@@ -56,7 +56,7 @@ pub fn possible_actions_to_legal_actions(actions: &[MjaiPossibleAction]) -> Vec<
 
 // TileRegistry実装までの一時措置。mjai牌文字列からは牌種しか分からないため、
 // 赤5は固定ID、黒5は非赤の先頭ID、それ以外はその牌種の先頭IDを仮割当する。
-fn temporary_tile_id_from_mjai_pai(pai: &str) -> Option<TileId> {
+pub(crate) fn temporary_tile_id_from_mjai_pai(pai: &str) -> Option<TileId> {
     match pai {
         "5mr" => return TileId::new(16),
         "5pr" => return TileId::new(52),
