@@ -1,0 +1,2 @@
+# nodocchi
+Riichi Mahjong AI
