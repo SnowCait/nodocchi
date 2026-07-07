@@ -1,5 +1,7 @@
 use bot_core::AlwaysLegalAgent;
+use riichilab_client::validation_policy::AgentKind;
 use riichilab_client::{ClientConfig, install_default_crypto_provider, run_validation_client};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,8 +14,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = ClientConfig::from_env()?;
+    let agent_kind = AgentKind::from_env()?;
+    let policy = agent_kind.response_policy();
     let mut agent = AlwaysLegalAgent;
 
-    run_validation_client(config, &mut agent).await?;
+    info!(agent_kind = %agent_kind, "selected agent");
+
+    run_validation_client(config, &mut agent, policy).await?;
     Ok(())
 }
