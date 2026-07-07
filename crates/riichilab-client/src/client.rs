@@ -9,11 +9,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ClientConfig;
 use crate::convert::{legal_action_to_mjai_action, possible_actions_to_legal_actions};
-use crate::observation::ObservationPayload;
+use crate::observation::{ObservationPayload, game_context_from_decoded_observation};
 use crate::protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, parse_server_event,
 };
 use crate::state::ValidationState;
+use crate::validation_policy::game_context_from_validation_state;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -51,6 +52,37 @@ pub fn build_response_for_request<A: Agent>(
     legal_action_to_mjai_action(&chosen, actor, request_id)
 }
 
+pub(crate) fn context_for_request(
+    observation: &ObservationPayload,
+    state: &ValidationState,
+    request_id: u64,
+) -> GameContext {
+    let decoded_observation = match observation.decode_4p() {
+        Ok(decoded) => {
+            debug!(
+                request_id,
+                player_id = decoded.player_id,
+                drawn_tile = ?decoded.drawn_tile,
+                "decoded observation"
+            );
+            Some(decoded)
+        }
+        Err(error) => {
+            debug!(
+                request_id,
+                error = %error,
+                "failed to decode observation; using validation state context"
+            );
+            None
+        }
+    };
+
+    decoded_observation
+        .as_ref()
+        .map(game_context_from_decoded_observation)
+        .unwrap_or_else(|| game_context_from_validation_state(state))
+}
+
 pub async fn run_validation_client<A, P>(
     config: ClientConfig,
     agent: &mut A,
@@ -58,7 +90,7 @@ pub async fn run_validation_client<A, P>(
 ) -> Result<(), ClientError>
 where
     A: Agent,
-    P: Fn(&ValidationState, u64, &[MjaiPossibleAction]) -> Option<MjaiAction>,
+    P: Fn(&ValidationState, &GameContext, u64, &[MjaiPossibleAction]) -> Option<MjaiAction>,
 {
     info!(endpoint = %config.endpoint, "connecting");
     let mut request = config.endpoint.as_str().into_client_request()?;
@@ -163,7 +195,8 @@ where
                             warn!("actor not set before request_action; falling back to 0");
                         }
                         let observation = ObservationPayload::new(observation);
-                        let response = policy(&state, request_id, &possible_actions)
+                        let context = context_for_request(&observation, &state, request_id);
+                        let response = policy(&state, &context, request_id, &possible_actions)
                             .inspect(|response| {
                                 debug!(
                                     request_id,
@@ -226,7 +259,47 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observation::fixture_base64;
     use bot_core::NormalAgent;
+    use bot_logic::TileId;
+
+    #[test]
+    fn context_for_request_prefers_decoded_observation() {
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59)));
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_tsumo(0, "1m".to_string());
+        let context = context_for_request(&observation, &state, 1);
+        assert_eq!(context.drawn_tile(), TileId::new(56));
+    }
+
+    #[test]
+    fn context_for_request_falls_back_to_state_when_decode_fails() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_tsumo(0, "6p".to_string());
+        let context = context_for_request(&observation, &state, 2);
+        assert_eq!(context.drawn_tile(), TileId::new(56));
+    }
+
+    #[test]
+    fn context_for_request_without_any_source_is_default() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let state = ValidationState::new();
+        let context = context_for_request(&observation, &state, 3);
+        assert_eq!(context, GameContext::default());
+    }
+
+    #[test]
+    fn context_for_request_uses_empty_decoded_observation_over_state() {
+        let observation = ObservationPayload::new(fixture_base64(0, None));
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_tsumo(0, "6p".to_string());
+        let context = context_for_request(&observation, &state, 4);
+        assert_eq!(context.drawn_tile(), None);
+    }
 
     #[test]
     fn prefers_hora_response() {
