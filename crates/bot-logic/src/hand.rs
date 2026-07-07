@@ -36,8 +36,8 @@ impl Hand {
     }
 
     pub fn add(&mut self, tile: TileId) {
-        self.tiles.push(tile);
         self.counts.add(tile.tile_type());
+        self.tiles.push(tile);
     }
 
     pub fn remove(&mut self, tile: TileId) -> Result<(), HandError> {
@@ -124,6 +124,26 @@ mod tests {
         assert!(!hand.contains(id(16)));
         assert!(hand.contains(id(17)));
         assert_eq!(hand.tiles(), &[id(17)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "more than four copies")]
+    fn add_panics_on_fifth_copy_of_same_type() {
+        let mut hand = Hand::from_tiles(vec![id(0), id(1), id(2), id(3)]);
+        hand.add(id(0));
+    }
+
+    #[test]
+    fn add_keeps_hand_consistent_when_counts_add_panics() {
+        let mut hand = Hand::from_tiles(vec![id(0), id(1), id(2), id(3)]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hand.add(id(0));
+        }));
+        assert!(result.is_err());
+        assert_eq!(hand.len(), 4);
+        assert_eq!(hand.counts().total(), 4);
+        assert_eq!(hand.count_type(tt(0)), 4);
+        assert_eq!(hand.tiles(), &[id(0), id(1), id(2), id(3)]);
     }
 
     #[test]
