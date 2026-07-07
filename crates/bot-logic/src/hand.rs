@@ -10,8 +10,8 @@ pub enum HandError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hand {
-    pub tiles: Vec<TileId>,
-    pub counts: TileCounts,
+    tiles: Vec<TileId>,
+    counts: TileCounts,
 }
 
 impl Hand {
@@ -25,6 +25,14 @@ impl Hand {
     pub fn from_tiles(tiles: Vec<TileId>) -> Self {
         let counts = TileCounts::from_tile_types(tiles.iter().map(|tile| tile.tile_type()));
         Self { tiles, counts }
+    }
+
+    pub fn tiles(&self) -> &[TileId] {
+        &self.tiles
+    }
+
+    pub fn counts(&self) -> &TileCounts {
+        &self.counts
     }
 
     pub fn add(&mut self, tile: TileId) {
@@ -86,7 +94,8 @@ mod tests {
         let hand = Hand::empty();
         assert!(hand.is_empty());
         assert_eq!(hand.len(), 0);
-        assert_eq!(hand.counts.total(), 0);
+        assert_eq!(hand.counts().total(), 0);
+        assert!(hand.tiles().is_empty());
     }
 
     #[test]
@@ -95,7 +104,8 @@ mod tests {
         assert_eq!(hand.len(), 3);
         assert_eq!(hand.count_type(tt(0)), 2);
         assert_eq!(hand.count_type(tt(4)), 1);
-        assert_eq!(hand.counts.total(), 3);
+        assert_eq!(hand.counts().total(), 3);
+        assert_eq!(hand.counts().as_array()[0], 2);
     }
 
     #[test]
@@ -105,14 +115,15 @@ mod tests {
         hand.add(id(17));
         assert_eq!(hand.len(), 2);
         assert_eq!(hand.count_type(tt(4)), 2);
-        assert_eq!(hand.counts.total(), 2);
+        assert_eq!(hand.counts().total(), 2);
 
         hand.remove(id(16)).unwrap();
         assert_eq!(hand.len(), 1);
         assert_eq!(hand.count_type(tt(4)), 1);
-        assert_eq!(hand.counts.total(), 1);
+        assert_eq!(hand.counts().total(), 1);
         assert!(!hand.contains(id(16)));
         assert!(hand.contains(id(17)));
+        assert_eq!(hand.tiles(), &[id(17)]);
     }
 
     #[test]
@@ -120,7 +131,7 @@ mod tests {
         let mut hand = Hand::from_tiles(vec![id(17)]);
         assert_eq!(hand.remove(id(16)), Err(HandError::TileNotFound(id(16))));
         assert_eq!(hand.len(), 1);
-        assert_eq!(hand.counts.total(), 1);
+        assert_eq!(hand.counts().total(), 1);
     }
 
     #[test]
@@ -134,6 +145,6 @@ mod tests {
     fn sort_by_id_orders_tiles() {
         let mut hand = Hand::from_tiles(vec![id(88), id(0), id(52)]);
         hand.sort_by_id();
-        assert_eq!(hand.tiles, vec![id(0), id(52), id(88)]);
+        assert_eq!(hand.tiles(), &[id(0), id(52), id(88)]);
     }
 }

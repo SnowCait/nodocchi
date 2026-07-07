@@ -5,11 +5,14 @@ use thiserror::Error;
 pub enum TileCountError {
     #[error("no tile of type {0:?} left to remove")]
     Underflow(TileType),
+
+    #[error("too many tiles of type {0:?}")]
+    Overflow(TileType),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileCounts {
-    pub counts: [u8; 34],
+    counts: [u8; 34],
 }
 
 impl TileCounts {
@@ -25,8 +28,18 @@ impl TileCounts {
         counts
     }
 
+    pub fn try_add(&mut self, tile: TileType) -> Result<(), TileCountError> {
+        let slot = &mut self.counts[tile.index()];
+        if *slot >= 4 {
+            return Err(TileCountError::Overflow(tile));
+        }
+        *slot += 1;
+        Ok(())
+    }
+
     pub fn add(&mut self, tile: TileType) {
-        self.counts[tile.index()] += 1;
+        self.try_add(tile)
+            .expect("TileCounts cannot contain more than four copies of one tile type");
     }
 
     pub fn remove(&mut self, tile: TileType) -> Result<(), TileCountError> {
@@ -48,6 +61,10 @@ impl TileCounts {
 
     pub fn remaining_count(&self, tile: TileType) -> u8 {
         4u8.saturating_sub(self.get(tile))
+    }
+
+    pub fn as_array(&self) -> &[u8; 34] {
+        &self.counts
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (TileType, u8)> {
@@ -81,6 +98,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "more than four copies")]
+    fn from_tile_types_panics_on_fifth_copy() {
+        TileCounts::from_tile_types(vec![tt(0); 5]);
+    }
+
+    #[test]
     fn add_and_remove() {
         let mut counts = TileCounts::empty();
         counts.add(tt(5));
@@ -88,6 +111,27 @@ mod tests {
         counts.remove(tt(5)).unwrap();
         assert_eq!(counts.get(tt(5)), 0);
         assert_eq!(counts.remove(tt(5)), Err(TileCountError::Underflow(tt(5))));
+    }
+
+    #[test]
+    fn try_add_allows_up_to_four_copies() {
+        let mut counts = TileCounts::empty();
+        for _ in 0..4 {
+            counts.try_add(tt(0)).unwrap();
+        }
+        assert_eq!(counts.get(tt(0)), 4);
+        assert_eq!(counts.remaining_count(tt(0)), 0);
+        assert_eq!(counts.try_add(tt(0)), Err(TileCountError::Overflow(tt(0))));
+        assert_eq!(counts.get(tt(0)), 4);
+    }
+
+    #[test]
+    fn try_add_succeeds_again_after_remove() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(7); 4]);
+        assert_eq!(counts.try_add(tt(7)), Err(TileCountError::Overflow(tt(7))));
+        counts.remove(tt(7)).unwrap();
+        counts.try_add(tt(7)).unwrap();
+        assert_eq!(counts.get(tt(7)), 4);
     }
 
     #[test]
@@ -100,6 +144,15 @@ mod tests {
         counts.add(tt(0));
         counts.add(tt(0));
         assert_eq!(counts.remaining_count(tt(0)), 0);
+    }
+
+    #[test]
+    fn as_array_exposes_counts() {
+        let counts = TileCounts::from_tile_types(vec![tt(3), tt(3)]);
+        let array = counts.as_array();
+        assert_eq!(array.len(), 34);
+        assert_eq!(array[3], 2);
+        assert_eq!(array[0], 0);
     }
 
     #[test]
