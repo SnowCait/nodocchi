@@ -73,7 +73,7 @@ fn temporary_tile_id_from_mjai_pai(pai: &str) -> Option<TileId> {
 mod tests {
     use super::*;
     use crate::protocol::MjaiEvent;
-    use bot_core::{Agent, AlwaysLegalAgent, GameContext};
+    use bot_core::{Agent, GameContext, NormalAgent};
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -256,7 +256,7 @@ mod tests {
                 LegalAction::None,
             ]
         );
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let chosen = agent.act(&GameContext::default(), &legal_actions);
         assert_eq!(chosen, LegalAction::Hora);
         let response = legal_action_to_mjai_action(&chosen, 0, request_id);
@@ -288,7 +288,7 @@ mod tests {
         };
         let legal_actions = possible_actions_to_legal_actions(&possible_actions);
         assert_eq!(legal_actions, vec![LegalAction::None]);
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let chosen = agent.act(&GameContext::default(), &legal_actions);
         assert_eq!(chosen, LegalAction::None);
         let response = legal_action_to_mjai_action(&chosen, 0, request_id);
@@ -323,7 +323,7 @@ mod tests {
             legal_actions,
             vec![LegalAction::None, LegalAction::Dahai { tile: tile(16) }]
         );
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let chosen = agent.act(&GameContext::default(), &legal_actions);
         assert_eq!(chosen, LegalAction::Dahai { tile: tile(16) });
         let response = legal_action_to_mjai_action(&chosen, 0, request_id);
