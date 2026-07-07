@@ -107,6 +107,101 @@ pub enum MjaiEvent {
     #[serde(rename = "start_game")]
     StartGame { id: u8 },
 
+    #[serde(rename = "start_kyoku")]
+    StartKyoku {
+        #[serde(default)]
+        bakaze: Option<String>,
+        #[serde(default)]
+        dora_marker: Option<String>,
+        #[serde(default)]
+        kyoku: Option<u8>,
+        #[serde(default)]
+        honba: Option<u8>,
+        #[serde(default)]
+        kyotaku: Option<u8>,
+        #[serde(default)]
+        oya: Option<u8>,
+        #[serde(default)]
+        tehais: Vec<Vec<String>>,
+    },
+
+    #[serde(rename = "tsumo")]
+    Tsumo { actor: u8, pai: String },
+
+    #[serde(rename = "dahai")]
+    Dahai {
+        actor: u8,
+        pai: String,
+        #[serde(default)]
+        tsumogiri: Option<bool>,
+    },
+
+    #[serde(rename = "chi")]
+    Chi {
+        actor: u8,
+        target: u8,
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "pon")]
+    Pon {
+        actor: u8,
+        target: u8,
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "daiminkan")]
+    Daiminkan {
+        actor: u8,
+        target: u8,
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "ankan")]
+    Ankan {
+        actor: u8,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "kakan")]
+    Kakan {
+        actor: u8,
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "reach")]
+    Reach { actor: u8 },
+
+    #[serde(rename = "hora")]
+    Hora {
+        actor: u8,
+        #[serde(default)]
+        target: Option<u8>,
+        #[serde(default)]
+        pai: Option<String>,
+    },
+
+    #[serde(rename = "ryukyoku")]
+    Ryukyoku {
+        #[serde(default)]
+        reason: Option<String>,
+    },
+
+    #[serde(rename = "end_kyoku")]
+    EndKyoku {
+        #[serde(flatten)]
+        raw: serde_json::Value,
+    },
+
     #[serde(rename = "request_action")]
     RequestAction {
         request_id: u64,
@@ -153,6 +248,27 @@ pub enum ActionAckStatus {
     Unparseable,
     Stale,
     Defaulted,
+}
+
+pub fn parse_server_event(text: &str) -> Result<Option<MjaiEvent>, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let event_type = value.get("type").and_then(|v| v.as_str());
+
+    match event_type {
+        Some(
+            "start_game" | "start_kyoku" | "tsumo" | "dahai" | "chi" | "pon" | "daiminkan"
+            | "ankan" | "kakan" | "reach" | "hora" | "ryukyoku" | "end_kyoku" | "request_action"
+            | "action_ack" | "end_game" | "validation_result",
+        ) => serde_json::from_value(value).map(Some),
+        Some(other) => {
+            tracing::debug!(event_type = other, "ignoring unknown server event");
+            Ok(None)
+        }
+        None => {
+            tracing::debug!("ignoring JSON message without type");
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -585,6 +701,219 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn dahai_event_parses() {
+        let json = r#"{"actor":0,"pai":"6p","tsumogiri":false,"type":"dahai"}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Dahai {
+                actor: 0,
+                pai: "6p".to_string(),
+                tsumogiri: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn tsumo_event_parses() {
+        let json = r#"{"type":"tsumo","actor":0,"pai":"3m"}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Tsumo {
+                actor: 0,
+                pai: "3m".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn start_kyoku_event_parses() {
+        let json = r#"{
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "dora_marker": "2s",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "tehais": [
+                ["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p"],
+                ["?","?","?","?","?","?","?","?","?","?","?","?","?"],
+                ["?","?","?","?","?","?","?","?","?","?","?","?","?"],
+                ["?","?","?","?","?","?","?","?","?","?","?","?","?"]
+            ]
+        }"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        match event {
+            MjaiEvent::StartKyoku {
+                bakaze,
+                dora_marker,
+                kyoku,
+                honba,
+                kyotaku,
+                oya,
+                tehais,
+            } => {
+                assert_eq!(bakaze, Some("E".to_string()));
+                assert_eq!(dora_marker, Some("2s".to_string()));
+                assert_eq!(kyoku, Some(1));
+                assert_eq!(honba, Some(0));
+                assert_eq!(kyotaku, Some(0));
+                assert_eq!(oya, Some(0));
+                assert_eq!(tehais.len(), 4);
+                assert_eq!(tehais[0].len(), 13);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reach_event_parses() {
+        let json = r#"{"type":"reach","actor":0}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event, MjaiEvent::Reach { actor: 0 });
+    }
+
+    #[test]
+    fn hora_event_parses() {
+        let json = r#"{"type":"hora","actor":0,"target":1,"pai":"5m"}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Hora {
+                actor: 0,
+                target: Some(1),
+                pai: Some("5m".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn ryukyoku_event_parses() {
+        let json = r#"{"type":"ryukyoku","reason":"fanpai"}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Ryukyoku {
+                reason: Some("fanpai".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn meld_events_parse() {
+        let json = r#"{"type":"chi","actor":1,"target":0,"pai":"5m","consumed":["4m","6m"]}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Chi {
+                actor: 1,
+                target: 0,
+                pai: "5m".to_string(),
+                consumed: vec!["4m".to_string(), "6m".to_string()],
+            }
+        );
+
+        let json = r#"{"type":"pon","actor":2,"target":0,"pai":"E","consumed":["E","E"]}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Pon {
+                actor: 2,
+                target: 0,
+                pai: "E".to_string(),
+                consumed: vec!["E".to_string(), "E".to_string()],
+            }
+        );
+
+        let json =
+            r#"{"type":"daiminkan","actor":3,"target":1,"pai":"9s","consumed":["9s","9s","9s"]}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Daiminkan {
+                actor: 3,
+                target: 1,
+                pai: "9s".to_string(),
+                consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+            }
+        );
+
+        let json = r#"{"type":"ankan","actor":0,"consumed":["1s","1s","1s","1s"]}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Ankan {
+                actor: 0,
+                consumed: vec![
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                ],
+            }
+        );
+
+        let json = r#"{"type":"kakan","actor":1,"pai":"P","consumed":["P","P","P"]}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::Kakan {
+                actor: 1,
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn end_kyoku_event_parses_with_arbitrary_payload() {
+        let json = r#"{"type":"end_kyoku","scores":[25000,25000,25000,25000],"future_field":{"nested":true}}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        match event {
+            MjaiEvent::EndKyoku { raw } => {
+                assert_eq!(raw["scores"][0], 25000);
+                assert_eq!(raw["future_field"]["nested"], true);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_server_event_returns_known_event() {
+        let event =
+            parse_server_event(r#"{"actor":0,"pai":"6p","tsumogiri":false,"type":"dahai"}"#)
+                .unwrap();
+        assert_eq!(
+            event,
+            Some(MjaiEvent::Dahai {
+                actor: 0,
+                pai: "6p".to_string(),
+                tsumogiri: Some(false),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_server_event_ignores_unknown_event_type() {
+        let event = parse_server_event(r#"{"type":"future_event","foo":1}"#).unwrap();
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn parse_server_event_ignores_json_without_type() {
+        let event = parse_server_event(r#"{"foo":1}"#).unwrap();
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn parse_server_event_fails_on_broken_json() {
+        assert!(parse_server_event("not-json").is_err());
     }
 
     #[test]

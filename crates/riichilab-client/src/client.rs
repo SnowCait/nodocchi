@@ -10,7 +10,9 @@ use tracing::{debug, error, info, warn};
 use crate::config::ClientConfig;
 use crate::convert::{legal_action_to_mjai_action, possible_actions_to_legal_actions};
 use crate::observation::ObservationPayload;
-use crate::protocol::{ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction};
+use crate::protocol::{
+    ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, parse_server_event,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -73,8 +75,9 @@ pub async fn run_validation_client<A: Agent>(
         };
         match message {
             Message::Text(text) => {
-                let event: MjaiEvent = match serde_json::from_str(text.as_str()) {
-                    Ok(event) => event,
+                let event = match parse_server_event(text.as_str()) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => continue,
                     Err(e) => {
                         warn!(error = %e, text = %text, "failed to parse event");
                         continue;
@@ -84,6 +87,63 @@ pub async fn run_validation_client<A: Agent>(
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
                         actor = Some(id);
+                    }
+                    MjaiEvent::StartKyoku {
+                        kyoku, honba, oya, ..
+                    } => {
+                        info!(kyoku = ?kyoku, honba = ?honba, oya = ?oya, "start_kyoku");
+                    }
+                    MjaiEvent::Tsumo { actor, pai } => {
+                        debug!(actor, pai = %pai, "tsumo");
+                    }
+                    MjaiEvent::Dahai {
+                        actor,
+                        pai,
+                        tsumogiri,
+                    } => {
+                        debug!(actor, pai = %pai, tsumogiri = ?tsumogiri, "dahai");
+                    }
+                    MjaiEvent::Chi {
+                        actor,
+                        target,
+                        pai,
+                        consumed,
+                    }
+                    | MjaiEvent::Pon {
+                        actor,
+                        target,
+                        pai,
+                        consumed,
+                    }
+                    | MjaiEvent::Daiminkan {
+                        actor,
+                        target,
+                        pai,
+                        consumed,
+                    } => {
+                        debug!(actor, target, pai = %pai, consumed = ?consumed, "meld");
+                    }
+                    MjaiEvent::Ankan { actor, consumed } => {
+                        debug!(actor, consumed = ?consumed, "ankan");
+                    }
+                    MjaiEvent::Kakan {
+                        actor,
+                        pai,
+                        consumed,
+                    } => {
+                        debug!(actor, pai = %pai, consumed = ?consumed, "kakan");
+                    }
+                    MjaiEvent::Reach { actor } => {
+                        debug!(actor, "reach");
+                    }
+                    MjaiEvent::Hora { actor, target, pai } => {
+                        info!(actor, target = ?target, pai = ?pai, "hora");
+                    }
+                    MjaiEvent::Ryukyoku { reason } => {
+                        info!(reason = ?reason, "ryukyoku");
+                    }
+                    MjaiEvent::EndKyoku { .. } => {
+                        info!("end_kyoku");
                     }
                     MjaiEvent::RequestAction {
                         request_id,
