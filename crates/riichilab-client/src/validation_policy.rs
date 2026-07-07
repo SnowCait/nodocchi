@@ -1,17 +1,60 @@
-use crate::agent::AgentKind;
 use crate::protocol::{MjaiAction, MjaiPossibleAction};
 use crate::state::ValidationState;
 
-pub fn build_agent_response(
-    agent_kind: AgentKind,
-    state: &ValidationState,
-    request_id: u64,
-    possible_actions: &[MjaiPossibleAction],
-) -> Option<MjaiAction> {
-    match agent_kind {
-        AgentKind::Tsumogiri => build_tsumogiri_response(state, request_id, possible_actions),
-        AgentKind::Normal => build_normal_response(state, request_id, possible_actions),
+pub type ResponsePolicy = fn(&ValidationState, u64, &[MjaiPossibleAction]) -> Option<MjaiAction>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentKind {
+    Tsumogiri,
+    #[default]
+    Normal,
+}
+
+impl AgentKind {
+    pub fn from_env() -> Result<Self, AgentKindError> {
+        match std::env::var("MAHJONG_AGENT") {
+            Ok(value) => value.parse(),
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Err(std::env::VarError::NotUnicode(_)) => Err(AgentKindError::NotUnicode),
+        }
     }
+
+    pub fn response_policy(self) -> ResponsePolicy {
+        match self {
+            Self::Tsumogiri => build_tsumogiri_response,
+            Self::Normal => build_normal_response,
+        }
+    }
+}
+
+impl std::str::FromStr for AgentKind {
+    type Err = AgentKindError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "normal" => Ok(Self::Normal),
+            "tsumogiri" | "tsumo-giri" => Ok(Self::Tsumogiri),
+            other => Err(AgentKindError::Unknown(other.to_string())),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tsumogiri => write!(f, "tsumogiri"),
+            Self::Normal => write!(f, "normal"),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum AgentKindError {
+    #[error("MAHJONG_AGENT is not valid unicode")]
+    NotUnicode,
+
+    #[error("unknown MAHJONG_AGENT: {0}")]
+    Unknown(String),
 }
 
 pub fn build_tsumogiri_response(
@@ -63,14 +106,6 @@ pub fn build_normal_response(
         .or_else(|| none_response(request_id, possible_actions))
 }
 
-pub fn build_validation_response(
-    state: &ValidationState,
-    request_id: u64,
-    possible_actions: &[MjaiPossibleAction],
-) -> Option<MjaiAction> {
-    build_tsumogiri_response(state, request_id, possible_actions)
-}
-
 fn tsumogiri_dahai_response(
     state: &ValidationState,
     request_id: u64,
@@ -119,6 +154,72 @@ mod tests {
         MjaiPossibleAction::Pon {
             pai: "E".to_string(),
             consumed: vec!["E".to_string(), "E".to_string()],
+        }
+    }
+
+    mod agent_kind {
+        use super::*;
+
+        #[test]
+        fn default_is_normal() {
+            assert_eq!(AgentKind::default(), AgentKind::Normal);
+        }
+
+        #[test]
+        fn parses_normal() {
+            assert_eq!("normal".parse::<AgentKind>().unwrap(), AgentKind::Normal);
+        }
+
+        #[test]
+        fn parses_empty_string_as_normal() {
+            assert_eq!("".parse::<AgentKind>().unwrap(), AgentKind::Normal);
+        }
+
+        #[test]
+        fn parses_tsumogiri() {
+            assert_eq!(
+                "tsumogiri".parse::<AgentKind>().unwrap(),
+                AgentKind::Tsumogiri
+            );
+        }
+
+        #[test]
+        fn parses_tsumogiri_with_hyphen() {
+            assert_eq!(
+                "tsumo-giri".parse::<AgentKind>().unwrap(),
+                AgentKind::Tsumogiri
+            );
+        }
+
+        #[test]
+        fn parses_mixed_case() {
+            assert_eq!("Normal".parse::<AgentKind>().unwrap(), AgentKind::Normal);
+            assert_eq!(
+                "TsumoGiri".parse::<AgentKind>().unwrap(),
+                AgentKind::Tsumogiri
+            );
+        }
+
+        #[test]
+        fn parses_with_surrounding_whitespace() {
+            assert_eq!(
+                " tsumogiri ".parse::<AgentKind>().unwrap(),
+                AgentKind::Tsumogiri
+            );
+        }
+
+        #[test]
+        fn unknown_value_is_error() {
+            assert_eq!(
+                "nodocchi".parse::<AgentKind>(),
+                Err(AgentKindError::Unknown("nodocchi".to_string()))
+            );
+        }
+
+        #[test]
+        fn display_matches_env_values() {
+            assert_eq!(AgentKind::Normal.to_string(), "normal");
+            assert_eq!(AgentKind::Tsumogiri.to_string(), "tsumogiri");
         }
     }
 
@@ -173,6 +274,32 @@ mod tests {
         }
 
         #[test]
+        fn prefers_tsumogiri_over_none() {
+            let state = state_with_tsumo(1, "6p");
+            let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::None];
+            let response = build_tsumogiri_response(&state, 9, &possible_actions).unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 1,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(9),
+                }
+            );
+        }
+
+        #[test]
+        fn does_not_discard_when_last_tsumo_is_not_a_possible_dahai() {
+            let state = state_with_tsumo(0, "6p");
+            let possible_actions = vec![possible_dahai("1m")];
+            assert_eq!(
+                build_tsumogiri_response(&state, 42, &possible_actions),
+                None
+            );
+        }
+
+        #[test]
         fn returns_none_action_on_claim_opportunity_without_last_tsumo() {
             let state = ValidationState::new();
             let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
@@ -184,6 +311,19 @@ mod tests {
         }
 
         #[test]
+        fn returns_none_action_even_when_seat_id_is_unset() {
+            let state = ValidationState::new();
+            let possible_actions = vec![MjaiPossibleAction::None];
+            let response = build_tsumogiri_response(&state, 5, &possible_actions).unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::None {
+                    request_id: Some(5)
+                }
+            );
+        }
+
+        #[test]
         fn falls_back_when_none_is_not_possible() {
             let state = ValidationState::new();
             let possible_actions = vec![possible_pon()];
@@ -191,6 +331,19 @@ mod tests {
                 build_tsumogiri_response(&state, 43, &possible_actions),
                 None
             );
+        }
+
+        #[test]
+        fn falls_back_without_last_tsumo_and_without_none() {
+            let state = ValidationState::new();
+            let possible_actions = vec![possible_dahai("1m")];
+            assert_eq!(build_tsumogiri_response(&state, 1, &possible_actions), None);
+        }
+
+        #[test]
+        fn empty_possible_actions_falls_back() {
+            let state = state_with_tsumo(0, "6p");
+            assert_eq!(build_tsumogiri_response(&state, 1, &[]), None);
         }
 
         #[test]
@@ -360,11 +513,12 @@ mod tests {
         }
     }
 
-    mod agent_dispatch {
+    mod response_policy_dispatch {
         use super::*;
 
         #[test]
-        fn tsumogiri_kind_matches_tsumogiri_policy() {
+        fn tsumogiri_kind_uses_tsumogiri_policy() {
+            let policy = AgentKind::Tsumogiri.response_policy();
             let state = state_with_tsumo(0, "6p");
             for possible_actions in [
                 vec![
@@ -376,14 +530,15 @@ mod tests {
                 vec![possible_pon()],
             ] {
                 assert_eq!(
-                    build_agent_response(AgentKind::Tsumogiri, &state, 30, &possible_actions),
+                    policy(&state, 30, &possible_actions),
                     build_tsumogiri_response(&state, 30, &possible_actions)
                 );
             }
         }
 
         #[test]
-        fn normal_kind_matches_normal_policy() {
+        fn normal_kind_uses_normal_policy() {
+            let policy = AgentKind::Normal.response_policy();
             let state = state_with_tsumo(0, "6p");
             for possible_actions in [
                 vec![
@@ -396,101 +551,10 @@ mod tests {
                 vec![possible_pon()],
             ] {
                 assert_eq!(
-                    build_agent_response(AgentKind::Normal, &state, 31, &possible_actions),
+                    policy(&state, 31, &possible_actions),
                     build_normal_response(&state, 31, &possible_actions)
                 );
             }
-        }
-    }
-
-    mod validation_response_compatibility {
-        use super::*;
-
-        #[test]
-        fn discards_last_tsumo_when_possible() {
-            let state = state_with_tsumo(0, "6p");
-            let possible_actions = vec![possible_dahai("6p")];
-            let response = build_validation_response(&state, 42, &possible_actions).unwrap();
-            assert_eq!(
-                serde_json::to_string(&response).unwrap(),
-                r#"{"type":"dahai","actor":0,"pai":"6p","tsumogiri":true,"request_id":42}"#
-            );
-        }
-
-        #[test]
-        fn does_not_discard_when_last_tsumo_is_not_a_possible_dahai() {
-            let state = state_with_tsumo(0, "6p");
-            let possible_actions = vec![possible_dahai("1m")];
-            assert_eq!(
-                build_validation_response(&state, 42, &possible_actions),
-                None
-            );
-        }
-
-        #[test]
-        fn returns_none_action_on_claim_opportunity() {
-            let state = state_with_tsumo(0, "6p");
-            let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
-            let response = build_validation_response(&state, 43, &possible_actions).unwrap();
-            assert_eq!(
-                serde_json::to_string(&response).unwrap(),
-                r#"{"type":"none","request_id":43}"#
-            );
-        }
-
-        #[test]
-        fn falls_back_when_claim_opportunity_has_no_none() {
-            let state = ValidationState::new();
-            let possible_actions = vec![possible_pon()];
-            assert_eq!(
-                build_validation_response(&state, 43, &possible_actions),
-                None
-            );
-        }
-
-        #[test]
-        fn falls_back_without_last_tsumo_and_without_none() {
-            let state = ValidationState::new();
-            let possible_actions = vec![possible_dahai("1m")];
-            assert_eq!(
-                build_validation_response(&state, 1, &possible_actions),
-                None
-            );
-        }
-
-        #[test]
-        fn returns_none_action_even_when_seat_id_is_unset() {
-            let state = ValidationState::new();
-            let possible_actions = vec![MjaiPossibleAction::None];
-            let response = build_validation_response(&state, 5, &possible_actions).unwrap();
-            assert_eq!(
-                response,
-                MjaiAction::None {
-                    request_id: Some(5)
-                }
-            );
-        }
-
-        #[test]
-        fn prefers_tsumogiri_over_none() {
-            let state = state_with_tsumo(1, "6p");
-            let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::None];
-            let response = build_validation_response(&state, 9, &possible_actions).unwrap();
-            assert_eq!(
-                response,
-                MjaiAction::Dahai {
-                    actor: 1,
-                    pai: "6p".to_string(),
-                    tsumogiri: Some(true),
-                    request_id: Some(9),
-                }
-            );
-        }
-
-        #[test]
-        fn empty_possible_actions_falls_back() {
-            let state = state_with_tsumo(0, "6p");
-            assert_eq!(build_validation_response(&state, 1, &[]), None);
         }
     }
 }

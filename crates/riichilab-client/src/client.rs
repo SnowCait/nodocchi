@@ -10,7 +10,6 @@ use tracing::{debug, error, info, warn};
 use crate::config::ClientConfig;
 use crate::convert::{legal_action_to_mjai_action, possible_actions_to_legal_actions};
 use crate::observation::ObservationPayload;
-use crate::policy::build_agent_response;
 use crate::protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, parse_server_event,
 };
@@ -52,12 +51,16 @@ pub fn build_response_for_request<A: Agent>(
     legal_action_to_mjai_action(&chosen, actor, request_id)
 }
 
-pub async fn run_validation_client<A: Agent>(
+pub async fn run_validation_client<A, P>(
     config: ClientConfig,
     agent: &mut A,
-) -> Result<(), ClientError> {
-    info!(endpoint = %config.endpoint, agent_kind = %config.agent_kind, "connecting");
-    let agent_kind = config.agent_kind;
+    policy: P,
+) -> Result<(), ClientError>
+where
+    A: Agent,
+    P: Fn(&ValidationState, u64, &[MjaiPossibleAction]) -> Option<MjaiAction>,
+{
+    info!(endpoint = %config.endpoint, "connecting");
     let mut request = config.endpoint.as_str().into_client_request()?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", config.token))
         .map_err(|_| ClientError::InvalidToken)?;
@@ -160,25 +163,23 @@ pub async fn run_validation_client<A: Agent>(
                             warn!("actor not set before request_action; falling back to 0");
                         }
                         let observation = ObservationPayload::new(observation);
-                        let response =
-                            build_agent_response(agent_kind, &state, request_id, &possible_actions)
-                                .inspect(|response| {
-                                    debug!(
-                                        request_id,
-                                        agent_kind = %agent_kind,
-                                        response = ?response,
-                                        "agent policy selected response"
-                                    );
-                                })
-                                .unwrap_or_else(|| {
-                                    build_response_for_request(
-                                        state.actor_or_default(),
-                                        request_id,
-                                        &possible_actions,
-                                        &observation,
-                                        agent,
-                                    )
-                                });
+                        let response = policy(&state, request_id, &possible_actions)
+                            .inspect(|response| {
+                                debug!(
+                                    request_id,
+                                    response = ?response,
+                                    "policy selected response"
+                                );
+                            })
+                            .unwrap_or_else(|| {
+                                build_response_for_request(
+                                    state.actor_or_default(),
+                                    request_id,
+                                    &possible_actions,
+                                    &observation,
+                                    agent,
+                                )
+                            });
                         let json = serde_json::to_string(&response)?;
                         debug!(response = %json, "sending response");
                         ws_stream.send(Message::Text(json.into())).await?;
