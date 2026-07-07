@@ -1,4 +1,4 @@
-use bot_core::AlwaysLegalAgent;
+use bot_core::NormalAgent;
 use riichilab_client::validation_policy::AgentKind;
 use riichilab_client::{ClientConfig, install_default_crypto_provider, run_validation_client};
 use tracing::info;
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ClientConfig::from_env()?;
     let agent_kind = AgentKind::from_env()?;
     let policy = agent_kind.response_policy();
-    let mut agent = AlwaysLegalAgent;
+    let mut agent = NormalAgent;
 
     info!(agent_kind = %agent_kind, "selected agent");
 

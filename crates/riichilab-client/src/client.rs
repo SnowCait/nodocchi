@@ -226,7 +226,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::AlwaysLegalAgent;
+    use bot_core::NormalAgent;
 
     #[test]
     fn prefers_hora_response() {
@@ -238,7 +238,7 @@ mod tests {
             MjaiPossibleAction::Hora,
             MjaiPossibleAction::None,
         ];
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response =
             build_response_for_request(1, 42, &possible_actions, &observation, &mut agent);
@@ -259,7 +259,7 @@ mod tests {
             pai: "5mr".to_string(),
             tsumogiri: None,
         }];
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response =
             build_response_for_request(0, 43, &possible_actions, &observation, &mut agent);
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn echoes_request_id() {
         let possible_actions = vec![MjaiPossibleAction::None];
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response =
             build_response_for_request(0, 7, &possible_actions, &observation, &mut agent);
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn sets_actor_from_argument() {
         let possible_actions = vec![MjaiPossibleAction::Reach];
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response =
             build_response_for_request(3, 1, &possible_actions, &observation, &mut agent);
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn empty_possible_actions_fall_back_to_none() {
-        let mut agent = AlwaysLegalAgent;
+        let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response = build_response_for_request(0, 9, &[], &observation, &mut agent);
         assert_eq!(
