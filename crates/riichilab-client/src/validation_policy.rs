@@ -4,7 +4,8 @@ use crate::convert::{possible_actions_to_legal_actions, temporary_tile_id_from_m
 use crate::protocol::{MjaiAction, MjaiPossibleAction};
 use crate::state::ValidationState;
 
-pub type ResponsePolicy = fn(&ValidationState, u64, &[MjaiPossibleAction]) -> Option<MjaiAction>;
+pub type ResponsePolicy =
+    fn(&ValidationState, &GameContext, u64, &[MjaiPossibleAction]) -> Option<MjaiAction>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentKind {
@@ -24,8 +25,8 @@ impl AgentKind {
 
     pub fn response_policy(self) -> ResponsePolicy {
         match self {
-            Self::Tsumogiri => build_tsumogiri_response,
-            Self::Normal => build_normal_response,
+            Self::Tsumogiri => build_tsumogiri_response_with_context,
+            Self::Normal => build_normal_response_with_context,
         }
     }
 }
@@ -65,18 +66,27 @@ pub fn build_tsumogiri_response(
     request_id: u64,
     possible_actions: &[MjaiPossibleAction],
 ) -> Option<MjaiAction> {
-    let context = context_from_validation_state(state);
+    let context = game_context_from_validation_state(state);
+    build_tsumogiri_response_with_context(state, &context, request_id, possible_actions)
+}
+
+pub(crate) fn build_tsumogiri_response_with_context(
+    state: &ValidationState,
+    context: &GameContext,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+) -> Option<MjaiAction> {
     let legal_actions = possible_actions_to_legal_actions(possible_actions);
 
     let mut agent = TsumogiriAgent;
-    let chosen = agent.act(&context, &legal_actions);
+    let chosen = agent.act(context, &legal_actions);
 
     checked_legal_action_to_mjai_response(
         &chosen,
         state.actor_or_default(),
         request_id,
         possible_actions,
-        &context,
+        context,
     )
 }
 
@@ -85,22 +95,31 @@ pub fn build_normal_response(
     request_id: u64,
     possible_actions: &[MjaiPossibleAction],
 ) -> Option<MjaiAction> {
-    let context = context_from_validation_state(state);
+    let context = game_context_from_validation_state(state);
+    build_normal_response_with_context(state, &context, request_id, possible_actions)
+}
+
+pub(crate) fn build_normal_response_with_context(
+    state: &ValidationState,
+    context: &GameContext,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+) -> Option<MjaiAction> {
     let legal_actions = possible_actions_to_legal_actions(possible_actions);
 
     let mut agent = NormalAgent;
-    let chosen = agent.act(&context, &legal_actions);
+    let chosen = agent.act(context, &legal_actions);
 
     checked_legal_action_to_mjai_response(
         &chosen,
         state.actor_or_default(),
         request_id,
         possible_actions,
-        &context,
+        context,
     )
 }
 
-fn context_from_validation_state(state: &ValidationState) -> GameContext {
+pub(crate) fn game_context_from_validation_state(state: &ValidationState) -> GameContext {
     state
         .last_tsumo()
         .and_then(temporary_tile_id_from_mjai_pai)
@@ -257,7 +276,7 @@ mod tests {
         fn last_tsumo_becomes_drawn_tile() {
             let state = state_with_tsumo(0, "6p");
             assert_eq!(
-                context_from_validation_state(&state).drawn_tile(),
+                game_context_from_validation_state(&state).drawn_tile(),
                 TileId::new(56)
             );
         }
@@ -266,7 +285,7 @@ mod tests {
         fn red_five_becomes_red_tile_id() {
             let state = state_with_tsumo(0, "5mr");
             assert_eq!(
-                context_from_validation_state(&state).drawn_tile(),
+                game_context_from_validation_state(&state).drawn_tile(),
                 TileId::new(16)
             );
         }
@@ -274,19 +293,28 @@ mod tests {
         #[test]
         fn no_last_tsumo_has_no_drawn_tile() {
             let state = ValidationState::new();
-            assert_eq!(context_from_validation_state(&state).drawn_tile(), None);
+            assert_eq!(
+                game_context_from_validation_state(&state).drawn_tile(),
+                None
+            );
         }
 
         #[test]
         fn invalid_pai_has_no_drawn_tile() {
             let state = state_with_tsumo(0, "invalid");
-            assert_eq!(context_from_validation_state(&state).drawn_tile(), None);
+            assert_eq!(
+                game_context_from_validation_state(&state).drawn_tile(),
+                None
+            );
         }
 
         #[test]
         fn hidden_pai_has_no_drawn_tile() {
             let state = state_with_tsumo(0, "?");
-            assert_eq!(context_from_validation_state(&state).drawn_tile(), None);
+            assert_eq!(
+                game_context_from_validation_state(&state).drawn_tile(),
+                None
+            );
         }
     }
 
@@ -850,6 +878,107 @@ mod tests {
         }
     }
 
+    mod policy_with_context {
+        use super::*;
+        use bot_logic::TileId;
+
+        fn tile(value: u8) -> TileId {
+            TileId::new(value).unwrap()
+        }
+
+        #[test]
+        fn normal_marks_tsumogiri_from_context_drawn_tile() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            let context = GameContext::with_drawn_tile(tile(56));
+            let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+            let response =
+                build_normal_response_with_context(&state, &context, 60, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(60),
+                }
+            );
+        }
+
+        #[test]
+        fn tsumogiri_discards_from_context_without_last_tsumo() {
+            let mut state = ValidationState::new();
+            state.on_start_game(1);
+            assert_eq!(state.last_tsumo(), None);
+            let context = GameContext::with_drawn_tile(tile(56));
+            let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::None];
+            let response =
+                build_tsumogiri_response_with_context(&state, &context, 61, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 1,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(61),
+                }
+            );
+        }
+
+        #[test]
+        fn tsumogiri_without_context_and_state_does_not_pick_dahai() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            let context = GameContext::default();
+            let possible_actions = vec![possible_dahai("1m"), MjaiPossibleAction::None];
+            let response =
+                build_tsumogiri_response_with_context(&state, &context, 62, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::None {
+                    request_id: Some(62)
+                }
+            );
+        }
+
+        #[test]
+        fn context_takes_precedence_over_state_last_tsumo() {
+            let state = state_with_tsumo(0, "1m");
+            let context = GameContext::with_drawn_tile(tile(56));
+            let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+            let response =
+                build_tsumogiri_response_with_context(&state, &context, 63, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(63),
+                }
+            );
+        }
+
+        #[test]
+        fn compat_builders_use_state_derived_context() {
+            let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
+            let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+            assert_eq!(
+                build_tsumogiri_response(&state, 64, &possible_actions),
+                build_tsumogiri_response_with_context(&state, &context, 64, &possible_actions)
+            );
+            assert_eq!(
+                build_normal_response(&state, 64, &possible_actions),
+                build_normal_response_with_context(&state, &context, 64, &possible_actions)
+            );
+        }
+    }
+
     mod response_policy_dispatch {
         use super::*;
 
@@ -857,6 +986,7 @@ mod tests {
         fn tsumogiri_kind_uses_tsumogiri_policy() {
             let policy = AgentKind::Tsumogiri.response_policy();
             let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
             for possible_actions in [
                 vec![
                     MjaiPossibleAction::Hora,
@@ -867,7 +997,7 @@ mod tests {
                 vec![possible_pon()],
             ] {
                 assert_eq!(
-                    policy(&state, 30, &possible_actions),
+                    policy(&state, &context, 30, &possible_actions),
                     build_tsumogiri_response(&state, 30, &possible_actions)
                 );
             }
@@ -877,6 +1007,7 @@ mod tests {
         fn normal_kind_uses_normal_policy() {
             let policy = AgentKind::Normal.response_policy();
             let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
             for possible_actions in [
                 vec![
                     MjaiPossibleAction::Hora,
@@ -888,7 +1019,7 @@ mod tests {
                 vec![possible_pon()],
             ] {
                 assert_eq!(
-                    policy(&state, 31, &possible_actions),
+                    policy(&state, &context, 31, &possible_actions),
                     build_normal_response(&state, 31, &possible_actions)
                 );
             }

@@ -69,6 +69,16 @@ pub(crate) fn temporary_tile_id_from_mjai_pai(pai: &str) -> Option<TileId> {
     TileId::new(base + offset)
 }
 
+pub(crate) fn temporary_tile_id_from_observation_tile(raw: u8) -> Option<TileId> {
+    let tile = TileId::new(raw)?;
+    if tile.is_red() {
+        return Some(tile);
+    }
+    let base = tile.tile_type().raw() * 4;
+    let offset = u8::from(matches!(base, 16 | 52 | 88));
+    TileId::new(base + offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +114,38 @@ mod tests {
                 "pai: {pai}"
             );
         }
+    }
+
+    #[test]
+    fn observation_tile_normalizes_to_temporary_tile_id() {
+        for (raw, expected) in [
+            (0, 0),
+            (3, 0),
+            (16, 16),
+            (17, 17),
+            (19, 17),
+            (52, 52),
+            (55, 53),
+            (88, 88),
+            (91, 89),
+            (56, 56),
+            (59, 56),
+            (104, 104),
+            (132, 132),
+            (135, 132),
+        ] {
+            assert_eq!(
+                temporary_tile_id_from_observation_tile(raw),
+                TileId::new(expected),
+                "raw: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn observation_tile_out_of_range_is_none() {
+        assert_eq!(temporary_tile_id_from_observation_tile(136), None);
+        assert_eq!(temporary_tile_id_from_observation_tile(255), None);
     }
 
     #[test]
