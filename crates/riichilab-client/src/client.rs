@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ClientConfig;
 use crate::convert::{legal_action_to_mjai_action, possible_actions_to_legal_actions};
+use crate::observation::ObservationPayload;
 use crate::protocol::{ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction};
 
 #[derive(Debug, thiserror::Error)]
@@ -25,8 +26,14 @@ pub fn build_response_for_request<A: Agent>(
     actor: u8,
     request_id: u64,
     possible_actions: &[MjaiPossibleAction],
+    observation: &ObservationPayload,
     agent: &mut A,
 ) -> MjaiAction {
+    debug!(
+        request_id,
+        observation_len = observation.as_base64().len(),
+        "building response"
+    );
     let legal_actions = possible_actions_to_legal_actions(possible_actions);
     if legal_actions.is_empty() {
         warn!(request_id, "no convertible legal actions; falling back");
@@ -81,6 +88,7 @@ pub async fn run_validation_client<A: Agent>(
                     MjaiEvent::RequestAction {
                         request_id,
                         possible_actions,
+                        observation,
                         ..
                     } => {
                         let actor_id = match actor {
@@ -90,10 +98,12 @@ pub async fn run_validation_client<A: Agent>(
                                 0
                             }
                         };
+                        let observation = ObservationPayload::new(observation);
                         let response = build_response_for_request(
                             actor_id,
                             request_id,
                             &possible_actions,
+                            &observation,
                             agent,
                         );
                         let json = serde_json::to_string(&response)?;
@@ -155,7 +165,9 @@ mod tests {
             MjaiPossibleAction::None,
         ];
         let mut agent = AlwaysLegalAgent;
-        let response = build_response_for_request(1, 42, &possible_actions, &mut agent);
+        let observation = ObservationPayload::new("dummy-base64");
+        let response =
+            build_response_for_request(1, 42, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
             MjaiAction::Hora {
@@ -174,7 +186,9 @@ mod tests {
             tsumogiri: None,
         }];
         let mut agent = AlwaysLegalAgent;
-        let response = build_response_for_request(0, 43, &possible_actions, &mut agent);
+        let observation = ObservationPayload::new("dummy-base64");
+        let response =
+            build_response_for_request(0, 43, &possible_actions, &observation, &mut agent);
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"dahai","actor":0,"pai":"5mr","request_id":43}"#
@@ -185,7 +199,9 @@ mod tests {
     fn echoes_request_id() {
         let possible_actions = vec![MjaiPossibleAction::None];
         let mut agent = AlwaysLegalAgent;
-        let response = build_response_for_request(0, 7, &possible_actions, &mut agent);
+        let observation = ObservationPayload::new("dummy-base64");
+        let response =
+            build_response_for_request(0, 7, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
             MjaiAction::None {
@@ -198,7 +214,9 @@ mod tests {
     fn sets_actor_from_argument() {
         let possible_actions = vec![MjaiPossibleAction::Reach];
         let mut agent = AlwaysLegalAgent;
-        let response = build_response_for_request(3, 1, &possible_actions, &mut agent);
+        let observation = ObservationPayload::new("dummy-base64");
+        let response =
+            build_response_for_request(3, 1, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
             MjaiAction::Reach {
@@ -211,7 +229,8 @@ mod tests {
     #[test]
     fn empty_possible_actions_fall_back_to_none() {
         let mut agent = AlwaysLegalAgent;
-        let response = build_response_for_request(0, 9, &[], &mut agent);
+        let observation = ObservationPayload::new("dummy-base64");
+        let response = build_response_for_request(0, 9, &[], &observation, &mut agent);
         assert_eq!(
             response,
             MjaiAction::None {
