@@ -50,6 +50,8 @@ dependencies = [
 name = "riichilab-client"
 version = "0.1.0"
 dependencies = [
+ "bot-core",
+ "bot-logic",
  "serde",
  "serde_json",
 ]
