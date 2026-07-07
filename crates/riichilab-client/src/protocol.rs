@@ -42,6 +42,29 @@ pub enum MjaiAction {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum MjaiPossibleAction {
+    #[serde(rename = "dahai")]
+    Dahai {
+        pai: String,
+        #[serde(default)]
+        tsumogiri: Option<bool>,
+    },
+
+    #[serde(rename = "reach")]
+    Reach,
+
+    #[serde(rename = "hora")]
+    Hora,
+
+    #[serde(rename = "ryukyoku")]
+    Ryukyoku,
+
+    #[serde(rename = "none")]
+    None,
+}
+
 pub type TimeControl = serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -55,7 +78,7 @@ pub enum MjaiEvent {
         request_id: u64,
         #[serde(default)]
         time: Option<TimeControl>,
-        possible_actions: Vec<MjaiAction>,
+        possible_actions: Vec<MjaiPossibleAction>,
         observation: String,
     },
 
@@ -236,13 +259,16 @@ mod tests {
     }
 
     #[test]
-    fn request_action_parses_without_time() {
+    fn request_action_parses_official_example_without_actor() {
         let json = r#"{
             "type": "request_action",
             "request_id": 42,
             "possible_actions": [
-                {"type": "none"},
-                {"type": "dahai", "actor": 0, "pai": "5mr"}
+                {"type": "dahai", "pai": "1m"},
+                {"type": "dahai", "pai": "3m"},
+                {"type": "reach"},
+                {"type": "hora"},
+                {"type": "none"}
             ],
             "observation": "dummy-base64"
         }"#;
@@ -253,17 +279,53 @@ mod tests {
                 request_id: 42,
                 time: None,
                 possible_actions: vec![
-                    MjaiAction::None { request_id: None },
-                    MjaiAction::Dahai {
-                        actor: 0,
-                        pai: "5mr".to_string(),
+                    MjaiPossibleAction::Dahai {
+                        pai: "1m".to_string(),
                         tsumogiri: None,
-                        request_id: None,
                     },
+                    MjaiPossibleAction::Dahai {
+                        pai: "3m".to_string(),
+                        tsumogiri: None,
+                    },
+                    MjaiPossibleAction::Reach,
+                    MjaiPossibleAction::Hora,
+                    MjaiPossibleAction::None,
                 ],
                 observation: "dummy-base64".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn possible_action_parses_each_type_without_actor() {
+        for (json, expected) in [
+            (
+                r#"{"type":"dahai","pai":"5mr"}"#,
+                MjaiPossibleAction::Dahai {
+                    pai: "5mr".to_string(),
+                    tsumogiri: None,
+                },
+            ),
+            (
+                r#"{"type":"dahai","pai":"1m","tsumogiri":true}"#,
+                MjaiPossibleAction::Dahai {
+                    pai: "1m".to_string(),
+                    tsumogiri: Some(true),
+                },
+            ),
+            (r#"{"type":"reach"}"#, MjaiPossibleAction::Reach),
+            (r#"{"type":"hora"}"#, MjaiPossibleAction::Hora),
+            (r#"{"type":"ryukyoku"}"#, MjaiPossibleAction::Ryukyoku),
+            (r#"{"type":"none"}"#, MjaiPossibleAction::None),
+        ] {
+            let action: MjaiPossibleAction = serde_json::from_str(json).unwrap();
+            assert_eq!(action, expected, "json: {json}");
+        }
+    }
+
+    #[test]
+    fn possible_action_rejects_unsupported_type() {
+        assert!(serde_json::from_str::<MjaiPossibleAction>(r#"{"type":"pon"}"#).is_err());
     }
 
     #[test]

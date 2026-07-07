@@ -1,17 +1,17 @@
 use bot_core::LegalAction;
 use bot_logic::{TileId, TileType};
 
-use crate::protocol::MjaiAction;
+use crate::protocol::{MjaiAction, MjaiPossibleAction};
 
-pub fn mjai_action_to_legal_action(action: &MjaiAction) -> Option<LegalAction> {
+pub fn possible_action_to_legal_action(action: &MjaiPossibleAction) -> Option<LegalAction> {
     match action {
-        MjaiAction::Dahai { pai, .. } => {
+        MjaiPossibleAction::Dahai { pai, .. } => {
             temporary_tile_id_from_mjai_pai(pai).map(|tile| LegalAction::Dahai { tile })
         }
-        MjaiAction::Reach { .. } => Some(LegalAction::Reach),
-        MjaiAction::Hora { .. } => Some(LegalAction::Hora),
-        MjaiAction::Ryukyoku { .. } => Some(LegalAction::Ryukyoku),
-        MjaiAction::None { .. } => Some(LegalAction::None),
+        MjaiPossibleAction::Reach => Some(LegalAction::Reach),
+        MjaiPossibleAction::Hora => Some(LegalAction::Hora),
+        MjaiPossibleAction::Ryukyoku => Some(LegalAction::Ryukyoku),
+        MjaiPossibleAction::None => Some(LegalAction::None),
     }
 }
 
@@ -42,10 +42,10 @@ pub fn legal_action_to_mjai_action(action: &LegalAction, actor: u8, request_id: 
     }
 }
 
-pub fn possible_actions_to_legal_actions(actions: &[MjaiAction]) -> Vec<LegalAction> {
+pub fn possible_actions_to_legal_actions(actions: &[MjaiPossibleAction]) -> Vec<LegalAction> {
     actions
         .iter()
-        .filter_map(mjai_action_to_legal_action)
+        .filter_map(possible_action_to_legal_action)
         .collect()
 }
 
@@ -87,14 +87,12 @@ mod tests {
             ("9s", 104),
             ("C", 132),
         ] {
-            let action = MjaiAction::Dahai {
-                actor: 0,
+            let action = MjaiPossibleAction::Dahai {
                 pai: pai.to_string(),
                 tsumogiri: None,
-                request_id: None,
             };
             assert_eq!(
-                mjai_action_to_legal_action(&action),
+                possible_action_to_legal_action(&action),
                 Some(LegalAction::Dahai {
                     tile: tile(expected)
                 }),
@@ -105,59 +103,36 @@ mod tests {
 
     #[test]
     fn dahai_with_invalid_pai_converts_to_none() {
-        let action = MjaiAction::Dahai {
-            actor: 0,
+        let action = MjaiPossibleAction::Dahai {
             pai: "invalid".to_string(),
             tsumogiri: None,
-            request_id: None,
         };
-        assert_eq!(mjai_action_to_legal_action(&action), None);
+        assert_eq!(possible_action_to_legal_action(&action), None);
     }
 
     #[test]
     fn non_dahai_actions_convert_directly() {
         for (action, expected) in [
-            (
-                MjaiAction::Reach {
-                    actor: 1,
-                    request_id: None,
-                },
-                LegalAction::Reach,
-            ),
-            (
-                MjaiAction::Hora {
-                    actor: 1,
-                    target: None,
-                    pai: None,
-                    request_id: None,
-                },
-                LegalAction::Hora,
-            ),
-            (
-                MjaiAction::Ryukyoku { request_id: None },
-                LegalAction::Ryukyoku,
-            ),
-            (MjaiAction::None { request_id: None }, LegalAction::None),
+            (MjaiPossibleAction::Reach, LegalAction::Reach),
+            (MjaiPossibleAction::Hora, LegalAction::Hora),
+            (MjaiPossibleAction::Ryukyoku, LegalAction::Ryukyoku),
+            (MjaiPossibleAction::None, LegalAction::None),
         ] {
-            assert_eq!(mjai_action_to_legal_action(&action), Some(expected));
+            assert_eq!(possible_action_to_legal_action(&action), Some(expected));
         }
     }
 
     #[test]
     fn possible_actions_skip_unconvertible_ones() {
         let actions = vec![
-            MjaiAction::None { request_id: None },
-            MjaiAction::Dahai {
-                actor: 0,
+            MjaiPossibleAction::None,
+            MjaiPossibleAction::Dahai {
                 pai: "invalid".to_string(),
                 tsumogiri: None,
-                request_id: None,
             },
-            MjaiAction::Dahai {
-                actor: 0,
+            MjaiPossibleAction::Dahai {
                 pai: "1m".to_string(),
                 tsumogiri: None,
-                request_id: None,
             },
         ];
         assert_eq!(
@@ -211,13 +186,57 @@ mod tests {
     }
 
     #[test]
-    fn request_action_flows_to_dahai_response() {
+    fn official_request_action_flows_to_hora_response() {
         let json = r#"{
             "type": "request_action",
             "request_id": 42,
             "possible_actions": [
+                {"type": "dahai", "pai": "1m"},
+                {"type": "dahai", "pai": "3m"},
+                {"type": "reach"},
+                {"type": "hora"},
+                {"type": "none"}
+            ],
+            "observation": "dummy-base64"
+        }"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        let MjaiEvent::RequestAction {
+            request_id,
+            possible_actions,
+            ..
+        } = event
+        else {
+            panic!("expected request_action");
+        };
+        let legal_actions = possible_actions_to_legal_actions(&possible_actions);
+        assert_eq!(
+            legal_actions,
+            vec![
+                LegalAction::Dahai { tile: tile(0) },
+                LegalAction::Dahai { tile: tile(8) },
+                LegalAction::Reach,
+                LegalAction::Hora,
+                LegalAction::None,
+            ]
+        );
+        let mut agent = AlwaysLegalAgent;
+        let chosen = agent.act(&GameContext::default(), &legal_actions);
+        assert_eq!(chosen, LegalAction::Hora);
+        let response = legal_action_to_mjai_action(&chosen, 0, request_id);
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"type":"hora","actor":0,"request_id":42}"#
+        );
+    }
+
+    #[test]
+    fn request_action_flows_to_dahai_response() {
+        let json = r#"{
+            "type": "request_action",
+            "request_id": 43,
+            "possible_actions": [
                 {"type": "none"},
-                {"type": "dahai", "actor": 0, "pai": "5mr"}
+                {"type": "dahai", "pai": "5mr"}
             ],
             "observation": "dummy-base64"
         }"#;
@@ -241,38 +260,7 @@ mod tests {
         let response = legal_action_to_mjai_action(&chosen, 0, request_id);
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
-            r#"{"type":"dahai","actor":0,"pai":"5mr","request_id":42}"#
-        );
-    }
-
-    #[test]
-    fn request_action_with_hora_flows_to_hora_response() {
-        let json = r#"{
-            "type": "request_action",
-            "request_id": 7,
-            "possible_actions": [
-                {"type": "none"},
-                {"type": "hora", "actor": 1, "target": 2, "pai": "3m"}
-            ],
-            "observation": "dummy-base64"
-        }"#;
-        let event: MjaiEvent = serde_json::from_str(json).unwrap();
-        let MjaiEvent::RequestAction {
-            request_id,
-            possible_actions,
-            ..
-        } = event
-        else {
-            panic!("expected request_action");
-        };
-        let legal_actions = possible_actions_to_legal_actions(&possible_actions);
-        let mut agent = AlwaysLegalAgent;
-        let chosen = agent.act(&GameContext::default(), &legal_actions);
-        assert_eq!(chosen, LegalAction::Hora);
-        let response = legal_action_to_mjai_action(&chosen, 1, request_id);
-        assert_eq!(
-            serde_json::to_string(&response).unwrap(),
-            r#"{"type":"hora","actor":1,"request_id":7}"#
+            r#"{"type":"dahai","actor":0,"pai":"5mr","request_id":43}"#
         );
     }
 }
