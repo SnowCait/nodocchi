@@ -101,6 +101,13 @@ pub enum MjaiEvent {
         #[serde(default)]
         scores: Vec<i32>,
     },
+
+    #[serde(rename = "validation_result")]
+    ValidationResult {
+        success: bool,
+        #[serde(default)]
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -410,6 +417,42 @@ mod tests {
     #[test]
     fn action_ack_status_rejects_unknown() {
         assert!(serde_json::from_str::<ActionAckStatus>(r#""unknown""#).is_err());
+    }
+
+    #[test]
+    fn validation_result_parses_with_and_without_message() {
+        let event: MjaiEvent =
+            serde_json::from_str(r#"{"type":"validation_result","success":true,"message":"ok"}"#)
+                .unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::ValidationResult {
+                success: true,
+                message: Some("ok".to_string()),
+            }
+        );
+        let event: MjaiEvent =
+            serde_json::from_str(r#"{"type":"validation_result","success":false}"#).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::ValidationResult {
+                success: false,
+                message: None,
+            }
+        );
+    }
+
+    #[test]
+    fn validation_result_ignores_unknown_fields() {
+        let json = r#"{"type":"validation_result","success":true,"details":{"games":1}}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::ValidationResult {
+                success: true,
+                message: None,
+            }
+        );
     }
 
     #[test]
