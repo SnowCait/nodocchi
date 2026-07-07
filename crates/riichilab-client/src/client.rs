@@ -115,11 +115,11 @@ pub async fn run_validation_client<A: Agent>(
                     MjaiEvent::EndGame { scores } => {
                         info!(scores = ?scores, "end_game");
                     }
-                    MjaiEvent::ValidationResult { success, message } => {
-                        if success {
-                            info!(message = ?message, "validation_result: success");
+                    MjaiEvent::ValidationResult { passed, reason } => {
+                        if passed {
+                            info!(reason = ?reason, "validation_result: passed");
                         } else {
-                            error!(message = ?message, "validation_result: failure");
+                            error!(reason = ?reason, "validation_result: failed");
                         }
                         break;
                     }

@@ -52,6 +52,40 @@ pub enum MjaiPossibleAction {
         tsumogiri: Option<bool>,
     },
 
+    #[serde(rename = "chi")]
+    Chi {
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "pon")]
+    Pon {
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "daiminkan")]
+    Daiminkan {
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "ankan")]
+    Ankan {
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
+    #[serde(rename = "kakan")]
+    Kakan {
+        pai: String,
+        #[serde(default)]
+        consumed: Vec<String>,
+    },
+
     #[serde(rename = "reach")]
     Reach,
 
@@ -104,9 +138,10 @@ pub enum MjaiEvent {
 
     #[serde(rename = "validation_result")]
     ValidationResult {
-        success: bool,
-        #[serde(default)]
-        message: Option<String>,
+        #[serde(alias = "success")]
+        passed: bool,
+        #[serde(default, alias = "message")]
+        reason: Option<String>,
     },
 }
 
@@ -331,8 +366,85 @@ mod tests {
     }
 
     #[test]
+    fn possible_action_parses_each_claim_type() {
+        for (json, expected) in [
+            (
+                r#"{"type":"chi","pai":"5m","consumed":["4m","6m"]}"#,
+                MjaiPossibleAction::Chi {
+                    pai: "5m".to_string(),
+                    consumed: vec!["4m".to_string(), "6m".to_string()],
+                },
+            ),
+            (
+                r#"{"type":"pon","pai":"E","consumed":["E","E"]}"#,
+                MjaiPossibleAction::Pon {
+                    pai: "E".to_string(),
+                    consumed: vec!["E".to_string(), "E".to_string()],
+                },
+            ),
+            (
+                r#"{"type":"daiminkan","pai":"9s","consumed":["9s","9s","9s"]}"#,
+                MjaiPossibleAction::Daiminkan {
+                    pai: "9s".to_string(),
+                    consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+                },
+            ),
+            (
+                r#"{"type":"ankan","consumed":["1s","1s","1s","1s"]}"#,
+                MjaiPossibleAction::Ankan {
+                    consumed: vec![
+                        "1s".to_string(),
+                        "1s".to_string(),
+                        "1s".to_string(),
+                        "1s".to_string(),
+                    ],
+                },
+            ),
+            (
+                r#"{"type":"kakan","pai":"P","consumed":["P","P","P"]}"#,
+                MjaiPossibleAction::Kakan {
+                    pai: "P".to_string(),
+                    consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+                },
+            ),
+        ] {
+            let action: MjaiPossibleAction = serde_json::from_str(json).unwrap();
+            assert_eq!(action, expected, "json: {json}");
+        }
+    }
+
+    #[test]
+    fn request_action_parses_with_claim_possible_actions() {
+        let json = r#"{
+            "type": "request_action",
+            "request_id": 44,
+            "possible_actions": [
+                {"type":"pon","pai":"E","consumed":["E","E"]},
+                {"type":"none"}
+            ],
+            "observation": "dummy-base64"
+        }"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            event,
+            MjaiEvent::RequestAction {
+                request_id: 44,
+                time: None,
+                possible_actions: vec![
+                    MjaiPossibleAction::Pon {
+                        pai: "E".to_string(),
+                        consumed: vec!["E".to_string(), "E".to_string()],
+                    },
+                    MjaiPossibleAction::None,
+                ],
+                observation: "dummy-base64".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn possible_action_rejects_unsupported_type() {
-        assert!(serde_json::from_str::<MjaiPossibleAction>(r#"{"type":"pon"}"#).is_err());
+        assert!(serde_json::from_str::<MjaiPossibleAction>(r#"{"type":"unknown"}"#).is_err());
     }
 
     #[test]
@@ -420,37 +532,57 @@ mod tests {
     }
 
     #[test]
-    fn validation_result_parses_with_and_without_message() {
-        let event: MjaiEvent =
-            serde_json::from_str(r#"{"type":"validation_result","success":true,"message":"ok"}"#)
-                .unwrap();
+    fn validation_result_parses_official_examples() {
+        for (json, expected) in [
+            (
+                r#"{"type":"validation_result","passed":true}"#,
+                MjaiEvent::ValidationResult {
+                    passed: true,
+                    reason: None,
+                },
+            ),
+            (
+                r#"{"type":"validation_result","passed":false,"reason":"disconnected"}"#,
+                MjaiEvent::ValidationResult {
+                    passed: false,
+                    reason: Some("disconnected".to_string()),
+                },
+            ),
+            (
+                r#"{"type":"validation_result","passed":false,"reason":"penalized (illegal action)"}"#,
+                MjaiEvent::ValidationResult {
+                    passed: false,
+                    reason: Some("penalized (illegal action)".to_string()),
+                },
+            ),
+        ] {
+            let event: MjaiEvent = serde_json::from_str(json).unwrap();
+            assert_eq!(event, expected, "json: {json}");
+        }
+    }
+
+    #[test]
+    fn validation_result_parses_legacy_field_names_as_aliases() {
+        let json = r#"{"type":"validation_result","success":true,"message":"ok"}"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
         assert_eq!(
             event,
             MjaiEvent::ValidationResult {
-                success: true,
-                message: Some("ok".to_string()),
-            }
-        );
-        let event: MjaiEvent =
-            serde_json::from_str(r#"{"type":"validation_result","success":false}"#).unwrap();
-        assert_eq!(
-            event,
-            MjaiEvent::ValidationResult {
-                success: false,
-                message: None,
+                passed: true,
+                reason: Some("ok".to_string()),
             }
         );
     }
 
     #[test]
     fn validation_result_ignores_unknown_fields() {
-        let json = r#"{"type":"validation_result","success":true,"details":{"games":1}}"#;
+        let json = r#"{"type":"validation_result","passed":true,"details":{"games":1}}"#;
         let event: MjaiEvent = serde_json::from_str(json).unwrap();
         assert_eq!(
             event,
             MjaiEvent::ValidationResult {
-                success: true,
-                message: None,
+                passed: true,
+                reason: None,
             }
         );
     }
