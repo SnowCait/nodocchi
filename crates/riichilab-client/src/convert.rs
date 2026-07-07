@@ -12,6 +12,11 @@ pub fn possible_action_to_legal_action(action: &MjaiPossibleAction) -> Option<Le
         MjaiPossibleAction::Hora => Some(LegalAction::Hora),
         MjaiPossibleAction::Ryukyoku => Some(LegalAction::Ryukyoku),
         MjaiPossibleAction::None => Some(LegalAction::None),
+        MjaiPossibleAction::Chi { .. }
+        | MjaiPossibleAction::Pon { .. }
+        | MjaiPossibleAction::Daiminkan { .. }
+        | MjaiPossibleAction::Ankan { .. }
+        | MjaiPossibleAction::Kakan { .. } => None,
     }
 }
 
@@ -123,6 +128,38 @@ mod tests {
     }
 
     #[test]
+    fn claim_actions_convert_to_no_legal_action() {
+        for action in [
+            MjaiPossibleAction::Chi {
+                pai: "5m".to_string(),
+                consumed: vec!["4m".to_string(), "6m".to_string()],
+            },
+            MjaiPossibleAction::Pon {
+                pai: "E".to_string(),
+                consumed: vec!["E".to_string(), "E".to_string()],
+            },
+            MjaiPossibleAction::Daiminkan {
+                pai: "9s".to_string(),
+                consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+            },
+            MjaiPossibleAction::Ankan {
+                consumed: vec![
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                ],
+            },
+            MjaiPossibleAction::Kakan {
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+            },
+        ] {
+            assert_eq!(possible_action_to_legal_action(&action), None, "{action:?}");
+        }
+    }
+
+    #[test]
     fn possible_actions_skip_unconvertible_ones() {
         let actions = vec![
             MjaiPossibleAction::None,
@@ -226,6 +263,38 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"hora","actor":0,"request_id":42}"#
+        );
+    }
+
+    #[test]
+    fn claim_request_action_flows_to_none_response() {
+        let json = r#"{
+            "type": "request_action",
+            "request_id": 44,
+            "possible_actions": [
+                {"type":"pon","pai":"E","consumed":["E","E"]},
+                {"type":"none"}
+            ],
+            "observation": "dummy-base64"
+        }"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        let MjaiEvent::RequestAction {
+            request_id,
+            possible_actions,
+            ..
+        } = event
+        else {
+            panic!("expected request_action");
+        };
+        let legal_actions = possible_actions_to_legal_actions(&possible_actions);
+        assert_eq!(legal_actions, vec![LegalAction::None]);
+        let mut agent = AlwaysLegalAgent;
+        let chosen = agent.act(&GameContext::default(), &legal_actions);
+        assert_eq!(chosen, LegalAction::None);
+        let response = legal_action_to_mjai_action(&chosen, 0, request_id);
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"type":"none","request_id":44}"#
         );
     }
 
