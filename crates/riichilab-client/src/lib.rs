@@ -3,6 +3,7 @@ pub mod config;
 pub mod convert;
 pub mod observation;
 pub mod protocol;
+pub mod tls;
 
 pub use client::{ClientError, build_response_for_request, run_validation_client};
 pub use config::{ClientConfig, ConfigError};
@@ -11,3 +12,4 @@ pub use convert::{
 };
 pub use observation::{DecodedObservation, ObservationError, ObservationPayload};
 pub use protocol::{ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, TimeControl};
+pub use tls::install_default_crypto_provider;
