@@ -10,9 +10,11 @@ use tracing::{debug, error, info, warn};
 use crate::config::ClientConfig;
 use crate::convert::{legal_action_to_mjai_action, possible_actions_to_legal_actions};
 use crate::observation::ObservationPayload;
+use crate::policy::build_validation_response;
 use crate::protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, parse_server_event,
 };
+use crate::state::ValidationState;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -63,7 +65,7 @@ pub async fn run_validation_client<A: Agent>(
     let (mut ws_stream, _) = connect_async(request).await?;
     info!("connected");
 
-    let mut actor: Option<u8> = None;
+    let mut state = ValidationState::new();
 
     while let Some(message) = ws_stream.next().await {
         let message = match message {
@@ -86,7 +88,7 @@ pub async fn run_validation_client<A: Agent>(
                 match event {
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
-                        actor = Some(id);
+                        state.on_start_game(id);
                     }
                     MjaiEvent::StartKyoku {
                         kyoku, honba, oya, ..
@@ -95,6 +97,7 @@ pub async fn run_validation_client<A: Agent>(
                     }
                     MjaiEvent::Tsumo { actor, pai } => {
                         debug!(actor, pai = %pai, "tsumo");
+                        state.on_tsumo(actor, pai);
                     }
                     MjaiEvent::Dahai {
                         actor,
@@ -102,6 +105,7 @@ pub async fn run_validation_client<A: Agent>(
                         tsumogiri,
                     } => {
                         debug!(actor, pai = %pai, tsumogiri = ?tsumogiri, "dahai");
+                        state.on_dahai(actor);
                     }
                     MjaiEvent::Chi {
                         actor,
@@ -151,21 +155,28 @@ pub async fn run_validation_client<A: Agent>(
                         observation,
                         ..
                     } => {
-                        let actor_id = match actor {
-                            Some(id) => id,
-                            None => {
-                                warn!("actor not set before request_action; falling back to 0");
-                                0
-                            }
-                        };
+                        if state.seat_id().is_none() {
+                            warn!("actor not set before request_action; falling back to 0");
+                        }
                         let observation = ObservationPayload::new(observation);
-                        let response = build_response_for_request(
-                            actor_id,
-                            request_id,
-                            &possible_actions,
-                            &observation,
-                            agent,
-                        );
+                        let response =
+                            build_validation_response(&state, request_id, &possible_actions)
+                                .inspect(|response| {
+                                    debug!(
+                                        request_id,
+                                        response = ?response,
+                                        "validation policy selected response"
+                                    );
+                                })
+                                .unwrap_or_else(|| {
+                                    build_response_for_request(
+                                        state.actor_or_default(),
+                                        request_id,
+                                        &possible_actions,
+                                        &observation,
+                                        agent,
+                                    )
+                                });
                         let json = serde_json::to_string(&response)?;
                         debug!(response = %json, "sending response");
                         ws_stream.send(Message::Text(json.into())).await?;
