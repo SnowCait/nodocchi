@@ -16,10 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ClientConfig::from_env()?;
     let agent_kind = AgentKind::from_env()?;
     let policy = agent_kind.response_policy();
-    let mut agent = NormalAgent;
+    let mut fallback_agent = NormalAgent;
 
     info!(agent_kind = %agent_kind, "selected agent");
 
-    run_validation_client(config, &mut agent, policy).await?;
+    run_validation_client(config, &mut fallback_agent, policy).await?;
     Ok(())
 }

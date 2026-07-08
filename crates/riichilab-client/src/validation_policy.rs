@@ -1,4 +1,4 @@
-use bot_core::{Agent, GameContext, LegalAction, NormalAgent, TsumogiriAgent};
+use bot_core::{Agent, GameContext, LegalAction, NormalAgent, ShantenAgent, TsumogiriAgent};
 
 use crate::convert::{possible_actions_to_legal_actions, temporary_tile_id_from_mjai_pai};
 use crate::protocol::{MjaiAction, MjaiPossibleAction};
@@ -10,6 +10,7 @@ pub type ResponsePolicy =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentKind {
     Tsumogiri,
+    Shanten,
     #[default]
     Normal,
 }
@@ -26,6 +27,7 @@ impl AgentKind {
     pub fn response_policy(self) -> ResponsePolicy {
         match self {
             Self::Tsumogiri => build_tsumogiri_response_with_context,
+            Self::Shanten => build_shanten_response_with_context,
             Self::Normal => build_normal_response_with_context,
         }
     }
@@ -38,6 +40,7 @@ impl std::str::FromStr for AgentKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "" | "normal" => Ok(Self::Normal),
             "tsumogiri" | "tsumo-giri" => Ok(Self::Tsumogiri),
+            "shanten" => Ok(Self::Shanten),
             other => Err(AgentKindError::Unknown(other.to_string())),
         }
     }
@@ -47,6 +50,7 @@ impl std::fmt::Display for AgentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tsumogiri => write!(f, "tsumogiri"),
+            Self::Shanten => write!(f, "shanten"),
             Self::Normal => write!(f, "normal"),
         }
     }
@@ -108,6 +112,35 @@ pub(crate) fn build_normal_response_with_context(
     let legal_actions = possible_actions_to_legal_actions(possible_actions);
 
     let mut agent = NormalAgent;
+    let chosen = agent.act(context, &legal_actions);
+
+    checked_legal_action_to_mjai_response(
+        &chosen,
+        state.actor_or_default(),
+        request_id,
+        possible_actions,
+        context,
+    )
+}
+
+pub fn build_shanten_response(
+    state: &ValidationState,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+) -> Option<MjaiAction> {
+    let context = game_context_from_validation_state(state);
+    build_shanten_response_with_context(state, &context, request_id, possible_actions)
+}
+
+pub(crate) fn build_shanten_response_with_context(
+    state: &ValidationState,
+    context: &GameContext,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+) -> Option<MjaiAction> {
+    let legal_actions = possible_actions_to_legal_actions(possible_actions);
+
+    let mut agent = ShantenAgent;
     let chosen = agent.act(context, &legal_actions);
 
     checked_legal_action_to_mjai_response(
@@ -237,12 +270,18 @@ mod tests {
         }
 
         #[test]
+        fn parses_shanten() {
+            assert_eq!("shanten".parse::<AgentKind>().unwrap(), AgentKind::Shanten);
+        }
+
+        #[test]
         fn parses_mixed_case() {
             assert_eq!("Normal".parse::<AgentKind>().unwrap(), AgentKind::Normal);
             assert_eq!(
                 "TsumoGiri".parse::<AgentKind>().unwrap(),
                 AgentKind::Tsumogiri
             );
+            assert_eq!("Shanten".parse::<AgentKind>().unwrap(), AgentKind::Shanten);
         }
 
         #[test]
@@ -250,6 +289,10 @@ mod tests {
             assert_eq!(
                 " tsumogiri ".parse::<AgentKind>().unwrap(),
                 AgentKind::Tsumogiri
+            );
+            assert_eq!(
+                " Shanten ".parse::<AgentKind>().unwrap(),
+                AgentKind::Shanten
             );
         }
 
@@ -265,6 +308,7 @@ mod tests {
         fn display_matches_env_values() {
             assert_eq!(AgentKind::Normal.to_string(), "normal");
             assert_eq!(AgentKind::Tsumogiri.to_string(), "tsumogiri");
+            assert_eq!(AgentKind::Shanten.to_string(), "shanten");
         }
     }
 
@@ -878,6 +922,119 @@ mod tests {
         }
     }
 
+    mod shanten_policy {
+        use super::*;
+        use bot_logic::TileId;
+
+        fn tile(value: u8) -> TileId {
+            TileId::new(value).unwrap()
+        }
+
+        #[test]
+        fn discards_drawn_tile_from_context() {
+            let state = state_with_tsumo(0, "1m");
+            let context = GameContext::with_drawn_tile(tile(0));
+            let possible_actions = vec![possible_dahai("1m")];
+            let response =
+                build_shanten_response_with_context(&state, &context, 42, &possible_actions);
+            assert_eq!(
+                response,
+                Some(MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "1m".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(42),
+                })
+            );
+        }
+
+        #[test]
+        fn hora_takes_priority_over_dahai() {
+            let state = state_with_tsumo(1, "6p");
+            let context = GameContext::with_drawn_tile(tile(56));
+            let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::Hora];
+            let response =
+                build_shanten_response_with_context(&state, &context, 80, &possible_actions);
+            assert_eq!(
+                response,
+                Some(MjaiAction::Hora {
+                    actor: 1,
+                    target: None,
+                    pai: None,
+                    request_id: Some(80),
+                })
+            );
+        }
+
+        #[test]
+        fn ryukyoku_takes_priority_over_dahai() {
+            let state = state_with_tsumo(0, "6p");
+            let context = GameContext::with_drawn_tile(tile(56));
+            let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::Ryukyoku];
+            let response =
+                build_shanten_response_with_context(&state, &context, 81, &possible_actions);
+            assert_eq!(
+                response,
+                Some(MjaiAction::Ryukyoku {
+                    request_id: Some(81),
+                })
+            );
+        }
+
+        #[test]
+        fn builds_response_with_hand_tiles_in_context() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            let context =
+                GameContext::from_parts(Some(tile(56)), vec![tile(0), tile(16), tile(56)]);
+            let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+            let response =
+                build_shanten_response_with_context(&state, &context, 82, &possible_actions);
+            assert!(matches!(response, Some(MjaiAction::Dahai { .. })));
+        }
+
+        #[test]
+        fn does_not_return_actions_missing_from_possible_actions() {
+            let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
+            let possible_actions = vec![possible_pon()];
+            assert_eq!(
+                build_shanten_response_with_context(&state, &context, 83, &possible_actions),
+                None
+            );
+            assert_eq!(
+                build_shanten_response_with_context(&state, &context, 83, &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn passes_with_none_action_on_claim_opportunity() {
+            let state = ValidationState::new();
+            let context = GameContext::default();
+            let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
+            let response =
+                build_shanten_response_with_context(&state, &context, 84, &possible_actions);
+            assert_eq!(
+                response,
+                Some(MjaiAction::None {
+                    request_id: Some(84),
+                })
+            );
+        }
+
+        #[test]
+        fn compat_builder_uses_state_derived_context() {
+            let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
+            let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+            assert_eq!(
+                build_shanten_response(&state, 85, &possible_actions),
+                build_shanten_response_with_context(&state, &context, 85, &possible_actions)
+            );
+        }
+    }
+
     mod policy_with_context {
         use super::*;
         use bot_logic::TileId;
@@ -1088,6 +1245,28 @@ mod tests {
                 assert_eq!(
                     policy(&state, &context, 30, &possible_actions),
                     build_tsumogiri_response(&state, 30, &possible_actions)
+                );
+            }
+        }
+
+        #[test]
+        fn shanten_kind_uses_shanten_policy() {
+            let policy = AgentKind::Shanten.response_policy();
+            let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
+            for possible_actions in [
+                vec![
+                    MjaiPossibleAction::Hora,
+                    possible_dahai("6p"),
+                    MjaiPossibleAction::None,
+                ],
+                vec![MjaiPossibleAction::Ryukyoku, possible_dahai("6p")],
+                vec![possible_pon(), MjaiPossibleAction::None],
+                vec![possible_pon()],
+            ] {
+                assert_eq!(
+                    policy(&state, &context, 32, &possible_actions),
+                    build_shanten_response(&state, 32, &possible_actions)
                 );
             }
         }
