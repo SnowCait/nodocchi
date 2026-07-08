@@ -6,7 +6,7 @@ pub mod tile;
 pub mod tile_counts;
 
 pub use acceptance::{Acceptance, AcceptanceTile, calculate_acceptance};
-pub use discard::{DiscardEvaluation, evaluate_discards};
+pub use discard::{DiscardEvaluation, evaluate_discards, select_best_discard};
 pub use hand::{Hand, HandError};
 pub use shanten::{
     Shanten, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
