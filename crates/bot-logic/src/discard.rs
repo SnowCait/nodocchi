@@ -10,6 +10,7 @@ pub struct DiscardEvaluation {
     pub shanten_after_discard: Shanten,
     pub acceptance_after_discard: Acceptance,
     pub discarded_dora_count: u8,
+    pub discarded_value_honor_count: u8,
     pub discards_red_five: bool,
 }
 
@@ -39,9 +40,20 @@ pub fn select_best_discard_from_tiles_with_dora(
     tiles: &[TileId],
     dora_indicators: &[TileId],
 ) -> Option<DiscardEvaluation> {
-    select_best(evaluate_discards_from_tiles_with_dora(
+    select_best_discard_from_tiles_with_context(tiles, dora_indicators, None, None)
+}
+
+pub fn select_best_discard_from_tiles_with_context(
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> Option<DiscardEvaluation> {
+    select_best(evaluate_discards_from_tiles_with_context(
         tiles,
         dora_indicators,
+        round_wind,
+        seat_wind,
     ))
 }
 
@@ -78,7 +90,24 @@ fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) ->
         return candidate.discarded_dora_count < best.discarded_dora_count;
     }
 
+    if candidate.discarded_value_honor_count != best.discarded_value_honor_count {
+        return candidate.discarded_value_honor_count < best.discarded_value_honor_count;
+    }
+
     !candidate.discards_red_five && best.discards_red_five
+}
+
+fn value_honor_count(
+    tile: TileType,
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> u8 {
+    let mut count = u8::from(tile.is_dragon());
+    if tile.is_wind() {
+        count += u8::from(round_wind == Some(tile));
+        count += u8::from(seat_wind == Some(tile));
+    }
+    count
 }
 
 pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
@@ -104,6 +133,7 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             shanten_after_discard,
             acceptance_after_discard,
             discarded_dora_count: 0,
+            discarded_value_honor_count: 0,
             discards_red_five: false,
         });
     }
@@ -119,6 +149,15 @@ pub fn evaluate_discards_from_tiles_with_dora(
     tiles: &[TileId],
     dora_indicators: &[TileId],
 ) -> Vec<DiscardEvaluation> {
+    evaluate_discards_from_tiles_with_context(tiles, dora_indicators, None, None)
+}
+
+pub fn evaluate_discards_from_tiles_with_context(
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> Vec<DiscardEvaluation> {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
     let mut evaluations = evaluate_discards(&counts);
     for evaluation in &mut evaluations {
@@ -127,6 +166,8 @@ pub fn evaluate_discards_from_tiles_with_dora(
         evaluation.discarded_dora_count = discarded_tile
             .map(|tile| count_dora(tile, dora_indicators))
             .unwrap_or(0);
+        evaluation.discarded_value_honor_count =
+            value_honor_count(evaluation.discard, round_wind, seat_wind);
     }
     evaluations
 }
@@ -419,6 +460,17 @@ mod tests {
         dora: u8,
         red: bool,
     ) -> DiscardEvaluation {
+        evaluation_with_value_honor(min, remaining, type_count, dora, 0, red)
+    }
+
+    fn evaluation_with_value_honor(
+        min: i8,
+        remaining: u8,
+        type_count: usize,
+        dora: u8,
+        value_honor: u8,
+        red: bool,
+    ) -> DiscardEvaluation {
         let tiles: Vec<AcceptanceTile> = (0..type_count)
             .map(|i| AcceptanceTile {
                 tile: TileType::new(i as u8).unwrap(),
@@ -436,6 +488,7 @@ mod tests {
                 tiles,
             },
             discarded_dora_count: dora,
+            discarded_value_honor_count: value_honor,
             discards_red_five: red,
         }
     }
@@ -509,6 +562,187 @@ mod tests {
         let discard_red = evaluation(1, 10, 2, 0, true);
         assert!(is_better_discard(&keep_red, &discard_red));
         assert!(!is_better_discard(&discard_red, &keep_red));
+    }
+
+    #[test]
+    fn value_honor_count_for_dragons() {
+        assert_eq!(value_honor_count(tile("P"), None, None), 1);
+        assert_eq!(value_honor_count(tile("F"), None, None), 1);
+        assert_eq!(value_honor_count(tile("C"), None, None), 1);
+    }
+
+    #[test]
+    fn value_honor_count_for_round_and_seat_winds() {
+        assert_eq!(value_honor_count(tile("E"), Some(tile("E")), None), 1);
+        assert_eq!(value_honor_count(tile("E"), None, Some(tile("E"))), 1);
+        assert_eq!(
+            value_honor_count(tile("E"), Some(tile("E")), Some(tile("E"))),
+            2
+        );
+    }
+
+    #[test]
+    fn value_honor_count_for_guest_and_number_tiles() {
+        assert_eq!(
+            value_honor_count(tile("W"), Some(tile("E")), Some(tile("S"))),
+            0
+        );
+        assert_eq!(
+            value_honor_count(tile("1m"), Some(tile("E")), Some(tile("S"))),
+            0
+        );
+        assert_eq!(value_honor_count(tile("E"), None, None), 0);
+    }
+
+    #[test]
+    fn value_honor_tiebreak_prefers_keeping_value_honor() {
+        let keep_honor = evaluation_with_value_honor(1, 10, 2, 0, 0, false);
+        let discard_honor = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        assert!(is_better_discard(&keep_honor, &discard_honor));
+        assert!(!is_better_discard(&discard_honor, &keep_honor));
+    }
+
+    #[test]
+    fn value_honor_tiebreak_outranks_red_five() {
+        let keep_honor_discards_red = evaluation_with_value_honor(1, 10, 2, 0, 0, true);
+        let discard_honor_keeps_red = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        assert!(is_better_discard(
+            &keep_honor_discards_red,
+            &discard_honor_keeps_red
+        ));
+    }
+
+    #[test]
+    fn dora_tiebreak_outranks_value_honor() {
+        let keep_dora_discards_honor = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        let discard_dora_keeps_honor = evaluation_with_value_honor(1, 10, 2, 1, 0, false);
+        assert!(is_better_discard(
+            &keep_dora_discards_honor,
+            &discard_dora_keeps_honor
+        ));
+    }
+
+    #[test]
+    fn double_wind_is_harder_to_discard_than_single_value_honor() {
+        let single_honor = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        let double_wind = evaluation_with_value_honor(1, 10, 2, 0, 2, false);
+        assert!(is_better_discard(&single_honor, &double_wind));
+        assert!(!is_better_discard(&double_wind, &single_honor));
+    }
+
+    #[test]
+    fn with_context_sets_value_honor_count() {
+        // 123m 456m 789m 123p + 中(浮き) 1p(浮き)
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 37]);
+        let evaluations = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+        let dragon = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        assert_eq!(dragon.discarded_value_honor_count, 1);
+        let number = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("1m"))
+            .unwrap();
+        assert_eq!(number.discarded_value_honor_count, 0);
+    }
+
+    #[test]
+    fn without_context_only_dragons_are_value_honors() {
+        // context 無しの _with_dora では三元牌だけ役牌として数える
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 108]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let dragon = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        assert_eq!(dragon.discarded_value_honor_count, 1);
+        let wind = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("E"))
+            .unwrap();
+        assert_eq!(wind.discarded_value_honor_count, 0);
+    }
+
+    #[test]
+    fn shanten_outranks_value_honor_tiebreak() {
+        let low_shanten_honor = evaluation_with_value_honor(0, 4, 1, 0, 1, false);
+        let high_shanten_keep = evaluation_with_value_honor(1, 40, 5, 0, 0, false);
+        assert!(is_better_discard(&low_shanten_honor, &high_shanten_keep));
+    }
+
+    #[test]
+    fn acceptance_remaining_outranks_value_honor_tiebreak() {
+        let more_remaining_honor = evaluation_with_value_honor(1, 20, 1, 0, 1, false);
+        let less_remaining_keep = evaluation_with_value_honor(1, 10, 1, 0, 0, false);
+        assert!(is_better_discard(
+            &more_remaining_honor,
+            &less_remaining_keep
+        ));
+    }
+
+    #[test]
+    fn acceptance_types_outrank_value_honor_tiebreak() {
+        let more_types_honor = evaluation_with_value_honor(1, 10, 3, 0, 1, false);
+        let fewer_types_keep = evaluation_with_value_honor(1, 10, 2, 0, 0, false);
+        assert!(is_better_discard(&more_types_honor, &fewer_types_keep));
+    }
+
+    #[test]
+    fn context_perfect_tie_keeps_value_honor() {
+        // 123m 456m 789m 123p + 中(浮き) 北(浮き)
+        // どちらを切っても同じ単騎テンパイ。役牌でない北(客風)を優先して切る
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 120]);
+        let selected =
+            select_best_discard_from_tiles_with_context(&tiles, &[], None, None).unwrap();
+        assert_eq!(selected.discard, tile("N"));
+        assert_eq!(selected.discarded_value_honor_count, 0);
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+    }
+
+    #[test]
+    fn context_double_wind_kept_over_single_value_honor() {
+        // 東場東家。中(単役牌) と 東(ダブル東) の孤立牌があるとき、東を温存し中を切る
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 108]);
+        let selected = select_best_discard_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("E")),
+        )
+        .unwrap();
+        assert_eq!(selected.discard, tile("C"));
+        assert_eq!(selected.discarded_value_honor_count, 1);
+    }
+
+    #[test]
+    fn context_dora_outranks_value_honor() {
+        // 中(役牌・非ドラ) と 北(客風・ドラ) の孤立牌。ドラを温存し役牌の中を切る
+        // ドラ表示 西 -> 北 がドラ
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 120]);
+        let indicators = ids(&[116]);
+        let selected = select_best_discard_from_tiles_with_context(
+            &tiles,
+            &indicators,
+            Some(tile("E")),
+            Some(tile("S")),
+        )
+        .unwrap();
+        assert_eq!(selected.discard, tile("C"));
+        assert_eq!(selected.discarded_value_honor_count, 1);
+    }
+
+    #[test]
+    fn with_context_none_winds_matches_with_dora() {
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 108]);
+        let with_context = evaluate_discards_from_tiles_with_context(&tiles, &[], None, None);
+        let with_dora = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        assert_eq!(with_context, with_dora);
     }
 
     #[test]

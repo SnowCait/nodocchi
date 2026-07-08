@@ -1,6 +1,6 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use bot_logic::select_best_discard_from_tiles_with_dora;
+use bot_logic::select_best_discard_from_tiles_with_context;
 
 pub fn select_discard_action(
     context: &GameContext,
@@ -13,8 +13,13 @@ pub fn select_discard_action(
         .chain(context.drawn_tile())
         .collect();
 
-    let selected_type =
-        select_best_discard_from_tiles_with_dora(&tiles, context.dora_indicators())?.discard;
+    let selected_type = select_best_discard_from_tiles_with_context(
+        &tiles,
+        context.dora_indicators(),
+        context.round_wind(),
+        context.seat_wind(),
+    )?
+    .discard;
 
     let mut red_fallback = None;
     for action in legal_actions {
@@ -205,6 +210,133 @@ mod tests {
         let context = GameContext::from_parts_with_dora(None, vec![], vec![tile(12)]);
         let actions = vec![dahai(0)];
         assert_eq!(select_discard_action(&context, &actions), None);
+    }
+
+    #[test]
+    fn perfect_tie_keeps_value_honor() {
+        // 123m 456m 789m 123p + 中(浮き) 北(浮き)。役牌でない北を切る
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context =
+            GameContext::from_parts_with_context(Some(tile(120)), hand, vec![], None, None);
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 120]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "N");
+    }
+
+    #[test]
+    fn round_wind_makes_wind_harder_to_discard() {
+        // 東場。孤立した東(場風)と北(客風)では、役牌でない北を切る
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_context(
+            Some(tile(120)),
+            hand,
+            vec![],
+            Some(bot_logic::TileType::new(27).unwrap()),
+            Some(bot_logic::TileType::new(28).unwrap()),
+        );
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108, 120]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "N");
+    }
+
+    #[test]
+    fn double_wind_kept_over_single_value_honor() {
+        // 東場東家。ダブル東(場風かつ自風)と中(単役牌)では中を切る
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_context(
+            Some(tile(132)),
+            hand,
+            vec![],
+            Some(bot_logic::TileType::new(27).unwrap()),
+            Some(bot_logic::TileType::new(27).unwrap()),
+        );
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108, 132]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "C");
+    }
+
+    #[test]
+    fn shanten_outranks_value_honor() {
+        // 中を切るとテンパイ。中が役牌でも向聴を優先して切る
+        let hand: Vec<_> = [40u8, 44, 48, 56, 60, 64, 76, 80, 84, 108, 109, 96, 100]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_context(
+            Some(tile(132)),
+            hand,
+            vec![],
+            Some(bot_logic::TileType::new(27).unwrap()),
+            Some(bot_logic::TileType::new(28).unwrap()),
+        );
+        let actions: Vec<LegalAction> =
+            [40u8, 44, 48, 56, 60, 64, 76, 80, 84, 108, 109, 96, 100, 132]
+                .iter()
+                .map(|&value| dahai(value))
+                .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "C");
+    }
+
+    #[test]
+    fn dora_outranks_value_honor() {
+        // 中(役牌・非ドラ)と北(客風・ドラ)。ドラを温存し中を切る
+        // ドラ表示 西 -> 北 がドラ
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_context(
+            Some(tile(120)),
+            hand,
+            vec![tile(116)],
+            Some(bot_logic::TileType::new(27).unwrap()),
+            Some(bot_logic::TileType::new(28).unwrap()),
+        );
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 120]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "C");
     }
 
     #[test]
