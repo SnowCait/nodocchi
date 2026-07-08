@@ -59,6 +59,20 @@ impl TileType {
         (index < 4).then(|| Self(27 + index))
     }
 
+    pub fn is_dragon(self) -> bool {
+        (31..=33).contains(&self.0)
+    }
+
+    pub fn is_value_honor(self, round_wind: Option<TileType>, seat_wind: Option<TileType>) -> bool {
+        if self.is_dragon() {
+            return true;
+        }
+        if !self.is_wind() {
+            return false;
+        }
+        round_wind == Some(self) || seat_wind == Some(self)
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(self.number(), Some(1) | Some(9))
     }
@@ -332,6 +346,64 @@ mod tests {
         for index in 0..4 {
             assert!(TileType::wind_from_seat_index(index).unwrap().is_wind());
         }
+    }
+
+    #[test]
+    fn is_dragon_only_for_three_dragons() {
+        assert!(tt(31).is_dragon());
+        assert!(tt(32).is_dragon());
+        assert!(tt(33).is_dragon());
+        assert!(!tt(27).is_dragon());
+        assert!(!tt(28).is_dragon());
+        assert!(!tt(29).is_dragon());
+        assert!(!tt(30).is_dragon());
+        assert!(!tt(26).is_dragon());
+        assert!(!tt(0).is_dragon());
+    }
+
+    #[test]
+    fn is_value_honor_without_winds_only_dragons() {
+        for value in 31..=33 {
+            assert!(tt(value).is_value_honor(None, None));
+        }
+        for value in 27..=30 {
+            assert!(!tt(value).is_value_honor(None, None));
+        }
+        assert!(!tt(0).is_value_honor(None, None));
+        assert!(!tt(26).is_value_honor(None, None));
+    }
+
+    #[test]
+    fn is_value_honor_with_round_wind() {
+        let round = Some(tt(27));
+        assert!(tt(27).is_value_honor(round, None));
+        assert!(!tt(28).is_value_honor(round, None));
+        assert!(!tt(29).is_value_honor(round, None));
+        assert!(!tt(30).is_value_honor(round, None));
+        for value in 31..=33 {
+            assert!(tt(value).is_value_honor(round, None));
+        }
+    }
+
+    #[test]
+    fn is_value_honor_with_seat_wind() {
+        let seat = Some(tt(28));
+        assert!(tt(28).is_value_honor(None, seat));
+        assert!(!tt(27).is_value_honor(None, seat));
+        assert!(!tt(0).is_value_honor(None, seat));
+        for value in 31..=33 {
+            assert!(tt(value).is_value_honor(None, seat));
+        }
+    }
+
+    #[test]
+    fn is_value_honor_false_for_numbers_and_guest_winds() {
+        let round = Some(tt(27));
+        let seat = Some(tt(28));
+        assert!(!tt(29).is_value_honor(round, seat));
+        assert!(!tt(30).is_value_honor(round, seat));
+        assert!(!tt(0).is_value_honor(round, seat));
+        assert!(!tt(13).is_value_honor(round, seat));
     }
 
     #[test]
