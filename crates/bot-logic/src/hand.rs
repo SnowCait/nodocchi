@@ -18,7 +18,7 @@ impl Hand {
     pub fn empty() -> Self {
         Self {
             tiles: Vec::new(),
-            counts: TileCounts::empty(),
+            counts: TileCounts::new(),
         }
     }
 
@@ -57,7 +57,7 @@ impl Hand {
     }
 
     pub fn count_type(&self, tile: TileType) -> u8 {
-        self.counts.get(tile)
+        self.counts.count(tile)
     }
 
     pub fn red_count(&self) -> u8 {
