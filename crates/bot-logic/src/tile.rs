@@ -51,6 +51,14 @@ impl TileType {
         self.0 >= 27
     }
 
+    pub fn is_wind(self) -> bool {
+        (27..=30).contains(&self.0)
+    }
+
+    pub fn wind_from_seat_index(index: u8) -> Option<TileType> {
+        (index < 4).then(|| Self(27 + index))
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(self.number(), Some(1) | Some(9))
     }
@@ -290,6 +298,40 @@ mod tests {
         assert!(tt(0).is_yaochu());
         assert!(tt(27).is_yaochu());
         assert!(!tt(4).is_yaochu());
+    }
+
+    #[test]
+    fn is_wind_only_for_four_winds() {
+        assert!(tt(27).is_wind());
+        assert!(tt(28).is_wind());
+        assert!(tt(29).is_wind());
+        assert!(tt(30).is_wind());
+        assert!(!tt(26).is_wind());
+        assert!(!tt(31).is_wind());
+        assert!(!tt(32).is_wind());
+        assert!(!tt(33).is_wind());
+        assert!(!tt(0).is_wind());
+    }
+
+    #[test]
+    fn wind_from_seat_index_maps_east_to_north() {
+        assert_eq!(TileType::wind_from_seat_index(0), Some(tt(27)));
+        assert_eq!(TileType::wind_from_seat_index(1), Some(tt(28)));
+        assert_eq!(TileType::wind_from_seat_index(2), Some(tt(29)));
+        assert_eq!(TileType::wind_from_seat_index(3), Some(tt(30)));
+    }
+
+    #[test]
+    fn wind_from_seat_index_rejects_out_of_range() {
+        assert_eq!(TileType::wind_from_seat_index(4), None);
+        assert_eq!(TileType::wind_from_seat_index(255), None);
+    }
+
+    #[test]
+    fn wind_from_seat_index_results_are_winds() {
+        for index in 0..4 {
+            assert!(TileType::wind_from_seat_index(index).unwrap().is_wind());
+        }
     }
 
     #[test]
