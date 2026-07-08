@@ -7,10 +7,8 @@ use crate::discard_selection::select_discard_action;
 pub struct ShantenAgent;
 
 impl ShantenAgent {
-    // Reach は「打牌が選べなかったときの代替」ではなく、明示的な policy choice として扱う。
-    // possible_actions に Reach が含まれるときだけ候補になり、含まれなければ選ばない。
-    // 現状は protocol-safe な構造整理を優先し、最小方針として「リーチ可能なら即リーチ」とする。
-    // TODO: 押し引き・打点・安全度を考慮した本格的なリーチ判断を実装する。
+    // 現状は最小方針として、リーチ可能なら即リーチする。
+    // TODO: 押し引き・打点・安全度を考慮したリーチ判断を実装する。
     fn select_reach_action(&self, legal_actions: &[LegalAction]) -> Option<LegalAction> {
         legal_actions
             .iter()
