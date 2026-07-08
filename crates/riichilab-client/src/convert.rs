@@ -28,6 +28,8 @@ pub fn legal_action_to_mjai_action(action: &LegalAction, actor: u8, request_id: 
             tsumogiri: None,
             request_id: Some(request_id),
         },
+        // RiichiLab では reach 宣言と dahai は別 request/response として扱われる。
+        // そのため Reach action は打牌牌姿を持たず、後続の request_action で dahai を返す。
         LegalAction::Reach => MjaiAction::Reach {
             actor,
             request_id: Some(request_id),
@@ -297,6 +299,26 @@ mod tests {
             let json = serde_json::to_value(&mjai).unwrap();
             assert_eq!(json["request_id"], 42, "action: {action:?}");
         }
+    }
+
+    #[test]
+    fn reach_response_excludes_discard_fields() {
+        let mjai = legal_action_to_mjai_action(&LegalAction::Reach, 0, 42);
+        let json = serde_json::to_value(&mjai).unwrap();
+        assert_eq!(json["type"], "reach");
+        assert_eq!(json["actor"], 0);
+        assert_eq!(json["request_id"], 42);
+        assert!(json.get("pai").is_none());
+        assert!(json.get("tsumogiri").is_none());
+    }
+
+    #[test]
+    fn reach_serializes_without_discard_information() {
+        let mjai = legal_action_to_mjai_action(&LegalAction::Reach, 0, 42);
+        assert_eq!(
+            serde_json::to_string(&mjai).unwrap(),
+            r#"{"type":"reach","actor":0,"request_id":42}"#
+        );
     }
 
     #[test]

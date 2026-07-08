@@ -6,6 +6,17 @@ use crate::discard_selection::select_discard_action;
 #[derive(Debug, Default)]
 pub struct ShantenAgent;
 
+impl ShantenAgent {
+    // 現状は最小方針として、リーチ可能なら即リーチする。
+    // TODO: 押し引き・打点・安全度を考慮したリーチ判断を実装する。
+    fn select_reach_action(&self, legal_actions: &[LegalAction]) -> Option<LegalAction> {
+        legal_actions
+            .iter()
+            .find(|a| matches!(a, LegalAction::Reach))
+            .cloned()
+    }
+}
+
 impl Agent for ShantenAgent {
     fn act(&mut self, ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
         if let Some(action) = legal_actions
@@ -22,15 +33,12 @@ impl Agent for ShantenAgent {
             return action.clone();
         }
 
-        if let Some(action) = select_discard_action(ctx, legal_actions) {
+        if let Some(action) = self.select_reach_action(legal_actions) {
             return action;
         }
 
-        if let Some(action) = legal_actions
-            .iter()
-            .find(|a| matches!(a, LegalAction::Reach))
-        {
-            return action.clone();
+        if let Some(action) = select_discard_action(ctx, legal_actions) {
+            return action;
         }
 
         if let Some(action) = legal_actions
@@ -100,19 +108,62 @@ mod tests {
     }
 
     #[test]
-    fn prefers_dahai_over_reach_when_evaluable() {
+    fn prefers_hora_over_reach() {
         let mut agent = ShantenAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
-        let actions = vec![LegalAction::Reach, dahai(0)];
-        assert_eq!(agent.act(&ctx, &actions), dahai(0));
+        let actions = vec![LegalAction::Reach, LegalAction::Hora];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
     }
 
     #[test]
-    fn falls_back_to_reach_when_discard_selection_returns_none() {
+    fn prefers_ryukyoku_over_reach() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::with_drawn_tile(tile(0));
+        let actions = vec![LegalAction::Reach, LegalAction::Ryukyoku];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
+    }
+
+    #[test]
+    fn picks_reach_when_available() {
         let mut agent = ShantenAgent;
         let ctx = GameContext::default();
         let actions = vec![LegalAction::Reach];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn prefers_reach_over_evaluated_dahai() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::with_drawn_tile(tile(0));
+        let actions = vec![LegalAction::Reach, dahai(0)];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn reach_is_policy_choice_not_fallback() {
+        let mut agent = ShantenAgent;
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let ctx = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .chain([LegalAction::Reach])
+            .collect();
+
+        assert!(select_discard_action(&ctx, &actions).is_some());
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn picks_dahai_when_reach_absent() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::with_drawn_tile(tile(0));
+        let actions = vec![dahai(0)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
     #[test]
