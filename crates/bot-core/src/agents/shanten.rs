@@ -183,6 +183,35 @@ mod tests {
     }
 
     #[test]
+    fn does_not_actively_claim_melds_or_kans() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions = vec![
+            LegalAction::Chi {
+                tile: tile(17),
+                consumed: vec![tile(12), tile(20)],
+            },
+            LegalAction::Pon {
+                tile: tile(108),
+                consumed: vec![tile(109), tile(110)],
+            },
+            LegalAction::Daiminkan {
+                tile: tile(104),
+                consumed: vec![tile(105), tile(106), tile(107)],
+            },
+            LegalAction::Ankan {
+                consumed: vec![tile(72), tile(73), tile(74), tile(75)],
+            },
+            LegalAction::Kakan {
+                tile: tile(124),
+                consumed: vec![tile(125), tile(126), tile(127)],
+            },
+            LegalAction::None,
+        ];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
+    }
+
+    #[test]
     fn falls_back_to_none_for_empty_actions() {
         let mut agent = ShantenAgent;
         let ctx = GameContext::default();

@@ -29,6 +29,23 @@ pub enum MjaiAction {
         request_id: Option<u64>,
     },
 
+    #[serde(rename = "ankan")]
+    Ankan {
+        actor: u8,
+        consumed: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+
+    #[serde(rename = "kakan")]
+    Kakan {
+        actor: u8,
+        pai: String,
+        consumed: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+
     #[serde(rename = "ryukyoku")]
     Ryukyoku {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +142,8 @@ pub fn mjai_action_type(action: &MjaiAction) -> &'static str {
         MjaiAction::Dahai { .. } => "dahai",
         MjaiAction::Reach { .. } => "reach",
         MjaiAction::Hora { .. } => "hora",
+        MjaiAction::Ankan { .. } => "ankan",
+        MjaiAction::Kakan { .. } => "kakan",
         MjaiAction::Ryukyoku { .. } => "ryukyoku",
         MjaiAction::None { .. } => "none",
     }
@@ -404,6 +423,44 @@ mod tests {
         };
         let json = serde_json::to_string(&action).unwrap();
         assert_eq!(json, r#"{"type":"hora","actor":0}"#);
+    }
+
+    #[test]
+    fn ankan_serializes_without_pai() {
+        let action = MjaiAction::Ankan {
+            actor: 0,
+            consumed: vec![
+                "1s".to_string(),
+                "1s".to_string(),
+                "1s".to_string(),
+                "1s".to_string(),
+            ],
+            request_id: Some(60),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ankan","actor":0,"consumed":["1s","1s","1s","1s"],"request_id":60}"#
+        );
+        let parsed: MjaiAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn kakan_serializes_with_pai() {
+        let action = MjaiAction::Kakan {
+            actor: 1,
+            pai: "P".to_string(),
+            consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+            request_id: Some(62),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"kakan","actor":1,"pai":"P","consumed":["P","P","P"],"request_id":62}"#
+        );
+        let parsed: MjaiAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action);
     }
 
     #[test]
