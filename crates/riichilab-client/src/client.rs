@@ -26,6 +26,26 @@ pub enum ClientError {
     Serialize(#[from] serde_json::Error),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientExitCondition {
+    EndGame,
+    ValidationResult,
+}
+
+pub(crate) fn should_finish_after_event(
+    exit_condition: ClientExitCondition,
+    event: &MjaiEvent,
+) -> bool {
+    matches!(
+        (exit_condition, event),
+        (ClientExitCondition::EndGame, MjaiEvent::EndGame { .. })
+            | (
+                ClientExitCondition::ValidationResult,
+                MjaiEvent::ValidationResult { .. }
+            )
+    )
+}
+
 pub fn build_response_for_request<A: Agent>(
     actor: u8,
     request_id: u64,
@@ -102,10 +122,11 @@ pub(crate) fn context_for_request(
         .unwrap_or_else(|| game_context_from_validation_state(state))
 }
 
-pub async fn run_validation_client<A, P>(
+pub async fn run_riichilab_client<A, P>(
     config: ClientConfig,
     agent: &mut A,
     policy: P,
+    exit_condition: ClientExitCondition,
 ) -> Result<(), ClientError>
 where
     A: Agent,
@@ -140,6 +161,7 @@ where
                         continue;
                     }
                 };
+                let finish = should_finish_after_event(exit_condition, &event);
                 match event {
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
@@ -316,8 +338,14 @@ where
                         } else {
                             error!(reason = ?reason, "validation_result: failed");
                         }
-                        break;
                     }
+                }
+                if finish {
+                    info!(exit_condition = ?exit_condition, "exit condition met; finishing client");
+                    if let Err(e) = ws_stream.send(Message::Close(None)).await {
+                        debug!(error = %e, "failed to send close frame");
+                    }
+                    break;
                 }
             }
             Message::Close(frame) => {
@@ -551,6 +579,65 @@ mod tests {
                 request_id: Some(92),
             })
         );
+    }
+
+    #[test]
+    fn ranked_finishes_after_end_game() {
+        let event = MjaiEvent::EndGame { scores: vec![] };
+        assert!(should_finish_after_event(
+            ClientExitCondition::EndGame,
+            &event
+        ));
+    }
+
+    #[test]
+    fn validate_does_not_finish_after_end_game() {
+        let event = MjaiEvent::EndGame {
+            scores: vec![35000, 25000, 20000, 20000],
+        };
+        assert!(!should_finish_after_event(
+            ClientExitCondition::ValidationResult,
+            &event
+        ));
+    }
+
+    #[test]
+    fn validate_finishes_after_validation_result() {
+        let event = MjaiEvent::ValidationResult {
+            passed: true,
+            reason: None,
+        };
+        assert!(should_finish_after_event(
+            ClientExitCondition::ValidationResult,
+            &event
+        ));
+    }
+
+    #[test]
+    fn ranked_does_not_finish_after_validation_result() {
+        let event = MjaiEvent::ValidationResult {
+            passed: false,
+            reason: Some("disconnected".to_string()),
+        };
+        assert!(!should_finish_after_event(
+            ClientExitCondition::EndGame,
+            &event
+        ));
+    }
+
+    #[test]
+    fn other_events_never_finish() {
+        let event = MjaiEvent::EndKyoku {
+            raw: serde_json::json!({"type": "end_kyoku"}),
+        };
+        assert!(!should_finish_after_event(
+            ClientExitCondition::EndGame,
+            &event
+        ));
+        assert!(!should_finish_after_event(
+            ClientExitCondition::ValidationResult,
+            &event
+        ));
     }
 
     #[test]

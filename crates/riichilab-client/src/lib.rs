@@ -10,8 +10,8 @@ pub mod validation_policy;
 
 pub use cli::{CliArgs, CliError, ConnectionMode, USAGE};
 pub use client::{
-    ClientError, build_response_for_request, build_response_for_request_with_context,
-    run_validation_client,
+    ClientError, ClientExitCondition, build_response_for_request,
+    build_response_for_request_with_context, run_riichilab_client,
 };
 pub use config::{ClientConfig, ConfigError};
 pub use convert::{
