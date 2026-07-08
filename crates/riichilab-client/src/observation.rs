@@ -53,6 +53,10 @@ impl ObservationPayload {
 }
 
 fn seat_wind_from(player_id: u8, oya: u8) -> Option<TileType> {
+    if player_id >= 4 || oya >= 4 {
+        return None;
+    }
+
     let index = (player_id + 4 - oya) % 4;
     TileType::wind_from_seat_index(index)
 }
@@ -373,6 +377,14 @@ mod tests {
         assert_eq!(seat_wind_from(3, 0), Some(wind(30)));
         assert_eq!(seat_wind_from(0, 3), Some(wind(28)));
         assert_eq!(seat_wind_from(1, 3), Some(wind(29)));
+    }
+
+    #[test]
+    fn seat_wind_from_rejects_out_of_range_inputs() {
+        assert_eq!(seat_wind_from(4, 0), None);
+        assert_eq!(seat_wind_from(0, 4), None);
+        assert_eq!(seat_wind_from(255, 0), None);
+        assert_eq!(seat_wind_from(0, 255), None);
     }
 
     #[test]
