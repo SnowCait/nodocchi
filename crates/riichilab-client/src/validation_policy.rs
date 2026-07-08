@@ -1,6 +1,9 @@
-use bot_core::{Agent, GameContext, LegalAction, NormalAgent, ShantenAgent, TsumogiriAgent};
+use bot_core::{Agent, GameContext, NormalAgent, ShantenAgent, TsumogiriAgent};
 
-use crate::convert::{possible_actions_to_legal_actions, temporary_tile_id_from_mjai_pai};
+use crate::convert::{
+    checked_legal_action_to_mjai_action, possible_actions_to_legal_actions,
+    temporary_tile_id_from_mjai_pai,
+};
 use crate::protocol::{MjaiAction, MjaiPossibleAction};
 use crate::state::ValidationState;
 
@@ -85,7 +88,7 @@ pub(crate) fn build_tsumogiri_response_with_context(
     let mut agent = TsumogiriAgent;
     let chosen = agent.act(context, &legal_actions);
 
-    checked_legal_action_to_mjai_response(
+    checked_legal_action_to_mjai_action(
         &chosen,
         state.actor_or_default(),
         request_id,
@@ -114,7 +117,7 @@ pub(crate) fn build_normal_response_with_context(
     let mut agent = NormalAgent;
     let chosen = agent.act(context, &legal_actions);
 
-    checked_legal_action_to_mjai_response(
+    checked_legal_action_to_mjai_action(
         &chosen,
         state.actor_or_default(),
         request_id,
@@ -143,7 +146,7 @@ pub(crate) fn build_shanten_response_with_context(
     let mut agent = ShantenAgent;
     let chosen = agent.act(context, &legal_actions);
 
-    checked_legal_action_to_mjai_response(
+    checked_legal_action_to_mjai_action(
         &chosen,
         state.actor_or_default(),
         request_id,
@@ -158,56 +161,6 @@ pub(crate) fn game_context_from_validation_state(state: &ValidationState) -> Gam
         .and_then(temporary_tile_id_from_mjai_pai)
         .map(GameContext::with_drawn_tile)
         .unwrap_or_default()
-}
-
-fn checked_legal_action_to_mjai_response(
-    chosen: &LegalAction,
-    actor: u8,
-    request_id: u64,
-    possible_actions: &[MjaiPossibleAction],
-    context: &GameContext,
-) -> Option<MjaiAction> {
-    match chosen {
-        LegalAction::Hora => possible_actions
-            .iter()
-            .any(|a| matches!(a, MjaiPossibleAction::Hora))
-            .then_some(MjaiAction::Hora {
-                actor,
-                target: None,
-                pai: None,
-                request_id: Some(request_id),
-            }),
-        LegalAction::Ryukyoku => possible_actions
-            .iter()
-            .any(|a| matches!(a, MjaiPossibleAction::Ryukyoku))
-            .then_some(MjaiAction::Ryukyoku {
-                request_id: Some(request_id),
-            }),
-        LegalAction::Reach => possible_actions
-            .iter()
-            .any(|a| matches!(a, MjaiPossibleAction::Reach))
-            .then_some(MjaiAction::Reach {
-                actor,
-                request_id: Some(request_id),
-            }),
-        LegalAction::None => possible_actions
-            .iter()
-            .any(|a| matches!(a, MjaiPossibleAction::None))
-            .then_some(MjaiAction::None {
-                request_id: Some(request_id),
-            }),
-        LegalAction::Dahai { tile } => possible_actions.iter().find_map(|a| {
-            let MjaiPossibleAction::Dahai { pai, .. } = a else {
-                return None;
-            };
-            (temporary_tile_id_from_mjai_pai(pai) == Some(*tile)).then(|| MjaiAction::Dahai {
-                actor,
-                pai: pai.clone(),
-                tsumogiri: (context.drawn_tile() == Some(*tile)).then_some(true),
-                request_id: Some(request_id),
-            })
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -359,232 +312,6 @@ mod tests {
                 game_context_from_validation_state(&state).drawn_tile(),
                 None
             );
-        }
-    }
-
-    mod checked_conversion {
-        use super::*;
-        use bot_logic::TileId;
-
-        fn tile(value: u8) -> TileId {
-            TileId::new(value).unwrap()
-        }
-
-        #[test]
-        fn hora_is_returned_only_when_possible() {
-            let context = GameContext::default();
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::Hora,
-                    1,
-                    50,
-                    &[MjaiPossibleAction::Hora],
-                    &context,
-                ),
-                Some(MjaiAction::Hora {
-                    actor: 1,
-                    target: None,
-                    pai: None,
-                    request_id: Some(50),
-                })
-            );
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::Hora,
-                    1,
-                    50,
-                    &[MjaiPossibleAction::None],
-                    &context,
-                ),
-                None
-            );
-        }
-
-        #[test]
-        fn ryukyoku_is_returned_only_when_possible() {
-            let context = GameContext::default();
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::Ryukyoku,
-                    0,
-                    51,
-                    &[MjaiPossibleAction::Ryukyoku],
-                    &context,
-                ),
-                Some(MjaiAction::Ryukyoku {
-                    request_id: Some(51),
-                })
-            );
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::Ryukyoku,
-                    0,
-                    51,
-                    &[MjaiPossibleAction::None],
-                    &context,
-                ),
-                None
-            );
-        }
-
-        #[test]
-        fn reach_is_returned_only_when_possible() {
-            let context = GameContext::default();
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::Reach,
-                    2,
-                    52,
-                    &[MjaiPossibleAction::Reach],
-                    &context,
-                ),
-                Some(MjaiAction::Reach {
-                    actor: 2,
-                    request_id: Some(52),
-                })
-            );
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::Reach,
-                    2,
-                    52,
-                    &[MjaiPossibleAction::None],
-                    &context,
-                ),
-                None
-            );
-        }
-
-        #[test]
-        fn none_is_returned_only_when_possible() {
-            let context = GameContext::default();
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::None,
-                    0,
-                    53,
-                    &[MjaiPossibleAction::None],
-                    &context,
-                ),
-                Some(MjaiAction::None {
-                    request_id: Some(53),
-                })
-            );
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &LegalAction::None,
-                    0,
-                    53,
-                    &[possible_pon()],
-                    &context,
-                ),
-                None
-            );
-        }
-
-        #[test]
-        fn dahai_is_returned_only_when_matching_dahai_is_possible() {
-            let context = GameContext::default();
-            let chosen = LegalAction::Dahai { tile: tile(0) };
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &chosen,
-                    0,
-                    54,
-                    &[possible_dahai("1m")],
-                    &context,
-                ),
-                Some(MjaiAction::Dahai {
-                    actor: 0,
-                    pai: "1m".to_string(),
-                    tsumogiri: None,
-                    request_id: Some(54),
-                })
-            );
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &chosen,
-                    0,
-                    54,
-                    &[possible_dahai("9s")],
-                    &context,
-                ),
-                None
-            );
-        }
-
-        #[test]
-        fn dahai_matching_drawn_tile_is_tsumogiri() {
-            let context = GameContext::with_drawn_tile(tile(56));
-            let chosen = LegalAction::Dahai { tile: tile(56) };
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &chosen,
-                    2,
-                    55,
-                    &[possible_dahai("6p")],
-                    &context,
-                ),
-                Some(MjaiAction::Dahai {
-                    actor: 2,
-                    pai: "6p".to_string(),
-                    tsumogiri: Some(true),
-                    request_id: Some(55),
-                })
-            );
-        }
-
-        #[test]
-        fn dahai_not_matching_drawn_tile_is_not_tsumogiri() {
-            let context = GameContext::with_drawn_tile(tile(56));
-            let chosen = LegalAction::Dahai { tile: tile(0) };
-            assert_eq!(
-                checked_legal_action_to_mjai_response(
-                    &chosen,
-                    2,
-                    56,
-                    &[possible_dahai("1m")],
-                    &context,
-                ),
-                Some(MjaiAction::Dahai {
-                    actor: 2,
-                    pai: "1m".to_string(),
-                    tsumogiri: None,
-                    request_id: Some(56),
-                })
-            );
-        }
-
-        #[test]
-        fn echoes_request_id_for_all_actions() {
-            let context = GameContext::default();
-            let possible_actions = vec![
-                possible_dahai("1m"),
-                MjaiPossibleAction::Reach,
-                MjaiPossibleAction::Hora,
-                MjaiPossibleAction::Ryukyoku,
-                MjaiPossibleAction::None,
-            ];
-            for chosen in [
-                LegalAction::Dahai { tile: tile(0) },
-                LegalAction::Reach,
-                LegalAction::Hora,
-                LegalAction::Ryukyoku,
-                LegalAction::None,
-            ] {
-                for request_id in [0u64, 7, u64::MAX] {
-                    let response = checked_legal_action_to_mjai_response(
-                        &chosen,
-                        0,
-                        request_id,
-                        &possible_actions,
-                        &context,
-                    )
-                    .unwrap();
-                    let json = serde_json::to_value(&response).unwrap();
-                    assert_eq!(json["request_id"], request_id, "action: {chosen:?}");
-                }
-            }
         }
     }
 

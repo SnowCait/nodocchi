@@ -7,10 +7,14 @@ pub mod state;
 pub mod tls;
 pub mod validation_policy;
 
-pub use client::{ClientError, build_response_for_request, run_validation_client};
+pub use client::{
+    ClientError, build_response_for_request, build_response_for_request_with_context,
+    run_validation_client,
+};
 pub use config::{ClientConfig, ConfigError};
 pub use convert::{
-    legal_action_to_mjai_action, possible_action_to_legal_action, possible_actions_to_legal_actions,
+    checked_legal_action_to_mjai_action, legal_action_to_mjai_action,
+    possible_action_to_legal_action, possible_actions_to_legal_actions,
 };
 pub use observation::{DecodedObservation, ObservationError, ObservationPayload};
 pub use protocol::{
