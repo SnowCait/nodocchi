@@ -101,6 +101,35 @@ pub enum MjaiPossibleAction {
 
 pub type TimeControl = serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequestTimeBudget {
+    pub grace_ms: Option<u64>,
+    pub bank_ms: Option<u64>,
+    pub deadline_ms: Option<u64>,
+}
+
+pub fn request_time_budget(time: Option<&TimeControl>) -> RequestTimeBudget {
+    let Some(time) = time else {
+        return RequestTimeBudget::default();
+    };
+    let field = |key: &str| time.get(key).and_then(serde_json::Value::as_u64);
+    RequestTimeBudget {
+        grace_ms: field("grace_ms"),
+        bank_ms: field("bank_ms"),
+        deadline_ms: field("deadline_ms"),
+    }
+}
+
+pub fn mjai_action_type(action: &MjaiAction) -> &'static str {
+    match action {
+        MjaiAction::Dahai { .. } => "dahai",
+        MjaiAction::Reach { .. } => "reach",
+        MjaiAction::Hora { .. } => "hora",
+        MjaiAction::Ryukyoku { .. } => "ryukyoku",
+        MjaiAction::None { .. } => "none",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum MjaiEvent {
@@ -602,6 +631,98 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_time_budget_extracts_all_fields() {
+        let time = serde_json::json!({
+            "grace_ms": 3000,
+            "bank_ms": 10000,
+            "deadline_ms": 5000
+        });
+        let budget = request_time_budget(Some(&time));
+        assert_eq!(
+            budget,
+            RequestTimeBudget {
+                grace_ms: Some(3000),
+                bank_ms: Some(10000),
+                deadline_ms: Some(5000),
+            }
+        );
+    }
+
+    #[test]
+    fn request_time_budget_returns_none_for_missing_fields() {
+        let time = serde_json::json!({ "grace_ms": 3000 });
+        let budget = request_time_budget(Some(&time));
+        assert_eq!(
+            budget,
+            RequestTimeBudget {
+                grace_ms: Some(3000),
+                bank_ms: None,
+                deadline_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn request_time_budget_handles_none_time() {
+        assert_eq!(request_time_budget(None), RequestTimeBudget::default());
+    }
+
+    #[test]
+    fn request_time_budget_ignores_non_integer_fields() {
+        let time = serde_json::json!({
+            "grace_ms": "fast",
+            "bank_ms": -1,
+            "deadline_ms": 5000
+        });
+        let budget = request_time_budget(Some(&time));
+        assert_eq!(
+            budget,
+            RequestTimeBudget {
+                grace_ms: None,
+                bank_ms: None,
+                deadline_ms: Some(5000),
+            }
+        );
+    }
+
+    #[test]
+    fn mjai_action_type_maps_each_variant() {
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Dahai {
+                actor: 0,
+                pai: "1m".to_string(),
+                tsumogiri: None,
+                request_id: None,
+            }),
+            "dahai"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Reach {
+                actor: 0,
+                request_id: None,
+            }),
+            "reach"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Hora {
+                actor: 0,
+                target: None,
+                pai: None,
+                request_id: None,
+            }),
+            "hora"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Ryukyoku { request_id: None }),
+            "ryukyoku"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::None { request_id: None }),
+            "none"
+        );
     }
 
     #[test]

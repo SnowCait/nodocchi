@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use bot_core::{Agent, GameContext};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
@@ -11,7 +13,8 @@ use crate::config::ClientConfig;
 use crate::convert::{checked_legal_action_to_mjai_action, possible_actions_to_legal_actions};
 use crate::observation::{ObservationPayload, game_context_from_decoded_observation};
 use crate::protocol::{
-    ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, parse_server_event,
+    ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, mjai_action_type,
+    parse_server_event, request_time_budget,
 };
 use crate::state::ValidationState;
 use crate::validation_policy::game_context_from_validation_state;
@@ -228,15 +231,28 @@ where
                     }
                     MjaiEvent::RequestAction {
                         request_id,
+                        time,
                         possible_actions,
                         observation,
-                        ..
                     } => {
+                        let budget = request_time_budget(time.as_ref());
+                        debug!(
+                            request_id,
+                            possible_actions = possible_actions.len(),
+                            grace_ms = ?budget.grace_ms,
+                            bank_ms = ?budget.bank_ms,
+                            deadline_ms = ?budget.deadline_ms,
+                            "request_action received"
+                        );
                         if state.seat_id().is_none() {
                             warn!("actor not set before request_action; falling back to 0");
                         }
+                        let request_start = Instant::now();
                         let observation = ObservationPayload::new(observation);
                         let context = context_for_request(&observation, &state, request_id);
+                        let context_ms = request_start.elapsed().as_millis() as u64;
+
+                        let policy_start = Instant::now();
                         let response = policy(&state, &context, request_id, &possible_actions)
                             .inspect(|response| {
                                 debug!(
@@ -257,14 +273,75 @@ where
                                     request_id: Some(request_id),
                                 })
                             });
+                        let policy_ms = policy_start.elapsed().as_millis() as u64;
+                        let response_type = mjai_action_type(&response);
+
+                        let serialize_start = Instant::now();
                         let json = serde_json::to_string(&response)?;
+                        let serialize_ms = serialize_start.elapsed().as_millis() as u64;
+
                         debug!(
                             request_id,
                             possible_actions = possible_actions.len(),
+                            response_type,
                             response = %json,
                             "sending response"
                         );
+
+                        let send_start = Instant::now();
                         ws_stream.send(Message::Text(json.into())).await?;
+                        let send_ms = send_start.elapsed().as_millis() as u64;
+
+                        let total_ms = request_start.elapsed().as_millis() as u64;
+
+                        let over_deadline = budget
+                            .deadline_ms
+                            .is_some_and(|deadline| total_ms >= deadline);
+                        let over_grace = budget.grace_ms.is_some_and(|grace| total_ms >= grace);
+                        let over_fallback = budget.grace_ms.is_none()
+                            && budget.deadline_ms.is_none()
+                            && total_ms >= 1000;
+
+                        if over_deadline {
+                            error!(
+                                request_id,
+                                response_type,
+                                context_ms,
+                                policy_ms,
+                                serialize_ms,
+                                send_ms,
+                                total_ms,
+                                grace_ms = ?budget.grace_ms,
+                                deadline_ms = ?budget.deadline_ms,
+                                "request_action response exceeded deadline"
+                            );
+                        } else if over_grace || over_fallback {
+                            warn!(
+                                request_id,
+                                response_type,
+                                context_ms,
+                                policy_ms,
+                                serialize_ms,
+                                send_ms,
+                                total_ms,
+                                grace_ms = ?budget.grace_ms,
+                                deadline_ms = ?budget.deadline_ms,
+                                "slow request_action response"
+                            );
+                        } else {
+                            debug!(
+                                request_id,
+                                response_type,
+                                context_ms,
+                                policy_ms,
+                                serialize_ms,
+                                send_ms,
+                                total_ms,
+                                grace_ms = ?budget.grace_ms,
+                                deadline_ms = ?budget.deadline_ms,
+                                "request_action response timing"
+                            );
+                        }
                     }
                     MjaiEvent::ActionAck {
                         request_id,
@@ -296,6 +373,7 @@ where
                                 bank_consumed_ms = ?bank_consumed_ms,
                                 bank_ms = ?bank_ms,
                                 action = ?action,
+                                message = ?message,
                                 "action_ack defaulted; server substituted default action after timeout"
                             );
                         }
@@ -305,6 +383,7 @@ where
                                 status = ?status,
                                 elapsed_ms = ?elapsed_ms,
                                 bank_ms = ?bank_ms,
+                                message = ?message,
                                 "action_ack stale; reply was late or for an old request_id"
                             );
                         }
