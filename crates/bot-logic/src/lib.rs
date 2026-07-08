@@ -1,8 +1,10 @@
+pub mod acceptance;
 pub mod hand;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
 
+pub use acceptance::{Acceptance, AcceptanceTile, calculate_acceptance};
 pub use hand::{Hand, HandError};
 pub use shanten::{
     Shanten, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
