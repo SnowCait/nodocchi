@@ -1,5 +1,5 @@
 use bot_core::GameContext;
-use bot_logic::TileId;
+use bot_logic::{TileId, TileType};
 use riichienv_core::observation::Observation;
 
 use crate::convert::temporary_tile_id_from_observation_tile;
@@ -46,8 +46,15 @@ impl ObservationPayload {
                 .and_then(temporary_tile_id_from_observation_tile),
             hand_tiles,
             dora_indicators,
+            round_wind: TileType::wind_from_seat_index(observation.round_wind),
+            seat_wind: seat_wind_from(observation.player_id, observation.oya),
         })
     }
+}
+
+fn seat_wind_from(player_id: u8, oya: u8) -> Option<TileType> {
+    let index = (player_id + 4 - oya) % 4;
+    TileType::wind_from_seat_index(index)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,13 +69,17 @@ pub struct DecodedObservation {
     pub drawn_tile: Option<TileId>,
     pub hand_tiles: Vec<TileId>,
     pub dora_indicators: Vec<TileId>,
+    pub round_wind: Option<TileType>,
+    pub seat_wind: Option<TileType>,
 }
 
 pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
-    GameContext::from_parts_with_dora(
+    GameContext::from_parts_with_context(
         decoded.drawn_tile,
         decoded.hand_tiles.clone(),
         decoded.dora_indicators.clone(),
+        decoded.round_wind,
+        decoded.seat_wind,
     )
 }
 
@@ -84,6 +95,18 @@ pub(crate) fn fixture_base64_with_dora(
     hand: Vec<u8>,
     dora_indicators: Vec<u8>,
 ) -> String {
+    fixture_base64_with_winds(player_id, drawn_tile, hand, dora_indicators, 0, 0)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_base64_with_winds(
+    player_id: u8,
+    drawn_tile: Option<u8>,
+    hand: Vec<u8>,
+    dora_indicators: Vec<u8>,
+    round_wind: u8,
+    oya: u8,
+) -> String {
     let mut hands: [Vec<u8>; 4] = Default::default();
     hands[usize::from(player_id)] = hand;
     let observation = Observation::new(
@@ -98,8 +121,8 @@ pub(crate) fn fixture_base64_with_dora(
         vec![],
         0,
         0,
-        0,
-        0,
+        round_wind,
+        oya,
         0,
         vec![],
         false,
@@ -286,6 +309,80 @@ mod tests {
         ));
     }
 
+    fn wind(value: u8) -> TileType {
+        TileType::new(value).unwrap()
+    }
+
+    #[test]
+    fn decode_4p_returns_round_wind_from_observation() {
+        for (round_wind, expected) in [(0, 27), (1, 28), (2, 29), (3, 30)] {
+            let payload = ObservationPayload::new(fixture_base64_with_winds(
+                0,
+                None,
+                vec![],
+                vec![],
+                round_wind,
+                0,
+            ));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(
+                decoded.round_wind,
+                Some(wind(expected)),
+                "round_wind: {round_wind}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_4p_seat_wind_is_east_when_player_is_oya() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_winds(2, None, vec![], vec![], 0, 2));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.seat_wind, Some(wind(27)));
+    }
+
+    #[test]
+    fn decode_4p_seat_wind_is_south_for_oya_shimocha() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_winds(2, None, vec![], vec![], 0, 1));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.seat_wind, Some(wind(28)));
+    }
+
+    #[test]
+    fn decode_4p_seat_wind_is_west_for_oya_toimen() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_winds(3, None, vec![], vec![], 0, 1));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.seat_wind, Some(wind(29)));
+    }
+
+    #[test]
+    fn decode_4p_seat_wind_is_north_for_oya_kamicha() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_winds(0, None, vec![], vec![], 0, 1));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.seat_wind, Some(wind(30)));
+    }
+
+    #[test]
+    fn seat_wind_from_covers_all_seats() {
+        assert_eq!(seat_wind_from(0, 0), Some(wind(27)));
+        assert_eq!(seat_wind_from(1, 0), Some(wind(28)));
+        assert_eq!(seat_wind_from(2, 0), Some(wind(29)));
+        assert_eq!(seat_wind_from(3, 0), Some(wind(30)));
+        assert_eq!(seat_wind_from(0, 3), Some(wind(28)));
+        assert_eq!(seat_wind_from(1, 3), Some(wind(29)));
+    }
+
+    #[test]
+    fn decode_4p_default_fixture_has_east_winds() {
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.round_wind, Some(wind(27)));
+        assert_eq!(decoded.seat_wind, Some(wind(27)));
+    }
+
     mod game_context_helper {
         use super::*;
 
@@ -297,6 +394,8 @@ mod tests {
                 drawn_tile: Some(tile),
                 hand_tiles: vec![],
                 dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -311,6 +410,8 @@ mod tests {
                 drawn_tile: None,
                 hand_tiles: vec![],
                 dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -327,6 +428,8 @@ mod tests {
                 drawn_tile: Some(tile),
                 hand_tiles: hand_tiles.clone(),
                 dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -342,6 +445,8 @@ mod tests {
                 drawn_tile: None,
                 hand_tiles: hand_tiles.clone(),
                 dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.drawn_tile(), None);
@@ -356,6 +461,8 @@ mod tests {
                 drawn_tile: None,
                 hand_tiles: vec![],
                 dora_indicators: dora_indicators.clone(),
+                round_wind: None,
+                seat_wind: None,
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.dora_indicators(), dora_indicators.as_slice());
@@ -368,9 +475,41 @@ mod tests {
                 drawn_tile: None,
                 hand_tiles: vec![],
                 dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert!(context.dora_indicators().is_empty());
+        }
+
+        #[test]
+        fn winds_are_passed_to_context() {
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: None,
+                hand_tiles: vec![],
+                dora_indicators: vec![],
+                round_wind: Some(wind(27)),
+                seat_wind: Some(wind(28)),
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert_eq!(context.round_wind(), Some(wind(27)));
+            assert_eq!(context.seat_wind(), Some(wind(28)));
+        }
+
+        #[test]
+        fn absent_winds_become_none_in_context() {
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: None,
+                hand_tiles: vec![],
+                dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert_eq!(context.round_wind(), None);
+            assert_eq!(context.seat_wind(), None);
         }
     }
 }

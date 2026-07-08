@@ -1,10 +1,12 @@
-use bot_logic::TileId;
+use bot_logic::{TileId, TileType};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GameContext {
     drawn_tile: Option<TileId>,
     hand_tiles: Vec<TileId>,
     dora_indicators: Vec<TileId>,
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
 }
 
 impl GameContext {
@@ -15,16 +17,14 @@ impl GameContext {
     pub fn with_drawn_tile(drawn_tile: TileId) -> Self {
         Self {
             drawn_tile: Some(drawn_tile),
-            hand_tiles: Vec::new(),
-            dora_indicators: Vec::new(),
+            ..Self::default()
         }
     }
 
     pub fn with_hand_tiles(hand_tiles: Vec<TileId>) -> Self {
         Self {
-            drawn_tile: None,
             hand_tiles,
-            dora_indicators: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -32,7 +32,7 @@ impl GameContext {
         Self {
             drawn_tile,
             hand_tiles,
-            dora_indicators: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -45,6 +45,23 @@ impl GameContext {
             drawn_tile,
             hand_tiles,
             dora_indicators,
+            ..Self::default()
+        }
+    }
+
+    pub fn from_parts_with_context(
+        drawn_tile: Option<TileId>,
+        hand_tiles: Vec<TileId>,
+        dora_indicators: Vec<TileId>,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+    ) -> Self {
+        Self {
+            drawn_tile,
+            hand_tiles,
+            dora_indicators,
+            round_wind,
+            seat_wind,
         }
     }
 
@@ -59,6 +76,14 @@ impl GameContext {
     pub fn dora_indicators(&self) -> &[TileId] {
         &self.dora_indicators
     }
+
+    pub fn round_wind(&self) -> Option<TileType> {
+        self.round_wind
+    }
+
+    pub fn seat_wind(&self) -> Option<TileType> {
+        self.seat_wind
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +92,10 @@ mod tests {
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
+    }
+
+    fn wind(value: u8) -> TileType {
+        TileType::new(value).unwrap()
     }
 
     #[test]
@@ -175,5 +204,73 @@ mod tests {
         let context = GameContext::from_parts_with_dora(None, vec![], vec![tile(4)]);
         let slice: &[TileId] = context.dora_indicators();
         assert_eq!(slice, &[tile(4)]);
+    }
+
+    #[test]
+    fn default_has_no_winds() {
+        let context = GameContext::default();
+        assert_eq!(context.round_wind(), None);
+        assert_eq!(context.seat_wind(), None);
+    }
+
+    #[test]
+    fn existing_constructors_have_no_winds() {
+        for context in [
+            GameContext::new(),
+            GameContext::with_drawn_tile(tile(16)),
+            GameContext::with_hand_tiles(vec![tile(0)]),
+            GameContext::from_parts(Some(tile(16)), vec![tile(0)]),
+            GameContext::from_parts_with_dora(Some(tile(16)), vec![tile(0)], vec![tile(4)]),
+        ] {
+            assert_eq!(context.round_wind(), None);
+            assert_eq!(context.seat_wind(), None);
+        }
+    }
+
+    #[test]
+    fn from_parts_with_context_holds_winds() {
+        let context = GameContext::from_parts_with_context(
+            Some(tile(16)),
+            vec![tile(0)],
+            vec![tile(4)],
+            Some(wind(27)),
+            Some(wind(28)),
+        );
+        assert_eq!(context.round_wind(), Some(wind(27)));
+        assert_eq!(context.seat_wind(), Some(wind(28)));
+    }
+
+    #[test]
+    fn from_parts_with_context_keeps_other_parts() {
+        let hand_tiles = vec![tile(0), tile(56)];
+        let dora_indicators = vec![tile(4)];
+        let context = GameContext::from_parts_with_context(
+            Some(tile(16)),
+            hand_tiles.clone(),
+            dora_indicators.clone(),
+            None,
+            None,
+        );
+        assert_eq!(context.drawn_tile(), Some(tile(16)));
+        assert_eq!(context.hand_tiles(), hand_tiles.as_slice());
+        assert_eq!(context.dora_indicators(), dora_indicators.as_slice());
+        assert_eq!(context.round_wind(), None);
+        assert_eq!(context.seat_wind(), None);
+    }
+
+    #[test]
+    fn from_parts_with_context_none_winds_equals_from_parts_with_dora() {
+        let hand_tiles = vec![tile(0), tile(56)];
+        let dora_indicators = vec![tile(4)];
+        assert_eq!(
+            GameContext::from_parts_with_context(
+                Some(tile(16)),
+                hand_tiles.clone(),
+                dora_indicators.clone(),
+                None,
+                None,
+            ),
+            GameContext::from_parts_with_dora(Some(tile(16)), hand_tiles, dora_indicators)
+        );
     }
 }
