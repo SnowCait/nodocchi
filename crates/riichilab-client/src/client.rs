@@ -8,7 +8,7 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tracing::{debug, error, info, warn};
 
 use crate::config::ClientConfig;
-use crate::convert::{legal_action_to_mjai_action, possible_actions_to_legal_actions};
+use crate::convert::{checked_legal_action_to_mjai_action, possible_actions_to_legal_actions};
 use crate::observation::{ObservationPayload, game_context_from_decoded_observation};
 use crate::protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, parse_server_event,
@@ -38,18 +38,37 @@ pub fn build_response_for_request<A: Agent>(
         observation_len = observation.as_base64().len(),
         "building response"
     );
+    let context = observation
+        .decode_4p()
+        .ok()
+        .as_ref()
+        .map(game_context_from_decoded_observation)
+        .unwrap_or_default();
+    build_response_for_request_with_context(actor, request_id, possible_actions, &context, agent)
+        .unwrap_or(MjaiAction::None {
+            request_id: Some(request_id),
+        })
+}
+
+pub fn build_response_for_request_with_context<A: Agent>(
+    actor: u8,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+    context: &GameContext,
+    agent: &mut A,
+) -> Option<MjaiAction> {
     let legal_actions = possible_actions_to_legal_actions(possible_actions);
     if legal_actions.is_empty() {
         warn!(request_id, "no convertible legal actions; falling back");
     }
-    let chosen = agent.act(&GameContext::default(), &legal_actions);
+    let chosen = agent.act(context, &legal_actions);
     info!(
         request_id,
         legal_actions = legal_actions.len(),
         chosen = ?chosen,
         "request_action"
     );
-    legal_action_to_mjai_action(&chosen, actor, request_id)
+    checked_legal_action_to_mjai_action(&chosen, actor, request_id, possible_actions, context)
 }
 
 pub(crate) fn context_for_request(
@@ -205,13 +224,16 @@ where
                                 );
                             })
                             .unwrap_or_else(|| {
-                                build_response_for_request(
+                                build_response_for_request_with_context(
                                     state.actor_or_default(),
                                     request_id,
                                     &possible_actions,
-                                    &observation,
+                                    &context,
                                     agent,
                                 )
+                                .unwrap_or(MjaiAction::None {
+                                    request_id: Some(request_id),
+                                })
                             });
                         let json = serde_json::to_string(&response)?;
                         debug!(response = %json, "sending response");
@@ -260,8 +282,22 @@ where
 mod tests {
     use super::*;
     use crate::observation::fixture_base64;
-    use bot_core::NormalAgent;
+    use bot_core::{NormalAgent, ShantenAgent, TsumogiriAgent};
     use bot_logic::TileId;
+
+    fn possible_dahai(pai: &str) -> MjaiPossibleAction {
+        MjaiPossibleAction::Dahai {
+            pai: pai.to_string(),
+            tsumogiri: None,
+        }
+    }
+
+    fn possible_pon() -> MjaiPossibleAction {
+        MjaiPossibleAction::Pon {
+            pai: "E".to_string(),
+            consumed: vec!["E".to_string(), "E".to_string()],
+        }
+    }
 
     #[test]
     fn context_for_request_prefers_decoded_observation() {
@@ -413,5 +449,65 @@ mod tests {
                 request_id: Some(9)
             }
         );
+    }
+
+    #[test]
+    fn uses_observation_context_for_tsumogiri() {
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![]));
+        let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+        let mut agent = TsumogiriAgent;
+        let response =
+            build_response_for_request(0, 90, &possible_actions, &observation, &mut agent);
+        assert_eq!(
+            response,
+            MjaiAction::Dahai {
+                actor: 0,
+                pai: "6p".to_string(),
+                tsumogiri: Some(true),
+                request_id: Some(90),
+            }
+        );
+    }
+
+    #[test]
+    fn builds_dahai_with_hand_tiles_from_observation() {
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![0, 16, 104]));
+        let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+        let mut agent = ShantenAgent;
+        let response =
+            build_response_for_request(0, 91, &possible_actions, &observation, &mut agent);
+        assert!(matches!(response, MjaiAction::Dahai { .. }));
+    }
+
+    #[test]
+    fn with_context_uses_passed_context() {
+        let context = GameContext::with_drawn_tile(TileId::new(56).unwrap());
+        let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+        let mut agent = TsumogiriAgent;
+        let response =
+            build_response_for_request_with_context(1, 92, &possible_actions, &context, &mut agent);
+        assert_eq!(
+            response,
+            Some(MjaiAction::Dahai {
+                actor: 1,
+                pai: "6p".to_string(),
+                tsumogiri: Some(true),
+                request_id: Some(92),
+            })
+        );
+    }
+
+    #[test]
+    fn with_context_returns_none_when_chosen_action_is_not_possible() {
+        let possible_actions = vec![possible_pon()];
+        let mut agent = TsumogiriAgent;
+        let response = build_response_for_request_with_context(
+            0,
+            93,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(response, None);
     }
 }
