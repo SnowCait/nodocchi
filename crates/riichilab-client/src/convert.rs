@@ -8,15 +8,34 @@ pub fn possible_action_to_legal_action(action: &MjaiPossibleAction) -> Option<Le
         MjaiPossibleAction::Dahai { pai, .. } => {
             temporary_tile_id_from_mjai_pai(pai).map(|tile| LegalAction::Dahai { tile })
         }
+        MjaiPossibleAction::Chi { pai, consumed } => {
+            let tile = temporary_tile_id_from_mjai_pai(pai)?;
+            let consumed = temporary_tile_ids_from_mjai_pais(consumed)?;
+            Some(LegalAction::Chi { tile, consumed })
+        }
+        MjaiPossibleAction::Pon { pai, consumed } => {
+            let tile = temporary_tile_id_from_mjai_pai(pai)?;
+            let consumed = temporary_tile_ids_from_mjai_pais(consumed)?;
+            Some(LegalAction::Pon { tile, consumed })
+        }
+        MjaiPossibleAction::Daiminkan { pai, consumed } => {
+            let tile = temporary_tile_id_from_mjai_pai(pai)?;
+            let consumed = temporary_tile_ids_from_mjai_pais(consumed)?;
+            Some(LegalAction::Daiminkan { tile, consumed })
+        }
+        MjaiPossibleAction::Ankan { consumed } => {
+            let consumed = temporary_tile_ids_from_mjai_pais(consumed)?;
+            Some(LegalAction::Ankan { consumed })
+        }
+        MjaiPossibleAction::Kakan { pai, consumed } => {
+            let tile = temporary_tile_id_from_mjai_pai(pai)?;
+            let consumed = temporary_tile_ids_from_mjai_pais(consumed)?;
+            Some(LegalAction::Kakan { tile, consumed })
+        }
         MjaiPossibleAction::Reach => Some(LegalAction::Reach),
         MjaiPossibleAction::Hora => Some(LegalAction::Hora),
         MjaiPossibleAction::Ryukyoku => Some(LegalAction::Ryukyoku),
         MjaiPossibleAction::None => Some(LegalAction::None),
-        MjaiPossibleAction::Chi { .. }
-        | MjaiPossibleAction::Pon { .. }
-        | MjaiPossibleAction::Daiminkan { .. }
-        | MjaiPossibleAction::Ankan { .. }
-        | MjaiPossibleAction::Kakan { .. } => None,
     }
 }
 
@@ -43,7 +62,15 @@ pub fn legal_action_to_mjai_action(action: &LegalAction, actor: u8, request_id: 
         LegalAction::Ryukyoku => MjaiAction::Ryukyoku {
             request_id: Some(request_id),
         },
-        LegalAction::None => MjaiAction::None {
+        // 副露・カン response は possible_actions の元 action と照合して構築する必要があるため、
+        // possible_actions を参照しないこの単純変換では扱わず None を返す。
+        // 実際の副露・カン response は checked_legal_action_to_mjai_action() で構築する。
+        LegalAction::Chi { .. }
+        | LegalAction::Pon { .. }
+        | LegalAction::Daiminkan { .. }
+        | LegalAction::Ankan { .. }
+        | LegalAction::Kakan { .. }
+        | LegalAction::None => MjaiAction::None {
             request_id: Some(request_id),
         },
     }
@@ -96,7 +123,61 @@ pub fn checked_legal_action_to_mjai_action(
                 request_id: Some(request_id),
             })
         }),
+        // ankan response は actor / consumed のみで target を要さないため、
+        // 対応する possible_actions の元 consumed 文字列を再利用して安全に構築できる。
+        LegalAction::Ankan { consumed } => possible_actions.iter().find_map(|a| {
+            let MjaiPossibleAction::Ankan {
+                consumed: server_consumed,
+            } = a
+            else {
+                return None;
+            };
+            mjai_pais_match_tile_ids(server_consumed, consumed).then(|| MjaiAction::Ankan {
+                actor,
+                consumed: server_consumed.clone(),
+                request_id: Some(request_id),
+            })
+        }),
+        // kakan response は actor / pai / consumed のみで target を要さないため、
+        // 対応する possible_actions の元文字列を再利用して安全に構築できる。
+        LegalAction::Kakan { tile, consumed } => possible_actions.iter().find_map(|a| {
+            let MjaiPossibleAction::Kakan {
+                pai,
+                consumed: server_consumed,
+            } = a
+            else {
+                return None;
+            };
+            (temporary_tile_id_from_mjai_pai(pai) == Some(*tile)
+                && mjai_pais_match_tile_ids(server_consumed, consumed))
+            .then(|| MjaiAction::Kakan {
+                actor,
+                pai: pai.clone(),
+                consumed: server_consumed.clone(),
+                request_id: Some(request_id),
+            })
+        }),
+        // RiichiLab の Bot-to-Server response では chi / pon / daiminkan に target が必須だが、
+        // request_action.possible_actions は target を含まない（MjaiPossibleAction にも target field がない）。
+        // target を安全に得られないため、不完全な response で chombo を招かないよう response を返さない。
+        LegalAction::Chi { .. } | LegalAction::Pon { .. } | LegalAction::Daiminkan { .. } => None,
     }
+}
+
+fn temporary_tile_ids_from_mjai_pais(pais: &[String]) -> Option<Vec<TileId>> {
+    pais.iter()
+        .map(|pai| temporary_tile_id_from_mjai_pai(pai))
+        .collect()
+}
+
+fn mjai_pais_match_tile_ids(pais: &[String], tiles: &[TileId]) -> bool {
+    let Some(mut converted) = temporary_tile_ids_from_mjai_pais(pais) else {
+        return false;
+    };
+    let mut tiles = tiles.to_vec();
+    converted.sort_unstable();
+    tiles.sort_unstable();
+    converted == tiles
 }
 
 pub fn possible_actions_to_legal_actions(actions: &[MjaiPossibleAction]) -> Vec<LegalAction> {
@@ -236,8 +317,132 @@ mod tests {
     }
 
     #[test]
-    fn claim_actions_convert_to_no_legal_action() {
-        for action in [
+    fn chi_converts_to_legal_chi() {
+        let action = MjaiPossibleAction::Chi {
+            pai: "5m".to_string(),
+            consumed: vec!["4m".to_string(), "6m".to_string()],
+        };
+        assert_eq!(
+            possible_action_to_legal_action(&action),
+            Some(LegalAction::Chi {
+                tile: tile(17),
+                consumed: vec![tile(12), tile(20)],
+            })
+        );
+    }
+
+    #[test]
+    fn pon_converts_to_legal_pon() {
+        let action = MjaiPossibleAction::Pon {
+            pai: "E".to_string(),
+            consumed: vec!["E".to_string(), "E".to_string()],
+        };
+        assert_eq!(
+            possible_action_to_legal_action(&action),
+            Some(LegalAction::Pon {
+                tile: tile(108),
+                consumed: vec![tile(108), tile(108)],
+            })
+        );
+    }
+
+    #[test]
+    fn daiminkan_converts_to_legal_daiminkan() {
+        let action = MjaiPossibleAction::Daiminkan {
+            pai: "9s".to_string(),
+            consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+        };
+        assert_eq!(
+            possible_action_to_legal_action(&action),
+            Some(LegalAction::Daiminkan {
+                tile: tile(104),
+                consumed: vec![tile(104), tile(104), tile(104)],
+            })
+        );
+    }
+
+    #[test]
+    fn ankan_converts_to_legal_ankan() {
+        let action = MjaiPossibleAction::Ankan {
+            consumed: vec![
+                "1s".to_string(),
+                "1s".to_string(),
+                "1s".to_string(),
+                "1s".to_string(),
+            ],
+        };
+        assert_eq!(
+            possible_action_to_legal_action(&action),
+            Some(LegalAction::Ankan {
+                consumed: vec![tile(72), tile(72), tile(72), tile(72)],
+            })
+        );
+    }
+
+    #[test]
+    fn kakan_converts_to_legal_kakan() {
+        let action = MjaiPossibleAction::Kakan {
+            pai: "P".to_string(),
+            consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+        };
+        assert_eq!(
+            possible_action_to_legal_action(&action),
+            Some(LegalAction::Kakan {
+                tile: tile(124),
+                consumed: vec![tile(124), tile(124), tile(124)],
+            })
+        );
+    }
+
+    #[test]
+    fn chi_with_red_five_preserves_red_tile_id() {
+        let action = MjaiPossibleAction::Chi {
+            pai: "5mr".to_string(),
+            consumed: vec!["4m".to_string(), "6m".to_string()],
+        };
+        assert_eq!(
+            possible_action_to_legal_action(&action),
+            Some(LegalAction::Chi {
+                tile: tile(16),
+                consumed: vec![tile(12), tile(20)],
+            })
+        );
+    }
+
+    #[test]
+    fn chi_with_invalid_pai_converts_to_none() {
+        let action = MjaiPossibleAction::Chi {
+            pai: "invalid".to_string(),
+            consumed: vec!["4m".to_string(), "6m".to_string()],
+        };
+        assert_eq!(possible_action_to_legal_action(&action), None);
+    }
+
+    #[test]
+    fn chi_with_invalid_consumed_converts_to_none() {
+        let action = MjaiPossibleAction::Chi {
+            pai: "5m".to_string(),
+            consumed: vec!["4m".to_string(), "invalid".to_string()],
+        };
+        assert_eq!(possible_action_to_legal_action(&action), None);
+    }
+
+    #[test]
+    fn ankan_with_invalid_consumed_converts_to_none() {
+        let action = MjaiPossibleAction::Ankan {
+            consumed: vec![
+                "1s".to_string(),
+                "1s".to_string(),
+                "1s".to_string(),
+                "invalid".to_string(),
+            ],
+        };
+        assert_eq!(possible_action_to_legal_action(&action), None);
+    }
+
+    #[test]
+    fn claim_actions_are_not_dropped() {
+        let actions = vec![
             MjaiPossibleAction::Chi {
                 pai: "5m".to_string(),
                 consumed: vec!["4m".to_string(), "6m".to_string()],
@@ -262,9 +467,16 @@ mod tests {
                 pai: "P".to_string(),
                 consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
             },
-        ] {
-            assert_eq!(possible_action_to_legal_action(&action), None, "{action:?}");
-        }
+            MjaiPossibleAction::None,
+        ];
+        let legal_actions = possible_actions_to_legal_actions(&actions);
+        assert_eq!(legal_actions.len(), 6);
+        assert!(matches!(legal_actions[0], LegalAction::Chi { .. }));
+        assert!(matches!(legal_actions[1], LegalAction::Pon { .. }));
+        assert!(matches!(legal_actions[2], LegalAction::Daiminkan { .. }));
+        assert!(matches!(legal_actions[3], LegalAction::Ankan { .. }));
+        assert!(matches!(legal_actions[4], LegalAction::Kakan { .. }));
+        assert_eq!(legal_actions[5], LegalAction::None);
     }
 
     #[test]
@@ -569,6 +781,218 @@ mod tests {
                 }
             }
         }
+
+        fn possible_ankan() -> MjaiPossibleAction {
+            MjaiPossibleAction::Ankan {
+                consumed: vec![
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                ],
+            }
+        }
+
+        fn legal_ankan() -> LegalAction {
+            LegalAction::Ankan {
+                consumed: vec![tile(72), tile(72), tile(72), tile(72)],
+            }
+        }
+
+        fn possible_kakan() -> MjaiPossibleAction {
+            MjaiPossibleAction::Kakan {
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+            }
+        }
+
+        fn legal_kakan() -> LegalAction {
+            LegalAction::Kakan {
+                tile: tile(124),
+                consumed: vec![tile(124), tile(124), tile(124)],
+            }
+        }
+
+        #[test]
+        fn ankan_is_returned_only_when_possible() {
+            let context = GameContext::default();
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_ankan(),
+                    1,
+                    60,
+                    &[possible_ankan()],
+                    &context,
+                ),
+                Some(MjaiAction::Ankan {
+                    actor: 1,
+                    consumed: vec![
+                        "1s".to_string(),
+                        "1s".to_string(),
+                        "1s".to_string(),
+                        "1s".to_string(),
+                    ],
+                    request_id: Some(60),
+                })
+            );
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_ankan(),
+                    1,
+                    60,
+                    &[MjaiPossibleAction::None],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn ankan_response_excludes_pai() {
+            let context = GameContext::default();
+            let response = checked_legal_action_to_mjai_action(
+                &legal_ankan(),
+                0,
+                61,
+                &[possible_ankan()],
+                &context,
+            )
+            .unwrap();
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["type"], "ankan");
+            assert_eq!(json["actor"], 0);
+            assert_eq!(json["request_id"], 61);
+            assert!(json.get("pai").is_none());
+            assert_eq!(
+                serde_json::to_string(&response).unwrap(),
+                r#"{"type":"ankan","actor":0,"consumed":["1s","1s","1s","1s"],"request_id":61}"#
+            );
+        }
+
+        #[test]
+        fn kakan_is_returned_only_when_possible() {
+            let context = GameContext::default();
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_kakan(),
+                    2,
+                    62,
+                    &[possible_kakan()],
+                    &context,
+                ),
+                Some(MjaiAction::Kakan {
+                    actor: 2,
+                    pai: "P".to_string(),
+                    consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+                    request_id: Some(62),
+                })
+            );
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_kakan(),
+                    2,
+                    62,
+                    &[MjaiPossibleAction::None],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn kakan_response_includes_pai() {
+            let context = GameContext::default();
+            let response = checked_legal_action_to_mjai_action(
+                &legal_kakan(),
+                0,
+                63,
+                &[possible_kakan()],
+                &context,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_string(&response).unwrap(),
+                r#"{"type":"kakan","actor":0,"pai":"P","consumed":["P","P","P"],"request_id":63}"#
+            );
+        }
+
+        // chi / pon / daiminkan は target を安全に得られないため response を返さない。
+        #[test]
+        fn chi_pon_daiminkan_are_not_returned_even_when_possible() {
+            let context = GameContext::default();
+
+            let chi_chosen = LegalAction::Chi {
+                tile: tile(17),
+                consumed: vec![tile(12), tile(20)],
+            };
+            let chi_possible = MjaiPossibleAction::Chi {
+                pai: "5m".to_string(),
+                consumed: vec!["4m".to_string(), "6m".to_string()],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chi_chosen, 0, 64, &[chi_possible], &context,),
+                None
+            );
+
+            let pon_chosen = LegalAction::Pon {
+                tile: tile(108),
+                consumed: vec![tile(108), tile(108)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &pon_chosen,
+                    0,
+                    64,
+                    &[possible_pon()],
+                    &context,
+                ),
+                None
+            );
+
+            let daiminkan_chosen = LegalAction::Daiminkan {
+                tile: tile(104),
+                consumed: vec![tile(104), tile(104), tile(104)],
+            };
+            let daiminkan_possible = MjaiPossibleAction::Daiminkan {
+                pai: "9s".to_string(),
+                consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &daiminkan_chosen,
+                    0,
+                    64,
+                    &[daiminkan_possible],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn kan_not_in_possible_actions_returns_none() {
+            let context = GameContext::default();
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_ankan(),
+                    0,
+                    65,
+                    &[possible_kakan()],
+                    &context,
+                ),
+                None
+            );
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_kakan(),
+                    0,
+                    65,
+                    &[possible_ankan()],
+                    &context,
+                ),
+                None
+            );
+        }
     }
 
     #[test]
@@ -636,13 +1060,26 @@ mod tests {
             panic!("expected request_action");
         };
         let legal_actions = possible_actions_to_legal_actions(&possible_actions);
-        assert_eq!(legal_actions, vec![LegalAction::None]);
-        let mut agent = NormalAgent;
-        let chosen = agent.act(&GameContext::default(), &legal_actions);
-        assert_eq!(chosen, LegalAction::None);
-        let response = legal_action_to_mjai_action(&chosen, 0, request_id);
+        // 副露 action は情報を落とさず LegalAction として保持される。
         assert_eq!(
-            serde_json::to_string(&response).unwrap(),
+            legal_actions,
+            vec![
+                LegalAction::Pon {
+                    tile: tile(108),
+                    consumed: vec![tile(108), tile(108)],
+                },
+                LegalAction::None,
+            ]
+        );
+        // ただし現状の Agent は副露を積極選択せず None を返す。
+        let context = GameContext::default();
+        let mut agent = NormalAgent;
+        let chosen = agent.act(&context, &legal_actions);
+        assert_eq!(chosen, LegalAction::None);
+        let response =
+            checked_legal_action_to_mjai_action(&chosen, 0, request_id, &possible_actions, &context);
+        assert_eq!(
+            serde_json::to_string(&response.unwrap()).unwrap(),
             r#"{"type":"none","request_id":44}"#
         );
     }
