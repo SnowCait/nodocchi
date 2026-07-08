@@ -39,41 +39,171 @@ pub fn possible_action_to_legal_action(action: &MjaiPossibleAction) -> Option<Le
     }
 }
 
-pub fn legal_action_to_mjai_action(action: &LegalAction, actor: u8, request_id: u64) -> MjaiAction {
+// possible_actions を参照しない単純変換（unchecked / simple conversion）。
+// possible_actions と照合しないため、response を組み立てるだけで合法性は保証しない。
+// runtime 経路では必ず checked_legal_action_to_mjai_action() を使うこと。
+//
+// 副露・カン variant を silently MjaiAction::None に潰さないよう、戻り値は Option とする。
+// 変換できない action では None を返し、誤って none response が構築されたように
+// 見える状態を避ける。
+pub fn legal_action_to_mjai_action(
+    action: &LegalAction,
+    actor: u8,
+    request_id: u64,
+) -> Option<MjaiAction> {
     match action {
-        LegalAction::Dahai { tile } => MjaiAction::Dahai {
+        LegalAction::Dahai { tile } => Some(MjaiAction::Dahai {
             actor,
             pai: tile.to_mjai_string(),
             tsumogiri: None,
             request_id: Some(request_id),
-        },
+        }),
         // RiichiLab では reach 宣言と dahai は別 request/response として扱われる。
         // そのため Reach action は打牌牌姿を持たず、後続の request_action で dahai を返す。
-        LegalAction::Reach => MjaiAction::Reach {
+        LegalAction::Reach => Some(MjaiAction::Reach {
             actor,
             request_id: Some(request_id),
-        },
-        LegalAction::Hora => MjaiAction::Hora {
+        }),
+        LegalAction::Hora => Some(MjaiAction::Hora {
             actor,
             target: None,
             pai: None,
             request_id: Some(request_id),
-        },
-        LegalAction::Ryukyoku => MjaiAction::Ryukyoku {
+        }),
+        LegalAction::Ryukyoku => Some(MjaiAction::Ryukyoku {
             request_id: Some(request_id),
-        },
+        }),
+        LegalAction::None => Some(MjaiAction::None {
+            request_id: Some(request_id),
+        }),
         // 副露・カン response は possible_actions の元 action と照合して構築する必要があるため、
         // possible_actions を参照しないこの単純変換では扱わず None を返す。
-        // 実際の副露・カン response は checked_legal_action_to_mjai_action() で構築する。
+        // - Chi / Pon / Daiminkan は target を安全に得られない
+        // - Ankan / Kakan は response 自体は作れるが、server が提示した元文字列と
+        //   照合して構築する方が安全
+        // これらの副露・カン response は checked_legal_action_to_mjai_action() に寄せる。
         LegalAction::Chi { .. }
         | LegalAction::Pon { .. }
         | LegalAction::Daiminkan { .. }
         | LegalAction::Ankan { .. }
-        | LegalAction::Kakan { .. }
-        | LegalAction::None => MjaiAction::None {
-            request_id: Some(request_id),
-        },
+        | LegalAction::Kakan { .. } => None,
     }
+}
+
+// possible_actions に基づき、chombo risk が低い fallback response を選ぶ。
+//
+// fallback 優先順位:
+//   1. None      (claim opportunity では最も安全)
+//   2. Dahai     (draw turn の基本 fallback。ツモ切り)
+//   3. Ryukyoku
+//   4. Hora
+//   5. Reach
+//   6. Ankan
+//   7. Kakan
+//   8. それ以外   (Chi / Pon / Daiminkan は target を得られないため None)
+//
+// possible_actions に無い action を送らないよう、必ず possible_actions を走査して
+// 対応する response のみ構築する。合法な fallback が無い場合は None を返し、
+// 呼び出し側で「返信しない」判断を行えるようにする。
+pub fn fallback_mjai_action_from_possible_actions(
+    actor: u8,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+    context: &GameContext,
+) -> Option<MjaiAction> {
+    // 1. None
+    if possible_actions
+        .iter()
+        .any(|a| matches!(a, MjaiPossibleAction::None))
+    {
+        return Some(MjaiAction::None {
+            request_id: Some(request_id),
+        });
+    }
+
+    // 2. Dahai (server が提示した pai をそのまま使う。ツモ切り一致時のみ tsumogiri: true)
+    if let Some(response) = possible_actions.iter().find_map(|a| {
+        let MjaiPossibleAction::Dahai { pai, .. } = a else {
+            return None;
+        };
+        let tsumogiri = temporary_tile_id_from_mjai_pai(pai)
+            .is_some_and(|tile| context.drawn_tile() == Some(tile))
+            .then_some(true);
+        Some(MjaiAction::Dahai {
+            actor,
+            pai: pai.clone(),
+            tsumogiri,
+            request_id: Some(request_id),
+        })
+    }) {
+        return Some(response);
+    }
+
+    // 3. Ryukyoku
+    if possible_actions
+        .iter()
+        .any(|a| matches!(a, MjaiPossibleAction::Ryukyoku))
+    {
+        return Some(MjaiAction::Ryukyoku {
+            request_id: Some(request_id),
+        });
+    }
+
+    // 4. Hora
+    if possible_actions
+        .iter()
+        .any(|a| matches!(a, MjaiPossibleAction::Hora))
+    {
+        return Some(MjaiAction::Hora {
+            actor,
+            target: None,
+            pai: None,
+            request_id: Some(request_id),
+        });
+    }
+
+    // 5. Reach
+    if possible_actions
+        .iter()
+        .any(|a| matches!(a, MjaiPossibleAction::Reach))
+    {
+        return Some(MjaiAction::Reach {
+            actor,
+            request_id: Some(request_id),
+        });
+    }
+
+    // 6. Ankan (server の元 consumed 文字列を再利用して構築)
+    if let Some(response) = possible_actions.iter().find_map(|a| {
+        let MjaiPossibleAction::Ankan { consumed } = a else {
+            return None;
+        };
+        Some(MjaiAction::Ankan {
+            actor,
+            consumed: consumed.clone(),
+            request_id: Some(request_id),
+        })
+    }) {
+        return Some(response);
+    }
+
+    // 7. Kakan (server の元 pai / consumed 文字列を再利用して構築)
+    if let Some(response) = possible_actions.iter().find_map(|a| {
+        let MjaiPossibleAction::Kakan { pai, consumed } = a else {
+            return None;
+        };
+        Some(MjaiAction::Kakan {
+            actor,
+            pai: pai.clone(),
+            consumed: consumed.clone(),
+            request_id: Some(request_id),
+        })
+    }) {
+        return Some(response);
+    }
+
+    // 8. Chi / Pon / Daiminkan は target を安全に得られないため fallback 対象外。
+    None
 }
 
 pub fn checked_legal_action_to_mjai_action(
@@ -507,15 +637,71 @@ mod tests {
             LegalAction::Ryukyoku,
             LegalAction::None,
         ] {
-            let mjai = legal_action_to_mjai_action(&action, 0, 42);
+            let mjai = legal_action_to_mjai_action(&action, 0, 42).unwrap();
             let json = serde_json::to_value(&mjai).unwrap();
             assert_eq!(json["request_id"], 42, "action: {action:?}");
         }
     }
 
     #[test]
+    fn simple_conversion_does_not_silently_map_melds_and_kans_to_none() {
+        // 副露・カンは simple conversion では None を返し、
+        // 見かけ上 MjaiAction::None に成功変換されない。
+        for action in [
+            LegalAction::Chi {
+                tile: tile(17),
+                consumed: vec![tile(12), tile(20)],
+            },
+            LegalAction::Pon {
+                tile: tile(108),
+                consumed: vec![tile(108), tile(108)],
+            },
+            LegalAction::Daiminkan {
+                tile: tile(104),
+                consumed: vec![tile(104), tile(104), tile(104)],
+            },
+            LegalAction::Ankan {
+                consumed: vec![tile(72), tile(72), tile(72), tile(72)],
+            },
+            LegalAction::Kakan {
+                tile: tile(124),
+                consumed: vec![tile(124), tile(124), tile(124)],
+            },
+        ] {
+            assert_eq!(
+                legal_action_to_mjai_action(&action, 0, 42),
+                None,
+                "action: {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn simple_conversion_of_kakan_is_not_none_response() {
+        // 名前から kakan response が返りそうに見えるが、
+        // 実際に MjaiAction::None が構築される（見かけ上の成功変換）状態を避ける。
+        let action = LegalAction::Kakan {
+            tile: tile(124),
+            consumed: vec![tile(124), tile(124), tile(124)],
+        };
+        let converted = legal_action_to_mjai_action(&action, 0, 42);
+        assert_eq!(converted, None);
+        assert!(!matches!(converted, Some(MjaiAction::None { .. })));
+    }
+
+    #[test]
+    fn simple_conversion_of_ankan_is_not_none_response() {
+        let action = LegalAction::Ankan {
+            consumed: vec![tile(72), tile(72), tile(72), tile(72)],
+        };
+        let converted = legal_action_to_mjai_action(&action, 0, 42);
+        assert_eq!(converted, None);
+        assert!(!matches!(converted, Some(MjaiAction::None { .. })));
+    }
+
+    #[test]
     fn reach_response_excludes_discard_fields() {
-        let mjai = legal_action_to_mjai_action(&LegalAction::Reach, 0, 42);
+        let mjai = legal_action_to_mjai_action(&LegalAction::Reach, 0, 42).unwrap();
         let json = serde_json::to_value(&mjai).unwrap();
         assert_eq!(json["type"], "reach");
         assert_eq!(json["actor"], 0);
@@ -526,7 +712,7 @@ mod tests {
 
     #[test]
     fn reach_serializes_without_discard_information() {
-        let mjai = legal_action_to_mjai_action(&LegalAction::Reach, 0, 42);
+        let mjai = legal_action_to_mjai_action(&LegalAction::Reach, 0, 42).unwrap();
         assert_eq!(
             serde_json::to_string(&mjai).unwrap(),
             r#"{"type":"reach","actor":0,"request_id":42}"#
@@ -537,28 +723,28 @@ mod tests {
     fn legal_action_to_mjai_action_sets_actor() {
         assert_eq!(
             legal_action_to_mjai_action(&LegalAction::Dahai { tile: tile(16) }, 3, 1),
-            MjaiAction::Dahai {
+            Some(MjaiAction::Dahai {
                 actor: 3,
                 pai: "5mr".to_string(),
                 tsumogiri: None,
                 request_id: Some(1),
-            }
+            })
         );
         assert_eq!(
             legal_action_to_mjai_action(&LegalAction::Reach, 2, 1),
-            MjaiAction::Reach {
+            Some(MjaiAction::Reach {
                 actor: 2,
                 request_id: Some(1),
-            }
+            })
         );
         assert_eq!(
             legal_action_to_mjai_action(&LegalAction::Hora, 1, 1),
-            MjaiAction::Hora {
+            Some(MjaiAction::Hora {
                 actor: 1,
                 target: None,
                 pai: None,
                 request_id: Some(1),
-            }
+            })
         );
     }
 
@@ -995,6 +1181,199 @@ mod tests {
         }
     }
 
+    mod fallback {
+        use super::*;
+
+        fn possible_ankan() -> MjaiPossibleAction {
+            MjaiPossibleAction::Ankan {
+                consumed: vec![
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                    "1s".to_string(),
+                ],
+            }
+        }
+
+        fn possible_kakan() -> MjaiPossibleAction {
+            MjaiPossibleAction::Kakan {
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+            }
+        }
+
+        fn possible_chi() -> MjaiPossibleAction {
+            MjaiPossibleAction::Chi {
+                pai: "5m".to_string(),
+                consumed: vec!["4m".to_string(), "6m".to_string()],
+            }
+        }
+
+        fn possible_daiminkan() -> MjaiPossibleAction {
+            MjaiPossibleAction::Daiminkan {
+                pai: "9s".to_string(),
+                consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+            }
+        }
+
+        #[test]
+        fn prefers_none_when_present() {
+            let context = GameContext::default();
+            let possible_actions = vec![
+                possible_dahai("1m"),
+                possible_pon(),
+                MjaiPossibleAction::None,
+            ];
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(0, 42, &possible_actions, &context),
+                Some(MjaiAction::None {
+                    request_id: Some(42),
+                })
+            );
+        }
+
+        #[test]
+        fn falls_back_to_dahai_when_none_absent() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_dahai("1m")];
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(0, 43, &possible_actions, &context),
+                Some(MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "1m".to_string(),
+                    tsumogiri: None,
+                    request_id: Some(43),
+                })
+            );
+        }
+
+        #[test]
+        fn dahai_fallback_uses_server_pai() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_dahai("5mr")];
+            let response =
+                fallback_mjai_action_from_possible_actions(2, 44, &possible_actions, &context)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 2,
+                    pai: "5mr".to_string(),
+                    tsumogiri: None,
+                    request_id: Some(44),
+                }
+            );
+        }
+
+        #[test]
+        fn dahai_fallback_marks_tsumogiri_for_drawn_tile() {
+            let context = GameContext::with_drawn_tile(tile(56));
+            let possible_actions = vec![possible_dahai("6p")];
+            let response =
+                fallback_mjai_action_from_possible_actions(1, 45, &possible_actions, &context)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 1,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(45),
+                }
+            );
+        }
+
+        #[test]
+        fn does_not_return_none_when_none_absent() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_pon()];
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(0, 46, &possible_actions, &context),
+                None
+            );
+        }
+
+        #[test]
+        fn empty_possible_actions_do_not_fall_back_to_none() {
+            let context = GameContext::default();
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(0, 47, &[], &context),
+                None
+            );
+        }
+
+        #[test]
+        fn chi_pon_daiminkan_only_has_no_fallback() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_chi(), possible_pon(), possible_daiminkan()];
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(0, 48, &possible_actions, &context),
+                None
+            );
+        }
+
+        #[test]
+        fn builds_ankan_fallback_from_possible_action() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_ankan()];
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(1, 49, &possible_actions, &context),
+                Some(MjaiAction::Ankan {
+                    actor: 1,
+                    consumed: vec![
+                        "1s".to_string(),
+                        "1s".to_string(),
+                        "1s".to_string(),
+                        "1s".to_string(),
+                    ],
+                    request_id: Some(49),
+                })
+            );
+        }
+
+        #[test]
+        fn builds_kakan_fallback_from_possible_action() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_kakan()];
+            assert_eq!(
+                fallback_mjai_action_from_possible_actions(2, 50, &possible_actions, &context),
+                Some(MjaiAction::Kakan {
+                    actor: 2,
+                    pai: "P".to_string(),
+                    consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+                    request_id: Some(50),
+                })
+            );
+        }
+
+        #[test]
+        fn dahai_is_preferred_over_kan() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_ankan(), possible_dahai("1m"), possible_kakan()];
+            let response =
+                fallback_mjai_action_from_possible_actions(0, 51, &possible_actions, &context)
+                    .unwrap();
+            assert!(matches!(response, MjaiAction::Dahai { .. }));
+        }
+
+        #[test]
+        fn echoes_request_id() {
+            let context = GameContext::default();
+            let possible_actions = vec![possible_dahai("1m")];
+            for request_id in [0u64, 7, u64::MAX] {
+                let response = fallback_mjai_action_from_possible_actions(
+                    0,
+                    request_id,
+                    &possible_actions,
+                    &context,
+                )
+                .unwrap();
+                let json = serde_json::to_value(&response).unwrap();
+                assert_eq!(json["request_id"], request_id);
+            }
+        }
+    }
+
     #[test]
     fn official_request_action_flows_to_hora_response() {
         let json = r#"{
@@ -1032,7 +1411,7 @@ mod tests {
         let mut agent = NormalAgent;
         let chosen = agent.act(&GameContext::default(), &legal_actions);
         assert_eq!(chosen, LegalAction::Hora);
-        let response = legal_action_to_mjai_action(&chosen, 0, request_id);
+        let response = legal_action_to_mjai_action(&chosen, 0, request_id).unwrap();
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"hora","actor":0,"request_id":42}"#
@@ -1076,8 +1455,13 @@ mod tests {
         let mut agent = NormalAgent;
         let chosen = agent.act(&context, &legal_actions);
         assert_eq!(chosen, LegalAction::None);
-        let response =
-            checked_legal_action_to_mjai_action(&chosen, 0, request_id, &possible_actions, &context);
+        let response = checked_legal_action_to_mjai_action(
+            &chosen,
+            0,
+            request_id,
+            &possible_actions,
+            &context,
+        );
         assert_eq!(
             serde_json::to_string(&response.unwrap()).unwrap(),
             r#"{"type":"none","request_id":44}"#
@@ -1112,7 +1496,7 @@ mod tests {
         let mut agent = NormalAgent;
         let chosen = agent.act(&GameContext::default(), &legal_actions);
         assert_eq!(chosen, LegalAction::Dahai { tile: tile(16) });
-        let response = legal_action_to_mjai_action(&chosen, 0, request_id);
+        let response = legal_action_to_mjai_action(&chosen, 0, request_id).unwrap();
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"dahai","actor":0,"pai":"5mr","request_id":43}"#

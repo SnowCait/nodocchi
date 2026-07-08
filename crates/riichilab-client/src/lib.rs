@@ -15,8 +15,9 @@ pub use client::{
 };
 pub use config::{ClientConfig, ConfigError};
 pub use convert::{
-    checked_legal_action_to_mjai_action, legal_action_to_mjai_action,
-    possible_action_to_legal_action, possible_actions_to_legal_actions,
+    checked_legal_action_to_mjai_action, fallback_mjai_action_from_possible_actions,
+    legal_action_to_mjai_action, possible_action_to_legal_action,
+    possible_actions_to_legal_actions,
 };
 pub use observation::{DecodedObservation, ObservationError, ObservationPayload};
 pub use protocol::{

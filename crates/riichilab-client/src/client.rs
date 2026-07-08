@@ -10,7 +10,10 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tracing::{debug, error, info, warn};
 
 use crate::config::ClientConfig;
-use crate::convert::{checked_legal_action_to_mjai_action, possible_actions_to_legal_actions};
+use crate::convert::{
+    checked_legal_action_to_mjai_action, fallback_mjai_action_from_possible_actions,
+    possible_actions_to_legal_actions,
+};
 use crate::observation::{ObservationPayload, game_context_from_decoded_observation};
 use crate::protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, mjai_action_type,
@@ -55,7 +58,7 @@ pub fn build_response_for_request<A: Agent>(
     possible_actions: &[MjaiPossibleAction],
     observation: &ObservationPayload,
     agent: &mut A,
-) -> MjaiAction {
+) -> Option<MjaiAction> {
     debug!(
         request_id,
         observation_len = observation.as_base64().len(),
@@ -68,11 +71,18 @@ pub fn build_response_for_request<A: Agent>(
         .map(game_context_from_decoded_observation)
         .unwrap_or_default();
     build_response_for_request_with_context(actor, request_id, possible_actions, &context, agent)
-        .unwrap_or(MjaiAction::None {
-            request_id: Some(request_id),
-        })
 }
 
+// response 構築の流れ:
+//   1. possible_actions を LegalAction に変換
+//   2. Agent が LegalAction を選ぶ
+//   3. checked_legal_action_to_mjai_action() で response 化を試す
+//   4. 失敗したら fallback_mjai_action_from_possible_actions() を試す
+//   5. それでも response が作れない場合は None を返す（呼び出し側で返信しない）
+//
+// possible_actions に無い none を fallback として送らないため、fallback も必ず
+// possible_actions に基づいて選ぶ。合法 response が作れない場合は None を返し、
+// chombo risk のある response を送るより server default に任せる。
 pub fn build_response_for_request_with_context<A: Agent>(
     actor: u8,
     request_id: u64,
@@ -91,7 +101,42 @@ pub fn build_response_for_request_with_context<A: Agent>(
         chosen = ?chosen,
         "request_action"
     );
-    checked_legal_action_to_mjai_action(&chosen, actor, request_id, possible_actions, context)
+
+    if let Some(response) =
+        checked_legal_action_to_mjai_action(&chosen, actor, request_id, possible_actions, context)
+    {
+        return Some(response);
+    }
+
+    warn!(
+        request_id,
+        chosen = ?chosen,
+        possible_actions = possible_actions.len(),
+        "checked conversion failed; selecting protocol-safe fallback"
+    );
+
+    match fallback_mjai_action_from_possible_actions(actor, request_id, possible_actions, context) {
+        Some(fallback) => {
+            warn!(
+                request_id,
+                chosen = ?chosen,
+                fallback_type = mjai_action_type(&fallback),
+                fallback_reason = "checked conversion failed",
+                possible_actions = possible_actions.len(),
+                "sending fallback response"
+            );
+            Some(fallback)
+        }
+        None => {
+            error!(
+                request_id,
+                chosen = ?chosen,
+                possible_actions = possible_actions.len(),
+                "no legal fallback response; not replying and relying on server default"
+            );
+            None
+        }
+    }
 }
 
 pub(crate) fn context_for_request(
@@ -261,7 +306,7 @@ where
                                     "policy selected response"
                                 );
                             })
-                            .unwrap_or_else(|| {
+                            .or_else(|| {
                                 build_response_for_request_with_context(
                                     state.actor_or_default(),
                                     request_id,
@@ -269,11 +314,21 @@ where
                                     &context,
                                     agent,
                                 )
-                                .unwrap_or(MjaiAction::None {
-                                    request_id: Some(request_id),
-                                })
                             });
                         let policy_ms = policy_start.elapsed().as_millis() as u64;
+
+                        // 合法 response が構築できない場合は、possible_actions に無い none を
+                        // 無条件送信して chombo を招くより、返信せず server default に任せる。
+                        // timeout 単体は chombo ではなく server default 適用になる。
+                        let Some(response) = response else {
+                            error!(
+                                request_id,
+                                possible_actions = possible_actions.len(),
+                                policy_ms,
+                                "no legal response constructed; not replying to rely on server default"
+                            );
+                            continue;
+                        };
                         let response_type = mjai_action_type(&response);
 
                         let serialize_start = Instant::now();
@@ -445,7 +500,7 @@ where
 mod tests {
     use super::*;
     use crate::observation::fixture_base64;
-    use bot_core::{NormalAgent, ShantenAgent, TsumogiriAgent};
+    use bot_core::{LegalAction, NormalAgent, ShantenAgent, TsumogiriAgent};
     use bot_logic::TileId;
 
     fn possible_dahai(pai: &str) -> MjaiPossibleAction {
@@ -545,12 +600,12 @@ mod tests {
             build_response_for_request(1, 42, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
-            MjaiAction::Hora {
+            Some(MjaiAction::Hora {
                 actor: 1,
                 target: None,
                 pai: None,
                 request_id: Some(42),
-            }
+            })
         );
     }
 
@@ -563,7 +618,7 @@ mod tests {
         let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response =
-            build_response_for_request(0, 43, &possible_actions, &observation, &mut agent);
+            build_response_for_request(0, 43, &possible_actions, &observation, &mut agent).unwrap();
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"dahai","actor":0,"pai":"5mr","request_id":43}"#
@@ -579,9 +634,9 @@ mod tests {
             build_response_for_request(0, 7, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
-            MjaiAction::None {
+            Some(MjaiAction::None {
                 request_id: Some(7)
-            }
+            })
         );
     }
 
@@ -594,24 +649,21 @@ mod tests {
             build_response_for_request(3, 1, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
-            MjaiAction::Reach {
+            Some(MjaiAction::Reach {
                 actor: 3,
                 request_id: Some(1),
-            }
+            })
         );
     }
 
     #[test]
-    fn empty_possible_actions_fall_back_to_none() {
+    fn empty_possible_actions_do_not_construct_a_response() {
+        // possible_actions が空だと合法 response は構築できない。
+        // possible_actions に無い none を無条件送信せず、None を返して返信しない。
         let mut agent = NormalAgent;
         let observation = ObservationPayload::new("dummy-base64");
         let response = build_response_for_request(0, 9, &[], &observation, &mut agent);
-        assert_eq!(
-            response,
-            MjaiAction::None {
-                request_id: Some(9)
-            }
-        );
+        assert_eq!(response, None);
     }
 
     #[test]
@@ -623,12 +675,12 @@ mod tests {
             build_response_for_request(0, 90, &possible_actions, &observation, &mut agent);
         assert_eq!(
             response,
-            MjaiAction::Dahai {
+            Some(MjaiAction::Dahai {
                 actor: 0,
                 pai: "6p".to_string(),
                 tsumogiri: Some(true),
                 request_id: Some(90),
-            }
+            })
         );
     }
 
@@ -639,7 +691,7 @@ mod tests {
         let mut agent = ShantenAgent;
         let response =
             build_response_for_request(0, 91, &possible_actions, &observation, &mut agent);
-        assert!(matches!(response, MjaiAction::Dahai { .. }));
+        assert!(matches!(response, Some(MjaiAction::Dahai { .. })));
     }
 
     #[test]
@@ -731,5 +783,112 @@ mod tests {
             &mut agent,
         );
         assert_eq!(response, None);
+    }
+
+    // fallback safety 検証用に、意図的に副露・カンを選ぶテスト専用 Agent。
+    // 実運用 Agent の選択方針は変えない。
+    struct ClaimingAgent;
+
+    impl Agent for ClaimingAgent {
+        fn act(&mut self, _ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
+            legal_actions
+                .iter()
+                .find(|a| {
+                    matches!(
+                        a,
+                        LegalAction::Chi { .. }
+                            | LegalAction::Pon { .. }
+                            | LegalAction::Daiminkan { .. }
+                            | LegalAction::Ankan { .. }
+                            | LegalAction::Kakan { .. }
+                    )
+                })
+                .cloned()
+                .unwrap_or(LegalAction::None)
+        }
+    }
+
+    fn possible_kakan() -> MjaiPossibleAction {
+        MjaiPossibleAction::Kakan {
+            pai: "P".to_string(),
+            consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+        }
+    }
+
+    #[test]
+    fn pon_choice_falls_back_to_none_when_none_is_possible() {
+        // Agent が Pon を選んでも checked conversion は失敗し、None が possible なら none fallback。
+        let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
+        let mut agent = ClaimingAgent;
+        let response = build_response_for_request_with_context(
+            0,
+            94,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(
+            response,
+            Some(MjaiAction::None {
+                request_id: Some(94),
+            })
+        );
+    }
+
+    #[test]
+    fn pon_choice_does_not_return_none_without_possible_none() {
+        // possible_actions に None が無い場合、無条件 none は返さない。
+        let possible_actions = vec![possible_pon()];
+        let mut agent = ClaimingAgent;
+        let response = build_response_for_request_with_context(
+            0,
+            95,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(response, None);
+    }
+
+    #[test]
+    fn kakan_choice_builds_kakan_via_checked_conversion() {
+        // 対応する possible_actions があれば checked conversion で kakan response になる。
+        let possible_actions = vec![possible_kakan()];
+        let mut agent = ClaimingAgent;
+        let response = build_response_for_request_with_context(
+            2,
+            96,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(
+            response,
+            Some(MjaiAction::Kakan {
+                actor: 2,
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
+                request_id: Some(96),
+            })
+        );
+    }
+
+    #[test]
+    fn pon_choice_falls_back_to_dahai_when_none_absent() {
+        // None が無く Dahai が possible なら、fallback は dahai (ツモ切り一致で tsumogiri: true)。
+        let possible_actions = vec![possible_pon(), possible_dahai("6p")];
+        let context = GameContext::with_drawn_tile(TileId::new(56).unwrap());
+        let mut agent = ClaimingAgent;
+        let response =
+            build_response_for_request_with_context(1, 97, &possible_actions, &context, &mut agent);
+        assert_eq!(
+            response,
+            Some(MjaiAction::Dahai {
+                actor: 1,
+                pai: "6p".to_string(),
+                tsumogiri: Some(true),
+                request_id: Some(97),
+            })
+        );
     }
 }
