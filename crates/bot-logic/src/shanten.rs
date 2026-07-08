@@ -1,6 +1,27 @@
 use crate::tile::TileType;
 use crate::tile_counts::{TileCountError, TileCounts};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shanten {
+    pub standard: i8,
+    pub chiitoitsu: i8,
+    pub kokushi: i8,
+}
+
+impl Shanten {
+    pub fn min(self) -> i8 {
+        self.standard.min(self.chiitoitsu).min(self.kokushi)
+    }
+}
+
+pub fn calculate_shanten(counts: &TileCounts) -> Shanten {
+    Shanten {
+        standard: standard_shanten(counts),
+        chiitoitsu: chiitoitsu_shanten(counts),
+        kokushi: kokushi_shanten(counts),
+    }
+}
+
 pub fn standard_shanten(counts: &TileCounts) -> i8 {
     let mut best = i8::MAX;
     search(
@@ -316,5 +337,94 @@ mod tests {
     #[test]
     fn kokushi_empty_hand_returns_thirteen() {
         assert_eq!(kokushi_shanten(&TileCounts::new()), 13);
+    }
+
+    #[test]
+    fn shanten_min_returns_smallest_value() {
+        let shanten = Shanten {
+            standard: 2,
+            chiitoitsu: 1,
+            kokushi: 5,
+        };
+        assert_eq!(shanten.min(), 1);
+    }
+
+    #[test]
+    fn shanten_min_returns_minus_one_when_included() {
+        let shanten = Shanten {
+            standard: 0,
+            chiitoitsu: -1,
+            kokushi: 3,
+        };
+        assert_eq!(shanten.min(), -1);
+    }
+
+    #[test]
+    fn calculate_shanten_standard_complete_hand() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+        ]);
+        let shanten = calculate_shanten(&counts);
+        assert_eq!(shanten.standard, -1);
+        assert_eq!(shanten.min(), -1);
+    }
+
+    #[test]
+    fn calculate_shanten_chiitoitsu_complete_hand() {
+        let counts = counts(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E", "E",
+        ]);
+        let shanten = calculate_shanten(&counts);
+        assert_eq!(shanten.chiitoitsu, -1);
+        assert_eq!(shanten.min(), -1);
+    }
+
+    #[test]
+    fn calculate_shanten_kokushi_complete_hand() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C", "1m",
+        ]);
+        let shanten = calculate_shanten(&counts);
+        assert_eq!(shanten.kokushi, -1);
+        assert_eq!(shanten.min(), -1);
+    }
+
+    #[test]
+    fn calculate_shanten_standard_tenpai_hand() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+        ]);
+        let shanten = calculate_shanten(&counts);
+        assert_eq!(shanten.standard, 0);
+        assert_eq!(shanten.min(), 0);
+    }
+
+    #[test]
+    fn calculate_shanten_chiitoitsu_tenpai_hand() {
+        let counts = counts(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+        ]);
+        let shanten = calculate_shanten(&counts);
+        assert_eq!(shanten.chiitoitsu, 0);
+        assert_eq!(shanten.min(), 0);
+    }
+
+    #[test]
+    fn calculate_shanten_kokushi_tenpai_hand() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+        ]);
+        let shanten = calculate_shanten(&counts);
+        assert_eq!(shanten.kokushi, 0);
+        assert_eq!(shanten.min(), 0);
+    }
+
+    #[test]
+    fn calculate_shanten_empty_hand() {
+        let shanten = calculate_shanten(&TileCounts::new());
+        assert_eq!(shanten.standard, 8);
+        assert_eq!(shanten.chiitoitsu, 13);
+        assert_eq!(shanten.kokushi, 13);
+        assert_eq!(shanten.min(), 8);
     }
 }
