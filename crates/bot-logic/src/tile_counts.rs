@@ -67,6 +67,49 @@ impl TileCounts {
         self.counts[tile_type.index()]
     }
 
+    pub fn can_remove_pair(&self, tile: TileType) -> bool {
+        self.count(tile) >= 2
+    }
+
+    pub fn can_remove_triplet(&self, tile: TileType) -> bool {
+        self.count(tile) >= 3
+    }
+
+    pub fn can_remove_sequence(&self, start: TileType) -> bool {
+        start
+            .sequence()
+            .is_some_and(|tiles| tiles.iter().all(|&tile| self.count(tile) >= 1))
+    }
+
+    pub fn remove_pair(&mut self, tile: TileType) -> Result<(), TileCountError> {
+        if !self.can_remove_pair(tile) {
+            return Err(TileCountError::Underflow(tile));
+        }
+        self.counts[tile.index()] -= 2;
+        Ok(())
+    }
+
+    pub fn remove_triplet(&mut self, tile: TileType) -> Result<(), TileCountError> {
+        if !self.can_remove_triplet(tile) {
+            return Err(TileCountError::Underflow(tile));
+        }
+        self.counts[tile.index()] -= 3;
+        Ok(())
+    }
+
+    pub fn remove_sequence(&mut self, start: TileType) -> Result<(), TileCountError> {
+        let tiles = start.sequence().ok_or(TileCountError::Underflow(start))?;
+        for tile in tiles {
+            if self.count(tile) == 0 {
+                return Err(TileCountError::Underflow(tile));
+            }
+        }
+        for tile in tiles {
+            self.counts[tile.index()] -= 1;
+        }
+        Ok(())
+    }
+
     pub fn total(&self) -> u8 {
         self.counts.iter().sum()
     }
@@ -251,5 +294,133 @@ mod tests {
         assert_eq!(entries[3], (tt(3), 2));
         assert_eq!(entries[0], (tt(0), 0));
         assert_eq!(entries[33], (tt(33), 0));
+    }
+
+    #[test]
+    fn can_remove_pair_requires_two_copies() {
+        assert!(TileCounts::from_tile_types(vec![tt(0), tt(0)]).can_remove_pair(tt(0)));
+        assert!(!TileCounts::from_tile_types(vec![tt(0)]).can_remove_pair(tt(0)));
+        assert!(!TileCounts::new().can_remove_pair(tt(0)));
+    }
+
+    #[test]
+    fn can_remove_triplet_requires_three_copies() {
+        assert!(TileCounts::from_tile_types(vec![tt(0); 3]).can_remove_triplet(tt(0)));
+        assert!(!TileCounts::from_tile_types(vec![tt(0), tt(0)]).can_remove_triplet(tt(0)));
+        assert!(!TileCounts::new().can_remove_triplet(tt(0)));
+    }
+
+    #[test]
+    fn can_remove_sequence_requires_all_three_tiles() {
+        let counts = TileCounts::from_tile_types(vec![tt(0), tt(1), tt(2)]);
+        assert!(counts.can_remove_sequence(tt(0)));
+
+        let missing_third = TileCounts::from_tile_types(vec![tt(0), tt(1)]);
+        assert!(!missing_third.can_remove_sequence(tt(0)));
+    }
+
+    #[test]
+    fn can_remove_sequence_stays_within_suit() {
+        let counts = TileCounts::from_tile_types(vec![tt(24), tt(25), tt(26)]);
+        assert!(counts.can_remove_sequence(tt(24)));
+        assert!(!counts.can_remove_sequence(tt(25)));
+        assert!(!counts.can_remove_sequence(tt(26)));
+    }
+
+    #[test]
+    fn can_remove_sequence_rejects_honors() {
+        let counts = TileCounts::from_tile_types(vec![tt(27); 3]);
+        assert!(!counts.can_remove_sequence(tt(27)));
+    }
+
+    #[test]
+    fn remove_pair_removes_two_copies() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0), tt(0)]);
+        counts.remove_pair(tt(0)).unwrap();
+        assert_eq!(counts.count(tt(0)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_pair_fails_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0)]);
+        assert_eq!(
+            counts.remove_pair(tt(0)),
+            Err(TileCountError::Underflow(tt(0)))
+        );
+        assert_eq!(counts.count(tt(0)), 1);
+        assert_eq!(counts.total(), 1);
+    }
+
+    #[test]
+    fn remove_triplet_removes_three_copies() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0); 3]);
+        counts.remove_triplet(tt(0)).unwrap();
+        assert_eq!(counts.count(tt(0)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_triplet_fails_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0), tt(0)]);
+        assert_eq!(
+            counts.remove_triplet(tt(0)),
+            Err(TileCountError::Underflow(tt(0)))
+        );
+        assert_eq!(counts.count(tt(0)), 2);
+        assert_eq!(counts.total(), 2);
+    }
+
+    #[test]
+    fn remove_sequence_removes_one_of_each() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0), tt(1), tt(2)]);
+        counts.remove_sequence(tt(0)).unwrap();
+        assert_eq!(counts.count(tt(0)), 0);
+        assert_eq!(counts.count(tt(1)), 0);
+        assert_eq!(counts.count(tt(2)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_sequence_fails_on_missing_tile_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0), tt(1)]);
+        assert_eq!(
+            counts.remove_sequence(tt(0)),
+            Err(TileCountError::Underflow(tt(2)))
+        );
+        assert_eq!(counts.count(tt(0)), 1);
+        assert_eq!(counts.count(tt(1)), 1);
+        assert_eq!(counts.total(), 2);
+    }
+
+    #[test]
+    fn remove_sequence_stays_within_suit() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(24), tt(25), tt(26)]);
+        counts.remove_sequence(tt(24)).unwrap();
+        assert_eq!(counts.count(tt(24)), 0);
+        assert_eq!(counts.count(tt(25)), 0);
+        assert_eq!(counts.count(tt(26)), 0);
+
+        let mut counts = TileCounts::from_tile_types(vec![tt(24), tt(25), tt(26)]);
+        assert_eq!(
+            counts.remove_sequence(tt(25)),
+            Err(TileCountError::Underflow(tt(25)))
+        );
+        assert_eq!(
+            counts.remove_sequence(tt(26)),
+            Err(TileCountError::Underflow(tt(26)))
+        );
+        assert_eq!(counts.total(), 3);
+    }
+
+    #[test]
+    fn remove_sequence_rejects_honors_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(27); 3]);
+        assert_eq!(
+            counts.remove_sequence(tt(27)),
+            Err(TileCountError::Underflow(tt(27)))
+        );
+        assert_eq!(counts.count(tt(27)), 3);
+        assert_eq!(counts.total(), 3);
     }
 }
