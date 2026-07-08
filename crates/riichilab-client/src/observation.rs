@@ -33,12 +33,19 @@ impl ObservationPayload {
                     .collect()
             })
             .unwrap_or_default();
+        let dora_indicators = observation
+            .dora_indicators
+            .iter()
+            .filter_map(|&raw| u8::try_from(raw).ok())
+            .filter_map(temporary_tile_id_from_observation_tile)
+            .collect();
         Ok(DecodedObservation {
             player_id: observation.player_id,
             drawn_tile: observation
                 .drawn_tile
                 .and_then(temporary_tile_id_from_observation_tile),
             hand_tiles,
+            dora_indicators,
         })
     }
 }
@@ -54,14 +61,29 @@ pub struct DecodedObservation {
     pub player_id: u8,
     pub drawn_tile: Option<TileId>,
     pub hand_tiles: Vec<TileId>,
+    pub dora_indicators: Vec<TileId>,
 }
 
 pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
-    GameContext::from_parts(decoded.drawn_tile, decoded.hand_tiles.clone())
+    GameContext::from_parts_with_dora(
+        decoded.drawn_tile,
+        decoded.hand_tiles.clone(),
+        decoded.dora_indicators.clone(),
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn fixture_base64(player_id: u8, drawn_tile: Option<u8>, hand: Vec<u8>) -> String {
+    fixture_base64_with_dora(player_id, drawn_tile, hand, vec![])
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_base64_with_dora(
+    player_id: u8,
+    drawn_tile: Option<u8>,
+    hand: Vec<u8>,
+    dora_indicators: Vec<u8>,
+) -> String {
     let mut hands: [Vec<u8>; 4] = Default::default();
     hands[usize::from(player_id)] = hand;
     let observation = Observation::new(
@@ -69,7 +91,7 @@ pub(crate) fn fixture_base64(player_id: u8, drawn_tile: Option<u8>, hand: Vec<u8
         hands,
         Default::default(),
         Default::default(),
-        vec![],
+        dora_indicators,
         [25000; 4],
         [false; 4],
         vec![],
@@ -199,6 +221,54 @@ mod tests {
     }
 
     #[test]
+    fn decode_4p_without_dora_indicators_returns_empty() {
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![]));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(decoded.dora_indicators.is_empty());
+    }
+
+    #[test]
+    fn decode_4p_returns_dora_indicators() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_dora(0, None, vec![], vec![0, 104]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.dora_indicators,
+            vec![TileId::new(0).unwrap(), TileId::new(104).unwrap()]
+        );
+    }
+
+    #[test]
+    fn decode_4p_normalizes_dora_indicators_to_temporary_tile_id() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_dora(0, None, vec![], vec![59, 16, 19]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.dora_indicators,
+            vec![
+                TileId::new(56).unwrap(),
+                TileId::new(16).unwrap(),
+                TileId::new(17).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_4p_skips_out_of_range_dora_indicators() {
+        let payload = ObservationPayload::new(fixture_base64_with_dora(
+            0,
+            None,
+            vec![],
+            vec![0, 200, 136, 104],
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.dora_indicators,
+            vec![TileId::new(0).unwrap(), TileId::new(104).unwrap()]
+        );
+    }
+
+    #[test]
     fn decode_4p_rejects_invalid_base64() {
         let payload = ObservationPayload::new("not-valid-base64!!");
         assert!(matches!(
@@ -226,6 +296,7 @@ mod tests {
                 player_id: 0,
                 drawn_tile: Some(tile),
                 hand_tiles: vec![],
+                dora_indicators: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -239,6 +310,7 @@ mod tests {
                 player_id: 3,
                 drawn_tile: None,
                 hand_tiles: vec![],
+                dora_indicators: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -254,6 +326,7 @@ mod tests {
                 player_id: 0,
                 drawn_tile: Some(tile),
                 hand_tiles: hand_tiles.clone(),
+                dora_indicators: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -268,10 +341,36 @@ mod tests {
                 player_id: 1,
                 drawn_tile: None,
                 hand_tiles: hand_tiles.clone(),
+                dora_indicators: vec![],
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.drawn_tile(), None);
             assert_eq!(context.hand_tiles(), hand_tiles.as_slice());
+        }
+
+        #[test]
+        fn dora_indicators_are_passed_to_context() {
+            let dora_indicators = vec![TileId::new(4).unwrap(), TileId::new(20).unwrap()];
+            let decoded = DecodedObservation {
+                player_id: 2,
+                drawn_tile: None,
+                hand_tiles: vec![],
+                dora_indicators: dora_indicators.clone(),
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert_eq!(context.dora_indicators(), dora_indicators.as_slice());
+        }
+
+        #[test]
+        fn empty_dora_indicators_become_empty_context_dora() {
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: None,
+                hand_tiles: vec![],
+                dora_indicators: vec![],
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert!(context.dora_indicators().is_empty());
         }
     }
 }
