@@ -7,8 +7,9 @@ pub mod tile_counts;
 
 pub use acceptance::{Acceptance, AcceptanceTile, calculate_acceptance};
 pub use discard::{
-    DiscardEvaluation, evaluate_discards, evaluate_discards_from_tiles, select_best_discard,
-    select_best_discard_from_tiles,
+    DiscardEvaluation, evaluate_discards, evaluate_discards_from_tiles,
+    evaluate_discards_from_tiles_with_dora, select_best_discard, select_best_discard_from_tiles,
+    select_best_discard_from_tiles_with_dora,
 };
 pub use hand::{Hand, HandError};
 pub use shanten::{
