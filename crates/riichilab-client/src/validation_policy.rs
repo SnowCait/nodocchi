@@ -964,6 +964,95 @@ mod tests {
         }
 
         #[test]
+        fn normal_keeps_priority_with_hand_tiles() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            let context =
+                GameContext::from_parts(Some(tile(56)), vec![tile(0), tile(16), tile(56)]);
+            let possible_actions = vec![
+                possible_dahai("1m"),
+                possible_dahai("6p"),
+                MjaiPossibleAction::Reach,
+                MjaiPossibleAction::Hora,
+            ];
+            let response =
+                build_normal_response_with_context(&state, &context, 70, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Hora {
+                    actor: 0,
+                    target: None,
+                    pai: None,
+                    request_id: Some(70),
+                }
+            );
+        }
+
+        #[test]
+        fn normal_dahai_ignores_hand_tiles() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            let context =
+                GameContext::from_parts(Some(tile(56)), vec![tile(0), tile(16), tile(56)]);
+            let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
+            let response =
+                build_normal_response_with_context(&state, &context, 71, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(71),
+                }
+            );
+        }
+
+        #[test]
+        fn tsumogiri_keeps_drawn_tile_basis_with_hand_tiles() {
+            let mut state = ValidationState::new();
+            state.on_start_game(1);
+            let context =
+                GameContext::from_parts(Some(tile(56)), vec![tile(0), tile(16), tile(56)]);
+            let possible_actions = vec![
+                possible_dahai("1m"),
+                possible_dahai("6p"),
+                MjaiPossibleAction::None,
+            ];
+            let response =
+                build_tsumogiri_response_with_context(&state, &context, 72, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::Dahai {
+                    actor: 1,
+                    pai: "6p".to_string(),
+                    tsumogiri: Some(true),
+                    request_id: Some(72),
+                }
+            );
+        }
+
+        #[test]
+        fn tsumogiri_with_hand_tiles_but_no_drawn_tile_does_not_pick_dahai() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            let context = GameContext::with_hand_tiles(vec![tile(0), tile(16)]);
+            let possible_actions = vec![possible_dahai("1m"), MjaiPossibleAction::None];
+            let response =
+                build_tsumogiri_response_with_context(&state, &context, 73, &possible_actions)
+                    .unwrap();
+            assert_eq!(
+                response,
+                MjaiAction::None {
+                    request_id: Some(73)
+                }
+            );
+        }
+
+        #[test]
         fn compat_builders_use_state_derived_context() {
             let state = state_with_tsumo(0, "6p");
             let context = game_context_from_validation_state(&state);

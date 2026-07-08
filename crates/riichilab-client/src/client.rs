@@ -265,12 +265,28 @@ mod tests {
 
     #[test]
     fn context_for_request_prefers_decoded_observation() {
-        let observation = ObservationPayload::new(fixture_base64(0, Some(59)));
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![]));
         let mut state = ValidationState::new();
         state.on_start_game(0);
         state.on_tsumo(0, "1m".to_string());
         let context = context_for_request(&observation, &state, 1);
         assert_eq!(context.drawn_tile(), TileId::new(56));
+    }
+
+    #[test]
+    fn context_for_request_has_hand_tiles_from_observation() {
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![0, 16, 104]));
+        let state = ValidationState::new();
+        let context = context_for_request(&observation, &state, 1);
+        assert_eq!(context.drawn_tile(), TileId::new(56));
+        assert_eq!(
+            context.hand_tiles(),
+            &[
+                TileId::new(0).unwrap(),
+                TileId::new(16).unwrap(),
+                TileId::new(104).unwrap(),
+            ]
+        );
     }
 
     #[test]
@@ -281,6 +297,7 @@ mod tests {
         state.on_tsumo(0, "6p".to_string());
         let context = context_for_request(&observation, &state, 2);
         assert_eq!(context.drawn_tile(), TileId::new(56));
+        assert!(context.hand_tiles().is_empty());
     }
 
     #[test]
@@ -293,12 +310,24 @@ mod tests {
 
     #[test]
     fn context_for_request_uses_empty_decoded_observation_over_state() {
-        let observation = ObservationPayload::new(fixture_base64(0, None));
+        let observation = ObservationPayload::new(fixture_base64(0, None, vec![]));
         let mut state = ValidationState::new();
         state.on_start_game(0);
         state.on_tsumo(0, "6p".to_string());
         let context = context_for_request(&observation, &state, 4);
         assert_eq!(context.drawn_tile(), None);
+    }
+
+    #[test]
+    fn context_for_request_keeps_hand_tiles_without_drawn_tile() {
+        let observation = ObservationPayload::new(fixture_base64(0, None, vec![0, 104]));
+        let state = ValidationState::new();
+        let context = context_for_request(&observation, &state, 5);
+        assert_eq!(context.drawn_tile(), None);
+        assert_eq!(
+            context.hand_tiles(),
+            &[TileId::new(0).unwrap(), TileId::new(104).unwrap()]
+        );
     }
 
     #[test]

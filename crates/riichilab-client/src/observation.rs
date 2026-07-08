@@ -23,11 +23,22 @@ impl ObservationPayload {
     pub fn decode_4p(&self) -> Result<DecodedObservation, ObservationError> {
         let observation = Observation::deserialize_from_base64(&self.base64)
             .map_err(|e| ObservationError::Decode(e.to_string()))?;
+        let hand_tiles = observation
+            .hands
+            .get(usize::from(observation.player_id))
+            .map(|hand| {
+                hand.iter()
+                    .filter_map(|&raw| u8::try_from(raw).ok())
+                    .filter_map(temporary_tile_id_from_observation_tile)
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(DecodedObservation {
             player_id: observation.player_id,
             drawn_tile: observation
                 .drawn_tile
                 .and_then(temporary_tile_id_from_observation_tile),
+            hand_tiles,
         })
     }
 }
@@ -42,20 +53,20 @@ pub enum ObservationError {
 pub struct DecodedObservation {
     pub player_id: u8,
     pub drawn_tile: Option<TileId>,
+    pub hand_tiles: Vec<TileId>,
 }
 
 pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
-    decoded
-        .drawn_tile
-        .map(GameContext::with_drawn_tile)
-        .unwrap_or_default()
+    GameContext::from_parts(decoded.drawn_tile, decoded.hand_tiles.clone())
 }
 
 #[cfg(test)]
-pub(crate) fn fixture_base64(player_id: u8, drawn_tile: Option<u8>) -> String {
+pub(crate) fn fixture_base64(player_id: u8, drawn_tile: Option<u8>, hand: Vec<u8>) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
     let observation = Observation::new(
         player_id,
-        Default::default(),
+        hands,
         Default::default(),
         Default::default(),
         vec![],
@@ -96,21 +107,21 @@ mod tests {
 
     #[test]
     fn decode_4p_roundtrip_returns_player_id() {
-        let payload = ObservationPayload::new(fixture_base64(2, None));
+        let payload = ObservationPayload::new(fixture_base64(2, None, vec![]));
         let decoded = payload.decode_4p().unwrap();
         assert_eq!(decoded.player_id, 2);
     }
 
     #[test]
     fn decode_4p_without_drawn_tile_returns_none() {
-        let payload = ObservationPayload::new(fixture_base64(0, None));
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![]));
         let decoded = payload.decode_4p().unwrap();
         assert_eq!(decoded.drawn_tile, None);
     }
 
     #[test]
     fn decode_4p_returns_drawn_tile() {
-        let payload = ObservationPayload::new(fixture_base64(0, Some(56)));
+        let payload = ObservationPayload::new(fixture_base64(0, Some(56), vec![]));
         let decoded = payload.decode_4p().unwrap();
         assert_eq!(decoded.drawn_tile, TileId::new(56));
     }
@@ -118,7 +129,7 @@ mod tests {
     #[test]
     fn decode_4p_normalizes_drawn_tile_to_temporary_tile_id() {
         for (raw, expected) in [(59, 56), (16, 16), (19, 17)] {
-            let payload = ObservationPayload::new(fixture_base64(0, Some(raw)));
+            let payload = ObservationPayload::new(fixture_base64(0, Some(raw), vec![]));
             let decoded = payload.decode_4p().unwrap();
             assert_eq!(decoded.drawn_tile, TileId::new(expected), "raw: {raw}");
         }
@@ -126,9 +137,65 @@ mod tests {
 
     #[test]
     fn decode_4p_out_of_range_drawn_tile_becomes_none() {
-        let payload = ObservationPayload::new(fixture_base64(0, Some(200)));
+        let payload = ObservationPayload::new(fixture_base64(0, Some(200), vec![]));
         let decoded = payload.decode_4p().unwrap();
         assert_eq!(decoded.drawn_tile, None);
+    }
+
+    #[test]
+    fn decode_4p_returns_hand_tiles() {
+        let payload = ObservationPayload::new(fixture_base64(1, None, vec![0, 16, 104]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.hand_tiles,
+            vec![
+                TileId::new(0).unwrap(),
+                TileId::new(16).unwrap(),
+                TileId::new(104).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_4p_with_empty_hand_returns_empty_hand_tiles() {
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![]));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(decoded.hand_tiles.is_empty());
+    }
+
+    #[test]
+    fn decode_4p_normalizes_hand_tiles_to_temporary_tile_id() {
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![59, 16, 19]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.hand_tiles,
+            vec![
+                TileId::new(56).unwrap(),
+                TileId::new(16).unwrap(),
+                TileId::new(17).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_4p_skips_out_of_range_hand_tiles() {
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![0, 200, 136, 104]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.hand_tiles,
+            vec![TileId::new(0).unwrap(), TileId::new(104).unwrap()]
+        );
+    }
+
+    #[test]
+    fn decode_4p_returns_both_drawn_tile_and_hand_tiles() {
+        let payload = ObservationPayload::new(fixture_base64(0, Some(59), vec![0, 16]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.drawn_tile, TileId::new(56));
+        assert_eq!(
+            decoded.hand_tiles,
+            vec![TileId::new(0).unwrap(), TileId::new(16).unwrap()]
+        );
     }
 
     #[test]
@@ -158,6 +225,7 @@ mod tests {
             let decoded = DecodedObservation {
                 player_id: 0,
                 drawn_tile: Some(tile),
+                hand_tiles: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -170,11 +238,40 @@ mod tests {
             let decoded = DecodedObservation {
                 player_id: 3,
                 drawn_tile: None,
+                hand_tiles: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
                 GameContext::default()
             );
+        }
+
+        #[test]
+        fn drawn_tile_and_hand_tiles_become_context_parts() {
+            let tile = TileId::new(56).unwrap();
+            let hand_tiles = vec![TileId::new(0).unwrap(), TileId::new(16).unwrap()];
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: Some(tile),
+                hand_tiles: hand_tiles.clone(),
+            };
+            assert_eq!(
+                game_context_from_decoded_observation(&decoded),
+                GameContext::from_parts(Some(tile), hand_tiles)
+            );
+        }
+
+        #[test]
+        fn hand_tiles_are_kept_without_drawn_tile() {
+            let hand_tiles = vec![TileId::new(104).unwrap()];
+            let decoded = DecodedObservation {
+                player_id: 1,
+                drawn_tile: None,
+                hand_tiles: hand_tiles.clone(),
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert_eq!(context.drawn_tile(), None);
+            assert_eq!(context.hand_tiles(), hand_tiles.as_slice());
         }
     }
 }
