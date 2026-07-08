@@ -110,6 +110,44 @@ impl TileCounts {
         Ok(())
     }
 
+    pub fn can_remove_adjacent_wait(&self, start: TileType) -> bool {
+        start
+            .next_in_suit()
+            .is_some_and(|next| self.count(start) >= 1 && self.count(next) >= 1)
+    }
+
+    pub fn can_remove_skip_wait(&self, start: TileType) -> bool {
+        start
+            .second_next_in_suit()
+            .is_some_and(|second| self.count(start) >= 1 && self.count(second) >= 1)
+    }
+
+    pub fn remove_adjacent_wait(&mut self, start: TileType) -> Result<(), TileCountError> {
+        let next = start
+            .next_in_suit()
+            .ok_or(TileCountError::Underflow(start))?;
+        self.remove_one_each([start, next])
+    }
+
+    pub fn remove_skip_wait(&mut self, start: TileType) -> Result<(), TileCountError> {
+        let second = start
+            .second_next_in_suit()
+            .ok_or(TileCountError::Underflow(start))?;
+        self.remove_one_each([start, second])
+    }
+
+    fn remove_one_each(&mut self, tiles: [TileType; 2]) -> Result<(), TileCountError> {
+        for tile in tiles {
+            if self.count(tile) == 0 {
+                return Err(TileCountError::Underflow(tile));
+            }
+        }
+        for tile in tiles {
+            self.counts[tile.index()] -= 1;
+        }
+        Ok(())
+    }
+
     pub fn total(&self) -> u8 {
         self.counts.iter().sum()
     }
@@ -422,5 +460,164 @@ mod tests {
         );
         assert_eq!(counts.count(tt(27)), 3);
         assert_eq!(counts.total(), 3);
+    }
+
+    #[test]
+    fn can_remove_adjacent_wait_requires_both_tiles() {
+        assert!(TileCounts::from_tile_types(vec![tt(0), tt(1)]).can_remove_adjacent_wait(tt(0)));
+        assert!(!TileCounts::from_tile_types(vec![tt(0)]).can_remove_adjacent_wait(tt(0)));
+        assert!(!TileCounts::from_tile_types(vec![tt(1)]).can_remove_adjacent_wait(tt(0)));
+    }
+
+    #[test]
+    fn can_remove_adjacent_wait_allows_suit_edge() {
+        let counts = TileCounts::from_tile_types(vec![tt(7), tt(8)]);
+        assert!(counts.can_remove_adjacent_wait(tt(7)));
+    }
+
+    #[test]
+    fn can_remove_adjacent_wait_stays_within_suit() {
+        let counts = TileCounts::from_tile_types(vec![tt(8), tt(9)]);
+        assert!(!counts.can_remove_adjacent_wait(tt(8)));
+    }
+
+    #[test]
+    fn can_remove_adjacent_wait_rejects_honors() {
+        let counts = TileCounts::from_tile_types(vec![tt(27), tt(28)]);
+        assert!(!counts.can_remove_adjacent_wait(tt(27)));
+    }
+
+    #[test]
+    fn can_remove_skip_wait_requires_both_tiles() {
+        assert!(TileCounts::from_tile_types(vec![tt(0), tt(2)]).can_remove_skip_wait(tt(0)));
+        assert!(!TileCounts::from_tile_types(vec![tt(0)]).can_remove_skip_wait(tt(0)));
+        assert!(!TileCounts::from_tile_types(vec![tt(2)]).can_remove_skip_wait(tt(0)));
+    }
+
+    #[test]
+    fn can_remove_skip_wait_allows_suit_edge() {
+        let counts = TileCounts::from_tile_types(vec![tt(24), tt(26)]);
+        assert!(counts.can_remove_skip_wait(tt(24)));
+    }
+
+    #[test]
+    fn can_remove_skip_wait_stays_within_suit() {
+        let counts = TileCounts::from_tile_types(vec![tt(25), tt(26), tt(27), tt(28)]);
+        assert!(!counts.can_remove_skip_wait(tt(25)));
+        assert!(!counts.can_remove_skip_wait(tt(26)));
+    }
+
+    #[test]
+    fn can_remove_skip_wait_rejects_honors() {
+        let counts = TileCounts::from_tile_types(vec![tt(27), tt(29)]);
+        assert!(!counts.can_remove_skip_wait(tt(27)));
+    }
+
+    #[test]
+    fn remove_adjacent_wait_removes_one_of_each() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0), tt(1)]);
+        counts.remove_adjacent_wait(tt(0)).unwrap();
+        assert_eq!(counts.count(tt(0)), 0);
+        assert_eq!(counts.count(tt(1)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_adjacent_wait_removes_at_suit_edge() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(7), tt(8)]);
+        counts.remove_adjacent_wait(tt(7)).unwrap();
+        assert_eq!(counts.count(tt(7)), 0);
+        assert_eq!(counts.count(tt(8)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_adjacent_wait_fails_on_missing_tile_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0)]);
+        assert_eq!(
+            counts.remove_adjacent_wait(tt(0)),
+            Err(TileCountError::Underflow(tt(1)))
+        );
+        assert_eq!(counts.count(tt(0)), 1);
+        assert_eq!(counts.total(), 1);
+    }
+
+    #[test]
+    fn remove_adjacent_wait_stays_within_suit() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(8), tt(9)]);
+        assert_eq!(
+            counts.remove_adjacent_wait(tt(8)),
+            Err(TileCountError::Underflow(tt(8)))
+        );
+        assert_eq!(counts.count(tt(8)), 1);
+        assert_eq!(counts.count(tt(9)), 1);
+        assert_eq!(counts.total(), 2);
+    }
+
+    #[test]
+    fn remove_adjacent_wait_rejects_honors_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(27), tt(28)]);
+        assert_eq!(
+            counts.remove_adjacent_wait(tt(27)),
+            Err(TileCountError::Underflow(tt(27)))
+        );
+        assert_eq!(counts.count(tt(27)), 1);
+        assert_eq!(counts.count(tt(28)), 1);
+        assert_eq!(counts.total(), 2);
+    }
+
+    #[test]
+    fn remove_skip_wait_removes_one_of_each() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0), tt(2)]);
+        counts.remove_skip_wait(tt(0)).unwrap();
+        assert_eq!(counts.count(tt(0)), 0);
+        assert_eq!(counts.count(tt(2)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_skip_wait_removes_at_suit_edge() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(24), tt(26)]);
+        counts.remove_skip_wait(tt(24)).unwrap();
+        assert_eq!(counts.count(tt(24)), 0);
+        assert_eq!(counts.count(tt(26)), 0);
+        assert_eq!(counts.total(), 0);
+    }
+
+    #[test]
+    fn remove_skip_wait_fails_on_missing_tile_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(0)]);
+        assert_eq!(
+            counts.remove_skip_wait(tt(0)),
+            Err(TileCountError::Underflow(tt(2)))
+        );
+        assert_eq!(counts.count(tt(0)), 1);
+        assert_eq!(counts.total(), 1);
+    }
+
+    #[test]
+    fn remove_skip_wait_stays_within_suit() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(25), tt(26), tt(27), tt(28)]);
+        assert_eq!(
+            counts.remove_skip_wait(tt(25)),
+            Err(TileCountError::Underflow(tt(25)))
+        );
+        assert_eq!(
+            counts.remove_skip_wait(tt(26)),
+            Err(TileCountError::Underflow(tt(26)))
+        );
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[test]
+    fn remove_skip_wait_rejects_honors_without_changing_counts() {
+        let mut counts = TileCounts::from_tile_types(vec![tt(27), tt(29)]);
+        assert_eq!(
+            counts.remove_skip_wait(tt(27)),
+            Err(TileCountError::Underflow(tt(27)))
+        );
+        assert_eq!(counts.count(tt(27)), 1);
+        assert_eq!(counts.count(tt(29)), 1);
+        assert_eq!(counts.total(), 2);
     }
 }
