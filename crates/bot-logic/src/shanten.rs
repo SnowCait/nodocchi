@@ -15,6 +15,35 @@ pub fn standard_shanten(counts: &TileCounts) -> i8 {
     best
 }
 
+pub fn chiitoitsu_shanten(counts: &TileCounts) -> i8 {
+    let pairs = counts
+        .iter()
+        .filter(|(_, count)| *count >= 2)
+        .count()
+        .min(7) as i8;
+
+    let unique = counts
+        .iter()
+        .filter(|(_, count)| *count >= 1)
+        .count()
+        .min(7) as i8;
+
+    6 - pairs + (7 - unique)
+}
+
+pub fn kokushi_shanten(counts: &TileCounts) -> i8 {
+    let unique_yaochu = counts
+        .iter()
+        .filter(|(tile, count)| tile.is_yaochu() && *count >= 1)
+        .count() as i8;
+
+    let has_yaochu_pair = counts
+        .iter()
+        .any(|(tile, count)| tile.is_yaochu() && count >= 2);
+
+    13 - unique_yaochu - i8::from(has_yaochu_pair)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SearchState {
     melds: u8,
@@ -205,5 +234,87 @@ mod tests {
     fn sequence_does_not_cross_suits() {
         let counts = counts(&["8m", "9m", "1p", "E", "E"]);
         assert_eq!(standard_shanten(&counts), 6);
+    }
+
+    #[test]
+    fn chiitoitsu_complete_hand_returns_minus_one() {
+        let counts = counts(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E", "E",
+        ]);
+        assert_eq!(chiitoitsu_shanten(&counts), -1);
+    }
+
+    #[test]
+    fn chiitoitsu_tenpai_hand_returns_zero() {
+        let counts = counts(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+        ]);
+        assert_eq!(chiitoitsu_shanten(&counts), 0);
+    }
+
+    #[test]
+    fn chiitoitsu_one_shanten_hand_returns_one() {
+        let counts = counts(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "E",
+        ]);
+        assert_eq!(chiitoitsu_shanten(&counts), 1);
+    }
+
+    #[test]
+    fn chiitoitsu_quad_counts_as_one_pair() {
+        let counts = counts(&[
+            "1m", "1m", "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+        ]);
+        assert_eq!(chiitoitsu_shanten(&counts), 0);
+    }
+
+    #[test]
+    fn chiitoitsu_empty_hand_returns_thirteen() {
+        assert_eq!(chiitoitsu_shanten(&TileCounts::new()), 13);
+    }
+
+    #[test]
+    fn kokushi_complete_hand_returns_minus_one() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C", "1m",
+        ]);
+        assert_eq!(kokushi_shanten(&counts), -1);
+    }
+
+    #[test]
+    fn kokushi_thirteen_wait_tenpai_returns_zero() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+        ]);
+        assert_eq!(kokushi_shanten(&counts), 0);
+    }
+
+    #[test]
+    fn kokushi_single_wait_tenpai_returns_zero() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "1m",
+        ]);
+        assert_eq!(kokushi_shanten(&counts), 0);
+    }
+
+    #[test]
+    fn kokushi_one_shanten_hand_returns_one() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "1m",
+        ]);
+        assert_eq!(kokushi_shanten(&counts), 1);
+    }
+
+    #[test]
+    fn kokushi_middle_tile_does_not_count_as_yaochu() {
+        let counts = counts(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "5m",
+        ]);
+        assert_eq!(kokushi_shanten(&counts), 1);
+    }
+
+    #[test]
+    fn kokushi_empty_hand_returns_thirteen() {
+        assert_eq!(kokushi_shanten(&TileCounts::new()), 13);
     }
 }
