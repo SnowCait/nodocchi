@@ -1,6 +1,6 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use bot_logic::select_best_discard_from_tiles;
+use bot_logic::select_best_discard_from_tiles_with_dora;
 
 pub fn select_discard_action(
     context: &GameContext,
@@ -13,7 +13,8 @@ pub fn select_discard_action(
         .chain(context.drawn_tile())
         .collect();
 
-    let selected_type = select_best_discard_from_tiles(&tiles)?.discard;
+    let selected_type =
+        select_best_discard_from_tiles_with_dora(&tiles, context.dora_indicators())?.discard;
 
     let mut red_fallback = None;
     for action in legal_actions {
@@ -146,6 +147,63 @@ mod tests {
     fn returns_none_when_selected_type_has_no_dahai() {
         let context = GameContext::with_hand_tiles(vec![tile(0)]);
         let actions = vec![dahai(4)];
+        assert_eq!(select_discard_action(&context, &actions), None);
+    }
+
+    #[test]
+    fn perfect_tie_avoids_discarding_dora() {
+        // 123m 456m 789m 123p + 東(浮き) 西(浮き), ドラ表示 南 -> 西 がドラ
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_dora(Some(tile(116)), hand, vec![tile(112)]);
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108, 116]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "E");
+    }
+
+    #[test]
+    fn discards_dora_when_it_lowers_shanten() {
+        // 5m を切るとテンパイになる形。5m がドラでも向聴を優先して切る
+        let hand: Vec<_> = [40u8, 44, 48, 56, 60, 64, 76, 80, 84, 108, 109, 96, 100]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_dora(Some(tile(16)), hand, vec![tile(12)]);
+        let actions: Vec<LegalAction> =
+            [40u8, 44, 48, 56, 60, 64, 76, 80, 84, 108, 109, 96, 100, 16]
+                .iter()
+                .map(|&value| dahai(value))
+                .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "5m");
+    }
+
+    #[test]
+    fn prefers_black_five_over_red_with_dora_indicator() {
+        // 赤5と通常5が併存する場合は通常5を切る
+        let context =
+            GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
+        let actions = vec![dahai(16), dahai(17)];
+        assert_eq!(select_discard_action(&context, &actions), Some(dahai(17)));
+    }
+
+    #[test]
+    fn empty_tiles_yield_no_action_with_dora() {
+        let context = GameContext::from_parts_with_dora(None, vec![], vec![tile(12)]);
+        let actions = vec![dahai(0)];
         assert_eq!(select_discard_action(&context, &actions), None);
     }
 

@@ -1,6 +1,6 @@
 use crate::acceptance::{Acceptance, calculate_acceptance};
 use crate::shanten::Shanten;
-use crate::tile::{TileId, TileType};
+use crate::tile::{TileId, TileType, count_dora};
 use crate::tile_counts::TileCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +9,7 @@ pub struct DiscardEvaluation {
     pub count_before_discard: u8,
     pub shanten_after_discard: Shanten,
     pub acceptance_after_discard: Acceptance,
+    pub discarded_dora_count: u8,
     pub discards_red_five: bool,
 }
 
@@ -31,7 +32,17 @@ pub fn select_best_discard(counts: &TileCounts) -> Option<DiscardEvaluation> {
 }
 
 pub fn select_best_discard_from_tiles(tiles: &[TileId]) -> Option<DiscardEvaluation> {
-    select_best(evaluate_discards_from_tiles(tiles))
+    select_best_discard_from_tiles_with_dora(tiles, &[])
+}
+
+pub fn select_best_discard_from_tiles_with_dora(
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+) -> Option<DiscardEvaluation> {
+    select_best(evaluate_discards_from_tiles_with_dora(
+        tiles,
+        dora_indicators,
+    ))
 }
 
 fn select_best(evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
@@ -63,6 +74,10 @@ fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) ->
         return candidate_type_count > best_type_count;
     }
 
+    if candidate.discarded_dora_count != best.discarded_dora_count {
+        return candidate.discarded_dora_count < best.discarded_dora_count;
+    }
+
     !candidate.discards_red_five && best.discards_red_five
 }
 
@@ -88,6 +103,7 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             count_before_discard,
             shanten_after_discard,
             acceptance_after_discard,
+            discarded_dora_count: 0,
             discards_red_five: false,
         });
     }
@@ -96,20 +112,38 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
 }
 
 pub fn evaluate_discards_from_tiles(tiles: &[TileId]) -> Vec<DiscardEvaluation> {
+    evaluate_discards_from_tiles_with_dora(tiles, &[])
+}
+
+pub fn evaluate_discards_from_tiles_with_dora(
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+) -> Vec<DiscardEvaluation> {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
     let mut evaluations = evaluate_discards(&counts);
     for evaluation in &mut evaluations {
-        evaluation.discards_red_five = discard_is_forced_red_five(evaluation.discard, tiles);
+        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, tiles);
+        evaluation.discards_red_five = discarded_tile.map(TileId::is_red).unwrap_or(false);
+        evaluation.discarded_dora_count = discarded_tile
+            .map(|tile| count_dora(tile, dora_indicators))
+            .unwrap_or(0);
     }
     evaluations
 }
 
-fn discard_is_forced_red_five(discard: TileType, tiles: &[TileId]) -> bool {
-    let mut copies = tiles
-        .iter()
-        .filter(|tile| tile.tile_type() == discard)
-        .peekable();
-    copies.peek().is_some() && copies.all(|tile| tile.is_red())
+fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<TileId> {
+    let mut red = None;
+    for &tile in tiles {
+        if tile.tile_type() != discard {
+            continue;
+        }
+        if tile.is_red() {
+            red.get_or_insert(tile);
+        } else {
+            return Some(tile);
+        }
+    }
+    red
 }
 
 #[cfg(test)]
@@ -378,7 +412,13 @@ mod tests {
         }
     }
 
-    fn evaluation(min: i8, remaining: u8, type_count: usize, red: bool) -> DiscardEvaluation {
+    fn evaluation(
+        min: i8,
+        remaining: u8,
+        type_count: usize,
+        dora: u8,
+        red: bool,
+    ) -> DiscardEvaluation {
         let tiles: Vec<AcceptanceTile> = (0..type_count)
             .map(|i| AcceptanceTile {
                 tile: TileType::new(i as u8).unwrap(),
@@ -395,35 +435,78 @@ mod tests {
                 current: shanten_min(min),
                 tiles,
             },
+            discarded_dora_count: dora,
             discards_red_five: red,
         }
     }
 
     #[test]
     fn shanten_outranks_red_five_tiebreak() {
-        let low_shanten_red = evaluation(0, 4, 1, true);
-        let high_shanten_keep = evaluation(1, 40, 5, false);
+        let low_shanten_red = evaluation(0, 4, 1, 0, true);
+        let high_shanten_keep = evaluation(1, 40, 5, 0, false);
         assert!(is_better_discard(&low_shanten_red, &high_shanten_keep));
     }
 
     #[test]
     fn acceptance_remaining_outranks_red_five_tiebreak() {
-        let more_remaining_red = evaluation(1, 20, 1, true);
-        let less_remaining_keep = evaluation(1, 10, 1, false);
+        let more_remaining_red = evaluation(1, 20, 1, 0, true);
+        let less_remaining_keep = evaluation(1, 10, 1, 0, false);
         assert!(is_better_discard(&more_remaining_red, &less_remaining_keep));
     }
 
     #[test]
     fn acceptance_types_outrank_red_five_tiebreak() {
-        let more_types_red = evaluation(1, 10, 3, true);
-        let fewer_types_keep = evaluation(1, 10, 2, false);
+        let more_types_red = evaluation(1, 10, 3, 0, true);
+        let fewer_types_keep = evaluation(1, 10, 2, 0, false);
         assert!(is_better_discard(&more_types_red, &fewer_types_keep));
     }
 
     #[test]
+    fn shanten_outranks_dora_tiebreak() {
+        let low_shanten_dora = evaluation(0, 4, 1, 2, false);
+        let high_shanten_keep = evaluation(1, 40, 5, 0, false);
+        assert!(is_better_discard(&low_shanten_dora, &high_shanten_keep));
+    }
+
+    #[test]
+    fn acceptance_remaining_outranks_dora_tiebreak() {
+        let more_remaining_dora = evaluation(1, 20, 1, 2, false);
+        let less_remaining_keep = evaluation(1, 10, 1, 0, false);
+        assert!(is_better_discard(
+            &more_remaining_dora,
+            &less_remaining_keep
+        ));
+    }
+
+    #[test]
+    fn acceptance_types_outrank_dora_tiebreak() {
+        let more_types_dora = evaluation(1, 10, 3, 2, false);
+        let fewer_types_keep = evaluation(1, 10, 2, 0, false);
+        assert!(is_better_discard(&more_types_dora, &fewer_types_keep));
+    }
+
+    #[test]
+    fn dora_tiebreak_prefers_fewer_dora() {
+        let keep_dora = evaluation(1, 10, 2, 0, false);
+        let discard_dora = evaluation(1, 10, 2, 1, false);
+        assert!(is_better_discard(&keep_dora, &discard_dora));
+        assert!(!is_better_discard(&discard_dora, &keep_dora));
+    }
+
+    #[test]
+    fn dora_tiebreak_outranks_red_five_tiebreak() {
+        let fewer_dora_discards_red = evaluation(1, 10, 2, 0, true);
+        let more_dora_keeps_red = evaluation(1, 10, 2, 1, false);
+        assert!(is_better_discard(
+            &fewer_dora_discards_red,
+            &more_dora_keeps_red
+        ));
+    }
+
+    #[test]
     fn red_five_is_the_final_tiebreak() {
-        let keep_red = evaluation(1, 10, 2, false);
-        let discard_red = evaluation(1, 10, 2, true);
+        let keep_red = evaluation(1, 10, 2, 0, false);
+        let discard_red = evaluation(1, 10, 2, 0, true);
         assert!(is_better_discard(&keep_red, &discard_red));
         assert!(!is_better_discard(&discard_red, &keep_red));
     }
@@ -485,6 +568,90 @@ mod tests {
     #[test]
     fn from_tiles_empty_hand_has_no_selection() {
         assert_eq!(select_best_discard_from_tiles(&[]), None);
+    }
+
+    #[test]
+    fn with_empty_dora_matches_from_tiles_behavior() {
+        let tiles = ids(&[0, 17, 32, 36, 53, 68, 72, 89, 104, 108]);
+        let with_dora = select_best_discard_from_tiles_with_dora(&tiles, &[]).unwrap();
+        let without = select_best_discard_from_tiles(&tiles).unwrap();
+        assert_eq!(with_dora, without);
+    }
+
+    #[test]
+    fn empty_dora_indicators_yield_zero_dora_count() {
+        let tiles = ids(&[0, 17, 32, 36, 53, 68, 72, 89, 104, 108]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.discarded_dora_count == 0)
+        );
+    }
+
+    #[test]
+    fn normal_dora_discard_has_positive_dora_count() {
+        // 1m 2m 3m 4m 5m 6m 7m 8m 9m 1p 2p 3p 1m(浮き) 1p(浮き), ドラ表示 9p -> 1p がドラ
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 1, 37]);
+        let indicators = ids(&[68]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &indicators);
+        let dora_tile = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("1p"))
+            .unwrap();
+        assert!(dora_tile.discarded_dora_count > 0);
+        let non_dora = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("1m"))
+            .unwrap();
+        assert_eq!(non_dora.discarded_dora_count, 0);
+    }
+
+    #[test]
+    fn lone_red_five_counts_red_dora() {
+        let tiles = ids(&[0, 16, 32, 36, 53, 68, 72, 89, 104, 108]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let five = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("5m"))
+            .unwrap();
+        assert_eq!(five.discarded_dora_count, 1);
+        assert!(five.discards_red_five);
+    }
+
+    #[test]
+    fn black_five_present_does_not_count_red_dora() {
+        let tiles = ids(&[16, 17, 0, 8]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let five = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("5m"))
+            .unwrap();
+        assert_eq!(five.discarded_dora_count, 0);
+        assert!(!five.discards_red_five);
+    }
+
+    #[test]
+    fn perfect_tie_prefers_keeping_dora() {
+        // 123m 456m 789m 123p + 東(浮き) 西(浮き), ドラ表示 南 -> 西 がドラ
+        // 東と西のどちらを切っても同じ単騎テンパイになり、ドラでない東が優先される
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108, 116]);
+        let indicators = ids(&[112]);
+        let selected = select_best_discard_from_tiles_with_dora(&tiles, &indicators).unwrap();
+        assert_eq!(selected.discard, tile("E"));
+        assert_eq!(selected.discarded_dora_count, 0);
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+    }
+
+    #[test]
+    fn shanten_outranks_keeping_dora() {
+        // 5m を切るとテンパイになる形。5m がドラでも向聴を優先して切る
+        let tiles = ids(&[40, 44, 48, 56, 60, 64, 76, 80, 84, 108, 109, 96, 100, 16]);
+        let indicators = ids(&[12]);
+        let selected = select_best_discard_from_tiles_with_dora(&tiles, &indicators).unwrap();
+        assert_eq!(selected.discard, tile("5m"));
+        assert!(selected.discarded_dora_count > 0);
+        assert_eq!(selected.min_shanten_after_discard(), 0);
     }
 
     #[test]
