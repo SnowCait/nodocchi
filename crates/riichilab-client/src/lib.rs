@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod convert;
@@ -7,6 +8,7 @@ pub mod state;
 pub mod tls;
 pub mod validation_policy;
 
+pub use cli::{CliArgs, CliError, ConnectionMode, USAGE};
 pub use client::{
     ClientError, build_response_for_request, build_response_for_request_with_context,
     run_validation_client,

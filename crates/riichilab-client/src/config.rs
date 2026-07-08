@@ -6,6 +6,7 @@ pub struct ClientConfig {
 
 impl ClientConfig {
     pub const DEFAULT_VALIDATE_ENDPOINT: &'static str = "wss://game.riichi.dev/ws/validate";
+    pub const RANKED_ENDPOINT: &'static str = "wss://game.riichi.dev/ws/ranked";
 
     pub fn from_parts(token: String, endpoint: Option<String>) -> Self {
         Self {
@@ -14,11 +15,10 @@ impl ClientConfig {
         }
     }
 
-    pub fn from_env() -> Result<Self, ConfigError> {
+    pub fn from_env_with_endpoint(endpoint: String) -> Result<Self, ConfigError> {
         let token =
             std::env::var("RIICHILAB_BOT_TOKEN").map_err(|_| ConfigError::MissingBotToken)?;
-        let endpoint = std::env::var("RIICHILAB_ENDPOINT").ok();
-        Ok(Self::from_parts(token, endpoint))
+        Ok(Self::from_parts(token, Some(endpoint)))
     }
 }
 
