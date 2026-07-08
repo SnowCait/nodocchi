@@ -1,27 +1,36 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use bot_logic::{TileCounts, select_best_discard};
+use bot_logic::select_best_discard_from_tiles;
 
 pub fn select_discard_action(
     context: &GameContext,
     legal_actions: &[LegalAction],
 ) -> Option<LegalAction> {
-    let counts = TileCounts::from_tiles(
-        context
-            .hand_tiles()
-            .iter()
-            .copied()
-            .chain(context.drawn_tile()),
-    );
-
-    let selected_type = select_best_discard(&counts)?.discard;
-
-    legal_actions
+    let tiles: Vec<_> = context
+        .hand_tiles()
         .iter()
-        .find(|action| {
-            matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == selected_type)
-        })
-        .cloned()
+        .copied()
+        .chain(context.drawn_tile())
+        .collect();
+
+    let selected_type = select_best_discard_from_tiles(&tiles)?.discard;
+
+    let mut red_fallback = None;
+    for action in legal_actions {
+        let LegalAction::Dahai { tile } = action else {
+            continue;
+        };
+        if tile.tile_type() != selected_type {
+            continue;
+        }
+        if tile.is_red() {
+            red_fallback.get_or_insert_with(|| action.clone());
+        } else {
+            return Some(action.clone());
+        }
+    }
+
+    red_fallback
 }
 
 #[cfg(test)]
@@ -72,14 +81,15 @@ mod tests {
 
         let selected_action = select_discard_action(&context, &actions).unwrap();
 
-        let counts = TileCounts::from_tiles(
-            context
-                .hand_tiles()
-                .iter()
-                .copied()
-                .chain(context.drawn_tile()),
-        );
-        let selected_type = select_best_discard(&counts).unwrap().discard;
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let selected_type = bot_logic::select_best_discard_from_tiles(&tiles)
+            .unwrap()
+            .discard;
 
         assert!(matches!(
             selected_action,
@@ -109,6 +119,27 @@ mod tests {
         let context = GameContext::from_parts(Some(tile(16)), vec![tile(17)]);
         let actions = vec![dahai(17), dahai(16)];
         assert_eq!(select_discard_action(&context, &actions), Some(dahai(17)));
+    }
+
+    #[test]
+    fn prefers_black_five_over_red_of_selected_type() {
+        let context = GameContext::from_parts(None, vec![tile(16), tile(17)]);
+        let actions = vec![dahai(16), dahai(17)];
+        assert_eq!(select_discard_action(&context, &actions), Some(dahai(17)));
+    }
+
+    #[test]
+    fn falls_back_to_red_five_when_only_red_available() {
+        let context = GameContext::from_parts(None, vec![tile(16)]);
+        let actions = vec![dahai(16)];
+        assert_eq!(select_discard_action(&context, &actions), Some(dahai(16)));
+    }
+
+    #[test]
+    fn returns_none_without_context_tiles_even_with_dahai() {
+        let context = GameContext::default();
+        let actions = vec![dahai(16)];
+        assert_eq!(select_discard_action(&context, &actions), None);
     }
 
     #[test]
