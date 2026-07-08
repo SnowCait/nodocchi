@@ -331,4 +331,23 @@ mod tests {
                 .any(|evaluation| evaluation.discard == selected.discard)
         );
     }
+
+    #[test]
+    #[ignore]
+    fn benchmark_evaluate_discards_sample_hand() {
+        let counts = counts(&[
+            "2m", "3m", "4m", "5m", "6m", "7m", "8m", "2p", "3p", "4p", "5p", "6p", "7p", "5s",
+        ]);
+        let start = std::time::Instant::now();
+        let iterations = 100;
+        for _ in 0..iterations {
+            let _ = select_best_discard(&counts);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "select_best_discard: {:?} total, {:?} per call",
+            elapsed,
+            elapsed / iterations
+        );
+    }
 }
