@@ -1,5 +1,6 @@
 use crate::tile::TileType;
 use crate::tile_counts::{TileCountError, TileCounts};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shanten {
@@ -23,7 +24,7 @@ pub fn calculate_shanten(counts: &TileCounts) -> Shanten {
 }
 
 pub fn standard_shanten(counts: &TileCounts) -> i8 {
-    let mut best = i8::MAX;
+    let mut memo = SearchMemo::new();
     search(
         *counts,
         SearchState {
@@ -31,9 +32,8 @@ pub fn standard_shanten(counts: &TileCounts) -> i8 {
             has_pair: false,
             partials: 0,
         },
-        &mut best,
-    );
-    best
+        &mut memo,
+    )
 }
 
 pub fn chiitoitsu_shanten(counts: &TileCounts) -> i8 {
@@ -65,7 +65,9 @@ pub fn kokushi_shanten(counts: &TileCounts) -> i8 {
     13 - unique_yaochu - i8::from(has_yaochu_pair)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+type SearchMemo = HashMap<([u8; 34], SearchState), i8>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SearchState {
     melds: u8,
     has_pair: bool,
@@ -102,71 +104,79 @@ impl SearchState {
     }
 }
 
-fn search(counts: TileCounts, state: SearchState, best: &mut i8) {
-    *best = (*best).min(state.shanten());
+fn search(counts: TileCounts, state: SearchState, memo: &mut SearchMemo) -> i8 {
+    let mut best = state.shanten();
 
     let Some(tile) = counts
         .iter()
         .find_map(|(tile, count)| (count >= 1).then_some(tile))
     else {
-        return;
+        return best;
     };
 
+    let key = (*counts.as_array(), state);
+    if let Some(&cached) = memo.get(&key) {
+        return cached;
+    }
+
     if state.melds < 4 {
-        try_branch(
+        best = best.min(try_branch(
             counts,
             tile,
             TileCounts::remove_triplet,
             state.with_meld(),
-            best,
-        );
-        try_branch(
+            memo,
+        ));
+        best = best.min(try_branch(
             counts,
             tile,
             TileCounts::remove_sequence,
             state.with_meld(),
-            best,
-        );
+            memo,
+        ));
     }
 
     if !state.has_pair {
-        try_branch(
+        best = best.min(try_branch(
             counts,
             tile,
             TileCounts::remove_pair,
             state.with_pair_head(),
-            best,
-        );
+            memo,
+        ));
     }
 
     if state.melds + state.partials < 4 {
-        try_branch(
+        best = best.min(try_branch(
             counts,
             tile,
             TileCounts::remove_pair,
             state.with_partial(),
-            best,
-        );
-        try_branch(
+            memo,
+        ));
+        best = best.min(try_branch(
             counts,
             tile,
             TileCounts::remove_adjacent_wait,
             state.with_partial(),
-            best,
-        );
-        try_branch(
+            memo,
+        ));
+        best = best.min(try_branch(
             counts,
             tile,
             TileCounts::remove_skip_wait,
             state.with_partial(),
-            best,
-        );
+            memo,
+        ));
     }
 
     let mut removed = counts;
     if removed.remove(tile).is_ok() {
-        search(removed, state, best);
+        best = best.min(search(removed, state, memo));
     }
+
+    memo.insert(key, best);
+    best
 }
 
 fn try_branch(
@@ -174,11 +184,13 @@ fn try_branch(
     tile: TileType,
     remove: fn(&mut TileCounts, TileType) -> Result<(), TileCountError>,
     next_state: SearchState,
-    best: &mut i8,
-) {
+    memo: &mut SearchMemo,
+) -> i8 {
     let mut removed = counts;
     if remove(&mut removed, tile).is_ok() {
-        search(removed, next_state, best);
+        search(removed, next_state, memo)
+    } else {
+        i8::MAX
     }
 }
 
