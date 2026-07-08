@@ -20,7 +20,8 @@ pub use convert::{
 };
 pub use observation::{DecodedObservation, ObservationError, ObservationPayload};
 pub use protocol::{
-    ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, TimeControl, parse_server_event,
+    ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, RequestTimeBudget, TimeControl,
+    mjai_action_type, parse_server_event, request_time_budget,
 };
 pub use state::ValidationState;
 pub use tls::install_default_crypto_provider;
