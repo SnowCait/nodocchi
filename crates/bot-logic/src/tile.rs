@@ -76,6 +76,29 @@ impl TileType {
         }
     }
 
+    pub fn is_suited(self) -> bool {
+        !self.is_honor()
+    }
+
+    pub fn next_in_suit(self) -> Option<TileType> {
+        match self.number()? {
+            1..=8 => Some(Self(self.0 + 1)),
+            _ => None,
+        }
+    }
+
+    pub fn second_next_in_suit(self) -> Option<TileType> {
+        self.next_in_suit()?.next_in_suit()
+    }
+
+    pub fn can_start_sequence(self) -> bool {
+        matches!(self.number(), Some(1..=7))
+    }
+
+    pub fn sequence(self) -> Option<[TileType; 3]> {
+        Some([self, self.next_in_suit()?, self.second_next_in_suit()?])
+    }
+
     pub fn to_mjai_string(self) -> String {
         match self.0 {
             27 => "E".to_string(),
@@ -278,6 +301,83 @@ mod tests {
         assert_eq!(tt(9).suit(), Some(Suit::Pin));
         assert_eq!(tt(18).suit(), Some(Suit::Sou));
         assert_eq!(tt(33).suit(), None);
+    }
+
+    #[test]
+    fn is_suited_for_numbers_and_honors() {
+        assert!(tt(0).is_suited());
+        assert!(tt(8).is_suited());
+        assert!(tt(9).is_suited());
+        assert!(tt(17).is_suited());
+        assert!(tt(18).is_suited());
+        assert!(tt(26).is_suited());
+        assert!(!tt(27).is_suited());
+        assert!(!tt(33).is_suited());
+    }
+
+    #[test]
+    fn next_in_suit_stays_within_suit() {
+        assert_eq!(tt(0).next_in_suit(), Some(tt(1)));
+        assert_eq!(tt(7).next_in_suit(), Some(tt(8)));
+        assert_eq!(tt(8).next_in_suit(), None);
+        assert_eq!(tt(9).next_in_suit(), Some(tt(10)));
+        assert_eq!(tt(16).next_in_suit(), Some(tt(17)));
+        assert_eq!(tt(17).next_in_suit(), None);
+        assert_eq!(tt(18).next_in_suit(), Some(tt(19)));
+        assert_eq!(tt(25).next_in_suit(), Some(tt(26)));
+        assert_eq!(tt(26).next_in_suit(), None);
+        assert_eq!(tt(27).next_in_suit(), None);
+    }
+
+    #[test]
+    fn second_next_in_suit_stays_within_suit() {
+        assert_eq!(tt(0).second_next_in_suit(), Some(tt(2)));
+        assert_eq!(tt(6).second_next_in_suit(), Some(tt(8)));
+        assert_eq!(tt(7).second_next_in_suit(), None);
+        assert_eq!(tt(8).second_next_in_suit(), None);
+        assert_eq!(tt(9).second_next_in_suit(), Some(tt(11)));
+        assert_eq!(tt(15).second_next_in_suit(), Some(tt(17)));
+        assert_eq!(tt(16).second_next_in_suit(), None);
+        assert_eq!(tt(17).second_next_in_suit(), None);
+        assert_eq!(tt(18).second_next_in_suit(), Some(tt(20)));
+        assert_eq!(tt(24).second_next_in_suit(), Some(tt(26)));
+        assert_eq!(tt(25).second_next_in_suit(), None);
+        assert_eq!(tt(26).second_next_in_suit(), None);
+        assert_eq!(tt(27).second_next_in_suit(), None);
+    }
+
+    #[test]
+    fn can_start_sequence_for_numbers_and_honors() {
+        assert!(tt(0).can_start_sequence());
+        assert!(tt(6).can_start_sequence());
+        assert!(!tt(7).can_start_sequence());
+        assert!(!tt(8).can_start_sequence());
+        assert!(tt(9).can_start_sequence());
+        assert!(tt(15).can_start_sequence());
+        assert!(!tt(16).can_start_sequence());
+        assert!(!tt(17).can_start_sequence());
+        assert!(tt(18).can_start_sequence());
+        assert!(tt(24).can_start_sequence());
+        assert!(!tt(25).can_start_sequence());
+        assert!(!tt(26).can_start_sequence());
+        assert!(!tt(27).can_start_sequence());
+    }
+
+    #[test]
+    fn sequence_from_start_tile() {
+        assert_eq!(tt(0).sequence(), Some([tt(0), tt(1), tt(2)]));
+        assert_eq!(tt(6).sequence(), Some([tt(6), tt(7), tt(8)]));
+        assert_eq!(tt(7).sequence(), None);
+        assert_eq!(tt(8).sequence(), None);
+        assert_eq!(tt(9).sequence(), Some([tt(9), tt(10), tt(11)]));
+        assert_eq!(tt(15).sequence(), Some([tt(15), tt(16), tt(17)]));
+        assert_eq!(tt(16).sequence(), None);
+        assert_eq!(tt(17).sequence(), None);
+        assert_eq!(tt(18).sequence(), Some([tt(18), tt(19), tt(20)]));
+        assert_eq!(tt(24).sequence(), Some([tt(24), tt(25), tt(26)]));
+        assert_eq!(tt(25).sequence(), None);
+        assert_eq!(tt(26).sequence(), None);
+        assert_eq!(tt(27).sequence(), None);
     }
 
     #[test]
