@@ -236,21 +236,77 @@ where
                                 })
                             });
                         let json = serde_json::to_string(&response)?;
-                        debug!(response = %json, "sending response");
+                        debug!(
+                            request_id,
+                            possible_actions = possible_actions.len(),
+                            response = %json,
+                            "sending response"
+                        );
                         ws_stream.send(Message::Text(json.into())).await?;
                     }
                     MjaiEvent::ActionAck {
                         request_id,
                         status,
+                        elapsed_ms,
+                        bank_consumed_ms,
+                        bank_ms,
                         message,
-                        ..
-                    } => {
-                        if status == ActionAckStatus::Accepted {
-                            info!(request_id, status = ?status, "action_ack");
-                        } else {
-                            warn!(request_id, status = ?status, message = ?message, "action_ack");
+                        reason,
+                        action,
+                        attempted,
+                        legal_types,
+                    } => match status {
+                        ActionAckStatus::Accepted => {
+                            info!(
+                                request_id,
+                                status = ?status,
+                                elapsed_ms = ?elapsed_ms,
+                                bank_consumed_ms = ?bank_consumed_ms,
+                                bank_ms = ?bank_ms,
+                                "action_ack accepted"
+                            );
                         }
-                    }
+                        ActionAckStatus::Defaulted => {
+                            warn!(
+                                request_id,
+                                status = ?status,
+                                elapsed_ms = ?elapsed_ms,
+                                bank_consumed_ms = ?bank_consumed_ms,
+                                bank_ms = ?bank_ms,
+                                action = ?action,
+                                "action_ack defaulted; server substituted default action after timeout"
+                            );
+                        }
+                        ActionAckStatus::Stale => {
+                            warn!(
+                                request_id,
+                                status = ?status,
+                                elapsed_ms = ?elapsed_ms,
+                                bank_ms = ?bank_ms,
+                                "action_ack stale; reply was late or for an old request_id"
+                            );
+                        }
+                        ActionAckStatus::Rejected => {
+                            error!(
+                                request_id,
+                                status = ?status,
+                                reason = ?reason,
+                                message = ?message,
+                                attempted = ?attempted,
+                                legal_types = ?legal_types,
+                                "action_ack rejected; chombo risk"
+                            );
+                        }
+                        ActionAckStatus::Unparseable => {
+                            error!(
+                                request_id,
+                                status = ?status,
+                                reason = ?reason,
+                                message = ?message,
+                                "action_ack unparseable; chombo risk"
+                            );
+                        }
+                    },
                     MjaiEvent::EndGame { scores } => {
                         info!(scores = ?scores, "end_game");
                     }

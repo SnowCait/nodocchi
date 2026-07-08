@@ -223,6 +223,14 @@ pub enum MjaiEvent {
         bank_ms: Option<u64>,
         #[serde(default)]
         message: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        action: Option<serde_json::Value>,
+        #[serde(default)]
+        attempted: Option<serde_json::Value>,
+        #[serde(default)]
+        legal_types: Vec<String>,
     },
 
     #[serde(rename = "end_game")]
@@ -248,6 +256,16 @@ pub enum ActionAckStatus {
     Unparseable,
     Stale,
     Defaulted,
+}
+
+impl ActionAckStatus {
+    pub fn is_chombo(self) -> bool {
+        matches!(self, Self::Rejected | Self::Unparseable)
+    }
+
+    pub fn is_timing_issue(self) -> bool {
+        matches!(self, Self::Stale | Self::Defaulted)
+    }
 }
 
 pub fn parse_server_event(text: &str) -> Result<Option<MjaiEvent>, serde_json::Error> {
@@ -607,6 +625,10 @@ mod tests {
                 bank_consumed_ms: Some(0),
                 bank_ms: Some(10000),
                 message: Some("ok".to_string()),
+                reason: None,
+                action: None,
+                attempted: None,
+                legal_types: vec![],
             }
         );
     }
@@ -624,8 +646,73 @@ mod tests {
                 bank_consumed_ms: None,
                 bank_ms: None,
                 message: None,
+                reason: None,
+                action: None,
+                attempted: None,
+                legal_types: vec![],
             }
         );
+    }
+
+    #[test]
+    fn action_ack_defaulted_parses_substituted_action() {
+        let json = r#"{
+            "type": "action_ack",
+            "request_id": 51,
+            "status": "defaulted",
+            "elapsed_ms": 5000,
+            "bank_consumed_ms": 3000,
+            "bank_ms": 0,
+            "action": {"type": "none"},
+            "message": "deadline exceeded"
+        }"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        match event {
+            MjaiEvent::ActionAck {
+                request_id,
+                status,
+                bank_ms,
+                action,
+                ..
+            } => {
+                assert_eq!(request_id, 51);
+                assert_eq!(status, ActionAckStatus::Defaulted);
+                assert_eq!(bank_ms, Some(0));
+                assert_eq!(action.unwrap()["type"], "none");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_ack_rejected_parses_reason_attempted_legal_types() {
+        let json = r#"{
+            "type": "action_ack",
+            "request_id": 63,
+            "status": "rejected",
+            "reason": "action not in possible_actions",
+            "message": "illegal",
+            "attempted": {"type": "reach", "actor": 0},
+            "legal_types": ["dahai", "none"]
+        }"#;
+        let event: MjaiEvent = serde_json::from_str(json).unwrap();
+        match event {
+            MjaiEvent::ActionAck {
+                request_id,
+                status,
+                reason,
+                attempted,
+                legal_types,
+                ..
+            } => {
+                assert_eq!(request_id, 63);
+                assert_eq!(status, ActionAckStatus::Rejected);
+                assert_eq!(reason.as_deref(), Some("action not in possible_actions"));
+                assert_eq!(attempted.unwrap()["type"], "reach");
+                assert_eq!(legal_types, vec!["dahai".to_string(), "none".to_string()]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
@@ -645,6 +732,24 @@ mod tests {
     #[test]
     fn action_ack_status_rejects_unknown() {
         assert!(serde_json::from_str::<ActionAckStatus>(r#""unknown""#).is_err());
+    }
+
+    #[test]
+    fn action_ack_status_is_chombo() {
+        assert!(ActionAckStatus::Rejected.is_chombo());
+        assert!(ActionAckStatus::Unparseable.is_chombo());
+        assert!(!ActionAckStatus::Accepted.is_chombo());
+        assert!(!ActionAckStatus::Stale.is_chombo());
+        assert!(!ActionAckStatus::Defaulted.is_chombo());
+    }
+
+    #[test]
+    fn action_ack_status_is_timing_issue() {
+        assert!(ActionAckStatus::Stale.is_timing_issue());
+        assert!(ActionAckStatus::Defaulted.is_timing_issue());
+        assert!(!ActionAckStatus::Accepted.is_timing_issue());
+        assert!(!ActionAckStatus::Rejected.is_timing_issue());
+        assert!(!ActionAckStatus::Unparseable.is_timing_issue());
     }
 
     #[test]
