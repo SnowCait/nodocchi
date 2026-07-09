@@ -28,6 +28,95 @@ impl DiscardEvaluation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShapeBreakdown {
+    pub breaks_pair: bool,
+    pub breaks_ryanmen: bool,
+    pub breaks_kanchan: bool,
+    pub breaks_penchan: bool,
+    pub breaks_sequence: bool,
+    pub adjacent_count: u8,
+    pub same_type_count: u8,
+}
+
+pub fn shape_breakdown_for_discard(counts: &TileCounts, discard: TileType) -> ShapeBreakdown {
+    let same_type_count = counts.count(discard);
+    if same_type_count == 0 {
+        return ShapeBreakdown::default();
+    }
+
+    let mut breakdown = ShapeBreakdown {
+        same_type_count,
+        ..ShapeBreakdown::default()
+    };
+    if same_type_count >= 2 {
+        breakdown.breaks_pair = true;
+    }
+
+    let Some(number) = discard.number() else {
+        return breakdown;
+    };
+
+    let base = discard.raw() - (number - 1);
+    let has = |n: i8| -> bool {
+        if !(1..=9).contains(&n) {
+            return false;
+        }
+        let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+        counts.count(tile) > 0
+    };
+
+    let d = number as i8;
+
+    for delta in [-2i8, -1, 1, 2] {
+        if has(d + delta) {
+            breakdown.adjacent_count += 1;
+        }
+    }
+
+    breakdown.breaks_sequence =
+        (has(d - 2) && has(d - 1)) || (has(d - 1) && has(d + 1)) || (has(d + 1) && has(d + 2));
+
+    for a in [d - 1, d] {
+        if has(a) && has(a + 1) {
+            if a == 1 || a + 1 == 9 {
+                breakdown.breaks_penchan = true;
+            } else {
+                breakdown.breaks_ryanmen = true;
+            }
+        }
+    }
+
+    breakdown.breaks_kanchan = has(d - 2) || has(d + 2);
+
+    breakdown
+}
+
+pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
+    let breakdown = shape_breakdown_for_discard(counts, discard);
+    let mut penalty = 0i16;
+    if breakdown.breaks_sequence {
+        penalty += 40;
+    }
+    if breakdown.breaks_ryanmen {
+        penalty += 30;
+    }
+    if breakdown.breaks_pair {
+        penalty += 20;
+    }
+    if breakdown.breaks_kanchan {
+        penalty += 12;
+    }
+    if breakdown.breaks_penchan {
+        penalty += 8;
+    }
+    penalty += i16::from(breakdown.adjacent_count) * 3;
+    if breakdown.same_type_count >= 3 {
+        penalty += 10;
+    }
+    penalty
+}
+
 pub fn select_best_discard(counts: &TileCounts) -> Option<DiscardEvaluation> {
     select_best(evaluate_discards(counts))
 }
@@ -1147,6 +1236,165 @@ mod tests {
         visible.extend(ids(&[69, 70, 71]));
         let selected = select_best_discard_with_visible_tiles(&counts, &visible).unwrap();
         assert_eq!(selected.discard, tile("9p"));
+    }
+
+    #[test]
+    fn shape_breakdown_absent_discard_returns_default() {
+        let counts = counts(&["1m", "2m"]);
+        assert_eq!(
+            shape_breakdown_for_discard(&counts, tile("9s")),
+            ShapeBreakdown::default()
+        );
+    }
+
+    #[test]
+    fn shape_breakdown_honor_single_has_no_adjacent_shapes() {
+        let counts = counts(&["E"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("E"));
+        assert!(!breakdown.breaks_pair);
+        assert!(!breakdown.breaks_ryanmen);
+        assert!(!breakdown.breaks_kanchan);
+        assert!(!breakdown.breaks_penchan);
+        assert!(!breakdown.breaks_sequence);
+        assert_eq!(breakdown.adjacent_count, 0);
+        assert_eq!(breakdown.same_type_count, 1);
+        assert_eq!(shape_penalty_for_discard(&counts, tile("E")), 0);
+    }
+
+    #[test]
+    fn shape_breakdown_honor_pair_breaks_pair() {
+        let counts = counts(&["E", "E"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("E"));
+        assert!(breakdown.breaks_pair);
+        assert_eq!(breakdown.same_type_count, 2);
+        assert!(!breakdown.breaks_ryanmen);
+        assert!(!breakdown.breaks_kanchan);
+        assert!(!breakdown.breaks_penchan);
+        assert!(!breakdown.breaks_sequence);
+        assert_eq!(breakdown.adjacent_count, 0);
+    }
+
+    #[test]
+    fn shape_breakdown_number_pair_breaks_pair() {
+        let counts = counts(&["5m", "5m"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("5m"));
+        assert!(breakdown.breaks_pair);
+        assert_eq!(breakdown.same_type_count, 2);
+    }
+
+    #[test]
+    fn shape_breakdown_penchan_one_two() {
+        let counts = counts(&["1m", "2m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("1m")).breaks_penchan);
+        assert!(shape_breakdown_for_discard(&counts, tile("2m")).breaks_penchan);
+        assert!(!shape_breakdown_for_discard(&counts, tile("1m")).breaks_ryanmen);
+        assert!(!shape_breakdown_for_discard(&counts, tile("2m")).breaks_ryanmen);
+    }
+
+    #[test]
+    fn shape_breakdown_penchan_eight_nine() {
+        let counts = counts(&["8m", "9m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("8m")).breaks_penchan);
+        assert!(shape_breakdown_for_discard(&counts, tile("9m")).breaks_penchan);
+        assert!(!shape_breakdown_for_discard(&counts, tile("8m")).breaks_ryanmen);
+        assert!(!shape_breakdown_for_discard(&counts, tile("9m")).breaks_ryanmen);
+    }
+
+    #[test]
+    fn shape_breakdown_ryanmen_two_three() {
+        let counts = counts(&["2m", "3m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("2m")).breaks_ryanmen);
+        assert!(shape_breakdown_for_discard(&counts, tile("3m")).breaks_ryanmen);
+        assert!(!shape_breakdown_for_discard(&counts, tile("2m")).breaks_penchan);
+        assert!(!shape_breakdown_for_discard(&counts, tile("3m")).breaks_penchan);
+    }
+
+    #[test]
+    fn shape_breakdown_ryanmen_seven_eight() {
+        let counts = counts(&["7m", "8m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("7m")).breaks_ryanmen);
+        assert!(shape_breakdown_for_discard(&counts, tile("8m")).breaks_ryanmen);
+    }
+
+    #[test]
+    fn shape_breakdown_ryanmen_four_five() {
+        let counts = counts(&["4m", "5m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("4m")).breaks_ryanmen);
+        assert!(shape_breakdown_for_discard(&counts, tile("5m")).breaks_ryanmen);
+    }
+
+    #[test]
+    fn shape_breakdown_kanchan_one_three() {
+        let counts = counts(&["1m", "3m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("1m")).breaks_kanchan);
+        assert!(shape_breakdown_for_discard(&counts, tile("3m")).breaks_kanchan);
+        assert!(!shape_breakdown_for_discard(&counts, tile("1m")).breaks_ryanmen);
+    }
+
+    #[test]
+    fn shape_breakdown_kanchan_four_six() {
+        let counts = counts(&["4m", "6m"]);
+        assert!(shape_breakdown_for_discard(&counts, tile("4m")).breaks_kanchan);
+        assert!(shape_breakdown_for_discard(&counts, tile("6m")).breaks_kanchan);
+    }
+
+    #[test]
+    fn shape_breakdown_sequence_on_middle() {
+        assert!(
+            shape_breakdown_for_discard(&counts(&["1m", "2m", "3m"]), tile("2m")).breaks_sequence
+        );
+        assert!(
+            shape_breakdown_for_discard(&counts(&["3m", "4m", "5m"]), tile("4m")).breaks_sequence
+        );
+    }
+
+    #[test]
+    fn shape_breakdown_sequence_on_terminal() {
+        assert!(
+            shape_breakdown_for_discard(&counts(&["7m", "8m", "9m"]), tile("9m")).breaks_sequence
+        );
+    }
+
+    #[test]
+    fn shape_breakdown_adjacent_count_covers_plus_minus_one_and_two() {
+        let counts = counts(&["3m", "4m", "5m", "6m", "7m"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("5m"));
+        assert_eq!(breakdown.adjacent_count, 4);
+    }
+
+    #[test]
+    fn shape_breakdown_adjacent_count_counts_tile_types_not_copies() {
+        let counts = counts(&["3m", "3m", "5m", "7m"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("5m"));
+        assert_eq!(breakdown.adjacent_count, 2);
+    }
+
+    #[test]
+    fn shape_breakdown_adjacent_count_ignores_other_suits() {
+        let counts = counts(&["5m", "4p", "6p", "4s", "6s"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("5m"));
+        assert_eq!(breakdown.adjacent_count, 0);
+    }
+
+    #[test]
+    fn shape_breakdown_same_type_count_reflects_count_before_discard() {
+        let counts = counts(&["5m", "5m", "5m"]);
+        let breakdown = shape_breakdown_for_discard(&counts, tile("5m"));
+        assert_eq!(breakdown.same_type_count, 3);
+        assert!(breakdown.breaks_pair);
+    }
+
+    #[test]
+    fn shape_penalty_orders_shapes_by_severity() {
+        let sequence = shape_penalty_for_discard(&counts(&["1m", "2m", "3m"]), tile("2m"));
+        let ryanmen = shape_penalty_for_discard(&counts(&["4m", "5m"]), tile("4m"));
+        let pair = shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"));
+        let kanchan = shape_penalty_for_discard(&counts(&["1m", "3m"]), tile("1m"));
+        let penchan = shape_penalty_for_discard(&counts(&["1m", "2m"]), tile("1m"));
+        assert!(sequence > ryanmen);
+        assert!(ryanmen > pair);
+        assert!(pair > kanchan);
+        assert!(kanchan > penchan);
     }
 
     #[test]
