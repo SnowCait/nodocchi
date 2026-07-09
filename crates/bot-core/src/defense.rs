@@ -280,6 +280,50 @@ pub fn select_suited_safety_fallback_action<'a>(
         .map(|(action, _)| action)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefenseFallbackKind {
+    Genbutsu,
+    HonorSafety(HonorSafetyRank),
+    SuitedSafety(SuitedSafetyRank),
+}
+
+// 他家リーチ中の防御 fallback を優先順位付きで選ぶ。
+// 現物 → 字牌 safety → 数牌防御 の順に評価し、選ばれた種別を添えて返す。
+pub fn select_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+) -> Option<(&'a LegalAction, DefenseFallbackKind)> {
+    if let Some(action) = select_genbutsu_fallback_action(context, legal_actions) {
+        return Some((action, DefenseFallbackKind::Genbutsu));
+    }
+
+    if context.any_opponent_reached()
+        && let Some((action, rank)) = honor_dahai_actions_by_safety(legal_actions, context)
+            .into_iter()
+            .next()
+    {
+        return Some((action, DefenseFallbackKind::HonorSafety(rank)));
+    }
+
+    if context.any_opponent_reached()
+        && let Some((action, rank)) = suited_dahai_actions_by_safety(legal_actions, context)
+            .into_iter()
+            .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety)
+    {
+        return Some((action, DefenseFallbackKind::SuitedSafety(rank)));
+    }
+
+    None
+}
+
+// 防御 fallback の action だけを返す薄い wrapper。
+pub fn select_defense_fallback_action<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+) -> Option<&'a LegalAction> {
+    select_defense_fallback_action_with_kind(context, legal_actions).map(|(action, _)| action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1350,6 +1394,180 @@ mod tests {
         assert_eq!(
             select_suited_safety_fallback_action(&actions, &context),
             Some(&LegalAction::Dahai { tile: tile(4) })
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_none_without_opponent_reach() {
+        let context = suited_context(
+            vec![tile(0), tile(1), tile(2), tile(3)],
+            [vec![], vec![tile(16)], vec![], vec![]],
+            [false; 4],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_returns_genbutsu() {
+        let context = suited_context(
+            vec![],
+            [vec![], vec![tile(16)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(16) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_prefers_genbutsu_over_honor() {
+        // 共通現物 16(5m) と字牌 108(東) が両方候補でも Genbutsu を優先する。
+        let context = suited_context(
+            vec![],
+            [vec![], vec![tile(16)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(16) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_returns_honor_safety_with_rank() {
+        // 共通現物なし。東は2枚見えなので HonorSafety(TwoVisible)。
+        let context = suited_context(
+            vec![tile(108), tile(109)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(112) },
+            LegalAction::Dahai { tile: tile(108) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(108) },
+                DefenseFallbackKind::HonorSafety(HonorSafetyRank::TwoVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_returns_suited_safety_no_chance() {
+        // 共通現物も字牌もなし。2m は4枚見えで NoChance。
+        let context = suited_context(
+            vec![tile(4), tile(5), tile(6), tile(7)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(4) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::NoChance)
+            ))
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_returns_suited_safety_one_chance() {
+        // 2m は3枚見えで OneChance。
+        let context = suited_context(
+            vec![tile(4), tile(5), tile(6)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(4) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::OneChance)
+            ))
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_returns_suited_safety_suji() {
+        // リーチ者の河に 12(4m)。1m はスジで Suji。
+        let context = suited_context(
+            vec![],
+            [vec![], vec![tile(12)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(0) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
+            ))
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_none_when_only_no_safety() {
+        // 共通現物も字牌もなく、数牌が全て NoSafety なら None。
+        let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            None
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_returns_action_only() {
+        let context = suited_context(
+            vec![],
+            [vec![], vec![tile(16)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action(&context, &actions),
+            Some(&LegalAction::Dahai { tile: tile(16) })
         );
     }
 }

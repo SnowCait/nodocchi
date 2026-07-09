@@ -1,10 +1,7 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
-use crate::defense::{
-    select_genbutsu_fallback_action, select_honor_safety_fallback_action,
-    select_suited_safety_fallback_action,
-};
+use crate::defense::select_defense_fallback_action;
 use crate::discard_selection::select_discard_action;
 use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
@@ -77,20 +74,9 @@ impl Agent for ShantenAgent {
             return action.clone();
         }
 
-        // 他家リーチ中に共通現物 Dahai があれば、攻撃的な Reach や通常評価より先に切る。
-        if let Some(action) = select_genbutsu_fallback_action(ctx, legal_actions) {
-            return action.clone();
-        }
-
-        // 他家リーチ中で共通現物がない場合、合法 Dahai に字牌があれば最も安全な字牌を切る。
-        if ctx.any_opponent_reached()
-            && let Some(action) = select_honor_safety_fallback_action(legal_actions, ctx)
-        {
-            return action.clone();
-        }
-
-        // 他家リーチ中で共通現物も字牌 safety もない場合、NoChance / OneChance / Suji の数牌を切る。
-        if let Some(action) = select_suited_safety_fallback_action(legal_actions, ctx) {
+        // 他家リーチ中の防御 fallback(現物 → 字牌 safety → 数牌防御)を
+        // 攻撃的な Reach や通常評価より先に評価する。
+        if let Some(action) = select_defense_fallback_action(ctx, legal_actions) {
             return action.clone();
         }
 
