@@ -217,6 +217,20 @@ pub fn genbutsu_dahai_actions_for_all_reached<'a>(
         .collect()
 }
 
+// 他家リーチ中に、合法 Dahai の中から全リーチ者に共通する現物を fallback として選ぶ。
+// 他家リーチがない、または共通現物がなければ None。合法 action からのみ選ぶ。
+pub fn select_genbutsu_fallback_action<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+) -> Option<&'a LegalAction> {
+    if !context.any_opponent_reached() {
+        return None;
+    }
+    genbutsu_dahai_actions_for_all_reached(legal_actions, context)
+        .into_iter()
+        .next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,5 +946,95 @@ mod tests {
         let actions = vec![LegalAction::Dahai { tile: tile(16) }];
         let filtered = genbutsu_dahai_actions_for_all_reached(&actions, &context);
         assert_eq!(filtered, vec![&LegalAction::Dahai { tile: tile(16) }]);
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_none_without_opponent_reach() {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false; 4]);
+        let actions = vec![LegalAction::Dahai { tile: tile(16) }];
+        assert_eq!(select_genbutsu_fallback_action(&context, &actions), None);
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_ignores_only_own_reach() {
+        // 自分(0)だけがリーチしている場合は他家リーチ扱いにしない。
+        let discards = [vec![tile(16)], vec![], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [true, false, false, false]);
+        let actions = vec![LegalAction::Dahai { tile: tile(16) }];
+        assert_eq!(select_genbutsu_fallback_action(&context, &actions), None);
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_returns_common_genbutsu() {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_genbutsu_fallback_action(&context, &actions),
+            Some(&LegalAction::Dahai { tile: tile(16) })
+        );
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_none_when_no_common_genbutsu() {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(56) },
+        ];
+        assert_eq!(select_genbutsu_fallback_action(&context, &actions), None);
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_returns_first_in_legal_order() {
+        let discards = [vec![], vec![tile(0), tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(56) },
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        assert_eq!(
+            select_genbutsu_fallback_action(&context, &actions),
+            Some(&LegalAction::Dahai { tile: tile(16) })
+        );
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_never_returns_non_dahai() {
+        // 現物になり得るのは Dahai のみ。Reach/Hora/Ryukyoku/None/副露・カンは返さない。
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Reach,
+            LegalAction::Hora,
+            LegalAction::Ryukyoku,
+            LegalAction::None,
+            LegalAction::Pon {
+                tile: tile(16),
+                consumed: vec![tile(17), tile(18)],
+            },
+            LegalAction::Ankan {
+                consumed: vec![tile(16), tile(17), tile(18), tile(19)],
+            },
+        ];
+        assert_eq!(select_genbutsu_fallback_action(&context, &actions), None);
+    }
+
+    #[test]
+    fn select_genbutsu_fallback_action_matches_red_five_dahai() {
+        // 河に通常5m(tile 17)、Dahai が赤5m相当(tile 16)でも同じ TileType の現物として選ぶ。
+        let discards = [vec![], vec![tile(17)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![LegalAction::Dahai { tile: tile(16) }];
+        assert_eq!(
+            select_genbutsu_fallback_action(&context, &actions),
+            Some(&LegalAction::Dahai { tile: tile(16) })
+        );
     }
 }
