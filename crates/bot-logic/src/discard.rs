@@ -39,6 +39,9 @@ pub struct ShapeBreakdown {
     pub breaks_sequence: bool,
     pub adjacent_count: u8,
     pub same_type_count: u8,
+    pub preserves_sequence_after_discard: bool,
+    pub preserves_ryanmen_after_discard: bool,
+    pub preserves_pair_after_discard: bool,
 }
 
 pub fn shape_breakdown_for_discard(counts: &TileCounts, discard: TileType) -> ShapeBreakdown {
@@ -54,6 +57,7 @@ pub fn shape_breakdown_for_discard(counts: &TileCounts, discard: TileType) -> Sh
     if same_type_count >= 2 {
         breakdown.breaks_pair = true;
     }
+    breakdown.preserves_pair_after_discard = same_type_count >= 3;
 
     let Some(number) = discard.number() else {
         return breakdown;
@@ -91,7 +95,67 @@ pub fn shape_breakdown_for_discard(counts: &TileCounts, discard: TileType) -> Sh
 
     breakdown.breaks_kanchan = has(d - 2) || has(d + 2);
 
+    breakdown.preserves_sequence_after_discard = preserves_sequence_after_discard(counts, discard);
+    breakdown.preserves_ryanmen_after_discard = preserves_ryanmen_after_discard(counts, discard);
+
     breakdown
+}
+
+fn preserves_sequence_after_discard(counts: &TileCounts, discard: TileType) -> bool {
+    if counts.count(discard) < 2 {
+        return false;
+    }
+    let Some(number) = discard.number() else {
+        return false;
+    };
+
+    let mut after = *counts;
+    if after.remove(discard).is_err() {
+        return false;
+    }
+
+    let base = discard.raw() - (number - 1);
+    let has = |n: i8| -> bool {
+        if !(1..=9).contains(&n) {
+            return false;
+        }
+        let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+        after.count(tile) > 0
+    };
+
+    let d = number as i8;
+    (has(d - 2) && has(d - 1)) || (has(d - 1) && has(d + 1)) || (has(d + 1) && has(d + 2))
+}
+
+fn preserves_ryanmen_after_discard(counts: &TileCounts, discard: TileType) -> bool {
+    if counts.count(discard) < 2 {
+        return false;
+    }
+    let Some(number) = discard.number() else {
+        return false;
+    };
+
+    let mut after = *counts;
+    if after.remove(discard).is_err() {
+        return false;
+    }
+
+    let base = discard.raw() - (number - 1);
+    let has = |n: i8| -> bool {
+        if !(1..=9).contains(&n) {
+            return false;
+        }
+        let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+        after.count(tile) > 0
+    };
+
+    let d = number as i8;
+    for a in [d - 1, d] {
+        if has(a) && has(a + 1) && a != 1 && a + 1 != 9 {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
@@ -116,7 +180,22 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
     if breakdown.same_type_count >= 3 {
         penalty += 10;
     }
-    penalty
+
+    if breakdown.preserves_sequence_after_discard {
+        penalty -= 15;
+    }
+    if breakdown.preserves_ryanmen_after_discard {
+        penalty -= 15;
+    }
+    let preserves_shape =
+        breakdown.preserves_sequence_after_discard || breakdown.preserves_ryanmen_after_discard;
+    if breakdown.preserves_pair_after_discard {
+        penalty -= 12;
+    } else if breakdown.same_type_count == 2 && preserves_shape {
+        penalty -= 8;
+    }
+
+    penalty.max(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1472,6 +1551,155 @@ mod tests {
         assert!(ryanmen > pair);
         assert!(pair > kanchan);
         assert!(kanchan > penchan);
+    }
+
+    #[test]
+    fn sequence_penalty_present_for_simple_sequence() {
+        assert!(shape_penalty_for_discard(&counts(&["3m", "4m", "5m"]), tile("3m")) > 0);
+        assert!(shape_penalty_for_discard(&counts(&["4m", "5m", "6m"]), tile("4m")) > 0);
+        assert!(
+            shape_breakdown_for_discard(&counts(&["3m", "4m", "5m"]), tile("3m")).breaks_sequence
+        );
+        assert!(
+            shape_breakdown_for_discard(&counts(&["4m", "5m", "6m"]), tile("4m")).breaks_sequence
+        );
+    }
+
+    #[test]
+    fn ryanmen_penalty_present_for_simple_ryanmen() {
+        assert!(shape_penalty_for_discard(&counts(&["2m", "3m"]), tile("2m")) > 0);
+        assert!(shape_penalty_for_discard(&counts(&["7m", "8m"]), tile("8m")) > 0);
+        assert!(shape_breakdown_for_discard(&counts(&["2m", "3m"]), tile("2m")).breaks_ryanmen);
+        assert!(shape_breakdown_for_discard(&counts(&["7m", "8m"]), tile("8m")).breaks_ryanmen);
+    }
+
+    #[test]
+    fn redundant_third_tile_keeps_sequence_penalty_lower() {
+        // 3m3m4m5m の 3m は 1枚切っても 345m が残る
+        let redundant = shape_penalty_for_discard(&counts(&["3m", "3m", "4m", "5m"]), tile("3m"));
+        let plain = shape_penalty_for_discard(&counts(&["3m", "4m", "5m"]), tile("3m"));
+        assert!(redundant < plain);
+        assert!(
+            shape_breakdown_for_discard(&counts(&["3m", "3m", "4m", "5m"]), tile("3m"))
+                .preserves_sequence_after_discard
+        );
+    }
+
+    #[test]
+    fn redundant_upper_tile_keeps_sequence_penalty_lower() {
+        // 3m4m5m5m の 5m は 1枚切っても 345m が残る
+        let redundant = shape_penalty_for_discard(&counts(&["3m", "4m", "5m", "5m"]), tile("5m"));
+        let plain = shape_penalty_for_discard(&counts(&["3m", "4m", "5m"]), tile("5m"));
+        assert!(redundant < plain);
+    }
+
+    #[test]
+    fn redundant_lower_tile_keeps_sequence_penalty_lower() {
+        // 4m4m5m6m の 4m は 1枚切っても 456m が残る
+        let redundant = shape_penalty_for_discard(&counts(&["4m", "4m", "5m", "6m"]), tile("4m"));
+        let plain = shape_penalty_for_discard(&counts(&["4m", "5m", "6m"]), tile("4m"));
+        assert!(redundant < plain);
+    }
+
+    #[test]
+    fn redundant_tile_keeps_ryanmen_penalty_lower() {
+        // 2m2m3m の 2m は 1枚切っても 2m3m 両面が残る
+        let redundant_low = shape_penalty_for_discard(&counts(&["2m", "2m", "3m"]), tile("2m"));
+        let plain_low = shape_penalty_for_discard(&counts(&["2m", "3m"]), tile("2m"));
+        assert!(redundant_low < plain_low);
+        // 7m8m8m の 8m は 1枚切っても 7m8m 両面が残る
+        let redundant_high = shape_penalty_for_discard(&counts(&["7m", "8m", "8m"]), tile("8m"));
+        let plain_high = shape_penalty_for_discard(&counts(&["7m", "8m"]), tile("8m"));
+        assert!(redundant_high < plain_high);
+        assert!(
+            shape_breakdown_for_discard(&counts(&["2m", "2m", "3m"]), tile("2m"))
+                .preserves_ryanmen_after_discard
+        );
+    }
+
+    #[test]
+    fn bare_pair_keeps_full_pair_penalty() {
+        // 単純な対子は余剰牌ではないので補正されず 20 のまま
+        assert_eq!(
+            shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m")),
+            20
+        );
+    }
+
+    #[test]
+    fn same_type_two_relief_applies_in_complex_shape() {
+        // 5m5m6m の 5m は 1枚切っても 5m6m 両面が残る余剰対子
+        // 対子20 + 両面30 + 隣接3 - 両面存続15 - 同種2枚8 = 30
+        let redundant = shape_penalty_for_discard(&counts(&["5m", "5m", "6m"]), tile("5m"));
+        assert_eq!(redundant, 30);
+        let plain = shape_penalty_for_discard(&counts(&["5m", "6m"]), tile("5m"));
+        assert!(redundant < plain);
+    }
+
+    #[test]
+    fn same_type_three_relief_lowers_triplet_penalty() {
+        // 暗刻は 1枚切っても対子が残る余剰形
+        // 対子20 + 同種3枚 +10 - 対子存続12 = 18
+        assert_eq!(
+            shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m")),
+            18
+        );
+        // 暗刻は対子より切りやすい（対子は落とすと何も残らない）
+        assert!(
+            shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"))
+                < shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"))
+        );
+    }
+
+    #[test]
+    fn shape_penalty_never_negative() {
+        for hand in [
+            counts(&["2m", "2m", "3m"]),
+            counts(&["3m", "3m", "4m", "5m"]),
+            counts(&["5m", "5m"]),
+            counts(&["E", "E"]),
+        ] {
+            for tile in TileType::all() {
+                assert!(shape_penalty_for_discard(&hand, tile) >= 0);
+            }
+        }
+    }
+
+    #[test]
+    fn honor_single_penalty_stays_zero() {
+        assert_eq!(shape_penalty_for_discard(&counts(&["E"]), tile("E")), 0);
+    }
+
+    #[test]
+    fn honor_pair_penalty_positive() {
+        // 字牌対子は対子 penalty を持ち、0 未満にはならない
+        let penalty = shape_penalty_for_discard(&counts(&["E", "E"]), tile("E"));
+        assert!(penalty > 0);
+        assert_eq!(penalty, 20);
+    }
+
+    #[test]
+    fn lower_shape_penalty_does_not_override_shanten_or_acceptance() {
+        let low_penalty_worse_shanten = evaluation_with_shape_penalty(1, 40, 5, 0, 0, 0, false);
+        let high_penalty_better_shanten = evaluation_with_shape_penalty(0, 4, 1, 40, 0, 0, false);
+        assert!(is_better_discard(
+            &high_penalty_better_shanten,
+            &low_penalty_worse_shanten
+        ));
+
+        let low_penalty_less_remaining = evaluation_with_shape_penalty(1, 10, 1, 0, 0, 0, false);
+        let high_penalty_more_remaining = evaluation_with_shape_penalty(1, 20, 1, 40, 0, 0, false);
+        assert!(is_better_discard(
+            &high_penalty_more_remaining,
+            &low_penalty_less_remaining
+        ));
+
+        let low_penalty_fewer_types = evaluation_with_shape_penalty(1, 10, 2, 0, 0, 0, false);
+        let high_penalty_more_types = evaluation_with_shape_penalty(1, 10, 3, 40, 0, 0, false);
+        assert!(is_better_discard(
+            &high_penalty_more_types,
+            &low_penalty_fewer_types
+        ));
     }
 
     fn ryanmen_penalty() -> i16 {
