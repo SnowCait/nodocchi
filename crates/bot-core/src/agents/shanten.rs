@@ -1,7 +1,7 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
-use crate::defense::select_genbutsu_fallback_action;
+use crate::defense::{select_genbutsu_fallback_action, select_honor_safety_fallback_action};
 use crate::discard_selection::select_discard_action;
 use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
@@ -76,6 +76,13 @@ impl Agent for ShantenAgent {
 
         // 他家リーチ中に共通現物 Dahai があれば、攻撃的な Reach や通常評価より先に切る。
         if let Some(action) = select_genbutsu_fallback_action(ctx, legal_actions) {
+            return action.clone();
+        }
+
+        // 他家リーチ中で共通現物がない場合、合法 Dahai に字牌があれば最も安全な字牌を切る。
+        if ctx.any_opponent_reached()
+            && let Some(action) = select_honor_safety_fallback_action(legal_actions, ctx)
+        {
             return action.clone();
         }
 
@@ -472,5 +479,129 @@ mod tests {
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::None];
         assert_eq!(agent.act(&ctx, &actions), dahai(16));
+    }
+
+    // 他家(player 1)がリーチしており、その河に 16(5m) がある局面に visible_tiles を加える。
+    fn opponent_reach_context_with_visible(
+        drawn_tile: Option<u8>,
+        hand_values: &[u8],
+        visible_values: &[u8],
+    ) -> GameContext {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        GameContext::from_parts_with_table_state(
+            drawn_tile.map(tile),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            None,
+            None,
+            visible_values.iter().map(|&value| tile(value)).collect(),
+            Some(0),
+            None,
+            discards,
+            [false, true, false, false],
+        )
+    }
+
+    #[test]
+    fn prefers_genbutsu_fallback_over_honor_safety_fallback() {
+        let mut agent = ShantenAgent;
+        // 共通現物 16(5m) と字牌 108(東) が両方合法でも、現物を優先する。
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![dahai(108), dahai(16)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(16));
+    }
+
+    #[test]
+    fn picks_safest_honor_dahai_when_no_common_genbutsu() {
+        let mut agent = ShantenAgent;
+        // 共通現物なし。東は2枚見え、南は0枚見え。より安全な東を切る。
+        let ctx = opponent_reach_context_with_visible(Some(112), &[], &[108, 109]);
+        let actions = vec![dahai(112), dahai(108)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(108));
+    }
+
+    #[test]
+    fn prefers_honor_safety_fallback_over_reach() {
+        let mut agent = ShantenAgent;
+        // 共通現物なし。数牌と字牌が合法なら Reach より字牌を切る。
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(108)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(108));
+    }
+
+    #[test]
+    fn prefers_honor_safety_fallback_over_discard_evaluation() {
+        let mut agent = ShantenAgent;
+        // 通常評価では別牌が選ばれ得る手牌だが、共通現物がなければ字牌 108(東) を優先する。
+        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
+        let ctx = opponent_reach_context(Some(108), &hand_values);
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(108)])
+            .collect();
+        assert_eq!(agent.act(&ctx, &actions), dahai(108));
+    }
+
+    #[test]
+    fn falls_through_to_reach_without_common_genbutsu_or_honor() {
+        let mut agent = ShantenAgent;
+        // 共通現物も字牌 Dahai もなければ従来通り Reach 判断に進む。
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn does_not_use_honor_safety_fallback_without_opponent_reach() {
+        let mut agent = ShantenAgent;
+        // 他家リーチが無ければ、字牌が合法でも従来の Reach を選ぶ。
+        let ctx = GameContext::from_parts_with_table_state(
+            Some(tile(0)),
+            vec![],
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            None,
+            [vec![], vec![], vec![], vec![]],
+            [false; 4],
+        );
+        let actions = vec![LegalAction::Reach, dahai(108)];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn honor_safety_fallback_ignores_number_dahai() {
+        let mut agent = ShantenAgent;
+        // 数牌のみで字牌がなければ字牌 fallback は発動せず Reach に進む。
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn honor_safety_fallback_ignores_non_dahai_honor_actions() {
+        let mut agent = ShantenAgent;
+        // 字牌の Pon はあっても字牌 Dahai が無ければ fallback は発動しない。
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![
+            LegalAction::Pon {
+                tile: tile(108),
+                consumed: vec![tile(109), tile(110)],
+            },
+            LegalAction::None,
+        ];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
+    }
+
+    #[test]
+    fn honor_safety_fallback_preserves_order_within_same_rank() {
+        let mut agent = ShantenAgent;
+        // 東も南も0枚見えで同安全度なら legal_actions の元順序を保つ。
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![dahai(112), dahai(108)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(112));
     }
 }
