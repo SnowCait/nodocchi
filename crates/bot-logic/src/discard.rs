@@ -1,4 +1,4 @@
-use crate::acceptance::{Acceptance, calculate_acceptance};
+use crate::acceptance::{Acceptance, calculate_acceptance, calculate_acceptance_with_seen};
 use crate::shanten::Shanten;
 use crate::tile::{TileId, TileType, count_dora};
 use crate::tile_counts::TileCounts;
@@ -32,6 +32,13 @@ pub fn select_best_discard(counts: &TileCounts) -> Option<DiscardEvaluation> {
     select_best(evaluate_discards(counts))
 }
 
+pub fn select_best_discard_with_visible_tiles(
+    counts: &TileCounts,
+    visible_tiles: &[TileId],
+) -> Option<DiscardEvaluation> {
+    select_best(evaluate_discards_with_visible_tiles(counts, visible_tiles))
+}
+
 pub fn select_best_discard_from_tiles(tiles: &[TileId]) -> Option<DiscardEvaluation> {
     select_best_discard_from_tiles_with_dora(tiles, &[])
 }
@@ -54,6 +61,22 @@ pub fn select_best_discard_from_tiles_with_context(
         dora_indicators,
         round_wind,
         seat_wind,
+    ))
+}
+
+pub fn select_best_discard_from_tiles_with_visible_tiles(
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    visible_tiles: &[TileId],
+) -> Option<DiscardEvaluation> {
+    select_best(evaluate_discards_from_tiles_with_visible_tiles(
+        tiles,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+        visible_tiles,
     ))
 }
 
@@ -141,6 +164,56 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
     evaluations
 }
 
+pub fn evaluate_discards_with_visible_tiles(
+    counts: &TileCounts,
+    visible_tiles: &[TileId],
+) -> Vec<DiscardEvaluation> {
+    if visible_tiles.is_empty() {
+        return evaluate_discards(counts);
+    }
+
+    let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
+    let mut public_visible = [0u8; TileType::COUNT];
+    for tile in TileType::all() {
+        public_visible[tile.index()] = visible_counts
+            .count(tile)
+            .saturating_sub(counts.count(tile));
+    }
+
+    let mut evaluations = Vec::new();
+
+    for tile in TileType::all() {
+        let count_before_discard = counts.count(tile);
+        if count_before_discard == 0 {
+            continue;
+        }
+
+        let mut after_discard = *counts;
+        if after_discard.remove(tile).is_err() {
+            continue;
+        }
+
+        let mut additional_seen = public_visible;
+        additional_seen[tile.index()] = additional_seen[tile.index()].saturating_add(1);
+
+        let acceptance_after_discard =
+            calculate_acceptance_with_seen(&after_discard, &additional_seen);
+        let shanten_after_discard = acceptance_after_discard.current;
+
+        evaluations.push(DiscardEvaluation {
+            discard: tile,
+            count_before_discard,
+            shanten_after_discard,
+            acceptance_after_discard,
+            discarded_dora_count: 0,
+            discarded_value_honor_count: 0,
+            discards_red_five: false,
+        });
+    }
+
+    evaluations
+}
+
 pub fn evaluate_discards_from_tiles(tiles: &[TileId]) -> Vec<DiscardEvaluation> {
     evaluate_discards_from_tiles_with_dora(tiles, &[])
 }
@@ -160,7 +233,43 @@ pub fn evaluate_discards_from_tiles_with_context(
 ) -> Vec<DiscardEvaluation> {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
     let mut evaluations = evaluate_discards(&counts);
-    for evaluation in &mut evaluations {
+    decorate_evaluations(
+        &mut evaluations,
+        tiles,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+    );
+    evaluations
+}
+
+pub fn evaluate_discards_from_tiles_with_visible_tiles(
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    visible_tiles: &[TileId],
+) -> Vec<DiscardEvaluation> {
+    let counts = TileCounts::from_tiles(tiles.iter().copied());
+    let mut evaluations = evaluate_discards_with_visible_tiles(&counts, visible_tiles);
+    decorate_evaluations(
+        &mut evaluations,
+        tiles,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+    );
+    evaluations
+}
+
+fn decorate_evaluations(
+    evaluations: &mut [DiscardEvaluation],
+    tiles: &[TileId],
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) {
+    for evaluation in evaluations {
         let discarded_tile = discarded_tile_id_for_type(evaluation.discard, tiles);
         evaluation.discards_red_five = discarded_tile.map(TileId::is_red).unwrap_or(false);
         evaluation.discarded_dora_count = discarded_tile
@@ -169,7 +278,6 @@ pub fn evaluate_discards_from_tiles_with_context(
         evaluation.discarded_value_honor_count =
             value_honor_count(evaluation.discard, round_wind, seat_wind);
     }
-    evaluations
 }
 
 fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<TileId> {
@@ -886,6 +994,159 @@ mod tests {
         assert_eq!(selected.discard, tile("5m"));
         assert!(selected.discarded_dora_count > 0);
         assert_eq!(selected.min_shanten_after_discard(), 0);
+    }
+
+    fn discard_evaluation(
+        evaluations: &[DiscardEvaluation],
+        discard: TileType,
+    ) -> &DiscardEvaluation {
+        evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == discard)
+            .expect("discard candidate should exist")
+    }
+
+    fn acceptance_remaining(evaluation: &DiscardEvaluation, wait: TileType) -> Option<u8> {
+        evaluation
+            .acceptance_after_discard
+            .tiles
+            .iter()
+            .find(|entry| entry.tile == wait)
+            .map(|entry| entry.remaining)
+    }
+
+    #[test]
+    fn visible_tiles_empty_matches_plain_evaluate_discards() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+        ]);
+        assert_eq!(
+            evaluate_discards_with_visible_tiles(&counts, &[]),
+            evaluate_discards(&counts)
+        );
+    }
+
+    #[test]
+    fn select_best_with_empty_visible_tiles_matches_plain_select() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "W",
+        ]);
+        assert_eq!(
+            select_best_discard_with_visible_tiles(&counts, &[]),
+            select_best_discard(&counts)
+        );
+    }
+
+    #[test]
+    fn does_not_double_count_own_hand_tiles() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108, 109]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let evaluations = evaluate_discards_with_visible_tiles(&counts, &hand);
+        let east = discard_evaluation(&evaluations, tile("E"));
+        assert_eq!(acceptance_remaining(east, tile("E")), Some(2));
+    }
+
+    #[test]
+    fn candidate_discard_is_counted_as_visible_after_discard() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108, 109]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        let plain_evaluations = evaluate_discards(&counts);
+        let plain = discard_evaluation(&plain_evaluations, tile("E"));
+        let plain_remaining = acceptance_remaining(plain, tile("E")).unwrap();
+
+        let visible_evaluations = evaluate_discards_with_visible_tiles(&counts, &hand);
+        let visible = discard_evaluation(&visible_evaluations, tile("E"));
+        let visible_remaining = acceptance_remaining(visible, tile("E")).unwrap();
+
+        assert_eq!(plain_remaining, 3);
+        assert_eq!(visible_remaining, plain_remaining - 1);
+    }
+
+    #[test]
+    fn single_visible_wait_tile_reduces_remaining_by_one() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 53, 54, 72, 80, 108]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        let mut visible = hand.clone();
+        let baseline = discard_evaluation(
+            &evaluate_discards_with_visible_tiles(&counts, &visible),
+            tile("E"),
+        )
+        .clone();
+        assert_eq!(acceptance_remaining(&baseline, tile("2s")), Some(4));
+
+        visible.extend(ids(&[76]));
+        let reduced = discard_evaluation(
+            &evaluate_discards_with_visible_tiles(&counts, &visible),
+            tile("E"),
+        )
+        .clone();
+        assert_eq!(acceptance_remaining(&reduced, tile("2s")), Some(3));
+    }
+
+    #[test]
+    fn multiple_visible_wait_tiles_reduce_remaining_by_count() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 53, 54, 72, 80, 108]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        let mut visible = hand.clone();
+        visible.extend(ids(&[76, 77]));
+        let evaluation = discard_evaluation(
+            &evaluate_discards_with_visible_tiles(&counts, &visible),
+            tile("E"),
+        )
+        .clone();
+        assert_eq!(acceptance_remaining(&evaluation, tile("2s")), Some(2));
+    }
+
+    #[test]
+    fn fully_visible_wait_tile_is_excluded_from_acceptance() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 53, 54, 72, 80, 108]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        let mut visible = hand.clone();
+        visible.extend(ids(&[76, 77, 78, 79]));
+        let evaluation = discard_evaluation(
+            &evaluate_discards_with_visible_tiles(&counts, &visible),
+            tile("E"),
+        )
+        .clone();
+        assert_eq!(acceptance_remaining(&evaluation, tile("2s")), None);
+        assert_eq!(evaluation.acceptance_total_remaining(), 0);
+        assert_eq!(evaluation.acceptance_type_count(), 0);
+    }
+
+    #[test]
+    fn shanten_is_preferred_over_visible_correction() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 80, 84, 40, 41, 108]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        let mut visible = hand.clone();
+        visible.extend(ids(&[76, 77, 78, 79, 88, 89, 90, 91]));
+
+        let selected = select_best_discard_with_visible_tiles(&counts, &visible).unwrap();
+        assert_eq!(selected.discard, tile("E"));
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+    }
+
+    #[test]
+    fn visible_correction_changes_choice_between_same_shanten_candidates() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36, 68]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        assert_eq!(
+            select_best_discard_with_visible_tiles(&counts, &[])
+                .unwrap()
+                .discard,
+            select_best_discard(&counts).unwrap().discard
+        );
+        assert_eq!(select_best_discard(&counts).unwrap().discard, tile("1p"));
+
+        let mut visible = hand.clone();
+        visible.extend(ids(&[69, 70, 71]));
+        let selected = select_best_discard_with_visible_tiles(&counts, &visible).unwrap();
+        assert_eq!(selected.discard, tile("9p"));
     }
 
     #[test]

@@ -26,12 +26,20 @@ impl Acceptance {
 }
 
 pub fn calculate_acceptance(counts: &TileCounts) -> Acceptance {
+    calculate_acceptance_with_seen(counts, &[0; TileType::COUNT])
+}
+
+pub(crate) fn calculate_acceptance_with_seen(
+    counts: &TileCounts,
+    additional_seen: &[u8; TileType::COUNT],
+) -> Acceptance {
     let current = calculate_shanten(counts);
     let current_min = current.min();
     let mut tiles = Vec::new();
 
     for tile in TileType::all() {
-        let remaining = counts.remaining_count(tile);
+        let seen = counts.count(tile) + additional_seen[tile.index()];
+        let remaining = 4u8.saturating_sub(seen);
         if remaining == 0 {
             continue;
         }

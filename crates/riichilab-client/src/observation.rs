@@ -733,5 +733,47 @@ mod tests {
             let context = game_context_from_decoded_observation(&decoded);
             assert!(context.visible_tiles().is_empty());
         }
+
+        #[test]
+        fn shanten_agent_uses_visible_tiles_from_decoded_observation() {
+            use bot_core::{Agent, LegalAction, ShantenAgent};
+
+            let hand_values = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36];
+            let hand: Vec<TileId> = hand_values
+                .iter()
+                .map(|&value| TileId::new(value).unwrap())
+                .collect();
+            let mut visible_tiles = hand.clone();
+            visible_tiles.extend(
+                [68u8, 69, 70, 71]
+                    .iter()
+                    .map(|&value| TileId::new(value).unwrap()),
+            );
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: TileId::new(68),
+                hand_tiles: hand,
+                dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
+                visible_tiles,
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert!(!context.visible_tiles().is_empty());
+
+            let actions: Vec<LegalAction> = hand_values
+                .iter()
+                .chain(std::iter::once(&68u8))
+                .map(|&value| LegalAction::Dahai {
+                    tile: TileId::new(value).unwrap(),
+                })
+                .collect();
+
+            let mut agent = ShantenAgent;
+            let LegalAction::Dahai { tile } = agent.act(&context, &actions) else {
+                panic!("expected dahai");
+            };
+            assert_eq!(tile.tile_type().to_mjai_string(), "9p");
+        }
     }
 }

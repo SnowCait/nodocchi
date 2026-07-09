@@ -1,6 +1,8 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use bot_logic::select_best_discard_from_tiles_with_context;
+use bot_logic::{
+    select_best_discard_from_tiles_with_context, select_best_discard_from_tiles_with_visible_tiles,
+};
 
 pub fn select_discard_action(
     context: &GameContext,
@@ -13,13 +15,23 @@ pub fn select_discard_action(
         .chain(context.drawn_tile())
         .collect();
 
-    let selected_type = select_best_discard_from_tiles_with_context(
-        &tiles,
-        context.dora_indicators(),
-        context.round_wind(),
-        context.seat_wind(),
-    )?
-    .discard;
+    let selected = if context.visible_tiles().is_empty() {
+        select_best_discard_from_tiles_with_context(
+            &tiles,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+        )
+    } else {
+        select_best_discard_from_tiles_with_visible_tiles(
+            &tiles,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+            context.visible_tiles(),
+        )
+    };
+    let selected_type = selected?.discard;
 
     let mut red_fallback = None;
     for action in legal_actions {
@@ -337,6 +349,52 @@ mod tests {
             panic!("expected dahai");
         };
         assert_eq!(tile.tile_type().to_mjai_string(), "C");
+    }
+
+    fn tiles(values: &[u8]) -> Vec<TileId> {
+        values.iter().map(|&value| tile(value)).collect()
+    }
+
+    #[test]
+    fn uses_visible_tiles_when_present() {
+        let hand = tiles(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36]);
+        let mut visible = hand.clone();
+        visible.extend(tiles(&[68, 69, 70, 71]));
+        let context = GameContext::from_parts_with_visible_tiles(
+            Some(tile(68)),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+        );
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36, 68]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "9p");
+    }
+
+    #[test]
+    fn empty_visible_tiles_falls_back_to_context_path() {
+        let hand = tiles(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36]);
+        let context =
+            GameContext::from_parts_with_context(Some(tile(68)), hand, vec![], None, None);
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36, 68]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        let selected = select_discard_action(&context, &actions).unwrap();
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "1p");
     }
 
     #[test]

@@ -219,6 +219,34 @@ mod tests {
     }
 
     #[test]
+    fn uses_visible_tiles_for_discard_evaluation() {
+        let mut agent = ShantenAgent;
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36];
+        let hand: Vec<_> = hand_values.iter().map(|&value| tile(value)).collect();
+        let mut visible = hand.clone();
+        visible.extend([68, 69, 70, 71].iter().map(|&value| tile(value)));
+        let ctx = GameContext::from_parts_with_visible_tiles(
+            Some(tile(68)),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(68)])
+            .collect();
+
+        let selected = agent.act(&ctx, &actions);
+        let LegalAction::Dahai { tile } = selected else {
+            panic!("expected dahai");
+        };
+        assert_eq!(tile.tile_type().to_mjai_string(), "9p");
+    }
+
+    #[test]
     fn follows_discard_selection_for_same_tile_type() {
         let mut agent = ShantenAgent;
         let ctx = GameContext::from_parts(Some(tile(16)), vec![tile(17)]);
