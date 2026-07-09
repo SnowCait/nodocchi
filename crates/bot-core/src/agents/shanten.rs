@@ -1,6 +1,7 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
-use crate::context::{GameContext, select_genbutsu_fallback_action};
+use crate::context::GameContext;
+use crate::defense::select_genbutsu_fallback_action;
 use crate::discard_selection::select_discard_action;
 use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
