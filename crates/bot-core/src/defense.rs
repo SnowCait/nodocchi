@@ -214,6 +214,72 @@ pub fn wall_tile_types_by_rank(context: &GameContext) -> Vec<(TileType, WallRank
         .collect()
 }
 
+// 数牌の防御 fallback 用の安全度。壁 / スジを統合して分類する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SuitedSafetyRank {
+    NoSafety,
+    Suji,
+    OneChance,
+    NoChance,
+}
+
+// リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
+pub fn suited_safety_rank_for_any_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SuitedSafetyRank> {
+    if tile.is_honor() {
+        return None;
+    }
+    let rank = match wall_rank(tile, context) {
+        WallRank::NoChance => SuitedSafetyRank::NoChance,
+        WallRank::OneChance => SuitedSafetyRank::OneChance,
+        WallRank::NoWall => {
+            if is_suji_for_any_reached(tile, context) {
+                SuitedSafetyRank::Suji
+            } else {
+                SuitedSafetyRank::NoSafety
+            }
+        }
+    };
+    Some(rank)
+}
+
+// 合法 Dahai のうち数牌のみを安全度の高い順(NoChance → OneChance → Suji → NoSafety)に並べる。
+// 同安全度は元の順序を保つ。
+pub fn suited_dahai_actions_by_safety<'a>(
+    legal_actions: &'a [LegalAction],
+    context: &GameContext,
+) -> Vec<(&'a LegalAction, SuitedSafetyRank)> {
+    let mut ranked: Vec<(&'a LegalAction, SuitedSafetyRank)> = legal_actions
+        .iter()
+        .filter_map(|action| match action {
+            LegalAction::Dahai { tile } => {
+                suited_safety_rank_for_any_reached(tile.tile_type(), context)
+                    .map(|rank| (action, rank))
+            }
+            _ => None,
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked
+}
+
+// 他家リーチ中に、最も安全度の高い数牌 Dahai を fallback として選ぶ。
+// 他家リーチがない、または NoSafety しか候補がなければ None。NoSafety は選ばない。
+pub fn select_suited_safety_fallback_action<'a>(
+    legal_actions: &'a [LegalAction],
+    context: &GameContext,
+) -> Option<&'a LegalAction> {
+    if !context.any_opponent_reached() {
+        return None;
+    }
+    suited_dahai_actions_by_safety(legal_actions, context)
+        .into_iter()
+        .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety)
+        .map(|(action, _)| action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,5 +1108,248 @@ mod tests {
                 .any(|(tile, rank)| *tile != one_man && *rank == WallRank::NoWall)
         );
         assert_eq!(ranked.len(), 27);
+    }
+
+    fn suited_context(
+        visible_tiles: Vec<TileId>,
+        discards: [Vec<TileId>; 4],
+        reached: [bool; 4],
+    ) -> GameContext {
+        GameContext::from_parts_with_table_state(
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            visible_tiles,
+            Some(0),
+            None,
+            discards,
+            reached,
+        )
+    }
+
+    #[test]
+    fn suited_safety_rank_for_any_reached_none_for_honor() {
+        // 字牌は数牌防御対象外なので None。
+        let context = suited_context(
+            vec![tile(108), tile(109), tile(110), tile(111)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suited_safety_rank_for_any_reached(tile(108).tile_type(), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn suited_safety_rank_for_any_reached_no_chance_over_one_chance_and_suji() {
+        // 1m は 4m 河でスジかつ4枚見え。NoChance が最優先。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(
+            vec![tile(0), tile(1), tile(2), tile(3)],
+            discards,
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suited_safety_rank_for_any_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::NoChance)
+        );
+    }
+
+    #[test]
+    fn suited_safety_rank_for_any_reached_one_chance_over_suji() {
+        // 1m は 4m 河でスジかつ3枚見え。OneChance が Suji より優先。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(
+            vec![tile(0), tile(1), tile(2)],
+            discards,
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suited_safety_rank_for_any_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::OneChance)
+        );
+    }
+
+    #[test]
+    fn suited_safety_rank_for_any_reached_suji_over_no_safety() {
+        // 4m 河で 1m はスジ(Suji)、5m は無スジ(NoSafety)。壁は無し。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(vec![], discards, [false, true, false, false]);
+        assert_eq!(
+            suited_safety_rank_for_any_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_any_reached(tile(16).tile_type(), &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+    }
+
+    #[test]
+    fn suited_dahai_actions_by_safety_excludes_non_dahai() {
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(vec![], discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Reach,
+            LegalAction::Pon {
+                tile: tile(0),
+                consumed: vec![tile(1), tile(2)],
+            },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        let ranked = suited_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![(
+                &LegalAction::Dahai { tile: tile(0) },
+                SuitedSafetyRank::Suji
+            )]
+        );
+    }
+
+    #[test]
+    fn suited_dahai_actions_by_safety_excludes_honor_dahai() {
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(vec![], discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        let ranked = suited_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![(
+                &LegalAction::Dahai { tile: tile(0) },
+                SuitedSafetyRank::Suji
+            )]
+        );
+    }
+
+    #[test]
+    fn suited_dahai_actions_by_safety_orders_by_safety() {
+        // 4m 河でスジ判定。2m は4枚見え(NoChance)、3m は3枚見え(OneChance)、
+        // 1m はスジ(Suji)、5m は無スジ(NoSafety)。順序が入れ替わっていても安全度順に並ぶ。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(
+            vec![
+                tile(4),
+                tile(5),
+                tile(6),
+                tile(7),
+                tile(8),
+                tile(9),
+                tile(10),
+            ],
+            discards,
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(8) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        let ranked = suited_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(4) },
+                    SuitedSafetyRank::NoChance
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(8) },
+                    SuitedSafetyRank::OneChance
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(0) },
+                    SuitedSafetyRank::Suji
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(16) },
+                    SuitedSafetyRank::NoSafety
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn suited_dahai_actions_by_safety_includes_no_safety_and_preserves_order() {
+        // リーチ者はいるが河は空・壁も無しなので全て NoSafety。NoSafety も含み元の順序を保つ。
+        let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(32) },
+        ];
+        let ranked = suited_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(16) },
+                    SuitedSafetyRank::NoSafety
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(0) },
+                    SuitedSafetyRank::NoSafety
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(32) },
+                    SuitedSafetyRank::NoSafety
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_suited_safety_fallback_action_none_without_opponent_reach() {
+        // 他家リーチがいなければ NoChance でも選ばない。
+        let context = suited_context(
+            vec![tile(0), tile(1), tile(2), tile(3)],
+            Default::default(),
+            [false; 4],
+        );
+        let actions = vec![LegalAction::Dahai { tile: tile(0) }];
+        assert_eq!(
+            select_suited_safety_fallback_action(&actions, &context),
+            None
+        );
+    }
+
+    #[test]
+    fn select_suited_safety_fallback_action_none_when_only_no_safety() {
+        // 全て NoSafety の数牌しかない場合は None。
+        let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_suited_safety_fallback_action(&actions, &context),
+            None
+        );
+    }
+
+    #[test]
+    fn select_suited_safety_fallback_action_returns_safest_dahai() {
+        // 2m は4枚見え(NoChance)、1m はスジ(Suji)。最も安全な 2m を選ぶ。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = suited_context(
+            vec![tile(4), tile(5), tile(6), tile(7)],
+            discards,
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        assert_eq!(
+            select_suited_safety_fallback_action(&actions, &context),
+            Some(&LegalAction::Dahai { tile: tile(4) })
+        );
     }
 }
