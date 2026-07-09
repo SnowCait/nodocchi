@@ -9,14 +9,14 @@ pub use acceptance::{
     Acceptance, AcceptanceTile, calculate_acceptance, calculate_acceptance_with_visible_tiles,
 };
 pub use discard::{
-    DiscardEvaluation, FloatingTileValue, ShapeBreakdown, evaluate_discards,
+    DiscardEvaluation, FloatingTileValue, PairContext, ShapeBreakdown, evaluate_discards,
     evaluate_discards_from_tiles, evaluate_discards_from_tiles_with_context,
     evaluate_discards_from_tiles_with_dora, evaluate_discards_from_tiles_with_visible_tiles,
     evaluate_discards_with_visible_tiles, floating_tile_value_breakdown_for_discard,
-    floating_tile_value_for_discard, select_best_discard, select_best_discard_from_tiles,
-    select_best_discard_from_tiles_with_context, select_best_discard_from_tiles_with_dora,
-    select_best_discard_from_tiles_with_visible_tiles, select_best_discard_with_visible_tiles,
-    shape_breakdown_for_discard, shape_penalty_for_discard,
+    floating_tile_value_for_discard, pair_context_for_discard, select_best_discard,
+    select_best_discard_from_tiles, select_best_discard_from_tiles_with_context,
+    select_best_discard_from_tiles_with_dora, select_best_discard_from_tiles_with_visible_tiles,
+    select_best_discard_with_visible_tiles, shape_breakdown_for_discard, shape_penalty_for_discard,
 };
 pub use hand::{Hand, HandError};
 pub use shanten::{

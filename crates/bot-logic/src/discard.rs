@@ -158,6 +158,39 @@ fn preserves_ryanmen_after_discard(counts: &TileCounts, discard: TileType) -> bo
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PairContext {
+    pub pair_like_type_count: u8,
+    pub other_pair_like_type_count: u8,
+    pub is_only_pair_candidate: bool,
+    pub leaves_pair_after_discard: bool,
+}
+
+pub fn pair_context_for_discard(counts: &TileCounts, discard: TileType) -> PairContext {
+    let count_before_discard = counts.count(discard);
+    if count_before_discard == 0 {
+        return PairContext::default();
+    }
+
+    let mut pair_like_type_count = 0u8;
+    let mut other_pair_like_type_count = 0u8;
+    for tile in TileType::all() {
+        if counts.count(tile) >= 2 {
+            pair_like_type_count += 1;
+            if tile != discard {
+                other_pair_like_type_count += 1;
+            }
+        }
+    }
+
+    PairContext {
+        pair_like_type_count,
+        other_pair_like_type_count,
+        is_only_pair_candidate: count_before_discard >= 2 && other_pair_like_type_count == 0,
+        leaves_pair_after_discard: count_before_discard >= 3,
+    }
+}
+
 pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
     let breakdown = shape_breakdown_for_discard(counts, discard);
     let mut penalty = 0i16;
@@ -193,6 +226,20 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
         penalty -= 12;
     } else if breakdown.same_type_count == 2 && preserves_shape {
         penalty -= 8;
+    }
+
+    let pair_context = pair_context_for_discard(counts, discard);
+    if pair_context.is_only_pair_candidate
+        && !pair_context.leaves_pair_after_discard
+        && !preserves_shape
+    {
+        penalty += 8;
+    }
+    if breakdown.same_type_count == 2 && pair_context.other_pair_like_type_count >= 1 {
+        penalty -= 6;
+    }
+    if breakdown.same_type_count == 2 && pair_context.pair_like_type_count >= 3 {
+        penalty -= 4;
     }
 
     penalty.max(0)
@@ -1618,17 +1665,18 @@ mod tests {
     }
 
     #[test]
-    fn bare_pair_keeps_full_pair_penalty() {
-        // 単純な対子は余剰牌ではないので補正されず 20 のまま
+    fn only_pair_candidate_is_heavier_than_base() {
+        // 唯一の対子候補を壊すと、ヘッドを失うため対子20に唯一対子8を加える
         assert_eq!(
             shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m")),
-            20
+            28
         );
     }
 
     #[test]
     fn same_type_two_relief_applies_in_complex_shape() {
         // 5m5m6m の 5m は 1枚切っても 5m6m 両面が残る余剰対子
+        // 主要形が残るため唯一対子 penalty は加えない
         // 対子20 + 両面30 + 隣接3 - 両面存続15 - 同種2枚8 = 30
         let redundant = shape_penalty_for_discard(&counts(&["5m", "5m", "6m"]), tile("5m"));
         assert_eq!(redundant, 30);
@@ -1672,10 +1720,10 @@ mod tests {
 
     #[test]
     fn honor_pair_penalty_positive() {
-        // 字牌対子は対子 penalty を持ち、0 未満にはならない
+        // 字牌対子も唯一の対子候補なら対子20に唯一対子8を加える
         let penalty = shape_penalty_for_discard(&counts(&["E", "E"]), tile("E"));
         assert!(penalty > 0);
-        assert_eq!(penalty, 20);
+        assert_eq!(penalty, 28);
     }
 
     #[test]
@@ -2126,6 +2174,101 @@ mod tests {
             &low_floating_discards_dora,
             &high_floating_keeps_dora
         ));
+    }
+
+    #[test]
+    fn pair_context_absent_discard_returns_default() {
+        let counts = counts(&["1m", "2m"]);
+        assert_eq!(
+            pair_context_for_discard(&counts, tile("9s")),
+            PairContext::default()
+        );
+    }
+
+    #[test]
+    fn pair_context_counts_number_and_honor_pairs() {
+        // 5m5m と EE の2種類の対子。5s は単騎
+        let counts = counts(&["5m", "5m", "E", "E", "5s"]);
+        let context = pair_context_for_discard(&counts, tile("5m"));
+        assert_eq!(context.pair_like_type_count, 2);
+        assert_eq!(context.other_pair_like_type_count, 1);
+        assert!(!context.is_only_pair_candidate);
+        assert!(!context.leaves_pair_after_discard);
+    }
+
+    #[test]
+    fn pair_context_detects_only_pair_candidate() {
+        let counts = counts(&["5m", "5m", "1p", "3s"]);
+        let context = pair_context_for_discard(&counts, tile("5m"));
+        assert_eq!(context.pair_like_type_count, 1);
+        assert_eq!(context.other_pair_like_type_count, 0);
+        assert!(context.is_only_pair_candidate);
+        assert!(!context.leaves_pair_after_discard);
+    }
+
+    #[test]
+    fn pair_context_triplet_leaves_pair_after_discard() {
+        let counts = counts(&["5m", "5m", "5m"]);
+        let context = pair_context_for_discard(&counts, tile("5m"));
+        assert!(context.leaves_pair_after_discard);
+        assert!(context.is_only_pair_candidate);
+        assert_eq!(context.pair_like_type_count, 1);
+    }
+
+    #[test]
+    fn pair_context_single_tile_discard_is_not_only_pair() {
+        // 5m は単騎で、対子は EE のみ
+        let counts = counts(&["5m", "E", "E"]);
+        let context = pair_context_for_discard(&counts, tile("5m"));
+        assert!(!context.is_only_pair_candidate);
+        assert_eq!(context.pair_like_type_count, 1);
+        assert_eq!(context.other_pair_like_type_count, 1);
+    }
+
+    #[test]
+    fn breaking_only_pair_is_heavier_than_one_of_many() {
+        let only_pair = shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"));
+        let one_of_two = shape_penalty_for_discard(&counts(&["E", "E", "S", "S"]), tile("E"));
+        assert!(only_pair > one_of_two);
+    }
+
+    #[test]
+    fn breaking_pair_with_surplus_heads_is_lightest() {
+        let one_of_two = shape_penalty_for_discard(&counts(&["E", "E", "S", "S"]), tile("E"));
+        let one_of_three =
+            shape_penalty_for_discard(&counts(&["E", "E", "S", "S", "W", "W"]), tile("E"));
+        assert!(one_of_three < one_of_two);
+    }
+
+    #[test]
+    fn triplet_discard_skips_only_pair_penalty() {
+        // 暗刻から1枚落としても対子が残るため唯一対子 penalty は加えない
+        let triplet = shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"));
+        let only_pair = shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"));
+        assert_eq!(triplet, 18);
+        assert!(triplet < only_pair);
+    }
+
+    #[test]
+    fn only_pair_penalty_skipped_when_major_shape_survives() {
+        // 2m2m3m の 2m は唯一の対子候補だが、切っても両面が残るため唯一対子 penalty は加えない
+        // 対子20 + 両面30 + 隣接3 - 両面存続15 - 同種2枚8 = 30
+        assert_eq!(
+            shape_penalty_for_discard(&counts(&["2m", "2m", "3m"]), tile("2m")),
+            30
+        );
+    }
+
+    #[test]
+    fn pair_relief_never_makes_penalty_negative() {
+        for hand in [
+            counts(&["E", "E", "S", "S", "W", "W"]),
+            counts(&["E", "E", "S", "S"]),
+        ] {
+            for tile in TileType::all() {
+                assert!(shape_penalty_for_discard(&hand, tile) >= 0);
+            }
+        }
     }
 
     #[test]
