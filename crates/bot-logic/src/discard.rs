@@ -10,6 +10,7 @@ pub struct DiscardEvaluation {
     pub shanten_after_discard: Shanten,
     pub acceptance_after_discard: Acceptance,
     pub shape_penalty: i16,
+    pub floating_tile_value: i16,
     pub discarded_dora_count: u8,
     pub discarded_value_honor_count: u8,
     pub discards_red_five: bool,
@@ -118,6 +119,55 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
     penalty
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloatingTileValue {
+    pub value: i16,
+    pub is_isolated: bool,
+}
+
+pub fn floating_tile_value_breakdown_for_discard(
+    counts: &TileCounts,
+    discard: TileType,
+) -> FloatingTileValue {
+    let same_type_count = counts.count(discard);
+    if same_type_count != 1 {
+        return FloatingTileValue::default();
+    }
+
+    let Some(number) = discard.number() else {
+        return FloatingTileValue {
+            value: 0,
+            is_isolated: true,
+        };
+    };
+
+    let base = discard.raw() - (number - 1);
+    let has = |n: i8| -> bool {
+        if !(1..=9).contains(&n) {
+            return false;
+        }
+        let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+        counts.count(tile) > 0
+    };
+
+    let d = number as i8;
+    for delta in [-2i8, -1, 1, 2] {
+        if has(d + delta) {
+            return FloatingTileValue::default();
+        }
+    }
+
+    let value = i16::from(number.min(10 - number));
+    FloatingTileValue {
+        value,
+        is_isolated: true,
+    }
+}
+
+pub fn floating_tile_value_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
+    floating_tile_value_breakdown_for_discard(counts, discard).value
+}
+
 pub fn select_best_discard(counts: &TileCounts) -> Option<DiscardEvaluation> {
     select_best(evaluate_discards(counts))
 }
@@ -203,6 +253,10 @@ fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) ->
         return candidate.shape_penalty < best.shape_penalty;
     }
 
+    if candidate.floating_tile_value != best.floating_tile_value {
+        return candidate.floating_tile_value < best.floating_tile_value;
+    }
+
     if candidate.discarded_dora_count != best.discarded_dora_count {
         return candidate.discarded_dora_count < best.discarded_dora_count;
     }
@@ -250,6 +304,7 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             shanten_after_discard,
             acceptance_after_discard,
             shape_penalty: shape_penalty_for_discard(counts, tile),
+            floating_tile_value: floating_tile_value_for_discard(counts, tile),
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
@@ -301,6 +356,7 @@ pub fn evaluate_discards_with_visible_tiles(
             shanten_after_discard,
             acceptance_after_discard,
             shape_penalty: shape_penalty_for_discard(counts, tile),
+            floating_tile_value: floating_tile_value_for_discard(counts, tile),
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
@@ -704,6 +760,7 @@ mod tests {
                 tiles,
             },
             shape_penalty,
+            floating_tile_value: 0,
             discarded_dora_count: dora,
             discarded_value_honor_count: value_honor,
             discards_red_five: red,
@@ -1585,6 +1642,262 @@ mod tests {
                 shape_penalty_for_discard(&counts, evaluation.discard)
             );
         }
+    }
+
+    fn evaluation_with_floating(
+        min: i8,
+        remaining: u8,
+        type_count: usize,
+        shape_penalty: i16,
+        floating: i16,
+    ) -> DiscardEvaluation {
+        let mut evaluation =
+            evaluation_with_shape_penalty(min, remaining, type_count, shape_penalty, 0, 0, false);
+        evaluation.floating_tile_value = floating;
+        evaluation
+    }
+
+    #[test]
+    fn floating_absent_discard_is_zero() {
+        let counts = counts(&["1m", "2m"]);
+        assert_eq!(floating_tile_value_for_discard(&counts, tile("9s")), 0);
+        let breakdown = floating_tile_value_breakdown_for_discard(&counts, tile("9s"));
+        assert_eq!(breakdown, FloatingTileValue::default());
+        assert!(!breakdown.is_isolated);
+    }
+
+    #[test]
+    fn floating_lone_honor_is_zero() {
+        let counts = counts(&["E"]);
+        assert_eq!(floating_tile_value_for_discard(&counts, tile("E")), 0);
+        let breakdown = floating_tile_value_breakdown_for_discard(&counts, tile("E"));
+        assert!(breakdown.is_isolated);
+        assert_eq!(breakdown.value, 0);
+    }
+
+    #[test]
+    fn floating_pair_is_not_isolated() {
+        let counts = counts(&["4m", "4m"]);
+        assert_eq!(floating_tile_value_for_discard(&counts, tile("4m")), 0);
+        assert!(!floating_tile_value_breakdown_for_discard(&counts, tile("4m")).is_isolated);
+    }
+
+    #[test]
+    fn floating_triplet_is_not_isolated() {
+        let counts = counts(&["4m", "4m", "4m"]);
+        assert_eq!(floating_tile_value_for_discard(&counts, tile("4m")), 0);
+    }
+
+    #[test]
+    fn floating_tile_with_neighbor_is_not_isolated() {
+        let plus_one = counts(&["4m", "5m"]);
+        assert_eq!(floating_tile_value_for_discard(&plus_one, tile("4m")), 0);
+        let minus_one = counts(&["4m", "3m"]);
+        assert_eq!(floating_tile_value_for_discard(&minus_one, tile("4m")), 0);
+        let plus_two = counts(&["4m", "6m"]);
+        assert_eq!(floating_tile_value_for_discard(&plus_two, tile("4m")), 0);
+        let minus_two = counts(&["4m", "2m"]);
+        assert_eq!(floating_tile_value_for_discard(&minus_two, tile("4m")), 0);
+    }
+
+    #[test]
+    fn floating_neighbor_in_other_suit_stays_isolated() {
+        let counts = counts(&["4m", "3p", "5p", "4s"]);
+        assert_eq!(floating_tile_value_for_discard(&counts, tile("4m")), 4);
+        assert!(floating_tile_value_breakdown_for_discard(&counts, tile("4m")).is_isolated);
+    }
+
+    #[test]
+    fn floating_isolated_terminals_value_one() {
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["1m"]), tile("1m")),
+            1
+        );
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["9s"]), tile("9s")),
+            1
+        );
+    }
+
+    #[test]
+    fn floating_isolated_two_and_eight_value_two() {
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["2p"]), tile("2p")),
+            2
+        );
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["8m"]), tile("8m")),
+            2
+        );
+    }
+
+    #[test]
+    fn floating_isolated_three_and_seven_value_three() {
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["3s"]), tile("3s")),
+            3
+        );
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["7p"]), tile("7p")),
+            3
+        );
+    }
+
+    #[test]
+    fn floating_isolated_four_and_six_value_four() {
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["4m"]), tile("4m")),
+            4
+        );
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["6s"]), tile("6s")),
+            4
+        );
+    }
+
+    #[test]
+    fn floating_isolated_five_value_five() {
+        assert_eq!(
+            floating_tile_value_for_discard(&counts(&["5p"]), tile("5p")),
+            5
+        );
+    }
+
+    #[test]
+    fn evaluate_discards_sets_floating_from_counts_before_discard() {
+        let counts = counts(&["1m", "5s", "E"]);
+        let evaluations = evaluate_discards(&counts);
+        let one = discard_evaluation(&evaluations, tile("1m"));
+        assert_eq!(one.floating_tile_value, 1);
+        let five = discard_evaluation(&evaluations, tile("5s"));
+        assert_eq!(five.floating_tile_value, 5);
+        let honor = discard_evaluation(&evaluations, tile("E"));
+        assert_eq!(honor.floating_tile_value, 0);
+    }
+
+    #[test]
+    fn evaluate_discards_with_visible_tiles_sets_floating() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 88, 132]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let evaluations = evaluate_discards_with_visible_tiles(&counts, &hand);
+        assert!(!evaluations.is_empty());
+        for evaluation in &evaluations {
+            assert_eq!(
+                evaluation.floating_tile_value,
+                floating_tile_value_for_discard(&counts, evaluation.discard)
+            );
+        }
+    }
+
+    #[test]
+    fn from_tiles_preserves_floating_after_decorate() {
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 88, 132]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let with_context = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+        let with_visible = evaluate_discards_from_tiles_with_visible_tiles(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+            &tiles,
+        );
+        assert!(!with_context.is_empty());
+        for evaluation in &with_context {
+            assert_eq!(
+                evaluation.floating_tile_value,
+                floating_tile_value_for_discard(&counts, evaluation.discard)
+            );
+        }
+        for evaluation in &with_visible {
+            assert_eq!(
+                evaluation.floating_tile_value,
+                floating_tile_value_for_discard(&counts, evaluation.discard)
+            );
+        }
+    }
+
+    #[test]
+    fn floating_tiebreak_prefers_lower_value() {
+        let low = evaluation_with_floating(1, 10, 2, 0, 1);
+        let high = evaluation_with_floating(1, 10, 2, 0, 5);
+        assert!(is_better_discard(&low, &high));
+        assert!(!is_better_discard(&high, &low));
+    }
+
+    #[test]
+    fn discards_isolated_one_over_isolated_five() {
+        // 123m 789m 123p 東東東 + 1s(浮き) 5s(浮き)
+        // 同じ単騎テンパイ。孤立 5s より孤立 1s を切る
+        let tiles = ids(&[0, 4, 8, 24, 28, 32, 36, 40, 44, 108, 109, 110, 72, 89]);
+        let selected = select_best_discard_from_tiles(&tiles).unwrap();
+        assert_eq!(selected.discard, tile("1s"));
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+    }
+
+    #[test]
+    fn discards_isolated_nine_over_isolated_four() {
+        // 123m 789m 123p 東東東 + 9p(浮き) 4s(浮き)
+        // 同じ単騎テンパイ。孤立 4s より孤立 9p を切る
+        let tiles = ids(&[0, 4, 8, 24, 28, 32, 36, 40, 44, 108, 109, 110, 68, 84]);
+        let selected = select_best_discard_from_tiles(&tiles).unwrap();
+        assert_eq!(selected.discard, tile("9p"));
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+    }
+
+    #[test]
+    fn shape_penalty_outranks_floating_tiebreak() {
+        let low_floating_high_penalty = evaluation_with_floating(1, 10, 2, 40, 1);
+        let high_floating_low_penalty = evaluation_with_floating(1, 10, 2, 0, 5);
+        assert!(is_better_discard(
+            &high_floating_low_penalty,
+            &low_floating_high_penalty
+        ));
+    }
+
+    #[test]
+    fn shanten_outranks_floating_tiebreak() {
+        let low_shanten_high_floating = evaluation_with_floating(0, 4, 1, 0, 5);
+        let high_shanten_low_floating = evaluation_with_floating(1, 40, 5, 0, 1);
+        assert!(is_better_discard(
+            &low_shanten_high_floating,
+            &high_shanten_low_floating
+        ));
+    }
+
+    #[test]
+    fn acceptance_remaining_outranks_floating_tiebreak() {
+        let more_remaining_high_floating = evaluation_with_floating(1, 20, 1, 0, 5);
+        let less_remaining_low_floating = evaluation_with_floating(1, 10, 1, 0, 1);
+        assert!(is_better_discard(
+            &more_remaining_high_floating,
+            &less_remaining_low_floating
+        ));
+    }
+
+    #[test]
+    fn acceptance_types_outrank_floating_tiebreak() {
+        let more_types_high_floating = evaluation_with_floating(1, 10, 3, 0, 5);
+        let fewer_types_low_floating = evaluation_with_floating(1, 10, 2, 0, 1);
+        assert!(is_better_discard(
+            &more_types_high_floating,
+            &fewer_types_low_floating
+        ));
+    }
+
+    #[test]
+    fn floating_tiebreak_outranks_dora() {
+        let mut low_floating_discards_dora = evaluation_with_floating(1, 10, 2, 0, 1);
+        low_floating_discards_dora.discarded_dora_count = 1;
+        let high_floating_keeps_dora = evaluation_with_floating(1, 10, 2, 0, 5);
+        assert!(is_better_discard(
+            &low_floating_discards_dora,
+            &high_floating_keeps_dora
+        ));
     }
 
     #[test]
