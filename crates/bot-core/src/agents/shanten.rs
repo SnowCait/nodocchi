@@ -1,7 +1,10 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
-use crate::defense::{select_genbutsu_fallback_action, select_honor_safety_fallback_action};
+use crate::defense::{
+    select_genbutsu_fallback_action, select_honor_safety_fallback_action,
+    select_suited_safety_fallback_action,
+};
 use crate::discard_selection::select_discard_action;
 use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
@@ -83,6 +86,11 @@ impl Agent for ShantenAgent {
         if ctx.any_opponent_reached()
             && let Some(action) = select_honor_safety_fallback_action(legal_actions, ctx)
         {
+            return action.clone();
+        }
+
+        // 他家リーチ中で共通現物も字牌 safety もない場合、NoChance / OneChance / Suji の数牌を切る。
+        if let Some(action) = select_suited_safety_fallback_action(legal_actions, ctx) {
             return action.clone();
         }
 
@@ -546,9 +554,10 @@ mod tests {
     #[test]
     fn falls_through_to_reach_without_common_genbutsu_or_honor() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌 Dahai もなければ従来通り Reach 判断に進む。
+        // 共通現物も字牌 Dahai もなく、数牌も全て NoSafety なら従来通り Reach 判断に進む。
+        // リーチ者の河は 16(5m) のみで、0(1m) / 56(6p) は無スジ・壁なしの NoSafety。
         let ctx = opponent_reach_context(Some(0), &[]);
-        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
@@ -603,5 +612,156 @@ mod tests {
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(112), dahai(108)];
         assert_eq!(agent.act(&ctx, &actions), dahai(112));
+    }
+
+    // 他家(player 1)がリーチしている局面。河・visible・手牌・引き牌を個別に指定する。
+    fn suited_reach_context(
+        drawn_tile: Option<u8>,
+        hand_values: &[u8],
+        visible_values: &[u8],
+        reacher_discards: &[u8],
+    ) -> GameContext {
+        let discards = [
+            vec![],
+            reacher_discards.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            vec![],
+        ];
+        GameContext::from_parts_with_table_state(
+            drawn_tile.map(tile),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            None,
+            None,
+            visible_values.iter().map(|&value| tile(value)).collect(),
+            Some(0),
+            None,
+            discards,
+            [false, true, false, false],
+        )
+    }
+
+    #[test]
+    fn prefers_genbutsu_fallback_over_suited_safety_fallback() {
+        let mut agent = ShantenAgent;
+        // 共通現物 16(5m) と NoChance 数牌 4(2m) が両方合法でも、現物を優先する。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[16]);
+        let actions = vec![dahai(4), dahai(16)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(16));
+    }
+
+    #[test]
+    fn prefers_honor_safety_fallback_over_suited_safety_fallback() {
+        let mut agent = ShantenAgent;
+        // 共通現物なし。字牌 108(東) と NoChance 数牌 4(2m) が合法なら字牌を優先する。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
+        let actions = vec![dahai(108), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(108));
+    }
+
+    #[test]
+    fn picks_no_chance_suited_dahai_when_no_genbutsu_or_honor() {
+        let mut agent = ShantenAgent;
+        // 共通現物も字牌もなし。無スジ 0(1m) より NoChance 4(2m) を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
+        let actions = vec![dahai(0), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+    }
+
+    #[test]
+    fn picks_one_chance_suited_dahai_when_no_genbutsu_or_honor() {
+        let mut agent = ShantenAgent;
+        // 共通現物も字牌もなし。無スジ 0(1m) より OneChance 4(2m) を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6], &[]);
+        let actions = vec![dahai(0), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+    }
+
+    #[test]
+    fn picks_suji_suited_dahai_when_no_genbutsu_or_honor() {
+        let mut agent = ShantenAgent;
+        // 共通現物も字牌もなし。リーチ者の河に 12(4m) があり 0(1m) はスジ。無スジ 16(5m) より選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[], &[12]);
+        let actions = vec![dahai(16), dahai(0)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(0));
+    }
+
+    #[test]
+    fn suited_safety_fallback_follows_safety_order() {
+        let mut agent = ShantenAgent;
+        // 12(4m) 河でスジ判定。2m は4枚見え(NoChance)、3m は3枚見え(OneChance)、
+        // 1m はスジ(Suji)、5m は無スジ(NoSafety)。最も安全な NoChance を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7, 8, 9, 10], &[12]);
+        let actions = vec![dahai(16), dahai(0), dahai(8), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+    }
+
+    #[test]
+    fn falls_through_to_reach_when_only_no_safety_suited() {
+        let mut agent = ShantenAgent;
+        // 共通現物も字牌もなく、数牌が全て NoSafety なら数牌防御 fallback は使わず Reach に進む。
+        let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn does_not_use_suited_safety_fallback_without_opponent_reach() {
+        let mut agent = ShantenAgent;
+        // 他家リーチが無ければ、河に 16(5m) があり 4(2m) がスジ相当でも従来の Reach を選ぶ。
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let ctx = GameContext::from_parts_with_table_state(
+            Some(tile(0)),
+            vec![],
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            None,
+            discards,
+            [false; 4],
+        );
+        let actions = vec![LegalAction::Reach, dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn prefers_suited_safety_fallback_over_reach() {
+        let mut agent = ShantenAgent;
+        // 共通現物も字牌もなし。NoChance 数牌があれば Reach より優先する。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+    }
+
+    #[test]
+    fn prefers_suited_safety_fallback_over_discard_evaluation() {
+        let mut agent = ShantenAgent;
+        // 通常評価では別牌が選ばれ得る手牌だが、共通現物も字牌もなければ NoChance 4(2m) を優先する。
+        // 引き牌も数牌にして字牌 Dahai を作らず、字牌 fallback を挟まないようにする。
+        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
+        let ctx = suited_reach_context(Some(88), &hand_values, &[4, 5, 6, 7], &[]);
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(88)])
+            .collect();
+        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+    }
+
+    #[test]
+    fn suited_safety_fallback_ignores_non_dahai_actions() {
+        let mut agent = ShantenAgent;
+        // 数牌の Pon はあっても数牌 Dahai が無ければ数牌防御 fallback は発動しない。
+        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
+        let actions = vec![
+            LegalAction::Pon {
+                tile: tile(4),
+                consumed: vec![tile(5), tile(6)],
+            },
+            LegalAction::None,
+        ];
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 }
