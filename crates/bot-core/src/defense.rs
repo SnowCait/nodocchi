@@ -176,6 +176,44 @@ pub fn suji_dahai_actions_by_safety<'a>(
     ranked
 }
 
+// 数牌の見え枚数に基づく壁 / ワンチャンス分類。見えているほど当たり筋が減る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WallRank {
+    NoWall,
+    OneChance,
+    NoChance,
+}
+
+// 数牌の見え枚数から壁 / ワンチャンスを分類する。字牌は対象外で NoWall。
+pub fn wall_rank(tile: TileType, context: &GameContext) -> WallRank {
+    if tile.is_honor() {
+        return WallRank::NoWall;
+    }
+    match visible_count_of(tile, context) {
+        0..=2 => WallRank::NoWall,
+        3 => WallRank::OneChance,
+        _ => WallRank::NoChance,
+    }
+}
+
+// 3枚見えのワンチャンス数牌か判定する。
+pub fn is_one_chance(tile: TileType, context: &GameContext) -> bool {
+    wall_rank(tile, context) == WallRank::OneChance
+}
+
+// 4枚見えのノーチャンス数牌か判定する。
+pub fn is_no_chance(tile: TileType, context: &GameContext) -> bool {
+    wall_rank(tile, context) == WallRank::NoChance
+}
+
+// 数牌のみを TileType::all() の順序で壁分類と共に返す。NoWall も含める。
+pub fn wall_tile_types_by_rank(context: &GameContext) -> Vec<(TileType, WallRank)> {
+    TileType::all()
+        .filter(|tile| !tile.is_honor())
+        .map(|tile| (tile, wall_rank(tile, context)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +881,166 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn wall_rank_no_wall_for_zero_one_two_visible() {
+        // 1m(tile 0-3)を0/1/2枚見えているそれぞれのケース。
+        let one_man = tile(0).tile_type();
+        assert_eq!(
+            wall_rank(one_man, &visible_context(vec![])),
+            WallRank::NoWall
+        );
+        assert_eq!(
+            wall_rank(one_man, &visible_context(vec![tile(0)])),
+            WallRank::NoWall
+        );
+        assert_eq!(
+            wall_rank(one_man, &visible_context(vec![tile(0), tile(1)])),
+            WallRank::NoWall
+        );
+    }
+
+    #[test]
+    fn wall_rank_one_chance_for_three_visible() {
+        let one_man = tile(0).tile_type();
+        assert_eq!(
+            wall_rank(one_man, &visible_context(vec![tile(0), tile(1), tile(2)])),
+            WallRank::OneChance
+        );
+    }
+
+    #[test]
+    fn wall_rank_no_chance_for_four_visible() {
+        let one_man = tile(0).tile_type();
+        assert_eq!(
+            wall_rank(
+                one_man,
+                &visible_context(vec![tile(0), tile(1), tile(2), tile(3)])
+            ),
+            WallRank::NoChance
+        );
+    }
+
+    #[test]
+    fn wall_rank_no_chance_for_five_or_more_visible() {
+        // 通常あり得ないが5枚以上相当の入力でも NoChance。
+        let five_man = tile(17).tile_type();
+        assert_eq!(
+            wall_rank(
+                five_man,
+                &visible_context(vec![tile(16), tile(17), tile(18), tile(19), tile(20)])
+            ),
+            WallRank::NoChance
+        );
+    }
+
+    #[test]
+    fn wall_rank_no_wall_for_honor() {
+        // 字牌は3枚見えでも壁対象外なので NoWall。
+        let east = tile(108).tile_type();
+        assert_eq!(
+            wall_rank(
+                east,
+                &visible_context(vec![tile(108), tile(109), tile(110)])
+            ),
+            WallRank::NoWall
+        );
+    }
+
+    #[test]
+    fn wall_rank_counts_red_five_as_same_type() {
+        // 赤5m(tile 16)と通常5m(tile 17-19)で計4枚。同じ TileType として NoChance。
+        let five_man = tile(17).tile_type();
+        assert_eq!(
+            wall_rank(
+                five_man,
+                &visible_context(vec![tile(16), tile(17), tile(18), tile(19)])
+            ),
+            WallRank::NoChance
+        );
+    }
+
+    #[test]
+    fn is_one_chance_true_only_for_three_visible_number() {
+        let one_man = tile(0).tile_type();
+        assert!(is_one_chance(
+            one_man,
+            &visible_context(vec![tile(0), tile(1), tile(2)])
+        ));
+        assert!(!is_one_chance(
+            one_man,
+            &visible_context(vec![tile(0), tile(1)])
+        ));
+        assert!(!is_one_chance(
+            one_man,
+            &visible_context(vec![tile(0), tile(1), tile(2), tile(3)])
+        ));
+        // 字牌は3枚見えでも false。
+        let east = tile(108).tile_type();
+        assert!(!is_one_chance(
+            east,
+            &visible_context(vec![tile(108), tile(109), tile(110)])
+        ));
+    }
+
+    #[test]
+    fn is_no_chance_true_only_for_four_or_more_visible_number() {
+        let one_man = tile(0).tile_type();
+        assert!(is_no_chance(
+            one_man,
+            &visible_context(vec![tile(0), tile(1), tile(2), tile(3)])
+        ));
+        assert!(!is_no_chance(
+            one_man,
+            &visible_context(vec![tile(0), tile(1), tile(2)])
+        ));
+        // 字牌は4枚見えでも false。
+        let east = tile(108).tile_type();
+        assert!(!is_no_chance(
+            east,
+            &visible_context(vec![tile(108), tile(109), tile(110), tile(111)])
+        ));
+    }
+
+    #[test]
+    fn wall_tile_types_by_rank_excludes_honors() {
+        let context = visible_context(vec![]);
+        let ranked = wall_tile_types_by_rank(&context);
+        assert!(ranked.iter().all(|(tile, _)| !tile.is_honor()));
+    }
+
+    #[test]
+    fn wall_tile_types_by_rank_returns_number_tiles_in_all_order() {
+        let context = visible_context(vec![]);
+        let ranked = wall_tile_types_by_rank(&context);
+        let expected: Vec<(TileType, WallRank)> = TileType::all()
+            .filter(|tile| !tile.is_honor())
+            .map(|tile| (tile, WallRank::NoWall))
+            .collect();
+        assert_eq!(ranked, expected);
+        // 数牌は27種。
+        assert_eq!(ranked.len(), 27);
+    }
+
+    #[test]
+    fn wall_tile_types_by_rank_includes_no_wall_entries() {
+        // 1m だけ4枚見え、他は NoWall。NoWall も含めて返す。
+        let context = visible_context(vec![tile(0), tile(1), tile(2), tile(3)]);
+        let ranked = wall_tile_types_by_rank(&context);
+        let one_man = tile(0).tile_type();
+        assert_eq!(
+            ranked
+                .iter()
+                .find(|(tile, _)| *tile == one_man)
+                .map(|(_, rank)| *rank),
+            Some(WallRank::NoChance)
+        );
+        assert!(
+            ranked
+                .iter()
+                .any(|(tile, rank)| *tile != one_man && *rank == WallRank::NoWall)
+        );
+        assert_eq!(ranked.len(), 27);
     }
 }
