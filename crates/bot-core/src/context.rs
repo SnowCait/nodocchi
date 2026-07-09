@@ -7,6 +7,7 @@ pub struct GameContext {
     dora_indicators: Vec<TileId>,
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
+    visible_tiles: Vec<TileId>,
 }
 
 impl GameContext {
@@ -56,12 +57,31 @@ impl GameContext {
         round_wind: Option<TileType>,
         seat_wind: Option<TileType>,
     ) -> Self {
+        Self::from_parts_with_visible_tiles(
+            drawn_tile,
+            hand_tiles,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+            Vec::new(),
+        )
+    }
+
+    pub fn from_parts_with_visible_tiles(
+        drawn_tile: Option<TileId>,
+        hand_tiles: Vec<TileId>,
+        dora_indicators: Vec<TileId>,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+        visible_tiles: Vec<TileId>,
+    ) -> Self {
         Self {
             drawn_tile,
             hand_tiles,
             dora_indicators,
             round_wind,
             seat_wind,
+            visible_tiles,
         }
     }
 
@@ -83,6 +103,10 @@ impl GameContext {
 
     pub fn seat_wind(&self) -> Option<TileType> {
         self.seat_wind
+    }
+
+    pub fn visible_tiles(&self) -> &[TileId] {
+        &self.visible_tiles
     }
 }
 
@@ -272,5 +296,119 @@ mod tests {
             ),
             GameContext::from_parts_with_dora(Some(tile(16)), hand_tiles, dora_indicators)
         );
+    }
+
+    #[test]
+    fn default_has_no_visible_tiles() {
+        assert!(GameContext::default().visible_tiles().is_empty());
+    }
+
+    #[test]
+    fn new_has_no_visible_tiles() {
+        assert!(GameContext::new().visible_tiles().is_empty());
+    }
+
+    #[test]
+    fn existing_constructors_have_no_visible_tiles() {
+        for context in [
+            GameContext::new(),
+            GameContext::with_drawn_tile(tile(16)),
+            GameContext::with_hand_tiles(vec![tile(0)]),
+            GameContext::from_parts(Some(tile(16)), vec![tile(0)]),
+            GameContext::from_parts_with_dora(Some(tile(16)), vec![tile(0)], vec![tile(4)]),
+            GameContext::from_parts_with_context(
+                Some(tile(16)),
+                vec![tile(0)],
+                vec![tile(4)],
+                Some(wind(27)),
+                Some(wind(28)),
+            ),
+        ] {
+            assert!(context.visible_tiles().is_empty());
+        }
+    }
+
+    #[test]
+    fn from_parts_with_visible_tiles_holds_visible_tiles() {
+        let visible_tiles = vec![tile(0), tile(16), tile(16)];
+        let context = GameContext::from_parts_with_visible_tiles(
+            Some(tile(16)),
+            vec![tile(0)],
+            vec![tile(4)],
+            None,
+            None,
+            visible_tiles.clone(),
+        );
+        assert_eq!(context.visible_tiles(), visible_tiles.as_slice());
+    }
+
+    #[test]
+    fn from_parts_with_visible_tiles_keeps_other_parts() {
+        let hand_tiles = vec![tile(0), tile(56)];
+        let dora_indicators = vec![tile(4)];
+        let visible_tiles = vec![tile(0), tile(56), tile(4)];
+        let context = GameContext::from_parts_with_visible_tiles(
+            Some(tile(16)),
+            hand_tiles.clone(),
+            dora_indicators.clone(),
+            Some(wind(27)),
+            Some(wind(28)),
+            visible_tiles.clone(),
+        );
+        assert_eq!(context.drawn_tile(), Some(tile(16)));
+        assert_eq!(context.hand_tiles(), hand_tiles.as_slice());
+        assert_eq!(context.dora_indicators(), dora_indicators.as_slice());
+        assert_eq!(context.round_wind(), Some(wind(27)));
+        assert_eq!(context.seat_wind(), Some(wind(28)));
+        assert_eq!(context.visible_tiles(), visible_tiles.as_slice());
+    }
+
+    #[test]
+    fn from_parts_with_context_has_no_visible_tiles() {
+        let context = GameContext::from_parts_with_context(
+            Some(tile(16)),
+            vec![tile(0)],
+            vec![tile(4)],
+            Some(wind(27)),
+            Some(wind(28)),
+        );
+        assert!(context.visible_tiles().is_empty());
+    }
+
+    #[test]
+    fn from_parts_with_visible_tiles_empty_equals_from_parts_with_context() {
+        let hand_tiles = vec![tile(0), tile(56)];
+        let dora_indicators = vec![tile(4)];
+        assert_eq!(
+            GameContext::from_parts_with_visible_tiles(
+                Some(tile(16)),
+                hand_tiles.clone(),
+                dora_indicators.clone(),
+                Some(wind(27)),
+                Some(wind(28)),
+                Vec::new(),
+            ),
+            GameContext::from_parts_with_context(
+                Some(tile(16)),
+                hand_tiles,
+                dora_indicators,
+                Some(wind(27)),
+                Some(wind(28)),
+            )
+        );
+    }
+
+    #[test]
+    fn visible_tiles_returns_slice() {
+        let context = GameContext::from_parts_with_visible_tiles(
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            vec![tile(0)],
+        );
+        let slice: &[TileId] = context.visible_tiles();
+        assert_eq!(slice, &[tile(0)]);
     }
 }

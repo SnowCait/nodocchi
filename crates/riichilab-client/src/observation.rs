@@ -23,7 +23,7 @@ impl ObservationPayload {
     pub fn decode_4p(&self) -> Result<DecodedObservation, ObservationError> {
         let observation = Observation::deserialize_from_base64(&self.base64)
             .map_err(|e| ObservationError::Decode(e.to_string()))?;
-        let hand_tiles = observation
+        let hand_tiles: Vec<TileId> = observation
             .hands
             .get(usize::from(observation.player_id))
             .map(|hand| {
@@ -33,12 +33,22 @@ impl ObservationPayload {
                     .collect()
             })
             .unwrap_or_default();
-        let dora_indicators = observation
+        let dora_indicators: Vec<TileId> = observation
             .dora_indicators
             .iter()
             .filter_map(|&raw| u8::try_from(raw).ok())
             .filter_map(temporary_tile_id_from_observation_tile)
             .collect();
+        let mut visible_tiles = hand_tiles.clone();
+        visible_tiles.extend(dora_indicators.iter().copied());
+        for player_discards in &observation.discards {
+            visible_tiles.extend(
+                player_discards
+                    .iter()
+                    .filter_map(|&raw| u8::try_from(raw).ok())
+                    .filter_map(temporary_tile_id_from_observation_tile),
+            );
+        }
         Ok(DecodedObservation {
             player_id: observation.player_id,
             drawn_tile: observation
@@ -48,6 +58,7 @@ impl ObservationPayload {
             dora_indicators,
             round_wind: TileType::wind_from_seat_index(observation.round_wind),
             seat_wind: seat_wind_from(observation.player_id, observation.oya),
+            visible_tiles,
         })
     }
 }
@@ -75,15 +86,17 @@ pub struct DecodedObservation {
     pub dora_indicators: Vec<TileId>,
     pub round_wind: Option<TileType>,
     pub seat_wind: Option<TileType>,
+    pub visible_tiles: Vec<TileId>,
 }
 
 pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
-    GameContext::from_parts_with_context(
+    GameContext::from_parts_with_visible_tiles(
         decoded.drawn_tile,
         decoded.hand_tiles.clone(),
         decoded.dora_indicators.clone(),
         decoded.round_wind,
         decoded.seat_wind,
+        decoded.visible_tiles.clone(),
     )
 }
 
@@ -127,6 +140,41 @@ pub(crate) fn fixture_base64_with_winds(
         0,
         round_wind,
         oya,
+        0,
+        vec![],
+        false,
+        [None; 4],
+        [None; 4],
+        None,
+        drawn_tile,
+    );
+    observation.serialize_to_base64().unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_base64_with_discards(
+    player_id: u8,
+    drawn_tile: Option<u8>,
+    hand: Vec<u8>,
+    dora_indicators: Vec<u8>,
+    discards: [Vec<u8>; 4],
+) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
+    let observation = Observation::new(
+        player_id,
+        hands,
+        Default::default(),
+        discards,
+        dora_indicators,
+        [25000; 4],
+        [false; 4],
+        vec![],
+        vec![],
+        0,
+        0,
+        0,
+        0,
         0,
         vec![],
         false,
@@ -395,6 +443,125 @@ mod tests {
         assert_eq!(decoded.seat_wind, Some(wind(27)));
     }
 
+    #[test]
+    fn decode_4p_visible_tiles_include_hand_tiles() {
+        let payload = ObservationPayload::new(fixture_base64(1, None, vec![0, 16, 104]));
+        let decoded = payload.decode_4p().unwrap();
+        for tile in [
+            TileId::new(0).unwrap(),
+            TileId::new(16).unwrap(),
+            TileId::new(104).unwrap(),
+        ] {
+            assert!(decoded.visible_tiles.contains(&tile), "missing {tile:?}");
+        }
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_drawn_tile_via_hand() {
+        let payload = ObservationPayload::new(fixture_base64(0, Some(16), vec![0, 16, 104]));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.drawn_tile, TileId::new(16));
+        assert!(decoded.visible_tiles.contains(&TileId::new(16).unwrap()));
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_do_not_double_count_drawn_tile() {
+        let payload = ObservationPayload::new(fixture_base64(0, Some(16), vec![0, 16, 104]));
+        let decoded = payload.decode_4p().unwrap();
+        let count = decoded
+            .visible_tiles
+            .iter()
+            .filter(|&&tile| tile == TileId::new(16).unwrap())
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_dora_indicators() {
+        let payload =
+            ObservationPayload::new(fixture_base64_with_dora(0, None, vec![], vec![4, 20]));
+        let decoded = payload.decode_4p().unwrap();
+        for tile in [TileId::new(4).unwrap(), TileId::new(20).unwrap()] {
+            assert!(decoded.visible_tiles.contains(&tile), "missing {tile:?}");
+        }
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_discards_of_all_players() {
+        let discards = [vec![0], vec![16], vec![104], vec![132]];
+        let payload = ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            vec![],
+            vec![],
+            discards,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        for tile in [
+            TileId::new(0).unwrap(),
+            TileId::new(16).unwrap(),
+            TileId::new(104).unwrap(),
+            TileId::new(132).unwrap(),
+        ] {
+            assert!(decoded.visible_tiles.contains(&tile), "missing {tile:?}");
+        }
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_normalize_discards_to_temporary_tile_id() {
+        let discards = [vec![59], vec![19], vec![], vec![]];
+        let payload = ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            vec![],
+            vec![],
+            discards,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(decoded.visible_tiles.contains(&TileId::new(56).unwrap()));
+        assert!(decoded.visible_tiles.contains(&TileId::new(17).unwrap()));
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_skip_out_of_range_tiles() {
+        let discards = [vec![0, 200, 136], vec![], vec![], vec![]];
+        let payload = ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            vec![0, 200, 136, 104],
+            vec![0, 200],
+            discards,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(!decoded.visible_tiles.iter().any(|tile| tile.raw() >= 136));
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_preserve_duplicate_count_across_sources() {
+        let discards = [vec![1], vec![2], vec![3], vec![]];
+        let payload = ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            vec![0],
+            vec![],
+            discards,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        let count = decoded
+            .visible_tiles
+            .iter()
+            .filter(|&&tile| tile == TileId::new(0).unwrap())
+            .count();
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_empty_when_nothing_visible() {
+        let payload = ObservationPayload::new(fixture_base64(0, None, vec![]));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(decoded.visible_tiles.is_empty());
+    }
+
     mod game_context_helper {
         use super::*;
 
@@ -408,6 +575,7 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -424,6 +592,7 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -442,6 +611,7 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             assert_eq!(
                 game_context_from_decoded_observation(&decoded),
@@ -459,6 +629,7 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.drawn_tile(), None);
@@ -475,6 +646,7 @@ mod tests {
                 dora_indicators: dora_indicators.clone(),
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.dora_indicators(), dora_indicators.as_slice());
@@ -489,6 +661,7 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert!(context.dora_indicators().is_empty());
@@ -503,6 +676,7 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: Some(wind(27)),
                 seat_wind: Some(wind(28)),
+                visible_tiles: vec![],
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.round_wind(), Some(wind(27)));
@@ -518,10 +692,46 @@ mod tests {
                 dora_indicators: vec![],
                 round_wind: None,
                 seat_wind: None,
+                visible_tiles: vec![],
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert_eq!(context.round_wind(), None);
             assert_eq!(context.seat_wind(), None);
+        }
+
+        #[test]
+        fn visible_tiles_are_passed_to_context() {
+            let visible_tiles = vec![
+                TileId::new(0).unwrap(),
+                TileId::new(16).unwrap(),
+                TileId::new(16).unwrap(),
+            ];
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: None,
+                hand_tiles: vec![],
+                dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
+                visible_tiles: visible_tiles.clone(),
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert_eq!(context.visible_tiles(), visible_tiles.as_slice());
+        }
+
+        #[test]
+        fn empty_visible_tiles_become_empty_context_visible_tiles() {
+            let decoded = DecodedObservation {
+                player_id: 0,
+                drawn_tile: None,
+                hand_tiles: vec![],
+                dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
+                visible_tiles: vec![],
+            };
+            let context = game_context_from_decoded_observation(&decoded);
+            assert!(context.visible_tiles().is_empty());
         }
     }
 }
