@@ -1,5 +1,5 @@
 use crate::shanten::{Shanten, calculate_shanten};
-use crate::tile::TileType;
+use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +27,25 @@ impl Acceptance {
 
 pub fn calculate_acceptance(counts: &TileCounts) -> Acceptance {
     calculate_acceptance_with_seen(counts, &[0; TileType::COUNT])
+}
+
+pub fn calculate_acceptance_with_visible_tiles(
+    counts: &TileCounts,
+    visible_tiles: &[TileId],
+) -> Acceptance {
+    if visible_tiles.is_empty() {
+        return calculate_acceptance(counts);
+    }
+
+    let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
+    let mut additional_seen = [0u8; TileType::COUNT];
+    for tile in TileType::all() {
+        additional_seen[tile.index()] = visible_counts
+            .count(tile)
+            .saturating_sub(counts.count(tile));
+    }
+
+    calculate_acceptance_with_seen(counts, &additional_seen)
 }
 
 pub(crate) fn calculate_acceptance_with_seen(
@@ -76,6 +95,18 @@ mod tests {
 
     fn accepted_tiles(acceptance: &Acceptance) -> Vec<TileType> {
         acceptance.tiles.iter().map(|entry| entry.tile).collect()
+    }
+
+    fn ids(values: &[u8]) -> Vec<TileId> {
+        values.iter().map(|&v| TileId::new(v).unwrap()).collect()
+    }
+
+    fn remaining_of(acceptance: &Acceptance, wait: TileType) -> Option<u8> {
+        acceptance
+            .tiles
+            .iter()
+            .find(|entry| entry.tile == wait)
+            .map(|entry| entry.remaining)
     }
 
     #[test]
@@ -157,6 +188,59 @@ mod tests {
         let before = counts;
         let _ = calculate_acceptance(&counts);
         assert_eq!(counts, before);
+    }
+
+    #[test]
+    fn visible_empty_matches_plain_acceptance() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        assert_eq!(
+            calculate_acceptance_with_visible_tiles(&counts, &[]),
+            calculate_acceptance(&counts)
+        );
+    }
+
+    #[test]
+    fn visible_does_not_double_count_own_hand() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let acceptance = calculate_acceptance_with_visible_tiles(&counts, &hand);
+        assert_eq!(remaining_of(&acceptance, tile("5s")), Some(3));
+        assert_eq!(acceptance.total_remaining(), 3);
+    }
+
+    #[test]
+    fn visible_wait_tile_reduces_remaining_by_one() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let mut visible = hand.clone();
+        visible.extend(ids(&[90]));
+        let acceptance = calculate_acceptance_with_visible_tiles(&counts, &visible);
+        assert_eq!(remaining_of(&acceptance, tile("5s")), Some(2));
+    }
+
+    #[test]
+    fn visible_removes_wait_when_all_copies_seen() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let mut visible = hand.clone();
+        visible.extend(ids(&[88, 90, 91]));
+        let acceptance = calculate_acceptance_with_visible_tiles(&counts, &visible);
+        assert_eq!(remaining_of(&acceptance, tile("5s")), None);
+        assert_eq!(acceptance.total_remaining(), 0);
+        assert_eq!(acceptance.current.min(), 0);
+    }
+
+    #[test]
+    fn visible_does_not_apply_candidate_discard_correction() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let plain = calculate_acceptance(&counts);
+        let visible = calculate_acceptance_with_visible_tiles(&counts, &hand);
+        assert_eq!(
+            remaining_of(&visible, tile("5s")),
+            remaining_of(&plain, tile("5s"))
+        );
     }
 
     #[test]

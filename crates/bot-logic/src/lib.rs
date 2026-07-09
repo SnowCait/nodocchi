@@ -5,7 +5,9 @@ pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
 
-pub use acceptance::{Acceptance, AcceptanceTile, calculate_acceptance};
+pub use acceptance::{
+    Acceptance, AcceptanceTile, calculate_acceptance, calculate_acceptance_with_visible_tiles,
+};
 pub use discard::{
     DiscardEvaluation, evaluate_discards, evaluate_discards_from_tiles,
     evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_dora,

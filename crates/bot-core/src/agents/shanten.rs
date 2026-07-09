@@ -2,19 +2,59 @@ use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
 use crate::discard_selection::select_discard_action;
+use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
+
+// 補正後の待ち枚数がこの枚数以上ならリーチする。
+const REACH_MIN_REMAINING: u8 = 4;
 
 #[derive(Debug, Default)]
 pub struct ShantenAgent;
 
 impl ShantenAgent {
-    // 現状は最小方針として、リーチ可能なら即リーチする。
-    // TODO: 押し引き・打点・安全度を考慮したリーチ判断を実装する。
-    fn select_reach_action(&self, legal_actions: &[LegalAction]) -> Option<LegalAction> {
+    fn select_reach_action(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+    ) -> Option<LegalAction> {
+        if !should_reach(ctx) {
+            return None;
+        }
         legal_actions
             .iter()
             .find(|a| matches!(a, LegalAction::Reach))
             .cloned()
     }
+}
+
+// 補正後の待ち枚数が明らかに少ない即リーチだけを抑制する最小判断。
+// TODO: 役判定・打点・押し引きを考慮したリーチ判断に置き換える。
+fn should_reach(ctx: &GameContext) -> bool {
+    let tiles: Vec<_> = ctx
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(ctx.drawn_tile())
+        .collect();
+
+    // 手牌情報がない場合は従来挙動を維持する。
+    if tiles.is_empty() {
+        return true;
+    }
+
+    // visible_tiles がない場合は補正できないため従来挙動を維持する。
+    if ctx.visible_tiles().is_empty() {
+        return true;
+    }
+
+    let counts = TileCounts::from_tiles(tiles.iter().copied());
+    let acceptance = calculate_acceptance_with_visible_tiles(&counts, ctx.visible_tiles());
+
+    // テンパイしていないなら即リーチしない。
+    if acceptance.current.min() != 0 {
+        return false;
+    }
+
+    acceptance.total_remaining() >= REACH_MIN_REMAINING
 }
 
 impl Agent for ShantenAgent {
@@ -33,7 +73,7 @@ impl Agent for ShantenAgent {
             return action.clone();
         }
 
-        if let Some(action) = self.select_reach_action(legal_actions) {
+        if let Some(action) = self.select_reach_action(ctx, legal_actions) {
             return action;
         }
 
@@ -244,6 +284,65 @@ mod tests {
             panic!("expected dahai");
         };
         assert_eq!(tile.tile_type().to_mjai_string(), "9p");
+    }
+
+    // 4面子 + 1s + 9s のタンキ含みテンパイ形。捨て牌前提で待ちは {1s, 9s}。
+    const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 72];
+    const TENPAI_DRAWN: u8 = 104;
+
+    fn tenpai_context(extra_visible: &[u8]) -> GameContext {
+        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
+        let mut visible = hand.clone();
+        visible.push(tile(TENPAI_DRAWN));
+        visible.extend(extra_visible.iter().map(|&value| tile(value)));
+        GameContext::from_parts_with_visible_tiles(
+            Some(tile(TENPAI_DRAWN)),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+        )
+    }
+
+    fn tenpai_actions() -> Vec<LegalAction> {
+        TENPAI_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(TENPAI_DRAWN)])
+            .chain([LegalAction::Reach])
+            .collect()
+    }
+
+    #[test]
+    fn reaches_when_visible_waits_are_plentiful() {
+        let mut agent = ShantenAgent;
+        let ctx = tenpai_context(&[]);
+        assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
+    }
+
+    #[test]
+    fn skips_reach_when_visible_waits_are_scarce() {
+        let mut agent = ShantenAgent;
+        // 1s / 9s をそれぞれ2枚見せて待ち枚数を枯らす。
+        let ctx = tenpai_context(&[73, 74, 105, 106]);
+        let selected = agent.act(&ctx, &tenpai_actions());
+        assert!(matches!(selected, LegalAction::Dahai { .. }));
+    }
+
+    #[test]
+    fn reaches_when_visible_tiles_empty_even_with_hand() {
+        let mut agent = ShantenAgent;
+        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
+        let ctx = GameContext::from_parts(Some(tile(TENPAI_DRAWN)), hand);
+        assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
+    }
+
+    #[test]
+    fn reaches_without_hand_information() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::default();
+        assert_eq!(agent.act(&ctx, &[LegalAction::Reach]), LegalAction::Reach);
     }
 
     #[test]
