@@ -1,6 +1,7 @@
 use bot_core::GameContext;
 use bot_logic::{TileId, TileType};
 use riichienv_core::observation::Observation;
+use riichienv_core::types::Meld;
 
 use crate::convert::temporary_tile_id_from_observation_tile;
 
@@ -49,6 +50,11 @@ impl ObservationPayload {
                     .filter_map(temporary_tile_id_from_observation_tile),
             );
         }
+        for player_melds in &observation.melds {
+            for meld in player_melds {
+                visible_tiles.extend(meld_visible_tiles(meld));
+            }
+        }
         Ok(DecodedObservation {
             player_id: observation.player_id,
             drawn_tile: observation
@@ -70,6 +76,23 @@ fn seat_wind_from(player_id: u8, oya: u8) -> Option<TileType> {
 
     let index = (player_id + 4 - oya) % 4;
     TileType::wind_from_seat_index(index)
+}
+
+// called tile は河に残っており二重計上になるため、consumed 牌だけを見えている牌として扱う。
+// ankan は called tile を持たないため 4 枚すべて、kakan は元 pon の called tile を除いた牌を数える。
+fn meld_visible_tiles(meld: &Meld) -> Vec<TileId> {
+    let mut called_tile = meld.called_tile;
+    let mut tiles = Vec::new();
+    for &raw in &meld.tiles {
+        if called_tile == Some(raw) {
+            called_tile = None;
+            continue;
+        }
+        if let Some(tile) = temporary_tile_id_from_observation_tile(raw) {
+            tiles.push(tile);
+        }
+    }
+    tiles
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -187,8 +210,50 @@ pub(crate) fn fixture_base64_with_discards(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fixture_base64_with_melds(
+    player_id: u8,
+    drawn_tile: Option<u8>,
+    hand: Vec<u8>,
+    dora_indicators: Vec<u8>,
+    discards: [Vec<u8>; 4],
+    melds: [Vec<Meld>; 4],
+) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
+    let observation = Observation::new(
+        player_id,
+        hands,
+        melds,
+        discards,
+        dora_indicators,
+        [25000; 4],
+        [false; 4],
+        vec![],
+        vec![],
+        0,
+        0,
+        0,
+        0,
+        0,
+        vec![],
+        false,
+        [None; 4],
+        [None; 4],
+        None,
+        drawn_tile,
+    );
+    observation.serialize_to_base64().unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use riichienv_core::types::MeldType;
+
+    fn meld(meld_type: MeldType, tiles: Vec<u8>, called_tile: Option<u8>) -> Meld {
+        Meld::new(meld_type, tiles, called_tile.is_some(), -1, called_tile)
+    }
 
     #[test]
     fn new_keeps_base64_string() {
@@ -562,6 +627,189 @@ mod tests {
         assert!(decoded.visible_tiles.is_empty());
     }
 
+    fn count_visible(decoded: &DecodedObservation, tile: TileId) -> usize {
+        decoded.visible_tiles.iter().filter(|&&t| t == tile).count()
+    }
+
+    #[test]
+    fn meld_visible_tiles_pon_returns_consumed_without_called_tile() {
+        let tiles = meld_visible_tiles(&meld(MeldType::Pon, vec![2, 0, 1], Some(2)));
+        assert_eq!(
+            tiles,
+            vec![TileId::new(0).unwrap(), TileId::new(0).unwrap()]
+        );
+    }
+
+    #[test]
+    fn meld_visible_tiles_ankan_returns_all_four() {
+        let tiles = meld_visible_tiles(&meld(MeldType::Ankan, vec![0, 1, 2, 3], None));
+        assert_eq!(tiles, vec![TileId::new(0).unwrap(); 4]);
+    }
+
+    #[test]
+    fn meld_visible_tiles_kakan_excludes_original_called_tile() {
+        let tiles = meld_visible_tiles(&meld(MeldType::Kakan, vec![2, 0, 1, 3], Some(2)));
+        assert_eq!(tiles, vec![TileId::new(0).unwrap(); 3]);
+    }
+
+    #[test]
+    fn meld_visible_tiles_skips_out_of_range_tiles() {
+        let tiles = meld_visible_tiles(&meld(MeldType::Ankan, vec![0, 200, 136, 3], None));
+        assert_eq!(
+            tiles,
+            vec![TileId::new(0).unwrap(), TileId::new(0).unwrap()]
+        );
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_chi_consumed() {
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[1] = vec![meld(MeldType::Chi, vec![8, 4, 12], Some(8))];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(decoded.visible_tiles.contains(&TileId::new(4).unwrap()));
+        assert!(decoded.visible_tiles.contains(&TileId::new(12).unwrap()));
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_pon_consumed() {
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[2] = vec![meld(MeldType::Pon, vec![2, 0, 1], Some(2))];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(count_visible(&decoded, TileId::new(0).unwrap()), 2);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_daiminkan_consumed() {
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[3] = vec![meld(
+            MeldType::Daiminkan,
+            vec![104, 105, 106, 107],
+            Some(104),
+        )];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(count_visible(&decoded, TileId::new(104).unwrap()), 3);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_ankan_all_four() {
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[0] = vec![meld(MeldType::Ankan, vec![72, 73, 74, 75], None)];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(count_visible(&decoded, TileId::new(72).unwrap()), 4);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_do_not_double_count_called_tile_with_discard() {
+        // 鳴かれた牌は discarder の河に残るため、meld 側では called tile を数えない。
+        let mut discards: [Vec<u8>; 4] = Default::default();
+        discards[1] = vec![2];
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[2] = vec![meld(MeldType::Pon, vec![2, 0, 1], Some(2))];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            discards,
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        // 河の 1 枚 + consumed 2 枚 = 3 枚。called tile を meld 側でも数えると 4 枚になってしまう。
+        assert_eq!(count_visible(&decoded, TileId::new(0).unwrap()), 3);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_skip_out_of_range_meld_tiles() {
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[0] = vec![meld(MeldType::Ankan, vec![0, 200, 136, 3], None)];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert!(!decoded.visible_tiles.iter().any(|tile| tile.raw() >= 136));
+        assert_eq!(count_visible(&decoded, TileId::new(0).unwrap()), 2);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_include_melds_of_all_players() {
+        let mut melds: [Vec<Meld>; 4] = Default::default();
+        melds[0] = vec![meld(MeldType::Ankan, vec![0, 1, 2, 3], None)];
+        melds[3] = vec![meld(MeldType::Pon, vec![110, 108, 109], Some(110))];
+        let payload = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(count_visible(&decoded, TileId::new(0).unwrap()), 4);
+        assert_eq!(count_visible(&decoded, TileId::new(108).unwrap()), 2);
+    }
+
+    #[test]
+    fn decode_4p_visible_tiles_without_melds_match_previous_sources() {
+        let discards = [vec![0], vec![16], vec![], vec![]];
+        let with_helper = ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![104],
+            vec![4],
+            discards.clone(),
+            Default::default(),
+        ))
+        .decode_4p()
+        .unwrap();
+        let without_helper = ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            vec![104],
+            vec![4],
+            discards,
+        ))
+        .decode_4p()
+        .unwrap();
+        assert_eq!(with_helper.visible_tiles, without_helper.visible_tiles);
+    }
+
     mod game_context_helper {
         use super::*;
 
@@ -732,6 +980,29 @@ mod tests {
             };
             let context = game_context_from_decoded_observation(&decoded);
             assert!(context.visible_tiles().is_empty());
+        }
+
+        #[test]
+        fn decoded_meld_tiles_reach_context_visible_tiles() {
+            let mut melds: [Vec<Meld>; 4] = Default::default();
+            melds[1] = vec![meld(MeldType::Pon, vec![2, 0, 1], Some(2))];
+            let decoded = ObservationPayload::new(fixture_base64_with_melds(
+                0,
+                None,
+                vec![],
+                vec![],
+                Default::default(),
+                melds,
+            ))
+            .decode_4p()
+            .unwrap();
+            let context = game_context_from_decoded_observation(&decoded);
+            let count = context
+                .visible_tiles()
+                .iter()
+                .filter(|&&tile| tile == TileId::new(0).unwrap())
+                .count();
+            assert_eq!(count, 2);
         }
 
         #[test]
