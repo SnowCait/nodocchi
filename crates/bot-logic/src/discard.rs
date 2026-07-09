@@ -33,6 +33,8 @@ impl DiscardEvaluation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ShapeBreakdown {
     pub breaks_pair: bool,
+    pub breaks_triplet: bool,
+    pub breaks_honor_triplet: bool,
     pub breaks_ryanmen: bool,
     pub breaks_kanchan: bool,
     pub breaks_penchan: bool,
@@ -56,6 +58,12 @@ pub fn shape_breakdown_for_discard(counts: &TileCounts, discard: TileType) -> Sh
     };
     if same_type_count >= 2 {
         breakdown.breaks_pair = true;
+    }
+    if same_type_count >= 3 {
+        breakdown.breaks_triplet = true;
+        if discard.is_honor() {
+            breakdown.breaks_honor_triplet = true;
+        }
     }
     breakdown.preserves_pair_after_discard = same_type_count >= 3;
 
@@ -340,6 +348,12 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
     if breakdown.same_type_count >= 3 {
         penalty += 10;
     }
+    if breakdown.breaks_triplet {
+        penalty += 35;
+    }
+    if breakdown.breaks_honor_triplet {
+        penalty += 20;
+    }
 
     if breakdown.preserves_sequence_after_discard {
         penalty -= 15;
@@ -350,7 +364,9 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
     let preserves_shape =
         breakdown.preserves_sequence_after_discard || breakdown.preserves_ryanmen_after_discard;
     if breakdown.preserves_pair_after_discard {
-        penalty -= 12;
+        if !breakdown.breaks_honor_triplet {
+            penalty -= 12;
+        }
     } else if breakdown.same_type_count == 2 && preserves_shape {
         penalty -= 8;
     }
@@ -1823,18 +1839,17 @@ mod tests {
     }
 
     #[test]
-    fn same_type_three_relief_lowers_triplet_penalty() {
-        // 暗刻は 1枚切っても対子が残る余剰形
-        // 対子20 + 同種3枚 +10 - 対子存続12 = 18
-        // さらに推定ブロックが減り5ブロック未満になるため +10 で 28
+    fn number_triplet_penalty_is_heavier_than_pair() {
+        // 数牌刻子は完成面子なので刻子破壊 +35 を加える
+        // 対子20 + 同種3枚 +10 + 刻子35 - 対子存続12 + ブロック補正10 = 63
         assert_eq!(
             shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m")),
-            28
+            63
         );
-        // 暗刻は対子より切りやすい（対子は落とすと何も残らない）
+        // 数牌刻子は完成面子なので、対子を壊すより重くする
         assert!(
             shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"))
-                < shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"))
+                > shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"))
         );
     }
 
@@ -2383,11 +2398,12 @@ mod tests {
     #[test]
     fn triplet_discard_skips_only_pair_penalty() {
         // 暗刻から1枚落としても対子が残るため唯一対子 penalty は加えない
-        // ブロック補正 +10 を含めて 28
+        // 対子20 + 同種3枚10 + 刻子35 - 対子存続12 + ブロック補正10 = 63
         let triplet = shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"));
         let only_pair = shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"));
-        assert_eq!(triplet, 28);
-        assert!(triplet < only_pair);
+        assert_eq!(triplet, 63);
+        // 完成刻子は対子より重い
+        assert!(triplet > only_pair);
     }
 
     #[test]
@@ -2411,6 +2427,173 @@ mod tests {
                 assert!(shape_penalty_for_discard(&hand, tile) >= 0);
             }
         }
+    }
+
+    #[test]
+    fn shape_breakdown_number_triplet_breaks_triplet() {
+        let breakdown = shape_breakdown_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"));
+        assert!(breakdown.breaks_triplet);
+        assert!(!breakdown.breaks_honor_triplet);
+    }
+
+    #[test]
+    fn shape_breakdown_honor_triplet_breaks_honor_triplet() {
+        let breakdown = shape_breakdown_for_discard(&counts(&["E", "E", "E"]), tile("E"));
+        assert!(breakdown.breaks_triplet);
+        assert!(breakdown.breaks_honor_triplet);
+    }
+
+    #[test]
+    fn shape_breakdown_honor_single_is_not_triplet() {
+        let breakdown = shape_breakdown_for_discard(&counts(&["E"]), tile("E"));
+        assert!(!breakdown.breaks_triplet);
+        assert!(!breakdown.breaks_honor_triplet);
+    }
+
+    #[test]
+    fn shape_breakdown_honor_pair_is_not_triplet() {
+        let breakdown = shape_breakdown_for_discard(&counts(&["E", "E"]), tile("E"));
+        assert!(!breakdown.breaks_triplet);
+        assert!(!breakdown.breaks_honor_triplet);
+    }
+
+    #[test]
+    fn number_triplet_penalty_is_heavier_than_number_pair() {
+        let triplet = shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"));
+        let pair = shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"));
+        assert!(triplet > pair);
+    }
+
+    #[test]
+    fn honor_triplet_penalty_is_heavier_than_honor_pair() {
+        let triplet = shape_penalty_for_discard(&counts(&["E", "E", "E"]), tile("E"));
+        let pair = shape_penalty_for_discard(&counts(&["E", "E"]), tile("E"));
+        assert!(triplet > pair);
+    }
+
+    #[test]
+    fn honor_triplet_penalty_is_heavier_than_number_triplet() {
+        let honor = shape_penalty_for_discard(&counts(&["E", "E", "E"]), tile("E"));
+        let number = shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"));
+        assert!(honor > number);
+    }
+
+    #[test]
+    fn honor_triplet_penalty_value() {
+        // 対子20 + 同種3枚10 + 刻子35 + 字牌刻子20 + ブロック補正10 = 95
+        // 字牌刻子は順子化できない完成面子なので対子存続 -12 は適用しない
+        assert_eq!(
+            shape_penalty_for_discard(&counts(&["E", "E", "E"]), tile("E")),
+            95
+        );
+    }
+
+    #[test]
+    fn honor_triplet_penalty_not_softened_by_pair_relief() {
+        // 字牌刻子は preserves_pair_after_discard による軽減を受けないため対子より十分に重い
+        let honor_triplet = shape_penalty_for_discard(&counts(&["E", "E", "E"]), tile("E"));
+        let honor_pair = shape_penalty_for_discard(&counts(&["E", "E"]), tile("E"));
+        assert!(honor_triplet >= honor_pair + 35);
+    }
+
+    #[test]
+    fn triplet_penalty_never_negative() {
+        for hand in [
+            counts(&["5m", "5m", "5m"]),
+            counts(&["E", "E", "E"]),
+            counts(&["C", "C", "C"]),
+        ] {
+            for tile in TileType::all() {
+                assert!(shape_penalty_for_discard(&hand, tile) >= 0);
+            }
+        }
+    }
+
+    fn number_triplet_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"))
+    }
+
+    fn honor_triplet_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["E", "E", "E"]), tile("E"))
+    }
+
+    fn isolated_honor_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["W"]), tile("W"))
+    }
+
+    fn surplus_pair_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["E", "E", "S", "S", "W", "W"]), tile("E"))
+    }
+
+    #[test]
+    fn tiebreak_prefers_isolated_over_breaking_honor_triplet() {
+        let isolated = evaluation_with_shape_penalty(1, 10, 2, isolated_penalty(), 0, 0, false);
+        let breaks_honor_triplet =
+            evaluation_with_shape_penalty(1, 10, 2, honor_triplet_penalty(), 0, 0, false);
+        assert!(is_better_discard(&isolated, &breaks_honor_triplet));
+        assert!(!is_better_discard(&breaks_honor_triplet, &isolated));
+    }
+
+    #[test]
+    fn tiebreak_prefers_isolated_honor_over_breaking_honor_triplet() {
+        let isolated_honor =
+            evaluation_with_shape_penalty(1, 10, 2, isolated_honor_penalty(), 0, 0, false);
+        let breaks_honor_triplet =
+            evaluation_with_shape_penalty(1, 10, 2, honor_triplet_penalty(), 0, 0, false);
+        assert!(is_better_discard(&isolated_honor, &breaks_honor_triplet));
+        assert!(!is_better_discard(&breaks_honor_triplet, &isolated_honor));
+    }
+
+    #[test]
+    fn tiebreak_prefers_surplus_pair_over_breaking_honor_triplet() {
+        let surplus_pair =
+            evaluation_with_shape_penalty(1, 10, 2, surplus_pair_penalty(), 0, 0, false);
+        let breaks_honor_triplet =
+            evaluation_with_shape_penalty(1, 10, 2, honor_triplet_penalty(), 0, 0, false);
+        assert!(is_better_discard(&surplus_pair, &breaks_honor_triplet));
+        assert!(!is_better_discard(&breaks_honor_triplet, &surplus_pair));
+    }
+
+    #[test]
+    fn tiebreak_prefers_breaking_number_triplet_over_honor_triplet() {
+        let breaks_number_triplet =
+            evaluation_with_shape_penalty(1, 10, 2, number_triplet_penalty(), 0, 0, false);
+        let breaks_honor_triplet =
+            evaluation_with_shape_penalty(1, 10, 2, honor_triplet_penalty(), 0, 0, false);
+        assert!(is_better_discard(
+            &breaks_number_triplet,
+            &breaks_honor_triplet
+        ));
+    }
+
+    #[test]
+    fn honor_triplet_penalty_does_not_override_shanten() {
+        let break_honor_triplet_better_shanten =
+            evaluation_with_shape_penalty(0, 4, 1, honor_triplet_penalty(), 0, 0, false);
+        let keep_worse_shanten = evaluation_with_shape_penalty(1, 40, 5, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &break_honor_triplet_better_shanten,
+            &keep_worse_shanten
+        ));
+    }
+
+    #[test]
+    fn honor_triplet_penalty_does_not_override_acceptance() {
+        let break_honor_triplet_more_remaining =
+            evaluation_with_shape_penalty(1, 20, 1, honor_triplet_penalty(), 0, 0, false);
+        let keep_less_remaining = evaluation_with_shape_penalty(1, 10, 1, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &break_honor_triplet_more_remaining,
+            &keep_less_remaining
+        ));
+
+        let break_honor_triplet_more_types =
+            evaluation_with_shape_penalty(1, 10, 3, honor_triplet_penalty(), 0, 0, false);
+        let keep_fewer_types = evaluation_with_shape_penalty(1, 10, 2, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &break_honor_triplet_more_types,
+            &keep_fewer_types
+        ));
     }
 
     #[test]
