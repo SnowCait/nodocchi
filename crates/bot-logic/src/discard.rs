@@ -191,6 +191,133 @@ pub fn pair_context_for_discard(counts: &TileCounts, discard: TileType) -> PairC
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HandShapeSummary {
+    pub sequence_count: u8,
+    pub triplet_count: u8,
+    pub pair_like_type_count: u8,
+    pub ryanmen_taatsu_count: u8,
+    pub kanchan_taatsu_count: u8,
+    pub penchan_taatsu_count: u8,
+    pub isolated_tile_type_count: u8,
+    pub estimated_block_count: u8,
+}
+
+fn is_isolated_tile(counts: &TileCounts, tile: TileType) -> bool {
+    let same_type_count = counts.count(tile);
+    if same_type_count == 0 || same_type_count >= 2 {
+        return false;
+    }
+
+    let Some(number) = tile.number() else {
+        return true;
+    };
+
+    let base = tile.raw() - (number - 1);
+    let has = |n: i8| -> bool {
+        if !(1..=9).contains(&n) {
+            return false;
+        }
+        let neighbor = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+        counts.count(neighbor) > 0
+    };
+
+    let d = number as i8;
+    for delta in [-2i8, -1, 1, 2] {
+        if has(d + delta) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn hand_shape_summary(counts: &TileCounts) -> HandShapeSummary {
+    let mut summary = HandShapeSummary::default();
+
+    for tile in TileType::all() {
+        let same_type_count = counts.count(tile);
+        if same_type_count == 0 {
+            continue;
+        }
+        if same_type_count >= 3 {
+            summary.triplet_count += 1;
+        }
+        if same_type_count >= 2 {
+            summary.pair_like_type_count += 1;
+        }
+        if is_isolated_tile(counts, tile) {
+            summary.isolated_tile_type_count += 1;
+        }
+    }
+
+    for suit_base in [0u8, 9, 18] {
+        let has = |n: i8| -> bool {
+            if !(1..=9).contains(&n) {
+                return false;
+            }
+            let tile = TileType::new(suit_base + (n as u8 - 1)).expect("same-suit tile is valid");
+            counts.count(tile) > 0
+        };
+
+        for n in 1..=9i8 {
+            if !has(n) {
+                continue;
+            }
+            if has(n + 1) && has(n + 2) {
+                summary.sequence_count += 1;
+            }
+            if has(n + 1) {
+                if n == 1 || n + 1 == 9 {
+                    summary.penchan_taatsu_count += 1;
+                } else {
+                    summary.ryanmen_taatsu_count += 1;
+                }
+            }
+            if has(n + 2) {
+                summary.kanchan_taatsu_count += 1;
+            }
+        }
+    }
+
+    summary.estimated_block_count = summary.sequence_count
+        + summary.triplet_count
+        + summary.pair_like_type_count
+        + summary.ryanmen_taatsu_count
+        + summary.kanchan_taatsu_count
+        + summary.penchan_taatsu_count;
+
+    summary
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiscardBlockContext {
+    pub before: HandShapeSummary,
+    pub after: HandShapeSummary,
+    pub reduces_estimated_block_count: bool,
+    pub leaves_under_five_blocks: bool,
+}
+
+pub fn discard_block_context(counts: &TileCounts, discard: TileType) -> DiscardBlockContext {
+    if counts.count(discard) == 0 {
+        return DiscardBlockContext::default();
+    }
+
+    let before = hand_shape_summary(counts);
+
+    let mut after_counts = *counts;
+    if after_counts.remove(discard).is_err() {
+        return DiscardBlockContext::default();
+    }
+    let after = hand_shape_summary(&after_counts);
+
+    DiscardBlockContext {
+        before,
+        after,
+        reduces_estimated_block_count: after.estimated_block_count < before.estimated_block_count,
+        leaves_under_five_blocks: after.estimated_block_count < 5,
+    }
+}
+
 pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
     let breakdown = shape_breakdown_for_discard(counts, discard);
     let mut penalty = 0i16;
@@ -240,6 +367,15 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
     }
     if breakdown.same_type_count == 2 && pair_context.pair_like_type_count >= 3 {
         penalty -= 4;
+    }
+
+    let block_context = discard_block_context(counts, discard);
+    if block_context.reduces_estimated_block_count {
+        if block_context.leaves_under_five_blocks {
+            penalty += 10;
+        } else {
+            penalty += 4;
+        }
     }
 
     penalty.max(0)
@@ -1667,9 +1803,10 @@ mod tests {
     #[test]
     fn only_pair_candidate_is_heavier_than_base() {
         // 唯一の対子候補を壊すと、ヘッドを失うため対子20に唯一対子8を加える
+        // さらに推定ブロックが減り5ブロック未満になるため +10
         assert_eq!(
             shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m")),
-            28
+            38
         );
     }
 
@@ -1678,8 +1815,9 @@ mod tests {
         // 5m5m6m の 5m は 1枚切っても 5m6m 両面が残る余剰対子
         // 主要形が残るため唯一対子 penalty は加えない
         // 対子20 + 両面30 + 隣接3 - 両面存続15 - 同種2枚8 = 30
+        // さらに推定ブロックが減り5ブロック未満になるため +10 で 40
         let redundant = shape_penalty_for_discard(&counts(&["5m", "5m", "6m"]), tile("5m"));
-        assert_eq!(redundant, 30);
+        assert_eq!(redundant, 40);
         let plain = shape_penalty_for_discard(&counts(&["5m", "6m"]), tile("5m"));
         assert!(redundant < plain);
     }
@@ -1688,9 +1826,10 @@ mod tests {
     fn same_type_three_relief_lowers_triplet_penalty() {
         // 暗刻は 1枚切っても対子が残る余剰形
         // 対子20 + 同種3枚 +10 - 対子存続12 = 18
+        // さらに推定ブロックが減り5ブロック未満になるため +10 で 28
         assert_eq!(
             shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m")),
-            18
+            28
         );
         // 暗刻は対子より切りやすい（対子は落とすと何も残らない）
         assert!(
@@ -1721,9 +1860,10 @@ mod tests {
     #[test]
     fn honor_pair_penalty_positive() {
         // 字牌対子も唯一の対子候補なら対子20に唯一対子8を加える
+        // さらに推定ブロックが減り5ブロック未満になるため +10 で 38
         let penalty = shape_penalty_for_discard(&counts(&["E", "E"]), tile("E"));
         assert!(penalty > 0);
-        assert_eq!(penalty, 28);
+        assert_eq!(penalty, 38);
     }
 
     #[test]
@@ -2243,9 +2383,10 @@ mod tests {
     #[test]
     fn triplet_discard_skips_only_pair_penalty() {
         // 暗刻から1枚落としても対子が残るため唯一対子 penalty は加えない
+        // ブロック補正 +10 を含めて 28
         let triplet = shape_penalty_for_discard(&counts(&["5m", "5m", "5m"]), tile("5m"));
         let only_pair = shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"));
-        assert_eq!(triplet, 18);
+        assert_eq!(triplet, 28);
         assert!(triplet < only_pair);
     }
 
@@ -2253,9 +2394,10 @@ mod tests {
     fn only_pair_penalty_skipped_when_major_shape_survives() {
         // 2m2m3m の 2m は唯一の対子候補だが、切っても両面が残るため唯一対子 penalty は加えない
         // 対子20 + 両面30 + 隣接3 - 両面存続15 - 同種2枚8 = 30
+        // さらに推定ブロックが減り5ブロック未満になるため +10 で 40
         assert_eq!(
             shape_penalty_for_discard(&counts(&["2m", "2m", "3m"]), tile("2m")),
-            30
+            40
         );
     }
 
@@ -2269,6 +2411,160 @@ mod tests {
                 assert!(shape_penalty_for_discard(&hand, tile) >= 0);
             }
         }
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_sequences() {
+        let summary = hand_shape_summary(&counts(&["3m", "4m", "5m"]));
+        assert_eq!(summary.sequence_count, 1);
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_triplets() {
+        let summary = hand_shape_summary(&counts(&["5p", "5p", "5p"]));
+        assert_eq!(summary.triplet_count, 1);
+        assert_eq!(summary.pair_like_type_count, 1);
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_honor_and_number_pairs() {
+        let summary = hand_shape_summary(&counts(&["E", "E", "3s", "3s"]));
+        assert_eq!(summary.pair_like_type_count, 2);
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_ryanmen() {
+        for pair in [
+            ["2m", "3m"],
+            ["3m", "4m"],
+            ["4m", "5m"],
+            ["5m", "6m"],
+            ["6m", "7m"],
+            ["7m", "8m"],
+        ] {
+            let summary = hand_shape_summary(&counts(&pair));
+            assert_eq!(summary.ryanmen_taatsu_count, 1, "{pair:?}");
+            assert_eq!(summary.penchan_taatsu_count, 0, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_penchan() {
+        for pair in [["1m", "2m"], ["8s", "9s"]] {
+            let summary = hand_shape_summary(&counts(&pair));
+            assert_eq!(summary.penchan_taatsu_count, 1, "{pair:?}");
+            assert_eq!(summary.ryanmen_taatsu_count, 0, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_kanchan() {
+        for pair in [["1m", "3m"], ["4p", "6p"], ["7s", "9s"]] {
+            let summary = hand_shape_summary(&counts(&pair));
+            assert_eq!(summary.kanchan_taatsu_count, 1, "{pair:?}");
+            assert_eq!(summary.ryanmen_taatsu_count, 0, "{pair:?}");
+            assert_eq!(summary.penchan_taatsu_count, 0, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_honor_tanki_as_isolated() {
+        let summary = hand_shape_summary(&counts(&["E"]));
+        assert_eq!(summary.isolated_tile_type_count, 1);
+    }
+
+    #[test]
+    fn hand_shape_summary_counts_fully_isolated_number() {
+        let summary = hand_shape_summary(&counts(&["2m", "5m", "8m"]));
+        assert_eq!(summary.isolated_tile_type_count, 3);
+    }
+
+    #[test]
+    fn hand_shape_summary_ignores_cross_suit_shapes() {
+        let summary = hand_shape_summary(&counts(&["3m", "4s", "5p"]));
+        assert_eq!(summary.sequence_count, 0);
+        assert_eq!(summary.ryanmen_taatsu_count, 0);
+        assert_eq!(summary.kanchan_taatsu_count, 0);
+        assert_eq!(summary.penchan_taatsu_count, 0);
+        assert_eq!(summary.isolated_tile_type_count, 3);
+    }
+
+    #[test]
+    fn estimated_block_count_is_simple_sum() {
+        let summary = hand_shape_summary(&counts(&["1m", "1m", "2m", "3m", "5p", "6p"]));
+        assert_eq!(
+            summary.estimated_block_count,
+            summary.sequence_count
+                + summary.triplet_count
+                + summary.pair_like_type_count
+                + summary.ryanmen_taatsu_count
+                + summary.kanchan_taatsu_count
+                + summary.penchan_taatsu_count
+        );
+    }
+
+    #[test]
+    fn discard_block_context_returns_default_for_missing_discard() {
+        let context = discard_block_context(&counts(&["1m"]), tile("9s"));
+        assert_eq!(context, DiscardBlockContext::default());
+    }
+
+    #[test]
+    fn discard_block_context_sets_before_and_after() {
+        let hand = counts(&["3m", "4m", "9s"]);
+        let context = discard_block_context(&hand, tile("3m"));
+        assert_eq!(context.before, hand_shape_summary(&hand));
+        let mut after = hand;
+        after.remove(tile("3m")).unwrap();
+        assert_eq!(context.after, hand_shape_summary(&after));
+    }
+
+    #[test]
+    fn discard_block_context_flags_block_reduction() {
+        let context = discard_block_context(&counts(&["3m", "4m"]), tile("3m"));
+        assert!(context.reduces_estimated_block_count);
+        assert!(context.leaves_under_five_blocks);
+    }
+
+    #[test]
+    fn discard_block_context_reduces_but_keeps_five_blocks() {
+        let hand = counts(&["2m", "3m", "4m", "5m", "6m", "7m", "8m"]);
+        let context = discard_block_context(&hand, tile("2m"));
+        assert!(context.reduces_estimated_block_count);
+        assert!(!context.leaves_under_five_blocks);
+    }
+
+    #[test]
+    fn discard_block_context_no_reduction_for_isolated_tile() {
+        let context = discard_block_context(&counts(&["3m", "4m", "9s"]), tile("9s"));
+        assert!(!context.reduces_estimated_block_count);
+    }
+
+    #[test]
+    fn block_correction_is_heavier_when_leaving_under_five_blocks() {
+        let heavy = shape_penalty_for_discard(&counts(&["3m", "4m"]), tile("3m"));
+        let light = shape_penalty_for_discard(
+            &counts(&["3m", "4m", "1p", "2p", "3p", "4p", "5p", "6p"]),
+            tile("3m"),
+        );
+        assert!(heavy > light);
+        assert_eq!(heavy, light + 6);
+    }
+
+    #[test]
+    fn no_block_correction_when_block_count_unchanged() {
+        let hand = counts(&["3m", "4m", "9s"]);
+        assert_eq!(shape_penalty_for_discard(&hand, tile("9s")), 0);
+    }
+
+    #[test]
+    fn shanten_outranks_shape_penalty_block_correction() {
+        let low_shanten_high_penalty = evaluation_with_shape_penalty(0, 4, 1, 50, 0, 0, false);
+        let high_shanten_low_penalty = evaluation_with_shape_penalty(1, 40, 5, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &low_shanten_high_penalty,
+            &high_shanten_low_penalty
+        ));
     }
 
     #[test]
