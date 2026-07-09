@@ -109,6 +109,73 @@ pub fn select_honor_safety_fallback_action<'a>(
         .map(|(action, _)| action)
 }
 
+// 簡易スジ安全度。現時点では無スジ / スジの2段階のみ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SujiSafetyRank {
+    NoSuji,
+    Suji,
+}
+
+// 指定 player の河から簡易スジ判定する。字牌は対象外。player が範囲外なら false。
+// 同じ suit で number が ±3 の牌が河にあればスジ扱い。
+pub fn is_suji_for(tile: TileType, player: usize, context: &GameContext) -> bool {
+    let (Some(number), Some(suit)) = (tile.number(), tile.suit()) else {
+        return false;
+    };
+    context.discards_of(player).is_some_and(|discards| {
+        discards.iter().any(|discarded| {
+            let discarded = discarded.tile_type();
+            discarded.suit() == Some(suit)
+                && discarded.number().is_some_and(|n| n.abs_diff(number) == 3)
+        })
+    })
+}
+
+// いずれかのリーチ者の河からスジ判定する。リーチ者がいなければ false。
+pub fn is_suji_for_any_reached(tile: TileType, context: &GameContext) -> bool {
+    let reached = context.reached_opponents();
+    if reached.is_empty() {
+        return false;
+    }
+    reached
+        .iter()
+        .any(|&player| is_suji_for(tile, player, context))
+}
+
+// リーチ者の河に対する簡易スジ安全度。数牌なら Some、字牌なら None。
+pub fn suji_safety_rank_for_any_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SujiSafetyRank> {
+    if tile.is_honor() {
+        return None;
+    }
+    if is_suji_for_any_reached(tile, context) {
+        Some(SujiSafetyRank::Suji)
+    } else {
+        Some(SujiSafetyRank::NoSuji)
+    }
+}
+
+// 合法 Dahai のうち数牌のみを安全度の高い順(Suji → NoSuji)に並べる。同安全度は元の順序を保つ。
+pub fn suji_dahai_actions_by_safety<'a>(
+    legal_actions: &'a [LegalAction],
+    context: &GameContext,
+) -> Vec<(&'a LegalAction, SujiSafetyRank)> {
+    let mut ranked: Vec<(&'a LegalAction, SujiSafetyRank)> = legal_actions
+        .iter()
+        .filter_map(|action| match action {
+            LegalAction::Dahai { tile } => {
+                suji_safety_rank_for_any_reached(tile.tile_type(), context)
+                    .map(|rank| (action, rank))
+            }
+            _ => None,
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +635,213 @@ mod tests {
         assert_eq!(
             select_honor_safety_fallback_action(&actions, &context),
             None
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_any_reached_none_for_honor() {
+        // 字牌はスジ判定対象外なので None。
+        let context = table_state_context(
+            Some(0),
+            None,
+            Default::default(),
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suji_safety_rank_for_any_reached(tile(108).tile_type(), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_any_reached_classifies_number_tiles() {
+        // リーチ者(1)の河に 4m。1m はスジ、5m は無スジ。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        assert_eq!(
+            suji_safety_rank_for_any_reached(tile(0).tile_type(), &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suji_safety_rank_for_any_reached(tile(16).tile_type(), &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+    }
+
+    #[test]
+    fn is_suji_for_out_of_range_player_is_false() {
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        assert!(!is_suji_for(tile(0).tile_type(), 4, &context));
+    }
+
+    #[test]
+    fn is_suji_for_any_reached_false_without_reachers() {
+        // 河に 4m があっても、リーチ者がいなければ false。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false; 4]);
+        assert!(!is_suji_for_any_reached(tile(0).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_detects_plus_minus_three_same_suit() {
+        // 4m が河にあれば、同じ suit で ±3 の 1m と 7m はスジ。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        assert!(is_suji_for(tile(0).tile_type(), 1, &context));
+        assert!(is_suji_for(tile(24).tile_type(), 1, &context));
+    }
+
+    #[test]
+    fn is_suji_for_false_for_different_suit() {
+        // 4p が河にあっても 1m はスジにならない。
+        let discards = [vec![], vec![tile(48)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        assert!(!is_suji_for(tile(0).tile_type(), 1, &context));
+    }
+
+    #[test]
+    fn is_suji_for_detects_one_four_seven() {
+        // 1m 河 → 4m スジ、7m 河 → 4m スジ、4m 河 → 1m/7m スジ。
+        let context = table_state_context(
+            Some(0),
+            None,
+            [vec![], vec![tile(0)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert!(is_suji_for(tile(12).tile_type(), 1, &context));
+
+        let context = table_state_context(
+            Some(0),
+            None,
+            [vec![], vec![tile(24)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert!(is_suji_for(tile(12).tile_type(), 1, &context));
+
+        let context = table_state_context(
+            Some(0),
+            None,
+            [vec![], vec![tile(12)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert!(is_suji_for(tile(0).tile_type(), 1, &context));
+        assert!(is_suji_for(tile(24).tile_type(), 1, &context));
+    }
+
+    #[test]
+    fn is_suji_for_detects_two_five_eight() {
+        // 5m が河にあれば 2m と 8m はスジ。
+        let context = table_state_context(
+            Some(0),
+            None,
+            [vec![], vec![tile(16)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert!(is_suji_for(tile(4).tile_type(), 1, &context));
+        assert!(is_suji_for(tile(28).tile_type(), 1, &context));
+    }
+
+    #[test]
+    fn is_suji_for_detects_three_six_nine() {
+        // 6m が河にあれば 3m と 9m はスジ。
+        let context = table_state_context(
+            Some(0),
+            None,
+            [vec![], vec![tile(20)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert!(is_suji_for(tile(8).tile_type(), 1, &context));
+        assert!(is_suji_for(tile(32).tile_type(), 1, &context));
+    }
+
+    #[test]
+    fn suji_dahai_actions_by_safety_excludes_non_dahai() {
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Reach,
+            LegalAction::Pon {
+                tile: tile(0),
+                consumed: vec![tile(1), tile(2)],
+            },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        let ranked = suji_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![(&LegalAction::Dahai { tile: tile(0) }, SujiSafetyRank::Suji)]
+        );
+    }
+
+    #[test]
+    fn suji_dahai_actions_by_safety_excludes_honor_dahai() {
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        let ranked = suji_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![(&LegalAction::Dahai { tile: tile(0) }, SujiSafetyRank::Suji)]
+        );
+    }
+
+    #[test]
+    fn suji_dahai_actions_by_safety_orders_suji_first() {
+        // 4m 河 → 1m はスジ、5m は無スジ。Suji → NoSuji の順。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(0) },
+        ];
+        let ranked = suji_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (&LegalAction::Dahai { tile: tile(0) }, SujiSafetyRank::Suji),
+                (
+                    &LegalAction::Dahai { tile: tile(16) },
+                    SujiSafetyRank::NoSuji
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn suji_dahai_actions_by_safety_preserves_order_within_same_rank() {
+        // リーチ者はいるが河は空なので全て NoSuji。元の順序を保つ。
+        let context = table_state_context(
+            Some(0),
+            None,
+            Default::default(),
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(32) },
+        ];
+        let ranked = suji_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(16) },
+                    SujiSafetyRank::NoSuji
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(0) },
+                    SujiSafetyRank::NoSuji
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(32) },
+                    SujiSafetyRank::NoSuji
+                ),
+            ]
         );
     }
 }
