@@ -9,6 +9,7 @@ pub struct DiscardEvaluation {
     pub count_before_discard: u8,
     pub shanten_after_discard: Shanten,
     pub acceptance_after_discard: Acceptance,
+    pub shape_penalty: i16,
     pub discarded_dora_count: u8,
     pub discarded_value_honor_count: u8,
     pub discards_red_five: bool,
@@ -198,6 +199,10 @@ fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) ->
         return candidate_type_count > best_type_count;
     }
 
+    if candidate.shape_penalty != best.shape_penalty {
+        return candidate.shape_penalty < best.shape_penalty;
+    }
+
     if candidate.discarded_dora_count != best.discarded_dora_count {
         return candidate.discarded_dora_count < best.discarded_dora_count;
     }
@@ -244,6 +249,7 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             count_before_discard,
             shanten_after_discard,
             acceptance_after_discard,
+            shape_penalty: shape_penalty_for_discard(counts, tile),
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
@@ -294,6 +300,7 @@ pub fn evaluate_discards_with_visible_tiles(
             count_before_discard,
             shanten_after_discard,
             acceptance_after_discard,
+            shape_penalty: shape_penalty_for_discard(counts, tile),
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
@@ -668,6 +675,18 @@ mod tests {
         value_honor: u8,
         red: bool,
     ) -> DiscardEvaluation {
+        evaluation_with_shape_penalty(min, remaining, type_count, 0, dora, value_honor, red)
+    }
+
+    fn evaluation_with_shape_penalty(
+        min: i8,
+        remaining: u8,
+        type_count: usize,
+        shape_penalty: i16,
+        dora: u8,
+        value_honor: u8,
+        red: bool,
+    ) -> DiscardEvaluation {
         let tiles: Vec<AcceptanceTile> = (0..type_count)
             .map(|i| AcceptanceTile {
                 tile: TileType::new(i as u8).unwrap(),
@@ -684,6 +703,7 @@ mod tests {
                 current: shanten_min(min),
                 tiles,
             },
+            shape_penalty,
             discarded_dora_count: dora,
             discarded_value_honor_count: value_honor,
             discards_red_five: red,
@@ -1395,6 +1415,176 @@ mod tests {
         assert!(ryanmen > pair);
         assert!(pair > kanchan);
         assert!(kanchan > penchan);
+    }
+
+    fn ryanmen_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["4m", "5m"]), tile("4m"))
+    }
+
+    fn sequence_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["1m", "2m", "3m"]), tile("2m"))
+    }
+
+    fn pair_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["5m", "5m"]), tile("5m"))
+    }
+
+    fn isolated_penalty() -> i16 {
+        shape_penalty_for_discard(&counts(&["9p"]), tile("9p"))
+    }
+
+    #[test]
+    fn shape_penalty_tiebreak_prefers_lower_penalty() {
+        let low = evaluation_with_shape_penalty(1, 10, 2, 3, 0, 0, false);
+        let high = evaluation_with_shape_penalty(1, 10, 2, 40, 0, 0, false);
+        assert!(is_better_discard(&low, &high));
+        assert!(!is_better_discard(&high, &low));
+    }
+
+    #[test]
+    fn shanten_outranks_shape_penalty_tiebreak() {
+        let low_shanten_high_penalty = evaluation_with_shape_penalty(0, 4, 1, 40, 0, 0, false);
+        let high_shanten_low_penalty = evaluation_with_shape_penalty(1, 40, 5, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &low_shanten_high_penalty,
+            &high_shanten_low_penalty
+        ));
+    }
+
+    #[test]
+    fn acceptance_remaining_outranks_shape_penalty_tiebreak() {
+        let more_remaining_high_penalty = evaluation_with_shape_penalty(1, 20, 1, 40, 0, 0, false);
+        let less_remaining_low_penalty = evaluation_with_shape_penalty(1, 10, 1, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &more_remaining_high_penalty,
+            &less_remaining_low_penalty
+        ));
+    }
+
+    #[test]
+    fn acceptance_types_outrank_shape_penalty_tiebreak() {
+        let more_types_high_penalty = evaluation_with_shape_penalty(1, 10, 3, 40, 0, 0, false);
+        let fewer_types_low_penalty = evaluation_with_shape_penalty(1, 10, 2, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &more_types_high_penalty,
+            &fewer_types_low_penalty
+        ));
+    }
+
+    #[test]
+    fn shape_penalty_outranks_dora_tiebreak() {
+        let low_penalty_discards_dora = evaluation_with_shape_penalty(1, 10, 2, 0, 1, 0, false);
+        let high_penalty_keeps_dora = evaluation_with_shape_penalty(1, 10, 2, 33, 0, 0, false);
+        assert!(is_better_discard(
+            &low_penalty_discards_dora,
+            &high_penalty_keeps_dora
+        ));
+    }
+
+    #[test]
+    fn shape_penalty_outranks_value_honor_tiebreak() {
+        let low_penalty_discards_honor = evaluation_with_shape_penalty(1, 10, 2, 0, 0, 1, false);
+        let high_penalty_keeps_honor = evaluation_with_shape_penalty(1, 10, 2, 33, 0, 0, false);
+        assert!(is_better_discard(
+            &low_penalty_discards_honor,
+            &high_penalty_keeps_honor
+        ));
+    }
+
+    #[test]
+    fn shape_penalty_outranks_red_five_tiebreak() {
+        let low_penalty_discards_red = evaluation_with_shape_penalty(1, 10, 2, 0, 0, 0, true);
+        let high_penalty_keeps_red = evaluation_with_shape_penalty(1, 10, 2, 33, 0, 0, false);
+        assert!(is_better_discard(
+            &low_penalty_discards_red,
+            &high_penalty_keeps_red
+        ));
+    }
+
+    #[test]
+    fn tiebreak_prefers_isolated_over_breaking_ryanmen() {
+        let isolated = evaluation_with_shape_penalty(1, 10, 2, isolated_penalty(), 0, 0, false);
+        let breaks_ryanmen =
+            evaluation_with_shape_penalty(1, 10, 2, ryanmen_penalty(), 0, 0, false);
+        assert!(is_better_discard(&isolated, &breaks_ryanmen));
+        assert!(!is_better_discard(&breaks_ryanmen, &isolated));
+    }
+
+    #[test]
+    fn tiebreak_prefers_isolated_over_breaking_sequence() {
+        let isolated = evaluation_with_shape_penalty(1, 10, 2, isolated_penalty(), 0, 0, false);
+        let breaks_sequence =
+            evaluation_with_shape_penalty(1, 10, 2, sequence_penalty(), 0, 0, false);
+        assert!(is_better_discard(&isolated, &breaks_sequence));
+        assert!(!is_better_discard(&breaks_sequence, &isolated));
+    }
+
+    #[test]
+    fn tiebreak_prefers_isolated_over_breaking_pair() {
+        let isolated = evaluation_with_shape_penalty(1, 10, 2, isolated_penalty(), 0, 0, false);
+        let breaks_pair = evaluation_with_shape_penalty(1, 10, 2, pair_penalty(), 0, 0, false);
+        assert!(is_better_discard(&isolated, &breaks_pair));
+        assert!(!is_better_discard(&breaks_pair, &isolated));
+    }
+
+    #[test]
+    fn evaluate_discards_sets_shape_penalty_from_counts_before_discard() {
+        let counts = counts(&["4m", "5m", "9p"]);
+        let evaluations = evaluate_discards(&counts);
+        let four = discard_evaluation(&evaluations, tile("4m"));
+        assert_eq!(
+            four.shape_penalty,
+            shape_penalty_for_discard(&counts, tile("4m"))
+        );
+        assert!(four.shape_penalty > 0);
+        let nine = discard_evaluation(&evaluations, tile("9p"));
+        assert_eq!(nine.shape_penalty, 0);
+    }
+
+    #[test]
+    fn evaluate_discards_with_visible_tiles_sets_shape_penalty() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 37]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let evaluations = evaluate_discards_with_visible_tiles(&counts, &hand);
+        assert!(!evaluations.is_empty());
+        for evaluation in &evaluations {
+            assert_eq!(
+                evaluation.shape_penalty,
+                shape_penalty_for_discard(&counts, evaluation.discard)
+            );
+        }
+    }
+
+    #[test]
+    fn from_tiles_preserves_shape_penalty_after_decorate() {
+        let tiles = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 132, 37]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let with_context = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+        let with_visible = evaluate_discards_from_tiles_with_visible_tiles(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+            &tiles,
+        );
+        assert!(!with_context.is_empty());
+        for evaluation in &with_context {
+            assert_eq!(
+                evaluation.shape_penalty,
+                shape_penalty_for_discard(&counts, evaluation.discard)
+            );
+        }
+        for evaluation in &with_visible {
+            assert_eq!(
+                evaluation.shape_penalty,
+                shape_penalty_for_discard(&counts, evaluation.discard)
+            );
+        }
     }
 
     #[test]
