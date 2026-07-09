@@ -40,16 +40,11 @@ impl ObservationPayload {
             .filter_map(|&raw| u8::try_from(raw).ok())
             .filter_map(temporary_tile_id_from_observation_tile)
             .collect();
+        // discards は防御・現物判定用の player ごとの河、visible_tiles は枚数補正用。用途を分ける。
+        let discards = decode_discards(&observation);
         let mut visible_tiles = hand_tiles.clone();
         visible_tiles.extend(dora_indicators.iter().copied());
-        for player_discards in &observation.discards {
-            visible_tiles.extend(
-                player_discards
-                    .iter()
-                    .filter_map(|&raw| u8::try_from(raw).ok())
-                    .filter_map(temporary_tile_id_from_observation_tile),
-            );
-        }
+        visible_tiles.extend(discards.iter().flatten().copied());
         for player_melds in &observation.melds {
             for meld in player_melds {
                 visible_tiles.extend(meld_visible_tiles(meld));
@@ -65,8 +60,23 @@ impl ObservationPayload {
             round_wind: TileType::wind_from_seat_index(observation.round_wind),
             seat_wind: seat_wind_from(observation.player_id, observation.oya),
             visible_tiles,
+            oya: observation.oya,
+            discards,
+            reached: observation.riichi_declared,
         })
     }
+}
+
+fn decode_discards(observation: &Observation) -> [Vec<TileId>; 4] {
+    let mut discards: [Vec<TileId>; 4] = Default::default();
+    for (player, player_discards) in observation.discards.iter().enumerate() {
+        discards[player] = player_discards
+            .iter()
+            .filter_map(|&raw| u8::try_from(raw).ok())
+            .filter_map(temporary_tile_id_from_observation_tile)
+            .collect();
+    }
+    discards
 }
 
 fn seat_wind_from(player_id: u8, oya: u8) -> Option<TileType> {
@@ -110,16 +120,23 @@ pub struct DecodedObservation {
     pub round_wind: Option<TileType>,
     pub seat_wind: Option<TileType>,
     pub visible_tiles: Vec<TileId>,
+    pub oya: u8,
+    pub discards: [Vec<TileId>; 4],
+    pub reached: [bool; 4],
 }
 
 pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
-    GameContext::from_parts_with_visible_tiles(
+    GameContext::from_parts_with_table_state(
         decoded.drawn_tile,
         decoded.hand_tiles.clone(),
         decoded.dora_indicators.clone(),
         decoded.round_wind,
         decoded.seat_wind,
         decoded.visible_tiles.clone(),
+        Some(decoded.player_id),
+        Some(decoded.oya),
+        decoded.discards.clone(),
+        decoded.reached,
     )
 }
 
@@ -205,6 +222,43 @@ pub(crate) fn fixture_base64_with_discards(
         [None; 4],
         None,
         drawn_tile,
+    );
+    observation.serialize_to_base64().unwrap()
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fixture_base64_with_table_state(
+    player_id: u8,
+    hand: Vec<u8>,
+    discards: [Vec<u8>; 4],
+    riichi_declared: [bool; 4],
+    round_wind: u8,
+    oya: u8,
+) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
+    let observation = Observation::new(
+        player_id,
+        hands,
+        Default::default(),
+        discards,
+        vec![],
+        [25000; 4],
+        riichi_declared,
+        vec![],
+        vec![],
+        0,
+        0,
+        round_wind,
+        oya,
+        0,
+        vec![],
+        false,
+        [None; 4],
+        [None; 4],
+        None,
+        None,
     );
     observation.serialize_to_base64().unwrap()
 }
@@ -810,76 +864,161 @@ mod tests {
         assert_eq!(with_helper.visible_tiles, without_helper.visible_tiles);
     }
 
+    #[test]
+    fn decode_4p_returns_oya() {
+        let payload = ObservationPayload::new(fixture_base64_with_table_state(
+            0,
+            vec![],
+            Default::default(),
+            [false; 4],
+            0,
+            2,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.oya, 2);
+    }
+
+    #[test]
+    fn decode_4p_returns_discards_per_player() {
+        let discards = [vec![0], vec![16], vec![], vec![104, 132]];
+        let payload = ObservationPayload::new(fixture_base64_with_table_state(
+            0,
+            vec![],
+            discards,
+            [false; 4],
+            0,
+            0,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.discards[0], vec![TileId::new(0).unwrap()]);
+        assert_eq!(decoded.discards[1], vec![TileId::new(16).unwrap()]);
+        assert!(decoded.discards[2].is_empty());
+        assert_eq!(
+            decoded.discards[3],
+            vec![TileId::new(104).unwrap(), TileId::new(132).unwrap()]
+        );
+    }
+
+    #[test]
+    fn decode_4p_normalizes_discards_to_temporary_tile_id() {
+        let discards = [vec![59], vec![19], vec![], vec![]];
+        let payload = ObservationPayload::new(fixture_base64_with_table_state(
+            0,
+            vec![],
+            discards,
+            [false; 4],
+            0,
+            0,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.discards[0], vec![TileId::new(56).unwrap()]);
+        assert_eq!(decoded.discards[1], vec![TileId::new(17).unwrap()]);
+    }
+
+    #[test]
+    fn decode_4p_skips_out_of_range_discards() {
+        let discards = [vec![0, 200, 136, 104], vec![], vec![], vec![]];
+        let payload = ObservationPayload::new(fixture_base64_with_table_state(
+            0,
+            vec![],
+            discards,
+            [false; 4],
+            0,
+            0,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(
+            decoded.discards[0],
+            vec![TileId::new(0).unwrap(), TileId::new(104).unwrap()]
+        );
+    }
+
+    #[test]
+    fn decode_4p_returns_reached_flags() {
+        let payload = ObservationPayload::new(fixture_base64_with_table_state(
+            0,
+            vec![],
+            Default::default(),
+            [false, true, false, true],
+            0,
+            0,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        assert_eq!(decoded.reached, [false, true, false, true]);
+    }
+
+    #[test]
+    fn decode_4p_discards_still_feed_visible_tiles() {
+        let discards = [vec![0], vec![16], vec![104], vec![132]];
+        let payload = ObservationPayload::new(fixture_base64_with_table_state(
+            0,
+            vec![],
+            discards,
+            [false; 4],
+            0,
+            0,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        for tile in [
+            TileId::new(0).unwrap(),
+            TileId::new(16).unwrap(),
+            TileId::new(104).unwrap(),
+            TileId::new(132).unwrap(),
+        ] {
+            assert!(decoded.visible_tiles.contains(&tile), "missing {tile:?}");
+        }
+    }
+
     mod game_context_helper {
         use super::*;
+
+        fn decoded(
+            player_id: u8,
+            drawn_tile: Option<TileId>,
+            hand_tiles: Vec<TileId>,
+        ) -> DecodedObservation {
+            DecodedObservation {
+                player_id,
+                drawn_tile,
+                hand_tiles,
+                dora_indicators: vec![],
+                round_wind: None,
+                seat_wind: None,
+                visible_tiles: vec![],
+                oya: 0,
+                discards: Default::default(),
+                reached: [false; 4],
+            }
+        }
 
         #[test]
         fn drawn_tile_becomes_context_drawn_tile() {
             let tile = TileId::new(56).unwrap();
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: Some(tile),
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            assert_eq!(
-                game_context_from_decoded_observation(&decoded),
-                GameContext::with_drawn_tile(tile)
-            );
+            let context = game_context_from_decoded_observation(&decoded(0, Some(tile), vec![]));
+            assert_eq!(context.drawn_tile(), Some(tile));
         }
 
         #[test]
-        fn no_drawn_tile_becomes_default_context() {
-            let decoded = DecodedObservation {
-                player_id: 3,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            assert_eq!(
-                game_context_from_decoded_observation(&decoded),
-                GameContext::default()
-            );
+        fn no_drawn_tile_becomes_none_drawn_tile() {
+            let context = game_context_from_decoded_observation(&decoded(3, None, vec![]));
+            assert_eq!(context.drawn_tile(), None);
         }
 
         #[test]
         fn drawn_tile_and_hand_tiles_become_context_parts() {
             let tile = TileId::new(56).unwrap();
             let hand_tiles = vec![TileId::new(0).unwrap(), TileId::new(16).unwrap()];
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: Some(tile),
-                hand_tiles: hand_tiles.clone(),
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            assert_eq!(
-                game_context_from_decoded_observation(&decoded),
-                GameContext::from_parts(Some(tile), hand_tiles)
-            );
+            let context =
+                game_context_from_decoded_observation(&decoded(0, Some(tile), hand_tiles.clone()));
+            assert_eq!(context.drawn_tile(), Some(tile));
+            assert_eq!(context.hand_tiles(), hand_tiles.as_slice());
         }
 
         #[test]
         fn hand_tiles_are_kept_without_drawn_tile() {
             let hand_tiles = vec![TileId::new(104).unwrap()];
-            let decoded = DecodedObservation {
-                player_id: 1,
-                drawn_tile: None,
-                hand_tiles: hand_tiles.clone(),
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let context =
+                game_context_from_decoded_observation(&decoded(1, None, hand_tiles.clone()));
             assert_eq!(context.drawn_tile(), None);
             assert_eq!(context.hand_tiles(), hand_tiles.as_slice());
         }
@@ -887,62 +1026,31 @@ mod tests {
         #[test]
         fn dora_indicators_are_passed_to_context() {
             let dora_indicators = vec![TileId::new(4).unwrap(), TileId::new(20).unwrap()];
-            let decoded = DecodedObservation {
-                player_id: 2,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: dora_indicators.clone(),
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let mut d = decoded(2, None, vec![]);
+            d.dora_indicators = dora_indicators.clone();
+            let context = game_context_from_decoded_observation(&d);
             assert_eq!(context.dora_indicators(), dora_indicators.as_slice());
         }
 
         #[test]
         fn empty_dora_indicators_become_empty_context_dora() {
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let context = game_context_from_decoded_observation(&decoded(0, None, vec![]));
             assert!(context.dora_indicators().is_empty());
         }
 
         #[test]
         fn winds_are_passed_to_context() {
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: Some(wind(27)),
-                seat_wind: Some(wind(28)),
-                visible_tiles: vec![],
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let mut d = decoded(0, None, vec![]);
+            d.round_wind = Some(wind(27));
+            d.seat_wind = Some(wind(28));
+            let context = game_context_from_decoded_observation(&d);
             assert_eq!(context.round_wind(), Some(wind(27)));
             assert_eq!(context.seat_wind(), Some(wind(28)));
         }
 
         #[test]
         fn absent_winds_become_none_in_context() {
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let context = game_context_from_decoded_observation(&decoded(0, None, vec![]));
             assert_eq!(context.round_wind(), None);
             assert_eq!(context.seat_wind(), None);
         }
@@ -954,32 +1062,52 @@ mod tests {
                 TileId::new(16).unwrap(),
                 TileId::new(16).unwrap(),
             ];
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: visible_tiles.clone(),
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let mut d = decoded(0, None, vec![]);
+            d.visible_tiles = visible_tiles.clone();
+            let context = game_context_from_decoded_observation(&d);
             assert_eq!(context.visible_tiles(), visible_tiles.as_slice());
         }
 
         #[test]
         fn empty_visible_tiles_become_empty_context_visible_tiles() {
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: None,
-                hand_tiles: vec![],
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles: vec![],
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let context = game_context_from_decoded_observation(&decoded(0, None, vec![]));
             assert!(context.visible_tiles().is_empty());
+        }
+
+        #[test]
+        fn player_id_is_passed_to_context() {
+            let context = game_context_from_decoded_observation(&decoded(2, None, vec![]));
+            assert_eq!(context.player_id(), Some(2));
+        }
+
+        #[test]
+        fn oya_is_passed_to_context() {
+            let mut d = decoded(0, None, vec![]);
+            d.oya = 3;
+            let context = game_context_from_decoded_observation(&d);
+            assert_eq!(context.oya(), Some(3));
+        }
+
+        #[test]
+        fn discards_are_passed_to_context() {
+            let discards = [
+                vec![TileId::new(0).unwrap()],
+                vec![TileId::new(16).unwrap()],
+                vec![],
+                vec![TileId::new(104).unwrap()],
+            ];
+            let mut d = decoded(0, None, vec![]);
+            d.discards = discards.clone();
+            let context = game_context_from_decoded_observation(&d);
+            assert_eq!(context.discards(), &discards);
+        }
+
+        #[test]
+        fn reached_is_passed_to_context() {
+            let mut d = decoded(0, None, vec![]);
+            d.reached = [false, true, false, true];
+            let context = game_context_from_decoded_observation(&d);
+            assert_eq!(context.reached(), &[false, true, false, true]);
         }
 
         #[test]
@@ -1020,16 +1148,9 @@ mod tests {
                     .iter()
                     .map(|&value| TileId::new(value).unwrap()),
             );
-            let decoded = DecodedObservation {
-                player_id: 0,
-                drawn_tile: TileId::new(68),
-                hand_tiles: hand,
-                dora_indicators: vec![],
-                round_wind: None,
-                seat_wind: None,
-                visible_tiles,
-            };
-            let context = game_context_from_decoded_observation(&decoded);
+            let mut d = decoded(0, TileId::new(68), hand);
+            d.visible_tiles = visible_tiles;
+            let context = game_context_from_decoded_observation(&d);
             assert!(!context.visible_tiles().is_empty());
 
             let actions: Vec<LegalAction> = hand_values
