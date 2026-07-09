@@ -48,6 +48,67 @@ pub fn select_genbutsu_fallback_action<'a>(
         .next()
 }
 
+// visible_tiles 中で同じ TileType の枚数を数える。赤5も通常5と同じ TileType として数える。
+pub fn visible_count_of(tile: TileType, context: &GameContext) -> u8 {
+    context
+        .visible_tiles()
+        .iter()
+        .filter(|visible| visible.tile_type() == tile)
+        .count() as u8
+}
+
+// 字牌の見え枚数に基づく安全度。見えているほど当たりにくいので安全度が高い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HonorSafetyRank {
+    NoVisible,
+    OneVisible,
+    TwoVisible,
+    ThreeOrMoreVisible,
+}
+
+// 字牌の安全度を見え枚数から求める。字牌でなければ None。
+pub fn honor_safety_rank(tile: TileType, context: &GameContext) -> Option<HonorSafetyRank> {
+    if !tile.is_honor() {
+        return None;
+    }
+    let rank = match visible_count_of(tile, context) {
+        0 => HonorSafetyRank::NoVisible,
+        1 => HonorSafetyRank::OneVisible,
+        2 => HonorSafetyRank::TwoVisible,
+        _ => HonorSafetyRank::ThreeOrMoreVisible,
+    };
+    Some(rank)
+}
+
+// 合法 Dahai のうち字牌のみを安全度の高い順に並べる。同安全度は元の順序を保つ。
+pub fn honor_dahai_actions_by_safety<'a>(
+    legal_actions: &'a [LegalAction],
+    context: &GameContext,
+) -> Vec<(&'a LegalAction, HonorSafetyRank)> {
+    let mut ranked: Vec<(&'a LegalAction, HonorSafetyRank)> = legal_actions
+        .iter()
+        .filter_map(|action| match action {
+            LegalAction::Dahai { tile } => {
+                honor_safety_rank(tile.tile_type(), context).map(|rank| (action, rank))
+            }
+            _ => None,
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked
+}
+
+// 最も安全度の高い字牌 Dahai を fallback として選ぶ。候補がなければ None。
+pub fn select_honor_safety_fallback_action<'a>(
+    legal_actions: &'a [LegalAction],
+    context: &GameContext,
+) -> Option<&'a LegalAction> {
+    honor_dahai_actions_by_safety(legal_actions, context)
+        .into_iter()
+        .next()
+        .map(|(action, _)| action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +395,179 @@ mod tests {
         assert_eq!(
             select_genbutsu_fallback_action(&context, &actions),
             Some(&LegalAction::Dahai { tile: tile(16) })
+        );
+    }
+
+    fn visible_context(visible_tiles: Vec<TileId>) -> GameContext {
+        GameContext::from_parts_with_visible_tiles(None, vec![], vec![], None, None, visible_tiles)
+    }
+
+    #[test]
+    fn visible_count_of_counts_duplicate_tile_types() {
+        // 東(tile 108-110)を3枚、白(tile 124)を1枚見えている状態。
+        let context = visible_context(vec![tile(108), tile(109), tile(110), tile(124)]);
+        assert_eq!(visible_count_of(tile(108).tile_type(), &context), 3);
+        assert_eq!(visible_count_of(tile(124).tile_type(), &context), 1);
+        assert_eq!(visible_count_of(tile(0).tile_type(), &context), 0);
+    }
+
+    #[test]
+    fn visible_count_of_treats_red_five_as_same_type() {
+        // 赤5m(tile 16)と通常5m(tile 17)は同じ TileType として数える。
+        let context = visible_context(vec![tile(16), tile(17)]);
+        assert_eq!(visible_count_of(tile(16).tile_type(), &context), 2);
+    }
+
+    #[test]
+    fn honor_safety_rank_none_for_number_tiles() {
+        let context = visible_context(vec![]);
+        assert_eq!(honor_safety_rank(tile(0).tile_type(), &context), None);
+        assert_eq!(honor_safety_rank(tile(16).tile_type(), &context), None);
+        assert_eq!(honor_safety_rank(tile(104).tile_type(), &context), None);
+    }
+
+    #[test]
+    fn honor_safety_rank_classifies_visible_count() {
+        // 東を0/1/2/3枚見えているそれぞれのケース。
+        let east = tile(108).tile_type();
+        assert_eq!(
+            honor_safety_rank(east, &visible_context(vec![])),
+            Some(HonorSafetyRank::NoVisible)
+        );
+        assert_eq!(
+            honor_safety_rank(east, &visible_context(vec![tile(108)])),
+            Some(HonorSafetyRank::OneVisible)
+        );
+        assert_eq!(
+            honor_safety_rank(east, &visible_context(vec![tile(108), tile(109)])),
+            Some(HonorSafetyRank::TwoVisible)
+        );
+        assert_eq!(
+            honor_safety_rank(
+                east,
+                &visible_context(vec![tile(108), tile(109), tile(110)])
+            ),
+            Some(HonorSafetyRank::ThreeOrMoreVisible)
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_excludes_non_dahai() {
+        let context = visible_context(vec![tile(108)]);
+        let actions = vec![
+            LegalAction::Reach,
+            LegalAction::Pon {
+                tile: tile(108),
+                consumed: vec![tile(109), tile(110)],
+            },
+            LegalAction::Dahai { tile: tile(108) },
+        ];
+        let ranked = honor_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![(
+                &LegalAction::Dahai { tile: tile(108) },
+                HonorSafetyRank::OneVisible
+            )]
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_excludes_number_dahai() {
+        let context = visible_context(vec![]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(108) },
+        ];
+        let ranked = honor_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![(
+                &LegalAction::Dahai { tile: tile(108) },
+                HonorSafetyRank::NoVisible
+            )]
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_orders_high_safety_first() {
+        // 東は3枚見え、南は1枚見え、白は0枚見え。安全度の高い順に並ぶ。
+        let context = visible_context(vec![tile(108), tile(109), tile(110), tile(112)]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(124) },
+            LegalAction::Dahai { tile: tile(112) },
+            LegalAction::Dahai { tile: tile(108) },
+        ];
+        let ranked = honor_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(108) },
+                    HonorSafetyRank::ThreeOrMoreVisible
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(112) },
+                    HonorSafetyRank::OneVisible
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(124) },
+                    HonorSafetyRank::NoVisible
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_preserves_order_within_same_rank() {
+        // すべて0枚見えの字牌 Dahai は元の順序を保つ。
+        let context = visible_context(vec![]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(124) },
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::Dahai { tile: tile(120) },
+        ];
+        let ranked = honor_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(124) },
+                    HonorSafetyRank::NoVisible
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(108) },
+                    HonorSafetyRank::NoVisible
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(120) },
+                    HonorSafetyRank::NoVisible
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_returns_safest_honor_dahai() {
+        // 東は2枚見え、南は0枚見え。より安全な東を選ぶ。
+        let context = visible_context(vec![tile(108), tile(109)]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(112) },
+            LegalAction::Dahai { tile: tile(108) },
+        ];
+        assert_eq!(
+            select_honor_safety_fallback_action(&actions, &context),
+            Some(&LegalAction::Dahai { tile: tile(108) })
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_none_without_honor_dahai() {
+        let context = visible_context(vec![]);
+        let actions = vec![LegalAction::Dahai { tile: tile(0) }, LegalAction::Reach];
+        assert_eq!(
+            select_honor_safety_fallback_action(&actions, &context),
+            None
         );
     }
 }
