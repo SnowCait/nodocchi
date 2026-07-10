@@ -1,0 +1,455 @@
+use std::collections::HashSet;
+
+use bot_core::Agent;
+
+use crate::handler::{ChiihouHandlerError, reply_content_for_chiihou_content};
+use crate::tags::{build_reply_tags, has_tag_value, root_channel_id};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChiihouIncomingEvent {
+    pub id: String,
+    pub pubkey: String,
+    pub kind: u64,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChiihouOutgoingReply {
+    pub kind: u64,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChiihouEventConfig {
+    pub ai_pubkey_hex: String,
+    pub server_pubkey_hex: String,
+    pub server_npub: String,
+    pub channel_ids: Vec<String>,
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum ChiihouEventError {
+    #[error("failed to handle chiihou content: {0}")]
+    Handler(#[from] ChiihouHandlerError),
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SeenEventIds {
+    ids: HashSet<String>,
+}
+
+impl SeenEventIds {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn contains(&self, event_id: &str) -> bool {
+        self.ids.contains(event_id)
+    }
+
+    pub fn insert(&mut self, event_id: impl Into<String>) -> bool {
+        self.ids.insert(event_id.into())
+    }
+
+    pub fn should_process(&mut self, event_id: &str) -> bool {
+        self.insert(event_id)
+    }
+}
+
+pub fn is_chiihou_request_kind(kind: u64) -> bool {
+    kind == 42 || kind == 20000
+}
+
+pub fn event_targets_ai(event: &ChiihouIncomingEvent, ai_pubkey_hex: &str) -> bool {
+    has_tag_value(&event.tags, "p", ai_pubkey_hex)
+}
+
+pub fn event_is_from_server(event: &ChiihouIncomingEvent, server_pubkey_hex: &str) -> bool {
+    event.pubkey == server_pubkey_hex
+}
+
+pub fn event_channel_id<'a>(
+    event: &'a ChiihouIncomingEvent,
+    allowed_channel_ids: &[String],
+) -> Option<&'a str> {
+    root_channel_id(&event.tags).filter(|channel_id| {
+        allowed_channel_ids
+            .iter()
+            .any(|allowed| allowed == channel_id)
+    })
+}
+
+pub fn should_handle_event(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+    seen: &mut SeenEventIds,
+) -> bool {
+    is_chiihou_request_kind(event.kind)
+        && event_is_from_server(event, &config.server_pubkey_hex)
+        && event_targets_ai(event, &config.ai_pubkey_hex)
+        && event_channel_id(event, &config.channel_ids).is_some()
+        && seen.should_process(&event.id)
+}
+
+pub fn build_reply_for_event<A: Agent>(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+    agent: &mut A,
+) -> Result<Option<ChiihouOutgoingReply>, ChiihouEventError> {
+    let Some(content) =
+        reply_content_for_chiihou_content(&config.server_npub, &event.content, agent)?
+    else {
+        return Ok(None);
+    };
+    let Some(channel_id) = event_channel_id(event, &config.channel_ids) else {
+        return Ok(None);
+    };
+    let tags = build_reply_tags(
+        &event.id,
+        channel_id,
+        &config.ai_pubkey_hex,
+        &config.server_pubkey_hex,
+    );
+    Ok(Some(ChiihouOutgoingReply {
+        kind: event.kind,
+        tags,
+        content,
+    }))
+}
+
+pub fn process_incoming_event<A: Agent>(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+    seen: &mut SeenEventIds,
+    agent: &mut A,
+) -> Result<Option<ChiihouOutgoingReply>, ChiihouEventError> {
+    if !should_handle_event(event, config, seen) {
+        return Ok(None);
+    }
+    build_reply_for_event(event, config, agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handler::ChiihouHandlerError;
+    use crate::protocol::ChiihouProtocolError;
+    use bot_core::{GameContext, LegalAction};
+
+    struct PickSecondAgent;
+
+    impl Agent for PickSecondAgent {
+        fn act(&mut self, _ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
+            legal_actions.get(1).cloned().unwrap_or(LegalAction::None)
+        }
+    }
+
+    fn config() -> ChiihouEventConfig {
+        ChiihouEventConfig {
+            ai_pubkey_hex: "ai_pubkey".to_string(),
+            server_pubkey_hex: "server_pubkey".to_string(),
+            server_npub: "npub1server".to_string(),
+            channel_ids: vec!["channel_hanchan".to_string(), "channel_tonpuu".to_string()],
+        }
+    }
+
+    fn tag(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn valid_event(id: &str, content: &str) -> ChiihouIncomingEvent {
+        ChiihouIncomingEvent {
+            id: id.to_string(),
+            pubkey: "server_pubkey".to_string(),
+            kind: 42,
+            tags: vec![
+                tag(&["e", "channel_hanchan", "", "root"]),
+                tag(&["p", "ai_pubkey"]),
+            ],
+            content: content.to_string(),
+        }
+    }
+
+    fn sutehai_content() -> &'static str {
+        "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+nostr:npub1ai000 GET sutehai?"
+    }
+
+    fn naku_content() -> &'static str {
+        "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
+nostr:npub1ai000 GET naku? ron pon chi"
+    }
+
+    #[test]
+    fn chiihou_request_kinds_are_42_and_20000() {
+        assert!(is_chiihou_request_kind(42));
+        assert!(is_chiihou_request_kind(20000));
+        assert!(!is_chiihou_request_kind(30315));
+        assert!(!is_chiihou_request_kind(1));
+    }
+
+    #[test]
+    fn event_targets_ai_with_matching_p_tag() {
+        let event = valid_event("event1", "");
+        assert!(event_targets_ai(&event, "ai_pubkey"));
+        assert!(!event_targets_ai(&event, "other_pubkey"));
+
+        let mut event_without_p_tag = valid_event("event1", "");
+        event_without_p_tag.tags = vec![tag(&["e", "channel_hanchan", "", "root"])];
+        assert!(!event_targets_ai(&event_without_p_tag, "ai_pubkey"));
+    }
+
+    #[test]
+    fn event_is_from_server_compares_pubkey() {
+        let event = valid_event("event1", "");
+        assert!(event_is_from_server(&event, "server_pubkey"));
+        assert!(!event_is_from_server(&event, "other_pubkey"));
+    }
+
+    #[test]
+    fn event_channel_id_returns_allowed_root_channel() {
+        let event = valid_event("event1", "");
+        assert_eq!(
+            event_channel_id(&event, &config().channel_ids),
+            Some("channel_hanchan")
+        );
+    }
+
+    #[test]
+    fn event_channel_id_is_none_for_unknown_channel() {
+        let mut event = valid_event("event1", "");
+        event.tags = vec![
+            tag(&["e", "channel_unknown", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+        ];
+        assert_eq!(event_channel_id(&event, &config().channel_ids), None);
+    }
+
+    #[test]
+    fn event_channel_id_is_none_without_root_e_tag() {
+        let mut event = valid_event("event1", "");
+        event.tags = vec![tag(&["p", "ai_pubkey"])];
+        assert_eq!(event_channel_id(&event, &config().channel_ids), None);
+    }
+
+    #[test]
+    fn seen_event_ids_should_process_once() {
+        let mut seen = SeenEventIds::new();
+        assert!(seen.should_process("event1"));
+        assert!(!seen.should_process("event1"));
+        assert!(seen.should_process("event2"));
+    }
+
+    #[test]
+    fn seen_event_ids_insert_and_contains() {
+        let mut seen = SeenEventIds::new();
+        assert!(!seen.contains("event1"));
+        assert!(seen.insert("event1"));
+        assert!(seen.contains("event1"));
+        assert!(!seen.insert("event1"));
+    }
+
+    #[test]
+    fn should_handle_event_accepts_valid_event() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", sutehai_content());
+        assert!(should_handle_event(&event, &config(), &mut seen));
+        assert!(seen.contains("event1"));
+    }
+
+    #[test]
+    fn should_handle_event_accepts_kind_20000() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        assert!(should_handle_event(&event, &config(), &mut seen));
+    }
+
+    #[test]
+    fn should_handle_event_rejects_wrong_kind() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 1;
+        assert!(!should_handle_event(&event, &config(), &mut seen));
+        assert!(!seen.contains("event1"));
+    }
+
+    #[test]
+    fn should_handle_event_rejects_wrong_server_pubkey() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.pubkey = "other_pubkey".to_string();
+        assert!(!should_handle_event(&event, &config(), &mut seen));
+        assert!(!seen.contains("event1"));
+    }
+
+    #[test]
+    fn should_handle_event_rejects_event_without_ai_p_tag() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags = vec![tag(&["e", "channel_hanchan", "", "root"])];
+        assert!(!should_handle_event(&event, &config(), &mut seen));
+        assert!(!seen.contains("event1"));
+    }
+
+    #[test]
+    fn should_handle_event_rejects_unknown_channel() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags = vec![
+            tag(&["e", "channel_unknown", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+        ];
+        assert!(!should_handle_event(&event, &config(), &mut seen));
+        assert!(!seen.contains("event1"));
+    }
+
+    #[test]
+    fn should_handle_event_rejects_duplicate_event_id() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", sutehai_content());
+        assert!(should_handle_event(&event, &config(), &mut seen));
+        assert!(!should_handle_event(&event, &config(), &mut seen));
+    }
+
+    #[test]
+    fn builds_reply_for_sutehai_event() {
+        let event = valid_event("event1", sutehai_content());
+        assert_eq!(
+            build_reply_for_event(&event, &config(), &mut PickSecondAgent),
+            Ok(Some(ChiihouOutgoingReply {
+                kind: 42,
+                tags: vec![
+                    tag(&["e", "channel_hanchan", "", "root"]),
+                    tag(&["e", "event1", "", "reply", "server_pubkey"]),
+                    tag(&["p", "ai_pubkey"]),
+                    tag(&["p", "server_pubkey"]),
+                ],
+                content: "nostr:npub1server sutehai? sutehai 2m".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_naku_no_reply_for_naku_event() {
+        let event = valid_event("event1", naku_content());
+        let reply = build_reply_for_event(&event, &config(), &mut PickSecondAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.kind, 42);
+        assert_eq!(reply.content, "nostr:npub1server naku? no");
+    }
+
+    #[test]
+    fn build_reply_is_none_for_unrelated_content() {
+        let event = valid_event("event1", "nostr:npub1ai000 join");
+        assert_eq!(
+            build_reply_for_event(&event, &config(), &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn build_reply_is_none_without_allowed_channel() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags = vec![
+            tag(&["e", "channel_unknown", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+        ];
+        assert_eq!(
+            build_reply_for_event(&event, &config(), &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn processes_valid_sutehai_event() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", sutehai_content());
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(Some(ChiihouOutgoingReply {
+                kind: 42,
+                tags: vec![
+                    tag(&["e", "channel_hanchan", "", "root"]),
+                    tag(&["e", "event1", "", "reply", "server_pubkey"]),
+                    tag(&["p", "ai_pubkey"]),
+                    tag(&["p", "server_pubkey"]),
+                ],
+                content: "nostr:npub1server sutehai? sutehai 2m".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn processes_same_event_id_only_once() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", sutehai_content());
+        assert!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn process_ignores_invalid_sender() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.pubkey = "other_pubkey".to_string();
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn process_ignores_invalid_channel() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags = vec![
+            tag(&["e", "channel_unknown", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+        ];
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn process_ignores_event_without_ai_p_tag() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags = vec![tag(&["e", "channel_hanchan", "", "root"])];
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn process_returns_handler_error_for_unparsable_content() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event(
+            "event1",
+            "\
+:mahjong_m1::mahjong_m2: :mahjong_m3::mahjong_m4:
+nostr:npub1ai000 GET sutehai?",
+        );
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Err(ChiihouEventError::Handler(ChiihouHandlerError::Protocol(
+                ChiihouProtocolError::InvalidTileLayout
+            )))
+        );
+    }
+}
