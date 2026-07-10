@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod config;
 pub mod convert;
 pub mod decision;
@@ -7,8 +8,14 @@ pub mod nostr_adapter;
 pub mod protocol;
 pub mod reply;
 pub mod runtime;
+pub mod secret;
 pub mod tags;
 
+pub use cli::{
+    ChiihouAgentKind, ChiihouAgentKindParseError, ChiihouCliArgs, ChiihouCliError,
+    ChiihouServerNpubError, ChiihouStartupConfigError, USAGE, build_cli_nostr_config,
+    validate_server_npub,
+};
 pub use config::{
     ChiihouChannel, ChiihouChannelParseError, ChiihouConfigError, ChiihouNostrConfig,
     DEFAULT_RELAY_URLS, HANCHAN_CHANNEL_ID, TONPUU_CHANNEL_ID,
@@ -42,6 +49,8 @@ pub use protocol::{
     ChiihouSuit, parse_chiihou_request,
 };
 pub use reply::{build_naku_no_reply_content, build_sutehai_reply_content};
+pub use secret::{CHIIHOU_NSEC_ENV, ChiihouSecretError, load_chiihou_nsec, validate_chiihou_nsec};
+
 pub use runtime::{
     ChiihouRuntimeError, build_chiihou_request_filter, connect_chiihou_client,
     process_and_sign_nostr_event, publish_chiihou_reply, run_chiihou_client,
