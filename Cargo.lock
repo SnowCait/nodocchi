@@ -111,6 +111,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chiihou-client"
+version = "0.1.0"
+dependencies = [
+ "bot-logic",
+ "thiserror",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
