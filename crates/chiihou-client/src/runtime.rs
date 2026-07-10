@@ -15,7 +15,8 @@ use crate::config::ChiihouNostrConfig;
 use crate::controller::{ChiihouLifecycleController, ChiihouLifecycleEffect};
 use crate::event::{
     CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_CHANNEL_MESSAGE_KIND, ChiihouEventError,
-    ChiihouIncomingAction, SeenEventIds, classify_incoming_event, process_incoming_event,
+    ChiihouIncomingAction, SeenEventIds, classify_incoming_event_with_state,
+    process_incoming_event,
 };
 use crate::nostr_adapter::{
     ChiihouNostrAdapterError, incoming_event_from_nostr, sign_outgoing_reply,
@@ -251,7 +252,14 @@ async fn run_chiihou_request_loop<A: Agent>(
                 ..
             }) if received_subscription_id == subscription_id => {
                 let incoming = incoming_event_from_nostr(&event);
-                match classify_incoming_event(&incoming, config.event_config(), &mut seen, agent) {
+                let snapshot = controller.table_snapshot();
+                match classify_incoming_event_with_state(
+                    &incoming,
+                    config.event_config(),
+                    &mut seen,
+                    &snapshot,
+                    agent,
+                ) {
                     Ok(ChiihouIncomingAction::Ignore) => {}
                     Ok(ChiihouIncomingAction::Reply(reply)) => {
                         match sign_outgoing_reply(&reply, config.keys()) {
@@ -286,11 +294,27 @@ async fn run_chiihou_request_loop<A: Agent>(
                             }
                         }
                     }
+                    Ok(ChiihouIncomingAction::TableNotification(notification)) => {
+                        if let Err(error) = controller.apply_table_notification(&notification) {
+                            tracing::warn!(
+                                event_id = %event.id,
+                                error = %error,
+                                "rejected chiihou table notification"
+                            );
+                        }
+                    }
                     Err(ChiihouEventError::Lifecycle(error)) => {
                         tracing::warn!(
                             event_id = %event.id,
                             error = %error,
                             "failed to parse chiihou lifecycle notification"
+                        );
+                    }
+                    Err(ChiihouEventError::TableNotification(error)) => {
+                        tracing::warn!(
+                            event_id = %event.id,
+                            error = %error,
+                            "failed to parse chiihou table notification"
                         );
                     }
                     Err(error) => {
@@ -679,6 +703,40 @@ nostr:{ai_npub} GET naku? ron pon chi"
     fn unsupported_notify_is_ignored() {
         let config = config(ChiihouChannel::Hanchan);
         let mut seen = SeenEventIds::new();
+        for content in [
+            "NOTIFY point payload",
+            "NOTIFY open payload",
+            "NOTIFY agari payload",
+            "NOTIFY ryukyoku payload",
+        ] {
+            let event = build_request_event(42, content, &request_tags(), &server_keys());
+            let result =
+                process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
+            assert!(matches!(result, Ok(None)), "content: {content:?}");
+        }
+    }
+
+    #[test]
+    fn table_notify_does_not_get_reply() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let ai_npub = ai_keys().public_key().to_bech32().unwrap();
+        for content in [
+            format!("nostr:{ai_npub} NOTIFY dora 5p"),
+            format!("nostr:{ai_npub} NOTIFY sutehai nostr:{ai_npub} 7z"),
+            format!("nostr:{ai_npub} NOTIFY say nostr:{ai_npub} richi"),
+        ] {
+            let event = build_request_event(42, &content, &request_tags(), &server_keys());
+            let result =
+                process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
+            assert!(matches!(result, Ok(None)), "content: {content:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_table_notify_is_table_notification_error() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
         let event = build_request_event(
             42,
             "NOTIFY tsumo :mahjong_m1:",
@@ -686,7 +744,188 @@ nostr:{ai_npub} GET naku? ron pon chi"
             &server_keys(),
         );
         let result = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
-        assert!(matches!(result, Ok(None)));
+        assert!(matches!(
+            result,
+            Err(ChiihouRuntimeError::Event(
+                ChiihouEventError::TableNotification(_)
+            ))
+        ));
+    }
+
+    mod table_state_integration {
+        use super::*;
+        use crate::convert::{temporary_tile_id_from_chiihou_pai, tile_type_from_chiihou_wind};
+        use crate::lifecycle::ChiihouWind;
+        use crate::protocol::ChiihouPai;
+        use bot_logic::TileId;
+
+        struct RecordingAgent {
+            context: Option<GameContext>,
+        }
+
+        impl Agent for RecordingAgent {
+            fn act(&mut self, ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
+                self.context = Some(ctx.clone());
+                legal_actions.first().cloned().unwrap_or(LegalAction::None)
+            }
+        }
+
+        fn pai(s: &str) -> ChiihouPai {
+            s.parse().unwrap()
+        }
+
+        fn tile_of(s: &str) -> TileId {
+            temporary_tile_id_from_chiihou_pai(pai(s))
+        }
+
+        // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
+        fn other_player_npub(index: u64) -> String {
+            nostr_sdk::Keys::parse(&format!("{index:064x}"))
+                .unwrap()
+                .public_key()
+                .to_bech32()
+                .unwrap()
+        }
+
+        fn npub_tokens() -> Vec<String> {
+            let ai_npub = ai_keys().public_key().to_bech32().unwrap();
+            let mut tokens = vec![format!("nostr:{ai_npub}")];
+            tokens.extend((2..=4).map(|index| format!("nostr:{}", other_player_npub(index))));
+            tokens
+        }
+
+        fn notification_contents() -> Vec<String> {
+            let tokens = npub_tokens();
+            let prefix = tokens.join(" ");
+            let ai = &tokens[0];
+            let dealer = &tokens[1];
+            let opponent = &tokens[1];
+            vec![
+                format!("{prefix} NOTIFY gamestart 南 {prefix}"),
+                format!("{prefix} NOTIFY kyokustart 東 {dealer} 0 0"),
+                format!("{ai} NOTIFY haipai {ai} 1m2m3m4m5m6m7p8p9p1s1s2z2z\n\n:mahjong_m1:"),
+                format!("{prefix} NOTIFY dora 5p"),
+                format!("{ai} NOTIFY tsumo {ai} 69 7z"),
+                format!("{prefix} NOTIFY sutehai {ai} 7z"),
+                format!("{prefix} NOTIFY sutehai {opponent} 1z"),
+                format!("{prefix} NOTIFY say {opponent} richi"),
+            ]
+        }
+
+        fn apply_notifications(
+            controller: &mut ChiihouLifecycleController,
+            seen: &mut SeenEventIds,
+            config: &ChiihouNostrConfig,
+        ) {
+            for (index, content) in notification_contents().iter().enumerate() {
+                let event = build_request_event(42, content, &request_tags(), &server_keys());
+                let incoming = incoming_event_from_nostr(&event);
+                let snapshot = controller.table_snapshot();
+                let action = classify_incoming_event_with_state(
+                    &incoming,
+                    config.event_config(),
+                    seen,
+                    &snapshot,
+                    &mut PickSecondAgent,
+                )
+                .unwrap();
+                match action {
+                    ChiihouIncomingAction::Lifecycle(notification) => {
+                        controller.apply(&notification);
+                    }
+                    ChiihouIncomingAction::TableNotification(notification) => {
+                        controller.apply_table_notification(&notification).unwrap();
+                    }
+                    other => panic!("unexpected action for content {index}: {other:?}"),
+                }
+            }
+        }
+
+        fn recorded_context_for(content: &str) -> GameContext {
+            let config = config(ChiihouChannel::Hanchan);
+            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key());
+            let mut seen = SeenEventIds::new();
+            apply_notifications(&mut controller, &mut seen, &config);
+
+            let event = build_request_event(42, content, &request_tags(), &server_keys());
+            let incoming = incoming_event_from_nostr(&event);
+            let snapshot = controller.table_snapshot();
+            let mut agent = RecordingAgent { context: None };
+            let action = classify_incoming_event_with_state(
+                &incoming,
+                config.event_config(),
+                &mut seen,
+                &snapshot,
+                &mut agent,
+            )
+            .unwrap();
+            assert!(matches!(action, ChiihouIncomingAction::Reply(_)));
+            agent.context.unwrap()
+        }
+
+        #[test]
+        fn sutehai_request_context_reflects_notified_table_state() {
+            let context = recorded_context_for(&sutehai_content());
+            assert_eq!(
+                context.round_wind(),
+                Some(tile_type_from_chiihou_wind(ChiihouWind::East))
+            );
+            assert_eq!(
+                context.seat_wind(),
+                Some(tile_type_from_chiihou_wind(ChiihouWind::South))
+            );
+            assert_eq!(context.dora_indicators(), &[tile_of("5p")]);
+            assert_eq!(context.player_id(), Some(0));
+            assert_eq!(context.oya(), Some(1));
+            assert_eq!(context.discards()[0], vec![tile_of("7z")]);
+            assert_eq!(context.discards()[1], vec![tile_of("1z")]);
+            assert_eq!(context.reached(), &[false, true, false, false]);
+        }
+
+        #[test]
+        fn sutehai_request_context_uses_request_hand_not_notified_hand() {
+            let context = recorded_context_for(&sutehai_content());
+            assert_eq!(
+                context.hand_tiles(),
+                &[tile_of("1m"), tile_of("2m"), tile_of("3m")]
+            );
+            assert_eq!(context.drawn_tile(), Some(tile_of("1z")));
+        }
+
+        #[test]
+        fn sutehai_request_context_visible_tiles_hold_request_hand_dora_and_rivers() {
+            let context = recorded_context_for(&sutehai_content());
+            assert_eq!(
+                context.visible_tiles(),
+                &[
+                    tile_of("1m"),
+                    tile_of("2m"),
+                    tile_of("3m"),
+                    tile_of("1z"),
+                    tile_of("5p"),
+                    tile_of("7z"),
+                    tile_of("1z"),
+                ]
+            );
+        }
+
+        #[test]
+        fn naku_request_context_reflects_notified_table_state() {
+            let context = recorded_context_for(&naku_content());
+            assert_eq!(context.drawn_tile(), None);
+            assert_eq!(
+                context.hand_tiles(),
+                &[tile_of("1m"), tile_of("2m"), tile_of("3m")]
+            );
+            assert_eq!(
+                context.round_wind(),
+                Some(tile_type_from_chiihou_wind(ChiihouWind::East))
+            );
+            assert_eq!(context.dora_indicators(), &[tile_of("5p")]);
+            assert_eq!(context.player_id(), Some(0));
+            assert_eq!(context.oya(), Some(1));
+            assert_eq!(context.reached(), &[false, true, false, false]);
+        }
     }
 
     fn relay_url(url: &str) -> RelayUrl {

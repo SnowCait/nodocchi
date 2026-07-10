@@ -1,6 +1,17 @@
 use bot_logic::{TileId, TileType};
 
+use crate::lifecycle::ChiihouWind;
 use crate::protocol::{ChiihouPai, ChiihouSuit};
+
+pub fn tile_type_from_chiihou_wind(wind: ChiihouWind) -> TileType {
+    let index = match wind {
+        ChiihouWind::East => 0,
+        ChiihouWind::South => 1,
+        ChiihouWind::West => 2,
+        ChiihouWind::North => 3,
+    };
+    TileType::wind_from_seat_index(index).expect("valid chiihou wind maps to a wind tile type")
+}
 
 pub fn tile_type_from_chiihou_pai(pai: ChiihouPai) -> TileType {
     let base = match pai.suit() {
@@ -181,6 +192,22 @@ mod tests {
                 temporary_tile_id_from_chiihou_pai(converted).tile_type(),
                 tile(value).tile_type(),
                 "tile: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn chiihou_winds_convert_to_wind_tile_types() {
+        for (wind, expected) in [
+            (ChiihouWind::East, 27),
+            (ChiihouWind::South, 28),
+            (ChiihouWind::West, 29),
+            (ChiihouWind::North, 30),
+        ] {
+            assert_eq!(
+                tile_type_from_chiihou_wind(wind),
+                TileType::new(expected).unwrap(),
+                "wind: {wind:?}"
             );
         }
     }

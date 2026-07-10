@@ -2,8 +2,10 @@ use bot_core::Agent;
 
 use crate::decision::{
     NakuDecisionError, SutehaiDecisionError, build_naku_reply_for_request,
-    build_sutehai_reply_for_request,
+    build_naku_reply_for_request_with_state, build_sutehai_reply_for_request,
+    build_sutehai_reply_for_request_with_state,
 };
+use crate::match_state::ChiihouTableSnapshot;
 use crate::protocol::{ChiihouProtocolError, ChiihouRequest, parse_chiihou_request};
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -38,6 +40,23 @@ pub fn build_reply_for_request<A: Agent>(
     Ok(ChiihouHandlerResult::ReplyContent(content))
 }
 
+pub fn build_reply_for_request_with_state<A: Agent>(
+    server_npub: &str,
+    request: &ChiihouRequest,
+    state: &ChiihouTableSnapshot,
+    agent: &mut A,
+) -> Result<ChiihouHandlerResult, ChiihouHandlerError> {
+    let content = match request {
+        ChiihouRequest::Sutehai { .. } => {
+            build_sutehai_reply_for_request_with_state(server_npub, request, state, agent)?
+        }
+        ChiihouRequest::Naku { .. } => {
+            build_naku_reply_for_request_with_state(server_npub, request, state, agent)?
+        }
+    };
+    Ok(ChiihouHandlerResult::ReplyContent(content))
+}
+
 pub fn handle_chiihou_content<A: Agent>(
     server_npub: &str,
     content: &str,
@@ -46,6 +65,30 @@ pub fn handle_chiihou_content<A: Agent>(
     match parse_chiihou_request(content)? {
         None => Ok(ChiihouHandlerResult::NoReply),
         Some(request) => build_reply_for_request(server_npub, &request, agent),
+    }
+}
+
+pub fn handle_chiihou_content_with_state<A: Agent>(
+    server_npub: &str,
+    content: &str,
+    state: &ChiihouTableSnapshot,
+    agent: &mut A,
+) -> Result<ChiihouHandlerResult, ChiihouHandlerError> {
+    match parse_chiihou_request(content)? {
+        None => Ok(ChiihouHandlerResult::NoReply),
+        Some(request) => build_reply_for_request_with_state(server_npub, &request, state, agent),
+    }
+}
+
+pub fn reply_content_for_chiihou_content_with_state<A: Agent>(
+    server_npub: &str,
+    content: &str,
+    state: &ChiihouTableSnapshot,
+    agent: &mut A,
+) -> Result<Option<String>, ChiihouHandlerError> {
+    match handle_chiihou_content_with_state(server_npub, content, state, agent)? {
+        ChiihouHandlerResult::NoReply => Ok(None),
+        ChiihouHandlerResult::ReplyContent(content) => Ok(Some(content)),
     }
 }
 

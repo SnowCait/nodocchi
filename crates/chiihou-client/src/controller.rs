@@ -1,7 +1,8 @@
 use nostr_sdk::PublicKey;
 
 use crate::lifecycle::{CHIIHOU_PLAYER_COUNT, ChiihouLifecycleNotification};
-use crate::match_state::ChiihouMatchState;
+use crate::match_state::{ChiihouMatchState, ChiihouTableSnapshot, ChiihouTableStateError};
+use crate::table_notification::ChiihouTableNotification;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChiihouLifecycleEffect {
@@ -40,6 +41,18 @@ impl ChiihouLifecycleController {
             ChiihouLifecycleNotification::KyokuEnd => self.kyoku_end_effect(),
             ChiihouLifecycleNotification::GameEnd { .. } => ChiihouLifecycleEffect::EndGame,
         }
+    }
+
+    pub(crate) fn table_snapshot(&self) -> ChiihouTableSnapshot {
+        self.match_state.table_snapshot(&self.ai_pubkey)
+    }
+
+    pub(crate) fn apply_table_notification(
+        &mut self,
+        notification: &ChiihouTableNotification,
+    ) -> Result<(), ChiihouTableStateError> {
+        self.match_state
+            .apply_table_notification(&self.ai_pubkey, notification)
     }
 
     fn kyoku_end_effect(&mut self) -> ChiihouLifecycleEffect {
