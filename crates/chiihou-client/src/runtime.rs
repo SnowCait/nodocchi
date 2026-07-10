@@ -8,11 +8,14 @@ use nostr_sdk::{
     Timestamp,
 };
 
-use crate::command::{ChiihouCommandError, sign_chiihou_startup_command};
+use crate::command::{
+    ChiihouCommandError, sign_chiihou_next_command, sign_chiihou_startup_command,
+};
 use crate::config::ChiihouNostrConfig;
+use crate::controller::{ChiihouLifecycleController, ChiihouLifecycleEffect};
 use crate::event::{
-    CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_CHANNEL_MESSAGE_KIND, ChiihouEventError, SeenEventIds,
-    process_incoming_event,
+    CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_CHANNEL_MESSAGE_KIND, ChiihouEventError,
+    ChiihouIncomingAction, SeenEventIds, classify_incoming_event, process_incoming_event,
 };
 use crate::nostr_adapter::{
     ChiihouNostrAdapterError, incoming_event_from_nostr, sign_outgoing_reply,
@@ -238,6 +241,7 @@ async fn run_chiihou_request_loop<A: Agent>(
     agent: &mut A,
 ) -> Result<(), ChiihouRuntimeError> {
     let mut seen = SeenEventIds::new();
+    let mut controller = ChiihouLifecycleController::new(config.keys().public_key());
 
     loop {
         match notifications.recv().await {
@@ -246,11 +250,49 @@ async fn run_chiihou_request_loop<A: Agent>(
                 event,
                 ..
             }) if received_subscription_id == subscription_id => {
-                match process_and_sign_nostr_event(&event, config, &mut seen, agent) {
-                    Ok(Some(reply)) => {
-                        publish_chiihou_reply(client, &reply).await?;
+                let incoming = incoming_event_from_nostr(&event);
+                match classify_incoming_event(&incoming, config.event_config(), &mut seen, agent) {
+                    Ok(ChiihouIncomingAction::Ignore) => {}
+                    Ok(ChiihouIncomingAction::Reply(reply)) => {
+                        match sign_outgoing_reply(&reply, config.keys()) {
+                            Ok(signed) => {
+                                publish_chiihou_reply(client, &signed).await?;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    event_id = %event.id,
+                                    error = %error,
+                                    "failed to process chiihou event"
+                                );
+                            }
+                        }
                     }
-                    Ok(None) => {}
+                    Ok(ChiihouIncomingAction::Lifecycle(notification)) => {
+                        match controller.apply(&notification) {
+                            ChiihouLifecycleEffect::None => {}
+                            ChiihouLifecycleEffect::PublishNext => {
+                                let next = sign_chiihou_next_command(config)?;
+                                publish_chiihou_event(client, &next).await?;
+                                tracing::info!(
+                                    event_id = %next.id,
+                                    trigger_event_id = %event.id,
+                                    "published chiihou next command"
+                                );
+                            }
+                            ChiihouLifecycleEffect::EndGame => {
+                                client.unsubscribe(&subscription_id).await;
+                                tracing::info!("chiihou game ended");
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(ChiihouEventError::Lifecycle(error)) => {
+                        tracing::warn!(
+                            event_id = %event.id,
+                            error = %error,
+                            "failed to parse chiihou lifecycle notification"
+                        );
+                    }
                     Err(error) => {
                         tracing::warn!(
                             event_id = %event.id,
@@ -589,6 +631,60 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let ai_npub = ai_keys().public_key().to_bech32().unwrap();
         let content = format!("nostr:{ai_npub} join");
         let event = build_request_event(42, &content, &request_tags(), &server_keys());
+        let result = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    fn lifecycle_gamestart_content() -> String {
+        // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
+        let players = (1..=4u64)
+            .map(|index| {
+                let npub = Keys::parse(&format!("{index:064x}"))
+                    .unwrap()
+                    .public_key()
+                    .to_bech32()
+                    .unwrap();
+                format!("nostr:{npub}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("NOTIFY gamestart 東 {players}")
+    }
+
+    #[test]
+    fn lifecycle_notify_does_not_get_reply() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        for content in [lifecycle_gamestart_content(), "NOTIFY kyokuend".to_string()] {
+            let event = build_request_event(42, &content, &request_tags(), &server_keys());
+            let result =
+                process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
+            assert!(matches!(result, Ok(None)), "content: {content:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_lifecycle_notify_is_lifecycle_error() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let event = build_request_event(42, "NOTIFY gamestart", &request_tags(), &server_keys());
+        let result = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
+        assert!(matches!(
+            result,
+            Err(ChiihouRuntimeError::Event(ChiihouEventError::Lifecycle(_)))
+        ));
+    }
+
+    #[test]
+    fn unsupported_notify_is_ignored() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let event = build_request_event(
+            42,
+            "NOTIFY tsumo :mahjong_m1:",
+            &request_tags(),
+            &server_keys(),
+        );
         let result = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
         assert!(matches!(result, Ok(None)));
     }

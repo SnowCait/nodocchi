@@ -4,7 +4,7 @@ use std::str::FromStr;
 use nostr_sdk::{FromBech32, PublicKey};
 use thiserror::Error;
 
-const CHIIHOU_PLAYER_COUNT: usize = 4;
+pub(crate) const CHIIHOU_PLAYER_COUNT: usize = 4;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("invalid chiihou wind: {0:?}")]
