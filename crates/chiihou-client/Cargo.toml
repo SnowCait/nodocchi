@@ -8,3 +8,4 @@ bot-core = { path = "../bot-core" }
 bot-logic = { path = "../bot-logic" }
 nostr-sdk.workspace = true
 thiserror.workspace = true
+tracing = "0.1"
