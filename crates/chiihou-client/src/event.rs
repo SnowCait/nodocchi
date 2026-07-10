@@ -3,6 +3,9 @@ use std::collections::HashSet;
 use bot_core::Agent;
 
 use crate::handler::{ChiihouHandlerError, reply_content_for_chiihou_content};
+use crate::lifecycle::{
+    ChiihouLifecycleError, ChiihouLifecycleNotification, parse_chiihou_lifecycle_notification,
+};
 use crate::tags::{build_reply_tags, has_tag_value, root_channel_id};
 
 pub const CHIIHOU_CHANNEL_MESSAGE_KIND: u16 = 42;
@@ -38,6 +41,16 @@ pub struct ChiihouEventConfig {
 pub enum ChiihouEventError {
     #[error("failed to handle chiihou content: {0}")]
     Handler(#[from] ChiihouHandlerError),
+
+    #[error("failed to parse chiihou lifecycle notification: {0}")]
+    Lifecycle(#[from] ChiihouLifecycleError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChiihouIncomingAction {
+    Ignore,
+    Reply(ChiihouOutgoingReply),
+    Lifecycle(ChiihouLifecycleNotification),
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -146,16 +159,34 @@ pub fn build_reply_for_event<A: Agent>(
     }))
 }
 
+pub(crate) fn classify_incoming_event<A: Agent>(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+    seen: &mut SeenEventIds,
+    agent: &mut A,
+) -> Result<ChiihouIncomingAction, ChiihouEventError> {
+    if !should_handle_event(event, config, seen) {
+        return Ok(ChiihouIncomingAction::Ignore);
+    }
+    if let Some(notification) = parse_chiihou_lifecycle_notification(&event.content)? {
+        return Ok(ChiihouIncomingAction::Lifecycle(notification));
+    }
+    match build_reply_for_event(event, config, agent)? {
+        Some(reply) => Ok(ChiihouIncomingAction::Reply(reply)),
+        None => Ok(ChiihouIncomingAction::Ignore),
+    }
+}
+
 pub fn process_incoming_event<A: Agent>(
     event: &ChiihouIncomingEvent,
     config: &ChiihouEventConfig,
     seen: &mut SeenEventIds,
     agent: &mut A,
 ) -> Result<Option<ChiihouOutgoingReply>, ChiihouEventError> {
-    if !should_handle_event(event, config, seen) {
-        return Ok(None);
+    match classify_incoming_event(event, config, seen, agent)? {
+        ChiihouIncomingAction::Reply(reply) => Ok(Some(reply)),
+        ChiihouIncomingAction::Ignore | ChiihouIncomingAction::Lifecycle(_) => Ok(None),
     }
-    build_reply_for_event(event, config, agent)
 }
 
 #[cfg(test)]
@@ -670,6 +701,168 @@ nostr:npub1ai000 GET naku? ron pon chi"
         let mut seen = SeenEventIds::new();
         let mut event = valid_event("event1", sutehai_content());
         event.tags = vec![tag(&["e", "channel_hanchan", "", "root"])];
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    fn lifecycle_players() -> Vec<nostr_sdk::PublicKey> {
+        // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
+        (1..=4u64)
+            .map(|index| {
+                nostr_sdk::Keys::parse(&format!("{index:064x}"))
+                    .unwrap()
+                    .public_key()
+            })
+            .collect()
+    }
+
+    fn gamestart_content() -> String {
+        use nostr_sdk::ToBech32;
+        let players = lifecycle_players()
+            .iter()
+            .map(|player| format!("nostr:{}", player.to_bech32().unwrap()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("NOTIFY gamestart 東 {players}")
+    }
+
+    #[test]
+    fn classifies_valid_lifecycle_event() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", &gamestart_content());
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Lifecycle(
+                ChiihouLifecycleNotification::GameStart {
+                    seat: crate::lifecycle::ChiihouWind::East,
+                    players: lifecycle_players(),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn classifies_kyokuend_event() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", "NOTIFY kyokuend");
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Lifecycle(
+                ChiihouLifecycleNotification::KyokuEnd
+            ))
+        );
+    }
+
+    #[test]
+    fn classifies_sutehai_request_as_reply() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", sutehai_content());
+        let action =
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent).unwrap();
+        assert!(matches!(action, ChiihouIncomingAction::Reply(_)));
+    }
+
+    #[test]
+    fn classifies_naku_request_as_reply() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", naku_content());
+        let ChiihouIncomingAction::Reply(reply) =
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent).unwrap()
+        else {
+            panic!("expected reply action");
+        };
+        assert_eq!(reply.content, "nostr:npub1server naku? no");
+    }
+
+    #[test]
+    fn classify_ignores_unsupported_notify() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", "NOTIFY tsumo :mahjong_m1:");
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn classify_returns_lifecycle_error_for_malformed_notify() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", "NOTIFY gamestart");
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Err(ChiihouEventError::Lifecycle(
+                ChiihouLifecycleError::MissingSeat
+            ))
+        );
+    }
+
+    #[test]
+    fn classify_ignores_lifecycle_event_from_other_server() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", &gamestart_content());
+        event.pubkey = "other_pubkey".to_string();
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn classify_ignores_lifecycle_event_for_other_channel() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", &gamestart_content());
+        event.tags = vec![
+            tag(&["e", "channel_unknown", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+        ];
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn classify_ignores_lifecycle_event_without_ai_p_tag() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", &gamestart_content());
+        event.tags = vec![tag(&["e", "channel_hanchan", "", "root"])];
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn classify_ignores_lifecycle_event_with_unsupported_kind() {
+        let mut seen = SeenEventIds::new();
+        let mut event = valid_event("event1", &gamestart_content());
+        event.kind = 1;
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn classify_processes_same_lifecycle_event_id_only_once() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", "NOTIFY kyokuend");
+        assert!(matches!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Lifecycle(_))
+        ));
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn process_returns_none_for_valid_lifecycle_event() {
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", "NOTIFY kyokuend");
         assert_eq!(
             process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
             Ok(None)

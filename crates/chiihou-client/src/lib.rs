@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod command;
 pub mod config;
+mod controller;
 pub mod convert;
 pub mod decision;
 pub mod event;
@@ -22,7 +23,7 @@ pub use cli::{
 };
 pub use command::{
     ChiihouCommandError, build_chiihou_startup_command_content, build_chiihou_startup_command_tags,
-    sign_chiihou_startup_command,
+    sign_chiihou_next_command, sign_chiihou_startup_command,
 };
 pub use config::{
     CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouChannelParseError, ChiihouConfigError,
