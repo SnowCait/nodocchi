@@ -34,9 +34,10 @@ pub use convert::{
     temporary_tile_id_from_chiihou_pai, tile_type_from_chiihou_pai,
 };
 pub use decision::{
-    SutehaiDecisionError, build_sutehai_reply_for_request, chiihou_pai_from_dahai_action,
-    choose_sutehai_pai, game_context_from_sutehai_request,
-    legal_dahai_actions_from_sutehai_request,
+    ChiihouNakuDecision, NakuDecisionError, SutehaiDecisionError, build_naku_reply_for_request,
+    build_sutehai_reply_for_request, chiihou_pai_from_dahai_action, choose_naku_decision,
+    choose_sutehai_pai, game_context_from_naku_request, game_context_from_sutehai_request,
+    legal_actions_from_naku_actions, legal_dahai_actions_from_sutehai_request,
 };
 pub use event::{
     CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_BITCHAT_TELEPORT_TAG, CHIIHOU_CHANNEL_MESSAGE_KIND,
@@ -62,7 +63,9 @@ pub use protocol::{
     ChiihouNakuAction, ChiihouPai, ChiihouPaiParseError, ChiihouProtocolError, ChiihouRequest,
     ChiihouSuit, parse_chiihou_request,
 };
-pub use reply::{build_naku_no_reply_content, build_sutehai_reply_content};
+pub use reply::{
+    build_naku_no_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
+};
 pub use secret::{CHIIHOU_NSEC_ENV, ChiihouSecretError, load_chiihou_nsec, validate_chiihou_nsec};
 
 pub use runtime::{

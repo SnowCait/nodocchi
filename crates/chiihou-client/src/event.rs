@@ -204,6 +204,14 @@ mod tests {
         }
     }
 
+    struct HoraAgent;
+
+    impl Agent for HoraAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            LegalAction::Hora
+        }
+    }
+
     fn config() -> ChiihouEventConfig {
         ChiihouEventConfig {
             ai_pubkey_hex: "ai_pubkey".to_string(),
@@ -594,6 +602,44 @@ nostr:npub1ai000 GET naku? ron pon chi"
             .unwrap();
         assert_eq!(reply.kind, 42);
         assert_eq!(reply.content, "nostr:npub1server naku? no");
+    }
+
+    #[test]
+    fn builds_naku_ron_reply_for_naku_event() {
+        let event = valid_event("event1", naku_content());
+        assert_eq!(
+            build_reply_for_event(&event, &config(), &mut HoraAgent),
+            Ok(Some(ChiihouOutgoingReply {
+                kind: 42,
+                tags: vec![
+                    tag(&["e", "channel_hanchan", "", "root"]),
+                    tag(&["e", "event1", "", "reply", "server_pubkey"]),
+                    tag(&["p", "ai_pubkey"]),
+                    tag(&["p", "server_pubkey"]),
+                ],
+                content: "nostr:npub1server naku? ron".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_kind_20000_naku_ron_reply_with_bitchat_tags() {
+        let mut event = valid_event("event1", naku_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        let reply = build_reply_for_event(&event, &config(), &mut HoraAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.kind, 20000);
+        assert_eq!(reply.content, "nostr:npub1server naku? ron");
+        assert!(reply.tags.contains(&tag(&["g", "xn76"])));
+        assert!(reply.tags.contains(&tag(&["t", "teleport"])));
+        assert!(
+            !reply
+                .tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
     }
 
     #[test]
