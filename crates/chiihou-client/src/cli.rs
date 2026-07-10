@@ -1,9 +1,10 @@
+use nostr_sdk::nips::nip19::Nip19Profile;
 use nostr_sdk::{FromBech32, PublicKey};
 
-use crate::config::{ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
+use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
 use crate::secret::{ChiihouSecretError, validate_chiihou_nsec};
 
-pub const USAGE: &str = "usage: chiihou-client --server-npub <NPUB> --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten]";
+pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChiihouAgentKind {
@@ -42,7 +43,7 @@ impl std::fmt::Display for ChiihouAgentKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChiihouCliArgs {
-    pub server_npub: String,
+    pub server_npub: Option<String>,
     pub channel: ChiihouChannel,
     pub agent: ChiihouAgentKind,
 }
@@ -92,7 +93,7 @@ impl ChiihouCliArgs {
         }
 
         Ok(Self {
-            server_npub: server_npub.ok_or(ChiihouCliError::ServerNpubRequired)?,
+            server_npub,
             channel: channel.ok_or(ChiihouCliError::ChannelRequired)?,
             agent: agent.unwrap_or_default(),
         })
@@ -113,9 +114,6 @@ pub enum ChiihouCliError {
     #[error("--agent requires a value")]
     MissingAgentValue,
 
-    #[error("--server-npub is required")]
-    ServerNpubRequired,
-
     #[error("--channel is required")]
     ChannelRequired,
 
@@ -130,7 +128,7 @@ pub enum ChiihouCliError {
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-#[error("--server-npub must contain an NIP-19 npub public key")]
+#[error("--server-npub must contain an NIP-19 npub or nprofile")]
 pub struct ChiihouServerNpubError;
 
 pub fn validate_server_npub(value: &str) -> Result<String, ChiihouServerNpubError> {
@@ -138,8 +136,17 @@ pub fn validate_server_npub(value: &str) -> Result<String, ChiihouServerNpubErro
     if trimmed.is_empty() {
         return Err(ChiihouServerNpubError);
     }
-    PublicKey::from_bech32(trimmed).map_err(|_| ChiihouServerNpubError)?;
+    if PublicKey::from_bech32(trimmed).is_err() && Nip19Profile::from_bech32(trimmed).is_err() {
+        return Err(ChiihouServerNpubError);
+    }
     Ok(trimmed.to_string())
+}
+
+pub fn resolve_server_npub(override_npub: Option<&str>) -> Result<String, ChiihouServerNpubError> {
+    match override_npub {
+        Some(value) => validate_server_npub(value),
+        None => validate_server_npub(CHIIHOU_SERVER_NPUB),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,15 +166,15 @@ pub fn build_cli_nostr_config(
     args: &ChiihouCliArgs,
 ) -> Result<ChiihouNostrConfig, ChiihouStartupConfigError> {
     let valid_nsec = validate_chiihou_nsec(nsec)?;
-    let valid_npub = validate_server_npub(&args.server_npub)?;
-    let config = ChiihouNostrConfig::new(&valid_nsec, &valid_npub, args.channel)?;
+    let server_npub = resolve_server_npub(args.server_npub.as_deref())?;
+    let config = ChiihouNostrConfig::new(&valid_nsec, &server_npub, args.channel)?;
     Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::{Keys, ToBech32};
+    use nostr_sdk::{Keys, RelayUrl, ToBech32};
 
     // テスト専用の秘密鍵。実際の運用で使用してはならない。
     const TEST_AI_SECRET_KEY_HEX: &str =
@@ -185,6 +192,18 @@ mod tests {
             .unwrap()
     }
 
+    fn server_nprofile() -> String {
+        let relay = RelayUrl::parse("wss://hint.example.com/").unwrap();
+        Nip19Profile::new(
+            Keys::parse(TEST_SERVER_SECRET_KEY_HEX)
+                .unwrap()
+                .public_key(),
+            [relay],
+        )
+        .to_bech32()
+        .unwrap()
+    }
+
     fn ai_nsec() -> String {
         Keys::parse(TEST_AI_SECRET_KEY_HEX)
             .unwrap()
@@ -198,9 +217,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_required_options() {
+    fn parses_without_server_npub() {
+        let args = parse(&["--channel", "hanchan"]).unwrap();
+        assert_eq!(args.server_npub, None);
+        assert_eq!(args.channel, ChiihouChannel::Hanchan);
+        assert_eq!(args.agent, ChiihouAgentKind::Normal);
+    }
+
+    #[test]
+    fn parses_with_server_npub() {
         let args = parse(&["--server-npub", "npub1example", "--channel", "hanchan"]).unwrap();
-        assert_eq!(args.server_npub, "npub1example");
+        assert_eq!(args.server_npub, Some("npub1example".to_string()));
         assert_eq!(args.channel, ChiihouChannel::Hanchan);
         assert_eq!(args.agent, ChiihouAgentKind::Normal);
     }
@@ -216,111 +243,55 @@ mod tests {
             "npub1example",
         ])
         .unwrap();
-        assert_eq!(args.server_npub, "npub1example");
+        assert_eq!(args.server_npub, Some("npub1example".to_string()));
         assert_eq!(args.channel, ChiihouChannel::Tonpuu);
         assert_eq!(args.agent, ChiihouAgentKind::Shanten);
     }
 
     #[test]
     fn parses_agent_normal() {
-        let args = parse(&[
-            "--server-npub",
-            "npub1example",
-            "--channel",
-            "hanchan",
-            "--agent",
-            "normal",
-        ])
-        .unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "normal"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Normal);
     }
 
     #[test]
     fn parses_agent_tsumogiri() {
-        let args = parse(&[
-            "--server-npub",
-            "npub1example",
-            "--channel",
-            "hanchan",
-            "--agent",
-            "tsumogiri",
-        ])
-        .unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "tsumogiri"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Tsumogiri);
     }
 
     #[test]
     fn parses_agent_tsumogiri_with_hyphen() {
-        let args = parse(&[
-            "--server-npub",
-            "npub1example",
-            "--channel",
-            "hanchan",
-            "--agent",
-            "tsumo-giri",
-        ])
-        .unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "tsumo-giri"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Tsumogiri);
     }
 
     #[test]
     fn parses_agent_shanten() {
-        let args = parse(&[
-            "--server-npub",
-            "npub1example",
-            "--channel",
-            "hanchan",
-            "--agent",
-            "shanten",
-        ])
-        .unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "shanten"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Shanten);
     }
 
     #[test]
     fn defaults_to_normal_agent() {
-        let args = parse(&["--server-npub", "npub1example", "--channel", "hanchan"]).unwrap();
+        let args = parse(&["--channel", "hanchan"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Normal);
     }
 
     #[test]
     fn channel_ignores_ascii_case() {
-        let args = parse(&["--server-npub", "npub1example", "--channel", "HANCHAN"]).unwrap();
+        let args = parse(&["--channel", "HANCHAN"]).unwrap();
         assert_eq!(args.channel, ChiihouChannel::Hanchan);
-        let args = parse(&["--server-npub", "npub1example", "--channel", "Tonpuu"]).unwrap();
+        let args = parse(&["--channel", "Tonpuu"]).unwrap();
         assert_eq!(args.channel, ChiihouChannel::Tonpuu);
     }
 
     #[test]
     fn agent_ignores_ascii_case() {
-        let args = parse(&[
-            "--server-npub",
-            "npub1example",
-            "--channel",
-            "hanchan",
-            "--agent",
-            "Shanten",
-        ])
-        .unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "Shanten"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Shanten);
-        let args = parse(&[
-            "--server-npub",
-            "npub1example",
-            "--channel",
-            "hanchan",
-            "--agent",
-            "TSUMOGIRI",
-        ])
-        .unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "TSUMOGIRI"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Tsumogiri);
-    }
-
-    #[test]
-    fn rejects_missing_server_npub_option() {
-        assert_eq!(
-            parse(&["--channel", "hanchan"]),
-            Err(ChiihouCliError::ServerNpubRequired)
-        );
     }
 
     #[test]
@@ -342,7 +313,7 @@ mod tests {
     #[test]
     fn rejects_missing_channel_value() {
         assert_eq!(
-            parse(&["--server-npub", "npub1example", "--channel"]),
+            parse(&["--channel"]),
             Err(ChiihouCliError::MissingChannelValue)
         );
     }
@@ -350,13 +321,7 @@ mod tests {
     #[test]
     fn rejects_missing_agent_value() {
         assert_eq!(
-            parse(&[
-                "--server-npub",
-                "npub1example",
-                "--channel",
-                "hanchan",
-                "--agent"
-            ]),
+            parse(&["--channel", "hanchan", "--agent"]),
             Err(ChiihouCliError::MissingAgentValue)
         );
     }
@@ -372,7 +337,7 @@ mod tests {
     #[test]
     fn rejects_unknown_channel() {
         assert_eq!(
-            parse(&["--server-npub", "npub1example", "--channel", "sanma"]),
+            parse(&["--channel", "sanma"]),
             Err(ChiihouCliError::UnknownChannel("sanma".to_string()))
         );
     }
@@ -380,14 +345,7 @@ mod tests {
     #[test]
     fn rejects_unknown_agent() {
         assert_eq!(
-            parse(&[
-                "--server-npub",
-                "npub1example",
-                "--channel",
-                "hanchan",
-                "--agent",
-                "nodocchi"
-            ]),
+            parse(&["--channel", "hanchan", "--agent", "nodocchi"]),
             Err(ChiihouCliError::UnknownAgent("nodocchi".to_string()))
         );
     }
@@ -418,14 +376,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_channel() {
         assert_eq!(
-            parse(&[
-                "--server-npub",
-                "npub1example",
-                "--channel",
-                "hanchan",
-                "--channel",
-                "tonpuu"
-            ]),
+            parse(&["--channel", "hanchan", "--channel", "tonpuu"]),
             Err(ChiihouCliError::DuplicateOption("--channel"))
         );
     }
@@ -434,8 +385,6 @@ mod tests {
     fn rejects_duplicate_agent() {
         assert_eq!(
             parse(&[
-                "--server-npub",
-                "npub1example",
                 "--channel",
                 "hanchan",
                 "--agent",
@@ -471,6 +420,12 @@ mod tests {
     fn accepts_valid_server_npub() {
         let npub = server_npub();
         assert_eq!(validate_server_npub(&npub).unwrap(), npub);
+    }
+
+    #[test]
+    fn accepts_valid_server_nprofile() {
+        let nprofile = server_nprofile();
+        assert_eq!(validate_server_npub(&nprofile).unwrap(), nprofile);
     }
 
     #[test]
@@ -518,9 +473,56 @@ mod tests {
     }
 
     #[test]
+    fn resolves_default_server_npub_without_override() {
+        assert_eq!(resolve_server_npub(None).unwrap(), CHIIHOU_SERVER_NPUB);
+    }
+
+    #[test]
+    fn resolves_override_server_npub() {
+        let npub = server_npub();
+        assert_eq!(resolve_server_npub(Some(&npub)).unwrap(), npub);
+    }
+
+    #[test]
+    fn resolves_override_server_nprofile() {
+        let nprofile = server_nprofile();
+        assert_eq!(resolve_server_npub(Some(&nprofile)).unwrap(), nprofile);
+    }
+
+    #[test]
+    fn rejects_invalid_override_server_npub() {
+        assert_eq!(
+            resolve_server_npub(Some("npub1invalid")),
+            Err(ChiihouServerNpubError)
+        );
+    }
+
+    #[test]
+    fn rejects_hex_override_server_pubkey() {
+        let hex = Keys::parse(TEST_SERVER_SECRET_KEY_HEX)
+            .unwrap()
+            .public_key()
+            .to_hex();
+        assert_eq!(resolve_server_npub(Some(&hex)), Err(ChiihouServerNpubError));
+    }
+
+    #[test]
+    fn rejects_nsec_override_server_npub() {
+        assert_eq!(
+            resolve_server_npub(Some(&ai_nsec())),
+            Err(ChiihouServerNpubError)
+        );
+    }
+
+    #[test]
+    fn default_server_npub_is_valid_npub() {
+        assert!(PublicKey::from_bech32(CHIIHOU_SERVER_NPUB).is_ok());
+    }
+
+    #[test]
     fn builds_config_from_valid_inputs() {
         let args = ChiihouCliArgs {
-            server_npub: server_npub(),
+            server_npub: Some(server_npub()),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
         };
@@ -534,9 +536,31 @@ mod tests {
     }
 
     #[test]
+    fn builds_config_with_default_server() {
+        let args = ChiihouCliArgs {
+            server_npub: None,
+            channel: ChiihouChannel::Hanchan,
+            agent: ChiihouAgentKind::Normal,
+        };
+        let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
+        assert_eq!(config.event_config().server_npub, CHIIHOU_SERVER_NPUB);
+    }
+
+    #[test]
+    fn builds_config_with_nprofile_server() {
+        let args = ChiihouCliArgs {
+            server_npub: Some(server_nprofile()),
+            channel: ChiihouChannel::Hanchan,
+            agent: ChiihouAgentKind::Normal,
+        };
+        let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
+        assert_eq!(config.event_config().server_npub, server_npub());
+    }
+
+    #[test]
     fn build_config_rejects_hex_nsec() {
         let args = ChiihouCliArgs {
-            server_npub: server_npub(),
+            server_npub: Some(server_npub()),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
         };
@@ -556,7 +580,7 @@ mod tests {
             .public_key()
             .to_hex();
         let args = ChiihouCliArgs {
-            server_npub: hex,
+            server_npub: Some(hex),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
         };

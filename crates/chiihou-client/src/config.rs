@@ -1,8 +1,12 @@
 use std::str::FromStr;
 
-use nostr_sdk::{Keys, PublicKey, ToBech32};
+use nostr_sdk::nips::nip19::Nip19Profile;
+use nostr_sdk::{FromBech32, Keys, PublicKey, ToBech32};
 
 use crate::event::ChiihouEventConfig;
+
+pub const CHIIHOU_SERVER_NPUB: &str =
+    "npub1j0ng5hmm7mf47r939zqkpepwekenj6uqhd5x555pn80utevvavjsfgqem2";
 
 pub const DEFAULT_RELAY_URLS: [&str; 2] = ["wss://relay.nostr.wirednet.jp/", "wss://yabu.me/"];
 
@@ -94,8 +98,7 @@ impl ChiihouNostrConfig {
     ) -> Result<Self, ChiihouConfigError> {
         let keys =
             Keys::parse(ai_secret_key).map_err(|_| ChiihouConfigError::InvalidAiSecretKey)?;
-        let server_public_key = PublicKey::parse(server_public_key)
-            .map_err(|_| ChiihouConfigError::InvalidServerPublicKey)?;
+        let server_public_key = parse_server_public_key(server_public_key)?;
         let server_npub = server_public_key
             .to_bech32()
             .map_err(|_| ChiihouConfigError::InvalidServerPublicKey)?;
@@ -128,6 +131,15 @@ impl ChiihouNostrConfig {
     pub(crate) fn replace_channel_ids_for_tests(&mut self, channel_ids: Vec<String>) {
         self.event_config.channel_ids = channel_ids;
     }
+}
+
+fn parse_server_public_key(value: &str) -> Result<PublicKey, ChiihouConfigError> {
+    if let Ok(public_key) = PublicKey::parse(value) {
+        return Ok(public_key);
+    }
+    Nip19Profile::from_bech32(value)
+        .map(|profile| profile.public_key)
+        .map_err(|_| ChiihouConfigError::InvalidServerPublicKey)
 }
 
 #[cfg(test)]
@@ -218,6 +230,42 @@ mod tests {
         .unwrap();
         assert_eq!(config.event_config().server_pubkey_hex, server_pubkey_hex());
         assert_eq!(config.event_config().server_npub, server_npub());
+    }
+
+    #[test]
+    fn accepts_server_nprofile() {
+        let relay = nostr_sdk::RelayUrl::parse("wss://hint.example.com/").unwrap();
+        let nprofile = Nip19Profile::new(server_keys().public_key(), [relay])
+            .to_bech32()
+            .unwrap();
+        let config =
+            ChiihouNostrConfig::new(TEST_AI_SECRET_KEY_HEX, &nprofile, ChiihouChannel::Hanchan)
+                .unwrap();
+        assert_eq!(config.event_config().server_pubkey_hex, server_pubkey_hex());
+        assert_eq!(config.event_config().server_npub, server_npub());
+    }
+
+    #[test]
+    fn server_nprofile_relay_hint_is_not_added_to_relays() {
+        let relay = nostr_sdk::RelayUrl::parse("wss://hint.example.com/").unwrap();
+        let nprofile = Nip19Profile::new(server_keys().public_key(), [relay])
+            .to_bech32()
+            .unwrap();
+        let config =
+            ChiihouNostrConfig::new(TEST_AI_SECRET_KEY_HEX, &nprofile, ChiihouChannel::Hanchan)
+                .unwrap();
+        assert_eq!(
+            config.relay_urls(),
+            &[
+                "wss://relay.nostr.wirednet.jp/".to_string(),
+                "wss://yabu.me/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_server_npub_is_valid() {
+        assert!(PublicKey::from_bech32(CHIIHOU_SERVER_NPUB).is_ok());
     }
 
     #[test]

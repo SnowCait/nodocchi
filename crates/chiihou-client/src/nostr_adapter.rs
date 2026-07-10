@@ -40,18 +40,26 @@ pub fn nostr_tags_from_strings(tags: &[Vec<String>]) -> Result<Vec<Tag>, Chiihou
         .collect()
 }
 
-pub fn sign_outgoing_reply(
-    reply: &ChiihouOutgoingReply,
+pub fn sign_outgoing_event(
+    kind: u64,
+    tags: &[Vec<String>],
+    content: &str,
     keys: &Keys,
 ) -> Result<Event, ChiihouNostrAdapterError> {
-    let kind = u16::try_from(reply.kind)
-        .map_err(|_| ChiihouNostrAdapterError::KindOutOfRange(reply.kind))?;
-    let tags = nostr_tags_from_strings(&reply.tags)?;
-    EventBuilder::new(Kind::from_u16(kind), reply.content.clone())
+    let kind = u16::try_from(kind).map_err(|_| ChiihouNostrAdapterError::KindOutOfRange(kind))?;
+    let tags = nostr_tags_from_strings(tags)?;
+    EventBuilder::new(Kind::from_u16(kind), content)
         .tags(tags)
         .allow_self_tagging()
         .sign_with_keys(keys)
         .map_err(|error| ChiihouNostrAdapterError::Sign(error.to_string()))
+}
+
+pub fn sign_outgoing_reply(
+    reply: &ChiihouOutgoingReply,
+    keys: &Keys,
+) -> Result<Event, ChiihouNostrAdapterError> {
+    sign_outgoing_event(reply.kind, &reply.tags, &reply.content, keys)
 }
 
 #[cfg(test)]
