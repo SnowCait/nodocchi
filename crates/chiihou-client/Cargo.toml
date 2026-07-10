@@ -4,5 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+bot-core = { path = "../bot-core" }
 bot-logic = { path = "../bot-logic" }
 thiserror.workspace = true

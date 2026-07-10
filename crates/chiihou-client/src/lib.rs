@@ -1,4 +1,5 @@
 pub mod convert;
+pub mod decision;
 pub mod protocol;
 pub mod reply;
 pub mod tags;
@@ -6,6 +7,11 @@ pub mod tags;
 pub use convert::{
     chiihou_pai_from_tile_id, emoji_shortcode_to_chiihou_pai, extract_chiihou_pais_from_emoji_text,
     temporary_tile_id_from_chiihou_pai, tile_type_from_chiihou_pai,
+};
+pub use decision::{
+    SutehaiDecisionError, build_sutehai_reply_for_request, chiihou_pai_from_dahai_action,
+    choose_sutehai_pai, game_context_from_sutehai_request,
+    legal_dahai_actions_from_sutehai_request,
 };
 pub use protocol::{
     ChiihouNakuAction, ChiihouPai, ChiihouPaiParseError, ChiihouProtocolError, ChiihouRequest,

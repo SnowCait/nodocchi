@@ -114,6 +114,7 @@ dependencies = [
 name = "chiihou-client"
 version = "0.1.0"
 dependencies = [
+ "bot-core",
  "bot-logic",
  "thiserror",
 ]
