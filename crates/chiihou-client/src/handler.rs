@@ -1,8 +1,10 @@
 use bot_core::Agent;
 
-use crate::decision::{SutehaiDecisionError, build_sutehai_reply_for_request};
+use crate::decision::{
+    NakuDecisionError, SutehaiDecisionError, build_naku_reply_for_request,
+    build_sutehai_reply_for_request,
+};
 use crate::protocol::{ChiihouProtocolError, ChiihouRequest, parse_chiihou_request};
-use crate::reply::build_naku_no_reply_content;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum ChiihouHandlerError {
@@ -11,6 +13,9 @@ pub enum ChiihouHandlerError {
 
     #[error("failed to choose sutehai: {0}")]
     Sutehai(#[from] SutehaiDecisionError),
+
+    #[error("failed to choose naku: {0}")]
+    Naku(#[from] NakuDecisionError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +33,7 @@ pub fn build_reply_for_request<A: Agent>(
         ChiihouRequest::Sutehai { .. } => {
             build_sutehai_reply_for_request(server_npub, request, agent)?
         }
-        ChiihouRequest::Naku { .. } => build_naku_no_reply_content(server_npub),
+        ChiihouRequest::Naku { .. } => build_naku_reply_for_request(server_npub, request, agent)?,
     };
     Ok(ChiihouHandlerResult::ReplyContent(content))
 }
@@ -73,6 +78,14 @@ mod tests {
         }
     }
 
+    struct FixedActionAgent(LegalAction);
+
+    impl Agent for FixedActionAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            self.0.clone()
+        }
+    }
+
     #[test]
     fn builds_sutehai_reply_from_sutehai_request() {
         let request = ChiihouRequest::Sutehai {
@@ -103,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn naku_request_with_ron_pon_chi_still_replies_no() {
+    fn naku_request_with_ron_replies_no_when_agent_declines() {
         let request = ChiihouRequest::Naku {
             hand: vec![pai("1m"), pai("2m"), pai("3m")],
             target: pai("4m"),
@@ -114,11 +127,78 @@ mod tests {
             ],
         };
         assert_eq!(
-            build_reply_for_request("npub1server", &request, &mut PickSecondAgent),
+            build_reply_for_request(
+                "npub1server",
+                &request,
+                &mut FixedActionAgent(LegalAction::None)
+            ),
             Ok(ChiihouHandlerResult::ReplyContent(
                 "nostr:npub1server naku? no".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn naku_request_with_ron_replies_ron_when_agent_picks_hora() {
+        let request = ChiihouRequest::Naku {
+            hand: vec![pai("1m"), pai("2m"), pai("3m")],
+            target: pai("4m"),
+            actions: vec![ChiihouNakuAction::Ron],
+        };
+        assert_eq!(
+            build_reply_for_request(
+                "npub1server",
+                &request,
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server naku? ron".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn naku_request_without_ron_replies_no_even_if_agent_picks_hora() {
+        let request = ChiihouRequest::Naku {
+            hand: vec![pai("1m"), pai("2m"), pai("3m")],
+            target: pai("4m"),
+            actions: vec![ChiihouNakuAction::Pon, ChiihouNakuAction::Chi],
+        };
+        assert_eq!(
+            build_reply_for_request(
+                "npub1server",
+                &request,
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server naku? no".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn naku_request_falls_back_to_no_for_illegal_agent_action() {
+        let request = ChiihouRequest::Naku {
+            hand: vec![pai("1m"), pai("2m"), pai("3m")],
+            target: pai("4m"),
+            actions: vec![ChiihouNakuAction::Ron],
+        };
+        for action in [
+            LegalAction::Dahai {
+                tile: crate::convert::temporary_tile_id_from_chiihou_pai(pai("4m")),
+            },
+            LegalAction::Pon {
+                tile: crate::convert::temporary_tile_id_from_chiihou_pai(pai("4m")),
+                consumed: vec![],
+            },
+        ] {
+            assert_eq!(
+                build_reply_for_request("npub1server", &request, &mut FixedActionAgent(action)),
+                Ok(ChiihouHandlerResult::ReplyContent(
+                    "nostr:npub1server naku? no".to_string()
+                ))
+            );
+        }
     }
 
     #[test]
@@ -135,7 +215,7 @@ nostr:npub1ai000 GET sutehai?";
     }
 
     #[test]
-    fn handles_naku_content_with_fixed_no() {
+    fn handles_naku_content_with_no_when_agent_declines() {
         let content = "\
 :mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
 nostr:npub1ai000 GET naku? ron pon chi";
@@ -143,6 +223,23 @@ nostr:npub1ai000 GET naku? ron pon chi";
             handle_chiihou_content("npub1server", content, &mut PickSecondAgent),
             Ok(ChiihouHandlerResult::ReplyContent(
                 "nostr:npub1server naku? no".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn handles_naku_content_with_ron_when_agent_picks_hora() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
+nostr:npub1ai000 GET naku? ron pon chi";
+        assert_eq!(
+            handle_chiihou_content(
+                "npub1server",
+                content,
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server naku? ron".to_string()
             ))
         );
     }

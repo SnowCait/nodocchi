@@ -8,6 +8,10 @@ pub fn build_naku_no_reply_content(server_npub: &str) -> String {
     format!("nostr:{server_npub} naku? no")
 }
 
+pub fn build_naku_ron_reply_content(server_npub: &str) -> String {
+    format!("nostr:{server_npub} naku? ron")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,6 +33,14 @@ mod tests {
         assert_eq!(
             build_naku_no_reply_content("npub1server"),
             "nostr:npub1server naku? no"
+        );
+    }
+
+    #[test]
+    fn builds_naku_ron_reply_content() {
+        assert_eq!(
+            build_naku_ron_reply_content("npub1server"),
+            "nostr:npub1server naku? ron"
         );
     }
 }

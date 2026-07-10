@@ -169,15 +169,19 @@ fn parse_naku_request<'a>(
     groups: Vec<Vec<ChiihouPai>>,
     tokens: impl Iterator<Item = &'a str>,
 ) -> Result<ChiihouRequest, ChiihouProtocolError> {
-    let actions = tokens
-        .map(|token| match token {
-            "ron" => Ok(ChiihouNakuAction::Ron),
-            "kan" => Ok(ChiihouNakuAction::Kan),
-            "pon" => Ok(ChiihouNakuAction::Pon),
-            "chi" => Ok(ChiihouNakuAction::Chi),
-            _ => Err(ChiihouProtocolError::UnknownAction(token.to_string())),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut actions = Vec::new();
+    for token in tokens {
+        let action = match token {
+            "ron" => ChiihouNakuAction::Ron,
+            "kan" => ChiihouNakuAction::Kan,
+            "pon" => ChiihouNakuAction::Pon,
+            "chi" => ChiihouNakuAction::Chi,
+            _ => return Err(ChiihouProtocolError::UnknownAction(token.to_string())),
+        };
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    }
     if actions.is_empty() {
         return Err(ChiihouProtocolError::MissingActions);
     }
@@ -307,6 +311,55 @@ nostr:npub1ai000 GET naku? ron pon chi";
                     ChiihouNakuAction::Pon,
                     ChiihouNakuAction::Chi,
                 ],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_naku_request_with_ron_only() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
+nostr:npub1ai000 GET naku? ron";
+        assert_eq!(
+            parse_chiihou_request(content).unwrap(),
+            Some(ChiihouRequest::Naku {
+                hand: vec![pai("1m"), pai("2m"), pai("3m")],
+                target: pai("4m"),
+                actions: vec![ChiihouNakuAction::Ron],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_naku_request_actions_in_any_order() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
+nostr:npub1ai000 GET naku? chi pon ron";
+        assert_eq!(
+            parse_chiihou_request(content).unwrap(),
+            Some(ChiihouRequest::Naku {
+                hand: vec![pai("1m"), pai("2m"), pai("3m")],
+                target: pai("4m"),
+                actions: vec![
+                    ChiihouNakuAction::Chi,
+                    ChiihouNakuAction::Pon,
+                    ChiihouNakuAction::Ron,
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_naku_request_deduplicating_actions() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
+nostr:npub1ai000 GET naku? ron ron pon ron";
+        assert_eq!(
+            parse_chiihou_request(content).unwrap(),
+            Some(ChiihouRequest::Naku {
+                hand: vec![pai("1m"), pai("2m"), pai("3m")],
+                target: pai("4m"),
+                actions: vec![ChiihouNakuAction::Ron, ChiihouNakuAction::Pon],
             })
         );
     }
