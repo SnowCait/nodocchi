@@ -203,10 +203,13 @@ fn parse_gameend<'a>(
 }
 
 fn parse_player_pubkey(token: &str) -> Result<PublicKey, ChiihouLifecycleError> {
+    player_pubkey_from_token(token).ok_or(ChiihouLifecycleError::InvalidPublicKey)
+}
+
+pub(crate) fn player_pubkey_from_token(token: &str) -> Option<PublicKey> {
     token
         .strip_prefix("nostr:")
         .and_then(|npub| PublicKey::from_bech32(npub).ok())
-        .ok_or(ChiihouLifecycleError::InvalidPublicKey)
 }
 
 fn ensure_unique_players(players: &[PublicKey]) -> Result<(), ChiihouLifecycleError> {
@@ -227,7 +230,7 @@ fn ensure_no_remaining_tokens<'a>(
     Ok(())
 }
 
-fn parse_u32(token: &str) -> Option<u32> {
+pub(crate) fn parse_u32(token: &str) -> Option<u32> {
     if !token.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }

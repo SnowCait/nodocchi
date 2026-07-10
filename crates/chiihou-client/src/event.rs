@@ -2,9 +2,16 @@ use std::collections::HashSet;
 
 use bot_core::Agent;
 
-use crate::handler::{ChiihouHandlerError, reply_content_for_chiihou_content};
+use crate::handler::{
+    ChiihouHandlerError, reply_content_for_chiihou_content,
+    reply_content_for_chiihou_content_with_state,
+};
 use crate::lifecycle::{
     ChiihouLifecycleError, ChiihouLifecycleNotification, parse_chiihou_lifecycle_notification,
+};
+use crate::match_state::ChiihouTableSnapshot;
+use crate::table_notification::{
+    ChiihouTableNotification, ChiihouTableNotificationError, parse_chiihou_table_notification,
 };
 use crate::tags::{build_reply_tags, has_tag_value, root_channel_id};
 
@@ -44,6 +51,9 @@ pub enum ChiihouEventError {
 
     #[error("failed to parse chiihou lifecycle notification: {0}")]
     Lifecycle(#[from] ChiihouLifecycleError),
+
+    #[error("failed to parse chiihou table notification: {0}")]
+    TableNotification(#[from] ChiihouTableNotificationError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +61,7 @@ pub(crate) enum ChiihouIncomingAction {
     Ignore,
     Reply(ChiihouOutgoingReply),
     Lifecycle(ChiihouLifecycleNotification),
+    TableNotification(ChiihouTableNotification),
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -159,6 +170,43 @@ pub fn build_reply_for_event<A: Agent>(
     }))
 }
 
+pub fn build_reply_for_event_with_state<A: Agent>(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+    state: &ChiihouTableSnapshot,
+    agent: &mut A,
+) -> Result<Option<ChiihouOutgoingReply>, ChiihouEventError> {
+    let Some(content) = reply_content_for_chiihou_content_with_state(
+        &config.server_npub,
+        &event.content,
+        state,
+        agent,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(tags) = build_reply_tags_for_event(event, config) else {
+        return Ok(None);
+    };
+    Ok(Some(ChiihouOutgoingReply {
+        kind: event.kind,
+        tags,
+        content,
+    }))
+}
+
+fn classify_notification(
+    content: &str,
+) -> Result<Option<ChiihouIncomingAction>, ChiihouEventError> {
+    if let Some(notification) = parse_chiihou_lifecycle_notification(content)? {
+        return Ok(Some(ChiihouIncomingAction::Lifecycle(notification)));
+    }
+    if let Some(notification) = parse_chiihou_table_notification(content)? {
+        return Ok(Some(ChiihouIncomingAction::TableNotification(notification)));
+    }
+    Ok(None)
+}
+
 pub(crate) fn classify_incoming_event<A: Agent>(
     event: &ChiihouIncomingEvent,
     config: &ChiihouEventConfig,
@@ -168,10 +216,29 @@ pub(crate) fn classify_incoming_event<A: Agent>(
     if !should_handle_event(event, config, seen) {
         return Ok(ChiihouIncomingAction::Ignore);
     }
-    if let Some(notification) = parse_chiihou_lifecycle_notification(&event.content)? {
-        return Ok(ChiihouIncomingAction::Lifecycle(notification));
+    if let Some(action) = classify_notification(&event.content)? {
+        return Ok(action);
     }
     match build_reply_for_event(event, config, agent)? {
+        Some(reply) => Ok(ChiihouIncomingAction::Reply(reply)),
+        None => Ok(ChiihouIncomingAction::Ignore),
+    }
+}
+
+pub(crate) fn classify_incoming_event_with_state<A: Agent>(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+    seen: &mut SeenEventIds,
+    state: &ChiihouTableSnapshot,
+    agent: &mut A,
+) -> Result<ChiihouIncomingAction, ChiihouEventError> {
+    if !should_handle_event(event, config, seen) {
+        return Ok(ChiihouIncomingAction::Ignore);
+    }
+    if let Some(action) = classify_notification(&event.content)? {
+        return Ok(action);
+    }
+    match build_reply_for_event_with_state(event, config, state, agent)? {
         Some(reply) => Ok(ChiihouIncomingAction::Reply(reply)),
         None => Ok(ChiihouIncomingAction::Ignore),
     }
@@ -185,7 +252,9 @@ pub fn process_incoming_event<A: Agent>(
 ) -> Result<Option<ChiihouOutgoingReply>, ChiihouEventError> {
     match classify_incoming_event(event, config, seen, agent)? {
         ChiihouIncomingAction::Reply(reply) => Ok(Some(reply)),
-        ChiihouIncomingAction::Ignore | ChiihouIncomingAction::Lifecycle(_) => Ok(None),
+        ChiihouIncomingAction::Ignore
+        | ChiihouIncomingAction::Lifecycle(_)
+        | ChiihouIncomingAction::TableNotification(_) => Ok(None),
     }
 }
 
@@ -824,11 +893,124 @@ nostr:npub1ai000 GET naku? ron pon chi"
 
     #[test]
     fn classify_ignores_unsupported_notify() {
+        for content in [
+            "NOTIFY point payload",
+            "NOTIFY open payload",
+            "NOTIFY agari payload",
+            "NOTIFY ryukyoku payload",
+        ] {
+            let mut seen = SeenEventIds::new();
+            let event = valid_event("event1", content);
+            assert_eq!(
+                classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+                Ok(ChiihouIncomingAction::Ignore),
+                "content: {content:?}"
+            );
+        }
+    }
+
+    fn ai_npub_token() -> String {
+        use nostr_sdk::ToBech32;
+        format!("nostr:{}", lifecycle_players()[0].to_bech32().unwrap())
+    }
+
+    #[test]
+    fn classifies_table_notification_event() {
+        let mut seen = SeenEventIds::new();
+        let content = format!("{} NOTIFY dora 5p", ai_npub_token());
+        let event = valid_event("event1", &content);
+        let action =
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent).unwrap();
+        assert!(matches!(
+            action,
+            ChiihouIncomingAction::TableNotification(ChiihouTableNotification::Dora { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_returns_table_notification_error_for_malformed_table_notify() {
         let mut seen = SeenEventIds::new();
         let event = valid_event("event1", "NOTIFY tsumo :mahjong_m1:");
         assert_eq!(
             classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Err(ChiihouEventError::TableNotification(
+                ChiihouTableNotificationError::InvalidPublicKey
+            ))
+        );
+    }
+
+    #[test]
+    fn classify_ignores_table_notification_from_other_server() {
+        let mut seen = SeenEventIds::new();
+        let content = format!("{} NOTIFY dora 5p", ai_npub_token());
+        let mut event = valid_event("event1", &content);
+        event.pubkey = "other_pubkey".to_string();
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
             Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn classify_processes_same_table_notification_event_id_only_once() {
+        let mut seen = SeenEventIds::new();
+        let content = format!("{} NOTIFY dora 5p", ai_npub_token());
+        let event = valid_event("event1", &content);
+        assert!(matches!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::TableNotification(_))
+        ));
+        assert_eq!(
+            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(ChiihouIncomingAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn process_returns_none_for_table_notification_event() {
+        let mut seen = SeenEventIds::new();
+        let content = format!("{} NOTIFY dora 5p", ai_npub_token());
+        let event = valid_event("event1", &content);
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn classify_with_state_passes_snapshot_to_agent_context() {
+        use crate::match_state::ChiihouTableSnapshot;
+        use crate::protocol::ChiihouPai;
+
+        struct RecordingAgent {
+            context: Option<GameContext>,
+        }
+
+        impl Agent for RecordingAgent {
+            fn act(&mut self, ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
+                self.context = Some(ctx.clone());
+                legal_actions.first().cloned().unwrap_or(LegalAction::None)
+            }
+        }
+
+        let dora: ChiihouPai = "5p".parse().unwrap();
+        let state = ChiihouTableSnapshot {
+            dora_indicators: vec![dora],
+            player_id: Some(2),
+            ..ChiihouTableSnapshot::default()
+        };
+        let mut seen = SeenEventIds::new();
+        let event = valid_event("event1", sutehai_content());
+        let mut agent = RecordingAgent { context: None };
+        let action =
+            classify_incoming_event_with_state(&event, &config(), &mut seen, &state, &mut agent)
+                .unwrap();
+        assert!(matches!(action, ChiihouIncomingAction::Reply(_)));
+        let context = agent.context.unwrap();
+        assert_eq!(context.player_id(), Some(2));
+        assert_eq!(
+            context.dora_indicators(),
+            &[crate::convert::temporary_tile_id_from_chiihou_pai(dora)]
         );
     }
 

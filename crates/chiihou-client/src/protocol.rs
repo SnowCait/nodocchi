@@ -74,6 +74,35 @@ impl fmt::Display for ChiihouPai {
     }
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ChiihouCompactPaiParseError {
+    #[error("compact pai string is not ascii")]
+    NotAscii,
+    #[error("compact pai string has odd length: {0}")]
+    OddLength(usize),
+    #[error("invalid chiihou pai string: {0:?}")]
+    InvalidPai(String),
+}
+
+pub fn parse_compact_chiihou_pais(s: &str) -> Result<Vec<ChiihouPai>, ChiihouCompactPaiParseError> {
+    if !s.is_ascii() {
+        return Err(ChiihouCompactPaiParseError::NotAscii);
+    }
+    if !s.len().is_multiple_of(2) {
+        return Err(ChiihouCompactPaiParseError::OddLength(s.len()));
+    }
+    s.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let token =
+                std::str::from_utf8(chunk).map_err(|_| ChiihouCompactPaiParseError::NotAscii)?;
+            token
+                .parse()
+                .map_err(|_| ChiihouCompactPaiParseError::InvalidPai(token.to_string()))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChiihouNakuAction {
     Ron,
@@ -266,6 +295,74 @@ mod tests {
         let honor = pai("6z");
         assert_eq!(honor.number(), 6);
         assert_eq!(honor.suit(), ChiihouSuit::Zi);
+    }
+
+    #[test]
+    fn parses_compact_thirteen_tile_hand() {
+        assert_eq!(
+            parse_compact_chiihou_pais("1m2m3m4p4p7s7s1z1z2z3z4z5z").unwrap(),
+            vec![
+                pai("1m"),
+                pai("2m"),
+                pai("3m"),
+                pai("4p"),
+                pai("4p"),
+                pai("7s"),
+                pai("7s"),
+                pai("1z"),
+                pai("1z"),
+                pai("2z"),
+                pai("3z"),
+                pai("4z"),
+                pai("5z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_compact_hand_with_duplicate_tiles() {
+        assert_eq!(
+            parse_compact_chiihou_pais("5p5p5p5p").unwrap(),
+            vec![pai("5p"); 4]
+        );
+    }
+
+    #[test]
+    fn compact_empty_string_is_empty() {
+        assert_eq!(parse_compact_chiihou_pais("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn compact_odd_length_is_error() {
+        for s in ["1", "1m2", "1m2m3"] {
+            assert_eq!(
+                parse_compact_chiihou_pais(s),
+                Err(ChiihouCompactPaiParseError::OddLength(s.len())),
+                "input: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_invalid_pai_is_error() {
+        for (s, invalid) in [("1m0m", "0m"), ("8z1m", "8z"), ("m1", "m1"), ("1m2x", "2x")] {
+            assert_eq!(
+                parse_compact_chiihou_pais(s),
+                Err(ChiihouCompactPaiParseError::InvalidPai(invalid.to_string())),
+                "input: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_non_ascii_is_error() {
+        for s in ["１m2m", "1m東"] {
+            assert_eq!(
+                parse_compact_chiihou_pais(s),
+                Err(ChiihouCompactPaiParseError::NotAscii),
+                "input: {s:?}"
+            );
+        }
     }
 
     #[test]
