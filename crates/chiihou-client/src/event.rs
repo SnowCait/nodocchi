@@ -8,7 +8,6 @@ use crate::tags::{build_reply_tags, has_tag_value, root_channel_id};
 pub const CHIIHOU_CHANNEL_MESSAGE_KIND: u16 = 42;
 pub const CHIIHOU_BITCHAT_MESSAGE_KIND: u16 = 20000;
 
-pub const CHIIHOU_BITCHAT_NICKNAME: &str = "Mahjong Bot";
 pub const CHIIHOU_BITCHAT_TELEPORT_TAG: &str = "teleport";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +118,6 @@ pub fn build_reply_tags_for_event(
                 .filter(|tag| tag.len() >= 2 && tag.first().is_some_and(|name| name == "g"))
                 .cloned(),
         );
-        tags.push(vec!["n".to_string(), CHIIHOU_BITCHAT_NICKNAME.to_string()]);
         tags.push(vec![
             "t".to_string(),
             CHIIHOU_BITCHAT_TELEPORT_TAG.to_string(),
@@ -417,10 +415,25 @@ nostr:npub1ai000 GET naku? ron pon chi"
                 tag(&["p", "ai_pubkey"]),
                 tag(&["p", "server_pubkey"]),
                 tag(&["g", "xn76"]),
-                tag(&["n", "Mahjong Bot"]),
                 tag(&["t", "teleport"]),
             ]
         );
+    }
+
+    #[test]
+    fn kind_20000_reply_has_no_nickname_tag() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["n", "Server Bot"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
+        assert!(tags.contains(&tag(&["g", "xn76"])));
+        assert!(tags.contains(&tag(&["t", "teleport"])));
     }
 
     #[test]
@@ -436,7 +449,7 @@ nostr:npub1ai000 GET naku? ron pon chi"
             tags.iter()
                 .filter(|t| t.first().is_some_and(|name| name == "n"))
                 .count(),
-            1
+            0
         );
         assert_eq!(
             tags.iter()
@@ -562,7 +575,12 @@ nostr:npub1ai000 GET naku? ron pon chi"
             .unwrap();
         assert_eq!(reply.kind, 20000);
         assert!(reply.tags.contains(&tag(&["g", "xn76"])));
-        assert!(reply.tags.contains(&tag(&["n", "Mahjong Bot"])));
+        assert!(
+            !reply
+                .tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
         assert!(reply.tags.contains(&tag(&["t", "teleport"])));
     }
 

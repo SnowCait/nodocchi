@@ -409,9 +409,30 @@ nostr:{ai_npub} GET naku? ron pon chi"
             tag_values(&reply_tags, "g"),
             vec![string_tag(&["g", "xn76"]), string_tag(&["g", "xn77"])]
         );
+        assert!(tag_values(&reply_tags, "n").is_empty());
         assert_eq!(
-            tag_values(&reply_tags, "n"),
-            vec![string_tag(&["n", "Mahjong Bot"])]
+            tag_values(&reply_tags, "t"),
+            vec![string_tag(&["t", "teleport"])]
+        );
+    }
+
+    #[test]
+    fn signed_kind_20000_reply_has_no_nickname_tag() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let mut tags = request_tags();
+        tags.push(string_tag(&["g", "xn76"]));
+        tags.push(string_tag(&["n", "Server Bot"]));
+        let event = build_request_event(20000, &sutehai_content(), &tags, &server_keys());
+        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent)
+            .unwrap()
+            .unwrap();
+        assert!(reply.verify().is_ok());
+        let reply_tags = incoming_event_from_nostr(&reply).tags;
+        assert!(tag_values(&reply_tags, "n").is_empty());
+        assert_eq!(
+            tag_values(&reply_tags, "g"),
+            vec![string_tag(&["g", "xn76"])]
         );
         assert_eq!(
             tag_values(&reply_tags, "t"),

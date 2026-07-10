@@ -23,11 +23,11 @@ pub use decision::{
     legal_dahai_actions_from_sutehai_request,
 };
 pub use event::{
-    CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_BITCHAT_NICKNAME, CHIIHOU_BITCHAT_TELEPORT_TAG,
-    CHIIHOU_CHANNEL_MESSAGE_KIND, ChiihouEventConfig, ChiihouEventError, ChiihouIncomingEvent,
-    ChiihouOutgoingReply, SeenEventIds, build_reply_for_event, build_reply_tags_for_event,
-    event_channel_id, event_is_from_server, event_targets_ai, is_chiihou_request_kind,
-    process_incoming_event, should_handle_event,
+    CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_BITCHAT_TELEPORT_TAG, CHIIHOU_CHANNEL_MESSAGE_KIND,
+    ChiihouEventConfig, ChiihouEventError, ChiihouIncomingEvent, ChiihouOutgoingReply,
+    SeenEventIds, build_reply_for_event, build_reply_tags_for_event, event_channel_id,
+    event_is_from_server, event_targets_ai, is_chiihou_request_kind, process_incoming_event,
+    should_handle_event,
 };
 pub use handler::{
     ChiihouHandlerError, ChiihouHandlerResult, build_reply_for_request, handle_chiihou_content,
