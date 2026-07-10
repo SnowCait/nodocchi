@@ -27,6 +27,15 @@ impl ChiihouChannel {
     }
 }
 
+impl std::fmt::Display for ChiihouChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hanchan => write!(f, "hanchan"),
+            Self::Tonpuu => write!(f, "tonpuu"),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 #[error("invalid chiihou channel: {0}")]
 pub struct ChiihouChannelParseError(String);
