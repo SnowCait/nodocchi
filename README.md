@@ -48,9 +48,9 @@ cargo run -p riichilab-client --bin riichilab-client -- ranked --agent shanten
 `RIICHILAB_BOT_TOKEN` は secret として扱い、repository・README・log に残さないでください。
 `ranked` は実戦 queue に入るため、validation と bot activation を確認してから実行してください。
 
-## chiihou 接続
+## 地鳳接続
 
-`chiihou-client` は Nostr relay 経由で chiihou の request を受信し、指定した Agent で打牌を選択して返信します。
+`chiihou-client` は Nostr relay 経由で地鳳の request を受信し、指定した Agent で打牌を選択して返信します。
 
 ### 実行方法
 
@@ -70,7 +70,7 @@ usage: chiihou-client --server-npub <NPUB> --channel <hanchan|tonpuu> [--agent n
 
 | 引数 | 必須 | 内容 |
 | --- | --: | --- |
-| `--server-npub` | 必須 | chiihou server の NIP-19 npub |
+| `--server-npub` | 必須 | 地鳳 server の NIP-19 npub |
 | `--channel` | 必須 | `hanchan` または `tonpuu` |
 | `--agent` | 任意 | `normal`、`tsumogiri`、`shanten`。既定値は `normal` |
 
