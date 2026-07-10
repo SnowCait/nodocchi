@@ -124,17 +124,21 @@ impl ChiihouMatchState {
     }
 
     pub fn table_snapshot(&self, ai_pubkey: &PublicKey) -> ChiihouTableSnapshot {
+        let player_id = self
+            .player_index(ai_pubkey)
+            .and_then(|index| u8::try_from(index).ok());
+        let oya = self
+            .dealer
+            .and_then(|dealer| self.player_index(&dealer))
+            .and_then(|index| u8::try_from(index).ok());
         ChiihouTableSnapshot {
             dora_indicators: self.dora_indicators.clone(),
             round_wind: self.round_wind,
-            seat_wind: self.seat,
-            player_id: self
-                .player_index(ai_pubkey)
-                .and_then(|index| u8::try_from(index).ok()),
-            oya: self
-                .dealer
-                .and_then(|dealer| self.player_index(&dealer))
-                .and_then(|index| u8::try_from(index).ok()),
+            seat_wind: player_id
+                .zip(oya)
+                .and_then(|(player_id, oya)| seat_wind_from_player_and_dealer(player_id, oya)),
+            player_id,
+            oya,
             discards: self.discards.clone(),
             reached: self.reached,
         }
@@ -248,6 +252,21 @@ impl ChiihouMatchState {
         self.hand = tiles;
         self.drawn = None;
         Ok(())
+    }
+}
+
+fn seat_wind_from_player_and_dealer(player_id: u8, oya: u8) -> Option<ChiihouWind> {
+    let player_count = CHIIHOU_PLAYER_COUNT as u8;
+    if player_id >= player_count || oya >= player_count {
+        return None;
+    }
+    let seat_index = (player_id + player_count - oya) % player_count;
+    match seat_index {
+        0 => Some(ChiihouWind::East),
+        1 => Some(ChiihouWind::South),
+        2 => Some(ChiihouWind::West),
+        3 => Some(ChiihouWind::North),
+        _ => None,
     }
 }
 
@@ -732,7 +751,7 @@ mod tests {
         let snapshot = state.table_snapshot(&ai_pubkey());
         assert_eq!(snapshot.dora_indicators, pais(&["5p"]));
         assert_eq!(snapshot.round_wind, Some(ChiihouWind::East));
-        assert_eq!(snapshot.seat_wind, Some(ChiihouWind::South));
+        assert_eq!(snapshot.seat_wind, Some(ChiihouWind::North));
         assert_eq!(snapshot.player_id, Some(0));
         assert_eq!(snapshot.oya, Some(1));
         assert_eq!(snapshot.discards[1], pais(&["1z"]));
@@ -752,6 +771,7 @@ mod tests {
         let snapshot = state.table_snapshot(&player_pubkey(9));
         assert_eq!(snapshot.player_id, None);
         assert_eq!(snapshot.oya, Some(1));
+        assert_eq!(snapshot.seat_wind, None);
     }
 
     #[test]
@@ -764,7 +784,112 @@ mod tests {
             honba: 0,
             kyotaku_points: 0,
         });
-        assert_eq!(state.table_snapshot(&ai_pubkey()).oya, None);
+        let snapshot = state.table_snapshot(&ai_pubkey());
+        assert_eq!(snapshot.oya, None);
+        assert_eq!(snapshot.seat_wind, None);
+    }
+
+    #[test]
+    fn seat_wind_for_ai_index_zero_covers_all_dealers() {
+        for (oya, expected) in [
+            (0, ChiihouWind::East),
+            (1, ChiihouWind::North),
+            (2, ChiihouWind::West),
+            (3, ChiihouWind::South),
+        ] {
+            assert_eq!(
+                seat_wind_from_player_and_dealer(0, oya),
+                Some(expected),
+                "oya: {oya}"
+            );
+        }
+    }
+
+    #[test]
+    fn seat_wind_for_other_player_indexes() {
+        assert_eq!(
+            seat_wind_from_player_and_dealer(2, 1),
+            Some(ChiihouWind::South)
+        );
+        assert_eq!(
+            seat_wind_from_player_and_dealer(3, 3),
+            Some(ChiihouWind::East)
+        );
+    }
+
+    #[test]
+    fn seat_wind_rejects_out_of_range_indexes() {
+        assert_eq!(seat_wind_from_player_and_dealer(4, 0), None);
+        assert_eq!(seat_wind_from_player_and_dealer(0, 4), None);
+        assert_eq!(seat_wind_from_player_and_dealer(255, 0), None);
+        assert_eq!(seat_wind_from_player_and_dealer(0, 255), None);
+    }
+
+    fn kyokustart_with_dealer(dealer_index: u64) -> ChiihouLifecycleNotification {
+        ChiihouLifecycleNotification::KyokuStart {
+            round_wind: ChiihouWind::East,
+            dealer: player_pubkey(dealer_index),
+            honba: 0,
+            kyotaku_points: 0,
+        }
+    }
+
+    #[test]
+    fn snapshot_seat_wind_follows_initial_dealer() {
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        assert_eq!(state.table_snapshot(&ai_pubkey()).seat_wind, None);
+        state.apply(&kyokustart_with_dealer(1));
+        assert_eq!(
+            state.table_snapshot(&ai_pubkey()).seat_wind,
+            Some(ChiihouWind::East)
+        );
+    }
+
+    #[test]
+    fn snapshot_seat_wind_changes_when_dealer_moves() {
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        state.apply(&kyokustart_with_dealer(1));
+        assert_eq!(
+            state.table_snapshot(&ai_pubkey()).seat_wind,
+            Some(ChiihouWind::East)
+        );
+        state.apply(&ChiihouLifecycleNotification::KyokuEnd);
+        state.apply(&kyokustart_with_dealer(2));
+        assert_eq!(
+            state.table_snapshot(&ai_pubkey()).seat_wind,
+            Some(ChiihouWind::North)
+        );
+    }
+
+    #[test]
+    fn snapshot_seat_wind_stays_when_dealer_repeats() {
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        state.apply(&kyokustart_with_dealer(2));
+        assert_eq!(
+            state.table_snapshot(&ai_pubkey()).seat_wind,
+            Some(ChiihouWind::North)
+        );
+        state.apply(&ChiihouLifecycleNotification::KyokuEnd);
+        state.apply(&kyokustart_with_dealer(2));
+        assert_eq!(
+            state.table_snapshot(&ai_pubkey()).seat_wind,
+            Some(ChiihouWind::North)
+        );
+    }
+
+    #[test]
+    fn snapshot_seat_wind_does_not_use_gamestart_seat() {
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        state.apply(&kyokustart_with_dealer(1));
+        assert_eq!(state.seat(), Some(ChiihouWind::South));
+        assert_eq!(
+            state.table_snapshot(&ai_pubkey()).seat_wind,
+            Some(ChiihouWind::East)
+        );
     }
 
     #[test]

@@ -872,7 +872,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
             );
             assert_eq!(
                 context.seat_wind(),
-                Some(tile_type_from_chiihou_wind(ChiihouWind::South))
+                Some(tile_type_from_chiihou_wind(ChiihouWind::North))
             );
             assert_eq!(context.dora_indicators(), &[tile_of("5p")]);
             assert_eq!(context.player_id(), Some(0));
@@ -880,6 +880,95 @@ nostr:{ai_npub} GET naku? ron pon chi"
             assert_eq!(context.discards()[0], vec![tile_of("7z")]);
             assert_eq!(context.discards()[1], vec![tile_of("1z")]);
             assert_eq!(context.reached(), &[false, true, false, false]);
+        }
+
+        fn recorded_seat_wind_after_kyokustart(
+            controller: &mut ChiihouLifecycleController,
+            seen: &mut SeenEventIds,
+            config: &ChiihouNostrConfig,
+            dealer: &str,
+            request_id_hint: &str,
+        ) -> Option<bot_logic::TileType> {
+            let prefix = npub_tokens().join(" ");
+            let kyokustart = format!("{prefix} NOTIFY kyokustart 東 {dealer} 0 0");
+            let event = build_request_event(42, &kyokustart, &request_tags(), &server_keys());
+            let incoming = incoming_event_from_nostr(&event);
+            let snapshot = controller.table_snapshot();
+            let action = classify_incoming_event_with_state(
+                &incoming,
+                config.event_config(),
+                seen,
+                &snapshot,
+                &mut PickSecondAgent,
+            )
+            .unwrap();
+            let ChiihouIncomingAction::Lifecycle(notification) = action else {
+                panic!("expected lifecycle action, got: {action:?}");
+            };
+            controller.apply(&notification);
+
+            let request = format!("{}\n{request_id_hint}", sutehai_content());
+            let event = build_request_event(42, &request, &request_tags(), &server_keys());
+            let incoming = incoming_event_from_nostr(&event);
+            let snapshot = controller.table_snapshot();
+            let mut agent = RecordingAgent { context: None };
+            let action = classify_incoming_event_with_state(
+                &incoming,
+                config.event_config(),
+                seen,
+                &snapshot,
+                &mut agent,
+            )
+            .unwrap();
+            assert!(matches!(action, ChiihouIncomingAction::Reply(_)));
+            agent.context.unwrap().seat_wind()
+        }
+
+        #[test]
+        fn seat_wind_in_context_follows_current_dealer_across_kyoku() {
+            let config = config(ChiihouChannel::Hanchan);
+            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key());
+            let mut seen = SeenEventIds::new();
+            let tokens = npub_tokens();
+            let prefix = tokens.join(" ");
+
+            let gamestart = format!("{prefix} NOTIFY gamestart 南 {prefix}");
+            let event = build_request_event(42, &gamestart, &request_tags(), &server_keys());
+            let incoming = incoming_event_from_nostr(&event);
+            let snapshot = controller.table_snapshot();
+            let action = classify_incoming_event_with_state(
+                &incoming,
+                config.event_config(),
+                &mut seen,
+                &snapshot,
+                &mut PickSecondAgent,
+            )
+            .unwrap();
+            let ChiihouIncomingAction::Lifecycle(notification) = action else {
+                panic!("expected lifecycle action, got: {action:?}");
+            };
+            controller.apply(&notification);
+
+            assert_eq!(
+                recorded_seat_wind_after_kyokustart(
+                    &mut controller,
+                    &mut seen,
+                    &config,
+                    &tokens[0],
+                    "request1",
+                ),
+                Some(tile_type_from_chiihou_wind(ChiihouWind::East))
+            );
+            assert_eq!(
+                recorded_seat_wind_after_kyokustart(
+                    &mut controller,
+                    &mut seen,
+                    &config,
+                    &tokens[1],
+                    "request2",
+                ),
+                Some(tile_type_from_chiihou_wind(ChiihouWind::North))
+            );
         }
 
         #[test]
