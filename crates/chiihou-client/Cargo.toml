@@ -1,0 +1,8 @@
+[package]
+name = "chiihou-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bot-logic = { path = "../bot-logic" }
+thiserror.workspace = true
