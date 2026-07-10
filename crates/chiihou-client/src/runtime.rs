@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
+
 use bot_core::Agent;
 use nostr_sdk::async_utility::tokio::sync::broadcast::error::RecvError;
 use nostr_sdk::{
-    Client, Event, EventId, Filter, Kind, RelayPoolNotification, SubscriptionId, Timestamp,
+    Client, Event, EventId, Filter, Kind, RelayPoolNotification, RelayUrl, SubscriptionId,
+    Timestamp,
 };
 
 use crate::config::ChiihouNostrConfig;
@@ -92,6 +95,17 @@ pub async fn connect_chiihou_client(
     Ok(client)
 }
 
+fn ensure_any_relay_succeeded(
+    operation: &str,
+    success: &HashSet<RelayUrl>,
+    failed: &HashMap<RelayUrl, String>,
+) -> Result<(), String> {
+    if success.is_empty() {
+        return Err(format!("{operation} failed on all relays: {failed:?}"));
+    }
+    Ok(())
+}
+
 pub async fn subscribe_chiihou_requests(
     client: &Client,
     config: &ChiihouNostrConfig,
@@ -104,6 +118,16 @@ pub async fn subscribe_chiihou_requests(
         .await
         .map_err(|error| ChiihouRuntimeError::Subscribe(error.to_string()))?;
 
+    ensure_any_relay_succeeded("subscription", &output.success, &output.failed)
+        .map_err(ChiihouRuntimeError::Subscribe)?;
+
+    if !output.failed.is_empty() {
+        tracing::warn!(
+            failed_relays = ?output.failed,
+            "chiihou subscription failed on some relays"
+        );
+    }
+
     Ok(output.val)
 }
 
@@ -111,11 +135,23 @@ pub async fn publish_chiihou_reply(
     client: &Client,
     event: &Event,
 ) -> Result<(), ChiihouRuntimeError> {
-    client
+    let output = client
         .send_event(event)
         .await
-        .map(|_| ())
-        .map_err(|error| ChiihouRuntimeError::Publish(error.to_string()))
+        .map_err(|error| ChiihouRuntimeError::Publish(error.to_string()))?;
+
+    ensure_any_relay_succeeded("reply publish", &output.success, &output.failed)
+        .map_err(ChiihouRuntimeError::Publish)?;
+
+    if !output.failed.is_empty() {
+        tracing::warn!(
+            event_id = %event.id,
+            failed_relays = ?output.failed,
+            "chiihou reply publish failed on some relays"
+        );
+    }
+
+    Ok(())
 }
 
 pub async fn run_chiihou_client<A: Agent>(
@@ -462,6 +498,59 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let event = build_request_event(42, &content, &request_tags(), &server_keys());
         let result = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent);
         assert!(matches!(result, Ok(None)));
+    }
+
+    fn relay_url(url: &str) -> RelayUrl {
+        RelayUrl::parse(url).unwrap()
+    }
+
+    #[test]
+    fn ensure_any_relay_succeeded_is_error_without_success() {
+        let success = HashSet::new();
+        let failed = HashMap::from([(
+            relay_url("wss://relay1.example.com"),
+            "connection refused".to_string(),
+        )]);
+        let result = ensure_any_relay_succeeded("subscription", &success, &failed);
+        let message = result.unwrap_err();
+        assert!(message.contains("subscription failed on all relays"));
+        assert!(message.contains("relay1.example.com"));
+    }
+
+    #[test]
+    fn ensure_any_relay_succeeded_is_ok_with_all_success() {
+        let success = HashSet::from([relay_url("wss://relay1.example.com")]);
+        let failed = HashMap::new();
+        assert!(ensure_any_relay_succeeded("subscription", &success, &failed).is_ok());
+    }
+
+    #[test]
+    fn ensure_any_relay_succeeded_is_ok_with_partial_failure() {
+        let success = HashSet::from([relay_url("wss://relay1.example.com")]);
+        let failed = HashMap::from([(
+            relay_url("wss://relay2.example.com"),
+            "connection refused".to_string(),
+        )]);
+        assert!(ensure_any_relay_succeeded("reply publish", &success, &failed).is_ok());
+    }
+
+    #[test]
+    fn signed_kind_20000_reply_drops_g_tag_without_value() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let mut tags = request_tags();
+        tags.push(string_tag(&["g"]));
+        tags.push(string_tag(&["g", "xn76"]));
+        let event = build_request_event(20000, &sutehai_content(), &tags, &server_keys());
+        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent)
+            .unwrap()
+            .unwrap();
+        assert!(reply.verify().is_ok());
+        let reply_tags = incoming_event_from_nostr(&reply).tags;
+        assert_eq!(
+            tag_values(&reply_tags, "g"),
+            vec![string_tag(&["g", "xn76"])]
+        );
     }
 
     #[test]

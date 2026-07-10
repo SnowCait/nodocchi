@@ -116,7 +116,7 @@ pub fn build_reply_tags_for_event(
             event
                 .tags
                 .iter()
-                .filter(|tag| tag.first().is_some_and(|name| name == "g"))
+                .filter(|tag| tag.len() >= 2 && tag.first().is_some_and(|name| name == "g"))
                 .cloned(),
         );
         tags.push(vec!["n".to_string(), CHIIHOU_BITCHAT_NICKNAME.to_string()]);
@@ -463,6 +463,52 @@ nostr:npub1ai000 GET naku? ron pon chi"
             vec![
                 &tag(&["g", "xn76"]),
                 &tag(&["g", "xn77"]),
+                &tag(&["g", "xn78"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_20000_reply_does_not_copy_g_tag_without_value() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g"]));
+        event.tags.push(tag(&["g", "xn76"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        let g_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|name| name == "g"))
+            .collect();
+        assert_eq!(g_tags, vec![&tag(&["g", "xn76"])]);
+    }
+
+    #[test]
+    fn kind_20000_reply_keeps_g_tag_with_extra_values() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76", "extra"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert!(tags.contains(&tag(&["g", "xn76", "extra"])));
+    }
+
+    #[test]
+    fn kind_20000_reply_keeps_valid_g_tags_in_order_and_skips_bare_g_tag() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["g"]));
+        event.tags.push(tag(&["g", "xn77", "extra"]));
+        event.tags.push(tag(&["g", "xn78"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        let g_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|name| name == "g"))
+            .collect();
+        assert_eq!(
+            g_tags,
+            vec![
+                &tag(&["g", "xn76"]),
+                &tag(&["g", "xn77", "extra"]),
                 &tag(&["g", "xn78"]),
             ]
         );
