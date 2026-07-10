@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use bot_core::Agent;
+use nostr_sdk::async_utility::tokio::sync::broadcast::Receiver;
 use nostr_sdk::async_utility::tokio::sync::broadcast::error::RecvError;
 use nostr_sdk::{
     Client, Event, EventId, Filter, Kind, RelayPoolNotification, RelayUrl, SubscriptionId,
     Timestamp,
 };
 
+use crate::command::{ChiihouCommandError, sign_chiihou_startup_command};
 use crate::config::ChiihouNostrConfig;
 use crate::event::{
     CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_CHANNEL_MESSAGE_KIND, ChiihouEventError, SeenEventIds,
@@ -14,6 +16,10 @@ use crate::event::{
 };
 use crate::nostr_adapter::{
     ChiihouNostrAdapterError, incoming_event_from_nostr, sign_outgoing_reply,
+};
+use crate::status::{
+    CHIIHOU_STATUS_FETCH_TIMEOUT, ChiihouStatusError, ChiihouTableStatus,
+    fetch_chiihou_table_status, startup_command_for_status,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +41,12 @@ pub enum ChiihouRuntimeError {
 
     #[error("failed to publish chiihou reply: {0}")]
     Publish(String),
+
+    #[error(transparent)]
+    Status(#[from] ChiihouStatusError),
+
+    #[error(transparent)]
+    Command(#[from] ChiihouCommandError),
 }
 
 pub fn build_chiihou_request_filter(
@@ -131,7 +143,7 @@ pub async fn subscribe_chiihou_requests(
     Ok(output.val)
 }
 
-pub async fn publish_chiihou_reply(
+pub async fn publish_chiihou_event(
     client: &Client,
     event: &Event,
 ) -> Result<(), ChiihouRuntimeError> {
@@ -140,18 +152,25 @@ pub async fn publish_chiihou_reply(
         .await
         .map_err(|error| ChiihouRuntimeError::Publish(error.to_string()))?;
 
-    ensure_any_relay_succeeded("reply publish", &output.success, &output.failed)
+    ensure_any_relay_succeeded("event publish", &output.success, &output.failed)
         .map_err(ChiihouRuntimeError::Publish)?;
 
     if !output.failed.is_empty() {
         tracing::warn!(
             event_id = %event.id,
             failed_relays = ?output.failed,
-            "chiihou reply publish failed on some relays"
+            "chiihou event publish failed on some relays"
         );
     }
 
     Ok(())
+}
+
+pub async fn publish_chiihou_reply(
+    client: &Client,
+    event: &Event,
+) -> Result<(), ChiihouRuntimeError> {
+    publish_chiihou_event(client, event).await
 }
 
 pub async fn run_chiihou_client<A: Agent>(
@@ -165,6 +184,59 @@ pub async fn run_chiihou_client<A: Agent>(
 
     let subscription_id = subscribe_chiihou_requests(&client, config, since).await?;
 
+    run_chiihou_request_loop(&client, &mut notifications, subscription_id, config, agent).await
+}
+
+pub async fn run_chiihou_client_auto_enter<A: Agent>(
+    config: &ChiihouNostrConfig,
+    agent: &mut A,
+) -> Result<(), ChiihouRuntimeError> {
+    let since = Timestamp::now();
+    let client = connect_chiihou_client(config).await?;
+
+    let mut notifications = client.notifications();
+
+    let subscription_id = subscribe_chiihou_requests(&client, config, since).await?;
+
+    let status = fetch_chiihou_table_status(&client, config, CHIIHOU_STATUS_FETCH_TIMEOUT).await?;
+
+    match startup_command_for_status(&status) {
+        Some(command) => {
+            let event = sign_chiihou_startup_command(command, config)?;
+            publish_chiihou_event(&client, &event).await?;
+            tracing::info!(
+                command = %command,
+                status = %status,
+                event_id = %event.id,
+                "published chiihou startup command"
+            );
+        }
+        None => {
+            if let ChiihouTableStatus::Unknown(content) = &status {
+                tracing::warn!(
+                    status = %status,
+                    content = %content,
+                    "unknown chiihou table status; skipping startup command"
+                );
+            } else {
+                tracing::info!(
+                    status = %status,
+                    "no chiihou startup command is required"
+                );
+            }
+        }
+    }
+
+    run_chiihou_request_loop(&client, &mut notifications, subscription_id, config, agent).await
+}
+
+async fn run_chiihou_request_loop<A: Agent>(
+    client: &Client,
+    notifications: &mut Receiver<RelayPoolNotification>,
+    subscription_id: SubscriptionId,
+    config: &ChiihouNostrConfig,
+    agent: &mut A,
+) -> Result<(), ChiihouRuntimeError> {
     let mut seen = SeenEventIds::new();
 
     loop {
@@ -176,7 +248,7 @@ pub async fn run_chiihou_client<A: Agent>(
             }) if received_subscription_id == subscription_id => {
                 match process_and_sign_nostr_event(&event, config, &mut seen, agent) {
                     Ok(Some(reply)) => {
-                        publish_chiihou_reply(&client, &reply).await?;
+                        publish_chiihou_reply(client, &reply).await?;
                     }
                     Ok(None) => {}
                     Err(error) => {
