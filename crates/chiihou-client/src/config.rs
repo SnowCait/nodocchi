@@ -114,6 +114,11 @@ impl ChiihouNostrConfig {
     pub fn relay_urls(&self) -> &[String] {
         &self.relay_urls
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_channel_ids_for_tests(&mut self, channel_ids: Vec<String>) {
+        self.event_config.channel_ids = channel_ids;
+    }
 }
 
 #[cfg(test)]

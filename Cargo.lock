@@ -280,6 +280,7 @@ dependencies = [
  "bot-logic",
  "nostr-sdk",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

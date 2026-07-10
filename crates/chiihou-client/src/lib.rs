@@ -6,6 +6,7 @@ pub mod handler;
 pub mod nostr_adapter;
 pub mod protocol;
 pub mod reply;
+pub mod runtime;
 pub mod tags;
 
 pub use config::{
@@ -22,9 +23,11 @@ pub use decision::{
     legal_dahai_actions_from_sutehai_request,
 };
 pub use event::{
+    CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_BITCHAT_TELEPORT_TAG, CHIIHOU_CHANNEL_MESSAGE_KIND,
     ChiihouEventConfig, ChiihouEventError, ChiihouIncomingEvent, ChiihouOutgoingReply,
-    SeenEventIds, build_reply_for_event, event_channel_id, event_is_from_server, event_targets_ai,
-    is_chiihou_request_kind, process_incoming_event, should_handle_event,
+    SeenEventIds, build_reply_for_event, build_reply_tags_for_event, event_channel_id,
+    event_is_from_server, event_targets_ai, is_chiihou_request_kind, process_incoming_event,
+    should_handle_event,
 };
 pub use handler::{
     ChiihouHandlerError, ChiihouHandlerResult, build_reply_for_request, handle_chiihou_content,
@@ -39,4 +42,9 @@ pub use protocol::{
     ChiihouSuit, parse_chiihou_request,
 };
 pub use reply::{build_naku_no_reply_content, build_sutehai_reply_content};
+pub use runtime::{
+    ChiihouRuntimeError, build_chiihou_request_filter, connect_chiihou_client,
+    process_and_sign_nostr_event, publish_chiihou_reply, run_chiihou_client,
+    subscribe_chiihou_requests,
+};
 pub use tags::{build_reply_tags, has_tag_value, root_channel_id};

@@ -5,6 +5,11 @@ use bot_core::Agent;
 use crate::handler::{ChiihouHandlerError, reply_content_for_chiihou_content};
 use crate::tags::{build_reply_tags, has_tag_value, root_channel_id};
 
+pub const CHIIHOU_CHANNEL_MESSAGE_KIND: u16 = 42;
+pub const CHIIHOU_BITCHAT_MESSAGE_KIND: u16 = 20000;
+
+pub const CHIIHOU_BITCHAT_TELEPORT_TAG: &str = "teleport";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChiihouIncomingEvent {
     pub id: String,
@@ -59,7 +64,8 @@ impl SeenEventIds {
 }
 
 pub fn is_chiihou_request_kind(kind: u64) -> bool {
-    kind == 42 || kind == 20000
+    kind == u64::from(CHIIHOU_CHANNEL_MESSAGE_KIND)
+        || kind == u64::from(CHIIHOU_BITCHAT_MESSAGE_KIND)
 }
 
 pub fn event_targets_ai(event: &ChiihouIncomingEvent, ai_pubkey_hex: &str) -> bool {
@@ -93,6 +99,33 @@ pub fn should_handle_event(
         && seen.should_process(&event.id)
 }
 
+pub fn build_reply_tags_for_event(
+    event: &ChiihouIncomingEvent,
+    config: &ChiihouEventConfig,
+) -> Option<Vec<Vec<String>>> {
+    let channel_id = event_channel_id(event, &config.channel_ids)?;
+    let mut tags = build_reply_tags(
+        &event.id,
+        channel_id,
+        &config.ai_pubkey_hex,
+        &config.server_pubkey_hex,
+    );
+    if event.kind == u64::from(CHIIHOU_BITCHAT_MESSAGE_KIND) {
+        tags.extend(
+            event
+                .tags
+                .iter()
+                .filter(|tag| tag.len() >= 2 && tag.first().is_some_and(|name| name == "g"))
+                .cloned(),
+        );
+        tags.push(vec![
+            "t".to_string(),
+            CHIIHOU_BITCHAT_TELEPORT_TAG.to_string(),
+        ]);
+    }
+    Some(tags)
+}
+
 pub fn build_reply_for_event<A: Agent>(
     event: &ChiihouIncomingEvent,
     config: &ChiihouEventConfig,
@@ -103,15 +136,9 @@ pub fn build_reply_for_event<A: Agent>(
     else {
         return Ok(None);
     };
-    let Some(channel_id) = event_channel_id(event, &config.channel_ids) else {
+    let Some(tags) = build_reply_tags_for_event(event, config) else {
         return Ok(None);
     };
-    let tags = build_reply_tags(
-        &event.id,
-        channel_id,
-        &config.ai_pubkey_hex,
-        &config.server_pubkey_hex,
-    );
     Ok(Some(ChiihouOutgoingReply {
         kind: event.kind,
         tags,
@@ -190,6 +217,18 @@ nostr:npub1ai000 GET naku? ron pon chi"
         assert!(is_chiihou_request_kind(20000));
         assert!(!is_chiihou_request_kind(30315));
         assert!(!is_chiihou_request_kind(1));
+    }
+
+    #[test]
+    fn chiihou_kind_constants_match_request_kinds() {
+        assert_eq!(CHIIHOU_CHANNEL_MESSAGE_KIND, 42);
+        assert_eq!(CHIIHOU_BITCHAT_MESSAGE_KIND, 20000);
+        assert!(is_chiihou_request_kind(u64::from(
+            CHIIHOU_CHANNEL_MESSAGE_KIND
+        )));
+        assert!(is_chiihou_request_kind(u64::from(
+            CHIIHOU_BITCHAT_MESSAGE_KIND
+        )));
     }
 
     #[test]
@@ -317,6 +356,188 @@ nostr:npub1ai000 GET naku? ron pon chi"
     }
 
     #[test]
+    fn kind_42_reply_tags_have_only_nip28_tags() {
+        let event = valid_event("event1", sutehai_content());
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert_eq!(
+            tags,
+            vec![
+                tag(&["e", "channel_hanchan", "", "root"]),
+                tag(&["e", "event1", "", "reply", "server_pubkey"]),
+                tag(&["p", "ai_pubkey"]),
+                tag(&["p", "server_pubkey"]),
+            ]
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "g"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "t"))
+        );
+    }
+
+    #[test]
+    fn kind_42_reply_tags_ignore_incoming_g_tag() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags.push(tag(&["g", "xn76"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "g"))
+        );
+    }
+
+    #[test]
+    fn kind_20000_reply_tags_add_bitchat_tags() {
+        let mut event = valid_event("server_event_id", sutehai_content());
+        event.kind = 20000;
+        event.tags = vec![
+            tag(&["e", "channel_hanchan", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+            tag(&["g", "xn76"]),
+            tag(&["n", "Server Bot"]),
+        ];
+        assert_eq!(
+            build_reply_tags_for_event(&event, &config()).unwrap(),
+            vec![
+                tag(&["e", "channel_hanchan", "", "root"]),
+                tag(&["e", "server_event_id", "", "reply", "server_pubkey"]),
+                tag(&["p", "ai_pubkey"]),
+                tag(&["p", "server_pubkey"]),
+                tag(&["g", "xn76"]),
+                tag(&["t", "teleport"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_20000_reply_has_no_nickname_tag() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["n", "Server Bot"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
+        assert!(tags.contains(&tag(&["g", "xn76"])));
+        assert!(tags.contains(&tag(&["t", "teleport"])));
+    }
+
+    #[test]
+    fn kind_20000_reply_tags_do_not_copy_incoming_n_and_t_tags() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["n", "Server Bot"]));
+        event.tags.push(tag(&["t", "mahjong"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert!(!tags.contains(&tag(&["n", "Server Bot"])));
+        assert!(!tags.contains(&tag(&["t", "mahjong"])));
+        assert_eq!(
+            tags.iter()
+                .filter(|t| t.first().is_some_and(|name| name == "n"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            tags.iter()
+                .filter(|t| t.first().is_some_and(|name| name == "t"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn kind_20000_reply_tags_keep_multiple_g_tags_in_order() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["g", "xn77"]));
+        event.tags.push(tag(&["g", "xn78"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        let g_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|name| name == "g"))
+            .collect();
+        assert_eq!(
+            g_tags,
+            vec![
+                &tag(&["g", "xn76"]),
+                &tag(&["g", "xn77"]),
+                &tag(&["g", "xn78"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_20000_reply_does_not_copy_g_tag_without_value() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g"]));
+        event.tags.push(tag(&["g", "xn76"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        let g_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|name| name == "g"))
+            .collect();
+        assert_eq!(g_tags, vec![&tag(&["g", "xn76"])]);
+    }
+
+    #[test]
+    fn kind_20000_reply_keeps_g_tag_with_extra_values() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76", "extra"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        assert!(tags.contains(&tag(&["g", "xn76", "extra"])));
+    }
+
+    #[test]
+    fn kind_20000_reply_keeps_valid_g_tags_in_order_and_skips_bare_g_tag() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["g"]));
+        event.tags.push(tag(&["g", "xn77", "extra"]));
+        event.tags.push(tag(&["g", "xn78"]));
+        let tags = build_reply_tags_for_event(&event, &config()).unwrap();
+        let g_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|name| name == "g"))
+            .collect();
+        assert_eq!(
+            g_tags,
+            vec![
+                &tag(&["g", "xn76"]),
+                &tag(&["g", "xn77", "extra"]),
+                &tag(&["g", "xn78"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_reply_tags_for_event_is_none_without_allowed_channel() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.tags = vec![
+            tag(&["e", "channel_unknown", "", "root"]),
+            tag(&["p", "ai_pubkey"]),
+        ];
+        assert_eq!(build_reply_tags_for_event(&event, &config()), None);
+    }
+
+    #[test]
     fn builds_reply_for_sutehai_event() {
         let event = valid_event("event1", sutehai_content());
         assert_eq!(
@@ -342,6 +563,25 @@ nostr:npub1ai000 GET naku? ron pon chi"
             .unwrap();
         assert_eq!(reply.kind, 42);
         assert_eq!(reply.content, "nostr:npub1server naku? no");
+    }
+
+    #[test]
+    fn builds_kind_20000_reply_with_bitchat_tags() {
+        let mut event = valid_event("event1", sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        let reply = build_reply_for_event(&event, &config(), &mut PickSecondAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.kind, 20000);
+        assert!(reply.tags.contains(&tag(&["g", "xn76"])));
+        assert!(
+            !reply
+                .tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
+        assert!(reply.tags.contains(&tag(&["t", "teleport"])));
     }
 
     #[test]
