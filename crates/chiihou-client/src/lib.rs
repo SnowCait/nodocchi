@@ -5,6 +5,8 @@ pub mod convert;
 pub mod decision;
 pub mod event;
 pub mod handler;
+pub mod lifecycle;
+pub mod match_state;
 pub mod nostr_adapter;
 pub mod protocol;
 pub mod reply;
@@ -46,6 +48,11 @@ pub use handler::{
     ChiihouHandlerError, ChiihouHandlerResult, build_reply_for_request, handle_chiihou_content,
     reply_content_for_chiihou_content,
 };
+pub use lifecycle::{
+    ChiihouLifecycleError, ChiihouLifecycleNotification, ChiihouPlayerScore, ChiihouWind,
+    ChiihouWindParseError, parse_chiihou_lifecycle_notification,
+};
+pub use match_state::{ChiihouMatchPhase, ChiihouMatchState};
 pub use nostr_adapter::{
     ChiihouNostrAdapterError, incoming_event_from_nostr, nostr_tags_from_strings,
     sign_outgoing_event, sign_outgoing_reply,
