@@ -1,5 +1,6 @@
 pub mod convert;
 pub mod decision;
+pub mod handler;
 pub mod protocol;
 pub mod reply;
 pub mod tags;
@@ -12,6 +13,10 @@ pub use decision::{
     SutehaiDecisionError, build_sutehai_reply_for_request, chiihou_pai_from_dahai_action,
     choose_sutehai_pai, game_context_from_sutehai_request,
     legal_dahai_actions_from_sutehai_request,
+};
+pub use handler::{
+    ChiihouHandlerError, ChiihouHandlerResult, build_reply_for_request, handle_chiihou_content,
+    reply_content_for_chiihou_content,
 };
 pub use protocol::{
     ChiihouNakuAction, ChiihouPai, ChiihouPaiParseError, ChiihouProtocolError, ChiihouRequest,
