@@ -309,7 +309,7 @@ mod tests {
 
     fn sutehai_content() -> &'static str {
         "\
-:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_s1: :mahjong_east:
 nostr:npub1ai000 GET sutehai?"
     }
 
@@ -661,6 +661,62 @@ nostr:npub1ai000 GET naku? ron pon chi"
                 content: "nostr:npub1server sutehai? sutehai 2m".to_string(),
             }))
         );
+    }
+
+    fn complete_sutehai_content() -> &'static str {
+        "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_p5: :mahjong_p5:
+nostr:npub1ai000 GET sutehai?"
+    }
+
+    #[test]
+    fn builds_tsumo_reply_for_complete_sutehai_event() {
+        let event = valid_event("event1", complete_sutehai_content());
+        assert_eq!(
+            build_reply_for_event(&event, &config(), &mut HoraAgent),
+            Ok(Some(ChiihouOutgoingReply {
+                kind: 42,
+                tags: vec![
+                    tag(&["e", "channel_hanchan", "", "root"]),
+                    tag(&["e", "event1", "", "reply", "server_pubkey"]),
+                    tag(&["p", "ai_pubkey"]),
+                    tag(&["p", "server_pubkey"]),
+                ],
+                content: "nostr:npub1server sutehai? tsumo".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_kind_20000_tsumo_reply_with_bitchat_tags() {
+        let mut event = valid_event("event1", complete_sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["g"]));
+        event.tags.push(tag(&["n", "Server Bot"]));
+        let reply = build_reply_for_event(&event, &config(), &mut HoraAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.kind, 20000);
+        assert_eq!(reply.content, "nostr:npub1server sutehai? tsumo");
+        assert!(reply.tags.contains(&tag(&["g", "xn76"])));
+        assert!(!reply.tags.contains(&tag(&["g"])));
+        assert!(reply.tags.contains(&tag(&["t", "teleport"])));
+        assert!(
+            !reply
+                .tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
+    }
+
+    #[test]
+    fn complete_sutehai_event_replies_dahai_when_agent_discards() {
+        let event = valid_event("event1", complete_sutehai_content());
+        let reply = build_reply_for_event(&event, &config(), &mut PickSecondAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.content, "nostr:npub1server sutehai? sutehai 1m");
     }
 
     #[test]
@@ -1094,6 +1150,24 @@ nostr:npub1ai000 GET naku? ron pon chi"
         assert_eq!(
             process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn invalid_hand_tile_count_sutehai_event_gets_no_reply() {
+        use crate::decision::SutehaiDecisionError;
+        let mut seen = SeenEventIds::new();
+        let event = valid_event(
+            "event1",
+            "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+nostr:npub1ai000 GET sutehai?",
+        );
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Err(ChiihouEventError::Handler(ChiihouHandlerError::Sutehai(
+                SutehaiDecisionError::InvalidHandTileCount(3)
+            )))
         );
     }
 

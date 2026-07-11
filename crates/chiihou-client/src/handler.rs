@@ -129,16 +129,51 @@ mod tests {
         }
     }
 
+    fn tenpai_sutehai_request() -> ChiihouRequest {
+        ChiihouRequest::Sutehai {
+            hand: vec![
+                pai("1m"),
+                pai("2m"),
+                pai("3m"),
+                pai("4m"),
+                pai("5m"),
+                pai("6m"),
+                pai("7m"),
+                pai("8m"),
+                pai("9m"),
+                pai("1p"),
+                pai("2p"),
+                pai("3p"),
+                pai("1s"),
+            ],
+            drawn: Some(pai("1z")),
+        }
+    }
+
     #[test]
     fn builds_sutehai_reply_from_sutehai_request() {
+        assert_eq!(
+            build_reply_for_request(
+                "npub1server",
+                &tenpai_sutehai_request(),
+                &mut PickSecondAgent
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? sutehai 2m".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn invalid_hand_tile_count_request_is_sutehai_error() {
         let request = ChiihouRequest::Sutehai {
             hand: vec![pai("1m"), pai("2m"), pai("3m")],
             drawn: Some(pai("1z")),
         };
         assert_eq!(
             build_reply_for_request("npub1server", &request, &mut PickSecondAgent),
-            Ok(ChiihouHandlerResult::ReplyContent(
-                "nostr:npub1server sutehai? sutehai 2m".to_string()
+            Err(ChiihouHandlerError::Sutehai(
+                SutehaiDecisionError::InvalidHandTileCount(3)
             ))
         );
     }
@@ -244,15 +279,95 @@ mod tests {
         }
     }
 
+    fn complete_sutehai_request() -> ChiihouRequest {
+        ChiihouRequest::Sutehai {
+            hand: vec![
+                pai("1m"),
+                pai("2m"),
+                pai("3m"),
+                pai("4m"),
+                pai("5m"),
+                pai("6m"),
+                pai("7m"),
+                pai("8m"),
+                pai("9m"),
+                pai("1p"),
+                pai("2p"),
+                pai("3p"),
+                pai("5p"),
+            ],
+            drawn: Some(pai("5p")),
+        }
+    }
+
+    #[test]
+    fn builds_tsumo_reply_from_complete_sutehai_request() {
+        assert_eq!(
+            build_reply_for_request(
+                "npub1server",
+                &complete_sutehai_request(),
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? tsumo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn builds_tsumo_reply_from_complete_sutehai_request_with_state() {
+        assert_eq!(
+            build_reply_for_request_with_state(
+                "npub1server",
+                &complete_sutehai_request(),
+                &crate::match_state::ChiihouTableSnapshot::default(),
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? tsumo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn handles_complete_sutehai_content_with_tsumo() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_p5: :mahjong_p5:
+nostr:npub1ai000 GET sutehai?";
+        assert_eq!(
+            handle_chiihou_content(
+                "npub1server",
+                content,
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? tsumo".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn handles_sutehai_content() {
         let content = "\
-:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_s1: :mahjong_east:
 nostr:npub1ai000 GET sutehai?";
         assert_eq!(
             handle_chiihou_content("npub1server", content, &mut PickSecondAgent),
             Ok(ChiihouHandlerResult::ReplyContent(
                 "nostr:npub1server sutehai? sutehai 2m".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn invalid_hand_tile_count_content_is_sutehai_error() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+nostr:npub1ai000 GET sutehai?";
+        assert_eq!(
+            handle_chiihou_content("npub1server", content, &mut PickSecondAgent),
+            Err(ChiihouHandlerError::Sutehai(
+                SutehaiDecisionError::InvalidHandTileCount(3)
             ))
         );
     }
@@ -325,7 +440,7 @@ nostr:npub1ai000 GET sutehai?";
     #[test]
     fn reply_content_helper_returns_some_for_reply() {
         let content = "\
-:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_s1: :mahjong_east:
 nostr:npub1ai000 GET sutehai?";
         assert_eq!(
             reply_content_for_chiihou_content("npub1server", content, &mut PickSecondAgent),
