@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use bot_core::Agent;
 use nostr_sdk::async_utility::tokio::sync::broadcast::Receiver;
@@ -26,9 +27,25 @@ use crate::status::{
     fetch_chiihou_table_status, startup_command_for_status,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChiihouRuntimeOptions {
     pub auto_next: bool,
+    pub response_delay: Duration,
+}
+
+impl Default for ChiihouRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            auto_next: false,
+            response_delay: Duration::ZERO,
+        }
+    }
+}
+
+async fn sleep_response_delay(delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -302,6 +319,8 @@ async fn run_chiihou_request_loop<A: Agent>(
                 ) {
                     Ok(ChiihouIncomingAction::Ignore) => {}
                     Ok(ChiihouIncomingAction::Reply(reply)) => {
+                        sleep_response_delay(options.response_delay).await;
+
                         match sign_outgoing_reply(&reply, config.keys()) {
                             Ok(signed) => {
                                 publish_chiihou_reply(client, &signed).await?;
@@ -319,6 +338,8 @@ async fn run_chiihou_request_loop<A: Agent>(
                         match controller.apply(&notification) {
                             ChiihouLifecycleEffect::None => {}
                             ChiihouLifecycleEffect::PublishNext => {
+                                sleep_response_delay(options.response_delay).await;
+
                                 let next = sign_chiihou_next_command(config)?;
                                 publish_chiihou_event(client, &next).await?;
                                 tracing::info!(
@@ -1287,6 +1308,20 @@ nostr:npub1ai000 GET sutehai?"
     #[test]
     fn runtime_options_default_disables_auto_next() {
         assert!(!ChiihouRuntimeOptions::default().auto_next);
+    }
+
+    #[test]
+    fn runtime_options_default_has_zero_response_delay() {
+        assert_eq!(
+            ChiihouRuntimeOptions::default().response_delay,
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_response_delay_returns_immediately_for_zero() {
+        // Duration::ZERO では待機せずに即座に完了する。
+        sleep_response_delay(Duration::ZERO).await;
     }
 
     #[test]

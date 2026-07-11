@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use nostr_sdk::nips::nip19::Nip19Profile;
 use nostr_sdk::{FromBech32, PublicKey};
 
 use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
 use crate::secret::{ChiihouSecretError, validate_chiihou_nsec};
 
-pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next]";
+pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChiihouAgentKind {
@@ -47,6 +49,7 @@ pub struct ChiihouCliArgs {
     pub channel: ChiihouChannel,
     pub agent: ChiihouAgentKind,
     pub auto_next: bool,
+    pub response_delay_ms: u64,
 }
 
 impl ChiihouCliArgs {
@@ -59,6 +62,7 @@ impl ChiihouCliArgs {
         let mut channel = None;
         let mut agent = None;
         let mut auto_next = false;
+        let mut response_delay_ms = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -96,6 +100,19 @@ impl ChiihouCliArgs {
                     }
                     auto_next = true;
                 }
+                "--response-delay-ms" => {
+                    if response_delay_ms.is_some() {
+                        return Err(ChiihouCliError::DuplicateOption("--response-delay-ms"));
+                    }
+                    let value = args
+                        .next()
+                        .ok_or(ChiihouCliError::MissingResponseDelayValue)?;
+                    response_delay_ms = Some(
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| ChiihouCliError::InvalidResponseDelay(value))?,
+                    );
+                }
                 other => return Err(ChiihouCliError::UnknownOption(other.to_string())),
             }
         }
@@ -105,7 +122,12 @@ impl ChiihouCliArgs {
             channel: channel.ok_or(ChiihouCliError::ChannelRequired)?,
             agent: agent.unwrap_or_default(),
             auto_next,
+            response_delay_ms: response_delay_ms.unwrap_or(0),
         })
+    }
+
+    pub fn response_delay(&self) -> Duration {
+        Duration::from_millis(self.response_delay_ms)
     }
 }
 
@@ -131,6 +153,12 @@ pub enum ChiihouCliError {
 
     #[error("unknown agent: {0}")]
     UnknownAgent(String),
+
+    #[error("--response-delay-ms requires a value")]
+    MissingResponseDelayValue,
+
+    #[error("--response-delay-ms must be a non-negative integer in milliseconds: {0}")]
+    InvalidResponseDelay(String),
 
     #[error("option specified more than once: {0}")]
     DuplicateOption(&'static str),
@@ -304,6 +332,131 @@ mod tests {
     #[test]
     fn usage_mentions_auto_next() {
         assert!(USAGE.contains("--auto-next"));
+    }
+
+    #[test]
+    fn response_delay_defaults_to_zero() {
+        let args = parse(&["--channel", "hanchan"]).unwrap();
+        assert_eq!(args.response_delay_ms, 0);
+        assert!(!args.auto_next);
+    }
+
+    #[test]
+    fn parses_response_delay_ms() {
+        let args = parse(&["--channel", "hanchan", "--response-delay-ms", "1000"]).unwrap();
+        assert_eq!(args.response_delay_ms, 1000);
+    }
+
+    #[test]
+    fn parses_response_delay_before_channel() {
+        let args = parse(&["--response-delay-ms", "5000", "--channel", "tonpuu"]).unwrap();
+        assert_eq!(args.response_delay_ms, 5000);
+        assert_eq!(args.channel, ChiihouChannel::Tonpuu);
+    }
+
+    #[test]
+    fn parses_response_delay_with_auto_next() {
+        let args = parse(&[
+            "--channel",
+            "hanchan",
+            "--auto-next",
+            "--response-delay-ms",
+            "5000",
+        ])
+        .unwrap();
+        assert!(args.auto_next);
+        assert_eq!(args.response_delay_ms, 5000);
+    }
+
+    #[test]
+    fn accepts_zero_response_delay() {
+        let args = parse(&["--channel", "hanchan", "--response-delay-ms", "0"]).unwrap();
+        assert_eq!(args.response_delay_ms, 0);
+    }
+
+    #[test]
+    fn response_delay_is_independent_of_auto_next() {
+        let args = parse(&["--channel", "hanchan", "--response-delay-ms", "1000"]).unwrap();
+        assert!(!args.auto_next);
+        assert_eq!(args.response_delay_ms, 1000);
+
+        let args = parse(&["--channel", "hanchan", "--auto-next"]).unwrap();
+        assert!(args.auto_next);
+        assert_eq!(args.response_delay_ms, 0);
+    }
+
+    #[test]
+    fn rejects_missing_response_delay_value() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--response-delay-ms"]),
+            Err(ChiihouCliError::MissingResponseDelayValue)
+        );
+    }
+
+    #[test]
+    fn rejects_non_integer_response_delay() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--response-delay-ms", "abc"]),
+            Err(ChiihouCliError::InvalidResponseDelay("abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_negative_response_delay() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--response-delay-ms", "-1"]),
+            Err(ChiihouCliError::InvalidResponseDelay("-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_fractional_response_delay() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--response-delay-ms", "1.5"]),
+            Err(ChiihouCliError::InvalidResponseDelay("1.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_response_delay() {
+        assert_eq!(
+            parse(&[
+                "--channel",
+                "hanchan",
+                "--response-delay-ms",
+                "100",
+                "--response-delay-ms",
+                "200"
+            ]),
+            Err(ChiihouCliError::DuplicateOption("--response-delay-ms"))
+        );
+    }
+
+    #[test]
+    fn rejects_response_delay_with_inline_value() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--response-delay-ms=1000"]),
+            Err(ChiihouCliError::UnknownOption(
+                "--response-delay-ms=1000".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn usage_mentions_response_delay_ms() {
+        assert!(USAGE.contains("--response-delay-ms <MILLISECONDS>"));
+    }
+
+    #[test]
+    fn response_delay_converts_to_duration() {
+        let args = parse(&["--channel", "hanchan"]).unwrap();
+        assert_eq!(args.response_delay(), Duration::ZERO);
+
+        let args = parse(&["--channel", "hanchan", "--response-delay-ms", "1000"]).unwrap();
+        assert_eq!(args.response_delay(), Duration::from_millis(1000));
+
+        let args = parse(&["--channel", "hanchan", "--response-delay-ms", "5000"]).unwrap();
+        assert_eq!(args.response_delay(), Duration::from_millis(5000));
     }
 
     #[test]
@@ -608,6 +761,7 @@ mod tests {
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
             auto_next: false,
+            response_delay_ms: 0,
         };
         let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
         let expected = Keys::parse(TEST_AI_SECRET_KEY_HEX).unwrap();
@@ -625,6 +779,7 @@ mod tests {
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
             auto_next: false,
+            response_delay_ms: 0,
         };
         let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
         assert_eq!(config.event_config().server_npub, CHIIHOU_SERVER_NPUB);
@@ -637,6 +792,7 @@ mod tests {
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
             auto_next: false,
+            response_delay_ms: 0,
         };
         let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
         assert_eq!(config.event_config().server_npub, server_npub());
@@ -649,6 +805,7 @@ mod tests {
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
             auto_next: false,
+            response_delay_ms: 0,
         };
         let result = build_cli_nostr_config(TEST_AI_SECRET_KEY_HEX, &args);
         assert!(matches!(
@@ -670,6 +827,7 @@ mod tests {
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
             auto_next: false,
+            response_delay_ms: 0,
         };
         let result = build_cli_nostr_config(&ai_nsec(), &args);
         assert!(matches!(
