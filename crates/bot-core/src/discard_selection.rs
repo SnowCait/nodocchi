@@ -23,7 +23,7 @@ pub fn select_discard_action(
     let selected = if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         select_best_discard_with_diagnostics(context, &tiles)
     } else {
-        select_best_discard(context, &tiles)
+        select_best_discard_evaluation(context, &tiles)
     };
     let selected_type = selected?.discard;
 
@@ -45,7 +45,10 @@ pub fn select_discard_action(
     red_fallback
 }
 
-fn select_best_discard(context: &GameContext, tiles: &[TileId]) -> Option<DiscardEvaluation> {
+pub(crate) fn select_best_discard_evaluation(
+    context: &GameContext,
+    tiles: &[TileId],
+) -> Option<DiscardEvaluation> {
     if context.visible_tiles().is_empty() {
         select_best_discard_from_tiles_with_context(
             tiles,
@@ -558,7 +561,7 @@ mod tests {
             .chain(context.drawn_tile())
             .collect();
 
-        let normal = select_best_discard(&context, &tiles);
+        let normal = select_best_discard_evaluation(&context, &tiles);
         let diagnostic = select_best_discard_with_diagnostics(&context, &tiles);
         assert_eq!(normal, diagnostic);
         assert!(normal.is_some());
@@ -584,7 +587,7 @@ mod tests {
             .chain(context.drawn_tile())
             .collect();
 
-        let normal = select_best_discard(&context, &all_tiles);
+        let normal = select_best_discard_evaluation(&context, &all_tiles);
         let diagnostic = select_best_discard_with_diagnostics(&context, &all_tiles);
         assert_eq!(normal, diagnostic);
         assert!(normal.is_some());
