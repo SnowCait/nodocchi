@@ -508,42 +508,100 @@ fn select_best(evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation>
     })
 }
 
-fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardComparisonReason {
+    Shanten,
+    AcceptanceRemaining,
+    AcceptanceTypeCount,
+    ShapePenalty,
+    FloatingTileValue,
+    Dora,
+    ValueHonor,
+    RedFive,
+    StableOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscardComparison {
+    pub candidate_is_better: bool,
+    pub reason: DiscardComparisonReason,
+}
+
+pub fn compare_discard_evaluations(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> DiscardComparison {
     let candidate_shanten = candidate.min_shanten_after_discard();
-    let best_shanten = best.min_shanten_after_discard();
+    let best_shanten = current_best.min_shanten_after_discard();
     if candidate_shanten != best_shanten {
-        return candidate_shanten < best_shanten;
+        return DiscardComparison {
+            candidate_is_better: candidate_shanten < best_shanten,
+            reason: DiscardComparisonReason::Shanten,
+        };
     }
 
     let candidate_remaining = candidate.acceptance_total_remaining();
-    let best_remaining = best.acceptance_total_remaining();
+    let best_remaining = current_best.acceptance_total_remaining();
     if candidate_remaining != best_remaining {
-        return candidate_remaining > best_remaining;
+        return DiscardComparison {
+            candidate_is_better: candidate_remaining > best_remaining,
+            reason: DiscardComparisonReason::AcceptanceRemaining,
+        };
     }
 
     let candidate_type_count = candidate.acceptance_type_count();
-    let best_type_count = best.acceptance_type_count();
+    let best_type_count = current_best.acceptance_type_count();
     if candidate_type_count != best_type_count {
-        return candidate_type_count > best_type_count;
+        return DiscardComparison {
+            candidate_is_better: candidate_type_count > best_type_count,
+            reason: DiscardComparisonReason::AcceptanceTypeCount,
+        };
     }
 
-    if candidate.shape_penalty != best.shape_penalty {
-        return candidate.shape_penalty < best.shape_penalty;
+    if candidate.shape_penalty != current_best.shape_penalty {
+        return DiscardComparison {
+            candidate_is_better: candidate.shape_penalty < current_best.shape_penalty,
+            reason: DiscardComparisonReason::ShapePenalty,
+        };
     }
 
-    if candidate.floating_tile_value != best.floating_tile_value {
-        return candidate.floating_tile_value < best.floating_tile_value;
+    if candidate.floating_tile_value != current_best.floating_tile_value {
+        return DiscardComparison {
+            candidate_is_better: candidate.floating_tile_value < current_best.floating_tile_value,
+            reason: DiscardComparisonReason::FloatingTileValue,
+        };
     }
 
-    if candidate.discarded_dora_count != best.discarded_dora_count {
-        return candidate.discarded_dora_count < best.discarded_dora_count;
+    if candidate.discarded_dora_count != current_best.discarded_dora_count {
+        return DiscardComparison {
+            candidate_is_better: candidate.discarded_dora_count < current_best.discarded_dora_count,
+            reason: DiscardComparisonReason::Dora,
+        };
     }
 
-    if candidate.discarded_value_honor_count != best.discarded_value_honor_count {
-        return candidate.discarded_value_honor_count < best.discarded_value_honor_count;
+    if candidate.discarded_value_honor_count != current_best.discarded_value_honor_count {
+        return DiscardComparison {
+            candidate_is_better: candidate.discarded_value_honor_count
+                < current_best.discarded_value_honor_count,
+            reason: DiscardComparisonReason::ValueHonor,
+        };
     }
 
-    !candidate.discards_red_five && best.discards_red_five
+    if candidate.discards_red_five != current_best.discards_red_five {
+        return DiscardComparison {
+            candidate_is_better: !candidate.discards_red_five && current_best.discards_red_five,
+            reason: DiscardComparisonReason::RedFive,
+        };
+    }
+
+    DiscardComparison {
+        candidate_is_better: false,
+        reason: DiscardComparisonReason::StableOrder,
+    }
+}
+
+fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) -> bool {
+    compare_discard_evaluations(candidate, best).candidate_is_better
 }
 
 fn value_honor_count(
@@ -2748,6 +2806,124 @@ mod tests {
             &low_shanten_high_penalty,
             &high_shanten_low_penalty
         ));
+    }
+
+    #[test]
+    fn compare_reports_shanten_reason() {
+        let candidate = evaluation(0, 4, 1, 2, false);
+        let current_best = evaluation(1, 40, 5, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
+    }
+
+    #[test]
+    fn compare_reports_shanten_reason_when_candidate_is_worse() {
+        let candidate = evaluation(1, 40, 5, 0, false);
+        let current_best = evaluation(0, 4, 1, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(!comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
+    }
+
+    #[test]
+    fn compare_reports_acceptance_remaining_reason() {
+        let candidate = evaluation_with_shape_penalty(1, 20, 1, 50, 0, 0, false);
+        let current_best = evaluation_with_shape_penalty(1, 10, 1, 0, 0, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn compare_reports_acceptance_type_count_reason() {
+        let candidate = evaluation(1, 10, 3, 0, false);
+        let current_best = evaluation(1, 10, 2, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceTypeCount
+        );
+    }
+
+    #[test]
+    fn compare_reports_shape_penalty_reason() {
+        let candidate = evaluation_with_shape_penalty(1, 10, 2, 10, 2, 0, false);
+        let current_best = evaluation_with_shape_penalty(1, 10, 2, 40, 0, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::ShapePenalty);
+    }
+
+    #[test]
+    fn compare_reports_floating_tile_value_reason() {
+        let candidate = evaluation_with_floating(1, 10, 2, 0, 1);
+        let current_best = evaluation_with_floating(1, 10, 2, 0, 5);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::FloatingTileValue
+        );
+    }
+
+    #[test]
+    fn compare_reports_dora_reason() {
+        let candidate = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        let current_best = evaluation_with_value_honor(1, 10, 2, 1, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Dora);
+    }
+
+    #[test]
+    fn compare_reports_value_honor_reason() {
+        let candidate = evaluation_with_value_honor(1, 10, 2, 0, 0, true);
+        let current_best = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::ValueHonor);
+    }
+
+    #[test]
+    fn compare_reports_red_five_reason() {
+        let candidate = evaluation(1, 10, 2, 0, false);
+        let current_best = evaluation(1, 10, 2, 0, true);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::RedFive);
+    }
+
+    #[test]
+    fn compare_reports_red_five_reason_when_candidate_is_worse() {
+        let candidate = evaluation(1, 10, 2, 0, true);
+        let current_best = evaluation(1, 10, 2, 0, false);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(!comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::RedFive);
+    }
+
+    #[test]
+    fn compare_reports_stable_order_on_perfect_tie() {
+        let candidate = evaluation_with_value_honor(1, 10, 2, 1, 1, true);
+        let current_best = evaluation_with_value_honor(1, 10, 2, 1, 1, true);
+        let comparison = compare_discard_evaluations(&candidate, &current_best);
+        assert!(!comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::StableOrder);
+    }
+
+    #[test]
+    fn compare_matches_is_better_discard() {
+        let candidate = evaluation_with_value_honor(1, 10, 2, 1, 1, false);
+        let current_best = evaluation_with_value_honor(1, 12, 2, 1, 1, false);
+        assert_eq!(
+            compare_discard_evaluations(&candidate, &current_best).candidate_is_better,
+            is_better_discard(&candidate, &current_best)
+        );
     }
 
     #[test]
