@@ -1,7 +1,7 @@
 use bot_core::{NormalAgent, ShantenAgent, TsumogiriAgent};
 use chiihou_client::{
-    ChiihouAgentKind, ChiihouCliArgs, USAGE, build_cli_nostr_config, load_chiihou_nsec,
-    run_chiihou_client_auto_enter,
+    ChiihouAgentKind, ChiihouCliArgs, ChiihouRuntimeOptions, USAGE, build_cli_nostr_config,
+    load_chiihou_nsec, run_chiihou_client_auto_enter_with_options,
 };
 use tracing::info;
 
@@ -24,6 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let nsec = load_chiihou_nsec()?;
     let config = build_cli_nostr_config(&nsec, &args)?;
+    let options = ChiihouRuntimeOptions {
+        auto_next: args.auto_next,
+    };
 
     let server_source = if args.server_npub.is_some() {
         "cli"
@@ -34,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         channel = %args.channel,
         agent = %args.agent,
+        auto_next = args.auto_next,
         relay_count = config.relay_urls().len(),
         server_source,
         "starting chiihou client"
@@ -42,15 +46,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.agent {
         ChiihouAgentKind::Normal => {
             let mut agent = NormalAgent;
-            run_chiihou_client_auto_enter(&config, &mut agent).await?;
+            run_chiihou_client_auto_enter_with_options(&config, options, &mut agent).await?;
         }
         ChiihouAgentKind::Tsumogiri => {
             let mut agent = TsumogiriAgent;
-            run_chiihou_client_auto_enter(&config, &mut agent).await?;
+            run_chiihou_client_auto_enter_with_options(&config, options, &mut agent).await?;
         }
         ChiihouAgentKind::Shanten => {
             let mut agent = ShantenAgent;
-            run_chiihou_client_auto_enter(&config, &mut agent).await?;
+            run_chiihou_client_auto_enter_with_options(&config, options, &mut agent).await?;
         }
     }
 

@@ -26,6 +26,11 @@ use crate::status::{
     fetch_chiihou_table_status, startup_command_for_status,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChiihouRuntimeOptions {
+    pub auto_next: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ChiihouRuntimeError {
     #[error("invalid chiihou channel ID: {0}")]
@@ -181,6 +186,14 @@ pub async fn run_chiihou_client<A: Agent>(
     config: &ChiihouNostrConfig,
     agent: &mut A,
 ) -> Result<(), ChiihouRuntimeError> {
+    run_chiihou_client_with_options(config, ChiihouRuntimeOptions::default(), agent).await
+}
+
+pub async fn run_chiihou_client_with_options<A: Agent>(
+    config: &ChiihouNostrConfig,
+    options: ChiihouRuntimeOptions,
+    agent: &mut A,
+) -> Result<(), ChiihouRuntimeError> {
     let since = Timestamp::now();
     let client = connect_chiihou_client(config).await?;
 
@@ -188,11 +201,28 @@ pub async fn run_chiihou_client<A: Agent>(
 
     let subscription_id = subscribe_chiihou_requests(&client, config, since).await?;
 
-    run_chiihou_request_loop(&client, &mut notifications, subscription_id, config, agent).await
+    run_chiihou_request_loop(
+        &client,
+        &mut notifications,
+        subscription_id,
+        config,
+        options,
+        agent,
+    )
+    .await
 }
 
 pub async fn run_chiihou_client_auto_enter<A: Agent>(
     config: &ChiihouNostrConfig,
+    agent: &mut A,
+) -> Result<(), ChiihouRuntimeError> {
+    run_chiihou_client_auto_enter_with_options(config, ChiihouRuntimeOptions::default(), agent)
+        .await
+}
+
+pub async fn run_chiihou_client_auto_enter_with_options<A: Agent>(
+    config: &ChiihouNostrConfig,
+    options: ChiihouRuntimeOptions,
     agent: &mut A,
 ) -> Result<(), ChiihouRuntimeError> {
     let since = Timestamp::now();
@@ -231,7 +261,15 @@ pub async fn run_chiihou_client_auto_enter<A: Agent>(
         }
     }
 
-    run_chiihou_request_loop(&client, &mut notifications, subscription_id, config, agent).await
+    run_chiihou_request_loop(
+        &client,
+        &mut notifications,
+        subscription_id,
+        config,
+        options,
+        agent,
+    )
+    .await
 }
 
 async fn run_chiihou_request_loop<A: Agent>(
@@ -239,10 +277,12 @@ async fn run_chiihou_request_loop<A: Agent>(
     notifications: &mut Receiver<RelayPoolNotification>,
     subscription_id: SubscriptionId,
     config: &ChiihouNostrConfig,
+    options: ChiihouRuntimeOptions,
     agent: &mut A,
 ) -> Result<(), ChiihouRuntimeError> {
     let mut seen = SeenEventIds::new();
-    let mut controller = ChiihouLifecycleController::new(config.keys().public_key());
+    let mut controller =
+        ChiihouLifecycleController::new(config.keys().public_key(), options.auto_next);
 
     loop {
         match notifications.recv().await {
@@ -946,7 +986,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
 
         fn recorded_context_for(content: &str) -> GameContext {
             let config = config(ChiihouChannel::Hanchan);
-            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key());
+            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key(), false);
             let mut seen = SeenEventIds::new();
             apply_notifications(&mut controller, &mut seen, &config);
 
@@ -1030,7 +1070,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
         #[test]
         fn seat_wind_in_context_follows_current_dealer_across_kyoku() {
             let config = config(ChiihouChannel::Hanchan);
-            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key());
+            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key(), false);
             let mut seen = SeenEventIds::new();
             let tokens = npub_tokens();
             let prefix = tokens.join(" ");
@@ -1149,6 +1189,22 @@ nostr:{ai_npub} GET naku? ron pon chi"
             "connection refused".to_string(),
         )]);
         assert!(ensure_any_relay_succeeded("reply publish", &success, &failed).is_ok());
+    }
+
+    #[test]
+    fn runtime_options_default_disables_auto_next() {
+        assert!(!ChiihouRuntimeOptions::default().auto_next);
+    }
+
+    #[test]
+    fn controller_with_default_options_does_not_publish_next_on_kyokuend() {
+        let options = ChiihouRuntimeOptions::default();
+        let mut controller =
+            ChiihouLifecycleController::new(ai_keys().public_key(), options.auto_next);
+        assert_eq!(
+            controller.apply(&crate::lifecycle::ChiihouLifecycleNotification::KyokuEnd),
+            ChiihouLifecycleEffect::None
+        );
     }
 
     #[test]

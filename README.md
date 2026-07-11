@@ -71,10 +71,20 @@ cargo run -p chiihou-client --bin chiihou-client -- \
   --server-npub npub1...
 ```
 
+自動 next を有効化する場合:
+
+```bash
+CHIIHOU_NSEC=nsec1... \
+cargo run -p chiihou-client --bin chiihou-client -- \
+  --channel hanchan \
+  --agent shanten \
+  --auto-next
+```
+
 ### 引数
 
 ```text
-usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>]
+usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next]
 ```
 
 | 引数 | 必須 | 内容 |
@@ -82,6 +92,7 @@ usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shant
 | `--channel` | 必須 | `hanchan` または `tonpuu` |
 | `--agent` | 任意 | `normal`、`tsumogiri`、`shanten`。既定値は `normal` |
 | `--server-npub` | 任意 | server の NIP-19 `npub` または `nprofile`。省略時は既定 server |
+| `--auto-next` | 任意 | 局終了ごとに `next` を 1 回送信する。省略時は送信しない |
 
 既定 server:
 
