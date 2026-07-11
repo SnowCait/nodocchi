@@ -409,7 +409,7 @@ mod tests {
         let ai_npub = ai_keys().public_key().to_bech32().unwrap();
         format!(
             "\
-:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_s1: :mahjong_east:
 nostr:{ai_npub} GET sutehai?"
         )
     }
@@ -1074,31 +1074,28 @@ nostr:{ai_npub} GET naku? ron pon chi"
             );
         }
 
+        fn request_hand_tiles() -> Vec<TileId> {
+            [
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "1s",
+            ]
+            .iter()
+            .map(|s| tile_of(s))
+            .collect()
+        }
+
         #[test]
         fn sutehai_request_context_uses_request_hand_not_notified_hand() {
             let context = recorded_context_for(&sutehai_content());
-            assert_eq!(
-                context.hand_tiles(),
-                &[tile_of("1m"), tile_of("2m"), tile_of("3m")]
-            );
+            assert_eq!(context.hand_tiles(), &request_hand_tiles()[..]);
             assert_eq!(context.drawn_tile(), Some(tile_of("1z")));
         }
 
         #[test]
         fn sutehai_request_context_visible_tiles_hold_request_hand_dora_and_rivers() {
             let context = recorded_context_for(&sutehai_content());
-            assert_eq!(
-                context.visible_tiles(),
-                &[
-                    tile_of("1m"),
-                    tile_of("2m"),
-                    tile_of("3m"),
-                    tile_of("1z"),
-                    tile_of("5p"),
-                    tile_of("7z"),
-                    tile_of("1z"),
-                ]
-            );
+            let mut expected = request_hand_tiles();
+            expected.extend([tile_of("1z"), tile_of("5p"), tile_of("7z"), tile_of("1z")]);
+            assert_eq!(context.visible_tiles(), &expected[..]);
         }
 
         #[test]

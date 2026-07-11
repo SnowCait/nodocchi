@@ -149,11 +149,13 @@ pub fn legal_actions_from_sutehai_request(
     drawn: Option<ChiihouPai>,
 ) -> Result<Vec<LegalAction>, SutehaiDecisionError> {
     let mut actions = Vec::new();
-    if let Some(drawn_pai) = drawn
-        && hand.len() == MENZEN_HAND_TILE_COUNT
-        && is_complete_menzen_tsumo_hand(hand, drawn_pai)?
-    {
-        actions.push(LegalAction::Hora);
+    if let Some(drawn_pai) = drawn {
+        if hand.len() != MENZEN_HAND_TILE_COUNT {
+            return Err(SutehaiDecisionError::InvalidHandTileCount(hand.len()));
+        }
+        if is_complete_menzen_tsumo_hand(hand, drawn_pai)? {
+            actions.push(LegalAction::Hora);
+        }
     }
     actions.extend(legal_dahai_actions_from_sutehai_request(hand, drawn));
     Ok(actions)
@@ -726,13 +728,36 @@ mod tests {
     }
 
     #[test]
-    fn legal_actions_have_no_hora_for_short_hand_with_drawn() {
-        let actions =
-            legal_actions_from_sutehai_request(&[pai("1m"), pai("2m"), pai("3m")], Some(pai("1z")))
-                .unwrap();
+    fn legal_actions_reject_short_hand_with_drawn() {
         assert_eq!(
-            actions,
-            vec![dahai("1m"), dahai("2m"), dahai("3m"), dahai("1z")]
+            legal_actions_from_sutehai_request(&[pai("1m"), pai("2m"), pai("3m")], Some(pai("1z"))),
+            Err(SutehaiDecisionError::InvalidHandTileCount(3))
+        );
+    }
+
+    #[test]
+    fn legal_actions_reject_twelve_tile_hand_with_drawn() {
+        assert_eq!(
+            legal_actions_from_sutehai_request(&complete_standard_hand()[..12], Some(pai("5p"))),
+            Err(SutehaiDecisionError::InvalidHandTileCount(12))
+        );
+    }
+
+    #[test]
+    fn legal_actions_reject_fourteen_tile_hand_with_drawn() {
+        let mut fourteen = complete_standard_hand();
+        fourteen.push(pai("5p"));
+        assert_eq!(
+            legal_actions_from_sutehai_request(&fourteen, Some(pai("5p"))),
+            Err(SutehaiDecisionError::InvalidHandTileCount(14))
+        );
+    }
+
+    #[test]
+    fn legal_actions_allow_short_hand_without_drawn() {
+        assert_eq!(
+            legal_actions_from_sutehai_request(&[pai("1m"), pai("5p")], None),
+            Ok(vec![dahai("1m"), dahai("5p")])
         );
     }
 

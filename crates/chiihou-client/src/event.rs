@@ -309,7 +309,7 @@ mod tests {
 
     fn sutehai_content() -> &'static str {
         "\
-:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_s1: :mahjong_east:
 nostr:npub1ai000 GET sutehai?"
     }
 
@@ -1150,6 +1150,24 @@ nostr:npub1ai000 GET sutehai?"
         assert_eq!(
             process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn invalid_hand_tile_count_sutehai_event_gets_no_reply() {
+        use crate::decision::SutehaiDecisionError;
+        let mut seen = SeenEventIds::new();
+        let event = valid_event(
+            "event1",
+            "\
+:mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+nostr:npub1ai000 GET sutehai?",
+        );
+        assert_eq!(
+            process_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent),
+            Err(ChiihouEventError::Handler(ChiihouHandlerError::Sutehai(
+                SutehaiDecisionError::InvalidHandTileCount(3)
+            )))
         );
     }
 
