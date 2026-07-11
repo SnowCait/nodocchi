@@ -142,7 +142,19 @@ pub fn is_suji_for_any_reached(tile: TileType, context: &GameContext) -> bool {
         .any(|&player| is_suji_for(tile, player, context))
 }
 
-// リーチ者の河に対する簡易スジ安全度。数牌なら Some、字牌なら None。
+// 全リーチ者の河に対してスジか判定する。リーチ者がいなければ false。
+// 全リーチ者について is_suji_for が true の場合だけ true。一人でも無スジなら false。
+pub fn is_suji_for_all_reached(tile: TileType, context: &GameContext) -> bool {
+    let reached = context.reached_opponents();
+    if reached.is_empty() {
+        return false;
+    }
+    reached
+        .iter()
+        .all(|&player| is_suji_for(tile, player, context))
+}
+
+// いずれかのリーチ者の河に対する簡易スジ安全度。数牌なら Some、字牌なら None。
 pub fn suji_safety_rank_for_any_reached(
     tile: TileType,
     context: &GameContext,
@@ -157,7 +169,23 @@ pub fn suji_safety_rank_for_any_reached(
     }
 }
 
+// 全リーチ者の河に対する簡易スジ安全度。数牌なら Some、字牌なら None。
+pub fn suji_safety_rank_for_all_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SujiSafetyRank> {
+    if tile.is_honor() {
+        return None;
+    }
+    if is_suji_for_all_reached(tile, context) {
+        Some(SujiSafetyRank::Suji)
+    } else {
+        Some(SujiSafetyRank::NoSuji)
+    }
+}
+
 // 合法 Dahai のうち数牌のみを安全度の高い順(Suji → NoSuji)に並べる。同安全度は元の順序を保つ。
+// スジ判定は全リーチ者基準。全リーチ者に対してスジの場合だけ Suji。
 pub fn suji_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
@@ -166,7 +194,7 @@ pub fn suji_dahai_actions_by_safety<'a>(
         .iter()
         .filter_map(|action| match action {
             LegalAction::Dahai { tile } => {
-                suji_safety_rank_for_any_reached(tile.tile_type(), context)
+                suji_safety_rank_for_all_reached(tile.tile_type(), context)
                     .map(|rank| (action, rank))
             }
             _ => None,
@@ -223,7 +251,7 @@ pub enum SuitedSafetyRank {
     NoChance,
 }
 
-// リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
+// いずれかのリーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
 pub fn suited_safety_rank_for_any_reached(
     tile: TileType,
     context: &GameContext,
@@ -245,8 +273,31 @@ pub fn suited_safety_rank_for_any_reached(
     Some(rank)
 }
 
+// 全リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
+// 壁評価はスジ評価より優先する。スジは全リーチ者に対してスジの場合だけ Suji。
+pub fn suited_safety_rank_for_all_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SuitedSafetyRank> {
+    if tile.is_honor() {
+        return None;
+    }
+    let rank = match wall_rank(tile, context) {
+        WallRank::NoChance => SuitedSafetyRank::NoChance,
+        WallRank::OneChance => SuitedSafetyRank::OneChance,
+        WallRank::NoWall => {
+            if is_suji_for_all_reached(tile, context) {
+                SuitedSafetyRank::Suji
+            } else {
+                SuitedSafetyRank::NoSafety
+            }
+        }
+    };
+    Some(rank)
+}
+
 // 合法 Dahai のうち数牌のみを安全度の高い順(NoChance → OneChance → Suji → NoSafety)に並べる。
-// 同安全度は元の順序を保つ。
+// 同安全度は元の順序を保つ。スジ判定は全リーチ者基準。
 pub fn suited_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
@@ -255,7 +306,7 @@ pub fn suited_dahai_actions_by_safety<'a>(
         .iter()
         .filter_map(|action| match action {
             LegalAction::Dahai { tile } => {
-                suited_safety_rank_for_any_reached(tile.tile_type(), context)
+                suited_safety_rank_for_all_reached(tile.tile_type(), context)
                     .map(|rank| (action, rank))
             }
             _ => None,
@@ -1568,6 +1619,259 @@ mod tests {
         assert_eq!(
             select_defense_fallback_action(&context, &actions),
             Some(&LegalAction::Dahai { tile: tile(16) })
+        );
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_false_without_reachers() {
+        // 河に 4m があっても、リーチ者がいなければ false。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false; 4]);
+        assert!(!is_suji_for_all_reached(tile(0).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_single_reacher_classifies_number_tiles() {
+        // 単独リーチ者(1)の河に 4m。1m と 7m はスジ、5m は無スジ。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        assert!(is_suji_for_all_reached(tile(0).tile_type(), &context));
+        assert!(is_suji_for_all_reached(tile(24).tile_type(), &context));
+        assert!(!is_suji_for_all_reached(tile(16).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_matches_any_for_single_reacher() {
+        // 単独リーチでは any 判定と all 判定が一致する。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        for value in [0u8, 16, 24] {
+            let tile_type = tile(value).tile_type();
+            assert_eq!(
+                is_suji_for_any_reached(tile_type, &context),
+                is_suji_for_all_reached(tile_type, &context)
+            );
+        }
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_true_when_all_reachers_have_suji() {
+        // 二人のリーチ者の河にそれぞれ 4m。1m は全員にスジ。
+        let discards = [vec![], vec![tile(12)], vec![tile(13)], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, true, false]);
+        assert!(is_suji_for_all_reached(tile(0).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_false_when_only_one_reacher_has_suji() {
+        // 一人目の河にだけ 4m。any は true でも all は false(主要な回帰テスト)。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, true, false]);
+        assert!(is_suji_for_any_reached(tile(0).tile_type(), &context));
+        assert!(!is_suji_for_all_reached(tile(0).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_ignores_own_reach() {
+        // 自分(0)の河にだけ 4m。自分のリーチは対象外で、他家リーチ者(1)の河には根拠なし。
+        let discards = [vec![tile(12)], vec![], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [true, true, false, false]);
+        assert!(!is_suji_for_all_reached(tile(0).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_without_player_id_targets_all_reached() {
+        // player_id なしはリーチフラグが立っている全席を対象にする。
+        let discards = [vec![tile(12)], vec![], vec![], vec![]];
+        let context = table_state_context(None, None, discards, [true, false, false, false]);
+        assert!(is_suji_for_all_reached(tile(0).tile_type(), &context));
+    }
+
+    #[test]
+    fn is_suji_for_all_reached_false_for_honor() {
+        // 字牌はスジ判定対象外なので false。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        assert!(!is_suji_for_all_reached(tile(108).tile_type(), &context));
+    }
+
+    #[test]
+    fn suji_safety_rank_for_all_reached_none_for_honor() {
+        let context = table_state_context(
+            Some(0),
+            None,
+            Default::default(),
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(tile(108).tile_type(), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_all_reached_no_suji_when_only_one_reacher_has_suji() {
+        // 二人リーチで一人だけにスジ。all 基準では NoSuji / NoSafety。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, true, false]);
+        assert_eq!(
+            suji_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_all_reached_suji_when_all_reachers_have_suji() {
+        // 二人リーチで全員にスジ。all 基準でも Suji。
+        let discards = [vec![], vec![tile(12)], vec![tile(13)], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, true, false]);
+        assert_eq!(
+            suji_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn suited_safety_rank_for_all_reached_none_for_honor() {
+        let context = table_state_context(
+            Some(0),
+            None,
+            Default::default(),
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(108).tile_type(), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn suited_safety_rank_for_all_reached_keeps_wall_priority_over_suji() {
+        // 二人リーチで一人だけにスジの 1m でも、壁評価はスジより優先される。
+        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        // 4枚見え -> NoChance。
+        let context = suited_context(
+            vec![tile(0), tile(1), tile(2), tile(3)],
+            discards.clone(),
+            [false, true, true, false],
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::NoChance)
+        );
+        // 3枚見え -> OneChance。
+        let context = suited_context(
+            vec![tile(0), tile(1), tile(2)],
+            discards,
+            [false, true, true, false],
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::OneChance)
+        );
+    }
+
+    // 二人のリーチ者について、2m は全員にスジ・1m は一人にだけスジになる状況を作る。
+    // player1 の河: 4m(1m スジ根拠) と 5m(2m スジ根拠)。player2 の河: 5m のみ。
+    fn all_reached_partial_suji_context(visible_tiles: Vec<TileId>) -> GameContext {
+        suited_context(
+            visible_tiles,
+            [vec![], vec![tile(12), tile(16)], vec![tile(17)], vec![]],
+            [false, true, true, false],
+        )
+    }
+
+    #[test]
+    fn suji_dahai_actions_by_safety_uses_all_reached_basis() {
+        // 合法 Dahai を 1m, 2m の順で渡す。2m は全員スジ、1m は一人だけスジ。
+        let context = all_reached_partial_suji_context(vec![]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        let ranked = suji_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (&LegalAction::Dahai { tile: tile(4) }, SujiSafetyRank::Suji),
+                (
+                    &LegalAction::Dahai { tile: tile(0) },
+                    SujiSafetyRank::NoSuji
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn suited_dahai_actions_by_safety_uses_all_reached_basis() {
+        let context = all_reached_partial_suji_context(vec![]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        let ranked = suited_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(4) },
+                    SuitedSafetyRank::Suji
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(0) },
+                    SuitedSafetyRank::NoSafety
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_suited_safety_fallback_action_prefers_all_reached_suji() {
+        // 一人だけスジの 1m と全員スジの 2m がある場合、全員スジの 2m を選ぶ。
+        let context = all_reached_partial_suji_context(vec![]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        assert_eq!(
+            select_suited_safety_fallback_action(&actions, &context),
+            Some(&LegalAction::Dahai { tile: tile(4) })
+        );
+    }
+
+    #[test]
+    fn select_suited_safety_fallback_action_none_when_only_partial_suji() {
+        // 一人だけスジの牌しかなく壁もない場合は None。
+        let context = all_reached_partial_suji_context(vec![]);
+        let actions = vec![LegalAction::Dahai { tile: tile(0) }];
+        assert_eq!(
+            select_suited_safety_fallback_action(&actions, &context),
+            None
+        );
+    }
+
+    #[test]
+    fn select_defense_fallback_action_with_kind_prefers_all_reached_suji() {
+        // 共通現物なし・字牌 Dahai なし。一人だけスジと全員スジがあれば全員スジを選ぶ。
+        let context = all_reached_partial_suji_context(vec![]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(4) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(4) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
+            ))
         );
     }
 }
