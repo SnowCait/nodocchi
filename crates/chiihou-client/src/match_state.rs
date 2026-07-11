@@ -36,6 +36,7 @@ pub struct ChiihouTableSnapshot {
     pub seat_wind: Option<ChiihouWind>,
     pub player_id: Option<u8>,
     pub oya: Option<u8>,
+    pub remaining_tiles: Option<u32>,
     pub discards: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
     pub reached: [bool; CHIIHOU_PLAYER_COUNT],
 }
@@ -139,6 +140,7 @@ impl ChiihouMatchState {
                 .and_then(|(player_id, oya)| seat_wind_from_player_and_dealer(player_id, oya)),
             player_id,
             oya,
+            remaining_tiles: self.remaining_tiles,
             discards: self.discards.clone(),
             reached: self.reached,
         }
@@ -754,8 +756,22 @@ mod tests {
         assert_eq!(snapshot.seat_wind, Some(ChiihouWind::North));
         assert_eq!(snapshot.player_id, Some(0));
         assert_eq!(snapshot.oya, Some(1));
+        assert_eq!(snapshot.remaining_tiles, Some(69));
         assert_eq!(snapshot.discards[1], pais(&["1z"]));
         assert_eq!(snapshot.reached, [false, true, false, false]);
+    }
+
+    #[test]
+    fn table_snapshot_remaining_tiles_follow_tsumo_and_kyokustart() {
+        let mut state = state_in_kyoku();
+        assert_eq!(state.table_snapshot(&ai_pubkey()).remaining_tiles, None);
+        state
+            .apply_table_notification(&ai_pubkey(), &tsumo(ai_pubkey(), 42, "7z"))
+            .unwrap();
+        assert_eq!(state.table_snapshot(&ai_pubkey()).remaining_tiles, Some(42));
+        state.apply(&ChiihouLifecycleNotification::KyokuEnd);
+        state.apply(&kyokustart(1, 0));
+        assert_eq!(state.table_snapshot(&ai_pubkey()).remaining_tiles, None);
     }
 
     #[test]

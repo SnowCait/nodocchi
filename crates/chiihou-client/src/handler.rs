@@ -329,6 +329,82 @@ mod tests {
         );
     }
 
+    fn richi_sutehai_request() -> ChiihouRequest {
+        ChiihouRequest::Sutehai {
+            hand: vec![
+                pai("1m"),
+                pai("2m"),
+                pai("3m"),
+                pai("4m"),
+                pai("5m"),
+                pai("6m"),
+                pai("7m"),
+                pai("8m"),
+                pai("9m"),
+                pai("2p"),
+                pai("3p"),
+                pai("5s"),
+                pai("5s"),
+            ],
+            drawn: Some(pai("1z")),
+        }
+    }
+
+    fn richi_snapshot() -> crate::match_state::ChiihouTableSnapshot {
+        crate::match_state::ChiihouTableSnapshot {
+            player_id: Some(0),
+            remaining_tiles: Some(30),
+            ..crate::match_state::ChiihouTableSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn builds_richi_reply_from_richi_request_with_state() {
+        assert_eq!(
+            build_reply_for_request_with_state(
+                "npub1server",
+                &richi_sutehai_request(),
+                &richi_snapshot(),
+                &mut FixedActionAgent(LegalAction::Reach)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? richi 1z".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn richi_request_without_state_falls_back_to_dahai() {
+        assert_eq!(
+            build_reply_for_request(
+                "npub1server",
+                &richi_sutehai_request(),
+                &mut FixedActionAgent(LegalAction::Reach)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? sutehai 1m".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn handles_richi_content_with_state() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p2::mahjong_p3::mahjong_s5::mahjong_s5: :mahjong_east:
+nostr:npub1ai000 GET sutehai?";
+        assert_eq!(
+            handle_chiihou_content_with_state(
+                "npub1server",
+                content,
+                &richi_snapshot(),
+                &mut FixedActionAgent(LegalAction::Reach)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? richi 1z".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn handles_complete_sutehai_content_with_tsumo() {
         let content = "\

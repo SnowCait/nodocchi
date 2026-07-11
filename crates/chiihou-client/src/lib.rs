@@ -44,7 +44,7 @@ pub use decision::{
     game_context_from_naku_request_with_state, game_context_from_sutehai_request,
     game_context_from_sutehai_request_with_state, is_complete_menzen_tsumo_hand,
     legal_actions_from_naku_actions, legal_actions_from_sutehai_request,
-    legal_dahai_actions_from_sutehai_request,
+    legal_actions_from_sutehai_request_with_state, legal_dahai_actions_from_sutehai_request,
 };
 pub use event::{
     CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_BITCHAT_TELEPORT_TAG, CHIIHOU_CHANNEL_MESSAGE_KIND,
@@ -76,7 +76,7 @@ pub use protocol::{
 };
 pub use reply::{
     build_naku_no_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
-    build_sutehai_tsumo_reply_content,
+    build_sutehai_richi_reply_content, build_sutehai_tsumo_reply_content,
 };
 pub use secret::{CHIIHOU_NSEC_ENV, ChiihouSecretError, load_chiihou_nsec, validate_chiihou_nsec};
 pub use table_notification::{

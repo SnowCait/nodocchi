@@ -8,6 +8,10 @@ pub fn build_sutehai_tsumo_reply_content(server_npub: &str) -> String {
     format!("nostr:{server_npub} sutehai? tsumo")
 }
 
+pub fn build_sutehai_richi_reply_content(server_npub: &str, pai: ChiihouPai) -> String {
+    format!("nostr:{server_npub} sutehai? richi {pai}")
+}
+
 pub fn build_naku_no_reply_content(server_npub: &str) -> String {
     format!("nostr:{server_npub} naku? no")
 }
@@ -37,6 +41,18 @@ mod tests {
         assert_eq!(
             build_sutehai_tsumo_reply_content("npub1server"),
             "nostr:npub1server sutehai? tsumo"
+        );
+    }
+
+    #[test]
+    fn builds_sutehai_richi_reply_content_with_pai() {
+        assert_eq!(
+            build_sutehai_richi_reply_content("npub1server", "5p".parse().unwrap()),
+            "nostr:npub1server sutehai? richi 5p"
+        );
+        assert_eq!(
+            build_sutehai_richi_reply_content("npub1server", "1z".parse().unwrap()),
+            "nostr:npub1server sutehai? richi 1z"
         );
     }
 
