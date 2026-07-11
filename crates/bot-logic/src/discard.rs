@@ -498,14 +498,20 @@ pub fn select_best_discard_from_tiles_with_visible_tiles(
     ))
 }
 
-fn select_best(evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
-    evaluations.into_iter().reduce(|best, candidate| {
-        if is_better_discard(&candidate, &best) {
-            candidate
-        } else {
-            best
+fn best_discard_index(evaluations: &[DiscardEvaluation]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (index, candidate) in evaluations.iter().enumerate() {
+        match best {
+            Some(best_index) if !is_better_discard(candidate, &evaluations[best_index]) => {}
+            _ => best = Some(index),
         }
-    })
+    }
+    best
+}
+
+fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
+    let index = best_discard_index(&evaluations)?;
+    Some(evaluations.swap_remove(index))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,6 +608,72 @@ pub fn compare_discard_evaluations(
 
 fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) -> bool {
     compare_discard_evaluations(candidate, best).candidate_is_better
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardDecisionDiagnostic {
+    pub selected: Option<DiscardEvaluation>,
+    pub candidates: Vec<DiscardCandidateDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardCandidateDiagnostic {
+    pub evaluation: DiscardEvaluation,
+    pub selected: bool,
+    pub selected_is_strictly_better_than_candidate: bool,
+    pub comparison_reason: DiscardComparisonReason,
+    pub shape_breakdown: ShapeBreakdown,
+    pub pair_context: PairContext,
+    pub block_context: DiscardBlockContext,
+    pub floating_tile_value_breakdown: FloatingTileValue,
+}
+
+pub fn diagnose_discard_evaluations(
+    counts: &TileCounts,
+    evaluations: &[DiscardEvaluation],
+) -> DiscardDecisionDiagnostic {
+    let best_index = best_discard_index(evaluations);
+    let selected = best_index.map(|index| evaluations[index].clone());
+
+    let candidates = evaluations
+        .iter()
+        .enumerate()
+        .map(|(index, evaluation)| {
+            let is_selected = Some(index) == best_index;
+            let (selected_is_strictly_better_than_candidate, comparison_reason) = if is_selected {
+                (false, DiscardComparisonReason::StableOrder)
+            } else {
+                let selected = selected
+                    .as_ref()
+                    .expect("non-selected candidate implies a selected evaluation exists");
+                let comparison = compare_discard_evaluations(selected, evaluation);
+                if comparison.candidate_is_better {
+                    (true, comparison.reason)
+                } else {
+                    (false, DiscardComparisonReason::StableOrder)
+                }
+            };
+
+            DiscardCandidateDiagnostic {
+                evaluation: evaluation.clone(),
+                selected: is_selected,
+                selected_is_strictly_better_than_candidate,
+                comparison_reason,
+                shape_breakdown: shape_breakdown_for_discard(counts, evaluation.discard),
+                pair_context: pair_context_for_discard(counts, evaluation.discard),
+                block_context: discard_block_context(counts, evaluation.discard),
+                floating_tile_value_breakdown: floating_tile_value_breakdown_for_discard(
+                    counts,
+                    evaluation.discard,
+                ),
+            }
+        })
+        .collect();
+
+    DiscardDecisionDiagnostic {
+        selected,
+        candidates,
+    }
 }
 
 fn value_honor_count(
@@ -2924,6 +2996,242 @@ mod tests {
             compare_discard_evaluations(&candidate, &current_best).candidate_is_better,
             is_better_discard(&candidate, &current_best)
         );
+    }
+
+    fn floating_evaluation(floating: i16) -> DiscardEvaluation {
+        let mut evaluation = evaluation(1, 10, 2, 0, false);
+        evaluation.floating_tile_value = floating;
+        evaluation
+    }
+
+    fn loser_candidate(
+        winner: DiscardEvaluation,
+        loser: DiscardEvaluation,
+    ) -> DiscardCandidateDiagnostic {
+        let report = diagnose_discard_evaluations(&TileCounts::new(), &[winner, loser]);
+        assert!(report.candidates[0].selected);
+        assert!(!report.candidates[1].selected);
+        report.candidates[1].clone()
+    }
+
+    #[test]
+    fn diagnose_selected_matches_select_best_discard() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "5m", "6m", "9m", "1p", "2p", "3p", "5s", "5s", "E", "E", "W",
+        ]);
+        let evaluations = evaluate_discards(&counts);
+        let selected = select_best_discard(&counts).unwrap();
+        let report = diagnose_discard_evaluations(&counts, &evaluations);
+        assert_eq!(report.selected.as_ref(), Some(&selected));
+
+        let report_discards: Vec<_> = report
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evaluation.discard)
+            .collect();
+        assert_eq!(report_discards, discard_tiles(&evaluations));
+
+        let selected_candidates: Vec<_> = report
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.selected)
+            .collect();
+        assert_eq!(selected_candidates.len(), 1);
+        assert_eq!(selected_candidates[0].evaluation, selected);
+        assert!(!selected_candidates[0].selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            selected_candidates[0].comparison_reason,
+            DiscardComparisonReason::StableOrder
+        );
+    }
+
+    #[test]
+    fn diagnose_empty_evaluations_has_no_selection() {
+        let report = diagnose_discard_evaluations(&TileCounts::new(), &[]);
+        assert_eq!(report.selected, None);
+        assert!(report.candidates.is_empty());
+    }
+
+    #[test]
+    fn diagnose_single_candidate_is_selected() {
+        let candidate = evaluation(1, 10, 2, 0, false);
+        let report =
+            diagnose_discard_evaluations(&TileCounts::new(), std::slice::from_ref(&candidate));
+        assert_eq!(report.selected, Some(candidate.clone()));
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.candidates[0].selected);
+        assert!(!report.candidates[0].selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            report.candidates[0].comparison_reason,
+            DiscardComparisonReason::StableOrder
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_shanten_reason() {
+        let winner = evaluation(0, 10, 2, 0, false);
+        let loser = evaluation(1, 10, 2, 0, false);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::Shanten
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_acceptance_remaining_reason() {
+        let winner = evaluation(1, 20, 1, 0, false);
+        let loser = evaluation(1, 10, 1, 0, false);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_acceptance_type_count_reason() {
+        let winner = evaluation(1, 10, 3, 0, false);
+        let loser = evaluation(1, 10, 2, 0, false);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::AcceptanceTypeCount
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_shape_penalty_reason() {
+        let winner = evaluation_with_shape_penalty(1, 10, 2, 0, 0, 0, false);
+        let loser = evaluation_with_shape_penalty(1, 10, 2, 10, 0, 0, false);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::ShapePenalty
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_floating_tile_value_reason() {
+        let winner = floating_evaluation(0);
+        let loser = floating_evaluation(5);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::FloatingTileValue
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_dora_reason() {
+        let winner = evaluation(1, 10, 2, 0, false);
+        let loser = evaluation(1, 10, 2, 1, false);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(candidate.comparison_reason, DiscardComparisonReason::Dora);
+    }
+
+    #[test]
+    fn diagnose_reports_value_honor_reason() {
+        let winner = evaluation_with_value_honor(1, 10, 2, 0, 0, false);
+        let loser = evaluation_with_value_honor(1, 10, 2, 0, 1, false);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::ValueHonor
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_red_five_reason() {
+        let winner = evaluation(1, 10, 2, 0, false);
+        let loser = evaluation(1, 10, 2, 0, true);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::RedFive
+        );
+    }
+
+    #[test]
+    fn diagnose_perfect_tie_keeps_first_candidate() {
+        let first = evaluation_with_value_honor(1, 10, 2, 1, 1, true);
+        let second = evaluation_with_value_honor(1, 10, 2, 1, 1, true);
+        let report = diagnose_discard_evaluations(&TileCounts::new(), &[first.clone(), second]);
+
+        assert_eq!(report.selected, Some(first));
+        assert!(report.candidates[0].selected);
+        assert!(!report.candidates[1].selected);
+        assert!(!report.candidates[1].selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            report.candidates[1].comparison_reason,
+            DiscardComparisonReason::StableOrder
+        );
+    }
+
+    #[test]
+    fn diagnose_exposes_shape_breakdown_per_candidate() {
+        let counts = counts(&["2m", "3m", "5m", "7m", "1p", "1p"]);
+        let evaluations = evaluate_discards(&counts);
+        let report = diagnose_discard_evaluations(&counts, &evaluations);
+
+        for candidate in &report.candidates {
+            let discard = candidate.evaluation.discard;
+            assert_eq!(
+                candidate.shape_breakdown,
+                shape_breakdown_for_discard(&counts, discard)
+            );
+            assert_eq!(
+                candidate.pair_context,
+                pair_context_for_discard(&counts, discard)
+            );
+            assert_eq!(
+                candidate.block_context,
+                discard_block_context(&counts, discard)
+            );
+            assert_eq!(
+                candidate.floating_tile_value_breakdown,
+                floating_tile_value_breakdown_for_discard(&counts, discard)
+            );
+            assert_eq!(
+                candidate.evaluation.shape_penalty,
+                shape_penalty_for_discard(&counts, discard)
+            );
+        }
+
+        let ryanmen = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile("2m"))
+            .unwrap();
+        assert!(ryanmen.shape_breakdown.breaks_ryanmen);
+
+        let kanchan = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile("5m"))
+            .unwrap();
+        assert!(kanchan.shape_breakdown.breaks_kanchan);
+    }
+
+    #[test]
+    fn diagnose_does_not_modify_inputs() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+        ]);
+        let evaluations = evaluate_discards(&counts);
+        let counts_before = counts;
+        let evaluations_before = evaluations.clone();
+        let _ = diagnose_discard_evaluations(&counts, &evaluations);
+        assert_eq!(counts, counts_before);
+        assert_eq!(evaluations, evaluations_before);
     }
 
     #[test]

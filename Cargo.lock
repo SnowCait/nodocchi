@@ -189,6 +189,7 @@ name = "bot-core"
 version = "0.1.0"
 dependencies = [
  "bot-logic",
+ "tracing",
 ]
 
 [[package]]

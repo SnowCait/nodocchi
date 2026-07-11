@@ -10,8 +10,9 @@ pub use acceptance::{
     Acceptance, AcceptanceTile, calculate_acceptance, calculate_acceptance_with_visible_tiles,
 };
 pub use discard::{
-    DiscardBlockContext, DiscardComparison, DiscardComparisonReason, DiscardEvaluation,
-    FloatingTileValue, HandShapeSummary, PairContext, ShapeBreakdown, compare_discard_evaluations,
+    DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
+    DiscardDecisionDiagnostic, DiscardEvaluation, FloatingTileValue, HandShapeSummary, PairContext,
+    ShapeBreakdown, compare_discard_evaluations, diagnose_discard_evaluations,
     discard_block_context, evaluate_discards, evaluate_discards_from_tiles,
     evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_dora,
     evaluate_discards_from_tiles_with_visible_tiles, evaluate_discards_with_visible_tiles,
