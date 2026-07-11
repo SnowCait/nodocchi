@@ -492,7 +492,10 @@ pub fn select_best_discard_from_tiles_with_dora(
     tiles: &[TileId],
     dora_indicators: &[TileId],
 ) -> Option<DiscardEvaluation> {
-    select_best_discard_from_tiles_with_context(tiles, dora_indicators, None, None)
+    select_best(evaluate_discards_from_tiles_with_dora(
+        tiles,
+        dora_indicators,
+    ))
 }
 
 pub fn select_best_discard_from_tiles_with_context(
@@ -3001,6 +3004,43 @@ mod tests {
             .find(|evaluation| evaluation.discard == tile("C"))
             .unwrap();
         assert_eq!(dragon_dora.shape_penalty, base);
+    }
+
+    #[test]
+    fn select_context_free_omits_value_honor_triplet_penalty() {
+        // 中刻子だけの入力: context なし selector は追加 penalty を適用しない
+        let tiles = ids(&[132, 133, 134]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let expected = shape_penalty_for_discard(&counts, tile("C"));
+
+        let selected = select_best_discard_from_tiles(&tiles).expect("candidate should exist");
+        assert_eq!(selected.discard, tile("C"));
+        assert_eq!(selected.shape_penalty, expected);
+
+        let selected =
+            select_best_discard_from_tiles_with_dora(&tiles, &[]).expect("candidate should exist");
+        assert_eq!(selected.discard, tile("C"));
+        assert_eq!(selected.shape_penalty, expected);
+
+        // context 付き selector では引き続き追加 penalty が適用される
+        let selected = select_best_discard_from_tiles_with_context(&tiles, &[], None, None)
+            .expect("candidate should exist");
+        assert_eq!(
+            selected.shape_penalty,
+            expected + VALUE_HONOR_TRIPLET_PENALTY
+        );
+    }
+
+    #[test]
+    fn select_with_dora_matches_evaluate_with_dora() {
+        // selector の戻り値は evaluate 一覧から既存比較順で選ばれた候補と一致する
+        let tiles = ids(&[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 132, 133, 134]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let expected = select_best(evaluations.clone()).expect("candidate should exist");
+        let selected =
+            select_best_discard_from_tiles_with_dora(&tiles, &[]).expect("candidate should exist");
+        assert_eq!(selected, expected);
+        assert!(evaluations.contains(&selected));
     }
 
     #[test]
