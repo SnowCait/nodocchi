@@ -1,6 +1,6 @@
 use nostr_sdk::PublicKey;
 
-use crate::lifecycle::{CHIIHOU_PLAYER_COUNT, ChiihouLifecycleNotification};
+use crate::lifecycle::ChiihouLifecycleNotification;
 use crate::match_state::{ChiihouMatchState, ChiihouTableSnapshot, ChiihouTableStateError};
 use crate::table_notification::ChiihouTableNotification;
 
@@ -15,14 +15,16 @@ pub(crate) enum ChiihouLifecycleEffect {
 pub(crate) struct ChiihouLifecycleController {
     ai_pubkey: PublicKey,
     match_state: ChiihouMatchState,
+    auto_next: bool,
     next_sent_for_current_kyoku: bool,
 }
 
 impl ChiihouLifecycleController {
-    pub(crate) fn new(ai_pubkey: PublicKey) -> Self {
+    pub(crate) fn new(ai_pubkey: PublicKey, auto_next: bool) -> Self {
         Self {
             ai_pubkey,
             match_state: ChiihouMatchState::new(),
+            auto_next,
             next_sent_for_current_kyoku: false,
         }
     }
@@ -56,29 +58,12 @@ impl ChiihouLifecycleController {
     }
 
     fn kyoku_end_effect(&mut self) -> ChiihouLifecycleEffect {
-        if self.next_sent_for_current_kyoku {
-            return ChiihouLifecycleEffect::None;
-        }
-        let Some(coordinator) = select_chiihou_next_coordinator(self.match_state.players()) else {
-            tracing::warn!(
-                player_count = self.match_state.players().len(),
-                "cannot select chiihou next coordinator"
-            );
-            return ChiihouLifecycleEffect::None;
-        };
-        if coordinator != self.ai_pubkey {
+        if !self.auto_next || self.next_sent_for_current_kyoku {
             return ChiihouLifecycleEffect::None;
         }
         self.next_sent_for_current_kyoku = true;
         ChiihouLifecycleEffect::PublishNext
     }
-}
-
-pub(crate) fn select_chiihou_next_coordinator(players: &[PublicKey]) -> Option<PublicKey> {
-    if players.len() != CHIIHOU_PLAYER_COUNT {
-        return None;
-    }
-    players.iter().min().copied()
 }
 
 #[cfg(test)]
@@ -99,14 +84,6 @@ mod tests {
 
     fn players(indexes: impl IntoIterator<Item = u64>) -> Vec<PublicKey> {
         indexes.into_iter().map(player_pubkey).collect()
-    }
-
-    fn min_player(players: &[PublicKey]) -> PublicKey {
-        players
-            .iter()
-            .min_by_key(|player| player.to_hex())
-            .copied()
-            .unwrap()
     }
 
     fn gamestart(players: Vec<PublicKey>) -> ChiihouLifecycleNotification {
@@ -136,95 +113,24 @@ mod tests {
         }
     }
 
-    fn coordinator_controller() -> ChiihouLifecycleController {
-        let players = players(1..=4);
-        let mut controller = ChiihouLifecycleController::new(min_player(&players));
-        controller.apply(&gamestart(players));
+    fn controller_in_kyoku(ai_index: u64, auto_next: bool) -> ChiihouLifecycleController {
+        let mut controller = ChiihouLifecycleController::new(player_pubkey(ai_index), auto_next);
+        controller.apply(&gamestart(players(1..=4)));
         controller.apply(&kyokustart());
         controller
-    }
-
-    fn non_coordinator_controller() -> ChiihouLifecycleController {
-        let players = players(1..=4);
-        let non_coordinator = players
-            .iter()
-            .find(|player| **player != min_player(&players))
-            .copied()
-            .unwrap();
-        let mut controller = ChiihouLifecycleController::new(non_coordinator);
-        controller.apply(&gamestart(players));
-        controller.apply(&kyokustart());
-        controller
-    }
-
-    #[test]
-    fn selects_exactly_one_coordinator_among_four_players() {
-        let players = players(1..=4);
-        let coordinator = select_chiihou_next_coordinator(&players).unwrap();
-        let selected: Vec<PublicKey> = players
-            .iter()
-            .filter(|player| select_chiihou_next_coordinator(&players) == Some(**player))
-            .copied()
-            .collect();
-        assert_eq!(selected, vec![coordinator]);
-    }
-
-    #[test]
-    fn coordinator_does_not_depend_on_player_order() {
-        let base = players(1..=4);
-        let expected = select_chiihou_next_coordinator(&base);
-        let reordered = vec![base[2], base[0], base[3], base[1]];
-        assert_eq!(select_chiihou_next_coordinator(&reordered), expected);
-    }
-
-    #[test]
-    fn coordinator_is_lexicographically_smallest_hex_pubkey() {
-        let players = players([7, 3, 9, 5]);
-        assert_eq!(
-            select_chiihou_next_coordinator(&players),
-            Some(min_player(&players))
-        );
-    }
-
-    #[test]
-    fn no_coordinator_for_empty_players() {
-        assert_eq!(select_chiihou_next_coordinator(&[]), None);
-    }
-
-    #[test]
-    fn no_coordinator_for_wrong_player_count() {
-        assert_eq!(select_chiihou_next_coordinator(&players(1..=3)), None);
-        assert_eq!(select_chiihou_next_coordinator(&players(1..=5)), None);
-    }
-
-    #[test]
-    fn ai_outside_player_list_is_not_coordinator() {
-        let players = players(2..=5);
-        let outsider = player_pubkey(1);
-        assert!(!players.contains(&outsider));
-        assert_ne!(select_chiihou_next_coordinator(&players), Some(outsider));
     }
 
     #[test]
     fn gamestart_holds_players_in_match_state() {
-        let mut controller = ChiihouLifecycleController::new(player_pubkey(1));
+        let mut controller = ChiihouLifecycleController::new(player_pubkey(1), false);
         let effect = controller.apply(&gamestart(players(1..=4)));
         assert_eq!(effect, ChiihouLifecycleEffect::None);
         assert_eq!(controller.match_state.players(), players(1..=4));
     }
 
     #[test]
-    fn coordinator_kyokuend_publishes_next() {
-        let mut controller = coordinator_controller();
-        assert_eq!(
-            controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
-            ChiihouLifecycleEffect::PublishNext
-        );
-    }
-
-    #[test]
-    fn non_coordinator_kyokuend_does_not_publish_next() {
-        let mut controller = non_coordinator_controller();
+    fn kyokuend_with_auto_next_disabled_is_none() {
+        let mut controller = controller_in_kyoku(1, false);
         assert_eq!(
             controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
             ChiihouLifecycleEffect::None
@@ -232,8 +138,102 @@ mod tests {
     }
 
     #[test]
+    fn repeated_kyokuend_with_auto_next_disabled_is_always_none() {
+        let mut controller = controller_in_kyoku(1, false);
+        for _ in 0..3 {
+            assert_eq!(
+                controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+                ChiihouLifecycleEffect::None
+            );
+        }
+    }
+
+    #[test]
+    fn kyokuend_with_auto_next_disabled_updates_phase() {
+        let mut controller = controller_in_kyoku(1, false);
+        controller.apply(&ChiihouLifecycleNotification::KyokuEnd);
+        assert_eq!(
+            controller.match_state.phase(),
+            ChiihouMatchPhase::WaitingNext
+        );
+    }
+
+    #[test]
+    fn kyokuend_with_auto_next_enabled_publishes_next() {
+        let mut controller = controller_in_kyoku(1, true);
+        assert_eq!(
+            controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+            ChiihouLifecycleEffect::PublishNext
+        );
+    }
+
+    #[test]
+    fn all_auto_next_clients_publish_next_regardless_of_pubkey_order() {
+        for ai_index in 1..=4 {
+            let mut controller = controller_in_kyoku(ai_index, true);
+            assert_eq!(
+                controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+                ChiihouLifecycleEffect::PublishNext,
+                "ai_index: {ai_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_auto_next_enabled_clients_publish_next() {
+        let expectations = [
+            (1, true, ChiihouLifecycleEffect::PublishNext),
+            (2, false, ChiihouLifecycleEffect::None),
+            (3, false, ChiihouLifecycleEffect::None),
+            (4, true, ChiihouLifecycleEffect::PublishNext),
+        ];
+        for (ai_index, auto_next, expected) in expectations {
+            let mut controller = controller_in_kyoku(ai_index, auto_next);
+            assert_eq!(
+                controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+                expected,
+                "ai_index: {ai_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn kyokuend_without_gamestart_publishes_next_when_auto_next_enabled() {
+        let mut controller = ChiihouLifecycleController::new(player_pubkey(1), true);
+        assert_eq!(
+            controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+            ChiihouLifecycleEffect::PublishNext
+        );
+    }
+
+    #[test]
+    fn kyokuend_with_three_players_publishes_next_when_auto_next_enabled() {
+        let mut controller = ChiihouLifecycleController::new(player_pubkey(1), true);
+        controller.apply(&gamestart(players(1..=3)));
+        controller.apply(&kyokustart());
+        assert_eq!(
+            controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+            ChiihouLifecycleEffect::PublishNext
+        );
+    }
+
+    #[test]
+    fn kyokuend_with_ai_outside_players_publishes_next_when_auto_next_enabled() {
+        let outsider = player_pubkey(9);
+        let listed = players(1..=4);
+        assert!(!listed.contains(&outsider));
+        let mut controller = ChiihouLifecycleController::new(outsider, true);
+        controller.apply(&gamestart(listed));
+        controller.apply(&kyokustart());
+        assert_eq!(
+            controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
+            ChiihouLifecycleEffect::PublishNext
+        );
+    }
+
+    #[test]
     fn second_kyokuend_in_same_kyoku_does_not_publish_next() {
-        let mut controller = coordinator_controller();
+        let mut controller = controller_in_kyoku(1, true);
         assert_eq!(
             controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
             ChiihouLifecycleEffect::PublishNext
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn kyokustart_resets_next_sent_state() {
-        let mut controller = coordinator_controller();
+        let mut controller = controller_in_kyoku(1, true);
         controller.apply(&ChiihouLifecycleNotification::KyokuEnd);
         assert_eq!(
             controller.apply(&kyokustart()),
@@ -259,17 +259,17 @@ mod tests {
     }
 
     #[test]
-    fn kyokuend_without_players_does_not_publish_next() {
-        let mut controller = ChiihouLifecycleController::new(player_pubkey(1));
+    fn gameend_requests_end_game_when_auto_next_disabled() {
+        let mut controller = controller_in_kyoku(1, false);
         assert_eq!(
-            controller.apply(&ChiihouLifecycleNotification::KyokuEnd),
-            ChiihouLifecycleEffect::None
+            controller.apply(&gameend()),
+            ChiihouLifecycleEffect::EndGame
         );
     }
 
     #[test]
-    fn gameend_requests_end_game() {
-        let mut controller = coordinator_controller();
+    fn gameend_requests_end_game_when_auto_next_enabled() {
+        let mut controller = controller_in_kyoku(1, true);
         assert_eq!(
             controller.apply(&gameend()),
             ChiihouLifecycleEffect::EndGame
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn gameend_does_not_publish_next() {
-        let mut controller = coordinator_controller();
+        let mut controller = controller_in_kyoku(1, true);
         assert_ne!(
             controller.apply(&gameend()),
             ChiihouLifecycleEffect::PublishNext
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn phase_after_gameend_is_ended() {
-        let mut controller = coordinator_controller();
+        let mut controller = controller_in_kyoku(1, false);
         controller.apply(&gameend());
         assert_eq!(controller.match_state.phase(), ChiihouMatchPhase::Ended);
     }

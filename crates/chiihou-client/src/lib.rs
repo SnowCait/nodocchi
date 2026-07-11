@@ -85,9 +85,11 @@ pub use table_notification::{
 };
 
 pub use runtime::{
-    ChiihouRuntimeError, build_chiihou_request_filter, connect_chiihou_client,
-    process_and_sign_nostr_event, publish_chiihou_event, publish_chiihou_reply, run_chiihou_client,
-    run_chiihou_client_auto_enter, subscribe_chiihou_requests,
+    ChiihouRuntimeError, ChiihouRuntimeOptions, build_chiihou_request_filter,
+    connect_chiihou_client, process_and_sign_nostr_event, publish_chiihou_event,
+    publish_chiihou_reply, run_chiihou_client, run_chiihou_client_auto_enter,
+    run_chiihou_client_auto_enter_with_options, run_chiihou_client_with_options,
+    subscribe_chiihou_requests,
 };
 pub use status::{
     CHIIHOU_STATUS_FETCH_TIMEOUT, CHIIHOU_STATUS_KIND, ChiihouStartupCommand, ChiihouStatusError,

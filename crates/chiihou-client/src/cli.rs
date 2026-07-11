@@ -4,7 +4,7 @@ use nostr_sdk::{FromBech32, PublicKey};
 use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
 use crate::secret::{ChiihouSecretError, validate_chiihou_nsec};
 
-pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>]";
+pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChiihouAgentKind {
@@ -46,6 +46,7 @@ pub struct ChiihouCliArgs {
     pub server_npub: Option<String>,
     pub channel: ChiihouChannel,
     pub agent: ChiihouAgentKind,
+    pub auto_next: bool,
 }
 
 impl ChiihouCliArgs {
@@ -57,6 +58,7 @@ impl ChiihouCliArgs {
         let mut server_npub = None;
         let mut channel = None;
         let mut agent = None;
+        let mut auto_next = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -88,6 +90,12 @@ impl ChiihouCliArgs {
                             .map_err(|_| ChiihouCliError::UnknownAgent(value))?,
                     );
                 }
+                "--auto-next" => {
+                    if auto_next {
+                        return Err(ChiihouCliError::DuplicateOption("--auto-next"));
+                    }
+                    auto_next = true;
+                }
                 other => return Err(ChiihouCliError::UnknownOption(other.to_string())),
             }
         }
@@ -96,6 +104,7 @@ impl ChiihouCliArgs {
             server_npub,
             channel: channel.ok_or(ChiihouCliError::ChannelRequired)?,
             agent: agent.unwrap_or_default(),
+            auto_next,
         })
     }
 }
@@ -222,6 +231,79 @@ mod tests {
         assert_eq!(args.server_npub, None);
         assert_eq!(args.channel, ChiihouChannel::Hanchan);
         assert_eq!(args.agent, ChiihouAgentKind::Normal);
+        assert!(!args.auto_next);
+    }
+
+    #[test]
+    fn auto_next_defaults_to_false() {
+        let args = parse(&["--channel", "hanchan"]).unwrap();
+        assert!(!args.auto_next);
+        let args = parse(&["--channel", "tonpuu", "--agent", "shanten"]).unwrap();
+        assert!(!args.auto_next);
+    }
+
+    #[test]
+    fn parses_auto_next_flag() {
+        let args = parse(&["--channel", "hanchan", "--auto-next"]).unwrap();
+        assert!(args.auto_next);
+        assert_eq!(args.channel, ChiihouChannel::Hanchan);
+    }
+
+    #[test]
+    fn parses_auto_next_before_other_options() {
+        let args = parse(&["--auto-next", "--channel", "tonpuu"]).unwrap();
+        assert!(args.auto_next);
+        assert_eq!(args.channel, ChiihouChannel::Tonpuu);
+    }
+
+    #[test]
+    fn parses_auto_next_with_agent_in_any_order() {
+        let args = parse(&["--channel", "hanchan", "--agent", "shanten", "--auto-next"]).unwrap();
+        assert!(args.auto_next);
+        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
+        let args = parse(&["--agent", "shanten", "--auto-next", "--channel", "hanchan"]).unwrap();
+        assert!(args.auto_next);
+        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
+        assert_eq!(args.channel, ChiihouChannel::Hanchan);
+    }
+
+    #[test]
+    fn rejects_duplicate_auto_next() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--auto-next", "--auto-next"]),
+            Err(ChiihouCliError::DuplicateOption("--auto-next"))
+        );
+    }
+
+    #[test]
+    fn rejects_auto_next_with_inline_value() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--auto-next=true"]),
+            Err(ChiihouCliError::UnknownOption(
+                "--auto-next=true".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_no_auto_next() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--no-auto-next"]),
+            Err(ChiihouCliError::UnknownOption("--no-auto-next".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_auto_next_with_separate_value() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--auto-next", "false"]),
+            Err(ChiihouCliError::UnknownOption("false".to_string()))
+        );
+    }
+
+    #[test]
+    fn usage_mentions_auto_next() {
+        assert!(USAGE.contains("--auto-next"));
     }
 
     #[test]
@@ -525,6 +607,7 @@ mod tests {
             server_npub: Some(server_npub()),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
+            auto_next: false,
         };
         let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
         let expected = Keys::parse(TEST_AI_SECRET_KEY_HEX).unwrap();
@@ -541,6 +624,7 @@ mod tests {
             server_npub: None,
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
+            auto_next: false,
         };
         let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
         assert_eq!(config.event_config().server_npub, CHIIHOU_SERVER_NPUB);
@@ -552,6 +636,7 @@ mod tests {
             server_npub: Some(server_nprofile()),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
+            auto_next: false,
         };
         let config = build_cli_nostr_config(&ai_nsec(), &args).unwrap();
         assert_eq!(config.event_config().server_npub, server_npub());
@@ -563,6 +648,7 @@ mod tests {
             server_npub: Some(server_npub()),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
+            auto_next: false,
         };
         let result = build_cli_nostr_config(TEST_AI_SECRET_KEY_HEX, &args);
         assert!(matches!(
@@ -583,6 +669,7 @@ mod tests {
             server_npub: Some(hex),
             channel: ChiihouChannel::Hanchan,
             agent: ChiihouAgentKind::Normal,
+            auto_next: false,
         };
         let result = build_cli_nostr_config(&ai_nsec(), &args);
         assert!(matches!(
