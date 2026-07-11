@@ -81,10 +81,33 @@ cargo run -p chiihou-client --bin chiihou-client -- \
   --auto-next
 ```
 
+応答 publish 前に遅延を入れる場合:
+
+```bash
+CHIIHOU_NSEC=nsec1... \
+RUST_LOG=info \
+cargo run -p chiihou-client --bin chiihou-client -- \
+  --channel hanchan \
+  --agent shanten \
+  --response-delay-ms 1000
+```
+
+自動 next と併用する場合:
+
+```bash
+CHIIHOU_NSEC=nsec1... \
+RUST_LOG=info \
+cargo run -p chiihou-client --bin chiihou-client -- \
+  --channel hanchan \
+  --agent shanten \
+  --auto-next \
+  --response-delay-ms 5000
+```
+
 ### 引数
 
 ```text
-usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next]
+usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]
 ```
 
 | 引数 | 必須 | 内容 |
@@ -93,6 +116,9 @@ usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shant
 | `--agent` | 任意 | `normal`、`tsumogiri`、`shanten`。既定値は `normal` |
 | `--server-npub` | 任意 | server の NIP-19 `npub` または `nprofile`。省略時は既定 server |
 | `--auto-next` | 任意 | 局終了ごとに `next` を 1 回送信する。省略時は送信しない |
+| `--response-delay-ms` | 任意 | 応答 event を publish する前の遅延（ミリ秒）。既定値は `0`（遅延なし） |
+
+`--response-delay-ms` は、publish の集中を緩和するため、GET reply と自動 next の送信前に任意の遅延を設定できます。
 
 既定 server:
 

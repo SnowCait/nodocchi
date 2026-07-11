@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = build_cli_nostr_config(&nsec, &args)?;
     let options = ChiihouRuntimeOptions {
         auto_next: args.auto_next,
+        response_delay: args.response_delay(),
     };
 
     let server_source = if args.server_npub.is_some() {
@@ -38,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         channel = %args.channel,
         agent = %args.agent,
         auto_next = args.auto_next,
+        response_delay_ms = args.response_delay_ms,
         relay_count = config.relay_urls().len(),
         server_source,
         "starting chiihou client"
