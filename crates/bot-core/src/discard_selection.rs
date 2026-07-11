@@ -1,8 +1,13 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::{
-    select_best_discard_from_tiles_with_context, select_best_discard_from_tiles_with_visible_tiles,
+    DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation, TileCounts, TileId,
+    diagnose_discard_evaluations, evaluate_discards_from_tiles_with_context,
+    evaluate_discards_from_tiles_with_visible_tiles, select_best_discard_from_tiles_with_context,
+    select_best_discard_from_tiles_with_visible_tiles,
 };
+
+const LOG_TARGET: &str = "bot_core::discard_selection";
 
 pub fn select_discard_action(
     context: &GameContext,
@@ -15,21 +20,10 @@ pub fn select_discard_action(
         .chain(context.drawn_tile())
         .collect();
 
-    let selected = if context.visible_tiles().is_empty() {
-        select_best_discard_from_tiles_with_context(
-            &tiles,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-        )
+    let selected = if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        select_best_discard_with_diagnostics(context, &tiles)
     } else {
-        select_best_discard_from_tiles_with_visible_tiles(
-            &tiles,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-            context.visible_tiles(),
-        )
+        select_best_discard(context, &tiles)
     };
     let selected_type = selected?.discard;
 
@@ -49,6 +43,152 @@ pub fn select_discard_action(
     }
 
     red_fallback
+}
+
+fn select_best_discard(context: &GameContext, tiles: &[TileId]) -> Option<DiscardEvaluation> {
+    if context.visible_tiles().is_empty() {
+        select_best_discard_from_tiles_with_context(
+            tiles,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+        )
+    } else {
+        select_best_discard_from_tiles_with_visible_tiles(
+            tiles,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+            context.visible_tiles(),
+        )
+    }
+}
+
+fn select_best_discard_with_diagnostics(
+    context: &GameContext,
+    tiles: &[TileId],
+) -> Option<DiscardEvaluation> {
+    let evaluations = if context.visible_tiles().is_empty() {
+        evaluate_discards_from_tiles_with_context(
+            tiles,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+        )
+    } else {
+        evaluate_discards_from_tiles_with_visible_tiles(
+            tiles,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+            context.visible_tiles(),
+        )
+    };
+
+    let counts = TileCounts::from_tiles(tiles.iter().copied());
+    let diagnostic = diagnose_discard_evaluations(&counts, &evaluations);
+    log_discard_diagnostic(context, tiles, &diagnostic);
+    diagnostic.selected
+}
+
+fn tiles_to_mjai(tiles: &[TileId]) -> String {
+    tiles
+        .iter()
+        .map(|tile| tile.to_mjai_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn log_discard_diagnostic(
+    context: &GameContext,
+    tiles: &[TileId],
+    diagnostic: &DiscardDecisionDiagnostic,
+) {
+    let Some(selected) = diagnostic.selected.as_ref() else {
+        return;
+    };
+
+    let hand_tiles = tiles_to_mjai(context.hand_tiles());
+    let all_tiles = tiles_to_mjai(tiles);
+    let drawn_tile = context.drawn_tile().map(|tile| tile.to_mjai_string());
+    let dora_indicators = tiles_to_mjai(context.dora_indicators());
+    let round_wind = context.round_wind().map(|wind| wind.to_mjai_string());
+    let seat_wind = context.seat_wind().map(|wind| wind.to_mjai_string());
+
+    tracing::debug!(
+        target: LOG_TARGET,
+        hand_tiles = %hand_tiles,
+        drawn_tile = ?drawn_tile,
+        all_tiles = %all_tiles,
+        dora_indicators = %dora_indicators,
+        round_wind = ?round_wind,
+        seat_wind = ?seat_wind,
+        visible_tile_count = context.visible_tiles().len(),
+        candidate_count = diagnostic.candidates.len(),
+        selected_discard = %selected.discard.to_mjai_string(),
+        selected_standard_shanten = selected.shanten_after_discard.standard,
+        selected_chiitoitsu_shanten = selected.shanten_after_discard.chiitoitsu,
+        selected_kokushi_shanten = selected.shanten_after_discard.kokushi,
+        selected_min_shanten = selected.min_shanten_after_discard(),
+        selected_acceptance_total_remaining = selected.acceptance_total_remaining(),
+        selected_acceptance_type_count = selected.acceptance_type_count(),
+        selected_shape_penalty = selected.shape_penalty,
+        selected_floating_tile_value = selected.floating_tile_value,
+        selected_discarded_dora_count = selected.discarded_dora_count,
+        selected_discarded_value_honor_count = selected.discarded_value_honor_count,
+        selected_discards_red_five = selected.discards_red_five,
+        "discard decision",
+    );
+
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
+        for candidate in &diagnostic.candidates {
+            log_discard_candidate(candidate);
+        }
+    }
+}
+
+fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
+    let evaluation = &candidate.evaluation;
+    let acceptance_tiles = evaluation
+        .acceptance_after_discard
+        .tiles
+        .iter()
+        .map(|tile| {
+            format!(
+                "{}:{}:{}",
+                tile.tile.to_mjai_string(),
+                tile.remaining,
+                tile.shanten_after_draw.min()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    tracing::trace!(
+        target: LOG_TARGET,
+        discard = %evaluation.discard.to_mjai_string(),
+        selected = candidate.selected,
+        selected_is_strictly_better_than_candidate =
+            candidate.selected_is_strictly_better_than_candidate,
+        comparison_reason = ?candidate.comparison_reason,
+        count_before_discard = evaluation.count_before_discard,
+        standard_shanten_after_discard = evaluation.shanten_after_discard.standard,
+        chiitoitsu_shanten_after_discard = evaluation.shanten_after_discard.chiitoitsu,
+        kokushi_shanten_after_discard = evaluation.shanten_after_discard.kokushi,
+        min_shanten_after_discard = evaluation.min_shanten_after_discard(),
+        acceptance_total_remaining = evaluation.acceptance_total_remaining(),
+        acceptance_type_count = evaluation.acceptance_type_count(),
+        acceptance_tiles = ?acceptance_tiles,
+        shape_penalty = evaluation.shape_penalty,
+        floating_tile_value = evaluation.floating_tile_value,
+        discarded_dora_count = evaluation.discarded_dora_count,
+        discarded_value_honor_count = evaluation.discarded_value_honor_count,
+        discards_red_five = evaluation.discards_red_five,
+        shape_breakdown = ?candidate.shape_breakdown,
+        pair_context = ?candidate.pair_context,
+        block_context = ?candidate.block_context,
+        floating_tile_value_breakdown = ?candidate.floating_tile_value_breakdown,
+        "discard candidate",
+    );
 }
 
 #[cfg(test)]
@@ -395,6 +535,55 @@ mod tests {
             panic!("expected dahai");
         };
         assert_eq!(tile.tile_type().to_mjai_string(), "1p");
+    }
+
+    #[test]
+    fn diagnostics_path_selects_same_discard_as_normal_path() {
+        let hand_values = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts_with_context(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+            vec![tile(12)],
+            Some(bot_logic::TileType::new(27).unwrap()),
+            Some(bot_logic::TileType::new(28).unwrap()),
+        );
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+
+        let normal = select_best_discard(&context, &tiles);
+        let diagnostic = select_best_discard_with_diagnostics(&context, &tiles);
+        assert_eq!(normal, diagnostic);
+        assert!(normal.is_some());
+    }
+
+    #[test]
+    fn diagnostics_path_matches_normal_path_with_visible_tiles() {
+        let hand = tiles(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36]);
+        let mut visible = hand.clone();
+        visible.extend(tiles(&[68, 69, 70, 71]));
+        let context = GameContext::from_parts_with_visible_tiles(
+            Some(tile(68)),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+        );
+        let all_tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+
+        let normal = select_best_discard(&context, &all_tiles);
+        let diagnostic = select_best_discard_with_diagnostics(&context, &all_tiles);
+        assert_eq!(normal, diagnostic);
+        assert!(normal.is_some());
     }
 
     #[test]

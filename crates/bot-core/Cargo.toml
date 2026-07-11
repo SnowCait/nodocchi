@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 bot-logic = { path = "../bot-logic" }
+tracing = "0.1"
