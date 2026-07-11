@@ -20,7 +20,7 @@ pub use discard::{
     pair_context_for_discard, select_best_discard, select_best_discard_from_tiles,
     select_best_discard_from_tiles_with_context, select_best_discard_from_tiles_with_dora,
     select_best_discard_from_tiles_with_visible_tiles, select_best_discard_with_visible_tiles,
-    shape_breakdown_for_discard, shape_penalty_for_discard,
+    shape_breakdown_for_discard, shape_penalty_for_discard, shape_penalty_for_discard_with_context,
 };
 pub use hand::{Hand, HandError};
 pub use iishanten::{IishantenShape, classify_standard_iishanten_shape};

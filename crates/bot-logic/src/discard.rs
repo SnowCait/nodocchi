@@ -326,8 +326,31 @@ pub fn discard_block_context(counts: &TileCounts, discard: TileType) -> DiscardB
     }
 }
 
+const VALUE_HONOR_TRIPLET_PENALTY: i16 = 15;
+
 pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
     let breakdown = shape_breakdown_for_discard(counts, discard);
+    shape_penalty_for_discard_impl(counts, discard, &breakdown, false)
+}
+
+pub fn shape_penalty_for_discard_with_context(
+    counts: &TileCounts,
+    discard: TileType,
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> i16 {
+    let breakdown = shape_breakdown_for_discard(counts, discard);
+    let breaks_value_honor_triplet =
+        breakdown.breaks_triplet && discard.is_value_honor(round_wind, seat_wind);
+    shape_penalty_for_discard_impl(counts, discard, &breakdown, breaks_value_honor_triplet)
+}
+
+fn shape_penalty_for_discard_impl(
+    counts: &TileCounts,
+    discard: TileType,
+    breakdown: &ShapeBreakdown,
+    breaks_value_honor_triplet: bool,
+) -> i16 {
     let mut penalty = 0i16;
     if breakdown.breaks_sequence {
         penalty += 40;
@@ -392,6 +415,10 @@ pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 
         } else {
             penalty += 4;
         }
+    }
+
+    if breaks_value_honor_triplet {
+        penalty += VALUE_HONOR_TRIPLET_PENALTY;
     }
 
     penalty.max(0)
@@ -465,7 +492,10 @@ pub fn select_best_discard_from_tiles_with_dora(
     tiles: &[TileId],
     dora_indicators: &[TileId],
 ) -> Option<DiscardEvaluation> {
-    select_best_discard_from_tiles_with_context(tiles, dora_indicators, None, None)
+    select_best(evaluate_discards_from_tiles_with_dora(
+        tiles,
+        dora_indicators,
+    ))
 }
 
 pub fn select_best_discard_from_tiles_with_context(
@@ -782,7 +812,18 @@ pub fn evaluate_discards_from_tiles_with_dora(
     tiles: &[TileId],
     dora_indicators: &[TileId],
 ) -> Vec<DiscardEvaluation> {
-    evaluate_discards_from_tiles_with_context(tiles, dora_indicators, None, None)
+    let counts = TileCounts::from_tiles(tiles.iter().copied());
+    let mut evaluations = evaluate_discards(&counts);
+    decorate_evaluations(
+        &mut evaluations,
+        &counts,
+        tiles,
+        dora_indicators,
+        None,
+        None,
+        ShapePenaltyMode::ContextFree,
+    );
+    evaluations
 }
 
 pub fn evaluate_discards_from_tiles_with_context(
@@ -795,10 +836,15 @@ pub fn evaluate_discards_from_tiles_with_context(
     let mut evaluations = evaluate_discards(&counts);
     decorate_evaluations(
         &mut evaluations,
+        &counts,
         tiles,
         dora_indicators,
         round_wind,
         seat_wind,
+        ShapePenaltyMode::WithContext {
+            round_wind,
+            seat_wind,
+        },
     );
     evaluations
 }
@@ -814,20 +860,35 @@ pub fn evaluate_discards_from_tiles_with_visible_tiles(
     let mut evaluations = evaluate_discards_with_visible_tiles(&counts, visible_tiles);
     decorate_evaluations(
         &mut evaluations,
+        &counts,
         tiles,
         dora_indicators,
         round_wind,
         seat_wind,
+        ShapePenaltyMode::WithContext {
+            round_wind,
+            seat_wind,
+        },
     );
     evaluations
 }
 
+enum ShapePenaltyMode {
+    ContextFree,
+    WithContext {
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+    },
+}
+
 fn decorate_evaluations(
     evaluations: &mut [DiscardEvaluation],
+    counts: &TileCounts,
     tiles: &[TileId],
     dora_indicators: &[TileId],
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
+    shape_penalty_mode: ShapePenaltyMode,
 ) {
     for evaluation in evaluations {
         let discarded_tile = discarded_tile_id_for_type(evaluation.discard, tiles);
@@ -837,6 +898,18 @@ fn decorate_evaluations(
             .unwrap_or(0);
         evaluation.discarded_value_honor_count =
             value_honor_count(evaluation.discard, round_wind, seat_wind);
+        if let ShapePenaltyMode::WithContext {
+            round_wind,
+            seat_wind,
+        } = shape_penalty_mode
+        {
+            evaluation.shape_penalty = shape_penalty_for_discard_with_context(
+                counts,
+                evaluation.discard,
+                round_wind,
+                seat_wind,
+            );
+        }
     }
 }
 
@@ -2637,6 +2710,366 @@ mod tests {
                 assert!(shape_penalty_for_discard(&hand, tile) >= 0);
             }
         }
+    }
+
+    #[test]
+    fn context_free_shape_penalty_unchanged_for_honor_triplets() {
+        // context なし API では場風・自風・客風・三元牌の区別なく同一値
+        for name in ["E", "S", "W", "N", "P", "F", "C"] {
+            assert_eq!(
+                shape_penalty_for_discard(&counts(&[name, name, name]), tile(name)),
+                95
+            );
+        }
+    }
+
+    #[test]
+    fn context_shape_penalty_matches_context_free_for_number_triplet() {
+        // 数牌刻子には追加 penalty を適用しない
+        let counts = counts(&["5m", "5m", "5m"]);
+        let base = shape_penalty_for_discard(&counts, tile("5m"));
+        assert_eq!(
+            shape_penalty_for_discard_with_context(
+                &counts,
+                tile("5m"),
+                Some(tile("E")),
+                Some(tile("S")),
+            ),
+            base
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_adds_for_dragon_triplet() {
+        // 白・發・中は場風・自風が None でも役牌として +15
+        for name in ["P", "F", "C"] {
+            let counts = counts(&[name, name, name]);
+            let base = shape_penalty_for_discard(&counts, tile(name));
+            assert_eq!(
+                shape_penalty_for_discard_with_context(&counts, tile(name), None, None),
+                base + VALUE_HONOR_TRIPLET_PENALTY
+            );
+        }
+    }
+
+    #[test]
+    fn context_free_dragon_triplet_has_no_extra_penalty() {
+        // context なし API では三元牌刻子にも +15 を適用しない
+        let counts = counts(&["C", "C", "C"]);
+        assert_eq!(shape_penalty_for_discard(&counts, tile("C")), 95);
+        assert_eq!(
+            shape_penalty_for_discard_with_context(&counts, tile("C"), None, None),
+            95 + VALUE_HONOR_TRIPLET_PENALTY
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_adds_for_round_wind_triplet() {
+        // 場風が東のとき東刻子を崩すと +15、場風でも自風でもなければ追加なし
+        let counts = counts(&["E", "E", "E"]);
+        let base = shape_penalty_for_discard(&counts, tile("E"));
+        assert_eq!(
+            shape_penalty_for_discard_with_context(
+                &counts,
+                tile("E"),
+                Some(tile("E")),
+                Some(tile("S")),
+            ),
+            base + VALUE_HONOR_TRIPLET_PENALTY
+        );
+        assert_eq!(
+            shape_penalty_for_discard_with_context(
+                &counts,
+                tile("E"),
+                Some(tile("S")),
+                Some(tile("W")),
+            ),
+            base
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_adds_for_seat_wind_triplet() {
+        // 自風が南のとき南刻子を崩すと +15、場風でも自風でもなければ追加なし
+        let counts = counts(&["S", "S", "S"]);
+        let base = shape_penalty_for_discard(&counts, tile("S"));
+        assert_eq!(
+            shape_penalty_for_discard_with_context(
+                &counts,
+                tile("S"),
+                Some(tile("E")),
+                Some(tile("S")),
+            ),
+            base + VALUE_HONOR_TRIPLET_PENALTY
+        );
+        assert_eq!(
+            shape_penalty_for_discard_with_context(
+                &counts,
+                tile("S"),
+                Some(tile("E")),
+                Some(tile("W")),
+            ),
+            base
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_double_wind_adds_only_once() {
+        // 場風と自風が同じ東でも追加は +15 の1回だけ
+        let counts = counts(&["E", "E", "E"]);
+        let base = shape_penalty_for_discard(&counts, tile("E"));
+        assert_eq!(
+            shape_penalty_for_discard_with_context(
+                &counts,
+                tile("E"),
+                Some(tile("E")),
+                Some(tile("E")),
+            ),
+            base + VALUE_HONOR_TRIPLET_PENALTY
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_guest_wind_triplet_has_no_extra() {
+        // 場風東・自風南のとき西・北の客風刻子には追加しない
+        for name in ["W", "N"] {
+            let counts = counts(&[name, name, name]);
+            let base = shape_penalty_for_discard(&counts, tile(name));
+            assert_eq!(
+                shape_penalty_for_discard_with_context(
+                    &counts,
+                    tile(name),
+                    Some(tile("E")),
+                    Some(tile("S")),
+                ),
+                base
+            );
+        }
+    }
+
+    #[test]
+    fn context_shape_penalty_value_honor_pair_has_no_extra() {
+        // 役牌でも2枚なら追加しない
+        let counts = counts(&["C", "C"]);
+        assert_eq!(
+            shape_penalty_for_discard_with_context(&counts, tile("C"), None, None),
+            shape_penalty_for_discard(&counts, tile("C"))
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_value_honor_single_has_no_extra() {
+        // 役牌でも1枚なら追加しない
+        let counts = counts(&["C"]);
+        assert_eq!(
+            shape_penalty_for_discard_with_context(&counts, tile("C"), None, None),
+            shape_penalty_for_discard(&counts, tile("C"))
+        );
+    }
+
+    #[test]
+    fn context_shape_penalty_value_honor_quad_adds_once() {
+        // 役牌を4枚持つ状態から切っても刻子を含む完成形を崩すため +15 を1回適用
+        let counts = counts(&["C", "C", "C", "C"]);
+        let base = shape_penalty_for_discard(&counts, tile("C"));
+        assert_eq!(
+            shape_penalty_for_discard_with_context(&counts, tile("C"), None, None),
+            base + VALUE_HONOR_TRIPLET_PENALTY
+        );
+    }
+
+    fn value_honor_triplet_context_penalty() -> i16 {
+        shape_penalty_for_discard_with_context(&counts(&["C", "C", "C"]), tile("C"), None, None)
+    }
+
+    #[test]
+    fn tiebreak_prefers_not_breaking_value_honor_triplet() {
+        // 同じ向聴・受け入れなら役牌刻子を崩す候補より客風刻子を崩す候補を優先する
+        let breaks_guest_triplet =
+            evaluation_with_shape_penalty(1, 10, 2, honor_triplet_penalty(), 0, 0, false);
+        let breaks_value_honor_triplet = evaluation_with_shape_penalty(
+            1,
+            10,
+            2,
+            value_honor_triplet_context_penalty(),
+            0,
+            0,
+            false,
+        );
+        assert!(is_better_discard(
+            &breaks_guest_triplet,
+            &breaks_value_honor_triplet
+        ));
+        assert!(!is_better_discard(
+            &breaks_value_honor_triplet,
+            &breaks_guest_triplet
+        ));
+    }
+
+    #[test]
+    fn value_honor_triplet_penalty_does_not_override_shanten() {
+        // 役牌刻子を崩す方が向聴数で優れていればそちらを選ぶ
+        let break_triplet_better_shanten = evaluation_with_shape_penalty(
+            0,
+            4,
+            1,
+            value_honor_triplet_context_penalty(),
+            0,
+            0,
+            false,
+        );
+        let keep_triplet_worse_shanten = evaluation_with_shape_penalty(1, 40, 5, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &break_triplet_better_shanten,
+            &keep_triplet_worse_shanten
+        ));
+    }
+
+    #[test]
+    fn value_honor_triplet_penalty_does_not_override_acceptance() {
+        // 役牌刻子を崩す方が受け入れで優れていればそちらを選ぶ
+        let break_triplet_more_remaining = evaluation_with_shape_penalty(
+            1,
+            20,
+            1,
+            value_honor_triplet_context_penalty(),
+            0,
+            0,
+            false,
+        );
+        let keep_triplet_less_remaining = evaluation_with_shape_penalty(1, 10, 1, 0, 0, 0, false);
+        assert!(is_better_discard(
+            &break_triplet_more_remaining,
+            &keep_triplet_less_remaining
+        ));
+    }
+
+    #[test]
+    fn evaluate_with_context_adds_value_honor_triplet_penalty() {
+        // 123m 456m 789m 1p 2p 中中中
+        let tiles = ids(&[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 132, 133, 134]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let base = shape_penalty_for_discard(&counts, tile("C"));
+
+        let with_context = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+        let dragon = with_context
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        assert_eq!(dragon.shape_penalty, base + VALUE_HONOR_TRIPLET_PENALTY);
+
+        let visible = ids(&[72, 76]);
+        for visible_tiles in [&[][..], &visible[..]] {
+            let with_visible = evaluate_discards_from_tiles_with_visible_tiles(
+                &tiles,
+                &[],
+                Some(tile("E")),
+                Some(tile("S")),
+                visible_tiles,
+            );
+            let dragon_visible = with_visible
+                .iter()
+                .find(|evaluation| evaluation.discard == tile("C"))
+                .unwrap();
+            assert_eq!(
+                dragon_visible.shape_penalty,
+                base + VALUE_HONOR_TRIPLET_PENALTY
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_context_free_omits_value_honor_triplet_penalty() {
+        // 123m 456m 789m 1p 2p 中中中
+        let tiles = ids(&[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 132, 133, 134]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let base = shape_penalty_for_discard(&counts, tile("C"));
+
+        let from_tiles = evaluate_discards_from_tiles(&tiles);
+        let dragon = from_tiles
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        assert_eq!(dragon.shape_penalty, base);
+
+        // with_dora 経路へ context 付き penalty が漏れていないこと
+        let with_dora = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let dragon_dora = with_dora
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        assert_eq!(dragon_dora.shape_penalty, base);
+    }
+
+    #[test]
+    fn select_context_free_omits_value_honor_triplet_penalty() {
+        // 中刻子だけの入力: context なし selector は追加 penalty を適用しない
+        let tiles = ids(&[132, 133, 134]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let expected = shape_penalty_for_discard(&counts, tile("C"));
+
+        let selected = select_best_discard_from_tiles(&tiles).expect("candidate should exist");
+        assert_eq!(selected.discard, tile("C"));
+        assert_eq!(selected.shape_penalty, expected);
+
+        let selected =
+            select_best_discard_from_tiles_with_dora(&tiles, &[]).expect("candidate should exist");
+        assert_eq!(selected.discard, tile("C"));
+        assert_eq!(selected.shape_penalty, expected);
+
+        // context 付き selector では引き続き追加 penalty が適用される
+        let selected = select_best_discard_from_tiles_with_context(&tiles, &[], None, None)
+            .expect("candidate should exist");
+        assert_eq!(
+            selected.shape_penalty,
+            expected + VALUE_HONOR_TRIPLET_PENALTY
+        );
+    }
+
+    #[test]
+    fn select_with_dora_matches_evaluate_with_dora() {
+        // selector の戻り値は evaluate 一覧から既存比較順で選ばれた候補と一致する
+        let tiles = ids(&[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 132, 133, 134]);
+        let evaluations = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let expected = select_best(evaluations.clone()).expect("candidate should exist");
+        let selected =
+            select_best_discard_from_tiles_with_dora(&tiles, &[]).expect("candidate should exist");
+        assert_eq!(selected, expected);
+        assert!(evaluations.contains(&selected));
+    }
+
+    #[test]
+    fn context_shape_penalty_leaves_other_fields_untouched() {
+        // 123m 456m 789m 1p 2p 中中中
+        let tiles = ids(&[0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 132, 133, 134]);
+        let free = evaluate_discards_from_tiles_with_dora(&tiles, &[]);
+        let ctx = evaluate_discards_from_tiles_with_context(&tiles, &[], None, None);
+        for (a, b) in free.iter().zip(ctx.iter()) {
+            assert_eq!(a.discard, b.discard);
+            assert_eq!(a.shanten_after_discard, b.shanten_after_discard);
+            assert_eq!(a.acceptance_after_discard, b.acceptance_after_discard);
+            assert_eq!(a.floating_tile_value, b.floating_tile_value);
+            assert_eq!(a.discarded_dora_count, b.discarded_dora_count);
+            assert_eq!(a.discarded_value_honor_count, b.discarded_value_honor_count);
+            assert_eq!(a.discards_red_five, b.discards_red_five);
+        }
+        let dragon_free = free
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        let dragon_ctx = ctx
+            .iter()
+            .find(|evaluation| evaluation.discard == tile("C"))
+            .unwrap();
+        assert_eq!(
+            dragon_ctx.shape_penalty,
+            dragon_free.shape_penalty + VALUE_HONOR_TRIPLET_PENALTY
+        );
     }
 
     fn number_triplet_penalty() -> i16 {
