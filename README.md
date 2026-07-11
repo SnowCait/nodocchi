@@ -118,7 +118,7 @@ usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shant
 | `--auto-next` | 任意 | 局終了ごとに `next` を 1 回送信する。省略時は送信しない |
 | `--response-delay-ms` | 任意 | 応答 event を publish する前の遅延（ミリ秒）。既定値は `0`（遅延なし） |
 
-`--response-delay-ms` は、publish の集中を緩和するため、GET reply と自動 next の送信前に任意の遅延を設定できます。`--auto-next` とは独立しており、遅延を指定しても自動 next は有効になりません。
+`--response-delay-ms` は、publish の集中を緩和するため、GET reply と自動 next の送信前に任意の遅延を設定できます。
 
 既定 server:
 

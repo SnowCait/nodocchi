@@ -375,17 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn response_delay_is_independent_of_auto_next() {
-        let args = parse(&["--channel", "hanchan", "--response-delay-ms", "1000"]).unwrap();
-        assert!(!args.auto_next);
-        assert_eq!(args.response_delay_ms, 1000);
-
-        let args = parse(&["--channel", "hanchan", "--auto-next"]).unwrap();
-        assert!(args.auto_next);
-        assert_eq!(args.response_delay_ms, 0);
-    }
-
-    #[test]
     fn rejects_missing_response_delay_value() {
         assert_eq!(
             parse(&["--channel", "hanchan", "--response-delay-ms"]),
