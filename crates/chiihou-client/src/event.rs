@@ -719,6 +719,96 @@ nostr:npub1ai000 GET sutehai?"
         assert_eq!(reply.content, "nostr:npub1server sutehai? sutehai 1m");
     }
 
+    struct ReachAgent;
+
+    impl Agent for ReachAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            LegalAction::Reach
+        }
+    }
+
+    fn richi_sutehai_content() -> &'static str {
+        "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p2::mahjong_p3::mahjong_s5::mahjong_s5: :mahjong_east:
+nostr:npub1ai000 GET sutehai?"
+    }
+
+    fn richi_snapshot() -> ChiihouTableSnapshot {
+        ChiihouTableSnapshot {
+            player_id: Some(0),
+            remaining_tiles: Some(30),
+            ..ChiihouTableSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn builds_kind_42_richi_reply_with_state() {
+        let event = valid_event("event1", richi_sutehai_content());
+        assert_eq!(
+            build_reply_for_event_with_state(&event, &config(), &richi_snapshot(), &mut ReachAgent),
+            Ok(Some(ChiihouOutgoingReply {
+                kind: 42,
+                tags: vec![
+                    tag(&["e", "channel_hanchan", "", "root"]),
+                    tag(&["e", "event1", "", "reply", "server_pubkey"]),
+                    tag(&["p", "ai_pubkey"]),
+                    tag(&["p", "server_pubkey"]),
+                ],
+                content: "nostr:npub1server sutehai? richi 1z".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_kind_20000_richi_reply_with_bitchat_tags() {
+        let mut event = valid_event("event1", richi_sutehai_content());
+        event.kind = 20000;
+        event.tags.push(tag(&["g", "xn76"]));
+        event.tags.push(tag(&["g"]));
+        event.tags.push(tag(&["n", "Server Bot"]));
+        let reply =
+            build_reply_for_event_with_state(&event, &config(), &richi_snapshot(), &mut ReachAgent)
+                .unwrap()
+                .unwrap();
+        assert_eq!(reply.kind, 20000);
+        assert_eq!(reply.content, "nostr:npub1server sutehai? richi 1z");
+        assert!(reply.tags.contains(&tag(&["g", "xn76"])));
+        assert!(!reply.tags.contains(&tag(&["g"])));
+        assert!(reply.tags.contains(&tag(&["t", "teleport"])));
+        assert!(
+            !reply
+                .tags
+                .iter()
+                .any(|tag| tag.first().is_some_and(|name| name == "n"))
+        );
+    }
+
+    #[test]
+    fn richi_reply_keeps_request_kind() {
+        for kind in [42u64, 20000] {
+            let mut event = valid_event("event1", richi_sutehai_content());
+            event.kind = kind;
+            let reply = build_reply_for_event_with_state(
+                &event,
+                &config(),
+                &richi_snapshot(),
+                &mut ReachAgent,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(reply.kind, kind, "kind: {kind}");
+        }
+    }
+
+    #[test]
+    fn richi_hand_without_state_falls_back_to_dahai_reply() {
+        let event = valid_event("event1", richi_sutehai_content());
+        let reply = build_reply_for_event(&event, &config(), &mut ReachAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.content, "nostr:npub1server sutehai? sutehai 1m");
+    }
+
     #[test]
     fn builds_naku_no_reply_for_naku_event() {
         let event = valid_event("event1", naku_content());

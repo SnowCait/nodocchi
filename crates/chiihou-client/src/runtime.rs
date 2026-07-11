@@ -1138,6 +1138,99 @@ nostr:{ai_npub} GET naku? ron pon chi"
             assert_eq!(context.visible_tiles(), &expected[..]);
         }
 
+        struct ReachAgent;
+
+        impl Agent for ReachAgent {
+            fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+                LegalAction::Reach
+            }
+        }
+
+        fn richi_sutehai_content() -> &'static str {
+            "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p2::mahjong_p3::mahjong_s5::mahjong_s5: :mahjong_east:
+nostr:npub1ai000 GET sutehai?"
+        }
+
+        fn apply_notification_content(
+            controller: &mut ChiihouLifecycleController,
+            seen: &mut SeenEventIds,
+            config: &ChiihouNostrConfig,
+            content: &str,
+        ) {
+            let event = build_request_event(42, content, &request_tags(), &server_keys());
+            let incoming = incoming_event_from_nostr(&event);
+            let snapshot = controller.table_snapshot();
+            let action = classify_incoming_event_with_state(
+                &incoming,
+                config.event_config(),
+                seen,
+                &snapshot,
+                &mut PickSecondAgent,
+            )
+            .unwrap();
+            match action {
+                ChiihouIncomingAction::Lifecycle(notification) => {
+                    controller.apply(&notification);
+                }
+                ChiihouIncomingAction::TableNotification(notification) => {
+                    controller.apply_table_notification(&notification).unwrap();
+                }
+                other => panic!("unexpected action for content {content:?}: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn richi_reply_flow_updates_reached_only_after_say_notification() {
+            let config = config(ChiihouChannel::Hanchan);
+            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key(), false);
+            let mut seen = SeenEventIds::new();
+            let tokens = npub_tokens();
+            let prefix = tokens.join(" ");
+            let ai = &tokens[0];
+            let dealer = &tokens[1];
+            for content in [
+                format!("{prefix} NOTIFY gamestart 南 {prefix}"),
+                format!("{prefix} NOTIFY kyokustart 東 {dealer} 0 0"),
+                format!("{ai} NOTIFY haipai {ai} 1m2m3m4m5m6m7m8m9m2p3p5s5s\n\n:mahjong_m1:"),
+                format!("{ai} NOTIFY tsumo {ai} 69 1z"),
+            ] {
+                apply_notification_content(&mut controller, &mut seen, &config, &content);
+            }
+            let snapshot = controller.table_snapshot();
+            assert_eq!(snapshot.remaining_tiles, Some(69));
+            assert_eq!(snapshot.reached, [false; 4]);
+
+            let event =
+                build_request_event(42, richi_sutehai_content(), &request_tags(), &server_keys());
+            let incoming = incoming_event_from_nostr(&event);
+            let action = classify_incoming_event_with_state(
+                &incoming,
+                config.event_config(),
+                &mut seen,
+                &snapshot,
+                &mut ReachAgent,
+            )
+            .unwrap();
+            let ChiihouIncomingAction::Reply(reply) = action else {
+                panic!("expected reply action, got: {action:?}");
+            };
+            assert!(reply.content.ends_with("sutehai? richi 1z"));
+            assert_eq!(reply.kind, 42);
+            assert_eq!(controller.table_snapshot().reached, [false; 4]);
+
+            apply_notification_content(
+                &mut controller,
+                &mut seen,
+                &config,
+                &format!("{prefix} NOTIFY say {ai} richi"),
+            );
+            assert_eq!(
+                controller.table_snapshot().reached,
+                [true, false, false, false]
+            );
+        }
+
         #[test]
         fn naku_request_context_reflects_notified_table_state() {
             let context = recorded_context_for(&naku_content());

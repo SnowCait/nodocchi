@@ -231,6 +231,37 @@ mod tests {
         assert_eq!(event.kind, Kind::from_u16(20000));
     }
 
+    fn richi_reply(kind: u64) -> ChiihouOutgoingReply {
+        ChiihouOutgoingReply {
+            kind,
+            tags: reply_tags(),
+            content: "nostr:npub1server sutehai? richi 5p".to_string(),
+        }
+    }
+
+    #[test]
+    fn signed_richi_reply_keeps_kind_42() {
+        let event = sign_outgoing_reply(&richi_reply(42), &ai_keys()).unwrap();
+        assert_eq!(event.kind, Kind::from_u16(42));
+        assert_eq!(event.content, "nostr:npub1server sutehai? richi 5p");
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn signed_richi_reply_keeps_kind_20000() {
+        let event = sign_outgoing_reply(&richi_reply(20000), &ai_keys()).unwrap();
+        assert_eq!(event.kind, Kind::from_u16(20000));
+        assert_eq!(event.content, "nostr:npub1server sutehai? richi 5p");
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn signed_richi_reply_keeps_tag_order_and_values() {
+        let reply = richi_reply(42);
+        let event = sign_outgoing_reply(&reply, &ai_keys()).unwrap();
+        assert_eq!(incoming_event_from_nostr(&event).tags, reply.tags);
+    }
+
     #[test]
     fn signed_reply_keeps_content() {
         let reply = reply(42);
