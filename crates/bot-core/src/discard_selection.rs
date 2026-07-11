@@ -9,10 +9,33 @@ use bot_logic::{
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
 
+/// 通常打牌選択の内部結果。
+///
+/// - `evaluation`: 最善の `DiscardEvaluation`。手牌がなければ `None`。
+/// - `action`: `evaluation` に対応する合法 Dahai。対応する Dahai が無ければ `None`。
+///
+/// evaluation が `Some` でも action が `None` になり得るため、両者を区別できる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscardActionSelection {
+    pub evaluation: Option<DiscardEvaluation>,
+    pub action: Option<LegalAction>,
+}
+
 pub fn select_discard_action(
     context: &GameContext,
     legal_actions: &[LegalAction],
 ) -> Option<LegalAction> {
+    select_discard_action_with_evaluation(context, legal_actions).action
+}
+
+/// 最善の `DiscardEvaluation` を一度だけ計算し、evaluation と対応する合法 Dahai を返す。
+///
+/// DEBUG 診断ログが有効な場合は既存の診断経路を使用し、通常時は
+/// `select_best_discard_evaluation()` を使用する。診断ログは重複出力しない。
+pub(crate) fn select_discard_action_with_evaluation(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+) -> DiscardActionSelection {
     let tiles: Vec<_> = context
         .hand_tiles()
         .iter()
@@ -20,12 +43,25 @@ pub fn select_discard_action(
         .chain(context.drawn_tile())
         .collect();
 
-    let selected = if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+    let evaluation = if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         select_best_discard_with_diagnostics(context, &tiles)
     } else {
         select_best_discard_evaluation(context, &tiles)
     };
-    let selected_type = selected?.discard;
+
+    let action = evaluation
+        .as_ref()
+        .and_then(|evaluation| legal_dahai_for_evaluation(evaluation, legal_actions));
+
+    DiscardActionSelection { evaluation, action }
+}
+
+// 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
+fn legal_dahai_for_evaluation(
+    evaluation: &DiscardEvaluation,
+    legal_actions: &[LegalAction],
+) -> Option<LegalAction> {
+    let selected_type = evaluation.discard;
 
     let mut red_fallback = None;
     for action in legal_actions {
@@ -631,5 +667,74 @@ mod tests {
             dahai(0),
         ];
         assert_eq!(select_discard_action(&context, &actions), Some(dahai(0)));
+    }
+
+    #[test]
+    fn public_action_matches_internal_helper_action() {
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .collect();
+
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(select_discard_action(&context, &actions), selection.action);
+    }
+
+    #[test]
+    fn internal_helper_evaluation_matches_best_selector() {
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .collect();
+
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let expected = select_best_discard_evaluation(&context, &tiles);
+
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(selection.evaluation, expected);
+        assert!(selection.evaluation.is_some());
+    }
+
+    #[test]
+    fn internal_helper_prefers_black_five_over_red() {
+        let context = GameContext::from_parts(None, vec![tile(16), tile(17)]);
+        let actions = vec![dahai(16), dahai(17)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(selection.action, Some(dahai(17)));
+    }
+
+    #[test]
+    fn internal_helper_falls_back_to_red_five() {
+        let context = GameContext::from_parts(None, vec![tile(16)]);
+        let actions = vec![dahai(16)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(selection.action, Some(dahai(16)));
+    }
+
+    #[test]
+    fn internal_helper_reports_evaluation_without_matching_dahai() {
+        // best evaluation は 1m だが、合法 Dahai には 1m が無い。evaluation は Some、action は None。
+        let context = GameContext::with_hand_tiles(vec![tile(0)]);
+        let actions = vec![dahai(4)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert!(selection.evaluation.is_some());
+        assert_eq!(selection.action, None);
     }
 }

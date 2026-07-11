@@ -2,7 +2,11 @@ use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
 use crate::defense::select_defense_fallback_action;
-use crate::discard_selection::select_discard_action;
+use crate::discard_selection::select_discard_action_with_evaluation;
+use crate::push_pull::{
+    PushPullMode, decide_push_pull, log_push_pull_decision,
+    push_pull_inputs_from_context_with_evaluation,
+};
 use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
 // 補正後の待ち枚数がこの枚数以上ならリーチする。
@@ -24,6 +28,43 @@ impl ShantenAgent {
             .iter()
             .find(|a| matches!(a, LegalAction::Reach))
             .cloned()
+    }
+
+    // 押し引きモードに応じた action 選択。候補は必要になった時点でのみ計算する。
+    //
+    // - Push:    Reach → 通常打牌 → 防御 fallback
+    // - Neutral: 通常打牌 → 防御 fallback(Reach は検討しない)
+    // - Fold:    防御 fallback → 通常打牌(Reach は検討しない)
+    fn select_action_for_push_pull_mode(
+        &self,
+        mode: PushPullMode,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        normal_discard: Option<&LegalAction>,
+    ) -> Option<LegalAction> {
+        match mode {
+            PushPullMode::Push => {
+                if let Some(action) = self.select_reach_action(ctx, legal_actions) {
+                    return Some(action);
+                }
+                if let Some(action) = normal_discard {
+                    return Some(action.clone());
+                }
+                select_defense_fallback_action(ctx, legal_actions).cloned()
+            }
+            PushPullMode::Neutral => {
+                if let Some(action) = normal_discard {
+                    return Some(action.clone());
+                }
+                select_defense_fallback_action(ctx, legal_actions).cloned()
+            }
+            PushPullMode::Fold => {
+                if let Some(action) = select_defense_fallback_action(ctx, legal_actions) {
+                    return Some(action.clone());
+                }
+                normal_discard.cloned()
+            }
+        }
     }
 }
 
@@ -74,17 +115,22 @@ impl Agent for ShantenAgent {
             return action.clone();
         }
 
-        // 他家リーチ中の防御 fallback(現物 → 字牌 safety → 数牌防御)を
-        // 攻撃的な Reach や通常評価より先に評価する。
-        if let Some(action) = select_defense_fallback_action(ctx, legal_actions) {
-            return action.clone();
-        }
+        // 通常打牌の evaluation と action を一度だけ取得し、その evaluation を
+        // 押し引き入力にも共有して二重計算を避ける。
+        let discard_selection = select_discard_action_with_evaluation(ctx, legal_actions);
+        let inputs = push_pull_inputs_from_context_with_evaluation(
+            ctx,
+            discard_selection.evaluation.as_ref(),
+        );
+        let decision = decide_push_pull(&inputs);
+        log_push_pull_decision(&decision, &inputs, discard_selection.action.as_ref());
 
-        if let Some(action) = self.select_reach_action(ctx, legal_actions) {
-            return action;
-        }
-
-        if let Some(action) = select_discard_action(ctx, legal_actions) {
+        if let Some(action) = self.select_action_for_push_pull_mode(
+            decision.mode,
+            ctx,
+            legal_actions,
+            discard_selection.action.as_ref(),
+        ) {
             return action;
         }
 
@@ -109,6 +155,8 @@ impl Agent for ShantenAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discard_selection::select_discard_action;
+    use crate::push_pull::push_pull_inputs_from_context;
     use bot_logic::TileId;
 
     fn tile(value: u8) -> TileId {
@@ -405,27 +453,37 @@ mod tests {
     }
 
     #[test]
-    fn prefers_genbutsu_fallback_over_discard_evaluation() {
+    fn neutral_prefers_normal_discard_over_genbutsu_fallback() {
         let mut agent = ShantenAgent;
-        // 通常評価では別牌が選ばれ得る手牌だが、共通現物 16(5m) を優先して切る。
-        // 手牌には 5m を含めず、共通現物が dahai(16) のみになるようにする。
+        // 単独の子リーチに対する強い一向聴で Neutral。共通現物 16(5m) があっても
+        // Neutral では通常打牌(浮いた 116(北))を防御 fallback より優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = opponent_reach_context(Some(116), &hand_values);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Neutral
+        );
         let actions: Vec<LegalAction> = hand_values
             .iter()
             .map(|&value| dahai(value))
             .chain([dahai(116), dahai(16)])
             .collect();
-        assert_eq!(agent.act(&ctx, &actions), dahai(16));
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        assert_eq!(agent.act(&ctx, &actions), normal);
+        assert_ne!(agent.act(&ctx, &actions), dahai(16));
     }
 
     #[test]
-    fn falls_through_when_no_common_genbutsu_available() {
+    fn fold_without_common_genbutsu_falls_through_to_normal_discard() {
         let mut agent = ShantenAgent;
-        // 他家リーチ中でも合法 Dahai に共通現物が無ければ従来の Reach 判断に進む。
+        // 他家リーチ中でも合法 Dahai に共通現物が無い Fold 局面。Reach は抑制し通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
         let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
-        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+        assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
     #[test]
@@ -538,13 +596,18 @@ mod tests {
     }
 
     #[test]
-    fn falls_through_to_reach_without_common_genbutsu_or_honor() {
+    fn fold_without_common_genbutsu_or_honor_falls_through_to_normal_discard() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌 Dahai もなく、数牌も全て NoSafety なら従来通り Reach 判断に進む。
+        // 共通現物も字牌 Dahai もなく、数牌も全て NoSafety の Fold 局面。
         // リーチ者の河は 16(5m) のみで、0(1m) / 56(6p) は無スジ・壁なしの NoSafety。
+        // Reach を抑制し、防御牌が無いので通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
         let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
-        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+        assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
     #[test]
@@ -570,10 +633,14 @@ mod tests {
     #[test]
     fn honor_safety_fallback_ignores_number_dahai() {
         let mut agent = ShantenAgent;
-        // 数牌のみで字牌がなければ字牌 fallback は発動せず Reach に進む。
+        // 数牌のみで字牌がなければ字牌 fallback は発動しない。Fold だが安全牌が無いので通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
         let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
-        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+        assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
     #[test]
@@ -683,12 +750,17 @@ mod tests {
     }
 
     #[test]
-    fn falls_through_to_reach_when_only_no_safety_suited() {
+    fn fold_without_safe_suited_falls_through_to_normal_discard() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌もなく、数牌が全て NoSafety なら数牌防御 fallback は使わず Reach に進む。
+        // Fold 局面で共通現物も字牌もなく数牌が全て NoSafety なら、防御 fallback は無い。
+        // Reach は抑制し、防御牌がないことを理由に失敗させず通常打牌へ進む。
         let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
         let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
-        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+        assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
     #[test]
@@ -722,18 +794,24 @@ mod tests {
     }
 
     #[test]
-    fn prefers_suited_safety_fallback_over_discard_evaluation() {
+    fn push_prefers_normal_discard_over_suited_safety_fallback() {
         let mut agent = ShantenAgent;
-        // 通常評価では別牌が選ばれ得る手牌だが、共通現物も字牌もなければ NoChance 4(2m) を優先する。
-        // 引き牌も数牌にして字牌 Dahai を作らず、字牌 fallback を挟まないようにする。
+        // テンパイで単独の子リーチに対しては Push。Reach が合法でなければ通常打牌へ進み、
+        // NoChance 4(2m) の防御 fallback より通常打牌(32(9m))を優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = suited_reach_context(Some(88), &hand_values, &[4, 5, 6, 7], &[]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Push
+        );
         let actions: Vec<LegalAction> = hand_values
             .iter()
             .map(|&value| dahai(value))
             .chain([dahai(88)])
             .collect();
-        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        assert_eq!(agent.act(&ctx, &actions), normal);
+        assert_ne!(agent.act(&ctx, &actions), dahai(4));
     }
 
     #[test]
@@ -749,5 +827,122 @@ mod tests {
             LegalAction::None,
         ];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
+    }
+
+    // テンパイ手牌で他家リーチを受ける局面。oya と reached を指定してモードを作り分ける。
+    // visible は空にして should_reach を従来挙動(true)に保つ。
+    fn tenpai_under_reach_context(oya: Option<u8>, reached: [bool; 4]) -> GameContext {
+        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
+        // リーチ者(player 1)の河に 5m を置き、テンパイ手牌の 5m を現物にする。
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        GameContext::from_parts_with_table_state(
+            Some(tile(TENPAI_DRAWN)),
+            hand,
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            oya,
+            discards,
+            reached,
+        )
+    }
+
+    #[test]
+    fn push_tenpai_against_single_non_dealer_reaches() {
+        let mut agent = ShantenAgent;
+        // 単独の子リーチに対するテンパイ。decide_push_pull は Push。
+        // Reach が合法で should_reach() == true なら、現物があっても Reach を選ぶ。
+        let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Push
+        );
+        let actions = tenpai_actions();
+        assert!(should_reach(&ctx));
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+    }
+
+    #[test]
+    fn neutral_tenpai_against_dealer_reach_prefers_normal_discard_over_reach() {
+        let mut agent = ShantenAgent;
+        // 親リーチに対するテンパイ。decide_push_pull は Neutral。
+        // Reach が合法でも選ばず、暫定的にダマ相当の通常打牌を優先する。
+        let ctx = tenpai_under_reach_context(Some(1), [false, true, false, false]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Neutral
+        );
+        let actions = tenpai_actions();
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let selected = agent.act(&ctx, &actions);
+        assert_eq!(selected, normal);
+        assert_ne!(selected, LegalAction::Reach);
+    }
+
+    #[test]
+    fn neutral_tenpai_against_multiple_reach_prefers_normal_discard_over_reach() {
+        let mut agent = ShantenAgent;
+        // 複数リーチに対するテンパイ。decide_push_pull は Neutral。Reach は選ばない。
+        let ctx = tenpai_under_reach_context(None, [false, true, true, false]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Neutral
+        );
+        let actions = tenpai_actions();
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let selected = agent.act(&ctx, &actions);
+        assert_eq!(selected, normal);
+        assert_ne!(selected, LegalAction::Reach);
+    }
+
+    // 2向聴以上で他家リーチを受ける Fold 局面。リーチ者の河に 5s を置き手牌の 5s を現物にする。
+    const FOLD_HAND: [u8; 13] = [0, 4, 17, 20, 36, 40, 56, 60, 89, 108, 112, 120, 124];
+    const FOLD_DRAWN: u8 = 16;
+
+    fn fold_under_reach_context() -> GameContext {
+        let hand: Vec<_> = FOLD_HAND.iter().map(|&value| tile(value)).collect();
+        let discards = [vec![], vec![tile(89)], vec![], vec![]];
+        GameContext::from_parts_with_table_state(
+            Some(tile(FOLD_DRAWN)),
+            hand,
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            None,
+            discards,
+            [false, true, false, false],
+        )
+    }
+
+    fn fold_actions() -> Vec<LegalAction> {
+        FOLD_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(FOLD_DRAWN)])
+            .collect()
+    }
+
+    #[test]
+    fn fold_prefers_defense_fallback_over_normal_discard() {
+        let mut agent = ShantenAgent;
+        // 二向聴以上で他家リーチを受ける Fold 局面。防御 fallback(現物 5s)と通常打牌が異なり、
+        // Fold では防御 fallback を通常打牌より優先する。
+        let ctx = fold_under_reach_context();
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
+        let actions = fold_actions();
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let defense = select_defense_fallback_action(&ctx, &actions)
+            .cloned()
+            .unwrap();
+        assert_ne!(normal, defense);
+        assert_eq!(agent.act(&ctx, &actions), defense);
+        assert_eq!(defense, dahai(89));
     }
 }

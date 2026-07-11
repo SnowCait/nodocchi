@@ -1,14 +1,25 @@
+use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::select_best_discard_evaluation;
+use bot_logic::DiscardEvaluation;
+
+const LOG_TARGET: &str = "bot_core::push_pull";
 
 /// 押し引きの判断結果を表すモード。
 ///
-/// - `Push`: 防御 fallback より通常の攻撃的選択を優先できる状態。
-/// - `Neutral`: 無条件の押し・無条件のオリのどちらとも確定しない状態。
-/// - `Fold`: 防御 fallback を優先すべき状態。
+/// `ShantenAgent` は `Hora` / `Ryukyoku` を確認したあと、このモードに応じて
+/// action の優先順位を切り替える。
 ///
-/// 今回は `ShantenAgent` へ組み込まないため、この意味を実際の action 選択には
-/// まだ反映しない。分岐は次の PR で行う。
+/// - `Push`: Reach → 通常打牌 → 防御 fallback
+/// - `Neutral`: 通常打牌 → 防御 fallback(Reach は抑制)
+/// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
+///
+/// これは暫定 heuristic であり、以下はまだ考慮していない。
+///
+/// - 打点
+/// - 待ちの良形・愚形
+/// - 点棒状況
+/// - 局・順位条件
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -68,12 +79,6 @@ const STRONG_IISHANTEN_MIN_TYPES: usize = 2;
 /// `reached_opponents()` の仕様どおり、リーチフラグが立っている全席を対象にする。
 /// 攻撃評価は既存の best discard 評価を再利用し、手牌とツモ牌が空なら `offense == None`。
 pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
-    let reached_opponents = context.reached_opponents();
-    let opponent_reach_count = reached_opponents.len() as u8;
-    let dealer_reacher = context
-        .oya()
-        .is_some_and(|oya| reached_opponents.contains(&(oya as usize)));
-
     let tiles: Vec<_> = context
         .hand_tiles()
         .iter()
@@ -81,15 +86,35 @@ pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
         .chain(context.drawn_tile())
         .collect();
 
-    let offense = if tiles.is_empty() {
+    let evaluation = if tiles.is_empty() {
         None
     } else {
-        select_best_discard_evaluation(context, &tiles).map(|evaluation| PushPullOffenseState {
-            min_shanten_after_discard: evaluation.min_shanten_after_discard(),
-            acceptance_total_remaining: evaluation.acceptance_total_remaining(),
-            acceptance_type_count: evaluation.acceptance_type_count(),
-        })
+        select_best_discard_evaluation(context, &tiles)
     };
+
+    push_pull_inputs_from_context_with_evaluation(context, evaluation.as_ref())
+}
+
+/// すでに計算済みの `DiscardEvaluation` を利用して押し引き入力を構築する crate-private helper。
+///
+/// リーチ者数と親リーチ判定は `push_pull_inputs_from_context()` と同じロジックを共有する。
+/// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
+/// evaluation が `None` なら offense も `None`。
+pub(crate) fn push_pull_inputs_from_context_with_evaluation(
+    context: &GameContext,
+    evaluation: Option<&DiscardEvaluation>,
+) -> PushPullInputs {
+    let reached_opponents = context.reached_opponents();
+    let opponent_reach_count = reached_opponents.len() as u8;
+    let dealer_reacher = context
+        .oya()
+        .is_some_and(|oya| reached_opponents.contains(&(oya as usize)));
+
+    let offense = evaluation.map(|evaluation| PushPullOffenseState {
+        min_shanten_after_discard: evaluation.min_shanten_after_discard(),
+        acceptance_total_remaining: evaluation.acceptance_total_remaining(),
+        acceptance_type_count: evaluation.acceptance_type_count(),
+    });
 
     PushPullInputs {
         opponent_reach_count,
@@ -108,7 +133,11 @@ pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
 /// - 局・順位条件
 ///
 /// また、暫定 threshold は実戦の regression test に基づいて将来調整する。
-/// 今回は `ShantenAgent` に未接続であり、実対局の挙動は変わらない。
+/// この判定結果は `ShantenAgent` の action 選択に反映される。
+///
+/// - `Push`: Reach → 通常打牌 → 防御 fallback
+/// - `Neutral`: 通常打牌 → 防御 fallback(Reach は抑制)
+/// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
 pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     // 1. 他家リーチがなければ攻撃評価の有無にかかわらず押す。
     if inputs.opponent_reach_count == 0 {
@@ -164,6 +193,39 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         mode: PushPullMode::Fold,
         reason: PushPullReason::TwoOrMoreShanten,
     }
+}
+
+/// 押し引き判断1回につき DEBUG イベントを1件出す opt-in ログ。
+///
+/// `RUST_LOG=bot_core::push_pull=debug` で有効化する。debug が無効な通常時は
+/// ログ用の文字列変換などを一切行わない。全打牌候補は
+/// `bot_core::discard_selection=trace` に任せ、ここでは重複出力しない。
+pub(crate) fn log_push_pull_decision(
+    decision: &PushPullDecision,
+    inputs: &PushPullInputs,
+    normal_discard: Option<&LegalAction>,
+) {
+    if !tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        return;
+    }
+
+    let normal_discard = normal_discard.map(|action| match action {
+        LegalAction::Dahai { tile } => tile.to_mjai_string(),
+        other => format!("{other:?}"),
+    });
+
+    tracing::debug!(
+        target: LOG_TARGET,
+        mode = ?decision.mode,
+        reason = ?decision.reason,
+        opponent_reach_count = inputs.opponent_reach_count,
+        dealer_reacher = inputs.dealer_reacher,
+        offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
+        offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
+        offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
+        normal_discard = ?normal_discard,
+        "push-pull decision",
+    );
 }
 
 #[cfg(test)]
@@ -449,6 +511,89 @@ mod tests {
             offense.acceptance_type_count,
             expected.acceptance_type_count()
         );
+    }
+
+    #[test]
+    fn with_evaluation_matches_public_inputs() {
+        use crate::discard_selection::select_best_discard_evaluation;
+
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_table_state(
+            Some(tile(116)),
+            hand,
+            vec![tile(12)],
+            Some(TileType::new(27).unwrap()),
+            Some(TileType::new(28).unwrap()),
+            Vec::new(),
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false, true, false, false],
+        );
+
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let evaluation = select_best_discard_evaluation(&context, &tiles);
+
+        let shared = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
+        let public = push_pull_inputs_from_context(&context);
+        assert_eq!(shared, public);
+        assert!(shared.offense.is_some());
+    }
+
+    #[test]
+    fn with_evaluation_none_yields_no_offense() {
+        let context = table_state_context(None, vec![], Some(0), None, [false, true, false, false]);
+        let inputs = push_pull_inputs_from_context_with_evaluation(&context, None);
+        assert_eq!(inputs.offense, None);
+        assert_eq!(inputs.opponent_reach_count, 1);
+    }
+
+    #[test]
+    fn with_evaluation_keeps_reach_count_and_dealer_judgment() {
+        use crate::discard_selection::select_best_discard_evaluation;
+
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_table_state(
+            Some(tile(116)),
+            hand,
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false, true, true, false],
+        );
+        let before = context.clone();
+
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let evaluation = select_best_discard_evaluation(&context, &tiles);
+        let evaluation_before = evaluation.clone();
+
+        let inputs = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
+
+        assert_eq!(inputs.opponent_reach_count, 2);
+        assert!(inputs.dealer_reacher);
+        // GameContext と evaluation を変更しない。
+        assert_eq!(context, before);
+        assert_eq!(evaluation, evaluation_before);
     }
 
     #[test]
