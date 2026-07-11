@@ -155,7 +155,7 @@ impl Agent for ShantenAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discard_selection::select_discard_action;
+    use crate::discard_selection::{select_best_discard_evaluation, select_discard_action};
     use crate::push_pull::push_pull_inputs_from_context;
     use bot_logic::TileId;
 
@@ -944,5 +944,63 @@ mod tests {
         assert_ne!(normal, defense);
         assert_eq!(agent.act(&ctx, &actions), defense);
         assert_eq!(defense, dahai(89));
+    }
+
+    #[test]
+    fn agent_push_pull_uses_legal_candidate_evaluation_not_illegal_global_best() {
+        // 全体最善(手牌の東を切ってテンパイ = shanten 0)は非合法で、合法なのはツモ切り 3p だけ。
+        // 非合法な全体最善を使うと Push、合法なツモ切り(shanten 1)を使うと Neutral になる。
+        // Agent は合法候補側の evaluation / mode を使う。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 89, 108];
+        let drawn = 44; // 3p ツモ
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let ctx = GameContext::from_parts_with_table_state(
+            Some(tile(drawn)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            None,
+            discards,
+            [false, true, false, false],
+        );
+        let tiles: Vec<_> = ctx
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(ctx.drawn_tile())
+            .collect();
+
+        // 非合法な全体最善候補の mode は Push。
+        let global_best = select_best_discard_evaluation(&ctx, &tiles).unwrap();
+        assert_eq!(global_best.min_shanten_after_discard(), 0);
+        let illegal_mode = decide_push_pull(&push_pull_inputs_from_context_with_evaluation(
+            &ctx,
+            Some(&global_best),
+        ))
+        .mode;
+        assert_eq!(illegal_mode, PushPullMode::Push);
+
+        // 合法なのはツモ切り 3p だけ。Agent が使う offense は合法候補の評価に一致する。
+        let actions = vec![dahai(drawn)];
+        let selection = select_discard_action_with_evaluation(&ctx, &actions);
+        let legal_evaluation = selection.evaluation.clone().unwrap();
+        assert_eq!(legal_evaluation.min_shanten_after_discard(), 1);
+        let legal_inputs =
+            push_pull_inputs_from_context_with_evaluation(&ctx, selection.evaluation.as_ref());
+        let legal_mode = decide_push_pull(&legal_inputs).mode;
+
+        assert_ne!(illegal_mode, legal_mode);
+        assert_eq!(legal_mode, PushPullMode::Neutral);
+        assert_eq!(
+            legal_inputs.offense.unwrap().min_shanten_after_discard,
+            legal_evaluation.min_shanten_after_discard()
+        );
+
+        // Agent は合法候補(ツモ切り 3p)を切る。
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), dahai(drawn));
     }
 }

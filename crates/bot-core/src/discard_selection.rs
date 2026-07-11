@@ -2,19 +2,18 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::{
     AcceptanceTile, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
-    TileCounts, TileId, diagnose_discard_evaluations, evaluate_discards_from_tiles_with_context,
-    evaluate_discards_from_tiles_with_visible_tiles, select_best_discard_from_tiles_with_context,
-    select_best_discard_from_tiles_with_visible_tiles,
+    TileCounts, TileId, TileType, compare_discard_evaluations, diagnose_discard_evaluations,
+    evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_visible_tiles,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
 
 /// 通常打牌選択の内部結果。
 ///
-/// - `evaluation`: 最善の `DiscardEvaluation`。手牌がなければ `None`。
-/// - `action`: `evaluation` に対応する合法 Dahai。対応する Dahai が無ければ `None`。
+/// - `evaluation`: 合法 Dahai 候補の中の最善 `DiscardEvaluation`。合法候補が無ければ `None`。
+/// - `action`: `evaluation` に対応する合法 Dahai。
 ///
-/// evaluation が `Some` でも action が `None` になり得るため、両者を区別できる。
+/// `evaluation` と `action` は常に同時に `Some` / `None` になり、`Some` のときは牌種が一致する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscardActionSelection {
     pub evaluation: Option<DiscardEvaluation>,
@@ -28,10 +27,18 @@ pub fn select_discard_action(
     select_discard_action_with_evaluation(context, legal_actions).action
 }
 
-/// 最善の `DiscardEvaluation` を一度だけ計算し、evaluation と対応する合法 Dahai を返す。
+/// 合法 Dahai 候補だけから最善の `DiscardEvaluation` を選び、対応する合法 Dahai を返す。
 ///
-/// DEBUG 診断ログが有効な場合は既存の診断経路を使用し、通常時は
-/// `select_best_discard_evaluation()` を使用する。診断ログは重複出力しない。
+/// 全打牌候補を評価したうえで、合法 Dahai に対応する牌種だけへ絞り込み、絞り込んだ候補から
+/// 既存比較順で最善を選ぶ。これにより evaluation は必ず実際に切れる牌の評価になり、押し引き
+/// 入力にもそのまま共有できる。
+///
+/// 不変条件:
+///
+/// - 合法 Dahai 候補がある: `evaluation == Some` かつ `action == Some` で牌種が一致する
+/// - 合法 Dahai 候補がない: `evaluation == None` かつ `action == None`
+///
+/// DEBUG / TRACE 診断が有効な場合も、絞り込み後の合法候補だけを対象にする。
 pub(crate) fn select_discard_action_with_evaluation(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -43,12 +50,14 @@ pub(crate) fn select_discard_action_with_evaluation(
         .chain(context.drawn_tile())
         .collect();
 
-    let evaluation = if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
-        select_best_discard_with_diagnostics(context, &tiles)
-    } else {
-        select_best_discard_evaluation(context, &tiles)
-    };
+    let evaluations = evaluate_discard_candidates(context, &tiles);
+    let legal_evaluations = retain_legal_dahai_evaluations(evaluations, legal_actions);
 
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        log_legal_discard_diagnostic(context, &tiles, &legal_evaluations);
+    }
+
+    let evaluation = select_best_evaluation(&legal_evaluations).cloned();
     let action = evaluation
         .as_ref()
         .and_then(|evaluation| legal_dahai_for_evaluation(evaluation, legal_actions));
@@ -81,33 +90,9 @@ fn legal_dahai_for_evaluation(
     red_fallback
 }
 
-pub(crate) fn select_best_discard_evaluation(
-    context: &GameContext,
-    tiles: &[TileId],
-) -> Option<DiscardEvaluation> {
+// context に応じた全打牌候補の評価一覧を返す。通常経路と診断経路で分岐を共有する。
+fn evaluate_discard_candidates(context: &GameContext, tiles: &[TileId]) -> Vec<DiscardEvaluation> {
     if context.visible_tiles().is_empty() {
-        select_best_discard_from_tiles_with_context(
-            tiles,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-        )
-    } else {
-        select_best_discard_from_tiles_with_visible_tiles(
-            tiles,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-            context.visible_tiles(),
-        )
-    }
-}
-
-fn select_best_discard_with_diagnostics(
-    context: &GameContext,
-    tiles: &[TileId],
-) -> Option<DiscardEvaluation> {
-    let evaluations = if context.visible_tiles().is_empty() {
         evaluate_discards_from_tiles_with_context(
             tiles,
             context.dora_indicators(),
@@ -122,12 +107,60 @@ fn select_best_discard_with_diagnostics(
             context.seat_wind(),
             context.visible_tiles(),
         )
-    };
+    }
+}
 
+// 合法 Dahai に対応する牌種を持つ評価候補だけを、元の順序を保って残す。
+// 評価一覧は牌種ごとに1件なので、同じ牌種の合法 Dahai が複数あっても評価は重複しない。
+// legal_actions と各評価値は変更しない。
+fn retain_legal_dahai_evaluations(
+    evaluations: Vec<DiscardEvaluation>,
+    legal_actions: &[LegalAction],
+) -> Vec<DiscardEvaluation> {
+    evaluations
+        .into_iter()
+        .filter(|evaluation| has_legal_dahai_for_type(evaluation.discard, legal_actions))
+        .collect()
+}
+
+// 指定牌種の合法 Dahai が存在するか判定する。赤牌と通常牌は同じ TileType として扱う。
+fn has_legal_dahai_for_type(tile_type: TileType, legal_actions: &[LegalAction]) -> bool {
+    legal_actions.iter().any(
+        |action| matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == tile_type),
+    )
+}
+
+// 既存比較順 compare_discard_evaluations() で最善評価を選ぶ。完全同値では先に現れた候補を維持する。
+fn select_best_evaluation(evaluations: &[DiscardEvaluation]) -> Option<&DiscardEvaluation> {
+    let mut best: Option<&DiscardEvaluation> = None;
+    for candidate in evaluations {
+        match best {
+            Some(current)
+                if !compare_discard_evaluations(candidate, current).candidate_is_better => {}
+            _ => best = Some(candidate),
+        }
+    }
+    best
+}
+
+// 合法 action を受け取らない汎用の best 評価。push_pull など合法 action が無い経路で使用する。
+pub(crate) fn select_best_discard_evaluation(
+    context: &GameContext,
+    tiles: &[TileId],
+) -> Option<DiscardEvaluation> {
+    let evaluations = evaluate_discard_candidates(context, tiles);
+    select_best_evaluation(&evaluations).cloned()
+}
+
+// 絞り込んだ合法候補だけを診断へ渡し、既存の DEBUG/TRACE ログ経路で出力する。
+fn log_legal_discard_diagnostic(
+    context: &GameContext,
+    tiles: &[TileId],
+    legal_evaluations: &[DiscardEvaluation],
+) {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
-    let diagnostic = diagnose_discard_evaluations(&counts, &evaluations);
+    let diagnostic = diagnose_discard_evaluations(&counts, legal_evaluations);
     log_discard_diagnostic(context, tiles, &diagnostic);
-    diagnostic.selected
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
@@ -581,7 +614,9 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_path_selects_same_discard_as_normal_path() {
+    fn diagnostic_selection_matches_best_on_legal_candidates() {
+        // 診断 (diagnose_discard_evaluations) の selected と通常経路の select_best_evaluation が、
+        // 同じ合法候補一覧に対して一致することを確認する。グローバル subscriber に依存しない。
         let hand_values = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
         let context = GameContext::from_parts_with_context(
             Some(tile(116)),
@@ -590,6 +625,11 @@ mod tests {
             Some(bot_logic::TileType::new(27).unwrap()),
             Some(bot_logic::TileType::new(28).unwrap()),
         );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .collect();
         let tiles: Vec<_> = context
             .hand_tiles()
             .iter()
@@ -597,14 +637,17 @@ mod tests {
             .chain(context.drawn_tile())
             .collect();
 
-        let normal = select_best_discard_evaluation(&context, &tiles);
-        let diagnostic = select_best_discard_with_diagnostics(&context, &tiles);
-        assert_eq!(normal, diagnostic);
-        assert!(normal.is_some());
+        let legal =
+            retain_legal_dahai_evaluations(evaluate_discard_candidates(&context, &tiles), &actions);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let diagnostic = diagnose_discard_evaluations(&counts, &legal);
+
+        assert_eq!(diagnostic.selected.as_ref(), select_best_evaluation(&legal));
+        assert!(diagnostic.selected.is_some());
     }
 
     #[test]
-    fn diagnostics_path_matches_normal_path_with_visible_tiles() {
+    fn diagnostic_selection_matches_best_on_legal_candidates_with_visible_tiles() {
         let hand = tiles(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36]);
         let mut visible = hand.clone();
         visible.extend(tiles(&[68, 69, 70, 71]));
@@ -616,6 +659,10 @@ mod tests {
             None,
             visible,
         );
+        let actions: Vec<LegalAction> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36, 68]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
         let all_tiles: Vec<_> = context
             .hand_tiles()
             .iter()
@@ -623,10 +670,15 @@ mod tests {
             .chain(context.drawn_tile())
             .collect();
 
-        let normal = select_best_discard_evaluation(&context, &all_tiles);
-        let diagnostic = select_best_discard_with_diagnostics(&context, &all_tiles);
-        assert_eq!(normal, diagnostic);
-        assert!(normal.is_some());
+        let legal = retain_legal_dahai_evaluations(
+            evaluate_discard_candidates(&context, &all_tiles),
+            &actions,
+        );
+        let counts = TileCounts::from_tiles(all_tiles.iter().copied());
+        let diagnostic = diagnose_discard_evaluations(&counts, &legal);
+
+        assert_eq!(diagnostic.selected.as_ref(), select_best_evaluation(&legal));
+        assert!(diagnostic.selected.is_some());
     }
 
     #[test]
@@ -687,7 +739,8 @@ mod tests {
     }
 
     #[test]
-    fn internal_helper_evaluation_matches_best_selector() {
+    fn internal_helper_evaluation_matches_best_selector_when_all_legal() {
+        // 全牌種が合法な場合は、合法候補への絞り込み後も汎用 best selector と一致する。
         let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
         let context = GameContext::from_parts(
             Some(tile(116)),
@@ -712,6 +765,139 @@ mod tests {
         assert!(selection.evaluation.is_some());
     }
 
+    // 合法 Dahai がある選択では、evaluation と action の TileType が常に一致する。
+    fn assert_evaluation_action_types_match(selection: &DiscardActionSelection) {
+        let evaluation_type = selection
+            .evaluation
+            .as_ref()
+            .map(|evaluation| evaluation.discard);
+        let action_type = selection.action.as_ref().and_then(|action| match action {
+            LegalAction::Dahai { tile } => Some(tile.tile_type()),
+            _ => None,
+        });
+        assert_eq!(evaluation_type, action_type);
+    }
+
+    #[test]
+    fn evaluation_and_action_tile_types_always_match() {
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .collect();
+
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert!(selection.evaluation.is_some());
+        assert!(selection.action.is_some());
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn excludes_illegal_global_best_and_picks_best_legal_candidate() {
+        // 全体最善候補(浮いた W)が合法 Dahai に含まれない場合、その非合法候補は使わず、
+        // 合法候補の中の最善(5s)を選ぶ。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+
+        let all = evaluate_discard_candidates(&context, &tiles);
+        let global_best = select_best_evaluation(&all).unwrap().discard;
+
+        // 全体最善(W=116)を除外し、他の牌種だけを合法にする。
+        let actions: Vec<LegalAction> = hand_values.iter().map(|&value| dahai(value)).collect();
+        assert!(!has_legal_dahai_for_type(global_best, &actions));
+
+        let expected_best = select_best_evaluation(&retain_legal_dahai_evaluations(
+            evaluate_discard_candidates(&context, &tiles),
+            &actions,
+        ))
+        .unwrap()
+        .clone();
+
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(selection.evaluation.as_ref(), Some(&expected_best));
+        assert_ne!(selection.evaluation.as_ref().unwrap().discard, global_best);
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn respects_tsumogiri_constraint_when_only_drawn_tile_is_legal() {
+        // 手牌には複数の打牌候補があるが、合法 Dahai はツモ牌(5s)だけ。
+        // 全体最善(浮いた W)は手牌内の非合法牌なので使わず、ツモ切りの評価を返す。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 116];
+        let context = GameContext::from_parts(
+            Some(tile(89)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let global_best = select_best_evaluation(&evaluate_discard_candidates(&context, &tiles))
+            .unwrap()
+            .discard;
+        assert_ne!(global_best, tile(89).tile_type());
+
+        let actions = vec![dahai(89)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(
+            selection.evaluation.as_ref().unwrap().discard,
+            tile(89).tile_type()
+        );
+        assert_eq!(selection.action, Some(dahai(89)));
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn single_legal_type_is_selected_regardless_of_evaluation() {
+        // 合法 Dahai が 1 種類(1m)だけなら、評価上の優劣にかかわらずその牌種を選ぶ。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 116];
+        let context = GameContext::from_parts(
+            Some(tile(89)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions = vec![dahai(0)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(
+            selection.evaluation.as_ref().unwrap().discard,
+            tile(0).tile_type()
+        );
+        assert_eq!(selection.action, Some(dahai(0)));
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn duplicate_same_type_dahai_does_not_duplicate_evaluations() {
+        // 赤5m と通常5m の両方が合法でも、5m の評価候補は1件だけ。
+        let hand = tiles(&[16, 17, 0, 4]);
+        let context = GameContext::from_parts(None, hand);
+        let tiles_all: Vec<_> = context.hand_tiles().to_vec();
+        let actions = vec![dahai(16), dahai(17), dahai(0), dahai(4)];
+
+        let all = evaluate_discard_candidates(&context, &tiles_all);
+        let legal = retain_legal_dahai_evaluations(all.clone(), &actions);
+
+        let five_type = tile(17).tile_type();
+        assert_eq!(legal.iter().filter(|e| e.discard == five_type).count(), 1);
+        // 3牌種(5m,1m,2m)がすべて合法なので、絞り込みで件数は変わらない。
+        assert_eq!(legal.len(), all.len());
+    }
+
     #[test]
     fn internal_helper_prefers_black_five_over_red() {
         let context = GameContext::from_parts(None, vec![tile(16), tile(17)]);
@@ -729,12 +915,13 @@ mod tests {
     }
 
     #[test]
-    fn internal_helper_reports_evaluation_without_matching_dahai() {
-        // best evaluation は 1m だが、合法 Dahai には 1m が無い。evaluation は Some、action は None。
+    fn reports_none_evaluation_and_action_without_legal_dahai() {
+        // 合法 Dahai の牌種(1m)が無い場合、evaluation も action も None にする。
+        // 以前は evaluation == Some / action == None を許容していたが、その状態は廃止する。
         let context = GameContext::with_hand_tiles(vec![tile(0)]);
         let actions = vec![dahai(4)];
         let selection = select_discard_action_with_evaluation(&context, &actions);
-        assert!(selection.evaluation.is_some());
+        assert_eq!(selection.evaluation, None);
         assert_eq!(selection.action, None);
     }
 }
