@@ -1,8 +1,8 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::{
-    DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation, TileCounts, TileId,
-    diagnose_discard_evaluations, evaluate_discards_from_tiles_with_context,
+    AcceptanceTile, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
+    TileCounts, TileId, diagnose_discard_evaluations, evaluate_discards_from_tiles_with_context,
     evaluate_discards_from_tiles_with_visible_tiles, select_best_discard_from_tiles_with_context,
     select_best_discard_from_tiles_with_visible_tiles,
 };
@@ -147,20 +147,24 @@ fn log_discard_diagnostic(
     }
 }
 
+fn acceptance_tile_diagnostic(tile: &AcceptanceTile) -> (String, u8, i8, i8, i8, i8) {
+    (
+        tile.tile.to_mjai_string(),
+        tile.remaining,
+        tile.shanten_after_draw.standard,
+        tile.shanten_after_draw.chiitoitsu,
+        tile.shanten_after_draw.kokushi,
+        tile.shanten_after_draw.min(),
+    )
+}
+
 fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
     let evaluation = &candidate.evaluation;
     let acceptance_tiles = evaluation
         .acceptance_after_discard
         .tiles
         .iter()
-        .map(|tile| {
-            format!(
-                "{}:{}:{}",
-                tile.tile.to_mjai_string(),
-                tile.remaining,
-                tile.shanten_after_draw.min()
-            )
-        })
+        .map(acceptance_tile_diagnostic)
         .collect::<Vec<_>>();
 
     tracing::trace!(
@@ -584,6 +588,33 @@ mod tests {
         let diagnostic = select_best_discard_with_diagnostics(&context, &all_tiles);
         assert_eq!(normal, diagnostic);
         assert!(normal.is_some());
+    }
+
+    #[test]
+    fn acceptance_tile_diagnostic_preserves_all_shanten_kinds() {
+        use bot_logic::{AcceptanceTile, Shanten, TileType};
+
+        let source = AcceptanceTile {
+            tile: TileType::from_mjai_type_str("5mr").unwrap(),
+            remaining: 3,
+            shanten_after_draw: Shanten {
+                standard: 1,
+                chiitoitsu: 2,
+                kokushi: 5,
+            },
+        };
+        let before = source;
+
+        let (tile, remaining, standard, chiitoitsu, kokushi, min) =
+            acceptance_tile_diagnostic(&source);
+
+        assert_eq!(tile, "5m");
+        assert_eq!(remaining, 3);
+        assert_eq!(standard, 1);
+        assert_eq!(chiitoitsu, 2);
+        assert_eq!(kokushi, 5);
+        assert_eq!(min, 1);
+        assert_eq!(source, before);
     }
 
     #[test]
