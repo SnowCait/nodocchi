@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod discard;
 pub mod hand;
+pub mod iishanten;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
@@ -21,6 +22,7 @@ pub use discard::{
     shape_breakdown_for_discard, shape_penalty_for_discard,
 };
 pub use hand::{Hand, HandError};
+pub use iishanten::{IishantenShape, classify_standard_iishanten_shape};
 pub use shanten::{
     Shanten, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
 };
