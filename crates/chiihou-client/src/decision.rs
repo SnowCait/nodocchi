@@ -28,6 +28,8 @@ pub enum SutehaiDecisionError {
     TooManySameTiles(ChiihouPai),
     #[error("richi discard tile {0} is not held")]
     RichiDiscardNotHeld(ChiihouPai),
+    #[error("GET sutehai? has no drawn tile after richi")]
+    MissingDrawnTileAfterRichi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,7 +150,30 @@ pub fn is_complete_menzen_tsumo_hand(
     Ok(calculate_shanten(&counts).min() == -1)
 }
 
-fn legal_actions_with_richi(
+fn is_self_reached(state: &ChiihouTableSnapshot) -> bool {
+    state
+        .player_id
+        .and_then(|player| state.reached.get(usize::from(player)))
+        .copied()
+        == Some(true)
+}
+
+fn legal_dahai_actions_from_sutehai_request_with_state(
+    hand: &[ChiihouPai],
+    drawn: Option<ChiihouPai>,
+    state: &ChiihouTableSnapshot,
+) -> Result<Vec<LegalAction>, SutehaiDecisionError> {
+    if is_self_reached(state) {
+        let drawn = drawn.ok_or(SutehaiDecisionError::MissingDrawnTileAfterRichi)?;
+        Ok(vec![LegalAction::Dahai {
+            tile: temporary_tile_id_from_chiihou_pai(drawn),
+        }])
+    } else {
+        Ok(legal_dahai_actions_from_sutehai_request(hand, drawn))
+    }
+}
+
+fn legal_hora_and_reach_actions(
     hand: &[ChiihouPai],
     drawn: Option<ChiihouPai>,
     include_richi: bool,
@@ -165,7 +190,29 @@ fn legal_actions_with_richi(
     if include_richi {
         actions.push(LegalAction::Reach);
     }
+    Ok(actions)
+}
+
+fn legal_actions_with_richi(
+    hand: &[ChiihouPai],
+    drawn: Option<ChiihouPai>,
+    include_richi: bool,
+) -> Result<Vec<LegalAction>, SutehaiDecisionError> {
+    let mut actions = legal_hora_and_reach_actions(hand, drawn, include_richi)?;
     actions.extend(legal_dahai_actions_from_sutehai_request(hand, drawn));
+    Ok(actions)
+}
+
+fn legal_actions_with_richi_and_state(
+    hand: &[ChiihouPai],
+    drawn: Option<ChiihouPai>,
+    include_richi: bool,
+    state: &ChiihouTableSnapshot,
+) -> Result<Vec<LegalAction>, SutehaiDecisionError> {
+    let mut actions = legal_hora_and_reach_actions(hand, drawn, include_richi)?;
+    actions.extend(legal_dahai_actions_from_sutehai_request_with_state(
+        hand, drawn, state,
+    )?);
     Ok(actions)
 }
 
@@ -183,7 +230,7 @@ pub fn legal_actions_from_sutehai_request_with_state(
 ) -> Result<Vec<LegalAction>, SutehaiDecisionError> {
     let context = game_context_from_sutehai_request_with_state(hand, drawn, state);
     let richi_pai = select_richi_pai(hand, drawn, state, &context)?;
-    legal_actions_with_richi(hand, drawn, richi_pai.is_some())
+    legal_actions_with_richi_and_state(hand, drawn, richi_pai.is_some(), state)
 }
 
 fn is_tenpai_after_discard(
@@ -257,7 +304,8 @@ pub fn choose_sutehai_pai<A: Agent>(
         return Err(SutehaiDecisionError::NotSutehaiRequest);
     };
     let context = game_context_from_sutehai_request(hand, *drawn);
-    choose_sutehai_pai_with_context(hand, *drawn, context, agent)
+    let legal_actions = legal_dahai_actions_from_sutehai_request(hand, *drawn);
+    choose_sutehai_pai_from_actions(&legal_actions, context, agent)
 }
 
 pub fn choose_sutehai_pai_with_state<A: Agent>(
@@ -269,23 +317,22 @@ pub fn choose_sutehai_pai_with_state<A: Agent>(
         return Err(SutehaiDecisionError::NotSutehaiRequest);
     };
     let context = game_context_from_sutehai_request_with_state(hand, *drawn, state);
-    choose_sutehai_pai_with_context(hand, *drawn, context, agent)
+    let legal_actions = legal_dahai_actions_from_sutehai_request_with_state(hand, *drawn, state)?;
+    choose_sutehai_pai_from_actions(&legal_actions, context, agent)
 }
 
-fn choose_sutehai_pai_with_context<A: Agent>(
-    hand: &[ChiihouPai],
-    drawn: Option<ChiihouPai>,
+fn choose_sutehai_pai_from_actions<A: Agent>(
+    legal_actions: &[LegalAction],
     context: GameContext,
     agent: &mut A,
 ) -> Result<ChiihouPai, SutehaiDecisionError> {
-    let legal_actions = legal_dahai_actions_from_sutehai_request(hand, drawn);
     let Some(fallback) = legal_actions
         .first()
         .and_then(chiihou_pai_from_dahai_action)
     else {
         return Err(SutehaiDecisionError::NoLegalDahai);
     };
-    let chosen = agent.act(&context, &legal_actions);
+    let chosen = agent.act(&context, legal_actions);
     if legal_actions.contains(&chosen) {
         return Ok(chiihou_pai_from_dahai_action(&chosen).unwrap_or(fallback));
     }
@@ -300,7 +347,8 @@ pub fn choose_sutehai_decision<A: Agent>(
         return Err(SutehaiDecisionError::NotSutehaiRequest);
     };
     let context = game_context_from_sutehai_request(hand, *drawn);
-    choose_sutehai_decision_with_context(hand, *drawn, context, None, agent)
+    let legal_actions = legal_actions_with_richi(hand, *drawn, false)?;
+    choose_sutehai_decision_from_actions(&legal_actions, context, None, agent)
 }
 
 pub fn choose_sutehai_decision_with_state<A: Agent>(
@@ -313,21 +361,21 @@ pub fn choose_sutehai_decision_with_state<A: Agent>(
     };
     let context = game_context_from_sutehai_request_with_state(hand, *drawn, state);
     let richi_pai = select_richi_pai(hand, *drawn, state, &context)?;
-    choose_sutehai_decision_with_context(hand, *drawn, context, richi_pai, agent)
+    let legal_actions =
+        legal_actions_with_richi_and_state(hand, *drawn, richi_pai.is_some(), state)?;
+    choose_sutehai_decision_from_actions(&legal_actions, context, richi_pai, agent)
 }
 
-fn choose_sutehai_decision_with_context<A: Agent>(
-    hand: &[ChiihouPai],
-    drawn: Option<ChiihouPai>,
+fn choose_sutehai_decision_from_actions<A: Agent>(
+    legal_actions: &[LegalAction],
     context: GameContext,
     richi_pai: Option<ChiihouPai>,
     agent: &mut A,
 ) -> Result<ChiihouSutehaiDecision, SutehaiDecisionError> {
-    let legal_actions = legal_actions_with_richi(hand, drawn, richi_pai.is_some())?;
     let Some(fallback) = legal_actions.iter().find_map(chiihou_pai_from_dahai_action) else {
         return Err(SutehaiDecisionError::NoLegalDahai);
     };
-    let chosen = agent.act(&context, &legal_actions);
+    let chosen = agent.act(&context, legal_actions);
     if !legal_actions.contains(&chosen) {
         return Ok(ChiihouSutehaiDecision::Dahai(fallback));
     }
@@ -1845,5 +1893,330 @@ mod tests {
         };
         let reply = build_sutehai_reply_for_request("npub1server", &request, &mut agent).unwrap();
         assert!(reply.starts_with("nostr:npub1server sutehai? sutehai "));
+    }
+
+    fn self_reached_snapshot() -> ChiihouTableSnapshot {
+        ChiihouTableSnapshot {
+            player_id: Some(0),
+            remaining_tiles: Some(30),
+            reached: [true, false, false, false],
+            ..ChiihouTableSnapshot::default()
+        }
+    }
+
+    fn dahai_actions(actions: &[LegalAction]) -> Vec<LegalAction> {
+        actions
+            .iter()
+            .filter(|action| matches!(action, LegalAction::Dahai { .. }))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn legal_actions_with_state_not_reached_include_hand_and_drawn() {
+        let actions = legal_actions_from_sutehai_request_with_state(
+            &richi_hand(),
+            Some(pai("1z")),
+            &richi_snapshot(),
+        )
+        .unwrap();
+        assert!(actions.contains(&dahai("1z")));
+        assert!(actions.contains(&dahai("2p")));
+        assert!(actions.contains(&dahai("5s")));
+    }
+
+    #[test]
+    fn legal_actions_with_state_reached_only_drawn_dahai() {
+        let actions = legal_actions_from_sutehai_request_with_state(
+            &richi_hand(),
+            Some(pai("1z")),
+            &self_reached_snapshot(),
+        )
+        .unwrap();
+        assert_eq!(dahai_actions(&actions), vec![dahai("1z")]);
+        assert!(!actions.contains(&dahai("2p")));
+        assert!(!actions.contains(&dahai("5s")));
+        assert!(!actions.contains(&LegalAction::Reach));
+    }
+
+    #[test]
+    fn legal_actions_with_state_reached_and_complete_keep_hora_and_drawn() {
+        let actions = legal_actions_from_sutehai_request_with_state(
+            &complete_standard_hand(),
+            Some(pai("5p")),
+            &self_reached_snapshot(),
+        )
+        .unwrap();
+        assert!(actions.contains(&LegalAction::Hora));
+        assert_eq!(dahai_actions(&actions), vec![dahai("5p")]);
+    }
+
+    #[test]
+    fn legal_actions_with_state_only_others_reached_are_normal() {
+        let state = ChiihouTableSnapshot {
+            reached: [false, true, false, false],
+            ..richi_snapshot()
+        };
+        let actions =
+            legal_actions_from_sutehai_request_with_state(&richi_hand(), Some(pai("1z")), &state)
+                .unwrap();
+        assert!(actions.contains(&dahai("2p")));
+        assert!(actions.contains(&dahai("5s")));
+        assert!(actions.contains(&dahai("1z")));
+    }
+
+    #[test]
+    fn legal_actions_with_state_player_id_none_are_normal() {
+        let state = ChiihouTableSnapshot {
+            player_id: None,
+            reached: [true, true, true, true],
+            ..richi_snapshot()
+        };
+        let actions =
+            legal_actions_from_sutehai_request_with_state(&richi_hand(), Some(pai("1z")), &state)
+                .unwrap();
+        assert!(actions.contains(&dahai("2p")));
+        assert!(actions.contains(&dahai("1z")));
+    }
+
+    #[test]
+    fn legal_actions_with_state_player_id_out_of_range_are_normal() {
+        let state = ChiihouTableSnapshot {
+            player_id: Some(4),
+            reached: [true, true, true, true],
+            ..richi_snapshot()
+        };
+        let actions =
+            legal_actions_from_sutehai_request_with_state(&richi_hand(), Some(pai("1z")), &state)
+                .unwrap();
+        assert!(actions.contains(&dahai("2p")));
+        assert!(actions.contains(&dahai("1z")));
+    }
+
+    #[test]
+    fn legal_actions_with_state_reached_without_drawn_is_error() {
+        assert_eq!(
+            legal_actions_from_sutehai_request_with_state(
+                &richi_hand(),
+                None,
+                &self_reached_snapshot()
+            ),
+            Err(SutehaiDecisionError::MissingDrawnTileAfterRichi)
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_without_drawn_is_error() {
+        let request = ChiihouRequest::Sutehai {
+            hand: richi_hand(),
+            drawn: None,
+        };
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &request,
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(dahai("1z"))
+            ),
+            Err(SutehaiDecisionError::MissingDrawnTileAfterRichi)
+        );
+    }
+
+    #[test]
+    fn reply_with_state_reached_without_drawn_is_error() {
+        let request = ChiihouRequest::Sutehai {
+            hand: richi_hand(),
+            drawn: None,
+        };
+        assert_eq!(
+            build_sutehai_reply_for_request_with_state(
+                "npub1server",
+                &request,
+                &self_reached_snapshot(),
+                &mut bot_core::TsumogiriAgent
+            ),
+            Err(SutehaiDecisionError::MissingDrawnTileAfterRichi)
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_agent_picks_drawn() {
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(dahai("1z"))
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_agent_picks_hand_tile_falls_back_to_drawn() {
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(dahai("5s"))
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_agent_picks_none_falls_back_to_drawn() {
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(LegalAction::None)
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_agent_picks_reach_falls_back_to_drawn() {
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(LegalAction::Reach)
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_and_complete_agent_picks_hora_tsumos() {
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &complete_sutehai_request(),
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouSutehaiDecision::Tsumo)
+        );
+    }
+
+    #[test]
+    fn decision_with_state_reached_and_complete_agent_discards_drawn() {
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &complete_sutehai_request(),
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(dahai("5p"))
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("5p")))
+        );
+    }
+
+    #[test]
+    fn normal_agent_discards_drawn_when_reached() {
+        let mut agent = bot_core::NormalAgent;
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut agent
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn shanten_agent_discards_drawn_when_reached() {
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut agent
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn tsumogiri_agent_discards_drawn_when_reached() {
+        let mut agent = bot_core::TsumogiriAgent;
+        assert_eq!(
+            choose_sutehai_decision_with_state(
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut agent
+            ),
+            Ok(ChiihouSutehaiDecision::Dahai(pai("1z")))
+        );
+    }
+
+    #[test]
+    fn builds_sutehai_reply_when_reached_discards_drawn() {
+        assert_eq!(
+            build_sutehai_reply_for_request_with_state(
+                "npub1server",
+                &richi_request(),
+                &self_reached_snapshot(),
+                &mut ShantenAgent
+            ),
+            Ok("nostr:npub1server sutehai? sutehai 1z".to_string())
+        );
+    }
+
+    #[test]
+    fn reached_reply_uses_exact_drawn_tile_even_if_hand_has_same_kind() {
+        let request = ChiihouRequest::Sutehai {
+            hand: richi_hand(),
+            drawn: Some(pai("5s")),
+        };
+        assert_eq!(
+            build_sutehai_reply_for_request_with_state(
+                "npub1server",
+                &request,
+                &self_reached_snapshot(),
+                &mut FixedActionAgent(dahai("2p"))
+            ),
+            Ok("nostr:npub1server sutehai? sutehai 5s".to_string())
+        );
+    }
+
+    #[test]
+    fn generating_richi_reply_does_not_change_snapshot_reached() {
+        let state = richi_snapshot();
+        let reply = build_sutehai_reply_for_request_with_state(
+            "npub1server",
+            &richi_request(),
+            &state,
+            &mut FixedActionAgent(LegalAction::Reach),
+        )
+        .unwrap();
+        assert_eq!(reply, "nostr:npub1server sutehai? richi 1z".to_string());
+        assert_eq!(state.reached, [false; CHIIHOU_PLAYER_COUNT]);
+    }
+
+    fn first_richi_hand() -> Vec<ChiihouPai> {
+        pais(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "9s",
+        ])
+    }
+
+    #[test]
+    fn first_richi_discard_can_be_hand_tile_not_drawn() {
+        let request = ChiihouRequest::Sutehai {
+            hand: first_richi_hand(),
+            drawn: Some(pai("4p")),
+        };
+        let decision = choose_sutehai_decision_with_state(
+            &request,
+            &richi_snapshot(),
+            &mut FixedActionAgent(LegalAction::Reach),
+        )
+        .unwrap();
+        match decision {
+            ChiihouSutehaiDecision::Richi(discard) => {
+                assert_ne!(discard, pai("4p"));
+                assert!(first_richi_hand().contains(&discard));
+            }
+            other => panic!("expected richi decision, got {other:?}"),
+        }
     }
 }
