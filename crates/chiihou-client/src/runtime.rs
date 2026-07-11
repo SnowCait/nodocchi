@@ -361,6 +361,14 @@ mod tests {
         }
     }
 
+    struct HoraAgent;
+
+    impl Agent for HoraAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            LegalAction::Hora
+        }
+    }
+
     fn ai_keys() -> Keys {
         Keys::parse(TEST_AI_SECRET_KEY_HEX).unwrap()
     }
@@ -402,6 +410,15 @@ mod tests {
         format!(
             "\
 :mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:
+nostr:{ai_npub} GET sutehai?"
+        )
+    }
+
+    fn complete_sutehai_content() -> String {
+        let ai_npub = ai_keys().public_key().to_bech32().unwrap();
+        format!(
+            "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_p5: :mahjong_p5:
 nostr:{ai_npub} GET sutehai?"
         )
     }
@@ -590,6 +607,92 @@ nostr:{ai_npub} GET naku? ron pon chi"
         assert!(tag_values(&reply_tags, "g").is_empty());
         assert!(tag_values(&reply_tags, "n").is_empty());
         assert!(tag_values(&reply_tags, "t").is_empty());
+    }
+
+    #[test]
+    fn processes_and_signs_kind_42_tsumo_reply() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let event = build_request_event(
+            42,
+            &complete_sutehai_content(),
+            &request_tags(),
+            &server_keys(),
+        );
+        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut HoraAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.kind, Kind::from_u16(42));
+        assert_eq!(reply.pubkey, ai_keys().public_key());
+        assert!(reply.verify().is_ok());
+        let server_npub = server_keys().public_key().to_bech32().unwrap();
+        assert_eq!(reply.content, format!("nostr:{server_npub} sutehai? tsumo"));
+        let reply_tags = incoming_event_from_nostr(&reply).tags;
+        assert_eq!(
+            tag_values(&reply_tags, "e"),
+            vec![
+                string_tag(&["e", HANCHAN_CHANNEL_ID, "", "root"]),
+                string_tag(&[
+                    "e",
+                    &event.id.to_hex(),
+                    "",
+                    "reply",
+                    &server_keys().public_key().to_hex()
+                ]),
+            ]
+        );
+        assert_eq!(
+            tag_values(&reply_tags, "p"),
+            vec![
+                string_tag(&["p", &ai_keys().public_key().to_hex()]),
+                string_tag(&["p", &server_keys().public_key().to_hex()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn processes_and_signs_kind_20000_tsumo_reply() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let mut tags = request_tags();
+        tags.push(string_tag(&["g", "xn76"]));
+        tags.push(string_tag(&["n", "Server Bot"]));
+        let event = build_request_event(20000, &complete_sutehai_content(), &tags, &server_keys());
+        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut HoraAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.kind, Kind::from_u16(20000));
+        assert!(reply.verify().is_ok());
+        let server_npub = server_keys().public_key().to_bech32().unwrap();
+        assert_eq!(reply.content, format!("nostr:{server_npub} sutehai? tsumo"));
+        let reply_tags = incoming_event_from_nostr(&reply).tags;
+        assert_eq!(
+            tag_values(&reply_tags, "g"),
+            vec![string_tag(&["g", "xn76"])]
+        );
+        assert!(tag_values(&reply_tags, "n").is_empty());
+        assert_eq!(
+            tag_values(&reply_tags, "t"),
+            vec![string_tag(&["t", "teleport"])]
+        );
+    }
+
+    #[test]
+    fn processes_and_signs_tsumo_reply_with_normal_agent() {
+        let config = config(ChiihouChannel::Hanchan);
+        let mut seen = SeenEventIds::new();
+        let event = build_request_event(
+            42,
+            &complete_sutehai_content(),
+            &request_tags(),
+            &server_keys(),
+        );
+        let mut agent = bot_core::NormalAgent;
+        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut agent)
+            .unwrap()
+            .unwrap();
+        let server_npub = server_keys().public_key().to_bech32().unwrap();
+        assert_eq!(reply.content, format!("nostr:{server_npub} sutehai? tsumo"));
     }
 
     #[test]

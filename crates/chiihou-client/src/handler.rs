@@ -244,6 +244,73 @@ mod tests {
         }
     }
 
+    fn complete_sutehai_request() -> ChiihouRequest {
+        ChiihouRequest::Sutehai {
+            hand: vec![
+                pai("1m"),
+                pai("2m"),
+                pai("3m"),
+                pai("4m"),
+                pai("5m"),
+                pai("6m"),
+                pai("7m"),
+                pai("8m"),
+                pai("9m"),
+                pai("1p"),
+                pai("2p"),
+                pai("3p"),
+                pai("5p"),
+            ],
+            drawn: Some(pai("5p")),
+        }
+    }
+
+    #[test]
+    fn builds_tsumo_reply_from_complete_sutehai_request() {
+        assert_eq!(
+            build_reply_for_request(
+                "npub1server",
+                &complete_sutehai_request(),
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? tsumo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn builds_tsumo_reply_from_complete_sutehai_request_with_state() {
+        assert_eq!(
+            build_reply_for_request_with_state(
+                "npub1server",
+                &complete_sutehai_request(),
+                &crate::match_state::ChiihouTableSnapshot::default(),
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? tsumo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn handles_complete_sutehai_content_with_tsumo() {
+        let content = "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_m7::mahjong_m8::mahjong_m9::mahjong_p1::mahjong_p2::mahjong_p3::mahjong_p5: :mahjong_p5:
+nostr:npub1ai000 GET sutehai?";
+        assert_eq!(
+            handle_chiihou_content(
+                "npub1server",
+                content,
+                &mut FixedActionAgent(LegalAction::Hora)
+            ),
+            Ok(ChiihouHandlerResult::ReplyContent(
+                "nostr:npub1server sutehai? tsumo".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn handles_sutehai_content() {
         let content = "\
