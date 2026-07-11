@@ -24,25 +24,35 @@ impl ObservationPayload {
     pub fn decode_4p(&self) -> Result<DecodedObservation, ObservationError> {
         let observation = Observation::deserialize_from_base64(&self.base64)
             .map_err(|e| ObservationError::Decode(e.to_string()))?;
-        let hand_tiles: Vec<TileId> = observation
+
+        // RiichiEnv (riichienv-core 0.4.8) の Observation.hands はツモ牌込みであり、
+        // 同じ物理牌 ID が drawn_tile にも保持される。raw 物理牌 ID のまま取得し、
+        // hand_tiles 用と visible_tiles 用で別々に扱う。
+        let raw_hand: Vec<u32> = observation
             .hands
             .get(usize::from(observation.player_id))
-            .map(|hand| {
-                hand.iter()
-                    .filter_map(|&raw| u8::try_from(raw).ok())
-                    .filter_map(temporary_tile_id_from_observation_tile)
-                    .collect()
-            })
+            .cloned()
             .unwrap_or_default();
-        let dora_indicators: Vec<TileId> = observation
-            .dora_indicators
-            .iter()
-            .filter_map(|&raw| u8::try_from(raw).ok())
-            .filter_map(temporary_tile_id_from_observation_tile)
-            .collect();
+        let raw_drawn_tile = observation.drawn_tile;
+
+        // ツモ牌を raw 物理牌 ID で 1 枚だけ分離する。赤5と通常5、同牌種の別個体を
+        // 区別するため、temporary 変換前の raw ID で比較する。
+        let mut concealed_hand_raw = raw_hand.clone();
+        let removed_drawn_tile = remove_drawn_tile_once(&mut concealed_hand_raw, raw_drawn_tile);
+
+        let hand_tiles = decode_observation_tiles(&concealed_hand_raw);
+        let drawn_tile = raw_drawn_tile.and_then(temporary_tile_id_from_observation_tile);
+        let dora_indicators = decode_observation_tiles(&observation.dora_indicators);
         // discards は防御・現物判定用の player ごとの河、visible_tiles は枚数補正用。用途を分ける。
         let discards = decode_discards(&observation);
-        let mut visible_tiles = hand_tiles.clone();
+
+        // visible_tiles には自分から見えている現在の手牌全体をツモ牌込みで 1 回だけ含める。
+        // 上流形式では raw_hand がツモ牌を含むため drawn_tile を足さない。ツモ牌が hand に
+        // 含まれない互換形式（分離できなかった場合）のみ drawn_tile を 1 枚足す。
+        let mut visible_tiles = decode_observation_tiles(&raw_hand);
+        if !removed_drawn_tile && let Some(drawn_tile) = drawn_tile {
+            visible_tiles.push(drawn_tile);
+        }
         visible_tiles.extend(dora_indicators.iter().copied());
         visible_tiles.extend(discards.iter().flatten().copied());
         for player_melds in &observation.melds {
@@ -50,11 +60,10 @@ impl ObservationPayload {
                 visible_tiles.extend(meld_visible_tiles(meld));
             }
         }
+
         Ok(DecodedObservation {
             player_id: observation.player_id,
-            drawn_tile: observation
-                .drawn_tile
-                .and_then(temporary_tile_id_from_observation_tile),
+            drawn_tile,
             hand_tiles,
             dora_indicators,
             round_wind: TileType::wind_from_seat_index(observation.round_wind),
@@ -67,14 +76,37 @@ impl ObservationPayload {
     }
 }
 
+// raw 物理牌 ID 列を temporary TileId へ変換する。不正な牌 ID は従来どおり除外する。
+fn decode_observation_tiles(raw_tiles: &[u32]) -> Vec<TileId> {
+    raw_tiles
+        .iter()
+        .filter_map(|&raw| u8::try_from(raw).ok())
+        .filter_map(temporary_tile_id_from_observation_tile)
+        .collect()
+}
+
+// ツモ牌と一致する raw 物理牌 ID を hand から 1 枚だけ除去する。
+//
+// - drawn_tile == None: hand を変更せず false
+// - 同じ raw 物理牌 ID が hand にある: 最初の 1 枚だけ除去し true
+// - 同じ raw 物理牌 ID が hand にない: hand を変更せず false
+//
+// 赤5と通常5、同牌種の別個体を区別するため、temporary 変換前の raw ID で比較する。
+fn remove_drawn_tile_once(hand: &mut Vec<u32>, drawn_tile: Option<u8>) -> bool {
+    let Some(drawn_tile) = drawn_tile.map(u32::from) else {
+        return false;
+    };
+    let Some(index) = hand.iter().position(|&tile| tile == drawn_tile) else {
+        return false;
+    };
+    hand.remove(index);
+    true
+}
+
 fn decode_discards(observation: &Observation) -> [Vec<TileId>; 4] {
     let mut discards: [Vec<TileId>; 4] = Default::default();
     for (player, player_discards) in observation.discards.iter().enumerate() {
-        discards[player] = player_discards
-            .iter()
-            .filter_map(|&raw| u8::try_from(raw).ok())
-            .filter_map(temporary_tile_id_from_observation_tile)
-            .collect();
+        discards[player] = decode_observation_tiles(player_discards);
     }
     discards
 }
@@ -115,6 +147,9 @@ pub enum ObservationError {
 pub struct DecodedObservation {
     pub player_id: u8,
     pub drawn_tile: Option<TileId>,
+    /// RiichiEnv の Observation.hands はツモ牌込みである。
+    /// hand_tiles は drawn_tile を raw 物理牌 ID で 1 枚分離した状態で保持する。
+    /// hand_tiles + drawn_tile が実際の自摸後手牌になる。
     pub hand_tiles: Vec<TileId>,
     pub dora_indicators: Vec<TileId>,
     pub round_wind: Option<TileType>,
@@ -966,6 +1001,203 @@ mod tests {
             TileId::new(132).unwrap(),
         ] {
             assert!(decoded.visible_tiles.contains(&tile), "missing {tile:?}");
+        }
+    }
+
+    mod drawn_tile_separation {
+        use super::*;
+        use bot_logic::evaluate_discards_from_tiles_with_context;
+
+        fn count(tiles: &[TileId], tile: TileId) -> usize {
+            tiles.iter().filter(|&&t| t == tile).count()
+        }
+
+        // 1. 上流形式の基本ケース: raw hand 14 枚のうち drawn_tile と一致する物理牌を 1 枚分離する。
+        #[test]
+        fn upstream_hand_separates_drawn_tile() {
+            let hand = vec![0, 4, 8, 12, 16, 36, 40, 44, 48, 72, 76, 104, 120, 108];
+            assert_eq!(hand.len(), 14);
+            let payload = ObservationPayload::new(fixture_base64(0, Some(108), hand));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(decoded.hand_tiles.len(), 13);
+            assert!(decoded.drawn_tile.is_some());
+            assert_eq!(decoded.hand_tiles.len() + 1, 14);
+
+            let context = game_context_from_decoded_observation(&decoded);
+            assert_eq!(context.hand_tiles().len(), 13);
+            assert!(context.drawn_tile().is_some());
+        }
+
+        // 2. 同牌種の別物理牌 ID を複数含む hand から、ツモった 1 枚だけを枚数として分離する。
+        #[test]
+        fn removes_only_one_physical_tile() {
+            // 5m の物理牌 ID A=17, B=18。drawn は B=18。
+            let payload = ObservationPayload::new(fixture_base64(0, Some(18), vec![17, 18]));
+            let decoded = payload.decode_4p().unwrap();
+            // 正規化後は A も B も temporary 17 になるが、枚数は 1 枚だけ減る。
+            assert_eq!(decoded.hand_tiles.len(), 1);
+            assert_eq!(count(&decoded.hand_tiles, TileId::new(17).unwrap()), 1);
+            assert_eq!(decoded.drawn_tile, TileId::new(17));
+        }
+
+        // 3. 赤5ツモ: 赤5m を分離し、通常5m は hand に残す。
+        #[test]
+        fn red_five_tsumo_keeps_normal_five_in_hand() {
+            // 16 = 赤5m, 17 = 通常5m, 4 = 2m。drawn は赤5m=16。
+            let payload = ObservationPayload::new(fixture_base64(0, Some(16), vec![16, 17, 4]));
+            let decoded = payload.decode_4p().unwrap();
+            // 通常5m は残り、赤5m は分離される。
+            assert!(decoded.hand_tiles.contains(&TileId::new(17).unwrap()));
+            assert!(!decoded.hand_tiles.contains(&TileId::new(16).unwrap()));
+            assert_eq!(decoded.drawn_tile, TileId::new(16));
+            // visible_tiles には赤5m と通常5m を各 1 枚含む。
+            assert_eq!(count(&decoded.visible_tiles, TileId::new(16).unwrap()), 1);
+            assert_eq!(count(&decoded.visible_tiles, TileId::new(17).unwrap()), 1);
+        }
+
+        // 4. 通常5ツモ: 通常5m だけを分離し、赤5m は hand に残す。
+        #[test]
+        fn normal_five_tsumo_keeps_red_five_in_hand() {
+            // 16 = 赤5m, 17 = 通常5m。drawn は通常5m=17。
+            let payload = ObservationPayload::new(fixture_base64(0, Some(17), vec![16, 17]));
+            let decoded = payload.decode_4p().unwrap();
+            assert!(decoded.hand_tiles.contains(&TileId::new(16).unwrap()));
+            assert!(!decoded.hand_tiles.contains(&TileId::new(17).unwrap()));
+            assert_eq!(decoded.drawn_tile, TileId::new(17));
+        }
+
+        // 5. 同牌種だが raw 物理牌 ID が一致しない互換形式: 除去せず drawn を維持する。
+        #[test]
+        fn same_type_but_different_raw_id_is_not_removed() {
+            // hand は通常5m の物理牌 A=17。drawn は通常5m の物理牌 B=18 (hand に存在しない)。
+            let payload = ObservationPayload::new(fixture_base64(0, Some(18), vec![17]));
+            let decoded = payload.decode_4p().unwrap();
+            // A を除去しない。
+            assert_eq!(decoded.hand_tiles.len(), 1);
+            assert_eq!(decoded.drawn_tile, TileId::new(17));
+            // visible_tiles には A と B の 2 枚分を含む。
+            assert_eq!(count(&decoded.visible_tiles, TileId::new(17).unwrap()), 2);
+        }
+
+        // 6. drawn tile を含まない互換形式: 13 枚の hand を維持し、drawn を別に保持する。
+        #[test]
+        fn compat_hand_without_drawn_tile_keeps_thirteen() {
+            let hand = vec![0, 4, 8, 12, 16, 36, 40, 44, 48, 72, 76, 104, 108];
+            assert_eq!(hand.len(), 13);
+            // drawn=132 (C) は hand に存在しない。
+            let payload = ObservationPayload::new(fixture_base64(0, Some(132), hand));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(decoded.hand_tiles.len(), 13);
+            assert_eq!(decoded.drawn_tile, TileId::new(132));
+            let context = game_context_from_decoded_observation(&decoded);
+            let after_tsumo =
+                context.hand_tiles().len() + usize::from(context.drawn_tile().is_some());
+            assert_eq!(after_tsumo, 14);
+            // visible_tiles に drawn tile を 1 枚追加する。
+            assert_eq!(count(&decoded.visible_tiles, TileId::new(132).unwrap()), 1);
+        }
+
+        // 7. drawn tile なし: hand も visible_tiles も既存挙動を維持する。
+        #[test]
+        fn no_drawn_tile_keeps_hand_and_visible() {
+            let payload = ObservationPayload::new(fixture_base64(0, None, vec![0, 4]));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(
+                decoded.hand_tiles,
+                vec![TileId::new(0).unwrap(), TileId::new(4).unwrap()]
+            );
+            assert_eq!(decoded.drawn_tile, None);
+            assert_eq!(
+                decoded.visible_tiles,
+                vec![TileId::new(0).unwrap(), TileId::new(4).unwrap()]
+            );
+        }
+
+        // 8. visible_tiles の一回計上: 上流形式・互換形式ともツモ牌をちょうど 1 枚含む。
+        #[test]
+        fn visible_tiles_count_drawn_tile_once_upstream() {
+            // raw hand 14 枚がツモ牌 108 を含む。dora / 河 / 副露なし。
+            let hand = vec![0, 4, 8, 12, 16, 36, 40, 44, 48, 72, 76, 104, 120, 108];
+            let payload = ObservationPayload::new(fixture_base64(0, Some(108), hand));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(decoded.visible_tiles.len(), 14);
+            assert_eq!(count(&decoded.visible_tiles, TileId::new(108).unwrap()), 1);
+        }
+
+        #[test]
+        fn visible_tiles_count_drawn_tile_once_compat() {
+            // raw hand 13 枚にツモ牌 132 を含まない。
+            let hand = vec![0, 4, 8, 12, 16, 36, 40, 44, 48, 72, 76, 104, 108];
+            let payload = ObservationPayload::new(fixture_base64(0, Some(132), hand));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(decoded.visible_tiles.len(), 14);
+            assert_eq!(count(&decoded.visible_tiles, TileId::new(132).unwrap()), 1);
+        }
+
+        // 9. 実際に確認された回帰牌姿。ツモ牌 N を二重計上すると偽の七対子テンパイになる。
+        #[test]
+        fn regression_north_tsumo_is_not_false_chiitoitsu_tenpai() {
+            // 2m 3m 4m 4m 5m 5m 4p 4p 5p 2s 2s 9s 9s N の 14 枚。drawn は hand 内の N=120。
+            let hand = vec![4, 8, 12, 13, 17, 18, 48, 49, 53, 76, 77, 104, 105, 120];
+            assert_eq!(hand.len(), 14);
+            let payload = ObservationPayload::new(fixture_base64(0, Some(120), hand));
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(decoded.hand_tiles.len(), 13);
+            assert_eq!(decoded.drawn_tile, TileId::new(120));
+            // ツモ牌の N は hand_tiles に含まれない。
+            let north = TileId::new(120).unwrap();
+            assert_eq!(count(&decoded.hand_tiles, north), 0);
+
+            let context = game_context_from_decoded_observation(&decoded);
+            let tiles: Vec<TileId> = context
+                .hand_tiles()
+                .iter()
+                .copied()
+                .chain(context.drawn_tile())
+                .collect();
+            assert_eq!(tiles.len(), 14);
+            // 評価牌内の N は 1 枚。
+            assert_eq!(count(&tiles, north), 1);
+
+            let evaluations = evaluate_discards_from_tiles_with_context(
+                &tiles,
+                context.dora_indicators(),
+                context.round_wind(),
+                context.seat_wind(),
+            );
+            let five_pin = evaluations
+                .iter()
+                .find(|evaluation| evaluation.discard.to_mjai_string() == "5p")
+                .expect("5p 切り候補が存在する");
+            assert_eq!(five_pin.shanten_after_discard.chiitoitsu, 1);
+            // 15 枚評価による偽の七対子テンパイ (0 向聴) を防止する。
+            assert_ne!(five_pin.shanten_after_discard.chiitoitsu, 0);
+        }
+
+        // 10. helper は渡された clone だけを操作し、元の raw hand を変更しない。
+        #[test]
+        fn remove_drawn_tile_once_only_mutates_passed_clone() {
+            let raw_hand: Vec<u32> = vec![17, 18, 4];
+            let mut concealed = raw_hand.clone();
+            let removed = remove_drawn_tile_once(&mut concealed, Some(18));
+            assert!(removed);
+            assert_eq!(concealed, vec![17, 4]);
+            // 元の raw hand は変更されない。
+            assert_eq!(raw_hand, vec![17, 18, 4]);
+        }
+
+        #[test]
+        fn remove_drawn_tile_once_returns_false_without_drawn_tile() {
+            let mut hand: Vec<u32> = vec![17, 18];
+            assert!(!remove_drawn_tile_once(&mut hand, None));
+            assert_eq!(hand, vec![17, 18]);
+        }
+
+        #[test]
+        fn remove_drawn_tile_once_returns_false_when_absent() {
+            let mut hand: Vec<u32> = vec![17];
+            assert!(!remove_drawn_tile_once(&mut hand, Some(18)));
+            assert_eq!(hand, vec![17]);
         }
     }
 
