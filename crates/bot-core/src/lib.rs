@@ -4,6 +4,7 @@ pub mod agents;
 pub mod context;
 pub mod defense;
 pub mod discard_selection;
+pub mod push_pull;
 
 pub use action::LegalAction;
 pub use agent::Agent;
@@ -22,3 +23,7 @@ pub use defense::{
     wall_rank, wall_tile_types_by_rank,
 };
 pub use discard_selection::select_discard_action;
+pub use push_pull::{
+    PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
+    decide_push_pull, push_pull_inputs_from_context,
+};
