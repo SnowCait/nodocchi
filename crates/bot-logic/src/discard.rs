@@ -1,5 +1,5 @@
 use crate::acceptance::{Acceptance, calculate_acceptance, calculate_acceptance_with_seen};
-use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape};
+use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::shanten::Shanten;
 use crate::tile::{TileId, TileType, count_dora};
 use crate::tile_counts::TileCounts;
@@ -777,6 +777,12 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
 
         let acceptance_after_discard = calculate_acceptance(&after_discard);
         let shanten_after_discard = acceptance_after_discard.current;
+        // 計算済みの通常形向聴数を再利用し、分類のための standard_shanten() 再計算を避ける。
+        let standard_iishanten_shape_after_discard =
+            classify_standard_iishanten_shape_with_standard_shanten(
+                &after_discard,
+                shanten_after_discard.standard,
+            );
 
         evaluations.push(DiscardEvaluation {
             discard: tile,
@@ -788,9 +794,7 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
-            standard_iishanten_shape_after_discard: classify_standard_iishanten_shape(
-                &after_discard,
-            ),
+            standard_iishanten_shape_after_discard,
         });
     }
 
@@ -832,6 +836,12 @@ pub fn evaluate_discards_with_visible_tiles(
         let acceptance_after_discard =
             calculate_acceptance_with_seen(&after_discard, &additional_seen);
         let shanten_after_discard = acceptance_after_discard.current;
+        // 計算済みの通常形向聴数を再利用し、分類のための standard_shanten() 再計算を避ける。
+        let standard_iishanten_shape_after_discard =
+            classify_standard_iishanten_shape_with_standard_shanten(
+                &after_discard,
+                shanten_after_discard.standard,
+            );
 
         evaluations.push(DiscardEvaluation {
             discard: tile,
@@ -843,9 +853,7 @@ pub fn evaluate_discards_with_visible_tiles(
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
-            standard_iishanten_shape_after_discard: classify_standard_iishanten_shape(
-                &after_discard,
-            ),
+            standard_iishanten_shape_after_discard,
         });
     }
 

@@ -29,10 +29,36 @@ pub enum IishantenShape {
 /// 使用する正確な分解で行う。複数の分解が可能な場合は
 /// `Complete > Headless > Kuttsuki` の優先順位で一つに決定する。
 pub fn classify_standard_iishanten_shape(counts: &TileCounts) -> IishantenShape {
-    if counts.total() != 13 || standard_shanten(counts) != 1 {
+    let standard = standard_shanten(counts);
+    classify_standard_iishanten_shape_with_standard_shanten(counts, standard)
+}
+
+/// 通常形向聴数を事前計算済みの呼び出し側向けに、その値を再利用して形分類する。
+///
+/// 打牌評価生成のように `calculate_acceptance()` 内で既に通常形向聴数を求めている経路から
+/// 使うための crate-private helper。渡された `standard_shanten` を信頼し、内部で
+/// [`standard_shanten`] を再計算しない（二重計算を避けるのが目的）。整合しない向聴数を渡すと
+/// 誤分類し得るため外部へは公開せず、public な [`classify_standard_iishanten_shape`] は
+/// 従来どおり自身で [`standard_shanten`] を計算してからこの helper へ委譲する。
+///
+/// 契約は [`classify_standard_iishanten_shape`] と同じ。`counts.total() != 13` または
+/// `standard_shanten != 1` なら [`IishantenShape::Unknown`]、そうでなければ正確な牌分解により
+/// `Complete` / `Headless` / `Kuttsuki` / `Weak` のいずれかを返す。
+pub(crate) fn classify_standard_iishanten_shape_with_standard_shanten(
+    counts: &TileCounts,
+    standard_shanten: i8,
+) -> IishantenShape {
+    if counts.total() != 13 || standard_shanten != 1 {
         return IishantenShape::Unknown;
     }
 
+    classify_standard_iishanten_shape_exact(counts)
+}
+
+/// 13枚かつ通常形一向聴であることが確定した手牌を、正確な牌分解で形分類する。
+///
+/// 複数の分解が可能な場合は `Complete > Headless > Kuttsuki` の優先順位で一つに決定する。
+fn classify_standard_iishanten_shape_exact(counts: &TileCounts) -> IishantenShape {
     let mut memo = DecomposeMemo::new();
     if can_decompose(*counts, Target::COMPLETE, &mut memo) {
         IishantenShape::Complete
@@ -421,6 +447,73 @@ mod tests {
         assert_eq!(
             classify_standard_iishanten_shape(&hand),
             IishantenShape::Complete
+        );
+    }
+
+    #[test]
+    fn with_standard_shanten_matches_public_helper_for_iishanten() {
+        // 13枚かつ standard_shanten=1 のとき、事前計算済みの値を渡しても public helper と一致する。
+        let complete = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C",
+        ]);
+        assert_eq!(standard_shanten(&complete), 1);
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&complete, 1),
+            classify_standard_iishanten_shape(&complete)
+        );
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&complete, 1),
+            IishantenShape::Complete
+        );
+
+        let weak = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "E",
+        ]);
+        assert_eq!(standard_shanten(&weak), 1);
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&weak, 1),
+            classify_standard_iishanten_shape(&weak)
+        );
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&weak, 1),
+            IishantenShape::Weak
+        );
+    }
+
+    #[test]
+    fn with_standard_shanten_returns_unknown_for_tenpai() {
+        // standard_shanten=0 を渡すと Unknown（渡された向聴数を信頼する）。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 0),
+            IishantenShape::Unknown
+        );
+    }
+
+    #[test]
+    fn with_standard_shanten_returns_unknown_for_two_shanten() {
+        // standard_shanten=2 を渡すと Unknown。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 2),
+            IishantenShape::Unknown
+        );
+    }
+
+    #[test]
+    fn with_standard_shanten_returns_unknown_for_wrong_tile_count() {
+        // 13枚でなければ standard_shanten=1 を渡しても Unknown。
+        let twelve = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s",
+        ]);
+        assert_eq!(twelve.total(), 12);
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&twelve, 1),
+            IishantenShape::Unknown
         );
     }
 }
