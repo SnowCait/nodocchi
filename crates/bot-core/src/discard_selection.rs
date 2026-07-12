@@ -29,16 +29,19 @@ pub fn select_discard_action(
 
 /// 合法 Dahai 候補だけから最善の `DiscardEvaluation` を選び、対応する合法 Dahai を返す。
 ///
-/// 全打牌候補を評価したうえで、合法 Dahai に対応する牌種だけへ絞り込み、絞り込んだ候補から
-/// 既存比較順で最善を選ぶ。これにより evaluation は必ず実際に切れる牌の評価になり、押し引き
-/// 入力にもそのまま共有できる。
+/// 全打牌候補を評価したうえで、合法 Dahai に対応する牌種だけへ絞り込み、各評価の物理牌依存
+/// フィールド (`discards_red_five` / `discarded_dora_count`) を実際に切られる合法 Dahai の
+/// 物理牌へ合わせてから、既存比較順で最善を選ぶ。これにより evaluation は必ず実際に切れる牌の
+/// 評価になり、押し引き入力にもそのまま共有できる。
 ///
 /// 不変条件:
 ///
 /// - 合法 Dahai 候補がある: `evaluation == Some` かつ `action == Some` で牌種が一致する
 /// - 合法 Dahai 候補がない: `evaluation == None` かつ `action == None`
+/// - `evaluation.discards_red_five == action の TileId.is_red()`
+/// - `evaluation.discarded_dora_count == count_dora(action の TileId, dora_indicators)`
 ///
-/// DEBUG / TRACE 診断が有効な場合も、絞り込み後の合法候補だけを対象にする。
+/// DEBUG / TRACE 診断が有効な場合も、物理牌補正後の合法候補だけを対象にする。
 pub(crate) fn select_discard_action_with_evaluation(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -51,7 +54,8 @@ pub(crate) fn select_discard_action_with_evaluation(
         .collect();
 
     let evaluations = evaluate_discard_candidates(context, &tiles);
-    let legal_evaluations = retain_legal_dahai_evaluations(evaluations, legal_actions);
+    let legal_evaluations =
+        retain_legal_dahai_evaluations(evaluations, legal_actions, context.dora_indicators());
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_legal_discard_diagnostic(context, &tiles, &legal_evaluations);
@@ -70,20 +74,26 @@ fn legal_dahai_for_evaluation(
     evaluation: &DiscardEvaluation,
     legal_actions: &[LegalAction],
 ) -> Option<LegalAction> {
-    let selected_type = evaluation.discard;
+    legal_dahai_tile_for_type(evaluation.discard, legal_actions)
+        .map(|tile| LegalAction::Dahai { tile })
+}
 
+// 指定牌種の合法 Dahai として実際に切られる物理牌を返す。通常牌を赤牌より優先し、なければ
+// 赤牌を返す。action 選択 (legal_dahai_for_evaluation) と評価補正 (evaluation_for_legal_dahai)
+// が同じ物理牌を指すよう、この関数へ選択方針を一元化する。
+fn legal_dahai_tile_for_type(tile_type: TileType, legal_actions: &[LegalAction]) -> Option<TileId> {
     let mut red_fallback = None;
     for action in legal_actions {
         let LegalAction::Dahai { tile } = action else {
             continue;
         };
-        if tile.tile_type() != selected_type {
+        if tile.tile_type() != tile_type {
             continue;
         }
         if tile.is_red() {
-            red_fallback.get_or_insert_with(|| action.clone());
+            red_fallback.get_or_insert(*tile);
         } else {
-            return Some(action.clone());
+            return Some(*tile);
         }
     }
 
@@ -111,23 +121,34 @@ fn evaluate_discard_candidates(context: &GameContext, tiles: &[TileId]) -> Vec<D
 }
 
 // 合法 Dahai に対応する牌種を持つ評価候補だけを、元の順序を保って残す。
-// 評価一覧は牌種ごとに1件なので、同じ牌種の合法 Dahai が複数あっても評価は重複しない。
-// legal_actions と各評価値は変更しない。
+// さらに各評価の物理牌依存フィールド (discards_red_five / discarded_dora_count) を、実際に
+// 切られる合法 Dahai の物理牌へ合わせる。牌種単位の向聴・受け入れ・shape_penalty 等は変更
+// しない。評価一覧は牌種ごとに1件なので、同じ牌種の合法 Dahai が複数あっても評価は重複しない。
 fn retain_legal_dahai_evaluations(
     evaluations: Vec<DiscardEvaluation>,
     legal_actions: &[LegalAction],
+    dora_indicators: &[TileId],
 ) -> Vec<DiscardEvaluation> {
     evaluations
         .into_iter()
-        .filter(|evaluation| has_legal_dahai_for_type(evaluation.discard, legal_actions))
+        .filter_map(|evaluation| {
+            evaluation_for_legal_dahai(evaluation, legal_actions, dora_indicators)
+        })
         .collect()
 }
 
-// 指定牌種の合法 Dahai が存在するか判定する。赤牌と通常牌は同じ TileType として扱う。
-fn has_legal_dahai_for_type(tile_type: TileType, legal_actions: &[LegalAction]) -> bool {
-    legal_actions.iter().any(
-        |action| matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == tile_type),
-    )
+// 評価に対応する合法 Dahai が存在すれば、その物理牌へ物理牌依存フィールドを合わせた評価を返す。
+// 存在しなければ None。物理牌は legal_dahai_tile_for_type と同じ通常牌優先・赤牌fallback方針で
+// 選ぶため、返す評価と最終的に選ばれる action の物理牌は常に一致する。
+fn evaluation_for_legal_dahai(
+    mut evaluation: DiscardEvaluation,
+    legal_actions: &[LegalAction],
+    dora_indicators: &[TileId],
+) -> Option<DiscardEvaluation> {
+    let discarded_tile = legal_dahai_tile_for_type(evaluation.discard, legal_actions)?;
+    evaluation.discards_red_five = discarded_tile.is_red();
+    evaluation.discarded_dora_count = bot_logic::count_dora(discarded_tile, dora_indicators);
+    Some(evaluation)
 }
 
 // 既存比較順 compare_discard_evaluations() で最善評価を選ぶ。完全同値では先に現れた候補を維持する。
@@ -637,8 +658,11 @@ mod tests {
             .chain(context.drawn_tile())
             .collect();
 
-        let legal =
-            retain_legal_dahai_evaluations(evaluate_discard_candidates(&context, &tiles), &actions);
+        let legal = retain_legal_dahai_evaluations(
+            evaluate_discard_candidates(&context, &tiles),
+            &actions,
+            context.dora_indicators(),
+        );
         let counts = TileCounts::from_tiles(tiles.iter().copied());
         let diagnostic = diagnose_discard_evaluations(&counts, &legal);
 
@@ -673,6 +697,7 @@ mod tests {
         let legal = retain_legal_dahai_evaluations(
             evaluate_discard_candidates(&context, &all_tiles),
             &actions,
+            context.dora_indicators(),
         );
         let counts = TileCounts::from_tiles(all_tiles.iter().copied());
         let diagnostic = diagnose_discard_evaluations(&counts, &legal);
@@ -818,11 +843,12 @@ mod tests {
 
         // 全体最善(W=116)を除外し、他の牌種だけを合法にする。
         let actions: Vec<LegalAction> = hand_values.iter().map(|&value| dahai(value)).collect();
-        assert!(!has_legal_dahai_for_type(global_best, &actions));
+        assert!(legal_dahai_tile_for_type(global_best, &actions).is_none());
 
         let expected_best = select_best_evaluation(&retain_legal_dahai_evaluations(
             evaluate_discard_candidates(&context, &tiles),
             &actions,
+            context.dora_indicators(),
         ))
         .unwrap()
         .clone();
@@ -890,7 +916,8 @@ mod tests {
         let actions = vec![dahai(16), dahai(17), dahai(0), dahai(4)];
 
         let all = evaluate_discard_candidates(&context, &tiles_all);
-        let legal = retain_legal_dahai_evaluations(all.clone(), &actions);
+        let legal =
+            retain_legal_dahai_evaluations(all.clone(), &actions, context.dora_indicators());
 
         let five_type = tile(17).tile_type();
         assert_eq!(legal.iter().filter(|e| e.discard == five_type).count(), 1);
@@ -923,5 +950,102 @@ mod tests {
         let selection = select_discard_action_with_evaluation(&context, &actions);
         assert_eq!(selection.evaluation, None);
         assert_eq!(selection.action, None);
+    }
+
+    #[test]
+    fn red_five_only_legal_marks_evaluation_as_red() {
+        // 赤5m(16)と通常5m(17)を所持するが、合法 Dahai は赤5mだけ。
+        // 評価も赤5mの物理牌情報に合わせる。
+        let context = GameContext::from_parts(None, vec![tile(16), tile(17)]);
+        let actions = vec![dahai(16)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(selection.action, Some(dahai(16)));
+        assert_eq!(evaluation.discard, tile(16).tile_type());
+        assert!(evaluation.discards_red_five);
+        assert_eq!(evaluation.discarded_dora_count, 1);
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn black_five_only_legal_keeps_evaluation_non_red() {
+        // 赤5mと通常5mを所持するが、合法 Dahai は通常5mだけ。赤ドラ分は含めない。
+        let context = GameContext::from_parts(None, vec![tile(16), tile(17)]);
+        let actions = vec![dahai(17)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(selection.action, Some(dahai(17)));
+        assert_eq!(evaluation.discard, tile(17).tile_type());
+        assert!(!evaluation.discards_red_five);
+        assert_eq!(evaluation.discarded_dora_count, 0);
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn both_fives_legal_prefers_black_five() {
+        // 赤5mと通常5mの両方が合法なら通常5mを優先し、評価も通常5mに合わせる。
+        let context = GameContext::from_parts(None, vec![tile(16), tile(17)]);
+        let actions = vec![dahai(16), dahai(17)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(selection.action, Some(dahai(17)));
+        assert!(!evaluation.discards_red_five);
+        assert_eq!(evaluation.discarded_dora_count, 0);
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn red_five_only_legal_counts_indicator_and_red_dora() {
+        // 4m(12)をドラ表示牌にすると5mがドラ。赤5mだけが合法なら表示牌ドラ+赤ドラの2枚。
+        let context =
+            GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
+        let actions = vec![dahai(16)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(selection.action, Some(dahai(16)));
+        assert!(evaluation.discards_red_five);
+        assert_eq!(evaluation.discarded_dora_count, 2);
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn both_fives_legal_with_dora_indicator_counts_indicator_only() {
+        // 5mがドラでも両方合法なら通常5mを優先し、赤ドラ分は含めず表示牌ドラのみ。
+        let context =
+            GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
+        let actions = vec![dahai(16), dahai(17)];
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(selection.action, Some(dahai(17)));
+        assert!(!evaluation.discards_red_five);
+        assert_eq!(evaluation.discarded_dora_count, 1);
+        assert_evaluation_action_types_match(&selection);
+    }
+
+    #[test]
+    fn legal_evaluations_carry_corrected_physical_fields_before_diagnostic() {
+        // 診断 report へ渡す直前の評価(retain 後)が、赤5だけ合法のとき赤5の物理牌情報を持つ。
+        let context =
+            GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
+        let actions = vec![dahai(16)];
+        let tiles = context.hand_tiles().to_vec();
+
+        let legal = retain_legal_dahai_evaluations(
+            evaluate_discard_candidates(&context, &tiles),
+            &actions,
+            context.dora_indicators(),
+        );
+
+        let five = legal
+            .iter()
+            .find(|evaluation| evaluation.discard == tile(16).tile_type())
+            .unwrap();
+        assert!(five.discards_red_five);
+        assert_eq!(five.discarded_dora_count, 2);
     }
 }
