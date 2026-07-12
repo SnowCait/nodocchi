@@ -1,7 +1,7 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::select_best_discard_evaluation;
-use bot_logic::{DiscardEvaluation, IishantenShape};
+use bot_logic::{DiscardEvaluation, IishantenShape, TileCounts, TileId, TileType, count_dora};
 
 const LOG_TARGET: &str = "bot_core::push_pull";
 
@@ -23,6 +23,9 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// 待ち形については Complete 一向聴だけを限定的に考慮する。一般的な良形・愚形評価は未対応で、
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
+///
+/// 打牌後13枚の簡易打点 proxy は `PushPullInputs` とログに保持するが、押し引き threshold への
+/// 反映は未対応で、判定には未使用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -34,12 +37,133 @@ pub enum PushPullMode {
 ///
 /// 現在の手牌から既存の通常打牌選択を行った場合の、最善候補の評価値を保持する。
 /// 新しい向聴数計算や受け入れ計算・一向聴形分類は行わず、既存の `DiscardEvaluation` から取得する。
+///
+/// 打点関連フィールドは、打牌後13枚の手牌内で確認できる牌だけから求める簡易 proxy であり、
+/// 正確な翻数・打点ではない。副露・暗槓は `GameContext` に情報が無いため含まない。
+/// これらは診断・ログ用であり、現状 `decide_push_pull()` の判定には使用しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
     pub min_shanten_after_discard: i8,
     pub acceptance_total_remaining: u8,
     pub acceptance_type_count: usize,
     pub standard_iishanten_shape_after_discard: IishantenShape,
+
+    /// 打牌後13枚に残るドラの総数。表示牌ドラと赤ドラを含む。
+    /// 同じ牌を示す表示牌が複数あれば重複分も数え、赤5が表示牌ドラでもあれば両方数える。
+    pub dora_count_after_discard: u8,
+    /// 打牌後13枚に残る赤ドラ(赤5)の枚数。`dora_count_after_discard` の内数であり、
+    /// 合計 proxy へ別途加算しない。
+    pub red_dora_count_after_discard: u8,
+    /// 打牌後13枚の手牌内で確認できる役牌刻子・槓子候補の翻 proxy。
+    /// 三元牌刻子は1、場風刻子・自風刻子は各1、連風牌(場風かつ自風)は2。
+    /// 同じ牌が4枚あっても刻子・槓子候補1組として一度だけ数える。副露は含まない。
+    /// 場風・自風が不明な風牌は数えない(三元牌は風情報が無くても数える)。
+    pub value_honor_han_proxy_after_discard: u8,
+}
+
+impl PushPullOffenseState {
+    /// 簡易打点 proxy。ドラ総数と役牌翻 proxy の合計で、正確な翻数・打点ではない。
+    /// 赤ドラ数は `dora_count_after_discard` に既に含まれるため別途加算しない。
+    pub fn simple_value_proxy_after_discard(&self) -> u8 {
+        self.dora_count_after_discard
+            .saturating_add(self.value_honor_han_proxy_after_discard)
+    }
+}
+
+/// 打牌後13枚の簡易打点 proxy の内訳。`PushPullOffenseState` の各フィールドへ転記する前段の計算値。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct OffenseValueProxyBreakdown {
+    dora_count: u8,
+    red_dora_count: u8,
+    value_honor_han_proxy: u8,
+}
+
+/// 補正済み評価が指す物理牌を1枚だけ除いた、打牌後13枚の物理牌一覧を返す。
+///
+/// 手牌とツモ牌を結合した物理牌一覧から、`evaluation.discard` の牌種かつ
+/// `evaluation.discards_red_five` の赤フラグと一致する牌を1枚だけ除く。赤5と通常5の混同を避けるため、
+/// 牌種だけでなく赤フラグも一致させる。一致する物理牌が無ければ `None`。
+fn tiles_after_discard(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+) -> Option<Vec<TileId>> {
+    let mut tiles: Vec<TileId> = context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(context.drawn_tile())
+        .collect();
+
+    let position = tiles.iter().position(|&tile| {
+        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
+    })?;
+    tiles.remove(position);
+    Some(tiles)
+}
+
+/// 打牌後13枚の手牌内で確認できる役牌刻子・槓子候補の翻 proxy。
+///
+/// 三元牌は常に1。風牌は `round_wind` / `seat_wind` と一致した分だけ数え、連風牌は2。
+/// 風情報が不明な風牌は数えない。副露・暗槓は含まない。
+fn value_honor_triplet_han(
+    tile: TileType,
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> u8 {
+    let mut han = u8::from(tile.is_dragon());
+    if tile.is_wind() {
+        han += u8::from(round_wind == Some(tile));
+        han += u8::from(seat_wind == Some(tile));
+    }
+    han
+}
+
+/// 補正済み評価と `GameContext` から、打牌後13枚の簡易打点 proxy の内訳を一度だけ計算する。
+///
+/// 実際に切られる物理牌カテゴリ(赤5・通常5)と一致するよう、`tiles_after_discard` で
+/// 物理牌を1枚除いた打牌後13枚へ処理を一元化する。ドラ総数・赤ドラ数・役牌翻 proxy を同じ牌集合から求める。
+///
+/// 通常の `ShantenAgent` 経路では補正済み評価と合法 action の物理牌情報が一致する不変条件があるため、
+/// 一致する物理牌は必ず見つかる。それでも見つからない場合は panic せず、契約違反を `debug_assert` で
+/// 検出しつつ release ではデフォルト値(計算不能)を返す。
+fn offense_value_proxy_after_discard(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+) -> OffenseValueProxyBreakdown {
+    let Some(tiles) = tiles_after_discard(context, evaluation) else {
+        debug_assert!(
+            false,
+            "打牌後13枚を構築できない: 補正済み評価と一致する物理牌が手牌・ツモ牌に存在しない"
+        );
+        return OffenseValueProxyBreakdown::default();
+    };
+
+    let dora_indicators = context.dora_indicators();
+    let mut dora_count = 0u8;
+    let mut red_dora_count = 0u8;
+    for &tile in &tiles {
+        dora_count = dora_count.saturating_add(count_dora(tile, dora_indicators));
+        if tile.is_red() {
+            red_dora_count = red_dora_count.saturating_add(1);
+        }
+    }
+
+    let counts = TileCounts::from_tiles(tiles.iter().copied());
+    let round_wind = context.round_wind();
+    let seat_wind = context.seat_wind();
+    let mut value_honor_han_proxy = 0u8;
+    for tile in TileType::all() {
+        if counts.count(tile) >= 3 {
+            value_honor_han_proxy = value_honor_han_proxy
+                .saturating_add(value_honor_triplet_han(tile, round_wind, seat_wind));
+        }
+    }
+
+    OffenseValueProxyBreakdown {
+        dora_count,
+        red_dora_count,
+        value_honor_han_proxy,
+    }
 }
 
 /// 押し引き判定に使用する入力データ。
@@ -132,11 +256,18 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
         _ => false,
     };
 
-    let offense = evaluation.map(|evaluation| PushPullOffenseState {
-        min_shanten_after_discard: evaluation.min_shanten_after_discard(),
-        acceptance_total_remaining: evaluation.acceptance_total_remaining(),
-        acceptance_type_count: evaluation.acceptance_type_count(),
-        standard_iishanten_shape_after_discard: evaluation.standard_iishanten_shape_after_discard,
+    let offense = evaluation.map(|evaluation| {
+        let value_proxy = offense_value_proxy_after_discard(context, evaluation);
+        PushPullOffenseState {
+            min_shanten_after_discard: evaluation.min_shanten_after_discard(),
+            acceptance_total_remaining: evaluation.acceptance_total_remaining(),
+            acceptance_type_count: evaluation.acceptance_type_count(),
+            standard_iishanten_shape_after_discard: evaluation
+                .standard_iishanten_shape_after_discard,
+            dora_count_after_discard: value_proxy.dora_count,
+            red_dora_count_after_discard: value_proxy.red_dora_count,
+            value_honor_han_proxy_after_discard: value_proxy.value_honor_han_proxy,
+        }
     });
 
     PushPullInputs {
@@ -159,6 +290,8 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 /// また、暫定 threshold は実戦の regression test に基づいて将来調整する。
+/// 打牌後13枚の簡易打点 proxy(`PushPullOffenseState` のドラ・役牌翻 proxy)は診断・ログ用で、
+/// この判定では使用しない。実戦ログで誤判定を確認してから別途 threshold へ反映する。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
@@ -277,6 +410,10 @@ pub(crate) fn log_push_pull_decision(
         offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
         offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
         offense_iishanten_shape_after_discard = ?inputs.offense.map(|offense| offense.standard_iishanten_shape_after_discard),
+        offense_dora_count_after_discard = ?inputs.offense.map(|offense| offense.dora_count_after_discard),
+        offense_red_dora_count_after_discard = ?inputs.offense.map(|offense| offense.red_dora_count_after_discard),
+        offense_value_honor_han_proxy_after_discard = ?inputs.offense.map(|offense| offense.value_honor_han_proxy_after_discard),
+        offense_simple_value_proxy_after_discard = ?inputs.offense.map(|offense| offense.simple_value_proxy_after_discard()),
         normal_discard = ?normal_discard,
         "push-pull decision",
     );
@@ -301,11 +438,27 @@ mod tests {
         types: usize,
         shape: IishantenShape,
     ) -> PushPullOffenseState {
+        offense_with_shape_and_proxy(shanten, remaining, types, shape, 0, 0, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn offense_with_shape_and_proxy(
+        shanten: i8,
+        remaining: u8,
+        types: usize,
+        shape: IishantenShape,
+        dora: u8,
+        red_dora: u8,
+        value_honor_han: u8,
+    ) -> PushPullOffenseState {
         PushPullOffenseState {
             min_shanten_after_discard: shanten,
             acceptance_total_remaining: remaining,
             acceptance_type_count: types,
             standard_iishanten_shape_after_discard: shape,
+            dora_count_after_discard: dora,
+            red_dora_count_after_discard: red_dora,
+            value_honor_han_proxy_after_discard: value_honor_han,
         }
     }
 
@@ -1074,5 +1227,400 @@ mod tests {
         let decision = decide_push_pull(&inputs_with_dealer(1, false, true, None));
         assert_eq!(decision.mode, PushPullMode::Neutral);
         assert_eq!(decision.reason, PushPullReason::MissingOffenseEvaluation);
+    }
+
+    // ここから打牌後13枚の簡易打点 proxy のテスト。
+    use bot_logic::{Acceptance, Shanten};
+
+    fn ids(values: &[u8]) -> Vec<TileId> {
+        values.iter().map(|&value| tile(value)).collect()
+    }
+
+    fn wind(value: u8) -> TileType {
+        TileType::new(value).unwrap()
+    }
+
+    // 打牌後 proxy 計算で読むのは discard 牌種と discards_red_five だけ。他フィールドはダミー。
+    fn proxy_evaluation(discard: TileType, discards_red_five: bool) -> DiscardEvaluation {
+        let shanten = Shanten {
+            standard: 1,
+            chiitoitsu: 6,
+            kokushi: 13,
+        };
+        DiscardEvaluation {
+            discard,
+            count_before_discard: 1,
+            shanten_after_discard: shanten,
+            acceptance_after_discard: Acceptance {
+                current: shanten,
+                tiles: Vec::new(),
+            },
+            shape_penalty: 0,
+            floating_tile_value: 0,
+            discarded_dora_count: 0,
+            discarded_value_honor_count: 0,
+            discards_red_five,
+            discards_isolated_tile: false,
+            standard_iishanten_shape_after_discard: IishantenShape::Unknown,
+        }
+    }
+
+    fn proxy_context(
+        hand: Vec<TileId>,
+        dora: Vec<TileId>,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+    ) -> GameContext {
+        GameContext::from_parts_with_context(None, hand, dora, round_wind, seat_wind)
+    }
+
+    // 5m=type4, 5p=type13, P(白)=type31, E(東)=type27
+    fn five_m() -> TileType {
+        tile(16).tile_type()
+    }
+    fn five_p() -> TileType {
+        tile(52).tile_type()
+    }
+    fn haku() -> TileType {
+        tile(124).tile_type()
+    }
+    fn nine_s() -> TileType {
+        tile(104).tile_type()
+    }
+
+    #[test]
+    fn proxy_no_dora_no_red_no_value_honor() {
+        // ドラ表示牌なし・赤なし・役牌刻子なし。
+        let mut hand = ids(&[0, 4, 8, 12, 20, 24, 28, 32, 36, 40, 44, 48, 56]);
+        hand.push(tile(104)); // 捨てる 9s
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 0);
+        assert_eq!(proxy.red_dora_count, 0);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+    }
+
+    #[test]
+    fn proxy_keeps_indicator_dora() {
+        // ドラ表示牌 4p、打牌後に通常 5p が残る。
+        let mut hand = ids(&[0, 4, 8, 12, 20, 24, 28, 32, 36, 40, 44, 53, 56]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, ids(&[48]), None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 1);
+        assert_eq!(proxy.red_dora_count, 0);
+    }
+
+    #[test]
+    fn proxy_excludes_discarded_indicator_dora() {
+        // ドラ表示牌 4p、実際に通常 5p を捨てるので打牌後には含めない。
+        let hand = ids(&[0, 4, 8, 12, 20, 24, 28, 32, 36, 40, 44, 56, 60, 53]);
+        let context = proxy_context(hand, ids(&[48]), None, None);
+        let evaluation = proxy_evaluation(five_p(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 0);
+    }
+
+    #[test]
+    fn proxy_keeps_red_five() {
+        // 打牌後に赤 5m が残り、他にドラがない。
+        let mut hand = ids(&[16, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44, 48, 56]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 1);
+        assert_eq!(proxy.red_dora_count, 1);
+    }
+
+    #[test]
+    fn proxy_discards_red_five_keeps_black_five() {
+        // 通常 5m と赤 5m の両方があり、赤 5m を捨てる。
+        let hand = ids(&[16, 17, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44, 48, 56]);
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(five_m(), true);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.red_dora_count, 0);
+    }
+
+    #[test]
+    fn proxy_discards_black_five_keeps_red_five() {
+        // 通常 5m と赤 5m の両方があり、通常 5m を捨てる。
+        let hand = ids(&[16, 17, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44, 48, 56]);
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(five_m(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.red_dora_count, 1);
+    }
+
+    #[test]
+    fn proxy_red_five_is_also_indicator_dora() {
+        // 打牌後に赤 5p が残り、ドラ表示牌 4p でもある。赤ドラ分を重複加算しない。
+        let mut hand = ids(&[52, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44, 56, 60]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, ids(&[48]), None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 2);
+        assert_eq!(proxy.red_dora_count, 1);
+        // simple proxy には 2 だけ加算(赤ドラの重複加算はしない)。
+        assert_eq!(
+            proxy.dora_count.saturating_add(proxy.value_honor_han_proxy),
+            2
+        );
+    }
+
+    #[test]
+    fn proxy_multiple_same_indicator_dora() {
+        // ドラ表示牌 4p が2枚、打牌後に通常 5p が残る。
+        let mut hand = ids(&[53, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44, 56, 60]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, ids(&[48, 49]), None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 2);
+    }
+
+    #[test]
+    fn proxy_dragon_triplet_without_winds() {
+        // 白白白。三元牌は風情報が無くても1として数える。
+        let mut hand = ids(&[124, 125, 126, 0, 4, 8, 20, 24, 28, 32, 36, 40]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+    }
+
+    #[test]
+    fn proxy_round_wind_triplet() {
+        // 東東東、場風=東・自風=南。
+        let mut hand = ids(&[108, 109, 110, 0, 4, 8, 20, 24, 28, 32, 36, 40]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], Some(wind(27)), Some(wind(28)));
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+    }
+
+    #[test]
+    fn proxy_seat_wind_triplet() {
+        // 西西西、場風=南・自風=西。
+        let mut hand = ids(&[116, 117, 118, 0, 4, 8, 20, 24, 28, 32, 36, 40]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], Some(wind(28)), Some(wind(29)));
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+    }
+
+    #[test]
+    fn proxy_double_wind_triplet() {
+        // 東東東、場風=東・自風=東。連風牌は2。
+        let mut hand = ids(&[108, 109, 110, 0, 4, 8, 20, 24, 28, 32, 36, 40]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], Some(wind(27)), Some(wind(27)));
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 2);
+    }
+
+    #[test]
+    fn proxy_pair_is_not_counted() {
+        // 白白(対子)は数えない。
+        let mut hand = ids(&[124, 125, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+    }
+
+    #[test]
+    fn proxy_four_copies_counted_once() {
+        // 白白白白でも刻子・槓子候補1組として一度だけ。
+        let mut hand = ids(&[124, 125, 126, 127, 0, 4, 8, 20, 24, 28, 32]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+    }
+
+    #[test]
+    fn proxy_four_copies_discard_one_keeps_triplet() {
+        // 打牌前 白白白白、白を1枚切ると打牌後は白白白。
+        let hand = ids(&[124, 125, 126, 127, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44]);
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(haku(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+    }
+
+    #[test]
+    fn proxy_triplet_discard_one_becomes_pair() {
+        // 打牌前 白白白、白を1枚切ると打牌後は白白。
+        let hand = ids(&[124, 125, 126, 0, 4, 8, 20, 24, 28, 32, 36, 40, 44, 48]);
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(haku(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+    }
+
+    #[test]
+    fn proxy_wind_triplet_with_unknown_winds_is_zero() {
+        // 東東東、場風・自風とも不明。推測せず数えない。
+        let mut hand = ids(&[108, 109, 110, 0, 4, 8, 20, 24, 28, 32, 36, 40]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, vec![], None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+    }
+
+    #[test]
+    fn proxy_composite() {
+        // 打牌後: 表示牌ドラ2枚分(赤5p+通常5p, 表示牌 4p)、赤ドラ1枚、白刻子。
+        let mut hand = ids(&[52, 53, 124, 125, 126, 0, 4, 8, 20, 24, 28, 32]);
+        hand.push(tile(104));
+        let context = proxy_context(hand, ids(&[48]), None, None);
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 3);
+        assert_eq!(proxy.red_dora_count, 1);
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+        assert_eq!(
+            proxy.dora_count.saturating_add(proxy.value_honor_han_proxy),
+            4
+        );
+    }
+
+    // 実戦寄りの14枚 context。ドラ・場風を持たせて proxy が非ゼロになり得る。
+    fn proxy_realistic_context() -> GameContext {
+        let hand: Vec<_> = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 108]);
+        GameContext::from_parts_with_table_state(
+            Some(tile(109)),
+            hand,
+            ids(&[12]),
+            Some(wind(27)),
+            Some(wind(27)),
+            Vec::new(),
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false, true, false, false],
+        )
+    }
+
+    #[test]
+    fn with_evaluation_transcribes_value_proxy() {
+        let context = proxy_realistic_context();
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let evaluation =
+            select_best_discard_evaluation(&context, &tiles).expect("evaluation should exist");
+        let expected = offense_value_proxy_after_discard(&context, &evaluation);
+
+        let inputs = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
+        let offense = inputs.offense.expect("offense should be present");
+
+        assert_eq!(offense.dora_count_after_discard, expected.dora_count);
+        assert_eq!(
+            offense.red_dora_count_after_discard,
+            expected.red_dora_count
+        );
+        assert_eq!(
+            offense.value_honor_han_proxy_after_discard,
+            expected.value_honor_han_proxy
+        );
+        assert_eq!(
+            offense.simple_value_proxy_after_discard(),
+            expected
+                .dora_count
+                .saturating_add(expected.value_honor_han_proxy)
+        );
+    }
+
+    #[test]
+    fn public_helper_matches_with_evaluation_value_proxy() {
+        let context = proxy_realistic_context();
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let evaluation = select_best_discard_evaluation(&context, &tiles);
+
+        let public = push_pull_inputs_from_context(&context);
+        let shared = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
+        assert_eq!(public, shared);
+
+        let public_offense = public.offense.expect("offense should be present");
+        let shared_offense = shared.offense.expect("offense should be present");
+        assert_eq!(
+            public_offense.dora_count_after_discard,
+            shared_offense.dora_count_after_discard
+        );
+        assert_eq!(
+            public_offense.red_dora_count_after_discard,
+            shared_offense.red_dora_count_after_discard
+        );
+        assert_eq!(
+            public_offense.value_honor_han_proxy_after_discard,
+            shared_offense.value_honor_han_proxy_after_discard
+        );
+        assert_eq!(
+            public_offense.simple_value_proxy_after_discard(),
+            shared_offense.simple_value_proxy_after_discard()
+        );
+    }
+
+    #[test]
+    fn value_proxy_does_not_change_decision() {
+        // 同じ向聴数・受け入れ・一向聴形・親情報で proxy だけを変えても判定は変わらない。
+        let cases = [
+            // (opponent_reach, dealer_reacher, self_dealer, shanten, remaining, types, shape)
+            (1u8, false, false, 1i8, 7u8, 2usize, IishantenShape::Weak), // 一向聴 Fold
+            (1, false, false, 1, 8, 2, IishantenShape::Weak),            // Strong 一向聴
+            (1, false, false, 1, 6, 2, IishantenShape::Complete),        // Complete 一向聴
+            (1, false, true, 1, 7, 2, IishantenShape::Weak),             // Dealer 一向聴
+            (1, false, false, 2, 20, 4, IishantenShape::Unknown),        // 二向聴以上
+        ];
+
+        for (reach, dealer_reacher, self_dealer, shanten, remaining, types, shape) in cases {
+            let low = offense_with_shape_and_proxy(shanten, remaining, types, shape, 0, 0, 0);
+            let high = offense_with_shape_and_proxy(shanten, remaining, types, shape, 6, 1, 2);
+            let a = inputs_with_dealer(reach, dealer_reacher, self_dealer, Some(low));
+            let b = inputs_with_dealer(reach, dealer_reacher, self_dealer, Some(high));
+            assert_eq!(decide_push_pull(&a), decide_push_pull(&b));
+        }
+    }
+
+    #[test]
+    fn value_proxy_does_not_mutate_context_or_evaluation() {
+        let context = proxy_realistic_context();
+        let context_before = context.clone();
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let evaluation =
+            select_best_discard_evaluation(&context, &tiles).expect("evaluation should exist");
+        let evaluation_before = evaluation.clone();
+
+        let _ = offense_value_proxy_after_discard(&context, &evaluation);
+        let _ = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
+
+        assert_eq!(context, context_before);
+        assert_eq!(evaluation, evaluation_before);
     }
 }
