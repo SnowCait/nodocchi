@@ -1,7 +1,7 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::select_best_discard_evaluation;
-use bot_logic::DiscardEvaluation;
+use bot_logic::{DiscardEvaluation, IishantenShape};
 
 const LOG_TARGET: &str = "bot_core::push_pull";
 
@@ -17,9 +17,11 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// これは暫定 heuristic であり、以下はまだ考慮していない。
 ///
 /// - 打点
-/// - 待ちの良形・愚形
 /// - 点棒状況
 /// - 局・順位条件
+///
+/// 待ち形については Complete 一向聴だけを限定的に考慮する。一般的な良形・愚形評価は未対応で、
+/// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -30,12 +32,13 @@ pub enum PushPullMode {
 /// 攻撃を継続した場合の最善候補の評価値。
 ///
 /// 現在の手牌から既存の通常打牌選択を行った場合の、最善候補の評価値を保持する。
-/// 新しい向聴数計算や受け入れ計算は行わず、既存の `DiscardEvaluation` から取得する。
+/// 新しい向聴数計算や受け入れ計算・一向聴形分類は行わず、既存の `DiscardEvaluation` から取得する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
     pub min_shanten_after_discard: i8,
     pub acceptance_total_remaining: u8,
     pub acceptance_type_count: usize,
+    pub standard_iishanten_shape_after_discard: IishantenShape,
 }
 
 /// 押し引き判定に使用する入力データ。
@@ -58,6 +61,7 @@ pub enum PushPullReason {
     TenpaiAgainstSingleNonDealer,
     TenpaiUnderHighPressure,
     StrongIishantenAgainstSingleNonDealer,
+    CompleteIishantenAgainstSingleNonDealer,
     IishantenUnderHighPressure,
     TwoOrMoreShanten,
 }
@@ -72,6 +76,11 @@ pub struct PushPullDecision {
 // 強い一向聴とみなすための暫定 heuristic。実戦の regression test に基づき将来調整する。
 const STRONG_IISHANTEN_MIN_REMAINING: u8 = 8;
 const STRONG_IISHANTEN_MIN_TYPES: usize = 2;
+
+// 完全一向聴だけを対象にした限定補正の暫定 threshold。強い一向聴 threshold に届かなくても、
+// 形が Complete でこの受け入れを満たす場合だけ Neutral にする。
+const COMPLETE_IISHANTEN_MIN_REMAINING: u8 = 6;
+const COMPLETE_IISHANTEN_MIN_TYPES: usize = 2;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
@@ -114,6 +123,7 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
         min_shanten_after_discard: evaluation.min_shanten_after_discard(),
         acceptance_total_remaining: evaluation.acceptance_total_remaining(),
         acceptance_type_count: evaluation.acceptance_type_count(),
+        standard_iishanten_shape_after_discard: evaluation.standard_iishanten_shape_after_discard,
     });
 
     PushPullInputs {
@@ -128,10 +138,11 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// これは最初の保守的な土台であり、以下を考慮していない。
 ///
 /// - 打点
-/// - 待ちの良形・愚形
 /// - 点棒状況
 /// - 局・順位条件
 ///
+/// 待ち形については Complete 一向聴だけを限定的に考慮する。一般的な良形・愚形評価は未対応で、
+/// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、暫定 threshold は実戦の regression test に基づいて将来調整する。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
 ///
@@ -173,6 +184,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
 
     // 4. 一向聴。単独の子リーチかつ受け入れが暫定 threshold 以上の場合だけ強い一向聴。
     if offense.min_shanten_after_discard == 1 {
+        // 4-1. 既存の強い一向聴 threshold。形にかかわらず従来どおり。
         let strong = single_non_dealer
             && offense.acceptance_total_remaining >= STRONG_IISHANTEN_MIN_REMAINING
             && offense.acceptance_type_count >= STRONG_IISHANTEN_MIN_TYPES;
@@ -182,6 +194,19 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
                 reason: PushPullReason::StrongIishantenAgainstSingleNonDealer,
             };
         }
+
+        // 4-2. 強い一向聴 threshold には届かないが、形が Complete で限定 threshold を満たす場合だけ Neutral。
+        let complete = single_non_dealer
+            && offense.standard_iishanten_shape_after_discard == IishantenShape::Complete
+            && offense.acceptance_total_remaining >= COMPLETE_IISHANTEN_MIN_REMAINING
+            && offense.acceptance_type_count >= COMPLETE_IISHANTEN_MIN_TYPES;
+        if complete {
+            return PushPullDecision {
+                mode: PushPullMode::Neutral,
+                reason: PushPullReason::CompleteIishantenAgainstSingleNonDealer,
+            };
+        }
+
         return PushPullDecision {
             mode: PushPullMode::Fold,
             reason: PushPullReason::IishantenUnderHighPressure,
@@ -223,6 +248,7 @@ pub(crate) fn log_push_pull_decision(
         offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
         offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
         offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
+        offense_iishanten_shape_after_discard = ?inputs.offense.map(|offense| offense.standard_iishanten_shape_after_discard),
         normal_discard = ?normal_discard,
         "push-pull decision",
     );
@@ -238,10 +264,20 @@ mod tests {
     }
 
     fn offense(shanten: i8, remaining: u8, types: usize) -> PushPullOffenseState {
+        offense_with_shape(shanten, remaining, types, IishantenShape::Unknown)
+    }
+
+    fn offense_with_shape(
+        shanten: i8,
+        remaining: u8,
+        types: usize,
+        shape: IishantenShape,
+    ) -> PushPullOffenseState {
         PushPullOffenseState {
             min_shanten_after_discard: shanten,
             acceptance_total_remaining: remaining,
             acceptance_type_count: types,
+            standard_iishanten_shape_after_discard: shape,
         }
     }
 
@@ -310,6 +346,143 @@ mod tests {
             decision.reason,
             PushPullReason::StrongIishantenAgainstSingleNonDealer
         );
+    }
+
+    #[test]
+    fn strong_iishanten_threshold_takes_priority_over_complete_reason() {
+        // 強い一向聴 threshold を満たす場合は形が Complete でも既存 reason を維持する。
+        let decision = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(1, 8, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::StrongIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn complete_iishanten_boundary_is_neutral() {
+        let decision = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::CompleteIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn weak_iishanten_with_same_acceptance_folds() {
+        let decision = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn headless_and_kuttsuki_are_not_corrected() {
+        for shape in [IishantenShape::Headless, IishantenShape::Kuttsuki] {
+            let decision =
+                decide_push_pull(&inputs(1, false, Some(offense_with_shape(1, 6, 2, shape))));
+            assert_eq!(decision.mode, PushPullMode::Fold);
+            assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+        }
+    }
+
+    #[test]
+    fn complete_iishanten_below_remaining_threshold_folds() {
+        let decision = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(1, 5, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn complete_iishanten_below_type_threshold_folds() {
+        let decision = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(1, 6, 1, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn complete_iishanten_against_dealer_reach_folds() {
+        let decision = decide_push_pull(&inputs(
+            1,
+            true,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn complete_iishanten_against_multiple_reach_folds() {
+        let decision = decide_push_pull(&inputs(
+            2,
+            false,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn complete_shape_does_not_change_tenpai_branch() {
+        // 向聴 <= 0 なら形が Complete でも既存のテンパイ分岐を使う。
+        let single = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(0, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(single.mode, PushPullMode::Push);
+        assert_eq!(single.reason, PushPullReason::TenpaiAgainstSingleNonDealer);
+
+        let dealer = decide_push_pull(&inputs(
+            1,
+            true,
+            Some(offense_with_shape(0, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(dealer.mode, PushPullMode::Neutral);
+        assert_eq!(dealer.reason, PushPullReason::TenpaiUnderHighPressure);
+    }
+
+    #[test]
+    fn complete_shape_does_not_change_two_shanten_branch() {
+        // 向聴 >= 2 なら形が Complete でも既存の TwoOrMoreShanten を維持する。
+        let decision = decide_push_pull(&inputs(
+            1,
+            false,
+            Some(offense_with_shape(2, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::TwoOrMoreShanten);
+    }
+
+    #[test]
+    fn complete_shape_does_not_change_no_opponent_reach() {
+        let decision = decide_push_pull(&inputs(
+            0,
+            false,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
     }
 
     #[test]
@@ -546,6 +719,44 @@ mod tests {
         let public = push_pull_inputs_from_context(&context);
         assert_eq!(shared, public);
         assert!(shared.offense.is_some());
+    }
+
+    #[test]
+    fn with_evaluation_transcribes_iishanten_shape() {
+        use crate::discard_selection::select_best_discard_evaluation;
+
+        let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let context = GameContext::from_parts_with_table_state(
+            Some(tile(116)),
+            hand,
+            vec![tile(12)],
+            Some(TileType::new(27).unwrap()),
+            Some(TileType::new(28).unwrap()),
+            Vec::new(),
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false, true, false, false],
+        );
+
+        let tiles: Vec<_> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let mut evaluation =
+            select_best_discard_evaluation(&context, &tiles).expect("evaluation should exist");
+
+        for shape in [IishantenShape::Complete, IishantenShape::Unknown] {
+            evaluation.standard_iishanten_shape_after_discard = shape;
+            let inputs = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
+            let offense = inputs.offense.expect("offense should be present");
+            assert_eq!(offense.standard_iishanten_shape_after_discard, shape);
+        }
     }
 
     #[test]
