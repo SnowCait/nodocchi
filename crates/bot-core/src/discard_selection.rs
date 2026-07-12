@@ -2,8 +2,7 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::{
     AcceptanceTile, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
-    IishantenShape, TileCounts, TileId, TileType, classify_standard_iishanten_shape_after_discard,
-    compare_discard_evaluations, diagnose_discard_evaluations,
+    TileCounts, TileId, TileType, compare_discard_evaluations, diagnose_discard_evaluations,
     evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_visible_tiles,
 };
 
@@ -182,13 +181,7 @@ fn log_legal_discard_diagnostic(
 ) {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
     let diagnostic = diagnose_discard_evaluations(&counts, legal_evaluations);
-    log_discard_diagnostic(context, tiles, &counts, &diagnostic);
-}
-
-// 打牌前 TileCounts と candidate の discard から、打牌後の通常形一向聴分類を求める診断用helper。
-// 分類には正確な牌分解が含まれるため、診断ログが有効な経路でのみ呼び出す。
-fn iishanten_shape_after_discard(counts: &TileCounts, discard: TileType) -> Option<IishantenShape> {
-    classify_standard_iishanten_shape_after_discard(counts, discard)
+    log_discard_diagnostic(context, tiles, &diagnostic);
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
@@ -202,15 +195,11 @@ fn tiles_to_mjai(tiles: &[TileId]) -> String {
 fn log_discard_diagnostic(
     context: &GameContext,
     tiles: &[TileId],
-    counts: &TileCounts,
     diagnostic: &DiscardDecisionDiagnostic,
 ) {
     let Some(selected) = diagnostic.selected.as_ref() else {
         return;
     };
-
-    let selected_iishanten_shape_after_discard =
-        iishanten_shape_after_discard(counts, selected.discard);
 
     let hand_tiles = tiles_to_mjai(context.hand_tiles());
     let all_tiles = tiles_to_mjai(tiles);
@@ -237,7 +226,7 @@ fn log_discard_diagnostic(
         selected_acceptance_total_remaining = selected.acceptance_total_remaining(),
         selected_acceptance_type_count = selected.acceptance_type_count(),
         selected_shape_penalty = selected.shape_penalty,
-        selected_iishanten_shape_after_discard = ?selected_iishanten_shape_after_discard,
+        selected_iishanten_shape_after_discard = ?selected.standard_iishanten_shape_after_discard,
         selected_floating_tile_value = selected.floating_tile_value,
         selected_discarded_dora_count = selected.discarded_dora_count,
         selected_discarded_value_honor_count = selected.discarded_value_honor_count,
@@ -247,7 +236,7 @@ fn log_discard_diagnostic(
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
         for candidate in &diagnostic.candidates {
-            log_discard_candidate(counts, candidate);
+            log_discard_candidate(candidate);
         }
     }
 }
@@ -263,7 +252,7 @@ fn acceptance_tile_diagnostic(tile: &AcceptanceTile) -> (String, u8, i8, i8, i8,
     )
 }
 
-fn log_discard_candidate(counts: &TileCounts, candidate: &DiscardCandidateDiagnostic) {
+fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
     let evaluation = &candidate.evaluation;
     let acceptance_tiles = evaluation
         .acceptance_after_discard
@@ -271,7 +260,6 @@ fn log_discard_candidate(counts: &TileCounts, candidate: &DiscardCandidateDiagno
         .iter()
         .map(acceptance_tile_diagnostic)
         .collect::<Vec<_>>();
-    let iishanten_shape_after_discard = iishanten_shape_after_discard(counts, evaluation.discard);
 
     tracing::trace!(
         target: LOG_TARGET,
@@ -289,7 +277,7 @@ fn log_discard_candidate(counts: &TileCounts, candidate: &DiscardCandidateDiagno
         acceptance_type_count = evaluation.acceptance_type_count(),
         acceptance_tiles = ?acceptance_tiles,
         shape_penalty = evaluation.shape_penalty,
-        iishanten_shape_after_discard = ?iishanten_shape_after_discard,
+        iishanten_shape_after_discard = ?evaluation.standard_iishanten_shape_after_discard,
         floating_tile_value = evaluation.floating_tile_value,
         discarded_dora_count = evaluation.discarded_dora_count,
         discarded_value_honor_count = evaluation.discarded_value_honor_count,
@@ -748,19 +736,23 @@ mod tests {
     }
 
     #[test]
-    fn iishanten_shape_after_discard_matches_candidate_discard() {
+    fn evaluation_carries_iishanten_shape_after_discard() {
         // 完全一向聴(1m2m3m4m5m6m EE 2p3p 5s6s C)へ余分な 1s を加えた14枚。
-        // 1s を切ると完全一向聴へ戻るので Complete、存在しない牌は None。
-        let hand = tiles(&[0, 4, 8, 12, 17, 20, 108, 109, 40, 44, 88, 92, 132, 72]);
-        let counts = TileCounts::from_tiles(hand.iter().copied());
+        // 1s を切ると完全一向聴へ戻るので、候補評価が Complete を保持する。
+        use bot_logic::IishantenShape;
 
+        let hand = tiles(&[0, 4, 8, 12, 17, 20, 108, 109, 40, 44, 88, 92, 132, 72]);
+        let context = GameContext::from_parts(None, hand);
+        let all_tiles = context.hand_tiles().to_vec();
+
+        let evaluations = evaluate_discard_candidates(&context, &all_tiles);
+        let one_s = evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == tile(72).tile_type())
+            .unwrap();
         assert_eq!(
-            iishanten_shape_after_discard(&counts, tile(72).tile_type()),
-            Some(IishantenShape::Complete)
-        );
-        assert_eq!(
-            iishanten_shape_after_discard(&counts, tile(60).tile_type()),
-            None
+            one_s.standard_iishanten_shape_after_discard,
+            IishantenShape::Complete
         );
     }
 
