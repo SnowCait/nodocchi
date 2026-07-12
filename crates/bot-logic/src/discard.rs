@@ -15,6 +15,11 @@ pub struct DiscardEvaluation {
     pub discarded_dora_count: u8,
     pub discarded_value_honor_count: u8,
     pub discards_red_five: bool,
+    /// この打牌が明確な孤立単騎牌を切るかどうか。多向聴時の比較軸 [`DiscardComparisonReason::IsolatedTile`]
+    /// の正式な入力として使う。判定は手牌構造だけに基づき、visible tiles の影響を受けない。
+    /// [`floating_tile_value_breakdown_for_discard`] の `is_isolated` と同じ契約で、評価生成時に
+    /// その helper を一度だけ呼んで `floating_tile_value` と同時に設定する。
+    pub discards_isolated_tile: bool,
     /// 打牌後13枚の通常形一向聴の形分類。通常形一向聴でなければ [`IishantenShape::Unknown`]。
     /// 評価生成時に打牌後 counts から一度だけ算出し、比較と診断ログで再利用する。
     pub standard_iishanten_shape_after_discard: IishantenShape,
@@ -551,6 +556,7 @@ fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluat
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscardComparisonReason {
     Shanten,
+    IsolatedTile,
     AcceptanceRemaining,
     AcceptanceTypeCount,
     IishantenShape,
@@ -579,6 +585,10 @@ pub fn compare_discard_evaluations(
             candidate_is_better: candidate_shanten < best_shanten,
             reason: DiscardComparisonReason::Shanten,
         };
+    }
+
+    if let Some(comparison) = compare_isolated_tile_discard(candidate, current_best) {
+        return comparison;
     }
 
     let candidate_remaining = candidate.acceptance_total_remaining();
@@ -643,6 +653,50 @@ pub fn compare_discard_evaluations(
         candidate_is_better: false,
         reason: DiscardComparisonReason::StableOrder,
     }
+}
+
+// 多向聴時に限り、同じ向聴数を維持する候補間で、明確な孤立単騎牌を切る打牌を搭子候補を壊す
+// 打牌より優先する限定的な比較軸。以下の条件をすべて満たす場合だけ決着させ、それ以外は None を
+// 返して後続の受け入れ以下の既存比較へ委ねる。
+//
+// - 両候補の最小向聴数が等しい
+// - 最小向聴数が2以上（テンパイ・一向聴には適用しない）
+// - 片方だけが明確な孤立単騎牌を切る
+// - 両候補の discarded_dora_count が等しい
+// - 両候補の discarded_value_honor_count が等しい
+// - 両候補の discards_red_five が等しい
+//
+// 特殊牌情報が異なる場合はこの軸で決着させず、孤立ドラ・孤立役牌・孤立赤5を非孤立の搭子牌より
+// 不用意に先切りしないようにする。
+fn compare_isolated_tile_discard(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> Option<DiscardComparison> {
+    let candidate_shanten = candidate.min_shanten_after_discard();
+    let best_shanten = current_best.min_shanten_after_discard();
+    if candidate_shanten != best_shanten {
+        return None;
+    }
+    if candidate_shanten < 2 {
+        return None;
+    }
+    if candidate.discards_isolated_tile == current_best.discards_isolated_tile {
+        return None;
+    }
+    if candidate.discarded_dora_count != current_best.discarded_dora_count {
+        return None;
+    }
+    if candidate.discarded_value_honor_count != current_best.discarded_value_honor_count {
+        return None;
+    }
+    if candidate.discards_red_five != current_best.discards_red_five {
+        return None;
+    }
+
+    Some(DiscardComparison {
+        candidate_is_better: candidate.discards_isolated_tile,
+        reason: DiscardComparisonReason::IsolatedTile,
+    })
 }
 
 // 完全一向聴を維持する限定的な tie-break。両候補とも通常形一向聴（打牌後13枚・standard 一向聴）
@@ -783,6 +837,8 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
                 &after_discard,
                 shanten_after_discard.standard,
             );
+        // floating_tile_value と孤立牌判定は同じ breakdown から一度だけ取得する。
+        let floating = floating_tile_value_breakdown_for_discard(counts, tile);
 
         evaluations.push(DiscardEvaluation {
             discard: tile,
@@ -790,10 +846,11 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             shanten_after_discard,
             acceptance_after_discard,
             shape_penalty: shape_penalty_for_discard(counts, tile),
-            floating_tile_value: floating_tile_value_for_discard(counts, tile),
+            floating_tile_value: floating.value,
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
+            discards_isolated_tile: floating.is_isolated,
             standard_iishanten_shape_after_discard,
         });
     }
@@ -842,6 +899,8 @@ pub fn evaluate_discards_with_visible_tiles(
                 &after_discard,
                 shanten_after_discard.standard,
             );
+        // 孤立牌判定は手牌構造だけを使う。visible tiles は受け入れ計算のみに影響させる。
+        let floating = floating_tile_value_breakdown_for_discard(counts, tile);
 
         evaluations.push(DiscardEvaluation {
             discard: tile,
@@ -849,10 +908,11 @@ pub fn evaluate_discards_with_visible_tiles(
             shanten_after_discard,
             acceptance_after_discard,
             shape_penalty: shape_penalty_for_discard(counts, tile),
-            floating_tile_value: floating_tile_value_for_discard(counts, tile),
+            floating_tile_value: floating.value,
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
+            discards_isolated_tile: floating.is_isolated,
             standard_iishanten_shape_after_discard,
         });
     }
@@ -1301,6 +1361,7 @@ mod tests {
             discarded_dora_count: dora,
             discarded_value_honor_count: value_honor,
             discards_red_five: red,
+            discards_isolated_tile: false,
             standard_iishanten_shape_after_discard: IishantenShape::Unknown,
         }
     }
@@ -3966,6 +4027,213 @@ mod tests {
         let _ = diagnose_discard_evaluations(&counts, &evaluations);
         assert_eq!(counts, counts_before);
         assert_eq!(evaluations, evaluations_before);
+    }
+
+    fn isolated_evaluation(
+        min: i8,
+        remaining: u8,
+        type_count: usize,
+        isolated: bool,
+    ) -> DiscardEvaluation {
+        let mut evaluation = evaluation(min, remaining, type_count, 0, false);
+        evaluation.discards_isolated_tile = isolated;
+        evaluation
+    }
+
+    #[test]
+    fn real_hand_prefers_isolated_tile_over_taatsu_tile() {
+        // 2m 6m 2p 3p 4p 5p 8p 9p 1s 1s 2s 2s 4s 8s, ドラ表示 7p, 場風 S, 自風 W
+        // 4s は 2s2s4s の嵌張候補を構成するため孤立牌ではない。2m・6m・8s は孤立単騎牌。
+        // 3向聴のまま孤立牌を優先して切るため、選択牌は 4s ではなく孤立牌側になる。
+        let tiles = ids(&[4, 20, 40, 44, 48, 53, 64, 68, 72, 73, 76, 77, 84, 100]);
+        let indicators = ids(&[60]);
+        let evaluations = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &indicators,
+            Some(tile("S")),
+            Some(tile("W")),
+        );
+
+        let four_s = discard_evaluation(&evaluations, tile("4s"));
+        assert!(!four_s.discards_isolated_tile);
+        for isolated in ["2m", "6m", "8s"] {
+            let evaluation = discard_evaluation(&evaluations, tile(isolated));
+            assert!(
+                evaluation.discards_isolated_tile,
+                "{isolated} should be isolated"
+            );
+        }
+
+        let selected = select_best(evaluations).unwrap();
+        assert_ne!(selected.discard, tile("4s"));
+        assert!(selected.discards_isolated_tile);
+        assert_eq!(selected.discard, tile("2m"));
+    }
+
+    #[test]
+    fn shanten_outranks_isolated_tile() {
+        // 孤立牌を切ると3向聴、非孤立牌を切ると2向聴。向聴改善が優先される。
+        let isolated_worse_shanten = isolated_evaluation(3, 10, 2, true);
+        let taatsu_better_shanten = isolated_evaluation(2, 4, 1, false);
+        let comparison =
+            compare_discard_evaluations(&taatsu_better_shanten, &isolated_worse_shanten);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
+    }
+
+    #[test]
+    fn multi_shanten_isolated_outranks_acceptance() {
+        // 両候補とも3向聴・特殊牌情報同一。孤立牌候補は受け入れが少なくても優先される。
+        let isolated = isolated_evaluation(3, 10, 1, true);
+        let taatsu = isolated_evaluation(3, 40, 5, false);
+        let comparison = compare_discard_evaluations(&isolated, &taatsu);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+    }
+
+    #[test]
+    fn iishanten_does_not_apply_isolated_tile() {
+        // 一向聴では孤立牌軸を適用せず、受け入れ枚数が優先される。
+        let isolated = isolated_evaluation(1, 10, 1, true);
+        let taatsu = isolated_evaluation(1, 40, 5, false);
+        let comparison = compare_discard_evaluations(&taatsu, &isolated);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn tenpai_does_not_apply_isolated_tile() {
+        // テンパイでは孤立牌軸で決着しない。孤立牌情報以外を同一にすると StableOrder になる。
+        let isolated = isolated_evaluation(0, 10, 2, true);
+        let taatsu = isolated_evaluation(0, 10, 2, false);
+        let comparison = compare_discard_evaluations(&isolated, &taatsu);
+        assert!(!comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::StableOrder);
+        assert!(compare_isolated_tile_discard(&isolated, &taatsu).is_none());
+    }
+
+    #[test]
+    fn isolated_axis_undecided_between_two_isolated() {
+        // 両候補とも孤立牌なら孤立牌軸では決着せず、受け入れ以下の既存比較へ進む。
+        let more = isolated_evaluation(3, 40, 5, true);
+        let less = isolated_evaluation(3, 10, 1, true);
+        assert!(compare_isolated_tile_discard(&more, &less).is_none());
+        let comparison = compare_discard_evaluations(&more, &less);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn isolated_axis_undecided_between_two_non_isolated() {
+        // 両候補とも非孤立牌なら孤立牌軸では決着しない。
+        let more = isolated_evaluation(3, 40, 5, false);
+        let less = isolated_evaluation(3, 10, 1, false);
+        assert!(compare_isolated_tile_discard(&more, &less).is_none());
+    }
+
+    #[test]
+    fn isolated_axis_yields_to_dora_difference() {
+        // 孤立牌候補がドラを切る場合は孤立牌軸で決着させない。
+        let isolated_dora = isolated_evaluation(3, 10, 1, true);
+        let mut isolated_dora = isolated_dora;
+        isolated_dora.discarded_dora_count = 1;
+        let taatsu = isolated_evaluation(3, 40, 5, false);
+        assert!(compare_isolated_tile_discard(&isolated_dora, &taatsu).is_none());
+        let comparison = compare_discard_evaluations(&isolated_dora, &taatsu);
+        assert_ne!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+    }
+
+    #[test]
+    fn isolated_axis_yields_to_value_honor_difference() {
+        // 孤立牌候補が役牌を切る場合は孤立牌軸で決着させない。
+        let mut isolated_honor = isolated_evaluation(3, 10, 1, true);
+        isolated_honor.discarded_value_honor_count = 1;
+        let taatsu = isolated_evaluation(3, 40, 5, false);
+        assert!(compare_isolated_tile_discard(&isolated_honor, &taatsu).is_none());
+        let comparison = compare_discard_evaluations(&isolated_honor, &taatsu);
+        assert_ne!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+    }
+
+    #[test]
+    fn isolated_axis_yields_to_red_five_difference() {
+        // 孤立牌候補が赤5を切る場合は孤立牌軸で決着させない。
+        let mut isolated_red = isolated_evaluation(3, 10, 1, true);
+        isolated_red.discards_red_five = true;
+        let taatsu = isolated_evaluation(3, 40, 5, false);
+        assert!(compare_isolated_tile_discard(&isolated_red, &taatsu).is_none());
+        let comparison = compare_discard_evaluations(&isolated_red, &taatsu);
+        assert_ne!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+    }
+
+    #[test]
+    fn visible_tiles_do_not_change_isolation_flag() {
+        // 通常経路と visible tiles 経路で、同じ打牌候補の floating_tile_value と
+        // discards_isolated_tile が一致する。visible tiles は孤立牌判定へ影響しない。
+        let tiles = ids(&[4, 20, 40, 44, 48, 53, 64, 68, 72, 73, 76, 77, 84, 100]);
+        let indicators = ids(&[60]);
+        let plain = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &indicators,
+            Some(tile("S")),
+            Some(tile("W")),
+        );
+
+        let mut visible = tiles.clone();
+        visible.extend(ids(&[85, 86, 101, 102]));
+        let with_visible = evaluate_discards_from_tiles_with_visible_tiles(
+            &tiles,
+            &indicators,
+            Some(tile("S")),
+            Some(tile("W")),
+            &visible,
+        );
+
+        for plain_evaluation in &plain {
+            let visible_evaluation = discard_evaluation(&with_visible, plain_evaluation.discard);
+            assert_eq!(
+                plain_evaluation.floating_tile_value,
+                visible_evaluation.floating_tile_value
+            );
+            assert_eq!(
+                plain_evaluation.discards_isolated_tile,
+                visible_evaluation.discards_isolated_tile
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_reports_isolated_tile_reason() {
+        // 多向聴の孤立牌候補が選ばれ、非孤立の 4s 候補の comparison_reason が IsolatedTile。
+        let tiles = ids(&[4, 20, 40, 44, 48, 53, 64, 68, 72, 73, 76, 77, 84, 100]);
+        let indicators = ids(&[60]);
+        let evaluations = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &indicators,
+            Some(tile("S")),
+            Some(tile("W")),
+        );
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let diagnostic = diagnose_discard_evaluations(&counts, &evaluations);
+
+        let selected = diagnostic.selected.as_ref().unwrap();
+        assert_eq!(selected.discard, tile("2m"));
+        assert!(selected.discards_isolated_tile);
+
+        let four_s = diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile("4s"))
+            .unwrap();
+        assert!(!four_s.selected);
+        assert_eq!(
+            four_s.comparison_reason,
+            DiscardComparisonReason::IsolatedTile
+        );
     }
 
     #[test]
