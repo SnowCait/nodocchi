@@ -47,7 +47,8 @@ pub fn classify_standard_iishanten_shape(counts: &TileCounts) -> IishantenShape 
 
 /// `discard` を1枚取り除いた後の門前13枚を通常形一向聴として形分類する。
 ///
-/// 診断専用のpure helper。打牌選択や比較には使用しない。契約は次の通り。
+/// 打牌前 counts しか手元に無い場合に使える pure helper。打牌後 counts を既に構築している
+/// 評価生成経路では [`classify_standard_iishanten_shape`] を直接呼ぶ。契約は次の通り。
 ///
 /// - `counts` に `discard` が1枚も含まれない場合は `None`。
 /// - 1枚取り除ける場合は `Some(classify_standard_iishanten_shape(打牌後counts))`。

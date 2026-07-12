@@ -1,4 +1,5 @@
 use crate::acceptance::{Acceptance, calculate_acceptance, calculate_acceptance_with_seen};
+use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape};
 use crate::shanten::Shanten;
 use crate::tile::{TileId, TileType, count_dora};
 use crate::tile_counts::TileCounts;
@@ -14,6 +15,9 @@ pub struct DiscardEvaluation {
     pub discarded_dora_count: u8,
     pub discarded_value_honor_count: u8,
     pub discards_red_five: bool,
+    /// 打牌後13枚の通常形一向聴の形分類。通常形一向聴でなければ [`IishantenShape::Unknown`]。
+    /// 評価生成時に打牌後 counts から一度だけ算出し、比較と診断ログで再利用する。
+    pub standard_iishanten_shape_after_discard: IishantenShape,
 }
 
 impl DiscardEvaluation {
@@ -549,6 +553,7 @@ pub enum DiscardComparisonReason {
     Shanten,
     AcceptanceRemaining,
     AcceptanceTypeCount,
+    IishantenShape,
     ShapePenalty,
     FloatingTileValue,
     Dora,
@@ -594,6 +599,10 @@ pub fn compare_discard_evaluations(
         };
     }
 
+    if let Some(comparison) = compare_standard_iishanten_shape(candidate, current_best) {
+        return comparison;
+    }
+
     if candidate.shape_penalty != current_best.shape_penalty {
         return DiscardComparison {
             candidate_is_better: candidate.shape_penalty < current_best.shape_penalty,
@@ -634,6 +643,39 @@ pub fn compare_discard_evaluations(
         candidate_is_better: false,
         reason: DiscardComparisonReason::StableOrder,
     }
+}
+
+// 完全一向聴を維持する限定的な tie-break。両候補とも通常形一向聴（打牌後13枚・standard 一向聴）
+// かつ全体最小向聴も一向聴で、片方だけが完全一向聴のときだけ完全一向聴を優先する。
+// 完全一向聴同士・非完全一向聴同士には順位を付けず、後続の shape_penalty 以下へ委ねる。
+fn compare_standard_iishanten_shape(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> Option<DiscardComparison> {
+    // 全体テンパイ（七対子・国士など）を含む候補には適用しない。両候補とも全体最小向聴が一向聴。
+    if candidate.min_shanten_after_discard() != 1 || current_best.min_shanten_after_discard() != 1 {
+        return None;
+    }
+    // 両候補とも通常形一向聴である場合に限定する。片方だけが通常形一向聴なら決着させない。
+    if candidate.shanten_after_discard.standard != 1
+        || current_best.shanten_after_discard.standard != 1
+    {
+        return None;
+    }
+
+    let candidate_complete =
+        candidate.standard_iishanten_shape_after_discard == IishantenShape::Complete;
+    let best_complete =
+        current_best.standard_iishanten_shape_after_discard == IishantenShape::Complete;
+    // 完全一向聴同士・非完全一向聴同士は順位を付けない。
+    if candidate_complete == best_complete {
+        return None;
+    }
+
+    Some(DiscardComparison {
+        candidate_is_better: candidate_complete,
+        reason: DiscardComparisonReason::IishantenShape,
+    })
 }
 
 fn is_better_discard(candidate: &DiscardEvaluation, best: &DiscardEvaluation) -> bool {
@@ -746,6 +788,9 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
+            standard_iishanten_shape_after_discard: classify_standard_iishanten_shape(
+                &after_discard,
+            ),
         });
     }
 
@@ -798,6 +843,9 @@ pub fn evaluate_discards_with_visible_tiles(
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
             discards_red_five: false,
+            standard_iishanten_shape_after_discard: classify_standard_iishanten_shape(
+                &after_discard,
+            ),
         });
     }
 
@@ -1245,7 +1293,29 @@ mod tests {
             discarded_dora_count: dora,
             discarded_value_honor_count: value_honor,
             discards_red_five: red,
+            standard_iishanten_shape_after_discard: IishantenShape::Unknown,
         }
+    }
+
+    // 上位3軸を固定した通常形一向聴の評価。tie-break が適用される min==1・standard==1 の前提を満たす。
+    fn evaluation_with_iishanten_shape(
+        remaining: u8,
+        type_count: usize,
+        shape: IishantenShape,
+    ) -> DiscardEvaluation {
+        evaluation_with_shape_penalty_and_iishanten_shape(remaining, type_count, 0, shape)
+    }
+
+    fn evaluation_with_shape_penalty_and_iishanten_shape(
+        remaining: u8,
+        type_count: usize,
+        shape_penalty: i16,
+        shape: IishantenShape,
+    ) -> DiscardEvaluation {
+        let mut evaluation =
+            evaluation_with_shape_penalty(1, remaining, type_count, shape_penalty, 0, 0, false);
+        evaluation.standard_iishanten_shape_after_discard = shape;
+        evaluation
     }
 
     #[test]
@@ -3428,6 +3498,229 @@ mod tests {
         assert_eq!(
             compare_discard_evaluations(&candidate, &current_best).candidate_is_better,
             is_better_discard(&candidate, &current_best)
+        );
+    }
+
+    // standard==1 だが全体最小向聴を 0 にした（七対子テンパイ相当の）通常形一向聴評価。
+    fn tenpai_overall_standard_iishanten(
+        remaining: u8,
+        type_count: usize,
+        shape: IishantenShape,
+    ) -> DiscardEvaluation {
+        let mut evaluation = evaluation_with_iishanten_shape(remaining, type_count, shape);
+        let shanten = Shanten {
+            standard: 1,
+            chiitoitsu: 0,
+            kokushi: 127,
+        };
+        evaluation.shanten_after_discard = shanten;
+        evaluation.acceptance_after_discard.current = shanten;
+        evaluation
+    }
+
+    #[test]
+    fn shanten_outranks_iishanten_shape() {
+        let better_shanten_non_complete = evaluation(0, 4, 1, 0, false);
+        let worse_shanten_complete =
+            evaluation_with_iishanten_shape(40, 5, IishantenShape::Complete);
+        let comparison =
+            compare_discard_evaluations(&better_shanten_non_complete, &worse_shanten_complete);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
+    }
+
+    #[test]
+    fn acceptance_remaining_outranks_iishanten_shape() {
+        let more_remaining_non_complete =
+            evaluation_with_iishanten_shape(20, 1, IishantenShape::Weak);
+        let less_remaining_complete =
+            evaluation_with_iishanten_shape(10, 1, IishantenShape::Complete);
+        let comparison =
+            compare_discard_evaluations(&more_remaining_non_complete, &less_remaining_complete);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn acceptance_type_count_outranks_iishanten_shape() {
+        let more_types_non_complete = evaluation_with_iishanten_shape(10, 3, IishantenShape::Weak);
+        let fewer_types_complete = evaluation_with_iishanten_shape(10, 2, IishantenShape::Complete);
+        let comparison =
+            compare_discard_evaluations(&more_types_non_complete, &fewer_types_complete);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceTypeCount
+        );
+    }
+
+    #[test]
+    fn complete_outranks_non_complete_when_top_axes_tie() {
+        let complete = evaluation_with_iishanten_shape(10, 2, IishantenShape::Complete);
+        let weak = evaluation_with_iishanten_shape(10, 2, IishantenShape::Weak);
+
+        let forward = compare_discard_evaluations(&complete, &weak);
+        assert!(forward.candidate_is_better);
+        assert_eq!(forward.reason, DiscardComparisonReason::IishantenShape);
+
+        let backward = compare_discard_evaluations(&weak, &complete);
+        assert!(!backward.candidate_is_better);
+        assert_eq!(backward.reason, DiscardComparisonReason::IishantenShape);
+    }
+
+    #[test]
+    fn complete_outranks_larger_shape_penalty() {
+        let complete_high_penalty =
+            evaluation_with_shape_penalty_and_iishanten_shape(10, 2, 40, IishantenShape::Complete);
+        let weak_low_penalty =
+            evaluation_with_shape_penalty_and_iishanten_shape(10, 2, 0, IishantenShape::Weak);
+        let comparison = compare_discard_evaluations(&complete_high_penalty, &weak_low_penalty);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IishantenShape);
+    }
+
+    #[test]
+    fn non_complete_shapes_have_no_fixed_order() {
+        for (a, b) in [
+            (IishantenShape::Headless, IishantenShape::Kuttsuki),
+            (IishantenShape::Kuttsuki, IishantenShape::Weak),
+            (IishantenShape::Headless, IishantenShape::Weak),
+            (IishantenShape::Weak, IishantenShape::Unknown),
+        ] {
+            let left = evaluation_with_iishanten_shape(10, 2, a);
+            let right = evaluation_with_iishanten_shape(10, 2, b);
+            let forward = compare_discard_evaluations(&left, &right);
+            let backward = compare_discard_evaluations(&right, &left);
+            // 一向聴形だけでは決着せず、後続軸（ここでは全同値なので StableOrder）で決まる。
+            assert_ne!(forward.reason, DiscardComparisonReason::IishantenShape);
+            assert_ne!(backward.reason, DiscardComparisonReason::IishantenShape);
+            assert_eq!(forward.reason, DiscardComparisonReason::StableOrder);
+            assert!(!forward.candidate_is_better);
+            assert!(!backward.candidate_is_better);
+        }
+    }
+
+    #[test]
+    fn iishanten_shape_not_applied_when_overall_tenpai() {
+        // standard==1 でも全体（七対子）テンパイなら完全一向聴だけを理由に優先しない。
+        let complete_tenpai = tenpai_overall_standard_iishanten(10, 2, IishantenShape::Complete);
+        let weak_tenpai = tenpai_overall_standard_iishanten(10, 2, IishantenShape::Weak);
+        let comparison = compare_discard_evaluations(&complete_tenpai, &weak_tenpai);
+        assert_ne!(comparison.reason, DiscardComparisonReason::IishantenShape);
+        assert!(!comparison.candidate_is_better);
+    }
+
+    #[test]
+    fn iishanten_shape_not_applied_when_only_one_side_is_standard_iishanten() {
+        // 片方だけが通常形一向聴（standard==1）の場合は IishantenShape で決着しない。
+        let complete = evaluation_with_iishanten_shape(10, 2, IishantenShape::Complete);
+        let mut non_standard = evaluation_with_iishanten_shape(10, 2, IishantenShape::Unknown);
+        // 全体最小向聴は一向聴のまま standard だけ二向聴にする。
+        let shanten = Shanten {
+            standard: 2,
+            chiitoitsu: 1,
+            kokushi: 127,
+        };
+        non_standard.shanten_after_discard = shanten;
+        non_standard.acceptance_after_discard.current = shanten;
+
+        let comparison = compare_discard_evaluations(&complete, &non_standard);
+        assert_ne!(comparison.reason, DiscardComparisonReason::IishantenShape);
+    }
+
+    #[test]
+    fn evaluate_discards_classifies_iishanten_shape_after_discard() {
+        // 既存の一向聴分類テストで使用する13枚形へ14枚目を加え、対象牌を切ると元の形へ戻る。
+        let cases = [
+            (
+                vec![
+                    "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C", "1s",
+                ],
+                "1s",
+                IishantenShape::Complete,
+            ),
+            (
+                vec![
+                    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "6s",
+                    "1s",
+                ],
+                "1s",
+                IishantenShape::Headless,
+            ),
+            (
+                vec![
+                    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p", "5p", "2s", "8s",
+                    "9s",
+                ],
+                "9s",
+                IishantenShape::Kuttsuki,
+            ),
+            (
+                vec![
+                    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "E",
+                    "1s",
+                ],
+                "1s",
+                IishantenShape::Weak,
+            ),
+            (
+                // 1s を切ると通常形テンパイなので Unknown。
+                vec![
+                    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "5s",
+                    "1s",
+                ],
+                "1s",
+                IishantenShape::Unknown,
+            ),
+        ];
+
+        for (hand, discard, expected) in cases {
+            let counts = counts(&hand);
+            let evaluations = evaluate_discards(&counts);
+            let evaluation = discard_evaluation(&evaluations, tile(discard));
+            assert_eq!(
+                evaluation.standard_iishanten_shape_after_discard, expected,
+                "{hand:?} discard {discard}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_discards_with_visible_tiles_matches_iishanten_shape() {
+        // 完全一向聴の14枚形。visible tiles 経路でも分類は打牌後 counts のみに依存し一致する。
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 108, 109, 40, 44, 88, 92, 132, 72]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        let plain = evaluate_discards(&counts);
+        let visible = evaluate_discards_with_visible_tiles(&counts, &hand);
+        assert!(!plain.is_empty());
+        for (a, b) in plain.iter().zip(visible.iter()) {
+            assert_eq!(a.discard, b.discard);
+            assert_eq!(
+                a.standard_iishanten_shape_after_discard,
+                b.standard_iishanten_shape_after_discard
+            );
+        }
+        let complete = discard_evaluation(&plain, tile("1s"));
+        assert_eq!(
+            complete.standard_iishanten_shape_after_discard,
+            IishantenShape::Complete
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_iishanten_shape_reason() {
+        // 上位3軸が同値で片方だけ Complete のとき、非選択候補の理由は IishantenShape。
+        let winner = evaluation_with_iishanten_shape(10, 2, IishantenShape::Complete);
+        let loser = evaluation_with_iishanten_shape(10, 2, IishantenShape::Weak);
+        let candidate = loser_candidate(winner, loser);
+        assert!(candidate.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            candidate.comparison_reason,
+            DiscardComparisonReason::IishantenShape
         );
     }
 
