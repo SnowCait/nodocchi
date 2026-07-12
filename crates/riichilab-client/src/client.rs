@@ -175,17 +175,19 @@ pub(crate) fn context_for_request(
 /// 送信 action から `action sent` INFO ログ用のフィールドを抽出する pure helper。
 ///
 /// `action_type` は `mjai_action_type` と一致し、Dahai のときだけ `tile` / `tsumogiri` を持つ。
-/// `actor` は Ryukyoku / None を除く全 action に存在する。tracing への依存なしにテストできる。
+/// `actor` は Ryukyoku / None を除く全 action に存在する。`request_id` は送信する `MjaiAction`
+/// 自身の値で、受信した RequestAction の id とは区別する。`tile` は `action` を借用するため
+/// clone を伴わない。tracing への依存なしにテストできる。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SentActionLogFields {
+pub(crate) struct SentActionLogFields<'a> {
     pub request_id: Option<u64>,
     pub actor: Option<u8>,
     pub action_type: &'static str,
-    pub tile: Option<String>,
+    pub tile: Option<&'a str>,
     pub tsumogiri: Option<bool>,
 }
 
-pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields {
+pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields<'_> {
     let action_type = mjai_action_type(action);
     match action {
         MjaiAction::Dahai {
@@ -197,7 +199,7 @@ pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields
             request_id: *request_id,
             actor: Some(*actor),
             action_type,
-            tile: Some(pai.clone()),
+            tile: Some(pai.as_str()),
             tsumogiri: *tsumogiri,
         },
         MjaiAction::Reach { actor, request_id } => SentActionLogFields {
@@ -411,15 +413,20 @@ where
                         ws_stream.send(Message::Text(json.into())).await?;
                         let send_ms = send_start.elapsed().as_millis() as u64;
 
-                        let sent = sent_action_log_fields(&response);
-                        info!(
-                            request_id,
-                            actor = ?sent.actor,
-                            action_type = sent.action_type,
-                            tile = ?sent.tile,
-                            tsumogiri = ?sent.tsumogiri,
-                            "action sent"
-                        );
+                        // INFO 無効時は診断値を一切構築しないよう、有効時だけ helper を呼ぶ。
+                        // `enabled!` と `info!` は target 未指定で同じ module path を使う。
+                        if tracing::enabled!(tracing::Level::INFO) {
+                            let sent = sent_action_log_fields(&response);
+                            info!(
+                                request_id = ?sent.request_id,
+                                request_action_id = request_id,
+                                actor = ?sent.actor,
+                                action_type = sent.action_type,
+                                tile = ?sent.tile,
+                                tsumogiri = ?sent.tsumogiri,
+                                "action sent"
+                            );
+                        }
 
                         let total_ms = request_start.elapsed().as_millis() as u64;
 
@@ -603,8 +610,24 @@ mod tests {
         assert_eq!(fields.request_id, Some(425));
         assert_eq!(fields.actor, Some(1));
         assert_eq!(fields.action_type, "dahai");
-        assert_eq!(fields.tile.as_deref(), Some("4p"));
+        assert_eq!(fields.tile, Some("4p"));
         assert_eq!(fields.tsumogiri, Some(false));
+    }
+
+    #[test]
+    fn sent_action_log_fields_uses_action_request_id_not_received_id() {
+        // 受信 RequestAction の id が 100 でも、送信 MjaiAction 自身の request_id(200)を返す。
+        // `action sent` の主 request_id が送信 action 由来であることを保証する。
+        let received_request_id: u64 = 100;
+        let action = MjaiAction::Dahai {
+            actor: 1,
+            pai: "4p".to_string(),
+            tsumogiri: Some(false),
+            request_id: Some(200),
+        };
+        let fields = sent_action_log_fields(&action);
+        assert_eq!(fields.request_id, Some(200));
+        assert_ne!(fields.request_id, Some(received_request_id));
     }
 
     #[test]
