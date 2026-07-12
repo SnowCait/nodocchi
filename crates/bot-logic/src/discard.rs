@@ -15,10 +15,14 @@ pub struct DiscardEvaluation {
     pub discarded_dora_count: u8,
     pub discarded_value_honor_count: u8,
     pub discards_red_five: bool,
-    /// この打牌が明確な孤立単騎牌を切るかどうか。多向聴時の比較軸 [`DiscardComparisonReason::IsolatedTile`]
-    /// の正式な入力として使う。判定は手牌構造だけに基づき、visible tiles の影響を受けない。
-    /// [`floating_tile_value_breakdown_for_discard`] の `is_isolated` と同じ契約で、評価生成時に
-    /// その helper を一度だけ呼んで `floating_tile_value` と同時に設定する。
+    /// この打牌が純粋な手牌構造上の孤立単騎牌を切るかどうか。判定は手牌構造だけに基づき、
+    /// visible tiles や特殊牌情報の影響を受けない。[`floating_tile_value_breakdown_for_discard`]
+    /// の `is_isolated` と同じ契約で、評価生成時にその helper を一度だけ呼んで
+    /// `floating_tile_value` と同時に設定する。
+    ///
+    /// 多向聴時の比較軸 [`DiscardComparisonReason::IsolatedTile`] の優先対象判定
+    /// (`isolated_tile_priority_eligible`) は、これに加えて孤立ドラ・孤立役牌・孤立赤5を
+    /// 除外する。孤立牌であることと比較上の優先対象であることを混同しないこと。
     pub discards_isolated_tile: bool,
     /// 打牌後13枚の通常形一向聴の形分類。通常形一向聴でなければ [`IishantenShape::Unknown`]。
     /// 評価生成時に打牌後 counts から一度だけ算出し、比較と診断ログで再利用する。
@@ -655,19 +659,28 @@ pub fn compare_discard_evaluations(
     }
 }
 
-// 多向聴時に限り、同じ向聴数を維持する候補間で、明確な孤立単騎牌を切る打牌を搭子候補を壊す
-// 打牌より優先する限定的な比較軸。以下の条件をすべて満たす場合だけ決着させ、それ以外は None を
-// 返して後続の受け入れ以下の既存比較へ委ねる。
+// 候補単独で「通常孤立牌の優先対象」かどうかを判定する。手牌構造上の孤立牌
+// (discards_isolated_tile) であっても、孤立ドラ・孤立役牌・孤立赤5は優先対象外とし、
+// 特殊牌を含む形の温存は後続の Dora / ValueHonor / RedFive 比較へ委ねる。
+//
+// 比較相手に依存しない候補固有の値なので、辞書順比較の推移律を壊さない。
+fn isolated_tile_priority_eligible(evaluation: &DiscardEvaluation) -> bool {
+    evaluation.discards_isolated_tile
+        && evaluation.discarded_dora_count == 0
+        && evaluation.discarded_value_honor_count == 0
+        && !evaluation.discards_red_five
+}
+
+// 多向聴時に限り、同じ向聴数を維持する候補間で、通常孤立牌を切る打牌を搭子候補を壊す打牌より
+// 優先する限定的な比較軸。以下の条件をすべて満たす場合だけ決着させ、それ以外は None を返して
+// 後続の受け入れ以下の既存比較へ委ねる。
 //
 // - 両候補の最小向聴数が等しい
 // - 最小向聴数が2以上（テンパイ・一向聴には適用しない）
-// - 片方だけが明確な孤立単騎牌を切る
-// - 両候補の discarded_dora_count が等しい
-// - 両候補の discarded_value_honor_count が等しい
-// - 両候補の discards_red_five が等しい
+// - isolated_tile_priority_eligible() の値が異なる
 //
-// 特殊牌情報が異なる場合はこの軸で決着させず、孤立ドラ・孤立役牌・孤立赤5を非孤立の搭子牌より
-// 不用意に先切りしないようにする。
+// 各候補単独で通常孤立牌かどうかを判定する。孤立ドラ・孤立役牌・孤立赤5は優先対象外。
+// 比較相手に依存する条件を持たず、辞書順比較の推移律を維持する。
 fn compare_isolated_tile_discard(
     candidate: &DiscardEvaluation,
     current_best: &DiscardEvaluation,
@@ -680,21 +693,15 @@ fn compare_isolated_tile_discard(
     if candidate_shanten < 2 {
         return None;
     }
-    if candidate.discards_isolated_tile == current_best.discards_isolated_tile {
-        return None;
-    }
-    if candidate.discarded_dora_count != current_best.discarded_dora_count {
-        return None;
-    }
-    if candidate.discarded_value_honor_count != current_best.discarded_value_honor_count {
-        return None;
-    }
-    if candidate.discards_red_five != current_best.discards_red_five {
+
+    let candidate_eligible = isolated_tile_priority_eligible(candidate);
+    let best_eligible = isolated_tile_priority_eligible(current_best);
+    if candidate_eligible == best_eligible {
         return None;
     }
 
     Some(DiscardComparison {
-        candidate_is_better: candidate.discards_isolated_tile,
+        candidate_is_better: candidate_eligible,
         reason: DiscardComparisonReason::IsolatedTile,
     })
 }
@@ -4234,6 +4241,212 @@ mod tests {
             four_s.comparison_reason,
             DiscardComparisonReason::IsolatedTile
         );
+    }
+
+    // 3向聴・受け入れ牌種2で固定した比較キー検証用の候補。孤立牌フラグと特殊牌情報、
+    // 打牌牌種、受け入れ枚数だけを変えて eligibility の推移律を確認する。
+    fn priority_candidate(
+        discard_index: u8,
+        remaining: u8,
+        isolated: bool,
+        dora: u8,
+        value_honor: u8,
+        red: bool,
+    ) -> DiscardEvaluation {
+        let mut evaluation = evaluation(3, remaining, 2, dora, red);
+        evaluation.discard = TileType::new(discard_index).unwrap();
+        evaluation.discards_isolated_tile = isolated;
+        evaluation.discarded_value_honor_count = value_honor;
+        evaluation
+    }
+
+    // 再現例の A/B/C。A は通常孤立牌、B は通常非孤立牌、C は孤立ドラ相当(非eligible)。
+    fn cycle_candidate_a() -> DiscardEvaluation {
+        priority_candidate(0, 10, true, 0, 0, false)
+    }
+    fn cycle_candidate_b() -> DiscardEvaluation {
+        priority_candidate(1, 40, false, 0, 0, false)
+    }
+    fn cycle_candidate_c() -> DiscardEvaluation {
+        priority_candidate(2, 20, false, 1, 0, false)
+    }
+
+    #[test]
+    fn isolated_priority_eligibility_is_candidate_intrinsic() {
+        // 通常孤立牌だけが eligible。孤立ドラ・孤立役牌・孤立赤5・非孤立牌は eligible=false。
+        assert!(isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, true, 0, 0, false
+        )));
+        assert!(!isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, true, 1, 0, false
+        )));
+        assert!(!isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, true, 0, 1, false
+        )));
+        assert!(!isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, true, 0, 0, true
+        )));
+        assert!(!isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, false, 0, 0, false
+        )));
+    }
+
+    #[test]
+    fn resolves_former_comparison_cycle() {
+        // 旧実装は A>B(IsolatedTile), B>C(AcceptanceRemaining), C>A(AcceptanceRemaining) で循環した。
+        // 修正後は C>A が成立せず A>C(IsolatedTile) となり循環が解消する。
+        let a = cycle_candidate_a();
+        let b = cycle_candidate_b();
+        let c = cycle_candidate_c();
+
+        let ab = compare_discard_evaluations(&a, &b);
+        assert!(ab.candidate_is_better);
+        assert_eq!(ab.reason, DiscardComparisonReason::IsolatedTile);
+
+        let ac = compare_discard_evaluations(&a, &c);
+        assert!(ac.candidate_is_better);
+        assert_eq!(ac.reason, DiscardComparisonReason::IsolatedTile);
+
+        let bc = compare_discard_evaluations(&b, &c);
+        assert!(bc.candidate_is_better);
+        assert_eq!(bc.reason, DiscardComparisonReason::AcceptanceRemaining);
+
+        // C は A に勝たない(旧実装の循環要因)。
+        assert!(!compare_discard_evaluations(&c, &a).candidate_is_better);
+    }
+
+    #[test]
+    fn selection_is_order_independent_across_permutations() {
+        let a = cycle_candidate_a();
+        let b = cycle_candidate_b();
+        let c = cycle_candidate_c();
+        let permutations = [
+            [a.clone(), b.clone(), c.clone()],
+            [a.clone(), c.clone(), b.clone()],
+            [b.clone(), a.clone(), c.clone()],
+            [b.clone(), c.clone(), a.clone()],
+            [c.clone(), a.clone(), b.clone()],
+            [c.clone(), b.clone(), a.clone()],
+        ];
+        for permutation in permutations {
+            let selected = select_best(permutation.to_vec()).unwrap();
+            assert_eq!(selected.discard, a.discard);
+        }
+    }
+
+    #[test]
+    fn comparison_is_transitive_for_cycle_candidates() {
+        let a = cycle_candidate_a();
+        let b = cycle_candidate_b();
+        let c = cycle_candidate_c();
+        assert!(compare_discard_evaluations(&a, &b).candidate_is_better);
+        assert!(compare_discard_evaluations(&b, &c).candidate_is_better);
+        assert!(compare_discard_evaluations(&a, &c).candidate_is_better);
+    }
+
+    #[test]
+    fn comparison_is_antisymmetric_for_cycle_candidates() {
+        let a = cycle_candidate_a();
+        let b = cycle_candidate_b();
+        let c = cycle_candidate_c();
+        for (x, y) in [(&a, &b), (&a, &c), (&b, &c)] {
+            assert!(compare_discard_evaluations(x, y).candidate_is_better);
+            assert!(!compare_discard_evaluations(y, x).candidate_is_better);
+        }
+    }
+
+    #[test]
+    fn normal_isolated_beats_non_isolated_special_tiles() {
+        // 通常孤立牌は、非孤立のドラ・役牌・赤5より IsolatedTile で優先される。
+        let normal_isolated = priority_candidate(0, 10, true, 0, 0, false);
+        let non_isolated_dora = priority_candidate(1, 40, false, 1, 0, false);
+        let non_isolated_honor = priority_candidate(2, 40, false, 0, 1, false);
+        let non_isolated_red = priority_candidate(3, 40, false, 0, 0, true);
+        for opponent in [&non_isolated_dora, &non_isolated_honor, &non_isolated_red] {
+            let comparison = compare_discard_evaluations(&normal_isolated, opponent);
+            assert!(comparison.candidate_is_better);
+            assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+        }
+    }
+
+    #[test]
+    fn isolated_dora_is_protected_by_dora_axis_when_else_equal() {
+        // 孤立ドラと通常非孤立牌は共に非eligible。他軸同値なら Dora 比較で非孤立牌が勝つ。
+        let isolated_dora = priority_candidate(0, 10, true, 1, 0, false);
+        let non_isolated = priority_candidate(1, 10, false, 0, 0, false);
+        assert!(compare_isolated_tile_discard(&non_isolated, &isolated_dora).is_none());
+        let comparison = compare_discard_evaluations(&non_isolated, &isolated_dora);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Dora);
+    }
+
+    #[test]
+    fn isolated_value_honor_is_protected_by_value_honor_axis_when_else_equal() {
+        let isolated_honor = priority_candidate(0, 10, true, 0, 1, false);
+        let non_isolated = priority_candidate(1, 10, false, 0, 0, false);
+        assert!(compare_isolated_tile_discard(&non_isolated, &isolated_honor).is_none());
+        let comparison = compare_discard_evaluations(&non_isolated, &isolated_honor);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::ValueHonor);
+    }
+
+    #[test]
+    fn isolated_red_five_is_protected_by_red_five_axis_when_else_equal() {
+        let isolated_red = priority_candidate(0, 10, true, 0, 0, true);
+        let non_isolated = priority_candidate(1, 10, false, 0, 0, false);
+        assert!(compare_isolated_tile_discard(&non_isolated, &isolated_red).is_none());
+        let comparison = compare_discard_evaluations(&non_isolated, &isolated_red);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::RedFive);
+    }
+
+    #[test]
+    fn isolated_axis_undecided_between_non_eligible_candidates() {
+        // 非eligible同士(非孤立牌・孤立ドラ・孤立役牌・孤立赤5)は IsolatedTile で決着しない。
+        let non_isolated = priority_candidate(0, 10, false, 0, 0, false);
+        let isolated_dora = priority_candidate(1, 10, true, 1, 0, false);
+        let isolated_honor = priority_candidate(2, 10, true, 0, 1, false);
+        let isolated_red = priority_candidate(3, 10, true, 0, 0, true);
+        let candidates = [
+            &non_isolated,
+            &isolated_dora,
+            &isolated_honor,
+            &isolated_red,
+        ];
+        for (i, x) in candidates.iter().enumerate() {
+            for y in candidates.iter().skip(i + 1) {
+                assert!(compare_isolated_tile_discard(x, y).is_none());
+                assert!(compare_isolated_tile_discard(y, x).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_is_consistent_for_cycle_candidates() {
+        // A/B/C を診断すると A が選ばれ、B・C の理由が IsolatedTile。
+        // どの非選択候補も selected に直接勝たない。
+        let a = cycle_candidate_a();
+        let b = cycle_candidate_b();
+        let c = cycle_candidate_c();
+        let evaluations = vec![a.clone(), b.clone(), c.clone()];
+        let counts = TileCounts::new();
+        let diagnostic = diagnose_discard_evaluations(&counts, &evaluations);
+
+        let selected = diagnostic.selected.as_ref().unwrap();
+        assert_eq!(selected.discard, a.discard);
+
+        for candidate in &diagnostic.candidates {
+            if candidate.selected {
+                continue;
+            }
+            assert_eq!(
+                candidate.comparison_reason,
+                DiscardComparisonReason::IsolatedTile
+            );
+            assert!(
+                !compare_discard_evaluations(&candidate.evaluation, selected).candidate_is_better
+            );
+        }
     }
 
     #[test]
