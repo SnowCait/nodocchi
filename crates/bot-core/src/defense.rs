@@ -2,6 +2,8 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::TileType;
 
+const LOG_TARGET: &str = "bot_core::defense";
+
 // discards は防御・現物判定用、visible_tiles は枚数補正用なので用途を分ける。
 pub fn is_genbutsu_for(tile: TileType, player: usize, context: &GameContext) -> bool {
     context
@@ -204,7 +206,7 @@ pub fn suji_dahai_actions_by_safety<'a>(
     ranked
 }
 
-// 数牌の見え枚数に基づく壁 / ワンチャンス分類。見えているほど当たり筋が減る。
+// 数牌の順子待ち経路ごとの壁 / ワンチャンス分類。見えているほど当たり筋が減る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WallRank {
     NoWall,
@@ -212,24 +214,104 @@ pub enum WallRank {
     NoChance,
 }
 
-// 数牌の見え枚数から壁 / ワンチャンスを分類する。字牌は対象外で NoWall。
-pub fn wall_rank(tile: TileType, context: &GameContext) -> WallRank {
-    if tile.is_honor() {
-        return WallRank::NoWall;
+// 対象牌を和了牌とする順子待ち経路1本の壁分類。
+//
+// - Blocked:   経路を構成するどちらかの牌が4枚以上見えている(その順子待ちは残らない)。
+// - OneChance: Blocked ではなく、どちらかの牌が3枚見えている。
+// - Open:      それ以外。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceRouteRank {
+    Open,
+    OneChance,
+    Blocked,
+}
+
+// 対象牌 n を和了牌とする、同一色内の順子待ち経路を列挙する。
+//
+// - n >= 3: [n-2, n-1]
+// - n <= 7: [n+1, n+2]
+//
+// 字牌は対象外で空。1〜9 の範囲外へは進まないので、端牌は経路が1本だけになる。
+// 対象牌自身の見え枚数は経路に含めない。
+fn sequence_wait_routes(tile: TileType) -> Vec<[TileType; 2]> {
+    let Some(number) = tile.number() else {
+        return Vec::new();
+    };
+    // 同一色の 1 の TileType を基準にした相対計算。suit をまたがない。
+    let suit_base = tile.raw() - (number - 1);
+    let in_suit = |value: u8| TileType::new(suit_base + value - 1).unwrap();
+
+    let mut routes = Vec::new();
+    if number >= 3 {
+        routes.push([in_suit(number - 2), in_suit(number - 1)]);
     }
-    match visible_count_of(tile, context) {
-        0..=2 => WallRank::NoWall,
-        3 => WallRank::OneChance,
-        _ => WallRank::NoChance,
+    if number <= 7 {
+        routes.push([in_suit(number + 1), in_suit(number + 2)]);
+    }
+    routes
+}
+
+// 順子待ち経路1本の壁分類。経路を構成する牌の見え枚数だけを使う。
+fn sequence_route_rank(route: [TileType; 2], context: &GameContext) -> SequenceRouteRank {
+    let max_visible = route
+        .iter()
+        .map(|&tile| visible_count_of(tile, context))
+        .max()
+        .unwrap_or(0);
+    if max_visible >= 4 {
+        SequenceRouteRank::Blocked
+    } else if max_visible >= 3 {
+        SequenceRouteRank::OneChance
+    } else {
+        SequenceRouteRank::Open
     }
 }
 
-// 3枚見えのワンチャンス数牌か判定する。
+/// 数牌の順子待ちに関する壁 / ワンチャンスを保守的に分類する。
+///
+/// 対象牌 `n` を和了牌とする順子待ち経路(`[n-2, n-1]` / `[n+1, n+2]`)を列挙し、各経路を
+/// 構成する牌の見え枚数から集約する。**対象牌 `n` 自身の見え枚数は壁判定に使わない**。
+/// 自分が `n` を暗刻で持っているだけで壁扱いされる誤分類を避けるためである。
+///
+/// 集約規則:
+///
+/// - すべての有効経路が Blocked: `NoChance`
+/// - すべての有効経路が Blocked または OneChance で、少なくとも1経路が OneChance: `OneChance`
+/// - Open の経路が1つでもある: `NoWall`
+///
+/// これは順子待ちに関する限定的な安全度でしかなく、単騎・双碰・嵌張などへの絶対的な安全は
+/// 意味しない。字牌は対象外で常に `NoWall`。
+pub fn wall_rank(tile: TileType, context: &GameContext) -> WallRank {
+    let routes = sequence_wait_routes(tile);
+    if routes.is_empty() {
+        return WallRank::NoWall;
+    }
+
+    let mut has_open = false;
+    let mut has_one_chance = false;
+    for route in routes {
+        match sequence_route_rank(route, context) {
+            SequenceRouteRank::Open => has_open = true,
+            SequenceRouteRank::OneChance => has_one_chance = true,
+            SequenceRouteRank::Blocked => {}
+        }
+    }
+
+    if has_open {
+        WallRank::NoWall
+    } else if has_one_chance {
+        WallRank::OneChance
+    } else {
+        WallRank::NoChance
+    }
+}
+
+// 順子待ち経路がワンチャンスの数牌か判定する。詳細は `wall_rank`。
 pub fn is_one_chance(tile: TileType, context: &GameContext) -> bool {
     wall_rank(tile, context) == WallRank::OneChance
 }
 
-// 4枚見えのノーチャンス数牌か判定する。
+// 順子待ち経路がノーチャンスの数牌か判定する。詳細は `wall_rank`。
 pub fn is_no_chance(tile: TileType, context: &GameContext) -> bool {
     wall_rank(tile, context) == WallRank::NoChance
 }
@@ -373,6 +455,107 @@ pub fn select_defense_fallback_action<'a>(
     legal_actions: &'a [LegalAction],
 ) -> Option<&'a LegalAction> {
     select_defense_fallback_action_with_kind(context, legal_actions).map(|(action, _)| action)
+}
+
+/// 防御 fallback がどの理由で選ばれたかを表す診断データ。
+///
+/// tracing の出力文字列に依存せずテストできるよう、ログへ渡す値を pure に構築する。
+/// 数牌なら壁 / スジ / 数牌 safety を、字牌なら字牌 safety を持ち、無関係なフィールドは `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefenseFallbackDiagnostic {
+    pub selected_action: String,
+    pub selected_kind: DefenseFallbackKind,
+    pub opponent_reach_count: u8,
+    pub selected_genbutsu_for_all: bool,
+    pub selected_honor_safety_rank: Option<HonorSafetyRank>,
+    pub selected_wall_rank: Option<WallRank>,
+    pub selected_suji_for_all_reached: Option<bool>,
+    pub selected_suited_safety_rank: Option<SuitedSafetyRank>,
+}
+
+impl DefenseFallbackDiagnostic {
+    /// 選択された防御 fallback の action と種別から診断データを構築する pure helper。
+    ///
+    /// 数牌に対しては `wall_rank` / `is_suji_for_all_reached` / `suited_safety_rank_for_all_reached`
+    /// を、字牌に対しては `honor_safety_rank` を計算する。Dahai 以外の action では牌由来の値は空。
+    pub fn from_selection(
+        context: &GameContext,
+        action: &LegalAction,
+        kind: DefenseFallbackKind,
+    ) -> Self {
+        let tile_type = match action {
+            LegalAction::Dahai { tile } => Some(tile.tile_type()),
+            _ => None,
+        };
+        let selected_action = match action {
+            LegalAction::Dahai { tile } => tile.to_mjai_string(),
+            other => format!("{other:?}"),
+        };
+        let suited_tile = tile_type.filter(|tile| !tile.is_honor());
+
+        Self {
+            selected_action,
+            selected_kind: kind,
+            opponent_reach_count: context.reached_opponents().len() as u8,
+            selected_genbutsu_for_all: tile_type
+                .is_some_and(|tile| is_genbutsu_for_all_reached(tile, context)),
+            selected_honor_safety_rank: tile_type.and_then(|tile| honor_safety_rank(tile, context)),
+            selected_wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
+            selected_suji_for_all_reached: suited_tile
+                .map(|tile| is_suji_for_all_reached(tile, context)),
+            selected_suited_safety_rank: tile_type
+                .and_then(|tile| suited_safety_rank_for_all_reached(tile, context)),
+        }
+    }
+}
+
+/// 防御 fallback を実際に採用したとき DEBUG イベントを1件出す opt-in ログ。
+///
+/// `RUST_LOG=bot_core::defense=debug` で有効化する。debug が無効な通常時は診断値や文字列を
+/// 一切構築しない。TRACE が有効なら、合法 Dahai ごとの防御評価も追加で記録する。
+pub fn log_defense_fallback_decision(
+    context: &GameContext,
+    action: &LegalAction,
+    kind: DefenseFallbackKind,
+    legal_actions: &[LegalAction],
+) {
+    if !tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        return;
+    }
+
+    let diagnostic = DefenseFallbackDiagnostic::from_selection(context, action, kind);
+    tracing::debug!(
+        target: LOG_TARGET,
+        selected_action = %diagnostic.selected_action,
+        selected_kind = ?diagnostic.selected_kind,
+        opponent_reach_count = diagnostic.opponent_reach_count,
+        selected_genbutsu_for_all = diagnostic.selected_genbutsu_for_all,
+        selected_honor_safety_rank = ?diagnostic.selected_honor_safety_rank,
+        selected_wall_rank = ?diagnostic.selected_wall_rank,
+        selected_suji_for_all_reached = ?diagnostic.selected_suji_for_all_reached,
+        selected_suited_safety_rank = ?diagnostic.selected_suited_safety_rank,
+        "defense fallback decision",
+    );
+
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
+        for candidate in legal_actions {
+            let LegalAction::Dahai { tile } = candidate else {
+                continue;
+            };
+            let tile_type = tile.tile_type();
+            let suited_tile = (!tile_type.is_honor()).then_some(tile_type);
+            tracing::trace!(
+                target: LOG_TARGET,
+                tile = %tile.to_mjai_string(),
+                genbutsu_for_all = is_genbutsu_for_all_reached(tile_type, context),
+                honor_safety_rank = ?honor_safety_rank(tile_type, context),
+                wall_rank = ?suited_tile.map(|tile| wall_rank(tile, context)),
+                suji_for_all_reached = ?suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
+                suited_safety_rank = ?suited_safety_rank_for_all_reached(tile_type, context),
+                "defense fallback candidate",
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1044,100 +1227,178 @@ mod tests {
         );
     }
 
+    // 6p(tile 56-59)を対象に、経路構成牌 4p/5p/7p/8p の見え枚数で壁を作る helper。
+    // 4p: 48-51, 5p: 52-55, 6p: 56-59, 7p: 60-63, 8p: 64-67。
+
     #[test]
-    fn wall_rank_no_wall_for_zero_one_two_visible() {
-        // 1m(tile 0-3)を0/1/2枚見えているそれぞれのケース。
-        let one_man = tile(0).tile_type();
+    fn wall_rank_no_wall_when_own_count_high_but_routes_open() {
+        // 対象牌自身(6p)を3枚見えていても、経路 4p/5p/7p/8p に壁がなければ NoWall。
+        // 対象牌自身の見え枚数を壁判定に使わないことの回帰テスト。
+        let six_pin = tile(56).tile_type();
         assert_eq!(
-            wall_rank(one_man, &visible_context(vec![])),
-            WallRank::NoWall
-        );
-        assert_eq!(
-            wall_rank(one_man, &visible_context(vec![tile(0)])),
-            WallRank::NoWall
-        );
-        assert_eq!(
-            wall_rank(one_man, &visible_context(vec![tile(0), tile(1)])),
+            wall_rank(
+                six_pin,
+                &visible_context(vec![tile(56), tile(57), tile(58)])
+            ),
             WallRank::NoWall
         );
     }
 
     #[test]
-    fn wall_rank_one_chance_for_three_visible() {
-        let one_man = tile(0).tile_type();
+    fn wall_rank_no_wall_when_own_count_four_but_routes_open() {
+        // 対象牌自身(6p)を4枚見えていても、経路に壁がなければ NoWall。人工的な pure test。
+        let six_pin = tile(56).tile_type();
         assert_eq!(
-            wall_rank(one_man, &visible_context(vec![tile(0), tile(1), tile(2)])),
+            wall_rank(
+                six_pin,
+                &visible_context(vec![tile(56), tile(57), tile(58), tile(59)])
+            ),
+            WallRank::NoWall
+        );
+    }
+
+    #[test]
+    fn wall_rank_no_chance_when_both_routes_blocked() {
+        // 5p を4枚・7p を4枚見え。経路 [4p,5p] と [7p,8p] が両方 Blocked なので NoChance。
+        let six_pin = tile(56).tile_type();
+        let visible = vec![
+            tile(52),
+            tile(53),
+            tile(54),
+            tile(55),
+            tile(60),
+            tile(61),
+            tile(62),
+            tile(63),
+        ];
+        assert_eq!(
+            wall_rank(six_pin, &visible_context(visible)),
+            WallRank::NoChance
+        );
+    }
+
+    #[test]
+    fn wall_rank_no_wall_when_one_route_blocked_and_other_open() {
+        // 5p を4枚見え(経路 [4p,5p] は Blocked)だが、7p/8p は見えず経路 [7p,8p] は Open。NoWall。
+        let six_pin = tile(56).tile_type();
+        let visible = vec![tile(52), tile(53), tile(54), tile(55)];
+        assert_eq!(
+            wall_rank(six_pin, &visible_context(visible)),
+            WallRank::NoWall
+        );
+    }
+
+    #[test]
+    fn wall_rank_one_chance_when_blocked_and_one_chance() {
+        // 5p を4枚見え(Blocked)、7p を3枚見え(OneChance)。Open が無く OneChance が残るので OneChance。
+        let six_pin = tile(56).tile_type();
+        let visible = vec![
+            tile(52),
+            tile(53),
+            tile(54),
+            tile(55),
+            tile(60),
+            tile(61),
+            tile(62),
+        ];
+        assert_eq!(
+            wall_rank(six_pin, &visible_context(visible)),
             WallRank::OneChance
         );
     }
 
     #[test]
-    fn wall_rank_no_chance_for_four_visible() {
-        let one_man = tile(0).tile_type();
+    fn wall_rank_no_wall_when_one_chance_and_open() {
+        // 5p を3枚見え(経路 [4p,5p] は OneChance)、7p/8p は見えず経路 [7p,8p] は Open。NoWall。
+        let six_pin = tile(56).tile_type();
+        let visible = vec![tile(52), tile(53), tile(54)];
         assert_eq!(
-            wall_rank(
-                one_man,
-                &visible_context(vec![tile(0), tile(1), tile(2), tile(3)])
-            ),
-            WallRank::NoChance
-        );
-    }
-
-    #[test]
-    fn wall_rank_no_chance_for_five_or_more_visible() {
-        // 通常あり得ないが5枚以上相当の入力でも NoChance。
-        let five_man = tile(17).tile_type();
-        assert_eq!(
-            wall_rank(
-                five_man,
-                &visible_context(vec![tile(16), tile(17), tile(18), tile(19), tile(20)])
-            ),
-            WallRank::NoChance
+            wall_rank(six_pin, &visible_context(visible)),
+            WallRank::NoWall
         );
     }
 
     #[test]
     fn wall_rank_no_wall_for_honor() {
-        // 字牌は3枚見えでも壁対象外なので NoWall。
+        // 字牌は経路を持たないので、何枚見えていても NoWall。
         let east = tile(108).tile_type();
         assert_eq!(
             wall_rank(
                 east,
-                &visible_context(vec![tile(108), tile(109), tile(110)])
+                &visible_context(vec![tile(108), tile(109), tile(110), tile(111)])
             ),
             WallRank::NoWall
         );
     }
 
     #[test]
-    fn wall_rank_counts_red_five_as_same_type() {
-        // 赤5m(tile 16)と通常5m(tile 17-19)で計4枚。同じ TileType として NoChance。
-        let five_man = tile(17).tile_type();
+    fn wall_rank_terminal_uses_only_in_range_route() {
+        // 1p は経路 [2p,3p] のみ、9p は経路 [7p,8p] のみを評価し、範囲外へは進まない。
+        // 1p: 2p(40-43)を4枚見えで NoChance。9p: 8p(64-67)を4枚見えで NoChance。
+        let one_pin = tile(36).tile_type();
+        let nine_pin = tile(68).tile_type();
         assert_eq!(
             wall_rank(
-                five_man,
-                &visible_context(vec![tile(16), tile(17), tile(18), tile(19)])
+                one_pin,
+                &visible_context(vec![tile(40), tile(41), tile(42), tile(43)])
+            ),
+            WallRank::NoChance
+        );
+        assert_eq!(
+            wall_rank(
+                nine_pin,
+                &visible_context(vec![tile(64), tile(65), tile(66), tile(67)])
             ),
             WallRank::NoChance
         );
     }
 
     #[test]
-    fn is_one_chance_true_only_for_three_visible_number() {
-        let one_man = tile(0).tile_type();
-        assert!(is_one_chance(
-            one_man,
-            &visible_context(vec![tile(0), tile(1), tile(2)])
-        ));
-        assert!(!is_one_chance(
-            one_man,
-            &visible_context(vec![tile(0), tile(1)])
-        ));
-        assert!(!is_one_chance(
-            one_man,
-            &visible_context(vec![tile(0), tile(1), tile(2), tile(3)])
-        ));
-        // 字牌は3枚見えでも false。
+    fn sequence_wait_routes_stay_in_suit_and_in_range() {
+        // 端牌は経路1本、中張牌は2本。suit をまたがず 1〜9 の範囲内に収まる。
+        let one_pin = tile(36).tile_type();
+        assert_eq!(sequence_wait_routes(one_pin).len(), 1);
+        let nine_pin = tile(68).tile_type();
+        assert_eq!(sequence_wait_routes(nine_pin).len(), 1);
+        let five_pin = tile(52).tile_type();
+        assert_eq!(sequence_wait_routes(five_pin).len(), 2);
+        // 字牌は経路なし。
+        assert!(sequence_wait_routes(tile(108).tile_type()).is_empty());
+    }
+
+    #[test]
+    fn wall_rank_counts_red_five_in_route_as_same_type() {
+        // 経路構成牌 5p の壁を赤5p(tile 52)込みの4枚で作る。赤5も通常5と同じ TileType。
+        // 6p の経路 [4p,5p] が Blocked、[7p,8p] は Open なので NoWall。
+        let six_pin = tile(56).tile_type();
+        let visible = vec![tile(52), tile(53), tile(54), tile(55)];
+        assert_eq!(
+            visible_count_of(tile(53).tile_type(), &visible_context(visible.clone())),
+            4
+        );
+        assert_eq!(
+            wall_rank(six_pin, &visible_context(visible)),
+            WallRank::NoWall
+        );
+    }
+
+    #[test]
+    fn is_one_chance_reflects_route_one_chance() {
+        // 6p の経路 [4p,5p] を Blocked、[7p,8p] を OneChance にすると is_one_chance == true。
+        let six_pin = tile(56).tile_type();
+        let one_chance = vec![
+            tile(52),
+            tile(53),
+            tile(54),
+            tile(55),
+            tile(60),
+            tile(61),
+            tile(62),
+        ];
+        assert!(is_one_chance(six_pin, &visible_context(one_chance)));
+        // 経路が Open のままなら false。
+        assert!(!is_one_chance(six_pin, &visible_context(vec![])));
+        // 字牌は経路を持たないので false。
         let east = tile(108).tile_type();
         assert!(!is_one_chance(
             east,
@@ -1146,15 +1407,23 @@ mod tests {
     }
 
     #[test]
-    fn is_no_chance_true_only_for_four_or_more_visible_number() {
-        let one_man = tile(0).tile_type();
-        assert!(is_no_chance(
-            one_man,
-            &visible_context(vec![tile(0), tile(1), tile(2), tile(3)])
-        ));
+    fn is_no_chance_reflects_route_blocked() {
+        // 6p の両経路を Blocked にすると is_no_chance == true。片方 Open なら false。
+        let six_pin = tile(56).tile_type();
+        let no_chance = vec![
+            tile(52),
+            tile(53),
+            tile(54),
+            tile(55),
+            tile(60),
+            tile(61),
+            tile(62),
+            tile(63),
+        ];
+        assert!(is_no_chance(six_pin, &visible_context(no_chance)));
         assert!(!is_no_chance(
-            one_man,
-            &visible_context(vec![tile(0), tile(1), tile(2)])
+            six_pin,
+            &visible_context(vec![tile(52), tile(53), tile(54), tile(55)])
         ));
         // 字牌は4枚見えでも false。
         let east = tile(108).tile_type();
@@ -1186,8 +1455,8 @@ mod tests {
 
     #[test]
     fn wall_tile_types_by_rank_includes_no_wall_entries() {
-        // 1m だけ4枚見え、他は NoWall。NoWall も含めて返す。
-        let context = visible_context(vec![tile(0), tile(1), tile(2), tile(3)]);
+        // 2m を4枚見え。経路 [2m,3m] が Blocked になる 1m だけ NoChance、他は NoWall。
+        let context = visible_context(vec![tile(4), tile(5), tile(6), tile(7)]);
         let ranked = wall_tile_types_by_rank(&context);
         let one_man = tile(0).tile_type();
         assert_eq!(
@@ -1240,10 +1509,10 @@ mod tests {
 
     #[test]
     fn suited_safety_rank_for_any_reached_no_chance_over_one_chance_and_suji() {
-        // 1m は 4m 河でスジかつ4枚見え。NoChance が最優先。
+        // 1m は 4m 河でスジ。経路 [2m,3m] を 2m 4枚で Blocked にすると NoChance。壁が最優先。
         let discards = [vec![], vec![tile(12)], vec![], vec![]];
         let context = suited_context(
-            vec![tile(0), tile(1), tile(2), tile(3)],
+            vec![tile(4), tile(5), tile(6), tile(7)],
             discards,
             [false, true, false, false],
         );
@@ -1255,10 +1524,10 @@ mod tests {
 
     #[test]
     fn suited_safety_rank_for_any_reached_one_chance_over_suji() {
-        // 1m は 4m 河でスジかつ3枚見え。OneChance が Suji より優先。
+        // 1m は 4m 河でスジ。経路 [2m,3m] を 2m 3枚で OneChance にすると OneChance が Suji より優先。
         let discards = [vec![], vec![tile(12)], vec![], vec![]];
         let context = suited_context(
-            vec![tile(0), tile(1), tile(2)],
+            vec![tile(4), tile(5), tile(6)],
             discards,
             [false, true, false, false],
         );
@@ -1325,46 +1594,46 @@ mod tests {
 
     #[test]
     fn suited_dahai_actions_by_safety_orders_by_safety() {
-        // 4m 河でスジ判定。2m は4枚見え(NoChance)、3m は3枚見え(OneChance)、
-        // 1m はスジ(Suji)、5m は無スジ(NoSafety)。順序が入れ替わっていても安全度順に並ぶ。
-        let discards = [vec![], vec![tile(12)], vec![], vec![]];
+        // 経路壁で安全度を作る。1p は 2p 4枚で NoChance、9p は 8p 3枚で OneChance、
+        // 1s は 4s 河でスジ(Suji)、5s は無スジ・壁なし(NoSafety)。順序が入れ替わっても安全度順に並ぶ。
+        let discards = [vec![], vec![tile(84)], vec![], vec![]];
         let context = suited_context(
             vec![
-                tile(4),
-                tile(5),
-                tile(6),
-                tile(7),
-                tile(8),
-                tile(9),
-                tile(10),
+                tile(40),
+                tile(41),
+                tile(42),
+                tile(43),
+                tile(64),
+                tile(65),
+                tile(66),
             ],
             discards,
             [false, true, false, false],
         );
         let actions = vec![
-            LegalAction::Dahai { tile: tile(16) },
-            LegalAction::Dahai { tile: tile(0) },
-            LegalAction::Dahai { tile: tile(8) },
-            LegalAction::Dahai { tile: tile(4) },
+            LegalAction::Dahai { tile: tile(88) },
+            LegalAction::Dahai { tile: tile(72) },
+            LegalAction::Dahai { tile: tile(68) },
+            LegalAction::Dahai { tile: tile(36) },
         ];
         let ranked = suited_dahai_actions_by_safety(&actions, &context);
         assert_eq!(
             ranked,
             vec![
                 (
-                    &LegalAction::Dahai { tile: tile(4) },
+                    &LegalAction::Dahai { tile: tile(36) },
                     SuitedSafetyRank::NoChance
                 ),
                 (
-                    &LegalAction::Dahai { tile: tile(8) },
+                    &LegalAction::Dahai { tile: tile(68) },
                     SuitedSafetyRank::OneChance
                 ),
                 (
-                    &LegalAction::Dahai { tile: tile(0) },
+                    &LegalAction::Dahai { tile: tile(72) },
                     SuitedSafetyRank::Suji
                 ),
                 (
-                    &LegalAction::Dahai { tile: tile(16) },
+                    &LegalAction::Dahai { tile: tile(88) },
                     SuitedSafetyRank::NoSafety
                 ),
             ]
@@ -1402,9 +1671,9 @@ mod tests {
 
     #[test]
     fn select_suited_safety_fallback_action_none_without_opponent_reach() {
-        // 他家リーチがいなければ NoChance でも選ばない。
+        // 他家リーチがいなければ、1m が 2m 4枚で NoChance でも選ばない。
         let context = suited_context(
-            vec![tile(0), tile(1), tile(2), tile(3)],
+            vec![tile(4), tile(5), tile(6), tile(7)],
             Default::default(),
             [false; 4],
         );
@@ -1431,10 +1700,10 @@ mod tests {
 
     #[test]
     fn select_suited_safety_fallback_action_returns_safest_dahai() {
-        // 2m は4枚見え(NoChance)、1m はスジ(Suji)。最も安全な 2m を選ぶ。
+        // 4m 河でスジ判定。4m を4枚見えにして 2m を NoChance、1m はスジ(Suji)。最も安全な 2m を選ぶ。
         let discards = [vec![], vec![tile(12)], vec![], vec![]];
         let context = suited_context(
-            vec![tile(4), tile(5), tile(6), tile(7)],
+            vec![tile(12), tile(13), tile(14), tile(15)],
             discards,
             [false, true, false, false],
         );
@@ -1530,9 +1799,9 @@ mod tests {
 
     #[test]
     fn select_defense_fallback_action_with_kind_returns_suited_safety_no_chance() {
-        // 共通現物も字牌もなし。2m は4枚見えで NoChance。
+        // 共通現物も字牌もなし。4m を4枚見えにして経路 [3m,4m] を Blocked にし 2m を NoChance。
         let context = suited_context(
-            vec![tile(4), tile(5), tile(6), tile(7)],
+            vec![tile(12), tile(13), tile(14), tile(15)],
             Default::default(),
             [false, true, false, false],
         );
@@ -1551,9 +1820,9 @@ mod tests {
 
     #[test]
     fn select_defense_fallback_action_with_kind_returns_suited_safety_one_chance() {
-        // 2m は3枚見えで OneChance。
+        // 4m を3枚見えにして経路 [3m,4m] を OneChance にし 2m を OneChance。
         let context = suited_context(
-            vec![tile(4), tile(5), tile(6)],
+            vec![tile(12), tile(13), tile(14)],
             Default::default(),
             [false, true, false, false],
         );
@@ -1757,9 +2026,9 @@ mod tests {
     fn suited_safety_rank_for_all_reached_keeps_wall_priority_over_suji() {
         // 二人リーチで一人だけにスジの 1m でも、壁評価はスジより優先される。
         let discards = [vec![], vec![tile(12)], vec![], vec![]];
-        // 4枚見え -> NoChance。
+        // 2m を4枚見えにして経路 [2m,3m] を Blocked -> 1m は NoChance。
         let context = suited_context(
-            vec![tile(0), tile(1), tile(2), tile(3)],
+            vec![tile(4), tile(5), tile(6), tile(7)],
             discards.clone(),
             [false, true, true, false],
         );
@@ -1767,9 +2036,9 @@ mod tests {
             suited_safety_rank_for_all_reached(tile(0).tile_type(), &context),
             Some(SuitedSafetyRank::NoChance)
         );
-        // 3枚見え -> OneChance。
+        // 2m を3枚見え -> 1m は OneChance。
         let context = suited_context(
-            vec![tile(0), tile(1), tile(2)],
+            vec![tile(4), tile(5), tile(6)],
             discards,
             [false, true, true, false],
         );
@@ -1873,5 +2142,136 @@ mod tests {
                 DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
             ))
         );
+    }
+
+    // 実戦問題の最小回帰。合法 Dahai は 6p(56) と 1s(72)。6p は自身が3枚見えているが周辺牌に壁なし、
+    // リーチ者(1人)の河は 4s(84) のみ。6p は現物でなく無スジ、1s は 4s に対してスジ。
+    #[test]
+    fn real_world_regression_prefers_suji_1s_over_self_visible_6p() {
+        let six_pin = tile(56).tile_type();
+        let one_sou = tile(72).tile_type();
+        let context = suited_context(
+            vec![tile(56), tile(57), tile(58)],
+            [vec![], vec![tile(84)], vec![], vec![]],
+            [false, true, false, false],
+        );
+
+        // 6p 自身が3枚見えていても、経路 4p/5p/7p/8p に壁がないので NoWall。
+        assert_eq!(wall_rank(six_pin, &context), WallRank::NoWall);
+        assert_eq!(
+            suited_safety_rank_for_all_reached(six_pin, &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(one_sou, &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(56) },
+            LegalAction::Dahai { tile: tile(72) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(72) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
+            ))
+        );
+    }
+
+    // 同じ候補でも、リーチ者の河に 6p があれば 6p を現物として選ぶ。現物優先が壊れていないこと。
+    #[test]
+    fn real_world_regression_keeps_genbutsu_6p_when_in_river() {
+        let context = suited_context(
+            vec![tile(56), tile(57), tile(58)],
+            [vec![], vec![tile(59), tile(84)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(56) },
+            LegalAction::Dahai { tile: tile(72) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(56) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_from_selection_for_suited_suji() {
+        // 1s をスジとして選んだ場合の診断データ。壁は NoWall、suji は true、suited safety は Suji。
+        let context = suited_context(
+            vec![tile(56), tile(57), tile(58)],
+            [vec![], vec![tile(84)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(72) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &action,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji),
+        );
+        assert_eq!(diagnostic.selected_action, "1s");
+        assert_eq!(
+            diagnostic.selected_kind,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
+        );
+        assert_eq!(diagnostic.opponent_reach_count, 1);
+        assert!(!diagnostic.selected_genbutsu_for_all);
+        assert_eq!(diagnostic.selected_honor_safety_rank, None);
+        assert_eq!(diagnostic.selected_wall_rank, Some(WallRank::NoWall));
+        assert_eq!(diagnostic.selected_suji_for_all_reached, Some(true));
+        assert_eq!(
+            diagnostic.selected_suited_safety_rank,
+            Some(SuitedSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_from_selection_for_genbutsu() {
+        // 6p を現物として選んだ場合の診断データ。genbutsu は true、数牌 safety も算出される。
+        let context = suited_context(
+            vec![tile(56), tile(57), tile(58)],
+            [vec![], vec![tile(59)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(56) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &action,
+            DefenseFallbackKind::Genbutsu,
+        );
+        assert_eq!(diagnostic.selected_action, "6p");
+        assert_eq!(diagnostic.selected_kind, DefenseFallbackKind::Genbutsu);
+        assert!(diagnostic.selected_genbutsu_for_all);
+        assert_eq!(diagnostic.selected_wall_rank, Some(WallRank::NoWall));
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_from_selection_for_honor() {
+        // 字牌を選んだ場合、壁・スジ・数牌 safety は None で字牌 safety だけ算出される。
+        let context = suited_context(
+            vec![tile(108), tile(109)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(108) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &action,
+            DefenseFallbackKind::HonorSafety(HonorSafetyRank::TwoVisible),
+        );
+        assert_eq!(diagnostic.selected_action, "E");
+        assert_eq!(
+            diagnostic.selected_honor_safety_rank,
+            Some(HonorSafetyRank::TwoVisible)
+        );
+        assert_eq!(diagnostic.selected_wall_rank, None);
+        assert_eq!(diagnostic.selected_suji_for_all_reached, None);
+        assert_eq!(diagnostic.selected_suited_safety_rank, None);
     }
 }

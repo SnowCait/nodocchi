@@ -1,7 +1,7 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
-use crate::defense::select_defense_fallback_action;
+use crate::defense::{log_defense_fallback_decision, select_defense_fallback_action_with_kind};
 use crate::discard_selection::select_discard_action_with_evaluation;
 use crate::push_pull::{
     PushPullMode, decide_push_pull, log_push_pull_decision,
@@ -50,21 +50,32 @@ impl ShantenAgent {
                 if let Some(action) = normal_discard {
                     return Some(action.clone());
                 }
-                select_defense_fallback_action(ctx, legal_actions).cloned()
+                self.select_defense_fallback(ctx, legal_actions)
             }
             PushPullMode::Neutral => {
                 if let Some(action) = normal_discard {
                     return Some(action.clone());
                 }
-                select_defense_fallback_action(ctx, legal_actions).cloned()
+                self.select_defense_fallback(ctx, legal_actions)
             }
             PushPullMode::Fold => {
-                if let Some(action) = select_defense_fallback_action(ctx, legal_actions) {
-                    return Some(action.clone());
+                if let Some(action) = self.select_defense_fallback(ctx, legal_actions) {
+                    return Some(action);
                 }
                 normal_discard.cloned()
             }
         }
+    }
+
+    // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action を返す。
+    fn select_defense_fallback(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+    ) -> Option<LegalAction> {
+        let (action, kind) = select_defense_fallback_action_with_kind(ctx, legal_actions)?;
+        log_defense_fallback_decision(ctx, action, kind, legal_actions);
+        Some(action.clone())
     }
 }
 
@@ -155,6 +166,7 @@ impl Agent for ShantenAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::defense::select_defense_fallback_action;
     use crate::discard_selection::{select_best_discard_evaluation, select_discard_action};
     use crate::push_pull::push_pull_inputs_from_context;
     use bot_logic::TileId;
@@ -715,8 +727,9 @@ mod tests {
     #[test]
     fn picks_no_chance_suited_dahai_when_no_genbutsu_or_honor() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌もなし。無スジ 0(1m) より NoChance 4(2m) を選ぶ。
-        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
+        // 共通現物も字牌もなし。4m を4枚見えにして経路 [3m,4m] を Blocked にし 2m を NoChance。
+        // 無スジ 0(1m) より NoChance 4(2m) を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
         let actions = vec![dahai(0), dahai(4)];
         assert_eq!(agent.act(&ctx, &actions), dahai(4));
     }
@@ -724,8 +737,9 @@ mod tests {
     #[test]
     fn picks_one_chance_suited_dahai_when_no_genbutsu_or_honor() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌もなし。無スジ 0(1m) より OneChance 4(2m) を選ぶ。
-        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6], &[]);
+        // 共通現物も字牌もなし。4m を3枚見えにして経路 [3m,4m] を OneChance にし 2m を OneChance。
+        // 無スジ 0(1m) より OneChance 4(2m) を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14], &[]);
         let actions = vec![dahai(0), dahai(4)];
         assert_eq!(agent.act(&ctx, &actions), dahai(4));
     }
@@ -742,11 +756,11 @@ mod tests {
     #[test]
     fn suited_safety_fallback_follows_safety_order() {
         let mut agent = ShantenAgent;
-        // 12(4m) 河でスジ判定。2m は4枚見え(NoChance)、3m は3枚見え(OneChance)、
-        // 1m はスジ(Suji)、5m は無スジ(NoSafety)。最も安全な NoChance を選ぶ。
-        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7, 8, 9, 10], &[12]);
-        let actions = vec![dahai(16), dahai(0), dahai(8), dahai(4)];
-        assert_eq!(agent.act(&ctx, &actions), dahai(4));
+        // 経路壁で安全度を作る。1p は 2p 4枚で NoChance、9p は 8p 3枚で OneChance、
+        // 1s は 4s(84) 河でスジ(Suji)、5s は無スジ・壁なし(NoSafety)。最も安全な NoChance を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[40, 41, 42, 43, 64, 65, 66], &[84]);
+        let actions = vec![dahai(88), dahai(72), dahai(68), dahai(36)];
+        assert_eq!(agent.act(&ctx, &actions), dahai(36));
     }
 
     #[test]
@@ -787,8 +801,8 @@ mod tests {
     #[test]
     fn prefers_suited_safety_fallback_over_reach() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌もなし。NoChance 数牌があれば Reach より優先する。
-        let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
+        // 共通現物も字牌もなし。4m を4枚見えにして 2m を NoChance にすると Reach より優先する。
+        let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
         assert_eq!(agent.act(&ctx, &actions), dahai(4));
     }
@@ -797,7 +811,7 @@ mod tests {
     fn push_prefers_normal_discard_over_suited_safety_fallback() {
         let mut agent = ShantenAgent;
         // テンパイで単独の子リーチに対しては Push。Reach が合法でなければ通常打牌へ進み、
-        // NoChance 4(2m) の防御 fallback より通常打牌(32(9m))を優先する。
+        // 防御 fallback より通常打牌(32(9m))を優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = suited_reach_context(Some(88), &hand_values, &[4, 5, 6, 7], &[]);
         assert_eq!(
