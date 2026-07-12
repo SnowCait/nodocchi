@@ -21,7 +21,7 @@ pub struct DiscardEvaluation {
     /// `floating_tile_value` と同時に設定する。
     ///
     /// 多向聴時の比較軸 [`DiscardComparisonReason::IsolatedTile`] の優先対象判定
-    /// (`isolated_tile_priority_eligible`) は、これに加えて孤立ドラ・孤立役牌・孤立赤5を
+    /// (`isolated_tile_priority_eligible`) は、これに加えて孤立ドラ・孤立赤5を
     /// 除外する。孤立牌であることと比較上の優先対象であることを混同しないこと。
     pub discards_isolated_tile: bool,
     /// 打牌後13枚の通常形一向聴の形分類。通常形一向聴でなければ [`IishantenShape::Unknown`]。
@@ -561,6 +561,7 @@ fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluat
 pub enum DiscardComparisonReason {
     Shanten,
     IsolatedTile,
+    IsolatedHonor,
     AcceptanceRemaining,
     AcceptanceTypeCount,
     IishantenShape,
@@ -592,6 +593,10 @@ pub fn compare_discard_evaluations(
     }
 
     if let Some(comparison) = compare_isolated_tile_discard(candidate, current_best) {
+        return comparison;
+    }
+
+    if let Some(comparison) = compare_isolated_honor_discard(candidate, current_best) {
         return comparison;
     }
 
@@ -659,15 +664,16 @@ pub fn compare_discard_evaluations(
     }
 }
 
-// 候補単独で「通常孤立牌の優先対象」かどうかを判定する。手牌構造上の孤立牌
-// (discards_isolated_tile) であっても、孤立ドラ・孤立役牌・孤立赤5は優先対象外とし、
-// 特殊牌を含む形の温存は後続の Dora / ValueHonor / RedFive 比較へ委ねる。
+// 候補単独で「孤立牌の優先対象」かどうかを判定する。手牌構造上の孤立牌
+// (discards_isolated_tile) であっても、孤立ドラ・孤立赤5は優先対象外とし、
+// これらの温存は後続の Dora / RedFive 比較へ委ねる。孤立役牌は優先対象へ含め、
+// 非ドラの孤立字牌を孤立数牌より先に切れるようにする。役牌の温存判断は後続の
+// ValueHonor 比較へ委ねる。
 //
 // 比較相手に依存しない候補固有の値なので、辞書順比較の推移律を壊さない。
 fn isolated_tile_priority_eligible(evaluation: &DiscardEvaluation) -> bool {
     evaluation.discards_isolated_tile
         && evaluation.discarded_dora_count == 0
-        && evaluation.discarded_value_honor_count == 0
         && !evaluation.discards_red_five
 }
 
@@ -703,6 +709,48 @@ fn compare_isolated_tile_discard(
     Some(DiscardComparison {
         candidate_is_better: candidate_eligible,
         reason: DiscardComparisonReason::IsolatedTile,
+    })
+}
+
+// 多向聴時に限り、両候補とも孤立牌優先対象で片方が字牌・もう片方が数牌のとき、孤立字牌を
+// 切る打牌を孤立数牌を切る打牌より優先する限定的な比較軸。以下の条件をすべて満たす場合だけ
+// 決着させ、それ以外は None を返して後続の受け入れ以下の既存比較へ委ねる。
+//
+// - 両候補の最小向聴数が等しい
+// - 最小向聴数が2以上（テンパイ・一向聴には適用しない）
+// - 両候補とも isolated_tile_priority_eligible() == true
+// - 片方が字牌・もう片方が数牌
+//
+// 役牌かどうかは使用しない。孤立ドラ字牌は isolated_tile_priority_eligible() を満たさないため
+// 対象外となり、既存のドラ保護を維持する。両方字牌・両方数牌の場合はこの軸で決着させない。
+// 比較相手に依存する条件を持たず、辞書順比較の推移律を維持する。
+fn compare_isolated_honor_discard(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> Option<DiscardComparison> {
+    let candidate_shanten = candidate.min_shanten_after_discard();
+    let best_shanten = current_best.min_shanten_after_discard();
+    if candidate_shanten != best_shanten {
+        return None;
+    }
+    if candidate_shanten < 2 {
+        return None;
+    }
+
+    if !isolated_tile_priority_eligible(candidate) || !isolated_tile_priority_eligible(current_best)
+    {
+        return None;
+    }
+
+    let candidate_is_honor = candidate.discard.is_honor();
+    let best_is_honor = current_best.discard.is_honor();
+    if candidate_is_honor == best_is_honor {
+        return None;
+    }
+
+    Some(DiscardComparison {
+        candidate_is_better: candidate_is_honor,
+        reason: DiscardComparisonReason::IsolatedHonor,
     })
 }
 
@@ -1263,7 +1311,8 @@ mod tests {
 
     #[test]
     fn select_best_discard_keeps_first_candidate_on_tie() {
-        let counts = counts(&["1m", "5m", "9m", "1p", "5p", "9p", "1s", "5s", "9s", "E"]);
+        // 全て孤立数牌のみ。字牌を含めると孤立字牌軸で決着してしまうため数牌だけにする。
+        let counts = counts(&["1m", "5m", "9m", "1p", "5p", "9p", "1s", "5s", "9s"]);
         let evaluations = evaluate_discards(&counts);
         let selected = select_best_discard(&counts).unwrap();
         let first_equal = evaluations
@@ -1307,6 +1356,21 @@ mod tests {
 
     fn ids(values: &[u8]) -> Vec<TileId> {
         values.iter().map(|&v| TileId::new(v).unwrap()).collect()
+    }
+
+    // mjai 牌文字列から TileId 列を作る。同種牌は variant を 1 から順に割り当てるため、
+    // variant 0 に割り当てられる赤5は選ばれず、赤ドラ保護と孤立字牌軸の検証が混ざらない。
+    fn ids_of(strs: &[&str]) -> Vec<TileId> {
+        let mut used: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+        strs.iter()
+            .map(|s| {
+                let index = tile(s).index() as u8;
+                let variant = used.entry(index).or_insert(1);
+                let id = TileId::new(index * 4 + *variant).unwrap();
+                *variant += 1;
+                id
+            })
+            .collect()
     }
 
     fn shanten_min(min: i8) -> Shanten {
@@ -4156,14 +4220,14 @@ mod tests {
     }
 
     #[test]
-    fn isolated_axis_yields_to_value_honor_difference() {
-        // 孤立牌候補が役牌を切る場合は孤立牌軸で決着させない。
+    fn isolated_value_honor_is_eligible_like_normal_isolated() {
+        // 非ドラの孤立役牌は孤立牌優先対象になり、非孤立候補に対して IsolatedTile 軸で先に切られる。
         let mut isolated_honor = isolated_evaluation(3, 10, 1, true);
         isolated_honor.discarded_value_honor_count = 1;
         let taatsu = isolated_evaluation(3, 40, 5, false);
-        assert!(compare_isolated_tile_discard(&isolated_honor, &taatsu).is_none());
-        let comparison = compare_discard_evaluations(&isolated_honor, &taatsu);
-        assert_ne!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+        let comparison = compare_isolated_tile_discard(&isolated_honor, &taatsu).unwrap();
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
     }
 
     #[test]
@@ -4273,15 +4337,24 @@ mod tests {
 
     #[test]
     fn isolated_priority_eligibility_is_candidate_intrinsic() {
-        // 通常孤立牌だけが eligible。孤立ドラ・孤立役牌・孤立赤5・非孤立牌は eligible=false。
+        // 非ドラの孤立牌は役牌でも eligible。孤立ドラ・孤立赤5・非孤立牌は eligible=false。
         assert!(isolated_tile_priority_eligible(&priority_candidate(
             0, 10, true, 0, 0, false
         )));
         assert!(!isolated_tile_priority_eligible(&priority_candidate(
             0, 10, true, 1, 0, false
         )));
-        assert!(!isolated_tile_priority_eligible(&priority_candidate(
+        // 非ドラの孤立役牌（value_honor=1）は eligible。
+        assert!(isolated_tile_priority_eligible(&priority_candidate(
             0, 10, true, 0, 1, false
+        )));
+        // 連風牌相当（value_honor=2）も eligible。
+        assert!(isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, true, 0, 2, false
+        )));
+        // ドラ役牌は eligible=false。
+        assert!(!isolated_tile_priority_eligible(&priority_candidate(
+            0, 10, true, 1, 1, false
         )));
         assert!(!isolated_tile_priority_eligible(&priority_candidate(
             0, 10, true, 0, 0, true
@@ -4381,13 +4454,13 @@ mod tests {
     }
 
     #[test]
-    fn isolated_value_honor_is_protected_by_value_honor_axis_when_else_equal() {
+    fn isolated_value_honor_is_preferred_over_non_isolated() {
+        // 非ドラの孤立役牌は eligible。非孤立候補に対して IsolatedTile 軸で孤立役牌側が先に切られる。
         let isolated_honor = priority_candidate(0, 10, true, 0, 1, false);
         let non_isolated = priority_candidate(1, 10, false, 0, 0, false);
-        assert!(compare_isolated_tile_discard(&non_isolated, &isolated_honor).is_none());
-        let comparison = compare_discard_evaluations(&non_isolated, &isolated_honor);
+        let comparison = compare_discard_evaluations(&isolated_honor, &non_isolated);
         assert!(comparison.candidate_is_better);
-        assert_eq!(comparison.reason, DiscardComparisonReason::ValueHonor);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
     }
 
     #[test]
@@ -4402,17 +4475,12 @@ mod tests {
 
     #[test]
     fn isolated_axis_undecided_between_non_eligible_candidates() {
-        // 非eligible同士(非孤立牌・孤立ドラ・孤立役牌・孤立赤5)は IsolatedTile で決着しない。
+        // 非eligible同士(非孤立牌・孤立ドラ・孤立赤5)は IsolatedTile で決着しない。
+        // 孤立役牌は eligible になったためこの群には含めない。
         let non_isolated = priority_candidate(0, 10, false, 0, 0, false);
         let isolated_dora = priority_candidate(1, 10, true, 1, 0, false);
-        let isolated_honor = priority_candidate(2, 10, true, 0, 1, false);
-        let isolated_red = priority_candidate(3, 10, true, 0, 0, true);
-        let candidates = [
-            &non_isolated,
-            &isolated_dora,
-            &isolated_honor,
-            &isolated_red,
-        ];
+        let isolated_red = priority_candidate(2, 10, true, 0, 0, true);
+        let candidates = [&non_isolated, &isolated_dora, &isolated_red];
         for (i, x) in candidates.iter().enumerate() {
             for y in candidates.iter().skip(i + 1) {
                 assert!(compare_isolated_tile_discard(x, y).is_none());
@@ -4447,6 +4515,233 @@ mod tests {
                 !compare_discard_evaluations(&candidate.evaluation, selected).candidate_is_better
             );
         }
+    }
+
+    // 孤立字牌軸(IsolatedHonor)検証用の合成候補。字牌(index>=27)と数牌を、eligibility 要素と
+    // 向聴を指定して作る。受け入れ牌種は2で固定する。
+    fn isolated_axis_candidate(
+        discard_index: u8,
+        min: i8,
+        remaining: u8,
+        isolated: bool,
+        dora: u8,
+        value_honor: u8,
+        red: bool,
+    ) -> DiscardEvaluation {
+        let mut evaluation = evaluation(min, remaining, 2, dora, red);
+        evaluation.discard = TileType::new(discard_index).unwrap();
+        evaluation.discards_isolated_tile = isolated;
+        evaluation.discarded_value_honor_count = value_honor;
+        evaluation
+    }
+
+    #[test]
+    fn isolated_honor_outranks_isolated_number() {
+        // 孤立役牌(C 中, index 33)と孤立数牌(1m)。受け入れが数牌側で大きくても字牌を先に切る。
+        let honor = isolated_axis_candidate(33, 3, 10, true, 0, 1, false);
+        let number = isolated_axis_candidate(0, 3, 40, true, 0, 0, false);
+        let forward = compare_discard_evaluations(&honor, &number);
+        assert!(forward.candidate_is_better);
+        assert_eq!(forward.reason, DiscardComparisonReason::IsolatedHonor);
+        // 候補順を入れ替えても数牌側は勝たず、軸も同じ。
+        let backward = compare_discard_evaluations(&number, &honor);
+        assert!(!backward.candidate_is_better);
+        assert_eq!(backward.reason, DiscardComparisonReason::IsolatedHonor);
+    }
+
+    #[test]
+    fn isolated_guest_wind_outranks_isolated_number() {
+        // 孤立客風(E, value_honor=0)と孤立数牌。役牌でなくても字牌を先に切る。
+        let wind = isolated_axis_candidate(27, 3, 10, true, 0, 0, false);
+        let number = isolated_axis_candidate(0, 3, 40, true, 0, 0, false);
+        let comparison = compare_discard_evaluations(&wind, &number);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedHonor);
+    }
+
+    #[test]
+    fn isolated_honor_axis_undecided_between_two_honors() {
+        // 両方字牌(客風 E と 役牌 C)なら新軸では決着せず、受け入れ以下の既存比較へ進む。
+        // 受け入れ・牌種を揃えると後段の ValueHonor で客風側が切られる。
+        let guest_wind = isolated_axis_candidate(27, 3, 10, true, 0, 0, false);
+        let dragon = isolated_axis_candidate(33, 3, 10, true, 0, 1, false);
+        assert!(compare_isolated_honor_discard(&guest_wind, &dragon).is_none());
+        let comparison = compare_discard_evaluations(&guest_wind, &dragon);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::ValueHonor);
+    }
+
+    #[test]
+    fn isolated_honor_axis_undecided_between_honor_and_double_wind() {
+        // 孤立役牌(白, value_honor=1)と孤立連風牌(E, value_honor=2)。両方字牌なので新軸では決着しない。
+        let yakuhai = isolated_axis_candidate(31, 3, 10, true, 0, 1, false);
+        let double_wind = isolated_axis_candidate(27, 3, 10, true, 0, 2, false);
+        assert!(compare_isolated_honor_discard(&yakuhai, &double_wind).is_none());
+    }
+
+    #[test]
+    fn isolated_honor_axis_undecided_between_two_numbers() {
+        // 両方数牌(1m と 5m)なら新軸では決着させない。
+        let terminal = isolated_axis_candidate(0, 3, 10, true, 0, 0, false);
+        let middle = isolated_axis_candidate(4, 3, 10, true, 0, 0, false);
+        assert!(compare_isolated_honor_discard(&terminal, &middle).is_none());
+    }
+
+    #[test]
+    fn isolated_dora_honor_does_not_apply_honor_axis() {
+        // 孤立ドラ字牌は eligible でないため新軸の対象外。孤立数牌を切る。
+        let dora_honor = isolated_axis_candidate(33, 3, 10, true, 1, 1, false);
+        let number = isolated_axis_candidate(0, 3, 40, true, 0, 0, false);
+        assert!(compare_isolated_honor_discard(&dora_honor, &number).is_none());
+        // 数牌が eligible、ドラ字牌は非eligible → IsolatedTile 軸で数牌切りが優先。
+        let comparison = compare_discard_evaluations(&number, &dora_honor);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+    }
+
+    #[test]
+    fn isolated_non_dora_honor_outranks_isolated_dora_number() {
+        // 孤立非ドラ字牌 vs 孤立ドラ数牌。字牌側が eligible、ドラ数牌は非eligible → 字牌切り。
+        let honor = isolated_axis_candidate(33, 3, 10, true, 0, 1, false);
+        let dora_number = isolated_axis_candidate(0, 3, 40, true, 1, 0, false);
+        let comparison = compare_discard_evaluations(&honor, &dora_number);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
+    }
+
+    #[test]
+    fn shanten_outranks_isolated_honor_axis() {
+        // 孤立字牌切りが3向聴、孤立数牌切りが2向聴なら向聴改善が優先。
+        let honor = isolated_axis_candidate(33, 3, 10, true, 0, 1, false);
+        let number = isolated_axis_candidate(0, 2, 40, true, 0, 0, false);
+        let comparison = compare_discard_evaluations(&number, &honor);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
+        assert!(compare_isolated_honor_discard(&honor, &number).is_none());
+    }
+
+    #[test]
+    fn iishanten_does_not_apply_isolated_honor_axis() {
+        // 一向聴では新軸を適用しない。
+        let honor = isolated_axis_candidate(33, 1, 10, true, 0, 1, false);
+        let number = isolated_axis_candidate(0, 1, 40, true, 0, 0, false);
+        assert!(compare_isolated_honor_discard(&honor, &number).is_none());
+    }
+
+    #[test]
+    fn tenpai_does_not_apply_isolated_honor_axis() {
+        // テンパイでは新軸を適用しない。
+        let honor = isolated_axis_candidate(33, 0, 10, true, 0, 1, false);
+        let number = isolated_axis_candidate(0, 0, 40, true, 0, 0, false);
+        assert!(compare_isolated_honor_discard(&honor, &number).is_none());
+    }
+
+    #[test]
+    fn isolated_honor_axis_selection_is_order_independent() {
+        // 孤立役牌 > 孤立数牌 > 非孤立牌。3候補の全順列で孤立役牌が選ばれる。
+        let honor = isolated_axis_candidate(33, 3, 10, true, 0, 1, false);
+        let number = isolated_axis_candidate(0, 3, 40, true, 0, 0, false);
+        let non_isolated = isolated_axis_candidate(4, 3, 40, false, 0, 0, false);
+        let permutations = [
+            [honor.clone(), number.clone(), non_isolated.clone()],
+            [honor.clone(), non_isolated.clone(), number.clone()],
+            [number.clone(), honor.clone(), non_isolated.clone()],
+            [number.clone(), non_isolated.clone(), honor.clone()],
+            [non_isolated.clone(), honor.clone(), number.clone()],
+            [non_isolated.clone(), number.clone(), honor.clone()],
+        ];
+        for permutation in permutations {
+            let selected = select_best(permutation.to_vec()).unwrap();
+            assert_eq!(selected.discard, honor.discard);
+        }
+    }
+
+    #[test]
+    fn regression_guest_wind_discarded_before_isolated_number() {
+        // 場風 E, 自風 S。W は客風(非役牌)の孤立単騎、8s も孤立単騎。ドラ表示なし。
+        // 手牌 3m4m5m 3p4p5p6p7p 2s2s 5s 8s 9m W は2向聴で、W を切っても 8s を切っても2向聴で不変。
+        // 旧比較では客風 W と孤立数牌がともに孤立牌優先対象で IsolatedTile 軸では決着せず、
+        // 受け入れ比較(W が受け入れ最大=50)で W が選ばれていた(reason=AcceptanceRemaining)。
+        // 新比較では孤立字牌軸 IsolatedHonor で W を数牌より先に切り、決着理由を明示する。
+        let tiles = ids_of(&[
+            "3m", "4m", "5m", "3p", "4p", "5p", "6p", "7p", "2s", "2s", "5s", "8s", "9m", "W",
+        ]);
+        let evaluations = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+
+        let wind = discard_evaluation(&evaluations, tile("W"));
+        let number = discard_evaluation(&evaluations, tile("8s"));
+        assert!(wind.discards_isolated_tile);
+        assert!(number.discards_isolated_tile);
+        assert_eq!(wind.discarded_value_honor_count, 0);
+        assert_eq!(wind.discarded_dora_count, 0);
+        // どちらを切っても同じ2向聴。
+        assert_eq!(wind.min_shanten_after_discard(), 2);
+        assert_eq!(number.min_shanten_after_discard(), 2);
+
+        let selected = select_best(evaluations.clone()).unwrap();
+        assert_eq!(selected.discard, tile("W"));
+
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let diagnostic = diagnose_discard_evaluations(&counts, &evaluations);
+        let eight_s = diagnostic
+            .candidates
+            .iter()
+            .find(|c| c.evaluation.discard == tile("8s"))
+            .unwrap();
+        assert!(!eight_s.selected);
+        assert_eq!(
+            eight_s.comparison_reason,
+            DiscardComparisonReason::IsolatedHonor
+        );
+    }
+
+    #[test]
+    fn regression_yakuhai_discarded_before_isolated_number() {
+        // 場風 E, 自風 S。C(中)は三元牌=役牌の孤立単騎、8s も孤立単騎。C はドラではない。
+        // 手牌 3m4m5m 3p4p5p6p7p 2s2s 5s 8s 9m C は2向聴で、C を切っても 8s を切っても2向聴で不変。
+        // 旧比較では役牌 C が孤立牌優先対象から除外され、孤立数牌 8s が eligible だったため、
+        // IsolatedTile 軸で 8s が先に切られていた(reason=IsolatedTile で数牌切り)。
+        // 新比較では C を孤立牌優先対象へ含め、孤立字牌軸 IsolatedHonor で C を数牌より先に切る。
+        let tiles = ids_of(&[
+            "3m", "4m", "5m", "3p", "4p", "5p", "6p", "7p", "2s", "2s", "5s", "8s", "9m", "C",
+        ]);
+        let evaluations = evaluate_discards_from_tiles_with_context(
+            &tiles,
+            &[],
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+
+        let dragon = discard_evaluation(&evaluations, tile("C"));
+        let number = discard_evaluation(&evaluations, tile("8s"));
+        assert!(dragon.discards_isolated_tile);
+        assert!(number.discards_isolated_tile);
+        assert!(dragon.discarded_value_honor_count > 0);
+        assert_eq!(dragon.discarded_dora_count, 0);
+        // どちらを切っても同じ2向聴。
+        assert_eq!(dragon.min_shanten_after_discard(), 2);
+        assert_eq!(number.min_shanten_after_discard(), 2);
+
+        let selected = select_best(evaluations.clone()).unwrap();
+        assert_eq!(selected.discard, tile("C"));
+
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let diagnostic = diagnose_discard_evaluations(&counts, &evaluations);
+        let eight_s = diagnostic
+            .candidates
+            .iter()
+            .find(|c| c.evaluation.discard == tile("8s"))
+            .unwrap();
+        assert!(!eight_s.selected);
+        assert_eq!(
+            eight_s.comparison_reason,
+            DiscardComparisonReason::IsolatedHonor
+        );
     }
 
     #[test]
