@@ -23,7 +23,10 @@ pub use discard::{
     shape_breakdown_for_discard, shape_penalty_for_discard, shape_penalty_for_discard_with_context,
 };
 pub use hand::{Hand, HandError};
-pub use iishanten::{IishantenShape, classify_standard_iishanten_shape};
+pub use iishanten::{
+    IishantenShape, classify_standard_iishanten_shape,
+    classify_standard_iishanten_shape_after_discard,
+};
 pub use shanten::{
     Shanten, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
 };

@@ -45,6 +45,24 @@ pub fn classify_standard_iishanten_shape(counts: &TileCounts) -> IishantenShape 
     }
 }
 
+/// `discard` を1枚取り除いた後の門前13枚を通常形一向聴として形分類する。
+///
+/// 診断専用のpure helper。打牌選択や比較には使用しない。契約は次の通り。
+///
+/// - `counts` に `discard` が1枚も含まれない場合は `None`。
+/// - 1枚取り除ける場合は `Some(classify_standard_iishanten_shape(打牌後counts))`。
+///   そのため打牌後が13枚の通常形一向聴でなければ `Some(IishantenShape::Unknown)` になる。
+///
+/// 牌は物理IDではなく `TileType` 単位で1枚だけ取り除く。入力の `counts` は変更しない。
+pub fn classify_standard_iishanten_shape_after_discard(
+    counts: &TileCounts,
+    discard: TileType,
+) -> Option<IishantenShape> {
+    let mut after_discard = *counts;
+    after_discard.remove(discard).ok()?;
+    Some(classify_standard_iishanten_shape(&after_discard))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Target {
     melds: u8,
@@ -160,6 +178,10 @@ mod tests {
                 .iter()
                 .map(|s| TileType::from_mjai_type_str(s).unwrap()),
         )
+    }
+
+    fn tt(string: &str) -> TileType {
+        TileType::from_mjai_type_str(string).unwrap()
     }
 
     #[test]
@@ -297,6 +319,87 @@ mod tests {
         ]);
         let before = hand;
         let _ = classify_standard_iishanten_shape(&hand);
+        assert_eq!(hand, before);
+    }
+
+    #[test]
+    fn after_discard_complete() {
+        // Complete の13枚形へ捨てる14枚目(1s)を加える。1s を切ると Complete に戻る。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C", "1s",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_after_discard(&hand, tt("1s")),
+            Some(IishantenShape::Complete)
+        );
+    }
+
+    #[test]
+    fn after_discard_headless() {
+        // Headless の13枚形へ捨てる14枚目(1s)を加える。1s を切ると Headless に戻る。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "6s", "1s",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_after_discard(&hand, tt("1s")),
+            Some(IishantenShape::Headless)
+        );
+    }
+
+    #[test]
+    fn after_discard_kuttsuki() {
+        // Kuttsuki の13枚形へ捨てる14枚目(9s)を加える。9s を切ると Kuttsuki に戻る。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p", "5p", "2s", "8s", "9s",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_after_discard(&hand, tt("9s")),
+            Some(IishantenShape::Kuttsuki)
+        );
+    }
+
+    #[test]
+    fn after_discard_weak() {
+        // Weak の13枚形へ捨てる14枚目(1s)を加える。1s を切ると Weak に戻る。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "E", "1s",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_after_discard(&hand, tt("1s")),
+            Some(IishantenShape::Weak)
+        );
+    }
+
+    #[test]
+    fn after_discard_unknown_when_not_iishanten() {
+        // テンパイ形へ余分な牌(1s)を加える。1s を切ると通常形一向聴ではなくテンパイなので Unknown。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "3p", "5s", "5s", "1s",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_after_discard(&hand, tt("1s")),
+            Some(IishantenShape::Unknown)
+        );
+    }
+
+    #[test]
+    fn after_discard_none_when_tile_absent() {
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C", "1s",
+        ]);
+        assert_eq!(
+            classify_standard_iishanten_shape_after_discard(&hand, tt("9p")),
+            None
+        );
+    }
+
+    #[test]
+    fn after_discard_does_not_mutate_input() {
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C", "1s",
+        ]);
+        let before = hand;
+        let _ = classify_standard_iishanten_shape_after_discard(&hand, tt("1s"));
         assert_eq!(hand, before);
     }
 
