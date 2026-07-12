@@ -95,7 +95,9 @@ pub fn build_response_for_request_with_context<A: Agent>(
         warn!(request_id, "no convertible legal actions; falling back");
     }
     let chosen = agent.act(context, &legal_actions);
-    info!(
+    // Agent の選択は agent decision の DEBUG で追跡でき、実際に送信した action は
+    // `action sent` の INFO で1件だけ記録する。ここは選択過程の DEBUG に留める。
+    debug!(
         request_id,
         legal_actions = legal_actions.len(),
         chosen = ?chosen,
@@ -168,6 +170,68 @@ pub(crate) fn context_for_request(
         .as_ref()
         .map(game_context_from_decoded_observation)
         .unwrap_or_else(|| game_context_from_validation_state(state))
+}
+
+/// 送信 action から `action sent` INFO ログ用のフィールドを抽出する pure helper。
+///
+/// `action_type` は `mjai_action_type` と一致し、Dahai のときだけ `tile` / `tsumogiri` を持つ。
+/// `actor` は Ryukyoku / None を除く全 action に存在する。tracing への依存なしにテストできる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SentActionLogFields {
+    pub request_id: Option<u64>,
+    pub actor: Option<u8>,
+    pub action_type: &'static str,
+    pub tile: Option<String>,
+    pub tsumogiri: Option<bool>,
+}
+
+pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields {
+    let action_type = mjai_action_type(action);
+    match action {
+        MjaiAction::Dahai {
+            actor,
+            pai,
+            tsumogiri,
+            request_id,
+        } => SentActionLogFields {
+            request_id: *request_id,
+            actor: Some(*actor),
+            action_type,
+            tile: Some(pai.clone()),
+            tsumogiri: *tsumogiri,
+        },
+        MjaiAction::Reach { actor, request_id } => SentActionLogFields {
+            request_id: *request_id,
+            actor: Some(*actor),
+            action_type,
+            tile: None,
+            tsumogiri: None,
+        },
+        MjaiAction::Hora {
+            actor, request_id, ..
+        }
+        | MjaiAction::Ankan {
+            actor, request_id, ..
+        }
+        | MjaiAction::Kakan {
+            actor, request_id, ..
+        } => SentActionLogFields {
+            request_id: *request_id,
+            actor: Some(*actor),
+            action_type,
+            tile: None,
+            tsumogiri: None,
+        },
+        MjaiAction::Ryukyoku { request_id } | MjaiAction::None { request_id } => {
+            SentActionLogFields {
+                request_id: *request_id,
+                actor: None,
+                action_type,
+                tile: None,
+                tsumogiri: None,
+            }
+        }
+    }
 }
 
 pub async fn run_riichilab_client<A, P>(
@@ -347,6 +411,16 @@ where
                         ws_stream.send(Message::Text(json.into())).await?;
                         let send_ms = send_start.elapsed().as_millis() as u64;
 
+                        let sent = sent_action_log_fields(&response);
+                        info!(
+                            request_id,
+                            actor = ?sent.actor,
+                            action_type = sent.action_type,
+                            tile = ?sent.tile,
+                            tsumogiri = ?sent.tsumogiri,
+                            "action sent"
+                        );
+
                         let total_ms = request_start.elapsed().as_millis() as u64;
 
                         let over_deadline = budget
@@ -515,6 +589,78 @@ mod tests {
             pai: "E".to_string(),
             consumed: vec!["E".to_string(), "E".to_string()],
         }
+    }
+
+    #[test]
+    fn sent_action_log_fields_extracts_dahai() {
+        let action = MjaiAction::Dahai {
+            actor: 1,
+            pai: "4p".to_string(),
+            tsumogiri: Some(false),
+            request_id: Some(425),
+        };
+        let fields = sent_action_log_fields(&action);
+        assert_eq!(fields.request_id, Some(425));
+        assert_eq!(fields.actor, Some(1));
+        assert_eq!(fields.action_type, "dahai");
+        assert_eq!(fields.tile.as_deref(), Some("4p"));
+        assert_eq!(fields.tsumogiri, Some(false));
+    }
+
+    #[test]
+    fn sent_action_log_fields_extracts_reach() {
+        let action = MjaiAction::Reach {
+            actor: 2,
+            request_id: Some(7),
+        };
+        let fields = sent_action_log_fields(&action);
+        assert_eq!(fields.request_id, Some(7));
+        assert_eq!(fields.actor, Some(2));
+        assert_eq!(fields.action_type, "reach");
+        assert_eq!(fields.tile, None);
+        assert_eq!(fields.tsumogiri, None);
+    }
+
+    #[test]
+    fn sent_action_log_fields_extracts_hora() {
+        let action = MjaiAction::Hora {
+            actor: 3,
+            target: Some(1),
+            pai: Some("3m".to_string()),
+            request_id: Some(42),
+        };
+        let fields = sent_action_log_fields(&action);
+        assert_eq!(fields.request_id, Some(42));
+        assert_eq!(fields.actor, Some(3));
+        assert_eq!(fields.action_type, "hora");
+        assert_eq!(fields.tile, None);
+        assert_eq!(fields.tsumogiri, None);
+    }
+
+    #[test]
+    fn sent_action_log_fields_extracts_ryukyoku() {
+        let action = MjaiAction::Ryukyoku {
+            request_id: Some(9),
+        };
+        let fields = sent_action_log_fields(&action);
+        assert_eq!(fields.request_id, Some(9));
+        assert_eq!(fields.actor, None);
+        assert_eq!(fields.action_type, "ryukyoku");
+        assert_eq!(fields.tile, None);
+        assert_eq!(fields.tsumogiri, None);
+    }
+
+    #[test]
+    fn sent_action_log_fields_extracts_none() {
+        let action = MjaiAction::None {
+            request_id: Some(11),
+        };
+        let fields = sent_action_log_fields(&action);
+        assert_eq!(fields.request_id, Some(11));
+        assert_eq!(fields.actor, None);
+        assert_eq!(fields.action_type, "none");
+        assert_eq!(fields.tile, None);
+        assert_eq!(fields.tsumogiri, None);
     }
 
     #[test]

@@ -1,16 +1,66 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::context::GameContext;
-use crate::defense::{log_defense_fallback_decision, select_defense_fallback_action_with_kind};
+use crate::defense::{
+    DefenseFallbackKind, log_defense_fallback_decision, select_defense_fallback_action_with_kind,
+};
 use crate::discard_selection::select_discard_action_with_evaluation;
 use crate::push_pull::{
-    PushPullMode, decide_push_pull, log_push_pull_decision,
+    PushPullDecision, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_context_with_evaluation,
 };
 use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
+const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
+
 // 補正後の待ち枚数がこの枚数以上ならリーチする。
 const REACH_MIN_REMAINING: u8 = 4;
+
+/// 最終 action がどの経路で選ばれたかを表す内部診断。プロトコル非依存。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentActionSource {
+    Hora,
+    Ryukyoku,
+    Reach,
+    NormalDiscard,
+    DefenseFallback(DefenseFallbackKind),
+    LegalDahaiFallback,
+    None,
+}
+
+impl AgentActionSource {
+    // 防御 kind を分離して扱えるよう、source ラベルは kind を含めない固定名にする。
+    fn label(&self) -> &'static str {
+        match self {
+            AgentActionSource::Hora => "Hora",
+            AgentActionSource::Ryukyoku => "Ryukyoku",
+            AgentActionSource::Reach => "Reach",
+            AgentActionSource::NormalDiscard => "NormalDiscard",
+            AgentActionSource::DefenseFallback(_) => "DefenseFallback",
+            AgentActionSource::LegalDahaiFallback => "LegalDahaiFallback",
+            AgentActionSource::None => "None",
+        }
+    }
+
+    fn defense_kind(&self) -> Option<DefenseFallbackKind> {
+        match self {
+            AgentActionSource::DefenseFallback(kind) => Some(*kind),
+            _ => None,
+        }
+    }
+}
+
+/// `ShantenAgent` が下した最終判断と、その選択経路・ログ用文脈をまとめた内部表現。
+///
+/// ログのためだけに判断ロジックを再実行しないよう、action 選択の過程で得た情報を保持する。
+/// `push_pull` と `normal_discard` は Hora / Ryukyoku の早期 return では `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentDecision {
+    action: LegalAction,
+    source: AgentActionSource,
+    push_pull: Option<PushPullDecision>,
+    normal_discard: Option<LegalAction>,
+}
 
 #[derive(Debug, Default)]
 pub struct ShantenAgent;
@@ -30,7 +80,86 @@ impl ShantenAgent {
             .cloned()
     }
 
+    // 最終 action と選択経路を1回で決める内部 helper。act() はこの結果を返し、
+    // 共通箇所で agent decision ログを1件だけ出す。
+    pub(crate) fn decide(&self, ctx: &GameContext, legal_actions: &[LegalAction]) -> AgentDecision {
+        if let Some(action) = legal_actions
+            .iter()
+            .find(|a| matches!(a, LegalAction::Hora))
+        {
+            return AgentDecision {
+                action: action.clone(),
+                source: AgentActionSource::Hora,
+                push_pull: None,
+                normal_discard: None,
+            };
+        }
+
+        if let Some(action) = legal_actions
+            .iter()
+            .find(|a| matches!(a, LegalAction::Ryukyoku))
+        {
+            return AgentDecision {
+                action: action.clone(),
+                source: AgentActionSource::Ryukyoku,
+                push_pull: None,
+                normal_discard: None,
+            };
+        }
+
+        // 通常打牌の evaluation と action を一度だけ取得し、その evaluation を
+        // 押し引き入力にも共有して二重計算を避ける。
+        let discard_selection = select_discard_action_with_evaluation(ctx, legal_actions);
+        let inputs = push_pull_inputs_from_context_with_evaluation(
+            ctx,
+            discard_selection.evaluation.as_ref(),
+        );
+        let push_pull = decide_push_pull(&inputs);
+        log_push_pull_decision(&push_pull, &inputs, discard_selection.action.as_ref());
+
+        let normal_discard = discard_selection.action.clone();
+
+        if let Some((action, source)) = self.select_action_for_push_pull_mode(
+            push_pull.mode,
+            ctx,
+            legal_actions,
+            discard_selection.action.as_ref(),
+        ) {
+            return AgentDecision {
+                action,
+                source,
+                push_pull: Some(push_pull),
+                normal_discard,
+            };
+        }
+
+        if let Some(action) = legal_actions
+            .iter()
+            .find(|a| matches!(a, LegalAction::Dahai { .. }))
+        {
+            return AgentDecision {
+                action: action.clone(),
+                source: AgentActionSource::LegalDahaiFallback,
+                push_pull: Some(push_pull),
+                normal_discard,
+            };
+        }
+
+        let action = legal_actions
+            .iter()
+            .find(|a| matches!(a, LegalAction::None))
+            .cloned()
+            .unwrap_or(LegalAction::None);
+        AgentDecision {
+            action,
+            source: AgentActionSource::None,
+            push_pull: Some(push_pull),
+            normal_discard,
+        }
+    }
+
     // 押し引きモードに応じた action 選択。候補は必要になった時点でのみ計算する。
+    // 選ばれた action とともに、その選択経路を表す source を返す。
     //
     // - Push:    Reach → 通常打牌 → 防御 fallback
     // - Neutral: 通常打牌 → 防御 fallback(Reach は検討しない)
@@ -41,42 +170,96 @@ impl ShantenAgent {
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         normal_discard: Option<&LegalAction>,
-    ) -> Option<LegalAction> {
+    ) -> Option<(LegalAction, AgentActionSource)> {
         match mode {
             PushPullMode::Push => {
                 if let Some(action) = self.select_reach_action(ctx, legal_actions) {
-                    return Some(action);
+                    return Some((action, AgentActionSource::Reach));
                 }
                 if let Some(action) = normal_discard {
-                    return Some(action.clone());
+                    return Some((action.clone(), AgentActionSource::NormalDiscard));
                 }
                 self.select_defense_fallback(ctx, legal_actions)
             }
             PushPullMode::Neutral => {
                 if let Some(action) = normal_discard {
-                    return Some(action.clone());
+                    return Some((action.clone(), AgentActionSource::NormalDiscard));
                 }
                 self.select_defense_fallback(ctx, legal_actions)
             }
             PushPullMode::Fold => {
-                if let Some(action) = self.select_defense_fallback(ctx, legal_actions) {
-                    return Some(action);
+                if let Some(result) = self.select_defense_fallback(ctx, legal_actions) {
+                    return Some(result);
                 }
-                normal_discard.cloned()
+                normal_discard
+                    .cloned()
+                    .map(|action| (action, AgentActionSource::NormalDiscard))
             }
         }
     }
 
-    // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action を返す。
+    // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action と種別を返す。
     fn select_defense_fallback(
         &self,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
-    ) -> Option<LegalAction> {
+    ) -> Option<(LegalAction, AgentActionSource)> {
         let (action, kind) = select_defense_fallback_action_with_kind(ctx, legal_actions)?;
         log_defense_fallback_decision(ctx, action, kind, legal_actions);
-        Some(action.clone())
+        Some((action.clone(), AgentActionSource::DefenseFallback(kind)))
     }
+}
+
+// action を agent decision ログ用のコンパクトな文字列へ変換する。
+fn agent_action_label(action: &LegalAction) -> String {
+    match action {
+        LegalAction::Dahai { tile } => tile.to_mjai_string(),
+        LegalAction::Reach => "Reach".to_string(),
+        LegalAction::Hora => "Hora".to_string(),
+        LegalAction::Ryukyoku => "Ryukyoku".to_string(),
+        LegalAction::None => "None".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// 意思決定1回につき最終 action と選択経路の DEBUG イベントを1件出す opt-in ログ。
+///
+/// `RUST_LOG=bot_core::agent_decision=debug` で有効化する。debug が無効な通常時は
+/// ログ用の文字列変換などを一切行わない。
+fn log_agent_decision(decision: &AgentDecision) {
+    if !tracing::enabled!(target: AGENT_DECISION_LOG_TARGET, tracing::Level::DEBUG) {
+        return;
+    }
+
+    let selected_action = agent_action_label(&decision.action);
+    let normal_discard = decision
+        .normal_discard
+        .as_ref()
+        .map(agent_action_label)
+        .unwrap_or_else(|| "None".to_string());
+    let push_pull_mode = match &decision.push_pull {
+        Some(decision) => format!("{:?}", decision.mode),
+        None => "None".to_string(),
+    };
+    let push_pull_reason = match &decision.push_pull {
+        Some(decision) => format!("{:?}", decision.reason),
+        None => "None".to_string(),
+    };
+    let defense_kind = match decision.source.defense_kind() {
+        Some(kind) => format!("{kind:?}"),
+        None => "None".to_string(),
+    };
+
+    tracing::debug!(
+        target: AGENT_DECISION_LOG_TARGET,
+        selected_action = %selected_action,
+        selected_source = decision.source.label(),
+        push_pull_mode = %push_pull_mode,
+        push_pull_reason = %push_pull_reason,
+        normal_discard = %normal_discard,
+        defense_kind = %defense_kind,
+        "agent decision",
+    );
 }
 
 // 補正後の待ち枚数が明らかに少ない即リーチだけを抑制する最小判断。
@@ -112,54 +295,9 @@ fn should_reach(ctx: &GameContext) -> bool {
 
 impl Agent for ShantenAgent {
     fn act(&mut self, ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
-        if let Some(action) = legal_actions
-            .iter()
-            .find(|a| matches!(a, LegalAction::Hora))
-        {
-            return action.clone();
-        }
-
-        if let Some(action) = legal_actions
-            .iter()
-            .find(|a| matches!(a, LegalAction::Ryukyoku))
-        {
-            return action.clone();
-        }
-
-        // 通常打牌の evaluation と action を一度だけ取得し、その evaluation を
-        // 押し引き入力にも共有して二重計算を避ける。
-        let discard_selection = select_discard_action_with_evaluation(ctx, legal_actions);
-        let inputs = push_pull_inputs_from_context_with_evaluation(
-            ctx,
-            discard_selection.evaluation.as_ref(),
-        );
-        let decision = decide_push_pull(&inputs);
-        log_push_pull_decision(&decision, &inputs, discard_selection.action.as_ref());
-
-        if let Some(action) = self.select_action_for_push_pull_mode(
-            decision.mode,
-            ctx,
-            legal_actions,
-            discard_selection.action.as_ref(),
-        ) {
-            return action;
-        }
-
-        if let Some(action) = legal_actions
-            .iter()
-            .find(|a| matches!(a, LegalAction::Dahai { .. }))
-        {
-            return action.clone();
-        }
-
-        if let Some(action) = legal_actions
-            .iter()
-            .find(|a| matches!(a, LegalAction::None))
-        {
-            return action.clone();
-        }
-
-        LegalAction::None
+        let decision = self.decide(ctx, legal_actions);
+        log_agent_decision(&decision);
+        decision.action
     }
 }
 
@@ -1016,5 +1154,188 @@ mod tests {
         // Agent は合法候補(ツモ切り 3p)を切る。
         let mut agent = ShantenAgent;
         assert_eq!(agent.act(&ctx, &actions), dahai(drawn));
+    }
+
+    // ---- decide() の選択経路(AgentActionSource)テスト ----
+    // tracing の出力文字列に依存せず、pure な診断構造(AgentDecision)を検証する。
+
+    #[test]
+    fn decide_reports_hora_source() {
+        let agent = ShantenAgent;
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![dahai(16), LegalAction::Hora];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, LegalAction::Hora);
+        assert_eq!(decision.source, AgentActionSource::Hora);
+        assert_eq!(decision.push_pull, None);
+        assert_eq!(decision.normal_discard, None);
+        assert_eq!(decision.source.defense_kind(), None);
+    }
+
+    #[test]
+    fn decide_reports_ryukyoku_source() {
+        let agent = ShantenAgent;
+        let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![dahai(16), LegalAction::Ryukyoku];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, LegalAction::Ryukyoku);
+        assert_eq!(decision.source, AgentActionSource::Ryukyoku);
+        assert_eq!(decision.push_pull, None);
+        assert_eq!(decision.normal_discard, None);
+    }
+
+    #[test]
+    fn decide_reports_reach_source_on_push() {
+        let agent = ShantenAgent;
+        // 他家リーチなし → Push。Reach が合法なら Reach を選ぶ。
+        let ctx = GameContext::with_drawn_tile(tile(0));
+        let actions = vec![LegalAction::Reach, dahai(0)];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, LegalAction::Reach);
+        assert_eq!(decision.source, AgentActionSource::Reach);
+        assert_eq!(decision.push_pull.map(|d| d.mode), Some(PushPullMode::Push));
+    }
+
+    #[test]
+    fn decide_reports_normal_discard_source_on_push() {
+        let agent = ShantenAgent;
+        // 他家リーチなし → Push。Reach が無ければ通常打牌。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let ctx = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .collect();
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.source, AgentActionSource::NormalDiscard);
+        assert_eq!(decision.action, normal);
+        assert_eq!(decision.normal_discard, Some(normal));
+    }
+
+    #[test]
+    fn decide_reports_normal_discard_source_on_neutral() {
+        let agent = ShantenAgent;
+        // 単独の子リーチに対する強い一向聴で Neutral。共通現物があっても通常打牌を選ぶ。
+        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
+        let ctx = opponent_reach_context(Some(116), &hand_values);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Neutral
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116), dahai(16)])
+            .collect();
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.source, AgentActionSource::NormalDiscard);
+        assert_eq!(decision.action, normal);
+        assert_eq!(
+            decision.push_pull.map(|d| d.mode),
+            Some(PushPullMode::Neutral)
+        );
+    }
+
+    #[test]
+    fn decide_reports_defense_fallback_genbutsu_source_on_fold() {
+        let agent = ShantenAgent;
+        // 二向聴以上の Fold 局面。防御 fallback(現物 5s)を採用し、通常打牌とは異なる。
+        let ctx = fold_under_reach_context();
+        let actions = fold_actions();
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let defense = select_defense_fallback_action(&ctx, &actions)
+            .cloned()
+            .unwrap();
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.source,
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
+        );
+        assert_eq!(decision.action, defense);
+        assert_eq!(decision.normal_discard, Some(normal.clone()));
+        assert_ne!(decision.normal_discard, Some(decision.action.clone()));
+        assert_ne!(normal, defense);
+        assert_eq!(decision.push_pull.map(|d| d.mode), Some(PushPullMode::Fold));
+        assert_eq!(
+            decision.source.defense_kind(),
+            Some(DefenseFallbackKind::Genbutsu)
+        );
+    }
+
+    // 回帰構造: normal_discard(通常打牌)と最終 selected_action(防御 fallback)が
+    // Fold 時に異なり得ることを、SuitedSafety 経路で確認する。
+    // 実牌姿での防御は河・visible の正確な再現が必要なため、pure な選択経路として構築する。
+    #[test]
+    fn decide_reports_defense_fallback_suited_safety_source_on_fold() {
+        use crate::defense::SuitedSafetyRank;
+
+        let agent = ShantenAgent;
+        // 共通現物も字牌もなし。4m を4枚見せて 2m を NoChance にする。
+        // ツモ 1m(0) だけが手牌評価対象なので通常打牌は 1m、防御 fallback は NoChance の 2m。
+        let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
+        let actions = vec![dahai(0), dahai(4)];
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, dahai(4));
+        assert_eq!(
+            decision.source,
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::SuitedSafety(
+                SuitedSafetyRank::NoChance
+            ))
+        );
+        assert_eq!(decision.normal_discard, Some(dahai(0)));
+        assert_ne!(decision.normal_discard, Some(decision.action.clone()));
+    }
+
+    #[test]
+    fn decide_falls_through_to_normal_discard_when_fold_has_no_defense() {
+        let agent = ShantenAgent;
+        // Fold だが共通現物・字牌・数牌 safety がいずれも無い局面。通常打牌へ進む。
+        let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        assert_eq!(
+            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            PushPullMode::Fold
+        );
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
+        let normal = select_discard_action(&ctx, &actions).unwrap();
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.source, AgentActionSource::NormalDiscard);
+        assert_eq!(decision.action, normal);
+        assert_eq!(decision.normal_discard, Some(normal));
+    }
+
+    #[test]
+    fn decide_reports_none_source_for_empty_actions() {
+        let agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let decision = agent.decide(&ctx, &[]);
+        assert_eq!(decision.action, LegalAction::None);
+        assert_eq!(decision.source, AgentActionSource::None);
+    }
+
+    #[test]
+    fn agent_action_source_labels_are_stable() {
+        assert_eq!(AgentActionSource::Hora.label(), "Hora");
+        assert_eq!(AgentActionSource::Ryukyoku.label(), "Ryukyoku");
+        assert_eq!(AgentActionSource::Reach.label(), "Reach");
+        assert_eq!(AgentActionSource::NormalDiscard.label(), "NormalDiscard");
+        assert_eq!(
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu).label(),
+            "DefenseFallback"
+        );
+        assert_eq!(
+            AgentActionSource::LegalDahaiFallback.label(),
+            "LegalDahaiFallback"
+        );
+        assert_eq!(AgentActionSource::None.label(), "None");
     }
 }
