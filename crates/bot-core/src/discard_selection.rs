@@ -1,4 +1,4 @@
-use crate::action::LegalAction;
+use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use bot_logic::{
     AcceptanceTile, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
@@ -80,24 +80,12 @@ fn legal_dahai_for_evaluation(
 
 // 指定牌種の合法 Dahai として実際に切られる物理牌を返す。通常牌を赤牌より優先し、なければ
 // 赤牌を返す。action 選択 (legal_dahai_for_evaluation) と評価補正 (evaluation_for_legal_dahai)
-// が同じ物理牌を指すよう、この関数へ選択方針を一元化する。
+// が同じ物理牌を指すよう、物理牌選択は全経路共通の preferred_dahai_action_for_type へ委譲する。
 fn legal_dahai_tile_for_type(tile_type: TileType, legal_actions: &[LegalAction]) -> Option<TileId> {
-    let mut red_fallback = None;
-    for action in legal_actions {
-        let LegalAction::Dahai { tile } = action else {
-            continue;
-        };
-        if tile.tile_type() != tile_type {
-            continue;
-        }
-        if tile.is_red() {
-            red_fallback.get_or_insert(*tile);
-        } else {
-            return Some(*tile);
-        }
+    match preferred_dahai_action_for_type(legal_actions, tile_type)? {
+        LegalAction::Dahai { tile } => Some(*tile),
+        _ => None,
     }
-
-    red_fallback
 }
 
 // context に応じた全打牌候補の評価一覧を返す。通常経路と診断経路で分岐を共有する。

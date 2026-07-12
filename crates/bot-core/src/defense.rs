@@ -1,4 +1,4 @@
-use crate::action::LegalAction;
+use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use bot_logic::TileType;
 
@@ -422,11 +422,15 @@ pub enum DefenseFallbackKind {
 
 // 他家リーチ中の防御 fallback を優先順位付きで選ぶ。
 // 現物 → 字牌 safety → 数牌防御 の順に評価し、選ばれた種別を添えて返す。
+//
+// 牌種と種別を先に決めた後、その牌種の合法 Dahai から共通の prefer_black_five_for_action で
+// 黒牌を優先する。安全度は同一牌種で同じなので、この正規化は牌種選択や種別を変えない。
 pub fn select_defense_fallback_action_with_kind<'a>(
     context: &GameContext,
     legal_actions: &'a [LegalAction],
 ) -> Option<(&'a LegalAction, DefenseFallbackKind)> {
     if let Some(action) = select_genbutsu_fallback_action(context, legal_actions) {
+        let action = prefer_black_five_for_action(legal_actions, action);
         return Some((action, DefenseFallbackKind::Genbutsu));
     }
 
@@ -435,6 +439,7 @@ pub fn select_defense_fallback_action_with_kind<'a>(
             .into_iter()
             .next()
     {
+        let action = prefer_black_five_for_action(legal_actions, action);
         return Some((action, DefenseFallbackKind::HonorSafety(rank)));
     }
 
@@ -443,6 +448,7 @@ pub fn select_defense_fallback_action_with_kind<'a>(
             .into_iter()
             .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety)
     {
+        let action = prefer_black_five_for_action(legal_actions, action);
         return Some((action, DefenseFallbackKind::SuitedSafety(rank)));
     }
 
@@ -2273,5 +2279,152 @@ mod tests {
         assert_eq!(diagnostic.selected_wall_rank, None);
         assert_eq!(diagnostic.selected_suji_for_all_reached, None);
         assert_eq!(diagnostic.selected_suited_safety_rank, None);
+    }
+
+    // ---- 防御 fallback の黒5優先(物理牌正規化)テスト ----
+
+    #[test]
+    fn defense_fallback_genbutsu_prefers_black_five() {
+        // リーチ者の河に 5m があり 5m 系は現物。合法 Dahai が [赤5m, 黒5m] でも黒5m を選ぶ。
+        let discards = [vec![], vec![tile(17)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(17) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(17) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
+    }
+
+    #[test]
+    fn defense_fallback_genbutsu_prefers_black_five_when_red_first_reversed() {
+        // 合法 action の順序を逆(黒5m→赤5m)にしても黒5m を選ぶ。
+        let discards = [vec![], vec![tile(17)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(17) },
+            LegalAction::Dahai { tile: tile(16) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions).map(|(a, _)| a),
+            Some(&LegalAction::Dahai { tile: tile(17) })
+        );
+    }
+
+    #[test]
+    fn defense_fallback_genbutsu_keeps_red_five_when_only_red_legal() {
+        // 赤5m しか合法でなければ赤5m を選ぶ。
+        let discards = [vec![], vec![tile(17)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![LegalAction::Dahai { tile: tile(16) }];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(16) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
+    }
+
+    #[test]
+    fn defense_fallback_suited_safety_prefers_black_five() {
+        // 5m を NoChance にする。4m(12-15)を4枚見せて経路 [4m,5m]... ではなく 5m を対象に
+        // 経路 [3m,4m] と [6m,7m] を塞ぐ必要がある。ここでは 4m と 6m を各4枚見せる。
+        // すると 5m の経路 [3m,4m]=Blocked, [6m,7m]=Blocked で NoChance。
+        let visible = vec![
+            tile(12),
+            tile(13),
+            tile(14),
+            tile(15),
+            tile(20),
+            tile(21),
+            tile(22),
+            tile(23),
+        ];
+        let context = suited_context(visible, Default::default(), [false, true, false, false]);
+        // 5m の合法 Dahai が [赤5m, 黒5m]。NoChance の 5m を選び、物理牌は黒5m。
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(17) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(17) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::NoChance)
+            ))
+        );
+    }
+
+    #[test]
+    fn defense_fallback_suited_safety_keeps_red_when_only_red_legal() {
+        // 同じ NoChance 5m だが合法 Dahai が赤5m だけなら赤5m を選ぶ。安全度は変わらない。
+        let visible = vec![
+            tile(12),
+            tile(13),
+            tile(14),
+            tile(15),
+            tile(20),
+            tile(21),
+            tile(22),
+            tile(23),
+        ];
+        let context = suited_context(visible, Default::default(), [false, true, false, false]);
+        let actions = vec![LegalAction::Dahai { tile: tile(16) }];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(16) },
+                DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::NoChance)
+            ))
+        );
+    }
+
+    #[test]
+    fn defense_fallback_does_not_change_tile_type_for_black_five() {
+        // 同一安全度で [赤5m, 1p, 5m] の順。先頭牌種は 5m。黒5優先で 1p へは変えず黒5m を選ぶ。
+        // リーチ者はいるが河・visible が空なので 5m も 1p も NoSafety で同一安全度。
+        // NoSafety は防御 fallback の対象外なので、この局面では防御 fallback は None になる。
+        // 牌種順維持の確認は現物経路で行う(下記テスト)。
+        let discards = [vec![], vec![tile(17), tile(36)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        // 5m 系と 1p が現物。合法順 [赤5m, 1p, 黒5m] で先頭現物牌種は 5m。黒5m を選ぶ。
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(36) },
+            LegalAction::Dahai { tile: tile(17) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(17) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
+    }
+
+    #[test]
+    fn defense_fallback_keeps_leading_tile_type_over_black_five() {
+        // 合法順 [1p, 赤5m, 黒5m] で 1p と 5m 系がともに現物。先頭現物牌種 1p を維持する。
+        // 黒5優先のために 5m を 1p より前へ移動しない。
+        let discards = [vec![], vec![tile(17), tile(36)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(36) },
+            LegalAction::Dahai { tile: tile(16) },
+            LegalAction::Dahai { tile: tile(17) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((
+                &LegalAction::Dahai { tile: tile(36) },
+                DefenseFallbackKind::Genbutsu
+            ))
+        );
     }
 }

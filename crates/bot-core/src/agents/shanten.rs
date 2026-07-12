@@ -1,4 +1,4 @@
-use crate::action::LegalAction;
+use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::agent::Agent;
 use crate::context::GameContext;
 use crate::defense::{
@@ -133,10 +133,13 @@ impl ShantenAgent {
             };
         }
 
-        if let Some(action) = legal_actions
+        if let Some(first_dahai) = legal_actions
             .iter()
             .find(|a| matches!(a, LegalAction::Dahai { .. }))
         {
+            // 最初の合法 Dahai の牌種を選んだうえで、その牌種内では黒牌を優先する。
+            // 別牌種との順番は変えないため、先頭牌種はそのまま維持される。
+            let action = prefer_black_five_for_action(legal_actions, first_dahai);
             return AgentDecision {
                 action: action.clone(),
                 source: AgentActionSource::LegalDahaiFallback,
@@ -1311,6 +1314,49 @@ mod tests {
         assert_eq!(decision.source, AgentActionSource::NormalDiscard);
         assert_eq!(decision.action, normal);
         assert_eq!(decision.normal_discard, Some(normal));
+    }
+
+    #[test]
+    fn legal_dahai_fallback_prefers_black_five() {
+        // 手牌評価が作れず(手牌なし)、他家リーチも無い局面。通常打牌も防御 fallback も None で
+        // LegalDahaiFallback へ落ちる。合法 Dahai [赤5m, 黒5m] なら黒5m を返す。
+        let agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions = vec![dahai(16), dahai(17)];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, dahai(17));
+        assert_eq!(decision.source, AgentActionSource::LegalDahaiFallback);
+    }
+
+    #[test]
+    fn legal_dahai_fallback_prefers_black_five_when_reversed() {
+        let agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions = vec![dahai(17), dahai(16)];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, dahai(17));
+        assert_eq!(decision.source, AgentActionSource::LegalDahaiFallback);
+    }
+
+    #[test]
+    fn legal_dahai_fallback_keeps_red_five_when_only_red() {
+        let agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions = vec![dahai(16)];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, dahai(16));
+        assert_eq!(decision.source, AgentActionSource::LegalDahaiFallback);
+    }
+
+    #[test]
+    fn legal_dahai_fallback_keeps_leading_tile_type() {
+        // 合法 Dahai [1p, 赤5m, 黒5m] では先頭牌種 1p を維持する。黒5優先で 5m を前へ出さない。
+        let agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions = vec![dahai(36), dahai(16), dahai(17)];
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(decision.action, dahai(36));
+        assert_eq!(decision.source, AgentActionSource::LegalDahaiFallback);
     }
 
     #[test]
