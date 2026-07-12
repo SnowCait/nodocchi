@@ -22,6 +22,7 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 ///
 /// 待ち形については Complete 一向聴だけを限定的に考慮する。一般的な良形・愚形評価は未対応で、
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
+/// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -44,12 +45,14 @@ pub struct PushPullOffenseState {
 /// 押し引き判定に使用する入力データ。
 ///
 /// - `opponent_reach_count`: 自分を除くリーチ者数。
-/// - `dealer_reacher`: 親が他家リーチ者に含まれる場合だけ true。親情報がない場合は false。
+/// - `dealer_reacher`: 他家リーチ者に親が含まれるか。親情報がない場合は false。
+/// - `self_dealer`: 自分が親か。`player_id` または `oya` が不明なら false。
 /// - `offense`: 攻撃評価を構築できない場合は `None`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullInputs {
     pub opponent_reach_count: u8,
     pub dealer_reacher: bool,
+    pub self_dealer: bool,
     pub offense: Option<PushPullOffenseState>,
 }
 
@@ -62,6 +65,7 @@ pub enum PushPullReason {
     TenpaiUnderHighPressure,
     StrongIishantenAgainstSingleNonDealer,
     CompleteIishantenAgainstSingleNonDealer,
+    DealerIishantenAgainstSingleNonDealer,
     IishantenUnderHighPressure,
     TwoOrMoreShanten,
 }
@@ -81,6 +85,11 @@ const STRONG_IISHANTEN_MIN_TYPES: usize = 2;
 // 形が Complete でこの受け入れを満たす場合だけ Neutral にする。
 const COMPLETE_IISHANTEN_MIN_REMAINING: u8 = 6;
 const COMPLETE_IISHANTEN_MIN_TYPES: usize = 2;
+
+// 自分が親のときだけ、強い一向聴 threshold より少し押し寄りにする限定補正の暫定 threshold。
+// 形は限定せず、単独の子リーチに対してこの受け入れを満たす場合だけ Neutral にする。
+const DEALER_IISHANTEN_MIN_REMAINING: u8 = 7;
+const DEALER_IISHANTEN_MIN_TYPES: usize = 2;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
@@ -118,6 +127,10 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
     let dealer_reacher = context
         .oya()
         .is_some_and(|oya| reached_opponents.contains(&(oya as usize)));
+    let self_dealer = match (context.player_id(), context.oya()) {
+        (Some(player_id), Some(oya)) => player_id == oya,
+        _ => false,
+    };
 
     let offense = evaluation.map(|evaluation| PushPullOffenseState {
         min_shanten_after_discard: evaluation.min_shanten_after_discard(),
@@ -129,6 +142,7 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
     PushPullInputs {
         opponent_reach_count,
         dealer_reacher,
+        self_dealer,
         offense,
     }
 }
@@ -143,6 +157,7 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 ///
 /// 待ち形については Complete 一向聴だけを限定的に考慮する。一般的な良形・愚形評価は未対応で、
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
+/// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 /// また、暫定 threshold は実戦の regression test に基づいて将来調整する。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
 ///
@@ -207,6 +222,18 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
             };
         }
 
+        // 4-3. 自分が親のときだけ、形を限定せずに限定 threshold を満たす場合だけ Neutral。
+        let dealer = single_non_dealer
+            && inputs.self_dealer
+            && offense.acceptance_total_remaining >= DEALER_IISHANTEN_MIN_REMAINING
+            && offense.acceptance_type_count >= DEALER_IISHANTEN_MIN_TYPES;
+        if dealer {
+            return PushPullDecision {
+                mode: PushPullMode::Neutral,
+                reason: PushPullReason::DealerIishantenAgainstSingleNonDealer,
+            };
+        }
+
         return PushPullDecision {
             mode: PushPullMode::Fold,
             reason: PushPullReason::IishantenUnderHighPressure,
@@ -245,6 +272,7 @@ pub(crate) fn log_push_pull_decision(
         reason = ?decision.reason,
         opponent_reach_count = inputs.opponent_reach_count,
         dealer_reacher = inputs.dealer_reacher,
+        self_dealer = inputs.self_dealer,
         offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
         offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
         offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
@@ -286,9 +314,19 @@ mod tests {
         dealer_reacher: bool,
         offense: Option<PushPullOffenseState>,
     ) -> PushPullInputs {
+        inputs_with_dealer(opponent_reach_count, dealer_reacher, false, offense)
+    }
+
+    fn inputs_with_dealer(
+        opponent_reach_count: u8,
+        dealer_reacher: bool,
+        self_dealer: bool,
+        offense: Option<PushPullOffenseState>,
+    ) -> PushPullInputs {
         PushPullInputs {
             opponent_reach_count,
             dealer_reacher,
+            self_dealer,
             offense,
         }
     }
@@ -830,5 +868,211 @@ mod tests {
         let _ = push_pull_inputs_from_context(&context);
 
         assert_eq!(context, before);
+    }
+
+    #[test]
+    fn self_dealer_true_when_player_is_oya() {
+        let context =
+            table_state_context(None, vec![], Some(1), Some(1), [false, false, false, false]);
+        let inputs = push_pull_inputs_from_context(&context);
+        assert!(inputs.self_dealer);
+    }
+
+    #[test]
+    fn self_dealer_false_when_player_is_not_oya() {
+        let context =
+            table_state_context(None, vec![], Some(1), Some(2), [false, false, false, false]);
+        let inputs = push_pull_inputs_from_context(&context);
+        assert!(!inputs.self_dealer);
+    }
+
+    #[test]
+    fn self_dealer_false_without_player_id() {
+        let context =
+            table_state_context(None, vec![], None, Some(1), [false, false, false, false]);
+        let inputs = push_pull_inputs_from_context(&context);
+        assert!(!inputs.self_dealer);
+    }
+
+    #[test]
+    fn self_dealer_false_without_oya() {
+        let context =
+            table_state_context(None, vec![], Some(1), None, [false, false, false, false]);
+        let inputs = push_pull_inputs_from_context(&context);
+        assert!(!inputs.self_dealer);
+    }
+
+    #[test]
+    fn self_dealer_and_dealer_reacher_are_distinct() {
+        // 自分が親で子1人がリーチ。
+        let dealer_self =
+            table_state_context(None, vec![], Some(0), Some(0), [false, true, false, false]);
+        let inputs = push_pull_inputs_from_context(&dealer_self);
+        assert!(inputs.self_dealer);
+        assert!(!inputs.dealer_reacher);
+        assert_eq!(inputs.opponent_reach_count, 1);
+
+        // 自分が子で親がリーチ。
+        let dealer_reach =
+            table_state_context(None, vec![], Some(0), Some(1), [false, true, false, false]);
+        let inputs = push_pull_inputs_from_context(&dealer_reach);
+        assert!(!inputs.self_dealer);
+        assert!(inputs.dealer_reacher);
+        assert_eq!(inputs.opponent_reach_count, 1);
+    }
+
+    #[test]
+    fn dealer_iishanten_boundary_is_neutral() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::DealerIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn dealer_iishanten_folds_when_self_is_child() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            false,
+            Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn dealer_iishanten_below_remaining_threshold_folds() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn dealer_iishanten_below_type_threshold_folds() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape(1, 7, 1, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn dealer_iishanten_keeps_strong_reason() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape(1, 8, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::StrongIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn dealer_iishanten_keeps_complete_reason() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::CompleteIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn dealer_iishanten_complete_at_eight_keeps_strong_reason() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape(1, 8, 2, IishantenShape::Complete)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::StrongIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn dealer_iishanten_not_applied_to_multiple_reach() {
+        let decision = decide_push_pull(&inputs_with_dealer(
+            2,
+            false,
+            true,
+            Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn dealer_iishanten_not_applied_to_dealer_reach() {
+        // 不整合な入力(self_dealer と dealer_reacher が同時に true)でも親補正は適用しない。
+        let decision = decide_push_pull(&inputs_with_dealer(
+            1,
+            true,
+            false,
+            Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
+        ));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn dealer_does_not_change_tenpai_branch() {
+        let single = decide_push_pull(&inputs_with_dealer(1, false, true, Some(offense(0, 4, 1))));
+        assert_eq!(single.mode, PushPullMode::Push);
+        assert_eq!(single.reason, PushPullReason::TenpaiAgainstSingleNonDealer);
+
+        let dealer = decide_push_pull(&inputs_with_dealer(1, true, false, Some(offense(0, 4, 1))));
+        assert_eq!(dealer.mode, PushPullMode::Neutral);
+        assert_eq!(dealer.reason, PushPullReason::TenpaiUnderHighPressure);
+    }
+
+    #[test]
+    fn dealer_does_not_change_two_shanten_branch() {
+        let decision =
+            decide_push_pull(&inputs_with_dealer(1, false, true, Some(offense(2, 20, 4))));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::TwoOrMoreShanten);
+    }
+
+    #[test]
+    fn dealer_does_not_change_no_opponent_reach() {
+        let decision =
+            decide_push_pull(&inputs_with_dealer(0, false, true, Some(offense(1, 7, 2))));
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+    }
+
+    #[test]
+    fn dealer_does_not_change_missing_offense() {
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, true, None));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(decision.reason, PushPullReason::MissingOffenseEvaluation);
     }
 }
