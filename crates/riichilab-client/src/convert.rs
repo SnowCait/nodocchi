@@ -895,6 +895,40 @@ mod tests {
         }
 
         #[test]
+        fn dahai_black_five_maps_to_black_pai_when_both_possible() {
+            // bot-core が黒5m(tile 17)を選んだら、possible に "5mr" と "5m" が両方あっても "5m" を送る。
+            let context = GameContext::default();
+            let chosen = LegalAction::Dahai { tile: tile(17) };
+            let possible_actions = vec![possible_dahai("5mr"), possible_dahai("5m")];
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chosen, 0, 70, &possible_actions, &context),
+                Some(MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "5m".to_string(),
+                    tsumogiri: None,
+                    request_id: Some(70),
+                })
+            );
+        }
+
+        #[test]
+        fn dahai_red_five_maps_to_red_pai_when_both_possible() {
+            // bot-core が赤5m(tile 16)を選んだ場合は "5mr" を送る。黒5へ差し替えない。
+            let context = GameContext::default();
+            let chosen = LegalAction::Dahai { tile: tile(16) };
+            let possible_actions = vec![possible_dahai("5mr"), possible_dahai("5m")];
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chosen, 0, 71, &possible_actions, &context),
+                Some(MjaiAction::Dahai {
+                    actor: 0,
+                    pai: "5mr".to_string(),
+                    tsumogiri: None,
+                    request_id: Some(71),
+                })
+            );
+        }
+
+        #[test]
         fn dahai_matching_drawn_tile_is_tsumogiri() {
             let context = GameContext::with_drawn_tile(tile(56));
             let chosen = LegalAction::Dahai { tile: tile(56) };
