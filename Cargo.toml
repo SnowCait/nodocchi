@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/bot-logic",
     "crates/bot-core",
+    "crates/bot-scenario",
     "crates/riichilab-client",
     "crates/chiihou-client",
 ]
