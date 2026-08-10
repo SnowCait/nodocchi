@@ -20,6 +20,23 @@ pub(crate) struct DiscardActionSelection {
     pub action: Option<LegalAction>,
 }
 
+/// 通常打牌選択の結果と、その選択に使った全合法候補の構造化診断。
+///
+/// `selection` は `select_discard_action_with_evaluation()` と同じ helper で導出するため、
+/// 診断を付けても選択結果は変わらない。`diagnostic` は解析専用の追加情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscardActionSelectionWithDiagnostic {
+    pub selection: DiscardActionSelection,
+    pub diagnostic: DiscardDecisionDiagnostic,
+}
+
+// 合法 Dahai へ絞り込み・物理牌補正済みの打牌候補評価集合と、その評価対象の物理牌一覧。
+// 本番選択・構造化診断・tracing ログはすべてこの集合を共有する。
+struct LegalDiscardEvaluations {
+    tiles: Vec<TileId>,
+    evaluations: Vec<DiscardEvaluation>,
+}
+
 pub fn select_discard_action(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -46,6 +63,42 @@ pub(crate) fn select_discard_action_with_evaluation(
     context: &GameContext,
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
+    let legal = legal_discard_evaluations(context, legal_actions);
+
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        log_discard_diagnostic(context, &legal.tiles, &diagnose_legal_evaluations(&legal));
+    }
+
+    selection_from_legal_evaluations(&legal, legal_actions)
+}
+
+/// `select_discard_action_with_evaluation()` と同じ選択結果に、全合法候補の構造化診断を添えて返す。
+///
+/// 合法候補の絞り込み・物理牌補正・最善選択はすべて通常経路と同じ helper を通すため、選択結果は
+/// `select_discard_action_with_evaluation()` と一致する。`diagnostic` は解析専用の追加情報で、
+/// 候補ごとの形の内訳など通常経路では計算しない値を含むため、診断が必要な経路からのみ呼ぶ。
+pub(crate) fn select_discard_action_with_diagnostic(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+) -> DiscardActionSelectionWithDiagnostic {
+    let legal = legal_discard_evaluations(context, legal_actions);
+    let diagnostic = diagnose_legal_evaluations(&legal);
+
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        log_discard_diagnostic(context, &legal.tiles, &diagnostic);
+    }
+
+    DiscardActionSelectionWithDiagnostic {
+        selection: selection_from_legal_evaluations(&legal, legal_actions),
+        diagnostic,
+    }
+}
+
+// 評価対象の物理牌一覧を作り、全打牌候補を評価してから合法 Dahai へ絞り込み・物理牌補正する。
+fn legal_discard_evaluations(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+) -> LegalDiscardEvaluations {
     let tiles: Vec<_> = context
         .hand_tiles()
         .iter()
@@ -53,20 +106,32 @@ pub(crate) fn select_discard_action_with_evaluation(
         .chain(context.drawn_tile())
         .collect();
 
-    let evaluations = evaluate_discard_candidates(context, &tiles);
-    let legal_evaluations =
-        retain_legal_dahai_evaluations(evaluations, legal_actions, context.dora_indicators());
+    let evaluations = retain_legal_dahai_evaluations(
+        evaluate_discard_candidates(context, &tiles),
+        legal_actions,
+        context.dora_indicators(),
+    );
 
-    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
-        log_legal_discard_diagnostic(context, &tiles, &legal_evaluations);
-    }
+    LegalDiscardEvaluations { tiles, evaluations }
+}
 
-    let evaluation = select_best_evaluation(&legal_evaluations).cloned();
+// 補正済みの合法候補集合から最善評価と対応する合法 Dahai を決める。全経路共通の選択処理。
+fn selection_from_legal_evaluations(
+    legal: &LegalDiscardEvaluations,
+    legal_actions: &[LegalAction],
+) -> DiscardActionSelection {
+    let evaluation = select_best_evaluation(&legal.evaluations).cloned();
     let action = evaluation
         .as_ref()
         .and_then(|evaluation| legal_dahai_for_evaluation(evaluation, legal_actions));
 
     DiscardActionSelection { evaluation, action }
+}
+
+// 絞り込み済みの合法候補集合から既存の診断を構築する。診断と tracing ログはこの結果を共有する。
+fn diagnose_legal_evaluations(legal: &LegalDiscardEvaluations) -> DiscardDecisionDiagnostic {
+    let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
+    diagnose_discard_evaluations(&counts, &legal.evaluations)
 }
 
 // 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
@@ -159,17 +224,6 @@ pub(crate) fn select_best_discard_evaluation(
 ) -> Option<DiscardEvaluation> {
     let evaluations = evaluate_discard_candidates(context, tiles);
     select_best_evaluation(&evaluations).cloned()
-}
-
-// 絞り込んだ合法候補だけを診断へ渡し、既存の DEBUG/TRACE ログ経路で出力する。
-fn log_legal_discard_diagnostic(
-    context: &GameContext,
-    tiles: &[TileId],
-    legal_evaluations: &[DiscardEvaluation],
-) {
-    let counts = TileCounts::from_tiles(tiles.iter().copied());
-    let diagnostic = diagnose_discard_evaluations(&counts, legal_evaluations);
-    log_discard_diagnostic(context, tiles, &diagnostic);
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
@@ -1060,5 +1114,101 @@ mod tests {
             .unwrap();
         assert!(five.discards_red_five);
         assert_eq!(five.discarded_dora_count, 2);
+    }
+
+    // ---- 構造化診断付き選択 (select_discard_action_with_diagnostic) ----
+
+    #[test]
+    fn diagnostic_path_selection_matches_normal_path() {
+        // 診断付き経路の選択結果は通常経路と一致する。診断は選択に影響しない。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116)])
+            .collect();
+
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        assert_eq!(
+            with_diagnostic.selection,
+            select_discard_action_with_evaluation(&context, &actions)
+        );
+        assert_eq!(
+            with_diagnostic.diagnostic.selected,
+            with_diagnostic.selection.evaluation
+        );
+    }
+
+    #[test]
+    fn diagnostic_candidates_contain_only_legal_dahai_types() {
+        // 合法 Dahai が一部だけの局面では、診断候補も合法牌種だけに絞られる。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+        let context = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions = vec![dahai(0), dahai(89), dahai(116)];
+
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let candidate_types: Vec<_> = with_diagnostic
+            .diagnostic
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evaluation.discard)
+            .collect();
+
+        assert_eq!(
+            candidate_types,
+            vec![
+                tile(0).tile_type(),
+                tile(89).tile_type(),
+                tile(116).tile_type()
+            ]
+        );
+        assert_eq!(
+            with_diagnostic
+                .diagnostic
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.selected)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn diagnostic_candidates_carry_physical_corrected_fields() {
+        // 赤5mだけが合法な局面では、診断候補の物理牌依存フィールドも赤5mへ補正済み。
+        let context =
+            GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
+        let actions = vec![dahai(16)];
+
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let five = with_diagnostic
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile(16).tile_type())
+            .unwrap();
+
+        assert_eq!(with_diagnostic.selection.action, Some(dahai(16)));
+        assert!(five.evaluation.discards_red_five);
+        assert_eq!(five.evaluation.discarded_dora_count, 2);
+    }
+
+    #[test]
+    fn diagnostic_is_empty_without_legal_dahai() {
+        let context = GameContext::with_hand_tiles(vec![tile(0)]);
+        let actions = vec![LegalAction::Reach, LegalAction::None];
+
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        assert_eq!(with_diagnostic.selection.action, None);
+        assert_eq!(with_diagnostic.selection.evaluation, None);
+        assert_eq!(with_diagnostic.diagnostic.selected, None);
+        assert!(with_diagnostic.diagnostic.candidates.is_empty());
     }
 }

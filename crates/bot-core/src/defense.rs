@@ -524,10 +524,122 @@ impl DefenseFallbackDiagnostic {
     }
 }
 
+/// 合法 Dahai 1件ごとの防御候補評価。
+///
+/// 防御 fallback の優先順位判断に使う値だけを pure に保持する解析用データで、これ自体が
+/// action 選択を行うことはない。選択の source of truth は
+/// [`select_defense_fallback_action_with_kind`] であり、`selected` はその結果を写したもの。
+///
+/// 数牌では `wall_rank` / `suji_for_all_reached` / `suited_safety_rank` が `Some`、字牌では
+/// `honor_safety_rank` が `Some` になり、無関係なフィールドは `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefenseCandidateDiagnostic {
+    /// 対象の合法 Dahai。物理牌(赤5 / 黒5)の区別を保持する。
+    pub action: LegalAction,
+    /// `action` の牌種。
+    pub tile: TileType,
+    /// この候補が防御 fallback として選ばれたか。
+    pub selected: bool,
+    pub genbutsu_for_all: bool,
+    pub honor_safety_rank: Option<HonorSafetyRank>,
+    pub wall_rank: Option<WallRank>,
+    pub suji_for_all_reached: Option<bool>,
+    pub suited_safety_rank: Option<SuitedSafetyRank>,
+}
+
+impl DefenseCandidateDiagnostic {
+    /// 合法 Dahai 1件から防御候補評価を構築する pure helper。Dahai 以外の action では `None`。
+    pub fn for_dahai_action(
+        context: &GameContext,
+        action: &LegalAction,
+        selected: bool,
+    ) -> Option<Self> {
+        let LegalAction::Dahai { tile } = action else {
+            return None;
+        };
+        let tile_type = tile.tile_type();
+        let suited_tile = (!tile_type.is_honor()).then_some(tile_type);
+
+        Some(Self {
+            action: action.clone(),
+            tile: tile_type,
+            selected,
+            genbutsu_for_all: is_genbutsu_for_all_reached(tile_type, context),
+            honor_safety_rank: honor_safety_rank(tile_type, context),
+            wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
+            suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
+            suited_safety_rank: suited_safety_rank_for_all_reached(tile_type, context),
+        })
+    }
+
+    /// 合法 action のうち Dahai だけを、元の順序を保って防御候補評価へ変換する。
+    ///
+    /// `selected_action` は防御 fallback として実際に選ばれた action。一致する候補の `selected`
+    /// だけが `true` になる。
+    pub fn for_legal_actions(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        selected_action: Option<&LegalAction>,
+    ) -> Vec<Self> {
+        legal_actions
+            .iter()
+            .filter_map(|action| {
+                Self::for_dahai_action(context, action, selected_action == Some(action))
+            })
+            .collect()
+    }
+}
+
+/// 防御 fallback を検討した局面の構造化診断。
+///
+/// `selected` は防御 fallback を採用した場合の既存診断で、検討したが候補が無かった場合は `None`。
+/// `candidates` は採否にかかわらず全合法 Dahai の防御評価を保持する解析用データで、
+/// 「なぜその牌を切ったか」を後から追跡するために使う。
+///
+/// 防御選択ロジックは再実装しない。採用結果は [`select_defense_fallback_action_with_kind`] の
+/// 結果をそのまま写す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefenseDecisionDiagnostic {
+    pub selected: Option<DefenseFallbackDiagnostic>,
+    pub candidates: Vec<DefenseCandidateDiagnostic>,
+}
+
+impl DefenseDecisionDiagnostic {
+    /// 実際の防御 fallback 選択結果と合法 action から診断データを構築する pure helper。
+    ///
+    /// `selected` には [`select_defense_fallback_action_with_kind`] の戻り値をそのまま渡す。
+    pub fn from_selection(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        selected: Option<(&LegalAction, DefenseFallbackKind)>,
+    ) -> Self {
+        Self {
+            selected: selected.map(|(action, kind)| {
+                DefenseFallbackDiagnostic::from_selection(context, action, kind)
+            }),
+            candidates: DefenseCandidateDiagnostic::for_legal_actions(
+                context,
+                legal_actions,
+                selected.map(|(action, _)| action),
+            ),
+        }
+    }
+
+    /// 採用された防御 fallback の種別。検討したが候補が無かった場合は `None`。
+    pub fn selected_kind(&self) -> Option<DefenseFallbackKind> {
+        self.selected
+            .as_ref()
+            .map(|diagnostic| diagnostic.selected_kind)
+    }
+}
+
 /// 防御 fallback を実際に採用したとき DEBUG イベントを1件出す opt-in ログ。
 ///
 /// `RUST_LOG=bot_core::defense=debug` で有効化する。debug が無効な通常時は診断値や文字列を
 /// 一切構築しない。TRACE が有効なら、合法 Dahai ごとの防御評価も追加で記録する。
+///
+/// 出力値は pure な診断データ (`DefenseFallbackDiagnostic` / `DefenseCandidateDiagnostic`) から
+/// 作る。ログを解析して診断データを作る向きにはしない。
 pub fn log_defense_fallback_decision(
     context: &GameContext,
     action: &LegalAction,
@@ -553,24 +665,31 @@ pub fn log_defense_fallback_decision(
     );
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
-        for candidate in legal_actions {
-            let LegalAction::Dahai { tile } = candidate else {
-                continue;
-            };
-            let tile_type = tile.tile_type();
-            let suited_tile = (!tile_type.is_honor()).then_some(tile_type);
-            tracing::trace!(
-                target: LOG_TARGET,
-                tile = %tile.to_mjai_string(),
-                genbutsu_for_all = is_genbutsu_for_all_reached(tile_type, context),
-                honor_safety_rank = ?honor_safety_rank(tile_type, context),
-                wall_rank = ?suited_tile.map(|tile| wall_rank(tile, context)),
-                suji_for_all_reached = ?suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
-                suited_safety_rank = ?suited_safety_rank_for_all_reached(tile_type, context),
-                "defense fallback candidate",
-            );
+        for candidate in
+            DefenseCandidateDiagnostic::for_legal_actions(context, legal_actions, Some(action))
+        {
+            log_defense_fallback_candidate(&candidate);
         }
     }
+}
+
+// 合法 Dahai ごとの防御候補評価を TRACE で1件記録する。値は pure な診断データから取り出す。
+fn log_defense_fallback_candidate(candidate: &DefenseCandidateDiagnostic) {
+    let tile = match &candidate.action {
+        LegalAction::Dahai { tile } => tile.to_mjai_string(),
+        other => format!("{other:?}"),
+    };
+
+    tracing::trace!(
+        target: LOG_TARGET,
+        tile = %tile,
+        genbutsu_for_all = candidate.genbutsu_for_all,
+        honor_safety_rank = ?candidate.honor_safety_rank,
+        wall_rank = ?candidate.wall_rank,
+        suji_for_all_reached = ?candidate.suji_for_all_reached,
+        suited_safety_rank = ?candidate.suited_safety_rank,
+        "defense fallback candidate",
+    );
 }
 
 #[cfg(test)]
@@ -2616,6 +2735,170 @@ mod tests {
                 &LegalAction::Dahai { tile: tile(36) },
                 DefenseFallbackKind::Genbutsu
             ))
+        );
+    }
+
+    // ---- 合法 Dahai ごとの防御候補診断 ----
+
+    #[test]
+    fn defense_candidate_diagnostic_for_suited_tile() {
+        // 2m は 4m 4枚見えで NoChance。スジではないので suji は false。
+        let context = suited_context(
+            vec![tile(12), tile(13), tile(14), tile(15)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(4) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, true).unwrap();
+
+        assert_eq!(candidate.action, action);
+        assert_eq!(candidate.tile, tile(4).tile_type());
+        assert!(candidate.selected);
+        assert!(!candidate.genbutsu_for_all);
+        assert_eq!(candidate.honor_safety_rank, None);
+        assert_eq!(candidate.wall_rank, Some(WallRank::NoChance));
+        assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suited_safety_rank,
+            Some(SuitedSafetyRank::NoChance)
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_for_honor_tile() {
+        // 東が2枚見え。字牌なので壁・スジ・数牌 safety は None。
+        let context = suited_context(
+            vec![tile(108), tile(109)],
+            Default::default(),
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(108) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+
+        assert_eq!(candidate.tile, tile(108).tile_type());
+        assert!(!candidate.selected);
+        assert_eq!(
+            candidate.honor_safety_rank,
+            Some(HonorSafetyRank::TwoVisible)
+        );
+        assert_eq!(candidate.wall_rank, None);
+        assert_eq!(candidate.suji_for_all_reached, None);
+        assert_eq!(candidate.suited_safety_rank, None);
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_marks_genbutsu() {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let action = LegalAction::Dahai { tile: tile(17) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+
+        assert!(candidate.genbutsu_for_all);
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_skips_non_dahai_actions() {
+        let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+        assert_eq!(
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &LegalAction::None, false),
+            None
+        );
+        assert_eq!(
+            DefenseCandidateDiagnostic::for_dahai_action(
+                &context,
+                &LegalAction::Pon {
+                    tile: tile(108),
+                    consumed: vec![tile(109), tile(110)],
+                },
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn defense_candidates_keep_legal_action_order_and_mark_selected() {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::None,
+            LegalAction::Dahai { tile: tile(17) },
+        ];
+        let selected = LegalAction::Dahai { tile: tile(17) };
+
+        let candidates =
+            DefenseCandidateDiagnostic::for_legal_actions(&context, &actions, Some(&selected));
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].tile, tile(108).tile_type());
+        assert!(!candidates[0].selected);
+        assert_eq!(candidates[1].tile, tile(17).tile_type());
+        assert!(candidates[1].selected);
+    }
+
+    #[test]
+    fn defense_decision_diagnostic_holds_actual_selection() {
+        // 現物 5m が選ばれる局面。実際の選択結果をそのまま保持し、候補評価も全合法 Dahai 分持つ。
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(108) },
+            LegalAction::Dahai { tile: tile(17) },
+        ];
+        let selected = select_defense_fallback_action_with_kind(&context, &actions);
+
+        let diagnostic = DefenseDecisionDiagnostic::from_selection(&context, &actions, selected);
+
+        assert_eq!(
+            diagnostic.selected_kind(),
+            Some(DefenseFallbackKind::Genbutsu)
+        );
+        assert_eq!(
+            diagnostic.selected.as_ref().unwrap().selected_action,
+            "5m".to_string()
+        );
+        assert_eq!(diagnostic.candidates.len(), 2);
+        assert_eq!(
+            diagnostic
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.selected)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn defense_decision_diagnostic_keeps_candidates_without_selection() {
+        // 防御 fallback 候補が無い(全て NoSafety)局面でも、候補評価は保持する。
+        let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(56) },
+        ];
+        let selected = select_defense_fallback_action_with_kind(&context, &actions);
+        assert_eq!(selected, None);
+
+        let diagnostic = DefenseDecisionDiagnostic::from_selection(&context, &actions, selected);
+
+        assert_eq!(diagnostic.selected, None);
+        assert_eq!(diagnostic.selected_kind(), None);
+        assert_eq!(diagnostic.candidates.len(), 2);
+        assert!(
+            diagnostic
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.selected)
+        );
+        assert!(
+            diagnostic
+                .candidates
+                .iter()
+                .all(|candidate| candidate.suited_safety_rank == Some(SuitedSafetyRank::NoSafety))
         );
     }
 }
