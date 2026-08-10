@@ -254,6 +254,20 @@ Final decision
 
 通常打牌候補では、選ばれなかった理由も表示されます。その判断処理を通らなかった場合は `not evaluated` と表示されます。
 
+出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
+
+```text
+Summary
+  selected: 7s
+  source: DefenseFallback
+  selected detail: SuitedSafety(Suji)
+  runner-up: 4p
+  runner-up source: DefenseFallback
+  runner-up detail: SuitedSafety(HalfSuji)
+```
+
+次点 (`runner-up`) は、選ばれた合法手を1件だけ除いて `ShantenAgent` の判断をやり直した結果です。除外後に合法手が無い場合は `runner-up: -` と表示します。赤5と黒5は別の合法手として扱うため、選ばれた側だけを除外します。
+
 ## 公式ドキュメント
 
 - RiichiLab Documentation: https://riichi.dev/docs
