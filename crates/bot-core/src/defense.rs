@@ -115,52 +115,99 @@ pub fn select_honor_safety_fallback_action<'a>(
         .map(|(action, _)| action)
 }
 
-// 簡易スジ安全度。現時点では無スジ / スジの2段階のみ。
+/// スジ安全度。両側スジ / 片スジ / 無スジ の3段階。
+///
+/// 安全度は `Suji` > `HalfSuji` > `NoSuji` で、derive した `Ord` の順序と一致する。
+///
+/// - `Suji`:     対象牌のスジ本数ぶんすべての根拠牌が河にある(4/5/6 なら両側)。
+/// - `HalfSuji`: 2本のスジを持つ 4/5/6 で、片側の根拠牌だけが河にある片スジ。
+/// - `NoSuji`:   根拠牌が河に無い。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SujiSafetyRank {
     NoSuji,
+    HalfSuji,
     Suji,
 }
 
-// 指定 player の河から簡易スジ判定する。字牌は対象外。player が範囲外なら false。
-// 同じ suit で number が ±3 の牌が河にあればスジ扱い。
-pub fn is_suji_for(tile: TileType, player: usize, context: &GameContext) -> bool {
+// 対象牌のスジ根拠となる同一色の数字。4/5/6 だけが両側の2本を持つ。
+fn suji_partner_numbers(number: u8) -> &'static [u8] {
+    match number {
+        1 => &[4],
+        2 => &[5],
+        3 => &[6],
+        4 => &[1, 7],
+        5 => &[2, 8],
+        6 => &[3, 9],
+        7 => &[4],
+        8 => &[5],
+        9 => &[6],
+        _ => &[],
+    }
+}
+
+/// 指定 player の河に対するスジ安全度を求める pure helper。字牌は対象外で `None`。
+///
+/// 同一色のスジ根拠牌(1/2/3 と 7/8/9 は1本、4/5/6 は両側2本)が河に何本あるかで分類する。
+/// すべて揃えば `Suji`、一部だけなら `HalfSuji`、無ければ `NoSuji`。
+///
+/// player が範囲外で河を取得できない場合は推測せず `NoSuji` として扱い、安全側へ倒さない。
+pub fn suji_safety_rank_for(
+    tile: TileType,
+    player: usize,
+    context: &GameContext,
+) -> Option<SujiSafetyRank> {
     let (Some(number), Some(suit)) = (tile.number(), tile.suit()) else {
-        return false;
+        return None;
     };
-    context.discards_of(player).is_some_and(|discards| {
-        discards.iter().any(|discarded| {
-            let discarded = discarded.tile_type();
-            discarded.suit() == Some(suit)
-                && discarded.number().is_some_and(|n| n.abs_diff(number) == 3)
+    let partners = suji_partner_numbers(number);
+    if partners.is_empty() {
+        return Some(SujiSafetyRank::NoSuji);
+    }
+    let Some(discards) = context.discards_of(player) else {
+        return Some(SujiSafetyRank::NoSuji);
+    };
+    let found = partners
+        .iter()
+        .filter(|&&partner| {
+            discards.iter().any(|discarded| {
+                let discarded = discarded.tile_type();
+                discarded.suit() == Some(suit) && discarded.number() == Some(partner)
+            })
         })
-    })
+        .count();
+    let rank = if found == partners.len() {
+        SujiSafetyRank::Suji
+    } else if found > 0 {
+        SujiSafetyRank::HalfSuji
+    } else {
+        SujiSafetyRank::NoSuji
+    };
+    Some(rank)
 }
 
-// いずれかのリーチ者の河からスジ判定する。リーチ者がいなければ false。
+/// 指定 player に対して完全なスジか判定する。`SujiSafetyRank::Suji` のときだけ `true`。
+///
+/// 片スジ (`HalfSuji`) と無スジ (`NoSuji`) はいずれも `false`。字牌や範囲外 player も `false`。
+pub fn is_suji_for(tile: TileType, player: usize, context: &GameContext) -> bool {
+    suji_safety_rank_for(tile, player, context) == Some(SujiSafetyRank::Suji)
+}
+
+/// いずれかのリーチ者に対して完全なスジか判定する。リーチ者がいなければ `false`。
 pub fn is_suji_for_any_reached(tile: TileType, context: &GameContext) -> bool {
-    let reached = context.reached_opponents();
-    if reached.is_empty() {
-        return false;
-    }
-    reached
-        .iter()
-        .any(|&player| is_suji_for(tile, player, context))
+    suji_safety_rank_for_any_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
 
-// 全リーチ者の河に対してスジか判定する。リーチ者がいなければ false。
-// 全リーチ者について is_suji_for が true の場合だけ true。一人でも無スジなら false。
+/// 全リーチ者に対して完全なスジか判定する。リーチ者がいなければ `false`。
+///
+/// 一人でも片スジ / 無スジなら `false`。
 pub fn is_suji_for_all_reached(tile: TileType, context: &GameContext) -> bool {
-    let reached = context.reached_opponents();
-    if reached.is_empty() {
-        return false;
-    }
-    reached
-        .iter()
-        .all(|&player| is_suji_for(tile, player, context))
+    suji_safety_rank_for_all_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
 
-// いずれかのリーチ者の河に対する簡易スジ安全度。数牌なら Some、字牌なら None。
+/// いずれかのリーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
+///
+/// 各リーチ者の [`suji_safety_rank_for`] の最大値(最も安全な評価)を採る。
+/// リーチ者がいなければ `NoSuji`。
 pub fn suji_safety_rank_for_any_reached(
     tile: TileType,
     context: &GameContext,
@@ -168,14 +215,22 @@ pub fn suji_safety_rank_for_any_reached(
     if tile.is_honor() {
         return None;
     }
-    if is_suji_for_any_reached(tile, context) {
-        Some(SujiSafetyRank::Suji)
-    } else {
-        Some(SujiSafetyRank::NoSuji)
-    }
+    let rank = context
+        .reached_opponents()
+        .iter()
+        .filter_map(|&player| suji_safety_rank_for(tile, player, context))
+        .max()
+        .unwrap_or(SujiSafetyRank::NoSuji);
+    Some(rank)
 }
 
-// 全リーチ者の河に対する簡易スジ安全度。数牌なら Some、字牌なら None。
+/// 全リーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
+///
+/// 各リーチ者の [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。
+/// 例えば player1 に対して `Suji`・player2 に対して `HalfSuji` なら全体は `HalfSuji`。
+/// リーチ者がいなければ `NoSuji` で、安全牌としては扱わない。
+///
+/// これが数牌防御におけるスジ評価の source of truth。
 pub fn suji_safety_rank_for_all_reached(
     tile: TileType,
     context: &GameContext,
@@ -183,15 +238,17 @@ pub fn suji_safety_rank_for_all_reached(
     if tile.is_honor() {
         return None;
     }
-    if is_suji_for_all_reached(tile, context) {
-        Some(SujiSafetyRank::Suji)
-    } else {
-        Some(SujiSafetyRank::NoSuji)
-    }
+    let rank = context
+        .reached_opponents()
+        .iter()
+        .filter_map(|&player| suji_safety_rank_for(tile, player, context))
+        .min()
+        .unwrap_or(SujiSafetyRank::NoSuji);
+    Some(rank)
 }
 
-// 合法 Dahai のうち数牌のみを安全度の高い順(Suji → NoSuji)に並べる。同安全度は元の順序を保つ。
-// スジ判定は全リーチ者基準。全リーチ者に対してスジの場合だけ Suji。
+// 合法 Dahai のうち数牌のみを安全度の高い順(Suji → HalfSuji → NoSuji)に並べる。
+// 同安全度は元の順序を保つ。スジ判定は全リーチ者基準で、各リーチ者の rank の最小値を使う。
 pub fn suji_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
@@ -329,12 +386,23 @@ pub fn wall_tile_types_by_rank(context: &GameContext) -> Vec<(TileType, WallRank
 }
 
 // 数牌の防御 fallback 用の安全度。壁 / スジを統合して分類する。
+// 安全度は NoChance > OneChance > Suji > HalfSuji > NoSafety。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SuitedSafetyRank {
     NoSafety,
+    HalfSuji,
     Suji,
     OneChance,
     NoChance,
+}
+
+// スジ安全度を数牌防御の安全度へ写す。壁が無い場合の分類にだけ使う。
+fn suited_safety_rank_from_suji(rank: SujiSafetyRank) -> SuitedSafetyRank {
+    match rank {
+        SujiSafetyRank::Suji => SuitedSafetyRank::Suji,
+        SujiSafetyRank::HalfSuji => SuitedSafetyRank::HalfSuji,
+        SujiSafetyRank::NoSuji => SuitedSafetyRank::NoSafety,
+    }
 }
 
 // いずれかのリーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
@@ -348,19 +416,14 @@ pub fn suited_safety_rank_for_any_reached(
     let rank = match wall_rank(tile, context) {
         WallRank::NoChance => SuitedSafetyRank::NoChance,
         WallRank::OneChance => SuitedSafetyRank::OneChance,
-        WallRank::NoWall => {
-            if is_suji_for_any_reached(tile, context) {
-                SuitedSafetyRank::Suji
-            } else {
-                SuitedSafetyRank::NoSafety
-            }
-        }
+        WallRank::NoWall => suji_safety_rank_for_any_reached(tile, context)
+            .map_or(SuitedSafetyRank::NoSafety, suited_safety_rank_from_suji),
     };
     Some(rank)
 }
 
 // 全リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
-// 壁評価はスジ評価より優先する。スジは全リーチ者に対してスジの場合だけ Suji。
+// 壁評価はスジ評価より優先する。スジ評価は全リーチ者に対する rank の最小値を使う。
 pub fn suited_safety_rank_for_all_reached(
     tile: TileType,
     context: &GameContext,
@@ -371,18 +434,14 @@ pub fn suited_safety_rank_for_all_reached(
     let rank = match wall_rank(tile, context) {
         WallRank::NoChance => SuitedSafetyRank::NoChance,
         WallRank::OneChance => SuitedSafetyRank::OneChance,
-        WallRank::NoWall => {
-            if is_suji_for_all_reached(tile, context) {
-                SuitedSafetyRank::Suji
-            } else {
-                SuitedSafetyRank::NoSafety
-            }
-        }
+        WallRank::NoWall => suji_safety_rank_for_all_reached(tile, context)
+            .map_or(SuitedSafetyRank::NoSafety, suited_safety_rank_from_suji),
     };
     Some(rank)
 }
 
-// 合法 Dahai のうち数牌のみを安全度の高い順(NoChance → OneChance → Suji → NoSafety)に並べる。
+// 合法 Dahai のうち数牌のみを安全度の高い順
+// (NoChance → OneChance → Suji → HalfSuji → NoSafety)に並べる。
 // 同安全度は元の順序を保つ。スジ判定は全リーチ者基準。
 pub fn suited_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
@@ -484,15 +543,23 @@ pub struct DefenseFallbackDiagnostic {
     pub selected_genbutsu_for_all: bool,
     pub selected_honor_safety_rank: Option<HonorSafetyRank>,
     pub selected_wall_rank: Option<WallRank>,
+    /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
+    /// 片スジと無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
     pub selected_suji_for_all_reached: Option<bool>,
+    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    ///
+    /// 壁と統合する前の純粋なスジ評価なので、`selected_suited_safety_rank` が壁由来の
+    /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
+    pub selected_suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub selected_suited_safety_rank: Option<SuitedSafetyRank>,
 }
 
 impl DefenseFallbackDiagnostic {
     /// 選択された防御 fallback の action と種別から診断データを構築する pure helper。
     ///
-    /// 数牌に対しては `wall_rank` / `is_suji_for_all_reached` / `suited_safety_rank_for_all_reached`
-    /// を、字牌に対しては `honor_safety_rank` を計算する。Dahai 以外の action では牌由来の値は空。
+    /// 数牌に対しては `wall_rank` / `is_suji_for_all_reached` / `suji_safety_rank_for_all_reached`
+    /// / `suited_safety_rank_for_all_reached` を、字牌に対しては `honor_safety_rank` を計算する。
+    /// Dahai 以外の action では牌由来の値は空。
     pub fn from_selection(
         context: &GameContext,
         action: &LegalAction,
@@ -518,6 +585,8 @@ impl DefenseFallbackDiagnostic {
             selected_wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
             selected_suji_for_all_reached: suited_tile
                 .map(|tile| is_suji_for_all_reached(tile, context)),
+            selected_suji_safety_rank_for_all_reached: tile_type
+                .and_then(|tile| suji_safety_rank_for_all_reached(tile, context)),
             selected_suited_safety_rank: tile_type
                 .and_then(|tile| suited_safety_rank_for_all_reached(tile, context)),
         }
@@ -543,7 +612,14 @@ pub struct DefenseCandidateDiagnostic {
     pub genbutsu_for_all: bool,
     pub honor_safety_rank: Option<HonorSafetyRank>,
     pub wall_rank: Option<WallRank>,
+    /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
+    /// 片スジと無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
     pub suji_for_all_reached: Option<bool>,
+    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    ///
+    /// 壁と統合する前の純粋なスジ評価なので、`suited_safety_rank` が壁由来の
+    /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
+    pub suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
 }
 
@@ -568,6 +644,7 @@ impl DefenseCandidateDiagnostic {
             honor_safety_rank: honor_safety_rank(tile_type, context),
             wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
             suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
+            suji_safety_rank_for_all_reached: suji_safety_rank_for_all_reached(tile_type, context),
             suited_safety_rank: suited_safety_rank_for_all_reached(tile_type, context),
         })
     }
@@ -660,6 +737,7 @@ pub fn log_defense_fallback_decision(
         selected_honor_safety_rank = ?diagnostic.selected_honor_safety_rank,
         selected_wall_rank = ?diagnostic.selected_wall_rank,
         selected_suji_for_all_reached = ?diagnostic.selected_suji_for_all_reached,
+        selected_suji_safety_rank = ?diagnostic.selected_suji_safety_rank_for_all_reached,
         selected_suited_safety_rank = ?diagnostic.selected_suited_safety_rank,
         "defense fallback decision",
     );
@@ -687,6 +765,7 @@ fn log_defense_fallback_candidate(candidate: &DefenseCandidateDiagnostic) {
         honor_safety_rank = ?candidate.honor_safety_rank,
         wall_rank = ?candidate.wall_rank,
         suji_for_all_reached = ?candidate.suji_for_all_reached,
+        suji_safety_rank = ?candidate.suji_safety_rank_for_all_reached,
         suited_safety_rank = ?candidate.suited_safety_rank,
         "defense fallback candidate",
     );
@@ -1292,57 +1371,240 @@ mod tests {
 
     #[test]
     fn is_suji_for_detects_one_four_seven() {
-        // 1m 河 → 4m スジ、7m 河 → 4m スジ、4m 河 → 1m/7m スジ。
-        let context = table_state_context(
-            Some(0),
-            None,
-            [vec![], vec![tile(0)], vec![], vec![]],
-            [false, true, false, false],
-        );
+        // 1m 河 → 4m は片スジなので is_suji_for は false、4m 河 → 1m/7m は完全スジ。
+        let context = single_reacher_discards_context(vec![tile(0)]);
+        assert!(!is_suji_for(tile(12).tile_type(), 1, &context));
+
+        let context = single_reacher_discards_context(vec![tile(24)]);
+        assert!(!is_suji_for(tile(12).tile_type(), 1, &context));
+
+        let context = single_reacher_discards_context(vec![tile(0), tile(24)]);
         assert!(is_suji_for(tile(12).tile_type(), 1, &context));
 
-        let context = table_state_context(
-            Some(0),
-            None,
-            [vec![], vec![tile(24)], vec![], vec![]],
-            [false, true, false, false],
-        );
-        assert!(is_suji_for(tile(12).tile_type(), 1, &context));
-
-        let context = table_state_context(
-            Some(0),
-            None,
-            [vec![], vec![tile(12)], vec![], vec![]],
-            [false, true, false, false],
-        );
+        let context = single_reacher_discards_context(vec![tile(12)]);
         assert!(is_suji_for(tile(0).tile_type(), 1, &context));
         assert!(is_suji_for(tile(24).tile_type(), 1, &context));
     }
 
     #[test]
     fn is_suji_for_detects_two_five_eight() {
-        // 5m が河にあれば 2m と 8m はスジ。
-        let context = table_state_context(
-            Some(0),
-            None,
-            [vec![], vec![tile(16)], vec![], vec![]],
-            [false, true, false, false],
-        );
+        // 5m が河にあれば 2m と 8m はスジ。5m は片スジなので false。
+        let context = single_reacher_discards_context(vec![tile(16)]);
         assert!(is_suji_for(tile(4).tile_type(), 1, &context));
         assert!(is_suji_for(tile(28).tile_type(), 1, &context));
+        assert!(!is_suji_for(tile(16).tile_type(), 1, &context));
     }
 
     #[test]
     fn is_suji_for_detects_three_six_nine() {
-        // 6m が河にあれば 3m と 9m はスジ。
-        let context = table_state_context(
-            Some(0),
-            None,
-            [vec![], vec![tile(20)], vec![], vec![]],
-            [false, true, false, false],
-        );
+        // 6m が河にあれば 3m と 9m はスジ。6m は片スジなので false。
+        let context = single_reacher_discards_context(vec![tile(20)]);
         assert!(is_suji_for(tile(8).tile_type(), 1, &context));
         assert!(is_suji_for(tile(32).tile_type(), 1, &context));
+        assert!(!is_suji_for(tile(20).tile_type(), 1, &context));
+    }
+
+    // player1 だけがリーチしている状況で、その河だけを差し替える helper。
+    fn single_reacher_discards_context(discards: Vec<TileId>) -> GameContext {
+        table_state_context(
+            Some(0),
+            None,
+            [vec![], discards, vec![], vec![]],
+            [false, true, false, false],
+        )
+    }
+
+    // 単独リーチ者の河から、対象牌のスジ安全度を求める。
+    fn single_reacher_suji_rank(target: u8, discards: Vec<TileId>) -> Option<SujiSafetyRank> {
+        let context = single_reacher_discards_context(discards);
+        suji_safety_rank_for_all_reached(tile(target).tile_type(), &context)
+    }
+
+    #[test]
+    fn suji_safety_rank_for_four_distinguishes_half_and_full_suji() {
+        // 4p は 1p-4p と 4p-7p の2本。1p(36) / 7p(60) の有無で NoSuji / HalfSuji / Suji。
+        assert_eq!(
+            single_reacher_suji_rank(48, vec![]),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(48, vec![tile(36)]),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(48, vec![tile(60)]),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(48, vec![tile(36), tile(60)]),
+            Some(SujiSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_five_distinguishes_half_and_full_suji() {
+        // 5p は 2p(40) と 8p(64) の2本。
+        assert_eq!(
+            single_reacher_suji_rank(52, vec![]),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(52, vec![tile(40)]),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(52, vec![tile(64)]),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(52, vec![tile(40), tile(64)]),
+            Some(SujiSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_six_distinguishes_half_and_full_suji() {
+        // 6p は 3p(44) と 9p(68) の2本。
+        assert_eq!(
+            single_reacher_suji_rank(56, vec![]),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(56, vec![tile(44)]),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(56, vec![tile(68)]),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            single_reacher_suji_rank(56, vec![tile(44), tile(68)]),
+            Some(SujiSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_terminal_side_is_never_half_suji() {
+        // 1/2/3 と 7/8/9 はスジが1本だけ。対応牌があれば Suji、無ければ NoSuji。
+        for (target, partner) in [
+            (36u8, 48u8),
+            (40, 52),
+            (44, 56),
+            (60, 48),
+            (64, 52),
+            (68, 56),
+        ] {
+            assert_eq!(
+                single_reacher_suji_rank(target, vec![tile(partner)]),
+                Some(SujiSafetyRank::Suji)
+            );
+            assert_eq!(
+                single_reacher_suji_rank(target, vec![]),
+                Some(SujiSafetyRank::NoSuji)
+            );
+        }
+    }
+
+    #[test]
+    fn suji_safety_rank_for_honor_is_none() {
+        // 字牌はスジ評価対象外。player 単位でも全リーチ者基準でも None。
+        let context = single_reacher_discards_context(vec![tile(12)]);
+        assert_eq!(
+            suji_safety_rank_for(tile(108).tile_type(), 1, &context),
+            None
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(tile(108).tile_type(), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_out_of_range_player_is_no_suji() {
+        // 河を取得できない player は推測せず NoSuji。安全側へは倒さない。
+        let context = single_reacher_discards_context(vec![tile(12)]);
+        assert_eq!(
+            suji_safety_rank_for(tile(0).tile_type(), 4, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+    }
+
+    // 二人リーチで、player1 の河と player2 の河を個別に与える helper。
+    fn two_reachers_context(first: Vec<TileId>, second: Vec<TileId>) -> GameContext {
+        table_state_context(
+            Some(0),
+            None,
+            [vec![], first, second, vec![]],
+            [false, true, true, false],
+        )
+    }
+
+    #[test]
+    fn suji_safety_rank_for_all_reached_takes_most_dangerous_rank() {
+        // 4p を対象に、二人のリーチ者の rank の最小値を採る。
+        let four_pin = tile(48).tile_type();
+
+        // 両者とも 1p/7p 持ち → Suji。
+        let context = two_reachers_context(vec![tile(36), tile(60)], vec![tile(37), tile(61)]);
+        assert_eq!(
+            suji_safety_rank_for_all_reached(four_pin, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+
+        // player1 は Suji、player2 は 1p だけで HalfSuji → 全体は HalfSuji。
+        let context = two_reachers_context(vec![tile(36), tile(60)], vec![tile(37)]);
+        assert_eq!(
+            suji_safety_rank_for(four_pin, 1, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suji_safety_rank_for(four_pin, 2, &context),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(four_pin, &context),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+
+        // player1 は Suji、player2 は根拠なしで NoSuji → 全体は NoSuji。
+        let context = two_reachers_context(vec![tile(36), tile(60)], vec![]);
+        assert_eq!(
+            suji_safety_rank_for_all_reached(four_pin, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_for_any_reached_takes_safest_rank() {
+        // any 基準は最大値。片方が Suji なら全体も Suji。
+        let four_pin = tile(48).tile_type();
+        let context = two_reachers_context(vec![tile(36), tile(60)], vec![]);
+        assert_eq!(
+            suji_safety_rank_for_any_reached(four_pin, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+
+        // 片スジと無スジなら HalfSuji。
+        let context = two_reachers_context(vec![tile(36)], vec![]);
+        assert_eq!(
+            suji_safety_rank_for_any_reached(four_pin, &context),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+    }
+
+    #[test]
+    fn suji_safety_rank_no_suji_without_reachers() {
+        // リーチ者がいなければ、河に根拠があっても安全牌として扱わない。
+        let discards = [vec![], vec![tile(36), tile(60)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false; 4]);
+        assert_eq!(
+            suji_safety_rank_for_all_reached(tile(48).tile_type(), &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suji_safety_rank_for_any_reached(tile(48).tile_type(), &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
     }
 
     #[test]
@@ -2517,6 +2779,276 @@ mod tests {
         );
     }
 
+    // 片スジ回帰局面。リーチ者(1)の河は 1p(36) と 4s(84)。
+    // 手牌 444p147m258p123s7s + ツモ 9m を visible にしても壁は両方 NoWall なので、
+    // 4p(1p だけスジ)と 7s(4s でスジ)の差はスジ分類だけで決まる。
+    fn half_suji_regression_context() -> GameContext {
+        let hand = vec![
+            tile(48),
+            tile(49),
+            tile(50),
+            tile(0),
+            tile(12),
+            tile(24),
+            tile(40),
+            tile(52),
+            tile(64),
+            tile(72),
+            tile(76),
+            tile(80),
+            tile(96),
+            tile(32),
+        ];
+        suited_context(
+            hand,
+            [vec![], vec![tile(36), tile(84)], vec![], vec![]],
+            [false, true, false, false],
+        )
+    }
+
+    #[test]
+    fn suited_safety_rank_reflects_half_suji() {
+        // 4p は片スジで HalfSuji、7s は完全スジで Suji。壁はどちらも NoWall。
+        let context = half_suji_regression_context();
+        let four_pin = tile(48).tile_type();
+        let seven_sou = tile(96).tile_type();
+
+        assert_eq!(wall_rank(four_pin, &context), WallRank::NoWall);
+        assert_eq!(wall_rank(seven_sou, &context), WallRank::NoWall);
+        assert_eq!(
+            suji_safety_rank_for_all_reached(four_pin, &context),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(seven_sou, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(four_pin, &context),
+            Some(SuitedSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(seven_sou, &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn suited_safety_rank_orders_half_suji_between_suji_and_no_safety() {
+        assert!(SuitedSafetyRank::Suji > SuitedSafetyRank::HalfSuji);
+        assert!(SuitedSafetyRank::HalfSuji > SuitedSafetyRank::NoSafety);
+        assert!(SuitedSafetyRank::OneChance > SuitedSafetyRank::Suji);
+        assert!(SujiSafetyRank::Suji > SujiSafetyRank::HalfSuji);
+        assert!(SujiSafetyRank::HalfSuji > SujiSafetyRank::NoSuji);
+    }
+
+    #[test]
+    fn suited_safety_rank_keeps_wall_priority_over_half_suji() {
+        // 片スジの 4p でも、経路 [2p,3p] と [5p,6p] を塞げば壁評価が優先される。
+        let visible = vec![
+            tile(40),
+            tile(41),
+            tile(42),
+            tile(43),
+            tile(52),
+            tile(53),
+            tile(54),
+            tile(55),
+        ];
+        let context = suited_context(
+            visible,
+            [vec![], vec![tile(36)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(tile(48).tile_type(), &context),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(48).tile_type(), &context),
+            Some(SuitedSafetyRank::NoChance)
+        );
+    }
+
+    #[test]
+    fn suited_dahai_actions_by_safety_orders_full_suji_over_half_suji() {
+        let context = half_suji_regression_context();
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(48) },
+            LegalAction::Dahai { tile: tile(96) },
+        ];
+        let ranked = suited_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(96) },
+                    SuitedSafetyRank::Suji
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(48) },
+                    SuitedSafetyRank::HalfSuji
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn half_suji_regression_prefers_full_suji_regardless_of_action_order() {
+        // 合法 action の順序に関係なく、完全スジの 7s を片スジの 4p より優先する。
+        let context = half_suji_regression_context();
+        let expected = Some((
+            &LegalAction::Dahai { tile: tile(96) },
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji),
+        ));
+
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(48) },
+            LegalAction::Dahai { tile: tile(96) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            expected
+        );
+
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(96) },
+            LegalAction::Dahai { tile: tile(48) },
+        ];
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            expected
+        );
+    }
+
+    #[test]
+    fn select_suited_safety_fallback_action_takes_half_suji_over_no_safety() {
+        // 片スジは無スジより安全なので、他に候補が無ければ片スジを選ぶ。
+        let context = half_suji_regression_context();
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(0) },
+            LegalAction::Dahai { tile: tile(48) },
+        ];
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(0).tile_type(), &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+        assert_eq!(
+            select_suited_safety_fallback_action(&actions, &context),
+            Some(&LegalAction::Dahai { tile: tile(48) })
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_reports_half_suji() {
+        // 壁なしの片スジ。bool は false でも、純粋なスジ rank から HalfSuji と分かる。
+        let context = half_suji_regression_context();
+        let action = LegalAction::Dahai { tile: tile(48) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+
+        assert_eq!(candidate.wall_rank, Some(WallRank::NoWall));
+        assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            candidate.suited_safety_rank,
+            Some(SuitedSafetyRank::HalfSuji)
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_reports_half_suji_behind_one_chance_wall() {
+        // 4p は 1p だけ河にある片スジ。経路 [2p,3p] は 2p 4枚で Blocked、[5p,6p] は 5p 3枚で
+        // OneChance。suited_safety_rank は壁由来の OneChance になるが、純粋なスジ rank は HalfSuji。
+        let visible = vec![
+            tile(40),
+            tile(41),
+            tile(42),
+            tile(43),
+            tile(52),
+            tile(53),
+            tile(54),
+        ];
+        let context = suited_context(
+            visible,
+            [vec![], vec![tile(36)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(48) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+
+        assert_eq!(candidate.wall_rank, Some(WallRank::OneChance));
+        assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            candidate.suited_safety_rank,
+            Some(SuitedSafetyRank::OneChance)
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_reports_no_suji_and_full_suji() {
+        // 無スジの 1m は NoSuji、完全スジの 7s は Suji。bool と rank の対応も確認する。
+        let context = half_suji_regression_context();
+
+        let action = LegalAction::Dahai { tile: tile(0) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+        assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::NoSuji)
+        );
+
+        let action = LegalAction::Dahai { tile: tile(96) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, true).unwrap();
+        assert_eq!(candidate.suji_for_all_reached, Some(true));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(candidate.suited_safety_rank, Some(SuitedSafetyRank::Suji));
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_reports_pure_suji_safety_rank() {
+        // 選択牌側でも同じ rank を保持する。7s は完全スジ、4p は片スジ。
+        let context = half_suji_regression_context();
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(48) },
+            LegalAction::Dahai { tile: tile(96) },
+        ];
+        let (action, kind) = select_defense_fallback_action_with_kind(&context, &actions).unwrap();
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(&context, action, kind);
+
+        assert_eq!(diagnostic.selected_action, "7s");
+        assert_eq!(diagnostic.selected_suji_for_all_reached, Some(true));
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
+
+        let half_suji = LegalAction::Dahai { tile: tile(48) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &half_suji,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::HalfSuji),
+        );
+        assert_eq!(diagnostic.selected_suji_for_all_reached, Some(false));
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::HalfSuji)
+        );
+    }
+
     #[test]
     fn defense_fallback_diagnostic_from_selection_for_suited_suji() {
         // 1s をスジとして選んだ場合の診断データ。壁は NoWall、suji は true、suited safety は Suji。
@@ -2541,6 +3073,10 @@ mod tests {
         assert_eq!(diagnostic.selected_honor_safety_rank, None);
         assert_eq!(diagnostic.selected_wall_rank, Some(WallRank::NoWall));
         assert_eq!(diagnostic.selected_suji_for_all_reached, Some(true));
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
         assert_eq!(
             diagnostic.selected_suited_safety_rank,
             Some(SuitedSafetyRank::Suji)
@@ -2588,6 +3124,7 @@ mod tests {
         );
         assert_eq!(diagnostic.selected_wall_rank, None);
         assert_eq!(diagnostic.selected_suji_for_all_reached, None);
+        assert_eq!(diagnostic.selected_suji_safety_rank_for_all_reached, None);
         assert_eq!(diagnostic.selected_suited_safety_rank, None);
     }
 
@@ -2785,6 +3322,7 @@ mod tests {
         );
         assert_eq!(candidate.wall_rank, None);
         assert_eq!(candidate.suji_for_all_reached, None);
+        assert_eq!(candidate.suji_safety_rank_for_all_reached, None);
         assert_eq!(candidate.suited_safety_rank, None);
     }
 

@@ -321,6 +321,10 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
         optional(selected.selected_suji_for_all_reached)
     ));
     lines.push(format!(
+        "  suji safety: {}",
+        optional(selected.selected_suji_safety_rank_for_all_reached)
+    ));
+    lines.push(format!(
         "  suited safety: {}",
         optional(selected.selected_suited_safety_rank)
     ));
@@ -354,6 +358,10 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
     lines.push(format!(
         "  suji: {}",
         optional(candidate.suji_for_all_reached)
+    ));
+    lines.push(format!(
+        "  suji safety: {}",
+        optional(candidate.suji_safety_rank_for_all_reached)
     ));
     lines.push(format!(
         "  suited safety: {}",
@@ -522,6 +530,35 @@ mod tests {
         "reached": [false, true, false, false],
         "discards": ["", "1m 4m 7p E", "", ""]
     }"#;
+
+    const HALF_SUJI_SCENARIO: &str = r#"{
+        "hand": "444p147m258p123s7s",
+        "draw": "9m",
+        "player_id": 0,
+        "oya": 3,
+        "reached": [false, true, false, false],
+        "discards": ["", "1p 4s", "", ""],
+        "legal_dahai": "4p 7s"
+    }"#;
+
+    #[test]
+    fn defense_shows_pure_suji_safety_rank() {
+        // 4p は 1p だけ河にある片スジ、7s は 4s でスジ。bool の suji とは別に rank を表示する。
+        let (_, _, output) = rendered(HALF_SUJI_SCENARIO, false);
+
+        let four_pin = candidate_block(&output, "Defense candidates", "4p");
+        assert!(four_pin.contains("  suji: false"), "{four_pin}");
+        assert!(four_pin.contains("  suji safety: HalfSuji"), "{four_pin}");
+        assert!(four_pin.contains("  suited safety: HalfSuji"), "{four_pin}");
+
+        let seven_sou = candidate_block(&output, "Defense candidates", "7s");
+        assert!(seven_sou.contains("  suji: true"), "{seven_sou}");
+        assert!(seven_sou.contains("  suji safety: Suji"), "{seven_sou}");
+
+        let defense = section(&output, "Defense\n");
+        assert!(defense.contains("  selected action: 7s"), "{defense}");
+        assert!(defense.contains("  suji safety: Suji"), "{defense}");
+    }
 
     #[test]
     fn scenario_section_lists_inputs() {
@@ -808,6 +845,13 @@ mod tests {
                 block.contains(&format!(
                     "  suji: {}",
                     optional(candidate.suji_for_all_reached)
+                )),
+                "{block}"
+            );
+            assert!(
+                block.contains(&format!(
+                    "  suji safety: {}",
+                    optional(candidate.suji_safety_rank_for_all_reached)
                 )),
                 "{block}"
             );
