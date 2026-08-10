@@ -23,7 +23,7 @@ pub use defense::{
     select_genbutsu_fallback_action, select_honor_safety_fallback_action,
     select_suited_safety_fallback_action, suited_dahai_actions_by_safety,
     suited_safety_rank_for_all_reached, suited_safety_rank_for_any_reached,
-    suji_dahai_actions_by_safety, suji_safety_rank_for_all_reached,
+    suji_dahai_actions_by_safety, suji_safety_rank_for, suji_safety_rank_for_all_reached,
     suji_safety_rank_for_any_reached, visible_count_of, wall_rank, wall_tile_types_by_rank,
 };
 pub use discard_selection::select_discard_action;
