@@ -544,16 +544,22 @@ pub struct DefenseFallbackDiagnostic {
     pub selected_honor_safety_rank: Option<HonorSafetyRank>,
     pub selected_wall_rank: Option<WallRank>,
     /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
-    /// 片スジと無スジの区別は `selected_suited_safety_rank` の `HalfSuji` / `NoSafety` で分かる。
+    /// 片スジと無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
     pub selected_suji_for_all_reached: Option<bool>,
+    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    ///
+    /// 壁と統合する前の純粋なスジ評価なので、`selected_suited_safety_rank` が壁由来の
+    /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
+    pub selected_suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub selected_suited_safety_rank: Option<SuitedSafetyRank>,
 }
 
 impl DefenseFallbackDiagnostic {
     /// 選択された防御 fallback の action と種別から診断データを構築する pure helper。
     ///
-    /// 数牌に対しては `wall_rank` / `is_suji_for_all_reached` / `suited_safety_rank_for_all_reached`
-    /// を、字牌に対しては `honor_safety_rank` を計算する。Dahai 以外の action では牌由来の値は空。
+    /// 数牌に対しては `wall_rank` / `is_suji_for_all_reached` / `suji_safety_rank_for_all_reached`
+    /// / `suited_safety_rank_for_all_reached` を、字牌に対しては `honor_safety_rank` を計算する。
+    /// Dahai 以外の action では牌由来の値は空。
     pub fn from_selection(
         context: &GameContext,
         action: &LegalAction,
@@ -579,6 +585,8 @@ impl DefenseFallbackDiagnostic {
             selected_wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
             selected_suji_for_all_reached: suited_tile
                 .map(|tile| is_suji_for_all_reached(tile, context)),
+            selected_suji_safety_rank_for_all_reached: tile_type
+                .and_then(|tile| suji_safety_rank_for_all_reached(tile, context)),
             selected_suited_safety_rank: tile_type
                 .and_then(|tile| suited_safety_rank_for_all_reached(tile, context)),
         }
@@ -605,8 +613,13 @@ pub struct DefenseCandidateDiagnostic {
     pub honor_safety_rank: Option<HonorSafetyRank>,
     pub wall_rank: Option<WallRank>,
     /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
-    /// 片スジと無スジの区別は `suited_safety_rank` の `HalfSuji` / `NoSafety` で分かる。
+    /// 片スジと無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
     pub suji_for_all_reached: Option<bool>,
+    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    ///
+    /// 壁と統合する前の純粋なスジ評価なので、`suited_safety_rank` が壁由来の
+    /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
+    pub suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
 }
 
@@ -631,6 +644,7 @@ impl DefenseCandidateDiagnostic {
             honor_safety_rank: honor_safety_rank(tile_type, context),
             wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
             suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
+            suji_safety_rank_for_all_reached: suji_safety_rank_for_all_reached(tile_type, context),
             suited_safety_rank: suited_safety_rank_for_all_reached(tile_type, context),
         })
     }
@@ -723,6 +737,7 @@ pub fn log_defense_fallback_decision(
         selected_honor_safety_rank = ?diagnostic.selected_honor_safety_rank,
         selected_wall_rank = ?diagnostic.selected_wall_rank,
         selected_suji_for_all_reached = ?diagnostic.selected_suji_for_all_reached,
+        selected_suji_safety_rank = ?diagnostic.selected_suji_safety_rank_for_all_reached,
         selected_suited_safety_rank = ?diagnostic.selected_suited_safety_rank,
         "defense fallback decision",
     );
@@ -750,6 +765,7 @@ fn log_defense_fallback_candidate(candidate: &DefenseCandidateDiagnostic) {
         honor_safety_rank = ?candidate.honor_safety_rank,
         wall_rank = ?candidate.wall_rank,
         suji_for_all_reached = ?candidate.suji_for_all_reached,
+        suji_safety_rank = ?candidate.suji_safety_rank_for_all_reached,
         suited_safety_rank = ?candidate.suited_safety_rank,
         "defense fallback candidate",
     );
@@ -2925,16 +2941,111 @@ mod tests {
 
     #[test]
     fn defense_candidate_diagnostic_reports_half_suji() {
-        // 構造化診断では片スジが suited_safety_rank の HalfSuji として見える。bool は false。
+        // 壁なしの片スジ。bool は false でも、純粋なスジ rank から HalfSuji と分かる。
         let context = half_suji_regression_context();
         let action = LegalAction::Dahai { tile: tile(48) };
         let candidate =
             DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
 
+        assert_eq!(candidate.wall_rank, Some(WallRank::NoWall));
         assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::HalfSuji)
+        );
         assert_eq!(
             candidate.suited_safety_rank,
             Some(SuitedSafetyRank::HalfSuji)
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_reports_half_suji_behind_one_chance_wall() {
+        // 4p は 1p だけ河にある片スジ。経路 [2p,3p] は 2p 4枚で Blocked、[5p,6p] は 5p 3枚で
+        // OneChance。suited_safety_rank は壁由来の OneChance になるが、純粋なスジ rank は HalfSuji。
+        let visible = vec![
+            tile(40),
+            tile(41),
+            tile(42),
+            tile(43),
+            tile(52),
+            tile(53),
+            tile(54),
+        ];
+        let context = suited_context(
+            visible,
+            [vec![], vec![tile(36)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        let action = LegalAction::Dahai { tile: tile(48) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+
+        assert_eq!(candidate.wall_rank, Some(WallRank::OneChance));
+        assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::HalfSuji)
+        );
+        assert_eq!(
+            candidate.suited_safety_rank,
+            Some(SuitedSafetyRank::OneChance)
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_reports_no_suji_and_full_suji() {
+        // 無スジの 1m は NoSuji、完全スジの 7s は Suji。bool と rank の対応も確認する。
+        let context = half_suji_regression_context();
+
+        let action = LegalAction::Dahai { tile: tile(0) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+        assert_eq!(candidate.suji_for_all_reached, Some(false));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::NoSuji)
+        );
+
+        let action = LegalAction::Dahai { tile: tile(96) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, true).unwrap();
+        assert_eq!(candidate.suji_for_all_reached, Some(true));
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(candidate.suited_safety_rank, Some(SuitedSafetyRank::Suji));
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_reports_pure_suji_safety_rank() {
+        // 選択牌側でも同じ rank を保持する。7s は完全スジ、4p は片スジ。
+        let context = half_suji_regression_context();
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(48) },
+            LegalAction::Dahai { tile: tile(96) },
+        ];
+        let (action, kind) = select_defense_fallback_action_with_kind(&context, &actions).unwrap();
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(&context, action, kind);
+
+        assert_eq!(diagnostic.selected_action, "7s");
+        assert_eq!(diagnostic.selected_suji_for_all_reached, Some(true));
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
+
+        let half_suji = LegalAction::Dahai { tile: tile(48) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &half_suji,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::HalfSuji),
+        );
+        assert_eq!(diagnostic.selected_suji_for_all_reached, Some(false));
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::HalfSuji)
         );
     }
 
@@ -2962,6 +3073,10 @@ mod tests {
         assert_eq!(diagnostic.selected_honor_safety_rank, None);
         assert_eq!(diagnostic.selected_wall_rank, Some(WallRank::NoWall));
         assert_eq!(diagnostic.selected_suji_for_all_reached, Some(true));
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
         assert_eq!(
             diagnostic.selected_suited_safety_rank,
             Some(SuitedSafetyRank::Suji)
@@ -3009,6 +3124,7 @@ mod tests {
         );
         assert_eq!(diagnostic.selected_wall_rank, None);
         assert_eq!(diagnostic.selected_suji_for_all_reached, None);
+        assert_eq!(diagnostic.selected_suji_safety_rank_for_all_reached, None);
         assert_eq!(diagnostic.selected_suited_safety_rank, None);
     }
 
@@ -3206,6 +3322,7 @@ mod tests {
         );
         assert_eq!(candidate.wall_rank, None);
         assert_eq!(candidate.suji_for_all_reached, None);
+        assert_eq!(candidate.suji_safety_rank_for_all_reached, None);
         assert_eq!(candidate.suited_safety_rank, None);
     }
 
