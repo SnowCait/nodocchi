@@ -24,11 +24,6 @@ pub enum TileInputError {
         suit: char,
     },
 
-    #[error(
-        "token {token:?}: 10{suit} is ambiguous, 0 means the red five so write it as \"1{suit} 0{suit}\""
-    )]
-    AmbiguousTen { token: String, suit: char },
-
     #[error("token {token:?}: red five 0{suit} appears more than once")]
     DuplicateRedFive { token: String, suit: char },
 }
@@ -158,19 +153,10 @@ fn expand_numbers(
     red_suits: &mut Vec<char>,
     tiles: &mut Vec<LogicalTile>,
 ) -> Result<(), TileInputError> {
-    let numbers: Vec<char> = numbers.chars().collect();
-
-    for (index, &number) in numbers.iter().enumerate() {
+    for number in numbers.chars() {
         let tile = match suit {
             MpszSuit::Honor => honor_tile(token, number)?,
             _ if number == '0' => {
-                let previous = index.checked_sub(1).and_then(|index| numbers.get(index));
-                if previous == Some(&'1') {
-                    return Err(TileInputError::AmbiguousTen {
-                        token: token.to_string(),
-                        suit: suit.label(),
-                    });
-                }
                 if red_suits.contains(&suit.label()) {
                     return Err(TileInputError::DuplicateRedFive {
                         token: token.to_string(),
@@ -355,6 +341,28 @@ mod tests {
     }
 
     #[test]
+    fn one_followed_by_red_five_expands_to_two_tiles() {
+        assert_eq!(parsed("10m"), ["1m", "5mr"]);
+        assert_eq!(parsed("10p"), ["1p", "5pr"]);
+        assert_eq!(parsed("10s"), ["1s", "5sr"]);
+    }
+
+    #[test]
+    fn red_five_between_and_after_other_numbers_expands_in_order() {
+        assert_eq!(parsed("105m"), ["1m", "5mr", "5m"]);
+        assert_eq!(parsed("110m"), ["1m", "1m", "5mr"]);
+    }
+
+    #[test]
+    fn every_mpsz_number_is_a_single_tile() {
+        assert_eq!(parsed("1234567890m").len(), 10);
+        assert_eq!(
+            parsed("1234567890m"),
+            ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5mr"]
+        );
+    }
+
+    #[test]
     fn rejects_repeated_red_five_in_token() {
         assert_eq!(
             parse_tiles("00m"),
@@ -375,19 +383,6 @@ mod tests {
                 suit: 'r',
             })
         );
-    }
-
-    #[test]
-    fn rejects_ambiguous_ten() {
-        assert_eq!(
-            parse_tiles("10m"),
-            Err(TileInputError::AmbiguousTen {
-                token: "10m".to_string(),
-                suit: 'm',
-            })
-        );
-        assert!(parse_tiles("10p").is_err());
-        assert!(parse_tiles("10s").is_err());
     }
 
     #[test]
