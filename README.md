@@ -266,7 +266,7 @@ Summary
   runner-up detail: SuitedSafety(HalfSuji)
 ```
 
-次点 (`runner-up`) は、選ばれた合法手を1件だけ除いて `ShantenAgent` の判断をやり直した結果です。除外後に合法手が無い場合は `runner-up: -` と表示します。赤5と黒5は別の合法手として扱うため、選ばれた側だけを除外します。
+次点 (`runner-up`) は、最終選択を除いた場合に次に選ばれる候補です。次点が存在しない場合は `runner-up: -` と表示します。
 
 ## 公式ドキュメント
 
