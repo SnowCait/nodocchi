@@ -254,6 +254,20 @@ Final decision
 
 通常打牌候補では、選ばれなかった理由も表示されます。その判断処理を通らなかった場合は `not evaluated` と表示されます。
 
+出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
+
+```text
+Summary
+  selected: 7s
+  source: DefenseFallback
+  selected detail: SuitedSafety(Suji)
+  runner-up: 4p
+  runner-up source: DefenseFallback
+  runner-up detail: SuitedSafety(HalfSuji)
+```
+
+次点 (`runner-up`) は、最終選択を除いた場合に次に選ばれる候補です。次点が存在しない場合は `runner-up: -` と表示します。
+
 ## 公式ドキュメント
 
 - RiichiLab Documentation: https://riichi.dev/docs

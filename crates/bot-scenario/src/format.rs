@@ -1,8 +1,11 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext,
-    LegalAction, PushPullDecision, PushPullInputs, ShantenDecisionDiagnostic,
+    LegalAction, PushPullDecision, PushPullInputs, ShantenAgent, ShantenDecisionDiagnostic,
 };
-use bot_logic::{DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation, TileId};
+use bot_logic::{
+    DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
+    DiscardEvaluation, TileId,
+};
 
 use crate::scenario::Scenario;
 
@@ -35,6 +38,8 @@ pub fn format_diagnostic(
     if let Some(section) = format_defense_candidates(diagnostic.defense.as_ref()) {
         sections.push(section);
     }
+
+    sections.push(format_summary(scenario, diagnostic));
 
     sections.join("\n\n")
 }
@@ -371,6 +376,110 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
     lines.join("\n")
 }
 
+fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
+    let mut lines = vec!["Summary".to_string()];
+
+    lines.push(format!(
+        "  selected: {}",
+        action_label(&diagnostic.selected_action)
+    ));
+    lines.push(format!(
+        "  source: {}",
+        source_label(diagnostic.selected_source)
+    ));
+    if let Some(kind) = diagnostic.defense_fallback_kind() {
+        lines.push(format!("  selected detail: {kind:?}"));
+    }
+
+    let Some(runner_up) = diagnose_runner_up(scenario, diagnostic) else {
+        lines.push(format!("  runner-up: {ABSENT}"));
+        return lines.join("\n");
+    };
+
+    lines.push(format!(
+        "  runner-up: {}",
+        action_label(&runner_up.selected_action)
+    ));
+    lines.push(format!(
+        "  runner-up source: {}",
+        source_label(runner_up.selected_source)
+    ));
+    if let Some(kind) = runner_up.defense_fallback_kind() {
+        lines.push(format!("  runner-up detail: {kind:?}"));
+    }
+    if let Some(reason) = runner_up_comparison_reason(diagnostic, &runner_up) {
+        lines.push(format!("  runner-up lost by: {reason:?}"));
+    }
+
+    lines.join("\n")
+}
+
+fn diagnose_runner_up(
+    scenario: &Scenario,
+    diagnostic: &ShantenDecisionDiagnostic,
+) -> Option<ShantenDecisionDiagnostic> {
+    if diagnostic.selected_action == LegalAction::None {
+        return None;
+    }
+
+    let runner_up_actions =
+        legal_actions_without_selected(&scenario.legal_actions, &diagnostic.selected_action);
+    if runner_up_actions.is_empty() {
+        return None;
+    }
+
+    let runner_up = ShantenAgent::diagnose(&scenario.context, &runner_up_actions);
+    if runner_up.selected_action == LegalAction::None {
+        return None;
+    }
+
+    Some(runner_up)
+}
+
+fn legal_actions_without_selected(
+    legal_actions: &[LegalAction],
+    selected: &LegalAction,
+) -> Vec<LegalAction> {
+    let mut excluded = false;
+    legal_actions
+        .iter()
+        .filter(|action| {
+            if !excluded && *action == selected {
+                excluded = true;
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+fn runner_up_comparison_reason(
+    diagnostic: &ShantenDecisionDiagnostic,
+    runner_up: &ShantenDecisionDiagnostic,
+) -> Option<DiscardComparisonReason> {
+    if diagnostic.selected_source != AgentActionSource::NormalDiscard
+        || runner_up.selected_source != AgentActionSource::NormalDiscard
+    {
+        return None;
+    }
+
+    let LegalAction::Dahai { tile } = &runner_up.selected_action else {
+        return None;
+    };
+
+    diagnostic
+        .normal_discard
+        .as_ref()?
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.evaluation.discard == tile.tile_type()
+                && candidate.evaluation.discards_red_five == tile.is_red()
+        })
+        .map(|candidate| candidate.comparison_reason)
+}
+
 fn discard_label(evaluation: &DiscardEvaluation) -> String {
     let mut label = evaluation.discard.to_mjai_string();
     if evaluation.discards_red_five {
@@ -459,7 +568,7 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
-    use bot_core::{Agent, ShantenAgent};
+    use bot_core::Agent;
 
     fn scenario_from_json(json: &str) -> Scenario {
         let spec: ScenarioSpec = serde_json::from_str(json).unwrap();
@@ -495,7 +604,12 @@ mod tests {
                 | "Push/Pull"
                 | "Defense"
                 | "Defense candidates"
+                | "Summary"
         )
+    }
+
+    fn sections(output: &str) -> Vec<&str> {
+        output.split("\n\n").collect()
     }
 
     fn candidate_block(output: &str, header: &str, tile: &str) -> String {
@@ -950,5 +1064,279 @@ mod tests {
         assert!(output.contains("\n\nPush/Pull\n"));
         assert!(output.contains("\n\nDefense\n"));
         assert!(!output.ends_with('\n'));
+    }
+
+    const RED_FIVE_SCENARIO: &str = r#"{
+        "hand": "0m5m234m789p123s11z",
+        "legal_dahai": "5m 5mr"
+    }"#;
+
+    const SINGLE_ACTION_SCENARIO: &str = r#"{
+        "hand": "234m455p789s1123z",
+        "draw": "N",
+        "legal_dahai": "N"
+    }"#;
+
+    const REACH_SCENARIO: &str = r#"{
+        "hand": "123456789m123p1s",
+        "draw": "9s",
+        "allow_reach": true
+    }"#;
+
+    fn without_selected_action(
+        legal_actions: &[LegalAction],
+        selected: &LegalAction,
+    ) -> Vec<LegalAction> {
+        let mut remaining = legal_actions.to_vec();
+        let index = remaining
+            .iter()
+            .position(|action| action == selected)
+            .unwrap_or_else(|| panic!("selected action must be legal"));
+        remaining.remove(index);
+        remaining
+    }
+
+    fn expected_runner_up(
+        scenario: &Scenario,
+        selected: &LegalAction,
+    ) -> ShantenDecisionDiagnostic {
+        let remaining = without_selected_action(&scenario.legal_actions, selected);
+        ShantenAgent::diagnose(&scenario.context, &remaining)
+    }
+
+    #[test]
+    fn summary_is_the_last_section() {
+        for json in [
+            NORMAL_SCENARIO,
+            DEFENSE_SCENARIO,
+            HALF_SUJI_SCENARIO,
+            REACH_SCENARIO,
+        ] {
+            for verbose in [false, true] {
+                let (_, _, output) = rendered(json, verbose);
+                let sections = sections(&output);
+                let last = sections.last().unwrap();
+                assert!(last.starts_with("Summary\n"), "{output}");
+                assert_eq!(
+                    sections
+                        .iter()
+                        .filter(|section| section.starts_with("Summary"))
+                        .count(),
+                    1,
+                    "{output}"
+                );
+                assert!(output.ends_with(last), "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn summary_shows_normal_discard_runner_up() {
+        let (scenario, diagnostic, output) = rendered(NORMAL_SCENARIO, false);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+
+        let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
+        assert_eq!(
+            runner_up.selected_source,
+            AgentActionSource::NormalDiscard,
+            "{output}"
+        );
+        assert_ne!(runner_up.selected_action, diagnostic.selected_action);
+
+        let summary = section(&output, "Summary");
+        assert!(
+            summary.contains(&format!(
+                "  selected: {}",
+                action_label(&diagnostic.selected_action)
+            )),
+            "{summary}"
+        );
+        assert!(summary.contains("  source: NormalDiscard"), "{summary}");
+        assert!(
+            summary.contains(&format!(
+                "  runner-up: {}",
+                action_label(&runner_up.selected_action)
+            )),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  runner-up source: NormalDiscard"),
+            "{summary}"
+        );
+
+        let LegalAction::Dahai { tile } = &runner_up.selected_action else {
+            panic!("expected a dahai runner-up:\n{summary}");
+        };
+        let candidate = diagnostic
+            .normal_discard
+            .as_ref()
+            .unwrap()
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile.tile_type())
+            .unwrap_or_else(|| panic!("missing runner-up candidate:\n{output}"));
+        assert!(
+            summary.contains(&format!(
+                "  runner-up lost by: {:?}",
+                candidate.comparison_reason
+            )),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_shows_defense_fallback_details() {
+        let (scenario, diagnostic, output) = rendered(HALF_SUJI_SCENARIO, false);
+        let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
+
+        let summary = section(&output, "Summary");
+        assert!(summary.contains("  selected: 7s"), "{summary}");
+        assert!(summary.contains("  source: DefenseFallback"), "{summary}");
+        assert!(
+            summary.contains("  selected detail: SuitedSafety(Suji)"),
+            "{summary}"
+        );
+        assert!(summary.contains("  runner-up: 4p"), "{summary}");
+        assert!(
+            summary.contains("  runner-up source: DefenseFallback"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  runner-up detail: SuitedSafety(HalfSuji)"),
+            "{summary}"
+        );
+        assert!(!summary.contains("  runner-up lost by:"), "{summary}");
+
+        assert_eq!(
+            summary,
+            format!(
+                "Summary\n  selected: {}\n  source: {}\n  selected detail: {:?}\n  runner-up: {}\n  runner-up source: {}\n  runner-up detail: {:?}",
+                action_label(&diagnostic.selected_action),
+                source_label(diagnostic.selected_source),
+                diagnostic.defense_fallback_kind().unwrap(),
+                action_label(&runner_up.selected_action),
+                source_label(runner_up.selected_source),
+                runner_up.defense_fallback_kind().unwrap(),
+            )
+        );
+    }
+
+    #[test]
+    fn excluding_selected_keeps_remaining_action_order() {
+        let scenario = scenario_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "draw": "N",
+                "legal_dahai": "4p 7s 9s"
+            }"#,
+        );
+        let selected = scenario.legal_actions[1].clone();
+        let remaining = legal_actions_without_selected(&scenario.legal_actions, &selected);
+        assert_eq!(
+            remaining.iter().map(action_label).collect::<Vec<_>>(),
+            ["4p", "9s"]
+        );
+    }
+
+    #[test]
+    fn excluding_selected_keeps_the_other_five() {
+        let (scenario, diagnostic, output) = rendered(RED_FIVE_SCENARIO, false);
+        assert_eq!(
+            scenario
+                .legal_actions
+                .iter()
+                .map(action_label)
+                .collect::<Vec<_>>(),
+            ["5m", "5mr"]
+        );
+        assert_eq!(action_label(&diagnostic.selected_action), "5m");
+
+        let remaining =
+            legal_actions_without_selected(&scenario.legal_actions, &diagnostic.selected_action);
+        assert_eq!(
+            remaining.iter().map(action_label).collect::<Vec<_>>(),
+            ["5mr"]
+        );
+
+        let summary = section(&output, "Summary");
+        assert!(summary.contains("  selected: 5m\n"), "{summary}");
+        assert!(summary.contains("  runner-up: 5mr"), "{summary}");
+    }
+
+    #[test]
+    fn summary_marks_a_missing_runner_up() {
+        let (scenario, _, output) = rendered(SINGLE_ACTION_SCENARIO, false);
+        assert_eq!(scenario.legal_actions.len(), 1);
+
+        let summary = section(&output, "Summary");
+        assert!(summary.contains("  selected: N"), "{summary}");
+        assert!(summary.contains("  runner-up: -"), "{summary}");
+        assert!(!summary.contains("  runner-up source:"), "{summary}");
+        assert!(!summary.contains("  runner-up detail:"), "{summary}");
+        assert!(!summary.contains("  runner-up lost by:"), "{summary}");
+    }
+
+    #[test]
+    fn summary_runner_up_source_can_differ_from_selected_source() {
+        let (scenario, diagnostic, output) = rendered(REACH_SCENARIO, false);
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+
+        let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
+        assert_eq!(runner_up.selected_source, AgentActionSource::NormalDiscard);
+        assert!(matches!(
+            runner_up.selected_action,
+            LegalAction::Dahai { .. }
+        ));
+
+        let summary = section(&output, "Summary");
+        assert!(summary.contains("  selected: Reach"), "{summary}");
+        assert!(summary.contains("  source: Reach"), "{summary}");
+        assert!(
+            summary.contains(&format!(
+                "  runner-up: {}",
+                action_label(&runner_up.selected_action)
+            )),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  runner-up source: NormalDiscard"),
+            "{summary}"
+        );
+        assert!(!summary.contains("  runner-up lost by:"), "{summary}");
+    }
+
+    #[test]
+    fn summary_does_not_change_the_final_decision() {
+        for json in [
+            NORMAL_SCENARIO,
+            DEFENSE_SCENARIO,
+            HALF_SUJI_SCENARIO,
+            REACH_SCENARIO,
+        ] {
+            let scenario = scenario_from_json(json);
+            let diagnostic = diagnose(&scenario);
+            let output = format_diagnostic(&scenario, &diagnostic, false);
+
+            let mut agent = ShantenAgent;
+            assert_eq!(
+                diagnostic.selected_action,
+                agent.act(&scenario.context, &scenario.legal_actions)
+            );
+            assert_eq!(diagnose(&scenario), diagnostic);
+
+            let final_decision = section(&output, "Final decision");
+            let summary = section(&output, "Summary");
+            let action = action_label(&diagnostic.selected_action);
+            let source = source_label(diagnostic.selected_source);
+            assert!(
+                final_decision.contains(&format!("  action: {action}\n  source: {source}")),
+                "{final_decision}"
+            );
+            assert!(
+                summary.contains(&format!("  selected: {action}\n  source: {source}")),
+                "{summary}"
+            );
+        }
     }
 }
