@@ -1,0 +1,117 @@
+use thiserror::Error;
+
+use crate::cli::CliError;
+use crate::input::TileInputError;
+use crate::tiles::TileAllocationError;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ScenarioError {
+    #[error(transparent)]
+    Cli(#[from] CliError),
+
+    #[error("cannot read scenario file {path:?}: {message}")]
+    ReadFile { path: String, message: String },
+
+    #[error("cannot parse scenario JSON {path:?}: {message}")]
+    Json { path: String, message: String },
+
+    #[error("invalid tile string in {field} ({input:?}): {source}")]
+    TileInput {
+        field: String,
+        input: String,
+        #[source]
+        source: TileInputError,
+    },
+
+    #[error("cannot place tiles of {field} ({input:?}): {source}")]
+    TileAllocation {
+        field: String,
+        input: String,
+        #[source]
+        source: TileAllocationError,
+    },
+
+    #[error("scenario tiles are inconsistent: {source}")]
+    PhysicalTiles {
+        #[source]
+        source: TileAllocationError,
+    },
+
+    #[error("draw ({input:?}) must be a single tile, but expands to {count} tiles")]
+    MultipleDrawTiles { input: String, count: usize },
+
+    #[error("{field} ({input:?}) must be a single tile, but expands to {count} tiles")]
+    NotSingleTile {
+        field: String,
+        input: String,
+        count: usize,
+    },
+
+    #[error("{field} ({input:?}) must be a wind tile: E, S, W or N")]
+    NotWind { field: String, input: String },
+
+    #[error("{field} must be 0..=3, but is {value}")]
+    SeatOutOfRange { field: String, value: u8 },
+
+    #[error(
+        "seat_wind {explicit} conflicts with {derived} derived from player_id {player_id} and oya {oya}"
+    )]
+    SeatWindConflict {
+        explicit: String,
+        derived: String,
+        player_id: u8,
+        oya: u8,
+    },
+
+    #[error("reached must have 4 elements, but has {count}")]
+    ReachedLength { count: usize },
+
+    #[error("discards must have 4 elements, but has {count}")]
+    DiscardsLength { count: usize },
+
+    #[error("legal_dahai {tile} is not in hand or draw")]
+    LegalDahaiNotHeld { tile: String },
+
+    #[error("legal_dahai {tile} does not match the held {held}")]
+    LegalDahaiRedMismatch { tile: String, held: String },
+
+    #[error("legal_dahai {tile} appears more than once")]
+    LegalDahaiDuplicate { tile: String },
+}
+
+impl ScenarioError {
+    pub fn is_usage_error(&self) -> bool {
+        matches!(self, Self::Cli(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_errors_are_usage_errors() {
+        assert!(ScenarioError::from(CliError::MissingHand).is_usage_error());
+    }
+
+    #[test]
+    fn scenario_errors_are_not_usage_errors() {
+        let error = ScenarioError::ReachedLength { count: 3 };
+        assert!(!error.is_usage_error());
+    }
+
+    #[test]
+    fn tile_input_error_message_has_field_and_input() {
+        let error = ScenarioError::TileInput {
+            field: "hand".to_string(),
+            input: "123x".to_string(),
+            source: TileInputError::UnknownSuit {
+                token: "123x".to_string(),
+                suit: 'x',
+            },
+        };
+        let message = error.to_string();
+        assert!(message.contains("hand"), "{message}");
+        assert!(message.contains("123x"), "{message}");
+    }
+}

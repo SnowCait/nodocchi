@@ -1,0 +1,11 @@
+[package]
+name = "bot-scenario"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bot-core = { path = "../bot-core" }
+bot-logic = { path = "../bot-logic" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

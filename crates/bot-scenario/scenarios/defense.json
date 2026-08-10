@@ -1,0 +1,23 @@
+{
+  "hand": "19m19p1478s23467z",
+  "draw": "4p",
+
+  "dora_indicators": "3p",
+
+  "round_wind": "E",
+  "seat_wind": "N",
+
+  "player_id": 0,
+  "oya": 1,
+
+  "reached": [false, true, false, false],
+
+  "discards": [
+    "",
+    "1m 4m 7p E",
+    "",
+    ""
+  ],
+
+  "extra_visible_tiles": "444p"
+}

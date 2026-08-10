@@ -152,6 +152,108 @@ npub1j0ng5hmm7mf47r939zqkpepwekenj6uqhd5x555pn80utevvavjsfgqem2
 - `--server-npub` は既定 server を上書きする高度な用途向けです。
 - command の受理確認や競合時の retry は未実装です。
 
+## 局面解析
+
+`bot-scenario` は、手牌・局面を入力して `ShantenAgent` の判断とその根拠をオフラインで確認する CLI です。実対局・WebSocket 接続は行いません。
+
+### 簡易 CLI
+
+牌効率をすぐ確認する用途です。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "234m455p789s1123z" \
+  --draw "N"
+```
+
+| 引数 | 必須 | 内容 |
+| --- | --: | --- |
+| `--hand` | 必須 | ツモ牌を除いた手牌 |
+| `--draw` | 任意 | ツモ牌。2牌以上へ展開される文字列は error |
+| `--dora` | 任意 | ドラ表示牌。ドラそのものではない |
+| `--round-wind` | 任意 | 場風。`E` / `S` / `W` / `N` のみ |
+| `--seat-wind` | 任意 | 自風。`E` / `S` / `W` / `N` のみ |
+| `--allow-reach` | 任意 | リーチを合法手に加える |
+| `--allow-hora` | 任意 | 和了を合法手に加える |
+| `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
+| `--verbose` | 任意 | 通常打牌候補の詳細を追加表示する |
+
+`player_id` / `oya` / `reached` / `discards` は簡易 CLI では指定できません。防御局面は JSON scenario を使用します。
+
+### JSON scenario
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
+```
+
+```json
+{
+  "hand": "234m455p789s1123z",
+  "draw": "N",
+  "dora_indicators": "3p",
+  "round_wind": "E",
+  "seat_wind": "S",
+  "player_id": 0,
+  "oya": 3,
+  "reached": [false, true, false, false],
+  "discards": ["", "1m 4m 7p E", "", ""],
+  "extra_visible_tiles": "",
+  "legal_dahai": null,
+  "allow_reach": false,
+  "allow_hora": false,
+  "allow_ryukyoku": false
+}
+```
+
+`hand` / `draw` / `dora_indicators` / `round_wind` / `seat_wind` / `allow_*` は簡易 CLI の同名 option と同じです。JSON だけで指定できる field は次のとおりです。
+
+| field | 内容 |
+| --- | --- |
+| `player_id` / `oya` | 自分の席 / 親の席。`0`..`3` |
+| `reached` | 各 player のリーチ状態。要素数 4 |
+| `discards` | 各 player の河。入力順のまま扱う。要素数 4 |
+| `extra_visible_tiles` | 副露牌など、他の field で表現していない見え牌 |
+| `legal_dahai` | 打牌可能な牌とその順序 |
+
+`hand` 以外は省略できます。省略した場合、河は空、`reached` は全員 `false`、`allow_*` は `false` として扱います。
+
+見え牌は手牌・ツモ牌・ドラ表示牌・河・`extra_visible_tiles` から自動的に扱われます。副露など追加で見えている牌は `extra_visible_tiles` に指定してください。
+
+`seat_wind` は省略しても、`player_id` と `oya` があれば自動で決まります。明示した自風がその席と矛盾する場合は error です。
+
+`legal_dahai` を指定すると、打牌可能な牌とその順序を明示できます。リーチ後のツモ切りのみの局面や、候補順に依存する判断の再現に利用できます。省略した場合は手牌とツモ牌から自動的に作られます。手牌に無い牌や、赤5と黒5が一致しない指定は error です。
+
+### 牌表記
+
+MJAI 単牌表記と圧縮 MPSZ 表記の両方を受け付けます。空白区切りで両者を混在させても構いません。
+
+```text
+234m 5pr 67p E
+```
+
+| 表記 | 内容 |
+| --- | --- |
+| `1m`..`9m` / `1p`..`9p` / `1s`..`9s` | 数牌 |
+| `E` `S` `W` `N` `P` `F` `C` | 字牌 |
+| `5mr` `5pr` `5sr` | 赤5 |
+| `234m455p789s1234z` | 圧縮 MPSZ。字牌は `1z`=`E` .. `7z`=`C` |
+| `0m` `0p` `0s` | MPSZ の赤5。`0m`=`5mr` / `0p`=`5pr` / `0s`=`5sr`。`406m` は `4m 5mr 6m` |
+
+曖昧な補正は行いません。`123` / `123x` / `8z` / `0z` / `5r` はいずれも error です。赤5は各色1枚しか存在しないため、`00m` のように同じ赤5を複数指定した場合も error です。
+
+### 出力
+
+入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・防御（`Defense` / `Defense candidates`）を表示します。
+
+```text
+Final decision
+  action: 1m
+  source: DefenseFallback
+  defense kind: Genbutsu
+```
+
+通常打牌候補では、選ばれなかった理由も表示されます。その判断処理を通らなかった場合は `not evaluated` と表示されます。
+
 ## 公式ドキュメント
 
 - RiichiLab Documentation: https://riichi.dev/docs

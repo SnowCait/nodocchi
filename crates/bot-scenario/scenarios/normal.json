@@ -1,0 +1,24 @@
+{
+  "hand": "234m455p789s1123z",
+  "draw": "N",
+
+  "dora_indicators": "3p",
+
+  "round_wind": "E",
+  "seat_wind": "S",
+
+  "player_id": 0,
+  "oya": 3,
+
+  "reached": [false, false, false, false],
+
+  "discards": ["", "", "", ""],
+
+  "extra_visible_tiles": "",
+
+  "legal_dahai": null,
+
+  "allow_reach": false,
+  "allow_hora": false,
+  "allow_ryukyoku": false
+}
