@@ -429,8 +429,6 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
     lines.join("\n")
 }
 
-// 字牌防御 (HonorSafety) で選ばれた場合だけ役牌価値を表示する。数牌防御や通常打牌では None。
-// 役牌価値は診断側で再実装せず、bot-core の診断データをそのまま読む。
 fn honor_safety_opponent_honor_value(diagnostic: &ShantenDecisionDiagnostic) -> Option<String> {
     if !matches!(
         diagnostic.defense_fallback_kind(),
@@ -1256,8 +1254,6 @@ mod tests {
         );
     }
 
-    // 東場・自分 player0・oya = player3・player1 リーチ(自風は西)。
-    // N は player1 にとって客風、C は役牌。どちらも1枚見えで HonorSafetyRank は同じ。
     const HONOR_GUEST_VS_VALUE_SCENARIO: &str = r#"{
         "hand": "19m19p1478s23467z",
         "draw": "4p",
@@ -1269,8 +1265,6 @@ mod tests {
         "legal_dahai": "C N"
     }"#;
 
-    // 東場・自分 player0・oya = player1・player1 リーチ(自風は東)。
-    // E は player1 にとってダブ東、C は役牌。どちらも1枚見えで HonorSafetyRank は同じ。
     const HONOR_VALUE_VS_DOUBLE_SCENARIO: &str = r#"{
         "hand": "19m19p1478s13467z",
         "draw": "4p",
@@ -1304,7 +1298,6 @@ mod tests {
 
     #[test]
     fn summary_shows_opponent_honor_value_for_guest_wind_over_value_honor() {
-        // 合法 action 順が "C N" でも、客風の N を先に切る。
         let (_, _, output) = rendered(HONOR_GUEST_VS_VALUE_SCENARIO, false);
         assert_eq!(
             section(&output, "Summary"),
@@ -1322,7 +1315,6 @@ mod tests {
 
     #[test]
     fn summary_shows_opponent_honor_value_for_value_honor_over_double_wind() {
-        // 合法 action 順が "E C" でも、ダブ東ではない C を先に切る。
         let (_, _, output) = rendered(HONOR_VALUE_VS_DOUBLE_SCENARIO, false);
         assert_eq!(
             section(&output, "Summary"),
@@ -1357,7 +1349,6 @@ mod tests {
 
     #[test]
     fn summary_omits_opponent_honor_value_outside_honor_safety() {
-        // 数牌防御と通常打牌では役牌価値を表示しない。
         for json in [HALF_SUJI_SCENARIO, NORMAL_SCENARIO] {
             let (_, _, output) = rendered(json, false);
             let summary = section(&output, "Summary");
