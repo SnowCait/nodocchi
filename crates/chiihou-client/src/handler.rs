@@ -454,7 +454,11 @@ nostr:npub1ai000 GET sutehai?";
 :mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_m4:
 nostr:npub1ai000 GET naku? ron pon chi";
         assert_eq!(
-            handle_chiihou_content("npub1server", content, &mut PickSecondAgent),
+            handle_chiihou_content(
+                "npub1server",
+                content,
+                &mut FixedActionAgent(LegalAction::None)
+            ),
             Ok(ChiihouHandlerResult::ReplyContent(
                 "nostr:npub1server naku? no".to_string()
             ))

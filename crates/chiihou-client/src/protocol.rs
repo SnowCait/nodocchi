@@ -233,6 +233,37 @@ fn parse_naku_request<'a>(
     })
 }
 
+pub fn chi_material_pairs(hand: &[ChiihouPai], target: ChiihouPai) -> Vec<[ChiihouPai; 2]> {
+    let suit = target.suit();
+    if suit == ChiihouSuit::Zi {
+        return Vec::new();
+    }
+    let number = i16::from(target.number());
+    [
+        [number - 2, number - 1],
+        [number - 1, number + 1],
+        [number + 1, number + 2],
+    ]
+    .into_iter()
+    .filter_map(|[first, second]| chi_material_pair(hand, suit, first, second))
+    .collect()
+}
+
+fn chi_material_pair(
+    hand: &[ChiihouPai],
+    suit: ChiihouSuit,
+    first: i16,
+    second: i16,
+) -> Option<[ChiihouPai; 2]> {
+    let first = number_pai(suit, first)?;
+    let second = number_pai(suit, second)?;
+    (hand.contains(&first) && hand.contains(&second)).then_some([first, second])
+}
+
+fn number_pai(suit: ChiihouSuit, number: i16) -> Option<ChiihouPai> {
+    ChiihouPai::new(u8::try_from(number).ok()?, suit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +578,83 @@ nostr:npub1ai000 GET naku? ron riichi";
         assert_eq!(
             parse_chiihou_request(content),
             Err(ChiihouProtocolError::UnknownAction("riichi".to_string()))
+        );
+    }
+
+    fn pais(names: &[&str]) -> Vec<ChiihouPai> {
+        names.iter().map(|name| pai(name)).collect()
+    }
+
+    fn pair(first: &str, second: &str) -> [ChiihouPai; 2] {
+        [pai(first), pai(second)]
+    }
+
+    #[test]
+    fn chi_material_has_single_pair_for_lower_run() {
+        assert_eq!(
+            chi_material_pairs(&pais(&["1m", "2m", "9s", "1z"]), pai("3m")),
+            vec![pair("1m", "2m")]
+        );
+    }
+
+    #[test]
+    fn chi_material_has_three_pairs_for_middle_pai() {
+        assert_eq!(
+            chi_material_pairs(&pais(&["1m", "2m", "4m", "5m"]), pai("3m")),
+            vec![pair("1m", "2m"), pair("2m", "4m"), pair("4m", "5m")]
+        );
+    }
+
+    #[test]
+    fn chi_material_pairs_are_ascending() {
+        for pairs in [
+            chi_material_pairs(&pais(&["1m", "2m", "4m", "5m"]), pai("3m")),
+            chi_material_pairs(&pais(&["7p", "8p"]), pai("9p")),
+        ] {
+            assert!(!pairs.is_empty());
+            for [first, second] in pairs {
+                assert_eq!(first.suit(), second.suit());
+                assert!(first.number() < second.number(), "{first} {second}");
+            }
+        }
+    }
+
+    #[test]
+    fn chi_material_clamps_lower_edge_pai() {
+        assert_eq!(
+            chi_material_pairs(&pais(&["2m", "3m", "4m"]), pai("1m")),
+            vec![pair("2m", "3m")]
+        );
+    }
+
+    #[test]
+    fn chi_material_clamps_upper_edge_pai() {
+        assert_eq!(
+            chi_material_pairs(&pais(&["6m", "7m", "8m"]), pai("9m")),
+            vec![pair("7m", "8m")]
+        );
+    }
+
+    #[test]
+    fn chi_material_is_empty_for_honor_pai() {
+        assert!(chi_material_pairs(&pais(&["1z", "1z", "2z", "3z"]), pai("2z")).is_empty());
+    }
+
+    #[test]
+    fn chi_material_is_empty_without_materials() {
+        assert!(chi_material_pairs(&pais(&["1m", "5m", "9m"]), pai("3m")).is_empty());
+    }
+
+    #[test]
+    fn chi_material_ignores_other_suits() {
+        assert!(chi_material_pairs(&pais(&["1p", "2p", "1s", "2s"]), pai("3m")).is_empty());
+    }
+
+    #[test]
+    fn chi_material_does_not_duplicate_pairs_for_duplicate_tiles() {
+        assert_eq!(
+            chi_material_pairs(&pais(&["1m", "1m", "2m", "2m"]), pai("3m")),
+            vec![pair("1m", "2m")]
         );
     }
 

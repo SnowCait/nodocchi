@@ -281,6 +281,14 @@ mod tests {
         }
     }
 
+    struct DeclineAgent;
+
+    impl Agent for DeclineAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            LegalAction::None
+        }
+    }
+
     fn config() -> ChiihouEventConfig {
         ChiihouEventConfig {
             ai_pubkey_hex: "ai_pubkey".to_string(),
@@ -812,7 +820,7 @@ nostr:npub1ai000 GET sutehai?"
     #[test]
     fn builds_naku_no_reply_for_naku_event() {
         let event = valid_event("event1", naku_content());
-        let reply = build_reply_for_event(&event, &config(), &mut PickSecondAgent)
+        let reply = build_reply_for_event(&event, &config(), &mut DeclineAgent)
             .unwrap()
             .unwrap();
         assert_eq!(reply.kind, 42);
@@ -1030,7 +1038,7 @@ nostr:npub1ai000 GET sutehai?"
         let mut seen = SeenEventIds::new();
         let event = valid_event("event1", naku_content());
         let ChiihouIncomingAction::Reply(reply) =
-            classify_incoming_event(&event, &config(), &mut seen, &mut PickSecondAgent).unwrap()
+            classify_incoming_event(&event, &config(), &mut seen, &mut DeclineAgent).unwrap()
         else {
             panic!("expected reply action");
         };

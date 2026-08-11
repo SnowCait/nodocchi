@@ -445,6 +445,14 @@ mod tests {
         }
     }
 
+    struct DeclineAgent;
+
+    impl Agent for DeclineAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            LegalAction::None
+        }
+    }
+
     fn ai_keys() -> Keys {
         Keys::parse(TEST_AI_SECRET_KEY_HEX).unwrap()
     }
@@ -776,7 +784,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let config = config(ChiihouChannel::Hanchan);
         let mut seen = SeenEventIds::new();
         let event = build_request_event(42, &naku_content(), &request_tags(), &server_keys());
-        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut PickSecondAgent)
+        let reply = process_and_sign_nostr_event(&event, &config, &mut seen, &mut DeclineAgent)
             .unwrap()
             .unwrap();
         let server_npub = server_keys().public_key().to_bech32().unwrap();
