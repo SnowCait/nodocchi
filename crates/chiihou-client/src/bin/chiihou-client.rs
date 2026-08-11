@@ -1,4 +1,4 @@
-use bot_core::{NormalAgent, ShantenAgent, TsumogiriAgent};
+use bot_core::{MenzenAgent, NormalAgent, ShantenAgent, TsumogiriAgent};
 use chiihou_client::{
     ChiihouAgentKind, ChiihouCliArgs, ChiihouRuntimeOptions, USAGE, build_cli_nostr_config,
     load_chiihou_nsec, run_chiihou_client_auto_enter_with_options,
@@ -56,6 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ChiihouAgentKind::Shanten => {
             let mut agent = ShantenAgent;
+            run_chiihou_client_auto_enter_with_options(&config, options, &mut agent).await?;
+        }
+        ChiihouAgentKind::Menzen => {
+            let mut agent = MenzenAgent::default();
             run_chiihou_client_auto_enter_with_options(&config, options, &mut agent).await?;
         }
     }

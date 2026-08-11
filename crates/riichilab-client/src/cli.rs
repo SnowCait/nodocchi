@@ -2,7 +2,7 @@ use crate::config::ClientConfig;
 use crate::validation_policy::AgentKind;
 
 pub const USAGE: &str =
-    "usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten]";
+    "usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionMode {
@@ -117,6 +117,12 @@ mod tests {
         let args = parse(&["validate", "--agent", "shanten"]).unwrap();
         assert_eq!(args.mode, ConnectionMode::Validate);
         assert_eq!(args.agent, Some(AgentKind::Shanten));
+    }
+
+    #[test]
+    fn parses_agent_menzen() {
+        let args = parse(&["validate", "--agent", "menzen"]).unwrap();
+        assert_eq!(args.agent, Some(AgentKind::Menzen));
     }
 
     #[test]

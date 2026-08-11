@@ -10,8 +10,8 @@ pub mod push_pull;
 pub use action::LegalAction;
 pub use agent::Agent;
 pub use agents::{
-    AgentActionSource, NormalAgent, ShantenAgent, ShantenDecisionDiagnostic, TsumogiriAgent,
-    diagnose_shanten_decision,
+    AgentActionSource, MenzenAgent, NormalAgent, ShantenAgent, ShantenDecisionDiagnostic,
+    TsumogiriAgent, diagnose_shanten_decision,
 };
 pub use context::GameContext;
 pub use defense::{

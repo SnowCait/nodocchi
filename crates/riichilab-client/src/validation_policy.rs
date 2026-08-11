@@ -1,4 +1,4 @@
-use bot_core::{Agent, GameContext, NormalAgent, ShantenAgent, TsumogiriAgent};
+use bot_core::{Agent, GameContext, MenzenAgent, NormalAgent, ShantenAgent, TsumogiriAgent};
 
 use crate::convert::{
     checked_legal_action_to_mjai_action, possible_actions_to_legal_actions,
@@ -14,6 +14,7 @@ pub type ResponsePolicy =
 pub enum AgentKind {
     Tsumogiri,
     Shanten,
+    Menzen,
     #[default]
     Normal,
 }
@@ -31,6 +32,7 @@ impl AgentKind {
         match self {
             Self::Tsumogiri => build_tsumogiri_response_with_context,
             Self::Shanten => build_shanten_response_with_context,
+            Self::Menzen => build_menzen_response_with_context,
             Self::Normal => build_normal_response_with_context,
         }
     }
@@ -44,6 +46,7 @@ impl std::str::FromStr for AgentKind {
             "" | "normal" => Ok(Self::Normal),
             "tsumogiri" | "tsumo-giri" => Ok(Self::Tsumogiri),
             "shanten" => Ok(Self::Shanten),
+            "menzen" => Ok(Self::Menzen),
             other => Err(AgentKindError::Unknown(other.to_string())),
         }
     }
@@ -54,6 +57,7 @@ impl std::fmt::Display for AgentKind {
         match self {
             Self::Tsumogiri => write!(f, "tsumogiri"),
             Self::Shanten => write!(f, "shanten"),
+            Self::Menzen => write!(f, "menzen"),
             Self::Normal => write!(f, "normal"),
         }
     }
@@ -155,6 +159,35 @@ pub(crate) fn build_shanten_response_with_context(
     )
 }
 
+pub fn build_menzen_response(
+    state: &ValidationState,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+) -> Option<MjaiAction> {
+    let context = game_context_from_validation_state(state);
+    build_menzen_response_with_context(state, &context, request_id, possible_actions)
+}
+
+pub(crate) fn build_menzen_response_with_context(
+    state: &ValidationState,
+    context: &GameContext,
+    request_id: u64,
+    possible_actions: &[MjaiPossibleAction],
+) -> Option<MjaiAction> {
+    let legal_actions = possible_actions_to_legal_actions(possible_actions);
+
+    let mut agent = MenzenAgent::default();
+    let chosen = agent.act(context, &legal_actions);
+
+    checked_legal_action_to_mjai_action(
+        &chosen,
+        state.actor_or_default(),
+        request_id,
+        possible_actions,
+        context,
+    )
+}
+
 pub(crate) fn game_context_from_validation_state(state: &ValidationState) -> GameContext {
     state
         .last_tsumo()
@@ -228,6 +261,11 @@ mod tests {
         }
 
         #[test]
+        fn parses_menzen() {
+            assert_eq!("menzen".parse::<AgentKind>().unwrap(), AgentKind::Menzen);
+        }
+
+        #[test]
         fn parses_mixed_case() {
             assert_eq!("Normal".parse::<AgentKind>().unwrap(), AgentKind::Normal);
             assert_eq!(
@@ -235,6 +273,7 @@ mod tests {
                 AgentKind::Tsumogiri
             );
             assert_eq!("Shanten".parse::<AgentKind>().unwrap(), AgentKind::Shanten);
+            assert_eq!("Menzen".parse::<AgentKind>().unwrap(), AgentKind::Menzen);
         }
 
         #[test]
@@ -262,6 +301,7 @@ mod tests {
             assert_eq!(AgentKind::Normal.to_string(), "normal");
             assert_eq!(AgentKind::Tsumogiri.to_string(), "tsumogiri");
             assert_eq!(AgentKind::Shanten.to_string(), "shanten");
+            assert_eq!(AgentKind::Menzen.to_string(), "menzen");
         }
     }
 
@@ -762,6 +802,58 @@ mod tests {
         }
     }
 
+    mod menzen_policy {
+        use super::*;
+
+        #[test]
+        fn passes_on_pon_opportunity() {
+            let state = ValidationState::new();
+            let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
+            let response = build_menzen_response(&state, 90, &possible_actions);
+            assert_eq!(
+                response,
+                Some(MjaiAction::None {
+                    request_id: Some(90),
+                })
+            );
+        }
+
+        #[test]
+        fn hora_survives_pon_filtering() {
+            let state = state_with_tsumo(1, "6p");
+            let possible_actions = vec![
+                possible_pon(),
+                MjaiPossibleAction::Hora,
+                MjaiPossibleAction::None,
+            ];
+            let response = build_menzen_response(&state, 91, &possible_actions);
+            assert_eq!(
+                response,
+                Some(MjaiAction::Hora {
+                    actor: 1,
+                    target: None,
+                    pai: None,
+                    request_id: Some(91),
+                })
+            );
+        }
+
+        #[test]
+        fn matches_shanten_policy_without_meld_actions() {
+            let state = state_with_tsumo(0, "6p");
+            for possible_actions in [
+                vec![possible_dahai("1m"), possible_dahai("6p")],
+                vec![MjaiPossibleAction::Reach, possible_dahai("6p")],
+                vec![MjaiPossibleAction::Hora, possible_dahai("6p")],
+            ] {
+                assert_eq!(
+                    build_menzen_response(&state, 92, &possible_actions),
+                    build_shanten_response(&state, 92, &possible_actions)
+                );
+            }
+        }
+    }
+
     mod policy_with_context {
         use super::*;
         use bot_logic::TileId;
@@ -994,6 +1086,28 @@ mod tests {
                 assert_eq!(
                     policy(&state, &context, 32, &possible_actions),
                     build_shanten_response(&state, 32, &possible_actions)
+                );
+            }
+        }
+
+        #[test]
+        fn menzen_kind_uses_menzen_policy() {
+            let policy = AgentKind::Menzen.response_policy();
+            let state = state_with_tsumo(0, "6p");
+            let context = game_context_from_validation_state(&state);
+            for possible_actions in [
+                vec![
+                    MjaiPossibleAction::Hora,
+                    possible_dahai("6p"),
+                    MjaiPossibleAction::None,
+                ],
+                vec![MjaiPossibleAction::Reach, possible_dahai("6p")],
+                vec![possible_pon(), MjaiPossibleAction::None],
+                vec![possible_pon()],
+            ] {
+                assert_eq!(
+                    policy(&state, &context, 33, &possible_actions),
+                    build_menzen_response(&state, 33, &possible_actions)
                 );
             }
         }

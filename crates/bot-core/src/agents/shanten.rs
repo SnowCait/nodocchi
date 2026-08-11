@@ -472,18 +472,18 @@ impl Agent for ShantenAgent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::defense::{HonorSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_discard_evaluation, select_discard_action};
     use crate::push_pull::{PushPullReason, push_pull_inputs_from_context};
     use bot_logic::{DiscardComparisonReason, TileId, TileType, compare_discard_evaluations};
 
-    fn tile(value: u8) -> TileId {
+    pub(crate) fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
     }
 
-    fn dahai(value: u8) -> LegalAction {
+    pub(crate) fn dahai(value: u8) -> LegalAction {
         LegalAction::Dahai { tile: tile(value) }
     }
 
@@ -665,7 +665,7 @@ mod tests {
     const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 72];
     const TENPAI_DRAWN: u8 = 104;
 
-    fn tenpai_context(extra_visible: &[u8]) -> GameContext {
+    pub(crate) fn tenpai_context(extra_visible: &[u8]) -> GameContext {
         let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
         let mut visible = hand.clone();
         visible.push(tile(TENPAI_DRAWN));
@@ -680,7 +680,7 @@ mod tests {
         )
     }
 
-    fn tenpai_actions() -> Vec<LegalAction> {
+    pub(crate) fn tenpai_actions() -> Vec<LegalAction> {
         TENPAI_HAND
             .iter()
             .map(|&value| dahai(value))
@@ -732,7 +732,10 @@ mod tests {
     }
 
     // 他家(player 1)がリーチしており、その河に 16(5m) がある局面。自分は player 0。
-    fn opponent_reach_context(drawn_tile: Option<u8>, hand_values: &[u8]) -> GameContext {
+    pub(crate) fn opponent_reach_context(
+        drawn_tile: Option<u8>,
+        hand_values: &[u8],
+    ) -> GameContext {
         let discards = [vec![], vec![tile(16)], vec![], vec![]];
         GameContext::from_parts_with_table_state(
             drawn_tile.map(tile),

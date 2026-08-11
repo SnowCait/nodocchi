@@ -6,7 +6,7 @@ use nostr_sdk::{FromBech32, PublicKey};
 use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
 use crate::secret::{ChiihouSecretError, validate_chiihou_nsec};
 
-pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]";
+pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten|menzen] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChiihouAgentKind {
@@ -14,6 +14,7 @@ pub enum ChiihouAgentKind {
     Normal,
     Tsumogiri,
     Shanten,
+    Menzen,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -28,6 +29,7 @@ impl std::str::FromStr for ChiihouAgentKind {
             "normal" => Ok(Self::Normal),
             "tsumogiri" | "tsumo-giri" => Ok(Self::Tsumogiri),
             "shanten" => Ok(Self::Shanten),
+            "menzen" => Ok(Self::Menzen),
             other => Err(ChiihouAgentKindParseError(other.to_string())),
         }
     }
@@ -39,6 +41,7 @@ impl std::fmt::Display for ChiihouAgentKind {
             Self::Normal => write!(f, "normal"),
             Self::Tsumogiri => write!(f, "tsumogiri"),
             Self::Shanten => write!(f, "shanten"),
+            Self::Menzen => write!(f, "menzen"),
         }
     }
 }
@@ -497,6 +500,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_menzen() {
+        let args = parse(&["--channel", "hanchan", "--agent", "menzen"]).unwrap();
+        assert_eq!(args.agent, ChiihouAgentKind::Menzen);
+    }
+
+    #[test]
     fn defaults_to_normal_agent() {
         let args = parse(&["--channel", "hanchan"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Normal);
@@ -516,6 +525,8 @@ mod tests {
         assert_eq!(args.agent, ChiihouAgentKind::Shanten);
         let args = parse(&["--channel", "hanchan", "--agent", "TSUMOGIRI"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Tsumogiri);
+        let args = parse(&["--channel", "hanchan", "--agent", "Menzen"]).unwrap();
+        assert_eq!(args.agent, ChiihouAgentKind::Menzen);
     }
 
     #[test]
@@ -638,6 +649,7 @@ mod tests {
         assert_eq!(ChiihouAgentKind::Normal.to_string(), "normal");
         assert_eq!(ChiihouAgentKind::Tsumogiri.to_string(), "tsumogiri");
         assert_eq!(ChiihouAgentKind::Shanten.to_string(), "shanten");
+        assert_eq!(ChiihouAgentKind::Menzen.to_string(), "menzen");
     }
 
     #[test]
