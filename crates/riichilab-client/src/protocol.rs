@@ -29,6 +29,33 @@ pub enum MjaiAction {
         request_id: Option<u64>,
     },
 
+    #[serde(rename = "chi")]
+    Chi {
+        actor: u8,
+        pai: String,
+        consumed: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+
+    #[serde(rename = "pon")]
+    Pon {
+        actor: u8,
+        pai: String,
+        consumed: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+
+    #[serde(rename = "daiminkan")]
+    Daiminkan {
+        actor: u8,
+        pai: String,
+        consumed: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+
     #[serde(rename = "ankan")]
     Ankan {
         actor: u8,
@@ -142,6 +169,9 @@ pub fn mjai_action_type(action: &MjaiAction) -> &'static str {
         MjaiAction::Dahai { .. } => "dahai",
         MjaiAction::Reach { .. } => "reach",
         MjaiAction::Hora { .. } => "hora",
+        MjaiAction::Chi { .. } => "chi",
+        MjaiAction::Pon { .. } => "pon",
+        MjaiAction::Daiminkan { .. } => "daiminkan",
         MjaiAction::Ankan { .. } => "ankan",
         MjaiAction::Kakan { .. } => "kakan",
         MjaiAction::Ryukyoku { .. } => "ryukyoku",
@@ -423,6 +453,100 @@ mod tests {
         };
         let json = serde_json::to_string(&action).unwrap();
         assert_eq!(json, r#"{"type":"hora","actor":0}"#);
+    }
+
+    // RiichiEnv v0.4.8 の Action::to_mjai() は type / actor / pai / consumed のみを出力し、
+    // Bot-to-Server action JSON に target を含めない。
+    #[test]
+    fn chi_serializes_without_target() {
+        let action = MjaiAction::Chi {
+            actor: 0,
+            pai: "3m".to_string(),
+            consumed: vec!["1m".to_string(), "2m".to_string()],
+            request_id: Some(64),
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "chi",
+                "actor": 0,
+                "pai": "3m",
+                "consumed": ["1m", "2m"],
+                "request_id": 64,
+            })
+        );
+        assert!(json.get("target").is_none());
+        let parsed: MjaiAction = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn pon_serializes_without_target() {
+        let action = MjaiAction::Pon {
+            actor: 0,
+            pai: "E".to_string(),
+            consumed: vec!["E".to_string(), "E".to_string()],
+            request_id: Some(65),
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "pon",
+                "actor": 0,
+                "pai": "E",
+                "consumed": ["E", "E"],
+                "request_id": 65,
+            })
+        );
+        assert!(json.get("target").is_none());
+        let parsed: MjaiAction = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn daiminkan_serializes_without_target() {
+        let action = MjaiAction::Daiminkan {
+            actor: 0,
+            pai: "E".to_string(),
+            consumed: vec!["E".to_string(), "E".to_string(), "E".to_string()],
+            request_id: Some(66),
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "daiminkan",
+                "actor": 0,
+                "pai": "E",
+                "consumed": ["E", "E", "E"],
+                "request_id": 66,
+            })
+        );
+        assert!(json.get("target").is_none());
+        let parsed: MjaiAction = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn claim_actions_omit_request_id_when_absent() {
+        let action = MjaiAction::Pon {
+            actor: 2,
+            pai: "5m".to_string(),
+            consumed: vec!["5m".to_string(), "5mr".to_string()],
+            request_id: None,
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "pon",
+                "actor": 2,
+                "pai": "5m",
+                "consumed": ["5m", "5mr"],
+            })
+        );
     }
 
     #[test]
@@ -771,6 +895,50 @@ mod tests {
                 request_id: None,
             }),
             "hora"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Chi {
+                actor: 0,
+                pai: "3m".to_string(),
+                consumed: vec!["1m".to_string(), "2m".to_string()],
+                request_id: None,
+            }),
+            "chi"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Pon {
+                actor: 0,
+                pai: "E".to_string(),
+                consumed: vec!["E".to_string(), "E".to_string()],
+                request_id: None,
+            }),
+            "pon"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Daiminkan {
+                actor: 0,
+                pai: "E".to_string(),
+                consumed: vec!["E".to_string(), "E".to_string(), "E".to_string()],
+                request_id: None,
+            }),
+            "daiminkan"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Ankan {
+                actor: 0,
+                consumed: vec!["1s".to_string(); 4],
+                request_id: None,
+            }),
+            "ankan"
+        );
+        assert_eq!(
+            mjai_action_type(&MjaiAction::Kakan {
+                actor: 0,
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(); 3],
+                request_id: None,
+            }),
+            "kakan"
         );
         assert_eq!(
             mjai_action_type(&MjaiAction::Ryukyoku { request_id: None }),

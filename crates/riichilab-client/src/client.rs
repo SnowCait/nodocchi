@@ -212,6 +212,15 @@ pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields
         MjaiAction::Hora {
             actor, request_id, ..
         }
+        | MjaiAction::Chi {
+            actor, request_id, ..
+        }
+        | MjaiAction::Pon {
+            actor, request_id, ..
+        }
+        | MjaiAction::Daiminkan {
+            actor, request_id, ..
+        }
         | MjaiAction::Ankan {
             actor, request_id, ..
         }
@@ -977,6 +986,18 @@ mod tests {
         }
     }
 
+    // possible_actions に無い Pon を選ぶ、fallback 経路検証用のテスト専用 Agent。
+    struct MismatchedPonAgent;
+
+    impl Agent for MismatchedPonAgent {
+        fn act(&mut self, _ctx: &GameContext, _legal_actions: &[LegalAction]) -> LegalAction {
+            LegalAction::Pon {
+                tile: TileId::new(104).unwrap(),
+                consumed: vec![TileId::new(104).unwrap(), TileId::new(104).unwrap()],
+            }
+        }
+    }
+
     fn possible_kakan() -> MjaiPossibleAction {
         MjaiPossibleAction::Kakan {
             pai: "P".to_string(),
@@ -984,10 +1005,23 @@ mod tests {
         }
     }
 
+    fn possible_chi() -> MjaiPossibleAction {
+        MjaiPossibleAction::Chi {
+            pai: "3m".to_string(),
+            consumed: vec!["1m".to_string(), "2m".to_string()],
+        }
+    }
+
+    fn possible_daiminkan() -> MjaiPossibleAction {
+        MjaiPossibleAction::Daiminkan {
+            pai: "E".to_string(),
+            consumed: vec!["E".to_string(), "E".to_string(), "E".to_string()],
+        }
+    }
+
     #[test]
-    fn pon_choice_falls_back_to_none_when_none_is_possible() {
-        // Agent が Pon を選んでも checked conversion は失敗し、None が possible なら none fallback。
-        let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
+    fn chi_choice_builds_chi_via_checked_conversion() {
+        let possible_actions = vec![possible_chi(), MjaiPossibleAction::None];
         let mut agent = ClaimingAgent;
         let response = build_response_for_request_with_context(
             0,
@@ -998,25 +1032,154 @@ mod tests {
         );
         assert_eq!(
             response,
-            Some(MjaiAction::None {
+            Some(MjaiAction::Chi {
+                actor: 0,
+                pai: "3m".to_string(),
+                consumed: vec!["1m".to_string(), "2m".to_string()],
                 request_id: Some(94),
             })
+        );
+        assert_eq!(
+            serde_json::to_string(&response.unwrap()).unwrap(),
+            r#"{"type":"chi","actor":0,"pai":"3m","consumed":["1m","2m"],"request_id":94}"#
         );
     }
 
     #[test]
-    fn pon_choice_does_not_return_none_without_possible_none() {
-        // possible_actions に None が無い場合、無条件 none は返さない。
-        let possible_actions = vec![possible_pon()];
+    fn pon_choice_builds_pon_via_checked_conversion() {
+        let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
         let mut agent = ClaimingAgent;
         let response = build_response_for_request_with_context(
-            0,
+            1,
             95,
             &possible_actions,
             &GameContext::default(),
             &mut agent,
         );
+        assert_eq!(
+            response,
+            Some(MjaiAction::Pon {
+                actor: 1,
+                pai: "E".to_string(),
+                consumed: vec!["E".to_string(), "E".to_string()],
+                request_id: Some(95),
+            })
+        );
+        assert_eq!(
+            serde_json::to_string(&response.unwrap()).unwrap(),
+            r#"{"type":"pon","actor":1,"pai":"E","consumed":["E","E"],"request_id":95}"#
+        );
+    }
+
+    #[test]
+    fn daiminkan_choice_builds_daiminkan_via_checked_conversion() {
+        let possible_actions = vec![possible_daiminkan(), MjaiPossibleAction::None];
+        let mut agent = ClaimingAgent;
+        let response = build_response_for_request_with_context(
+            2,
+            96,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(
+            response,
+            Some(MjaiAction::Daiminkan {
+                actor: 2,
+                pai: "E".to_string(),
+                consumed: vec!["E".to_string(), "E".to_string(), "E".to_string()],
+                request_id: Some(96),
+            })
+        );
+        assert_eq!(
+            serde_json::to_string(&response.unwrap()).unwrap(),
+            r#"{"type":"daiminkan","actor":2,"pai":"E","consumed":["E","E","E"],"request_id":96}"#
+        );
+    }
+
+    #[test]
+    fn mismatched_pon_choice_falls_back_to_none_when_none_is_possible() {
+        // possible_actions に一致する Pon が無ければ checked conversion は失敗し、
+        // None が possible なら none fallback になる。
+        let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
+        let mut agent = MismatchedPonAgent;
+        let response = build_response_for_request_with_context(
+            0,
+            97,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(
+            response,
+            Some(MjaiAction::None {
+                request_id: Some(97),
+            })
+        );
+    }
+
+    #[test]
+    fn mismatched_pon_choice_does_not_return_none_without_possible_none() {
+        // possible_actions に None が無い場合、無条件 none は返さない。
+        let possible_actions = vec![possible_pon()];
+        let mut agent = MismatchedPonAgent;
+        let response = build_response_for_request_with_context(
+            0,
+            98,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
         assert_eq!(response, None);
+    }
+
+    #[test]
+    fn shanten_agent_still_passes_on_claims() {
+        // 送信できるようになっても、ShantenAgent の鳴き判断は変えない。
+        for claim in [possible_chi(), possible_pon(), possible_daiminkan()] {
+            let possible_actions = vec![claim.clone(), MjaiPossibleAction::None];
+            let mut agent = ShantenAgent;
+            let response = build_response_for_request_with_context(
+                0,
+                99,
+                &possible_actions,
+                &GameContext::default(),
+                &mut agent,
+            );
+            assert_eq!(
+                response,
+                Some(MjaiAction::None {
+                    request_id: Some(99),
+                }),
+                "claim: {claim:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shanten_agent_still_prefers_hora_over_claims() {
+        let possible_actions = vec![
+            MjaiPossibleAction::Hora,
+            possible_pon(),
+            MjaiPossibleAction::None,
+        ];
+        let mut agent = ShantenAgent;
+        let response = build_response_for_request_with_context(
+            0,
+            100,
+            &possible_actions,
+            &GameContext::default(),
+            &mut agent,
+        );
+        assert_eq!(
+            response,
+            Some(MjaiAction::Hora {
+                actor: 0,
+                target: None,
+                pai: None,
+                request_id: Some(100),
+            })
+        );
     }
 
     #[test]
@@ -1043,11 +1206,11 @@ mod tests {
     }
 
     #[test]
-    fn pon_choice_falls_back_to_dahai_when_none_absent() {
+    fn mismatched_pon_choice_falls_back_to_dahai_when_none_absent() {
         // None が無く Dahai が possible なら、fallback は dahai (ツモ切り一致で tsumogiri: true)。
         let possible_actions = vec![possible_pon(), possible_dahai("6p")];
         let context = GameContext::with_drawn_tile(TileId::new(56).unwrap());
-        let mut agent = ClaimingAgent;
+        let mut agent = MismatchedPonAgent;
         let response =
             build_response_for_request_with_context(1, 97, &possible_actions, &context, &mut agent);
         assert_eq!(
