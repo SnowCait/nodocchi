@@ -2102,6 +2102,85 @@ mod tests {
         assert_eq!(diagnostic.own_fixed_meld_count, None);
     }
 
+    // 白ポン1組。副露の種類によらず完成済み面子1として数える。
+    fn white_dragon_pon() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Pon,
+            vec![tile(124), tile(125), tile(126)],
+            Some(tile(124)),
+        )
+    }
+
+    #[test]
+    fn act_uses_the_fixed_meld_aware_normal_discard() {
+        // 白ポン1組 + 123456m 78p 55s + ツモ N。N を切ると副露込みの通常形テンパイ (待ち 6p / 9p)。
+        let hand_values = [0u8, 4, 8, 12, 17, 20, 60, 64, 89, 90];
+        let ctx =
+            context_with_own_melds(Some(0), &hand_values, Some(120), vec![white_dragon_pon()]);
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(120)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), dahai(120));
+
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(diagnostic.normal_discard_action, Some(dahai(120)));
+        assert_eq!(
+            diagnostic.own_fixed_meld_count.map(FixedMeldCount::get),
+            Some(1)
+        );
+
+        let selected = diagnostic
+            .normal_discard
+            .as_ref()
+            .unwrap()
+            .selected
+            .as_ref()
+            .unwrap();
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+        assert_eq!(selected.shanten_after_discard.standard(), 0);
+        assert_eq!(selected.acceptance_total_remaining(), 8);
+        let acceptance: Vec<String> = selected
+            .acceptance_after_discard
+            .tiles
+            .iter()
+            .map(|entry| entry.tile.to_mjai_string())
+            .collect();
+        assert_eq!(acceptance, vec!["6p".to_string(), "9p".to_string()]);
+
+        // 同じ評価が押し引き入力へ共有される。
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        assert_eq!(offense.min_shanten_after_discard, 0);
+        assert_eq!(offense.acceptance_total_remaining, 8);
+    }
+
+    #[test]
+    fn act_without_own_melds_keeps_the_concealed_evaluation() {
+        // 同じ手牌でも副露が無ければ従来どおり二向聴のまま評価する。
+        let hand_values = [0u8, 4, 8, 12, 17, 20, 60, 64, 89, 90];
+        let ctx = context_with_own_melds(Some(0), &hand_values, Some(120), vec![]);
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(120)])
+            .collect();
+
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        let selected = diagnostic
+            .normal_discard
+            .as_ref()
+            .unwrap()
+            .selected
+            .as_ref()
+            .unwrap();
+        assert_eq!(selected.min_shanten_after_discard(), 2);
+        assert!(selected.shanten_after_discard.concealed().is_some());
+    }
+
     #[test]
     fn melds_do_not_change_the_selected_action() {
         let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36];

@@ -24,7 +24,7 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 ///
-/// 打牌後13枚の簡易打点 proxy は `PushPullInputs` とログに保持し、単独の子リーチに対する子の
+/// 打牌後の concealed hand の簡易打点 proxy は `PushPullInputs` とログに保持し、単独の子リーチに対する子の
 /// 一向聴だけを対象にした限定補正で使用する。それ以外の branch では判定に影響しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
@@ -38,8 +38,10 @@ pub enum PushPullMode {
 /// 現在の手牌から既存の通常打牌選択を行った場合の、最善候補の評価値を保持する。
 /// 新しい向聴数計算や受け入れ計算・一向聴形分類は行わず、既存の `DiscardEvaluation` から取得する。
 ///
-/// 打点関連フィールドは、打牌後13枚の手牌内で確認できる牌だけから求める簡易 proxy であり、
-/// 正確な翻数・打点ではない。副露・暗槓は `GameContext` に情報が無いため含まない。
+/// 打点関連フィールドは、打牌後の concealed hand 内で確認できる牌だけから求める簡易 proxy であり、
+/// 正確な翻数・打点ではない。現在の簡易 proxy は fixed meld をまだ含めないため、副露・暗槓の
+/// ドラや役牌は数えない。向聴数・受け入れは fixed meld を考慮した `DiscardEvaluation` の値をそのまま
+/// 受け取る。
 /// `decide_push_pull()` はこの proxy の合計だけを、単独の子リーチに対する子の一向聴の
 /// 限定補正で参照する。個別フィールドは診断・ログ用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,15 +51,16 @@ pub struct PushPullOffenseState {
     pub acceptance_type_count: usize,
     pub standard_iishanten_shape_after_discard: IishantenShape,
 
-    /// 打牌後13枚に残るドラの総数。表示牌ドラと赤ドラを含む。
+    /// 打牌後の concealed hand に残るドラの総数。表示牌ドラと赤ドラを含む。
     /// 同じ牌を示す表示牌が複数あれば重複分も数え、赤5が表示牌ドラでもあれば両方数える。
     pub dora_count_after_discard: u8,
-    /// 打牌後13枚に残る赤ドラ(赤5)の枚数。`dora_count_after_discard` の内数であり、
+    /// 打牌後の concealed hand に残る赤ドラ(赤5)の枚数。`dora_count_after_discard` の内数であり、
     /// 合計 proxy へ別途加算しない。
     pub red_dora_count_after_discard: u8,
-    /// 打牌後13枚の手牌内で確認できる役牌刻子・槓子候補の翻 proxy。
+    /// 打牌後の concealed hand 内で確認できる役牌刻子・槓子候補の翻 proxy。
     /// 三元牌刻子は1、場風刻子・自風刻子は各1、連風牌(場風かつ自風)は2。
-    /// 同じ牌が4枚あっても刻子・槓子候補1組として一度だけ数える。副露は含まない。
+    /// 同じ牌が4枚あっても刻子・槓子候補1組として一度だけ数える。現在の簡易 proxy は
+    /// fixed meld をまだ含めないため、副露した役牌は数えない。
     /// 場風・自風が不明な風牌は数えない(三元牌は風情報が無くても数える)。
     pub value_honor_han_proxy_after_discard: u8,
 }
@@ -71,7 +74,7 @@ impl PushPullOffenseState {
     }
 }
 
-/// 打牌後13枚の簡易打点 proxy の内訳。`PushPullOffenseState` の各フィールドへ転記する前段の計算値。
+/// 打牌後の concealed hand の簡易打点 proxy の内訳。`PushPullOffenseState` の各フィールドへ転記する前段の計算値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct OffenseValueProxyBreakdown {
     dora_count: u8,
@@ -79,7 +82,7 @@ struct OffenseValueProxyBreakdown {
     value_honor_han_proxy: u8,
 }
 
-/// 補正済み評価が指す物理牌を1枚だけ除いた、打牌後13枚の物理牌一覧を返す。
+/// 補正済み評価が指す物理牌を1枚だけ除いた、打牌後の concealed hand の物理牌一覧を返す。
 ///
 /// 手牌とツモ牌を結合した物理牌一覧から、`evaluation.discard` の牌種かつ
 /// `evaluation.discards_red_five` の赤フラグと一致する牌を1枚だけ除く。赤5と通常5の混同を避けるため、
@@ -102,10 +105,11 @@ fn tiles_after_discard(
     Some(tiles)
 }
 
-/// 打牌後13枚の手牌内で確認できる役牌刻子・槓子候補の翻 proxy。
+/// 打牌後の concealed hand 内で確認できる役牌刻子・槓子候補の翻 proxy。
 ///
 /// 三元牌は常に1。風牌は `round_wind` / `seat_wind` と一致した分だけ数え、連風牌は2。
-/// 風情報が不明な風牌は数えない。副露・暗槓は含まない。
+/// 風情報が不明な風牌は数えない。現在の簡易 proxy は fixed meld をまだ含めないため、
+/// 副露・暗槓は数えない。
 fn value_honor_triplet_han(
     tile: TileType,
     round_wind: Option<TileType>,
@@ -119,10 +123,10 @@ fn value_honor_triplet_han(
     han
 }
 
-/// 補正済み評価と `GameContext` から、打牌後13枚の簡易打点 proxy の内訳を一度だけ計算する。
+/// 補正済み評価と `GameContext` から、打牌後の concealed hand の簡易打点 proxy の内訳を一度だけ計算する。
 ///
 /// 実際に切られる物理牌カテゴリ(赤5・通常5)と一致するよう、`tiles_after_discard` で
-/// 物理牌を1枚除いた打牌後13枚へ処理を一元化する。ドラ総数・赤ドラ数・役牌翻 proxy を同じ牌集合から求める。
+/// 物理牌を1枚除いた打牌後の concealed hand へ処理を一元化する。ドラ総数・赤ドラ数・役牌翻 proxy を同じ牌集合から求める。
 ///
 /// 通常の `ShantenAgent` 経路では補正済み評価と合法 action の物理牌情報が一致する不変条件があるため、
 /// 一致する物理牌は必ず見つかる。それでも見つからない場合は panic せず、契約違反を `debug_assert` で
@@ -134,7 +138,7 @@ fn offense_value_proxy_after_discard(
     let Some(tiles) = tiles_after_discard(context, evaluation) else {
         debug_assert!(
             false,
-            "打牌後13枚を構築できない: 補正済み評価と一致する物理牌が手牌・ツモ牌に存在しない"
+            "打牌後の concealed hand を構築できない: 補正済み評価と一致する物理牌が手牌・ツモ牌に存在しない"
         );
         return OffenseValueProxyBreakdown::default();
     };
@@ -296,7 +300,7 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 /// また、暫定 threshold は実戦の regression test に基づいて将来調整する。
-/// 打牌後13枚の簡易打点 proxy(`PushPullOffenseState::simple_value_proxy_after_discard()`)は、
+/// 打牌後の concealed hand の簡易打点 proxy(`PushPullOffenseState::simple_value_proxy_after_discard()`)は、
 /// 単独の子リーチに対する子の一向聴だけを対象にした限定補正で参照する。テンパイ・親リーチ・
 /// 複数リーチ・二向聴以上・自分が親の場合は従来どおり proxy を見ない。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
@@ -1432,8 +1436,96 @@ mod tests {
         );
     }
 
-    // ここから打牌後13枚の簡易打点 proxy のテスト。
-    use bot_logic::{Acceptance, Shanten};
+    // ---- 副露済み手牌の通常打牌評価が押し引き入力へ届くこと ----
+
+    // 白ポン1組 + 123456m 78p 55s + ツモ N。N を切ると副露込みの通常形テンパイ。
+    fn one_meld_context(own_melds: Vec<crate::meld::Meld>) -> GameContext {
+        let hand = [0u8, 4, 8, 12, 17, 20, 60, 64, 89, 90]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[0] = own_melds;
+
+        GameContext::from_parts_with_melds(
+            Some(tile(120)),
+            hand,
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            Some(3),
+            Default::default(),
+            [false, true, false, false],
+            melds,
+        )
+    }
+
+    fn one_meld_pon() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Pon,
+            vec![tile(124), tile(125), tile(126)],
+            Some(tile(124)),
+        )
+    }
+
+    fn offense_state_from_normal_discard(context: &GameContext) -> PushPullOffenseState {
+        let tiles: Vec<TileId> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .collect();
+        let evaluation = select_best_discard_evaluation(context, &tiles).unwrap();
+        push_pull_inputs_from_context_with_evaluation(context, Some(&evaluation))
+            .offense
+            .unwrap()
+    }
+
+    #[test]
+    fn fixed_meld_aware_evaluation_reaches_the_offense_state() {
+        let context = one_meld_context(vec![one_meld_pon()]);
+        let offense = offense_state_from_normal_discard(&context);
+
+        // 通常打牌評価と同じ副露込みの向聴・受け入れがそのまま届く。
+        assert_eq!(offense.min_shanten_after_discard, 0);
+        assert_eq!(offense.acceptance_total_remaining, 8);
+        assert_eq!(offense.acceptance_type_count, 2);
+
+        // threshold は変更していない。単独の子リーチに対するテンパイなので押す。
+        let inputs = PushPullInputs {
+            opponent_reach_count: 1,
+            dealer_reacher: false,
+            self_dealer: false,
+            offense: Some(offense),
+        };
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::TenpaiAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn concealed_hand_offense_state_is_unchanged() {
+        // 同じ手牌でも副露が無ければ従来どおり二向聴のまま押し引きへ渡る。
+        let offense = offense_state_from_normal_discard(&one_meld_context(vec![]));
+        assert_eq!(offense.min_shanten_after_discard, 2);
+
+        let decision = decide_push_pull(&PushPullInputs {
+            opponent_reach_count: 1,
+            dealer_reacher: false,
+            self_dealer: false,
+            offense: Some(offense),
+        });
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::TwoOrMoreShanten);
+    }
+
+    // ここから打牌後の concealed hand の簡易打点 proxy のテスト。
+    use bot_logic::{Acceptance, EffectiveShanten, Shanten};
 
     fn ids(values: &[u8]) -> Vec<TileId> {
         values.iter().map(|&value| tile(value)).collect()
@@ -1445,11 +1537,11 @@ mod tests {
 
     // 打牌後 proxy 計算で読むのは discard 牌種と discards_red_five だけ。他フィールドはダミー。
     fn proxy_evaluation(discard: TileType, discards_red_five: bool) -> DiscardEvaluation {
-        let shanten = Shanten {
+        let shanten = EffectiveShanten::Concealed(Shanten {
             standard: 1,
             chiitoitsu: 6,
             kokushi: 13,
-        };
+        });
         DiscardEvaluation {
             discard,
             count_before_discard: 1,

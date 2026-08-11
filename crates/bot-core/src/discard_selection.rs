@@ -1,9 +1,11 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use bot_logic::{
-    AcceptanceTile, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
-    TileCounts, TileId, TileType, compare_discard_evaluations, diagnose_discard_evaluations,
-    evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_visible_tiles,
+    DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
+    EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, TileCounts, TileId, TileType,
+    compare_discard_evaluations, diagnose_discard_evaluations_with_fixed_melds,
+    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -66,7 +68,11 @@ pub(crate) fn select_discard_action_with_evaluation(
     let legal = legal_discard_evaluations(context, legal_actions);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
-        log_discard_diagnostic(context, &legal.tiles, &diagnose_legal_evaluations(&legal));
+        log_discard_diagnostic(
+            context,
+            &legal.tiles,
+            &diagnose_legal_evaluations(context, &legal),
+        );
     }
 
     selection_from_legal_evaluations(&legal, legal_actions)
@@ -82,7 +88,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelectionWithDiagnostic {
     let legal = legal_discard_evaluations(context, legal_actions);
-    let diagnostic = diagnose_legal_evaluations(&legal);
+    let diagnostic = diagnose_legal_evaluations(context, &legal);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(context, &legal.tiles, &diagnostic);
@@ -129,9 +135,17 @@ fn selection_from_legal_evaluations(
 }
 
 // 絞り込み済みの合法候補集合から既存の診断を構築する。診断と tracing ログはこの結果を共有する。
-fn diagnose_legal_evaluations(legal: &LegalDiscardEvaluations) -> DiscardDecisionDiagnostic {
+// block context の副露補正が本番評価とずれないよう、診断にも同じ副露済み面子数を渡す。
+fn diagnose_legal_evaluations(
+    context: &GameContext,
+    legal: &LegalDiscardEvaluations,
+) -> DiscardDecisionDiagnostic {
     let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
-    diagnose_discard_evaluations(&counts, &legal.evaluations)
+    diagnose_discard_evaluations_with_fixed_melds(
+        &counts,
+        evaluation_fixed_meld_count(context),
+        &legal.evaluations,
+    )
 }
 
 // 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
@@ -154,23 +168,43 @@ fn legal_dahai_tile_for_type(tile_type: TileType, legal_actions: &[LegalAction])
 }
 
 // context に応じた全打牌候補の評価一覧を返す。通常経路と診断経路で分岐を共有する。
+//
+// 自分の副露済み面子数が分かる場合はその値を fixed-meld 対応評価へ渡し、副露済み手牌でも
+// 完成済み面子を含めた向聴・受け入れで評価する。分からない場合は
+// evaluation_fixed_meld_count() の方針どおり門前評価へフォールバックする。
 fn evaluate_discard_candidates(context: &GameContext, tiles: &[TileId]) -> Vec<DiscardEvaluation> {
+    let fixed_meld_count = evaluation_fixed_meld_count(context);
+
     if context.visible_tiles().is_empty() {
-        evaluate_discards_from_tiles_with_context(
+        evaluate_discards_from_tiles_with_fixed_melds_and_context(
             tiles,
+            fixed_meld_count,
             context.dora_indicators(),
             context.round_wind(),
             context.seat_wind(),
         )
     } else {
-        evaluate_discards_from_tiles_with_visible_tiles(
+        evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
             tiles,
+            fixed_meld_count,
             context.dora_indicators(),
             context.round_wind(),
             context.seat_wind(),
             context.visible_tiles(),
         )
     }
+}
+
+// 打牌評価に使う副露済み面子数。
+//
+// `player_id` が無いなど自分の副露が確定できない場合 (`own_fixed_meld_count() == None`) は、
+// player 0 の副露数などを推測せず、既存の門前評価経路と同じ `FixedMeldCount::NONE` で評価する。
+// これは情報不足時の fallback であり「副露0と確定した」という診断ではない。診断が報告する
+// `own_fixed_meld_count` は引き続き `None` のままにする。
+fn evaluation_fixed_meld_count(context: &GameContext) -> FixedMeldCount {
+    context
+        .own_fixed_meld_count()
+        .unwrap_or(FixedMeldCount::NONE)
 }
 
 // 合法 Dahai に対応する牌種を持つ評価候補だけを、元の順序を保って残す。
@@ -261,9 +295,9 @@ fn log_discard_diagnostic(
         visible_tile_count = context.visible_tiles().len(),
         candidate_count = diagnostic.candidates.len(),
         normal_discard = %selected.discard.to_mjai_string(),
-        normal_standard_shanten = selected.shanten_after_discard.standard,
-        normal_chiitoitsu_shanten = selected.shanten_after_discard.chiitoitsu,
-        normal_kokushi_shanten = selected.shanten_after_discard.kokushi,
+        normal_standard_shanten = selected.shanten_after_discard.standard(),
+        normal_chiitoitsu_shanten = ?chiitoitsu_shanten(selected.shanten_after_discard),
+        normal_kokushi_shanten = ?kokushi_shanten(selected.shanten_after_discard),
         normal_min_shanten = selected.min_shanten_after_discard(),
         normal_acceptance_total_remaining = selected.acceptance_total_remaining(),
         normal_acceptance_type_count = selected.acceptance_type_count(),
@@ -284,13 +318,25 @@ fn log_discard_diagnostic(
     }
 }
 
-fn acceptance_tile_diagnostic(tile: &AcceptanceTile) -> (String, u8, i8, i8, i8, i8) {
+// 副露済み面子がある場合、七対子・国士は完成形候補にできないため向聴数が存在しない。
+// 適当な sentinel を表示せず `None` にして、意味の無い値をログへ出さない。
+fn chiitoitsu_shanten(shanten: EffectiveShanten) -> Option<i8> {
+    shanten.concealed().map(|shanten| shanten.chiitoitsu)
+}
+
+fn kokushi_shanten(shanten: EffectiveShanten) -> Option<i8> {
+    shanten.concealed().map(|shanten| shanten.kokushi)
+}
+
+fn acceptance_tile_diagnostic(
+    tile: &EffectiveAcceptanceTile,
+) -> (String, u8, i8, Option<i8>, Option<i8>, i8) {
     (
         tile.tile.to_mjai_string(),
         tile.remaining,
-        tile.shanten_after_draw.standard,
-        tile.shanten_after_draw.chiitoitsu,
-        tile.shanten_after_draw.kokushi,
+        tile.shanten_after_draw.standard(),
+        chiitoitsu_shanten(tile.shanten_after_draw),
+        kokushi_shanten(tile.shanten_after_draw),
         tile.shanten_after_draw.min(),
     )
 }
@@ -312,9 +358,9 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
             candidate.selected_is_strictly_better_than_candidate,
         comparison_reason = ?candidate.comparison_reason,
         count_before_discard = evaluation.count_before_discard,
-        standard_shanten_after_discard = evaluation.shanten_after_discard.standard,
-        chiitoitsu_shanten_after_discard = evaluation.shanten_after_discard.chiitoitsu,
-        kokushi_shanten_after_discard = evaluation.shanten_after_discard.kokushi,
+        standard_shanten_after_discard = evaluation.shanten_after_discard.standard(),
+        chiitoitsu_shanten_after_discard = ?chiitoitsu_shanten(evaluation.shanten_after_discard),
+        kokushi_shanten_after_discard = ?kokushi_shanten(evaluation.shanten_after_discard),
         min_shanten_after_discard = evaluation.min_shanten_after_discard(),
         acceptance_total_remaining = evaluation.acceptance_total_remaining(),
         acceptance_type_count = evaluation.acceptance_type_count(),
@@ -710,7 +756,11 @@ mod tests {
             context.dora_indicators(),
         );
         let counts = TileCounts::from_tiles(tiles.iter().copied());
-        let diagnostic = diagnose_discard_evaluations(&counts, &legal);
+        let diagnostic = diagnose_discard_evaluations_with_fixed_melds(
+            &counts,
+            evaluation_fixed_meld_count(&context),
+            &legal,
+        );
 
         assert_eq!(diagnostic.selected.as_ref(), select_best_evaluation(&legal));
         assert!(diagnostic.selected.is_some());
@@ -746,7 +796,11 @@ mod tests {
             context.dora_indicators(),
         );
         let counts = TileCounts::from_tiles(all_tiles.iter().copied());
-        let diagnostic = diagnose_discard_evaluations(&counts, &legal);
+        let diagnostic = diagnose_discard_evaluations_with_fixed_melds(
+            &counts,
+            evaluation_fixed_meld_count(&context),
+            &legal,
+        );
 
         assert_eq!(diagnostic.selected.as_ref(), select_best_evaluation(&legal));
         assert!(diagnostic.selected.is_some());
@@ -759,11 +813,11 @@ mod tests {
         let source = AcceptanceTile {
             tile: TileType::from_mjai_type_str("5mr").unwrap(),
             remaining: 3,
-            shanten_after_draw: Shanten {
+            shanten_after_draw: EffectiveShanten::Concealed(Shanten {
                 standard: 1,
                 chiitoitsu: 2,
                 kokushi: 5,
-            },
+            }),
         };
         let before = source;
 
@@ -773,10 +827,29 @@ mod tests {
         assert_eq!(tile, "5m");
         assert_eq!(remaining, 3);
         assert_eq!(standard, 1);
-        assert_eq!(chiitoitsu, 2);
-        assert_eq!(kokushi, 5);
+        assert_eq!(chiitoitsu, Some(2));
+        assert_eq!(kokushi, Some(5));
         assert_eq!(min, 1);
         assert_eq!(source, before);
+    }
+
+    #[test]
+    fn acceptance_tile_diagnostic_omits_chiitoitsu_and_kokushi_with_fixed_melds() {
+        // 副露済み面子がある場合、七対子・国士の向聴数は存在しないので sentinel を出さない。
+        use bot_logic::{AcceptanceTile, TileType};
+
+        let source = AcceptanceTile {
+            tile: TileType::from_mjai_type_str("5p").unwrap(),
+            remaining: 4,
+            shanten_after_draw: EffectiveShanten::Melded { standard: -1 },
+        };
+
+        let (_, _, standard, chiitoitsu, kokushi, min) = acceptance_tile_diagnostic(&source);
+
+        assert_eq!(standard, -1);
+        assert_eq!(chiitoitsu, None);
+        assert_eq!(kokushi, None);
+        assert_eq!(min, -1);
     }
 
     #[test]
@@ -1198,6 +1271,169 @@ mod tests {
         assert_eq!(with_diagnostic.selection.action, Some(dahai(16)));
         assert!(five.evaluation.discards_red_five);
         assert_eq!(five.evaluation.discarded_dora_count, 2);
+    }
+
+    // ---- 副露済み手牌の通常打牌評価 ----
+
+    use crate::meld::{Meld, MeldKind};
+
+    // 白ポン1組。副露の種類によらず完成済み面子1として数える。
+    fn white_dragon_pon() -> Meld {
+        Meld::new(
+            MeldKind::Pon,
+            vec![tile(124), tile(125), tile(126)],
+            Some(tile(124)),
+        )
+    }
+
+    // 123456m 78p 55s (concealed) + ツモ N。白ポン1組を持つ player 0 の局面。
+    fn one_meld_context(melds: [Vec<Meld>; 4], player_id: Option<u8>) -> GameContext {
+        let hand = tiles(&[0, 4, 8, 12, 17, 20, 60, 64, 89, 90]);
+        GameContext::from_parts_with_melds(
+            Some(tile(120)),
+            hand,
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            player_id,
+            None,
+            Default::default(),
+            [false; 4],
+            melds,
+        )
+    }
+
+    fn one_meld_actions() -> Vec<LegalAction> {
+        [0u8, 4, 8, 12, 17, 20, 60, 64, 89, 90, 120]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect()
+    }
+
+    fn acceptance_summary(evaluation: &DiscardEvaluation) -> Vec<(String, u8)> {
+        evaluation
+            .acceptance_after_discard
+            .tiles
+            .iter()
+            .map(|entry| (entry.tile.to_mjai_string(), entry.remaining))
+            .collect()
+    }
+
+    #[test]
+    fn own_meld_makes_discard_evaluation_fixed_meld_aware() {
+        let context = one_meld_context([vec![white_dragon_pon()], vec![], vec![], vec![]], Some(0));
+        assert_eq!(
+            context.own_fixed_meld_count().map(FixedMeldCount::get),
+            Some(1)
+        );
+
+        let selection = select_discard_action_with_evaluation(&context, &one_meld_actions());
+        let evaluation = selection.evaluation.as_ref().unwrap();
+
+        assert_eq!(evaluation.discard.to_mjai_string(), "N");
+        assert_eq!(evaluation.min_shanten_after_discard(), 0);
+        assert_eq!(evaluation.shanten_after_discard.standard(), 0);
+        assert_eq!(evaluation.shanten_after_discard.concealed(), None);
+        assert_eq!(
+            acceptance_summary(evaluation),
+            vec![("6p".to_string(), 4), ("9p".to_string(), 4)]
+        );
+        assert_eq!(evaluation.acceptance_total_remaining(), 8);
+        assert_eq!(selection.action, Some(dahai(120)));
+    }
+
+    #[test]
+    fn opponent_melds_do_not_change_own_discard_evaluation() {
+        // 他家の副露は自分の向聴数に影響しないため、門前評価のままになる。
+        let context = one_meld_context([vec![], vec![white_dragon_pon()], vec![], vec![]], Some(0));
+        assert_eq!(context.own_fixed_meld_count(), Some(FixedMeldCount::NONE));
+
+        let selection = select_discard_action_with_evaluation(&context, &one_meld_actions());
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(evaluation.min_shanten_after_discard(), 2);
+        assert!(evaluation.shanten_after_discard.concealed().is_some());
+    }
+
+    #[test]
+    fn missing_player_id_falls_back_to_the_concealed_evaluation() {
+        // player_id が無い場合は player 0 の副露数を推測せず、門前評価へフォールバックする。
+        let context = one_meld_context([vec![white_dragon_pon()], vec![], vec![], vec![]], None);
+        assert_eq!(context.own_fixed_meld_count(), None);
+        assert_eq!(evaluation_fixed_meld_count(&context), FixedMeldCount::NONE);
+
+        let selection = select_discard_action_with_evaluation(&context, &one_meld_actions());
+        let evaluation = selection.evaluation.as_ref().unwrap();
+        assert_eq!(evaluation.min_shanten_after_discard(), 2);
+        assert!(evaluation.shanten_after_discard.concealed().is_some());
+    }
+
+    #[test]
+    fn diagnostic_path_shares_the_fixed_meld_aware_evaluation() {
+        let context = one_meld_context([vec![white_dragon_pon()], vec![], vec![], vec![]], Some(0));
+        let actions = one_meld_actions();
+
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        assert_eq!(
+            with_diagnostic.selection,
+            select_discard_action_with_evaluation(&context, &actions)
+        );
+
+        let selected = with_diagnostic.diagnostic.selected.as_ref().unwrap();
+        assert_eq!(selected.discard.to_mjai_string(), "N");
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+
+        // 診断の block context も本番評価と同じ副露済み面子数で求める。
+        let counts = TileCounts::from_tiles(
+            context
+                .hand_tiles()
+                .iter()
+                .copied()
+                .chain(context.drawn_tile()),
+        );
+        for candidate in &with_diagnostic.diagnostic.candidates {
+            assert_eq!(
+                candidate.block_context,
+                bot_logic::discard_block_context_with_fixed_melds(
+                    &counts,
+                    candidate.evaluation.discard,
+                    FixedMeldCount::new(1).unwrap(),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_meld_evaluation_uses_visible_tiles() {
+        // 他家に見えている 6p 2枚を反映しても、副露込みのテンパイ判定は維持する。
+        let hand = tiles(&[0, 4, 8, 12, 17, 20, 60, 64, 89, 90]);
+        let mut visible = hand.clone();
+        visible.push(tile(120));
+        visible.extend(tiles(&[56, 57]));
+        let context = GameContext::from_parts_with_melds(
+            Some(tile(120)),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+            Some(0),
+            None,
+            Default::default(),
+            [false; 4],
+            [vec![white_dragon_pon()], vec![], vec![], vec![]],
+        );
+
+        let selection = select_discard_action_with_evaluation(&context, &one_meld_actions());
+        let evaluation = selection.evaluation.as_ref().unwrap();
+
+        assert_eq!(evaluation.discard.to_mjai_string(), "N");
+        assert_eq!(evaluation.min_shanten_after_discard(), 0);
+        assert_eq!(
+            acceptance_summary(evaluation),
+            vec![("6p".to_string(), 2), ("9p".to_string(), 4)]
+        );
+        assert_eq!(evaluation.acceptance_total_remaining(), 6);
     }
 
     #[test]
