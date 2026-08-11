@@ -1,10 +1,11 @@
+use bot_core::MeldKind;
 use nostr_sdk::PublicKey;
 use thiserror::Error;
 
 use crate::lifecycle::{
     CHIIHOU_PLAYER_COUNT, ChiihouLifecycleNotification, ChiihouPlayerScore, ChiihouWind,
 };
-use crate::protocol::ChiihouPai;
+use crate::protocol::{ChiihouPai, ChiihouSuit};
 use crate::table_notification::{ChiihouSayAction, ChiihouTableNotification};
 
 const OPEN_KAKAN_TILE_COUNT: usize = 1;
@@ -35,6 +36,17 @@ pub enum ChiihouTableStateError {
     InvalidOpenTileCount(usize),
     #[error("open call does not contain the claimable discard")]
     OpenWithoutCalledTile,
+    #[error("open tiles do not form a meld: {0:?}")]
+    OpenTilesAreNotMeld(Vec<ChiihouPai>),
+    #[error("kakan {0} has no matching pon")]
+    KakanWithoutPon(ChiihouPai),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChiihouMeld {
+    pub kind: MeldKind,
+    pub tiles: Vec<ChiihouPai>,
+    pub called_tile: Option<ChiihouPai>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -48,6 +60,7 @@ pub struct ChiihouTableSnapshot {
     pub discards: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
     pub reached: [bool; CHIIHOU_PLAYER_COUNT],
     pub newly_visible_meld_tiles: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
+    pub melds: [Vec<ChiihouMeld>; CHIIHOU_PLAYER_COUNT],
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -68,6 +81,7 @@ pub struct ChiihouMatchState {
     reached: [bool; CHIIHOU_PLAYER_COUNT],
     claimable_discard: Option<ChiihouPai>,
     newly_visible_meld_tiles: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
+    melds: [Vec<ChiihouMeld>; CHIIHOU_PLAYER_COUNT],
 }
 
 impl ChiihouMatchState {
@@ -139,6 +153,10 @@ impl ChiihouMatchState {
         &self.newly_visible_meld_tiles
     }
 
+    pub fn melds(&self) -> &[Vec<ChiihouMeld>; CHIIHOU_PLAYER_COUNT] {
+        &self.melds
+    }
+
     pub fn player_index(&self, player: &PublicKey) -> Option<usize> {
         self.players.iter().position(|p| p == player)
     }
@@ -163,6 +181,7 @@ impl ChiihouMatchState {
             discards: self.discards.clone(),
             reached: self.reached,
             newly_visible_meld_tiles: self.newly_visible_meld_tiles.clone(),
+            melds: self.melds.clone(),
         }
     }
 
@@ -258,7 +277,9 @@ impl ChiihouMatchState {
                 let Some(index) = self.player_index(player) else {
                     return Err(ChiihouTableStateError::UnknownPlayer);
                 };
+                let meld_update = self.meld_update_from_open(index, tiles)?;
                 let newly_visible = self.newly_visible_tiles_from_open(tiles)?;
+                self.apply_meld_update(index, meld_update);
                 self.newly_visible_meld_tiles[index].extend(newly_visible);
                 self.claimable_discard = None;
                 Ok(())
@@ -270,9 +291,7 @@ impl ChiihouMatchState {
         &self,
         tiles: &[ChiihouPai],
     ) -> Result<Vec<ChiihouPai>, ChiihouTableStateError> {
-        let called = self
-            .claimable_discard
-            .and_then(|discard| tiles.iter().position(|tile| *tile == discard));
+        let called = self.called_tile_index(tiles);
         match (tiles.len(), called) {
             (OPEN_KAKAN_TILE_COUNT, _) | (OPEN_KAN_TILE_COUNT, None) => Ok(tiles.to_vec()),
             (OPEN_CALL_TILE_COUNT, Some(called)) | (OPEN_KAN_TILE_COUNT, Some(called)) => {
@@ -285,6 +304,65 @@ impl ChiihouMatchState {
         }
     }
 
+    fn called_tile_index(&self, tiles: &[ChiihouPai]) -> Option<usize> {
+        self.claimable_discard
+            .and_then(|discard| tiles.iter().position(|tile| *tile == discard))
+    }
+
+    fn meld_update_from_open(
+        &self,
+        player: usize,
+        tiles: &[ChiihouPai],
+    ) -> Result<ChiihouMeldUpdate, ChiihouTableStateError> {
+        let called = self.called_tile_index(tiles);
+        match (tiles.len(), called) {
+            (OPEN_KAKAN_TILE_COUNT, _) => {
+                let tile = tiles[0];
+                let pon = self
+                    .pon_index_of(player, tile)
+                    .ok_or(ChiihouTableStateError::KakanWithoutPon(tile))?;
+                Ok(ChiihouMeldUpdate::UpgradePonToKakan { pon, tile })
+            }
+            (OPEN_CALL_TILE_COUNT, Some(called)) => Ok(ChiihouMeldUpdate::Append(ChiihouMeld {
+                kind: called_meld_kind(tiles)?,
+                tiles: tiles.to_vec(),
+                called_tile: Some(tiles[called]),
+            })),
+            (OPEN_KAN_TILE_COUNT, called) => {
+                if !is_same_tile(tiles) {
+                    return Err(ChiihouTableStateError::OpenTilesAreNotMeld(tiles.to_vec()));
+                }
+                Ok(ChiihouMeldUpdate::Append(ChiihouMeld {
+                    kind: match called {
+                        Some(_) => MeldKind::Daiminkan,
+                        None => MeldKind::Ankan,
+                    },
+                    tiles: tiles.to_vec(),
+                    called_tile: called.map(|called| tiles[called]),
+                }))
+            }
+            (OPEN_CALL_TILE_COUNT, None) => Err(ChiihouTableStateError::OpenWithoutCalledTile),
+            (count, _) => Err(ChiihouTableStateError::InvalidOpenTileCount(count)),
+        }
+    }
+
+    fn pon_index_of(&self, player: usize, tile: ChiihouPai) -> Option<usize> {
+        self.melds.get(player)?.iter().position(|meld| {
+            meld.kind == MeldKind::Pon && meld.tiles.first().copied() == Some(tile)
+        })
+    }
+
+    fn apply_meld_update(&mut self, player: usize, update: ChiihouMeldUpdate) {
+        match update {
+            ChiihouMeldUpdate::Append(meld) => self.melds[player].push(meld),
+            ChiihouMeldUpdate::UpgradePonToKakan { pon, tile } => {
+                let meld = &mut self.melds[player][pon];
+                meld.kind = MeldKind::Kakan;
+                meld.tiles.push(tile);
+            }
+        }
+    }
+
     fn reset_table_state(&mut self) {
         self.hand.clear();
         self.drawn = None;
@@ -294,6 +372,7 @@ impl ChiihouMatchState {
         self.reached = [false; CHIIHOU_PLAYER_COUNT];
         self.claimable_discard = None;
         self.newly_visible_meld_tiles = Default::default();
+        self.melds = Default::default();
     }
 
     fn discard_from_held_hand(&mut self, tile: ChiihouPai) -> Result<(), ChiihouTableStateError> {
@@ -307,6 +386,38 @@ impl ChiihouMatchState {
         self.drawn = None;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChiihouMeldUpdate {
+    Append(ChiihouMeld),
+    UpgradePonToKakan { pon: usize, tile: ChiihouPai },
+}
+
+fn called_meld_kind(tiles: &[ChiihouPai]) -> Result<MeldKind, ChiihouTableStateError> {
+    if is_same_tile(tiles) {
+        return Ok(MeldKind::Pon);
+    }
+    if is_sequence(tiles) {
+        return Ok(MeldKind::Chi);
+    }
+    Err(ChiihouTableStateError::OpenTilesAreNotMeld(tiles.to_vec()))
+}
+
+fn is_same_tile(tiles: &[ChiihouPai]) -> bool {
+    tiles.windows(2).all(|pair| pair[0] == pair[1])
+}
+
+fn is_sequence(tiles: &[ChiihouPai]) -> bool {
+    let Some(first) = tiles.first() else {
+        return false;
+    };
+    if first.suit() == ChiihouSuit::Zi || tiles.iter().any(|tile| tile.suit() != first.suit()) {
+        return false;
+    }
+    let mut numbers: Vec<u8> = tiles.iter().map(|tile| tile.number()).collect();
+    numbers.sort_unstable();
+    numbers.windows(2).all(|pair| pair[1] == pair[0] + 1)
 }
 
 fn seat_wind_from_player_and_dealer(player_id: u8, oya: u8) -> Option<ChiihouWind> {
@@ -852,11 +963,223 @@ mod tests {
 
     #[test]
     fn kakan_adds_the_single_notified_tile() {
-        let mut state = state_in_kyoku();
+        let mut state = ponned_state();
         state
             .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z"]))
             .unwrap();
-        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z"]));
+        assert_eq!(
+            state.newly_visible_meld_tiles()[2],
+            pais(&["1z", "1z", "1z"])
+        );
+    }
+
+    fn ponned_state() -> ChiihouMatchState {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z", "1z"]))
+            .unwrap();
+        state
+    }
+
+    fn meld_kinds(state: &ChiihouMatchState, player: usize) -> Vec<MeldKind> {
+        state.melds()[player].iter().map(|meld| meld.kind).collect()
+    }
+
+    #[test]
+    fn initial_state_has_no_melds() {
+        let state = ChiihouMatchState::new();
+        assert!(state.melds().iter().all(|melds| melds.is_empty()));
+    }
+
+    #[test]
+    fn pon_records_a_pon_meld_with_the_called_tile() {
+        let state = ponned_state();
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Pon]);
+        assert_eq!(state.melds()[2][0].tiles, pais(&["1z", "1z", "1z"]));
+        assert_eq!(state.melds()[2][0].called_tile, Some(pai("1z")));
+        assert!(state.melds()[2][0].kind.is_open());
+        assert!(state.melds()[0].is_empty());
+    }
+
+    #[test]
+    fn chi_records_a_chi_meld_with_the_called_tile() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "3m"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1m", "2m", "3m"]))
+            .unwrap();
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Chi]);
+        assert_eq!(state.melds()[2][0].tiles, pais(&["1m", "2m", "3m"]));
+        assert_eq!(state.melds()[2][0].called_tile, Some(pai("3m")));
+    }
+
+    #[test]
+    fn daiminkan_records_a_daiminkan_meld() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(3), &["1z", "1z", "1z", "1z"]),
+            )
+            .unwrap();
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Daiminkan]);
+        assert_eq!(state.melds()[2][0].tiles.len(), 4);
+        assert_eq!(state.melds()[2][0].called_tile, Some(pai("1z")));
+        assert!(state.melds()[2][0].kind.is_open());
+    }
+
+    #[test]
+    fn ankan_records_an_ankan_meld_without_called_tile() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "9p"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &tsumo(ai_pubkey(), 69, "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(ai_pubkey(), &["1z", "1z", "1z", "1z"]))
+            .unwrap();
+        assert_eq!(meld_kinds(&state, 0), [MeldKind::Ankan]);
+        assert_eq!(state.melds()[0][0].called_tile, None);
+        assert!(!state.melds()[0][0].kind.is_open());
+    }
+
+    #[test]
+    fn kakan_upgrades_the_existing_pon_instead_of_adding_a_meld() {
+        let mut state = ponned_state();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z"]))
+            .unwrap();
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Kakan]);
+        assert_eq!(state.melds()[2][0].tiles, pais(&["1z"; 4]));
+        assert_eq!(state.melds()[2][0].called_tile, Some(pai("1z")));
+    }
+
+    #[test]
+    fn kakan_without_pon_is_error_and_keeps_state() {
+        let mut state = state_in_kyoku();
+        assert_eq!(
+            state.apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z"])),
+            Err(ChiihouTableStateError::KakanWithoutPon(pai("1z")))
+        );
+        assert!(state.melds()[2].is_empty());
+        assert!(state.newly_visible_meld_tiles()[2].is_empty());
+    }
+
+    #[test]
+    fn kakan_of_another_tile_than_the_pon_is_error() {
+        let mut state = ponned_state();
+        assert_eq!(
+            state.apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["2z"])),
+            Err(ChiihouTableStateError::KakanWithoutPon(pai("2z")))
+        );
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Pon]);
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z", "1z"]));
+    }
+
+    #[test]
+    fn kakan_by_another_player_does_not_touch_own_pon() {
+        let mut state = ponned_state();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(3), "2z"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(4), &["2z", "2z", "2z"]))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(4), &["2z"]))
+            .unwrap();
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Pon]);
+        assert_eq!(meld_kinds(&state, 3), [MeldKind::Kakan]);
+    }
+
+    #[test]
+    fn melds_accumulate_per_player() {
+        let mut state = ponned_state();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(3), "3m"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1m", "2m", "3m"]))
+            .unwrap();
+        assert_eq!(meld_kinds(&state, 2), [MeldKind::Pon, MeldKind::Chi]);
+        assert!(state.melds()[3].is_empty());
+    }
+
+    #[test]
+    fn open_tiles_that_do_not_form_a_meld_are_error() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1m"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(3), &["1m", "3m", "5m"])
+            ),
+            Err(ChiihouTableStateError::OpenTilesAreNotMeld(pais(&[
+                "1m", "3m", "5m"
+            ])))
+        );
+        assert!(state.melds()[2].is_empty());
+        assert!(state.newly_visible_meld_tiles()[2].is_empty());
+    }
+
+    #[test]
+    fn open_kan_of_mixed_tiles_is_error() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(3), &["1z", "1z", "1z", "2z"])
+            ),
+            Err(ChiihouTableStateError::OpenTilesAreNotMeld(pais(&[
+                "1z", "1z", "1z", "2z"
+            ])))
+        );
+        assert!(state.melds()[2].is_empty());
+        assert!(state.newly_visible_meld_tiles()[2].is_empty());
+    }
+
+    #[test]
+    fn open_with_invalid_tile_count_keeps_melds_empty() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z"])),
+            Err(ChiihouTableStateError::InvalidOpenTileCount(2))
+        );
+        assert!(state.melds()[2].is_empty());
+    }
+
+    #[test]
+    fn open_from_unknown_player_keeps_melds_empty() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(9), &["1z", "1z", "1z"])
+            ),
+            Err(ChiihouTableStateError::UnknownPlayer)
+        );
+        assert!(state.melds().iter().all(|melds| melds.is_empty()));
     }
 
     #[test]
@@ -979,6 +1302,7 @@ mod tests {
                 .iter()
                 .all(|tiles| tiles.is_empty())
         );
+        assert!(state.melds().iter().all(|melds| melds.is_empty()));
     }
 
     #[test]
@@ -1007,6 +1331,7 @@ mod tests {
                 .iter()
                 .all(|tiles| tiles.is_empty())
         );
+        assert!(state.melds().iter().all(|melds| melds.is_empty()));
     }
 
     #[test]
@@ -1023,20 +1348,24 @@ mod tests {
         assert_eq!(snapshot.reached, [false, true, false, false]);
         assert_eq!(snapshot.newly_visible_meld_tiles[3], pais(&["2m", "3m"]));
         assert!(snapshot.newly_visible_meld_tiles[0].is_empty());
+        assert_eq!(
+            snapshot.melds[3]
+                .iter()
+                .map(|meld| meld.kind)
+                .collect::<Vec<_>>(),
+            [MeldKind::Chi]
+        );
+        assert!(snapshot.melds[0].is_empty());
     }
 
     #[test]
     fn table_snapshot_meld_tiles_exclude_the_called_tile() {
-        let mut state = state_in_kyoku();
-        state
-            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
-            .unwrap();
-        state
-            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z", "1z"]))
-            .unwrap();
+        let state = ponned_state();
         let snapshot = state.table_snapshot(&ai_pubkey());
         assert_eq!(snapshot.discards[1], pais(&["1z"]));
         assert_eq!(snapshot.newly_visible_meld_tiles[2], pais(&["1z", "1z"]));
+        assert_eq!(snapshot.melds[2][0].tiles, pais(&["1z", "1z", "1z"]));
+        assert_eq!(snapshot.melds[2][0].called_tile, Some(pai("1z")));
     }
 
     #[test]

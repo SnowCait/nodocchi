@@ -1,4 +1,4 @@
-use bot_core::{Agent, GameContext, LegalAction, select_discard_action};
+use bot_core::{Agent, GameContext, LegalAction, Meld, select_discard_action};
 use bot_logic::{TileCounts, TileId, calculate_shanten};
 
 use crate::convert::{
@@ -6,7 +6,7 @@ use crate::convert::{
     tile_type_from_chiihou_wind,
 };
 use crate::lifecycle::CHIIHOU_PLAYER_COUNT;
-use crate::match_state::ChiihouTableSnapshot;
+use crate::match_state::{ChiihouMeld, ChiihouTableSnapshot};
 use crate::protocol::{ChiihouNakuAction, ChiihouPai, ChiihouRequest};
 use crate::reply::{
     build_naku_no_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
@@ -96,7 +96,11 @@ fn game_context_from_request_with_state(
             .flatten()
             .map(|&pai| temporary_tile_id_from_chiihou_pai(pai)),
     );
-    GameContext::from_parts_with_table_state(
+    let mut melds: [Vec<Meld>; CHIIHOU_PLAYER_COUNT] = Default::default();
+    for (player_melds, state_melds) in melds.iter_mut().zip(&state.melds) {
+        *player_melds = state_melds.iter().map(meld_from_chiihou_meld).collect();
+    }
+    GameContext::from_parts_with_melds(
         drawn_tile,
         hand_tiles,
         dora_indicators,
@@ -107,6 +111,18 @@ fn game_context_from_request_with_state(
         state.oya,
         discards,
         state.reached,
+        melds,
+    )
+}
+
+fn meld_from_chiihou_meld(meld: &ChiihouMeld) -> Meld {
+    Meld::new(
+        meld.kind,
+        meld.tiles
+            .iter()
+            .map(|&pai| temporary_tile_id_from_chiihou_pai(pai))
+            .collect(),
+        meld.called_tile.map(temporary_tile_id_from_chiihou_pai),
     )
 }
 
@@ -1281,6 +1297,7 @@ mod tests {
             discards,
             reached: [false, true, false, false],
             newly_visible_meld_tiles,
+            melds: Default::default(),
         }
     }
 
@@ -1384,6 +1401,70 @@ mod tests {
         let context =
             game_context_from_naku_request_with_state(&[pai("5p")], &ponned_east_snapshot());
         assert_eq!(visible_tile_count(&context, "1z"), 3);
+    }
+
+    fn own_pon_snapshot() -> ChiihouTableSnapshot {
+        let mut discards: [Vec<ChiihouPai>; 4] = Default::default();
+        discards[1] = vec![pai("1z")];
+        let mut newly_visible_meld_tiles: [Vec<ChiihouPai>; 4] = Default::default();
+        newly_visible_meld_tiles[0] = vec![pai("1z"), pai("1z")];
+        let mut melds: [Vec<ChiihouMeld>; 4] = Default::default();
+        melds[0] = vec![ChiihouMeld {
+            kind: bot_core::MeldKind::Pon,
+            tiles: vec![pai("1z"); 3],
+            called_tile: Some(pai("1z")),
+        }];
+        ChiihouTableSnapshot {
+            player_id: Some(0),
+            discards,
+            newly_visible_meld_tiles,
+            melds,
+            ..ChiihouTableSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn context_holds_melds_per_player() {
+        let context =
+            game_context_from_sutehai_request_with_state(&[pai("5p")], None, &own_pon_snapshot());
+        let melds = context.melds_of(0).unwrap();
+        assert_eq!(melds.len(), 1);
+        assert_eq!(melds[0].kind(), bot_core::MeldKind::Pon);
+        assert_eq!(melds[0].tiles(), [tile_of("1z"); 3]);
+        assert_eq!(melds[0].called_tile(), Some(tile_of("1z")));
+        assert!(context.melds_of(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn own_pon_makes_context_fixed_meld_count_one() {
+        let context =
+            game_context_from_sutehai_request_with_state(&[pai("5p")], None, &own_pon_snapshot());
+        assert_eq!(
+            context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn melds_do_not_add_visible_tiles_beyond_the_river_and_newly_visible_tiles() {
+        let context =
+            game_context_from_sutehai_request_with_state(&[pai("5p")], None, &own_pon_snapshot());
+        assert_eq!(visible_tile_count(&context, "1z"), 3);
+    }
+
+    #[test]
+    fn context_without_melds_has_empty_melds() {
+        let context =
+            game_context_from_sutehai_request_with_state(&[pai("1m")], None, &snapshot_for_tests());
+        assert!(context.melds().iter().all(|melds| melds.is_empty()));
+        assert_eq!(
+            context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(0)
+        );
     }
 
     #[test]

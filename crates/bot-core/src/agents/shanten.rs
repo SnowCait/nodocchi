@@ -13,7 +13,9 @@ use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_context_with_evaluation,
 };
-use bot_logic::{DiscardDecisionDiagnostic, TileCounts, calculate_acceptance_with_visible_tiles};
+use bot_logic::{
+    DiscardDecisionDiagnostic, FixedMeldCount, TileCounts, calculate_acceptance_with_visible_tiles,
+};
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
@@ -101,6 +103,7 @@ pub struct ShantenDecisionDiagnostic {
     pub push_pull_decision: Option<PushPullDecision>,
     /// 防御 fallback を検討した場合の診断。採用されなかった場合も候補評価を保持する。
     pub defense: Option<DefenseDecisionDiagnostic>,
+    pub own_fixed_meld_count: Option<FixedMeldCount>,
 }
 
 impl ShantenDecisionDiagnostic {
@@ -187,6 +190,7 @@ impl ShantenAgent {
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
             defense: diagnostics.defense,
+            own_fixed_meld_count: context.own_fixed_meld_count(),
         }
     }
 
@@ -2039,6 +2043,85 @@ mod tests {
         let normal_discard = diagnostic.normal_discard.as_ref().unwrap();
         assert_eq!(normal_discard.selected, None);
         assert!(normal_discard.candidates.is_empty());
+    }
+
+    fn pon_meld() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Pon,
+            vec![tile(108), tile(109), tile(110)],
+            Some(tile(108)),
+        )
+    }
+
+    fn context_with_own_melds(
+        player_id: Option<u8>,
+        hand_values: &[u8],
+        drawn_tile: Option<u8>,
+        own_melds: Vec<crate::meld::Meld>,
+    ) -> GameContext {
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        if let Some(player_id) = player_id {
+            melds[usize::from(player_id)] = own_melds;
+        }
+        GameContext::from_parts_with_melds(
+            drawn_tile.map(tile),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            player_id,
+            None,
+            Default::default(),
+            [false; 4],
+            melds,
+        )
+    }
+
+    #[test]
+    fn diagnose_reports_own_fixed_meld_count() {
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36];
+        let ctx = context_with_own_melds(Some(0), &hand_values, Some(40), vec![pon_meld()]);
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(40)])
+            .collect();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.own_fixed_meld_count.map(FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_no_own_fixed_meld_count_without_player_id() {
+        let ctx = GameContext::default();
+        let diagnostic = diagnose_matching_act(&ctx, &[]);
+        assert_eq!(diagnostic.own_fixed_meld_count, None);
+    }
+
+    #[test]
+    fn melds_do_not_change_the_selected_action() {
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36];
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(40)])
+            .collect();
+        let without_melds = context_with_own_melds(Some(0), &hand_values, Some(40), vec![]);
+        let with_melds = context_with_own_melds(Some(0), &hand_values, Some(40), vec![pon_meld()]);
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&with_melds, &actions),
+            agent.act(&without_melds, &actions)
+        );
+        assert_eq!(
+            ShantenAgent::diagnose(&with_melds, &actions).selected_action,
+            ShantenAgent::diagnose(&without_melds, &actions).selected_action
+        );
     }
 
     #[test]

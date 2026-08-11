@@ -1,11 +1,11 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
-    GameContext, LegalAction, PushPullDecision, PushPullInputs, ShantenAgent,
+    GameContext, LegalAction, Meld, PushPullDecision, PushPullInputs, ShantenAgent,
     ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
-    DiscardEvaluation, TileId,
+    DiscardEvaluation, FixedMeldCount, TileId,
 };
 
 use crate::scenario::Scenario;
@@ -75,6 +75,16 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
             lines.push(format!("  discards[{player}]: {}", format_tiles(discards)));
         }
     }
+
+    for (player, melds) in context.melds().iter().enumerate() {
+        if !melds.is_empty() {
+            lines.push(format!("  melds[{player}]: {}", format_melds(melds)));
+        }
+    }
+    lines.push(format!(
+        "  own fixed meld count: {}",
+        format_fixed_meld_count(context.own_fixed_meld_count())
+    ));
 
     if verbose {
         lines.push(format!(
@@ -558,6 +568,27 @@ fn format_tiles(tiles: &[TileId]) -> String {
         .join(" ")
 }
 
+fn format_melds(melds: &[Meld]) -> String {
+    if melds.is_empty() {
+        return NONE.to_string();
+    }
+    melds.iter().map(format_meld).collect::<Vec<_>>().join(", ")
+}
+
+fn format_meld(meld: &Meld) -> String {
+    let mut label = format!("{:?} {}", meld.kind(), format_tiles(meld.tiles()));
+    if let Some(called_tile) = meld.called_tile() {
+        label.push_str(&format!(" (called {})", called_tile.to_mjai_string()));
+    }
+    label
+}
+
+fn format_fixed_meld_count(fixed_meld_count: Option<FixedMeldCount>) -> String {
+    fixed_meld_count
+        .map(|count| count.get().to_string())
+        .unwrap_or_else(|| "None".to_string())
+}
+
 fn format_wind(wind: Option<bot_logic::TileType>) -> String {
     wind.map(|wind| wind.to_mjai_string())
         .unwrap_or_else(|| "None".to_string())
@@ -740,6 +771,78 @@ mod tests {
         assert!(scenario.contains("  seat wind: S"), "{scenario}");
         assert!(scenario.contains("  player id: 0"), "{scenario}");
         assert!(scenario.contains("  oya: 3"), "{scenario}");
+    }
+
+    const OWN_PON_SCENARIO: &str = r#"{
+        "hand": "234m455p789s",
+        "draw": "N",
+        "player_id": 0,
+        "oya": 1,
+        "discards": ["", "E", "", ""],
+        "melds": [
+            [{"kind": "pon", "tiles": "E E E", "called_tile": "E"}],
+            [],
+            [],
+            []
+        ]
+    }"#;
+
+    #[test]
+    fn scenario_section_lists_melds_and_own_fixed_meld_count() {
+        let (_, _, output) = rendered(OWN_PON_SCENARIO, false);
+        let scenario = section(&output, "Scenario");
+        assert!(
+            scenario.contains("  melds[0]: Pon E E E (called E)"),
+            "{scenario}"
+        );
+        assert!(scenario.contains("  own fixed meld count: 1"), "{scenario}");
+    }
+
+    #[test]
+    fn scenario_section_shows_ankan_melds() {
+        let (_, _, output) = rendered(
+            r#"{
+                "hand": "234m455p789s",
+                "player_id": 0,
+                "melds": [[{"kind": "ankan", "tiles": "1111z"}], [], [], []]
+            }"#,
+            false,
+        );
+        let scenario = section(&output, "Scenario");
+        assert!(scenario.contains("  melds[0]: Ankan E E E E"), "{scenario}");
+        assert!(!scenario.contains("(called"), "{scenario}");
+        assert!(scenario.contains("  own fixed meld count: 1"), "{scenario}");
+    }
+
+    #[test]
+    fn scenario_section_omits_meld_lines_without_melds() {
+        let (_, _, output) = rendered(NORMAL_SCENARIO, false);
+        let scenario = section(&output, "Scenario");
+        assert!(!scenario.contains("  melds["), "{scenario}");
+        assert!(scenario.contains("  own fixed meld count: 0"), "{scenario}");
+    }
+
+    #[test]
+    fn scenario_section_shows_no_fixed_meld_count_without_player_id() {
+        let (_, _, output) = rendered(r#"{"hand": "123m456p789s11z"}"#, false);
+        let scenario = section(&output, "Scenario");
+        assert!(
+            scenario.contains("  own fixed meld count: None"),
+            "{scenario}"
+        );
+    }
+
+    #[test]
+    fn diagnostic_own_fixed_meld_count_matches_the_context() {
+        let (scenario, diagnostic, _) = rendered(OWN_PON_SCENARIO, false);
+        assert_eq!(
+            diagnostic.own_fixed_meld_count,
+            scenario.context.own_fixed_meld_count()
+        );
+        assert_eq!(
+            diagnostic.own_fixed_meld_count.map(FixedMeldCount::get),
+            Some(1)
+        );
     }
 
     #[test]
