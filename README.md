@@ -7,7 +7,7 @@
 `riichilab-client` で RiichiLab に接続します。
 
 ```text
-usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten]
+usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen]
 ```
 
 ### 接続モード
@@ -21,12 +21,13 @@ cargo run -p riichilab-client --bin riichilab-client -- ranked
 
 ### Agent の指定
 
-`--agent shanten` を指定すると、向聴ベースの `ShantenAgent` を使用します。未指定の場合は `NormalAgent` を使用します。
+`--agent shanten` を指定すると、向聴ベースの `ShantenAgent` を使用します。`--agent menzen` を指定すると、`ShantenAgent` と同じ基本判断を使いつつ、チー・ポン・明槓など門前を崩す鳴きを行わない `MenzenAgent` を使用します。未指定の場合は `NormalAgent` を使用します。
 
 ```bash
 --agent normal
 --agent tsumogiri
 --agent shanten
+--agent menzen
 ```
 
 ### 実行例
@@ -107,13 +108,13 @@ cargo run -p chiihou-client --bin chiihou-client -- \
 ### 引数
 
 ```text
-usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]
+usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten|menzen] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]
 ```
 
 | 引数 | 必須 | 内容 |
 | --- | --: | --- |
 | `--channel` | 必須 | `hanchan` または `tonpuu` |
-| `--agent` | 任意 | `normal`、`tsumogiri`、`shanten`。既定値は `normal` |
+| `--agent` | 任意 | `normal`、`tsumogiri`、`shanten`、`menzen`。既定値は `normal` |
 | `--server-npub` | 任意 | server の NIP-19 `npub` または `nprofile`。省略時は既定 server |
 | `--auto-next` | 任意 | 局終了ごとに `next` を 1 回送信する。省略時は送信しない |
 | `--response-delay-ms` | 任意 | 応答 event を publish する前の遅延（ミリ秒）。既定値は `0`（遅延なし） |
