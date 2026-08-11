@@ -5,7 +5,7 @@ use bot_core::{
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
-    DiscardEvaluation, FixedMeldCount, TileId,
+    DiscardEvaluation, EffectiveShanten, FixedMeldCount, Shanten, TileId,
 };
 
 use crate::scenario::Scenario;
@@ -206,15 +206,17 @@ fn format_normal_discard_candidate(
     if verbose {
         lines.push(format!(
             "  standard shanten: {}",
-            evaluation.shanten_after_discard.standard
+            evaluation.shanten_after_discard.standard()
         ));
         lines.push(format!(
             "  chiitoitsu shanten: {}",
-            evaluation.shanten_after_discard.chiitoitsu
+            format_concealed_only_shanten(evaluation.shanten_after_discard, |shanten| shanten
+                .chiitoitsu)
         ));
         lines.push(format!(
             "  kokushi shanten: {}",
-            evaluation.shanten_after_discard.kokushi
+            format_concealed_only_shanten(evaluation.shanten_after_discard, |shanten| shanten
+                .kokushi)
         ));
         lines.push("  acceptance tiles:".to_string());
         if evaluation.acceptance_after_discard.tiles.is_empty() {
@@ -583,6 +585,18 @@ fn format_meld(meld: &Meld) -> String {
     label
 }
 
+// 七対子・国士のように門前でしか意味を持たない向聴数の表示。副露済み面子がある場合は
+// これらを完成形候補にできないため、適当な sentinel を表示せず ABSENT にする。
+fn format_concealed_only_shanten(
+    shanten: EffectiveShanten,
+    select: impl Fn(Shanten) -> i8,
+) -> String {
+    shanten
+        .concealed()
+        .map(|shanten| select(shanten).to_string())
+        .unwrap_or_else(|| ABSENT.to_string())
+}
+
 fn format_fixed_meld_count(fixed_meld_count: Option<FixedMeldCount>) -> String {
     fixed_meld_count
         .map(|count| count.get().to_string())
@@ -829,6 +843,96 @@ mod tests {
         assert!(
             scenario.contains("  own fixed meld count: None"),
             "{scenario}"
+        );
+    }
+
+    // 白ポン1組 + 123456m 78p 55s + ツモ N。N を切ると副露込みの通常形テンパイ (待ち 6p / 9p)。
+    const ONE_MELD_TENPAI_SCENARIO: &str = r#"{
+        "hand": "123456m78p55s",
+        "draw": "N",
+        "player_id": 0,
+        "oya": 1,
+        "discards": ["", "P", "", ""],
+        "melds": [
+            [{"kind": "pon", "tiles": "P P P", "called_tile": "P"}],
+            [],
+            [],
+            []
+        ]
+    }"#;
+
+    #[test]
+    fn normal_discard_candidates_use_the_fixed_meld_aware_evaluation() {
+        let (_, _, output) = rendered(ONE_MELD_TENPAI_SCENARIO, false);
+        let scenario = section(&output, "Scenario");
+        assert!(scenario.contains("  own fixed meld count: 1"), "{scenario}");
+
+        let north = candidate_block(&output, "Normal discard candidates", "N");
+        assert!(north.contains("  selected: yes"), "{north}");
+        assert!(north.contains("  shanten: 0"), "{north}");
+        assert!(north.contains("  acceptance: 8 / 2 types"), "{north}");
+    }
+
+    #[test]
+    fn fixed_meld_aware_summary_selects_the_tenpai_discard() {
+        let (_, _, output) = rendered(ONE_MELD_TENPAI_SCENARIO, false);
+        let summary = section(&output, "Summary");
+        assert!(summary.contains("  selected: N"), "{summary}");
+        assert!(summary.contains("  source: NormalDiscard"), "{summary}");
+        assert!(
+            summary.contains("  runner-up lost by: Shanten"),
+            "{summary}"
+        );
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains("    min shanten after discard: 0"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    acceptance: 8 / 2 types"),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn verbose_candidate_shows_no_chiitoitsu_or_kokushi_with_fixed_melds() {
+        let (_, _, output) = rendered(ONE_MELD_TENPAI_SCENARIO, true);
+        let north = candidate_block(&output, "Normal discard candidates", "N");
+
+        assert!(north.contains("  standard shanten: 0"), "{north}");
+        assert!(north.contains("  chiitoitsu shanten: -"), "{north}");
+        assert!(north.contains("  kokushi shanten: -"), "{north}");
+        assert!(
+            north.contains("    6p: 4 remaining, shanten after draw -1"),
+            "{north}"
+        );
+        assert!(
+            north.contains("    9p: 4 remaining, shanten after draw -1"),
+            "{north}"
+        );
+    }
+
+    #[test]
+    fn verbose_candidate_keeps_chiitoitsu_and_kokushi_without_melds() {
+        let (_, _, output) = rendered(NORMAL_SCENARIO, true);
+        let north = candidate_block(&output, "Normal discard candidates", "N");
+
+        assert!(north.contains("  standard shanten: 2"), "{north}");
+        assert!(north.contains("  chiitoitsu shanten: 4"), "{north}");
+        assert!(north.contains("  kokushi shanten: 8"), "{north}");
+    }
+
+    #[test]
+    fn concealed_scenario_selection_is_unchanged() {
+        // 副露が無い既存 scenario の selected / runner-up は fixed meld 対応後も変わらない。
+        let (_, _, output) = rendered(NORMAL_SCENARIO, false);
+        let summary = section(&output, "Summary");
+        assert!(summary.contains("  selected: W"), "{summary}");
+        assert!(summary.contains("  runner-up: N"), "{summary}");
+        assert!(
+            summary.contains("  runner-up lost by: StableOrder"),
+            "{summary}"
         );
     }
 

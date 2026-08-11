@@ -68,7 +68,11 @@ pub(crate) fn calculate_acceptance_with_seen(
     collect_acceptance(counts, additional_seen, calculate_shanten, Shanten::min)
 }
 
-fn calculate_acceptance_with_fixed_melds_and_seen(
+/// 手牌以外に見えている枚数を直接渡して、副露済み面子数を考慮した受け入れを求める。
+///
+/// 打牌候補評価のように「公開牌 + 今から切る候補牌1枚」を seen として扱う経路と、残枚数計算を
+/// 共有するための crate-private helper。同じ残枚数計算を呼び出し側へ複製しないこと。
+pub(crate) fn calculate_acceptance_with_fixed_melds_and_seen(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     additional_seen: &[u8; TileType::COUNT],

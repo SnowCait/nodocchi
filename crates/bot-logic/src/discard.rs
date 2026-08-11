@@ -1,6 +1,6 @@
-use crate::acceptance::{Acceptance, calculate_acceptance, calculate_acceptance_with_seen};
+use crate::acceptance::{EffectiveAcceptance, calculate_acceptance_with_fixed_melds_and_seen};
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
-use crate::shanten::Shanten;
+use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_dora};
 use crate::tile_counts::TileCounts;
 
@@ -8,8 +8,12 @@ use crate::tile_counts::TileCounts;
 pub struct DiscardEvaluation {
     pub discard: TileType,
     pub count_before_discard: u8,
-    pub shanten_after_discard: Shanten,
-    pub acceptance_after_discard: Acceptance,
+    /// 打牌後の向聴数。副露済み面子数が 0 なら [`EffectiveShanten::Concealed`] で門前どおり
+    /// 七対子・国士を含み、1 組以上なら [`EffectiveShanten::Melded`] で通常形のみになる。
+    /// 副露時に意味を持たない七対子・国士の値をこの型へ詰めることはしない。
+    pub shanten_after_discard: EffectiveShanten,
+    /// 打牌後の受け入れ。`shanten_after_discard` と同じ副露済み面子数で求める。
+    pub acceptance_after_discard: EffectiveAcceptance,
     pub shape_penalty: i16,
     pub floating_tile_value: i16,
     pub discarded_dora_count: u8,
@@ -26,6 +30,9 @@ pub struct DiscardEvaluation {
     pub discards_isolated_tile: bool,
     /// 打牌後13枚の通常形一向聴の形分類。通常形一向聴でなければ [`IishantenShape::Unknown`]。
     /// 評価生成時に打牌後 counts から一度だけ算出し、比較と診断ログで再利用する。
+    ///
+    /// 分類器は門前13枚専用なので、副露済み面子が 1 組以上ある手牌は分類せず常に
+    /// [`IishantenShape::Unknown`] にする。副露手を門前13枚分類器へ押し込まない。
     pub standard_iishanten_shape_after_discard: IishantenShape,
 }
 
@@ -310,15 +317,35 @@ pub fn hand_shape_summary(counts: &TileCounts) -> HandShapeSummary {
     summary
 }
 
+/// 打牌前後のブロック数の内訳。
+///
+/// `before` / `after` は [`hand_shape_summary`] どおり concealed hand の形だけを見る。副露済み
+/// 面子は concealed tiles から消えているため含まれない。副露済み面子数の補正は
+/// `leaves_under_five_blocks` にだけ効き、`before` / `after` の意味は変えない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiscardBlockContext {
     pub before: HandShapeSummary,
     pub after: HandShapeSummary,
     pub reduces_estimated_block_count: bool,
+    /// 打牌後の実効ブロック数(concealed の推定ブロック数 + 副露済み面子数)が5未満かどうか。
     pub leaves_under_five_blocks: bool,
 }
 
 pub fn discard_block_context(counts: &TileCounts, discard: TileType) -> DiscardBlockContext {
+    discard_block_context_with_fixed_melds(counts, discard, FixedMeldCount::NONE)
+}
+
+/// 副露済み面子数を考慮して打牌前後のブロック文脈を求める。
+///
+/// concealed tiles だけを見ると完成済み副露が消えているため、ブロック不足の判定
+/// (`leaves_under_five_blocks`) には副露済み面子数を加えた実効ブロック数を使う。
+/// `reduces_estimated_block_count` は打牌前後の差なので副露済み面子数の影響を受けない。
+/// `fixed_meld_count == FixedMeldCount::NONE` では [`discard_block_context`] と一致する。
+pub fn discard_block_context_with_fixed_melds(
+    counts: &TileCounts,
+    discard: TileType,
+    fixed_meld_count: FixedMeldCount,
+) -> DiscardBlockContext {
     if counts.count(discard) == 0 {
         return DiscardBlockContext::default();
     }
@@ -331,19 +358,36 @@ pub fn discard_block_context(counts: &TileCounts, discard: TileType) -> DiscardB
     }
     let after = hand_shape_summary(&after_counts);
 
+    let effective_block_count_after = after
+        .estimated_block_count
+        .saturating_add(fixed_meld_count.get());
+
     DiscardBlockContext {
         before,
         after,
         reduces_estimated_block_count: after.estimated_block_count < before.estimated_block_count,
-        leaves_under_five_blocks: after.estimated_block_count < 5,
+        leaves_under_five_blocks: effective_block_count_after < 5,
     }
 }
 
 const VALUE_HONOR_TRIPLET_PENALTY: i16 = 15;
 
 pub fn shape_penalty_for_discard(counts: &TileCounts, discard: TileType) -> i16 {
+    shape_penalty_for_discard_with_fixed_melds(counts, discard, FixedMeldCount::NONE)
+}
+
+/// 副露済み面子数を考慮した形ペナルティ。
+///
+/// ペナルティの各項は concealed hand の形だけを見る既存のままで、副露済み面子数は
+/// ブロック不足判定 ([`discard_block_context_with_fixed_melds`]) にだけ反映する。
+/// `fixed_meld_count == FixedMeldCount::NONE` では [`shape_penalty_for_discard`] と一致する。
+pub fn shape_penalty_for_discard_with_fixed_melds(
+    counts: &TileCounts,
+    discard: TileType,
+    fixed_meld_count: FixedMeldCount,
+) -> i16 {
     let breakdown = shape_breakdown_for_discard(counts, discard);
-    shape_penalty_for_discard_impl(counts, discard, &breakdown, false)
+    shape_penalty_for_discard_impl(counts, discard, &breakdown, false, fixed_meld_count)
 }
 
 pub fn shape_penalty_for_discard_with_context(
@@ -352,10 +396,36 @@ pub fn shape_penalty_for_discard_with_context(
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
 ) -> i16 {
+    shape_penalty_for_discard_with_fixed_melds_and_context(
+        counts,
+        discard,
+        FixedMeldCount::NONE,
+        round_wind,
+        seat_wind,
+    )
+}
+
+/// 副露済み面子数と場風・自風を考慮した形ペナルティ。
+///
+/// `fixed_meld_count == FixedMeldCount::NONE` では [`shape_penalty_for_discard_with_context`]
+/// と一致する。
+pub fn shape_penalty_for_discard_with_fixed_melds_and_context(
+    counts: &TileCounts,
+    discard: TileType,
+    fixed_meld_count: FixedMeldCount,
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> i16 {
     let breakdown = shape_breakdown_for_discard(counts, discard);
     let breaks_value_honor_triplet =
         breakdown.breaks_triplet && discard.is_value_honor(round_wind, seat_wind);
-    shape_penalty_for_discard_impl(counts, discard, &breakdown, breaks_value_honor_triplet)
+    shape_penalty_for_discard_impl(
+        counts,
+        discard,
+        &breakdown,
+        breaks_value_honor_triplet,
+        fixed_meld_count,
+    )
 }
 
 fn shape_penalty_for_discard_impl(
@@ -363,6 +433,7 @@ fn shape_penalty_for_discard_impl(
     discard: TileType,
     breakdown: &ShapeBreakdown,
     breaks_value_honor_triplet: bool,
+    fixed_meld_count: FixedMeldCount,
 ) -> i16 {
     let mut penalty = 0i16;
     if breakdown.breaks_sequence {
@@ -421,7 +492,7 @@ fn shape_penalty_for_discard_impl(
         penalty -= 4;
     }
 
-    let block_context = discard_block_context(counts, discard);
+    let block_context = discard_block_context_with_fixed_melds(counts, discard, fixed_meld_count);
     if block_context.reduces_estimated_block_count {
         if block_context.leaves_under_five_blocks {
             penalty += 10;
@@ -766,8 +837,8 @@ fn compare_standard_iishanten_shape(
         return None;
     }
     // 両候補とも通常形一向聴である場合に限定する。片方だけが通常形一向聴なら決着させない。
-    if candidate.shanten_after_discard.standard != 1
-        || current_best.shanten_after_discard.standard != 1
+    if candidate.shanten_after_discard.standard() != 1
+        || current_best.shanten_after_discard.standard() != 1
     {
         return None;
     }
@@ -813,6 +884,19 @@ pub fn diagnose_discard_evaluations(
     counts: &TileCounts,
     evaluations: &[DiscardEvaluation],
 ) -> DiscardDecisionDiagnostic {
+    diagnose_discard_evaluations_with_fixed_melds(counts, FixedMeldCount::NONE, evaluations)
+}
+
+/// 副露済み面子数を考慮して打牌候補の診断を構築する。
+///
+/// 比較・選択は [`compare_discard_evaluations`] を通る本番と同じ経路で、診断専用の比較ロジックは
+/// 持たない。`fixed_meld_count` は block context のブロック不足判定にだけ使い、本番評価と同じ
+/// 補正を診断へ反映する。`FixedMeldCount::NONE` では [`diagnose_discard_evaluations`] と一致する。
+pub fn diagnose_discard_evaluations_with_fixed_melds(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    evaluations: &[DiscardEvaluation],
+) -> DiscardDecisionDiagnostic {
     let best_index = best_discard_index(evaluations);
     let selected = best_index.map(|index| evaluations[index].clone());
 
@@ -842,7 +926,11 @@ pub fn diagnose_discard_evaluations(
                 comparison_reason,
                 shape_breakdown: shape_breakdown_for_discard(counts, evaluation.discard),
                 pair_context: pair_context_for_discard(counts, evaluation.discard),
-                block_context: discard_block_context(counts, evaluation.discard),
+                block_context: discard_block_context_with_fixed_melds(
+                    counts,
+                    evaluation.discard,
+                    fixed_meld_count,
+                ),
                 floating_tile_value_breakdown: floating_tile_value_breakdown_for_discard(
                     counts,
                     evaluation.discard,
@@ -870,7 +958,52 @@ fn value_honor_count(
     count
 }
 
-pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
+// 打牌候補ごとの受け入れ計算で使う seen 牌の扱い。
+//
+// - `HandOnly`: 打牌後 counts だけを seen とする。visible tiles が無い経路の既存 semantics で、
+//   今から切る候補牌は seen に数えない。
+// - `PublicVisible`: 自分の手牌以外に見えている枚数へ、今から切る候補牌1枚を加えて seen とする。
+//   これにより自分が今切った牌を山に残っている牌として数えない。
+enum CandidateSeen {
+    HandOnly,
+    PublicVisible([u8; TileType::COUNT]),
+}
+
+impl CandidateSeen {
+    // 自分の手牌以外に見えている枚数を、visible tiles と手牌から求める。
+    fn from_visible_tiles(counts: &TileCounts, visible_tiles: &[TileId]) -> Self {
+        let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
+        let mut public_visible = [0u8; TileType::COUNT];
+        for tile in TileType::all() {
+            public_visible[tile.index()] = visible_counts
+                .count(tile)
+                .saturating_sub(counts.count(tile));
+        }
+        Self::PublicVisible(public_visible)
+    }
+
+    fn additional_seen(&self, discard: TileType) -> [u8; TileType::COUNT] {
+        match self {
+            Self::HandOnly => [0u8; TileType::COUNT],
+            Self::PublicVisible(public_visible) => {
+                let mut additional_seen = *public_visible;
+                additional_seen[discard.index()] =
+                    additional_seen[discard.index()].saturating_add(1);
+                additional_seen
+            }
+        }
+    }
+}
+
+// 打牌候補評価の本体。門前・副露と visible tiles の有無で共有する唯一の生成経路。
+//
+// 副露済み面子数は受け入れ計算 (PR #108 の fixed meld 対応 API)・一向聴形分類・形ペナルティの
+// ブロック不足判定へ渡す。打牌しても副露済み面子数は変わらないため、候補打牌後も同じ値を使う。
+fn evaluate_discards_with_seen(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    seen: &CandidateSeen,
+) -> Vec<DiscardEvaluation> {
     let mut evaluations = Vec::new();
 
     for tile in TileType::all() {
@@ -884,15 +1017,16 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             continue;
         }
 
-        let acceptance_after_discard = calculate_acceptance(&after_discard);
+        let acceptance_after_discard = calculate_acceptance_with_fixed_melds_and_seen(
+            &after_discard,
+            fixed_meld_count,
+            &seen.additional_seen(tile),
+        );
         let shanten_after_discard = acceptance_after_discard.current;
-        // 計算済みの通常形向聴数を再利用し、分類のための standard_shanten() 再計算を避ける。
         let standard_iishanten_shape_after_discard =
-            classify_standard_iishanten_shape_with_standard_shanten(
-                &after_discard,
-                shanten_after_discard.standard,
-            );
+            iishanten_shape_after_discard(&after_discard, shanten_after_discard, fixed_meld_count);
         // floating_tile_value と孤立牌判定は同じ breakdown から一度だけ取得する。
+        // 孤立牌判定は手牌構造だけを使う。visible tiles は受け入れ計算のみに影響させる。
         let floating = floating_tile_value_breakdown_for_discard(counts, tile);
 
         evaluations.push(DiscardEvaluation {
@@ -900,7 +1034,11 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
             count_before_discard,
             shanten_after_discard,
             acceptance_after_discard,
-            shape_penalty: shape_penalty_for_discard(counts, tile),
+            shape_penalty: shape_penalty_for_discard_with_fixed_melds(
+                counts,
+                tile,
+                fixed_meld_count,
+            ),
             floating_tile_value: floating.value,
             discarded_dora_count: 0,
             discarded_value_honor_count: 0,
@@ -913,66 +1051,68 @@ pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
     evaluations
 }
 
+// 打牌後の通常形一向聴の形分類。分類器は門前13枚専用なので、副露済み面子がある手牌は
+// 分類せず Unknown にする。門前では計算済みの通常形向聴数を再利用し、分類のための
+// standard_shanten() 再計算を避ける。
+fn iishanten_shape_after_discard(
+    after_discard: &TileCounts,
+    shanten_after_discard: EffectiveShanten,
+    fixed_meld_count: FixedMeldCount,
+) -> IishantenShape {
+    if fixed_meld_count.has_melds() {
+        return IishantenShape::Unknown;
+    }
+    classify_standard_iishanten_shape_with_standard_shanten(
+        after_discard,
+        shanten_after_discard.standard(),
+    )
+}
+
+pub fn evaluate_discards(counts: &TileCounts) -> Vec<DiscardEvaluation> {
+    evaluate_discards_with_fixed_melds(counts, FixedMeldCount::NONE)
+}
+
+/// 副露済み面子数を考慮して全打牌候補を評価する。
+///
+/// 候補列挙・受け入れ計算・形評価・比較は [`evaluate_discards`] と同じ実装を共有する。
+/// `fixed_meld_count == FixedMeldCount::NONE` では [`evaluate_discards`] と一致する。
+pub fn evaluate_discards_with_fixed_melds(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> Vec<DiscardEvaluation> {
+    evaluate_discards_with_seen(counts, fixed_meld_count, &CandidateSeen::HandOnly)
+}
+
 pub fn evaluate_discards_with_visible_tiles(
     counts: &TileCounts,
     visible_tiles: &[TileId],
 ) -> Vec<DiscardEvaluation> {
+    evaluate_discards_with_fixed_melds_and_visible_tiles(
+        counts,
+        FixedMeldCount::NONE,
+        visible_tiles,
+    )
+}
+
+/// 副露済み面子数と visible tiles を考慮して全打牌候補を評価する。
+///
+/// 受け入れの残枚数は「自分の手牌以外に見えている牌 + 今から切る候補牌1枚」を seen として
+/// 求める既存 semantics を維持する。`fixed_meld_count == FixedMeldCount::NONE` では
+/// [`evaluate_discards_with_visible_tiles`] と一致する。
+pub fn evaluate_discards_with_fixed_melds_and_visible_tiles(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    visible_tiles: &[TileId],
+) -> Vec<DiscardEvaluation> {
     if visible_tiles.is_empty() {
-        return evaluate_discards(counts);
+        return evaluate_discards_with_fixed_melds(counts, fixed_meld_count);
     }
 
-    let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
-    let mut public_visible = [0u8; TileType::COUNT];
-    for tile in TileType::all() {
-        public_visible[tile.index()] = visible_counts
-            .count(tile)
-            .saturating_sub(counts.count(tile));
-    }
-
-    let mut evaluations = Vec::new();
-
-    for tile in TileType::all() {
-        let count_before_discard = counts.count(tile);
-        if count_before_discard == 0 {
-            continue;
-        }
-
-        let mut after_discard = *counts;
-        if after_discard.remove(tile).is_err() {
-            continue;
-        }
-
-        let mut additional_seen = public_visible;
-        additional_seen[tile.index()] = additional_seen[tile.index()].saturating_add(1);
-
-        let acceptance_after_discard =
-            calculate_acceptance_with_seen(&after_discard, &additional_seen);
-        let shanten_after_discard = acceptance_after_discard.current;
-        // 計算済みの通常形向聴数を再利用し、分類のための standard_shanten() 再計算を避ける。
-        let standard_iishanten_shape_after_discard =
-            classify_standard_iishanten_shape_with_standard_shanten(
-                &after_discard,
-                shanten_after_discard.standard,
-            );
-        // 孤立牌判定は手牌構造だけを使う。visible tiles は受け入れ計算のみに影響させる。
-        let floating = floating_tile_value_breakdown_for_discard(counts, tile);
-
-        evaluations.push(DiscardEvaluation {
-            discard: tile,
-            count_before_discard,
-            shanten_after_discard,
-            acceptance_after_discard,
-            shape_penalty: shape_penalty_for_discard(counts, tile),
-            floating_tile_value: floating.value,
-            discarded_dora_count: 0,
-            discarded_value_honor_count: 0,
-            discards_red_five: false,
-            discards_isolated_tile: floating.is_isolated,
-            standard_iishanten_shape_after_discard,
-        });
-    }
-
-    evaluations
+    evaluate_discards_with_seen(
+        counts,
+        fixed_meld_count,
+        &CandidateSeen::from_visible_tiles(counts, visible_tiles),
+    )
 }
 
 pub fn evaluate_discards_from_tiles(tiles: &[TileId]) -> Vec<DiscardEvaluation> {
@@ -1003,8 +1143,28 @@ pub fn evaluate_discards_from_tiles_with_context(
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
 ) -> Vec<DiscardEvaluation> {
+    evaluate_discards_from_tiles_with_fixed_melds_and_context(
+        tiles,
+        FixedMeldCount::NONE,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+    )
+}
+
+/// 副露済み面子数を考慮して物理牌一覧から全打牌候補を評価する。
+///
+/// `fixed_meld_count == FixedMeldCount::NONE` では
+/// [`evaluate_discards_from_tiles_with_context`] と一致する。
+pub fn evaluate_discards_from_tiles_with_fixed_melds_and_context(
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> Vec<DiscardEvaluation> {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
-    let mut evaluations = evaluate_discards(&counts);
+    let mut evaluations = evaluate_discards_with_fixed_melds(&counts, fixed_meld_count);
     decorate_evaluations(
         &mut evaluations,
         &counts,
@@ -1015,6 +1175,7 @@ pub fn evaluate_discards_from_tiles_with_context(
         ShapePenaltyMode::WithContext {
             round_wind,
             seat_wind,
+            fixed_meld_count,
         },
     );
     evaluations
@@ -1027,8 +1188,35 @@ pub fn evaluate_discards_from_tiles_with_visible_tiles(
     seat_wind: Option<TileType>,
     visible_tiles: &[TileId],
 ) -> Vec<DiscardEvaluation> {
+    evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
+        tiles,
+        FixedMeldCount::NONE,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+        visible_tiles,
+    )
+}
+
+/// 副露済み面子数と visible tiles を考慮して物理牌一覧から全打牌候補を評価する。
+///
+/// `fixed_meld_count == FixedMeldCount::NONE` では
+/// [`evaluate_discards_from_tiles_with_visible_tiles`] と一致する。
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    visible_tiles: &[TileId],
+) -> Vec<DiscardEvaluation> {
     let counts = TileCounts::from_tiles(tiles.iter().copied());
-    let mut evaluations = evaluate_discards_with_visible_tiles(&counts, visible_tiles);
+    let mut evaluations = evaluate_discards_with_fixed_melds_and_visible_tiles(
+        &counts,
+        fixed_meld_count,
+        visible_tiles,
+    );
     decorate_evaluations(
         &mut evaluations,
         &counts,
@@ -1039,6 +1227,7 @@ pub fn evaluate_discards_from_tiles_with_visible_tiles(
         ShapePenaltyMode::WithContext {
             round_wind,
             seat_wind,
+            fixed_meld_count,
         },
     );
     evaluations
@@ -1049,6 +1238,7 @@ enum ShapePenaltyMode {
     WithContext {
         round_wind: Option<TileType>,
         seat_wind: Option<TileType>,
+        fixed_meld_count: FixedMeldCount,
     },
 }
 
@@ -1072,11 +1262,13 @@ fn decorate_evaluations(
         if let ShapePenaltyMode::WithContext {
             round_wind,
             seat_wind,
+            fixed_meld_count,
         } = shape_penalty_mode
         {
-            evaluation.shape_penalty = shape_penalty_for_discard_with_context(
+            evaluation.shape_penalty = shape_penalty_for_discard_with_fixed_melds_and_context(
                 counts,
                 evaluation.discard,
+                fixed_meld_count,
                 round_wind,
                 seat_wind,
             );
@@ -1102,9 +1294,22 @@ fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<Til
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acceptance::{
+        Acceptance, calculate_acceptance, calculate_acceptance_with_fixed_melds,
+        calculate_acceptance_with_fixed_melds_and_visible_tiles,
+    };
+    use crate::shanten::{Shanten, standard_shanten_with_fixed_melds};
 
     fn tile(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).unwrap()
+    }
+
+    fn fixed(value: u8) -> FixedMeldCount {
+        FixedMeldCount::new(value).unwrap()
+    }
+
+    fn concealed(shanten: Shanten) -> EffectiveShanten {
+        EffectiveShanten::Concealed(shanten)
     }
 
     fn counts(strings: &[&str]) -> TileCounts {
@@ -1351,7 +1556,7 @@ mod tests {
         );
     }
 
-    use crate::acceptance::AcceptanceTile;
+    use crate::acceptance::{AcceptanceTile, EffectiveAcceptanceTile};
     use crate::tile::TileId;
 
     fn ids(values: &[u8]) -> Vec<TileId> {
@@ -1373,12 +1578,12 @@ mod tests {
             .collect()
     }
 
-    fn shanten_min(min: i8) -> Shanten {
-        Shanten {
+    fn shanten_min(min: i8) -> EffectiveShanten {
+        concealed(Shanten {
             standard: min,
             chiitoitsu: 127,
             kokushi: 127,
-        }
+        })
     }
 
     fn evaluation(
@@ -1411,7 +1616,7 @@ mod tests {
         value_honor: u8,
         red: bool,
     ) -> DiscardEvaluation {
-        let tiles: Vec<AcceptanceTile> = (0..type_count)
+        let tiles: Vec<EffectiveAcceptanceTile> = (0..type_count)
             .map(|i| AcceptanceTile {
                 tile: TileType::new(i as u8).unwrap(),
                 remaining: if i == 0 { remaining } else { 0 },
@@ -3648,11 +3853,11 @@ mod tests {
         shape: IishantenShape,
     ) -> DiscardEvaluation {
         let mut evaluation = evaluation_with_iishanten_shape(remaining, type_count, shape);
-        let shanten = Shanten {
+        let shanten = concealed(Shanten {
             standard: 1,
             chiitoitsu: 0,
             kokushi: 127,
-        };
+        });
         evaluation.shanten_after_discard = shanten;
         evaluation.acceptance_after_discard.current = shanten;
         evaluation
@@ -3759,11 +3964,11 @@ mod tests {
         let complete = evaluation_with_iishanten_shape(10, 2, IishantenShape::Complete);
         let mut non_standard = evaluation_with_iishanten_shape(10, 2, IishantenShape::Unknown);
         // 全体最小向聴は一向聴のまま standard だけ二向聴にする。
-        let shanten = Shanten {
+        let shanten = concealed(Shanten {
             standard: 2,
             chiitoitsu: 1,
             kokushi: 127,
-        };
+        });
         non_standard.shanten_after_discard = shanten;
         non_standard.acceptance_after_discard.current = shanten;
 
@@ -4741,6 +4946,493 @@ mod tests {
         assert_eq!(
             eight_s.comparison_reason,
             DiscardComparisonReason::IsolatedHonor
+        );
+    }
+
+    // ---- 副露済み面子数を考慮した打牌評価 ----
+
+    fn menzen_hands() -> Vec<TileCounts> {
+        vec![
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+            ]),
+            counts(&[
+                "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E", "E",
+            ]),
+            counts(&[
+                "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C", "1m",
+            ]),
+            counts(&[
+                "3m", "4m", "5m", "3p", "4p", "5p", "6p", "7p", "2s", "2s", "5s", "8s", "9m", "C",
+            ]),
+            counts(&["1m", "1m", "2m", "3m", "E"]),
+        ]
+    }
+
+    fn acceptance_summary(evaluation: &DiscardEvaluation) -> Vec<(TileType, u8, i8)> {
+        evaluation
+            .acceptance_after_discard
+            .tiles
+            .iter()
+            .map(|entry| (entry.tile, entry.remaining, entry.shanten_after_draw.min()))
+            .collect()
+    }
+
+    #[test]
+    fn fixed_meld_none_matches_concealed_evaluations() {
+        for hand in menzen_hands() {
+            let expected = evaluate_discards(&hand);
+            let actual = evaluate_discards_with_fixed_melds(&hand, FixedMeldCount::NONE);
+            assert_eq!(actual, expected);
+
+            for (actual, expected) in actual.iter().zip(expected.iter()) {
+                assert_eq!(actual.discard, expected.discard);
+                assert_eq!(
+                    actual.min_shanten_after_discard(),
+                    expected.min_shanten_after_discard()
+                );
+                assert_eq!(acceptance_summary(actual), acceptance_summary(expected));
+                assert_eq!(
+                    actual.acceptance_total_remaining(),
+                    expected.acceptance_total_remaining()
+                );
+                assert_eq!(actual.shape_penalty, expected.shape_penalty);
+                assert_eq!(
+                    actual.standard_iishanten_shape_after_discard,
+                    expected.standard_iishanten_shape_after_discard
+                );
+                // 門前では七対子・国士の向聴数を従来どおり保持する。
+                assert!(actual.shanten_after_discard.concealed().is_some());
+            }
+
+            assert_eq!(select_best(actual), select_best(expected));
+        }
+    }
+
+    #[test]
+    fn fixed_meld_none_evaluations_match_the_concealed_acceptance_api() {
+        for hand in menzen_hands() {
+            for evaluation in evaluate_discards_with_fixed_melds(&hand, FixedMeldCount::NONE) {
+                let mut after_discard = hand;
+                after_discard.remove(evaluation.discard).unwrap();
+                let expected = calculate_acceptance(&after_discard);
+
+                assert_eq!(
+                    evaluation.shanten_after_discard.concealed(),
+                    Some(expected.current)
+                );
+                assert_eq!(
+                    evaluation.min_shanten_after_discard(),
+                    expected.current.min()
+                );
+                assert_eq!(evaluation.acceptance_type_count(), expected.tiles.len());
+                assert_eq!(
+                    evaluation.acceptance_total_remaining(),
+                    expected.total_remaining()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_meld_none_keeps_selection_and_comparison_reason() {
+        for hand in menzen_hands() {
+            let expected = evaluate_discards(&hand);
+            let actual = evaluate_discards_with_fixed_melds(&hand, FixedMeldCount::NONE);
+
+            let expected_diagnostic = diagnose_discard_evaluations(&hand, &expected);
+            let actual_diagnostic =
+                diagnose_discard_evaluations_with_fixed_melds(&hand, FixedMeldCount::NONE, &actual);
+
+            assert_eq!(actual_diagnostic.selected, expected_diagnostic.selected);
+            for (actual, expected) in actual_diagnostic
+                .candidates
+                .iter()
+                .zip(expected_diagnostic.candidates.iter())
+            {
+                assert_eq!(actual.selected, expected.selected);
+                assert_eq!(actual.comparison_reason, expected.comparison_reason);
+                assert_eq!(actual.block_context, expected.block_context);
+            }
+        }
+    }
+
+    // 副露1組 + 123456m78p55s + ツモ N。N を切ると固定面子1・123m・456m・78p・55s の通常形テンパイ。
+    fn one_meld_hand() -> TileCounts {
+        counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "5s", "5s", "N",
+        ])
+    }
+
+    #[test]
+    fn one_fixed_meld_discard_reaches_standard_tenpai() {
+        let hand = one_meld_hand();
+        let evaluations = evaluate_discards_with_fixed_melds(&hand, fixed(1));
+        let north = discard_evaluation(&evaluations, tile("N"));
+
+        assert_eq!(north.min_shanten_after_discard(), 0);
+        assert_eq!(north.shanten_after_discard.standard(), 0);
+        assert_eq!(
+            acceptance_summary(north),
+            vec![(tile("6p"), 4, -1), (tile("9p"), 4, -1)]
+        );
+        assert_eq!(north.acceptance_type_count(), 2);
+        assert_eq!(north.acceptance_total_remaining(), 8);
+
+        assert_eq!(select_best(evaluations).unwrap().discard, tile("N"));
+    }
+
+    #[test]
+    fn one_fixed_meld_does_not_use_chiitoitsu_or_kokushi() {
+        let hand = one_meld_hand();
+        let evaluations = evaluate_discards_with_fixed_melds(&hand, fixed(1));
+
+        for evaluation in &evaluations {
+            assert_eq!(evaluation.shanten_after_discard.concealed(), None);
+            assert_eq!(
+                evaluation.min_shanten_after_discard(),
+                evaluation.shanten_after_discard.standard()
+            );
+            assert!(
+                evaluation
+                    .acceptance_after_discard
+                    .tiles
+                    .iter()
+                    .all(|entry| entry.shanten_after_draw.concealed().is_none())
+            );
+        }
+
+        // 門前評価では同じ手牌が2向聴で、N 切りの受け入れも別物になる。
+        let menzen = discard_evaluation(&evaluate_discards(&hand), tile("N")).clone();
+        assert_eq!(menzen.min_shanten_after_discard(), 2);
+        assert_ne!(
+            menzen.acceptance_total_remaining(),
+            discard_evaluation(&evaluations, tile("N")).acceptance_total_remaining()
+        );
+    }
+
+    #[test]
+    fn one_fixed_meld_keeps_iishanten_shape_unknown() {
+        // 一向聴形分類は門前13枚専用。副露手を門前分類器へ押し込まない。
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s",
+        ]);
+        for evaluation in evaluate_discards_with_fixed_melds(&hand, fixed(1)) {
+            assert_eq!(
+                evaluation.standard_iishanten_shape_after_discard,
+                IishantenShape::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn one_fixed_meld_visible_tiles_reduce_acceptance_remaining() {
+        // 手牌 123456m78p55s + ツモ N に、他家に見えている 6p 2枚を加える。
+        let tiles = ids_of(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "5s", "5s", "N",
+        ]);
+        let hand = TileCounts::from_tiles(tiles.iter().copied());
+        let mut visible = tiles.clone();
+        visible.extend(ids(&[56, 57]));
+
+        let evaluations =
+            evaluate_discards_with_fixed_melds_and_visible_tiles(&hand, fixed(1), &visible);
+        let north = discard_evaluation(&evaluations, tile("N"));
+
+        assert_eq!(north.min_shanten_after_discard(), 0);
+        assert_eq!(
+            acceptance_summary(north),
+            vec![(tile("6p"), 2, -1), (tile("9p"), 4, -1)]
+        );
+        assert_eq!(north.acceptance_total_remaining(), 6);
+    }
+
+    #[test]
+    fn one_fixed_meld_counts_the_candidate_discard_as_seen() {
+        // 手牌 123456m78p55s + ツモ 6p。6p を切った後の待ちは 6p / 9p で、今切る 6p 自身を
+        // 山に残っている牌として数えない。
+        let tiles = ids_of(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "5s", "5s", "6p",
+        ]);
+        let hand = TileCounts::from_tiles(tiles.iter().copied());
+
+        let with_visible =
+            evaluate_discards_with_fixed_melds_and_visible_tiles(&hand, fixed(1), &tiles);
+        let six_pin = discard_evaluation(&with_visible, tile("6p"));
+        assert_eq!(six_pin.min_shanten_after_discard(), 0);
+        assert_eq!(
+            acceptance_summary(six_pin),
+            vec![(tile("6p"), 3, -1), (tile("9p"), 4, -1)]
+        );
+        assert_eq!(six_pin.acceptance_total_remaining(), 7);
+
+        // visible tiles を渡さない経路では候補打牌補正を行わない既存 semantics のまま。
+        let without_visible = evaluate_discards_with_fixed_melds(&hand, fixed(1));
+        assert_eq!(
+            discard_evaluation(&without_visible, tile("6p")).acceptance_total_remaining(),
+            8
+        );
+    }
+
+    #[test]
+    fn fixed_meld_visible_tiles_match_the_pure_acceptance_api() {
+        let tiles = ids_of(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "5s", "5s", "N",
+        ]);
+        let hand = TileCounts::from_tiles(tiles.iter().copied());
+        let mut visible = tiles.clone();
+        visible.extend(ids(&[56, 57]));
+
+        let north = discard_evaluation(
+            &evaluate_discards_with_fixed_melds_and_visible_tiles(&hand, fixed(1), &visible),
+            tile("N"),
+        )
+        .clone();
+
+        let mut after_discard = hand;
+        after_discard.remove(tile("N")).unwrap();
+        // 打牌後の手牌に N は無く visible には残るため、pure API 側でも候補打牌1枚が seen に入る。
+        let expected = calculate_acceptance_with_fixed_melds_and_visible_tiles(
+            &after_discard,
+            fixed(1),
+            &visible,
+        );
+
+        assert_eq!(north.acceptance_after_discard, expected);
+    }
+
+    #[test]
+    fn two_fixed_melds_match_the_pure_shanten_and_acceptance_api() {
+        // 副露2組 + 123456m5s + ツモ N。N を切ると固定面子2・123m・456m・5s 単騎のテンパイ。
+        let hand = counts(&["1m", "2m", "3m", "4m", "5m", "6m", "5s", "N"]);
+        let evaluations = evaluate_discards_with_fixed_melds(&hand, fixed(2));
+        let north = discard_evaluation(&evaluations, tile("N"));
+
+        let mut after_discard = hand;
+        after_discard.remove(tile("N")).unwrap();
+
+        assert_eq!(
+            north.shanten_after_discard.standard(),
+            standard_shanten_with_fixed_melds(&after_discard, fixed(2))
+        );
+        assert_eq!(
+            north.acceptance_after_discard,
+            calculate_acceptance_with_fixed_melds(&after_discard, fixed(2))
+        );
+        assert_eq!(north.min_shanten_after_discard(), 0);
+        assert_eq!(acceptance_summary(north), vec![(tile("5s"), 3, -1)]);
+        assert_eq!(north.acceptance_total_remaining(), 3);
+        assert_eq!(select_best(evaluations).unwrap().discard, tile("N"));
+    }
+
+    #[test]
+    fn fixed_melds_do_not_change_after_a_candidate_discard() {
+        // 打牌しただけでは副露済み面子数は変わらないので、打牌後の受け入れも同じ面子数で求める。
+        let hand = one_meld_hand();
+        for evaluation in evaluate_discards_with_fixed_melds(&hand, fixed(1)) {
+            let mut after_discard = hand;
+            after_discard.remove(evaluation.discard).unwrap();
+            assert_eq!(
+                evaluation.acceptance_after_discard,
+                calculate_acceptance_with_fixed_melds(&after_discard, fixed(1))
+            );
+        }
+    }
+
+    // ---- shape penalty の副露補正 ----
+
+    #[test]
+    fn shape_penalty_with_zero_fixed_melds_matches_existing_penalty() {
+        for hand in menzen_hands() {
+            for tile in TileType::all() {
+                if hand.count(tile) == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    shape_penalty_for_discard_with_fixed_melds(&hand, tile, FixedMeldCount::NONE),
+                    shape_penalty_for_discard(&hand, tile)
+                );
+                assert_eq!(
+                    shape_penalty_for_discard_with_fixed_melds_and_context(
+                        &hand,
+                        tile,
+                        FixedMeldCount::NONE,
+                        Some(TileType::from_mjai_type_str("E").unwrap()),
+                        Some(TileType::from_mjai_type_str("S").unwrap()),
+                    ),
+                    shape_penalty_for_discard_with_context(
+                        &hand,
+                        tile,
+                        Some(TileType::from_mjai_type_str("E").unwrap()),
+                        Some(TileType::from_mjai_type_str("S").unwrap()),
+                    )
+                );
+                assert_eq!(
+                    discard_block_context_with_fixed_melds(&hand, tile, FixedMeldCount::NONE),
+                    discard_block_context(&hand, tile)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_shortage_counts_fixed_melds_as_blocks() {
+        // concealed の推定ブロック数は打牌後2で、副露済み面子を足すと5に届く。
+        let hand = counts(&["1m", "1m", "9m", "9m", "1p", "2p"]);
+        let discard = tile("2p");
+
+        let menzen = discard_block_context(&hand, discard);
+        assert_eq!(menzen.after.estimated_block_count, 2);
+        assert!(menzen.reduces_estimated_block_count);
+        assert!(menzen.leaves_under_five_blocks);
+
+        let three_melds = discard_block_context_with_fixed_melds(&hand, discard, fixed(3));
+        assert!(three_melds.reduces_estimated_block_count);
+        assert!(!three_melds.leaves_under_five_blocks);
+        // concealed hand の形そのものの意味は変えない。
+        assert_eq!(three_melds.before, menzen.before);
+        assert_eq!(three_melds.after, menzen.after);
+
+        // 足りない場合はブロック不足のまま。
+        assert!(
+            discard_block_context_with_fixed_melds(&hand, discard, fixed(1))
+                .leaves_under_five_blocks
+        );
+    }
+
+    #[test]
+    fn shape_penalty_block_shortage_is_relaxed_by_fixed_melds() {
+        let hand = counts(&["1m", "1m", "9m", "9m", "1p", "2p"]);
+        let discard = tile("2p");
+
+        let menzen = shape_penalty_for_discard(&hand, discard);
+        let three_melds = shape_penalty_for_discard_with_fixed_melds(&hand, discard, fixed(3));
+
+        // ブロック不足 (+10) とブロック減少のみ (+4) の差。
+        assert_eq!(menzen - three_melds, 6);
+        assert_eq!(
+            shape_penalty_for_discard_with_fixed_melds(&hand, discard, fixed(1)),
+            menzen
+        );
+    }
+
+    #[test]
+    fn evaluations_use_the_fixed_meld_aware_shape_penalty() {
+        let hand = counts(&["1m", "1m", "9m", "9m", "1p", "2p"]);
+        let evaluations = evaluate_discards_with_fixed_melds(&hand, fixed(3));
+        let two_pin = discard_evaluation(&evaluations, tile("2p"));
+
+        assert_eq!(
+            two_pin.shape_penalty,
+            shape_penalty_for_discard_with_fixed_melds(&hand, tile("2p"), fixed(3))
+        );
+        assert_ne!(
+            two_pin.shape_penalty,
+            shape_penalty_for_discard(&hand, tile("2p"))
+        );
+    }
+
+    #[test]
+    fn diagnostic_block_context_matches_the_evaluation_fixed_melds() {
+        let hand = counts(&["1m", "1m", "9m", "9m", "1p", "2p"]);
+        let evaluations = evaluate_discards_with_fixed_melds(&hand, fixed(3));
+        let diagnostic =
+            diagnose_discard_evaluations_with_fixed_melds(&hand, fixed(3), &evaluations);
+
+        let two_pin = diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile("2p"))
+            .unwrap();
+        assert!(!two_pin.block_context.leaves_under_five_blocks);
+        assert_eq!(
+            two_pin.block_context,
+            discard_block_context_with_fixed_melds(&hand, tile("2p"), fixed(3))
+        );
+    }
+
+    #[test]
+    fn from_tiles_with_fixed_melds_matches_the_counts_api() {
+        let tiles = ids_of(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "5s", "5s", "N",
+        ]);
+        let hand = TileCounts::from_tiles(tiles.iter().copied());
+
+        let from_tiles = evaluate_discards_from_tiles_with_fixed_melds_and_context(
+            &tiles,
+            fixed(1),
+            &[],
+            None,
+            None,
+        );
+        let north = discard_evaluation(&from_tiles, tile("N"));
+        assert_eq!(north.min_shanten_after_discard(), 0);
+        assert_eq!(north.acceptance_total_remaining(), 8);
+        assert_eq!(
+            north.shanten_after_discard,
+            discard_evaluation(
+                &evaluate_discards_with_fixed_melds(&hand, fixed(1)),
+                tile("N")
+            )
+            .shanten_after_discard
+        );
+
+        let mut visible = tiles.clone();
+        visible.extend(ids(&[56, 57]));
+        let from_tiles_with_visible =
+            evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
+                &tiles,
+                fixed(1),
+                &[],
+                None,
+                None,
+                &visible,
+            );
+        assert_eq!(
+            discard_evaluation(&from_tiles_with_visible, tile("N")).acceptance_total_remaining(),
+            6
+        );
+    }
+
+    #[test]
+    fn from_tiles_with_zero_fixed_melds_matches_the_existing_api() {
+        let tiles = ids_of(&[
+            "3m", "4m", "5m", "3p", "4p", "5p", "6p", "7p", "2s", "2s", "5s", "8s", "9m", "C",
+        ]);
+        let mut visible = tiles.clone();
+        visible.extend(ids_of(&["9m", "9m"]));
+
+        assert_eq!(
+            evaluate_discards_from_tiles_with_fixed_melds_and_context(
+                &tiles,
+                FixedMeldCount::NONE,
+                &[],
+                Some(tile("E")),
+                Some(tile("S")),
+            ),
+            evaluate_discards_from_tiles_with_context(
+                &tiles,
+                &[],
+                Some(tile("E")),
+                Some(tile("S"))
+            )
+        );
+        assert_eq!(
+            evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
+                &tiles,
+                FixedMeldCount::NONE,
+                &[],
+                Some(tile("E")),
+                Some(tile("S")),
+                &visible,
+            ),
+            evaluate_discards_from_tiles_with_visible_tiles(
+                &tiles,
+                &[],
+                Some(tile("E")),
+                Some(tile("S")),
+                &visible,
+            )
         );
     }
 

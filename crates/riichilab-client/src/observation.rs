@@ -1346,9 +1346,14 @@ mod tests {
                 .iter()
                 .find(|evaluation| evaluation.discard.to_mjai_string() == "5p")
                 .expect("5p 切り候補が存在する");
-            assert_eq!(five_pin.shanten_after_discard.chiitoitsu, 1);
+            let chiitoitsu = five_pin
+                .shanten_after_discard
+                .concealed()
+                .expect("門前手なので七対子向聴数を持つ")
+                .chiitoitsu;
+            assert_eq!(chiitoitsu, 1);
             // 15 枚評価による偽の七対子テンパイ (0 向聴) を防止する。
-            assert_ne!(five_pin.shanten_after_discard.chiitoitsu, 0);
+            assert_ne!(chiitoitsu, 0);
         }
 
         // 10. helper は渡された clone だけを操作し、元の raw hand を変更しない。
