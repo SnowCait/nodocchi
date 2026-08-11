@@ -3,6 +3,11 @@ use bot_logic::{TileId, TileType};
 use crate::lifecycle::ChiihouWind;
 use crate::protocol::{ChiihouPai, ChiihouSuit};
 
+const MELD_OPEN: char = '<';
+const MELD_CLOSE: char = '>';
+const ANKAN_OPEN: char = '(';
+const ANKAN_CLOSE: char = ')';
+
 pub fn tile_type_from_chiihou_wind(wind: ChiihouWind) -> TileType {
     let index = match wind {
         ChiihouWind::East => 0,
@@ -60,6 +65,28 @@ pub fn extract_chiihou_pais_from_emoji_text(text: &str) -> Vec<ChiihouPai> {
         } else {
             rest = &after[end..];
         }
+    }
+    pais
+}
+
+pub fn extract_concealed_chiihou_pais_from_emoji_text(text: &str) -> Vec<ChiihouPai> {
+    let mut pais = Vec::new();
+    let mut rest = text;
+    loop {
+        let Some(open) = rest.find([MELD_OPEN, ANKAN_OPEN]) else {
+            pais.extend(extract_chiihou_pais_from_emoji_text(rest));
+            break;
+        };
+        pais.extend(extract_chiihou_pais_from_emoji_text(&rest[..open]));
+        let close = if rest[open..].starts_with(MELD_OPEN) {
+            MELD_CLOSE
+        } else {
+            ANKAN_CLOSE
+        };
+        let Some(end) = rest[open..].find(close) else {
+            break;
+        };
+        rest = &rest[open + end + close.len_utf8()..];
     }
     pais
 }
@@ -301,6 +328,91 @@ mod tests {
         assert_eq!(
             extract_chiihou_pais_from_emoji_text("nostr:npub1ai000 GET sutehai?"),
             vec![]
+        );
+    }
+
+    const CHI_MELD: &str = "<:mahjong_m1::mahjong_m2::mahjong_m3:>";
+    const PON_MELD: &str = "<:mahjong_south::mahjong_south::mahjong_south:>";
+    const DAIMINKAN_MELD: &str = "<:mahjong_white::mahjong_white::mahjong_white::mahjong_white:>";
+    const ANKAN_MELD: &str = "(:mahjong_east::mahjong_east::mahjong_east::mahjong_east:)";
+
+    #[test]
+    fn extracts_all_pais_including_melds() {
+        let text = format!(":mahjong_m2::mahjong_m4:{CHI_MELD}{ANKAN_MELD}");
+        assert_eq!(
+            extract_chiihou_pais_from_emoji_text(&text),
+            vec![
+                pai("2m"),
+                pai("4m"),
+                pai("1m"),
+                pai("2m"),
+                pai("3m"),
+                pai("1z"),
+                pai("1z"),
+                pai("1z"),
+                pai("1z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn concealed_extraction_matches_plain_extraction_without_melds() {
+        for text in [
+            ":mahjong_m1::mahjong_m2::mahjong_m3: :mahjong_east:",
+            "hand :smile: :mahjong_p5: and :mahjong_red:!",
+            "GET sutehai?",
+        ] {
+            assert_eq!(
+                extract_concealed_chiihou_pais_from_emoji_text(text),
+                extract_chiihou_pais_from_emoji_text(text),
+                "text: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn concealed_extraction_skips_open_meld() {
+        let text = format!(":mahjong_m2::mahjong_m4:{CHI_MELD}");
+        assert_eq!(
+            extract_concealed_chiihou_pais_from_emoji_text(&text),
+            vec![pai("2m"), pai("4m")]
+        );
+    }
+
+    #[test]
+    fn concealed_extraction_skips_ankan() {
+        let text = format!(":mahjong_m2::mahjong_m4:{ANKAN_MELD}");
+        assert_eq!(
+            extract_concealed_chiihou_pais_from_emoji_text(&text),
+            vec![pai("2m"), pai("4m")]
+        );
+    }
+
+    #[test]
+    fn concealed_extraction_skips_every_meld() {
+        let text =
+            format!(":mahjong_m2::mahjong_m4:{CHI_MELD}{PON_MELD}{DAIMINKAN_MELD}{ANKAN_MELD}");
+        assert_eq!(
+            extract_concealed_chiihou_pais_from_emoji_text(&text),
+            vec![pai("2m"), pai("4m")]
+        );
+    }
+
+    #[test]
+    fn concealed_extraction_keeps_pais_between_melds() {
+        let text = format!("{CHI_MELD}:mahjong_m2:{ANKAN_MELD}:mahjong_m4:");
+        assert_eq!(
+            extract_concealed_chiihou_pais_from_emoji_text(&text),
+            vec![pai("2m"), pai("4m")]
+        );
+    }
+
+    #[test]
+    fn concealed_extraction_drops_unterminated_meld() {
+        let text = ":mahjong_m2:<:mahjong_m1::mahjong_m2::mahjong_m3:";
+        assert_eq!(
+            extract_concealed_chiihou_pais_from_emoji_text(text),
+            vec![pai("2m")]
         );
     }
 }

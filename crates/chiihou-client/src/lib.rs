@@ -32,7 +32,8 @@ pub use config::{
 };
 pub use convert::{
     chiihou_pai_from_tile_id, emoji_shortcode_to_chiihou_pai, extract_chiihou_pais_from_emoji_text,
-    temporary_tile_id_from_chiihou_pai, tile_type_from_chiihou_pai, tile_type_from_chiihou_wind,
+    extract_concealed_chiihou_pais_from_emoji_text, temporary_tile_id_from_chiihou_pai,
+    tile_type_from_chiihou_pai, tile_type_from_chiihou_wind,
 };
 pub use decision::{
     ChiihouNakuDecision, ChiihouSutehaiDecision, NakuDecisionError, SutehaiDecisionError,

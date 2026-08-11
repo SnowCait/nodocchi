@@ -1907,6 +1907,131 @@ mod tests {
         );
     }
 
+    const CHI_MELD: &str = "<:mahjong_m1::mahjong_m2::mahjong_m3:>";
+    const PON_MELD: &str = "<:mahjong_south::mahjong_south::mahjong_south:>";
+    const EAST_PON_MELD: &str = "<:mahjong_east::mahjong_east::mahjong_east:>";
+    const ANKAN_MELD: &str = "(:mahjong_east::mahjong_east::mahjong_east::mahjong_east:)";
+
+    fn parsed_naku_legal_actions(content: &str) -> Vec<LegalAction> {
+        let Some(ChiihouRequest::Naku {
+            hand,
+            target,
+            actions,
+        }) = crate::protocol::parse_chiihou_request(content).unwrap()
+        else {
+            panic!("expected naku request");
+        };
+        legal_actions_from_naku_request(&hand, target, &actions)
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_chi_material() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4::mahjong_p7:{CHI_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![chi("3m", ["2m", "4m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn ankan_pais_do_not_become_chi_material() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{ANKAN_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![chi("3m", ["2m", "4m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn concealed_pais_still_become_chi_material_alongside_melds() {
+        let content = format!(
+            "\
+:mahjong_m1::mahjong_m2::mahjong_m4::mahjong_m5:{PON_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![
+                chi("3m", ["1m", "2m"]),
+                chi("3m", ["2m", "4m"]),
+                chi("3m", ["4m", "5m"]),
+                LegalAction::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_pon_material() {
+        let content = format!(
+            "\
+:mahjong_east:{EAST_PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? pon"
+        );
+        assert_eq!(parsed_naku_legal_actions(&content), vec![LegalAction::None]);
+    }
+
+    #[test]
+    fn concealed_pais_still_become_pon_material_alongside_melds() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east:{PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? pon"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![pon("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_daiminkan_material() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east:{EAST_PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? kan"
+        );
+        assert_eq!(parsed_naku_legal_actions(&content), vec![LegalAction::None]);
+    }
+
+    #[test]
+    fn concealed_pais_still_become_daiminkan_material_alongside_melds() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east::mahjong_east:{PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? kan"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![daiminkan("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_dahai_candidates() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{CHI_MELD}{ANKAN_MELD}
+nostr:npub1ai000 GET sutehai?"
+        );
+        let Some(ChiihouRequest::Sutehai { hand, drawn }) =
+            crate::protocol::parse_chiihou_request(&content).unwrap()
+        else {
+            panic!("expected sutehai request");
+        };
+        assert_eq!(
+            legal_dahai_actions_from_sutehai_request(&hand, drawn),
+            vec![dahai("2m"), dahai("4m")]
+        );
+    }
+
     fn snapshot_for_tests() -> ChiihouTableSnapshot {
         use crate::lifecycle::ChiihouWind;
         let mut discards: [Vec<ChiihouPai>; 4] = Default::default();

@@ -3,7 +3,9 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::convert::extract_chiihou_pais_from_emoji_text;
+use crate::convert::{
+    extract_chiihou_pais_from_emoji_text, extract_concealed_chiihou_pais_from_emoji_text,
+};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ChiihouPaiParseError {
@@ -171,8 +173,8 @@ fn tile_groups(lines: &[&str]) -> Vec<Vec<ChiihouPai>> {
     lines
         .iter()
         .flat_map(|line| line.split_whitespace())
-        .map(extract_chiihou_pais_from_emoji_text)
-        .filter(|pais| !pais.is_empty())
+        .filter(|token| !extract_chiihou_pais_from_emoji_text(token).is_empty())
+        .map(extract_concealed_chiihou_pais_from_emoji_text)
         .collect()
 }
 
@@ -587,6 +589,140 @@ nostr:npub1ai000 GET naku? ron riichi";
 
     fn pair(first: &str, second: &str) -> [ChiihouPai; 2] {
         [pai(first), pai(second)]
+    }
+
+    const CHI_MELD: &str = "<:mahjong_m1::mahjong_m2::mahjong_m3:>";
+    const PON_MELD: &str = "<:mahjong_south::mahjong_south::mahjong_south:>";
+    const DAIMINKAN_MELD: &str = "<:mahjong_white::mahjong_white::mahjong_white::mahjong_white:>";
+    const ANKAN_MELD: &str = "(:mahjong_east::mahjong_east::mahjong_east::mahjong_east:)";
+
+    #[test]
+    fn sutehai_hand_without_melds_is_unchanged() {
+        let content = "\
+:mahjong_m2::mahjong_m4::mahjong_p7: :mahjong_m5:
+nostr:npub1ai000 GET sutehai?";
+        assert_eq!(
+            parse_chiihou_request(content).unwrap(),
+            Some(ChiihouRequest::Sutehai {
+                hand: pais(&["2m", "4m", "7p"]),
+                drawn: Some(pai("5m")),
+            })
+        );
+    }
+
+    #[test]
+    fn sutehai_hand_excludes_chi_meld_tiles() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4::mahjong_p7:{CHI_MELD} :mahjong_m5:
+nostr:npub1ai000 GET sutehai?"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Sutehai {
+                hand: pais(&["2m", "4m", "7p"]),
+                drawn: Some(pai("5m")),
+            })
+        );
+    }
+
+    #[test]
+    fn sutehai_hand_excludes_ankan_tiles() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4::mahjong_p7:{ANKAN_MELD} :mahjong_m5:
+nostr:npub1ai000 GET sutehai?"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Sutehai {
+                hand: pais(&["2m", "4m", "7p"]),
+                drawn: Some(pai("5m")),
+            })
+        );
+    }
+
+    #[test]
+    fn sutehai_hand_excludes_every_meld() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4::mahjong_p7::mahjong_p9:{CHI_MELD}{PON_MELD}{DAIMINKAN_MELD}{ANKAN_MELD} :mahjong_m5:
+nostr:npub1ai000 GET sutehai?"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Sutehai {
+                hand: pais(&["2m", "4m", "7p", "9p"]),
+                drawn: Some(pai("5m")),
+            })
+        );
+    }
+
+    #[test]
+    fn sutehai_after_naku_has_meld_but_no_drawn_pai() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{PON_MELD}
+nostr:npub1ai000 GET sutehai?"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Sutehai {
+                hand: pais(&["2m", "4m"]),
+                drawn: None,
+            })
+        );
+    }
+
+    #[test]
+    fn naku_hand_excludes_pon_meld_tiles() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{PON_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Naku {
+                hand: pais(&["2m", "4m"]),
+                target: pai("3m"),
+                actions: vec![ChiihouNakuAction::Chi],
+            })
+        );
+    }
+
+    #[test]
+    fn naku_hand_excludes_every_meld() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{CHI_MELD}{PON_MELD}{ANKAN_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Naku {
+                hand: pais(&["2m", "4m"]),
+                target: pai("3m"),
+                actions: vec![ChiihouNakuAction::Chi],
+            })
+        );
+    }
+
+    #[test]
+    fn naku_target_is_kept_outside_the_hand() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east:{PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? pon kan"
+        );
+        assert_eq!(
+            parse_chiihou_request(&content).unwrap(),
+            Some(ChiihouRequest::Naku {
+                hand: pais(&["1z", "1z"]),
+                target: pai("1z"),
+                actions: vec![ChiihouNakuAction::Pon, ChiihouNakuAction::Kan],
+            })
+        );
     }
 
     #[test]
