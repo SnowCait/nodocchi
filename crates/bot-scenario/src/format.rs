@@ -285,6 +285,10 @@ fn format_push_pull(
                     "    value honor han proxy after discard: {}",
                     offense.value_honor_han_proxy_after_discard
                 ));
+                lines.push(format!(
+                    "    simple value proxy after discard: {}",
+                    offense.simple_value_proxy_after_discard()
+                ));
             }
         }
     }
@@ -671,6 +675,28 @@ mod tests {
         "discards": ["", "1m 4m 7p E", "", ""]
     }"#;
 
+    // 単独の子リーチに対する子の Weak 一向聴。打点だけが違う対照ケース。
+    const LOW_VALUE_IISHANTEN_SCENARIO: &str = r#"{
+        "hand": "123456789m23p5s1z",
+        "draw": "C",
+        "player_id": 0,
+        "oya": 2,
+        "reached": [false, true, false, false],
+        "extra_visible_tiles": "111444p5s",
+        "legal_dahai": "C"
+    }"#;
+
+    const HIGH_VALUE_IISHANTEN_SCENARIO: &str = r#"{
+        "hand": "123406789m23p0s1z",
+        "draw": "C",
+        "dora_indicators": "4m4s",
+        "player_id": 0,
+        "oya": 2,
+        "reached": [false, true, false, false],
+        "extra_visible_tiles": "111444p5s",
+        "legal_dahai": "C"
+    }"#;
+
     const HALF_SUJI_SCENARIO: &str = r#"{
         "hand": "444p147m258p123s7s",
         "draw": "9m",
@@ -930,6 +956,86 @@ mod tests {
                 "{push_pull}"
             );
         }
+    }
+
+    #[test]
+    fn push_pull_section_shows_simple_value_proxy() {
+        let (_, diagnostic, output) = rendered(DEFENSE_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains(&format!(
+                "    simple value proxy after discard: {}",
+                offense.simple_value_proxy_after_discard()
+            )),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn low_value_iishanten_folds_under_single_non_dealer_reach() {
+        let (_, _, output) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
+        let push_pull = section(&output, "Push/Pull");
+
+        assert!(push_pull.contains("  mode: Fold"), "{push_pull}");
+        assert!(
+            push_pull.contains("  reason: IishantenUnderHighPressure"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    min shanten after discard: 1"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    simple value proxy after discard: 0"),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn high_value_iishanten_is_neutral_under_single_non_dealer_reach() {
+        let (_, _, output) = rendered(HIGH_VALUE_IISHANTEN_SCENARIO, false);
+        let push_pull = section(&output, "Push/Pull");
+
+        assert!(push_pull.contains("  mode: Neutral"), "{push_pull}");
+        assert!(
+            push_pull.contains("  reason: HighValueIishantenAgainstSingleNonDealer"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    min shanten after discard: 1"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    simple value proxy after discard: 4"),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn value_only_differs_between_low_and_high_value_iishanten_scenarios() {
+        // 打牌後の牌種構造・向聴数・受け入れが同じで、打点 proxy だけが違うことを確認する。
+        let (_, low, _) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
+        let (_, high, _) = rendered(HIGH_VALUE_IISHANTEN_SCENARIO, false);
+        let low = low.push_pull_inputs.unwrap().offense.unwrap();
+        let high = high.push_pull_inputs.unwrap().offense.unwrap();
+
+        assert_eq!(
+            low.min_shanten_after_discard,
+            high.min_shanten_after_discard
+        );
+        assert_eq!(
+            low.acceptance_total_remaining,
+            high.acceptance_total_remaining
+        );
+        assert_eq!(low.acceptance_type_count, high.acceptance_type_count);
+        assert_eq!(
+            low.standard_iishanten_shape_after_discard,
+            high.standard_iishanten_shape_after_discard
+        );
+        assert_eq!(low.simple_value_proxy_after_discard(), 0);
+        assert_eq!(high.simple_value_proxy_after_discard(), 4);
     }
 
     #[test]
