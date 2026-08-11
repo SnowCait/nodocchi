@@ -40,6 +40,10 @@ pub enum ChiihouTableNotification {
         player: PublicKey,
         action: ChiihouSayAction,
     },
+    Open {
+        player: PublicKey,
+        tiles: Vec<ChiihouPai>,
+    },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -62,6 +66,10 @@ pub enum ChiihouTableNotificationError {
     MissingRemainingTiles,
     #[error("invalid remaining tiles: {0:?}")]
     InvalidRemainingTiles(String),
+    #[error("missing open tiles")]
+    MissingOpenTiles,
+    #[error("invalid open tiles: {0}")]
+    InvalidOpenTiles(ChiihouCompactPaiParseError),
     #[error("missing say action")]
     MissingAction,
     #[error("unknown say action: {0:?}")]
@@ -92,6 +100,7 @@ pub fn parse_chiihou_table_notification(
         "tsumo" => parse_tsumo(tokens).map(Some),
         "sutehai" => parse_sutehai(tokens).map(Some),
         "say" => parse_say(tokens).map(Some),
+        "open" => parse_open(tokens).map(Some),
         _ => Ok(None),
     }
 }
@@ -175,6 +184,19 @@ fn parse_say<'a>(
     Ok(ChiihouTableNotification::Say { player, action })
 }
 
+fn parse_open<'a>(
+    mut tokens: impl Iterator<Item = &'a str>,
+) -> Result<ChiihouTableNotification, ChiihouTableNotificationError> {
+    let player = parse_player(tokens.next())?;
+    let Some(tiles_token) = tokens.next() else {
+        return Err(ChiihouTableNotificationError::MissingOpenTiles);
+    };
+    let tiles = parse_compact_chiihou_pais(tiles_token)
+        .map_err(ChiihouTableNotificationError::InvalidOpenTiles)?;
+    ensure_no_remaining_tokens(tokens)?;
+    Ok(ChiihouTableNotification::Open { player, tiles })
+}
+
 fn parse_player(token: Option<&str>) -> Result<PublicKey, ChiihouTableNotificationError> {
     let Some(token) = token else {
         return Err(ChiihouTableNotificationError::MissingPlayer);
@@ -229,6 +251,10 @@ mod tests {
 
     fn pai(s: &str) -> ChiihouPai {
         s.parse().unwrap()
+    }
+
+    fn pais(items: &[&str]) -> Vec<ChiihouPai> {
+        items.iter().map(|s| pai(s)).collect()
     }
 
     const HAIPAI_HAND: &str = "1m2m3m4m5m6m7p8p9p1s1s2z2z";
@@ -608,6 +634,107 @@ mod tests {
         );
     }
 
+    fn open_content(player: &str, tiles: &str) -> String {
+        format!("{} NOTIFY open {player} {tiles}", players_prefix())
+    }
+
+    #[test]
+    fn parses_open_pon() {
+        let content = open_content(&npub_token(2), "5z5z5z");
+        assert_eq!(
+            parse_chiihou_table_notification(&content).unwrap(),
+            Some(ChiihouTableNotification::Open {
+                player: player_pubkey(2),
+                tiles: vec![pai("5z"); 3],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_open_chi() {
+        let content = open_content(&npub_token(3), "1m2m3m");
+        assert_eq!(
+            parse_chiihou_table_notification(&content).unwrap(),
+            Some(ChiihouTableNotification::Open {
+                player: player_pubkey(3),
+                tiles: pais(&["1m", "2m", "3m"]),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_open_kan() {
+        let content = open_content(&npub_token(4), "5z5z5z5z");
+        assert_eq!(
+            parse_chiihou_table_notification(&content).unwrap(),
+            Some(ChiihouTableNotification::Open {
+                player: player_pubkey(4),
+                tiles: vec![pai("5z"); 4],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_open_kakan() {
+        let content = open_content(&npub_token(2), "5z");
+        assert_eq!(
+            parse_chiihou_table_notification(&content).unwrap(),
+            Some(ChiihouTableNotification::Open {
+                player: player_pubkey(2),
+                tiles: vec![pai("5z")],
+            })
+        );
+    }
+
+    #[test]
+    fn open_without_player_or_tiles_is_error() {
+        assert_eq!(
+            parse_chiihou_table_notification("NOTIFY open"),
+            Err(ChiihouTableNotificationError::MissingPlayer)
+        );
+        assert_eq!(
+            parse_chiihou_table_notification(&format!("NOTIFY open {}", npub_token(2))),
+            Err(ChiihouTableNotificationError::MissingOpenTiles)
+        );
+    }
+
+    #[test]
+    fn open_with_invalid_npub_is_error() {
+        let content = open_content(&npub(2), "5z5z5z");
+        assert_eq!(
+            parse_chiihou_table_notification(&content),
+            Err(ChiihouTableNotificationError::InvalidPublicKey)
+        );
+    }
+
+    #[test]
+    fn open_with_invalid_tiles_is_error() {
+        for (tiles, expected) in [
+            (
+                "5z5z0z",
+                ChiihouCompactPaiParseError::InvalidPai("0z".to_string()),
+            ),
+            ("1m2m3", ChiihouCompactPaiParseError::OddLength(5)),
+            ("１m2m", ChiihouCompactPaiParseError::NotAscii),
+        ] {
+            let content = open_content(&npub_token(2), tiles);
+            assert_eq!(
+                parse_chiihou_table_notification(&content),
+                Err(ChiihouTableNotificationError::InvalidOpenTiles(expected)),
+                "tiles: {tiles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_with_extra_payload_is_error() {
+        let content = format!("{} 4m", open_content(&npub_token(2), "1m2m3m"));
+        assert_eq!(
+            parse_chiihou_table_notification(&content),
+            Err(ChiihouTableNotificationError::UnexpectedPayload)
+        );
+    }
+
     #[test]
     fn get_requests_are_none() {
         let sutehai = format!(
@@ -626,7 +753,6 @@ mod tests {
     fn unsupported_notify_commands_are_none() {
         for command in [
             "point",
-            "open",
             "agari",
             "ryukyoku",
             "kyokuend",

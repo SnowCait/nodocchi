@@ -89,6 +89,13 @@ fn game_context_from_request_with_state(
     visible_tiles.extend(drawn_tile);
     visible_tiles.extend(dora_indicators.iter().copied());
     visible_tiles.extend(discards.iter().flatten().copied());
+    visible_tiles.extend(
+        state
+            .newly_visible_meld_tiles
+            .iter()
+            .flatten()
+            .map(|&pai| temporary_tile_id_from_chiihou_pai(pai)),
+    );
     GameContext::from_parts_with_table_state(
         drawn_tile,
         hand_tiles,
@@ -1262,6 +1269,8 @@ mod tests {
         let mut discards: [Vec<ChiihouPai>; 4] = Default::default();
         discards[1] = vec![pai("7z"), pai("1z")];
         discards[3] = vec![pai("9s")];
+        let mut newly_visible_meld_tiles: [Vec<ChiihouPai>; 4] = Default::default();
+        newly_visible_meld_tiles[2] = vec![pai("1z"), pai("1z")];
         ChiihouTableSnapshot {
             dora_indicators: vec![pai("5p"), pai("5p")],
             round_wind: Some(ChiihouWind::South),
@@ -1271,6 +1280,7 @@ mod tests {
             remaining_tiles: None,
             discards,
             reached: [false, true, false, false],
+            newly_visible_meld_tiles,
         }
     }
 
@@ -1315,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn context_with_state_visible_tiles_hold_hand_drawn_dora_and_discards() {
+    fn context_with_state_visible_tiles_hold_hand_drawn_dora_discards_and_melds() {
         let context = game_context_from_sutehai_request_with_state(
             &[pai("1m"), pai("5p")],
             Some(pai("2m")),
@@ -1332,8 +1342,60 @@ mod tests {
                 tile_of("7z"),
                 tile_of("1z"),
                 tile_of("9s"),
+                tile_of("1z"),
+                tile_of("1z"),
             ]
         );
+    }
+
+    fn ponned_east_snapshot() -> ChiihouTableSnapshot {
+        let mut discards: [Vec<ChiihouPai>; 4] = Default::default();
+        discards[1] = vec![pai("1z")];
+        let mut newly_visible_meld_tiles: [Vec<ChiihouPai>; 4] = Default::default();
+        newly_visible_meld_tiles[2] = vec![pai("1z"), pai("1z")];
+        ChiihouTableSnapshot {
+            discards,
+            newly_visible_meld_tiles,
+            ..ChiihouTableSnapshot::default()
+        }
+    }
+
+    fn visible_tile_count(context: &GameContext, s: &str) -> usize {
+        context
+            .visible_tiles()
+            .iter()
+            .filter(|&&tile| tile.tile_type() == tile_type_from_chiihou_pai(pai(s)))
+            .count()
+    }
+
+    #[test]
+    fn ponned_tile_is_visible_three_times_without_double_counting_the_river() {
+        let context = game_context_from_sutehai_request_with_state(
+            &[pai("5p")],
+            None,
+            &ponned_east_snapshot(),
+        );
+        assert_eq!(visible_tile_count(&context, "1z"), 3);
+        assert_eq!(context.visible_tiles().len(), 4);
+    }
+
+    #[test]
+    fn naku_context_with_state_includes_meld_visible_tiles() {
+        let context =
+            game_context_from_naku_request_with_state(&[pai("5p")], &ponned_east_snapshot());
+        assert_eq!(visible_tile_count(&context, "1z"), 3);
+    }
+
+    #[test]
+    fn context_without_melds_keeps_river_only_visibility() {
+        let mut discards: [Vec<ChiihouPai>; 4] = Default::default();
+        discards[1] = vec![pai("1z")];
+        let state = ChiihouTableSnapshot {
+            discards,
+            ..ChiihouTableSnapshot::default()
+        };
+        let context = game_context_from_sutehai_request_with_state(&[pai("5p")], None, &state);
+        assert_eq!(visible_tile_count(&context, "1z"), 1);
     }
 
     #[test]
@@ -1474,6 +1536,7 @@ mod tests {
         visible.push(tile_of("5p"));
         visible.extend([tile_of("5p"), tile_of("5p")]);
         visible.extend([tile_of("7z"), tile_of("1z"), tile_of("9s")]);
+        visible.extend([tile_of("1z"), tile_of("1z")]);
         assert_eq!(context.visible_tiles(), &visible[..]);
     }
 
