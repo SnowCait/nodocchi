@@ -86,22 +86,145 @@ pub fn honor_safety_rank(tile: TileType, context: &GameContext) -> Option<HonorS
     Some(rank)
 }
 
-// 合法 Dahai のうち字牌のみを安全度の高い順に並べる。同安全度は元の順序を保つ。
+/// 対象リーチ者にとっての役牌価値。危険度は `GuestWind` < `SingleValueHonor` < `DoubleWind` で、
+/// derive した `Ord` の順序と一致する。
+///
+/// これは防御上のヒューリスティックであって、「役牌ならルール上ロンされやすい」という意味では
+/// ない。リーチ者はすでにリーチという役を持つため、客風でも待ち牌になり得る。相手が手牌に
+/// 保持しやすいと考えられる役牌、特に連風牌を危険寄りに扱うための重み付けとして使う。
+///
+/// - `GuestWind`:        対象リーチ者にとって場風でも自風でもない風牌。
+/// - `SingleValueHonor`: 三元牌、または場風だけ / 自風だけに該当する風牌。
+/// - `DoubleWind`:       対象リーチ者にとって場風かつ自風の風牌(ダブ東・ダブ南等)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OpponentHonorValue {
+    GuestWind,
+    SingleValueHonor,
+    DoubleWind,
+}
+
+/// 指定 player の自風を親から導出する pure helper。4人麻雀の席順だけを前提にする。
+///
+/// `seat_index = (player + 4 - oya) % 4` で、`oya` 自身は東家。範囲外の `player` / `oya` は
+/// 推測で補完せず `None`。`GameContext::seat_wind()` は自分の自風なので相手の判定には使わない。
+pub fn seat_wind_for_player(player: usize, oya: u8) -> Option<TileType> {
+    if player >= 4 || oya >= 4 {
+        return None;
+    }
+    let seat_index = (player as u8 + 4 - oya) % 4;
+    TileType::wind_from_seat_index(seat_index)
+}
+
+/// 指定 player にとっての役牌価値を求める pure helper。数牌は対象外で `None`。
+///
+/// 三元牌は常に `SingleValueHonor`。風牌は場風と player の自風の一致で分類し、特定の `E` / `S`
+/// へはハードコードしない。
+///
+/// 場風または親が不明で風牌の分類を確定できない場合は推測せず `None` (unknown) を返す。
+/// unknown を `GuestWind` として安全牌扱いしたり、根拠なく `DoubleWind` と決めつけたりしない。
+pub fn opponent_honor_value_for(
+    tile: TileType,
+    player: usize,
+    context: &GameContext,
+) -> Option<OpponentHonorValue> {
+    if tile.is_dragon() {
+        return Some(OpponentHonorValue::SingleValueHonor);
+    }
+    if !tile.is_wind() {
+        return None;
+    }
+    let round_wind = context.round_wind()?;
+    let seat_wind = seat_wind_for_player(player, context.oya()?)?;
+
+    let value = match (round_wind == tile, seat_wind == tile) {
+        (true, true) => OpponentHonorValue::DoubleWind,
+        (true, false) | (false, true) => OpponentHonorValue::SingleValueHonor,
+        (false, false) => OpponentHonorValue::GuestWind,
+    };
+    Some(value)
+}
+
+/// 全リーチ者に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
+///
+/// 対象牌が現物のリーチ者からはロンされないので、そのリーチ者は集約対象から除外する。
+/// リーチ者がいない場合、全リーチ者に対して現物の場合、情報不足で誰の分も確定できない場合は
+/// `None` (unknown)。unknown を安全側にも危険側にも倒さない。
+///
+/// これが字牌防御における役牌価値の source of truth。
+pub fn opponent_honor_value_for_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<OpponentHonorValue> {
+    context
+        .reached_opponents()
+        .iter()
+        .filter(|&&player| !is_genbutsu_for(tile, player, context))
+        .filter_map(|&player| opponent_honor_value_for(tile, player, context))
+        .max()
+}
+
+// 字牌候補1件ぶんの並べ替え用データ。役牌価値は確定できなければ None。
+type RankedHonorCandidate<'a> = (&'a LegalAction, HonorSafetyRank, Option<OpponentHonorValue>);
+
+// HonorSafetyRank が同じ候補の並びを役牌価値で tie-break する。
+//
+// 危険度の昇順(GuestWind → SingleValueHonor → DoubleWind)へ安定に並べ替えるが、対象は役牌価値
+// が確定している候補だけ。unknown の候補は元の位置に固定したまま残し、既知の候補どうしをその
+// 空き位置へ順に詰め直す。unknown を既知の値と比較しないので、安全側にも危険側にも倒れない。
+fn sort_group_by_opponent_honor_value(group: &mut [RankedHonorCandidate<'_>]) {
+    let slots: Vec<usize> = (0..group.len())
+        .filter(|&index| group[index].2.is_some())
+        .collect();
+    let mut ordered: Vec<RankedHonorCandidate<'_>> =
+        slots.iter().map(|&index| group[index]).collect();
+    ordered.sort_by_key(|candidate| candidate.2);
+
+    for (&slot, candidate) in slots.iter().zip(ordered) {
+        group[slot] = candidate;
+    }
+}
+
+// 合法 Dahai のうち字牌のみを 見え枚数の安全度 → 役牌価値 → 元の順序 で並べる。
+//
+// 役牌価値は HonorSafetyRank が同じ候補どうしの tie-break にだけ使い、見え枚数を逆転しない。
+// 役牌価値を確定できない候補はその値を理由に順位を付けず、元の順序を保つ。
 pub fn honor_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
 ) -> Vec<(&'a LegalAction, HonorSafetyRank)> {
-    let mut ranked: Vec<(&'a LegalAction, HonorSafetyRank)> = legal_actions
+    let mut ranked: Vec<RankedHonorCandidate<'a>> = legal_actions
         .iter()
         .filter_map(|action| match action {
             LegalAction::Dahai { tile } => {
-                honor_safety_rank(tile.tile_type(), context).map(|rank| (action, rank))
+                let tile_type = tile.tile_type();
+                honor_safety_rank(tile_type, context).map(|rank| {
+                    (
+                        action,
+                        rank,
+                        opponent_honor_value_for_reached(tile_type, context),
+                    )
+                })
             }
             _ => None,
         })
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut start = 0;
+    while start < ranked.len() {
+        let rank = ranked[start].1;
+        let end = ranked[start..]
+            .iter()
+            .position(|candidate| candidate.1 != rank)
+            .map_or(ranked.len(), |offset| start + offset);
+        sort_group_by_opponent_honor_value(&mut ranked[start..end]);
+        start = end;
+    }
+
     ranked
+        .into_iter()
+        .map(|(action, rank, _)| (action, rank))
+        .collect()
 }
 
 // 最も安全度の高い字牌 Dahai を fallback として選ぶ。候補がなければ None。
@@ -542,6 +665,10 @@ pub struct DefenseFallbackDiagnostic {
     pub opponent_reach_count: u8,
     pub selected_genbutsu_for_all: bool,
     pub selected_honor_safety_rank: Option<HonorSafetyRank>,
+    /// 現物のリーチ者を除いた全リーチ者に対する [`opponent_honor_value_for_reached`] の結果。
+    ///
+    /// 同じ `selected_honor_safety_rank` の字牌どうしの tie-break に使った値。数牌では `None`。
+    pub selected_opponent_honor_value: Option<OpponentHonorValue>,
     pub selected_wall_rank: Option<WallRank>,
     /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
     /// 片スジと無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
@@ -582,6 +709,8 @@ impl DefenseFallbackDiagnostic {
             selected_genbutsu_for_all: tile_type
                 .is_some_and(|tile| is_genbutsu_for_all_reached(tile, context)),
             selected_honor_safety_rank: tile_type.and_then(|tile| honor_safety_rank(tile, context)),
+            selected_opponent_honor_value: tile_type
+                .and_then(|tile| opponent_honor_value_for_reached(tile, context)),
             selected_wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
             selected_suji_for_all_reached: suited_tile
                 .map(|tile| is_suji_for_all_reached(tile, context)),
@@ -611,6 +740,10 @@ pub struct DefenseCandidateDiagnostic {
     pub selected: bool,
     pub genbutsu_for_all: bool,
     pub honor_safety_rank: Option<HonorSafetyRank>,
+    /// 現物のリーチ者を除いた全リーチ者に対する [`opponent_honor_value_for_reached`] の結果。
+    ///
+    /// 同じ `honor_safety_rank` の字牌どうしの tie-break に使う値。数牌では `None`。
+    pub opponent_honor_value: Option<OpponentHonorValue>,
     pub wall_rank: Option<WallRank>,
     /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
     /// 片スジと無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
@@ -642,6 +775,7 @@ impl DefenseCandidateDiagnostic {
             selected,
             genbutsu_for_all: is_genbutsu_for_all_reached(tile_type, context),
             honor_safety_rank: honor_safety_rank(tile_type, context),
+            opponent_honor_value: opponent_honor_value_for_reached(tile_type, context),
             wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
             suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
             suji_safety_rank_for_all_reached: suji_safety_rank_for_all_reached(tile_type, context),
@@ -735,6 +869,7 @@ pub fn log_defense_fallback_decision(
         opponent_reach_count = diagnostic.opponent_reach_count,
         selected_genbutsu_for_all = diagnostic.selected_genbutsu_for_all,
         selected_honor_safety_rank = ?diagnostic.selected_honor_safety_rank,
+        selected_opponent_honor_value = ?diagnostic.selected_opponent_honor_value,
         selected_wall_rank = ?diagnostic.selected_wall_rank,
         selected_suji_for_all_reached = ?diagnostic.selected_suji_for_all_reached,
         selected_suji_safety_rank = ?diagnostic.selected_suji_safety_rank_for_all_reached,
@@ -763,6 +898,7 @@ fn log_defense_fallback_candidate(candidate: &DefenseCandidateDiagnostic) {
         tile = %tile,
         genbutsu_for_all = candidate.genbutsu_for_all,
         honor_safety_rank = ?candidate.honor_safety_rank,
+        opponent_honor_value = ?candidate.opponent_honor_value,
         wall_rank = ?candidate.wall_rank,
         suji_for_all_reached = ?candidate.suji_for_all_reached,
         suji_safety_rank = ?candidate.suji_safety_rank_for_all_reached,
@@ -1304,6 +1440,598 @@ mod tests {
         assert_eq!(
             select_honor_safety_fallback_action(&actions, &context),
             None
+        );
+    }
+
+    fn honor(value: u8) -> TileType {
+        TileType::new(value).unwrap()
+    }
+
+    const EAST: u8 = 27;
+    const SOUTH: u8 = 28;
+    const WEST: u8 = 29;
+    const NORTH: u8 = 30;
+    const HAKU: u8 = 31;
+    const HATSU: u8 = 32;
+    const CHUN: u8 = 33;
+
+    // 自分は player0 固定。自分の自風は相手の役牌判定に使わないので None のままにする。
+    fn honor_value_context(
+        round_wind: Option<TileType>,
+        oya: Option<u8>,
+        reached: [bool; 4],
+        discards: [Vec<TileId>; 4],
+        visible_tiles: Vec<TileId>,
+    ) -> GameContext {
+        GameContext::from_parts_with_table_state(
+            None,
+            vec![],
+            vec![],
+            round_wind,
+            None,
+            visible_tiles,
+            Some(0),
+            oya,
+            discards,
+            reached,
+        )
+    }
+
+    // 東場・自分 player0・player1 だけがリーチ。字牌の見え枚数は0枚に揃える。
+    fn single_reacher_honor_context(oya: u8) -> GameContext {
+        honor_value_context(
+            Some(honor(EAST)),
+            Some(oya),
+            [false, true, false, false],
+            Default::default(),
+            vec![],
+        )
+    }
+
+    #[test]
+    fn seat_wind_for_player_derives_from_oya() {
+        assert_eq!(seat_wind_for_player(0, 0), Some(honor(EAST)));
+        assert_eq!(seat_wind_for_player(1, 0), Some(honor(SOUTH)));
+        assert_eq!(seat_wind_for_player(2, 0), Some(honor(WEST)));
+        assert_eq!(seat_wind_for_player(3, 0), Some(honor(NORTH)));
+        assert_eq!(seat_wind_for_player(1, 1), Some(honor(EAST)));
+        assert_eq!(seat_wind_for_player(0, 3), Some(honor(SOUTH)));
+        assert_eq!(seat_wind_for_player(1, 3), Some(honor(WEST)));
+    }
+
+    #[test]
+    fn seat_wind_for_player_rejects_out_of_range() {
+        assert_eq!(seat_wind_for_player(4, 0), None);
+        assert_eq!(seat_wind_for_player(0, 4), None);
+        assert_eq!(seat_wind_for_player(usize::MAX, 0), None);
+        assert_eq!(seat_wind_for_player(0, 255), None);
+    }
+
+    #[test]
+    fn opponent_honor_value_for_dragons_is_single_value_honor() {
+        // 三元牌は誰にとっても役牌なので、場風 / 親が分からなくても SingleValueHonor。
+        let context = single_reacher_honor_context(3);
+        for dragon in [HAKU, HATSU, CHUN] {
+            assert_eq!(
+                opponent_honor_value_for(honor(dragon), 1, &context),
+                Some(OpponentHonorValue::SingleValueHonor)
+            );
+        }
+
+        let unknown = honor_value_context(
+            None,
+            None,
+            [false, true, false, false],
+            Default::default(),
+            vec![],
+        );
+        assert_eq!(
+            opponent_honor_value_for(honor(CHUN), 1, &unknown),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_round_wind_only_is_single_value_honor() {
+        // 東場で player1 の自風は南。東は場風だけに該当する。
+        let context = single_reacher_honor_context(0);
+        assert_eq!(seat_wind_for_player(1, 0), Some(honor(SOUTH)));
+        assert_eq!(
+            opponent_honor_value_for(honor(EAST), 1, &context),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_seat_wind_only_is_single_value_honor() {
+        // 東場で player1 の自風は南。南は自風だけに該当する。
+        let context = single_reacher_honor_context(0);
+        assert_eq!(
+            opponent_honor_value_for(honor(SOUTH), 1, &context),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_guest_wind() {
+        // 東場で player1 の自風は南。西と北はどちらにも該当しない客風。
+        let context = single_reacher_honor_context(0);
+        assert_eq!(
+            opponent_honor_value_for(honor(WEST), 1, &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+        assert_eq!(
+            opponent_honor_value_for(honor(NORTH), 1, &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_double_east() {
+        // 東場・oya = player1 なので player1 の自風は東。ダブ東。
+        let context = single_reacher_honor_context(1);
+        assert_eq!(seat_wind_for_player(1, 1), Some(honor(EAST)));
+        assert_eq!(
+            opponent_honor_value_for(honor(EAST), 1, &context),
+            Some(OpponentHonorValue::DoubleWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_double_south() {
+        // 南場・oya = player0 なので player1 の自風は南。ダブ南。
+        let context = honor_value_context(
+            Some(honor(SOUTH)),
+            Some(0),
+            [false, true, false, false],
+            Default::default(),
+            vec![],
+        );
+        assert_eq!(seat_wind_for_player(1, 0), Some(honor(SOUTH)));
+        assert_eq!(
+            opponent_honor_value_for(honor(SOUTH), 1, &context),
+            Some(OpponentHonorValue::DoubleWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_number_tile_is_none() {
+        let context = single_reacher_honor_context(0);
+        assert_eq!(
+            opponent_honor_value_for(tile(0).tile_type(), 1, &context),
+            None
+        );
+        assert_eq!(
+            opponent_honor_value_for(tile(16).tile_type(), 1, &context),
+            None
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_wind_without_round_wind_is_unknown() {
+        // 場風が不明なら風牌を確定できない。推測で GuestWind へ倒さない。
+        let context = honor_value_context(
+            None,
+            Some(0),
+            [false, true, false, false],
+            Default::default(),
+            vec![],
+        );
+        for value in [EAST, SOUTH, WEST, NORTH] {
+            assert_eq!(opponent_honor_value_for(honor(value), 1, &context), None);
+        }
+    }
+
+    #[test]
+    fn opponent_honor_value_for_wind_without_oya_is_unknown() {
+        // 親が不明なら相手の自風を導出できない。推測で DoubleWind とも決めつけない。
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            None,
+            [false, true, false, false],
+            Default::default(),
+            vec![],
+        );
+        for value in [EAST, SOUTH, WEST, NORTH] {
+            assert_eq!(opponent_honor_value_for(honor(value), 1, &context), None);
+        }
+    }
+
+    #[test]
+    fn opponent_honor_value_for_out_of_range_player_is_unknown() {
+        let context = single_reacher_honor_context(0);
+        assert_eq!(opponent_honor_value_for(honor(EAST), 4, &context), None);
+    }
+
+    #[test]
+    fn opponent_honor_value_for_ignores_own_seat_wind() {
+        // context.seat_wind() は自分の自風。相手の判定へ流用していないことを確かめる。
+        let context = GameContext::from_parts_with_table_state(
+            None,
+            vec![],
+            vec![],
+            Some(honor(EAST)),
+            Some(honor(NORTH)),
+            Vec::new(),
+            Some(0),
+            Some(0),
+            Default::default(),
+            [false, true, false, false],
+        );
+        assert_eq!(
+            opponent_honor_value_for(honor(NORTH), 1, &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_takes_most_dangerous_guest_and_guest() {
+        // 東場・oya = player0。player1 は南家、player3 は北家。西はどちらにも客風。
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false, true, false, true],
+            Default::default(),
+            vec![],
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_takes_most_dangerous_guest_and_single() {
+        // 東場・oya = player0。player1 は南家(客風)、player2 は西家(自風)。
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false, true, true, false],
+            Default::default(),
+            vec![],
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_takes_most_dangerous_single_and_double() {
+        // 東場・oya = player0・自分は player3。player0 は東家でダブ東、player1 は場風のみ。
+        let context = GameContext::from_parts_with_table_state(
+            None,
+            vec![],
+            vec![],
+            Some(honor(EAST)),
+            None,
+            Vec::new(),
+            Some(3),
+            Some(0),
+            Default::default(),
+            [true, true, false, false],
+        );
+        assert_eq!(
+            opponent_honor_value_for(honor(EAST), 0, &context),
+            Some(OpponentHonorValue::DoubleWind)
+        );
+        assert_eq!(
+            opponent_honor_value_for(honor(EAST), 1, &context),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(EAST), &context),
+            Some(OpponentHonorValue::DoubleWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_excludes_genbutsu_player() {
+        // 東場・oya = player0。player1 は南家で西は客風、player2 は西家だが西が現物。
+        // 現物の player2 からはロンされないので、その SingleValueHonor は集約へ入れない。
+        let discards = [vec![], vec![], vec![tile(116)], vec![]];
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false, true, true, false],
+            discards,
+            vec![],
+        );
+        assert_eq!(
+            opponent_honor_value_for(honor(WEST), 2, &context),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_is_unknown_when_all_reachers_have_genbutsu() {
+        let discards = [vec![], vec![tile(116)], vec![], vec![]];
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false, true, false, false],
+            discards,
+            vec![],
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_is_unknown_without_reachers() {
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false; 4],
+            Default::default(),
+            vec![],
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            None
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(CHUN), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn opponent_honor_value_for_reached_is_none_for_number_tiles() {
+        let context = single_reacher_honor_context(0);
+        assert_eq!(
+            opponent_honor_value_for_reached(tile(0).tile_type(), &context),
+            None
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_breaks_ties_by_opponent_honor_value() {
+        // 東場・oya = player3 なので player1 の自風は西。北は客風、中は役牌。
+        let context = single_reacher_honor_context(3);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(132) },
+            LegalAction::Dahai { tile: tile(120) },
+        ];
+        let ranked = honor_dahai_actions_by_safety(&actions, &context);
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    &LegalAction::Dahai { tile: tile(120) },
+                    HonorSafetyRank::NoVisible
+                ),
+                (
+                    &LegalAction::Dahai { tile: tile(132) },
+                    HonorSafetyRank::NoVisible
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_prefers_guest_wind_over_value_honor() {
+        // 最重要回帰ケース1。東場・oya = player3・player1 リーチ(自風は西)。
+        // 中は SingleValueHonor、北は GuestWind。同じ見え枚数なら北を先に切る。
+        let context = single_reacher_honor_context(3);
+        let chun = LegalAction::Dahai { tile: tile(132) };
+        let north = LegalAction::Dahai { tile: tile(120) };
+
+        assert_eq!(
+            select_honor_safety_fallback_action(&[chun.clone(), north.clone()], &context),
+            Some(&north)
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[north.clone(), chun.clone()], &context),
+            Some(&north)
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_prefers_value_honor_over_double_wind() {
+        // 最重要回帰ケース2。東場・oya = player1・player1 リーチ(自風は東)。
+        // 東は DoubleWind、中は SingleValueHonor。同じ見え枚数なら中を先に切る。
+        let context = single_reacher_honor_context(1);
+        let east = LegalAction::Dahai { tile: tile(108) };
+        let chun = LegalAction::Dahai { tile: tile(132) };
+
+        assert_eq!(
+            select_honor_safety_fallback_action(&[east.clone(), chun.clone()], &context),
+            Some(&chun)
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[chun.clone(), east.clone()], &context),
+            Some(&chun)
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_prefers_guest_wind_over_double_wind() {
+        // 最重要回帰ケース3。同条件で北は GuestWind、東は DoubleWind。北を先に切る。
+        let context = single_reacher_honor_context(1);
+        let north = LegalAction::Dahai { tile: tile(120) };
+        let east = LegalAction::Dahai { tile: tile(108) };
+
+        assert_eq!(
+            select_honor_safety_fallback_action(&[east.clone(), north.clone()], &context),
+            Some(&north)
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[north.clone(), east.clone()], &context),
+            Some(&north)
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_uses_partial_genbutsu_aggregation() {
+        // 最重要回帰ケース4。東場・oya = player0・player1 と player2 がリーチ。
+        // 西は player1 に客風・非現物、player2 に自風だが現物。全体評価は GuestWind。
+        let discards = [vec![], vec![], vec![tile(116)], vec![]];
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false, true, true, false],
+            discards,
+            vec![],
+        );
+        let west = LegalAction::Dahai { tile: tile(116) };
+        let chun = LegalAction::Dahai { tile: tile(132) };
+
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[chun.clone(), west.clone()], &context),
+            Some(&west)
+        );
+    }
+
+    #[test]
+    fn select_honor_safety_fallback_action_keeps_visible_count_priority() {
+        // 中は3枚見えの SingleValueHonor、西は1枚見えの GuestWind。見え枚数を逆転しない。
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(1),
+            [false, true, false, false],
+            Default::default(),
+            vec![tile(132), tile(133), tile(134), tile(116)],
+        );
+        let west = LegalAction::Dahai { tile: tile(117) };
+        let chun = LegalAction::Dahai { tile: tile(135) };
+
+        assert_eq!(
+            honor_safety_rank(honor(CHUN), &context),
+            Some(HonorSafetyRank::ThreeOrMoreVisible)
+        );
+        assert_eq!(
+            honor_safety_rank(honor(WEST), &context),
+            Some(HonorSafetyRank::OneVisible)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            Some(OpponentHonorValue::GuestWind)
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[west.clone(), chun.clone()], &context),
+            Some(&chun)
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_preserves_order_for_equal_value_honors() {
+        // 白と中はどちらも SingleValueHonor。見え枚数も同じなので元の順序を保つ。
+        let context = single_reacher_honor_context(1);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(132) },
+            LegalAction::Dahai { tile: tile(124) },
+        ];
+        let ranked: Vec<&LegalAction> = honor_dahai_actions_by_safety(&actions, &context)
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect();
+        assert_eq!(ranked, vec![&actions[0], &actions[1]]);
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_preserves_order_for_equal_guest_winds() {
+        // 東場・oya = player1(自風は東)。西と北はどちらも客風なので元の順序を保つ。
+        let context = single_reacher_honor_context(1);
+        let actions = vec![
+            LegalAction::Dahai { tile: tile(120) },
+            LegalAction::Dahai { tile: tile(116) },
+        ];
+        let ranked: Vec<&LegalAction> = honor_dahai_actions_by_safety(&actions, &context)
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect();
+        assert_eq!(ranked, vec![&actions[0], &actions[1]]);
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_leaves_unknown_value_to_stable_order() {
+        // 場風が不明なので東は unknown、中は SingleValueHonor。unknown を理由に順序を変えない。
+        let context = honor_value_context(
+            None,
+            Some(1),
+            [false, true, false, false],
+            Default::default(),
+            vec![],
+        );
+        let east = LegalAction::Dahai { tile: tile(108) };
+        let chun = LegalAction::Dahai { tile: tile(132) };
+
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(EAST), &context),
+            None
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[east.clone(), chun.clone()], &context),
+            Some(&east)
+        );
+        assert_eq!(
+            select_honor_safety_fallback_action(&[chun.clone(), east.clone()], &context),
+            Some(&chun)
+        );
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_pins_unknown_candidate_in_place() {
+        // 東場・oya = player1・player1 リーチ(自風は東)。西は player1 の現物なので unknown。
+        // 中と北は既知なので互いに並べ替わるが、unknown の西は元の位置に残る。
+        let discards = [vec![], vec![tile(116)], vec![], vec![]];
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(1),
+            [false, true, false, false],
+            discards,
+            vec![tile(117), tile(132), tile(120)],
+        );
+        let chun = LegalAction::Dahai { tile: tile(133) };
+        let west = LegalAction::Dahai { tile: tile(118) };
+        let north = LegalAction::Dahai { tile: tile(121) };
+        let actions = vec![chun.clone(), west.clone(), north.clone()];
+
+        for tile_type in [honor(CHUN), honor(WEST), honor(NORTH)] {
+            assert_eq!(
+                honor_safety_rank(tile_type, &context),
+                Some(HonorSafetyRank::OneVisible)
+            );
+        }
+        assert_eq!(
+            opponent_honor_value_for_reached(honor(WEST), &context),
+            None
+        );
+
+        let ranked: Vec<&LegalAction> = honor_dahai_actions_by_safety(&actions, &context)
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect();
+        assert_eq!(ranked, vec![&north, &west, &chun]);
+    }
+
+    #[test]
+    fn honor_dahai_actions_by_safety_without_reachers_keeps_stable_order() {
+        // リーチ者がいなければ役牌価値は unknown。従来どおり見え枚数と元の順序だけで決まる。
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(1),
+            [false; 4],
+            Default::default(),
+            vec![],
+        );
+        let east = LegalAction::Dahai { tile: tile(108) };
+        let chun = LegalAction::Dahai { tile: tile(132) };
+
+        assert_eq!(
+            select_honor_safety_fallback_action(&[east.clone(), chun.clone()], &context),
+            Some(&east)
         );
     }
 
@@ -3324,6 +4052,86 @@ mod tests {
         assert_eq!(candidate.suji_for_all_reached, None);
         assert_eq!(candidate.suji_safety_rank_for_all_reached, None);
         assert_eq!(candidate.suited_safety_rank, None);
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_reports_opponent_honor_value() {
+        // 東場・oya = player1・player1 リーチ(自風は東)。東はダブ東、北は客風、数牌は対象外。
+        let context = single_reacher_honor_context(1);
+        let candidates: Vec<Option<OpponentHonorValue>> = [tile(108), tile(120), tile(0)]
+            .into_iter()
+            .map(|tile| {
+                let action = LegalAction::Dahai { tile };
+                DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false)
+                    .unwrap()
+                    .opponent_honor_value
+            })
+            .collect();
+
+        assert_eq!(
+            candidates,
+            vec![
+                Some(OpponentHonorValue::DoubleWind),
+                Some(OpponentHonorValue::GuestWind),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn defense_candidate_diagnostic_opponent_honor_value_excludes_genbutsu_player() {
+        // 診断側でも現物のリーチ者を集約から除外した値を持つ。判定は同じ helper を使う。
+        let discards = [vec![], vec![], vec![tile(116)], vec![]];
+        let context = honor_value_context(
+            Some(honor(EAST)),
+            Some(0),
+            [false, true, true, false],
+            discards,
+            vec![],
+        );
+        let action = LegalAction::Dahai { tile: tile(117) };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+
+        assert_eq!(
+            candidate.opponent_honor_value,
+            Some(OpponentHonorValue::GuestWind)
+        );
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_reports_selected_opponent_honor_value() {
+        // 東場・oya = player1・player1 リーチ(自風は東)。選んだ北は客風。
+        let context = single_reacher_honor_context(1);
+        let action = LegalAction::Dahai { tile: tile(120) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &action,
+            DefenseFallbackKind::HonorSafety(HonorSafetyRank::NoVisible),
+        );
+
+        assert_eq!(diagnostic.selected_action, "N");
+        assert_eq!(
+            diagnostic.selected_honor_safety_rank,
+            Some(HonorSafetyRank::NoVisible)
+        );
+        assert_eq!(
+            diagnostic.selected_opponent_honor_value,
+            Some(OpponentHonorValue::GuestWind)
+        );
+    }
+
+    #[test]
+    fn defense_fallback_diagnostic_has_no_opponent_honor_value_for_suited_tile() {
+        let context = single_reacher_honor_context(1);
+        let action = LegalAction::Dahai { tile: tile(0) };
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &action,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::NoSafety),
+        );
+
+        assert_eq!(diagnostic.selected_opponent_honor_value, None);
     }
 
     #[test]

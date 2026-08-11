@@ -473,7 +473,7 @@ mod tests {
     use crate::defense::{HonorSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_discard_evaluation, select_discard_action};
     use crate::push_pull::{PushPullReason, push_pull_inputs_from_context};
-    use bot_logic::{DiscardComparisonReason, TileId, compare_discard_evaluations};
+    use bot_logic::{DiscardComparisonReason, TileId, TileType, compare_discard_evaluations};
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -981,6 +981,56 @@ mod tests {
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(112), dahai(108)];
         assert_eq!(agent.act(&ctx, &actions), dahai(112));
+    }
+
+    // 東場・自分 player0・player1 リーチ。親を変えて player1 の自風を切り替える。
+    fn opponent_reach_wind_context(oya: u8, drawn_tile: Option<u8>) -> GameContext {
+        let discards = [vec![], vec![tile(16)], vec![], vec![]];
+        GameContext::from_parts_with_table_state(
+            drawn_tile.map(tile),
+            vec![],
+            vec![],
+            TileType::new(27),
+            None,
+            Vec::new(),
+            Some(0),
+            Some(oya),
+            discards,
+            [false, true, false, false],
+        )
+    }
+
+    #[test]
+    fn honor_safety_fallback_breaks_same_rank_ties_by_opponent_honor_value() {
+        let mut agent = ShantenAgent;
+        // oya = player3 なので player1 の自風は西。北は客風、中は役牌。
+        let ctx = opponent_reach_wind_context(3, Some(0));
+        assert_eq!(agent.act(&ctx, &[dahai(132), dahai(120)]), dahai(120));
+        assert_eq!(agent.act(&ctx, &[dahai(120), dahai(132)]), dahai(120));
+
+        // oya = player1 なので player1 の自風は東。東はダブ東で最も危険。
+        let ctx = opponent_reach_wind_context(1, Some(0));
+        assert_eq!(agent.act(&ctx, &[dahai(108), dahai(132)]), dahai(132));
+        assert_eq!(agent.act(&ctx, &[dahai(108), dahai(120)]), dahai(120));
+    }
+
+    #[test]
+    fn honor_safety_fallback_keeps_visible_count_over_opponent_honor_value() {
+        let mut agent = ShantenAgent;
+        // 中は3枚見えの役牌、北は0枚見えの客風。見え枚数の安全度を役牌価値で逆転しない。
+        let ctx = GameContext::from_parts_with_table_state(
+            Some(tile(0)),
+            vec![],
+            vec![],
+            TileType::new(27),
+            None,
+            vec![tile(132), tile(133), tile(134)],
+            Some(0),
+            Some(3),
+            [vec![], vec![tile(16)], vec![], vec![]],
+            [false, true, false, false],
+        );
+        assert_eq!(agent.act(&ctx, &[dahai(120), dahai(135)]), dahai(135));
     }
 
     // 他家(player 1)がリーチしている局面。河・visible・手牌・引き牌を個別に指定する。

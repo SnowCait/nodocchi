@@ -1,6 +1,7 @@
 use bot_core::{
-    AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext,
-    LegalAction, PushPullDecision, PushPullInputs, ShantenAgent, ShantenDecisionDiagnostic,
+    AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
+    GameContext, LegalAction, PushPullDecision, PushPullInputs, ShantenAgent,
+    ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -320,6 +321,10 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
         "  honor safety: {}",
         optional(selected.selected_honor_safety_rank)
     ));
+    lines.push(format!(
+        "  opponent honor value: {}",
+        optional(selected.selected_opponent_honor_value)
+    ));
     lines.push(format!("  wall: {}", optional(selected.selected_wall_rank)));
     lines.push(format!(
         "  suji: {}",
@@ -359,6 +364,10 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
         "  honor safety: {}",
         optional(candidate.honor_safety_rank)
     ));
+    lines.push(format!(
+        "  opponent honor value: {}",
+        optional(candidate.opponent_honor_value)
+    ));
     lines.push(format!("  wall: {}", optional(candidate.wall_rank)));
     lines.push(format!(
         "  suji: {}",
@@ -390,6 +399,9 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
     if let Some(kind) = diagnostic.defense_fallback_kind() {
         lines.push(format!("  selected detail: {kind:?}"));
     }
+    if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
+        lines.push(format!("  selected opponent honor value: {value}"));
+    }
 
     let Some(runner_up) = diagnose_runner_up(scenario, diagnostic) else {
         lines.push(format!("  runner-up: {ABSENT}"));
@@ -407,11 +419,27 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
     if let Some(kind) = runner_up.defense_fallback_kind() {
         lines.push(format!("  runner-up detail: {kind:?}"));
     }
+    if let Some(value) = honor_safety_opponent_honor_value(&runner_up) {
+        lines.push(format!("  runner-up opponent honor value: {value}"));
+    }
     if let Some(reason) = runner_up_comparison_reason(diagnostic, &runner_up) {
         lines.push(format!("  runner-up lost by: {reason:?}"));
     }
 
     lines.join("\n")
+}
+
+// 字牌防御 (HonorSafety) で選ばれた場合だけ役牌価値を表示する。数牌防御や通常打牌では None。
+// 役牌価値は診断側で再実装せず、bot-core の診断データをそのまま読む。
+fn honor_safety_opponent_honor_value(diagnostic: &ShantenDecisionDiagnostic) -> Option<String> {
+    if !matches!(
+        diagnostic.defense_fallback_kind(),
+        Some(DefenseFallbackKind::HonorSafety(_))
+    ) {
+        return None;
+    }
+    let selected = diagnostic.defense.as_ref()?.selected.as_ref()?;
+    Some(optional(selected.selected_opponent_honor_value))
 }
 
 fn diagnose_runner_up(
@@ -952,6 +980,13 @@ mod tests {
                 "{block}"
             );
             assert!(
+                block.contains(&format!(
+                    "  opponent honor value: {}",
+                    optional(candidate.opponent_honor_value)
+                )),
+                "{block}"
+            );
+            assert!(
                 block.contains(&format!("  wall: {}", optional(candidate.wall_rank))),
                 "{block}"
             );
@@ -1219,6 +1254,115 @@ mod tests {
                 runner_up.defense_fallback_kind().unwrap(),
             )
         );
+    }
+
+    // 東場・自分 player0・oya = player3・player1 リーチ(自風は西)。
+    // N は player1 にとって客風、C は役牌。どちらも1枚見えで HonorSafetyRank は同じ。
+    const HONOR_GUEST_VS_VALUE_SCENARIO: &str = r#"{
+        "hand": "19m19p1478s23467z",
+        "draw": "4p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "reached": [false, true, false, false],
+        "discards": ["", "1m 4m 7p", "", ""],
+        "legal_dahai": "C N"
+    }"#;
+
+    // 東場・自分 player0・oya = player1・player1 リーチ(自風は東)。
+    // E は player1 にとってダブ東、C は役牌。どちらも1枚見えで HonorSafetyRank は同じ。
+    const HONOR_VALUE_VS_DOUBLE_SCENARIO: &str = r#"{
+        "hand": "19m19p1478s13467z",
+        "draw": "4p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 1,
+        "reached": [false, true, false, false],
+        "discards": ["", "1m 4m 7p", "", ""],
+        "legal_dahai": "E C"
+    }"#;
+
+    #[test]
+    fn defense_candidates_show_opponent_honor_value() {
+        let (_, _, output) = rendered(HONOR_VALUE_VS_DOUBLE_SCENARIO, false);
+
+        let east = candidate_block(&output, "Defense candidates", "E");
+        assert!(east.contains("  honor safety: OneVisible"), "{east}");
+        assert!(
+            east.contains("  opponent honor value: DoubleWind"),
+            "{east}"
+        );
+
+        let chun = candidate_block(&output, "Defense candidates", "C");
+        assert!(chun.contains("  honor safety: OneVisible"), "{chun}");
+        assert!(
+            chun.contains("  opponent honor value: SingleValueHonor"),
+            "{chun}"
+        );
+        assert!(chun.contains("  selected: yes"), "{chun}");
+    }
+
+    #[test]
+    fn summary_shows_opponent_honor_value_for_guest_wind_over_value_honor() {
+        // 合法 action 順が "C N" でも、客風の N を先に切る。
+        let (_, _, output) = rendered(HONOR_GUEST_VS_VALUE_SCENARIO, false);
+        assert_eq!(
+            section(&output, "Summary"),
+            "Summary\n  \
+             selected: N\n  \
+             source: DefenseFallback\n  \
+             selected detail: HonorSafety(OneVisible)\n  \
+             selected opponent honor value: GuestWind\n  \
+             runner-up: C\n  \
+             runner-up source: DefenseFallback\n  \
+             runner-up detail: HonorSafety(OneVisible)\n  \
+             runner-up opponent honor value: SingleValueHonor"
+        );
+    }
+
+    #[test]
+    fn summary_shows_opponent_honor_value_for_value_honor_over_double_wind() {
+        // 合法 action 順が "E C" でも、ダブ東ではない C を先に切る。
+        let (_, _, output) = rendered(HONOR_VALUE_VS_DOUBLE_SCENARIO, false);
+        assert_eq!(
+            section(&output, "Summary"),
+            "Summary\n  \
+             selected: C\n  \
+             source: DefenseFallback\n  \
+             selected detail: HonorSafety(OneVisible)\n  \
+             selected opponent honor value: SingleValueHonor\n  \
+             runner-up: E\n  \
+             runner-up source: DefenseFallback\n  \
+             runner-up detail: HonorSafety(OneVisible)\n  \
+             runner-up opponent honor value: DoubleWind"
+        );
+    }
+
+    #[test]
+    fn honor_safety_selection_does_not_depend_on_legal_action_order() {
+        for (json, expected) in [
+            (HONOR_GUEST_VS_VALUE_SCENARIO, "N"),
+            (HONOR_VALUE_VS_DOUBLE_SCENARIO, "C"),
+        ] {
+            let scenario = scenario_from_json(json);
+            let forward = diagnose(&scenario);
+            assert_eq!(action_label(&forward.selected_action), expected);
+
+            let mut reversed_actions = scenario.legal_actions.clone();
+            reversed_actions.reverse();
+            let reversed = ShantenAgent::diagnose(&scenario.context, &reversed_actions);
+            assert_eq!(action_label(&reversed.selected_action), expected);
+        }
+    }
+
+    #[test]
+    fn summary_omits_opponent_honor_value_outside_honor_safety() {
+        // 数牌防御と通常打牌では役牌価値を表示しない。
+        for json in [HALF_SUJI_SCENARIO, NORMAL_SCENARIO] {
+            let (_, _, output) = rendered(json, false);
+            let summary = section(&output, "Summary");
+            assert!(!summary.contains("opponent honor value"), "{summary}");
+        }
     }
 
     #[test]
