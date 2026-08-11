@@ -24,8 +24,8 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 ///
-/// 打牌後13枚の簡易打点 proxy は `PushPullInputs` とログに保持するが、押し引き threshold への
-/// 反映は未対応で、判定には未使用。
+/// 打牌後13枚の簡易打点 proxy は `PushPullInputs` とログに保持し、単独の子リーチに対する子の
+/// 一向聴だけを対象にした限定補正で使用する。それ以外の branch では判定に影響しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -40,7 +40,8 @@ pub enum PushPullMode {
 ///
 /// 打点関連フィールドは、打牌後13枚の手牌内で確認できる牌だけから求める簡易 proxy であり、
 /// 正確な翻数・打点ではない。副露・暗槓は `GameContext` に情報が無いため含まない。
-/// これらは診断・ログ用であり、現状 `decide_push_pull()` の判定には使用しない。
+/// `decide_push_pull()` はこの proxy の合計だけを、単独の子リーチに対する子の一向聴の
+/// 限定補正で参照する。個別フィールドは診断・ログ用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
     pub min_shanten_after_discard: i8,
@@ -190,6 +191,7 @@ pub enum PushPullReason {
     StrongIishantenAgainstSingleNonDealer,
     CompleteIishantenAgainstSingleNonDealer,
     DealerIishantenAgainstSingleNonDealer,
+    HighValueIishantenAgainstSingleNonDealer,
     IishantenUnderHighPressure,
     TwoOrMoreShanten,
 }
@@ -214,6 +216,10 @@ const COMPLETE_IISHANTEN_MIN_TYPES: usize = 2;
 // 形は限定せず、単独の子リーチに対してこの受け入れを満たす場合だけ Neutral にする。
 const DEALER_IISHANTEN_MIN_REMAINING: u8 = 7;
 const DEALER_IISHANTEN_MIN_TYPES: usize = 2;
+
+// 明確な高打点だけを対象にした限定補正の暫定 threshold。受け入れや形は限定せず、
+// 単独の子リーチに対する子の一向聴で簡易打点 proxy がこの値以上の場合だけ Neutral にする。
+const HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY: u8 = 4;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
@@ -290,8 +296,9 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 /// また、暫定 threshold は実戦の regression test に基づいて将来調整する。
-/// 打牌後13枚の簡易打点 proxy(`PushPullOffenseState` のドラ・役牌翻 proxy)は診断・ログ用で、
-/// この判定では使用しない。実戦ログで誤判定を確認してから別途 threshold へ反映する。
+/// 打牌後13枚の簡易打点 proxy(`PushPullOffenseState::simple_value_proxy_after_discard()`)は、
+/// 単独の子リーチに対する子の一向聴だけを対象にした限定補正で参照する。テンパイ・親リーチ・
+/// 複数リーチ・二向聴以上・自分が親の場合は従来どおり proxy を見ない。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
@@ -364,6 +371,19 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
             return PushPullDecision {
                 mode: PushPullMode::Neutral,
                 reason: PushPullReason::DealerIishantenAgainstSingleNonDealer,
+            };
+        }
+
+        // 4-4. 子の自分が単独の子リーチを受け、簡易打点 proxy が限定 threshold 以上の場合だけ Neutral。
+        // 受け入れ・形は限定せず、明確な高打点だけを対象にする。Push にはしない。
+        let high_value = single_non_dealer
+            && !inputs.self_dealer
+            && offense.simple_value_proxy_after_discard()
+                >= HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY;
+        if high_value {
+            return PushPullDecision {
+                mode: PushPullMode::Neutral,
+                reason: PushPullReason::HighValueIishantenAgainstSingleNonDealer,
             };
         }
 
@@ -1229,6 +1249,189 @@ mod tests {
         assert_eq!(decision.reason, PushPullReason::MissingOffenseEvaluation);
     }
 
+    #[test]
+    fn high_value_iishanten_without_value_folds() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 0, 0, 0);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 0);
+
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn high_value_iishanten_below_threshold_folds() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 3, 1, 0);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 3);
+
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn high_value_iishanten_boundary_is_neutral() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 0);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 4);
+
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::HighValueIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn high_value_iishanten_above_threshold_is_neutral() {
+        // ドラと役牌翻 proxy の合計でも threshold を超えれば同じ扱い。
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 2);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 6);
+
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::HighValueIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn high_value_iishanten_against_dealer_reach_folds() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 0);
+        let decision = decide_push_pull(&inputs_with_dealer(1, true, false, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn high_value_iishanten_against_multiple_reach_folds() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 0);
+        for reach in [2, 3] {
+            let decision =
+                decide_push_pull(&inputs_with_dealer(reach, false, false, Some(offense)));
+            assert_eq!(decision.mode, PushPullMode::Fold, "reach {reach}");
+            assert_eq!(
+                decision.reason,
+                PushPullReason::IishantenUnderHighPressure,
+                "reach {reach}"
+            );
+        }
+    }
+
+    #[test]
+    fn high_value_two_or_more_shanten_folds() {
+        for shanten in [2, 3] {
+            let offense =
+                offense_with_shape_and_proxy(shanten, 20, 4, IishantenShape::Unknown, 4, 1, 2);
+            let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
+            assert_eq!(decision.mode, PushPullMode::Fold, "shanten {shanten}");
+            assert_eq!(
+                decision.reason,
+                PushPullReason::TwoOrMoreShanten,
+                "shanten {shanten}"
+            );
+        }
+    }
+
+    #[test]
+    fn high_value_does_not_change_tenpai_branch() {
+        let offense = offense_with_shape_and_proxy(0, 4, 1, IishantenShape::Unknown, 4, 1, 2);
+
+        let single = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
+        assert_eq!(single.mode, PushPullMode::Push);
+        assert_eq!(single.reason, PushPullReason::TenpaiAgainstSingleNonDealer);
+
+        let dealer_reach = decide_push_pull(&inputs_with_dealer(1, true, false, Some(offense)));
+        assert_eq!(dealer_reach.mode, PushPullMode::Neutral);
+        assert_eq!(dealer_reach.reason, PushPullReason::TenpaiUnderHighPressure);
+
+        let multiple = decide_push_pull(&inputs_with_dealer(2, false, false, Some(offense)));
+        assert_eq!(multiple.mode, PushPullMode::Neutral);
+        assert_eq!(multiple.reason, PushPullReason::TenpaiUnderHighPressure);
+    }
+
+    #[test]
+    fn high_value_does_not_change_no_opponent_reach() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 0);
+        let decision = decide_push_pull(&inputs_with_dealer(0, false, false, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+    }
+
+    #[test]
+    fn high_value_iishanten_is_not_applied_when_self_is_dealer() {
+        // 自分が親のときは親補正だけを使う。親補正の受け入れに届かなければ高打点でも Fold。
+        let offense = offense_with_shape_and_proxy(1, 6, 2, IishantenShape::Weak, 4, 1, 0);
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, true, Some(offense)));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+    }
+
+    #[test]
+    fn high_value_iishanten_keeps_existing_iishanten_reasons() {
+        // 既存の一向聴補正が先に成立する場合は reason を変えない。
+        let strong = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            false,
+            Some(offense_with_shape_and_proxy(
+                1,
+                8,
+                2,
+                IishantenShape::Weak,
+                4,
+                1,
+                0,
+            )),
+        ));
+        assert_eq!(strong.mode, PushPullMode::Neutral);
+        assert_eq!(
+            strong.reason,
+            PushPullReason::StrongIishantenAgainstSingleNonDealer
+        );
+
+        let complete = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            false,
+            Some(offense_with_shape_and_proxy(
+                1,
+                6,
+                2,
+                IishantenShape::Complete,
+                4,
+                1,
+                0,
+            )),
+        ));
+        assert_eq!(complete.mode, PushPullMode::Neutral);
+        assert_eq!(
+            complete.reason,
+            PushPullReason::CompleteIishantenAgainstSingleNonDealer
+        );
+
+        let dealer = decide_push_pull(&inputs_with_dealer(
+            1,
+            false,
+            true,
+            Some(offense_with_shape_and_proxy(
+                1,
+                7,
+                2,
+                IishantenShape::Weak,
+                4,
+                1,
+                0,
+            )),
+        ));
+        assert_eq!(dealer.mode, PushPullMode::Neutral);
+        assert_eq!(
+            dealer.reason,
+            PushPullReason::DealerIishantenAgainstSingleNonDealer
+        );
+    }
+
     // ここから打牌後13枚の簡易打点 proxy のテスト。
     use bot_logic::{Acceptance, Shanten};
 
@@ -1583,14 +1786,43 @@ mod tests {
     }
 
     #[test]
-    fn value_proxy_does_not_change_decision() {
-        // 同じ向聴数・受け入れ・一向聴形・親情報で proxy だけを変えても判定は変わらない。
+    fn value_proxy_changes_decision_only_in_high_value_iishanten_branch() {
+        // 単独の子リーチ・子の自分・一向聴でだけ、proxy が判定を変える。
+        let shape = IishantenShape::Weak;
+        let low = offense_with_shape_and_proxy(1, 7, 2, shape, 0, 0, 0);
+        let high = offense_with_shape_and_proxy(1, 7, 2, shape, 6, 1, 2);
+
+        let low_decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(low)));
+        assert_eq!(low_decision.mode, PushPullMode::Fold);
+        assert_eq!(
+            low_decision.reason,
+            PushPullReason::IishantenUnderHighPressure
+        );
+
+        let high_decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(high)));
+        assert_eq!(high_decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            high_decision.reason,
+            PushPullReason::HighValueIishantenAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn value_proxy_does_not_change_other_branches() {
+        // 高打点補正の対象外では、同じ向聴数・受け入れ・一向聴形・親情報で proxy だけを変えても
+        // 判定は変わらない。
         let cases = [
             // (opponent_reach, dealer_reacher, self_dealer, shanten, remaining, types, shape)
-            (1u8, false, false, 1i8, 7u8, 2usize, IishantenShape::Weak), // 一向聴 Fold
+            (0u8, false, false, 1i8, 7u8, 2usize, IishantenShape::Weak), // 他家リーチなし
+            (1, false, false, 0, 4, 1, IishantenShape::Unknown),         // テンパイ(単独子リーチ)
+            (1, true, false, 0, 4, 1, IishantenShape::Unknown),          // テンパイ(親リーチ)
+            (2, false, false, 0, 4, 1, IishantenShape::Unknown),         // テンパイ(複数リーチ)
             (1, false, false, 1, 8, 2, IishantenShape::Weak),            // Strong 一向聴
             (1, false, false, 1, 6, 2, IishantenShape::Complete),        // Complete 一向聴
             (1, false, true, 1, 7, 2, IishantenShape::Weak),             // Dealer 一向聴
+            (1, true, false, 1, 7, 2, IishantenShape::Weak),             // 親リーチへの一向聴
+            (2, false, false, 1, 7, 2, IishantenShape::Weak),            // 複数リーチへの一向聴
+            (1, false, true, 1, 6, 2, IishantenShape::Weak),             // 自分が親の一向聴 Fold
             (1, false, false, 2, 20, 4, IishantenShape::Unknown),        // 二向聴以上
         ];
 
@@ -1599,7 +1831,11 @@ mod tests {
             let high = offense_with_shape_and_proxy(shanten, remaining, types, shape, 6, 1, 2);
             let a = inputs_with_dealer(reach, dealer_reacher, self_dealer, Some(low));
             let b = inputs_with_dealer(reach, dealer_reacher, self_dealer, Some(high));
-            assert_eq!(decide_push_pull(&a), decide_push_pull(&b));
+            assert_eq!(
+                decide_push_pull(&a),
+                decide_push_pull(&b),
+                "{reach} {dealer_reacher} {self_dealer} {shanten} {remaining} {types} {shape:?}"
+            );
         }
     }
 
