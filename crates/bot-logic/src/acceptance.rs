@@ -1,21 +1,24 @@
-use crate::shanten::{Shanten, calculate_shanten};
+use crate::shanten::{
+    EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
+    calculate_shanten_with_fixed_melds,
+};
 use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AcceptanceTile {
+pub struct AcceptanceTile<S = Shanten> {
     pub tile: TileType,
     pub remaining: u8,
-    pub shanten_after_draw: Shanten,
+    pub shanten_after_draw: S,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Acceptance {
-    pub current: Shanten,
-    pub tiles: Vec<AcceptanceTile>,
+pub struct Acceptance<S = Shanten> {
+    pub current: S,
+    pub tiles: Vec<AcceptanceTile<S>>,
 }
 
-impl Acceptance {
+impl<S> Acceptance<S> {
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
     }
@@ -25,6 +28,9 @@ impl Acceptance {
     }
 }
 
+pub type EffectiveAcceptance = Acceptance<EffectiveShanten>;
+pub type EffectiveAcceptanceTile = AcceptanceTile<EffectiveShanten>;
+
 pub fn calculate_acceptance(counts: &TileCounts) -> Acceptance {
     calculate_acceptance_with_seen(counts, &[0; TileType::COUNT])
 }
@@ -33,10 +39,49 @@ pub fn calculate_acceptance_with_visible_tiles(
     counts: &TileCounts,
     visible_tiles: &[TileId],
 ) -> Acceptance {
-    if visible_tiles.is_empty() {
-        return calculate_acceptance(counts);
-    }
+    calculate_acceptance_with_seen(counts, &additional_seen(counts, visible_tiles))
+}
 
+pub fn calculate_acceptance_with_fixed_melds(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> EffectiveAcceptance {
+    calculate_acceptance_with_fixed_melds_and_seen(counts, fixed_meld_count, &[0; TileType::COUNT])
+}
+
+pub fn calculate_acceptance_with_fixed_melds_and_visible_tiles(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    visible_tiles: &[TileId],
+) -> EffectiveAcceptance {
+    calculate_acceptance_with_fixed_melds_and_seen(
+        counts,
+        fixed_meld_count,
+        &additional_seen(counts, visible_tiles),
+    )
+}
+
+pub(crate) fn calculate_acceptance_with_seen(
+    counts: &TileCounts,
+    additional_seen: &[u8; TileType::COUNT],
+) -> Acceptance {
+    collect_acceptance(counts, additional_seen, calculate_shanten, Shanten::min)
+}
+
+fn calculate_acceptance_with_fixed_melds_and_seen(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    additional_seen: &[u8; TileType::COUNT],
+) -> EffectiveAcceptance {
+    collect_acceptance(
+        counts,
+        additional_seen,
+        |counts| calculate_shanten_with_fixed_melds(counts, fixed_meld_count),
+        EffectiveShanten::min,
+    )
+}
+
+fn additional_seen(counts: &TileCounts, visible_tiles: &[TileId]) -> [u8; TileType::COUNT] {
     let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
     let mut additional_seen = [0u8; TileType::COUNT];
     for tile in TileType::all() {
@@ -44,16 +89,17 @@ pub fn calculate_acceptance_with_visible_tiles(
             .count(tile)
             .saturating_sub(counts.count(tile));
     }
-
-    calculate_acceptance_with_seen(counts, &additional_seen)
+    additional_seen
 }
 
-pub(crate) fn calculate_acceptance_with_seen(
+fn collect_acceptance<S: Copy>(
     counts: &TileCounts,
     additional_seen: &[u8; TileType::COUNT],
-) -> Acceptance {
-    let current = calculate_shanten(counts);
-    let current_min = current.min();
+    evaluate: impl Fn(&TileCounts) -> S,
+    effective: impl Fn(S) -> i8,
+) -> Acceptance<S> {
+    let current = evaluate(counts);
+    let current_min = effective(current);
     let mut tiles = Vec::new();
 
     for tile in TileType::all() {
@@ -68,8 +114,8 @@ pub(crate) fn calculate_acceptance_with_seen(
             continue;
         }
 
-        let shanten_after_draw = calculate_shanten(&added);
-        if shanten_after_draw.min() < current_min {
+        let shanten_after_draw = evaluate(&added);
+        if effective(shanten_after_draw) < current_min {
             tiles.push(AcceptanceTile {
                 tile,
                 remaining,
@@ -240,6 +286,141 @@ mod tests {
         assert_eq!(
             remaining_of(&visible, tile("5s")),
             remaining_of(&plain, tile("5s"))
+        );
+    }
+
+    fn fixed(value: u8) -> FixedMeldCount {
+        FixedMeldCount::new(value).unwrap()
+    }
+
+    fn effective_accepted_tiles(acceptance: &EffectiveAcceptance) -> Vec<TileType> {
+        acceptance.tiles.iter().map(|entry| entry.tile).collect()
+    }
+
+    fn effective_remaining_of(acceptance: &EffectiveAcceptance, wait: TileType) -> Option<u8> {
+        acceptance
+            .tiles
+            .iter()
+            .find(|entry| entry.tile == wait)
+            .map(|entry| entry.remaining)
+    }
+
+    fn one_meld_tenpai_hand() -> Vec<TileId> {
+        ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 53])
+    }
+
+    #[test]
+    fn one_fixed_meld_tenpai_accepts_only_winning_tile() {
+        let counts = counts(&["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p"]);
+        let acceptance = calculate_acceptance_with_fixed_melds(&counts, fixed(1));
+
+        assert_eq!(acceptance.current.min(), 0);
+        assert_eq!(effective_accepted_tiles(&acceptance), vec![tile("5p")]);
+        assert_eq!(acceptance.tiles[0].shanten_after_draw.min(), -1);
+        assert_eq!(acceptance.tiles[0].remaining, 3);
+        assert_eq!(acceptance.total_remaining(), 3);
+    }
+
+    #[test]
+    fn fixed_meld_acceptance_keeps_effective_shanten_standard_only() {
+        let counts = counts(&["1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N"]);
+        let acceptance = calculate_acceptance_with_fixed_melds(&counts, fixed(1));
+
+        assert_eq!(acceptance.current.min(), 6);
+        assert_eq!(acceptance.current.concealed(), None);
+        assert!(
+            acceptance
+                .tiles
+                .iter()
+                .all(|entry| entry.shanten_after_draw.concealed().is_none())
+        );
+        assert!(!effective_accepted_tiles(&acceptance).contains(&tile("C")));
+    }
+
+    #[test]
+    fn fixed_meld_visible_tiles_reduce_remaining() {
+        let hand = one_meld_tenpai_hand();
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let mut visible = hand.clone();
+        visible.extend(ids(&[54, 55]));
+
+        let acceptance =
+            calculate_acceptance_with_fixed_melds_and_visible_tiles(&counts, fixed(1), &visible);
+
+        assert_eq!(acceptance.current.min(), 0);
+        assert_eq!(effective_accepted_tiles(&acceptance), vec![tile("5p")]);
+        assert_eq!(effective_remaining_of(&acceptance, tile("5p")), Some(1));
+        assert_eq!(acceptance.total_remaining(), 1);
+    }
+
+    #[test]
+    fn fixed_meld_visible_tiles_do_not_double_count_own_hand() {
+        let hand = one_meld_tenpai_hand();
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+
+        assert_eq!(
+            calculate_acceptance_with_fixed_melds_and_visible_tiles(&counts, fixed(1), &hand),
+            calculate_acceptance_with_fixed_melds(&counts, fixed(1))
+        );
+        assert_eq!(
+            calculate_acceptance_with_fixed_melds_and_visible_tiles(&counts, fixed(1), &[]),
+            calculate_acceptance_with_fixed_melds(&counts, fixed(1))
+        );
+    }
+
+    #[test]
+    fn zero_fixed_melds_matches_concealed_acceptance() {
+        let hands = [
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+            ]),
+            counts(&[
+                "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+            ]),
+            counts(&[
+                "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+            ]),
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "5s", "E", "E",
+            ]),
+        ];
+
+        for hand in hands {
+            let expected = calculate_acceptance(&hand);
+            let actual = calculate_acceptance_with_fixed_melds(&hand, FixedMeldCount::NONE);
+
+            assert_eq!(actual.current.concealed(), Some(expected.current));
+            assert_eq!(effective_accepted_tiles(&actual), accepted_tiles(&expected));
+            assert_eq!(actual.total_remaining(), expected.total_remaining());
+            for (actual_tile, expected_tile) in actual.tiles.iter().zip(expected.tiles.iter()) {
+                assert_eq!(actual_tile.remaining, expected_tile.remaining);
+                assert_eq!(
+                    actual_tile.shanten_after_draw.concealed(),
+                    Some(expected_tile.shanten_after_draw)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_fixed_melds_visible_tiles_match_concealed_acceptance() {
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let mut visible = hand.clone();
+        visible.extend(ids(&[90]));
+
+        let expected = calculate_acceptance_with_visible_tiles(&counts, &visible);
+        let actual = calculate_acceptance_with_fixed_melds_and_visible_tiles(
+            &counts,
+            FixedMeldCount::NONE,
+            &visible,
+        );
+
+        assert_eq!(actual.current.concealed(), Some(expected.current));
+        assert_eq!(effective_accepted_tiles(&actual), accepted_tiles(&expected));
+        assert_eq!(
+            effective_remaining_of(&actual, tile("5s")),
+            remaining_of(&expected, tile("5s"))
         );
     }
 

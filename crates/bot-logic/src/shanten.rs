@@ -15,6 +15,55 @@ impl Shanten {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FixedMeldCount(u8);
+
+impl FixedMeldCount {
+    pub const MAX: u8 = 4;
+    pub const NONE: Self = Self(0);
+
+    pub fn new(value: u8) -> Option<Self> {
+        (value <= Self::MAX).then_some(Self(value))
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+
+    pub fn has_melds(self) -> bool {
+        self.0 > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveShanten {
+    Concealed(Shanten),
+    Melded { standard: i8 },
+}
+
+impl EffectiveShanten {
+    pub fn min(self) -> i8 {
+        match self {
+            Self::Concealed(shanten) => shanten.min(),
+            Self::Melded { standard } => standard,
+        }
+    }
+
+    pub fn standard(self) -> i8 {
+        match self {
+            Self::Concealed(shanten) => shanten.standard,
+            Self::Melded { standard } => standard,
+        }
+    }
+
+    pub fn concealed(self) -> Option<Shanten> {
+        match self {
+            Self::Concealed(shanten) => Some(shanten),
+            Self::Melded { .. } => None,
+        }
+    }
+}
+
 pub fn calculate_shanten(counts: &TileCounts) -> Shanten {
     Shanten {
         standard: standard_shanten(counts),
@@ -23,12 +72,32 @@ pub fn calculate_shanten(counts: &TileCounts) -> Shanten {
     }
 }
 
+pub fn calculate_shanten_with_fixed_melds(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> EffectiveShanten {
+    if fixed_meld_count.has_melds() {
+        EffectiveShanten::Melded {
+            standard: standard_shanten_with_fixed_melds(counts, fixed_meld_count),
+        }
+    } else {
+        EffectiveShanten::Concealed(calculate_shanten(counts))
+    }
+}
+
 pub fn standard_shanten(counts: &TileCounts) -> i8 {
+    standard_shanten_with_fixed_melds(counts, FixedMeldCount::NONE)
+}
+
+pub fn standard_shanten_with_fixed_melds(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> i8 {
     let mut memo = SearchMemo::new();
     search(
         *counts,
         SearchState {
-            melds: 0,
+            melds: fixed_meld_count.get(),
             has_pair: false,
             partials: 0,
         },
@@ -198,12 +267,12 @@ fn try_branch(
 mod tests {
     use super::*;
 
+    fn tile(s: &str) -> TileType {
+        TileType::from_mjai_type_str(s).unwrap()
+    }
+
     fn counts(strings: &[&str]) -> TileCounts {
-        TileCounts::from_tile_types(
-            strings
-                .iter()
-                .map(|s| TileType::from_mjai_type_str(s).unwrap()),
-        )
+        TileCounts::from_tile_types(strings.iter().map(|s| tile(s)))
     }
 
     #[test]
@@ -438,5 +507,164 @@ mod tests {
         assert_eq!(shanten.chiitoitsu, 13);
         assert_eq!(shanten.kokushi, 13);
         assert_eq!(shanten.min(), 8);
+    }
+
+    fn fixed(value: u8) -> FixedMeldCount {
+        FixedMeldCount::new(value).unwrap()
+    }
+
+    #[test]
+    fn fixed_meld_count_accepts_zero_to_four() {
+        for value in 0..=FixedMeldCount::MAX {
+            assert_eq!(
+                FixedMeldCount::new(value).map(FixedMeldCount::get),
+                Some(value)
+            );
+        }
+        assert_eq!(FixedMeldCount::NONE.get(), 0);
+        assert!(!FixedMeldCount::NONE.has_melds());
+        assert!(fixed(1).has_melds());
+    }
+
+    #[test]
+    fn fixed_meld_count_rejects_more_than_four_without_clamping() {
+        assert_eq!(FixedMeldCount::new(5), None);
+        assert_eq!(FixedMeldCount::new(u8::MAX), None);
+    }
+
+    #[test]
+    fn standard_shanten_with_zero_fixed_melds_matches_concealed_api() {
+        let hands = [
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+            ]),
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+            ]),
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "5s", "E", "E",
+            ]),
+            counts(&[
+                "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+            ]),
+            counts(&[
+                "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+            ]),
+            counts(&["1m", "3m", "5m", "7m", "9m", "E", "S", "W"]),
+            TileCounts::new(),
+        ];
+
+        for hand in hands {
+            assert_eq!(
+                standard_shanten_with_fixed_melds(&hand, FixedMeldCount::NONE),
+                standard_shanten(&hand)
+            );
+            assert_eq!(
+                calculate_shanten_with_fixed_melds(&hand, FixedMeldCount::NONE),
+                EffectiveShanten::Concealed(calculate_shanten(&hand))
+            );
+            assert_eq!(
+                calculate_shanten_with_fixed_melds(&hand, FixedMeldCount::NONE).min(),
+                calculate_shanten(&hand).min()
+            );
+        }
+    }
+
+    #[test]
+    fn one_fixed_meld_with_nine_tiles_and_single_tile_is_tenpai() {
+        let hand = counts(&["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p"]);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(1)), 0);
+        assert_eq!(calculate_shanten_with_fixed_melds(&hand, fixed(1)).min(), 0);
+    }
+
+    #[test]
+    fn one_fixed_meld_with_nine_tiles_and_pair_is_complete() {
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p", "5p",
+        ]);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(1)), -1);
+        assert_eq!(
+            calculate_shanten_with_fixed_melds(&hand, fixed(1)).min(),
+            -1
+        );
+    }
+
+    #[test]
+    fn two_fixed_melds_with_six_tiles_and_single_tile_is_tenpai() {
+        let hand = counts(&["1m", "2m", "3m", "4m", "5m", "6m", "5p"]);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(2)), 0);
+
+        let mut drawn = hand;
+        drawn.add(tile("5p"));
+        assert_eq!(standard_shanten_with_fixed_melds(&drawn, fixed(2)), -1);
+    }
+
+    #[test]
+    fn three_fixed_melds_with_three_tiles_and_single_tile_is_tenpai() {
+        let hand = counts(&["1m", "2m", "3m", "5p"]);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(3)), 0);
+
+        let mut drawn = hand;
+        drawn.add(tile("5p"));
+        assert_eq!(standard_shanten_with_fixed_melds(&drawn, fixed(3)), -1);
+    }
+
+    #[test]
+    fn four_fixed_melds_with_single_tile_is_tenpai() {
+        let hand = counts(&["5p"]);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(4)), 0);
+
+        let mut drawn = hand;
+        drawn.add(tile("5p"));
+        assert_eq!(standard_shanten_with_fixed_melds(&drawn, fixed(4)), -1);
+    }
+
+    #[test]
+    fn fixed_melds_are_not_a_tile_count_correction() {
+        let hand = counts(&["1m", "2m", "3m", "5p"]);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(3)), 0);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(2)), 2);
+        assert_eq!(standard_shanten_with_fixed_melds(&hand, fixed(1)), 4);
+        assert_eq!(
+            standard_shanten_with_fixed_melds(&hand, FixedMeldCount::NONE),
+            6
+        );
+    }
+
+    #[test]
+    fn fixed_melds_do_not_use_kokushi() {
+        let hand = counts(&["1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N"]);
+        assert_eq!(kokushi_shanten(&hand), 3);
+        assert_eq!(calculate_shanten(&hand).min(), 3);
+
+        let effective = calculate_shanten_with_fixed_melds(&hand, fixed(1));
+        assert_eq!(effective.min(), 6);
+        assert_eq!(effective.standard(), 6);
+        assert_eq!(effective.concealed(), None);
+    }
+
+    #[test]
+    fn fixed_melds_do_not_use_chiitoitsu() {
+        let hand = counts(&["1m", "1m", "4m", "4m", "7m", "7m", "1p", "1p", "4p", "4p"]);
+        assert_eq!(chiitoitsu_shanten(&hand), 3);
+
+        let effective = calculate_shanten_with_fixed_melds(&hand, fixed(1));
+        assert_eq!(effective.min(), 2);
+        assert_eq!(
+            effective.min(),
+            standard_shanten_with_fixed_melds(&hand, fixed(1))
+        );
+        assert_eq!(effective.concealed(), None);
+    }
+
+    #[test]
+    fn effective_shanten_exposes_concealed_shanten_only_without_fixed_melds() {
+        let hand = counts(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+        ]);
+        let concealed = calculate_shanten_with_fixed_melds(&hand, FixedMeldCount::NONE);
+        assert_eq!(concealed.concealed(), Some(calculate_shanten(&hand)));
+        assert_eq!(concealed.min(), 0);
+        assert_eq!(concealed.standard(), standard_shanten(&hand));
     }
 }
