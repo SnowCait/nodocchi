@@ -76,12 +76,10 @@ pub fn legal_action_to_mjai_action(
         LegalAction::None => Some(MjaiAction::None {
             request_id: Some(request_id),
         }),
-        // 副露・カン response は possible_actions の元 action と照合して構築する必要があるため、
-        // possible_actions を参照しないこの単純変換では扱わず None を返す。
-        // - Chi / Pon / Daiminkan は target を安全に得られない
-        // - Ankan / Kakan は response 自体は作れるが、server が提示した元文字列と
-        //   照合して構築する方が安全
-        // これらの副露・カン response は checked_legal_action_to_mjai_action() に寄せる。
+        // 副露・カン response 自体は組み立てられるが、server が提示した元の pai / consumed
+        // 文字列を再利用する方が赤5などの物理牌表現を安全に維持できる。
+        // そのため possible_actions を参照しないこの単純変換では扱わず None を返し、
+        // 副露・カン response は checked_legal_action_to_mjai_action() に寄せる。
         LegalAction::Chi { .. }
         | LegalAction::Pon { .. }
         | LegalAction::Daiminkan { .. }
@@ -100,7 +98,7 @@ pub fn legal_action_to_mjai_action(
 //   5. Reach
 //   6. Ankan
 //   7. Kakan
-//   8. それ以外   (Chi / Pon / Daiminkan は target を得られないため None)
+//   8. それ以外   (Chi / Pon / Daiminkan は fallback で自動的に鳴かないため None)
 //
 // possible_actions に無い action を送らないよう、必ず possible_actions を走査して
 // 対応する response のみ構築する。合法な fallback が無い場合は None を返し、
@@ -202,7 +200,8 @@ pub fn fallback_mjai_action_from_possible_actions(
         return Some(response);
     }
 
-    // 8. Chi / Pon / Daiminkan は target を安全に得られないため fallback 対象外。
+    // 8. Chi / Pon / Daiminkan は response 自体は送信可能だが、fallback として自動的に
+    //    鳴くと鳴き判断を勝手に変えてしまうため対象外とする。
     None
 }
 
@@ -253,7 +252,61 @@ pub fn checked_legal_action_to_mjai_action(
                 request_id: Some(request_id),
             })
         }),
-        // ankan response は actor / consumed のみで target を要さないため、
+        // 副露 response は actor / pai / consumed のみで target を含まない
+        // (RiichiEnv v0.4.8 Action::to_mjai() と同じ)。選択した LegalAction と
+        // pai + consumed が一致する possible action の元文字列を再利用して構築する。
+        LegalAction::Chi { tile, consumed } => possible_actions.iter().find_map(|a| {
+            let MjaiPossibleAction::Chi {
+                pai,
+                consumed: server_consumed,
+            } = a
+            else {
+                return None;
+            };
+            (temporary_tile_id_from_mjai_pai(pai) == Some(*tile)
+                && mjai_pais_match_tile_ids(server_consumed, consumed))
+            .then(|| MjaiAction::Chi {
+                actor,
+                pai: pai.clone(),
+                consumed: server_consumed.clone(),
+                request_id: Some(request_id),
+            })
+        }),
+        LegalAction::Pon { tile, consumed } => possible_actions.iter().find_map(|a| {
+            let MjaiPossibleAction::Pon {
+                pai,
+                consumed: server_consumed,
+            } = a
+            else {
+                return None;
+            };
+            (temporary_tile_id_from_mjai_pai(pai) == Some(*tile)
+                && mjai_pais_match_tile_ids(server_consumed, consumed))
+            .then(|| MjaiAction::Pon {
+                actor,
+                pai: pai.clone(),
+                consumed: server_consumed.clone(),
+                request_id: Some(request_id),
+            })
+        }),
+        LegalAction::Daiminkan { tile, consumed } => possible_actions.iter().find_map(|a| {
+            let MjaiPossibleAction::Daiminkan {
+                pai,
+                consumed: server_consumed,
+            } = a
+            else {
+                return None;
+            };
+            (temporary_tile_id_from_mjai_pai(pai) == Some(*tile)
+                && mjai_pais_match_tile_ids(server_consumed, consumed))
+            .then(|| MjaiAction::Daiminkan {
+                actor,
+                pai: pai.clone(),
+                consumed: server_consumed.clone(),
+                request_id: Some(request_id),
+            })
+        }),
+        // ankan response は actor / consumed のみで構成されるため、
         // 対応する possible_actions の元 consumed 文字列を再利用して安全に構築できる。
         LegalAction::Ankan { consumed } => possible_actions.iter().find_map(|a| {
             let MjaiPossibleAction::Ankan {
@@ -268,7 +321,7 @@ pub fn checked_legal_action_to_mjai_action(
                 request_id: Some(request_id),
             })
         }),
-        // kakan response は actor / pai / consumed のみで target を要さないため、
+        // kakan response は actor / pai / consumed のみで構成されるため、
         // 対応する possible_actions の元文字列を再利用して安全に構築できる。
         LegalAction::Kakan { tile, consumed } => possible_actions.iter().find_map(|a| {
             let MjaiPossibleAction::Kakan {
@@ -287,10 +340,6 @@ pub fn checked_legal_action_to_mjai_action(
                 request_id: Some(request_id),
             })
         }),
-        // RiichiLab の Bot-to-Server response では chi / pon / daiminkan に target が必須だが、
-        // request_action.possible_actions は target を含まない（MjaiPossibleAction にも target field がない）。
-        // target を安全に得られないため、不完全な response で chombo を招かないよう response を返さない。
-        LegalAction::Chi { .. } | LegalAction::Pon { .. } | LegalAction::Daiminkan { .. } => None,
     }
 }
 
@@ -1136,56 +1185,438 @@ mod tests {
             );
         }
 
-        // chi / pon / daiminkan は target を安全に得られないため response を返さない。
-        #[test]
-        fn chi_pon_daiminkan_are_not_returned_even_when_possible() {
-            let context = GameContext::default();
+        fn possible_chi(pai: &str, consumed: [&str; 2]) -> MjaiPossibleAction {
+            MjaiPossibleAction::Chi {
+                pai: pai.to_string(),
+                consumed: consumed.iter().map(|s| s.to_string()).collect(),
+            }
+        }
 
-            let chi_chosen = LegalAction::Chi {
-                tile: tile(17),
-                consumed: vec![tile(12), tile(20)],
-            };
-            let chi_possible = MjaiPossibleAction::Chi {
-                pai: "5m".to_string(),
-                consumed: vec!["4m".to_string(), "6m".to_string()],
-            };
-            assert_eq!(
-                checked_legal_action_to_mjai_action(&chi_chosen, 0, 64, &[chi_possible], &context,),
-                None
-            );
+        fn possible_daiminkan() -> MjaiPossibleAction {
+            MjaiPossibleAction::Daiminkan {
+                pai: "9s".to_string(),
+                consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+            }
+        }
 
-            let pon_chosen = LegalAction::Pon {
+        fn legal_pon() -> LegalAction {
+            LegalAction::Pon {
                 tile: tile(108),
                 consumed: vec![tile(108), tile(108)],
+            }
+        }
+
+        fn legal_daiminkan() -> LegalAction {
+            LegalAction::Daiminkan {
+                tile: tile(104),
+                consumed: vec![tile(104), tile(104), tile(104)],
+            }
+        }
+
+        #[test]
+        fn chi_is_returned_only_when_possible() {
+            let context = GameContext::default();
+            let chosen = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(0), tile(4)],
             };
             assert_eq!(
                 checked_legal_action_to_mjai_action(
-                    &pon_chosen,
+                    &chosen,
                     0,
                     64,
+                    &[possible_chi("3m", ["1m", "2m"])],
+                    &context,
+                ),
+                Some(MjaiAction::Chi {
+                    actor: 0,
+                    pai: "3m".to_string(),
+                    consumed: vec!["1m".to_string(), "2m".to_string()],
+                    request_id: Some(64),
+                })
+            );
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chosen,
+                    0,
+                    64,
+                    &[MjaiPossibleAction::None],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn chi_response_excludes_target() {
+            let context = GameContext::default();
+            let chosen = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(0), tile(4)],
+            };
+            let response = checked_legal_action_to_mjai_action(
+                &chosen,
+                1,
+                66,
+                &[possible_chi("3m", ["1m", "2m"])],
+                &context,
+            )
+            .unwrap();
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["type"], "chi");
+            assert_eq!(json["actor"], 1);
+            assert_eq!(json["request_id"], 66);
+            assert!(json.get("target").is_none());
+        }
+
+        #[test]
+        fn pon_is_returned_only_when_possible() {
+            let context = GameContext::default();
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_pon(),
+                    2,
+                    67,
                     &[possible_pon()],
                     &context,
                 ),
-                None
+                Some(MjaiAction::Pon {
+                    actor: 2,
+                    pai: "E".to_string(),
+                    consumed: vec!["E".to_string(), "E".to_string()],
+                    request_id: Some(67),
+                })
             );
-
-            let daiminkan_chosen = LegalAction::Daiminkan {
-                tile: tile(104),
-                consumed: vec![tile(104), tile(104), tile(104)],
-            };
-            let daiminkan_possible = MjaiPossibleAction::Daiminkan {
-                pai: "9s".to_string(),
-                consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
-            };
             assert_eq!(
                 checked_legal_action_to_mjai_action(
-                    &daiminkan_chosen,
-                    0,
-                    64,
-                    &[daiminkan_possible],
+                    &legal_pon(),
+                    2,
+                    67,
+                    &[MjaiPossibleAction::None],
                     &context,
                 ),
                 None
+            );
+        }
+
+        #[test]
+        fn daiminkan_is_returned_only_when_possible() {
+            let context = GameContext::default();
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_daiminkan(),
+                    3,
+                    68,
+                    &[possible_daiminkan()],
+                    &context,
+                ),
+                Some(MjaiAction::Daiminkan {
+                    actor: 3,
+                    pai: "9s".to_string(),
+                    consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+                    request_id: Some(68),
+                })
+            );
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_daiminkan(),
+                    3,
+                    68,
+                    &[MjaiPossibleAction::None],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn chi_matches_the_selected_candidate_among_multiple() {
+            // 3m を鳴く chi が3候補あるとき、Agent が選んだ候補と一致するものだけを送る。
+            let context = GameContext::default();
+            let possible_actions = vec![
+                possible_chi("3m", ["1m", "2m"]),
+                possible_chi("3m", ["2m", "4m"]),
+                possible_chi("3m", ["4m", "5m"]),
+            ];
+            let chosen = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(4), tile(12)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chosen, 0, 69, &possible_actions, &context),
+                Some(MjaiAction::Chi {
+                    actor: 0,
+                    pai: "3m".to_string(),
+                    consumed: vec!["2m".to_string(), "4m".to_string()],
+                    request_id: Some(69),
+                })
+            );
+        }
+
+        #[test]
+        fn chi_matches_regardless_of_chosen_consumed_order() {
+            // 照合は consumed を sort して比較するため、LegalAction 側の順序に依存しない。
+            let context = GameContext::default();
+            let chosen = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(12), tile(4)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chosen,
+                    0,
+                    70,
+                    &[possible_chi("3m", ["2m", "4m"])],
+                    &context,
+                ),
+                Some(MjaiAction::Chi {
+                    actor: 0,
+                    pai: "3m".to_string(),
+                    consumed: vec!["2m".to_string(), "4m".to_string()],
+                    request_id: Some(70),
+                })
+            );
+        }
+
+        #[test]
+        fn chi_with_mismatched_consumed_returns_none() {
+            let context = GameContext::default();
+            let chosen = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(4), tile(12)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chosen,
+                    0,
+                    71,
+                    &[possible_chi("3m", ["1m", "2m"])],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn chi_with_mismatched_pai_returns_none() {
+            let context = GameContext::default();
+            let chosen = LegalAction::Chi {
+                tile: tile(0),
+                consumed: vec![tile(4), tile(8)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chosen,
+                    0,
+                    72,
+                    &[possible_chi("4m", ["2m", "3m"])],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn pon_with_mismatched_pai_returns_none() {
+            let context = GameContext::default();
+            let chosen = LegalAction::Pon {
+                tile: tile(112),
+                consumed: vec![tile(112), tile(112)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chosen, 0, 73, &[possible_pon()], &context),
+                None
+            );
+        }
+
+        #[test]
+        fn daiminkan_with_mismatched_consumed_returns_none() {
+            let context = GameContext::default();
+            let chosen = LegalAction::Daiminkan {
+                tile: tile(104),
+                consumed: vec![tile(104), tile(104)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chosen,
+                    0,
+                    74,
+                    &[possible_daiminkan()],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn claim_does_not_match_a_different_claim_type() {
+            let context = GameContext::default();
+            let chi_shaped_pon = LegalAction::Pon {
+                tile: tile(8),
+                consumed: vec![tile(0), tile(4)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chi_shaped_pon,
+                    0,
+                    75,
+                    &[possible_chi("3m", ["1m", "2m"])],
+                    &context,
+                ),
+                None
+            );
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &legal_daiminkan(),
+                    0,
+                    75,
+                    &[MjaiPossibleAction::Pon {
+                        pai: "9s".to_string(),
+                        consumed: vec!["9s".to_string(), "9s".to_string(), "9s".to_string()],
+                    }],
+                    &context,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn pon_keeps_server_red_five_notation() {
+            // server が 5mr を提示しているなら、response でも 5mr をそのまま維持する。
+            let context = GameContext::default();
+            let possible_actions = vec![MjaiPossibleAction::Pon {
+                pai: "5m".to_string(),
+                consumed: vec!["5m".to_string(), "5mr".to_string()],
+            }];
+            let chosen = LegalAction::Pon {
+                tile: tile(17),
+                consumed: vec![tile(17), tile(16)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chosen, 0, 76, &possible_actions, &context),
+                Some(MjaiAction::Pon {
+                    actor: 0,
+                    pai: "5m".to_string(),
+                    consumed: vec!["5m".to_string(), "5mr".to_string()],
+                    request_id: Some(76),
+                })
+            );
+        }
+
+        #[test]
+        fn pon_picks_the_chosen_candidate_between_red_and_black_five() {
+            // 赤5を使う候補と黒5のみの候補が両方あるとき、選んだ側の元文字列を保持する。
+            let context = GameContext::default();
+            let black_only = MjaiPossibleAction::Pon {
+                pai: "5m".to_string(),
+                consumed: vec!["5m".to_string(), "5m".to_string()],
+            };
+            let with_red = MjaiPossibleAction::Pon {
+                pai: "5m".to_string(),
+                consumed: vec!["5m".to_string(), "5mr".to_string()],
+            };
+            let possible_actions = vec![black_only, with_red];
+
+            let chose_black = LegalAction::Pon {
+                tile: tile(17),
+                consumed: vec![tile(17), tile(17)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chose_black,
+                    0,
+                    77,
+                    &possible_actions,
+                    &context
+                ),
+                Some(MjaiAction::Pon {
+                    actor: 0,
+                    pai: "5m".to_string(),
+                    consumed: vec!["5m".to_string(), "5m".to_string()],
+                    request_id: Some(77),
+                })
+            );
+
+            let chose_red = LegalAction::Pon {
+                tile: tile(17),
+                consumed: vec![tile(17), tile(16)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chose_red, 0, 77, &possible_actions, &context),
+                Some(MjaiAction::Pon {
+                    actor: 0,
+                    pai: "5m".to_string(),
+                    consumed: vec!["5m".to_string(), "5mr".to_string()],
+                    request_id: Some(77),
+                })
+            );
+        }
+
+        #[test]
+        fn chi_picks_the_chosen_candidate_between_red_and_black_five() {
+            let context = GameContext::default();
+            let possible_actions = vec![
+                possible_chi("3m", ["4m", "5m"]),
+                possible_chi("3m", ["4m", "5mr"]),
+            ];
+
+            let chose_black = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(12), tile(17)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chose_black,
+                    0,
+                    78,
+                    &possible_actions,
+                    &context
+                ),
+                Some(MjaiAction::Chi {
+                    actor: 0,
+                    pai: "3m".to_string(),
+                    consumed: vec!["4m".to_string(), "5m".to_string()],
+                    request_id: Some(78),
+                })
+            );
+
+            let chose_red = LegalAction::Chi {
+                tile: tile(8),
+                consumed: vec![tile(12), tile(16)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(&chose_red, 0, 78, &possible_actions, &context),
+                Some(MjaiAction::Chi {
+                    actor: 0,
+                    pai: "3m".to_string(),
+                    consumed: vec!["4m".to_string(), "5mr".to_string()],
+                    request_id: Some(78),
+                })
+            );
+        }
+
+        #[test]
+        fn chi_keeps_server_red_five_pai() {
+            // 鳴く牌自体が赤5のとき、pai の 5mr 表現を維持する。
+            let context = GameContext::default();
+            let chosen = LegalAction::Chi {
+                tile: tile(16),
+                consumed: vec![tile(12), tile(20)],
+            };
+            assert_eq!(
+                checked_legal_action_to_mjai_action(
+                    &chosen,
+                    0,
+                    79,
+                    &[possible_chi("5mr", ["4m", "6m"])],
+                    &context,
+                ),
+                Some(MjaiAction::Chi {
+                    actor: 0,
+                    pai: "5mr".to_string(),
+                    consumed: vec!["4m".to_string(), "6m".to_string()],
+                    request_id: Some(79),
+                })
             );
         }
 
