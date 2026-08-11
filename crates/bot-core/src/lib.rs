@@ -15,10 +15,11 @@ pub use agents::{
 pub use context::GameContext;
 pub use defense::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
-    DefenseFallbackKind, HonorSafetyRank, SuitedSafetyRank, SujiSafetyRank, WallRank,
-    genbutsu_dahai_actions_for_all_reached, honor_dahai_actions_by_safety, honor_safety_rank,
-    is_genbutsu_for, is_genbutsu_for_all_reached, is_no_chance, is_one_chance, is_suji_for,
-    is_suji_for_all_reached, is_suji_for_any_reached, log_defense_fallback_decision,
+    DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank,
+    WallRank, genbutsu_dahai_actions_for_all_reached, honor_dahai_actions_by_safety,
+    honor_safety_rank, is_genbutsu_for, is_genbutsu_for_all_reached, is_no_chance, is_one_chance,
+    is_suji_for, is_suji_for_all_reached, is_suji_for_any_reached, log_defense_fallback_decision,
+    opponent_honor_value_for, opponent_honor_value_for_reached, seat_wind_for_player,
     select_defense_fallback_action, select_defense_fallback_action_with_kind,
     select_genbutsu_fallback_action, select_honor_safety_fallback_action,
     select_suited_safety_fallback_action, suited_dahai_actions_by_safety,
