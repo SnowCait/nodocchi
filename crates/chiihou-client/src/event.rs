@@ -1041,7 +1041,6 @@ nostr:npub1ai000 GET sutehai?"
     fn classify_ignores_unsupported_notify() {
         for content in [
             "NOTIFY point payload",
-            "NOTIFY open payload",
             "NOTIFY agari payload",
             "NOTIFY ryukyoku payload",
         ] {

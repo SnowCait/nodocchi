@@ -7,6 +7,10 @@ use crate::lifecycle::{
 use crate::protocol::ChiihouPai;
 use crate::table_notification::{ChiihouSayAction, ChiihouTableNotification};
 
+const OPEN_KAKAN_TILE_COUNT: usize = 1;
+const OPEN_CALL_TILE_COUNT: usize = 3;
+const OPEN_KAN_TILE_COUNT: usize = 4;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChiihouMatchPhase {
     #[default]
@@ -27,6 +31,10 @@ pub enum ChiihouTableStateError {
     TsumoForOtherPlayer,
     #[error("sutehai tile {0} is not in the held hand")]
     SutehaiTileNotHeld(ChiihouPai),
+    #[error("invalid open tile count: {0}")]
+    InvalidOpenTileCount(usize),
+    #[error("open call does not contain the claimable discard")]
+    OpenWithoutCalledTile,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,6 +47,7 @@ pub struct ChiihouTableSnapshot {
     pub remaining_tiles: Option<u32>,
     pub discards: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
     pub reached: [bool; CHIIHOU_PLAYER_COUNT],
+    pub newly_visible_meld_tiles: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,6 +66,8 @@ pub struct ChiihouMatchState {
     dora_indicators: Vec<ChiihouPai>,
     discards: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
     reached: [bool; CHIIHOU_PLAYER_COUNT],
+    claimable_discard: Option<ChiihouPai>,
+    newly_visible_meld_tiles: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
 }
 
 impl ChiihouMatchState {
@@ -120,6 +131,14 @@ impl ChiihouMatchState {
         &self.reached
     }
 
+    pub fn claimable_discard(&self) -> Option<ChiihouPai> {
+        self.claimable_discard
+    }
+
+    pub fn newly_visible_meld_tiles(&self) -> &[Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT] {
+        &self.newly_visible_meld_tiles
+    }
+
     pub fn player_index(&self, player: &PublicKey) -> Option<usize> {
         self.players.iter().position(|p| p == player)
     }
@@ -143,6 +162,7 @@ impl ChiihouMatchState {
             remaining_tiles: self.remaining_tiles,
             discards: self.discards.clone(),
             reached: self.reached,
+            newly_visible_meld_tiles: self.newly_visible_meld_tiles.clone(),
         }
     }
 
@@ -211,6 +231,7 @@ impl ChiihouMatchState {
                 }
                 self.drawn = Some(*tile);
                 self.remaining_tiles = Some(*remaining_tiles);
+                self.claimable_discard = None;
                 Ok(())
             }
             ChiihouTableNotification::Sutehai { player, tile } => {
@@ -218,6 +239,7 @@ impl ChiihouMatchState {
                     return Err(ChiihouTableStateError::UnknownPlayer);
                 };
                 self.discards[index].push(*tile);
+                self.claimable_discard = Some(*tile);
                 if player == ai_pubkey {
                     self.discard_from_held_hand(*tile)?;
                 }
@@ -232,6 +254,34 @@ impl ChiihouMatchState {
                 }
                 Ok(())
             }
+            ChiihouTableNotification::Open { player, tiles } => {
+                let Some(index) = self.player_index(player) else {
+                    return Err(ChiihouTableStateError::UnknownPlayer);
+                };
+                let newly_visible = self.newly_visible_tiles_from_open(tiles)?;
+                self.newly_visible_meld_tiles[index].extend(newly_visible);
+                self.claimable_discard = None;
+                Ok(())
+            }
+        }
+    }
+
+    fn newly_visible_tiles_from_open(
+        &self,
+        tiles: &[ChiihouPai],
+    ) -> Result<Vec<ChiihouPai>, ChiihouTableStateError> {
+        let called = self
+            .claimable_discard
+            .and_then(|discard| tiles.iter().position(|tile| *tile == discard));
+        match (tiles.len(), called) {
+            (OPEN_KAKAN_TILE_COUNT, _) | (OPEN_KAN_TILE_COUNT, None) => Ok(tiles.to_vec()),
+            (OPEN_CALL_TILE_COUNT, Some(called)) | (OPEN_KAN_TILE_COUNT, Some(called)) => {
+                let mut newly_visible = tiles.to_vec();
+                newly_visible.remove(called);
+                Ok(newly_visible)
+            }
+            (OPEN_CALL_TILE_COUNT, None) => Err(ChiihouTableStateError::OpenWithoutCalledTile),
+            (count, _) => Err(ChiihouTableStateError::InvalidOpenTileCount(count)),
         }
     }
 
@@ -242,6 +292,8 @@ impl ChiihouMatchState {
         self.dora_indicators.clear();
         self.discards = Default::default();
         self.reached = [false; CHIIHOU_PLAYER_COUNT];
+        self.claimable_discard = None;
+        self.newly_visible_meld_tiles = Default::default();
     }
 
     fn discard_from_held_hand(&mut self, tile: ChiihouPai) -> Result<(), ChiihouTableStateError> {
@@ -482,6 +534,13 @@ mod tests {
         ChiihouTableNotification::Say { player, action }
     }
 
+    fn open(player: PublicKey, items: &[&str]) -> ChiihouTableNotification {
+        ChiihouTableNotification::Open {
+            player,
+            tiles: pais(items),
+        }
+    }
+
     #[test]
     fn initial_state_has_empty_table_state() {
         let state = ChiihouMatchState::new();
@@ -690,6 +749,189 @@ mod tests {
         assert_eq!(state.reached(), &[false; 4]);
     }
 
+    #[test]
+    fn initial_state_has_no_claimable_discard_or_meld_tiles() {
+        let state = ChiihouMatchState::new();
+        assert_eq!(state.claimable_discard(), None);
+        assert!(
+            state
+                .newly_visible_meld_tiles()
+                .iter()
+                .all(|tiles| tiles.is_empty())
+        );
+    }
+
+    #[test]
+    fn sutehai_sets_claimable_discard_and_tsumo_clears_it() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        assert_eq!(state.claimable_discard(), Some(pai("1z")));
+        state
+            .apply_table_notification(&ai_pubkey(), &tsumo(ai_pubkey(), 69, "7z"))
+            .unwrap();
+        assert_eq!(state.claimable_discard(), None);
+    }
+
+    #[test]
+    fn pon_keeps_called_tile_in_river_and_adds_two_tiles() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z", "1z"]))
+            .unwrap();
+        assert_eq!(state.discards()[1], pais(&["1z"]));
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z", "1z"]));
+        assert_eq!(state.claimable_discard(), None);
+    }
+
+    #[test]
+    fn chi_excludes_only_the_called_tile() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "3m"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1m", "2m", "3m"]))
+            .unwrap();
+        assert_eq!(state.discards()[1], pais(&["3m"]));
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1m", "2m"]));
+    }
+
+    #[test]
+    fn daiminkan_adds_three_tiles() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(3), &["1z", "1z", "1z", "1z"]),
+            )
+            .unwrap();
+        assert_eq!(state.discards()[1], pais(&["1z"]));
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z"; 3]));
+    }
+
+    #[test]
+    fn ankan_after_own_tsumo_adds_four_tiles() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "9p"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &tsumo(ai_pubkey(), 69, "1z"))
+            .unwrap();
+        assert_eq!(state.claimable_discard(), None);
+        state
+            .apply_table_notification(&ai_pubkey(), &open(ai_pubkey(), &["1z", "1z", "1z", "1z"]))
+            .unwrap();
+        assert_eq!(state.discards()[1], pais(&["9p"]));
+        assert_eq!(state.newly_visible_meld_tiles()[0], pais(&["1z"; 4]));
+    }
+
+    #[test]
+    fn ankan_by_other_player_adds_four_tiles_without_observed_tsumo() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "9p"))
+            .unwrap();
+        state
+            .apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(3), &["1z", "1z", "1z", "1z"]),
+            )
+            .unwrap();
+        assert_eq!(state.discards()[1], pais(&["9p"]));
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z"; 4]));
+    }
+
+    #[test]
+    fn kakan_adds_the_single_notified_tile() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z"]))
+            .unwrap();
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z"]));
+    }
+
+    #[test]
+    fn repeated_opens_accumulate_per_player() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z", "1z"]))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(3), "3m"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(4), &["1m", "2m", "3m"]))
+            .unwrap();
+        assert_eq!(state.newly_visible_meld_tiles()[2], pais(&["1z", "1z"]));
+        assert_eq!(state.newly_visible_meld_tiles()[3], pais(&["1m", "2m"]));
+        assert!(state.newly_visible_meld_tiles()[0].is_empty());
+        assert!(state.newly_visible_meld_tiles()[1].is_empty());
+    }
+
+    #[test]
+    fn open_call_without_the_claimable_discard_is_error() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "3m"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(3), &["4m", "5m", "6m"])
+            ),
+            Err(ChiihouTableStateError::OpenWithoutCalledTile)
+        );
+        assert!(state.newly_visible_meld_tiles()[2].is_empty());
+        assert_eq!(state.claimable_discard(), Some(pai("3m")));
+    }
+
+    #[test]
+    fn open_with_invalid_tile_count_is_error() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z"])),
+            Err(ChiihouTableStateError::InvalidOpenTileCount(2))
+        );
+        assert!(state.newly_visible_meld_tiles()[2].is_empty());
+    }
+
+    #[test]
+    fn open_from_unknown_player_is_error() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        assert_eq!(
+            state.apply_table_notification(
+                &ai_pubkey(),
+                &open(player_pubkey(9), &["1z", "1z", "1z"])
+            ),
+            Err(ChiihouTableStateError::UnknownPlayer)
+        );
+        assert!(
+            state
+                .newly_visible_meld_tiles()
+                .iter()
+                .all(|tiles| tiles.is_empty())
+        );
+        assert_eq!(state.claimable_discard(), Some(pai("1z")));
+    }
+
     fn filled_table_state() -> ChiihouMatchState {
         let mut state = state_in_kyoku();
         state
@@ -711,6 +953,12 @@ mod tests {
             )
             .unwrap();
         state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(3), "1m"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(4), &["1m", "2m", "3m"]))
+            .unwrap();
+        state
     }
 
     #[test]
@@ -724,6 +972,13 @@ mod tests {
         assert!(state.dora_indicators().is_empty());
         assert!(state.discards().iter().all(|river| river.is_empty()));
         assert_eq!(state.reached(), &[false; 4]);
+        assert_eq!(state.claimable_discard(), None);
+        assert!(
+            state
+                .newly_visible_meld_tiles()
+                .iter()
+                .all(|tiles| tiles.is_empty())
+        );
     }
 
     #[test]
@@ -745,6 +1000,13 @@ mod tests {
         assert!(state.dora_indicators().is_empty());
         assert!(state.discards().iter().all(|river| river.is_empty()));
         assert_eq!(state.reached(), &[false; 4]);
+        assert_eq!(state.claimable_discard(), None);
+        assert!(
+            state
+                .newly_visible_meld_tiles()
+                .iter()
+                .all(|tiles| tiles.is_empty())
+        );
     }
 
     #[test]
@@ -759,6 +1021,22 @@ mod tests {
         assert_eq!(snapshot.remaining_tiles, Some(69));
         assert_eq!(snapshot.discards[1], pais(&["1z"]));
         assert_eq!(snapshot.reached, [false, true, false, false]);
+        assert_eq!(snapshot.newly_visible_meld_tiles[3], pais(&["2m", "3m"]));
+        assert!(snapshot.newly_visible_meld_tiles[0].is_empty());
+    }
+
+    #[test]
+    fn table_snapshot_meld_tiles_exclude_the_called_tile() {
+        let mut state = state_in_kyoku();
+        state
+            .apply_table_notification(&ai_pubkey(), &sutehai(player_pubkey(2), "1z"))
+            .unwrap();
+        state
+            .apply_table_notification(&ai_pubkey(), &open(player_pubkey(3), &["1z", "1z", "1z"]))
+            .unwrap();
+        let snapshot = state.table_snapshot(&ai_pubkey());
+        assert_eq!(snapshot.discards[1], pais(&["1z"]));
+        assert_eq!(snapshot.newly_visible_meld_tiles[2], pais(&["1z", "1z"]));
     }
 
     #[test]

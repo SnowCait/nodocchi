@@ -884,7 +884,6 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let mut seen = SeenEventIds::new();
         for content in [
             "NOTIFY point payload",
-            "NOTIFY open payload",
             "NOTIFY agari payload",
             "NOTIFY ryukyoku payload",
         ] {
@@ -1172,6 +1171,71 @@ nostr:{ai_npub} GET naku? ron pon chi"
             let mut expected = request_hand_tiles();
             expected.extend([tile_of("1z"), tile_of("5p"), tile_of("7z"), tile_of("1z")]);
             assert_eq!(context.visible_tiles(), &expected[..]);
+        }
+
+        #[test]
+        fn pon_notification_adds_only_the_tiles_not_already_in_the_river() {
+            let config = config(ChiihouChannel::Hanchan);
+            let mut controller = ChiihouLifecycleController::new(ai_keys().public_key(), false);
+            let mut seen = SeenEventIds::new();
+            let tokens = npub_tokens();
+            let prefix = tokens.join(" ");
+            let ai = &tokens[0];
+            let dealer = &tokens[1];
+            let discarder = &tokens[1];
+            let caller = &tokens[2];
+            for content in [
+                format!("{prefix} NOTIFY gamestart 南 {prefix}"),
+                format!("{prefix} NOTIFY kyokustart 東 {dealer} 0 0"),
+                format!("{ai} NOTIFY haipai {ai} 1m2m3m4m5m6m7p8p9p1s1s2z2z\n\n:mahjong_m1:"),
+                format!("{prefix} NOTIFY sutehai {discarder} 1z"),
+                format!("{prefix} NOTIFY say {caller} pon"),
+                format!("{prefix} NOTIFY open {caller} 1z1z1z"),
+            ] {
+                apply_notification_content(&mut controller, &mut seen, &config, &content);
+            }
+            let snapshot = controller.table_snapshot();
+            assert_eq!(snapshot.discards[1], vec![pai("1z")]);
+            assert_eq!(
+                snapshot.newly_visible_meld_tiles[2],
+                vec![pai("1z"), pai("1z")]
+            );
+
+            let context = {
+                let event =
+                    build_request_event(42, &naku_content(), &request_tags(), &server_keys());
+                let incoming = incoming_event_from_nostr(&event);
+                let mut agent = RecordingAgent { context: None };
+                let action = classify_incoming_event_with_state(
+                    &incoming,
+                    config.event_config(),
+                    &mut seen,
+                    &snapshot,
+                    &mut agent,
+                )
+                .unwrap();
+                assert!(matches!(action, ChiihouIncomingAction::Reply(_)));
+                agent.context.unwrap()
+            };
+            assert_eq!(
+                context.visible_tiles(),
+                &[
+                    tile_of("1m"),
+                    tile_of("2m"),
+                    tile_of("3m"),
+                    tile_of("1z"),
+                    tile_of("1z"),
+                    tile_of("1z"),
+                ]
+            );
+            assert_eq!(
+                context
+                    .visible_tiles()
+                    .iter()
+                    .filter(|&&tile| tile == tile_of("1z"))
+                    .count(),
+                3
+            );
         }
 
         struct ReachAgent;
