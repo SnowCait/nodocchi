@@ -1,7 +1,7 @@
-use bot_core::GameContext;
+use bot_core::{GameContext, Meld, MeldKind};
 use bot_logic::{TileId, TileType};
 use riichienv_core::observation::Observation;
-use riichienv_core::types::Meld;
+use riichienv_core::types::{Meld as ObservationMeld, MeldType as ObservationMeldType};
 
 use crate::convert::temporary_tile_id_from_observation_tile;
 
@@ -45,6 +45,7 @@ impl ObservationPayload {
         let dora_indicators = decode_observation_tiles(&observation.dora_indicators);
         // discards は防御・現物判定用の player ごとの河、visible_tiles は枚数補正用。用途を分ける。
         let discards = decode_discards(&observation);
+        let melds = decode_melds(&observation);
 
         // visible_tiles には自分から見えている現在の手牌全体をツモ牌込みで 1 回だけ含める。
         // 上流形式では raw_hand がツモ牌を含むため drawn_tile を足さない。ツモ牌が hand に
@@ -55,7 +56,7 @@ impl ObservationPayload {
         }
         visible_tiles.extend(dora_indicators.iter().copied());
         visible_tiles.extend(discards.iter().flatten().copied());
-        for player_melds in &observation.melds {
+        for player_melds in &melds {
             for meld in player_melds {
                 visible_tiles.extend(meld_visible_tiles(meld));
             }
@@ -72,6 +73,7 @@ impl ObservationPayload {
             oya: observation.oya,
             discards,
             reached: observation.riichi_declared,
+            melds,
         })
     }
 }
@@ -111,6 +113,33 @@ fn decode_discards(observation: &Observation) -> [Vec<TileId>; 4] {
     discards
 }
 
+fn decode_melds(observation: &Observation) -> [Vec<Meld>; 4] {
+    let mut melds: [Vec<Meld>; 4] = Default::default();
+    for (player, player_melds) in observation.melds.iter().enumerate() {
+        melds[player] = player_melds.iter().map(decode_meld).collect();
+    }
+    melds
+}
+
+fn decode_meld(meld: &ObservationMeld) -> Meld {
+    Meld::new(
+        meld_kind_from_observation_meld_type(meld.meld_type),
+        decode_observation_tiles(&meld.tiles_as_u32()),
+        meld.called_tile
+            .and_then(temporary_tile_id_from_observation_tile),
+    )
+}
+
+fn meld_kind_from_observation_meld_type(meld_type: ObservationMeldType) -> MeldKind {
+    match meld_type {
+        ObservationMeldType::Chi => MeldKind::Chi,
+        ObservationMeldType::Pon => MeldKind::Pon,
+        ObservationMeldType::Daiminkan => MeldKind::Daiminkan,
+        ObservationMeldType::Ankan => MeldKind::Ankan,
+        ObservationMeldType::Kakan => MeldKind::Kakan,
+    }
+}
+
 fn seat_wind_from(player_id: u8, oya: u8) -> Option<TileType> {
     if player_id >= 4 || oya >= 4 {
         return None;
@@ -123,16 +152,14 @@ fn seat_wind_from(player_id: u8, oya: u8) -> Option<TileType> {
 // called tile は河に残っており二重計上になるため、consumed 牌だけを見えている牌として扱う。
 // ankan は called tile を持たないため 4 枚すべて、kakan は元 pon の called tile を除いた牌を数える。
 fn meld_visible_tiles(meld: &Meld) -> Vec<TileId> {
-    let mut called_tile = meld.called_tile;
+    let mut called_tile = meld.called_tile();
     let mut tiles = Vec::new();
-    for &raw in &meld.tiles {
-        if called_tile == Some(raw) {
+    for &tile in meld.tiles() {
+        if called_tile == Some(tile) {
             called_tile = None;
             continue;
         }
-        if let Some(tile) = temporary_tile_id_from_observation_tile(raw) {
-            tiles.push(tile);
-        }
+        tiles.push(tile);
     }
     tiles
 }
@@ -158,10 +185,11 @@ pub struct DecodedObservation {
     pub oya: u8,
     pub discards: [Vec<TileId>; 4],
     pub reached: [bool; 4],
+    pub melds: [Vec<Meld>; 4],
 }
 
 pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
-    GameContext::from_parts_with_table_state(
+    GameContext::from_parts_with_melds(
         decoded.drawn_tile,
         decoded.hand_tiles.clone(),
         decoded.dora_indicators.clone(),
@@ -172,6 +200,7 @@ pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation
         Some(decoded.oya),
         decoded.discards.clone(),
         decoded.reached,
+        decoded.melds.clone(),
     )
 }
 
@@ -306,7 +335,7 @@ pub(crate) fn fixture_base64_with_melds(
     hand: Vec<u8>,
     dora_indicators: Vec<u8>,
     discards: [Vec<u8>; 4],
-    melds: [Vec<Meld>; 4],
+    melds: [Vec<ObservationMeld>; 4],
 ) -> String {
     let mut hands: [Vec<u8>; 4] = Default::default();
     hands[usize::from(player_id)] = hand;
@@ -340,8 +369,16 @@ mod tests {
     use super::*;
     use riichienv_core::types::MeldType;
 
-    fn meld(meld_type: MeldType, tiles: Vec<u8>, called_tile: Option<u8>) -> Meld {
-        Meld::new(meld_type, tiles, called_tile.is_some(), -1, called_tile)
+    fn meld(meld_type: MeldType, tiles: Vec<u8>, called_tile: Option<u8>) -> ObservationMeld {
+        ObservationMeld::new(meld_type, tiles, called_tile.is_some(), -1, called_tile)
+    }
+
+    fn visible_tiles_of(
+        meld_type: MeldType,
+        tiles: Vec<u8>,
+        called_tile: Option<u8>,
+    ) -> Vec<TileId> {
+        meld_visible_tiles(&decode_meld(&meld(meld_type, tiles, called_tile)))
     }
 
     #[test]
@@ -722,7 +759,7 @@ mod tests {
 
     #[test]
     fn meld_visible_tiles_pon_returns_consumed_without_called_tile() {
-        let tiles = meld_visible_tiles(&meld(MeldType::Pon, vec![2, 0, 1], Some(2)));
+        let tiles = visible_tiles_of(MeldType::Pon, vec![2, 0, 1], Some(2));
         assert_eq!(
             tiles,
             vec![TileId::new(0).unwrap(), TileId::new(0).unwrap()]
@@ -731,19 +768,19 @@ mod tests {
 
     #[test]
     fn meld_visible_tiles_ankan_returns_all_four() {
-        let tiles = meld_visible_tiles(&meld(MeldType::Ankan, vec![0, 1, 2, 3], None));
+        let tiles = visible_tiles_of(MeldType::Ankan, vec![0, 1, 2, 3], None);
         assert_eq!(tiles, vec![TileId::new(0).unwrap(); 4]);
     }
 
     #[test]
     fn meld_visible_tiles_kakan_excludes_original_called_tile() {
-        let tiles = meld_visible_tiles(&meld(MeldType::Kakan, vec![2, 0, 1, 3], Some(2)));
+        let tiles = visible_tiles_of(MeldType::Kakan, vec![2, 0, 1, 3], Some(2));
         assert_eq!(tiles, vec![TileId::new(0).unwrap(); 3]);
     }
 
     #[test]
     fn meld_visible_tiles_skips_out_of_range_tiles() {
-        let tiles = meld_visible_tiles(&meld(MeldType::Ankan, vec![0, 200, 136, 3], None));
+        let tiles = visible_tiles_of(MeldType::Ankan, vec![0, 200, 136, 3], None);
         assert_eq!(
             tiles,
             vec![TileId::new(0).unwrap(), TileId::new(0).unwrap()]
@@ -752,7 +789,7 @@ mod tests {
 
     #[test]
     fn decode_4p_visible_tiles_include_chi_consumed() {
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[1] = vec![meld(MeldType::Chi, vec![8, 4, 12], Some(8))];
         let payload = ObservationPayload::new(fixture_base64_with_melds(
             0,
@@ -769,7 +806,7 @@ mod tests {
 
     #[test]
     fn decode_4p_visible_tiles_include_pon_consumed() {
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[2] = vec![meld(MeldType::Pon, vec![2, 0, 1], Some(2))];
         let payload = ObservationPayload::new(fixture_base64_with_melds(
             0,
@@ -785,7 +822,7 @@ mod tests {
 
     #[test]
     fn decode_4p_visible_tiles_include_daiminkan_consumed() {
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[3] = vec![meld(
             MeldType::Daiminkan,
             vec![104, 105, 106, 107],
@@ -805,7 +842,7 @@ mod tests {
 
     #[test]
     fn decode_4p_visible_tiles_include_ankan_all_four() {
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[0] = vec![meld(MeldType::Ankan, vec![72, 73, 74, 75], None)];
         let payload = ObservationPayload::new(fixture_base64_with_melds(
             0,
@@ -824,7 +861,7 @@ mod tests {
         // 鳴かれた牌は discarder の河に残るため、meld 側では called tile を数えない。
         let mut discards: [Vec<u8>; 4] = Default::default();
         discards[1] = vec![2];
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[2] = vec![meld(MeldType::Pon, vec![2, 0, 1], Some(2))];
         let payload = ObservationPayload::new(fixture_base64_with_melds(
             0,
@@ -841,7 +878,7 @@ mod tests {
 
     #[test]
     fn decode_4p_visible_tiles_skip_out_of_range_meld_tiles() {
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[0] = vec![meld(MeldType::Ankan, vec![0, 200, 136, 3], None)];
         let payload = ObservationPayload::new(fixture_base64_with_melds(
             0,
@@ -858,7 +895,7 @@ mod tests {
 
     #[test]
     fn decode_4p_visible_tiles_include_melds_of_all_players() {
-        let mut melds: [Vec<Meld>; 4] = Default::default();
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
         melds[0] = vec![meld(MeldType::Ankan, vec![0, 1, 2, 3], None)];
         melds[3] = vec![meld(MeldType::Pon, vec![110, 108, 109], Some(110))];
         let payload = ObservationPayload::new(fixture_base64_with_melds(
@@ -897,6 +934,146 @@ mod tests {
         .decode_4p()
         .unwrap();
         assert_eq!(with_helper.visible_tiles, without_helper.visible_tiles);
+    }
+
+    fn decoded_with_melds(melds: [Vec<ObservationMeld>; 4]) -> DecodedObservation {
+        ObservationPayload::new(fixture_base64_with_melds(
+            0,
+            None,
+            vec![],
+            vec![],
+            Default::default(),
+            melds,
+        ))
+        .decode_4p()
+        .unwrap()
+    }
+
+    fn decoded_with_meld_of(player: usize, meld: ObservationMeld) -> DecodedObservation {
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
+        melds[player] = vec![meld];
+        decoded_with_melds(melds)
+    }
+
+    #[test]
+    fn decode_4p_maps_every_meld_type_to_the_shared_meld_kind() {
+        for (meld_type, tiles, called_tile, expected) in [
+            (MeldType::Chi, vec![8, 4, 12], Some(8), MeldKind::Chi),
+            (MeldType::Pon, vec![2, 0, 1], Some(2), MeldKind::Pon),
+            (
+                MeldType::Daiminkan,
+                vec![3, 0, 1, 2],
+                Some(3),
+                MeldKind::Daiminkan,
+            ),
+            (MeldType::Ankan, vec![0, 1, 2, 3], None, MeldKind::Ankan),
+            (MeldType::Kakan, vec![2, 0, 1, 3], Some(2), MeldKind::Kakan),
+        ] {
+            let decoded = decoded_with_meld_of(1, meld(meld_type, tiles, called_tile));
+            assert_eq!(decoded.melds[1].len(), 1, "meld type: {meld_type:?}");
+            assert_eq!(
+                decoded.melds[1][0].kind(),
+                expected,
+                "meld type: {meld_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_4p_keeps_meld_tiles_and_called_tile() {
+        let decoded = decoded_with_meld_of(2, meld(MeldType::Chi, vec![8, 4, 12], Some(8)));
+        let meld = &decoded.melds[2][0];
+        assert_eq!(
+            meld.tiles(),
+            [
+                TileId::new(8).unwrap(),
+                TileId::new(4).unwrap(),
+                TileId::new(12).unwrap(),
+            ]
+        );
+        assert_eq!(meld.called_tile(), TileId::new(8));
+        assert!(meld.is_open());
+    }
+
+    #[test]
+    fn decode_4p_ankan_has_no_called_tile_and_is_not_open() {
+        let decoded = decoded_with_meld_of(0, meld(MeldType::Ankan, vec![72, 73, 74, 75], None));
+        let meld = &decoded.melds[0][0];
+        assert_eq!(meld.kind(), MeldKind::Ankan);
+        assert_eq!(meld.called_tile(), None);
+        assert!(!meld.is_open());
+    }
+
+    #[test]
+    fn decode_4p_kakan_stays_a_single_meld() {
+        let decoded = decoded_with_meld_of(3, meld(MeldType::Kakan, vec![2, 0, 1, 3], Some(2)));
+        assert_eq!(decoded.melds[3].len(), 1);
+        assert_eq!(decoded.melds[3][0].kind(), MeldKind::Kakan);
+        assert_eq!(decoded.melds[3][0].tiles().len(), 4);
+    }
+
+    #[test]
+    fn decode_4p_without_melds_has_empty_melds() {
+        let decoded = decoded_with_melds(Default::default());
+        assert!(decoded.melds.iter().all(|melds| melds.is_empty()));
+    }
+
+    #[test]
+    fn decode_4p_keeps_melds_per_player() {
+        let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
+        melds[0] = vec![meld(MeldType::Ankan, vec![0, 1, 2, 3], None)];
+        melds[3] = vec![
+            meld(MeldType::Pon, vec![110, 108, 109], Some(110)),
+            meld(MeldType::Chi, vec![8, 4, 12], Some(8)),
+        ];
+        let decoded = decoded_with_melds(melds);
+        assert_eq!(decoded.melds[0].len(), 1);
+        assert!(decoded.melds[1].is_empty());
+        assert!(decoded.melds[2].is_empty());
+        assert_eq!(decoded.melds[3].len(), 2);
+    }
+
+    #[test]
+    fn own_pon_makes_context_fixed_meld_count_one() {
+        let decoded = decoded_with_meld_of(0, meld(MeldType::Pon, vec![110, 108, 109], Some(110)));
+        let context = game_context_from_decoded_observation(&decoded);
+        assert_eq!(context.player_id(), Some(0));
+        assert_eq!(context.own_melds().map(<[_]>::len), Some(1));
+        assert_eq!(
+            context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn opponent_melds_do_not_change_context_fixed_meld_count() {
+        let decoded = decoded_with_meld_of(1, meld(MeldType::Pon, vec![110, 108, 109], Some(110)));
+        let context = game_context_from_decoded_observation(&decoded);
+        assert_eq!(context.melds_of(1).map(<[_]>::len), Some(1));
+        assert_eq!(
+            context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn meld_tiles_are_not_counted_twice_in_visible_tiles() {
+        let decoded = decoded_with_meld_of(1, meld(MeldType::Pon, vec![110, 108, 109], Some(110)));
+        let context = game_context_from_decoded_observation(&decoded);
+        assert_eq!(count_visible(&decoded, TileId::new(108).unwrap()), 2);
+        assert_eq!(
+            context
+                .visible_tiles()
+                .iter()
+                .filter(|&&tile| tile == TileId::new(108).unwrap())
+                .count(),
+            2
+        );
+        assert_eq!(context.melds_of(1).unwrap()[0].tiles().len(), 3);
     }
 
     #[test]
@@ -1220,6 +1397,7 @@ mod tests {
                 oya: 0,
                 discards: Default::default(),
                 reached: [false; 4],
+                melds: Default::default(),
             }
         }
 
@@ -1344,7 +1522,7 @@ mod tests {
 
         #[test]
         fn decoded_meld_tiles_reach_context_visible_tiles() {
-            let mut melds: [Vec<Meld>; 4] = Default::default();
+            let mut melds: [Vec<ObservationMeld>; 4] = Default::default();
             melds[1] = vec![meld(MeldType::Pon, vec![2, 0, 1], Some(2))];
             let decoded = ObservationPayload::new(fixture_base64_with_melds(
                 0,

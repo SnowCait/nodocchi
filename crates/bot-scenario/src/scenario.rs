@@ -1,10 +1,14 @@
-use bot_core::{GameContext, LegalAction};
+use bot_core::{GameContext, LegalAction, Meld, MeldKind};
 use bot_logic::{TileId, TileType};
 use serde::Deserialize;
 
 use crate::error::ScenarioError;
 use crate::input::{LogicalTile, parse_tiles};
 use crate::tiles::{TileAllocator, validate_unique_physical_tiles};
+
+const CHI_TILE_COUNT: usize = 3;
+const PON_TILE_COUNT: usize = 3;
+const KAN_TILE_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +31,8 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub discards: Option<Vec<String>>,
     #[serde(default)]
+    pub melds: Option<Vec<Vec<MeldSpec>>>,
+    #[serde(default)]
     pub extra_visible_tiles: Option<String>,
     #[serde(default)]
     pub legal_dahai: Option<String>,
@@ -36,6 +42,59 @@ pub struct ScenarioSpec {
     pub allow_hora: bool,
     #[serde(default)]
     pub allow_ryukyoku: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeldKindSpec {
+    Chi,
+    Pon,
+    Daiminkan,
+    Ankan,
+    Kakan,
+}
+
+impl MeldKindSpec {
+    fn kind(self) -> MeldKind {
+        match self {
+            Self::Chi => MeldKind::Chi,
+            Self::Pon => MeldKind::Pon,
+            Self::Daiminkan => MeldKind::Daiminkan,
+            Self::Ankan => MeldKind::Ankan,
+            Self::Kakan => MeldKind::Kakan,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Chi => "chi",
+            Self::Pon => "pon",
+            Self::Daiminkan => "daiminkan",
+            Self::Ankan => "ankan",
+            Self::Kakan => "kakan",
+        }
+    }
+
+    fn tile_count(self) -> usize {
+        match self {
+            Self::Chi => CHI_TILE_COUNT,
+            Self::Pon => PON_TILE_COUNT,
+            Self::Daiminkan | Self::Ankan | Self::Kakan => KAN_TILE_COUNT,
+        }
+    }
+
+    fn needs_called_tile(self) -> bool {
+        !matches!(self, Self::Ankan)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeldSpec {
+    pub kind: MeldKindSpec,
+    pub tiles: String,
+    #[serde(default)]
+    pub called_tile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +107,7 @@ impl Scenario {
     pub fn resolve(spec: &ScenarioSpec) -> Result<Self, ScenarioError> {
         let reached = resolve_reached(spec.reached.as_deref())?;
         let discard_inputs = resolve_discard_inputs(spec.discards.as_deref())?;
+        let meld_inputs = resolve_meld_inputs(spec.melds.as_deref())?;
         let player_id = resolve_seat("player_id", spec.player_id)?;
         let oya = resolve_seat("oya", spec.oya)?;
         let round_wind = parse_wind("round_wind", spec.round_wind.as_deref())?;
@@ -62,6 +122,7 @@ impl Scenario {
             spec.dora_indicators.as_deref().unwrap_or_default(),
         )?;
         let discards = allocate_discards(&mut allocator, &discard_inputs)?;
+        let melds = allocate_melds(&mut allocator, &meld_inputs, &discards)?;
         let extra_visible_tiles = allocate_field(
             &mut allocator,
             "extra_visible_tiles",
@@ -73,6 +134,7 @@ impl Scenario {
             draw,
             &dora_indicators,
             &discards,
+            &melds,
             &extra_visible_tiles,
         );
         validate_unique_physical_tiles(&visible_tiles)
@@ -80,7 +142,7 @@ impl Scenario {
 
         let legal_actions = build_legal_actions(spec, &hand, draw)?;
 
-        let context = GameContext::from_parts_with_table_state(
+        let context = GameContext::from_parts_with_melds(
             draw,
             hand,
             dora_indicators,
@@ -91,6 +153,7 @@ impl Scenario {
             oya,
             discards,
             reached,
+            melds,
         );
 
         Ok(Self {
@@ -251,11 +314,197 @@ fn allocate_discards(
     Ok(discards)
 }
 
+fn resolve_meld_inputs(
+    melds: Option<&[Vec<MeldSpec>]>,
+) -> Result<[Vec<MeldSpec>; 4], ScenarioError> {
+    let Some(values) = melds else {
+        return Ok(std::array::from_fn(|_| Vec::new()));
+    };
+    if values.len() != 4 {
+        return Err(ScenarioError::MeldsLength {
+            count: values.len(),
+        });
+    }
+    Ok(std::array::from_fn(|index| {
+        values.get(index).cloned().unwrap_or_default()
+    }))
+}
+
+fn allocate_melds(
+    allocator: &mut TileAllocator,
+    inputs: &[Vec<MeldSpec>; 4],
+    discards: &[Vec<TileId>; 4],
+) -> Result<[Vec<Meld>; 4], ScenarioError> {
+    let mut claimed_discards: Vec<TileId> = Vec::new();
+    let mut melds: [Vec<Meld>; 4] = std::array::from_fn(|_| Vec::new());
+    for (player, (slot, player_inputs)) in melds.iter_mut().zip(inputs).enumerate() {
+        for (index, spec) in player_inputs.iter().enumerate() {
+            slot.push(allocate_meld(
+                allocator,
+                &format!("melds[{player}][{index}]"),
+                spec,
+                discards,
+                &mut claimed_discards,
+            )?);
+        }
+    }
+    Ok(melds)
+}
+
+fn allocate_meld(
+    allocator: &mut TileAllocator,
+    field: &str,
+    spec: &MeldSpec,
+    discards: &[Vec<TileId>; 4],
+    claimed_discards: &mut Vec<TileId>,
+) -> Result<Meld, ScenarioError> {
+    let tiles = parse_field(field, &spec.tiles)?;
+    validate_meld_shape(field, spec.kind, &tiles)?;
+
+    let called_logical = resolve_meld_called_tile(field, spec, &tiles)?;
+    let called_position =
+        called_logical.and_then(|called| tiles.iter().position(|tile| *tile == called));
+    let called_tile = called_logical
+        .map(|called| claim_discarded_tile(field, called, discards, claimed_discards))
+        .transpose()?;
+
+    let mut remaining = tiles;
+    if let Some(position) = called_position {
+        remaining.remove(position);
+    }
+
+    let mut meld_tiles = allocate_logical(allocator, field, &spec.tiles, &remaining)?;
+    if let (Some(position), Some(called_tile)) = (called_position, called_tile) {
+        meld_tiles.insert(position, called_tile);
+    }
+
+    Ok(Meld::new(spec.kind.kind(), meld_tiles, called_tile))
+}
+
+fn validate_meld_shape(
+    field: &str,
+    kind: MeldKindSpec,
+    tiles: &[LogicalTile],
+) -> Result<(), ScenarioError> {
+    if tiles.len() != kind.tile_count() {
+        return Err(ScenarioError::MeldTileCount {
+            field: field.to_string(),
+            kind: kind.label().to_string(),
+            expected: kind.tile_count(),
+            count: tiles.len(),
+        });
+    }
+
+    let matches_shape = match kind {
+        MeldKindSpec::Chi => is_sequence(tiles),
+        _ => is_same_tile_type(tiles),
+    };
+    if !matches_shape {
+        return Err(ScenarioError::MeldShape {
+            field: field.to_string(),
+            kind: kind.label().to_string(),
+            input: tiles
+                .iter()
+                .map(|tile| tile.to_mjai_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_same_tile_type(tiles: &[LogicalTile]) -> bool {
+    tiles
+        .windows(2)
+        .all(|pair| pair[0].tile_type == pair[1].tile_type)
+}
+
+fn is_sequence(tiles: &[LogicalTile]) -> bool {
+    let Some(first) = tiles.first() else {
+        return false;
+    };
+    if first.tile_type.is_honor() {
+        return false;
+    }
+    let mut raws: Vec<u8> = tiles.iter().map(|tile| tile.tile_type.raw()).collect();
+    raws.sort_unstable();
+    tiles
+        .iter()
+        .all(|tile| tile.tile_type.suit() == first.tile_type.suit())
+        && raws.windows(2).all(|pair| pair[1] == pair[0] + 1)
+}
+
+fn resolve_meld_called_tile(
+    field: &str,
+    spec: &MeldSpec,
+    tiles: &[LogicalTile],
+) -> Result<Option<LogicalTile>, ScenarioError> {
+    let called_field = format!("{field}.called_tile");
+    let called = match spec.called_tile.as_deref() {
+        Some(input) => {
+            let parsed = parse_field(&called_field, input)?;
+            if parsed.len() != 1 {
+                return Err(ScenarioError::NotSingleTile {
+                    field: called_field,
+                    input: input.to_string(),
+                    count: parsed.len(),
+                });
+            }
+            parsed.first().copied()
+        }
+        None => None,
+    };
+
+    match (spec.kind.needs_called_tile(), called) {
+        (true, None) => Err(ScenarioError::MeldCalledTileMissing {
+            field: field.to_string(),
+            kind: spec.kind.label().to_string(),
+        }),
+        (false, Some(called)) => Err(ScenarioError::MeldCalledTileNotAllowed {
+            field: field.to_string(),
+            kind: spec.kind.label().to_string(),
+            tile: called.to_mjai_string(),
+        }),
+        (_, Some(called)) if !tiles.contains(&called) => {
+            Err(ScenarioError::MeldCalledTileNotInMeld {
+                field: field.to_string(),
+                tile: called.to_mjai_string(),
+            })
+        }
+        (_, called) => Ok(called),
+    }
+}
+
+fn claim_discarded_tile(
+    field: &str,
+    called: LogicalTile,
+    discards: &[Vec<TileId>; 4],
+    claimed_discards: &mut Vec<TileId>,
+) -> Result<TileId, ScenarioError> {
+    let tile = discards
+        .iter()
+        .flatten()
+        .copied()
+        .find(|tile| {
+            tile.tile_type() == called.tile_type
+                && tile.is_red() == called.red
+                && !claimed_discards.contains(tile)
+        })
+        .ok_or_else(|| ScenarioError::MeldCalledTileNotDiscarded {
+            field: field.to_string(),
+            tile: called.to_mjai_string(),
+        })?;
+    claimed_discards.push(tile);
+    Ok(tile)
+}
+
 fn collect_visible_tiles(
     hand: &[TileId],
     draw: Option<TileId>,
     dora_indicators: &[TileId],
     discards: &[Vec<TileId>; 4],
+    melds: &[Vec<Meld>; 4],
     extra_visible_tiles: &[TileId],
 ) -> Vec<TileId> {
     hand.iter()
@@ -263,8 +512,22 @@ fn collect_visible_tiles(
         .chain(draw)
         .chain(dora_indicators.iter().copied())
         .chain(discards.iter().flatten().copied())
+        .chain(melds.iter().flatten().flat_map(meld_visible_tiles))
         .chain(extra_visible_tiles.iter().copied())
         .collect()
+}
+
+fn meld_visible_tiles(meld: &Meld) -> Vec<TileId> {
+    let mut called_tile = meld.called_tile();
+    let mut tiles = Vec::new();
+    for &tile in meld.tiles() {
+        if called_tile == Some(tile) {
+            called_tile = None;
+            continue;
+        }
+        tiles.push(tile);
+    }
+    tiles
 }
 
 fn build_legal_actions(
@@ -958,5 +1221,483 @@ mod tests {
         assert!(!scenario.legal_actions.contains(&LegalAction::Reach));
         assert!(!scenario.legal_actions.contains(&LegalAction::Hora));
         assert!(!scenario.legal_actions.contains(&LegalAction::Ryukyoku));
+    }
+
+    const OWN_PON_SCENARIO: &str = r#"{
+        "hand": "234m455p789s",
+        "draw": "N",
+        "player_id": 0,
+        "oya": 1,
+        "discards": ["", "E", "", ""],
+        "melds": [
+            [{"kind": "pon", "tiles": "E E E", "called_tile": "E"}],
+            [],
+            [],
+            []
+        ]
+    }"#;
+
+    fn visible_count(scenario: &Scenario, label: &str) -> usize {
+        scenario
+            .context
+            .visible_tiles()
+            .iter()
+            .filter(|tile| tile.to_mjai_string() == label)
+            .count()
+    }
+
+    #[test]
+    fn json_melds_default_to_empty() {
+        let spec = spec_from_json(r#"{"hand": "123m456p789s11z"}"#);
+        assert_eq!(spec.melds, None);
+        let scenario = resolve(&spec);
+        assert!(
+            scenario
+                .context
+                .melds()
+                .iter()
+                .all(|melds| melds.is_empty())
+        );
+    }
+
+    #[test]
+    fn scenario_without_melds_keeps_the_previous_context() {
+        let without = resolve(&spec_from_json(
+            r#"{"hand": "234m455p789s1123z", "draw": "N", "player_id": 0, "oya": 1}"#,
+        ));
+        let with_empty = resolve(&spec_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "draw": "N",
+                "player_id": 0,
+                "oya": 1,
+                "melds": [[], [], [], []]
+            }"#,
+        ));
+        assert_eq!(without.context, with_empty.context);
+        assert_eq!(without.legal_actions, with_empty.legal_actions);
+        assert_eq!(
+            without.context.own_fixed_meld_count(),
+            Some(bot_logic::FixedMeldCount::NONE)
+        );
+    }
+
+    #[test]
+    fn json_pon_meld_is_resolved() {
+        let scenario = resolve(&spec_from_json(OWN_PON_SCENARIO));
+        let melds = scenario.context.melds_of(0).unwrap();
+        assert_eq!(melds.len(), 1);
+        assert_eq!(melds[0].kind(), MeldKind::Pon);
+        assert_eq!(labels(melds[0].tiles()), ["E", "E", "E"]);
+        assert_eq!(
+            melds[0].called_tile().map(|tile| tile.to_mjai_string()),
+            Some("E".to_string())
+        );
+        assert!(melds[0].is_open());
+        assert!(scenario.context.melds_of(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn json_pon_meld_makes_own_fixed_meld_count_one() {
+        let scenario = resolve(&spec_from_json(OWN_PON_SCENARIO));
+        assert_eq!(
+            scenario
+                .context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn called_tile_reuses_the_discarded_physical_tile() {
+        let scenario = resolve(&spec_from_json(OWN_PON_SCENARIO));
+        let called_tile = scenario.context.melds_of(0).unwrap()[0]
+            .called_tile()
+            .unwrap();
+        assert!(
+            scenario
+                .context
+                .discards_of(1)
+                .unwrap()
+                .contains(&called_tile)
+        );
+        assert_eq!(visible_count(&scenario, "E"), 3);
+        assert!(validate_unique_physical_tiles(scenario.context.visible_tiles()).is_ok());
+    }
+
+    #[test]
+    fn meld_tiles_keep_the_input_order_with_the_called_tile_in_place() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "455p789s",
+                "player_id": 0,
+                "discards": ["", "2m", "", ""],
+                "melds": [[{"kind": "chi", "tiles": "123m", "called_tile": "2m"}], [], [], []]
+            }"#,
+        ));
+        let meld = &scenario.context.melds_of(0).unwrap()[0];
+        assert_eq!(labels(meld.tiles()), ["1m", "2m", "3m"]);
+        assert_eq!(meld.tiles()[1], meld.called_tile().unwrap());
+        assert_eq!(
+            meld.called_tile(),
+            scenario.context.discards_of(1).unwrap().first().copied()
+        );
+    }
+
+    #[test]
+    fn red_five_in_a_meld_keeps_its_physical_tile() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "455p789s",
+                "player_id": 0,
+                "discards": ["", "0m", "", ""],
+                "melds": [[{"kind": "chi", "tiles": "406m", "called_tile": "0m"}], [], [], []]
+            }"#,
+        ));
+        let meld = &scenario.context.melds_of(0).unwrap()[0];
+        assert_eq!(labels(meld.tiles()), ["4m", "5mr", "6m"]);
+        assert!(meld.called_tile().unwrap().is_red());
+        assert_eq!(visible_count(&scenario, "5mr"), 1);
+    }
+
+    #[test]
+    fn ankan_meld_is_fully_visible_and_not_open() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "234m455p789s",
+                "player_id": 0,
+                "melds": [[{"kind": "ankan", "tiles": "1111z"}], [], [], []]
+            }"#,
+        ));
+        let melds = scenario.context.melds_of(0).unwrap();
+        assert_eq!(melds[0].kind(), MeldKind::Ankan);
+        assert_eq!(melds[0].called_tile(), None);
+        assert!(!melds[0].is_open());
+        assert_eq!(visible_count(&scenario, "E"), 4);
+        assert_eq!(
+            scenario
+                .context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn chi_and_kan_melds_are_resolved() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "455p789s",
+                "player_id": 0,
+                "discards": ["", "3m", "1z", "2z"],
+                "melds": [
+                    [{"kind": "chi", "tiles": "123m", "called_tile": "3m"}],
+                    [],
+                    [{"kind": "daiminkan", "tiles": "1111z", "called_tile": "1z"}],
+                    [{"kind": "kakan", "tiles": "2222z", "called_tile": "2z"}]
+                ]
+            }"#,
+        ));
+        assert_eq!(
+            scenario.context.melds_of(0).unwrap()[0].kind(),
+            MeldKind::Chi
+        );
+        assert_eq!(
+            scenario.context.melds_of(2).unwrap()[0].kind(),
+            MeldKind::Daiminkan
+        );
+        assert_eq!(
+            scenario.context.melds_of(3).unwrap()[0].kind(),
+            MeldKind::Kakan
+        );
+        assert_eq!(visible_count(&scenario, "1m"), 1);
+        assert_eq!(visible_count(&scenario, "E"), 4);
+        assert_eq!(visible_count(&scenario, "S"), 4);
+        assert!(validate_unique_physical_tiles(scenario.context.visible_tiles()).is_ok());
+    }
+
+    #[test]
+    fn kakan_stays_a_single_fixed_meld() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "455p789s",
+                "player_id": 0,
+                "discards": ["", "1z", "", ""],
+                "melds": [[{"kind": "kakan", "tiles": "1111z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ));
+        assert_eq!(scenario.context.melds_of(0).unwrap().len(), 1);
+        assert_eq!(
+            scenario
+                .context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn melds_of_all_players_are_kept_separately() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "455p789s",
+                "player_id": 1,
+                "discards": ["", "", "3m", ""],
+                "melds": [
+                    [],
+                    [{"kind": "chi", "tiles": "123m", "called_tile": "3m"}],
+                    [],
+                    [{"kind": "ankan", "tiles": "1111z"}]
+                ]
+            }"#,
+        ));
+        assert!(scenario.context.melds_of(0).unwrap().is_empty());
+        assert_eq!(scenario.context.melds_of(1).unwrap().len(), 1);
+        assert_eq!(scenario.context.melds_of(3).unwrap().len(), 1);
+        assert_eq!(
+            scenario
+                .context
+                .own_fixed_meld_count()
+                .map(bot_logic::FixedMeldCount::get),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn melds_without_player_id_have_no_own_fixed_meld_count() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "455p789s",
+                "melds": [[{"kind": "ankan", "tiles": "1111z"}], [], [], []]
+            }"#,
+        ));
+        assert_eq!(scenario.context.melds_of(0).unwrap().len(), 1);
+        assert_eq!(scenario.context.own_melds(), None);
+        assert_eq!(scenario.context.own_fixed_meld_count(), None);
+    }
+
+    #[test]
+    fn rejects_wrong_melds_length() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{"hand": "123m", "melds": [[], [], []]}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(error, ScenarioError::MeldsLength { count: 3 });
+    }
+
+    #[test]
+    fn rejects_meld_with_wrong_tile_count() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "123m",
+                "discards": ["", "1z", "", ""],
+                "melds": [[{"kind": "pon", "tiles": "11z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::MeldTileCount { field, kind, expected, count }
+                    if field == "melds[0][0]" && kind == "pon" && *expected == 3 && *count == 2
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_chi_that_is_not_a_sequence() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "discards": ["", "1m", "", ""],
+                "melds": [[{"kind": "chi", "tiles": "135m", "called_tile": "1m"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&error, ScenarioError::MeldShape { kind, .. } if kind == "chi"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_chi_of_honor_tiles() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "discards": ["", "1z", "", ""],
+                "melds": [[{"kind": "chi", "tiles": "123z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&error, ScenarioError::MeldShape { kind, .. } if kind == "chi"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_pon_of_mixed_tiles() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "discards": ["", "1z", "", ""],
+                "melds": [[{"kind": "pon", "tiles": "112z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&error, ScenarioError::MeldShape { kind, .. } if kind == "pon"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_called_meld_without_called_tile() {
+        for (kind, tiles) in [
+            ("chi", "123m"),
+            ("pon", "111z"),
+            ("daiminkan", "1111z"),
+            ("kakan", "1111z"),
+        ] {
+            let json = format!(
+                r#"{{
+                    "hand": "456p",
+                    "discards": ["", "1m 1z", "", ""],
+                    "melds": [[{{"kind": "{kind}", "tiles": "{tiles}"}}], [], [], []]
+                }}"#
+            );
+            let error = Scenario::resolve(&spec_from_json(&json)).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ScenarioError::MeldCalledTileMissing { kind: label, .. } if label == kind
+                ),
+                "{kind}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_ankan_with_called_tile() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "discards": ["", "1z", "", ""],
+                "melds": [[{"kind": "ankan", "tiles": "1111z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::MeldCalledTileNotAllowed { kind, tile, .. }
+                    if kind == "ankan" && tile == "E"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_called_tile_outside_the_meld_tiles() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "discards": ["", "2z", "", ""],
+                "melds": [[{"kind": "pon", "tiles": "111z", "called_tile": "2z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::MeldCalledTileNotInMeld { tile, .. } if tile == "S"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_called_tile_that_is_not_discarded() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "melds": [[{"kind": "pon", "tiles": "111z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::MeldCalledTileNotDiscarded { field, tile }
+                    if field == "melds[0][0]" && tile == "E"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_two_melds_claiming_the_same_discarded_tile() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "456p",
+                "discards": ["", "1z", "", ""],
+                "melds": [
+                    [{"kind": "pon", "tiles": "111z", "called_tile": "1z"}],
+                    [],
+                    [{"kind": "pon", "tiles": "111z", "called_tile": "1z"}],
+                    []
+                ]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::MeldCalledTileNotDiscarded { field, .. } if field == "melds[2][0]"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_fifth_copy_created_by_a_meld() {
+        let error = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "11z",
+                "discards": ["", "1z", "", ""],
+                "melds": [[{"kind": "daiminkan", "tiles": "1111z", "called_tile": "1z"}], [], [], []]
+            }"#,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::TileAllocation { field, .. } if field == "melds[0][0]"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn json_rejects_unknown_meld_field() {
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand": "1m", "melds": [[{"kind": "pon", "tiles": "111z", "from": 1}], [], [], []]}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn json_rejects_unknown_meld_kind() {
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand": "1m", "melds": [[{"kind": "nuki", "tiles": "111z"}], [], [], []]}"#
+            )
+            .is_err()
+        );
     }
 }

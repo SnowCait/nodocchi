@@ -63,7 +63,7 @@ pub use lifecycle::{
     ChiihouWindParseError, parse_chiihou_lifecycle_notification,
 };
 pub use match_state::{
-    ChiihouMatchPhase, ChiihouMatchState, ChiihouTableSnapshot, ChiihouTableStateError,
+    ChiihouMatchPhase, ChiihouMatchState, ChiihouMeld, ChiihouTableSnapshot, ChiihouTableStateError,
 };
 pub use nostr_adapter::{
     ChiihouNostrAdapterError, incoming_event_from_nostr, nostr_tags_from_strings,

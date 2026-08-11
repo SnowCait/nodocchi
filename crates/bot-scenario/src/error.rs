@@ -69,6 +69,40 @@ pub enum ScenarioError {
     #[error("discards must have 4 elements, but has {count}")]
     DiscardsLength { count: usize },
 
+    #[error("melds must have 4 elements, but has {count}")]
+    MeldsLength { count: usize },
+
+    #[error("{field} ({kind}) must have {expected} tiles, but has {count}")]
+    MeldTileCount {
+        field: String,
+        kind: String,
+        expected: usize,
+        count: usize,
+    },
+
+    #[error("{field} ({input:?}) is not a {kind}")]
+    MeldShape {
+        field: String,
+        kind: String,
+        input: String,
+    },
+
+    #[error("{field} ({kind}) needs called_tile")]
+    MeldCalledTileMissing { field: String, kind: String },
+
+    #[error("{field} ({kind}) must not have called_tile {tile}")]
+    MeldCalledTileNotAllowed {
+        field: String,
+        kind: String,
+        tile: String,
+    },
+
+    #[error("{field} called_tile {tile} is not in the meld tiles")]
+    MeldCalledTileNotInMeld { field: String, tile: String },
+
+    #[error("{field} called_tile {tile} is not in any discards")]
+    MeldCalledTileNotDiscarded { field: String, tile: String },
+
     #[error("legal_dahai {tile} is not in hand or draw")]
     LegalDahaiNotHeld { tile: String },
 

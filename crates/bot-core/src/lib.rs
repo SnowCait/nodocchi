@@ -4,6 +4,7 @@ pub mod agents;
 pub mod context;
 pub mod defense;
 pub mod discard_selection;
+pub mod meld;
 pub mod push_pull;
 
 pub use action::LegalAction;
@@ -28,6 +29,7 @@ pub use defense::{
     suji_safety_rank_for_any_reached, visible_count_of, wall_rank, wall_tile_types_by_rank,
 };
 pub use discard_selection::select_discard_action;
+pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
     decide_push_pull, push_pull_inputs_from_context,
