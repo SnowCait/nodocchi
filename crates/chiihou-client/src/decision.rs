@@ -7,14 +7,17 @@ use crate::convert::{
 };
 use crate::lifecycle::CHIIHOU_PLAYER_COUNT;
 use crate::match_state::{ChiihouMeld, ChiihouTableSnapshot};
-use crate::protocol::{ChiihouNakuAction, ChiihouPai, ChiihouRequest};
+use crate::protocol::{ChiihouNakuAction, ChiihouPai, ChiihouRequest, chi_material_pairs};
 use crate::reply::{
-    build_naku_no_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
+    build_naku_chi_reply_content, build_naku_kan_reply_content, build_naku_no_reply_content,
+    build_naku_pon_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
     build_sutehai_richi_reply_content, build_sutehai_tsumo_reply_content,
 };
 
 const MENZEN_HAND_TILE_COUNT: usize = 13;
 const RICHI_MIN_REMAINING_TILES: u32 = 4;
+const PON_MIN_HELD_TILES: usize = 2;
+const DAIMINKAN_MIN_HELD_TILES: usize = 3;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum SutehaiDecisionError {
@@ -48,6 +51,9 @@ pub enum NakuDecisionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChiihouNakuDecision {
     Ron,
+    Pon,
+    Daiminkan,
+    Chi { consumed: [ChiihouPai; 2] },
     No,
 }
 
@@ -457,15 +463,91 @@ pub fn legal_actions_from_naku_actions(actions: &[ChiihouNakuAction]) -> Vec<Leg
     }
 }
 
+struct NakuCandidate {
+    action: LegalAction,
+    decision: ChiihouNakuDecision,
+}
+
+fn naku_candidates(
+    hand: &[ChiihouPai],
+    target: ChiihouPai,
+    actions: &[ChiihouNakuAction],
+) -> Vec<NakuCandidate> {
+    let target_tile = temporary_tile_id_from_chiihou_pai(target);
+    let held = hand.iter().filter(|&&pai| pai == target).count();
+    let mut candidates = Vec::new();
+    if actions.contains(&ChiihouNakuAction::Ron) {
+        candidates.push(NakuCandidate {
+            action: LegalAction::Hora,
+            decision: ChiihouNakuDecision::Ron,
+        });
+    }
+    if actions.contains(&ChiihouNakuAction::Pon) && held >= PON_MIN_HELD_TILES {
+        candidates.push(NakuCandidate {
+            action: LegalAction::Pon {
+                tile: target_tile,
+                consumed: vec![target_tile; PON_MIN_HELD_TILES],
+            },
+            decision: ChiihouNakuDecision::Pon,
+        });
+    }
+    if actions.contains(&ChiihouNakuAction::Kan) && held >= DAIMINKAN_MIN_HELD_TILES {
+        candidates.push(NakuCandidate {
+            action: LegalAction::Daiminkan {
+                tile: target_tile,
+                consumed: vec![target_tile; DAIMINKAN_MIN_HELD_TILES],
+            },
+            decision: ChiihouNakuDecision::Daiminkan,
+        });
+    }
+    if actions.contains(&ChiihouNakuAction::Chi) {
+        for consumed in chi_material_pairs(hand, target) {
+            candidates.push(NakuCandidate {
+                action: LegalAction::Chi {
+                    tile: target_tile,
+                    consumed: consumed
+                        .iter()
+                        .map(|&pai| temporary_tile_id_from_chiihou_pai(pai))
+                        .collect(),
+                },
+                decision: ChiihouNakuDecision::Chi { consumed },
+            });
+        }
+    }
+    candidates.push(NakuCandidate {
+        action: LegalAction::None,
+        decision: ChiihouNakuDecision::No,
+    });
+    candidates
+}
+
+pub fn legal_actions_from_naku_request(
+    hand: &[ChiihouPai],
+    target: ChiihouPai,
+    actions: &[ChiihouNakuAction],
+) -> Vec<LegalAction> {
+    naku_candidates(hand, target, actions)
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect()
+}
+
 pub fn choose_naku_decision<A: Agent>(
     request: &ChiihouRequest,
     agent: &mut A,
 ) -> Result<ChiihouNakuDecision, NakuDecisionError> {
-    let ChiihouRequest::Naku { hand, actions, .. } = request else {
+    let ChiihouRequest::Naku {
+        hand,
+        target,
+        actions,
+    } = request
+    else {
         return Err(NakuDecisionError::NotNakuRequest);
     };
     let context = game_context_from_naku_request(hand);
-    choose_naku_decision_with_context(actions, context, agent)
+    Ok(choose_naku_decision_with_context(
+        hand, *target, actions, context, agent,
+    ))
 }
 
 pub fn choose_naku_decision_with_state<A: Agent>(
@@ -473,24 +555,37 @@ pub fn choose_naku_decision_with_state<A: Agent>(
     state: &ChiihouTableSnapshot,
     agent: &mut A,
 ) -> Result<ChiihouNakuDecision, NakuDecisionError> {
-    let ChiihouRequest::Naku { hand, actions, .. } = request else {
+    let ChiihouRequest::Naku {
+        hand,
+        target,
+        actions,
+    } = request
+    else {
         return Err(NakuDecisionError::NotNakuRequest);
     };
     let context = game_context_from_naku_request_with_state(hand, state);
-    choose_naku_decision_with_context(actions, context, agent)
+    Ok(choose_naku_decision_with_context(
+        hand, *target, actions, context, agent,
+    ))
 }
 
 fn choose_naku_decision_with_context<A: Agent>(
+    hand: &[ChiihouPai],
+    target: ChiihouPai,
     actions: &[ChiihouNakuAction],
     context: GameContext,
     agent: &mut A,
-) -> Result<ChiihouNakuDecision, NakuDecisionError> {
-    let legal_actions = legal_actions_from_naku_actions(actions);
+) -> ChiihouNakuDecision {
+    let candidates = naku_candidates(hand, target, actions);
+    let legal_actions: Vec<LegalAction> = candidates
+        .iter()
+        .map(|candidate| candidate.action.clone())
+        .collect();
     let chosen = agent.act(&context, &legal_actions);
-    if chosen == LegalAction::Hora && legal_actions.contains(&LegalAction::Hora) {
-        return Ok(ChiihouNakuDecision::Ron);
-    }
-    Ok(ChiihouNakuDecision::No)
+    candidates
+        .iter()
+        .find(|candidate| candidate.action == chosen)
+        .map_or(ChiihouNakuDecision::No, |candidate| candidate.decision)
 }
 
 pub fn build_naku_reply_for_request<A: Agent>(
@@ -498,10 +593,8 @@ pub fn build_naku_reply_for_request<A: Agent>(
     request: &ChiihouRequest,
     agent: &mut A,
 ) -> Result<String, NakuDecisionError> {
-    match choose_naku_decision(request, agent)? {
-        ChiihouNakuDecision::Ron => Ok(build_naku_ron_reply_content(server_npub)),
-        ChiihouNakuDecision::No => Ok(build_naku_no_reply_content(server_npub)),
-    }
+    let decision = choose_naku_decision(request, agent)?;
+    Ok(build_naku_reply_for_decision(server_npub, decision))
 }
 
 pub fn build_naku_reply_for_request_with_state<A: Agent>(
@@ -510,9 +603,19 @@ pub fn build_naku_reply_for_request_with_state<A: Agent>(
     state: &ChiihouTableSnapshot,
     agent: &mut A,
 ) -> Result<String, NakuDecisionError> {
-    match choose_naku_decision_with_state(request, state, agent)? {
-        ChiihouNakuDecision::Ron => Ok(build_naku_ron_reply_content(server_npub)),
-        ChiihouNakuDecision::No => Ok(build_naku_no_reply_content(server_npub)),
+    let decision = choose_naku_decision_with_state(request, state, agent)?;
+    Ok(build_naku_reply_for_decision(server_npub, decision))
+}
+
+fn build_naku_reply_for_decision(server_npub: &str, decision: ChiihouNakuDecision) -> String {
+    match decision {
+        ChiihouNakuDecision::Ron => build_naku_ron_reply_content(server_npub),
+        ChiihouNakuDecision::Pon => build_naku_pon_reply_content(server_npub),
+        ChiihouNakuDecision::Daiminkan => build_naku_kan_reply_content(server_npub),
+        ChiihouNakuDecision::Chi { consumed } => {
+            build_naku_chi_reply_content(server_npub, consumed)
+        }
+        ChiihouNakuDecision::No => build_naku_no_reply_content(server_npub),
     }
 }
 
@@ -1277,6 +1380,655 @@ mod tests {
                 &mut FixedActionAgent(LegalAction::Hora)
             ),
             Ok("nostr:npub1server naku? no".to_string())
+        );
+    }
+
+    fn naku_request_with(
+        hand: &[&str],
+        target: &str,
+        actions: Vec<ChiihouNakuAction>,
+    ) -> ChiihouRequest {
+        ChiihouRequest::Naku {
+            hand: pais(hand),
+            target: pai(target),
+            actions,
+        }
+    }
+
+    fn naku_legal_actions(
+        hand: &[&str],
+        target: &str,
+        actions: &[ChiihouNakuAction],
+    ) -> Vec<LegalAction> {
+        legal_actions_from_naku_request(&pais(hand), pai(target), actions)
+    }
+
+    fn pon(target: &str) -> LegalAction {
+        let tile = temporary_tile_id_from_chiihou_pai(pai(target));
+        LegalAction::Pon {
+            tile,
+            consumed: vec![tile; 2],
+        }
+    }
+
+    fn daiminkan(target: &str) -> LegalAction {
+        let tile = temporary_tile_id_from_chiihou_pai(pai(target));
+        LegalAction::Daiminkan {
+            tile,
+            consumed: vec![tile; 3],
+        }
+    }
+
+    fn chi(target: &str, consumed: [&str; 2]) -> LegalAction {
+        LegalAction::Chi {
+            tile: temporary_tile_id_from_chiihou_pai(pai(target)),
+            consumed: consumed
+                .iter()
+                .map(|name| temporary_tile_id_from_chiihou_pai(pai(name)))
+                .collect(),
+        }
+    }
+
+    fn chi_decision(consumed: [&str; 2]) -> ChiihouNakuDecision {
+        ChiihouNakuDecision::Chi {
+            consumed: [pai(consumed[0]), pai(consumed[1])],
+        }
+    }
+
+    #[test]
+    fn naku_request_actions_with_ron_are_hora_and_none() {
+        assert_eq!(
+            naku_legal_actions(&["1m", "2m", "3m"], "9p", &[ChiihouNakuAction::Ron]),
+            vec![LegalAction::Hora, LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_always_include_none() {
+        for actions in [
+            vec![],
+            vec![ChiihouNakuAction::Ron],
+            vec![ChiihouNakuAction::Pon],
+            vec![ChiihouNakuAction::Kan],
+            vec![ChiihouNakuAction::Chi],
+        ] {
+            let legal_actions = naku_legal_actions(&["1z", "1z", "1z", "2m", "3m"], "1z", &actions);
+            assert!(
+                legal_actions.contains(&LegalAction::None),
+                "actions: {actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn naku_request_actions_include_pon_with_held_pair() {
+        assert_eq!(
+            naku_legal_actions(&["1z", "1z", "5p", "9s"], "1z", &[ChiihouNakuAction::Pon]),
+            vec![pon("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_have_no_pon_without_held_pair() {
+        assert_eq!(
+            naku_legal_actions(&["1z", "5p", "9s"], "1z", &[ChiihouNakuAction::Pon]),
+            vec![LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_have_single_pon_for_three_held_tiles() {
+        assert_eq!(
+            naku_legal_actions(&["1z", "1z", "1z", "5p"], "1z", &[ChiihouNakuAction::Pon]),
+            vec![pon("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_include_daiminkan_with_held_triplet() {
+        assert_eq!(
+            naku_legal_actions(&["1z", "1z", "1z", "5p"], "1z", &[ChiihouNakuAction::Kan]),
+            vec![daiminkan("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_have_no_daiminkan_without_held_triplet() {
+        assert_eq!(
+            naku_legal_actions(&["1z", "1z", "5p"], "1z", &[ChiihouNakuAction::Kan]),
+            vec![LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_kan_never_becomes_ankan_or_kakan() {
+        let legal_actions =
+            naku_legal_actions(&["1z", "1z", "1z", "1z"], "1z", &[ChiihouNakuAction::Kan]);
+        assert!(!legal_actions.iter().any(|action| matches!(
+            action,
+            LegalAction::Ankan { .. } | LegalAction::Kakan { .. }
+        )));
+        assert!(legal_actions.contains(&daiminkan("1z")));
+    }
+
+    #[test]
+    fn naku_request_actions_keep_ron_pon_kan_chi_order() {
+        assert_eq!(
+            naku_legal_actions(
+                &["2m", "3m", "4m", "4m", "4m"],
+                "4m",
+                &[
+                    ChiihouNakuAction::Ron,
+                    ChiihouNakuAction::Pon,
+                    ChiihouNakuAction::Kan,
+                    ChiihouNakuAction::Chi,
+                ]
+            ),
+            vec![
+                LegalAction::Hora,
+                pon("4m"),
+                daiminkan("4m"),
+                chi("4m", ["2m", "3m"]),
+                LegalAction::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_include_single_chi_candidate() {
+        assert_eq!(
+            naku_legal_actions(&["1m", "2m", "9s"], "3m", &[ChiihouNakuAction::Chi]),
+            vec![chi("3m", ["1m", "2m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_include_three_chi_candidates() {
+        assert_eq!(
+            naku_legal_actions(&["1m", "2m", "4m", "5m"], "3m", &[ChiihouNakuAction::Chi]),
+            vec![
+                chi("3m", ["1m", "2m"]),
+                chi("3m", ["2m", "4m"]),
+                chi("3m", ["4m", "5m"]),
+                LegalAction::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_chi_for_lower_terminal_target() {
+        assert_eq!(
+            naku_legal_actions(&["2m", "3m", "4m"], "1m", &[ChiihouNakuAction::Chi]),
+            vec![chi("1m", ["2m", "3m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_chi_for_upper_terminal_target() {
+        assert_eq!(
+            naku_legal_actions(&["6m", "7m", "8m"], "9m", &[ChiihouNakuAction::Chi]),
+            vec![chi("9m", ["7m", "8m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_have_no_chi_for_honor_target() {
+        assert_eq!(
+            naku_legal_actions(&["1z", "1z", "2z", "3z"], "2z", &[ChiihouNakuAction::Chi]),
+            vec![LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_have_no_chi_without_material() {
+        assert_eq!(
+            naku_legal_actions(&["1m", "5m", "9m", "1p"], "3m", &[ChiihouNakuAction::Chi]),
+            vec![LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn naku_request_actions_ignore_chi_material_without_chi_offer() {
+        assert_eq!(
+            naku_legal_actions(&["1m", "2m"], "3m", &[ChiihouNakuAction::Pon]),
+            vec![LegalAction::None]
+        );
+    }
+
+    struct RecordingActionsAgent {
+        legal_actions: Vec<LegalAction>,
+        chosen: LegalAction,
+    }
+
+    impl Agent for RecordingActionsAgent {
+        fn act(&mut self, _ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
+            self.legal_actions = legal_actions.to_vec();
+            self.chosen.clone()
+        }
+    }
+
+    #[test]
+    fn agent_receives_every_naku_candidate() {
+        let mut agent = RecordingActionsAgent {
+            legal_actions: Vec::new(),
+            chosen: LegalAction::None,
+        };
+        let request = naku_request_with(
+            &["1z", "1z", "1z", "2m", "3m"],
+            "1z",
+            vec![
+                ChiihouNakuAction::Ron,
+                ChiihouNakuAction::Pon,
+                ChiihouNakuAction::Kan,
+            ],
+        );
+        assert_eq!(
+            choose_naku_decision(&request, &mut agent),
+            Ok(ChiihouNakuDecision::No)
+        );
+        assert_eq!(
+            agent.legal_actions,
+            vec![
+                LegalAction::Hora,
+                pon("1z"),
+                daiminkan("1z"),
+                LegalAction::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn choose_naku_decision_pons_when_agent_picks_pon() {
+        assert_eq!(
+            choose_naku_decision(
+                &naku_request_with(&["1z", "1z", "5p"], "1z", vec![ChiihouNakuAction::Pon]),
+                &mut FixedActionAgent(pon("1z"))
+            ),
+            Ok(ChiihouNakuDecision::Pon)
+        );
+    }
+
+    #[test]
+    fn choose_naku_decision_daiminkans_when_agent_picks_daiminkan() {
+        assert_eq!(
+            choose_naku_decision(
+                &naku_request_with(
+                    &["1z", "1z", "1z", "5p"],
+                    "1z",
+                    vec![ChiihouNakuAction::Kan]
+                ),
+                &mut FixedActionAgent(daiminkan("1z"))
+            ),
+            Ok(ChiihouNakuDecision::Daiminkan)
+        );
+    }
+
+    #[test]
+    fn choose_naku_decision_chis_with_the_chosen_material() {
+        let request = naku_request_with(
+            &["1m", "2m", "4m", "5m"],
+            "3m",
+            vec![ChiihouNakuAction::Chi],
+        );
+        for consumed in [["1m", "2m"], ["2m", "4m"], ["4m", "5m"]] {
+            assert_eq!(
+                choose_naku_decision(&request, &mut FixedActionAgent(chi("3m", consumed))),
+                Ok(chi_decision(consumed)),
+                "consumed: {consumed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn choose_naku_decision_falls_back_to_no_for_illegal_pon() {
+        assert_eq!(
+            choose_naku_decision(
+                &naku_request_with(&["1z", "5p", "9s"], "1z", vec![ChiihouNakuAction::Pon]),
+                &mut FixedActionAgent(pon("1z"))
+            ),
+            Ok(ChiihouNakuDecision::No)
+        );
+    }
+
+    #[test]
+    fn choose_naku_decision_falls_back_to_no_for_illegal_daiminkan() {
+        assert_eq!(
+            choose_naku_decision(
+                &naku_request_with(&["1z", "1z", "5p"], "1z", vec![ChiihouNakuAction::Kan]),
+                &mut FixedActionAgent(daiminkan("1z"))
+            ),
+            Ok(ChiihouNakuDecision::No)
+        );
+    }
+
+    #[test]
+    fn choose_naku_decision_falls_back_to_no_for_illegal_chi_material() {
+        assert_eq!(
+            choose_naku_decision(
+                &naku_request_with(
+                    &["1m", "2m", "4m", "5m"],
+                    "3m",
+                    vec![ChiihouNakuAction::Chi]
+                ),
+                &mut FixedActionAgent(chi("3m", ["2m", "5m"]))
+            ),
+            Ok(ChiihouNakuDecision::No)
+        );
+    }
+
+    #[test]
+    fn choose_naku_decision_falls_back_to_no_for_unoffered_pon() {
+        assert_eq!(
+            choose_naku_decision(
+                &naku_request_with(&["1z", "1z", "5p"], "1z", vec![ChiihouNakuAction::Ron]),
+                &mut FixedActionAgent(pon("1z"))
+            ),
+            Ok(ChiihouNakuDecision::No)
+        );
+    }
+
+    #[test]
+    fn builds_naku_pon_reply_when_agent_picks_pon() {
+        assert_eq!(
+            build_naku_reply_for_request(
+                "npub1server",
+                &naku_request_with(&["1z", "1z", "5p"], "1z", vec![ChiihouNakuAction::Pon]),
+                &mut FixedActionAgent(pon("1z"))
+            ),
+            Ok("nostr:npub1server naku? pon".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_naku_kan_reply_when_agent_picks_daiminkan() {
+        assert_eq!(
+            build_naku_reply_for_request(
+                "npub1server",
+                &naku_request_with(
+                    &["1z", "1z", "1z", "5p"],
+                    "1z",
+                    vec![ChiihouNakuAction::Kan]
+                ),
+                &mut FixedActionAgent(daiminkan("1z"))
+            ),
+            Ok("nostr:npub1server naku? kan".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_naku_chi_reply_when_agent_picks_chi() {
+        assert_eq!(
+            build_naku_reply_for_request(
+                "npub1server",
+                &naku_request_with(&["1m", "3m", "9s"], "2m", vec![ChiihouNakuAction::Chi]),
+                &mut FixedActionAgent(chi("2m", ["1m", "3m"]))
+            ),
+            Ok("nostr:npub1server naku? chi 1m 3m".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_naku_chi_reply_for_the_chosen_candidate_among_three() {
+        let request = naku_request_with(
+            &["1m", "2m", "4m", "5m"],
+            "3m",
+            vec![ChiihouNakuAction::Chi],
+        );
+        for (consumed, expected) in [
+            (["1m", "2m"], "nostr:npub1server naku? chi 1m 2m"),
+            (["2m", "4m"], "nostr:npub1server naku? chi 2m 4m"),
+            (["4m", "5m"], "nostr:npub1server naku? chi 4m 5m"),
+        ] {
+            assert_eq!(
+                build_naku_reply_for_request(
+                    "npub1server",
+                    &request,
+                    &mut FixedActionAgent(chi("3m", consumed))
+                ),
+                Ok(expected.to_string()),
+                "consumed: {consumed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn builds_naku_pon_reply_with_state() {
+        assert_eq!(
+            build_naku_reply_for_request_with_state(
+                "npub1server",
+                &naku_request_with(&["1z", "1z", "5p"], "1z", vec![ChiihouNakuAction::Pon]),
+                &snapshot_for_tests(),
+                &mut FixedActionAgent(pon("1z"))
+            ),
+            Ok("nostr:npub1server naku? pon".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_naku_kan_reply_with_state() {
+        assert_eq!(
+            build_naku_reply_for_request_with_state(
+                "npub1server",
+                &naku_request_with(
+                    &["1z", "1z", "1z", "5p"],
+                    "1z",
+                    vec![ChiihouNakuAction::Kan]
+                ),
+                &snapshot_for_tests(),
+                &mut FixedActionAgent(daiminkan("1z"))
+            ),
+            Ok("nostr:npub1server naku? kan".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_naku_chi_reply_with_state() {
+        assert_eq!(
+            build_naku_reply_for_request_with_state(
+                "npub1server",
+                &naku_request_with(&["1m", "3m", "9s"], "2m", vec![ChiihouNakuAction::Chi]),
+                &snapshot_for_tests(),
+                &mut FixedActionAgent(chi("2m", ["1m", "3m"]))
+            ),
+            Ok("nostr:npub1server naku? chi 1m 3m".to_string())
+        );
+    }
+
+    #[test]
+    fn shanten_agent_declines_pon_offer() {
+        let request = naku_request_with(
+            &["1z", "1z", "1m", "2m", "3m"],
+            "1z",
+            vec![ChiihouNakuAction::Pon],
+        );
+        assert_eq!(
+            choose_naku_decision(&request, &mut ShantenAgent),
+            Ok(ChiihouNakuDecision::No)
+        );
+        assert_eq!(
+            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            Ok("nostr:npub1server naku? no".to_string())
+        );
+    }
+
+    #[test]
+    fn shanten_agent_declines_chi_offer() {
+        let request = naku_request_with(
+            &["1m", "2m", "4m", "5m"],
+            "3m",
+            vec![ChiihouNakuAction::Chi],
+        );
+        assert_eq!(
+            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            Ok("nostr:npub1server naku? no".to_string())
+        );
+    }
+
+    #[test]
+    fn shanten_agent_declines_daiminkan_offer() {
+        let request = naku_request_with(
+            &["1z", "1z", "1z", "2m", "3m"],
+            "1z",
+            vec![ChiihouNakuAction::Kan],
+        );
+        assert_eq!(
+            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            Ok("nostr:npub1server naku? no".to_string())
+        );
+    }
+
+    #[test]
+    fn shanten_agent_rons_when_ron_and_pon_are_offered() {
+        let request = naku_request_with(
+            &["1z", "1z", "1m", "2m", "3m"],
+            "1z",
+            vec![ChiihouNakuAction::Ron, ChiihouNakuAction::Pon],
+        );
+        assert_eq!(
+            choose_naku_decision(&request, &mut ShantenAgent),
+            Ok(ChiihouNakuDecision::Ron)
+        );
+        assert_eq!(
+            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            Ok("nostr:npub1server naku? ron".to_string())
+        );
+    }
+
+    #[test]
+    fn normal_agent_declines_pon_offer() {
+        let request = naku_request_with(
+            &["1z", "1z", "1m", "2m", "3m"],
+            "1z",
+            vec![ChiihouNakuAction::Pon],
+        );
+        assert_eq!(
+            choose_naku_decision(&request, &mut bot_core::NormalAgent),
+            Ok(ChiihouNakuDecision::No)
+        );
+    }
+
+    const CHI_MELD: &str = "<:mahjong_m1::mahjong_m2::mahjong_m3:>";
+    const PON_MELD: &str = "<:mahjong_south::mahjong_south::mahjong_south:>";
+    const EAST_PON_MELD: &str = "<:mahjong_east::mahjong_east::mahjong_east:>";
+    const ANKAN_MELD: &str = "(:mahjong_east::mahjong_east::mahjong_east::mahjong_east:)";
+
+    fn parsed_naku_legal_actions(content: &str) -> Vec<LegalAction> {
+        let Some(ChiihouRequest::Naku {
+            hand,
+            target,
+            actions,
+        }) = crate::protocol::parse_chiihou_request(content).unwrap()
+        else {
+            panic!("expected naku request");
+        };
+        legal_actions_from_naku_request(&hand, target, &actions)
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_chi_material() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4::mahjong_p7:{CHI_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![chi("3m", ["2m", "4m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn ankan_pais_do_not_become_chi_material() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{ANKAN_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![chi("3m", ["2m", "4m"]), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn concealed_pais_still_become_chi_material_alongside_melds() {
+        let content = format!(
+            "\
+:mahjong_m1::mahjong_m2::mahjong_m4::mahjong_m5:{PON_MELD} :mahjong_m3:
+nostr:npub1ai000 GET naku? chi"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![
+                chi("3m", ["1m", "2m"]),
+                chi("3m", ["2m", "4m"]),
+                chi("3m", ["4m", "5m"]),
+                LegalAction::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_pon_material() {
+        let content = format!(
+            "\
+:mahjong_east:{EAST_PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? pon"
+        );
+        assert_eq!(parsed_naku_legal_actions(&content), vec![LegalAction::None]);
+    }
+
+    #[test]
+    fn concealed_pais_still_become_pon_material_alongside_melds() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east:{PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? pon"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![pon("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_daiminkan_material() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east:{EAST_PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? kan"
+        );
+        assert_eq!(parsed_naku_legal_actions(&content), vec![LegalAction::None]);
+    }
+
+    #[test]
+    fn concealed_pais_still_become_daiminkan_material_alongside_melds() {
+        let content = format!(
+            "\
+:mahjong_east::mahjong_east::mahjong_east:{PON_MELD} :mahjong_east:
+nostr:npub1ai000 GET naku? kan"
+        );
+        assert_eq!(
+            parsed_naku_legal_actions(&content),
+            vec![daiminkan("1z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn melded_pais_do_not_become_dahai_candidates() {
+        let content = format!(
+            "\
+:mahjong_m2::mahjong_m4:{CHI_MELD}{ANKAN_MELD}
+nostr:npub1ai000 GET sutehai?"
+        );
+        let Some(ChiihouRequest::Sutehai { hand, drawn }) =
+            crate::protocol::parse_chiihou_request(&content).unwrap()
+        else {
+            panic!("expected sutehai request");
+        };
+        assert_eq!(
+            legal_dahai_actions_from_sutehai_request(&hand, drawn),
+            vec![dahai("2m"), dahai("4m")]
         );
     }
 

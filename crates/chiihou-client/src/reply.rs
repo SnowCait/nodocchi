@@ -20,6 +20,19 @@ pub fn build_naku_ron_reply_content(server_npub: &str) -> String {
     format!("nostr:{server_npub} naku? ron")
 }
 
+pub fn build_naku_pon_reply_content(server_npub: &str) -> String {
+    format!("nostr:{server_npub} naku? pon")
+}
+
+pub fn build_naku_kan_reply_content(server_npub: &str) -> String {
+    format!("nostr:{server_npub} naku? kan")
+}
+
+pub fn build_naku_chi_reply_content(server_npub: &str, consumed: [ChiihouPai; 2]) -> String {
+    let [first, second] = consumed;
+    format!("nostr:{server_npub} naku? chi {first} {second}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +82,40 @@ mod tests {
         assert_eq!(
             build_naku_ron_reply_content("npub1server"),
             "nostr:npub1server naku? ron"
+        );
+    }
+
+    #[test]
+    fn builds_naku_pon_reply_content() {
+        assert_eq!(
+            build_naku_pon_reply_content("npub1server"),
+            "nostr:npub1server naku? pon"
+        );
+    }
+
+    #[test]
+    fn builds_naku_kan_reply_content() {
+        assert_eq!(
+            build_naku_kan_reply_content("npub1server"),
+            "nostr:npub1server naku? kan"
+        );
+    }
+
+    #[test]
+    fn builds_naku_chi_reply_content_with_two_pais() {
+        assert_eq!(
+            build_naku_chi_reply_content(
+                "npub1server",
+                ["1m".parse().unwrap(), "3m".parse().unwrap()]
+            ),
+            "nostr:npub1server naku? chi 1m 3m"
+        );
+        assert_eq!(
+            build_naku_chi_reply_content(
+                "npub1server",
+                ["7s".parse().unwrap(), "8s".parse().unwrap()]
+            ),
+            "nostr:npub1server naku? chi 7s 8s"
         );
     }
 }

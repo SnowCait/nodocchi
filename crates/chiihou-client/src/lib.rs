@@ -32,7 +32,8 @@ pub use config::{
 };
 pub use convert::{
     chiihou_pai_from_tile_id, emoji_shortcode_to_chiihou_pai, extract_chiihou_pais_from_emoji_text,
-    temporary_tile_id_from_chiihou_pai, tile_type_from_chiihou_pai, tile_type_from_chiihou_wind,
+    extract_concealed_chiihou_pais_from_emoji_text, temporary_tile_id_from_chiihou_pai,
+    tile_type_from_chiihou_pai, tile_type_from_chiihou_wind,
 };
 pub use decision::{
     ChiihouNakuDecision, ChiihouSutehaiDecision, NakuDecisionError, SutehaiDecisionError,
@@ -43,8 +44,9 @@ pub use decision::{
     choose_sutehai_pai_with_state, game_context_from_naku_request,
     game_context_from_naku_request_with_state, game_context_from_sutehai_request,
     game_context_from_sutehai_request_with_state, is_complete_menzen_tsumo_hand,
-    legal_actions_from_naku_actions, legal_actions_from_sutehai_request,
-    legal_actions_from_sutehai_request_with_state, legal_dahai_actions_from_sutehai_request,
+    legal_actions_from_naku_actions, legal_actions_from_naku_request,
+    legal_actions_from_sutehai_request, legal_actions_from_sutehai_request_with_state,
+    legal_dahai_actions_from_sutehai_request,
 };
 pub use event::{
     CHIIHOU_BITCHAT_MESSAGE_KIND, CHIIHOU_BITCHAT_TELEPORT_TAG, CHIIHOU_CHANNEL_MESSAGE_KIND,
@@ -71,11 +73,12 @@ pub use nostr_adapter::{
 };
 pub use protocol::{
     ChiihouCompactPaiParseError, ChiihouNakuAction, ChiihouPai, ChiihouPaiParseError,
-    ChiihouProtocolError, ChiihouRequest, ChiihouSuit, parse_chiihou_request,
+    ChiihouProtocolError, ChiihouRequest, ChiihouSuit, chi_material_pairs, parse_chiihou_request,
     parse_compact_chiihou_pais,
 };
 pub use reply::{
-    build_naku_no_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
+    build_naku_chi_reply_content, build_naku_kan_reply_content, build_naku_no_reply_content,
+    build_naku_pon_reply_content, build_naku_ron_reply_content, build_sutehai_reply_content,
     build_sutehai_richi_reply_content, build_sutehai_tsumo_reply_content,
 };
 pub use secret::{CHIIHOU_NSEC_ENV, ChiihouSecretError, load_chiihou_nsec, validate_chiihou_nsec};
