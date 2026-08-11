@@ -166,15 +166,8 @@ pub fn opponent_honor_value_for_reached(
 type RankedHonorCandidate<'a> = (&'a LegalAction, HonorSafetyRank, Option<OpponentHonorValue>);
 
 fn sort_group_by_opponent_honor_value(group: &mut [RankedHonorCandidate<'_>]) {
-    let slots: Vec<usize> = (0..group.len())
-        .filter(|&index| group[index].2.is_some())
-        .collect();
-    let mut ordered: Vec<RankedHonorCandidate<'_>> =
-        slots.iter().map(|&index| group[index]).collect();
-    ordered.sort_by_key(|candidate| candidate.2);
-
-    for (&slot, candidate) in slots.iter().zip(ordered) {
-        group[slot] = candidate;
+    for run in group.split_mut(|candidate| candidate.2.is_none()) {
+        run.sort_by_key(|candidate| candidate.2);
     }
 }
 
@@ -1945,7 +1938,7 @@ mod tests {
     }
 
     #[test]
-    fn honor_dahai_actions_by_safety_pins_unknown_candidate_in_place() {
+    fn honor_dahai_actions_by_safety_does_not_reorder_across_unknown() {
         let discards = [vec![], vec![tile(116)], vec![], vec![]];
         let context = honor_value_context(
             Some(honor(EAST)),
@@ -1974,7 +1967,77 @@ mod tests {
             .into_iter()
             .map(|(action, _)| action)
             .collect();
-        assert_eq!(ranked, vec![&north, &west, &chun]);
+        assert_eq!(ranked, vec![&chun, &west, &north]);
+    }
+
+    const GUEST: Option<OpponentHonorValue> = Some(OpponentHonorValue::GuestWind);
+    const VALUE: Option<OpponentHonorValue> = Some(OpponentHonorValue::SingleValueHonor);
+    const DOUBLE: Option<OpponentHonorValue> = Some(OpponentHonorValue::DoubleWind);
+    const UNKNOWN: Option<OpponentHonorValue> = None;
+
+    fn sorted_group_order(values: &[Option<OpponentHonorValue>]) -> Vec<usize> {
+        let actions: Vec<LegalAction> = (0..values.len())
+            .map(|index| LegalAction::Dahai {
+                tile: tile(108 + index as u8),
+            })
+            .collect();
+        let mut group: Vec<RankedHonorCandidate<'_>> = actions
+            .iter()
+            .zip(values)
+            .map(|(action, &value)| (action, HonorSafetyRank::NoVisible, value))
+            .collect();
+
+        sort_group_by_opponent_honor_value(&mut group);
+
+        group
+            .iter()
+            .map(|candidate| match candidate.0 {
+                LegalAction::Dahai { tile } => (tile.raw() - 108) as usize,
+                other => panic!("unexpected action: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sort_group_keeps_order_when_unknown_is_in_the_middle() {
+        assert_eq!(sorted_group_order(&[VALUE, UNKNOWN, GUEST]), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sort_group_sorts_only_the_run_before_a_trailing_unknown() {
+        assert_eq!(sorted_group_order(&[VALUE, GUEST, UNKNOWN]), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn sort_group_sorts_only_the_run_after_a_leading_unknown() {
+        assert_eq!(sorted_group_order(&[UNKNOWN, DOUBLE, GUEST]), vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn sort_group_sorts_each_run_between_unknowns() {
+        assert_eq!(
+            sorted_group_order(&[DOUBLE, UNKNOWN, VALUE, GUEST, UNKNOWN]),
+            vec![0, 1, 3, 2, 4]
+        );
+    }
+
+    #[test]
+    fn sort_group_sorts_every_candidate_when_all_are_known() {
+        assert_eq!(sorted_group_order(&[DOUBLE, VALUE, GUEST]), vec![2, 1, 0]);
+        assert_eq!(sorted_group_order(&[GUEST, VALUE, DOUBLE]), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sort_group_keeps_order_when_all_are_unknown() {
+        assert_eq!(
+            sorted_group_order(&[UNKNOWN, UNKNOWN, UNKNOWN]),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn sort_group_keeps_order_within_equal_values() {
+        assert_eq!(sorted_group_order(&[VALUE, GUEST, GUEST]), vec![1, 2, 0]);
     }
 
     #[test]
