@@ -7,7 +7,9 @@ pub mod tile;
 pub mod tile_counts;
 
 pub use acceptance::{
-    Acceptance, AcceptanceTile, calculate_acceptance, calculate_acceptance_with_visible_tiles,
+    Acceptance, AcceptanceTile, EffectiveAcceptance, EffectiveAcceptanceTile, calculate_acceptance,
+    calculate_acceptance_with_fixed_melds, calculate_acceptance_with_fixed_melds_and_visible_tiles,
+    calculate_acceptance_with_visible_tiles,
 };
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
@@ -28,7 +30,9 @@ pub use iishanten::{
     classify_standard_iishanten_shape_after_discard,
 };
 pub use shanten::{
-    Shanten, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
+    EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
+    calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
+    standard_shanten_with_fixed_melds,
 };
 pub use tile::{Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, next_dora};
 pub use tile_counts::{TileCountError, TileCounts};
