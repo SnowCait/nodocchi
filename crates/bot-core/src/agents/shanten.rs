@@ -2730,16 +2730,16 @@ pub(crate) mod tests {
 
         assert!(normal_discard.candidates.len() > 1);
         assert_eq!(lookahead.candidates.len(), normal_discard.candidates.len());
-        for (second_ply, candidate) in lookahead
+        for (candidate_lookahead, candidate) in lookahead
             .candidates
             .iter()
             .zip(normal_discard.candidates.iter())
         {
-            assert_eq!(second_ply.discard, candidate.evaluation.discard);
+            assert_eq!(candidate_lookahead.discard, candidate.evaluation.discard);
             // 現在打牌後の受け入れをそのまま引き継ぐので、対象牌と残枚数が一致する。
             let acceptance = &candidate.evaluation.acceptance_after_discard.tiles;
-            assert_eq!(second_ply.draws.len(), acceptance.len());
-            for (draw, accepted) in second_ply.draws.iter().zip(acceptance.iter()) {
+            assert_eq!(candidate_lookahead.draws.len(), acceptance.len());
+            for (draw, accepted) in candidate_lookahead.draws.iter().zip(acceptance.iter()) {
                 assert_eq!(draw.draw, accepted.tile);
                 assert_eq!(draw.remaining, accepted.remaining);
             }

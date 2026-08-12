@@ -3,7 +3,7 @@ use crate::acceptance::{
 };
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
-use crate::tile::{TileId, TileType, count_dora};
+use crate::tile::{TileId, TileType, count_indicated_dora};
 use crate::tile_counts::TileCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1140,11 +1140,14 @@ pub fn evaluate_discards_from_tiles_with_dora(
     decorate_evaluations(
         &mut evaluations,
         &counts,
-        tiles,
-        dora_indicators,
-        None,
-        None,
-        ShapePenaltyMode::ContextFree,
+        &DecorationContext {
+            tiles,
+            dora_indicators,
+            round_wind: None,
+            seat_wind: None,
+            shape_penalty: ShapePenaltyMode::ContextFree,
+            unresolved_red_tile: None,
+        },
     );
     evaluations
 }
@@ -1180,14 +1183,17 @@ pub fn evaluate_discards_from_tiles_with_fixed_melds_and_context(
     decorate_evaluations(
         &mut evaluations,
         &counts,
-        tiles,
-        dora_indicators,
-        round_wind,
-        seat_wind,
-        ShapePenaltyMode::WithContext {
+        &DecorationContext {
+            tiles,
+            dora_indicators,
             round_wind,
             seat_wind,
-            fixed_meld_count,
+            shape_penalty: ShapePenaltyMode::WithContext {
+                round_wind,
+                seat_wind,
+                fixed_meld_count,
+            },
+            unresolved_red_tile: None,
         },
     );
     evaluations
@@ -1232,20 +1238,23 @@ pub fn evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
     decorate_evaluations(
         &mut evaluations,
         &counts,
-        tiles,
-        dora_indicators,
-        round_wind,
-        seat_wind,
-        ShapePenaltyMode::WithContext {
+        &DecorationContext {
+            tiles,
+            dora_indicators,
             round_wind,
             seat_wind,
-            fixed_meld_count,
+            shape_penalty: ShapePenaltyMode::WithContext {
+                round_wind,
+                seat_wind,
+                fixed_meld_count,
+            },
+            unresolved_red_tile: None,
         },
     );
     evaluations
 }
 
-enum ShapePenaltyMode {
+pub(crate) enum ShapePenaltyMode {
     ContextFree,
     WithContext {
         round_wind: Option<TileType>,
@@ -1254,28 +1263,49 @@ enum ShapePenaltyMode {
     },
 }
 
-fn decorate_evaluations(
+/// 打牌候補評価へ後付けする文脈。
+///
+/// 牌種だけで決まる項目 (通常ドラ・役牌・形ペナルティ) と、物理牌が必要な項目 (赤5・赤ドラ) を
+/// 同じ経路で反映するための入力。通常打牌評価と2手先診断が共有する。
+pub(crate) struct DecorationContext<'a> {
+    /// 切る物理牌を決めるための手牌。牌種ごとに黒牌を赤牌より優先して選ぶ。
+    pub tiles: &'a [TileId],
+    pub dora_indicators: &'a [TileId],
+    pub round_wind: Option<TileType>,
+    pub seat_wind: Option<TileType>,
+    pub shape_penalty: ShapePenaltyMode,
+    /// 物理牌が一意に決まらず、赤5かどうかを解決できない牌種。
+    ///
+    /// 2手先診断の仮想ツモ牌だけが該当する。受け入れは34種の牌種単位なので、ツモった5が赤か
+    /// 黒かは決まらない。この牌種を切る候補では赤5扱いにせず、牌種から確定する通常ドラだけを
+    /// 反映する。通常打牌評価は物理牌がすべて分かっているため `None` を渡す。
+    pub unresolved_red_tile: Option<TileType>,
+}
+
+pub(crate) fn decorate_evaluations(
     evaluations: &mut [DiscardEvaluation],
     counts: &TileCounts,
-    tiles: &[TileId],
-    dora_indicators: &[TileId],
-    round_wind: Option<TileType>,
-    seat_wind: Option<TileType>,
-    shape_penalty_mode: ShapePenaltyMode,
+    context: &DecorationContext,
 ) {
     for evaluation in evaluations {
-        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, tiles);
-        evaluation.discards_red_five = discarded_tile.map(TileId::is_red).unwrap_or(false);
-        evaluation.discarded_dora_count = discarded_tile
-            .map(|tile| count_dora(tile, dora_indicators))
-            .unwrap_or(0);
+        // 赤5かどうかが解決できない牌種では赤扱いにしない。手牌に黒の同種牌があれば通常打牌
+        // 評価も黒を選ぶため結果は一致し、赤1枚しか無い場合はその赤が手牌に見えている以上
+        // 仮想ツモは黒に確定する。同種牌が1枚も無い場合だけ赤かどうかが未解決のまま残る。
+        let resolves_red_five = context.unresolved_red_tile != Some(evaluation.discard);
+        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, context.tiles);
+        evaluation.discards_red_five =
+            resolves_red_five && discarded_tile.map(TileId::is_red).unwrap_or(false);
+        // 通常ドラは牌種だけで決まるため、物理牌が分からなくても必ず反映する。
+        evaluation.discarded_dora_count =
+            count_indicated_dora(evaluation.discard, context.dora_indicators)
+                + u8::from(evaluation.discards_red_five);
         evaluation.discarded_value_honor_count =
-            value_honor_count(evaluation.discard, round_wind, seat_wind);
+            value_honor_count(evaluation.discard, context.round_wind, context.seat_wind);
         if let ShapePenaltyMode::WithContext {
             round_wind,
             seat_wind,
             fixed_meld_count,
-        } = shape_penalty_mode
+        } = context.shape_penalty
         {
             evaluation.shape_penalty = shape_penalty_for_discard_with_fixed_melds_and_context(
                 counts,
@@ -1288,7 +1318,7 @@ fn decorate_evaluations(
     }
 }
 
-fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<TileId> {
+pub(crate) fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<TileId> {
     let mut red = None;
     for &tile in tiles {
         if tile.tile_type() != discard {

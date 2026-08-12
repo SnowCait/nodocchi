@@ -227,13 +227,20 @@ pub fn next_dora(tile: TileType) -> TileType {
     }
 }
 
-pub fn count_dora(tile: TileId, dora_indicators: &[TileId]) -> u8 {
-    let tile_type = tile.tile_type();
-    let indicated = dora_indicators
+/// ドラ表示牌が示す通常ドラの枚数を牌種から数える。
+///
+/// 通常ドラは牌種だけで決まるため、物理牌が分からない場合でも数えられる。赤ドラは物理牌
+/// ([`TileId::is_red`]) でしか決まらないためここには含めない。物理牌が分かっている場合は
+/// 通常ドラと赤ドラを合わせた [`count_dora`] を使う。
+pub fn count_indicated_dora(tile_type: TileType, dora_indicators: &[TileId]) -> u8 {
+    dora_indicators
         .iter()
         .filter(|indicator| next_dora(indicator.tile_type()) == tile_type)
-        .count() as u8;
-    indicated + u8::from(tile.is_red())
+        .count() as u8
+}
+
+pub fn count_dora(tile: TileId, dora_indicators: &[TileId]) -> u8 {
+    count_indicated_dora(tile.tile_type(), dora_indicators) + u8::from(tile.is_red())
 }
 
 #[cfg(test)]

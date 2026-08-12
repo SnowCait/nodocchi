@@ -37,13 +37,16 @@ pub use iishanten::{
     classify_standard_iishanten_shape_after_discard,
 };
 pub use lookahead::{
-    LookaheadDiagnostic, SecondPlyDiagnostic, SecondPlyDrawDiagnostic,
-    diagnose_second_ply_with_fixed_melds, diagnose_second_ply_with_fixed_melds_and_visible_tiles,
+    DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, LookaheadDiagnostic,
+    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
 };
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
     calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     standard_shanten_with_fixed_melds,
 };
-pub use tile::{Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, next_dora};
+pub use tile::{
+    Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, count_indicated_dora,
+    next_dora,
+};
 pub use tile_counts::{TileCountError, TileCounts};

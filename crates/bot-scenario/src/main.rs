@@ -41,7 +41,7 @@ where
     };
 
     let scenario = Scenario::resolve(&spec)?;
-    let options = if args.second_ply {
+    let options = if args.lookahead {
         DiagnosticOptions::WITH_LOOKAHEAD
     } else {
         DiagnosticOptions::NONE
@@ -147,27 +147,26 @@ mod tests {
     }
 
     #[test]
-    fn second_ply_is_opt_in() {
+    fn lookahead_is_opt_in() {
         // 2手先は重い探索なので既定では計算せず表示もしない。小さい手牌で確認する。
         let default = run_args(&["--hand", "12m12p55s", "--draw", "9p"]).unwrap();
-        assert!(!default.contains("Second ply"), "{default}");
+        assert!(!default.contains("Lookahead"), "{default}");
 
-        let second_ply =
-            run_args(&["--hand", "12m12p55s", "--draw", "9p", "--second-ply"]).unwrap();
-        assert!(second_ply.contains("\n\nSecond ply\n"), "{second_ply}");
-        assert!(second_ply.contains("draws: "), "{second_ply}");
-        assert!(!second_ply.contains("next discard:"), "{second_ply}");
+        let lookahead = run_args(&["--hand", "12m12p55s", "--draw", "9p", "--lookahead"]).unwrap();
+        assert!(lookahead.contains("\n\nLookahead\n"), "{lookahead}");
+        assert!(lookahead.contains("draws: "), "{lookahead}");
+        assert!(!lookahead.contains("next discard:"), "{lookahead}");
     }
 
     #[test]
-    fn verbose_second_ply_adds_each_draw() {
-        let summary = run_args(&["--hand", "12m12p55s", "--draw", "9p", "--second-ply"]).unwrap();
+    fn verbose_lookahead_adds_each_draw() {
+        let summary = run_args(&["--hand", "12m12p55s", "--draw", "9p", "--lookahead"]).unwrap();
         let verbose = run_args(&[
             "--hand",
             "12m12p55s",
             "--draw",
             "9p",
-            "--second-ply",
+            "--lookahead",
             "--verbose",
         ])
         .unwrap();

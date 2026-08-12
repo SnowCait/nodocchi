@@ -5,8 +5,8 @@ use bot_core::{
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
-    DiscardEvaluation, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic, SecondPlyDiagnostic,
-    SecondPlyDrawDiagnostic, Shanten, TileId,
+    DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, EffectiveShanten,
+    FixedMeldCount, LookaheadDiagnostic, Shanten, TileId,
 };
 
 use crate::scenario::Scenario;
@@ -32,8 +32,7 @@ pub fn format_diagnostic(
         sections.push(section);
     }
 
-    if let Some(section) = format_second_ply(diagnostic.normal_discard_lookahead.as_ref(), verbose)
-    {
+    if let Some(section) = format_lookahead(diagnostic.normal_discard_lookahead.as_ref(), verbose) {
         sections.push(section);
     }
 
@@ -335,22 +334,25 @@ fn format_normal_discard_candidate(
     lines.join("\n")
 }
 
-// 2手先診断の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、verbose で
-// 各受け入れ牌の詳細を出す。この節の値は選択に一切使われない解析専用の情報。
-fn format_second_ply(lookahead: Option<&LookaheadDiagnostic>, verbose: bool) -> Option<String> {
+// 2手先診断 (lookahead) の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、
+// verbose で各受け入れ牌の詳細を出す。この節の値は選択に一切使われない解析専用の情報。
+fn format_lookahead(lookahead: Option<&LookaheadDiagnostic>, verbose: bool) -> Option<String> {
     let lookahead = lookahead?;
     if lookahead.candidates.is_empty() {
         return None;
     }
 
-    let mut lines = vec!["Second ply".to_string()];
+    let mut lines = vec!["Lookahead".to_string()];
     for candidate in &lookahead.candidates {
-        lines.extend(format_second_ply_candidate(candidate, verbose));
+        lines.extend(format_lookahead_candidate(candidate, verbose));
     }
     Some(lines.join("\n"))
 }
 
-fn format_second_ply_candidate(candidate: &SecondPlyDiagnostic, verbose: bool) -> Vec<String> {
+fn format_lookahead_candidate(
+    candidate: &DiscardLookaheadDiagnostic,
+    verbose: bool,
+) -> Vec<String> {
     let mut lines = vec![format!("  {}", candidate.discard.to_mjai_string())];
 
     let total_remaining: u32 = candidate
@@ -372,12 +374,12 @@ fn format_second_ply_candidate(candidate: &SecondPlyDiagnostic, verbose: bool) -
         lines.push(format!("    {NONE}"));
     }
     for draw in &candidate.draws {
-        lines.extend(format_second_ply_draw(draw));
+        lines.extend(format_lookahead_draw(draw));
     }
     lines
 }
 
-fn format_second_ply_draw(draw: &SecondPlyDrawDiagnostic) -> Vec<String> {
+fn format_lookahead_draw(draw: &DrawLookaheadDiagnostic) -> Vec<String> {
     let mut lines = vec![format!(
         "    draw {}: {} remaining, shanten after draw {}",
         draw.draw.to_mjai_string(),
@@ -833,12 +835,12 @@ mod tests {
 
     // 2手先診断は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり重いため、表示の確認には
     // 小さい手牌の局面だけを使う。
-    const SECOND_PLY_SCENARIO: &str = r#"{
+    const LOOKAHEAD_SCENARIO: &str = r#"{
         "hand": "12m12p55s",
         "draw": "9p"
     }"#;
 
-    fn rendered_with_second_ply(json: &str, verbose: bool) -> String {
+    fn rendered_with_lookahead(json: &str, verbose: bool) -> String {
         let scenario = scenario_from_json(json);
         let diagnostic = ShantenAgent::diagnose_with_options(
             &scenario.context,
@@ -864,7 +866,7 @@ mod tests {
                 | "Pon"
                 | "Normal discard"
                 | "Normal discard candidates"
-                | "Second ply"
+                | "Lookahead"
                 | "Push/Pull"
                 | "Defense"
                 | "Defense candidates"
@@ -2088,18 +2090,19 @@ mod tests {
             );
         }
     }
-    // ---- Second ply (2手先診断) 表示 ----
+
+    // ---- Lookahead (2手先診断) 表示 ----
 
     #[test]
-    fn second_ply_section_is_absent_without_the_option() {
-        let (_, _, output) = rendered(SECOND_PLY_SCENARIO, true);
-        assert!(!output.contains("Second ply"), "{output}");
+    fn lookahead_section_is_absent_without_the_option() {
+        let (_, _, output) = rendered(LOOKAHEAD_SCENARIO, true);
+        assert!(!output.contains("Lookahead"), "{output}");
     }
 
     #[test]
-    fn second_ply_summarises_every_current_discard_candidate() {
-        let output = rendered_with_second_ply(SECOND_PLY_SCENARIO, false);
-        let second_ply = section(&output, "Second ply");
+    fn lookahead_summarises_every_current_discard_candidate() {
+        let output = rendered_with_lookahead(LOOKAHEAD_SCENARIO, false);
+        let lookahead = section(&output, "Lookahead");
         let candidates = section(&output, "Normal discard candidates");
 
         for tile in ["1m", "2m", "1p", "2p", "5s", "9p"] {
@@ -2107,43 +2110,37 @@ mod tests {
                 candidates.contains(tile) || output.contains(tile),
                 "{output}"
             );
-            assert!(
-                second_ply.contains(&format!("\n  {tile}\n")),
-                "{second_ply}"
-            );
+            assert!(lookahead.contains(&format!("\n  {tile}\n")), "{lookahead}");
         }
-        assert!(second_ply.contains("draws: "), "{second_ply}");
-        assert!(second_ply.contains(" types / "), "{second_ply}");
+        assert!(lookahead.contains("draws: "), "{lookahead}");
+        assert!(lookahead.contains(" types / "), "{lookahead}");
         // 通常表示では受け入れ牌ごとの詳細を出さない。
-        assert!(!second_ply.contains("next discard:"), "{second_ply}");
+        assert!(!lookahead.contains("next discard:"), "{lookahead}");
     }
 
     #[test]
-    fn verbose_second_ply_lists_each_draw() {
-        let output = rendered_with_second_ply(SECOND_PLY_SCENARIO, true);
-        let second_ply = section(&output, "Second ply");
+    fn verbose_lookahead_lists_each_draw() {
+        let output = rendered_with_lookahead(LOOKAHEAD_SCENARIO, true);
+        let lookahead = section(&output, "Lookahead");
 
-        assert!(second_ply.contains("    draw "), "{second_ply}");
+        assert!(lookahead.contains("    draw "), "{lookahead}");
         assert!(
-            second_ply.contains("remaining, shanten after draw"),
-            "{second_ply}"
+            lookahead.contains("remaining, shanten after draw"),
+            "{lookahead}"
         );
-        assert!(second_ply.contains("      next discard: "), "{second_ply}");
-        assert!(second_ply.contains("      next shanten: "), "{second_ply}");
+        assert!(lookahead.contains("      next discard: "), "{lookahead}");
+        assert!(lookahead.contains("      next shanten: "), "{lookahead}");
+        assert!(lookahead.contains("      next acceptance: "), "{lookahead}");
         assert!(
-            second_ply.contains("      next acceptance: "),
-            "{second_ply}"
-        );
-        assert!(
-            second_ply.contains("      next iishanten shape: "),
-            "{second_ply}"
+            lookahead.contains("      next iishanten shape: "),
+            "{lookahead}"
         );
     }
 
     #[test]
-    fn second_ply_does_not_change_the_existing_sections() {
-        let (_, _, without) = rendered(SECOND_PLY_SCENARIO, true);
-        let with = rendered_with_second_ply(SECOND_PLY_SCENARIO, true);
+    fn lookahead_does_not_change_the_existing_sections() {
+        let (_, _, without) = rendered(LOOKAHEAD_SCENARIO, true);
+        let with = rendered_with_lookahead(LOOKAHEAD_SCENARIO, true);
 
         for header in [
             "Final decision",

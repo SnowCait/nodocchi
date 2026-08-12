@@ -177,7 +177,7 @@ cargo run -p bot-scenario -- \
 | `--allow-reach` | 任意 | リーチを合法手に加える |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
-| `--second-ply` | 任意 | 打牌候補ごとの2手先概要を追加表示する。`--verbose` と併用すると受け入れ牌ごとの詳細も出す |
+| `--lookahead` | 任意 | 打牌候補ごとの2手先概要を追加表示する。`--verbose` と併用すると受け入れ牌ごとの詳細も出す |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加表示する |
 
 `player_id` / `oya` / `reached` / `discards` は簡易 CLI では指定できません。防御局面は JSON scenario を使用します。

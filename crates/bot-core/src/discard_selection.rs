@@ -4,7 +4,7 @@ use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic, TileCounts,
     TileId, TileType, compare_discard_evaluations, diagnose_discard_evaluations_with_fixed_melds,
-    diagnose_second_ply_with_fixed_melds, diagnose_second_ply_with_fixed_melds_and_visible_tiles,
+    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
 };
@@ -162,21 +162,31 @@ fn diagnose_legal_evaluations(
 // 絞り込み済みの合法候補集合から2手先診断を構築する。解析専用で、選択には一切使用しない。
 //
 // 現在打牌後の受け入れは既存評価 (legal.evaluations) が持つ値をそのまま入力にするため、
-// 現在の1手評価を再計算しない。副露済み面子数・visible tiles は本番評価と同じ値を渡し、
-// 2手目の残枚数計算も既存 acceptance の seen 経路を共有する。
+// 現在の1手評価を再計算しない。物理牌・副露済み面子数・visible tiles・ドラ表示牌・場風・自風は
+// 本番評価と同じ値を渡し、2手目の残枚数計算と文脈反映も既存経路を共有する。GameContext 自体は
+// 渡さず、bot-logic が必要とする値だけを取り出して渡す。
 fn lookahead_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
 ) -> LookaheadDiagnostic {
-    let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
     let fixed_meld_count = evaluation_fixed_meld_count(context);
 
     if context.visible_tiles().is_empty() {
-        diagnose_second_ply_with_fixed_melds(&counts, fixed_meld_count, &legal.evaluations)
-    } else {
-        diagnose_second_ply_with_fixed_melds_and_visible_tiles(
-            &counts,
+        diagnose_lookahead_with_fixed_melds(
+            &legal.tiles,
             fixed_meld_count,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+            &legal.evaluations,
+        )
+    } else {
+        diagnose_lookahead_with_fixed_melds_and_visible_tiles(
+            &legal.tiles,
+            fixed_meld_count,
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
             context.visible_tiles(),
             &legal.evaluations,
         )
@@ -1308,12 +1318,12 @@ mod tests {
         let lookahead = with.lookahead.expect("lookahead built on request");
         assert!(with.diagnostic.candidates.len() > 1);
         assert_eq!(lookahead.candidates.len(), with.diagnostic.candidates.len());
-        for (second_ply, candidate) in lookahead
+        for (candidate_lookahead, candidate) in lookahead
             .candidates
             .iter()
             .zip(with.diagnostic.candidates.iter())
         {
-            assert_eq!(second_ply.discard, candidate.evaluation.discard);
+            assert_eq!(candidate_lookahead.discard, candidate.evaluation.discard);
         }
     }
 
