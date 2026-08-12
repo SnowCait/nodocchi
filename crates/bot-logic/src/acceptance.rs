@@ -85,7 +85,14 @@ pub(crate) fn calculate_acceptance_with_fixed_melds_and_seen(
     )
 }
 
-fn additional_seen(counts: &TileCounts, visible_tiles: &[TileId]) -> [u8; TileType::COUNT] {
+/// 手牌以外に見えている枚数を visible tiles と手牌から求める。
+///
+/// visible tiles は自分の手牌を含むため、手牌分を差し引いて二重計上を防ぐ。打牌候補評価のように
+/// visible tiles から seen を組み立てる経路と計算を共有するための crate-private helper。
+pub(crate) fn additional_seen(
+    counts: &TileCounts,
+    visible_tiles: &[TileId],
+) -> [u8; TileType::COUNT] {
     let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
     let mut additional_seen = [0u8; TileType::COUNT];
     for tile in TileType::all() {

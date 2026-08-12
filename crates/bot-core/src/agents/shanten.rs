@@ -14,8 +14,8 @@ use crate::push_pull::{
     push_pull_inputs_from_context_with_evaluation,
 };
 use bot_logic::{
-    DiscardDecisionDiagnostic, DiscardEvaluation, FixedMeldCount, TileCounts, TileId, TileType,
-    calculate_acceptance_with_visible_tiles, calculate_shanten_with_fixed_melds,
+    DiscardDecisionDiagnostic, DiscardEvaluation, FixedMeldCount, LookaheadDiagnostic, TileCounts,
+    TileId, TileType, calculate_acceptance_with_visible_tiles, calculate_shanten_with_fixed_melds,
 };
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
@@ -195,6 +195,13 @@ pub struct ShantenDecisionDiagnostic {
     /// 通常打牌評価を行った場合の全合法候補診断。合法 Dahai が無い場合は
     /// `selected == None` かつ `candidates` が空の診断になる。
     pub normal_discard: Option<DiscardDecisionDiagnostic>,
+    /// 通常打牌評価を行った場合の全合法候補の2手先診断。`normal_discard` と同じ候補集合・同じ
+    /// 順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
+    ///
+    /// 解析専用であり、`selected_action` / `selected_source` / `normal_discard_action` /
+    /// `push_pull_decision` / `defense` / `pon` のどれにも影響しない。`act()` の経路では
+    /// 構築しない。
+    pub normal_discard_lookahead: Option<LookaheadDiagnostic>,
     /// 押し引き判定に使った入力。`push_pull_inputs_from_context_with_evaluation()` の実結果。
     pub push_pull_inputs: Option<PushPullInputs>,
     /// 押し引き判定の結果。`decide_push_pull()` の実結果。
@@ -214,6 +221,27 @@ impl ShantenDecisionDiagnostic {
     }
 }
 
+/// 診断で追加構築する解析情報の指定。
+///
+/// 追加情報の有無は選択結果を変えない。既定 ([`DiagnosticOptions::default`]) では、既存診断だけを
+/// 構築して重い追加探索を行わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiagnosticOptions {
+    /// 通常打牌候補の2手先診断 ([`ShantenDecisionDiagnostic::normal_discard_lookahead`]) を
+    /// 構築するかどうか。
+    ///
+    /// 2手先は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり既存診断よりさらに重いため、
+    /// 既定では構築しない。有効にしても選択結果は変わらない。
+    pub lookahead: bool,
+}
+
+impl DiagnosticOptions {
+    /// 既存診断のみ。2手先診断は構築しない。
+    pub const NONE: Self = Self { lookahead: false };
+    /// 2手先診断まで構築する。
+    pub const WITH_LOOKAHEAD: Self = Self { lookahead: true };
+}
+
 /// `ShantenAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
 ///
 /// [`ShantenAgent::diagnose`] の別名。契約は [`ShantenDecisionDiagnostic`] を参照。
@@ -224,6 +252,17 @@ pub fn diagnose_shanten_decision(
     ShantenAgent::diagnose(context, legal_actions)
 }
 
+/// 追加診断を指定して `ShantenAgent::act()` と同じ判断を行う。
+///
+/// [`ShantenAgent::diagnose_with_options`] の別名。
+pub fn diagnose_shanten_decision_with_options(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    options: DiagnosticOptions,
+) -> ShantenDecisionDiagnostic {
+    ShantenAgent::diagnose_with_options(context, legal_actions, options)
+}
+
 // 解析専用の追加診断を集める内部収集器。
 //
 // `enabled == false` の通常 act() 経路では、候補ごとの形の内訳や全防御候補評価といった
@@ -231,7 +270,9 @@ pub fn diagnose_shanten_decision(
 #[derive(Debug, Default)]
 struct DecisionDiagnostics {
     enabled: bool,
+    options: DiagnosticOptions,
     normal_discard: Option<DiscardDecisionDiagnostic>,
+    normal_discard_lookahead: Option<LookaheadDiagnostic>,
     defense: Option<DefenseDecisionDiagnostic>,
 }
 
@@ -240,11 +281,17 @@ impl DecisionDiagnostics {
         Self::default()
     }
 
-    fn enabled() -> Self {
+    fn enabled_with(options: DiagnosticOptions) -> Self {
         Self {
             enabled: true,
+            options,
             ..Self::default()
         }
+    }
+
+    #[cfg(test)]
+    fn enabled() -> Self {
+        Self::enabled_with(DiagnosticOptions::NONE)
     }
 }
 
@@ -278,7 +325,20 @@ impl ShantenAgent {
         context: &GameContext,
         legal_actions: &[LegalAction],
     ) -> ShantenDecisionDiagnostic {
-        let mut diagnostics = DecisionDiagnostics::enabled();
+        Self::diagnose_with_options(context, legal_actions, DiagnosticOptions::NONE)
+    }
+
+    /// 追加診断を指定して `act()` と同じ判断を行い、その過程を構造化診断として返す。
+    ///
+    /// `options` は解析専用の追加情報を構築するかどうかだけを決め、選択結果には影響しない。
+    /// `diagnose_with_options(...).selected_action == ShantenAgent::act(...)` は `options` に
+    /// かかわらず常に成り立つ。
+    pub fn diagnose_with_options(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        options: DiagnosticOptions,
+    ) -> ShantenDecisionDiagnostic {
+        let mut diagnostics = DecisionDiagnostics::enabled_with(options);
         let decision =
             ShantenAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
         log_agent_decision(&decision);
@@ -288,6 +348,7 @@ impl ShantenAgent {
             selected_source: decision.source,
             normal_discard_action: decision.normal_discard,
             normal_discard: diagnostics.normal_discard,
+            normal_discard_lookahead: diagnostics.normal_discard_lookahead,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
             defense: diagnostics.defense,
@@ -413,7 +474,7 @@ impl ShantenAgent {
     }
 
     // 通常打牌選択。選択結果は診断の有無で変わらず、診断が有効な場合だけ全合法候補の
-    // 構造化診断を追加で受け取る。
+    // 構造化診断と2手先診断を追加で受け取る。2手先探索は診断が無効な act() 経路には入らない。
     fn select_normal_discard(
         &self,
         ctx: &GameContext,
@@ -424,8 +485,13 @@ impl ShantenAgent {
             return select_discard_action_with_evaluation(ctx, legal_actions);
         }
 
-        let selection = select_discard_action_with_diagnostic(ctx, legal_actions);
+        let selection = select_discard_action_with_diagnostic(
+            ctx,
+            legal_actions,
+            diagnostics.options.lookahead,
+        );
         diagnostics.normal_discard = Some(selection.diagnostic);
+        diagnostics.normal_discard_lookahead = selection.lookahead;
         selection.selection
     }
 
@@ -2575,6 +2641,123 @@ pub(crate) mod tests {
                 agent.decide_with_diagnostics(&ctx, &actions, &mut DecisionDiagnostics::enabled());
             assert_eq!(production, with_diagnostics);
         }
+    }
+
+    // ---- 2手先診断 (DiagnosticOptions::WITH_LOOKAHEAD) テスト ----
+
+    // 2手先診断テスト用の小さい局面。2手先は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索に
+    // なるため、診断の構造と選択への非干渉を確認するのに十分な最小の手牌で回す。
+    fn lookahead_context() -> GameContext {
+        let hand: Vec<_> = [0u8, 4, 36, 40, 89].iter().map(|&v| tile(v)).collect();
+        let drawn = tile(90);
+        let mut visible = hand.clone();
+        visible.push(drawn);
+        visible.push(tile(1));
+        GameContext::from_parts_with_visible_tiles(Some(drawn), hand, vec![], None, None, visible)
+    }
+
+    fn lookahead_actions() -> Vec<LegalAction> {
+        [0u8, 4, 36, 40, 89, 90].iter().map(|&v| dahai(v)).collect()
+    }
+
+    #[test]
+    fn act_path_does_not_build_lookahead() {
+        // 通常の act() 経路では2手先診断を構築しない。
+        let ctx = lookahead_context();
+        let actions = lookahead_actions();
+
+        let mut diagnostics = DecisionDiagnostics::disabled();
+        let _ = ShantenAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
+
+        assert!(diagnostics.normal_discard_lookahead.is_none());
+    }
+
+    #[test]
+    fn diagnose_does_not_build_lookahead_by_default() {
+        // 既定の診断でも2手先は構築しない。構築するのは明示的に要求した場合だけ。
+        let ctx = lookahead_context();
+        let actions = lookahead_actions();
+
+        assert!(
+            ShantenAgent::diagnose(&ctx, &actions)
+                .normal_discard_lookahead
+                .is_none()
+        );
+        assert!(
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::NONE)
+                .normal_discard_lookahead
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lookahead_does_not_change_the_selected_action() {
+        let ctx = lookahead_context();
+        let actions = lookahead_actions();
+
+        let mut agent = ShantenAgent;
+        let expected = agent.act(&ctx, &actions);
+        let without = ShantenAgent::diagnose(&ctx, &actions);
+        let with =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        assert_eq!(with.selected_action, expected);
+        assert!(
+            with.normal_discard_lookahead.is_some(),
+            "2手先診断が構築されていない"
+        );
+        // 2手先以外の診断はすべて既定の診断と一致する。
+        assert_eq!(
+            ShantenDecisionDiagnostic {
+                normal_discard_lookahead: None,
+                ..with
+            },
+            without
+        );
+    }
+
+    #[test]
+    fn lookahead_covers_every_normal_discard_candidate() {
+        let ctx = lookahead_context();
+        let actions = lookahead_actions();
+        let diagnostic =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        let normal_discard = diagnostic.normal_discard.expect("normal discard evaluated");
+        let lookahead = diagnostic
+            .normal_discard_lookahead
+            .expect("lookahead built");
+
+        assert!(normal_discard.candidates.len() > 1);
+        assert_eq!(lookahead.candidates.len(), normal_discard.candidates.len());
+        for (candidate_lookahead, candidate) in lookahead
+            .candidates
+            .iter()
+            .zip(normal_discard.candidates.iter())
+        {
+            assert_eq!(candidate_lookahead.discard, candidate.evaluation.discard);
+            // 現在打牌後の受け入れをそのまま引き継ぐので、対象牌と残枚数が一致する。
+            let acceptance = &candidate.evaluation.acceptance_after_discard.tiles;
+            assert_eq!(candidate_lookahead.draws.len(), acceptance.len());
+            for (draw, accepted) in candidate_lookahead.draws.iter().zip(acceptance.iter()) {
+                assert_eq!(draw.draw, accepted.tile);
+                assert_eq!(draw.remaining, accepted.remaining);
+            }
+        }
+    }
+
+    #[test]
+    fn lookahead_free_function_matches_associated_function() {
+        let ctx = lookahead_context();
+        let actions = lookahead_actions();
+        assert_eq!(
+            diagnose_shanten_decision_with_options(
+                &ctx,
+                &actions,
+                DiagnosticOptions::WITH_LOOKAHEAD
+            ),
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD)
+        );
     }
 
     // ---- 限定 Pon (AgentActionSource::Pon) テスト ----

@@ -1,7 +1,9 @@
-use crate::acceptance::{EffectiveAcceptance, calculate_acceptance_with_fixed_melds_and_seen};
+use crate::acceptance::{
+    EffectiveAcceptance, additional_seen, calculate_acceptance_with_fixed_melds_and_seen,
+};
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
-use crate::tile::{TileId, TileType, count_dora};
+use crate::tile::{TileId, TileType, count_indicated_dora};
 use crate::tile_counts::TileCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,7 +625,7 @@ fn best_discard_index(evaluations: &[DiscardEvaluation]) -> Option<usize> {
     best
 }
 
-fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
+pub(crate) fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
     let index = best_discard_index(&evaluations)?;
     Some(evaluations.swap_remove(index))
 }
@@ -960,38 +962,48 @@ fn value_honor_count(
 
 // 打牌候補ごとの受け入れ計算で使う seen 牌の扱い。
 //
-// - `HandOnly`: 打牌後 counts だけを seen とする。visible tiles が無い経路の既存 semantics で、
-//   今から切る候補牌は seen に数えない。
-// - `PublicVisible`: 自分の手牌以外に見えている枚数へ、今から切る候補牌1枚を加えて seen とする。
-//   これにより自分が今切った牌を山に残っている牌として数えない。
-enum CandidateSeen {
-    HandOnly,
-    PublicVisible([u8; TileType::COUNT]),
+// - `base`: 手牌以外に見えている枚数。visible tiles が無い経路では 0 のままで、打牌後 counts
+//   だけを seen とする既存 semantics になる。
+// - `counts_candidate_discard`: 今から切る候補牌1枚を seen へ加えるかどうか。visible tiles を
+//   持つ経路だけ `true` にして、自分が今切った牌を山に残っている牌として数えない。visible tiles
+//   が無い経路では既存どおり `false` で、候補牌を seen に数えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CandidateSeen {
+    base: [u8; TileType::COUNT],
+    counts_candidate_discard: bool,
 }
 
 impl CandidateSeen {
-    // 自分の手牌以外に見えている枚数を、visible tiles と手牌から求める。
-    fn from_visible_tiles(counts: &TileCounts, visible_tiles: &[TileId]) -> Self {
-        let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
-        let mut public_visible = [0u8; TileType::COUNT];
-        for tile in TileType::all() {
-            public_visible[tile.index()] = visible_counts
-                .count(tile)
-                .saturating_sub(counts.count(tile));
+    pub(crate) const fn hand_only() -> Self {
+        Self {
+            base: [0u8; TileType::COUNT],
+            counts_candidate_discard: false,
         }
-        Self::PublicVisible(public_visible)
+    }
+
+    // 自分の手牌以外に見えている枚数を、visible tiles と手牌から求める。残枚数計算と同じ
+    // 手牌差し引きを使うため、acceptance 側の helper へ委譲する。
+    pub(crate) fn from_visible_tiles(counts: &TileCounts, visible_tiles: &[TileId]) -> Self {
+        Self {
+            base: additional_seen(counts, visible_tiles),
+            counts_candidate_discard: true,
+        }
+    }
+
+    // `discard` を1枚切った後の seen 状態。切った牌は以降どの経路でも見え牌なので base へ
+    // 1枚加える。2手先診断が1手目の打牌を2手目の seen として引き継ぐために使う。
+    pub(crate) fn after_discard(&self, discard: TileType) -> Self {
+        let mut base = self.base;
+        base[discard.index()] = base[discard.index()].saturating_add(1);
+        Self { base, ..*self }
     }
 
     fn additional_seen(&self, discard: TileType) -> [u8; TileType::COUNT] {
-        match self {
-            Self::HandOnly => [0u8; TileType::COUNT],
-            Self::PublicVisible(public_visible) => {
-                let mut additional_seen = *public_visible;
-                additional_seen[discard.index()] =
-                    additional_seen[discard.index()].saturating_add(1);
-                additional_seen
-            }
+        let mut additional_seen = self.base;
+        if self.counts_candidate_discard {
+            additional_seen[discard.index()] = additional_seen[discard.index()].saturating_add(1);
         }
+        additional_seen
     }
 }
 
@@ -999,7 +1011,7 @@ impl CandidateSeen {
 //
 // 副露済み面子数は受け入れ計算 (PR #108 の fixed meld 対応 API)・一向聴形分類・形ペナルティの
 // ブロック不足判定へ渡す。打牌しても副露済み面子数は変わらないため、候補打牌後も同じ値を使う。
-fn evaluate_discards_with_seen(
+pub(crate) fn evaluate_discards_with_seen(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     seen: &CandidateSeen,
@@ -1080,7 +1092,7 @@ pub fn evaluate_discards_with_fixed_melds(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
 ) -> Vec<DiscardEvaluation> {
-    evaluate_discards_with_seen(counts, fixed_meld_count, &CandidateSeen::HandOnly)
+    evaluate_discards_with_seen(counts, fixed_meld_count, &CandidateSeen::hand_only())
 }
 
 pub fn evaluate_discards_with_visible_tiles(
@@ -1128,11 +1140,14 @@ pub fn evaluate_discards_from_tiles_with_dora(
     decorate_evaluations(
         &mut evaluations,
         &counts,
-        tiles,
-        dora_indicators,
-        None,
-        None,
-        ShapePenaltyMode::ContextFree,
+        &DecorationContext {
+            tiles,
+            dora_indicators,
+            round_wind: None,
+            seat_wind: None,
+            shape_penalty: ShapePenaltyMode::ContextFree,
+            unresolved_red_tile: None,
+        },
     );
     evaluations
 }
@@ -1168,14 +1183,17 @@ pub fn evaluate_discards_from_tiles_with_fixed_melds_and_context(
     decorate_evaluations(
         &mut evaluations,
         &counts,
-        tiles,
-        dora_indicators,
-        round_wind,
-        seat_wind,
-        ShapePenaltyMode::WithContext {
+        &DecorationContext {
+            tiles,
+            dora_indicators,
             round_wind,
             seat_wind,
-            fixed_meld_count,
+            shape_penalty: ShapePenaltyMode::WithContext {
+                round_wind,
+                seat_wind,
+                fixed_meld_count,
+            },
+            unresolved_red_tile: None,
         },
     );
     evaluations
@@ -1220,20 +1238,23 @@ pub fn evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
     decorate_evaluations(
         &mut evaluations,
         &counts,
-        tiles,
-        dora_indicators,
-        round_wind,
-        seat_wind,
-        ShapePenaltyMode::WithContext {
+        &DecorationContext {
+            tiles,
+            dora_indicators,
             round_wind,
             seat_wind,
-            fixed_meld_count,
+            shape_penalty: ShapePenaltyMode::WithContext {
+                round_wind,
+                seat_wind,
+                fixed_meld_count,
+            },
+            unresolved_red_tile: None,
         },
     );
     evaluations
 }
 
-enum ShapePenaltyMode {
+pub(crate) enum ShapePenaltyMode {
     ContextFree,
     WithContext {
         round_wind: Option<TileType>,
@@ -1242,28 +1263,49 @@ enum ShapePenaltyMode {
     },
 }
 
-fn decorate_evaluations(
+/// 打牌候補評価へ後付けする文脈。
+///
+/// 牌種だけで決まる項目 (通常ドラ・役牌・形ペナルティ) と、物理牌が必要な項目 (赤5・赤ドラ) を
+/// 同じ経路で反映するための入力。通常打牌評価と2手先診断が共有する。
+pub(crate) struct DecorationContext<'a> {
+    /// 切る物理牌を決めるための手牌。牌種ごとに黒牌を赤牌より優先して選ぶ。
+    pub tiles: &'a [TileId],
+    pub dora_indicators: &'a [TileId],
+    pub round_wind: Option<TileType>,
+    pub seat_wind: Option<TileType>,
+    pub shape_penalty: ShapePenaltyMode,
+    /// 物理牌が一意に決まらず、赤5かどうかを解決できない牌種。
+    ///
+    /// 2手先診断の仮想ツモ牌だけが該当する。受け入れは34種の牌種単位なので、ツモった5が赤か
+    /// 黒かは決まらない。この牌種を切る候補では赤5扱いにせず、牌種から確定する通常ドラだけを
+    /// 反映する。通常打牌評価は物理牌がすべて分かっているため `None` を渡す。
+    pub unresolved_red_tile: Option<TileType>,
+}
+
+pub(crate) fn decorate_evaluations(
     evaluations: &mut [DiscardEvaluation],
     counts: &TileCounts,
-    tiles: &[TileId],
-    dora_indicators: &[TileId],
-    round_wind: Option<TileType>,
-    seat_wind: Option<TileType>,
-    shape_penalty_mode: ShapePenaltyMode,
+    context: &DecorationContext,
 ) {
     for evaluation in evaluations {
-        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, tiles);
-        evaluation.discards_red_five = discarded_tile.map(TileId::is_red).unwrap_or(false);
-        evaluation.discarded_dora_count = discarded_tile
-            .map(|tile| count_dora(tile, dora_indicators))
-            .unwrap_or(0);
+        // 赤5かどうかが解決できない牌種では赤扱いにしない。手牌に黒の同種牌があれば通常打牌
+        // 評価も黒を選ぶため結果は一致し、赤1枚しか無い場合はその赤が手牌に見えている以上
+        // 仮想ツモは黒に確定する。同種牌が1枚も無い場合だけ赤かどうかが未解決のまま残る。
+        let resolves_red_five = context.unresolved_red_tile != Some(evaluation.discard);
+        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, context.tiles, None);
+        evaluation.discards_red_five =
+            resolves_red_five && discarded_tile.map(TileId::is_red).unwrap_or(false);
+        // 通常ドラは牌種だけで決まるため、物理牌が分からなくても必ず反映する。
+        evaluation.discarded_dora_count =
+            count_indicated_dora(evaluation.discard, context.dora_indicators)
+                + u8::from(evaluation.discards_red_five);
         evaluation.discarded_value_honor_count =
-            value_honor_count(evaluation.discard, round_wind, seat_wind);
+            value_honor_count(evaluation.discard, context.round_wind, context.seat_wind);
         if let ShapePenaltyMode::WithContext {
             round_wind,
             seat_wind,
             fixed_meld_count,
-        } = shape_penalty_mode
+        } = context.shape_penalty
         {
             evaluation.shape_penalty = shape_penalty_for_discard_with_fixed_melds_and_context(
                 counts,
@@ -1276,8 +1318,18 @@ fn decorate_evaluations(
     }
 }
 
-fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<TileId> {
+/// 指定牌種を切るときに使う物理牌を返す。
+///
+/// `discards_red_five` は「実際に切る牌が赤5かどうか」が上位層で確定している場合のその値。
+/// 確定していれば一致する物理牌を優先し、確定していない (`None`) 場合や一致する牌が無い場合は
+/// 通常牌を赤牌より優先する既定の規則で選ぶ。物理牌の選択規則はこの1箇所だけに置く。
+pub(crate) fn discarded_tile_id_for_type(
+    discard: TileType,
+    tiles: &[TileId],
+    discards_red_five: Option<bool>,
+) -> Option<TileId> {
     let mut red = None;
+    let mut black = None;
     for &tile in tiles {
         if tile.tile_type() != discard {
             continue;
@@ -1285,10 +1337,14 @@ fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<Til
         if tile.is_red() {
             red.get_or_insert(tile);
         } else {
-            return Some(tile);
+            black.get_or_insert(tile);
         }
     }
-    red
+
+    if discards_red_five == Some(true) {
+        return red.or(black);
+    }
+    black.or(red)
 }
 
 #[cfg(test)]

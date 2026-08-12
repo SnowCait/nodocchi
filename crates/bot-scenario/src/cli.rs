@@ -4,8 +4,9 @@ use crate::scenario::ScenarioSpec;
 
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora <TILES>] [--round-wind <WIND>]
-               [--seat-wind <WIND>] [--allow-reach] [--allow-hora] [--allow-ryukyoku] [--verbose]
-  bot-scenario <SCENARIO_JSON> [--verbose]";
+               [--seat-wind <WIND>] [--allow-reach] [--allow-hora] [--allow-ryukyoku]
+               [--lookahead] [--verbose]
+  bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose]";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CliError {
@@ -35,6 +36,8 @@ pub enum ScenarioSource {
 pub struct CliArgs {
     pub source: ScenarioSource,
     pub verbose: bool,
+    /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
+    pub lookahead: bool,
 }
 
 impl CliArgs {
@@ -48,6 +51,7 @@ impl CliArgs {
         let mut hand: Option<String> = None;
         let mut inline_options = false;
         let mut verbose = false;
+        let mut lookahead = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -80,6 +84,7 @@ impl CliArgs {
                     spec.allow_ryukyoku = true;
                     inline_options = true;
                 }
+                "--lookahead" => lookahead = true,
                 "--verbose" => verbose = true,
                 other if other.starts_with('-') => {
                     return Err(CliError::UnknownOption(other.to_string()));
@@ -101,7 +106,11 @@ impl CliArgs {
             (None, None) => return Err(CliError::MissingHand),
         };
 
-        Ok(Self { source, verbose })
+        Ok(Self {
+            source,
+            verbose,
+            lookahead,
+        })
     }
 }
 
@@ -196,6 +205,13 @@ mod tests {
     fn parses_verbose_flag() {
         assert!(!parse(&["--hand", "123m"]).unwrap().verbose);
         assert!(parse(&["--hand", "123m", "--verbose"]).unwrap().verbose);
+    }
+
+    #[test]
+    fn parses_lookahead_flag() {
+        assert!(!parse(&["--hand", "123m"]).unwrap().lookahead);
+        assert!(parse(&["--hand", "123m", "--lookahead"]).unwrap().lookahead);
+        assert!(parse(&["scenario.json", "--lookahead"]).unwrap().lookahead);
     }
 
     #[test]

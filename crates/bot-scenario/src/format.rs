@@ -5,7 +5,8 @@ use bot_core::{
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
-    DiscardEvaluation, EffectiveShanten, FixedMeldCount, Shanten, TileId,
+    DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, EffectiveShanten,
+    FixedMeldCount, LookaheadDiagnostic, Shanten, TileId,
 };
 
 use crate::scenario::Scenario;
@@ -28,6 +29,10 @@ pub fn format_diagnostic(
     if let Some(section) =
         format_normal_discard_candidates(diagnostic.normal_discard.as_ref(), verbose)
     {
+        sections.push(section);
+    }
+
+    if let Some(section) = format_lookahead(diagnostic.normal_discard_lookahead.as_ref(), verbose) {
         sections.push(section);
     }
 
@@ -327,6 +332,84 @@ fn format_normal_discard_candidate(
     }
 
     lines.join("\n")
+}
+
+// 2手先診断 (lookahead) の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、
+// verbose で各受け入れ牌の詳細を出す。この節の値は選択に一切使われない解析専用の情報。
+fn format_lookahead(lookahead: Option<&LookaheadDiagnostic>, verbose: bool) -> Option<String> {
+    let lookahead = lookahead?;
+    if lookahead.candidates.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec!["Lookahead".to_string()];
+    for candidate in &lookahead.candidates {
+        lines.extend(format_lookahead_candidate(candidate, verbose));
+    }
+    Some(lines.join("\n"))
+}
+
+fn format_lookahead_candidate(
+    candidate: &DiscardLookaheadDiagnostic,
+    verbose: bool,
+) -> Vec<String> {
+    let mut lines = vec![format!("  {}", candidate.discard.to_mjai_string())];
+
+    let total_remaining: u32 = candidate
+        .draws
+        .iter()
+        .map(|draw| u32::from(draw.remaining))
+        .sum();
+    lines.push(format!(
+        "    draws: {} types / {} remaining",
+        candidate.draws.len(),
+        total_remaining
+    ));
+
+    if !verbose {
+        return lines;
+    }
+
+    if candidate.draws.is_empty() {
+        lines.push(format!("    {NONE}"));
+    }
+    for draw in &candidate.draws {
+        lines.extend(format_lookahead_draw(draw));
+    }
+    lines
+}
+
+fn format_lookahead_draw(draw: &DrawLookaheadDiagnostic) -> Vec<String> {
+    let mut lines = vec![format!(
+        "    draw {}: {} remaining, shanten after draw {}",
+        draw.draw.to_mjai_string(),
+        draw.remaining,
+        draw.shanten_after_draw.min()
+    )];
+
+    let Some(next) = draw.next_discard.as_ref() else {
+        lines.push(format!("      next discard: {ABSENT}"));
+        return lines;
+    };
+
+    lines.push(format!(
+        "      next discard: {}",
+        next.discard.to_mjai_string()
+    ));
+    lines.push(format!(
+        "      next shanten: {}",
+        next.min_shanten_after_discard()
+    ));
+    lines.push(format!(
+        "      next acceptance: {} / {} types",
+        next.acceptance_total_remaining(),
+        next.acceptance_type_count()
+    ));
+    lines.push(format!(
+        "      next iishanten shape: {:?}",
+        next.standard_iishanten_shape_after_discard
+    ));
+    lines
 }
 
 fn format_push_pull(
@@ -732,7 +815,7 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
-    use bot_core::{Agent, MenzenAgent};
+    use bot_core::{Agent, DiagnosticOptions, MenzenAgent};
 
     fn scenario_from_json(json: &str) -> Scenario {
         let spec: ScenarioSpec = serde_json::from_str(json).unwrap();
@@ -748,6 +831,23 @@ mod tests {
         let diagnostic = diagnose(&scenario);
         let output = format_diagnostic(&scenario, &diagnostic, verbose);
         (scenario, diagnostic, output)
+    }
+
+    // 2手先診断は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり重いため、表示の確認には
+    // 小さい手牌の局面だけを使う。
+    const LOOKAHEAD_SCENARIO: &str = r#"{
+        "hand": "12m12p55s",
+        "draw": "9p"
+    }"#;
+
+    fn rendered_with_lookahead(json: &str, verbose: bool) -> String {
+        let scenario = scenario_from_json(json);
+        let diagnostic = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+        format_diagnostic(&scenario, &diagnostic, verbose)
     }
 
     fn section(output: &str, header: &str) -> String {
@@ -766,6 +866,7 @@ mod tests {
                 | "Pon"
                 | "Normal discard"
                 | "Normal discard candidates"
+                | "Lookahead"
                 | "Push/Pull"
                 | "Defense"
                 | "Defense candidates"
@@ -1987,6 +2088,68 @@ mod tests {
                 summary.contains(&format!("  selected: {action}\n  source: {source}")),
                 "{summary}"
             );
+        }
+    }
+
+    // ---- Lookahead (2手先診断) 表示 ----
+
+    #[test]
+    fn lookahead_section_is_absent_without_the_option() {
+        let (_, _, output) = rendered(LOOKAHEAD_SCENARIO, true);
+        assert!(!output.contains("Lookahead"), "{output}");
+    }
+
+    #[test]
+    fn lookahead_summarises_every_current_discard_candidate() {
+        let output = rendered_with_lookahead(LOOKAHEAD_SCENARIO, false);
+        let lookahead = section(&output, "Lookahead");
+        let candidates = section(&output, "Normal discard candidates");
+
+        for tile in ["1m", "2m", "1p", "2p", "5s", "9p"] {
+            assert!(
+                candidates.contains(tile) || output.contains(tile),
+                "{output}"
+            );
+            assert!(lookahead.contains(&format!("\n  {tile}\n")), "{lookahead}");
+        }
+        assert!(lookahead.contains("draws: "), "{lookahead}");
+        assert!(lookahead.contains(" types / "), "{lookahead}");
+        // 通常表示では受け入れ牌ごとの詳細を出さない。
+        assert!(!lookahead.contains("next discard:"), "{lookahead}");
+    }
+
+    #[test]
+    fn verbose_lookahead_lists_each_draw() {
+        let output = rendered_with_lookahead(LOOKAHEAD_SCENARIO, true);
+        let lookahead = section(&output, "Lookahead");
+
+        assert!(lookahead.contains("    draw "), "{lookahead}");
+        assert!(
+            lookahead.contains("remaining, shanten after draw"),
+            "{lookahead}"
+        );
+        assert!(lookahead.contains("      next discard: "), "{lookahead}");
+        assert!(lookahead.contains("      next shanten: "), "{lookahead}");
+        assert!(lookahead.contains("      next acceptance: "), "{lookahead}");
+        assert!(
+            lookahead.contains("      next iishanten shape: "),
+            "{lookahead}"
+        );
+    }
+
+    #[test]
+    fn lookahead_does_not_change_the_existing_sections() {
+        let (_, _, without) = rendered(LOOKAHEAD_SCENARIO, true);
+        let with = rendered_with_lookahead(LOOKAHEAD_SCENARIO, true);
+
+        for header in [
+            "Final decision",
+            "Normal discard",
+            "Push/Pull",
+            "Defense",
+            "Summary",
+        ] {
+            assert_eq!(section(&without, header), section(&with, header));
         }
     }
 }

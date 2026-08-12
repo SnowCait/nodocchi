@@ -2,6 +2,7 @@ pub mod acceptance;
 pub mod discard;
 pub mod hand;
 pub mod iishanten;
+pub mod lookahead;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
@@ -35,10 +36,17 @@ pub use iishanten::{
     IishantenShape, classify_standard_iishanten_shape,
     classify_standard_iishanten_shape_after_discard,
 };
+pub use lookahead::{
+    DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, LookaheadDiagnostic,
+    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
+};
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
     calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     standard_shanten_with_fixed_melds,
 };
-pub use tile::{Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, next_dora};
+pub use tile::{
+    Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, count_indicated_dora,
+    next_dora,
+};
 pub use tile_counts::{TileCountError, TileCounts};
