@@ -1,3 +1,20 @@
+//! 打牌候補ごとの2手先診断。
+//!
+//! 「現在打牌 → その打牌後の各受け入れ牌を1枚ツモった仮想手牌 → 既存打牌評価による次の最良打牌」
+//! を構造化して返す解析専用の pure な基盤。向聴・受け入れ・一向聴形分類・打牌比較はすべて既存
+//! 実装を呼び出し、2手先専用の計算器は持たない。
+//!
+//! # 赤5の制約
+//!
+//! 受け入れ ([`EffectiveAcceptanceTile`]) は 34 種の [`TileType`] 単位なので、仮想ツモが赤5か
+//! 黒5かを一意に決められない。そのため仮想手牌は [`TileCounts`] だけで構築し、物理牌に依存する
+//! 評価項目 (`discards_red_five` / `discarded_dora_count` / `discarded_value_honor_count`) は
+//! 2手目では補正せず既定値のままにする。結果として2手目の比較は
+//! [`crate::discard::DiscardComparisonReason::Dora`] /
+//! [`crate::discard::DiscardComparisonReason::ValueHonor`] /
+//! [`crate::discard::DiscardComparisonReason::RedFive`] の軸で決着せず、その手前の軸か
+//! `StableOrder` で決まる。赤5の確率モデルなど新しい仕様はここでは導入しない。
+
 use crate::acceptance::EffectiveAcceptanceTile;
 use crate::discard::{CandidateSeen, DiscardEvaluation, evaluate_discards_with_seen, select_best};
 use crate::iishanten::IishantenShape;
@@ -33,8 +50,10 @@ pub struct SecondPlyDrawDiagnostic {
     pub draw: TileType,
     pub remaining: u8,
     pub shanten_after_draw: EffectiveShanten,
-    /// 仮想ツモ後14枚に既存打牌評価と既存比較順を適用した最良打牌。打牌候補が1件も無い場合だけ
+    /// 仮想ツモ後の手牌に既存打牌評価と既存比較順を適用した最良打牌。打牌候補が1件も無い場合だけ
     /// `None`。数値のコピーではなく評価そのものを保持する。
+    ///
+    /// 物理牌に依存する項目はモジュールの「赤5の制約」どおり既定値のままになる。
     pub next_discard: Option<DiscardEvaluation>,
 }
 
