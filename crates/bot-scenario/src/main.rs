@@ -7,7 +7,7 @@ mod tiles;
 
 use std::process::ExitCode;
 
-use bot_core::ShantenAgent;
+use bot_core::{DiagnosticOptions, ShantenAgent};
 
 use crate::cli::{CliArgs, ScenarioSource, USAGE};
 use crate::error::ScenarioError;
@@ -41,7 +41,13 @@ where
     };
 
     let scenario = Scenario::resolve(&spec)?;
-    let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
+    let options = if args.second_ply {
+        DiagnosticOptions::WITH_LOOKAHEAD
+    } else {
+        DiagnosticOptions::NONE
+    };
+    let diagnostic =
+        ShantenAgent::diagnose_with_options(&scenario.context, &scenario.legal_actions, options);
 
     Ok(format_diagnostic(&scenario, &diagnostic, args.verbose))
 }
@@ -138,6 +144,36 @@ mod tests {
         assert!(output.contains("  discards[1]: 1m 4m 7p E"), "{output}");
         assert!(output.contains("\n\nPush/Pull\n"), "{output}");
         assert!(output.contains("\n\nDefense\n"), "{output}");
+    }
+
+    #[test]
+    fn second_ply_is_opt_in() {
+        // 2手先は重い探索なので既定では計算せず表示もしない。小さい手牌で確認する。
+        let default = run_args(&["--hand", "12m12p55s", "--draw", "9p"]).unwrap();
+        assert!(!default.contains("Second ply"), "{default}");
+
+        let second_ply =
+            run_args(&["--hand", "12m12p55s", "--draw", "9p", "--second-ply"]).unwrap();
+        assert!(second_ply.contains("\n\nSecond ply\n"), "{second_ply}");
+        assert!(second_ply.contains("draws: "), "{second_ply}");
+        assert!(!second_ply.contains("next discard:"), "{second_ply}");
+    }
+
+    #[test]
+    fn verbose_second_ply_adds_each_draw() {
+        let summary = run_args(&["--hand", "12m12p55s", "--draw", "9p", "--second-ply"]).unwrap();
+        let verbose = run_args(&[
+            "--hand",
+            "12m12p55s",
+            "--draw",
+            "9p",
+            "--second-ply",
+            "--verbose",
+        ])
+        .unwrap();
+
+        assert!(verbose.len() > summary.len());
+        assert!(verbose.contains("      next discard: "), "{verbose}");
     }
 
     #[test]

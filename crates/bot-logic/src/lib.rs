@@ -2,6 +2,7 @@ pub mod acceptance;
 pub mod discard;
 pub mod hand;
 pub mod iishanten;
+pub mod lookahead;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
@@ -34,6 +35,10 @@ pub use hand::{Hand, HandError};
 pub use iishanten::{
     IishantenShape, classify_standard_iishanten_shape,
     classify_standard_iishanten_shape_after_discard,
+};
+pub use lookahead::{
+    LookaheadDiagnostic, SecondPlyDiagnostic, SecondPlyDrawDiagnostic,
+    diagnose_second_ply_with_fixed_melds, diagnose_second_ply_with_fixed_melds_and_visible_tiles,
 };
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,

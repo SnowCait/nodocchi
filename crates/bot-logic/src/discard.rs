@@ -1,4 +1,6 @@
-use crate::acceptance::{EffectiveAcceptance, calculate_acceptance_with_fixed_melds_and_seen};
+use crate::acceptance::{
+    EffectiveAcceptance, additional_seen, calculate_acceptance_with_fixed_melds_and_seen,
+};
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_dora};
@@ -623,7 +625,7 @@ fn best_discard_index(evaluations: &[DiscardEvaluation]) -> Option<usize> {
     best
 }
 
-fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
+pub(crate) fn select_best(mut evaluations: Vec<DiscardEvaluation>) -> Option<DiscardEvaluation> {
     let index = best_discard_index(&evaluations)?;
     Some(evaluations.swap_remove(index))
 }
@@ -960,38 +962,48 @@ fn value_honor_count(
 
 // 打牌候補ごとの受け入れ計算で使う seen 牌の扱い。
 //
-// - `HandOnly`: 打牌後 counts だけを seen とする。visible tiles が無い経路の既存 semantics で、
-//   今から切る候補牌は seen に数えない。
-// - `PublicVisible`: 自分の手牌以外に見えている枚数へ、今から切る候補牌1枚を加えて seen とする。
-//   これにより自分が今切った牌を山に残っている牌として数えない。
-enum CandidateSeen {
-    HandOnly,
-    PublicVisible([u8; TileType::COUNT]),
+// - `base`: 手牌以外に見えている枚数。visible tiles が無い経路では 0 のままで、打牌後 counts
+//   だけを seen とする既存 semantics になる。
+// - `counts_candidate_discard`: 今から切る候補牌1枚を seen へ加えるかどうか。visible tiles を
+//   持つ経路だけ `true` にして、自分が今切った牌を山に残っている牌として数えない。visible tiles
+//   が無い経路では既存どおり `false` で、候補牌を seen に数えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CandidateSeen {
+    base: [u8; TileType::COUNT],
+    counts_candidate_discard: bool,
 }
 
 impl CandidateSeen {
-    // 自分の手牌以外に見えている枚数を、visible tiles と手牌から求める。
-    fn from_visible_tiles(counts: &TileCounts, visible_tiles: &[TileId]) -> Self {
-        let visible_counts = TileCounts::from_tiles(visible_tiles.iter().copied());
-        let mut public_visible = [0u8; TileType::COUNT];
-        for tile in TileType::all() {
-            public_visible[tile.index()] = visible_counts
-                .count(tile)
-                .saturating_sub(counts.count(tile));
+    pub(crate) const fn hand_only() -> Self {
+        Self {
+            base: [0u8; TileType::COUNT],
+            counts_candidate_discard: false,
         }
-        Self::PublicVisible(public_visible)
+    }
+
+    // 自分の手牌以外に見えている枚数を、visible tiles と手牌から求める。残枚数計算と同じ
+    // 手牌差し引きを使うため、acceptance 側の helper へ委譲する。
+    pub(crate) fn from_visible_tiles(counts: &TileCounts, visible_tiles: &[TileId]) -> Self {
+        Self {
+            base: additional_seen(counts, visible_tiles),
+            counts_candidate_discard: true,
+        }
+    }
+
+    // `discard` を1枚切った後の seen 状態。切った牌は以降どの経路でも見え牌なので base へ
+    // 1枚加える。2手先診断が1手目の打牌を2手目の seen として引き継ぐために使う。
+    pub(crate) fn after_discard(&self, discard: TileType) -> Self {
+        let mut base = self.base;
+        base[discard.index()] = base[discard.index()].saturating_add(1);
+        Self { base, ..*self }
     }
 
     fn additional_seen(&self, discard: TileType) -> [u8; TileType::COUNT] {
-        match self {
-            Self::HandOnly => [0u8; TileType::COUNT],
-            Self::PublicVisible(public_visible) => {
-                let mut additional_seen = *public_visible;
-                additional_seen[discard.index()] =
-                    additional_seen[discard.index()].saturating_add(1);
-                additional_seen
-            }
+        let mut additional_seen = self.base;
+        if self.counts_candidate_discard {
+            additional_seen[discard.index()] = additional_seen[discard.index()].saturating_add(1);
         }
+        additional_seen
     }
 }
 
@@ -999,7 +1011,7 @@ impl CandidateSeen {
 //
 // 副露済み面子数は受け入れ計算 (PR #108 の fixed meld 対応 API)・一向聴形分類・形ペナルティの
 // ブロック不足判定へ渡す。打牌しても副露済み面子数は変わらないため、候補打牌後も同じ値を使う。
-fn evaluate_discards_with_seen(
+pub(crate) fn evaluate_discards_with_seen(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     seen: &CandidateSeen,
@@ -1080,7 +1092,7 @@ pub fn evaluate_discards_with_fixed_melds(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
 ) -> Vec<DiscardEvaluation> {
-    evaluate_discards_with_seen(counts, fixed_meld_count, &CandidateSeen::HandOnly)
+    evaluate_discards_with_seen(counts, fixed_meld_count, &CandidateSeen::hand_only())
 }
 
 pub fn evaluate_discards_with_visible_tiles(

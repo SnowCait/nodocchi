@@ -2,8 +2,9 @@ use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
-    EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, TileCounts, TileId, TileType,
-    compare_discard_evaluations, diagnose_discard_evaluations_with_fixed_melds,
+    EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic, TileCounts,
+    TileId, TileType, compare_discard_evaluations, diagnose_discard_evaluations_with_fixed_melds,
+    diagnose_second_ply_with_fixed_melds, diagnose_second_ply_with_fixed_melds_and_visible_tiles,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
 };
@@ -25,11 +26,13 @@ pub(crate) struct DiscardActionSelection {
 /// 通常打牌選択の結果と、その選択に使った全合法候補の構造化診断。
 ///
 /// `selection` は `select_discard_action_with_evaluation()` と同じ helper で導出するため、
-/// 診断を付けても選択結果は変わらない。`diagnostic` は解析専用の追加情報。
+/// 診断を付けても選択結果は変わらない。`diagnostic` / `lookahead` は解析専用の追加情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscardActionSelectionWithDiagnostic {
     pub selection: DiscardActionSelection,
     pub diagnostic: DiscardDecisionDiagnostic,
+    /// 全合法候補の2手先診断。要求された場合だけ構築し、selection には一切使用しない。
+    pub lookahead: Option<LookaheadDiagnostic>,
 }
 
 // 合法 Dahai へ絞り込み・物理牌補正済みの打牌候補評価集合と、その評価対象の物理牌一覧。
@@ -81,14 +84,21 @@ pub(crate) fn select_discard_action_with_evaluation(
 /// `select_discard_action_with_evaluation()` と同じ選択結果に、全合法候補の構造化診断を添えて返す。
 ///
 /// 合法候補の絞り込み・物理牌補正・最善選択はすべて通常経路と同じ helper を通すため、選択結果は
-/// `select_discard_action_with_evaluation()` と一致する。`diagnostic` は解析専用の追加情報で、
-/// 候補ごとの形の内訳など通常経路では計算しない値を含むため、診断が必要な経路からのみ呼ぶ。
+/// `select_discard_action_with_evaluation()` と一致する。`diagnostic` / `lookahead` は解析専用の
+/// 追加情報で、候補ごとの形の内訳や2手先評価など通常経路では計算しない値を含むため、診断が必要な
+/// 経路からのみ呼ぶ。
+///
+/// `with_lookahead` は2手先診断を構築するかどうか。2手先は
+/// 「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり通常診断よりさらに重いため、明示的に
+/// 要求された場合だけ構築する。構築の有無は選択結果を変えない。
 pub(crate) fn select_discard_action_with_diagnostic(
     context: &GameContext,
     legal_actions: &[LegalAction],
+    with_lookahead: bool,
 ) -> DiscardActionSelectionWithDiagnostic {
     let legal = legal_discard_evaluations(context, legal_actions);
     let diagnostic = diagnose_legal_evaluations(context, &legal);
+    let lookahead = with_lookahead.then(|| lookahead_from_legal_evaluations(context, &legal));
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(context, &legal.tiles, &diagnostic);
@@ -97,6 +107,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(&legal, legal_actions),
         diagnostic,
+        lookahead,
     }
 }
 
@@ -146,6 +157,30 @@ fn diagnose_legal_evaluations(
         evaluation_fixed_meld_count(context),
         &legal.evaluations,
     )
+}
+
+// 絞り込み済みの合法候補集合から2手先診断を構築する。解析専用で、選択には一切使用しない。
+//
+// 現在打牌後の受け入れは既存評価 (legal.evaluations) が持つ値をそのまま入力にするため、
+// 現在の1手評価を再計算しない。副露済み面子数・visible tiles は本番評価と同じ値を渡し、
+// 2手目の残枚数計算も既存 acceptance の seen 経路を共有する。
+fn lookahead_from_legal_evaluations(
+    context: &GameContext,
+    legal: &LegalDiscardEvaluations,
+) -> LookaheadDiagnostic {
+    let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
+    let fixed_meld_count = evaluation_fixed_meld_count(context);
+
+    if context.visible_tiles().is_empty() {
+        diagnose_second_ply_with_fixed_melds(&counts, fixed_meld_count, &legal.evaluations)
+    } else {
+        diagnose_second_ply_with_fixed_melds_and_visible_tiles(
+            &counts,
+            fixed_meld_count,
+            context.visible_tiles(),
+            &legal.evaluations,
+        )
+    }
 }
 
 // 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
@@ -1237,7 +1272,7 @@ mod tests {
             .chain([dahai(116)])
             .collect();
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
         assert_eq!(
             with_diagnostic.selection,
             select_discard_action_with_evaluation(&context, &actions)
@@ -1246,6 +1281,40 @@ mod tests {
             with_diagnostic.diagnostic.selected,
             with_diagnostic.selection.evaluation
         );
+    }
+
+    #[test]
+    fn lookahead_is_built_only_on_request_and_does_not_change_selection() {
+        // 2手先診断は明示的に要求した場合だけ構築し、選択結果は要求の有無で変わらない。
+        // 2手先は重い探索なので、小さい手牌で構造だけを確認する。
+        let hand_values = [0, 4, 36, 40, 89];
+        let context = GameContext::from_parts(
+            Some(tile(90)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(90)])
+            .collect();
+
+        let without = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+
+        assert!(without.lookahead.is_none());
+        assert_eq!(without.selection, with.selection);
+        assert_eq!(without.diagnostic, with.diagnostic);
+
+        let lookahead = with.lookahead.expect("lookahead built on request");
+        assert!(with.diagnostic.candidates.len() > 1);
+        assert_eq!(lookahead.candidates.len(), with.diagnostic.candidates.len());
+        for (second_ply, candidate) in lookahead
+            .candidates
+            .iter()
+            .zip(with.diagnostic.candidates.iter())
+        {
+            assert_eq!(second_ply.discard, candidate.evaluation.discard);
+        }
     }
 
     #[test]
@@ -1258,7 +1327,7 @@ mod tests {
         );
         let actions = vec![dahai(0), dahai(89), dahai(116)];
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
         let candidate_types: Vec<_> = with_diagnostic
             .diagnostic
             .candidates
@@ -1292,7 +1361,7 @@ mod tests {
             GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
         let actions = vec![dahai(16)];
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
         let five = with_diagnostic
             .diagnostic
             .candidates
@@ -1405,7 +1474,7 @@ mod tests {
         let context = one_meld_context([vec![white_dragon_pon()], vec![], vec![], vec![]], Some(0));
         let actions = one_meld_actions();
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
         assert_eq!(
             with_diagnostic.selection,
             select_discard_action_with_evaluation(&context, &actions)
@@ -1473,7 +1542,7 @@ mod tests {
         let context = GameContext::with_hand_tiles(vec![tile(0)]);
         let actions = vec![LegalAction::Reach, LegalAction::None];
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions);
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
         assert_eq!(with_diagnostic.selection.action, None);
         assert_eq!(with_diagnostic.selection.evaluation, None);
         assert_eq!(with_diagnostic.diagnostic.selected, None);
