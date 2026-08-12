@@ -192,7 +192,7 @@ pub fn honor_dahai_actions_by_safety<'a>(
             _ => None,
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
 
     let mut start = 0;
     while start < ranked.len() {
@@ -370,7 +370,7 @@ pub fn suji_dahai_actions_by_safety<'a>(
             _ => None,
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
     ranked
 }
 
@@ -564,7 +564,7 @@ pub fn suited_dahai_actions_by_safety<'a>(
             _ => None,
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
     ranked
 }
 
