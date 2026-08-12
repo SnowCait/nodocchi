@@ -170,6 +170,7 @@ pub(crate) fn context_for_request(
         .as_ref()
         .map(game_context_from_decoded_observation)
         .unwrap_or_else(|| game_context_from_validation_state(state))
+        .with_post_reach_passed_tiles(state.post_reach_passed_tiles().clone())
 }
 
 /// 送信 action から `action sent` INFO ログ用のフィールドを抽出する pure helper。
@@ -294,6 +295,7 @@ where
                         kyoku, honba, oya, ..
                     } => {
                         info!(kyoku = ?kyoku, honba = ?honba, oya = ?oya, "start_kyoku");
+                        state.on_start_kyoku();
                     }
                     MjaiEvent::Tsumo { actor, pai } => {
                         debug!(actor, pai = %pai, "tsumo");
@@ -305,7 +307,7 @@ where
                         tsumogiri,
                     } => {
                         debug!(actor, pai = %pai, tsumogiri = ?tsumogiri, "dahai");
-                        state.on_dahai(actor);
+                        state.on_dahai(actor, &pai);
                     }
                     MjaiEvent::Chi {
                         actor,
@@ -339,6 +341,7 @@ where
                     }
                     MjaiEvent::Reach { actor } => {
                         debug!(actor, "reach");
+                        state.on_reach(actor);
                     }
                     MjaiEvent::Hora { actor, target, pai } => {
                         info!(actor, target = ?target, pai = ?pai, "hora");
@@ -595,7 +598,7 @@ mod tests {
         AgentActionSource, LegalAction, NormalAgent, PonDecisionReason, ShantenAgent,
         TsumogiriAgent,
     };
-    use bot_logic::{FixedMeldCount, TileId};
+    use bot_logic::{FixedMeldCount, TileId, TileType};
 
     fn possible_dahai(pai: &str) -> MjaiPossibleAction {
         MjaiPossibleAction::Dahai {
@@ -764,6 +767,46 @@ mod tests {
             context.hand_tiles(),
             &[TileId::new(0).unwrap(), TileId::new(104).unwrap()]
         );
+    }
+
+    fn state_after_two_reaches() -> ValidationState {
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_reach(1);
+        state.on_dahai(1, "3p");
+        state.on_reach(2);
+        state.on_dahai(2, "4s");
+        state
+    }
+
+    #[test]
+    fn context_for_request_carries_post_reach_passed_tiles_from_the_event_stream() {
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![]));
+        let state = state_after_two_reaches();
+        let context = context_for_request(&observation, &state, 6);
+        let four_sou = TileType::from_mjai_type_str("4s").unwrap();
+        assert!(context.is_post_reach_passed(four_sou, 1));
+        assert!(!context.is_post_reach_passed(four_sou, 2));
+    }
+
+    #[test]
+    fn context_for_request_carries_post_reach_passed_tiles_when_decode_fails() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let state = state_after_two_reaches();
+        let context = context_for_request(&observation, &state, 7);
+        let four_sou = TileType::from_mjai_type_str("4s").unwrap();
+        assert!(context.is_post_reach_passed(four_sou, 1));
+    }
+
+    #[test]
+    fn context_for_request_has_no_post_reach_passed_tiles_before_any_reach() {
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![]));
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_dahai(2, "4s");
+        let context = context_for_request(&observation, &state, 8);
+        assert!(context.post_reach_passed_tiles().iter().all(Vec::is_empty));
     }
 
     #[test]

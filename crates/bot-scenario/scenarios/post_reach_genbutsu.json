@@ -1,0 +1,25 @@
+{
+  "hand": "19m19p34s789s1234z",
+  "draw": "5m",
+
+  "dora_indicators": "3p",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "reached": [false, true, true, false],
+
+  "discards": [
+    "",
+    "3p",
+    "4s",
+    ""
+  ],
+
+  "post_reach_passed": [
+    "",
+    "4s",
+    "",
+    ""
+  ]
+}

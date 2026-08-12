@@ -199,6 +199,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
   "oya": 3,
   "reached": [false, true, false, false],
   "discards": ["", "1m 4m 7p E", "", ""],
+  "post_reach_passed": ["", "", "", ""],
   "extra_visible_tiles": "",
   "legal_dahai": null,
   "allow_reach": false,
@@ -214,10 +215,19 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `player_id` / `oya` | 自分の席 / 親の席。`0`..`3` |
 | `reached` | 各 player のリーチ状態。要素数 4 |
 | `discards` | 各 player の河。入力順のまま扱う。要素数 4 |
+| `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数 4 |
 | `extra_visible_tiles` | 副露牌など、他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌とその順序 |
 
 `hand` 以外は省略できます。省略した場合、河は空、`reached` は全員 `false`、`allow_*` は `false` として扱います。
+
+現物は「対象リーチ者自身の河にある牌」と「そのリーチ成立後に他家から切られて通った牌」の両方です。後者は河から逆算できないため `post_reach_passed` で指定します。`post_reach_passed` は牌種だけを持つので、見え牌にも河にも影響しません。赤5は黒5と同じ牌種として扱います。
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.json
+```
+
+上の scenario は「player1 が 3p でリーチ → player2 が 4s でリーチ」の局面で、4s が player1 にも player2 にも現物になることを確認できます。
 
 見え牌は手牌・ツモ牌・ドラ表示牌・河・`extra_visible_tiles` から自動的に扱われます。副露など追加で見えている牌は `extra_visible_tiles` に指定してください。
 
