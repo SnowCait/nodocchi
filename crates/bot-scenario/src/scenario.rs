@@ -9,6 +9,7 @@ use crate::tiles::{TileAllocator, validate_unique_physical_tiles};
 const CHI_TILE_COUNT: usize = 3;
 const PON_TILE_COUNT: usize = 3;
 const KAN_TILE_COUNT: usize = 4;
+const PON_CONSUMED_TILE_COUNT: usize = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,11 +38,23 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub legal_dahai: Option<String>,
     #[serde(default)]
+    pub legal_pon: Option<Vec<PonActionSpec>>,
+    #[serde(default)]
     pub allow_reach: bool,
     #[serde(default)]
     pub allow_hora: bool,
     #[serde(default)]
     pub allow_ryukyoku: bool,
+    #[serde(default)]
+    pub allow_none: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PonActionSpec {
+    pub from_player: u8,
+    pub tile: String,
+    pub consumed: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -140,7 +153,7 @@ impl Scenario {
         validate_unique_physical_tiles(&visible_tiles)
             .map_err(|source| ScenarioError::PhysicalTiles { source })?;
 
-        let legal_actions = build_legal_actions(spec, &hand, draw)?;
+        let legal_actions = build_legal_actions(spec, &hand, draw, &discards, player_id)?;
 
         let context = GameContext::from_parts_with_melds(
             draw,
@@ -187,13 +200,17 @@ fn resolve_discard_inputs(discards: Option<&[String]>) -> Result<[String; 4], Sc
 }
 
 fn resolve_seat(field: &str, value: Option<u8>) -> Result<Option<u8>, ScenarioError> {
-    match value {
-        Some(value) if value > 3 => Err(ScenarioError::SeatOutOfRange {
+    value.map(|value| validate_seat(field, value)).transpose()
+}
+
+fn validate_seat(field: &str, value: u8) -> Result<u8, ScenarioError> {
+    if value > 3 {
+        return Err(ScenarioError::SeatOutOfRange {
             field: field.to_string(),
             value,
-        }),
-        value => Ok(value),
+        });
     }
+    Ok(value)
 }
 
 fn resolve_seat_wind(
@@ -256,6 +273,18 @@ fn parse_field(field: &str, input: &str) -> Result<Vec<LogicalTile>, ScenarioErr
         input: input.to_string(),
         source,
     })
+}
+
+fn parse_single_tile(field: &str, input: &str) -> Result<LogicalTile, ScenarioError> {
+    let tiles = parse_field(field, input)?;
+    match tiles.as_slice() {
+        [tile] => Ok(*tile),
+        tiles => Err(ScenarioError::NotSingleTile {
+            field: field.to_string(),
+            input: input.to_string(),
+            count: tiles.len(),
+        }),
+    }
 }
 
 fn allocate_field(
@@ -441,20 +470,11 @@ fn resolve_meld_called_tile(
     tiles: &[LogicalTile],
 ) -> Result<Option<LogicalTile>, ScenarioError> {
     let called_field = format!("{field}.called_tile");
-    let called = match spec.called_tile.as_deref() {
-        Some(input) => {
-            let parsed = parse_field(&called_field, input)?;
-            if parsed.len() != 1 {
-                return Err(ScenarioError::NotSingleTile {
-                    field: called_field,
-                    input: input.to_string(),
-                    count: parsed.len(),
-                });
-            }
-            parsed.first().copied()
-        }
-        None => None,
-    };
+    let called = spec
+        .called_tile
+        .as_deref()
+        .map(|input| parse_single_tile(&called_field, input))
+        .transpose()?;
 
     match (spec.kind.needs_called_tile(), called) {
         (true, None) => Err(ScenarioError::MeldCalledTileMissing {
@@ -534,11 +554,17 @@ fn build_legal_actions(
     spec: &ScenarioSpec,
     hand: &[TileId],
     draw: Option<TileId>,
+    discards: &[Vec<TileId>; 4],
+    player_id: Option<u8>,
 ) -> Result<Vec<LegalAction>, ScenarioError> {
     let mut actions = match spec.legal_dahai.as_deref() {
         Some(input) => explicit_dahai_actions(input, hand, draw)?,
         None => automatic_dahai_actions(hand, draw),
     };
+
+    if let Some(specs) = spec.legal_pon.as_deref() {
+        actions.extend(pon_actions(specs, hand, discards, player_id)?);
+    }
 
     if spec.allow_reach {
         actions.push(LegalAction::Reach);
@@ -548,6 +574,9 @@ fn build_legal_actions(
     }
     if spec.allow_ryukyoku {
         actions.push(LegalAction::Ryukyoku);
+    }
+    if spec.allow_none {
+        actions.push(LegalAction::None);
     }
 
     Ok(actions)
@@ -616,6 +645,126 @@ fn explicit_dahai_actions(
     Ok(actions)
 }
 
+fn pon_actions(
+    specs: &[PonActionSpec],
+    hand: &[TileId],
+    discards: &[Vec<TileId>; 4],
+    player_id: Option<u8>,
+) -> Result<Vec<LegalAction>, ScenarioError> {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            pon_action(
+                &format!("legal_pon[{index}]"),
+                spec,
+                hand,
+                discards,
+                player_id,
+            )
+        })
+        .collect()
+}
+
+fn pon_action(
+    field: &str,
+    spec: &PonActionSpec,
+    hand: &[TileId],
+    discards: &[Vec<TileId>; 4],
+    player_id: Option<u8>,
+) -> Result<LegalAction, ScenarioError> {
+    let Some(player_id) = player_id else {
+        return Err(ScenarioError::LegalPonWithoutPlayerId {
+            field: field.to_string(),
+        });
+    };
+
+    let from_player = validate_seat(&format!("{field}.from_player"), spec.from_player)?;
+    if from_player == player_id {
+        return Err(ScenarioError::LegalPonFromOwnDiscard {
+            field: field.to_string(),
+            player_id,
+        });
+    }
+
+    let tile = parse_single_tile(&format!("{field}.tile"), &spec.tile)?;
+    let consumed = parse_field(&format!("{field}.consumed"), &spec.consumed)?;
+    if consumed.len() != PON_CONSUMED_TILE_COUNT {
+        return Err(ScenarioError::LegalPonConsumedCount {
+            field: field.to_string(),
+            expected: PON_CONSUMED_TILE_COUNT,
+            count: consumed.len(),
+        });
+    }
+    if consumed
+        .iter()
+        .any(|consumed| consumed.tile_type != tile.tile_type)
+    {
+        return Err(ScenarioError::LegalPonTileType {
+            field: field.to_string(),
+            tile: tile.to_mjai_string(),
+            consumed: spec.consumed.clone(),
+        });
+    }
+
+    let target = pon_target_tile(field, tile, from_player, discards)?;
+    let consumed = pon_consumed_tiles(field, &consumed, hand)?;
+
+    Ok(LegalAction::Pon {
+        tile: target,
+        consumed,
+    })
+}
+
+fn pon_target_tile(
+    field: &str,
+    tile: LogicalTile,
+    from_player: u8,
+    discards: &[Vec<TileId>; 4],
+) -> Result<TileId, ScenarioError> {
+    let target = discards[usize::from(from_player)]
+        .last()
+        .copied()
+        .ok_or_else(|| ScenarioError::LegalPonNoDiscard {
+            field: field.to_string(),
+            from_player,
+        })?;
+
+    if target.tile_type() != tile.tile_type || target.is_red() != tile.red {
+        return Err(ScenarioError::LegalPonTargetMismatch {
+            field: field.to_string(),
+            tile: tile.to_mjai_string(),
+            discarded: target.to_mjai_string(),
+            from_player,
+        });
+    }
+
+    Ok(target)
+}
+
+fn pon_consumed_tiles(
+    field: &str,
+    consumed: &[LogicalTile],
+    hand: &[TileId],
+) -> Result<Vec<TileId>, ScenarioError> {
+    let mut tiles: Vec<TileId> = Vec::new();
+
+    for tile in consumed {
+        let held = hand.iter().copied().find(|held| {
+            held.tile_type() == tile.tile_type && held.is_red() == tile.red && !tiles.contains(held)
+        });
+        let Some(held) = held else {
+            return Err(ScenarioError::LegalPonConsumedNotHeld {
+                field: field.to_string(),
+                tile: tile.to_mjai_string(),
+            });
+        };
+        tiles.push(held);
+    }
+
+    Ok(tiles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,9 +830,11 @@ mod tests {
         assert_eq!(spec.discards, None);
         assert_eq!(spec.extra_visible_tiles, None);
         assert_eq!(spec.legal_dahai, None);
+        assert_eq!(spec.legal_pon, None);
         assert!(!spec.allow_reach);
         assert!(!spec.allow_hora);
         assert!(!spec.allow_ryukyoku);
+        assert!(!spec.allow_none);
 
         let scenario = resolve(&spec);
         let context = &scenario.context;
@@ -1221,6 +1372,323 @@ mod tests {
         assert!(!scenario.legal_actions.contains(&LegalAction::Reach));
         assert!(!scenario.legal_actions.contains(&LegalAction::Hora));
         assert!(!scenario.legal_actions.contains(&LegalAction::Ryukyoku));
+        assert!(!scenario.legal_actions.contains(&LegalAction::None));
+    }
+
+    const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");
+
+    fn pon_actions_of(scenario: &Scenario) -> Vec<(TileId, Vec<TileId>)> {
+        scenario
+            .legal_actions
+            .iter()
+            .filter_map(|action| match action {
+                LegalAction::Pon { tile, consumed } => Some((*tile, consumed.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn allow_none_appends_the_none_action() {
+        let spec = ScenarioSpec {
+            hand: "123m".to_string(),
+            allow_none: true,
+            ..ScenarioSpec::default()
+        };
+        let scenario = resolve(&spec);
+        assert_eq!(scenario.legal_actions.last(), Some(&LegalAction::None));
+    }
+
+    #[test]
+    fn legal_pon_and_allow_none_keep_the_existing_action_order() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "123m55p P P",
+                "player_id": 0,
+                "oya": 0,
+                "discards": ["", "P", "", ""],
+                "legal_dahai": "1m 5p",
+                "legal_pon": [{"from_player": 1, "tile": "P", "consumed": "P P"}],
+                "allow_reach": true,
+                "allow_hora": true,
+                "allow_ryukyoku": true,
+                "allow_none": true
+            }"#,
+        ));
+        let labels: Vec<String> = scenario
+            .legal_actions
+            .iter()
+            .map(|action| match action {
+                LegalAction::Dahai { tile } => tile.to_mjai_string(),
+                LegalAction::Pon { .. } => "Pon".to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["1m", "5p", "Pon", "Reach", "Hora", "Ryukyoku", "None"]
+        );
+    }
+
+    #[test]
+    fn legal_pon_builds_a_pon_action() {
+        let scenario = resolve(&spec_from_json(PON_REACTION_SCENARIO));
+        let actions = pon_actions_of(&scenario);
+        assert_eq!(actions.len(), 1);
+
+        let (tile, consumed) = &actions[0];
+        assert_eq!(tile.to_mjai_string(), "P");
+        assert_eq!(labels(consumed), ["P", "P"]);
+        assert_eq!(dahai_labels(&scenario.legal_actions), Vec::<String>::new());
+        assert_eq!(scenario.legal_actions.last(), Some(&LegalAction::None));
+        assert_eq!(scenario.legal_actions.len(), 2);
+    }
+
+    #[test]
+    fn legal_pon_reuses_the_discarded_and_held_physical_tiles() {
+        let scenario = resolve(&spec_from_json(PON_REACTION_SCENARIO));
+        let context = &scenario.context;
+        let (tile, consumed) = pon_actions_of(&scenario).remove(0);
+
+        assert_eq!(context.discards_of(1).unwrap().last().copied(), Some(tile));
+        assert_eq!(consumed.len(), 2);
+        assert_ne!(consumed[0], consumed[1]);
+        for consumed in &consumed {
+            assert!(
+                context.hand_tiles().contains(consumed),
+                "{consumed:?} must come from the hand"
+            );
+        }
+    }
+
+    #[test]
+    fn legal_pon_does_not_add_visible_tiles_or_melds() {
+        let mut without = spec_from_json(PON_REACTION_SCENARIO);
+        without.legal_pon = None;
+        let without = resolve(&without);
+        let with = resolve(&spec_from_json(PON_REACTION_SCENARIO));
+
+        assert_eq!(
+            with.context.visible_tiles().len(),
+            without.context.visible_tiles().len()
+        );
+        assert_eq!(
+            with.context.visible_tiles(),
+            without.context.visible_tiles()
+        );
+        assert!(with.context.melds().iter().all(|melds| melds.is_empty()));
+        assert_eq!(
+            with.context.own_fixed_meld_count(),
+            Some(bot_logic::FixedMeldCount::NONE)
+        );
+        assert!(validate_unique_physical_tiles(with.context.visible_tiles()).is_ok());
+    }
+
+    #[test]
+    fn pon_reaction_scenario_is_one_shanten() {
+        let scenario = resolve(&spec_from_json(PON_REACTION_SCENARIO));
+        let counts =
+            bot_logic::TileCounts::from_tiles(scenario.context.hand_tiles().iter().copied());
+        let shanten = bot_logic::calculate_shanten_with_fixed_melds(
+            &counts,
+            scenario
+                .context
+                .own_fixed_meld_count()
+                .unwrap_or(bot_logic::FixedMeldCount::NONE),
+        );
+        assert_eq!(shanten.min(), 1);
+    }
+
+    #[test]
+    fn scenario_without_legal_pon_and_allow_none_is_unchanged() {
+        let without = resolve(&spec_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "draw": "N",
+                "player_id": 0,
+                "oya": 1,
+                "discards": ["", "P", "", ""]
+            }"#,
+        ));
+        let with_defaults = resolve(&spec_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "draw": "N",
+                "player_id": 0,
+                "oya": 1,
+                "discards": ["", "P", "", ""],
+                "legal_pon": null,
+                "allow_none": false
+            }"#,
+        ));
+        assert_eq!(without.context, with_defaults.context);
+        assert_eq!(without.legal_actions, with_defaults.legal_actions);
+        assert!(
+            without
+                .legal_actions
+                .iter()
+                .all(|action| matches!(action, LegalAction::Dahai { .. }))
+        );
+    }
+
+    fn pon_error(discards: &str, legal_pon: &str, extra: &str) -> ScenarioError {
+        let json = format!(
+            r#"{{
+                "hand": "123456m55p78s455z",
+                "discards": {discards},
+                "legal_dahai": "",
+                "legal_pon": {legal_pon}
+                {extra}
+            }}"#
+        );
+        Scenario::resolve(&spec_from_json(&json)).unwrap_err()
+    }
+
+    #[test]
+    fn rejects_legal_pon_without_player_id() {
+        let error = pon_error(
+            r#"["", "P", "", ""]"#,
+            r#"[{"from_player": 1, "tile": "P", "consumed": "P P"}]"#,
+            "",
+        );
+        assert_eq!(
+            error,
+            ScenarioError::LegalPonWithoutPlayerId {
+                field: "legal_pon[0]".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_pon_from_player_out_of_range() {
+        let error = pon_error(
+            r#"["", "P", "", ""]"#,
+            r#"[{"from_player": 4, "tile": "P", "consumed": "P P"}]"#,
+            r#", "player_id": 0, "oya": 0"#,
+        );
+        assert_eq!(
+            error,
+            ScenarioError::SeatOutOfRange {
+                field: "legal_pon[0].from_player".to_string(),
+                value: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_pon_from_own_discard() {
+        let error = pon_error(
+            r#"["P", "", "", ""]"#,
+            r#"[{"from_player": 0, "tile": "P", "consumed": "P P"}]"#,
+            r#", "player_id": 0, "oya": 0"#,
+        );
+        assert_eq!(
+            error,
+            ScenarioError::LegalPonFromOwnDiscard {
+                field: "legal_pon[0]".to_string(),
+                player_id: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_pon_target_that_is_not_the_last_discard() {
+        let error = pon_error(
+            r#"["", "P F", "", ""]"#,
+            r#"[{"from_player": 1, "tile": "P", "consumed": "P P"}]"#,
+            r#", "player_id": 0, "oya": 0"#,
+        );
+        assert_eq!(
+            error,
+            ScenarioError::LegalPonTargetMismatch {
+                field: "legal_pon[0]".to_string(),
+                tile: "P".to_string(),
+                discarded: "F".to_string(),
+                from_player: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_pon_without_any_discard() {
+        let error = pon_error(
+            r#"["", "", "", ""]"#,
+            r#"[{"from_player": 1, "tile": "P", "consumed": "P P"}]"#,
+            r#", "player_id": 0, "oya": 0"#,
+        );
+        assert_eq!(
+            error,
+            ScenarioError::LegalPonNoDiscard {
+                field: "legal_pon[0]".to_string(),
+                from_player: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_pon_with_wrong_consumed_count() {
+        for (consumed, count) in [("P", 1), ("P P P", 3)] {
+            let error = pon_error(
+                r#"["", "P", "", ""]"#,
+                &format!(r#"[{{"from_player": 1, "tile": "P", "consumed": "{consumed}"}}]"#),
+                r#", "player_id": 0, "oya": 0"#,
+            );
+            assert_eq!(
+                error,
+                ScenarioError::LegalPonConsumedCount {
+                    field: "legal_pon[0]".to_string(),
+                    expected: 2,
+                    count,
+                },
+                "{consumed}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_legal_pon_with_mixed_consumed_tile_types() {
+        let error = pon_error(
+            r#"["", "P", "", ""]"#,
+            r#"[{"from_player": 1, "tile": "P", "consumed": "P F"}]"#,
+            r#", "player_id": 0, "oya": 0"#,
+        );
+        assert_eq!(
+            error,
+            ScenarioError::LegalPonTileType {
+                field: "legal_pon[0]".to_string(),
+                tile: "P".to_string(),
+                consumed: "P F".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_pon_consumed_that_is_not_held() {
+        let json = r#"{
+            "hand": "123456m55p789s45z",
+            "player_id": 0,
+            "oya": 0,
+            "discards": ["", "P", "", ""],
+            "legal_dahai": "",
+            "legal_pon": [{"from_player": 1, "tile": "P", "consumed": "P P"}]
+        }"#;
+        assert_eq!(
+            Scenario::resolve(&spec_from_json(json)).unwrap_err(),
+            ScenarioError::LegalPonConsumedNotHeld {
+                field: "legal_pon[0]".to_string(),
+                tile: "P".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn json_rejects_unknown_legal_pon_field() {
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand": "1m", "legal_pon": [{"from_player": 1, "tile": "P", "consumed": "P P", "kind": "pon"}]}"#
+            )
+            .is_err()
+        );
     }
 
     const OWN_PON_SCENARIO: &str = r#"{

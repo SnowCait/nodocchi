@@ -533,6 +533,11 @@ fn discard_label(evaluation: &DiscardEvaluation) -> String {
 pub fn action_label(action: &LegalAction) -> String {
     match action {
         LegalAction::Dahai { tile } => tile.to_mjai_string(),
+        LegalAction::Pon { tile, consumed } => format!(
+            "Pon {} <- {}",
+            tile.to_mjai_string(),
+            format_tiles(consumed)
+        ),
         LegalAction::Reach => "Reach".to_string(),
         LegalAction::Hora => "Hora".to_string(),
         LegalAction::Ryukyoku => "Ryukyoku".to_string(),
@@ -826,6 +831,46 @@ mod tests {
         assert!(scenario.contains("  melds[0]: Ankan E E E E"), "{scenario}");
         assert!(!scenario.contains("(called"), "{scenario}");
         assert!(scenario.contains("  own fixed meld count: 1"), "{scenario}");
+    }
+
+    const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");
+
+    #[test]
+    fn scenario_section_shows_pon_legal_action() {
+        let (_, _, output) = rendered(PON_REACTION_SCENARIO, false);
+        let scenario = section(&output, "Scenario");
+        assert!(
+            scenario.contains("  legal actions: Pon P <- P P None"),
+            "{scenario}"
+        );
+        assert!(scenario.contains("  own fixed meld count: 0"), "{scenario}");
+        assert!(!scenario.contains("  melds["), "{scenario}");
+    }
+
+    #[test]
+    fn pon_reaction_baseline_selects_none() {
+        let (scenario, diagnostic, output) = rendered(PON_REACTION_SCENARIO, false);
+        assert_eq!(scenario.legal_actions.len(), 2);
+        assert!(matches!(scenario.legal_actions[0], LegalAction::Pon { .. }));
+        assert_eq!(scenario.legal_actions[1], LegalAction::None);
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&scenario.context, &scenario.legal_actions),
+            LegalAction::None
+        );
+        assert_eq!(diagnostic.selected_action, LegalAction::None);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::None);
+
+        assert!(
+            output.contains("Final decision\n  action: None\n  source: None"),
+            "{output}"
+        );
+        let summary = section(&output, "Summary");
+        assert_eq!(
+            summary,
+            "Summary\n  selected: None\n  source: None\n  runner-up: -"
+        );
     }
 
     #[test]
