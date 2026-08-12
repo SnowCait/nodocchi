@@ -323,9 +323,9 @@ mod tests {
     use crate::tile::count_indicated_dora;
     use std::sync::LazyLock;
 
-    // 打牌評価と2手先診断を1組にした検証用の局面。2手先探索は重いので、同じ局面を使う複数の
-    // テストで構築結果を共有する。
-    struct Case {
+    // 打牌評価までを持つ検証用の局面。全候補分の2手先診断は重いので、1枝だけを見るテストは
+    // この局面から必要な枝だけを構築する。
+    struct Situation {
         tiles: Vec<TileId>,
         counts: TileCounts,
         visible: Vec<TileId>,
@@ -334,6 +334,12 @@ mod tests {
         seat_wind: Option<TileType>,
         fixed_meld_count: FixedMeldCount,
         evaluations: Vec<DiscardEvaluation>,
+    }
+
+    // 局面と全候補分の2手先診断を1組にした検証用の case。2手先探索は重いので、同じ局面を使う
+    // 複数のテストで構築結果を共有する。
+    struct Case {
+        situation: Situation,
         lookahead: LookaheadDiagnostic,
     }
 
@@ -364,14 +370,13 @@ mod tests {
         ids(&[0, 4, 8, 36, 40, 89, 90, 68])
     }
 
-    fn hand_only_case(
+    fn hand_only_situation(
         tiles: &[TileId],
         fixed_meld_count: FixedMeldCount,
         dora_indicators: Vec<TileId>,
         round_wind: Option<TileType>,
         seat_wind: Option<TileType>,
-    ) -> Case {
-        let counts = TileCounts::from_tiles(tiles.iter().copied());
+    ) -> Situation {
         let evaluations = evaluate_discards_from_tiles_with_fixed_melds_and_context(
             tiles,
             fixed_meld_count,
@@ -379,25 +384,92 @@ mod tests {
             round_wind,
             seat_wind,
         );
-        let lookahead = diagnose_lookahead_with_fixed_melds(
-            tiles,
-            fixed_meld_count,
-            &dora_indicators,
-            round_wind,
-            seat_wind,
-            &evaluations,
-        );
-        Case {
+        Situation {
             tiles: tiles.to_vec(),
-            counts,
+            counts: TileCounts::from_tiles(tiles.iter().copied()),
             visible: Vec::new(),
             dora_indicators,
             round_wind,
             seat_wind,
             fixed_meld_count,
             evaluations,
+        }
+    }
+
+    fn visible_situation(
+        tiles: &[TileId],
+        fixed_meld_count: FixedMeldCount,
+        dora_indicators: Vec<TileId>,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+        visible: Vec<TileId>,
+    ) -> Situation {
+        let evaluations = evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
+            tiles,
+            fixed_meld_count,
+            &dora_indicators,
+            round_wind,
+            seat_wind,
+            &visible,
+        );
+        Situation {
+            tiles: tiles.to_vec(),
+            counts: TileCounts::from_tiles(tiles.iter().copied()),
+            visible,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+            fixed_meld_count,
+            evaluations,
+        }
+    }
+
+    // 局面が持つ見え牌の有無に合わせて、既存の2手先診断エントリを呼び分ける。
+    fn diagnose(situation: &Situation, evaluations: &[DiscardEvaluation]) -> LookaheadDiagnostic {
+        if situation.visible.is_empty() {
+            diagnose_lookahead_with_fixed_melds(
+                &situation.tiles,
+                situation.fixed_meld_count,
+                &situation.dora_indicators,
+                situation.round_wind,
+                situation.seat_wind,
+                evaluations,
+            )
+        } else {
+            diagnose_lookahead_with_fixed_melds_and_visible_tiles(
+                &situation.tiles,
+                situation.fixed_meld_count,
+                &situation.dora_indicators,
+                situation.round_wind,
+                situation.seat_wind,
+                &situation.visible,
+                evaluations,
+            )
+        }
+    }
+
+    fn full_case(situation: Situation) -> Case {
+        let lookahead = diagnose(&situation, &situation.evaluations);
+        Case {
+            situation,
             lookahead,
         }
+    }
+
+    fn hand_only_case(
+        tiles: &[TileId],
+        fixed_meld_count: FixedMeldCount,
+        dora_indicators: Vec<TileId>,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+    ) -> Case {
+        full_case(hand_only_situation(
+            tiles,
+            fixed_meld_count,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+        ))
     }
 
     fn visible_case(
@@ -408,35 +480,45 @@ mod tests {
         seat_wind: Option<TileType>,
         visible: Vec<TileId>,
     ) -> Case {
-        let counts = TileCounts::from_tiles(tiles.iter().copied());
-        let evaluations = evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
+        full_case(visible_situation(
             tiles,
             fixed_meld_count,
-            &dora_indicators,
-            round_wind,
-            seat_wind,
-            &visible,
-        );
-        let lookahead = diagnose_lookahead_with_fixed_melds_and_visible_tiles(
-            tiles,
-            fixed_meld_count,
-            &dora_indicators,
-            round_wind,
-            seat_wind,
-            &visible,
-            &evaluations,
-        );
-        Case {
-            tiles: tiles.to_vec(),
-            counts,
-            visible,
             dora_indicators,
             round_wind,
             seat_wind,
-            fixed_meld_count,
-            evaluations,
-            lookahead,
-        }
+            visible,
+        ))
+    }
+
+    // 現在打牌1つ・受け入れ牌1枚だけへ絞った2手先の最良打牌。既存の受け入れから対象の1枚だけを
+    // 残した打牌評価を production の2手先診断へ渡すので、全候補分を構築した場合の同じ枝と同じ
+    // 結果になる。context-specific regression が full lookahead を作らないための test 専用 helper。
+    fn branch_next_discard(
+        situation: &Situation,
+        discard: TileType,
+        draw: TileType,
+    ) -> DiscardEvaluation {
+        let mut evaluation = situation
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == discard)
+            .expect("current discard evaluation exists")
+            .clone();
+        evaluation
+            .acceptance_after_discard
+            .tiles
+            .retain(|accepted| accepted.tile == draw);
+        assert_eq!(
+            evaluation.acceptance_after_discard.tiles.len(),
+            1,
+            "打牌 {discard:?} の受け入れに {draw:?} が含まれている必要がある"
+        );
+
+        diagnose(situation, std::slice::from_ref(&evaluation))
+            .candidate(discard)
+            .and_then(|candidate| candidate.draw(draw))
+            .and_then(|draw| draw.next_discard.clone())
+            .expect("next discard exists")
     }
 
     static CONCEALED_HAND_ONLY: LazyLock<Case> = LazyLock::new(|| {
@@ -481,13 +563,16 @@ mod tests {
     fn covers_every_current_discard_candidate() {
         let case = &*CONCEALED_HAND_ONLY;
 
-        assert!(case.evaluations.len() > 1);
-        assert_eq!(case.lookahead.candidates.len(), case.evaluations.len());
+        assert!(case.situation.evaluations.len() > 1);
+        assert_eq!(
+            case.lookahead.candidates.len(),
+            case.situation.evaluations.len()
+        );
         for (candidate, evaluation) in case
             .lookahead
             .candidates
             .iter()
-            .zip(case.evaluations.iter())
+            .zip(case.situation.evaluations.iter())
         {
             assert_eq!(candidate.discard, evaluation.discard);
             assert_eq!(
@@ -507,7 +592,7 @@ mod tests {
             .lookahead
             .candidates
             .iter()
-            .zip(case.evaluations.iter())
+            .zip(case.situation.evaluations.iter())
         {
             let acceptance = &evaluation.acceptance_after_discard.tiles;
             assert_eq!(candidate.draws.len(), acceptance.len());
@@ -521,24 +606,24 @@ mod tests {
 
     // 仮想ツモ後の手牌を物理牌一覧として組み立てる。ツモ牌には未使用の黒牌を割り当てるため、
     // 既存の context-aware 評価 API へそのまま渡せる。
-    fn hypothetical_tiles(case: &Case, discard: TileType, draw: TileType) -> Vec<TileId> {
-        let discards_red_five = case
+    fn hypothetical_tiles(situation: &Situation, discard: TileType, draw: TileType) -> Vec<TileId> {
+        let discards_red_five = situation
             .evaluations
             .iter()
             .find(|evaluation| evaluation.discard == discard)
             .map(|evaluation| evaluation.discards_red_five)
             .expect("current discard evaluation exists");
-        let mut tiles = tiles_after_discard(&case.tiles, discard, discards_red_five);
+        let mut tiles = tiles_after_discard(&situation.tiles, discard, discards_red_five);
         let mut used = tiles.clone();
-        used.extend(case.visible.iter().copied());
-        used.extend(case.dora_indicators.iter().copied());
+        used.extend(situation.visible.iter().copied());
+        used.extend(situation.dora_indicators.iter().copied());
         tiles.push(unused_copy(draw, &used));
         tiles
     }
 
     // 仮想ツモ牌を見え牌へ足した visible tiles。1手目の打牌は手牌から消えても visible に残る。
-    fn hypothetical_visible(case: &Case, drawn_tile: TileId) -> Vec<TileId> {
-        let mut visible = case.visible.clone();
+    fn hypothetical_visible(situation: &Situation, drawn_tile: TileId) -> Vec<TileId> {
+        let mut visible = situation.visible.clone();
         visible.push(drawn_tile);
         visible
     }
@@ -546,28 +631,28 @@ mod tests {
     // 2手目の最良打牌を、既存の context-aware 評価 API だけで求める。lookahead 側の期待値を
     // テスト内で再実装しないための共通 helper。
     fn expected_next_discard(
-        case: &Case,
+        situation: &Situation,
         discard: TileType,
         draw: TileType,
     ) -> Option<DiscardEvaluation> {
-        let tiles = hypothetical_tiles(case, discard, draw);
+        let tiles = hypothetical_tiles(situation, discard, draw);
         let drawn_tile = *tiles.last().expect("the drawn tile was pushed last");
         assert!(!drawn_tile.is_red(), "赤5の曖昧さが無い局面で検証する");
 
-        if case.visible.is_empty() {
+        if situation.visible.is_empty() {
             select_best_discard_from_tiles_with_context(
                 &tiles,
-                &case.dora_indicators,
-                case.round_wind,
-                case.seat_wind,
+                &situation.dora_indicators,
+                situation.round_wind,
+                situation.seat_wind,
             )
         } else {
             select_best_discard_from_tiles_with_visible_tiles(
                 &tiles,
-                &case.dora_indicators,
-                case.round_wind,
-                case.seat_wind,
-                &hypothetical_visible(case, drawn_tile),
+                &situation.dora_indicators,
+                situation.round_wind,
+                situation.seat_wind,
+                &hypothetical_visible(situation, drawn_tile),
             )
         }
     }
@@ -575,14 +660,14 @@ mod tests {
     // 全候補 × 全受け入れ牌で、2手先の next discard が既存 context-aware 評価と一致することを
     // 確認する。戻り値は検証した件数。
     fn assert_next_discard_matches_existing_evaluation(case: &Case) -> usize {
-        assert_eq!(case.fixed_meld_count, FixedMeldCount::NONE);
+        assert_eq!(case.situation.fixed_meld_count, FixedMeldCount::NONE);
 
         let mut checked = 0;
         for candidate in &case.lookahead.candidates {
             for draw in &candidate.draws {
                 assert_eq!(
                     draw.next_discard,
-                    expected_next_discard(case, candidate.discard, draw.draw),
+                    expected_next_discard(&case.situation, candidate.discard, draw.draw),
                     "discard {:?} draw {:?}",
                     candidate.discard,
                     draw.draw,
@@ -608,15 +693,15 @@ mod tests {
         ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 53, 54, 112, 116])
     }
 
-    fn honor_choice_case(
+    fn honor_choice_situation(
         dora_indicators: Vec<TileId>,
         round_wind: Option<TileType>,
         seat_wind: Option<TileType>,
-    ) -> Case {
+    ) -> Situation {
         let hand = honor_choice_hand();
         let mut visible = hand.clone();
         visible.extend(dora_indicators.iter().copied());
-        visible_case(
+        visible_situation(
             &hand,
             FixedMeldCount::NONE,
             dora_indicators,
@@ -627,89 +712,102 @@ mod tests {
     }
 
     // 東場南家。S が自風の役牌、W は無関係な客風。
-    static VALUE_HONOR_CASE: LazyLock<Case> =
-        LazyLock::new(|| honor_choice_case(Vec::new(), Some(tile("E")), Some(tile("S"))));
+    static VALUE_HONOR_SITUATION: LazyLock<Situation> =
+        LazyLock::new(|| honor_choice_situation(Vec::new(), Some(tile("E")), Some(tile("S"))));
 
     // ドラ表示牌 E → ドラは S。赤5とは無関係に牌種だけで決まる通常ドラ。
-    static NORMAL_DORA_CASE: LazyLock<Case> =
-        LazyLock::new(|| honor_choice_case(ids(&[108]), None, None));
+    static NORMAL_DORA_SITUATION: LazyLock<Situation> =
+        LazyLock::new(|| honor_choice_situation(ids(&[108]), None, None));
 
-    // 場風・自風もドラ表示牌も持たない対照 case。役牌 / 通常ドラの両方の比較に使う。
-    static HONOR_CHOICE_FREE_CASE: LazyLock<Case> =
-        LazyLock::new(|| honor_choice_case(Vec::new(), None, None));
+    // 場風・自風もドラ表示牌も持たない対照局面。役牌 / 通常ドラの両方の比較に使う。
+    static HONOR_CHOICE_FREE_SITUATION: LazyLock<Situation> =
+        LazyLock::new(|| honor_choice_situation(Vec::new(), None, None));
 
-    // 2つの診断で next discard の牌種が異なる (candidate, draw) の件数を数える。
-    fn count_next_discard_differences(left: &Case, right: &Case) -> usize {
-        let mut differences = 0;
-        for candidate in &left.lookahead.candidates {
-            let Some(other) = right.lookahead.candidate(candidate.discard) else {
-                continue;
-            };
-            for draw in &candidate.draws {
-                let Some(other_draw) = other.draw(draw.draw) else {
-                    continue;
-                };
-                if draw.next_discard_tile() != other_draw.next_discard_tile() {
-                    differences += 1;
-                }
-            }
-        }
-        differences
+    // context の有無で next discard が変わる枝。1p を切って 5p をツモると
+    // 123m456m789m 555p S W になり、2手目は孤立字牌 S と W のどちらを切るかだけになる。
+    // 場風・自風もドラ表示牌も無ければ S を切り、S が自風の役牌になる場でも S がドラになる場でも
+    // S を残して W へ変わる。
+    fn honor_choice_branch() -> (TileType, TileType) {
+        (tile("1p"), tile("5p"))
     }
 
     #[test]
     fn next_discard_reflects_value_honor_context() {
-        let case = &*VALUE_HONOR_CASE;
-        // 役牌は牌種と場風・自風だけで決まるので、赤5の曖昧さとは無関係に必ず反映される。
-        assert!(assert_next_discard_matches_existing_evaluation(case) > 0);
+        let situation = &*VALUE_HONOR_SITUATION;
+        let (discard, draw) = honor_choice_branch();
 
-        for candidate in &case.lookahead.candidates {
-            for draw in &candidate.draws {
-                let next = draw.next_discard.as_ref().expect("next discard exists");
-                assert_eq!(
-                    next.discarded_value_honor_count,
-                    u8::from(next.discard.is_value_honor(case.round_wind, case.seat_wind)),
-                );
-            }
-        }
+        let next = branch_next_discard(situation, discard, draw);
+        assert_eq!(
+            Some(&next),
+            expected_next_discard(situation, discard, draw).as_ref(),
+        );
+
+        // 役牌は牌種と場風・自風だけで決まるので、赤5の曖昧さとは無関係に必ず反映される。
+        assert_eq!(
+            next.discarded_value_honor_count,
+            u8::from(
+                next.discard
+                    .is_value_honor(situation.round_wind, situation.seat_wind)
+            ),
+        );
     }
 
     #[test]
     fn value_honor_context_changes_the_next_discard() {
-        // context-free では決着しない候補が、役牌保護によって別の牌になることを固定する。
-        let differences =
-            count_next_discard_differences(&VALUE_HONOR_CASE, &HONOR_CHOICE_FREE_CASE);
+        // context-free では S を切る枝が、役牌保護によって W へ変わることを固定する。
+        let (discard, draw) = honor_choice_branch();
+
+        let context_free = branch_next_discard(&HONOR_CHOICE_FREE_SITUATION, discard, draw);
+        let with_context = branch_next_discard(&VALUE_HONOR_SITUATION, discard, draw);
+
+        assert_ne!(
+            with_context.discard, context_free.discard,
+            "役牌 context が next discard を変える枝である必要がある"
+        );
         assert!(
-            differences > 0,
-            "役牌 context が next discard を変える局面である必要がある"
+            context_free.discard.is_value_honor(
+                VALUE_HONOR_SITUATION.round_wind,
+                VALUE_HONOR_SITUATION.seat_wind
+            ),
+            "役牌 context で守られる牌が context-free では切られる枝である必要がある"
         );
     }
 
     #[test]
     fn next_discard_reflects_normal_dora_context() {
-        let case = &*NORMAL_DORA_CASE;
-        assert!(assert_next_discard_matches_existing_evaluation(case) > 0);
+        let situation = &*NORMAL_DORA_SITUATION;
+        let (discard, draw) = honor_choice_branch();
+
+        let next = branch_next_discard(situation, discard, draw);
+        assert_eq!(
+            Some(&next),
+            expected_next_discard(situation, discard, draw).as_ref(),
+        );
 
         // 通常ドラは牌種から決まるので、仮想ツモ牌を切る候補でも 0 に潰さない。
-        for candidate in &case.lookahead.candidates {
-            for draw in &candidate.draws {
-                let next = draw.next_discard.as_ref().expect("next discard exists");
-                assert_eq!(
-                    next.discarded_dora_count,
-                    count_indicated_dora(next.discard, &case.dora_indicators)
-                        + u8::from(next.discards_red_five),
-                );
-            }
-        }
+        assert_eq!(
+            next.discarded_dora_count,
+            count_indicated_dora(next.discard, &situation.dora_indicators)
+                + u8::from(next.discards_red_five),
+        );
     }
 
     #[test]
     fn normal_dora_context_changes_the_next_discard() {
-        let differences =
-            count_next_discard_differences(&NORMAL_DORA_CASE, &HONOR_CHOICE_FREE_CASE);
-        assert!(
-            differences > 0,
-            "通常ドラ context が next discard を変える局面である必要がある"
+        // context-free では S を切る枝が、通常ドラ保護によって W へ変わることを固定する。
+        let (discard, draw) = honor_choice_branch();
+
+        let context_free = branch_next_discard(&HONOR_CHOICE_FREE_SITUATION, discard, draw);
+        let with_context = branch_next_discard(&NORMAL_DORA_SITUATION, discard, draw);
+
+        assert_ne!(
+            with_context.discard, context_free.discard,
+            "通常ドラ context が next discard を変える枝である必要がある"
+        );
+        assert_eq!(
+            count_indicated_dora(context_free.discard, &NORMAL_DORA_SITUATION.dora_indicators),
+            1,
+            "通常ドラ context で守られる牌が context-free では切られる枝である必要がある"
         );
     }
 
@@ -737,7 +835,6 @@ mod tests {
     fn drawn_tile_type_keeps_indicated_dora_without_resolving_red_five() {
         // 仮想ツモ牌を2手目に切る候補でも、牌種から確定する通常ドラは反映し、赤5扱いにはしない。
         let case = &*DRAWN_TILE_DISCARD_CASE;
-        assert!(assert_next_discard_matches_existing_evaluation(case) > 0);
 
         let mut checked = 0;
         for candidate in &case.lookahead.candidates {
@@ -749,7 +846,7 @@ mod tests {
                 assert!(!next.discards_red_five);
                 assert_eq!(
                     next.discarded_dora_count,
-                    count_indicated_dora(next.discard, &case.dora_indicators),
+                    count_indicated_dora(next.discard, &case.situation.dora_indicators),
                 );
                 checked += 1;
             }
@@ -802,7 +899,7 @@ mod tests {
             for draw in &candidate.draws {
                 let next = draw.next_discard.as_ref().expect("next discard exists");
 
-                let mut after_next = case.counts;
+                let mut after_next = case.situation.counts;
                 after_next.remove(candidate.discard).unwrap();
                 after_next.try_add(draw.draw).unwrap();
                 after_next.remove(next.discard).unwrap();
@@ -861,13 +958,13 @@ mod tests {
 
         assert_eq!(
             diagnose_lookahead_with_fixed_melds_and_visible_tiles(
-                &case.tiles,
+                &case.situation.tiles,
                 fixed(2),
                 &[],
                 None,
                 None,
                 &[],
-                &case.evaluations,
+                &case.situation.evaluations,
             ),
             case.lookahead,
         );
