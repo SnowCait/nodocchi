@@ -173,8 +173,23 @@ fn legal_dahai_tile_for_type(tile_type: TileType, legal_actions: &[LegalAction])
 // 完成済み面子を含めた向聴・受け入れで評価する。分からない場合は
 // evaluation_fixed_meld_count() の方針どおり門前評価へフォールバックする。
 fn evaluate_discard_candidates(context: &GameContext, tiles: &[TileId]) -> Vec<DiscardEvaluation> {
-    let fixed_meld_count = evaluation_fixed_meld_count(context);
+    evaluate_discard_candidates_with_fixed_meld_count(
+        context,
+        tiles,
+        evaluation_fixed_meld_count(context),
+    )
+}
 
+// 副露済み面子数を明示して全打牌候補を評価する。visible tiles の有無による経路分岐・評価
+// ロジックは通常経路と完全に共通で、使う副露済み面子数だけが違う。
+//
+// 鳴きシミュレーションのように GameContext がまだ鳴く前の状態である場合に、
+// context の副露済み面子数ではなく鳴いた後の値で評価するために使う。
+fn evaluate_discard_candidates_with_fixed_meld_count(
+    context: &GameContext,
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+) -> Vec<DiscardEvaluation> {
     if context.visible_tiles().is_empty() {
         evaluate_discards_from_tiles_with_fixed_melds_and_context(
             tiles,
@@ -256,7 +271,24 @@ pub(crate) fn select_best_discard_evaluation(
     context: &GameContext,
     tiles: &[TileId],
 ) -> Option<DiscardEvaluation> {
-    let evaluations = evaluate_discard_candidates(context, tiles);
+    select_best_discard_evaluation_with_fixed_meld_count(
+        context,
+        tiles,
+        evaluation_fixed_meld_count(context),
+    )
+}
+
+/// 副露済み面子数を明示した best 評価。候補評価・比較は通常経路と同じ helper を共有する。
+///
+/// `fixed_meld_count == evaluation_fixed_meld_count(context)` では
+/// [`select_best_discard_evaluation`] と一致する。
+pub(crate) fn select_best_discard_evaluation_with_fixed_meld_count(
+    context: &GameContext,
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+) -> Option<DiscardEvaluation> {
+    let evaluations =
+        evaluate_discard_candidates_with_fixed_meld_count(context, tiles, fixed_meld_count);
     select_best_evaluation(&evaluations).cloned()
 }
 

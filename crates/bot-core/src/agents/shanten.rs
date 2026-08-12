@@ -6,21 +6,31 @@ use crate::defense::{
     select_defense_fallback_action_with_kind,
 };
 use crate::discard_selection::{
-    DiscardActionSelection, select_discard_action_with_diagnostic,
-    select_discard_action_with_evaluation,
+    DiscardActionSelection, select_best_discard_evaluation_with_fixed_meld_count,
+    select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
 };
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_context_with_evaluation,
 };
 use bot_logic::{
-    DiscardDecisionDiagnostic, FixedMeldCount, TileCounts, calculate_acceptance_with_visible_tiles,
+    DiscardDecisionDiagnostic, DiscardEvaluation, FixedMeldCount, TileCounts, TileId, TileType,
+    calculate_acceptance_with_visible_tiles, calculate_shanten_with_fixed_melds,
 };
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
 // 補正後の待ち枚数がこの枚数以上ならリーチする。
 const REACH_MIN_REMAINING: u8 = 4;
+
+// 限定 Pon を検討する現在の向聴数。今回は 1向聴 → テンパイ だけを対象にする。
+const PON_CURRENT_SHANTEN: i8 = 1;
+
+// Pon 対象牌として concealed hand に必要な枚数。対子からの Pon だけを扱い、暗刻は崩さない。
+const PON_TARGET_HAND_COUNT: usize = 2;
+
+// Pon の consumed 枚数。
+const PON_CONSUMED_TILE_COUNT: usize = 2;
 
 /// 最終 action がどの経路で選ばれたかを表す診断。プロトコル非依存。
 ///
@@ -29,6 +39,7 @@ const REACH_MIN_REMAINING: u8 = 4;
 pub enum AgentActionSource {
     Hora,
     Ryukyoku,
+    Pon,
     Reach,
     NormalDiscard,
     DefenseFallback(DefenseFallbackKind),
@@ -42,6 +53,7 @@ impl AgentActionSource {
         match self {
             AgentActionSource::Hora => "Hora",
             AgentActionSource::Ryukyoku => "Ryukyoku",
+            AgentActionSource::Pon => "Pon",
             AgentActionSource::Reach => "Reach",
             AgentActionSource::NormalDiscard => "NormalDiscard",
             AgentActionSource::DefenseFallback(_) => "DefenseFallback",
@@ -59,10 +71,95 @@ impl AgentActionSource {
     }
 }
 
+/// 限定 Pon を採用した / しなかった理由。
+///
+/// `EligibleTenpai` 以外はすべて「今回は Pon しない」理由であり、最初に落ちた条件を1つだけ
+/// 表す。判定順は [`PonCandidateDiagnostic`] のフィールドが埋まる順と一致する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PonDecisionReason {
+    /// 全条件を満たし、Pon 後に生きた待ちのテンパイになる。
+    EligibleTenpai,
+    /// 他家にリーチ者がいる。今回の Pon は押し引きへ通さない。
+    OpponentReached,
+    /// reaction context に `drawn_tile` があり局面として不整合。14枚扱いで判断しない。
+    UnexpectedDrawnTile,
+    /// 対象牌が自分にとって確実な役牌ではない。風牌の情報不足もここに含む。
+    NotValueHonor,
+    /// 対象牌の concealed hand 内枚数がちょうど2枚ではない。
+    TargetCountNotTwo,
+    /// consumed が2枚でない・手牌に無い・物理牌が重複しているなどで除去できない。
+    InvalidConsumed,
+    /// 自分の副露済み面子数が不明。0副露と推測しない。
+    FixedMeldCountUnknown,
+    /// Pon 後の副露済み面子数が上限を超える。
+    FixedMeldCountOverflow,
+    /// 現在の effective shanten が1向聴ではない。
+    CurrentShantenNotOne,
+    /// Pon 後の手牌から打牌候補を評価できない。
+    NoPostPonDiscard,
+    /// Pon 後の最良打牌でもテンパイにならない。
+    PostPonNotTenpai,
+    /// Pon 後はテンパイだが、待ち牌がすべて見えている。
+    NoLiveAcceptance,
+}
+
+/// 合法 `LegalAction::Pon` 1件ごとの判断内訳。
+///
+/// 各フィールドは判定が実際にそこまで進んだ場合だけ `Some` になり、進まなかった判定は推測せず
+/// `None` のままにする。`post_pon_discard` は本番の打牌評価 helper が返した評価そのもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PonCandidateDiagnostic {
+    pub action: LegalAction,
+    pub target: TileType,
+    /// `TileType::is_value_honor(round_wind, seat_wind)` の結果。
+    pub value_honor: bool,
+    pub current_fixed_meld_count: Option<FixedMeldCount>,
+    /// `calculate_shanten_with_fixed_melds()` で求めた現在の effective shanten。
+    pub current_shanten: Option<i8>,
+    pub post_pon_fixed_meld_count: Option<FixedMeldCount>,
+    /// Pon 後の最良打牌評価。
+    pub post_pon_discard: Option<DiscardEvaluation>,
+    pub eligible: bool,
+    pub selected: bool,
+    pub reason: PonDecisionReason,
+}
+
+impl PonCandidateDiagnostic {
+    pub fn post_pon_shanten(&self) -> Option<i8> {
+        self.post_pon_discard
+            .as_ref()
+            .map(DiscardEvaluation::min_shanten_after_discard)
+    }
+
+    pub fn post_pon_acceptance_total_remaining(&self) -> Option<u8> {
+        self.post_pon_discard
+            .as_ref()
+            .map(DiscardEvaluation::acceptance_total_remaining)
+    }
+
+    pub fn post_pon_acceptance_type_count(&self) -> Option<usize> {
+        self.post_pon_discard
+            .as_ref()
+            .map(DiscardEvaluation::acceptance_type_count)
+    }
+}
+
+/// 限定 Pon 判断の構造化診断。
+///
+/// `selected` は `ShantenAgent::act()` が実際に採用した Pon そのもので、診断用の別判断ロジック
+/// は持たない。採用が無い場合の `reason` は最初の候補が落ちた理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PonDecisionDiagnostic {
+    pub selected: Option<LegalAction>,
+    pub reason: PonDecisionReason,
+    pub candidates: Vec<PonCandidateDiagnostic>,
+}
+
 /// `ShantenAgent` が下した最終判断と、その選択経路・ログ用文脈をまとめた内部表現。
 ///
 /// ログのためだけに判断ロジックを再実行しないよう、action 選択の過程で得た情報を保持する。
-/// `push_pull` / `push_pull_inputs` / `normal_discard` は Hora / Ryukyoku の早期 return では `None`。
+/// `push_pull` / `push_pull_inputs` / `normal_discard` は Hora / Ryukyoku / Pon の早期 return では
+/// `None`。`pon` は合法 Pon が1件も無い局面では `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentDecision {
     action: LegalAction,
@@ -70,6 +167,7 @@ pub(crate) struct AgentDecision {
     push_pull_inputs: Option<PushPullInputs>,
     push_pull: Option<PushPullDecision>,
     normal_discard: Option<LegalAction>,
+    pon: Option<PonDecisionDiagnostic>,
 }
 
 /// `ShantenAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
@@ -81,8 +179,8 @@ pub(crate) struct AgentDecision {
 ///   常に `selected_action == ShantenAgent::act(context, legal_actions)` が成り立つ。
 /// - 追加診断情報(候補ごとの形の内訳、全防御候補評価など)は解析用途であり、action 選択には
 ///   影響しない。
-/// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku で早期終了した
-///   場合は `normal_discard` / `normal_discard_action` / `push_pull_inputs` /
+/// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku / 限定 Pon で
+///   早期終了した場合は `normal_discard` / `normal_discard_action` / `push_pull_inputs` /
 ///   `push_pull_decision` / `defense` がすべて `None`。
 ///
 /// tracing ログとは独立した pure なデータであり、ログをパースして構築することはない。
@@ -103,6 +201,9 @@ pub struct ShantenDecisionDiagnostic {
     pub push_pull_decision: Option<PushPullDecision>,
     /// 防御 fallback を検討した場合の診断。採用されなかった場合も候補評価を保持する。
     pub defense: Option<DefenseDecisionDiagnostic>,
+    /// 限定 Pon を検討した場合の診断。合法 Pon が1件も無ければ `None`。採用しなかった場合も
+    /// 候補ごとの理由を保持する。
+    pub pon: Option<PonDecisionDiagnostic>,
     pub own_fixed_meld_count: Option<FixedMeldCount>,
 }
 
@@ -190,6 +291,7 @@ impl ShantenAgent {
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
             defense: diagnostics.defense,
+            pon: decision.pon,
             own_fixed_meld_count: context.own_fixed_meld_count(),
         }
     }
@@ -218,6 +320,7 @@ impl ShantenAgent {
                 push_pull_inputs: None,
                 push_pull: None,
                 normal_discard: None,
+                pon: None,
             };
         }
 
@@ -231,6 +334,20 @@ impl ShantenAgent {
                 push_pull_inputs: None,
                 push_pull: None,
                 normal_discard: None,
+                pon: None,
+            };
+        }
+
+        // 限定 Pon。和了・流局より後、通常打牌 / 押し引き / 防御より前に検討する。
+        let pon = evaluate_pon_decision(ctx, legal_actions);
+        if let Some(action) = pon.as_ref().and_then(|pon| pon.selected.clone()) {
+            return AgentDecision {
+                action,
+                source: AgentActionSource::Pon,
+                push_pull_inputs: None,
+                push_pull: None,
+                normal_discard: None,
+                pon,
             };
         }
 
@@ -259,6 +376,7 @@ impl ShantenAgent {
                 push_pull_inputs: Some(inputs),
                 push_pull: Some(push_pull),
                 normal_discard,
+                pon,
             };
         }
 
@@ -275,6 +393,7 @@ impl ShantenAgent {
                 push_pull_inputs: Some(inputs),
                 push_pull: Some(push_pull),
                 normal_discard,
+                pon,
             };
         }
 
@@ -289,6 +408,7 @@ impl ShantenAgent {
             push_pull_inputs: Some(inputs),
             push_pull: Some(push_pull),
             normal_discard,
+            pon,
         }
     }
 
@@ -380,10 +500,174 @@ impl ShantenAgent {
     }
 }
 
+// 限定 Pon の判断本体。act() と構造化診断はこの1本を共有し、診断は結果を載せるだけにする。
+//
+// 合法 Pon が1件も無ければ検討自体を行わず None。1件以上ある場合は候補ごとに条件を評価し、
+// 最初に全条件を満たした候補を採用する。
+fn evaluate_pon_decision(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+) -> Option<PonDecisionDiagnostic> {
+    let mut candidates: Vec<PonCandidateDiagnostic> = legal_actions
+        .iter()
+        .filter_map(|action| match action {
+            LegalAction::Pon { tile, consumed } => {
+                Some(evaluate_pon_candidate(ctx, action, *tile, consumed))
+            }
+            _ => None,
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let selected_index = candidates.iter().position(|candidate| candidate.eligible);
+    if let Some(index) = selected_index {
+        candidates[index].selected = true;
+    }
+
+    let reason = candidates[selected_index.unwrap_or(0)].reason;
+    let selected = selected_index.map(|index| candidates[index].action.clone());
+
+    Some(PonDecisionDiagnostic {
+        selected,
+        reason,
+        candidates,
+    })
+}
+
+fn evaluate_pon_candidate(
+    ctx: &GameContext,
+    action: &LegalAction,
+    tile: TileId,
+    consumed: &[TileId],
+) -> PonCandidateDiagnostic {
+    let target = tile.tile_type();
+    let mut candidate = PonCandidateDiagnostic {
+        action: action.clone(),
+        target,
+        value_honor: target.is_value_honor(ctx.round_wind(), ctx.seat_wind()),
+        current_fixed_meld_count: None,
+        current_shanten: None,
+        post_pon_fixed_meld_count: None,
+        post_pon_discard: None,
+        eligible: false,
+        selected: false,
+        reason: PonDecisionReason::EligibleTenpai,
+    };
+
+    let reason = evaluate_pon_conditions(ctx, target, consumed, &mut candidate);
+    candidate.eligible = reason == PonDecisionReason::EligibleTenpai;
+    candidate.reason = reason;
+    candidate
+}
+
+// Pon 成立条件を順に評価し、最初に落ちた条件を理由として返す。評価が進んだ範囲の値だけを
+// candidate へ書き込み、評価しなかった項目は None のままにする。
+fn evaluate_pon_conditions(
+    ctx: &GameContext,
+    target: TileType,
+    consumed: &[TileId],
+    candidate: &mut PonCandidateDiagnostic,
+) -> PonDecisionReason {
+    if ctx.any_opponent_reached() {
+        return PonDecisionReason::OpponentReached;
+    }
+
+    // Pon は他家捨て牌への reaction なので、既存 client の reaction context に drawn_tile は無い。
+    // drawn_tile がある不整合な context では、それを混ぜても無視しても正しい局面を復元できない
+    // ため Pon を検討しない。
+    if ctx.drawn_tile().is_some() {
+        return PonDecisionReason::UnexpectedDrawnTile;
+    }
+
+    if !candidate.value_honor {
+        return PonDecisionReason::NotValueHonor;
+    }
+
+    let hand_tiles = ctx.hand_tiles();
+    let target_count = hand_tiles
+        .iter()
+        .filter(|tile| tile.tile_type() == target)
+        .count();
+    if target_count != PON_TARGET_HAND_COUNT {
+        return PonDecisionReason::TargetCountNotTwo;
+    }
+
+    let Some(post_pon_tiles) = remove_pon_consumed_tiles(hand_tiles, target, consumed) else {
+        return PonDecisionReason::InvalidConsumed;
+    };
+
+    let Some(current_fixed_meld_count) = ctx.own_fixed_meld_count() else {
+        return PonDecisionReason::FixedMeldCountUnknown;
+    };
+    candidate.current_fixed_meld_count = Some(current_fixed_meld_count);
+
+    let Some(post_pon_fixed_meld_count) = FixedMeldCount::new(current_fixed_meld_count.get() + 1)
+    else {
+        return PonDecisionReason::FixedMeldCountOverflow;
+    };
+    candidate.post_pon_fixed_meld_count = Some(post_pon_fixed_meld_count);
+
+    let counts = TileCounts::from_tiles(hand_tiles.iter().copied());
+    let current_shanten =
+        calculate_shanten_with_fixed_melds(&counts, current_fixed_meld_count).min();
+    candidate.current_shanten = Some(current_shanten);
+    if current_shanten != PON_CURRENT_SHANTEN {
+        return PonDecisionReason::CurrentShantenNotOne;
+    }
+
+    let Some(evaluation) = select_best_discard_evaluation_with_fixed_meld_count(
+        ctx,
+        &post_pon_tiles,
+        post_pon_fixed_meld_count,
+    ) else {
+        return PonDecisionReason::NoPostPonDiscard;
+    };
+    let min_shanten = evaluation.min_shanten_after_discard();
+    let acceptance_total_remaining = evaluation.acceptance_total_remaining();
+    candidate.post_pon_discard = Some(evaluation);
+
+    if min_shanten != 0 {
+        return PonDecisionReason::PostPonNotTenpai;
+    }
+    if acceptance_total_remaining == 0 {
+        return PonDecisionReason::NoLiveAcceptance;
+    }
+
+    PonDecisionReason::EligibleTenpai
+}
+
+// consumed の物理牌を concealed hand から1枚ずつ除去した仮想手牌を返す。
+//
+// 牌種単位で減らすのではなく物理牌 ID で除去するため、赤5などへ拡張しても semantics を保つ。
+// 枚数が2枚でない・対象牌種でない・手牌に無い・同じ物理牌が重複している場合は None。
+fn remove_pon_consumed_tiles(
+    hand_tiles: &[TileId],
+    target: TileType,
+    consumed: &[TileId],
+) -> Option<Vec<TileId>> {
+    if consumed.len() != PON_CONSUMED_TILE_COUNT {
+        return None;
+    }
+
+    let mut remaining = hand_tiles.to_vec();
+    for tile in consumed {
+        if tile.tile_type() != target {
+            return None;
+        }
+        let position = remaining.iter().position(|held| held == tile)?;
+        remaining.remove(position);
+    }
+    Some(remaining)
+}
+
 // action を agent decision ログ用のコンパクトな文字列へ変換する。
 fn agent_action_label(action: &LegalAction) -> String {
     match action {
         LegalAction::Dahai { tile } => tile.to_mjai_string(),
+        LegalAction::Pon { tile, .. } => format!("Pon {}", tile.to_mjai_string()),
         LegalAction::Reach => "Reach".to_string(),
         LegalAction::Hora => "Hora".to_string(),
         LegalAction::Ryukyoku => "Ryukyoku".to_string(),
@@ -419,6 +703,10 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(kind) => format!("{kind:?}"),
         None => "None".to_string(),
     };
+    let pon_reason = match &decision.pon {
+        Some(pon) => format!("{:?}", pon.reason),
+        None => "None".to_string(),
+    };
 
     tracing::debug!(
         target: AGENT_DECISION_LOG_TARGET,
@@ -428,6 +716,7 @@ fn log_agent_decision(decision: &AgentDecision) {
         push_pull_reason = %push_pull_reason,
         normal_discard = %normal_discard,
         defense_kind = %defense_kind,
+        pon_reason = %pon_reason,
         "agent decision",
     );
 }
@@ -597,18 +886,12 @@ pub(crate) mod tests {
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 
-    #[test]
-    fn does_not_actively_claim_melds_or_kans() {
-        let mut agent = ShantenAgent;
-        let ctx = GameContext::default();
-        let actions = vec![
+    // Pon 以外の副露・カン。限定 Pon を追加した後も、これらは積極的に選ばない。
+    pub(crate) fn chi_and_kan_actions() -> Vec<LegalAction> {
+        vec![
             LegalAction::Chi {
                 tile: tile(17),
                 consumed: vec![tile(12), tile(20)],
-            },
-            LegalAction::Pon {
-                tile: tile(108),
-                consumed: vec![tile(109), tile(110)],
             },
             LegalAction::Daiminkan {
                 tile: tile(104),
@@ -621,8 +904,34 @@ pub(crate) mod tests {
                 tile: tile(124),
                 consumed: vec![tile(125), tile(126), tile(127)],
             },
-            LegalAction::None,
-        ];
+        ]
+    }
+
+    #[test]
+    fn does_not_actively_claim_chi_or_kans() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions: Vec<LegalAction> = chi_and_kan_actions()
+            .into_iter()
+            .chain([LegalAction::None])
+            .collect();
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
+    }
+
+    #[test]
+    fn does_not_claim_pon_outside_the_limited_conditions() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::default();
+        let actions: Vec<LegalAction> = chi_and_kan_actions()
+            .into_iter()
+            .chain([
+                LegalAction::Pon {
+                    tile: tile(108),
+                    consumed: vec![tile(109), tile(110)],
+                },
+                LegalAction::None,
+            ])
+            .collect();
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 
@@ -2253,6 +2562,10 @@ pub(crate) mod tests {
                 suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]),
                 vec![dahai(0), dahai(4)],
             ),
+            (
+                dragon_pon_reaction().context(),
+                dragon_pon_reaction().actions(),
+            ),
         ];
 
         for (ctx, actions) in cases {
@@ -2264,10 +2577,619 @@ pub(crate) mod tests {
         }
     }
 
+    // ---- 限定 Pon (AgentActionSource::Pon) テスト ----
+
+    // 他家(player 1)が捨てた牌への Pon reaction 局面を組み立てる。
+    // 既定は東場東家・リーチ者なし・副露なし・ツモ牌なしで、検証したい条件だけ差し替える。
+    #[derive(Debug, Clone)]
+    pub(crate) struct PonReaction {
+        hand: Vec<u8>,
+        target: u8,
+        consumed: Vec<u8>,
+        round_wind: Option<u8>,
+        seat_wind: Option<u8>,
+        reached: [bool; 4],
+        extra_visible: Vec<u8>,
+        own_melds: Vec<crate::meld::Meld>,
+        drawn_tile: Option<u8>,
+        player_id: Option<u8>,
+    }
+
+    impl PonReaction {
+        pub(crate) fn new(hand: &[u8], target: u8, consumed: &[u8]) -> Self {
+            Self {
+                hand: hand.to_vec(),
+                target,
+                consumed: consumed.to_vec(),
+                round_wind: Some(27),
+                seat_wind: Some(27),
+                reached: [false; 4],
+                extra_visible: Vec::new(),
+                own_melds: Vec::new(),
+                drawn_tile: None,
+                player_id: Some(0),
+            }
+        }
+
+        fn with_winds(mut self, round_wind: Option<u8>, seat_wind: Option<u8>) -> Self {
+            self.round_wind = round_wind;
+            self.seat_wind = seat_wind;
+            self
+        }
+
+        fn with_reached(mut self, reached: [bool; 4]) -> Self {
+            self.reached = reached;
+            self
+        }
+
+        fn with_extra_visible(mut self, extra_visible: &[u8]) -> Self {
+            self.extra_visible = extra_visible.to_vec();
+            self
+        }
+
+        fn with_own_melds(mut self, own_melds: Vec<crate::meld::Meld>) -> Self {
+            self.own_melds = own_melds;
+            self
+        }
+
+        fn with_drawn_tile(mut self, drawn_tile: u8) -> Self {
+            self.drawn_tile = Some(drawn_tile);
+            self
+        }
+
+        fn without_player_id(mut self) -> Self {
+            self.player_id = None;
+            self
+        }
+
+        fn with_consumed(mut self, consumed: &[u8]) -> Self {
+            self.consumed = consumed.to_vec();
+            self
+        }
+
+        pub(crate) fn context(&self) -> GameContext {
+            let hand: Vec<TileId> = self.hand.iter().map(|&value| tile(value)).collect();
+            let discards = [vec![], vec![tile(self.target)], vec![], vec![]];
+
+            let mut visible = hand.clone();
+            visible.extend(self.drawn_tile.map(tile));
+            visible.push(tile(self.target));
+            visible.extend(self.own_melds.iter().flat_map(|meld| meld.tiles().to_vec()));
+            visible.extend(self.extra_visible.iter().map(|&value| tile(value)));
+
+            let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+            melds[0] = self.own_melds.clone();
+
+            GameContext::from_parts_with_melds(
+                self.drawn_tile.map(tile),
+                hand,
+                vec![],
+                self.round_wind.and_then(TileType::new),
+                self.seat_wind.and_then(TileType::new),
+                visible,
+                self.player_id,
+                Some(0),
+                discards,
+                self.reached,
+                melds,
+            )
+        }
+
+        pub(crate) fn pon(&self) -> LegalAction {
+            LegalAction::Pon {
+                tile: tile(self.target),
+                consumed: self.consumed.iter().map(|&value| tile(value)).collect(),
+            }
+        }
+
+        pub(crate) fn actions(&self) -> Vec<LegalAction> {
+            vec![self.pon(), LegalAction::None]
+        }
+    }
+
+    fn honor_pon_meld(first: u8) -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Pon,
+            vec![tile(first), tile(first + 1), tile(first + 2)],
+            Some(tile(first)),
+        )
+    }
+
+    // 123456m 55p 78s N PP。P(白) の対子を持つ一向聴で、PP を Pon して N を切るとテンパイ。
+    const PON_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
+    const PON_TARGET: u8 = 126;
+    const PON_CONSUMED: [u8; 2] = [124, 125];
+
+    fn dragon_pon_reaction() -> PonReaction {
+        PonReaction::new(&PON_HAND, PON_TARGET, &PON_CONSUMED)
+    }
+
+    // 診断の Pon candidate は1件で、その理由と最終 action が期待どおりであることを確認する。
+    fn assert_single_pon_candidate(
+        reaction: &PonReaction,
+        expected_action: &LegalAction,
+        expected_reason: PonDecisionReason,
+    ) -> PonCandidateDiagnostic {
+        let ctx = reaction.context();
+        let actions = reaction.actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(&diagnostic.selected_action, expected_action);
+
+        let pon = diagnostic.pon.as_ref().unwrap();
+        assert_eq!(pon.reason, expected_reason);
+        assert_eq!(pon.candidates.len(), 1);
+
+        let candidate = pon.candidates[0].clone();
+        assert_eq!(candidate.reason, expected_reason);
+        assert_eq!(
+            candidate.eligible,
+            expected_reason == PonDecisionReason::EligibleTenpai
+        );
+        assert_eq!(candidate.selected, candidate.eligible);
+        assert_eq!(
+            pon.selected.as_ref(),
+            candidate.eligible.then_some(&candidate.action)
+        );
+        candidate
+    }
+
+    fn assert_pon_is_declined(reaction: &PonReaction, expected_reason: PonDecisionReason) {
+        let candidate = assert_single_pon_candidate(reaction, &LegalAction::None, expected_reason);
+        assert!(!candidate.eligible);
+    }
+
+    #[test]
+    fn pons_value_honor_pair_that_reaches_a_live_tenpai() {
+        let reaction = dragon_pon_reaction();
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &reaction.pon(),
+            PonDecisionReason::EligibleTenpai,
+        );
+
+        assert_eq!(candidate.target, tile(PON_TARGET).tile_type());
+        assert!(candidate.value_honor);
+        assert_eq!(candidate.current_shanten, Some(1));
+        assert_eq!(
+            candidate.current_fixed_meld_count.map(FixedMeldCount::get),
+            Some(0)
+        );
+        assert_eq!(
+            candidate.post_pon_fixed_meld_count.map(FixedMeldCount::get),
+            Some(1)
+        );
+        assert_eq!(candidate.post_pon_shanten(), Some(0));
+        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
+        assert_eq!(candidate.post_pon_acceptance_type_count(), Some(2));
+
+        let evaluation = candidate.post_pon_discard.as_ref().unwrap();
+        assert_eq!(evaluation.discard.to_mjai_string(), "N");
+        let acceptance: Vec<(String, u8)> = evaluation
+            .acceptance_after_discard
+            .tiles
+            .iter()
+            .map(|entry| (entry.tile.to_mjai_string(), entry.remaining))
+            .collect();
+        assert_eq!(
+            acceptance,
+            vec![("6s".to_string(), 4), ("9s".to_string(), 4)]
+        );
+    }
+
+    #[test]
+    fn pon_source_is_reported_for_the_selected_pon() {
+        let reaction = dragon_pon_reaction();
+        let ctx = reaction.context();
+        let actions = reaction.actions();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), reaction.pon());
+
+        let decision = ShantenAgent.decide(&ctx, &actions);
+        assert_eq!(decision.source, AgentActionSource::Pon);
+        // Pon は通常打牌・押し引き・防御より前で確定するので、それらは評価していない。
+        assert_eq!(decision.push_pull, None);
+        assert_eq!(decision.push_pull_inputs, None);
+        assert_eq!(decision.normal_discard, None);
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
+        assert_eq!(diagnostic.normal_discard, None);
+        assert_eq!(diagnostic.push_pull_decision, None);
+        assert_eq!(diagnostic.defense, None);
+    }
+
+    #[test]
+    fn post_pon_evaluation_matches_the_shared_discard_helper() {
+        // 診断が持つ Pon 後の打牌評価は、本番の打牌評価 helper の結果そのものである。
+        let reaction = dragon_pon_reaction();
+        let ctx = reaction.context();
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &reaction.pon(),
+            PonDecisionReason::EligibleTenpai,
+        );
+
+        let post_pon_tiles: Vec<TileId> = PON_HAND
+            .iter()
+            .filter(|value| !PON_CONSUMED.contains(value))
+            .map(|&value| tile(value))
+            .collect();
+        let expected = select_best_discard_evaluation_with_fixed_meld_count(
+            &ctx,
+            &post_pon_tiles,
+            FixedMeldCount::new(1).unwrap(),
+        );
+
+        assert_eq!(candidate.post_pon_discard, expected);
+        assert!(expected.is_some());
+    }
+
+    #[test]
+    fn pons_round_wind_pair() {
+        // 東場・南家。場風の東は既存 helper で役牌と判定される。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 108, 109],
+            110,
+            &[108, 109],
+        )
+        .with_winds(Some(27), Some(28));
+
+        assert!(
+            tile(110)
+                .tile_type()
+                .is_value_honor(TileType::new(27), TileType::new(28))
+        );
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &reaction.pon(),
+            PonDecisionReason::EligibleTenpai,
+        );
+        assert!(candidate.value_honor);
+        assert_eq!(candidate.current_shanten, Some(1));
+        assert_eq!(candidate.post_pon_shanten(), Some(0));
+        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
+    }
+
+    #[test]
+    fn does_not_pon_guest_wind_pair() {
+        // 東場・南家の西は場風でも自風でもないので役なしテンパイを作らない。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 116, 117],
+            118,
+            &[116, 117],
+        )
+        .with_winds(Some(27), Some(28));
+
+        assert!(
+            !tile(118)
+                .tile_type()
+                .is_value_honor(TileType::new(27), TileType::new(28))
+        );
+
+        assert_pon_is_declined(&reaction, PonDecisionReason::NotValueHonor);
+    }
+
+    #[test]
+    fn does_not_pon_wind_pair_without_wind_information() {
+        // 場風・自風が不明な東は役牌と確定できないため、自風だろうと推測しない。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 108, 109],
+            110,
+            &[108, 109],
+        )
+        .with_winds(None, None);
+
+        assert_pon_is_declined(&reaction, PonDecisionReason::NotValueHonor);
+    }
+
+    #[test]
+    fn pons_dragon_pair_without_wind_information() {
+        // 三元牌は場風・自風に依存しないので、風の情報が無くても役牌として扱う。
+        let reaction = dragon_pon_reaction().with_winds(None, None);
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &reaction.pon(),
+            PonDecisionReason::EligibleTenpai,
+        );
+        assert!(candidate.value_honor);
+    }
+
+    #[test]
+    fn does_not_pon_from_two_shanten() {
+        // 123456m 55p 1s 9s N PP。役牌の対子でも2向聴からは鳴かない。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 72, 104, 120, 124, 125],
+            PON_TARGET,
+            &PON_CONSUMED,
+        );
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::CurrentShantenNotOne,
+        );
+        assert_eq!(candidate.current_shanten, Some(2));
+        // 1向聴判定で落ちるので、Pon 後の打牌評価は行わない。
+        assert_eq!(candidate.post_pon_discard, None);
+    }
+
+    #[test]
+    fn does_not_pon_while_already_tenpai() {
+        // 123456789m 55p PP。テンパイ維持の比較は今回の対象外。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 24, 28, 32, 53, 54, 124, 125],
+            PON_TARGET,
+            &PON_CONSUMED,
+        );
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::CurrentShantenNotOne,
+        );
+        assert_eq!(candidate.current_shanten, Some(0));
+    }
+
+    #[test]
+    fn does_not_pon_when_the_best_post_pon_discard_is_still_one_shanten() {
+        // 12345678m 1p 45p PP。Pon してもテンパイにならない一向聴。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 24, 28, 36, 48, 53, 124, 125],
+            PON_TARGET,
+            &PON_CONSUMED,
+        );
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::PostPonNotTenpai,
+        );
+        assert_eq!(candidate.current_shanten, Some(1));
+        assert_eq!(candidate.post_pon_shanten(), Some(1));
+    }
+
+    #[test]
+    fn does_not_pon_without_live_acceptance() {
+        // 6s / 9s が場に4枚ずつ見えている枯れ待ち。形の上ではテンパイでも鳴かない。
+        let reaction =
+            dragon_pon_reaction().with_extra_visible(&[92, 93, 94, 95, 104, 105, 106, 107]);
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::NoLiveAcceptance,
+        );
+        assert_eq!(candidate.post_pon_shanten(), Some(0));
+        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(0));
+    }
+
+    #[test]
+    fn does_not_pon_under_opponent_reach() {
+        let reaction = dragon_pon_reaction().with_reached([false, true, false, false]);
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::OpponentReached,
+        );
+        // リーチ者がいる時点で以降の条件は評価しない。
+        assert_eq!(candidate.current_shanten, None);
+        assert_eq!(candidate.post_pon_discard, None);
+    }
+
+    #[test]
+    fn does_not_pon_from_a_triplet() {
+        // 123456m 55p 78s PPP。既に暗刻として完成している構造は崩さない。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 124, 125, 126],
+            127,
+            &PON_CONSUMED,
+        );
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::TargetCountNotTwo,
+        );
+        assert!(candidate.value_honor);
+    }
+
+    #[test]
+    fn does_not_pon_without_a_known_fixed_meld_count() {
+        // player_id が無く自分の副露数が確定できない局面。0副露だろうと推測しない。
+        let reaction = dragon_pon_reaction().without_player_id();
+        assert_eq!(reaction.context().own_fixed_meld_count(), None);
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::FixedMeldCountUnknown,
+        );
+        assert_eq!(candidate.current_fixed_meld_count, None);
+        assert_eq!(candidate.post_pon_fixed_meld_count, None);
+    }
+
+    #[test]
+    fn pons_with_an_existing_meld() {
+        // 東ポン1組 + 123m 55p 78s N PP。副露済み1組から2組へ増やしてテンパイする。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 53, 54, 96, 100, 120, 124, 125],
+            PON_TARGET,
+            &PON_CONSUMED,
+        )
+        .with_own_melds(vec![pon_meld()]);
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &reaction.pon(),
+            PonDecisionReason::EligibleTenpai,
+        );
+        assert_eq!(
+            candidate.current_fixed_meld_count.map(FixedMeldCount::get),
+            Some(1)
+        );
+        assert_eq!(
+            candidate.post_pon_fixed_meld_count.map(FixedMeldCount::get),
+            Some(2)
+        );
+        assert_eq!(candidate.current_shanten, Some(1));
+        assert_eq!(candidate.post_pon_shanten(), Some(0));
+        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
+        assert_eq!(
+            candidate
+                .post_pon_discard
+                .as_ref()
+                .unwrap()
+                .discard
+                .to_mjai_string(),
+            "N"
+        );
+    }
+
+    #[test]
+    fn does_not_pon_when_the_post_pon_fixed_meld_count_would_overflow() {
+        // 副露済み4組からの Pon は成立しない。silent clamp せず理由として報告する。
+        let melds: Vec<crate::meld::Meld> = [108, 112, 116, 120]
+            .iter()
+            .map(|&first| honor_pon_meld(first))
+            .collect();
+        let reaction =
+            PonReaction::new(&[124, 125], PON_TARGET, &PON_CONSUMED).with_own_melds(melds);
+        assert_eq!(
+            reaction
+                .context()
+                .own_fixed_meld_count()
+                .map(FixedMeldCount::get),
+            Some(4)
+        );
+
+        let candidate = assert_single_pon_candidate(
+            &reaction,
+            &LegalAction::None,
+            PonDecisionReason::FixedMeldCountOverflow,
+        );
+        assert_eq!(
+            candidate.current_fixed_meld_count.map(FixedMeldCount::get),
+            Some(4)
+        );
+        assert_eq!(candidate.post_pon_fixed_meld_count, None);
+    }
+
+    #[test]
+    fn does_not_pon_in_a_reaction_context_that_has_a_drawn_tile() {
+        // reaction 局面に drawn_tile がある不整合な context では、14枚扱いで判断しない。
+        let reaction = dragon_pon_reaction().with_drawn_tile(132);
+
+        assert_pon_is_declined(&reaction, PonDecisionReason::UnexpectedDrawnTile);
+    }
+
+    #[test]
+    fn does_not_pon_with_inconsistent_consumed_tiles() {
+        for consumed in [
+            // 手牌に無い物理牌
+            vec![124, 127],
+            // 同じ物理牌の重複
+            vec![124, 124],
+            // 枚数不足
+            vec![124],
+            // 枚数過多
+            vec![124, 125, 126],
+            // 対象牌種ではない
+            vec![124, 120],
+        ] {
+            let reaction = dragon_pon_reaction().with_consumed(&consumed);
+            let candidate = assert_single_pon_candidate(
+                &reaction,
+                &LegalAction::None,
+                PonDecisionReason::InvalidConsumed,
+            );
+            assert_eq!(candidate.current_shanten, None, "{consumed:?}");
+        }
+    }
+
+    #[test]
+    fn prefers_hora_over_an_eligible_pon() {
+        let mut agent = ShantenAgent;
+        let reaction = dragon_pon_reaction();
+        let ctx = reaction.context();
+
+        for actions in [
+            vec![LegalAction::Hora, reaction.pon(), LegalAction::None],
+            vec![reaction.pon(), LegalAction::Hora, LegalAction::None],
+        ] {
+            assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
+            let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+            assert_eq!(diagnostic.selected_source, AgentActionSource::Hora);
+            // Hora で早期終了するので Pon は検討していない。
+            assert_eq!(diagnostic.pon, None);
+        }
+    }
+
+    #[test]
+    fn prefers_ryukyoku_over_an_eligible_pon() {
+        let mut agent = ShantenAgent;
+        let reaction = dragon_pon_reaction();
+        let ctx = reaction.context();
+        let actions = vec![reaction.pon(), LegalAction::Ryukyoku, LegalAction::None];
+
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Ryukyoku);
+        assert_eq!(diagnostic.pon, None);
+    }
+
+    #[test]
+    fn does_not_claim_chi_or_kans_in_an_eligible_pon_context() {
+        // Pon が成立する局面でも、Chi / Daiminkan / Ankan / Kakan は選ばない。
+        let mut agent = ShantenAgent;
+        let ctx = dragon_pon_reaction().context();
+        let actions: Vec<LegalAction> = chi_and_kan_actions()
+            .into_iter()
+            .chain([LegalAction::None])
+            .collect();
+
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
+        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).pon, None);
+    }
+
+    #[test]
+    fn pon_diagnostic_is_absent_without_a_legal_pon() {
+        let ctx = dragon_pon_reaction().context();
+        let actions = vec![LegalAction::None];
+        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).pon, None);
+    }
+
+    #[test]
+    fn eligible_pon_keeps_the_first_candidate_when_several_are_legal() {
+        // 合法 Pon が複数ある場合は、成立条件を満たす最初の候補を採用する。
+        let reaction = dragon_pon_reaction();
+        let ctx = reaction.context();
+        let declined = LegalAction::Pon {
+            tile: tile(PON_TARGET),
+            consumed: vec![tile(124), tile(120)],
+        };
+        let actions = vec![declined.clone(), reaction.pon(), LegalAction::None];
+
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        assert_eq!(diagnostic.selected_action, reaction.pon());
+
+        let pon = diagnostic.pon.as_ref().unwrap();
+        assert_eq!(pon.reason, PonDecisionReason::EligibleTenpai);
+        assert_eq!(pon.candidates.len(), 2);
+        assert_eq!(pon.candidates[0].action, declined);
+        assert_eq!(pon.candidates[0].reason, PonDecisionReason::InvalidConsumed);
+        assert!(!pon.candidates[0].selected);
+        assert!(pon.candidates[1].selected);
+    }
+
     #[test]
     fn agent_action_source_labels_are_stable() {
         assert_eq!(AgentActionSource::Hora.label(), "Hora");
         assert_eq!(AgentActionSource::Ryukyoku.label(), "Ryukyoku");
+        assert_eq!(AgentActionSource::Pon.label(), "Pon");
         assert_eq!(AgentActionSource::Reach.label(), "Reach");
         assert_eq!(AgentActionSource::NormalDiscard.label(), "NormalDiscard");
         assert_eq!(
