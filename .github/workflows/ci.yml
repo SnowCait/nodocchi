@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -36,18 +36,73 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-v1-${{ steps.rust-key.outputs.rustc }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-v2-lint-${{ steps.rust-key.outputs.rustc }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-v2-lint-${{ steps.rust-key.outputs.rustc }}-
             ${{ runner.os }}-${{ runner.arch }}-cargo-v1-${{ steps.rust-key.outputs.rustc }}-
 
       - name: Format
         run: cargo fmt --check
 
-      - name: Test
-        run: cargo test
-
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Save Cargo cache
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  test:
+    name: test / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: bot-logic
+            args: -p bot-logic
+          - name: bot-core
+            args: -p bot-core
+          - name: scenario-clients
+            args: -p bot-scenario -p chiihou-client -p riichilab-client
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: rustup default stable
+
+      - name: Compute Rust cache key
+        id: rust-key
+        run: |
+          echo "rustc=$(rustc -Vv | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-v2-${{ matrix.name }}-${{ steps.rust-key.outputs.rustc }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-v2-${{ matrix.name }}-${{ steps.rust-key.outputs.rustc }}-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-v1-${{ steps.rust-key.outputs.rustc }}-
+
+      - name: Test
+        run: cargo test ${{ matrix.args }}
 
       - name: Save Cargo cache
         if: >-
