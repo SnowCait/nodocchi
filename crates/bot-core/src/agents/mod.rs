@@ -6,6 +6,7 @@ mod tsumogiri;
 pub use menzen::MenzenAgent;
 pub use normal::NormalAgent;
 pub use shanten::{
-    AgentActionSource, ShantenAgent, ShantenDecisionDiagnostic, diagnose_shanten_decision,
+    AgentActionSource, PonCandidateDiagnostic, PonDecisionDiagnostic, PonDecisionReason,
+    ShantenAgent, ShantenDecisionDiagnostic, diagnose_shanten_decision,
 };
 pub use tsumogiri::TsumogiriAgent;

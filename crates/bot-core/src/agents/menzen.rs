@@ -42,7 +42,7 @@ impl Agent for MenzenAgent {
 mod tests {
     use super::*;
     use crate::agents::shanten::tests::{
-        dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
+        PonReaction, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
     };
 
     fn chi() -> LegalAction {
@@ -248,6 +248,30 @@ mod tests {
         let expected = shanten.act(&ctx, &actions);
         assert_eq!(expected, dahai(16));
         assert_eq!(agent.act(&ctx, &actions), expected);
+    }
+
+    #[test]
+    fn keeps_none_where_shanten_agent_pons_a_value_honor_pair() {
+        // 123456m 55p 78s N PP に他家が P を捨てた局面。ShantenAgent は Pon するが、
+        // MenzenAgent は Pon を除外するので None を維持する。
+        let reaction = PonReaction::new(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
+            126,
+            &[124, 125],
+        );
+        let ctx = reaction.context();
+        let actions = reaction.actions();
+
+        let mut shanten = ShantenAgent;
+        assert_eq!(shanten.act(&ctx, &actions), reaction.pon());
+        assert_eq!(
+            ShantenAgent::diagnose(&ctx, &actions).selected_source,
+            crate::AgentActionSource::Pon
+        );
+
+        let mut agent = MenzenAgent::default();
+        assert_eq!(menzen_compatible_actions(&actions), vec![LegalAction::None]);
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 
     #[test]

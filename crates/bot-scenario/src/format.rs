@@ -1,7 +1,7 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
-    GameContext, LegalAction, Meld, PushPullDecision, PushPullInputs, ShantenAgent,
-    ShantenDecisionDiagnostic,
+    GameContext, LegalAction, Meld, PonCandidateDiagnostic, PonDecisionDiagnostic,
+    PushPullDecision, PushPullInputs, ShantenAgent, ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -21,6 +21,7 @@ pub fn format_diagnostic(
     let mut sections = vec![
         format_scenario(scenario, verbose),
         format_final_decision(diagnostic),
+        format_pon(diagnostic.pon.as_ref(), verbose),
         format_normal_discard(diagnostic),
     ];
 
@@ -120,6 +121,89 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
         lines.push(format!("  defense kind: {kind:?}"));
     }
     lines.join("\n")
+}
+
+fn format_pon(pon: Option<&PonDecisionDiagnostic>, verbose: bool) -> String {
+    let mut lines = vec!["Pon".to_string()];
+
+    let Some(pon) = pon else {
+        lines.push("  not evaluated".to_string());
+        return lines.join("\n");
+    };
+
+    lines.push("  evaluated".to_string());
+    match pon.selected.as_ref() {
+        Some(action) => lines.push(format!("  selected: {}", action_label(action))),
+        None => lines.push(format!("  selected: {NONE}")),
+    }
+    lines.push(format!("  reason: {:?}", pon.reason));
+    lines.push(format!("  candidates: {}", pon.candidates.len()));
+
+    for candidate in &pon.candidates {
+        lines.extend(format_pon_candidate(candidate, verbose));
+    }
+
+    lines.join("\n")
+}
+
+fn format_pon_candidate(candidate: &PonCandidateDiagnostic, verbose: bool) -> Vec<String> {
+    let mut lines = vec![format!("  {}", action_label(&candidate.action))];
+
+    lines.push(format!("    selected: {}", yes_no(candidate.selected)));
+    lines.push(format!("    eligible: {}", yes_no(candidate.eligible)));
+    lines.push(format!("    reason: {:?}", candidate.reason));
+    lines.push(format!("    target: {}", candidate.target.to_mjai_string()));
+    lines.push(format!(
+        "    value honor: {}",
+        yes_no(candidate.value_honor)
+    ));
+    lines.push(format!(
+        "    current shanten: {}",
+        optional(candidate.current_shanten)
+    ));
+    lines.push(format!(
+        "    current fixed meld count: {}",
+        format_fixed_meld_count(candidate.current_fixed_meld_count)
+    ));
+    lines.push(format!(
+        "    post-Pon fixed meld count: {}",
+        format_fixed_meld_count(candidate.post_pon_fixed_meld_count)
+    ));
+
+    let Some(evaluation) = candidate.post_pon_discard.as_ref() else {
+        lines.push(format!("    best discard: {ABSENT}"));
+        lines.push(format!("    shanten after discard: {ABSENT}"));
+        lines.push(format!("    acceptance: {ABSENT}"));
+        return lines;
+    };
+
+    lines.push(format!("    best discard: {}", discard_label(evaluation)));
+    lines.push(format!(
+        "    shanten after discard: {}",
+        evaluation.min_shanten_after_discard()
+    ));
+    lines.push(format!(
+        "    acceptance: {} / {} types",
+        evaluation.acceptance_total_remaining(),
+        evaluation.acceptance_type_count()
+    ));
+
+    if verbose {
+        lines.push("    acceptance tiles:".to_string());
+        if evaluation.acceptance_after_discard.tiles.is_empty() {
+            lines.push(format!("      {NONE}"));
+        }
+        for tile in &evaluation.acceptance_after_discard.tiles {
+            lines.push(format!(
+                "      {}: {} remaining, shanten after draw {}",
+                tile.tile.to_mjai_string(),
+                tile.remaining,
+                tile.shanten_after_draw.min()
+            ));
+        }
+    }
+
+    lines
 }
 
 fn format_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
@@ -648,7 +732,7 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
-    use bot_core::Agent;
+    use bot_core::{Agent, MenzenAgent};
 
     fn scenario_from_json(json: &str) -> Scenario {
         let spec: ScenarioSpec = serde_json::from_str(json).unwrap();
@@ -679,6 +763,7 @@ mod tests {
             block.lines().next().unwrap_or_default(),
             "Scenario"
                 | "Final decision"
+                | "Pon"
                 | "Normal discard"
                 | "Normal discard candidates"
                 | "Push/Pull"
@@ -848,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn pon_reaction_baseline_selects_none() {
+    fn pon_reaction_selects_the_value_honor_pon() {
         let (scenario, diagnostic, output) = rendered(PON_REACTION_SCENARIO, false);
         assert_eq!(scenario.legal_actions.len(), 2);
         assert!(matches!(scenario.legal_actions[0], LegalAction::Pon { .. }));
@@ -857,20 +942,92 @@ mod tests {
         let mut agent = ShantenAgent;
         assert_eq!(
             agent.act(&scenario.context, &scenario.legal_actions),
-            LegalAction::None
+            scenario.legal_actions[0]
         );
-        assert_eq!(diagnostic.selected_action, LegalAction::None);
-        assert_eq!(diagnostic.selected_source, AgentActionSource::None);
+        assert_eq!(diagnostic.selected_action, scenario.legal_actions[0]);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
 
         assert!(
-            output.contains("Final decision\n  action: None\n  source: None"),
+            output.contains("Final decision\n  action: Pon P <- P P\n  source: Pon"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn pon_reaction_section_shows_why_the_pon_is_eligible() {
+        let (_, _, output) = rendered(PON_REACTION_SCENARIO, false);
+        let pon = section(&output, "Pon\n");
+
+        assert_eq!(
+            pon,
+            "Pon\n  \
+             evaluated\n  \
+             selected: Pon P <- P P\n  \
+             reason: EligibleTenpai\n  \
+             candidates: 1\n  \
+             Pon P <- P P\n    \
+             selected: yes\n    \
+             eligible: yes\n    \
+             reason: EligibleTenpai\n    \
+             target: P\n    \
+             value honor: yes\n    \
+             current shanten: 1\n    \
+             current fixed meld count: 0\n    \
+             post-Pon fixed meld count: 1\n    \
+             best discard: N\n    \
+             shanten after discard: 0\n    \
+             acceptance: 8 / 2 types"
+        );
+    }
+
+    #[test]
+    fn verbose_pon_candidate_lists_the_live_acceptance_tiles() {
+        let (_, _, output) = rendered(PON_REACTION_SCENARIO, true);
+        let pon = section(&output, "Pon\n");
+
+        assert!(pon.contains("    acceptance tiles:"), "{pon}");
+        assert!(
+            pon.contains("      6s: 4 remaining, shanten after draw -1"),
+            "{pon}"
+        );
+        assert!(
+            pon.contains("      9s: 4 remaining, shanten after draw -1"),
+            "{pon}"
+        );
+    }
+
+    #[test]
+    fn pon_reaction_summary_reports_the_pon_source() {
+        let (_, _, output) = rendered(PON_REACTION_SCENARIO, false);
         let summary = section(&output, "Summary");
         assert_eq!(
             summary,
-            "Summary\n  selected: None\n  source: None\n  runner-up: -"
+            "Summary\n  selected: Pon P <- P P\n  source: Pon\n  runner-up: -"
         );
+    }
+
+    #[test]
+    fn menzen_agent_keeps_none_on_the_pon_reaction_scenario() {
+        let scenario = scenario_from_json(PON_REACTION_SCENARIO);
+
+        let mut menzen = MenzenAgent::default();
+        assert_eq!(
+            menzen.act(&scenario.context, &scenario.legal_actions),
+            LegalAction::None
+        );
+
+        let mut shanten = ShantenAgent;
+        assert_eq!(
+            shanten.act(&scenario.context, &scenario.legal_actions),
+            scenario.legal_actions[0]
+        );
+    }
+
+    #[test]
+    fn pon_section_is_not_evaluated_without_a_legal_pon() {
+        let (_, diagnostic, output) = rendered(NORMAL_SCENARIO, false);
+        assert_eq!(diagnostic.pon, None);
+        assert_eq!(section(&output, "Pon\n"), "Pon\n  not evaluated");
     }
 
     #[test]
