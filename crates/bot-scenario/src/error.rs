@@ -111,6 +111,40 @@ pub enum ScenarioError {
 
     #[error("legal_dahai {tile} appears more than once")]
     LegalDahaiDuplicate { tile: String },
+
+    #[error("{field} needs player_id to tell whose discard is called")]
+    LegalPonWithoutPlayerId { field: String },
+
+    #[error("{field} from_player must not be the player_id {player_id} itself")]
+    LegalPonFromOwnDiscard { field: String, player_id: u8 },
+
+    #[error("{field} consumed must have {expected} tiles, but has {count}")]
+    LegalPonConsumedCount {
+        field: String,
+        expected: usize,
+        count: usize,
+    },
+
+    #[error("{field} consumed ({consumed:?}) must have the same tile type as {tile}")]
+    LegalPonTileType {
+        field: String,
+        tile: String,
+        consumed: String,
+    },
+
+    #[error("{field} needs a discard of player {from_player}, but it has none")]
+    LegalPonNoDiscard { field: String, from_player: u8 },
+
+    #[error("{field} tile {tile} is not the last discard {discarded} of player {from_player}")]
+    LegalPonTargetMismatch {
+        field: String,
+        tile: String,
+        discarded: String,
+        from_player: u8,
+    },
+
+    #[error("{field} consumed {tile} is not in hand")]
+    LegalPonConsumedNotHeld { field: String, tile: String },
 }
 
 impl ScenarioError {

@@ -1,0 +1,22 @@
+{
+  "hand": "123456m55p78s455z",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "discards": ["", "P", "", ""],
+
+  "legal_dahai": "",
+
+  "legal_pon": [
+    {
+      "from_player": 1,
+      "tile": "P",
+      "consumed": "P P"
+    }
+  ],
+
+  "allow_none": true
+}
