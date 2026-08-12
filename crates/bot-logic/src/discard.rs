@@ -1292,7 +1292,7 @@ pub(crate) fn decorate_evaluations(
         // 評価も黒を選ぶため結果は一致し、赤1枚しか無い場合はその赤が手牌に見えている以上
         // 仮想ツモは黒に確定する。同種牌が1枚も無い場合だけ赤かどうかが未解決のまま残る。
         let resolves_red_five = context.unresolved_red_tile != Some(evaluation.discard);
-        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, context.tiles);
+        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, context.tiles, None);
         evaluation.discards_red_five =
             resolves_red_five && discarded_tile.map(TileId::is_red).unwrap_or(false);
         // 通常ドラは牌種だけで決まるため、物理牌が分からなくても必ず反映する。
@@ -1318,8 +1318,18 @@ pub(crate) fn decorate_evaluations(
     }
 }
 
-pub(crate) fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) -> Option<TileId> {
+/// 指定牌種を切るときに使う物理牌を返す。
+///
+/// `discards_red_five` は「実際に切る牌が赤5かどうか」が上位層で確定している場合のその値。
+/// 確定していれば一致する物理牌を優先し、確定していない (`None`) 場合や一致する牌が無い場合は
+/// 通常牌を赤牌より優先する既定の規則で選ぶ。物理牌の選択規則はこの1箇所だけに置く。
+pub(crate) fn discarded_tile_id_for_type(
+    discard: TileType,
+    tiles: &[TileId],
+    discards_red_five: Option<bool>,
+) -> Option<TileId> {
     let mut red = None;
+    let mut black = None;
     for &tile in tiles {
         if tile.tile_type() != discard {
             continue;
@@ -1327,10 +1337,14 @@ pub(crate) fn discarded_tile_id_for_type(discard: TileType, tiles: &[TileId]) ->
         if tile.is_red() {
             red.get_or_insert(tile);
         } else {
-            return Some(tile);
+            black.get_or_insert(tile);
         }
     }
-    red
+
+    if discards_red_five == Some(true) {
+        return red.or(black);
+    }
+    black.or(red)
 }
 
 #[cfg(test)]

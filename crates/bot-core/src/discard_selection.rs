@@ -1293,6 +1293,124 @@ mod tests {
         );
     }
 
+    // 赤5m(16) と通常5m(17) を持つ14枚。5m 以外はすべて完成ブロックで、1手目に 5m を切って
+    // E を引くと、2手目の最良打牌は残った 5m になる。
+    const RED_FIVE_LOOKAHEAD_TILES: [u8; 14] =
+        [16, 17, 40, 44, 48, 57, 61, 65, 76, 80, 84, 89, 90, 108];
+
+    // 2手目に仮想ツモする E。物理牌は手牌の E(108) とは別の未使用コピーを使う。
+    const RED_FIVE_LOOKAHEAD_DRAW: u8 = 109;
+
+    fn red_five_lookahead_context() -> GameContext {
+        let tiles: Vec<_> = RED_FIVE_LOOKAHEAD_TILES
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let (hand, drawn) = tiles.split_at(RED_FIVE_LOOKAHEAD_TILES.len() - 1);
+        GameContext::from_parts_with_visible_tiles(
+            Some(drawn[0]),
+            hand.to_vec(),
+            vec![],
+            None,
+            None,
+            tiles.clone(),
+        )
+    }
+
+    // 5m の片方の物理牌だけを合法にした Dahai 一覧。lookahead は「打牌候補 × 受け入れ牌 ×
+    // 次打牌候補」の探索になるため、検証に必要な 5m 候補だけへ絞る。
+    fn red_five_lookahead_actions(legal_five: u8) -> Vec<LegalAction> {
+        vec![dahai(legal_five)]
+    }
+
+    // 1手目に実際の合法 Dahai を切った後の物理手牌から、既存の context-aware 評価で2手目の
+    // 最良打牌を求める。テスト側で打牌評価を再実装しないための期待値。
+    fn expected_next_discard_after(discarded: u8) -> Option<bot_logic::DiscardEvaluation> {
+        let mut tiles: Vec<_> = RED_FIVE_LOOKAHEAD_TILES
+            .iter()
+            .filter(|&&value| value != discarded)
+            .map(|&value| tile(value))
+            .collect();
+        tiles.push(tile(RED_FIVE_LOOKAHEAD_DRAW));
+
+        let mut visible: Vec<_> = RED_FIVE_LOOKAHEAD_TILES
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        visible.push(tile(RED_FIVE_LOOKAHEAD_DRAW));
+
+        bot_logic::select_best_discard_from_tiles_with_visible_tiles(
+            &tiles,
+            &[],
+            None,
+            None,
+            &visible,
+        )
+    }
+
+    // 5m 候補の lookahead から、E を仮想ツモした場合の2手目評価を取り出す。
+    fn lookahead_next_discard_for_five(legal_five: u8) -> bot_logic::DiscardEvaluation {
+        let context = red_five_lookahead_context();
+        let actions = red_five_lookahead_actions(legal_five);
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, true);
+
+        with_diagnostic
+            .lookahead
+            .expect("lookahead built on request")
+            .candidate(tile(16).tile_type())
+            .expect("5m candidate exists")
+            .draw(tile(108).tile_type())
+            .expect("E draw exists")
+            .next_discard
+            .clone()
+            .expect("next discard exists")
+    }
+
+    #[test]
+    fn lookahead_discards_the_red_five_when_only_the_red_five_is_legal() {
+        // 赤5mだけが合法なら、1手目で赤5mが除かれ通常5mが残る。2手目評価は通常5mが残った
+        // 物理手牌を起点とした既存 context-aware 評価と一致する。
+        let next = lookahead_next_discard_for_five(16);
+
+        assert_eq!(next.discard, tile(16).tile_type());
+        assert!(!next.discards_red_five);
+        assert_eq!(next.discarded_dora_count, 0);
+        assert_eq!(Some(next), expected_next_discard_after(16));
+    }
+
+    #[test]
+    fn lookahead_discards_the_black_five_when_only_the_black_five_is_legal() {
+        // 通常5mだけが合法なら、1手目で通常5mが除かれ赤5mが残る。
+        let next = lookahead_next_discard_for_five(17);
+
+        assert_eq!(next.discard, tile(16).tile_type());
+        assert!(next.discards_red_five);
+        assert_eq!(next.discarded_dora_count, 1);
+        assert_eq!(Some(next), expected_next_discard_after(17));
+    }
+
+    #[test]
+    fn lookahead_prefers_the_black_five_when_both_fives_are_legal() {
+        // 両方合法なら既存の黒牌優先方針どおり通常5mを切り、赤5mが残る。
+        let context = red_five_lookahead_context();
+        let actions = vec![dahai(16), dahai(17)];
+        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, true);
+
+        let next = with_diagnostic
+            .lookahead
+            .expect("lookahead built on request")
+            .candidate(tile(16).tile_type())
+            .expect("5m candidate exists")
+            .draw(tile(108).tile_type())
+            .expect("E draw exists")
+            .next_discard
+            .clone()
+            .expect("next discard exists");
+
+        assert!(next.discards_red_five);
+        assert_eq!(Some(next), expected_next_discard_after(17));
+    }
+
     #[test]
     fn lookahead_is_built_only_on_request_and_does_not_change_selection() {
         // 2手先診断は明示的に要求した場合だけ構築し、選択結果は要求の有無で変わらない。

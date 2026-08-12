@@ -13,6 +13,7 @@
 //! - 副露済み面子数・見え牌・場風・自風・ドラ表示牌: すべて通常打牌評価と同じ値を反映する
 //! - 役牌 (`discarded_value_honor_count`): 牌種と場風・自風だけで決まるので必ず反映する
 //! - 通常ドラ (ドラ表示牌が示す分): 牌種だけで決まるので必ず反映する
+//! - 1手目に切る物理牌: 通常打牌評価が合法 Dahai に合わせて確定した牌をそのまま除去する
 //! - 赤5 (`discards_red_five` と赤ドラ分): 仮想ツモ牌の牌種を2手目に切る候補でだけ解決できない
 //!
 //! 最後の未解決分はさらに絞り込める。手牌に同種の黒牌が残っていれば通常打牌評価も黒を選ぶので
@@ -225,8 +226,13 @@ fn lookahead_for_candidate(
 
     // 1手目に切った牌は2手目時点で見え牌になる。
     let next_seen = inputs.seen.after_discard(evaluation.discard);
-    // 1手目に切る物理牌も通常打牌評価と同じ規則で決め、2手目の物理牌一覧から外す。
-    let next_tiles = tiles_after_discard(inputs.tiles, evaluation.discard);
+    // 1手目に実際に切られる物理牌を2手目の物理牌一覧から外す。赤5と黒5の両方を持ち片方だけが
+    // 合法な局面でも、通常打牌評価が確定した物理牌をそのまま引き継ぐ。
+    let next_tiles = tiles_after_discard(
+        inputs.tiles,
+        evaluation.discard,
+        evaluation.discards_red_five,
+    );
 
     let draws = evaluation
         .acceptance_after_discard
@@ -284,10 +290,19 @@ fn lookahead_for_draw(
     }
 }
 
-// 指定牌種を1枚切った後の物理牌一覧。切る物理牌は通常打牌評価と同じ黒牌優先で選ぶ。
-fn tiles_after_discard(tiles: &[TileId], discard: TileType) -> Vec<TileId> {
+// 指定牌種を1枚切った後の物理牌一覧。
+//
+// `discards_red_five` は通常打牌評価が確定した「実際に切る牌が赤5かどうか」。合法 Dahai へ
+// 補正済みの [`DiscardEvaluation`] が持つ値をそのまま渡すことで、赤5だけ・黒5だけが合法な
+// 局面でも実際に切られる物理牌を除ける。物理牌の選択は既存 helper へ委ねる。
+fn tiles_after_discard(
+    tiles: &[TileId],
+    discard: TileType,
+    discards_red_five: bool,
+) -> Vec<TileId> {
     let mut remaining = tiles.to_vec();
-    let Some(discarded) = discarded_tile_id_for_type(discard, tiles) else {
+    let Some(discarded) = discarded_tile_id_for_type(discard, tiles, Some(discards_red_five))
+    else {
         return remaining;
     };
     if let Some(position) = remaining.iter().position(|tile| *tile == discarded) {
@@ -507,7 +522,13 @@ mod tests {
     // 仮想ツモ後の手牌を物理牌一覧として組み立てる。ツモ牌には未使用の黒牌を割り当てるため、
     // 既存の context-aware 評価 API へそのまま渡せる。
     fn hypothetical_tiles(case: &Case, discard: TileType, draw: TileType) -> Vec<TileId> {
-        let mut tiles = tiles_after_discard(&case.tiles, discard);
+        let discards_red_five = case
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == discard)
+            .map(|evaluation| evaluation.discards_red_five)
+            .expect("current discard evaluation exists");
+        let mut tiles = tiles_after_discard(&case.tiles, discard, discards_red_five);
         let mut used = tiles.clone();
         used.extend(case.visible.iter().copied());
         used.extend(case.dora_indicators.iter().copied());
