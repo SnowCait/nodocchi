@@ -1267,7 +1267,7 @@ mod tests {
         };
 
         assert_eq!(Some(*tile), temporary_tile_id_from_mjai_pai("P"));
-        assert_eq!(consumed, &vec![*tile, *tile]);
+        assert_eq!(consumed, &[*tile, *tile]);
         assert_eq!(
             decoded
                 .hand_tiles
