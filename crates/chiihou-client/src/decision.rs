@@ -623,8 +623,8 @@ fn build_naku_reply_for_decision(server_npub: &str, decision: ChiihouNakuDecisio
 mod tests {
     use super::*;
     use crate::protocol::ChiihouNakuAction;
-    use bot_core::ShantenAgent;
-    use bot_logic::TileId;
+    use bot_core::{AgentActionSource, PonDecisionReason, ShantenAgent};
+    use bot_logic::{FixedMeldCount, TileId};
 
     fn pai(s: &str) -> ChiihouPai {
         s.parse().unwrap()
@@ -3114,5 +3114,170 @@ nostr:npub1ai000 GET sutehai?"
             }
             other => panic!("expected richi decision, got {other:?}"),
         }
+    }
+
+    const PON_NAKU_REQUEST_CONTENT: &str = "\
+:mahjong_m1::mahjong_m2::mahjong_m3::mahjong_m4::mahjong_m5::mahjong_m6::mahjong_p5::mahjong_p5::mahjong_s7::mahjong_s8::mahjong_north::mahjong_white::mahjong_white: :mahjong_white:
+nostr:npub1ai000 GET naku? pon";
+
+    fn pon_hand() -> Vec<ChiihouPai> {
+        pais(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "5p", "5p", "7s", "8s", "4z", "5z", "5z",
+        ])
+    }
+
+    fn parsed_pon_naku_request() -> ChiihouRequest {
+        crate::protocol::parse_chiihou_request(PON_NAKU_REQUEST_CONTENT)
+            .unwrap()
+            .expect("naku request")
+    }
+
+    fn pon_snapshot() -> ChiihouTableSnapshot {
+        use crate::lifecycle::ChiihouWind;
+        let mut discards: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT] = Default::default();
+        discards[1] = vec![pai("5z")];
+        ChiihouTableSnapshot {
+            round_wind: Some(ChiihouWind::East),
+            seat_wind: Some(ChiihouWind::East),
+            player_id: Some(0),
+            oya: Some(0),
+            discards,
+            ..ChiihouTableSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn pon_naku_request_parses_into_the_expected_reaction() {
+        assert_eq!(
+            parsed_pon_naku_request(),
+            ChiihouRequest::Naku {
+                hand: pon_hand(),
+                target: pai("5z"),
+                actions: vec![ChiihouNakuAction::Pon],
+            }
+        );
+    }
+
+    #[test]
+    fn pon_naku_request_offers_only_pon_and_none() {
+        let ChiihouRequest::Naku {
+            hand,
+            target,
+            actions,
+        } = parsed_pon_naku_request()
+        else {
+            panic!("expected naku request");
+        };
+        assert_eq!(
+            legal_actions_from_naku_request(&hand, target, &actions),
+            vec![pon("5z"), LegalAction::None]
+        );
+    }
+
+    #[test]
+    fn pon_naku_context_is_a_meldless_reaction_without_drawn_tile() {
+        let ChiihouRequest::Naku { hand, .. } = parsed_pon_naku_request() else {
+            panic!("expected naku request");
+        };
+        let context = game_context_from_naku_request_with_state(&hand, &pon_snapshot());
+
+        assert_eq!(context.drawn_tile(), None);
+        assert_eq!(context.player_id(), Some(0));
+        assert_eq!(context.own_fixed_meld_count(), Some(FixedMeldCount::NONE));
+        assert!(!context.any_opponent_reached());
+        assert_eq!(
+            context
+                .hand_tiles()
+                .iter()
+                .map(|tile| tile.to_mjai_string())
+                .collect::<Vec<_>>(),
+            [
+                "1m", "2m", "3m", "4m", "5m", "6m", "5p", "5p", "7s", "8s", "N", "P", "P"
+            ]
+        );
+        assert_eq!(
+            context
+                .hand_tiles()
+                .iter()
+                .filter(|&&tile| tile == tile_of("5z"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn shanten_agent_pons_value_honor_from_a_raw_naku_request() {
+        let request = parsed_pon_naku_request();
+        let ChiihouRequest::Naku {
+            hand,
+            target,
+            actions,
+        } = &request
+        else {
+            panic!("expected naku request");
+        };
+
+        let context = game_context_from_naku_request_with_state(hand, &pon_snapshot());
+        let legal_actions = legal_actions_from_naku_request(hand, *target, actions);
+        assert_eq!(ShantenAgent.act(&context, &legal_actions), pon("5z"));
+
+        assert_eq!(
+            choose_naku_decision_with_state(&request, &pon_snapshot(), &mut ShantenAgent),
+            Ok(ChiihouNakuDecision::Pon)
+        );
+        assert_eq!(
+            build_naku_reply_for_request_with_state(
+                "npub1server",
+                &request,
+                &pon_snapshot(),
+                &mut ShantenAgent
+            ),
+            Ok("nostr:npub1server naku? pon".to_string())
+        );
+    }
+
+    #[test]
+    fn pon_from_a_raw_naku_request_keeps_the_bot_core_pon_judgement() {
+        let ChiihouRequest::Naku {
+            hand,
+            target,
+            actions,
+        } = parsed_pon_naku_request()
+        else {
+            panic!("expected naku request");
+        };
+        let context = game_context_from_naku_request_with_state(&hand, &pon_snapshot());
+        let legal_actions = legal_actions_from_naku_request(&hand, target, &actions);
+
+        let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
+        assert_eq!(diagnostic.selected_action, pon("5z"));
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
+
+        let pon = diagnostic.pon.as_ref().unwrap();
+        assert_eq!(pon.reason, PonDecisionReason::EligibleTenpai);
+        assert_eq!(pon.candidates.len(), 1);
+
+        let candidate = &pon.candidates[0];
+        assert!(candidate.value_honor);
+        assert_eq!(candidate.current_shanten, Some(1));
+        assert_eq!(
+            candidate.current_fixed_meld_count.map(FixedMeldCount::get),
+            Some(0)
+        );
+        assert_eq!(candidate.post_pon_shanten(), Some(0));
+        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
+        assert_eq!(candidate.post_pon_acceptance_type_count(), Some(2));
+
+        let evaluation = candidate.post_pon_discard.as_ref().unwrap();
+        assert_eq!(evaluation.discard.to_mjai_string(), "N");
+        assert_eq!(
+            evaluation
+                .acceptance_after_discard
+                .tiles
+                .iter()
+                .map(|entry| (entry.tile.to_mjai_string(), entry.remaining))
+                .collect::<Vec<_>>(),
+            [("6s".to_string(), 4), ("9s".to_string(), 4)]
+        );
     }
 }

@@ -589,9 +589,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::fixture_base64;
-    use bot_core::{LegalAction, NormalAgent, ShantenAgent, TsumogiriAgent};
-    use bot_logic::TileId;
+    use crate::convert::temporary_tile_id_from_mjai_pai;
+    use crate::observation::{fixture_base64, fixture_base64_with_discards};
+    use bot_core::{
+        AgentActionSource, LegalAction, NormalAgent, PonDecisionReason, ShantenAgent,
+        TsumogiriAgent,
+    };
+    use bot_logic::{FixedMeldCount, TileId};
 
     fn possible_dahai(pai: &str) -> MjaiPossibleAction {
         MjaiPossibleAction::Dahai {
@@ -1202,6 +1206,138 @@ mod tests {
                 consumed: vec!["P".to_string(), "P".to_string(), "P".to_string()],
                 request_id: Some(96),
             })
+        );
+    }
+
+    const PON_OBSERVATION_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
+
+    const PON_DISCARDED_TILE: u8 = 126;
+
+    fn pon_reaction_observation() -> ObservationPayload {
+        let mut discards: [Vec<u8>; 4] = Default::default();
+        discards[1] = vec![PON_DISCARDED_TILE];
+        ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            PON_OBSERVATION_HAND.to_vec(),
+            vec![],
+            discards,
+        ))
+    }
+
+    fn pon_reaction_possible_actions() -> Vec<MjaiPossibleAction> {
+        vec![
+            MjaiPossibleAction::Pon {
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string()],
+            },
+            MjaiPossibleAction::None,
+        ]
+    }
+
+    #[test]
+    fn pon_reaction_observation_decodes_to_the_expected_hand() {
+        let decoded = pon_reaction_observation().decode_4p().unwrap();
+        assert_eq!(
+            decoded
+                .hand_tiles
+                .iter()
+                .map(|tile| tile.to_mjai_string())
+                .collect::<Vec<_>>(),
+            [
+                "1m", "2m", "3m", "4m", "5m", "6m", "5p", "5p", "7s", "8s", "N", "P", "P"
+            ]
+        );
+        assert_eq!(decoded.player_id, 0);
+        assert_eq!(decoded.drawn_tile, None);
+        assert_eq!(decoded.reached, [false; 4]);
+        assert!(decoded.melds.iter().all(|melds| melds.is_empty()));
+    }
+
+    #[test]
+    fn pon_consumed_tiles_match_the_observation_hand_tiles() {
+        // possible_actions の mjai 牌文字列と Observation の raw 物理牌 ID は、非赤牌なら
+        // 同じ牌種代表の temporary TileId へ正規化される。手牌の P 2枚と consumed の P 2枚が
+        // 物理牌 ID として対応するため、ShantenAgent の consumed 除去が InvalidConsumed に
+        // ならずに Pon まで到達する。
+        let decoded = pon_reaction_observation().decode_4p().unwrap();
+        let legal_actions = possible_actions_to_legal_actions(&pon_reaction_possible_actions());
+        let Some(LegalAction::Pon { tile, consumed }) = legal_actions.first() else {
+            panic!("expected pon legal action");
+        };
+
+        assert_eq!(Some(*tile), temporary_tile_id_from_mjai_pai("P"));
+        assert_eq!(consumed, &[*tile, *tile]);
+        assert_eq!(
+            decoded
+                .hand_tiles
+                .iter()
+                .filter(|&held| held == tile)
+                .count(),
+            2
+        );
+        assert_eq!(legal_actions.last(), Some(&LegalAction::None));
+    }
+
+    #[test]
+    fn shanten_agent_pons_value_honor_through_the_observation_path() {
+        let observation = pon_reaction_observation();
+        let possible_actions = pon_reaction_possible_actions();
+        let mut agent = ShantenAgent;
+        let response =
+            build_response_for_request(0, 116, &possible_actions, &observation, &mut agent)
+                .expect("pon response");
+
+        assert_eq!(
+            response,
+            MjaiAction::Pon {
+                actor: 0,
+                pai: "P".to_string(),
+                consumed: vec!["P".to_string(), "P".to_string()],
+                request_id: Some(116),
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"type":"pon","actor":0,"pai":"P","consumed":["P","P"],"request_id":116}"#
+        );
+    }
+
+    #[test]
+    fn pon_through_the_observation_path_keeps_the_bot_core_pon_judgement() {
+        let decoded = pon_reaction_observation().decode_4p().unwrap();
+        let context = game_context_from_decoded_observation(&decoded);
+        let legal_actions = possible_actions_to_legal_actions(&pon_reaction_possible_actions());
+
+        assert_eq!(context.drawn_tile(), None);
+        assert_eq!(context.own_fixed_meld_count(), Some(FixedMeldCount::NONE));
+        assert!(!context.any_opponent_reached());
+
+        let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
+        assert_eq!(diagnostic.selected_action, legal_actions[0]);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
+
+        let pon = diagnostic.pon.as_ref().unwrap();
+        assert_eq!(pon.reason, PonDecisionReason::EligibleTenpai);
+        assert_eq!(pon.candidates.len(), 1);
+
+        let candidate = &pon.candidates[0];
+        assert!(candidate.value_honor);
+        assert_eq!(candidate.current_shanten, Some(1));
+        assert_eq!(candidate.post_pon_shanten(), Some(0));
+        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
+        assert_eq!(candidate.post_pon_acceptance_type_count(), Some(2));
+
+        let evaluation = candidate.post_pon_discard.as_ref().unwrap();
+        assert_eq!(evaluation.discard.to_mjai_string(), "N");
+        assert_eq!(
+            evaluation
+                .acceptance_after_discard
+                .tiles
+                .iter()
+                .map(|entry| (entry.tile.to_mjai_string(), entry.remaining))
+                .collect::<Vec<_>>(),
+            [("6s".to_string(), 4), ("9s".to_string(), 4)]
         );
     }
 
