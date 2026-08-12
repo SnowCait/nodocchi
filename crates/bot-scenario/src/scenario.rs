@@ -32,6 +32,8 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub discards: Option<Vec<String>>,
     #[serde(default)]
+    pub post_reach_passed: Option<Vec<String>>,
+    #[serde(default)]
     pub melds: Option<Vec<Vec<MeldSpec>>>,
     #[serde(default)]
     pub extra_visible_tiles: Option<String>,
@@ -120,6 +122,8 @@ impl Scenario {
     pub fn resolve(spec: &ScenarioSpec) -> Result<Self, ScenarioError> {
         let reached = resolve_reached(spec.reached.as_deref())?;
         let discard_inputs = resolve_discard_inputs(spec.discards.as_deref())?;
+        let post_reach_passed_tiles =
+            resolve_post_reach_passed_tiles(spec.post_reach_passed.as_deref())?;
         let meld_inputs = resolve_meld_inputs(spec.melds.as_deref())?;
         let player_id = resolve_seat("player_id", spec.player_id)?;
         let oya = resolve_seat("oya", spec.oya)?;
@@ -167,7 +171,8 @@ impl Scenario {
             discards,
             reached,
             melds,
-        );
+        )
+        .with_post_reach_passed_tiles(post_reach_passed_tiles);
 
         Ok(Self {
             context,
@@ -197,6 +202,29 @@ fn resolve_discard_inputs(discards: Option<&[String]>) -> Result<[String; 4], Sc
     Ok(std::array::from_fn(|index| {
         values.get(index).cloned().unwrap_or_default()
     }))
+}
+
+fn resolve_post_reach_passed_tiles(
+    post_reach_passed: Option<&[String]>,
+) -> Result<[Vec<TileType>; 4], ScenarioError> {
+    let Some(values) = post_reach_passed else {
+        return Ok(std::array::from_fn(|_| Vec::new()));
+    };
+    if values.len() != 4 {
+        return Err(ScenarioError::PostReachPassedLength {
+            count: values.len(),
+        });
+    }
+
+    let mut tiles: [Vec<TileType>; 4] = std::array::from_fn(|_| Vec::new());
+    for (player, slot) in tiles.iter_mut().enumerate() {
+        let input = values.get(player).map(String::as_str).unwrap_or_default();
+        *slot = parse_field(&format!("post_reach_passed[{player}]"), input)?
+            .into_iter()
+            .map(|tile| tile.tile_type)
+            .collect();
+    }
+    Ok(tiles)
 }
 
 fn resolve_seat(field: &str, value: Option<u8>) -> Result<Option<u8>, ScenarioError> {
@@ -768,6 +796,10 @@ fn pon_consumed_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bot_core::{
+        DefenseFallbackKind, is_genbutsu_for, is_genbutsu_for_all_reached,
+        select_defense_fallback_action_with_kind,
+    };
 
     fn spec_from_json(json: &str) -> ScenarioSpec {
         serde_json::from_str(json).unwrap()
@@ -828,6 +860,7 @@ mod tests {
         assert_eq!(spec.oya, None);
         assert_eq!(spec.reached, None);
         assert_eq!(spec.discards, None);
+        assert_eq!(spec.post_reach_passed, None);
         assert_eq!(spec.extra_visible_tiles, None);
         assert_eq!(spec.legal_dahai, None);
         assert_eq!(spec.legal_pon, None);
@@ -850,6 +883,12 @@ mod tests {
                 .discards()
                 .iter()
                 .all(|discards| discards.is_empty())
+        );
+        assert!(
+            context
+                .post_reach_passed_tiles()
+                .iter()
+                .all(|passed| passed.is_empty())
         );
         assert!(
             scenario
@@ -1162,6 +1201,38 @@ mod tests {
         assert_eq!(
             Scenario::resolve(&spec),
             Err(ScenarioError::ReachedLength { count: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_post_reach_passed_length() {
+        let spec = ScenarioSpec {
+            hand: "123m".to_string(),
+            post_reach_passed: Some(vec!["4s".to_string()]),
+            ..ScenarioSpec::default()
+        };
+        assert_eq!(
+            Scenario::resolve(&spec),
+            Err(ScenarioError::PostReachPassedLength { count: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_post_reach_passed_tile() {
+        let spec = ScenarioSpec {
+            hand: "123m".to_string(),
+            post_reach_passed: Some(vec![
+                String::new(),
+                "4x".to_string(),
+                String::new(),
+                String::new(),
+            ]),
+            ..ScenarioSpec::default()
+        };
+        let error = Scenario::resolve(&spec).unwrap_err();
+        assert!(
+            matches!(&error, ScenarioError::TileInput { field, .. } if field == "post_reach_passed[1]"),
+            "{error:?}"
         );
     }
 
@@ -2166,6 +2237,93 @@ mod tests {
                 r#"{"hand": "1m", "melds": [[{"kind": "nuki", "tiles": "111z"}], [], [], []]}"#
             )
             .is_err()
+        );
+    }
+
+    const POST_REACH_GENBUTSU_SCENARIO: &str =
+        include_str!("../scenarios/post_reach_genbutsu.json");
+
+    fn tile_type(mjai: &str) -> TileType {
+        TileType::from_mjai_type_str(mjai).unwrap()
+    }
+
+    #[test]
+    fn post_reach_passed_is_resolved_per_player() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123m456p789s11z",
+                "player_id": 0,
+                "reached": [false, true, true, false],
+                "discards": ["", "3p", "4s", ""],
+                "post_reach_passed": ["", "4s", "", ""]
+            }"#,
+        );
+        let context = resolve(&spec).context;
+        assert_eq!(
+            context.post_reach_passed_tiles_of(1),
+            Some([tile_type("4s")].as_slice())
+        );
+        assert_eq!(context.post_reach_passed_tiles_of(2), Some([].as_slice()));
+    }
+
+    #[test]
+    fn post_reach_passed_does_not_allocate_physical_tiles() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "1111m",
+                "post_reach_passed": ["", "1m 1m 1m", "", ""]
+            }"#,
+        );
+        let context = resolve(&spec).context;
+        assert_eq!(context.visible_tiles().len(), 4);
+        assert_eq!(
+            context.post_reach_passed_tiles_of(1).map(<[_]>::len),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn post_reach_passed_red_five_is_stored_as_the_black_tile_type() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "1m",
+                "post_reach_passed": ["", "5sr", "", ""]
+            }"#,
+        );
+        let context = resolve(&spec).context;
+        assert_eq!(
+            context.post_reach_passed_tiles_of(1),
+            Some([tile_type("5s")].as_slice())
+        );
+    }
+
+    #[test]
+    fn post_reach_genbutsu_scenario_makes_the_passed_tile_genbutsu_for_both_reachers() {
+        let spec = spec_from_json(POST_REACH_GENBUTSU_SCENARIO);
+        let context = resolve(&spec).context;
+        let four_sou = tile_type("4s");
+
+        assert_eq!(context.reached_opponents(), vec![1, 2]);
+        assert!(is_genbutsu_for(four_sou, 1, &context));
+        assert!(is_genbutsu_for(four_sou, 2, &context));
+        assert!(is_genbutsu_for_all_reached(four_sou, &context));
+    }
+
+    #[test]
+    fn post_reach_genbutsu_scenario_selects_the_passed_tile_as_genbutsu_fallback() {
+        let spec = spec_from_json(POST_REACH_GENBUTSU_SCENARIO);
+        let scenario = resolve(&spec);
+        let selected =
+            select_defense_fallback_action_with_kind(&scenario.context, &scenario.legal_actions);
+
+        assert_eq!(
+            selected.map(|(action, kind)| (action.clone(), kind)),
+            Some((
+                LegalAction::Dahai {
+                    tile: TileId::new(tile_type("4s").raw() * 4).unwrap(),
+                },
+                DefenseFallbackKind::Genbutsu
+            ))
         );
     }
 }

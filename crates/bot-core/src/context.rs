@@ -15,6 +15,7 @@ pub struct GameContext {
     discards: [Vec<TileId>; 4],
     reached: [bool; 4],
     melds: [Vec<Meld>; 4],
+    post_reach_passed_tiles: [Vec<TileType>; 4],
 }
 
 impl GameContext {
@@ -147,7 +148,16 @@ impl GameContext {
             discards,
             reached,
             melds,
+            ..Self::default()
         }
+    }
+
+    pub fn with_post_reach_passed_tiles(
+        mut self,
+        post_reach_passed_tiles: [Vec<TileType>; 4],
+    ) -> Self {
+        self.post_reach_passed_tiles = post_reach_passed_tiles;
+        self
     }
 
     pub fn drawn_tile(&self) -> Option<TileId> {
@@ -220,6 +230,19 @@ impl GameContext {
             .iter()
             .enumerate()
             .any(|(player, &reached)| reached && self.player_id != Some(player as u8))
+    }
+
+    pub fn post_reach_passed_tiles(&self) -> &[Vec<TileType>; 4] {
+        &self.post_reach_passed_tiles
+    }
+
+    pub fn post_reach_passed_tiles_of(&self, player: usize) -> Option<&[TileType]> {
+        self.post_reach_passed_tiles.get(player).map(Vec::as_slice)
+    }
+
+    pub fn is_post_reach_passed(&self, tile: TileType, player: usize) -> bool {
+        self.post_reach_passed_tiles_of(player)
+            .is_some_and(|tiles| tiles.contains(&tile))
     }
 
     // リーチ者一覧: player_id がある場合は自分を除く。ない場合は reached 全員を返す。
@@ -827,6 +850,86 @@ mod tests {
     fn reached_opponents_empty_when_nobody_reached() {
         let context = table_state_context(Some(0), None, Default::default(), [false; 4]);
         assert!(context.reached_opponents().is_empty());
+    }
+
+    #[test]
+    fn default_has_no_post_reach_passed_tiles() {
+        let context = GameContext::default();
+        assert!(context.post_reach_passed_tiles().iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn existing_constructors_have_no_post_reach_passed_tiles() {
+        for context in [
+            GameContext::new(),
+            GameContext::with_drawn_tile(tile(16)),
+            GameContext::with_hand_tiles(vec![tile(0)]),
+            GameContext::from_parts(Some(tile(16)), vec![tile(0)]),
+            GameContext::from_parts_with_dora(Some(tile(16)), vec![tile(0)], vec![tile(4)]),
+            table_state_context(Some(0), Some(0), Default::default(), [false; 4]),
+            meld_context(Some(0), [vec![pon()], vec![], vec![], vec![]]),
+        ] {
+            assert!(context.post_reach_passed_tiles().iter().all(Vec::is_empty));
+        }
+    }
+
+    #[test]
+    fn with_post_reach_passed_tiles_holds_tiles_per_player() {
+        let four_sou = tile(84).tile_type();
+        let context = GameContext::default().with_post_reach_passed_tiles([
+            vec![],
+            vec![four_sou],
+            vec![],
+            vec![],
+        ]);
+        assert_eq!(context.post_reach_passed_tiles_of(0), Some([].as_slice()));
+        assert_eq!(
+            context.post_reach_passed_tiles_of(1),
+            Some([four_sou].as_slice())
+        );
+    }
+
+    #[test]
+    fn with_post_reach_passed_tiles_keeps_other_parts() {
+        let discards = [vec![tile(0)], vec![], vec![], vec![]];
+        let base = table_state_context(
+            Some(1),
+            Some(2),
+            discards.clone(),
+            [false, true, false, false],
+        );
+        let context = base.clone().with_post_reach_passed_tiles([
+            vec![],
+            vec![tile(84).tile_type()],
+            vec![],
+            vec![],
+        ]);
+        assert_eq!(context.player_id(), base.player_id());
+        assert_eq!(context.oya(), base.oya());
+        assert_eq!(context.discards(), &discards);
+        assert_eq!(context.reached(), base.reached());
+    }
+
+    #[test]
+    fn is_post_reach_passed_reports_per_player() {
+        let four_sou = tile(84).tile_type();
+        let five_sou = tile(88).tile_type();
+        let context = GameContext::default().with_post_reach_passed_tiles([
+            vec![],
+            vec![four_sou],
+            vec![],
+            vec![],
+        ]);
+        assert!(context.is_post_reach_passed(four_sou, 1));
+        assert!(!context.is_post_reach_passed(four_sou, 2));
+        assert!(!context.is_post_reach_passed(five_sou, 1));
+    }
+
+    #[test]
+    fn post_reach_passed_tiles_out_of_range_returns_none() {
+        let context = GameContext::default();
+        assert_eq!(context.post_reach_passed_tiles_of(4), None);
+        assert!(!context.is_post_reach_passed(tile(84).tile_type(), 4));
     }
 
     #[test]

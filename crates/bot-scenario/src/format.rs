@@ -6,7 +6,7 @@ use bot_core::{
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, EffectiveShanten,
-    FixedMeldCount, LookaheadDiagnostic, Shanten, TileId,
+    FixedMeldCount, LookaheadDiagnostic, Shanten, TileId, TileType,
 };
 
 use crate::scenario::Scenario;
@@ -79,6 +79,15 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
     for (player, discards) in context.discards().iter().enumerate() {
         if !discards.is_empty() {
             lines.push(format!("  discards[{player}]: {}", format_tiles(discards)));
+        }
+    }
+
+    for (player, passed) in context.post_reach_passed_tiles().iter().enumerate() {
+        if !passed.is_empty() {
+            lines.push(format!(
+                "  post reach passed[{player}]: {}",
+                format_tile_types(passed)
+            ));
         }
     }
 
@@ -742,6 +751,17 @@ fn format_tiles(tiles: &[TileId]) -> String {
         .join(" ")
 }
 
+fn format_tile_types(tiles: &[TileType]) -> String {
+    if tiles.is_empty() {
+        return NONE.to_string();
+    }
+    tiles
+        .iter()
+        .map(|tile| tile.to_mjai_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn format_melds(melds: &[Meld]) -> String {
     if melds.is_empty() {
         return NONE.to_string();
@@ -1017,6 +1037,47 @@ mod tests {
         assert!(scenario.contains("  melds[0]: Ankan E E E E"), "{scenario}");
         assert!(!scenario.contains("(called"), "{scenario}");
         assert!(scenario.contains("  own fixed meld count: 1"), "{scenario}");
+    }
+
+    const POST_REACH_GENBUTSU_SCENARIO: &str =
+        include_str!("../scenarios/post_reach_genbutsu.json");
+
+    #[test]
+    fn scenario_section_shows_post_reach_passed_tiles() {
+        let (_, _, output) = rendered(POST_REACH_GENBUTSU_SCENARIO, false);
+        let scenario = section(&output, "Scenario");
+        assert!(
+            scenario.contains("  post reach passed[1]: 4s"),
+            "{scenario}"
+        );
+        assert!(!scenario.contains("  post reach passed[0]"), "{scenario}");
+        assert!(!scenario.contains("  post reach passed[2]"), "{scenario}");
+    }
+
+    #[test]
+    fn scenario_section_omits_post_reach_passed_when_empty() {
+        let (_, _, output) = rendered(r#"{"hand": "234m455p789s"}"#, false);
+        let scenario = section(&output, "Scenario");
+        assert!(!scenario.contains("post reach passed"), "{scenario}");
+    }
+
+    #[test]
+    fn post_reach_genbutsu_scenario_reports_genbutsu_in_the_defense_section() {
+        let (_, _, output) = rendered(POST_REACH_GENBUTSU_SCENARIO, false);
+        let defense = section(&output, "Defense");
+        assert!(defense.contains("  selected action: 4s"), "{defense}");
+        assert!(defense.contains("  selected kind: Genbutsu"), "{defense}");
+        assert!(defense.contains("  opponent reach count: 2"), "{defense}");
+        assert!(defense.contains("  genbutsu: true"), "{defense}");
+    }
+
+    #[test]
+    fn post_reach_genbutsu_scenario_discards_the_passed_tile() {
+        let (_, _, output) = rendered(POST_REACH_GENBUTSU_SCENARIO, false);
+        assert!(
+            output.contains("Final decision\n  action: 4s\n  source: DefenseFallback"),
+            "{output}"
+        );
     }
 
     const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");

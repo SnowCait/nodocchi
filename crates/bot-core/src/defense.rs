@@ -6,9 +6,10 @@ const LOG_TARGET: &str = "bot_core::defense";
 
 // discards は防御・現物判定用、visible_tiles は枚数補正用なので用途を分ける。
 pub fn is_genbutsu_for(tile: TileType, player: usize, context: &GameContext) -> bool {
-    context
+    let in_own_discards = context
         .discards_of(player)
-        .is_some_and(|discards| discards.iter().any(|t| t.tile_type() == tile))
+        .is_some_and(|discards| discards.iter().any(|t| t.tile_type() == tile));
+    in_own_discards || context.is_post_reach_passed(tile, player)
 }
 
 // 全リーチ者に共通する現物か判定する。リーチ者がいなければ false。
@@ -996,6 +997,171 @@ mod tests {
         let discards = [vec![], vec![tile(17)], vec![], vec![]];
         let context = table_state_context(Some(0), None, discards, [false, true, false, false]);
         assert!(is_genbutsu_for_all_reached(tile(16).tile_type(), &context));
+    }
+
+    fn post_reach_context(
+        player_id: Option<u8>,
+        discards: [Vec<TileId>; 4],
+        reached: [bool; 4],
+        post_reach_passed: [Vec<TileType>; 4],
+    ) -> GameContext {
+        table_state_context(player_id, None, discards, reached)
+            .with_post_reach_passed_tiles(post_reach_passed)
+    }
+
+    fn tile_type(mjai: &str) -> TileType {
+        TileType::from_mjai_type_str(mjai).unwrap()
+    }
+
+    fn discarded(mjai: &str) -> TileId {
+        TileId::new(tile_type(mjai).raw() * 4).unwrap()
+    }
+
+    fn held(mjai: &str) -> TileId {
+        TileId::new(tile_type(mjai).raw() * 4 + 1).unwrap()
+    }
+
+    #[test]
+    fn reach_declaration_tile_stays_genbutsu_for_the_reacher() {
+        let discards = [vec![], vec![discarded("3p")], vec![], vec![]];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, false, false],
+            Default::default(),
+        );
+        assert!(is_genbutsu_for(tile_type("3p"), 1, &context));
+        assert!(is_genbutsu_for_all_reached(tile_type("3p"), &context));
+    }
+
+    #[test]
+    fn tile_passed_after_single_reach_is_genbutsu_for_the_reacher() {
+        let discards = [vec![], vec![discarded("3p")], vec![discarded("4s")], vec![]];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, false, false],
+            [vec![], vec![tile_type("4s")], vec![], vec![]],
+        );
+        assert!(is_genbutsu_for(tile_type("4s"), 1, &context));
+        assert!(is_genbutsu_for_all_reached(tile_type("4s"), &context));
+    }
+
+    #[test]
+    fn tile_discarded_before_reach_is_not_genbutsu_for_the_reacher() {
+        let discards = [vec![], vec![discarded("3p")], vec![discarded("4s")], vec![]];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, false, false],
+            Default::default(),
+        );
+        assert!(!is_genbutsu_for(tile_type("4s"), 1, &context));
+        assert!(!is_genbutsu_for_all_reached(tile_type("4s"), &context));
+    }
+
+    #[test]
+    fn declaration_tile_of_a_later_reach_is_genbutsu_for_both_reachers() {
+        let discards = [vec![], vec![discarded("3p")], vec![discarded("4s")], vec![]];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, true, false],
+            [vec![], vec![tile_type("4s")], vec![], vec![]],
+        );
+        assert!(is_genbutsu_for(tile_type("4s"), 1, &context));
+        assert!(is_genbutsu_for(tile_type("4s"), 2, &context));
+        assert!(is_genbutsu_for_all_reached(tile_type("4s"), &context));
+    }
+
+    #[test]
+    fn genbutsu_fallback_selects_the_tile_passed_after_reach() {
+        let discards = [vec![], vec![discarded("3p")], vec![discarded("4s")], vec![]];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, true, false],
+            [vec![], vec![tile_type("4s")], vec![], vec![]],
+        );
+        let four_sou = LegalAction::Dahai { tile: held("4s") };
+        let actions = vec![LegalAction::Dahai { tile: tile(0) }, four_sou.clone()];
+
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((&four_sou, DefenseFallbackKind::Genbutsu))
+        );
+    }
+
+    #[test]
+    fn post_reach_passed_tiles_are_tracked_per_player() {
+        let discards = [
+            vec![],
+            vec![discarded("3p")],
+            vec![discarded("6p")],
+            vec![discarded("7s")],
+        ];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, true, false],
+            [vec![], vec![tile_type("7s")], vec![], vec![]],
+        );
+        assert!(is_genbutsu_for(tile_type("7s"), 1, &context));
+        assert!(!is_genbutsu_for(tile_type("7s"), 2, &context));
+        assert!(!is_genbutsu_for_all_reached(tile_type("7s"), &context));
+    }
+
+    #[test]
+    fn tile_passed_after_three_reaches_is_genbutsu_for_all_of_them() {
+        let context = post_reach_context(
+            Some(0),
+            Default::default(),
+            [false, true, true, true],
+            [
+                vec![],
+                vec![tile_type("4s")],
+                vec![tile_type("4s")],
+                vec![tile_type("4s")],
+            ],
+        );
+        assert_eq!(context.reached_opponents(), vec![1, 2, 3]);
+        assert!(is_genbutsu_for_all_reached(tile_type("4s"), &context));
+    }
+
+    #[test]
+    fn post_reach_passed_black_five_covers_the_red_five() {
+        let context = post_reach_context(
+            Some(0),
+            Default::default(),
+            [false, true, false, false],
+            [vec![], vec![tile_type("5s")], vec![], vec![]],
+        );
+        let red_five_sou = TileId::new(88).unwrap();
+        assert!(red_five_sou.is_red());
+        assert_eq!(red_five_sou.tile_type(), tile_type("5s"));
+        assert!(is_genbutsu_for(red_five_sou.tile_type(), 1, &context));
+        assert!(is_genbutsu_for_all_reached(
+            red_five_sou.tile_type(),
+            &context
+        ));
+    }
+
+    #[test]
+    fn own_post_reach_passed_tiles_do_not_make_a_tile_genbutsu_for_all_reached() {
+        let context = post_reach_context(
+            Some(0),
+            Default::default(),
+            [true, true, false, false],
+            [vec![tile_type("4s")], vec![], vec![], vec![]],
+        );
+        assert!(!is_genbutsu_for_all_reached(tile_type("4s"), &context));
+    }
+
+    #[test]
+    fn post_reach_passed_tiles_of_out_of_range_player_is_none() {
+        let context = GameContext::default();
+        assert_eq!(context.post_reach_passed_tiles_of(4), None);
+        assert!(!is_genbutsu_for(tile_type("4s"), 4, &context));
     }
 
     #[test]
