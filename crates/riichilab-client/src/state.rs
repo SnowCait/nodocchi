@@ -59,6 +59,9 @@ impl ValidationState {
     }
 
     pub fn on_dahai(&mut self, actor: u8, pai: &str) {
+        if usize::from(actor) >= PLAYER_COUNT {
+            return;
+        }
         if Some(actor) == self.seat_id {
             self.last_tsumo = None;
         }
@@ -383,6 +386,27 @@ mod tests {
                 assert!(!state.is_reach_active(player));
                 assert!(passed(&state, player).is_empty());
             }
+        }
+
+        #[test]
+        fn out_of_range_actor_dahai_is_not_recorded_for_active_reachers() {
+            let mut state = started();
+            state.on_tsumo(0, "6p".to_string());
+            state.on_reach(1);
+            state.on_dahai(1, "3p");
+            state.on_reach(2);
+            assert!(state.is_reach_active(1));
+            assert!(passed(&state, 1).is_empty());
+
+            let before = state.clone();
+            state.on_dahai(4, "4s");
+
+            assert!(passed(&state, 1).is_empty());
+            assert!(state.is_reach_active(1));
+            assert!(state.is_reach_pending(2));
+            assert!(!state.is_reach_active(2));
+            assert_eq!(state.last_tsumo(), Some("6p"));
+            assert_eq!(state, before);
         }
 
         #[test]
