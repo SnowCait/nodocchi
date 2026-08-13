@@ -1,7 +1,8 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
     GameContext, LegalAction, Meld, PonCandidateDiagnostic, PonDecisionDiagnostic,
-    PushPullDecision, PushPullInputs, ShantenAgent, ShantenDecisionDiagnostic,
+    PushPullDecision, PushPullInputs, ReachDecisionDiagnostic, ShantenAgent,
+    ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -44,6 +45,7 @@ pub fn format_diagnostic(
         diagnostic.push_pull_inputs.as_ref(),
         diagnostic.push_pull_decision.as_ref(),
     ));
+    sections.push(format_reach(diagnostic.reach.as_ref()));
     sections.push(format_defense(diagnostic.defense.as_ref()));
 
     if let Some(section) = format_defense_candidates(diagnostic.defense.as_ref()) {
@@ -567,6 +569,63 @@ fn format_push_pull(
     lines.join("\n")
 }
 
+// リーチ判断。通常打牌 selection が選んだ打牌と、その打牌後のテンパイの待ち・恒常フリテンを
+// そのまま出す。表示専用に待ちやフリテンを求め直さない。
+fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
+    let mut lines = vec!["Reach".to_string()];
+
+    let Some(reach) = reach else {
+        lines.push("  not evaluated".to_string());
+        return lines.join("\n");
+    };
+
+    lines.push("  evaluated".to_string());
+    lines.push(format!("  decision: {}", yes_no(reach.should_reach())));
+    lines.push(format!("  reason: {:?}", reach.reason));
+    match reach.selected_discard.as_ref() {
+        Some(action) => lines.push(format!("  selected discard: {}", action_label(action))),
+        None => lines.push(format!("  selected discard: {NONE}")),
+    }
+    lines.push(format!(
+        "  shanten: {}",
+        reach
+            .shanten_after_discard
+            .map_or_else(|| ABSENT.to_string(), |shanten| shanten.to_string())
+    ));
+
+    let Some(tenpai) = reach.tenpai_wait.as_ref() else {
+        return lines.join("\n");
+    };
+
+    // ツモ和了できる待ち。選ばれた打牌評価の受け入れそのもので、見え牌を反映済み。
+    lines.push(format!(
+        "  live wait: {} remaining / {} types",
+        tenpai.tsumo_remaining, tenpai.tsumo_type_count
+    ));
+    lines.push(format!(
+        "  permanent furiten: {}",
+        permanent_furiten_label(tenpai.permanent_furiten())
+    ));
+    lines.push(format!(
+        "  ron: {}",
+        format_optional_yes_no(tenpai.can_ron())
+    ));
+    lines.push(format!(
+        "  tenpai waits: {}",
+        format_tile_types(&tenpai.structural_waits)
+    ));
+    lines.push(format!(
+        "  live tenpai waits: {}",
+        format_tile_types(&tenpai.live_waits)
+    ));
+    lines.push(format!(
+        "  discarded waits: {}",
+        format_discarded_waits(tenpai)
+    ));
+
+    lines.join("\n")
+}
+
 fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
     let mut lines = vec!["Defense".to_string()];
 
@@ -924,6 +983,7 @@ mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
     use bot_core::{Agent, DiagnosticOptions, MenzenAgent};
+    use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
 
     fn scenario_from_json(json: &str) -> Scenario {
         let spec: ScenarioSpec = serde_json::from_str(json).unwrap();
@@ -976,6 +1036,7 @@ mod tests {
                 | "Normal discard candidates"
                 | "Lookahead"
                 | "Push/Pull"
+                | "Reach"
                 | "Defense"
                 | "Defense candidates"
                 | "Summary"
@@ -2141,11 +2202,16 @@ mod tests {
         "legal_dahai": "N"
     }"#;
 
+    // 打 北 で 2p / 5p の両面テンパイになり、待ちは8枚。
     const REACH_SCENARIO: &str = r#"{
-        "hand": "123456789m123p1s",
-        "draw": "9s",
+        "hand": "123456789m34p55s",
+        "draw": "N",
         "allow_reach": true
     }"#;
+
+    // 打 北 で 5s 単騎テンパイになり、待ちは3枚だけ。14枚をそのまま評価すると受け入れは
+    // {5s, 北} の6枚に見えるが、実際に選んだ打牌後の待ちは threshold に届かない。
+    const REACH_TANKI_WAIT_SCENARIO: &str = include_str!("../scenarios/reach_tanki_wait.json");
 
     fn without_selected_action(
         legal_actions: &[LegalAction],
@@ -2504,6 +2570,82 @@ mod tests {
                 "{summary}"
             );
         }
+    }
+
+    // ---- Reach 表示 ----
+
+    #[test]
+    fn reach_section_reports_the_selected_discard_and_its_wait() {
+        let (_, diagnostic, output) = rendered(REACH_SCENARIO, false);
+        let reach = section(&output, "Reach");
+        let decision = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
+        assert!(reach.contains("  decision: yes"), "{reach}");
+        assert!(reach.contains("  reason: Eligible"), "{reach}");
+        assert!(reach.contains("  selected discard: N"), "{reach}");
+        assert!(reach.contains("  shanten: 0"), "{reach}");
+        assert!(
+            reach.contains("  live wait: 8 remaining / 2 types"),
+            "{reach}"
+        );
+        assert!(reach.contains("  permanent furiten: unknown"), "{reach}");
+        assert!(reach.contains("  ron: unknown"), "{reach}");
+        assert!(reach.contains("  tenpai waits: 2p 5p"), "{reach}");
+        assert!(reach.contains("  live tenpai waits: 2p 5p"), "{reach}");
+        assert!(reach.contains("  discarded waits: -"), "{reach}");
+
+        // 表示は診断が持つ値そのもので、表示専用に待ちを求め直さない。
+        assert_eq!(decision.tsumo_remaining(), Some(8));
+        assert_eq!(decision.tsumo_type_count(), Some(2));
+        assert_eq!(
+            decision.selected_discard.as_ref(),
+            diagnostic.normal_discard_action.as_ref()
+        );
+    }
+
+    #[test]
+    fn reach_section_reports_the_insufficient_wait_of_the_selected_discard() {
+        // 14枚をそのまま評価すると {5s, 北} の6枚に見えるが、実際に切る 北 を決めた後の待ちは
+        // 5s の3枚だけ。リーチ判断は選んだ打牌後の待ちで行う。
+        let (scenario, diagnostic, output) = rendered(REACH_TANKI_WAIT_SCENARIO, false);
+        let reach = section(&output, "Reach");
+
+        // 打牌前の14枚をそのまま評価すると threshold を満たしてしまう局面であることを固定する。
+        let counts = TileCounts::from_tiles(
+            scenario
+                .context
+                .hand_tiles()
+                .iter()
+                .copied()
+                .chain(scenario.context.drawn_tile()),
+        );
+        let whole_hand =
+            calculate_acceptance_with_visible_tiles(&counts, scenario.context.visible_tiles());
+        assert_eq!(whole_hand.current.min(), 0);
+        assert_eq!(whole_hand.total_remaining(), 6);
+
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(action_label(&diagnostic.selected_action), "N");
+        assert!(reach.contains("  decision: no"), "{reach}");
+        assert!(reach.contains("  reason: InsufficientLiveWait"), "{reach}");
+        assert!(reach.contains("  selected discard: N"), "{reach}");
+        assert!(reach.contains("  shanten: 0"), "{reach}");
+        assert!(
+            reach.contains("  live wait: 3 remaining / 1 types"),
+            "{reach}"
+        );
+        assert!(reach.contains("  tenpai waits: 5s"), "{reach}");
+        assert!(reach.contains("  permanent furiten: no"), "{reach}");
+        assert!(reach.contains("  ron: yes"), "{reach}");
+    }
+
+    #[test]
+    fn reach_section_is_not_evaluated_outside_push() {
+        // 防御局面 (Fold) ではリーチを検討しない。
+        let (_, diagnostic, output) = rendered(DEFENSE_SCENARIO, false);
+        assert!(diagnostic.reach.is_none());
+        assert_eq!(section(&output, "Reach"), "Reach\n  not evaluated");
     }
 
     // ---- Lookahead (2手先診断) 表示 ----

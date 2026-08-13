@@ -11,8 +11,9 @@ pub use action::LegalAction;
 pub use agent::Agent;
 pub use agents::{
     AgentActionSource, DiagnosticOptions, MenzenAgent, NormalAgent, PonCandidateDiagnostic,
-    PonDecisionDiagnostic, PonDecisionReason, ShantenAgent, ShantenDecisionDiagnostic,
-    TsumogiriAgent, diagnose_shanten_decision, diagnose_shanten_decision_with_options,
+    PonDecisionDiagnostic, PonDecisionReason, ReachDecisionDiagnostic, ReachDecisionReason,
+    ShantenAgent, ShantenDecisionDiagnostic, TsumogiriAgent, diagnose_shanten_decision,
+    diagnose_shanten_decision_with_options,
 };
 pub use context::GameContext;
 pub use defense::{
