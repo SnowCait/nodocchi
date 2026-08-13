@@ -359,7 +359,7 @@ Scenario
       --request-id 425
     ```
 
-4. `Player threats` で相手の副露 facts（`reached` / `open melds` / `meld kinds` / `meld dora`）を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
+4. `Player threats` で相手の副露 facts（`reached` / `discards` / `open melds` / `meld kinds` / `meld dora`）と `open hand threat` を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
 
     ```text
     Push/Pull
@@ -370,9 +370,12 @@ Scenario
     player 1
       opponent: yes
       reached: no
+      discards: 9
       melds: 2
       open melds: 2
       meld kinds: Chi 1, Pon 1
+      open hand threat: High
+      open hand threat reason: TwoOrMoreOpenMeldsFromNineDiscards
     ```
 
 5. 原因になった比較軸が分かったら、その局面を JSON scenario に落として回帰 fixture にする
@@ -433,7 +436,7 @@ Reach
 
 通常打牌候補では、選ばれなかった理由も表示されます。その判断処理を通らなかった場合は `not evaluated` と表示されます。
 
-`Player threats` は、局面から観測できる player ごとの事実だけを表示する section です。リーチ・親・自風・副露数 (`melds` / `open melds` / `kans`) と `MeldKind` の内訳、副露ごとの牌・公開かどうか・槓かどうか・ドラ・赤ドラ・役牌になり得るかを出します。
+`Player threats` は、局面から観測できる player ごとの事実と、そこから求めた副露相手の暫定 classification を表示する section です。リーチ・親・自風・河の枚数 (`discards`)・副露数 (`melds` / `open melds` / `kans`) と `MeldKind` の内訳、副露ごとの牌・公開かどうか・槓かどうか・ドラ・赤ドラ・役牌になり得るかを出します。
 
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/opponent_threat.json
@@ -445,12 +448,18 @@ player 1
   reached: no
   dealer: no
   seat wind: S
+  discards: 0
   melds: 2
   open melds: 2
   kans: 0
   meld kinds: Chi 1, Pon 1
   meld dora: 2
   meld red dora: 1
+  open meld dora: 2
+  open meld red dora: 1
+  open confirmed value honor: 1
+  open hand threat: High
+  open hand threat reason: TwoOrMoreWithValueHonor
   meld 1: Pon P P P
     open: yes
     kan: no
@@ -466,9 +475,34 @@ player 1
     red dora: 1
 ```
 
-`player_id` が不明でも席を除外せず常に4席分を表示し、自分か他家か (`opponent`)・親か (`dealer`) ・自風が確定できない場合は推測せず `unknown` / `None` と表示します。暗槓は fixed meld として `melds` と `kans` に数えますが `open melds` には数えません。
+`player_id` が不明でも席を除外せず常に4席分を表示し、自分か他家か (`opponent`)・親か (`dealer`) ・自風が確定できない場合は推測せず `unknown` / `None` と表示します。暗槓は fixed meld として `melds` と `kans` に数えますが `open melds` には数えません。`discards` はその player が河へ切った枚数そのもので、「河2段目」のような表示上の区切りからは導出しません。
 
-この section は観測できる事実だけで、危険度の判断は含みません。押し引き・防御にもまだ反映しておらず、非リーチの副露相手しかいない局面の `Push/Pull` は従来どおり `NoOpponentReach` → `Push` になります。
+`meld dora` / `meld red dora` は暗槓を含む fixed meld 全体の集計です。`open meld dora` / `open meld red dora` / `open confirmed value honor` は公開された副露だけの集計で、暗槓のドラ・赤ドラ・役牌は含みません。
+
+#### 副露相手の暫定 OpenHandThreat
+
+`open hand threat` は、非リーチで副露している他家に対する暫定 classification です。観測 facts だけを入力にした暫定 heuristic であり、テンパイ確率・放銃率・推定打点を表すものではありません。
+
+| level | 条件 |
+| --- | --- |
+| `High` | 下の暫定条件のいずれかを満たす |
+| `Present` | `High` ではないが `open melds` が1つ以上ある |
+| `None` | `open melds` が0。暗槓だけの相手もここ |
+
+`High` の暫定条件は次のいずれかです。
+
+- `open melds` が3つ以上 (`ThreeOrMoreOpenMelds`)
+- `open melds` が2つ以上かつ確定役牌の副露がある (`TwoOrMoreWithValueHonor`)
+- `open melds` が2つ以上かつ公開副露内のドラが2枚以上 (`TwoOrMoreWithDora`)
+- 親が `open melds` を2つ以上持つ (`DealerWithTwoOrMoreOpenMelds`)
+- `open melds` が2つ以上かつ `discards` が9枚以上 (`TwoOrMoreOpenMeldsFromNineDiscards`)
+- `open melds` が1つ以上かつ `discards` が12枚以上 (`OpenMeldFromTwelveDiscards`)
+
+局進行の threshold (2副露以上 + 河9枚以上、1副露以上 + 河12枚以上) は、中盤以降の副露相手を警戒するための現在の暫定値です。テンパイ確率を計算した結果ではなく、実戦の regression test に基づいて将来調整します。複数の条件を同時に満たす場合、`open hand threat reason` には上の並び順で最初に一致した条件だけを表示します。level 自体はどの条件を満たしても `High` です。
+
+自分の席・リーチ済みの席・`player_id` 不明で自分かどうか確定できない席は分類の対象外で、`not applicable (SelfSeat)` / `not applicable (Reached)` / `not applicable (UnknownSeat)` と表示します。リーチ者の危険度は既存のリーチ情報が source of truth なので、OpenHandThreat とは二重に適用しません。席が不明な相手を他家と推測して `Present` / `High` にすることも、逆に危険度なしと確定させることもしません。
+
+この classification は現時点では診断専用で、押し引き・防御の行動には使っていません。`open hand threat: High` の相手がいても、非リーチの副露相手しかいない局面の `Push/Pull` は従来どおり `NoOpponentReach` → `Push` で、防御 fallback もリーチ者向けの現物・筋のままです。
 
 出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
 
@@ -513,7 +547,9 @@ diff \
 
 副露牌は見え牌に加わるため受け入れが変わり得ますが、この scenario 群は相手の副露牌が自分の受け入れ牌種と重ならない局面に揃えてあるため、`Normal discard` と offense は一致します。
 
-現在の押し引きは副露 facts を使わないため、どの scenario も `NoOpponentReach` → `Push` です。何副露から危険とみなすか、役牌副露・ドラ・親副露をどう扱うかの threshold はまだ入れていません。
+各 scenario の `open hand threat` は、副露なしが `None`、1副露が `Present`、`open_hand_value_pon_and_chi.json` / `open_hand_dora_melds.json` / 3副露の各 scenario が `High` になります。どの scenario も相手の河は空なので、局進行の threshold は `High` の理由になりません。
+
+現在の押し引きは副露 facts も OpenHandThreat も使わないため、`High` の scenario を含めてどの scenario も `NoOpponentReach` → `Push` です。副露相手に対する具体的な押し引き・防御はまだ入れていません。
 
 ## 公式ドキュメント
 

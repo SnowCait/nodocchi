@@ -1,14 +1,17 @@
 //! 非リーチ副露相手の観測事実を段階的に比較するための scenario corpus と、その回帰テスト。
 //!
 //! 各 fixture は同じ自分の攻撃状態に対して相手の副露だけを変えたもので、現行の
-//! `PlayerThreatFacts` / 押し引き / 通常打牌 selected を並べて比較するための固定局面。
-//! corpus 側で threat score や副露評価を再実装せず、production が構築した facts をそのまま
-//! 確認する。`decide_push_pull()` はまだ副露 facts を使わないため、全 fixture が
-//! `NoOpponentReach` → `Push` になることを固定する。
+//! `PlayerThreatFacts` / `OpenHandThreat` / 押し引き / 通常打牌 selected を並べて比較するための
+//! 固定局面。corpus 側で threat score や副露評価を再実装せず、production が構築した facts と
+//! classification をそのまま確認する。`decide_push_pull()` はまだ副露 facts も OpenHandThreat も
+//! 使わないため、`High` になる fixture を含めて全 fixture が `NoOpponentReach` → `Push` になる
+//! ことを固定する。
 
 use bot_core::{
-    Agent, DiagnosticOptions, MeldKindCounts, PlayerThreatFacts, PushPullMode, PushPullReason,
-    ShantenAgent, ShantenDecisionDiagnostic, ValueHonorMeldCounts,
+    Agent, DiagnosticOptions, MeldKindCounts, OpenHandThreatAssessment, OpenHandThreatDecision,
+    OpenHandThreatExclusion, OpenHandThreatLevel, OpenHandThreatReason, PlayerThreatFacts,
+    PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, ValueHonorMeldCounts,
+    classify_open_hand_threat,
 };
 use bot_logic::{TileId, TileType};
 
@@ -34,6 +37,10 @@ const WEAK_THREE_MELDS_VALUE_DORA: &str =
 const SELF_PLAYER: usize = 0;
 const DEALER_PLAYER: usize = 1;
 
+// 全 fixture で共通の河。player 2 だけが 5 枚切っており、副露を持つ席の河は空。
+const RIVER_PLAYER: usize = 2;
+const RIVER_DISCARD_COUNT: usize = 5;
+
 /// corpus が持つ2種類の自分側局面。副露 threat と自分の攻撃力を後から組み合わせるための軸で、
 /// 同じ hand を共有する fixture 同士は通常打牌・offense が一致する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,11 +51,13 @@ enum SelfHand {
     TwoShanten,
 }
 
-/// 副露を持つ席に期待する観測事実。`PlayerThreatFacts` の値をそのまま比較するためだけの表で、
-/// ここから危険度を導かない。
+/// 副露を持つ席に期待する観測事実と、そこから production が導く暫定 classification。
+/// `PlayerThreatFacts` / `OpenHandThreatDecision` の値をそのまま比較するためだけの表で、
+/// corpus 側で危険度を計算し直さない。
 #[derive(Debug, Clone, Copy)]
 struct ExpectedOpenHand {
     player: usize,
+    discard_count: usize,
     meld_count: usize,
     open_meld_count: usize,
     kan_count: usize,
@@ -56,6 +65,10 @@ struct ExpectedOpenHand {
     meld_dora_count: u8,
     meld_red_dora_count: u8,
     value_honor_melds: ValueHonorMeldCounts,
+    open_meld_dora_count: u8,
+    open_meld_red_dora_count: u8,
+    open_value_honor_melds: ValueHonorMeldCounts,
+    threat: OpenHandThreatDecision,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +104,27 @@ fn dragon_meld() -> ValueHonorMeldCounts {
     }
 }
 
+fn no_open_meld() -> OpenHandThreatDecision {
+    OpenHandThreatDecision {
+        level: OpenHandThreatLevel::None,
+        reason: OpenHandThreatReason::NoOpenMeld,
+    }
+}
+
+fn present() -> OpenHandThreatDecision {
+    OpenHandThreatDecision {
+        level: OpenHandThreatLevel::Present,
+        reason: OpenHandThreatReason::OpenMeldPresent,
+    }
+}
+
+fn high(reason: OpenHandThreatReason) -> OpenHandThreatDecision {
+    OpenHandThreatDecision {
+        level: OpenHandThreatLevel::High,
+        reason,
+    }
+}
+
 fn corpus() -> Vec<CorpusScenario> {
     vec![
         CorpusScenario {
@@ -105,6 +139,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 1,
                 open_meld_count: 1,
                 kan_count: 0,
@@ -112,6 +147,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                threat: present(),
             }),
         },
         CorpusScenario {
@@ -120,6 +159,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 1,
                 open_meld_count: 1,
                 kan_count: 0,
@@ -127,6 +167,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: dragon_meld(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: dragon_meld(),
+                threat: present(),
             }),
         },
         CorpusScenario {
@@ -135,6 +179,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 2,
                 open_meld_count: 2,
                 kan_count: 0,
@@ -142,6 +187,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                threat: present(),
             }),
         },
         CorpusScenario {
@@ -150,6 +199,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 2,
                 open_meld_count: 2,
                 kan_count: 0,
@@ -157,6 +207,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: dragon_meld(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: dragon_meld(),
+                threat: high(OpenHandThreatReason::TwoOrMoreWithValueHonor),
             }),
         },
         CorpusScenario {
@@ -165,6 +219,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 2,
                 open_meld_count: 2,
                 kan_count: 0,
@@ -172,6 +227,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 2,
                 meld_red_dora_count: 1,
                 value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 2,
+                open_meld_red_dora_count: 1,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                threat: high(OpenHandThreatReason::TwoOrMoreWithDora),
             }),
         },
         CorpusScenario {
@@ -180,6 +239,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 3,
                 open_meld_count: 3,
                 kan_count: 0,
@@ -187,6 +247,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
             }),
         },
         CorpusScenario {
@@ -195,6 +259,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 3,
                 open_meld_count: 3,
                 kan_count: 0,
@@ -202,6 +267,11 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 2,
                 meld_red_dora_count: 1,
                 value_honor_melds: dragon_meld(),
+                open_meld_dora_count: 2,
+                open_meld_red_dora_count: 1,
+                open_value_honor_melds: dragon_meld(),
+                // 役牌・ドラの条件も満たすが、優先順位により3副露の reason になる。
+                threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
             }),
         },
         CorpusScenario {
@@ -210,6 +280,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: DEALER_PLAYER,
+                discard_count: 0,
                 meld_count: 1,
                 open_meld_count: 1,
                 kan_count: 0,
@@ -217,6 +288,11 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: dragon_meld(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: dragon_meld(),
+                // 親でも1副露では High にしない。
+                threat: present(),
             }),
         },
         CorpusScenario {
@@ -225,6 +301,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::Tenpai,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 1,
                 open_meld_count: 0,
                 kan_count: 1,
@@ -235,6 +312,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                threat: no_open_meld(),
             }),
         },
         CorpusScenario {
@@ -249,6 +330,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::TwoShanten,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 1,
                 open_meld_count: 1,
                 kan_count: 0,
@@ -256,6 +338,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 0,
                 meld_red_dora_count: 0,
                 value_honor_melds: dragon_meld(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: dragon_meld(),
+                threat: present(),
             }),
         },
         CorpusScenario {
@@ -264,6 +350,7 @@ fn corpus() -> Vec<CorpusScenario> {
             self_hand: SelfHand::TwoShanten,
             melded: Some(ExpectedOpenHand {
                 player: 3,
+                discard_count: 0,
                 meld_count: 3,
                 open_meld_count: 3,
                 kan_count: 0,
@@ -271,6 +358,10 @@ fn corpus() -> Vec<CorpusScenario> {
                 meld_dora_count: 2,
                 meld_red_dora_count: 1,
                 value_honor_melds: dragon_meld(),
+                open_meld_dora_count: 2,
+                open_meld_red_dora_count: 1,
+                open_value_honor_melds: dragon_meld(),
+                threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
             }),
         },
     ]
@@ -286,10 +377,15 @@ fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
     ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
 }
 
-// 副露を持たない席に期待する観測事実。
+// 副露を持たない席に期待する観測事実。河だけは player 2 が 5 枚持つ。
 fn no_melds(player: usize) -> ExpectedOpenHand {
     ExpectedOpenHand {
         player,
+        discard_count: if player == RIVER_PLAYER {
+            RIVER_DISCARD_COUNT
+        } else {
+            0
+        },
         meld_count: 0,
         open_meld_count: 0,
         kan_count: 0,
@@ -297,12 +393,28 @@ fn no_melds(player: usize) -> ExpectedOpenHand {
         meld_dora_count: 0,
         meld_red_dora_count: 0,
         value_honor_melds: ValueHonorMeldCounts::default(),
+        open_meld_dora_count: 0,
+        open_meld_red_dora_count: 0,
+        open_value_honor_melds: ValueHonorMeldCounts::default(),
+        threat: no_open_meld(),
+    }
+}
+
+// その席に期待する観測事実。副露を持たない席は共通の `no_melds` になる。
+fn expected_of(entry: &CorpusScenario, player: usize) -> ExpectedOpenHand {
+    match entry.melded {
+        Some(melded) if melded.player == player => melded,
+        _ => no_melds(player),
     }
 }
 
 fn assert_open_hand_facts(name: &str, expected: ExpectedOpenHand, facts: PlayerThreatFacts) {
     let player = expected.player;
     assert_eq!(facts.player, player, "{name} player {player}");
+    assert_eq!(
+        facts.discard_count, expected.discard_count,
+        "{name} player {player} discard_count"
+    );
     assert_eq!(
         facts.meld_count, expected.meld_count,
         "{name} player {player} meld_count"
@@ -330,6 +442,18 @@ fn assert_open_hand_facts(name: &str, expected: ExpectedOpenHand, facts: PlayerT
     assert_eq!(
         facts.value_honor_melds, expected.value_honor_melds,
         "{name} player {player} value_honor_melds"
+    );
+    assert_eq!(
+        facts.open_meld_dora_count, expected.open_meld_dora_count,
+        "{name} player {player} open_meld_dora_count"
+    );
+    assert_eq!(
+        facts.open_meld_red_dora_count, expected.open_meld_red_dora_count,
+        "{name} player {player} open_meld_red_dora_count"
+    );
+    assert_eq!(
+        facts.open_value_honor_melds, expected.open_value_honor_melds,
+        "{name} player {player} open_value_honor_melds"
     );
 }
 
@@ -432,12 +556,76 @@ fn every_scenario_matches_the_expected_player_threat_facts() {
                 entry.name
             );
 
-            let expected = match entry.melded {
-                Some(melded) if melded.player == player => melded,
-                _ => no_melds(player),
-            };
-            assert_open_hand_facts(entry.name, expected, facts);
+            assert_open_hand_facts(entry.name, expected_of(&entry, player), facts);
+            assert_eq!(
+                facts.discard_count,
+                scenario.context.discards_of(player).unwrap().len(),
+                "{} player {player} discard_count",
+                entry.name
+            );
         }
+    }
+}
+
+#[test]
+fn every_scenario_matches_the_expected_open_hand_threat() {
+    // 副露 facts から production が導く暫定 classification を fixture ごとに固定する。
+    // 自分の席は対象外で、リーチ者はこの corpus にいない。
+    for entry in corpus() {
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+
+        for player in 0..4 {
+            let threat = &diagnostic.player_threats[player];
+            let expected = if player == SELF_PLAYER {
+                OpenHandThreatAssessment::NotApplicable(OpenHandThreatExclusion::SelfSeat)
+            } else {
+                OpenHandThreatAssessment::Classified(expected_of(&entry, player).threat)
+            };
+
+            assert_eq!(
+                threat.open_hand_threat, expected,
+                "{} player {player}",
+                entry.name
+            );
+            // 表示・診断は分類し直さず、同じ facts から求めた結果を共有する。
+            assert_eq!(
+                threat.open_hand_threat,
+                classify_open_hand_threat(threat.facts),
+                "{} player {player}",
+                entry.name
+            );
+        }
+    }
+}
+
+#[test]
+fn a_high_open_hand_threat_does_not_change_the_push_pull_decision() {
+    // High になる fixture でも、非リーチ相手だけの局面の押し引きは NoOpponentReach → Push。
+    let high: Vec<CorpusScenario> = corpus()
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .melded
+                .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::High)
+        })
+        .collect();
+    assert!(!high.is_empty());
+
+    for entry in high {
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+        let decision = diagnostic
+            .push_pull_decision
+            .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
+
+        assert_eq!(decision.mode, PushPullMode::Push, "{}", entry.name);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::NoOpponentReach,
+            "{}",
+            entry.name
+        );
     }
 }
 
@@ -473,6 +661,16 @@ fn the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld() {
     assert_eq!(facts.open_meld_count, 0);
     assert_eq!(facts.kan_count, 1);
     assert_eq!(facts.value_honor_melds, ValueHonorMeldCounts::default());
+    assert_eq!(facts.open_meld_dora_count, 0);
+    assert_eq!(
+        facts.open_value_honor_melds,
+        ValueHonorMeldCounts::default()
+    );
+    // 暗槓だけの相手は open hand の威圧材料を持たない。
+    assert_eq!(
+        classify_open_hand_threat(facts),
+        OpenHandThreatAssessment::Classified(no_open_meld())
+    );
 }
 
 #[test]

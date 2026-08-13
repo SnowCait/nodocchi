@@ -3075,6 +3075,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn diagnose_classifies_the_open_hand_threat_from_the_same_facts() {
+        use crate::open_hand_threat::{
+            OpenHandThreatAssessment, OpenHandThreatDecision, OpenHandThreatExclusion,
+            OpenHandThreatLevel, OpenHandThreatReason, classify_open_hand_threat,
+        };
+
+        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+        let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
+
+        // 表示・解析用に分類し直さず、診断が持つ facts から求めた結果をそのまま持つ。
+        for threat in &diagnostic.player_threats {
+            assert_eq!(
+                threat.open_hand_threat,
+                classify_open_hand_threat(threat.facts)
+            );
+        }
+
+        // 白 Pon + Chi の2副露で確定役牌があるので High。
+        assert_eq!(
+            diagnostic.player_threats[1].open_hand_threat,
+            OpenHandThreatAssessment::Classified(OpenHandThreatDecision {
+                level: OpenHandThreatLevel::High,
+                reason: OpenHandThreatReason::TwoOrMoreWithValueHonor,
+            })
+        );
+        assert_eq!(
+            diagnostic.player_threats[0].open_hand_threat.exclusion(),
+            Some(OpenHandThreatExclusion::SelfSeat)
+        );
+        assert_eq!(
+            diagnostic.player_threats[2].open_hand_threat.level(),
+            Some(OpenHandThreatLevel::None)
+        );
+    }
+
+    #[test]
     fn diagnose_does_not_guess_the_self_seat_without_player_id() {
         let ctx = opponent_meld_context(None, vec![white_dragon_pon()]);
         let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
@@ -3127,6 +3163,12 @@ pub(crate) mod tests {
             crate::push_pull::PushPullReason::NoOpponentReach
         );
         assert_eq!(melded_inputs.opponent_reach_count, 0);
+
+        // OpenHandThreat が High でも、非リーチ相手だけの局面の押し引きは変えない。
+        assert_eq!(
+            melded.player_threats[1].open_hand_threat.level(),
+            Some(crate::open_hand_threat::OpenHandThreatLevel::High)
+        );
     }
 
     #[test]

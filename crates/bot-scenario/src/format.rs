@@ -1,8 +1,9 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
     GameContext, LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
-    PlayerThreatDiagnostic, PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision,
-    PushPullInputs, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
+    OpenHandThreatAssessment, PlayerThreatDiagnostic, PonCandidateDiagnostic,
+    PonDecisionDiagnostic, PushPullDecision, PushPullInputs, ReachDecisionDiagnostic, ShantenAgent,
+    ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -744,6 +745,7 @@ fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
         format_optional_yes_no(facts.is_dealer)
     ));
     lines.push(format!("  seat wind: {}", format_wind(facts.seat_wind)));
+    lines.push(format!("  discards: {}", facts.discard_count));
     lines.push(format!("  melds: {}", facts.meld_count));
     lines.push(format!("  open melds: {}", facts.open_meld_count));
     lines.push(format!("  kans: {}", facts.kan_count));
@@ -753,12 +755,39 @@ fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
     ));
     lines.push(format!("  meld dora: {}", facts.meld_dora_count));
     lines.push(format!("  meld red dora: {}", facts.meld_red_dora_count));
+    lines.push(format!("  open meld dora: {}", facts.open_meld_dora_count));
+    lines.push(format!(
+        "  open meld red dora: {}",
+        facts.open_meld_red_dora_count
+    ));
+    lines.push(format!(
+        "  open confirmed value honor: {}",
+        facts.open_value_honor_melds.confirmed
+    ));
+    lines.push(format!(
+        "  open hand threat: {}",
+        format_open_hand_threat(threat.open_hand_threat)
+    ));
+    lines.push(format!(
+        "  open hand threat reason: {}",
+        optional(threat.open_hand_threat.reason())
+    ));
 
     for (index, meld) in threat.melds.iter().enumerate() {
         lines.extend(format_meld_threat(index + 1, meld));
     }
 
     lines.join("\n")
+}
+
+// 対象外の席を「危険度なし」と読ませないため、level と対象外を別の表記にする。
+fn format_open_hand_threat(assessment: OpenHandThreatAssessment) -> String {
+    match assessment {
+        OpenHandThreatAssessment::Classified(decision) => format!("{:?}", decision.level),
+        OpenHandThreatAssessment::NotApplicable(exclusion) => {
+            format!("not applicable ({exclusion:?})")
+        }
+    }
 }
 
 fn format_meld_threat(number: usize, meld: &MeldThreatDiagnostic) -> Vec<String> {
@@ -2838,12 +2867,18 @@ mod tests {
              reached: no\n  \
              dealer: no\n  \
              seat wind: S\n  \
+             discards: 0\n  \
              melds: 2\n  \
              open melds: 2\n  \
              kans: 0\n  \
              meld kinds: Chi 1, Pon 1\n  \
              meld dora: 2\n  \
              meld red dora: 1\n  \
+             open meld dora: 2\n  \
+             open meld red dora: 1\n  \
+             open confirmed value honor: 1\n  \
+             open hand threat: High\n  \
+             open hand threat reason: TwoOrMoreWithValueHonor\n  \
              meld 1: Pon P P P\n    \
              open: yes\n    \
              kan: no\n    \
@@ -2869,6 +2904,15 @@ mod tests {
         assert!(block.contains("  open melds: 0"), "{block}");
         assert!(block.contains("  kans: 1"), "{block}");
         assert!(block.contains("  meld kinds: Ankan 1"), "{block}");
+        // 暗槓の自風は fixed meld 全体では役牌でも、open meld 限定では数えない。
+        assert!(block.contains("  open meld dora: 0"), "{block}");
+        assert!(block.contains("  open meld red dora: 0"), "{block}");
+        assert!(block.contains("  open confirmed value honor: 0"), "{block}");
+        assert!(block.contains("  open hand threat: None"), "{block}");
+        assert!(
+            block.contains("  open hand threat reason: NoOpenMeld"),
+            "{block}"
+        );
         assert!(
             block.contains("  meld 1: Ankan W W W W\n    open: no\n    kan: yes"),
             "{block}"
@@ -2887,6 +2931,12 @@ mod tests {
 
         assert!(block.contains("  reached: yes"), "{block}");
         assert!(block.contains("  melds: 0"), "{block}");
+        // リーチ者の threat は既存のリーチ情報が source of truth なので OpenHandThreat の対象外。
+        assert!(
+            block.contains("  open hand threat: not applicable (Reached)"),
+            "{block}"
+        );
+        assert!(block.contains("  open hand threat reason: -"), "{block}");
     }
 
     #[test]
@@ -2896,6 +2946,64 @@ mod tests {
 
         assert!(block.contains("  opponent: no"), "{block}");
         assert!(block.contains("  dealer: yes"), "{block}");
+        assert!(block.contains("  discards: 2"), "{block}");
+        assert!(
+            block.contains("  open hand threat: not applicable (SelfSeat)"),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn player_threats_section_shows_the_late_round_open_hand_threat() {
+        // 1副露でも河が12枚に達した非リーチ相手は暫定 heuristic で High になる。
+        let (_, diagnostic, output) = rendered(
+            r#"{
+                "hand": "234m 567m 88m 345p 67p",
+                "draw": "N",
+                "player_id": 0,
+                "oya": 0,
+                "discards": ["1s", "E E E E S S S S W W W W", "", ""],
+                "melds": [[], [{"kind": "chi", "tiles": "1s 2s 3s", "called_tile": "1s"}], [], []]
+            }"#,
+            false,
+        );
+        let block = player_threat_block(&output, 1);
+
+        assert_eq!(diagnostic.player_threats[1].facts.discard_count, 12);
+        assert!(block.contains("  discards: 12"), "{block}");
+        assert!(block.contains("  open melds: 1"), "{block}");
+        assert!(block.contains("  open hand threat: High"), "{block}");
+        assert!(
+            block.contains("  open hand threat reason: OpenMeldFromTwelveDiscards"),
+            "{block}"
+        );
+        // classification は行動を変えない。
+        assert!(
+            section(&output, "Push/Pull")
+                .contains("  mode: Push\n  reason: NoOpponentReach\n  opponent reach count: 0"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn player_threats_open_hand_threat_is_the_production_classification() {
+        // 表示用に分類し直さず、診断が持つ classification をそのまま出す。
+        let (_, diagnostic, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+
+        for (player, threat) in diagnostic.player_threats.iter().enumerate() {
+            assert_eq!(
+                threat.open_hand_threat,
+                bot_core::classify_open_hand_threat(threat.facts),
+                "player {player}"
+            );
+
+            let block = player_threat_block(&output, player);
+            let expected = match threat.open_hand_threat.level() {
+                Some(level) => format!("  open hand threat: {level:?}"),
+                None => "  open hand threat: not applicable".to_string(),
+            };
+            assert!(block.contains(&expected), "{block}");
+        }
     }
 
     #[test]
@@ -2910,6 +3018,11 @@ mod tests {
             assert!(block.contains("  opponent: unknown"), "{block}");
             assert!(block.contains("  dealer: unknown"), "{block}");
             assert!(block.contains("  seat wind: None"), "{block}");
+            // 席が不明な相手を他家と推測して分類しない。危険度なしにも確定させない。
+            assert!(
+                block.contains("  open hand threat: not applicable (UnknownSeat)"),
+                "{block}"
+            );
         }
         assert!(
             player_threat_block(&output, 1).contains("  melds: 1"),

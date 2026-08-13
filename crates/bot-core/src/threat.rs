@@ -2,6 +2,7 @@ use bot_logic::{TileId, TileType, count_dora};
 
 use crate::context::GameContext;
 use crate::meld::{Meld, MeldKind};
+use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threat};
 
 /// fixed meld の [`MeldKind`] 別内訳。件数だけを持つ観測事実。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -147,6 +148,10 @@ pub struct PlayerThreatFacts {
     pub reached: bool,
     /// この player の自風。`oya` から導出できない場合は推測せず `None`。
     pub seat_wind: Option<TileType>,
+    /// この player が既に河へ切った牌の枚数。
+    /// [`GameContext::discards_of`] の長さがそのまま source of truth で、UI 上の「河2段目」
+    /// のような表現からは導出しない。
+    pub discard_count: usize,
     /// Chi / Pon / Daiminkan / Ankan / Kakan を含む fixed meld の総数。
     pub meld_count: usize,
     /// `meld_count` のうち [`MeldKind::is_open`] が `true` のものだけ。Ankan は含まない。
@@ -154,13 +159,20 @@ pub struct PlayerThreatFacts {
     /// `meld_count` のうち [`MeldKind::is_kan`] が `true` のものだけ。Ankan を含む。
     pub kan_count: usize,
     pub meld_kinds: MeldKindCounts,
-    /// 全 fixed meld の `dora_count` 合計。Ankan の分も含むので、公開分だけを見たい policy は
-    /// meld ごとの `is_open` で絞る。
+    /// 全 fixed meld の `dora_count` 合計。Ankan の分も含む。公開分だけを見たい policy は
+    /// `open_meld_dora_count` を使う。
     pub meld_dora_count: u8,
     /// 全 fixed meld の `red_dora_count` 合計。`meld_dora_count` の内数。
     pub meld_red_dora_count: u8,
-    /// 役牌副露の集計。翻数へは潰さず、情報不足も `unconfirmed_wind` として残す。
+    /// 役牌副露の集計。Ankan を含む。翻数へは潰さず、情報不足も `unconfirmed_wind` として残す。
     pub value_honor_melds: ValueHonorMeldCounts,
+    /// `is_open` な meld だけの `dora_count` 合計。Ankan は含まない。
+    /// 判定は `meld_dora_count` と同じ meld ごとの facts の集計で、ドラを数え直さない。
+    pub open_meld_dora_count: u8,
+    /// `is_open` な meld だけの `red_dora_count` 合計。`open_meld_dora_count` の内数。
+    pub open_meld_red_dora_count: u8,
+    /// `is_open` な meld だけの役牌副露の集計。Ankan は含まない。
+    pub open_value_honor_melds: ValueHonorMeldCounts,
 }
 
 impl PlayerThreatFacts {
@@ -187,7 +199,7 @@ pub struct MeldThreatDiagnostic {
     pub tiles: Vec<TileId>,
 }
 
-/// player 1人分の観測事実と、meld ごとの詳細。危険度 (threat level) の判断は持たない。
+/// player 1人分の観測事実と、meld ごとの詳細。
 ///
 /// 集計値は [`PlayerThreatFacts`] そのもので、診断のために数え直さない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +208,10 @@ pub struct PlayerThreatDiagnostic {
     pub facts: PlayerThreatFacts,
     /// fixed meld ごとの観測事実。`melds` の順序は `GameContext` の順序そのまま。
     pub melds: Vec<MeldThreatDiagnostic>,
+    /// `facts` だけから求めた非リーチ副露相手の暫定 classification
+    /// ([`classify_open_hand_threat`])。observed facts とは分けて持ち、`GameContext` を
+    /// 解析し直さない。押し引き・防御にはまだ使わない診断専用の情報。
+    pub open_hand_threat: OpenHandThreatAssessment,
 }
 
 /// [`player_threat_facts`] / [`diagnose_player_threat`] の入力。`GameContext` から取り出した
@@ -213,6 +229,8 @@ pub struct PlayerThreatInputs<'a> {
     /// 対象 player 自身の自風。自分の自風ではない。
     pub seat_wind: Option<TileType>,
     pub melds: &'a [Meld],
+    /// 対象 player の河。局進行は枚数だけを facts に載せる。
+    pub discards: &'a [TileId],
     pub dora_indicators: &'a [TileId],
 }
 
@@ -284,7 +302,11 @@ pub fn player_threat_facts(inputs: PlayerThreatInputs<'_>) -> PlayerThreatFacts 
 pub fn diagnose_player_threat(inputs: PlayerThreatInputs<'_>) -> PlayerThreatDiagnostic {
     let melds = meld_threat_diagnostics(inputs);
     let facts = aggregate_player_threat_facts(inputs, melds.iter().map(|meld| meld.facts));
-    PlayerThreatDiagnostic { facts, melds }
+    PlayerThreatDiagnostic {
+        facts,
+        melds,
+        open_hand_threat: classify_open_hand_threat(facts),
+    }
 }
 
 /// 構築済みの [`PlayerThreatFacts`] へ meld ごとの詳細を足して診断にする pure helper。
@@ -298,6 +320,7 @@ pub fn diagnose_player_threat_with_facts(
     PlayerThreatDiagnostic {
         facts,
         melds: meld_threat_diagnostics(inputs),
+        open_hand_threat: classify_open_hand_threat(facts),
     }
 }
 
@@ -316,6 +339,7 @@ pub fn player_threat_inputs(context: &GameContext, player: usize) -> PlayerThrea
         round_wind: context.round_wind(),
         seat_wind: context.seat_wind_of(player),
         melds: context.melds_of(player).unwrap_or_default(),
+        discards: context.discards_of(player).unwrap_or_default(),
         dora_indicators: context.dora_indicators(),
     }
 }
@@ -394,6 +418,7 @@ fn aggregate_player_threat_facts(
         is_dealer: inputs.is_dealer,
         reached: inputs.reached,
         seat_wind: inputs.seat_wind,
+        discard_count: inputs.discards.len(),
         meld_count: 0,
         open_meld_count: 0,
         kan_count: 0,
@@ -401,6 +426,9 @@ fn aggregate_player_threat_facts(
         meld_dora_count: 0,
         meld_red_dora_count: 0,
         value_honor_melds: ValueHonorMeldCounts::default(),
+        open_meld_dora_count: 0,
+        open_meld_red_dora_count: 0,
+        open_value_honor_melds: ValueHonorMeldCounts::default(),
     };
 
     for meld in melds {
@@ -414,6 +442,19 @@ fn aggregate_player_threat_facts(
             .saturating_add(meld.red_dora_count);
         if let Some(value_honor) = meld.value_honor {
             facts.value_honor_melds.add(value_honor);
+        }
+
+        // 公開されていない Ankan は open hand の威圧材料として数えない。判定は meld ごとの
+        // facts をそのまま使い、ドラ・赤ドラ・役牌を別実装で数え直さない。
+        if !meld.is_open {
+            continue;
+        }
+        facts.open_meld_dora_count = facts.open_meld_dora_count.saturating_add(meld.dora_count);
+        facts.open_meld_red_dora_count = facts
+            .open_meld_red_dora_count
+            .saturating_add(meld.red_dora_count);
+        if let Some(value_honor) = meld.value_honor {
+            facts.open_value_honor_melds.add(value_honor);
         }
     }
 
@@ -516,6 +557,27 @@ mod tests {
         reached: [bool; 4],
         melds: [Vec<Meld>; 4],
     ) -> GameContext {
+        context_with_discards(
+            player_id,
+            oya,
+            round_wind,
+            dora_indicators,
+            reached,
+            Default::default(),
+            melds,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn context_with_discards(
+        player_id: Option<u8>,
+        oya: Option<u8>,
+        round_wind: Option<TileType>,
+        dora_indicators: Vec<TileId>,
+        reached: [bool; 4],
+        discards: [Vec<TileId>; 4],
+        melds: [Vec<Meld>; 4],
+    ) -> GameContext {
         GameContext::from_parts_with_melds(
             None,
             vec![],
@@ -525,20 +587,26 @@ mod tests {
             Vec::new(),
             player_id,
             oya,
-            Default::default(),
+            discards,
             reached,
             melds,
         )
     }
 
-    // 4席すべてに別の副露・リーチ・ドラを持たせた context。facts と診断の一致確認に使う。
+    // 河を持つ context。牌種は問わないので、指定枚数だけ別の物理牌を並べる。
+    fn river(count: usize) -> Vec<TileId> {
+        (0..count).map(|index| tile(index as u8)).collect()
+    }
+
+    // 4席すべてに別の副露・リーチ・ドラ・河を持たせた context。facts と診断の一致確認に使う。
     fn mixed_threat_context() -> GameContext {
-        context_with(
+        context_with_discards(
             Some(0),
             Some(1),
             Some(honor(EAST)),
             vec![tile(12)],
             [false, true, false, false],
+            [river(0), river(3), river(9), river(12)],
             [
                 vec![pon(HAKU)],
                 vec![chi(), kakan(SOUTH)],
@@ -1095,6 +1163,7 @@ mod tests {
             round_wind: Some(honor(EAST)),
             seat_wind: Some(honor(EAST)),
             melds,
+            discards: context.discards_of(1).unwrap(),
             dora_indicators: context.dora_indicators(),
         };
 
@@ -1162,6 +1231,9 @@ mod tests {
                 .iter()
                 .map(|meld| meld.facts.red_dora_count)
                 .sum();
+            let open_melds = || threat.melds.iter().filter(|meld| meld.facts.is_open);
+            let expected_open_dora: u8 = open_melds().map(|meld| meld.facts.dora_count).sum();
+            let expected_open_red: u8 = open_melds().map(|meld| meld.facts.red_dora_count).sum();
 
             assert_eq!(facts[player].meld_count, threat.melds.len());
             assert_eq!(
@@ -1174,11 +1246,119 @@ mod tests {
             );
             assert_eq!(facts[player].meld_dora_count, expected_dora);
             assert_eq!(facts[player].meld_red_dora_count, expected_red);
+            assert_eq!(facts[player].open_meld_dora_count, expected_open_dora);
+            assert_eq!(facts[player].open_meld_red_dora_count, expected_open_red);
             assert_eq!(
                 facts[player].meld_kinds,
                 MeldKindCounts::of(context.melds_of(player).unwrap())
             );
         }
+    }
+
+    // ---- 河の枚数 ----
+
+    #[test]
+    fn discard_count_matches_the_context_river_length() {
+        let context = context_with_discards(
+            Some(0),
+            Some(1),
+            None,
+            vec![],
+            [false; 4],
+            [river(0), river(1), river(9), river(12)],
+            Default::default(),
+        );
+        let facts = player_threat_facts_from_context(&context);
+
+        for (player, expected) in [0usize, 1, 9, 12].into_iter().enumerate() {
+            assert_eq!(facts[player].discard_count, expected, "player {player}");
+            assert_eq!(
+                facts[player].discard_count,
+                context.discards_of(player).unwrap().len(),
+                "player {player}"
+            );
+        }
+    }
+
+    #[test]
+    fn discard_count_is_zero_without_a_river() {
+        let context = context(Default::default());
+        for facts in player_threat_facts_from_context(&context) {
+            assert_eq!(facts.discard_count, 0);
+        }
+    }
+
+    // ---- open meld 限定 facts ----
+
+    #[test]
+    fn open_meld_facts_exclude_ankan() {
+        // 4m 表示で 5m がドラ。Ankan は 5m 4枚で、Chi は役牌にならない数牌。
+        let ankan_dora = Meld::new(
+            MeldKind::Ankan,
+            vec![tile(16), tile(17), tile(18), tile(19)],
+            None,
+        );
+        let context = context_with(
+            Some(0),
+            Some(1),
+            Some(honor(EAST)),
+            vec![tile(12)],
+            [false; 4],
+            [vec![], vec![], vec![], vec![ankan_dora, pon(HAKU)]],
+        );
+        let facts = facts_of(&context, 3);
+
+        assert_eq!(facts.meld_count, 2);
+        assert_eq!(facts.open_meld_count, 1);
+        // fixed meld 全体には Ankan のドラと役牌を含む。
+        assert_eq!(facts.meld_dora_count, 5);
+        assert_eq!(facts.meld_red_dora_count, 1);
+        assert_eq!(facts.value_honor_melds.confirmed, 1);
+        // open meld 限定では Ankan を除く。
+        assert_eq!(facts.open_meld_dora_count, 0);
+        assert_eq!(facts.open_meld_red_dora_count, 0);
+        assert_eq!(facts.open_value_honor_melds.confirmed, 1);
+    }
+
+    #[test]
+    fn ankan_only_player_has_no_open_meld_facts() {
+        let context = context_with(
+            Some(0),
+            Some(1),
+            Some(honor(EAST)),
+            vec![],
+            [false; 4],
+            [vec![], vec![], vec![], vec![ankan(HAKU)]],
+        );
+        let facts = facts_of(&context, 3);
+
+        assert_eq!(facts.meld_count, 1);
+        assert_eq!(facts.open_meld_count, 0);
+        assert_eq!(facts.value_honor_melds.confirmed, 1);
+        assert_eq!(facts.open_meld_dora_count, 0);
+        assert_eq!(facts.open_meld_red_dora_count, 0);
+        assert_eq!(
+            facts.open_value_honor_melds,
+            ValueHonorMeldCounts::default()
+        );
+    }
+
+    #[test]
+    fn open_value_honor_melds_keep_the_unconfirmed_wind() {
+        // oya 不明で自風が分からない風牌の Pon。open meld 側でも「役牌ではない」と確定させない。
+        let context = context_with(
+            Some(0),
+            None,
+            Some(honor(EAST)),
+            vec![],
+            [false; 4],
+            [vec![], vec![], vec![], vec![pon(WEST)]],
+        );
+        let facts = facts_of(&context, 3);
+
+        assert_eq!(facts.open_value_honor_melds.confirmed, 0);
+        assert_eq!(facts.open_value_honor_melds.unconfirmed_wind, 1);
+        assert_eq!(facts.open_value_honor_melds, facts.value_honor_melds);
     }
 
     // ---- リーチ情報の source of truth ----
