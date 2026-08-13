@@ -1,8 +1,8 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
-    GameContext, LegalAction, Meld, PonCandidateDiagnostic, PonDecisionDiagnostic,
-    PushPullDecision, PushPullInputs, ReachDecisionDiagnostic, ShantenAgent,
-    ShantenDecisionDiagnostic,
+    GameContext, LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
+    PlayerThreatDiagnostic, PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision,
+    PushPullInputs, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -52,6 +52,7 @@ pub fn format_diagnostic(
         sections.push(section);
     }
 
+    sections.push(format_player_threats(diagnostic));
     sections.push(format_summary(scenario, diagnostic));
 
     sections.join("\n\n")
@@ -719,6 +720,93 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
     lines.join("\n")
 }
 
+// player ごとの脅威診断。診断が持つ観測事実をそのまま出し、表示用に副露やドラを解析し直さない。
+// 危険度の判断は含まず、押し引きにもまだ反映していない。
+fn format_player_threats(diagnostic: &ShantenDecisionDiagnostic) -> String {
+    let mut blocks = vec!["Player threats".to_string()];
+    for threat in &diagnostic.player_threats {
+        blocks.push(format_player_threat(threat));
+    }
+    blocks.join("\n\n")
+}
+
+fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
+    let mut lines = vec![format!("player {}", threat.player)];
+
+    lines.push(format!(
+        "  opponent: {}",
+        format_optional_yes_no(threat.is_opponent())
+    ));
+    lines.push(format!("  reached: {}", yes_no(threat.reached)));
+    lines.push(format!(
+        "  dealer: {}",
+        format_optional_yes_no(threat.is_dealer)
+    ));
+    lines.push(format!("  seat wind: {}", format_wind(threat.seat_wind)));
+    lines.push(format!("  melds: {}", threat.meld_count));
+    lines.push(format!("  open melds: {}", threat.open_meld_count));
+    lines.push(format!("  kans: {}", threat.kan_count));
+    lines.push(format!(
+        "  meld kinds: {}",
+        format_meld_kind_counts(threat.meld_kinds)
+    ));
+    lines.push(format!("  meld dora: {}", threat.meld_dora_count));
+    lines.push(format!("  meld red dora: {}", threat.meld_red_dora_count));
+
+    for (index, meld) in threat.melds.iter().enumerate() {
+        lines.extend(format_meld_threat(index + 1, meld));
+    }
+
+    lines.join("\n")
+}
+
+fn format_meld_threat(number: usize, meld: &MeldThreatDiagnostic) -> Vec<String> {
+    let mut lines = vec![format!(
+        "  meld {number}: {:?} {}",
+        meld.kind,
+        format_tiles(&meld.tiles)
+    )];
+
+    lines.push(format!("    open: {}", yes_no(meld.is_open)));
+    lines.push(format!("    kan: {}", yes_no(meld.is_kan)));
+    lines.push(format!("    dora: {}", meld.dora_count));
+    lines.push(format!("    red dora: {}", meld.red_dora_count));
+
+    // 役牌になり得ない Chi・数牌の刻子槓子では役牌の行自体を出さない。
+    if let Some(value_honor) = meld.value_honor {
+        lines.push(format!("    dragon: {}", yes_no(value_honor.is_dragon)));
+        lines.push(format!(
+            "    round wind: {}",
+            format_optional_yes_no(value_honor.is_round_wind)
+        ));
+        lines.push(format!(
+            "    seat wind: {}",
+            format_optional_yes_no(value_honor.is_seat_wind)
+        ));
+    }
+
+    lines
+}
+
+fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
+    let labels: Vec<String> = [
+        MeldKind::Chi,
+        MeldKind::Pon,
+        MeldKind::Daiminkan,
+        MeldKind::Ankan,
+        MeldKind::Kakan,
+    ]
+    .into_iter()
+    .filter(|&kind| counts.get(kind) > 0)
+    .map(|kind| format!("{kind:?} {}", counts.get(kind)))
+    .collect();
+
+    if labels.is_empty() {
+        return NONE.to_string();
+    }
+    labels.join(", ")
+}
+
 fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
     let mut lines = vec!["Summary".to_string()];
 
@@ -1039,6 +1127,7 @@ mod tests {
                 | "Reach"
                 | "Defense"
                 | "Defense candidates"
+                | "Player threats"
                 | "Summary"
         )
     }
@@ -2704,9 +2793,173 @@ mod tests {
             "Normal discard",
             "Push/Pull",
             "Defense",
+            "Player threats",
             "Summary",
         ] {
             assert_eq!(section(&without, header), section(&with, header));
         }
+    }
+
+    const OPPONENT_THREAT_SCENARIO: &str = include_str!("../scenarios/opponent_threat.json");
+
+    // "Player threats" 直後の player ブロックを取り出す。
+    fn player_threat_block(output: &str, player: usize) -> String {
+        let mut blocks = output
+            .split("\n\n")
+            .skip_while(|block| !block.starts_with("Player threats"));
+        blocks.next();
+        blocks
+            .take_while(|block| !is_section_header(block))
+            .find(|block| block.lines().next() == Some(&format!("player {player}")))
+            .unwrap_or_else(|| panic!("missing player {player} in:\n{output}"))
+            .to_string()
+    }
+
+    #[test]
+    fn player_threats_section_shows_every_seat() {
+        let (_, diagnostic, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        assert_eq!(diagnostic.player_threats.len(), 4);
+
+        for player in 0..4 {
+            let block = player_threat_block(&output, player);
+            assert!(block.contains("  melds: "), "{block}");
+        }
+    }
+
+    #[test]
+    fn player_threats_section_shows_the_open_hand_facts() {
+        let (_, _, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        assert_eq!(
+            player_threat_block(&output, 1),
+            "player 1\n  \
+             opponent: yes\n  \
+             reached: no\n  \
+             dealer: no\n  \
+             seat wind: S\n  \
+             melds: 2\n  \
+             open melds: 2\n  \
+             kans: 0\n  \
+             meld kinds: Chi 1, Pon 1\n  \
+             meld dora: 2\n  \
+             meld red dora: 1\n  \
+             meld 1: Pon P P P\n    \
+             open: yes\n    \
+             kan: no\n    \
+             dora: 0\n    \
+             red dora: 0\n    \
+             dragon: yes\n    \
+             round wind: no\n    \
+             seat wind: no\n  \
+             meld 2: Chi 4m 5mr 6m\n    \
+             open: yes\n    \
+             kan: no\n    \
+             dora: 2\n    \
+             red dora: 1"
+        );
+    }
+
+    #[test]
+    fn player_threats_section_keeps_ankan_out_of_the_open_meld_count() {
+        let (_, _, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        let block = player_threat_block(&output, 2);
+
+        assert!(block.contains("  melds: 1"), "{block}");
+        assert!(block.contains("  open melds: 0"), "{block}");
+        assert!(block.contains("  kans: 1"), "{block}");
+        assert!(block.contains("  meld kinds: Ankan 1"), "{block}");
+        assert!(
+            block.contains("  meld 1: Ankan W W W W\n    open: no\n    kan: yes"),
+            "{block}"
+        );
+        // 自風の暗槓なので、場風ではなく自風として診断されている。
+        assert!(
+            block.contains("    round wind: no\n    seat wind: yes"),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn player_threats_section_shows_the_reached_player() {
+        let (_, _, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        let block = player_threat_block(&output, 3);
+
+        assert!(block.contains("  reached: yes"), "{block}");
+        assert!(block.contains("  melds: 0"), "{block}");
+    }
+
+    #[test]
+    fn player_threats_section_shows_the_self_seat() {
+        let (_, _, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        let block = player_threat_block(&output, 0);
+
+        assert!(block.contains("  opponent: no"), "{block}");
+        assert!(block.contains("  dealer: yes"), "{block}");
+    }
+
+    #[test]
+    fn player_threats_section_does_not_guess_the_self_seat_without_player_id() {
+        let (_, _, output) = rendered(
+            r#"{"hand": "234m455p789s1123z", "draw": "N", "melds": [[], [{"kind": "chi", "tiles": "1m 2m 3m", "called_tile": "1m"}], [], []], "discards": ["1m", "", "", ""]}"#,
+            false,
+        );
+
+        for player in 0..4 {
+            let block = player_threat_block(&output, player);
+            assert!(block.contains("  opponent: unknown"), "{block}");
+            assert!(block.contains("  dealer: unknown"), "{block}");
+            assert!(block.contains("  seat wind: None"), "{block}");
+        }
+        assert!(
+            player_threat_block(&output, 1).contains("  melds: 1"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn player_threats_are_the_production_diagnostic_values() {
+        // 表示専用に副露やドラを解析し直さず、診断が持つ値をそのまま出す。
+        let (_, diagnostic, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        let threat = &diagnostic.player_threats[1];
+        let block = player_threat_block(&output, 1);
+
+        assert!(
+            block.contains(&format!("  melds: {}", threat.meld_count)),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!("  open melds: {}", threat.open_meld_count)),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!("  meld dora: {}", threat.meld_dora_count)),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!("  meld red dora: {}", threat.meld_red_dora_count)),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn opponent_melds_do_not_change_the_push_pull_section() {
+        // 非リーチの副露相手だけの局面では、押し引きは従来どおり NoOpponentReach → Push。
+        let (_, diagnostic, output) = rendered(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "draw": "N",
+                "player_id": 0,
+                "oya": 0,
+                "melds": [[], [{"kind": "pon", "tiles": "P P P", "called_tile": "P"}], [], []],
+                "discards": ["P", "", "", ""]
+            }"#,
+            false,
+        );
+
+        assert_eq!(diagnostic.player_threats[1].open_meld_count, 1);
+        assert!(
+            section(&output, "Push/Pull")
+                .contains("  mode: Push\n  reason: NoOpponentReach\n  opponent reach count: 0"),
+            "{output}"
+        );
     }
 }

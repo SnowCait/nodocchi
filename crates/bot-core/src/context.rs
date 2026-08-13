@@ -2,6 +2,18 @@ use bot_logic::{FixedMeldCount, TileId, TileType};
 
 use crate::meld::{Meld, fixed_meld_count};
 
+/// 指定 player の自風を親から導出する pure helper。4人麻雀の席順だけを前提にする。
+///
+/// `seat_index = (player + 4 - oya) % 4` で、`oya` 自身は東家。範囲外の `player` / `oya` は
+/// 推測で補完せず `None`。`GameContext::seat_wind()` は自分の自風なので相手の判定には使わない。
+pub fn seat_wind_for_player(player: usize, oya: u8) -> Option<TileType> {
+    if player >= 4 || oya >= 4 {
+        return None;
+    }
+    let seat_index = (player as u8 + 4 - oya) % 4;
+    TileType::wind_from_seat_index(seat_index)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GameContext {
     drawn_tile: Option<TileId>,
@@ -190,6 +202,15 @@ impl GameContext {
 
     pub fn oya(&self) -> Option<u8> {
         self.oya
+    }
+
+    /// 指定 player の自風。親から席順で導出できる場合だけ `Some`。
+    ///
+    /// 自分・他家を問わず [`seat_wind_for_player`] だけを source of truth にする。`oya` が無い
+    /// 場合や範囲外の `player` では推測せず `None`。自分の席でも `seat_wind()` へ fallback せず、
+    /// 全席で同じ規則にする。
+    pub fn seat_wind_of(&self, player: usize) -> Option<TileType> {
+        seat_wind_for_player(player, self.oya?)
     }
 
     // discards は防御・現物判定用に player ごとの河として保持する。
@@ -963,6 +984,54 @@ mod tests {
         let context = GameContext::default();
         assert_eq!(context.post_reach_passed_tiles_of(4), None);
         assert!(!context.is_post_reach_passed(tile(84).tile_type(), 4));
+    }
+
+    #[test]
+    fn seat_wind_for_player_derives_from_oya() {
+        assert_eq!(seat_wind_for_player(0, 0), Some(wind(27)));
+        assert_eq!(seat_wind_for_player(1, 0), Some(wind(28)));
+        assert_eq!(seat_wind_for_player(2, 0), Some(wind(29)));
+        assert_eq!(seat_wind_for_player(3, 0), Some(wind(30)));
+        assert_eq!(seat_wind_for_player(1, 1), Some(wind(27)));
+        assert_eq!(seat_wind_for_player(0, 3), Some(wind(28)));
+    }
+
+    #[test]
+    fn seat_wind_for_player_rejects_out_of_range() {
+        assert_eq!(seat_wind_for_player(4, 0), None);
+        assert_eq!(seat_wind_for_player(0, 4), None);
+        assert_eq!(seat_wind_for_player(usize::MAX, 0), None);
+    }
+
+    #[test]
+    fn seat_wind_of_derives_every_seat_from_oya() {
+        let context = table_state_context(Some(0), Some(2), Default::default(), [false; 4]);
+        assert_eq!(context.seat_wind_of(2), Some(wind(27)));
+        assert_eq!(context.seat_wind_of(3), Some(wind(28)));
+        assert_eq!(context.seat_wind_of(0), Some(wind(29)));
+        assert_eq!(context.seat_wind_of(1), Some(wind(30)));
+    }
+
+    #[test]
+    fn seat_wind_of_is_none_when_oya_is_unknown() {
+        // 自分の seat_wind が分かっていても、oya が無ければどの席の自風も推測しない。
+        let context = GameContext::from_parts_with_context(
+            None,
+            vec![],
+            vec![],
+            Some(wind(27)),
+            Some(wind(28)),
+        );
+        assert_eq!(context.oya(), None);
+        assert_eq!(context.seat_wind_of(0), None);
+        assert_eq!(context.seat_wind_of(1), None);
+    }
+
+    #[test]
+    fn seat_wind_of_out_of_range_returns_none() {
+        let context = table_state_context(Some(0), Some(0), Default::default(), [false; 4]);
+        assert_eq!(context.seat_wind_of(4), None);
+        assert_eq!(context.seat_wind_of(usize::MAX), None);
     }
 
     #[test]

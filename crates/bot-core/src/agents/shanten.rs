@@ -14,6 +14,7 @@ use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_context_with_evaluation,
 };
+use crate::threat::{PlayerThreatDiagnostic, diagnose_player_threats};
 use bot_logic::{
     DiscardDecisionDiagnostic, DiscardEvaluation, DiscardFuritenDiagnostic, FixedMeldCount,
     LookaheadDiagnostic, PermanentFuriten, TenpaiWaitAvailability, TileCounts, TileId, TileType,
@@ -323,6 +324,12 @@ pub struct ShantenDecisionDiagnostic {
     /// 候補ごとの理由を保持する。
     pub pon: Option<PonDecisionDiagnostic>,
     pub own_fixed_meld_count: Option<FixedMeldCount>,
+    /// 全4席分の脅威診断。`context` から読み取れる副露・リーチ・親・ドラの観測事実だけを持つ。
+    ///
+    /// `player_id` が不明でも席を除外せず常に4席分あり、自分か他家かは各診断の `is_self` /
+    /// `is_opponent()` が unknown で表す。危険度の判断は含まず、現時点では押し引き・防御・
+    /// 打牌選択のどれにも影響しない解析専用の情報。
+    pub player_threats: [PlayerThreatDiagnostic; 4],
 }
 
 impl ShantenDecisionDiagnostic {
@@ -454,6 +461,7 @@ impl ShantenAgent {
             defense: diagnostics.defense,
             pon: decision.pon,
             own_fixed_meld_count: context.own_fixed_meld_count(),
+            player_threats: diagnose_player_threats(context),
         }
     }
 
@@ -2957,6 +2965,169 @@ pub(crate) mod tests {
         let ctx = GameContext::default();
         let diagnostic = diagnose_matching_act(&ctx, &[]);
         assert_eq!(diagnostic.own_fixed_meld_count, None);
+    }
+
+    // 123456789m 123p 5s + ツモ N。他家 (player 1) だけが副露しており、リーチ者はいない。
+    const OPPONENT_MELD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+    const OPPONENT_MELD_DRAW: u8 = 120;
+
+    fn red_five_chi() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Chi,
+            vec![tile(13), tile(16), tile(21)],
+            Some(tile(13)),
+        )
+    }
+
+    fn opponent_meld_context(
+        player_id: Option<u8>,
+        opponent_melds: Vec<crate::meld::Meld>,
+    ) -> GameContext {
+        opponent_meld_context_with_reach(player_id, opponent_melds, [false; 4])
+    }
+
+    fn opponent_meld_context_with_reach(
+        player_id: Option<u8>,
+        opponent_melds: Vec<crate::meld::Meld>,
+        reached: [bool; 4],
+    ) -> GameContext {
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[1] = opponent_melds;
+
+        GameContext::from_parts_with_melds(
+            Some(tile(OPPONENT_MELD_DRAW)),
+            OPPONENT_MELD_HAND
+                .iter()
+                .map(|&value| tile(value))
+                .collect(),
+            vec![],
+            TileType::new(27),
+            TileType::new(27),
+            Vec::new(),
+            player_id,
+            Some(0),
+            Default::default(),
+            reached,
+            melds,
+        )
+    }
+
+    fn opponent_meld_actions() -> Vec<LegalAction> {
+        OPPONENT_MELD_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(OPPONENT_MELD_DRAW)])
+            .collect()
+    }
+
+    #[test]
+    fn diagnose_reports_player_threats_for_every_seat() {
+        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+        let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
+
+        // 表示・解析用に別実装で数え直さず、production の診断値をそのまま持つ。
+        assert_eq!(diagnostic.player_threats, diagnose_player_threats(&ctx));
+
+        let threat = &diagnostic.player_threats[1];
+        assert_eq!(threat.player, 1);
+        assert_eq!(threat.is_opponent(), Some(true));
+        assert!(!threat.reached);
+        assert_eq!(threat.is_dealer, Some(false));
+        assert_eq!(threat.meld_count, 2);
+        assert_eq!(threat.open_meld_count, 2);
+        assert_eq!(threat.kan_count, 0);
+        assert!(threat.melds[0].value_honor.unwrap().is_dragon);
+        assert_eq!(threat.melds[1].red_dora_count, 1);
+
+        assert_eq!(diagnostic.player_threats[0].is_self, Some(true));
+        assert_eq!(diagnostic.player_threats[0].meld_count, 0);
+    }
+
+    #[test]
+    fn diagnose_does_not_guess_the_self_seat_without_player_id() {
+        let ctx = opponent_meld_context(None, vec![white_dragon_pon()]);
+        let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
+
+        assert_eq!(diagnostic.player_threats.len(), 4);
+        for (player, threat) in diagnostic.player_threats.iter().enumerate() {
+            assert_eq!(threat.player, player);
+            assert_eq!(threat.is_self, None);
+            assert_eq!(threat.is_opponent(), None);
+        }
+        assert_eq!(diagnostic.player_threats[1].meld_count, 1);
+    }
+
+    #[test]
+    fn opponent_melds_do_not_change_the_existing_decisions() {
+        // 非リーチの副露相手は脅威入力に入らないので、既存の選択・押し引き・防御は変わらない。
+        let actions = opponent_meld_actions();
+        let with_melds = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+        let without_melds = opponent_meld_context(Some(0), vec![]);
+
+        let melded = diagnose_matching_act(&with_melds, &actions);
+        let plain = diagnose_matching_act(&without_melds, &actions);
+
+        assert_eq!(melded.selected_action, plain.selected_action);
+        assert_eq!(melded.selected_source, plain.selected_source);
+        assert_eq!(melded.normal_discard_action, plain.normal_discard_action);
+        assert_eq!(melded.push_pull_inputs, plain.push_pull_inputs);
+        assert_eq!(melded.push_pull_decision, plain.push_pull_decision);
+        assert_eq!(melded.reach, plain.reach);
+        assert_eq!(melded.defense, plain.defense);
+        assert_eq!(melded.pon, plain.pon);
+        assert_ne!(melded.player_threats, plain.player_threats);
+
+        let decision = melded.push_pull_decision.expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(
+            decision.reason,
+            crate::push_pull::PushPullReason::NoOpponentReach
+        );
+        assert_eq!(
+            melded
+                .push_pull_inputs
+                .expect("押し引き入力がある")
+                .opponent_reach_count,
+            0
+        );
+    }
+
+    #[test]
+    fn player_threats_keep_act_and_diagnose_consistent() {
+        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+        let actions = opponent_meld_actions();
+
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&ctx, &actions);
+        let diagnosed = ShantenAgent::diagnose(&ctx, &actions);
+        let with_lookahead =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        assert_eq!(diagnosed.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(with_lookahead.player_threats, diagnosed.player_threats);
+    }
+
+    #[test]
+    fn player_threats_keep_reach_and_meld_facts_together() {
+        let ctx = opponent_meld_context_with_reach(
+            Some(0),
+            vec![white_dragon_pon()],
+            [false, true, false, false],
+        );
+        let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
+
+        let threat = &diagnostic.player_threats[1];
+        assert!(threat.reached);
+        assert_eq!(threat.meld_count, 1);
+        assert_eq!(threat.open_meld_count, 1);
+        assert_eq!(
+            diagnostic
+                .push_pull_inputs
+                .expect("押し引き入力がある")
+                .opponent_reach_count,
+            1
+        );
     }
 
     // 白ポン1組。副露の種類によらず完成済み面子1として数える。

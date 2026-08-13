@@ -232,6 +232,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `reached` | 各 player のリーチ状態。要素数 4 |
 | `discards` | 各 player の河。入力順のまま扱う。要素数 4 |
 | `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数 4 |
+| `melds` | 各 player の副露・暗槓。要素数 4。各面子は `kind` (`chi` / `pon` / `daiminkan` / `ankan` / `kakan`) と `tiles`、暗槓以外は鳴いた牌 `called_tile` を持つ |
 | `extra_visible_tiles` | 副露牌など、他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌とその順序 |
 
@@ -304,6 +305,43 @@ Reach
 上の scenario は打 北 で 5s 単騎テンパイになる局面です。打牌前の14枚をそのまま見ると受け入れは `5s` と `北` の6枚ありますが、実際に切る打牌を決めた後の待ちは 5s の3枚だけなので、リーチせずダマに進みます。
 
 通常打牌候補では、選ばれなかった理由も表示されます。その判断処理を通らなかった場合は `not evaluated` と表示されます。
+
+`Player threats` は、局面から観測できる player ごとの事実だけを表示する section です。リーチ・親・自風・副露数 (`melds` / `open melds` / `kans`) と `MeldKind` の内訳、副露ごとの牌・公開かどうか・槓かどうか・ドラ・赤ドラ・役牌になり得るかを出します。
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/opponent_threat.json
+```
+
+```text
+player 1
+  opponent: yes
+  reached: no
+  dealer: no
+  seat wind: S
+  melds: 2
+  open melds: 2
+  kans: 0
+  meld kinds: Chi 1, Pon 1
+  meld dora: 2
+  meld red dora: 1
+  meld 1: Pon P P P
+    open: yes
+    kan: no
+    dora: 0
+    red dora: 0
+    dragon: yes
+    round wind: no
+    seat wind: no
+  meld 2: Chi 4m 5mr 6m
+    open: yes
+    kan: no
+    dora: 2
+    red dora: 1
+```
+
+`player_id` が不明でも席を除外せず常に4席分を表示し、自分か他家か (`opponent`)・親か (`dealer`) ・自風が確定できない場合は推測せず `unknown` / `None` と表示します。暗槓は fixed meld として `melds` と `kans` に数えますが `open melds` には数えません。
+
+この section は観測できる事実だけで、危険度の判断は含みません。押し引き・防御にもまだ反映しておらず、非リーチの副露相手しかいない局面の `Push/Pull` は従来どおり `NoOpponentReach` → `Push` になります。
 
 出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
 
