@@ -215,23 +215,27 @@ fn sort_group_by_opponent_honor_value(group: &mut [RankedHonorCandidate<'_>]) {
     }
 }
 
-// 合法 Dahai のうち字牌のみを 見え枚数の安全度 → 役牌価値 → 元の順序 で並べる。
-pub fn honor_dahai_actions_by_safety<'a>(
+/// 合法 Dahai のうち字牌のみを 見え枚数の安全度 → 役牌価値 → 元の順序 で並べる共有実装。
+///
+/// 役牌価値の求め方だけを呼び出し側から差し替えられるようにしてある。見え枚数の安全度
+/// ([`honor_safety_rank`]) と、同 rank 内を役牌価値の切りやすい順
+/// (`GuestWind` → `SingleValueHonor` → `DoubleWind`) に並べる sorting はここが唯一の実装で、
+/// 対象 player 集合ごとにコピーしない。unknown の役牌価値は推測せず、その位置の元の順序を保つ。
+///
+/// リーチ者向けの入口は [`honor_dahai_actions_by_safety`]。非リーチ副露相手向けの入口は
+/// [`open_hand_honor_dahai_actions_by_safety`](crate::open_hand_defense::open_hand_honor_dahai_actions_by_safety)。
+pub fn honor_dahai_actions_by_safety_with<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
+    opponent_honor_value: impl Fn(TileType) -> Option<OpponentHonorValue>,
 ) -> Vec<(&'a LegalAction, HonorSafetyRank)> {
     let mut ranked: Vec<RankedHonorCandidate<'a>> = legal_actions
         .iter()
         .filter_map(|action| match action {
             LegalAction::Dahai { tile } => {
                 let tile_type = tile.tile_type();
-                honor_safety_rank(tile_type, context).map(|rank| {
-                    (
-                        action,
-                        rank,
-                        opponent_honor_value_for_reached(tile_type, context),
-                    )
-                })
+                honor_safety_rank(tile_type, context)
+                    .map(|rank| (action, rank, opponent_honor_value(tile_type)))
             }
             _ => None,
         })
@@ -253,6 +257,17 @@ pub fn honor_dahai_actions_by_safety<'a>(
         .into_iter()
         .map(|(action, rank, _)| (action, rank))
         .collect()
+}
+
+// 合法 Dahai のうち字牌のみを 見え枚数の安全度 → 役牌価値 → 元の順序 で並べる。
+// 役牌価値は全リーチ者基準で、現物のリーチ者を除いた最も危険な評価を使う。
+pub fn honor_dahai_actions_by_safety<'a>(
+    legal_actions: &'a [LegalAction],
+    context: &GameContext,
+) -> Vec<(&'a LegalAction, HonorSafetyRank)> {
+    honor_dahai_actions_by_safety_with(legal_actions, context, |tile| {
+        opponent_honor_value_for_reached(tile, context)
+    })
 }
 
 // 最も安全度の高い字牌 Dahai を fallback として選ぶ。候補がなければ None。
@@ -638,6 +653,31 @@ pub fn suited_safety_rank_for_all_reached(
     suited_safety_rank_for_players(tile, &context.reached_opponents(), context)
 }
 
+/// 合法 Dahai のうち数牌のみを安全度の高い順
+/// (`NoChance` → `OneChance` → `Suji` → `HalfSuji` → `NoSafety`) に並べる共有実装。
+///
+/// 数牌の安全度の求め方だけを呼び出し側から差し替えられるようにしてある。同安全度は元の順序を
+/// 保つ。並べ替えはここが唯一の実装で、対象 player 集合ごとにコピーしない。
+///
+/// リーチ者向けの入口は [`suited_dahai_actions_by_safety`]。非リーチ副露相手向けの入口は
+/// [`open_hand_suited_dahai_actions_by_safety`](crate::open_hand_defense::open_hand_suited_dahai_actions_by_safety)。
+pub fn suited_dahai_actions_by_safety_with<'a>(
+    legal_actions: &'a [LegalAction],
+    suited_safety_rank: impl Fn(TileType) -> Option<SuitedSafetyRank>,
+) -> Vec<(&'a LegalAction, SuitedSafetyRank)> {
+    let mut ranked: Vec<(&'a LegalAction, SuitedSafetyRank)> = legal_actions
+        .iter()
+        .filter_map(|action| match action {
+            LegalAction::Dahai { tile } => {
+                suited_safety_rank(tile.tile_type()).map(|rank| (action, rank))
+            }
+            _ => None,
+        })
+        .collect();
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
+    ranked
+}
+
 // 合法 Dahai のうち数牌のみを安全度の高い順
 // (NoChance → OneChance → Suji → HalfSuji → NoSafety)に並べる。
 // 同安全度は元の順序を保つ。スジ判定は全リーチ者基準。
@@ -645,18 +685,9 @@ pub fn suited_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
 ) -> Vec<(&'a LegalAction, SuitedSafetyRank)> {
-    let mut ranked: Vec<(&'a LegalAction, SuitedSafetyRank)> = legal_actions
-        .iter()
-        .filter_map(|action| match action {
-            LegalAction::Dahai { tile } => {
-                suited_safety_rank_for_all_reached(tile.tile_type(), context)
-                    .map(|rank| (action, rank))
-            }
-            _ => None,
-        })
-        .collect();
-    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
-    ranked
+    suited_dahai_actions_by_safety_with(legal_actions, |tile| {
+        suited_safety_rank_for_all_reached(tile, context)
+    })
 }
 
 // 他家リーチ中に、最も安全度の高い数牌 Dahai を fallback として選ぶ。

@@ -365,8 +365,8 @@ Scenario
 
     ```text
     Push/Pull
-      mode: Push
-      reason: NoOpponentReach
+      mode: Fold
+      reason: TwoOrMoreShantenAgainstHighOpenHand
       opponent reach count: 0
 
     player 1
@@ -411,6 +411,15 @@ Final decision
   action: 1m
   source: DefenseFallback
   defense kind: Genbutsu
+```
+
+防御 fallback は、リーチ者向け (`source: DefenseFallback` + `defense kind`) と非リーチ副露相手向け (`source: OpenHandDefenseFallback` + `open hand defense category`) を別の経路として区別します。どちらで最終 action を選んだかは `Final decision` / `Summary` / `bot_core::agent_decision` のログから判別できます。
+
+```text
+Final decision
+  action: 5m
+  source: OpenHandDefenseFallback
+  open hand defense category: DiscardedByAllTargets
 ```
 
 `Reach` は、通常打牌で選んだ打牌を切った後のテンパイ形に基づく判断です。選んだ打牌・打牌後の向聴・ツモ和了できる待ちの残枚数と種類数・恒常フリテン・ロン可否・理由を表示します。リーチを検討するのは押し引きが `Push` の場合だけで、それ以外は `not evaluated` になります。
@@ -504,7 +513,26 @@ player 1
 
 自分の席・リーチ済みの席・`player_id` 不明で自分かどうか確定できない席は分類の対象外で、`not applicable (SelfSeat)` / `not applicable (Reached)` / `not applicable (UnknownSeat)` と表示します。リーチ者の危険度は既存のリーチ情報が source of truth なので、OpenHandThreat とは二重に適用しません。席が不明な相手を他家と推測して `Present` / `High` にすることも、逆に危険度なしと確定させることもしません。
 
-この classification は現時点では行動に使っていません。`open hand threat: High` の相手がいても、非リーチの副露相手しかいない局面の `Push/Pull` は従来どおり `NoOpponentReach` → `Push` で、防御 fallback もリーチ者向けの現物・筋のままです。この classification を使う先として、次の `OpenHand defense` に safety の診断だけを用意しています。
+#### High OpenHandThreat の押し引き
+
+他家リーチ者が0人で `open hand threat: High` の相手が1人以上いる局面は、`decide_push_pull()` の新しい policy の対象になります。同じ classification を押し引きと `OpenHand defense` の両方が参照し、High 条件をそれぞれで書き直しません。
+
+| 自分の状態 | mode | reason |
+| --- | --- | --- |
+| 攻撃評価を作れない | `Neutral` | `MissingOffenseAgainstHighOpenHand` |
+| テンパイ (向聴 <= 0) | `Push` | `TenpaiAgainstHighOpenHand` |
+| 一向聴 / 受け入れ8枚以上・2種類以上 | `Neutral` | `StrongIishantenAgainstHighOpenHand` |
+| 一向聴 / 完全形・受け入れ6枚以上・2種類以上 | `Neutral` | `CompleteIishantenAgainstHighOpenHand` |
+| 一向聴 / 自分が親・受け入れ7枚以上・2種類以上 | `Neutral` | `DealerIishantenAgainstHighOpenHand` |
+| 一向聴 / 自分が子・簡易打点 proxy 4以上 | `Neutral` | `HighValueIishantenAgainstHighOpenHand` |
+| 上記以外の一向聴 | `Fold` | `IishantenAgainstHighOpenHand` |
+| 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainstHighOpenHand` |
+
+一向聴の threshold は既存のリーチ policy と同じ pure helper を共有しており、リーチ局面の境界は変えていません。テンパイなら High の副露相手がいても押し、情報不足 (攻撃評価なし) を理由に強制 Fold にはしません。`Push` の場合は Reach → 通常打牌 → 防御 fallback、`Neutral` は通常打牌 → 防御 fallback という既存の順序をそのまま使うため、High というだけで安全牌を通常打牌より優先することはありません。安全牌を優先するのは `Fold` の場合だけです。
+
+`open hand threat: Present` の相手は行動を変えません。`High` の相手がいない局面は従来どおり `NoOpponentReach` → `Push` です。
+
+他家リーチ者が1人以上いる局面には、この policy を適用しません。例えば「player 1 がリーチ・player 2 が `High`」でも押し引きは既存のリーチ policy、防御 fallback も既存のリーチ者向けのままです。`RiichiThreat` と `OpenHandThreat` を1つの危険度へ集約する threat 集約と、両者を同時に満たす safety selector はまだ未対応です。
 
 #### 非リーチ副露相手への OpenHand defense safety
 
@@ -517,8 +545,11 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/open_hand_defense.jso
 ```text
 OpenHand defense
   targets: 1, 3
+  selected action: 5m
+  selected category: DiscardedByAllTargets
 
 5m
+  selected: yes
   discarded by all targets: yes
   discarded by target[1]: yes
   discarded by target[3]: yes
@@ -535,6 +566,8 @@ OpenHand defense
 | 行 | 内容 |
 | --- | --- |
 | `targets` | `High` の相手の席。いなければ `none` で候補も出さない |
+| `selected action` / `selected category` | 実際に採用した OpenHand 防御 fallback。採用しなかった場合は `selected: none` |
+| `selected` | その候補が採用されたか |
 | `discarded by target[n]` | その相手自身の河に同じ牌種があるか |
 | `discarded by all targets` | 全 target 自身の河にあるか。target が0人なら `no` |
 | `honor safety` | 字牌の見え枚数による安全度。既存 Defense と同じ4段階 |
@@ -553,7 +586,11 @@ M リーグ公式ルールでは「自己の捨て牌にアガリ形を構成で
 
 target ごとに評価が変わる `opponent honor value` / `suji safety` / `suited safety` は、その牌でまだロンされ得る target だけを集約します。`discarded by target[n]: yes` の相手はフリテンでその牌をロンできないため、その相手の無スジや役牌価値を全体の危険度に持ち込みません。除外根拠は本人の河だけで、`post_reach_passed` は使いません。`suji safety[n]` はその相手単独の評価なので、除外された相手の値は集約後の `suji safety` と一致しないことがあります。全 target が河に切っている牌は集約対象が0人になりますが、`suji safety` を `Suji` とは扱わず、安全根拠は `category: DiscardedByAllTargets` が表します。
 
-この section は現時点では診断専用です。`High` の相手がいても `decide_push_pull()` / `PushPullMode` / 防御 fallback の採用条件 / 最終 action は変わりません。押し引きと防御 fallback への接続は次の変更で行います。
+押し引きが `Fold` になった場合は、この safety から `DiscardedByAllTargets` → `HonorSafety` → `SuitedSafety` の順で fallback を選び、通常打牌より優先します。字牌は既存 Defense と同じ見え枚数の安全度で並べ、同じ rank 内は `opponent honor value` の切りやすい順 (`GuestWind` → `SingleValueHonor` → `DoubleWind`) にします。数牌は既存 Defense と同じ `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で、`NoSafety` しか無い場合は fallback として選びません。fallback を1件も選べない場合だけ通常打牌に戻ります。
+
+選択そのものは production の selector が source of truth で、この section はその結果を `selected` に写すだけです。`act()` と `diagnose()` は同じ selector を共有するため、`Final decision` の `action` と `selected action` は必ず一致します。
+
+`Push` / `Neutral` では順序を変えないため、`High` の相手がいても安全牌が通常打牌より優先されることはありません。リーチ者がいる局面ではこの fallback に切り替えず、既存のリーチ者向け防御 fallback (`Defense`) をそのまま使います。
 
 出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
 
@@ -598,13 +635,24 @@ diff \
 
 `open_hand_weak_*.json` は、副露なし・役牌 Pon・3副露の3局面を弱い自分の手 (二向聴) で並べたものです。副露相手の facts と自分の攻撃力を後から組み合わせられるよう、`Push/Pull` の offense だけが違う組を用意しています。
 
+さらに、押し引きが分かれる一向聴の組を最小限だけ用意しています。どちらも「副露なし」と「3副露 (`High`)」の対で、自分の手牌・合法 Dahai は組の中で共通です。
+
+| scenario | 自分の手 | `High` のときの `Push/Pull` |
+| --- | --- | --- |
+| `open_hand_iishanten_baseline.json` / `open_hand_iishanten_three_melds.json` | 強い一向聴 (受け入れ8枚以上・2種類以上) | `Neutral` / `StrongIishantenAgainstHighOpenHand` |
+| `open_hand_weak_iishanten_baseline.json` / `open_hand_weak_iishanten_three_melds.json` | 弱い一向聴 (受け入れ7枚・2種類) | `Fold` / `IishantenAgainstHighOpenHand` |
+
+弱い一向聴の組は `extra_visible_tiles` で受け入れ牌をほぼ見え牌にして、強い一向聴の threshold に届かない形へ固定しています。
+
 副露牌は見え牌に加わるため受け入れが変わり得ますが、この scenario 群は相手の副露牌が自分の受け入れ牌種と重ならない局面に揃えてあるため、`Normal discard` と offense は一致します。
 
 各 scenario の `open hand threat` は、副露なしが `None`、1副露が `Present`、`open_hand_value_pon_and_chi.json` / `open_hand_dora_melds.json` / 3副露の各 scenario が `High` になります。`open_hand_two_melds_nine_discards.json` と `open_hand_chi_twelve_discards.json` だけは相手の河が進んでおり、局進行の threshold で `High` になります。他の scenario は相手の河が空なので、局進行の threshold は `High` の理由になりません。
 
 `High` の scenario では `OpenHand defense` に target と合法 Dahai ごとの safety が出ます。`Present` / `None` だけの scenario は `targets: none` です。`open_hand_defense.json` は、`High` の相手が2人・`Present` の相手が1人いる局面で、本人の河・字牌 safety・壁・スジの出方をまとめて見るための fixture です。
 
-現在の押し引きは副露 facts も OpenHandThreat も使わないため、`High` の scenario を含めてどの scenario も `NoOpponentReach` → `Push` です。副露相手に対する具体的な押し引き・防御はまだ入れていません。
+押し引きは `High` の scenario でだけ分かれます。テンパイの scenario 群は `TenpaiAgainstHighOpenHand` → `Push`、強い一向聴は `StrongIishantenAgainstHighOpenHand` → `Neutral`、弱い一向聴は `IishantenAgainstHighOpenHand` → `Fold`、二向聴の `open_hand_weak_*.json` は `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` です。`Present` / `None` だけの scenario はどれも従来どおり `NoOpponentReach` → `Push` になります。
+
+`Fold` になる scenario では、`Final decision` の `source` が `OpenHandDefenseFallback` になり、通常打牌より OpenHand 防御 fallback が優先されます。`open_hand_defense.json` は本人の河 (`DiscardedByAllTargets`)、`open_hand_weak_iishanten_three_melds.json` は字牌 (`HonorSafety`) が選ばれる例です。
 
 ## 公式ドキュメント
 

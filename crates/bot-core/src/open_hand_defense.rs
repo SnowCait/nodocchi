@@ -1,4 +1,4 @@
-//! `High` [`OpenHandThreatLevel`] の非リーチ副露相手に対する防御 safety の source of truth。
+//! `High` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の非リーチ副露相手に対する防御 safety の source of truth。
 //!
 //! 判定は既存 Defense の pure helper をそのまま共有し、字牌の見え枚数・壁・スジ・役牌価値を
 //! 別実装しない。リーチ者向けの `*_for_all_reached` と違うのは対象 player 集合の決め方と、
@@ -8,26 +8,26 @@
 //! `post_reach_passed_tiles`(リーチ成立後に他家から切られて通った牌)は使わない。あちらは
 //! リーチ固有の情報なので、非リーチ副露相手へは流用しない。
 //!
-//! 現時点では診断専用で、押し引き・防御 fallback の採用条件には接続していない。
+//! 防御 fallback の action 選択は [`select_open_hand_defense_fallback_action_with_kind`] が
+//! source of truth で、[`OpenHandDefenseDiagnostic`] はその結果を写すだけにする。
 
-use crate::action::LegalAction;
+use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
     HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
-    honor_safety_rank, is_discarded_by_all_players, is_discarded_by_player,
-    opponent_honor_value_for_players, suited_safety_rank_for_players, suji_safety_rank_for,
-    suji_safety_rank_for_players, wall_rank,
+    honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
+    is_discarded_by_player, opponent_honor_value_for_players, suited_dahai_actions_by_safety_with,
+    suited_safety_rank_for_players, suji_safety_rank_for, suji_safety_rank_for_players, wall_rank,
 };
-use crate::open_hand_threat::{
-    OpenHandThreatAssessment, OpenHandThreatLevel, classify_open_hand_threats,
-};
+use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 use bot_logic::TileType;
 
-/// [`OpenHandThreatLevel::High`] と分類された席を防御の target として集める pure helper。
+/// [`OpenHandThreatLevel::High`](crate::open_hand_threat::OpenHandThreatLevel::High) と分類された席を防御の target として集める pure helper。
 ///
 /// 分類そのものは行わず、渡された classification をそのまま source of truth にする。配列の
-/// index が席番号で、戻り値は席順。[`OpenHandThreatLevel::Present`] は今回の target にしない。
+/// index が席番号で、戻り値は席順。[`OpenHandThreatLevel::Present`](crate::open_hand_threat::OpenHandThreatLevel::Present)
+/// は今回の target にしない。
 ///
 /// 自分の席・リーチ済みの席・`player_id` 不明の席は
 /// [`OpenHandThreatAssessment::NotApplicable`] なので、level を持たず target にもならない。
@@ -35,7 +35,7 @@ pub fn high_open_hand_threat_players(assessments: &[OpenHandThreatAssessment; 4]
     assessments
         .iter()
         .enumerate()
-        .filter(|(_, assessment)| assessment.level() == Some(OpenHandThreatLevel::High))
+        .filter(|(_, assessment)| assessment.is_high())
         .map(|(player, _)| player)
         .collect()
 }
@@ -159,6 +159,118 @@ pub fn open_hand_defense_category(
         .map(OpenHandDefenseCategory::SuitedSafety)
 }
 
+/// 合法 Dahai のうち、全 target 自身の河にある牌を元の順序を保って抽出する。
+///
+/// 根拠は [`is_discarded_by_all_open_hand_threats`] だけで、target が0人なら空。
+pub fn discarded_by_all_targets_dahai_actions<'a>(
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+    context: &GameContext,
+) -> Vec<&'a LegalAction> {
+    legal_actions
+        .iter()
+        .filter(|action| match action {
+            LegalAction::Dahai { tile } => {
+                is_discarded_by_all_open_hand_threats(tile.tile_type(), targets, context)
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+/// 合法 Dahai のうち字牌のみを、target に対する安全度順に並べる。
+///
+/// 並べ替えは既存 Defense の [`honor_dahai_actions_by_safety_with`] と共有し、副露相手用の
+/// sorting を別に持たない。役牌価値だけを
+/// [`opponent_honor_value_for_open_hand_threats`] へ差し替える。
+pub fn open_hand_honor_dahai_actions_by_safety<'a>(
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+    context: &GameContext,
+) -> Vec<(&'a LegalAction, HonorSafetyRank)> {
+    honor_dahai_actions_by_safety_with(legal_actions, context, |tile| {
+        opponent_honor_value_for_open_hand_threats(tile, targets, context)
+    })
+}
+
+/// 合法 Dahai のうち数牌のみを、target に対する安全度順に並べる。
+///
+/// 並べ替えは既存 Defense の [`suited_dahai_actions_by_safety_with`] と共有し、安全度だけを
+/// [`suited_safety_rank_for_open_hand_threats`] へ差し替える。
+pub fn open_hand_suited_dahai_actions_by_safety<'a>(
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+    context: &GameContext,
+) -> Vec<(&'a LegalAction, SuitedSafetyRank)> {
+    suited_dahai_actions_by_safety_with(legal_actions, |tile| {
+        suited_safety_rank_for_open_hand_threats(tile, targets, context)
+    })
+}
+
+/// High OpenHandThreat 相手に対する防御 fallback を優先順位付きで選ぶ production selector。
+///
+/// [`OpenHandDefenseCategory`] の並びどおり、全 target 本人の河 → 字牌 safety → 数牌 safety の
+/// 順に評価し、選ばれた大分類を添えて返す。target が0人なら `None`。
+///
+/// - `DiscardedByAllTargets`: 全 target 自身の河にある牌。同順位では合法 Dahai の元順序を保つ。
+/// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存リーチ Defense と同じ ranking。
+/// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存リーチ Defense と同じく
+///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
+///
+/// いずれも牌種を決めたあと、その牌種内では [`prefer_black_five_for_action`] で黒5を優先する。
+/// 牌種選択・大分類・安全度 rank は変えず、物理牌だけを黒牌へ正規化する。
+///
+/// リーチ者向けの防御 fallback ([`select_defense_fallback_action_with_kind`](crate::defense::select_defense_fallback_action_with_kind))
+/// とは別経路で、両者の safety を1つに集約することはしない。リーチ者がいる局面でこちらを使うか
+/// どうかは呼び出し側の責務。
+pub fn select_open_hand_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+) -> Option<(&'a LegalAction, OpenHandDefenseCategory)> {
+    if targets.is_empty() {
+        return None;
+    }
+
+    if let Some(action) = discarded_by_all_targets_dahai_actions(legal_actions, targets, context)
+        .into_iter()
+        .next()
+    {
+        let action = prefer_black_five_for_action(legal_actions, action);
+        return Some((action, OpenHandDefenseCategory::DiscardedByAllTargets));
+    }
+
+    if let Some((action, rank)) =
+        open_hand_honor_dahai_actions_by_safety(legal_actions, targets, context)
+            .into_iter()
+            .next()
+    {
+        let action = prefer_black_five_for_action(legal_actions, action);
+        return Some((action, OpenHandDefenseCategory::HonorSafety(rank)));
+    }
+
+    if let Some((action, rank)) =
+        open_hand_suited_dahai_actions_by_safety(legal_actions, targets, context)
+            .into_iter()
+            .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety)
+    {
+        let action = prefer_black_five_for_action(legal_actions, action);
+        return Some((action, OpenHandDefenseCategory::SuitedSafety(rank)));
+    }
+
+    None
+}
+
+/// 防御 fallback の action だけを返す薄い wrapper。
+pub fn select_open_hand_defense_fallback_action<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+) -> Option<&'a LegalAction> {
+    select_open_hand_defense_fallback_action_with_kind(context, legal_actions, targets)
+        .map(|(action, _)| action)
+}
+
 /// target 1人に対する safety。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenHandDefenseTargetSafety {
@@ -178,7 +290,9 @@ pub struct OpenHandDefenseTargetSafety {
 /// 合法 Dahai 1件ごとの、High OpenHandThreat 相手に対する防御評価。
 ///
 /// production で使う pure な safety helper の結果をそのまま持つ解析用データで、表示のために
-/// safety を計算し直さない。これ自体が action 選択を行うこともない。
+/// safety を計算し直さない。これ自体が action 選択を行うこともない。選択の source of truth は
+/// [`select_open_hand_defense_fallback_action_with_kind`] であり、`selected` はその結果を写した
+/// もの。
 ///
 /// 数牌では `wall_rank` / `suji_safety_rank` / `suited_safety_rank` が `Some`、字牌では
 /// `honor_safety_rank` が `Some` になり、無関係なフィールドは `None`。
@@ -188,6 +302,8 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     pub action: LegalAction,
     /// `action` の牌種。
     pub tile: TileType,
+    /// この候補が OpenHand 防御 fallback として実際に選ばれたか。
+    pub selected: bool,
     /// target ごとの safety。席順で、target が0人なら空。
     pub targets: Vec<OpenHandDefenseTargetSafety>,
     /// 全 target 自身の河にあるか。target が0人なら `false`。
@@ -210,10 +326,13 @@ pub struct OpenHandDefenseCandidateDiagnostic {
 
 impl OpenHandDefenseCandidateDiagnostic {
     /// 合法 Dahai 1件から防御評価を構築する pure helper。Dahai 以外の action では `None`。
+    ///
+    /// `selected` は production selector の結果をそのまま渡す。ここで選び直さない。
     pub fn for_dahai_action(
         context: &GameContext,
         action: &LegalAction,
         targets: &[usize],
+        selected: bool,
     ) -> Option<Self> {
         let LegalAction::Dahai { tile } = action else {
             return None;
@@ -224,6 +343,7 @@ impl OpenHandDefenseCandidateDiagnostic {
         Some(Self {
             action: action.clone(),
             tile: tile_type,
+            selected,
             targets: targets
                 .iter()
                 .map(|&player| OpenHandDefenseTargetSafety {
@@ -249,57 +369,98 @@ impl OpenHandDefenseCandidateDiagnostic {
     }
 
     /// 合法 action のうち Dahai だけを、元の順序を保って防御評価へ変換する。
+    ///
+    /// `selected_action` は OpenHand 防御 fallback として実際に選ばれた action。一致する候補の
+    /// `selected` だけが `true` になる。
     pub fn for_legal_actions(
         context: &GameContext,
         legal_actions: &[LegalAction],
         targets: &[usize],
+        selected_action: Option<&LegalAction>,
     ) -> Vec<Self> {
         legal_actions
             .iter()
-            .filter_map(|action| Self::for_dahai_action(context, action, targets))
+            .filter_map(|action| {
+                Self::for_dahai_action(context, action, targets, selected_action == Some(action))
+            })
             .collect()
     }
+}
+
+/// 採用された OpenHand 防御 fallback の内訳。
+///
+/// [`select_open_hand_defense_fallback_action_with_kind`] の結果をそのまま写したもので、
+/// 診断側で選び直さない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandDefenseSelectionDiagnostic {
+    /// 実際に選ばれた合法 Dahai。物理牌(赤5 / 黒5)の区別を保持する。
+    pub selected_action: LegalAction,
+    /// その action が選ばれた大分類。
+    pub selected_category: OpenHandDefenseCategory,
 }
 
 /// High OpenHandThreat 相手に対する防御 safety の構造化診断。
 ///
 /// `targets` が空の局面は「OpenHand Defense target なし」で、候補評価も作らない。target がいない
 /// ことを safety の値で表さないための区別。
+///
+/// `selected` は OpenHand 防御 fallback を実際に採用した場合だけ `Some` になる。採用しなかった
+/// 局面(押し引きが `Fold` ではない、安全牌候補が無い、リーチ者がいるので既存 Defense を使った
+/// など)では `None` で、候補評価だけが残る。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenHandDefenseDiagnostic {
-    /// [`OpenHandThreatLevel::High`] の target 席。席順。
+    /// [`OpenHandThreatLevel::High`](crate::open_hand_threat::OpenHandThreatLevel::High) の target 席。席順。
     pub targets: Vec<usize>,
+    /// 採用された OpenHand 防御 fallback。採用しなかった場合は `None`。
+    pub selected: Option<OpenHandDefenseSelectionDiagnostic>,
     /// target が1人以上いる場合の全合法 Dahai の防御評価。target が0人なら空。
     pub candidates: Vec<OpenHandDefenseCandidateDiagnostic>,
 }
 
 impl OpenHandDefenseDiagnostic {
-    /// 構築済みの classification から診断を作る pure helper。
+    /// 構築済みの classification と選択結果から診断を作る pure helper。
     ///
     /// 分類を作り直さないので、`Player threats` が持つ classification と target が必ず一致する。
+    /// `selected` には [`select_open_hand_defense_fallback_action_with_kind`] の戻り値をそのまま
+    /// 渡す。ここで防御 fallback を選び直さない。
     pub fn from_assessments(
         context: &GameContext,
         legal_actions: &[LegalAction],
         assessments: &[OpenHandThreatAssessment; 4],
+        selected: Option<(&LegalAction, OpenHandDefenseCategory)>,
     ) -> Self {
         let targets = high_open_hand_threat_players(assessments);
         let candidates = if targets.is_empty() {
             Vec::new()
         } else {
-            OpenHandDefenseCandidateDiagnostic::for_legal_actions(context, legal_actions, &targets)
+            OpenHandDefenseCandidateDiagnostic::for_legal_actions(
+                context,
+                legal_actions,
+                &targets,
+                selected.map(|(action, _)| action),
+            )
         };
         Self {
             targets,
+            selected: selected.map(|(action, category)| OpenHandDefenseSelectionDiagnostic {
+                selected_action: action.clone(),
+                selected_category: category,
+            }),
             candidates,
         }
     }
 
     /// `GameContext` から診断を作る adapter。分類は [`classify_open_hand_threats`] が行う。
-    pub fn from_context(context: &GameContext, legal_actions: &[LegalAction]) -> Self {
+    pub fn from_context(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        selected: Option<(&LegalAction, OpenHandDefenseCategory)>,
+    ) -> Self {
         Self::from_assessments(
             context,
             legal_actions,
             &classify_open_hand_threats(&player_threat_facts_from_context(context)),
+            selected,
         )
     }
 
@@ -307,13 +468,22 @@ impl OpenHandDefenseDiagnostic {
     pub fn has_target(&self) -> bool {
         !self.targets.is_empty()
     }
+
+    /// 採用された OpenHand 防御 fallback の大分類。採用しなかった場合は `None`。
+    pub fn selected_category(&self) -> Option<OpenHandDefenseCategory> {
+        self.selected
+            .as_ref()
+            .map(|selection| selection.selected_category)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::meld::{Meld, MeldKind};
-    use crate::open_hand_threat::{OpenHandThreatDecision, OpenHandThreatExclusion};
+    use crate::open_hand_threat::{
+        OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
+    };
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::TileId;
 
@@ -1015,6 +1185,7 @@ mod tests {
             context,
             &dahai(mjai),
             &high_open_hand_threat_players_from_context(context),
+            false,
         )
         .expect("Dahai の候補診断")
     }
@@ -1147,10 +1318,17 @@ mod tests {
             dahai("5m"),
             LegalAction::Hora,
         ];
-        let diagnostic = OpenHandDefenseDiagnostic::from_context(&context, &legal_actions);
+        let diagnostic = OpenHandDefenseDiagnostic::from_context(&context, &legal_actions, None);
 
         assert!(diagnostic.has_target());
         assert_eq!(diagnostic.targets, vec![3]);
+        assert!(diagnostic.selected.is_none());
+        assert!(
+            diagnostic
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.selected)
+        );
         assert_eq!(
             diagnostic
                 .candidates
@@ -1165,7 +1343,7 @@ mod tests {
     fn the_diagnostic_has_no_candidates_without_targets() {
         // Present しかいない局面を「target なし」と分かる形にする。
         let context = ContextSpec::new().melds_of(3, open_melds(1)).build();
-        let diagnostic = OpenHandDefenseDiagnostic::from_context(&context, &[dahai("N")]);
+        let diagnostic = OpenHandDefenseDiagnostic::from_context(&context, &[dahai("N")], None);
 
         assert!(!diagnostic.has_target());
         assert!(diagnostic.targets.is_empty());
@@ -1181,9 +1359,10 @@ mod tests {
             OpenHandDefenseDiagnostic::from_assessments(
                 &context,
                 &legal_actions,
-                &assessments(&context)
+                &assessments(&context),
+                None
             ),
-            OpenHandDefenseDiagnostic::from_context(&context, &legal_actions)
+            OpenHandDefenseDiagnostic::from_context(&context, &legal_actions, None)
         );
     }
 
@@ -1199,5 +1378,346 @@ mod tests {
             Some(OpenHandThreatLevel::High)
         );
         assert_eq!(targets(&context), vec![3]);
+    }
+
+    // ---- 防御 fallback の選択 ----
+
+    fn fallback(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+    ) -> Option<(LegalAction, OpenHandDefenseCategory)> {
+        select_open_hand_defense_fallback_action_with_kind(
+            context,
+            legal_actions,
+            &targets(context),
+        )
+        .map(|(action, category)| (action.clone(), category))
+    }
+
+    #[test]
+    fn the_fallback_is_none_without_targets() {
+        // Present しかいない局面では OpenHand 防御 fallback を選ばない。
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(1))
+            .discards_of(3, "N")
+            .build();
+
+        assert!(targets(&context).is_empty());
+        assert_eq!(fallback(&context, &[dahai("N"), dahai("5m")]), None);
+    }
+
+    #[test]
+    fn the_fallback_prefers_a_tile_in_every_targets_river() {
+        // 第一分類は全 target 本人の河。字牌 safety より優先し、同順位では元順序を保つ。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(2, "4s N")
+            .discards_of(3, "4s N")
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("5m"), dahai("4s"), dahai("N")]),
+            Some((dahai("4s"), OpenHandDefenseCategory::DiscardedByAllTargets))
+        );
+        assert_eq!(
+            fallback(&context, &[dahai("5m"), dahai("N"), dahai("4s")]),
+            Some((dahai("N"), OpenHandDefenseCategory::DiscardedByAllTargets))
+        );
+    }
+
+    #[test]
+    fn a_tile_in_only_one_targets_river_is_not_the_first_category() {
+        // 片方の target の河にしか無い牌は第一分類にしない。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(2, "4s")
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("4s"), dahai("N")]),
+            Some((
+                dahai("N"),
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::NoVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn the_fallback_uses_the_honor_safety_without_a_river_safe_tile() {
+        // 字牌は見え枚数の安全度順。既存リーチ Defense と同じ4段階を使う。
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .visible(vec![tile_copy("N", 0), tile_copy("N", 1)])
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("5m"), dahai("W"), dahai("N")]),
+            Some((
+                dahai("N"),
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::TwoVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn the_fallback_breaks_an_honor_tie_by_the_opponent_honor_value() {
+        // 場風 東、player 3 の自風は西。見え枚数が同じなら客風の南を先に切る。
+        let context = ContextSpec::new().melds_of(3, open_melds(3)).build();
+
+        assert_eq!(context.seat_wind_of(3), Some(tile_type("W")));
+        assert_eq!(
+            opponent_honor_value_for_open_hand_threats(
+                tile_type("S"),
+                &targets(&context),
+                &context
+            ),
+            Some(OpponentHonorValue::GuestWind)
+        );
+        assert_eq!(
+            opponent_honor_value_for_open_hand_threats(
+                tile_type("P"),
+                &targets(&context),
+                &context
+            ),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+
+        assert_eq!(
+            fallback(&context, &[dahai("P"), dahai("S")]),
+            Some((
+                dahai("S"),
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::NoVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn an_unknown_honor_value_is_not_ordered_as_a_guest_wind() {
+        // 場風が不明な風牌は unknown のまま。客風と推測して役牌より先に切らない。
+        let mut spec = ContextSpec::new().melds_of(3, open_melds(3));
+        spec.round_wind = None;
+        let context = spec.build();
+
+        assert_eq!(
+            opponent_honor_value_for_open_hand_threats(
+                tile_type("S"),
+                &targets(&context),
+                &context
+            ),
+            None
+        );
+        assert_eq!(
+            fallback(&context, &[dahai("P"), dahai("S")]),
+            Some((
+                dahai("P"),
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::NoVisible)
+            ))
+        );
+    }
+
+    // 数牌の安全度を段階的に作る局面。
+    //
+    // - 1s: 2s が4枚見えているので NoChance
+    // - 9s: 8s が3枚見えているので OneChance
+    // - 5m: player 3 の河の 2m / 8m から両側スジ
+    // - 6p: player 3 の河の 3p から片スジ
+    // - 4m: 壁もスジも無い NoSafety
+    fn suited_safety_context() -> GameContext {
+        let mut visible: Vec<TileId> = (0..4).map(|copy| tile_copy("2s", copy)).collect();
+        visible.extend((0..3).map(|copy| tile_copy("8s", copy)));
+
+        ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .discards_of(3, "2m 8m 3p")
+            .visible(visible)
+            .build()
+    }
+
+    #[test]
+    fn the_fallback_prefers_the_safest_suited_tile() {
+        // 字牌も本人の河も無い場合は数牌 safety の順。既存リーチ Defense と同じ rank 順を使う。
+        let context = suited_safety_context();
+        let expectations = [
+            ("1s", SuitedSafetyRank::NoChance),
+            ("9s", SuitedSafetyRank::OneChance),
+            ("5m", SuitedSafetyRank::Suji),
+            ("6p", SuitedSafetyRank::HalfSuji),
+        ];
+
+        // 先頭の候補から順に外すと、次に安全な候補が選ばれる。無スジの 4m を先頭に置いても
+        // 合法 action の順序より安全度が優先される。
+        for index in 0..expectations.len() {
+            let mut legal_actions = vec![dahai("4m")];
+            legal_actions.extend(expectations[index..].iter().map(|(mjai, _)| dahai(mjai)));
+
+            let (mjai, rank) = expectations[index];
+            assert_eq!(
+                fallback(&context, &legal_actions),
+                Some((dahai(mjai), OpenHandDefenseCategory::SuitedSafety(rank))),
+                "{mjai}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_suited_no_safety_candidate_is_not_selected() {
+        // NoSafety しか無い場合は OpenHand 防御 fallback を選ばない。既存リーチ Defense と同じ。
+        let context = ContextSpec::new().melds_of(3, open_melds(3)).build();
+
+        for mjai in ["4m", "5p"] {
+            assert_eq!(
+                suited_safety_rank_for_open_hand_threats(
+                    tile_type(mjai),
+                    &targets(&context),
+                    &context
+                ),
+                Some(SuitedSafetyRank::NoSafety),
+                "{mjai}"
+            );
+        }
+        assert_eq!(fallback(&context, &[dahai("4m"), dahai("5p")]), None);
+    }
+
+    #[test]
+    fn a_post_reach_passed_tile_is_not_selected_as_river_safe() {
+        // post_reach_passed はリーチ者専用の情報。第一分類の根拠にしない。
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .post_reach_passed(3, "4s")
+            .build();
+
+        assert!(context.is_post_reach_passed(tile_type("4s"), 3));
+        assert_eq!(
+            fallback(&context, &[dahai("4s"), dahai("N")]),
+            Some((
+                dahai("N"),
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::NoVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn the_fallback_prefers_the_black_five_of_the_same_tile_type() {
+        // 牌種を決めたあと、同じ牌種内では黒5を優先する既存 semantics を保つ。
+        let river_safe = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .discards_of(3, "5s")
+            .build();
+        let red_five = LegalAction::Dahai {
+            tile: tile_copy("5s", 0),
+        };
+        let black_five = LegalAction::Dahai {
+            tile: tile_copy("5s", 1),
+        };
+        assert!(tile_copy("5s", 0).is_red());
+        assert!(!tile_copy("5s", 1).is_red());
+
+        assert_eq!(
+            fallback(&river_safe, &[red_five.clone(), black_five.clone()]),
+            Some((
+                black_five.clone(),
+                OpenHandDefenseCategory::DiscardedByAllTargets
+            ))
+        );
+
+        // 数牌 safety 経由でも同じ。5m は player 3 の河の 2m / 8m から両側スジ。
+        let suji = suited_safety_context();
+        let red_five_man = LegalAction::Dahai {
+            tile: tile_copy("5m", 0),
+        };
+        let black_five_man = LegalAction::Dahai {
+            tile: tile_copy("5m", 1),
+        };
+
+        assert_eq!(
+            fallback(&suji, &[red_five_man, black_five_man.clone()]),
+            Some((
+                black_five_man,
+                OpenHandDefenseCategory::SuitedSafety(SuitedSafetyRank::Suji)
+            ))
+        );
+    }
+
+    #[test]
+    fn the_fallback_skips_actions_other_than_dahai() {
+        let context = ContextSpec::new().melds_of(3, open_melds(3)).build();
+        let legal_actions = vec![LegalAction::Reach, dahai("N"), LegalAction::Hora];
+
+        assert_eq!(
+            fallback(&context, &legal_actions),
+            Some((
+                dahai("N"),
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::NoVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn the_selected_action_matches_its_category_helper() {
+        // selector が返す大分類は、その牌の open_hand_defense_category と一致する。
+        let context = suited_safety_context();
+        let legal_actions = vec![dahai("4m"), dahai("6p"), dahai("5m"), dahai("1s")];
+        let (action, category) = fallback(&context, &legal_actions).expect("防御 fallback");
+        let LegalAction::Dahai { tile } = action else {
+            panic!("Dahai を選ぶ");
+        };
+
+        assert_eq!(
+            Some(category),
+            open_hand_defense_category(tile.tile_type(), &targets(&context), &context)
+        );
+    }
+
+    #[test]
+    fn the_action_only_wrapper_matches_the_selector() {
+        let context = suited_safety_context();
+        let legal_actions = vec![dahai("4m"), dahai("1s")];
+        let targets = targets(&context);
+
+        assert_eq!(
+            select_open_hand_defense_fallback_action(&context, &legal_actions, &targets),
+            select_open_hand_defense_fallback_action_with_kind(&context, &legal_actions, &targets)
+                .map(|(action, _)| action)
+        );
+    }
+
+    #[test]
+    fn the_diagnostic_reflects_the_selected_fallback() {
+        // 診断は production selector の結果を写すだけで、選び直さない。
+        let context = suited_safety_context();
+        let legal_actions = vec![dahai("4m"), dahai("1s")];
+        let selected = select_open_hand_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+        let diagnostic =
+            OpenHandDefenseDiagnostic::from_context(&context, &legal_actions, selected);
+
+        assert_eq!(
+            diagnostic.selected,
+            Some(OpenHandDefenseSelectionDiagnostic {
+                selected_action: dahai("1s"),
+                selected_category: OpenHandDefenseCategory::SuitedSafety(
+                    SuitedSafetyRank::NoChance
+                ),
+            })
+        );
+        assert_eq!(
+            diagnostic.selected_category(),
+            Some(OpenHandDefenseCategory::SuitedSafety(
+                SuitedSafetyRank::NoChance
+            ))
+        );
+        assert_eq!(
+            diagnostic
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.tile, candidate.selected))
+                .collect::<Vec<(TileType, bool)>>(),
+            vec![(tile_type("4m"), false), (tile_type("1s"), true)]
+        );
     }
 }

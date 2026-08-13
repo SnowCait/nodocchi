@@ -3,9 +3,12 @@
 //! 各 fixture は同じ自分の攻撃状態に対して相手の副露だけを変えたもので、現行の
 //! `PlayerThreatFacts` / `OpenHandThreat` / 押し引き / 通常打牌 selected を並べて比較するための
 //! 固定局面。corpus 側で threat score や副露評価を再実装せず、production が構築した facts と
-//! classification をそのまま確認する。`decide_push_pull()` はまだ副露 facts も OpenHandThreat も
-//! 使わないため、`High` になる fixture を含めて全 fixture が `NoOpponentReach` → `Push` になる
-//! ことを固定する。
+//! classification をそのまま確認する。
+//!
+//! `decide_push_pull()` は `High` の副露相手だけを新しい policy の対象にするため、`None` /
+//! `Present` の fixture は従来どおり `NoOpponentReach` → `Push`、`High` の fixture は自分の
+//! 攻撃状態で分かれる。テンパイの自分なら `TenpaiAgainstHighOpenHand` → `Push`、二向聴の自分
+//! なら `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
 
 use bot_core::{
     Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
@@ -38,6 +41,13 @@ const WEAK_BASELINE: &str = include_str!("../scenarios/open_hand_weak_baseline.j
 const WEAK_VALUE_PON: &str = include_str!("../scenarios/open_hand_weak_value_pon.json");
 const WEAK_THREE_MELDS_VALUE_DORA: &str =
     include_str!("../scenarios/open_hand_weak_three_melds_value_dora.json");
+const IISHANTEN_BASELINE: &str = include_str!("../scenarios/open_hand_iishanten_baseline.json");
+const IISHANTEN_THREE_MELDS: &str =
+    include_str!("../scenarios/open_hand_iishanten_three_melds.json");
+const WEAK_IISHANTEN_BASELINE: &str =
+    include_str!("../scenarios/open_hand_weak_iishanten_baseline.json");
+const WEAK_IISHANTEN_THREE_MELDS: &str =
+    include_str!("../scenarios/open_hand_weak_iishanten_three_melds.json");
 
 // 自分の席は player 0、親は player 1 に固定する。
 const SELF_PLAYER: usize = 0;
@@ -53,6 +63,11 @@ const RIVER_DISCARD_COUNT: usize = 5;
 enum SelfHand {
     /// 打 N でテンパイになる局面。
     Tenpai,
+    /// 打 N で強い一向聴 (受け入れ 8 枚以上・2 種類以上) に留まる局面。
+    StrongIishanten,
+    /// 打 1p で弱い一向聴 (受け入れ 7 枚 / 2 種類) に留まる局面。受け入れ牌をほぼ見え牌にして
+    /// 強い一向聴の threshold に届かないよう固定してある。
+    WeakIishanten,
     /// 打 S で二向聴に留まる局面。
     TwoShanten,
 }
@@ -128,6 +143,25 @@ fn high(reason: OpenHandThreatReason) -> OpenHandThreatDecision {
     OpenHandThreatDecision {
         level: OpenHandThreatLevel::High,
         reason,
+    }
+}
+
+// 役牌もドラも含まない Chi 3組を持つ子。3副露なので High になる。
+fn three_plain_chi() -> ExpectedOpenHand {
+    ExpectedOpenHand {
+        player: 3,
+        discard_count: 0,
+        meld_count: 3,
+        open_meld_count: 3,
+        kan_count: 0,
+        meld_kinds: chi_counts(3),
+        meld_dora_count: 0,
+        meld_red_dora_count: 0,
+        value_honor_melds: ValueHonorMeldCounts::default(),
+        open_meld_dora_count: 0,
+        open_meld_red_dora_count: 0,
+        open_value_honor_melds: ValueHonorMeldCounts::default(),
+        threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
     }
 }
 
@@ -366,6 +400,30 @@ fn corpus() -> Vec<CorpusScenario> {
             }),
         },
         CorpusScenario {
+            name: "open_hand_iishanten_baseline",
+            json: IISHANTEN_BASELINE,
+            self_hand: SelfHand::StrongIishanten,
+            melded: None,
+        },
+        CorpusScenario {
+            name: "open_hand_iishanten_three_melds",
+            json: IISHANTEN_THREE_MELDS,
+            self_hand: SelfHand::StrongIishanten,
+            melded: Some(three_plain_chi()),
+        },
+        CorpusScenario {
+            name: "open_hand_weak_iishanten_baseline",
+            json: WEAK_IISHANTEN_BASELINE,
+            self_hand: SelfHand::WeakIishanten,
+            melded: None,
+        },
+        CorpusScenario {
+            name: "open_hand_weak_iishanten_three_melds",
+            json: WEAK_IISHANTEN_THREE_MELDS,
+            self_hand: SelfHand::WeakIishanten,
+            melded: Some(three_plain_chi()),
+        },
+        CorpusScenario {
             name: "open_hand_weak_baseline",
             json: WEAK_BASELINE,
             self_hand: SelfHand::TwoShanten,
@@ -556,8 +614,48 @@ fn group(self_hand: SelfHand) -> Vec<CorpusScenario> {
         .collect()
 }
 
+// その fixture が High の副露相手を持つか。
+fn has_high_threat(entry: &CorpusScenario) -> bool {
+    entry
+        .melded
+        .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::High)
+}
+
+// その fixture に期待する押し引き。High の副露相手がいる場合だけ新しい policy の対象になる。
+fn expected_push_pull(entry: &CorpusScenario) -> (PushPullMode, PushPullReason) {
+    if !has_high_threat(entry) {
+        return (PushPullMode::Push, PushPullReason::NoOpponentReach);
+    }
+    match entry.self_hand {
+        SelfHand::Tenpai => (
+            PushPullMode::Push,
+            PushPullReason::TenpaiAgainstHighOpenHand,
+        ),
+        SelfHand::StrongIishanten => (
+            PushPullMode::Neutral,
+            PushPullReason::StrongIishantenAgainstHighOpenHand,
+        ),
+        SelfHand::WeakIishanten => (
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        ),
+        SelfHand::TwoShanten => (
+            PushPullMode::Fold,
+            PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+        ),
+    }
+}
+
+// 全 fixture の自分側局面。同じ hand を共有する fixture 同士は通常打牌・offense が一致する。
+const SELF_HANDS: [SelfHand; 4] = [
+    SelfHand::Tenpai,
+    SelfHand::StrongIishanten,
+    SelfHand::WeakIishanten,
+    SelfHand::TwoShanten,
+];
+
 #[test]
-fn every_scenario_resolves_and_keeps_no_opponent_reach_push() {
+fn every_scenario_resolves_without_an_opponent_reach() {
     for entry in corpus() {
         let scenario = resolve(&entry);
         let diagnostic = diagnose(&scenario);
@@ -567,17 +665,19 @@ fn every_scenario_resolves_and_keeps_no_opponent_reach_push() {
         let decision = diagnostic
             .push_pull_decision
             .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
+        let (mode, reason) = expected_push_pull(&entry);
 
         assert_eq!(inputs.opponent_reach_count, 0, "{}", entry.name);
         assert!(!inputs.dealer_reacher, "{}", entry.name);
         assert!(!inputs.self_dealer, "{}", entry.name);
-        assert_eq!(decision.mode, PushPullMode::Push, "{}", entry.name);
         assert_eq!(
-            decision.reason,
-            PushPullReason::NoOpponentReach,
+            inputs.has_high_open_hand_threat(),
+            has_high_threat(&entry),
             "{}",
             entry.name
         );
+        assert_eq!(decision.mode, mode, "{}", entry.name);
+        assert_eq!(decision.reason, reason, "{}", entry.name);
     }
 }
 
@@ -647,19 +747,38 @@ fn every_scenario_matches_the_expected_open_hand_threat() {
 }
 
 #[test]
-fn a_high_open_hand_threat_does_not_change_the_push_pull_decision() {
-    // High になる fixture でも、非リーチ相手だけの局面の押し引きは NoOpponentReach → Push。
-    let high: Vec<CorpusScenario> = corpus()
+fn a_high_open_hand_threat_changes_the_push_pull_decision() {
+    // High になる fixture だけが新しい policy の対象。テンパイなら押し、二向聴なら降りる。
+    let high: Vec<CorpusScenario> = corpus().into_iter().filter(has_high_threat).collect();
+    assert!(!high.is_empty());
+
+    for entry in high {
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+        let decision = diagnostic
+            .push_pull_decision
+            .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
+        let (mode, reason) = expected_push_pull(&entry);
+
+        assert_eq!(decision.mode, mode, "{}", entry.name);
+        assert_eq!(decision.reason, reason, "{}", entry.name);
+    }
+}
+
+#[test]
+fn a_present_open_hand_threat_does_not_change_the_push_pull_decision() {
+    // Present に留まる fixture は行動を変えない。副露なしの基準局面と同じ判断になる。
+    let present: Vec<CorpusScenario> = corpus()
         .into_iter()
         .filter(|entry| {
             entry
                 .melded
-                .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::High)
+                .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::Present)
         })
         .collect();
-    assert!(!high.is_empty());
+    assert!(!present.is_empty());
 
-    for entry in high {
+    for entry in present {
         let scenario = resolve(&entry);
         let diagnostic = diagnose(&scenario);
         let decision = diagnostic
@@ -670,6 +789,74 @@ fn a_high_open_hand_threat_does_not_change_the_push_pull_decision() {
         assert_eq!(
             decision.reason,
             PushPullReason::NoOpponentReach,
+            "{}",
+            entry.name
+        );
+        assert!(!diagnostic.open_hand_defense.has_target(), "{}", entry.name);
+    }
+}
+
+#[test]
+fn the_folding_high_scenarios_select_the_open_hand_defense_fallback() {
+    // High + 弱い一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
+    let folding: Vec<CorpusScenario> = corpus()
+        .into_iter()
+        .filter(|entry| expected_push_pull(entry).0 == PushPullMode::Fold)
+        .collect();
+    assert!(!folding.is_empty());
+
+    for entry in folding {
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+
+        let category = diagnostic
+            .open_hand_defense_category()
+            .unwrap_or_else(|| panic!("{}: OpenHand 防御 fallback を採用している", entry.name));
+        let selection = diagnostic
+            .open_hand_defense
+            .selected
+            .as_ref()
+            .unwrap_or_else(|| panic!("{}: 診断に採用結果が載る", entry.name));
+
+        assert_eq!(selection.selected_category, category, "{}", entry.name);
+        assert_eq!(
+            selection.selected_action, diagnostic.selected_action,
+            "{}",
+            entry.name
+        );
+        // リーチ者がいないので、リーチ者向けの防御 fallback は検討自体が起きない。
+        assert!(diagnostic.defense.is_none(), "{}", entry.name);
+        assert_eq!(diagnostic.defense_fallback_kind(), None, "{}", entry.name);
+    }
+}
+
+#[test]
+fn the_pushing_high_scenarios_keep_the_normal_discard() {
+    // High でも Push / Neutral なら安全牌を通常打牌より優先しない。
+    let pushing: Vec<CorpusScenario> = corpus()
+        .into_iter()
+        .filter(|entry| has_high_threat(entry) && expected_push_pull(entry).0 != PushPullMode::Fold)
+        .collect();
+    assert!(!pushing.is_empty());
+
+    for entry in pushing {
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+
+        assert_eq!(
+            diagnostic.open_hand_defense_category(),
+            None,
+            "{}",
+            entry.name
+        );
+        assert_eq!(
+            diagnostic.open_hand_defense.selected, None,
+            "{}",
+            entry.name
+        );
+        assert_eq!(
+            Some(diagnostic.selected_action.clone()),
+            diagnostic.normal_discard_action,
             "{}",
             entry.name
         );
@@ -957,7 +1144,7 @@ fn the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld() {
 fn scenarios_with_the_same_self_hand_share_the_normal_discard_and_offense() {
     // 同じ自分の局面を共有する fixture 同士は、相手の副露 facts だけが違う。手牌・ツモ・
     // 合法 Dahai が同一なので、通常打牌の候補比較も offense も一致する。
-    for self_hand in [SelfHand::Tenpai, SelfHand::TwoShanten] {
+    for self_hand in SELF_HANDS {
         let entries = group(self_hand);
         let baseline_entry = entries[0];
         let baseline = resolve(&baseline_entry);
@@ -992,11 +1179,15 @@ fn scenarios_with_the_same_self_hand_share_the_normal_discard_and_offense() {
                 "{}: 通常打牌 selected が一致する",
                 entry.name
             );
-            assert_eq!(
-                diagnostic.selected_action, baseline_diagnostic.selected_action,
-                "{}: 最終 action が一致する",
-                entry.name
-            );
+            // 最終 action は押し引きが同じ fixture 同士でだけ一致する。High の副露相手がいて
+            // Fold になる fixture は、通常打牌より OpenHand 防御 fallback を優先する。
+            if expected_push_pull(entry) == expected_push_pull(&baseline_entry) {
+                assert_eq!(
+                    diagnostic.selected_action, baseline_diagnostic.selected_action,
+                    "{}: 最終 action が一致する",
+                    entry.name
+                );
+            }
             assert_eq!(
                 diagnostic
                     .push_pull_inputs
@@ -1015,7 +1206,7 @@ fn open_melds_add_visible_tiles_outside_the_acceptance() {
     // 副露牌は visible tiles に加わるため、受け入れ枚数が変わり得る。この corpus は
     // 「相手の副露牌が自分の受け入れ牌種と重ならない」局面に揃えてあり、そのおかげで
     // acceptance が一致する。visible tiles を無視して offense が同じだと仮定しない。
-    for self_hand in [SelfHand::Tenpai, SelfHand::TwoShanten] {
+    for self_hand in SELF_HANDS {
         let entries = group(self_hand);
         let baseline = resolve(&entries[0]);
         let acceptance = acceptance_tile_types(&diagnose(&baseline));
@@ -1075,21 +1266,35 @@ fn the_dealer_pair_differs_only_in_the_dealer_seat() {
     assert!(!diagnose(&dealer).push_pull_inputs.unwrap().dealer_reacher);
 }
 
+fn offense_of(self_hand: SelfHand) -> bot_core::PushPullOffenseState {
+    diagnose(&resolve(&group(self_hand)[0]))
+        .push_pull_inputs
+        .expect("押し引き入力がある")
+        .offense
+        .expect("offense がある")
+}
+
 #[test]
-fn the_two_self_hands_have_different_offense_states() {
-    let tenpai = diagnose(&resolve(&group(SelfHand::Tenpai)[0]))
-        .push_pull_inputs
-        .expect("押し引き入力がある")
-        .offense
-        .expect("offense がある");
-    let two_shanten = diagnose(&resolve(&group(SelfHand::TwoShanten)[0]))
-        .push_pull_inputs
-        .expect("押し引き入力がある")
-        .offense
-        .expect("offense がある");
+fn the_self_hands_cover_the_push_pull_branches() {
+    // 押し引きの分岐ごとに1つずつ自分の局面を持つ。一向聴の2つは強い一向聴 threshold の
+    // 境界 (受け入れ 8 枚以上 / 2 種類以上) を挟む。
+    let tenpai = offense_of(SelfHand::Tenpai);
+    let strong = offense_of(SelfHand::StrongIishanten);
+    let weak = offense_of(SelfHand::WeakIishanten);
+    let two_shanten = offense_of(SelfHand::TwoShanten);
 
     assert_eq!(tenpai.min_shanten_after_discard, 0);
+    assert_eq!(strong.min_shanten_after_discard, 1);
+    assert_eq!(weak.min_shanten_after_discard, 1);
     assert_eq!(two_shanten.min_shanten_after_discard, 2);
+
+    assert!(strong.acceptance_total_remaining >= 8);
+    assert!(strong.acceptance_type_count >= 2);
+    assert_eq!(weak.acceptance_total_remaining, 7);
+    assert_eq!(weak.acceptance_type_count, 2);
+    // 弱い一向聴でも簡易打点 proxy の限定補正には届かない。
+    assert!(weak.simple_value_proxy_after_discard() < 4);
+
     assert_ne!(
         tenpai.acceptance_total_remaining,
         two_shanten.acceptance_total_remaining
@@ -1102,9 +1307,11 @@ fn the_two_self_hands_have_different_offense_states() {
 
 // 2手先診断は「打牌候補 × 受け入れ牌 × 次打牌候補」の重い探索なので、自分の局面ごとに
 // 副露なしと3副露の代表 fixture だけで一致を確認する。
-const LOOKAHEAD_SCENARIOS: [&str; 4] = [
+const LOOKAHEAD_SCENARIOS: [&str; 6] = [
     "open_hand_baseline",
     "open_hand_three_melds_value_dora",
+    "open_hand_iishanten_three_melds",
+    "open_hand_weak_iishanten_three_melds",
     "open_hand_weak_baseline",
     "open_hand_weak_three_melds_value_dora",
 ];

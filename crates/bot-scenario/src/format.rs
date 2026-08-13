@@ -143,6 +143,9 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
     if let Some(kind) = diagnostic.defense_fallback_kind() {
         lines.push(format!("  defense kind: {kind:?}"));
     }
+    if let Some(category) = diagnostic.open_hand_defense_category() {
+        lines.push(format!("  open hand defense category: {category:?}"));
+    }
     lines.join("\n")
 }
 
@@ -724,13 +727,27 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
 
 // High OpenHandThreat 相手に対する防御 safety。診断が持つ pure helper の結果をそのまま出し、
 // 表示用に安全度を計算し直さない。target がいない局面は候補を出さず、target なしと分かる表示に
-// する。現時点では押し引き・selected action のどれにも反映していない解析専用の情報。
+// する。`selected` は production selector が選んだ結果そのもので、表示側で選び直さない。
 fn format_open_hand_defense(open_hand_defense: &OpenHandDefenseDiagnostic) -> String {
-    let mut blocks = vec![format!(
-        "OpenHand defense\n  targets: {}",
-        format_targets(&open_hand_defense.targets)
-    )];
+    let mut header = vec![
+        "OpenHand defense".to_string(),
+        format!("  targets: {}", format_targets(&open_hand_defense.targets)),
+    ];
+    match open_hand_defense.selected.as_ref() {
+        Some(selected) => {
+            header.push(format!(
+                "  selected action: {}",
+                action_label(&selected.selected_action)
+            ));
+            header.push(format!(
+                "  selected category: {:?}",
+                selected.selected_category
+            ));
+        }
+        None => header.push(format!("  selected: {NONE}")),
+    }
 
+    let mut blocks = vec![header.join("\n")];
     for candidate in &open_hand_defense.candidates {
         blocks.push(format_open_hand_defense_candidate(candidate));
     }
@@ -751,6 +768,7 @@ fn format_targets(targets: &[usize]) -> String {
 fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagnostic) -> String {
     let mut lines = vec![action_label(&candidate.action)];
 
+    lines.push(format!("  selected: {}", yes_no(candidate.selected)));
     lines.push(format!(
         "  discarded by all targets: {}",
         yes_no(candidate.discarded_by_all_targets)
@@ -922,6 +940,9 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
     if let Some(kind) = diagnostic.defense_fallback_kind() {
         lines.push(format!("  selected detail: {kind:?}"));
     }
+    if let Some(category) = diagnostic.open_hand_defense_category() {
+        lines.push(format!("  selected detail: {category:?}"));
+    }
     if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
         lines.push(format!("  selected opponent honor value: {value}"));
     }
@@ -941,6 +962,9 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
     ));
     if let Some(kind) = runner_up.defense_fallback_kind() {
         lines.push(format!("  runner-up detail: {kind:?}"));
+    }
+    if let Some(category) = runner_up.open_hand_defense_category() {
+        lines.push(format!("  runner-up detail: {category:?}"));
     }
     if let Some(value) = honor_safety_opponent_honor_value(&runner_up) {
         lines.push(format!("  runner-up opponent honor value: {value}"));
@@ -1056,6 +1080,7 @@ pub fn action_label(action: &LegalAction) -> String {
 fn source_label(source: AgentActionSource) -> String {
     match source {
         AgentActionSource::DefenseFallback(_) => "DefenseFallback".to_string(),
+        AgentActionSource::OpenHandDefenseFallback(_) => "OpenHandDefenseFallback".to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -3048,10 +3073,11 @@ mod tests {
             block.contains("  open hand threat reason: OpenMeldFromTwelveDiscards"),
             "{block}"
         );
-        // classification は行動を変えない。
+        // High の副露相手がいてもテンパイなら押す。reason だけが新しい policy のものになる。
         assert!(
-            section(&output, "Push/Pull")
-                .contains("  mode: Push\n  reason: NoOpponentReach\n  opponent reach count: 0"),
+            section(&output, "Push/Pull").contains(
+                "  mode: Push\n  reason: TenpaiAgainstHighOpenHand\n  opponent reach count: 0"
+            ),
             "{output}"
         );
     }
@@ -3134,7 +3160,7 @@ mod tests {
         assert!(!diagnostic.open_hand_defense.has_target());
         assert_eq!(
             section(&output, "OpenHand defense"),
-            "OpenHand defense\n  targets: none"
+            "OpenHand defense\n  targets: none\n  selected: none"
         );
     }
 

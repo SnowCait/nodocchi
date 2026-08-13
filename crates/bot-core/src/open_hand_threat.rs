@@ -101,6 +101,14 @@ impl OpenHandThreatAssessment {
             Self::NotApplicable(exclusion) => Some(exclusion),
         }
     }
+
+    /// [`OpenHandThreatLevel::High`] と分類された席か。
+    ///
+    /// level を持たない対象外の席は `false`。押し引きと防御はこの判定を共有し、High 条件を
+    /// それぞれで書き直さない。
+    pub fn is_high(self) -> bool {
+        self.level() == Some(OpenHandThreatLevel::High)
+    }
 }
 
 // 局進行・打点に関係なく High とする open meld 数。
@@ -162,6 +170,13 @@ pub fn classify_open_hand_threat(facts: PlayerThreatFacts) -> OpenHandThreatAsse
 /// 全4席分の facts をまとめて分類する helper。
 pub fn classify_open_hand_threats(facts: &[PlayerThreatFacts; 4]) -> [OpenHandThreatAssessment; 4] {
     std::array::from_fn(|player| classify_open_hand_threat(facts[player]))
+}
+
+/// 分類済みの全4席から [`OpenHandThreatLevel::High`] の席が1つ以上あるか判定する pure helper。
+///
+/// 分類し直さず、渡された classification をそのまま source of truth にする。
+pub fn has_high_open_hand_threat(assessments: &[OpenHandThreatAssessment; 4]) -> bool {
+    assessments.iter().any(|assessment| assessment.is_high())
 }
 
 // 対象外の席とその理由。自分のリーチは自分の席として、席が不明なリーチ者はリーチ者として扱い、
