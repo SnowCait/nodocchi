@@ -4,12 +4,46 @@ use bot_logic::TileType;
 
 const LOG_TARGET: &str = "bot_core::defense";
 
-// discards は防御・現物判定用、visible_tiles は枚数補正用なので用途を分ける。
-pub fn is_genbutsu_for(tile: TileType, player: usize, context: &GameContext) -> bool {
-    let in_own_discards = context
+/// 指定 player 自身の河に同じ牌種があるか判定する pure helper。
+///
+/// M リーグ公式ルールでは「自己の捨て牌にアガリ形を構成できる牌がある聴牌」がフリテンで、
+/// フリテン時はツモアガリのみになる。そのため対象 player 自身の河にある牌は、その player からの
+/// ロンについてリーチの有無によらず安全根拠として使える。
+///
+/// 「リーチ成立後に他家から切られて通った牌」(`GameContext::is_post_reach_passed`) は含まない。
+/// あちらはリーチ後にその player が見逃していない、というリーチ固有の情報なので、非リーチ相手へ
+/// 流用しない。両方を含む従来の現物判定は [`is_genbutsu_for`]。
+///
+/// 赤5は黒5と同じ牌種として扱う。範囲外の player は河を取得できないので `false`。
+pub fn is_discarded_by_player(tile: TileType, player: usize, context: &GameContext) -> bool {
+    context
         .discards_of(player)
-        .is_some_and(|discards| discards.iter().any(|t| t.tile_type() == tile));
-    in_own_discards || context.is_post_reach_passed(tile, player)
+        .is_some_and(|discards| discards.iter().any(|t| t.tile_type() == tile))
+}
+
+/// 指定 player 集合の全員自身の河にある牌か判定する pure helper。
+///
+/// 判定は [`is_discarded_by_player`] だけを使い、`post_reach_passed_tiles` は見ない。
+/// 集合が空なら `false` で、対象がいないことを安全側へ倒さない。
+pub fn is_discarded_by_all_players(
+    tile: TileType,
+    players: &[usize],
+    context: &GameContext,
+) -> bool {
+    !players.is_empty()
+        && players
+            .iter()
+            .all(|&player| is_discarded_by_player(tile, player, context))
+}
+
+/// 指定リーチ者にとっての現物か判定する。
+///
+/// 現物は「対象 player 自身の河にある牌 ([`is_discarded_by_player`])」または「そのリーチ成立後に
+/// 他家から切られて通った牌」。後者はリーチ固有の情報なので、非リーチ相手の防御には使わない。
+///
+/// discards は防御・現物判定用、visible_tiles は枚数補正用なので用途を分ける。
+pub fn is_genbutsu_for(tile: TileType, player: usize, context: &GameContext) -> bool {
+    is_discarded_by_player(tile, player, context) || context.is_post_reach_passed(tile, player)
 }
 
 // 全リーチ者に共通する現物か判定する。リーチ者がいなければ false。
@@ -133,23 +167,44 @@ pub fn opponent_honor_value_for(
     Some(value)
 }
 
+/// 指定 player 集合に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
+///
+/// 各 player の評価は [`opponent_honor_value_for`] そのもので、集約だけを行う。集合が空の場合、
+/// 情報不足で誰の分も確定できない場合は `None` (unknown) で、unknown を安全側にも危険側にも
+/// 倒さない。
+///
+/// ロンされない player (対象牌がその player 自身の河にある等) を外すかどうかは呼び出し側の
+/// 責務で、ここでは渡された集合をそのまま集約する。リーチ者向けの入口は
+/// [`opponent_honor_value_for_reached`]。
+pub fn opponent_honor_value_for_players(
+    tile: TileType,
+    players: &[usize],
+    context: &GameContext,
+) -> Option<OpponentHonorValue> {
+    players
+        .iter()
+        .filter_map(|&player| opponent_honor_value_for(tile, player, context))
+        .max()
+}
+
 /// 全リーチ者に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
 ///
 /// 対象牌が現物のリーチ者からはロンされないので、そのリーチ者は集約対象から除外する。
 /// リーチ者がいない場合、全リーチ者に対して現物の場合、情報不足で誰の分も確定できない場合は
 /// `None` (unknown)。unknown を安全側にも危険側にも倒さない。
 ///
-/// これが字牌防御における役牌価値の source of truth。
+/// これが字牌防御における役牌価値の source of truth。集約自体は
+/// [`opponent_honor_value_for_players`] と共有する。
 pub fn opponent_honor_value_for_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<OpponentHonorValue> {
-    context
+    let targets: Vec<usize> = context
         .reached_opponents()
-        .iter()
-        .filter(|&&player| !is_genbutsu_for(tile, player, context))
-        .filter_map(|&player| opponent_honor_value_for(tile, player, context))
-        .max()
+        .into_iter()
+        .filter(|&player| !is_genbutsu_for(tile, player, context))
+        .collect();
+    opponent_honor_value_for_players(tile, &targets, context)
 }
 
 type RankedHonorCandidate<'a> = (&'a LegalAction, HonorSafetyRank, Option<OpponentHonorValue>);
@@ -300,6 +355,52 @@ pub fn is_suji_for_all_reached(tile: TileType, context: &GameContext) -> bool {
     suji_safety_rank_for_all_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
 
+// player 集合に対するスジ安全度の集約方法。
+//
+// 最も危険な評価 (最小値) は集合全員へ通したい防御に、最も安全な評価 (最大値) は誰か1人に対する
+// スジがあるかの判定に対応する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SujiAggregate {
+    MostDangerous,
+    Safest,
+}
+
+// player 集合の [`suji_safety_rank_for`] を集約する。字牌は対象外で None、集合が空なら NoSuji。
+fn aggregate_suji_safety_rank(
+    tile: TileType,
+    players: &[usize],
+    context: &GameContext,
+    aggregate: SujiAggregate,
+) -> Option<SujiSafetyRank> {
+    if tile.is_honor() {
+        return None;
+    }
+    let ranks = players
+        .iter()
+        .filter_map(|&player| suji_safety_rank_for(tile, player, context));
+    let rank = match aggregate {
+        SujiAggregate::MostDangerous => ranks.min(),
+        SujiAggregate::Safest => ranks.max(),
+    };
+    Some(rank.unwrap_or(SujiSafetyRank::NoSuji))
+}
+
+/// 指定 player 集合の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
+///
+/// 各 player の [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。例えば player1 に
+/// 対して `Suji`・player2 に対して `HalfSuji` なら全体は `HalfSuji`。集合が空なら `NoSuji` で、
+/// 安全牌としては扱わない。
+///
+/// リーチ者向けの入口は [`suji_safety_rank_for_all_reached`] で、判定も集約もこの helper と
+/// 共有する。
+pub fn suji_safety_rank_for_players(
+    tile: TileType,
+    players: &[usize],
+    context: &GameContext,
+) -> Option<SujiSafetyRank> {
+    aggregate_suji_safety_rank(tile, players, context, SujiAggregate::MostDangerous)
+}
+
 /// いずれかのリーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
 ///
 /// 各リーチ者の [`suji_safety_rank_for`] の最大値(最も安全な評価)を採る。
@@ -308,16 +409,12 @@ pub fn suji_safety_rank_for_any_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<SujiSafetyRank> {
-    if tile.is_honor() {
-        return None;
-    }
-    let rank = context
-        .reached_opponents()
-        .iter()
-        .filter_map(|&player| suji_safety_rank_for(tile, player, context))
-        .max()
-        .unwrap_or(SujiSafetyRank::NoSuji);
-    Some(rank)
+    aggregate_suji_safety_rank(
+        tile,
+        &context.reached_opponents(),
+        context,
+        SujiAggregate::Safest,
+    )
 }
 
 /// 全リーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
@@ -326,21 +423,13 @@ pub fn suji_safety_rank_for_any_reached(
 /// 例えば player1 に対して `Suji`・player2 に対して `HalfSuji` なら全体は `HalfSuji`。
 /// リーチ者がいなければ `NoSuji` で、安全牌としては扱わない。
 ///
-/// これが数牌防御におけるスジ評価の source of truth。
+/// これが数牌防御におけるスジ評価の source of truth。任意の player 集合向けの
+/// [`suji_safety_rank_for_players`] にリーチ者を渡す薄い wrapper。
 pub fn suji_safety_rank_for_all_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<SujiSafetyRank> {
-    if tile.is_honor() {
-        return None;
-    }
-    let rank = context
-        .reached_opponents()
-        .iter()
-        .filter_map(|&player| suji_safety_rank_for(tile, player, context))
-        .min()
-        .unwrap_or(SujiSafetyRank::NoSuji);
-    Some(rank)
+    suji_safety_rank_for_players(tile, &context.reached_opponents(), context)
 }
 
 // 合法 Dahai のうち数牌のみを安全度の高い順(Suji → HalfSuji → NoSuji)に並べる。
@@ -518,10 +607,14 @@ pub fn suited_safety_rank_for_any_reached(
     Some(rank)
 }
 
-// 全リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
-// 壁評価はスジ評価より優先する。スジ評価は全リーチ者に対する rank の最小値を使う。
-pub fn suited_safety_rank_for_all_reached(
+/// 指定 player 集合の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で `None`。
+///
+/// 壁評価はスジ評価より優先する。壁は見え牌由来で対象 player に依らないため [`wall_rank`] を
+/// そのまま使い、スジ評価は [`suji_safety_rank_for_players`] の最小値(最も危険な評価)を使う。
+/// 集合が空なら壁が無い限り `NoSafety`。
+pub fn suited_safety_rank_for_players(
     tile: TileType,
+    players: &[usize],
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
     if tile.is_honor() {
@@ -530,10 +623,19 @@ pub fn suited_safety_rank_for_all_reached(
     let rank = match wall_rank(tile, context) {
         WallRank::NoChance => SuitedSafetyRank::NoChance,
         WallRank::OneChance => SuitedSafetyRank::OneChance,
-        WallRank::NoWall => suji_safety_rank_for_all_reached(tile, context)
+        WallRank::NoWall => suji_safety_rank_for_players(tile, players, context)
             .map_or(SuitedSafetyRank::NoSafety, suited_safety_rank_from_suji),
     };
     Some(rank)
+}
+
+// 全リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
+// 壁評価はスジ評価より優先する。スジ評価は全リーチ者に対する rank の最小値を使う。
+pub fn suited_safety_rank_for_all_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SuitedSafetyRank> {
+    suited_safety_rank_for_players(tile, &context.reached_opponents(), context)
 }
 
 // 合法 Dahai のうち数牌のみを安全度の高い順
@@ -919,6 +1021,45 @@ mod tests {
     }
 
     #[test]
+    fn is_discarded_by_player_only_looks_at_that_players_river() {
+        let discards = [vec![tile(0)], vec![tile(16)], vec![], vec![]];
+        let context = table_state_context(Some(3), None, discards, [false; 4]);
+        let one_man = tile(0).tile_type();
+
+        assert!(is_discarded_by_player(one_man, 0, &context));
+        // 他家が切っただけの牌は、その player 自身の河ではない。
+        assert!(!is_discarded_by_player(one_man, 1, &context));
+        assert!(!is_discarded_by_player(one_man, 2, &context));
+    }
+
+    #[test]
+    fn is_discarded_by_player_treats_red_five_as_the_same_type() {
+        // 河に通常5m(tile 17)、判定対象が赤5m相当(tile 16)。
+        let discards = [vec![], vec![tile(17)], vec![], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false; 4]);
+
+        assert!(is_discarded_by_player(tile(16).tile_type(), 1, &context));
+    }
+
+    #[test]
+    fn is_discarded_by_player_out_of_range_player_is_false() {
+        let context = GameContext::default();
+        assert!(!is_discarded_by_player(tile(0).tile_type(), 4, &context));
+    }
+
+    #[test]
+    fn is_discarded_by_all_players_needs_every_player_and_a_non_empty_set() {
+        let discards = [vec![], vec![tile(16)], vec![tile(17)], vec![]];
+        let context = table_state_context(Some(0), None, discards, [false; 4]);
+        let five_man = tile(16).tile_type();
+
+        assert!(is_discarded_by_all_players(five_man, &[1, 2], &context));
+        assert!(!is_discarded_by_all_players(five_man, &[1, 3], &context));
+        // 対象がいないことを「全員に通る」と扱わない。
+        assert!(!is_discarded_by_all_players(five_man, &[], &context));
+    }
+
+    #[test]
     fn is_genbutsu_for_out_of_range_player_is_false() {
         let context = GameContext::default();
         assert!(!is_genbutsu_for(tile(0).tile_type(), 4, &context));
@@ -1078,6 +1219,33 @@ mod tests {
             select_defense_fallback_action_with_kind(&context, &actions),
             Some((&four_sou, DefenseFallbackKind::Genbutsu))
         );
+    }
+
+    #[test]
+    fn is_genbutsu_for_is_the_players_own_river_or_a_post_reach_passed_tile() {
+        // 現物の2つの根拠を分けても、既存 semantics (OR) は変わらない。
+        let discards = [vec![], vec![discarded("3p")], vec![discarded("4s")], vec![]];
+        let context = post_reach_context(
+            Some(0),
+            discards,
+            [false, true, false, false],
+            [vec![], vec![tile_type("4s")], vec![], vec![]],
+        );
+
+        // 本人の河の牌。post_reach_passed には無い。
+        assert!(is_discarded_by_player(tile_type("3p"), 1, &context));
+        assert!(!context.is_post_reach_passed(tile_type("3p"), 1));
+        assert!(is_genbutsu_for(tile_type("3p"), 1, &context));
+
+        // リーチ後に通った牌。本人の河には無い。
+        assert!(!is_discarded_by_player(tile_type("4s"), 1, &context));
+        assert!(context.is_post_reach_passed(tile_type("4s"), 1));
+        assert!(is_genbutsu_for(tile_type("4s"), 1, &context));
+
+        // どちらの根拠も無い牌。
+        assert!(!is_discarded_by_player(tile_type("6p"), 1, &context));
+        assert!(!context.is_post_reach_passed(tile_type("6p"), 1));
+        assert!(!is_genbutsu_for(tile_type("6p"), 1, &context));
     }
 
     #[test]
