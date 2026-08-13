@@ -6,7 +6,8 @@ pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora <TILES>] [--round-wind <WIND>]
                [--seat-wind <WIND>] [--allow-reach] [--allow-hora] [--allow-ryukyoku]
                [--lookahead] [--verbose]
-  bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose]";
+  bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose]
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CliError {
@@ -24,12 +25,25 @@ pub enum CliError {
 
     #[error("multiple scenario files: {0:?}")]
     MultipleScenarioFiles(String),
+
+    #[error("--riichilab-capture cannot be combined with {0}")]
+    ConflictingCaptureInput(String),
+
+    #[error("--request-id requires --riichilab-capture")]
+    RequestIdWithoutCapture,
+
+    #[error("--request-id must be a number, but is {0:?}")]
+    InvalidRequestId(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScenarioSource {
     Json(String),
     Inline(Box<ScenarioSpec>),
+    RiichilabCapture {
+        path: String,
+        request_id: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +66,8 @@ impl CliArgs {
         let mut inline_options = false;
         let mut verbose = false;
         let mut lookahead = false;
+        let mut capture: Option<String> = None;
+        let mut request_id: Option<u64> = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -84,6 +100,17 @@ impl CliArgs {
                     spec.allow_ryukyoku = true;
                     inline_options = true;
                 }
+                "--riichilab-capture" => {
+                    capture = Some(value_of(&mut args, "--riichilab-capture")?);
+                }
+                "--request-id" => {
+                    let value = value_of(&mut args, "--request-id")?;
+                    request_id = Some(
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| CliError::InvalidRequestId(value))?,
+                    );
+                }
                 "--lookahead" => lookahead = true,
                 "--verbose" => verbose = true,
                 other if other.starts_with('-') => {
@@ -96,14 +123,28 @@ impl CliArgs {
             }
         }
 
-        let source = match (path, hand) {
-            (Some(path), None) if !inline_options => ScenarioSource::Json(path),
-            (Some(path), _) => return Err(CliError::ConflictingInput(path)),
-            (None, Some(hand)) => {
+        let source = match (capture, path, hand) {
+            (Some(_), Some(path), _) => return Err(CliError::ConflictingCaptureInput(path)),
+            (Some(_), None, Some(_)) => {
+                return Err(CliError::ConflictingCaptureInput("--hand".to_string()));
+            }
+            (Some(_), None, None) if inline_options => {
+                return Err(CliError::ConflictingCaptureInput(
+                    "scenario options".to_string(),
+                ));
+            }
+            (Some(capture), None, None) => ScenarioSource::RiichilabCapture {
+                path: capture,
+                request_id,
+            },
+            _ if request_id.is_some() => return Err(CliError::RequestIdWithoutCapture),
+            (None, Some(path), None) if !inline_options => ScenarioSource::Json(path),
+            (None, Some(path), _) => return Err(CliError::ConflictingInput(path)),
+            (None, None, Some(hand)) => {
                 spec.hand = hand;
                 ScenarioSource::Inline(Box::new(spec))
             }
-            (None, None) => return Err(CliError::MissingHand),
+            (None, None, None) => return Err(CliError::MissingHand),
         };
 
         Ok(Self {
@@ -232,6 +273,90 @@ mod tests {
             ScenarioSource::Json("scenario.json".to_string())
         );
         assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_riichilab_capture() {
+        let args = parse(&["--riichilab-capture", "logs/ranked-capture.jsonl"]).unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::RiichilabCapture {
+                path: "logs/ranked-capture.jsonl".to_string(),
+                request_id: None,
+            }
+        );
+        assert!(!args.verbose);
+        assert!(!args.lookahead);
+    }
+
+    #[test]
+    fn parses_riichilab_capture_with_request_id_and_flags() {
+        let args = parse(&[
+            "--riichilab-capture",
+            "logs/ranked-capture.jsonl",
+            "--request-id",
+            "425",
+            "--lookahead",
+            "--verbose",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::RiichilabCapture {
+                path: "logs/ranked-capture.jsonl".to_string(),
+                request_id: Some(425),
+            }
+        );
+        assert!(args.verbose);
+        assert!(args.lookahead);
+    }
+
+    #[test]
+    fn rejects_riichilab_capture_with_other_scenario_input() {
+        assert_eq!(
+            parse(&["--riichilab-capture", "capture.jsonl", "--hand", "123m"]),
+            Err(CliError::ConflictingCaptureInput("--hand".to_string()))
+        );
+        assert_eq!(
+            parse(&["--riichilab-capture", "capture.jsonl", "scenario.json"]),
+            Err(CliError::ConflictingCaptureInput(
+                "scenario.json".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&["--riichilab-capture", "capture.jsonl", "--draw", "N"]),
+            Err(CliError::ConflictingCaptureInput(
+                "scenario options".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_request_id_without_capture() {
+        assert_eq!(
+            parse(&["scenario.json", "--request-id", "1"]),
+            Err(CliError::RequestIdWithoutCapture)
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--request-id", "1"]),
+            Err(CliError::RequestIdWithoutCapture)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_request_id() {
+        assert_eq!(
+            parse(&["--riichilab-capture", "capture.jsonl", "--request-id", "x"]),
+            Err(CliError::InvalidRequestId("x".to_string()))
+        );
+        assert_eq!(
+            parse(&["--riichilab-capture", "capture.jsonl", "--request-id"]),
+            Err(CliError::MissingValue("--request-id".to_string()))
+        );
+        assert_eq!(
+            parse(&["--riichilab-capture"]),
+            Err(CliError::MissingValue("--riichilab-capture".to_string()))
+        );
     }
 
     #[test]

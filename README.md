@@ -7,7 +7,7 @@
 `riichilab-client` で RiichiLab に接続します。
 
 ```text
-usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen] [--log-file <PATH>]
+usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen] [--log-file <PATH>] [--capture-file <PATH>]
 ```
 
 ### 接続モード
@@ -64,6 +64,58 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 ```
 
 `RUST_LOG` の filter は console と file で共通です。上記のように target を追加すると、`agent decision` や `discard_selection` などの診断 log が console と `logs/ranked.log` の双方へ出力されます。
+
+### request_action の capture
+
+`--capture-file <PATH>` を指定すると、server から受信した `request_action` をそのまま保存します。保存した record は `bot-scenario` でそのまま再生でき、実戦で見つけた問題局面をオフラインで調査できます。
+
+```bash
+RIICHILAB_BOT_TOKEN=...
+cargo run -p riichilab-client --bin riichilab-client -- \
+  ranked \
+  --agent shanten \
+  --log-file logs/ranked.log \
+  --capture-file logs/ranked-capture.jsonl
+```
+
+validation で試す場合:
+
+```bash
+RIICHILAB_BOT_TOKEN=...
+cargo run -p riichilab-client --bin riichilab-client -- \
+  validate \
+  --agent shanten \
+  --capture-file logs/validate-capture.jsonl
+```
+
+| 項目 | 内容 |
+| --- | --- |
+| 形式 | JSONL。`request_action` 1件が1行1 JSON object |
+| 保存内容 | 受信した `request_action` の raw JSON そのもの。`request_id` / `possible_actions` / `observation` / `time` など受信した field をすべて保持する |
+| 保存対象 | `request_action` のみ。`start_game` / `action_ack` / `end_game` などは保存しない |
+| 単位 | client 1起動 = 1対局 = capture file 1つ |
+| file | `--log-file` とは別 file。`observation` の base64 が大きいため通常 log には混ぜない |
+| 未指定時 | capture 処理を一切行わない。clone・JSON 変換・file I/O ともに追加されない |
+
+`GameContext` から `request_action` を逆生成せず、受信した JSON をそのまま1行として書きます。decode → 再 serialize による情報欠落が無いため、後から同じ局面を正確に再生できます。
+
+capture file は「client 1起動 = ranked 1対局または validation 1対局」の単位で扱います。起動時に既存 file の内容へ追記せず、新しい session として file を置き換えます（既存 file があれば truncate します）。RiichiLab の `request_id` は対局内では一意ですが、対局を跨いだ一意性は保証されないため、1 file に複数対局を混ぜません。複数対局を残したい場合は、対局ごとに別 path を指定してください。
+
+```bash
+cargo run -p riichilab-client --bin riichilab-client -- \
+  ranked --agent shanten \
+  --capture-file "logs/ranked-capture-$(date +%Y%m%d-%H%M%S).jsonl"
+```
+
+1対局の中では、複数の `request_action` を同じ file へ順次追記します。JSONL なので、途中終了してもそこまでの record をそのまま利用できます。`grep` や `jq` で request_id を絞り込めます。
+
+```bash
+jq -r 'select(.request_id == 425)' logs/ranked-capture.jsonl
+```
+
+書き込みは通常 log と同じく non-blocking writer 経由で行い、`request_action` の deadline より capture I/O を優先しません。buffer が溢れた場合は応答を遅らせるより record を落とし、落ちた件数を warning log に出します。capture file を開けない場合は silent に無効化せず、起動時 error になります（log directory と同じく、directory は自動生成しません）。
+
+capture file は実戦局面の発見・調査のための入口です。原因を特定してロジックを修正するときは、必要な局面を `bot-scenario` の JSON scenario へ落として恒久的な回帰 fixture にしてください。capture file 自体を fixture として大量に抱えることは想定していません。
 
 ## 地鳳接続
 
@@ -251,6 +303,81 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.j
 `seat_wind` は省略しても、`player_id` と `oya` があれば自動で決まります。明示した自風がその席と矛盾する場合は error です。
 
 `legal_dahai` を指定すると、打牌可能な牌とその順序を明示できます。リーチ後のツモ切りのみの局面や、候補順に依存する判断の再現に利用できます。省略した場合は手牌とツモ牌から自動的に作られます。手牌に無い牌や、赤5と黒5が一致しない指定は error です。
+
+### RiichiLab capture の再生
+
+`riichilab-client --capture-file` で保存した `request_action` を、そのまま1件再生できます。
+
+```bash
+cargo run -p bot-scenario -- \
+  --riichilab-capture logs/ranked-capture.jsonl \
+  --request-id 425
+```
+
+| 引数 | 必須 | 内容 |
+| --- | --: | --- |
+| `--riichilab-capture` | 必須 | capture した JSONL の path |
+| `--request-id` | 任意 | 再生する `request_id`。record が1件だけなら省略できる |
+
+record が複数ある file で `--request-id` を省略した場合は、どれを再生するか推測せず error になります。`--hand` や JSON scenario とは併用できません。
+
+`observation` の decode と `possible_actions` の変換は `riichilab-client` の実装をそのまま共有します。`bot-scenario` 側に Observation decoder は持ちません。出力の先頭に capture の出所を表示し、以降は JSON scenario と同じ structured diagnostics です。
+
+```text
+RiichiLab capture
+  file: logs/ranked-capture.jsonl
+  request_id: 425
+  actor: None
+  possible actions: 12
+  legal actions: 12
+
+Scenario
+  hand: 1m 2m 3m 4m 5m 6m 5p 5p 7s 8s N P P
+  draw: 6p
+  ...
+```
+
+`post_reach_passed`（リーチ成立後に他家から切られて通った牌）は event 列から積み上げる情報で `observation` に含まれないため、replay では空になります。この情報を含めた検証は JSON scenario で行ってください。
+
+非リーチ副露相手 (OpenHandThreat) の調査は次の流れです。
+
+1. 実戦を capture する
+
+    ```bash
+    cargo run -p riichilab-client --bin riichilab-client -- \
+      ranked --agent shanten \
+      --log-file logs/ranked.log \
+      --capture-file logs/ranked-capture.jsonl
+    ```
+
+2. 問題の `request_id` を特定する。`logs/ranked.log` の `action sent` や `action_ack` から、疑わしい局面の `request_id` を探す
+3. その `request_id` を replay する
+
+    ```bash
+    cargo run -p bot-scenario -- \
+      --riichilab-capture logs/ranked-capture.jsonl \
+      --request-id 425
+    ```
+
+4. `Player threats` で相手の副露 facts（`reached` / `open melds` / `meld kinds` / `meld dora`）を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
+
+    ```text
+    Push/Pull
+      mode: Push
+      reason: NoOpponentReach
+      opponent reach count: 0
+
+    player 1
+      opponent: yes
+      reached: no
+      melds: 2
+      open melds: 2
+      meld kinds: Chi 1, Pon 1
+    ```
+
+5. 原因になった比較軸が分かったら、その局面を JSON scenario に落として回帰 fixture にする
+
+capture file は調査の入口で、恒久的な回帰テストは既存の JSON scenario 側に置きます。
 
 ### 牌表記
 

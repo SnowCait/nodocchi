@@ -3,6 +3,9 @@ name = "riichilab-client"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 bot-core = { path = "../bot-core" }
 bot-logic = { path = "../bot-logic" }

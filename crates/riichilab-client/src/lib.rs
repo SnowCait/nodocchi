@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod cli;
 pub mod client;
 pub mod config;
@@ -9,6 +10,10 @@ pub mod state;
 pub mod tls;
 pub mod validation_policy;
 
+pub use capture::{
+    CaptureError, CaptureRecordError, CapturedRequestAction, RequestActionCapture,
+    capture_server_event, should_capture_event,
+};
 pub use cli::{CliArgs, CliError, ConnectionMode, USAGE};
 pub use client::{
     ClientError, ClientExitCondition, build_response_for_request,
@@ -21,7 +26,9 @@ pub use convert::{
     possible_actions_to_legal_actions,
 };
 pub use logging::LoggingError;
-pub use observation::{DecodedObservation, ObservationError, ObservationPayload};
+pub use observation::{
+    DecodedObservation, ObservationError, ObservationPayload, game_context_from_decoded_observation,
+};
 pub use protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, RequestTimeBudget, TimeControl,
     mjai_action_type, parse_server_event, request_time_budget,
