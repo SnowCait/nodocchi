@@ -1,0 +1,10 @@
+{
+  "hand": "123456m3456789s",
+  "draw": "1p",
+
+  "player_id": 0,
+  "oya": 0,
+  "discards": ["3s", "3s 3s", "", ""],
+
+  "legal_dahai": "1p 1m"
+}

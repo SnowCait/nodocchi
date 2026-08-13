@@ -64,6 +64,27 @@ impl EffectiveShanten {
     }
 }
 
+/// 向聴数表現から最小向聴数だけを取り出す最小の抽象。
+///
+/// [`Acceptance`](crate::acceptance::Acceptance) のように向聴数表現を型引数に持つ構造を、門前形
+/// ([`Shanten`]) と副露形 ([`EffectiveShanten`]) のどちらでも同じ helper で扱うために使う。
+/// 新しい向聴計算は持たず、既存の `min()` をそのまま返す。
+pub trait MinShanten: Copy {
+    fn min_shanten(self) -> i8;
+}
+
+impl MinShanten for Shanten {
+    fn min_shanten(self) -> i8 {
+        self.min()
+    }
+}
+
+impl MinShanten for EffectiveShanten {
+    fn min_shanten(self) -> i8 {
+        self.min()
+    }
+}
+
 pub fn calculate_shanten(counts: &TileCounts) -> Shanten {
     Shanten {
         standard: standard_shanten(counts),
@@ -288,6 +309,21 @@ mod tests {
 
     fn counts(strings: &[&str]) -> TileCounts {
         TileCounts::from_tile_types(strings.iter().map(|s| tile(s)))
+    }
+
+    #[test]
+    fn min_shanten_matches_the_existing_min() {
+        let shanten = Shanten {
+            standard: 2,
+            chiitoitsu: 1,
+            kokushi: 5,
+        };
+        assert_eq!(shanten.min_shanten(), shanten.min());
+        assert_eq!(
+            EffectiveShanten::Concealed(shanten).min_shanten(),
+            EffectiveShanten::Concealed(shanten).min()
+        );
+        assert_eq!(EffectiveShanten::Melded { standard: 3 }.min_shanten(), 3);
     }
 
     #[test]

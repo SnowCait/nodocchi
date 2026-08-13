@@ -1,5 +1,6 @@
 pub mod acceptance;
 pub mod discard;
+pub mod furiten;
 pub mod hand;
 pub mod iishanten;
 pub mod lookahead;
@@ -11,7 +12,8 @@ pub mod tile_counts;
 pub use acceptance::{
     Acceptance, AcceptanceTile, EffectiveAcceptance, EffectiveAcceptanceTile, calculate_acceptance,
     calculate_acceptance_with_fixed_melds, calculate_acceptance_with_fixed_melds_and_visible_tiles,
-    calculate_acceptance_with_visible_tiles,
+    calculate_acceptance_with_visible_tiles, structural_acceptance_tile_types,
+    structural_acceptance_tile_types_with_fixed_melds,
 };
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
@@ -33,6 +35,11 @@ pub use discard::{
     shape_penalty_for_discard_with_fixed_melds,
     shape_penalty_for_discard_with_fixed_melds_and_context,
 };
+pub use furiten::{
+    DiscardFuritenDiagnostic, OwnDiscards, PermanentFuriten, PermanentFuritenDiagnostic,
+    TenpaiWaitAvailability, diagnose_discard_furiten, discard_tenpai_wait_availability,
+    permanent_furiten_for_waits, tenpai_wait_availability,
+};
 pub use hand::{Hand, HandError};
 pub use iishanten::{
     IishantenShape, classify_standard_iishanten_shape,
@@ -49,7 +56,7 @@ pub use selection::{
     compare_discard_selection_candidates,
 };
 pub use shanten::{
-    EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
+    EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,
     calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     standard_shanten_with_fixed_melds,
 };
