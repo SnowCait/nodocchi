@@ -8,10 +8,13 @@
 //! ことを固定する。
 
 use bot_core::{
-    Agent, DiagnosticOptions, MeldKindCounts, OpenHandThreatAssessment, OpenHandThreatDecision,
-    OpenHandThreatExclusion, OpenHandThreatLevel, OpenHandThreatReason, PlayerThreatFacts,
-    PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, ValueHonorMeldCounts,
-    classify_open_hand_threat,
+    Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
+    OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel, OpenHandThreatReason,
+    PlayerThreatFacts, PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic,
+    SuitedSafetyRank, SujiSafetyRank, ValueHonorMeldCounts, WallRank, classify_open_hand_threat,
+    honor_safety_rank, is_discarded_by_all_open_hand_threats,
+    opponent_honor_value_for_open_hand_threats, suited_safety_rank_for_open_hand_threats,
+    suji_safety_rank_for, suji_safety_rank_for_open_hand_threats, wall_rank,
 };
 use bot_logic::{TileId, TileType};
 
@@ -23,6 +26,9 @@ const VALUE_PON: &str = include_str!("../scenarios/open_hand_value_pon.json");
 const TWO_MELDS: &str = include_str!("../scenarios/open_hand_two_melds.json");
 const VALUE_PON_AND_CHI: &str = include_str!("../scenarios/open_hand_value_pon_and_chi.json");
 const DORA_MELDS: &str = include_str!("../scenarios/open_hand_dora_melds.json");
+const TWO_MELDS_NINE_DISCARDS: &str =
+    include_str!("../scenarios/open_hand_two_melds_nine_discards.json");
+const CHI_TWELVE_DISCARDS: &str = include_str!("../scenarios/open_hand_chi_twelve_discards.json");
 const THREE_MELDS: &str = include_str!("../scenarios/open_hand_three_melds.json");
 const THREE_MELDS_VALUE_DORA: &str =
     include_str!("../scenarios/open_hand_three_melds_value_dora.json");
@@ -231,6 +237,47 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_red_dora_count: 1,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
                 threat: high(OpenHandThreatReason::TwoOrMoreWithDora),
+            }),
+        },
+        CorpusScenario {
+            name: "open_hand_two_melds_nine_discards",
+            json: TWO_MELDS_NINE_DISCARDS,
+            self_hand: SelfHand::Tenpai,
+            melded: Some(ExpectedOpenHand {
+                player: 3,
+                discard_count: 9,
+                meld_count: 2,
+                open_meld_count: 2,
+                kan_count: 0,
+                meld_kinds: chi_counts(2),
+                meld_dora_count: 0,
+                meld_red_dora_count: 0,
+                value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                // 役牌もドラも無い2副露でも、河が9枚まで進むと High になる。
+                threat: high(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards),
+            }),
+        },
+        CorpusScenario {
+            name: "open_hand_chi_twelve_discards",
+            json: CHI_TWELVE_DISCARDS,
+            self_hand: SelfHand::Tenpai,
+            melded: Some(ExpectedOpenHand {
+                player: 3,
+                discard_count: 12,
+                meld_count: 1,
+                open_meld_count: 1,
+                kan_count: 0,
+                meld_kinds: chi_counts(1),
+                meld_dora_count: 0,
+                meld_red_dora_count: 0,
+                value_honor_melds: ValueHonorMeldCounts::default(),
+                open_meld_dora_count: 0,
+                open_meld_red_dora_count: 0,
+                open_value_honor_melds: ValueHonorMeldCounts::default(),
+                threat: high(OpenHandThreatReason::OpenMeldFromTwelveDiscards),
             }),
         },
         CorpusScenario {
@@ -626,6 +673,239 @@ fn a_high_open_hand_threat_does_not_change_the_push_pull_decision() {
             "{}",
             entry.name
         );
+    }
+}
+
+// その fixture で OpenHand 防御 target になるべき席。High の副露相手だけが対象。
+fn expected_targets(entry: &CorpusScenario) -> Vec<usize> {
+    entry
+        .melded
+        .filter(|melded| melded.threat.level == OpenHandThreatLevel::High)
+        .map(|melded| vec![melded.player])
+        .unwrap_or_default()
+}
+
+#[test]
+fn every_scenario_selects_the_high_open_hand_threats_as_defense_targets() {
+    // target は Player threats の classification と同じ source of truth から選ぶ。
+    for entry in corpus() {
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+
+        assert_eq!(
+            diagnostic.open_hand_defense.targets,
+            expected_targets(&entry),
+            "{}",
+            entry.name
+        );
+        for &player in &diagnostic.open_hand_defense.targets {
+            assert_eq!(
+                diagnostic.player_threats[player].open_hand_threat.level(),
+                Some(OpenHandThreatLevel::High),
+                "{} player {player}",
+                entry.name
+            );
+        }
+    }
+}
+
+#[test]
+fn the_representative_high_scenarios_fix_the_defense_target() {
+    // 2副露 + 9捨て / 1副露 + 12捨て / 役牌入り2副露 / 3副露 の代表局面で target を固定する。
+    let representatives = [
+        (
+            "open_hand_two_melds_nine_discards",
+            OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
+        ),
+        (
+            "open_hand_chi_twelve_discards",
+            OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+        ),
+        (
+            "open_hand_value_pon_and_chi",
+            OpenHandThreatReason::TwoOrMoreWithValueHonor,
+        ),
+        (
+            "open_hand_three_melds",
+            OpenHandThreatReason::ThreeOrMoreOpenMelds,
+        ),
+    ];
+
+    for (name, reason) in representatives {
+        let entry = corpus()
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} scenario"));
+        let diagnostic = diagnose(&resolve(&entry));
+
+        assert_eq!(diagnostic.open_hand_defense.targets, vec![3], "{name}");
+        assert_eq!(
+            diagnostic.player_threats[3].open_hand_threat.reason(),
+            Some(reason),
+            "{name}"
+        );
+        assert!(diagnostic.open_hand_defense.has_target(), "{name}");
+    }
+}
+
+#[test]
+fn scenarios_without_a_high_threat_have_no_defense_target() {
+    // Present / None しか存在しない局面は「OpenHand Defense target なし」で、候補も持たない。
+    for entry in corpus() {
+        if !expected_targets(&entry).is_empty() {
+            continue;
+        }
+        let diagnostic = diagnose(&resolve(&entry));
+
+        assert!(!diagnostic.open_hand_defense.has_target(), "{}", entry.name);
+        assert!(
+            diagnostic.open_hand_defense.candidates.is_empty(),
+            "{}",
+            entry.name
+        );
+    }
+}
+
+#[test]
+fn the_high_scenarios_report_the_open_hand_defense_safety_of_every_legal_dahai() {
+    // 候補は合法 Dahai と同じ順序で、値は production の pure helper の結果そのもの。
+    for entry in corpus() {
+        let targets = expected_targets(&entry);
+        if targets.is_empty() {
+            continue;
+        }
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+        let context = &scenario.context;
+
+        assert_eq!(
+            diagnostic
+                .open_hand_defense
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<LegalAction>>(),
+            scenario.legal_actions,
+            "{}",
+            entry.name
+        );
+
+        for candidate in &diagnostic.open_hand_defense.candidates {
+            let tile = candidate.tile;
+            let label = format!("{} {}", entry.name, tile.to_mjai_string());
+
+            assert_eq!(
+                candidate
+                    .targets
+                    .iter()
+                    .map(|target| target.player)
+                    .collect::<Vec<usize>>(),
+                targets,
+                "{label}"
+            );
+            assert_eq!(
+                candidate.discarded_by_all_targets,
+                is_discarded_by_all_open_hand_threats(tile, &targets, context),
+                "{label}"
+            );
+            assert_eq!(
+                candidate.honor_safety_rank,
+                honor_safety_rank(tile, context),
+                "{label}"
+            );
+            assert_eq!(
+                candidate.opponent_honor_value,
+                opponent_honor_value_for_open_hand_threats(tile, &targets, context),
+                "{label}"
+            );
+            assert_eq!(
+                candidate.wall_rank,
+                (!tile.is_honor()).then(|| wall_rank(tile, context)),
+                "{label}"
+            );
+            assert_eq!(
+                candidate.suji_safety_rank,
+                suji_safety_rank_for_open_hand_threats(tile, &targets, context),
+                "{label}"
+            );
+            assert_eq!(
+                candidate.suited_safety_rank,
+                suited_safety_rank_for_open_hand_threats(tile, &targets, context),
+                "{label}"
+            );
+
+            for target in &candidate.targets {
+                assert_eq!(
+                    target.suji_safety_rank,
+                    suji_safety_rank_for(tile, target.player, context),
+                    "{label} target {}",
+                    target.player
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_nine_discard_scenario_shares_the_existing_wall_rank() {
+    // 相手の河の 7m が3枚 + 自分の手牌の 7m で 8m の順子待ち経路が塞がる。壁は既存 helper の値。
+    let entry = corpus()
+        .into_iter()
+        .find(|entry| entry.name == "open_hand_two_melds_nine_discards")
+        .expect("nine discard scenario");
+    let scenario = resolve(&entry);
+    let diagnostic = diagnose(&scenario);
+    let eight_man = TileType::from_mjai_type_str("8m").unwrap();
+
+    let candidate = diagnostic
+        .open_hand_defense
+        .candidates
+        .iter()
+        .find(|candidate| candidate.tile == eight_man)
+        .expect("8m candidate");
+
+    assert_eq!(
+        candidate.wall_rank,
+        Some(wall_rank(eight_man, &scenario.context))
+    );
+    assert_eq!(candidate.wall_rank, Some(WallRank::NoChance));
+    // 壁はスジより優先する。相手の河に 5m は無いのでスジは無い。
+    assert_eq!(candidate.suji_safety_rank, Some(SujiSafetyRank::NoSuji));
+    assert_eq!(
+        candidate.suited_safety_rank,
+        Some(SuitedSafetyRank::NoChance)
+    );
+}
+
+#[test]
+fn no_scenario_treats_another_players_river_as_river_safe() {
+    // 河を持つのは player 2 と副露を持つ席だけ。他家が切っただけの牌を安全根拠にしない。
+    for entry in corpus() {
+        let targets = expected_targets(&entry);
+        if targets.is_empty() {
+            continue;
+        }
+        let scenario = resolve(&entry);
+        let diagnostic = diagnose(&scenario);
+
+        for candidate in &diagnostic.open_hand_defense.candidates {
+            for target in &candidate.targets {
+                let river_has_tile = scenario
+                    .context
+                    .discards_of(target.player)
+                    .expect("target の河")
+                    .iter()
+                    .any(|tile| tile.tile_type() == candidate.tile);
+                assert_eq!(
+                    target.discarded_by_target,
+                    river_has_tile,
+                    "{} {} target {}",
+                    entry.name,
+                    candidate.tile.to_mjai_string(),
+                    target.player
+                );
+            }
+        }
     }
 }
 

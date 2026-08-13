@@ -1,9 +1,9 @@
 use bot_core::{
     AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
     GameContext, LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
-    OpenHandThreatAssessment, PlayerThreatDiagnostic, PonCandidateDiagnostic,
-    PonDecisionDiagnostic, PushPullDecision, PushPullInputs, ReachDecisionDiagnostic, ShantenAgent,
-    ShantenDecisionDiagnostic,
+    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
+    PlayerThreatDiagnostic, PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision,
+    PushPullInputs, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -53,6 +53,7 @@ pub fn format_diagnostic(
         sections.push(section);
     }
 
+    sections.push(format_open_hand_defense(&diagnostic.open_hand_defense));
     sections.push(format_player_threats(diagnostic));
     sections.push(format_summary(scenario, diagnostic));
 
@@ -721,6 +722,75 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
     lines.join("\n")
 }
 
+// High OpenHandThreat 相手に対する防御 safety。診断が持つ pure helper の結果をそのまま出し、
+// 表示用に安全度を計算し直さない。target がいない局面は候補を出さず、target なしと分かる表示に
+// する。現時点では押し引き・selected action のどれにも反映していない解析専用の情報。
+fn format_open_hand_defense(open_hand_defense: &OpenHandDefenseDiagnostic) -> String {
+    let mut blocks = vec![format!(
+        "OpenHand defense\n  targets: {}",
+        format_targets(&open_hand_defense.targets)
+    )];
+
+    for candidate in &open_hand_defense.candidates {
+        blocks.push(format_open_hand_defense_candidate(candidate));
+    }
+    blocks.join("\n\n")
+}
+
+fn format_targets(targets: &[usize]) -> String {
+    if targets.is_empty() {
+        return NONE.to_string();
+    }
+    targets
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagnostic) -> String {
+    let mut lines = vec![action_label(&candidate.action)];
+
+    lines.push(format!(
+        "  discarded by all targets: {}",
+        yes_no(candidate.discarded_by_all_targets)
+    ));
+    for target in &candidate.targets {
+        lines.push(format!(
+            "  discarded by target[{}]: {}",
+            target.player,
+            yes_no(target.discarded_by_target)
+        ));
+    }
+    lines.push(format!(
+        "  honor safety: {}",
+        optional(candidate.honor_safety_rank)
+    ));
+    lines.push(format!(
+        "  opponent honor value: {}",
+        optional(candidate.opponent_honor_value)
+    ));
+    lines.push(format!("  wall: {}", optional(candidate.wall_rank)));
+    for target in &candidate.targets {
+        lines.push(format!(
+            "  suji safety[{}]: {}",
+            target.player,
+            optional(target.suji_safety_rank)
+        ));
+    }
+    lines.push(format!(
+        "  suji safety: {}",
+        optional(candidate.suji_safety_rank)
+    ));
+    lines.push(format!(
+        "  suited safety: {}",
+        optional(candidate.suited_safety_rank)
+    ));
+    lines.push(format!("  category: {}", optional(candidate.category)));
+
+    lines.join("\n")
+}
+
 // player ごとの脅威診断。診断が持つ観測事実をそのまま出し、表示用に副露やドラを解析し直さない。
 // 危険度の判断は含まず、押し引きにもまだ反映していない。
 fn format_player_threats(diagnostic: &ShantenDecisionDiagnostic) -> String {
@@ -1158,6 +1228,7 @@ mod tests {
                 | "Reach"
                 | "Defense"
                 | "Defense candidates"
+                | "OpenHand defense"
                 | "Player threats"
                 | "Summary"
         )
@@ -2983,6 +3054,113 @@ mod tests {
                 .contains("  mode: Push\n  reason: NoOpponentReach\n  opponent reach count: 0"),
             "{output}"
         );
+    }
+
+    const OPEN_HAND_DEFENSE_SCENARIO: &str = include_str!("../scenarios/open_hand_defense.json");
+
+    #[test]
+    fn open_hand_defense_section_lists_the_high_targets_and_their_safety() {
+        let (_, diagnostic, output) = rendered(OPEN_HAND_DEFENSE_SCENARIO, false);
+        let open_hand_defense = section(&output, "OpenHand defense");
+
+        assert_eq!(diagnostic.open_hand_defense.targets, vec![1, 3]);
+        assert!(open_hand_defense.contains("  targets: 1, 3"), "{output}");
+
+        // 本人の河にある牌が第一分類。post_reach_passed は使わない。
+        let five_man = candidate_block(&output, "OpenHand defense", "5m");
+        assert!(
+            five_man.contains("  discarded by all targets: yes"),
+            "{five_man}"
+        );
+        assert!(
+            five_man.contains("  discarded by target[1]: yes"),
+            "{five_man}"
+        );
+        assert!(
+            five_man.contains("  discarded by target[3]: yes"),
+            "{five_man}"
+        );
+        assert!(
+            five_man.contains("  category: DiscardedByAllTargets"),
+            "{five_man}"
+        );
+
+        // 字牌は既存 Defense と同じ見え枚数の safety と役牌価値を出す。
+        let east = candidate_block(&output, "OpenHand defense", "E");
+        assert!(east.contains("  honor safety: OneVisible"), "{east}");
+        assert!(
+            east.contains("  opponent honor value: DoubleWind"),
+            "{east}"
+        );
+        assert!(
+            east.contains("  category: HonorSafety(OneVisible)"),
+            "{east}"
+        );
+
+        // 数牌は target ごとのスジと、その集約 (最も危険な rank) の両方を出す。
+        let three_sou = candidate_block(&output, "OpenHand defense", "3s");
+        assert!(three_sou.contains("  suji safety[1]: Suji"), "{three_sou}");
+        assert!(
+            three_sou.contains("  suji safety[3]: NoSuji"),
+            "{three_sou}"
+        );
+        assert!(three_sou.contains("  suji safety: NoSuji"), "{three_sou}");
+        assert!(
+            three_sou.contains("  suited safety: NoSafety"),
+            "{three_sou}"
+        );
+
+        // 壁は見え牌由来で、スジより優先する。
+        let nine_man = candidate_block(&output, "OpenHand defense", "9m");
+        assert!(nine_man.contains("  wall: NoChance"), "{nine_man}");
+        assert!(nine_man.contains("  suited safety: NoChance"), "{nine_man}");
+    }
+
+    #[test]
+    fn open_hand_defense_section_reports_no_target_without_a_high_threat() {
+        // Present の副露相手しかいない局面は「target なし」と分かる表示にする。
+        let (_, diagnostic, output) = rendered(
+            r#"{
+                "hand": "234m 567m 88m 345p 67p",
+                "draw": "N",
+                "player_id": 0,
+                "oya": 0,
+                "discards": ["1s", "", "", ""],
+                "melds": [[], [{"kind": "chi", "tiles": "1s 2s 3s", "called_tile": "1s"}], [], []]
+            }"#,
+            false,
+        );
+
+        assert!(!diagnostic.open_hand_defense.has_target());
+        assert_eq!(
+            section(&output, "OpenHand defense"),
+            "OpenHand defense\n  targets: none"
+        );
+    }
+
+    #[test]
+    fn open_hand_defense_section_is_the_production_diagnostic() {
+        // 表示用に safety を計算し直さず、診断が持つ値をそのまま出す。
+        let (_, diagnostic, output) = rendered(OPEN_HAND_DEFENSE_SCENARIO, false);
+
+        for candidate in &diagnostic.open_hand_defense.candidates {
+            let block = candidate_block(
+                &output,
+                "OpenHand defense",
+                &candidate.tile.to_mjai_string(),
+            );
+            assert!(
+                block.contains(&format!(
+                    "  suited safety: {}",
+                    optional(candidate.suited_safety_rank)
+                )),
+                "{block}"
+            );
+            assert!(
+                block.contains(&format!("  category: {}", optional(candidate.category))),
+                "{block}"
+            );
+        }
     }
 
     #[test]

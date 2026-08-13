@@ -3,6 +3,8 @@ mod error;
 mod format;
 mod input;
 #[cfg(test)]
+mod open_hand_defense;
+#[cfg(test)]
 mod open_hand_threat;
 mod replay;
 mod scenario;

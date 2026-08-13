@@ -292,6 +292,8 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 
 現物は「対象リーチ者自身の河にある牌」と「そのリーチ成立後に他家から切られて通った牌」の両方です。後者は河から逆算できないため `post_reach_passed` で指定します。`post_reach_passed` は牌種だけを持つので、見え牌にも河にも影響しません。赤5は黒5と同じ牌種として扱います。
 
+`post_reach_passed` はリーチ者専用の情報です。「リーチ後に通った」という根拠は非リーチの相手には成立しないため、非リーチ副露相手に対する防御（`OpenHand defense`）では使いません。
+
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.json
 ```
@@ -359,7 +361,7 @@ Scenario
       --request-id 425
     ```
 
-4. `Player threats` で相手の副露 facts（`reached` / `discards` / `open melds` / `meld kinds` / `meld dora`）と `open hand threat` を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
+4. `Player threats` で相手の副露 facts（`reached` / `discards` / `open melds` / `meld kinds` / `meld dora`）と `open hand threat` を、`OpenHand defense` で `High` の相手に対する打牌ごとの safety を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
 
     ```text
     Push/Pull
@@ -402,7 +404,7 @@ MJAI 単牌表記と圧縮 MPSZ 表記の両方を受け付けます。空白区
 
 ### 出力
 
-入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates`）を表示します。
+入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates` / `OpenHand defense`）を表示します。
 
 ```text
 Final decision
@@ -502,7 +504,56 @@ player 1
 
 自分の席・リーチ済みの席・`player_id` 不明で自分かどうか確定できない席は分類の対象外で、`not applicable (SelfSeat)` / `not applicable (Reached)` / `not applicable (UnknownSeat)` と表示します。リーチ者の危険度は既存のリーチ情報が source of truth なので、OpenHandThreat とは二重に適用しません。席が不明な相手を他家と推測して `Present` / `High` にすることも、逆に危険度なしと確定させることもしません。
 
-この classification は現時点では診断専用で、押し引き・防御の行動には使っていません。`open hand threat: High` の相手がいても、非リーチの副露相手しかいない局面の `Push/Pull` は従来どおり `NoOpponentReach` → `Push` で、防御 fallback もリーチ者向けの現物・筋のままです。
+この classification は現時点では行動に使っていません。`open hand threat: High` の相手がいても、非リーチの副露相手しかいない局面の `Push/Pull` は従来どおり `NoOpponentReach` → `Push` で、防御 fallback もリーチ者向けの現物・筋のままです。この classification を使う先として、次の `OpenHand defense` に safety の診断だけを用意しています。
+
+#### 非リーチ副露相手への OpenHand defense safety
+
+`OpenHand defense` は、`open hand threat: High` の非リーチ副露相手に対する防御 safety の section です。target は `Player threats` の classification をそのまま source of truth にして選び、防御側で危険度を分類し直しません。`High` の相手だけが target で、`Present` / `None` の相手・自分の席・リーチ済みの席・`player_id` 不明の席は target にしません。
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/open_hand_defense.json
+```
+
+```text
+OpenHand defense
+  targets: 1, 3
+
+5m
+  discarded by all targets: yes
+  discarded by target[1]: yes
+  discarded by target[3]: yes
+  honor safety: -
+  opponent honor value: -
+  wall: NoWall
+  suji safety[1]: NoSuji
+  suji safety[3]: HalfSuji
+  suji safety: NoSuji
+  suited safety: NoSafety
+  category: DiscardedByAllTargets
+```
+
+| 行 | 内容 |
+| --- | --- |
+| `targets` | `High` の相手の席。いなければ `none` で候補も出さない |
+| `discarded by target[n]` | その相手自身の河に同じ牌種があるか |
+| `discarded by all targets` | 全 target 自身の河にあるか。target が0人なら `no` |
+| `honor safety` | 字牌の見え枚数による安全度。既存 Defense と同じ4段階 |
+| `opponent honor value` | まだロンされ得る target にとっての役牌価値。最も危険な値を採る |
+| `wall` | 順子待ち経路の壁 / ワンチャンス。見え牌由来で target に依らない |
+| `suji safety[n]` | その相手の河に対するスジ安全度。その相手単独の評価 |
+| `suji safety` | まだロンされ得る target 全体のスジ安全度。最も危険な rank を採る |
+| `suited safety` | 壁とスジを統合した数牌の安全度 |
+| `category` | `DiscardedByAllTargets` → `HonorSafety` → `SuitedSafety` の大分類 |
+
+M リーグ公式ルールでは「自己の捨て牌にアガリ形を構成できる牌がある聴牌」がフリテンで、フリテン時はツモアガリのみです（<https://m-league.jp/about/>）。そのため対象 player 自身の河にある牌は、リーチの有無によらずその player からのロンについて安全根拠として使えます。`category` の第一分類 `DiscardedByAllTargets` はこの根拠だけを使います。
+
+一方、`post_reach_passed`（リーチ成立後に他家から切られて通った牌）はリーチ者専用で、非リーチ副露相手には使いません。リーチ者向けの現物 (`Defense` の `genbutsu`) が本人の河と `post_reach_passed` の両方を含むのに対し、`OpenHand defense` は本人の河だけを見ます。「本人の河」と「リーチ後に通った牌」を混ぜないため、第一分類の名前も `Genbutsu` とは分けています。
+
+字牌の見え枚数・役牌価値・壁・スジは既存 Defense と同じ判定を共有し、副露相手用に別実装を持ちません。違うのは対象 player 集合の決め方だけで、複数 target の集約はリーチ者向けと同じく最も危険な評価（スジは最小 rank、役牌価値は最大値）を採ります。場風や親が不明で風牌を確定できない場合は `-` のままにし、客風とは推測しません。
+
+target ごとに評価が変わる `opponent honor value` / `suji safety` / `suited safety` は、その牌でまだロンされ得る target だけを集約します。`discarded by target[n]: yes` の相手はフリテンでその牌をロンできないため、その相手の無スジや役牌価値を全体の危険度に持ち込みません。除外根拠は本人の河だけで、`post_reach_passed` は使いません。`suji safety[n]` はその相手単独の評価なので、除外された相手の値は集約後の `suji safety` と一致しないことがあります。全 target が河に切っている牌は集約対象が0人になりますが、`suji safety` を `Suji` とは扱わず、安全根拠は `category: DiscardedByAllTargets` が表します。
+
+この section は現時点では診断専用です。`High` の相手がいても `decide_push_pull()` / `PushPullMode` / 防御 fallback の採用条件 / 最終 action は変わりません。押し引きと防御 fallback への接続は次の変更で行います。
 
 出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
 
@@ -530,6 +581,8 @@ Summary
 | `open_hand_two_melds.json` | 役牌・ドラを含まない副露 2つ |
 | `open_hand_value_pon_and_chi.json` | 役牌 Pon + 通常副露 |
 | `open_hand_dora_melds.json` | ドラと赤ドラが見えている副露 2つ |
+| `open_hand_two_melds_nine_discards.json` | 役牌・ドラを含まない副露 2つ + 河9枚 |
+| `open_hand_chi_twelve_discards.json` | Chi 1副露 + 河12枚 |
 | `open_hand_three_melds.json` | 役牌・ドラを含まない3副露 |
 | `open_hand_three_melds_value_dora.json` | 役牌 Pon とドラを含む3副露 |
 | `open_hand_dealer_value_pon.json` | 親の役牌 Pon |
@@ -547,7 +600,9 @@ diff \
 
 副露牌は見え牌に加わるため受け入れが変わり得ますが、この scenario 群は相手の副露牌が自分の受け入れ牌種と重ならない局面に揃えてあるため、`Normal discard` と offense は一致します。
 
-各 scenario の `open hand threat` は、副露なしが `None`、1副露が `Present`、`open_hand_value_pon_and_chi.json` / `open_hand_dora_melds.json` / 3副露の各 scenario が `High` になります。どの scenario も相手の河は空なので、局進行の threshold は `High` の理由になりません。
+各 scenario の `open hand threat` は、副露なしが `None`、1副露が `Present`、`open_hand_value_pon_and_chi.json` / `open_hand_dora_melds.json` / 3副露の各 scenario が `High` になります。`open_hand_two_melds_nine_discards.json` と `open_hand_chi_twelve_discards.json` だけは相手の河が進んでおり、局進行の threshold で `High` になります。他の scenario は相手の河が空なので、局進行の threshold は `High` の理由になりません。
+
+`High` の scenario では `OpenHand defense` に target と合法 Dahai ごとの safety が出ます。`Present` / `None` だけの scenario は `targets: none` です。`open_hand_defense.json` は、`High` の相手が2人・`Present` の相手が1人いる局面で、本人の河・字牌 safety・壁・スジの出方をまとめて見るための fixture です。
 
 現在の押し引きは副露 facts も OpenHandThreat も使わないため、`High` の scenario を含めてどの scenario も `NoOpponentReach` → `Push` です。副露相手に対する具体的な押し引き・防御はまだ入れていません。
 

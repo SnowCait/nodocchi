@@ -10,6 +10,7 @@ use crate::discard_selection::{
     select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
     selected_discard_tenpai_wait_availability,
 };
+use crate::open_hand_defense::OpenHandDefenseDiagnostic;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -336,6 +337,15 @@ pub struct ShantenDecisionDiagnostic {
     /// `is_opponent()` が unknown で表す。危険度の判断は含まず、現時点では押し引き・防御・
     /// 打牌選択のどれにも影響しない解析専用の情報。
     pub player_threats: [PlayerThreatDiagnostic; 4],
+    /// `High` OpenHandThreat の相手に対する防御 safety の診断。
+    ///
+    /// target は `player_threats` が持つ classification をそのまま source of truth にして選ぶ。
+    /// `High` の相手がいない局面では `targets` も `candidates` も空になる。
+    ///
+    /// 防御 fallback ([`Self::defense`]) がリーチ者向けなのに対し、こちらは非リーチ副露相手
+    /// 向けで、現物相当の根拠に `post_reach_passed_tiles` を使わない。押し引き・防御 fallback の
+    /// 採用条件・selected action のどれにも影響しない解析専用の情報。
+    pub open_hand_defense: OpenHandDefenseDiagnostic,
 }
 
 impl ShantenDecisionDiagnostic {
@@ -460,6 +470,11 @@ impl ShantenAgent {
             || player_threat_facts_from_context(context),
             |inputs| inputs.player_threats,
         );
+        let player_threats = diagnose_player_threats_with_facts(context, &player_threat_facts);
+
+        // OpenHand 防御の target は診断が持つ classification をそのまま使い、分類し直さない。
+        let open_hand_threats =
+            std::array::from_fn(|player| player_threats[player].open_hand_threat);
 
         ShantenDecisionDiagnostic {
             selected_action: decision.action,
@@ -474,7 +489,12 @@ impl ShantenAgent {
             defense: diagnostics.defense,
             pon: decision.pon,
             own_fixed_meld_count: context.own_fixed_meld_count(),
-            player_threats: diagnose_player_threats_with_facts(context, &player_threat_facts),
+            player_threats,
+            open_hand_defense: OpenHandDefenseDiagnostic::from_assessments(
+                context,
+                legal_actions,
+                &open_hand_threats,
+            ),
         }
     }
 
@@ -3108,6 +3128,106 @@ pub(crate) mod tests {
             diagnostic.player_threats[2].open_hand_threat.level(),
             Some(OpenHandThreatLevel::None)
         );
+    }
+
+    #[test]
+    fn diagnose_reports_the_open_hand_defense_of_the_high_threats() {
+        use crate::open_hand_defense::OpenHandDefenseDiagnostic;
+
+        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+        let actions = opponent_meld_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        // target は player_threats の classification と同じ source of truth から選ぶ。
+        assert_eq!(diagnostic.open_hand_defense.targets, vec![1]);
+        assert!(diagnostic.open_hand_defense.has_target());
+        assert_eq!(
+            diagnostic.open_hand_defense,
+            OpenHandDefenseDiagnostic::from_context(&ctx, &actions)
+        );
+
+        // 合法 Dahai の順序をそのまま保つ。
+        assert_eq!(
+            diagnostic
+                .open_hand_defense
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<LegalAction>>(),
+            actions
+        );
+        for candidate in &diagnostic.open_hand_defense.candidates {
+            assert_eq!(
+                candidate
+                    .targets
+                    .iter()
+                    .map(|target| target.player)
+                    .collect::<Vec<usize>>(),
+                vec![1]
+            );
+        }
+    }
+
+    #[test]
+    fn diagnose_reports_no_open_hand_defense_target_without_a_high_threat() {
+        use crate::open_hand_threat::OpenHandThreatLevel;
+
+        // 役牌 Pon 1副露だけの相手は Present なので、防御 target にしない。
+        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon()]);
+        let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
+
+        assert_eq!(
+            diagnostic.player_threats[1].open_hand_threat.level(),
+            Some(OpenHandThreatLevel::Present)
+        );
+        assert!(!diagnostic.open_hand_defense.has_target());
+        assert!(diagnostic.open_hand_defense.targets.is_empty());
+        assert!(diagnostic.open_hand_defense.candidates.is_empty());
+    }
+
+    #[test]
+    fn a_reached_player_is_not_an_open_hand_defense_target() {
+        // リーチ者の防御は既存の Defense fallback が source of truth で、二重適用しない。
+        let ctx = opponent_meld_context_with_reach(
+            Some(0),
+            vec![white_dragon_pon(), red_five_chi()],
+            [false, true, false, false],
+        );
+        let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
+
+        assert!(diagnostic.player_threats[1].facts.reached);
+        assert_eq!(diagnostic.player_threats[1].open_hand_threat.level(), None);
+        assert!(!diagnostic.open_hand_defense.has_target());
+    }
+
+    #[test]
+    fn a_high_open_hand_threat_does_not_change_the_push_pull_or_the_selected_action() {
+        use crate::open_hand_threat::OpenHandThreatLevel;
+
+        let actions = opponent_meld_actions();
+        let with_high = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+        let without_melds = opponent_meld_context(Some(0), vec![]);
+
+        let melded = diagnose_matching_act(&with_high, &actions);
+        let plain = diagnose_matching_act(&without_melds, &actions);
+
+        assert_eq!(
+            melded.player_threats[1].open_hand_threat.level(),
+            Some(OpenHandThreatLevel::High)
+        );
+        assert!(melded.open_hand_defense.has_target());
+        assert!(!plain.open_hand_defense.has_target());
+
+        // 押し引きも最終 action も、OpenHand 防御 safety には影響されない。
+        let melded_decision = melded.push_pull_decision.expect("押し引きを判定している");
+        let plain_decision = plain.push_pull_decision.expect("押し引きを判定している");
+        assert_eq!(melded_decision.mode, plain_decision.mode);
+        assert_eq!(melded_decision.reason, plain_decision.reason);
+        assert_eq!(melded_decision.mode, PushPullMode::Push);
+        assert_eq!(melded_decision.reason, PushPullReason::NoOpponentReach);
+        assert_eq!(melded.selected_action, plain.selected_action);
+        assert_eq!(melded.selected_source, plain.selected_source);
+        assert_eq!(melded.defense, plain.defense);
     }
 
     #[test]
