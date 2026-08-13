@@ -1,8 +1,9 @@
+use std::path::PathBuf;
+
 use crate::config::ClientConfig;
 use crate::validation_policy::AgentKind;
 
-pub const USAGE: &str =
-    "usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen]";
+pub const USAGE: &str = "usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen] [--log-file <PATH>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionMode {
@@ -29,10 +30,11 @@ impl std::fmt::Display for ConnectionMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CliArgs {
     pub mode: ConnectionMode,
     pub agent: Option<AgentKind>,
+    pub log_file: Option<PathBuf>,
 }
 
 impl CliArgs {
@@ -43,6 +45,7 @@ impl CliArgs {
         let mut args = args.into_iter();
         let mut mode = None;
         let mut agent = None;
+        let mut log_file = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -56,6 +59,10 @@ impl CliArgs {
                             .map_err(|_| CliError::UnknownAgent(value))?,
                     );
                 }
+                "--log-file" => {
+                    let value = args.next().ok_or(CliError::MissingLogFileValue)?;
+                    log_file = Some(PathBuf::from(value));
+                }
                 other if other.starts_with('-') => {
                     return Err(CliError::UnknownOption(other.to_string()));
                 }
@@ -66,6 +73,7 @@ impl CliArgs {
         Ok(Self {
             mode: mode.unwrap_or_default(),
             agent,
+            log_file,
         })
     }
 }
@@ -83,6 +91,9 @@ pub enum CliError {
 
     #[error("unknown agent: {0}")]
     UnknownAgent(String),
+
+    #[error("--log-file requires a value")]
+    MissingLogFileValue,
 }
 
 #[cfg(test)]
@@ -98,6 +109,7 @@ mod tests {
         let args = parse(&[]).unwrap();
         assert_eq!(args.mode, ConnectionMode::Validate);
         assert_eq!(args.agent, None);
+        assert_eq!(args.log_file, None);
     }
 
     #[test]
@@ -130,6 +142,32 @@ mod tests {
         let args = parse(&["--agent", "tsumogiri"]).unwrap();
         assert_eq!(args.mode, ConnectionMode::Validate);
         assert_eq!(args.agent, Some(AgentKind::Tsumogiri));
+    }
+
+    #[test]
+    fn parses_log_file_option() {
+        let args = parse(&["--log-file", "logs/ranked.log"]).unwrap();
+        assert_eq!(args.log_file, Some(PathBuf::from("logs/ranked.log")));
+    }
+
+    #[test]
+    fn parses_log_file_option_with_mode_and_agent() {
+        let args = parse(&[
+            "ranked",
+            "--agent",
+            "shanten",
+            "--log-file",
+            "logs/ranked.log",
+        ])
+        .unwrap();
+        assert_eq!(args.mode, ConnectionMode::Ranked);
+        assert_eq!(args.agent, Some(AgentKind::Shanten));
+        assert_eq!(args.log_file, Some(PathBuf::from("logs/ranked.log")));
+    }
+
+    #[test]
+    fn rejects_missing_log_file_value() {
+        assert_eq!(parse(&["--log-file"]), Err(CliError::MissingLogFileValue));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 `riichilab-client` で RiichiLab に接続します。
 
 ```text
-usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen]
+usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen] [--log-file <PATH>]
 ```
 
 ### 接続モード
@@ -48,6 +48,22 @@ cargo run -p riichilab-client --bin riichilab-client -- ranked --agent shanten
 
 `RIICHILAB_BOT_TOKEN` は secret として扱い、repository・README・log に残さないでください。
 `ranked` は実戦 queue に入るため、validation と bot activation を確認してから実行してください。
+
+### ログのファイル保存
+
+`--log-file <PATH>` を指定すると、console 出力を維持したまま、同じ log を指定した file にも保存します。file 側は ANSI escape sequence を含まないため、そのまま検索・copy できます。log directory は自動生成しないため、file を開けない場合は起動時に error となります。
+
+`ShantenAgent` の対局判断を後から調査する例:
+
+```bash
+RUST_LOG=info,bot_core::agent_decision=debug,bot_core::discard_selection=debug \
+cargo run -p riichilab-client --bin riichilab-client -- \
+  ranked \
+  --agent shanten \
+  --log-file logs/ranked.log
+```
+
+`RUST_LOG` の filter は console と file で共通です。上記のように target を追加すると、`agent decision` や `discard_selection` などの診断 log が console と `logs/ranked.log` の双方へ出力されます。
 
 ## 地鳳接続
 

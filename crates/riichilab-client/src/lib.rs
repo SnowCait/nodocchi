@@ -2,6 +2,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod convert;
+pub mod logging;
 pub mod observation;
 pub mod protocol;
 pub mod state;
@@ -19,6 +20,7 @@ pub use convert::{
     legal_action_to_mjai_action, possible_action_to_legal_action,
     possible_actions_to_legal_actions,
 };
+pub use logging::LoggingError;
 pub use observation::{DecodedObservation, ObservationError, ObservationPayload};
 pub use protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, RequestTimeBudget, TimeControl,
