@@ -2,6 +2,8 @@ mod cli;
 mod error;
 mod format;
 mod input;
+#[cfg(test)]
+mod open_hand_threat;
 mod scenario;
 mod tiles;
 

@@ -1,0 +1,19 @@
+{
+  "hand": "234m 678m 22p 45p 8p S W",
+  "draw": "E",
+
+  "dora_indicators": "9s",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 1,
+
+  "reached": [false, false, false, false],
+
+  "discards": ["", "", "P 1s 4s 6s 7s", ""],
+
+  "melds": [[], [], [], []],
+
+  "legal_dahai": "E S W 8p"
+}

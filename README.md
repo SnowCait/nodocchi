@@ -357,6 +357,37 @@ Summary
 
 次点 (`runner-up`) は、最終選択を除いた場合に次に選ばれる候補です。次点が存在しない場合は `runner-up: -` と表示します。
 
+### 副露相手の比較用 scenario
+
+`scenarios/open_hand_*.json` は、非リーチの副露相手だけがいる局面を段階的に並べた scenario 群です。正解 action を決めるための scenario ではなく、同じ自分の局面に対して相手の観測 facts だけを変えたときの現行判断を見比べるための fixture です。
+
+| scenario | 相手の副露 |
+| --- | --- |
+| `open_hand_baseline.json` | なし。基準局面 |
+| `open_hand_chi.json` | Chi 1副露 |
+| `open_hand_value_pon.json` | 役牌 (白) Pon 1副露 |
+| `open_hand_two_melds.json` | 役牌・ドラを含まない副露 2つ |
+| `open_hand_value_pon_and_chi.json` | 役牌 Pon + 通常副露 |
+| `open_hand_dora_melds.json` | ドラと赤ドラが見えている副露 2つ |
+| `open_hand_three_melds.json` | 役牌・ドラを含まない3副露 |
+| `open_hand_three_melds_value_dora.json` | 役牌 Pon とドラを含む3副露 |
+| `open_hand_dealer_value_pon.json` | 親の役牌 Pon |
+| `open_hand_ankan.json` | 暗槓のみ。`open melds` は 0 |
+
+自分の手牌・ツモ牌・合法 Dahai・河・ドラ表示牌は共通なので、出力を diff すると相手の副露 facts の差だけを取り出せます。
+
+```bash
+diff \
+  <(cargo run -q -p bot-scenario -- crates/bot-scenario/scenarios/open_hand_baseline.json) \
+  <(cargo run -q -p bot-scenario -- crates/bot-scenario/scenarios/open_hand_value_pon.json)
+```
+
+`open_hand_weak_*.json` は、副露なし・役牌 Pon・3副露の3局面を弱い自分の手 (二向聴) で並べたものです。副露相手の facts と自分の攻撃力を後から組み合わせられるよう、`Push/Pull` の offense だけが違う組を用意しています。
+
+副露牌は見え牌に加わるため受け入れが変わり得ますが、この scenario 群は相手の副露牌が自分の受け入れ牌種と重ならない局面に揃えてあるため、`Normal discard` と offense は一致します。
+
+現在の押し引きは副露 facts を使わないため、どの scenario も `NoOpponentReach` → `Push` です。何副露から危険とみなすか、役牌副露・ドラ・親副露をどう扱うかの threshold はまだ入れていません。
+
 ## 公式ドキュメント
 
 - RiichiLab Documentation: https://riichi.dev/docs
