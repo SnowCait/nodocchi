@@ -3535,7 +3535,11 @@ pub(crate) mod tests {
 
         let furiten = furiten_of(&diagnostic, tile(FURITEN_DRAWN).tile_type());
         let tenpai = furiten.tenpai.as_ref().expect("テンパイになる");
-        assert_eq!(tenpai.waits, vec![tile(FURITEN_WAIT).tile_type()]);
+        assert_eq!(
+            tenpai.structural_waits,
+            vec![tile(FURITEN_WAIT).tile_type()]
+        );
+        assert_eq!(tenpai.live_waits, tenpai.structural_waits);
         assert_eq!(furiten.permanent_furiten(), Some(PermanentFuriten::Yes));
         assert_eq!(furiten.discarded_waits(), [tile(FURITEN_WAIT).tile_type()]);
         assert_eq!(tenpai.can_ron(), Some(false));
@@ -3642,6 +3646,120 @@ pub(crate) mod tests {
                 diagnostic.normal_discard_furiten
             );
         }
+    }
+
+    // 123m456m 3456789s + ツモ 1p。打 1p で 3s / 6s / 9s の3面待ちテンパイになる。
+    // 3s は手牌に1枚だけなので、残り3枚 (81 / 82 / 83) を見え牌にできる。
+    fn three_sided_hand() -> Vec<TileId> {
+        [0u8, 4, 8, 12, 17, 20, 80, 84, 89, 92, 96, 100, 104]
+            .iter()
+            .map(|&value| tile(value))
+            .collect()
+    }
+
+    fn three_sided_context(extra_visible: &[u8], own_river: &[u8]) -> GameContext {
+        let hand = three_sided_hand();
+        let drawn = tile(36);
+        let discards = [
+            own_river.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            vec![],
+            vec![],
+        ];
+
+        let mut visible = hand.clone();
+        visible.push(drawn);
+        visible.extend(extra_visible.iter().map(|&value| tile(value)));
+        for river in &discards {
+            visible.extend(river.iter().copied());
+        }
+
+        GameContext::from_parts_with_table_state(
+            Some(drawn),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+            Some(0),
+            Some(0),
+            discards,
+            [false; 4],
+        )
+    }
+
+    #[test]
+    fn a_fully_visible_discarded_wait_still_reports_furiten() {
+        // 待ち 3s を自分が捨てていて 3s が4枚とも見えている局面。3s は既存受け入れから消えるが、
+        // 恒常フリテンは解除されない。
+        let ctx = three_sided_context(&[82, 83], &[81]);
+        let actions = vec![dahai(36), dahai(0)];
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let furiten = furiten_of(&diagnostic, tile(36).tile_type());
+        let tenpai = furiten.tenpai.as_ref().expect("テンパイになる");
+        let three_sou = tile(80).tile_type();
+
+        assert_eq!(tenpai.structural_waits.len(), 3);
+        assert!(tenpai.structural_waits.contains(&three_sou));
+        assert!(!tenpai.live_waits.contains(&three_sou));
+        assert_eq!(furiten.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(furiten.discarded_waits(), [three_sou]);
+        assert_eq!(tenpai.can_ron(), Some(false));
+
+        // ツモ側は見え牌を反映した既存受け入れのまま。
+        let evaluation = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile(36).tile_type())
+            .map(|candidate| candidate.evaluation.clone())
+            .expect("打 1p の評価がある");
+        assert_eq!(
+            tenpai.tsumo_remaining,
+            evaluation.acceptance_total_remaining()
+        );
+        assert_eq!(tenpai.tsumo_type_count, evaluation.acceptance_type_count());
+        assert_eq!(tenpai.tsumo_type_count, 2);
+    }
+
+    #[test]
+    fn the_last_visible_copy_of_a_wait_does_not_change_the_furiten_diagnostic() {
+        // 残枚数 1 → 0 の境界を跨いでも、フリテン判定・重複した待ち牌・ロン可否は変わらない。
+        let actions = vec![dahai(36), dahai(0)];
+        let one_left = diagnose_matching_act(&three_sided_context(&[82], &[81]), &actions);
+        let none_left = diagnose_matching_act(&three_sided_context(&[82, 83], &[81]), &actions);
+
+        let discard = tile(36).tile_type();
+        let with_one_left = furiten_of(&one_left, discard);
+        let with_none_left = furiten_of(&none_left, discard);
+
+        assert_eq!(
+            with_one_left.tenpai.as_ref().unwrap().live_waits.len(),
+            with_none_left.tenpai.as_ref().unwrap().live_waits.len() + 1
+        );
+        assert_eq!(
+            with_one_left.tenpai.as_ref().unwrap().furiten,
+            with_none_left.tenpai.as_ref().unwrap().furiten
+        );
+        assert_eq!(
+            with_one_left.permanent_furiten(),
+            with_none_left.permanent_furiten()
+        );
+        assert_eq!(
+            with_one_left.discarded_waits(),
+            with_none_left.discarded_waits()
+        );
+        assert_eq!(
+            with_one_left.tenpai.as_ref().unwrap().can_ron(),
+            with_none_left.tenpai.as_ref().unwrap().can_ron()
+        );
+        assert_eq!(
+            with_none_left.permanent_furiten(),
+            Some(PermanentFuriten::Yes)
+        );
     }
 
     #[test]

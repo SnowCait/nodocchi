@@ -396,7 +396,16 @@ fn format_permanent_furiten(furiten: Option<&DiscardFuritenDiagnostic>) -> Vec<S
             permanent_furiten_label(tenpai.permanent_furiten())
         ),
         format!("  ron: {}", format_optional_yes_no(tenpai.can_ron())),
-        format!("  tenpai waits: {}", format_tile_types(&tenpai.waits)),
+        // 構造上のアガリ牌種。残枚数 0 の牌種も含み、恒常フリテン判定に使う。
+        format!(
+            "  tenpai waits: {}",
+            format_tile_types(&tenpai.structural_waits)
+        ),
+        // 実際に残っているツモ可能牌。見え牌を反映した既存受け入れそのもの。
+        format!(
+            "  live tenpai waits: {}",
+            format_tile_types(&tenpai.live_waits)
+        ),
         format!("  discarded waits: {}", format_discarded_waits(tenpai)),
     ]
 }
@@ -1319,6 +1328,7 @@ mod tests {
         assert!(block.contains("  permanent furiten: yes"), "{block}");
         assert!(block.contains("  ron: no"), "{block}");
         assert!(block.contains("  tenpai waits: 5s"), "{block}");
+        assert!(block.contains("  live tenpai waits: 5s"), "{block}");
         assert!(block.contains("  discarded waits: 5s"), "{block}");
         // ツモ側の残枚数・種類数は既存受け入れのままで、フリテンでも 0 に書き換えない。
         assert!(block.contains("  acceptance: 2 / 1 types"), "{block}");
@@ -1336,6 +1346,38 @@ mod tests {
         assert_eq!(tenpai.can_ron(), Some(false));
         assert_eq!(tenpai.tsumo_remaining, 2);
         assert_eq!(tenpai.tsumo_type_count, 1);
+    }
+
+    const PERMANENT_FURITEN_VISIBLE_WAIT_SCENARIO: &str =
+        include_str!("../scenarios/permanent_furiten_visible_wait.json");
+
+    #[test]
+    fn a_fully_visible_discarded_wait_is_still_reported_as_furiten() {
+        // 3面待ちのうち 3s を自分が捨てていて 3s が4枚とも見えている局面。3s は既存受け入れから
+        // 消えるが、恒常フリテンは解除されない。
+        let (_, diagnostic, output) = rendered(PERMANENT_FURITEN_VISIBLE_WAIT_SCENARIO, false);
+        let block = candidate_block(&output, "Normal discard candidates", "1p");
+
+        assert!(block.contains("  permanent furiten: yes"), "{block}");
+        assert!(block.contains("  ron: no"), "{block}");
+        assert!(block.contains("  tenpai waits: 3s 6s 9s"), "{block}");
+        assert!(block.contains("  live tenpai waits: 6s 9s"), "{block}");
+        assert!(block.contains("  discarded waits: 3s"), "{block}");
+        // ツモ側は見え牌を反映した既存受け入れのまま。
+        assert!(block.contains("  acceptance: 6 / 2 types"), "{block}");
+
+        let furiten = diagnostic
+            .normal_discard_furiten
+            .as_ref()
+            .expect("恒常フリテン診断がある")
+            .iter()
+            .find(|furiten| furiten.discard.to_mjai_string() == "1p")
+            .expect("打 1p の候補がある");
+        let tenpai = furiten.tenpai.as_ref().expect("テンパイになる");
+        assert_eq!(tenpai.structural_waits.len(), 3);
+        assert_eq!(tenpai.live_waits.len(), 2);
+        assert_eq!(tenpai.tsumo_type_count, 2);
+        assert_eq!(tenpai.tsumo_remaining, 6);
     }
 
     #[test]

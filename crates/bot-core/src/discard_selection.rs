@@ -229,15 +229,18 @@ fn diagnose_legal_evaluations(
 
 // 絞り込み済みの合法候補集合から恒常フリテン診断を構築する。
 //
-// 待ちは既存の打牌評価が持つ受け入れをそのまま使い、判定に使う自分の河は
-// 「context の自分の河 + その打牌」を bot-logic の pure helper 側で組み立てる。player_id が無く
-// 自分の河を特定できない場合は player 0 などを推測せず Unknown として扱う。診断専用の情報で、
-// 打牌選択には使わない。
+// ツモ側は既存の打牌評価が持つ受け入れをそのまま使い、恒常フリテン判定に使う構造上のアガリ牌種と
+// 「context の自分の河 + その打牌」は bot-logic の pure helper 側で組み立てる。副露済み面子数は
+// 本番評価と同じ値を渡す。player_id が無く自分の河を特定できない場合は player 0 などを推測せず
+// Unknown として扱う。診断専用の情報で、打牌選択には使わない。
 fn furiten_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
 ) -> Vec<DiscardFuritenDiagnostic> {
+    let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
     diagnose_discard_furiten(
+        &counts,
+        evaluation_fixed_meld_count(context),
         &legal.evaluations,
         &OwnDiscards::from_optional_river(context.own_discards()),
     )

@@ -12,7 +12,8 @@ pub mod tile_counts;
 pub use acceptance::{
     Acceptance, AcceptanceTile, EffectiveAcceptance, EffectiveAcceptanceTile, calculate_acceptance,
     calculate_acceptance_with_fixed_melds, calculate_acceptance_with_fixed_melds_and_visible_tiles,
-    calculate_acceptance_with_visible_tiles,
+    calculate_acceptance_with_visible_tiles, structural_acceptance_tile_types,
+    structural_acceptance_tile_types_with_fixed_melds,
 };
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,

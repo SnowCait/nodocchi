@@ -26,6 +26,12 @@ impl<S> Acceptance<S> {
     pub fn total_remaining(&self) -> u8 {
         self.tiles.iter().map(|tile| tile.remaining).sum()
     }
+
+    /// 受け入れ牌種の一覧。残枚数 0 の牌種を含めない既存 semantics のままの「実際に残っている
+    /// 受け入れ」。
+    pub fn tile_types(&self) -> Vec<TileType> {
+        self.tiles.iter().map(|tile| tile.tile).collect()
+    }
 }
 
 impl<S: MinShanten> Acceptance<S> {
@@ -65,6 +71,29 @@ pub fn calculate_acceptance_with_fixed_melds_and_visible_tiles(
         fixed_meld_count,
         &additional_seen(counts, visible_tiles),
     )
+}
+
+/// 見え牌を反映しない「構造上の受け入れ牌種」。
+///
+/// 判定は既存の受け入れと同じ「牌種を1枚足すと向聴が下がるか」で、見え牌による残枚数の絞り込み
+/// だけを行わない。したがって4枚とも他家に見えている牌種も含む。
+///
+/// 恒常フリテンのように「山や他家にその牌が残っているか」で結論が変わらない判定へ渡すためのもの。
+/// [`Acceptance`] が残枚数 0 の牌種を受け入れに含めない semantics 自体は変えない。
+///
+/// 手牌に4枚持っている牌種は5枚目が存在せずアガリ牌になり得ないため、見え牌が無くても含めない。
+pub fn structural_acceptance_tile_types(counts: &TileCounts) -> Vec<TileType> {
+    calculate_acceptance(counts).tile_types()
+}
+
+/// 副露済み面子数を考慮した構造上の受け入れ牌種。
+///
+/// 判定の共有と見え牌の扱いは [`structural_acceptance_tile_types`] と同じ。
+pub fn structural_acceptance_tile_types_with_fixed_melds(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> Vec<TileType> {
+    calculate_acceptance_with_fixed_melds(counts, fixed_meld_count).tile_types()
 }
 
 pub(crate) fn calculate_acceptance_with_seen(
@@ -439,6 +468,76 @@ mod tests {
             effective_remaining_of(&actual, tile("5s")),
             remaining_of(&expected, tile("5s"))
         );
+    }
+
+    #[test]
+    fn structural_tile_types_ignore_visible_tiles() {
+        // 待ちが4枚とも見えていても構造上のアガリ牌種からは消えない。既存受け入れは従来どおり
+        // 残枚数 0 の牌種を含めない。
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]);
+        let counts = TileCounts::from_tiles(hand.iter().copied());
+        let mut visible = hand.clone();
+        visible.extend(ids(&[88, 90, 91]));
+
+        assert_eq!(structural_acceptance_tile_types(&counts), vec![tile("5s")]);
+        assert!(
+            calculate_acceptance_with_visible_tiles(&counts, &visible)
+                .tiles
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn structural_tile_types_match_the_acceptance_without_visible_tiles() {
+        let hands = [
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+            ]),
+            counts(&[
+                "1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6s", "6s", "E",
+            ]),
+            counts(&[
+                "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+            ]),
+        ];
+
+        for hand in hands {
+            assert_eq!(
+                structural_acceptance_tile_types(&hand),
+                accepted_tiles(&calculate_acceptance(&hand))
+            );
+            assert_eq!(
+                structural_acceptance_tile_types_with_fixed_melds(&hand, FixedMeldCount::NONE),
+                structural_acceptance_tile_types(&hand)
+            );
+        }
+    }
+
+    #[test]
+    fn structural_tile_types_exclude_a_tile_type_held_four_times() {
+        // 手牌に4枚ある牌種は5枚目が存在せず、見え牌が無くてもアガリ牌になり得ない。
+        let counts = counts(&[
+            "1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m",
+        ]);
+        assert!(!structural_acceptance_tile_types(&counts).contains(&tile("1m")));
+    }
+
+    #[test]
+    fn structural_tile_types_with_fixed_melds_use_the_effective_acceptance() {
+        let counts = counts(&["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p"]);
+        assert_eq!(
+            structural_acceptance_tile_types_with_fixed_melds(&counts, fixed(1)),
+            vec![tile("5p")]
+        );
+    }
+
+    #[test]
+    fn tile_types_expose_the_live_acceptance_tiles() {
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+        ]);
+        let acceptance = calculate_acceptance(&counts);
+        assert_eq!(acceptance.tile_types(), accepted_tiles(&acceptance));
     }
 
     #[test]
