@@ -93,16 +93,18 @@ pub fn standard_shanten_with_fixed_melds(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
 ) -> i8 {
-    let mut memo = SearchMemo::new();
-    search(
-        *counts,
-        SearchState {
-            melds: fixed_meld_count.get(),
-            has_pair: false,
-            partials: 0,
-        },
-        &mut memo,
-    )
+    let state = SearchState {
+        melds: fixed_meld_count.get(),
+        has_pair: false,
+        partials: 0,
+    };
+
+    SEARCH_MEMO.with_borrow_mut(|memo| {
+        if memo.len() >= SEARCH_MEMO_CAPACITY {
+            memo.clear();
+        }
+        search(*counts, state, memo)
+    })
 }
 
 pub fn chiitoitsu_shanten(counts: &TileCounts) -> i8 {
@@ -135,6 +137,19 @@ pub fn kokushi_shanten(counts: &TileCounts) -> i8 {
 }
 
 type SearchMemo = HashMap<([u8; 34], SearchState), i8>;
+
+// 探索 memo を保持する上限エントリ数。超えたら丸ごと捨てて使用量を上限内に保つ。
+const SEARCH_MEMO_CAPACITY: usize = 1 << 17;
+
+// 通常形向聴数探索の memo。
+//
+// `search()` は `(counts, state)` に対する純関数で、結果は memo の中身に依存しない。打牌候補
+// 評価・受け入れ計算・2手先評価は同じ部分形を何度も探索するため、呼び出しごとに memo を作り
+// 直さずスレッドローカルで使い回し、重複探索だけを省く。向聴数そのものは変わらない。
+thread_local! {
+    static SEARCH_MEMO: std::cell::RefCell<SearchMemo> =
+        std::cell::RefCell::new(SearchMemo::new());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SearchState {
@@ -318,6 +333,51 @@ mod tests {
     #[test]
     fn empty_hand_returns_eight() {
         assert_eq!(standard_shanten(&TileCounts::new()), 8);
+    }
+
+    #[test]
+    fn reused_memo_keeps_the_same_shanten() {
+        // memo を呼び出し間で使い回しても、呼び出し順にかかわらず同じ向聴数を返す。
+        let hands = [
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "5s", "E", "E",
+            ]),
+            counts(&[
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+            ]),
+            counts(&["1m", "3m", "5m", "7m", "9m", "E", "S", "W"]),
+        ];
+
+        let forward: Vec<_> = hands.iter().map(standard_shanten).collect();
+        let backward: Vec<_> = hands.iter().rev().map(standard_shanten).collect();
+        let melded: Vec<_> = hands
+            .iter()
+            .map(|counts| {
+                standard_shanten_with_fixed_melds(counts, FixedMeldCount::new(1).unwrap())
+            })
+            .collect();
+
+        assert_eq!(
+            forward,
+            backward.into_iter().rev().collect::<Vec<_>>(),
+            "呼び出し順で結果が変わらない"
+        );
+        assert_eq!(
+            forward,
+            hands.iter().map(standard_shanten).collect::<Vec<_>>()
+        );
+        // 副露済み面子数は memo の key に含まれるので、門前の結果と混ざらない。
+        assert_ne!(melded, forward);
+        assert_eq!(
+            melded,
+            hands
+                .iter()
+                .map(|counts| standard_shanten_with_fixed_melds(
+                    counts,
+                    FixedMeldCount::new(1).unwrap()
+                ))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

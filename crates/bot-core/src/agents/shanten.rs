@@ -195,12 +195,13 @@ pub struct ShantenDecisionDiagnostic {
     /// 通常打牌評価を行った場合の全合法候補診断。合法 Dahai が無い場合は
     /// `selected == None` かつ `candidates` が空の診断になる。
     pub normal_discard: Option<DiscardDecisionDiagnostic>,
-    /// 通常打牌評価を行った場合の全合法候補の2手先診断。`normal_discard` と同じ候補集合・同じ
-    /// 順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
+    /// 通常打牌評価を行った場合の全合法候補の詳細な2手先診断。`normal_discard` と同じ候補集合・
+    /// 同じ順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
     ///
-    /// 解析専用であり、`selected_action` / `selected_source` / `normal_discard_action` /
-    /// `push_pull_decision` / `defense` / `pon` のどれにも影響しない。`act()` の経路では
-    /// 構築しない。
+    /// 構築の有無は `selected_action` / `selected_source` / `normal_discard_action` /
+    /// `push_pull_decision` / `defense` / `pon` のどれも変えない。構築した場合は打牌選択が使う
+    /// 1向聴の weighted tenpai wait もこの枝評価から集計するが、集計対象と集計規則は選択専用
+    /// 経路と同じなので結果は一致する。`act()` の経路では構築しない。
     pub normal_discard_lookahead: Option<LookaheadDiagnostic>,
     /// 押し引き判定に使った入力。`push_pull_inputs_from_context_with_evaluation()` の実結果。
     pub push_pull_inputs: Option<PushPullInputs>,
@@ -2757,6 +2758,105 @@ pub(crate) mod tests {
                 DiagnosticOptions::WITH_LOOKAHEAD
             ),
             ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD)
+        );
+    }
+
+    // ---- 1向聴の weighted tenpai wait ----
+
+    // 12m 68m 444p 5p 789p 567s の門前14枚。
+    //
+    // 打 5p は受け入れが最も広く、打 1m は 45p の両面を残してテンパイ後の待ちが広くなる。
+    // 合法 Dahai をこの2候補だけに絞り、新しい比較軸で選択が決まる局面にする。
+    fn iishanten_wait_context() -> GameContext {
+        let values = [0u8, 4, 20, 28, 48, 49, 50, 53, 60, 64, 68, 89, 92, 96];
+        let tiles: Vec<_> = values.iter().map(|&value| tile(value)).collect();
+        let (hand, drawn) = tiles.split_at(values.len() - 1);
+        GameContext::from_parts_with_visible_tiles(
+            Some(drawn[0]),
+            hand.to_vec(),
+            vec![],
+            None,
+            None,
+            tiles.clone(),
+        )
+    }
+
+    fn iishanten_wait_actions() -> Vec<LegalAction> {
+        vec![dahai(0), dahai(53)]
+    }
+
+    #[test]
+    fn weighted_tenpai_wait_keeps_act_and_diagnose_consistent() {
+        // act() / diagnose() / diagnose_with_options(WITH_LOOKAHEAD) の選択が一致する。
+        let ctx = iishanten_wait_context();
+        let actions = iishanten_wait_actions();
+
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&ctx, &actions);
+        let diagnosed = ShantenAgent::diagnose(&ctx, &actions);
+        let with_lookahead =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        assert_eq!(diagnosed.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(with_lookahead.normal_discard, diagnosed.normal_discard);
+
+        // 新しい比較軸で選択が決まっている局面であることを固定する。
+        let normal_discard = diagnosed.normal_discard.as_ref().expect("evaluated");
+        let runner_up = normal_discard
+            .candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up exists");
+        assert_eq!(
+            runner_up.comparison_reason,
+            bot_logic::DiscardComparisonReason::WeightedTenpaiWaitRemaining
+        );
+        assert_eq!(acted, dahai(0));
+    }
+
+    #[test]
+    fn push_pull_shares_the_selected_normal_discard() {
+        // 押し引きへ渡る攻撃評価は、weighted tenpai wait で選ばれた通常打牌評価そのもの。
+        let ctx = iishanten_wait_context();
+        let actions = iishanten_wait_actions();
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let selected = diagnostic
+            .normal_discard
+            .as_ref()
+            .and_then(|normal_discard| normal_discard.selected.as_ref())
+            .expect("selected evaluation exists");
+        let offense = diagnostic
+            .push_pull_inputs
+            .as_ref()
+            .and_then(|inputs| inputs.offense.as_ref())
+            .expect("offense state exists");
+
+        assert_eq!(
+            offense.min_shanten_after_discard,
+            selected.min_shanten_after_discard()
+        );
+        assert_eq!(
+            offense.acceptance_total_remaining,
+            selected.acceptance_total_remaining()
+        );
+        assert_eq!(
+            offense.acceptance_type_count,
+            selected.acceptance_type_count()
+        );
+
+        // 受け入れの多い runner-up (1手評価だけなら選ばれる候補) の評価は渡っていない。
+        let runner_up = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("evaluated")
+            .candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up exists");
+        assert!(
+            runner_up.evaluation.acceptance_total_remaining() > offense.acceptance_total_remaining
         );
     }
 

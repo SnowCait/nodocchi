@@ -6,7 +6,7 @@ use bot_core::{
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, EffectiveShanten,
-    FixedMeldCount, LookaheadDiagnostic, Shanten, TileId, TileType,
+    FixedMeldCount, LookaheadDiagnostic, Shanten, TenpaiWaitMetric, TileId, TileType,
 };
 
 use crate::scenario::Scenario;
@@ -272,6 +272,10 @@ fn format_normal_discard_candidate(
         evaluation.acceptance_type_count()
     ));
     lines.push(format!(
+        "  weighted tenpai wait: {}",
+        format_tenpai_wait(candidate.tenpai_wait)
+    ));
+    lines.push(format!(
         "  iishanten shape: {:?}",
         evaluation.standard_iishanten_shape_after_discard
     ));
@@ -341,6 +345,18 @@ fn format_normal_discard_candidate(
     }
 
     lines.join("\n")
+}
+
+// 打牌選択に使った1向聴限定の前方集計値。前方評価を計算していない候補は "-" にして、
+// 待ちがすべて死んでいる場合の有効な 0 と区別する。
+fn format_tenpai_wait(tenpai_wait: Option<TenpaiWaitMetric>) -> String {
+    match tenpai_wait {
+        Some(metric) => format!(
+            "{} remaining / {} types",
+            metric.weighted_remaining, metric.weighted_type_count
+        ),
+        None => ABSENT.to_string(),
+    }
 }
 
 // 2手先診断 (lookahead) の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、
@@ -1078,6 +1094,138 @@ mod tests {
             output.contains("Final decision\n  action: 4s\n  source: DefenseFallback"),
             "{output}"
         );
+    }
+
+    const IISHANTEN_TENPAI_WAIT_SCENARIO: &str =
+        include_str!("../scenarios/iishanten_tenpai_wait.json");
+
+    // 1向聴の2候補だけを合法にした scenario から、selected と runner-up の候補診断を取り出す。
+    fn iishanten_tenpai_wait_candidates() -> (
+        DiscardCandidateDiagnostic,
+        DiscardCandidateDiagnostic,
+        String,
+    ) {
+        let (_, diagnostic, output) = rendered(IISHANTEN_TENPAI_WAIT_SCENARIO, false);
+        let candidates = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated")
+            .candidates
+            .clone();
+        assert_eq!(candidates.len(), 2);
+
+        let selected = candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("selected candidate")
+            .clone();
+        let runner_up = candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up candidate")
+            .clone();
+        (selected, runner_up, output)
+    }
+
+    #[test]
+    fn iishanten_tenpai_wait_scenario_prefers_the_wider_tenpai() {
+        // 受け入れは runner-up の方が広いが、テンパイ後の待ちが広い候補を選ぶ。
+        let (selected, runner_up, output) = iishanten_tenpai_wait_candidates();
+
+        assert_eq!(selected.evaluation.min_shanten_after_discard(), 1);
+        assert_eq!(runner_up.evaluation.min_shanten_after_discard(), 1);
+        assert!(
+            runner_up.evaluation.acceptance_total_remaining()
+                > selected.evaluation.acceptance_total_remaining()
+        );
+
+        // 修正前の1手比較では、受け入れの多い runner-up が勝っていた。
+        let before =
+            bot_logic::compare_discard_evaluations(&runner_up.evaluation, &selected.evaluation);
+        assert!(before.candidate_is_better);
+        assert_eq!(before.reason, DiscardComparisonReason::AcceptanceRemaining);
+
+        // 修正後は weighted tenpai wait remaining で決着する。
+        assert_eq!(
+            runner_up.comparison_reason,
+            DiscardComparisonReason::WeightedTenpaiWaitRemaining
+        );
+        assert!(
+            selected
+                .tenpai_wait
+                .expect("weighted wait")
+                .weighted_remaining
+                > runner_up
+                    .tenpai_wait
+                    .expect("weighted wait")
+                    .weighted_remaining
+        );
+        assert!(
+            output.contains("  runner-up lost by: WeightedTenpaiWaitRemaining"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn iishanten_tenpai_wait_scenario_shows_the_weighted_wait_of_both_candidates() {
+        let (selected, runner_up, output) = iishanten_tenpai_wait_candidates();
+
+        for candidate in [&selected, &runner_up] {
+            let metric = candidate.tenpai_wait.expect("weighted wait");
+            let block = candidate_block(
+                &output,
+                "Normal discard candidates",
+                &candidate.evaluation.discard.to_mjai_string(),
+            );
+            assert!(
+                block.contains(&format!(
+                    "  weighted tenpai wait: {} remaining / {} types",
+                    metric.weighted_remaining, metric.weighted_type_count
+                )),
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_wait_is_absent_for_non_iishanten_candidates() {
+        // 1向聴以外では計算しないので、意味の無い 0 ではなく "-" を出す。
+        let (_, diagnostic, output) = rendered(LOOKAHEAD_SCENARIO, false);
+        let normal_discard = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated");
+
+        assert!(
+            normal_discard
+                .candidates
+                .iter()
+                .all(|candidate| candidate.tenpai_wait.is_none())
+        );
+        assert!(output.contains("  weighted tenpai wait: -"), "{output}");
+        assert!(
+            !output.contains("  weighted tenpai wait: 0 remaining"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn iishanten_tenpai_wait_scenario_selects_the_same_action_with_lookahead() {
+        // act() / diagnose() / --lookahead 付き診断で selected action が一致する。
+        let scenario = scenario_from_json(IISHANTEN_TENPAI_WAIT_SCENARIO);
+        let mut agent = ShantenAgent;
+
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        let diagnostic = diagnose(&scenario);
+        let with_lookahead = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(with_lookahead.normal_discard, diagnostic.normal_discard);
     }
 
     const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");

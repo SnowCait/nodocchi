@@ -2,6 +2,10 @@ use crate::acceptance::{
     EffectiveAcceptance, additional_seen, calculate_acceptance_with_fixed_melds_and_seen,
 };
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
+use crate::selection::{
+    DiscardSelectionCandidate, TenpaiWaitMetric, best_discard_selection_index,
+    compare_discard_selection_candidates,
+};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
 use crate::tile_counts::TileCounts;
@@ -635,6 +639,10 @@ pub enum DiscardComparisonReason {
     Shanten,
     IsolatedTile,
     IsolatedHonor,
+    /// 1向聴限定の前方評価。Σ(受け入れ残枚数 × そのテンパイの和了牌残枚数)。
+    WeightedTenpaiWaitRemaining,
+    /// 1向聴限定の前方評価。Σ(受け入れ残枚数 × そのテンパイの待ち牌種類数)。
+    WeightedTenpaiWaitTypeCount,
     AcceptanceRemaining,
     AcceptanceTypeCount,
     IishantenShape,
@@ -652,27 +660,46 @@ pub struct DiscardComparison {
     pub reason: DiscardComparisonReason,
 }
 
+/// 1手の打牌評価だけで打牌候補を比較する。
+///
+/// 前方評価を持つ selection 経路は [`crate::selection::compare_discard_selection_candidates`] を
+/// 使う。比較順の前半 ([`compare_discard_before_acceptance`]) と後半
+/// ([`compare_discard_from_acceptance`]) は selection 経路と共有し、比較順を二重定義しない。
 pub fn compare_discard_evaluations(
     candidate: &DiscardEvaluation,
     current_best: &DiscardEvaluation,
 ) -> DiscardComparison {
+    compare_discard_before_acceptance(candidate, current_best)
+        .unwrap_or_else(|| compare_discard_from_acceptance(candidate, current_best))
+}
+
+// 比較順のうち、向聴数と多向聴限定の孤立牌比較まで。決着しなければ `None` を返す。
+// `None` を返した時点で両候補の最小向聴数は等しい。
+pub(crate) fn compare_discard_before_acceptance(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> Option<DiscardComparison> {
     let candidate_shanten = candidate.min_shanten_after_discard();
     let best_shanten = current_best.min_shanten_after_discard();
     if candidate_shanten != best_shanten {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate_shanten < best_shanten,
             reason: DiscardComparisonReason::Shanten,
-        };
+        });
     }
 
     if let Some(comparison) = compare_isolated_tile_discard(candidate, current_best) {
-        return comparison;
+        return Some(comparison);
     }
 
-    if let Some(comparison) = compare_isolated_honor_discard(candidate, current_best) {
-        return comparison;
-    }
+    compare_isolated_honor_discard(candidate, current_best)
+}
 
+// 比較順のうち、受け入れ以降。最後は StableOrder になるので必ず決着する。
+pub(crate) fn compare_discard_from_acceptance(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> DiscardComparison {
     let candidate_remaining = candidate.acceptance_total_remaining();
     let best_remaining = current_best.acceptance_total_remaining();
     if candidate_remaining != best_remaining {
@@ -880,6 +907,11 @@ pub struct DiscardCandidateDiagnostic {
     pub pair_context: PairContext,
     pub block_context: DiscardBlockContext,
     pub floating_tile_value_breakdown: FloatingTileValue,
+    /// 打牌選択に使った1向聴限定の前方集計値。前方評価を計算しなかった候補は `None`。
+    ///
+    /// 診断のために再計算せず、選択で使った値をそのまま保持する。待ちがすべて死んでいる場合の
+    /// 有効な 0 と、計算していない `None` を区別する。
+    pub tenpai_wait: Option<TenpaiWaitMetric>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -899,7 +931,32 @@ pub fn diagnose_discard_evaluations_with_fixed_melds(
     fixed_meld_count: FixedMeldCount,
     evaluations: &[DiscardEvaluation],
 ) -> DiscardDecisionDiagnostic {
-    let best_index = best_discard_index(evaluations);
+    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
+        counts,
+        fixed_meld_count,
+        evaluations,
+        &[],
+    )
+}
+
+/// 打牌選択で使った1向聴限定の前方集計値も含めて打牌候補の診断を構築する。
+///
+/// 比較・選択は本番と同じ [`compare_discard_selection_candidates`] を通り、診断専用の比較
+/// ロジックは持たない。`tenpai_wait` は `evaluations` と同じ順序で、範囲外の index は前方評価
+/// なしとして扱う。空スライスを渡すと [`diagnose_discard_evaluations_with_fixed_melds`] と
+/// 一致する。前方集計値は診断のために再計算せず、渡された値をそのまま候補診断へ載せる。
+pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    evaluations: &[DiscardEvaluation],
+    tenpai_wait: &[Option<TenpaiWaitMetric>],
+) -> DiscardDecisionDiagnostic {
+    let candidate_at = |index: usize| DiscardSelectionCandidate {
+        evaluation: &evaluations[index],
+        tenpai_wait: tenpai_wait.get(index).copied().flatten(),
+    };
+
+    let best_index = best_discard_selection_index(evaluations, tenpai_wait);
     let selected = best_index.map(|index| evaluations[index].clone());
 
     let candidates = evaluations
@@ -910,10 +967,12 @@ pub fn diagnose_discard_evaluations_with_fixed_melds(
             let (selected_is_strictly_better_than_candidate, comparison_reason) = if is_selected {
                 (false, DiscardComparisonReason::StableOrder)
             } else {
-                let selected = selected
-                    .as_ref()
+                let best_index = best_index
                     .expect("non-selected candidate implies a selected evaluation exists");
-                let comparison = compare_discard_evaluations(selected, evaluation);
+                let comparison = compare_discard_selection_candidates(
+                    &candidate_at(best_index),
+                    &candidate_at(index),
+                );
                 if comparison.candidate_is_better {
                     (true, comparison.reason)
                 } else {
@@ -937,6 +996,7 @@ pub fn diagnose_discard_evaluations_with_fixed_melds(
                     counts,
                     evaluation.discard,
                 ),
+                tenpai_wait: tenpai_wait.get(index).copied().flatten(),
             }
         })
         .collect();
