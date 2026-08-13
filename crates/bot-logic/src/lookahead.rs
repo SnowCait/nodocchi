@@ -27,6 +27,7 @@ use crate::discard::{
     discarded_tile_id_for_type, evaluate_discards_with_seen, select_best,
 };
 use crate::iishanten::IishantenShape;
+use crate::selection::{TenpaiWaitMetric, is_forward_target, requires_tenpai_wait};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
@@ -34,7 +35,9 @@ use crate::tile_counts::TileCounts;
 /// 現在の打牌候補1件について、その打牌後の受け入れ牌を1枚ツモった仮想手牌を既存打牌評価へ
 /// かけた2手先診断。
 ///
-/// 解析専用の pure なデータであり、打牌選択・押し引き・鳴き・リーチ判断のどれにも使用しない。
+/// pure なデータであり、押し引き・鳴き・リーチ判断のどれにも使用しない。打牌選択が使うのは
+/// [`DiscardLookaheadDiagnostic::tenpai_wait_metric`] が返す集計値だけで、通常の選択経路は
+/// この診断そのものを構築しない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscardLookaheadDiagnostic {
     /// 現在の打牌候補の牌種。
@@ -46,6 +49,18 @@ pub struct DiscardLookaheadDiagnostic {
 impl DiscardLookaheadDiagnostic {
     pub fn draw(&self, tile: TileType) -> Option<&DrawLookaheadDiagnostic> {
         self.draws.iter().find(|draw| draw.draw == tile)
+    }
+
+    /// 構築済みの枝から打牌選択用の weighted tenpai wait を集計する。
+    ///
+    /// 集計規則は選択専用経路 ([`tenpai_wait_metrics_with_fixed_melds`]) と共有するため、詳細
+    /// 診断を構築した場合に同じ枝を2回評価しなくてよい。
+    pub fn tenpai_wait_metric(&self) -> TenpaiWaitMetric {
+        let mut metric = TenpaiWaitMetric::default();
+        for draw in &self.draws {
+            metric.accumulate(draw.remaining, draw.next_discard.as_ref());
+        }
+        metric
     }
 }
 
@@ -199,6 +214,109 @@ pub fn diagnose_lookahead_with_fixed_melds_and_visible_tiles(
     )
 }
 
+/// 副露済み面子数と場風・自風・ドラ表示牌を考慮して、打牌選択用の weighted tenpai wait を求める。
+///
+/// 戻り値は `evaluations` と同じ順序・同じ件数で、前方評価を計算しなかった候補は `None`。
+/// 計算対象は [`crate::selection::requires_tenpai_wait`] のとおり「最善向聴数が1向聴で、かつ
+/// 1向聴を維持する候補が複数ある」場合のその候補だけで、テンパイ・2向聴以上の候補は探索しない。
+///
+/// 枝の評価は詳細診断 ([`diagnose_lookahead_with_fixed_melds`]) と同じ helper を共有し、選択用に
+/// [`LookaheadDiagnostic`] を構築しない。
+pub fn tenpai_wait_metrics_with_fixed_melds(
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    evaluations: &[DiscardEvaluation],
+) -> Vec<Option<TenpaiWaitMetric>> {
+    if !requires_tenpai_wait(evaluations) {
+        return vec![None; evaluations.len()];
+    }
+
+    tenpai_wait_metrics(
+        &LookaheadInputs {
+            counts: TileCounts::from_tiles(tiles.iter().copied()),
+            tiles,
+            fixed_meld_count,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+            seen: CandidateSeen::hand_only(),
+        },
+        evaluations,
+    )
+}
+
+/// visible tiles も考慮して打牌選択用の weighted tenpai wait を求める。
+///
+/// 2手目の残枚数の扱いは [`diagnose_lookahead_with_fixed_melds_and_visible_tiles`] と同じで、
+/// 1手目に切った牌も2手目時点の見え牌として数える。
+#[allow(clippy::too_many_arguments)]
+pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    visible_tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+) -> Vec<Option<TenpaiWaitMetric>> {
+    if visible_tiles.is_empty() {
+        return tenpai_wait_metrics_with_fixed_melds(
+            tiles,
+            fixed_meld_count,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+            evaluations,
+        );
+    }
+
+    if !requires_tenpai_wait(evaluations) {
+        return vec![None; evaluations.len()];
+    }
+
+    let counts = TileCounts::from_tiles(tiles.iter().copied());
+    tenpai_wait_metrics(
+        &LookaheadInputs {
+            counts,
+            tiles,
+            fixed_meld_count,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+            seen: CandidateSeen::from_visible_tiles(&counts, visible_tiles),
+        },
+        evaluations,
+    )
+}
+
+/// 構築済みの2手先診断から打牌選択用の weighted tenpai wait を求める。
+///
+/// 詳細診断を作る経路で、同じ「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しないための入口。
+/// 対象候補の条件と集計規則は選択専用経路と同じなので、詳細診断の有無で選択結果は変わらない。
+///
+/// `lookahead` は `evaluations` から構築したものを渡す。候補の順序・牌種が対応しない場合は
+/// 推測せず `None` にする。
+pub fn tenpai_wait_metrics_from_lookahead(
+    evaluations: &[DiscardEvaluation],
+    lookahead: &LookaheadDiagnostic,
+) -> Vec<Option<TenpaiWaitMetric>> {
+    if !requires_tenpai_wait(evaluations) || lookahead.candidates.len() != evaluations.len() {
+        return vec![None; evaluations.len()];
+    }
+
+    evaluations
+        .iter()
+        .zip(lookahead.candidates.iter())
+        .map(|(evaluation, candidate)| {
+            (is_forward_target(evaluation) && candidate.discard == evaluation.discard)
+                .then(|| candidate.tenpai_wait_metric())
+        })
+        .collect()
+}
+
 fn diagnose_lookahead(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
@@ -211,34 +329,41 @@ fn diagnose_lookahead(
     }
 }
 
+// 前方評価の対象候補だけ枝を評価して集計する。対象外の候補は探索しない。
+fn tenpai_wait_metrics(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+) -> Vec<Option<TenpaiWaitMetric>> {
+    evaluations
+        .iter()
+        .map(|evaluation| {
+            is_forward_target(evaluation).then(|| tenpai_wait_for_candidate(inputs, evaluation))
+        })
+        .collect()
+}
+
 // 現在の打牌候補1件分の2手先診断。入力は変更せず、打牌後の手牌を copy で作る。
 fn lookahead_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> DiscardLookaheadDiagnostic {
-    let mut after_discard = inputs.counts;
-    if after_discard.remove(evaluation.discard).is_err() {
+    let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
         return DiscardLookaheadDiagnostic {
             discard: evaluation.discard,
             draws: Vec::new(),
         };
-    }
-
-    // 1手目に切った牌は2手目時点で見え牌になる。
-    let next_seen = inputs.seen.after_discard(evaluation.discard);
-    // 1手目に実際に切られる物理牌を2手目の物理牌一覧から外す。赤5と黒5の両方を持ち片方だけが
-    // 合法な局面でも、通常打牌評価が確定した物理牌をそのまま引き継ぐ。
-    let next_tiles = tiles_after_discard(
-        inputs.tiles,
-        evaluation.discard,
-        evaluation.discards_red_five,
-    );
+    };
 
     let draws = evaluation
         .acceptance_after_discard
         .tiles
         .iter()
-        .map(|tile| lookahead_for_draw(inputs, &after_discard, &next_tiles, &next_seen, tile))
+        .map(|tile| DrawLookaheadDiagnostic {
+            draw: tile.tile,
+            remaining: tile.remaining,
+            shanten_after_draw: tile.shanten_after_draw,
+            next_discard: branch.next_discard(inputs, tile),
+        })
         .collect();
 
     DiscardLookaheadDiagnostic {
@@ -247,25 +372,69 @@ fn lookahead_for_candidate(
     }
 }
 
-// 受け入れ牌1枚を仮想的にツモった手牌を作り、既存打牌評価・既存文脈反映・既存比較順で最良打牌を
-// 求める。仮想ツモ牌は物理牌が決まらないため `next_tiles` には含めず、赤5が解決できない牌種として
-// 既存の decoration へ渡す。
-fn lookahead_for_draw(
+// 現在の打牌候補1件分の weighted tenpai wait。枝の評価は詳細診断と同じ helper を共有し、
+// 診断 object を作らずに集計値だけを求める。
+fn tenpai_wait_for_candidate(
     inputs: &LookaheadInputs,
-    after_discard: &TileCounts,
-    next_tiles: &[TileId],
-    seen: &CandidateSeen,
-    tile: &EffectiveAcceptanceTile,
-) -> DrawLookaheadDiagnostic {
-    let mut hypothetical = *after_discard;
-    let next_discard = if hypothetical.try_add(tile.tile).is_ok() {
+    evaluation: &DiscardEvaluation,
+) -> TenpaiWaitMetric {
+    let mut metric = TenpaiWaitMetric::default();
+    let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
+        return metric;
+    };
+
+    for tile in &evaluation.acceptance_after_discard.tiles {
+        metric.accumulate(tile.remaining, branch.next_discard(inputs, tile).as_ref());
+    }
+    metric
+}
+
+// 現在の打牌候補1件について、その打牌後の受け入れ牌を仮想ツモした2手目評価に必要な状態。
+// 受け入れ牌ごとに作り直さず、詳細診断と選択用集計で共有する。
+struct CandidateBranch {
+    after_discard: TileCounts,
+    next_tiles: Vec<TileId>,
+    seen: CandidateSeen,
+}
+
+impl CandidateBranch {
+    // 打牌候補の牌種を手牌から除けない場合だけ `None`。
+    fn new(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> Option<Self> {
+        let mut after_discard = inputs.counts;
+        after_discard.remove(evaluation.discard).ok()?;
+
+        Some(Self {
+            after_discard,
+            // 1手目に実際に切られる物理牌を2手目の物理牌一覧から外す。赤5と黒5の両方を持ち
+            // 片方だけが合法な局面でも、通常打牌評価が確定した物理牌をそのまま引き継ぐ。
+            next_tiles: tiles_after_discard(
+                inputs.tiles,
+                evaluation.discard,
+                evaluation.discards_red_five,
+            ),
+            // 1手目に切った牌は2手目時点で見え牌になる。
+            seen: inputs.seen.after_discard(evaluation.discard),
+        })
+    }
+
+    // 受け入れ牌1枚を仮想的にツモった手牌を作り、既存打牌評価・既存文脈反映・既存比較順で最良
+    // 打牌を求める。仮想ツモ牌は物理牌が決まらないため `next_tiles` には含めず、赤5が解決
+    // できない牌種として既存の decoration へ渡す。
+    fn next_discard(
+        &self,
+        inputs: &LookaheadInputs,
+        tile: &EffectiveAcceptanceTile,
+    ) -> Option<DiscardEvaluation> {
+        let mut hypothetical = self.after_discard;
+        hypothetical.try_add(tile.tile).ok()?;
+
         let mut evaluations =
-            evaluate_discards_with_seen(&hypothetical, inputs.fixed_meld_count, seen);
+            evaluate_discards_with_seen(&hypothetical, inputs.fixed_meld_count, &self.seen);
         decorate_evaluations(
             &mut evaluations,
             &hypothetical,
             &DecorationContext {
-                tiles: next_tiles,
+                tiles: &self.next_tiles,
                 dora_indicators: inputs.dora_indicators,
                 round_wind: inputs.round_wind,
                 seat_wind: inputs.seat_wind,
@@ -278,15 +447,6 @@ fn lookahead_for_draw(
             },
         );
         select_best(evaluations)
-    } else {
-        None
-    };
-
-    DrawLookaheadDiagnostic {
-        draw: tile.tile,
-        remaining: tile.remaining,
-        shanten_after_draw: tile.shanten_after_draw,
-        next_discard,
     }
 }
 
@@ -992,6 +1152,375 @@ mod tests {
             }
         }
         assert!(checked > 0);
+    }
+
+    // ---- 打牌選択用の weighted tenpai wait ----
+
+    // 局面が持つ見え牌の有無に合わせて、選択用集計の入口を呼び分ける。
+    fn metrics(situation: &Situation) -> Vec<Option<TenpaiWaitMetric>> {
+        if situation.visible.is_empty() {
+            tenpai_wait_metrics_with_fixed_melds(
+                &situation.tiles,
+                situation.fixed_meld_count,
+                &situation.dora_indicators,
+                situation.round_wind,
+                situation.seat_wind,
+                &situation.evaluations,
+            )
+        } else {
+            tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
+                &situation.tiles,
+                situation.fixed_meld_count,
+                &situation.dora_indicators,
+                situation.round_wind,
+                situation.seat_wind,
+                &situation.visible,
+                &situation.evaluations,
+            )
+        }
+    }
+
+    // 集計 helper を使わずに Σ(受け入れ残枚数 × テンパイ後の和了牌残枚数) を組み立てる。
+    // 期待値を診断の生の値から作ることで、集計規則そのものを固定する。
+    fn expected_metric(candidate: &DiscardLookaheadDiagnostic) -> TenpaiWaitMetric {
+        let mut expected = TenpaiWaitMetric::default();
+        for draw in &candidate.draws {
+            let Some(next) = draw.next_discard.as_ref() else {
+                continue;
+            };
+            if next.min_shanten_after_discard() != 0 {
+                continue;
+            }
+            expected.weighted_remaining +=
+                u32::from(draw.remaining) * u32::from(next.acceptance_total_remaining());
+            expected.weighted_type_count +=
+                u32::from(draw.remaining) * next.acceptance_type_count() as u32;
+        }
+        expected
+    }
+
+    // 1向聴を維持する打牌候補が複数ある門前14枚 12m 68m 444p 5p 789p 567s。
+    // 打 5p は受け入れが最も広く、打 1m / 2m は 45p の両面を残してテンパイ後の待ちが広くなる。
+    fn iishanten_wait_hand() -> Vec<TileId> {
+        ids(&[0, 4, 20, 28, 48, 49, 50, 53, 60, 64, 68, 89, 92, 96])
+    }
+
+    static IISHANTEN_WAIT_CASE: LazyLock<Case> = LazyLock::new(|| {
+        hand_only_case(
+            &iishanten_wait_hand(),
+            FixedMeldCount::NONE,
+            Vec::new(),
+            None,
+            None,
+        )
+    });
+
+    // 手牌以外に 3p 3枚・6p 3枚が見えている同じ局面。テンパイ後の待ちが実際に減る。
+    static IISHANTEN_WAIT_WITH_VISIBLE: LazyLock<Case> = LazyLock::new(|| {
+        let hand = iishanten_wait_hand();
+        let mut visible = hand.clone();
+        visible.extend(ids(&[44, 45, 46, 56, 57, 58]));
+        visible_case(&hand, FixedMeldCount::NONE, Vec::new(), None, None, visible)
+    });
+
+    #[test]
+    fn weighted_wait_is_computed_for_every_iishanten_candidate() {
+        let case = &*IISHANTEN_WAIT_CASE;
+        let metrics = metrics(&case.situation);
+
+        assert_eq!(metrics.len(), case.situation.evaluations.len());
+        let mut iishanten = 0;
+        for (evaluation, metric) in case.situation.evaluations.iter().zip(metrics.iter()) {
+            if evaluation.min_shanten_after_discard() == 1 {
+                assert!(metric.is_some(), "1向聴候補 {:?}", evaluation.discard);
+                iishanten += 1;
+            } else {
+                // 1向聴以外は前方探索そのものを行わないので None のままにする。
+                assert_eq!(*metric, None, "非1向聴候補 {:?}", evaluation.discard);
+            }
+        }
+        assert!(iishanten > 1, "1向聴候補が複数ある局面が必要");
+    }
+
+    #[test]
+    fn weighted_wait_aggregates_the_branch_evaluations() {
+        let case = &*IISHANTEN_WAIT_CASE;
+        let metrics = metrics(&case.situation);
+
+        let mut checked = 0;
+        for (candidate, metric) in case.lookahead.candidates.iter().zip(metrics.iter()) {
+            let Some(metric) = metric else {
+                continue;
+            };
+            assert_eq!(
+                *metric,
+                expected_metric(candidate),
+                "{:?}",
+                candidate.discard
+            );
+            checked += 1;
+        }
+        assert!(checked > 1);
+    }
+
+    #[test]
+    fn weighted_wait_matches_the_detailed_lookahead() {
+        // 詳細診断から集計しても選択専用経路と同じ値になる。同じ枝を2回計算する必要はない。
+        let case = &*IISHANTEN_WAIT_CASE;
+
+        assert_eq!(
+            tenpai_wait_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+            metrics(&case.situation),
+        );
+    }
+
+    #[test]
+    fn weighted_wait_prefers_the_wider_tenpai_over_the_wider_acceptance() {
+        // 受け入れが最も広い打牌より、テンパイ後の待ちが広い打牌の方が weighted wait が大きい。
+        let case = &*IISHANTEN_WAIT_CASE;
+        let metrics = metrics(&case.situation);
+
+        let metric_of = |discard: TileType| {
+            case.situation
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard == discard)
+                .and_then(|index| metrics[index])
+                .expect("1向聴候補の集計値がある")
+        };
+        let acceptance_of = |discard: TileType| {
+            case.situation
+                .evaluations
+                .iter()
+                .find(|evaluation| evaluation.discard == discard)
+                .map(DiscardEvaluation::acceptance_total_remaining)
+                .expect("打牌候補がある")
+        };
+
+        assert!(acceptance_of(tile("5p")) > acceptance_of(tile("1m")));
+        assert!(
+            metric_of(tile("1m")).weighted_remaining > metric_of(tile("5p")).weighted_remaining
+        );
+    }
+
+    #[test]
+    fn tenpai_hands_do_not_compute_the_weighted_wait() {
+        // 最善向聴数がテンパイの局面では前方評価を計算しない。
+        let situation = hand_only_situation(
+            &ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 89, 90, 68]),
+            FixedMeldCount::NONE,
+            Vec::new(),
+            None,
+            None,
+        );
+        assert_eq!(
+            situation
+                .evaluations
+                .iter()
+                .map(DiscardEvaluation::min_shanten_after_discard)
+                .min(),
+            Some(0)
+        );
+
+        assert!(metrics(&situation).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn multi_shanten_hands_do_not_compute_the_weighted_wait() {
+        // 2向聴・3向聴以上の局面では1向聴を維持する候補が無いので前方評価を計算しない。
+        for hand in [
+            ids(&[0, 4, 8, 12, 17, 20, 48, 53, 72, 76, 108, 112, 116, 120]),
+            ids(&[0, 8, 20, 28, 48, 56, 68, 76, 88, 100, 108, 116, 124, 132]),
+        ] {
+            let situation =
+                hand_only_situation(&hand, FixedMeldCount::NONE, Vec::new(), None, None);
+            let best = situation
+                .evaluations
+                .iter()
+                .map(DiscardEvaluation::min_shanten_after_discard)
+                .min()
+                .expect("打牌候補がある");
+            assert!(best >= 2, "2向聴以上の局面が必要");
+
+            assert!(metrics(&situation).iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn a_single_iishanten_candidate_does_not_compute_the_weighted_wait() {
+        // 1向聴を維持する候補が1件だけなら Shanten 比較で決着するので前方評価は不要。
+        let case = &*IISHANTEN_WAIT_CASE;
+        let single: Vec<_> = case
+            .situation
+            .evaluations
+            .iter()
+            .filter(|evaluation| evaluation.min_shanten_after_discard() != 1)
+            .cloned()
+            .chain(
+                case.situation
+                    .evaluations
+                    .iter()
+                    .find(|evaluation| evaluation.min_shanten_after_discard() == 1)
+                    .cloned(),
+            )
+            .collect();
+
+        let metrics = tenpai_wait_metrics_with_fixed_melds(
+            &case.situation.tiles,
+            FixedMeldCount::NONE,
+            &[],
+            None,
+            None,
+            &single,
+        );
+        assert!(metrics.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn visible_tiles_reduce_the_weighted_wait() {
+        // テンパイ後の待ち牌が他家に見えている分だけ、weighted wait が実際に減る。
+        let hand_only = metrics(&IISHANTEN_WAIT_CASE.situation);
+        let with_visible = metrics(&IISHANTEN_WAIT_WITH_VISIBLE.situation);
+
+        let mut reduced = 0;
+        for (without, with) in hand_only.iter().zip(with_visible.iter()) {
+            let (Some(without), Some(with)) = (without, with) else {
+                continue;
+            };
+            assert!(with.weighted_remaining <= without.weighted_remaining);
+            if with.weighted_remaining < without.weighted_remaining {
+                reduced += 1;
+            }
+        }
+        assert!(reduced > 0, "見え牌で待ちが減る候補が必要");
+    }
+
+    #[test]
+    fn dead_wait_tenpai_branches_contribute_zero() {
+        // 待ちがすべて見えているテンパイへ進む枝は寄与 0。計算していない None とは区別する。
+        //
+        // 123m456m789m 99s E S + ツモ W。E を切って S を引くと 3面子 + 99s + SS + W になり、
+        // 2手目は W を切って 9s / S のシャンポン待ちテンパイになる。9s と S を残り全部見え牌に
+        // しておくと、そのテンパイの和了牌は1枚も残らない。
+        let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 104, 105, 108, 112]);
+        let mut tiles = hand.clone();
+        tiles.push(ids(&[116])[0]);
+        let mut visible = tiles.clone();
+        visible.extend(ids(&[106, 107, 113, 114]));
+        let case = visible_case(
+            &tiles,
+            FixedMeldCount::NONE,
+            Vec::new(),
+            None,
+            None,
+            visible,
+        );
+        let metrics = metrics(&case.situation);
+
+        let mut dead = 0;
+        for (candidate, metric) in case.lookahead.candidates.iter().zip(metrics.iter()) {
+            let Some(metric) = metric else {
+                continue;
+            };
+            for draw in &candidate.draws {
+                let Some(next) = draw.next_discard.as_ref() else {
+                    continue;
+                };
+                if next.min_shanten_after_discard() == 0 && next.acceptance_total_remaining() == 0 {
+                    dead += 1;
+                }
+            }
+            assert_eq!(*metric, expected_metric(candidate));
+        }
+        assert!(dead > 0, "死にテンへ進む枝がある局面が必要");
+    }
+
+    #[test]
+    fn discarded_tiles_are_not_returned_to_the_wall() {
+        // 集計対象の局面でも、1手目・2手目に切った牌を山へ戻さない既存 seen 扱いを維持する。
+        // 残枚数の検証は既存の枝と同じ helper を使い、集計はその残枚数から組み立てる。
+        let _ = assert_lookahead_remaining(&IISHANTEN_WAIT_CASE, &[], false);
+        let _ = assert_lookahead_remaining(
+            &IISHANTEN_WAIT_WITH_VISIBLE,
+            &[(tile("3p"), 3), (tile("6p"), 3)],
+            true,
+        );
+    }
+
+    #[test]
+    fn fixed_melds_keep_the_effective_shanten_semantics_in_the_weighted_wait() {
+        // 副露済み手牌でも既存 EffectiveShanten のまま集計し、詳細診断と同じ値になる。
+        let hand = ids(&[0, 4, 8, 36, 40, 60, 64, 89]);
+        let case = hand_only_case(&hand, fixed(2), Vec::new(), None, None);
+
+        let metrics = metrics(&case.situation);
+        assert!(metrics.iter().any(Option::is_some), "1向聴候補が必要");
+        assert_eq!(
+            metrics,
+            tenpai_wait_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+        );
+
+        for (candidate, metric) in case.lookahead.candidates.iter().zip(metrics.iter()) {
+            if metric.is_none() {
+                continue;
+            }
+            for draw in &candidate.draws {
+                assert_eq!(draw.shanten_after_draw.concealed(), None);
+                let next = draw.next_discard.as_ref().expect("next discard exists");
+                assert_eq!(next.shanten_after_discard.concealed(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn red_five_handling_matches_the_detailed_lookahead() {
+        // 赤5を含む物理牌でも、選択用集計は詳細診断と同じ枝評価を共有する。
+        let mut hand = iishanten_wait_hand();
+        // 黒5s を赤5s へ置き換える。
+        let position = hand.iter().position(|tile| *tile == ids(&[89])[0]).unwrap();
+        hand[position] = ids(&[88])[0];
+        let case = hand_only_case(&hand, FixedMeldCount::NONE, Vec::new(), None, None);
+
+        assert!(hand.iter().any(|tile| tile.is_red()));
+        let metrics = metrics(&case.situation);
+        assert!(metrics.iter().any(Option::is_some));
+        assert_eq!(
+            metrics,
+            tenpai_wait_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+        );
+    }
+
+    #[test]
+    fn empty_visible_tiles_match_the_fixed_meld_weighted_wait() {
+        let case = &*IISHANTEN_WAIT_CASE;
+
+        assert_eq!(
+            tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
+                &case.situation.tiles,
+                FixedMeldCount::NONE,
+                &[],
+                None,
+                None,
+                &[],
+                &case.situation.evaluations,
+            ),
+            metrics(&case.situation),
+        );
+    }
+
+    #[test]
+    fn weighted_wait_from_a_mismatched_lookahead_is_absent() {
+        // 候補集合と対応しない診断を渡された場合は推測せず None にする。
+        let case = &*IISHANTEN_WAIT_CASE;
+
+        assert!(
+            tenpai_wait_metrics_from_lookahead(
+                &case.situation.evaluations,
+                &LookaheadDiagnostic::default(),
+            )
+            .iter()
+            .all(Option::is_none)
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod discard;
 pub mod hand;
 pub mod iishanten;
 pub mod lookahead;
+pub mod selection;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
@@ -16,7 +17,8 @@ pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
     DiscardDecisionDiagnostic, DiscardEvaluation, FloatingTileValue, HandShapeSummary, PairContext,
     ShapeBreakdown, compare_discard_evaluations, diagnose_discard_evaluations,
-    diagnose_discard_evaluations_with_fixed_melds, discard_block_context,
+    diagnose_discard_evaluations_with_fixed_melds,
+    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait, discard_block_context,
     discard_block_context_with_fixed_melds, evaluate_discards, evaluate_discards_from_tiles,
     evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_dora,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
@@ -39,6 +41,12 @@ pub use iishanten::{
 pub use lookahead::{
     DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, LookaheadDiagnostic,
     diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
+    tenpai_wait_metrics_from_lookahead, tenpai_wait_metrics_with_fixed_melds,
+    tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
+};
+pub use selection::{
+    DiscardSelectionCandidate, TenpaiWaitMetric, best_discard_selection_index,
+    compare_discard_selection_candidates,
 };
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
