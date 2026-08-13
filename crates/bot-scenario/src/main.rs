@@ -4,6 +4,7 @@ mod format;
 mod input;
 #[cfg(test)]
 mod open_hand_threat;
+mod replay;
 mod scenario;
 mod tiles;
 
@@ -14,6 +15,7 @@ use bot_core::{DiagnosticOptions, ShantenAgent};
 use crate::cli::{CliArgs, ScenarioSource, USAGE};
 use crate::error::ScenarioError;
 use crate::format::format_diagnostic;
+use crate::replay::load_captured_scenario;
 use crate::scenario::{Scenario, ScenarioSpec};
 
 fn main() -> ExitCode {
@@ -37,12 +39,15 @@ where
     I: IntoIterator<Item = String>,
 {
     let args = CliArgs::parse(args)?;
-    let spec = match &args.source {
-        ScenarioSource::Json(path) => read_spec(path)?,
-        ScenarioSource::Inline(spec) => spec.as_ref().clone(),
+    let (header, scenario) = match &args.source {
+        ScenarioSource::Json(path) => (None, Scenario::resolve(&read_spec(path)?)?),
+        ScenarioSource::Inline(spec) => (None, Scenario::resolve(spec)?),
+        ScenarioSource::RiichilabCapture { path, request_id } => {
+            let captured = load_captured_scenario(path, *request_id)?;
+            (Some(captured.header()), captured.scenario)
+        }
     };
 
-    let scenario = Scenario::resolve(&spec)?;
     let options = if args.lookahead {
         DiagnosticOptions::WITH_LOOKAHEAD
     } else {
@@ -51,7 +56,11 @@ where
     let diagnostic =
         ShantenAgent::diagnose_with_options(&scenario.context, &scenario.legal_actions, options);
 
-    Ok(format_diagnostic(&scenario, &diagnostic, args.verbose))
+    let output = format_diagnostic(&scenario, &diagnostic, args.verbose);
+    Ok(match header {
+        Some(header) => format!("{header}\n\n{output}"),
+        None => output,
+    })
 }
 
 fn read_spec(path: &str) -> Result<ScenarioSpec, ScenarioError> {
@@ -146,6 +155,50 @@ mod tests {
         assert!(output.contains("  discards[1]: 1m 4m 7p E"), "{output}");
         assert!(output.contains("\n\nPush/Pull\n"), "{output}");
         assert!(output.contains("\n\nDefense\n"), "{output}");
+    }
+
+    #[test]
+    fn runs_a_captured_riichilab_request() {
+        let observation = riichilab_client::observation::fixture_base64(
+            0,
+            Some(59),
+            vec![0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
+        );
+        let line = format!(
+            r#"{{"type":"request_action","request_id":425,"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
+        );
+        let path = std::env::temp_dir().join(format!(
+            "bot-scenario-main-capture-{}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let output = run_args(&["--riichilab-capture", path.to_str().unwrap()]).unwrap();
+        let selected = run_args(&[
+            "--riichilab-capture",
+            path.to_str().unwrap(),
+            "--request-id",
+            "425",
+        ])
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(output, selected);
+        assert!(output.starts_with("RiichiLab capture\n"), "{output}");
+        assert!(output.contains("  request_id: 425"), "{output}");
+        assert!(output.contains("\n\nScenario\n"), "{output}");
+        assert!(output.contains("\n\nPush/Pull\n"), "{output}");
+        assert!(output.contains("\n\nPlayer threats\n"), "{output}");
+        assert!(output.contains("\n\nSummary\n"), "{output}");
+    }
+
+    #[test]
+    fn reports_a_missing_capture_file() {
+        let error = run_args(&["--riichilab-capture", "missing-capture.jsonl"]).unwrap_err();
+        assert!(
+            matches!(&error, ScenarioError::ReadFile { path, .. } if path == "missing-capture.jsonl"),
+            "{error:?}"
+        );
     }
 
     #[test]

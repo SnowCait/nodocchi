@@ -188,7 +188,7 @@ pub struct DecodedObservation {
     pub melds: [Vec<Meld>; 4],
 }
 
-pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
+pub fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
     GameContext::from_parts_with_melds(
         decoded.drawn_tile,
         decoded.hand_tiles.clone(),
@@ -204,13 +204,13 @@ pub(crate) fn game_context_from_decoded_observation(decoded: &DecodedObservation
     )
 }
 
-#[cfg(test)]
-pub(crate) fn fixture_base64(player_id: u8, drawn_tile: Option<u8>, hand: Vec<u8>) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_base64(player_id: u8, drawn_tile: Option<u8>, hand: Vec<u8>) -> String {
     fixture_base64_with_dora(player_id, drawn_tile, hand, vec![])
 }
 
-#[cfg(test)]
-pub(crate) fn fixture_base64_with_dora(
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_base64_with_dora(
     player_id: u8,
     drawn_tile: Option<u8>,
     hand: Vec<u8>,
@@ -219,8 +219,8 @@ pub(crate) fn fixture_base64_with_dora(
     fixture_base64_with_winds(player_id, drawn_tile, hand, dora_indicators, 0, 0)
 }
 
-#[cfg(test)]
-pub(crate) fn fixture_base64_with_winds(
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_base64_with_winds(
     player_id: u8,
     drawn_tile: Option<u8>,
     hand: Vec<u8>,
@@ -255,8 +255,8 @@ pub(crate) fn fixture_base64_with_winds(
     observation.serialize_to_base64().unwrap()
 }
 
-#[cfg(test)]
-pub(crate) fn fixture_base64_with_discards(
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_base64_with_discards(
     player_id: u8,
     drawn_tile: Option<u8>,
     hand: Vec<u8>,
@@ -290,9 +290,9 @@ pub(crate) fn fixture_base64_with_discards(
     observation.serialize_to_base64().unwrap()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn fixture_base64_with_table_state(
+pub fn fixture_base64_with_table_state(
     player_id: u8,
     hand: Vec<u8>,
     discards: [Vec<u8>; 4],
@@ -327,9 +327,31 @@ pub(crate) fn fixture_base64_with_table_state(
     observation.serialize_to_base64().unwrap()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_meld(kind: MeldKind, tiles: Vec<u8>, called_tile: Option<u8>) -> ObservationMeld {
+    ObservationMeld::new(
+        observation_meld_type_from_meld_kind(kind),
+        tiles,
+        called_tile.is_some(),
+        -1,
+        called_tile,
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn observation_meld_type_from_meld_kind(kind: MeldKind) -> ObservationMeldType {
+    match kind {
+        MeldKind::Chi => ObservationMeldType::Chi,
+        MeldKind::Pon => ObservationMeldType::Pon,
+        MeldKind::Daiminkan => ObservationMeldType::Daiminkan,
+        MeldKind::Ankan => ObservationMeldType::Ankan,
+        MeldKind::Kakan => ObservationMeldType::Kakan,
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn fixture_base64_with_melds(
+pub fn fixture_base64_with_melds(
     player_id: u8,
     drawn_tile: Option<u8>,
     hand: Vec<u8>,

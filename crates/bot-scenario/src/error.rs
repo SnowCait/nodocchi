@@ -1,3 +1,4 @@
+use riichilab_client::CaptureRecordError;
 use thiserror::Error;
 
 use crate::cli::CliError;
@@ -14,6 +15,32 @@ pub enum ScenarioError {
 
     #[error("cannot parse scenario JSON {path:?}: {message}")]
     Json { path: String, message: String },
+
+    #[error("cannot parse capture file {path:?} line {line}: {source}")]
+    CaptureRecord {
+        path: String,
+        line: usize,
+        #[source]
+        source: CaptureRecordError,
+    },
+
+    #[error("capture file {path:?} has no request_action record")]
+    EmptyCapture { path: String },
+
+    #[error(
+        "capture file {path:?} has {count} request_action records; select one with --request-id"
+    )]
+    AmbiguousCapture { path: String, count: usize },
+
+    #[error("capture file {path:?} has no request_action with request_id {request_id}")]
+    CapturedRequestNotFound { path: String, request_id: u64 },
+
+    #[error("cannot decode the observation of request_id {request_id} in {path:?}: {message}")]
+    CaptureObservation {
+        path: String,
+        request_id: u64,
+        message: String,
+    },
 
     #[error("invalid tile string in {field} ({input:?}): {source}")]
     TileInput {

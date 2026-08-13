@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tracing::{debug, error, info, warn};
 
+use crate::capture::{RequestActionCapture, capture_server_event};
 use crate::config::ClientConfig;
 use crate::convert::{
     checked_legal_action_to_mjai_action, fallback_mjai_action_from_possible_actions,
@@ -251,6 +252,7 @@ pub async fn run_riichilab_client<A, P>(
     agent: &mut A,
     policy: P,
     exit_condition: ClientExitCondition,
+    mut capture: Option<RequestActionCapture>,
 ) -> Result<(), ClientError>
 where
     A: Agent,
@@ -286,6 +288,7 @@ where
                     }
                 };
                 let finish = should_finish_after_event(exit_condition, &event);
+                capture_server_event(capture.as_mut(), &event, text.as_str());
                 match event {
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
@@ -1382,6 +1385,134 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("6s".to_string(), 4), ("9s".to_string(), 4)]
         );
+    }
+
+    mod capture_replay {
+        use super::*;
+        use crate::capture::{self, CapturedRequestAction};
+        use bot_core::ShantenAgent;
+
+        const CAPTURED_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
+
+        const CAPTURED_DRAWN_TILE: u8 = 59;
+
+        const CAPTURED_DAHAI: [&str; 12] = [
+            "1m", "2m", "3m", "4m", "5m", "6m", "5p", "6p", "7s", "8s", "N", "P",
+        ];
+
+        fn captured_observation() -> String {
+            fixture_base64(0, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec())
+        }
+
+        fn request_action_text(request_id: u64, observation: &str) -> String {
+            let possible_actions = CAPTURED_DAHAI
+                .iter()
+                .map(|pai| format!(r#"{{"type":"dahai","pai":"{pai}","tsumogiri":false}}"#))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{possible_actions}],"observation":"{observation}"}}"#
+            )
+        }
+
+        fn temp_capture_path(name: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "riichilab-client-client-capture-{name}-{}.jsonl",
+                std::process::id()
+            ))
+        }
+
+        fn response_for(text: &str) -> Option<MjaiAction> {
+            let MjaiEvent::RequestAction {
+                request_id,
+                possible_actions,
+                observation,
+                ..
+            } = parse_server_event(text).unwrap().unwrap()
+            else {
+                panic!("expected a request_action");
+            };
+            build_response_for_request(
+                0,
+                request_id,
+                &possible_actions,
+                &ObservationPayload::new(observation),
+                &mut ShantenAgent,
+            )
+        }
+
+        #[test]
+        fn capture_does_not_change_the_sent_action() {
+            let path = temp_capture_path("same-action");
+            let _ = std::fs::remove_file(&path);
+            let text = request_action_text(300, &captured_observation());
+            let event = parse_server_event(&text).unwrap().unwrap();
+
+            let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
+            capture_server_event(Some(&mut capture), &event, &text);
+            let with_capture = response_for(&text);
+            drop(capture);
+            drop(guard);
+
+            capture_server_event(None, &event, &text);
+            let without_capture = response_for(&text);
+
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+
+            assert!(with_capture.is_some());
+            assert_eq!(with_capture, without_capture);
+            assert_eq!(contents.lines().count(), 1);
+        }
+
+        #[test]
+        fn captured_record_reproduces_the_client_context_and_legal_actions() {
+            let observation = captured_observation();
+            let text = request_action_text(301, &observation);
+            let record = CapturedRequestAction::from_json_line(&text).unwrap();
+
+            let MjaiEvent::RequestAction {
+                possible_actions, ..
+            } = parse_server_event(&text).unwrap().unwrap()
+            else {
+                panic!("expected a request_action");
+            };
+
+            let payload = ObservationPayload::new(observation);
+            let decoded = payload.decode_4p().unwrap();
+            assert_eq!(
+                record.game_context().unwrap(),
+                game_context_from_decoded_observation(&decoded)
+            );
+            assert_eq!(
+                record.legal_actions(),
+                possible_actions_to_legal_actions(&possible_actions)
+            );
+        }
+
+        #[test]
+        fn act_diagnose_and_the_sent_action_agree_for_a_captured_record() {
+            let text = request_action_text(302, &captured_observation());
+            let record = CapturedRequestAction::from_json_line(&text).unwrap();
+            let context = record.game_context().unwrap();
+            let legal_actions = record.legal_actions();
+
+            let acted = ShantenAgent.act(&context, &legal_actions);
+            let diagnosed = ShantenAgent::diagnose(&context, &legal_actions);
+            assert_eq!(diagnosed.selected_action, acted);
+
+            let response = response_for(&text).unwrap();
+            assert_eq!(
+                Some(response),
+                checked_legal_action_to_mjai_action(
+                    &diagnosed.selected_action,
+                    0,
+                    record.request_id,
+                    &record.possible_actions,
+                    &context,
+                )
+            );
+        }
     }
 
     #[test]
