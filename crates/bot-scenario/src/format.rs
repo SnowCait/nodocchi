@@ -5,14 +5,16 @@ use bot_core::{
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
-    DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, EffectiveShanten,
-    FixedMeldCount, LookaheadDiagnostic, Shanten, TenpaiWaitMetric, TileId, TileType,
+    DiscardEvaluation, DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic,
+    DrawLookaheadDiagnostic, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
+    PermanentFuriten, Shanten, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
 };
 
 use crate::scenario::Scenario;
 
 const NONE: &str = "none";
 const ABSENT: &str = "-";
+const UNKNOWN: &str = "unknown";
 
 pub fn format_diagnostic(
     scenario: &Scenario,
@@ -26,9 +28,11 @@ pub fn format_diagnostic(
         format_normal_discard(diagnostic),
     ];
 
-    if let Some(section) =
-        format_normal_discard_candidates(diagnostic.normal_discard.as_ref(), verbose)
-    {
+    if let Some(section) = format_normal_discard_candidates(
+        diagnostic.normal_discard.as_ref(),
+        diagnostic.normal_discard_furiten.as_deref(),
+        verbose,
+    ) {
         sections.push(section);
     }
 
@@ -240,6 +244,7 @@ fn format_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
 
 fn format_normal_discard_candidates(
     normal_discard: Option<&DiscardDecisionDiagnostic>,
+    furiten: Option<&[DiscardFuritenDiagnostic]>,
     verbose: bool,
 ) -> Option<String> {
     let normal_discard = normal_discard?;
@@ -249,13 +254,29 @@ fn format_normal_discard_candidates(
 
     let mut blocks = vec!["Normal discard candidates".to_string()];
     for candidate in &normal_discard.candidates {
-        blocks.push(format_normal_discard_candidate(candidate, verbose));
+        blocks.push(format_normal_discard_candidate(
+            candidate,
+            furiten_for_candidate(furiten, candidate),
+            verbose,
+        ));
     }
     Some(blocks.join("\n\n"))
 }
 
+// 打牌候補に対応する恒常フリテン診断。診断専用に判定し直さず、production と同じ pure helper が
+// 返した結果をそのまま引く。
+fn furiten_for_candidate<'a>(
+    furiten: Option<&'a [DiscardFuritenDiagnostic]>,
+    candidate: &DiscardCandidateDiagnostic,
+) -> Option<&'a DiscardFuritenDiagnostic> {
+    furiten?
+        .iter()
+        .find(|diagnostic| diagnostic.discard == candidate.evaluation.discard)
+}
+
 fn format_normal_discard_candidate(
     candidate: &DiscardCandidateDiagnostic,
+    furiten: Option<&DiscardFuritenDiagnostic>,
     verbose: bool,
 ) -> String {
     let evaluation = &candidate.evaluation;
@@ -275,6 +296,7 @@ fn format_normal_discard_candidate(
         "  weighted tenpai wait: {}",
         format_tenpai_wait(candidate.tenpai_wait)
     ));
+    lines.extend(format_permanent_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
         evaluation.standard_iishanten_shape_after_discard
@@ -356,6 +378,42 @@ fn format_tenpai_wait(tenpai_wait: Option<TenpaiWaitMetric>) -> String {
             metric.weighted_remaining, metric.weighted_type_count
         ),
         None => ABSENT.to_string(),
+    }
+}
+
+// その打牌でテンパイになる場合の恒常フリテン診断。テンパイにならない打牌候補では何も出さない。
+//
+// 表示専用にフリテンを判定し直さず、production の打牌選択が使ったものと同じ pure helper
+// ([`bot_logic::diagnose_discard_furiten`]) の結果をそのまま出す。
+fn format_permanent_furiten(furiten: Option<&DiscardFuritenDiagnostic>) -> Vec<String> {
+    let Some(tenpai) = furiten.and_then(|furiten| furiten.tenpai.as_ref()) else {
+        return Vec::new();
+    };
+
+    vec![
+        format!(
+            "  permanent furiten: {}",
+            permanent_furiten_label(tenpai.permanent_furiten())
+        ),
+        format!("  ron: {}", format_optional_yes_no(tenpai.can_ron())),
+        format!("  tenpai waits: {}", format_tile_types(&tenpai.waits)),
+        format!("  discarded waits: {}", format_discarded_waits(tenpai)),
+    ]
+}
+
+fn permanent_furiten_label(status: PermanentFuriten) -> &'static str {
+    match status {
+        PermanentFuriten::Yes => "yes",
+        PermanentFuriten::No => "no",
+        PermanentFuriten::Unknown => UNKNOWN,
+    }
+}
+
+// 自分の河が特定できない場合は「重複なし」と読めてしまう none ではなく ABSENT を出す。
+fn format_discarded_waits(tenpai: &TenpaiWaitAvailability) -> String {
+    match tenpai.permanent_furiten() {
+        PermanentFuriten::Unknown => ABSENT.to_string(),
+        _ => format_tile_types(tenpai.discarded_waits()),
     }
 }
 
@@ -847,6 +905,11 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+// 判断できない場合を「no」と読ませないための三値表示。
+fn format_optional_yes_no(value: Option<bool>) -> &'static str {
+    value.map_or(UNKNOWN, yes_no)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,6 +1289,107 @@ mod tests {
         assert_eq!(diagnostic.selected_action, acted);
         assert_eq!(with_lookahead.selected_action, acted);
         assert_eq!(with_lookahead.normal_discard, diagnostic.normal_discard);
+    }
+
+    const PERMANENT_FURITEN_SCENARIO: &str = include_str!("../scenarios/permanent_furiten.json");
+
+    // 同じ手牌・同じ待ちで、自分の河だけを変えた対照 scenario。
+    const OPPONENT_RIVER_FURITEN_SCENARIO: &str = r#"{
+        "hand": "123456789m123p5s",
+        "draw": "9s",
+        "player_id": 0,
+        "oya": 0,
+        "discards": ["E", "5s", "", ""],
+        "legal_dahai": "9s 1m"
+    }"#;
+
+    // player_id が無く自分の河を特定できない scenario。
+    const UNKNOWN_PLAYER_FURITEN_SCENARIO: &str = r#"{
+        "hand": "123456789m123p5s",
+        "draw": "9s",
+        "discards": ["5s E", "", "", ""],
+        "legal_dahai": "9s 1m"
+    }"#;
+
+    #[test]
+    fn permanent_furiten_scenario_reports_the_furiten_tenpai() {
+        let (_, diagnostic, output) = rendered(PERMANENT_FURITEN_SCENARIO, false);
+        let block = candidate_block(&output, "Normal discard candidates", "9s");
+
+        assert!(block.contains("  permanent furiten: yes"), "{block}");
+        assert!(block.contains("  ron: no"), "{block}");
+        assert!(block.contains("  tenpai waits: 5s"), "{block}");
+        assert!(block.contains("  discarded waits: 5s"), "{block}");
+        // ツモ側の残枚数・種類数は既存受け入れのままで、フリテンでも 0 に書き換えない。
+        assert!(block.contains("  acceptance: 2 / 1 types"), "{block}");
+
+        // 表示は production と同じ pure helper の結果そのもので、表示専用の判定を持たない。
+        let furiten = diagnostic
+            .normal_discard_furiten
+            .as_ref()
+            .expect("恒常フリテン診断がある")
+            .iter()
+            .find(|furiten| furiten.discard.to_mjai_string() == "9s")
+            .expect("打 9s の候補がある");
+        let tenpai = furiten.tenpai.as_ref().expect("テンパイになる");
+        assert_eq!(furiten.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(tenpai.can_ron(), Some(false));
+        assert_eq!(tenpai.tsumo_remaining, 2);
+        assert_eq!(tenpai.tsumo_type_count, 1);
+    }
+
+    #[test]
+    fn candidates_that_do_not_reach_tenpai_show_no_furiten_lines() {
+        let (_, _, output) = rendered(PERMANENT_FURITEN_SCENARIO, false);
+        let block = candidate_block(&output, "Normal discard candidates", "1m");
+
+        assert!(block.contains("  shanten: 1"), "{block}");
+        assert!(!block.contains("permanent furiten"), "{block}");
+    }
+
+    #[test]
+    fn a_wait_in_the_opponent_river_is_not_reported_as_furiten() {
+        let (_, _, output) = rendered(OPPONENT_RIVER_FURITEN_SCENARIO, false);
+        let block = candidate_block(&output, "Normal discard candidates", "9s");
+
+        assert!(block.contains("  permanent furiten: no"), "{block}");
+        assert!(block.contains("  ron: yes"), "{block}");
+        assert!(block.contains("  discarded waits: none"), "{block}");
+    }
+
+    #[test]
+    fn an_unknown_player_id_is_not_reported_as_non_furiten() {
+        let (scenario, _, output) = rendered(UNKNOWN_PLAYER_FURITEN_SCENARIO, false);
+        assert_eq!(scenario.context.player_id(), None);
+
+        let block = candidate_block(&output, "Normal discard candidates", "9s");
+        assert!(block.contains("  permanent furiten: unknown"), "{block}");
+        assert!(block.contains("  ron: unknown"), "{block}");
+        assert!(block.contains("  discarded waits: -"), "{block}");
+        assert!(!block.contains("  permanent furiten: no"), "{block}");
+    }
+
+    #[test]
+    fn permanent_furiten_scenario_selects_the_same_action_everywhere() {
+        // フリテン診断は事実の表現だけで、act() / diagnose() / --lookahead の選択を変えない。
+        let scenario = scenario_from_json(PERMANENT_FURITEN_SCENARIO);
+        let mut agent = ShantenAgent;
+
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        let diagnostic = diagnose(&scenario);
+        let with_lookahead = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+
+        assert_eq!(action_label(&acted), "9s");
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(
+            with_lookahead.normal_discard_furiten,
+            diagnostic.normal_discard_furiten
+        );
     }
 
     const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");

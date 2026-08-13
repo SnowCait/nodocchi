@@ -14,8 +14,9 @@ use crate::push_pull::{
     push_pull_inputs_from_context_with_evaluation,
 };
 use bot_logic::{
-    DiscardDecisionDiagnostic, DiscardEvaluation, FixedMeldCount, LookaheadDiagnostic, TileCounts,
-    TileId, TileType, calculate_acceptance_with_visible_tiles, calculate_shanten_with_fixed_melds,
+    DiscardDecisionDiagnostic, DiscardEvaluation, DiscardFuritenDiagnostic, FixedMeldCount,
+    LookaheadDiagnostic, TileCounts, TileId, TileType, calculate_acceptance_with_visible_tiles,
+    calculate_shanten_with_fixed_melds,
 };
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
@@ -195,6 +196,15 @@ pub struct ShantenDecisionDiagnostic {
     /// 通常打牌評価を行った場合の全合法候補診断。合法 Dahai が無い場合は
     /// `selected == None` かつ `candidates` が空の診断になる。
     pub normal_discard: Option<DiscardDecisionDiagnostic>,
+    /// 通常打牌評価を行った場合の全合法候補の恒常フリテン診断。`normal_discard` と同じ候補集合・
+    /// 同じ順序で、候補ごとに「その打牌でテンパイになる場合の待ち・ツモ和了の残枚数と種類数・
+    /// ロン可否・自分の河と重複した待ち牌」を持つ。
+    ///
+    /// 判定に使う自分の河は「context の自分の河 + その打牌」で、他家の河や見え牌は使わない。
+    /// `player_id` が無く自分の河を特定できない場合は非フリテンと断定せず
+    /// [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten::Unknown) になる。
+    /// 打牌選択・押し引き・リーチ判断のどれにも使わない解析専用の情報。
+    pub normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
     /// 通常打牌評価を行った場合の全合法候補の詳細な2手先診断。`normal_discard` と同じ候補集合・
     /// 同じ順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
     ///
@@ -273,6 +283,7 @@ struct DecisionDiagnostics {
     enabled: bool,
     options: DiagnosticOptions,
     normal_discard: Option<DiscardDecisionDiagnostic>,
+    normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
     normal_discard_lookahead: Option<LookaheadDiagnostic>,
     defense: Option<DefenseDecisionDiagnostic>,
 }
@@ -349,6 +360,7 @@ impl ShantenAgent {
             selected_source: decision.source,
             normal_discard_action: decision.normal_discard,
             normal_discard: diagnostics.normal_discard,
+            normal_discard_furiten: diagnostics.normal_discard_furiten,
             normal_discard_lookahead: diagnostics.normal_discard_lookahead,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
@@ -492,6 +504,7 @@ impl ShantenAgent {
             diagnostics.options.lookahead,
         );
         diagnostics.normal_discard = Some(selection.diagnostic);
+        diagnostics.normal_discard_furiten = Some(selection.furiten);
         diagnostics.normal_discard_lookahead = selection.lookahead;
         selection.selection
     }
@@ -833,7 +846,9 @@ pub(crate) mod tests {
     use crate::defense::{HonorSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{PushPullReason, push_pull_inputs_from_context};
-    use bot_logic::{DiscardComparisonReason, TileId, TileType, compare_discard_evaluations};
+    use bot_logic::{
+        DiscardComparisonReason, PermanentFuriten, TileId, TileType, compare_discard_evaluations,
+    };
 
     pub(crate) fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -3454,6 +3469,189 @@ pub(crate) mod tests {
         assert_eq!(pon.candidates[0].reason, PonDecisionReason::InvalidConsumed);
         assert!(!pon.candidates[0].selected);
         assert!(pon.candidates[1].selected);
+    }
+
+    // ---- 恒常フリテン診断 ----
+
+    // 123m456m789m 123p 5s + ツモ 9s。打 9s で 5s 単騎テンパイ、打 1m では1向聴に落ちる。
+    fn furiten_hand() -> Vec<TileId> {
+        [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
+            .iter()
+            .map(|&value| tile(value))
+            .collect()
+    }
+
+    const FURITEN_DRAWN: u8 = 104;
+    const FURITEN_WAIT: u8 = 90;
+
+    fn furiten_actions() -> Vec<LegalAction> {
+        vec![dahai(FURITEN_DRAWN), dahai(0)]
+    }
+
+    fn furiten_context(player_id: Option<u8>, discards: [Vec<TileId>; 4]) -> GameContext {
+        let hand = furiten_hand();
+        let drawn = tile(FURITEN_DRAWN);
+        let mut visible = hand.clone();
+        visible.push(drawn);
+        for river in &discards {
+            visible.extend(river.iter().copied());
+        }
+
+        GameContext::from_parts_with_table_state(
+            Some(drawn),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+            player_id,
+            Some(0),
+            discards,
+            [false; 4],
+        )
+    }
+
+    fn furiten_of(
+        diagnostic: &ShantenDecisionDiagnostic,
+        discard: TileType,
+    ) -> DiscardFuritenDiagnostic {
+        diagnostic
+            .normal_discard_furiten
+            .as_ref()
+            .expect("恒常フリテン診断がある")
+            .iter()
+            .find(|furiten| furiten.discard == discard)
+            .expect("打牌候補がある")
+            .clone()
+    }
+
+    #[test]
+    fn own_river_makes_the_reached_tenpai_permanently_furiten() {
+        let ctx = furiten_context(
+            Some(0),
+            [vec![tile(FURITEN_WAIT), tile(108)], vec![], vec![], vec![]],
+        );
+        let diagnostic = diagnose_matching_act(&ctx, &furiten_actions());
+
+        let furiten = furiten_of(&diagnostic, tile(FURITEN_DRAWN).tile_type());
+        let tenpai = furiten.tenpai.as_ref().expect("テンパイになる");
+        assert_eq!(tenpai.waits, vec![tile(FURITEN_WAIT).tile_type()]);
+        assert_eq!(furiten.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(furiten.discarded_waits(), [tile(FURITEN_WAIT).tile_type()]);
+        assert_eq!(tenpai.can_ron(), Some(false));
+        // フリテンでもツモ側は既存受け入れのまま。
+        assert!(tenpai.tsumo_remaining > 0);
+    }
+
+    #[test]
+    fn only_the_own_river_makes_the_tenpai_furiten() {
+        // 同じ待ち牌が他家の河にあるだけではフリテンにならない。
+        let ctx = furiten_context(Some(0), [vec![], vec![tile(FURITEN_WAIT)], vec![], vec![]]);
+        let diagnostic = diagnose_matching_act(&ctx, &furiten_actions());
+
+        let furiten = furiten_of(&diagnostic, tile(FURITEN_DRAWN).tile_type());
+        assert_eq!(furiten.permanent_furiten(), Some(PermanentFuriten::No));
+        assert!(furiten.discarded_waits().is_empty());
+        assert_eq!(
+            furiten.tenpai.as_ref().expect("テンパイになる").can_ron(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_unknown_player_id_leaves_the_furiten_diagnostic_unknown() {
+        // player_id が無い場合、player 0 の河を自分の河と推測しない。
+        let ctx = furiten_context(None, [vec![tile(FURITEN_WAIT)], vec![], vec![], vec![]]);
+        let diagnostic = diagnose_matching_act(&ctx, &furiten_actions());
+
+        assert_eq!(ctx.own_discards(), None);
+        let furiten = furiten_of(&diagnostic, tile(FURITEN_DRAWN).tile_type());
+        assert_eq!(furiten.permanent_furiten(), Some(PermanentFuriten::Unknown));
+        assert_eq!(
+            furiten.tenpai.as_ref().expect("テンパイになる").can_ron(),
+            None
+        );
+    }
+
+    #[test]
+    fn candidates_that_do_not_reach_tenpai_have_no_furiten_diagnostic() {
+        let ctx = furiten_context(Some(0), [vec![tile(FURITEN_WAIT)], vec![], vec![], vec![]]);
+        let diagnostic = diagnose_matching_act(&ctx, &furiten_actions());
+
+        let furiten = furiten_of(&diagnostic, tile(0).tile_type());
+        assert!(furiten.tenpai.is_none());
+        assert_eq!(furiten.permanent_furiten(), None);
+        assert!(furiten.discarded_waits().is_empty());
+    }
+
+    #[test]
+    fn furiten_diagnostic_covers_every_normal_discard_candidate() {
+        let ctx = furiten_context(Some(0), [vec![tile(FURITEN_WAIT)], vec![], vec![], vec![]]);
+        let diagnostic = diagnose_matching_act(&ctx, &furiten_actions());
+
+        let normal_discard = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated");
+        let furiten = diagnostic
+            .normal_discard_furiten
+            .as_ref()
+            .expect("恒常フリテン診断がある");
+
+        assert_eq!(furiten.len(), normal_discard.candidates.len());
+        for (furiten, candidate) in furiten.iter().zip(normal_discard.candidates.iter()) {
+            assert_eq!(furiten.discard, candidate.evaluation.discard);
+            let Some(tenpai) = furiten.tenpai.as_ref() else {
+                continue;
+            };
+            // 待ちと残枚数は既存の受け入れそのままで、フリテンでも書き換えない。
+            assert_eq!(
+                tenpai.tsumo_remaining,
+                candidate.evaluation.acceptance_total_remaining()
+            );
+            assert_eq!(
+                tenpai.tsumo_type_count,
+                candidate.evaluation.acceptance_type_count()
+            );
+        }
+    }
+
+    #[test]
+    fn the_furiten_diagnostic_does_not_change_the_selected_action() {
+        for player_id in [Some(0), None] {
+            let ctx = furiten_context(
+                player_id,
+                [vec![tile(FURITEN_WAIT)], vec![], vec![], vec![]],
+            );
+            let actions = furiten_actions();
+
+            let mut agent = ShantenAgent;
+            let acted = agent.act(&ctx, &actions);
+            let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+            let with_lookahead = ShantenAgent::diagnose_with_options(
+                &ctx,
+                &actions,
+                DiagnosticOptions::WITH_LOOKAHEAD,
+            );
+
+            assert_eq!(acted, dahai(FURITEN_DRAWN));
+            assert_eq!(diagnostic.selected_action, acted);
+            assert_eq!(with_lookahead.selected_action, acted);
+            assert_eq!(
+                with_lookahead.normal_discard_furiten,
+                diagnostic.normal_discard_furiten
+            );
+        }
+    }
+
+    #[test]
+    fn act_path_does_not_build_the_furiten_diagnostic() {
+        let ctx = furiten_context(Some(0), [vec![tile(FURITEN_WAIT)], vec![], vec![], vec![]]);
+
+        let mut diagnostics = DecisionDiagnostics::disabled();
+        let _ = ShantenAgent.decide_with_diagnostics(&ctx, &furiten_actions(), &mut diagnostics);
+
+        assert!(diagnostics.normal_discard_furiten.is_none());
     }
 
     #[test]

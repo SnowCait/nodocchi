@@ -201,6 +201,14 @@ impl GameContext {
         self.discards.get(player).map(Vec::as_slice)
     }
 
+    /// 自分の河。`player_id` が無い場合は player 0 などを推測せず `None`。
+    ///
+    /// 恒常フリテン判定のように「自分が捨てた牌」が要る経路で使う。`None` は「河が空」ではなく
+    /// 「自分の河を特定できない」を表す。
+    pub fn own_discards(&self) -> Option<&[TileId]> {
+        self.discards_of(usize::from(self.player_id?))
+    }
+
     pub fn melds(&self) -> &[Vec<Meld>; 4] {
         &self.melds
     }
@@ -755,6 +763,31 @@ mod tests {
         let context = GameContext::default();
         assert_eq!(context.discards_of(4), None);
         assert_eq!(context.discards_of(usize::MAX), None);
+    }
+
+    #[test]
+    fn own_discards_follow_player_id() {
+        let discards = [vec![tile(0)], vec![tile(16), tile(20)], vec![], vec![]];
+        let context = table_state_context(Some(1), None, discards, [false; 4]);
+        assert_eq!(
+            context.own_discards(),
+            Some([tile(16), tile(20)].as_slice())
+        );
+    }
+
+    #[test]
+    fn own_discards_are_empty_when_the_known_player_has_not_discarded() {
+        let discards = [vec![tile(0)], vec![], vec![], vec![]];
+        let context = table_state_context(Some(2), None, discards, [false; 4]);
+        assert_eq!(context.own_discards(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn own_discards_are_none_when_player_id_is_unknown() {
+        // player 0 の河を自分の河と推測しない。
+        let discards = [vec![tile(0)], vec![], vec![], vec![]];
+        let context = table_state_context(None, None, discards, [false; 4]);
+        assert_eq!(context.own_discards(), None);
     }
 
     #[test]

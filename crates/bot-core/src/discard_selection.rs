@@ -2,10 +2,11 @@ use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
-    EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
-    TenpaiWaitMetric, TileCounts, TileId, TileType, best_discard_selection_index,
-    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait,
-    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
+    DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
+    LookaheadDiagnostic, OwnDiscards, TenpaiWaitMetric, TileCounts, TileId, TileType,
+    best_discard_selection_index, diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait,
+    diagnose_discard_furiten, diagnose_lookahead_with_fixed_melds,
+    diagnose_lookahead_with_fixed_melds_and_visible_tiles,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
     tenpai_wait_metrics_from_lookahead, tenpai_wait_metrics_with_fixed_melds,
@@ -34,6 +35,10 @@ pub(crate) struct DiscardActionSelection {
 pub(crate) struct DiscardActionSelectionWithDiagnostic {
     pub selection: DiscardActionSelection,
     pub diagnostic: DiscardDecisionDiagnostic,
+    /// 全合法候補の恒常フリテン診断。`diagnostic` と同じ候補集合・同じ順序。
+    ///
+    /// 打牌選択には一切使わない解析専用の情報で、選択結果を変えない。
+    pub furiten: Vec<DiscardFuritenDiagnostic>,
     /// 全合法候補の詳細な2手先診断。要求された場合だけ構築する。
     ///
     /// 構築した場合は、選択に使う1向聴の weighted tenpai wait もこの枝評価から集計して同じ枝を
@@ -128,6 +133,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(&legal, &tenpai_wait, legal_actions),
         diagnostic,
+        furiten: furiten_from_legal_evaluations(context, &legal),
         lookahead,
     }
 }
@@ -218,6 +224,22 @@ fn diagnose_legal_evaluations(
         evaluation_fixed_meld_count(context),
         &legal.evaluations,
         tenpai_wait,
+    )
+}
+
+// 絞り込み済みの合法候補集合から恒常フリテン診断を構築する。
+//
+// 待ちは既存の打牌評価が持つ受け入れをそのまま使い、判定に使う自分の河は
+// 「context の自分の河 + その打牌」を bot-logic の pure helper 側で組み立てる。player_id が無く
+// 自分の河を特定できない場合は player 0 などを推測せず Unknown として扱う。診断専用の情報で、
+// 打牌選択には使わない。
+fn furiten_from_legal_evaluations(
+    context: &GameContext,
+    legal: &LegalDiscardEvaluations,
+) -> Vec<DiscardFuritenDiagnostic> {
+    diagnose_discard_furiten(
+        &legal.evaluations,
+        &OwnDiscards::from_optional_river(context.own_discards()),
     )
 }
 

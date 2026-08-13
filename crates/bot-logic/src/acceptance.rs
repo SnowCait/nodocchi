@@ -1,5 +1,5 @@
 use crate::shanten::{
-    EffectiveShanten, FixedMeldCount, Shanten, calculate_shanten,
+    EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,
     calculate_shanten_with_fixed_melds,
 };
 use crate::tile::{TileId, TileType};
@@ -25,6 +25,12 @@ impl<S> Acceptance<S> {
 
     pub fn total_remaining(&self) -> u8 {
         self.tiles.iter().map(|tile| tile.remaining).sum()
+    }
+}
+
+impl<S: MinShanten> Acceptance<S> {
+    pub fn current_min_shanten(&self) -> i8 {
+        self.current.min_shanten()
     }
 }
 
