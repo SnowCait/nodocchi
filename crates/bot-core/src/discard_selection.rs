@@ -81,7 +81,7 @@ pub(crate) fn select_discard_action_with_evaluation(
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
-    let tenpai_wait = tenpai_wait_metrics(context, &legal);
+    let tenpai_wait = tenpai_wait_metrics(context, &legal.tiles, &legal.evaluations);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(
@@ -116,7 +116,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
     let lookahead = with_lookahead.then(|| lookahead_from_legal_evaluations(context, &legal));
     let tenpai_wait = match lookahead.as_ref() {
         Some(lookahead) => tenpai_wait_metrics_from_lookahead(&legal.evaluations, lookahead),
-        None => tenpai_wait_metrics(context, &legal),
+        None => tenpai_wait_metrics(context, &legal.tiles, &legal.evaluations),
     };
 
     let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
@@ -168,37 +168,38 @@ fn selection_from_legal_evaluations(
     DiscardActionSelection { evaluation, action }
 }
 
-// 合法候補のうち1向聴を維持するものについて、打牌選択用の前方集計値を求める。
+// 打牌候補のうち1向聴を維持するものについて、打牌選択用の前方集計値を求める。
 //
 // 対象の絞り込み (最善向聴数が1向聴 かつ 1向聴を維持する候補が複数) は bot-logic 側の入口が
 // 行うため、テンパイ・2向聴以上では前方探索が走らない。現在打牌後の受け入れは既存評価
-// (legal.evaluations) が持つ値をそのまま入力にするため、現在の1手評価を再計算しない。
+// (evaluations) が持つ値をそのまま入力にするため、現在の1手評価を再計算しない。
 // 物理牌・副露済み面子数・visible tiles・ドラ表示牌・場風・自風は本番評価と同じ値を渡す。
 // GameContext 自体は渡さず、bot-logic が必要とする値だけを取り出して渡す。
 fn tenpai_wait_metrics(
     context: &GameContext,
-    legal: &LegalDiscardEvaluations,
+    tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
 ) -> TenpaiWaitMetrics {
     let fixed_meld_count = evaluation_fixed_meld_count(context);
 
     if context.visible_tiles().is_empty() {
         tenpai_wait_metrics_with_fixed_melds(
-            &legal.tiles,
+            tiles,
             fixed_meld_count,
             context.dora_indicators(),
             context.round_wind(),
             context.seat_wind(),
-            &legal.evaluations,
+            evaluations,
         )
     } else {
         tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
-            &legal.tiles,
+            tiles,
             fixed_meld_count,
             context.dora_indicators(),
             context.round_wind(),
             context.seat_wind(),
             context.visible_tiles(),
-            &legal.evaluations,
+            evaluations,
         )
     }
 }
@@ -361,37 +362,48 @@ fn evaluation_for_legal_dahai(
 
 // 1手評価だけの既存比較順で最善評価を選ぶ。完全同値では先に現れた候補を維持する。
 //
-// 前方集計値を渡さないため、1向聴限定の weighted tenpai wait は適用しない。通常打牌選択は
-// selection_from_legal_evaluations() を通り、こちらは合法 action を持たない汎用経路
-// (押し引きの単独入口・限定 Pon シミュレーション) 専用。
-fn select_best_evaluation(evaluations: &[DiscardEvaluation]) -> Option<&DiscardEvaluation> {
+// 前方集計値を渡さないため、1向聴限定の weighted tenpai wait は適用しない。通常打牌選択が使う
+// 比較は selection_from_legal_evaluations() /
+// select_best_normal_discard_evaluation() 側にあり、こちらは意図的に1手比較だけを行う。
+fn select_best_one_step_evaluation(
+    evaluations: &[DiscardEvaluation],
+) -> Option<&DiscardEvaluation> {
     best_discard_selection_index(evaluations, &[]).map(|index| &evaluations[index])
 }
 
-// 合法 action を受け取らない汎用の best 評価。push_pull など合法 action が無い経路で使用する。
-pub(crate) fn select_best_discard_evaluation(
+/// 合法 Dahai を受け取らない経路のための、通常打牌としての best 評価。
+///
+/// 比較 semantics は合法 Dahai 付きの通常打牌選択 (`select_discard_action_with_evaluation`) と
+/// 同じで、1向聴限定の weighted tenpai wait を含む。違いは対象候補だけで、こちらは合法 Dahai
+/// による絞り込みと物理牌補正を行わず、手牌から切れる全打牌候補を対象にする。
+///
+/// 押し引き入力の単独構築 (`push_pull_inputs_from_context`) のように、`GameContext` だけから
+/// 「通常打牌なら何を切るか」を求める経路で使う。鳴き後シミュレーションのような1手評価には
+/// [`select_best_one_step_discard_evaluation_with_fixed_meld_count`] を使い、こちらは使わない。
+pub(crate) fn select_best_normal_discard_evaluation(
     context: &GameContext,
     tiles: &[TileId],
 ) -> Option<DiscardEvaluation> {
-    select_best_discard_evaluation_with_fixed_meld_count(
-        context,
-        tiles,
-        evaluation_fixed_meld_count(context),
-    )
+    let evaluations = evaluate_discard_candidates(context, tiles);
+    let tenpai_wait = tenpai_wait_metrics(context, tiles, &evaluations);
+
+    best_discard_selection_index(&evaluations, &tenpai_wait).map(|index| evaluations[index].clone())
 }
 
-/// 副露済み面子数を明示した best 評価。候補評価・比較は通常経路と同じ helper を共有する。
+/// 副露済み面子数を明示した1手評価だけの best 評価。
 ///
-/// `fixed_meld_count == evaluation_fixed_meld_count(context)` では
-/// [`select_best_discard_evaluation`] と一致する。
-pub(crate) fn select_best_discard_evaluation_with_fixed_meld_count(
+/// 候補評価そのものは通常経路と同じ helper を共有するが、比較は既存の
+/// [`bot_logic::compare_discard_evaluations`] 相当の1手比較だけで、1向聴限定の weighted tenpai
+/// wait は**意図的に使わない**。限定 Pon の「Pon 後に生きた待ちのテンパイになるか」という
+/// シミュレーション用の入口であり、通常打牌 selection の semantics とは切り離す。
+pub(crate) fn select_best_one_step_discard_evaluation_with_fixed_meld_count(
     context: &GameContext,
     tiles: &[TileId],
     fixed_meld_count: FixedMeldCount,
 ) -> Option<DiscardEvaluation> {
     let evaluations =
         evaluate_discard_candidates_with_fixed_meld_count(context, tiles, fixed_meld_count);
-    select_best_evaluation(&evaluations).cloned()
+    select_best_one_step_evaluation(&evaluations).cloned()
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
@@ -530,7 +542,7 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bot_logic::TileId;
 
@@ -879,7 +891,7 @@ mod tests {
     // 確認する。本番経路と同じ helper だけを通す。
     fn assert_diagnostic_selection_matches(context: &GameContext, actions: &[LegalAction]) {
         let legal = legal_discard_evaluations(context, actions);
-        let tenpai_wait = tenpai_wait_metrics(context, &legal);
+        let tenpai_wait = tenpai_wait_metrics(context, &legal.tiles, &legal.evaluations);
 
         let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
         let selection = selection_from_legal_evaluations(&legal, &tenpai_wait, actions);
@@ -1047,7 +1059,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let expected = select_best_discard_evaluation(&context, &tiles);
+        let expected = select_best_normal_discard_evaluation(&context, &tiles);
 
         let selection = select_discard_action_with_evaluation(&context, &actions);
         assert_eq!(selection.evaluation, expected);
@@ -1103,13 +1115,13 @@ mod tests {
             .collect();
 
         let all = evaluate_discard_candidates(&context, &tiles);
-        let global_best = select_best_evaluation(&all).unwrap().discard;
+        let global_best = select_best_one_step_evaluation(&all).unwrap().discard;
 
         // 全体最善(W=116)を除外し、他の牌種だけを合法にする。
         let actions: Vec<LegalAction> = hand_values.iter().map(|&value| dahai(value)).collect();
         assert!(legal_dahai_tile_for_type(global_best, &actions).is_none());
 
-        let expected_best = select_best_evaluation(&retain_legal_dahai_evaluations(
+        let expected_best = select_best_one_step_evaluation(&retain_legal_dahai_evaluations(
             evaluate_discard_candidates(&context, &tiles),
             &actions,
             context.dora_indicators(),
@@ -1138,9 +1150,10 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let global_best = select_best_evaluation(&evaluate_discard_candidates(&context, &tiles))
-            .unwrap()
-            .discard;
+        let global_best =
+            select_best_one_step_evaluation(&evaluate_discard_candidates(&context, &tiles))
+                .unwrap()
+                .discard;
         assert_ne!(global_best, tile(89).tile_type());
 
         let actions = vec![dahai(89)];
@@ -1319,9 +1332,10 @@ mod tests {
     //
     // 打 5p は 12m の辺張と 68m の嵌張を残して受け入れが最も広く、打 1m は 45p の両面を残して
     // テンパイ後の待ちが広くなる。1手評価だけなら受け入れの多い 5p が選ばれる。
-    const IISHANTEN_WAIT_TILES: [u8; 14] = [0, 4, 20, 28, 48, 49, 50, 53, 60, 64, 68, 89, 92, 96];
+    pub(crate) const IISHANTEN_WAIT_TILES: [u8; 14] =
+        [0, 4, 20, 28, 48, 49, 50, 53, 60, 64, 68, 89, 92, 96];
 
-    fn iishanten_wait_context() -> GameContext {
+    pub(crate) fn iishanten_wait_context() -> GameContext {
         let tiles: Vec<_> = IISHANTEN_WAIT_TILES
             .iter()
             .map(|&value| tile(value))
@@ -1337,9 +1351,62 @@ mod tests {
         )
     }
 
+    // 手牌とツモ牌の物理牌一覧。合法 Dahai を受け取らない入口の検証で使う。
+    pub(crate) fn iishanten_wait_tiles() -> Vec<TileId> {
+        IISHANTEN_WAIT_TILES
+            .iter()
+            .map(|&value| tile(value))
+            .collect()
+    }
+
+    // 1手評価だけで選ぶ best。通常打牌 selection との違いを固定するための検証用 helper で、
+    // 副露済み面子数は本番評価と同じ値を使う。
+    pub(crate) fn one_step_best_evaluation(
+        context: &GameContext,
+        tiles: &[TileId],
+    ) -> Option<DiscardEvaluation> {
+        select_best_one_step_discard_evaluation_with_fixed_meld_count(
+            context,
+            tiles,
+            evaluation_fixed_meld_count(context),
+        )
+    }
+
     // 検証対象の2候補だけを合法にする。1向聴を維持する候補が複数あるので前方評価は走る。
     fn iishanten_wait_actions() -> Vec<LegalAction> {
         vec![dahai(0), dahai(53)]
+    }
+
+    #[test]
+    fn standalone_normal_discard_evaluation_uses_the_weighted_tenpai_wait() {
+        // 合法 Dahai を制限せず、手牌から切れる全打牌候補を対象にした1向聴局面。
+        let context = iishanten_wait_context();
+        let tiles = iishanten_wait_tiles();
+
+        let one_step = one_step_best_evaluation(&context, &tiles).expect("1手評価の best");
+        let normal =
+            select_best_normal_discard_evaluation(&context, &tiles).expect("通常打牌の best");
+
+        assert_eq!(one_step.min_shanten_after_discard(), 1);
+        assert_eq!(normal.min_shanten_after_discard(), 1);
+        // 1手比較だけなら受け入れの多い候補、weighted wait 込みなら別候補が勝つ局面である。
+        assert_ne!(normal.discard, one_step.discard);
+        assert!(one_step.acceptance_total_remaining() > normal.acceptance_total_remaining());
+    }
+
+    #[test]
+    fn standalone_normal_discard_evaluation_matches_the_legal_selection() {
+        // 全打牌候補が合法な局面では、合法 Dahai 付きの通常打牌選択と同じ評価になる。
+        let context = iishanten_wait_context();
+        let actions: Vec<LegalAction> = IISHANTEN_WAIT_TILES
+            .iter()
+            .map(|&value| dahai(value))
+            .collect();
+
+        assert_eq!(
+            select_discard_action_with_evaluation(&context, &actions).evaluation,
+            select_best_normal_discard_evaluation(&context, &iishanten_wait_tiles()),
+        );
     }
 
     #[test]
@@ -1349,7 +1416,9 @@ mod tests {
 
         let legal = legal_discard_evaluations(&context, &actions);
         // 1手評価だけなら受け入れの多い候補が選ばれる局面である。
-        let one_step = select_best_evaluation(&legal.evaluations).unwrap().clone();
+        let one_step = select_best_one_step_evaluation(&legal.evaluations)
+            .unwrap()
+            .clone();
 
         let selection = select_discard_action_with_evaluation(&context, &actions);
         let selected = selection.evaluation.as_ref().unwrap();

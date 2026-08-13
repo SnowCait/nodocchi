@@ -1,6 +1,6 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use crate::discard_selection::select_best_discard_evaluation;
+use crate::discard_selection::select_best_normal_discard_evaluation;
 use bot_logic::{DiscardEvaluation, IishantenShape, TileCounts, TileId, TileType, count_dora};
 
 const LOG_TARGET: &str = "bot_core::push_pull";
@@ -229,7 +229,11 @@ const HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY: u8 = 4;
 ///
 /// リーチ情報は `context.reached_opponents()` を使用する。`player_id == None` の場合は
 /// `reached_opponents()` の仕様どおり、リーチフラグが立っている全席を対象にする。
-/// 攻撃評価は既存の best discard 評価を再利用し、手牌とツモ牌が空なら `offense == None`。
+///
+/// 攻撃評価は既存の通常打牌 best 評価 ([`select_best_normal_discard_evaluation`]) を再利用する。
+/// 比較 semantics は `ShantenAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait を
+/// 含む。合法 Dahai を受け取らない入口なので、対象は手牌から切れる全打牌候補になる。
+/// 手牌とツモ牌が空なら `offense == None`。
 pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
     let tiles: Vec<_> = context
         .hand_tiles()
@@ -241,7 +245,7 @@ pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
     let evaluation = if tiles.is_empty() {
         None
     } else {
-        select_best_discard_evaluation(context, &tiles)
+        select_best_normal_discard_evaluation(context, &tiles)
     };
 
     push_pull_inputs_from_context_with_evaluation(context, evaluation.as_ref())
@@ -903,7 +907,7 @@ mod tests {
 
     #[test]
     fn with_evaluation_matches_public_inputs() {
-        use crate::discard_selection::select_best_discard_evaluation;
+        use crate::discard_selection::select_best_normal_discard_evaluation;
 
         let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
             .iter()
@@ -928,7 +932,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_discard_evaluation(&context, &tiles);
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
 
         let shared = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
         let public = push_pull_inputs_from_context(&context);
@@ -937,8 +941,37 @@ mod tests {
     }
 
     #[test]
+    fn public_inputs_use_the_normal_discard_selection() {
+        // 単独入口の offense も、1向聴限定の weighted tenpai wait を含む通常打牌 selection から
+        // 構築する。1手比較だけの best 評価とは別の候補になる局面で固定する。
+        use crate::discard_selection::select_best_normal_discard_evaluation;
+        use crate::discard_selection::tests::{
+            iishanten_wait_context, iishanten_wait_tiles, one_step_best_evaluation,
+        };
+
+        let context = iishanten_wait_context();
+        let tiles = iishanten_wait_tiles();
+
+        let normal = select_best_normal_discard_evaluation(&context, &tiles);
+        let one_step = one_step_best_evaluation(&context, &tiles);
+        assert!(normal.is_some());
+        assert_ne!(normal, one_step, "両者が分かれる局面である必要がある");
+
+        let public = push_pull_inputs_from_context(&context);
+        assert_eq!(
+            public,
+            push_pull_inputs_from_context_with_evaluation(&context, normal.as_ref()),
+        );
+        assert_ne!(
+            public,
+            push_pull_inputs_from_context_with_evaluation(&context, one_step.as_ref()),
+        );
+        assert!(public.offense.is_some());
+    }
+
+    #[test]
     fn with_evaluation_transcribes_iishanten_shape() {
-        use crate::discard_selection::select_best_discard_evaluation;
+        use crate::discard_selection::select_best_normal_discard_evaluation;
 
         let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
             .iter()
@@ -963,8 +996,8 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let mut evaluation =
-            select_best_discard_evaluation(&context, &tiles).expect("evaluation should exist");
+        let mut evaluation = select_best_normal_discard_evaluation(&context, &tiles)
+            .expect("evaluation should exist");
 
         for shape in [IishantenShape::Complete, IishantenShape::Unknown] {
             evaluation.standard_iishanten_shape_after_discard = shape;
@@ -984,7 +1017,7 @@ mod tests {
 
     #[test]
     fn with_evaluation_keeps_reach_count_and_dealer_judgment() {
-        use crate::discard_selection::select_best_discard_evaluation;
+        use crate::discard_selection::select_best_normal_discard_evaluation;
 
         let hand: Vec<_> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89]
             .iter()
@@ -1010,7 +1043,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_discard_evaluation(&context, &tiles);
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
         let evaluation_before = evaluation.clone();
 
         let inputs = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
@@ -1477,7 +1510,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_discard_evaluation(context, &tiles).unwrap();
+        let evaluation = select_best_normal_discard_evaluation(context, &tiles).unwrap();
         push_pull_inputs_from_context_with_evaluation(context, Some(&evaluation))
             .offense
             .unwrap()
@@ -1818,8 +1851,8 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation =
-            select_best_discard_evaluation(&context, &tiles).expect("evaluation should exist");
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles)
+            .expect("evaluation should exist");
         let expected = offense_value_proxy_after_discard(&context, &evaluation);
 
         let inputs = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
@@ -1851,7 +1884,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_discard_evaluation(&context, &tiles);
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
 
         let public = push_pull_inputs_from_context(&context);
         let shared = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
@@ -1941,8 +1974,8 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation =
-            select_best_discard_evaluation(&context, &tiles).expect("evaluation should exist");
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles)
+            .expect("evaluation should exist");
         let evaluation_before = evaluation.clone();
 
         let _ = offense_value_proxy_after_discard(&context, &evaluation);

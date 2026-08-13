@@ -6,7 +6,7 @@ use crate::defense::{
     select_defense_fallback_action_with_kind,
 };
 use crate::discard_selection::{
-    DiscardActionSelection, select_best_discard_evaluation_with_fixed_meld_count,
+    DiscardActionSelection, select_best_one_step_discard_evaluation_with_fixed_meld_count,
     select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
 };
 use crate::push_pull::{
@@ -685,7 +685,7 @@ fn evaluate_pon_conditions(
         return PonDecisionReason::CurrentShantenNotOne;
     }
 
-    let Some(evaluation) = select_best_discard_evaluation_with_fixed_meld_count(
+    let Some(evaluation) = select_best_one_step_discard_evaluation_with_fixed_meld_count(
         ctx,
         &post_pon_tiles,
         post_pon_fixed_meld_count,
@@ -831,7 +831,7 @@ impl Agent for ShantenAgent {
 pub(crate) mod tests {
     use super::*;
     use crate::defense::{HonorSafetyRank, select_defense_fallback_action};
-    use crate::discard_selection::{select_best_discard_evaluation, select_discard_action};
+    use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{PushPullReason, push_pull_inputs_from_context};
     use bot_logic::{DiscardComparisonReason, TileId, TileType, compare_discard_evaluations};
 
@@ -1721,7 +1721,7 @@ pub(crate) mod tests {
             .collect();
 
         // 非合法な全体最善候補の mode は Push。
-        let global_best = select_best_discard_evaluation(&ctx, &tiles).unwrap();
+        let global_best = select_best_normal_discard_evaluation(&ctx, &tiles).unwrap();
         assert_eq!(global_best.min_shanten_after_discard(), 0);
         let illegal_mode = decide_push_pull(&push_pull_inputs_from_context_with_evaluation(
             &ctx,
@@ -2763,23 +2763,11 @@ pub(crate) mod tests {
 
     // ---- 1向聴の weighted tenpai wait ----
 
-    // 12m 68m 444p 5p 789p 567s の門前14枚。
+    // 12m 68m 444p 5p 789p 567s の門前14枚 (打牌選択側と同じ fixture)。
     //
     // 打 5p は受け入れが最も広く、打 1m は 45p の両面を残してテンパイ後の待ちが広くなる。
     // 合法 Dahai をこの2候補だけに絞り、新しい比較軸で選択が決まる局面にする。
-    fn iishanten_wait_context() -> GameContext {
-        let values = [0u8, 4, 20, 28, 48, 49, 50, 53, 60, 64, 68, 89, 92, 96];
-        let tiles: Vec<_> = values.iter().map(|&value| tile(value)).collect();
-        let (hand, drawn) = tiles.split_at(values.len() - 1);
-        GameContext::from_parts_with_visible_tiles(
-            Some(drawn[0]),
-            hand.to_vec(),
-            vec![],
-            None,
-            None,
-            tiles.clone(),
-        )
-    }
+    use crate::discard_selection::tests::iishanten_wait_context;
 
     fn iishanten_wait_actions() -> Vec<LegalAction> {
         vec![dahai(0), dahai(53)]
@@ -3099,7 +3087,7 @@ pub(crate) mod tests {
             .filter(|value| !PON_CONSUMED.contains(value))
             .map(|&value| tile(value))
             .collect();
-        let expected = select_best_discard_evaluation_with_fixed_meld_count(
+        let expected = select_best_one_step_discard_evaluation_with_fixed_meld_count(
             &ctx,
             &post_pon_tiles,
             FixedMeldCount::new(1).unwrap(),
