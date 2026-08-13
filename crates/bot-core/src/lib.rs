@@ -5,6 +5,7 @@ pub mod context;
 pub mod defense;
 pub mod discard_selection;
 pub mod meld;
+pub mod open_hand_threat;
 pub mod push_pull;
 pub mod threat;
 
@@ -33,6 +34,10 @@ pub use defense::{
 };
 pub use discard_selection::select_discard_action;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
+pub use open_hand_threat::{
+    OpenHandThreatAssessment, OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
+    OpenHandThreatReason, classify_open_hand_threat, classify_open_hand_threats,
+};
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
     decide_push_pull, push_pull_inputs_from_context,
