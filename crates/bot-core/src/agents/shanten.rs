@@ -12,9 +12,11 @@ use crate::discard_selection::{
 };
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
-    push_pull_inputs_from_context_with_evaluation,
+    push_pull_inputs_from_threat_facts,
 };
-use crate::threat::{PlayerThreatDiagnostic, diagnose_player_threats};
+use crate::threat::{
+    PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
+};
 use bot_logic::{
     DiscardDecisionDiagnostic, DiscardEvaluation, DiscardFuritenDiagnostic, FixedMeldCount,
     LookaheadDiagnostic, PermanentFuriten, TenpaiWaitAvailability, TileCounts, TileId, TileType,
@@ -326,7 +328,11 @@ pub struct ShantenDecisionDiagnostic {
     pub own_fixed_meld_count: Option<FixedMeldCount>,
     /// 全4席分の脅威診断。`context` から読み取れる副露・リーチ・親・ドラの観測事実だけを持つ。
     ///
-    /// `player_id` が不明でも席を除外せず常に4席分あり、自分か他家かは各診断の `is_self` /
+    /// 集計値 (`facts`) は `act()` が押し引き入力へ渡したものと同じ
+    /// [`PlayerThreatFacts`](crate::threat::PlayerThreatFacts) そのもので、診断のために数え直さ
+    /// ない。`melds` の物理牌など表示用の詳細だけをこの経路で追加する。
+    ///
+    /// `player_id` が不明でも席を除外せず常に4席分あり、自分か他家かは各 facts の `is_self` /
     /// `is_opponent()` が unknown で表す。危険度の判断は含まず、現時点では押し引き・防御・
     /// 打牌選択のどれにも影響しない解析専用の情報。
     pub player_threats: [PlayerThreatDiagnostic; 4],
@@ -448,6 +454,13 @@ impl ShantenAgent {
             ShantenAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
         log_agent_decision(&decision);
 
+        // 押し引きまで進んだ場合はそのとき使った facts をそのまま診断へ載せ、集計を作り直さない。
+        // Hora / Ryukyoku / 限定 Pon で早期終了した場合だけ、診断のためにここで facts を作る。
+        let player_threat_facts = decision.push_pull_inputs.map_or_else(
+            || player_threat_facts_from_context(context),
+            |inputs| inputs.player_threats,
+        );
+
         ShantenDecisionDiagnostic {
             selected_action: decision.action,
             selected_source: decision.source,
@@ -461,7 +474,7 @@ impl ShantenAgent {
             defense: diagnostics.defense,
             pon: decision.pon,
             own_fixed_meld_count: context.own_fixed_meld_count(),
-            player_threats: diagnose_player_threats(context),
+            player_threats: diagnose_player_threats_with_facts(context, &player_threat_facts),
         }
     }
 
@@ -525,9 +538,14 @@ impl ShantenAgent {
 
         // 通常打牌の evaluation と action を一度だけ取得し、その evaluation を
         // 押し引き入力にも共有して二重計算を避ける。
+        //
+        // 脅威 facts もここで一度だけ構築し、押し引き入力へそのまま渡す。meld ごとの Vec を
+        // 作らない軽量 facts なので、通常 act() で allocation は増えない。構造化診断は
+        // この facts を再利用して full diagnostic を組み立てる。
         let discard_selection = self.select_normal_discard(ctx, legal_actions, diagnostics);
-        let inputs = push_pull_inputs_from_context_with_evaluation(
+        let inputs = push_pull_inputs_from_threat_facts(
             ctx,
+            player_threat_facts_from_context(ctx),
             discard_selection.evaluation.as_ref(),
         );
         let push_pull = decide_push_pull(&inputs);
@@ -990,7 +1008,11 @@ pub(crate) mod tests {
     use super::*;
     use crate::defense::{HonorSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
-    use crate::push_pull::{PushPullReason, push_pull_inputs_from_context};
+    use crate::push_pull::{
+        PushPullReason, push_pull_inputs_from_context,
+        push_pull_inputs_from_context_with_evaluation,
+    };
+    use crate::threat::diagnose_player_threats;
     use bot_logic::{
         DiscardComparisonReason, PermanentFuriten, TileId, TileType, compare_discard_evaluations,
     };
@@ -2991,6 +3013,15 @@ pub(crate) mod tests {
         opponent_melds: Vec<crate::meld::Meld>,
         reached: [bool; 4],
     ) -> GameContext {
+        opponent_meld_context_with_reach_and_oya(player_id, Some(0), opponent_melds, reached)
+    }
+
+    fn opponent_meld_context_with_reach_and_oya(
+        player_id: Option<u8>,
+        oya: Option<u8>,
+        opponent_melds: Vec<crate::meld::Meld>,
+        reached: [bool; 4],
+    ) -> GameContext {
         let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
         melds[1] = opponent_melds;
 
@@ -3005,7 +3036,7 @@ pub(crate) mod tests {
             TileType::new(27),
             Vec::new(),
             player_id,
-            Some(0),
+            oya,
             Default::default(),
             reached,
             melds,
@@ -3029,18 +3060,18 @@ pub(crate) mod tests {
         assert_eq!(diagnostic.player_threats, diagnose_player_threats(&ctx));
 
         let threat = &diagnostic.player_threats[1];
-        assert_eq!(threat.player, 1);
-        assert_eq!(threat.is_opponent(), Some(true));
-        assert!(!threat.reached);
-        assert_eq!(threat.is_dealer, Some(false));
-        assert_eq!(threat.meld_count, 2);
-        assert_eq!(threat.open_meld_count, 2);
-        assert_eq!(threat.kan_count, 0);
-        assert!(threat.melds[0].value_honor.unwrap().is_dragon);
-        assert_eq!(threat.melds[1].red_dora_count, 1);
+        assert_eq!(threat.facts.player, 1);
+        assert_eq!(threat.facts.is_opponent(), Some(true));
+        assert!(!threat.facts.reached);
+        assert_eq!(threat.facts.is_dealer, Some(false));
+        assert_eq!(threat.facts.meld_count, 2);
+        assert_eq!(threat.facts.open_meld_count, 2);
+        assert_eq!(threat.facts.kan_count, 0);
+        assert!(threat.melds[0].facts.value_honor.unwrap().is_dragon);
+        assert_eq!(threat.melds[1].facts.red_dora_count, 1);
 
-        assert_eq!(diagnostic.player_threats[0].is_self, Some(true));
-        assert_eq!(diagnostic.player_threats[0].meld_count, 0);
+        assert_eq!(diagnostic.player_threats[0].facts.is_self, Some(true));
+        assert_eq!(diagnostic.player_threats[0].facts.meld_count, 0);
     }
 
     #[test]
@@ -3050,16 +3081,17 @@ pub(crate) mod tests {
 
         assert_eq!(diagnostic.player_threats.len(), 4);
         for (player, threat) in diagnostic.player_threats.iter().enumerate() {
-            assert_eq!(threat.player, player);
-            assert_eq!(threat.is_self, None);
-            assert_eq!(threat.is_opponent(), None);
+            assert_eq!(threat.facts.player, player);
+            assert_eq!(threat.facts.is_self, None);
+            assert_eq!(threat.facts.is_opponent(), None);
         }
-        assert_eq!(diagnostic.player_threats[1].meld_count, 1);
+        assert_eq!(diagnostic.player_threats[1].facts.meld_count, 1);
     }
 
     #[test]
     fn opponent_melds_do_not_change_the_existing_decisions() {
-        // 非リーチの副露相手は脅威入力に入らないので、既存の選択・押し引き・防御は変わらない。
+        // 副露 facts は押し引き入力に載るが判定には使わないので、既存の選択・押し引き・防御は
+        // 変わらない。
         let actions = opponent_meld_actions();
         let with_melds = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
         let without_melds = opponent_meld_context(Some(0), vec![]);
@@ -3070,12 +3102,23 @@ pub(crate) mod tests {
         assert_eq!(melded.selected_action, plain.selected_action);
         assert_eq!(melded.selected_source, plain.selected_source);
         assert_eq!(melded.normal_discard_action, plain.normal_discard_action);
-        assert_eq!(melded.push_pull_inputs, plain.push_pull_inputs);
         assert_eq!(melded.push_pull_decision, plain.push_pull_decision);
         assert_eq!(melded.reach, plain.reach);
         assert_eq!(melded.defense, plain.defense);
         assert_eq!(melded.pon, plain.pon);
         assert_ne!(melded.player_threats, plain.player_threats);
+
+        // 押し引き入力は副露 facts だけが異なり、判定に使う項目はすべて同じ。
+        let melded_inputs = melded.push_pull_inputs.expect("押し引き入力がある");
+        let plain_inputs = plain.push_pull_inputs.expect("押し引き入力がある");
+        assert_eq!(
+            melded_inputs.opponent_reach_count,
+            plain_inputs.opponent_reach_count
+        );
+        assert_eq!(melded_inputs.dealer_reacher, plain_inputs.dealer_reacher);
+        assert_eq!(melded_inputs.self_dealer, plain_inputs.self_dealer);
+        assert_eq!(melded_inputs.offense, plain_inputs.offense);
+        assert_ne!(melded_inputs.player_threats, plain_inputs.player_threats);
 
         let decision = melded.push_pull_decision.expect("押し引きを判定している");
         assert_eq!(decision.mode, PushPullMode::Push);
@@ -3083,13 +3126,7 @@ pub(crate) mod tests {
             decision.reason,
             crate::push_pull::PushPullReason::NoOpponentReach
         );
-        assert_eq!(
-            melded
-                .push_pull_inputs
-                .expect("押し引き入力がある")
-                .opponent_reach_count,
-            0
-        );
+        assert_eq!(melded_inputs.opponent_reach_count, 0);
     }
 
     #[test]
@@ -3118,9 +3155,9 @@ pub(crate) mod tests {
         let diagnostic = diagnose_matching_act(&ctx, &opponent_meld_actions());
 
         let threat = &diagnostic.player_threats[1];
-        assert!(threat.reached);
-        assert_eq!(threat.meld_count, 1);
-        assert_eq!(threat.open_meld_count, 1);
+        assert!(threat.facts.reached);
+        assert_eq!(threat.facts.meld_count, 1);
+        assert_eq!(threat.facts.open_meld_count, 1);
         assert_eq!(
             diagnostic
                 .push_pull_inputs
@@ -3128,6 +3165,119 @@ pub(crate) mod tests {
                 .opponent_reach_count,
             1
         );
+    }
+
+    #[test]
+    fn push_pull_and_diagnostics_share_the_same_threat_facts() {
+        // 押し引きへ渡した軽量 facts と診断の集計値が同じものであることを固定する。
+        let ctx = opponent_meld_context_with_reach(
+            Some(0),
+            vec![white_dragon_pon(), red_five_chi()],
+            [false, false, false, true],
+        );
+        let actions = opponent_meld_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+
+        for player in 0..4 {
+            assert_eq!(
+                inputs.player_threats[player], diagnostic.player_threats[player].facts,
+                "player {player}"
+            );
+        }
+        assert_eq!(
+            inputs.player_threats,
+            crate::threat::player_threat_facts_from_context(&ctx)
+        );
+        assert_eq!(diagnostic.player_threats, diagnose_player_threats(&ctx));
+
+        // 2手先診断を有効にしても facts は変わらない。
+        let with_lookahead =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+        assert_eq!(with_lookahead.push_pull_inputs, diagnostic.push_pull_inputs);
+        assert_eq!(with_lookahead.player_threats, diagnostic.player_threats);
+    }
+
+    #[test]
+    fn opponent_melds_do_not_change_the_reach_branches() {
+        // 単独子リーチ・親リーチ・複数リーチのどれでも、副露相手の有無で押し引きは変わらない。
+        let actions = opponent_meld_actions();
+        // (oya, reached, 期待する mode, 期待する reason)
+        let cases = [
+            (
+                Some(0u8),
+                [false, true, false, false],
+                PushPullMode::Push,
+                PushPullReason::TenpaiAgainstSingleNonDealer,
+            ),
+            (
+                Some(1),
+                [false, true, false, false],
+                PushPullMode::Neutral,
+                PushPullReason::TenpaiUnderHighPressure,
+            ),
+            (
+                Some(0),
+                [false, true, true, false],
+                PushPullMode::Neutral,
+                PushPullReason::TenpaiUnderHighPressure,
+            ),
+        ];
+
+        for (oya, reached, mode, reason) in cases {
+            let with_melds = opponent_meld_context_with_reach_and_oya(
+                Some(0),
+                oya,
+                vec![white_dragon_pon(), red_five_chi()],
+                reached,
+            );
+            let without_melds =
+                opponent_meld_context_with_reach_and_oya(Some(0), oya, vec![], reached);
+
+            let melded = diagnose_matching_act(&with_melds, &actions);
+            let plain = diagnose_matching_act(&without_melds, &actions);
+
+            let decision = melded.push_pull_decision.expect("押し引きを判定している");
+            assert_eq!(decision.mode, mode, "{oya:?} {reached:?}");
+            assert_eq!(decision.reason, reason, "{oya:?} {reached:?}");
+            assert_eq!(
+                melded.push_pull_decision, plain.push_pull_decision,
+                "{oya:?} {reached:?}"
+            );
+            assert_eq!(
+                melded.selected_action, plain.selected_action,
+                "{oya:?} {reached:?}"
+            );
+            assert_eq!(
+                melded.selected_source, plain.selected_source,
+                "{oya:?} {reached:?}"
+            );
+
+            let melded_inputs = melded.push_pull_inputs.expect("押し引き入力がある");
+            let plain_inputs = plain.push_pull_inputs.expect("押し引き入力がある");
+            assert_eq!(
+                melded_inputs.opponent_reach_count,
+                plain_inputs.opponent_reach_count
+            );
+            assert_eq!(melded_inputs.dealer_reacher, plain_inputs.dealer_reacher);
+            assert_eq!(melded_inputs.self_dealer, plain_inputs.self_dealer);
+            assert_eq!(melded_inputs.offense, plain_inputs.offense);
+            assert_eq!(melded_inputs.player_threats[1].open_meld_count, 2);
+            assert_eq!(plain_inputs.player_threats[1].open_meld_count, 0);
+        }
+    }
+
+    #[test]
+    fn threat_facts_are_built_for_early_return_paths() {
+        // 和了・流局で早期終了した場合も、診断は4席分の facts を持つ。
+        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon()]);
+
+        for actions in [vec![LegalAction::Hora], vec![LegalAction::Ryukyoku]] {
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+            assert_eq!(diagnostic.push_pull_inputs, None);
+            assert_eq!(diagnostic.player_threats, diagnose_player_threats(&ctx));
+            assert_eq!(diagnostic.player_threats[1].facts.open_meld_count, 1);
+        }
     }
 
     // 白ポン1組。副露の種類によらず完成済み面子1として数える。

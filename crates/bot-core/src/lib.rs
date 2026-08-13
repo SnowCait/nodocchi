@@ -38,7 +38,10 @@ pub use push_pull::{
     decide_push_pull, push_pull_inputs_from_context,
 };
 pub use threat::{
-    MeldKindCounts, MeldThreatDiagnostic, PlayerThreatDiagnostic, PlayerThreatInputs,
-    ValueHonorMeldDiagnostic, diagnose_meld_threat, diagnose_player_threat,
-    diagnose_player_threats, player_threat_inputs,
+    MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts, PlayerThreatDiagnostic,
+    PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts, ValueHonorMeldFacts,
+    diagnose_meld_threat, diagnose_player_threat, diagnose_player_threat_with_facts,
+    diagnose_player_threats, diagnose_player_threats_with_facts, has_reached_dealer,
+    meld_threat_facts, player_threat_facts, player_threat_facts_from_context, player_threat_inputs,
+    reached_opponent_count,
 };

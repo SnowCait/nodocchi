@@ -731,27 +731,28 @@ fn format_player_threats(diagnostic: &ShantenDecisionDiagnostic) -> String {
 }
 
 fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
-    let mut lines = vec![format!("player {}", threat.player)];
+    let facts = threat.facts;
+    let mut lines = vec![format!("player {}", facts.player)];
 
     lines.push(format!(
         "  opponent: {}",
-        format_optional_yes_no(threat.is_opponent())
+        format_optional_yes_no(facts.is_opponent())
     ));
-    lines.push(format!("  reached: {}", yes_no(threat.reached)));
+    lines.push(format!("  reached: {}", yes_no(facts.reached)));
     lines.push(format!(
         "  dealer: {}",
-        format_optional_yes_no(threat.is_dealer)
+        format_optional_yes_no(facts.is_dealer)
     ));
-    lines.push(format!("  seat wind: {}", format_wind(threat.seat_wind)));
-    lines.push(format!("  melds: {}", threat.meld_count));
-    lines.push(format!("  open melds: {}", threat.open_meld_count));
-    lines.push(format!("  kans: {}", threat.kan_count));
+    lines.push(format!("  seat wind: {}", format_wind(facts.seat_wind)));
+    lines.push(format!("  melds: {}", facts.meld_count));
+    lines.push(format!("  open melds: {}", facts.open_meld_count));
+    lines.push(format!("  kans: {}", facts.kan_count));
     lines.push(format!(
         "  meld kinds: {}",
-        format_meld_kind_counts(threat.meld_kinds)
+        format_meld_kind_counts(facts.meld_kinds)
     ));
-    lines.push(format!("  meld dora: {}", threat.meld_dora_count));
-    lines.push(format!("  meld red dora: {}", threat.meld_red_dora_count));
+    lines.push(format!("  meld dora: {}", facts.meld_dora_count));
+    lines.push(format!("  meld red dora: {}", facts.meld_red_dora_count));
 
     for (index, meld) in threat.melds.iter().enumerate() {
         lines.extend(format_meld_threat(index + 1, meld));
@@ -761,19 +762,20 @@ fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
 }
 
 fn format_meld_threat(number: usize, meld: &MeldThreatDiagnostic) -> Vec<String> {
+    let facts = meld.facts;
     let mut lines = vec![format!(
         "  meld {number}: {:?} {}",
-        meld.kind,
+        facts.kind,
         format_tiles(&meld.tiles)
     )];
 
-    lines.push(format!("    open: {}", yes_no(meld.is_open)));
-    lines.push(format!("    kan: {}", yes_no(meld.is_kan)));
-    lines.push(format!("    dora: {}", meld.dora_count));
-    lines.push(format!("    red dora: {}", meld.red_dora_count));
+    lines.push(format!("    open: {}", yes_no(facts.is_open)));
+    lines.push(format!("    kan: {}", yes_no(facts.is_kan)));
+    lines.push(format!("    dora: {}", facts.dora_count));
+    lines.push(format!("    red dora: {}", facts.red_dora_count));
 
     // 役牌になり得ない Chi・数牌の刻子槓子では役牌の行自体を出さない。
-    if let Some(value_honor) = meld.value_honor {
+    if let Some(value_honor) = facts.value_honor {
         lines.push(format!("    dragon: {}", yes_no(value_honor.is_dragon)));
         lines.push(format!(
             "    round wind: {}",
@@ -2919,24 +2921,56 @@ mod tests {
     fn player_threats_are_the_production_diagnostic_values() {
         // 表示専用に副露やドラを解析し直さず、診断が持つ値をそのまま出す。
         let (_, diagnostic, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
-        let threat = &diagnostic.player_threats[1];
+        let facts = diagnostic.player_threats[1].facts;
         let block = player_threat_block(&output, 1);
 
         assert!(
-            block.contains(&format!("  melds: {}", threat.meld_count)),
+            block.contains(&format!("  melds: {}", facts.meld_count)),
             "{block}"
         );
         assert!(
-            block.contains(&format!("  open melds: {}", threat.open_meld_count)),
+            block.contains(&format!("  open melds: {}", facts.open_meld_count)),
             "{block}"
         );
         assert!(
-            block.contains(&format!("  meld dora: {}", threat.meld_dora_count)),
+            block.contains(&format!("  meld dora: {}", facts.meld_dora_count)),
             "{block}"
         );
         assert!(
-            block.contains(&format!("  meld red dora: {}", threat.meld_red_dora_count)),
+            block.contains(&format!("  meld red dora: {}", facts.meld_red_dora_count)),
             "{block}"
+        );
+    }
+
+    #[test]
+    fn player_threats_section_uses_the_push_pull_threat_facts() {
+        // 表示・押し引き・診断が同じ軽量 facts を共有していることを固定する。
+        let (_, diagnostic, output) = rendered(OPPONENT_THREAT_SCENARIO, false);
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+
+        for player in 0..4 {
+            assert_eq!(
+                inputs.player_threats[player], diagnostic.player_threats[player].facts,
+                "player {player}"
+            );
+        }
+
+        let facts = inputs.player_threats[1];
+        let block = player_threat_block(&output, 1);
+        assert!(
+            block.contains(&format!("  open melds: {}", facts.open_meld_count)),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!("  meld dora: {}", facts.meld_dora_count)),
+            "{block}"
+        );
+        // 白ポンは役牌と確定し、暗槓した自風も確定した役牌として数える。
+        assert_eq!(facts.value_honor_melds.dragon, 1);
+        assert_eq!(facts.value_honor_melds.confirmed, 1);
+        assert_eq!(
+            inputs.player_threats[2].value_honor_melds.seat_wind, 1,
+            "{output}"
         );
     }
 
@@ -2955,7 +2989,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(diagnostic.player_threats[1].open_meld_count, 1);
+        assert_eq!(diagnostic.player_threats[1].facts.open_meld_count, 1);
         assert!(
             section(&output, "Push/Pull")
                 .contains("  mode: Push\n  reason: NoOpponentReach\n  opponent reach count: 0"),

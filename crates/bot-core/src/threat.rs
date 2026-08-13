@@ -18,7 +18,7 @@ impl MeldKindCounts {
     pub fn of(melds: &[Meld]) -> Self {
         let mut counts = Self::default();
         for meld in melds {
-            *counts.get_mut(meld.kind()) += 1;
+            counts.add(meld.kind());
         }
         counts
     }
@@ -33,9 +33,13 @@ impl MeldKindCounts {
         }
     }
 
-    /// 全 [`MeldKind`] の合計。`PlayerThreatDiagnostic::meld_count` と一致する。
+    /// 全 [`MeldKind`] の合計。`PlayerThreatFacts::meld_count` と一致する。
     pub fn total(self) -> usize {
         self.chi + self.pon + self.daiminkan + self.ankan + self.kakan
+    }
+
+    fn add(&mut self, kind: MeldKind) {
+        *self.get_mut(kind) += 1;
     }
 
     fn get_mut(&mut self, kind: MeldKind) -> &mut usize {
@@ -57,19 +61,64 @@ impl MeldKindCounts {
 /// (unknown)。unknown を `false` として「役牌ではない」と断定しない。三元牌は場風・自風には
 /// 決してならないため、風情報が無くても `Some(false)`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValueHonorMeldDiagnostic {
+pub struct ValueHonorMeldFacts {
     pub tile: TileType,
     pub is_dragon: bool,
     pub is_round_wind: Option<bool>,
     pub is_seat_wind: Option<bool>,
 }
 
-/// fixed meld 1つ分の観測事実。危険度の判断は持たない。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeldThreatDiagnostic {
+impl ValueHonorMeldFacts {
+    /// 役牌と確定しているか。三元牌、または場風・自風との一致が確定した風牌。
+    pub fn is_confirmed(self) -> bool {
+        self.is_dragon || self.is_round_wind == Some(true) || self.is_seat_wind == Some(true)
+    }
+
+    /// 場風または自風が不明で、役牌かどうかを確定できない風牌か。
+    ///
+    /// 情報不足を「役牌ではない」と確定させないための区別で、[`Self::is_confirmed`] とは
+    /// 排他になる。
+    pub fn is_unconfirmed_wind(self) -> bool {
+        !self.is_confirmed() && (self.is_round_wind.is_none() || self.is_seat_wind.is_none())
+    }
+}
+
+/// player 1人分の役牌副露の集計。翻数へは潰さず、unknown を `false` と確定させない。
+///
+/// `dragon` / `round_wind` / `seat_wind` は軸ごとの面子数で、ダブ風は `round_wind` と
+/// `seat_wind` の両方に数える。何面子が役牌かを見たい場合は `confirmed` を使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ValueHonorMeldCounts {
+    /// 三元牌の刻子・槓子の数。風情報が無くても確定する。
+    pub dragon: usize,
+    /// 場風と確定した風牌の刻子・槓子の数。
+    pub round_wind: usize,
+    /// 自風と確定した風牌の刻子・槓子の数。
+    pub seat_wind: usize,
+    /// 役牌と確定した面子の数。ダブ風でも1面子として一度だけ数える。
+    pub confirmed: usize,
+    /// 場風・自風が不明で、役牌かどうかを確定できない風牌の刻子・槓子の数。
+    /// `confirmed` とは重複しない。
+    pub unconfirmed_wind: usize,
+}
+
+impl ValueHonorMeldCounts {
+    fn add(&mut self, facts: ValueHonorMeldFacts) {
+        self.dragon += usize::from(facts.is_dragon);
+        self.round_wind += usize::from(facts.is_round_wind == Some(true));
+        self.seat_wind += usize::from(facts.is_seat_wind == Some(true));
+        self.confirmed += usize::from(facts.is_confirmed());
+        self.unconfirmed_wind += usize::from(facts.is_unconfirmed_wind());
+    }
+}
+
+/// fixed meld 1つ分の軽量な観測事実。allocation を持たず `Copy`。
+///
+/// [`MeldThreatDiagnostic`] はこの facts に物理牌を足したもので、副露の種類・ドラ・役牌の判定は
+/// production と診断で必ずこの型を経由する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeldThreatFacts {
     pub kind: MeldKind,
-    /// meld を構成する物理牌。Kakan は加槓牌を含む4枚。
-    pub tiles: Vec<TileId>,
     /// [`MeldKind::is_open`] の結果。Ankan は fixed meld だが `false`。
     pub is_open: bool,
     /// [`MeldKind::is_kan`] の結果。
@@ -80,15 +129,16 @@ pub struct MeldThreatDiagnostic {
     /// meld 内の赤ドラ ([`TileId::is_red`]) の枚数。`dora_count` の内数。
     pub red_dora_count: u8,
     /// 字牌の刻子・槓子の場合の役牌診断。Chi と数牌の刻子・槓子は役牌になり得ないため `None`。
-    pub value_honor: Option<ValueHonorMeldDiagnostic>,
+    pub value_honor: Option<ValueHonorMeldFacts>,
 }
 
-/// player 1人分の観測事実。危険度 (threat level) の判断は持たない。
+/// player 1人分の軽量な観測事実。allocation を持たず `Copy`。
 ///
-/// 副露数やドラ枚数からテンパイ・向聴数を推測しない。ここにあるのは観測できた事実だけで、
-/// そこから threat level を決める policy は呼び出し側の責務。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlayerThreatDiagnostic {
+/// 押し引きが参照できる threat の source of truth で、[`PlayerThreatDiagnostic`] はこの facts に
+/// meld ごとの詳細を足したもの。副露数やドラ枚数からテンパイ・向聴数を推測しない。ここにあるのは
+/// 観測できた事実だけで、そこから threat level を決める policy は呼び出し側の責務。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerThreatFacts {
     pub player: usize,
     /// 自分の席か。`player_id` が不明なら推測せず `None` (unknown)。
     pub is_self: Option<bool>,
@@ -104,26 +154,55 @@ pub struct PlayerThreatDiagnostic {
     /// `meld_count` のうち [`MeldKind::is_kan`] が `true` のものだけ。Ankan を含む。
     pub kan_count: usize,
     pub meld_kinds: MeldKindCounts,
-    /// fixed meld ごとの観測事実。`melds` の順序は `GameContext` の順序そのまま。
-    pub melds: Vec<MeldThreatDiagnostic>,
     /// 全 fixed meld の `dora_count` 合計。Ankan の分も含むので、公開分だけを見たい policy は
     /// meld ごとの `is_open` で絞る。
     pub meld_dora_count: u8,
     /// 全 fixed meld の `red_dora_count` 合計。`meld_dora_count` の内数。
     pub meld_red_dora_count: u8,
+    /// 役牌副露の集計。翻数へは潰さず、情報不足も `unconfirmed_wind` として残す。
+    pub value_honor_melds: ValueHonorMeldCounts,
 }
 
-impl PlayerThreatDiagnostic {
+impl PlayerThreatFacts {
     /// 他家の席か。`player_id` が不明なら推測せず `None` (unknown)。
     pub fn is_opponent(&self) -> Option<bool> {
         self.is_self.map(|is_self| !is_self)
     }
+
+    /// 他家リーチとして数える席か。
+    ///
+    /// [`GameContext::reached_opponents`] と同じ semantics で、`is_self` が unknown の席は
+    /// 自分と断定せずリーチ者として数える。
+    pub fn is_reached_opponent(&self) -> bool {
+        self.reached && self.is_self != Some(true)
+    }
 }
 
-/// [`diagnose_player_threat`] の入力。`GameContext` から取り出した観測事実だけを持つ。
+/// fixed meld 1つ分の観測事実と、その meld の物理牌。危険度の判断は持たない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeldThreatDiagnostic {
+    /// production と共有する軽量な観測事実。
+    pub facts: MeldThreatFacts,
+    /// meld を構成する物理牌。Kakan は加槓牌を含む4枚。診断・表示のためだけに持つ詳細。
+    pub tiles: Vec<TileId>,
+}
+
+/// player 1人分の観測事実と、meld ごとの詳細。危険度 (threat level) の判断は持たない。
 ///
-/// `GameContext` からデータを取り出す adapter ([`player_threat_inputs`]) と、そこから診断を組み立てる
-/// pure な logic を分けるための型。ここで不足情報を補完しない。
+/// 集計値は [`PlayerThreatFacts`] そのもので、診断のために数え直さない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerThreatDiagnostic {
+    /// production と共有する軽量な観測事実。
+    pub facts: PlayerThreatFacts,
+    /// fixed meld ごとの観測事実。`melds` の順序は `GameContext` の順序そのまま。
+    pub melds: Vec<MeldThreatDiagnostic>,
+}
+
+/// [`player_threat_facts`] / [`diagnose_player_threat`] の入力。`GameContext` から取り出した
+/// 観測事実だけを持つ。
+///
+/// `GameContext` からデータを取り出す adapter ([`player_threat_inputs`]) と、そこから facts を
+/// 組み立てる pure な logic を分けるための型。ここで不足情報を補完しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerThreatInputs<'a> {
     pub player: usize,
@@ -137,16 +216,16 @@ pub struct PlayerThreatInputs<'a> {
     pub dora_indicators: &'a [TileId],
 }
 
-/// fixed meld 1つ分の観測事実を作る pure helper。
+/// fixed meld 1つ分の軽量な観測事実を作る pure helper。
 ///
 /// ドラ判定は既存の [`count_dora`] と [`TileId::is_red`] をそのまま使い、別の判定器を作らない。
 /// `seat_wind` は meld を持つ player 自身の自風。
-pub fn diagnose_meld_threat(
+pub fn meld_threat_facts(
     meld: &Meld,
     dora_indicators: &[TileId],
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
-) -> MeldThreatDiagnostic {
+) -> MeldThreatFacts {
     let mut dora_count = 0u8;
     let mut red_dora_count = 0u8;
     for &tile in meld.tiles() {
@@ -156,56 +235,73 @@ pub fn diagnose_meld_threat(
         }
     }
 
-    MeldThreatDiagnostic {
+    MeldThreatFacts {
         kind: meld.kind(),
-        tiles: meld.tiles().to_vec(),
         is_open: meld.is_open(),
         is_kan: meld.kind().is_kan(),
         dora_count,
         red_dora_count,
-        value_honor: value_honor_meld_diagnostic(meld, round_wind, seat_wind),
+        value_honor: value_honor_meld_facts(meld, round_wind, seat_wind),
     }
 }
 
-/// player 1人分の観測事実を作る pure helper。向聴数・受け入れ・待ちの再計算は行わない。
-pub fn diagnose_player_threat(inputs: PlayerThreatInputs<'_>) -> PlayerThreatDiagnostic {
-    let melds: Vec<MeldThreatDiagnostic> = inputs
-        .melds
-        .iter()
-        .map(|meld| {
-            diagnose_meld_threat(
+/// fixed meld 1つ分の診断を作る pure helper。
+///
+/// 判定は [`meld_threat_facts`] のものをそのまま使い、診断のために物理牌を足すだけ。
+pub fn diagnose_meld_threat(
+    meld: &Meld,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> MeldThreatDiagnostic {
+    MeldThreatDiagnostic {
+        facts: meld_threat_facts(meld, dora_indicators, round_wind, seat_wind),
+        tiles: meld.tiles().to_vec(),
+    }
+}
+
+/// player 1人分の軽量な観測事実を作る pure helper。向聴数・受け入れ・待ちの再計算は行わない。
+///
+/// meld ごとの物理牌を持たないため allocation を行わない。
+pub fn player_threat_facts(inputs: PlayerThreatInputs<'_>) -> PlayerThreatFacts {
+    aggregate_player_threat_facts(
+        inputs,
+        inputs.melds.iter().map(|meld| {
+            meld_threat_facts(
                 meld,
                 inputs.dora_indicators,
                 inputs.round_wind,
                 inputs.seat_wind,
             )
-        })
-        .collect();
+        }),
+    )
+}
 
-    let mut meld_dora_count = 0u8;
-    let mut meld_red_dora_count = 0u8;
-    for meld in &melds {
-        meld_dora_count = meld_dora_count.saturating_add(meld.dora_count);
-        meld_red_dora_count = meld_red_dora_count.saturating_add(meld.red_dora_count);
-    }
+/// player 1人分の診断を作る pure helper。
+///
+/// 集計値は [`player_threat_facts`] と同じ pure logic で求め、診断のために meld ごとの詳細を
+/// 追加する。
+pub fn diagnose_player_threat(inputs: PlayerThreatInputs<'_>) -> PlayerThreatDiagnostic {
+    let melds = meld_threat_diagnostics(inputs);
+    let facts = aggregate_player_threat_facts(inputs, melds.iter().map(|meld| meld.facts));
+    PlayerThreatDiagnostic { facts, melds }
+}
 
+/// 構築済みの [`PlayerThreatFacts`] へ meld ごとの詳細を足して診断にする pure helper。
+///
+/// production で使った facts をそのまま診断へ載せるための入口で、集計値を作り直さない。
+/// `facts` は同じ `inputs` から作られたものであることを前提にする。
+pub fn diagnose_player_threat_with_facts(
+    facts: PlayerThreatFacts,
+    inputs: PlayerThreatInputs<'_>,
+) -> PlayerThreatDiagnostic {
     PlayerThreatDiagnostic {
-        player: inputs.player,
-        is_self: inputs.is_self,
-        is_dealer: inputs.is_dealer,
-        reached: inputs.reached,
-        seat_wind: inputs.seat_wind,
-        meld_count: melds.len(),
-        open_meld_count: melds.iter().filter(|meld| meld.is_open).count(),
-        kan_count: melds.iter().filter(|meld| meld.is_kan).count(),
-        meld_kinds: MeldKindCounts::of(inputs.melds),
-        melds,
-        meld_dora_count,
-        meld_red_dora_count,
+        facts,
+        melds: meld_threat_diagnostics(inputs),
     }
 }
 
-/// `GameContext` から指定 player の診断入力を取り出す adapter。
+/// `GameContext` から指定 player の入力を取り出す adapter。
 ///
 /// `player_id` / `oya` が不明な場合は `is_self` / `is_dealer` / `seat_wind` を unknown のままにし、
 /// 「player 0 が自分」「player 0 が東」のような推測をしない。
@@ -224,20 +320,112 @@ pub fn player_threat_inputs(context: &GameContext, player: usize) -> PlayerThrea
     }
 }
 
-/// `GameContext` から全4席分の観測事実を作る adapter。
+/// `GameContext` から全4席分の軽量な観測事実を作る adapter。
 ///
-/// `player_id` が不明でもどの席も除外せず、常に4席分を返す。自分と他家の区別は各診断の
-/// `is_self` / `is_opponent()` が unknown で表す。
+/// 通常の `act()` 経路が使う入口で、meld ごとの `Vec` を作らない。`player_id` が不明でもどの席も
+/// 除外せず、常に4席分を返す。自分と他家の区別は各 facts の `is_self` / `is_opponent()` が
+/// unknown で表す。
+pub fn player_threat_facts_from_context(context: &GameContext) -> [PlayerThreatFacts; 4] {
+    std::array::from_fn(|player| player_threat_facts(player_threat_inputs(context, player)))
+}
+
+/// `GameContext` から全4席分の診断を作る adapter。
 pub fn diagnose_player_threats(context: &GameContext) -> [PlayerThreatDiagnostic; 4] {
     std::array::from_fn(|player| diagnose_player_threat(player_threat_inputs(context, player)))
 }
 
-// 刻子・槓子の牌種から役牌診断を作る。Chi は牌種が揃わないので対象外。
-fn value_honor_meld_diagnostic(
+/// 構築済みの facts から全4席分の診断を作る adapter。
+///
+/// 集計値を作り直さないので、production で押し引きへ渡した facts と診断の集計値が必ず一致する。
+/// `facts` は同じ `context` から作られたものであることを前提にする。
+pub fn diagnose_player_threats_with_facts(
+    context: &GameContext,
+    facts: &[PlayerThreatFacts; 4],
+) -> [PlayerThreatDiagnostic; 4] {
+    std::array::from_fn(|player| {
+        diagnose_player_threat_with_facts(facts[player], player_threat_inputs(context, player))
+    })
+}
+
+/// 全4席分の facts から他家リーチ者数を数える。
+///
+/// [`GameContext::reached_opponents`] と同じ semantics で、`player_id` が不明な場合はリーチ
+/// フラグが立っている全席を数える。席数は4固定なので `u8` に収まる。
+pub fn reached_opponent_count(facts: &[PlayerThreatFacts; 4]) -> u8 {
+    facts
+        .iter()
+        .filter(|facts| facts.is_reached_opponent())
+        .count() as u8
+}
+
+/// 全4席分の facts で、他家リーチ者に親が含まれるか。
+///
+/// `oya` が不明な席は `is_dealer` が unknown なので、親リーチと確定させない。
+pub fn has_reached_dealer(facts: &[PlayerThreatFacts; 4]) -> bool {
+    facts
+        .iter()
+        .any(|facts| facts.is_reached_opponent() && facts.is_dealer == Some(true))
+}
+
+// meld ごとの診断を作る。判定は meld_threat_facts に一本化し、ここでは物理牌を足すだけ。
+fn meld_threat_diagnostics(inputs: PlayerThreatInputs<'_>) -> Vec<MeldThreatDiagnostic> {
+    inputs
+        .melds
+        .iter()
+        .map(|meld| {
+            diagnose_meld_threat(
+                meld,
+                inputs.dora_indicators,
+                inputs.round_wind,
+                inputs.seat_wind,
+            )
+        })
+        .collect()
+}
+
+// meld ごとの facts から player 1人分の集計を作る。facts 経路と診断経路はこの1本を共有する。
+fn aggregate_player_threat_facts(
+    inputs: PlayerThreatInputs<'_>,
+    melds: impl Iterator<Item = MeldThreatFacts>,
+) -> PlayerThreatFacts {
+    let mut facts = PlayerThreatFacts {
+        player: inputs.player,
+        is_self: inputs.is_self,
+        is_dealer: inputs.is_dealer,
+        reached: inputs.reached,
+        seat_wind: inputs.seat_wind,
+        meld_count: 0,
+        open_meld_count: 0,
+        kan_count: 0,
+        meld_kinds: MeldKindCounts::default(),
+        meld_dora_count: 0,
+        meld_red_dora_count: 0,
+        value_honor_melds: ValueHonorMeldCounts::default(),
+    };
+
+    for meld in melds {
+        facts.meld_count += 1;
+        facts.open_meld_count += usize::from(meld.is_open);
+        facts.kan_count += usize::from(meld.is_kan);
+        facts.meld_kinds.add(meld.kind);
+        facts.meld_dora_count = facts.meld_dora_count.saturating_add(meld.dora_count);
+        facts.meld_red_dora_count = facts
+            .meld_red_dora_count
+            .saturating_add(meld.red_dora_count);
+        if let Some(value_honor) = meld.value_honor {
+            facts.value_honor_melds.add(value_honor);
+        }
+    }
+
+    facts
+}
+
+// 刻子・槓子の牌種から役牌 facts を作る。Chi は牌種が揃わないので対象外。
+fn value_honor_meld_facts(
     meld: &Meld,
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
-) -> Option<ValueHonorMeldDiagnostic> {
+) -> Option<ValueHonorMeldFacts> {
     if matches!(meld.kind(), MeldKind::Chi) {
         return None;
     }
@@ -246,7 +434,7 @@ fn value_honor_meld_diagnostic(
         return None;
     }
 
-    Some(ValueHonorMeldDiagnostic {
+    Some(ValueHonorMeldFacts {
         tile,
         is_dragon: tile.is_dragon(),
         is_round_wind: matches_wind(tile, round_wind),
@@ -343,91 +531,132 @@ mod tests {
         )
     }
 
+    // 4席すべてに別の副露・リーチ・ドラを持たせた context。facts と診断の一致確認に使う。
+    fn mixed_threat_context() -> GameContext {
+        context_with(
+            Some(0),
+            Some(1),
+            Some(honor(EAST)),
+            vec![tile(12)],
+            [false, true, false, false],
+            [
+                vec![pon(HAKU)],
+                vec![chi(), kakan(SOUTH)],
+                vec![ankan(WEST)],
+                vec![daiminkan(EAST), chi(), pon(SOUTH)],
+            ],
+        )
+    }
+
     fn threat_of(context: &GameContext, player: usize) -> PlayerThreatDiagnostic {
         diagnose_player_threats(context)[player].clone()
+    }
+
+    fn facts_of(context: &GameContext, player: usize) -> PlayerThreatFacts {
+        player_threat_facts_from_context(context)[player]
     }
 
     #[test]
     fn player_without_melds_or_reach_has_no_facts() {
         let threat = threat_of(&context(Default::default()), 1);
-        assert_eq!(threat.player, 1);
-        assert_eq!(threat.meld_count, 0);
-        assert_eq!(threat.open_meld_count, 0);
-        assert_eq!(threat.kan_count, 0);
-        assert!(!threat.reached);
+        assert_eq!(threat.facts.player, 1);
+        assert_eq!(threat.facts.meld_count, 0);
+        assert_eq!(threat.facts.open_meld_count, 0);
+        assert_eq!(threat.facts.kan_count, 0);
+        assert!(!threat.facts.reached);
         assert!(threat.melds.is_empty());
-        assert_eq!(threat.meld_kinds, MeldKindCounts::default());
-        assert_eq!(threat.meld_dora_count, 0);
-        assert_eq!(threat.meld_red_dora_count, 0);
+        assert_eq!(threat.facts.meld_kinds, MeldKindCounts::default());
+        assert_eq!(threat.facts.meld_dora_count, 0);
+        assert_eq!(threat.facts.meld_red_dora_count, 0);
+        assert_eq!(
+            threat.facts.value_honor_melds,
+            ValueHonorMeldCounts::default()
+        );
     }
 
     #[test]
     fn chi_is_one_open_meld() {
-        let threat = threat_of(&context([vec![], vec![chi()], vec![], vec![]]), 1);
-        assert_eq!(threat.meld_count, 1);
-        assert_eq!(threat.open_meld_count, 1);
-        assert_eq!(threat.kan_count, 0);
-        assert_eq!(threat.meld_kinds.chi, 1);
-        assert_eq!(threat.melds[0].kind, MeldKind::Chi);
-        assert!(threat.melds[0].is_open);
-        assert!(!threat.melds[0].is_kan);
+        let context = context([vec![], vec![chi()], vec![], vec![]]);
+        let facts = facts_of(&context, 1);
+        assert_eq!(facts.meld_count, 1);
+        assert_eq!(facts.open_meld_count, 1);
+        assert_eq!(facts.kan_count, 0);
+        assert_eq!(facts.meld_kinds.chi, 1);
+
+        let threat = threat_of(&context, 1);
+        assert_eq!(threat.melds[0].facts.kind, MeldKind::Chi);
+        assert!(threat.melds[0].facts.is_open);
+        assert!(!threat.melds[0].facts.is_kan);
         assert_eq!(threat.melds[0].tiles, [tile(12), tile(16), tile(20)]);
     }
 
     #[test]
     fn pon_is_one_open_meld() {
-        let threat = threat_of(&context([vec![], vec![pon(HAKU)], vec![], vec![]]), 1);
-        assert_eq!(threat.meld_count, 1);
-        assert_eq!(threat.open_meld_count, 1);
-        assert_eq!(threat.kan_count, 0);
-        assert_eq!(threat.meld_kinds.pon, 1);
-        assert_eq!(threat.melds[0].kind, MeldKind::Pon);
-        assert!(threat.melds[0].is_open);
+        let context = context([vec![], vec![pon(HAKU)], vec![], vec![]]);
+        let facts = facts_of(&context, 1);
+        assert_eq!(facts.meld_count, 1);
+        assert_eq!(facts.open_meld_count, 1);
+        assert_eq!(facts.kan_count, 0);
+        assert_eq!(facts.meld_kinds.pon, 1);
+
+        let threat = threat_of(&context, 1);
+        assert_eq!(threat.melds[0].facts.kind, MeldKind::Pon);
+        assert!(threat.melds[0].facts.is_open);
     }
 
     #[test]
     fn daiminkan_is_an_open_kan() {
-        let threat = threat_of(&context([vec![], vec![daiminkan(HAKU)], vec![], vec![]]), 1);
-        assert_eq!(threat.meld_count, 1);
-        assert_eq!(threat.open_meld_count, 1);
-        assert_eq!(threat.kan_count, 1);
-        assert_eq!(threat.meld_kinds.daiminkan, 1);
-        assert!(threat.melds[0].is_open);
-        assert!(threat.melds[0].is_kan);
+        let context = context([vec![], vec![daiminkan(HAKU)], vec![], vec![]]);
+        let facts = facts_of(&context, 1);
+        assert_eq!(facts.meld_count, 1);
+        assert_eq!(facts.open_meld_count, 1);
+        assert_eq!(facts.kan_count, 1);
+        assert_eq!(facts.meld_kinds.daiminkan, 1);
+
+        let threat = threat_of(&context, 1);
+        assert!(threat.melds[0].facts.is_open);
+        assert!(threat.melds[0].facts.is_kan);
     }
 
     #[test]
     fn ankan_is_a_kan_but_not_an_open_meld() {
-        let threat = threat_of(&context([vec![], vec![ankan(HAKU)], vec![], vec![]]), 1);
-        assert_eq!(threat.meld_count, 1);
-        assert_eq!(threat.open_meld_count, 0);
-        assert_eq!(threat.kan_count, 1);
-        assert_eq!(threat.meld_kinds.ankan, 1);
-        assert!(!threat.melds[0].is_open);
-        assert!(threat.melds[0].is_kan);
+        let context = context([vec![], vec![ankan(HAKU)], vec![], vec![]]);
+        let facts = facts_of(&context, 1);
+        assert_eq!(facts.meld_count, 1);
+        assert_eq!(facts.open_meld_count, 0);
+        assert_eq!(facts.kan_count, 1);
+        assert_eq!(facts.meld_kinds.ankan, 1);
+
+        let threat = threat_of(&context, 1);
+        assert!(!threat.melds[0].facts.is_open);
+        assert!(threat.melds[0].facts.is_kan);
     }
 
     #[test]
     fn kakan_is_an_open_kan() {
-        let threat = threat_of(&context([vec![], vec![kakan(HAKU)], vec![], vec![]]), 1);
-        assert_eq!(threat.meld_count, 1);
-        assert_eq!(threat.open_meld_count, 1);
-        assert_eq!(threat.kan_count, 1);
-        assert_eq!(threat.meld_kinds.kakan, 1);
-        assert!(threat.melds[0].is_open);
-        assert!(threat.melds[0].is_kan);
+        let context = context([vec![], vec![kakan(HAKU)], vec![], vec![]]);
+        let facts = facts_of(&context, 1);
+        assert_eq!(facts.meld_count, 1);
+        assert_eq!(facts.open_meld_count, 1);
+        assert_eq!(facts.kan_count, 1);
+        assert_eq!(facts.meld_kinds.kakan, 1);
+
+        let threat = threat_of(&context, 1);
+        assert!(threat.melds[0].facts.is_open);
+        assert!(threat.melds[0].facts.is_kan);
     }
 
     #[test]
     fn multiple_melds_are_aggregated_by_kind_open_and_kan() {
         let melds = vec![chi(), pon(HAKU), ankan(EAST), kakan(SOUTH)];
-        let threat = threat_of(&context([vec![], melds, vec![], vec![]]), 1);
+        let context = context([vec![], melds, vec![], vec![]]);
+        let facts = facts_of(&context, 1);
 
-        assert_eq!(threat.meld_count, 4);
-        assert_eq!(threat.open_meld_count, 3);
-        assert_eq!(threat.kan_count, 2);
+        assert_eq!(facts.meld_count, 4);
+        assert_eq!(facts.open_meld_count, 3);
+        assert_eq!(facts.kan_count, 2);
         assert_eq!(
-            threat.meld_kinds,
+            facts.meld_kinds,
             MeldKindCounts {
                 chi: 1,
                 pon: 1,
@@ -436,12 +665,14 @@ mod tests {
                 kakan: 1,
             }
         );
-        assert_eq!(threat.meld_kinds.total(), threat.meld_count);
+        assert_eq!(facts.meld_kinds.total(), facts.meld_count);
+
+        let threat = threat_of(&context, 1);
         assert_eq!(
             threat
                 .melds
                 .iter()
-                .map(|meld| meld.kind)
+                .map(|meld| meld.facts.kind)
                 .collect::<Vec<_>>(),
             [
                 MeldKind::Chi,
@@ -454,7 +685,7 @@ mod tests {
             threat
                 .melds
                 .iter()
-                .map(|meld| meld.is_open)
+                .map(|meld| meld.facts.is_open)
                 .collect::<Vec<_>>(),
             [true, true, false, true]
         );
@@ -462,7 +693,7 @@ mod tests {
             threat
                 .melds
                 .iter()
-                .map(|meld| meld.is_kan)
+                .map(|meld| meld.facts.is_kan)
                 .collect::<Vec<_>>(),
             [false, false, true, true]
         );
@@ -504,10 +735,11 @@ mod tests {
         );
         let threat = threat_of(&context, 1);
 
-        assert_eq!(threat.melds[0].dora_count, expected);
-        assert_eq!(threat.melds[0].dora_count, 1);
-        assert_eq!(threat.melds[0].red_dora_count, 0);
-        assert_eq!(threat.meld_dora_count, expected);
+        assert_eq!(threat.melds[0].facts.dora_count, expected);
+        assert_eq!(threat.melds[0].facts.dora_count, 1);
+        assert_eq!(threat.melds[0].facts.red_dora_count, 0);
+        assert_eq!(threat.facts.meld_dora_count, expected);
+        assert_eq!(facts_of(&context, 1).meld_dora_count, expected);
     }
 
     #[test]
@@ -516,10 +748,11 @@ mod tests {
         let context = context([vec![], vec![chi()], vec![], vec![]]);
         let threat = threat_of(&context, 1);
 
-        assert_eq!(threat.melds[0].red_dora_count, 1);
-        assert_eq!(threat.melds[0].dora_count, 1);
-        assert_eq!(threat.meld_red_dora_count, 1);
-        assert_eq!(threat.meld_dora_count, 1);
+        assert_eq!(threat.melds[0].facts.red_dora_count, 1);
+        assert_eq!(threat.melds[0].facts.dora_count, 1);
+        assert_eq!(threat.facts.meld_red_dora_count, 1);
+        assert_eq!(threat.facts.meld_dora_count, 1);
+        assert_eq!(facts_of(&context, 1).meld_red_dora_count, 1);
     }
 
     #[test]
@@ -538,10 +771,10 @@ mod tests {
         let threat = threat_of(&context, 1);
 
         assert_eq!(expected, 2);
-        assert_eq!(threat.melds[0].dora_count, 2);
-        assert_eq!(threat.melds[0].red_dora_count, 1);
-        assert_eq!(threat.meld_dora_count, 2);
-        assert_eq!(threat.meld_red_dora_count, 1);
+        assert_eq!(threat.melds[0].facts.dora_count, 2);
+        assert_eq!(threat.melds[0].facts.red_dora_count, 1);
+        assert_eq!(threat.facts.meld_dora_count, 2);
+        assert_eq!(threat.facts.meld_red_dora_count, 1);
     }
 
     #[test]
@@ -554,12 +787,25 @@ mod tests {
             [false; 4],
             [vec![], vec![pon(HAKU)], vec![], vec![]],
         );
-        let value_honor = threat_of(&context, 1).melds[0].value_honor.unwrap();
+        let value_honor = threat_of(&context, 1).melds[0].facts.value_honor.unwrap();
 
         assert_eq!(value_honor.tile, honor(HAKU));
         assert!(value_honor.is_dragon);
         assert_eq!(value_honor.is_round_wind, Some(false));
         assert_eq!(value_honor.is_seat_wind, Some(false));
+        assert!(value_honor.is_confirmed());
+        assert!(!value_honor.is_unconfirmed_wind());
+
+        assert_eq!(
+            facts_of(&context, 1).value_honor_melds,
+            ValueHonorMeldCounts {
+                dragon: 1,
+                round_wind: 0,
+                seat_wind: 0,
+                confirmed: 1,
+                unconfirmed_wind: 0,
+            }
+        );
     }
 
     #[test]
@@ -574,12 +820,23 @@ mod tests {
             [vec![], vec![pon(EAST)], vec![], vec![]],
         );
         let threat = threat_of(&context, 1);
-        let value_honor = threat.melds[0].value_honor.unwrap();
+        let value_honor = threat.melds[0].facts.value_honor.unwrap();
 
-        assert_eq!(threat.seat_wind, Some(honor(SOUTH)));
+        assert_eq!(threat.facts.seat_wind, Some(honor(SOUTH)));
         assert!(!value_honor.is_dragon);
         assert_eq!(value_honor.is_round_wind, Some(true));
         assert_eq!(value_honor.is_seat_wind, Some(false));
+
+        assert_eq!(
+            facts_of(&context, 1).value_honor_melds,
+            ValueHonorMeldCounts {
+                dragon: 0,
+                round_wind: 1,
+                seat_wind: 0,
+                confirmed: 1,
+                unconfirmed_wind: 0,
+            }
+        );
     }
 
     #[test]
@@ -594,11 +851,22 @@ mod tests {
             [vec![], vec![pon(SOUTH)], vec![], vec![]],
         );
         let threat = threat_of(&context, 1);
-        let value_honor = threat.melds[0].value_honor.unwrap();
+        let value_honor = threat.melds[0].facts.value_honor.unwrap();
 
-        assert_eq!(threat.seat_wind, Some(honor(SOUTH)));
+        assert_eq!(threat.facts.seat_wind, Some(honor(SOUTH)));
         assert_eq!(value_honor.is_round_wind, Some(false));
         assert_eq!(value_honor.is_seat_wind, Some(true));
+
+        assert_eq!(
+            facts_of(&context, 1).value_honor_melds,
+            ValueHonorMeldCounts {
+                dragon: 0,
+                round_wind: 0,
+                seat_wind: 1,
+                confirmed: 1,
+                unconfirmed_wind: 0,
+            }
+        );
     }
 
     #[test]
@@ -614,11 +882,24 @@ mod tests {
                 [vec![meld.clone()], vec![], vec![], vec![]],
             );
             let threat = threat_of(&context, 0);
-            let value_honor = threat.melds[0].value_honor.unwrap();
+            let value_honor = threat.melds[0].facts.value_honor.unwrap();
 
-            assert_eq!(threat.seat_wind, Some(honor(SOUTH)));
+            assert_eq!(threat.facts.seat_wind, Some(honor(SOUTH)));
             assert_eq!(value_honor.is_round_wind, Some(true), "{meld:?}");
             assert_eq!(value_honor.is_seat_wind, Some(true), "{meld:?}");
+
+            // ダブ風でも1面子として一度だけ数え、翻数へは潰さない。
+            assert_eq!(
+                facts_of(&context, 0).value_honor_melds,
+                ValueHonorMeldCounts {
+                    dragon: 0,
+                    round_wind: 1,
+                    seat_wind: 1,
+                    confirmed: 1,
+                    unconfirmed_wind: 0,
+                },
+                "{meld:?}"
+            );
         }
     }
 
@@ -633,12 +914,26 @@ mod tests {
             [vec![], vec![pon(WEST)], vec![], vec![]],
         );
         let threat = threat_of(&context, 1);
-        let value_honor = threat.melds[0].value_honor.unwrap();
+        let value_honor = threat.melds[0].facts.value_honor.unwrap();
 
-        assert_eq!(threat.seat_wind, None);
-        assert_eq!(threat.is_dealer, None);
+        assert_eq!(threat.facts.seat_wind, None);
+        assert_eq!(threat.facts.is_dealer, None);
         assert_eq!(value_honor.is_round_wind, Some(false));
         assert_eq!(value_honor.is_seat_wind, None);
+        assert!(!value_honor.is_confirmed());
+        assert!(value_honor.is_unconfirmed_wind());
+
+        // 情報不足を「役牌ではない」と確定させず、unknown として残す。
+        assert_eq!(
+            facts_of(&context, 1).value_honor_melds,
+            ValueHonorMeldCounts {
+                dragon: 0,
+                round_wind: 0,
+                seat_wind: 0,
+                confirmed: 0,
+                unconfirmed_wind: 1,
+            }
+        );
     }
 
     #[test]
@@ -651,10 +946,24 @@ mod tests {
             [false; 4],
             [vec![], vec![pon(SOUTH)], vec![], vec![]],
         );
-        let value_honor = threat_of(&context, 1).melds[0].value_honor.unwrap();
+        let value_honor = threat_of(&context, 1).melds[0].facts.value_honor.unwrap();
 
         assert_eq!(value_honor.is_round_wind, None);
         assert_eq!(value_honor.is_seat_wind, Some(true));
+        // 自風と確定しているので、場風が不明でも役牌としては確定している。
+        assert!(value_honor.is_confirmed());
+        assert!(!value_honor.is_unconfirmed_wind());
+
+        assert_eq!(
+            facts_of(&context, 1).value_honor_melds,
+            ValueHonorMeldCounts {
+                dragon: 0,
+                round_wind: 0,
+                seat_wind: 1,
+                confirmed: 1,
+                unconfirmed_wind: 0,
+            }
+        );
     }
 
     #[test]
@@ -674,8 +983,12 @@ mod tests {
         );
         let threat = threat_of(&context, 1);
 
-        assert_eq!(threat.melds[0].value_honor, None);
-        assert_eq!(threat.melds[1].value_honor, None);
+        assert_eq!(threat.melds[0].facts.value_honor, None);
+        assert_eq!(threat.melds[1].facts.value_honor, None);
+        assert_eq!(
+            facts_of(&context, 1).value_honor_melds,
+            ValueHonorMeldCounts::default()
+        );
     }
 
     #[test]
@@ -688,30 +1001,47 @@ mod tests {
             [false; 4],
             Default::default(),
         );
-        let threats = diagnose_player_threats(&context);
+        let facts = player_threat_facts_from_context(&context);
 
-        assert_eq!(threats[2].is_self, Some(true));
-        assert_eq!(threats[2].is_opponent(), Some(false));
+        assert_eq!(facts[2].is_self, Some(true));
+        assert_eq!(facts[2].is_opponent(), Some(false));
         for player in [0, 1, 3] {
-            assert_eq!(threats[player].is_self, Some(false));
-            assert_eq!(threats[player].is_opponent(), Some(true));
+            assert_eq!(facts[player].is_self, Some(false));
+            assert_eq!(facts[player].is_opponent(), Some(true));
         }
-        assert_eq!(threats[0].is_dealer, Some(true));
-        assert_eq!(threats[1].is_dealer, Some(false));
+        assert_eq!(facts[0].is_dealer, Some(true));
+        assert_eq!(facts[1].is_dealer, Some(false));
     }
 
     #[test]
     fn unknown_player_id_does_not_guess_the_self_seat() {
         let context = context([vec![pon(HAKU)], vec![], vec![], vec![]]);
-        let threats = diagnose_player_threats(&context);
+        let facts = player_threat_facts_from_context(&context);
 
-        assert_eq!(threats.len(), 4);
-        for (player, threat) in threats.iter().enumerate() {
-            assert_eq!(threat.player, player);
-            assert_eq!(threat.is_self, None);
-            assert_eq!(threat.is_opponent(), None);
+        assert_eq!(facts.len(), 4);
+        for (player, facts) in facts.iter().enumerate() {
+            assert_eq!(facts.player, player);
+            assert_eq!(facts.is_self, None);
+            assert_eq!(facts.is_opponent(), None);
         }
-        assert_eq!(threats[0].meld_count, 1);
+        assert_eq!(facts[0].meld_count, 1);
+    }
+
+    #[test]
+    fn unknown_oya_does_not_guess_the_dealer_or_seat_wind() {
+        let context = context_with(
+            Some(0),
+            None,
+            Some(honor(EAST)),
+            vec![],
+            [false; 4],
+            Default::default(),
+        );
+
+        for facts in player_threat_facts_from_context(&context) {
+            assert_eq!(facts.is_dealer, None);
+            assert_eq!(facts.seat_wind, None);
+        }
     }
 
     #[test]
@@ -726,10 +1056,10 @@ mod tests {
         );
         let threat = threat_of(&context, 1);
 
-        assert!(threat.reached);
-        assert_eq!(threat.meld_count, 2);
-        assert_eq!(threat.open_meld_count, 2);
-        assert!(threat.melds[0].value_honor.unwrap().is_dragon);
+        assert!(threat.facts.reached);
+        assert_eq!(threat.facts.meld_count, 2);
+        assert_eq!(threat.facts.open_meld_count, 2);
+        assert!(threat.melds[0].facts.value_honor.unwrap().is_dragon);
     }
 
     #[test]
@@ -740,7 +1070,7 @@ mod tests {
         assert_eq!(
             threats
                 .iter()
-                .map(|threat| (threat.player, threat.meld_count))
+                .map(|threat| (threat.facts.player, threat.facts.meld_count))
                 .collect::<Vec<_>>(),
             [(0, 0), (1, 1), (2, 0), (3, 1)]
         );
@@ -769,5 +1099,185 @@ mod tests {
         };
 
         assert_eq!(diagnose_player_threat(inputs), threat_of(&context, 1));
+        assert_eq!(player_threat_facts(inputs), facts_of(&context, 1));
+    }
+
+    // ---- 軽量 facts と full diagnostic の一致 ----
+
+    #[test]
+    fn lightweight_facts_match_the_full_diagnostic_for_every_seat() {
+        let context = mixed_threat_context();
+        let facts = player_threat_facts_from_context(&context);
+        let threats = diagnose_player_threats(&context);
+
+        for player in 0..4 {
+            assert_eq!(facts[player], threats[player].facts, "player {player}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_melds_share_the_meld_facts() {
+        let context = mixed_threat_context();
+        let threats = diagnose_player_threats(&context);
+
+        for (player, threat) in threats.iter().enumerate() {
+            let melds = context.melds_of(player).unwrap();
+            assert_eq!(threat.melds.len(), melds.len());
+            for (meld, diagnostic) in melds.iter().zip(&threat.melds) {
+                assert_eq!(
+                    diagnostic.facts,
+                    meld_threat_facts(
+                        meld,
+                        context.dora_indicators(),
+                        context.round_wind(),
+                        context.seat_wind_of(player),
+                    )
+                );
+                assert_eq!(diagnostic.tiles, meld.tiles());
+            }
+        }
+    }
+
+    #[test]
+    fn diagnosing_with_facts_keeps_the_given_facts() {
+        let context = mixed_threat_context();
+        let facts = player_threat_facts_from_context(&context);
+
+        assert_eq!(
+            diagnose_player_threats_with_facts(&context, &facts),
+            diagnose_player_threats(&context)
+        );
+    }
+
+    #[test]
+    fn meld_aggregates_match_the_sum_of_meld_facts() {
+        let context = mixed_threat_context();
+        let facts = player_threat_facts_from_context(&context);
+        let threats = diagnose_player_threats(&context);
+
+        for (player, threat) in threats.iter().enumerate() {
+            let expected_dora: u8 = threat.melds.iter().map(|meld| meld.facts.dora_count).sum();
+            let expected_red: u8 = threat
+                .melds
+                .iter()
+                .map(|meld| meld.facts.red_dora_count)
+                .sum();
+
+            assert_eq!(facts[player].meld_count, threat.melds.len());
+            assert_eq!(
+                facts[player].open_meld_count,
+                threat.melds.iter().filter(|m| m.facts.is_open).count()
+            );
+            assert_eq!(
+                facts[player].kan_count,
+                threat.melds.iter().filter(|m| m.facts.is_kan).count()
+            );
+            assert_eq!(facts[player].meld_dora_count, expected_dora);
+            assert_eq!(facts[player].meld_red_dora_count, expected_red);
+            assert_eq!(
+                facts[player].meld_kinds,
+                MeldKindCounts::of(context.melds_of(player).unwrap())
+            );
+        }
+    }
+
+    // ---- リーチ情報の source of truth ----
+
+    #[test]
+    fn reach_facts_match_the_context_reach_information() {
+        // player_id / oya / reached のあらゆる組み合わせで、facts 由来のリーチ情報が
+        // GameContext のリーチ情報と一致する。
+        let reach_patterns = [
+            [false, false, false, false],
+            [true, false, false, false],
+            [false, true, false, false],
+            [true, true, false, false],
+            [false, true, true, false],
+            [true, true, true, true],
+        ];
+
+        for player_id in [None, Some(0), Some(2)] {
+            for oya in [None, Some(0), Some(1)] {
+                for reached in reach_patterns {
+                    let context =
+                        context_with(player_id, oya, None, vec![], reached, Default::default());
+                    let facts = player_threat_facts_from_context(&context);
+                    let reached_opponents = context.reached_opponents();
+
+                    for (player, facts) in facts.iter().enumerate() {
+                        assert_eq!(facts.reached, context.is_reached(player));
+                        assert_eq!(
+                            facts.is_reached_opponent(),
+                            reached_opponents.contains(&player),
+                            "{player_id:?} {oya:?} {reached:?} player {player}"
+                        );
+                    }
+
+                    assert_eq!(
+                        usize::from(reached_opponent_count(&facts)),
+                        reached_opponents.len(),
+                        "{player_id:?} {oya:?} {reached:?}"
+                    );
+                    assert_eq!(
+                        has_reached_dealer(&facts),
+                        oya.is_some_and(|oya| reached_opponents.contains(&usize::from(oya))),
+                        "{player_id:?} {oya:?} {reached:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_player_id_keeps_every_reacher_as_an_opponent() {
+        // player_id 不明でリーチ者を0人扱いにしない。
+        let context = context_with(
+            None,
+            None,
+            None,
+            vec![],
+            [true, false, true, false],
+            Default::default(),
+        );
+        let facts = player_threat_facts_from_context(&context);
+
+        assert_eq!(reached_opponent_count(&facts), 2);
+        assert!(facts[0].is_reached_opponent());
+        assert!(facts[2].is_reached_opponent());
+        assert!(!facts[1].is_reached_opponent());
+    }
+
+    #[test]
+    fn own_reach_is_not_an_opponent_reach() {
+        let context = context_with(
+            Some(0),
+            Some(0),
+            None,
+            vec![],
+            [true, false, false, false],
+            Default::default(),
+        );
+        let facts = player_threat_facts_from_context(&context);
+
+        assert!(facts[0].reached);
+        assert!(!facts[0].is_reached_opponent());
+        assert_eq!(reached_opponent_count(&facts), 0);
+        assert!(!has_reached_dealer(&facts));
+    }
+
+    #[test]
+    fn unknown_oya_does_not_confirm_a_dealer_reach() {
+        let context = context_with(
+            Some(0),
+            None,
+            None,
+            vec![],
+            [false, true, false, false],
+            Default::default(),
+        );
+        let facts = player_threat_facts_from_context(&context);
+
+        assert_eq!(reached_opponent_count(&facts), 1);
+        assert!(!has_reached_dealer(&facts));
     }
 }
