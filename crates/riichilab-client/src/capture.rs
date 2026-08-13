@@ -55,7 +55,8 @@ pub fn init(
 fn open_capture_file(path: &Path) -> Result<File, CaptureError> {
     File::options()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(path)
         .map_err(|source| CaptureError::OpenCaptureFile {
             path: path.to_path_buf(),
@@ -237,6 +238,39 @@ mod tests {
 
         assert_eq!(contents, format!("{text}\n"));
         assert_eq!(contents.lines().count(), 1);
+    }
+
+    #[test]
+    fn init_replaces_an_existing_capture_file() {
+        let path = temp_capture_path("truncate");
+        std::fs::write(&path, format!("{}\n", request_action_text(900, "OLD"))).unwrap();
+        let text = request_action_text(1, "AAA");
+
+        let contents = write_records(&path, std::slice::from_ref(&text));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(contents, format!("{text}\n"));
+        assert!(!contents.contains("OLD"), "{contents}");
+    }
+
+    #[test]
+    fn re_running_init_starts_a_new_capture_session() {
+        let path = temp_capture_path("new-session");
+        let _ = std::fs::remove_file(&path);
+
+        let first_session = write_records(
+            &path,
+            &[request_action_text(1, "AAA"), request_action_text(2, "BBB")],
+        );
+        assert_eq!(first_session.lines().count(), 2);
+
+        let text = request_action_text(3, "CCC");
+        let second_session = write_records(&path, std::slice::from_ref(&text));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(second_session, format!("{text}\n"));
+        assert!(!second_session.contains("AAA"), "{second_session}");
+        assert!(!second_session.contains("BBB"), "{second_session}");
     }
 
     #[test]

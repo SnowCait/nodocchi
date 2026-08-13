@@ -93,12 +93,21 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 | 形式 | JSONL。`request_action` 1件が1行1 JSON object |
 | 保存内容 | 受信した `request_action` の raw JSON そのもの。`request_id` / `possible_actions` / `observation` / `time` など受信した field をすべて保持する |
 | 保存対象 | `request_action` のみ。`start_game` / `action_ack` / `end_game` などは保存しない |
+| 単位 | client 1起動 = 1対局 = capture file 1つ |
 | file | `--log-file` とは別 file。`observation` の base64 が大きいため通常 log には混ぜない |
 | 未指定時 | capture 処理を一切行わない。clone・JSON 変換・file I/O ともに追加されない |
 
 `GameContext` から `request_action` を逆生成せず、受信した JSON をそのまま1行として書きます。decode → 再 serialize による情報欠落が無いため、後から同じ局面を正確に再生できます。
 
-JSONL なので、1対局から複数局面を保存でき、途中終了してもそこまでの record をそのまま利用できます。`grep` や `jq` で request_id を絞り込めます。
+capture file は「client 1起動 = ranked 1対局または validation 1対局」の単位で扱います。起動時に既存 file の内容へ追記せず、新しい session として file を置き換えます（既存 file があれば truncate します）。RiichiLab の `request_id` は対局内では一意ですが、対局を跨いだ一意性は保証されないため、1 file に複数対局を混ぜません。複数対局を残したい場合は、対局ごとに別 path を指定してください。
+
+```bash
+cargo run -p riichilab-client --bin riichilab-client -- \
+  ranked --agent shanten \
+  --capture-file "logs/ranked-capture-$(date +%Y%m%d-%H%M%S).jsonl"
+```
+
+1対局の中では、複数の `request_action` を同じ file へ順次追記します。JSONL なので、途中終了してもそこまでの record をそのまま利用できます。`grep` や `jq` で request_id を絞り込めます。
 
 ```bash
 jq -r 'select(.request_id == 425)' logs/ranked-capture.jsonl

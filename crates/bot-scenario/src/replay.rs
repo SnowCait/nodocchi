@@ -115,6 +115,7 @@ mod tests {
         Agent, LegalAction, MeldKind, PushPullMode, PushPullReason, ShantenAgent,
         player_threat_facts_from_context,
     };
+    use riichilab_client::capture;
     use riichilab_client::observation::{
         fixture_base64, fixture_base64_with_melds, fixture_meld,
         game_context_from_decoded_observation,
@@ -268,6 +269,32 @@ mod tests {
                 .map(|diagnostic| diagnostic.facts),
             player_threat_facts_from_context(&direct.context)
         );
+    }
+
+    #[test]
+    fn selects_a_record_of_a_capture_session_written_by_the_client() {
+        let observation = observation_base64();
+        let path = std::env::temp_dir().join(format!(
+            "bot-scenario-replay-session-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
+        for request_id in [431, 432, 433] {
+            capture.write_record(&request_action_line(request_id, &observation));
+        }
+        drop(capture);
+        drop(guard);
+
+        let path = path.to_str().unwrap().to_string();
+        let captured = load_captured_scenario(&path, Some(432)).unwrap();
+        let error = load_captured_scenario(&path, None).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(captured.request_id, 432);
+        assert_eq!(captured.possible_action_count, CAPTURED_DAHAI.len());
+        assert_eq!(error, ScenarioError::AmbiguousCapture { path, count: 3 });
     }
 
     #[test]
