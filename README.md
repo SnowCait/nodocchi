@@ -538,10 +538,10 @@ OpenHand defense
 | `discarded by target[n]` | その相手自身の河に同じ牌種があるか |
 | `discarded by all targets` | 全 target 自身の河にあるか。target が0人なら `no` |
 | `honor safety` | 字牌の見え枚数による安全度。既存 Defense と同じ4段階 |
-| `opponent honor value` | target にとっての役牌価値。最も危険な値を採る |
+| `opponent honor value` | まだロンされ得る target にとっての役牌価値。最も危険な値を採る |
 | `wall` | 順子待ち経路の壁 / ワンチャンス。見え牌由来で target に依らない |
-| `suji safety[n]` | その相手の河に対するスジ安全度 |
-| `suji safety` | target 全体のスジ安全度。最も危険な rank を採る |
+| `suji safety[n]` | その相手の河に対するスジ安全度。その相手単独の評価 |
+| `suji safety` | まだロンされ得る target 全体のスジ安全度。最も危険な rank を採る |
 | `suited safety` | 壁とスジを統合した数牌の安全度 |
 | `category` | `DiscardedByAllTargets` → `HonorSafety` → `SuitedSafety` の大分類 |
 
@@ -550,6 +550,8 @@ M リーグ公式ルールでは「自己の捨て牌にアガリ形を構成で
 一方、`post_reach_passed`（リーチ成立後に他家から切られて通った牌）はリーチ者専用で、非リーチ副露相手には使いません。リーチ者向けの現物 (`Defense` の `genbutsu`) が本人の河と `post_reach_passed` の両方を含むのに対し、`OpenHand defense` は本人の河だけを見ます。「本人の河」と「リーチ後に通った牌」を混ぜないため、第一分類の名前も `Genbutsu` とは分けています。
 
 字牌の見え枚数・役牌価値・壁・スジは既存 Defense と同じ判定を共有し、副露相手用に別実装を持ちません。違うのは対象 player 集合の決め方だけで、複数 target の集約はリーチ者向けと同じく最も危険な評価（スジは最小 rank、役牌価値は最大値）を採ります。場風や親が不明で風牌を確定できない場合は `-` のままにし、客風とは推測しません。
+
+target ごとに評価が変わる `opponent honor value` / `suji safety` / `suited safety` は、その牌でまだロンされ得る target だけを集約します。`discarded by target[n]: yes` の相手はフリテンでその牌をロンできないため、その相手の無スジや役牌価値を全体の危険度に持ち込みません。除外根拠は本人の河だけで、`post_reach_passed` は使いません。`suji safety[n]` はその相手単独の評価なので、除外された相手の値は集約後の `suji safety` と一致しないことがあります。全 target が河に切っている牌は集約対象が0人になりますが、`suji safety` を `Suji` とは扱わず、安全根拠は `category: DiscardedByAllTargets` が表します。
 
 この section は現時点では診断専用です。`High` の相手がいても `decide_push_pull()` / `PushPullMode` / 防御 fallback の採用条件 / 最終 action は変わりません。押し引きと防御 fallback への接続は次の変更で行います。
 

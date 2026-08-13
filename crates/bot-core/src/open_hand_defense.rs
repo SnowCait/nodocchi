@@ -62,11 +62,28 @@ pub fn is_discarded_by_all_open_hand_threats(
     is_discarded_by_all_players(tile, targets, context)
 }
 
+// 対象牌でまだロンされ得る target。target ごとに評価が変わる safety はこの集合だけを集約する。
+//
+// 対象牌が自身の河にある target はフリテンでその牌をロンできないため、その target の評価が
+// 全体の安全度を悪化させないよう除外する。除外根拠は本人の河 ([`is_discarded_by_player`]) だけ
+// で、`post_reach_passed_tiles` は使わない。
+//
+// 全 target が対象牌を河に切っている場合は空になる。空集合は「安全と確定した」ではなく
+// 「target ごとの評価が無い」で、その場合の安全根拠は
+// [`OpenHandDefenseCategory::DiscardedByAllTargets`] が表す。
+fn ron_capable_targets(tile: TileType, targets: &[usize], context: &GameContext) -> Vec<usize> {
+    targets
+        .iter()
+        .copied()
+        .filter(|&player| !is_discarded_by_player(tile, player, context))
+        .collect()
+}
+
 /// target に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
 ///
-/// 対象牌が自身の河にある target からはロンされないので、その target は集約対象から除外する。
-/// target がいない場合、全 target 自身の河にある場合、情報不足で誰の分も確定できない場合は
-/// `None` (unknown)。情報不足を `GuestWind` と推測しない。
+/// 対象牌が自身の河にある target からはロンされないので、その target は集約対象から除外する
+/// ([`ron_capable_targets`])。target がいない場合、全 target 自身の河にある場合、情報不足で
+/// 誰の分も確定できない場合は `None` (unknown)。情報不足を `GuestWind` と推測しない。
 ///
 /// 集約は既存 Defense と同じ [`opponent_honor_value_for_players`]。
 pub fn opponent_honor_value_for_open_hand_threats(
@@ -74,38 +91,37 @@ pub fn opponent_honor_value_for_open_hand_threats(
     targets: &[usize],
     context: &GameContext,
 ) -> Option<OpponentHonorValue> {
-    let targets: Vec<usize> = targets
-        .iter()
-        .copied()
-        .filter(|&player| !is_discarded_by_player(tile, player, context))
-        .collect();
-    opponent_honor_value_for_players(tile, &targets, context)
+    opponent_honor_value_for_players(tile, &ron_capable_targets(tile, targets, context), context)
 }
 
 /// target の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
 ///
-/// 各 target の [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。target が0人なら
-/// `NoSuji` で、安全牌としては扱わない。判定も集約も既存 Defense の
-/// [`suji_safety_rank_for_players`] と共有する。
+/// 対象牌が自身の河にある target は役牌価値と同じく集約対象から除外する
+/// ([`ron_capable_targets`])。その target からはロンされないので、その河のスジが無いことを
+/// 全体の危険度に持ち込まない。
+///
+/// 残った target の [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。target が0人の
+/// 場合と全 target 自身の河にある場合は `NoSuji` で、スジがあるとは扱わない。判定も集約も既存
+/// Defense の [`suji_safety_rank_for_players`] と共有する。
 pub fn suji_safety_rank_for_open_hand_threats(
     tile: TileType,
     targets: &[usize],
     context: &GameContext,
 ) -> Option<SujiSafetyRank> {
-    suji_safety_rank_for_players(tile, targets, context)
+    suji_safety_rank_for_players(tile, &ron_capable_targets(tile, targets, context), context)
 }
 
 /// target に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で `None`。
 ///
 /// 壁は見え牌由来で target に依らないため既存 [`wall_rank`] をそのまま使い、スジは
-/// [`suji_safety_rank_for_open_hand_threats`] を使う。分類は既存 Defense の
-/// [`suited_safety_rank_for_players`] と共有する。
+/// [`suji_safety_rank_for_open_hand_threats`] と同じ [`ron_capable_targets`] だけを集約する。
+/// 分類は既存 Defense の [`suited_safety_rank_for_players`] と共有する。
 pub fn suited_safety_rank_for_open_hand_threats(
     tile: TileType,
     targets: &[usize],
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    suited_safety_rank_for_players(tile, targets, context)
+    suited_safety_rank_for_players(tile, &ron_capable_targets(tile, targets, context), context)
 }
 
 /// target に対する防御候補の大分類。
@@ -152,6 +168,10 @@ pub struct OpenHandDefenseTargetSafety {
     /// `post_reach_passed_tiles` は含まない。
     pub discarded_by_target: bool,
     /// この target の河に対する [`suji_safety_rank_for`]。字牌では `None`。
+    ///
+    /// この target 単独の評価そのもので、`discarded_by_target` による除外は行わない。集約側
+    /// ([`OpenHandDefenseCandidateDiagnostic::suji_safety_rank`]) は
+    /// `discarded_by_target` が `true` の target を外すため、両者の値は一致しないことがある。
     pub suji_safety_rank: Option<SujiSafetyRank>,
 }
 
@@ -180,6 +200,8 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
+    /// 対象牌が自身の河にある target は集約対象から外れるため、`targets` の
+    /// `suji_safety_rank` をそのまま最小値へ潰した値とは一致しないことがある。
     pub suji_safety_rank: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
     /// [`open_hand_defense_category`] による大分類。
@@ -812,6 +834,121 @@ mod tests {
         assert_eq!(
             suji_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
             Some(SujiSafetyRank::HalfSuji)
+        );
+    }
+
+    #[test]
+    fn a_target_with_the_tile_in_its_river_does_not_lower_the_suji_rank() {
+        // player 2 は 5m を河に切っているのでフリテンでロンできない。その無スジを集約に
+        // 持ち込まず、ロンされ得る player 3 の両側スジがそのまま全体の評価になる。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(2, "5m")
+            .discards_of(3, "2m 8m")
+            .build();
+        let targets = targets(&context);
+
+        assert_eq!(targets, vec![2, 3]);
+        assert!(is_discarded_by_player(tile_type("5m"), 2, &context));
+        assert_eq!(
+            suji_safety_rank_for(tile_type("5m"), 2, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suji_safety_rank_for(tile_type("5m"), 3, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+
+        assert_eq!(
+            suji_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn a_remaining_target_without_a_suji_still_lowers_the_suji_rank() {
+        // player 2 は 5m を河に切っているが、player 3 にはまだロンされ得るので無スジのまま。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(2, "5m")
+            .build();
+        let targets = targets(&context);
+
+        assert_eq!(targets, vec![2, 3]);
+        assert!(!is_discarded_by_player(tile_type("5m"), 3, &context));
+        assert_eq!(
+            suji_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+    }
+
+    #[test]
+    fn a_tile_in_every_targets_river_keeps_the_first_category() {
+        // 全 target が河に切っている牌は集約対象が0人になるが、安全根拠は本人の河の分類が持つ。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(2, "5m")
+            .discards_of(3, "5m")
+            .build();
+        let targets = targets(&context);
+
+        assert!(is_discarded_by_all_open_hand_threats(
+            tile_type("5m"),
+            &targets,
+            &context
+        ));
+        assert_eq!(
+            open_hand_defense_category(tile_type("5m"), &targets, &context),
+            Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+        );
+        // 集約対象が0人でも「スジがある」とは扱わない。
+        assert_eq!(
+            suji_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+    }
+
+    #[test]
+    fn a_post_reach_passed_tile_does_not_exclude_a_target_from_the_aggregate() {
+        // post_reach_passed_tiles は非リーチ副露相手の除外根拠にしない。player 2 は 5m を
+        // 河に切っていないので、その無スジも役牌価値もそのまま集約へ入る。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(3, "2m 8m")
+            .post_reach_passed(2, "5m E")
+            .build();
+        let targets = targets(&context);
+
+        assert!(context.is_post_reach_passed(tile_type("5m"), 2));
+        assert!(!is_discarded_by_player(tile_type("5m"), 2, &context));
+        assert_eq!(
+            suji_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_open_hand_threats(tile_type("5m"), &targets, &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+        // 役牌価値も同じ除外規則を共有する。
+        assert_eq!(
+            opponent_honor_value_for_open_hand_threats(tile_type("E"), &targets, &context),
+            Some(OpponentHonorValue::SingleValueHonor)
         );
     }
 

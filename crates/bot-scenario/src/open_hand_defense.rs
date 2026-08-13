@@ -264,6 +264,48 @@ fn every_candidate_reports_the_production_safety_helpers() {
 }
 
 #[test]
+fn a_target_with_the_tile_in_its_river_is_excluded_from_the_aggregated_suji() {
+    // player 3 の河へ 3s を足すと、player 3 はフリテンで 3s をロンできなくなる。その無スジは
+    // 集約に持ち込まれず、まだロンされ得る player 1 の両側スジがそのまま全体の評価になる。
+    let mut spec = spec();
+    spec.discards = Some(vec![
+        "C 2p".to_string(),
+        "5m 1p 7p 6s".to_string(),
+        "9p 1s 4s F".to_string(),
+        "5m 1p 7p 2m 3s".to_string(),
+    ]);
+    let scenario = resolve(&spec);
+    let diagnostic = diagnose(&scenario);
+    let three_sou = candidate(&diagnostic, "3s");
+
+    assert_eq!(
+        three_sou
+            .targets
+            .iter()
+            .map(|target| (
+                target.player,
+                target.discarded_by_target,
+                target.suji_safety_rank
+            ))
+            .collect::<Vec<(usize, bool, Option<SujiSafetyRank>)>>(),
+        vec![
+            (DEALER_TARGET, false, Some(SujiSafetyRank::Suji)),
+            (CHILD_TARGET, true, Some(SujiSafetyRank::NoSuji)),
+        ]
+    );
+    // 全 target の河にある訳ではないので第一分類にはならないが、集約は Suji のまま。
+    assert!(!three_sou.discarded_by_all_targets);
+    assert_eq!(three_sou.suji_safety_rank, Some(SujiSafetyRank::Suji));
+    assert_eq!(three_sou.suited_safety_rank, Some(SuitedSafetyRank::Suji));
+    assert_eq!(
+        three_sou.category,
+        Some(OpenHandDefenseCategory::SuitedSafety(
+            SuitedSafetyRank::Suji
+        ))
+    );
+}
+
+#[test]
 fn a_post_reach_passed_tile_is_not_river_safe_for_a_non_reach_target() {
     // post_reach_passed はリーチ者専用の情報で、非リーチ副露相手には流用しない。
     let mut spec = spec();
