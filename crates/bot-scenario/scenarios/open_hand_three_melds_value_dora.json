@@ -1,0 +1,40 @@
+{
+  "hand": "234m 567m 88m 345p 67p",
+  "draw": "N",
+
+  "dora_indicators": "9s",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 1,
+
+  "reached": [false, false, false, false],
+
+  "discards": ["", "", "P 1s 4s 6s 7s", ""],
+
+  "melds": [
+    [],
+    [],
+    [],
+    [
+      {
+        "kind": "pon",
+        "tiles": "P P P",
+        "called_tile": "P"
+      },
+      {
+        "kind": "chi",
+        "tiles": "1s 2s 3s",
+        "called_tile": "1s"
+      },
+      {
+        "kind": "chi",
+        "tiles": "4s 0s 6s",
+        "called_tile": "6s"
+      }
+    ]
+  ],
+
+  "legal_dahai": "N 8m 2m"
+}
