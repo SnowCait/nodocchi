@@ -10,7 +10,10 @@ use crate::discard_selection::{
     select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
     selected_discard_tenpai_wait_availability,
 };
-use crate::open_hand_defense::OpenHandDefenseDiagnostic;
+use crate::open_hand_defense::{
+    OpenHandDefenseCategory, OpenHandDefenseDiagnostic, high_open_hand_threat_players,
+    select_open_hand_defense_fallback_action_with_kind,
+};
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -44,6 +47,11 @@ const PON_CONSUMED_TILE_COUNT: usize = 2;
 /// 最終 action がどの経路で選ばれたかを表す診断。プロトコル非依存。
 ///
 /// `ShantenAgent::act()` が実際に通った経路そのものであり、診断用の別判断ロジックではない。
+///
+/// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`] と、非リーチ副露相手向けの
+/// [`Self::OpenHandDefenseFallback`] を別の経路として区別する。リーチ者向けの現物
+/// ([`DefenseFallbackKind::Genbutsu`]) と全 target 本人の河
+/// ([`OpenHandDefenseCategory::DiscardedByAllTargets`]) は根拠が違うため、同じ種別へ押し込まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentActionSource {
     Hora,
@@ -52,6 +60,7 @@ pub enum AgentActionSource {
     Reach,
     NormalDiscard,
     DefenseFallback(DefenseFallbackKind),
+    OpenHandDefenseFallback(OpenHandDefenseCategory),
     LegalDahaiFallback,
     None,
 }
@@ -66,15 +75,25 @@ impl AgentActionSource {
             AgentActionSource::Reach => "Reach",
             AgentActionSource::NormalDiscard => "NormalDiscard",
             AgentActionSource::DefenseFallback(_) => "DefenseFallback",
+            AgentActionSource::OpenHandDefenseFallback(_) => "OpenHandDefenseFallback",
             AgentActionSource::LegalDahaiFallback => "LegalDahaiFallback",
             AgentActionSource::None => "None",
         }
     }
 
-    /// 防御 fallback 経路で選ばれた場合のその種別。他の経路では `None`。
+    /// リーチ者向けの防御 fallback 経路で選ばれた場合のその種別。他の経路では `None`。
     pub fn defense_kind(&self) -> Option<DefenseFallbackKind> {
         match self {
             AgentActionSource::DefenseFallback(kind) => Some(*kind),
+            _ => None,
+        }
+    }
+
+    /// 非リーチ副露相手向けの防御 fallback 経路で選ばれた場合のその大分類。
+    /// 他の経路では `None`。
+    pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
+        match self {
+            AgentActionSource::OpenHandDefenseFallback(category) => Some(*category),
             _ => None,
         }
     }
@@ -343,15 +362,22 @@ pub struct ShantenDecisionDiagnostic {
     /// `High` の相手がいない局面では `targets` も `candidates` も空になる。
     ///
     /// 防御 fallback ([`Self::defense`]) がリーチ者向けなのに対し、こちらは非リーチ副露相手
-    /// 向けで、現物相当の根拠に `post_reach_passed_tiles` を使わない。押し引き・防御 fallback の
-    /// 採用条件・selected action のどれにも影響しない解析専用の情報。
+    /// 向けで、現物相当の根拠に `post_reach_passed_tiles` を使わない。`selected` は `act()` が
+    /// 実際に採用した OpenHand 防御 fallback で、診断側で選び直さない。採用しなかった局面では
+    /// `None` になり、候補評価だけが解析用に残る。
     pub open_hand_defense: OpenHandDefenseDiagnostic,
 }
 
 impl ShantenDecisionDiagnostic {
-    /// 最終 action が防御 fallback 由来の場合のその種別。他の経路では `None`。
+    /// 最終 action がリーチ者向けの防御 fallback 由来の場合のその種別。他の経路では `None`。
     pub fn defense_fallback_kind(&self) -> Option<DefenseFallbackKind> {
         self.selected_source.defense_kind()
+    }
+
+    /// 最終 action が非リーチ副露相手向けの防御 fallback 由来の場合のその大分類。
+    /// 他の経路では `None`。
+    pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
+        self.selected_source.open_hand_defense_category()
     }
 }
 
@@ -476,6 +502,17 @@ impl ShantenAgent {
         let open_hand_threats =
             std::array::from_fn(|player| player_threats[player].open_hand_threat);
 
+        // 採用された OpenHand 防御 fallback は act() が通った経路そのもの。診断側で選び直さない。
+        let open_hand_defense = OpenHandDefenseDiagnostic::from_assessments(
+            context,
+            legal_actions,
+            &open_hand_threats,
+            decision
+                .source
+                .open_hand_defense_category()
+                .map(|category| (&decision.action, category)),
+        );
+
         ShantenDecisionDiagnostic {
             selected_action: decision.action,
             selected_source: decision.source,
@@ -490,11 +527,7 @@ impl ShantenAgent {
             pon: decision.pon,
             own_fixed_meld_count: context.own_fixed_meld_count(),
             player_threats,
-            open_hand_defense: OpenHandDefenseDiagnostic::from_assessments(
-                context,
-                legal_actions,
-                &open_hand_threats,
-            ),
+            open_hand_defense,
         }
     }
 
@@ -578,6 +611,7 @@ impl ShantenAgent {
             push_pull.mode,
             ctx,
             legal_actions,
+            &inputs,
             &discard_selection,
             &mut reach,
             diagnostics,
@@ -657,14 +691,19 @@ impl ShantenAgent {
     // - Neutral: 通常打牌 → 防御 fallback(Reach は検討しない)
     // - Fold:    防御 fallback → 通常打牌(Reach は検討しない)
     //
+    // Push / Neutral の順序は OpenHandThreat が High でも変えない。安全牌を通常打牌より優先
+    // するのは Fold の場合だけ。
+    //
     // リーチ判断と通常打牌・押し引きは同じ `discard_selection` を参照する。リーチのために打牌を
     // 選び直したり、待ちを別経路で計算し直したりしない。検討した場合の判断内訳は `reach` へ
     // 書き込み、検討しなかった Neutral / Fold では `None` のままにする。
+    #[allow(clippy::too_many_arguments)]
     fn select_action_for_push_pull_mode(
         &self,
         mode: PushPullMode,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
+        inputs: &PushPullInputs,
         discard_selection: &DiscardActionSelection,
         reach: &mut Option<ReachDecisionDiagnostic>,
         diagnostics: &mut DecisionDiagnostics,
@@ -688,7 +727,8 @@ impl ShantenAgent {
                 self.select_defense_fallback(ctx, legal_actions, diagnostics)
             }
             PushPullMode::Fold => {
-                if let Some(result) = self.select_defense_fallback(ctx, legal_actions, diagnostics)
+                if let Some(result) =
+                    self.select_fold_defense(ctx, legal_actions, inputs, diagnostics)
                 {
                     return Some(result);
                 }
@@ -697,6 +737,40 @@ impl ShantenAgent {
                     .map(|action| (action, AgentActionSource::NormalDiscard))
             }
         }
+    }
+
+    // Fold 時の防御 fallback。他家リーチがいる局面は従来どおりリーチ者向けの防御 fallback を
+    // 使い、他家リーチが0人で High OpenHandThreat の相手だけがいる局面は OpenHand 防御
+    // fallback を使う。両者の safety を1つに集約することはしない。
+    fn select_fold_defense(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        inputs: &PushPullInputs,
+        diagnostics: &mut DecisionDiagnostics,
+    ) -> Option<(LegalAction, AgentActionSource)> {
+        if inputs.opponent_reach_count > 0 {
+            return self.select_defense_fallback(ctx, legal_actions, diagnostics);
+        }
+        self.select_open_hand_defense_fallback(ctx, legal_actions, inputs)
+    }
+
+    // High OpenHandThreat の相手に対する防御 fallback。target は押し引き入力が持つ
+    // classification をそのまま使い、分類し直さない。選択は production selector が source of
+    // truth で、通常 act() では候補ごとの構造化診断を構築しない。
+    fn select_open_hand_defense_fallback(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        inputs: &PushPullInputs,
+    ) -> Option<(LegalAction, AgentActionSource)> {
+        let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+        let (action, category) =
+            select_open_hand_defense_fallback_action_with_kind(ctx, legal_actions, &targets)?;
+        Some((
+            action.clone(),
+            AgentActionSource::OpenHandDefenseFallback(category),
+        ))
     }
 
     // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action と種別を返す。
@@ -931,6 +1005,10 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(kind) => format!("{kind:?}"),
         None => "None".to_string(),
     };
+    let open_hand_defense_category = match decision.source.open_hand_defense_category() {
+        Some(category) => format!("{category:?}"),
+        None => "None".to_string(),
+    };
     let pon_reason = match &decision.pon {
         Some(pon) => format!("{:?}", pon.reason),
         None => "None".to_string(),
@@ -949,6 +1027,7 @@ fn log_agent_decision(decision: &AgentDecision) {
         normal_discard = %normal_discard,
         reach_reason = %reach_reason,
         defense_kind = %defense_kind,
+        open_hand_defense_category = %open_hand_defense_category,
         pon_reason = %pon_reason,
         "agent decision",
     );
@@ -1026,7 +1105,7 @@ impl Agent for ShantenAgent {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::defense::{HonorSafetyRank, select_defense_fallback_action};
+    use crate::defense::{HonorSafetyRank, SuitedSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{
         PushPullReason, push_pull_inputs_from_context,
@@ -3141,9 +3220,11 @@ pub(crate) mod tests {
         // target は player_threats の classification と同じ source of truth から選ぶ。
         assert_eq!(diagnostic.open_hand_defense.targets, vec![1]);
         assert!(diagnostic.open_hand_defense.has_target());
+        // この局面はテンパイなので Push のまま。OpenHand 防御 fallback は採用されない。
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
         assert_eq!(
             diagnostic.open_hand_defense,
-            OpenHandDefenseDiagnostic::from_context(&ctx, &actions)
+            OpenHandDefenseDiagnostic::from_context(&ctx, &actions, None)
         );
 
         // 合法 Dahai の順序をそのまま保つ。
@@ -3201,7 +3282,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_high_open_hand_threat_does_not_change_the_push_pull_or_the_selected_action() {
+    fn a_high_open_hand_threat_keeps_pushing_from_tenpai() {
         use crate::open_hand_threat::OpenHandThreatLevel;
 
         let actions = opponent_meld_actions();
@@ -3218,15 +3299,23 @@ pub(crate) mod tests {
         assert!(melded.open_hand_defense.has_target());
         assert!(!plain.open_hand_defense.has_target());
 
-        // 押し引きも最終 action も、OpenHand 防御 safety には影響されない。
+        // テンパイなので High の副露相手がいても押す。reason だけが新しい policy のものになる。
         let melded_decision = melded.push_pull_decision.expect("押し引きを判定している");
         let plain_decision = plain.push_pull_decision.expect("押し引きを判定している");
-        assert_eq!(melded_decision.mode, plain_decision.mode);
-        assert_eq!(melded_decision.reason, plain_decision.reason);
         assert_eq!(melded_decision.mode, PushPullMode::Push);
-        assert_eq!(melded_decision.reason, PushPullReason::NoOpponentReach);
+        assert_eq!(
+            melded_decision.reason,
+            PushPullReason::TenpaiAgainstHighOpenHand
+        );
+        assert_eq!(plain_decision.mode, PushPullMode::Push);
+        assert_eq!(plain_decision.reason, PushPullReason::NoOpponentReach);
+
+        // Push なので通常打牌が優先され、OpenHand 防御 fallback は採用されない。
         assert_eq!(melded.selected_action, plain.selected_action);
         assert_eq!(melded.selected_source, plain.selected_source);
+        assert_eq!(melded.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(melded.open_hand_defense_category(), None);
+        assert_eq!(melded.open_hand_defense.selected, None);
         assert_eq!(melded.defense, plain.defense);
     }
 
@@ -3245,9 +3334,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opponent_melds_do_not_change_the_existing_decisions() {
-        // 副露 facts は押し引き入力に載るが判定には使わないので、既存の選択・押し引き・防御は
-        // 変わらない。
+    fn opponent_melds_keep_the_tenpai_decisions() {
+        // 副露 facts から High OpenHandThreat になっても、テンパイなら押すので選択・防御は
+        // 変わらない。押し引きの reason だけが新しい policy のものになる。
         let actions = opponent_meld_actions();
         let with_melds = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
         let without_melds = opponent_meld_context(Some(0), vec![]);
@@ -3258,13 +3347,12 @@ pub(crate) mod tests {
         assert_eq!(melded.selected_action, plain.selected_action);
         assert_eq!(melded.selected_source, plain.selected_source);
         assert_eq!(melded.normal_discard_action, plain.normal_discard_action);
-        assert_eq!(melded.push_pull_decision, plain.push_pull_decision);
         assert_eq!(melded.reach, plain.reach);
         assert_eq!(melded.defense, plain.defense);
         assert_eq!(melded.pon, plain.pon);
         assert_ne!(melded.player_threats, plain.player_threats);
 
-        // 押し引き入力は副露 facts だけが異なり、判定に使う項目はすべて同じ。
+        // 押し引き入力は副露由来の facts と classification だけが異なる。
         let melded_inputs = melded.push_pull_inputs.expect("押し引き入力がある");
         let plain_inputs = plain.push_pull_inputs.expect("押し引き入力がある");
         assert_eq!(
@@ -3275,16 +3363,24 @@ pub(crate) mod tests {
         assert_eq!(melded_inputs.self_dealer, plain_inputs.self_dealer);
         assert_eq!(melded_inputs.offense, plain_inputs.offense);
         assert_ne!(melded_inputs.player_threats, plain_inputs.player_threats);
+        assert!(melded_inputs.has_high_open_hand_threat());
+        assert!(!plain_inputs.has_high_open_hand_threat());
 
         let decision = melded.push_pull_decision.expect("押し引きを判定している");
         assert_eq!(decision.mode, PushPullMode::Push);
         assert_eq!(
             decision.reason,
-            crate::push_pull::PushPullReason::NoOpponentReach
+            crate::push_pull::PushPullReason::TenpaiAgainstHighOpenHand
         );
         assert_eq!(melded_inputs.opponent_reach_count, 0);
 
-        // OpenHandThreat が High でも、非リーチ相手だけの局面の押し引きは変えない。
+        let plain_decision = plain.push_pull_decision.expect("押し引きを判定している");
+        assert_eq!(plain_decision.mode, PushPullMode::Push);
+        assert_eq!(
+            plain_decision.reason,
+            crate::push_pull::PushPullReason::NoOpponentReach
+        );
+
         assert_eq!(
             melded.player_threats[1].open_hand_threat.level(),
             Some(crate::open_hand_threat::OpenHandThreatLevel::High)
@@ -4747,9 +4843,345 @@ pub(crate) mod tests {
             "DefenseFallback"
         );
         assert_eq!(
+            AgentActionSource::OpenHandDefenseFallback(
+                OpenHandDefenseCategory::DiscardedByAllTargets
+            )
+            .label(),
+            "OpenHandDefenseFallback"
+        );
+        assert_eq!(
             AgentActionSource::LegalDahaiFallback.label(),
             "LegalDahaiFallback"
         );
         assert_eq!(AgentActionSource::None.label(), "None");
+    }
+
+    #[test]
+    fn agent_action_source_separates_the_two_defense_paths() {
+        let riichi = AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu);
+        let open_hand = AgentActionSource::OpenHandDefenseFallback(
+            OpenHandDefenseCategory::DiscardedByAllTargets,
+        );
+
+        assert_eq!(riichi.defense_kind(), Some(DefenseFallbackKind::Genbutsu));
+        assert_eq!(riichi.open_hand_defense_category(), None);
+        assert_eq!(open_hand.defense_kind(), None);
+        assert_eq!(
+            open_hand.open_hand_defense_category(),
+            Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+        );
+    }
+
+    // ---- High OpenHandThreat に対する action 選択 ----
+
+    // 弱い一向聴 (受け入れ 7 枚 / 2 種類) になる自分の手牌。123m 456m 789m 1p 3p 5p 7p + ツモ 北。
+    const OPEN_HAND_FOLD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 44, 53, 60];
+    const OPEN_HAND_FOLD_DRAWN: u8 = 120;
+    // 受け入れ牌をほぼ見え牌にして、弱い一向聴に固定するための見え牌。
+    const OPEN_HAND_FOLD_DEAD: [u8; 20] = [
+        37, 38, 39, 40, 41, 42, 43, 45, 46, 47, 52, 54, 55, 56, 57, 58, 59, 61, 62, 63,
+    ];
+
+    // 強い一向聴 (受け入れ 8 枚 / 2 種類) になる自分の手牌。
+    const OPEN_HAND_IISHANTEN_HAND: [u8; 13] = [0, 4, 8, 12, 16, 20, 28, 29, 36, 40, 48, 52, 60];
+    // テンパイになる自分の手牌。
+    const OPEN_HAND_TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 16, 20, 28, 29, 36, 40, 44, 56, 60];
+
+    // ドラも役牌も含まない Chi。open meld 数を作るためだけに使う。
+    fn plain_chi() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Chi,
+            vec![tile(72), tile(76), tile(80)],
+            Some(tile(72)),
+        )
+    }
+
+    // 自分は player 0、親は player 2。`melded` の席が3副露で High OpenHandThreat になる。
+    fn open_hand_context(
+        hand_values: &[u8],
+        drawn: Option<u8>,
+        melded: usize,
+        discards: [&[u8]; 4],
+        reached: [bool; 4],
+        extra_visible: &[u8],
+    ) -> GameContext {
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[melded] = (0..3).map(|_| plain_chi()).collect();
+
+        let mut visible: Vec<TileId> = hand_values.iter().map(|&value| tile(value)).collect();
+        visible.extend(drawn.map(tile));
+        visible.extend(extra_visible.iter().map(|&value| tile(value)));
+        for discard in discards {
+            visible.extend(discard.iter().map(|&value| tile(value)));
+        }
+
+        GameContext::from_parts_with_melds(
+            drawn.map(tile),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            None,
+            None,
+            visible,
+            Some(0),
+            Some(2),
+            std::array::from_fn(|player| {
+                discards[player].iter().map(|&value| tile(value)).collect()
+            }),
+            reached,
+            melds,
+        )
+    }
+
+    // 弱い一向聴 + player 1 が High の副露相手。
+    fn open_hand_fold_context(opponent_discards: &[u8], extra_visible: &[u8]) -> GameContext {
+        let mut visible = OPEN_HAND_FOLD_DEAD.to_vec();
+        visible.extend_from_slice(extra_visible);
+
+        open_hand_context(
+            &OPEN_HAND_FOLD_HAND,
+            Some(OPEN_HAND_FOLD_DRAWN),
+            1,
+            [&[], opponent_discards, &[], &[]],
+            [false; 4],
+            &visible,
+        )
+    }
+
+    fn open_hand_fold_actions() -> Vec<LegalAction> {
+        OPEN_HAND_FOLD_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(OPEN_HAND_FOLD_DRAWN)])
+            .collect()
+    }
+
+    #[test]
+    fn fold_against_a_high_open_hand_prefers_a_tile_in_every_targets_river() {
+        // player 1 の河に 9m があるので、通常打牌より本人の河の安全牌を優先する。
+        let ctx = open_hand_fold_context(&[33], &[]);
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::IishantenAgainstHighOpenHand
+        );
+
+        assert_eq!(diagnostic.selected_action, dahai(32));
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(
+                OpenHandDefenseCategory::DiscardedByAllTargets
+            )
+        );
+        assert_ne!(
+            diagnostic.selected_action,
+            diagnostic.normal_discard_action.clone().unwrap()
+        );
+
+        // リーチ者向けの防御 fallback は検討自体が起きない。
+        assert!(diagnostic.defense.is_none());
+        assert_eq!(diagnostic.defense_fallback_kind(), None);
+
+        // 診断は production selector の結果をそのまま写す。
+        let selection = diagnostic
+            .open_hand_defense
+            .selected
+            .as_ref()
+            .expect("OpenHand 防御 fallback を採用している");
+        assert_eq!(selection.selected_action, dahai(32));
+        assert_eq!(
+            selection.selected_category,
+            OpenHandDefenseCategory::DiscardedByAllTargets
+        );
+        assert_eq!(
+            diagnostic
+                .open_hand_defense
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.selected)
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<LegalAction>>(),
+            vec![dahai(32)]
+        );
+    }
+
+    #[test]
+    fn fold_against_a_high_open_hand_uses_the_honor_safety_without_a_river_safe_tile() {
+        // 本人の河に通る牌が無ければ字牌 safety。手牌の字牌は北だけ。
+        let ctx = open_hand_fold_context(&[], &[]);
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.selected_action, dahai(OPEN_HAND_FOLD_DRAWN));
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(OpenHandDefenseCategory::HonorSafety(
+                HonorSafetyRank::OneVisible
+            ))
+        );
+    }
+
+    #[test]
+    fn fold_against_a_high_open_hand_uses_the_suited_safety_without_honors() {
+        // 8m が4枚見えているので 9m は NoChance。無スジの 1m より優先する。
+        let ctx = open_hand_fold_context(&[], &[29, 30, 31]);
+        let actions = vec![dahai(0), dahai(32)];
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.selected_action, dahai(32));
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(OpenHandDefenseCategory::SuitedSafety(
+                SuitedSafetyRank::NoChance
+            ))
+        );
+    }
+
+    #[test]
+    fn fold_against_a_high_open_hand_falls_back_to_the_normal_discard() {
+        // 安全牌候補が1件も無い場合だけ通常打牌に戻る。
+        let ctx = open_hand_fold_context(&[], &[]);
+        let actions = vec![dahai(0), dahai(4)];
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(
+            diagnostic.selected_action,
+            diagnostic.normal_discard_action.clone().unwrap()
+        );
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
+        assert!(
+            diagnostic
+                .open_hand_defense
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.selected)
+        );
+    }
+
+    #[test]
+    fn neutral_against_a_high_open_hand_prefers_the_normal_discard() {
+        // 強い一向聴は Neutral。High の副露相手がいても安全牌を通常打牌より優先しない。
+        let ctx = open_hand_context(
+            &OPEN_HAND_IISHANTEN_HAND,
+            Some(OPEN_HAND_FOLD_DRAWN),
+            1,
+            [&[], &[33], &[], &[]],
+            [false; 4],
+            &[],
+        );
+        let actions: Vec<LegalAction> = OPEN_HAND_IISHANTEN_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(OPEN_HAND_FOLD_DRAWN)])
+            .collect();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::StrongIishantenAgainstHighOpenHand
+        );
+
+        assert!(diagnostic.open_hand_defense.has_target());
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(
+            diagnostic.selected_action,
+            diagnostic.normal_discard_action.clone().unwrap()
+        );
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
+        // Neutral ではリーチも検討しない。
+        assert!(diagnostic.reach.is_none());
+    }
+
+    #[test]
+    fn push_against_a_high_open_hand_keeps_the_reach_priority() {
+        // テンパイは Push。Reach → 通常打牌 の既存順序を変えない。
+        let ctx = open_hand_context(
+            &OPEN_HAND_TENPAI_HAND,
+            Some(OPEN_HAND_FOLD_DRAWN),
+            1,
+            [&[], &[33], &[], &[]],
+            [false; 4],
+            &[],
+        );
+        let normal_actions: Vec<LegalAction> = OPEN_HAND_TENPAI_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(OPEN_HAND_FOLD_DRAWN)])
+            .collect();
+        let mut reach_actions = vec![LegalAction::Reach];
+        reach_actions.extend(normal_actions.clone());
+
+        let with_reach = diagnose_matching_act(&ctx, &reach_actions);
+        let decision = with_reach
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::TenpaiAgainstHighOpenHand);
+        assert_eq!(with_reach.selected_action, LegalAction::Reach);
+        assert_eq!(with_reach.selected_source, AgentActionSource::Reach);
+        assert_eq!(with_reach.open_hand_defense.selected, None);
+
+        let without_reach = diagnose_matching_act(&ctx, &normal_actions);
+        assert_eq!(
+            without_reach.selected_source,
+            AgentActionSource::NormalDiscard
+        );
+        assert_eq!(
+            without_reach.selected_action,
+            without_reach.normal_discard_action.clone().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_reached_opponent_keeps_the_existing_defense_fallback() {
+        // player 1 がリーチ、player 2 が High の副露相手。防御は既存のリーチ者向け fallback のまま。
+        let ctx = open_hand_context(
+            &OPEN_HAND_FOLD_HAND,
+            Some(OPEN_HAND_FOLD_DRAWN),
+            2,
+            [&[], &[33], &[], &[]],
+            [false, true, false, false],
+            &OPEN_HAND_FOLD_DEAD,
+        );
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+
+        // High の副露相手はいるが、OpenHand 防御 fallback には切り替えない。
+        assert!(diagnostic.open_hand_defense.has_target());
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
+        assert_eq!(diagnostic.selected_action, dahai(32));
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
+        );
+        assert!(diagnostic.defense.is_some());
     }
 }

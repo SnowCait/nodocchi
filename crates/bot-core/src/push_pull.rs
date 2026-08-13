@@ -1,6 +1,9 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::select_best_normal_discard_evaluation;
+use crate::open_hand_threat::{
+    OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
+};
 use crate::threat::{
     PlayerThreatFacts, has_reached_dealer, player_threat_facts_from_context, reached_opponent_count,
 };
@@ -27,8 +30,11 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// `Headless` / `Kuttsuki` / `Weak` に固定順位や押し引き差は付けない。
 /// また、自分が親の場合の一向聴を限定的に考慮する。正確な打点・点棒・順位条件は未対応。
 ///
-/// 打牌後の concealed hand の簡易打点 proxy は `PushPullInputs` とログに保持し、単独の子リーチに対する子の
-/// 一向聴だけを対象にした限定補正で使用する。それ以外の branch では判定に影響しない。
+/// 打牌後の concealed hand の簡易打点 proxy は `PushPullInputs` とログに保持し、一向聴だけを
+/// 対象にした限定補正で使用する。それ以外の branch では判定に影響しない。
+///
+/// 相手の危険度は、他家リーチがある局面ではリーチ情報だけ、他家リーチが0人の局面では
+/// `OpenHandThreat` の classification だけを見る。両者を1つの危険度へ集約することはまだしない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -181,6 +187,7 @@ fn offense_value_proxy_after_discard(
 /// - `self_dealer`: 自分が親か。`player_id` または `oya` が不明なら false。
 /// - `offense`: 攻撃評価を構築できない場合は `None`。
 /// - `player_threats`: 全4席分の軽量な脅威 facts。
+/// - `open_hand_threats`: `player_threats` から導出した全4席分の OpenHandThreat classification。
 ///
 /// `opponent_reach_count` / `dealer_reacher` は `player_threats` から導出する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,14 +198,32 @@ pub struct PushPullInputs {
     pub offense: Option<PushPullOffenseState>,
     /// 全4席分の軽量な脅威 facts。副露・リーチ・親・自風・ドラ・役牌副露の観測事実を持つ。
     ///
-    /// リーチ情報の source of truth であり、[`decide_push_pull`] は現時点でリーチ由来の
-    /// `opponent_reach_count` / `dealer_reacher` 以外を参照しない。副露の facts は将来の
-    /// policy が `GameContext` を解析し直さずに使えるよう保持するだけで、現在の mode / reason は
-    /// 一切変えない。
+    /// リーチ情報の source of truth であり、副露由来の危険度は `open_hand_threats` が持つ
+    /// classification が source of truth。
     pub player_threats: [PlayerThreatFacts; 4],
+    /// 全4席分の非リーチ副露相手の classification。`player_threats` から
+    /// [`classify_open_hand_threats`] で一度だけ導出する。
+    ///
+    /// 押し引きと OpenHand 防御はこの同じ classification を参照し、High 条件をそれぞれで
+    /// 書き直さない。自分の席・リーチ済みの席・`player_id` 不明の席は level を持たない
+    /// [`OpenHandThreatAssessment::NotApplicable`] になる。
+    pub open_hand_threats: [OpenHandThreatAssessment; 4],
+}
+
+impl PushPullInputs {
+    /// High OpenHandThreat の相手が1人以上いるか。
+    ///
+    /// 判定は [`has_high_open_hand_threat`] と共有し、押し引き側で High 条件を書き直さない。
+    pub fn has_high_open_hand_threat(&self) -> bool {
+        has_high_open_hand_threat(&self.open_hand_threats)
+    }
 }
 
 /// 押し引き判定がどの条件で下されたかを表す理由。
+///
+/// `*AgainstSingleNonDealer` / `*UnderHighPressure` / `TwoOrMoreShanten` は他家リーチがある局面の
+/// 既存 reason。`*AgainstHighOpenHand` は他家リーチが0人で High OpenHandThreat の相手がいる
+/// 局面の reason で、両者が混ざることはない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullReason {
     NoOpponentReach,
@@ -211,6 +236,14 @@ pub enum PushPullReason {
     HighValueIishantenAgainstSingleNonDealer,
     IishantenUnderHighPressure,
     TwoOrMoreShanten,
+    MissingOffenseAgainstHighOpenHand,
+    TenpaiAgainstHighOpenHand,
+    StrongIishantenAgainstHighOpenHand,
+    CompleteIishantenAgainstHighOpenHand,
+    DealerIishantenAgainstHighOpenHand,
+    HighValueIishantenAgainstHighOpenHand,
+    IishantenAgainstHighOpenHand,
+    TwoOrMoreShantenAgainstHighOpenHand,
 }
 
 /// 押し引き判定の結果。
@@ -288,6 +321,9 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// 数え直さない。`player_id` が不明な場合の扱いも `GameContext::reached_opponents()` と同じで、
 /// リーチフラグが立っている全席を他家リーチとして数える。
 ///
+/// 非リーチ副露相手の classification は既存 [`classify_open_hand_threats`] を同じ facts から
+/// 一度だけ導出する。押し引き側で High 条件を分類し直さない。
+///
 /// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
 /// evaluation が `None` なら offense も `None`。
 pub(crate) fn push_pull_inputs_from_threat_facts(
@@ -322,6 +358,104 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
         self_dealer,
         offense,
         player_threats,
+        open_hand_threats: classify_open_hand_threats(&player_threats),
+    }
+}
+
+/// 強い一向聴の暫定条件。形は限定せず、受け入れの枚数と種類数だけを見る。
+///
+/// 相手の脅威条件は含まない。リーチ policy と OpenHand policy はこの pure helper を共有し、
+/// threshold をそれぞれで書き直さない。
+fn is_strong_iishanten(offense: &PushPullOffenseState) -> bool {
+    offense.acceptance_total_remaining >= STRONG_IISHANTEN_MIN_REMAINING
+        && offense.acceptance_type_count >= STRONG_IISHANTEN_MIN_TYPES
+}
+
+/// 完全一向聴だけを対象にした限定条件。強い一向聴 threshold に届かない場合の補正。
+fn is_complete_iishanten(offense: &PushPullOffenseState) -> bool {
+    offense.standard_iishanten_shape_after_discard == IishantenShape::Complete
+        && offense.acceptance_total_remaining >= COMPLETE_IISHANTEN_MIN_REMAINING
+        && offense.acceptance_type_count >= COMPLETE_IISHANTEN_MIN_TYPES
+}
+
+/// 自分が親のときだけの限定条件。形は限定しない。
+fn is_dealer_iishanten(inputs: &PushPullInputs, offense: &PushPullOffenseState) -> bool {
+    inputs.self_dealer
+        && offense.acceptance_total_remaining >= DEALER_IISHANTEN_MIN_REMAINING
+        && offense.acceptance_type_count >= DEALER_IISHANTEN_MIN_TYPES
+}
+
+/// 自分が子で、簡易打点 proxy が明確に高い場合だけの限定条件。受け入れ・形は限定しない。
+fn is_high_value_iishanten(inputs: &PushPullInputs, offense: &PushPullOffenseState) -> bool {
+    !inputs.self_dealer
+        && offense.simple_value_proxy_after_discard() >= HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY
+}
+
+/// 他家リーチが0人の局面の押し引き。
+///
+/// High OpenHandThreat の相手がいなければ従来どおり無条件で押す。`Present` だけの相手は行動を
+/// 変えない。High の相手が1人以上いる場合だけ、テンパイ / 一向聴 / 二向聴以上で押し引きを
+/// 分ける。一向聴の限定条件は既存のリーチ policy と同じ pure helper を共有する。
+///
+/// 相手のリーチは含まないので、`RiichiThreat` と `OpenHandThreat` を1つの危険度へ集約する
+/// 判定はここには無い。
+fn decide_against_open_hand_threats(inputs: &PushPullInputs) -> PushPullDecision {
+    if !inputs.has_high_open_hand_threat() {
+        return PushPullDecision {
+            mode: PushPullMode::Push,
+            reason: PushPullReason::NoOpponentReach,
+        };
+    }
+
+    // 攻撃評価が無ければ、情報不足を理由に強制 Fold にはせず Neutral に留める。
+    let Some(offense) = inputs.offense else {
+        return PushPullDecision {
+            mode: PushPullMode::Neutral,
+            reason: PushPullReason::MissingOffenseAgainstHighOpenHand,
+        };
+    };
+
+    // テンパイ相当(向聴 <= 0)。副露相手が High でも自動 Fold にはしない。
+    if offense.min_shanten_after_discard <= 0 {
+        return PushPullDecision {
+            mode: PushPullMode::Push,
+            reason: PushPullReason::TenpaiAgainstHighOpenHand,
+        };
+    }
+
+    if offense.min_shanten_after_discard == 1 {
+        let (mode, reason) = if is_strong_iishanten(&offense) {
+            (
+                PushPullMode::Neutral,
+                PushPullReason::StrongIishantenAgainstHighOpenHand,
+            )
+        } else if is_complete_iishanten(&offense) {
+            (
+                PushPullMode::Neutral,
+                PushPullReason::CompleteIishantenAgainstHighOpenHand,
+            )
+        } else if is_dealer_iishanten(inputs, &offense) {
+            (
+                PushPullMode::Neutral,
+                PushPullReason::DealerIishantenAgainstHighOpenHand,
+            )
+        } else if is_high_value_iishanten(inputs, &offense) {
+            (
+                PushPullMode::Neutral,
+                PushPullReason::HighValueIishantenAgainstHighOpenHand,
+            )
+        } else {
+            (
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            )
+        };
+        return PushPullDecision { mode, reason };
+    }
+
+    PushPullDecision {
+        mode: PushPullMode::Fold,
+        reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
     }
 }
 
@@ -342,20 +476,21 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
 /// 複数リーチ・二向聴以上・自分が親の場合は従来どおり proxy を見ない。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
 ///
-/// `PushPullInputs::player_threats` の副露 facts は現時点で判定に使わない。相手の副露は
-/// `opponent_reach_count` / `dealer_reacher` を変えないため、非リーチの副露相手だけの局面は
-/// 従来どおり `NoOpponentReach` → `Push` になる。
+/// 他家リーチがある局面では従来どおりリーチ由来の policy だけを使う。他家リーチが0人の局面
+/// だけが `PushPullInputs::open_hand_threats` を見る新しい policy の対象で、High の相手が1人以上
+/// いる場合に押し引きを分ける ([`decide_against_open_hand_threats`])。`Present` の相手は行動を
+/// 変えない。
+///
+/// リーチ者と High の副露相手が同時にいる局面は、今回もリーチ policy をそのまま使う。
+/// `RiichiThreat` と `OpenHandThreat` を1つの危険度へ集約する判定は未対応。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
 /// - `Neutral`: 通常打牌 → 防御 fallback(Reach は抑制)
 /// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
 pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
-    // 1. 他家リーチがなければ攻撃評価の有無にかかわらず押す。
+    // 1. 他家リーチがなければ、非リーチ副露相手の classification だけで判定する。
     if inputs.opponent_reach_count == 0 {
-        return PushPullDecision {
-            mode: PushPullMode::Push,
-            reason: PushPullReason::NoOpponentReach,
-        };
+        return decide_against_open_hand_threats(inputs);
     }
 
     // 2. 攻撃評価が無ければ、情報不足を理由に強制 Fold にはせず Neutral に留める。
@@ -385,9 +520,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     // 4. 一向聴。単独の子リーチかつ受け入れが暫定 threshold 以上の場合だけ強い一向聴。
     if offense.min_shanten_after_discard == 1 {
         // 4-1. 既存の強い一向聴 threshold。形にかかわらず従来どおり。
-        let strong = single_non_dealer
-            && offense.acceptance_total_remaining >= STRONG_IISHANTEN_MIN_REMAINING
-            && offense.acceptance_type_count >= STRONG_IISHANTEN_MIN_TYPES;
+        let strong = single_non_dealer && is_strong_iishanten(&offense);
         if strong {
             return PushPullDecision {
                 mode: PushPullMode::Neutral,
@@ -396,10 +529,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         }
 
         // 4-2. 強い一向聴 threshold には届かないが、形が Complete で限定 threshold を満たす場合だけ Neutral。
-        let complete = single_non_dealer
-            && offense.standard_iishanten_shape_after_discard == IishantenShape::Complete
-            && offense.acceptance_total_remaining >= COMPLETE_IISHANTEN_MIN_REMAINING
-            && offense.acceptance_type_count >= COMPLETE_IISHANTEN_MIN_TYPES;
+        let complete = single_non_dealer && is_complete_iishanten(&offense);
         if complete {
             return PushPullDecision {
                 mode: PushPullMode::Neutral,
@@ -408,10 +538,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         }
 
         // 4-3. 自分が親のときだけ、形を限定せずに限定 threshold を満たす場合だけ Neutral。
-        let dealer = single_non_dealer
-            && inputs.self_dealer
-            && offense.acceptance_total_remaining >= DEALER_IISHANTEN_MIN_REMAINING
-            && offense.acceptance_type_count >= DEALER_IISHANTEN_MIN_TYPES;
+        let dealer = single_non_dealer && is_dealer_iishanten(inputs, &offense);
         if dealer {
             return PushPullDecision {
                 mode: PushPullMode::Neutral,
@@ -421,10 +548,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
 
         // 4-4. 子の自分が単独の子リーチを受け、簡易打点 proxy が限定 threshold 以上の場合だけ Neutral。
         // 受け入れ・形は限定せず、明確な高打点だけを対象にする。Push にはしない。
-        let high_value = single_non_dealer
-            && !inputs.self_dealer
-            && offense.simple_value_proxy_after_discard()
-                >= HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY;
+        let high_value = single_non_dealer && is_high_value_iishanten(inputs, &offense);
         if high_value {
             return PushPullDecision {
                 mode: PushPullMode::Neutral,
@@ -471,6 +595,7 @@ pub(crate) fn log_push_pull_decision(
         opponent_reach_count = inputs.opponent_reach_count,
         dealer_reacher = inputs.dealer_reacher,
         self_dealer = inputs.self_dealer,
+        high_open_hand_threat = inputs.has_high_open_hand_threat(),
         offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
         offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
         offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
@@ -563,6 +688,7 @@ mod tests {
             self_dealer,
             offense,
             player_threats,
+            open_hand_threats: classify_open_hand_threats(&player_threats),
         }
     }
 
@@ -2161,14 +2287,362 @@ mod tests {
     }
 
     #[test]
-    fn non_reaching_open_hands_still_push() {
-        // 非リーチの副露相手だけの局面は従来どおり NoOpponentReach → Push。
+    fn present_open_hands_still_push() {
+        // Present に留まる副露相手だけの局面は従来どおり NoOpponentReach → Push。
         let facts = opponent_meld_facts();
+        assert!(!has_high_open_hand_threat(&classify_open_hand_threats(
+            &facts
+        )));
 
         for offense in [None, Some(offense(2, 20, 4))] {
             let decision = decide_push_pull(&inputs_with_threats(0, false, false, offense, facts));
             assert_eq!(decision.mode, PushPullMode::Push);
             assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
         }
+    }
+
+    // ---- High OpenHandThreat に対する押し引き ----
+
+    // ドラも役牌も含まない Chi。
+    fn chi_meld() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Chi,
+            vec![tile(0), tile(4), tile(8)],
+            Some(tile(0)),
+        )
+    }
+
+    // 指定席が Chi を `count` 個持つ4席分の facts。自分は player 0 で親も player 0。
+    fn open_meld_facts_of(
+        player: usize,
+        count: usize,
+        reached: [bool; 4],
+        player_id: Option<u8>,
+    ) -> [PlayerThreatFacts; 4] {
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[player] = (0..count).map(|_| chi_meld()).collect();
+
+        let context = GameContext::from_parts_with_melds(
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            player_id,
+            Some(0),
+            Default::default(),
+            reached,
+            melds,
+        );
+        player_threat_facts_from_context(&context)
+    }
+
+    // player 1 が3副露で High になる facts。リーチ者はいない。
+    fn high_open_hand_facts() -> [PlayerThreatFacts; 4] {
+        open_meld_facts_of(1, 3, [false; 4], Some(0))
+    }
+
+    // High の副露相手だけがいる局面の押し引き入力。
+    fn high_open_hand_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
+        high_open_hand_inputs_with_dealer(false, offense)
+    }
+
+    fn high_open_hand_inputs_with_dealer(
+        self_dealer: bool,
+        offense: Option<PushPullOffenseState>,
+    ) -> PushPullInputs {
+        inputs_with_threats(0, false, self_dealer, offense, high_open_hand_facts())
+    }
+
+    fn assert_high_open_hand_decision(
+        inputs: &PushPullInputs,
+        mode: PushPullMode,
+        reason: PushPullReason,
+    ) {
+        assert!(inputs.has_high_open_hand_threat());
+        let decision = decide_push_pull(inputs);
+        assert_eq!(decision.mode, mode, "{:?}", inputs.offense);
+        assert_eq!(decision.reason, reason, "{:?}", inputs.offense);
+    }
+
+    #[test]
+    fn no_high_open_hand_threat_keeps_pushing() {
+        // 副露相手がいない、または Present しかいない局面は従来どおり。
+        for facts in [
+            no_threat_facts(),
+            opponent_meld_facts(),
+            open_meld_facts_of(1, 1, [false; 4], Some(0)),
+        ] {
+            let inputs = inputs_with_threats(0, false, false, Some(offense(2, 20, 4)), facts);
+            assert!(!inputs.has_high_open_hand_threat());
+
+            let decision = decide_push_pull(&inputs);
+            assert_eq!(decision.mode, PushPullMode::Push);
+            assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+        }
+    }
+
+    #[test]
+    fn missing_offense_against_a_high_open_hand_is_neutral() {
+        // 情報不足を理由に強制 Fold にはしない。
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs(None),
+            PushPullMode::Neutral,
+            PushPullReason::MissingOffenseAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn tenpai_against_a_high_open_hand_pushes() {
+        // High の副露相手がいてもテンパイから自動 Fold にはしない。
+        for shanten in [0, -1] {
+            assert_high_open_hand_decision(
+                &high_open_hand_inputs(Some(offense(shanten, 4, 1))),
+                PushPullMode::Push,
+                PushPullReason::TenpaiAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn strong_iishanten_against_a_high_open_hand_is_neutral() {
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs(Some(offense(1, 8, 2))),
+            PushPullMode::Neutral,
+            PushPullReason::StrongIishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn strong_iishanten_below_the_threshold_against_a_high_open_hand_folds() {
+        // 受け入れ 7 / 種類 2 は強い一向聴 threshold に届かず、他の限定条件も満たさない。
+        for offense in [
+            offense_with_shape(1, 7, 2, IishantenShape::Weak),
+            offense_with_shape(1, 8, 1, IishantenShape::Weak),
+        ] {
+            assert_high_open_hand_decision(
+                &high_open_hand_inputs(Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn complete_iishanten_against_a_high_open_hand_is_neutral() {
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs(Some(offense_with_shape(1, 6, 2, IishantenShape::Complete))),
+            PushPullMode::Neutral,
+            PushPullReason::CompleteIishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn complete_iishanten_below_the_threshold_against_a_high_open_hand_folds() {
+        for offense in [
+            offense_with_shape(1, 5, 2, IishantenShape::Complete),
+            offense_with_shape(1, 6, 1, IishantenShape::Complete),
+        ] {
+            assert_high_open_hand_decision(
+                &high_open_hand_inputs(Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn dealer_iishanten_against_a_high_open_hand_is_neutral() {
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs_with_dealer(
+                true,
+                Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
+            ),
+            PushPullMode::Neutral,
+            PushPullReason::DealerIishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn dealer_iishanten_below_the_threshold_against_a_high_open_hand_folds() {
+        for offense in [
+            offense_with_shape(1, 6, 2, IishantenShape::Weak),
+            offense_with_shape(1, 7, 1, IishantenShape::Weak),
+        ] {
+            assert_high_open_hand_decision(
+                &high_open_hand_inputs_with_dealer(true, Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn high_value_iishanten_against_a_high_open_hand_is_neutral() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 0);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 4);
+
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs(Some(offense)),
+            PushPullMode::Neutral,
+            PushPullReason::HighValueIishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn high_value_iishanten_below_the_threshold_against_a_high_open_hand_folds() {
+        let offense = offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 3, 1, 0);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 3);
+
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs(Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn high_value_iishanten_is_not_applied_to_a_dealer_against_a_high_open_hand() {
+        // 自分が親のときは親補正だけを使う。既存リーチ policy と同じ扱い。
+        let offense = offense_with_shape_and_proxy(1, 6, 2, IishantenShape::Weak, 6, 1, 2);
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs_with_dealer(true, Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn weak_iishanten_against_a_high_open_hand_folds() {
+        for shape in [
+            IishantenShape::Weak,
+            IishantenShape::Headless,
+            IishantenShape::Kuttsuki,
+            IishantenShape::Unknown,
+        ] {
+            assert_high_open_hand_decision(
+                &high_open_hand_inputs(Some(offense_with_shape(1, 4, 1, shape))),
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn two_or_more_shanten_against_a_high_open_hand_folds() {
+        for shanten in [2, 3] {
+            assert_high_open_hand_decision(
+                &high_open_hand_inputs(Some(offense(shanten, 30, 6))),
+                PushPullMode::Fold,
+                PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn the_high_open_hand_iishanten_thresholds_match_the_riichi_policy() {
+        // 一向聴の限定条件は既存リーチ policy と同じ pure helper を共有する。相手の脅威が違うので
+        // reason は別だが、Neutral / Fold の境界は一致する。
+        let cases = [
+            (offense_with_shape(1, 8, 2, IishantenShape::Weak), false),
+            (offense_with_shape(1, 7, 2, IishantenShape::Weak), false),
+            (offense_with_shape(1, 6, 2, IishantenShape::Complete), false),
+            (offense_with_shape(1, 5, 2, IishantenShape::Complete), false),
+            (offense_with_shape(1, 7, 2, IishantenShape::Weak), true),
+            (offense_with_shape(1, 6, 2, IishantenShape::Weak), true),
+            (
+                offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 4, 1, 0),
+                false,
+            ),
+            (
+                offense_with_shape_and_proxy(1, 7, 2, IishantenShape::Weak, 3, 0, 0),
+                false,
+            ),
+        ];
+
+        for (offense, self_dealer) in cases {
+            let riichi =
+                decide_push_pull(&inputs_with_dealer(1, false, self_dealer, Some(offense)));
+            let open_hand = decide_push_pull(&high_open_hand_inputs_with_dealer(
+                self_dealer,
+                Some(offense),
+            ));
+            assert_eq!(
+                riichi.mode, open_hand.mode,
+                "{offense:?} self_dealer={self_dealer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reached_opponent_keeps_the_existing_riichi_policy() {
+        // player 1 がリーチ、player 2 が3副露の High。押し引きは既存リーチ policy のまま。
+        let facts = open_meld_facts_of(2, 3, [false, true, false, false], Some(0));
+        assert!(facts[1].reached);
+        assert_eq!(facts[2].open_meld_count, 3);
+
+        let offenses = [
+            None,
+            Some(offense(0, 4, 1)),
+            Some(offense_with_shape(1, 8, 2, IishantenShape::Weak)),
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+            Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
+            Some(offense(2, 20, 4)),
+        ];
+
+        for offense in offenses {
+            for self_dealer in [false, true] {
+                let melded = inputs_with_threats(1, false, self_dealer, offense, facts);
+                let plain = inputs_with_dealer(1, false, self_dealer, offense);
+                assert!(melded.has_high_open_hand_threat());
+                assert_eq!(
+                    decide_push_pull(&melded),
+                    decide_push_pull(&plain),
+                    "{offense:?} self_dealer={self_dealer}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reached_player_is_not_a_high_open_hand_threat() {
+        // 副露しているリーチ者は OpenHandThreat の対象外。リーチ由来の危険度と二重適用しない。
+        let facts = open_meld_facts_of(1, 3, [false, true, false, false], Some(0));
+        assert!(facts[1].reached);
+        assert_eq!(facts[1].open_meld_count, 3);
+
+        let inputs = inputs_with_threats(0, false, false, Some(offense(2, 20, 4)), facts);
+        assert!(!inputs.has_high_open_hand_threat());
+
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+    }
+
+    #[test]
+    fn an_unknown_player_id_is_not_guessed_as_a_high_open_hand_threat() {
+        let facts = open_meld_facts_of(1, 3, [false; 4], None);
+        assert_eq!(facts[1].open_meld_count, 3);
+        assert_eq!(facts[1].is_self, None);
+
+        let inputs = inputs_with_threats(0, false, false, Some(offense(2, 20, 4)), facts);
+        assert!(!inputs.has_high_open_hand_threat());
+
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+    }
+
+    #[test]
+    fn the_open_hand_classification_is_derived_from_the_same_facts() {
+        // 押し引き入力の classification は facts から一度だけ導出する。押し引き側で分類し直さない。
+        let context = opponent_meld_context([false, false, false, true]);
+        let inputs = push_pull_inputs_from_context(&context);
+
+        assert_eq!(
+            inputs.open_hand_threats,
+            classify_open_hand_threats(&inputs.player_threats)
+        );
     }
 }

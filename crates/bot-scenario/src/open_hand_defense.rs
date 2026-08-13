@@ -5,17 +5,17 @@
 //! fixture で見比べるためのもの。corpus 側で safety を計算し直さず、production の pure helper が
 //! 返した値をそのまま確認する。
 //!
-//! この PR では防御 safety を押し引き・selected action へは接続していないため、High の相手が
-//! いても `NoOpponentReach` → `Push` のまま通常打牌を選ぶことも合わせて固定する。
+//! この局面は自分が二向聴なので、High の相手がいると `Fold` になり、通常打牌より OpenHand 防御
+//! fallback が優先されることも合わせて固定する。
 
 use bot_core::{
-    Agent, DiagnosticOptions, HonorSafetyRank, OpenHandDefenseCandidateDiagnostic,
+    Agent, DiagnosticOptions, HonorSafetyRank, LegalAction, OpenHandDefenseCandidateDiagnostic,
     OpenHandDefenseCategory, OpenHandThreatLevel, OpenHandThreatReason, OpponentHonorValue,
     PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, SuitedSafetyRank,
     SujiSafetyRank, WallRank, honor_safety_rank, is_discarded_by_all_open_hand_threats,
     open_hand_defense_category, opponent_honor_value_for_open_hand_threats,
-    suited_safety_rank_for_open_hand_threats, suji_safety_rank_for,
-    suji_safety_rank_for_open_hand_threats, wall_rank,
+    select_open_hand_defense_fallback_action_with_kind, suited_safety_rank_for_open_hand_threats,
+    suji_safety_rank_for, suji_safety_rank_for_open_hand_threats, wall_rank,
 };
 use bot_logic::TileType;
 
@@ -47,6 +47,13 @@ fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
 
 fn tile_type(mjai: &str) -> TileType {
     TileType::from_mjai_type_str(mjai).unwrap()
+}
+
+fn discards(action: &LegalAction) -> TileType {
+    match action {
+        LegalAction::Dahai { tile } => tile.tile_type(),
+        other => panic!("Dahai ではない: {other:?}"),
+    }
 }
 
 fn candidate(
@@ -340,7 +347,7 @@ fn a_post_reach_passed_tile_is_not_river_safe_for_a_non_reach_target() {
 }
 
 #[test]
-fn the_high_threats_do_not_change_the_push_pull_or_the_selected_action() {
+fn the_high_threats_drive_the_fold_and_the_selected_action() {
     let scenario = scenario();
     let mut agent = ShantenAgent;
     let acted = agent.act(&scenario.context, &scenario.legal_actions);
@@ -355,12 +362,87 @@ fn the_high_threats_do_not_change_the_push_pull_or_the_selected_action() {
     let decision = diagnostic
         .push_pull_decision
         .expect("押し引きを判定している");
-    assert_eq!(decision.mode, PushPullMode::Push);
-    assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+    assert_eq!(decision.mode, PushPullMode::Fold);
+    assert_eq!(
+        decision.reason,
+        PushPullReason::TwoOrMoreShantenAgainstHighOpenHand
+    );
 
-    // 防御 fallback はリーチ局面用なので、この局面では検討自体が起きない。
+    // リーチ者向けの防御 fallback はリーチ局面用なので、この局面では検討自体が起きない。
     assert!(diagnostic.defense.is_none());
+    assert_eq!(diagnostic.defense_fallback_kind(), None);
+
+    // 二向聴の Fold なので、通常打牌より OpenHand 防御 fallback を優先する。5m は player 1 と
+    // player 3 の河にあるので第一分類。
     assert_eq!(diagnostic.selected_action, acted);
     assert_eq!(with_lookahead.selected_action, acted);
-    assert_eq!(diagnostic.normal_discard_action, Some(acted));
+    assert_eq!(discards(&acted), tile_type("5m"));
+    assert_eq!(
+        diagnostic.open_hand_defense_category(),
+        Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+    );
+    assert_ne!(diagnostic.normal_discard_action, Some(acted.clone()));
+
+    // 診断は production selector の結果をそのまま写す。
+    let selection = diagnostic
+        .open_hand_defense
+        .selected
+        .as_ref()
+        .expect("OpenHand 防御 fallback を採用している");
+    assert_eq!(selection.selected_action, acted);
+    assert_eq!(
+        selection.selected_category,
+        OpenHandDefenseCategory::DiscardedByAllTargets
+    );
+    assert_eq!(
+        with_lookahead.open_hand_defense, diagnostic.open_hand_defense,
+        "追加診断は選択結果を変えない"
+    );
+    assert_eq!(
+        diagnostic
+            .open_hand_defense
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.selected)
+            .map(|candidate| candidate.tile)
+            .collect::<Vec<TileType>>(),
+        vec![tile_type("5m")]
+    );
+}
+
+#[test]
+fn the_selected_fallback_matches_the_production_selector() {
+    // 診断は選び直さず、production selector の結果を写す。
+    let scenario = scenario();
+    let diagnostic = diagnose(&scenario);
+    let selected = select_open_hand_defense_fallback_action_with_kind(
+        &scenario.context,
+        &scenario.legal_actions,
+        &diagnostic.open_hand_defense.targets,
+    );
+
+    let (action, category) = selected.expect("防御 fallback を選べる");
+    assert_eq!(diagnostic.selected_action, *action);
+    assert_eq!(diagnostic.open_hand_defense_category(), Some(category));
+}
+
+#[test]
+fn a_fold_without_a_safe_tile_falls_back_to_the_normal_discard() {
+    // 安全牌候補が1件も無い場合だけ通常打牌に戻る。合法 Dahai を無スジの数牌だけに絞る。
+    let mut spec = spec();
+    spec.legal_dahai = Some("3s".to_string());
+    let scenario = resolve(&spec);
+    let diagnostic = diagnose(&scenario);
+
+    assert!(diagnostic.open_hand_defense.has_target());
+    assert_eq!(
+        diagnostic.push_pull_decision.map(|decision| decision.mode),
+        Some(PushPullMode::Fold)
+    );
+    assert_eq!(diagnostic.open_hand_defense_category(), None);
+    assert_eq!(diagnostic.open_hand_defense.selected, None);
+    assert_eq!(
+        Some(diagnostic.selected_action.clone()),
+        diagnostic.normal_discard_action
+    );
 }

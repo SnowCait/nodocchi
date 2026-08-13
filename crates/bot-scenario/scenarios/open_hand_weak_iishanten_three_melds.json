@@ -1,0 +1,21 @@
+{
+  "hand": "123m 456m 789m 1p 3p 5p 7p",
+  "draw": "N",
+
+  "dora_indicators": "9s",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 1,
+
+  "reached": [false, false, false, false],
+
+  "discards": ["", "", "P 1s 4s 6s 7s", ""],
+
+  "melds": [[], [], [], [{"kind": "chi", "tiles": "4s 5s 6s", "called_tile": "4s"}, {"kind": "chi", "tiles": "6s 7s 8s", "called_tile": "6s"}, {"kind": "chi", "tiles": "7s 8s 9s", "called_tile": "7s"}]],
+
+  "extra_visible_tiles": "111p 2222p 333p 55p 0p 6666p 777p",
+
+  "legal_dahai": "N 1p 7p 1m 9m"
+}
