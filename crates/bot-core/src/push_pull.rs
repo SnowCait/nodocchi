@@ -1,6 +1,9 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::select_best_normal_discard_evaluation;
+use crate::threat::{
+    PlayerThreatFacts, has_reached_dealer, player_threat_facts_from_context, reached_opponent_count,
+};
 use bot_logic::{DiscardEvaluation, IishantenShape, TileCounts, TileId, TileType, count_dora};
 
 const LOG_TARGET: &str = "bot_core::push_pull";
@@ -177,12 +180,22 @@ fn offense_value_proxy_after_discard(
 /// - `dealer_reacher`: 他家リーチ者に親が含まれるか。親情報がない場合は false。
 /// - `self_dealer`: 自分が親か。`player_id` または `oya` が不明なら false。
 /// - `offense`: 攻撃評価を構築できない場合は `None`。
+/// - `player_threats`: 全4席分の軽量な脅威 facts。
+///
+/// `opponent_reach_count` / `dealer_reacher` は `player_threats` から導出する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullInputs {
     pub opponent_reach_count: u8,
     pub dealer_reacher: bool,
     pub self_dealer: bool,
     pub offense: Option<PushPullOffenseState>,
+    /// 全4席分の軽量な脅威 facts。副露・リーチ・親・自風・ドラ・役牌副露の観測事実を持つ。
+    ///
+    /// リーチ情報の source of truth であり、[`decide_push_pull`] は現時点でリーチ由来の
+    /// `opponent_reach_count` / `dealer_reacher` 以外を参照しない。副露の facts は将来の
+    /// policy が `GameContext` を解析し直さずに使えるよう保持するだけで、現在の mode / reason は
+    /// 一切変えない。
+    pub player_threats: [PlayerThreatFacts; 4],
 }
 
 /// 押し引き判定がどの条件で下されたかを表す理由。
@@ -227,8 +240,10 @@ const HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY: u8 = 4;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
-/// リーチ情報は `context.reached_opponents()` を使用する。`player_id == None` の場合は
-/// `reached_opponents()` の仕様どおり、リーチフラグが立っている全席を対象にする。
+/// リーチ情報は `GameContext` から構築した脅威 facts
+/// ([`player_threat_facts_from_context`]) を source of truth にする。`player_id == None` の
+/// 場合は `GameContext::reached_opponents()` と同じ仕様で、リーチフラグが立っている全席を
+/// 対象にする。
 ///
 /// 攻撃評価は既存の通常打牌 best 評価 ([`select_best_normal_discard_evaluation`]) を再利用する。
 /// 比較 semantics は `ShantenAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait を
@@ -253,18 +268,35 @@ pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
 
 /// すでに計算済みの `DiscardEvaluation` を利用して押し引き入力を構築する crate-private helper。
 ///
-/// リーチ者数と親リーチ判定は `push_pull_inputs_from_context()` と同じロジックを共有する。
-/// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
-/// evaluation が `None` なら offense も `None`。
+/// 脅威 facts をまだ構築していない入口用。すでに構築済みなら
+/// [`push_pull_inputs_from_threat_facts`] へ渡して二重構築を避ける。
 pub(crate) fn push_pull_inputs_from_context_with_evaluation(
     context: &GameContext,
     evaluation: Option<&DiscardEvaluation>,
 ) -> PushPullInputs {
-    let reached_opponents = context.reached_opponents();
-    let opponent_reach_count = reached_opponents.len() as u8;
-    let dealer_reacher = context
-        .oya()
-        .is_some_and(|oya| reached_opponents.contains(&(oya as usize)));
+    push_pull_inputs_from_threat_facts(
+        context,
+        player_threat_facts_from_context(context),
+        evaluation,
+    )
+}
+
+/// 構築済みの脅威 facts と `DiscardEvaluation` から押し引き入力を構築する crate-private helper。
+///
+/// リーチ者数と親リーチ判定は `player_threats` だけを source of truth にする
+/// ([`reached_opponent_count`] / [`has_reached_dealer`])。`GameContext` のリーチ情報を別経路で
+/// 数え直さない。`player_id` が不明な場合の扱いも `GameContext::reached_opponents()` と同じで、
+/// リーチフラグが立っている全席を他家リーチとして数える。
+///
+/// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
+/// evaluation が `None` なら offense も `None`。
+pub(crate) fn push_pull_inputs_from_threat_facts(
+    context: &GameContext,
+    player_threats: [PlayerThreatFacts; 4],
+    evaluation: Option<&DiscardEvaluation>,
+) -> PushPullInputs {
+    let opponent_reach_count = reached_opponent_count(&player_threats);
+    let dealer_reacher = has_reached_dealer(&player_threats);
     let self_dealer = match (context.player_id(), context.oya()) {
         (Some(player_id), Some(oya)) => player_id == oya,
         _ => false,
@@ -289,6 +321,7 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
         dealer_reacher,
         self_dealer,
         offense,
+        player_threats,
     }
 }
 
@@ -308,6 +341,10 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// 単独の子リーチに対する子の一向聴だけを対象にした限定補正で参照する。テンパイ・親リーチ・
 /// 複数リーチ・二向聴以上・自分が親の場合は従来どおり proxy を見ない。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
+///
+/// `PushPullInputs::player_threats` の副露 facts は現時点で判定に使わない。相手の副露は
+/// `opponent_reach_count` / `dealer_reacher` を変えないため、非リーチの副露相手だけの局面は
+/// 従来どおり `NoOpponentReach` → `Push` になる。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
 /// - `Neutral`: 通常打牌 → 防御 fallback(Reach は抑制)
@@ -504,12 +541,34 @@ mod tests {
         self_dealer: bool,
         offense: Option<PushPullOffenseState>,
     ) -> PushPullInputs {
+        inputs_with_threats(
+            opponent_reach_count,
+            dealer_reacher,
+            self_dealer,
+            offense,
+            no_threat_facts(),
+        )
+    }
+
+    fn inputs_with_threats(
+        opponent_reach_count: u8,
+        dealer_reacher: bool,
+        self_dealer: bool,
+        offense: Option<PushPullOffenseState>,
+        player_threats: [PlayerThreatFacts; 4],
+    ) -> PushPullInputs {
         PushPullInputs {
             opponent_reach_count,
             dealer_reacher,
             self_dealer,
             offense,
+            player_threats,
         }
+    }
+
+    // 副露もリーチも無い4席分の facts。
+    fn no_threat_facts() -> [PlayerThreatFacts; 4] {
+        player_threat_facts_from_context(&GameContext::default())
     }
 
     #[test]
@@ -1527,12 +1586,7 @@ mod tests {
         assert_eq!(offense.acceptance_type_count, 2);
 
         // threshold は変更していない。単独の子リーチに対するテンパイなので押す。
-        let inputs = PushPullInputs {
-            opponent_reach_count: 1,
-            dealer_reacher: false,
-            self_dealer: false,
-            offense: Some(offense),
-        };
+        let inputs = inputs_with_dealer(1, false, false, Some(offense));
         let decision = decide_push_pull(&inputs);
         assert_eq!(decision.mode, PushPullMode::Push);
         assert_eq!(
@@ -1547,12 +1601,7 @@ mod tests {
         let offense = offense_state_from_normal_discard(&one_meld_context(vec![]));
         assert_eq!(offense.min_shanten_after_discard, 2);
 
-        let decision = decide_push_pull(&PushPullInputs {
-            opponent_reach_count: 1,
-            dealer_reacher: false,
-            self_dealer: false,
-            offense: Some(offense),
-        });
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(offense)));
         assert_eq!(decision.mode, PushPullMode::Fold);
         assert_eq!(decision.reason, PushPullReason::TwoOrMoreShanten);
     }
@@ -1983,5 +2032,143 @@ mod tests {
 
         assert_eq!(context, context_before);
         assert_eq!(evaluation, evaluation_before);
+    }
+
+    // ---- 軽量 threat facts を押し引き入力へ渡す ----
+
+    // player 1 が白ポンだけを持ち、リーチ者がいない4席分の facts。
+    fn opponent_meld_facts() -> [PlayerThreatFacts; 4] {
+        player_threat_facts_from_context(&opponent_meld_context([false; 4]))
+    }
+
+    fn opponent_meld_context(reached: [bool; 4]) -> GameContext {
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[1] = vec![one_meld_pon()];
+
+        GameContext::from_parts_with_melds(
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            Some(0),
+            Default::default(),
+            reached,
+            melds,
+        )
+    }
+
+    #[test]
+    fn threat_facts_reach_the_push_pull_inputs() {
+        let context = opponent_meld_context([false, false, false, true]);
+        let inputs = push_pull_inputs_from_context(&context);
+
+        assert_eq!(
+            inputs.player_threats,
+            player_threat_facts_from_context(&context)
+        );
+        assert_eq!(inputs.player_threats[1].open_meld_count, 1);
+        assert_eq!(inputs.player_threats[1].value_honor_melds.confirmed, 1);
+        assert!(inputs.player_threats[3].reached);
+    }
+
+    #[test]
+    fn threat_facts_entry_point_matches_the_context_entry_point() {
+        let context = opponent_meld_context([false, false, false, true]);
+        let facts = player_threat_facts_from_context(&context);
+
+        assert_eq!(
+            push_pull_inputs_from_threat_facts(&context, facts, None),
+            push_pull_inputs_from_context_with_evaluation(&context, None)
+        );
+    }
+
+    #[test]
+    fn reach_inputs_are_derived_from_the_threat_facts() {
+        // player_id / oya / reached のあらゆる組み合わせで、既存のリーチ情報と一致する。
+        let reach_patterns = [
+            [false, false, false, false],
+            [true, false, false, false],
+            [false, true, false, false],
+            [true, true, false, false],
+            [false, true, true, false],
+            [true, true, true, true],
+        ];
+
+        for player_id in [None, Some(0), Some(2)] {
+            for oya in [None, Some(0), Some(1)] {
+                for reached in reach_patterns {
+                    let context = table_state_context(None, vec![], player_id, oya, reached);
+                    let inputs = push_pull_inputs_from_context(&context);
+                    let reached_opponents = context.reached_opponents();
+
+                    assert_eq!(
+                        inputs.opponent_reach_count,
+                        reached_opponents.len() as u8,
+                        "{player_id:?} {oya:?} {reached:?}"
+                    );
+                    assert_eq!(
+                        inputs.dealer_reacher,
+                        oya.is_some_and(|oya| reached_opponents.contains(&usize::from(oya))),
+                        "{player_id:?} {oya:?} {reached:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn threat_facts_do_not_change_any_decision() {
+        // 副露 facts の有無だけを変えても、mode / reason は既存のまま。
+        let facts = opponent_meld_facts();
+        assert_eq!(facts[1].open_meld_count, 1);
+        assert_eq!(facts[1].value_honor_melds.confirmed, 1);
+        assert_eq!(reached_opponent_count(&facts), 0);
+        assert_ne!(facts, no_threat_facts());
+
+        let offenses = [
+            None,
+            Some(offense(0, 4, 1)),
+            Some(offense_with_shape(1, 8, 2, IishantenShape::Weak)),
+            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+            Some(offense_with_shape(1, 5, 1, IishantenShape::Weak)),
+            Some(offense(2, 20, 4)),
+        ];
+        // (opponent_reach_count, dealer_reacher, self_dealer)
+        let seats = [
+            (0u8, false, false),
+            (1, false, false),
+            (1, true, false),
+            (1, false, true),
+            (2, false, false),
+            (2, true, false),
+        ];
+
+        for offense in offenses {
+            for (reach, dealer_reacher, self_dealer) in seats {
+                let plain = inputs_with_dealer(reach, dealer_reacher, self_dealer, offense);
+                let melded =
+                    inputs_with_threats(reach, dealer_reacher, self_dealer, offense, facts);
+                assert_eq!(
+                    decide_push_pull(&plain),
+                    decide_push_pull(&melded),
+                    "{reach} {dealer_reacher} {self_dealer} {offense:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_reaching_open_hands_still_push() {
+        // 非リーチの副露相手だけの局面は従来どおり NoOpponentReach → Push。
+        let facts = opponent_meld_facts();
+
+        for offense in [None, Some(offense(2, 20, 4))] {
+            let decision = decide_push_pull(&inputs_with_threats(0, false, false, offense, facts));
+            assert_eq!(decision.mode, PushPullMode::Push);
+            assert_eq!(decision.reason, PushPullReason::NoOpponentReach);
+        }
     }
 }
