@@ -2,7 +2,7 @@ use bot_core::NormalAgent;
 use riichilab_client::validation_policy::AgentKind;
 use riichilab_client::{
     CliArgs, ClientConfig, ClientExitCondition, ConnectionMode, USAGE,
-    install_default_crypto_provider, run_riichilab_client,
+    install_default_crypto_provider, logging, run_riichilab_client,
 };
 use tracing::info;
 
@@ -19,11 +19,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     install_default_crypto_provider();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let _log_guard = match logging::init(args.log_file.as_deref()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
 
     let config = ClientConfig::from_env_with_endpoint(args.mode.endpoint().to_string())?;
     let agent_kind = match args.agent {
