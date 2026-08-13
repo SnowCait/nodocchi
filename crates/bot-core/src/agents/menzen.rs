@@ -42,7 +42,8 @@ impl Agent for MenzenAgent {
 mod tests {
     use super::*;
     use crate::agents::shanten::tests::{
-        PonReaction, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
+        PonReaction, TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions,
+        tenpai_context, tile,
     };
 
     fn chi() -> LegalAction {
@@ -203,7 +204,7 @@ mod tests {
     fn matches_shanten_agent_on_normal_discard() {
         let mut agent = MenzenAgent::default();
         let mut shanten = ShantenAgent;
-        let ctx = tenpai_context(&[73, 74, 105, 106]);
+        let ctx = tenpai_context(&TENPAI_SCARCE_VISIBLE);
         let actions = tenpai_actions();
 
         let expected = shanten.act(&ctx, &actions);

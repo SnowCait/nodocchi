@@ -8,6 +8,7 @@ use crate::defense::{
 use crate::discard_selection::{
     DiscardActionSelection, select_best_one_step_discard_evaluation_with_fixed_meld_count,
     select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
+    selected_discard_tenpai_wait_availability,
 };
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
@@ -15,7 +16,7 @@ use crate::push_pull::{
 };
 use bot_logic::{
     DiscardDecisionDiagnostic, DiscardEvaluation, DiscardFuritenDiagnostic, FixedMeldCount,
-    LookaheadDiagnostic, TileCounts, TileId, TileType, calculate_acceptance_with_visible_tiles,
+    LookaheadDiagnostic, PermanentFuriten, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     calculate_shanten_with_fixed_melds,
 };
 
@@ -23,6 +24,9 @@ const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
 // 補正後の待ち枚数がこの枚数以上ならリーチする。
 const REACH_MIN_REMAINING: u8 = 4;
+
+// リーチを検討する打牌後の向聴数。
+const REACH_TENPAI_SHANTEN: i8 = 0;
 
 // 限定 Pon を検討する現在の向聴数。今回は 1向聴 → テンパイ だけを対象にする。
 const PON_CURRENT_SHANTEN: i8 = 1;
@@ -156,11 +160,101 @@ pub struct PonDecisionDiagnostic {
     pub candidates: Vec<PonCandidateDiagnostic>,
 }
 
+/// リーチを採用した / しなかった理由。
+///
+/// `Eligible` 以外はすべて「今回はリーチしない」理由であり、最初に落ちた条件を1つだけ表す。
+/// 判定順は [`ReachDecisionDiagnostic`] のフィールドが埋まる順と一致する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReachDecisionReason {
+    /// 全条件を満たし、選んだ打牌後が生きた待ちを十分に持つテンパイになる。
+    Eligible,
+    /// 合法 action に [`LegalAction::Reach`] が無い。
+    NoLegalReach,
+    /// 通常打牌 selection が打牌を選べていない。手牌や合法 Dahai が無い局面。
+    NoSelectedDiscard,
+    /// 選んだ打牌の後がテンパイではない。
+    NotTenpai,
+    /// テンパイだが、ツモ和了できる待ちの残枚数が threshold 未満。
+    InsufficientLiveWait,
+}
+
+/// リーチ判断の構造化診断。
+///
+/// 契約:
+///
+/// - 判断材料は通常打牌 selection が選んだ打牌 ([`DiscardActionSelection`]) の評価だけで、リーチ
+///   専用に向聴・受け入れ・待ち・フリテンを計算し直さない。`shanten_after_discard` は
+///   [`DiscardEvaluation::min_shanten_after_discard`]、`tenpai_wait` のツモ側は
+///   [`DiscardEvaluation::acceptance_after_discard`] そのもの。
+/// - `selected` は `ShantenAgent::act()` が実際に採用したリーチそのもので、診断用の別判断
+///   ロジックは持たない。
+/// - 判定が進まなかった項目は推測せず `None` のままにする。
+///
+/// `tenpai_wait` の恒常フリテン・ロン可否は事実として持つだけで、今回のリーチ判断には使わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachDecisionDiagnostic {
+    /// 通常打牌 selection が選んだ合法 Dahai。押し引き入力と同じ selection の action。
+    pub selected_discard: Option<LegalAction>,
+    /// `selected_discard` を切った後の向聴数。打牌を選べていない場合は `None`。
+    pub shanten_after_discard: Option<i8>,
+    /// `selected_discard` を切った後がテンパイの場合の待ちとロン可否。
+    ///
+    /// 構造上のアガリ牌種・生きた待ち・ツモ残枚数と種類数・恒常フリテン・自分の河と重複した
+    /// 待ち牌を持つ。テンパイにならない場合とリーチを検討しなかった場合は `None`。
+    pub tenpai_wait: Option<TenpaiWaitAvailability>,
+    /// 採用したリーチ。採用しなかった場合は `None`。
+    pub selected: Option<LegalAction>,
+    pub reason: ReachDecisionReason,
+}
+
+impl ReachDecisionDiagnostic {
+    /// リーチすべきと判断したか。`selected` が `Some` であることと同値。
+    pub fn should_reach(&self) -> bool {
+        self.selected.is_some()
+    }
+
+    /// 打牌後テンパイの恒常フリテン状態。テンパイにならない場合は `None`。
+    pub fn permanent_furiten(&self) -> Option<PermanentFuriten> {
+        self.tenpai_wait
+            .as_ref()
+            .map(TenpaiWaitAvailability::permanent_furiten)
+    }
+
+    /// 恒常フリテンの観点からロンできるか。テンパイにならない場合と判断できない場合は `None`。
+    pub fn can_ron(&self) -> Option<bool> {
+        self.tenpai_wait
+            .as_ref()
+            .and_then(TenpaiWaitAvailability::can_ron)
+    }
+
+    /// ツモ和了できる待ちの残枚数。テンパイにならない場合は `None`。
+    ///
+    /// 選ばれた [`DiscardEvaluation::acceptance_total_remaining`] と常に一致する。
+    pub fn tsumo_remaining(&self) -> Option<u8> {
+        self.tenpai_wait.as_ref().map(|wait| wait.tsumo_remaining)
+    }
+
+    /// ツモ和了できる待ちの種類数。テンパイにならない場合は `None`。
+    ///
+    /// 選ばれた [`DiscardEvaluation::acceptance_type_count`] と常に一致する。
+    pub fn tsumo_type_count(&self) -> Option<usize> {
+        self.tenpai_wait.as_ref().map(|wait| wait.tsumo_type_count)
+    }
+
+    /// 自分の河と重複した待ち牌。テンパイにならない場合は空。
+    pub fn discarded_waits(&self) -> &[TileType] {
+        self.tenpai_wait
+            .as_ref()
+            .map_or(&[], TenpaiWaitAvailability::discarded_waits)
+    }
+}
+
 /// `ShantenAgent` が下した最終判断と、その選択経路・ログ用文脈をまとめた内部表現。
 ///
 /// ログのためだけに判断ロジックを再実行しないよう、action 選択の過程で得た情報を保持する。
 /// `push_pull` / `push_pull_inputs` / `normal_discard` は Hora / Ryukyoku / Pon の早期 return では
-/// `None`。`pon` は合法 Pon が1件も無い局面では `None`。
+/// `None`。`pon` は合法 Pon が1件も無い局面では `None`。`reach` はリーチを検討する Push mode
+/// 以外では `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentDecision {
     action: LegalAction,
@@ -168,6 +262,7 @@ pub(crate) struct AgentDecision {
     push_pull_inputs: Option<PushPullInputs>,
     push_pull: Option<PushPullDecision>,
     normal_discard: Option<LegalAction>,
+    reach: Option<ReachDecisionDiagnostic>,
     pon: Option<PonDecisionDiagnostic>,
 }
 
@@ -182,7 +277,7 @@ pub(crate) struct AgentDecision {
 ///   影響しない。
 /// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku / 限定 Pon で
 ///   早期終了した場合は `normal_discard` / `normal_discard_action` / `push_pull_inputs` /
-///   `push_pull_decision` / `defense` がすべて `None`。
+///   `push_pull_decision` / `reach` / `defense` がすべて `None`。
 ///
 /// tracing ログとは独立した pure なデータであり、ログをパースして構築することはない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +312,11 @@ pub struct ShantenDecisionDiagnostic {
     pub push_pull_inputs: Option<PushPullInputs>,
     /// 押し引き判定の結果。`decide_push_pull()` の実結果。
     pub push_pull_decision: Option<PushPullDecision>,
+    /// リーチを検討した場合の判断内訳。リーチを検討する Push mode 以外では `None`。
+    ///
+    /// 採用しなかった場合も、通常打牌 selection が選んだ打牌・打牌後の向聴・待ち・恒常フリテンと
+    /// 理由を保持する。`act()` と同じ helper の実結果で、診断用の別判断ロジックは持たない。
+    pub reach: Option<ReachDecisionDiagnostic>,
     /// 防御 fallback を検討した場合の診断。採用されなかった場合も候補評価を保持する。
     pub defense: Option<DefenseDecisionDiagnostic>,
     /// 限定 Pon を検討した場合の診断。合法 Pon が1件も無ければ `None`。採用しなかった場合も
@@ -311,20 +411,6 @@ impl DecisionDiagnostics {
 pub struct ShantenAgent;
 
 impl ShantenAgent {
-    fn select_reach_action(
-        &self,
-        ctx: &GameContext,
-        legal_actions: &[LegalAction],
-    ) -> Option<LegalAction> {
-        if !should_reach(ctx) {
-            return None;
-        }
-        legal_actions
-            .iter()
-            .find(|a| matches!(a, LegalAction::Reach))
-            .cloned()
-    }
-
     /// `act()` と同じ判断を行い、その過程を構造化診断として返す。
     ///
     /// 判断経路は `act()` と共通の内部 helper を通るため、
@@ -364,6 +450,7 @@ impl ShantenAgent {
             normal_discard_lookahead: diagnostics.normal_discard_lookahead,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
+            reach: decision.reach,
             defense: diagnostics.defense,
             pon: decision.pon,
             own_fixed_meld_count: context.own_fixed_meld_count(),
@@ -394,6 +481,7 @@ impl ShantenAgent {
                 push_pull_inputs: None,
                 push_pull: None,
                 normal_discard: None,
+                reach: None,
                 pon: None,
             };
         }
@@ -408,6 +496,7 @@ impl ShantenAgent {
                 push_pull_inputs: None,
                 push_pull: None,
                 normal_discard: None,
+                reach: None,
                 pon: None,
             };
         }
@@ -421,6 +510,7 @@ impl ShantenAgent {
                 push_pull_inputs: None,
                 push_pull: None,
                 normal_discard: None,
+                reach: None,
                 pon,
             };
         }
@@ -436,12 +526,14 @@ impl ShantenAgent {
         log_push_pull_decision(&push_pull, &inputs, discard_selection.action.as_ref());
 
         let normal_discard = discard_selection.action.clone();
+        let mut reach = None;
 
         if let Some((action, source)) = self.select_action_for_push_pull_mode(
             push_pull.mode,
             ctx,
             legal_actions,
-            discard_selection.action.as_ref(),
+            &discard_selection,
+            &mut reach,
             diagnostics,
         ) {
             return AgentDecision {
@@ -450,6 +542,7 @@ impl ShantenAgent {
                 push_pull_inputs: Some(inputs),
                 push_pull: Some(push_pull),
                 normal_discard,
+                reach,
                 pon,
             };
         }
@@ -467,6 +560,7 @@ impl ShantenAgent {
                 push_pull_inputs: Some(inputs),
                 push_pull: Some(push_pull),
                 normal_discard,
+                reach,
                 pon,
             };
         }
@@ -482,6 +576,7 @@ impl ShantenAgent {
             push_pull_inputs: Some(inputs),
             push_pull: Some(push_pull),
             normal_discard,
+            reach,
             pon,
         }
     }
@@ -515,17 +610,24 @@ impl ShantenAgent {
     // - Push:    Reach → 通常打牌 → 防御 fallback
     // - Neutral: 通常打牌 → 防御 fallback(Reach は検討しない)
     // - Fold:    防御 fallback → 通常打牌(Reach は検討しない)
+    //
+    // リーチ判断と通常打牌・押し引きは同じ `discard_selection` を参照する。リーチのために打牌を
+    // 選び直したり、待ちを別経路で計算し直したりしない。検討した場合の判断内訳は `reach` へ
+    // 書き込み、検討しなかった Neutral / Fold では `None` のままにする。
     fn select_action_for_push_pull_mode(
         &self,
         mode: PushPullMode,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
-        normal_discard: Option<&LegalAction>,
+        discard_selection: &DiscardActionSelection,
+        reach: &mut Option<ReachDecisionDiagnostic>,
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
+        let normal_discard = discard_selection.action.as_ref();
         match mode {
             PushPullMode::Push => {
-                if let Some(action) = self.select_reach_action(ctx, legal_actions) {
+                let decision = reach.insert(decide_reach(ctx, legal_actions, discard_selection));
+                if let Some(action) = decision.selected.clone() {
                     return Some((action, AgentActionSource::Reach));
                 }
                 if let Some(action) = normal_discard {
@@ -787,6 +889,10 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(pon) => format!("{:?}", pon.reason),
         None => "None".to_string(),
     };
+    let reach_reason = match &decision.reach {
+        Some(reach) => format!("{:?}", reach.reason),
+        None => "None".to_string(),
+    };
 
     tracing::debug!(
         target: AGENT_DECISION_LOG_TARGET,
@@ -795,41 +901,72 @@ fn log_agent_decision(decision: &AgentDecision) {
         push_pull_mode = %push_pull_mode,
         push_pull_reason = %push_pull_reason,
         normal_discard = %normal_discard,
+        reach_reason = %reach_reason,
         defense_kind = %defense_kind,
         pon_reason = %pon_reason,
         "agent decision",
     );
 }
 
-// 補正後の待ち枚数が明らかに少ない即リーチだけを抑制する最小判断。
+// リーチ判断の本体。act() と構造化診断はこの1本を共有し、診断は結果を載せるだけにする。
+//
+// 判断材料は通常打牌 selection が選んだ打牌の評価だけで、リーチ専用に手牌から向聴・受け入れを
+// 計算し直さない。待ちと恒常フリテンも選択済みの1候補分だけを既存 pure helper から求め、全合法
+// 候補分の診断や2手先探索は構築しない。
+//
+// 補正後の待ち枚数が明らかに少ない即リーチだけを抑制する最小判断であることは変えていない。
 // TODO: 役判定・打点・押し引きを考慮したリーチ判断に置き換える。
-fn should_reach(ctx: &GameContext) -> bool {
-    let tiles: Vec<_> = ctx
-        .hand_tiles()
+fn decide_reach(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+    selection: &DiscardActionSelection,
+) -> ReachDecisionDiagnostic {
+    let mut diagnostic = ReachDecisionDiagnostic {
+        selected_discard: selection.action.clone(),
+        shanten_after_discard: selection
+            .evaluation
+            .as_ref()
+            .map(DiscardEvaluation::min_shanten_after_discard),
+        tenpai_wait: None,
+        selected: None,
+        reason: ReachDecisionReason::NoLegalReach,
+    };
+
+    // 合法手にリーチが無ければ待ちもフリテンも求めない。
+    let Some(reach) = legal_actions
         .iter()
-        .copied()
-        .chain(ctx.drawn_tile())
-        .collect();
+        .find(|action| matches!(action, LegalAction::Reach))
+        .cloned()
+    else {
+        return diagnostic;
+    };
 
-    // 手牌情報がない場合は従来挙動を維持する。
-    if tiles.is_empty() {
-        return true;
+    // DiscardActionSelection の不変条件より、evaluation が Some なら action も Some。
+    let Some(evaluation) = selection.evaluation.as_ref() else {
+        diagnostic.reason = ReachDecisionReason::NoSelectedDiscard;
+        return diagnostic;
+    };
+
+    if evaluation.min_shanten_after_discard() != REACH_TENPAI_SHANTEN {
+        diagnostic.reason = ReachDecisionReason::NotTenpai;
+        return diagnostic;
     }
 
-    // visible_tiles がない場合は補正できないため従来挙動を維持する。
-    if ctx.visible_tiles().is_empty() {
-        return true;
+    let Some(tenpai_wait) = selected_discard_tenpai_wait_availability(ctx, evaluation) else {
+        diagnostic.reason = ReachDecisionReason::NotTenpai;
+        return diagnostic;
+    };
+
+    // 待ち枚数は既存受け入れそのもので、visible tiles の反映も打牌評価の時点で済んでいる。
+    // 恒常フリテンとロン可否は事実として tenpai_wait に持つだけで、判断には使わない。
+    if tenpai_wait.tsumo_remaining >= REACH_MIN_REMAINING {
+        diagnostic.reason = ReachDecisionReason::Eligible;
+        diagnostic.selected = Some(reach);
+    } else {
+        diagnostic.reason = ReachDecisionReason::InsufficientLiveWait;
     }
-
-    let counts = TileCounts::from_tiles(tiles.iter().copied());
-    let acceptance = calculate_acceptance_with_visible_tiles(&counts, ctx.visible_tiles());
-
-    // テンパイしていないなら即リーチしない。
-    if acceptance.current.min() != 0 {
-        return false;
-    }
-
-    acceptance.total_remaining() >= REACH_MIN_REMAINING
+    diagnostic.tenpai_wait = Some(tenpai_wait);
+    diagnostic
 }
 
 impl Agent for ShantenAgent {
@@ -910,38 +1047,24 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn picks_reach_when_available() {
-        let mut agent = ShantenAgent;
-        let ctx = GameContext::default();
-        let actions = vec![LegalAction::Reach];
-        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
-    }
-
-    #[test]
     fn prefers_reach_over_evaluated_dahai() {
         let mut agent = ShantenAgent;
-        let ctx = GameContext::with_drawn_tile(tile(0));
-        let actions = vec![LegalAction::Reach, dahai(0)];
+        let ctx = tenpai_context(&[]);
+        let actions = tenpai_actions();
+        assert!(select_discard_action(&ctx, &actions).is_some());
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
     #[test]
     fn reach_is_policy_choice_not_fallback() {
+        // 通常打牌を選べる局面でも、選んだ打牌後の待ちが十分ならリーチを選ぶ。
         let mut agent = ShantenAgent;
-        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
-        let ctx = GameContext::from_parts(
-            Some(tile(116)),
-            hand_values.iter().map(|&value| tile(value)).collect(),
-        );
-        let actions: Vec<LegalAction> = hand_values
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(116)])
-            .chain([LegalAction::Reach])
-            .collect();
+        let ctx = tenpai_context(&[]);
+        let actions = tenpai_actions();
 
-        assert!(select_discard_action(&ctx, &actions).is_some());
+        let normal = select_discard_action(&ctx, &actions).expect("通常打牌を選べる");
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+        assert_ne!(agent.act(&ctx, &actions), normal);
     }
 
     #[test]
@@ -1052,9 +1175,12 @@ pub(crate) mod tests {
         assert_eq!(tile.tile_type().to_mjai_string(), "9p");
     }
 
-    // 4面子 + 1s + 9s のタンキ含みテンパイ形。捨て牌前提で待ちは {1s, 9s}。
-    const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 72];
-    const TENPAI_DRAWN: u8 = 104;
+    // 123m456m789m 34p 55s + ツモ 北。打 北 で 2p / 5p の両面テンパイになり、待ちは8枚。
+    const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 44, 48, 89, 90];
+    const TENPAI_DRAWN: u8 = 116;
+
+    // 2p / 5p を3枚ずつ見せて、テンパイのまま待ち枚数だけを threshold 未満(2枚)にする見え牌。
+    pub(crate) const TENPAI_SCARCE_VISIBLE: [u8; 6] = [40, 41, 42, 53, 54, 55];
 
     pub(crate) fn tenpai_context(extra_visible: &[u8]) -> GameContext {
         let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
@@ -1071,6 +1197,12 @@ pub(crate) mod tests {
         )
     }
 
+    // 同じテンパイ手牌で visible tiles だけを空にした局面。
+    fn tenpai_context_without_visible_tiles() -> GameContext {
+        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
+        GameContext::from_parts(Some(tile(TENPAI_DRAWN)), hand)
+    }
+
     pub(crate) fn tenpai_actions() -> Vec<LegalAction> {
         TENPAI_HAND
             .iter()
@@ -1078,6 +1210,38 @@ pub(crate) mod tests {
             .chain([dahai(TENPAI_DRAWN)])
             .chain([LegalAction::Reach])
             .collect()
+    }
+
+    // 123456789m 123p 5s + ツモ 北。打 北 で 5s 単騎テンパイになり、待ちは3枚だけ。
+    //
+    // 14枚をそのまま評価すると受け入れは {5s, 北} の6枚に見えるが、実際に切る打牌を決めた後の
+    // 待ちは3枚しかない。旧判断と新判断で結論が変わる代表局面。
+    const TANKI_TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
+    const TANKI_TENPAI_DRAWN: u8 = 116;
+
+    fn tanki_tenpai_context() -> GameContext {
+        let hand: Vec<_> = TANKI_TENPAI_HAND.iter().map(|&value| tile(value)).collect();
+        GameContext::from_parts(Some(tile(TANKI_TENPAI_DRAWN)), hand)
+    }
+
+    fn tanki_tenpai_actions() -> Vec<LegalAction> {
+        TANKI_TENPAI_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(TANKI_TENPAI_DRAWN)])
+            .chain([LegalAction::Reach])
+            .collect()
+    }
+
+    // act() が実際に通ったリーチ判断。診断専用に判断し直さないことを毎回確かめる。
+    fn reach_diagnostic(ctx: &GameContext, actions: &[LegalAction]) -> ReachDecisionDiagnostic {
+        let diagnostic = diagnose_matching_act(ctx, actions);
+        let reach = diagnostic.reach.expect("リーチを検討している");
+        assert_eq!(
+            reach.should_reach(),
+            diagnostic.selected_source == AgentActionSource::Reach
+        );
+        reach
     }
 
     #[test]
@@ -1090,25 +1254,344 @@ pub(crate) mod tests {
     #[test]
     fn skips_reach_when_visible_waits_are_scarce() {
         let mut agent = ShantenAgent;
-        // 1s / 9s をそれぞれ2枚見せて待ち枚数を枯らす。
-        let ctx = tenpai_context(&[73, 74, 105, 106]);
+        let ctx = tenpai_context(&TENPAI_SCARCE_VISIBLE);
         let selected = agent.act(&ctx, &tenpai_actions());
         assert!(matches!(selected, LegalAction::Dahai { .. }));
     }
 
     #[test]
     fn reaches_when_visible_tiles_empty_even_with_hand() {
+        // visible tiles が空でも「空だから無条件にリーチ」ではなく、選んだ打牌の受け入れで
+        // 判断する。この手牌は見え牌補正が無くても待ちが8枚あるのでリーチになる。
         let mut agent = ShantenAgent;
-        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
-        let ctx = GameContext::from_parts(Some(tile(TENPAI_DRAWN)), hand);
+        let ctx = tenpai_context_without_visible_tiles();
+        assert!(ctx.visible_tiles().is_empty());
         assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
     }
 
     #[test]
-    fn reaches_without_hand_information() {
+    fn does_not_reach_without_hand_information() {
+        // 手牌が無く通常打牌 selection が打牌を選べない局面では、リーチ専用の fallback で
+        // 無条件にリーチしない。
         let mut agent = ShantenAgent;
         let ctx = GameContext::default();
-        assert_eq!(agent.act(&ctx, &[LegalAction::Reach]), LegalAction::Reach);
+        let actions = vec![LegalAction::Reach];
+
+        assert_ne!(agent.act(&ctx, &actions), LegalAction::Reach);
+        let reach = ShantenAgent::diagnose(&ctx, &actions)
+            .reach
+            .expect("Push mode でリーチを検討する");
+        assert!(!reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::NoSelectedDiscard);
+        assert_eq!(reach.selected_discard, None);
+        assert_eq!(reach.shanten_after_discard, None);
+        assert_eq!(reach.tenpai_wait, None);
+    }
+
+    // ---- リーチ判断 ----
+
+    #[test]
+    fn reach_uses_the_wait_of_the_selected_discard() {
+        // 選んだ打牌後がテンパイで待ちが threshold 以上なら Push mode でリーチする。
+        let ctx = tenpai_context(&[]);
+        let actions = tenpai_actions();
+        let reach = reach_diagnostic(&ctx, &actions);
+
+        assert!(reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert_eq!(reach.selected, Some(LegalAction::Reach));
+        assert_eq!(reach.selected_discard, Some(dahai(TENPAI_DRAWN)));
+        assert_eq!(reach.shanten_after_discard, Some(0));
+        assert_eq!(reach.tsumo_remaining(), Some(8));
+        assert_eq!(reach.tsumo_type_count(), Some(2));
+    }
+
+    #[test]
+    fn does_not_reach_when_the_live_wait_is_below_the_threshold() {
+        // テンパイでも待ち枚数が threshold 未満なら、リーチせず通常打牌へ進む。
+        let ctx = tenpai_context(&TENPAI_SCARCE_VISIBLE);
+        let actions = tenpai_actions();
+        let normal = select_discard_action(&ctx, &actions).expect("通常打牌を選べる");
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(diagnostic.selected_action, normal);
+        assert!(!reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::InsufficientLiveWait);
+        assert_eq!(reach.shanten_after_discard, Some(0));
+        assert!(reach.tsumo_remaining().expect("テンパイ") < REACH_MIN_REMAINING);
+    }
+
+    #[test]
+    fn does_not_reach_when_the_selected_discard_is_not_tenpai() {
+        // 合法手にリーチがあっても、選んだ打牌後がテンパイでなければ選ばない。
+        let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 56, 89];
+        let ctx = GameContext::from_parts(
+            Some(tile(116)),
+            hand_values.iter().map(|&value| tile(value)).collect(),
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116), LegalAction::Reach])
+            .collect();
+        let reach = reach_diagnostic(&ctx, &actions);
+
+        assert!(!reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::NotTenpai);
+        assert!(reach.shanten_after_discard.expect("打牌を選べる") > 0);
+        assert_eq!(reach.tenpai_wait, None);
+    }
+
+    #[test]
+    fn does_not_reach_without_a_legal_reach() {
+        // 合法手にリーチが無ければ、テンパイでもリーチを選ばず待ちも求めない。
+        let ctx = tenpai_context(&[]);
+        let actions: Vec<LegalAction> = tenpai_actions()
+            .into_iter()
+            .filter(|action| !matches!(action, LegalAction::Reach))
+            .collect();
+        let reach = reach_diagnostic(&ctx, &actions);
+
+        assert!(!reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::NoLegalReach);
+        assert_eq!(reach.tenpai_wait, None);
+    }
+
+    #[test]
+    fn reach_wait_matches_the_selected_discard_evaluation() {
+        // 待ち枚数・種類数は選ばれた打牌評価の受け入れそのもので、リーチ用に計算し直さない。
+        for ctx in [
+            tenpai_context(&[]),
+            tenpai_context(&TENPAI_SCARCE_VISIBLE),
+            tenpai_context_without_visible_tiles(),
+        ] {
+            let actions = tenpai_actions();
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+            let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+            let evaluation = diagnostic
+                .normal_discard
+                .as_ref()
+                .expect("通常打牌を評価している")
+                .selected
+                .as_ref()
+                .expect("打牌を選べる");
+
+            assert_eq!(
+                reach.shanten_after_discard,
+                Some(evaluation.min_shanten_after_discard())
+            );
+            assert_eq!(
+                reach.tsumo_remaining(),
+                Some(evaluation.acceptance_total_remaining())
+            );
+            assert_eq!(
+                reach.tsumo_type_count(),
+                Some(evaluation.acceptance_type_count())
+            );
+        }
+    }
+
+    #[test]
+    fn reach_wait_reflects_visible_tiles_through_the_discard_evaluation() {
+        // 見え牌の反映は打牌評価の時点で済んでいる。リーチ判断は補正済みの残枚数をそのまま使う。
+        let plentiful = reach_diagnostic(&tenpai_context(&[]), &tenpai_actions());
+        let scarce = reach_diagnostic(&tenpai_context(&TENPAI_SCARCE_VISIBLE), &tenpai_actions());
+
+        assert_eq!(plentiful.tsumo_remaining(), Some(8));
+        assert_eq!(scarce.tsumo_remaining(), Some(2));
+        // 見え牌で消えるのは残枚数だけで、構造上の待ちは変わらない。
+        assert_eq!(
+            plentiful
+                .tenpai_wait
+                .as_ref()
+                .map(|wait| &wait.structural_waits),
+            scarce
+                .tenpai_wait
+                .as_ref()
+                .map(|wait| &wait.structural_waits)
+        );
+    }
+
+    #[test]
+    fn reach_wait_without_visible_tiles_uses_the_evaluation_acceptance() {
+        // visible tiles が空でもリーチ専用 fallback を使わず、打牌評価の受け入れで判断する。
+        let ctx = tenpai_context_without_visible_tiles();
+        let reach = reach_diagnostic(&ctx, &tenpai_actions());
+
+        assert!(ctx.visible_tiles().is_empty());
+        assert!(reach.should_reach());
+        assert_eq!(reach.tsumo_remaining(), Some(8));
+
+        // 同じく visible tiles が空でも、待ちが足りなければリーチしない。
+        let tanki = reach_diagnostic(&tanki_tenpai_context(), &tanki_tenpai_actions());
+        assert!(tanki_tenpai_context().visible_tiles().is_empty());
+        assert!(!tanki.should_reach());
+        assert_eq!(tanki.reason, ReachDecisionReason::InsufficientLiveWait);
+        assert_eq!(tanki.tsumo_remaining(), Some(3));
+    }
+
+    #[test]
+    fn permanent_furiten_is_reported_without_changing_the_reach_policy() {
+        // 恒常フリテンのテンパイでも、待ち枚数だけで判断する今回の policy は変えない。
+        let ctx = three_sided_context(&[], &[81]);
+        let actions: Vec<LegalAction> = three_sided_actions()
+            .into_iter()
+            .chain([LegalAction::Reach])
+            .collect();
+        let reach = reach_diagnostic(&ctx, &actions);
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.can_ron(), Some(false));
+        assert_eq!(reach.discarded_waits(), [tile(80).tile_type()]);
+        // フリテンを理由にリーチを止めない。
+        assert!(reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+    }
+
+    #[test]
+    fn an_unknown_player_id_leaves_the_reach_furiten_unknown() {
+        // 自分の河を特定できない場合、非フリテンだと推測しない。
+        let ctx = three_sided_context_without_player_id(&[81]);
+        let actions: Vec<LegalAction> = three_sided_actions()
+            .into_iter()
+            .chain([LegalAction::Reach])
+            .collect();
+        let reach = reach_diagnostic(&ctx, &actions);
+
+        assert_eq!(ctx.own_discards(), None);
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Unknown));
+        assert_eq!(reach.can_ron(), None);
+        assert!(reach.discarded_waits().is_empty());
+        assert!(reach.should_reach());
+    }
+
+    #[test]
+    fn a_fully_visible_discarded_wait_keeps_the_reach_furiten_diagnostic() {
+        // 構造上の待ちの一部が残枚数 0 でも、恒常フリテンは解除されない。
+        let ctx = three_sided_context(&[82, 83], &[81]);
+        let actions: Vec<LegalAction> = three_sided_actions()
+            .into_iter()
+            .chain([LegalAction::Reach])
+            .collect();
+        let reach = reach_diagnostic(&ctx, &actions);
+        let tenpai = reach.tenpai_wait.as_ref().expect("テンパイになる");
+
+        let three_sou = tile(80).tile_type();
+        assert!(tenpai.structural_waits.contains(&three_sou));
+        assert!(!tenpai.live_waits.contains(&three_sou));
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.can_ron(), Some(false));
+        assert_eq!(reach.discarded_waits(), [three_sou]);
+    }
+
+    #[test]
+    fn reach_and_push_pull_share_the_selected_discard_evaluation() {
+        // リーチ判断と押し引きが別々の打牌評価を参照しないことを固定する。
+        for (ctx, actions) in [
+            (tenpai_context(&[]), tenpai_actions()),
+            (tenpai_context(&TENPAI_SCARCE_VISIBLE), tenpai_actions()),
+            (tanki_tenpai_context(), tanki_tenpai_actions()),
+        ] {
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+            let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+            let offense = diagnostic
+                .push_pull_inputs
+                .as_ref()
+                .expect("押し引き入力がある")
+                .offense
+                .expect("攻撃評価がある");
+
+            assert_eq!(
+                reach.shanten_after_discard,
+                Some(offense.min_shanten_after_discard)
+            );
+            assert_eq!(
+                reach.tsumo_remaining(),
+                Some(offense.acceptance_total_remaining)
+            );
+            assert_eq!(
+                reach.tsumo_type_count(),
+                Some(offense.acceptance_type_count)
+            );
+        }
+    }
+
+    #[test]
+    fn reach_decision_is_shared_by_act_and_every_diagnose_entry_point() {
+        for (ctx, actions) in [
+            (tenpai_context(&[]), tenpai_actions()),
+            (tenpai_context(&TENPAI_SCARCE_VISIBLE), tenpai_actions()),
+            (tanki_tenpai_context(), tanki_tenpai_actions()),
+            (three_sided_context(&[], &[81]), {
+                three_sided_actions()
+                    .into_iter()
+                    .chain([LegalAction::Reach])
+                    .collect()
+            }),
+        ] {
+            let mut agent = ShantenAgent;
+            let acted = agent.act(&ctx, &actions);
+            let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+            let with_lookahead = ShantenAgent::diagnose_with_options(
+                &ctx,
+                &actions,
+                DiagnosticOptions::WITH_LOOKAHEAD,
+            );
+
+            assert_eq!(diagnostic.selected_action, acted);
+            assert_eq!(with_lookahead.selected_action, acted);
+            assert_eq!(with_lookahead.reach, diagnostic.reach);
+        }
+    }
+
+    #[test]
+    fn reach_evaluation_does_not_build_the_analysis_diagnostics() {
+        // リーチ判断のために全候補フリテン診断や2手先診断を構築しない。必要なのは選択済み
+        // 打牌1件分の待ちだけ。
+        let ctx = tenpai_context(&[]);
+        let mut diagnostics = DecisionDiagnostics::disabled();
+        let decision =
+            ShantenAgent.decide_with_diagnostics(&ctx, &tenpai_actions(), &mut diagnostics);
+
+        assert_eq!(decision.action, LegalAction::Reach);
+        assert!(diagnostics.normal_discard.is_none());
+        assert!(diagnostics.normal_discard_furiten.is_none());
+        assert!(diagnostics.normal_discard_lookahead.is_none());
+        assert!(
+            decision
+                .reach
+                .expect("リーチを検討している")
+                .tenpai_wait
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn neutral_and_fold_do_not_evaluate_reach() {
+        // リーチを検討するのは Push mode だけで、他のモードでは診断も残さない。
+        for (ctx, actions, mode) in [
+            (
+                tenpai_under_reach_context(Some(1), [false, true, false, false]),
+                tenpai_actions(),
+                PushPullMode::Neutral,
+            ),
+            (
+                fold_under_reach_context(),
+                fold_actions(),
+                PushPullMode::Fold,
+            ),
+        ] {
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+            assert_eq!(
+                diagnostic.push_pull_decision.map(|decision| decision.mode),
+                Some(mode)
+            );
+            assert_eq!(diagnostic.reach, None);
+            assert_ne!(diagnostic.selected_action, LegalAction::Reach);
+            assert_ne!(diagnostic.selected_source, AgentActionSource::Reach);
+        }
     }
 
     #[test]
@@ -1203,21 +1686,9 @@ pub(crate) mod tests {
     #[test]
     fn keeps_normal_behavior_without_opponent_reach() {
         let mut agent = ShantenAgent;
-        // 他家リーチが無ければ、現物相当の牌があっても従来の Reach を選ぶ。
-        let discards = [vec![], vec![tile(16)], vec![], vec![]];
-        let ctx = GameContext::from_parts_with_table_state(
-            Some(tile(0)),
-            vec![],
-            vec![],
-            None,
-            None,
-            Vec::new(),
-            Some(0),
-            None,
-            discards,
-            [false; 4],
-        );
-        let actions = vec![LegalAction::Reach, dahai(16)];
+        // 他家リーチが無ければ、河の 16(5m) と同じ現物相当の 17(5m) が合法でも Reach を選ぶ。
+        let ctx = tenpai_under_reach_context(None, [false; 4]);
+        let actions = vec![LegalAction::Reach, dahai(TENPAI_DRAWN), dahai(17)];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
@@ -1327,20 +1798,9 @@ pub(crate) mod tests {
     #[test]
     fn does_not_use_honor_safety_fallback_without_opponent_reach() {
         let mut agent = ShantenAgent;
-        // 他家リーチが無ければ、字牌が合法でも従来の Reach を選ぶ。
-        let ctx = GameContext::from_parts_with_table_state(
-            Some(tile(0)),
-            vec![],
-            vec![],
-            None,
-            None,
-            Vec::new(),
-            Some(0),
-            None,
-            [vec![], vec![], vec![], vec![]],
-            [false; 4],
-        );
-        let actions = vec![LegalAction::Reach, dahai(108)];
+        // 他家リーチが無ければ、字牌(116 = 北)が合法でも従来の Reach を選ぶ。
+        let ctx = tenpai_context(&[]);
+        let actions = vec![LegalAction::Reach, dahai(TENPAI_DRAWN)];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
@@ -1529,20 +1989,8 @@ pub(crate) mod tests {
     fn does_not_use_suited_safety_fallback_without_opponent_reach() {
         let mut agent = ShantenAgent;
         // 他家リーチが無ければ、河に 16(5m) があり 4(2m) がスジ相当でも従来の Reach を選ぶ。
-        let discards = [vec![], vec![tile(16)], vec![], vec![]];
-        let ctx = GameContext::from_parts_with_table_state(
-            Some(tile(0)),
-            vec![],
-            vec![],
-            None,
-            None,
-            Vec::new(),
-            Some(0),
-            None,
-            discards,
-            [false; 4],
-        );
-        let actions = vec![LegalAction::Reach, dahai(4)];
+        let ctx = tenpai_under_reach_context(None, [false; 4]);
+        let actions = vec![LegalAction::Reach, dahai(TENPAI_DRAWN), dahai(4)];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
@@ -1592,7 +2040,7 @@ pub(crate) mod tests {
     }
 
     // テンパイ手牌で他家リーチを受ける局面。oya と reached を指定してモードを作り分ける。
-    // visible は空にして should_reach を従来挙動(true)に保つ。
+    // visible は空にして、待ち枚数の見え牌補正が入らない状態で押し引きの分岐だけを確認する。
     fn tenpai_under_reach_context(oya: Option<u8>, reached: [bool; 4]) -> GameContext {
         let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
         // リーチ者(player 1)の河に 5m を置き、テンパイ手牌の 5m を現物にする。
@@ -1615,14 +2063,17 @@ pub(crate) mod tests {
     fn push_tenpai_against_single_non_dealer_reaches() {
         let mut agent = ShantenAgent;
         // 単独の子リーチに対するテンパイ。decide_push_pull は Push。
-        // Reach が合法で should_reach() == true なら、現物があっても Reach を選ぶ。
+        // Reach が合法でリーチ判断も Eligible なら、現物があっても Reach を選ぶ。
         let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
         assert_eq!(
             decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
             PushPullMode::Push
         );
         let actions = tenpai_actions();
-        assert!(should_reach(&ctx));
+        assert_eq!(
+            reach_diagnostic(&ctx, &actions).reason,
+            ReachDecisionReason::Eligible
+        );
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
@@ -1797,13 +2248,17 @@ pub(crate) mod tests {
     #[test]
     fn decide_reports_reach_source_on_push() {
         let agent = ShantenAgent;
-        // 他家リーチなし → Push。Reach が合法なら Reach を選ぶ。
-        let ctx = GameContext::with_drawn_tile(tile(0));
-        let actions = vec![LegalAction::Reach, dahai(0)];
+        // 他家リーチなし → Push。選んだ打牌後のテンパイが十分な待ちを持つなら Reach を選ぶ。
+        let ctx = tenpai_context(&[]);
+        let actions = tenpai_actions();
         let decision = agent.decide(&ctx, &actions);
         assert_eq!(decision.action, LegalAction::Reach);
         assert_eq!(decision.source, AgentActionSource::Reach);
         assert_eq!(decision.push_pull.map(|d| d.mode), Some(PushPullMode::Push));
+        assert_eq!(
+            decision.reach.map(|reach| reach.reason),
+            Some(ReachDecisionReason::Eligible)
+        );
     }
 
     #[test]
@@ -2047,6 +2502,14 @@ pub(crate) mod tests {
         // Reach 経路でも通常打牌評価は実行済みなので、比較用の通常打牌は保持する。
         assert!(diagnostic.normal_discard.is_some());
         assert!(diagnostic.normal_discard_action.is_some());
+        // リーチ判断は通常打牌 selection が選んだ打牌に基づく。
+        let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+        assert!(reach.should_reach());
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert_eq!(
+            reach.selected_discard.as_ref(),
+            diagnostic.normal_discard_action.as_ref()
+        );
         assert_eq!(
             diagnostic.push_pull_decision.map(|decision| decision.mode),
             Some(PushPullMode::Push)
@@ -3658,6 +4121,19 @@ pub(crate) mod tests {
     }
 
     fn three_sided_context(extra_visible: &[u8], own_river: &[u8]) -> GameContext {
+        three_sided_context_with_player_id(Some(0), extra_visible, own_river)
+    }
+
+    // player 0 の河は同じまま、自分の席だけを特定できない局面。
+    fn three_sided_context_without_player_id(own_river: &[u8]) -> GameContext {
+        three_sided_context_with_player_id(None, &[], own_river)
+    }
+
+    fn three_sided_context_with_player_id(
+        player_id: Option<u8>,
+        extra_visible: &[u8],
+        own_river: &[u8],
+    ) -> GameContext {
         let hand = three_sided_hand();
         let drawn = tile(36);
         let discards = [
@@ -3681,11 +4157,15 @@ pub(crate) mod tests {
             None,
             None,
             visible,
-            Some(0),
+            player_id,
             Some(0),
             discards,
             [false; 4],
         )
+    }
+
+    fn three_sided_actions() -> Vec<LegalAction> {
+        vec![dahai(36), dahai(0)]
     }
 
     #[test]

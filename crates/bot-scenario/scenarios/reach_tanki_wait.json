@@ -1,0 +1,9 @@
+{
+  "hand": "123456789m123p5s",
+  "draw": "N",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "allow_reach": true
+}

@@ -3,11 +3,11 @@ use crate::context::GameContext;
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    LookaheadDiagnostic, OwnDiscards, TenpaiWaitMetric, TileCounts, TileId, TileType,
-    best_discard_selection_index, diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait,
-    diagnose_discard_furiten, diagnose_lookahead_with_fixed_melds,
-    diagnose_lookahead_with_fixed_melds_and_visible_tiles,
-    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    LookaheadDiagnostic, OwnDiscards, TenpaiWaitAvailability, TenpaiWaitMetric, TileCounts, TileId,
+    TileType, best_discard_selection_index,
+    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait, diagnose_discard_furiten,
+    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
+    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
     tenpai_wait_metrics_from_lookahead, tenpai_wait_metrics_with_fixed_melds,
     tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
@@ -242,6 +242,33 @@ fn furiten_from_legal_evaluations(
         &counts,
         evaluation_fixed_meld_count(context),
         &legal.evaluations,
+        &OwnDiscards::from_optional_river(context.own_discards()),
+    )
+}
+
+/// 通常打牌選択が選んだ打牌1件について、その打牌後のテンパイの待ちとロン可否を返す。
+///
+/// 全合法候補分の恒常フリテン診断 (`furiten_from_legal_evaluations`) と同じ pure helper へ同じ
+/// 入力を渡し、対象を選択済みの1件だけに絞る。ツモ側は渡された打牌評価が持つ受け入れをそのまま
+/// 使い、向聴・受け入れ・残枚数・待ちを再計算しない。その打牌でテンパイにならない場合は `None`。
+///
+/// `evaluation` は同じ `context` の手牌から求めた評価であること。リーチ判断のように選択済みの
+/// 1候補だけが必要な経路が、全候補分の診断を構築せずに待ちとフリテンを共有するために使う。
+pub(crate) fn selected_discard_tenpai_wait_availability(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+) -> Option<TenpaiWaitAvailability> {
+    let counts = TileCounts::from_tiles(
+        context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile()),
+    );
+    discard_tenpai_wait_availability(
+        &counts,
+        evaluation_fixed_meld_count(context),
+        evaluation,
         &OwnDiscards::from_optional_river(context.own_discards()),
     )
 }

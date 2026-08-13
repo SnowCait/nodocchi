@@ -271,7 +271,7 @@ MJAI 単牌表記と圧縮 MPSZ 表記の両方を受け付けます。空白区
 
 ### 出力
 
-入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・防御（`Defense` / `Defense candidates`）を表示します。
+入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates`）を表示します。
 
 ```text
 Final decision
@@ -279,6 +279,29 @@ Final decision
   source: DefenseFallback
   defense kind: Genbutsu
 ```
+
+`Reach` は、通常打牌で選んだ打牌を切った後のテンパイ形に基づく判断です。選んだ打牌・打牌後の向聴・ツモ和了できる待ちの残枚数と種類数・恒常フリテン・ロン可否・理由を表示します。リーチを検討するのは押し引きが `Push` の場合だけで、それ以外は `not evaluated` になります。
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/reach_tanki_wait.json
+```
+
+```text
+Reach
+  evaluated
+  decision: no
+  reason: InsufficientLiveWait
+  selected discard: N
+  shanten: 0
+  live wait: 3 remaining / 1 types
+  permanent furiten: no
+  ron: yes
+  tenpai waits: 5s
+  live tenpai waits: 5s
+  discarded waits: none
+```
+
+上の scenario は打 北 で 5s 単騎テンパイになる局面です。打牌前の14枚をそのまま見ると受け入れは `5s` と `北` の6枚ありますが、実際に切る打牌を決めた後の待ちは 5s の3枚だけなので、リーチせずダマに進みます。
 
 通常打牌候補では、選ばれなかった理由も表示されます。その判断処理を通らなかった場合は `not evaluated` と表示されます。
 
