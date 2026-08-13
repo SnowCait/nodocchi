@@ -1,5 +1,5 @@
 use crate::action::{LegalAction, prefer_black_five_for_action};
-use crate::context::GameContext;
+use crate::context::{GameContext, seat_wind_for_player};
 use bot_logic::TileType;
 
 const LOG_TARGET: &str = "bot_core::defense";
@@ -102,18 +102,6 @@ pub enum OpponentHonorValue {
     GuestWind,
     SingleValueHonor,
     DoubleWind,
-}
-
-/// 指定 player の自風を親から導出する pure helper。4人麻雀の席順だけを前提にする。
-///
-/// `seat_index = (player + 4 - oya) % 4` で、`oya` 自身は東家。範囲外の `player` / `oya` は
-/// 推測で補完せず `None`。`GameContext::seat_wind()` は自分の自風なので相手の判定には使わない。
-pub fn seat_wind_for_player(player: usize, oya: u8) -> Option<TileType> {
-    if player >= 4 || oya >= 4 {
-        return None;
-    }
-    let seat_index = (player as u8 + 4 - oya) % 4;
-    TileType::wind_from_seat_index(seat_index)
 }
 
 /// 指定 player にとっての役牌価値を求める pure helper。数牌は対象外で `None`。

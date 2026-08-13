@@ -1,0 +1,38 @@
+{
+  "hand": "123456m123p789s5s",
+  "draw": "N",
+
+  "dora_indicators": "4m",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "reached": [false, false, false, true],
+
+  "discards": ["P 4m", "", "", "3p"],
+
+  "melds": [
+    [],
+    [
+      {
+        "kind": "pon",
+        "tiles": "P P P",
+        "called_tile": "P"
+      },
+      {
+        "kind": "chi",
+        "tiles": "4m 0m 6m",
+        "called_tile": "4m"
+      }
+    ],
+    [
+      {
+        "kind": "ankan",
+        "tiles": "W W W W"
+      }
+    ],
+    []
+  ]
+}

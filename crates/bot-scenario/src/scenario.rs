@@ -1,4 +1,4 @@
-use bot_core::{GameContext, LegalAction, Meld, MeldKind};
+use bot_core::{GameContext, LegalAction, Meld, MeldKind, seat_wind_for_player};
 use bot_logic::{TileId, TileType};
 use serde::Deserialize;
 
@@ -264,9 +264,9 @@ fn resolve_seat_wind(
     Ok(explicit.or(derived))
 }
 
+// 席順からの自風導出は bot-core の pure helper を再利用し、同じ計算を持たない。
 fn derive_seat_wind(player_id: Option<u8>, oya: Option<u8>) -> Option<TileType> {
-    let (player_id, oya) = (player_id?, oya?);
-    TileType::wind_from_seat_index((player_id + 4 - oya) % 4)
+    seat_wind_for_player(usize::from(player_id?), oya?)
 }
 
 fn parse_wind(field: &str, input: Option<&str>) -> Result<Option<TileType>, ScenarioError> {
