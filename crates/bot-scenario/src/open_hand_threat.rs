@@ -5,10 +5,11 @@
 //! 固定局面。corpus 側で threat score や副露評価を再実装せず、production が構築した facts と
 //! classification をそのまま確認する。
 //!
-//! `decide_push_pull()` は `High` の副露相手だけを新しい policy の対象にするため、`None` /
-//! `Present` の fixture は従来どおり `NoOpponentReach` → `Push`、`High` の fixture は自分の
-//! 攻撃状態で分かれる。テンパイの自分なら `TenpaiAgainstHighOpenHand` → `Push`、二向聴の自分
-//! なら `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
+//! `decide_push_pull()` は `High` の副露相手だけを threat として扱うため、`None` / `Present` の
+//! fixture は従来どおり `NoThreat` → `Push`、`High` の fixture は自分の攻撃状態で分かれる。
+//! 強いテンパイの自分なら `StrongTenpaiAgainstHighOpenHand` → `Push`、一向聴の自分なら受け入れの
+//! 強さにかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の自分なら
+//! `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
 
 use bot_core::{
     Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
@@ -61,12 +62,12 @@ const RIVER_DISCARD_COUNT: usize = 5;
 /// 同じ hand を共有する fixture 同士は通常打牌・offense が一致する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelfHand {
-    /// 打 N でテンパイになる局面。
+    /// 打 N で非フリテンの強いテンパイ (待ち 6 枚以上) になる局面。
     Tenpai,
-    /// 打 N で強い一向聴 (受け入れ 8 枚以上・2 種類以上) に留まる局面。
+    /// 打 N で受け入れの広い一向聴 (受け入れ 8 枚以上・2 種類以上) に留まる局面。
     StrongIishanten,
-    /// 打 1p で弱い一向聴 (受け入れ 7 枚 / 2 種類) に留まる局面。受け入れ牌をほぼ見え牌にして
-    /// 強い一向聴の threshold に届かないよう固定してある。
+    /// 打 1p で受け入れの狭い一向聴 (受け入れ 7 枚 / 2 種類) に留まる局面。受け入れ牌をほぼ
+    /// 見え牌にして固定してある。
     WeakIishanten,
     /// 打 S で二向聴に留まる局面。
     TwoShanten,
@@ -624,18 +625,15 @@ fn has_high_threat(entry: &CorpusScenario) -> bool {
 // その fixture に期待する押し引き。High の副露相手がいる場合だけ新しい policy の対象になる。
 fn expected_push_pull(entry: &CorpusScenario) -> (PushPullMode, PushPullReason) {
     if !has_high_threat(entry) {
-        return (PushPullMode::Push, PushPullReason::NoOpponentReach);
+        return (PushPullMode::Push, PushPullReason::NoThreat);
     }
     match entry.self_hand {
         SelfHand::Tenpai => (
             PushPullMode::Push,
-            PushPullReason::TenpaiAgainstHighOpenHand,
+            PushPullReason::StrongTenpaiAgainstHighOpenHand,
         ),
-        SelfHand::StrongIishanten => (
-            PushPullMode::Neutral,
-            PushPullReason::StrongIishantenAgainstHighOpenHand,
-        ),
-        SelfHand::WeakIishanten => (
+        // 一向聴は受け入れの強さにかかわらず Fold。
+        SelfHand::StrongIishanten | SelfHand::WeakIishanten => (
             PushPullMode::Fold,
             PushPullReason::IishantenAgainstHighOpenHand,
         ),
@@ -748,7 +746,7 @@ fn every_scenario_matches_the_expected_open_hand_threat() {
 
 #[test]
 fn a_high_open_hand_threat_changes_the_push_pull_decision() {
-    // High になる fixture だけが新しい policy の対象。テンパイなら押し、二向聴なら降りる。
+    // High になる fixture だけが threat の対象。強いテンパイなら押し、一向聴以下なら降りる。
     let high: Vec<CorpusScenario> = corpus().into_iter().filter(has_high_threat).collect();
     assert!(!high.is_empty());
 
@@ -786,19 +784,14 @@ fn a_present_open_hand_threat_does_not_change_the_push_pull_decision() {
             .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
 
         assert_eq!(decision.mode, PushPullMode::Push, "{}", entry.name);
-        assert_eq!(
-            decision.reason,
-            PushPullReason::NoOpponentReach,
-            "{}",
-            entry.name
-        );
+        assert_eq!(decision.reason, PushPullReason::NoThreat, "{}", entry.name);
         assert!(!diagnostic.open_hand_defense.has_target(), "{}", entry.name);
     }
 }
 
 #[test]
 fn the_folding_high_scenarios_select_the_open_hand_defense_fallback() {
-    // High + 弱い一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
+    // High + 一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
     let folding: Vec<CorpusScenario> = corpus()
         .into_iter()
         .filter(|entry| expected_push_pull(entry).0 == PushPullMode::Fold)
@@ -832,7 +825,7 @@ fn the_folding_high_scenarios_select_the_open_hand_defense_fallback() {
 
 #[test]
 fn the_pushing_high_scenarios_keep_the_normal_discard() {
-    // High でも Push / Neutral なら安全牌を通常打牌より優先しない。
+    // High でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。
     let pushing: Vec<CorpusScenario> = corpus()
         .into_iter()
         .filter(|entry| has_high_threat(entry) && expected_push_pull(entry).0 != PushPullMode::Fold)
@@ -1276,8 +1269,8 @@ fn offense_of(self_hand: SelfHand) -> bot_core::PushPullOffenseState {
 
 #[test]
 fn the_self_hands_cover_the_push_pull_branches() {
-    // 押し引きの分岐ごとに1つずつ自分の局面を持つ。一向聴の2つは強い一向聴 threshold の
-    // 境界 (受け入れ 8 枚以上 / 2 種類以上) を挟む。
+    // 押し引きの分岐ごとに1つずつ自分の局面を持つ。一向聴の2つは受け入れの広さが違うが、
+    // 現在の policy ではどちらも Fold になる。
     let tenpai = offense_of(SelfHand::Tenpai);
     let strong = offense_of(SelfHand::StrongIishanten);
     let weak = offense_of(SelfHand::WeakIishanten);
@@ -1288,12 +1281,21 @@ fn the_self_hands_cover_the_push_pull_branches() {
     assert_eq!(weak.min_shanten_after_discard, 1);
     assert_eq!(two_shanten.min_shanten_after_discard, 2);
 
+    // テンパイの fixture は非フリテンで待ちが広く、強いテンパイになる。
+    let wait = tenpai
+        .tenpai_wait_after_discard
+        .expect("テンパイの待ち facts がある");
+    assert_eq!(wait.permanent_furiten, bot_logic::PermanentFuriten::No);
+    assert!(wait.tsumo_remaining >= 6);
+    assert_eq!(wait.can_ron, Some(true));
+
     assert!(strong.acceptance_total_remaining >= 8);
     assert!(strong.acceptance_type_count >= 2);
     assert_eq!(weak.acceptance_total_remaining, 7);
     assert_eq!(weak.acceptance_type_count, 2);
-    // 弱い一向聴でも簡易打点 proxy の限定補正には届かない。
-    assert!(weak.simple_value_proxy_after_discard() < 4);
+    // 一向聴では待ち facts を持たない。
+    assert_eq!(strong.tenpai_wait_after_discard, None);
+    assert_eq!(weak.tenpai_wait_after_discard, None);
 
     assert_ne!(
         tenpai.acceptance_total_remaining,

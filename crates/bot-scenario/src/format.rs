@@ -558,6 +558,25 @@ fn format_push_pull(
                     "    standard iishanten shape: {:?}",
                     offense.standard_iishanten_shape_after_discard
                 ));
+                // 押し引きが強いテンパイを判定するときに見る事実。テンパイにならない打牌では出ない。
+                match offense.tenpai_wait_after_discard.as_ref() {
+                    None => lines.push(format!("    tenpai wait after discard: {NONE}")),
+                    Some(wait) => {
+                        lines.push("    tenpai wait after discard".to_string());
+                        lines.push(format!(
+                            "      live wait: {} remaining / {} types",
+                            wait.tsumo_remaining, wait.tsumo_type_count
+                        ));
+                        lines.push(format!(
+                            "      permanent furiten: {}",
+                            permanent_furiten_label(wait.permanent_furiten)
+                        ));
+                        lines.push(format!(
+                            "      ron: {}",
+                            format_optional_yes_no(wait.can_ron)
+                        ));
+                    }
+                }
                 lines.push(format!(
                     "    dora after discard: {}",
                     offense.dora_count_after_discard
@@ -1399,6 +1418,16 @@ mod tests {
         "oya": 1,
         "reached": [false, true, false, false],
         "discards": ["", "1m 4m 7p E", "", ""]
+    }"#;
+
+    // 単独の子リーチに対するテンパイ。押し引きの強いテンパイ判定を表示で確認するための局面。
+    const TENPAI_UNDER_REACH_SCENARIO: &str = r#"{
+        "hand": "234m 567m 88m 345p 67p",
+        "draw": "N",
+        "player_id": 0,
+        "oya": 2,
+        "reached": [false, true, false, false],
+        "discards": ["1s", "9m", "", ""]
     }"#;
 
     // 単独の子リーチに対する子の Weak 一向聴。打点だけが違う対照ケース。
@@ -2281,13 +2310,67 @@ mod tests {
     }
 
     #[test]
+    fn push_pull_section_shows_the_tenpai_wait_after_discard() {
+        // 押し引きが強いテンパイを判定するときに見る事実をそのまま出す。
+        let (_, diagnostic, output) = rendered(TENPAI_UNDER_REACH_SCENARIO, false);
+        let wait = diagnostic
+            .push_pull_inputs
+            .unwrap()
+            .offense
+            .unwrap()
+            .tenpai_wait_after_discard
+            .expect("テンパイの待ち facts がある");
+        let push_pull = section(&output, "Push/Pull");
+
+        assert!(
+            push_pull.contains("    tenpai wait after discard\n"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      live wait: {} remaining / {} types",
+                wait.tsumo_remaining, wait.tsumo_type_count
+            )),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      permanent furiten: {}",
+                permanent_furiten_label(wait.permanent_furiten)
+            )),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      ron: {}",
+                format_optional_yes_no(wait.can_ron)
+            )),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn push_pull_section_shows_no_tenpai_wait_without_a_tenpai() {
+        let (_, diagnostic, output) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        assert_eq!(offense.tenpai_wait_after_discard, None);
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains("    tenpai wait after discard: none"),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
     fn low_value_iishanten_folds_under_single_non_dealer_reach() {
         let (_, _, output) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
         let push_pull = section(&output, "Push/Pull");
 
         assert!(push_pull.contains("  mode: Fold"), "{push_pull}");
         assert!(
-            push_pull.contains("  reason: IishantenUnderHighPressure"),
+            push_pull.contains("  reason: IishantenAgainstReach"),
             "{push_pull}"
         );
         assert!(
@@ -2301,13 +2384,14 @@ mod tests {
     }
 
     #[test]
-    fn high_value_iishanten_is_neutral_under_single_non_dealer_reach() {
+    fn high_value_iishanten_also_folds_under_single_non_dealer_reach() {
+        // 簡易打点 proxy は診断に出るだけで、押し引きには影響しない。
         let (_, _, output) = rendered(HIGH_VALUE_IISHANTEN_SCENARIO, false);
         let push_pull = section(&output, "Push/Pull");
 
-        assert!(push_pull.contains("  mode: Neutral"), "{push_pull}");
+        assert!(push_pull.contains("  mode: Fold"), "{push_pull}");
         assert!(
-            push_pull.contains("  reason: HighValueIishantenAgainstSingleNonDealer"),
+            push_pull.contains("  reason: IishantenAgainstReach"),
             "{push_pull}"
         );
         assert!(
@@ -3178,10 +3262,10 @@ mod tests {
             block.contains("  open hand threat reason: OpenMeldFromTwelveDiscards"),
             "{block}"
         );
-        // High の副露相手がいてもテンパイなら押す。reason だけが新しい policy のものになる。
+        // High の副露相手がいても、待ちが広い非フリテンのテンパイなら押す。
         assert!(
             section(&output, "Push/Pull").contains(
-                "  mode: Push\n  reason: TenpaiAgainstHighOpenHand\n  opponent reach count: 0"
+                "  mode: Push\n  reason: StrongTenpaiAgainstHighOpenHand\n  opponent reach count: 0"
             ),
             "{output}"
         );
@@ -3551,7 +3635,7 @@ mod tests {
 
     #[test]
     fn opponent_melds_do_not_change_the_push_pull_section() {
-        // 非リーチの副露相手だけの局面では、押し引きは従来どおり NoOpponentReach → Push。
+        // Present の副露相手だけの局面では、押し引きは従来どおり NoThreat → Push。
         let (_, diagnostic, output) = rendered(
             r#"{
                 "hand": "234m455p789s1123z",
@@ -3567,7 +3651,7 @@ mod tests {
         assert_eq!(diagnostic.player_threats[1].facts.open_meld_count, 1);
         assert!(
             section(&output, "Push/Pull")
-                .contains("  mode: Push\n  reason: NoOpponentReach\n  opponent reach count: 0"),
+                .contains("  mode: Push\n  reason: NoThreat\n  opponent reach count: 0"),
             "{output}"
         );
     }
