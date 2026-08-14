@@ -117,8 +117,8 @@ mod tests {
     };
     use riichilab_client::capture;
     use riichilab_client::observation::{
-        fixture_base64, fixture_base64_with_melds, fixture_meld,
-        game_context_from_decoded_observation,
+        fixture_base64, fixture_base64_with_melds, fixture_base64_with_table_state_facts,
+        fixture_meld, game_context_from_decoded_observation,
     };
     use riichilab_client::{
         CaptureRecordError, MjaiPossibleAction, ObservationPayload, build_response_for_request,
@@ -204,6 +204,69 @@ mod tests {
             captured.scenario.context,
             game_context_from_decoded_observation(&decoded)
         );
+    }
+
+    #[test]
+    fn replay_context_keeps_the_captured_table_state() {
+        let observation = fixture_base64_with_table_state_facts(
+            1,
+            Some(CAPTURED_DRAWN_TILE),
+            CAPTURED_HAND.to_vec(),
+            [12300, 28700, 40100, 18900],
+            2,
+            3,
+            1,
+            2,
+            3,
+        );
+        let path = write_capture("table-state", &[request_action_line(413, &observation)]);
+        let captured = load_captured_scenario(&path, None).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let decoded = ObservationPayload::new(observation).decode_4p().unwrap();
+        let context = &captured.scenario.context;
+        assert_eq!(context.table_state(), decoded.table_state);
+        assert_eq!(context.scores(), Some([12300, 28700, 40100, 18900]));
+        assert_eq!(context.honba(), Some(2));
+        assert_eq!(context.kyotaku_points(), Some(3000));
+        assert_eq!(context.kyoku(), Some(4));
+        // Observation に山の残り枚数が無いので replay でも unknown のままにする。
+        assert_eq!(context.remaining_tiles(), None);
+    }
+
+    #[test]
+    fn replay_shows_the_captured_table_state_in_the_diagnostics() {
+        let observation = fixture_base64_with_table_state_facts(
+            0,
+            Some(CAPTURED_DRAWN_TILE),
+            CAPTURED_HAND.to_vec(),
+            [12300, 28700, 40100, 18900],
+            2,
+            3,
+            1,
+            2,
+            3,
+        );
+        let path = write_capture(
+            "table-state-format",
+            &[request_action_line(414, &observation)],
+        );
+        let captured = load_captured_scenario(&path, None).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let diagnostic =
+            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+        let output = crate::format::format_diagnostic(&captured.scenario, &diagnostic, false);
+
+        assert!(output.contains("\n\nTable state\n"), "{output}");
+        assert!(
+            output.contains("  scores: 12300 / 28700 / 40100 / 18900"),
+            "{output}"
+        );
+        assert!(output.contains("  honba: 2"), "{output}");
+        assert!(output.contains("  kyotaku: 3000 points"), "{output}");
+        assert!(output.contains("  kyoku: 4"), "{output}");
+        assert!(output.contains("  remaining tiles: unknown"), "{output}");
     }
 
     #[test]

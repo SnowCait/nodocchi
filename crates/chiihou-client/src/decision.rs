@@ -1,4 +1,4 @@
-use bot_core::{Agent, GameContext, LegalAction, Meld, select_discard_action};
+use bot_core::{Agent, GameContext, LegalAction, Meld, TableStateFacts, select_discard_action};
 use bot_logic::{TileCounts, TileId, calculate_shanten};
 
 use crate::convert::{
@@ -119,6 +119,22 @@ fn game_context_from_request_with_state(
         state.reached,
         melds,
     )
+    .with_table_state_facts(table_state_facts_from_snapshot(state))
+}
+
+/// 地鳳 snapshot から bot-core の table state facts へ変換する。
+///
+/// 地鳳 protocol には対局中の現在点棒と局番号の source が無いため、`scores` / `kyoku` は
+/// 25000 点や東1局で補完せず unknown のままにする。`kyotaku_points` は `kyokustart` が点数で
+/// 渡すため、そのまま点として扱う。
+fn table_state_facts_from_snapshot(state: &ChiihouTableSnapshot) -> TableStateFacts {
+    TableStateFacts {
+        remaining_tiles: state.remaining_tiles,
+        honba: state.honba,
+        kyotaku_points: state.kyotaku_points,
+        scores: None,
+        kyoku: None,
+    }
 }
 
 fn meld_from_chiihou_meld(meld: &ChiihouMeld) -> Meld {
@@ -2046,6 +2062,8 @@ nostr:npub1ai000 GET sutehai?"
             player_id: Some(0),
             oya: Some(2),
             remaining_tiles: None,
+            honba: None,
+            kyotaku_points: None,
             discards,
             reached: [false, true, false, false],
             newly_visible_meld_tiles,
@@ -2091,6 +2109,87 @@ nostr:npub1ai000 GET sutehai?"
         assert_eq!(context.discards()[3], vec![tile_of("9s")]);
         assert!(context.discards()[0].is_empty());
         assert_eq!(context.reached(), &[false, true, false, false]);
+    }
+
+    #[test]
+    fn context_with_state_carries_the_table_state_facts() {
+        let state = ChiihouTableSnapshot {
+            remaining_tiles: Some(42),
+            honba: Some(2),
+            kyotaku_points: Some(3000),
+            ..snapshot_for_tests()
+        };
+        let context = game_context_from_sutehai_request_with_state(&[pai("1m")], None, &state);
+
+        assert_eq!(context.remaining_tiles(), Some(42));
+        assert_eq!(context.honba(), Some(2));
+        assert_eq!(context.kyotaku_points(), Some(3000));
+    }
+
+    #[test]
+    fn context_with_state_keeps_a_protocol_zero_as_a_known_zero() {
+        let state = ChiihouTableSnapshot {
+            remaining_tiles: Some(0),
+            honba: Some(0),
+            kyotaku_points: Some(0),
+            ..snapshot_for_tests()
+        };
+        let context = game_context_from_sutehai_request_with_state(&[pai("1m")], None, &state);
+
+        assert_eq!(context.remaining_tiles(), Some(0));
+        assert_eq!(context.honba(), Some(0));
+        assert_eq!(context.kyotaku_points(), Some(0));
+    }
+
+    #[test]
+    fn context_with_state_keeps_unknown_table_state_unknown() {
+        let state = ChiihouTableSnapshot {
+            remaining_tiles: None,
+            honba: None,
+            kyotaku_points: None,
+            ..snapshot_for_tests()
+        };
+        let context = game_context_from_sutehai_request_with_state(&[pai("1m")], None, &state);
+
+        assert_eq!(context.remaining_tiles(), None);
+        assert_eq!(context.honba(), None);
+        assert_eq!(context.kyotaku_points(), None);
+    }
+
+    #[test]
+    fn context_with_state_has_no_scores_or_kyoku() {
+        // 地鳳 protocol には対局中の現在点棒と局番号の source が無いので補完しない。
+        let state = ChiihouTableSnapshot {
+            remaining_tiles: Some(42),
+            honba: Some(2),
+            kyotaku_points: Some(3000),
+            ..snapshot_for_tests()
+        };
+        let context = game_context_from_sutehai_request_with_state(&[pai("1m")], None, &state);
+
+        assert_eq!(context.scores(), None);
+        assert_eq!(context.own_score(), None);
+        assert_eq!(context.kyoku(), None);
+    }
+
+    #[test]
+    fn naku_context_with_state_carries_the_same_table_state_facts() {
+        let state = ChiihouTableSnapshot {
+            remaining_tiles: Some(42),
+            honba: Some(2),
+            kyotaku_points: Some(3000),
+            ..snapshot_for_tests()
+        };
+        assert_eq!(
+            game_context_from_naku_request_with_state(&[pai("1m")], &state).table_state(),
+            game_context_from_sutehai_request_with_state(&[pai("1m")], None, &state).table_state()
+        );
+    }
+
+    #[test]
+    fn context_without_state_has_unknown_table_state() {
+        let context = game_context_from_sutehai_request(&[pai("1m")], Some(pai("7z")));
+        assert_eq!(context.table_state(), TableStateFacts::default());
     }
 
     #[test]

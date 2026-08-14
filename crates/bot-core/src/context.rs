@@ -14,6 +14,33 @@ pub fn seat_wind_for_player(player: usize, oya: u8) -> Option<TileType> {
     TileType::wind_from_seat_index(seat_index)
 }
 
+/// 局面まわりの table state を表す観測事実。
+///
+/// すべて optional で、unknown (`None`) と観測できた 0 (`Some(0)`) を区別する。取得できない
+/// 入力経路では `None` のままにし、`0` や 25000 点などの初期値で補完しない。
+///
+/// 単位は field ごとに固定する。client 固有の単位はここへ入れる前に変換する。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TableStateFacts {
+    /// 山の残りツモ可能枚数 [枚]。
+    pub remaining_tiles: Option<u32>,
+    /// 本場 [本]。
+    pub honba: Option<u32>,
+    /// 供託 [点]。リーチ棒の本数ではない。
+    pub kyotaku_points: Option<u32>,
+    /// 各 player の現在持ち点 [点]。index は player id で、席順に並ぶ。
+    pub scores: Option<[i32; 4]>,
+    /// 場風の中で何局目か [局]。東1 / 南1 を `1` とする 1-based で、場風は `round_wind` が持つ。
+    pub kyoku: Option<u8>,
+}
+
+impl TableStateFacts {
+    /// 指定 player の現在持ち点。点棒が unknown な場合や範囲外の `player` では `None`。
+    pub fn score_of(&self, player: usize) -> Option<i32> {
+        self.scores?.get(player).copied()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GameContext {
     drawn_tile: Option<TileId>,
@@ -28,6 +55,7 @@ pub struct GameContext {
     reached: [bool; 4],
     melds: [Vec<Meld>; 4],
     post_reach_passed_tiles: [Vec<TileType>; 4],
+    table_state: TableStateFacts,
 }
 
 impl GameContext {
@@ -172,6 +200,11 @@ impl GameContext {
         self
     }
 
+    pub fn with_table_state_facts(mut self, table_state: TableStateFacts) -> Self {
+        self.table_state = table_state;
+        self
+    }
+
     pub fn drawn_tile(&self) -> Option<TileId> {
         self.drawn_tile
     }
@@ -272,6 +305,39 @@ impl GameContext {
     pub fn is_post_reach_passed(&self, tile: TileType, player: usize) -> bool {
         self.post_reach_passed_tiles_of(player)
             .is_some_and(|tiles| tiles.contains(&tile))
+    }
+
+    pub fn table_state(&self) -> TableStateFacts {
+        self.table_state
+    }
+
+    pub fn remaining_tiles(&self) -> Option<u32> {
+        self.table_state.remaining_tiles
+    }
+
+    pub fn honba(&self) -> Option<u32> {
+        self.table_state.honba
+    }
+
+    pub fn kyotaku_points(&self) -> Option<u32> {
+        self.table_state.kyotaku_points
+    }
+
+    pub fn scores(&self) -> Option<[i32; 4]> {
+        self.table_state.scores
+    }
+
+    pub fn kyoku(&self) -> Option<u8> {
+        self.table_state.kyoku
+    }
+
+    pub fn score_of(&self, player: usize) -> Option<i32> {
+        self.table_state.score_of(player)
+    }
+
+    /// 自分の現在持ち点。`player_id` が無い場合は player 0 などを推測せず `None`。
+    pub fn own_score(&self) -> Option<i32> {
+        self.score_of(usize::from(self.player_id?))
     }
 
     // リーチ者一覧: player_id がある場合は自分を除く。ない場合は reached 全員を返す。
@@ -984,6 +1050,167 @@ mod tests {
         let context = GameContext::default();
         assert_eq!(context.post_reach_passed_tiles_of(4), None);
         assert!(!context.is_post_reach_passed(tile(84).tile_type(), 4));
+    }
+
+    fn full_table_state_facts() -> TableStateFacts {
+        TableStateFacts {
+            remaining_tiles: Some(42),
+            honba: Some(1),
+            kyotaku_points: Some(2000),
+            scores: Some([12300, 28700, 40100, 18900]),
+            kyoku: Some(3),
+        }
+    }
+
+    #[test]
+    fn default_table_state_is_all_unknown() {
+        let context = GameContext::default();
+        assert_eq!(context.table_state(), TableStateFacts::default());
+        assert_eq!(context.remaining_tiles(), None);
+        assert_eq!(context.honba(), None);
+        assert_eq!(context.kyotaku_points(), None);
+        assert_eq!(context.scores(), None);
+        assert_eq!(context.kyoku(), None);
+    }
+
+    #[test]
+    fn existing_constructors_have_unknown_table_state() {
+        for context in [
+            GameContext::new(),
+            GameContext::with_drawn_tile(tile(16)),
+            GameContext::with_hand_tiles(vec![tile(0)]),
+            GameContext::from_parts(Some(tile(16)), vec![tile(0)]),
+            GameContext::from_parts_with_dora(Some(tile(16)), vec![tile(0)], vec![tile(4)]),
+            GameContext::from_parts_with_context(
+                Some(tile(16)),
+                vec![tile(0)],
+                vec![tile(4)],
+                Some(wind(27)),
+                Some(wind(28)),
+            ),
+            GameContext::from_parts_with_visible_tiles(
+                Some(tile(16)),
+                vec![tile(0)],
+                vec![tile(4)],
+                Some(wind(27)),
+                Some(wind(28)),
+                vec![tile(0)],
+            ),
+            table_state_context(Some(0), Some(0), Default::default(), [false; 4]),
+            meld_context(Some(0), [vec![pon()], vec![], vec![], vec![]]),
+        ] {
+            assert_eq!(context.table_state(), TableStateFacts::default());
+        }
+    }
+
+    #[test]
+    fn with_table_state_facts_holds_every_fact() {
+        let context = GameContext::default().with_table_state_facts(full_table_state_facts());
+        assert_eq!(context.remaining_tiles(), Some(42));
+        assert_eq!(context.honba(), Some(1));
+        assert_eq!(context.kyotaku_points(), Some(2000));
+        assert_eq!(context.scores(), Some([12300, 28700, 40100, 18900]));
+        assert_eq!(context.kyoku(), Some(3));
+    }
+
+    #[test]
+    fn with_table_state_facts_keeps_other_parts() {
+        let discards = [vec![tile(0)], vec![], vec![], vec![]];
+        let base = table_state_context(
+            Some(1),
+            Some(2),
+            discards.clone(),
+            [false, true, false, false],
+        );
+        let context = base
+            .clone()
+            .with_table_state_facts(full_table_state_facts());
+        assert_eq!(context.player_id(), base.player_id());
+        assert_eq!(context.oya(), base.oya());
+        assert_eq!(context.discards(), &discards);
+        assert_eq!(context.reached(), base.reached());
+    }
+
+    #[test]
+    fn with_post_reach_passed_tiles_keeps_table_state_facts() {
+        let context = GameContext::default()
+            .with_table_state_facts(full_table_state_facts())
+            .with_post_reach_passed_tiles([vec![tile(84).tile_type()], vec![], vec![], vec![]]);
+        assert_eq!(context.table_state(), full_table_state_facts());
+    }
+
+    #[test]
+    fn known_zero_table_state_differs_from_unknown() {
+        let known_zero = GameContext::default().with_table_state_facts(TableStateFacts {
+            remaining_tiles: Some(0),
+            honba: Some(0),
+            kyotaku_points: Some(0),
+            scores: Some([0; 4]),
+            kyoku: Some(1),
+        });
+        let unknown = GameContext::default();
+
+        assert_eq!(known_zero.remaining_tiles(), Some(0));
+        assert_eq!(known_zero.honba(), Some(0));
+        assert_eq!(known_zero.kyotaku_points(), Some(0));
+        assert_eq!(known_zero.scores(), Some([0; 4]));
+        assert_ne!(known_zero.remaining_tiles(), unknown.remaining_tiles());
+        assert_ne!(known_zero.honba(), unknown.honba());
+        assert_ne!(known_zero.kyotaku_points(), unknown.kyotaku_points());
+        assert_ne!(known_zero.scores(), unknown.scores());
+        assert_ne!(known_zero.table_state(), unknown.table_state());
+    }
+
+    #[test]
+    fn score_of_returns_the_score_of_each_seat() {
+        let context = GameContext::default().with_table_state_facts(full_table_state_facts());
+        assert_eq!(context.score_of(0), Some(12300));
+        assert_eq!(context.score_of(1), Some(28700));
+        assert_eq!(context.score_of(2), Some(40100));
+        assert_eq!(context.score_of(3), Some(18900));
+    }
+
+    #[test]
+    fn score_of_out_of_range_returns_none() {
+        let context = GameContext::default().with_table_state_facts(full_table_state_facts());
+        assert_eq!(context.score_of(4), None);
+        assert_eq!(context.score_of(usize::MAX), None);
+    }
+
+    #[test]
+    fn score_of_is_none_when_scores_are_unknown() {
+        let context = GameContext::default();
+        assert_eq!(context.score_of(0), None);
+    }
+
+    #[test]
+    fn own_score_follows_player_id() {
+        let context = table_state_context(Some(2), None, Default::default(), [false; 4])
+            .with_table_state_facts(full_table_state_facts());
+        assert_eq!(context.own_score(), Some(40100));
+    }
+
+    #[test]
+    fn own_score_is_none_when_player_id_is_unknown() {
+        // player 0 の点棒を自分の点棒と推測しない。
+        let context = GameContext::default().with_table_state_facts(full_table_state_facts());
+        assert_eq!(context.player_id(), None);
+        assert_eq!(context.own_score(), None);
+    }
+
+    #[test]
+    fn own_score_is_none_when_scores_are_unknown() {
+        let context = table_state_context(Some(0), None, Default::default(), [false; 4]);
+        assert_eq!(context.own_score(), None);
+    }
+
+    #[test]
+    fn table_state_facts_score_of_matches_the_context_accessor() {
+        let facts = full_table_state_facts();
+        let context = GameContext::default().with_table_state_facts(facts);
+        for player in 0..5 {
+            assert_eq!(facts.score_of(player), context.score_of(player));
+        }
     }
 
     #[test]

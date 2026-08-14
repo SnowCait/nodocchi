@@ -102,6 +102,12 @@ pub enum ScenarioError {
     #[error("melds must have 4 elements, but has {count}")]
     MeldsLength { count: usize },
 
+    #[error("scores must have 4 elements, but has {count}")]
+    ScoresLength { count: usize },
+
+    #[error("kyoku must be 1..=4, but is {value}")]
+    KyokuOutOfRange { value: u8 },
+
     #[error("{field} ({kind}) must have {expected} tiles, but has {count}")]
     MeldTileCount {
         field: String,

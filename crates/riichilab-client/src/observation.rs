@@ -1,9 +1,14 @@
-use bot_core::{GameContext, Meld, MeldKind};
+use bot_core::{GameContext, Meld, MeldKind, TableStateFacts};
 use bot_logic::{TileId, TileType};
 use riichienv_core::observation::Observation;
 use riichienv_core::types::{Meld as ObservationMeld, MeldType as ObservationMeldType};
 
 use crate::convert::temporary_tile_id_from_observation_tile;
+
+/// riichienv-core がリーチ棒1本を精算する点数。upstream の `GameState` が同じ係数で支払う。
+const RIICHI_STICK_POINTS: u32 = 1000;
+
+const PLAYER_COUNT: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationPayload {
@@ -74,8 +79,28 @@ impl ObservationPayload {
             discards,
             reached: observation.riichi_declared,
             melds,
+            table_state: table_state_facts_from_observation(&observation),
         })
     }
+}
+
+/// riichienv-core の `Observation` から bot-core の table state facts へ変換する。
+///
+/// - `remaining_tiles`: `Observation` に山の残り枚数を表す field が無いため unknown。
+/// - `kyotaku_points`: upstream はリーチ棒の本数 `riichi_sticks` で持つので点数へ換算する。
+/// - `kyoku`: upstream の `kyoku_index` は 0 始まりなので 1 始まりへ直す。
+fn table_state_facts_from_observation(observation: &Observation) -> TableStateFacts {
+    TableStateFacts {
+        remaining_tiles: None,
+        honba: Some(u32::from(observation.honba)),
+        kyotaku_points: observation.riichi_sticks.checked_mul(RIICHI_STICK_POINTS),
+        scores: Some(observation.scores),
+        kyoku: kyoku_from_kyoku_index(observation.kyoku_index),
+    }
+}
+
+fn kyoku_from_kyoku_index(kyoku_index: u8) -> Option<u8> {
+    (usize::from(kyoku_index) < PLAYER_COUNT).then(|| kyoku_index + 1)
 }
 
 // raw 物理牌 ID 列を temporary TileId へ変換する。不正な牌 ID は従来どおり除外する。
@@ -186,6 +211,7 @@ pub struct DecodedObservation {
     pub discards: [Vec<TileId>; 4],
     pub reached: [bool; 4],
     pub melds: [Vec<Meld>; 4],
+    pub table_state: TableStateFacts,
 }
 
 pub fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> GameContext {
@@ -202,6 +228,7 @@ pub fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> Ga
         decoded.reached,
         decoded.melds.clone(),
     )
+    .with_table_state_facts(decoded.table_state)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -323,6 +350,49 @@ pub fn fixture_base64_with_table_state(
         [None; 4],
         None,
         None,
+    );
+    observation.serialize_to_base64().unwrap()
+}
+
+/// table state を既定値と異なる値で持つ `Observation` fixture。
+///
+/// `Observation::new` は位置引数が多いため、field ごとに違う値を渡して取り違えを検出できるようにする。
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+pub fn fixture_base64_with_table_state_facts(
+    player_id: u8,
+    drawn_tile: Option<u8>,
+    hand: Vec<u8>,
+    scores: [i32; 4],
+    honba: u8,
+    riichi_sticks: u32,
+    round_wind: u8,
+    oya: u8,
+    kyoku_index: u8,
+) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
+    let observation = Observation::new(
+        player_id,
+        hands,
+        Default::default(),
+        Default::default(),
+        vec![],
+        scores,
+        [false; 4],
+        vec![],
+        vec![],
+        honba,
+        riichi_sticks,
+        round_wind,
+        oya,
+        kyoku_index,
+        vec![],
+        false,
+        [None; 4],
+        [None; 4],
+        None,
+        drawn_tile,
     );
     observation.serialize_to_base64().unwrap()
 }
@@ -1167,6 +1237,110 @@ mod tests {
         );
     }
 
+    // 位置引数の取り違えを検出するため、field ごとに異なる値を持つ fixture を使う。
+    const TABLE_STATE_SCORES: [i32; 4] = [12300, 28700, 40100, 18900];
+    const TABLE_STATE_HONBA: u8 = 2;
+    const TABLE_STATE_RIICHI_STICKS: u32 = 3;
+    const TABLE_STATE_ROUND_WIND: u8 = 1;
+    const TABLE_STATE_OYA: u8 = 2;
+    const TABLE_STATE_KYOKU_INDEX: u8 = 3;
+
+    fn table_state_payload() -> ObservationPayload {
+        ObservationPayload::new(fixture_base64_with_table_state_facts(
+            1,
+            None,
+            vec![],
+            TABLE_STATE_SCORES,
+            TABLE_STATE_HONBA,
+            TABLE_STATE_RIICHI_STICKS,
+            TABLE_STATE_ROUND_WIND,
+            TABLE_STATE_OYA,
+            TABLE_STATE_KYOKU_INDEX,
+        ))
+    }
+
+    #[test]
+    fn decode_4p_maps_every_table_state_field_from_the_observation() {
+        let decoded = table_state_payload().decode_4p().unwrap();
+
+        assert_eq!(decoded.table_state.scores, Some(TABLE_STATE_SCORES));
+        assert_eq!(decoded.table_state.honba, Some(2));
+        // upstream はリーチ棒3本を持ち、1本 1000 点で精算する。
+        assert_eq!(decoded.table_state.kyotaku_points, Some(3000));
+        // upstream の kyoku_index は 0 始まりなので、4局目は 3。
+        assert_eq!(decoded.table_state.kyoku, Some(4));
+        // Observation には山の残り枚数を表す field が無い。
+        assert_eq!(decoded.table_state.remaining_tiles, None);
+
+        // 隣接する位置引数と取り違えていないことを、既存 field 側からも確認する。
+        assert_eq!(decoded.player_id, 1);
+        assert_eq!(decoded.oya, TABLE_STATE_OYA);
+        assert_eq!(
+            decoded.round_wind,
+            TileType::wind_from_seat_index(TABLE_STATE_ROUND_WIND)
+        );
+    }
+
+    #[test]
+    fn decode_4p_table_state_reaches_the_game_context() {
+        let decoded = table_state_payload().decode_4p().unwrap();
+        let context = game_context_from_decoded_observation(&decoded);
+
+        assert_eq!(context.table_state(), decoded.table_state);
+        assert_eq!(context.scores(), Some(TABLE_STATE_SCORES));
+        assert_eq!(context.honba(), Some(2));
+        assert_eq!(context.kyotaku_points(), Some(3000));
+        assert_eq!(context.kyoku(), Some(4));
+        assert_eq!(context.remaining_tiles(), None);
+        // player_id 1 の点棒を自分の点棒として引ける。
+        assert_eq!(context.own_score(), Some(TABLE_STATE_SCORES[1]));
+    }
+
+    #[test]
+    fn decode_4p_keeps_a_known_zero_table_state() {
+        let payload = ObservationPayload::new(fixture_base64_with_table_state_facts(
+            0,
+            None,
+            vec![],
+            [0; 4],
+            0,
+            0,
+            0,
+            0,
+            0,
+        ));
+        let decoded = payload.decode_4p().unwrap();
+
+        assert_eq!(decoded.table_state.scores, Some([0; 4]));
+        assert_eq!(decoded.table_state.honba, Some(0));
+        assert_eq!(decoded.table_state.kyotaku_points, Some(0));
+        assert_eq!(decoded.table_state.kyoku, Some(1));
+    }
+
+    #[test]
+    fn decode_4p_does_not_invent_a_kyoku_for_an_out_of_range_index() {
+        let payload = ObservationPayload::new(fixture_base64_with_table_state_facts(
+            0,
+            None,
+            vec![],
+            TABLE_STATE_SCORES,
+            0,
+            0,
+            0,
+            0,
+            9,
+        ));
+        assert_eq!(payload.decode_4p().unwrap().table_state.kyoku, None);
+    }
+
+    #[test]
+    fn kyoku_from_kyoku_index_is_one_based_within_the_round() {
+        assert_eq!(kyoku_from_kyoku_index(0), Some(1));
+        assert_eq!(kyoku_from_kyoku_index(3), Some(4));
+        assert_eq!(kyoku_from_kyoku_index(4), None);
+        assert_eq!(kyoku_from_kyoku_index(u8::MAX), None);
+    }
+
     #[test]
     fn decode_4p_returns_reached_flags() {
         let payload = ObservationPayload::new(fixture_base64_with_table_state(
@@ -1425,6 +1599,7 @@ mod tests {
                 discards: Default::default(),
                 reached: [false; 4],
                 melds: Default::default(),
+                table_state: TableStateFacts::default(),
             }
         }
 
