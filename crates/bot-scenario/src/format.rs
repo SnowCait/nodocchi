@@ -27,6 +27,7 @@ pub fn format_diagnostic(
 ) -> String {
     let mut sections = vec![
         format_scenario(scenario, verbose),
+        format_table_state(&scenario.context),
         format_final_decision(diagnostic),
         format_pon(diagnostic.pon.as_ref(), verbose),
         format_normal_discard(diagnostic),
@@ -131,6 +132,45 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
     ));
 
     lines.join("\n")
+}
+
+// 現時点では AI policy の入力ではなく、局面調査のための観測事実として表示するだけ。
+fn format_table_state(context: &GameContext) -> String {
+    let table_state = context.table_state();
+    [
+        "Table state".to_string(),
+        format!(
+            "  remaining tiles: {}",
+            format_optional_count(table_state.remaining_tiles)
+        ),
+        format!("  honba: {}", format_optional_count(table_state.honba)),
+        format!(
+            "  kyotaku: {}",
+            format_optional_points(table_state.kyotaku_points)
+        ),
+        format!("  scores: {}", format_scores(table_state.scores)),
+        format!("  kyoku: {}", format_optional_count(table_state.kyoku)),
+    ]
+    .join("\n")
+}
+
+fn format_optional_count<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| UNKNOWN.to_string(), |value| value.to_string())
+}
+
+fn format_optional_points(points: Option<u32>) -> String {
+    points.map_or_else(|| UNKNOWN.to_string(), |points| format!("{points} points"))
+}
+
+fn format_scores(scores: Option<[i32; 4]>) -> String {
+    let Some(scores) = scores else {
+        return UNKNOWN.to_string();
+    };
+    scores
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
@@ -1367,6 +1407,7 @@ mod tests {
         matches!(
             block.lines().next().unwrap_or_default(),
             "Scenario"
+                | "Table state"
                 | "Final decision"
                 | "Pon"
                 | "Normal discard"
@@ -1479,6 +1520,101 @@ mod tests {
         let defense = section(&output, "Defense\n");
         assert!(defense.contains("  selected action: 7s"), "{defense}");
         assert!(defense.contains("  suji safety: Suji"), "{defense}");
+    }
+
+    const TABLE_STATE_SCENARIO: &str = r#"{
+        "hand": "234m455p789s1123z",
+        "draw": "N",
+        "remaining_tiles": 42,
+        "honba": 1,
+        "kyotaku_points": 0,
+        "scores": [25000, 24000, 26000, 25000],
+        "kyoku": 2
+    }"#;
+
+    #[test]
+    fn table_state_section_lists_every_fact() {
+        let (_, _, output) = rendered(TABLE_STATE_SCENARIO, false);
+        assert_eq!(
+            section(&output, "Table state"),
+            "Table state\n  \
+             remaining tiles: 42\n  \
+             honba: 1\n  \
+             kyotaku: 0 points\n  \
+             scores: 25000 / 24000 / 26000 / 25000\n  \
+             kyoku: 2"
+        );
+    }
+
+    #[test]
+    fn table_state_section_marks_unknown_facts() {
+        let (_, _, output) = rendered(NORMAL_SCENARIO, false);
+        assert_eq!(
+            section(&output, "Table state"),
+            "Table state\n  \
+             remaining tiles: unknown\n  \
+             honba: unknown\n  \
+             kyotaku: unknown\n  \
+             scores: unknown\n  \
+             kyoku: unknown"
+        );
+    }
+
+    #[test]
+    fn table_state_section_distinguishes_a_known_zero_from_unknown() {
+        let (_, _, output) = rendered(
+            r#"{"hand": "234m455p789s1123z", "draw": "N", "remaining_tiles": 0, "honba": 0}"#,
+            false,
+        );
+        let table_state = section(&output, "Table state");
+        assert!(
+            table_state.contains("  remaining tiles: 0"),
+            "{table_state}"
+        );
+        assert!(table_state.contains("  honba: 0"), "{table_state}");
+        assert!(table_state.contains("  kyotaku: unknown"), "{table_state}");
+        assert!(table_state.contains("  scores: unknown"), "{table_state}");
+    }
+
+    #[test]
+    fn table_state_does_not_change_the_selected_action() {
+        let (_, plain, plain_output) = rendered(NORMAL_SCENARIO, false);
+        let (_, with_table_state, table_state_output) = rendered(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "draw": "N",
+                "dora_indicators": "3p",
+                "round_wind": "E",
+                "seat_wind": "S",
+                "player_id": 0,
+                "oya": 3,
+                "remaining_tiles": 4,
+                "honba": 5,
+                "kyotaku_points": 3000,
+                "scores": [12300, 28700, 40100, 18900],
+                "kyoku": 4
+            }"#,
+            false,
+        );
+
+        assert_eq!(
+            with_table_state.selected_action, plain.selected_action,
+            "{table_state_output}"
+        );
+        assert_eq!(with_table_state.selected_source, plain.selected_source);
+        assert_eq!(
+            with_table_state.push_pull_decision,
+            plain.push_pull_decision
+        );
+        assert_eq!(with_table_state.reach, plain.reach);
+        assert_eq!(
+            section(&table_state_output, "Final decision"),
+            section(&plain_output, "Final decision")
+        );
+        assert_eq!(
+            section(&table_state_output, "Summary"),
+            section(&plain_output, "Summary")
+        );
     }
 
     #[test]

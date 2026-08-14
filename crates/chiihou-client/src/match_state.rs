@@ -57,6 +57,8 @@ pub struct ChiihouTableSnapshot {
     pub player_id: Option<u8>,
     pub oya: Option<u8>,
     pub remaining_tiles: Option<u32>,
+    pub honba: Option<u32>,
+    pub kyotaku_points: Option<u32>,
     pub discards: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
     pub reached: [bool; CHIIHOU_PLAYER_COUNT],
     pub newly_visible_meld_tiles: [Vec<ChiihouPai>; CHIIHOU_PLAYER_COUNT],
@@ -69,8 +71,8 @@ pub struct ChiihouMatchState {
     seat: Option<ChiihouWind>,
     round_wind: Option<ChiihouWind>,
     dealer: Option<PublicKey>,
-    honba: u32,
-    kyotaku_points: u32,
+    honba: Option<u32>,
+    kyotaku_points: Option<u32>,
     phase: ChiihouMatchPhase,
     final_scores: Vec<ChiihouPlayerScore>,
     hand: Vec<ChiihouPai>,
@@ -105,11 +107,13 @@ impl ChiihouMatchState {
         self.dealer
     }
 
-    pub fn honba(&self) -> u32 {
+    /// 本場 [本]。`kyokustart` を受け取るまでは 0 と断定せず `None`。
+    pub fn honba(&self) -> Option<u32> {
         self.honba
     }
 
-    pub fn kyotaku_points(&self) -> u32 {
+    /// 供託 [点]。`kyokustart` を受け取るまでは 0 と断定せず `None`。
+    pub fn kyotaku_points(&self) -> Option<u32> {
         self.kyotaku_points
     }
 
@@ -178,6 +182,8 @@ impl ChiihouMatchState {
             player_id,
             oya,
             remaining_tiles: self.remaining_tiles,
+            honba: self.honba,
+            kyotaku_points: self.kyotaku_points,
             discards: self.discards.clone(),
             reached: self.reached,
             newly_visible_meld_tiles: self.newly_visible_meld_tiles.clone(),
@@ -192,8 +198,8 @@ impl ChiihouMatchState {
                 self.seat = Some(*seat);
                 self.round_wind = None;
                 self.dealer = None;
-                self.honba = 0;
-                self.kyotaku_points = 0;
+                self.honba = None;
+                self.kyotaku_points = None;
                 self.final_scores.clear();
                 self.reset_table_state();
                 self.phase = ChiihouMatchPhase::GameStarted;
@@ -206,8 +212,8 @@ impl ChiihouMatchState {
             } => {
                 self.round_wind = Some(*round_wind);
                 self.dealer = Some(*dealer);
-                self.honba = *honba;
-                self.kyotaku_points = *kyotaku_points;
+                self.honba = Some(*honba);
+                self.kyotaku_points = Some(*kyotaku_points);
                 self.reset_table_state();
                 self.phase = ChiihouMatchPhase::InKyoku;
             }
@@ -500,8 +506,8 @@ mod tests {
         assert_eq!(state.seat(), None);
         assert_eq!(state.round_wind(), None);
         assert_eq!(state.dealer(), None);
-        assert_eq!(state.honba(), 0);
-        assert_eq!(state.kyotaku_points(), 0);
+        assert_eq!(state.honba(), None);
+        assert_eq!(state.kyotaku_points(), None);
         assert!(state.final_scores().is_empty());
     }
 
@@ -524,8 +530,8 @@ mod tests {
         assert_eq!(state.phase(), ChiihouMatchPhase::InKyoku);
         assert_eq!(state.round_wind(), Some(ChiihouWind::East));
         assert_eq!(state.dealer(), Some(player_pubkey(2)));
-        assert_eq!(state.honba(), 1);
-        assert_eq!(state.kyotaku_points(), 2000);
+        assert_eq!(state.honba(), Some(1));
+        assert_eq!(state.kyotaku_points(), Some(2000));
         assert_eq!(state.players(), players(1..=4));
         assert_eq!(state.seat(), Some(ChiihouWind::South));
     }
@@ -550,8 +556,8 @@ mod tests {
         state.apply(&ChiihouLifecycleNotification::KyokuEnd);
         state.apply(&kyokustart(1, 1000));
         assert_eq!(state.phase(), ChiihouMatchPhase::InKyoku);
-        assert_eq!(state.honba(), 1);
-        assert_eq!(state.kyotaku_points(), 1000);
+        assert_eq!(state.honba(), Some(1));
+        assert_eq!(state.kyotaku_points(), Some(1000));
     }
 
     #[test]
@@ -585,8 +591,8 @@ mod tests {
         assert_eq!(state.seat(), Some(ChiihouWind::West));
         assert_eq!(state.round_wind(), None);
         assert_eq!(state.dealer(), None);
-        assert_eq!(state.honba(), 0);
-        assert_eq!(state.kyotaku_points(), 0);
+        assert_eq!(state.honba(), None);
+        assert_eq!(state.kyotaku_points(), None);
         assert!(state.final_scores().is_empty());
     }
 
@@ -1379,6 +1385,99 @@ mod tests {
         state.apply(&ChiihouLifecycleNotification::KyokuEnd);
         state.apply(&kyokustart(1, 0));
         assert_eq!(state.table_snapshot(&ai_pubkey()).remaining_tiles, None);
+    }
+
+    fn npub_token(index: u64) -> String {
+        use nostr_sdk::ToBech32;
+        format!("nostr:{}", player_pubkey(index).to_bech32().unwrap())
+    }
+
+    #[test]
+    fn protocol_notifications_carry_the_table_state_into_the_game_context() {
+        use crate::decision::game_context_from_sutehai_request_with_state;
+        use crate::lifecycle::parse_chiihou_lifecycle_notification;
+        use crate::table_notification::parse_chiihou_table_notification;
+
+        let mut state = ChiihouMatchState::new();
+        let gamestart_content = format!(
+            "NOTIFY gamestart 南 {} {} {} {}",
+            npub_token(1),
+            npub_token(2),
+            npub_token(3),
+            npub_token(4)
+        );
+        state.apply(
+            &parse_chiihou_lifecycle_notification(&gamestart_content)
+                .unwrap()
+                .unwrap(),
+        );
+
+        let kyokustart_content = format!("NOTIFY kyokustart 東 {} 2 3000", npub_token(2));
+        state.apply(
+            &parse_chiihou_lifecycle_notification(&kyokustart_content)
+                .unwrap()
+                .unwrap(),
+        );
+
+        let tsumo_content = format!("NOTIFY tsumo {} 42 7z", npub_token(1));
+        state
+            .apply_table_notification(
+                &ai_pubkey(),
+                &parse_chiihou_table_notification(&tsumo_content)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let snapshot = state.table_snapshot(&ai_pubkey());
+        assert_eq!(snapshot.remaining_tiles, Some(42));
+        assert_eq!(snapshot.honba, Some(2));
+        assert_eq!(snapshot.kyotaku_points, Some(3000));
+
+        let context = game_context_from_sutehai_request_with_state(&[], None, &snapshot);
+        assert_eq!(context.remaining_tiles(), Some(42));
+        assert_eq!(context.honba(), Some(2));
+        assert_eq!(context.kyotaku_points(), Some(3000));
+        assert_eq!(context.scores(), None);
+        assert_eq!(context.kyoku(), None);
+    }
+
+    #[test]
+    fn table_snapshot_honba_and_kyotaku_points_follow_kyokustart() {
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        let before = state.table_snapshot(&ai_pubkey());
+        assert_eq!(before.honba, None);
+        assert_eq!(before.kyotaku_points, None);
+
+        state.apply(&kyokustart(2, 3000));
+        let snapshot = state.table_snapshot(&ai_pubkey());
+        assert_eq!(snapshot.honba, Some(2));
+        assert_eq!(snapshot.kyotaku_points, Some(3000));
+    }
+
+    #[test]
+    fn table_snapshot_keeps_a_kyokustart_zero_as_a_known_zero() {
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        state.apply(&kyokustart(0, 0));
+        let snapshot = state.table_snapshot(&ai_pubkey());
+        assert_eq!(snapshot.honba, Some(0));
+        assert_eq!(snapshot.kyotaku_points, Some(0));
+    }
+
+    #[test]
+    fn table_snapshot_honba_and_kyotaku_points_are_unknown_before_kyokustart() {
+        // gamestart 直後は 0 本場 / 供託 0 点と断定できない。
+        let mut state = ChiihouMatchState::new();
+        state.apply(&gamestart());
+        state.apply(&kyokustart(1, 1000));
+        state.apply(&ChiihouLifecycleNotification::KyokuEnd);
+        state.apply(&gamestart());
+
+        let snapshot = state.table_snapshot(&ai_pubkey());
+        assert_eq!(snapshot.honba, None);
+        assert_eq!(snapshot.kyotaku_points, None);
     }
 
     #[test]

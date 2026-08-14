@@ -479,6 +479,40 @@ mod tests {
     }
 
     #[test]
+    fn the_captured_table_state_survives_the_replay() {
+        use crate::observation::fixture_base64_with_table_state_facts;
+
+        let observation = fixture_base64_with_table_state_facts(
+            1,
+            Some(59),
+            vec![0, 16, 104],
+            [12300, 28700, 40100, 18900],
+            2,
+            3,
+            1,
+            2,
+            3,
+        );
+        let record =
+            CapturedRequestAction::from_json_line(&request_action_text(36, &observation)).unwrap();
+
+        let decoded = ObservationPayload::new(observation).decode_4p().unwrap();
+        let context = record.game_context().unwrap();
+
+        assert_eq!(context.table_state(), decoded.table_state);
+        assert_eq!(
+            context,
+            game_context_from_decoded_observation(&decoded),
+            "capture replay は通常 decode と同じ context を作る"
+        );
+        assert_eq!(context.scores(), Some([12300, 28700, 40100, 18900]));
+        assert_eq!(context.honba(), Some(2));
+        assert_eq!(context.kyotaku_points(), Some(3000));
+        assert_eq!(context.kyoku(), Some(4));
+        assert_eq!(context.remaining_tiles(), None);
+    }
+
+    #[test]
     fn decodes_the_captured_observation_with_the_client_conversion() {
         let observation = fixture_base64(0, Some(59), vec![0, 16, 104]);
         let record =

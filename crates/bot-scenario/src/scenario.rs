@@ -1,4 +1,4 @@
-use bot_core::{GameContext, LegalAction, Meld, MeldKind, seat_wind_for_player};
+use bot_core::{GameContext, LegalAction, Meld, MeldKind, TableStateFacts, seat_wind_for_player};
 use bot_logic::{TileId, TileType};
 use serde::Deserialize;
 
@@ -37,6 +37,16 @@ pub struct ScenarioSpec {
     pub melds: Option<Vec<Vec<MeldSpec>>>,
     #[serde(default)]
     pub extra_visible_tiles: Option<String>,
+    #[serde(default)]
+    pub remaining_tiles: Option<u32>,
+    #[serde(default)]
+    pub honba: Option<u32>,
+    #[serde(default)]
+    pub kyotaku_points: Option<u32>,
+    #[serde(default)]
+    pub scores: Option<Vec<i32>>,
+    #[serde(default)]
+    pub kyoku: Option<u8>,
     #[serde(default)]
     pub legal_dahai: Option<String>,
     #[serde(default)]
@@ -129,6 +139,7 @@ impl Scenario {
         let oya = resolve_seat("oya", spec.oya)?;
         let round_wind = parse_wind("round_wind", spec.round_wind.as_deref())?;
         let seat_wind = resolve_seat_wind(spec.seat_wind.as_deref(), player_id, oya)?;
+        let table_state = resolve_table_state_facts(spec)?;
 
         let mut allocator = TileAllocator::new();
         let hand = allocate_field(&mut allocator, "hand", &spec.hand)?;
@@ -172,13 +183,47 @@ impl Scenario {
             reached,
             melds,
         )
-        .with_post_reach_passed_tiles(post_reach_passed_tiles);
+        .with_post_reach_passed_tiles(post_reach_passed_tiles)
+        .with_table_state_facts(table_state);
 
         Ok(Self {
             context,
             legal_actions,
         })
     }
+}
+
+// 省略した field は unknown のままにし、0 や 25000 点などの初期値で補完しない。
+fn resolve_table_state_facts(spec: &ScenarioSpec) -> Result<TableStateFacts, ScenarioError> {
+    Ok(TableStateFacts {
+        remaining_tiles: spec.remaining_tiles,
+        honba: spec.honba,
+        kyotaku_points: spec.kyotaku_points,
+        scores: resolve_scores(spec.scores.as_deref())?,
+        kyoku: resolve_kyoku(spec.kyoku)?,
+    })
+}
+
+fn resolve_scores(scores: Option<&[i32]>) -> Result<Option<[i32; 4]>, ScenarioError> {
+    let Some(values) = scores else {
+        return Ok(None);
+    };
+    values
+        .try_into()
+        .map(Some)
+        .map_err(|_| ScenarioError::ScoresLength {
+            count: values.len(),
+        })
+}
+
+fn resolve_kyoku(kyoku: Option<u8>) -> Result<Option<u8>, ScenarioError> {
+    let Some(value) = kyoku else {
+        return Ok(None);
+    };
+    if !(1..=4).contains(&value) {
+        return Err(ScenarioError::KyokuOutOfRange { value });
+    }
+    Ok(Some(value))
 }
 
 fn resolve_reached(reached: Option<&[bool]>) -> Result<[bool; 4], ScenarioError> {
@@ -1234,6 +1279,170 @@ mod tests {
             matches!(&error, ScenarioError::TileInput { field, .. } if field == "post_reach_passed[1]"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn table_state_is_unknown_when_omitted() {
+        let scenario = resolve(&hand_spec("234m455p789s1123z", Some("N")));
+        assert_eq!(scenario.context.table_state(), TableStateFacts::default());
+        assert_eq!(scenario.context.remaining_tiles(), None);
+        assert_eq!(scenario.context.honba(), None);
+        assert_eq!(scenario.context.kyotaku_points(), None);
+        assert_eq!(scenario.context.scores(), None);
+        assert_eq!(scenario.context.kyoku(), None);
+    }
+
+    #[test]
+    fn resolves_every_table_state_field() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "remaining_tiles": 42,
+                "honba": 1,
+                "kyotaku_points": 2000,
+                "scores": [25000, 24000, 26000, 25000],
+                "kyoku": 2
+            }"#,
+        );
+        let scenario = resolve(&spec);
+
+        assert_eq!(scenario.context.remaining_tiles(), Some(42));
+        assert_eq!(scenario.context.honba(), Some(1));
+        assert_eq!(scenario.context.kyotaku_points(), Some(2000));
+        assert_eq!(
+            scenario.context.scores(),
+            Some([25000, 24000, 26000, 25000])
+        );
+        assert_eq!(scenario.context.kyoku(), Some(2));
+    }
+
+    #[test]
+    fn keeps_a_table_state_zero_as_a_known_zero() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "remaining_tiles": 0,
+                "honba": 0,
+                "kyotaku_points": 0,
+                "scores": [0, 0, 0, 0]
+            }"#,
+        );
+        let scenario = resolve(&spec);
+
+        assert_eq!(scenario.context.remaining_tiles(), Some(0));
+        assert_eq!(scenario.context.honba(), Some(0));
+        assert_eq!(scenario.context.kyotaku_points(), Some(0));
+        assert_eq!(scenario.context.scores(), Some([0; 4]));
+        assert_ne!(scenario.context.table_state(), TableStateFacts::default());
+    }
+
+    #[test]
+    fn resolves_each_table_state_field_independently() {
+        let spec = spec_from_json(r#"{"hand": "123m", "honba": 3}"#);
+        let scenario = resolve(&spec);
+
+        assert_eq!(scenario.context.honba(), Some(3));
+        assert_eq!(scenario.context.remaining_tiles(), None);
+        assert_eq!(scenario.context.kyotaku_points(), None);
+        assert_eq!(scenario.context.scores(), None);
+        assert_eq!(scenario.context.kyoku(), None);
+    }
+
+    #[test]
+    fn scores_follow_the_player_index() {
+        let spec = spec_from_json(
+            r#"{"hand": "123m", "player_id": 2, "scores": [12300, 28700, 40100, 18900]}"#,
+        );
+        let scenario = resolve(&spec);
+
+        assert_eq!(scenario.context.score_of(0), Some(12300));
+        assert_eq!(scenario.context.score_of(3), Some(18900));
+        assert_eq!(scenario.context.own_score(), Some(40100));
+    }
+
+    #[test]
+    fn resolves_negative_scores() {
+        let spec = spec_from_json(r#"{"hand": "123m", "scores": [-1500, 51500, 25000, 25000]}"#);
+        assert_eq!(
+            resolve(&spec).context.scores(),
+            Some([-1500, 51500, 25000, 25000])
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_scores_length() {
+        for (json, count) in [
+            (r#"{"hand": "123m", "scores": [25000, 25000, 25000]}"#, 3),
+            (
+                r#"{"hand": "123m", "scores": [25000, 25000, 25000, 25000, 25000]}"#,
+                5,
+            ),
+            (r#"{"hand": "123m", "scores": []}"#, 0),
+        ] {
+            assert_eq!(
+                Scenario::resolve(&spec_from_json(json)),
+                Err(ScenarioError::ScoresLength { count }),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_kyoku() {
+        for value in [0, 5, u8::MAX] {
+            let spec = ScenarioSpec {
+                hand: "123m".to_string(),
+                kyoku: Some(value),
+                ..ScenarioSpec::default()
+            };
+            assert_eq!(
+                Scenario::resolve(&spec),
+                Err(ScenarioError::KyokuOutOfRange { value }),
+                "kyoku: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_every_kyoku_in_range() {
+        for value in 1..=4 {
+            let spec = ScenarioSpec {
+                hand: "123m".to_string(),
+                kyoku: Some(value),
+                ..ScenarioSpec::default()
+            };
+            assert_eq!(resolve(&spec).context.kyoku(), Some(value));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_table_state_fields() {
+        let error =
+            serde_json::from_str::<ScenarioSpec>(r#"{"hand": "123m", "kyotaku": 2}"#).unwrap_err();
+        assert!(error.to_string().contains("kyotaku"), "{error}");
+    }
+
+    #[test]
+    fn table_state_does_not_change_the_resolved_hand_or_legal_actions() {
+        let base = resolve(&hand_spec("234m455p789s1123z", Some("N")));
+        let spec = ScenarioSpec {
+            remaining_tiles: Some(42),
+            honba: Some(1),
+            kyotaku_points: Some(2000),
+            scores: Some(vec![12300, 28700, 40100, 18900]),
+            kyoku: Some(2),
+            ..hand_spec("234m455p789s1123z", Some("N"))
+        };
+        let scenario = resolve(&spec);
+
+        assert_eq!(scenario.context.hand_tiles(), base.context.hand_tiles());
+        assert_eq!(scenario.context.drawn_tile(), base.context.drawn_tile());
+        assert_eq!(
+            scenario.context.visible_tiles(),
+            base.context.visible_tiles()
+        );
+        assert_eq!(scenario.legal_actions, base.legal_actions);
+        assert_ne!(scenario.context.table_state(), base.context.table_state());
     }
 
     #[test]

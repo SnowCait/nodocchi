@@ -287,8 +287,35 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `melds` | 各 player の副露・暗槓。要素数 4。各面子は `kind` (`chi` / `pon` / `daiminkan` / `ankan` / `kakan`) と `tiles`、暗槓以外は鳴いた牌 `called_tile` を持つ |
 | `extra_visible_tiles` | 副露牌など、他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌とその順序 |
+| `remaining_tiles` / `honba` / `kyotaku_points` / `scores` / `kyoku` | 局面の table state。詳細は下記 |
 
 `hand` 以外は省略できます。省略した場合、河は空、`reached` は全員 `false`、`allow_*` は `false` として扱います。
+
+#### table state
+
+局の進行状況を表す field です。いずれも省略でき、省略した場合は `0` や 25000 点などで補完せず「未取得 (unknown)」として扱います。`0` を指定した場合は「観測できた 0」として unknown と区別します。
+
+| field | 意味 | 単位 | validation |
+| --- | --- | --- | --- |
+| `remaining_tiles` | 山の残りツモ可能枚数 | 枚 | 0 以上の整数 |
+| `honba` | 本場 | 本 | 0 以上の整数 |
+| `kyotaku_points` | 供託。リーチ棒の本数ではなく点数で指定する | 点 | 0 以上の整数 |
+| `scores` | 各 player の現在持ち点。index は player id で、席順に並ぶ。負の点数も指定できる | 点 | 要素数 4 |
+| `kyoku` | 場風の中で何局目か。東1 / 南1 が `1`。場風そのものは `round_wind` が持つ | 局 | `1`..`4` |
+
+```json
+{
+  "hand": "234m455p789s1123z",
+  "draw": "N",
+  "remaining_tiles": 42,
+  "honba": 1,
+  "kyotaku_points": 0,
+  "scores": [25000, 24000, 26000, 25000],
+  "kyoku": 2
+}
+```
+
+これらの値は現時点では AI の判断（打牌選択・押し引き・リーチ・防御・鳴き）には一切使用していません。今後の判断のために局面情報を通す基盤で、出力の `Table state` で確認できるだけです。同じ手牌・河・副露であれば、table state を変えても選ばれる action は変わりません。
 
 現物は「対象リーチ者自身の河にある牌」と「そのリーチ成立後に他家から切られて通った牌」の両方です。後者は河から逆算できないため `post_reach_passed` で指定します。`post_reach_passed` は牌種だけを持つので、見え牌にも河にも影響しません。赤5は黒5と同じ牌種として扱います。
 
@@ -340,6 +367,8 @@ Scenario
 ```
 
 `post_reach_passed`（リーチ成立後に他家から切られて通った牌）は event 列から積み上げる情報で `observation` に含まれないため、replay では空になります。この情報を含めた検証は JSON scenario で行ってください。
+
+`Table state` のうち `scores` / `honba` / `kyotaku` / `kyoku` は `observation` から復元します。山の残り枚数を表す field は `observation` に無いため、`remaining tiles` は replay では `unknown` になります。
 
 非リーチ副露相手 (OpenHandThreat) の調査は次の流れです。
 
@@ -404,7 +433,18 @@ MJAI 単牌表記と圧縮 MPSZ 表記の両方を受け付けます。空白区
 
 ### 出力
 
-入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense`）を表示します。
+入力した局面（`Scenario` / `Table state`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense`）を表示します。
+
+`Table state` は局の進行状況の観測事実です。取得できていない値は `unknown` と表示し、観測できた `0` と区別します。現時点ではどれも AI の判断には使用していません。
+
+```text
+Table state
+  remaining tiles: 42
+  honba: 1
+  kyotaku: 0 points
+  scores: 25000 / 24000 / 26000 / 25000
+  kyoku: 2
+```
 
 ```text
 Final decision

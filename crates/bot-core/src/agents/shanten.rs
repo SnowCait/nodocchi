@@ -1187,6 +1187,7 @@ pub(crate) mod tests {
     use crate::combined_defense::{
         ThreatDefenseTarget, combined_threat_defense_targets_from_context,
     };
+    use crate::context::TableStateFacts;
     use crate::defense::{HonorSafetyRank, SuitedSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{
@@ -5633,5 +5634,170 @@ pub(crate) mod tests {
         let (action, category) = selected.expect("防御 fallback を選べる");
         assert_eq!(acted, *action);
         assert_eq!(diagnostic.combined_defense_category(), Some(category));
+    }
+
+    // ---- table state facts が現行 policy を変えないことの固定 ----
+
+    // 同一手牌・同一河・同一副露で table state だけを変えた context を作る。
+    fn table_state_variants() -> Vec<TableStateFacts> {
+        vec![
+            TableStateFacts::default(),
+            TableStateFacts {
+                remaining_tiles: Some(0),
+                honba: Some(0),
+                kyotaku_points: Some(0),
+                scores: Some([25000; 4]),
+                kyoku: Some(1),
+            },
+            TableStateFacts {
+                remaining_tiles: Some(70),
+                honba: Some(5),
+                kyotaku_points: Some(3000),
+                scores: Some([12300, 28700, 40100, 18900]),
+                kyoku: Some(4),
+            },
+            TableStateFacts {
+                remaining_tiles: Some(3),
+                honba: None,
+                kyotaku_points: None,
+                scores: Some([-1000, 51000, 25000, 25000]),
+                kyoku: None,
+            },
+        ]
+    }
+
+    fn policy_invariance_cases() -> Vec<(&'static str, GameContext, Vec<LegalAction>)> {
+        vec![
+            ("reach", tenpai_context(&[]), tenpai_actions()),
+            (
+                "push",
+                tenpai_under_reach_context(None, [false, true, false, false]),
+                tenpai_dahai_actions(),
+            ),
+            (
+                "weak tenpai fold",
+                weak_tenpai_under_reach_context(),
+                weak_tenpai_actions(),
+            ),
+            ("fold", fold_under_reach_context(), fold_actions()),
+            (
+                "open hand defense",
+                open_hand_fold_context(&[33], &[]),
+                open_hand_fold_actions(),
+            ),
+            (
+                "combined defense",
+                combined_threat_fold_context(&[33], &[33]),
+                open_hand_fold_actions(),
+            ),
+            (
+                "pon",
+                dragon_pon_reaction().context(),
+                dragon_pon_reaction().actions(),
+            ),
+            ("lookahead", lookahead_context(), lookahead_actions()),
+        ]
+    }
+
+    #[test]
+    fn table_state_facts_do_not_change_the_selected_action() {
+        for (label, base, actions) in policy_invariance_cases() {
+            let mut agent = ShantenAgent;
+            let expected = agent.act(&base, &actions);
+
+            for facts in table_state_variants() {
+                let ctx = base.clone().with_table_state_facts(facts);
+                assert_eq!(ctx.table_state(), facts, "{label}");
+                assert_eq!(
+                    ShantenAgent.act(&ctx, &actions),
+                    expected,
+                    "{label}: {facts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_state_facts_do_not_change_the_decision_diagnostics() {
+        for (label, base, actions) in policy_invariance_cases() {
+            let expected = ShantenAgent::diagnose(&base, &actions);
+
+            for facts in table_state_variants() {
+                let ctx = base.clone().with_table_state_facts(facts);
+                let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+
+                assert_eq!(
+                    diagnostic.selected_action, expected.selected_action,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(
+                    diagnostic.selected_source, expected.selected_source,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(
+                    diagnostic.push_pull_decision, expected.push_pull_decision,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(
+                    diagnostic.push_pull_inputs, expected.push_pull_inputs,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(diagnostic.reach, expected.reach, "{label}: {facts:?}");
+                assert_eq!(diagnostic.pon, expected.pon, "{label}: {facts:?}");
+                assert_eq!(diagnostic.defense, expected.defense, "{label}: {facts:?}");
+                assert_eq!(
+                    diagnostic.open_hand_defense, expected.open_hand_defense,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(
+                    diagnostic.combined_defense, expected.combined_defense,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(
+                    diagnostic.normal_discard, expected.normal_discard,
+                    "{label}: {facts:?}"
+                );
+                assert_eq!(
+                    diagnostic.player_threats, expected.player_threats,
+                    "{label}: {facts:?}"
+                );
+            }
+        }
+    }
+
+    // WITH_LOOKAHEAD は重い探索なので、既存 lookahead 回帰と同じ小さい手牌1件で固定する。
+    #[test]
+    fn table_state_facts_keep_every_diagnose_entry_point_in_agreement() {
+        let base = lookahead_context();
+        let actions = lookahead_actions();
+
+        for facts in table_state_variants() {
+            let ctx = base.clone().with_table_state_facts(facts);
+            let mut agent = ShantenAgent;
+            let acted = agent.act(&ctx, &actions);
+            let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+            let with_lookahead = ShantenAgent::diagnose_with_options(
+                &ctx,
+                &actions,
+                DiagnosticOptions::WITH_LOOKAHEAD,
+            );
+
+            assert_eq!(diagnostic.selected_action, acted, "{facts:?}");
+            assert_eq!(with_lookahead.selected_action, acted, "{facts:?}");
+            assert_eq!(
+                with_lookahead.selected_source, diagnostic.selected_source,
+                "{facts:?}"
+            );
+            assert_eq!(
+                with_lookahead.normal_discard_lookahead,
+                ShantenAgent::diagnose_with_options(
+                    &base,
+                    &actions,
+                    DiagnosticOptions::WITH_LOOKAHEAD
+                )
+                .normal_discard_lookahead,
+                "{facts:?}"
+            );
+        }
     }
 }
