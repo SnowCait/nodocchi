@@ -737,8 +737,8 @@ impl ShantenAgent {
     // - Neutral: 通常打牌 → 防御 fallback(Reach は検討しない)
     // - Fold:    防御 fallback → 通常打牌(Reach は検討しない)
     //
-    // Push / Neutral の順序は OpenHandThreat が High でも変えない。安全牌を通常打牌より優先
-    // するのは Fold の場合だけ。
+    // 現在の押し引き policy は Neutral を返さないが、action 順序としては維持している。
+    // Push の順序は threat の種類で変えない。安全牌を通常打牌より優先するのは Fold の場合だけ。
     //
     // リーチ判断と通常打牌・押し引きは同じ `discard_selection` を参照する。リーチのために打牌を
     // 選び直したり、待ちを別経路で計算し直したりしない。検討した場合の判断内訳は `reach` へ
@@ -1415,11 +1415,49 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn tenpai_actions() -> Vec<LegalAction> {
+        tenpai_dahai_actions()
+            .into_iter()
+            .chain([LegalAction::Reach])
+            .collect()
+    }
+
+    fn tenpai_dahai_actions() -> Vec<LegalAction> {
         TENPAI_HAND
             .iter()
             .map(|&value| dahai(value))
             .chain([dahai(TENPAI_DRAWN)])
-            .chain([LegalAction::Reach])
+            .collect()
+    }
+
+    // 待ち枚数が足りないテンパイで他家リーチを受ける局面。リーチ者の河に 1m を置いて手牌の
+    // 1m を現物にし、2m を4枚見えにする。
+    const WEAK_TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
+    const WEAK_TENPAI_DRAWN: u8 = 88;
+
+    fn weak_tenpai_under_reach_context() -> GameContext {
+        weak_tenpai_under_reach_context_with(None, [false, true, false, false])
+    }
+
+    fn weak_tenpai_under_reach_context_with(oya: Option<u8>, reached: [bool; 4]) -> GameContext {
+        GameContext::from_parts_with_table_state(
+            Some(tile(WEAK_TENPAI_DRAWN)),
+            WEAK_TENPAI_HAND.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            None,
+            None,
+            [4u8, 5, 6, 7].iter().map(|&value| tile(value)).collect(),
+            Some(0),
+            oya,
+            [vec![], vec![tile(1)], vec![], vec![]],
+            reached,
+        )
+    }
+
+    fn weak_tenpai_actions() -> Vec<LegalAction> {
+        WEAK_TENPAI_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(WEAK_TENPAI_DRAWN)])
             .collect()
     }
 
@@ -1780,13 +1818,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn neutral_and_fold_do_not_evaluate_reach() {
-        // リーチを検討するのは Push mode だけで、他のモードでは診断も残さない。
+    fn fold_does_not_evaluate_reach() {
+        // リーチを検討するのは Push mode だけで、Fold では診断も残さない。
         for (ctx, actions, mode) in [
             (
-                tenpai_under_reach_context(Some(1), [false, true, false, false]),
-                tenpai_actions(),
-                PushPullMode::Neutral,
+                weak_tenpai_under_reach_context(),
+                weak_tenpai_actions(),
+                PushPullMode::Fold,
             ),
             (
                 fold_under_reach_context(),
@@ -1861,24 +1899,24 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn neutral_prefers_normal_discard_over_genbutsu_fallback() {
+    fn fold_iishanten_prefers_genbutsu_fallback_over_normal_discard() {
         let mut agent = ShantenAgent;
-        // 単独の子リーチに対する強い一向聴で Neutral。共通現物 16(5m) があっても
-        // Neutral では通常打牌(浮いた 116(北))を防御 fallback より優先する。
+        // 単独の子リーチに対する一向聴。受け入れが広くても押さず、共通現物 16(5m) を
+        // 通常打牌より優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = opponent_reach_context(Some(116), &hand_values);
-        assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
-            PushPullMode::Neutral
-        );
+        let decision = decide_push_pull(&push_pull_inputs_from_context(&ctx));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenAgainstReach);
+
         let actions: Vec<LegalAction> = hand_values
             .iter()
             .map(|&value| dahai(value))
             .chain([dahai(116), dahai(16)])
             .collect();
         let normal = select_discard_action(&ctx, &actions).unwrap();
-        assert_eq!(agent.act(&ctx, &actions), normal);
-        assert_ne!(agent.act(&ctx, &actions), dahai(16));
+        assert_eq!(agent.act(&ctx, &actions), dahai(16));
+        assert_ne!(agent.act(&ctx, &actions), normal);
     }
 
     #[test]
@@ -2215,24 +2253,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn push_prefers_normal_discard_over_suited_safety_fallback() {
+    fn push_prefers_normal_discard_over_the_defense_fallback() {
         let mut agent = ShantenAgent;
-        // テンパイで単独の子リーチに対しては Push。Reach が合法でなければ通常打牌へ進み、
-        // 防御 fallback より通常打牌(32(9m))を優先する。
-        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
-        let ctx = suited_reach_context(Some(88), &hand_values, &[4, 5, 6, 7], &[]);
+        // 強いテンパイで単独の子リーチに対しては Push。Reach が合法でなければ通常打牌へ進み、
+        // 現物 17(5m) より通常打牌を優先する。
+        let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
         assert_eq!(
             decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
             PushPullMode::Push
         );
-        let actions: Vec<LegalAction> = hand_values
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(88)])
-            .collect();
+        let actions = tenpai_dahai_actions();
         let normal = select_discard_action(&ctx, &actions).unwrap();
+        assert_ne!(normal, dahai(17));
         assert_eq!(agent.act(&ctx, &actions), normal);
-        assert_ne!(agent.act(&ctx, &actions), dahai(4));
     }
 
     #[test]
@@ -2289,36 +2322,71 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn neutral_tenpai_against_dealer_reach_prefers_normal_discard_over_reach() {
+    fn push_strong_tenpai_against_dealer_reach_reaches() {
         let mut agent = ShantenAgent;
-        // 親リーチに対するテンパイ。decide_push_pull は Neutral。
-        // Reach が合法でも選ばず、暫定的にダマ相当の通常打牌を優先する。
+        // 親リーチでも強いテンパイなら押す。Push の順序どおり Reach を最優先する。
         let ctx = tenpai_under_reach_context(Some(1), [false, true, false, false]);
-        assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
-            PushPullMode::Neutral
-        );
-        let actions = tenpai_actions();
+        let inputs = push_pull_inputs_from_context(&ctx);
+        assert!(inputs.dealer_reacher);
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::StrongTenpaiAgainstReach);
+
+        assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
+    }
+
+    #[test]
+    fn push_strong_tenpai_against_multiple_reach_reaches() {
+        let mut agent = ShantenAgent;
+        // 複数リーチでも強いテンパイなら押す。
+        let ctx = tenpai_under_reach_context(None, [false, true, true, false]);
+        let inputs = push_pull_inputs_from_context(&ctx);
+        assert_eq!(inputs.opponent_reach_count, 2);
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::StrongTenpaiAgainstReach);
+
+        assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
+    }
+
+    #[test]
+    fn fold_weak_tenpai_against_a_reach_prefers_the_defense_fallback() {
+        let mut agent = ShantenAgent;
+        // 待ち枚数が足りないテンパイは押さない。Reach が合法でも抑制し、現物を優先する。
+        let ctx = weak_tenpai_under_reach_context();
+        let inputs = push_pull_inputs_from_context(&ctx);
+        let wait = inputs
+            .offense
+            .and_then(|offense| offense.tenpai_wait_after_discard)
+            .expect("テンパイの待ち facts がある");
+        assert_eq!(wait.permanent_furiten, PermanentFuriten::No);
+        assert!(wait.tsumo_remaining < 6);
+
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::WeakTenpaiAgainstReach);
+
+        let mut actions = vec![LegalAction::Reach];
+        actions.extend(weak_tenpai_actions());
         let normal = select_discard_action(&ctx, &actions).unwrap();
+        let defense = select_defense_fallback_action(&ctx, &actions)
+            .cloned()
+            .unwrap();
         let selected = agent.act(&ctx, &actions);
-        assert_eq!(selected, normal);
+        assert_eq!(selected, defense);
+        assert_ne!(selected, normal);
         assert_ne!(selected, LegalAction::Reach);
     }
 
     #[test]
-    fn neutral_tenpai_against_multiple_reach_prefers_normal_discard_over_reach() {
-        let mut agent = ShantenAgent;
-        // 複数リーチに対するテンパイ。decide_push_pull は Neutral。Reach は選ばない。
-        let ctx = tenpai_under_reach_context(None, [false, true, true, false]);
-        assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
-            PushPullMode::Neutral
-        );
-        let actions = tenpai_actions();
-        let normal = select_discard_action(&ctx, &actions).unwrap();
-        let selected = agent.act(&ctx, &actions);
-        assert_eq!(selected, normal);
-        assert_ne!(selected, LegalAction::Reach);
+    fn fold_weak_tenpai_against_a_dealer_or_multiple_reach_folds() {
+        // 親リーチ・複数リーチでも弱いテンパイは同じく降りる。
+        for reached in [[false, true, false, false], [false, true, true, false]] {
+            let ctx = weak_tenpai_under_reach_context_with(Some(1), reached);
+            let decision = decide_push_pull(&push_pull_inputs_from_context(&ctx));
+            assert_eq!(decision.mode, PushPullMode::Fold);
+            assert_eq!(decision.reason, PushPullReason::WeakTenpaiAgainstReach);
+        }
     }
 
     // 2向聴以上で他家リーチを受ける Fold 局面。リーチ者の河に 5s を置き手牌の 5s を現物にする。
@@ -2373,8 +2441,7 @@ pub(crate) mod tests {
     #[test]
     fn agent_push_pull_uses_legal_candidate_evaluation_not_illegal_global_best() {
         // 全体最善(手牌の東を切ってテンパイ = shanten 0)は非合法で、合法なのはツモ切り 3p だけ。
-        // 非合法な全体最善を使うと Push、合法なツモ切り(shanten 1)を使うと Neutral になる。
-        // Agent は合法候補側の evaluation / mode を使う。
+        // Agent は合法候補側の evaluation / 押し引き判断を使う。
         let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 89, 108];
         let drawn = 44; // 3p ツモ
         let discards = [vec![], vec![tile(16)], vec![], vec![]];
@@ -2397,15 +2464,18 @@ pub(crate) mod tests {
             .chain(ctx.drawn_tile())
             .collect();
 
-        // 非合法な全体最善候補の mode は Push。
+        // 非合法な全体最善候補はテンパイだが、単騎の待ちは 3 枚しかないので弱いテンパイ。
         let global_best = select_best_normal_discard_evaluation(&ctx, &tiles).unwrap();
         assert_eq!(global_best.min_shanten_after_discard(), 0);
-        let illegal_mode = decide_push_pull(&push_pull_inputs_from_context_with_evaluation(
-            &ctx,
-            Some(&global_best),
-        ))
-        .mode;
-        assert_eq!(illegal_mode, PushPullMode::Push);
+        let illegal_inputs =
+            push_pull_inputs_from_context_with_evaluation(&ctx, Some(&global_best));
+        let illegal_wait = illegal_inputs
+            .offense
+            .and_then(|offense| offense.tenpai_wait_after_discard)
+            .expect("テンパイの待ち facts がある");
+        assert_eq!(illegal_wait.tsumo_remaining, 3);
+        let illegal_reason = decide_push_pull(&illegal_inputs).reason;
+        assert_eq!(illegal_reason, PushPullReason::WeakTenpaiAgainstReach);
 
         // 合法なのはツモ切り 3p だけ。Agent が使う offense は合法候補の評価に一致する。
         let actions = vec![dahai(drawn)];
@@ -2414,13 +2484,17 @@ pub(crate) mod tests {
         assert_eq!(legal_evaluation.min_shanten_after_discard(), 1);
         let legal_inputs =
             push_pull_inputs_from_context_with_evaluation(&ctx, selection.evaluation.as_ref());
-        let legal_mode = decide_push_pull(&legal_inputs).mode;
+        let legal_reason = decide_push_pull(&legal_inputs).reason;
 
-        assert_ne!(illegal_mode, legal_mode);
-        assert_eq!(legal_mode, PushPullMode::Neutral);
+        assert_ne!(illegal_reason, legal_reason);
+        assert_eq!(legal_reason, PushPullReason::IishantenAgainstReach);
         assert_eq!(
             legal_inputs.offense.unwrap().min_shanten_after_discard,
             legal_evaluation.min_shanten_after_discard()
+        );
+        assert_eq!(
+            legal_inputs.offense.unwrap().tenpai_wait_after_discard,
+            None
         );
 
         // Agent は合法候補(ツモ切り 3p)を切る。
@@ -2494,28 +2568,33 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn decide_reports_normal_discard_source_on_neutral() {
-        let agent = ShantenAgent;
-        // 単独の子リーチに対する強い一向聴で Neutral。共通現物があっても通常打牌を選ぶ。
-        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
-        let ctx = opponent_reach_context(Some(116), &hand_values);
-        assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
-            PushPullMode::Neutral
-        );
-        let actions: Vec<LegalAction> = hand_values
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(116), dahai(16)])
-            .collect();
-        let normal = select_discard_action(&ctx, &actions).unwrap();
-        let decision = agent.decide(&ctx, &actions);
-        assert_eq!(decision.source, AgentActionSource::NormalDiscard);
-        assert_eq!(decision.action, normal);
-        assert_eq!(
-            decision.push_pull.map(|d| d.mode),
-            Some(PushPullMode::Neutral)
-        );
+    fn the_neutral_ordering_prefers_the_normal_discard_over_the_defense_fallback() {
+        // 現在の押し引き policy は Neutral を返さないが、action 順序としては維持している。
+        // 通常打牌 → 防御 fallback で、Reach は検討しない。
+        let ctx = fold_under_reach_context();
+        let mut actions = vec![LegalAction::Reach];
+        actions.extend(fold_actions());
+        let selection = select_discard_action_with_evaluation(&ctx, &actions);
+        let normal = selection.action.clone().expect("通常打牌を選べる");
+        let inputs = push_pull_inputs_from_context(&ctx);
+        let mut reach = None;
+        let mut diagnostics = DecisionDiagnostics::disabled();
+
+        let (action, source) = ShantenAgent
+            .select_action_for_push_pull_mode(
+                PushPullMode::Neutral,
+                &ctx,
+                &actions,
+                &inputs,
+                &selection,
+                &mut reach,
+                &mut diagnostics,
+            )
+            .expect("action を選べる");
+
+        assert_eq!(action, normal);
+        assert_eq!(source, AgentActionSource::NormalDiscard);
+        assert_eq!(reach, None);
     }
 
     #[test]
@@ -2888,14 +2967,9 @@ pub(crate) mod tests {
 
     #[test]
     fn diagnose_holds_push_inputs_and_decision() {
-        // テンパイで単独の子リーチに対する Push。
-        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
-        let ctx = suited_reach_context(Some(88), &hand_values, &[4, 5, 6, 7], &[]);
-        let actions: Vec<LegalAction> = hand_values
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(88)])
-            .collect();
+        // 強いテンパイで単独の子リーチに対する Push。
+        let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+        let actions = tenpai_dahai_actions();
 
         let diagnostic = assert_push_pull_diagnostic(&ctx, &actions, PushPullMode::Push);
         let inputs = diagnostic.push_pull_inputs.unwrap();
@@ -2915,25 +2989,26 @@ pub(crate) mod tests {
         );
         assert_eq!(
             diagnostic.push_pull_decision.unwrap().reason,
-            PushPullReason::TenpaiAgainstSingleNonDealer
+            PushPullReason::StrongTenpaiAgainstReach
         );
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
     }
 
     #[test]
-    fn diagnose_holds_neutral_inputs_and_decision() {
-        // 単独の子リーチに対する強い一向聴で Neutral。
-        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
-        let ctx = opponent_reach_context(Some(116), &hand_values);
-        let actions: Vec<LegalAction> = hand_values
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(116), dahai(16)])
-            .collect();
+    fn diagnose_holds_weak_tenpai_fold_inputs_and_decision() {
+        // 待ち枚数が足りないテンパイは Fold。防御 fallback を通常打牌より優先する。
+        let ctx = weak_tenpai_under_reach_context();
+        let actions = weak_tenpai_actions();
 
-        let diagnostic = assert_push_pull_diagnostic(&ctx, &actions, PushPullMode::Neutral);
-        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
-        // Neutral で通常打牌を採用したので防御 fallback は検討していない。
-        assert_eq!(diagnostic.defense, None);
+        let diagnostic = assert_push_pull_diagnostic(&ctx, &actions, PushPullMode::Fold);
+        assert_eq!(
+            diagnostic.push_pull_decision.unwrap().reason,
+            PushPullReason::WeakTenpaiAgainstReach
+        );
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
+        );
     }
 
     #[test]
@@ -2944,7 +3019,7 @@ pub(crate) mod tests {
         let diagnostic = assert_push_pull_diagnostic(&ctx, &actions, PushPullMode::Fold);
         assert_eq!(
             diagnostic.push_pull_decision.unwrap().reason,
-            PushPullReason::TwoOrMoreShanten
+            PushPullReason::TwoOrMoreShantenAgainstReach
         );
     }
 
@@ -3302,11 +3377,23 @@ pub(crate) mod tests {
         // target は player_threats の classification と同じ source of truth から選ぶ。
         assert_eq!(diagnostic.open_hand_defense.targets, vec![1]);
         assert!(diagnostic.open_hand_defense.has_target());
-        // この局面はテンパイなので Push のまま。OpenHand 防御 fallback は採用されない。
-        assert_eq!(diagnostic.open_hand_defense.selected, None);
+        // この局面は待ち 3 枚の弱いテンパイなので Fold。OpenHand 防御 fallback を採用する。
+        let selected = diagnostic
+            .open_hand_defense
+            .selected
+            .as_ref()
+            .expect("OpenHand 防御 fallback を採用している");
+        assert_eq!(selected.selected_action, diagnostic.selected_action);
+        let category = diagnostic
+            .open_hand_defense_category()
+            .expect("採用した category がある");
         assert_eq!(
             diagnostic.open_hand_defense,
-            OpenHandDefenseDiagnostic::from_context(&ctx, &actions, None)
+            OpenHandDefenseDiagnostic::from_context(
+                &ctx,
+                &actions,
+                Some((&diagnostic.selected_action, category))
+            )
         );
 
         // 合法 Dahai の順序をそのまま保つ。
@@ -3364,7 +3451,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_high_open_hand_threat_keeps_pushing_from_tenpai() {
+    fn a_high_open_hand_threat_folds_from_a_weak_tenpai() {
         use crate::open_hand_threat::OpenHandThreatLevel;
 
         let actions = opponent_meld_actions();
@@ -3381,23 +3468,34 @@ pub(crate) mod tests {
         assert!(melded.open_hand_defense.has_target());
         assert!(!plain.open_hand_defense.has_target());
 
-        // テンパイなので High の副露相手がいても押す。reason だけが新しい policy のものになる。
+        // 待ち 3 枚の弱いテンパイなので、High の副露相手がいれば降りる。
         let melded_decision = melded.push_pull_decision.expect("押し引きを判定している");
         let plain_decision = plain.push_pull_decision.expect("押し引きを判定している");
-        assert_eq!(melded_decision.mode, PushPullMode::Push);
+        assert_eq!(
+            melded
+                .push_pull_inputs
+                .and_then(|inputs| inputs.offense)
+                .and_then(|offense| offense.tenpai_wait_after_discard)
+                .map(|wait| wait.tsumo_remaining),
+            Some(3)
+        );
+        assert_eq!(melded_decision.mode, PushPullMode::Fold);
         assert_eq!(
             melded_decision.reason,
-            PushPullReason::TenpaiAgainstHighOpenHand
+            PushPullReason::WeakTenpaiAgainstHighOpenHand
         );
-        assert_eq!(plain_decision.mode, PushPullMode::Push);
-        assert_eq!(plain_decision.reason, PushPullReason::NoOpponentReach);
 
-        // Push なので通常打牌が優先され、OpenHand 防御 fallback は採用されない。
-        assert_eq!(melded.selected_action, plain.selected_action);
-        assert_eq!(melded.selected_source, plain.selected_source);
-        assert_eq!(melded.selected_source, AgentActionSource::NormalDiscard);
-        assert_eq!(melded.open_hand_defense_category(), None);
-        assert_eq!(melded.open_hand_defense.selected, None);
+        // threat が無ければ従来どおり通常打牌のまま。
+        assert_eq!(plain_decision.mode, PushPullMode::Push);
+        assert_eq!(plain_decision.reason, PushPullReason::NoThreat);
+        assert_eq!(plain.selected_source, AgentActionSource::NormalDiscard);
+
+        // Fold では OpenHand 防御 fallback を通常打牌より優先する。
+        assert!(matches!(
+            melded.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(_)
+        ));
+        assert!(melded.open_hand_defense_category().is_some());
         assert_eq!(melded.defense, plain.defense);
     }
 
@@ -3416,9 +3514,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opponent_melds_keep_the_tenpai_decisions() {
-        // 副露 facts から High OpenHandThreat になっても、テンパイなら押すので選択・防御は
-        // 変わらない。押し引きの reason だけが新しい policy のものになる。
+    fn opponent_melds_keep_the_same_offense_and_normal_discard() {
+        // 副露 facts から High OpenHandThreat になっても、通常打牌評価と offense は変わらない。
+        // 変わるのは threat と、そこから決まる押し引き・選択経路だけ。
         let actions = opponent_meld_actions();
         let with_melds = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
         let without_melds = opponent_meld_context(Some(0), vec![]);
@@ -3426,13 +3524,12 @@ pub(crate) mod tests {
         let melded = diagnose_matching_act(&with_melds, &actions);
         let plain = diagnose_matching_act(&without_melds, &actions);
 
-        assert_eq!(melded.selected_action, plain.selected_action);
-        assert_eq!(melded.selected_source, plain.selected_source);
         assert_eq!(melded.normal_discard_action, plain.normal_discard_action);
-        assert_eq!(melded.reach, plain.reach);
         assert_eq!(melded.defense, plain.defense);
         assert_eq!(melded.pon, plain.pon);
         assert_ne!(melded.player_threats, plain.player_threats);
+        // Fold ではリーチを検討しない。
+        assert_eq!(melded.reach, None);
 
         // 押し引き入力は副露由来の facts と classification だけが異なる。
         let melded_inputs = melded.push_pull_inputs.expect("押し引き入力がある");
@@ -3448,19 +3545,25 @@ pub(crate) mod tests {
         assert!(melded_inputs.has_high_open_hand_threat());
         assert!(!plain_inputs.has_high_open_hand_threat());
 
+        // 待ち 3 枚の弱いテンパイなので、High の副露相手がいれば降りる。
         let decision = melded.push_pull_decision.expect("押し引きを判定している");
-        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.mode, PushPullMode::Fold);
         assert_eq!(
             decision.reason,
-            crate::push_pull::PushPullReason::TenpaiAgainstHighOpenHand
+            crate::push_pull::PushPullReason::WeakTenpaiAgainstHighOpenHand
         );
+        assert!(matches!(
+            melded.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(_)
+        ));
+        assert_eq!(plain.selected_source, AgentActionSource::NormalDiscard);
         assert_eq!(melded_inputs.opponent_reach_count, 0);
 
         let plain_decision = plain.push_pull_decision.expect("押し引きを判定している");
         assert_eq!(plain_decision.mode, PushPullMode::Push);
         assert_eq!(
             plain_decision.reason,
-            crate::push_pull::PushPullReason::NoOpponentReach
+            crate::push_pull::PushPullReason::NoThreat
         );
 
         assert_eq!(
@@ -3540,31 +3643,17 @@ pub(crate) mod tests {
 
     #[test]
     fn opponent_melds_do_not_change_the_reach_branches() {
-        // 単独子リーチ・親リーチ・複数リーチのどれでも、副露相手の有無で押し引きは変わらない。
+        // 単独子リーチ・親リーチ・複数リーチのどれでも境界は同じ。副露している player 1 は
+        // 同時にリーチ者なので OpenHandThreat の対象外で、reason はリーチだけのものになる。
+        // この局面は待ち 3 枚の弱いテンパイなので、どのリーチでも Fold。
         let actions = opponent_meld_actions();
-        // (oya, reached, 期待する mode, 期待する reason)
         let cases = [
-            (
-                Some(0u8),
-                [false, true, false, false],
-                PushPullMode::Push,
-                PushPullReason::TenpaiAgainstSingleNonDealer,
-            ),
-            (
-                Some(1),
-                [false, true, false, false],
-                PushPullMode::Neutral,
-                PushPullReason::TenpaiUnderHighPressure,
-            ),
-            (
-                Some(0),
-                [false, true, true, false],
-                PushPullMode::Neutral,
-                PushPullReason::TenpaiUnderHighPressure,
-            ),
+            (Some(0u8), [false, true, false, false]),
+            (Some(1), [false, true, false, false]),
+            (Some(0), [false, true, true, false]),
         ];
 
-        for (oya, reached, mode, reason) in cases {
+        for (oya, reached) in cases {
             let with_melds = opponent_meld_context_with_reach_and_oya(
                 Some(0),
                 oya,
@@ -3577,19 +3666,19 @@ pub(crate) mod tests {
             let melded = diagnose_matching_act(&with_melds, &actions);
             let plain = diagnose_matching_act(&without_melds, &actions);
 
-            let decision = melded.push_pull_decision.expect("押し引きを判定している");
-            assert_eq!(decision.mode, mode, "{oya:?} {reached:?}");
-            assert_eq!(decision.reason, reason, "{oya:?} {reached:?}");
+            assert!(
+                !melded.open_hand_defense.has_target(),
+                "{oya:?} {reached:?}"
+            );
             assert_eq!(
                 melded.push_pull_decision, plain.push_pull_decision,
                 "{oya:?} {reached:?}"
             );
+            let decision = melded.push_pull_decision.expect("押し引きを判定している");
+            assert_eq!(decision.mode, PushPullMode::Fold, "{oya:?} {reached:?}");
             assert_eq!(
-                melded.selected_action, plain.selected_action,
-                "{oya:?} {reached:?}"
-            );
-            assert_eq!(
-                melded.selected_source, plain.selected_source,
+                decision.reason,
+                PushPullReason::WeakTenpaiAgainstReach,
                 "{oya:?} {reached:?}"
             );
 
@@ -5233,7 +5322,10 @@ pub(crate) mod tests {
             .push_pull_decision
             .expect("押し引きを判定している");
         assert_eq!(decision.mode, PushPullMode::Push);
-        assert_eq!(decision.reason, PushPullReason::TenpaiAgainstHighOpenHand);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::StrongTenpaiAgainstHighOpenHand
+        );
         assert_eq!(with_reach.selected_action, LegalAction::Reach);
         assert_eq!(with_reach.selected_source, AgentActionSource::Reach);
         assert_eq!(with_reach.open_hand_defense.selected, None);
@@ -5387,8 +5479,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn neutral_against_a_combined_threat_prefers_the_normal_discard() {
-        // 複合 threat のテンパイは Neutral。安全牌を通常打牌より優先せず、リーチも検討しない。
+    fn push_strong_tenpai_against_a_combined_threat_reaches() {
+        // 複合 threat でも強いテンパイなら押す。Push の順序どおり Reach を最優先する。
         let ctx = open_hand_context(
             &OPEN_HAND_TENPAI_HAND,
             Some(OPEN_HAND_FOLD_DRAWN),
@@ -5409,16 +5501,55 @@ pub(crate) mod tests {
         let decision = diagnostic
             .push_pull_decision
             .expect("押し引きを判定している");
-        assert_eq!(decision.mode, PushPullMode::Neutral);
-        assert_eq!(decision.reason, PushPullReason::TenpaiAgainstCombinedThreat);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::StrongTenpaiAgainstCombinedThreat
+        );
 
         assert!(diagnostic.combined_defense.has_target());
-        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
-        assert_eq!(
-            diagnostic.selected_action,
-            diagnostic.normal_discard_action.clone().unwrap()
-        );
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
         assert_eq!(diagnostic.combined_defense.selected, None);
+    }
+
+    #[test]
+    fn fold_weak_tenpai_against_a_combined_threat_prefers_the_combined_defense_fallback() {
+        // player 1 が High の副露相手、player 3 がリーチの複合 threat。待ち 3 枚の弱いテンパイ
+        // なので押さず、複合 threat 用の防御 fallback を通常打牌より優先する。
+        let ctx = opponent_meld_context_with_reach(
+            Some(0),
+            vec![white_dragon_pon(), red_five_chi()],
+            [false, false, false, true],
+        );
+        let actions = opponent_meld_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+        assert!(inputs.has_combined_threat());
+
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::WeakTenpaiAgainstCombinedThreat
+        );
+
+        assert!(diagnostic.combined_defense.has_target());
+        assert!(matches!(
+            diagnostic.selected_source,
+            AgentActionSource::CombinedThreatDefenseFallback(_)
+        ));
+        assert_eq!(
+            diagnostic
+                .combined_defense
+                .selected
+                .as_ref()
+                .map(|selection| selection.selected_action.clone()),
+            Some(diagnostic.selected_action.clone())
+        );
         assert!(diagnostic.reach.is_none());
     }
 
@@ -5440,7 +5571,7 @@ pub(crate) mod tests {
             .push_pull_decision
             .expect("押し引きを判定している");
         assert_eq!(decision.mode, PushPullMode::Fold);
-        assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
+        assert_eq!(decision.reason, PushPullReason::IishantenAgainstReach);
 
         assert!(!diagnostic.combined_defense.has_target());
         assert_eq!(diagnostic.combined_defense.selected, None);

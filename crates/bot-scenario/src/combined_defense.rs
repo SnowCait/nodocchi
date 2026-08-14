@@ -487,7 +487,7 @@ fn a_riichi_without_a_high_open_hand_keeps_the_existing_defense() {
         diagnostic
             .push_pull_decision
             .map(|decision| decision.reason),
-        Some(PushPullReason::TwoOrMoreShanten)
+        Some(PushPullReason::TwoOrMoreShantenAgainstReach)
     );
     assert!(diagnostic.defense.is_some());
     assert!(diagnostic.defense_fallback_kind().is_some());

@@ -68,7 +68,7 @@ pub use open_hand_threat::{
 };
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
-    decide_push_pull, push_pull_inputs_from_context,
+    PushPullTenpaiWaitFacts, decide_push_pull, push_pull_inputs_from_context,
 };
 pub use threat::{
     MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts, PlayerThreatDiagnostic,
