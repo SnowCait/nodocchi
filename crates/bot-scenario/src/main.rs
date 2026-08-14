@@ -1,4 +1,6 @@
 mod cli;
+#[cfg(test)]
+mod combined_defense;
 mod error;
 mod format;
 mod input;

@@ -1,9 +1,11 @@
 use bot_core::{
-    AgentActionSource, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind,
-    GameContext, LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
+    AgentActionSource, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
+    DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind, GameContext,
+    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
     PlayerThreatDiagnostic, PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision,
     PushPullInputs, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
+    ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -54,6 +56,7 @@ pub fn format_diagnostic(
     }
 
     sections.push(format_open_hand_defense(&diagnostic.open_hand_defense));
+    sections.push(format_combined_defense(&diagnostic.combined_defense));
     sections.push(format_player_threats(diagnostic));
     sections.push(format_summary(scenario, diagnostic));
 
@@ -145,6 +148,9 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
     }
     if let Some(category) = diagnostic.open_hand_defense_category() {
         lines.push(format!("  open hand defense category: {category:?}"));
+    }
+    if let Some(category) = diagnostic.combined_defense_category() {
+        lines.push(format!("  combined defense category: {category:?}"));
     }
     lines.join("\n")
 }
@@ -809,6 +815,95 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
     lines.join("\n")
 }
 
+// リーチ者と High OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety。診断が持つ
+// pure helper の結果をそのまま出し、表示用に安全度を計算し直さない。複合 threat でない局面は
+// target を持たないので候補も出さない。`selected` は production selector が選んだ結果そのもの。
+fn format_combined_defense(combined_defense: &CombinedDefenseDiagnostic) -> String {
+    let mut header = vec![
+        "Combined defense".to_string(),
+        format!(
+            "  targets: {}",
+            format_threat_targets(&combined_defense.targets)
+        ),
+    ];
+    match combined_defense.selected.as_ref() {
+        Some(selected) => {
+            header.push(format!(
+                "  selected action: {}",
+                action_label(&selected.selected_action)
+            ));
+            header.push(format!(
+                "  selected category: {:?}",
+                selected.selected_category
+            ));
+        }
+        None => header.push(format!("  selected: {NONE}")),
+    }
+
+    let mut blocks = vec![header.join("\n")];
+    for candidate in &combined_defense.candidates {
+        blocks.push(format_combined_defense_candidate(candidate));
+    }
+    blocks.join("\n\n")
+}
+
+// target は席だけでなく種類も出す。リーチ者と High の副露相手ではロン安全の根拠が違うため。
+fn format_threat_targets(targets: &[ThreatDefenseTarget]) -> String {
+    if targets.is_empty() {
+        return NONE.to_string();
+    }
+    targets
+        .iter()
+        .map(|target| format!("{}({:?})", target.player, target.kind))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_combined_defense_candidate(candidate: &CombinedDefenseCandidateDiagnostic) -> String {
+    let mut lines = vec![action_label(&candidate.action)];
+
+    lines.push(format!("  selected: {}", yes_no(candidate.selected)));
+    lines.push(format!(
+        "  safe against all threats: {}",
+        yes_no(candidate.safe_against_all_threats)
+    ));
+    for target in &candidate.targets {
+        lines.push(format!(
+            "  ron safe[{} {:?}]: {}",
+            target.player(),
+            target.kind(),
+            yes_no(target.ron_safe)
+        ));
+    }
+    lines.push(format!(
+        "  honor safety: {}",
+        optional(candidate.honor_safety_rank)
+    ));
+    lines.push(format!(
+        "  opponent honor value: {}",
+        optional(candidate.opponent_honor_value)
+    ));
+    lines.push(format!("  wall: {}", optional(candidate.wall_rank)));
+    for target in &candidate.targets {
+        lines.push(format!(
+            "  suji safety[{}]: {}",
+            target.player(),
+            optional(target.suji_safety_rank)
+        ));
+    }
+    lines.push(format!(
+        "  suji safety: {}",
+        optional(candidate.suji_safety_rank)
+    ));
+    lines.push(format!(
+        "  suited safety: {}",
+        optional(candidate.suited_safety_rank)
+    ));
+    lines.push(format!("  category: {}", optional(candidate.category)));
+
+    lines.join("\n")
+}
+
 // player ごとの脅威診断。診断が持つ観測事実をそのまま出し、表示用に副露やドラを解析し直さない。
 // 危険度の判断は含まず、押し引きにもまだ反映していない。
 fn format_player_threats(diagnostic: &ShantenDecisionDiagnostic) -> String {
@@ -943,6 +1038,9 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
     if let Some(category) = diagnostic.open_hand_defense_category() {
         lines.push(format!("  selected detail: {category:?}"));
     }
+    if let Some(category) = diagnostic.combined_defense_category() {
+        lines.push(format!("  selected detail: {category:?}"));
+    }
     if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
         lines.push(format!("  selected opponent honor value: {value}"));
     }
@@ -964,6 +1062,9 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
         lines.push(format!("  runner-up detail: {kind:?}"));
     }
     if let Some(category) = runner_up.open_hand_defense_category() {
+        lines.push(format!("  runner-up detail: {category:?}"));
+    }
+    if let Some(category) = runner_up.combined_defense_category() {
         lines.push(format!("  runner-up detail: {category:?}"));
     }
     if let Some(value) = honor_safety_opponent_honor_value(&runner_up) {
@@ -1081,6 +1182,9 @@ fn source_label(source: AgentActionSource) -> String {
     match source {
         AgentActionSource::DefenseFallback(_) => "DefenseFallback".to_string(),
         AgentActionSource::OpenHandDefenseFallback(_) => "OpenHandDefenseFallback".to_string(),
+        AgentActionSource::CombinedThreatDefenseFallback(_) => {
+            "CombinedThreatDefenseFallback".to_string()
+        }
         other => format!("{other:?}"),
     }
 }
@@ -1254,6 +1358,7 @@ mod tests {
                 | "Defense"
                 | "Defense candidates"
                 | "OpenHand defense"
+                | "Combined defense"
                 | "Player threats"
                 | "Summary"
         )
@@ -3187,6 +3292,159 @@ mod tests {
                 "{block}"
             );
         }
+    }
+
+    const COMBINED_THREAT_DEFENSE_SCENARIO: &str =
+        include_str!("../scenarios/combined_threat_defense.json");
+
+    #[test]
+    fn combined_defense_section_lists_both_threat_kinds_and_their_safety() {
+        let (_, diagnostic, output) = rendered(COMBINED_THREAT_DEFENSE_SCENARIO, false);
+        let combined_defense = section(&output, "Combined defense");
+
+        assert_eq!(
+            diagnostic.combined_defense.targets,
+            vec![
+                bot_core::ThreatDefenseTarget::riichi(1),
+                bot_core::ThreatDefenseTarget::high_open_hand(3),
+            ]
+        );
+        // target は席だけでなく種類も出す。ロン安全の根拠が種類で変わるため。
+        assert!(
+            combined_defense.contains("  targets: 1(Riichi), 3(HighOpenHand)"),
+            "{output}"
+        );
+        assert!(
+            combined_defense.contains("  selected action: 5m"),
+            "{output}"
+        );
+        assert!(
+            combined_defense.contains("  selected category: SafeAgainstAllThreats"),
+            "{output}"
+        );
+
+        // 全 target にロンされない牌が第一分類。
+        let five_man = candidate_block(&output, "Combined defense", "5m");
+        assert!(five_man.contains("  selected: yes"), "{five_man}");
+        assert!(
+            five_man.contains("  safe against all threats: yes"),
+            "{five_man}"
+        );
+        assert!(five_man.contains("  ron safe[1 Riichi]: yes"), "{five_man}");
+        assert!(
+            five_man.contains("  ron safe[3 HighOpenHand]: yes"),
+            "{five_man}"
+        );
+        assert!(
+            five_man.contains("  category: SafeAgainstAllThreats"),
+            "{five_man}"
+        );
+
+        // post_reach_passed はリーチ者にだけ効く。副露相手には安全根拠にしない。
+        let nine_man = candidate_block(&output, "Combined defense", "9m");
+        assert!(nine_man.contains("  ron safe[1 Riichi]: yes"), "{nine_man}");
+        assert!(
+            nine_man.contains("  ron safe[3 HighOpenHand]: no"),
+            "{nine_man}"
+        );
+        assert!(
+            nine_man.contains("  safe against all threats: no"),
+            "{nine_man}"
+        );
+
+        // 字牌は既存 Defense と同じ見え枚数の safety と、ロン可能な target の役牌価値を出す。
+        let east = candidate_block(&output, "Combined defense", "E");
+        assert!(east.contains("  honor safety: OneVisible"), "{east}");
+        assert!(
+            east.contains("  opponent honor value: DoubleWind"),
+            "{east}"
+        );
+
+        // 数牌は target ごとのスジと、その集約 (最も危険な rank) の両方を出す。
+        let three_sou = candidate_block(&output, "Combined defense", "3s");
+        assert!(three_sou.contains("  suji safety[1]: Suji"), "{three_sou}");
+        assert!(
+            three_sou.contains("  suji safety[3]: NoSuji"),
+            "{three_sou}"
+        );
+        assert!(three_sou.contains("  suji safety: NoSuji"), "{three_sou}");
+        assert!(
+            three_sou.contains("  suited safety: NoSafety"),
+            "{three_sou}"
+        );
+    }
+
+    #[test]
+    fn combined_defense_section_reports_no_target_without_a_combined_threat() {
+        // リーチ者だけの局面は複合 threat ではないので「target なし」と分かる表示にする。
+        let (_, diagnostic, output) = rendered(POST_REACH_GENBUTSU_SCENARIO, false);
+
+        assert!(!diagnostic.combined_defense.has_target());
+        assert_eq!(
+            section(&output, "Combined defense"),
+            "Combined defense\n  targets: none\n  selected: none"
+        );
+    }
+
+    #[test]
+    fn combined_defense_section_is_the_production_diagnostic() {
+        // 表示用に safety を計算し直さず、診断が持つ値をそのまま出す。
+        let (_, diagnostic, output) = rendered(COMBINED_THREAT_DEFENSE_SCENARIO, false);
+
+        for candidate in &diagnostic.combined_defense.candidates {
+            let block = candidate_block(
+                &output,
+                "Combined defense",
+                &candidate.tile.to_mjai_string(),
+            );
+            assert!(
+                block.contains(&format!(
+                    "  suited safety: {}",
+                    optional(candidate.suited_safety_rank)
+                )),
+                "{block}"
+            );
+            assert!(
+                block.contains(&format!("  category: {}", optional(candidate.category))),
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_combined_defense_fallback_is_reported_as_its_own_source() {
+        // 最終 action の経路は既存の DefenseFallback / OpenHandDefenseFallback と区別できる。
+        let (_, diagnostic, output) = rendered(COMBINED_THREAT_DEFENSE_SCENARIO, false);
+        let final_decision = section(&output, "Final decision");
+        let summary = section(&output, "Summary");
+
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::CombinedThreatDefenseFallback(
+                bot_core::CombinedDefenseCategory::SafeAgainstAllThreats
+            )
+        );
+        assert!(
+            final_decision.contains("  source: CombinedThreatDefenseFallback"),
+            "{output}"
+        );
+        assert!(
+            final_decision.contains("  combined defense category: SafeAgainstAllThreats"),
+            "{output}"
+        );
+        assert!(!final_decision.contains("  defense kind:"), "{output}");
+        assert!(
+            !final_decision.contains("  open hand defense category:"),
+            "{output}"
+        );
+        assert!(
+            summary.contains("  source: CombinedThreatDefenseFallback"),
+            "{output}"
+        );
+        assert!(
+            summary.contains("  selected detail: SafeAgainstAllThreats"),
+            "{output}"
+        );
     }
 
     #[test]

@@ -292,7 +292,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 
 現物は「対象リーチ者自身の河にある牌」と「そのリーチ成立後に他家から切られて通った牌」の両方です。後者は河から逆算できないため `post_reach_passed` で指定します。`post_reach_passed` は牌種だけを持つので、見え牌にも河にも影響しません。赤5は黒5と同じ牌種として扱います。
 
-`post_reach_passed` はリーチ者専用の情報です。「リーチ後に通った」という根拠は非リーチの相手には成立しないため、非リーチ副露相手に対する防御（`OpenHand defense`）では使いません。
+`post_reach_passed` はリーチ者専用の情報です。「リーチ後に通った」という根拠は非リーチの相手には成立しないため、非リーチ副露相手に対する防御（`OpenHand defense`）では使いません。リーチ者と `High` の副露相手が同時にいる複合 threat の防御（`Combined defense`）でも、`post_reach_passed` を安全根拠にできるのはリーチ者に対してだけです。
 
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.json
@@ -361,7 +361,7 @@ Scenario
       --request-id 425
     ```
 
-4. `Player threats` で相手の副露 facts（`reached` / `discards` / `open melds` / `meld kinds` / `meld dora`）と `open hand threat` を、`OpenHand defense` で `High` の相手に対する打牌ごとの safety を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
+4. `Player threats` で相手の副露 facts（`reached` / `discards` / `open melds` / `meld kinds` / `meld dora`）と `open hand threat` を、`OpenHand defense` で `High` の相手に対する打牌ごとの safety を、`Combined defense` でリーチ者と `High` の相手が同時にいる場合の safety を、`Push/Pull` で `opponent reach count` と `reason` を、`Summary` で `selected` と `runner-up` を確認する
 
     ```text
     Push/Pull
@@ -404,7 +404,7 @@ MJAI 単牌表記と圧縮 MPSZ 表記の両方を受け付けます。空白区
 
 ### 出力
 
-入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates` / `OpenHand defense`）を表示します。
+入力した局面（`Scenario`）に続けて、最終的に選んだ打牌（`Final decision`）と、その根拠として通常打牌の候補比較（`Normal discard candidates`）・押し引き（`Push/Pull`）・リーチ（`Reach`）・防御（`Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense`）を表示します。
 
 ```text
 Final decision
@@ -413,7 +413,7 @@ Final decision
   defense kind: Genbutsu
 ```
 
-防御 fallback は、リーチ者向け (`source: DefenseFallback` + `defense kind`) と非リーチ副露相手向け (`source: OpenHandDefenseFallback` + `open hand defense category`) を別の経路として区別します。どちらで最終 action を選んだかは `Final decision` / `Summary` / `bot_core::agent_decision` のログから判別できます。
+防御 fallback は、リーチ者向け (`source: DefenseFallback` + `defense kind`)、非リーチ副露相手向け (`source: OpenHandDefenseFallback` + `open hand defense category`)、両者が同時にいる複合 threat 向け (`source: CombinedThreatDefenseFallback` + `combined defense category`) を別の経路として区別します。どれで最終 action を選んだかは `Final decision` / `Summary` / `bot_core::agent_decision` のログから判別できます。
 
 ```text
 Final decision
@@ -532,7 +532,7 @@ player 1
 
 `open hand threat: Present` の相手は行動を変えません。`High` の相手がいない局面は従来どおり `NoOpponentReach` → `Push` です。
 
-他家リーチ者が1人以上いる局面には、この policy を適用しません。例えば「player 1 がリーチ・player 2 が `High`」でも押し引きは既存のリーチ policy、防御 fallback も既存のリーチ者向けのままです。`RiichiThreat` と `OpenHandThreat` を1つの危険度へ集約する threat 集約と、両者を同時に満たす safety selector はまだ未対応です。
+他家リーチ者が1人以上いる局面には、この policy を適用しません。リーチ者と `High` の副露相手が同時にいる局面は、次の複合 threat policy の対象になります。
 
 #### 非リーチ副露相手への OpenHand defense safety
 
@@ -590,7 +590,76 @@ target ごとに評価が変わる `opponent honor value` / `suji safety` / `sui
 
 選択そのものは production の selector が source of truth で、この section はその結果を `selected` に写すだけです。`act()` と `diagnose()` は同じ selector を共有するため、`Final decision` の `action` と `selected action` は必ず一致します。
 
-`Push` / `Neutral` では順序を変えないため、`High` の相手がいても安全牌が通常打牌より優先されることはありません。リーチ者がいる局面ではこの fallback に切り替えず、既存のリーチ者向け防御 fallback (`Defense`) をそのまま使います。
+`Push` / `Neutral` では順序を変えないため、`High` の相手がいても安全牌が通常打牌より優先されることはありません。リーチ者だけがいる局面ではこの fallback に切り替えず、既存のリーチ者向け防御 fallback (`Defense`) をそのまま使います。リーチ者と `High` の相手が同時にいる複合 threat 局面では、`Defense` でも `OpenHand defense` でもなく `Combined defense` を使います。
+
+#### RiichiThreat + High OpenHandThreat の複合 threat
+
+他家リーチ者が1人以上いて、かつ `open hand threat: High` の相手も1人以上いる局面は複合 threat として扱います。判定条件は `opponent_reach_count >= 1` かつ `High` の相手が1人以上いることだけで、`open hand threat: Present` の相手は複合 threat に含めません。`High` の条件は `Player threats` の classification がそのまま source of truth です。
+
+押し引きは、単独の子リーチより強い pressure として判定します。
+
+| 自分の状態 | mode | reason |
+| --- | --- | --- |
+| 攻撃評価を作れない | `Neutral` | `MissingOffenseAgainstCombinedThreat` |
+| テンパイ (向聴 <= 0) | `Neutral` | `TenpaiAgainstCombinedThreat` |
+| 一向聴 | `Fold` | `IishantenAgainstCombinedThreat` |
+| 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainstCombinedThreat` |
+
+単独の子リーチだけならテンパイは `Push` ですが、複合 threat では押しません。ただしテンパイから即 `Fold` にもせず `Neutral` に留め、リーチだけを抑制して通常打牌は維持します。情報不足 (攻撃評価なし) を理由に強制 `Fold` にもしません。
+
+一向聴では、単独の子リーチや `High` の副露相手単独に対する限定補正 (強い一向聴・完全一向聴・自分が親・簡易高打点) を適用しません。これらは片方だけの threat に対する補正として維持し、複合 threat には持ち込みません。
+
+判定順は 複合 threat → リーチのみ → 非リーチ副露相手のみ です。リーチ者だけの局面、`High` の副露相手だけの局面、`Present` だけの局面、threat が無い局面の判定は変わりません。
+
+#### 複合 threat の Combined defense safety
+
+`Combined defense` は、複合 threat 局面の防御 safety の section です。target はリーチ情報と `Player threats` の classification をそのまま source of truth にして選び、防御側でリーチ者も `High` の相手も判定し直しません。複合 threat ではない局面は `targets: none` で候補も出さず、防御は既存の `Defense` / `OpenHand defense` が担当します。
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/combined_threat_defense.json
+```
+
+```text
+Combined defense
+  targets: 1(Riichi), 3(HighOpenHand)
+  selected action: 5m
+  selected category: SafeAgainstAllThreats
+
+5m
+  selected: yes
+  safe against all threats: yes
+  ron safe[1 Riichi]: yes
+  ron safe[3 HighOpenHand]: yes
+  honor safety: -
+  opponent honor value: -
+  wall: NoWall
+  suji safety[1]: NoSuji
+  suji safety[3]: HalfSuji
+  suji safety: NoSuji
+  suited safety: NoSafety
+  category: SafeAgainstAllThreats
+```
+
+| 行 | 内容 |
+| --- | --- |
+| `targets` | 複合 threat の target。席と種類 (`Riichi` / `HighOpenHand`)。複合 threat でなければ `none` |
+| `selected action` / `selected category` | 実際に採用した複合 threat 用の防御 fallback。採用しなかった場合は `selected: none` |
+| `ron safe[n kind]` | その target にその牌でロンされないと言えるか |
+| `safe against all threats` | 全 target に対してロン安全か。target が0人なら `no` |
+| `honor safety` | 字牌の見え枚数による安全度。既存 Defense と同じ4段階 |
+| `opponent honor value` | まだロンされ得る target に対する役牌価値のうち最も危険な評価 |
+| `wall` / `suji safety[n]` / `suji safety` / `suited safety` | 壁・target ごとのスジ・その集約・数牌 safety |
+| `category` | `SafeAgainstAllThreats` → `HonorSafety` → `SuitedSafety` の大分類 |
+
+ロン安全の根拠は target の種類ごとに違います。リーチ者は既存の現物判定 (本人の河 + `post_reach_passed`) を使い、`High` の副露相手は本人の河だけを使います。`post_reach_passed` はリーチ固有の情報なので、副露相手には絶対に流用しません。上の例の `9m` は `post_reach_passed[1]` にあるためリーチ者には通りますが、player 3 の河には無いので `safe against all threats: no` になります。
+
+第一分類の `SafeAgainstAllThreats` は、リーチ現物と副露相手本人の河が混ざった集合です。根拠が違うので、既存の `Genbutsu` (リーチ者向け) や `DiscardedByAllTargets` (副露相手向け) とは別の名前にしています。
+
+字牌の見え枚数・役牌価値・壁・スジは既存 Defense と同じ判定を共有し、複合 threat 用に別実装を持ちません。target ごとに評価が変わる `opponent honor value` / `suji safety` / `suited safety` は、その牌でまだロンされ得る target だけを集約します。`ron safe[n kind]: yes` の相手はその牌でロンできないため、その相手の無スジや役牌価値を全体の危険度に持ち込みません。全 target がロン安全な牌は集約対象が0人になりますが、`suji safety` を `Suji` とは扱わず、安全根拠は `category: SafeAgainstAllThreats` が表します。壁は見え牌由来で target に依らないため、既存の `wall_rank` をそのまま共有します。
+
+押し引きが `Fold` になった場合は、この safety から `SafeAgainstAllThreats` → `HonorSafety` → `SuitedSafety` の順で fallback を選び、通常打牌より優先します。字牌は既存 Defense と同じ見え枚数の安全度で並べ、同じ rank 内は `opponent honor value` の切りやすい順 (`GuestWind` → `SingleValueHonor` → `DoubleWind`) にします。数牌は既存 Defense と同じ `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で、`NoSafety` しか無い場合は fallback として選びません。fallback を1件も選べない場合だけ通常打牌に戻ります。同じ牌種の赤5 / 黒5では既存どおり黒5を優先します。
+
+選択そのものは production の selector が source of truth で、この section はその結果を `selected` に写すだけです。`act()` と `diagnose()` は同じ selector を共有するため、`Final decision` の `action` と `selected action` は必ず一致します。`Neutral` では順序を変えないため、複合 threat でも安全牌が通常打牌より優先されることはありません。
 
 出力の最後には `Summary` を表示します。詳細出力が長くても、ターミナル最下部だけで最終選択と次点候補を確認できます。
 
@@ -649,6 +718,8 @@ diff \
 各 scenario の `open hand threat` は、副露なしが `None`、1副露が `Present`、`open_hand_value_pon_and_chi.json` / `open_hand_dora_melds.json` / 3副露の各 scenario が `High` になります。`open_hand_two_melds_nine_discards.json` と `open_hand_chi_twelve_discards.json` だけは相手の河が進んでおり、局進行の threshold で `High` になります。他の scenario は相手の河が空なので、局進行の threshold は `High` の理由になりません。
 
 `High` の scenario では `OpenHand defense` に target と合法 Dahai ごとの safety が出ます。`Present` / `None` だけの scenario は `targets: none` です。`open_hand_defense.json` は、`High` の相手が2人・`Present` の相手が1人いる局面で、本人の河・字牌 safety・壁・スジの出方をまとめて見るための fixture です。
+
+`combined_threat_defense.json` は、player 1 がリーチ・player 3 が3副露の `High`・player 2 が `Present` という複合 threat の fixture です。`Combined defense` で target の種類ごとのロン安全・集約・大分類を見比べられます。リーチ者にだけ通る `post_reach_passed` の牌 (`9m`) と、両方の河にある牌 (`5m`) の違いもこの fixture で確認できます。
 
 押し引きは `High` の scenario でだけ分かれます。テンパイの scenario 群は `TenpaiAgainstHighOpenHand` → `Push`、強い一向聴は `StrongIishantenAgainstHighOpenHand` → `Neutral`、弱い一向聴は `IishantenAgainstHighOpenHand` → `Fold`、二向聴の `open_hand_weak_*.json` は `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` です。`Present` / `None` だけの scenario はどれも従来どおり `NoOpponentReach` → `Push` になります。
 

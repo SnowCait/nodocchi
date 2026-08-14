@@ -33,8 +33,9 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// 打牌後の concealed hand の簡易打点 proxy は `PushPullInputs` とログに保持し、一向聴だけを
 /// 対象にした限定補正で使用する。それ以外の branch では判定に影響しない。
 ///
-/// 相手の危険度は、他家リーチがある局面ではリーチ情報だけ、他家リーチが0人の局面では
-/// `OpenHandThreat` の classification だけを見る。両者を1つの危険度へ集約することはまだしない。
+/// 相手の危険度は、リーチ者と `High` の副露相手が同時にいる複合 threat、他家リーチだけの局面、
+/// 他家リーチが0人で `OpenHandThreat` だけの局面の3通りに分けて見る。複合 threat は単独リーチ
+/// より強い pressure として扱い、それ以外は従来どおり片方の情報だけを使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -217,13 +218,24 @@ impl PushPullInputs {
     pub fn has_high_open_hand_threat(&self) -> bool {
         has_high_open_hand_threat(&self.open_hand_threats)
     }
+
+    /// リーチ者と High OpenHandThreat の相手が同時にいる複合 threat の局面か。
+    ///
+    /// 条件は `opponent_reach_count >= 1` かつ [`Self::has_high_open_hand_threat`]。
+    /// [`OpenHandThreatLevel::Present`](crate::open_hand_threat::OpenHandThreatLevel::Present) の
+    /// 相手は複合 threat に含めない。High 条件は PR の classification が source of truth で、
+    /// ここで書き直さない。
+    pub fn has_combined_threat(&self) -> bool {
+        self.opponent_reach_count >= 1 && self.has_high_open_hand_threat()
+    }
 }
 
 /// 押し引き判定がどの条件で下されたかを表す理由。
 ///
-/// `*AgainstSingleNonDealer` / `*UnderHighPressure` / `TwoOrMoreShanten` は他家リーチがある局面の
-/// 既存 reason。`*AgainstHighOpenHand` は他家リーチが0人で High OpenHandThreat の相手がいる
-/// 局面の reason で、両者が混ざることはない。
+/// `*AgainstSingleNonDealer` / `*UnderHighPressure` / `TwoOrMoreShanten` は他家リーチだけがある
+/// 局面の既存 reason。`*AgainstHighOpenHand` は他家リーチが0人で High OpenHandThreat の相手が
+/// いる局面の reason。`*AgainstCombinedThreat` は両者が同時にいる複合 threat 局面の reason で、
+/// 3種類が混ざることはない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullReason {
     NoOpponentReach,
@@ -244,6 +256,10 @@ pub enum PushPullReason {
     HighValueIishantenAgainstHighOpenHand,
     IishantenAgainstHighOpenHand,
     TwoOrMoreShantenAgainstHighOpenHand,
+    MissingOffenseAgainstCombinedThreat,
+    TenpaiAgainstCombinedThreat,
+    IishantenAgainstCombinedThreat,
+    TwoOrMoreShantenAgainstCombinedThreat,
 }
 
 /// 押し引き判定の結果。
@@ -459,6 +475,49 @@ fn decide_against_open_hand_threats(inputs: &PushPullInputs) -> PushPullDecision
     }
 }
 
+/// リーチ者と High OpenHandThreat の相手が同時にいる複合 threat 局面の押し引き。
+///
+/// 単独の子リーチより強い pressure として扱い、テンパイでも押さない。ただし情報不足やテンパイ
+/// から即 Fold にもしない。
+///
+/// - 攻撃評価なし: `Neutral`
+/// - テンパイ (向聴 <= 0): `Neutral`。Reach は抑制されるが通常打牌は維持する。
+/// - 一向聴: `Fold`
+/// - 二向聴以上: `Fold`
+///
+/// 一向聴では、単独の子リーチや High OpenHandThreat 単独に対する限定補正 (強い一向聴 / 完全
+/// 一向聴 / 自分が親 / 簡易高打点) を適用しない。それらは片方だけの threat に対する補正として
+/// 維持し、複合 threat には持ち込まない。
+fn decide_against_combined_threat(inputs: &PushPullInputs) -> PushPullDecision {
+    // 攻撃評価が無ければ、情報不足を理由に強制 Fold にはせず Neutral に留める。
+    let Some(offense) = inputs.offense else {
+        return PushPullDecision {
+            mode: PushPullMode::Neutral,
+            reason: PushPullReason::MissingOffenseAgainstCombinedThreat,
+        };
+    };
+
+    // テンパイ相当(向聴 <= 0)。単独の子リーチなら Push だが、複合 threat では押さない。
+    if offense.min_shanten_after_discard <= 0 {
+        return PushPullDecision {
+            mode: PushPullMode::Neutral,
+            reason: PushPullReason::TenpaiAgainstCombinedThreat,
+        };
+    }
+
+    if offense.min_shanten_after_discard == 1 {
+        return PushPullDecision {
+            mode: PushPullMode::Fold,
+            reason: PushPullReason::IishantenAgainstCombinedThreat,
+        };
+    }
+
+    PushPullDecision {
+        mode: PushPullMode::Fold,
+        reason: PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
+    }
+}
+
 /// 押し引きを判定する pure な暫定 helper。
 ///
 /// これは最初の保守的な土台であり、以下を考慮していない。
@@ -476,24 +535,31 @@ fn decide_against_open_hand_threats(inputs: &PushPullInputs) -> PushPullDecision
 /// 複数リーチ・二向聴以上・自分が親の場合は従来どおり proxy を見ない。
 /// この判定結果は `ShantenAgent` の action 選択に反映される。
 ///
-/// 他家リーチがある局面では従来どおりリーチ由来の policy だけを使う。他家リーチが0人の局面
-/// だけが `PushPullInputs::open_hand_threats` を見る新しい policy の対象で、High の相手が1人以上
-/// いる場合に押し引きを分ける ([`decide_against_open_hand_threats`])。`Present` の相手は行動を
-/// 変えない。
+/// 判定順は 複合 threat → リーチのみ → 非リーチ副露相手のみ。リーチ者と High の副露相手が
+/// 同時にいる局面だけを先に複合 policy ([`decide_against_combined_threat`]) で判定し、リーチだけ
+/// の局面と副露相手だけの局面は既存の分岐をそのまま通す。
 ///
-/// リーチ者と High の副露相手が同時にいる局面は、今回もリーチ policy をそのまま使う。
-/// `RiichiThreat` と `OpenHandThreat` を1つの危険度へ集約する判定は未対応。
+/// 他家リーチがある局面では従来どおりリーチ由来の policy だけを使う。他家リーチが0人の局面
+/// だけが `PushPullInputs::open_hand_threats` を見る policy の対象で、High の相手が1人以上
+/// いる場合に押し引きを分ける ([`decide_against_open_hand_threats`])。`Present` の相手は行動を
+/// 変えず、複合 threat にも含めない。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
 /// - `Neutral`: 通常打牌 → 防御 fallback(Reach は抑制)
 /// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
 pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
-    // 1. 他家リーチがなければ、非リーチ副露相手の classification だけで判定する。
+    // 1. リーチ者と High の副露相手が同時にいる複合 threat。単独リーチより強い pressure として
+    //    扱うため、リーチ policy より先に判定する。
+    if inputs.has_combined_threat() {
+        return decide_against_combined_threat(inputs);
+    }
+
+    // 2. 他家リーチがなければ、非リーチ副露相手の classification だけで判定する。
     if inputs.opponent_reach_count == 0 {
         return decide_against_open_hand_threats(inputs);
     }
 
-    // 2. 攻撃評価が無ければ、情報不足を理由に強制 Fold にはせず Neutral に留める。
+    // 3. 攻撃評価が無ければ、情報不足を理由に強制 Fold にはせず Neutral に留める。
     let Some(offense) = inputs.offense else {
         return PushPullDecision {
             mode: PushPullMode::Neutral,
@@ -503,7 +569,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
 
     let single_non_dealer = inputs.opponent_reach_count == 1 && !inputs.dealer_reacher;
 
-    // 3. テンパイ相当(向聴 <= 0)。
+    // 4. テンパイ相当(向聴 <= 0)。
     if offense.min_shanten_after_discard <= 0 {
         if single_non_dealer {
             return PushPullDecision {
@@ -517,9 +583,9 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         };
     }
 
-    // 4. 一向聴。単独の子リーチかつ受け入れが暫定 threshold 以上の場合だけ強い一向聴。
+    // 5. 一向聴。単独の子リーチかつ受け入れが暫定 threshold 以上の場合だけ強い一向聴。
     if offense.min_shanten_after_discard == 1 {
-        // 4-1. 既存の強い一向聴 threshold。形にかかわらず従来どおり。
+        // 5-1. 既存の強い一向聴 threshold。形にかかわらず従来どおり。
         let strong = single_non_dealer && is_strong_iishanten(&offense);
         if strong {
             return PushPullDecision {
@@ -528,7 +594,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
             };
         }
 
-        // 4-2. 強い一向聴 threshold には届かないが、形が Complete で限定 threshold を満たす場合だけ Neutral。
+        // 5-2. 強い一向聴 threshold には届かないが、形が Complete で限定 threshold を満たす場合だけ Neutral。
         let complete = single_non_dealer && is_complete_iishanten(&offense);
         if complete {
             return PushPullDecision {
@@ -537,7 +603,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
             };
         }
 
-        // 4-3. 自分が親のときだけ、形を限定せずに限定 threshold を満たす場合だけ Neutral。
+        // 5-3. 自分が親のときだけ、形を限定せずに限定 threshold を満たす場合だけ Neutral。
         let dealer = single_non_dealer && is_dealer_iishanten(inputs, &offense);
         if dealer {
             return PushPullDecision {
@@ -546,7 +612,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
             };
         }
 
-        // 4-4. 子の自分が単独の子リーチを受け、簡易打点 proxy が限定 threshold 以上の場合だけ Neutral。
+        // 5-4. 子の自分が単独の子リーチを受け、簡易打点 proxy が限定 threshold 以上の場合だけ Neutral。
         // 受け入れ・形は限定せず、明確な高打点だけを対象にする。Push にはしない。
         let high_value = single_non_dealer && is_high_value_iishanten(inputs, &offense);
         if high_value {
@@ -562,7 +628,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         };
     }
 
-    // 5. 二向聴以上。
+    // 6. 二向聴以上。
     PushPullDecision {
         mode: PushPullMode::Fold,
         reason: PushPullReason::TwoOrMoreShanten,
@@ -596,6 +662,7 @@ pub(crate) fn log_push_pull_decision(
         dealer_reacher = inputs.dealer_reacher,
         self_dealer = inputs.self_dealer,
         high_open_hand_threat = inputs.has_high_open_hand_threat(),
+        combined_threat = inputs.has_combined_threat(),
         offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
         offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
         offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
@@ -2576,29 +2643,39 @@ mod tests {
     }
 
     #[test]
-    fn a_reached_opponent_keeps_the_existing_riichi_policy() {
-        // player 1 がリーチ、player 2 が3副露の High。押し引きは既存リーチ policy のまま。
+    fn a_reached_opponent_with_a_high_open_hand_uses_the_combined_policy() {
+        // player 1 がリーチ、player 2 が3副露の High。押し引きは複合 threat policy になる。
         let facts = open_meld_facts_of(2, 3, [false, true, false, false], Some(0));
         assert!(facts[1].reached);
         assert_eq!(facts[2].open_meld_count, 3);
 
-        let offenses = [
-            None,
-            Some(offense(0, 4, 1)),
-            Some(offense_with_shape(1, 8, 2, IishantenShape::Weak)),
-            Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
-            Some(offense_with_shape(1, 7, 2, IishantenShape::Weak)),
-            Some(offense(2, 20, 4)),
+        let cases = [
+            (None, PushPullReason::MissingOffenseAgainstCombinedThreat),
+            (
+                Some(offense(0, 4, 1)),
+                PushPullReason::TenpaiAgainstCombinedThreat,
+            ),
+            (
+                Some(offense_with_shape(1, 8, 2, IishantenShape::Weak)),
+                PushPullReason::IishantenAgainstCombinedThreat,
+            ),
+            (
+                Some(offense_with_shape(1, 6, 2, IishantenShape::Complete)),
+                PushPullReason::IishantenAgainstCombinedThreat,
+            ),
+            (
+                Some(offense(2, 20, 4)),
+                PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
+            ),
         ];
 
-        for offense in offenses {
+        for (offense, reason) in cases {
             for self_dealer in [false, true] {
                 let melded = inputs_with_threats(1, false, self_dealer, offense, facts);
-                let plain = inputs_with_dealer(1, false, self_dealer, offense);
-                assert!(melded.has_high_open_hand_threat());
+                assert!(melded.has_combined_threat());
                 assert_eq!(
-                    decide_push_pull(&melded),
-                    decide_push_pull(&plain),
+                    decide_push_pull(&melded).reason,
+                    reason,
                     "{offense:?} self_dealer={self_dealer}"
                 );
             }
@@ -2643,6 +2720,219 @@ mod tests {
         assert_eq!(
             inputs.open_hand_threats,
             classify_open_hand_threats(&inputs.player_threats)
+        );
+    }
+
+    // ---- RiichiThreat + High OpenHandThreat の複合 threat に対する押し引き ----
+
+    // player 1 がリーチ、player 2 が3副露で High になる facts。
+    fn combined_threat_facts() -> [PlayerThreatFacts; 4] {
+        open_meld_facts_of(2, 3, [false, true, false, false], Some(0))
+    }
+
+    // player 1 と player 3 がリーチ、player 2 が3副露で High になる facts。
+    fn multiple_reach_combined_threat_facts() -> [PlayerThreatFacts; 4] {
+        open_meld_facts_of(2, 3, [false, true, false, true], Some(0))
+    }
+
+    // 子リーチ1人 + High の副露相手1人。
+    fn combined_threat_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
+        inputs_with_threats(1, false, false, offense, combined_threat_facts())
+    }
+
+    fn assert_combined_threat_decision(
+        inputs: &PushPullInputs,
+        mode: PushPullMode,
+        reason: PushPullReason,
+    ) {
+        assert!(inputs.has_combined_threat());
+        let decision = decide_push_pull(inputs);
+        assert_eq!(decision.mode, mode, "{:?}", inputs.offense);
+        assert_eq!(decision.reason, reason, "{:?}", inputs.offense);
+    }
+
+    #[test]
+    fn a_riichi_with_a_high_open_hand_is_a_combined_threat() {
+        // リーチ者と High の副露相手が同時にいる場合だけ複合 threat。
+        let facts = combined_threat_facts();
+        assert_eq!(reached_opponent_count(&facts), 1);
+
+        let combined = inputs_with_threats(1, false, false, Some(offense(0, 4, 1)), facts);
+        assert!(combined.has_combined_threat());
+
+        // リーチ者だけ、High の副露相手だけの局面は複合 threat にしない。
+        let riichi_only = inputs(1, false, Some(offense(0, 4, 1)));
+        assert!(!riichi_only.has_combined_threat());
+        let open_hand_only = high_open_hand_inputs(Some(offense(0, 4, 1)));
+        assert!(!open_hand_only.has_combined_threat());
+    }
+
+    #[test]
+    fn a_present_open_hand_with_a_riichi_is_not_a_combined_threat() {
+        // Present の副露相手は複合 threat に含めない。既存のリーチ policy のまま。
+        let facts = open_meld_facts_of(2, 1, [false, true, false, false], Some(0));
+        let inputs = inputs_with_threats(1, false, false, Some(offense(0, 4, 1)), facts);
+
+        assert!(!inputs.has_high_open_hand_threat());
+        assert!(!inputs.has_combined_threat());
+
+        let decision = decide_push_pull(&inputs);
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::TenpaiAgainstSingleNonDealer
+        );
+    }
+
+    #[test]
+    fn missing_offense_against_a_combined_threat_is_neutral() {
+        // 情報不足を理由に強制 Fold にはしない。
+        assert_combined_threat_decision(
+            &combined_threat_inputs(None),
+            PushPullMode::Neutral,
+            PushPullReason::MissingOffenseAgainstCombinedThreat,
+        );
+    }
+
+    #[test]
+    fn tenpai_against_a_combined_threat_is_neutral() {
+        // 単独の子リーチだけなら Push だが、複合 threat では押さない。即 Fold にもしない。
+        for shanten in [0, -1] {
+            assert_combined_threat_decision(
+                &combined_threat_inputs(Some(offense(shanten, 8, 2))),
+                PushPullMode::Neutral,
+                PushPullReason::TenpaiAgainstCombinedThreat,
+            );
+        }
+    }
+
+    #[test]
+    fn tenpai_against_a_dealer_reach_with_a_high_open_hand_is_neutral() {
+        assert_combined_threat_decision(
+            &inputs_with_threats(
+                1,
+                true,
+                false,
+                Some(offense(0, 4, 1)),
+                combined_threat_facts(),
+            ),
+            PushPullMode::Neutral,
+            PushPullReason::TenpaiAgainstCombinedThreat,
+        );
+    }
+
+    #[test]
+    fn tenpai_against_multiple_reach_with_a_high_open_hand_is_neutral() {
+        let facts = multiple_reach_combined_threat_facts();
+        assert_eq!(reached_opponent_count(&facts), 2);
+
+        assert_combined_threat_decision(
+            &inputs_with_threats(2, false, false, Some(offense(0, 4, 1)), facts),
+            PushPullMode::Neutral,
+            PushPullReason::TenpaiAgainstCombinedThreat,
+        );
+    }
+
+    #[test]
+    fn iishanten_against_a_combined_threat_folds() {
+        // 単独の子リーチや High 単独に対する一向聴の限定補正は複合 threat へ持ち込まない。
+        let strong = offense(1, 8, 2);
+        let complete = offense_with_shape(1, 6, 2, IishantenShape::Complete);
+        let high_value = offense_with_shape_and_proxy(
+            1,
+            4,
+            1,
+            IishantenShape::Unknown,
+            HIGH_VALUE_IISHANTEN_MIN_SIMPLE_VALUE_PROXY,
+            0,
+            0,
+        );
+        let weak = offense(1, 4, 1);
+
+        for offense in [strong, complete, high_value, weak] {
+            assert_combined_threat_decision(
+                &combined_threat_inputs(Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstCombinedThreat,
+            );
+        }
+
+        // 自分が親の一向聴も同じ。
+        assert_combined_threat_decision(
+            &inputs_with_threats(
+                1,
+                false,
+                true,
+                Some(offense(1, DEALER_IISHANTEN_MIN_REMAINING, 2)),
+                combined_threat_facts(),
+            ),
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstCombinedThreat,
+        );
+    }
+
+    #[test]
+    fn two_or_more_shanten_against_a_combined_threat_folds() {
+        for shanten in [2, 3] {
+            assert_combined_threat_decision(
+                &combined_threat_inputs(Some(offense(shanten, 30, 6))),
+                PushPullMode::Fold,
+                PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
+            );
+        }
+    }
+
+    #[test]
+    fn the_combined_policy_is_decided_before_the_riichi_policy() {
+        // 同じ offense でも、複合 threat は単独リーチより強い pressure として扱う。
+        let offense = offense(1, 8, 2);
+        let riichi_only = decide_push_pull(&inputs(1, false, Some(offense)));
+        assert_eq!(riichi_only.mode, PushPullMode::Neutral);
+        assert_eq!(
+            riichi_only.reason,
+            PushPullReason::StrongIishantenAgainstSingleNonDealer
+        );
+
+        assert_combined_threat_decision(
+            &combined_threat_inputs(Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstCombinedThreat,
+        );
+    }
+
+    #[test]
+    fn the_riichi_only_and_open_hand_only_policies_are_unchanged() {
+        // 複合 threat 以外の局面は既存 policy の判定結果をそのまま維持する。
+        let offense = Some(offense(0, 4, 1));
+
+        let riichi_only = decide_push_pull(&inputs(1, false, offense));
+        assert_eq!(riichi_only.mode, PushPullMode::Push);
+        assert_eq!(
+            riichi_only.reason,
+            PushPullReason::TenpaiAgainstSingleNonDealer
+        );
+
+        let open_hand_only = decide_push_pull(&high_open_hand_inputs(offense));
+        assert_eq!(open_hand_only.mode, PushPullMode::Push);
+        assert_eq!(
+            open_hand_only.reason,
+            PushPullReason::TenpaiAgainstHighOpenHand
+        );
+
+        let no_threat = decide_push_pull(&inputs(0, false, offense));
+        assert_eq!(no_threat.mode, PushPullMode::Push);
+        assert_eq!(no_threat.reason, PushPullReason::NoOpponentReach);
+    }
+
+    #[test]
+    fn the_combined_threat_is_derived_from_the_shared_classification() {
+        // 複合 threat の判定は既存のリーチ情報と classification をそのまま使う。
+        let inputs = combined_threat_inputs(Some(offense(1, 8, 2)));
+
+        assert_eq!(
+            inputs.has_combined_threat(),
+            inputs.opponent_reach_count >= 1
+                && has_high_open_hand_threat(&inputs.open_hand_threats)
         );
     }
 }
