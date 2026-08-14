@@ -7,8 +7,9 @@
 //!
 //! `decide_push_pull()` は `High` の副露相手だけを新しい policy の対象にするため、`None` /
 //! `Present` の fixture は従来どおり `NoOpponentReach` → `Push`、`High` の fixture は自分の
-//! 攻撃状態で分かれる。テンパイの自分なら `TenpaiAgainstHighOpenHand` → `Push`、二向聴の自分
-//! なら `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
+//! 攻撃状態で分かれる。テンパイの自分なら `TenpaiAgainstHighOpenHand` → `Push`、一向聴の自分
+//! なら受け入れの強さにかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の自分なら
+//! `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
 
 use bot_core::{
     Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
@@ -631,11 +632,8 @@ fn expected_push_pull(entry: &CorpusScenario) -> (PushPullMode, PushPullReason) 
             PushPullMode::Push,
             PushPullReason::TenpaiAgainstHighOpenHand,
         ),
-        SelfHand::StrongIishanten => (
-            PushPullMode::Neutral,
-            PushPullReason::StrongIishantenAgainstHighOpenHand,
-        ),
-        SelfHand::WeakIishanten => (
+        // 一向聴は受け入れの強さにかかわらず Fold。
+        SelfHand::StrongIishanten | SelfHand::WeakIishanten => (
             PushPullMode::Fold,
             PushPullReason::IishantenAgainstHighOpenHand,
         ),
@@ -798,7 +796,7 @@ fn a_present_open_hand_threat_does_not_change_the_push_pull_decision() {
 
 #[test]
 fn the_folding_high_scenarios_select_the_open_hand_defense_fallback() {
-    // High + 弱い一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
+    // High + 一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
     let folding: Vec<CorpusScenario> = corpus()
         .into_iter()
         .filter(|entry| expected_push_pull(entry).0 == PushPullMode::Fold)

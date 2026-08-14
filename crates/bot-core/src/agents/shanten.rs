@@ -5159,13 +5159,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn neutral_against_a_high_open_hand_prefers_the_normal_discard() {
-        // 強い一向聴は Neutral。High の副露相手がいても安全牌を通常打牌より優先しない。
+    fn fold_against_a_high_open_hand_with_a_strong_iishanten_prefers_the_defense_fallback() {
+        // 強い一向聴でも High の副露相手には降りる。player 1 の河に 1m があるので、通常打牌より
+        // 本人の河の安全牌を優先する。
         let ctx = open_hand_context(
             &OPEN_HAND_IISHANTEN_HAND,
             Some(OPEN_HAND_FOLD_DRAWN),
             1,
-            [&[], &[33], &[], &[]],
+            [&[], &[1], &[], &[]],
             [false; 4],
             &[],
         );
@@ -5179,21 +5180,33 @@ pub(crate) mod tests {
         let decision = diagnostic
             .push_pull_decision
             .expect("押し引きを判定している");
-        assert_eq!(decision.mode, PushPullMode::Neutral);
+        let offense = diagnostic
+            .push_pull_inputs
+            .expect("押し引き入力がある")
+            .offense
+            .expect("offense がある");
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        assert!(offense.acceptance_total_remaining >= 8);
+        assert!(offense.acceptance_type_count >= 2);
+
+        assert_eq!(decision.mode, PushPullMode::Fold);
         assert_eq!(
             decision.reason,
-            PushPullReason::StrongIishantenAgainstHighOpenHand
+            PushPullReason::IishantenAgainstHighOpenHand
         );
 
         assert!(diagnostic.open_hand_defense.has_target());
-        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(diagnostic.selected_action, dahai(0));
         assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(
+                OpenHandDefenseCategory::DiscardedByAllTargets
+            )
+        );
+        assert_ne!(
             diagnostic.selected_action,
             diagnostic.normal_discard_action.clone().unwrap()
         );
-        assert_eq!(diagnostic.open_hand_defense.selected, None);
-        // Neutral ではリーチも検討しない。
-        assert!(diagnostic.reach.is_none());
     }
 
     #[test]

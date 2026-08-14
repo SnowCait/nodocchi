@@ -521,14 +521,12 @@ player 1
 | --- | --- | --- |
 | 攻撃評価を作れない | `Neutral` | `MissingOffenseAgainstHighOpenHand` |
 | テンパイ (向聴 <= 0) | `Push` | `TenpaiAgainstHighOpenHand` |
-| 一向聴 / 受け入れ8枚以上・2種類以上 | `Neutral` | `StrongIishantenAgainstHighOpenHand` |
-| 一向聴 / 完全形・受け入れ6枚以上・2種類以上 | `Neutral` | `CompleteIishantenAgainstHighOpenHand` |
-| 一向聴 / 自分が親・受け入れ7枚以上・2種類以上 | `Neutral` | `DealerIishantenAgainstHighOpenHand` |
-| 一向聴 / 自分が子・簡易打点 proxy 4以上 | `Neutral` | `HighValueIishantenAgainstHighOpenHand` |
-| 上記以外の一向聴 | `Fold` | `IishantenAgainstHighOpenHand` |
+| 一向聴 | `Fold` | `IishantenAgainstHighOpenHand` |
 | 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainstHighOpenHand` |
 
-一向聴の threshold は既存のリーチ policy と同じ pure helper を共有しており、リーチ局面の境界は変えていません。テンパイなら High の副露相手がいても押し、情報不足 (攻撃評価なし) を理由に強制 Fold にはしません。`Push` の場合は Reach → 通常打牌 → 防御 fallback、`Neutral` は通常打牌 → 防御 fallback という既存の順序をそのまま使うため、High というだけで安全牌を通常打牌より優先することはありません。安全牌を優先するのは `Fold` の場合だけです。
+一向聴では、単独の子リーチに対する限定補正 (強い一向聴・完全一向聴・自分が親・簡易高打点) を適用しません。受け入れが8枚以上あっても、形が完全一向聴でも、自分が親でも、簡易打点 proxy が高くても、`High` の副露相手に対しては降ります。これらの補正はリーチ policy 側だけで維持しており、リーチ局面の境界は変えていません。
+
+テンパイなら High の副露相手がいても押し、情報不足 (攻撃評価なし) を理由に強制 Fold にはしません。`Push` の場合は Reach → 通常打牌 → 防御 fallback という既存の順序をそのまま使うため、High というだけで安全牌を通常打牌より優先することはありません。安全牌を優先するのは `Fold` の場合だけです。
 
 `open hand threat: Present` の相手は行動を変えません。`High` の相手がいない局面は従来どおり `NoOpponentReach` → `Push` です。
 
@@ -607,7 +605,7 @@ target ごとに評価が変わる `opponent honor value` / `suji safety` / `sui
 
 単独の子リーチだけならテンパイは `Push` ですが、複合 threat では押しません。ただしテンパイから即 `Fold` にもせず `Neutral` に留め、リーチだけを抑制して通常打牌は維持します。情報不足 (攻撃評価なし) を理由に強制 `Fold` にもしません。
 
-一向聴では、単独の子リーチや `High` の副露相手単独に対する限定補正 (強い一向聴・完全一向聴・自分が親・簡易高打点) を適用しません。これらは片方だけの threat に対する補正として維持し、複合 threat には持ち込みません。
+一向聴では、単独の子リーチに対する限定補正 (強い一向聴・完全一向聴・自分が親・簡易高打点) を適用しません。これらは単独の子リーチに対する補正として維持し、複合 threat には持ち込みません。
 
 判定順は 複合 threat → リーチのみ → 非リーチ副露相手のみ です。リーチ者だけの局面、`High` の副露相手だけの局面、`Present` だけの局面、threat が無い局面の判定は変わりません。
 
@@ -708,10 +706,10 @@ diff \
 
 | scenario | 自分の手 | `High` のときの `Push/Pull` |
 | --- | --- | --- |
-| `open_hand_iishanten_baseline.json` / `open_hand_iishanten_three_melds.json` | 強い一向聴 (受け入れ8枚以上・2種類以上) | `Neutral` / `StrongIishantenAgainstHighOpenHand` |
+| `open_hand_iishanten_baseline.json` / `open_hand_iishanten_three_melds.json` | 強い一向聴 (受け入れ8枚以上・2種類以上) | `Fold` / `IishantenAgainstHighOpenHand` |
 | `open_hand_weak_iishanten_baseline.json` / `open_hand_weak_iishanten_three_melds.json` | 弱い一向聴 (受け入れ7枚・2種類) | `Fold` / `IishantenAgainstHighOpenHand` |
 
-弱い一向聴の組は `extra_visible_tiles` で受け入れ牌をほぼ見え牌にして、強い一向聴の threshold に届かない形へ固定しています。
+弱い一向聴の組は `extra_visible_tiles` で受け入れ牌をほぼ見え牌にして、強い一向聴の threshold に届かない形へ固定しています。`High` の副露相手に対しては受け入れの強さで押し引きが分かれないため、この2組は同じ `Fold` になります。リーチ policy 側の一向聴 threshold は別の scenario で確認します。
 
 副露牌は見え牌に加わるため受け入れが変わり得ますが、この scenario 群は相手の副露牌が自分の受け入れ牌種と重ならない局面に揃えてあるため、`Normal discard` と offense は一致します。
 
@@ -721,7 +719,7 @@ diff \
 
 `combined_threat_defense.json` は、player 1 がリーチ・player 3 が3副露の `High`・player 2 が `Present` という複合 threat の fixture です。`Combined defense` で target の種類ごとのロン安全・集約・大分類を見比べられます。リーチ者にだけ通る `post_reach_passed` の牌 (`9m`) と、両方の河にある牌 (`5m`) の違いもこの fixture で確認できます。
 
-押し引きは `High` の scenario でだけ分かれます。テンパイの scenario 群は `TenpaiAgainstHighOpenHand` → `Push`、強い一向聴は `StrongIishantenAgainstHighOpenHand` → `Neutral`、弱い一向聴は `IishantenAgainstHighOpenHand` → `Fold`、二向聴の `open_hand_weak_*.json` は `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` です。`Present` / `None` だけの scenario はどれも従来どおり `NoOpponentReach` → `Push` になります。
+押し引きは `High` の scenario でだけ分かれます。テンパイの scenario 群は `TenpaiAgainstHighOpenHand` → `Push`、一向聴は強弱にかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の `open_hand_weak_*.json` は `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` です。`Present` / `None` だけの scenario はどれも従来どおり `NoOpponentReach` → `Push` になります。
 
 `Fold` になる scenario では、`Final decision` の `source` が `OpenHandDefenseFallback` になり、通常打牌より OpenHand 防御 fallback が優先されます。`open_hand_defense.json` は本人の河 (`DiscardedByAllTargets`)、`open_hand_weak_iishanten_three_melds.json` は字牌 (`HonorSafety`) が選ばれる例です。
 

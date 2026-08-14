@@ -348,12 +348,12 @@ mod tests {
         assert_eq!(facts.is_opponent(), Some(true));
         assert_eq!(facts.value_honor_melds.dragon, 1);
 
-        // 役牌入り2副露の非リーチ相手は High。自分は強い一向聴なので Neutral に留める。
+        // 役牌入り2副露の非リーチ相手は High。自分は強い一向聴でも押さずに降りる。
         let decision = diagnostic.push_pull_decision.unwrap();
-        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(decision.mode, PushPullMode::Fold);
         assert_eq!(
             decision.reason,
-            PushPullReason::StrongIishantenAgainstHighOpenHand
+            PushPullReason::IishantenAgainstHighOpenHand
         );
     }
 
