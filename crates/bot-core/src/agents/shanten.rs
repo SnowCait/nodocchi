@@ -1,5 +1,9 @@
 use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::agent::Agent;
+use crate::combined_defense::{
+    CombinedDefenseCategory, CombinedDefenseDiagnostic, combined_threat_defense_targets,
+    select_combined_threat_defense_fallback_action_with_kind,
+};
 use crate::context::GameContext;
 use crate::defense::{
     DefenseDecisionDiagnostic, DefenseFallbackKind, log_defense_fallback_decision,
@@ -48,10 +52,12 @@ const PON_CONSUMED_TILE_COUNT: usize = 2;
 ///
 /// `ShantenAgent::act()` が実際に通った経路そのものであり、診断用の別判断ロジックではない。
 ///
-/// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`] と、非リーチ副露相手向けの
-/// [`Self::OpenHandDefenseFallback`] を別の経路として区別する。リーチ者向けの現物
-/// ([`DefenseFallbackKind::Genbutsu`]) と全 target 本人の河
-/// ([`OpenHandDefenseCategory::DiscardedByAllTargets`]) は根拠が違うため、同じ種別へ押し込まない。
+/// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`]、非リーチ副露相手向けの
+/// [`Self::OpenHandDefenseFallback`]、両者が同時にいる複合 threat 向けの
+/// [`Self::CombinedThreatDefenseFallback`] を別の経路として区別する。リーチ者向けの現物
+/// ([`DefenseFallbackKind::Genbutsu`])、全 target 本人の河
+/// ([`OpenHandDefenseCategory::DiscardedByAllTargets`])、全 threat へのロン安全
+/// ([`CombinedDefenseCategory::SafeAgainstAllThreats`]) は根拠が違うため、同じ種別へ押し込まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentActionSource {
     Hora,
@@ -61,6 +67,7 @@ pub enum AgentActionSource {
     NormalDiscard,
     DefenseFallback(DefenseFallbackKind),
     OpenHandDefenseFallback(OpenHandDefenseCategory),
+    CombinedThreatDefenseFallback(CombinedDefenseCategory),
     LegalDahaiFallback,
     None,
 }
@@ -76,6 +83,7 @@ impl AgentActionSource {
             AgentActionSource::NormalDiscard => "NormalDiscard",
             AgentActionSource::DefenseFallback(_) => "DefenseFallback",
             AgentActionSource::OpenHandDefenseFallback(_) => "OpenHandDefenseFallback",
+            AgentActionSource::CombinedThreatDefenseFallback(_) => "CombinedThreatDefenseFallback",
             AgentActionSource::LegalDahaiFallback => "LegalDahaiFallback",
             AgentActionSource::None => "None",
         }
@@ -94,6 +102,14 @@ impl AgentActionSource {
     pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
         match self {
             AgentActionSource::OpenHandDefenseFallback(category) => Some(*category),
+            _ => None,
+        }
+    }
+
+    /// 複合 threat 向けの防御 fallback 経路で選ばれた場合のその大分類。他の経路では `None`。
+    pub fn combined_defense_category(&self) -> Option<CombinedDefenseCategory> {
+        match self {
+            AgentActionSource::CombinedThreatDefenseFallback(category) => Some(*category),
             _ => None,
         }
     }
@@ -366,6 +382,17 @@ pub struct ShantenDecisionDiagnostic {
     /// 実際に採用した OpenHand 防御 fallback で、診断側で選び直さない。採用しなかった局面では
     /// `None` になり、候補評価だけが解析用に残る。
     pub open_hand_defense: OpenHandDefenseDiagnostic,
+    /// リーチ者と `High` OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety の診断。
+    ///
+    /// target はリーチ情報と `player_threats` が持つ classification をそのまま source of truth に
+    /// して選ぶ。複合 threat ではない局面 (リーチ者だけ / `High` の相手だけ / threat なし) では
+    /// `targets` も `candidates` も空になり、防御は既存の [`Self::defense`] /
+    /// [`Self::open_hand_defense`] が担当する。
+    ///
+    /// target ごとに「ロン安全」の根拠が違い、リーチ者は現物 (本人の河 + post_reach_passed)、
+    /// `High` の副露相手は本人の河だけを使う。`selected` は `act()` が実際に採用した複合 threat 用
+    /// の防御 fallback で、診断側で選び直さない。
+    pub combined_defense: CombinedDefenseDiagnostic,
 }
 
 impl ShantenDecisionDiagnostic {
@@ -378,6 +405,11 @@ impl ShantenDecisionDiagnostic {
     /// 他の経路では `None`。
     pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
         self.selected_source.open_hand_defense_category()
+    }
+
+    /// 最終 action が複合 threat 向けの防御 fallback 由来の場合のその大分類。他の経路では `None`。
+    pub fn combined_defense_category(&self) -> Option<CombinedDefenseCategory> {
+        self.selected_source.combined_defense_category()
     }
 }
 
@@ -513,6 +545,19 @@ impl ShantenAgent {
                 .map(|category| (&decision.action, category)),
         );
 
+        // 複合 threat の target も同じ facts と classification から作り、リーチ者も High の相手も
+        // 判定し直さない。採用された防御 fallback は act() が通った経路そのもの。
+        let combined_defense = CombinedDefenseDiagnostic::from_threats(
+            context,
+            legal_actions,
+            &player_threat_facts,
+            &open_hand_threats,
+            decision
+                .source
+                .combined_defense_category()
+                .map(|category| (&decision.action, category)),
+        );
+
         ShantenDecisionDiagnostic {
             selected_action: decision.action,
             selected_source: decision.source,
@@ -528,6 +573,7 @@ impl ShantenAgent {
             own_fixed_meld_count: context.own_fixed_meld_count(),
             player_threats,
             open_hand_defense,
+            combined_defense,
         }
     }
 
@@ -739,9 +785,14 @@ impl ShantenAgent {
         }
     }
 
-    // Fold 時の防御 fallback。他家リーチがいる局面は従来どおりリーチ者向けの防御 fallback を
-    // 使い、他家リーチが0人で High OpenHandThreat の相手だけがいる局面は OpenHand 防御
-    // fallback を使う。両者の safety を1つに集約することはしない。
+    // Fold 時の防御 fallback。threat の組み合わせごとに経路を分ける。
+    //
+    // - リーチ者 + High OpenHandThreat: 複合 threat 用の防御 fallback。全 threat に対する safety を
+    //   集約する。
+    // - リーチ者だけ: 従来どおりリーチ者向けの防御 fallback。
+    // - High OpenHandThreat だけ: OpenHand 防御 fallback。
+    //
+    // 複合 threat 以外では safety の集約対象を変えないので、既存局面の選択結果は変わらない。
     fn select_fold_defense(
         &self,
         ctx: &GameContext,
@@ -749,10 +800,33 @@ impl ShantenAgent {
         inputs: &PushPullInputs,
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
+        if inputs.has_combined_threat() {
+            return self.select_combined_threat_defense_fallback(ctx, legal_actions, inputs);
+        }
         if inputs.opponent_reach_count > 0 {
             return self.select_defense_fallback(ctx, legal_actions, diagnostics);
         }
         self.select_open_hand_defense_fallback(ctx, legal_actions, inputs)
+    }
+
+    // リーチ者と High OpenHandThreat の相手が同時にいる局面の防御 fallback。target は押し引き
+    // 入力が持つ facts と classification をそのまま使い、リーチ者も High の相手も判定し直さない。
+    // 選択は production selector が source of truth で、通常 act() では候補ごとの構造化診断を
+    // 構築しない。
+    fn select_combined_threat_defense_fallback(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        inputs: &PushPullInputs,
+    ) -> Option<(LegalAction, AgentActionSource)> {
+        let targets =
+            combined_threat_defense_targets(&inputs.player_threats, &inputs.open_hand_threats);
+        let (action, category) =
+            select_combined_threat_defense_fallback_action_with_kind(ctx, legal_actions, &targets)?;
+        Some((
+            action.clone(),
+            AgentActionSource::CombinedThreatDefenseFallback(category),
+        ))
     }
 
     // High OpenHandThreat の相手に対する防御 fallback。target は押し引き入力が持つ
@@ -1009,6 +1083,10 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(category) => format!("{category:?}"),
         None => "None".to_string(),
     };
+    let combined_defense_category = match decision.source.combined_defense_category() {
+        Some(category) => format!("{category:?}"),
+        None => "None".to_string(),
+    };
     let pon_reason = match &decision.pon {
         Some(pon) => format!("{:?}", pon.reason),
         None => "None".to_string(),
@@ -1028,6 +1106,7 @@ fn log_agent_decision(decision: &AgentDecision) {
         reach_reason = %reach_reason,
         defense_kind = %defense_kind,
         open_hand_defense_category = %open_hand_defense_category,
+        combined_defense_category = %combined_defense_category,
         pon_reason = %pon_reason,
         "agent decision",
     );
@@ -1105,6 +1184,9 @@ impl Agent for ShantenAgent {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::combined_defense::{
+        ThreatDefenseTarget, combined_threat_defense_targets_from_context,
+    };
     use crate::defense::{HonorSafetyRank, SuitedSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{
@@ -5154,13 +5236,186 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_reached_opponent_keeps_the_existing_defense_fallback() {
-        // player 1 がリーチ、player 2 が High の副露相手。防御は既存のリーチ者向け fallback のまま。
-        let ctx = open_hand_context(
+    // ---- RiichiThreat + High OpenHandThreat の複合 threat に対する action 選択 ----
+
+    // 弱い一向聴 + player 1 がリーチ + player 2 が High の副露相手。
+    fn combined_threat_fold_context(
+        riichi_discards: &[u8],
+        open_hand_discards: &[u8],
+    ) -> GameContext {
+        open_hand_context(
             &OPEN_HAND_FOLD_HAND,
             Some(OPEN_HAND_FOLD_DRAWN),
             2,
+            [&[], riichi_discards, open_hand_discards, &[]],
+            [false, true, false, false],
+            &OPEN_HAND_FOLD_DEAD,
+        )
+    }
+
+    #[test]
+    fn fold_against_a_combined_threat_prefers_a_tile_safe_against_all_threats() {
+        // 9m はリーチ者の現物でも副露相手の河にもある。両方に通る牌を最優先する。
+        let ctx = combined_threat_fold_context(&[33], &[33]);
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(
+            decision.reason,
+            PushPullReason::IishantenAgainstCombinedThreat
+        );
+
+        assert_eq!(diagnostic.selected_action, dahai(32));
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::CombinedThreatDefenseFallback(
+                CombinedDefenseCategory::SafeAgainstAllThreats
+            )
+        );
+        assert_ne!(
+            diagnostic.selected_action,
+            diagnostic.normal_discard_action.clone().unwrap()
+        );
+
+        // 既存のリーチ者向け / OpenHand 向け防御 fallback には切り替えない。
+        assert!(diagnostic.defense.is_none());
+        assert_eq!(diagnostic.defense_fallback_kind(), None);
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
+        assert_eq!(diagnostic.open_hand_defense_category(), None);
+
+        // 診断は production selector の結果をそのまま写す。
+        let selection = diagnostic
+            .combined_defense
+            .selected
+            .as_ref()
+            .expect("複合 threat の防御 fallback を採用している");
+        assert_eq!(selection.selected_action, dahai(32));
+        assert_eq!(
+            selection.selected_category,
+            CombinedDefenseCategory::SafeAgainstAllThreats
+        );
+        assert_eq!(
+            diagnostic
+                .combined_defense
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.selected)
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<LegalAction>>(),
+            vec![dahai(32)]
+        );
+    }
+
+    #[test]
+    fn a_tile_safe_for_only_the_riichi_target_is_not_the_first_category() {
+        // 9m はリーチ者の現物だが副露相手の河には無いので、字牌 safety が選ばれる。
+        let ctx = combined_threat_fold_context(&[33], &[]);
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.selected_action, dahai(OPEN_HAND_FOLD_DRAWN));
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::CombinedThreatDefenseFallback(CombinedDefenseCategory::HonorSafety(
+                HonorSafetyRank::OneVisible
+            ))
+        );
+    }
+
+    #[test]
+    fn the_combined_defense_targets_both_threats() {
+        let ctx = combined_threat_fold_context(&[33], &[33]);
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.combined_defense.targets,
+            vec![
+                ThreatDefenseTarget::riichi(1),
+                ThreatDefenseTarget::high_open_hand(2),
+            ]
+        );
+        // OpenHand 診断の target は High の相手だけで、既存 semantics のまま。
+        assert_eq!(diagnostic.open_hand_defense.targets, vec![2]);
+    }
+
+    #[test]
+    fn fold_against_a_combined_threat_falls_back_to_the_normal_discard() {
+        // 安全牌候補が1件も無い場合だけ通常打牌に戻る。
+        let ctx = combined_threat_fold_context(&[], &[]);
+        let actions = vec![dahai(0), dahai(4)];
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(
+            diagnostic.selected_action,
+            diagnostic.normal_discard_action.clone().unwrap()
+        );
+        assert_eq!(diagnostic.combined_defense.selected, None);
+        assert!(
+            diagnostic
+                .combined_defense
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.selected)
+        );
+    }
+
+    #[test]
+    fn neutral_against_a_combined_threat_prefers_the_normal_discard() {
+        // 複合 threat のテンパイは Neutral。安全牌を通常打牌より優先せず、リーチも検討しない。
+        let ctx = open_hand_context(
+            &OPEN_HAND_TENPAI_HAND,
+            Some(OPEN_HAND_FOLD_DRAWN),
+            2,
+            [&[], &[33], &[33], &[]],
+            [false, true, false, false],
+            &[],
+        );
+        let mut actions = vec![LegalAction::Reach];
+        actions.extend(
+            OPEN_HAND_TENPAI_HAND
+                .iter()
+                .map(|&value| dahai(value))
+                .chain([dahai(OPEN_HAND_FOLD_DRAWN)]),
+        );
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きを判定している");
+        assert_eq!(decision.mode, PushPullMode::Neutral);
+        assert_eq!(decision.reason, PushPullReason::TenpaiAgainstCombinedThreat);
+
+        assert!(diagnostic.combined_defense.has_target());
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(
+            diagnostic.selected_action,
+            diagnostic.normal_discard_action.clone().unwrap()
+        );
+        assert_eq!(diagnostic.combined_defense.selected, None);
+        assert!(diagnostic.reach.is_none());
+    }
+
+    #[test]
+    fn a_riichi_without_a_high_open_hand_keeps_the_existing_defense_fallback() {
+        // player 1 がリーチで、副露相手は同じリーチ者だけ。既存のリーチ者向け fallback のまま。
+        let ctx = open_hand_context(
+            &OPEN_HAND_FOLD_HAND,
+            Some(OPEN_HAND_FOLD_DRAWN),
+            1,
             [&[], &[33], &[], &[]],
             [false, true, false, false],
             &OPEN_HAND_FOLD_DEAD,
@@ -5174,14 +5429,65 @@ pub(crate) mod tests {
         assert_eq!(decision.mode, PushPullMode::Fold);
         assert_eq!(decision.reason, PushPullReason::IishantenUnderHighPressure);
 
-        // High の副露相手はいるが、OpenHand 防御 fallback には切り替えない。
-        assert!(diagnostic.open_hand_defense.has_target());
-        assert_eq!(diagnostic.open_hand_defense.selected, None);
+        assert!(!diagnostic.combined_defense.has_target());
+        assert_eq!(diagnostic.combined_defense.selected, None);
+        assert!(diagnostic.combined_defense.candidates.is_empty());
         assert_eq!(diagnostic.selected_action, dahai(32));
         assert_eq!(
             diagnostic.selected_source,
             AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
         );
         assert!(diagnostic.defense.is_some());
+    }
+
+    #[test]
+    fn a_high_open_hand_without_a_riichi_keeps_the_open_hand_defense_fallback() {
+        // リーチ者がいない局面は既存の OpenHand 防御 fallback のまま。
+        let ctx = open_hand_fold_context(&[33], &[]);
+        let actions = open_hand_fold_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(
+            diagnostic
+                .push_pull_decision
+                .map(|decision| decision.reason),
+            Some(PushPullReason::IishantenAgainstHighOpenHand)
+        );
+        assert!(!diagnostic.combined_defense.has_target());
+        assert_eq!(diagnostic.combined_defense.selected, None);
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::OpenHandDefenseFallback(
+                OpenHandDefenseCategory::DiscardedByAllTargets
+            )
+        );
+    }
+
+    #[test]
+    fn the_combined_defense_selection_matches_act_and_every_diagnose_entry_point() {
+        // act() / diagnose() / 追加診断つき diagnose() の選択結果は必ず一致する。
+        let ctx = combined_threat_fold_context(&[33], &[33]);
+        let actions = open_hand_fold_actions();
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&ctx, &actions);
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let with_lookahead =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(with_lookahead.selected_source, diagnostic.selected_source);
+        assert_eq!(
+            with_lookahead.combined_defense, diagnostic.combined_defense,
+            "追加診断は選択結果を変えない"
+        );
+
+        // 診断は production selector を再実行せず、その結果を写す。
+        let targets = combined_threat_defense_targets_from_context(&ctx);
+        let selected =
+            select_combined_threat_defense_fallback_action_with_kind(&ctx, &actions, &targets);
+        let (action, category) = selected.expect("防御 fallback を選べる");
+        assert_eq!(acted, *action);
+        assert_eq!(diagnostic.combined_defense_category(), Some(category));
     }
 }

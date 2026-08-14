@@ -1,6 +1,7 @@
 pub mod action;
 pub mod agent;
 pub mod agents;
+pub mod combined_defense;
 pub mod context;
 pub mod defense;
 pub mod discard_selection;
@@ -17,6 +18,17 @@ pub use agents::{
     PonDecisionDiagnostic, PonDecisionReason, ReachDecisionDiagnostic, ReachDecisionReason,
     ShantenAgent, ShantenDecisionDiagnostic, TsumogiriAgent, diagnose_shanten_decision,
     diagnose_shanten_decision_with_options,
+};
+pub use combined_defense::{
+    CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, CombinedDefenseDiagnostic,
+    CombinedDefenseSelectionDiagnostic, CombinedDefenseTargetSafety, ThreatDefenseTarget,
+    ThreatDefenseTargetKind, combined_defense_category, combined_honor_dahai_actions_by_safety,
+    combined_suited_dahai_actions_by_safety, combined_threat_defense_targets,
+    combined_threat_defense_targets_from_context, combined_threat_defense_targets_from_facts,
+    is_ron_safe_for_target, is_safe_against_all_threats, opponent_honor_value_for_combined_threats,
+    safe_against_all_threats_dahai_actions, select_combined_threat_defense_fallback_action,
+    select_combined_threat_defense_fallback_action_with_kind,
+    suited_safety_rank_for_combined_threats, suji_safety_rank_for_combined_threats,
 };
 pub use context::{GameContext, seat_wind_for_player};
 pub use defense::{
