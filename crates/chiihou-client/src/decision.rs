@@ -739,6 +739,19 @@ mod tests {
     }
 
     #[test]
+    fn chiihou_snapshot_does_not_guess_history_furiten() {
+        let context = game_context_from_request_with_state(
+            &[pai("1m")],
+            None,
+            &ChiihouTableSnapshot::default(),
+        );
+        assert_eq!(
+            context.history_furiten(),
+            bot_logic::HistoryFuritenFacts::default()
+        );
+    }
+
+    #[test]
     fn game_context_holds_drawn_tile() {
         let context = game_context_from_sutehai_request(&[pai("1m")], Some(pai("7z")));
         assert_eq!(

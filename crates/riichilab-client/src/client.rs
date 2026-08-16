@@ -172,6 +172,7 @@ pub(crate) fn context_for_request(
         .map(game_context_from_decoded_observation)
         .unwrap_or_else(|| game_context_from_validation_state(state))
         .with_post_reach_passed_tiles(state.post_reach_passed_tiles().clone())
+        .with_history_furiten_facts(state.history_furiten())
 }
 
 /// 送信 action から `action sent` INFO ログ用のフィールドを抽出する pure helper。
@@ -426,6 +427,12 @@ where
 
                         let send_start = Instant::now();
                         ws_stream.send(Message::Text(json.into())).await?;
+                        state.on_action_response(
+                            possible_actions
+                                .iter()
+                                .any(|action| matches!(action, MjaiPossibleAction::Hora)),
+                            matches!(response, MjaiAction::Hora { .. }),
+                        );
                         let send_ms = send_start.elapsed().as_millis() as u64;
 
                         // INFO 無効時は診断値を一切構築しないよう、有効時だけ helper を呼ぶ。
@@ -810,6 +817,18 @@ mod tests {
         state.on_dahai(2, "4s");
         let context = context_for_request(&observation, &state, 8);
         assert!(context.post_reach_passed_tiles().iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn context_for_request_carries_history_furiten_from_event_state() {
+        let observation = ObservationPayload::new("not base64".to_string());
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_action_response(true, false);
+        let context = context_for_request(&observation, &state, 9);
+        assert_eq!(context.history_furiten().same_turn, Some(true));
+        assert_eq!(context.history_furiten().riichi_missed_win, Some(false));
     }
 
     #[test]

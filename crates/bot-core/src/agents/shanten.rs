@@ -339,6 +339,9 @@ pub struct ShantenDecisionDiagnostic {
     /// [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten::Unknown) になる。
     /// 打牌選択・押し引き・リーチ判断のどれにも使わない解析専用の情報。
     pub normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
+    /// 履歴依存フリテンの production facts。恒常フリテンとは別で、現時点では action 選択や
+    /// `TenpaiWaitAvailability::can_ron()` に使用しない。
+    pub history_furiten: bot_logic::HistoryFuritenFacts,
     /// 通常打牌評価を行った場合の全合法候補の詳細な2手先診断。`normal_discard` と同じ候補集合・
     /// 同じ順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
     ///
@@ -564,6 +567,7 @@ impl ShantenAgent {
             normal_discard_action: decision.normal_discard,
             normal_discard: diagnostics.normal_discard,
             normal_discard_furiten: diagnostics.normal_discard_furiten,
+            history_furiten: context.history_furiten(),
             normal_discard_lookahead: diagnostics.normal_discard_lookahead,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,

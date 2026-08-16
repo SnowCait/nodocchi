@@ -1,5 +1,5 @@
 use bot_core::{GameContext, LegalAction, Meld, MeldKind, TableStateFacts, seat_wind_for_player};
-use bot_logic::{TileId, TileType};
+use bot_logic::{HistoryFuritenFacts, TileId, TileType};
 use serde::Deserialize;
 
 use crate::error::ScenarioError;
@@ -48,6 +48,8 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub kyoku: Option<u8>,
     #[serde(default)]
+    pub history_furiten: Option<HistoryFuritenSpec>,
+    #[serde(default)]
     pub legal_dahai: Option<String>,
     #[serde(default)]
     pub legal_pon: Option<Vec<PonActionSpec>>,
@@ -59,6 +61,15 @@ pub struct ScenarioSpec {
     pub allow_ryukyoku: bool,
     #[serde(default)]
     pub allow_none: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryFuritenSpec {
+    #[serde(default)]
+    pub same_turn: Option<bool>,
+    #[serde(default)]
+    pub riichi_missed_win: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -184,13 +195,22 @@ impl Scenario {
             melds,
         )
         .with_post_reach_passed_tiles(post_reach_passed_tiles)
-        .with_table_state_facts(table_state);
+        .with_table_state_facts(table_state)
+        .with_history_furiten_facts(resolve_history_furiten_facts(spec));
 
         Ok(Self {
             context,
             legal_actions,
         })
     }
+}
+
+fn resolve_history_furiten_facts(spec: &ScenarioSpec) -> HistoryFuritenFacts {
+    spec.history_furiten
+        .map_or_else(HistoryFuritenFacts::default, |facts| HistoryFuritenFacts {
+            same_turn: facts.same_turn,
+            riichi_missed_win: facts.riichi_missed_win,
+        })
 }
 
 // 省略した field は unknown のままにし、0 や 25000 点などの初期値で補完しない。
@@ -2597,5 +2617,61 @@ mod tests {
             with_lookahead.defense_fallback_kind(),
             diagnostic.defense_fallback_kind()
         );
+    }
+
+    #[test]
+    fn history_furiten_json_distinguishes_true_false_and_unknown() {
+        let omitted = resolve(&spec_from_json(r#"{"hand":"123m"}"#));
+        assert_eq!(
+            omitted.context.history_furiten(),
+            HistoryFuritenFacts::default()
+        );
+
+        let explicit = resolve(&spec_from_json(
+            r#"{"hand":"123m","history_furiten":{"same_turn":true,"riichi_missed_win":false}}"#,
+        ));
+        assert_eq!(
+            explicit.context.history_furiten(),
+            HistoryFuritenFacts {
+                same_turn: Some(true),
+                riichi_missed_win: Some(false),
+            }
+        );
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand":"123m","history_furiten":{"same_turn":"yes"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand":"123m","history_furiten":{"temporary":true}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn history_furiten_does_not_change_selection_or_diagnostic_consistency() {
+        let base = resolve(&spec_from_json(MULTI_RIICHI_DOUBLE_WIND_SCENARIO));
+        let context = base
+            .context
+            .clone()
+            .with_history_furiten_facts(HistoryFuritenFacts {
+                same_turn: Some(true),
+                riichi_missed_win: Some(true),
+            });
+        let mut agent = ShantenAgent;
+        let action = agent.act(&context, &base.legal_actions);
+        let diagnostic = ShantenAgent::diagnose(&context, &base.legal_actions);
+        let lookahead = ShantenAgent::diagnose_with_options(
+            &context,
+            &base.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+        assert_eq!(action, diagnostic.selected_action);
+        assert_eq!(action, lookahead.selected_action);
+        assert_eq!(diagnostic.history_furiten, context.history_furiten());
+        assert_eq!(lookahead.history_furiten, context.history_furiten());
     }
 }

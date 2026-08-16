@@ -36,9 +36,9 @@ pub use discard::{
     shape_penalty_for_discard_with_fixed_melds_and_context,
 };
 pub use furiten::{
-    DiscardFuritenDiagnostic, OwnDiscards, PermanentFuriten, PermanentFuritenDiagnostic,
-    TenpaiWaitAvailability, diagnose_discard_furiten, discard_tenpai_wait_availability,
-    permanent_furiten_for_waits, tenpai_wait_availability,
+    DiscardFuritenDiagnostic, HistoryFuritenFacts, OwnDiscards, PermanentFuriten,
+    PermanentFuritenDiagnostic, TenpaiWaitAvailability, diagnose_discard_furiten,
+    discard_tenpai_wait_availability, permanent_furiten_for_waits, tenpai_wait_availability,
 };
 pub use hand::{Hand, HandError};
 pub use iishanten::{

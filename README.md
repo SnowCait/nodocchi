@@ -268,6 +268,10 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
   "reached": [false, true, false, false],
   "discards": ["", "1m 4m 7p E", "", ""],
   "post_reach_passed": ["", "", "", ""],
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  },
   "extra_visible_tiles": "",
   "legal_dahai": null,
   "allow_reach": false,
@@ -284,6 +288,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `reached` | 各 player のリーチ状態。要素数 4 |
 | `discards` | 各 player の河。入力順のまま扱う。要素数 4 |
 | `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数 4 |
+| `history_furiten` | 履歴依存フリテンの現在状態。`same_turn` / `riichi_missed_win` は省略時 unknown |
 | `melds` | 各 player の副露・暗槓。要素数 4。各面子は `kind` (`chi` / `pon` / `daiminkan` / `ankan` / `kakan`) と `tiles`、暗槓以外は鳴いた牌 `called_tile` を持つ |
 | `extra_visible_tiles` | 副露牌など、他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌とその順序 |
@@ -320,6 +325,8 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 現物は「対象リーチ者自身の河にある牌」と「そのリーチ成立後に他家から切られて通った牌」の両方です。後者は河から逆算できないため `post_reach_passed` で指定します。`post_reach_passed` は牌種だけを持つので、見え牌にも河にも影響しません。赤5は黒5と同じ牌種として扱います。
 
 `post_reach_passed` はリーチ者専用の情報です。「リーチ後に通った」という根拠は非リーチの相手には成立しないため、非リーチ副露相手に対する防御（`OpenHand defense`）では使いません。リーチ者と `High` の副露相手が同時にいる複合 threat の防御（`Combined defense`）でも、`post_reach_passed` を安全根拠にできるのはリーチ者に対してだけです。
+
+`history_furiten.same_turn` は同巡内フリテン、`history_furiten.riichi_missed_win` はリーチ後のアガリ見逃しによる局中継続フリテンです。各値は `true` / `false` / 省略による unknown を区別します。これは自分の河から計算する恒常フリテンとは別の履歴事実で、現時点では保持と診断だけを行い、`can_ron()` や action policy にはまだ統合していません。
 
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.json
@@ -367,6 +374,8 @@ Scenario
 ```
 
 `post_reach_passed`（リーチ成立後に他家から切られて通った牌）は event 列から積み上げる情報で `observation` に含まれないため、replay では空になります。この情報を含めた検証は JSON scenario で行ってください。
+
+履歴依存フリテンも単一 request の `observation` からは復元できないため、capture replay では unknown です。RiichiLab の live client は legal Hora と実際に送信した action を source of truth として追跡します。Chiihou の現在の decision API は immutable snapshot から返信を構築し、その結果を match state へ戻す経路を持たないため、この state は false と推測せず unknown のままです。
 
 `Table state` のうち `scores` / `honba` / `kyotaku` / `kyoku` は `observation` から復元します。山の残り枚数を表す field は `observation` に無いため、`remaining tiles` は replay では `unknown` になります。
 

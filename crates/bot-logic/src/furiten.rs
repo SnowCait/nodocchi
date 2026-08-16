@@ -41,6 +41,19 @@ use crate::tile_counts::TileCounts;
 // フリテンを判定する向聴数。テンパイ形の待ちだけを対象にする。
 const TENPAI_SHANTEN: i8 = 0;
 
+/// 過去の action 履歴に依存するフリテンの観測事実。
+///
+/// 自分の河と現在の待ちから計算する恒常フリテンとは別の入力事実として保持する。各 field は
+/// `None` (取得不能), `Some(false)` (該当しないことを確認済み), `Some(true)` (該当を確認済み)
+/// を区別する。現時点では診断専用で、ロン可否や action 選択には使用しない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryFuritenFacts {
+    /// 同巡内フリテンの現在状態。
+    pub same_turn: Option<bool>,
+    /// リーチ後にロン可能なアガリ牌を見逃したことによる、局終了まで続くフリテンの現在状態。
+    pub riichi_missed_win: Option<bool>,
+}
+
 /// 恒常フリテン判定に使う「自分が捨てた牌」。
 ///
 /// 赤5と黒5を同じ牌種として扱うため、物理牌ではなく牌種で保持する。自分の河が特定できない場合と
@@ -325,6 +338,7 @@ pub fn diagnose_discard_furiten(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::acceptance::{
         calculate_acceptance, calculate_acceptance_with_fixed_melds,
         calculate_acceptance_with_fixed_melds_and_visible_tiles,
@@ -333,6 +347,17 @@ mod tests {
     use crate::discard::{
         evaluate_discards_from_tiles, evaluate_discards_from_tiles_with_visible_tiles,
     };
+
+    #[test]
+    fn history_furiten_defaults_to_unknown() {
+        assert_eq!(
+            HistoryFuritenFacts::default(),
+            HistoryFuritenFacts {
+                same_turn: None,
+                riichi_missed_win: None,
+            }
+        );
+    }
 
     fn tile(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).unwrap()

@@ -1,4 +1,4 @@
-use bot_logic::{FixedMeldCount, TileId, TileType};
+use bot_logic::{FixedMeldCount, HistoryFuritenFacts, TileId, TileType};
 
 use crate::meld::{Meld, fixed_meld_count};
 
@@ -56,6 +56,7 @@ pub struct GameContext {
     melds: [Vec<Meld>; 4],
     post_reach_passed_tiles: [Vec<TileType>; 4],
     table_state: TableStateFacts,
+    history_furiten: HistoryFuritenFacts,
 }
 
 impl GameContext {
@@ -205,8 +206,17 @@ impl GameContext {
         self
     }
 
+    pub fn with_history_furiten_facts(mut self, history_furiten: HistoryFuritenFacts) -> Self {
+        self.history_furiten = history_furiten;
+        self
+    }
+
     pub fn drawn_tile(&self) -> Option<TileId> {
         self.drawn_tile
+    }
+
+    pub fn history_furiten(&self) -> HistoryFuritenFacts {
+        self.history_furiten
     }
 
     pub fn hand_tiles(&self) -> &[TileId] {
@@ -1474,5 +1484,30 @@ mod tests {
         let context = meld_context(Some(0), [melds, vec![], vec![], vec![]]);
         assert_eq!(context.own_melds().map(<[Meld]>::len), Some(5));
         assert_eq!(context.own_fixed_meld_count(), None);
+    }
+
+    #[test]
+    fn history_furiten_defaults_to_unknown_and_preserves_known_values() {
+        assert_eq!(
+            GameContext::default().history_furiten(),
+            HistoryFuritenFacts::default()
+        );
+        for facts in [
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+            HistoryFuritenFacts {
+                same_turn: Some(true),
+                riichi_missed_win: Some(true),
+            },
+        ] {
+            assert_eq!(
+                GameContext::default()
+                    .with_history_furiten_facts(facts)
+                    .history_furiten(),
+                facts
+            );
+        }
     }
 }
