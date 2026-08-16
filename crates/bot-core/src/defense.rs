@@ -371,9 +371,10 @@ pub fn is_suji_for_any_reached(tile: TileType, context: &GameContext) -> bool {
     suji_safety_rank_for_any_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
 
-/// 全リーチ者に対して完全なスジか判定する。リーチ者がいなければ `false`。
+/// 対象牌が現物のリーチ者を除いた、まだロンされ得る全リーチ者に対して完全なスジか判定する。
 ///
-/// 一人でも片スジ / 無スジなら `false`。
+/// まだロンされ得るリーチ者が一人でも片スジ / 無スジなら `false`。リーチ者がいない場合と、
+/// 全リーチ者に現物で集約対象が空になる場合も `false`。
 pub fn is_suji_for_all_reached(tile: TileType, context: &GameContext) -> bool {
     suji_safety_rank_for_all_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
@@ -440,7 +441,7 @@ pub fn suji_safety_rank_for_any_reached(
     )
 }
 
-/// 全リーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
+/// 現物ではない全リーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
 ///
 /// 対象牌が現物のリーチ者を除外し、まだロンされ得るリーチ者の
 /// [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。例えば player1 には現物、player2
@@ -654,7 +655,7 @@ pub fn suited_safety_rank_for_players(
     Some(rank)
 }
 
-// 全リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
+// 現物ではない全リーチ者に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
 // 壁評価はスジ評価より優先する。スジ評価は現物ではない全リーチ者に対する rank の最小値を使う。
 pub fn suited_safety_rank_for_all_reached(
     tile: TileType,
@@ -690,7 +691,7 @@ pub fn suited_dahai_actions_by_safety_with<'a>(
 
 // 合法 Dahai のうち数牌のみを安全度の高い順
 // (NoChance → OneChance → Suji → HalfSuji → NoSafety)に並べる。
-// 同安全度は元の順序を保つ。スジ判定は全リーチ者基準。
+// 同安全度は元の順序を保つ。スジ判定は現物ではない全リーチ者基準。
 pub fn suited_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
@@ -816,10 +817,11 @@ pub struct DefenseFallbackDiagnostic {
     /// 同じ `selected_honor_safety_rank` の字牌どうしの tie-break に使った値。数牌では `None`。
     pub selected_opponent_honor_value: Option<OpponentHonorValue>,
     pub selected_wall_rank: Option<WallRank>,
-    /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
-    /// 片スジと無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
+    /// 現物ではない、まだロンされ得る全リーチ者に対して完全なスジなら `true`。
+    /// そのうち一人でも片スジ / 無スジなら `false`。集約対象が空の場合も `false`。片スジと
+    /// 無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
     pub selected_suji_for_all_reached: Option<bool>,
-    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`selected_suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
@@ -891,10 +893,11 @@ pub struct DefenseCandidateDiagnostic {
     /// 同じ `honor_safety_rank` の字牌どうしの tie-break に使う値。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
     pub wall_rank: Option<WallRank>,
-    /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
-    /// 片スジと無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
+    /// 現物ではない、まだロンされ得る全リーチ者に対して完全なスジなら `true`。
+    /// そのうち一人でも片スジ / 無スジなら `false`。集約対象が空の場合も `false`。片スジと
+    /// 無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
     pub suji_for_all_reached: Option<bool>,
-    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
