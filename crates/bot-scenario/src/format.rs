@@ -367,6 +367,10 @@ fn format_normal_discard_candidate(
         "  weighted tenpai wait: {}",
         format_tenpai_wait(candidate.tenpai_wait)
     ));
+    lines.push(format!(
+        "  weighted next acceptance: {}",
+        format_tenpai_wait(candidate.next_acceptance)
+    ));
     lines.extend(format_permanent_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
@@ -1751,6 +1755,64 @@ mod tests {
 
     const IISHANTEN_TENPAI_WAIT_SCENARIO: &str =
         include_str!("../scenarios/iishanten_tenpai_wait.json");
+    const RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO: &str =
+        include_str!("../scenarios/ryanshanten_next_acceptance.json");
+
+    #[test]
+    fn ryanshanten_scenario_reports_weighted_next_acceptance_selection() {
+        let (_, diagnostic, output) = rendered(RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO, true);
+        let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
+        assert_eq!(candidates.len(), 9, "all discard tile types must be legal");
+        let selected = candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .unwrap();
+        let runner_up = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "6s")
+            .unwrap();
+        assert_eq!(selected.evaluation.discard.to_mjai_string(), "7p");
+        assert_eq!(runner_up.evaluation.discard.to_mjai_string(), "6s");
+        assert_eq!(
+            runner_up.comparison_reason,
+            DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+        assert!(
+            selected.next_acceptance.unwrap().weighted_remaining
+                > runner_up.next_acceptance.unwrap().weighted_remaining
+        );
+        assert!(
+            output.contains("weighted next acceptance: 428 remaining / 138 types"),
+            "{output}"
+        );
+        assert!(
+            output.contains("runner-up lost by: WeightedNextAcceptanceRemaining"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn ryanshanten_scenario_keeps_act_and_diagnostics_consistent() {
+        let scenario = scenario_from_json(RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO);
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        let diagnosed = diagnose(&scenario);
+        let with_lookahead = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+
+        assert_eq!(scenario.legal_actions.len(), 9);
+        assert_eq!(acted, diagnosed.selected_action);
+        assert_eq!(acted, with_lookahead.selected_action);
+        assert_eq!(
+            acted,
+            LegalAction::Dahai {
+                tile: TileId::new(60).unwrap()
+            }
+        );
+    }
 
     // 1向聴の2候補だけを合法にした scenario から、selected と runner-up の候補診断を取り出す。
     fn iishanten_tenpai_wait_candidates() -> (

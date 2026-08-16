@@ -27,7 +27,10 @@ use crate::discard::{
     discarded_tile_id_for_type, evaluate_discards_with_seen, select_best,
 };
 use crate::iishanten::IishantenShape;
-use crate::selection::{TenpaiWaitMetric, is_forward_target, requires_tenpai_wait};
+use crate::selection::{
+    ForwardMetrics, TenpaiWaitMetric, WeightedForwardMetric, forward_target_mask,
+    requires_forward_metrics,
+};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
@@ -36,7 +39,7 @@ use crate::tile_counts::TileCounts;
 /// かけた2手先診断。
 ///
 /// pure なデータであり、押し引き・鳴き・リーチ判断のどれにも使用しない。打牌選択が使うのは
-/// [`DiscardLookaheadDiagnostic::tenpai_wait_metric`] が返す集計値だけで、通常の選択経路は
+/// [`DiscardLookaheadDiagnostic::weighted_forward_metric`] が返す集計値だけで、通常の選択経路は
 /// この診断そのものを構築しない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscardLookaheadDiagnostic {
@@ -56,9 +59,17 @@ impl DiscardLookaheadDiagnostic {
     /// 集計規則は選択専用経路 ([`tenpai_wait_metrics_with_fixed_melds`]) と共有するため、詳細
     /// 診断を構築した場合に同じ枝を2回評価しなくてよい。
     pub fn tenpai_wait_metric(&self) -> TenpaiWaitMetric {
-        let mut metric = TenpaiWaitMetric::default();
+        self.weighted_forward_metric(0)
+    }
+
+    pub fn weighted_forward_metric(&self, required_next_shanten: i8) -> WeightedForwardMetric {
+        let mut metric = WeightedForwardMetric::default();
         for draw in &self.draws {
-            metric.accumulate(draw.remaining, draw.next_discard.as_ref());
+            metric.accumulate(
+                draw.remaining,
+                required_next_shanten,
+                draw.next_discard.as_ref(),
+            );
         }
         metric
     }
@@ -214,27 +225,27 @@ pub fn diagnose_lookahead_with_fixed_melds_and_visible_tiles(
     )
 }
 
-/// 副露済み面子数と場風・自風・ドラ表示牌を考慮して、打牌選択用の weighted tenpai wait を求める。
+/// 副露済み面子数と場風・自風・ドラ表示牌を考慮して、打牌選択用の前方集計値を求める。
 ///
 /// 戻り値は `evaluations` と同じ順序・同じ件数で、前方評価を計算しなかった候補は `None`。
-/// 計算対象は [`crate::selection::requires_tenpai_wait`] のとおり「最善向聴数が1向聴で、かつ
-/// 1向聴を維持する候補が複数ある」場合のその候補だけで、テンパイ・2向聴以上の候補は探索しない。
+/// 計算対象は最善向聴数が1以上で、それを維持する候補が複数ある場合の最善候補だけ。
+/// 1向聴では weighted tenpai wait、2向聴以上では weighted next acceptance を返す。
 ///
 /// 枝の評価は詳細診断 ([`diagnose_lookahead_with_fixed_melds`]) と同じ helper を共有し、選択用に
 /// [`LookaheadDiagnostic`] を構築しない。
-pub fn tenpai_wait_metrics_with_fixed_melds(
+pub fn forward_metrics_with_fixed_melds(
     tiles: &[TileId],
     fixed_meld_count: FixedMeldCount,
     dora_indicators: &[TileId],
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
     evaluations: &[DiscardEvaluation],
-) -> Vec<Option<TenpaiWaitMetric>> {
-    if !requires_tenpai_wait(evaluations) {
-        return vec![None; evaluations.len()];
+) -> Vec<ForwardMetrics> {
+    if !requires_forward_metrics(evaluations) {
+        return vec![ForwardMetrics::default(); evaluations.len()];
     }
 
-    tenpai_wait_metrics(
+    forward_metrics(
         &LookaheadInputs {
             counts: TileCounts::from_tiles(tiles.iter().copied()),
             tiles,
@@ -248,12 +259,33 @@ pub fn tenpai_wait_metrics_with_fixed_melds(
     )
 }
 
+pub fn tenpai_wait_metrics_with_fixed_melds(
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    evaluations: &[DiscardEvaluation],
+) -> Vec<Option<TenpaiWaitMetric>> {
+    forward_metrics_with_fixed_melds(
+        tiles,
+        fixed_meld_count,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+        evaluations,
+    )
+    .into_iter()
+    .map(|metric| metric.tenpai_wait)
+    .collect()
+}
+
 /// visible tiles も考慮して打牌選択用の weighted tenpai wait を求める。
 ///
 /// 2手目の残枚数の扱いは [`diagnose_lookahead_with_fixed_melds_and_visible_tiles`] と同じで、
 /// 1手目に切った牌も2手目時点の見え牌として数える。
 #[allow(clippy::too_many_arguments)]
-pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
+pub fn forward_metrics_with_fixed_melds_and_visible_tiles(
     tiles: &[TileId],
     fixed_meld_count: FixedMeldCount,
     dora_indicators: &[TileId],
@@ -261,9 +293,9 @@ pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
     seat_wind: Option<TileType>,
     visible_tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
-) -> Vec<Option<TenpaiWaitMetric>> {
+) -> Vec<ForwardMetrics> {
     if visible_tiles.is_empty() {
-        return tenpai_wait_metrics_with_fixed_melds(
+        return forward_metrics_with_fixed_melds(
             tiles,
             fixed_meld_count,
             dora_indicators,
@@ -273,12 +305,12 @@ pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
         );
     }
 
-    if !requires_tenpai_wait(evaluations) {
-        return vec![None; evaluations.len()];
+    if !requires_forward_metrics(evaluations) {
+        return vec![ForwardMetrics::default(); evaluations.len()];
     }
 
     let counts = TileCounts::from_tiles(tiles.iter().copied());
-    tenpai_wait_metrics(
+    forward_metrics(
         &LookaheadInputs {
             counts,
             tiles,
@@ -292,6 +324,30 @@ pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+    visible_tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+) -> Vec<Option<TenpaiWaitMetric>> {
+    forward_metrics_with_fixed_melds_and_visible_tiles(
+        tiles,
+        fixed_meld_count,
+        dora_indicators,
+        round_wind,
+        seat_wind,
+        visible_tiles,
+        evaluations,
+    )
+    .into_iter()
+    .map(|metric| metric.tenpai_wait)
+    .collect()
+}
+
 /// 構築済みの2手先診断から打牌選択用の weighted tenpai wait を求める。
 ///
 /// 詳細診断を作る経路で、同じ「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しないための入口。
@@ -299,21 +355,52 @@ pub fn tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
 ///
 /// `lookahead` は `evaluations` から構築したものを渡す。候補の順序・牌種が対応しない場合は
 /// 推測せず `None` にする。
+pub fn forward_metrics_from_lookahead(
+    evaluations: &[DiscardEvaluation],
+    lookahead: &LookaheadDiagnostic,
+) -> Vec<ForwardMetrics> {
+    if !requires_forward_metrics(evaluations) || lookahead.candidates.len() != evaluations.len() {
+        return vec![ForwardMetrics::default(); evaluations.len()];
+    }
+
+    let best_shanten = evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min()
+        .unwrap_or(i8::MAX);
+
+    let targets = forward_target_mask(evaluations);
+    evaluations
+        .iter()
+        .zip(lookahead.candidates.iter())
+        .zip(targets)
+        .map(|((evaluation, candidate), target)| {
+            if !target || candidate.discard != evaluation.discard {
+                return ForwardMetrics::default();
+            }
+            let metric = candidate.weighted_forward_metric(best_shanten - 1);
+            if best_shanten == 1 {
+                ForwardMetrics {
+                    tenpai_wait: Some(metric),
+                    next_acceptance: None,
+                }
+            } else {
+                ForwardMetrics {
+                    tenpai_wait: None,
+                    next_acceptance: Some(metric),
+                }
+            }
+        })
+        .collect()
+}
+
 pub fn tenpai_wait_metrics_from_lookahead(
     evaluations: &[DiscardEvaluation],
     lookahead: &LookaheadDiagnostic,
 ) -> Vec<Option<TenpaiWaitMetric>> {
-    if !requires_tenpai_wait(evaluations) || lookahead.candidates.len() != evaluations.len() {
-        return vec![None; evaluations.len()];
-    }
-
-    evaluations
-        .iter()
-        .zip(lookahead.candidates.iter())
-        .map(|(evaluation, candidate)| {
-            (is_forward_target(evaluation) && candidate.discard == evaluation.discard)
-                .then(|| candidate.tenpai_wait_metric())
-        })
+    forward_metrics_from_lookahead(evaluations, lookahead)
+        .into_iter()
+        .map(|metric| metric.tenpai_wait)
         .collect()
 }
 
@@ -330,14 +417,36 @@ fn diagnose_lookahead(
 }
 
 // 前方評価の対象候補だけ枝を評価して集計する。対象外の候補は探索しない。
-fn tenpai_wait_metrics(
+fn forward_metrics(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
-) -> Vec<Option<TenpaiWaitMetric>> {
+) -> Vec<ForwardMetrics> {
+    let best_shanten = evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min()
+        .unwrap_or(i8::MAX);
+    let targets = forward_target_mask(evaluations);
     evaluations
         .iter()
-        .map(|evaluation| {
-            is_forward_target(evaluation).then(|| tenpai_wait_for_candidate(inputs, evaluation))
+        .zip(targets)
+        .map(|(evaluation, target)| {
+            if !target {
+                return ForwardMetrics::default();
+            }
+            let metric =
+                weighted_forward_metric_for_candidate(inputs, evaluation, best_shanten - 1);
+            if best_shanten == 1 {
+                ForwardMetrics {
+                    tenpai_wait: Some(metric),
+                    next_acceptance: None,
+                }
+            } else {
+                ForwardMetrics {
+                    tenpai_wait: None,
+                    next_acceptance: Some(metric),
+                }
+            }
         })
         .collect()
 }
@@ -374,17 +483,22 @@ fn lookahead_for_candidate(
 
 // 現在の打牌候補1件分の weighted tenpai wait。枝の評価は詳細診断と同じ helper を共有し、
 // 診断 object を作らずに集計値だけを求める。
-fn tenpai_wait_for_candidate(
+fn weighted_forward_metric_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
-) -> TenpaiWaitMetric {
-    let mut metric = TenpaiWaitMetric::default();
+    required_next_shanten: i8,
+) -> WeightedForwardMetric {
+    let mut metric = WeightedForwardMetric::default();
     let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
         return metric;
     };
 
     for tile in &evaluation.acceptance_after_discard.tiles {
-        metric.accumulate(tile.remaining, branch.next_discard(inputs, tile).as_ref());
+        metric.accumulate(
+            tile.remaining,
+            required_next_shanten,
+            branch.next_discard(inputs, tile).as_ref(),
+        );
     }
     metric
 }

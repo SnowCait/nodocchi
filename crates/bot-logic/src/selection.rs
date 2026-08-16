@@ -1,7 +1,8 @@
 //! 打牌選択用の前方集計値と、それを含む打牌比較。
 //!
 //! [`DiscardEvaluation`] は「その打牌をした直後の13枚」を1手だけ見る評価で、この module が持つ
-//! のは「1向聴の打牌候補がどのテンパイへ入りやすいか」という selection 専用の集計値。責務が
+//! のは「有効牌を引いた後の形」を比較する selection 専用の集計値。1向聴ではテンパイ待ち、
+//! 2向聴以上では次打牌後の受け入れとして解釈する。責務が
 //! 別なので前方集計値を [`DiscardEvaluation`] へ持ち込まず、`evaluate_discards_with_seen()` が
 //! 再帰的に前方探索を始める構造も作らない。
 //!
@@ -15,39 +16,39 @@ use crate::discard::{
     compare_discard_before_acceptance, compare_discard_from_acceptance,
 };
 
-/// 前方評価の対象になる現在打牌後の向聴数。今回は1向聴だけを対象にする。
-pub(crate) const FORWARD_TARGET_SHANTEN: i8 = 1;
+/// 既存 weighted tenpai wait を適用する現在打牌後の向聴数。
+pub(crate) const TENPAI_WAIT_TARGET_SHANTEN: i8 = 1;
 
-// 前方評価が待ちを集計する2手目の向聴数。
-const TENPAI_SHANTEN: i8 = 0;
-
-/// 1向聴の打牌候補1件について、到達するテンパイの待ちを受け入れ残枚数で重み付けした集計値。
+/// 1手目の有効牌の残枚数で、その後の受け入れを重み付けした共通集計値。
 ///
-/// - `weighted_remaining` = Σ(受け入れ牌の残枚数 × そのテンパイの和了牌残枚数)
-/// - `weighted_type_count` = Σ(受け入れ牌の残枚数 × そのテンパイの待ち牌種類数)
+/// - `weighted_remaining` = Σ(first draw remaining × next discard acceptance remaining)
+/// - `weighted_type_count` = Σ(first draw remaining × next discard acceptance type count)
 ///
+/// `next_discard.min_shanten_after_discard()` が呼び出し側の `required_next_shanten` と一致する
+/// 枝だけを集計する。1向聴では `required_next_shanten = 0` なので next acceptance をテンパイ待ち
+/// として解釈し、2向聴以上では1手進んだ後の次の有効牌として解釈する。
 /// どちらも平均や確率へ正規化しない生の重み付き合計で、桁溢れを避けるため `u32` で保持する。
-/// 待ち牌がすべて見えている死にテンへ進む枝の寄与は 0 で、これは意図した値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TenpaiWaitMetric {
+pub struct WeightedForwardMetric {
     pub weighted_remaining: u32,
     pub weighted_type_count: u32,
 }
 
-impl TenpaiWaitMetric {
+impl WeightedForwardMetric {
     /// 受け入れ牌1枚分の枝を加算する。
     ///
-    /// `next_discard` は既存評価が選んだ2手目の最良打牌。`None` の場合や2手目がテンパイに
-    /// ならない場合、その枝の寄与は 0 にする。
+    /// `next_discard` は既存評価が選んだ2手目の最良打牌。`None` の場合、または次打牌後の向聴数が
+    /// `required_next_shanten` と一致しない場合、その枝の寄与は 0 にする。
     pub(crate) fn accumulate(
         &mut self,
         first_draw_remaining: u8,
+        required_next_shanten: i8,
         next_discard: Option<&DiscardEvaluation>,
     ) {
         let Some(next) = next_discard else {
             return;
         };
-        if next.min_shanten_after_discard() != TENPAI_SHANTEN {
+        if next.min_shanten_after_discard() != required_next_shanten {
             return;
         }
 
@@ -57,7 +58,18 @@ impl TenpaiWaitMetric {
     }
 }
 
-/// 打牌選択1候補分の入力。1手評価と、1向聴のときだけ計算する前方集計値を組にする。
+/// 1向聴で next acceptance をテンパイ待ちとして解釈する alias。
+pub type TenpaiWaitMetric = WeightedForwardMetric;
+/// 2向聴以上で next acceptance を1手進んだ後の次の有効牌として解釈する alias。
+pub type NextAcceptanceMetric = WeightedForwardMetric;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ForwardMetrics {
+    pub tenpai_wait: Option<TenpaiWaitMetric>,
+    pub next_acceptance: Option<NextAcceptanceMetric>,
+}
+
+/// 打牌選択1候補分の入力。1手評価と向聴数別の前方集計値を組にする。
 ///
 /// `tenpai_wait` は前方評価を実際に計算した場合だけ `Some`。計算しなかった候補と
 /// 「計算した結果すべての待ちが死んでいた」候補を区別するため、意味の無い 0 で埋めない。
@@ -65,6 +77,7 @@ impl TenpaiWaitMetric {
 pub struct DiscardSelectionCandidate<'a> {
     pub evaluation: &'a DiscardEvaluation,
     pub tenpai_wait: Option<TenpaiWaitMetric>,
+    pub next_acceptance: Option<NextAcceptanceMetric>,
 }
 
 impl<'a> DiscardSelectionCandidate<'a> {
@@ -73,6 +86,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
         Self {
             evaluation,
             tenpai_wait: None,
+            next_acceptance: None,
         }
     }
 }
@@ -84,11 +98,11 @@ impl<'a> DiscardSelectionCandidate<'a> {
 /// ```text
 /// Shanten → IsolatedTile → IsolatedHonor
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
+///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
 ///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ...
 /// ```
 ///
-/// 新しい軸は両候補とも1向聴でかつ両方の前方集計値がある場合だけ決着させ、それ以外は既存比較へ
-/// そのまま落とす。したがってテンパイ・2向聴以上・和了形の比較結果は変わらない。
+/// 各軸は両候補の向聴数が等しく、対応する前方集計値が両方にある場合だけ決着させる。
 pub fn compare_discard_selection_candidates(
     candidate: &DiscardSelectionCandidate,
     current_best: &DiscardSelectionCandidate,
@@ -103,6 +117,10 @@ pub fn compare_discard_selection_candidates(
         return comparison;
     }
 
+    if let Some(comparison) = compare_weighted_next_acceptance(candidate, current_best) {
+        return comparison;
+    }
+
     compare_discard_from_acceptance(candidate.evaluation, current_best.evaluation)
 }
 
@@ -114,9 +132,25 @@ pub fn best_discard_selection_index(
     evaluations: &[DiscardEvaluation],
     tenpai_wait: &[Option<TenpaiWaitMetric>],
 ) -> Option<usize> {
+    let metrics: Vec<_> = tenpai_wait
+        .iter()
+        .map(|&tenpai_wait| ForwardMetrics {
+            tenpai_wait,
+            next_acceptance: None,
+        })
+        .collect();
+    best_discard_selection_index_with_forward_metrics(evaluations, &metrics)
+}
+
+pub fn best_discard_selection_index_with_forward_metrics(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+) -> Option<usize> {
+    let metrics_at = |index: usize| forward_metrics.get(index).copied().unwrap_or_default();
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
-        tenpai_wait: tenpai_wait.get(index).copied().flatten(),
+        tenpai_wait: metrics_at(index).tenpai_wait,
+        next_acceptance: metrics_at(index).next_acceptance,
     };
 
     let mut best: Option<usize> = None;
@@ -142,8 +176,8 @@ fn compare_weighted_tenpai_wait(
     candidate: &DiscardSelectionCandidate,
     current_best: &DiscardSelectionCandidate,
 ) -> Option<DiscardComparison> {
-    if candidate.evaluation.min_shanten_after_discard() != FORWARD_TARGET_SHANTEN
-        || current_best.evaluation.min_shanten_after_discard() != FORWARD_TARGET_SHANTEN
+    if candidate.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
     {
         return None;
     }
@@ -168,28 +202,78 @@ fn compare_weighted_tenpai_wait(
     None
 }
 
+fn compare_weighted_next_acceptance(
+    candidate: &DiscardSelectionCandidate,
+    current_best: &DiscardSelectionCandidate,
+) -> Option<DiscardComparison> {
+    let shanten = candidate.evaluation.min_shanten_after_discard();
+    if shanten < 2 || current_best.evaluation.min_shanten_after_discard() != shanten {
+        return None;
+    }
+
+    let candidate_metric = candidate.next_acceptance?;
+    let best_metric = current_best.next_acceptance?;
+    if candidate_metric.weighted_remaining != best_metric.weighted_remaining {
+        return Some(DiscardComparison {
+            candidate_is_better: candidate_metric.weighted_remaining
+                > best_metric.weighted_remaining,
+            reason: DiscardComparisonReason::WeightedNextAcceptanceRemaining,
+        });
+    }
+    if candidate_metric.weighted_type_count != best_metric.weighted_type_count {
+        return Some(DiscardComparison {
+            candidate_is_better: candidate_metric.weighted_type_count
+                > best_metric.weighted_type_count,
+            reason: DiscardComparisonReason::WeightedNextAcceptanceTypeCount,
+        });
+    }
+    None
+}
+
 /// 打牌候補集合が前方評価の対象かどうか。
 ///
 /// 全合法候補の1手評価から求めた最善向聴数が1向聴で、かつ1向聴を維持する候補が複数ある場合
 /// だけ `true`。候補が1件だけなら Shanten 比較で決着するため前方評価は不要で、最善向聴数が
 /// 1向聴でなければ今回の評価軸は使わない。
-pub(crate) fn requires_tenpai_wait(evaluations: &[DiscardEvaluation]) -> bool {
-    let mut best_shanten = i8::MAX;
-    let mut target_count = 0usize;
-    for evaluation in evaluations {
-        let shanten = evaluation.min_shanten_after_discard();
-        best_shanten = best_shanten.min(shanten);
-        if shanten == FORWARD_TARGET_SHANTEN {
-            target_count += 1;
-        }
-    }
+pub(crate) fn requires_forward_metrics(evaluations: &[DiscardEvaluation]) -> bool {
+    forward_target_mask(evaluations)
+        .into_iter()
+        .filter(|&target| target)
+        .count()
+        > 1
+}
 
-    best_shanten == FORWARD_TARGET_SHANTEN && target_count > 1
+#[cfg(test)]
+fn requires_tenpai_wait(evaluations: &[DiscardEvaluation]) -> bool {
+    requires_forward_metrics(evaluations)
+        && evaluations
+            .iter()
+            .map(DiscardEvaluation::min_shanten_after_discard)
+            .min()
+            == Some(1)
 }
 
 /// この打牌候補が前方評価の対象かどうか。
-pub(crate) fn is_forward_target(evaluation: &DiscardEvaluation) -> bool {
-    evaluation.min_shanten_after_discard() == FORWARD_TARGET_SHANTEN
+pub(crate) fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool> {
+    let Some(mut best_index) = (!evaluations.is_empty()).then_some(0) else {
+        return Vec::new();
+    };
+    for index in 1..evaluations.len() {
+        if compare_discard_before_acceptance(&evaluations[index], &evaluations[best_index])
+            .is_some_and(|comparison| comparison.candidate_is_better)
+        {
+            best_index = index;
+        }
+    }
+    if evaluations[best_index].min_shanten_after_discard() < TENPAI_WAIT_TARGET_SHANTEN {
+        return vec![false; evaluations.len()];
+    }
+    evaluations
+        .iter()
+        .map(|evaluation| {
+            compare_discard_before_acceptance(evaluation, &evaluations[best_index]).is_none()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -262,6 +346,18 @@ mod tests {
         DiscardSelectionCandidate {
             evaluation,
             tenpai_wait,
+            next_acceptance: None,
+        }
+    }
+
+    fn next_candidate<'a>(
+        evaluation: &'a DiscardEvaluation,
+        next_acceptance: Option<NextAcceptanceMetric>,
+    ) -> DiscardSelectionCandidate<'a> {
+        DiscardSelectionCandidate {
+            evaluation,
+            tenpai_wait: None,
+            next_acceptance,
         }
     }
 
@@ -270,7 +366,7 @@ mod tests {
         let mut metric = TenpaiWaitMetric::default();
         let tenpai = evaluation("E", 0, &[("3m", 4), ("6m", 4)]);
 
-        metric.accumulate(4, Some(&tenpai));
+        metric.accumulate(4, 0, Some(&tenpai));
 
         assert_eq!(metric.weighted_remaining, 4 * 8);
         assert_eq!(metric.weighted_type_count, 4 * 2);
@@ -279,7 +375,7 @@ mod tests {
     #[test]
     fn skips_branches_without_a_next_discard() {
         let mut metric = TenpaiWaitMetric::default();
-        metric.accumulate(4, None);
+        metric.accumulate(4, 0, None);
         assert_eq!(metric, TenpaiWaitMetric::default());
     }
 
@@ -288,7 +384,7 @@ mod tests {
         let mut metric = TenpaiWaitMetric::default();
         let iishanten = evaluation("E", 1, &[("3m", 4)]);
 
-        metric.accumulate(4, Some(&iishanten));
+        metric.accumulate(4, 0, Some(&iishanten));
 
         assert_eq!(metric, TenpaiWaitMetric::default());
     }
@@ -299,9 +395,88 @@ mod tests {
         let mut metric = TenpaiWaitMetric::default();
         let dead = evaluation("E", 0, &[]);
 
-        metric.accumulate(4, Some(&dead));
+        metric.accumulate(4, 0, Some(&dead));
 
         assert_eq!(metric, TenpaiWaitMetric::default());
+    }
+
+    #[test]
+    fn accumulates_weighted_next_acceptance() {
+        let mut metric = WeightedForwardMetric::default();
+        let first = evaluation(
+            "E",
+            2,
+            &[("3m", 4), ("6m", 4), ("9m", 4), ("3p", 4), ("6p", 4)],
+        );
+        let second = evaluation("S", 2, &[("3s", 4), ("6s", 4), ("9s", 2)]);
+        metric.accumulate(4, 2, Some(&first));
+        metric.accumulate(2, 2, Some(&second));
+        assert_eq!(metric.weighted_remaining, 100);
+        assert_eq!(metric.weighted_type_count, 26);
+    }
+
+    #[test]
+    fn next_acceptance_skips_a_branch_that_loses_progress() {
+        let mut metric = WeightedForwardMetric::default();
+        let back_to_three = evaluation("E", 3, &[("3m", 4)]);
+        metric.accumulate(4, 2, Some(&back_to_three));
+        assert_eq!(metric, WeightedForwardMetric::default());
+    }
+
+    #[test]
+    fn weighted_next_acceptance_remaining_outranks_current_acceptance() {
+        let wide = evaluation("1m", 2, &[("3m", 4), ("6m", 4), ("9m", 4)]);
+        let narrow = evaluation("9p", 2, &[("3p", 4), ("6p", 4)]);
+        let comparison = compare_discard_selection_candidates(
+            &next_candidate(&narrow, metric(101, 20)),
+            &next_candidate(&wide, metric(100, 30)),
+        );
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn weighted_next_acceptance_type_count_breaks_a_remaining_tie() {
+        let first = evaluation("1m", 3, &[("3m", 4)]);
+        let second = evaluation("9p", 3, &[("3p", 4)]);
+        let comparison = compare_discard_selection_candidates(
+            &next_candidate(&second, metric(100, 31)),
+            &next_candidate(&first, metric(100, 30)),
+        );
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedNextAcceptanceTypeCount
+        );
+    }
+
+    #[test]
+    fn equal_next_acceptance_falls_through_to_current_acceptance() {
+        let wide = evaluation("1m", 2, &[("3m", 4), ("6m", 4)]);
+        let narrow = evaluation("9p", 2, &[("3p", 4)]);
+        let comparison = compare_discard_selection_candidates(
+            &next_candidate(&wide, metric(100, 20)),
+            &next_candidate(&narrow, metric(100, 20)),
+        );
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn shanten_outranks_weighted_next_acceptance() {
+        let two = evaluation("1m", 2, &[("3m", 1)]);
+        let three = evaluation("9p", 3, &[("3p", 4)]);
+        let comparison = compare_discard_selection_candidates(
+            &next_candidate(&three, metric(9999, 999)),
+            &next_candidate(&two, metric(0, 0)),
+        );
+        assert!(!comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
     }
 
     #[test]
@@ -521,10 +696,25 @@ mod tests {
     }
 
     #[test]
+    fn forward_metrics_require_multiple_best_candidates_at_one_or_more_shanten() {
+        let two_a = evaluation("1m", 2, &[]);
+        let two_b = evaluation("2m", 2, &[]);
+        let three = evaluation("3m", 3, &[]);
+        let tenpai_a = evaluation("4m", 0, &[]);
+        let tenpai_b = evaluation("5m", 0, &[]);
+
+        assert!(requires_forward_metrics(&[two_a.clone(), two_b]));
+        assert!(!requires_forward_metrics(&[two_a.clone(), three]));
+        assert!(!requires_forward_metrics(std::slice::from_ref(&two_a)));
+        assert!(!requires_forward_metrics(&[tenpai_a, tenpai_b]));
+    }
+
+    #[test]
     fn forward_target_is_only_iishanten() {
-        assert!(is_forward_target(&evaluation("1m", 1, &[])));
-        assert!(!is_forward_target(&evaluation("1m", 0, &[])));
-        assert!(!is_forward_target(&evaluation("1m", 2, &[])));
-        assert!(!is_forward_target(&evaluation("1m", -1, &[])));
+        assert_eq!(forward_target_mask(&[evaluation("1m", 1, &[])]), vec![true]);
+        assert_eq!(
+            forward_target_mask(&[evaluation("1m", 0, &[])]),
+            vec![false]
+        );
     }
 }

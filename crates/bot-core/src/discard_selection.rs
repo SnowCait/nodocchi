@@ -3,14 +3,14 @@ use crate::context::GameContext;
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    LookaheadDiagnostic, OwnDiscards, TenpaiWaitAvailability, TenpaiWaitMetric, TileCounts, TileId,
-    TileType, best_discard_selection_index,
-    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait, diagnose_discard_furiten,
+    ForwardMetrics, LookaheadDiagnostic, OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId,
+    TileType, best_discard_selection_index, best_discard_selection_index_with_forward_metrics,
+    diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics, diagnose_discard_furiten,
     diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
     discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
-    tenpai_wait_metrics_from_lookahead, tenpai_wait_metrics_with_fixed_melds,
-    tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
+    forward_metrics_from_lookahead, forward_metrics_with_fixed_melds,
+    forward_metrics_with_fixed_melds_and_visible_tiles,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -41,7 +41,7 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     pub furiten: Vec<DiscardFuritenDiagnostic>,
     /// 全合法候補の詳細な2手先診断。要求された場合だけ構築する。
     ///
-    /// 構築した場合は、選択に使う1向聴の weighted tenpai wait もこの枝評価から集計して同じ枝を
+    /// 構築した場合は、選択に使う weighted forward metric もこの枝評価から集計して同じ枝を
     /// 2回計算しない。集計対象と集計規則は選択専用経路と同じなので、詳細診断の有無で選択結果は
     /// 変わらない。
     pub lookahead: Option<LookaheadDiagnostic>,
@@ -54,10 +54,10 @@ struct LegalDiscardEvaluations {
     evaluations: Vec<DiscardEvaluation>,
 }
 
-// 打牌選択に使う1向聴限定の前方集計値。`evaluations` と同じ順序・同じ件数で、前方評価を
+// 打牌選択に使う前方集計値。`evaluations` と同じ順序・同じ件数で、前方評価を
 // 計算しなかった候補は `None`。本番選択・構造化診断・tracing ログはこの1組を共有し、同じ枝を
 // 二重に評価しない。
-type TenpaiWaitMetrics = Vec<Option<TenpaiWaitMetric>>;
+type SelectionForwardMetrics = Vec<ForwardMetrics>;
 
 pub fn select_discard_action(
     context: &GameContext,
@@ -86,7 +86,7 @@ pub(crate) fn select_discard_action_with_evaluation(
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
-    let tenpai_wait = tenpai_wait_metrics(context, &legal.tiles, &legal.evaluations);
+    let tenpai_wait = forward_metrics(context, &legal.tiles, &legal.evaluations);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(
@@ -120,8 +120,8 @@ pub(crate) fn select_discard_action_with_diagnostic(
     // 「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しない。
     let lookahead = with_lookahead.then(|| lookahead_from_legal_evaluations(context, &legal));
     let tenpai_wait = match lookahead.as_ref() {
-        Some(lookahead) => tenpai_wait_metrics_from_lookahead(&legal.evaluations, lookahead),
-        None => tenpai_wait_metrics(context, &legal.tiles, &legal.evaluations),
+        Some(lookahead) => forward_metrics_from_lookahead(&legal.evaluations, lookahead),
+        None => forward_metrics(context, &legal.tiles, &legal.evaluations),
     };
 
     let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
@@ -162,11 +162,12 @@ fn legal_discard_evaluations(
 // 補正済みの合法候補集合から最善評価と対応する合法 Dahai を決める。全経路共通の選択処理。
 fn selection_from_legal_evaluations(
     legal: &LegalDiscardEvaluations,
-    tenpai_wait: &[Option<TenpaiWaitMetric>],
+    tenpai_wait: &[ForwardMetrics],
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
-    let evaluation = best_discard_selection_index(&legal.evaluations, tenpai_wait)
-        .map(|index| legal.evaluations[index].clone());
+    let evaluation =
+        best_discard_selection_index_with_forward_metrics(&legal.evaluations, tenpai_wait)
+            .map(|index| legal.evaluations[index].clone());
     let action = evaluation
         .as_ref()
         .and_then(|evaluation| legal_dahai_for_evaluation(evaluation, legal_actions));
@@ -174,22 +175,22 @@ fn selection_from_legal_evaluations(
     DiscardActionSelection { evaluation, action }
 }
 
-// 打牌候補のうち1向聴を維持するものについて、打牌選択用の前方集計値を求める。
+// 最善向聴を維持する複数候補について、打牌選択用の前方集計値を求める。
 //
-// 対象の絞り込み (最善向聴数が1向聴 かつ 1向聴を維持する候補が複数) は bot-logic 側の入口が
-// 行うため、テンパイ・2向聴以上では前方探索が走らない。現在打牌後の受け入れは既存評価
+// 対象の絞り込み (最善向聴数が1以上 かつ それを維持する候補が複数) は bot-logic 側の入口が
+// 行うため、テンパイ・候補1件では前方探索が走らない。現在打牌後の受け入れは既存評価
 // (evaluations) が持つ値をそのまま入力にするため、現在の1手評価を再計算しない。
 // 物理牌・副露済み面子数・visible tiles・ドラ表示牌・場風・自風は本番評価と同じ値を渡す。
 // GameContext 自体は渡さず、bot-logic が必要とする値だけを取り出して渡す。
-fn tenpai_wait_metrics(
+fn forward_metrics(
     context: &GameContext,
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
-) -> TenpaiWaitMetrics {
+) -> SelectionForwardMetrics {
     let fixed_meld_count = evaluation_fixed_meld_count(context);
 
     if context.visible_tiles().is_empty() {
-        tenpai_wait_metrics_with_fixed_melds(
+        forward_metrics_with_fixed_melds(
             tiles,
             fixed_meld_count,
             context.dora_indicators(),
@@ -198,7 +199,7 @@ fn tenpai_wait_metrics(
             evaluations,
         )
     } else {
-        tenpai_wait_metrics_with_fixed_melds_and_visible_tiles(
+        forward_metrics_with_fixed_melds_and_visible_tiles(
             tiles,
             fixed_meld_count,
             context.dora_indicators(),
@@ -216,10 +217,10 @@ fn tenpai_wait_metrics(
 fn diagnose_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
-    tenpai_wait: &[Option<TenpaiWaitMetric>],
+    tenpai_wait: &[ForwardMetrics],
 ) -> DiscardDecisionDiagnostic {
     let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
-    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
+    diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
         &counts,
         evaluation_fixed_meld_count(context),
         &legal.evaluations,
@@ -437,9 +438,10 @@ pub(crate) fn select_best_normal_discard_evaluation(
     tiles: &[TileId],
 ) -> Option<DiscardEvaluation> {
     let evaluations = evaluate_discard_candidates(context, tiles);
-    let tenpai_wait = tenpai_wait_metrics(context, tiles, &evaluations);
+    let tenpai_wait = forward_metrics(context, tiles, &evaluations);
 
-    best_discard_selection_index(&evaluations, &tenpai_wait).map(|index| evaluations[index].clone())
+    best_discard_selection_index_with_forward_metrics(&evaluations, &tenpai_wait)
+        .map(|index| evaluations[index].clone())
 }
 
 /// 副露済み面子数を明示した1手評価だけの best 評価。
@@ -577,6 +579,12 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
             .map(|metric| metric.weighted_remaining),
         weighted_tenpai_wait_type_count = ?candidate
             .tenpai_wait
+            .map(|metric| metric.weighted_type_count),
+        weighted_next_acceptance_remaining = ?candidate
+            .next_acceptance
+            .map(|metric| metric.weighted_remaining),
+        weighted_next_acceptance_type_count = ?candidate
+            .next_acceptance
             .map(|metric| metric.weighted_type_count),
         shape_penalty = evaluation.shape_penalty,
         iishanten_shape_after_discard = ?evaluation.standard_iishanten_shape_after_discard,
@@ -943,7 +951,7 @@ pub(crate) mod tests {
     // 確認する。本番経路と同じ helper だけを通す。
     fn assert_diagnostic_selection_matches(context: &GameContext, actions: &[LegalAction]) {
         let legal = legal_discard_evaluations(context, actions);
-        let tenpai_wait = tenpai_wait_metrics(context, &legal.tiles, &legal.evaluations);
+        let tenpai_wait = forward_metrics(context, &legal.tiles, &legal.evaluations);
 
         let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
         let selection = selection_from_legal_evaluations(&legal, &tenpai_wait, actions);
@@ -1570,6 +1578,131 @@ pub(crate) mod tests {
                     .all(|candidate| candidate.tenpai_wait.is_none())
             );
         }
+    }
+
+    // ---- 2向聴以上の weighted next acceptance ----
+
+    // 78m 4467p 446s WW FFF。打6sと打7pはいずれも2向聴、現在受け入れは34枚/11種で同値。
+    // 既存1手比較では安定順の打6sだが、1手進んだ後の受け入れ加重合計は打7pが広い。
+    const RYANSHANTEN_FORWARD_TILES: [u8; 14] =
+        [116, 128, 92, 84, 85, 48, 60, 49, 56, 24, 129, 130, 28, 117];
+
+    fn ryanshanten_forward_context() -> GameContext {
+        let tiles: Vec<_> = RYANSHANTEN_FORWARD_TILES
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let (hand, drawn) = tiles.split_at(13);
+        GameContext::from_parts_with_visible_tiles(
+            Some(drawn[0]),
+            hand.to_vec(),
+            vec![],
+            None,
+            None,
+            tiles.clone(),
+        )
+    }
+
+    fn ryanshanten_forward_actions() -> Vec<LegalAction> {
+        vec![dahai(92), dahai(60)]
+    }
+
+    fn ryanshanten_all_actions() -> Vec<LegalAction> {
+        RYANSHANTEN_FORWARD_TILES
+            .iter()
+            .map(|&value| dahai(value))
+            .collect()
+    }
+
+    #[test]
+    fn weighted_next_acceptance_changes_a_real_hand_selection() {
+        let context = ryanshanten_forward_context();
+        let actions = ryanshanten_forward_actions();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let one_step = select_best_one_step_evaluation(&legal.evaluations).unwrap();
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        let selected = selection.evaluation.as_ref().unwrap();
+
+        assert_eq!(one_step.discard, tile(92).tile_type());
+        assert_eq!(selected.discard, tile(60).tile_type());
+        assert_eq!(selected.min_shanten_after_discard(), 2);
+        assert!(one_step.acceptance_total_remaining() >= selected.acceptance_total_remaining());
+    }
+
+    #[test]
+    fn weighted_next_acceptance_diagnostic_reuses_lookahead_and_keeps_selection_consistent() {
+        let context = ryanshanten_forward_context();
+        let actions = ryanshanten_forward_actions();
+        let normal = select_discard_action_with_evaluation(&context, &actions);
+        let without = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+
+        assert_eq!(normal, without.selection);
+        assert_eq!(without.selection, with.selection);
+        assert_eq!(without.diagnostic, with.diagnostic);
+        let selected = without
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .unwrap();
+        let runner_up = without
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .unwrap();
+        assert_eq!(
+            runner_up.comparison_reason,
+            bot_logic::DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+        assert!(
+            selected.next_acceptance.unwrap().weighted_remaining
+                > runner_up.next_acceptance.unwrap().weighted_remaining
+        );
+        assert_eq!(selected.tenpai_wait, None);
+        assert!(with.lookahead.is_some());
+    }
+
+    #[test]
+    fn weighted_next_acceptance_improves_selection_with_all_legal_discards() {
+        let context = ryanshanten_forward_context();
+        let actions = ryanshanten_all_actions();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let one_step = select_best_one_step_evaluation(&legal.evaluations).unwrap();
+        let normal = select_discard_action_with_evaluation(&context, &actions);
+        let without = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+
+        assert_eq!(legal.evaluations.len(), 9);
+        assert_eq!(one_step.discard, tile(92).tile_type());
+        assert_eq!(normal.action, Some(dahai(60)));
+        assert_eq!(normal, without.selection);
+        assert_eq!(without.selection, with.selection);
+        assert_eq!(without.diagnostic, with.diagnostic);
+
+        let selected = without
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .unwrap();
+        let runner_up = without
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == one_step.discard)
+            .unwrap();
+        assert_eq!(selected.evaluation.discard, tile(60).tile_type());
+        assert_eq!(runner_up.evaluation.discard, tile(92).tile_type());
+        assert_eq!(
+            runner_up.comparison_reason,
+            bot_logic::DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+        assert_eq!(selected.next_acceptance.unwrap().weighted_remaining, 428);
+        assert_eq!(selected.next_acceptance.unwrap().weighted_type_count, 138);
+        assert_eq!(runner_up.next_acceptance.unwrap().weighted_remaining, 396);
+        assert_eq!(runner_up.next_acceptance.unwrap().weighted_type_count, 128);
     }
 
     // ---- 構造化診断付き選択 (select_discard_action_with_diagnostic) ----

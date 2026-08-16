@@ -3,8 +3,8 @@ use crate::acceptance::{
 };
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::selection::{
-    DiscardSelectionCandidate, TenpaiWaitMetric, best_discard_selection_index,
-    compare_discard_selection_candidates,
+    DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
+    best_discard_selection_index_with_forward_metrics, compare_discard_selection_candidates,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
@@ -643,6 +643,10 @@ pub enum DiscardComparisonReason {
     WeightedTenpaiWaitRemaining,
     /// 1向聴限定の前方評価。Σ(受け入れ残枚数 × そのテンパイの待ち牌種類数)。
     WeightedTenpaiWaitTypeCount,
+    /// 2向聴以上限定。Σ(受け入れ残枚数 × 次打牌後の受け入れ残枚数)。
+    WeightedNextAcceptanceRemaining,
+    /// 2向聴以上限定。Σ(受け入れ残枚数 × 次打牌後の受け入れ牌種類数)。
+    WeightedNextAcceptanceTypeCount,
     AcceptanceRemaining,
     AcceptanceTypeCount,
     IishantenShape,
@@ -912,6 +916,8 @@ pub struct DiscardCandidateDiagnostic {
     /// 診断のために再計算せず、選択で使った値をそのまま保持する。待ちがすべて死んでいる場合の
     /// 有効な 0 と、計算していない `None` を区別する。
     pub tenpai_wait: Option<TenpaiWaitMetric>,
+    /// 2向聴以上で打牌選択に使った weighted next acceptance。
+    pub next_acceptance: Option<NextAcceptanceMetric>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -931,7 +937,7 @@ pub fn diagnose_discard_evaluations_with_fixed_melds(
     fixed_meld_count: FixedMeldCount,
     evaluations: &[DiscardEvaluation],
 ) -> DiscardDecisionDiagnostic {
-    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
+    diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
         counts,
         fixed_meld_count,
         evaluations,
@@ -945,18 +951,24 @@ pub fn diagnose_discard_evaluations_with_fixed_melds(
 /// ロジックは持たない。`tenpai_wait` は `evaluations` と同じ順序で、範囲外の index は前方評価
 /// なしとして扱う。空スライスを渡すと [`diagnose_discard_evaluations_with_fixed_melds`] と
 /// 一致する。前方集計値は診断のために再計算せず、渡された値をそのまま候補診断へ載せる。
-pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
+pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     evaluations: &[DiscardEvaluation],
-    tenpai_wait: &[Option<TenpaiWaitMetric>],
+    forward_metrics: &[ForwardMetrics],
 ) -> DiscardDecisionDiagnostic {
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
-        tenpai_wait: tenpai_wait.get(index).copied().flatten(),
+        tenpai_wait: forward_metrics
+            .get(index)
+            .and_then(|metric| metric.tenpai_wait),
+        next_acceptance: forward_metrics
+            .get(index)
+            .and_then(|metric| metric.next_acceptance),
     };
 
-    let best_index = best_discard_selection_index(evaluations, tenpai_wait);
+    let best_index =
+        best_discard_selection_index_with_forward_metrics(evaluations, forward_metrics);
     let selected = best_index.map(|index| evaluations[index].clone());
 
     let candidates = evaluations
@@ -996,7 +1008,12 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
                     counts,
                     evaluation.discard,
                 ),
-                tenpai_wait: tenpai_wait.get(index).copied().flatten(),
+                tenpai_wait: forward_metrics
+                    .get(index)
+                    .and_then(|metric| metric.tenpai_wait),
+                next_acceptance: forward_metrics
+                    .get(index)
+                    .and_then(|metric| metric.next_acceptance),
             }
         })
         .collect();
@@ -1005,6 +1022,28 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
         selected,
         candidates,
     }
+}
+
+/// Compatibility entry point for callers that only provide the existing 1向聴 metric.
+pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    evaluations: &[DiscardEvaluation],
+    tenpai_wait: &[Option<TenpaiWaitMetric>],
+) -> DiscardDecisionDiagnostic {
+    let metrics: Vec<_> = tenpai_wait
+        .iter()
+        .map(|&tenpai_wait| ForwardMetrics {
+            tenpai_wait,
+            next_acceptance: None,
+        })
+        .collect();
+    diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
+        counts,
+        fixed_meld_count,
+        evaluations,
+        &metrics,
+    )
 }
 
 fn value_honor_count(

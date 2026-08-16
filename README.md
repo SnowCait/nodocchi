@@ -248,6 +248,12 @@ cargo run -p bot-scenario -- \
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要を追加表示する。`--verbose` と併用すると受け入れ牌ごとの詳細も出す |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加表示する |
 
+通常打牌候補には、1向聴では `weighted tenpai wait`、2向聴以上では
+`weighted next acceptance` が表示されます。後者は
+`Σ(first draw remaining × next acceptance)` で、既存 Acceptance の有効牌を1枚引いた後に
+既存 comparator が選ぶ次打牌後の受け入れを集計した2手先の牌効率指標です。期待値や和了率では
+ありません。対象外または探索不要の候補は `-` と表示します。
+
 `player_id` / `oya` / `reached` / `discards` は簡易 CLI では指定できません。防御局面は JSON scenario を使用します。
 
 ### JSON scenario
