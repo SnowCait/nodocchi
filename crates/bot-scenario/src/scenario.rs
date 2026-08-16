@@ -842,8 +842,10 @@ fn pon_consumed_tiles(
 mod tests {
     use super::*;
     use bot_core::{
-        DefenseFallbackKind, is_genbutsu_for, is_genbutsu_for_all_reached,
-        select_defense_fallback_action_with_kind,
+        Agent, DefenseCandidateDiagnostic, DefenseFallbackKind, DiagnosticOptions, HonorSafetyRank,
+        OpponentHonorValue, ShantenAgent, SuitedSafetyRank, SujiSafetyRank, is_genbutsu_for,
+        is_genbutsu_for_all_reached, select_defense_fallback_action_with_kind,
+        suji_safety_rank_for,
     };
 
     fn spec_from_json(json: &str) -> ScenarioSpec {
@@ -2451,6 +2453,8 @@ mod tests {
 
     const POST_REACH_GENBUTSU_SCENARIO: &str =
         include_str!("../scenarios/post_reach_genbutsu.json");
+    const MULTI_RIICHI_DOUBLE_WIND_SCENARIO: &str =
+        include_str!("../scenarios/defense_multi_riichi_double_wind.json");
 
     fn tile_type(mjai: &str) -> TileType {
         TileType::from_mjai_type_str(mjai).unwrap()
@@ -2533,6 +2537,65 @@ mod tests {
                 },
                 DefenseFallbackKind::Genbutsu
             ))
+        );
+    }
+
+    #[test]
+    fn multi_riichi_double_wind_scenario_prefers_suji_and_keeps_diagnostics_consistent() {
+        let scenario = resolve(&spec_from_json(MULTI_RIICHI_DOUBLE_WIND_SCENARIO));
+        let nine_man = tile_type("9m");
+        let south = tile_type("S");
+
+        assert_eq!(scenario.context.reached_opponents(), vec![1, 2]);
+        assert!(!is_genbutsu_for(nine_man, 1, &scenario.context));
+        assert!(is_genbutsu_for(nine_man, 2, &scenario.context));
+        assert_eq!(
+            suji_safety_rank_for(nine_man, 1, &scenario.context),
+            Some(SujiSafetyRank::Suji)
+        );
+
+        let selected =
+            select_defense_fallback_action_with_kind(&scenario.context, &scenario.legal_actions)
+                .expect("defense fallback");
+        assert_eq!(
+            selected.1,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
+        );
+        assert!(matches!(selected.0, LegalAction::Dahai { tile } if tile.tile_type() == nine_man));
+
+        let candidates = DefenseCandidateDiagnostic::for_legal_actions(
+            &scenario.context,
+            &scenario.legal_actions,
+            Some(selected.0),
+        );
+        let south = candidates
+            .iter()
+            .find(|candidate| candidate.tile == south)
+            .unwrap();
+        assert_eq!(south.honor_safety_rank, Some(HonorSafetyRank::OneVisible));
+        assert_eq!(
+            south.opponent_honor_value,
+            Some(OpponentHonorValue::DoubleWind)
+        );
+
+        let mut agent = ShantenAgent;
+        let action = agent.act(&scenario.context, &scenario.legal_actions);
+        let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
+        let with_lookahead = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+        assert_eq!(action, diagnostic.selected_action);
+        assert_eq!(action, with_lookahead.selected_action);
+        assert!(matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == nine_man));
+        assert_eq!(
+            diagnostic.defense_fallback_kind(),
+            Some(DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji))
+        );
+        assert_eq!(
+            with_lookahead.defense_fallback_kind(),
+            diagnostic.defense_fallback_kind()
         );
     }
 }

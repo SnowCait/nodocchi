@@ -1,0 +1,16 @@
+{
+  "hand": "2m 9m 7p 9p 9p 4s 5sr 5s 6s 7s 8s 9s S",
+  "draw": "4s",
+  "dora_indicators": "3p",
+  "round_wind": "S",
+  "seat_wind": "W",
+  "player_id": 3,
+  "oya": 1,
+  "reached": [false, true, true, false],
+  "discards": [
+    "W F N E 1s 1p 8m 2p",
+    "6m 1m 8s 4m 5m 1p 3s 7m 2p",
+    "9p F 9m C 2p 6m 2s C 4m",
+    "E W N C 1p 1m 1m 6m"
+  ]
+}
