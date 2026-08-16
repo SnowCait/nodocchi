@@ -341,7 +341,7 @@ pub struct ShantenDecisionDiagnostic {
     pub normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
     /// 履歴依存フリテンの production facts。恒常フリテンとは別で、現時点では action 選択や
     /// `TenpaiWaitAvailability::can_ron()` に使用しない。
-    pub history_furiten: crate::HistoryFuritenFacts,
+    pub history_furiten: bot_logic::HistoryFuritenFacts,
     /// 通常打牌評価を行った場合の全合法候補の詳細な2手先診断。`normal_discard` と同じ候補集合・
     /// 同じ順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
     ///

@@ -30,7 +30,7 @@ pub use combined_defense::{
     select_combined_threat_defense_fallback_action_with_kind,
     suited_safety_rank_for_combined_threats, suji_safety_rank_for_combined_threats,
 };
-pub use context::{GameContext, HistoryFuritenFacts, TableStateFacts, seat_wind_for_player};
+pub use context::{GameContext, TableStateFacts, seat_wind_for_player};
 pub use defense::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
     DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank,

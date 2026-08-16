@@ -1,4 +1,4 @@
-use bot_logic::{FixedMeldCount, TileId, TileType};
+use bot_logic::{FixedMeldCount, HistoryFuritenFacts, TileId, TileType};
 
 use crate::meld::{Meld, fixed_meld_count};
 
@@ -32,19 +32,6 @@ pub struct TableStateFacts {
     pub scores: Option<[i32; 4]>,
     /// 場風の中で何局目か [局]。東1 / 南1 を `1` とする 1-based で、場風は `round_wind` が持つ。
     pub kyoku: Option<u8>,
-}
-
-/// 過去の action 履歴に依存するフリテンの観測事実。
-///
-/// 自分の河と現在の待ちから計算する恒常フリテンとは別の入力事実として保持する。各 field は
-/// `None` (取得不能), `Some(false)` (該当しないことを確認済み), `Some(true)` (該当を確認済み)
-/// を区別する。現時点では診断専用で、ロン可否や action 選択には使用しない。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HistoryFuritenFacts {
-    /// 同巡内フリテンの現在状態。
-    pub same_turn: Option<bool>,
-    /// リーチ後にロン可能なアガリ牌を見逃したことによる、局終了まで続くフリテンの現在状態。
-    pub riichi_missed_win: Option<bool>,
 }
 
 impl TableStateFacts {

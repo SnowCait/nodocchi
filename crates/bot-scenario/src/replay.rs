@@ -206,7 +206,7 @@ mod tests {
         );
         assert_eq!(
             captured.scenario.context.history_furiten(),
-            bot_core::HistoryFuritenFacts::default()
+            bot_logic::HistoryFuritenFacts::default()
         );
     }
 

@@ -747,7 +747,7 @@ mod tests {
         );
         assert_eq!(
             context.history_furiten(),
-            bot_core::HistoryFuritenFacts::default()
+            bot_logic::HistoryFuritenFacts::default()
         );
     }
 

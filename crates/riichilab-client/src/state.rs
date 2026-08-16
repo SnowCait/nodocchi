@@ -1,5 +1,4 @@
-use bot_core::HistoryFuritenFacts;
-use bot_logic::TileType;
+use bot_logic::{HistoryFuritenFacts, TileType};
 
 const PLAYER_COUNT: usize = 4;
 

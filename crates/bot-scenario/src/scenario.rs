@@ -1,8 +1,5 @@
-use bot_core::{
-    GameContext, HistoryFuritenFacts, LegalAction, Meld, MeldKind, TableStateFacts,
-    seat_wind_for_player,
-};
-use bot_logic::{TileId, TileType};
+use bot_core::{GameContext, LegalAction, Meld, MeldKind, TableStateFacts, seat_wind_for_player};
+use bot_logic::{HistoryFuritenFacts, TileId, TileType};
 use serde::Deserialize;
 
 use crate::error::ScenarioError;
