@@ -28,6 +28,7 @@ pub fn format_diagnostic(
     let mut sections = vec![
         format_scenario(scenario, verbose),
         format_table_state(&scenario.context),
+        format_history_furiten(diagnostic),
         format_final_decision(diagnostic),
         format_pon(diagnostic.pon.as_ref(), verbose),
         format_normal_discard(diagnostic),
@@ -62,6 +63,22 @@ pub fn format_diagnostic(
     sections.push(format_summary(scenario, diagnostic));
 
     sections.join("\n\n")
+}
+
+fn format_history_furiten(diagnostic: &ShantenDecisionDiagnostic) -> String {
+    fn value(value: Option<bool>) -> &'static str {
+        match value {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => UNKNOWN,
+        }
+    }
+
+    format!(
+        "History furiten\n  same turn: {}\n  riichi missed win: {}",
+        value(diagnostic.history_furiten.same_turn),
+        value(diagnostic.history_furiten.riichi_missed_win)
+    )
 }
 
 fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
@@ -1408,6 +1425,7 @@ mod tests {
             block.lines().next().unwrap_or_default(),
             "Scenario"
                 | "Table state"
+                | "History furiten"
                 | "Final decision"
                 | "Pon"
                 | "Normal discard"
@@ -1426,6 +1444,22 @@ mod tests {
 
     fn sections(output: &str) -> Vec<&str> {
         output.split("\n\n").collect()
+    }
+
+    #[test]
+    fn formats_known_and_unknown_history_furiten() {
+        let (_, _, known) = rendered(
+            r#"{"hand":"123m","history_furiten":{"same_turn":true,"riichi_missed_win":false}}"#,
+            false,
+        );
+        let known = section(&known, "History furiten");
+        assert!(known.contains("  same turn: true"));
+        assert!(known.contains("  riichi missed win: false"));
+
+        let (_, _, unknown) = rendered(r#"{"hand":"123m"}"#, false);
+        let unknown = section(&unknown, "History furiten");
+        assert!(unknown.contains("  same turn: unknown"));
+        assert!(unknown.contains("  riichi missed win: unknown"));
     }
 
     fn candidate_block(output: &str, header: &str, tile: &str) -> String {

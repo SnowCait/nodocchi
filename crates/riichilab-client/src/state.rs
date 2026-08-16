@@ -1,3 +1,4 @@
+use bot_core::HistoryFuritenFacts;
 use bot_logic::TileType;
 
 const PLAYER_COUNT: usize = 4;
@@ -9,6 +10,8 @@ pub struct ValidationState {
     pending_reach: [bool; PLAYER_COUNT],
     active_reach: [bool; PLAYER_COUNT],
     post_reach_passed_tiles: [Vec<TileType>; PLAYER_COUNT],
+    history_furiten: HistoryFuritenFacts,
+    own_tsumo_pending_discard: bool,
 }
 
 impl ValidationState {
@@ -36,19 +39,34 @@ impl ValidationState {
         &self.post_reach_passed_tiles
     }
 
+    pub fn history_furiten(&self) -> HistoryFuritenFacts {
+        self.history_furiten
+    }
+
     pub fn on_start_game(&mut self, id: u8) {
         self.seat_id = Some(id);
         self.last_tsumo = None;
         self.reset_reach_tracking();
+        self.history_furiten = HistoryFuritenFacts::default();
+        self.own_tsumo_pending_discard = false;
     }
 
     pub fn on_start_kyoku(&mut self) {
         self.reset_reach_tracking();
+        self.last_tsumo = None;
+        self.history_furiten = HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        };
+        self.own_tsumo_pending_discard = false;
     }
 
     pub fn on_tsumo(&mut self, actor: u8, pai: String) {
-        if Some(actor) == self.seat_id && pai != "?" {
-            self.last_tsumo = Some(pai);
+        if Some(actor) == self.seat_id {
+            self.own_tsumo_pending_discard = true;
+            if pai != "?" {
+                self.last_tsumo = Some(pai);
+            }
         }
     }
 
@@ -63,10 +81,38 @@ impl ValidationState {
             return;
         }
         if Some(actor) == self.seat_id {
+            if self.own_tsumo_pending_discard {
+                self.history_furiten.same_turn = Some(false);
+            }
+            self.own_tsumo_pending_discard = false;
             self.last_tsumo = None;
         }
         self.record_post_reach_passed_tile(actor, pai);
         self.establish_pending_reach(actor);
+    }
+
+    /// legal Hora を選ばなかった claim decision を履歴依存フリテンとして記録する。
+    ///
+    /// 自摸直後の Hora はツモ和了なので対象外。新局開始を観測できず state が unknown の場合も、
+    /// リーチ状態を false と推測して記録しない。
+    pub fn on_action_response(&mut self, ron_legal: bool, chose_hora: bool) {
+        if !ron_legal || chose_hora || self.own_tsumo_pending_discard {
+            return;
+        }
+        if self.history_furiten.same_turn.is_none()
+            || self.history_furiten.riichi_missed_win.is_none()
+        {
+            return;
+        }
+        let Some(player) = self.seat_id.map(usize::from) else {
+            return;
+        };
+        if self.is_reach_active(player) {
+            self.history_furiten.same_turn = Some(true);
+            self.history_furiten.riichi_missed_win = Some(true);
+        } else {
+            self.history_furiten.same_turn = Some(true);
+        }
     }
 
     pub fn actor_or_default(&self) -> u8 {
@@ -187,6 +233,115 @@ mod tests {
         assert_eq!(state.actor_or_default(), 0);
         state.on_start_game(3);
         assert_eq!(state.actor_or_default(), 3);
+    }
+
+    mod history_furiten {
+        use super::*;
+
+        fn started() -> ValidationState {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            state.on_start_kyoku();
+            state
+        }
+
+        #[test]
+        fn is_unknown_until_a_kyoku_start_is_observed() {
+            let state = ValidationState::new();
+            assert_eq!(state.history_furiten(), HistoryFuritenFacts::default());
+        }
+
+        #[test]
+        fn non_riichi_legal_ron_pass_sets_same_turn_only() {
+            let mut state = started();
+            state.on_action_response(true, false);
+            assert_eq!(
+                state.history_furiten(),
+                HistoryFuritenFacts {
+                    same_turn: Some(true),
+                    riichi_missed_win: Some(false),
+                }
+            );
+        }
+
+        #[test]
+        fn no_legal_ron_or_choosing_ron_does_not_set_furiten() {
+            for (ron_legal, chose_hora) in [(false, false), (true, true)] {
+                let mut state = started();
+                state.on_action_response(ron_legal, chose_hora);
+                assert_eq!(
+                    state.history_furiten(),
+                    HistoryFuritenFacts {
+                        same_turn: Some(false),
+                        riichi_missed_win: Some(false),
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn own_tsumo_then_dahai_clears_same_turn() {
+            let mut state = started();
+            state.on_action_response(true, false);
+            state.on_tsumo(0, "?".to_string());
+            assert_eq!(state.history_furiten().same_turn, Some(true));
+            state.on_dahai(0, "1m");
+            assert_eq!(state.history_furiten().same_turn, Some(false));
+        }
+
+        #[test]
+        fn own_dahai_without_own_tsumo_does_not_clear_same_turn() {
+            let mut state = started();
+            state.on_action_response(true, false);
+            state.on_dahai(0, "1m");
+            assert_eq!(state.history_furiten().same_turn, Some(true));
+        }
+
+        #[test]
+        fn passing_tsumo_hora_does_not_set_missed_ron() {
+            let mut state = started();
+            state.on_tsumo(0, "1m".to_string());
+            state.on_action_response(true, false);
+            assert_eq!(
+                state.history_furiten(),
+                HistoryFuritenFacts {
+                    same_turn: Some(false),
+                    riichi_missed_win: Some(false),
+                }
+            );
+        }
+
+        #[test]
+        fn riichi_legal_ron_pass_sets_persistent_state() {
+            let mut state = started();
+            state.on_reach(0);
+            state.on_dahai(0, "1m");
+            state.on_action_response(true, false);
+            assert_eq!(state.history_furiten().same_turn, Some(true));
+            assert_eq!(state.history_furiten().riichi_missed_win, Some(true));
+
+            state.on_tsumo(0, "2m".to_string());
+            state.on_dahai(0, "2m");
+            assert_eq!(state.history_furiten().same_turn, Some(false));
+            assert_eq!(state.history_furiten().riichi_missed_win, Some(true));
+        }
+
+        #[test]
+        fn start_kyoku_resets_both_to_known_false() {
+            let mut state = started();
+            state.on_action_response(true, false);
+            state.on_reach(0);
+            state.on_dahai(0, "1m");
+            state.on_action_response(true, false);
+            state.on_start_kyoku();
+            assert_eq!(
+                state.history_furiten(),
+                HistoryFuritenFacts {
+                    same_turn: Some(false),
+                    riichi_missed_win: Some(false),
+                }
+            );
+        }
     }
 
     mod reach_tracking {

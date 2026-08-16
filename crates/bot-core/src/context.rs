@@ -34,6 +34,19 @@ pub struct TableStateFacts {
     pub kyoku: Option<u8>,
 }
 
+/// 過去の action 履歴に依存するフリテンの観測事実。
+///
+/// 自分の河と現在の待ちから計算する恒常フリテンとは別の入力事実として保持する。各 field は
+/// `None` (取得不能), `Some(false)` (該当しないことを確認済み), `Some(true)` (該当を確認済み)
+/// を区別する。現時点では診断専用で、ロン可否や action 選択には使用しない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryFuritenFacts {
+    /// 同巡内フリテンの現在状態。
+    pub same_turn: Option<bool>,
+    /// リーチ後にロン可能なアガリ牌を見逃したことによる、局終了まで続くフリテンの現在状態。
+    pub riichi_missed_win: Option<bool>,
+}
+
 impl TableStateFacts {
     /// 指定 player の現在持ち点。点棒が unknown な場合や範囲外の `player` では `None`。
     pub fn score_of(&self, player: usize) -> Option<i32> {
@@ -56,6 +69,7 @@ pub struct GameContext {
     melds: [Vec<Meld>; 4],
     post_reach_passed_tiles: [Vec<TileType>; 4],
     table_state: TableStateFacts,
+    history_furiten: HistoryFuritenFacts,
 }
 
 impl GameContext {
@@ -205,8 +219,17 @@ impl GameContext {
         self
     }
 
+    pub fn with_history_furiten_facts(mut self, history_furiten: HistoryFuritenFacts) -> Self {
+        self.history_furiten = history_furiten;
+        self
+    }
+
     pub fn drawn_tile(&self) -> Option<TileId> {
         self.drawn_tile
+    }
+
+    pub fn history_furiten(&self) -> HistoryFuritenFacts {
+        self.history_furiten
     }
 
     pub fn hand_tiles(&self) -> &[TileId] {
@@ -1474,5 +1497,30 @@ mod tests {
         let context = meld_context(Some(0), [melds, vec![], vec![], vec![]]);
         assert_eq!(context.own_melds().map(<[Meld]>::len), Some(5));
         assert_eq!(context.own_fixed_meld_count(), None);
+    }
+
+    #[test]
+    fn history_furiten_defaults_to_unknown_and_preserves_known_values() {
+        assert_eq!(
+            GameContext::default().history_furiten(),
+            HistoryFuritenFacts::default()
+        );
+        for facts in [
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+            HistoryFuritenFacts {
+                same_turn: Some(true),
+                riichi_missed_win: Some(true),
+            },
+        ] {
+            assert_eq!(
+                GameContext::default()
+                    .with_history_furiten_facts(facts)
+                    .history_furiten(),
+                facts
+            );
+        }
     }
 }

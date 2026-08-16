@@ -204,6 +204,10 @@ mod tests {
             captured.scenario.context,
             game_context_from_decoded_observation(&decoded)
         );
+        assert_eq!(
+            captured.scenario.context.history_furiten(),
+            bot_core::HistoryFuritenFacts::default()
+        );
     }
 
     #[test]
