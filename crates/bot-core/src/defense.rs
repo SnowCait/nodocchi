@@ -187,6 +187,19 @@ pub fn opponent_honor_value_for_players(
         .max()
 }
 
+// 対象牌でまだロンされ得るリーチ者。target ごとに評価が変わる safety はこの集合だけを集約する。
+//
+// 除外根拠はリーチ専用の現物判定 ([`is_genbutsu_for`]) で、本人の河と
+// `post_reach_passed_tiles` の両方を使う。全リーチ者に現物なら空になり、その場合の安全根拠は
+// [`is_genbutsu_for_all_reached`] と [`DefenseFallbackKind::Genbutsu`] が表す。
+fn ron_capable_reached_players(tile: TileType, context: &GameContext) -> Vec<usize> {
+    context
+        .reached_opponents()
+        .into_iter()
+        .filter(|&player| !is_genbutsu_for(tile, player, context))
+        .collect()
+}
+
 /// 全リーチ者に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
 ///
 /// 対象牌が現物のリーチ者からはロンされないので、そのリーチ者は集約対象から除外する。
@@ -199,12 +212,7 @@ pub fn opponent_honor_value_for_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<OpponentHonorValue> {
-    let targets: Vec<usize> = context
-        .reached_opponents()
-        .into_iter()
-        .filter(|&player| !is_genbutsu_for(tile, player, context))
-        .collect();
-    opponent_honor_value_for_players(tile, &targets, context)
+    opponent_honor_value_for_players(tile, &ron_capable_reached_players(tile, context), context)
 }
 
 type RankedHonorCandidate<'a> = (&'a LegalAction, HonorSafetyRank, Option<OpponentHonorValue>);
@@ -363,9 +371,10 @@ pub fn is_suji_for_any_reached(tile: TileType, context: &GameContext) -> bool {
     suji_safety_rank_for_any_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
 
-/// 全リーチ者に対して完全なスジか判定する。リーチ者がいなければ `false`。
+/// 対象牌が現物のリーチ者を除いた、まだロンされ得る全リーチ者に対して完全なスジか判定する。
 ///
-/// 一人でも片スジ / 無スジなら `false`。
+/// まだロンされ得るリーチ者が一人でも片スジ / 無スジなら `false`。リーチ者がいない場合と、
+/// 全リーチ者に現物で集約対象が空になる場合も `false`。
 pub fn is_suji_for_all_reached(tile: TileType, context: &GameContext) -> bool {
     suji_safety_rank_for_all_reached(tile, context) == Some(SujiSafetyRank::Suji)
 }
@@ -432,11 +441,12 @@ pub fn suji_safety_rank_for_any_reached(
     )
 }
 
-/// 全リーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
+/// 現物ではない全リーチ者の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
 ///
-/// 各リーチ者の [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。
-/// 例えば player1 に対して `Suji`・player2 に対して `HalfSuji` なら全体は `HalfSuji`。
-/// リーチ者がいなければ `NoSuji` で、安全牌としては扱わない。
+/// 対象牌が現物のリーチ者を除外し、まだロンされ得るリーチ者の
+/// [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。例えば player1 には現物、player2
+/// には `Suji` なら全体は `Suji`。リーチ者がいない場合と全リーチ者に現物の場合は `NoSuji`
+/// で、別のスジ安全性を捏造しない。
 ///
 /// これが数牌防御におけるスジ評価の source of truth。任意の player 集合向けの
 /// [`suji_safety_rank_for_players`] にリーチ者を渡す薄い wrapper。
@@ -444,11 +454,12 @@ pub fn suji_safety_rank_for_all_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<SujiSafetyRank> {
-    suji_safety_rank_for_players(tile, &context.reached_opponents(), context)
+    suji_safety_rank_for_players(tile, &ron_capable_reached_players(tile, context), context)
 }
 
 // 合法 Dahai のうち数牌のみを安全度の高い順(Suji → HalfSuji → NoSuji)に並べる。
-// 同安全度は元の順序を保つ。スジ判定は全リーチ者基準で、各リーチ者の rank の最小値を使う。
+// 同安全度は元の順序を保つ。スジ判定は現物ではない全リーチ者基準で、各リーチ者の rank の
+// 最小値を使う。
 pub fn suji_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
@@ -644,13 +655,13 @@ pub fn suited_safety_rank_for_players(
     Some(rank)
 }
 
-// 全リーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
-// 壁評価はスジ評価より優先する。スジ評価は全リーチ者に対する rank の最小値を使う。
+// 現物ではない全リーチ者に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
+// 壁評価はスジ評価より優先する。スジ評価は現物ではない全リーチ者に対する rank の最小値を使う。
 pub fn suited_safety_rank_for_all_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    suited_safety_rank_for_players(tile, &context.reached_opponents(), context)
+    suited_safety_rank_for_players(tile, &ron_capable_reached_players(tile, context), context)
 }
 
 /// 合法 Dahai のうち数牌のみを安全度の高い順
@@ -680,7 +691,7 @@ pub fn suited_dahai_actions_by_safety_with<'a>(
 
 // 合法 Dahai のうち数牌のみを安全度の高い順
 // (NoChance → OneChance → Suji → HalfSuji → NoSafety)に並べる。
-// 同安全度は元の順序を保つ。スジ判定は全リーチ者基準。
+// 同安全度は元の順序を保つ。スジ判定は現物ではない全リーチ者基準。
 pub fn suited_dahai_actions_by_safety<'a>(
     legal_actions: &'a [LegalAction],
     context: &GameContext,
@@ -806,10 +817,11 @@ pub struct DefenseFallbackDiagnostic {
     /// 同じ `selected_honor_safety_rank` の字牌どうしの tie-break に使った値。数牌では `None`。
     pub selected_opponent_honor_value: Option<OpponentHonorValue>,
     pub selected_wall_rank: Option<WallRank>,
-    /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
-    /// 片スジと無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
+    /// 現物ではない、まだロンされ得る全リーチ者に対して完全なスジなら `true`。
+    /// そのうち一人でも片スジ / 無スジなら `false`。集約対象が空の場合も `false`。片スジと
+    /// 無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
     pub selected_suji_for_all_reached: Option<bool>,
-    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`selected_suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
@@ -881,10 +893,11 @@ pub struct DefenseCandidateDiagnostic {
     /// 同じ `honor_safety_rank` の字牌どうしの tie-break に使う値。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
     pub wall_rank: Option<WallRank>,
-    /// 全リーチ者に対して完全なスジなら `true`。片スジ / 無スジはどちらも `false`。
-    /// 片スジと無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
+    /// 現物ではない、まだロンされ得る全リーチ者に対して完全なスジなら `true`。
+    /// そのうち一人でも片スジ / 無スジなら `false`。集約対象が空の場合も `false`。片スジと
+    /// 無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
     pub suji_for_all_reached: Option<bool>,
-    /// 全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
@@ -2705,6 +2718,125 @@ mod tests {
         assert_eq!(
             suji_safety_rank_for_all_reached(four_pin, &context),
             Some(SujiSafetyRank::NoSuji)
+        );
+    }
+
+    #[test]
+    fn genbutsu_in_own_river_is_excluded_from_reached_suji_aggregation() {
+        let nine_man = tile_type("9m");
+        let context = two_reachers_context(vec![discarded("9m")], vec![discarded("6m")]);
+
+        assert!(is_discarded_by_player(nine_man, 1, &context));
+        assert!(is_genbutsu_for(nine_man, 1, &context));
+        assert_eq!(
+            suji_safety_rank_for(nine_man, 1, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert!(!is_genbutsu_for(nine_man, 2, &context));
+        assert_eq!(
+            suji_safety_rank_for(nine_man, 2, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(nine_man, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(nine_man, &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+
+        let action = LegalAction::Dahai { tile: held("9m") };
+        let candidate =
+            DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+        assert_eq!(
+            candidate.suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(candidate.suited_safety_rank, Some(SuitedSafetyRank::Suji));
+
+        let diagnostic = DefenseFallbackDiagnostic::from_selection(
+            &context,
+            &action,
+            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji),
+        );
+        assert_eq!(
+            diagnostic.selected_suji_safety_rank_for_all_reached,
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            diagnostic.selected_suited_safety_rank,
+            Some(SuitedSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn post_reach_genbutsu_is_excluded_from_reached_suji_aggregation() {
+        let nine_man = tile_type("9m");
+        let context = post_reach_context(
+            Some(0),
+            [vec![], vec![], vec![discarded("6m")], vec![]],
+            [false, true, true, false],
+            [vec![], vec![nine_man], vec![], vec![]],
+        );
+
+        assert!(!is_discarded_by_player(nine_man, 1, &context));
+        assert!(context.is_post_reach_passed(nine_man, 1));
+        assert!(is_genbutsu_for(nine_man, 1, &context));
+        assert_eq!(
+            suji_safety_rank_for(nine_man, 1, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suji_safety_rank_for_all_reached(nine_man, &context),
+            Some(SujiSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(nine_man, &context),
+            Some(SuitedSafetyRank::Suji)
+        );
+    }
+
+    #[test]
+    fn non_genbutsu_no_suji_reacher_still_makes_the_aggregate_unsafe() {
+        let nine_man = tile_type("9m");
+        let context = two_reachers_context(vec![discarded("9m")], vec![]);
+
+        assert!(is_genbutsu_for(nine_man, 1, &context));
+        assert!(!is_genbutsu_for(nine_man, 2, &context));
+        assert_eq!(
+            suji_safety_rank_for_all_reached(nine_man, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(nine_man, &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+    }
+
+    #[test]
+    fn all_reachers_genbutsu_keeps_genbutsu_as_the_fallback_source() {
+        let nine_man = tile_type("9m");
+        let context = post_reach_context(
+            Some(0),
+            [vec![], vec![discarded("9m")], vec![], vec![]],
+            [false, true, true, false],
+            [vec![], vec![], vec![nine_man], vec![]],
+        );
+        let actions = vec![LegalAction::Dahai { tile: held("9m") }];
+
+        assert!(is_genbutsu_for_all_reached(nine_man, &context));
+        assert_eq!(
+            suji_safety_rank_for_all_reached(nine_man, &context),
+            Some(SujiSafetyRank::NoSuji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(nine_man, &context),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+        assert_eq!(
+            select_defense_fallback_action_with_kind(&context, &actions),
+            Some((&actions[0], DefenseFallbackKind::Genbutsu))
         );
     }
 
