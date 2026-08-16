@@ -716,8 +716,24 @@ pub enum DefenseFallbackKind {
     SuitedSafety(SuitedSafetyRank),
 }
 
+/// 最上位の字牌候補より数牌候補を優先する、限定的な横断比較。
+///
+/// 字牌・数牌全体の包括的な順位ではなく、1枚見えの連風牌が完全スジ以上の数牌より無条件に
+/// 優先されていたケースだけを補正する。2枚以上見えた字牌や客風など、既存の明確に安全な字牌の
+/// 優先順位は変えない。
+pub fn suited_safety_outweighs_honor(
+    honor_rank: HonorSafetyRank,
+    opponent_honor_value: Option<OpponentHonorValue>,
+    suited_rank: SuitedSafetyRank,
+) -> bool {
+    honor_rank == HonorSafetyRank::OneVisible
+        && opponent_honor_value == Some(OpponentHonorValue::DoubleWind)
+        && suited_rank >= SuitedSafetyRank::Suji
+}
+
 // 他家リーチ中の防御 fallback を優先順位付きで選ぶ。
-// 現物 → 字牌 safety → 数牌防御 の順に評価し、選ばれた種別を添えて返す。
+// 全リーチ者への共通現物を最優先にし、その候補が無い場合は最上位の字牌・数牌候補を限定的に
+// 横断比較して、選ばれた種別を添えて返す。
 //
 // 現物は黒5対応済みの select_genbutsu_fallback_action をそのまま利用する。字牌 safety と
 // 数牌 safety は DefenseFallbackKind に載せる rank を候補列から一度に得るため、候補列を直接
@@ -731,22 +747,36 @@ pub fn select_defense_fallback_action_with_kind<'a>(
         return Some((action, DefenseFallbackKind::Genbutsu));
     }
 
-    if context.any_opponent_reached()
-        && let Some((action, rank)) = honor_dahai_actions_by_safety(legal_actions, context)
+    if context.any_opponent_reached() {
+        let honor = honor_dahai_actions_by_safety(legal_actions, context)
             .into_iter()
-            .next()
-    {
-        let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, DefenseFallbackKind::HonorSafety(rank)));
-    }
+            .next();
+        let suited = suited_dahai_actions_by_safety(legal_actions, context)
+            .into_iter()
+            .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety);
 
-    if context.any_opponent_reached()
-        && let Some((action, rank)) = suited_dahai_actions_by_safety(legal_actions, context)
-            .into_iter()
-            .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety)
-    {
-        let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, DefenseFallbackKind::SuitedSafety(rank)));
+        if let (Some((honor_action, honor_rank)), Some((suited_action, suited_rank))) =
+            (honor, suited)
+            && let LegalAction::Dahai { tile: honor_tile } = honor_action
+            && suited_safety_outweighs_honor(
+                honor_rank,
+                opponent_honor_value_for_reached(honor_tile.tile_type(), context),
+                suited_rank,
+            )
+        {
+            let action = prefer_black_five_for_action(legal_actions, suited_action);
+            return Some((action, DefenseFallbackKind::SuitedSafety(suited_rank)));
+        }
+
+        if let Some((action, rank)) = honor {
+            let action = prefer_black_five_for_action(legal_actions, action);
+            return Some((action, DefenseFallbackKind::HonorSafety(rank)));
+        }
+
+        if let Some((action, rank)) = suited {
+            let action = prefer_black_five_for_action(legal_actions, action);
+            return Some((action, DefenseFallbackKind::SuitedSafety(rank)));
+        }
     }
 
     None
@@ -4619,5 +4649,33 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.suited_safety_rank == Some(SuitedSafetyRank::NoSafety))
         );
+    }
+
+    #[test]
+    fn one_visible_double_wind_is_outweighed_by_full_suji() {
+        assert!(suited_safety_outweighs_honor(
+            HonorSafetyRank::OneVisible,
+            Some(OpponentHonorValue::DoubleWind),
+            SuitedSafetyRank::Suji,
+        ));
+    }
+
+    #[test]
+    fn cross_category_rule_does_not_demote_clearly_safe_honors() {
+        for honor_rank in [
+            HonorSafetyRank::TwoVisible,
+            HonorSafetyRank::ThreeOrMoreVisible,
+        ] {
+            assert!(!suited_safety_outweighs_honor(
+                honor_rank,
+                Some(OpponentHonorValue::DoubleWind),
+                SuitedSafetyRank::NoChance,
+            ));
+        }
+        assert!(!suited_safety_outweighs_honor(
+            HonorSafetyRank::OneVisible,
+            Some(OpponentHonorValue::GuestWind),
+            SuitedSafetyRank::NoChance,
+        ));
     }
 }
