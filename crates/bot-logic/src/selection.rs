@@ -19,14 +19,15 @@ use crate::discard::{
 /// 既存 weighted tenpai wait を適用する現在打牌後の向聴数。
 pub(crate) const TENPAI_WAIT_TARGET_SHANTEN: i8 = 1;
 
-// 前方評価が待ちを集計する2手目の向聴数。
 /// 1手目の有効牌の残枚数で、その後の受け入れを重み付けした共通集計値。
 ///
-/// - `weighted_remaining` = Σ(受け入れ牌の残枚数 × そのテンパイの和了牌残枚数)
-/// - `weighted_type_count` = Σ(受け入れ牌の残枚数 × そのテンパイの待ち牌種類数)
+/// - `weighted_remaining` = Σ(first draw remaining × next discard acceptance remaining)
+/// - `weighted_type_count` = Σ(first draw remaining × next discard acceptance type count)
 ///
+/// `next_discard.min_shanten_after_discard()` が呼び出し側の `required_next_shanten` と一致する
+/// 枝だけを集計する。1向聴では `required_next_shanten = 0` なので next acceptance をテンパイ待ち
+/// として解釈し、2向聴以上では1手進んだ後の次の有効牌として解釈する。
 /// どちらも平均や確率へ正規化しない生の重み付き合計で、桁溢れを避けるため `u32` で保持する。
-/// 待ち牌がすべて見えている死にテンへ進む枝の寄与は 0 で、これは意図した値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WeightedForwardMetric {
     pub weighted_remaining: u32,
@@ -36,8 +37,8 @@ pub struct WeightedForwardMetric {
 impl WeightedForwardMetric {
     /// 受け入れ牌1枚分の枝を加算する。
     ///
-    /// `next_discard` は既存評価が選んだ2手目の最良打牌。`None` の場合や2手目がテンパイに
-    /// ならない場合、その枝の寄与は 0 にする。
+    /// `next_discard` は既存評価が選んだ2手目の最良打牌。`None` の場合、または次打牌後の向聴数が
+    /// `required_next_shanten` と一致しない場合、その枝の寄与は 0 にする。
     pub(crate) fn accumulate(
         &mut self,
         first_draw_remaining: u8,
@@ -57,7 +58,9 @@ impl WeightedForwardMetric {
     }
 }
 
+/// 1向聴で next acceptance をテンパイ待ちとして解釈する alias。
 pub type TenpaiWaitMetric = WeightedForwardMetric;
+/// 2向聴以上で next acceptance を1手進んだ後の次の有効牌として解釈する alias。
 pub type NextAcceptanceMetric = WeightedForwardMetric;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

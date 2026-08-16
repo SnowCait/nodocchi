@@ -1762,13 +1762,14 @@ mod tests {
     fn ryanshanten_scenario_reports_weighted_next_acceptance_selection() {
         let (_, diagnostic, output) = rendered(RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO, true);
         let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
+        assert_eq!(candidates.len(), 9, "all discard tile types must be legal");
         let selected = candidates
             .iter()
             .find(|candidate| candidate.selected)
             .unwrap();
         let runner_up = candidates
             .iter()
-            .find(|candidate| !candidate.selected)
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "6s")
             .unwrap();
         assert_eq!(selected.evaluation.discard.to_mjai_string(), "7p");
         assert_eq!(runner_up.evaluation.discard.to_mjai_string(), "6s");
@@ -1787,6 +1788,29 @@ mod tests {
         assert!(
             output.contains("runner-up lost by: WeightedNextAcceptanceRemaining"),
             "{output}"
+        );
+    }
+
+    #[test]
+    fn ryanshanten_scenario_keeps_act_and_diagnostics_consistent() {
+        let scenario = scenario_from_json(RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO);
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        let diagnosed = diagnose(&scenario);
+        let with_lookahead = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+
+        assert_eq!(scenario.legal_actions.len(), 9);
+        assert_eq!(acted, diagnosed.selected_action);
+        assert_eq!(acted, with_lookahead.selected_action);
+        assert_eq!(
+            acted,
+            LegalAction::Dahai {
+                tile: TileId::new(60).unwrap()
+            }
         );
     }
 

@@ -1607,6 +1607,13 @@ pub(crate) mod tests {
         vec![dahai(92), dahai(60)]
     }
 
+    fn ryanshanten_all_actions() -> Vec<LegalAction> {
+        RYANSHANTEN_FORWARD_TILES
+            .iter()
+            .map(|&value| dahai(value))
+            .collect()
+    }
+
     #[test]
     fn weighted_next_acceptance_changes_a_real_hand_selection() {
         let context = ryanshanten_forward_context();
@@ -1655,6 +1662,47 @@ pub(crate) mod tests {
         );
         assert_eq!(selected.tenpai_wait, None);
         assert!(with.lookahead.is_some());
+    }
+
+    #[test]
+    fn weighted_next_acceptance_improves_selection_with_all_legal_discards() {
+        let context = ryanshanten_forward_context();
+        let actions = ryanshanten_all_actions();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let one_step = select_best_one_step_evaluation(&legal.evaluations).unwrap();
+        let normal = select_discard_action_with_evaluation(&context, &actions);
+        let without = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+
+        assert_eq!(legal.evaluations.len(), 9);
+        assert_eq!(one_step.discard, tile(92).tile_type());
+        assert_eq!(normal.action, Some(dahai(60)));
+        assert_eq!(normal, without.selection);
+        assert_eq!(without.selection, with.selection);
+        assert_eq!(without.diagnostic, with.diagnostic);
+
+        let selected = without
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .unwrap();
+        let runner_up = without
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == one_step.discard)
+            .unwrap();
+        assert_eq!(selected.evaluation.discard, tile(60).tile_type());
+        assert_eq!(runner_up.evaluation.discard, tile(92).tile_type());
+        assert_eq!(
+            runner_up.comparison_reason,
+            bot_logic::DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+        assert_eq!(selected.next_acceptance.unwrap().weighted_remaining, 428);
+        assert_eq!(selected.next_acceptance.unwrap().weighted_type_count, 138);
+        assert_eq!(runner_up.next_acceptance.unwrap().weighted_remaining, 396);
+        assert_eq!(runner_up.next_acceptance.unwrap().weighted_type_count, 128);
     }
 
     // ---- 構造化診断付き選択 (select_discard_action_with_diagnostic) ----
