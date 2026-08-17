@@ -271,6 +271,28 @@ impl PushPullInputs {
     pub fn has_combined_threat(&self) -> bool {
         self.opponent_reach_count >= 1 && self.has_high_open_hand_threat()
     }
+
+    /// High OpenHandThreat の対象がすべて「1副露かつ河12枚以上」だけで High になった相手か。
+    ///
+    /// High target の特定には分類済みの `open_hand_threats` を使い、その target の意味は対応する
+    /// `player_threats` の観測 facts で確認する。diagnostic reason には依存せず、High 条件そのものも
+    /// ここでは分類し直さない。High target がいない場合は `false`。
+    pub fn has_only_late_one_meld_high_open_hand_threats(&self) -> bool {
+        let mut has_high_target = false;
+
+        for (facts, assessment) in self.player_threats.iter().zip(&self.open_hand_threats) {
+            if !assessment.is_high() {
+                continue;
+            }
+
+            has_high_target = true;
+            if facts.open_meld_count != 1 || facts.discard_count < 12 {
+                return false;
+            }
+        }
+
+        has_high_target
+    }
 }
 
 /// 押し引き判定がどの条件で下されたかを表す理由。
@@ -289,6 +311,8 @@ pub enum PushPullReason {
     TwoOrMoreShantenAgainstReach,
     MissingOffenseAgainstHighOpenHand,
     StrongTenpaiAgainstHighOpenHand,
+    /// 終盤の1副露だけが High target の局面で、通常打牌後がテンパイなので押す。
+    TenpaiAgainstLateOneMeldHighOpenHand,
     WeakTenpaiAgainstHighOpenHand,
     IishantenAgainstHighOpenHand,
     TwoOrMoreShantenAgainstHighOpenHand,
@@ -504,19 +528,21 @@ fn is_strong_tenpai(offense: &PushPullOffenseState) -> bool {
 /// 押し引きを判定する pure な暫定 helper。
 ///
 /// 明確な threat が無ければ従来どおり通常の攻撃判断 (`Push`) を続ける。明確な threat がある
-/// 場合は、打牌後が強いテンパイのときだけ押し、それ以外は降りる。
+/// 場合は、原則として打牌後が強いテンパイのときだけ押し、それ以外は降りる。ただし他家リーチが
+/// なく、High target がすべて1副露かつ河12枚以上なら、通常打牌後がテンパイであれば強さを問わず
+/// 押す。
 ///
 /// | 自分の状態 | mode |
 /// | --- | --- |
 /// | 攻撃評価を作れない | `Fold` |
 /// | 強いテンパイ | `Push` |
-/// | 強いと確認できないテンパイ | `Fold` |
+/// | 強いと確認できないテンパイ | `Fold` (終盤1副露 High だけなら `Push`) |
 /// | 一向聴 | `Fold` |
 /// | 二向聴以上 | `Fold` |
 ///
-/// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類
-/// で、境界はどれも同じ。親リーチ・複数リーチでも強いテンパイなら押し、`Present` の副露相手は
-/// threat に数えない。threat の種類は [`PushPullReason`] だけで区別する。
+/// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
+/// 終盤1副露 High だけの例外は High OpenHandThreat 単独に限り、Riichi / Combined や2副露以上を
+/// 含む High には適用しない。`Present` の副露相手は threat に数えない。
 ///
 /// 情報不足 (攻撃評価なし / テンパイなのに待ちを構築できない / 恒常フリテンが判定不能) の場合は
 /// 攻撃継続を推測せず `Fold` にする。`Neutral` にすると通常打牌が防御 fallback より優先され、
@@ -553,10 +579,17 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         };
     };
 
-    // 3. テンパイ相当(向聴 <= 0)。強いテンパイだけ押す。
+    // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、または終盤1副露 High だけなら押す。
     if offense.min_shanten_after_discard <= 0 {
         let (mode, reason) = if is_strong_tenpai(&offense) {
             (PushPullMode::Push, reasons.strong_tenpai)
+        } else if threat == ThreatKind::HighOpenHand
+            && inputs.has_only_late_one_meld_high_open_hand_threats()
+        {
+            (
+                PushPullMode::Push,
+                PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+            )
         } else {
             (PushPullMode::Fold, reasons.weak_tenpai)
         };
@@ -2096,6 +2129,17 @@ mod tests {
         open_meld_facts_of(1, 3, [false; 4], Some(0))
     }
 
+    // player 1 が1副露かつ河12枚で High になる facts。
+    fn late_one_meld_high_facts() -> [PlayerThreatFacts; 4] {
+        let mut facts = open_meld_facts_of(1, 1, [false; 4], Some(0));
+        facts[1].discard_count = 12;
+        facts
+    }
+
+    fn late_one_meld_high_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
+        inputs_with_threats(0, false, false, offense, late_one_meld_high_facts())
+    }
+
     // High の副露相手だけがいる局面の押し引き入力。
     fn high_open_hand_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
         high_open_hand_inputs_with_dealer(false, offense)
@@ -2159,6 +2203,95 @@ mod tests {
                 PushPullReason::StrongTenpaiAgainstHighOpenHand,
             );
         }
+    }
+
+    #[test]
+    fn tenpai_against_only_a_late_one_meld_high_open_hand_pushes() {
+        let weak = late_one_meld_high_inputs(Some(tenpai_offense(3, PermanentFuriten::No)));
+        assert!(weak.has_only_late_one_meld_high_open_hand_threats());
+        assert_high_open_hand_decision(
+            &weak,
+            PushPullMode::Push,
+            PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+        );
+
+        // strong tenpai は専用例外ではなく既存 reason のまま押す。
+        assert_high_open_hand_decision(
+            &late_one_meld_high_inputs(Some(strong_tenpai_offense())),
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn non_tenpai_against_a_late_one_meld_high_open_hand_still_folds() {
+        assert_high_open_hand_decision(
+            &late_one_meld_high_inputs(Some(offense(1, 8, 3))),
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        );
+        assert_high_open_hand_decision(
+            &late_one_meld_high_inputs(Some(offense(2, 20, 4))),
+            PushPullMode::Fold,
+            PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn weak_tenpai_against_a_two_meld_high_open_hand_still_folds() {
+        let mut facts = open_meld_facts_of(1, 2, [false; 4], Some(0));
+        facts[1].discard_count = 9;
+        let inputs = inputs_with_threats(0, false, false, Some(weak_tenpai_offense()), facts);
+
+        assert!(!inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn every_high_target_must_be_a_late_one_meld_open_hand() {
+        let mut all_late = late_one_meld_high_facts();
+        let mut second_late = open_meld_facts_of(2, 1, [false; 4], Some(0));
+        second_late[2].discard_count = 13;
+        all_late[2] = second_late[2];
+        let all_late_inputs =
+            inputs_with_threats(0, false, false, Some(weak_tenpai_offense()), all_late);
+        assert!(all_late_inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert_high_open_hand_decision(
+            &all_late_inputs,
+            PushPullMode::Push,
+            PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+        );
+
+        let mut mixed = late_one_meld_high_facts();
+        let mut two_meld = open_meld_facts_of(2, 2, [false; 4], Some(0));
+        two_meld[2].discard_count = 9;
+        mixed[2] = two_meld[2];
+        let mixed_inputs = inputs_with_threats(0, false, false, Some(weak_tenpai_offense()), mixed);
+        assert!(!mixed_inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert_high_open_hand_decision(
+            &mixed_inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_reach_keeps_the_strong_tenpai_threshold_with_a_late_one_meld_high() {
+        let mut facts = late_one_meld_high_facts();
+        facts[2].reached = true;
+        let inputs = inputs_with_threats(1, false, false, Some(weak_tenpai_offense()), facts);
+
+        assert!(inputs.has_combined_threat());
+        assert!(inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstCombinedThreat,
+        );
     }
 
     #[test]
