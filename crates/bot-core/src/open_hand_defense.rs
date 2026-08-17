@@ -4,9 +4,8 @@
 //! 別実装しない。リーチ者向けの `*_for_all_reached` と違うのは対象 player 集合の決め方と、
 //! 「現物相当」の根拠だけ。
 //!
-//! 現物相当の根拠は対象 player 自身の河 ([`is_discarded_by_player`]) だけで、
-//! `post_reach_passed_tiles`(リーチ成立後に他家から切られて通った牌)は使わない。あちらは
-//! リーチ固有の情報なので、非リーチ副露相手へは流用しない。
+//! ロン安全の根拠は対象 player 自身の河と、その player の手牌が最後に変化してから他家から
+//! 切られて通った一時安全牌。`post_reach_passed_tiles` はリーチ固有なので流用しない。
 //!
 //! 防御 fallback の action 選択は [`select_open_hand_defense_fallback_action_with_kind`] が
 //! source of truth で、[`OpenHandDefenseDiagnostic`] はその結果を写すだけにする。
@@ -50,6 +49,15 @@ pub fn high_open_hand_threat_players_from_context(context: &GameContext) -> Vec<
     high_open_hand_threat_players_from_facts(&player_threat_facts_from_context(context))
 }
 
+/// 非リーチ副露 target にこの牌でロンされないと言えるか判定する source of truth。
+pub fn is_ron_safe_for_open_hand_target(
+    tile: TileType,
+    player: usize,
+    context: &GameContext,
+) -> bool {
+    is_discarded_by_player(tile, player, context) || context.is_temporary_passed(tile, player)
+}
+
 /// 全 target 自身の河にある牌か判定する。target が0人なら `false`。
 ///
 /// 判定は [`is_discarded_by_player`] の集約 ([`is_discarded_by_all_players`]) で、
@@ -62,11 +70,22 @@ pub fn is_discarded_by_all_open_hand_threats(
     is_discarded_by_all_players(tile, targets, context)
 }
 
+/// 全 OpenHand target にロンされないか。target が0人なら `false`。
+pub fn is_ron_safe_for_all_open_hand_targets(
+    tile: TileType,
+    targets: &[usize],
+    context: &GameContext,
+) -> bool {
+    !targets.is_empty()
+        && targets
+            .iter()
+            .all(|&player| is_ron_safe_for_open_hand_target(tile, player, context))
+}
+
 // 対象牌でまだロンされ得る target。target ごとに評価が変わる safety はこの集合だけを集約する。
 //
-// 対象牌が自身の河にある target はフリテンでその牌をロンできないため、その target の評価が
-// 全体の安全度を悪化させないよう除外する。除外根拠は本人の河 ([`is_discarded_by_player`]) だけ
-// で、`post_reach_passed_tiles` は使わない。
+// 対象牌が本人の河または現在有効な一時通過牌にある target はロンできないため、その target の
+// 評価が全体の安全度を悪化させないよう除外する。`post_reach_passed_tiles` は使わない。
 //
 // 全 target が対象牌を河に切っている場合は空になる。空集合は「安全と確定した」ではなく
 // 「target ごとの評価が無い」で、その場合の安全根拠は
@@ -75,7 +94,7 @@ fn ron_capable_targets(tile: TileType, targets: &[usize], context: &GameContext)
     targets
         .iter()
         .copied()
-        .filter(|&player| !is_discarded_by_player(tile, player, context))
+        .filter(|&player| !is_ron_safe_for_open_hand_target(tile, player, context))
         .collect()
 }
 
@@ -129,9 +148,8 @@ pub fn suited_safety_rank_for_open_hand_threats(
 /// 優先順位は既存 Defense ([`DefenseFallbackKind`](crate::defense::DefenseFallbackKind)) に
 /// 合わせて `DiscardedByAllTargets` → `HonorSafety` → `SuitedSafety`。
 ///
-/// 第一分類を `Genbutsu` と呼ばないのは、リーチ者向けの現物が `post_reach_passed_tiles` まで
-/// 含むのに対し、こちらは対象 player 自身の河だけを根拠にするため。「本人の河」と「リーチ後に
-/// 通った牌」の意味を混ぜない。
+/// 第一分類を `Genbutsu` と呼ばないのは、リーチ固有の `post_reach_passed_tiles` と、手牌変化まで
+/// だけ有効な一時通過牌の意味と寿命を混ぜないため。
 ///
 /// 現時点では診断専用で、この順位で action を選ぶことはしない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +167,7 @@ pub fn open_hand_defense_category(
     targets: &[usize],
     context: &GameContext,
 ) -> Option<OpenHandDefenseCategory> {
-    if is_discarded_by_all_open_hand_threats(tile, targets, context) {
+    if is_ron_safe_for_all_open_hand_targets(tile, targets, context) {
         return Some(OpenHandDefenseCategory::DiscardedByAllTargets);
     }
     if let Some(rank) = honor_safety_rank(tile, context) {
@@ -159,7 +177,7 @@ pub fn open_hand_defense_category(
         .map(OpenHandDefenseCategory::SuitedSafety)
 }
 
-/// 合法 Dahai のうち、全 target 自身の河にある牌を元の順序を保って抽出する。
+/// 合法 Dahai のうち、全 target にロンされない牌を元の順序を保って抽出する。
 ///
 /// 根拠は [`is_discarded_by_all_open_hand_threats`] だけで、target が0人なら空。
 pub fn discarded_by_all_targets_dahai_actions<'a>(
@@ -171,7 +189,7 @@ pub fn discarded_by_all_targets_dahai_actions<'a>(
         .iter()
         .filter(|action| match action {
             LegalAction::Dahai { tile } => {
-                is_discarded_by_all_open_hand_threats(tile.tile_type(), targets, context)
+                is_ron_safe_for_all_open_hand_targets(tile.tile_type(), targets, context)
             }
             _ => false,
         })
@@ -212,7 +230,7 @@ pub fn open_hand_suited_dahai_actions_by_safety<'a>(
 /// [`OpenHandDefenseCategory`] の並びどおり、全 target 本人の河 → 字牌 safety → 数牌 safety の
 /// 順に評価し、選ばれた大分類を添えて返す。target が0人なら `None`。
 ///
-/// - `DiscardedByAllTargets`: 全 target 自身の河にある牌。同順位では合法 Dahai の元順序を保つ。
+/// - `DiscardedByAllTargets`: 全 target にロンされない牌。同順位では合法 Dahai の元順序を保つ。
 /// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存リーチ Defense と同じ ranking。
 /// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存リーチ Defense と同じく
 ///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
@@ -279,6 +297,8 @@ pub struct OpenHandDefenseTargetSafety {
     /// この target 自身の河に同じ牌種があるか ([`is_discarded_by_player`])。
     /// `post_reach_passed_tiles` は含まない。
     pub discarded_by_target: bool,
+    /// 本人の河または現在有効な一時通過牌により、この target にロンされないか。
+    pub ron_safe: bool,
     /// この target の河に対する [`suji_safety_rank_for`]。字牌では `None`。
     ///
     /// この target 単独の評価そのもので、`discarded_by_target` による除外は行わない。集約側
@@ -308,6 +328,8 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     pub targets: Vec<OpenHandDefenseTargetSafety>,
     /// 全 target 自身の河にあるか。target が0人なら `false`。
     pub discarded_by_all_targets: bool,
+    /// 全 target に対して本人の河または一時通過牌によりロン安全か。
+    pub ron_safe_for_all_targets: bool,
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// target に対する [`opponent_honor_value_for_open_hand_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
@@ -349,10 +371,14 @@ impl OpenHandDefenseCandidateDiagnostic {
                 .map(|&player| OpenHandDefenseTargetSafety {
                     player,
                     discarded_by_target: is_discarded_by_player(tile_type, player, context),
+                    ron_safe: is_ron_safe_for_open_hand_target(tile_type, player, context),
                     suji_safety_rank: suji_safety_rank_for(tile_type, player, context),
                 })
                 .collect(),
             discarded_by_all_targets: is_discarded_by_all_open_hand_threats(
+                tile_type, targets, context,
+            ),
+            ron_safe_for_all_targets: is_ron_safe_for_all_open_hand_targets(
                 tile_type, targets, context,
             ),
             honor_safety_rank: honor_safety_rank(tile_type, context),
@@ -1206,11 +1232,13 @@ mod tests {
                 OpenHandDefenseTargetSafety {
                     player: 2,
                     discarded_by_target: true,
+                    ron_safe: true,
                     suji_safety_rank: Some(SujiSafetyRank::Suji),
                 },
                 OpenHandDefenseTargetSafety {
                     player: 3,
                     discarded_by_target: false,
+                    ron_safe: false,
                     suji_safety_rank: Some(SujiSafetyRank::HalfSuji),
                 },
             ]

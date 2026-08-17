@@ -14,8 +14,8 @@ use bot_core::{
     HonorSafetyRank, LegalAction, OpenHandDefenseCategory, OpponentHonorValue, PushPullMode,
     PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, SuitedSafetyRank, SujiSafetyRank,
     ThreatDefenseTarget, ThreatDefenseTargetKind, combined_defense_category,
-    combined_threat_defense_targets_from_context, honor_safety_rank, is_ron_safe_for_target,
-    is_safe_against_all_threats, opponent_honor_value_for_combined_threats,
+    combined_threat_defense_targets_from_context, honor_safety_rank, is_discarded_by_player,
+    is_ron_safe_for_target, is_safe_against_all_threats, opponent_honor_value_for_combined_threats,
     select_combined_threat_defense_fallback_action_with_kind,
     suited_safety_rank_for_combined_threats, suji_safety_rank_for,
     suji_safety_rank_for_combined_threats, wall_rank,
@@ -25,6 +25,8 @@ use bot_logic::TileType;
 use crate::scenario::{Scenario, ScenarioSpec};
 
 const COMBINED_THREAT_DEFENSE: &str = include_str!("../scenarios/combined_threat_defense.json");
+const REQUEST_131_TEMPORARY_PASSED: &str =
+    include_str!("../scenarios/request_131_temporary_passed.json");
 
 // リーチしている親。post_reach_passed もこの player の分だけが安全根拠になる。
 const RIICHI_TARGET: usize = 1;
@@ -43,6 +45,42 @@ fn resolve(spec: &ScenarioSpec) -> Scenario {
 
 fn scenario() -> Scenario {
     resolve(&spec())
+}
+
+#[test]
+fn request_131_selects_nine_man_after_drawing_eight_sou() {
+    let spec: ScenarioSpec = serde_json::from_str(REQUEST_131_TEMPORARY_PASSED).unwrap();
+    let scenario = resolve(&spec);
+    let diagnostic = diagnose(&scenario);
+    let nine_man = candidate(&diagnostic, "9m");
+
+    assert_eq!(
+        scenario.context.drawn_tile().unwrap().to_mjai_string(),
+        "8s"
+    );
+    assert!(is_discarded_by_player(
+        tile_type("9m"),
+        RIICHI_TARGET,
+        &scenario.context
+    ));
+    assert!(
+        scenario
+            .context
+            .is_temporary_passed(tile_type("9m"), OPEN_HAND_TARGET)
+    );
+    assert!(nine_man.targets.iter().all(|target| target.ron_safe));
+    assert_eq!(
+        nine_man.category,
+        Some(CombinedDefenseCategory::SafeAgainstAllThreats)
+    );
+    assert_eq!(
+        diagnostic
+            .combined_defense
+            .selected
+            .as_ref()
+            .map(|selection| discards(&selection.selected_action)),
+        Some(tile_type("9m"))
+    );
 }
 
 fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {

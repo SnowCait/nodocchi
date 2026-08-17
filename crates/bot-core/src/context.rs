@@ -55,6 +55,7 @@ pub struct GameContext {
     reached: [bool; 4],
     melds: [Vec<Meld>; 4],
     post_reach_passed_tiles: [Vec<TileType>; 4],
+    temporary_passed_tiles: Option<[Vec<TileType>; 4]>,
     table_state: TableStateFacts,
     history_furiten: HistoryFuritenFacts,
 }
@@ -201,6 +202,17 @@ impl GameContext {
         self
     }
 
+    /// 各 player の最後の手牌変化以降に、他家から切られてロンされず通った牌種。
+    ///
+    /// `None` は入力経路から履歴を取得できないことを表し、空配列 (`Some`) と区別する。
+    pub fn with_temporary_passed_tiles(
+        mut self,
+        temporary_passed_tiles: Option<[Vec<TileType>; 4]>,
+    ) -> Self {
+        self.temporary_passed_tiles = temporary_passed_tiles;
+        self
+    }
+
     pub fn with_table_state_facts(mut self, table_state: TableStateFacts) -> Self {
         self.table_state = table_state;
         self
@@ -314,6 +326,22 @@ impl GameContext {
 
     pub fn is_post_reach_passed(&self, tile: TileType, player: usize) -> bool {
         self.post_reach_passed_tiles_of(player)
+            .is_some_and(|tiles| tiles.contains(&tile))
+    }
+
+    pub fn temporary_passed_tiles(&self) -> Option<&[Vec<TileType>; 4]> {
+        self.temporary_passed_tiles.as_ref()
+    }
+
+    pub fn temporary_passed_tiles_of(&self, player: usize) -> Option<&[TileType]> {
+        self.temporary_passed_tiles
+            .as_ref()?
+            .get(player)
+            .map(Vec::as_slice)
+    }
+
+    pub fn is_temporary_passed(&self, tile: TileType, player: usize) -> bool {
+        self.temporary_passed_tiles_of(player)
             .is_some_and(|tiles| tiles.contains(&tile))
     }
 

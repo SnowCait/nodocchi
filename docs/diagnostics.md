@@ -143,13 +143,15 @@ OpenHand defense
 | `targets` | High の相手。いなければ `none` |
 | `discarded by target[n]` | target 自身の河に同じ牌種があるか |
 | `discarded by all targets` | 全 target 自身の河にあるか |
+| `ron safe[n]` | 本人の河または現在有効な一時通過牌により target にロンされないか |
+| `ron safe for all targets` | 全 target にロンされないか |
 | `honor safety` | 字牌の見え枚数による safety |
 | `opponent honor value` | まだロン可能な target に対する最も危険な役牌価値 |
 | `wall` | 壁 / ワンチャンス |
 | `suji safety[n]` / `suji safety` | target 個別 / 集約後のスジ safety |
 | `category` | `DiscardedByAllTargets` / `HonorSafety` / `SuitedSafety` |
 
-target 選択や `post_reach_passed` を使わない理由は [OpenHand Defense](ai/defense.md#openhand-defense) を参照してください。
+target 選択と `post_reach_passed` / `temporary_passed` の違いは [OpenHand Defense](ai/defense.md#openhand-defense) を参照してください。
 
 ## Combined defense
 

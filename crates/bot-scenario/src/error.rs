@@ -99,6 +99,9 @@ pub enum ScenarioError {
     #[error("post_reach_passed must have 4 elements, but has {count}")]
     PostReachPassedLength { count: usize },
 
+    #[error("temporary_passed must have 4 elements, but has {count}")]
+    TemporaryPassedLength { count: usize },
+
     #[error("melds must have 4 elements, but has {count}")]
     MeldsLength { count: usize },
 
