@@ -49,7 +49,7 @@ Final decision
 Final decision
   action: 5m
   source: OpenHandDefenseFallback
-  open hand defense category: DiscardedByAllTargets
+  open hand defense category: SafeAgainstAllTargets
 ```
 
 ## Normal discard と candidates
@@ -133,7 +133,7 @@ High OpenHandThreat の target と候補ごとの safety を表示します。
 OpenHand defense
   targets: 1, 3
   selected action: 5m
-  selected category: DiscardedByAllTargets
+  selected category: SafeAgainstAllTargets
 ```
 
 主な行:
@@ -143,13 +143,17 @@ OpenHand defense
 | `targets` | High の相手。いなければ `none` |
 | `discarded by target[n]` | target 自身の河に同じ牌種があるか |
 | `discarded by all targets` | 全 target 自身の河にあるか |
+| `ron safe[n]` | 本人の河または現在有効な一時通過牌により target にロンされないか |
+| `ron safe for all targets` | 全 target にロンされないか |
 | `honor safety` | 字牌の見え枚数による safety |
 | `opponent honor value` | まだロン可能な target に対する最も危険な役牌価値 |
 | `wall` | 壁 / ワンチャンス |
 | `suji safety[n]` / `suji safety` | target 個別 / 集約後のスジ safety |
-| `category` | `DiscardedByAllTargets` / `HonorSafety` / `SuitedSafety` |
+| `category` | `SafeAgainstAllTargets` / `HonorSafety` / `SuitedSafety` |
 
-target 選択や `post_reach_passed` を使わない理由は [OpenHand Defense](ai/defense.md#openhand-defense) を参照してください。
+`discarded by *` は target 本人の河だけを表す観測事実、`ron safe *` は本人の河と現在有効な一時通過牌を合わせたロン安全性です。`SafeAgainstAllTargets` の source of truth は後者なので、`discarded by all targets: no` と同時に成立することがあります。
+
+target 選択と `post_reach_passed` / `temporary_passed` の違いは [OpenHand Defense](ai/defense.md#openhand-defense) を参照してください。
 
 ## Combined defense
 

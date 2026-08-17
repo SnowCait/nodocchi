@@ -34,6 +34,8 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub post_reach_passed: Option<Vec<String>>,
     #[serde(default)]
+    pub temporary_passed: Option<Vec<String>>,
+    #[serde(default)]
     pub melds: Option<Vec<Vec<MeldSpec>>>,
     #[serde(default)]
     pub extra_visible_tiles: Option<String>,
@@ -145,6 +147,8 @@ impl Scenario {
         let discard_inputs = resolve_discard_inputs(spec.discards.as_deref())?;
         let post_reach_passed_tiles =
             resolve_post_reach_passed_tiles(spec.post_reach_passed.as_deref())?;
+        let temporary_passed_tiles =
+            resolve_temporary_passed_tiles(spec.temporary_passed.as_deref())?;
         let meld_inputs = resolve_meld_inputs(spec.melds.as_deref())?;
         let player_id = resolve_seat("player_id", spec.player_id)?;
         let oya = resolve_seat("oya", spec.oya)?;
@@ -195,6 +199,7 @@ impl Scenario {
             melds,
         )
         .with_post_reach_passed_tiles(post_reach_passed_tiles)
+        .with_temporary_passed_tiles(temporary_passed_tiles)
         .with_table_state_facts(table_state)
         .with_history_furiten_facts(resolve_history_furiten_facts(spec));
 
@@ -290,6 +295,29 @@ fn resolve_post_reach_passed_tiles(
             .collect();
     }
     Ok(tiles)
+}
+
+fn resolve_temporary_passed_tiles(
+    temporary_passed: Option<&[String]>,
+) -> Result<Option<[Vec<TileType>; 4]>, ScenarioError> {
+    let Some(values) = temporary_passed else {
+        return Ok(None);
+    };
+    if values.len() != 4 {
+        return Err(ScenarioError::TemporaryPassedLength {
+            count: values.len(),
+        });
+    }
+
+    let mut tiles: [Vec<TileType>; 4] = std::array::from_fn(|_| Vec::new());
+    for (player, slot) in tiles.iter_mut().enumerate() {
+        let input = values.get(player).map(String::as_str).unwrap_or_default();
+        *slot = parse_field(&format!("temporary_passed[{player}]"), input)?
+            .into_iter()
+            .map(|tile| tile.tile_type)
+            .collect();
+    }
+    Ok(Some(tiles))
 }
 
 fn resolve_seat(field: &str, value: Option<u8>) -> Result<Option<u8>, ScenarioError> {
@@ -2497,6 +2525,31 @@ mod tests {
             Some([tile_type("4s")].as_slice())
         );
         assert_eq!(context.post_reach_passed_tiles_of(2), Some([].as_slice()));
+    }
+
+    #[test]
+    fn temporary_passed_is_resolved_per_player_and_normalizes_red_five() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123m456p789s11z",
+                "temporary_passed": ["", "5sr", "9m", ""]
+            }"#,
+        );
+        let context = resolve(&spec).context;
+        assert_eq!(
+            context.temporary_passed_tiles_of(1),
+            Some([tile_type("5s")].as_slice())
+        );
+        assert_eq!(
+            context.temporary_passed_tiles_of(2),
+            Some([tile_type("9m")].as_slice())
+        );
+    }
+
+    #[test]
+    fn omitted_temporary_passed_is_unknown() {
+        let spec = spec_from_json(r#"{"hand": "123m456p789s11z"}"#);
+        assert_eq!(resolve(&spec).context.temporary_passed_tiles(), None);
     }
 
     #[test]

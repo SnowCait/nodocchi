@@ -85,6 +85,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `reached` | 各 player のリーチ状態。要素数4 |
 | `discards` | 各 player の河。入力順のまま扱う。要素数4 |
 | `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数4 |
+| `temporary_passed` | 各 player の最後の手牌変化後に他家から切られて通った牌。要素数4。省略時 unknown |
 | `history_furiten` | `same_turn` / `riichi_missed_win`。各値は省略時 unknown |
 | `melds` | 各 player の副露・暗槓。要素数4 |
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
@@ -116,6 +117,14 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.json
 ```
+
+### temporary_passed
+
+`temporary_passed[player]` は、その player の最後のツモまたは鳴き・槓以降に、他家から切られてロンされず通った牌種です。赤5と黒5は同じ牌種として扱います。次のツモ、chi / pon / daiminkan / ankan / kakan で手牌が変化すると無効になります。
+
+単一 observation からは復元できない履歴事実なので、JSON scenario では明示してください。field 省略は「安全牌なし」ではなく unknown です。リーチ者用の `post_reach_passed` とは寿命も意味も異なります。
+
+例えば player 0 が 9m を切って通った直後に player 1 がツモると、打牌者自身には登録せず、player 1 の分はツモで消えるため、状態は `["", "", "9m", "9m"]` になります。
 
 ### history_furiten
 

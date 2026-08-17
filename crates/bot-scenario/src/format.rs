@@ -121,6 +121,17 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
         }
     }
 
+    if let Some(temporary_passed) = context.temporary_passed_tiles() {
+        for (player, passed) in temporary_passed.iter().enumerate() {
+            if !passed.is_empty() {
+                lines.push(format!(
+                    "  temporary passed[{player}]: {}",
+                    format_tile_types(passed)
+                ));
+            }
+        }
+    }
+
     for (player, melds) in context.melds().iter().enumerate() {
         if !melds.is_empty() {
             lines.push(format!("  melds[{player}]: {}", format_melds(melds)));
@@ -859,11 +870,20 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
         "  discarded by all targets: {}",
         yes_no(candidate.discarded_by_all_targets)
     ));
+    lines.push(format!(
+        "  ron safe for all targets: {}",
+        yes_no(candidate.ron_safe_for_all_targets)
+    ));
     for target in &candidate.targets {
         lines.push(format!(
             "  discarded by target[{}]: {}",
             target.player,
             yes_no(target.discarded_by_target)
+        ));
+        lines.push(format!(
+            "  ron safe[{}]: {}",
+            target.player,
+            yes_no(target.ron_safe)
         ));
     }
     lines.push(format!(
@@ -3533,7 +3553,7 @@ mod tests {
             "{five_man}"
         );
         assert!(
-            five_man.contains("  category: DiscardedByAllTargets"),
+            five_man.contains("  category: SafeAgainstAllTargets"),
             "{five_man}"
         );
 

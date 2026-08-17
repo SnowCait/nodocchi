@@ -1,0 +1,27 @@
+{
+  "hand": "234m 99m 67p 1s 3s 5s 77s 9s",
+  "draw": "8s",
+  "dora_indicators": "4p",
+  "round_wind": "E",
+  "player_id": 1,
+  "oya": 0,
+  "reached": [true, false, false, false],
+  "discards": [
+    "1s 1p 4s 6s 2p 9m",
+    "2s 4m 8p 3p 6m",
+    "S 9p 1m 8m 2p",
+    "W 1p 4p 6p 2s 4s 6s 8s 3p 5p"
+  ],
+  "post_reach_passed": ["", "", "", ""],
+  "temporary_passed": ["", "", "9m", "9m"],
+  "melds": [
+    [],
+    [],
+    [],
+    [
+      { "kind": "chi", "tiles": "1s 2s 3s", "called_tile": "1s" },
+      { "kind": "chi", "tiles": "4s 5s 6s", "called_tile": "4s" }
+    ]
+  ],
+  "legal_dahai": "2m 3m 4m 9m 6p 7p 1s 3s 5s 7s 8s 9s"
+}

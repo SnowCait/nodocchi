@@ -5,10 +5,10 @@
 //! スジ・役牌価値を別実装しない。違うのは target 集合の作り方と、「その player にロンされない」
 //! 根拠が target の種類ごとに変わる点だけ。
 //!
-//! - [`ThreatDefenseTargetKind::Riichi`]: 本人の河と `post_reach_passed_tiles` の両方
+//! - [`ThreatDefenseTargetKind::Riichi`]：本人の河と `post_reach_passed_tiles` の両方
 //!   ([`is_genbutsu_for`])。
-//! - [`ThreatDefenseTargetKind::HighOpenHand`]: 本人の河だけ ([`is_discarded_by_player`])。
-//!   `post_reach_passed_tiles` はリーチ固有の情報なので流用しない。
+//! - [`ThreatDefenseTargetKind::HighOpenHand`]：本人の河または現在有効な一時通過牌
+//!   ([`is_ron_safe_for_open_hand_target`])。`post_reach_passed_tiles` は流用しない。
 //!
 //! 防御 fallback の action 選択は [`select_combined_threat_defense_fallback_action_with_kind`] が
 //! source of truth で、[`CombinedDefenseDiagnostic`] はその結果を写すだけにする。
@@ -17,11 +17,11 @@ use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
     HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
-    honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_player, is_genbutsu_for,
+    honor_dahai_actions_by_safety_with, honor_safety_rank, is_genbutsu_for,
     opponent_honor_value_for_players, suited_dahai_actions_by_safety_with,
     suited_safety_rank_for_players, suji_safety_rank_for, suji_safety_rank_for_players, wall_rank,
 };
-use crate::open_hand_defense::high_open_hand_threat_players;
+use crate::open_hand_defense::{high_open_hand_threat_players, is_ron_safe_for_open_hand_target};
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 use bot_logic::TileType;
@@ -108,8 +108,8 @@ pub fn combined_threat_defense_targets_from_context(
 /// その target にこの牌でロンされないと言えるか判定する pure helper。
 ///
 /// 根拠は target の種類ごとに変わる。リーチ者は現物 ([`is_genbutsu_for`]) で、本人の河と
-/// `post_reach_passed_tiles` の両方を使う。`High` の副露相手は本人の河 ([`is_discarded_by_player`])
-/// だけで、`post_reach_passed_tiles` は使わない。
+/// `post_reach_passed_tiles` の両方を使う。`High` の副露相手は本人の河または現在有効な一時通過牌
+/// ([`is_ron_safe_for_open_hand_target`]) を使い、`post_reach_passed_tiles` は使わない。
 ///
 /// この判定を selector や診断へ散らさず、target 種類の分岐はここに1つだけ置く。
 pub fn is_ron_safe_for_target(
@@ -120,7 +120,7 @@ pub fn is_ron_safe_for_target(
     match target.kind {
         ThreatDefenseTargetKind::Riichi => is_genbutsu_for(tile, target.player, context),
         ThreatDefenseTargetKind::HighOpenHand => {
-            is_discarded_by_player(tile, target.player, context)
+            is_ron_safe_for_open_hand_target(tile, target.player, context)
         }
     }
 }
@@ -143,7 +143,7 @@ pub fn is_safe_against_all_threats(
 // 対象牌でまだロンされ得る target の席。target ごとに評価が変わる safety はこの集合だけを集約する。
 //
 // 除外根拠は target の種類ごとの [`is_ron_safe_for_target`] で、リーチ者は現物、副露相手は本人の
-// 河だけ。すでにロン不能な target の無スジや役牌価値を全体の危険度に持ち込まない。
+// 河または一時通過牌。すでにロン不能な target の無スジや役牌価値を持ち込まない。
 //
 // 全 target がロン不能な場合は空になる。空集合は「安全と確定した」ではなく「target ごとの評価が
 // 無い」で、その場合の安全根拠は [`CombinedDefenseCategory::SafeAgainstAllThreats`] が表す。
@@ -217,9 +217,10 @@ pub fn suited_safety_rank_for_combined_threats(
 /// 優先順位は既存 Defense / OpenHand Defense に合わせて `SafeAgainstAllThreats` →
 /// `HonorSafety` → `SuitedSafety`。
 ///
-/// 第一分類を `Genbutsu` と呼ばないのは、リーチ者の現物と副露相手本人の河という根拠の違う安全牌が
-/// 混ざった集合だから。既存の [`DefenseFallbackKind::Genbutsu`](crate::defense::DefenseFallbackKind)
-/// や [`OpenHandDefenseCategory::DiscardedByAllTargets`](crate::open_hand_defense::OpenHandDefenseCategory)
+/// 第一分類を `Genbutsu` と呼ばないのは、リーチ者の現物と、副露相手本人の河または現在有効な
+/// 一時通過牌という根拠の違う安全牌が混ざった集合だから。既存の
+/// [`DefenseFallbackKind::Genbutsu`](crate::defense::DefenseFallbackKind)
+/// や [`OpenHandDefenseCategory::SafeAgainstAllTargets`](crate::open_hand_defense::OpenHandDefenseCategory)
 /// へは押し込まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CombinedDefenseCategory {
@@ -358,7 +359,7 @@ pub struct CombinedDefenseTargetSafety {
     /// target の席と種類。
     pub target: ThreatDefenseTarget,
     /// この target にこの牌でロンされないか ([`is_ron_safe_for_target`])。根拠は種類ごとに違い、
-    /// リーチ者は現物、`High` の副露相手は本人の河だけ。
+    /// リーチ者は現物、`High` の副露相手は本人の河または現在有効な一時通過牌。
     pub ron_safe: bool,
     /// この target の河に対する [`suji_safety_rank_for`]。字牌では `None`。
     ///
@@ -569,6 +570,7 @@ impl CombinedDefenseDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::defense::is_discarded_by_player;
     use crate::defense::{is_genbutsu_for_all_reached, suited_safety_rank_for_all_reached};
     use crate::meld::{Meld, MeldKind};
     use crate::open_hand_threat::OpenHandThreatLevel;
@@ -622,6 +624,7 @@ mod tests {
         melds: [Vec<Meld>; 4],
         visible_tiles: Vec<TileId>,
         post_reach_passed: [Vec<TileType>; 4],
+        temporary_passed: Option<[Vec<TileType>; 4]>,
     }
 
     impl ContextSpec {
@@ -670,6 +673,14 @@ mod tests {
             self
         }
 
+        fn temporary_passed(mut self, player: usize, mjai: &str) -> Self {
+            let passed = self
+                .temporary_passed
+                .get_or_insert_with(|| std::array::from_fn(|_| Vec::new()));
+            passed[player] = mjai.split_whitespace().map(tile_type).collect();
+            self
+        }
+
         fn build(self) -> GameContext {
             GameContext::from_parts_with_melds(
                 None,
@@ -685,6 +696,7 @@ mod tests {
                 self.melds,
             )
             .with_post_reach_passed_tiles(self.post_reach_passed)
+            .with_temporary_passed_tiles(self.temporary_passed)
         }
     }
 
@@ -883,6 +895,30 @@ mod tests {
         ));
         assert_ne!(
             combined_defense_category(tile_type("4s"), &targets, &context),
+            Some(CombinedDefenseCategory::SafeAgainstAllThreats)
+        );
+    }
+
+    #[test]
+    fn a_current_temporary_passed_tile_is_safe_for_the_open_hand_target() {
+        let context = ContextSpec::combined()
+            .post_reach_passed(RIICHI_TARGET, "9m")
+            .temporary_passed(OPEN_HAND_TARGET, "9m")
+            .build();
+        let targets = targets(&context);
+
+        assert!(is_ron_safe_for_target(
+            tile_type("9m"),
+            ThreatDefenseTarget::riichi(RIICHI_TARGET),
+            &context
+        ));
+        assert!(is_ron_safe_for_target(
+            tile_type("9m"),
+            ThreatDefenseTarget::high_open_hand(OPEN_HAND_TARGET),
+            &context
+        ));
+        assert_eq!(
+            combined_defense_category(tile_type("9m"), &targets, &context),
             Some(CombinedDefenseCategory::SafeAgainstAllThreats)
         );
     }

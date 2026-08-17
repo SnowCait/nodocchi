@@ -33,11 +33,11 @@
 
 候補の大分類は次の順です。
 
-1. `DiscardedByAllTargets`
+1. `SafeAgainstAllTargets`
 2. `HonorSafety`
 3. `SuitedSafety`
 
-第一分類は全 target 自身の河に同じ牌種がある場合です。字牌・役牌価値・壁・スジは Riichi Defense と同じ helper を共有します。複数 target の集約では、まだその牌でロン可能な相手のうち最も危険な評価を採ります。
+第一分類 `SafeAgainstAllTargets` は、本人の河または現在有効な一時通過牌によって全 target にロンされない牌です。「全 target 自身の河にある」という意味ではありません。字牌・役牌価値・壁・スジは Riichi Defense と同じ helper を共有します。複数 target の集約では、まだその牌でロン可能な相手のうち最も危険な評価を採ります。
 
 数牌は `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で fallback を探し、`NoSafety` だけなら選びません。選べる防御候補がない場合は通常打牌へ戻ります。
 
@@ -60,11 +60,11 @@
 | target | ロン安全の根拠 |
 | --- | --- |
 | `Riichi` | 本人の河 + `post_reach_passed` |
-| `HighOpenHand` | 本人の河だけ |
+| `HighOpenHand` | 本人の河 + 現在有効な `temporary_passed` |
 
-`post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実です。非リーチ副露相手には流用しません。Combined Defense でも同じ牌がリーチ者には安全で、副露相手には安全でない場合があります。
+`post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実で、リーチ者の手牌が変化しないため局中継続します。`temporary_passed` は非リーチを含む各 player について「最後の手牌変化後に通った」事実で、対象 player の次のツモ、chi / pon / daiminkan / ankan / kakan で消えます。両者は寿命が異なる別 state で、前者を非リーチ副露相手へ流用しません。
 
-入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。
+入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。
 
 ## fallback と source of truth
 

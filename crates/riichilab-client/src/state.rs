@@ -9,6 +9,8 @@ pub struct ValidationState {
     pending_reach: [bool; PLAYER_COUNT],
     active_reach: [bool; PLAYER_COUNT],
     post_reach_passed_tiles: [Vec<TileType>; PLAYER_COUNT],
+    temporary_passed_tiles: Option<[Vec<TileType>; PLAYER_COUNT]>,
+    pending_passed_tile: Option<(u8, TileType)>,
     history_furiten: HistoryFuritenFacts,
     own_tsumo_pending_discard: bool,
 }
@@ -38,6 +40,10 @@ impl ValidationState {
         &self.post_reach_passed_tiles
     }
 
+    pub fn temporary_passed_tiles(&self) -> Option<&[Vec<TileType>; PLAYER_COUNT]> {
+        self.temporary_passed_tiles.as_ref()
+    }
+
     pub fn history_furiten(&self) -> HistoryFuritenFacts {
         self.history_furiten
     }
@@ -52,6 +58,7 @@ impl ValidationState {
 
     pub fn on_start_kyoku(&mut self) {
         self.reset_reach_tracking();
+        self.start_temporary_passed_tracking();
         self.last_tsumo = None;
         self.history_furiten = HistoryFuritenFacts {
             same_turn: Some(false),
@@ -61,6 +68,8 @@ impl ValidationState {
     }
 
     pub fn on_tsumo(&mut self, actor: u8, pai: String) {
+        self.confirm_pending_passed_tile();
+        self.clear_temporary_passed_tiles(actor);
         if Some(actor) == self.seat_id {
             self.own_tsumo_pending_discard = true;
             if pai != "?" {
@@ -86,8 +95,24 @@ impl ValidationState {
             self.own_tsumo_pending_discard = false;
             self.last_tsumo = None;
         }
+        self.confirm_pending_passed_tile();
         self.record_post_reach_passed_tile(actor, pai);
         self.establish_pending_reach(actor);
+        self.pending_passed_tile = TileType::from_mjai_type_str(pai)
+            .ok()
+            .map(|tile| (actor, tile));
+    }
+
+    /// 鳴き・槓による手牌変化。直前の打牌はロンされず局が継続したと確定してから、
+    /// actor の旧手牌に対する一時安全情報を消す。
+    pub fn on_hand_change(&mut self, actor: u8) {
+        self.confirm_pending_passed_tile();
+        self.clear_temporary_passed_tiles(actor);
+    }
+
+    /// 和了イベントでは直前の打牌が「通った」とは言えないため pending を破棄する。
+    pub fn on_hora(&mut self) {
+        self.pending_passed_tile = None;
     }
 
     /// legal Hora を選ばなかった claim decision を履歴依存フリテンとして記録する。
@@ -122,6 +147,37 @@ impl ValidationState {
         self.pending_reach = [false; PLAYER_COUNT];
         self.active_reach = [false; PLAYER_COUNT];
         self.post_reach_passed_tiles = Default::default();
+        self.temporary_passed_tiles = None;
+        self.pending_passed_tile = None;
+    }
+
+    fn start_temporary_passed_tracking(&mut self) {
+        self.temporary_passed_tiles = Some(Default::default());
+        self.pending_passed_tile = None;
+    }
+
+    fn confirm_pending_passed_tile(&mut self) {
+        let Some((actor, tile)) = self.pending_passed_tile.take() else {
+            return;
+        };
+        let Some(passed) = self.temporary_passed_tiles.as_mut() else {
+            return;
+        };
+        for (player, tiles) in passed.iter_mut().enumerate() {
+            if player != usize::from(actor) && !tiles.contains(&tile) {
+                tiles.push(tile);
+            }
+        }
+    }
+
+    fn clear_temporary_passed_tiles(&mut self, actor: u8) {
+        if let Some(tiles) = self
+            .temporary_passed_tiles
+            .as_mut()
+            .and_then(|passed| passed.get_mut(usize::from(actor)))
+        {
+            tiles.clear();
+        }
     }
 
     fn record_post_reach_passed_tile(&mut self, actor: u8, pai: &str) {
@@ -570,6 +626,108 @@ mod tests {
             state.on_dahai(0, "3p");
             state.on_dahai(1, "4s");
             assert_eq!(passed(&state, 0), ["4s"]);
+        }
+    }
+
+    mod temporary_passed_tracking {
+        use super::*;
+
+        fn tile(mjai: &str) -> TileType {
+            TileType::from_mjai_type_str(mjai).unwrap()
+        }
+
+        fn started() -> ValidationState {
+            let mut state = ValidationState::new();
+            state.on_start_game(1);
+            state.on_start_kyoku();
+            state
+        }
+
+        fn is_passed(state: &ValidationState, player: usize, mjai: &str) -> bool {
+            state
+                .temporary_passed_tiles()
+                .is_some_and(|passed| passed[player].contains(&tile(mjai)))
+        }
+
+        #[test]
+        fn dahai_is_not_safe_until_a_continuation_event_confirms_it_passed() {
+            let mut state = started();
+            state.on_dahai(0, "9m");
+            assert!((0..4).all(|player| !is_passed(&state, player, "9m")));
+
+            state.on_tsumo(1, "8s".to_string());
+            assert!(!is_passed(&state, 0, "9m"));
+            assert!(!is_passed(&state, 1, "9m"));
+            assert!(is_passed(&state, 2, "9m"));
+            assert!(is_passed(&state, 3, "9m"));
+        }
+
+        #[test]
+        fn next_tsumo_clears_only_the_drawing_players_previous_safety() {
+            let mut state = started();
+            state.on_dahai(0, "9m");
+            state.on_tsumo(2, "?".to_string());
+            assert!(!is_passed(&state, 2, "9m"));
+            assert!(is_passed(&state, 3, "9m"));
+        }
+
+        #[test]
+        fn next_tsumo_clears_temporary_safety_but_keeps_post_reach_safety() {
+            let mut state = started();
+            state.on_reach(0);
+            state.on_dahai(0, "3p");
+            state.on_dahai(1, "9m");
+            state.on_tsumo(3, "?".to_string());
+
+            assert!(state.post_reach_passed_tiles()[0].contains(&tile("9m")));
+            assert!(!is_passed(&state, 3, "9m"));
+            assert!(is_passed(&state, 2, "9m"));
+        }
+
+        #[test]
+        fn every_meld_kind_clears_the_callers_previous_safety() {
+            for actor in 0..4 {
+                let mut state = started();
+                state.on_dahai((actor + 1) % 4, "9m");
+                state.on_hand_change(actor);
+                assert!(!is_passed(&state, usize::from(actor), "9m"));
+            }
+        }
+
+        #[test]
+        fn red_and_black_five_are_the_same_temporary_tile_type() {
+            let mut state = started();
+            state.on_dahai(0, "5sr");
+            state.on_tsumo(1, "?".to_string());
+            assert!(is_passed(&state, 3, "5s"));
+        }
+
+        #[test]
+        fn hora_does_not_confirm_the_winning_discard_as_passed() {
+            let mut state = started();
+            state.on_dahai(0, "9m");
+            state.on_hora();
+            state.on_tsumo(1, "?".to_string());
+            assert!((0..4).all(|player| !is_passed(&state, player, "9m")));
+        }
+
+        #[test]
+        fn new_round_resets_known_temporary_safety_to_empty() {
+            let mut state = started();
+            state.on_dahai(0, "9m");
+            state.on_tsumo(1, "?".to_string());
+            assert!(is_passed(&state, 3, "9m"));
+
+            state.on_start_kyoku();
+            let passed = state.temporary_passed_tiles().unwrap();
+            assert!(passed.iter().all(Vec::is_empty));
+        }
+
+        #[test]
+        fn tracking_is_unknown_until_start_kyoku_is_observed() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            assert_eq!(state.temporary_passed_tiles(), None);
         }
     }
 }

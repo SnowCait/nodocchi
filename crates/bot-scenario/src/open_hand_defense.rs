@@ -113,7 +113,7 @@ fn a_tile_in_every_targets_river_is_the_first_category() {
     );
     assert_eq!(
         five_man.category,
-        Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+        Some(OpenHandDefenseCategory::SafeAgainstAllTargets)
     );
     // スジや壁が無くても、本人の河が最優先の分類になる。
     assert_eq!(five_man.suji_safety_rank, Some(SujiSafetyRank::NoSuji));
@@ -342,7 +342,7 @@ fn a_post_reach_passed_tile_is_not_river_safe_for_a_non_reach_target() {
     );
     assert_ne!(
         three_sou.category,
-        Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+        Some(OpenHandDefenseCategory::SafeAgainstAllTargets)
     );
 }
 
@@ -379,7 +379,7 @@ fn the_high_threats_drive_the_fold_and_the_selected_action() {
     assert_eq!(discards(&acted), tile_type("5m"));
     assert_eq!(
         diagnostic.open_hand_defense_category(),
-        Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+        Some(OpenHandDefenseCategory::SafeAgainstAllTargets)
     );
     assert_ne!(diagnostic.normal_discard_action, Some(acted.clone()));
 
@@ -392,7 +392,7 @@ fn the_high_threats_drive_the_fold_and_the_selected_action() {
     assert_eq!(selection.selected_action, acted);
     assert_eq!(
         selection.selected_category,
-        OpenHandDefenseCategory::DiscardedByAllTargets
+        OpenHandDefenseCategory::SafeAgainstAllTargets
     );
     assert_eq!(
         with_lookahead.open_hand_defense, diagnostic.open_hand_defense,

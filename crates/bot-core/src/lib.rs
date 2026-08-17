@@ -53,14 +53,14 @@ pub use discard_selection::select_discard_action;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use open_hand_defense::{
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
-    OpenHandDefenseSelectionDiagnostic, OpenHandDefenseTargetSafety,
-    discarded_by_all_targets_dahai_actions, high_open_hand_threat_players,
+    OpenHandDefenseSelectionDiagnostic, OpenHandDefenseTargetSafety, high_open_hand_threat_players,
     high_open_hand_threat_players_from_context, high_open_hand_threat_players_from_facts,
-    is_discarded_by_all_open_hand_threats, open_hand_defense_category,
+    is_discarded_by_all_open_hand_threats, is_ron_safe_for_all_open_hand_targets,
+    is_ron_safe_for_open_hand_target, open_hand_defense_category,
     open_hand_honor_dahai_actions_by_safety, open_hand_suited_dahai_actions_by_safety,
-    opponent_honor_value_for_open_hand_threats, select_open_hand_defense_fallback_action,
-    select_open_hand_defense_fallback_action_with_kind, suited_safety_rank_for_open_hand_threats,
-    suji_safety_rank_for_open_hand_threats,
+    opponent_honor_value_for_open_hand_threats, safe_against_all_targets_dahai_actions,
+    select_open_hand_defense_fallback_action, select_open_hand_defense_fallback_action_with_kind,
+    suited_safety_rank_for_open_hand_threats, suji_safety_rank_for_open_hand_threats,
 };
 pub use open_hand_threat::{
     OpenHandThreatAssessment, OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,

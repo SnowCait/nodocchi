@@ -172,6 +172,7 @@ pub(crate) fn context_for_request(
         .map(game_context_from_decoded_observation)
         .unwrap_or_else(|| game_context_from_validation_state(state))
         .with_post_reach_passed_tiles(state.post_reach_passed_tiles().clone())
+        .with_temporary_passed_tiles(state.temporary_passed_tiles().cloned())
         .with_history_furiten_facts(state.history_furiten())
 }
 
@@ -332,9 +333,11 @@ where
                         consumed,
                     } => {
                         debug!(actor, target, pai = %pai, consumed = ?consumed, "meld");
+                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Ankan { actor, consumed } => {
                         debug!(actor, consumed = ?consumed, "ankan");
+                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Kakan {
                         actor,
@@ -342,6 +345,7 @@ where
                         consumed,
                     } => {
                         debug!(actor, pai = %pai, consumed = ?consumed, "kakan");
+                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Reach { actor } => {
                         debug!(actor, "reach");
@@ -349,6 +353,7 @@ where
                     }
                     MjaiEvent::Hora { actor, target, pai } => {
                         info!(actor, target = ?target, pai = ?pai, "hora");
+                        state.on_hora();
                     }
                     MjaiEvent::Ryukyoku { reason } => {
                         info!(reason = ?reason, "ryukyoku");
@@ -807,6 +812,30 @@ mod tests {
         let context = context_for_request(&observation, &state, 7);
         let four_sou = TileType::from_mjai_type_str("4s").unwrap();
         assert!(context.is_post_reach_passed(four_sou, 1));
+    }
+
+    #[test]
+    fn context_for_request_carries_confirmed_temporary_passed_tiles() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_dahai(1, "9m");
+        state.on_tsumo(0, "8s".to_string());
+
+        let context = context_for_request(&observation, &state, 8);
+        let nine_man = TileType::from_mjai_type_str("9m").unwrap();
+        assert!(context.is_temporary_passed(nine_man, 3));
+        assert!(!context.is_temporary_passed(nine_man, 0));
+    }
+
+    #[test]
+    fn context_for_request_keeps_unavailable_temporary_history_unknown() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        let context = context_for_request(&observation, &state, 8);
+        assert_eq!(context.temporary_passed_tiles(), None);
     }
 
     #[test]
