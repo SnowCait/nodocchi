@@ -55,8 +55,8 @@ const PON_CONSUMED_TILE_COUNT: usize = 2;
 /// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`]、非リーチ副露相手向けの
 /// [`Self::OpenHandDefenseFallback`]、両者が同時にいる複合 threat 向けの
 /// [`Self::CombinedThreatDefenseFallback`] を別の経路として区別する。リーチ者向けの現物
-/// ([`DefenseFallbackKind::Genbutsu`])、全 target 本人の河
-/// ([`OpenHandDefenseCategory::DiscardedByAllTargets`])、全 threat へのロン安全
+/// ([`DefenseFallbackKind::Genbutsu`])、全 OpenHand target へのロン安全
+/// ([`OpenHandDefenseCategory::SafeAgainstAllTargets`])、全 threat へのロン安全
 /// ([`CombinedDefenseCategory::SafeAgainstAllThreats`]) は根拠が違うため、同じ種別へ押し込まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentActionSource {
@@ -393,8 +393,8 @@ pub struct ShantenDecisionDiagnostic {
     /// [`Self::open_hand_defense`] が担当する。
     ///
     /// target ごとに「ロン安全」の根拠が違い、リーチ者は現物 (本人の河 + post_reach_passed)、
-    /// `High` の副露相手は本人の河だけを使う。`selected` は `act()` が実際に採用した複合 threat 用
-    /// の防御 fallback で、診断側で選び直さない。
+    /// `High` の副露相手は本人の河と現在有効な一時通過牌を使う。`selected` は `act()` が実際に
+    /// 採用した複合 threat 用の防御 fallback で、診断側で選び直さない。
     pub combined_defense: CombinedDefenseDiagnostic,
 }
 
@@ -5020,7 +5020,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             AgentActionSource::OpenHandDefenseFallback(
-                OpenHandDefenseCategory::DiscardedByAllTargets
+                OpenHandDefenseCategory::SafeAgainstAllTargets
             )
             .label(),
             "OpenHandDefenseFallback"
@@ -5036,7 +5036,7 @@ pub(crate) mod tests {
     fn agent_action_source_separates_the_two_defense_paths() {
         let riichi = AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu);
         let open_hand = AgentActionSource::OpenHandDefenseFallback(
-            OpenHandDefenseCategory::DiscardedByAllTargets,
+            OpenHandDefenseCategory::SafeAgainstAllTargets,
         );
 
         assert_eq!(riichi.defense_kind(), Some(DefenseFallbackKind::Genbutsu));
@@ -5044,7 +5044,7 @@ pub(crate) mod tests {
         assert_eq!(open_hand.defense_kind(), None);
         assert_eq!(
             open_hand.open_hand_defense_category(),
-            Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+            Some(OpenHandDefenseCategory::SafeAgainstAllTargets)
         );
     }
 
@@ -5172,7 +5172,7 @@ pub(crate) mod tests {
         assert_eq!(
             diagnostic.selected_source,
             AgentActionSource::OpenHandDefenseFallback(
-                OpenHandDefenseCategory::DiscardedByAllTargets
+                OpenHandDefenseCategory::SafeAgainstAllTargets
             )
         );
         assert_ne!(
@@ -5193,7 +5193,7 @@ pub(crate) mod tests {
         assert_eq!(selection.selected_action, dahai(32));
         assert_eq!(
             selection.selected_category,
-            OpenHandDefenseCategory::DiscardedByAllTargets
+            OpenHandDefenseCategory::SafeAgainstAllTargets
         );
         assert_eq!(
             diagnostic
@@ -5315,7 +5315,7 @@ pub(crate) mod tests {
         assert_eq!(
             diagnostic.selected_source,
             AgentActionSource::OpenHandDefenseFallback(
-                OpenHandDefenseCategory::DiscardedByAllTargets
+                OpenHandDefenseCategory::SafeAgainstAllTargets
             )
         );
         assert_ne!(
@@ -5672,7 +5672,7 @@ pub(crate) mod tests {
         assert_eq!(
             diagnostic.selected_source,
             AgentActionSource::OpenHandDefenseFallback(
-                OpenHandDefenseCategory::DiscardedByAllTargets
+                OpenHandDefenseCategory::SafeAgainstAllTargets
             )
         );
     }

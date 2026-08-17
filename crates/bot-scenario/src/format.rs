@@ -3553,7 +3553,7 @@ mod tests {
             "{five_man}"
         );
         assert!(
-            five_man.contains("  category: DiscardedByAllTargets"),
+            five_man.contains("  category: SafeAgainstAllTargets"),
             "{five_man}"
         );
 

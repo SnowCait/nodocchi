@@ -217,9 +217,10 @@ pub fn suited_safety_rank_for_combined_threats(
 /// 優先順位は既存 Defense / OpenHand Defense に合わせて `SafeAgainstAllThreats` →
 /// `HonorSafety` → `SuitedSafety`。
 ///
-/// 第一分類を `Genbutsu` と呼ばないのは、リーチ者の現物と副露相手本人の河という根拠の違う安全牌が
-/// 混ざった集合だから。既存の [`DefenseFallbackKind::Genbutsu`](crate::defense::DefenseFallbackKind)
-/// や [`OpenHandDefenseCategory::DiscardedByAllTargets`](crate::open_hand_defense::OpenHandDefenseCategory)
+/// 第一分類を `Genbutsu` と呼ばないのは、リーチ者の現物と、副露相手本人の河または現在有効な
+/// 一時通過牌という根拠の違う安全牌が混ざった集合だから。既存の
+/// [`DefenseFallbackKind::Genbutsu`](crate::defense::DefenseFallbackKind)
+/// や [`OpenHandDefenseCategory::SafeAgainstAllTargets`](crate::open_hand_defense::OpenHandDefenseCategory)
 /// へは押し込まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CombinedDefenseCategory {

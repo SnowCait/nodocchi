@@ -11,11 +11,12 @@
 
 use bot_core::{
     Agent, CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, DiagnosticOptions,
-    HonorSafetyRank, LegalAction, OpenHandDefenseCategory, OpponentHonorValue, PushPullMode,
-    PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, SuitedSafetyRank, SujiSafetyRank,
-    ThreatDefenseTarget, ThreatDefenseTargetKind, combined_defense_category,
-    combined_threat_defense_targets_from_context, honor_safety_rank, is_discarded_by_player,
-    is_ron_safe_for_target, is_safe_against_all_threats, opponent_honor_value_for_combined_threats,
+    HonorSafetyRank, LegalAction, OpenHandDefenseCategory, OpenHandThreatReason,
+    OpponentHonorValue, PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic,
+    SuitedSafetyRank, SujiSafetyRank, ThreatDefenseTarget, ThreatDefenseTargetKind,
+    combined_defense_category, combined_threat_defense_targets_from_context, honor_safety_rank,
+    is_discarded_by_player, is_ron_safe_for_target, is_safe_against_all_threats,
+    opponent_honor_value_for_combined_threats,
     select_combined_threat_defense_fallback_action_with_kind,
     suited_safety_rank_for_combined_threats, suji_safety_rank_for,
     suji_safety_rank_for_combined_threats, wall_rank,
@@ -58,17 +59,52 @@ fn request_131_selects_nine_man_after_drawing_eight_sou() {
         scenario.context.drawn_tile().unwrap().to_mjai_string(),
         "8s"
     );
-    assert!(is_discarded_by_player(
-        tile_type("9m"),
-        RIICHI_TARGET,
-        &scenario.context
-    ));
-    assert!(
+    assert_eq!(scenario.context.player_id(), Some(1));
+    assert_eq!(scenario.context.oya(), Some(0));
+    assert_eq!(scenario.legal_actions.len(), 12);
+    assert_eq!(
+        diagnostic.combined_defense.targets,
+        vec![
+            ThreatDefenseTarget::riichi(0),
+            ThreatDefenseTarget::high_open_hand(3),
+        ]
+    );
+    assert_eq!(
+        diagnostic.player_threats[3].open_hand_threat.reason(),
+        Some(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards)
+    );
+    assert_eq!(
         scenario
             .context
-            .is_temporary_passed(tile_type("9m"), OPEN_HAND_TARGET)
+            .temporary_passed_tiles()
+            .map(|players| players
+                .iter()
+                .map(|tiles| tiles.iter().map(|tile| tile.to_mjai_string()).collect())
+                .collect::<Vec<Vec<_>>>()),
+        Some(vec![
+            vec![],
+            vec![],
+            vec!["9m".to_string()],
+            vec!["9m".to_string()],
+        ])
     );
-    assert!(nine_man.targets.iter().all(|target| target.ron_safe));
+    assert!(is_discarded_by_player(
+        tile_type("9m"),
+        0,
+        &scenario.context
+    ));
+    assert!(scenario.context.is_temporary_passed(tile_type("9m"), 3));
+    assert_eq!(
+        nine_man
+            .targets
+            .iter()
+            .map(|target| (target.player(), target.kind(), target.ron_safe))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, ThreatDefenseTargetKind::Riichi, true),
+            (3, ThreatDefenseTargetKind::HighOpenHand, true),
+        ]
+    );
     assert_eq!(
         nine_man.category,
         Some(CombinedDefenseCategory::SafeAgainstAllThreats)
@@ -80,6 +116,19 @@ fn request_131_selects_nine_man_after_drawing_eight_sou() {
             .as_ref()
             .map(|selection| discards(&selection.selected_action)),
         Some(tile_type("9m"))
+    );
+    assert_eq!(discards(&diagnostic.selected_action), tile_type("9m"));
+    assert_eq!(
+        diagnostic.combined_defense_category(),
+        Some(CombinedDefenseCategory::SafeAgainstAllThreats)
+    );
+    assert_ne!(
+        diagnostic
+            .combined_defense
+            .selected
+            .as_ref()
+            .map(|selection| discards(&selection.selected_action)),
+        Some(tile_type("1s"))
     );
 }
 
@@ -549,7 +598,7 @@ fn a_high_open_hand_without_a_riichi_keeps_the_open_hand_defense() {
     );
     assert_eq!(
         diagnostic.open_hand_defense_category(),
-        Some(OpenHandDefenseCategory::DiscardedByAllTargets)
+        Some(OpenHandDefenseCategory::SafeAgainstAllTargets)
     );
     assert!(diagnostic.defense.is_none());
 }

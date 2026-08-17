@@ -33,11 +33,11 @@
 
 候補の大分類は次の順です。
 
-1. `DiscardedByAllTargets`
+1. `SafeAgainstAllTargets`
 2. `HonorSafety`
 3. `SuitedSafety`
 
-第一分類は全 target にロンされない牌です。根拠は target 自身の河、またはその target の最後の手牌変化以降に他家から切られて通った一時安全牌です。字牌・役牌価値・壁・スジは Riichi Defense と同じ helper を共有します。複数 target の集約では、まだその牌でロン可能な相手のうち最も危険な評価を採ります。
+第一分類 `SafeAgainstAllTargets` は、本人の河または現在有効な一時通過牌によって全 target にロンされない牌です。「全 target 自身の河にある」という意味ではありません。字牌・役牌価値・壁・スジは Riichi Defense と同じ helper を共有します。複数 target の集約では、まだその牌でロン可能な相手のうち最も危険な評価を採ります。
 
 数牌は `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で fallback を探し、`NoSafety` だけなら選びません。選べる防御候補がない場合は通常打牌へ戻ります。
 

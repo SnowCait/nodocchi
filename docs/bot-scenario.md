@@ -124,6 +124,8 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.j
 
 単一 observation からは復元できない履歴事実なので、JSON scenario では明示してください。field 省略は「安全牌なし」ではなく unknown です。リーチ者用の `post_reach_passed` とは寿命も意味も異なります。
 
+例えば player 0 が 9m を切って通った直後に player 1 がツモると、打牌者自身には登録せず、player 1 の分はツモで消えるため、状態は `["", "", "9m", "9m"]` になります。
+
 ### history_furiten
 
 `history_furiten.same_turn` は同巡内フリテン、`history_furiten.riichi_missed_win` はリーチ後のアガリ見逃しによる局中継続フリテンです。各値は `true` / `false` / 省略による unknown を区別します。現在の利用範囲は [フリテン](ai/furiten.md) を参照してください。
