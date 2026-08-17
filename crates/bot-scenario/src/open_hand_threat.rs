@@ -251,7 +251,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: dragon_meld(),
-                threat: high(OpenHandThreatReason::TwoOrMoreWithValueHonor),
+                threat: present(),
             }),
         },
         CorpusScenario {
@@ -271,7 +271,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 2,
                 open_meld_red_dora_count: 1,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                threat: high(OpenHandThreatReason::TwoOrMoreWithDora),
+                threat: high(OpenHandThreatReason::TwoOrMoreWithVisibleHan),
             }),
         },
         CorpusScenario {
@@ -902,8 +902,8 @@ fn the_representative_high_scenarios_fix_the_defense_target() {
             OpenHandThreatReason::OpenMeldFromTwelveDiscards,
         ),
         (
-            "open_hand_value_pon_and_chi",
-            OpenHandThreatReason::TwoOrMoreWithValueHonor,
+            "open_hand_dora_melds",
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         ),
         (
             "open_hand_three_melds",

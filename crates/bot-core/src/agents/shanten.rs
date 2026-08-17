@@ -3358,7 +3358,7 @@ pub(crate) mod tests {
             diagnostic.player_threats[1].open_hand_threat,
             OpenHandThreatAssessment::Classified(OpenHandThreatDecision {
                 level: OpenHandThreatLevel::High,
-                reason: OpenHandThreatReason::TwoOrMoreWithValueHonor,
+                reason: OpenHandThreatReason::TwoOrMoreWithVisibleHan,
             })
         );
         assert_eq!(

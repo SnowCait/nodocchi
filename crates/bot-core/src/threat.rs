@@ -104,6 +104,12 @@ pub struct ValueHonorMeldCounts {
 }
 
 impl ValueHonorMeldCounts {
+    /// 公開情報から確定している役牌の翻数。ダブ風は場風・自風の2翻として数え、
+    /// `unconfirmed_wind` は推測して加算しない。
+    pub fn confirmed_han(self) -> usize {
+        self.dragon + self.round_wind + self.seat_wind
+    }
+
     fn add(&mut self, facts: ValueHonorMeldFacts) {
         self.dragon += usize::from(facts.is_dragon);
         self.round_wind += usize::from(facts.is_round_wind == Some(true));
@@ -176,6 +182,14 @@ pub struct PlayerThreatFacts {
 }
 
 impl PlayerThreatFacts {
+    /// 公開副露だけから確定して確認できる翻数の下限 proxy。
+    ///
+    /// 確定役牌翻と、既存の open meld 内ドラ枚数を合計する。一般役の推定は行わず、
+    /// unknown wind と Ankan は open facts の既存 semantics により含まれない。
+    pub fn open_visible_han_proxy(&self) -> usize {
+        self.open_value_honor_melds.confirmed_han() + usize::from(self.open_meld_dora_count)
+    }
+
     /// 他家の席か。`player_id` が不明なら推測せず `None` (unknown)。
     pub fn is_opponent(&self) -> Option<bool> {
         self.is_self.map(|is_self| !is_self)
@@ -956,9 +970,10 @@ mod tests {
             assert_eq!(value_honor.is_round_wind, Some(true), "{meld:?}");
             assert_eq!(value_honor.is_seat_wind, Some(true), "{meld:?}");
 
-            // ダブ風でも1面子として一度だけ数え、翻数へは潰さない。
+            // ダブ風でも confirmed は1面子だが、確定翻の派生値では場風・自風の2翻になる。
+            let facts = facts_of(&context, 0);
             assert_eq!(
-                facts_of(&context, 0).value_honor_melds,
+                facts.value_honor_melds,
                 ValueHonorMeldCounts {
                     dragon: 0,
                     round_wind: 1,
@@ -966,6 +981,12 @@ mod tests {
                     confirmed: 1,
                     unconfirmed_wind: 0,
                 },
+                "{meld:?}"
+            );
+            assert_eq!(facts.value_honor_melds.confirmed_han(), 2, "{meld:?}");
+            assert_eq!(
+                facts.open_visible_han_proxy(),
+                if meld.kind().is_open() { 2 } else { 0 },
                 "{meld:?}"
             );
         }
@@ -1359,6 +1380,7 @@ mod tests {
         assert_eq!(facts.open_value_honor_melds.confirmed, 0);
         assert_eq!(facts.open_value_honor_melds.unconfirmed_wind, 1);
         assert_eq!(facts.open_value_honor_melds, facts.value_honor_melds);
+        assert_eq!(facts.open_visible_han_proxy(), 0);
     }
 
     // ---- リーチ情報の source of truth ----

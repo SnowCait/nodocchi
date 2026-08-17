@@ -415,13 +415,16 @@ mod tests {
         assert_eq!(facts.is_opponent(), Some(true));
         assert_eq!(facts.value_honor_melds.dragon, 1);
 
-        // 役牌入り2副露の非リーチ相手は High。自分は強い一向聴でも押さずに降りる。
-        let decision = diagnostic.push_pull_decision.unwrap();
-        assert_eq!(decision.mode, PushPullMode::Fold);
+        // 通常役牌1翻だけの2副露は Present。consumer は classification を共有し、従来の
+        // High 向け Fold policy を適用しない。
+        assert_eq!(facts.open_visible_han_proxy(), 1);
         assert_eq!(
-            decision.reason,
-            PushPullReason::IishantenAgainstHighOpenHand
+            diagnostic.player_threats[1].open_hand_threat.level(),
+            Some(bot_core::OpenHandThreatLevel::Present)
         );
+        let decision = diagnostic.push_pull_decision.unwrap();
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::NoThreat);
     }
 
     #[test]

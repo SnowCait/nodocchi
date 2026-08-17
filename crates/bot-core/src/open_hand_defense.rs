@@ -1367,17 +1367,18 @@ mod tests {
     }
 
     #[test]
-    fn a_value_honor_meld_target_is_selected_from_the_classification() {
-        // 2副露 + 確定役牌の High 条件でも、target の決め方は classification のまま。
+    fn one_value_honor_in_two_melds_is_not_a_target_from_the_classification() {
+        // 通常役牌1翻だけの2副露は Present。Defense は classification を共有し、独自に
+        // 旧 High 条件を再実装しない。
         let context = ContextSpec::new()
             .melds_of(3, vec![value_pon(), chi()])
             .build();
 
         assert_eq!(
             assessments(&context)[3].level(),
-            Some(OpenHandThreatLevel::High)
+            Some(OpenHandThreatLevel::Present)
         );
-        assert_eq!(targets(&context), vec![3]);
+        assert!(targets(&context).is_empty());
     }
 
     // ---- 防御 fallback の選択 ----
