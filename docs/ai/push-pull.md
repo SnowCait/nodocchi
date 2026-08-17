@@ -34,6 +34,8 @@
 
 複数条件に一致した場合、diagnostic reason は production code の固定優先順で1つだけ表示します。自分、リーチ済み、player id が不明な席は classification 対象外です。
 
+この classification 自体は Push/Pull policy とは分離されています。したがって、1副露かつ河12枚以上の相手は引き続き `High` です。そのうえで、他家リーチがなく、`High` target がすべて「1副露かつ河12枚以上」の場合に限り、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。複数の `High` target がいても、全員がこの条件なら同じです。
+
 ## offense state と mode
 
 | 自分の状態 | mode | reason |
@@ -42,6 +44,7 @@
 | offense evaluation なし | `Fold` | `MissingOffenseAgainst*` |
 | 強いテンパイ | `Push` | `StrongTenpaiAgainst*` |
 | 強いと確認できないテンパイ | `Fold` | `WeakTenpaiAgainst*` |
+| 終盤1副露だけが High target のテンパイ | `Push` | `TenpaiAgainstLateOneMeldHighOpenHand` |
 | 一向聴 | `Fold` | `IishantenAgainst*` |
 | 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainst*` |
 
@@ -50,6 +53,8 @@
 「強いテンパイ」は通常打牌で実際に選んだ牌を切った後の `TenpaiWaitAvailability` から判断します。打牌前14枚の受け入れではなく、見え牌を反映したツモ和了可能な待ちです。恒常フリテンが `no` なら残り6枚以上、`yes` ならツモ依存になるため8枚以上を暫定境界とします。unknown は強いと推測しません。
 
 親リーチ、複数リーチ、自分が親の場合でも現在の境界は変えません。一向聴の受け入れや簡易打点 proxy は diagnostics に残しますが、現在の Push/Pull 判定には使いません。
+
+終盤1副露 High の例外はテンパイだけが対象です。一向聴・二向聴以上は従来どおり `Fold` します。High target に2副露以上の相手が1人でも含まれる場合、Riichi threat、Combined threat では従来の strong-tenpai threshold を維持します。
 
 ## action ordering
 

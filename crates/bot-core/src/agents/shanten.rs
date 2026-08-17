@@ -5081,8 +5081,29 @@ pub(crate) mod tests {
         reached: [bool; 4],
         extra_visible: &[u8],
     ) -> GameContext {
+        open_hand_context_with_meld_count(
+            hand_values,
+            drawn,
+            melded,
+            3,
+            discards,
+            reached,
+            extra_visible,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_hand_context_with_meld_count(
+        hand_values: &[u8],
+        drawn: Option<u8>,
+        melded: usize,
+        open_meld_count: usize,
+        discards: [&[u8]; 4],
+        reached: [bool; 4],
+        extra_visible: &[u8],
+    ) -> GameContext {
         let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
-        melds[melded] = (0..3).map(|_| plain_chi()).collect();
+        melds[melded] = (0..open_meld_count).map(|_| plain_chi()).collect();
 
         let mut visible: Vec<TileId> = hand_values.iter().map(|&value| tile(value)).collect();
         visible.extend(drawn.map(tile));
@@ -5344,6 +5365,50 @@ pub(crate) mod tests {
             without_reach.selected_action,
             without_reach.normal_discard_action.clone().unwrap()
         );
+    }
+
+    #[test]
+    fn weak_tenpai_push_against_a_late_one_meld_high_matches_every_entry_point() {
+        let late_discards = [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107];
+        let ctx = open_hand_context_with_meld_count(
+            &OPPONENT_MELD_HAND,
+            Some(OPPONENT_MELD_DRAW),
+            1,
+            1,
+            [&[], &late_discards, &[], &[]],
+            [false; 4],
+            &[],
+        );
+        let actions = opponent_meld_actions();
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&ctx, &actions);
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let with_lookahead =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+        let offense = inputs.offense.expect("offense がある");
+        assert_eq!(inputs.player_threats[1].open_meld_count, 1);
+        assert_eq!(inputs.player_threats[1].discard_count, 12);
+        assert!(inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert_eq!(offense.min_shanten_after_discard, 0);
+        assert!(
+            offense
+                .tenpai_wait_after_discard
+                .is_some_and(|wait| wait.tsumo_remaining < 6)
+        );
+        assert_eq!(
+            diagnostic.push_pull_decision,
+            Some(crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+            })
+        );
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(with_lookahead.selected_source, diagnostic.selected_source);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
     }
 
     // ---- RiichiThreat + High OpenHandThreat の複合 threat に対する action 選択 ----
