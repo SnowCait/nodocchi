@@ -524,8 +524,9 @@ player 1
   open meld dora: 2
   open meld red dora: 1
   open confirmed value honor: 1
+  open visible han proxy: 3
   open hand threat: High
-  open hand threat reason: TwoOrMoreWithValueHonor
+  open hand threat reason: TwoOrMoreWithVisibleHan
   meld 1: Pon P P P
     open: yes
     kan: no
@@ -543,7 +544,7 @@ player 1
 
 `player_id` が不明でも席を除外せず常に4席分を表示し、自分か他家か (`opponent`)・親か (`dealer`) ・自風が確定できない場合は推測せず `unknown` / `None` と表示します。暗槓は fixed meld として `melds` と `kans` に数えますが `open melds` には数えません。`discards` はその player が河へ切った枚数そのもので、「河2段目」のような表示上の区切りからは導出しません。
 
-`meld dora` / `meld red dora` は暗槓を含む fixed meld 全体の集計です。`open meld dora` / `open meld red dora` / `open confirmed value honor` は公開された副露だけの集計で、暗槓のドラ・赤ドラ・役牌は含みません。
+`meld dora` / `meld red dora` は暗槓を含む fixed meld 全体の集計です。`open meld dora` / `open meld red dora` / `open confirmed value honor` / `open visible han proxy` は公開された副露だけの集計・派生値で、暗槓のドラ・赤ドラ・役牌は含みません。`open visible han proxy` は確定役牌翻 (`dragon + round wind + seat wind`) と `open meld dora` の合計で、ダブ風は2翻、通常役牌は1翻として数えます。場風・自風が不明な `unconfirmed wind` は推測して加算せず、一般役も判定しません。
 
 #### 副露相手の暫定 OpenHandThreat
 
@@ -558,8 +559,7 @@ player 1
 `High` の暫定条件は次のいずれかです。
 
 - `open melds` が3つ以上 (`ThreeOrMoreOpenMelds`)
-- `open melds` が2つ以上かつ確定役牌の副露がある (`TwoOrMoreWithValueHonor`)
-- `open melds` が2つ以上かつ公開副露内のドラが2枚以上 (`TwoOrMoreWithDora`)
+- `open melds` が2つ以上かつ、確定役牌翻 (`dragon + round wind + seat wind`) と公開副露内ドラの合計 proxy が2以上 (`TwoOrMoreWithVisibleHan`)
 - 親が `open melds` を2つ以上持つ (`DealerWithTwoOrMoreOpenMelds`)
 - `open melds` が2つ以上かつ `discards` が9枚以上 (`TwoOrMoreOpenMeldsFromNineDiscards`)
 - `open melds` が1つ以上かつ `discards` が12枚以上 (`OpenMeldFromTwelveDiscards`)

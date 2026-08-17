@@ -1028,6 +1028,10 @@ fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
         facts.open_value_honor_melds.confirmed
     ));
     lines.push(format!(
+        "  open visible han proxy: {}",
+        facts.open_visible_han_proxy()
+    ));
+    lines.push(format!(
         "  open hand threat: {}",
         format_open_hand_threat(threat.open_hand_threat)
     ));
@@ -3394,8 +3398,9 @@ mod tests {
              open meld dora: 2\n  \
              open meld red dora: 1\n  \
              open confirmed value honor: 1\n  \
+             open visible han proxy: 3\n  \
              open hand threat: High\n  \
-             open hand threat reason: TwoOrMoreWithValueHonor\n  \
+             open hand threat reason: TwoOrMoreWithVisibleHan\n  \
              meld 1: Pon P P P\n    \
              open: yes\n    \
              kan: no\n    \

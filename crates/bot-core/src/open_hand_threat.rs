@@ -32,10 +32,8 @@ pub enum OpenHandThreatReason {
     OpenMeldPresent,
     /// 3副露以上。
     ThreeOrMoreOpenMelds,
-    /// 2副露以上かつ確定役牌の副露がある。
-    TwoOrMoreWithValueHonor,
-    /// 2副露以上かつ open meld 内のドラが2枚以上。
-    TwoOrMoreWithDora,
+    /// 2副露以上かつ公開副露から確定する役牌翻・ドラ翻の proxy が2以上。
+    TwoOrMoreWithVisibleHan,
     /// 親が2副露以上。
     DealerWithTwoOrMoreOpenMelds,
     /// 2副露以上かつ河が9枚以上。
@@ -117,10 +115,8 @@ const THREE_OPEN_MELDS: usize = 3;
 const TWO_OPEN_MELDS: usize = 2;
 // Present とみなす最小の open meld 数。局進行条件でも同じ最小値を使う。
 const ONE_OPEN_MELD: usize = 1;
-// 2副露以上と組み合わせて High とする確定役牌の副露数。
-const HIGH_VALUE_HONOR_MELDS: usize = 1;
-// 2副露以上と組み合わせて High とする open meld 内のドラ枚数。
-const HIGH_OPEN_MELD_DORA_COUNT: u8 = 2;
+// 2副露以上と組み合わせて High とする公開副露の確定翻数 proxy。
+const HIGH_OPEN_VISIBLE_HAN_PROXY: usize = 2;
 // 2副露以上を強く警戒し始める河の枚数。
 const MID_ROUND_DISCARD_COUNT: usize = 9;
 // 1副露でも強く警戒し始める河の枚数。
@@ -132,8 +128,7 @@ const LATE_ROUND_DISCARD_COUNT: usize = 12;
 /// 満たすと [`OpenHandThreatLevel::High`] になる。
 ///
 /// - `open_meld_count >= 3`
-/// - `open_meld_count >= 2` かつ `open_value_honor_melds.confirmed >= 1`
-/// - `open_meld_count >= 2` かつ `open_meld_dora_count >= 2`
+/// - `open_meld_count >= 2` かつ `open_visible_han_proxy() >= 2`
 /// - `is_dealer == Some(true)` かつ `open_meld_count >= 2`
 /// - `open_meld_count >= 2` かつ `discard_count >= 9`
 /// - `open_meld_count >= 1` かつ `discard_count >= 12`
@@ -203,7 +198,7 @@ fn high_reason(facts: PlayerThreatFacts) -> Option<OpenHandThreatReason> {
 
 // High 条件と診断 reason の対応。並びは reason の優先順位で、どの条件も level は High なので、
 // 並び順は level の判定を変えない。
-fn high_conditions(facts: PlayerThreatFacts) -> [(bool, OpenHandThreatReason); 6] {
+fn high_conditions(facts: PlayerThreatFacts) -> [(bool, OpenHandThreatReason); 5] {
     let open_melds = facts.open_meld_count;
     [
         (
@@ -212,12 +207,8 @@ fn high_conditions(facts: PlayerThreatFacts) -> [(bool, OpenHandThreatReason); 6
         ),
         (
             open_melds >= TWO_OPEN_MELDS
-                && facts.open_value_honor_melds.confirmed >= HIGH_VALUE_HONOR_MELDS,
-            OpenHandThreatReason::TwoOrMoreWithValueHonor,
-        ),
-        (
-            open_melds >= TWO_OPEN_MELDS && facts.open_meld_dora_count >= HIGH_OPEN_MELD_DORA_COUNT,
-            OpenHandThreatReason::TwoOrMoreWithDora,
+                && facts.open_visible_han_proxy() >= HIGH_OPEN_VISIBLE_HAN_PROXY,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         ),
         (
             facts.is_dealer == Some(true) && open_melds >= TWO_OPEN_MELDS,
@@ -299,6 +290,33 @@ mod tests {
     fn with_value_honor(facts: PlayerThreatFacts) -> PlayerThreatFacts {
         let counts = ValueHonorMeldCounts {
             dragon: 1,
+            confirmed: 1,
+            ..ValueHonorMeldCounts::default()
+        };
+        PlayerThreatFacts {
+            value_honor_melds: counts,
+            open_value_honor_melds: counts,
+            ..facts
+        }
+    }
+
+    fn with_two_value_honors(facts: PlayerThreatFacts) -> PlayerThreatFacts {
+        let counts = ValueHonorMeldCounts {
+            dragon: 2,
+            confirmed: 2,
+            ..ValueHonorMeldCounts::default()
+        };
+        PlayerThreatFacts {
+            value_honor_melds: counts,
+            open_value_honor_melds: counts,
+            ..facts
+        }
+    }
+
+    fn with_double_wind(facts: PlayerThreatFacts) -> PlayerThreatFacts {
+        let counts = ValueHonorMeldCounts {
+            round_wind: 1,
+            seat_wind: 1,
             confirmed: 1,
             ..ValueHonorMeldCounts::default()
         };
@@ -409,11 +427,48 @@ mod tests {
     }
 
     #[test]
-    fn two_melds_with_a_confirmed_value_honor_are_high() {
+    fn two_melds_with_one_value_honor_are_present() {
+        let facts = with_value_honor(open_melds(2));
+        assert_eq!(facts.open_visible_han_proxy(), 1);
         assert_classified(
-            with_value_honor(open_melds(2)),
+            facts,
+            OpenHandThreatLevel::Present,
+            OpenHandThreatReason::OpenMeldPresent,
+        );
+    }
+
+    #[test]
+    fn two_melds_with_one_value_honor_and_one_dora_are_high() {
+        let facts = with_open_dora(with_value_honor(open_melds(2)), 1);
+        assert_eq!(facts.open_visible_han_proxy(), 2);
+        assert_classified(
+            facts,
             OpenHandThreatLevel::High,
-            OpenHandThreatReason::TwoOrMoreWithValueHonor,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+        );
+    }
+
+    #[test]
+    fn two_value_honor_melds_are_high() {
+        let facts = with_two_value_honors(open_melds(2));
+        assert_eq!(facts.open_visible_han_proxy(), 2);
+        assert_classified(
+            facts,
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+        );
+    }
+
+    #[test]
+    fn a_double_wind_counts_as_two_visible_han() {
+        let facts = with_double_wind(open_melds(2));
+        assert_eq!(facts.open_value_honor_melds.confirmed, 1);
+        assert_eq!(facts.open_value_honor_melds.confirmed_han(), 2);
+        assert_eq!(facts.open_visible_han_proxy(), 2);
+        assert_classified(
+            facts,
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         );
     }
 
@@ -431,6 +486,7 @@ mod tests {
             ..facts
         };
 
+        assert_eq!(facts.open_visible_han_proxy(), 0);
         assert_classified(
             facts,
             OpenHandThreatLevel::Present,
@@ -440,10 +496,12 @@ mod tests {
 
     #[test]
     fn two_melds_with_two_open_dora_are_high() {
+        let facts = with_open_dora(open_melds(2), 2);
+        assert_eq!(facts.open_visible_han_proxy(), 2);
         assert_classified(
-            with_open_dora(open_melds(2), 2),
+            facts,
             OpenHandThreatLevel::High,
-            OpenHandThreatReason::TwoOrMoreWithDora,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         );
     }
 
@@ -554,8 +612,7 @@ mod tests {
         );
         let expected = [
             OpenHandThreatReason::ThreeOrMoreOpenMelds,
-            OpenHandThreatReason::TwoOrMoreWithValueHonor,
-            OpenHandThreatReason::TwoOrMoreWithDora,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
             OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds,
             OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
             OpenHandThreatReason::OpenMeldFromTwelveDiscards,
@@ -571,6 +628,7 @@ mod tests {
         };
         assert_classified(facts, OpenHandThreatLevel::High, expected[1]);
 
+        facts = with_open_dora(facts, 0);
         facts = PlayerThreatFacts {
             value_honor_melds: ValueHonorMeldCounts::default(),
             open_value_honor_melds: ValueHonorMeldCounts::default(),
@@ -578,21 +636,18 @@ mod tests {
         };
         assert_classified(facts, OpenHandThreatLevel::High, expected[2]);
 
-        facts = with_open_dora(facts, 0);
-        assert_classified(facts, OpenHandThreatLevel::High, expected[3]);
-
         facts = PlayerThreatFacts {
             is_dealer: Some(false),
             ..facts
         };
-        assert_classified(facts, OpenHandThreatLevel::High, expected[4]);
+        assert_classified(facts, OpenHandThreatLevel::High, expected[3]);
 
         facts = PlayerThreatFacts {
             meld_count: 1,
             open_meld_count: 1,
             ..facts
         };
-        assert_classified(facts, OpenHandThreatLevel::High, expected[5]);
+        assert_classified(facts, OpenHandThreatLevel::High, expected[4]);
     }
 
     #[test]
@@ -600,7 +655,7 @@ mod tests {
         // level は満たした条件の優先順位に依らず High になる。
         let conditions = [
             open_melds(3),
-            with_value_honor(open_melds(2)),
+            with_open_dora(with_value_honor(open_melds(2)), 1),
             with_open_dora(open_melds(2), 2),
             as_dealer(open_melds(2)),
             with_discards(open_melds(2), 9),
@@ -787,6 +842,7 @@ mod tests {
 
         assert_eq!(facts.meld_count, 1);
         assert_eq!(facts.open_meld_count, 0);
+        assert_eq!(facts.open_visible_han_proxy(), 0);
         assert_eq!(
             assess(&context, 3),
             classified(OpenHandThreatLevel::None, OpenHandThreatReason::NoOpenMeld)
@@ -800,6 +856,7 @@ mod tests {
 
         assert!(facts.meld_dora_count >= 2);
         assert_eq!(facts.open_meld_dora_count, 0);
+        assert_eq!(facts.open_visible_han_proxy(), 0);
         assert_eq!(
             assess(&context, 3),
             classified(OpenHandThreatLevel::None, OpenHandThreatReason::NoOpenMeld)
@@ -813,6 +870,7 @@ mod tests {
 
         assert_eq!(facts.value_honor_melds.confirmed, 1);
         assert_eq!(facts.open_value_honor_melds.confirmed, 0);
+        assert_eq!(facts.open_visible_han_proxy(), 0);
         assert_eq!(
             assess(&context, 3),
             classified(OpenHandThreatLevel::None, OpenHandThreatReason::NoOpenMeld)

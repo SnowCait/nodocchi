@@ -81,7 +81,7 @@ fn only_the_high_open_hand_threats_are_defense_targets() {
         diagnostic.player_threats[DEALER_TARGET]
             .open_hand_threat
             .reason(),
-        Some(OpenHandThreatReason::TwoOrMoreWithValueHonor)
+        Some(OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds)
     );
     assert_eq!(
         diagnostic.player_threats[CHILD_TARGET]
