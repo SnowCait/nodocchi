@@ -1,0 +1,187 @@
+# Structured diagnostics
+
+`bot-scenario` は入力局面に続けて、最終 action と判断経路を section ごとに表示します。この文書は「出力をどう読むか」を扱います。各 policy の詳細は [麻雀 AI の概要](ai/overview.md) から辿ってください。
+
+## 全体像
+
+主な section は次のとおりです。
+
+| section | 内容 |
+| --- | --- |
+| `Scenario` / `Table state` | 入力した局面と観測済み table state |
+| `Final decision` | 最終 action と採用経路 |
+| `Normal discard` | 通常打牌 evaluation の有無、選択 action、候補数 |
+| `Normal discard candidates` | 通常打牌候補ごとの評価と比較 |
+| `Player threats` | player ごとの reach / meld facts と OpenHandThreat classification |
+| `Push/Pull` | threat と offense を組み合わせた押し引き |
+| `Reach` | 通常打牌後のテンパイに対するリーチ判断 |
+| `Defense` | リーチ者向け防御候補 |
+| `OpenHand defense` | High OpenHandThreat 向け防御候補 |
+| `Combined defense` | リーチと High OpenHandThreat が同時にいる場合の候補 |
+| `Summary` | 最終選択と次点を末尾で要約 |
+
+## Final decision と AgentActionSource
+
+`Final decision.source` は、どの production selector が action を採用したかを表す `AgentActionSource` です。
+
+```text
+Final decision
+  action: 1m
+  source: DefenseFallback
+  defense kind: Genbutsu
+```
+
+代表的な source:
+
+| source | 意味 |
+| --- | --- |
+| `Hora` / `Ryukyoku` / `Reach` | 和了、流局、リーチ |
+| `NormalDiscard` | 通常打牌 selector |
+| `DefenseFallback` | リーチ者向け防御 fallback |
+| `OpenHandDefenseFallback` | High OpenHandThreat 向け fallback |
+| `CombinedThreatDefenseFallback` | 複合 threat 向け fallback |
+| `Pon` | 鳴き判断で選んだポン |
+| `LegalDahaiFallback` / `None` | 上位判断で選べない場合の fallback |
+
+防御 source では category や kind も表示されます。
+
+```text
+Final decision
+  action: 5m
+  source: OpenHandDefenseFallback
+  open hand defense category: DiscardedByAllTargets
+```
+
+## Normal discard と candidates
+
+`Normal discard` は通常打牌を評価したか、選択 action と候補数を要約します。和了などの早期 return では `not evaluated` です。
+
+各合法打牌について、打牌後の向聴、Acceptance、ドラ、フリテン、1向聴・2向聴以上の指標などを表示します。`selected: yes` が通常打牌 selector の選択です。最終 action は Push/Pull や Reach、防御 fallback によって別の action になることがあります。
+
+`--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
+
+## Player threats
+
+player ごとの観測 facts と `classify_open_hand_threat()` の結果を表示します。
+
+```text
+player 1
+  opponent: yes
+  reached: no
+  dealer: no
+  seat wind: S
+  discards: 0
+  melds: 2
+  open melds: 2
+  kans: 0
+  meld kinds: Chi 1, Pon 1
+  meld dora: 2
+  meld red dora: 1
+  open meld dora: 2
+  open meld red dora: 1
+  open confirmed value honor: 1
+  open visible han proxy: 3
+  open hand threat: High
+  open hand threat reason: TwoOrMoreWithVisibleHan
+```
+
+`meld dora` などは暗槓を含む fixed meld 全体、`open meld dora` などの `open` 値は公開副露だけです。`open visible han proxy` は production helper から表示します。classification の意味と条件は [押し引きと threat](ai/push-pull.md#openhandthreat) を source document とします。
+
+`player_id` などが不明な値は推測せず `unknown` / `None` と表示します。暗槓は `melds` と `kans` には入り、`open melds` には入りません。
+
+## Push/Pull
+
+```text
+Push/Pull
+  mode: Fold
+  reason: TwoOrMoreShantenAgainstHighOpenHand
+  opponent reach count: 0
+```
+
+`mode` は最終 action の優先順に影響し、`reason` は offense state と threat 種類を示します。詳しい境界は [押し引きと threat](ai/push-pull.md) を参照してください。
+
+## Reach
+
+`Reach` は通常打牌で選んだ牌を切った後のテンパイ形に基づく判断です。押し引きが `Push` のときだけ評価し、それ以外は `not evaluated` です。
+
+```text
+Reach
+  evaluated
+  decision: no
+  reason: InsufficientLiveWait
+  selected discard: N
+  shanten: 0
+  live wait: 3 remaining / 1 types
+  permanent furiten: no
+  ron: yes
+  tenpai waits: 5s
+  live tenpai waits: 5s
+  discarded waits: none
+```
+
+`tenpai waits` は構造上の待ち、`live tenpai waits` は見え牌を反映して残っている待ちです。フリテンについては [フリテン](ai/furiten.md) を参照してください。
+
+## Defense
+
+リーチ者向けの候補を `Genbutsu`、字牌 safety、壁、スジなどで表示します。`selected` は production fallback が採用した候補です。詳しい safety と優先順は [防御](ai/defense.md#riichi-defense) を参照してください。
+
+## OpenHand defense
+
+High OpenHandThreat の target と候補ごとの safety を表示します。
+
+```text
+OpenHand defense
+  targets: 1, 3
+  selected action: 5m
+  selected category: DiscardedByAllTargets
+```
+
+主な行:
+
+| 行 | 内容 |
+| --- | --- |
+| `targets` | High の相手。いなければ `none` |
+| `discarded by target[n]` | target 自身の河に同じ牌種があるか |
+| `discarded by all targets` | 全 target 自身の河にあるか |
+| `honor safety` | 字牌の見え枚数による safety |
+| `opponent honor value` | まだロン可能な target に対する最も危険な役牌価値 |
+| `wall` | 壁 / ワンチャンス |
+| `suji safety[n]` / `suji safety` | target 個別 / 集約後のスジ safety |
+| `category` | `DiscardedByAllTargets` / `HonorSafety` / `SuitedSafety` |
+
+target 選択や `post_reach_passed` を使わない理由は [OpenHand Defense](ai/defense.md#openhand-defense) を参照してください。
+
+## Combined defense
+
+リーチ者と High OpenHandThreat が同時にいる場合の target と候補を表示します。
+
+```text
+Combined defense
+  targets: 1(Riichi), 3(HighOpenHand)
+  selected action: 5m
+  selected category: SafeAgainstAllThreats
+```
+
+`ron safe[n kind]` は target ごとの根拠でロン安全か、`safe against all threats` は全 target に安全かを示します。リーチ者と副露相手では根拠が異なります。詳細は [Combined Defense](ai/defense.md#combined-defense) を参照してください。
+
+## Summary と runner-up
+
+出力末尾で最終選択と次点を確認できます。
+
+```text
+Summary
+  selected: 7s
+  source: DefenseFallback
+  selected detail: SuitedSafety(Suji)
+  runner-up: 4p
+  runner-up source: DefenseFallback
+  runner-up detail: SuitedSafety(HalfSuji)
+```
+
+`runner-up` は最終選択を除いた場合に次に選ばれる候補です。存在しない場合は `-` です。`selected` と `runner-up` は同じ source とは限りません。
+
+## Table state と History furiten
+
+取得できない table state は `unknown` と表示し、観測済みの `0` と区別します。現在は AI policy へ使用していません。入力 schema は [bot-scenario](bot-scenario.md#table-state) を参照してください。
+
+履歴依存フリテンも known / unknown をそのまま表示します。production policy との関係は [フリテン](ai/furiten.md) を参照してください。
