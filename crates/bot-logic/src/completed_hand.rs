@@ -1,4 +1,4 @@
-use crate::meld::{Meld, fixed_meld_count};
+use crate::meld::{Meld, MeldShape, fixed_meld_count};
 use crate::shanten::FixedMeldCount;
 use crate::tile::{TileId, TileType};
 use crate::tile_counts::{TileCountError, TileCounts};
@@ -42,6 +42,13 @@ impl ConcealedMeld {
         match self {
             Self::Sequence { start } => start.sequence(),
             Self::Triplet { tile } => Some([tile, tile, tile]),
+        }
+    }
+
+    pub fn shape(self) -> MeldShape {
+        match self {
+            Self::Sequence { start } => MeldShape::Sequence { start },
+            Self::Triplet { tile } => MeldShape::Triplet { tile },
         }
     }
 }
@@ -422,6 +429,23 @@ mod tests {
         );
         assert_eq!(analysis.decompositions().len(), 1);
         assert_eq!(standard_shanten(&counts_of(&concealed)), -1);
+    }
+
+    #[test]
+    fn concealed_melds_map_to_neutral_meld_shapes() {
+        assert_eq!(
+            sequence("2m").shape(),
+            MeldShape::Sequence {
+                start: tile_type("2m")
+            }
+        );
+        assert_eq!(
+            triplet("9s").shape(),
+            MeldShape::Triplet {
+                tile: tile_type("9s")
+            }
+        );
+        assert!(!triplet("9s").shape().is_kan());
     }
 
     #[test]
