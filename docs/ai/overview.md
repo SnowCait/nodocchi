@@ -32,6 +32,7 @@ mode に応じて Reach / 通常打牌 / 防御 fallback を選択
 - [押し引きと threat](push-pull.md): reach threat、OpenHandThreat、combined threat、Push / Neutral / Fold
 - [防御](defense.md): リーチ、High OpenHandThreat、複合 threat に対する safety と fallback
 - [フリテン](furiten.md): 恒常フリテン、履歴依存フリテン、structural / live waits
+- [手牌評価](hand-value.md): 完成手の構造解析。役・翻数・符・点数は未実装
 - [Structured diagnostics](../diagnostics.md): 上記判断が出力のどこに現れるか
 
 production code と pure helper が正確な挙動の source of truth で、境界条件は tests と [`bot-scenario` fixtures](../bot-scenario.md#fixture-との使い分け) が固定します。

@@ -50,6 +50,7 @@ cargo run -p chiihou-client --bin chiihou-client -- \
 - [押し引きと threat](docs/ai/push-pull.md)
 - [防御](docs/ai/defense.md)
 - [フリテン](docs/ai/furiten.md)
+- [手牌評価](docs/ai/hand-value.md)
 
 ## Development
 
