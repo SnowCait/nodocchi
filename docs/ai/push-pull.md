@@ -56,6 +56,23 @@
 
 終盤1副露 High の例外はテンパイだけが対象です。一向聴・二向聴以上は従来どおり `Fold` します。High target に2副露以上の相手が1人でも含まれる場合、Riichi threat、Combined threat では従来の strong-tenpai threshold を維持します。
 
+## 簡易打点 proxy
+
+`PushPullOffenseState` の打点関連フィールドは、打牌後の自分の手牌全体から確認できる打点要素だけを数える簡易 proxy です。対象は次の2つで、それぞれ一度だけ数えます。
+
+| 対象 | 数えるもの |
+| --- | --- |
+| 打牌後の concealed hand | 通常ドラ、赤ドラ、役牌刻子・槓子候補 |
+| 自分の確認できている fixed meld | 通常ドラ、赤ドラ、役牌翻 |
+
+fixed meld のドラ・赤ドラ・役牌の判定は threat 側と同じ `meld_threat_facts()` / `fixed_meld_value_facts()` を使い、押し引き側で数え直しません。Chi / Pon / Daiminkan / Ankan / Kakan をすべて対象にし、Kan は物理牌4枚を数えます。Chi は字牌を含まないので役牌翻を持ちませんが、ドラ・赤ドラは通常どおり数えます。役牌翻は `dragon + round_wind + seat_wind` なので、東場の東家の東ポンのようなダブ風は2翻です。場風・自風が不明な軸は推測して加算しません。
+
+暗槓は公開副露ではありませんが自分の手牌価値の一部なので、この proxy には含めます。相手の [OpenHandThreat](#openhandthreat) の `open visible han proxy` が暗槓を含まないのは公開情報だけを見る別の semantics で、意図的な違いです。`player_id` が不明で自分の fixed meld を特定できない場合は、確認できない fixed meld の打点を推測して加算しません。
+
+`simple value proxy` は `dora after discard + value honor han proxy after discard` です。`red dora after discard` は `dora after discard` の内数なので加算しません。
+
+これは正確な `HandValue` ではありません。一般役はまだ含めず、符・点数計算も行いません。現在の Push/Fold policy はこの proxy を使わず、diagnostics と将来の打点評価のための観測値として持ちます。
+
 ## action ordering
 
 - `Push`: Reach → 通常打牌 → 対応する防御 fallback

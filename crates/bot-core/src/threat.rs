@@ -119,6 +119,53 @@ impl ValueHonorMeldCounts {
     }
 }
 
+/// fixed meld 一覧の打点寄与だけをまとめた観測事実。翻数へは潰さず、Ankan も含む。
+///
+/// 相手の threat 用にも自分の打点 proxy 用にも使えるよう、公開・非公開の区別や policy は持たない。
+/// 対象 meld の選び方 (全 fixed meld か公開副露だけか) は呼び出し側が決める。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FixedMeldValueFacts {
+    /// 対象 meld の `dora_count` 合計。表示牌ドラと赤ドラを含む既存 semantics。
+    pub dora_count: u8,
+    /// 対象 meld の `red_dora_count` 合計。`dora_count` の内数。
+    pub red_dora_count: u8,
+    /// 対象 meld の役牌副露の集計。unknown wind は推測せず `unconfirmed_wind` として残す。
+    pub value_honor_melds: ValueHonorMeldCounts,
+}
+
+impl FixedMeldValueFacts {
+    fn add(&mut self, meld: MeldThreatFacts) {
+        self.dora_count = self.dora_count.saturating_add(meld.dora_count);
+        self.red_dora_count = self.red_dora_count.saturating_add(meld.red_dora_count);
+        if let Some(value_honor) = meld.value_honor {
+            self.value_honor_melds.add(value_honor);
+        }
+    }
+}
+
+/// fixed meld 一覧の打点寄与を集計する pure helper。
+///
+/// 判定は [`meld_threat_facts`] に一本化し、ドラ・赤ドラ・役牌を数え直さない。Chi / Pon /
+/// Daiminkan / Ankan / Kakan をすべて fixed meld として数え、Kan は既存 [`Meld::tiles`] の
+/// 物理牌4枚がそのまま対象になる。`seat_wind` は meld を持つ player 自身の自風。
+pub fn fixed_meld_value_facts(
+    melds: &[Meld],
+    dora_indicators: &[TileId],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> FixedMeldValueFacts {
+    let mut facts = FixedMeldValueFacts::default();
+    for meld in melds {
+        facts.add(meld_threat_facts(
+            meld,
+            dora_indicators,
+            round_wind,
+            seat_wind,
+        ));
+    }
+    facts
+}
+
 /// fixed meld 1つ分の軽量な観測事実。allocation を持たず `Copy`。
 ///
 /// [`MeldThreatDiagnostic`] はこの facts に物理牌を足したもので、副露の種類・ドラ・役牌の判定は
@@ -445,32 +492,29 @@ fn aggregate_player_threat_facts(
         open_value_honor_melds: ValueHonorMeldCounts::default(),
     };
 
+    let mut all_meld_value = FixedMeldValueFacts::default();
+    let mut open_meld_value = FixedMeldValueFacts::default();
+
     for meld in melds {
         facts.meld_count += 1;
         facts.open_meld_count += usize::from(meld.is_open);
         facts.kan_count += usize::from(meld.is_kan);
         facts.meld_kinds.add(meld.kind);
-        facts.meld_dora_count = facts.meld_dora_count.saturating_add(meld.dora_count);
-        facts.meld_red_dora_count = facts
-            .meld_red_dora_count
-            .saturating_add(meld.red_dora_count);
-        if let Some(value_honor) = meld.value_honor {
-            facts.value_honor_melds.add(value_honor);
-        }
+        all_meld_value.add(meld);
 
         // 公開されていない Ankan は open hand の威圧材料として数えない。判定は meld ごとの
         // facts をそのまま使い、ドラ・赤ドラ・役牌を別実装で数え直さない。
-        if !meld.is_open {
-            continue;
-        }
-        facts.open_meld_dora_count = facts.open_meld_dora_count.saturating_add(meld.dora_count);
-        facts.open_meld_red_dora_count = facts
-            .open_meld_red_dora_count
-            .saturating_add(meld.red_dora_count);
-        if let Some(value_honor) = meld.value_honor {
-            facts.open_value_honor_melds.add(value_honor);
+        if meld.is_open {
+            open_meld_value.add(meld);
         }
     }
+
+    facts.meld_dora_count = all_meld_value.dora_count;
+    facts.meld_red_dora_count = all_meld_value.red_dora_count;
+    facts.value_honor_melds = all_meld_value.value_honor_melds;
+    facts.open_meld_dora_count = open_meld_value.dora_count;
+    facts.open_meld_red_dora_count = open_meld_value.red_dora_count;
+    facts.open_value_honor_melds = open_meld_value.value_honor_melds;
 
     facts
 }

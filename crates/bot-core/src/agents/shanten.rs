@@ -3376,6 +3376,99 @@ pub(crate) mod tests {
         );
     }
 
+    // 自分の副露だけが違い、手牌・向聴数・受け入れは同じ2つの context。白ポンだけが役牌翻を持つ。
+    fn own_meld_value_contexts() -> (GameContext, GameContext) {
+        let hand_values = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36];
+        let build = |own_meld: crate::meld::Meld| {
+            let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+            melds[0] = vec![own_meld];
+            GameContext::from_parts_with_melds(
+                Some(tile(40)),
+                hand_values.iter().map(|&value| tile(value)).collect(),
+                vec![],
+                None,
+                None,
+                Vec::new(),
+                Some(0),
+                None,
+                Default::default(),
+                [false, true, false, false],
+                melds,
+            )
+        };
+
+        (
+            build(pon_meld()),
+            build(crate::meld::Meld::new(
+                crate::meld::MeldKind::Pon,
+                vec![tile(124), tile(125), tile(126)],
+                Some(tile(124)),
+            )),
+        )
+    }
+
+    fn own_meld_value_actions() -> Vec<LegalAction> {
+        [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40]
+            .iter()
+            .map(|&value| dahai(value))
+            .collect()
+    }
+
+    #[test]
+    fn own_fixed_meld_value_does_not_change_the_selected_action() {
+        // 東ポン (風不明で0翻) と白ポン (1翻) で簡易打点 proxy だけが変わる。
+        let (plain, valuable) = own_meld_value_contexts();
+        let actions = own_meld_value_actions();
+
+        let plain_diagnostic = diagnose_matching_act(&plain, &actions);
+        let valuable_diagnostic = diagnose_matching_act(&valuable, &actions);
+        assert_eq!(
+            valuable_diagnostic.selected_action,
+            plain_diagnostic.selected_action
+        );
+
+        for ctx in [&plain, &valuable] {
+            let with_lookahead = ShantenAgent::diagnose_with_options(
+                ctx,
+                &actions,
+                DiagnosticOptions::WITH_LOOKAHEAD,
+            );
+            assert_eq!(
+                with_lookahead.selected_action,
+                ShantenAgent::diagnose(ctx, &actions).selected_action
+            );
+        }
+
+        let plain_offense = plain_diagnostic
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense)
+            .expect("offense should be present");
+        let valuable_offense = valuable_diagnostic
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense)
+            .expect("offense should be present");
+        assert_eq!(plain_offense.simple_value_proxy_after_discard(), 0);
+        assert_eq!(valuable_offense.simple_value_proxy_after_discard(), 1);
+
+        // 打点 proxy が増えても押し引きの mode / reason は変わらない。
+        assert_eq!(
+            plain_diagnostic
+                .push_pull_decision
+                .map(|decision| decision.mode),
+            valuable_diagnostic
+                .push_pull_decision
+                .map(|decision| decision.mode)
+        );
+        assert_eq!(
+            plain_diagnostic
+                .push_pull_decision
+                .map(|decision| decision.reason),
+            valuable_diagnostic
+                .push_pull_decision
+                .map(|decision| decision.reason)
+        );
+    }
+
     #[test]
     fn diagnose_reports_no_own_fixed_meld_count_without_player_id() {
         let ctx = GameContext::default();

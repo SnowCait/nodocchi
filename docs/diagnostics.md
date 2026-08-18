@@ -102,6 +102,8 @@ Push/Pull
 
 `mode` は最終 action の優先順に影響し、`reason` は offense state と threat 種類を示します。詳しい境界は [押し引きと threat](ai/push-pull.md) を参照してください。
 
+`dora after discard` / `red dora after discard` / `value honor han proxy after discard` / `simple value proxy after discard` は、打牌後の concealed hand と自分の確認できている fixed meld (暗槓を含む) の両方を数えた簡易打点 proxy です。production の `PushPullOffenseState` をそのまま表示し、表示用に数え直しません。正確な打点ではなく、一般役・符・点数計算は含みません。意味は [簡易打点 proxy](ai/push-pull.md#簡易打点-proxy) を参照してください。
+
 ## Reach
 
 `Reach` は通常打牌で選んだ牌を切った後のテンパイ形に基づく判断です。押し引きが `Push` のときだけ評価し、それ以外は `not evaluated` です。
