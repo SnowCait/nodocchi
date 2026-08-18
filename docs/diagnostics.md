@@ -113,7 +113,7 @@ Reach
   reason: InsufficientLiveWait
   selected discard: N
   shanten: 0
-  live wait: 3 remaining / 1 types
+  live wait: 2 remaining / 1 types
   permanent furiten: no
   history furiten after discard: same turn false / riichi missed win false
   ron: yes

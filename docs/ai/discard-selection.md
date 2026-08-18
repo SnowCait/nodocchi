@@ -8,6 +8,22 @@
 
 `bot-scenario` の `Normal discard candidates` では候補ごとの shanten、acceptance remaining / types、ドラやフリテンの情報を確認できます。見え牌には手牌、ツモ牌、ドラ表示牌、河、副露、`extra_visible_tiles` が反映されます。
 
+## 七対子テンパイの tie-break
+
+打牌後が七対子テンパイになる候補同士は、受け入れ残枚数と受け入れ牌種類数が同値の場合に限り、単騎待ち牌の品質で比較します。
+
+```text
+AcceptanceRemaining
+→ AcceptanceTypeCount
+→ [七対子テンパイ限定] ChiitoitsuWaitQuality
+→ IishantenShape
+→ ...
+```
+
+待ちの品質は `字牌 > 1/9 > 2/8 > 3/7 > 4/6 > 5` の固定順位です。同じ組同士は同品質で、スートや場風・自風・役牌かどうかは区別しません。生き枚数の比較が先なので、品質の低い待ちでも残枚数が多ければそちらを選びます。
+
+適用するのは両候補とも七対子テンパイで、七対子を完成させる牌が一意に定まる場合だけです。通常形テンパイ、国士テンパイ、一向聴以上、副露形には広げません。`bot-scenario` の候補表示では `lost by: ChiitoitsuWaitQuality` として現れます。
+
 ## 1向聴: WeightedTenpaiWait
 
 1向聴候補では、受け入れ牌を引いた後にテンパイへ進む各 branch の待ちを重み付きで集約した `weighted tenpai wait` を表示します。単なる現在の受け入れ枚数だけでなく、テンパイ後に残る待ちも比較するための指標です。

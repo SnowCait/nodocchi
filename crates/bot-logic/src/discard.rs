@@ -649,6 +649,8 @@ pub enum DiscardComparisonReason {
     WeightedNextAcceptanceTypeCount,
     AcceptanceRemaining,
     AcceptanceTypeCount,
+    /// 七対子テンパイ限定。単騎待ち牌の固定順位。
+    ChiitoitsuWaitQuality,
     IishantenShape,
     ShapePenalty,
     FloatingTileValue,
@@ -720,6 +722,10 @@ pub(crate) fn compare_discard_from_acceptance(
             candidate_is_better: candidate_type_count > best_type_count,
             reason: DiscardComparisonReason::AcceptanceTypeCount,
         };
+    }
+
+    if let Some(comparison) = compare_chiitoitsu_wait_quality(candidate, current_best) {
+        return comparison;
     }
 
     if let Some(comparison) = compare_standard_iishanten_shape(candidate, current_best) {
@@ -855,6 +861,64 @@ fn compare_isolated_honor_discard(
     Some(DiscardComparison {
         candidate_is_better: candidate_is_honor,
         reason: DiscardComparisonReason::IsolatedHonor,
+    })
+}
+
+// 七対子単騎待ちの固定順位。値が小さいほど良い待ちとする。
+//
+// 字牌 > 1/9 > 2/8 > 3/7 > 4/6 > 5 だけを表現し、スートや場風・自風・役牌は区別しない。
+// 七対子 tie-break 専用で、一般的な牌の安全度や待ちの良さとして使わない。
+fn chiitoitsu_wait_quality_rank(wait: TileType) -> u8 {
+    match wait.number() {
+        None => 0,
+        Some(number) => number.min(10 - number),
+    }
+}
+
+// 打牌後が七対子テンパイである候補の、七対子を完成させる単騎待ち牌。
+//
+// 判定は既存評価が持つ値だけで行い、打牌後13枚の再構築も向聴・受け入れの再計算もしない。
+// 副露形は七対子の対象外なので `Concealed` に限る。通常形と七対子が同時にテンパイしている
+// 場合に受け入れ全体を七対子待ちと誤認しないよう、七対子が和了になる (`chiitoitsu == -1`)
+// 受け入れ牌だけを対象にし、一意に定まらない場合は `None` を返して tie-break しない。
+fn chiitoitsu_tenpai_wait(evaluation: &DiscardEvaluation) -> Option<TileType> {
+    if evaluation.min_shanten_after_discard() != 0 {
+        return None;
+    }
+    if evaluation.shanten_after_discard.concealed()?.chiitoitsu != 0 {
+        return None;
+    }
+
+    let mut waits = evaluation
+        .acceptance_after_discard
+        .tiles
+        .iter()
+        .filter(|acceptance| {
+            acceptance
+                .shanten_after_draw
+                .concealed()
+                .is_some_and(|shanten| shanten.chiitoitsu == -1)
+        });
+    let wait = waits.next()?;
+    waits.next().is_none().then_some(wait.tile)
+}
+
+// 両候補とも七対子テンパイで単騎待ち牌が一意に定まる場合だけ、待ち牌の固定順位で決着させる
+// 限定的な tie-break。受け入れ残枚数・種類数の比較より後に置き、同値のときだけ使う。
+// 同順位・非対象は None を返して後続の既存比較へ委ねる。
+fn compare_chiitoitsu_wait_quality(
+    candidate: &DiscardEvaluation,
+    current_best: &DiscardEvaluation,
+) -> Option<DiscardComparison> {
+    let candidate_rank = chiitoitsu_wait_quality_rank(chiitoitsu_tenpai_wait(candidate)?);
+    let best_rank = chiitoitsu_wait_quality_rank(chiitoitsu_tenpai_wait(current_best)?);
+    if candidate_rank == best_rank {
+        return None;
+    }
+
+    Some(DiscardComparison {
+        candidate_is_better: candidate_rank < best_rank,
+        reason: DiscardComparisonReason::ChiitoitsuWaitQuality,
     })
 }
 
@@ -4221,6 +4285,208 @@ mod tests {
         assert_eq!(
             candidate.comparison_reason,
             DiscardComparisonReason::IishantenShape
+        );
+    }
+
+    // ---- 七対子単騎待ちの tie-break ----
+
+    // 6対子。孤立牌を2枚足すと、どちらを切っても他方の七対子単騎テンパイになる14枚になる。
+    const CHIITOITSU_PAIRS: [&str; 12] = [
+        "1m", "1m", "4m", "4m", "7m", "7m", "1p", "1p", "4p", "4p", "7p", "7p",
+    ];
+
+    fn chiitoitsu_tanki_hand<'a>(left: &'a str, right: &'a str) -> Vec<&'a str> {
+        let mut hand: Vec<&'a str> = CHIITOITSU_PAIRS.to_vec();
+        hand.push(left);
+        hand.push(right);
+        hand
+    }
+
+    #[test]
+    fn chiitoitsu_wait_quality_orders_the_tanki_wait() {
+        // 生き枚数が同じ七対子単騎同士は 字牌 > 1/9 > 2/8 > 3/7 > 4/6 > 5 の順で待ちを選ぶ。
+        for (better, worse) in [
+            ("E", "1s"),
+            ("1s", "2s"),
+            ("2s", "3s"),
+            ("3s", "4s"),
+            ("4s", "5s"),
+        ] {
+            let counts = counts(&chiitoitsu_tanki_hand(better, worse));
+            let evaluations = evaluate_discards(&counts);
+            // 品質の良い待ちを残す打牌と、悪い待ちを残す打牌。
+            let keeps_better = discard_evaluation(&evaluations, tile(worse));
+            let keeps_worse = discard_evaluation(&evaluations, tile(better));
+
+            assert_eq!(
+                keeps_better.min_shanten_after_discard(),
+                0,
+                "{better}/{worse}"
+            );
+            assert_eq!(
+                keeps_better.acceptance_total_remaining(),
+                keeps_worse.acceptance_total_remaining(),
+                "{better}/{worse}"
+            );
+            assert_eq!(
+                keeps_better.acceptance_type_count(),
+                keeps_worse.acceptance_type_count(),
+                "{better}/{worse}"
+            );
+
+            let comparison = compare_discard_evaluations(keeps_better, keeps_worse);
+            assert!(comparison.candidate_is_better, "{better}/{worse}");
+            assert_eq!(
+                comparison.reason,
+                DiscardComparisonReason::ChiitoitsuWaitQuality,
+                "{better}/{worse}"
+            );
+            assert_eq!(
+                select_best_discard(&counts).expect("打牌を選べる").discard,
+                tile(worse),
+                "{better}/{worse}"
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_remaining_outranks_the_chiitoitsu_wait_quality() {
+        // 待ちの品質は 北 単騎の方が上でも、生き枚数の多い 5m 単騎を選ぶ。
+        let hand = chiitoitsu_tanki_hand("5m", "N");
+        let counts = counts(&hand);
+        let mut visible = hand.clone();
+        visible.push("N");
+        let evaluations = evaluate_discards_with_visible_tiles(&counts, &ids_of(&visible));
+
+        let keeps_five = discard_evaluation(&evaluations, tile("N"));
+        let keeps_north = discard_evaluation(&evaluations, tile("5m"));
+        assert_eq!(acceptance_remaining(keeps_five, tile("5m")), Some(3));
+        assert_eq!(acceptance_remaining(keeps_north, tile("N")), Some(2));
+
+        let comparison = compare_discard_evaluations(keeps_five, keeps_north);
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+        assert_eq!(
+            select_best(evaluations).expect("打牌を選べる").discard,
+            tile("N")
+        );
+    }
+
+    #[test]
+    fn chiitoitsu_wait_quality_is_not_applied_to_a_standard_tanki_tenpai() {
+        // 通常形の単騎テンパイ同士には七対子専用の固定順位を広げない。
+        let counts = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "N",
+        ]);
+        let evaluations = evaluate_discards(&counts);
+        let keeps_five_sou = discard_evaluation(&evaluations, tile("N"));
+        let keeps_north = discard_evaluation(&evaluations, tile("5s"));
+
+        for evaluation in [keeps_five_sou, keeps_north] {
+            assert_eq!(evaluation.min_shanten_after_discard(), 0);
+            assert_ne!(
+                evaluation
+                    .shanten_after_discard
+                    .concealed()
+                    .expect("門前")
+                    .chiitoitsu,
+                0
+            );
+        }
+        assert_ne!(
+            compare_discard_evaluations(keeps_five_sou, keeps_north).reason,
+            DiscardComparisonReason::ChiitoitsuWaitQuality
+        );
+    }
+
+    // 七対子テンパイの合成評価。適用範囲だけを検証するため、単騎待ち牌を明示して作る。
+    fn chiitoitsu_tenpai_evaluation(waits: &[&str]) -> DiscardEvaluation {
+        let tenpai = concealed(Shanten {
+            standard: 3,
+            chiitoitsu: 0,
+            kokushi: 127,
+        });
+        let hora = concealed(Shanten {
+            standard: 2,
+            chiitoitsu: -1,
+            kokushi: 127,
+        });
+        let mut evaluation = evaluation(0, 0, 0, 0, false);
+        evaluation.shanten_after_discard = tenpai;
+        evaluation.acceptance_after_discard = Acceptance {
+            current: tenpai,
+            tiles: waits
+                .iter()
+                .map(|wait| AcceptanceTile {
+                    tile: tile(wait),
+                    remaining: 3,
+                    shanten_after_draw: hora,
+                })
+                .collect(),
+        };
+        evaluation
+    }
+
+    #[test]
+    fn chiitoitsu_wait_quality_needs_a_unique_wait() {
+        // 七対子完成牌を一意に決められない候補では tie-break せず、後続の既存比較へ委ねる。
+        let ambiguous = chiitoitsu_tenpai_evaluation(&["E", "5m"]);
+        let also_ambiguous = chiitoitsu_tenpai_evaluation(&["5m", "E"]);
+        assert_ne!(
+            compare_discard_evaluations(&ambiguous, &also_ambiguous).reason,
+            DiscardComparisonReason::ChiitoitsuWaitQuality
+        );
+
+        // 待ちが一意なら同じ構成でも tie-break が働く。
+        assert_eq!(
+            compare_discard_evaluations(
+                &chiitoitsu_tenpai_evaluation(&["E"]),
+                &chiitoitsu_tenpai_evaluation(&["5m"]),
+            )
+            .reason,
+            DiscardComparisonReason::ChiitoitsuWaitQuality
+        );
+    }
+
+    #[test]
+    fn chiitoitsu_wait_quality_is_not_applied_to_a_melded_hand() {
+        // 副露形は七対子の対象外なので、待ち牌が同じ形でも固定順位を使わない。
+        let melded = |wait: &str| {
+            let mut evaluation = chiitoitsu_tenpai_evaluation(&[wait]);
+            evaluation.shanten_after_discard = EffectiveShanten::Melded { standard: 0 };
+            evaluation.acceptance_after_discard.current = EffectiveShanten::Melded { standard: 0 };
+            for acceptance in &mut evaluation.acceptance_after_discard.tiles {
+                acceptance.shanten_after_draw = EffectiveShanten::Melded { standard: -1 };
+            }
+            evaluation
+        };
+        assert_ne!(
+            compare_discard_evaluations(&melded("E"), &melded("5m")).reason,
+            DiscardComparisonReason::ChiitoitsuWaitQuality
+        );
+    }
+
+    #[test]
+    fn diagnose_reports_chiitoitsu_wait_quality_reason() {
+        // 診断は production comparator が返した理由をそのまま載せる。
+        let counts = counts(&chiitoitsu_tanki_hand("E", "1s"));
+        let evaluations = evaluate_discards(&counts);
+        let report = diagnose_discard_evaluations(&counts, &evaluations);
+
+        let selected = report.selected.as_ref().expect("打牌を選べる");
+        assert_eq!(selected.discard, tile("1s"));
+        let loser = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard == tile("E"))
+            .expect("打 E も候補になる");
+        assert!(loser.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            loser.comparison_reason,
+            DiscardComparisonReason::ChiitoitsuWaitQuality
         );
     }
 

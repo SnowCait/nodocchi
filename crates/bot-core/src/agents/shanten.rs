@@ -33,8 +33,9 @@ use bot_logic::{
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
-// 補正後の待ち枚数がこの枚数以上ならリーチする。
-const REACH_MIN_REMAINING: u8 = 4;
+// 補正後の待ち枚数がこの枚数以上ならリーチする。生牌の単騎は3枚なので、待ち枚数だけを理由に
+// 抑制するのは3枚未満に限る。
+const REACH_MIN_REMAINING: u8 = 3;
 
 // リーチを検討する打牌後の向聴数。
 const REACH_TENPAI_SHANTEN: i8 = 0;
@@ -1485,6 +1486,25 @@ pub(crate) mod tests {
         GameContext::from_parts(Some(tile(TANKI_TENPAI_DRAWN)), hand)
     }
 
+    // 5s を1枚、北 を2枚見せて、打 北 の 5s 単騎を2枚待ちにした同じ単騎テンパイ。打 5s の
+    // 北 単騎は1枚しか残らないので、選ばれる打牌は 北 のまま。
+    const TANKI_TENPAI_SCARCE_VISIBLE: [u8; 3] = [88, 117, 118];
+
+    fn tanki_tenpai_context_with_visible(extra_visible: &[u8]) -> GameContext {
+        let hand: Vec<_> = TANKI_TENPAI_HAND.iter().map(|&value| tile(value)).collect();
+        let mut visible = hand.clone();
+        visible.push(tile(TANKI_TENPAI_DRAWN));
+        visible.extend(extra_visible.iter().map(|&value| tile(value)));
+        GameContext::from_parts_with_visible_tiles(
+            Some(tile(TANKI_TENPAI_DRAWN)),
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+        )
+    }
+
     fn tanki_tenpai_actions() -> Vec<LegalAction> {
         TANKI_TENPAI_HAND
             .iter()
@@ -1492,6 +1512,82 @@ pub(crate) mod tests {
             .chain([dahai(TANKI_TENPAI_DRAWN)])
             .chain([LegalAction::Reach])
             .collect()
+    }
+
+    // 114477m 114477p + 1s + ツモ E。どちらの孤立牌を切っても七対子単騎テンパイになり、
+    // 生き枚数が同じなので待ち牌の品質で打牌が決まる。
+    const CHIITOITSU_TANKI_HAND: [u8; 13] = [0, 1, 12, 13, 24, 25, 36, 37, 48, 49, 60, 61, 72];
+    const CHIITOITSU_TANKI_DRAWN: u8 = 108;
+    const CHIITOITSU_TANKI_DISCARD: u8 = 72;
+
+    fn chiitoitsu_tanki_context() -> GameContext {
+        let hand: Vec<_> = CHIITOITSU_TANKI_HAND
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        GameContext::from_parts(Some(tile(CHIITOITSU_TANKI_DRAWN)), hand)
+    }
+
+    fn chiitoitsu_tanki_dahai_actions() -> Vec<LegalAction> {
+        CHIITOITSU_TANKI_HAND
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(CHIITOITSU_TANKI_DRAWN)])
+            .collect()
+    }
+
+    #[test]
+    fn chiitoitsu_tanki_selection_is_shared_by_act_and_diagnose() {
+        // 品質の高い E 単騎に取るため 1s を切る。診断は production comparator の理由を載せる。
+        let ctx = chiitoitsu_tanki_context();
+        let actions = chiitoitsu_tanki_dahai_actions();
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&ctx, &actions);
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let with_lookahead =
+            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+
+        assert_eq!(acted, dahai(CHIITOITSU_TANKI_DISCARD));
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+
+        let normal_discard = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("通常打牌を評価している");
+        let loser = normal_discard
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.evaluation.discard == tile(CHIITOITSU_TANKI_DRAWN).tile_type()
+            })
+            .expect("打 E も候補になる");
+        assert!(loser.selected_is_strictly_better_than_candidate);
+        assert_eq!(
+            loser.comparison_reason,
+            DiscardComparisonReason::ChiitoitsuWaitQuality
+        );
+    }
+
+    #[test]
+    fn reaches_on_a_chiitoitsu_tanki_wait() {
+        // 七対子単騎は生牌でも3枚。選んだ打牌後の待ちで先制リーチする。
+        let ctx = chiitoitsu_tanki_context();
+        let actions: Vec<LegalAction> = chiitoitsu_tanki_dahai_actions()
+            .into_iter()
+            .chain([LegalAction::Reach])
+            .collect();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(
+            reach.selected_discard,
+            Some(dahai(CHIITOITSU_TANKI_DISCARD))
+        );
+        assert_eq!(reach.tsumo_remaining(), Some(3));
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
     }
 
     // act() が実際に通ったリーチ判断。診断専用に判断し直さないことを毎回確かめる。
@@ -1685,12 +1781,42 @@ pub(crate) mod tests {
         assert!(reach.should_reach());
         assert_eq!(reach.tsumo_remaining(), Some(8));
 
-        // 同じく visible tiles が空でも、待ちが足りなければリーチしない。
+        // 同じく visible tiles が空の単騎3枚待ちも、打牌評価の受け入れそのもので判断する。
         let tanki = reach_diagnostic(&tanki_tenpai_context(), &tanki_tenpai_actions());
         assert!(tanki_tenpai_context().visible_tiles().is_empty());
-        assert!(!tanki.should_reach());
-        assert_eq!(tanki.reason, ReachDecisionReason::InsufficientLiveWait);
+        assert!(tanki.should_reach());
+        assert_eq!(tanki.reason, ReachDecisionReason::Eligible);
         assert_eq!(tanki.tsumo_remaining(), Some(3));
+    }
+
+    #[test]
+    fn reaches_with_a_three_tile_tanki_wait() {
+        // 生牌の単騎は3枚。最低生き待ち枚数の境界そのものなので、先制リーチする。
+        let ctx = tanki_tenpai_context();
+        let actions = tanki_tenpai_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(reach.tsumo_remaining(), Some(3));
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert!(reach.should_reach());
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
+    }
+
+    #[test]
+    fn does_not_reach_with_a_two_tile_tanki_wait() {
+        // 同じ単騎テンパイで待ち牌を1枚見せると2枚になり、境界未満なのでリーチしない。
+        let ctx = tanki_tenpai_context_with_visible(&TANKI_TENPAI_SCARCE_VISIBLE);
+        let actions = tanki_tenpai_actions();
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(reach.selected_discard, Some(dahai(TANKI_TENPAI_DRAWN)));
+        assert_eq!(reach.tsumo_remaining(), Some(2));
+        assert_eq!(reach.reason, ReachDecisionReason::InsufficientLiveWait);
+        assert!(!reach.should_reach());
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
     }
 
     #[test]
@@ -5100,13 +5226,15 @@ pub(crate) mod tests {
     }
 
     // 選択した打牌後の待ち診断。全候補診断と押し引きが同じ評価時点の値を共有することも固定する。
+    //
+    // リーチを選んだ場合も切る牌は通常打牌 selection の結果なので、待ちは通常打牌から引く。
     fn selected_tenpai_wait(
         ctx: &GameContext,
         actions: &[LegalAction],
     ) -> (ShantenDecisionDiagnostic, TenpaiWaitAvailability) {
         let diagnostic = diagnose_matching_act(ctx, actions);
-        let LegalAction::Dahai { tile } = &diagnostic.selected_action else {
-            panic!("打牌が選ばれる: {:?}", diagnostic.selected_action);
+        let Some(LegalAction::Dahai { tile }) = &diagnostic.normal_discard_action else {
+            panic!("打牌が選ばれる: {:?}", diagnostic.normal_discard_action);
         };
         let tenpai = furiten_of(&diagnostic, tile.tile_type())
             .tenpai

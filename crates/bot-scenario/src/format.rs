@@ -2946,9 +2946,20 @@ mod tests {
         "allow_reach": true
     }"#;
 
-    // 打 北 で 5s 単騎テンパイになり、待ちは3枚だけ。14枚をそのまま評価すると受け入れは
-    // {5s, 北} の6枚に見えるが、実際に選んだ打牌後の待ちは threshold に届かない。
+    // 打 北 で 5s 単騎テンパイになり、待ちは3枚。14枚をそのまま評価すると受け入れは
+    // {5s, 北} の6枚に見えるが、リーチ判断は実際に選んだ打牌後の3枚で行う。
     const REACH_TANKI_WAIT_SCENARIO: &str = include_str!("../scenarios/reach_tanki_wait.json");
+
+    // 同じ単騎テンパイで 5s を1枚、北 を2枚見せた局面。打 北 の待ちは2枚に減る。
+    const REACH_SCARCE_TANKI_WAIT_SCENARIO: &str = r#"{
+        "hand": "123456789m123p5s",
+        "draw": "N",
+        "player_id": 0,
+        "oya": 0,
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "extra_visible_tiles": "5s N N",
+        "allow_reach": true
+    }"#;
 
     fn without_selected_action(
         legal_actions: &[LegalAction],
@@ -3342,13 +3353,13 @@ mod tests {
     }
 
     #[test]
-    fn reach_section_reports_the_insufficient_wait_of_the_selected_discard() {
+    fn reach_section_reports_the_tanki_wait_of_the_selected_discard() {
         // 14枚をそのまま評価すると {5s, 北} の6枚に見えるが、実際に切る 北 を決めた後の待ちは
-        // 5s の3枚だけ。リーチ判断は選んだ打牌後の待ちで行う。
+        // 5s の3枚。リーチ判断は選んだ打牌後の待ちで行い、生牌の単騎3枚は境界を満たす。
         let (scenario, diagnostic, output) = rendered(REACH_TANKI_WAIT_SCENARIO, false);
         let reach = section(&output, "Reach");
 
-        // 打牌前の14枚をそのまま評価すると threshold を満たしてしまう局面であることを固定する。
+        // 打牌前の14枚をそのまま評価した受け入れとは別物であることを固定する。
         let counts = TileCounts::from_tiles(
             scenario
                 .context
@@ -3362,10 +3373,10 @@ mod tests {
         assert_eq!(whole_hand.current.min(), 0);
         assert_eq!(whole_hand.total_remaining(), 6);
 
-        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
-        assert_eq!(action_label(&diagnostic.selected_action), "N");
-        assert!(reach.contains("  decision: no"), "{reach}");
-        assert!(reach.contains("  reason: InsufficientLiveWait"), "{reach}");
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+        assert_eq!(action_label(&diagnostic.selected_action), "Reach");
+        assert!(reach.contains("  decision: yes"), "{reach}");
+        assert!(reach.contains("  reason: Eligible"), "{reach}");
         assert!(reach.contains("  selected discard: N"), "{reach}");
         assert!(reach.contains("  shanten: 0"), "{reach}");
         assert!(
@@ -3375,6 +3386,24 @@ mod tests {
         assert!(reach.contains("  tenpai waits: 5s"), "{reach}");
         assert!(reach.contains("  permanent furiten: no"), "{reach}");
         assert!(reach.contains("  ron: yes"), "{reach}");
+    }
+
+    #[test]
+    fn reach_section_reports_the_insufficient_wait_of_the_selected_discard() {
+        // 同じ単騎テンパイでも待ちが2枚まで減ると、リーチせず通常打牌になる。
+        let (_, diagnostic, output) = rendered(REACH_SCARCE_TANKI_WAIT_SCENARIO, false);
+        let reach = section(&output, "Reach");
+
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(action_label(&diagnostic.selected_action), "N");
+        assert!(reach.contains("  decision: no"), "{reach}");
+        assert!(reach.contains("  reason: InsufficientLiveWait"), "{reach}");
+        assert!(reach.contains("  selected discard: N"), "{reach}");
+        assert!(
+            reach.contains("  live wait: 2 remaining / 1 types"),
+            "{reach}"
+        );
+        assert!(reach.contains("  tenpai waits: 5s"), "{reach}");
     }
 
     #[test]
