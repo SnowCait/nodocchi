@@ -3,7 +3,8 @@ use crate::completed_hand::{
 };
 use crate::meld::{Meld, MeldShape, is_menzen};
 use crate::shanten::FixedMeldCount;
-use crate::tile::{Suit, TileType};
+use crate::tile::{Dragon, Suit, TileType};
+use crate::winning_context::{RiichiStatus, WinMethod, WinningContext};
 
 const SANKANTSU_KAN_COUNT: usize = 3;
 const SHOUSANGEN_DRAGON_SET_COUNT: usize = 2;
@@ -27,15 +28,30 @@ pub enum Yaku {
     Shousangen,
     Honitsu,
     Chinitsu,
+    YakuhaiWhite,
+    YakuhaiGreen,
+    YakuhaiRed,
+    YakuhaiRoundWind,
+    YakuhaiSeatWind,
+    Riichi,
+    DoubleRiichi,
+    Ippatsu,
+    MenzenTsumo,
+    Chankan,
+    RinshanKaihou,
+    Haitei,
+    Houtei,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructuralYakuEvaluation<'a> {
+pub struct YakuEvaluation<'a> {
     decomposition: &'a CompletedHandDecomposition,
     yaku: Vec<Yaku>,
 }
 
-impl<'a> StructuralYakuEvaluation<'a> {
+pub type StructuralYakuEvaluation<'a> = YakuEvaluation<'a>;
+
+impl<'a> YakuEvaluation<'a> {
     pub fn decomposition(&self) -> &'a CompletedHandDecomposition {
         self.decomposition
     }
@@ -53,19 +69,141 @@ impl<'a> StructuralYakuEvaluation<'a> {
     }
 }
 
-pub fn evaluate_structural_yaku(
-    analysis: &CompletedHandAnalysis,
-) -> Vec<StructuralYakuEvaluation<'_>> {
+pub fn evaluate_structural_yaku(analysis: &CompletedHandAnalysis) -> Vec<YakuEvaluation<'_>> {
     let tiles = hand_tile_types(analysis);
     let menzen = is_menzen(analysis.fixed_melds());
     analysis
         .decompositions()
         .iter()
-        .map(|decomposition| StructuralYakuEvaluation {
+        .map(|decomposition| YakuEvaluation {
             decomposition,
             yaku: decomposition_yaku(decomposition, analysis.fixed_melds(), &tiles, menzen),
         })
         .collect()
+}
+
+pub fn evaluate_yaku(
+    analysis: &CompletedHandAnalysis,
+    context: WinningContext,
+) -> Vec<YakuEvaluation<'_>> {
+    let menzen = is_menzen(analysis.fixed_melds());
+    evaluate_structural_yaku(analysis)
+        .into_iter()
+        .map(|evaluation| {
+            let YakuEvaluation {
+                decomposition,
+                mut yaku,
+            } = evaluation;
+            yaku.extend(contextual_yaku(
+                decomposition,
+                analysis.fixed_melds(),
+                context,
+                menzen,
+            ));
+            yaku.sort_unstable();
+            yaku.dedup();
+            YakuEvaluation {
+                decomposition,
+                yaku,
+            }
+        })
+        .collect()
+}
+
+fn contextual_yaku(
+    decomposition: &CompletedHandDecomposition,
+    fixed_melds: &[Meld],
+    context: WinningContext,
+    menzen: bool,
+) -> Vec<Yaku> {
+    match decomposition {
+        CompletedHandDecomposition::Standard(standard) => {
+            let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
+                return Vec::new();
+            };
+            let mut yaku = yakuhai_yaku(&melds, context);
+            yaku.extend(win_context_yaku(context, menzen));
+            yaku
+        }
+        CompletedHandDecomposition::Chiitoitsu(_) | CompletedHandDecomposition::Kokushi(_) => {
+            win_context_yaku(context, menzen)
+        }
+    }
+}
+
+fn yakuhai_yaku(melds: &[MeldShape], context: WinningContext) -> Vec<Yaku> {
+    melds
+        .iter()
+        .filter_map(|meld| meld.triplet_tile_type())
+        .flat_map(|tile| tile_yakuhai(tile, context))
+        .collect()
+}
+
+fn tile_yakuhai(tile: TileType, context: WinningContext) -> Vec<Yaku> {
+    if let Some(dragon) = tile.dragon() {
+        return vec![dragon_yakuhai(dragon)];
+    }
+    if !tile.is_wind() {
+        return Vec::new();
+    }
+
+    let mut yaku = Vec::new();
+    if context.round_wind() == Some(tile) {
+        yaku.push(Yaku::YakuhaiRoundWind);
+    }
+    if context.seat_wind() == Some(tile) {
+        yaku.push(Yaku::YakuhaiSeatWind);
+    }
+    yaku
+}
+
+fn dragon_yakuhai(dragon: Dragon) -> Yaku {
+    match dragon {
+        Dragon::White => Yaku::YakuhaiWhite,
+        Dragon::Green => Yaku::YakuhaiGreen,
+        Dragon::Red => Yaku::YakuhaiRed,
+    }
+}
+
+fn win_context_yaku(context: WinningContext, menzen: bool) -> Vec<Yaku> {
+    let mut yaku = Vec::new();
+    if menzen {
+        yaku.extend(menzen_context_yaku(context));
+    }
+    if context.win_method().is_tsumo() && context.rinshan() == Some(true) {
+        yaku.push(Yaku::RinshanKaihou);
+    }
+    if context.win_method().is_ron() && context.chankan() == Some(true) {
+        yaku.push(Yaku::Chankan);
+    }
+    yaku.extend(last_live_tile_yaku(context));
+    yaku
+}
+
+fn menzen_context_yaku(context: WinningContext) -> Vec<Yaku> {
+    let mut yaku = Vec::new();
+    match context.riichi() {
+        RiichiStatus::Riichi => yaku.push(Yaku::Riichi),
+        RiichiStatus::DoubleRiichi => yaku.push(Yaku::DoubleRiichi),
+        RiichiStatus::Unknown | RiichiStatus::NotDeclared => {}
+    }
+    if context.riichi().is_declared() == Some(true) && context.ippatsu() == Some(true) {
+        yaku.push(Yaku::Ippatsu);
+    }
+    if context.win_method().is_tsumo() {
+        yaku.push(Yaku::MenzenTsumo);
+    }
+    yaku
+}
+
+fn last_live_tile_yaku(context: WinningContext) -> Option<Yaku> {
+    if !context.is_last_live_tile() {
+        return None;
+    }
+    match context.win_method() {
+        WinMethod::Tsumo => (context.rinshan() != Some(true)).then_some(Yaku::Haitei),
+        WinMethod::Ron => Some(Yaku::Houtei),
+    }
 }
 
 fn decomposition_yaku(
@@ -1021,5 +1159,538 @@ mod tests {
             assert_eq!(evaluation.yaku(), expected);
         }
         assert_eq!(evaluations, evaluate_structural_yaku(&analysis));
+    }
+
+    fn ron_context() -> WinningContext {
+        WinningContext::new(WinMethod::Ron)
+    }
+
+    fn tsumo_context() -> WinningContext {
+        WinningContext::new(WinMethod::Tsumo)
+    }
+
+    fn wind_context(round_wind: Option<&str>, seat_wind: Option<&str>) -> WinningContext {
+        ron_context()
+            .with_round_wind(round_wind.map(tile_type))
+            .with_seat_wind(seat_wind.map(tile_type))
+    }
+
+    fn honor_set_hand(source: &mut TileIdSource, honor: &str) -> Vec<TileId> {
+        source.tiles(&[
+            honor, honor, honor, "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5s", "5s",
+        ])
+    }
+
+    fn three_meld_rest(source: &mut TileIdSource) -> Vec<TileId> {
+        source.tiles(&[
+            "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5s", "5s",
+        ])
+    }
+
+    fn menzen_tanyao_hand(source: &mut TileIdSource) -> Vec<TileId> {
+        source.tiles(&[
+            "2m", "3m", "4m", "3m", "4m", "5m", "2p", "3p", "4p", "5p", "6p", "7p", "5s", "5s",
+        ])
+    }
+
+    fn honor_set_yaku(honor: &str, context: WinningContext) -> Vec<Yaku> {
+        let mut source = TileIdSource::new();
+        let concealed = honor_set_hand(&mut source, honor);
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        only_yaku(&evaluate_yaku(&analysis, context))
+    }
+
+    fn menzen_tanyao_yaku(context: WinningContext) -> Vec<Yaku> {
+        let mut source = TileIdSource::new();
+        let concealed = menzen_tanyao_hand(&mut source);
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        only_yaku(&evaluate_yaku(&analysis, context))
+    }
+
+    fn open_tanyao_yaku(context: WinningContext) -> Vec<Yaku> {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Chi, &["2p", "3p", "4p"])];
+        let concealed = source.tiles(&[
+            "2m", "3m", "4m", "3m", "4m", "5m", "5p", "6p", "7p", "5s", "5s",
+        ]);
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+
+        assert!(!is_menzen(&fixed));
+        only_yaku(&evaluate_yaku(&analysis, context))
+    }
+
+    #[test]
+    fn every_dragon_set_has_its_own_yakuhai() {
+        for (honor, expected) in [
+            ("P", Yaku::YakuhaiWhite),
+            ("F", Yaku::YakuhaiGreen),
+            ("C", Yaku::YakuhaiRed),
+        ] {
+            assert_eq!(
+                honor_set_yaku(honor, ron_context()),
+                [expected],
+                "honor: {honor}"
+            );
+        }
+    }
+
+    #[test]
+    fn dragon_yakuhai_ignores_round_and_seat_wind() {
+        assert_eq!(
+            honor_set_yaku("F", wind_context(Some("S"), Some("W"))),
+            [Yaku::YakuhaiGreen]
+        );
+    }
+
+    #[test]
+    fn round_wind_set_is_yakuhai() {
+        assert_eq!(
+            honor_set_yaku("E", wind_context(Some("E"), Some("S"))),
+            [Yaku::YakuhaiRoundWind]
+        );
+    }
+
+    #[test]
+    fn round_wind_kan_is_yakuhai() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Ankan, &["E", "E", "E", "E"])];
+        let concealed = three_meld_rest(&mut source);
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+
+        assert_eq!(
+            only_yaku(&evaluate_yaku(
+                &analysis,
+                wind_context(Some("E"), Some("S"))
+            )),
+            [Yaku::YakuhaiRoundWind]
+        );
+    }
+
+    #[test]
+    fn seat_wind_set_is_yakuhai() {
+        assert_eq!(
+            honor_set_yaku("E", wind_context(Some("S"), Some("E"))),
+            [Yaku::YakuhaiSeatWind]
+        );
+    }
+
+    #[test]
+    fn seat_wind_kan_is_yakuhai() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Ankan, &["E", "E", "E", "E"])];
+        let concealed = three_meld_rest(&mut source);
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+
+        assert_eq!(
+            only_yaku(&evaluate_yaku(
+                &analysis,
+                wind_context(Some("S"), Some("E"))
+            )),
+            [Yaku::YakuhaiSeatWind]
+        );
+    }
+
+    #[test]
+    fn double_wind_set_keeps_both_yakuhai_facts() {
+        assert_eq!(
+            honor_set_yaku("E", wind_context(Some("E"), Some("E"))),
+            [Yaku::YakuhaiRoundWind, Yaku::YakuhaiSeatWind]
+        );
+    }
+
+    #[test]
+    fn guest_wind_set_is_not_yakuhai() {
+        assert_eq!(honor_set_yaku("W", wind_context(Some("E"), Some("S"))), []);
+    }
+
+    #[test]
+    fn unknown_wind_axis_is_never_guessed() {
+        assert_eq!(
+            honor_set_yaku("E", wind_context(Some("E"), None)),
+            [Yaku::YakuhaiRoundWind]
+        );
+        assert_eq!(
+            honor_set_yaku("E", wind_context(None, Some("E"))),
+            [Yaku::YakuhaiSeatWind]
+        );
+        assert_eq!(honor_set_yaku("E", wind_context(None, None)), []);
+    }
+
+    #[test]
+    fn yakuhai_covers_concealed_open_and_kan_sets() {
+        assert_eq!(honor_set_yaku("P", ron_context()), [Yaku::YakuhaiWhite]);
+
+        for (kind, tiles) in [
+            (MeldKind::Pon, vec!["P", "P", "P"]),
+            (MeldKind::Ankan, vec!["P", "P", "P", "P"]),
+            (MeldKind::Daiminkan, vec!["P", "P", "P", "P"]),
+            (MeldKind::Kakan, vec!["P", "P", "P", "P"]),
+        ] {
+            let mut source = TileIdSource::new();
+            let fixed = vec![source.meld(kind, &tiles)];
+            let concealed = three_meld_rest(&mut source);
+            let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+
+            assert_eq!(
+                only_yaku(&evaluate_yaku(&analysis, ron_context())),
+                [Yaku::YakuhaiWhite],
+                "kind: {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shousangen_keeps_both_dragon_yakuhai() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "P", "P", "P", "F", "F", "F", "C", "C", "2m", "3m", "4m", "5m", "6m", "7m",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            only_yaku(&evaluate_yaku(&analysis, ron_context())),
+            [
+                Yaku::Shousangen,
+                Yaku::Honitsu,
+                Yaku::YakuhaiWhite,
+                Yaku::YakuhaiGreen
+            ]
+        );
+    }
+
+    #[test]
+    fn menzen_riichi_is_scored() {
+        assert_eq!(
+            menzen_tanyao_yaku(ron_context().with_riichi(RiichiStatus::Riichi)),
+            [Yaku::Tanyao, Yaku::Riichi]
+        );
+    }
+
+    #[test]
+    fn double_riichi_excludes_riichi() {
+        let yaku = menzen_tanyao_yaku(ron_context().with_riichi(RiichiStatus::DoubleRiichi));
+
+        assert!(yaku.contains(&Yaku::DoubleRiichi));
+        assert!(!yaku.contains(&Yaku::Riichi));
+    }
+
+    #[test]
+    fn open_hand_gets_no_riichi() {
+        for riichi in [RiichiStatus::Riichi, RiichiStatus::DoubleRiichi] {
+            let yaku = open_tanyao_yaku(ron_context().with_riichi(riichi));
+
+            assert_eq!(yaku, [Yaku::Tanyao], "riichi: {riichi:?}");
+        }
+    }
+
+    #[test]
+    fn ankan_keeps_riichi_menzen() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Ankan, &["2m", "2m", "2m", "2m"])];
+        let concealed = source.tiles(&[
+            "3m", "4m", "5m", "2p", "3p", "4p", "5p", "6p", "7p", "5s", "5s",
+        ]);
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+
+        assert!(is_menzen(&fixed));
+        assert_eq!(
+            only_yaku(&evaluate_yaku(
+                &analysis,
+                ron_context().with_riichi(RiichiStatus::Riichi)
+            )),
+            [Yaku::Tanyao, Yaku::Riichi]
+        );
+    }
+
+    #[test]
+    fn riichi_ippatsu_is_scored() {
+        let context = ron_context()
+            .with_riichi(RiichiStatus::Riichi)
+            .with_ippatsu(Some(true));
+
+        assert_eq!(
+            menzen_tanyao_yaku(context),
+            [Yaku::Tanyao, Yaku::Riichi, Yaku::Ippatsu]
+        );
+    }
+
+    #[test]
+    fn double_riichi_ippatsu_is_scored() {
+        let context = ron_context()
+            .with_riichi(RiichiStatus::DoubleRiichi)
+            .with_ippatsu(Some(true));
+
+        assert_eq!(
+            menzen_tanyao_yaku(context),
+            [Yaku::Tanyao, Yaku::DoubleRiichi, Yaku::Ippatsu]
+        );
+    }
+
+    #[test]
+    fn ippatsu_without_riichi_is_never_guessed() {
+        for riichi in [RiichiStatus::Unknown, RiichiStatus::NotDeclared] {
+            let context = ron_context().with_riichi(riichi).with_ippatsu(Some(true));
+
+            assert_eq!(
+                menzen_tanyao_yaku(context),
+                [Yaku::Tanyao],
+                "riichi: {riichi:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_hand_gets_no_ippatsu() {
+        let context = ron_context()
+            .with_riichi(RiichiStatus::Riichi)
+            .with_ippatsu(Some(true));
+
+        assert_eq!(open_tanyao_yaku(context), [Yaku::Tanyao]);
+    }
+
+    #[test]
+    fn unknown_ippatsu_is_not_scored() {
+        let context = ron_context().with_riichi(RiichiStatus::Riichi);
+
+        assert_eq!(menzen_tanyao_yaku(context), [Yaku::Tanyao, Yaku::Riichi]);
+    }
+
+    #[test]
+    fn menzen_tsumo_needs_a_closed_hand_and_a_self_draw() {
+        assert_eq!(
+            menzen_tanyao_yaku(tsumo_context()),
+            [Yaku::Tanyao, Yaku::MenzenTsumo]
+        );
+        assert_eq!(open_tanyao_yaku(tsumo_context()), [Yaku::Tanyao]);
+        assert_eq!(menzen_tanyao_yaku(ron_context()), [Yaku::Tanyao]);
+    }
+
+    #[test]
+    fn chankan_needs_a_ron() {
+        assert_eq!(
+            menzen_tanyao_yaku(ron_context().with_chankan(Some(true))),
+            [Yaku::Tanyao, Yaku::Chankan]
+        );
+        assert_eq!(
+            menzen_tanyao_yaku(tsumo_context().with_chankan(Some(true))),
+            [Yaku::Tanyao, Yaku::MenzenTsumo]
+        );
+    }
+
+    #[test]
+    fn rinshan_kaihou_combines_with_menzen_tsumo() {
+        assert_eq!(
+            menzen_tanyao_yaku(tsumo_context().with_rinshan(Some(true))),
+            [Yaku::Tanyao, Yaku::MenzenTsumo, Yaku::RinshanKaihou]
+        );
+        assert_eq!(
+            menzen_tanyao_yaku(ron_context().with_rinshan(Some(true))),
+            [Yaku::Tanyao]
+        );
+    }
+
+    #[test]
+    fn haitei_needs_the_last_live_tile_drawn_by_self() {
+        for rinshan in [None, Some(false)] {
+            let context = tsumo_context()
+                .with_rinshan(rinshan)
+                .with_remaining_live_tiles(Some(0));
+
+            assert_eq!(
+                menzen_tanyao_yaku(context),
+                [Yaku::Tanyao, Yaku::MenzenTsumo, Yaku::Haitei],
+                "rinshan: {rinshan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn haitei_and_rinshan_kaihou_are_exclusive() {
+        let context = tsumo_context()
+            .with_rinshan(Some(true))
+            .with_remaining_live_tiles(Some(0));
+        let yaku = menzen_tanyao_yaku(context);
+
+        assert!(yaku.contains(&Yaku::RinshanKaihou));
+        assert!(!yaku.contains(&Yaku::Haitei));
+    }
+
+    #[test]
+    fn houtei_needs_a_ron_on_the_last_discard() {
+        let ron = menzen_tanyao_yaku(ron_context().with_remaining_live_tiles(Some(0)));
+        assert_eq!(ron, [Yaku::Tanyao, Yaku::Houtei]);
+
+        let tsumo = menzen_tanyao_yaku(tsumo_context().with_remaining_live_tiles(Some(0)));
+        assert!(!tsumo.contains(&Yaku::Houtei));
+        assert!(tsumo.contains(&Yaku::Haitei));
+    }
+
+    #[test]
+    fn unknown_facts_never_become_yaku() {
+        assert_eq!(menzen_tanyao_yaku(ron_context()), [Yaku::Tanyao]);
+        assert_eq!(
+            menzen_tanyao_yaku(tsumo_context()),
+            [Yaku::Tanyao, Yaku::MenzenTsumo]
+        );
+
+        for context in [
+            ron_context().with_remaining_live_tiles(None),
+            tsumo_context().with_remaining_live_tiles(None),
+        ] {
+            let yaku = menzen_tanyao_yaku(context);
+
+            assert!(!yaku.contains(&Yaku::Haitei));
+            assert!(!yaku.contains(&Yaku::Houtei));
+        }
+
+        let unknown_events = menzen_tanyao_yaku(
+            ron_context()
+                .with_riichi(RiichiStatus::Unknown)
+                .with_ippatsu(None)
+                .with_chankan(None)
+                .with_rinshan(None),
+        );
+        assert_eq!(unknown_events, [Yaku::Tanyao]);
+    }
+
+    #[test]
+    fn structural_and_contextual_yaku_share_one_decomposition() {
+        let mut source = TileIdSource::new();
+        let concealed = menzen_tanyao_hand(&mut source);
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        let structural = evaluate_structural_yaku(&analysis);
+        let evaluations = evaluate_yaku(&analysis, ron_context().with_riichi(RiichiStatus::Riichi));
+
+        assert_eq!(only_yaku(&evaluations), [Yaku::Tanyao, Yaku::Riichi]);
+        assert_eq!(evaluations.len(), structural.len());
+        for (evaluation, structural) in evaluations.iter().zip(&structural) {
+            assert_eq!(evaluation.decomposition(), structural.decomposition());
+        }
+    }
+
+    #[test]
+    fn contextual_yaku_is_added_to_every_decomposition() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "4m", "4m", "5m", "5m",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+        let context = tsumo_context().with_riichi(RiichiStatus::Riichi);
+        let evaluations = evaluate_yaku(&analysis, context);
+
+        let iipeikou = vec![
+            Yaku::Iipeikou,
+            Yaku::Chinitsu,
+            Yaku::Riichi,
+            Yaku::MenzenTsumo,
+        ];
+        let toitoi = vec![
+            Yaku::Toitoi,
+            Yaku::Chinitsu,
+            Yaku::Riichi,
+            Yaku::MenzenTsumo,
+        ];
+        assert_eq!(
+            standard_yaku_sets(&evaluations),
+            vec![iipeikou.clone(), iipeikou.clone(), iipeikou, toitoi]
+        );
+        assert_eq!(
+            evaluations
+                .iter()
+                .filter(|evaluation| evaluation.contains(Yaku::Toitoi))
+                .count(),
+            1
+        );
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.contains(Yaku::Riichi))
+        );
+    }
+
+    #[test]
+    fn chiitoitsu_and_standard_families_share_the_contextual_yaku() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m", "6m", "7m", "7m",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+        let evaluations = evaluate_yaku(&analysis, ron_context().with_riichi(RiichiStatus::Riichi));
+
+        assert_eq!(
+            standard_yaku_sets(&evaluations),
+            vec![vec![Yaku::Ryanpeikou, Yaku::Chinitsu, Yaku::Riichi]; 3]
+        );
+        assert_eq!(
+            chiitoitsu_yaku_set(&evaluations),
+            Some(vec![Yaku::Chiitoitsu, Yaku::Chinitsu, Yaku::Riichi])
+        );
+    }
+
+    #[test]
+    fn malformed_fixed_meld_gets_no_contextual_yaku() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Ankan, &["E", "E", "E", "S"])];
+        let concealed = three_meld_rest(&mut source);
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+        let context = wind_context(Some("E"), Some("E"))
+            .with_riichi(RiichiStatus::Riichi)
+            .with_remaining_live_tiles(Some(0));
+
+        assert_eq!(fixed[0].shape(), None);
+        assert!(is_menzen(&fixed));
+        assert!(analysis.is_complete());
+        assert_eq!(only_yaku(&evaluate_structural_yaku(&analysis)), []);
+        assert_eq!(only_yaku(&evaluate_yaku(&analysis, context)), []);
+    }
+
+    #[test]
+    fn incomplete_hand_has_no_contextual_evaluation() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "3p", "5s", "7s", "9s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert!(
+            evaluate_yaku(&analysis, ron_context().with_riichi(RiichiStatus::Riichi)).is_empty()
+        );
+    }
+
+    #[test]
+    fn contextual_yaku_lists_are_sorted_deduplicated_and_deterministic() {
+        let mut source = TileIdSource::new();
+        let concealed = honor_set_hand(&mut source, "E");
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+        let context = wind_context(Some("E"), Some("E"))
+            .with_riichi(RiichiStatus::DoubleRiichi)
+            .with_ippatsu(Some(true))
+            .with_remaining_live_tiles(Some(0));
+        let evaluations = evaluate_yaku(&analysis, context);
+
+        for evaluation in &evaluations {
+            let mut expected = evaluation.yaku().to_vec();
+            expected.sort_unstable();
+            expected.dedup();
+            assert_eq!(evaluation.yaku(), expected);
+        }
+        assert_eq!(
+            only_yaku(&evaluations),
+            [
+                Yaku::YakuhaiRoundWind,
+                Yaku::YakuhaiSeatWind,
+                Yaku::DoubleRiichi,
+                Yaku::Ippatsu,
+                Yaku::Houtei
+            ]
+        );
+        assert_eq!(evaluations, evaluate_yaku(&analysis, context));
     }
 }

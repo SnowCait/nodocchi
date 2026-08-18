@@ -10,6 +10,7 @@ pub mod selection;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
+pub mod winning_context;
 pub mod yaku;
 
 pub use acceptance::{
@@ -73,8 +74,11 @@ pub use shanten::{
     standard_shanten_with_fixed_melds,
 };
 pub use tile::{
-    Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, count_indicated_dora,
+    Dragon, Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, count_indicated_dora,
     next_dora,
 };
 pub use tile_counts::{TileCountError, TileCounts};
-pub use yaku::{StructuralYakuEvaluation, Yaku, evaluate_structural_yaku};
+pub use winning_context::{RiichiStatus, WinMethod, WinningContext};
+pub use yaku::{
+    StructuralYakuEvaluation, Yaku, YakuEvaluation, evaluate_structural_yaku, evaluate_yaku,
+};

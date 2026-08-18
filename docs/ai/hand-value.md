@@ -1,6 +1,6 @@
 # 手牌評価
 
-将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに牌構成だけで確定する役を判定します。翻数や点数はまだ扱いません。
+将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。翻数や点数はまだ扱いません。
 
 ## 実装済みと未実装
 
@@ -12,17 +12,23 @@
 - fixed meld (Chi / Pon / Daiminkan / Ankan / Kakan) 対応
 - decomposition ごとの structural Yaku 判定 (`evaluate_structural_yaku()`)
 - 牌構成・面子構成だけで確定する通常役 (下表)
+- 和了時 context (`WinningContext`)
+- 役牌 (三元牌 / 場風 / 自風)
+- リーチ / ダブルリーチ / 一発
+- 門前清自摸和
+- 槍槓 / 嶺上開花 / 海底摸月 / 河底撈魚
+- structural と状況依存をまとめた decomposition ごとの判定 (`evaluate_yaku()`)
 
 未実装:
 
-- 状況依存役 (リーチ / 一発 / 門前清自摸和 / 海底 / 河底 / 嶺上開花 / 槍槓)
-- 場風・自風 context が必要な役牌
-- 和了牌・待ち形に依存する役 (平和 / 三暗刻など)
+- 和了牌と待ち形 (両面 / 嵌張 / 辺張 / 単騎 / シャンポン) の解釈
+- 平和
+- 三暗刻
+- 人和
 - 役満
 - 翻数集計
 - 符計算
 - 点数計算
-- 和了牌と待ち形 (両面 / 嵌張 / 辺張 / 単騎 / シャンポン) の解釈
 
 役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
 
@@ -73,7 +79,7 @@ CompletedHandDecomposition
 
 ## decomposition ごとの structural Yaku
 
-`evaluate_structural_yaku(&analysis)` は `CompletedHandAnalysis` を唯一の入力とし、`StructuralYakuEvaluation` を分解と同じ順序で返します。各 evaluation は判定元の `CompletedHandDecomposition` と、その分解で成立する `Yaku` を保持します。
+`evaluate_structural_yaku(&analysis)` は `CompletedHandAnalysis` を唯一の入力とし、`YakuEvaluation` を分解と同じ順序で返します。各 evaluation は判定元の `CompletedHandDecomposition` と、その分解で成立する `Yaku` を保持します。
 
 ```rust
 let analysis = analyze_completed_hand(&concealed_tiles, &fixed_melds)?;
@@ -125,9 +131,114 @@ for evaluation in evaluate_structural_yaku(&analysis) {
 
 - `Sankantsu` は槓子がちょうど3つのときだけ成立します。4槓子は `Suukantsu` へ残します。
 - `Shousangen` は三元牌2種が刻子 / 槓子で残り1種が雀頭のときだけ成立します。三元牌3種が刻子の `Daisangen` 形では成立しません。
-- `CompletedHandDecomposition::Kokushi` は今回の通常役の対象外で、常に空の役集合を返します。
+- `CompletedHandDecomposition::Kokushi` は structural Yaku の対象外で、常に空の役集合を返します。
 
-そのため、この評価器が返す空の役集合を「この手には役がない」と解釈する production policy へまだ使えません。状況依存役・役牌・役満が入るまでは pure な基盤としてだけ使います。各分解の役一覧は sort と dedup 済みで deterministic です。
+そのため、この評価器が返す空の役集合を「この手には役がない」と解釈する production policy へまだ使えません。和了牌に依存する役と役満が入るまでは pure な基盤としてだけ使い、`act()` / `diagnose()` の行動選択へは接続しません。各分解の役一覧は sort と dedup 済みで deterministic です。
+
+## 和了時 context
+
+`WinningContext` は和了時点の麻雀ルール上の観測事実だけを持つ pure な型です。`bot-core::GameContext` や RiichiLab の Observation、Chiihou の state には依存させません。client 固有の局面型を `bot-logic` へ持ち込まないことで、評価器を局面表現から独立させます。
+
+| field | 型 | 意味 |
+| --- | --- | --- |
+| `win_method` | `WinMethod` | `Ron` / `Tsumo` |
+| `round_wind` | `Option<TileType>` | 場風。unknown は `None` |
+| `seat_wind` | `Option<TileType>` | 自風。unknown は `None` |
+| `riichi` | `RiichiStatus` | `Unknown` / `NotDeclared` / `Riichi` / `DoubleRiichi` |
+| `ippatsu` | `Option<bool>` | 一発の条件を満たすか |
+| `rinshan` | `Option<bool>` | 嶺上牌での和了か |
+| `chankan` | `Option<bool>` | 他家の加槓を捉えた和了か |
+| `remaining_live_tiles` | `Option<u32>` | 和了時点の山の残りツモ可能枚数 [枚] |
+
+`WinningContext::new(win_method)` は win method 以外をすべて unknown にし、`with_round_wind()` などの builder で判明した事実だけを埋めます。
+
+### unknown の扱い
+
+どの軸も unknown を `false` と推測しません。
+
+- `riichi` は `Unknown` / `NotDeclared` / `Riichi` / `DoubleRiichi` を1つの型で表し、「リーチ宣言の有無が不明」と「リーチしていないと確認済み」を区別します。独立した2つの bool にしないため、`Riichi` と `DoubleRiichi` が同時に立つ矛盾した状態を作れません。
+- `ippatsu` / `rinshan` / `chankan` は既存 `HistoryFuritenFacts` と同じ tri-state semantics です。`None` は取得不能、`Some(false)` は該当しないことを確認済み、`Some(true)` は該当を確認済みを表します。履歴イベントを評価器側で河などから再構築せず、`None` のときは該当役を付けません。
+- `remaining_live_tiles` は役名そのものの bool ではなく観測事実です。`Some(0)` は「和了時点で live wall に残りツモ可能牌がない」ことを表し、既存 `TableStateFacts::remaining_tiles` (山の残りツモ可能枚数 [枚]) と同じ semantics です。`None` を `0` と推測しません。
+
+`riichi` が unknown / `NotDeclared` のまま `ippatsu = Some(true)` を渡しても `Ippatsu` は付きません。リーチが確認できている場合だけ成立します。
+
+client 配線はこの PR の対象外です。RiichiLab / Chiihou から `DoubleRiichi` / `Ippatsu` / `Rinshan` / `Chankan` を正確に取得できない場合は unknown のままにし、`reached == true` から `ippatsu = false` を導くような推測をしません。
+
+## structural + 状況依存の統合
+
+`evaluate_yaku(&analysis, context)` は structural Yaku と状況依存 Yaku をまとめて分解ごとに返します。
+
+```rust
+let analysis = analyze_completed_hand(&concealed_tiles, &fixed_melds)?;
+let context = WinningContext::new(WinMethod::Tsumo)
+    .with_round_wind(round_wind)
+    .with_seat_wind(seat_wind)
+    .with_riichi(RiichiStatus::Riichi);
+for evaluation in evaluate_yaku(&analysis, context) {
+    let decomposition = evaluation.decomposition();
+    let yaku = evaluation.yaku();
+}
+```
+
+structural Yaku を再判定せず、`evaluate_structural_yaku()` の結果へ状況依存 Yaku を足してから sort + dedup します。`Tanyao` / `Chiitoitsu` / `Toitoi` / `Iipeikou` などの判定は1か所だけに残ります。`evaluate_structural_yaku()` は牌姿だけで確定する pure な層として引き続き公開します。
+
+戻り値の表現はどちらも `YakuEvaluation` です。同じ shape の型を層ごとに複製しません。既存名の `StructuralYakuEvaluation` は `YakuEvaluation` の type alias として残します。
+
+ここでも analysis 全体へ役を union せず、分解ごとに役集合を紐付けます。不正な fixed meld を含む `Standard` 分解には状況依存 Yaku も付けません。structural Yaku だけが空で役牌やリーチが残る、という不整合を作らないためです。判定は既存 `Meld::shape()` を source of truth にします。
+
+### 役牌
+
+役牌は `Standard` 分解の刻子・槓子だけを対象にし、順子は対象外です。門前の暗刻と fixed meld (`Pon` / `Daiminkan` / `Ankan` / `Kakan`) の両方を見ます。面子の牌種は既存 `MeldShape::triplet_tile_type()` から取ります。
+
+| Yaku | 条件 |
+| --- | --- |
+| `YakuhaiWhite` | 白の刻子 / 槓子 |
+| `YakuhaiGreen` | 發の刻子 / 槓子 |
+| `YakuhaiRed` | 中の刻子 / 槓子 |
+| `YakuhaiRoundWind` | `round_wind` と一致する風牌の刻子 / 槓子 |
+| `YakuhaiSeatWind` | `seat_wind` と一致する風牌の刻子 / 槓子 |
+
+三元牌は round / seat context に関係なく成立します。風牌は既知の軸だけを見て、unknown な軸から役牌を推測しません。東場で自風が unknown なら、東の刻子は `YakuhaiRoundWind` だけが確定します。
+
+`Yaku::Yakuhai` のような generic な1 variant にはしません。役一覧は sort + dedup されるため、重複数で翻数を表す設計ではダブ風や複数役牌の情報が失われるからです。場風と自風が同じ東場・東家の東刻子は `YakuhaiRoundWind` と `YakuhaiSeatWind` の2つの成立事実として保持され、将来の翻数 layer が自然に2翻として集計できます。
+
+役牌は `Shousangen` と排他ではありません。白刻子・發刻子・中雀頭の手では、同じ分解が `Shousangen` / `YakuhaiWhite` / `YakuhaiGreen` を保持します。
+
+### 状況依存役
+
+| Yaku | 条件 |
+| --- | --- |
+| `Riichi` | 門前かつ `riichi == Riichi` |
+| `DoubleRiichi` | 門前かつ `riichi == DoubleRiichi` |
+| `Ippatsu` | 門前かつリーチ宣言が確認でき、`ippatsu == Some(true)` |
+| `MenzenTsumo` | 門前かつ `win_method == Tsumo` |
+| `Chankan` | `win_method == Ron` かつ `chankan == Some(true)` |
+| `RinshanKaihou` | `win_method == Tsumo` かつ `rinshan == Some(true)` |
+| `Haitei` | `win_method == Tsumo` かつ `remaining_live_tiles == Some(0)` かつ `rinshan != Some(true)` |
+| `Houtei` | `win_method == Ron` かつ `remaining_live_tiles == Some(0)` |
+
+門前判定は既存 `is_menzen()` が source of truth です。`Ankan` は門前を維持するため、暗槓だけの手でも `Riichi` / `MenzenTsumo` が成立します。副露手では context がリーチを示していても `Riichi` / `DoubleRiichi` / `Ippatsu` を付けません。
+
+「最初の打牌だったか」「リーチ後に鳴きや槓が入っていないか」「他家が加槓したか」は評価器が河や meld から再構築しません。すべて `WinningContext` の事実を source of truth にします。
+
+`RinshanKaihou` は自摸和了なので、門前なら `MenzenTsumo` と同時に成立します。`Houtei` は最後の wall tile が live wall / dead wall のどちらから引かれたかに関わらず、`Ron` かつ残りツモ可能牌がない場合に成立します。
+
+### 状況依存役の排他
+
+不可能な組み合わせは判定時点で作りません。矛盾した入力を `Result` で拒否するのではなく、成立条件を満たすものだけ返す既存 API style に合わせています。
+
+- `Riichi` と `DoubleRiichi` は `RiichiStatus` が1つの状態しか取れないため同時に立ちません。
+- `Haitei` と `RinshanKaihou` は排他です。嶺上牌は live wall の最後の牌ではないため、`rinshan == Some(true)` の自摸和了へ `Haitei` を付けません。
+- `WinMethod` と矛盾する役を付けません。`Tsumo` へ `Chankan` / `Houtei` を、`Ron` へ `MenzenTsumo` / `RinshanKaihou` / `Haitei` を付けません。
+
+`rinshan` が unknown のままで `remaining_live_tiles == Some(0)` の自摸和了は `Haitei` とします。嶺上牌での和了が `Some(true)` と確認できたときだけ除外します。
+
+### まだ入れない役
+
+- `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため入れません。特に `Sanankou` は「和了牌がどの刻子を完成させたか」が必要で、Ron / Tsumo だけでは決まりません。
+- `Renhou` は WRC では5翻相当ですが、他の役やドラと複合しない特殊な scoring semantics を持つため、この cumulative な役 layer へ入れません。
+- 役満は引き続き未実装です。
+- 翻数は引き続き `Yaku` に持たせません。`Riichi = 1` / `DoubleRiichi = 2` のような換算と食い下がりは後続の翻数 layer の責務です。通常ドラ / 裏ドラ / 赤ドラも役ではないため `Yaku` に入れません。
 
 ## 向聴数との関係
 
