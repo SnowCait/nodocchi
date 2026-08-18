@@ -1287,7 +1287,9 @@ fn the_self_hands_cover_the_push_pull_branches() {
         .expect("テンパイの待ち facts がある");
     assert_eq!(wait.permanent_furiten, bot_logic::PermanentFuriten::No);
     assert!(wait.tsumo_remaining >= 6);
-    assert_eq!(wait.can_ron, Some(true));
+    // 履歴依存フリテンを指定していない fixture なので、総合ロン可否は unknown のままになる。
+    // 押し引きの強いテンパイ判定は恒常フリテンを見るため、この unknown では変わらない。
+    assert_eq!(wait.can_ron, None);
 
     assert!(strong.acceptance_total_remaining >= 8);
     assert!(strong.acceptance_type_count >= 2);

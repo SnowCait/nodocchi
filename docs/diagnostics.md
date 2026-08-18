@@ -58,6 +58,8 @@ Final decision
 
 各合法打牌について、打牌後の向聴、Acceptance、ドラ、フリテン、1向聴・2向聴以上の指標などを表示します。`selected: yes` が通常打牌 selector の選択です。最終 action は Push/Pull や Reach、防御 fallback によって別の action になることがあります。
 
+その打牌でテンパイになる候補には `permanent furiten` / `history furiten after discard` / `ron` を表示します。`ron` は両者を合わせた総合ロン可否で、全候補が選択候補と同じ評価時点 (その打牌を切り終えた後) の facts を使います。
+
 `--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
 
 ## Player threats
@@ -113,13 +115,14 @@ Reach
   shanten: 0
   live wait: 3 remaining / 1 types
   permanent furiten: no
+  history furiten after discard: same turn false / riichi missed win false
   ron: yes
   tenpai waits: 5s
   live tenpai waits: 5s
   discarded waits: none
 ```
 
-`tenpai waits` は構造上の待ち、`live tenpai waits` は見え牌を反映して残っている待ちです。フリテンについては [フリテン](ai/furiten.md) を参照してください。
+`tenpai waits` は構造上の待ち、`live tenpai waits` は見え牌を反映して残っている待ちです。`ron` は恒常フリテンと `history furiten after discard` を合わせた総合ロン可否です。フリテンについては [フリテン](ai/furiten.md) を参照してください。
 
 ## Defense
 
@@ -188,4 +191,22 @@ Summary
 
 取得できない table state は `unknown` と表示し、観測済みの `0` と区別します。現在は AI policy へ使用していません。入力 schema は [bot-scenario](bot-scenario.md#table-state) を参照してください。
 
-履歴依存フリテンも known / unknown をそのまま表示します。production policy との関係は [フリテン](ai/furiten.md) を参照してください。
+`History furiten` section は**現在時点 (今回の打牌の前)** の履歴依存フリテンを known / unknown のまま表示します。
+
+```text
+History furiten
+  same turn: true
+  riichi missed win: false
+```
+
+ロン可否の判定に使うのは、これを**打牌後**へ補正した facts です。補正後の値は打牌候補と `Reach` の `history furiten after discard` 行に出ます。自分のツモを経た打牌では同巡内フリテンが解除されるため、
+
+```text
+History furiten
+  same turn: true
+...
+  history furiten after discard: same turn false / riichi missed win false
+  ron: yes
+```
+
+のように現在時点が `true` でもロンできる、という組み合わせが正常な出力になります。詳しい規則は [フリテン](ai/furiten.md) を参照してください。

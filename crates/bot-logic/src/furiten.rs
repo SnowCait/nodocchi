@@ -1,12 +1,13 @@
-//! 自分の河による恒常フリテンの判定基盤。
+//! フリテンの判定基盤。
 //!
 //! 待ちも向聴も既存の受け入れ ([`Acceptance`]) の判定を共有し、専用の shanten / acceptance /
 //! wait 計算器は持たない。判定に使う情報は
 //!
 //! - 既存の受け入れ判定が返すテンパイの待ち
 //! - 自分が捨てた牌種 ([`OwnDiscards`])
+//! - 評価対象時点の履歴依存フリテン ([`HistoryFuritenFacts`])
 //!
-//! の2つだけで、`GameContext` のような上位層の局面型には依存しない。
+//! の3つだけで、`GameContext` のような上位層の局面型には依存しない。
 //! 将来 [`crate::lookahead`] の枝で「既存の自分の河 + 1手目の打牌 + 2手目の打牌」を
 //! 河として渡す場合も、[`OwnDiscards::with_discards`] で組み立てた値を渡すだけで同じ helper を
 //! 使える。
@@ -26,11 +27,17 @@
 //! したがって見え牌はツモ可能残枚数だけに効き、恒常フリテンの判定そのものには影響しない。
 //! 残枚数 0 の牌種を受け入れから除く既存 [`Acceptance`] の semantics も変えない。
 //!
+//! # 恒常フリテンと履歴依存フリテン
+//!
+//! 自分の河と現在の待ちから計算できる恒常フリテン ([`PermanentFuriten`]) と、event 履歴が
+//! 必要な同巡内フリテン・リーチ後見逃しフリテン ([`HistoryFuritenFacts`]) は別の入力として
+//! 保持し、ロン可否 ([`can_ron_from_furiten`]) だけを総合値として一元的に判定する。
+//! どの軸も unknown を `false` と推測しない。
+//!
 //! # 今回扱う範囲
 //!
-//! 扱うのは自分の河による恒常フリテンだけで、一時フリテン・同巡フリテン・見逃し・リーチ後の
-//! 見逃しは扱わない。他家の河はフリテン判定に使わない。フリテンを打牌選択の点数へ変換する
-//! ヒューリスティックも持たず、事実だけを表現する。
+//! 他家の河はフリテン判定に使わない。フリテンを打牌選択の点数へ変換するヒューリスティックも
+//! 持たず、事実だけを表現する。
 
 use crate::acceptance::{Acceptance, structural_acceptance_tile_types_with_fixed_melds};
 use crate::discard::DiscardEvaluation;
@@ -45,13 +52,59 @@ const TENPAI_SHANTEN: i8 = 0;
 ///
 /// 自分の河と現在の待ちから計算する恒常フリテンとは別の入力事実として保持する。各 field は
 /// `None` (取得不能), `Some(false)` (該当しないことを確認済み), `Some(true)` (該当を確認済み)
-/// を区別する。現時点では診断専用で、ロン可否や action 選択には使用しない。
+/// を区別する。恒常フリテンと合わせた総合ロン可否は [`can_ron_from_furiten`] が判定する。
+///
+/// 値は「いつの時点の事実か」で意味が変わる。打牌後を評価する [`TenpaiWaitAvailability`] には、
+/// [`after_discard`](Self::after_discard) で評価対象時点へ補正した値を渡すこと。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HistoryFuritenFacts {
     /// 同巡内フリテンの現在状態。
     pub same_turn: Option<bool>,
     /// リーチ後にロン可能なアガリ牌を見逃したことによる、局終了まで続くフリテンの現在状態。
     pub riichi_missed_win: Option<bool>,
+}
+
+impl HistoryFuritenFacts {
+    /// 履歴依存フリテンのどれかに該当するか。判断できない場合は `None`。
+    ///
+    /// 1軸でも `Some(true)` なら他の軸が unknown でもフリテンだと断定できる。全軸が
+    /// `Some(false)` のときだけ非フリテンだと断定し、それ以外は unknown のままにする。
+    pub fn is_furiten(&self) -> Option<bool> {
+        combine_furiten([self.same_turn, self.riichi_missed_win])
+    }
+
+    /// 今回の打牌が完了した時点の履歴依存フリテンへ補正する。
+    ///
+    /// `after_own_draw` は「今回の打牌の前に自分がツモしたと確定できるか」。自摸 → 打牌で
+    /// 同巡内フリテンは必ず解除されるため、`same_turn` は元の値が `Some(true)` や unknown でも
+    /// `Some(false)` と確定できる。Chi / Pon 後の打牌のように自分のツモを経たと確認できない
+    /// 場合は現在の値をそのまま保ち、unknown を推測で埋めない。
+    ///
+    /// `riichi_missed_win` は局終了まで続くため、どちらの場合も維持する。
+    pub fn after_discard(self, after_own_draw: bool) -> Self {
+        if after_own_draw {
+            Self {
+                same_turn: Some(false),
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+}
+
+// 各軸のフリテン確定状況を1つに畳む。1軸でもフリテン確定なら確定、全軸が非フリテン確定なら
+// 非フリテン確定、それ以外は unknown。unknown を `false` と推測しない。
+fn combine_furiten(axes: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut all_known_not_furiten = true;
+    for axis in axes {
+        match axis {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => all_known_not_furiten = false,
+        }
+    }
+    all_known_not_furiten.then_some(false)
 }
 
 /// 恒常フリテン判定に使う「自分が捨てた牌」。
@@ -136,6 +189,17 @@ pub enum PermanentFuriten {
     Unknown,
 }
 
+impl PermanentFuriten {
+    /// 恒常フリテンかどうか。判断できない場合は `None`。
+    pub fn is_furiten(self) -> Option<bool> {
+        match self {
+            PermanentFuriten::Yes => Some(true),
+            PermanentFuriten::No => Some(false),
+            PermanentFuriten::Unknown => None,
+        }
+    }
+}
+
 /// 恒常フリテンの判定結果と、その根拠になった待ち牌。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermanentFuritenDiagnostic {
@@ -148,12 +212,37 @@ pub struct PermanentFuritenDiagnostic {
 impl PermanentFuritenDiagnostic {
     /// 恒常フリテンかどうか。判断できない場合は `None`。
     pub fn is_furiten(&self) -> Option<bool> {
-        match self.status {
-            PermanentFuriten::Yes => Some(true),
-            PermanentFuriten::No => Some(false),
-            PermanentFuriten::Unknown => None,
-        }
+        self.status.is_furiten()
     }
+}
+
+/// 恒常フリテンと評価対象時点の履歴依存フリテンから総合ロン可否を判定する。
+///
+/// ロン可否を判定する唯一の入口で、call site ごとに組み合わせ規則を書き直さない。
+///
+/// | 入力 | 結果 |
+/// | --- | --- |
+/// | 恒常 / 同巡内 / リーチ後見逃しのどれか1軸でもフリテン確定 | `Some(false)` |
+/// | 3軸すべて非フリテン確定 | `Some(true)` |
+/// | それ以外 | `None` |
+///
+/// unknown を `false` と推測しない。一方、1軸でもフリテンが確定していれば他の軸が unknown でも
+/// ロンできないと断定できる。
+///
+/// `history` は評価対象時点の facts であること。打牌後を評価する場合は
+/// [`HistoryFuritenFacts::after_discard`] で補正してから渡す。
+///
+/// 役の有無など、フリテン以外の理由によるロン不可はここでは扱わない。
+pub fn can_ron_from_furiten(
+    permanent: PermanentFuriten,
+    history: HistoryFuritenFacts,
+) -> Option<bool> {
+    combine_furiten([
+        permanent.is_furiten(),
+        history.same_turn,
+        history.riichi_missed_win,
+    ])
+    .map(|furiten| !furiten)
 }
 
 /// テンパイ時の待ちについて、ツモ和了とロン和了それぞれの可否を表す pure な診断。
@@ -165,7 +254,7 @@ impl PermanentFuritenDiagnostic {
 /// - `live_waits` / `tsumo_remaining` / `tsumo_type_count`: 実際に残っているツモ可能牌。既存
 ///   [`Acceptance`] の値そのもので、見え牌を反映する
 ///
-/// 恒常フリテンでもツモ側の値は書き換えない。フリテンで変わるのはロン可否
+/// フリテンでもツモ側の値は書き換えない。フリテンで変わるのはロン可否
 /// ([`can_ron`](Self::can_ron)) だけで、「ロンできないから残枚数を 0 にする」のように受け入れの
 /// 意味を変えない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,18 +268,30 @@ pub struct TenpaiWaitAvailability {
     /// 実際に残っているツモ可能牌の種類数。既存 [`Acceptance`] の受け入れ牌種数そのもの。
     pub tsumo_type_count: usize,
     pub furiten: PermanentFuritenDiagnostic,
+    /// [`can_ron`](Self::can_ron) の判定に実際に使う、この診断の評価対象時点の履歴依存フリテン。
+    ///
+    /// この診断は打牌後の状態なので、上位層が持つ現在時点 (打牌前) の facts とは異なる場合が
+    /// ある。例えば現在 `same_turn = Some(true)` でも、自分のツモを経た今回の打牌後は
+    /// `Some(false)` になる。
+    pub history_furiten: HistoryFuritenFacts,
 }
 
 impl TenpaiWaitAvailability {
-    /// 恒常フリテンの観点からロンできるか。判断できない場合は `None`。
+    /// 恒常フリテンと評価対象時点の履歴依存フリテンを合わせた総合ロン可否。
     ///
-    /// 役の有無や一時フリテンなど、恒常フリテン以外の理由によるロン不可はここでは扱わない。
+    /// 判定は [`can_ron_from_furiten`] に一元化し、call site ごとに計算し直さない。役の有無
+    /// など、フリテン以外の理由によるロン不可はここでは扱わない。
     pub fn can_ron(&self) -> Option<bool> {
-        self.furiten.is_furiten().map(|furiten| !furiten)
+        can_ron_from_furiten(self.furiten.status, self.history_furiten)
     }
 
     pub fn permanent_furiten(&self) -> PermanentFuriten {
         self.furiten.status
+    }
+
+    /// `can_ron()` に使った評価対象時点の履歴依存フリテン。
+    pub fn history_furiten(&self) -> HistoryFuritenFacts {
+        self.history_furiten
     }
 
     pub fn discarded_waits(&self) -> &[TileType] {
@@ -221,6 +322,14 @@ impl DiscardFuritenDiagnostic {
         self.tenpai
             .as_ref()
             .map_or(&[], TenpaiWaitAvailability::discarded_waits)
+    }
+
+    /// ロン可否の判定に使った、その打牌後の履歴依存フリテン。テンパイにならない打牌候補は
+    /// `None`。
+    pub fn history_furiten(&self) -> Option<HistoryFuritenFacts> {
+        self.tenpai
+            .as_ref()
+            .map(TenpaiWaitAvailability::history_furiten)
     }
 }
 
@@ -256,7 +365,8 @@ pub fn permanent_furiten_for_waits(
     }
 }
 
-/// 既存の受け入れ・構造上のアガリ牌種・自分の河からテンパイの待ちとロン可否を求める。
+/// 既存の受け入れ・構造上のアガリ牌種・自分の河・履歴依存フリテンからテンパイの待ちと
+/// ロン可否を求める。
 ///
 /// テンパイ形 (最小向聴数 0) 以外では待ちが定まらないため `None`。門前形・副露形のどちらの
 /// 受け入れでも同じ helper を使う。
@@ -265,10 +375,14 @@ pub fn permanent_furiten_for_waits(
 /// そのまま使う。`structural_waits` は残枚数 0 も含む構造上のアガリ牌種
 /// ([`structural_acceptance_tile_types`](crate::acceptance::structural_acceptance_tile_types))
 /// で、恒常フリテン判定だけに使う。
+///
+/// `history_furiten` はこの診断の評価対象時点へ補正済みの履歴依存フリテンを渡すこと
+/// ([`HistoryFuritenFacts::after_discard`])。
 pub fn tenpai_wait_availability<S: MinShanten>(
     acceptance: &Acceptance<S>,
     structural_waits: &[TileType],
     own_discards: &OwnDiscards,
+    history_furiten: HistoryFuritenFacts,
 ) -> Option<TenpaiWaitAvailability> {
     if acceptance.current_min_shanten() != TENPAI_SHANTEN {
         return None;
@@ -281,6 +395,7 @@ pub fn tenpai_wait_availability<S: MinShanten>(
         tsumo_type_count: live_waits.len(),
         live_waits,
         furiten: permanent_furiten_for_waits(structural_waits, own_discards),
+        history_furiten,
     })
 }
 
@@ -290,11 +405,16 @@ pub fn tenpai_wait_availability<S: MinShanten>(
 /// ツモ側は既存の打牌評価が持つ受け入れをそのまま使い、再計算しない。
 ///
 /// その打牌自身も自分の河に入るため、判定に使う河は `own_discards` へ打牌牌種を足したものになる。
+///
+/// `history_furiten` も同じく「その打牌が完了した時点」へ補正済みの値を渡すこと
+/// ([`HistoryFuritenFacts::after_discard`])。現在時点の facts をそのまま渡すと、自摸 → 打牌で
+/// 解除される同巡内フリテンが残ってしまう。
 pub fn discard_tenpai_wait_availability(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     evaluation: &DiscardEvaluation,
     own_discards: &OwnDiscards,
+    history_furiten: HistoryFuritenFacts,
 ) -> Option<TenpaiWaitAvailability> {
     if evaluation.acceptance_after_discard.current_min_shanten() != TENPAI_SHANTEN {
         return None;
@@ -307,19 +427,25 @@ pub fn discard_tenpai_wait_availability(
         &evaluation.acceptance_after_discard,
         &structural_acceptance_tile_types_with_fixed_melds(&after_discard, fixed_meld_count),
         &own_discards.with_discard(evaluation.discard),
+        history_furiten,
     )
 }
 
-/// 全打牌候補分の恒常フリテン診断。
+/// 全打牌候補分のフリテン診断。
 ///
 /// 戻り値は `evaluations` と同じ順序・同じ件数。`counts` / `fixed_meld_count` は `evaluations` を
 /// 求めたときと同じ打牌前の手牌・副露済み面子数を渡す。ツモ側は既存の打牌評価が持つ受け入れを
 /// そのまま使い、向聴・受け入れ・残枚数を再計算しない。
+///
+/// `history_furiten` は打牌後へ補正済みの値を全候補へ同じく渡す。候補ごとに違うのは打牌牌種と
+/// 打牌後の待ちだけで、「自分のツモを経た打牌か」は候補によらず同じだからである。選択候補と
+/// 全候補診断で評価時点がずれないよう、補正は呼び出し側で1回だけ行う。
 pub fn diagnose_discard_furiten(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     evaluations: &[DiscardEvaluation],
     own_discards: &OwnDiscards,
+    history_furiten: HistoryFuritenFacts,
 ) -> Vec<DiscardFuritenDiagnostic> {
     evaluations
         .iter()
@@ -330,6 +456,7 @@ pub fn diagnose_discard_furiten(
                 fixed_meld_count,
                 evaluation,
                 own_discards,
+                history_furiten,
             ),
         })
         .collect()
@@ -359,6 +486,121 @@ mod tests {
         );
     }
 
+    // ---- 恒常フリテン + 履歴依存フリテン の総合ロン可否 ----
+
+    fn history(same_turn: Option<bool>, riichi_missed_win: Option<bool>) -> HistoryFuritenFacts {
+        HistoryFuritenFacts {
+            same_turn,
+            riichi_missed_win,
+        }
+    }
+
+    #[test]
+    fn any_confirmed_furiten_axis_makes_ron_impossible() {
+        // 1軸でもフリテンが確定していれば、他の軸が unknown でもロンできないと断定できる。
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::Yes, history(None, None)),
+            Some(false)
+        );
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::Unknown, history(Some(true), None)),
+            Some(false)
+        );
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::Unknown, history(None, Some(true))),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn ron_is_possible_only_when_every_axis_is_confirmed_not_furiten() {
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::No, history(Some(false), Some(false))),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_unknown_axis_keeps_the_ron_availability_unknown() {
+        // unknown を false と推測しない。フリテン確定の軸が1つも無ければ unknown のまま。
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::No, history(Some(false), None)),
+            None
+        );
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::No, history(None, Some(false))),
+            None
+        );
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::Unknown, history(Some(false), Some(false))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_confirmed_furiten_axis_wins_over_unknown_axes_in_both_directions() {
+        // 「フリテン確定が1つでもあれば Some(false)」が unknown より優先されることを、恒常側と
+        // 履歴側の両方向で固定する。
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::Yes, history(Some(false), Some(false))),
+            Some(false)
+        );
+        assert_eq!(
+            can_ron_from_furiten(PermanentFuriten::No, history(Some(true), None)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn history_furiten_is_furiten_follows_the_same_combination_rule() {
+        assert_eq!(history(Some(true), None).is_furiten(), Some(true));
+        assert_eq!(history(None, Some(true)).is_furiten(), Some(true));
+        assert_eq!(history(Some(false), Some(false)).is_furiten(), Some(false));
+        assert_eq!(history(Some(false), None).is_furiten(), None);
+        assert_eq!(HistoryFuritenFacts::default().is_furiten(), None);
+    }
+
+    // ---- 評価時点の補正 ----
+
+    #[test]
+    fn an_own_draw_discard_clears_the_same_turn_furiten() {
+        // 自摸 → 打牌を終えた時点では同巡内フリテンが解除される。元が true でも unknown でも
+        // Some(false) と確定できる。
+        for same_turn in [Some(true), Some(false), None] {
+            assert_eq!(
+                history(same_turn, Some(false))
+                    .after_discard(true)
+                    .same_turn,
+                Some(false)
+            );
+        }
+    }
+
+    #[test]
+    fn an_own_draw_discard_keeps_the_riichi_missed_win_furiten() {
+        // リーチ後見逃しは局終了まで続くので、自摸後の打牌でも維持する。
+        for riichi_missed_win in [Some(true), Some(false), None] {
+            assert_eq!(
+                history(Some(true), riichi_missed_win)
+                    .after_discard(true)
+                    .riichi_missed_win,
+                riichi_missed_win
+            );
+        }
+    }
+
+    #[test]
+    fn a_discard_without_a_confirmed_own_draw_keeps_the_history_facts() {
+        // Chi / Pon 後の打牌や自摸を確認できない経路では、同巡内フリテンを解除しない。
+        for facts in [
+            history(Some(true), Some(false)),
+            history(None, Some(false)),
+            HistoryFuritenFacts::default(),
+        ] {
+            assert_eq!(facts.after_discard(false), facts);
+        }
+    }
+
     fn tile(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).unwrap()
     }
@@ -383,6 +625,15 @@ mod tests {
         FixedMeldCount::new(value).unwrap()
     }
 
+    // 履歴依存フリテンが両軸とも非該当だと確認済みの facts。恒常フリテンだけを見る既存テストは
+    // これを渡し、総合ロン可否が恒常フリテンで決まる状態にする。
+    fn no_history_furiten() -> HistoryFuritenFacts {
+        HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        }
+    }
+
     // 手牌と見え牌からテンパイの待ち診断を組み立てる。ツモ側は既存の受け入れ、恒常フリテン判定は
     // 既存の構造上の受け入れ牌種で、どちらも production と同じ入口から求める。
     fn availability_with_visible(
@@ -394,6 +645,7 @@ mod tests {
             &calculate_acceptance_with_visible_tiles(counts, visible),
             &structural_acceptance_tile_types(counts),
             own_discards,
+            no_history_furiten(),
         )
         .expect("テンパイ形である")
     }
@@ -701,15 +953,25 @@ mod tests {
         assert_eq!(acceptance.current.concealed(), None);
         assert_eq!(structural, tiles(&["5p"]));
 
-        let furiten = tenpai_wait_availability(&acceptance, &structural, &river(&["5p"]))
-            .expect("副露テンパイ形である");
+        let furiten = tenpai_wait_availability(
+            &acceptance,
+            &structural,
+            &river(&["5p"]),
+            no_history_furiten(),
+        )
+        .expect("副露テンパイ形である");
         assert_eq!(furiten.structural_waits, tiles(&["5p"]));
         assert_eq!(furiten.live_waits, tiles(&["5p"]));
         assert_eq!(furiten.tsumo_remaining, acceptance.total_remaining());
         assert_eq!(furiten.can_ron(), Some(false));
 
-        let non_furiten = tenpai_wait_availability(&acceptance, &structural, &river(&["1p"]))
-            .expect("副露テンパイ形である");
+        let non_furiten = tenpai_wait_availability(
+            &acceptance,
+            &structural,
+            &river(&["1p"]),
+            no_history_furiten(),
+        )
+        .expect("副露テンパイ形である");
         assert_eq!(non_furiten.can_ron(), Some(true));
     }
 
@@ -733,6 +995,7 @@ mod tests {
                 ),
                 &structural,
                 &river(&["5p"]),
+                no_history_furiten(),
             )
             .expect("副露テンパイ形である")
         };
@@ -760,7 +1023,8 @@ mod tests {
             tenpai_wait_availability(
                 &acceptance,
                 &structural_acceptance_tile_types(&counts),
-                &river(&[])
+                &river(&[]),
+                no_history_furiten(),
             ),
             None
         );
@@ -774,8 +1038,13 @@ mod tests {
         let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89, 90]);
         let counts = TileCounts::from_tiles(hand.iter().copied());
         let evaluations = evaluate_discards_from_tiles(&hand);
-        let diagnostics =
-            diagnose_discard_furiten(&counts, FixedMeldCount::NONE, &evaluations, &river(&[]));
+        let diagnostics = diagnose_discard_furiten(
+            &counts,
+            FixedMeldCount::NONE,
+            &evaluations,
+            &river(&[]),
+            no_history_furiten(),
+        );
 
         assert_eq!(diagnostics.len(), evaluations.len());
         let five_sou = diagnostics
@@ -794,8 +1063,13 @@ mod tests {
         let hand = ids(&[0, 8, 20, 28, 48, 56, 68, 76, 88, 100, 108, 116, 124, 132]);
         let counts = TileCounts::from_tiles(hand.iter().copied());
         let evaluations = evaluate_discards_from_tiles(&hand);
-        let diagnostics =
-            diagnose_discard_furiten(&counts, FixedMeldCount::NONE, &evaluations, &river(&[]));
+        let diagnostics = diagnose_discard_furiten(
+            &counts,
+            FixedMeldCount::NONE,
+            &evaluations,
+            &river(&[]),
+            no_history_furiten(),
+        );
 
         assert!(!diagnostics.is_empty());
         assert!(diagnostics.iter().all(|diagnostic| {
@@ -810,8 +1084,13 @@ mod tests {
         let hand = ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89, 90]);
         let counts = TileCounts::from_tiles(hand.iter().copied());
         let evaluations = evaluate_discards_from_tiles(&hand);
-        let diagnostics =
-            diagnose_discard_furiten(&counts, FixedMeldCount::NONE, &evaluations, &river(&["1m"]));
+        let diagnostics = diagnose_discard_furiten(
+            &counts,
+            FixedMeldCount::NONE,
+            &evaluations,
+            &river(&["1m"]),
+            no_history_furiten(),
+        );
 
         for (diagnostic, evaluation) in diagnostics.iter().zip(evaluations.iter()) {
             assert_eq!(diagnostic.discard, evaluation.discard);
@@ -847,6 +1126,7 @@ mod tests {
             FixedMeldCount::NONE,
             &evaluations,
             &OwnDiscards::from_river(&ids(&[81])),
+            no_history_furiten(),
         );
 
         let one_pin = diagnostics
@@ -881,6 +1161,7 @@ mod tests {
             FixedMeldCount::NONE,
             &evaluations,
             &OwnDiscards::unknown(),
+            no_history_furiten(),
         );
 
         let east = diagnostics

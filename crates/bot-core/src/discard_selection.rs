@@ -35,7 +35,7 @@ pub(crate) struct DiscardActionSelection {
 pub(crate) struct DiscardActionSelectionWithDiagnostic {
     pub selection: DiscardActionSelection,
     pub diagnostic: DiscardDecisionDiagnostic,
-    /// 全合法候補の恒常フリテン診断。`diagnostic` と同じ候補集合・同じ順序。
+    /// 全合法候補のフリテン診断。`diagnostic` と同じ候補集合・同じ順序。
     ///
     /// 打牌選択には一切使わない解析専用の情報で、選択結果を変えない。
     pub furiten: Vec<DiscardFuritenDiagnostic>,
@@ -228,12 +228,15 @@ fn diagnose_legal_evaluations(
     )
 }
 
-// 絞り込み済みの合法候補集合から恒常フリテン診断を構築する。
+// 絞り込み済みの合法候補集合からフリテン診断を構築する。
 //
 // ツモ側は既存の打牌評価が持つ受け入れをそのまま使い、恒常フリテン判定に使う構造上のアガリ牌種と
 // 「context の自分の河 + その打牌」は bot-logic の pure helper 側で組み立てる。副露済み面子数は
 // 本番評価と同じ値を渡す。player_id が無く自分の河を特定できない場合は player 0 などを推測せず
 // Unknown として扱う。診断専用の情報で、打牌選択には使わない。
+//
+// 履歴依存フリテンは選択済み1件の経路 (selected_discard_tenpai_wait_availability) と同じ
+// 「打牌後」へ補正した値を渡し、候補ごとに評価時点がずれないようにする。
 fn furiten_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
@@ -244,14 +247,19 @@ fn furiten_from_legal_evaluations(
         evaluation_fixed_meld_count(context),
         &legal.evaluations,
         &OwnDiscards::from_optional_river(context.own_discards()),
+        context.history_furiten_after_own_discard(),
     )
 }
 
 /// 通常打牌選択が選んだ打牌1件について、その打牌後のテンパイの待ちとロン可否を返す。
 ///
-/// 全合法候補分の恒常フリテン診断 (`furiten_from_legal_evaluations`) と同じ pure helper へ同じ
+/// 全合法候補分のフリテン診断 (`furiten_from_legal_evaluations`) と同じ pure helper へ同じ
 /// 入力を渡し、対象を選択済みの1件だけに絞る。ツモ側は渡された打牌評価が持つ受け入れをそのまま
 /// 使い、向聴・受け入れ・残枚数・待ちを再計算しない。その打牌でテンパイにならない場合は `None`。
+///
+/// 履歴依存フリテンも全候補診断と同じく「その打牌を切り終えた時点」へ補正した値を渡す
+/// (`GameContext::history_furiten_after_own_discard`)。返り値の `can_ron()` は恒常フリテンと
+/// 履歴依存フリテンを合わせた総合値になる。
 ///
 /// `evaluation` は同じ `context` の手牌から求めた評価であること。リーチ判断のように選択済みの
 /// 1候補だけが必要な経路が、全候補分の診断を構築せずに待ちとフリテンを共有するために使う。
@@ -271,6 +279,7 @@ pub(crate) fn selected_discard_tenpai_wait_availability(
         evaluation_fixed_meld_count(context),
         evaluation,
         &OwnDiscards::from_optional_river(context.own_discards()),
+        context.history_furiten_after_own_discard(),
     )
 }
 

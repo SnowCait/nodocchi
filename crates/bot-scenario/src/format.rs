@@ -65,19 +65,34 @@ pub fn format_diagnostic(
     sections.join("\n\n")
 }
 
+// 現在時点 (今回の打牌の前) の履歴依存フリテン。打牌後の評価時点へ補正した facts は
+// 各打牌候補とリーチ判断の待ち診断が別に出す。
 fn format_history_furiten(diagnostic: &ShantenDecisionDiagnostic) -> String {
-    fn value(value: Option<bool>) -> &'static str {
-        match value {
-            Some(true) => "true",
-            Some(false) => "false",
-            None => UNKNOWN,
-        }
-    }
-
     format!(
         "History furiten\n  same turn: {}\n  riichi missed win: {}",
-        value(diagnostic.history_furiten.same_turn),
-        value(diagnostic.history_furiten.riichi_missed_win)
+        optional_bool_label(diagnostic.history_furiten.same_turn),
+        optional_bool_label(diagnostic.history_furiten.riichi_missed_win)
+    )
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => UNKNOWN,
+    }
+}
+
+// ロン可否の判定に実際に使った、その打牌を切り終えた時点の履歴依存フリテン。トップの
+// "History furiten" は打牌前の現在時点なので、自分のツモを経た打牌では同巡内フリテンの値が
+// 食い違う。この行があることで「current same turn: true なのに ron: yes」が矛盾ではなく
+// 「自摸後の打牌で解除された」と読める。
+fn format_history_furiten_after_discard(tenpai: &TenpaiWaitAvailability) -> String {
+    let facts = tenpai.history_furiten();
+    format!(
+        "same turn {} / riichi missed win {}",
+        optional_bool_label(facts.same_turn),
+        optional_bool_label(facts.riichi_missed_win)
     )
 }
 
@@ -382,7 +397,7 @@ fn format_normal_discard_candidate(
         "  weighted next acceptance: {}",
         format_tenpai_wait(candidate.next_acceptance)
     ));
-    lines.extend(format_permanent_furiten(furiten));
+    lines.extend(format_candidate_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
         evaluation.standard_iishanten_shape_after_discard
@@ -467,11 +482,12 @@ fn format_tenpai_wait(tenpai_wait: Option<TenpaiWaitMetric>) -> String {
     }
 }
 
-// その打牌でテンパイになる場合の恒常フリテン診断。テンパイにならない打牌候補では何も出さない。
+// その打牌でテンパイになる場合のフリテン診断。テンパイにならない打牌候補では何も出さない。
 //
 // 表示専用にフリテンを判定し直さず、production の打牌選択が使ったものと同じ pure helper
-// ([`bot_logic::diagnose_discard_furiten`]) の結果をそのまま出す。
-fn format_permanent_furiten(furiten: Option<&DiscardFuritenDiagnostic>) -> Vec<String> {
+// ([`bot_logic::diagnose_discard_furiten`]) の結果をそのまま出す。`ron` は恒常フリテンと
+// 打牌後の履歴依存フリテンを合わせた総合値。
+fn format_candidate_furiten(furiten: Option<&DiscardFuritenDiagnostic>) -> Vec<String> {
     let Some(tenpai) = furiten.and_then(|furiten| furiten.tenpai.as_ref()) else {
         return Vec::new();
     };
@@ -480,6 +496,10 @@ fn format_permanent_furiten(furiten: Option<&DiscardFuritenDiagnostic>) -> Vec<S
         format!(
             "  permanent furiten: {}",
             permanent_furiten_label(tenpai.permanent_furiten())
+        ),
+        format!(
+            "  history furiten after discard: {}",
+            format_history_furiten_after_discard(tenpai)
         ),
         format!("  ron: {}", format_optional_yes_no(tenpai.can_ron())),
         // 構造上のアガリ牌種。残枚数 0 の牌種も含み、恒常フリテン判定に使う。
@@ -672,7 +692,7 @@ fn format_push_pull(
     lines.join("\n")
 }
 
-// リーチ判断。通常打牌 selection が選んだ打牌と、その打牌後のテンパイの待ち・恒常フリテンを
+// リーチ判断。通常打牌 selection が選んだ打牌と、その打牌後のテンパイの待ち・フリテンを
 // そのまま出す。表示専用に待ちやフリテンを求め直さない。
 fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
     let mut lines = vec!["Reach".to_string()];
@@ -708,6 +728,10 @@ fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
     lines.push(format!(
         "  permanent furiten: {}",
         permanent_furiten_label(tenpai.permanent_furiten())
+    ));
+    lines.push(format!(
+        "  history furiten after discard: {}",
+        format_history_furiten_after_discard(tenpai)
     ));
     lines.push(format!(
         "  ron: {}",
@@ -1969,13 +1993,15 @@ mod tests {
 
     const PERMANENT_FURITEN_SCENARIO: &str = include_str!("../scenarios/permanent_furiten.json");
 
-    // 同じ手牌・同じ待ちで、自分の河だけを変えた対照 scenario。
+    // 同じ手牌・同じ待ちで、自分の河だけを変えた対照 scenario。総合ロン可否が自分の河だけで
+    // 決まるよう、履歴依存フリテンは両軸とも非該当だと明示する。
     const OPPONENT_RIVER_FURITEN_SCENARIO: &str = r#"{
         "hand": "123456789m123p5s",
         "draw": "9s",
         "player_id": 0,
         "oya": 0,
         "discards": ["E", "5s", "", ""],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
         "legal_dahai": "9s 1m"
     }"#;
 
@@ -2098,6 +2124,56 @@ mod tests {
         assert_eq!(
             with_lookahead.normal_discard_furiten,
             diagnostic.normal_discard_furiten
+        );
+    }
+
+    // 現在は同巡内フリテンだが、自摸 → 今回の打牌で解除される scenario。恒常フリテンにはならない。
+    const HISTORY_FURITEN_SAME_TURN_SCENARIO: &str =
+        include_str!("../scenarios/history_furiten_same_turn.json");
+
+    #[test]
+    fn the_same_turn_furiten_is_cleared_by_the_own_draw_discard() {
+        // 現在時点の facts と、ロン可否に使った打牌後の facts を診断上で区別できる。
+        let (_, _, output) = rendered(HISTORY_FURITEN_SAME_TURN_SCENARIO, false);
+        let history = section(&output, "History furiten");
+        assert!(history.contains("  same turn: true"), "{history}");
+        assert!(history.contains("  riichi missed win: false"), "{history}");
+
+        let block = candidate_block(&output, "Normal discard candidates", "9s");
+        assert!(block.contains("  permanent furiten: no"), "{block}");
+        assert!(
+            block.contains(
+                "  history furiten after discard: same turn false / riichi missed win false"
+            ),
+            "{block}"
+        );
+        assert!(block.contains("  ron: yes"), "{block}");
+    }
+
+    #[test]
+    fn history_furiten_scenario_selects_the_same_action_everywhere() {
+        // 履歴依存フリテンを含む局面でも act() / diagnose() / --lookahead の選択は一致する。
+        let scenario = scenario_from_json(HISTORY_FURITEN_SAME_TURN_SCENARIO);
+        let mut agent = ShantenAgent;
+
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        let diagnostic = diagnose(&scenario);
+        let with_lookahead = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+
+        assert_eq!(action_label(&acted), "9s");
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(with_lookahead.selected_action, acted);
+        assert_eq!(
+            with_lookahead.normal_discard_furiten,
+            diagnostic.normal_discard_furiten
+        );
+        assert_eq!(
+            diagnostic.history_furiten,
+            scenario.context.history_furiten()
         );
     }
 

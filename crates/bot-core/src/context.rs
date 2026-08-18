@@ -227,8 +227,41 @@ impl GameContext {
         self.drawn_tile
     }
 
+    /// 今回の打牌の前に自分がツモしたと確定できるか。
+    ///
+    /// `drawn_tile` は全入力経路で「今回の打牌の前に自分が引いた牌」を表す。RiichiLab の
+    /// observation adapter は自摸牌込み手牌から自摸牌を1枚分離して渡し、地鳳は `GET sutehai?`
+    /// のツモ牌、JSON scenario は `draw` を渡す。どの経路でも `hand_tiles` と合わせて自摸後
+    /// 14枚の手牌を作る値なので、他家の自摸牌が入ることはない。
+    ///
+    /// Chi / Pon 後の打牌や、自摸牌を特定できない経路では `None` になる。したがって `false` は
+    /// 「ツモしていない」ではなく「自分のツモを経たと確認できない」を表す。
+    pub fn is_after_own_draw(&self) -> bool {
+        self.drawn_tile.is_some()
+    }
+
+    /// 現在時点 (今回の打牌の前) の履歴依存フリテン。
+    ///
+    /// 打牌後を評価する診断には、そのまま渡さず
+    /// [`history_furiten_after_own_discard`](Self::history_furiten_after_own_discard) を使う。
     pub fn history_furiten(&self) -> HistoryFuritenFacts {
         self.history_furiten
+    }
+
+    /// 今回の打牌を1枚切り終えた時点の履歴依存フリテン。
+    ///
+    /// 打牌後のテンパイを評価する
+    /// [`TenpaiWaitAvailability`](bot_logic::TenpaiWaitAvailability) は「選択した打牌を切った
+    /// 後」の状態なので、履歴依存フリテンも同じ評価時点へ補正する必要がある。自分のツモを経た
+    /// 打牌なら同巡内フリテンは解除されるため `same_turn` は `Some(false)` で確定し、鳴き後の
+    /// 打牌や自摸を確認できない経路では現在の値を維持する。`riichi_missed_win` は局終了まで
+    /// 続くので常に維持する。
+    ///
+    /// 補正規則そのものは pure helper ([`HistoryFuritenFacts::after_discard`]) が持ち、
+    /// この経路は評価時点を表す事実 ([`is_after_own_draw`](Self::is_after_own_draw)) を渡す
+    /// だけにする。
+    pub fn history_furiten_after_own_discard(&self) -> HistoryFuritenFacts {
+        self.history_furiten.after_discard(self.is_after_own_draw())
     }
 
     pub fn hand_tiles(&self) -> &[TileId] {
