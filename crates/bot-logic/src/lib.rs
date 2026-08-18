@@ -38,8 +38,9 @@ pub use discard::{
 };
 pub use furiten::{
     DiscardFuritenDiagnostic, HistoryFuritenFacts, OwnDiscards, PermanentFuriten,
-    PermanentFuritenDiagnostic, TenpaiWaitAvailability, diagnose_discard_furiten,
-    discard_tenpai_wait_availability, permanent_furiten_for_waits, tenpai_wait_availability,
+    PermanentFuritenDiagnostic, TenpaiWaitAvailability, can_ron_from_furiten,
+    diagnose_discard_furiten, discard_tenpai_wait_availability, permanent_furiten_for_waits,
+    tenpai_wait_availability,
 };
 pub use hand::{Hand, HandError};
 pub use iishanten::{

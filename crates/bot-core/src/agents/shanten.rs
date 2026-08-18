@@ -229,7 +229,7 @@ pub enum ReachDecisionReason {
 ///   ロジックは持たない。
 /// - 判定が進まなかった項目は推測せず `None` のままにする。
 ///
-/// `tenpai_wait` の恒常フリテン・ロン可否は事実として持つだけで、今回のリーチ判断には使わない。
+/// `tenpai_wait` のフリテン・ロン可否は事実として持つだけで、今回のリーチ判断には使わない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachDecisionDiagnostic {
     /// 通常打牌 selection が選んだ合法 Dahai。押し引き入力と同じ selection の action。
@@ -239,7 +239,8 @@ pub struct ReachDecisionDiagnostic {
     /// `selected_discard` を切った後がテンパイの場合の待ちとロン可否。
     ///
     /// 構造上のアガリ牌種・生きた待ち・ツモ残枚数と種類数・恒常フリテン・自分の河と重複した
-    /// 待ち牌を持つ。テンパイにならない場合とリーチを検討しなかった場合は `None`。
+    /// 待ち牌・ロン可否に使った打牌後の履歴依存フリテンを持つ。テンパイにならない場合と
+    /// リーチを検討しなかった場合は `None`。
     pub tenpai_wait: Option<TenpaiWaitAvailability>,
     /// 採用したリーチ。採用しなかった場合は `None`。
     pub selected: Option<LegalAction>,
@@ -259,7 +260,8 @@ impl ReachDecisionDiagnostic {
             .map(TenpaiWaitAvailability::permanent_furiten)
     }
 
-    /// 恒常フリテンの観点からロンできるか。テンパイにならない場合と判断できない場合は `None`。
+    /// 恒常フリテンと打牌後の履歴依存フリテンを合わせた総合ロン可否。テンパイにならない場合と
+    /// 判断できない場合は `None`。
     pub fn can_ron(&self) -> Option<bool> {
         self.tenpai_wait
             .as_ref()
@@ -330,17 +332,22 @@ pub struct ShantenDecisionDiagnostic {
     /// 通常打牌評価を行った場合の全合法候補診断。合法 Dahai が無い場合は
     /// `selected == None` かつ `candidates` が空の診断になる。
     pub normal_discard: Option<DiscardDecisionDiagnostic>,
-    /// 通常打牌評価を行った場合の全合法候補の恒常フリテン診断。`normal_discard` と同じ候補集合・
+    /// 通常打牌評価を行った場合の全合法候補のフリテン診断。`normal_discard` と同じ候補集合・
     /// 同じ順序で、候補ごとに「その打牌でテンパイになる場合の待ち・ツモ和了の残枚数と種類数・
-    /// ロン可否・自分の河と重複した待ち牌」を持つ。
+    /// ロン可否・自分の河と重複した待ち牌・ロン可否に使った打牌後の履歴依存フリテン」を持つ。
     ///
     /// 判定に使う自分の河は「context の自分の河 + その打牌」で、他家の河や見え牌は使わない。
     /// `player_id` が無く自分の河を特定できない場合は非フリテンと断定せず
     /// [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten::Unknown) になる。
     /// 打牌選択・押し引き・リーチ判断のどれにも使わない解析専用の情報。
     pub normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
-    /// 履歴依存フリテンの production facts。恒常フリテンとは別で、現時点では action 選択や
-    /// `TenpaiWaitAvailability::can_ron()` に使用しない。
+    /// 現在時点 (今回の打牌の前) の履歴依存フリテンの production facts。
+    ///
+    /// `TenpaiWaitAvailability::can_ron()` が使うのは、この facts を「選択した打牌を切った後」
+    /// へ補正した値 ([`GameContext::history_furiten_after_own_discard`]) であり、同じ値とは
+    /// 限らない。補正後の facts は各 `TenpaiWaitAvailability::history_furiten` が持つ。
+    /// 例えば現在 `same_turn = Some(true)` でも、自分のツモを経た今回の打牌後は `Some(false)`
+    /// になり、他の軸が非フリテン確定ならロンできる。
     pub history_furiten: bot_logic::HistoryFuritenFacts,
     /// 通常打牌評価を行った場合の全合法候補の詳細な2手先診断。`normal_discard` と同じ候補集合・
     /// 同じ順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
@@ -4706,6 +4713,8 @@ pub(crate) mod tests {
         vec![dahai(FURITEN_DRAWN), dahai(0)]
     }
 
+    // 恒常フリテンだけを見る局面。履歴依存フリテンは両軸とも非該当だと確認済みにして、総合
+    // ロン可否が自分の河だけで決まるようにする。
     fn furiten_context(player_id: Option<u8>, discards: [Vec<TileId>; 4]) -> GameContext {
         let hand = furiten_hand();
         let drawn = tile(FURITEN_DRAWN);
@@ -4727,6 +4736,10 @@ pub(crate) mod tests {
             discards,
             [false; 4],
         )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        })
     }
 
     fn furiten_of(
@@ -5005,6 +5018,262 @@ pub(crate) mod tests {
         let _ = ShantenAgent.decide_with_diagnostics(&ctx, &furiten_actions(), &mut diagnostics);
 
         assert!(diagnostics.normal_discard_furiten.is_none());
+    }
+
+    // ---- 履歴依存フリテンの評価時点 ----
+
+    fn history_facts(
+        same_turn: Option<bool>,
+        riichi_missed_win: Option<bool>,
+    ) -> bot_logic::HistoryFuritenFacts {
+        bot_logic::HistoryFuritenFacts {
+            same_turn,
+            riichi_missed_win,
+        }
+    }
+
+    // 打 9s で 5s 単騎テンパイになる門前局面。自分の河は空だと確定していて恒常フリテンにはなら
+    // ないので、総合ロン可否の差は履歴依存フリテンと評価時点だけで決まる。
+    //
+    // `drawn` が true なら 9s を自摸牌として渡し、false なら同じ14枚を手牌として渡して
+    // 「自分のツモを経たと確認できない打牌」にする。
+    fn history_furiten_context(
+        drawn: bool,
+        history: bot_logic::HistoryFuritenFacts,
+        own_river: &[TileId],
+    ) -> GameContext {
+        let mut hand = furiten_hand();
+        let drawn_tile = tile(FURITEN_DRAWN);
+        let mut visible = hand.clone();
+        visible.push(drawn_tile);
+        visible.extend(own_river.iter().copied());
+
+        let drawn_tile = if drawn {
+            Some(drawn_tile)
+        } else {
+            hand.push(drawn_tile);
+            None
+        };
+
+        let mut discards: [Vec<TileId>; 4] = Default::default();
+        discards[0] = own_river.to_vec();
+
+        GameContext::from_parts_with_table_state(
+            drawn_tile,
+            hand,
+            vec![],
+            None,
+            None,
+            visible,
+            Some(0),
+            Some(0),
+            discards,
+            [false; 4],
+        )
+        .with_history_furiten_facts(history)
+    }
+
+    // 1z の Pon 済みで、打 9s で 5s 単騎テンパイになる局面。自摸牌は渡さないので、鳴きの直後に
+    // 切る打牌と同じく「自分のツモを経ていない打牌」になる。
+    fn history_furiten_meld_context(history: bot_logic::HistoryFuritenFacts) -> GameContext {
+        let hand: Vec<TileId> = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 89, FURITEN_DRAWN]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[0] = vec![pon_meld()];
+
+        GameContext::from_parts_with_melds(
+            None,
+            hand.clone(),
+            vec![],
+            None,
+            None,
+            hand,
+            Some(0),
+            Some(0),
+            Default::default(),
+            [false; 4],
+            melds,
+        )
+        .with_history_furiten_facts(history)
+    }
+
+    // 選択した打牌後の待ち診断。全候補診断と押し引きが同じ評価時点の値を共有することも固定する。
+    fn selected_tenpai_wait(
+        ctx: &GameContext,
+        actions: &[LegalAction],
+    ) -> (ShantenDecisionDiagnostic, TenpaiWaitAvailability) {
+        let diagnostic = diagnose_matching_act(ctx, actions);
+        let LegalAction::Dahai { tile } = &diagnostic.selected_action else {
+            panic!("打牌が選ばれる: {:?}", diagnostic.selected_action);
+        };
+        let tenpai = furiten_of(&diagnostic, tile.tile_type())
+            .tenpai
+            .expect("テンパイになる");
+
+        // 押し引きへ転記されるロン可否も同じ総合値になる。
+        assert_eq!(
+            diagnostic
+                .push_pull_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.offense)
+                .and_then(|offense| offense.tenpai_wait_after_discard)
+                .map(|wait| wait.can_ron),
+            Some(tenpai.can_ron())
+        );
+        (diagnostic, tenpai)
+    }
+
+    #[test]
+    fn a_normal_draw_discard_clears_the_same_turn_furiten() {
+        // 現在は同巡内フリテンでも、自摸 → 今回の打牌を終えた時点では解除されている。
+        let ctx = history_furiten_context(true, history_facts(Some(true), Some(false)), &[]);
+        let (diagnostic, tenpai) = selected_tenpai_wait(&ctx, &furiten_actions());
+
+        assert_eq!(diagnostic.history_furiten.same_turn, Some(true));
+        assert_eq!(tenpai.permanent_furiten(), PermanentFuriten::No);
+        assert_eq!(tenpai.history_furiten().same_turn, Some(false));
+        assert_eq!(tenpai.history_furiten().riichi_missed_win, Some(false));
+        assert_eq!(tenpai.can_ron(), Some(true));
+    }
+
+    #[test]
+    fn a_discard_after_a_meld_keeps_the_same_turn_furiten() {
+        // 鳴きの後は自分のツモを経ていないので、同巡内フリテンは解除しない。
+        let ctx = history_furiten_meld_context(history_facts(Some(true), Some(false)));
+        let actions = vec![dahai(FURITEN_DRAWN), dahai(0)];
+        let (_, tenpai) = selected_tenpai_wait(&ctx, &actions);
+
+        assert!(!ctx.is_after_own_draw());
+        assert_eq!(tenpai.permanent_furiten(), PermanentFuriten::No);
+        assert_eq!(tenpai.history_furiten().same_turn, Some(true));
+        assert_eq!(tenpai.can_ron(), Some(false));
+    }
+
+    #[test]
+    fn the_riichi_missed_win_furiten_survives_a_normal_draw_discard() {
+        // 同巡内フリテンだけが解除され、リーチ後見逃しは局終了まで残る。
+        let ctx = history_furiten_context(true, history_facts(Some(true), Some(true)), &[]);
+        let (_, tenpai) = selected_tenpai_wait(&ctx, &furiten_actions());
+
+        assert_eq!(tenpai.permanent_furiten(), PermanentFuriten::No);
+        assert_eq!(tenpai.history_furiten().same_turn, Some(false));
+        assert_eq!(tenpai.history_furiten().riichi_missed_win, Some(true));
+        assert_eq!(tenpai.can_ron(), Some(false));
+    }
+
+    #[test]
+    fn a_normal_draw_discard_resolves_an_unknown_same_turn_furiten() {
+        // 現在は unknown でも、自摸 → 打牌を終えた時点なら Some(false) と確定できる。
+        let ctx = history_furiten_context(true, history_facts(None, Some(false)), &[]);
+        let (diagnostic, tenpai) = selected_tenpai_wait(&ctx, &furiten_actions());
+
+        assert_eq!(diagnostic.history_furiten.same_turn, None);
+        assert_eq!(tenpai.history_furiten().same_turn, Some(false));
+        assert_eq!(tenpai.can_ron(), Some(true));
+    }
+
+    #[test]
+    fn an_unconfirmed_own_draw_keeps_the_same_turn_furiten_unknown() {
+        // 自摸を確認できない打牌では unknown を Some(false) と推測しない。
+        let ctx = history_furiten_context(false, history_facts(None, Some(false)), &[]);
+        let (_, tenpai) = selected_tenpai_wait(&ctx, &furiten_actions());
+
+        assert!(!ctx.is_after_own_draw());
+        assert_eq!(tenpai.permanent_furiten(), PermanentFuriten::No);
+        assert_eq!(tenpai.history_furiten().same_turn, None);
+        assert_eq!(tenpai.can_ron(), None);
+    }
+
+    #[test]
+    fn permanent_furiten_makes_ron_impossible_even_with_unknown_history() {
+        // 履歴依存フリテンが両軸とも unknown でも、恒常フリテンが確定していればロンできない。
+        let ctx = history_furiten_context(
+            true,
+            bot_logic::HistoryFuritenFacts::default(),
+            &[tile(FURITEN_WAIT)],
+        );
+        let (_, tenpai) = selected_tenpai_wait(&ctx, &furiten_actions());
+
+        assert_eq!(tenpai.permanent_furiten(), PermanentFuriten::Yes);
+        assert_eq!(tenpai.history_furiten().riichi_missed_win, None);
+        assert_eq!(tenpai.can_ron(), Some(false));
+    }
+
+    #[test]
+    fn every_candidate_uses_the_same_evaluation_point_as_the_selected_discard() {
+        // 選択候補だけ履歴依存フリテンを補正して、全候補診断は現在時点のまま、という不一致を
+        // 作らない。
+        let ctx = history_furiten_context(true, history_facts(Some(true), Some(false)), &[]);
+        let diagnostic = diagnose_matching_act(&ctx, &furiten_actions());
+        let furiten = diagnostic
+            .normal_discard_furiten
+            .as_ref()
+            .expect("フリテン診断がある");
+
+        assert!(furiten.iter().any(|candidate| candidate.tenpai.is_some()));
+        for candidate in furiten {
+            let Some(tenpai) = candidate.tenpai.as_ref() else {
+                continue;
+            };
+            assert_eq!(
+                tenpai.history_furiten(),
+                ctx.history_furiten_after_own_discard()
+            );
+        }
+    }
+
+    #[test]
+    fn history_furiten_does_not_change_the_reach_or_push_pull_policy() {
+        // ロン可否が変わっても、リーチ採否・押し引きの mode / reason・最終 action は変えない。
+        let actions: Vec<LegalAction> = furiten_actions()
+            .into_iter()
+            .chain([LegalAction::Reach])
+            .collect();
+        let can_ron = history_furiten_context(true, history_facts(Some(false), Some(false)), &[]);
+        let cannot_ron = history_furiten_context(true, history_facts(Some(true), Some(true)), &[]);
+
+        let (can_ron_diagnostic, can_ron_wait) = selected_tenpai_wait(&can_ron, &actions);
+        let (cannot_ron_diagnostic, cannot_ron_wait) = selected_tenpai_wait(&cannot_ron, &actions);
+
+        // 前提として総合ロン可否だけが違う。
+        assert_eq!(can_ron_wait.can_ron(), Some(true));
+        assert_eq!(cannot_ron_wait.can_ron(), Some(false));
+        assert_eq!(
+            can_ron_wait.permanent_furiten(),
+            cannot_ron_wait.permanent_furiten()
+        );
+
+        assert_eq!(
+            can_ron_diagnostic.selected_action,
+            cannot_ron_diagnostic.selected_action
+        );
+        assert_eq!(
+            can_ron_diagnostic.selected_source,
+            cannot_ron_diagnostic.selected_source
+        );
+
+        let reach_of = |diagnostic: &ShantenDecisionDiagnostic| {
+            let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+            (reach.selected.clone(), reach.reason, reach.should_reach())
+        };
+        assert_eq!(
+            reach_of(&can_ron_diagnostic),
+            reach_of(&cannot_ron_diagnostic)
+        );
+
+        let push_pull_of = |diagnostic: &ShantenDecisionDiagnostic| {
+            let decision = diagnostic
+                .push_pull_decision
+                .as_ref()
+                .expect("押し引きを判定している");
+            (decision.mode, decision.reason)
+        };
+        assert_eq!(
+            push_pull_of(&can_ron_diagnostic),
+            push_pull_of(&cannot_ron_diagnostic)
+        );
     }
 
     #[test]

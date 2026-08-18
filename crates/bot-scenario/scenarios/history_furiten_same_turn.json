@@ -1,14 +1,14 @@
 {
   "hand": "123456789m123p5s",
-  "draw": "N",
+  "draw": "9s",
 
   "player_id": 0,
   "oya": 0,
 
   "history_furiten": {
-    "same_turn": false,
+    "same_turn": true,
     "riichi_missed_win": false
   },
 
-  "allow_reach": true
+  "legal_dahai": "9s 1m"
 }

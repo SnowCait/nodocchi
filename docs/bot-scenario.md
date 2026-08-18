@@ -128,7 +128,13 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.j
 
 ### history_furiten
 
-`history_furiten.same_turn` は同巡内フリテン、`history_furiten.riichi_missed_win` はリーチ後のアガリ見逃しによる局中継続フリテンです。各値は `true` / `false` / 省略による unknown を区別します。現在の利用範囲は [フリテン](ai/furiten.md) を参照してください。
+`history_furiten.same_turn` は同巡内フリテン、`history_furiten.riichi_missed_win` はリーチ後のアガリ見逃しによる局中継続フリテンです。各値は `true` / `false` / 省略による unknown を区別します。
+
+指定した値は**現在時点 (今回の打牌の前)** の facts です。ロン可否は恒常フリテンと合わせた総合値で、打牌後の評価時点へ補正してから判定します。`draw` を指定した局面は「自分のツモを経た打牌」になるため、`same_turn` が `true` でもその打牌後は解除されます。`draw` を省略した局面や鳴き後の局面では解除しません。unknown を `false` と推測しないので、軸を省略するとロン可否も unknown になります。規則は [フリテン](ai/furiten.md#総合ロン可否) を参照してください。
+
+```bash
+cargo run -p bot-scenario -- crates/bot-scenario/scenarios/history_furiten_same_turn.json
+```
 
 ### table state
 

@@ -1520,7 +1520,8 @@ mod tests {
         assert_eq!(wait.tsumo_remaining, 8);
         assert_eq!(wait.tsumo_type_count, 2);
         assert_eq!(wait.permanent_furiten, PermanentFuriten::No);
-        assert_eq!(wait.can_ron, Some(true));
+        // 履歴依存フリテンが unknown な context なので、総合ロン可否も unknown のまま。
+        assert_eq!(wait.can_ron, None);
 
         let inputs = inputs_with_dealer(1, false, false, Some(offense));
         let decision = decide_push_pull(&inputs);
