@@ -7,7 +7,8 @@ use crate::open_hand_threat::{
     OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
 };
 use crate::threat::{
-    PlayerThreatFacts, has_reached_dealer, player_threat_facts_from_context, reached_opponent_count,
+    PlayerThreatFacts, fixed_meld_value_facts, has_reached_dealer,
+    player_threat_facts_from_context, reached_opponent_count,
 };
 use bot_logic::{
     DiscardEvaluation, IishantenShape, PermanentFuriten, TenpaiWaitAvailability, TileCounts,
@@ -52,10 +53,11 @@ pub enum PushPullMode {
 /// 現在の手牌から既存の通常打牌選択を行った場合の、最善候補の評価値を保持する。
 /// 新しい向聴数計算や受け入れ計算・一向聴形分類は行わず、既存の `DiscardEvaluation` から取得する。
 ///
-/// 打点関連フィールドは、打牌後の concealed hand 内で確認できる牌だけから求める簡易 proxy であり、
-/// 正確な翻数・打点ではない。現在の簡易 proxy は fixed meld をまだ含めないため、副露・暗槓の
-/// ドラや役牌は数えない。向聴数・受け入れは fixed meld を考慮した `DiscardEvaluation` の値をそのまま
-/// 受け取る。
+/// 打点関連フィールドは、打牌後の自分の手牌全体 (concealed hand + 確認できている fixed meld) から
+/// 求める簡易 proxy であり、正確な翻数・打点ではない。fixed meld は Ankan を含む全 fixed meld が
+/// 対象で、`player_id` が不明で自分の fixed meld を特定できない場合は推測せず数えない。一般役・
+/// 符・点数計算はまだ含めない。向聴数・受け入れは fixed meld を考慮した `DiscardEvaluation` の値を
+/// そのまま受け取る。
 ///
 /// `decide_push_pull()` が現在参照するのは `min_shanten_after_discard` と
 /// `tenpai_wait_after_discard` だけで、受け入れ・一向聴形・簡易打点 proxy は診断・ログ用に
@@ -71,16 +73,17 @@ pub struct PushPullOffenseState {
     /// 待ちを構築できない場合は `None`。
     pub tenpai_wait_after_discard: Option<PushPullTenpaiWaitFacts>,
 
-    /// 打牌後の concealed hand に残るドラの総数。表示牌ドラと赤ドラを含む。
-    /// 同じ牌を示す表示牌が複数あれば重複分も数え、赤5が表示牌ドラでもあれば両方数える。
+    /// 打牌後の自分の手牌全体 (concealed hand + 確認できている fixed meld) のドラの総数。
+    /// 表示牌ドラと赤ドラを含む。同じ牌を示す表示牌が複数あれば重複分も数え、赤5が表示牌ドラでも
+    /// あれば両方数える。Kan は物理牌4枚をそのまま数える。
     pub dora_count_after_discard: u8,
-    /// 打牌後の concealed hand に残る赤ドラ(赤5)の枚数。`dora_count_after_discard` の内数であり、
-    /// 合計 proxy へ別途加算しない。
+    /// 打牌後の自分の手牌全体 (concealed hand + 確認できている fixed meld) の赤ドラ(赤5)の枚数。
+    /// `dora_count_after_discard` の内数であり、合計 proxy へ別途加算しない。
     pub red_dora_count_after_discard: u8,
-    /// 打牌後の concealed hand 内で確認できる役牌刻子・槓子候補の翻 proxy。
-    /// 三元牌刻子は1、場風刻子・自風刻子は各1、連風牌(場風かつ自風)は2。
-    /// 同じ牌が4枚あっても刻子・槓子候補1組として一度だけ数える。現在の簡易 proxy は
-    /// fixed meld をまだ含めないため、副露した役牌は数えない。
+    /// 打牌後の自分の手牌全体で確認できる役牌の翻 proxy。concealed hand の役牌刻子・槓子候補と、
+    /// 自分の fixed meld の確定役牌翻の合計。
+    /// 三元牌は1、場風・自風は各1、連風牌(場風かつ自風)は2。concealed hand 側は同じ牌が4枚あっても
+    /// 刻子・槓子候補1組として一度だけ数える。Chi は字牌を含まないため役牌翻を持たない。
     /// 場風・自風が不明な風牌は数えない(三元牌は風情報が無くても数える)。
     pub value_honor_han_proxy_after_discard: u8,
 }
@@ -123,12 +126,25 @@ impl PushPullTenpaiWaitFacts {
     }
 }
 
-/// 打牌後の concealed hand の簡易打点 proxy の内訳。`PushPullOffenseState` の各フィールドへ転記する前段の計算値。
+/// 打牌後の自分の手牌全体の簡易打点 proxy の内訳。`PushPullOffenseState` の各フィールドへ転記する前段の計算値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct OffenseValueProxyBreakdown {
     dora_count: u8,
     red_dora_count: u8,
     value_honor_han_proxy: u8,
+}
+
+impl OffenseValueProxyBreakdown {
+    /// concealed hand 側と fixed meld 側の寄与を一度ずつだけ合計する。
+    fn combined_with(self, other: Self) -> Self {
+        Self {
+            dora_count: self.dora_count.saturating_add(other.dora_count),
+            red_dora_count: self.red_dora_count.saturating_add(other.red_dora_count),
+            value_honor_han_proxy: self
+                .value_honor_han_proxy
+                .saturating_add(other.value_honor_han_proxy),
+        }
+    }
 }
 
 /// 補正済み評価が指す物理牌を1枚だけ除いた、打牌後の concealed hand の物理牌一覧を返す。
@@ -157,8 +173,8 @@ fn tiles_after_discard(
 /// 打牌後の concealed hand 内で確認できる役牌刻子・槓子候補の翻 proxy。
 ///
 /// 三元牌は常に1。風牌は `round_wind` / `seat_wind` と一致した分だけ数え、連風牌は2。
-/// 風情報が不明な風牌は数えない。現在の簡易 proxy は fixed meld をまだ含めないため、
-/// 副露・暗槓は数えない。
+/// 風情報が不明な風牌は数えない。fixed meld 側の役牌翻はここでは扱わず、既存の
+/// [`fixed_meld_value_facts`] から求める。
 fn value_honor_triplet_han(
     tile: TileType,
     round_wind: Option<TileType>,
@@ -172,7 +188,47 @@ fn value_honor_triplet_han(
     han
 }
 
-/// 補正済み評価と `GameContext` から、打牌後の concealed hand の簡易打点 proxy の内訳を一度だけ計算する。
+/// 補正済み評価と `GameContext` から、打牌後の自分の手牌全体の簡易打点 proxy の内訳を一度だけ計算する。
+///
+/// 打牌後の concealed hand の寄与と、自分の fixed meld の寄与を一度ずつだけ合計する。fixed meld は
+/// `tiles_after_discard` の牌集合に含まれないため、`visible_tiles` などから数え直して二重計上しない。
+fn offense_value_proxy_after_discard(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+) -> OffenseValueProxyBreakdown {
+    concealed_value_proxy_after_discard(context, evaluation)
+        .combined_with(own_fixed_meld_value_proxy(context))
+}
+
+/// 自分の fixed meld の簡易打点 proxy の内訳。
+///
+/// ドラ・赤ドラ・役牌の判定は既存 [`fixed_meld_value_facts`] に一本化し、押し引き側で `MeldKind` や
+/// 場風・自風を判定し直さない。Ankan は公開副露ではないが自分の手牌価値の一部なので、相手の
+/// OpenHandThreat とは違い全 fixed meld を対象にする。
+///
+/// `player_id` が不明で自分の fixed meld を特定できない場合は、player 0 を自分と仮定するような補完を
+/// せず、確認できない fixed meld の打点を加算しない。
+fn own_fixed_meld_value_proxy(context: &GameContext) -> OffenseValueProxyBreakdown {
+    let Some(melds) = context.own_melds() else {
+        return OffenseValueProxyBreakdown::default();
+    };
+
+    let facts = fixed_meld_value_facts(
+        melds,
+        context.dora_indicators(),
+        context.round_wind(),
+        context.seat_wind(),
+    );
+
+    OffenseValueProxyBreakdown {
+        dora_count: facts.dora_count,
+        red_dora_count: facts.red_dora_count,
+        value_honor_han_proxy: u8::try_from(facts.value_honor_melds.confirmed_han())
+            .unwrap_or(u8::MAX),
+    }
+}
+
+/// 補正済み評価と `GameContext` から、打牌後の concealed hand の簡易打点 proxy の内訳を計算する。
 ///
 /// 実際に切られる物理牌カテゴリ(赤5・通常5)と一致するよう、`tiles_after_discard` で
 /// 物理牌を1枚除いた打牌後の concealed hand へ処理を一元化する。ドラ総数・赤ドラ数・役牌翻 proxy を同じ牌集合から求める。
@@ -180,7 +236,7 @@ fn value_honor_triplet_han(
 /// 通常の `ShantenAgent` 経路では補正済み評価と合法 action の物理牌情報が一致する不変条件があるため、
 /// 一致する物理牌は必ず見つかる。それでも見つからない場合は panic せず、契約違反を `debug_assert` で
 /// 検出しつつ release ではデフォルト値(計算不能)を返す。
-fn offense_value_proxy_after_discard(
+fn concealed_value_proxy_after_discard(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
 ) -> OffenseValueProxyBreakdown {
@@ -661,6 +717,7 @@ pub(crate) fn log_push_pull_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meld::{Meld, MeldKind};
     use bot_logic::{TileId, TileType};
 
     fn tile(value: u8) -> TileId {
@@ -1530,6 +1587,20 @@ mod tests {
     }
 
     #[test]
+    fn own_fixed_meld_value_reaches_the_offense_state() {
+        // 白ポン1組。副露の役牌翻が offense state の打点 proxy へ届き、押し引きの判断は変わらない。
+        let with_meld = offense_state_from_normal_discard(&one_meld_context(vec![one_meld_pon()]));
+        assert_eq!(with_meld.value_honor_han_proxy_after_discard, 1);
+        assert_eq!(with_meld.dora_count_after_discard, 0);
+        assert_eq!(with_meld.red_dora_count_after_discard, 0);
+        assert_eq!(with_meld.simple_value_proxy_after_discard(), 1);
+
+        let decision = decide_push_pull(&inputs_with_dealer(1, false, false, Some(with_meld)));
+        assert_eq!(decision.mode, PushPullMode::Push);
+        assert_eq!(decision.reason, PushPullReason::StrongTenpaiAgainstReach);
+    }
+
+    #[test]
     fn concealed_hand_offense_state_is_unchanged() {
         // 同じ手牌でも副露が無ければ従来どおり二向聴のまま押し引きへ渡る。
         let offense = offense_state_from_normal_discard(&one_meld_context(vec![]));
@@ -1811,6 +1882,298 @@ mod tests {
             proxy.dora_count.saturating_add(proxy.value_honor_han_proxy),
             4
         );
+    }
+
+    // ---- 自分の fixed meld が簡易打点 proxy へ反映されること ----
+
+    fn meld(kind: MeldKind, tiles: &[u8]) -> Meld {
+        let tiles = ids(tiles);
+        let called_tile = kind.is_open().then(|| tiles[0]);
+        Meld::new(kind, tiles, called_tile)
+    }
+
+    fn melds_at(player: usize, melds: Vec<Meld>) -> [Vec<Meld>; 4] {
+        let mut all: [Vec<Meld>; 4] = Default::default();
+        all[player] = melds;
+        all
+    }
+
+    // 打牌する 9s と、ドラ・役牌にならない filler だけの concealed hand。`extra` で打点要素を足す。
+    fn plain_hand_with(extra: &[u8]) -> Vec<TileId> {
+        let mut hand = ids(extra);
+        hand.extend(ids(&[0, 4, 20, 24, 36, 40, 44, 56, 60, 64]));
+        hand.push(tile(104));
+        hand
+    }
+
+    // fixed meld を持つ proxy 用 context。fixed meld の物理牌は実局面と同じく visible tiles にも入れ、
+    // そこから二重に数えないことを同時に固定する。
+    fn proxy_meld_context(
+        hand: Vec<TileId>,
+        dora: Vec<TileId>,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+        player_id: Option<u8>,
+        melds: [Vec<Meld>; 4],
+    ) -> GameContext {
+        let visible_tiles: Vec<TileId> = melds
+            .iter()
+            .flatten()
+            .flat_map(|meld| meld.tiles().to_vec())
+            .collect();
+
+        GameContext::from_parts_with_melds(
+            None,
+            hand,
+            dora,
+            round_wind,
+            seat_wind,
+            visible_tiles,
+            player_id,
+            None,
+            Default::default(),
+            [false; 4],
+            melds,
+        )
+    }
+
+    #[test]
+    fn proxy_without_fixed_melds_counts_the_concealed_hand_only() {
+        // ドラ表示牌 3m、concealed に 4m 1枚・赤5p・白刻子。fixed meld が無ければ従来どおり。
+        let hand = plain_hand_with(&[12, 52, 124, 125, 126]);
+        let context = proxy_meld_context(hand, ids(&[8]), None, None, Some(0), Default::default());
+        let evaluation = proxy_evaluation(nine_s(), false);
+
+        let concealed = concealed_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(concealed.dora_count, 2);
+        assert_eq!(concealed.red_dora_count, 1);
+        assert_eq!(concealed.value_honor_han_proxy, 1);
+        assert_eq!(
+            offense_value_proxy_after_discard(&context, &evaluation),
+            concealed
+        );
+    }
+
+    #[test]
+    fn proxy_counts_indicator_dora_in_a_fixed_meld() {
+        // ドラ表示牌 3m。concealed の 4m 1枚に、自分の 4m ポン3枚が加算される。
+        let context = proxy_meld_context(
+            plain_hand_with(&[15]),
+            ids(&[8]),
+            None,
+            None,
+            Some(0),
+            melds_at(0, vec![meld(MeldKind::Pon, &[12, 13, 14])]),
+        );
+        let evaluation = proxy_evaluation(nine_s(), false);
+
+        let concealed = concealed_value_proxy_after_discard(&context, &evaluation);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(concealed.dora_count, 1);
+        assert_eq!(proxy.dora_count, 4);
+        assert_eq!(proxy.red_dora_count, 0);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+    }
+
+    #[test]
+    fn proxy_counts_red_dora_in_a_fixed_meld_without_double_counting() {
+        // 赤5m を含むチー。ドラ総数へ1、赤ドラへ1で、簡易 proxy では赤ドラを再加算しない。
+        let context = proxy_meld_context(
+            plain_hand_with(&[]),
+            vec![],
+            None,
+            None,
+            Some(0),
+            melds_at(0, vec![meld(MeldKind::Chi, &[12, 16, 21])]),
+        );
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+
+        assert_eq!(proxy.dora_count, 1);
+        assert_eq!(proxy.red_dora_count, 1);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+
+        let offense = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation))
+            .offense
+            .expect("offense should be present");
+        assert_eq!(offense.dora_count_after_discard, 1);
+        assert_eq!(offense.red_dora_count_after_discard, 1);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 1);
+    }
+
+    #[test]
+    fn proxy_counts_a_dragon_pon_as_one_han() {
+        let context = proxy_meld_context(
+            plain_hand_with(&[]),
+            vec![],
+            None,
+            None,
+            Some(0),
+            melds_at(0, vec![meld(MeldKind::Pon, &[124, 125, 126])]),
+        );
+        let proxy = offense_value_proxy_after_discard(&context, &proxy_evaluation(nine_s(), false));
+
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+        assert_eq!(proxy.dora_count, 0);
+    }
+
+    #[test]
+    fn proxy_counts_a_double_wind_pon_as_two_han() {
+        // 東場・東家の東ポン。自風は `oya` からではなく既知の `GameContext::seat_wind()` から取る。
+        let context = proxy_meld_context(
+            plain_hand_with(&[]),
+            vec![],
+            Some(wind(27)),
+            Some(wind(27)),
+            Some(0),
+            melds_at(0, vec![meld(MeldKind::Pon, &[108, 109, 110])]),
+        );
+        let proxy = offense_value_proxy_after_discard(&context, &proxy_evaluation(nine_s(), false));
+
+        assert_eq!(proxy.value_honor_han_proxy, 2);
+        assert_eq!(
+            player_threat_facts_from_context(&context)[0].seat_wind,
+            None
+        );
+    }
+
+    #[test]
+    fn proxy_counts_every_tile_of_an_ankan_and_keeps_it_out_of_open_meld_facts() {
+        // ドラ表示牌 3m の 4m 暗槓。物理牌4枚ぶん数え、相手向けの open meld facts は変えない。
+        let context = proxy_meld_context(
+            plain_hand_with(&[]),
+            ids(&[8]),
+            None,
+            None,
+            Some(0),
+            melds_at(0, vec![meld(MeldKind::Ankan, &[12, 13, 14, 15])]),
+        );
+        let proxy = offense_value_proxy_after_discard(&context, &proxy_evaluation(nine_s(), false));
+        assert_eq!(proxy.dora_count, 4);
+
+        let facts = player_threat_facts_from_context(&context)[0];
+        assert_eq!(facts.meld_dora_count, 4);
+        assert_eq!(facts.open_meld_dora_count, 0);
+        assert_eq!(facts.open_visible_han_proxy(), 0);
+    }
+
+    #[test]
+    fn proxy_counts_an_ankan_value_honor_but_open_facts_do_not() {
+        let context = proxy_meld_context(
+            plain_hand_with(&[]),
+            vec![],
+            None,
+            None,
+            Some(0),
+            melds_at(0, vec![meld(MeldKind::Ankan, &[124, 125, 126, 127])]),
+        );
+        let proxy = offense_value_proxy_after_discard(&context, &proxy_evaluation(nine_s(), false));
+        assert_eq!(proxy.value_honor_han_proxy, 1);
+
+        let facts = player_threat_facts_from_context(&context)[0];
+        assert_eq!(facts.value_honor_melds.confirmed_han(), 1);
+        assert_eq!(facts.open_value_honor_melds.confirmed_han(), 0);
+    }
+
+    #[test]
+    fn proxy_adds_concealed_and_fixed_meld_contributions_once() {
+        // concealed: 4m 1枚 + 赤5p + 白刻子。fixed meld: 4m ポン + 赤5m を含むチー + 東ポン。
+        // 場風 E・自風 S なので東ポンは1翻。
+        let context = proxy_meld_context(
+            plain_hand_with(&[15, 52, 124, 125, 126]),
+            ids(&[8]),
+            Some(wind(27)),
+            Some(wind(28)),
+            Some(0),
+            melds_at(
+                0,
+                vec![
+                    meld(MeldKind::Pon, &[12, 13, 14]),
+                    meld(MeldKind::Chi, &[16, 21, 25]),
+                    meld(MeldKind::Pon, &[108, 109, 110]),
+                ],
+            ),
+        );
+        let evaluation = proxy_evaluation(nine_s(), false);
+
+        let concealed = concealed_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(concealed.dora_count, 2);
+        assert_eq!(concealed.red_dora_count, 1);
+        assert_eq!(concealed.value_honor_han_proxy, 1);
+
+        let proxy = offense_value_proxy_after_discard(&context, &evaluation);
+        assert_eq!(proxy.dora_count, 2 + 3 + 1);
+        assert_eq!(proxy.red_dora_count, 1 + 1);
+        assert_eq!(proxy.value_honor_han_proxy, 1 + 1);
+    }
+
+    #[test]
+    fn proxy_does_not_guess_an_unknown_wind_of_a_fixed_meld() {
+        // 東ポン。場風・自風とも不明なら数えず、場風だけ確定していればその1翻だけ数える。
+        let melds = || melds_at(0, vec![meld(MeldKind::Pon, &[108, 109, 110])]);
+        let evaluation = proxy_evaluation(nine_s(), false);
+
+        let unknown =
+            proxy_meld_context(plain_hand_with(&[]), vec![], None, None, Some(0), melds());
+        assert_eq!(
+            offense_value_proxy_after_discard(&unknown, &evaluation).value_honor_han_proxy,
+            0
+        );
+
+        let round_wind_only = proxy_meld_context(
+            plain_hand_with(&[]),
+            vec![],
+            Some(wind(27)),
+            None,
+            Some(0),
+            melds(),
+        );
+        assert_eq!(
+            offense_value_proxy_after_discard(&round_wind_only, &evaluation).value_honor_han_proxy,
+            1
+        );
+    }
+
+    #[test]
+    fn proxy_ignores_melds_when_the_own_seat_is_unknown() {
+        // `player_id` が不明なら player 0 を自分と仮定せず、確認できない fixed meld を数えない。
+        let evaluation = proxy_evaluation(nine_s(), false);
+        let unknown_seat = proxy_meld_context(
+            plain_hand_with(&[]),
+            ids(&[8]),
+            None,
+            None,
+            None,
+            melds_at(
+                0,
+                vec![
+                    meld(MeldKind::Pon, &[12, 13, 14]),
+                    meld(MeldKind::Pon, &[124, 125, 126]),
+                ],
+            ),
+        );
+        let proxy = offense_value_proxy_after_discard(&unknown_seat, &evaluation);
+        assert_eq!(proxy.dora_count, 0);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
+
+        // 自分の席が分かっていても、他家の fixed meld は自分の打点にならない。
+        let opponent_meld = proxy_meld_context(
+            plain_hand_with(&[]),
+            ids(&[8]),
+            None,
+            None,
+            Some(0),
+            melds_at(
+                1,
+                vec![
+                    meld(MeldKind::Pon, &[12, 13, 14]),
+                    meld(MeldKind::Pon, &[124, 125, 126]),
+                ],
+            ),
+        );
+        let proxy = offense_value_proxy_after_discard(&opponent_meld, &evaluation);
+        assert_eq!(proxy.dora_count, 0);
+        assert_eq!(proxy.value_honor_han_proxy, 0);
     }
 
     // 実戦寄りの14枚 context。ドラ・場風を持たせて proxy が非ゼロになり得る。

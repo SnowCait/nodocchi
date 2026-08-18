@@ -2641,6 +2641,80 @@ mod tests {
         );
     }
 
+    // 自分の白ポンと concealed のドラ 4p。簡易打点 proxy が concealed + 自分の fixed meld になる。
+    const OWN_MELD_VALUE_SCENARIO: &str = r#"{
+        "hand": "234m455p789s",
+        "draw": "N",
+        "dora_indicators": "3p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 0,
+        "discards": ["", "P", "", ""],
+        "melds": [
+            [{"kind": "pon", "tiles": "P P P", "called_tile": "P"}],
+            [],
+            [],
+            []
+        ]
+    }"#;
+
+    // 同じ concealed hand で fixed meld だけを外した対照ケース。
+    const CONCEALED_ONLY_VALUE_SCENARIO: &str = r#"{
+        "hand": "234m455p789s",
+        "draw": "N",
+        "dora_indicators": "3p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 0
+    }"#;
+
+    #[test]
+    fn push_pull_section_shows_the_own_fixed_meld_value() {
+        let (_, diagnostic, output) = rendered(OWN_MELD_VALUE_SCENARIO, false);
+        let push_pull = section(&output, "Push/Pull");
+
+        assert!(
+            push_pull.contains("    dora after discard: 1"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    red dora after discard: 0"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    value honor han proxy after discard: 1"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    simple value proxy after discard: 2"),
+            "{push_pull}"
+        );
+
+        // 表示は production の PushPullOffenseState そのままで、表示用に数え直さない。
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        assert_eq!(offense.value_honor_han_proxy_after_discard, 1);
+        assert_eq!(offense.simple_value_proxy_after_discard(), 2);
+    }
+
+    #[test]
+    fn push_pull_section_without_own_melds_shows_the_concealed_value_only() {
+        let (_, _, output) = rendered(CONCEALED_ONLY_VALUE_SCENARIO, false);
+        let push_pull = section(&output, "Push/Pull");
+
+        assert!(
+            push_pull.contains("    dora after discard: 1"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    value honor han proxy after discard: 0"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    simple value proxy after discard: 1"),
+            "{push_pull}"
+        );
+    }
+
     #[test]
     fn push_pull_section_shows_the_tenpai_wait_after_discard() {
         // 押し引きが強いテンパイを判定するときに見る事実をそのまま出す。

@@ -72,10 +72,10 @@ pub use push_pull::{
     PushPullTenpaiWaitFacts, decide_push_pull, push_pull_inputs_from_context,
 };
 pub use threat::{
-    MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts, PlayerThreatDiagnostic,
-    PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts, ValueHonorMeldFacts,
-    diagnose_meld_threat, diagnose_player_threat, diagnose_player_threat_with_facts,
-    diagnose_player_threats, diagnose_player_threats_with_facts, has_reached_dealer,
-    meld_threat_facts, player_threat_facts, player_threat_facts_from_context, player_threat_inputs,
-    reached_opponent_count,
+    FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,
+    PlayerThreatDiagnostic, PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts,
+    ValueHonorMeldFacts, diagnose_meld_threat, diagnose_player_threat,
+    diagnose_player_threat_with_facts, diagnose_player_threats, diagnose_player_threats_with_facts,
+    fixed_meld_value_facts, has_reached_dealer, meld_threat_facts, player_threat_facts,
+    player_threat_facts_from_context, player_threat_inputs, reached_opponent_count,
 };
