@@ -10,6 +10,7 @@ pub mod selection;
 pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
+pub mod yaku;
 
 pub use acceptance::{
     Acceptance, AcceptanceTile, EffectiveAcceptance, EffectiveAcceptanceTile, calculate_acceptance,
@@ -60,7 +61,7 @@ pub use lookahead::{
     forward_metrics_with_fixed_melds_and_visible_tiles, tenpai_wait_metrics_from_lookahead,
     tenpai_wait_metrics_with_fixed_melds, tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
 };
-pub use meld::{Meld, MeldKind, fixed_meld_count};
+pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
 pub use selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     WeightedForwardMetric, best_discard_selection_index,
@@ -76,3 +77,4 @@ pub use tile::{
     next_dora,
 };
 pub use tile_counts::{TileCountError, TileCounts};
+pub use yaku::{StructuralYakuEvaluation, Yaku, evaluate_structural_yaku};
