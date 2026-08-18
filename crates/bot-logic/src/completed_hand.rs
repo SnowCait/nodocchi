@@ -1,0 +1,861 @@
+use crate::meld::{Meld, fixed_meld_count};
+use crate::shanten::FixedMeldCount;
+use crate::tile::{TileId, TileType};
+use crate::tile_counts::{TileCountError, TileCounts};
+use thiserror::Error;
+
+const CHIITOITSU_PAIR_COUNT: usize = 7;
+const COMPLETED_HAND_TILE_COUNT: u8 = 14;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CompletedHandError {
+    #[error("too many fixed melds: {0}")]
+    TooManyFixedMelds(usize),
+
+    #[error(transparent)]
+    TileCount(#[from] TileCountError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ConcealedMeld {
+    Sequence { start: TileType },
+    Triplet { tile: TileType },
+}
+
+impl ConcealedMeld {
+    pub fn is_sequence(self) -> bool {
+        matches!(self, Self::Sequence { .. })
+    }
+
+    pub fn is_triplet(self) -> bool {
+        matches!(self, Self::Triplet { .. })
+    }
+
+    pub fn first_tile_type(self) -> TileType {
+        match self {
+            Self::Sequence { start } => start,
+            Self::Triplet { tile } => tile,
+        }
+    }
+
+    pub fn tile_types(self) -> Option<[TileType; 3]> {
+        match self {
+            Self::Sequence { start } => start.sequence(),
+            Self::Triplet { tile } => Some([tile, tile, tile]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StandardDecomposition {
+    pair: TileType,
+    concealed_melds: Vec<ConcealedMeld>,
+    fixed_meld_count: FixedMeldCount,
+}
+
+impl StandardDecomposition {
+    pub fn pair(&self) -> TileType {
+        self.pair
+    }
+
+    pub fn concealed_melds(&self) -> &[ConcealedMeld] {
+        &self.concealed_melds
+    }
+
+    pub fn fixed_meld_count(&self) -> FixedMeldCount {
+        self.fixed_meld_count
+    }
+
+    pub fn meld_count(&self) -> u8 {
+        self.concealed_melds.len() as u8 + self.fixed_meld_count.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChiitoitsuDecomposition {
+    pairs: [TileType; CHIITOITSU_PAIR_COUNT],
+}
+
+impl ChiitoitsuDecomposition {
+    pub fn pairs(&self) -> &[TileType; CHIITOITSU_PAIR_COUNT] {
+        &self.pairs
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KokushiDecomposition {
+    pair: TileType,
+}
+
+impl KokushiDecomposition {
+    pub fn pair(&self) -> TileType {
+        self.pair
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CompletedHandDecomposition {
+    Standard(StandardDecomposition),
+    Chiitoitsu(ChiitoitsuDecomposition),
+    Kokushi(KokushiDecomposition),
+}
+
+impl CompletedHandDecomposition {
+    pub fn as_standard(&self) -> Option<&StandardDecomposition> {
+        match self {
+            Self::Standard(decomposition) => Some(decomposition),
+            _ => None,
+        }
+    }
+
+    pub fn as_chiitoitsu(&self) -> Option<&ChiitoitsuDecomposition> {
+        match self {
+            Self::Chiitoitsu(decomposition) => Some(decomposition),
+            _ => None,
+        }
+    }
+
+    pub fn as_kokushi(&self) -> Option<&KokushiDecomposition> {
+        match self {
+            Self::Kokushi(decomposition) => Some(decomposition),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedHandAnalysis {
+    concealed_tiles: Vec<TileId>,
+    fixed_melds: Vec<Meld>,
+    decompositions: Vec<CompletedHandDecomposition>,
+}
+
+impl CompletedHandAnalysis {
+    pub fn concealed_tiles(&self) -> &[TileId] {
+        &self.concealed_tiles
+    }
+
+    pub fn fixed_melds(&self) -> &[Meld] {
+        &self.fixed_melds
+    }
+
+    pub fn decompositions(&self) -> &[CompletedHandDecomposition] {
+        &self.decompositions
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !self.decompositions.is_empty()
+    }
+
+    pub fn standard_decompositions(&self) -> impl Iterator<Item = &StandardDecomposition> {
+        self.decompositions
+            .iter()
+            .filter_map(CompletedHandDecomposition::as_standard)
+    }
+
+    pub fn chiitoitsu_decomposition(&self) -> Option<&ChiitoitsuDecomposition> {
+        self.decompositions
+            .iter()
+            .find_map(CompletedHandDecomposition::as_chiitoitsu)
+    }
+
+    pub fn kokushi_decomposition(&self) -> Option<&KokushiDecomposition> {
+        self.decompositions
+            .iter()
+            .find_map(CompletedHandDecomposition::as_kokushi)
+    }
+}
+
+pub fn analyze_completed_hand(
+    concealed_tiles: &[TileId],
+    fixed_melds: &[Meld],
+) -> Result<CompletedHandAnalysis, CompletedHandError> {
+    let fixed_meld_count = fixed_meld_count(fixed_melds)
+        .ok_or(CompletedHandError::TooManyFixedMelds(fixed_melds.len()))?;
+
+    let mut visible = TileCounts::new();
+    for tile in concealed_tiles
+        .iter()
+        .chain(fixed_melds.iter().flat_map(|meld| meld.tiles()))
+    {
+        visible.try_add(tile.tile_type())?;
+    }
+
+    let concealed = TileCounts::from_tiles(concealed_tiles.iter().copied());
+    Ok(CompletedHandAnalysis {
+        concealed_tiles: concealed_tiles.to_vec(),
+        fixed_melds: fixed_melds.to_vec(),
+        decompositions: decompositions(&concealed, fixed_meld_count),
+    })
+}
+
+fn decompositions(
+    concealed: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> Vec<CompletedHandDecomposition> {
+    let mut decompositions: Vec<_> = standard_decompositions(concealed, fixed_meld_count)
+        .into_iter()
+        .map(CompletedHandDecomposition::Standard)
+        .collect();
+
+    if !fixed_meld_count.has_melds() {
+        decompositions.extend(
+            chiitoitsu_decomposition(concealed).map(CompletedHandDecomposition::Chiitoitsu),
+        );
+        decompositions
+            .extend(kokushi_decomposition(concealed).map(CompletedHandDecomposition::Kokushi));
+    }
+
+    decompositions
+}
+
+fn standard_decompositions(
+    concealed: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> Vec<StandardDecomposition> {
+    let concealed_meld_count = usize::from(FixedMeldCount::MAX - fixed_meld_count.get());
+    if usize::from(concealed.total()) != 2 + 3 * concealed_meld_count {
+        return Vec::new();
+    }
+
+    let mut decompositions = Vec::new();
+    for (pair, count) in concealed.iter() {
+        if count < 2 {
+            continue;
+        }
+
+        let mut rest = *concealed;
+        if rest.remove_pair(pair).is_err() {
+            continue;
+        }
+
+        let mut melds = Vec::with_capacity(concealed_meld_count);
+        let mut found = Vec::new();
+        collect_concealed_melds(rest, concealed_meld_count, &mut melds, &mut found);
+
+        decompositions.extend(found.into_iter().map(|mut concealed_melds| {
+            concealed_melds.sort_unstable();
+            StandardDecomposition {
+                pair,
+                concealed_melds,
+                fixed_meld_count,
+            }
+        }));
+    }
+
+    decompositions.sort_unstable();
+    decompositions.dedup();
+    decompositions
+}
+
+fn collect_concealed_melds(
+    counts: TileCounts,
+    remaining: usize,
+    melds: &mut Vec<ConcealedMeld>,
+    found: &mut Vec<Vec<ConcealedMeld>>,
+) {
+    if remaining == 0 {
+        if counts.is_empty() {
+            found.push(melds.clone());
+        }
+        return;
+    }
+
+    let Some(tile) = counts
+        .iter()
+        .find_map(|(tile, count)| (count >= 1).then_some(tile))
+    else {
+        return;
+    };
+
+    let mut triplet_removed = counts;
+    if triplet_removed.remove_triplet(tile).is_ok() {
+        melds.push(ConcealedMeld::Triplet { tile });
+        collect_concealed_melds(triplet_removed, remaining - 1, melds, found);
+        melds.pop();
+    }
+
+    let mut sequence_removed = counts;
+    if sequence_removed.remove_sequence(tile).is_ok() {
+        melds.push(ConcealedMeld::Sequence { start: tile });
+        collect_concealed_melds(sequence_removed, remaining - 1, melds, found);
+        melds.pop();
+    }
+}
+
+fn chiitoitsu_decomposition(concealed: &TileCounts) -> Option<ChiitoitsuDecomposition> {
+    if concealed.total() != COMPLETED_HAND_TILE_COUNT {
+        return None;
+    }
+
+    let mut pairs = Vec::with_capacity(CHIITOITSU_PAIR_COUNT);
+    for (tile, count) in concealed.iter() {
+        match count {
+            0 => {}
+            2 => pairs.push(tile),
+            _ => return None,
+        }
+    }
+
+    let pairs: [TileType; CHIITOITSU_PAIR_COUNT] = pairs.try_into().ok()?;
+    Some(ChiitoitsuDecomposition { pairs })
+}
+
+fn kokushi_decomposition(concealed: &TileCounts) -> Option<KokushiDecomposition> {
+    if concealed.total() != COMPLETED_HAND_TILE_COUNT {
+        return None;
+    }
+
+    let mut pair = None;
+    for (tile, count) in concealed.iter() {
+        if !tile.is_yaochu() {
+            if count > 0 {
+                return None;
+            }
+            continue;
+        }
+
+        match count {
+            1 => {}
+            2 if pair.is_none() => pair = Some(tile),
+            _ => return None,
+        }
+    }
+
+    pair.map(|pair| KokushiDecomposition { pair })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meld::MeldKind;
+    use crate::shanten::{
+        calculate_shanten, calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten,
+        standard_shanten, standard_shanten_with_fixed_melds,
+    };
+
+    struct TileIdSource {
+        used: [u8; TileType::COUNT],
+    }
+
+    impl TileIdSource {
+        fn new() -> Self {
+            Self {
+                used: [0; TileType::COUNT],
+            }
+        }
+
+        fn tiles(&mut self, strings: &[&str]) -> Vec<TileId> {
+            strings.iter().map(|s| self.tile(s)).collect()
+        }
+
+        fn meld(&mut self, kind: MeldKind, strings: &[&str]) -> Meld {
+            let tiles = self.tiles(strings);
+            let called_tile = kind.is_open().then(|| tiles[0]);
+            Meld::new(kind, tiles, called_tile)
+        }
+
+        fn tile(&mut self, s: &str) -> TileId {
+            let tile_type = tile_type(s);
+            let copy = &mut self.used[tile_type.index()];
+            let id = TileId::new(tile_type.raw() * 4 + *copy).unwrap();
+            *copy += 1;
+            id
+        }
+    }
+
+    fn tile_type(s: &str) -> TileType {
+        TileType::from_mjai_type_str(s).unwrap()
+    }
+
+    fn sequence(s: &str) -> ConcealedMeld {
+        ConcealedMeld::Sequence {
+            start: tile_type(s),
+        }
+    }
+
+    fn triplet(s: &str) -> ConcealedMeld {
+        ConcealedMeld::Triplet { tile: tile_type(s) }
+    }
+
+    fn counts_of(tiles: &[TileId]) -> TileCounts {
+        TileCounts::from_tiles(tiles.iter().copied())
+    }
+
+    fn fixed_count(value: u8) -> FixedMeldCount {
+        FixedMeldCount::new(value).unwrap()
+    }
+
+    fn standard_shapes(analysis: &CompletedHandAnalysis) -> Vec<(TileType, Vec<ConcealedMeld>)> {
+        analysis
+            .standard_decompositions()
+            .map(|decomposition| {
+                (
+                    decomposition.pair(),
+                    decomposition.concealed_melds().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unique_standard_hand_has_one_decomposition() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert!(analysis.is_complete());
+        assert_eq!(
+            standard_shapes(&analysis),
+            vec![(
+                tile_type("5s"),
+                vec![
+                    sequence("1m"),
+                    sequence("4m"),
+                    sequence("7m"),
+                    sequence("1p"),
+                ],
+            )]
+        );
+        assert_eq!(analysis.decompositions().len(), 1);
+        assert_eq!(standard_shanten(&counts_of(&concealed)), -1);
+    }
+
+    #[test]
+    fn analysis_keeps_physical_tiles_and_fixed_melds() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s", "5s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(analysis.concealed_tiles(), concealed);
+        assert!(analysis.fixed_melds().is_empty());
+    }
+
+    #[test]
+    fn standard_hand_with_triplets_keeps_meld_kinds() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "1m", "2m", "3m", "4m", "5p", "6p", "7p", "9s", "9s", "9s", "E", "E",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            standard_shapes(&analysis),
+            vec![(
+                tile_type("E"),
+                vec![sequence("2m"), sequence("5p"), triplet("1m"), triplet("9s"),],
+            )]
+        );
+        let melds: Vec<_> = analysis
+            .standard_decompositions()
+            .flat_map(|decomposition| decomposition.concealed_melds().iter().copied())
+            .collect();
+        assert_eq!(melds.iter().filter(|meld| meld.is_sequence()).count(), 2);
+        assert_eq!(melds.iter().filter(|meld| meld.is_triplet()).count(), 2);
+        assert_eq!(triplet("1m").tile_types(), Some([tile_type("1m"); 3]));
+        assert_eq!(
+            sequence("2m").tile_types(),
+            Some([tile_type("2m"), tile_type("3m"), tile_type("4m")])
+        );
+        assert_eq!(standard_shanten(&counts_of(&concealed)), -1);
+    }
+
+    #[test]
+    fn fixed_pon_leaves_three_concealed_melds() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Pon, &["E", "E", "E"])];
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5s", "5s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+        let decompositions: Vec<_> = analysis.standard_decompositions().collect();
+
+        assert_eq!(decompositions.len(), 1);
+        let decomposition = decompositions[0];
+        assert_eq!(decomposition.pair(), tile_type("5s"));
+        assert_eq!(decomposition.fixed_meld_count(), fixed_count(1));
+        assert_eq!(decomposition.concealed_melds().len(), 3);
+        assert_eq!(decomposition.meld_count(), 4);
+        assert_eq!(
+            decomposition.concealed_melds(),
+            [sequence("1m"), sequence("4m"), sequence("7m")]
+        );
+        assert!(
+            !decomposition
+                .concealed_melds()
+                .iter()
+                .any(|meld| meld.first_tile_type() == tile_type("E"))
+        );
+        assert_eq!(
+            standard_shanten_with_fixed_melds(&counts_of(&concealed), fixed_count(1)),
+            -1
+        );
+    }
+
+    #[test]
+    fn fixed_chi_leaves_three_concealed_melds() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Chi, &["1p", "2p", "3p"])];
+        let concealed = source.tiles(&[
+            "1m", "1m", "1m", "4m", "5m", "6m", "7m", "8m", "9m", "E", "E",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+        let decompositions: Vec<_> = analysis.standard_decompositions().collect();
+
+        assert_eq!(decompositions.len(), 1);
+        assert_eq!(decompositions[0].pair(), tile_type("E"));
+        assert_eq!(
+            decompositions[0].concealed_melds(),
+            [sequence("4m"), sequence("7m"), triplet("1m")]
+        );
+        assert_eq!(decompositions[0].meld_count(), 4);
+    }
+
+    #[test]
+    fn ankan_counts_as_one_fixed_meld() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Ankan, &["1m", "1m", "1m", "1m"])];
+        let concealed = source.tiles(&[
+            "2m", "3m", "4m", "5p", "6p", "7p", "7s", "8s", "9s", "E", "E",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+        let decompositions: Vec<_> = analysis.standard_decompositions().collect();
+
+        assert_eq!(fixed[0].tiles().len(), 4);
+        assert!(!fixed[0].is_open());
+        assert_eq!(fixed_meld_count(&fixed), Some(fixed_count(1)));
+        assert_eq!(decompositions.len(), 1);
+        assert_eq!(decompositions[0].fixed_meld_count(), fixed_count(1));
+        assert_eq!(decompositions[0].concealed_melds().len(), 3);
+        assert_eq!(decompositions[0].meld_count(), 4);
+        assert_eq!(decompositions[0].pair(), tile_type("E"));
+        assert_eq!(
+            calculate_shanten_with_fixed_melds(&counts_of(&concealed), fixed_count(1)).standard(),
+            -1
+        );
+    }
+
+    #[test]
+    fn chiitoitsu_needs_seven_distinct_pairs() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "9m", "9m", "1p", "1p", "E", "E",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            analysis.chiitoitsu_decomposition().map(|it| *it.pairs()),
+            Some([
+                tile_type("1m"),
+                tile_type("3m"),
+                tile_type("5m"),
+                tile_type("7m"),
+                tile_type("9m"),
+                tile_type("1p"),
+                tile_type("E"),
+            ])
+        );
+        assert_eq!(analysis.standard_decompositions().count(), 0);
+        assert_eq!(chiitoitsu_shanten(&counts_of(&concealed)), -1);
+    }
+
+    #[test]
+    fn four_of_a_kind_is_not_two_chiitoitsu_pairs() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "1m", "1m", "2m", "2m", "2m", "2m", "3m", "3m", "3m", "3m", "4m", "4m",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(analysis.chiitoitsu_decomposition(), None);
+        assert_ne!(chiitoitsu_shanten(&counts_of(&concealed)), -1);
+        assert_eq!(
+            standard_shapes(&analysis),
+            vec![
+                (
+                    tile_type("1m"),
+                    vec![
+                        sequence("1m"),
+                        sequence("1m"),
+                        sequence("2m"),
+                        sequence("2m"),
+                    ],
+                ),
+                (
+                    tile_type("4m"),
+                    vec![
+                        sequence("1m"),
+                        sequence("1m"),
+                        sequence("1m"),
+                        sequence("1m"),
+                    ],
+                ),
+                (
+                    tile_type("4m"),
+                    vec![sequence("1m"), triplet("1m"), triplet("2m"), triplet("3m"),],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn kokushi_keeps_the_pair_tile() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C", "9s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            analysis
+                .kokushi_decomposition()
+                .map(KokushiDecomposition::pair),
+            Some(tile_type("9s"))
+        );
+        assert_eq!(analysis.standard_decompositions().count(), 0);
+        assert_eq!(analysis.chiitoitsu_decomposition(), None);
+        assert_eq!(kokushi_shanten(&counts_of(&concealed)), -1);
+    }
+
+    #[test]
+    fn thirteen_orphans_without_a_pair_is_not_kokushi() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert!(!analysis.is_complete());
+        assert_eq!(kokushi_shanten(&counts_of(&concealed)), 0);
+    }
+
+    #[test]
+    fn fixed_melds_suppress_chiitoitsu_and_kokushi() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Pon, &["2p", "2p", "2p"])];
+        let chiitoitsu = source.tiles(&[
+            "1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "9m", "9m", "1p", "1p", "E", "E",
+        ]);
+        let kokushi = source.tiles(&[
+            "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C", "C",
+        ]);
+
+        let with_chiitoitsu = analyze_completed_hand(&chiitoitsu, &fixed).unwrap();
+        let with_kokushi = analyze_completed_hand(&kokushi, &fixed).unwrap();
+
+        assert_eq!(with_chiitoitsu.chiitoitsu_decomposition(), None);
+        assert!(!with_chiitoitsu.is_complete());
+        assert_eq!(with_kokushi.kokushi_decomposition(), None);
+        assert!(!with_kokushi.is_complete());
+    }
+
+    #[test]
+    fn standard_and_chiitoitsu_are_both_reported() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m", "6m", "7m", "7m",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            standard_shapes(&analysis),
+            vec![
+                (
+                    tile_type("1m"),
+                    vec![
+                        sequence("2m"),
+                        sequence("2m"),
+                        sequence("5m"),
+                        sequence("5m"),
+                    ],
+                ),
+                (
+                    tile_type("4m"),
+                    vec![
+                        sequence("1m"),
+                        sequence("1m"),
+                        sequence("5m"),
+                        sequence("5m"),
+                    ],
+                ),
+                (
+                    tile_type("7m"),
+                    vec![
+                        sequence("1m"),
+                        sequence("1m"),
+                        sequence("4m"),
+                        sequence("4m"),
+                    ],
+                ),
+            ]
+        );
+        assert!(analysis.chiitoitsu_decomposition().is_some());
+        assert_eq!(analysis.decompositions().len(), 4);
+
+        let counts = counts_of(&concealed);
+        assert_eq!(standard_shanten(&counts), -1);
+        assert_eq!(chiitoitsu_shanten(&counts), -1);
+        assert_eq!(calculate_shanten(&counts).min(), -1);
+    }
+
+    #[test]
+    fn multiple_standard_decompositions_are_all_reported() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "4m", "4m", "5m", "5m",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            standard_shapes(&analysis),
+            vec![
+                (
+                    tile_type("2m"),
+                    vec![
+                        sequence("2m"),
+                        sequence("3m"),
+                        sequence("3m"),
+                        triplet("1m"),
+                    ],
+                ),
+                (
+                    tile_type("5m"),
+                    vec![
+                        sequence("1m"),
+                        sequence("1m"),
+                        sequence("1m"),
+                        triplet("4m"),
+                    ],
+                ),
+                (
+                    tile_type("5m"),
+                    vec![
+                        sequence("2m"),
+                        sequence("2m"),
+                        sequence("2m"),
+                        triplet("1m"),
+                    ],
+                ),
+                (
+                    tile_type("5m"),
+                    vec![triplet("1m"), triplet("2m"), triplet("3m"), triplet("4m"),],
+                ),
+            ]
+        );
+        assert_eq!(standard_shanten(&counts_of(&concealed)), -1);
+    }
+
+    #[test]
+    fn decompositions_are_deduplicated() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "1m", "1m", "1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "5s", "5s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert_eq!(
+            standard_shapes(&analysis),
+            vec![(
+                tile_type("5s"),
+                vec![
+                    sequence("1m"),
+                    sequence("4p"),
+                    sequence("7p"),
+                    triplet("1m"),
+                ],
+            )]
+        );
+
+        let mut unique = analysis.decompositions().to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), analysis.decompositions().len());
+    }
+
+    #[test]
+    fn incomplete_hands_have_no_decomposition() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "3p", "5s", "7s", "9s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert!(!analysis.is_complete());
+        assert!(analysis.decompositions().is_empty());
+        assert!(calculate_shanten(&counts_of(&concealed)).min() > 0);
+    }
+
+    #[test]
+    fn tenpai_hand_has_no_decomposition() {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &[]).unwrap();
+
+        assert!(!analysis.is_complete());
+        assert_eq!(calculate_shanten(&counts_of(&concealed)).min(), 0);
+    }
+
+    #[test]
+    fn incomplete_hand_with_fixed_meld_has_no_decomposition() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Pon, &["E", "E", "E"])];
+        let concealed = source.tiles(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7m", "9m", "1p", "5s", "5s",
+        ]);
+
+        let analysis = analyze_completed_hand(&concealed, &fixed).unwrap();
+
+        assert!(!analysis.is_complete());
+        assert!(standard_shanten_with_fixed_melds(&counts_of(&concealed), fixed_count(1)) > -1);
+    }
+
+    #[test]
+    fn too_many_fixed_melds_is_rejected() {
+        let mut source = TileIdSource::new();
+        let fixed: Vec<Meld> = ["E", "S", "W", "N", "P"]
+            .iter()
+            .map(|honor| source.meld(MeldKind::Pon, &[honor, honor, honor]))
+            .collect();
+
+        assert_eq!(
+            analyze_completed_hand(&[], &fixed),
+            Err(CompletedHandError::TooManyFixedMelds(5))
+        );
+    }
+
+    #[test]
+    fn more_than_four_copies_of_one_tile_type_is_rejected() {
+        let mut source = TileIdSource::new();
+        let fixed = vec![source.meld(MeldKind::Ankan, &["1m", "1m", "1m", "1m"])];
+        let concealed = source.tiles(&["2m", "3m", "4m", "5p", "6p", "7p", "7s", "8s", "9s", "E"]);
+        let concealed = [concealed, vec![TileId::new(0).unwrap()]].concat();
+
+        assert_eq!(
+            analyze_completed_hand(&concealed, &fixed),
+            Err(CompletedHandError::TileCount(TileCountError::Overflow(
+                tile_type("1m")
+            )))
+        );
+    }
+}

@@ -1,9 +1,11 @@
 pub mod acceptance;
+pub mod completed_hand;
 pub mod discard;
 pub mod furiten;
 pub mod hand;
 pub mod iishanten;
 pub mod lookahead;
+pub mod meld;
 pub mod selection;
 pub mod shanten;
 pub mod tile;
@@ -14,6 +16,10 @@ pub use acceptance::{
     calculate_acceptance_with_fixed_melds, calculate_acceptance_with_fixed_melds_and_visible_tiles,
     calculate_acceptance_with_visible_tiles, structural_acceptance_tile_types,
     structural_acceptance_tile_types_with_fixed_melds,
+};
+pub use completed_hand::{
+    ChiitoitsuDecomposition, CompletedHandAnalysis, CompletedHandDecomposition, CompletedHandError,
+    ConcealedMeld, KokushiDecomposition, StandardDecomposition, analyze_completed_hand,
 };
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
@@ -54,6 +60,7 @@ pub use lookahead::{
     forward_metrics_with_fixed_melds_and_visible_tiles, tenpai_wait_metrics_from_lookahead,
     tenpai_wait_metrics_with_fixed_melds, tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
 };
+pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     WeightedForwardMetric, best_discard_selection_index,
