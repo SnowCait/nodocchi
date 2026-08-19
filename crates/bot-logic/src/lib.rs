@@ -1,4 +1,5 @@
 pub mod acceptance;
+pub mod bonus_han;
 pub mod completed_hand;
 pub mod discard;
 pub mod fu;
@@ -25,6 +26,7 @@ pub use acceptance::{
     calculate_acceptance_with_visible_tiles, structural_acceptance_tile_types,
     structural_acceptance_tile_types_with_fixed_melds,
 };
+pub use bonus_han::{BonusHanBreakdown, UraDoraHan, evaluate_bonus_han};
 pub use completed_hand::{
     ChiitoitsuDecomposition, CompletedHandAnalysis, CompletedHandDecomposition, CompletedHandError,
     ConcealedMeld, KokushiDecomposition, StandardDecomposition, analyze_completed_hand,
