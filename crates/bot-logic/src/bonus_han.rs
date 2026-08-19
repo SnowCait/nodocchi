@@ -43,14 +43,14 @@ impl BonusHanBreakdown {
         self.ura_dora
     }
 
-    pub fn known_bonus_han(self) -> u8 {
+    pub fn non_ura_bonus_han(self) -> u8 {
         self.indicated_dora + self.aka_dora
     }
 
     pub fn bonus_han_total(self) -> Option<u8> {
         self.ura_dora
             .han()
-            .map(|ura_dora| self.known_bonus_han() + ura_dora)
+            .map(|ura_dora| self.non_ura_bonus_han() + ura_dora)
     }
 }
 
@@ -58,7 +58,7 @@ pub fn evaluate_bonus_han(
     analysis: &CompletedHandAnalysis,
     context: WinningContext,
     dora_indicators: &[TileId],
-    ura_dora_indicators: &[TileId],
+    ura_dora_indicators: Option<&[TileId]>,
 ) -> BonusHanBreakdown {
     BonusHanBreakdown {
         indicated_dora: indicated_dora_han(analysis, dora_indicators),
@@ -70,10 +70,13 @@ pub fn evaluate_bonus_han(
 fn ura_dora_han(
     analysis: &CompletedHandAnalysis,
     context: WinningContext,
-    ura_dora_indicators: &[TileId],
+    ura_dora_indicators: Option<&[TileId]>,
 ) -> UraDoraHan {
     match context.riichi().is_declared() {
-        Some(true) => UraDoraHan::Known(indicated_dora_han(analysis, ura_dora_indicators)),
+        Some(true) => match ura_dora_indicators {
+            Some(indicators) => UraDoraHan::Known(indicated_dora_han(analysis, indicators)),
+            None => UraDoraHan::Unknown,
+        },
         Some(false) => UraDoraHan::Ineligible,
         None => UraDoraHan::Unknown,
     }
@@ -167,15 +170,20 @@ mod tests {
             &mut self,
             context: WinningContext,
             dora: &[&str],
-            ura: &[&str],
+            ura: Option<&[&str]>,
         ) -> BonusHanBreakdown {
             let dora_indicators = self.indicators(dora);
-            let ura_indicators = self.indicators(ura);
-            evaluate_bonus_han(&self.analysis, context, &dora_indicators, &ura_indicators)
+            let ura_indicators = ura.map(|ura| self.indicators(ura));
+            evaluate_bonus_han(
+                &self.analysis,
+                context,
+                &dora_indicators,
+                ura_indicators.as_deref(),
+            )
         }
 
         fn dora_han(&mut self, dora: &[&str]) -> BonusHanBreakdown {
-            self.bonus_han(ron(), dora, &[])
+            self.bonus_han(ron(), dora, None)
         }
     }
 
@@ -301,7 +309,7 @@ mod tests {
 
         assert_eq!(breakdown.indicated_dora(), 1);
         assert_eq!(breakdown.aka_dora(), 1);
-        assert_eq!(breakdown.known_bonus_han(), 2);
+        assert_eq!(breakdown.non_ura_bonus_han(), 2);
     }
 
     #[test]
@@ -359,11 +367,11 @@ mod tests {
         let mut hand = pinfu_hand();
         let context = ron().with_riichi(RiichiStatus::Riichi);
 
-        let breakdown = hand.bonus_han(context, &["4m"], &["8s"]);
+        let breakdown = hand.bonus_han(context, &["4m"], Some(&["8s"]));
 
         assert_eq!(breakdown.indicated_dora(), 1);
         assert_eq!(breakdown.ura_dora(), UraDoraHan::Known(2));
-        assert_eq!(breakdown.known_bonus_han(), 1);
+        assert_eq!(breakdown.non_ura_bonus_han(), 1);
         assert_eq!(breakdown.bonus_han_total(), Some(3));
     }
 
@@ -373,21 +381,63 @@ mod tests {
         let context = ron().with_riichi(RiichiStatus::DoubleRiichi);
 
         assert_eq!(
-            hand.bonus_han(context, &[], &["8s"]).ura_dora(),
+            hand.bonus_han(context, &[], Some(&["8s"])).ura_dora(),
             UraDoraHan::Known(2)
         );
     }
 
     #[test]
-    fn riichi_without_ura_indicators_has_known_zero_ura_dora() {
+    fn riichi_with_known_empty_ura_indicators_has_zero_ura_dora() {
         let mut hand = pinfu_hand();
         let context = ron().with_riichi(RiichiStatus::Riichi);
 
-        let breakdown = hand.bonus_han(context, &["4m"], &[]);
+        let breakdown = hand.bonus_han(context, &["4m"], Some(&[]));
 
         assert_eq!(breakdown.ura_dora(), UraDoraHan::Known(0));
         assert_eq!(breakdown.ura_dora().han(), Some(0));
         assert_eq!(breakdown.bonus_han_total(), Some(1));
+    }
+
+    #[test]
+    fn riichi_with_unobserved_ura_indicators_leaves_ura_dora_unknown() {
+        let mut hand = pinfu_hand();
+        let context = ron().with_riichi(RiichiStatus::Riichi);
+
+        let breakdown = hand.bonus_han(context, &["4m"], None);
+
+        assert_eq!(breakdown.ura_dora(), UraDoraHan::Unknown);
+        assert_eq!(breakdown.non_ura_bonus_han(), 1);
+        assert_eq!(breakdown.bonus_han_total(), None);
+    }
+
+    #[test]
+    fn double_riichi_with_unobserved_ura_indicators_leaves_ura_dora_unknown() {
+        let mut hand = pinfu_hand();
+        let context = ron().with_riichi(RiichiStatus::DoubleRiichi);
+
+        assert_eq!(
+            hand.bonus_han(context, &["4m"], None).ura_dora(),
+            UraDoraHan::Unknown
+        );
+    }
+
+    #[test]
+    fn known_empty_ura_indicators_are_not_unobserved_ura_indicators() {
+        let mut known_empty = pinfu_hand();
+        let mut unobserved = pinfu_hand();
+        let context = ron().with_riichi(RiichiStatus::Riichi);
+
+        let known_empty = known_empty.bonus_han(context, &["4m"], Some(&[]));
+        let unobserved = unobserved.bonus_han(context, &["4m"], None);
+
+        assert_eq!(known_empty.ura_dora(), UraDoraHan::Known(0));
+        assert_eq!(unobserved.ura_dora(), UraDoraHan::Unknown);
+        assert_eq!(known_empty.bonus_han_total(), Some(1));
+        assert_eq!(unobserved.bonus_han_total(), None);
+        assert_eq!(
+            known_empty.non_ura_bonus_han(),
+            unobserved.non_ura_bonus_han()
+        );
     }
 
     #[test]
@@ -400,7 +450,7 @@ mod tests {
         );
         let context = ron().with_riichi(RiichiStatus::NotDeclared);
 
-        let breakdown = hand.bonus_han(context, &["4m"], &["8s"]);
+        let breakdown = hand.bonus_han(context, &["4m"], Some(&["8s"]));
 
         assert_eq!(breakdown.ura_dora(), UraDoraHan::Ineligible);
         assert_eq!(breakdown.ura_dora().han(), Some(0));
@@ -410,14 +460,35 @@ mod tests {
     }
 
     #[test]
+    fn not_declared_with_unobserved_ura_indicators_has_no_ura_dora() {
+        let mut hand = pinfu_hand();
+        let context = ron().with_riichi(RiichiStatus::NotDeclared);
+
+        let breakdown = hand.bonus_han(context, &["4m"], None);
+
+        assert_eq!(breakdown.ura_dora(), UraDoraHan::Ineligible);
+        assert_eq!(breakdown.bonus_han_total(), Some(1));
+    }
+
+    #[test]
     fn unknown_riichi_leaves_ura_dora_unknown() {
         let mut hand = pinfu_hand();
 
-        let breakdown = hand.bonus_han(ron(), &["4m"], &["8s"]);
+        let breakdown = hand.bonus_han(ron(), &["4m"], None);
 
         assert_eq!(breakdown.ura_dora(), UraDoraHan::Unknown);
         assert!(breakdown.ura_dora().is_unknown());
         assert_eq!(breakdown.ura_dora().han(), None);
+        assert_eq!(breakdown.bonus_han_total(), None);
+    }
+
+    #[test]
+    fn unknown_riichi_does_not_infer_riichi_from_ura_indicators() {
+        let mut hand = pinfu_hand();
+
+        let breakdown = hand.bonus_han(ron(), &["4m"], Some(&["8s"]));
+
+        assert_eq!(breakdown.ura_dora(), UraDoraHan::Unknown);
         assert_eq!(breakdown.bonus_han_total(), None);
     }
 
@@ -427,16 +498,19 @@ mod tests {
         let mut not_declared = pinfu_hand();
         let context = ron().with_riichi(RiichiStatus::NotDeclared);
 
-        let unknown = unknown.bonus_han(ron(), &["4m"], &["8s"]);
-        let not_declared = not_declared.bonus_han(context, &["4m"], &["8s"]);
+        let unknown = unknown.bonus_han(ron(), &["4m"], Some(&["8s"]));
+        let not_declared = not_declared.bonus_han(context, &["4m"], Some(&["8s"]));
 
         assert_ne!(unknown.ura_dora(), not_declared.ura_dora());
         assert_ne!(unknown.bonus_han_total(), not_declared.bonus_han_total());
-        assert_eq!(unknown.known_bonus_han(), not_declared.known_bonus_han());
+        assert_eq!(
+            unknown.non_ura_bonus_han(),
+            not_declared.non_ura_bonus_han()
+        );
     }
 
     #[test]
-    fn unknown_riichi_keeps_known_bonus_han() {
+    fn unknown_riichi_keeps_non_ura_bonus_han() {
         let mut hand = Hand::new(
             &[
                 "2m", "3m", "4m", "5mr", "6m", "7m", "3p", "4p", "5p", "6s", "7s", "8s", "9s", "9s",
@@ -444,10 +518,29 @@ mod tests {
             &[],
         );
 
-        let breakdown = hand.bonus_han(ron(), &["4m"], &["8s"]);
+        let breakdown = hand.bonus_han(ron(), &["4m"], None);
 
-        assert_eq!(breakdown.known_bonus_han(), 2);
+        assert_eq!(breakdown.non_ura_bonus_han(), 2);
         assert_eq!(breakdown.bonus_han_total(), None);
+    }
+
+    #[test]
+    fn non_ura_bonus_han_excludes_known_ura_dora() {
+        let mut hand = Hand::new(
+            &[
+                "2m", "3m", "4m", "5mr", "6m", "7m", "3p", "4p", "5p", "6s", "7s", "8s", "9s", "9s",
+            ],
+            &[],
+        );
+        let context = ron().with_riichi(RiichiStatus::Riichi);
+
+        let breakdown = hand.bonus_han(context, &["4m"], Some(&["8s"]));
+
+        assert_eq!(breakdown.indicated_dora(), 1);
+        assert_eq!(breakdown.aka_dora(), 1);
+        assert_eq!(breakdown.ura_dora(), UraDoraHan::Known(2));
+        assert_eq!(breakdown.non_ura_bonus_han(), 2);
+        assert_eq!(breakdown.bonus_han_total(), Some(4));
     }
 
     #[test]
@@ -463,7 +556,7 @@ mod tests {
 
         assert_eq!(breakdown.indicated_dora(), 3);
         assert_eq!(breakdown.aka_dora(), 1);
-        assert_eq!(breakdown.known_bonus_han(), 4);
+        assert_eq!(breakdown.non_ura_bonus_han(), 4);
 
         let yaku: Vec<usize> = evaluate_winning_yaku(&hand.analysis, ron(), tile_type("9s"))
             .iter()
@@ -503,8 +596,18 @@ mod tests {
         let dora_indicators = hand.indicators(&["4m"]);
         let ura_indicators = hand.indicators(&["8s"]);
 
-        let first = evaluate_bonus_han(&hand.analysis, context, &dora_indicators, &ura_indicators);
-        let second = evaluate_bonus_han(&hand.analysis, context, &dora_indicators, &ura_indicators);
+        let first = evaluate_bonus_han(
+            &hand.analysis,
+            context,
+            &dora_indicators,
+            Some(&ura_indicators),
+        );
+        let second = evaluate_bonus_han(
+            &hand.analysis,
+            context,
+            &dora_indicators,
+            Some(&ura_indicators),
+        );
 
         assert_eq!(first, second);
         assert_eq!(first.bonus_han_total(), second.bonus_han_total());
