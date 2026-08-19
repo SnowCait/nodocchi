@@ -1,6 +1,6 @@
 # 手牌評価
 
-将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。翻数や点数はまだ扱いません。
+将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。そのうえで、通常役とは別型の `Yakuman` として named 役満の成立事実だけを同じ単位で判定します。翻数や点数はまだ扱いません。
 
 ## 実装済みと未実装
 
@@ -26,15 +26,30 @@
 - decomposition × interpretation ごとの Yaku 判定 (`evaluate_winning_yaku()`)
 - 平和
 - 三暗刻
+- 通常 `Yaku` と分離した named 役満の成立事実 (`Yakuman`)
+- decomposition ごとの structural 役満判定 (`evaluate_yakuman()`)
+- decomposition × interpretation ごとの役満判定 (`evaluate_winning_yakuman()`)
+- 国士無双 (`KokushiMusou`)
+- 九蓮宝燈 (`ChuurenPoutou`)
+- 緑一色 (`Ryuuiisou`)
+- 四暗刻 (`Suuankou`)
+- 四槓子 (`Suukantsu`)
+- 清老頭 (`Chinroutou`)
+- 字一色 (`Tsuuiisou`)
+- 大三元 (`Daisangen`)
+- 小四喜 (`Shousuushii`)
+- 大四喜 (`Daisuushii`)
 
 未実装:
 
 - 和了牌が不明な場合の完全な scoring policy
-- 人和
-- 役満
+- 天和 / 地和
+- 人和の特殊 scoring
+- 責任払い (包)
 - 翻数集計
 - 符計算
-- 点数計算
+- ドラの点数化
+- 確定した点数
 - 確定した `HandValue`
 
 役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) ([WRC Rules 2025 PDF](https://static1.squarespace.com/static/634a7884c297a25f06589b79/t/6834d67360e19c1da6c0d12c/1748293243651/WRC+Rules+2025.pdf) の `11.5 Yaku list`) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
@@ -134,13 +149,13 @@ for evaluation in evaluate_structural_yaku(&analysis) {
 - `Junchan` が成立する分解へ `Chanta` を付けません。字牌を含まない手は `Junchan` だけになります。
 - `Chinitsu` が成立する分解へ `Honitsu` を付けません。字牌だけの手はどちらにもなりません。
 
-役満は未実装です。将来の役満評価と二重にならないよう、境界を次のように固定しています。
+役満は `Yaku` へ混ぜず、別型の `Yakuman` として [役満](#役満) で判定します。両者が二重にならないよう、境界を次のように固定しています。
 
 - `Sankantsu` は槓子がちょうど3つのときだけ成立します。4槓子は `Suukantsu` へ残します。
 - `Shousangen` は三元牌2種が刻子 / 槓子で残り1種が雀頭のときだけ成立します。三元牌3種が刻子の `Daisangen` 形では成立しません。
 - `CompletedHandDecomposition::Kokushi` は structural Yaku の対象外で、常に空の役集合を返します。
 
-そのため、この評価器が返す空の役集合を「この手には役がない」と解釈する production policy へまだ使えません。和了牌に依存する役と役満が入るまでは pure な基盤としてだけ使い、`act()` / `diagnose()` の行動選択へは接続しません。各分解の役一覧は sort と dedup 済みで deterministic です。
+そのため、この評価器が返す空の役集合を「この手には役がない」と解釈する production policy へまだ使えません。和了牌に依存する役と役満は別 API が返すため、この評価器は pure な基盤としてだけ使い、`act()` / `diagnose()` の行動選択へは接続しません。各分解の役一覧は sort と dedup 済みで deterministic です。
 
 ## 和了時 context
 
@@ -256,7 +271,7 @@ WRC Rules 2025 `11.5.1 One han yaku` では、`Haitei` は live wall の最後�
 
 - `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため、`evaluate_yaku()` へは入れません。同じ分解でも和了牌の placement で結果が変わるため、`YakuEvaluation` へ和了牌を optional field として足さず、後述の [decomposition × interpretation ごとの Yaku](#decomposition--interpretation-ごとの-yaku) を別の層として持ちます。
 - `Renhou` は WRC では5翻相当ですが、他の役やドラと複合しない特殊な scoring semantics を持つため、この cumulative な役 layer へ入れません。
-- 役満は引き続き未実装です。
+- 役満は `Yaku` へ足さず、別型の `Yakuman` として [役満](#役満) で判定します。
 - 翻数は引き続き `Yaku` に持たせません。`Riichi = 1` / `DoubleRiichi = 2` のような換算と食い下がりは後続の翻数 layer の責務です。通常ドラ / 裏ドラ / 赤ドラも役ではないため `Yaku` に入れません。
 
 ## 和了牌の解釈
@@ -488,19 +503,170 @@ WRC Rules 2025 では、和了牌が刻子を完成させた場合、自摸な�
 
 #### `Suuankou` との境界
 
-役満は引き続き未実装です。`Sankantsu` が槓子ちょうど3つで `Suukantsu` を残しているのと同じく、`Sanankou` も和了後の concealed set がちょうど3のときだけ成立します。
+`Sankantsu` が槓子ちょうど3つで `Suukantsu` を残しているのと同じく、`Sanankou` も和了後の concealed set がちょうど3のときだけ成立します。
 
 | 形 | concealed set | 結果 |
 | --- | --- | --- |
-| 暗刻4つを自摸 | 4 | `Sanankou` なし (将来の `Suuankou`) |
-| 暗刻4つで雀頭をロン | 4 | `Sanankou` なし (将来の `Suuankou`) |
+| 暗刻4つを自摸 | 4 | `Sanankou` なし (`Yakuman::Suuankou`) |
+| 暗刻4つで雀頭をロン | 4 | `Sanankou` なし (`Yakuman::Suuankou`) |
 | 4刻子形でそのうち1つをロンで完成 | 3 | `Sanankou` |
 
-`Suuankou` 自体はまだ追加しません。
+`Suuankou` 自体は通常 `Yaku` ではなく [役満](#役満) 側で判定します。
 
 ### production policy へは接続しない
 
 この評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役評価を新しく構築しません。診断表示のために役判定を再実装することもしません。検証は `bot-logic` の unit test を中心に行います。
+
+## 役満
+
+named 役満は通常役と別の型 `Yakuman` で表します。`Yaku` enum へ役満 variant を足しません。後続 layer の扱いが3つとも異なるためです。
+
+```text
+通常 Yaku → 翻数集計
+Yakuman   → 役満 / limit-hand scoring
+ドラ      → bonus 翻
+```
+
+`Yakuman` は「その役満が成立している」という事実だけを表します。点数・倍率・親子の支払いを持たず、`value()` / `multiplier()` / `points()` のような API も持ちません。
+
+```rust
+pub enum Yakuman {
+    KokushiMusou,
+    ChuurenPoutou,
+    Ryuuiisou,
+    Suuankou,
+    Suukantsu,
+    Chinroutou,
+    Tsuuiisou,
+    Daisangen,
+    Shousuushii,
+    Daisuushii,
+}
+```
+
+### decomposition ごとの structural 役満
+
+`evaluate_yakuman(&analysis)` は `CompletedHandAnalysis` だけを入力に取り、和了牌と `WinMethod` がなくても確定する役満を分解ごとに返します。返却順と個数は `CompletedHandAnalysis::decompositions()` と一致します。
+
+```rust
+let analysis = analyze_completed_hand(&concealed_tiles, &fixed_melds)?;
+for evaluation in evaluate_yakuman(&analysis) {
+    let decomposition = evaluation.decomposition();
+    let yakuman = evaluation.yakuman();
+}
+```
+
+通常役と同じく analysis 全体へ役満を union しません。牌構成だけで決まる役満が複数の分解すべてで成立する場合は、それぞれの分解が同じ事実を持ちます。どの解釈を採用するかは後続の `HandValue` layer の責務です。
+
+### decomposition × interpretation ごとの役満
+
+`Suuankou` だけは分解・和了牌の placement・`WinMethod` の3つがそろって初めて確定します。既存 `evaluate_winning_yaku()` と同じ責務分離で、`evaluate_winning_yakuman(&analysis, context, winning_tile)` を別 API にします。
+
+```rust
+for evaluation in evaluate_winning_yakuman(&analysis, context, winning_tile) {
+    let interpretation = evaluation.interpretation();
+    let yakuman = evaluation.yakuman();
+}
+```
+
+この API は `evaluate_yakuman()` と `interpret_winning_tile()` を組み合わせるだけです。各解釈へ同じ分解の structural 役満をそのまま引き継ぎ、解釈依存の役満だけを足してから sort + dedup します。`Suuankou` のために structural 役満を再判定しません。`WinningYakumanEvaluation` は `WinningTileInterpretation` と役満一覧だけを持ち、和了牌 / `WinningGroup` / `WaitType` / 分解を複製しません。
+
+| API | 責務 |
+| --- | --- |
+| `evaluate_yakuman()` | 牌姿と面子構成だけで確定する役満 |
+| `evaluate_winning_yakuman()` | 上記 + 和了牌の placement と `WinMethod` に依存する `Suuankou` |
+
+### 成立条件
+
+| Yakuman | 判定 API | 条件 |
+| --- | --- | --- |
+| `KokushiMusou` | `evaluate_yakuman()` | `CompletedHandDecomposition::Kokushi` であること |
+| `ChuurenPoutou` | `evaluate_yakuman()` | fixed meld が1つもなく、全14牌が同一数牌スートで、1と9が3枚以上、2〜8が各1枚以上 |
+| `Ryuuiisou` | `evaluate_yakuman()` | 全牌が `2s` / `3s` / `4s` / `6s` / `8s` / 發のいずれか |
+| `Chinroutou` | `evaluate_yakuman()` | 全牌が老頭牌 (`TileType::is_terminal()`) |
+| `Tsuuiisou` | `evaluate_yakuman()` | 全牌が字牌 (`TileType::is_honor()`) |
+| `Daisangen` | `evaluate_yakuman()` | 三元牌3種すべてが刻子 / 槓子 |
+| `Shousuushii` | `evaluate_yakuman()` | 風牌の刻子 / 槓子が3種で、残り1種の風牌が雀頭 |
+| `Daisuushii` | `evaluate_yakuman()` | 風牌4種すべてが刻子 / 槓子 |
+| `Suukantsu` | `evaluate_yakuman()` | `Standard` の4面子すべてが `MeldShape::Kan` |
+| `Suuankou` | `evaluate_winning_yakuman()` | 門前かつ和了後の concealed set が4 |
+
+`Ryuuiisou` は發を必須にしません。判定は raw index ではなく `TileType::is_sou()` / `number()` / `Dragon::Green` の意味で行います。`Chinroutou` は `is_yaochu()` ではなく `is_terminal()` を使い、字牌を含む手を除外します。
+
+牌構成で決まる `ChuurenPoutou` / `Ryuuiisou` / `Chinroutou` / `Tsuuiisou` は `Standard` に限定しません。七対子の `EE SS WW NN PP FF CC` にも `Tsuuiisou` が成立します。
+
+`Daisangen` / `Shousuushii` / `Daisuushii` / `Suukantsu` は open / concealed を問いません。副露した刻子・槓子も既存 `standard_meld_shapes()` の結果として同じに数えます。
+
+### `Suuankou` のロン / 自摸の境界
+
+WRC Rules 2025 の四暗刻は暗刻 / 暗槓を4つ持ち、自摸和了か雀頭を完成させるロンで成立します。concealed set は既存 `concealed_set_count()` を再利用し、四暗刻のために暗刻数を数え直しません。ロンで刻子を完成させた解釈でその刻子が明刻になる semantics も既存のままです。
+
+| 形 | concealed set | 結果 |
+| --- | --- | --- |
+| 暗刻4つを自摸 (刻子完成) | 4 | `Suuankou` |
+| 暗刻4つを自摸 (雀頭完成) | 4 | `Suuankou` |
+| 暗刻4つで雀頭をロン | 4 | `Suuankou` |
+| 4刻子形でそのうち1つをロンで完成 | 3 | `Suuankou` なし (`Sanankou`) |
+
+`Ankan` は concealed set として数え、`Pon` / `Daiminkan` / `Kakan` は数えません。`Ankan` は門前を維持するため `is_menzen()` も満たします。
+
+### `ChuurenPoutou` と槓子の境界
+
+WRC Rules 2025 の九蓮宝燈は門前限定で、槓を宣言していると成立しません。nodocchi では Kan が fixed meld に入るため、`is_menzen()` だけでは `Ankan` を除外できません。そのため fixed meld が1つもないことを条件にします。
+
+牌構成だけで判定し、`Standard` 分解の順子 / 刻子を解析しません。`1112345678999` の基底形に同スートの余剰1枚が加わった牌構成を、既存 `TileCounts` の牌種カウントで確認します。
+
+### 特定待ちを double 役満にしない
+
+WRC Rules 2025 は特定の待ちによる double 役満を採用しません。既存 `WaitType` の structural fact はそのまま残しますが、役満の事実は1つだけです。
+
+| 待ち | Yakuman |
+| --- | --- |
+| `WaitType::KokushiSingle` | `KokushiMusou` 1つ |
+| `WaitType::KokushiThirteenSided` | `KokushiMusou` 1つ |
+| 四暗刻単騎 (雀頭のロン) | `Suuankou` 1つ |
+| 純正九蓮相当の待ち | `ChuurenPoutou` 1つ |
+
+`KokushiMusouThirteenSided` / `SuuankouTanki` / `DoubleSuuankou` のような variant を作りません。`Daisuushii` も特定待ちで2倍にしません。
+
+13翻以上の非役満手 (counted yakuman) は WRC では scoring limit 側の扱いで、named 役満ではありません。`KazoeYakuman` variant を `Yakuman` へ入れません。
+
+### 複数の役満を1つに絞らない
+
+WRC Rules 2025 では異なる役満が複数成立した場合、複合役満として数えます。そのため評価器は「最も強そうな役満を1つ選ぶ」実装にせず、同じ分解 / 解釈で成立した事実をすべて保持します。
+
+```text
+EEE SSS WWW NNN PP を自摸
+  ↓ 同じ解釈
+Suuankou + Tsuuiisou + Daisuushii
+```
+
+複合時の最終点数はまだ計算しません。この層の出力は `decomposition` / `interpretation` と `Vec<Yakuman>` までです。
+
+`Daisuushii` が成立する分解へ `Shousuushii` を同時に付けません。上位下位が重なる組み合わせは判定時点で排他にします。
+
+### 通常役との関係
+
+役満が成立しても既存 `evaluate_yaku()` / `evaluate_winning_yaku()` の通常役を削除・抑制しません。役満手でも `Toitoi` / 役牌 / `MenzenTsumo` などの通常役の事実がそのまま返ります。「named 役満が1つ以上なら通常翻とドラを加算しない」といった最終ルールは後続の `HandValue` / scoring layer の責務です。役満 layer と通常役 layer を相互依存させません。
+
+### 不正な fixed meld
+
+`CompletedHandAnalysis` は fixed meld の構造を完全には検証しません。既存役と同じく `Meld::shape()` と `standard_meld_shapes()` を検証の source of truth にします。不正な fixed meld を含む `Standard` 分解には役満を付けません。牌構成だけで決まる役満も同様で、「面子構成は不正だが牌構成が合っていたので役満」という不整合を作りません。`Chiitoitsu` / `Kokushi` は設計上 fixed meld を持たないため、同じ検証を重複させません。
+
+### 決定的な結果
+
+各 evaluation の `Vec<Yakuman>` は sort + dedup 済みで deterministic です。ただし役満一覧が同じという理由で異なる分解 / 解釈を dedup しません。候補の identity は既存 `CompletedHandDecomposition` と `WinningTileInterpretation` が source of truth です。
+
+### まだ入れない役満と scoring
+
+- `Tenhou` / `Chiihou` は入れません。現在の `WinningContext` には、配牌時の親の自摸和了か、子の第一自摸か、それ以前に鳴きや暗槓が発生したかを確定できる事実がありません。`seat_wind == East` かつ自摸だけで `Tenhou` と推測せず、非親の自摸だけで `Chiihou` と推測しません。first-turn / 中断履歴を tri-state の事実として設計してから実装します。
+- `Renhou` は WRC では5翻役で、他の役やドラと複合しない特殊な scoring semantics を持ちます。役満ではないため `Yakuman` へ入れず、`Yaku` へも安易に足さず、後続の特殊 scoring layer で扱います。
+- 責任払い (包) は入れません。WRC では `Daisangen` / `Daisuushii` / `Suukantsu` に責任払いが関係する場合がありますが、成立した役満そのものと支払い責任は別責務です。誰が最後の面子 / 槓を鳴かせたかを推測・追跡しません。
+- 役満の点数、親 / 子の支払い、複合役満の最終点数、翻数、符、ドラ、確定した `HandValue` はまだ実装しません。
+
+### production policy へは接続しない
+
+役満評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役満評価を新しく構築しません。診断表示のために役満判定を別実装することもしません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 向聴数との関係
 
