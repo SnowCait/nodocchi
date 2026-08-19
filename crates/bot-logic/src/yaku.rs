@@ -201,8 +201,8 @@ fn last_live_tile_yaku(context: WinningContext) -> Option<Yaku> {
         return None;
     }
     match context.win_method() {
-        WinMethod::Tsumo => (context.rinshan() != Some(true)).then_some(Yaku::Haitei),
-        WinMethod::Ron => Some(Yaku::Houtei),
+        WinMethod::Tsumo => (context.rinshan() == Some(false)).then_some(Yaku::Haitei),
+        WinMethod::Ron => (context.chankan() == Some(false)).then_some(Yaku::Houtei),
     }
 }
 
@@ -1494,17 +1494,22 @@ mod tests {
 
     #[test]
     fn haitei_needs_the_last_live_tile_drawn_by_self() {
-        for rinshan in [None, Some(false)] {
-            let context = tsumo_context()
-                .with_rinshan(rinshan)
-                .with_remaining_live_tiles(Some(0));
+        let context = tsumo_context()
+            .with_rinshan(Some(false))
+            .with_remaining_live_tiles(Some(0));
 
-            assert_eq!(
-                menzen_tanyao_yaku(context),
-                [Yaku::Tanyao, Yaku::MenzenTsumo, Yaku::Haitei],
-                "rinshan: {rinshan:?}"
-            );
-        }
+        assert_eq!(
+            menzen_tanyao_yaku(context),
+            [Yaku::Tanyao, Yaku::MenzenTsumo, Yaku::Haitei]
+        );
+    }
+
+    #[test]
+    fn unknown_rinshan_is_not_a_confirmed_haitei() {
+        let yaku = menzen_tanyao_yaku(tsumo_context().with_remaining_live_tiles(Some(0)));
+
+        assert_eq!(yaku, [Yaku::Tanyao, Yaku::MenzenTsumo]);
+        assert!(!yaku.contains(&Yaku::Haitei));
     }
 
     #[test]
@@ -1520,12 +1525,54 @@ mod tests {
 
     #[test]
     fn houtei_needs_a_ron_on_the_last_discard() {
-        let ron = menzen_tanyao_yaku(ron_context().with_remaining_live_tiles(Some(0)));
+        let ron = menzen_tanyao_yaku(
+            ron_context()
+                .with_chankan(Some(false))
+                .with_remaining_live_tiles(Some(0)),
+        );
         assert_eq!(ron, [Yaku::Tanyao, Yaku::Houtei]);
 
-        let tsumo = menzen_tanyao_yaku(tsumo_context().with_remaining_live_tiles(Some(0)));
+        let tsumo = menzen_tanyao_yaku(
+            tsumo_context()
+                .with_rinshan(Some(false))
+                .with_remaining_live_tiles(Some(0)),
+        );
         assert!(!tsumo.contains(&Yaku::Houtei));
         assert!(tsumo.contains(&Yaku::Haitei));
+    }
+
+    #[test]
+    fn unknown_chankan_is_not_a_confirmed_houtei() {
+        let yaku = menzen_tanyao_yaku(ron_context().with_remaining_live_tiles(Some(0)));
+
+        assert_eq!(yaku, [Yaku::Tanyao]);
+        assert!(!yaku.contains(&Yaku::Houtei));
+    }
+
+    #[test]
+    fn chankan_and_houtei_are_exclusive() {
+        let context = ron_context()
+            .with_chankan(Some(true))
+            .with_remaining_live_tiles(Some(0));
+        let yaku = menzen_tanyao_yaku(context);
+
+        assert!(yaku.contains(&Yaku::Chankan));
+        assert!(!yaku.contains(&Yaku::Houtei));
+    }
+
+    #[test]
+    fn houtei_does_not_look_at_the_rinshan_fact() {
+        for rinshan in [None, Some(false), Some(true)] {
+            let context = ron_context()
+                .with_chankan(Some(false))
+                .with_rinshan(rinshan)
+                .with_remaining_live_tiles(Some(0));
+
+            assert!(
+                menzen_tanyao_yaku(context).contains(&Yaku::Houtei),
+                "rinshan: {rinshan:?}"
+            );
+        }
     }
 
     #[test]
@@ -1539,11 +1586,13 @@ mod tests {
         for context in [
             ron_context().with_remaining_live_tiles(None),
             tsumo_context().with_remaining_live_tiles(None),
+            ron_context().with_remaining_live_tiles(Some(0)),
+            tsumo_context().with_remaining_live_tiles(Some(0)),
         ] {
             let yaku = menzen_tanyao_yaku(context);
 
-            assert!(!yaku.contains(&Yaku::Haitei));
-            assert!(!yaku.contains(&Yaku::Houtei));
+            assert!(!yaku.contains(&Yaku::Haitei), "context: {context:?}");
+            assert!(!yaku.contains(&Yaku::Houtei), "context: {context:?}");
         }
 
         let unknown_events = menzen_tanyao_yaku(
@@ -1672,6 +1721,7 @@ mod tests {
         let context = wind_context(Some("E"), Some("E"))
             .with_riichi(RiichiStatus::DoubleRiichi)
             .with_ippatsu(Some(true))
+            .with_chankan(Some(false))
             .with_remaining_live_tiles(Some(0));
         let evaluations = evaluate_yaku(&analysis, context);
 

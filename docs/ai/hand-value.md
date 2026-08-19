@@ -30,7 +30,7 @@
 - 符計算
 - 点数計算
 
-役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
+役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) ([WRC Rules 2025 PDF](https://static1.squarespace.com/static/634a7884c297a25f06589b79/t/6834d67360e19c1da6c0d12c/1748293243651/WRC+Rules+2025.pdf) の `11.5 Yaku list`) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
 
 ## 入力と出力
 
@@ -214,14 +214,27 @@ structural Yaku を再判定せず、`evaluate_structural_yaku()` の結果へ�
 | `MenzenTsumo` | 門前かつ `win_method == Tsumo` |
 | `Chankan` | `win_method == Ron` かつ `chankan == Some(true)` |
 | `RinshanKaihou` | `win_method == Tsumo` かつ `rinshan == Some(true)` |
-| `Haitei` | `win_method == Tsumo` かつ `remaining_live_tiles == Some(0)` かつ `rinshan != Some(true)` |
-| `Houtei` | `win_method == Ron` かつ `remaining_live_tiles == Some(0)` |
+| `Haitei` | `win_method == Tsumo` かつ `remaining_live_tiles == Some(0)` かつ `rinshan == Some(false)` |
+| `Houtei` | `win_method == Ron` かつ `remaining_live_tiles == Some(0)` かつ `chankan == Some(false)` |
 
 門前判定は既存 `is_menzen()` が source of truth です。`Ankan` は門前を維持するため、暗槓だけの手でも `Riichi` / `MenzenTsumo` が成立します。副露手では context がリーチを示していても `Riichi` / `DoubleRiichi` / `Ippatsu` を付けません。
 
 「最初の打牌だったか」「リーチ後に鳴きや槓が入っていないか」「他家が加槓したか」は評価器が河や meld から再構築しません。すべて `WinningContext` の事実を source of truth にします。
 
-`RinshanKaihou` は自摸和了なので、門前なら `MenzenTsumo` と同時に成立します。`Houtei` は最後の wall tile が live wall / dead wall のどちらから引かれたかに関わらず、`Ron` かつ残りツモ可能牌がない場合に成立します。
+`RinshanKaihou` は自摸和了なので、門前なら `MenzenTsumo` と同時に成立します。
+
+### 最後の牌の出所 (`Haitei` / `Houtei`)
+
+WRC Rules 2025 `11.5.1 One han yaku` では、`Haitei` は live wall の最後の牌を自摸しての和了です。その最後の牌が槓の replacement tile なら `RinshanKaihou` だけが成立し `Haitei` は付きません。`Houtei` は wall の最終牌が引かれた後に捨てられた牌をロンした和了です。`Chankan` は加槓に使われた牌をロンする特殊和了で、その牌は捨て牌ではありません。
+
+`remaining_live_tiles == Some(0)` は「live wall に残りツモ可能牌がない」ことしか表さず、和了牌がどこから来たかは決めません。そのため成立には牌の出所を確定する fact をもう1つ要求します。
+
+- `Haitei` は `rinshan == Some(false)`、つまり「嶺上牌での和了ではないと確認済み」を要求します。
+- `Houtei` は `chankan == Some(false)`、つまり「加槓牌のロンではないと確認済み」を要求します。
+
+どちらも `None` は unknown なので成立を推測しません。`rinshan == None` の自摸和了を `Haitei`、`chankan == None` のロンを `Houtei` と扱いません。これは `WinningContext` 全体の「unknown を `false` と推測しない」方針と同じ扱いです。
+
+`Houtei` の判定に `rinshan` は使いません。WRC Rules 2025 では最終 wall tile が live wall / dead wall のどちらから引かれたかを問わないため、replacement tile を引いた後の捨て牌をロンした場合も `Houtei` の対象になり得ます。
 
 ### 状況依存役の排他
 
@@ -229,9 +242,8 @@ structural Yaku を再判定せず、`evaluate_structural_yaku()` の結果へ�
 
 - `Riichi` と `DoubleRiichi` は `RiichiStatus` が1つの状態しか取れないため同時に立ちません。
 - `Haitei` と `RinshanKaihou` は排他です。嶺上牌は live wall の最後の牌ではないため、`rinshan == Some(true)` の自摸和了へ `Haitei` を付けません。
+- `Houtei` と `Chankan` は排他です。加槓牌は捨て牌ではないため、`chankan == Some(true)` のロンへ `Houtei` を付けません。
 - `WinMethod` と矛盾する役を付けません。`Tsumo` へ `Chankan` / `Houtei` を、`Ron` へ `MenzenTsumo` / `RinshanKaihou` / `Haitei` を付けません。
-
-`rinshan` が unknown のままで `remaining_live_tiles == Some(0)` の自摸和了は `Haitei` とします。嶺上牌での和了が `Some(true)` と確認できたときだけ除外します。
 
 ### まだ入れない役
 
