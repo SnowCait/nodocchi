@@ -696,7 +696,7 @@ for evaluation in evaluate_winning_yaku_han(&analysis, context, winning_tile) {
 }
 ```
 
-`evaluate_winning_yaku_han()` は `evaluate_winning_yaku()` を1回だけ呼び、その結果を翻数へ変換します。役ごとに完成手を再分解したり、`evaluate_yaku()` / `interpret_winning_tile()` を再実行したりしません。既に `WinningYakuEvaluation` を持っている呼び出し元は、`winning_yaku_han(&evaluation, menzen)` で同じ変換だけを行えます。
+`evaluate_winning_yaku_han()` は `evaluate_winning_yaku()` を1回だけ呼び、その結果を翻数へ変換します。役ごとに完成手を再分解したり、`evaluate_yaku()` / `interpret_winning_tile()` を再実行したりしません。この layer の public entry point はこの関数だけで、`YakuHan` は `yaku()` / `han()` で内訳を読むための型として公開します。
 
 ### 翻数
 
@@ -715,11 +715,19 @@ mapping は `Yaku` に対する exhaustive match です。wildcard fallback を�
 
 ### 成立判定を再実装しない
 
-翻数 layer は「その役が本当に成立するか」を再判定しません。`Pinfu` / `Iipeikou` / `Riichi` が門前か、`Chiitoitsu` が七対子か、`Sanankou` が暗刻3つか、`Ryanpeikou` と `Iipeikou` / `Chinitsu` と `Honitsu` / `Junchan` と `Chanta` が排他か、はすべて既存の役評価器の責務です。翻数 layer は `WinningYakuEvaluation::yaku()` に入っている事実を翻数へ変換するだけです。そのため門前限定役へ `menzen == false` を渡しても0翻へ落としません。副露手にその役が入っていないことは評価器が保証します。
+翻数 layer は「その役が本当に成立するか」を再判定しません。`Pinfu` / `Iipeikou` / `Riichi` が門前か、`Chiitoitsu` が七対子か、`Sanankou` が暗刻3つか、`Ryanpeikou` と `Iipeikou` / `Chinitsu` と `Honitsu` / `Junchan` と `Chanta` が排他か、はすべて既存の役評価器の責務です。翻数 layer は `WinningYakuEvaluation::yaku()` に入っている事実を翻数へ変換するだけです。そのため副露手として変換される場合でも、`Pinfu` / `Riichi` のような門前限定役を0翻へ落としません。副露手にその役が入っていないことは評価器が保証します。
 
 ### 門前 / 副露の source of truth
 
-食い下がりのためだけに門前 / 副露の区別が必要です。その source of truth は既存 `is_menzen(analysis.fixed_melds())` で、`fixed_meld_count == 0` のような別判定を作りません。`Ankan` は fixed meld ですが門前を維持する既存 semantics をそのまま使うため、暗槓だけを持つ手の `Ittsu` / `Honitsu` / `Chinitsu` は門前の翻数のままです。
+食い下がりのためだけに門前 / 副露の区別が必要です。その source of truth は既存 `is_menzen(analysis.fixed_melds())` で、`fixed_meld_count == 0` のような別判定を作りません。
+
+```text
+CompletedHandAnalysis
+  ↓ is_menzen(analysis.fixed_melds())
+Han mapping
+```
+
+門前性は `evaluate_winning_yaku_han()` が `CompletedHandAnalysis` から導出します。`menzen: bool` を引数に取る API を公開しないので、呼び出し側が副露手へ門前の翻数を注入したり、門前手を副露の翻数へ落としたりできません。`YakuHan::new()` と `WinningYakuEvaluation` から変換する helper は module private です。`Ankan` は fixed meld ですが門前を維持する既存 semantics をそのまま使うため、暗槓だけを持つ手の `Ittsu` / `Honitsu` / `Chinitsu` は門前の翻数のままです。
 
 ### 内訳を捨てない
 

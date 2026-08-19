@@ -13,7 +13,7 @@ pub struct YakuHan {
 }
 
 impl YakuHan {
-    pub fn new(yaku: Yaku, menzen: bool) -> Self {
+    fn new(yaku: Yaku, menzen: bool) -> Self {
         Self {
             yaku,
             han: han(yaku, menzen),
@@ -69,7 +69,7 @@ pub fn evaluate_winning_yaku_han(
         .collect()
 }
 
-pub fn winning_yaku_han<'a>(
+fn winning_yaku_han<'a>(
     evaluation: &WinningYakuEvaluation<'a>,
     menzen: bool,
 ) -> WinningYakuHanEvaluation<'a> {
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn a_yakuman_hand_gets_no_yaku_han() {
+    fn a_kokushi_hand_gets_no_yaku_han() {
         let analysis = analyze(
             &[
                 "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C", "9s",
@@ -664,15 +664,15 @@ mod tests {
     }
 
     #[test]
-    fn an_evaluation_can_be_converted_without_re_running_the_yaku_evaluator() {
+    fn the_entry_point_derives_menzen_from_the_analysis() {
         let analysis = analyze(
             &[
-                "2m", "3m", "4m", "3m", "4m", "5m", "4p", "5p", "6p", "6p", "7p", "8p", "5s", "5s",
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "E", "E",
             ],
-            &[],
+            &[(MeldKind::Pon, &["P", "P", "P"])],
         );
+        let yaku_evaluations = evaluate_winning_yaku(&analysis, ron(), tile_type("1m"));
 
-        let yaku_evaluations = evaluate_winning_yaku(&analysis, ron(), tile_type("2m"));
         let converted: Vec<WinningYakuHanEvaluation<'_>> = yaku_evaluations
             .iter()
             .map(|evaluation| winning_yaku_han(evaluation, is_menzen(analysis.fixed_melds())))
@@ -680,8 +680,15 @@ mod tests {
 
         assert_eq!(
             converted,
-            evaluate_winning_yaku_han(&analysis, ron(), tile_type("2m"))
+            evaluate_winning_yaku_han(&analysis, ron(), tile_type("1m"))
         );
-        assert_eq!(converted[0].yaku_han_total(), 2);
+        assert_eq!(converted[0].yaku_han_total(), 4);
+        assert_ne!(
+            yaku_evaluations
+                .iter()
+                .map(|evaluation| winning_yaku_han(evaluation, true))
+                .collect::<Vec<_>>(),
+            converted
+        );
     }
 }
