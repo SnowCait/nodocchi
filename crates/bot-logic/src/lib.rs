@@ -12,6 +12,7 @@ pub mod meld;
 pub mod normal_hand_scoring;
 pub mod normal_score;
 pub mod payment;
+pub mod scoring_selection;
 pub mod selection;
 pub mod shanten;
 pub mod tile;
@@ -83,6 +84,9 @@ pub use normal_hand_scoring::{
 };
 pub use normal_score::{LimitClass, NormalScoreBase, NormalScoreError, evaluate_normal_score_base};
 pub use payment::{Payment, PaymentBreakdown, PaymentError, evaluate_payment};
+pub use scoring_selection::{
+    BestScoringSelection, ScoringCandidateRef, select_best_scoring_candidate,
+};
 pub use selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     WeightedForwardMetric, best_discard_selection_index,
