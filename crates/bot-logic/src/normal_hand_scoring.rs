@@ -7,11 +7,25 @@ use crate::han::{WinningYakuHanEvaluation, YakuHan, evaluate_winning_yaku_han};
 use crate::normal_score::{NormalScoreBase, NormalScoreError, evaluate_normal_score_base};
 use crate::payment::{Payment, PaymentError, evaluate_payment};
 use crate::tile::{TileId, TileType};
-use crate::winning_context::WinningContext;
+use crate::winning_context::{WinMethod, WinningContext};
 use crate::winning_tile::WinningTileInterpretation;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MissingScoringFact {
+    RoundWind,
+    SeatWind,
+    RiichiStatus,
+    Ippatsu,
+    Rinshan,
+    Chankan,
+    RemainingLiveTiles,
+}
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum NormalScoringError {
+    #[error("the winning context is missing an exact scoring fact: {0:?}")]
+    IncompleteContext(MissingScoringFact),
+
     #[error(transparent)]
     NormalScore(#[from] NormalScoreError),
 
@@ -115,6 +129,10 @@ pub fn evaluate_normal_hand_scoring<'a>(
     ura_dora_indicators: Option<&[TileId]>,
     is_dealer: bool,
 ) -> Result<Vec<NormalScoringCandidate<'a>>, NormalScoringError> {
+    if let Some(fact) = missing_scoring_fact(context) {
+        return Err(NormalScoringError::IncompleteContext(fact));
+    }
+
     let bonus_han = evaluate_bonus_han(analysis, context, dora_indicators, ura_dora_indicators);
     let fu_evaluations = evaluate_winning_fu(analysis, context, winning_tile);
 
@@ -132,6 +150,41 @@ pub fn evaluate_normal_hand_scoring<'a>(
             ))
         })
         .collect()
+}
+
+fn missing_scoring_fact(context: WinningContext) -> Option<MissingScoringFact> {
+    if context.round_wind().is_none() {
+        return Some(MissingScoringFact::RoundWind);
+    }
+    if context.seat_wind().is_none() {
+        return Some(MissingScoringFact::SeatWind);
+    }
+
+    let Some(riichi_declared) = context.riichi().is_declared() else {
+        return Some(MissingScoringFact::RiichiStatus);
+    };
+    if riichi_declared && context.ippatsu().is_none() {
+        return Some(MissingScoringFact::Ippatsu);
+    }
+
+    let missing_win_method_fact = match context.win_method() {
+        WinMethod::Ron => context
+            .chankan()
+            .is_none()
+            .then_some(MissingScoringFact::Chankan),
+        WinMethod::Tsumo => context
+            .rinshan()
+            .is_none()
+            .then_some(MissingScoringFact::Rinshan),
+    };
+    if missing_win_method_fact.is_some() {
+        return missing_win_method_fact;
+    }
+
+    context
+        .remaining_live_tiles()
+        .is_none()
+        .then_some(MissingScoringFact::RemainingLiveTiles)
 }
 
 fn fu_breakdown<'a, 'b>(
@@ -267,12 +320,12 @@ mod tests {
             }
         }
 
-        fn candidates(
+        fn try_candidates(
             &self,
             context: WinningContext,
             winning_tile: &str,
             is_dealer: bool,
-        ) -> Vec<NormalScoringCandidate<'_>> {
+        ) -> Result<Vec<NormalScoringCandidate<'_>>, NormalScoringError> {
             evaluate_normal_hand_scoring(
                 &self.analysis,
                 context,
@@ -281,7 +334,16 @@ mod tests {
                 self.ura_dora_indicators.as_deref(),
                 is_dealer,
             )
-            .unwrap()
+        }
+
+        fn candidates(
+            &self,
+            context: WinningContext,
+            winning_tile: &str,
+            is_dealer: bool,
+        ) -> Vec<NormalScoringCandidate<'_>> {
+            self.try_candidates(context, winning_tile, is_dealer)
+                .unwrap()
         }
 
         fn only(
@@ -305,16 +367,28 @@ mod tests {
         Setup::new(concealed, &[], dora, None)
     }
 
+    fn known_context(win_method: WinMethod) -> WinningContext {
+        WinningContext::new(win_method)
+            .with_round_wind(Some(tile_type("E")))
+            .with_seat_wind(Some(tile_type("S")))
+            .with_riichi(RiichiStatus::NotDeclared)
+            .with_chankan(Some(false))
+            .with_rinshan(Some(false))
+            .with_remaining_live_tiles(Some(1))
+    }
+
     fn ron() -> WinningContext {
-        WinningContext::new(WinMethod::Ron).with_riichi(RiichiStatus::NotDeclared)
+        known_context(WinMethod::Ron)
     }
 
     fn tsumo() -> WinningContext {
-        WinningContext::new(WinMethod::Tsumo).with_riichi(RiichiStatus::NotDeclared)
+        known_context(WinMethod::Tsumo)
     }
 
     fn riichi_ron() -> WinningContext {
-        WinningContext::new(WinMethod::Ron).with_riichi(RiichiStatus::Riichi)
+        ron()
+            .with_riichi(RiichiStatus::Riichi)
+            .with_ippatsu(Some(false))
     }
 
     fn yaku(candidate: &NormalScoringCandidate<'_>) -> Vec<(Yaku, u8)> {
@@ -655,6 +729,149 @@ mod tests {
                 .all(|evaluation| evaluation.breakdown().is_none())
         );
         assert!(setup.candidates(riichi_ron(), "9s", false).is_empty());
+    }
+
+    #[test]
+    fn an_incomplete_winning_context_is_rejected_before_any_scoring() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+
+        for (context, fact) in [
+            (ron().with_round_wind(None), MissingScoringFact::RoundWind),
+            (ron().with_seat_wind(None), MissingScoringFact::SeatWind),
+            (
+                ron().with_riichi(RiichiStatus::Unknown),
+                MissingScoringFact::RiichiStatus,
+            ),
+            (riichi_ron().with_ippatsu(None), MissingScoringFact::Ippatsu),
+            (ron().with_chankan(None), MissingScoringFact::Chankan),
+            (tsumo().with_rinshan(None), MissingScoringFact::Rinshan),
+            (
+                ron().with_remaining_live_tiles(None),
+                MissingScoringFact::RemainingLiveTiles,
+            ),
+            (
+                tsumo().with_remaining_live_tiles(None),
+                MissingScoringFact::RemainingLiveTiles,
+            ),
+        ] {
+            assert_eq!(
+                setup.try_candidates(context, "2m", false),
+                Err(NormalScoringError::IncompleteContext(fact)),
+                "context: {context:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ron_does_not_need_the_rinshan_of_a_tsumo() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+
+        assert!(
+            setup
+                .try_candidates(ron().with_rinshan(None), "2m", false)
+                .is_ok()
+        );
+        assert!(
+            setup
+                .try_candidates(tsumo().with_chankan(None), "2m", false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_hand_without_riichi_does_not_need_the_ippatsu_fact() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+        let candidate = setup.only(ron().with_ippatsu(None), "2m", false);
+
+        assert_eq!(score(&candidate), (2, 30, 480, LimitClass::NoLimit, 2000));
+    }
+
+    #[test]
+    fn an_unknown_chankan_is_not_treated_as_a_confirmed_non_chankan() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+
+        assert_eq!(
+            setup.try_candidates(ron().with_chankan(None), "2m", false),
+            Err(NormalScoringError::IncompleteContext(
+                MissingScoringFact::Chankan
+            ))
+        );
+        assert_eq!(
+            score(&setup.only(ron().with_chankan(Some(false)), "2m", false)),
+            (2, 30, 480, LimitClass::NoLimit, 2000)
+        );
+        assert_eq!(
+            score(&setup.only(ron().with_chankan(Some(true)), "2m", false)),
+            (3, 30, 960, LimitClass::NoLimit, 3900)
+        );
+    }
+
+    #[test]
+    fn an_unknown_rinshan_is_not_treated_as_a_confirmed_non_rinshan() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+
+        assert_eq!(
+            setup.try_candidates(tsumo().with_rinshan(None), "2m", false),
+            Err(NormalScoringError::IncompleteContext(
+                MissingScoringFact::Rinshan
+            ))
+        );
+        assert_eq!(
+            score(&setup.only(tsumo().with_rinshan(Some(false)), "2m", false)),
+            (3, 20, 640, LimitClass::NoLimit, 2700)
+        );
+        assert_eq!(
+            score(&setup.only(tsumo().with_rinshan(Some(true)), "2m", false)),
+            (4, 20, 1280, LimitClass::NoLimit, 5200)
+        );
+    }
+
+    #[test]
+    fn unknown_remaining_live_tiles_are_not_treated_as_a_confirmed_non_houtei() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+
+        assert_eq!(
+            setup.try_candidates(ron().with_remaining_live_tiles(None), "2m", false),
+            Err(NormalScoringError::IncompleteContext(
+                MissingScoringFact::RemainingLiveTiles
+            ))
+        );
+        assert_eq!(
+            score(&setup.only(ron().with_remaining_live_tiles(Some(1)), "2m", false)),
+            (2, 30, 480, LimitClass::NoLimit, 2000)
+        );
+        assert_eq!(
+            score(&setup.only(ron().with_remaining_live_tiles(Some(0)), "2m", false)),
+            (3, 30, 960, LimitClass::NoLimit, 3900)
+        );
+    }
+
+    #[test]
+    fn known_ura_dora_does_not_complete_an_incomplete_context() {
+        let setup = Setup::new(&PINFU_TANYAO_HAND, &[], &[], Some(&[]));
+
+        assert_eq!(
+            setup.try_candidates(riichi_ron().with_ippatsu(None), "2m", false),
+            Err(NormalScoringError::IncompleteContext(
+                MissingScoringFact::Ippatsu
+            ))
+        );
+        assert_eq!(
+            score(&setup.only(riichi_ron(), "2m", false)),
+            (3, 30, 960, LimitClass::NoLimit, 3900)
+        );
+    }
+
+    #[test]
+    fn an_unknown_ura_dora_is_not_an_incomplete_context() {
+        let setup = Setup::new(&PINFU_TANYAO_HAND, &[], &[], None);
+        let candidates = setup.try_candidates(riichi_ron(), "2m", false).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].bonus_han().ura_dora(), UraDoraHan::Unknown);
+        assert_eq!(candidates[0].state(), NormalScoringState::UnknownBonusHan);
+        assert_eq!(candidates[0].yaku_han_total(), 3);
+        assert_eq!(candidates[0].fu().fu(), 30);
     }
 
     #[test]

@@ -77,7 +77,8 @@ pub use lookahead::{
 };
 pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
 pub use normal_hand_scoring::{
-    NormalScoringCandidate, NormalScoringError, NormalScoringState, evaluate_normal_hand_scoring,
+    MissingScoringFact, NormalScoringCandidate, NormalScoringError, NormalScoringState,
+    evaluate_normal_hand_scoring,
 };
 pub use normal_score::{LimitClass, NormalScoreBase, NormalScoreError, evaluate_normal_score_base};
 pub use payment::{Payment, PaymentBreakdown, PaymentError, evaluate_payment};
