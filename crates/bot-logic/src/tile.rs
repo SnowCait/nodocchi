@@ -14,6 +14,13 @@ pub enum Suit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Dragon {
+    White,
+    Green,
+    Red,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TileType(u8);
 
 impl TileType {
@@ -60,7 +67,16 @@ impl TileType {
     }
 
     pub fn is_dragon(self) -> bool {
-        (31..=33).contains(&self.0)
+        self.dragon().is_some()
+    }
+
+    pub fn dragon(self) -> Option<Dragon> {
+        match self.0 {
+            31 => Some(Dragon::White),
+            32 => Some(Dragon::Green),
+            33 => Some(Dragon::Red),
+            _ => None,
+        }
     }
 
     pub fn is_value_honor(self, round_wind: Option<TileType>, seat_wind: Option<TileType>) -> bool {
@@ -366,6 +382,16 @@ mod tests {
         assert!(!tt(30).is_dragon());
         assert!(!tt(26).is_dragon());
         assert!(!tt(0).is_dragon());
+    }
+
+    #[test]
+    fn dragon_distinguishes_each_dragon_tile() {
+        assert_eq!(tt(31).dragon(), Some(Dragon::White));
+        assert_eq!(tt(32).dragon(), Some(Dragon::Green));
+        assert_eq!(tt(33).dragon(), Some(Dragon::Red));
+        for value in [0, 8, 26, 27, 28, 29, 30] {
+            assert_eq!(tt(value).dragon(), None, "value: {value}");
+        }
     }
 
     #[test]
