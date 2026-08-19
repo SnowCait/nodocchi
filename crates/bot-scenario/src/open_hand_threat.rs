@@ -14,11 +14,12 @@
 use bot_core::{
     Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
     OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel, OpenHandThreatReason,
-    PlayerThreatFacts, PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic,
-    SuitedSafetyRank, SujiSafetyRank, ValueHonorMeldCounts, WallRank, classify_open_hand_threat,
-    honor_safety_rank, is_discarded_by_all_open_hand_threats,
-    opponent_honor_value_for_open_hand_threats, suited_safety_rank_for_open_hand_threats,
-    suji_safety_rank_for, suji_safety_rank_for_open_hand_threats, wall_rank,
+    PlayerThreatFacts, PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState,
+    PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, SuitedSafetyRank, SujiSafetyRank,
+    ValueHonorMeldCounts, WallRank, classify_open_hand_threat, honor_safety_rank,
+    is_discarded_by_all_open_hand_threats, opponent_honor_value_for_open_hand_threats,
+    suited_safety_rank_for_open_hand_threats, suji_safety_rank_for,
+    suji_safety_rank_for_open_hand_threats, wall_rank,
 };
 use bot_logic::{TileId, TileType};
 
@@ -608,13 +609,6 @@ fn hand_tiles(scenario: &Scenario) -> Vec<TileId> {
     scenario.context.hand_tiles().to_vec()
 }
 
-fn group(self_hand: SelfHand) -> Vec<CorpusScenario> {
-    corpus()
-        .into_iter()
-        .filter(|entry| entry.self_hand == self_hand)
-        .collect()
-}
-
 // その fixture が High の副露相手を持つか。
 fn has_high_threat(entry: &CorpusScenario) -> bool {
     entry
@@ -644,218 +638,6 @@ fn expected_push_pull(entry: &CorpusScenario) -> (PushPullMode, PushPullReason) 
     }
 }
 
-// 全 fixture の自分側局面。同じ hand を共有する fixture 同士は通常打牌・offense が一致する。
-const SELF_HANDS: [SelfHand; 4] = [
-    SelfHand::Tenpai,
-    SelfHand::StrongIishanten,
-    SelfHand::WeakIishanten,
-    SelfHand::TwoShanten,
-];
-
-#[test]
-fn every_scenario_resolves_without_an_opponent_reach() {
-    for entry in corpus() {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-        let inputs = diagnostic
-            .push_pull_inputs
-            .unwrap_or_else(|| panic!("{}: 押し引き入力がある", entry.name));
-        let decision = diagnostic
-            .push_pull_decision
-            .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
-        let (mode, reason) = expected_push_pull(&entry);
-
-        assert_eq!(inputs.opponent_reach_count, 0, "{}", entry.name);
-        assert!(!inputs.dealer_reacher, "{}", entry.name);
-        assert!(!inputs.self_dealer, "{}", entry.name);
-        assert_eq!(
-            inputs.has_high_open_hand_threat(),
-            has_high_threat(&entry),
-            "{}",
-            entry.name
-        );
-        assert_eq!(decision.mode, mode, "{}", entry.name);
-        assert_eq!(decision.reason, reason, "{}", entry.name);
-    }
-}
-
-#[test]
-fn every_scenario_matches_the_expected_player_threat_facts() {
-    for entry in corpus() {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-
-        for player in 0..4 {
-            let facts = diagnostic.player_threats[player].facts;
-            assert!(!facts.reached, "{} player {player}", entry.name);
-            assert_eq!(
-                facts.is_self,
-                Some(player == SELF_PLAYER),
-                "{} player {player}",
-                entry.name
-            );
-            assert_eq!(
-                facts.is_dealer,
-                Some(player == DEALER_PLAYER),
-                "{} player {player}",
-                entry.name
-            );
-
-            assert_open_hand_facts(entry.name, expected_of(&entry, player), facts);
-            assert_eq!(
-                facts.discard_count,
-                scenario.context.discards_of(player).unwrap().len(),
-                "{} player {player} discard_count",
-                entry.name
-            );
-        }
-    }
-}
-
-#[test]
-fn every_scenario_matches_the_expected_open_hand_threat() {
-    // 副露 facts から production が導く暫定 classification を fixture ごとに固定する。
-    // 自分の席は対象外で、リーチ者はこの corpus にいない。
-    for entry in corpus() {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-
-        for player in 0..4 {
-            let threat = &diagnostic.player_threats[player];
-            let expected = if player == SELF_PLAYER {
-                OpenHandThreatAssessment::NotApplicable(OpenHandThreatExclusion::SelfSeat)
-            } else {
-                OpenHandThreatAssessment::Classified(expected_of(&entry, player).threat)
-            };
-
-            assert_eq!(
-                threat.open_hand_threat, expected,
-                "{} player {player}",
-                entry.name
-            );
-            // 表示・診断は分類し直さず、同じ facts から求めた結果を共有する。
-            assert_eq!(
-                threat.open_hand_threat,
-                classify_open_hand_threat(threat.facts),
-                "{} player {player}",
-                entry.name
-            );
-        }
-    }
-}
-
-#[test]
-fn a_high_open_hand_threat_changes_the_push_pull_decision() {
-    // High になる fixture だけが threat の対象。強いテンパイなら押し、一向聴以下なら降りる。
-    let high: Vec<CorpusScenario> = corpus().into_iter().filter(has_high_threat).collect();
-    assert!(!high.is_empty());
-
-    for entry in high {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-        let decision = diagnostic
-            .push_pull_decision
-            .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
-        let (mode, reason) = expected_push_pull(&entry);
-
-        assert_eq!(decision.mode, mode, "{}", entry.name);
-        assert_eq!(decision.reason, reason, "{}", entry.name);
-    }
-}
-
-#[test]
-fn a_present_open_hand_threat_does_not_change_the_push_pull_decision() {
-    // Present に留まる fixture は行動を変えない。副露なしの基準局面と同じ判断になる。
-    let present: Vec<CorpusScenario> = corpus()
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .melded
-                .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::Present)
-        })
-        .collect();
-    assert!(!present.is_empty());
-
-    for entry in present {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-        let decision = diagnostic
-            .push_pull_decision
-            .unwrap_or_else(|| panic!("{}: 押し引き判断がある", entry.name));
-
-        assert_eq!(decision.mode, PushPullMode::Push, "{}", entry.name);
-        assert_eq!(decision.reason, PushPullReason::NoThreat, "{}", entry.name);
-        assert!(!diagnostic.open_hand_defense.has_target(), "{}", entry.name);
-    }
-}
-
-#[test]
-fn the_folding_high_scenarios_select_the_open_hand_defense_fallback() {
-    // High + 一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
-    let folding: Vec<CorpusScenario> = corpus()
-        .into_iter()
-        .filter(|entry| expected_push_pull(entry).0 == PushPullMode::Fold)
-        .collect();
-    assert!(!folding.is_empty());
-
-    for entry in folding {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-
-        let category = diagnostic
-            .open_hand_defense_category()
-            .unwrap_or_else(|| panic!("{}: OpenHand 防御 fallback を採用している", entry.name));
-        let selection = diagnostic
-            .open_hand_defense
-            .selected
-            .as_ref()
-            .unwrap_or_else(|| panic!("{}: 診断に採用結果が載る", entry.name));
-
-        assert_eq!(selection.selected_category, category, "{}", entry.name);
-        assert_eq!(
-            selection.selected_action, diagnostic.selected_action,
-            "{}",
-            entry.name
-        );
-        // リーチ者がいないので、リーチ者向けの防御 fallback は検討自体が起きない。
-        assert!(diagnostic.defense.is_none(), "{}", entry.name);
-        assert_eq!(diagnostic.defense_fallback_kind(), None, "{}", entry.name);
-    }
-}
-
-#[test]
-fn the_pushing_high_scenarios_keep_the_normal_discard() {
-    // High でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。
-    let pushing: Vec<CorpusScenario> = corpus()
-        .into_iter()
-        .filter(|entry| has_high_threat(entry) && expected_push_pull(entry).0 != PushPullMode::Fold)
-        .collect();
-    assert!(!pushing.is_empty());
-
-    for entry in pushing {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-
-        assert_eq!(
-            diagnostic.open_hand_defense_category(),
-            None,
-            "{}",
-            entry.name
-        );
-        assert_eq!(
-            diagnostic.open_hand_defense.selected, None,
-            "{}",
-            entry.name
-        );
-        assert_eq!(
-            Some(diagnostic.selected_action.clone()),
-            diagnostic.normal_discard_action,
-            "{}",
-            entry.name
-        );
-    }
-}
-
 // その fixture で OpenHand 防御 target になるべき席。High の副露相手だけが対象。
 fn expected_targets(entry: &CorpusScenario) -> Vec<usize> {
     entry
@@ -865,33 +647,362 @@ fn expected_targets(entry: &CorpusScenario) -> Vec<usize> {
         .unwrap_or_default()
 }
 
-#[test]
-fn every_scenario_selects_the_high_open_hand_threats_as_defense_targets() {
-    // target は Player threats の classification と同じ source of truth から選ぶ。
-    for entry in corpus() {
+// 全 fixture の自分側局面。同じ hand を共有する fixture 同士は通常打牌・offense が一致する。
+const SELF_HANDS: [SelfHand; 4] = [
+    SelfHand::Tenpai,
+    SelfHand::StrongIishanten,
+    SelfHand::WeakIishanten,
+    SelfHand::TwoShanten,
+];
+
+// fixture を1回だけ解決・診断した結果。同じ Scenario / 診断を意味ごとの assertion で共有し、
+// 同じ局面を何度も production の decision path へ通さない。
+struct Evaluated {
+    entry: CorpusScenario,
+    scenario: Scenario,
+    diagnostic: ShantenDecisionDiagnostic,
+}
+
+impl Evaluated {
+    fn new(entry: CorpusScenario) -> Self {
         let scenario = resolve(&entry);
         let diagnostic = diagnose(&scenario);
+        Self {
+            entry,
+            scenario,
+            diagnostic,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        self.entry.name
+    }
+
+    fn push_pull_inputs(&self) -> PushPullInputs {
+        self.diagnostic
+            .push_pull_inputs
+            .unwrap_or_else(|| panic!("{}: 押し引き入力がある", self.name()))
+    }
+
+    fn push_pull_decision(&self) -> PushPullDecision {
+        self.diagnostic
+            .push_pull_decision
+            .unwrap_or_else(|| panic!("{}: 押し引き判断がある", self.name()))
+    }
+
+    fn offense(&self) -> PushPullOffenseState {
+        self.push_pull_inputs()
+            .offense
+            .unwrap_or_else(|| panic!("{}: offense がある", self.name()))
+    }
+}
+
+// corpus 全 fixture を1回ずつ評価した集合。
+struct EvaluatedCorpus {
+    scenarios: Vec<Evaluated>,
+}
+
+impl EvaluatedCorpus {
+    fn evaluate() -> Self {
+        Self {
+            scenarios: corpus().into_iter().map(Evaluated::new).collect(),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Evaluated> {
+        self.scenarios.iter()
+    }
+
+    fn find(&self, name: &str) -> &Evaluated {
+        self.iter()
+            .find(|evaluated| evaluated.name() == name)
+            .unwrap_or_else(|| panic!("{name} scenario"))
+    }
+
+    fn select(&self, predicate: impl Fn(&CorpusScenario) -> bool) -> Vec<&Evaluated> {
+        self.iter()
+            .filter(|evaluated| predicate(&evaluated.entry))
+            .collect()
+    }
+
+    fn group(&self, self_hand: SelfHand) -> Vec<&Evaluated> {
+        self.select(|entry| entry.self_hand == self_hand)
+    }
+}
+
+fn assert_no_opponent_reach(evaluated: &Evaluated) {
+    let name = evaluated.name();
+    let inputs = evaluated.push_pull_inputs();
+
+    assert_eq!(inputs.opponent_reach_count, 0, "{name}");
+    assert!(!inputs.dealer_reacher, "{name}");
+    assert!(!inputs.self_dealer, "{name}");
+    assert_eq!(
+        inputs.has_high_open_hand_threat(),
+        has_high_threat(&evaluated.entry),
+        "{name}"
+    );
+}
+
+fn assert_the_expected_push_pull(evaluated: &Evaluated) {
+    let name = evaluated.name();
+    let decision = evaluated.push_pull_decision();
+    let (mode, reason) = expected_push_pull(&evaluated.entry);
+
+    assert_eq!(decision.mode, mode, "{name}");
+    assert_eq!(decision.reason, reason, "{name}");
+}
+
+fn assert_the_expected_player_threat_facts(evaluated: &Evaluated) {
+    let name = evaluated.name();
+
+    for player in 0..4 {
+        let facts = evaluated.diagnostic.player_threats[player].facts;
+        assert!(!facts.reached, "{name} player {player}");
+        assert_eq!(
+            facts.is_self,
+            Some(player == SELF_PLAYER),
+            "{name} player {player}"
+        );
+        assert_eq!(
+            facts.is_dealer,
+            Some(player == DEALER_PLAYER),
+            "{name} player {player}"
+        );
+
+        assert_open_hand_facts(name, expected_of(&evaluated.entry, player), facts);
+        assert_eq!(
+            facts.discard_count,
+            evaluated
+                .scenario
+                .context
+                .discards_of(player)
+                .unwrap()
+                .len(),
+            "{name} player {player} discard_count"
+        );
+    }
+}
+
+// 副露 facts から production が導く暫定 classification を fixture ごとに固定する。
+// 自分の席は対象外で、リーチ者はこの corpus にいない。
+fn assert_the_expected_open_hand_threat(evaluated: &Evaluated) {
+    let name = evaluated.name();
+
+    for player in 0..4 {
+        let threat = &evaluated.diagnostic.player_threats[player];
+        let expected = if player == SELF_PLAYER {
+            OpenHandThreatAssessment::NotApplicable(OpenHandThreatExclusion::SelfSeat)
+        } else {
+            OpenHandThreatAssessment::Classified(expected_of(&evaluated.entry, player).threat)
+        };
+
+        assert_eq!(threat.open_hand_threat, expected, "{name} player {player}");
+        // 表示・診断は分類し直さず、同じ facts から求めた結果を共有する。
+        assert_eq!(
+            threat.open_hand_threat,
+            classify_open_hand_threat(threat.facts),
+            "{name} player {player}"
+        );
+    }
+}
+
+// 表示・押し引き・診断が同じ軽量 facts を共有していることを固定する。
+fn assert_the_threat_facts_are_shared_with_push_pull(evaluated: &Evaluated) {
+    let name = evaluated.name();
+    let inputs = evaluated.push_pull_inputs();
+
+    for player in 0..4 {
+        assert_eq!(
+            inputs.player_threats[player], evaluated.diagnostic.player_threats[player].facts,
+            "{name} player {player}"
+        );
+    }
+}
+
+// target は Player threats の classification と同じ source of truth から選ぶ。
+fn assert_the_high_threats_are_the_defense_targets(evaluated: &Evaluated) {
+    let name = evaluated.name();
+
+    assert_eq!(
+        evaluated.diagnostic.open_hand_defense.targets,
+        expected_targets(&evaluated.entry),
+        "{name}"
+    );
+    for &player in &evaluated.diagnostic.open_hand_defense.targets {
+        assert_eq!(
+            evaluated.diagnostic.player_threats[player]
+                .open_hand_threat
+                .level(),
+            Some(OpenHandThreatLevel::High),
+            "{name} player {player}"
+        );
+    }
+}
+
+// Present に留まる fixture は行動を変えない。副露なしの基準局面と同じ判断になる。
+fn assert_the_present_threat_keeps_the_push_pull(evaluated: &Evaluated) {
+    let name = evaluated.name();
+    let decision = evaluated.push_pull_decision();
+
+    assert_eq!(decision.mode, PushPullMode::Push, "{name}");
+    assert_eq!(decision.reason, PushPullReason::NoThreat, "{name}");
+    assert!(
+        !evaluated.diagnostic.open_hand_defense.has_target(),
+        "{name}"
+    );
+}
+
+// High + 一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
+fn assert_the_folding_scenario_selects_the_defense_fallback(evaluated: &Evaluated) {
+    let name = evaluated.name();
+    let diagnostic = &evaluated.diagnostic;
+
+    let category = diagnostic
+        .open_hand_defense_category()
+        .unwrap_or_else(|| panic!("{name}: OpenHand 防御 fallback を採用している"));
+    let selection = diagnostic
+        .open_hand_defense
+        .selected
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name}: 診断に採用結果が載る"));
+
+    assert_eq!(selection.selected_category, category, "{name}");
+    assert_eq!(
+        selection.selected_action, diagnostic.selected_action,
+        "{name}"
+    );
+    // リーチ者がいないので、リーチ者向けの防御 fallback は検討自体が起きない。
+    assert!(diagnostic.defense.is_none(), "{name}");
+    assert_eq!(diagnostic.defense_fallback_kind(), None, "{name}");
+}
+
+// High でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。
+fn assert_the_pushing_scenario_keeps_the_normal_discard(evaluated: &Evaluated) {
+    let name = evaluated.name();
+    let diagnostic = &evaluated.diagnostic;
+
+    assert_eq!(diagnostic.open_hand_defense_category(), None, "{name}");
+    assert_eq!(diagnostic.open_hand_defense.selected, None, "{name}");
+    assert_eq!(
+        Some(diagnostic.selected_action.clone()),
+        diagnostic.normal_discard_action,
+        "{name}"
+    );
+}
+
+// Present / None しか存在しない局面は「OpenHand Defense target なし」で、候補も持たない。
+fn assert_no_defense_target(evaluated: &Evaluated) {
+    let name = evaluated.name();
+
+    assert!(
+        !evaluated.diagnostic.open_hand_defense.has_target(),
+        "{name}"
+    );
+    assert!(
+        evaluated.diagnostic.open_hand_defense.candidates.is_empty(),
+        "{name}"
+    );
+}
+
+// 候補は合法 Dahai と同じ順序で、値は production の pure helper の結果そのもの。
+fn assert_the_defense_safety_of_every_legal_dahai(evaluated: &Evaluated, targets: &[usize]) {
+    let name = evaluated.name();
+    let context = &evaluated.scenario.context;
+
+    assert_eq!(
+        evaluated
+            .diagnostic
+            .open_hand_defense
+            .candidates
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<LegalAction>>(),
+        evaluated.scenario.legal_actions,
+        "{name}"
+    );
+
+    for candidate in &evaluated.diagnostic.open_hand_defense.candidates {
+        let tile = candidate.tile;
+        let label = format!("{name} {}", tile.to_mjai_string());
 
         assert_eq!(
-            diagnostic.open_hand_defense.targets,
-            expected_targets(&entry),
-            "{}",
-            entry.name
+            candidate
+                .targets
+                .iter()
+                .map(|target| target.player)
+                .collect::<Vec<usize>>(),
+            targets,
+            "{label}"
         );
-        for &player in &diagnostic.open_hand_defense.targets {
+        assert_eq!(
+            candidate.discarded_by_all_targets,
+            is_discarded_by_all_open_hand_threats(tile, targets, context),
+            "{label}"
+        );
+        assert_eq!(
+            candidate.honor_safety_rank,
+            honor_safety_rank(tile, context),
+            "{label}"
+        );
+        assert_eq!(
+            candidate.opponent_honor_value,
+            opponent_honor_value_for_open_hand_threats(tile, targets, context),
+            "{label}"
+        );
+        assert_eq!(
+            candidate.wall_rank,
+            (!tile.is_honor()).then(|| wall_rank(tile, context)),
+            "{label}"
+        );
+        assert_eq!(
+            candidate.suji_safety_rank,
+            suji_safety_rank_for_open_hand_threats(tile, targets, context),
+            "{label}"
+        );
+        assert_eq!(
+            candidate.suited_safety_rank,
+            suited_safety_rank_for_open_hand_threats(tile, targets, context),
+            "{label}"
+        );
+
+        for target in &candidate.targets {
             assert_eq!(
-                diagnostic.player_threats[player].open_hand_threat.level(),
-                Some(OpenHandThreatLevel::High),
-                "{} player {player}",
-                entry.name
+                target.suji_safety_rank,
+                suji_safety_rank_for(tile, target.player, context),
+                "{label} target {}",
+                target.player
             );
         }
     }
 }
 
-#[test]
-fn the_representative_high_scenarios_fix_the_defense_target() {
-    // 2副露 + 9捨て / 1副露 + 12捨て / 役牌入り2副露 / 3副露 の代表局面で target を固定する。
+// 河を持つのは player 2 と副露を持つ席だけ。他家が切っただけの牌を安全根拠にしない。
+fn assert_no_other_players_river_is_river_safe(evaluated: &Evaluated) {
+    let name = evaluated.name();
+
+    for candidate in &evaluated.diagnostic.open_hand_defense.candidates {
+        for target in &candidate.targets {
+            let river_has_tile = evaluated
+                .scenario
+                .context
+                .discards_of(target.player)
+                .expect("target の河")
+                .iter()
+                .any(|tile| tile.tile_type() == candidate.tile);
+            assert_eq!(
+                target.discarded_by_target,
+                river_has_tile,
+                "{name} {} target {}",
+                candidate.tile.to_mjai_string(),
+                target.player
+            );
+        }
+    }
+}
+
+// 2副露 + 9捨て / 1副露 + 12捨て / 役牌入り2副露 / 3副露 の代表局面で target を固定する。
+fn assert_the_representative_high_scenarios_fix_the_defense_target(corpus: &EvaluatedCorpus) {
     let representatives = [
         (
             "open_hand_two_melds_nine_discards",
@@ -912,11 +1023,7 @@ fn the_representative_high_scenarios_fix_the_defense_target() {
     ];
 
     for (name, reason) in representatives {
-        let entry = corpus()
-            .into_iter()
-            .find(|entry| entry.name == name)
-            .unwrap_or_else(|| panic!("{name} scenario"));
-        let diagnostic = diagnose(&resolve(&entry));
+        let diagnostic = &corpus.find(name).diagnostic;
 
         assert_eq!(diagnostic.open_hand_defense.targets, vec![3], "{name}");
         assert_eq!(
@@ -928,116 +1035,12 @@ fn the_representative_high_scenarios_fix_the_defense_target() {
     }
 }
 
-#[test]
-fn scenarios_without_a_high_threat_have_no_defense_target() {
-    // Present / None しか存在しない局面は「OpenHand Defense target なし」で、候補も持たない。
-    for entry in corpus() {
-        if !expected_targets(&entry).is_empty() {
-            continue;
-        }
-        let diagnostic = diagnose(&resolve(&entry));
-
-        assert!(!diagnostic.open_hand_defense.has_target(), "{}", entry.name);
-        assert!(
-            diagnostic.open_hand_defense.candidates.is_empty(),
-            "{}",
-            entry.name
-        );
-    }
-}
-
-#[test]
-fn the_high_scenarios_report_the_open_hand_defense_safety_of_every_legal_dahai() {
-    // 候補は合法 Dahai と同じ順序で、値は production の pure helper の結果そのもの。
-    for entry in corpus() {
-        let targets = expected_targets(&entry);
-        if targets.is_empty() {
-            continue;
-        }
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-        let context = &scenario.context;
-
-        assert_eq!(
-            diagnostic
-                .open_hand_defense
-                .candidates
-                .iter()
-                .map(|candidate| candidate.action.clone())
-                .collect::<Vec<LegalAction>>(),
-            scenario.legal_actions,
-            "{}",
-            entry.name
-        );
-
-        for candidate in &diagnostic.open_hand_defense.candidates {
-            let tile = candidate.tile;
-            let label = format!("{} {}", entry.name, tile.to_mjai_string());
-
-            assert_eq!(
-                candidate
-                    .targets
-                    .iter()
-                    .map(|target| target.player)
-                    .collect::<Vec<usize>>(),
-                targets,
-                "{label}"
-            );
-            assert_eq!(
-                candidate.discarded_by_all_targets,
-                is_discarded_by_all_open_hand_threats(tile, &targets, context),
-                "{label}"
-            );
-            assert_eq!(
-                candidate.honor_safety_rank,
-                honor_safety_rank(tile, context),
-                "{label}"
-            );
-            assert_eq!(
-                candidate.opponent_honor_value,
-                opponent_honor_value_for_open_hand_threats(tile, &targets, context),
-                "{label}"
-            );
-            assert_eq!(
-                candidate.wall_rank,
-                (!tile.is_honor()).then(|| wall_rank(tile, context)),
-                "{label}"
-            );
-            assert_eq!(
-                candidate.suji_safety_rank,
-                suji_safety_rank_for_open_hand_threats(tile, &targets, context),
-                "{label}"
-            );
-            assert_eq!(
-                candidate.suited_safety_rank,
-                suited_safety_rank_for_open_hand_threats(tile, &targets, context),
-                "{label}"
-            );
-
-            for target in &candidate.targets {
-                assert_eq!(
-                    target.suji_safety_rank,
-                    suji_safety_rank_for(tile, target.player, context),
-                    "{label} target {}",
-                    target.player
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn the_nine_discard_scenario_shares_the_existing_wall_rank() {
-    // 相手の河の 7m が3枚 + 自分の手牌の 7m で 8m の順子待ち経路が塞がる。壁は既存 helper の値。
-    let entry = corpus()
-        .into_iter()
-        .find(|entry| entry.name == "open_hand_two_melds_nine_discards")
-        .expect("nine discard scenario");
-    let scenario = resolve(&entry);
-    let diagnostic = diagnose(&scenario);
+// 相手の河の 7m が3枚 + 自分の手牌の 7m で 8m の順子待ち経路が塞がる。壁は既存 helper の値。
+fn assert_the_nine_discard_scenario_shares_the_existing_wall_rank(evaluated: &Evaluated) {
     let eight_man = TileType::from_mjai_type_str("8m").unwrap();
 
-    let candidate = diagnostic
+    let candidate = evaluated
+        .diagnostic
         .open_hand_defense
         .candidates
         .iter()
@@ -1046,7 +1049,7 @@ fn the_nine_discard_scenario_shares_the_existing_wall_rank() {
 
     assert_eq!(
         candidate.wall_rank,
-        Some(wall_rank(eight_man, &scenario.context))
+        Some(wall_rank(eight_man, &evaluated.scenario.context))
     );
     assert_eq!(candidate.wall_rank, Some(WallRank::NoChance));
     // 壁はスジより優先する。相手の河に 5m は無いのでスジは無い。
@@ -1057,65 +1060,8 @@ fn the_nine_discard_scenario_shares_the_existing_wall_rank() {
     );
 }
 
-#[test]
-fn no_scenario_treats_another_players_river_as_river_safe() {
-    // 河を持つのは player 2 と副露を持つ席だけ。他家が切っただけの牌を安全根拠にしない。
-    for entry in corpus() {
-        let targets = expected_targets(&entry);
-        if targets.is_empty() {
-            continue;
-        }
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-
-        for candidate in &diagnostic.open_hand_defense.candidates {
-            for target in &candidate.targets {
-                let river_has_tile = scenario
-                    .context
-                    .discards_of(target.player)
-                    .expect("target の河")
-                    .iter()
-                    .any(|tile| tile.tile_type() == candidate.tile);
-                assert_eq!(
-                    target.discarded_by_target,
-                    river_has_tile,
-                    "{} {} target {}",
-                    entry.name,
-                    candidate.tile.to_mjai_string(),
-                    target.player
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn every_scenario_shares_the_threat_facts_with_push_pull() {
-    // 表示・押し引き・診断が同じ軽量 facts を共有していることを corpus 全体で固定する。
-    for entry in corpus() {
-        let scenario = resolve(&entry);
-        let diagnostic = diagnose(&scenario);
-        let inputs = diagnostic
-            .push_pull_inputs
-            .unwrap_or_else(|| panic!("{}: 押し引き入力がある", entry.name));
-
-        for player in 0..4 {
-            assert_eq!(
-                inputs.player_threats[player], diagnostic.player_threats[player].facts,
-                "{} player {player}",
-                entry.name
-            );
-        }
-    }
-}
-
-#[test]
-fn the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld() {
-    let entry = corpus()
-        .into_iter()
-        .find(|entry| entry.name == "open_hand_ankan")
-        .expect("ankan scenario");
-    let facts = diagnose(&resolve(&entry)).player_threats[3].facts;
+fn assert_the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld(evaluated: &Evaluated) {
+    let facts = evaluated.diagnostic.player_threats[3].facts;
 
     assert_eq!(facts.meld_count, 1);
     assert_eq!(facts.open_meld_count, 0);
@@ -1133,120 +1079,85 @@ fn the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld() {
     );
 }
 
-#[test]
-fn scenarios_with_the_same_self_hand_share_the_normal_discard_and_offense() {
-    // 同じ自分の局面を共有する fixture 同士は、相手の副露 facts だけが違う。手牌・ツモ・
-    // 合法 Dahai が同一なので、通常打牌の候補比較も offense も一致する。
-    for self_hand in SELF_HANDS {
-        let entries = group(self_hand);
-        let baseline_entry = entries[0];
-        let baseline = resolve(&baseline_entry);
-        let baseline_diagnostic = diagnose(&baseline);
-        let baseline_offense = baseline_diagnostic
-            .push_pull_inputs
-            .expect("押し引き入力がある")
-            .offense;
+// 同じ自分の局面を共有する fixture 同士は、相手の副露 facts だけが違う。手牌・ツモ・
+// 合法 Dahai が同一なので、通常打牌の候補比較も offense も一致する。
+fn assert_the_group_shares_the_normal_discard_and_offense(group: &[&Evaluated]) {
+    let baseline = group[0];
+    let baseline_offense = baseline.push_pull_inputs().offense;
 
-        for entry in entries.iter().skip(1) {
-            let scenario = resolve(entry);
-            let diagnostic = diagnose(&scenario);
+    for evaluated in group.iter().skip(1) {
+        let name = evaluated.name();
 
+        assert_eq!(
+            hand_tiles(&evaluated.scenario),
+            hand_tiles(&baseline.scenario),
+            "{name}: 手牌を共有する"
+        );
+        assert_eq!(
+            evaluated.scenario.legal_actions, baseline.scenario.legal_actions,
+            "{name}: 合法手を共有する"
+        );
+        assert_eq!(
+            evaluated.diagnostic.normal_discard, baseline.diagnostic.normal_discard,
+            "{name}: 通常打牌の候補比較が一致する"
+        );
+        assert_eq!(
+            evaluated.diagnostic.normal_discard_action, baseline.diagnostic.normal_discard_action,
+            "{name}: 通常打牌 selected が一致する"
+        );
+        // 最終 action は押し引きが同じ fixture 同士でだけ一致する。High の副露相手がいて
+        // Fold になる fixture は、通常打牌より OpenHand 防御 fallback を優先する。
+        if expected_push_pull(&evaluated.entry) == expected_push_pull(&baseline.entry) {
             assert_eq!(
-                hand_tiles(&scenario),
-                hand_tiles(&baseline),
-                "{}: 手牌を共有する",
-                entry.name
-            );
-            assert_eq!(
-                scenario.legal_actions, baseline.legal_actions,
-                "{}: 合法手を共有する",
-                entry.name
-            );
-            assert_eq!(
-                diagnostic.normal_discard, baseline_diagnostic.normal_discard,
-                "{}: 通常打牌の候補比較が一致する",
-                entry.name
-            );
-            assert_eq!(
-                diagnostic.normal_discard_action, baseline_diagnostic.normal_discard_action,
-                "{}: 通常打牌 selected が一致する",
-                entry.name
-            );
-            // 最終 action は押し引きが同じ fixture 同士でだけ一致する。High の副露相手がいて
-            // Fold になる fixture は、通常打牌より OpenHand 防御 fallback を優先する。
-            if expected_push_pull(entry) == expected_push_pull(&baseline_entry) {
-                assert_eq!(
-                    diagnostic.selected_action, baseline_diagnostic.selected_action,
-                    "{}: 最終 action が一致する",
-                    entry.name
-                );
-            }
-            assert_eq!(
-                diagnostic
-                    .push_pull_inputs
-                    .expect("押し引き入力がある")
-                    .offense,
-                baseline_offense,
-                "{}: offense が一致する",
-                entry.name
+                evaluated.diagnostic.selected_action, baseline.diagnostic.selected_action,
+                "{name}: 最終 action が一致する"
             );
         }
+        assert_eq!(
+            evaluated.push_pull_inputs().offense,
+            baseline_offense,
+            "{name}: offense が一致する"
+        );
     }
 }
 
-#[test]
-fn open_melds_add_visible_tiles_outside_the_acceptance() {
-    // 副露牌は visible tiles に加わるため、受け入れ枚数が変わり得る。この corpus は
-    // 「相手の副露牌が自分の受け入れ牌種と重ならない」局面に揃えてあり、そのおかげで
-    // acceptance が一致する。visible tiles を無視して offense が同じだと仮定しない。
-    for self_hand in SELF_HANDS {
-        let entries = group(self_hand);
-        let baseline = resolve(&entries[0]);
-        let acceptance = acceptance_tile_types(&diagnose(&baseline));
+// 副露牌は visible tiles に加わるため、受け入れ枚数が変わり得る。この corpus は
+// 「相手の副露牌が自分の受け入れ牌種と重ならない」局面に揃えてあり、そのおかげで
+// acceptance が一致する。visible tiles を無視して offense が同じだと仮定しない。
+fn assert_open_melds_add_visible_tiles_outside_the_acceptance(group: &[&Evaluated]) {
+    let baseline = group[0];
+    let acceptance = acceptance_tile_types(&baseline.diagnostic);
 
-        for entry in entries.iter().skip(1) {
-            let scenario = resolve(entry);
-            let added = added_visible_tile_types(&baseline, &scenario);
+    for evaluated in group.iter().skip(1) {
+        let name = evaluated.name();
+        let added = added_visible_tile_types(&baseline.scenario, &evaluated.scenario);
 
-            assert!(!added.is_empty(), "{}: 副露牌が見え牌に加わる", entry.name);
-            for tile in &added {
-                assert!(
-                    !acceptance.contains(tile),
-                    "{}: 増えた見え牌 {} が受け入れ牌種に含まれる",
-                    entry.name,
-                    tile.to_mjai_string()
-                );
-            }
+        assert!(!added.is_empty(), "{name}: 副露牌が見え牌に加わる");
+        for tile in &added {
             assert!(
-                scenario.context.visible_tiles().len() > baseline.context.visible_tiles().len(),
-                "{}: 見え牌は baseline より増える",
-                entry.name
+                !acceptance.contains(tile),
+                "{name}: 増えた見え牌 {} が受け入れ牌種に含まれる",
+                tile.to_mjai_string()
             );
         }
+        assert!(
+            evaluated.scenario.context.visible_tiles().len()
+                > baseline.scenario.context.visible_tiles().len(),
+            "{name}: 見え牌は baseline より増える"
+        );
     }
 }
 
-#[test]
-fn the_dealer_pair_differs_only_in_the_dealer_seat() {
-    // 同じ役牌 Pon を子 (player 3) と親 (player 1) が持つ対照ケース。牌の内訳が同じなので
-    // 見え牌も一致し、facts の差は副露を持つ席と親かどうかだけになる。
-    let child = resolve(
-        &corpus()
-            .into_iter()
-            .find(|entry| entry.name == "open_hand_value_pon")
-            .expect("value pon scenario"),
-    );
-    let dealer = resolve(
-        &corpus()
-            .into_iter()
-            .find(|entry| entry.name == "open_hand_dealer_value_pon")
-            .expect("dealer value pon scenario"),
+// 同じ役牌 Pon を子 (player 3) と親 (player 1) が持つ対照ケース。牌の内訳が同じなので
+// 見え牌も一致し、facts の差は副露を持つ席と親かどうかだけになる。
+fn assert_the_dealer_pair_differs_only_in_the_dealer_seat(child: &Evaluated, dealer: &Evaluated) {
+    assert_eq!(
+        visible_tile_counts(&child.scenario),
+        visible_tile_counts(&dealer.scenario)
     );
 
-    assert_eq!(visible_tile_counts(&child), visible_tile_counts(&dealer));
-
-    let child_facts = diagnose(&child).player_threats[3].facts;
-    let dealer_facts = diagnose(&dealer).player_threats[DEALER_PLAYER].facts;
+    let child_facts = child.diagnostic.player_threats[3].facts;
+    let dealer_facts = dealer.diagnostic.player_threats[DEALER_PLAYER].facts;
 
     assert_eq!(child_facts.is_dealer, Some(false));
     assert_eq!(dealer_facts.is_dealer, Some(true));
@@ -1256,25 +1167,16 @@ fn the_dealer_pair_differs_only_in_the_dealer_seat() {
         dealer_facts.value_honor_melds
     );
     // 親の非リーチ副露でも押し引きは変わらない。
-    assert!(!diagnose(&dealer).push_pull_inputs.unwrap().dealer_reacher);
+    assert!(!dealer.push_pull_inputs().dealer_reacher);
 }
 
-fn offense_of(self_hand: SelfHand) -> bot_core::PushPullOffenseState {
-    diagnose(&resolve(&group(self_hand)[0]))
-        .push_pull_inputs
-        .expect("押し引き入力がある")
-        .offense
-        .expect("offense がある")
-}
-
-#[test]
-fn the_self_hands_cover_the_push_pull_branches() {
-    // 押し引きの分岐ごとに1つずつ自分の局面を持つ。一向聴の2つは受け入れの広さが違うが、
-    // 現在の policy ではどちらも Fold になる。
-    let tenpai = offense_of(SelfHand::Tenpai);
-    let strong = offense_of(SelfHand::StrongIishanten);
-    let weak = offense_of(SelfHand::WeakIishanten);
-    let two_shanten = offense_of(SelfHand::TwoShanten);
+// 押し引きの分岐ごとに1つずつ自分の局面を持つ。一向聴の2つは受け入れの広さが違うが、
+// 現在の policy ではどちらも Fold になる。
+fn assert_the_self_hands_cover_the_push_pull_branches(corpus: &EvaluatedCorpus) {
+    let tenpai = corpus.group(SelfHand::Tenpai)[0].offense();
+    let strong = corpus.group(SelfHand::StrongIishanten)[0].offense();
+    let weak = corpus.group(SelfHand::WeakIishanten)[0].offense();
+    let two_shanten = corpus.group(SelfHand::TwoShanten)[0].offense();
 
     assert_eq!(tenpai.min_shanten_after_discard, 0);
     assert_eq!(strong.min_shanten_after_discard, 1);
@@ -1309,6 +1211,96 @@ fn the_self_hands_cover_the_push_pull_branches() {
     );
 }
 
+// 診断を無効にした production 経路の選択と、同じ局面の診断の選択が一致する。
+fn assert_the_selected_action_matches_act(evaluated: &Evaluated) {
+    let mut agent = ShantenAgent;
+    let acted = agent.act(
+        &evaluated.scenario.context,
+        &evaluated.scenario.legal_actions,
+    );
+
+    assert_eq!(
+        evaluated.diagnostic.selected_action,
+        acted,
+        "{}",
+        evaluated.name()
+    );
+}
+
+#[test]
+fn the_corpus_fixes_the_open_hand_threat_facts_and_decisions() {
+    // fixture ごとの評価は resolve 1回 + diagnose 1回だけで、意味ごとの assertion は同じ
+    // Scenario / 診断を共有する。
+    let corpus = EvaluatedCorpus::evaluate();
+
+    for evaluated in corpus.iter() {
+        assert_no_opponent_reach(evaluated);
+        assert_the_expected_push_pull(evaluated);
+        assert_the_expected_player_threat_facts(evaluated);
+        assert_the_expected_open_hand_threat(evaluated);
+        assert_the_threat_facts_are_shared_with_push_pull(evaluated);
+        assert_the_high_threats_are_the_defense_targets(evaluated);
+        assert_the_selected_action_matches_act(evaluated);
+
+        let targets = expected_targets(&evaluated.entry);
+        if targets.is_empty() {
+            assert_no_defense_target(evaluated);
+        } else {
+            assert_the_defense_safety_of_every_legal_dahai(evaluated, &targets);
+            assert_no_other_players_river_is_river_safe(evaluated);
+        }
+    }
+
+    // High になる fixture だけが threat の対象。強いテンパイなら押し、一向聴以下なら降りる。
+    let high_scenarios = corpus.select(has_high_threat);
+    assert!(!high_scenarios.is_empty());
+    for evaluated in &high_scenarios {
+        assert_the_expected_push_pull(evaluated);
+    }
+
+    let present_scenarios = corpus.select(|entry| {
+        entry
+            .melded
+            .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::Present)
+    });
+    assert!(!present_scenarios.is_empty());
+    for evaluated in &present_scenarios {
+        assert_the_present_threat_keeps_the_push_pull(evaluated);
+    }
+
+    let folding_scenarios =
+        corpus.select(|entry| expected_push_pull(entry).0 == PushPullMode::Fold);
+    assert!(!folding_scenarios.is_empty());
+    for evaluated in &folding_scenarios {
+        assert_the_folding_scenario_selects_the_defense_fallback(evaluated);
+    }
+
+    let pushing_scenarios = corpus.select(|entry| {
+        has_high_threat(entry) && expected_push_pull(entry).0 != PushPullMode::Fold
+    });
+    assert!(!pushing_scenarios.is_empty());
+    for evaluated in &pushing_scenarios {
+        assert_the_pushing_scenario_keeps_the_normal_discard(evaluated);
+    }
+
+    for self_hand in SELF_HANDS {
+        let group = corpus.group(self_hand);
+        assert_the_group_shares_the_normal_discard_and_offense(&group);
+        assert_open_melds_add_visible_tiles_outside_the_acceptance(&group);
+    }
+
+    assert_the_representative_high_scenarios_fix_the_defense_target(&corpus);
+    assert_the_nine_discard_scenario_shares_the_existing_wall_rank(
+        corpus.find("open_hand_two_melds_nine_discards"),
+    );
+    assert_the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld(corpus.find("open_hand_ankan"));
+    assert_the_dealer_pair_differs_only_in_the_dealer_seat(
+        corpus.find("open_hand_value_pon"),
+        corpus.find("open_hand_dealer_value_pon"),
+    );
+    assert_the_self_hands_cover_the_push_pull_branches(&corpus);
+}
+
 // 2手先診断は「打牌候補 × 受け入れ牌 × 次打牌候補」の重い探索なので、自分の局面ごとに
 // 副露なしと3副露の代表 fixture だけで一致を確認する。
 const LOOKAHEAD_SCENARIOS: [&str; 6] = [
@@ -1321,23 +1313,22 @@ const LOOKAHEAD_SCENARIOS: [&str; 6] = [
 ];
 
 #[test]
-fn every_scenario_selects_the_same_action_in_act_and_diagnose() {
-    for entry in corpus() {
+fn the_lookahead_scenarios_select_the_same_action_in_act_and_diagnose() {
+    for name in LOOKAHEAD_SCENARIOS {
+        let entry = corpus()
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} scenario"));
         let scenario = resolve(&entry);
         let mut agent = ShantenAgent;
 
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
-        let diagnostic = diagnose(&scenario);
-        assert_eq!(diagnostic.selected_action, acted, "{}", entry.name);
-
-        if !LOOKAHEAD_SCENARIOS.contains(&entry.name) {
-            continue;
-        }
         let with_lookahead = ShantenAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
         );
-        assert_eq!(with_lookahead.selected_action, acted, "{}", entry.name);
+
+        assert_eq!(with_lookahead.selected_action, acted, "{name}");
     }
 }
