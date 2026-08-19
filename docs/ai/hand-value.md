@@ -62,6 +62,9 @@
 - 親 / 子とロン / ツモごとの倍率
 - payer ごとの100点単位の切り上げ
 - 支払い内訳と和了者の受取総額
+- named 役満の点数化 (`evaluate_yakuman_scoring()`)
+- 役満ごとの倍率内訳と複合役満の合計倍率
+- 役満の基本点と支払点
 
 未実装:
 
@@ -71,7 +74,6 @@
 - 責任払い (包)
 - 最も高い解釈の選択
 - 本場 / 供託
-- 役満の点数化と複合役満の倍率
 - 確定した点数
 - 確定した `HandValue`
 
@@ -639,9 +641,9 @@ WRC Rules 2025 の九蓮宝燈は門前限定で、槓を宣言していると�
 
 牌構成だけで判定し、`Standard` 分解の順子 / 刻子を解析しません。`1112345678999` の基底形に同スートの余剰1枚が加わった牌構成を、既存 `TileCounts` の牌種カウントで確認します。
 
-### 特定待ちを double 役満にしない
+### 特定待ちで役満の事実を分けない
 
-WRC Rules 2025 は特定の待ちによる double 役満を採用しません。既存 `WaitType` の structural fact はそのまま残しますが、役満の事実は1つだけです。
+特定の待ちで役満の事実を増やしません。既存 `WaitType` の structural fact はそのまま残しますが、役満の事実は1つだけです。
 
 | 待ち | Yakuman |
 | --- | --- |
@@ -650,7 +652,7 @@ WRC Rules 2025 は特定の待ちによる double 役満を採用しません。
 | 四暗刻単騎 (雀頭のロン) | `Suuankou` 1つ |
 | 純正九蓮相当の待ち | `ChuurenPoutou` 1つ |
 
-`KokushiMusouThirteenSided` / `SuuankouTanki` / `DoubleSuuankou` のような variant を作りません。`Daisuushii` も特定待ちで2倍にしません。
+`KokushiMusouThirteenSided` / `SuuankouTanki` / `DoubleSuuankou` のような variant を作りません。国士無双十三面待ち・四暗刻単騎・純正九蓮宝燈を double 役満として数えるかどうかは、成立事実ではなく点数化 layer の倍率の問題として扱います。待ちに依存しない `Daisuushii` の倍率も同じく点数化 layer の責務です。
 
 13翻以上の非役満手 (counted yakuman) は WRC では scoring limit 側の扱いで、named 役満ではありません。`KazoeYakuman` variant を `Yakuman` へ入れません。
 
@@ -685,7 +687,7 @@ Suuankou + Tsuuiisou + Daisuushii
 - `Tenhou` / `Chiihou` は入れません。現在の `WinningContext` には、配牌時の親の自摸和了か、子の第一自摸か、それ以前に鳴きや暗槓が発生したかを確定できる事実がありません。`seat_wind == East` かつ自摸だけで `Tenhou` と推測せず、非親の自摸だけで `Chiihou` と推測しません。first-turn / 中断履歴を tri-state の事実として設計してから実装します。
 - `Renhou` は WRC では5翻役で、他の役やドラと複合しない特殊な scoring semantics を持ちます。役満ではないため `Yakuman` へ入れず、`Yaku` へも安易に足さず、後続の特殊 scoring layer で扱います。
 - 責任払い (包) は入れません。WRC では `Daisangen` / `Daisuushii` / `Suukantsu` に責任払いが関係する場合がありますが、成立した役満そのものと支払い責任は別責務です。誰が最後の面子 / 槓を鳴かせたかを推測・追跡しません。
-- 役満の基本点、複合役満の倍率、ドラ、確定した `HandValue` はまだ実装しません。[支払点](#支払点) は確定した基本点だけを入力に取るため、役満の基本点が決まれば同じ layer で支払点を求められますが、その倍率決定はまだありません。役満を翻数へ換算しないため、[通常 Yaku の翻数](#通常-yaku-の翻数) の合計へも足しません。
+- ドラと確定した `HandValue` はまだ実装しません。役満の基本点と複合役満の倍率は成立判定と分離した点数化 layer の責務で、この layer は成立事実までで止めます。役満を翻数へ換算しないため、[通常 Yaku の翻数](#通常-yaku-の翻数) の合計へも足しません。
 
 ### production policy へは接続しない
 
@@ -1095,7 +1097,7 @@ base payment の合計
 
 ### 数え役満を特別扱いしない
 
-数え役満の基本点8000も通常の基本点と同じ倍率と丸めで扱います。この layer は limit の種類を見ず基本点だけを見るため、named 役満の基本点が決まれば同じ計算をそのまま使えます。役満の倍率決定は [実装済みと未実装](#実装済みと未実装) のとおり未実装です。
+数え役満の基本点8000も通常の基本点と同じ倍率と丸めで扱います。この layer は limit の種類を見ず基本点だけを見るため、named 役満の基本点にも同じ計算をそのまま使います。
 
 ### まだ扱わない範囲
 
