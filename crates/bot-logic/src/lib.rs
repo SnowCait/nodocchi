@@ -2,6 +2,7 @@ pub mod acceptance;
 pub mod completed_hand;
 pub mod discard;
 pub mod furiten;
+pub mod han;
 pub mod hand;
 pub mod iishanten;
 pub mod lookahead;
@@ -54,6 +55,7 @@ pub use furiten::{
     diagnose_discard_furiten, discard_tenpai_wait_availability, permanent_furiten_for_waits,
     tenpai_wait_availability,
 };
+pub use han::{WinningYakuHanEvaluation, YakuHan, evaluate_winning_yaku_han};
 pub use hand::{Hand, HandError};
 pub use iishanten::{
     IishantenShape, classify_standard_iishanten_shape,

@@ -1,6 +1,6 @@
 # 手牌評価
 
-将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。そのうえで、通常役とは別型の `Yakuman` として named 役満の成立事実だけを同じ単位で判定します。翻数や点数はまだ扱いません。
+将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。そのうえで、通常役とは別型の `Yakuman` として named 役満の成立事実だけを同じ単位で判定します。成立した通常役は、成立判定と分離した pure な layer で WRC Rules 2025 の翻数へ変換し、`decomposition` × `interpretation` 単位で通常役由来の翻数を集計します。ドラ・符・点数はまだ扱いません。
 
 ## 実装済みと未実装
 
@@ -39,6 +39,10 @@
 - 大三元 (`Daisangen`)
 - 小四喜 (`Shousuushii`)
 - 大四喜 (`Daisuushii`)
+- 通常 `Yaku` から翻数への変換 (`YakuHan`)
+- 食い下がり (`SanshokuDoujun` / `Ittsu` / `Chanta` / `Honitsu` / `Junchan` / `Chinitsu`)
+- decomposition × interpretation ごとの翻数 (`evaluate_winning_yaku_han()`)
+- 役ごとの翻数内訳と通常役由来の翻数合計 (`yaku_han_total()`)
 
 未実装:
 
@@ -46,9 +50,11 @@
 - 天和 / 地和
 - 人和の特殊 scoring
 - 責任払い (包)
-- 翻数集計
+- ドラ / 裏ドラ / 槓ドラ / 赤ドラの翻数
 - 符計算
 - ドラの点数化
+- 満貫 / 跳満 / 倍満 / 三倍満などの limit 判定
+- 役満の点数化と複合役満の倍率
 - 確定した点数
 - 確定した `HandValue`
 
@@ -139,7 +145,7 @@ for evaluation in evaluate_structural_yaku(&analysis) {
 
 順子・刻子の判定では門前面子と fixed meld の両方を見ます。`SanshokuDoujun` と `Ittsu` は `Chi` を、`SanshokuDoukou` は `Pon` / `Daiminkan` / `Ankan` / `Kakan` を含みます。`Iipeikou` / `Ryanpeikou` だけは門前の順子だけを構成要素にします。
 
-`Yaku` は成立した事実だけを表し、翻数を持ちません。`Sanshoku` / `Ittsu` / `Chanta` / `Junchan` / `Honitsu` / `Chinitsu` の食い下がりは後続の翻数 layer の責務です。ドラと赤ドラも役ではないため `Yaku` に含めません。
+`Yaku` は成立した事実だけを表し、翻数を持ちません。`Sanshoku` / `Ittsu` / `Chanta` / `Junchan` / `Honitsu` / `Chinitsu` の食い下がりは [通常 Yaku の翻数](#通常-yaku-の翻数) layer の責務です。ドラと赤ドラも役ではないため `Yaku` に含めません。
 
 ### 役同士の排他と役満の境界
 
@@ -222,7 +228,7 @@ structural Yaku を再判定せず、`evaluate_structural_yaku()` の結果へ�
 
 三元牌は round / seat context に関係なく成立します。風牌は既知の軸だけを見て、unknown な軸から役牌を推測しません。東場で自風が unknown なら、東の刻子は `YakuhaiRoundWind` だけが確定します。
 
-`Yaku::Yakuhai` のような generic な1 variant にはしません。役一覧は sort + dedup されるため、重複数で翻数を表す設計ではダブ風や複数役牌の情報が失われるからです。場風と自風が同じ東場・東家の東刻子は `YakuhaiRoundWind` と `YakuhaiSeatWind` の2つの成立事実として保持され、将来の翻数 layer が自然に2翻として集計できます。
+`Yaku::Yakuhai` のような generic な1 variant にはしません。役一覧は sort + dedup されるため、重複数で翻数を表す設計ではダブ風や複数役牌の情報が失われるからです。場風と自風が同じ東場・東家の東刻子は `YakuhaiRoundWind` と `YakuhaiSeatWind` の2つの成立事実として保持され、[通常 Yaku の翻数](#通常-yaku-の翻数) layer がそのまま2翻として集計します。
 
 役牌は `Shousangen` と排他ではありません。白刻子・發刻子・中雀頭の手では、同じ分解が `Shousangen` / `YakuhaiWhite` / `YakuhaiGreen` を保持します。
 
@@ -272,7 +278,7 @@ WRC Rules 2025 `11.5.1 One han yaku` では、`Haitei` は live wall の最後�
 - `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため、`evaluate_yaku()` へは入れません。同じ分解でも和了牌の placement で結果が変わるため、`YakuEvaluation` へ和了牌を optional field として足さず、後述の [decomposition × interpretation ごとの Yaku](#decomposition--interpretation-ごとの-yaku) を別の層として持ちます。
 - `Renhou` は WRC では5翻相当ですが、他の役やドラと複合しない特殊な scoring semantics を持つため、この cumulative な役 layer へ入れません。
 - 役満は `Yaku` へ足さず、別型の `Yakuman` として [役満](#役満) で判定します。
-- 翻数は引き続き `Yaku` に持たせません。`Riichi = 1` / `DoubleRiichi = 2` のような換算と食い下がりは後続の翻数 layer の責務です。通常ドラ / 裏ドラ / 赤ドラも役ではないため `Yaku` に入れません。
+- 翻数は引き続き `Yaku` に持たせません。`Riichi = 1` / `DoubleRiichi = 2` のような換算と食い下がりは [通常 Yaku の翻数](#通常-yaku-の翻数) layer の責務です。通常ドラ / 裏ドラ / 赤ドラも役ではないため `Yaku` に入れません。
 
 ## 和了牌の解釈
 
@@ -662,11 +668,86 @@ Suuankou + Tsuuiisou + Daisuushii
 - `Tenhou` / `Chiihou` は入れません。現在の `WinningContext` には、配牌時の親の自摸和了か、子の第一自摸か、それ以前に鳴きや暗槓が発生したかを確定できる事実がありません。`seat_wind == East` かつ自摸だけで `Tenhou` と推測せず、非親の自摸だけで `Chiihou` と推測しません。first-turn / 中断履歴を tri-state の事実として設計してから実装します。
 - `Renhou` は WRC では5翻役で、他の役やドラと複合しない特殊な scoring semantics を持ちます。役満ではないため `Yakuman` へ入れず、`Yaku` へも安易に足さず、後続の特殊 scoring layer で扱います。
 - 責任払い (包) は入れません。WRC では `Daisangen` / `Daisuushii` / `Suukantsu` に責任払いが関係する場合がありますが、成立した役満そのものと支払い責任は別責務です。誰が最後の面子 / 槓を鳴かせたかを推測・追跡しません。
-- 役満の点数、親 / 子の支払い、複合役満の最終点数、翻数、符、ドラ、確定した `HandValue` はまだ実装しません。
+- 役満の点数、親 / 子の支払い、複合役満の最終点数、符、ドラ、確定した `HandValue` はまだ実装しません。役満を翻数へ換算しないため、[通常 Yaku の翻数](#通常-yaku-の翻数) の合計へも足しません。
 
 ### production policy へは接続しない
 
 役満評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役満評価を新しく構築しません。診断表示のために役満判定を別実装することもしません。検証は `bot-logic` の unit test を中心に行います。
+
+## 通常 Yaku の翻数
+
+通常 `Yaku` は成立した役の事実で、それを何翻として数えるかは別のルールです。翻数は成立判定と分離した層が扱い、成立済みの役を WRC Rules 2025 の翻数へ変換して `decomposition` × `interpretation` 単位で合計します。役が成立するかどうか、上位下位の役が排他かどうかは引き続き役評価器の責務で、この層では再判定しません。
+
+```text
+成立した Yaku
+  ↓ WRC Rules 2025 の翻数
+役ごとの翻数
+  ↓ interpretation ごとに合計
+通常役由来の翻数 (ドラを含まない)
+```
+
+役ごとの内訳と合計の両方を保持します。`Riichi 1 + Pinfu 1 + Tanyao 1 = 3` のように後続の符 / 点数計算や診断が根拠を説明できるようにするためで、合計値だけへ潰しません。
+
+### 翻数
+
+| 翻数 | Yaku |
+| --- | --- |
+| 1翻 | `Pinfu` / `Tanyao` / `Iipeikou` / `YakuhaiWhite` / `YakuhaiGreen` / `YakuhaiRed` / `YakuhaiRoundWind` / `YakuhaiSeatWind` / `Riichi` / `Ippatsu` / `MenzenTsumo` / `Chankan` / `RinshanKaihou` / `Haitei` / `Houtei` |
+| 2翻 | `Chiitoitsu` / `Toitoi` / `Sanankou` / `SanshokuDoukou` / `Sankantsu` / `Shousangen` / `Honroutou` / `DoubleRiichi` |
+| 門前2翻 / 副露1翻 | `SanshokuDoujun` / `Ittsu` / `Chanta` |
+| 門前3翻 | `Ryanpeikou` |
+| 門前3翻 / 副露2翻 | `Honitsu` / `Junchan` |
+| 門前6翻 / 副露5翻 | `Chinitsu` |
+
+翻数は WRC Rules 2025 の `11.5.1 One han yaku` / `11.5.2 Two han yaku` / `11.5.3 Three han yaku` / `11.5.5 Six han yaku` を一次情報とします。
+
+### 門前と副露
+
+食い下がりがあるのは上表の6役だけです。「副露手なら一律 -1翻」ではないため、副露しても `Toitoi` / `Honroutou` は2翻のままです。門前 / 副露の判定は既存の共通判定に従い、暗槓は門前を維持します。暗槓だけを持つ手の `Ittsu` / `Honitsu` / `Chinitsu` は門前の翻数です。
+
+`Pinfu` / `Iipeikou` / `Riichi` のような門前限定役の門前性は役評価器が保証済みなので、翻数側で再判定して0翻へ落としません。
+
+### 成立した役を個別に加算する
+
+役評価器は意味の異なる役を別々の `Yaku` として返します。翻数もそれぞれを個別に加算します。
+
+| 手 | 成立する役 | 翻数 |
+| --- | --- | --- |
+| 東場・東家の東刻子 | `YakuhaiRoundWind` + `YakuhaiSeatWind` | 1 + 1 = 2 |
+| 小三元 | `Shousangen` + 三元役牌 ×2 | 2 + 1 + 1 = 4 |
+| 混老頭の対々和 | `Honroutou` + `Toitoi` | 2 + 2 = 4 |
+| 混老頭の七対子 | `Honroutou` + `Chiitoitsu` | 2 + 2 = 4 |
+| リーチ一発 | `Riichi` + `Ippatsu` | 1 + 1 = 2 |
+| ダブルリーチ一発 | `DoubleRiichi` + `Ippatsu` | 2 + 1 = 3 |
+
+### interpretation ごとに集計する
+
+同じ完成手でも和了牌の解釈によって成立役が変わるため、翻数も解釈ごとに変わります。
+
+```text
+123m 345m 456p 789s 55p  和了牌 3m
+  ↓ 同じ分解
+3m が 123m を完成 → Penchan → Pinfu なし → 0翻
+3m が 345m を完成 → Ryanmen → Pinfu あり → 1翻
+```
+
+analysis 全体や分解単位へ翻数を union せず、同じ分解の複数解釈も1つへまとめません。後続で decomposition × interpretation → Yaku → Han → Fu → 点数 を比較し、最も高い解釈を選べる構造を維持します。
+
+### ドラと役満は別に扱う
+
+集計するのは通常役由来の翻数だけです。WRC Rules 2025 `11.4 Dora` ではドラも1枚1翻ですが、ドラは役ではありません。ドラ / 裏ドラ / 槓ドラ / 赤ドラは bonus 翻として後続 layer で扱い、この集計には含めません。
+
+役満も別 layer です。役満を13翻などへ換算せず、通常役の翻数へ足さず、複合役満の倍率も数えません。役満が成立していても通常役の翻数を suppression しません。役満と通常翻のどちらを採用するかは後続の scoring layer の責務です。
+
+### まだ扱わない範囲
+
+成立役の raw な翻数をそのまま合計し、5翻以上の満貫 / 跳満 / 倍満 / 三倍満や13翻以上の limit へ丸めません。合計が13以上でもその値を保持します。limit 判定、符、基本点、ロン / ツモの支払い、責任払い (包)、確定した `HandValue` は [実装済みと未実装](#実装済みと未実装) のとおり未実装です。
+
+`Renhou` は WRC Rules 2025 `11.5.4 Five han yaku` の5翻役ですが、他の役やドラと複合しない特殊な scoring semantics と first-turn の履歴事実を必要とするため、この generic な翻数合計へ入れません。`Tenhou` / `Chiihou` は既存方針どおり別 scope です。
+
+### production policy へは接続しない
+
+翻数も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / 鳴き判断 / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の選択結果は変わらず、通常の行動選択のために役 / 翻数評価を新しく実行する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 向聴数との関係
 
