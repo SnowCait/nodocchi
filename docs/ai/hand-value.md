@@ -65,6 +65,9 @@
 - named 役満の点数化 (`evaluate_yakuman_scoring()`)
 - 役満ごとの倍率内訳と複合役満の合計倍率
 - 役満の基本点と支払点
+- 通常手と named 役満の candidate からの最良候補の選択 (`select_best_scoring_candidate()`)
+- 支払点を第一比較軸とする candidate の比較
+- 裏ドラが未観測で最良候補を確定できない状態
 
 未実装:
 
@@ -72,7 +75,6 @@
 - 天和 / 地和
 - 人和の特殊 scoring
 - 責任払い (包)
-- 最も高い解釈の選択
 - 本場 / 供託
 - 確定した点数
 - 確定した `HandValue`
@@ -1105,7 +1107,7 @@ base payment の合計
 
 表現できない点数を silent に飽和させず、正しい支払いを求められない入力に対して点数を返しません。
 
-通常役の翻数と bonus 翻の統合、`decomposition` × `interpretation` ごとの scoring、最も高い解釈の選択、確定した `HandValue` も引き続き未実装です。
+確定した `HandValue` は引き続き未実装です。
 
 ### production policy へは接続しない
 
