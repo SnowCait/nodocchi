@@ -1,6 +1,6 @@
 # 手牌評価
 
-将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈します。翻数や点数はまだ扱いません。
+将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。翻数や点数はまだ扱いません。
 
 ## 実装済みと未実装
 
@@ -23,16 +23,19 @@
 - 待ち形 (両面 / 嵌張 / 辺張 / 単騎 / シャンポン)
 - 七対子の待ち
 - 国士無双の special wait (13面待ち / 単一牌種待ち)
+- decomposition × interpretation ごとの Yaku 判定 (`evaluate_winning_yaku()`)
+- 平和
+- 三暗刻
 
 未実装:
 
-- 平和
-- 三暗刻
+- 和了牌が不明な場合の完全な scoring policy
 - 人和
 - 役満
 - 翻数集計
 - 符計算
 - 点数計算
+- 確定した `HandValue`
 
 役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) ([WRC Rules 2025 PDF](https://static1.squarespace.com/static/634a7884c297a25f06589b79/t/6834d67360e19c1da6c0d12c/1748293243651/WRC+Rules+2025.pdf) の `11.5 Yaku list`) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
 
@@ -251,14 +254,14 @@ WRC Rules 2025 `11.5.1 One han yaku` では、`Haitei` は live wall の最後�
 
 ### まだ入れない役
 
-- `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため入れません。特に `Sanankou` は「和了牌がどの刻子を完成させたか」が必要で、Ron / Tsumo だけでは決まりません。解釈自体は後述の [和了牌の解釈](#和了牌の解釈) が独立した層として提供しますが、`YakuEvaluation` へはまだ組み込みません。
+- `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため、`evaluate_yaku()` へは入れません。同じ分解でも和了牌の placement で結果が変わるため、`YakuEvaluation` へ和了牌を optional field として足さず、後述の [decomposition × interpretation ごとの Yaku](#decomposition--interpretation-ごとの-yaku) を別の層として持ちます。
 - `Renhou` は WRC では5翻相当ですが、他の役やドラと複合しない特殊な scoring semantics を持つため、この cumulative な役 layer へ入れません。
 - 役満は引き続き未実装です。
 - 翻数は引き続き `Yaku` に持たせません。`Riichi = 1` / `DoubleRiichi = 2` のような換算と食い下がりは後続の翻数 layer の責務です。通常ドラ / 裏ドラ / 赤ドラも役ではないため `Yaku` に入れません。
 
 ## 和了牌の解釈
 
-`interpret_winning_tile(&analysis, winning_tile)` は完成手の構造と判明している和了牌だけを入力に取り、その和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに列挙する pure helper です。将来の平和 / 三暗刻 / 四暗刻 / 符計算が同じ解釈を再利用でき、役ごとに「和了牌が刻子を完成させたか」を再計算しないようにするための層です。
+`interpret_winning_tile(&analysis, winning_tile)` は完成手の構造と判明している和了牌だけを入力に取り、その和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに列挙する pure helper です。平和 / 三暗刻 と将来の四暗刻 / 符計算が同じ解釈を再利用でき、役ごとに「和了牌が刻子を完成させたか」を再計算しないようにするための層です。
 
 ```rust
 let analysis = analyze_completed_hand(&concealed_tiles, &fixed_melds)?;
@@ -369,6 +372,135 @@ WRC Rules 2025 (`11.3 Minipoints`) の待ち符は「手牌全体に他の待ち
 ### 和了牌が不明な場合
 
 WRC Rules 2025 では和了牌が不明で役や符が曖昧になる場合、その曖昧な役 / 符は得点できません。この helper は判明している和了牌だけを解釈し、和了牌が不明であることを `TileType` のダミー値では表現しません。和了牌が不明な場合は後続の scoring layer が `interpret_winning_tile()` を呼ばず、和了牌に依存する役と符を付けない、という切り分けにします。
+
+## decomposition × interpretation ごとの Yaku
+
+`evaluate_winning_yaku(&analysis, context, winning_tile)` は `evaluate_yaku()` と `interpret_winning_tile()` を組み合わせ、和了牌の placement まで確定した単位で役を返します。
+
+```rust
+let analysis = analyze_completed_hand(&concealed_tiles, &fixed_melds)?;
+let context = WinningContext::new(WinMethod::Ron)
+    .with_round_wind(round_wind)
+    .with_seat_wind(seat_wind);
+for evaluation in evaluate_winning_yaku(&analysis, context, winning_tile) {
+    let interpretation = evaluation.interpretation();
+    let decomposition = evaluation.decomposition();
+    let yaku = evaluation.yaku();
+}
+```
+
+`WinningYakuEvaluation` は `WinningTileInterpretation` と役一覧だけを持ちます。和了牌 / `WinningGroup` / `WaitType` / 分解を別 field へ複製せず、`WinningTileInterpretation` を唯一の source of truth にします。`decomposition()` は `interpretation().decomposition()` をそのまま返します。
+
+`Pinfu` / `Sanankou` 以外の役をここで再判定しません。同じ分解の `evaluate_yaku()` の結果をそのまま引き継ぎ、和了牌依存の役だけを足してから sort + dedup します。`Tanyao` / `Riichi` / 役牌のような structural / 状況依存役の判定は `evaluate_structural_yaku()` と `evaluate_yaku()` の1か所だけに残ります。
+
+### 既存 `evaluate_yaku()` との責務分離
+
+| API | 責務 |
+| --- | --- |
+| `evaluate_structural_yaku()` | 牌姿だけで確定する役 |
+| `evaluate_yaku()` | structural + `WinningContext` の状況依存役 |
+| `evaluate_winning_yaku()` | 上記 + 和了牌の placement に依存する役 |
+
+`evaluate_yaku()` へ和了牌を必須引数として足さず、既存 semantics のまま残します。和了牌が不明な場合は `evaluate_yaku()` を使い、`Pinfu` / `Sanankou` を付けません。将来の確定 `HandValue` は `evaluate_winning_yaku()` を使う想定です。
+
+`interpret_winning_tile()` が空を返す場合、`evaluate_winning_yaku()` も空を返します。未完成手、和了牌の牌種が門前部分にない場合、有効な解釈がない場合に和了牌を別ロジックで推測しません。
+
+### 解釈ごとに役が変わる
+
+同じ分解でも和了牌の placement によって成立する役が変わります。最も高い解釈を選ぶのは後続の点数比較 layer の責務なので、この層では候補をすべて保持します。
+
+```text
+123m 345m 456p 789s 55p  和了牌 3m
+  ↓ 同じ分解
+3m が 123m を完成 → Penchan → Pinfu 不成立
+3m が 345m を完成 → Ryanmen → Pinfu 成立
+```
+
+```text
+234m 333m 555p 777s 99p  和了牌 3m をロン
+  ↓ 同じ分解
+3m が 234m を完成 → 暗刻3つを維持 → Sanankou 成立
+3m が 333m を完成 → その刻子は明刻 → Sanankou 不成立
+```
+
+analysis 全体や分解単位で役を union しません。返却する解釈の個数と順序は `interpret_winning_tile()` と一致し、役一覧が同じになった解釈同士を dedup しません。dedup の source of truth は `interpret_winning_tile()` だけです。
+
+不正な fixed meld を含む `Standard` 分解には、既存 `evaluate_yaku()` と同じく和了牌依存の役も付けません。判定は `Meld::shape()` と `standard_meld_shapes()` を source of truth にし、「structural / 状況依存役は空なのに `Pinfu` / `Sanankou` だけ付く」という不整合を作りません。
+
+### `Pinfu`
+
+WRC Rules 2025 `11.5.1 Pinfu` の条件をそのまま実装します。次をすべて満たす解釈だけが `Pinfu` です。
+
+- `Standard` 分解であること
+- 門前であること (`is_menzen()`)
+- fixed meld を含めた4面子すべてが `MeldShape::Sequence`
+- 雀頭が非役牌と確認できること
+- `WinningGroup::Sequence` であること
+- `WaitType::Ryanmen` であること
+
+門前判定は `is_menzen()` が source of truth です。`Ankan` は門前を維持しますが `MeldShape::Kan` なので「4面子すべて順子」を満たさず、別条件で不成立になります。`Chi` / `Pon` / `Daiminkan` / `Kakan` は門前ではないため不成立です。
+
+4面子は `StandardDecomposition::concealed_melds()` だけでなく `standard_meld_shapes()` で fixed meld も含めて見ます。同じ面子構築を `Pinfu` 用に再実装しません。
+
+`Kanchan` / `Penchan` / `Tanki` / `Shanpon` と国士の待ちでは成立しません。`WaitType` に加えて `WinningGroup` が順子であることも明示的に確認します。
+
+#### unknown な風を客風と推測しない
+
+雀頭が三元牌なら常に不成立、数牌なら風 context に関係なく成立可能です。風牌の雀頭だけは「非役牌であることを確認できた」ことを要求します。
+
+| 雀頭 | `round_wind` | `seat_wind` | `Pinfu` |
+| --- | --- | --- | --- |
+| 数牌 | 任意 | 任意 | 成立可能 |
+| 三元牌 | 任意 | 任意 | 不成立 |
+| 西 | 東 | 南 | 成立可能 |
+| 西 | 東 | unknown | 不成立 |
+| 西 | unknown | 南 | 不成立 |
+| 東 | 東 | unknown | 不成立 |
+
+`TileType::is_value_honor(round_wind, seat_wind)` は unknown な軸を「一致しない」として扱うため、そのまま使うと unknown を客風と推測してしまいます。風牌の雀頭では `round_wind` と `seat_wind` の両方が判明している場合だけ `is_value_honor()` に問い合わせ、片方でも unknown なら `Pinfu` を付けません。`WinningContext` 全体の「unknown を `false` と推測しない」方針と同じ扱いです。
+
+### `Sanankou`
+
+WRC Rules 2025 `11.5.2 San'ankō` の「暗刻 / 暗槓が3つ」を、和了後の concealed set 数から判定します。門前限定ではありません。`Chi` を1つ副露していても暗刻3つがそろえば成立します。`is_menzen()` を必要条件にしません。
+
+concealed set は `concealed_set_count(&interpretation, fixed_melds, win_method)` が数えます。`Sanankou` 固有の helper ではなく、`StandardDecomposition` / fixed meld / 解釈 / `WinMethod` から和了後の暗刻・暗槓数だけを返す neutral な pure helper です。将来の `Suuankou` と符計算が同じ判定を再実装しなくて済みます。
+
+| 面子 | concealed set |
+| --- | --- |
+| 門前の暗刻 (`ConcealedMeld::Triplet`) | 数える |
+| `Ankan` | 数える |
+| `Pon` / `Daiminkan` / `Kakan` / `Chi` | 数えない |
+| 牌構成が不正な fixed meld | 数えない |
+
+open / closed の判定は既存 `Meld::is_open()` と `Meld::shape()` が source of truth で、fixed meld の判定を別実装しません。
+
+#### ロンで完成した刻子は明刻
+
+WRC Rules 2025 では、和了牌が刻子を完成させた場合、自摸なら暗刻、ロンなら明刻として扱います。
+
+| 解釈 | `WinMethod` | その面子 |
+| --- | --- | --- |
+| `WinningGroup::Triplet` | `Tsumo` | 暗刻として数える |
+| `WinningGroup::Triplet` | `Ron` | 明刻として数えない |
+| `WinningGroup::Sequence` / `Pair` | 任意 | 他の暗刻はそのまま維持 |
+
+最終的な分解上は `ConcealedMeld::Triplet` でも、ロンでその刻子を完成させた解釈では暗刻ではありません。逆に「ロンだから暗刻を一律1つ減らす」こともしません。減らすのは `Ron` かつ `WinningGroup::Triplet` の解釈だけです。暗刻3つを持ちロン牌が順子や雀頭を完成させた場合は `Sanankou` が成立します。
+
+#### `Suuankou` との境界
+
+役満は引き続き未実装です。`Sankantsu` が槓子ちょうど3つで `Suukantsu` を残しているのと同じく、`Sanankou` も和了後の concealed set がちょうど3のときだけ成立します。
+
+| 形 | concealed set | 結果 |
+| --- | --- | --- |
+| 暗刻4つを自摸 | 4 | `Sanankou` なし (将来の `Suuankou`) |
+| 暗刻4つで雀頭をロン | 4 | `Sanankou` なし (将来の `Suuankou`) |
+| 4刻子形でそのうち1つをロンで完成 | 3 | `Sanankou` |
+
+`Suuankou` 自体はまだ追加しません。
+
+### production policy へは接続しない
+
+この評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役評価を新しく構築しません。診断表示のために役判定を再実装することもしません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 向聴数との関係
 
