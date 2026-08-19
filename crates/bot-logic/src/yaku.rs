@@ -13,9 +13,11 @@ const NUMBER_COUNT: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Yaku {
+    Pinfu,
     Tanyao,
     Chiitoitsu,
     Toitoi,
+    Sanankou,
     Iipeikou,
     Ryanpeikou,
     SanshokuDoujun,
@@ -301,7 +303,7 @@ fn tile_composition_yaku(tiles: &[TileType]) -> Vec<Yaku> {
     yaku
 }
 
-fn standard_meld_shapes(
+pub(crate) fn standard_meld_shapes(
     standard: &StandardDecomposition,
     fixed_melds: &[Meld],
 ) -> Option<Vec<MeldShape>> {
