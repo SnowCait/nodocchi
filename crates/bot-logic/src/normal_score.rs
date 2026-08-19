@@ -101,7 +101,7 @@ fn calculated_basic_points(han: u8, fu: u8) -> (LimitClass, u32) {
 }
 
 fn is_final_fu(fu: u8) -> bool {
-    fu == CHIITOITSU_FU || (fu >= MIN_FU && fu % FU_ROUNDING_UNIT == 0)
+    fu == CHIITOITSU_FU || (fu >= MIN_FU && fu.is_multiple_of(FU_ROUNDING_UNIT))
 }
 
 #[cfg(test)]
