@@ -66,8 +66,8 @@ pub enum FuKind {
 }
 
 impl FuKind {
-    pub fn is_rounded_up(self) -> bool {
-        !matches!(self, Self::Chiitoitsu)
+    fn uses_ten_fu_rounding(self) -> bool {
+        matches!(self, Self::Standard)
     }
 }
 
@@ -86,7 +86,7 @@ impl FuBreakdown {
             kind,
             contributions,
             raw_fu,
-            fu: if kind.is_rounded_up() {
+            fu: if kind.uses_ten_fu_rounding() {
                 raw_fu.div_ceil(FU_ROUNDING_UNIT) * FU_ROUNDING_UNIT
             } else {
                 raw_fu
@@ -497,8 +497,15 @@ mod tests {
         let analysis = analyze(&CHIITOITSU_HAND, &[]);
         let breakdown = only_breakdown(&analysis, ron(), "E");
 
-        assert!(!breakdown.kind().is_rounded_up());
+        assert_eq!((breakdown.raw_fu(), breakdown.fu()), (25, 25));
         assert_eq!(breakdown.fu() % FU_ROUNDING_UNIT, 5);
+    }
+
+    #[test]
+    fn only_the_standard_kind_uses_ten_fu_rounding() {
+        assert!(FuKind::Standard.uses_ten_fu_rounding());
+        assert!(!FuKind::PinfuTsumo.uses_ten_fu_rounding());
+        assert!(!FuKind::Chiitoitsu.uses_ten_fu_rounding());
     }
 
     #[test]
