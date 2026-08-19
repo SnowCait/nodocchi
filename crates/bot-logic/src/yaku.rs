@@ -381,7 +381,7 @@ fn single_suit(tiles: &[TileType]) -> Option<Suit> {
     found
 }
 
-fn hand_tile_types(analysis: &CompletedHandAnalysis) -> Vec<TileType> {
+pub(crate) fn hand_tile_types(analysis: &CompletedHandAnalysis) -> Vec<TileType> {
     analysis
         .concealed_tiles()
         .iter()
