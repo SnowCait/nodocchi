@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod completed_hand;
 pub mod discard;
+pub mod fu;
 pub mod furiten;
 pub mod han;
 pub mod hand;
@@ -49,6 +50,7 @@ pub use discard::{
     shape_penalty_for_discard_with_fixed_melds,
     shape_penalty_for_discard_with_fixed_melds_and_context,
 };
+pub use fu::{FuBreakdown, FuContribution, FuKind, WinningFuEvaluation, evaluate_winning_fu};
 pub use furiten::{
     DiscardFuritenDiagnostic, HistoryFuritenFacts, OwnDiscards, PermanentFuriten,
     PermanentFuritenDiagnostic, TenpaiWaitAvailability, can_ron_from_furiten,

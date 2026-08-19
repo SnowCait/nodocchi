@@ -90,7 +90,7 @@ pub fn concealed_set_count(
     )))
 }
 
-fn completed_as_melded_triplet(
+pub(crate) fn completed_as_melded_triplet(
     interpretation: &WinningTileInterpretation<'_>,
     win_method: WinMethod,
 ) -> bool {
