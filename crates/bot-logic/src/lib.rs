@@ -22,6 +22,7 @@ pub mod winning_yaku;
 pub mod winning_yakuman;
 pub mod yaku;
 pub mod yakuman;
+pub mod yakuman_scoring;
 
 pub use acceptance::{
     Acceptance, AcceptanceTile, EffectiveAcceptance, EffectiveAcceptanceTile, calculate_acceptance,
@@ -105,3 +106,6 @@ pub use yaku::{
     StructuralYakuEvaluation, Yaku, YakuEvaluation, evaluate_structural_yaku, evaluate_yaku,
 };
 pub use yakuman::{Yakuman, YakumanEvaluation, evaluate_yakuman};
+pub use yakuman_scoring::{
+    YakumanContribution, YakumanScoringCandidate, YakumanScoringError, evaluate_yakuman_scoring,
+};
