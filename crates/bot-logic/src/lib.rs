@@ -9,6 +9,7 @@ pub mod hand;
 pub mod iishanten;
 pub mod lookahead;
 pub mod meld;
+pub mod normal_score;
 pub mod selection;
 pub mod shanten;
 pub mod tile;
@@ -73,6 +74,7 @@ pub use lookahead::{
     tenpai_wait_metrics_with_fixed_melds, tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
 };
 pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
+pub use normal_score::{LimitClass, NormalScoreBase, NormalScoreError, evaluate_normal_score_base};
 pub use selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     WeightedForwardMetric, best_discard_selection_index,
