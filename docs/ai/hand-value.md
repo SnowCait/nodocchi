@@ -1,6 +1,6 @@
 # 手牌評価
 
-将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。翻数や点数はまだ扱いません。
+将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈します。翻数や点数はまだ扱いません。
 
 ## 実装済みと未実装
 
@@ -18,10 +18,14 @@
 - 門前清自摸和
 - 槍槓 / 嶺上開花 / 海底摸月 / 河底撈魚
 - structural と状況依存をまとめた decomposition ごとの判定 (`evaluate_yaku()`)
+- 判明している和了牌の解釈 (`interpret_winning_tile()`)
+- decomposition ごとの複数の和了牌 placement
+- 待ち形 (両面 / 嵌張 / 辺張 / 単騎 / シャンポン)
+- 七対子の待ち
+- 国士無双の special wait (13面待ち / 単一牌種待ち)
 
 未実装:
 
-- 和了牌と待ち形 (両面 / 嵌張 / 辺張 / 単騎 / シャンポン) の解釈
 - 平和
 - 三暗刻
 - 人和
@@ -247,10 +251,124 @@ WRC Rules 2025 `11.5.1 One han yaku` では、`Haitei` は live wall の最後�
 
 ### まだ入れない役
 
-- `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため入れません。特に `Sanankou` は「和了牌がどの刻子を完成させたか」が必要で、Ron / Tsumo だけでは決まりません。
+- `Pinfu` / `Sanankou` は和了牌と待ち形の解釈が必要なため入れません。特に `Sanankou` は「和了牌がどの刻子を完成させたか」が必要で、Ron / Tsumo だけでは決まりません。解釈自体は後述の [和了牌の解釈](#和了牌の解釈) が独立した層として提供しますが、`YakuEvaluation` へはまだ組み込みません。
 - `Renhou` は WRC では5翻相当ですが、他の役やドラと複合しない特殊な scoring semantics を持つため、この cumulative な役 layer へ入れません。
 - 役満は引き続き未実装です。
 - 翻数は引き続き `Yaku` に持たせません。`Riichi = 1` / `DoubleRiichi = 2` のような換算と食い下がりは後続の翻数 layer の責務です。通常ドラ / 裏ドラ / 赤ドラも役ではないため `Yaku` に入れません。
+
+## 和了牌の解釈
+
+`interpret_winning_tile(&analysis, winning_tile)` は完成手の構造と判明している和了牌だけを入力に取り、その和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに列挙する pure helper です。将来の平和 / 三暗刻 / 四暗刻 / 符計算が同じ解釈を再利用でき、役ごとに「和了牌が刻子を完成させたか」を再計算しないようにするための層です。
+
+```rust
+let analysis = analyze_completed_hand(&concealed_tiles, &fixed_melds)?;
+for interpretation in interpret_winning_tile(&analysis, winning_tile) {
+    let decomposition = interpretation.decomposition();
+    let group = interpretation.group();
+    let wait = interpretation.wait();
+}
+```
+
+入力は `TileType` です。待ち形の解釈に赤5と黒5の区別は影響せず、赤ドラ集計で必要になる物理牌は `CompletedHandAnalysis` が `TileId` として既に保持しているため、ここで物理牌を再構築しません。
+
+完成手をここで再分解しません。`analyze_completed_hand()` が返した `CompletedHandDecomposition` を唯一の構造 source of truth にし、向聴数・受け入れ・待ち列挙も再計算しません。
+
+| 入力 | 結果 |
+| --- | --- |
+| 完成形 + 門前部分にある和了牌 | 成立する解釈をすべて含む `Vec` |
+| 未完成 (`is_complete() == false`) | 空の `Vec` |
+| 和了牌の牌種が門前部分にない | 空の `Vec` |
+
+専用のエラー型を足さず、既存 API と同じく成立するものだけを返す表現にしています。この helper は pure な基盤としてだけ使い、`act()` / `diagnose()` の行動選択へは接続しません。
+
+### 待ち形は手牌全体の待ち一覧ではない
+
+WRC Rules 2025 (`11.3 Minipoints`) の待ち符は「手牌全体に他の待ちがあるか」ではなく、和了牌が実際に完成させた group / pair を基準にします。そのため `WaitType` は手牌の待ち一覧ではなく、和了牌1枚の placement から決まります。
+
+| `WaitType` | 意味 |
+| --- | --- |
+| `Ryanmen` | 順子を両面形から完成させた |
+| `Kanchan` | 順子の中央牌を完成させた |
+| `Penchan` | WRC の edge wait。`12` へ `3`、`89` へ `7` |
+| `Tanki` | 雀頭を完成させた |
+| `Shanpon` | 門前の刻子を完成させた |
+| `KokushiSingle` | 国士無双で対子牌以外を完成させた |
+| `KokushiThirteenSided` | 国士無双で対子牌を完成させた |
+
+`Penchan` は完成した順子が `123` / `789` であることでは決まりません。和了牌が順子のどの位置を埋めたかで決まります。
+
+| 完成した順子 | 和了牌 | `WaitType` |
+| --- | --- | --- |
+| `123` | `3` | `Penchan` |
+| `123` | `2` | `Kanchan` |
+| `123` | `1` | `Ryanmen` |
+| `789` | `7` | `Penchan` |
+| `789` | `8` | `Kanchan` |
+| `789` | `9` | `Ryanmen` |
+
+牌番号の演算は既存 `TileType::sequence()` / `number()` を使い、raw index の演算を別実装しません。
+
+`WaitType` は事実だけを表し、符を持ちません。七対子の対子完成も構造としては `Tanki` ですが、七対子が固定25符であることとは結び付けません。符への換算は後続の符 layer の責務です。
+
+### 和了牌が何を完成させたか
+
+`WaitType` だけでなく、和了牌が完成させた group 自体も `WinningGroup` として保持します。
+
+| `WinningGroup` | 対応する `WaitType` |
+| --- | --- |
+| `Pair { tile }` | `Tanki` / `KokushiThirteenSided` |
+| `Sequence { start }` | `Ryanmen` / `Kanchan` / `Penchan` |
+| `Triplet { tile }` | `Shanpon` |
+| `KokushiSingle { tile }` | `KokushiSingle` |
+
+平和は `WinningGroup::Sequence` と `WaitType::Ryanmen` を、三暗刻・四暗刻・符は `WinningGroup::Triplet` を後続 layer が直接読めます。`WinningGroup::meld_shape()` は順子・刻子を既存 `MeldShape` へ正規化します。
+
+### `WinningContext` との責務分離
+
+待ち形は完成手の構造と和了牌だけで決まるため、この helper は `WinMethod` を受け取りません。和了時の event facts (Ron / Tsumo、場風、自風、リーチ、一発、嶺上、槍槓、残りツモ可能枚数) は `WinningContext` の責務のままにします。
+
+ここでは「和了牌がどの刻子を完成させたか」という事実だけを保持し、その刻子が暗刻か明刻かは後続 layer が `WinningTileInterpretation` と `WinningContext::win_method()` を組み合わせて決めます。WRC Rules 2025 `11.5.2 San'ankō` では、和了牌が完成させた刻子を自摸なら暗刻、ロンなら明刻として扱うためです。同じ組み合わせを `11.3 Minipoints` の符計算でも使います。
+
+### 同じ decomposition の複数解釈
+
+同じ `CompletedHandDecomposition` でも、和了牌の置き場所が複数あることがあります。分解ごとに `WaitType` を1つへ決め打ちせず、`decomposition` と和了牌の placement の組み合わせをすべて返します。
+
+```text
+123m 345m 456p 789s 55p  和了牌 3m
+  ↓ 同じ分解
+3m が 123m を完成 → Penchan
+3m が 345m を完成 → Ryanmen
+```
+
+```text
+123m 33m 456p 789p 123s  和了牌 3m
+  ↓ 同じ分解
+3m が雀頭を完成 → Tanki
+3m が 123m を完成 → Penchan
+```
+
+この層は評価ではなく事実の列挙なので、最も良い待ちを1つ選びません。どの解釈が最終得点になるかは、将来の `decomposition` × `interpretation` → 役 / 符 → 点数の比較で決めます。
+
+### fixed meld は解釈の対象にしない
+
+`Chi` / `Pon` / `Daiminkan` / `Ankan` / `Kakan` は和了前から確定済みです。和了牌の placement 候補は `StandardDecomposition::pair()` と `StandardDecomposition::concealed_melds()` だけで、fixed meld を和了牌が完成させたという解釈は作りません。和了牌と同じ牌種の `Pon` があっても `Shanpon` にはならず、門前側の解釈だけを返します。
+
+和了牌は和了時の門前部分に入った牌です。牌種が `CompletedHandAnalysis::concealed_tiles()` にない場合は解釈を返さず、fixed meld にしか存在しない牌種を和了牌として解釈しません。
+
+### 七対子と国士無双
+
+- 七対子: `ChiitoitsuDecomposition::pairs()` を source of truth にし、和了牌が7種の対子牌のいずれかなら `Tanki` を返します。牌数から七対子を再判定しません。fixed meld がある七対子を `CompletedHandAnalysis` が生成しない既存 semantics もそのままです。
+- 国士無双: `KokushiDecomposition::pair()` から判定します。和了牌が対子牌なら和了前は13種すべて1枚だったので `KokushiThirteenSided`、それ以外なら和了前は別牌が対子で和了牌の牌種だけが欠けていたので `KokushiSingle` です。WRC Rules 2025 は特定待ちによる double yakuman を採用しませんが、この層は点数ではなく待ち構造の事実なので、通常の5種へ押し込めず情報を残します。役満の判定と点数は引き続き未実装です。
+
+### 重複排除と決定的な順序
+
+同一の門前順子が2組ある場合、どちらへ和了牌を割り当てても同じ `WinningGroup` と `WaitType` になり、将来の scoring 結果も一致します。この意味的に同一な解釈は canonical な `(WinningGroup, WaitType)` へそろえたうえで sort + dedup し、探索順の違いだけで重複を返しません。`Penchan` と `Ryanmen` のように scoring 上の意味が異なる解釈は dedup しません。
+
+順序は分解の順序が外側で、その中を `WinningGroup` → `WaitType` の順に並べます。同じ入力なら常に同じ順序を返します。
+
+### 和了牌が不明な場合
+
+WRC Rules 2025 では和了牌が不明で役や符が曖昧になる場合、その曖昧な役 / 符は得点できません。この helper は判明している和了牌だけを解釈し、和了牌が不明であることを `TileType` のダミー値では表現しません。和了牌が不明な場合は後続の scoring layer が `interpret_winning_tile()` を呼ばず、和了牌に依存する役と符を付けない、という切り分けにします。
 
 ## 向聴数との関係
 

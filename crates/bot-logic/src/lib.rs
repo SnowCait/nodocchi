@@ -11,6 +11,7 @@ pub mod shanten;
 pub mod tile;
 pub mod tile_counts;
 pub mod winning_context;
+pub mod winning_tile;
 pub mod yaku;
 
 pub use acceptance::{
@@ -79,6 +80,7 @@ pub use tile::{
 };
 pub use tile_counts::{TileCountError, TileCounts};
 pub use winning_context::{RiichiStatus, WinMethod, WinningContext};
+pub use winning_tile::{WaitType, WinningGroup, WinningTileInterpretation, interpret_winning_tile};
 pub use yaku::{
     StructuralYakuEvaluation, Yaku, YakuEvaluation, evaluate_structural_yaku, evaluate_yaku,
 };
