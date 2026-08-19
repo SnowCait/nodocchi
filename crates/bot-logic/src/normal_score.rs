@@ -35,7 +35,7 @@ impl LimitClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NormalScoreBase {
     han: u8,
     fu: u8,
@@ -209,6 +209,23 @@ mod tests {
     #[test]
     fn matches_the_riichienv_four_han_thirty_fu_fixture() {
         assert_eq!(result(4, 30), (1920, LimitClass::NoLimit));
+    }
+
+    #[test]
+    fn more_han_is_not_always_more_basic_points() {
+        let fewer_han = score(3, 70);
+        let more_han = score(4, 30);
+
+        assert!(more_han.han() > fewer_han.han());
+        assert!(more_han.basic_points() < fewer_han.basic_points());
+        assert_eq!(
+            (fewer_han.basic_points(), fewer_han.limit()),
+            (2000, LimitClass::Mangan)
+        );
+        assert_eq!(
+            (more_han.basic_points(), more_han.limit()),
+            (1920, LimitClass::NoLimit)
+        );
     }
 
     #[test]
