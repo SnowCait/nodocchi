@@ -4,6 +4,9 @@ use crate::discard_selection::{
     concealed_tiles_after_discard, select_best_normal_discard_evaluation,
     selected_discard_tenpai_wait_availability,
 };
+use crate::offense_value::{
+    PUSH_HIGH_VALUE_MIN_TOTAL, TenpaiOffenseValue, evaluate_tenpai_offense_value,
+};
 use crate::open_hand_threat::{
     OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
 };
@@ -34,14 +37,16 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 ///
 /// これは暫定 heuristic であり、以下はまだ考慮していない。
 ///
-/// - 正確な打点(翻数・符・点数計算)
 /// - 待ち形(両面・カンチャン・単騎など)
 /// - 相手ごとの放銃率
 /// - 点棒状況
 /// - 局・順位条件
 ///
-/// 打牌後の受け入れ・一向聴形・簡易打点 proxy は `PushPullInputs` とログに保持するが、現在の
-/// 判定には使わない。本格的な一向聴押し引きを実装するときの解析材料として残している。
+/// 正確な打点は [`PushPullOffenseState::tenpai_offense_value_after_discard`] として持ち、
+/// threat ありの非フリテンテンパイでだけ判定へ反映する。それ以外の局面では打点を判定に
+/// 使わない。打牌後の受け入れ・一向聴形・簡易打点 proxy は
+/// `PushPullInputs` とログに保持するが、現在の判定には使わない。本格的な一向聴押し引きを
+/// 実装するときの解析材料として残している。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -60,9 +65,10 @@ pub enum PushPullMode {
 /// 符・点数計算はまだ含めない。向聴数・受け入れは fixed meld を考慮した `DiscardEvaluation` の値を
 /// そのまま受け取る。
 ///
-/// `decide_push_pull()` が現在参照するのは `min_shanten_after_discard` と
-/// `tenpai_wait_after_discard` だけで、受け入れ・一向聴形・簡易打点 proxy は診断・ログ用に
-/// 保持する。
+/// `decide_push_pull()` が現在参照するのは `min_shanten_after_discard` /
+/// `tenpai_wait_after_discard` / `tenpai_offense_value_after_discard` だけで、受け入れ・
+/// 一向聴形・簡易打点 proxy は診断・ログ用に保持する。簡易打点 proxy は exact 打点とは別物で、
+/// 一向聴以上の解析材料として残している。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
     pub min_shanten_after_discard: i8,
@@ -73,6 +79,17 @@ pub struct PushPullOffenseState {
     /// 打牌後にテンパイになる場合の待ちと恒常フリテンの事実。テンパイにならない打牌や、
     /// 待ちを構築できない場合は `None`。
     pub tenpai_wait_after_discard: Option<PushPullTenpaiWaitFacts>,
+
+    /// 打牌後テンパイを攻撃継続した場合の攻撃モードと確定打点。
+    ///
+    /// 評価するのは「打牌後がテンパイで、恒常フリテンでない」場合だけで、それ以外は `None` に
+    /// なる。exact 打点を使う policy がその条件に限られるため、使わない局面では点数計算その
+    /// ものを行わない。相手の threat には依存しない。
+    ///
+    /// 評価した結果として打点を確定できなかった場合は `Some` のまま
+    /// [`OffenseValue::Unknown`](crate::offense_value::OffenseValue::Unknown) になる。
+    /// 「評価していない」と「評価したが確定しない」は区別する。
+    pub tenpai_offense_value_after_discard: Option<TenpaiOffenseValue>,
 
     /// 打牌後の自分の手牌全体 (concealed hand + 確認できている fixed meld) のドラの総数。
     /// 表示牌ドラと赤ドラを含む。同じ牌を示す表示牌が複数あれば重複分も数え、赤5が表示牌ドラでも
@@ -95,6 +112,38 @@ impl PushPullOffenseState {
     pub fn simple_value_proxy_after_discard(&self) -> u8 {
         self.dora_count_after_discard
             .saturating_add(self.value_honor_han_proxy_after_discard)
+    }
+
+    /// 攻撃継続時の確定打点が [`PUSH_HIGH_VALUE_MIN_TOTAL`] 以上か。
+    ///
+    /// 打点を評価していない場合と、評価しても確定しなかった場合はどちらも `None`。
+    pub fn tenpai_offense_value_is_high(&self) -> Option<bool> {
+        self.tenpai_offense_value_after_discard?
+            .value
+            .meets(PUSH_HIGH_VALUE_MIN_TOTAL)
+    }
+
+    /// 明確な threat に対して押すために要求する打牌後テンパイの待ち枚数。
+    ///
+    /// 打牌後がテンパイにならない場合と、恒常フリテンを判定できない場合は `None` になり、
+    /// 強いテンパイと推測しない。
+    ///
+    /// - 非フリテン + 攻撃打点が [`PUSH_HIGH_VALUE_MIN_TOTAL`] 以上:
+    ///   [`HIGH_VALUE_TENPAI_MIN_REMAINING`]
+    /// - 非フリテン + 攻撃打点が [`PUSH_HIGH_VALUE_MIN_TOTAL`] 未満:
+    ///   [`LOW_VALUE_TENPAI_MIN_REMAINING`]
+    /// - 非フリテン + 攻撃打点を確定できない: 従来どおり [`STRONG_TENPAI_MIN_REMAINING`]
+    /// - 恒常フリテン: ロンできずツモ依存になるため [`FURITEN_STRONG_TENPAI_MIN_REMAINING`]
+    pub fn strong_tenpai_min_remaining(&self) -> Option<u8> {
+        match self.tenpai_wait_after_discard?.permanent_furiten {
+            PermanentFuriten::No => Some(match self.tenpai_offense_value_is_high() {
+                Some(true) => HIGH_VALUE_TENPAI_MIN_REMAINING,
+                Some(false) => LOW_VALUE_TENPAI_MIN_REMAINING,
+                None => STRONG_TENPAI_MIN_REMAINING,
+            }),
+            PermanentFuriten::Yes => Some(FURITEN_STRONG_TENPAI_MIN_REMAINING),
+            PermanentFuriten::Unknown => None,
+        }
     }
 }
 
@@ -365,13 +414,21 @@ pub struct PushPullDecision {
     pub reason: PushPullReason,
 }
 
+// テンパイ相当とみなす打牌後の向聴数。和了形 (-1) も含めるため以下で比較する。
+const TENPAI_SHANTEN: i8 = 0;
+
 // 明確な threat に対して押せる「強いテンパイ」の暫定 threshold。実戦の regression test に基づき
 // 将来調整する。リーチするかどうかを決める REACH_MIN_REMAINING とは別物で、こちらは threat に
-// 対して押すかどうかの threshold。
+// 対して押すかどうかの threshold。攻撃打点を確定できない場合の fallback として使う。
 const STRONG_TENPAI_MIN_REMAINING: u8 = 6;
 
 // 恒常フリテンのテンパイはロンできずツモ依存になるため、非フリテンより2枚多く要求する。
 const FURITEN_STRONG_TENPAI_MIN_REMAINING: u8 = 8;
+
+// 攻撃打点を確定できた非フリテンのテンパイで要求する待ち枚数。打点が
+// PUSH_HIGH_VALUE_MIN_TOTAL 以上なら少ない待ちでも押し、未満なら1枚多く要求する。
+const HIGH_VALUE_TENPAI_MIN_REMAINING: u8 = 3;
+const LOW_VALUE_TENPAI_MIN_REMAINING: u8 = 4;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
@@ -382,9 +439,16 @@ const FURITEN_STRONG_TENPAI_MIN_REMAINING: u8 = 8;
 ///
 /// 攻撃評価は既存の通常打牌 best 評価 ([`select_best_normal_discard_evaluation`]) を再利用する。
 /// 比較 semantics は `ShantenAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait を
-/// 含む。合法 Dahai を受け取らない入口なので、対象は手牌から切れる全打牌候補になる。
-/// 手牌とツモ牌が空なら `offense == None`。
-pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
+/// 含む。打牌候補の絞り込みには `legal_actions` を使わないので、対象は手牌から切れる全打牌候補に
+/// なる。手牌とツモ牌が空なら `offense == None`。
+///
+/// `legal_actions` は攻撃打点を求めるときの合法 Reach 判定にだけ使う。Reach 可否を別経路で
+/// 推測し直さないため、合法 action を持たない呼び出し元は空スライスを渡し、その場合は
+/// 「リーチできない局面」として扱う。
+pub fn push_pull_inputs_from_context(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+) -> PushPullInputs {
     let tiles: Vec<_> = context
         .hand_tiles()
         .iter()
@@ -398,7 +462,7 @@ pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
         select_best_normal_discard_evaluation(context, &tiles)
     };
 
-    push_pull_inputs_from_context_with_evaluation(context, evaluation.as_ref())
+    push_pull_inputs_from_context_with_evaluation(context, evaluation.as_ref(), legal_actions)
 }
 
 /// すでに計算済みの `DiscardEvaluation` を利用して押し引き入力を構築する crate-private helper。
@@ -408,11 +472,13 @@ pub fn push_pull_inputs_from_context(context: &GameContext) -> PushPullInputs {
 pub(crate) fn push_pull_inputs_from_context_with_evaluation(
     context: &GameContext,
     evaluation: Option<&DiscardEvaluation>,
+    legal_actions: &[LegalAction],
 ) -> PushPullInputs {
     push_pull_inputs_from_threat_facts(
         context,
         player_threat_facts_from_context(context),
         evaluation,
+        legal_actions,
     )
 }
 
@@ -432,10 +498,15 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// 打牌後テンパイの待ちと恒常フリテンも、選択済み打牌の既存経路
 /// ([`selected_discard_tenpai_wait_availability`]) から scalar facts だけを転記する。
 /// テンパイにならない打牌では `None` になる。
+///
+/// 攻撃継続時の確定打点は、その打点を使う policy が成立する局面
+/// ([`should_evaluate_tenpai_offense_value`]) でだけ評価する。合法 Reach の有無は
+/// `legal_actions` を source of truth にし、Reach 可否を別経路で推測し直さない。
 pub(crate) fn push_pull_inputs_from_threat_facts(
     context: &GameContext,
     player_threats: [PlayerThreatFacts; 4],
     evaluation: Option<&DiscardEvaluation>,
+    legal_actions: &[LegalAction],
 ) -> PushPullInputs {
     let opponent_reach_count = reached_opponent_count(&player_threats);
     let dealer_reacher = has_reached_dealer(&player_threats);
@@ -446,17 +517,30 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
 
     let offense = evaluation.map(|evaluation| {
         let value_proxy = offense_value_proxy_after_discard(context, evaluation);
+        let tenpai_wait = selected_discard_tenpai_wait_availability(context, evaluation);
+        let tenpai_wait_facts = tenpai_wait
+            .as_ref()
+            .map(PushPullTenpaiWaitFacts::from_availability);
+        let tenpai_offense_value = tenpai_wait
+            .as_ref()
+            .filter(|_| {
+                should_evaluate_tenpai_offense_value(
+                    evaluation.min_shanten_after_discard(),
+                    tenpai_wait_facts,
+                )
+            })
+            .map(|tenpai_wait| {
+                evaluate_tenpai_offense_value(context, evaluation, tenpai_wait, legal_actions)
+            });
+
         PushPullOffenseState {
             min_shanten_after_discard: evaluation.min_shanten_after_discard(),
             acceptance_total_remaining: evaluation.acceptance_total_remaining(),
             acceptance_type_count: evaluation.acceptance_type_count(),
             standard_iishanten_shape_after_discard: evaluation
                 .standard_iishanten_shape_after_discard,
-            tenpai_wait_after_discard: selected_discard_tenpai_wait_availability(
-                context, evaluation,
-            )
-            .as_ref()
-            .map(PushPullTenpaiWaitFacts::from_availability),
+            tenpai_wait_after_discard: tenpai_wait_facts,
+            tenpai_offense_value_after_discard: tenpai_offense_value,
             dora_count_after_discard: value_proxy.dora_count,
             red_dora_count_after_discard: value_proxy.red_dora_count,
             value_honor_han_proxy_after_discard: value_proxy.value_honor_han_proxy,
@@ -471,6 +555,22 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
         player_threats,
         open_hand_threats: classify_open_hand_threats(&player_threats),
     }
+}
+
+/// 攻撃継続時の確定打点を評価する局面か。
+///
+/// exact 打点を使う policy が「打牌後がテンパイで、恒常フリテンでない」場合だけなので、それ以外
+/// では点数計算そのものを行わない。恒常フリテンのテンパイの挙動は今回変えないため、その打点は
+/// 求めても使い道が無い。
+///
+/// 判定材料は自分の手牌から求めた事実だけで、相手の threat には依存しない。offense は threat の
+/// 有無で変わらないという既存の性質を保つ。
+fn should_evaluate_tenpai_offense_value(
+    min_shanten_after_discard: i8,
+    wait: Option<PushPullTenpaiWaitFacts>,
+) -> bool {
+    min_shanten_after_discard <= TENPAI_SHANTEN
+        && wait.is_some_and(|wait| wait.permanent_furiten == PermanentFuriten::No)
 }
 
 /// 明確な threat の種類。reason の系列を選ぶためだけに使う。
@@ -538,26 +638,20 @@ fn threat_kind(inputs: &PushPullInputs) -> Option<ThreatKind> {
     }
 }
 
-/// 明確な threat に対して押せる「強いテンパイ」の暫定条件。
+/// 明確な threat に対して押せる「強いテンパイ」の条件。
 ///
 /// 待ち枚数と恒常フリテンは、選択済み打牌の既存 [`TenpaiWaitAvailability`] から転記した事実を
-/// そのまま使う。押し引き側で待ちや残枚数を数え直さない。
-///
-/// - 非フリテン: 残枚数が [`STRONG_TENPAI_MIN_REMAINING`] 以上
-/// - 恒常フリテン: ロンできずツモ依存になるため [`FURITEN_STRONG_TENPAI_MIN_REMAINING`] 以上
-/// - フリテン判定不能: 強いテンパイと推測しない
-///
-/// 待ち形・待ち種類数・打点は現時点では条件にしない。
+/// そのまま使う。押し引き側で待ちや残枚数を数え直さない。要求する待ち枚数は
+/// [`PushPullOffenseState::strong_tenpai_min_remaining`] が1か所で決める。
 fn is_strong_tenpai(offense: &PushPullOffenseState) -> bool {
     let Some(wait) = offense.tenpai_wait_after_discard else {
         return false;
     };
+    let Some(min_remaining) = offense.strong_tenpai_min_remaining() else {
+        return false;
+    };
 
-    match wait.permanent_furiten {
-        PermanentFuriten::No => wait.tsumo_remaining >= STRONG_TENPAI_MIN_REMAINING,
-        PermanentFuriten::Yes => wait.tsumo_remaining >= FURITEN_STRONG_TENPAI_MIN_REMAINING,
-        PermanentFuriten::Unknown => false,
-    }
+    wait.tsumo_remaining >= min_remaining
 }
 
 /// 押し引きを判定する pure な暫定 helper。
@@ -585,10 +679,15 @@ fn is_strong_tenpai(offense: &PushPullOffenseState) -> bool {
 /// テンパイと確認できなくても `Push` になり得る。原則の局面で `Neutral` にすると通常打牌が防御
 /// fallback より優先され、実質的に押してしまうため。
 ///
+/// 強いテンパイの境界は打牌後テンパイの恒常フリテンと攻撃打点で決まる
+/// ([`PushPullOffenseState::strong_tenpai_min_remaining`])。非フリテンで攻撃継続時の打点を
+/// 確定できる場合は打点を考慮し、確定できない場合と恒常フリテンでは従来の待ち枚数だけの
+/// policy を維持する。
+///
 /// これは説明可能な暫定 policy であり、以下はまだ考慮していない。
 ///
 /// - 一向聴での本格的な押し引き
-/// - 正確な打点(翻数・符・点数計算)
+/// - 恒常フリテンのテンパイでの正確な打点
 /// - 待ち形(両面・カンチャン・単騎など)
 /// - 相手ごとの放銃率
 /// - 点棒状況・局・順位条件
@@ -617,7 +716,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     };
 
     // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、または終盤1副露 High だけなら押す。
-    if offense.min_shanten_after_discard <= 0 {
+    if offense.min_shanten_after_discard <= TENPAI_SHANTEN {
         let (mode, reason) = if is_strong_tenpai(&offense) {
             (PushPullMode::Push, reasons.strong_tenpai)
         } else if threat == ThreatKind::HighOpenHand
@@ -684,6 +783,11 @@ pub(crate) fn log_push_pull_decision(
         offense_tenpai_tsumo_type_count = ?inputs.offense.and_then(|offense| offense.tenpai_wait_after_discard).map(|wait| wait.tsumo_type_count),
         offense_tenpai_permanent_furiten = ?inputs.offense.and_then(|offense| offense.tenpai_wait_after_discard).map(|wait| wait.permanent_furiten),
         offense_tenpai_can_ron = ?inputs.offense.and_then(|offense| offense.tenpai_wait_after_discard).and_then(|wait| wait.can_ron),
+        offense_tenpai_mode = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_after_discard).map(|value| value.mode),
+        offense_tenpai_value_known = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_after_discard).map(|value| value.value.is_known()),
+        offense_tenpai_average_value = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_after_discard).and_then(|value| value.value.average_total()),
+        offense_tenpai_value_is_high = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_is_high()),
+        offense_strong_tenpai_min_remaining = ?inputs.offense.and_then(|offense| offense.strong_tenpai_min_remaining()),
         offense_dora_count_after_discard = ?inputs.offense.map(|offense| offense.dora_count_after_discard),
         offense_red_dora_count_after_discard = ?inputs.offense.map(|offense| offense.red_dora_count_after_discard),
         offense_value_honor_han_proxy_after_discard = ?inputs.offense.map(|offense| offense.value_honor_han_proxy_after_discard),
@@ -697,6 +801,7 @@ pub(crate) fn log_push_pull_decision(
 mod tests {
     use super::*;
     use crate::meld::{Meld, MeldKind};
+    use crate::offense_value::{OffenseValue, TenpaiOffenseMode};
     use bot_logic::{TileId, TileType};
 
     fn tile(value: u8) -> TileId {
@@ -734,6 +839,35 @@ mod tests {
         tenpai_offense(STRONG_TENPAI_MIN_REMAINING - 1, PermanentFuriten::No)
     }
 
+    // 攻撃打点を確定した非フリテンの打牌後テンパイ。全 variant が同じ支払い合計になる待ちとして
+    // 加重平均を組み立てる。
+    fn valued_tenpai_offense(tsumo_remaining: u8, total: u32) -> PushPullOffenseState {
+        PushPullOffenseState {
+            tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
+                mode: TenpaiOffenseMode::Reach,
+                value: OffenseValue::Known {
+                    weighted_total: u64::from(total) * u64::from(tsumo_remaining),
+                    total_remaining: u32::from(tsumo_remaining),
+                },
+            }),
+            ..tenpai_offense(tsumo_remaining, PermanentFuriten::No)
+        }
+    }
+
+    // 攻撃打点を評価したが確定しなかった打牌後テンパイ。
+    fn unknown_value_tenpai_offense(
+        tsumo_remaining: u8,
+        furiten: PermanentFuriten,
+    ) -> PushPullOffenseState {
+        PushPullOffenseState {
+            tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
+                mode: TenpaiOffenseMode::Reach,
+                value: OffenseValue::Unknown,
+            }),
+            ..tenpai_offense(tsumo_remaining, furiten)
+        }
+    }
+
     fn offense_with_shape(
         shanten: i8,
         remaining: u8,
@@ -759,6 +893,7 @@ mod tests {
             acceptance_type_count: types,
             standard_iishanten_shape_after_discard: shape,
             tenpai_wait_after_discard: None,
+            tenpai_offense_value_after_discard: None,
             dora_count_after_discard: dora,
             red_dora_count_after_discard: red_dora,
             value_honor_han_proxy_after_discard: value_honor_han,
@@ -896,6 +1031,192 @@ mod tests {
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstReach,
         );
+    }
+
+    // ---- 攻撃打点を確定できたテンパイの押し引き ----
+
+    #[test]
+    fn a_high_value_tenpai_pushes_from_three_live_waits() {
+        // 非フリテンで残枚数加重平均が 5200 以上なら、3枚待ちから押す。
+        let offense = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL);
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(HIGH_VALUE_TENPAI_MIN_REMAINING)
+        );
+        assert!(is_strong_tenpai(&offense));
+
+        assert_decision(
+            &inputs(1, false, Some(offense)),
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_high_value_tenpai_folds_with_two_live_waits() {
+        // 高打点でも2枚待ちなら押さない。
+        let offense = valued_tenpai_offense(2, 8000);
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
+        assert!(!is_strong_tenpai(&offense));
+
+        assert_decision(
+            &inputs(1, false, Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_low_value_tenpai_pushes_from_four_live_waits() {
+        // 非フリテンで残枚数加重平均が 5200 未満なら、1枚多い4枚待ちから押す。
+        let offense = valued_tenpai_offense(4, PUSH_HIGH_VALUE_MIN_TOTAL - 1);
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(LOW_VALUE_TENPAI_MIN_REMAINING)
+        );
+        assert!(is_strong_tenpai(&offense));
+
+        assert_decision(
+            &inputs(1, false, Some(offense)),
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_low_value_tenpai_folds_with_three_live_waits() {
+        // 打点が足りなければ、高打点なら押せる3枚待ちでも押さない。
+        let offense = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL - 1);
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
+        assert!(!is_strong_tenpai(&offense));
+
+        assert_decision(
+            &inputs(1, false, Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn the_high_value_threshold_is_inclusive() {
+        // 5200 ちょうどは高打点側。加重平均は整数除算で丸めずに threshold と比較する。
+        let exact = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL);
+        let below = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL - 1);
+
+        assert_eq!(exact.tenpai_offense_value_is_high(), Some(true));
+        assert_eq!(below.tenpai_offense_value_is_high(), Some(false));
+
+        assert_decision(
+            &inputs(1, false, Some(exact)),
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+        assert_decision(
+            &inputs(1, false, Some(below)),
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_offense_value_keeps_the_six_live_wait_boundary() {
+        // 打点を評価していない場合と、評価しても確定しない場合はどちらも既存 policy のまま。
+        for offense in [
+            tenpai_offense(STRONG_TENPAI_MIN_REMAINING, PermanentFuriten::No),
+            unknown_value_tenpai_offense(STRONG_TENPAI_MIN_REMAINING, PermanentFuriten::No),
+        ] {
+            assert_eq!(offense.tenpai_offense_value_is_high(), None);
+            assert_eq!(
+                offense.strong_tenpai_min_remaining(),
+                Some(STRONG_TENPAI_MIN_REMAINING)
+            );
+            assert!(is_strong_tenpai(&offense));
+        }
+
+        for offense in [
+            tenpai_offense(STRONG_TENPAI_MIN_REMAINING - 1, PermanentFuriten::No),
+            unknown_value_tenpai_offense(STRONG_TENPAI_MIN_REMAINING - 1, PermanentFuriten::No),
+        ] {
+            assert!(!is_strong_tenpai(&offense));
+            assert_decision(
+                &inputs(1, false, Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::WeakTenpaiAgainstReach,
+            );
+        }
+    }
+
+    #[test]
+    fn a_permanent_furiten_tenpai_ignores_the_offense_value() {
+        // 恒常フリテンには exact 打点 policy を適用せず、現行の8枚 policy を維持する。
+        for total in [8000, PUSH_HIGH_VALUE_MIN_TOTAL, 1000] {
+            let strong = PushPullOffenseState {
+                tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
+                    mode: TenpaiOffenseMode::Reach,
+                    value: OffenseValue::Known {
+                        weighted_total: u64::from(total) * 8,
+                        total_remaining: 8,
+                    },
+                }),
+                ..tenpai_offense(FURITEN_STRONG_TENPAI_MIN_REMAINING, PermanentFuriten::Yes)
+            };
+            let weak = PushPullOffenseState {
+                tenpai_wait_after_discard: tenpai_offense(
+                    FURITEN_STRONG_TENPAI_MIN_REMAINING - 1,
+                    PermanentFuriten::Yes,
+                )
+                .tenpai_wait_after_discard,
+                ..strong
+            };
+
+            assert_eq!(
+                strong.strong_tenpai_min_remaining(),
+                Some(FURITEN_STRONG_TENPAI_MIN_REMAINING)
+            );
+            assert!(is_strong_tenpai(&strong));
+            assert!(!is_strong_tenpai(&weak));
+        }
+    }
+
+    #[test]
+    fn an_unknown_furiten_tenpai_stays_weak_with_any_offense_value() {
+        // フリテンを判定できない場合は、打点が確定しても強いテンパイと推測しない。
+        let offense = PushPullOffenseState {
+            tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
+                mode: TenpaiOffenseMode::Reach,
+                value: OffenseValue::Known {
+                    weighted_total: 8000 * 20,
+                    total_remaining: 20,
+                },
+            }),
+            ..tenpai_offense(20, PermanentFuriten::Unknown)
+        };
+
+        assert_eq!(offense.strong_tenpai_min_remaining(), None);
+        assert!(!is_strong_tenpai(&offense));
+        assert_decision(
+            &inputs(1, false, Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn no_threat_pushes_regardless_of_the_offense_value() {
+        // threat が無ければ従来どおり押す。打点も待ち枚数も見ない。
+        for offense in [
+            valued_tenpai_offense(1, 1000),
+            valued_tenpai_offense(3, 8000),
+            unknown_value_tenpai_offense(1, PermanentFuriten::Yes),
+        ] {
+            assert_decision(
+                &inputs(0, false, Some(offense)),
+                PushPullMode::Push,
+                PushPullReason::NoThreat,
+            );
+        }
     }
 
     #[test]
@@ -1101,14 +1422,14 @@ mod tests {
     #[test]
     fn opponent_reach_count_excludes_self() {
         let context = table_state_context(None, vec![], Some(0), None, [true, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert_eq!(inputs.opponent_reach_count, 1);
     }
 
     #[test]
     fn opponent_reach_count_without_player_id_counts_all() {
         let context = table_state_context(None, vec![], None, None, [true, false, true, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert_eq!(inputs.opponent_reach_count, 2);
     }
 
@@ -1116,7 +1437,7 @@ mod tests {
     fn dealer_reacher_true_when_oya_is_opponent_reacher() {
         let context =
             table_state_context(None, vec![], Some(0), Some(1), [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(inputs.dealer_reacher);
     }
 
@@ -1124,21 +1445,21 @@ mod tests {
     fn dealer_reacher_false_when_self_is_oya() {
         let context =
             table_state_context(None, vec![], Some(0), Some(0), [true, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(!inputs.dealer_reacher);
     }
 
     #[test]
     fn dealer_reacher_false_without_oya() {
         let context = table_state_context(None, vec![], Some(0), None, [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(!inputs.dealer_reacher);
     }
 
     #[test]
     fn offense_is_none_without_tiles() {
         let context = table_state_context(None, vec![], Some(0), None, [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert_eq!(inputs.offense, None);
     }
 
@@ -1156,7 +1477,7 @@ mod tests {
             Some(TileType::new(28).unwrap()),
         );
 
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         let offense = inputs.offense.expect("offense should be present");
 
         let tiles: Vec<_> = context
@@ -1204,7 +1525,7 @@ mod tests {
             visible,
         );
 
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         let offense = inputs.offense.expect("offense should be present");
 
         let tiles: Vec<_> = context
@@ -1265,8 +1586,9 @@ mod tests {
             .collect();
         let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
 
-        let shared = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
-        let public = push_pull_inputs_from_context(&context);
+        let shared =
+            push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref(), &[]);
+        let public = push_pull_inputs_from_context(&context, &[]);
         assert_eq!(shared, public);
         assert!(shared.offense.is_some());
     }
@@ -1288,14 +1610,14 @@ mod tests {
         assert!(normal.is_some());
         assert_ne!(normal, one_step, "両者が分かれる局面である必要がある");
 
-        let public = push_pull_inputs_from_context(&context);
+        let public = push_pull_inputs_from_context(&context, &[]);
         assert_eq!(
             public,
-            push_pull_inputs_from_context_with_evaluation(&context, normal.as_ref()),
+            push_pull_inputs_from_context_with_evaluation(&context, normal.as_ref(), &[]),
         );
         assert_ne!(
             public,
-            push_pull_inputs_from_context_with_evaluation(&context, one_step.as_ref()),
+            push_pull_inputs_from_context_with_evaluation(&context, one_step.as_ref(), &[]),
         );
         assert!(public.offense.is_some());
     }
@@ -1332,7 +1654,8 @@ mod tests {
 
         for shape in [IishantenShape::Complete, IishantenShape::Unknown] {
             evaluation.standard_iishanten_shape_after_discard = shape;
-            let inputs = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
+            let inputs =
+                push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation), &[]);
             let offense = inputs.offense.expect("offense should be present");
             assert_eq!(offense.standard_iishanten_shape_after_discard, shape);
         }
@@ -1341,7 +1664,7 @@ mod tests {
     #[test]
     fn with_evaluation_none_yields_no_offense() {
         let context = table_state_context(None, vec![], Some(0), None, [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context_with_evaluation(&context, None);
+        let inputs = push_pull_inputs_from_context_with_evaluation(&context, None, &[]);
         assert_eq!(inputs.offense, None);
         assert_eq!(inputs.opponent_reach_count, 1);
     }
@@ -1377,7 +1700,8 @@ mod tests {
         let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
         let evaluation_before = evaluation.clone();
 
-        let inputs = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
+        let inputs =
+            push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref(), &[]);
 
         assert_eq!(inputs.opponent_reach_count, 2);
         assert!(inputs.dealer_reacher);
@@ -1406,7 +1730,7 @@ mod tests {
         );
         let before = context.clone();
 
-        let _ = push_pull_inputs_from_context(&context);
+        let _ = push_pull_inputs_from_context(&context, &[]);
 
         assert_eq!(context, before);
     }
@@ -1415,7 +1739,7 @@ mod tests {
     fn self_dealer_true_when_player_is_oya() {
         let context =
             table_state_context(None, vec![], Some(1), Some(1), [false, false, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(inputs.self_dealer);
     }
 
@@ -1423,7 +1747,7 @@ mod tests {
     fn self_dealer_false_when_player_is_not_oya() {
         let context =
             table_state_context(None, vec![], Some(1), Some(2), [false, false, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(!inputs.self_dealer);
     }
 
@@ -1431,7 +1755,7 @@ mod tests {
     fn self_dealer_false_without_player_id() {
         let context =
             table_state_context(None, vec![], None, Some(1), [false, false, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(!inputs.self_dealer);
     }
 
@@ -1439,7 +1763,7 @@ mod tests {
     fn self_dealer_false_without_oya() {
         let context =
             table_state_context(None, vec![], Some(1), None, [false, false, false, false]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
         assert!(!inputs.self_dealer);
     }
 
@@ -1448,7 +1772,7 @@ mod tests {
         // 自分が親で子1人がリーチ。
         let dealer_self =
             table_state_context(None, vec![], Some(0), Some(0), [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&dealer_self);
+        let inputs = push_pull_inputs_from_context(&dealer_self, &[]);
         assert!(inputs.self_dealer);
         assert!(!inputs.dealer_reacher);
         assert_eq!(inputs.opponent_reach_count, 1);
@@ -1456,7 +1780,7 @@ mod tests {
         // 自分が子で親がリーチ。
         let dealer_reach =
             table_state_context(None, vec![], Some(0), Some(1), [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&dealer_reach);
+        let inputs = push_pull_inputs_from_context(&dealer_reach, &[]);
         assert!(!inputs.self_dealer);
         assert!(inputs.dealer_reacher);
         assert_eq!(inputs.opponent_reach_count, 1);
@@ -1490,6 +1814,259 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- 実局面の攻撃打点が押し引き入力へ届くこと ----
+
+    struct ExactValueTileSource {
+        used: [bool; TileId::COUNT],
+    }
+
+    impl ExactValueTileSource {
+        fn new() -> Self {
+            Self {
+                used: [false; TileId::COUNT],
+            }
+        }
+
+        fn tiles(&mut self, strings: &[&str]) -> Vec<TileId> {
+            strings.iter().map(|s| self.tile(s)).collect()
+        }
+
+        fn tile(&mut self, s: &str) -> TileId {
+            let tile_type = TileType::from_mjai_type_str(s.trim_end_matches('r')).unwrap();
+            let red = s.ends_with('r');
+            let id = TileId::copies(tile_type)
+                .find(|id| id.is_red() == red && !self.used[id.index()])
+                .expect("同じ物理牌を使い回していない");
+            self.used[id.index()] = true;
+            id
+        }
+    }
+
+    // 攻撃打点を確定できる局面で、単独の子リーチを受けた押し引き入力を組み立てる。場風・自風・
+    // 履歴依存フリテンを既知にして、ダマでロンできる非フリテンのテンパイにする。
+    fn exact_value_inputs(
+        hand: &[&str],
+        drawn: &str,
+        dora_indicators: &[&str],
+        extra_visible: &[&str],
+    ) -> PushPullInputs {
+        let mut source = ExactValueTileSource::new();
+        let hand_tiles = source.tiles(hand);
+        let drawn_tile = source.tile(drawn);
+        let dora_indicators = source.tiles(dora_indicators);
+        let extra_visible = source.tiles(extra_visible);
+
+        let visible: Vec<TileId> = hand_tiles
+            .iter()
+            .chain([&drawn_tile])
+            .chain(dora_indicators.iter())
+            .chain(extra_visible.iter())
+            .copied()
+            .collect();
+        let actions: Vec<LegalAction> = hand_tiles
+            .iter()
+            .chain([&drawn_tile])
+            .map(|&tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Reach])
+            .collect();
+
+        let context = GameContext::from_parts_with_table_state(
+            Some(drawn_tile),
+            hand_tiles,
+            dora_indicators,
+            TileType::from_mjai_type_str("E").ok(),
+            TileType::from_mjai_type_str("S").ok(),
+            visible,
+            Some(0),
+            Some(3),
+            Default::default(),
+            [false, true, false, false],
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+
+        push_pull_inputs_from_context(&context, &actions)
+    }
+
+    // 平和 + 断幺 + ドラ2 の 6s 待ち。ダマ 7700 なのでダマのまま押す高打点テンパイ。
+    const HIGH_VALUE_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "6m", "7m", "8m", "2p", "2p", "3s", "4s", "5s", "4s", "5s",
+    ];
+
+    // 3p 嵌張の役なしテンパイ。リーチのみ 1300 点の低打点テンパイになる。
+    const LOW_VALUE_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "4m", "5m", "6m", "6m", "7m", "8m", "2p", "4p", "9s", "9s",
+    ];
+
+    #[test]
+    fn a_high_value_tenpai_pushes_from_three_live_waits_in_a_real_hand() {
+        // ダマ 7700 の 6s 待ちを3枚まで減らした局面。旧 policy の6枚には届かないが、打点が
+        // 5200 以上なので押す。
+        let inputs = exact_value_inputs(&HIGH_VALUE_HAND, "N", &["1p"], &["3s", "3s", "3s", "6s"]);
+        let offense = inputs.offense.expect("攻撃評価がある");
+        let wait = offense
+            .tenpai_wait_after_discard
+            .expect("テンパイの待ち facts がある");
+
+        assert_eq!(wait.tsumo_remaining, 3);
+        assert_eq!(wait.permanent_furiten, PermanentFuriten::No);
+        assert_eq!(wait.can_ron, Some(true));
+        let value = offense
+            .tenpai_offense_value_after_discard
+            .expect("攻撃打点を評価している");
+        assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(value.value.average_total(), Some(7700));
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(HIGH_VALUE_TENPAI_MIN_REMAINING)
+        );
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_high_value_tenpai_folds_with_two_live_waits_in_a_real_hand() {
+        // 同じ高打点でも残り2枚なら押さない。
+        let inputs = exact_value_inputs(
+            &HIGH_VALUE_HAND,
+            "N",
+            &["1p"],
+            &["3s", "3s", "3s", "6s", "6s"],
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+
+        assert_eq!(
+            offense
+                .tenpai_wait_after_discard
+                .expect("テンパイの待ち facts がある")
+                .tsumo_remaining,
+            2
+        );
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_low_value_tenpai_pushes_from_four_live_waits_in_a_real_hand() {
+        // ダマでは役が無いのでリーチ込みで評価する。リーチのみ 1300 点は 5200 未満なので、
+        // 押すには4枚待ちが要る。
+        let inputs = exact_value_inputs(&LOW_VALUE_HAND, "N", &[], &[]);
+        let offense = inputs.offense.expect("攻撃評価がある");
+        let value = offense
+            .tenpai_offense_value_after_discard
+            .expect("攻撃打点を評価している");
+
+        assert_eq!(
+            offense
+                .tenpai_wait_after_discard
+                .expect("テンパイの待ち facts がある")
+                .tsumo_remaining,
+            4
+        );
+        assert_eq!(value.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(value.value.average_total(), Some(1300));
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(LOW_VALUE_TENPAI_MIN_REMAINING)
+        );
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_low_value_tenpai_folds_with_three_live_waits_in_a_real_hand() {
+        // 同じ低打点で残り3枚なら押さない。
+        let inputs = exact_value_inputs(&LOW_VALUE_HAND, "N", &[], &["3p"]);
+        let offense = inputs.offense.expect("攻撃評価がある");
+
+        assert_eq!(
+            offense
+                .tenpai_wait_after_discard
+                .expect("テンパイの待ち facts がある")
+                .tsumo_remaining,
+            3
+        );
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_tenpai_without_a_scoring_context_falls_back_to_the_six_live_wait_boundary() {
+        // 場風・自風が不明で打点を確定できない局面は、従来どおり6枚が境界になる。
+        let mut source = ExactValueTileSource::new();
+        let hand_tiles = source.tiles(&LOW_VALUE_HAND);
+        let drawn_tile = source.tile("N");
+        let actions: Vec<LegalAction> = hand_tiles
+            .iter()
+            .chain([&drawn_tile])
+            .map(|&tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Reach])
+            .collect();
+        let context = GameContext::from_parts_with_table_state(
+            Some(drawn_tile),
+            hand_tiles,
+            vec![],
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            Some(3),
+            Default::default(),
+            [false, true, false, false],
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+
+        let inputs = push_pull_inputs_from_context(&context, &actions);
+        let offense = inputs.offense.expect("攻撃評価がある");
+        let value = offense
+            .tenpai_offense_value_after_discard
+            .expect("攻撃打点を評価している");
+
+        assert_eq!(value.value, OffenseValue::Unknown);
+        assert_eq!(offense.tenpai_offense_value_is_high(), None);
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(STRONG_TENPAI_MIN_REMAINING)
+        );
+
+        // 待ちは4枚。打点が確定していれば押せる枚数だが、確定しないので降りる。
+        assert_eq!(
+            offense
+                .tenpai_wait_after_discard
+                .expect("テンパイの待ち facts がある")
+                .tsumo_remaining,
+            4
+        );
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
     }
 
     // ---- 副露済み手牌の通常打牌評価が押し引き入力へ届くこと ----
@@ -1527,6 +2104,13 @@ mod tests {
     }
 
     fn offense_state_from_normal_discard(context: &GameContext) -> PushPullOffenseState {
+        offense_state_from_normal_discard_with_actions(context, &[])
+    }
+
+    fn offense_state_from_normal_discard_with_actions(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+    ) -> PushPullOffenseState {
         let tiles: Vec<TileId> = context
             .hand_tiles()
             .iter()
@@ -1534,7 +2118,7 @@ mod tests {
             .chain(context.drawn_tile())
             .collect();
         let evaluation = select_best_normal_discard_evaluation(context, &tiles).unwrap();
-        push_pull_inputs_from_context_with_evaluation(context, Some(&evaluation))
+        push_pull_inputs_from_context_with_evaluation(context, Some(&evaluation), legal_actions)
             .offense
             .unwrap()
     }
@@ -1972,9 +2556,10 @@ mod tests {
         assert_eq!(proxy.red_dora_count, 1);
         assert_eq!(proxy.value_honor_han_proxy, 0);
 
-        let offense = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation))
-            .offense
-            .expect("offense should be present");
+        let offense =
+            push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation), &[])
+                .offense
+                .expect("offense should be present");
         assert_eq!(offense.dora_count_after_discard, 1);
         assert_eq!(offense.red_dora_count_after_discard, 1);
         assert_eq!(offense.simple_value_proxy_after_discard(), 1);
@@ -2185,7 +2770,8 @@ mod tests {
             .expect("evaluation should exist");
         let expected = offense_value_proxy_after_discard(&context, &evaluation);
 
-        let inputs = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
+        let inputs =
+            push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation), &[]);
         let offense = inputs.offense.expect("offense should be present");
 
         assert_eq!(offense.dora_count_after_discard, expected.dora_count);
@@ -2216,8 +2802,9 @@ mod tests {
             .collect();
         let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
 
-        let public = push_pull_inputs_from_context(&context);
-        let shared = push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref());
+        let public = push_pull_inputs_from_context(&context, &[]);
+        let shared =
+            push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref(), &[]);
         assert_eq!(public, shared);
 
         let public_offense = public.offense.expect("offense should be present");
@@ -2285,7 +2872,7 @@ mod tests {
         let evaluation_before = evaluation.clone();
 
         let _ = offense_value_proxy_after_discard(&context, &evaluation);
-        let _ = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation));
+        let _ = push_pull_inputs_from_context_with_evaluation(&context, Some(&evaluation), &[]);
 
         assert_eq!(context, context_before);
         assert_eq!(evaluation, evaluation_before);
@@ -2320,7 +2907,7 @@ mod tests {
     #[test]
     fn threat_facts_reach_the_push_pull_inputs() {
         let context = opponent_meld_context([false, false, false, true]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
 
         assert_eq!(
             inputs.player_threats,
@@ -2337,8 +2924,8 @@ mod tests {
         let facts = player_threat_facts_from_context(&context);
 
         assert_eq!(
-            push_pull_inputs_from_threat_facts(&context, facts, None),
-            push_pull_inputs_from_context_with_evaluation(&context, None)
+            push_pull_inputs_from_threat_facts(&context, facts, None, &[]),
+            push_pull_inputs_from_context_with_evaluation(&context, None, &[])
         );
     }
 
@@ -2358,7 +2945,7 @@ mod tests {
             for oya in [None, Some(0), Some(1)] {
                 for reached in reach_patterns {
                     let context = table_state_context(None, vec![], player_id, oya, reached);
-                    let inputs = push_pull_inputs_from_context(&context);
+                    let inputs = push_pull_inputs_from_context(&context, &[]);
                     let reached_opponents = context.reached_opponents();
 
                     assert_eq!(
@@ -2566,6 +3153,24 @@ mod tests {
             PushPullMode::Push,
             PushPullReason::StrongTenpaiAgainstHighOpenHand,
         );
+    }
+
+    #[test]
+    fn the_late_one_meld_exception_does_not_depend_on_the_offense_value() {
+        // 打点を確定しても確定しなくても、終盤1副露 High だけならテンパイで押す例外は変わらない。
+        for offense in [
+            valued_tenpai_offense(2, PUSH_HIGH_VALUE_MIN_TOTAL - 1),
+            unknown_value_tenpai_offense(2, PermanentFuriten::No),
+            tenpai_offense(2, PermanentFuriten::Unknown),
+        ] {
+            let inputs = late_one_meld_high_inputs(Some(offense));
+            assert!(!is_strong_tenpai(&offense));
+            assert_high_open_hand_decision(
+                &inputs,
+                PushPullMode::Push,
+                PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+            );
+        }
     }
 
     #[test]
@@ -2787,7 +3392,7 @@ mod tests {
     fn the_open_hand_classification_is_derived_from_the_same_facts() {
         // 押し引き入力の classification は facts から一度だけ導出する。押し引き側で分類し直さない。
         let context = opponent_meld_context([false, false, false, true]);
-        let inputs = push_pull_inputs_from_context(&context);
+        let inputs = push_pull_inputs_from_context(&context, &[]);
 
         assert_eq!(
             inputs.open_hand_threats,
