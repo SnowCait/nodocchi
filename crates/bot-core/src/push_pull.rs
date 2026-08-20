@@ -1846,6 +1846,28 @@ mod tests {
 
     // 攻撃打点を確定できる局面で、単独の子リーチを受けた押し引き入力を組み立てる。場風・自風・
     // 履歴依存フリテンを既知にして、ダマでロンできる非フリテンのテンパイにする。
+    // 攻撃打点の評価条件のうち、局面ごとに変えたい部分。既定は「未リーチで Reach が合法、
+    // 履歴依存フリテンなし」。
+    #[derive(Clone, Copy)]
+    struct ExactValueSetup {
+        reach_legal: bool,
+        self_reached: bool,
+        history_furiten: bot_logic::HistoryFuritenFacts,
+    }
+
+    impl Default for ExactValueSetup {
+        fn default() -> Self {
+            Self {
+                reach_legal: true,
+                self_reached: false,
+                history_furiten: bot_logic::HistoryFuritenFacts {
+                    same_turn: Some(false),
+                    riichi_missed_win: Some(false),
+                },
+            }
+        }
+    }
+
     fn exact_value_inputs(
         hand: &[&str],
         drawn: &str,
@@ -1857,23 +1879,16 @@ mod tests {
             drawn,
             dora_indicators,
             extra_visible,
-            true,
-            bot_logic::HistoryFuritenFacts {
-                same_turn: Some(false),
-                riichi_missed_win: Some(false),
-            },
+            ExactValueSetup::default(),
         )
     }
 
-    // `reach_legal` は合法 action に Reach を含めるか。`history_furiten` は現在時点の履歴依存
-    // フリテンで、打牌後のロン可否は既存経路が補正する。
     fn exact_value_inputs_with(
         hand: &[&str],
         drawn: &str,
         dora_indicators: &[&str],
         extra_visible: &[&str],
-        reach_legal: bool,
-        history_furiten: bot_logic::HistoryFuritenFacts,
+        setup: ExactValueSetup,
     ) -> PushPullInputs {
         let mut source = ExactValueTileSource::new();
         let hand_tiles = source.tiles(hand);
@@ -1892,7 +1907,7 @@ mod tests {
             .iter()
             .chain([&drawn_tile])
             .map(|&tile| LegalAction::Dahai { tile })
-            .chain(reach_legal.then_some(LegalAction::Reach))
+            .chain(setup.reach_legal.then_some(LegalAction::Reach))
             .collect();
 
         let context = GameContext::from_parts_with_table_state(
@@ -1905,9 +1920,9 @@ mod tests {
             Some(0),
             Some(3),
             Default::default(),
-            [false, true, false, false],
+            [setup.self_reached, true, false, false],
         )
-        .with_history_furiten_facts(history_furiten);
+        .with_history_furiten_facts(setup.history_furiten);
 
         push_pull_inputs_from_context(&context, &actions)
     }
@@ -2032,6 +2047,87 @@ mod tests {
         );
     }
 
+    // 平和 + 断幺 + ドラ1 の 6s 待ち。ダマ 3900 だがリーチ込みなら 7700 で、リーチ1翻の有無で
+    // 5200 の境界をまたぐ。
+    const REACH_CROSSES_THRESHOLD_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "6m", "7m", "8m", "2p", "2p", "3s", "4s", "5s", "4s", "5s",
+    ];
+
+    #[test]
+    fn an_already_reached_tenpai_is_valued_with_the_reach_han() {
+        // 既にリーチしている手には Reach action が出ないが、それはダマ手だからではない。
+        // ダマ換算の 3900 ではなくリーチ込みの 7700 で評価し、3枚待ちから押す。
+        let inputs = exact_value_inputs_with(
+            &REACH_CROSSES_THRESHOLD_HAND,
+            "N",
+            &["1m"],
+            &["3s", "3s", "3s", "6s"],
+            ExactValueSetup {
+                reach_legal: false,
+                self_reached: true,
+                ..Default::default()
+            },
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+        let wait = offense
+            .tenpai_wait_after_discard
+            .expect("テンパイの待ち facts がある");
+        let value = offense
+            .tenpai_offense_value_after_discard
+            .expect("攻撃打点を評価している");
+
+        assert_eq!(wait.tsumo_remaining, 3);
+        assert_eq!(wait.permanent_furiten, PermanentFuriten::No);
+
+        assert_eq!(value.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(value.value.average_total(), Some(7700));
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(HIGH_VALUE_TENPAI_MIN_REMAINING)
+        );
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn an_illegal_reach_before_declaring_stays_damaten() {
+        // 同じ手でもまだリーチしていなければダマ手なので、ダマ 3900 のまま評価する。
+        // 5200 未満なので3枚待ちでは押さない。
+        let inputs = exact_value_inputs_with(
+            &REACH_CROSSES_THRESHOLD_HAND,
+            "N",
+            &["1m"],
+            &["3s", "3s", "3s", "6s"],
+            ExactValueSetup {
+                reach_legal: false,
+                ..Default::default()
+            },
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+        let value = offense
+            .tenpai_offense_value_after_discard
+            .expect("攻撃打点を評価している");
+
+        assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(value.value.average_total(), Some(3900));
+        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(LOW_VALUE_TENPAI_MIN_REMAINING)
+        );
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
     #[test]
     fn a_damaten_tenpai_that_cannot_ron_falls_back_to_the_six_live_wait_boundary() {
         // 恒常フリテンではないが、リーチ後の見逃しでロンできないテンパイ。ダマ打点はロン和了を
@@ -2047,10 +2143,13 @@ mod tests {
                 "N",
                 &["1p"],
                 &extra_visible,
-                false,
-                bot_logic::HistoryFuritenFacts {
-                    same_turn: Some(false),
-                    riichi_missed_win: Some(true),
+                ExactValueSetup {
+                    reach_legal: false,
+                    history_furiten: bot_logic::HistoryFuritenFacts {
+                        same_turn: Some(false),
+                        riichi_missed_win: Some(true),
+                    },
+                    ..Default::default()
                 },
             );
             let offense = inputs.offense.expect("攻撃評価がある");
@@ -2089,10 +2188,13 @@ mod tests {
             "N",
             &["1p"],
             &["3s", "3s", "3s"],
-            false,
-            bot_logic::HistoryFuritenFacts {
-                same_turn: None,
-                riichi_missed_win: None,
+            ExactValueSetup {
+                reach_legal: false,
+                history_furiten: bot_logic::HistoryFuritenFacts {
+                    same_turn: None,
+                    riichi_missed_win: None,
+                },
+                ..Default::default()
             },
         );
         let offense = inputs.offense.expect("攻撃評価がある");

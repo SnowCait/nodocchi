@@ -342,6 +342,13 @@ impl GameContext {
         self.reached.get(player).copied().unwrap_or(false)
     }
 
+    /// 自分がリーチ済みか。`player_id` が無い場合は player 0 などを推測せず `None`。
+    ///
+    /// 席の特定は `player_id` だけを source of truth にし、`reached` の index を推測しない。
+    pub fn own_reached(&self) -> Option<bool> {
+        Some(self.is_reached(usize::from(self.player_id?)))
+    }
+
     pub fn any_opponent_reached(&self) -> bool {
         self.reached
             .iter()
@@ -1252,6 +1259,34 @@ mod tests {
     fn score_of_is_none_when_scores_are_unknown() {
         let context = GameContext::default();
         assert_eq!(context.score_of(0), None);
+    }
+
+    #[test]
+    fn own_reached_follows_player_id() {
+        let context = table_state_context(
+            Some(2),
+            None,
+            Default::default(),
+            [true, false, true, false],
+        );
+        assert_eq!(context.own_reached(), Some(true));
+
+        let context = table_state_context(
+            Some(1),
+            None,
+            Default::default(),
+            [true, false, true, false],
+        );
+        assert_eq!(context.own_reached(), Some(false));
+    }
+
+    #[test]
+    fn own_reached_is_none_when_player_id_is_unknown() {
+        // player 0 のリーチを自分のリーチと推測しない。
+        let context =
+            table_state_context(None, None, Default::default(), [true, false, false, false]);
+        assert_eq!(context.player_id(), None);
+        assert_eq!(context.own_reached(), None);
     }
 
     #[test]
