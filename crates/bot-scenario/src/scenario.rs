@@ -1,5 +1,8 @@
 use bot_core::{GameContext, LegalAction, Meld, MeldKind, TableStateFacts, seat_wind_for_player};
-use bot_logic::{HistoryFuritenFacts, TileId, TileType};
+use bot_logic::{
+    FixedMeldCount, HistoryFuritenFacts, TileCounts, TileId, TileType,
+    calculate_shanten_with_fixed_melds, is_menzen,
+};
 use serde::Deserialize;
 
 use crate::error::ScenarioError;
@@ -10,6 +13,15 @@ const CHI_TILE_COUNT: usize = 3;
 const PON_TILE_COUNT: usize = 3;
 const KAN_TILE_COUNT: usize = 4;
 const PON_CONSUMED_TILE_COUNT: usize = 2;
+
+// リーチ宣言に必要な持ち点。
+const REACH_MIN_SCORE: i32 = 1000;
+
+// リーチ宣言に必要な残りツモ牌数。
+const REACH_MIN_REMAINING_TILES: u32 = 4;
+
+// リーチを生成する打牌後の向聴数。
+const REACH_TENPAI_SHANTEN: i8 = 0;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,8 +67,6 @@ pub struct ScenarioSpec {
     pub legal_dahai: Option<String>,
     #[serde(default)]
     pub legal_pon: Option<Vec<PonActionSpec>>,
-    #[serde(default)]
-    pub allow_reach: bool,
     #[serde(default)]
     pub allow_hora: bool,
     #[serde(default)]
@@ -183,8 +193,6 @@ impl Scenario {
         validate_unique_physical_tiles(&visible_tiles)
             .map_err(|source| ScenarioError::PhysicalTiles { source })?;
 
-        let legal_actions = build_legal_actions(spec, &hand, draw, &discards, player_id)?;
-
         let context = GameContext::from_parts_with_melds(
             draw,
             hand,
@@ -202,6 +210,8 @@ impl Scenario {
         .with_temporary_passed_tiles(temporary_passed_tiles)
         .with_table_state_facts(table_state)
         .with_history_furiten_facts(resolve_history_furiten_facts(spec));
+
+        let legal_actions = build_legal_actions(spec, &context)?;
 
         Ok(Self {
             context,
@@ -673,21 +683,26 @@ fn meld_visible_tiles(meld: &Meld) -> Vec<TileId> {
 
 fn build_legal_actions(
     spec: &ScenarioSpec,
-    hand: &[TileId],
-    draw: Option<TileId>,
-    discards: &[Vec<TileId>; 4],
-    player_id: Option<u8>,
+    context: &GameContext,
 ) -> Result<Vec<LegalAction>, ScenarioError> {
+    let hand = context.hand_tiles();
+    let draw = context.drawn_tile();
+
     let mut actions = match spec.legal_dahai.as_deref() {
         Some(input) => explicit_dahai_actions(input, hand, draw)?,
         None => automatic_dahai_actions(hand, draw),
     };
 
     if let Some(specs) = spec.legal_pon.as_deref() {
-        actions.extend(pon_actions(specs, hand, discards, player_id)?);
+        actions.extend(pon_actions(
+            specs,
+            hand,
+            context.discards(),
+            context.player_id(),
+        )?);
     }
 
-    if spec.allow_reach {
+    if is_reach_legal(context, &actions) {
         actions.push(LegalAction::Reach);
     }
     if spec.allow_hora {
@@ -701,6 +716,66 @@ fn build_legal_actions(
     }
 
     Ok(actions)
+}
+
+/// 局面から `LegalAction::Reach` を生成できるかを判定する。
+///
+/// RiichiEnv の4麻 semantics に合わせ、門前・未リーチ・合法 Dahai のいずれかを切った後テンパイ・
+/// 持ち点・残りツモ牌数の全てを満たす場合だけリーチを合法手にする。持ち点と残りツモ牌数が
+/// unknown の場合はリーチ不可と推測せず、明示的に不可能と分かる場合だけ生成しない。
+fn is_reach_legal(context: &GameContext, actions: &[LegalAction]) -> bool {
+    is_menzen_hand(context)
+        && !is_own_reached(context)
+        && has_reach_score(context)
+        && has_reach_remaining_tiles(context)
+        && reaches_tenpai_after_any_legal_dahai(context, actions)
+}
+
+// 自分の副露が分からない場合は非門前と推測しない。暗槓は門前のままなので bot-logic の判定を使う。
+fn is_menzen_hand(context: &GameContext) -> bool {
+    context.own_melds().is_none_or(is_menzen)
+}
+
+fn is_own_reached(context: &GameContext) -> bool {
+    context
+        .player_id()
+        .is_some_and(|player| context.is_reached(usize::from(player)))
+}
+
+fn has_reach_score(context: &GameContext) -> bool {
+    context
+        .own_score()
+        .is_none_or(|score| score >= REACH_MIN_SCORE)
+}
+
+fn has_reach_remaining_tiles(context: &GameContext) -> bool {
+    context
+        .remaining_tiles()
+        .is_none_or(|remaining| remaining >= REACH_MIN_REMAINING_TILES)
+}
+
+// 副露済み面子数を含む既存の向聴計算をそのまま使い、リーチ専用の向聴・受け入れは計算しない。
+fn reaches_tenpai_after_any_legal_dahai(context: &GameContext, actions: &[LegalAction]) -> bool {
+    let fixed_meld_count = context
+        .own_fixed_meld_count()
+        .unwrap_or(FixedMeldCount::NONE);
+    let counts = TileCounts::from_tiles(
+        context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile()),
+    );
+
+    actions.iter().any(|action| {
+        let LegalAction::Dahai { tile } = action else {
+            return false;
+        };
+        let mut after_discard = counts;
+        after_discard.remove(tile.tile_type()).is_ok()
+            && calculate_shanten_with_fixed_melds(&after_discard, fixed_meld_count).min()
+                == REACH_TENPAI_SHANTEN
+    })
 }
 
 fn automatic_dahai_actions(hand: &[TileId], draw: Option<TileId>) -> Vec<LegalAction> {
@@ -959,7 +1034,6 @@ mod tests {
         assert_eq!(spec.extra_visible_tiles, None);
         assert_eq!(spec.legal_dahai, None);
         assert_eq!(spec.legal_pon, None);
-        assert!(!spec.allow_reach);
         assert!(!spec.allow_hora);
         assert!(!spec.allow_ryukyoku);
         assert!(!spec.allow_none);
@@ -1008,7 +1082,6 @@ mod tests {
                 "discards": ["", "1m 4m 7p E", "", ""],
                 "extra_visible_tiles": "444p",
                 "legal_dahai": null,
-                "allow_reach": false,
                 "allow_hora": false,
                 "allow_ryukyoku": false
             }"#,
@@ -1685,13 +1758,11 @@ mod tests {
     fn allow_flags_append_actions() {
         let spec = ScenarioSpec {
             hand: "123m".to_string(),
-            allow_reach: true,
             allow_hora: true,
             allow_ryukyoku: true,
             ..ScenarioSpec::default()
         };
         let scenario = resolve(&spec);
-        assert!(scenario.legal_actions.contains(&LegalAction::Reach));
         assert!(scenario.legal_actions.contains(&LegalAction::Hora));
         assert!(scenario.legal_actions.contains(&LegalAction::Ryukyoku));
     }
@@ -1699,10 +1770,135 @@ mod tests {
     #[test]
     fn allow_flags_default_to_disabled() {
         let scenario = resolve(&hand_spec("123m", None));
-        assert!(!scenario.legal_actions.contains(&LegalAction::Reach));
         assert!(!scenario.legal_actions.contains(&LegalAction::Hora));
         assert!(!scenario.legal_actions.contains(&LegalAction::Ryukyoku));
         assert!(!scenario.legal_actions.contains(&LegalAction::None));
+    }
+
+    // 打 W で 4p / 7p のテンパイになる門前の何切る局面。リーチ自動生成の基準形として使う。
+    const REACH_TENPAI_HAND: &str = "12388m56p234789s3z";
+
+    fn reach_actions(scenario: &Scenario) -> Vec<&LegalAction> {
+        scenario
+            .legal_actions
+            .iter()
+            .filter(|action| matches!(action, LegalAction::Reach))
+            .collect()
+    }
+
+    fn generates_reach(json: &str) -> bool {
+        !reach_actions(&resolve(&spec_from_json(json))).is_empty()
+    }
+
+    #[test]
+    fn menzen_tenpai_generates_reach_without_any_option() {
+        let scenario = resolve(&spec_from_json(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0}}"#
+        )));
+        assert_eq!(reach_actions(&scenario).len(), 1);
+        assert_eq!(scenario.legal_actions.last(), Some(&LegalAction::Reach));
+    }
+
+    #[test]
+    fn a_hand_that_is_not_tenpai_after_any_legal_dahai_does_not_generate_reach() {
+        assert!(!generates_reach(
+            r#"{"hand": "234m455p789s1123z", "draw": "N", "player_id": 0, "oya": 0}"#
+        ));
+    }
+
+    // 合法 Dahai を W 以外に絞ると、テンパイになる打牌が無くなりリーチも生成されない。
+    #[test]
+    fn a_legal_dahai_that_never_reaches_tenpai_does_not_generate_reach() {
+        assert!(!generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0, "legal_dahai": "1m"}}"#
+        )));
+    }
+
+    // 同じテンパイ形で副露済み面子の種類だけが違う対照。チーは非門前なのでリーチできず、
+    // 暗槓は門前のままなのでリーチを生成する。
+    #[test]
+    fn fixed_melds_decide_whether_the_hand_is_menzen_for_reach() {
+        assert!(!generates_reach(OPEN_TENPAI_SCENARIO));
+        assert!(generates_reach(ANKAN_TENPAI_SCENARIO));
+    }
+
+    const OPEN_TENPAI_SCENARIO: &str = r#"{
+        "hand": "12388m56p234s3z",
+        "player_id": 0,
+        "oya": 0,
+        "discards": ["", "", "", "7s"],
+        "melds": [
+            [{"kind": "chi", "tiles": "7s 8s 9s", "called_tile": "7s"}],
+            [],
+            [],
+            []
+        ]
+    }"#;
+
+    const ANKAN_TENPAI_SCENARIO: &str = r#"{
+        "hand": "12388m56p234s3z",
+        "player_id": 0,
+        "oya": 0,
+        "melds": [
+            [{"kind": "ankan", "tiles": "1s 1s 1s 1s"}],
+            [],
+            [],
+            []
+        ]
+    }"#;
+
+    #[test]
+    fn a_score_below_the_reach_declaration_does_not_generate_reach() {
+        assert!(!generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0,
+                 "scores": [900, 25000, 25000, 25000]}}"#
+        )));
+        assert!(generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0,
+                 "scores": [1000, 25000, 25000, 25000]}}"#
+        )));
+    }
+
+    // 持ち点が unknown ならリーチ不可と推測せず、他の条件だけで判定する。
+    #[test]
+    fn an_unknown_score_generates_reach() {
+        let scenario = resolve(&spec_from_json(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0}}"#
+        )));
+        assert_eq!(scenario.context.own_score(), None);
+        assert_eq!(reach_actions(&scenario).len(), 1);
+    }
+
+    #[test]
+    fn too_few_remaining_tiles_do_not_generate_reach() {
+        assert!(!generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0, "remaining_tiles": 3}}"#
+        )));
+        assert!(generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0, "remaining_tiles": 4}}"#
+        )));
+    }
+
+    // 残りツモ牌数が unknown ならリーチ不可と推測しない。
+    #[test]
+    fn unknown_remaining_tiles_generate_reach() {
+        let scenario = resolve(&spec_from_json(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0}}"#
+        )));
+        assert_eq!(scenario.context.remaining_tiles(), None);
+        assert_eq!(reach_actions(&scenario).len(), 1);
+    }
+
+    #[test]
+    fn an_already_reached_player_does_not_generate_reach() {
+        assert!(!generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0,
+                 "reached": [true, false, false, false]}}"#
+        )));
+        assert!(generates_reach(&format!(
+            r#"{{"hand": "{REACH_TENPAI_HAND}", "player_id": 0, "oya": 0,
+                 "reached": [false, true, false, false]}}"#
+        )));
     }
 
     const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");
@@ -1733,13 +1929,13 @@ mod tests {
     fn legal_pon_and_allow_none_keep_the_existing_action_order() {
         let scenario = resolve(&spec_from_json(
             r#"{
-                "hand": "123m55p P P",
+                "hand": "123456789m 55p P P",
+                "draw": "1p",
                 "player_id": 0,
                 "oya": 0,
                 "discards": ["", "P", "", ""],
-                "legal_dahai": "1m 5p",
+                "legal_dahai": "1p 5p",
                 "legal_pon": [{"from_player": 1, "tile": "P", "consumed": "P P"}],
-                "allow_reach": true,
                 "allow_hora": true,
                 "allow_ryukyoku": true,
                 "allow_none": true
@@ -1756,7 +1952,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["1m", "5p", "Pon", "Reach", "Hora", "Ryukyoku", "None"]
+            ["1p", "5p", "Pon", "Reach", "Hora", "Ryukyoku", "None"]
         );
     }
 

@@ -4,7 +4,7 @@ use crate::scenario::ScenarioSpec;
 
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
-               [--seat-wind <WIND>] [--allow-reach] [--allow-hora] [--allow-ryukyoku]
+               [--seat-wind <WIND>] [--allow-hora] [--allow-ryukyoku]
                [--lookahead] [--verbose] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]
@@ -114,10 +114,6 @@ impl CliArgs {
                 }
                 "--seat-wind" => {
                     spec.seat_wind = Some(value_of(&mut args, "--seat-wind")?);
-                    inline_options = true;
-                }
-                "--allow-reach" => {
-                    spec.allow_reach = true;
                     inline_options = true;
                 }
                 "--allow-hora" => {
@@ -312,14 +308,7 @@ mod tests {
 
     #[test]
     fn parses_allow_flags() {
-        let spec = inline_spec(&[
-            "--hand",
-            "123m",
-            "--allow-reach",
-            "--allow-hora",
-            "--allow-ryukyoku",
-        ]);
-        assert!(spec.allow_reach);
+        let spec = inline_spec(&["--hand", "123m", "--allow-hora", "--allow-ryukyoku"]);
         assert!(spec.allow_hora);
         assert!(spec.allow_ryukyoku);
     }
@@ -327,11 +316,18 @@ mod tests {
     #[test]
     fn allow_flags_default_to_disabled() {
         let spec = inline_spec(&["--hand", "123m"]);
-        assert!(!spec.allow_reach);
         assert!(!spec.allow_hora);
         assert!(!spec.allow_ryukyoku);
         assert_eq!(spec.draw, None);
         assert_eq!(spec.dora_indicators, None);
+    }
+
+    #[test]
+    fn rejects_the_removed_allow_reach_option() {
+        assert_eq!(
+            parse(&["--hand", "123m", "--allow-reach"]),
+            Err(CliError::UnknownOption("--allow-reach".to_string()))
+        );
     }
 
     #[test]

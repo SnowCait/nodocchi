@@ -19,7 +19,6 @@ cargo run -p bot-scenario -- \
 | `--dora` | 任意 | ドラ表示牌。ドラそのものではない |
 | `--round-wind` | 任意 | 場風。`E` / `S` / `W` / `N` |
 | `--seat-wind` | 任意 | 自風。`E` / `S` / `W` / `N` |
-| `--allow-reach` | 任意 | リーチを合法手に加える |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要を追加。`--verbose` 併用時は受け入れ牌ごとの詳細も表示 |
@@ -69,7 +68,6 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
   },
   "extra_visible_tiles": "",
   "legal_dahai": null,
-  "allow_reach": false,
   "allow_hora": false,
   "allow_ryukyoku": false
 }

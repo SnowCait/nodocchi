@@ -2326,7 +2326,11 @@ mod tests {
             DiagnosticOptions::WITH_LOOKAHEAD,
         );
 
-        assert_eq!(action_label(&acted), "9s");
+        assert_eq!(action_label(&acted), "Reach");
+        assert_eq!(
+            diagnostic.normal_discard_action.as_ref().map(action_label),
+            Some("9s".to_string())
+        );
         assert_eq!(diagnostic.selected_action, acted);
         assert_eq!(with_lookahead.selected_action, acted);
         assert_eq!(
@@ -2336,6 +2340,38 @@ mod tests {
         assert_eq!(
             diagnostic.history_furiten,
             scenario.context.history_furiten()
+        );
+    }
+
+    // 追加オプション無しで打 W の 4p / 7p テンパイになり、リーチが合法手として自動生成される
+    // 何切る局面。ダマに役が無いので最終 action は Reach になる。
+    const AUTO_REACH_SCENARIO: &str = r#"{
+        "hand": "12388m56p234789s3z",
+        "dora_indicators": "7s"
+    }"#;
+
+    #[test]
+    fn an_auto_generated_reach_is_selected_and_matches_act() {
+        let (scenario, diagnostic, output) = rendered(AUTO_REACH_SCENARIO, false);
+        let mut agent = ShantenAgent;
+
+        assert!(scenario.legal_actions.contains(&LegalAction::Reach));
+
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        assert_eq!(action_label(&acted), "Reach");
+        assert_eq!(diagnostic.selected_action, acted);
+        assert!(
+            diagnostic
+                .reach
+                .as_ref()
+                .is_some_and(ReachDecisionDiagnostic::should_reach),
+            "{diagnostic:?}"
+        );
+
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  selected: Reach\n  source: Reach"),
+            "{summary}"
         );
     }
 
@@ -3183,8 +3219,7 @@ mod tests {
     // 打 北 で 2p / 5p の両面テンパイになり、待ちは8枚。
     const REACH_SCENARIO: &str = r#"{
         "hand": "123456789m34p55s",
-        "draw": "N",
-        "allow_reach": true
+        "draw": "N"
     }"#;
 
     // 打 北 で 5s 単騎テンパイになり、待ちは3枚。14枚をそのまま評価すると受け入れは
@@ -3202,8 +3237,7 @@ mod tests {
         "player_id": 0,
         "oya": 3,
         "extra_visible_tiles": "333s",
-        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
-        "allow_reach": true
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
     const DAMATEN_LOW_VALUE_SCENARIO: &str = r#"{
@@ -3214,8 +3248,7 @@ mod tests {
         "player_id": 0,
         "oya": 3,
         "extra_visible_tiles": "333s",
-        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
-        "allow_reach": true
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
     // 同じ単騎テンパイで 5s を1枚、北 を2枚見せた局面。打 北 の待ちは2枚に減る。
@@ -3225,8 +3258,7 @@ mod tests {
         "player_id": 0,
         "oya": 0,
         "history_furiten": { "same_turn": false, "riichi_missed_win": false },
-        "extra_visible_tiles": "5s N N",
-        "allow_reach": true
+        "extra_visible_tiles": "5s N N"
     }"#;
 
     fn without_selected_action(
@@ -3614,8 +3646,7 @@ mod tests {
         "seat_wind": "E",
         "player_id": 0,
         "oya": 0,
-        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
-        "allow_reach": true
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
     #[test]

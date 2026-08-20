@@ -99,6 +99,24 @@ mod tests {
         assert!(output.contains("\n\nNormal discard candidates"), "{output}");
     }
 
+    // 追加オプション無しの何切る CLI でも、打 W のテンパイからリーチが生成されて選ばれる。
+    #[test]
+    fn a_menzen_tenpai_cli_scenario_selects_reach_without_any_option() {
+        let output = run_args(&[
+            "--hand",
+            "12388m56p234789s3z",
+            "--dora-indicator",
+            "7s",
+            "--summary-only",
+        ])
+        .unwrap();
+
+        assert!(
+            output.starts_with("Summary\n  selected: Reach\n  source: Reach\n"),
+            "{output}"
+        );
+    }
+
     #[test]
     fn runs_a_simple_cli_scenario_with_red_five() {
         let output = run_args(&["--hand", "340m455p789s1123z", "--draw", "N"]).unwrap();
