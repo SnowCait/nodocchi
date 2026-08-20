@@ -40,10 +40,20 @@
 //!
 //! # ロン可否
 //!
-//! 未来のフリテンは未来の自分の河に依存するため推測できない。既存のフリテン診断を渡さず、
-//! ロン可否は unknown のままにする。フリテンは点数計算の入力ではないので、打点そのものは
-//! ロン可否によらず求まる。将来フリテンによる価値補正は今回の対象外で、ダマ baseline は
-//! 元々ロン和了を前提にした hypothetical baseline のまま使う。
+//! ダマ打点はロン和了を前提にした baseline なので、production ([`crate::offense_value`]) と
+//! 同じく「ダマでロンできると確定した場合」だけ確定値として使う。ロン可否は既存のフリテン基盤
+//! ([`tenpai_wait_availability`]) が source of truth で、この層で判定規則を書き直さない。
+//!
+//! 未来テンパイの恒常フリテンは、現在の自分の河へ1手目・2手目の打牌を足した河
+//! ([`OwnDiscards::with_discards`]) で判定できる。自分の河を特定できない場合は既存どおり
+//! [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten) のままにし、非フリテンだと推測
+//! しない。履歴依存フリテンは、2手目が自分のツモを経た打牌であることだけを評価時点の事実として
+//! 補正し ([`HistoryFuritenFacts::after_discard`])、未確定の軸を `false` で埋めない。
+//!
+//! ロン可否が確定しない場合はダマ打点を判断材料にせず、`damaten_verdict = None` として既存の
+//! リーチ判断 ([`decide_reach_reason`]) の fallback へ委ねる。その結果ダマを選んだ枝は、ロン
+//! できると確定していない限り確定打点を持たない。将来フリテンによる価値補正や EV 補正は
+//! 追加しない。
 //!
 //! # 仮想ツモ牌の赤5
 //!
@@ -60,14 +70,18 @@
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
-    DrawVariantLookaheadDiagnostic, HandValueError, HandValueOutcome, LookaheadDiagnostic, Meld,
-    Payment, ProspectiveTenpai, ProspectiveTenpaiValuator, TenpaiCompletedHands,
-    TenpaiHandValueProfile, TileId, TileType, WinningContext, evaluate_tenpai_hand_value,
-    is_menzen, split_discarded_tile, tenpai_completed_hands,
+    DrawVariantLookaheadDiagnostic, FixedMeldCount, HandValueError, HandValueOutcome,
+    HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, Payment, ProspectiveTenpai,
+    ProspectiveTenpaiValuator, TenpaiCompletedHands, TenpaiHandValueProfile,
+    TenpaiWaitAvailability, TileCounts, TileId, TileType, WinningContext,
+    evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
+    structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
+    tenpai_wait_availability,
 };
 
 use crate::context::GameContext;
 use crate::damaten_value::{damaten_baseline_context, damaten_value_from_hands};
+use crate::discard_selection::evaluation_fixed_meld_count;
 use crate::offense_value::{
     BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode, reach_baseline_context,
     variant_total, weighted_average,
@@ -76,6 +90,10 @@ use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_lega
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
+
+// 2手目の打牌は必ず仮想ツモを経る。自摸 → 打牌で同巡内フリテンは解除されるので、未来テンパイ
+// 時点の履歴依存フリテンはこの事実だけで補正できる。
+const FUTURE_AFTER_OWN_DRAW: bool = true;
 
 /// 和了牌の物理牌1つ分の将来打点。
 ///
@@ -182,6 +200,10 @@ pub struct ProspectiveTenpaiValue {
     pub reach: ProspectiveBaselineValue,
     /// production のリーチ判断と同じ policy が選んだ攻撃モード。
     pub mode: TenpaiOffenseMode,
+    /// 既存のフリテン基盤による、この未来テンパイの総合ロン可否。判断できない場合は `None`。
+    ///
+    /// `Some(true)` の場合だけダマ打点を判断材料と確定値に使う。
+    pub can_ron: Option<bool>,
 }
 
 /// 将来打点を評価できない理由。
@@ -285,6 +307,7 @@ impl ProspectiveLookaheadDiagnostic {
 pub(crate) struct ProductionProspectiveValuator<'a> {
     context: &'a GameContext,
     melds: &'a [Meld],
+    fixed_meld_count: FixedMeldCount,
     // ダマ / リーチ両方の hypothetical baseline。枝ごとに組み立て直さない。
     damaten: WinningContext,
     reach: WinningContext,
@@ -293,6 +316,10 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     reach_legal: bool,
     // 自分が既にリーチしているか。自分の席を特定できない場合は `None`。
     own_reached: Option<bool>,
+    // 現在の自分の河。枝ごとに1手目・2手目の打牌を足して恒常フリテンを判定する。
+    own_discards: OwnDiscards,
+    // 未来テンパイ時点へ補正した履歴依存フリテン。未確定の軸は unknown のまま持ち回る。
+    history_furiten: HistoryFuritenFacts,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -300,38 +327,75 @@ impl<'a> ProductionProspectiveValuator<'a> {
         Self {
             context,
             melds: context.own_melds().unwrap_or_default(),
+            fixed_meld_count: evaluation_fixed_meld_count(context),
             damaten: damaten_baseline_context(context),
             reach: reach_baseline_context(context),
             reach_legal: future_reach_legal(context),
             own_reached: context.own_reached(),
+            own_discards: OwnDiscards::from_optional_river(context.own_discards()),
+            history_furiten: context
+                .history_furiten()
+                .after_discard(FUTURE_AFTER_OWN_DRAW),
         }
     }
 
-    // 枝1つ分のテンパイの完成手。物理牌を組み立てられない場合と解析できない場合は `None`。
-    fn completed_hands(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiCompletedHands> {
+    // 枝1つ分の評価材料。完成手と、既存フリテン基盤で求めた待ち・ロン可否を組にする。
+    //
+    // 物理牌を組み立てられない場合と完成手を解析できない場合だけ `None`。
+    pub(crate) fn tenpai_facts(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<ProspectiveFacts> {
+        let availability = self.wait_availability(tenpai);
+
         // 1手目と2手目に切った牌はテンパイ時点で見え牌になる。赤5が見えているかの判定に使う。
         let mut visible = self.context.visible_tiles().to_vec();
         visible.extend_from_slice(tenpai.discarded_tiles);
 
-        // 未来のフリテンは未来の自分の河に依存するため推測しない。ロン可否は unknown のままにする。
-        tenpai_completed_hands(
+        let hands = tenpai_completed_hands(
             tenpai.concealed_tiles,
             self.melds,
             tenpai.acceptance,
-            None,
+            availability.as_ref(),
             &visible,
         )
-        .ok()
+        .ok()?;
+
+        Some(ProspectiveFacts {
+            hands,
+            availability,
+        })
+    }
+
+    // 未来テンパイの待ちとロン可否。既存のフリテン基盤へ同じ入力を渡すだけで、判定規則をこの層で
+    // 書き直さない。
+    //
+    // 恒常フリテンは「現在の自分の河 + 1手目の打牌 + 2手目の打牌」で判定する。自分の河を特定
+    // できない場合は既存どおり Unknown のままで、非フリテンだと推測しない。履歴依存フリテンは
+    // 未来テンパイ時点へ補正済みの値をそのまま渡す。
+    fn wait_availability(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiWaitAvailability> {
+        let counts = TileCounts::from_tiles(tenpai.concealed_tiles.iter().copied());
+        tenpai_wait_availability(
+            tenpai.acceptance,
+            &structural_acceptance_tile_types_with_fixed_melds(&counts, self.fixed_meld_count),
+            &self
+                .own_discards
+                .with_discards(tenpai.discarded_tiles.iter().map(|tile| tile.tile_type())),
+            self.history_furiten,
+        )
     }
 
     // 攻撃を継続した場合の攻撃モード。production のリーチ判断と同じ policy をそのまま使う。
-    fn offense_mode(&self, hands: &TenpaiCompletedHands, tsumo_remaining: u8) -> TenpaiOffenseMode {
+    //
+    // ダマでロンできると確定した場合だけダマ打点を判断材料にする。ロン可否 unknown を非フリテン
+    // だと推測せず、`damaten_verdict = None` として既存の待ち枚数だけを見る fallback へ委ねる。
+    pub(crate) fn offense_mode(&self, facts: &ProspectiveFacts) -> TenpaiOffenseMode {
         match self.own_reached {
             None => TenpaiOffenseMode::Unknown,
             Some(true) => TenpaiOffenseMode::Reach,
             Some(false) => {
-                let verdict = damaten_value_from_hands(self.context, hands).verdict;
-                let reason = decide_reach_reason(self.reach_legal, Some(verdict), tsumo_remaining);
+                let damaten_verdict = facts
+                    .can_ron()
+                    .then(|| damaten_value_from_hands(self.context, &facts.hands).verdict);
+                let reason =
+                    decide_reach_reason(self.reach_legal, damaten_verdict, facts.tsumo_remaining());
                 if reason.selects_reach() {
                     TenpaiOffenseMode::Reach
                 } else {
@@ -342,31 +406,67 @@ impl<'a> ProductionProspectiveValuator<'a> {
     }
 
     // 攻撃モードごとの hypothetical baseline と裏ドラ表示牌。確定できない場合は `None`。
+    //
+    // ダマのまま進む手の打点はロン和了を前提にした baseline なので、ダマでロンできると確定した
+    // 場合しか使えない。押し引きの攻撃打点と同じ入口条件で、ロンできない打点を確定値にしない。
     fn scoring_inputs(
         &self,
         mode: TenpaiOffenseMode,
+        can_ron: bool,
     ) -> Option<(WinningContext, Option<&'static [TileId]>)> {
         match mode {
             TenpaiOffenseMode::Reach => Some((self.reach, Some(BASELINE_URA_DORA_INDICATORS))),
-            TenpaiOffenseMode::Damaten => Some((self.damaten, None)),
+            TenpaiOffenseMode::Damaten => can_ron.then_some((self.damaten, None)),
             TenpaiOffenseMode::Unknown => None,
         }
     }
 
     // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計)。確定できない場合は `None`。
-    fn selection_value(&self, hands: &TenpaiCompletedHands, tsumo_remaining: u8) -> Option<u64> {
+    fn selection_value(&self, facts: &ProspectiveFacts) -> Option<u64> {
         let (baseline, ura_dora) =
-            self.scoring_inputs(self.offense_mode(hands, tsumo_remaining))?;
-        let profile =
-            evaluate_tenpai_hand_value(hands, baseline, self.context.dora_indicators(), ura_dora);
+            self.scoring_inputs(self.offense_mode(facts), facts.can_ron())?;
+        let profile = evaluate_tenpai_hand_value(
+            &facts.hands,
+            baseline,
+            self.context.dora_indicators(),
+            ura_dora,
+        );
         weighted_total(&profile)
     }
 }
 
 impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
-        let hands = self.completed_hands(tenpai)?;
-        self.selection_value(&hands, tenpai.acceptance.total_remaining())
+        self.selection_value(&self.tenpai_facts(tenpai)?)
+    }
+}
+
+/// 未来テンパイ1件分の評価材料。完成手と、既存フリテン基盤による待ち・ロン可否。
+///
+/// 打牌選択と診断はこの1組を共有し、同じ枝のロン可否や完成手を別々に組み立てない。
+pub(crate) struct ProspectiveFacts {
+    hands: TenpaiCompletedHands,
+    availability: Option<TenpaiWaitAvailability>,
+}
+
+impl ProspectiveFacts {
+    /// 既存フリテン基盤による総合ロン可否。判断できない場合は `None`。
+    pub(crate) fn ron_availability(&self) -> Option<bool> {
+        self.availability
+            .as_ref()
+            .and_then(TenpaiWaitAvailability::can_ron)
+    }
+
+    // ダマ打点を確定値として使えるか。unknown はロンできると推測しない。
+    fn can_ron(&self) -> bool {
+        self.ron_availability() == Some(true)
+    }
+
+    // 生きた待ちの残枚数。既存の受け入れそのもので、リーチ判断の fallback へ渡す。
+    fn tsumo_remaining(&self) -> u8 {
+        self.availability
+            .as_ref()
+            .map_or(0, |availability| availability.tsumo_remaining)
     }
 }
 
@@ -519,20 +619,21 @@ fn variant_outcome(
         acceptance: &next.acceptance_after_discard,
         discarded_tiles: &discarded_tiles,
     };
-    let Some(hands) = valuator.completed_hands(&tenpai) else {
+    let Some(facts) = valuator.tenpai_facts(&tenpai) else {
         return ProspectiveOutcome::Unavailable(ProspectiveUnavailable::CompletedHand);
     };
 
     let dora_indicators = valuator.context.dora_indicators();
     ProspectiveOutcome::Evaluated(ProspectiveTenpaiValue {
-        damaten: baseline_value(&hands, valuator.damaten, dora_indicators, None),
+        damaten: baseline_value(&facts.hands, valuator.damaten, dora_indicators, None),
         reach: baseline_value(
-            &hands,
+            &facts.hands,
             valuator.reach,
             dora_indicators,
             Some(BASELINE_URA_DORA_INDICATORS),
         ),
-        mode: valuator.offense_mode(&hands, next.acceptance_total_remaining()),
+        mode: valuator.offense_mode(&facts),
+        can_ron: facts.ron_availability(),
     })
 }
 
@@ -609,6 +710,7 @@ mod tests {
     };
 
     use crate::action::LegalAction;
+    use crate::context::TableStateFacts;
     use crate::damaten_value::DAMATEN_MIN_TOTAL;
     use crate::discard_selection::select_discard_action_with_diagnostic;
 
@@ -698,6 +800,86 @@ mod tests {
 
     // 場風・自風・見え牌を既知にした門前14枚の局面。自分は子 (南家)。`winds == false` では
     // 場風・自風を渡さず、点数計算の入力が足りない局面にする。
+    // 局面のツモ以外の材料。ロン可否と合法リーチの条件を変える検証だけがここを触る。
+    struct CaseSpec<'a> {
+        hand: &'a [&'a str],
+        dora_indicator: &'a str,
+        extra_visible: &'a [&'a str],
+        winds: bool,
+        /// 自分の河。未来テンパイの恒常フリテンを作るために使う。
+        own_river: &'a [&'a str],
+        history_furiten: HistoryFuritenFacts,
+        table_state: TableStateFacts,
+    }
+
+    // 履歴依存フリテンまで観測済みの既定値。production の局開始時と同じ facts。
+    fn known_history_furiten() -> HistoryFuritenFacts {
+        HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        }
+    }
+
+    impl<'a> CaseSpec<'a> {
+        fn new(hand: &'a [&'a str], dora_indicator: &'a str) -> Self {
+            Self {
+                hand,
+                dora_indicator,
+                extra_visible: &[],
+                winds: true,
+                own_river: &[],
+                history_furiten: known_history_furiten(),
+                table_state: TableStateFacts::default(),
+            }
+        }
+
+        fn build(self) -> Case {
+            let mut source = TileIdSource::new();
+            let hand_tiles = source.tiles(&self.hand[..self.hand.len() - 1]);
+            let drawn_tile = source.tile(self.hand[self.hand.len() - 1]);
+            let dora_indicators = source.tiles(&[self.dora_indicator]);
+            let extra_visible = source.tiles(self.extra_visible);
+            let own_river = source.tiles(self.own_river);
+
+            // 自分の河も見え牌になる。受け入れの残枚数と赤5の解決を局面と食い違わせない。
+            let visible: Vec<TileId> = hand_tiles
+                .iter()
+                .chain([&drawn_tile])
+                .chain(dora_indicators.iter())
+                .chain(extra_visible.iter())
+                .chain(own_river.iter())
+                .copied()
+                .collect();
+            let actions: Vec<LegalAction> = hand_tiles
+                .iter()
+                .chain([&drawn_tile])
+                .map(|&tile| LegalAction::Dahai { tile })
+                .collect();
+
+            let ctx = GameContext::from_parts_with_table_state(
+                Some(drawn_tile),
+                hand_tiles,
+                dora_indicators,
+                self.winds.then(|| tile("E")),
+                self.winds.then(|| tile("S")),
+                visible,
+                Some(0),
+                Some(3),
+                [own_river, Vec::new(), Vec::new(), Vec::new()],
+                [false; 4],
+            )
+            .with_table_state_facts(self.table_state)
+            .with_history_furiten_facts(self.history_furiten);
+
+            let selection = select_discard_action_with_diagnostic(&ctx, &actions, true);
+            Case {
+                ctx,
+                lookahead: selection.lookahead.expect("2手先診断が構築されている"),
+                value: selection.lookahead_value.expect("将来打点が構築されている"),
+            }
+        }
+    }
+
     fn case_of(hand: &[&str], extra_visible: &[&str], winds: bool) -> Case {
         case_with_dora(hand, "1m", extra_visible, winds)
     }
@@ -708,44 +890,12 @@ mod tests {
         extra_visible: &[&str],
         winds: bool,
     ) -> Case {
-        let mut source = TileIdSource::new();
-        let hand_tiles = source.tiles(&hand[..hand.len() - 1]);
-        let drawn_tile = source.tile(hand[hand.len() - 1]);
-        let dora_indicators = source.tiles(&[dora_indicator]);
-        let extra_visible = source.tiles(extra_visible);
-
-        let visible: Vec<TileId> = hand_tiles
-            .iter()
-            .chain([&drawn_tile])
-            .chain(dora_indicators.iter())
-            .chain(extra_visible.iter())
-            .copied()
-            .collect();
-        let actions: Vec<LegalAction> = hand_tiles
-            .iter()
-            .chain([&drawn_tile])
-            .map(|&tile| LegalAction::Dahai { tile })
-            .collect();
-
-        let ctx = GameContext::from_parts_with_table_state(
-            Some(drawn_tile),
-            hand_tiles,
-            dora_indicators,
-            winds.then(|| tile("E")),
-            winds.then(|| tile("S")),
-            visible,
-            Some(0),
-            Some(3),
-            Default::default(),
-            [false; 4],
-        );
-
-        let selection = select_discard_action_with_diagnostic(&ctx, &actions, true);
-        Case {
-            ctx,
-            lookahead: selection.lookahead.expect("2手先診断が構築されている"),
-            value: selection.lookahead_value.expect("将来打点が構築されている"),
+        CaseSpec {
+            extra_visible,
+            winds,
+            ..CaseSpec::new(hand, dora_indicator)
         }
+        .build()
     }
 
     // 123m 456m 78m 55p 13s 9s + ツモ 1p の1向聴。打 1p / 打 9s から 3m / 6m / 9m を引くと
@@ -1136,6 +1286,40 @@ mod tests {
     static HIGH_DAMATEN: LazyLock<Case> =
         LazyLock::new(|| case_with_dora(&HIGH_DAMATEN_HAND, "1p", &[], true));
 
+    // 同じ局面で、未来テンパイの待ち 3p を自分が既に捨てている。恒常フリテンが確定するので
+    // ダマではロンできない。
+    static HIGH_DAMATEN_FURITEN: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            own_river: &["3p"],
+            ..CaseSpec::new(&HIGH_DAMATEN_HAND, "1p")
+        }
+        .build()
+    });
+
+    // 同じ局面で、履歴依存フリテンが未観測。恒常フリテンは非フリテンでも総合ロン可否は
+    // 確定しない。
+    static HIGH_DAMATEN_UNKNOWN_RON: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            history_furiten: HistoryFuritenFacts::default(),
+            ..CaseSpec::new(&HIGH_DAMATEN_HAND, "1p")
+        }
+        .build()
+    });
+
+    // ロン可否が確定せず、持ち点が足りずリーチも打てない局面。攻撃モードはダマになるが、
+    // ダマ Ron baseline を確定値として使えない。
+    static HIGH_DAMATEN_NO_REACH: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            history_furiten: HistoryFuritenFacts::default(),
+            table_state: TableStateFacts {
+                scores: Some([500, 25_000, 25_000, 25_000]),
+                ..TableStateFacts::default()
+            },
+            ..CaseSpec::new(&HIGH_DAMATEN_HAND, "1p")
+        }
+        .build()
+    });
+
     fn totals(baseline: &ProspectiveBaselineValue) -> Vec<(u8, Option<u32>)> {
         baseline
             .winning_tile_values()
@@ -1157,10 +1341,12 @@ mod tests {
 
     #[test]
     fn a_high_damaten_branch_uses_the_damaten_value() {
-        // ダマ 7700 / リーチ 8000 で production 判断がダマなら、選択値もダマ打点で作る。
+        // ダマでロンできると確定していて、ダマ 7700 / リーチ 8000。production 判断はダマなので
+        // 選択値もダマ打点で作る。
         let variant = HIGH_DAMATEN.red_variant("8m", "5p", true);
         let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
 
+        assert_eq!(tenpai.can_ron, Some(true));
         assert_eq!(
             totals(&tenpai.damaten),
             vec![(4, Some(7700)), (4, Some(7700))]
@@ -1171,6 +1357,94 @@ mod tests {
         );
         assert_eq!(tenpai.mode, TenpaiOffenseMode::Damaten);
         assert_eq!(variant.selection_value, Some(8 * 7700));
+    }
+
+    #[test]
+    fn a_known_permanent_furiten_does_not_use_the_damaten_verdict() {
+        // 未来テンパイの待ちを自分が既に捨てていれば、既存 furiten helper が恒常フリテンを
+        // 確定させる。ダマではロンできないのでダマ打点を判断材料にしない。
+        let variant = HIGH_DAMATEN_FURITEN.red_variant("8m", "5p", true);
+        let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
+
+        assert_eq!(tenpai.can_ron, Some(false));
+        // フリテンでも打点そのものは変わらない。将来フリテンに倍率や EV 補正を掛けていない。
+        assert_eq!(
+            damaten_totals(tenpai),
+            damaten_totals(
+                HIGH_DAMATEN
+                    .red_variant("8m", "5p", true)
+                    .outcome
+                    .evaluated()
+                    .expect("テンパイ枝")
+            ),
+        );
+        // ダマ打点そのものは threshold 以上のまま。それでもダマは選ばない。
+        assert!(damaten_meets_threshold(tenpai));
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(
+            variant.selection_value,
+            reach_weighted_total(tenpai),
+            "リーチ baseline の打点で選択値を作る"
+        );
+    }
+
+    #[test]
+    fn an_unknown_ron_availability_does_not_use_the_damaten_verdict() {
+        // ロン可否が確定しない枝では、ダマ打点が threshold 以上でも HighValueDamaten と
+        // 確定しない。既存の待ち枚数だけを見る fallback へ委ねる。
+        let variant = HIGH_DAMATEN_UNKNOWN_RON.red_variant("8m", "5p", true);
+        let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
+
+        assert_eq!(tenpai.can_ron, None);
+        assert!(damaten_meets_threshold(tenpai));
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(variant.selection_value, reach_weighted_total(tenpai));
+    }
+
+    #[test]
+    fn a_damaten_branch_without_a_certain_ron_has_no_value() {
+        // 合法リーチが無くダマになる枝でも、ロンできると確定しない限りダマ Ron baseline を
+        // 確定値として使わない。0点にもせず、打点を持たないままにする。
+        let variant = HIGH_DAMATEN_NO_REACH.red_variant("8m", "5p", true);
+        let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
+
+        assert_eq!(tenpai.can_ron, None);
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Damaten);
+        assert!(
+            tenpai
+                .damaten
+                .winning_tile_values()
+                .all(|value| value.value.total().is_some()),
+            "ダマ打点そのものは求まる"
+        );
+        assert_eq!(variant.selection_value, None);
+    }
+
+    fn damaten_totals(tenpai: &ProspectiveTenpaiValue) -> Vec<Option<u32>> {
+        tenpai
+            .damaten
+            .winning_tile_values()
+            .map(|value| value.value.total())
+            .collect()
+    }
+
+    // 全ての生きた待ちのダマ打点が threshold 以上か。
+    fn damaten_meets_threshold(tenpai: &ProspectiveTenpaiValue) -> bool {
+        tenpai.damaten.winning_tile_values().all(|value| {
+            value
+                .value
+                .total()
+                .is_some_and(|total| total >= DAMATEN_MIN_TOTAL)
+        })
+    }
+
+    // リーチ baseline での Σ(和了牌 variant 残枚数 × 支払い合計)。
+    fn reach_weighted_total(tenpai: &ProspectiveTenpaiValue) -> Option<u64> {
+        tenpai
+            .reach
+            .winning_tile_values()
+            .map(|value| Some(u64::from(value.value.total()?) * u64::from(value.remaining)))
+            .sum()
     }
 
     #[test]
@@ -1202,6 +1476,9 @@ mod tests {
         }));
         assert_eq!(low.mode, TenpaiOffenseMode::Reach);
         assert_eq!(high.mode, TenpaiOffenseMode::Damaten);
+        // どちらもダマでロンできると確定した枝。threshold 判定はその場合だけ効く。
+        assert_eq!(low.can_ron, Some(true));
+        assert_eq!(high.can_ron, Some(true));
     }
 
     #[test]

@@ -404,7 +404,7 @@ fn evaluate_discard_candidates_with_fixed_meld_count(
 // player 0 の副露数などを推測せず、既存の門前評価経路と同じ `FixedMeldCount::NONE` で評価する。
 // これは情報不足時の fallback であり「副露0と確定した」という診断ではない。診断が報告する
 // `own_fixed_meld_count` は引き続き `None` のままにする。
-fn evaluation_fixed_meld_count(context: &GameContext) -> FixedMeldCount {
+pub(crate) fn evaluation_fixed_meld_count(context: &GameContext) -> FixedMeldCount {
     context
         .own_fixed_meld_count()
         .unwrap_or(FixedMeldCount::NONE)
@@ -632,7 +632,7 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use bot_logic::TileId;
+    use bot_logic::{HistoryFuritenFacts, TileId};
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -2372,7 +2372,12 @@ pub(crate) mod tests {
             Some(3),
             Default::default(),
             [false; 4],
-        );
+        )
+        // 履歴依存フリテンを既知にして、未来テンパイのロン可否まで確定できる局面にする。
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
         let actions = tiles
             .iter()
             .map(|&tile| LegalAction::Dahai { tile })

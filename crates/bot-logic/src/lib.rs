@@ -98,6 +98,7 @@ pub use selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     WeightedForwardMetric, best_discard_selection_index,
     best_discard_selection_index_with_forward_metrics, compare_discard_selection_candidates,
+    resolve_prospective_value_axis,
 };
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,

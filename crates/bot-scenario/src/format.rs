@@ -713,7 +713,12 @@ fn format_prospective_value(
             prospective_unavailable_label(*reason)
         )),
         ProspectiveOutcome::Evaluated(tenpai) => {
-            lines.push(format!("        prospective value ({:?})", tenpai.mode));
+            // 採用した baseline と、ダマ打点を確定値に使えるかどうかのロン可否を並べる。
+            lines.push(format!(
+                "        prospective value ({:?}, can ron: {})",
+                tenpai.mode,
+                format_optional_yes_no(tenpai.can_ron)
+            ));
             lines.extend(format_prospective_baseline("damaten", &tenpai.damaten));
             lines.extend(format_prospective_baseline("reach", &tenpai.reach));
         }
@@ -4400,7 +4405,7 @@ mod tests {
             // ダマ 3200 は threshold 未満なので production 判断はリーチ。選択に使う値は
             // リーチ打点 6400 × 残枚数 4。
             "        selection value: 25600",
-            "        prospective value (Reach)",
+            "        prospective value (Reach, can ron: unknown)",
             "          damaten: 3200",
             "            8p: 4 remaining / 3200",
             "          reach: 6400",
@@ -4420,7 +4425,7 @@ mod tests {
             "        final wait: 3m(2) 4p(2)",
             // ダマでは役が無い待ちがあるので production 判断はリーチ。2600 × 2 + 1600 × 2。
             "        selection value: 8400",
-            "        prospective value (Reach)",
+            "        prospective value (Reach, can ron: unknown)",
             "          damaten: unknown",
             "            3m: 2 remaining / 1300",
             "            4p: 2 remaining / no yaku",

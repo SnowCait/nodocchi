@@ -5,6 +5,7 @@ use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_st
 use crate::selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     best_discard_selection_index_with_forward_metrics, compare_discard_selection_candidates,
+    resolve_prospective_value_axis,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
@@ -1028,6 +1029,9 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
 ) -> DiscardDecisionDiagnostic {
+    // 打点込みの軸は候補集合単位で決まる。診断が報告する比較理由を本番選択と一致させるため、
+    // 診断側でも同じ解決を通した集計値を使う。
+    let forward_metrics = resolve_prospective_value_axis(evaluations, forward_metrics);
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
         tenpai_wait: forward_metrics
@@ -1042,7 +1046,7 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
     };
 
     let best_index =
-        best_discard_selection_index_with_forward_metrics(evaluations, forward_metrics);
+        best_discard_selection_index_with_forward_metrics(evaluations, &forward_metrics);
     let selected = best_index.map(|index| evaluations[index].clone());
 
     let candidates = evaluations

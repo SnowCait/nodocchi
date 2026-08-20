@@ -17,7 +17,24 @@
 //! 打点そのものは bot-logic の責務ではないため、上位層が渡す評価器
 //! ([`crate::lookahead::ProspectiveTenpaiValuator`]) の結果をそのまま集計するだけで、ここでは
 //! Reach / Damaten policy も点数計算も持たない。確定できない枝がある候補と、集計対象の枝が
-//! 1つも無い候補は打点込みの値を持たず (`None`)、その比較では既存 weighted wait へ委ねる。
+//! 1つも無い候補は打点込みの値を持たない (`None`)。
+//!
+//! # 打点込みの軸は候補集合単位で決める
+//!
+//! 打点を確定できない候補が混ざる場合に「その2候補だけ打点軸を飛ばす」と比較が循環する。
+//!
+//! ```text
+//! A: 打点 100 / 待ち 1
+//! B: 打点  50 / 待ち 3
+//! C: 打点 不明 / 待ち 2
+//!
+//! A > B (打点) / B > C (待ち) / C > A (待ち)
+//! ```
+//!
+//! そのため軸の有効・無効は候補ごとや比較ごとではなく、pre-acceptance 軸まで同順位になる候補
+//! 集合 (cohort) 単位で決める ([`resolve_prospective_value_axis`])。cohort の全候補で打点が
+//! 確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化して既存
+//! weighted wait 以降へ委ねる。
 
 use crate::discard::{
     DiscardComparison, DiscardComparisonReason, DiscardEvaluation,
@@ -150,7 +167,11 @@ pub struct DiscardSelectionCandidate<'a> {
     pub evaluation: &'a DiscardEvaluation,
     pub tenpai_wait: Option<TenpaiWaitMetric>,
     pub next_acceptance: Option<NextAcceptanceMetric>,
-    /// 打点込みの前方集計値。両候補が確定している場合だけ比較に使う。
+    /// 打点込みの前方集計値。
+    ///
+    /// 軸を使うかどうかは候補集合単位で決まるため、比較へ渡す前に
+    /// [`resolve_prospective_value_axis`] を通した値であること。比較そのものは両側が `Some`
+    /// の場合だけ決着させる。
     pub prospective_value: Option<u64>,
 }
 
@@ -224,11 +245,50 @@ pub fn best_discard_selection_index(
     best_discard_selection_index_with_forward_metrics(evaluations, &metrics)
 }
 
+/// 打点込みの軸を候補集合単位で有効化した前方集計値を返す。
+///
+/// 打点込みの軸が使われるのは pre-acceptance 軸 (Shanten → IsolatedTile → IsolatedHonor) まで
+/// 同順位になる候補同士の比較だけなので、その cohort 単位で軸の有無を揃える。cohort の全候補で
+/// 打点が確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化する。
+///
+/// 比較ごとに軸の有無が変わると順序が循環し、候補の列挙順で選択結果が変わってしまう。cohort が
+/// 違う候補同士は pre-acceptance 軸で先に決着するため、cohort をまたいで軸の有無が違っても
+/// 順序は壊れない。
+///
+/// 戻り値は `evaluations` と同じ順序・同じ件数。`forward_metrics` の範囲外は前方評価なしとして
+/// 扱う。打点込みの軸以外の集計値は変更しない。
+pub fn resolve_prospective_value_axis(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+) -> Vec<ForwardMetrics> {
+    let metrics_at = |index: usize| forward_metrics.get(index).copied().unwrap_or_default();
+    // pre-acceptance 軸まで同順位という関係は「同じ向聴数・同じ孤立牌区分」の同値関係なので、
+    // 候補ごとに同順位の相手を集めても cohort の判断は一致する。
+    let ties_with = |left: usize, right: usize| {
+        compare_discard_before_acceptance(&evaluations[left], &evaluations[right]).is_none()
+    };
+
+    (0..evaluations.len())
+        .map(|index| {
+            let cohort_is_known = (0..evaluations.len())
+                .filter(|&other| ties_with(index, other))
+                .all(|other| metrics_at(other).prospective_value.is_some());
+            ForwardMetrics {
+                prospective_value: metrics_at(index)
+                    .prospective_value
+                    .filter(|_| cohort_is_known),
+                ..metrics_at(index)
+            }
+        })
+        .collect()
+}
+
 pub fn best_discard_selection_index_with_forward_metrics(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
 ) -> Option<usize> {
-    let metrics_at = |index: usize| forward_metrics.get(index).copied().unwrap_or_default();
+    let resolved = resolve_prospective_value_axis(evaluations, forward_metrics);
+    let metrics_at = |index: usize| resolved.get(index).copied().unwrap_or_default();
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
         tenpai_wait: metrics_at(index).tenpai_wait,
@@ -253,8 +313,9 @@ pub fn best_discard_selection_index_with_forward_metrics(
 
 // 打点込みの前方集計値による比較。決着しなければ `None` を返して既存比較へ委ねる。
 //
-// 両候補の値が確定している場合だけ順位を付ける。片側でも確定していない場合はこの軸を使わず、
-// 既存 weighted wait 以降へ fallback する。確定しない値を 0 点として順位付けしない。
+// 軸を使うかどうかは呼び出し前に候補集合単位で決まっている ([`resolve_prospective_value_axis`])
+// ため、ここでの `None` は「この cohort では打点軸を使わない」を意味する。確定しない値を 0 点
+// として順位付けしない。
 fn compare_weighted_prospective_value(
     candidate: &DiscardSelectionCandidate,
     current_best: &DiscardSelectionCandidate,
@@ -953,22 +1014,66 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_prospective_value_keeps_the_comparison_antisymmetric_and_transitive() {
-        // 打点込みの軸を足しても比較の反対称性と推移律を壊さない。値が片側だけの候補も混ぜる。
-        let evaluations = [
-            evaluation("1m", 1, &[("3m", 4), ("6m", 4), ("9m", 4)]),
-            evaluation("9p", 1, &[("3p", 4), ("6p", 4)]),
+    // 打点込みの軸を候補ごとに切り替えると循環する典型例。3候補とも同じ1向聴なので、
+    // pre-acceptance 軸まで同順位の1つの cohort に入る。
+    //
+    // ```text
+    // A: 打点 100 / 待ち 1
+    // B: 打点  50 / 待ち 3
+    // C: 打点 不明 / 待ち 2
+    // ```
+    fn cycle_case() -> (Vec<DiscardEvaluation>, Vec<ForwardMetrics>) {
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
             evaluation("1s", 1, &[("4s", 4)]),
         ];
-        let candidates = [
-            value_candidate(&evaluations[0], metric(64, 16), Some(48_000)),
-            value_candidate(&evaluations[1], metric(24, 12), Some(64_000)),
-            value_candidate(&evaluations[2], metric(96, 24), None),
+        let metrics = vec![
+            forward_metrics(metric(1, 1), Some(100)),
+            forward_metrics(metric(3, 1), Some(50)),
+            forward_metrics(metric(2, 1), None),
         ];
+        (evaluations, metrics)
+    }
 
-        for left in &candidates {
-            for right in &candidates {
+    fn forward_metrics(
+        tenpai_wait: Option<TenpaiWaitMetric>,
+        prospective_value: Option<u64>,
+    ) -> ForwardMetrics {
+        ForwardMetrics {
+            tenpai_wait,
+            next_acceptance: None,
+            prospective_value,
+        }
+    }
+
+    fn candidates_of<'a>(
+        evaluations: &'a [DiscardEvaluation],
+        metrics: &'a [ForwardMetrics],
+    ) -> Vec<DiscardSelectionCandidate<'a>> {
+        evaluations
+            .iter()
+            .zip(metrics)
+            .map(|(evaluation, metric)| DiscardSelectionCandidate {
+                evaluation,
+                tenpai_wait: metric.tenpai_wait,
+                next_acceptance: metric.next_acceptance,
+                prospective_value: metric.prospective_value,
+            })
+            .collect()
+    }
+
+    fn is_better(
+        candidate: &DiscardSelectionCandidate,
+        current_best: &DiscardSelectionCandidate,
+    ) -> bool {
+        compare_discard_selection_candidates(candidate, current_best).candidate_is_better
+    }
+
+    // 全ての順序対で反対称性を、全ての三つ組で推移律を確認する。
+    fn assert_total_order(candidates: &[DiscardSelectionCandidate]) {
+        for left in candidates {
+            for right in candidates {
                 let forward = compare_discard_selection_candidates(left, right);
                 let backward = compare_discard_selection_candidates(right, left);
                 if std::ptr::eq(left.evaluation, right.evaluation) {
@@ -983,19 +1088,124 @@ mod tests {
             }
         }
 
-        // 打点が確定している2候補は打点で決まり、確定しない候補との比較は weighted wait で決まる。
+        for left in candidates {
+            for middle in candidates {
+                for right in candidates {
+                    if is_better(left, middle) && is_better(middle, right) {
+                        assert!(
+                            is_better(left, right),
+                            "推移律: {:?} > {:?} > {:?}",
+                            left.evaluation.discard,
+                            middle.evaluation.discard,
+                            right.evaluation.discard,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_mixed_cohort_cycles_without_the_axis_resolution() {
+        // 軸を候補ごとに切り替えると A > B (打点) > C (待ち) > A (待ち) で循環する。cohort 単位の
+        // 解決が必要な理由そのものを固定する。
+        let (evaluations, metrics) = cycle_case();
+        let raw = candidates_of(&evaluations, &metrics);
+
+        assert!(is_better(&raw[0], &raw[1]), "打点で A > B");
+        assert!(is_better(&raw[1], &raw[2]), "待ちで B > C");
+        assert!(is_better(&raw[2], &raw[0]), "待ちで C > A");
+    }
+
+    #[test]
+    fn the_axis_resolution_removes_the_cycle_of_a_mixed_cohort() {
+        // cohort に打点不明が1件でもあれば cohort 全体で軸を無効化するので循環しない。
+        let (evaluations, metrics) = cycle_case();
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
         assert!(
-            compare_discard_selection_candidates(&candidates[1], &candidates[0])
-                .candidate_is_better
+            resolved
+                .iter()
+                .all(|metric| metric.prospective_value.is_none()),
+            "cohort 全体で打点軸を使わない"
         );
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+
+        // 待ち枚数だけの順になる。
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_best_candidate_is_stable_under_permutation() {
+        // 同じ候補集合なら列挙順を変えても同じ打牌を選ぶ。
+        let (evaluations, metrics) = cycle_case();
+        let mut winners = Vec::new();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let permuted: Vec<_> = order.iter().map(|&i| evaluations[i].clone()).collect();
+            let permuted_metrics: Vec<_> = order.iter().map(|&i| metrics[i]).collect();
+            let best =
+                best_discard_selection_index_with_forward_metrics(&permuted, &permuted_metrics)
+                    .expect("最善候補がある");
+            winners.push(permuted[best].discard);
+        }
+
         assert!(
-            compare_discard_selection_candidates(&candidates[2], &candidates[0])
-                .candidate_is_better
+            winners.iter().all(|discard| *discard == winners[0]),
+            "{winners:?}"
         );
-        assert!(
-            compare_discard_selection_candidates(&candidates[2], &candidates[1])
-                .candidate_is_better
+        assert_eq!(winners[0], tile("9p"), "待ち枚数が最大の候補");
+    }
+
+    #[test]
+    fn a_cohort_with_every_value_known_keeps_the_prospective_axis() {
+        // cohort の全候補で打点が確定していれば、従来どおり打点が weighted wait より優先される。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+        ];
+        let metrics = vec![
+            forward_metrics(metric(1, 1), Some(100)),
+            forward_metrics(metric(3, 1), Some(50)),
+        ];
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert_eq!(resolved, metrics, "軸を落とさない");
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(0),
+            "待ちは狭くても打点が高い候補を選ぶ"
         );
+    }
+
+    #[test]
+    fn another_cohort_does_not_disable_the_prospective_axis() {
+        // cohort が違う候補同士は pre-acceptance 軸で先に決着するので、軸の有無を揃えない。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+            evaluation("1s", 2, &[("4s", 4)]),
+        ];
+        let metrics = vec![
+            forward_metrics(metric(1, 1), Some(100)),
+            forward_metrics(metric(3, 1), Some(50)),
+            forward_metrics(None, None),
+        ];
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert_eq!(resolved[0].prospective_value, Some(100));
+        assert_eq!(resolved[1].prospective_value, Some(50));
+        assert_total_order(&candidates_of(&evaluations, &resolved));
     }
 
     #[test]
