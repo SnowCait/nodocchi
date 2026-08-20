@@ -7,9 +7,11 @@ pub mod damaten_value;
 pub mod defense;
 pub mod discard_selection;
 pub mod meld;
+pub mod offense_value;
 pub mod open_hand_defense;
 pub mod open_hand_threat;
 pub mod push_pull;
+pub mod reach_policy;
 pub mod threat;
 
 pub use action::LegalAction;
@@ -56,6 +58,10 @@ pub use defense::{
 };
 pub use discard_selection::select_discard_action;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
+pub use offense_value::{
+    OffenseValue, PUSH_HIGH_VALUE_MIN_TOTAL, TenpaiOffenseMode, TenpaiOffenseValue,
+    reach_baseline_context,
+};
 pub use open_hand_defense::{
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
     OpenHandDefenseSelectionDiagnostic, OpenHandDefenseTargetSafety, high_open_hand_threat_players,
@@ -76,6 +82,7 @@ pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
     PushPullTenpaiWaitFacts, decide_push_pull, push_pull_inputs_from_context,
 };
+pub use reach_policy::{REACH_MIN_REMAINING, decide_reach_reason};
 pub use threat::{
     FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,
     PlayerThreatDiagnostic, PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts,

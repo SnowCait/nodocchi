@@ -23,6 +23,7 @@ use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
 };
+use crate::reach_policy::decide_reach_reason;
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };
@@ -32,11 +33,9 @@ use bot_logic::{
     calculate_shanten_with_fixed_melds,
 };
 
-const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
+pub use crate::reach_policy::ReachDecisionReason;
 
-// 補正後の待ち枚数がこの枚数以上ならリーチする。生牌の単騎は3枚なので、待ち枚数だけを理由に
-// 抑制するのは3枚未満に限る。
-const REACH_MIN_REMAINING: u8 = 3;
+const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
 // リーチを検討する打牌後の向聴数。
 const REACH_TENPAI_SHANTEN: i8 = 0;
@@ -199,36 +198,6 @@ pub struct PonDecisionDiagnostic {
     pub selected: Option<LegalAction>,
     pub reason: PonDecisionReason,
     pub candidates: Vec<PonCandidateDiagnostic>,
-}
-
-/// リーチを採用した / しなかった理由。
-///
-/// `Eligible*` 以外はすべて「今回はリーチしない」理由であり、最初に落ちた条件を1つだけ表す。
-/// 判定順は [`ReachDecisionDiagnostic`] のフィールドが埋まる順と一致する。
-///
-/// ダマ打点による判断 ([`DamatenValueVerdict`]) を適用した経路と、ダマ打点を使わない既存判断の
-/// 経路は別の理由として区別する。既存判断へ落ちるのはフリテン・ロン可否 unknown・ダマ打点を
-/// 確定できない場合で、そこでは非フリテンだともダマ打点が十分だとも推測しない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReachDecisionReason {
-    /// ダマ打点を使わない既存判断で、選んだ打牌後が生きた待ちを十分に持つテンパイになる。
-    Eligible,
-    /// ダマでは役が無い待ちがあるためリーチする。
-    EligibleNoDamatenYaku,
-    /// ダマ打点が threshold 未満の待ちがあるためリーチする。
-    EligibleLowValue,
-    /// 全ての生きた待ちがダマで役ありかつ threshold 以上なのでダマにする。
-    HighValueDamaten,
-    /// 合法 action に [`LegalAction::Reach`] が無い。
-    NoLegalReach,
-    /// 通常打牌 selection が打牌を選べていない。手牌や合法 Dahai が無い局面。
-    NoSelectedDiscard,
-    /// 選んだ打牌の後がテンパイではない。
-    NotTenpai,
-    /// テンパイだが、生きた待ちが1枚も無い。
-    NoLiveWait,
-    /// ダマ打点を使わない既存判断で、ツモ和了できる待ちの残枚数が threshold 未満。
-    InsufficientLiveWait,
 }
 
 /// リーチ判断の構造化診断。
@@ -693,6 +662,7 @@ impl ShantenAgent {
             ctx,
             player_threat_facts_from_context(ctx),
             discard_selection.evaluation.as_ref(),
+            legal_actions,
         );
         let push_pull = decide_push_pull(&inputs);
         log_push_pull_decision(&push_pull, &inputs, discard_selection.action.as_ref());
@@ -1179,6 +1149,10 @@ fn log_agent_decision(decision: &AgentDecision) {
 // (REACH_MIN_REMAINING) をダマ打点より先に適用してリーチを抑制しない。したがって1～2枚待ちでも
 // ダマが安ければリーチする。
 //
+// リーチ / ダマの条件は decide_reach_reason() が source of truth で、押し引きが攻撃打点を求める
+// ときの攻撃モードもそこを共有する。ここでは合法 Reach と打牌後テンパイを確認して結論を載せる
+// だけにする。
+//
 // フリテン・ロン可否 unknown・ダマ打点を確定できない場合は、非フリテンだともダマ打点が十分だとも
 // 推測せず、待ち枚数だけを見る既存判断を維持する。
 // TODO: フリテン専用のリーチ policy を決める。
@@ -1231,26 +1205,15 @@ fn decide_reach(
         .flatten();
 
     // 待ち枚数は既存受け入れそのもので、visible tiles の反映も打牌評価の時点で済んでいる。
-    let (reason, selected) = match damaten_value.as_ref().map(|value| value.verdict) {
-        Some(DamatenValueVerdict::NoLiveWait) => (ReachDecisionReason::NoLiveWait, None),
-        Some(DamatenValueVerdict::NoYaku) => {
-            (ReachDecisionReason::EligibleNoDamatenYaku, Some(reach))
-        }
-        Some(DamatenValueVerdict::BelowThreshold) => {
-            (ReachDecisionReason::EligibleLowValue, Some(reach))
-        }
-        Some(DamatenValueVerdict::AboveThreshold) => (ReachDecisionReason::HighValueDamaten, None),
-        Some(DamatenValueVerdict::Indeterminate) | None => {
-            if tenpai_wait.tsumo_remaining >= REACH_MIN_REMAINING {
-                (ReachDecisionReason::Eligible, Some(reach))
-            } else {
-                (ReachDecisionReason::InsufficientLiveWait, None)
-            }
-        }
-    };
+    // リーチ / ダマの条件そのものは押し引きの攻撃打点と共有し、ここで書き直さない。
+    let reason = decide_reach_reason(
+        true,
+        damaten_value.as_ref().map(|value| value.verdict),
+        tenpai_wait.tsumo_remaining,
+    );
 
     diagnostic.reason = reason;
-    diagnostic.selected = selected;
+    diagnostic.selected = reason.selects_reach().then_some(reach);
     diagnostic.damaten_value = damaten_value;
     diagnostic.tenpai_wait = Some(tenpai_wait);
     diagnostic
@@ -1278,6 +1241,7 @@ pub(crate) mod tests {
         PushPullReason, push_pull_inputs_from_context,
         push_pull_inputs_from_context_with_evaluation,
     };
+    use crate::reach_policy::REACH_MIN_REMAINING;
     use crate::threat::diagnose_player_threats;
     use bot_logic::{
         DiscardComparisonReason, HistoryFuritenFacts, PermanentFuriten, RiichiStatus, TileId,
@@ -2599,15 +2563,15 @@ pub(crate) mod tests {
         // 通常打牌より優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = opponent_reach_context(Some(116), &hand_values);
-        let decision = decide_push_pull(&push_pull_inputs_from_context(&ctx));
-        assert_eq!(decision.mode, PushPullMode::Fold);
-        assert_eq!(decision.reason, PushPullReason::IishantenAgainstReach);
-
         let actions: Vec<LegalAction> = hand_values
             .iter()
             .map(|&value| dahai(value))
             .chain([dahai(116), dahai(16)])
             .collect();
+        let decision = decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions));
+        assert_eq!(decision.mode, PushPullMode::Fold);
+        assert_eq!(decision.reason, PushPullReason::IishantenAgainstReach);
+
         let normal = select_discard_action(&ctx, &actions).unwrap();
         assert_eq!(agent.act(&ctx, &actions), dahai(16));
         assert_ne!(agent.act(&ctx, &actions), normal);
@@ -2618,11 +2582,11 @@ pub(crate) mod tests {
         let mut agent = ShantenAgent;
         // 他家リーチ中でも合法 Dahai に共通現物が無い Fold 局面。Reach は抑制し通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
-        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
@@ -2730,11 +2694,11 @@ pub(crate) mod tests {
         // リーチ者の河は 16(5m) のみで、0(1m) / 56(6p) は無スジ・壁なしの NoSafety。
         // Reach を抑制し、防御牌が無いので通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
-        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
@@ -2752,11 +2716,11 @@ pub(crate) mod tests {
         let mut agent = ShantenAgent;
         // 数牌のみで字牌がなければ字牌 fallback は発動しない。Fold だが安全牌が無いので通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
-        let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
         assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
@@ -2920,11 +2884,11 @@ pub(crate) mod tests {
         // Fold 局面で共通現物も字牌もなく数牌が全て NoSafety なら、防御 fallback は無い。
         // Reach は抑制し、防御牌がないことを理由に失敗させず通常打牌へ進む。
         let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
-        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
         assert_eq!(agent.act(&ctx, &actions), dahai(0));
     }
 
@@ -2952,11 +2916,11 @@ pub(crate) mod tests {
         // 強いテンパイで単独の子リーチに対しては Push。Reach が合法でなければ通常打牌へ進み、
         // 現物 17(5m) より通常打牌を優先する。
         let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+        let actions = tenpai_dahai_actions();
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Push
         );
-        let actions = tenpai_dahai_actions();
         let normal = select_discard_action(&ctx, &actions).unwrap();
         assert_ne!(normal, dahai(17));
         assert_eq!(agent.act(&ctx, &actions), normal);
@@ -3003,11 +2967,11 @@ pub(crate) mod tests {
         // 単独の子リーチに対するテンパイ。decide_push_pull は Push。
         // Reach が合法でリーチ判断も Eligible なら、現物があっても Reach を選ぶ。
         let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+        let actions = tenpai_actions();
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Push
         );
-        let actions = tenpai_actions();
         assert_eq!(
             reach_diagnostic(&ctx, &actions).reason,
             ReachDecisionReason::Eligible
@@ -3020,7 +2984,7 @@ pub(crate) mod tests {
         let mut agent = ShantenAgent;
         // 親リーチでも強いテンパイなら押す。Push の順序どおり Reach を最優先する。
         let ctx = tenpai_under_reach_context(Some(1), [false, true, false, false]);
-        let inputs = push_pull_inputs_from_context(&ctx);
+        let inputs = push_pull_inputs_from_context(&ctx, &tenpai_actions());
         assert!(inputs.dealer_reacher);
         let decision = decide_push_pull(&inputs);
         assert_eq!(decision.mode, PushPullMode::Push);
@@ -3034,7 +2998,7 @@ pub(crate) mod tests {
         let mut agent = ShantenAgent;
         // 複数リーチでも強いテンパイなら押す。
         let ctx = tenpai_under_reach_context(None, [false, true, true, false]);
-        let inputs = push_pull_inputs_from_context(&ctx);
+        let inputs = push_pull_inputs_from_context(&ctx, &tenpai_actions());
         assert_eq!(inputs.opponent_reach_count, 2);
         let decision = decide_push_pull(&inputs);
         assert_eq!(decision.mode, PushPullMode::Push);
@@ -3048,7 +3012,9 @@ pub(crate) mod tests {
         let mut agent = ShantenAgent;
         // 待ち枚数が足りないテンパイは押さない。Reach が合法でも抑制し、現物を優先する。
         let ctx = weak_tenpai_under_reach_context();
-        let inputs = push_pull_inputs_from_context(&ctx);
+        let mut actions = vec![LegalAction::Reach];
+        actions.extend(weak_tenpai_actions());
+        let inputs = push_pull_inputs_from_context(&ctx, &actions);
         let wait = inputs
             .offense
             .and_then(|offense| offense.tenpai_wait_after_discard)
@@ -3060,8 +3026,6 @@ pub(crate) mod tests {
         assert_eq!(decision.mode, PushPullMode::Fold);
         assert_eq!(decision.reason, PushPullReason::WeakTenpaiAgainstReach);
 
-        let mut actions = vec![LegalAction::Reach];
-        actions.extend(weak_tenpai_actions());
         let normal = select_discard_action(&ctx, &actions).unwrap();
         let defense = select_defense_fallback_action(&ctx, &actions)
             .cloned()
@@ -3077,7 +3041,9 @@ pub(crate) mod tests {
         // 親リーチ・複数リーチでも弱いテンパイは同じく降りる。
         for reached in [[false, true, false, false], [false, true, true, false]] {
             let ctx = weak_tenpai_under_reach_context_with(Some(1), reached);
-            let decision = decide_push_pull(&push_pull_inputs_from_context(&ctx));
+            let mut actions = vec![LegalAction::Reach];
+            actions.extend(weak_tenpai_actions());
+            let decision = decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions));
             assert_eq!(decision.mode, PushPullMode::Fold);
             assert_eq!(decision.reason, PushPullReason::WeakTenpaiAgainstReach);
         }
@@ -3118,11 +3084,11 @@ pub(crate) mod tests {
         // 二向聴以上で他家リーチを受ける Fold 局面。防御 fallback(現物 5s)と通常打牌が異なり、
         // Fold では防御 fallback を通常打牌より優先する。
         let ctx = fold_under_reach_context();
+        let actions = fold_actions();
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
-        let actions = fold_actions();
         let normal = select_discard_action(&ctx, &actions).unwrap();
         let defense = select_defense_fallback_action(&ctx, &actions)
             .cloned()
@@ -3161,8 +3127,10 @@ pub(crate) mod tests {
         // 非合法な全体最善候補はテンパイだが、単騎の待ちは 3 枚しかないので弱いテンパイ。
         let global_best = select_best_normal_discard_evaluation(&ctx, &tiles).unwrap();
         assert_eq!(global_best.min_shanten_after_discard(), 0);
+        // 合法なのはツモ切り 3p だけ。
+        let actions = vec![dahai(drawn)];
         let illegal_inputs =
-            push_pull_inputs_from_context_with_evaluation(&ctx, Some(&global_best));
+            push_pull_inputs_from_context_with_evaluation(&ctx, Some(&global_best), &actions);
         let illegal_wait = illegal_inputs
             .offense
             .and_then(|offense| offense.tenpai_wait_after_discard)
@@ -3171,13 +3139,15 @@ pub(crate) mod tests {
         let illegal_reason = decide_push_pull(&illegal_inputs).reason;
         assert_eq!(illegal_reason, PushPullReason::WeakTenpaiAgainstReach);
 
-        // 合法なのはツモ切り 3p だけ。Agent が使う offense は合法候補の評価に一致する。
-        let actions = vec![dahai(drawn)];
+        // Agent が使う offense は合法候補の評価に一致する。
         let selection = select_discard_action_with_evaluation(&ctx, &actions);
         let legal_evaluation = selection.evaluation.clone().unwrap();
         assert_eq!(legal_evaluation.min_shanten_after_discard(), 1);
-        let legal_inputs =
-            push_pull_inputs_from_context_with_evaluation(&ctx, selection.evaluation.as_ref());
+        let legal_inputs = push_pull_inputs_from_context_with_evaluation(
+            &ctx,
+            selection.evaluation.as_ref(),
+            &actions,
+        );
         let legal_reason = decide_push_pull(&legal_inputs).reason;
 
         assert_ne!(illegal_reason, legal_reason);
@@ -3270,7 +3240,7 @@ pub(crate) mod tests {
         actions.extend(fold_actions());
         let selection = select_discard_action_with_evaluation(&ctx, &actions);
         let normal = selection.action.clone().expect("通常打牌を選べる");
-        let inputs = push_pull_inputs_from_context(&ctx);
+        let inputs = push_pull_inputs_from_context(&ctx, &actions);
         let mut reach = None;
         let mut diagnostics = DecisionDiagnostics::disabled();
 
@@ -3330,7 +3300,7 @@ pub(crate) mod tests {
         let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
         let actions = vec![dahai(0), dahai(4)];
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
         let decision = agent.decide(&ctx, &actions);
@@ -3350,11 +3320,11 @@ pub(crate) mod tests {
         let agent = ShantenAgent;
         // Fold だが共通現物・字牌・数牌 safety がいずれも無い局面。通常打牌へ進む。
         let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
         assert_eq!(
-            decide_push_pull(&push_pull_inputs_from_context(&ctx)).mode,
+            decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
         );
-        let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
         let normal = select_discard_action(&ctx, &actions).unwrap();
         let decision = agent.decide(&ctx, &actions);
         assert_eq!(decision.source, AgentActionSource::NormalDiscard);
@@ -3652,7 +3622,11 @@ pub(crate) mod tests {
         let selection = select_discard_action_with_evaluation(ctx, actions);
         assert_eq!(
             inputs,
-            push_pull_inputs_from_context_with_evaluation(ctx, selection.evaluation.as_ref())
+            push_pull_inputs_from_context_with_evaluation(
+                ctx,
+                selection.evaluation.as_ref(),
+                actions
+            )
         );
         assert_eq!(decision, decide_push_pull(&inputs));
         assert_eq!(decision.mode, expected_mode);

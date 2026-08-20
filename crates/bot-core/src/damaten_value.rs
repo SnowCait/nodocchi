@@ -31,8 +31,8 @@
 
 use bot_logic::{
     DiscardEvaluation, HandValueError, HandValueOutcome, Payment, RiichiStatus,
-    TenpaiHandValueProfile, TenpaiWaitAvailability, TileId, TileType, WinMethod, WinningContext,
-    evaluate_tenpai_hand_value, tenpai_completed_hands,
+    TenpaiCompletedHands, TenpaiHandValueProfile, TenpaiWaitAvailability, TileId, TileType,
+    WinMethod, WinningContext, evaluate_tenpai_hand_value, tenpai_completed_hands,
 };
 
 use crate::context::GameContext;
@@ -43,8 +43,10 @@ use crate::discard_selection::concealed_tiles_after_discard;
 /// 親子で別の threshold へ換算せず、実点数をそのまま比較する。
 pub const DAMATEN_MIN_TOTAL: u32 = 7700;
 
-// 海底 / 河底の付かない baseline を作るための残り山枚数。実際の山残枚数ではない。
-const BASELINE_REMAINING_LIVE_TILES: u32 = 1;
+/// 海底 / 河底の付かない baseline を作るための残り山枚数。実際の山残枚数ではない。
+///
+/// ダマ baseline とリーチ baseline のどちらも同じ policy input を使う。
+pub(crate) const BASELINE_REMAINING_LIVE_TILES: u32 = 1;
 
 /// 和了牌の物理牌1つ分のダマ打点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,26 +200,49 @@ pub(crate) fn evaluate_damaten_value(
     evaluation: &DiscardEvaluation,
     wait_availability: &TenpaiWaitAvailability,
 ) -> Option<DamatenValueDiagnostic> {
+    let hands = tenpai_completed_hands_after_discard(context, evaluation, wait_availability)?;
+    Some(damaten_value_from_hands(context, &hands))
+}
+
+/// 選択済みの打牌1件について、その打牌後のテンパイの待ちごとの完成手を組み立てる。
+///
+/// 待ち牌種と残枚数は `evaluation` の受け入れ (`acceptance_after_discard`) がそのまま source of
+/// truth で、ここで待ちを計算し直さない。`wait_availability` は同じ打牌から求めた既存のフリテン
+/// 診断で、ロン可否を持ち回るためだけに渡す。
+///
+/// 打牌後の手牌を組み立てられない場合 (打牌の物理牌が手牌に無い、完成手を解析できないなど) は
+/// `None`。ダマ打点と押し引きの攻撃打点は同じ完成手を使うため、この1本を共有する。
+pub(crate) fn tenpai_completed_hands_after_discard(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+    wait_availability: &TenpaiWaitAvailability,
+) -> Option<TenpaiCompletedHands> {
     let concealed_tiles = concealed_tiles_after_discard(context, evaluation)?;
-    let hands = tenpai_completed_hands(
+    tenpai_completed_hands(
         &concealed_tiles,
         context.own_melds().unwrap_or_default(),
         &evaluation.acceptance_after_discard,
         Some(wait_availability),
         context.visible_tiles(),
     )
-    .ok()?;
+    .ok()
+}
 
+/// 組み立て済みの完成手を、ダマの hypothetical baseline で評価して待ちごとのダマ打点へ畳む。
+pub(crate) fn damaten_value_from_hands(
+    context: &GameContext,
+    hands: &TenpaiCompletedHands,
+) -> DamatenValueDiagnostic {
     let baseline = damaten_baseline_context(context);
-    let profile = evaluate_tenpai_hand_value(&hands, baseline, context.dora_indicators(), None);
+    let profile = evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), None);
     let waits = wait_values(&profile);
     let verdict = verdict(&waits);
 
-    Some(DamatenValueDiagnostic {
+    DamatenValueDiagnostic {
         baseline,
         waits,
         verdict,
-    })
+    }
 }
 
 fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<DamatenWaitValue> {

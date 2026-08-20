@@ -2,10 +2,11 @@ use bot_core::{
     AgentActionSource, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic, DamatenValue,
     DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
-    MeldThreatDiagnostic, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic,
-    OpenHandThreatAssessment, PlayerThreatDiagnostic, PonCandidateDiagnostic,
-    PonDecisionDiagnostic, PushPullDecision, PushPullInputs, ReachDecisionDiagnostic, ShantenAgent,
-    ShantenDecisionDiagnostic, ThreatDefenseTarget,
+    MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
+    OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
+    PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision, PushPullInputs,
+    PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
+    TenpaiOffenseValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -670,6 +671,7 @@ fn format_push_pull(
                         ));
                     }
                 }
+                lines.extend(format_tenpai_offense_value(offense));
                 lines.push(format!(
                     "    dora after discard: {}",
                     offense.dora_count_after_discard
@@ -691,6 +693,39 @@ fn format_push_pull(
     }
 
     lines.join("\n")
+}
+
+// 攻撃継続時の確定打点と、それによって決まった強いテンパイの待ち枚数 threshold。判断に使った
+// 値そのもので、表示専用に打点や threshold を求め直さない。打牌後がテンパイでない場合と恒常
+// フリテンの場合は評価していないので、その旨だけを出す。
+fn format_tenpai_offense_value(offense: &PushPullOffenseState) -> Vec<String> {
+    let mut lines = match offense.tenpai_offense_value_after_discard {
+        None => vec![format!("    tenpai offense value: {NOT_EVALUATED}")],
+        Some(TenpaiOffenseValue { mode, value }) => vec![
+            "    tenpai offense value".to_string(),
+            format!("      offense mode: {mode:?}"),
+            format!("      weighted average: {}", offense_value_label(value)),
+            format!(
+                "      high value: {}",
+                format_optional_yes_no(offense.tenpai_offense_value_is_high())
+            ),
+        ],
+    };
+
+    lines.push(format!(
+        "    strong tenpai min live wait: {}",
+        offense
+            .strong_tenpai_min_remaining()
+            .map_or_else(|| ABSENT.to_string(), |remaining| remaining.to_string())
+    ));
+    lines
+}
+
+fn offense_value_label(value: OffenseValue) -> String {
+    match value.average_total() {
+        Some(total) => total.to_string(),
+        None => UNKNOWN.to_string(),
+    }
 }
 
 // リーチ判断。通常打牌 selection が選んだ打牌と、その打牌後のテンパイの待ち・フリテンを
@@ -1217,10 +1252,59 @@ fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     let Some(decision) = diagnostic.push_pull_decision.as_ref() else {
         return Vec::new();
     };
-    vec![
+    let mut lines = vec![
         format!("  push/pull: {:?}", decision.mode),
         format!("  push/pull reason: {:?}", decision.reason),
-    ]
+    ];
+
+    // 打牌後がテンパイの局面だけ、押し引きが見た待ち・フリテン・攻撃打点と適用 threshold を
+    // 添える。テンパイでなければ判断材料にならないので行そのものを出さない。
+    let Some(offense) = diagnostic
+        .push_pull_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.offense)
+    else {
+        return lines;
+    };
+    let Some(wait) = offense.tenpai_wait_after_discard else {
+        return lines;
+    };
+
+    lines.push(format!(
+        "  offense live wait: {} remaining / {} types",
+        wait.tsumo_remaining, wait.tsumo_type_count
+    ));
+    lines.push(format!(
+        "  offense furiten: {}",
+        permanent_furiten_label(wait.permanent_furiten)
+    ));
+    lines.push(format!(
+        "  offense ron: {}",
+        format_optional_yes_no(wait.can_ron)
+    ));
+    lines.push(format!(
+        "  offense value: {}",
+        summary_offense_value(&offense)
+    ));
+    lines.push(format!(
+        "  strong tenpai min live wait: {}",
+        offense
+            .strong_tenpai_min_remaining()
+            .map_or_else(|| ABSENT.to_string(), |remaining| remaining.to_string())
+    ));
+    lines
+}
+
+// 攻撃モード・残枚数加重平均打点・高打点かを1行にまとめる。評価していない場合はその旨だけ出す。
+fn summary_offense_value(offense: &PushPullOffenseState) -> String {
+    match offense.tenpai_offense_value_after_discard {
+        None => NOT_EVALUATED.to_string(),
+        Some(TenpaiOffenseValue { mode, value }) => format!(
+            "{mode:?} {} / high: {}",
+            offense_value_label(value),
+            format_optional_yes_no(offense.tenpai_offense_value_is_high())
+        ),
+    }
 }
 
 fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
@@ -2827,6 +2911,120 @@ mod tests {
                 "{push_pull}"
             );
         }
+    }
+
+    #[test]
+    fn push_pull_section_shows_the_tenpai_offense_value() {
+        // 攻撃継続時の攻撃モード・確定打点・適用 threshold は判断に使った値そのものを出す。
+        let (_, diagnostic, output) = rendered(DAMATEN_HIGH_VALUE_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        let value = offense
+            .tenpai_offense_value_after_discard
+            .expect("攻撃打点を評価している");
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains(&format!("      offense mode: {:?}", value.mode)),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      weighted average: {}",
+                value.value.average_total().expect("攻撃打点が確定している")
+            )),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      high value: {}",
+                format_optional_yes_no(offense.tenpai_offense_value_is_high())
+            )),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "    strong tenpai min live wait: {}",
+                offense
+                    .strong_tenpai_min_remaining()
+                    .expect("適用 threshold が決まっている")
+            )),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn push_pull_section_reports_an_unevaluated_tenpai_offense_value() {
+        // 打牌後がテンパイでなければ攻撃打点を評価しないので、その旨だけを出す。
+        let (_, diagnostic, output) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        assert_eq!(offense.tenpai_offense_value_after_discard, None);
+        assert_eq!(offense.strong_tenpai_min_remaining(), None);
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains("    tenpai offense value: not evaluated"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains("    strong tenpai min live wait: -"),
+            "{push_pull}"
+        );
+    }
+
+    // 単独の子リーチに対する 6s 待ち3枚のテンパイ。ダマ 7700 なので打点を理由に押す。
+    const HIGH_VALUE_TENPAI_UNDER_REACH_SCENARIO: &str = r#"{
+        "hand": "234678m 22p 34455s",
+        "draw": "N",
+        "dora_indicators": "1p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 2,
+        "reached": [false, true, false, false],
+        "extra_visible_tiles": "333s 6s",
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
+    #[test]
+    fn summary_shows_the_tenpai_offense_value_behind_a_push() {
+        // 3枚待ちでも打点が 5200 以上なので押す。summary だけで理由をたどれる。
+        let (_, _, output) = rendered(HIGH_VALUE_TENPAI_UNDER_REACH_SCENARIO, false);
+        let summary = summary_section(&output);
+
+        assert!(summary.contains("  push/pull: Push"), "{summary}");
+        assert!(
+            summary.contains("  push/pull reason: StrongTenpaiAgainstReach"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  offense live wait: 3 remaining / 1 types"),
+            "{summary}"
+        );
+        assert!(summary.contains("  offense furiten: no"), "{summary}");
+        assert!(summary.contains("  offense ron: yes"), "{summary}");
+        assert!(
+            summary.contains("  offense value: Damaten 7700 / high: yes"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  strong tenpai min live wait: 3"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_shows_the_fallback_threshold_without_a_scoring_context() {
+        // 場風・自風が不明で打点を確定できない局面は、従来どおり6枚が境界になる。
+        let (_, _, output) = rendered(TENPAI_UNDER_REACH_SCENARIO, false);
+        let summary = summary_section(&output);
+
+        assert!(
+            summary.contains("  offense value: Reach unknown / high: unknown"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  strong tenpai min live wait: 6"),
+            "{summary}"
+        );
     }
 
     #[test]
