@@ -10,6 +10,7 @@ pub mod meld;
 pub mod offense_value;
 pub mod open_hand_defense;
 pub mod open_hand_threat;
+pub mod prospective_value;
 pub mod push_pull;
 pub mod reach_policy;
 pub mod threat;
@@ -77,6 +78,12 @@ pub use open_hand_threat::{
     OpenHandThreatAssessment, OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
     OpenHandThreatReason, classify_open_hand_threat, classify_open_hand_threats,
     has_high_open_hand_threat,
+};
+pub use prospective_value::{
+    ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
+    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveTenpaiValue,
+    ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
+    ProspectiveWinningTileValue,
 };
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,

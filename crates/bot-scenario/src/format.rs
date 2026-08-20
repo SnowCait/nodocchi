@@ -4,15 +4,18 @@ use bot_core::{
     DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
     MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
     OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
-    PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision, PushPullInputs,
-    PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
-    TenpaiOffenseValue, ThreatDefenseTarget,
+    PonCandidateDiagnostic, PonDecisionDiagnostic, ProspectiveBaselineValue,
+    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveLookaheadDiagnostic,
+    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue,
+    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent,
+    ShantenDecisionDiagnostic, TenpaiOffenseValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
     DiscardEvaluation, DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic,
-    DrawLookaheadDiagnostic, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
-    PermanentFuriten, Shanten, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
+    DrawLookaheadDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
+    LookaheadDiagnostic, PermanentFuriten, Shanten, TenpaiWaitAvailability, TenpaiWaitMetric,
+    TileId, TileType,
 };
 
 use crate::scenario::Scenario;
@@ -21,6 +24,9 @@ const NONE: &str = "none";
 const ABSENT: &str = "-";
 const UNKNOWN: &str = "unknown";
 const NOT_EVALUATED: &str = "not evaluated";
+
+// テンパイの向聴数。
+const TENPAI_SHANTEN: i8 = 0;
 
 pub fn format_diagnostic(
     scenario: &Scenario,
@@ -44,7 +50,11 @@ pub fn format_diagnostic(
         sections.push(section);
     }
 
-    if let Some(section) = format_lookahead(diagnostic.normal_discard_lookahead.as_ref(), verbose) {
+    if let Some(section) = format_lookahead(
+        diagnostic.normal_discard_lookahead.as_ref(),
+        diagnostic.normal_discard_lookahead_value.as_ref(),
+        verbose,
+    ) {
         sections.push(section);
     }
 
@@ -535,8 +545,13 @@ fn format_discarded_waits(tenpai: &TenpaiWaitAvailability) -> String {
 }
 
 // 2手先診断 (lookahead) の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、
-// verbose で各受け入れ牌の詳細を出す。この節の値は選択に一切使われない解析専用の情報。
-fn format_lookahead(lookahead: Option<&LookaheadDiagnostic>, verbose: bool) -> Option<String> {
+// verbose で各受け入れ牌の詳細と、その枝の将来打点を出す。この節の値は選択に一切使われない
+// 解析専用の情報。
+fn format_lookahead(
+    lookahead: Option<&LookaheadDiagnostic>,
+    value: Option<&ProspectiveLookaheadDiagnostic>,
+    verbose: bool,
+) -> Option<String> {
     let lookahead = lookahead?;
     if lookahead.candidates.is_empty() {
         return None;
@@ -544,13 +559,18 @@ fn format_lookahead(lookahead: Option<&LookaheadDiagnostic>, verbose: bool) -> O
 
     let mut lines = vec!["Lookahead".to_string()];
     for candidate in &lookahead.candidates {
-        lines.extend(format_lookahead_candidate(candidate, verbose));
+        lines.extend(format_lookahead_candidate(
+            candidate,
+            value.and_then(|value| value.candidate(candidate.discard)),
+            verbose,
+        ));
     }
     Some(lines.join("\n"))
 }
 
 fn format_lookahead_candidate(
     candidate: &DiscardLookaheadDiagnostic,
+    value: Option<&ProspectiveDiscardValue>,
     verbose: bool,
 ) -> Vec<String> {
     let mut lines = vec![format!("  {}", candidate.discard.to_mjai_string())];
@@ -574,12 +594,18 @@ fn format_lookahead_candidate(
         lines.push(format!("    {NONE}"));
     }
     for draw in &candidate.draws {
-        lines.extend(format_lookahead_draw(draw));
+        lines.extend(format_lookahead_draw(
+            draw,
+            value.and_then(|value| value.draw(draw.draw)),
+        ));
     }
     lines
 }
 
-fn format_lookahead_draw(draw: &DrawLookaheadDiagnostic) -> Vec<String> {
+fn format_lookahead_draw(
+    draw: &DrawLookaheadDiagnostic,
+    value: Option<&ProspectiveDrawValue>,
+) -> Vec<String> {
     let mut lines = vec![format!(
         "    draw {}: {} remaining, shanten after draw {}",
         draw.draw.to_mjai_string(),
@@ -589,6 +615,7 @@ fn format_lookahead_draw(draw: &DrawLookaheadDiagnostic) -> Vec<String> {
 
     let Some(next) = draw.next_discard.as_ref() else {
         lines.push(format!("      next discard: {ABSENT}"));
+        lines.extend(format_prospective_value(value));
         return lines;
     };
 
@@ -609,7 +636,101 @@ fn format_lookahead_draw(draw: &DrawLookaheadDiagnostic) -> Vec<String> {
         "      next iishanten shape: {:?}",
         next.standard_iishanten_shape_after_discard
     ));
+    // 2手目の打牌後がテンパイなら、その受け入れがそのまま最終待ちになる。
+    if next.min_shanten_after_discard() == TENPAI_SHANTEN {
+        lines.push(format!(
+            "      final wait: {}",
+            format_wait_tiles(&next.acceptance_after_discard.tiles)
+        ));
+    }
+    lines.extend(format_prospective_value(value));
     lines
+}
+
+fn format_wait_tiles(tiles: &[EffectiveAcceptanceTile]) -> String {
+    if tiles.is_empty() {
+        return NONE.to_string();
+    }
+    tiles
+        .iter()
+        .map(|tile| format!("{}({})", tile.tile.to_mjai_string(), tile.remaining))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// 2手目の打牌後がテンパイの場合の将来打点。ダマ / リーチ両方の baseline の値をそのまま出し、
+// 表示専用に打点を求め直さない。評価しなかった枝は理由だけを出す。
+fn format_prospective_value(value: Option<&ProspectiveDrawValue>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+
+    match &value.outcome {
+        ProspectiveOutcome::NoNextDiscard => {
+            vec![format!("      prospective value: {NONE}")]
+        }
+        ProspectiveOutcome::NotTenpai => {
+            vec![format!(
+                "      prospective value: {NOT_EVALUATED} (not tenpai)"
+            )]
+        }
+        ProspectiveOutcome::Unavailable(reason) => vec![format!(
+            "      prospective value: {UNKNOWN} ({})",
+            prospective_unavailable_label(*reason)
+        )],
+        ProspectiveOutcome::Evaluated(tenpai) => {
+            let mut lines = vec!["      prospective value".to_string()];
+            lines.extend(format_prospective_baseline("damaten", &tenpai.damaten));
+            lines.extend(format_prospective_baseline("reach", &tenpai.reach));
+            lines
+        }
+    }
+}
+
+// baseline 1つ分の将来打点。残枚数加重平均のあとに、和了牌の物理牌ごとの支払いを並べる。
+fn format_prospective_baseline(label: &str, value: &ProspectiveBaselineValue) -> Vec<String> {
+    let mut lines = vec![format!(
+        "        {label}: {}",
+        offense_value_label(value.weighted_average)
+    )];
+    for winning_tile in value.winning_tile_values() {
+        lines.push(format!(
+            "          {}: {} remaining / {}",
+            winning_tile.winning_tile.to_mjai_string(),
+            winning_tile.remaining,
+            prospective_value_label(winning_tile.value)
+        ));
+    }
+    lines
+}
+
+fn prospective_value_label(value: ProspectiveValue) -> String {
+    match value {
+        ProspectiveValue::Known {
+            payment,
+            is_yakuman: true,
+        } => format!("{} yakuman", payment.total()),
+        ProspectiveValue::Known { payment, .. } => payment.total().to_string(),
+        ProspectiveValue::NoYaku => "no yaku".to_string(),
+        ProspectiveValue::Unknown(reason) => {
+            format!("{UNKNOWN} ({})", prospective_unknown_reason_label(reason))
+        }
+    }
+}
+
+fn prospective_unknown_reason_label(reason: ProspectiveUnknownReason) -> String {
+    match reason {
+        ProspectiveUnknownReason::IndeterminateBonusHan => "indeterminate".to_string(),
+        ProspectiveUnknownReason::Scoring(error) => format!("scoring error: {error}"),
+        ProspectiveUnknownReason::MissingPayment => "no payment".to_string(),
+    }
+}
+
+fn prospective_unavailable_label(reason: ProspectiveUnavailable) -> &'static str {
+    match reason {
+        ProspectiveUnavailable::UnresolvedRedFive => "unresolved red five",
+        ProspectiveUnavailable::CompletedHand => "completed hand",
+    }
 }
 
 fn format_push_pull(
@@ -4215,6 +4336,124 @@ mod tests {
         assert!(
             lookahead.contains("      next iishanten shape: "),
             "{lookahead}"
+        );
+    }
+
+    // 111m 222m 33m 44p 79p 1s + ツモ 9s の1向聴。打 1s から 3m を引くと 9s を切って 8p の
+    // 嵌張テンパイ、2s ではなく 8p を引くと 3m / 4p のシャンポンテンパイになる。将来打点を
+    // 確定できるよう場風・自風・ドラ表示牌を既知にする。
+    const PROSPECTIVE_VALUE_SCENARIO: &str = r#"{
+        "hand": "111m222m33m44p79p1s",
+        "draw": "9s",
+        "dora_indicators": "1p",
+        "round_wind": "E",
+        "seat_wind": "S",
+        "player_id": 0,
+        "oya": 3
+    }"#;
+
+    #[test]
+    fn verbose_lookahead_shows_the_final_wait_and_the_prospective_value() {
+        // selected / runner-up のどちらの枝も、最終待ちとダマ / リーチ両方の将来打点まで追える。
+        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
+        let lookahead = section(&output, "Lookahead");
+
+        let branch = [
+            "      next discard: 9s",
+            "      next shanten: 0",
+            "      next acceptance: 4 / 1 types",
+            "      next iishanten shape: Unknown",
+            "      final wait: 8p(4)",
+            "      prospective value",
+            "        damaten: 3200",
+            "          8p: 4 remaining / 3200",
+            "        reach: 6400",
+            "          8p: 4 remaining / 6400",
+        ]
+        .join("\n");
+        assert!(lookahead.contains(&branch), "{lookahead}");
+    }
+
+    #[test]
+    fn verbose_lookahead_keeps_every_wait_of_a_multi_wait_branch() {
+        // 複数待ちは待ちごとの残枚数と支払いを並べ、ダマ役なしを0点として平均へ入れない。
+        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
+        let lookahead = section(&output, "Lookahead");
+
+        let branch = [
+            "      final wait: 3m(2) 4p(2)",
+            "      prospective value",
+            "        damaten: unknown",
+            "          3m: 2 remaining / 1300",
+            "          4p: 2 remaining / no yaku",
+            "        reach: 2100",
+            "          3m: 2 remaining / 2600",
+            "          4p: 2 remaining / 1600",
+        ]
+        .join("\n");
+        assert!(lookahead.contains(&branch), "{lookahead}");
+    }
+
+    #[test]
+    fn verbose_lookahead_reports_branches_without_a_prospective_value() {
+        // 2手目の打牌後がテンパイでない枝は最終待ちも将来打点も持たない。
+        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
+        let lookahead = section(&output, "Lookahead");
+
+        assert!(
+            lookahead.contains("      prospective value: not evaluated (not tenpai)"),
+            "{lookahead}"
+        );
+    }
+
+    #[test]
+    fn lookahead_summary_stays_free_of_the_prospective_value() {
+        // 通常表示は候補ごとの概要だけにして出力を短く保つ。
+        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, false);
+        let lookahead = section(&output, "Lookahead");
+
+        assert!(!lookahead.contains("prospective value"), "{lookahead}");
+        assert!(!lookahead.contains("final wait"), "{lookahead}");
+    }
+
+    #[test]
+    fn the_prospective_value_label_keeps_every_outcome() {
+        // 役なし・裏ドラ未確定・点数計算エラーを 0 点や同じ unknown へ潰さずに書き分ける。
+        assert_eq!(
+            prospective_value_label(ProspectiveValue::Known {
+                payment: bot_logic::evaluate_payment(1920, false, bot_logic::WinMethod::Ron)
+                    .expect("子のロン"),
+                is_yakuman: false,
+            }),
+            "7700"
+        );
+        assert_eq!(prospective_value_label(ProspectiveValue::NoYaku), "no yaku");
+        assert_eq!(
+            prospective_value_label(ProspectiveValue::Unknown(
+                ProspectiveUnknownReason::IndeterminateBonusHan
+            )),
+            "unknown (indeterminate)"
+        );
+        assert_eq!(
+            prospective_value_label(ProspectiveValue::Unknown(
+                ProspectiveUnknownReason::MissingPayment
+            )),
+            "unknown (no payment)"
+        );
+        assert!(
+            prospective_value_label(ProspectiveValue::Unknown(
+                ProspectiveUnknownReason::Scoring(
+                    bot_logic::NormalScoringError::IncompleteContext(
+                        bot_logic::MissingScoringFact::RoundWind
+                    )
+                    .into()
+                )
+            ))
+            .starts_with("unknown (scoring error: "),
+        );
+        assert_eq!(
+            prospective_unavailable_label(ProspectiveUnavailable::UnresolvedRedFive),
+            "unresolved red five"
         );
     }
 

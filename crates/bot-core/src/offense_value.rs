@@ -80,7 +80,7 @@ const BASELINE_IPPATSU: bool = false;
 const BASELINE_CHANKAN: bool = false;
 
 // リーチ baseline の裏ドラ表示牌。未観測ではなく「観測済みで0枚」として渡す。
-const BASELINE_URA_DORA_INDICATORS: &[TileId] = &[];
+pub(crate) const BASELINE_URA_DORA_INDICATORS: &[TileId] = &[];
 
 /// 攻撃を継続した場合の攻撃モード。
 ///
@@ -297,7 +297,9 @@ fn variant_total(variant: &bot_logic::WinningTileHandValue<'_>) -> Option<u32> {
 /// 残枚数0の variant は生きていないので、支払いを確定できるかにかかわらず平均へ入れない。
 /// 生きた variant が1つも無い場合と、生きた variant のどれかが確定しない場合は
 /// [`OffenseValue::Unknown`]。
-fn weighted_average(variants: impl Iterator<Item = (Option<u32>, u8)>) -> OffenseValue {
+///
+/// 押し引きの攻撃打点と2手先診断の将来打点はこの1本を共有し、集約規則を複製しない。
+pub(crate) fn weighted_average(variants: impl Iterator<Item = (Option<u32>, u8)>) -> OffenseValue {
     let mut weighted_total: u64 = 0;
     let mut total_remaining: u32 = 0;
 

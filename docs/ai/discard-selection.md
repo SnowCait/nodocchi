@@ -52,7 +52,9 @@ cargo run -p bot-scenario -- \
   --lookahead --verbose
 ```
 
-lookahead は diagnostics 用で、`act()` の通常経路には追加探索を持ち込みません。diagnostics の有無で最終 decision が変わらないことを tests で固定しています。
+受け入れ牌ごとの詳細では、次打牌後がテンパイになる枝について最終待ちと、その待ちでアガった場合のダマ / リーチ両方の打点も表示します。打点は待ち牌種ごと・和了牌の赤5 / 黒5ごとの支払いと、その残枚数加重平均で、役なしや点数計算の入力不足は0点にせずそのまま区別します。
+
+lookahead は diagnostics 用で、`act()` の通常経路には追加探索を持ち込みません。将来打点も同じく diagnostics 専用で、打牌比較にも次打牌の選択にも使いません。diagnostics の有無で最終 decision が変わらないことを tests で固定しています。
 
 ## selected と runner-up
 

@@ -1,5 +1,8 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
+use crate::prospective_value::{
+    ProspectiveLookaheadDiagnostic, evaluate_prospective_lookahead_value,
+};
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
@@ -45,6 +48,11 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     /// 2回計算しない。集計対象と集計規則は選択専用経路と同じなので、詳細診断の有無で選択結果は
     /// 変わらない。
     pub lookahead: Option<LookaheadDiagnostic>,
+    /// `lookahead` の各枝が選んだ2手目打牌の先にあるテンパイの将来打点。`lookahead` を構築した
+    /// 場合だけ持ち、同じ候補集合・同じ順序になる。
+    ///
+    /// 打牌選択にも2手目 `next_discard` の選択にも使わない解析専用の情報で、選択結果を変えない。
+    pub lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
 }
 
 // 合法 Dahai へ絞り込み・物理牌補正済みの打牌候補評価集合と、その評価対象の物理牌一覧。
@@ -130,11 +138,17 @@ pub(crate) fn select_discard_action_with_diagnostic(
         log_discard_diagnostic(context, &legal.tiles, &diagnostic);
     }
 
+    // 将来打点は構築済みの2手先診断の枝をそのまま評価対象にする。枝の探索も打牌比較もやり直さない。
+    let lookahead_value = lookahead.as_ref().map(|lookahead| {
+        evaluate_prospective_lookahead_value(context, &legal.tiles, &legal.evaluations, lookahead)
+    });
+
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(&legal, &tenpai_wait, legal_actions),
         diagnostic,
         furiten: furiten_from_legal_evaluations(context, &legal),
         lookahead,
+        lookahead_value,
     }
 }
 
@@ -296,18 +310,29 @@ pub(crate) fn concealed_tiles_after_discard(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
 ) -> Option<Vec<TileId>> {
-    let mut tiles: Vec<TileId> = context
+    let tiles: Vec<TileId> = context
         .hand_tiles()
         .iter()
         .copied()
         .chain(context.drawn_tile())
         .collect();
 
+    split_discarded_tile(tiles, evaluation).map(|(_, remaining)| remaining)
+}
+
+/// 物理牌一覧から、打牌候補1件が実際に切る物理牌を1枚だけ切り離す。
+///
+/// 一致条件は牌種と赤フラグの両方で、一致する物理牌が無ければ別の牌で代用せず `None`。返り値は
+/// 切る物理牌と、それを除いた残りの物理牌一覧。現在の打牌後の手牌
+/// ([`concealed_tiles_after_discard`]) と、2手先の仮想局面で切る牌の除去はこの1本を共有する。
+pub(crate) fn split_discarded_tile(
+    mut tiles: Vec<TileId>,
+    evaluation: &DiscardEvaluation,
+) -> Option<(TileId, Vec<TileId>)> {
     let discarded = tiles.iter().position(|tile| {
         tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
     })?;
-    tiles.remove(discarded);
-    Some(tiles)
+    Some((tiles.remove(discarded), tiles))
 }
 
 // 絞り込み済みの合法候補集合から詳細な2手先診断を構築する。要求された場合だけ構築する。
@@ -1564,6 +1589,66 @@ pub(crate) mod tests {
         assert_eq!(without.diagnostic, with.diagnostic);
         assert!(without.lookahead.is_none());
         assert!(with.lookahead.is_some());
+        assert!(without.lookahead_value.is_none());
+        assert!(with.lookahead_value.is_some());
+    }
+
+    #[test]
+    fn prospective_value_does_not_change_the_discard_selection() {
+        // 将来打点は解析専用の追加情報で、本番選択も候補比較も変えない。
+        let context = iishanten_wait_context();
+        let actions = iishanten_wait_actions();
+
+        let production = select_discard_action_with_evaluation(&context, &actions);
+        let with_value = select_discard_action_with_diagnostic(&context, &actions, true);
+        let without_value = select_discard_action_with_diagnostic(&context, &actions, false);
+
+        assert_eq!(with_value.selection, production);
+        for (with, without) in with_value
+            .diagnostic
+            .candidates
+            .iter()
+            .zip(without_value.diagnostic.candidates.iter())
+        {
+            assert_eq!(with.evaluation.discard, without.evaluation.discard);
+            assert_eq!(with.selected, without.selected);
+            assert_eq!(with.comparison_reason, without.comparison_reason);
+            assert_eq!(with.tenpai_wait, without.tenpai_wait);
+        }
+
+        // 1向聴の比較軸そのものが変わっていないことも固定する。
+        let runner_up = with_value
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up がある");
+        assert_eq!(
+            runner_up.comparison_reason,
+            bot_logic::DiscardComparisonReason::WeightedTenpaiWaitRemaining
+        );
+    }
+
+    #[test]
+    fn prospective_value_keeps_the_next_discard_of_each_branch() {
+        // 将来打点は既存 lookahead が既存比較順で選んだ2手目打牌をそのまま対象にする。
+        let context = iishanten_wait_context();
+        let actions = iishanten_wait_actions();
+
+        let selection = select_discard_action_with_diagnostic(&context, &actions, true);
+        let lookahead = selection.lookahead.expect("2手先診断が構築されている");
+        let value = selection.lookahead_value.expect("将来打点が構築されている");
+
+        assert_eq!(value.candidates.len(), lookahead.candidates.len());
+        for (candidate, values) in lookahead.candidates.iter().zip(value.candidates.iter()) {
+            assert_eq!(candidate.discard, values.discard);
+            assert_eq!(candidate.draws.len(), values.draws.len());
+            for (draw, draw_value) in candidate.draws.iter().zip(values.draws.iter()) {
+                assert_eq!(draw.draw, draw_value.draw);
+                assert_eq!(draw.remaining, draw_value.remaining);
+                assert_eq!(draw.next_discard_tile(), draw_value.next_discard);
+            }
+        }
     }
 
     #[test]
