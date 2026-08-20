@@ -285,7 +285,7 @@ fn offense_value(profile: &TenpaiHandValueProfile<'_>) -> OffenseValue {
 /// variant 1つ分の確定した支払い合計 [点]。確定しない場合は `None`。
 ///
 /// 点数計算の入力不足・裏ドラ未確定・役なしはどれも「確定しない」で、0点として扱わない。
-fn variant_total(variant: &bot_logic::WinningTileHandValue<'_>) -> Option<u32> {
+pub(crate) fn variant_total(variant: &bot_logic::WinningTileHandValue<'_>) -> Option<u32> {
     variant
         .known()
         .and_then(HandValue::payment)

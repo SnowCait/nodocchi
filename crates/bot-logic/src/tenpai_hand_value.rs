@@ -43,6 +43,8 @@
 //! 赤5がまだ見えていなければ赤と黒の両方を variant として評価し、「黒5として評価」のような推測を
 //! しない。上の内訳により後段は「5s の残り3枚のうち赤が1枚・黒が2枚」を扱える。赤ドラの数え方
 //! 自体は既存の bonus 翻 ([`TileId::is_red`]) に任せ、ここでは和了牌を赤 / 黒へ分けるだけである。
+//! 分割そのものは共有 helper ([`physical_tile_variants`]) が持ち、2手先診断の仮想ツモ牌と同じ
+//! 規則を使う。
 
 use thiserror::Error;
 
@@ -52,7 +54,7 @@ use crate::furiten::{TENPAI_SHANTEN, TenpaiWaitAvailability};
 use crate::hand_value::{HandValue, HandValueError, HandValueOutcome, evaluate_hand_value};
 use crate::meld::Meld;
 use crate::shanten::MinShanten;
-use crate::tile::{TileId, TileType};
+use crate::tile::{TileId, TileType, physical_tile_variants, seen_red_fives};
 use crate::winning_context::WinningContext;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -267,23 +269,32 @@ pub fn tenpai_completed_hands<S: MinShanten>(
         return Err(TenpaiHandValueError::NotTenpai(min_shanten));
     }
 
-    let seen_red_fives = seen_red_fives(concealed_tiles, fixed_melds, visible_tiles);
+    let seen_red_fives = seen_red_fives(
+        concealed_tiles
+            .iter()
+            .chain(fixed_melds.iter().flat_map(|meld| meld.tiles()))
+            .chain(visible_tiles)
+            .copied(),
+    );
     let waits = acceptance
         .tiles
         .iter()
         .map(|wait| {
-            let winning_tiles =
-                winning_tile_variants(wait.tile, wait.remaining, seen_red_fives[wait.tile.index()])
-                    .map(|variant| {
-                        completed_hand(concealed_tiles, fixed_melds, variant.winning_tile).map(
-                            |analysis| WinningTileCompletedHand {
-                                winning_tile: variant.winning_tile,
-                                remaining: variant.remaining,
-                                analysis,
-                            },
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+            let winning_tiles = physical_tile_variants(
+                wait.tile,
+                wait.remaining,
+                seen_red_fives[wait.tile.index()],
+            )
+            .map(|variant| {
+                completed_hand(concealed_tiles, fixed_melds, variant.tile).map(|analysis| {
+                    WinningTileCompletedHand {
+                        winning_tile: variant.tile,
+                        remaining: variant.remaining,
+                        analysis,
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
             Ok(TenpaiWaitCompletedHand {
                 winning_tile: wait.tile,
@@ -351,64 +362,6 @@ fn completed_hand(
     tiles.extend_from_slice(concealed_tiles);
     tiles.push(winning_tile);
     analyze_completed_hand(&tiles, fixed_melds)
-}
-
-/// 和了牌として評価すべき赤 / 黒と、その残枚数。
-struct WinningTileVariant {
-    winning_tile: TileId,
-    remaining: u8,
-}
-
-/// 待ち1牌種の残枚数を、和了牌の赤 / 黒へ分ける。
-///
-/// 点数が変わるのは赤5かどうかだけなので、赤と黒をそれぞれ1つの variant にまとめ、代表牌と
-/// 残枚数を返す。同じ赤 / 黒の物理牌はどれを選んでも評価が同じため、代表牌の copy は評価に
-/// 影響しない。
-///
-/// 数えるのは `remaining` のうち赤5が何枚かだけで、黒牌の物理牌 identity は数えない。赤5は
-/// 牌種ごとに1枚しかないため、まだ見えていなければ赤1枚・黒はその残り、既に見えていれば
-/// すべて黒になる。赤5の無い牌種は黒の variant 1つだけで、その残枚数が待ち全体の残枚数になる。
-/// 赤5がまだ見えていない場合に「黒5として評価」のような推測はしない。
-fn winning_tile_variants(
-    winning_tile: TileType,
-    remaining: u8,
-    red_five_seen: bool,
-) -> impl Iterator<Item = WinningTileVariant> {
-    let copy = |red: bool| TileId::copies(winning_tile).find(|tile| tile.is_red() == red);
-    let red = copy(true).filter(|_| !red_five_seen);
-    let red_remaining = u8::from(red.is_some()).min(remaining);
-    let variant = |winning_tile: Option<TileId>, remaining: u8| {
-        let winning_tile = winning_tile.filter(|_| remaining > 0)?;
-        Some(WinningTileVariant {
-            winning_tile,
-            remaining,
-        })
-    };
-
-    [
-        variant(red, red_remaining),
-        variant(copy(false), remaining - red_remaining),
-    ]
-    .into_iter()
-    .flatten()
-}
-
-/// 牌種ごとに、その赤5が手牌・副露・見え牌のどれかに現れているか。
-fn seen_red_fives(
-    concealed_tiles: &[TileId],
-    fixed_melds: &[Meld],
-    visible_tiles: &[TileId],
-) -> [bool; TileType::COUNT] {
-    let mut seen = [false; TileType::COUNT];
-    for tile in concealed_tiles
-        .iter()
-        .chain(fixed_melds.iter().flat_map(|meld| meld.tiles()))
-        .chain(visible_tiles)
-        .filter(|tile| tile.is_red())
-    {
-        seen[tile.tile_type().index()] = true;
-    }
-    seen
 }
 
 #[cfg(test)]

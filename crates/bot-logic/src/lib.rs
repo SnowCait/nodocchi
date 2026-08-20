@@ -58,7 +58,7 @@ pub use discard::{
     select_best_discard_from_tiles_with_visible_tiles, select_best_discard_with_visible_tiles,
     shape_breakdown_for_discard, shape_penalty_for_discard, shape_penalty_for_discard_with_context,
     shape_penalty_for_discard_with_fixed_melds,
-    shape_penalty_for_discard_with_fixed_melds_and_context,
+    shape_penalty_for_discard_with_fixed_melds_and_context, split_discarded_tile,
 };
 pub use fu::{FuBreakdown, FuContribution, FuKind, WinningFuEvaluation, evaluate_winning_fu};
 pub use furiten::{
@@ -79,11 +79,10 @@ pub use iishanten::{
     classify_standard_iishanten_shape_after_discard,
 };
 pub use lookahead::{
-    DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, LookaheadDiagnostic,
-    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
-    forward_metrics_from_lookahead, forward_metrics_with_fixed_melds,
-    forward_metrics_with_fixed_melds_and_visible_tiles, tenpai_wait_metrics_from_lookahead,
-    tenpai_wait_metrics_with_fixed_melds, tenpai_wait_metrics_with_fixed_melds_and_visible_tiles,
+    DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawVariantLookaheadDiagnostic,
+    LookaheadDiagnostic, LookaheadInputs, ProspectiveTenpai, ProspectiveTenpaiValuator,
+    diagnose_lookahead, forward_metrics, forward_metrics_from_lookahead,
+    tenpai_wait_metrics_from_lookahead,
 };
 pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
 pub use normal_hand_scoring::{
@@ -111,8 +110,8 @@ pub use tenpai_hand_value::{
     evaluate_tenpai_hand_value, tenpai_completed_hands,
 };
 pub use tile::{
-    Dragon, Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, count_indicated_dora,
-    next_dora,
+    Dragon, PhysicalTileVariant, Suit, TileId, TileParseError, TileType, VisibleTile, count_dora,
+    count_indicated_dora, next_dora, physical_tile_variants, seen_red_fives,
 };
 pub use tile_counts::{TileCountError, TileCounts};
 pub use winning_context::{RiichiStatus, WinMethod, WinningContext};

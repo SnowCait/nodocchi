@@ -1,4 +1,7 @@
-use bot_core::{GameContext, LegalAction, Meld, MeldKind, TableStateFacts, seat_wind_for_player};
+use bot_core::{
+    GameContext, LegalAction, Meld, MeldKind, ReachLegalityFacts, TableStateFacts, is_reach_legal,
+    seat_wind_for_player,
+};
 use bot_logic::{
     FixedMeldCount, HistoryFuritenFacts, TileCounts, TileId, TileType,
     calculate_shanten_with_fixed_melds, is_menzen,
@@ -13,12 +16,6 @@ const CHI_TILE_COUNT: usize = 3;
 const PON_TILE_COUNT: usize = 3;
 const KAN_TILE_COUNT: usize = 4;
 const PON_CONSUMED_TILE_COUNT: usize = 2;
-
-// リーチ宣言に必要な持ち点。
-const REACH_MIN_SCORE: i32 = 1000;
-
-// リーチ宣言に必要な残りツモ牌数。
-const REACH_MIN_REMAINING_TILES: u32 = 4;
 
 // リーチを生成する打牌後の向聴数。
 const REACH_TENPAI_SHANTEN: i8 = 0;
@@ -702,7 +699,7 @@ fn build_legal_actions(
         )?);
     }
 
-    if is_reach_legal(context, &actions) {
+    if is_reach_legal(reach_legality_facts(context, &actions)) {
         actions.push(LegalAction::Reach);
     }
     if spec.allow_hora {
@@ -718,40 +715,20 @@ fn build_legal_actions(
     Ok(actions)
 }
 
-/// 局面から `LegalAction::Reach` を生成できるかを判定する。
+/// 局面から `LegalAction::Reach` を生成できるかを判定するための材料を集める。
 ///
-/// RiichiEnv の4麻 semantics に合わせ、門前・未リーチ・合法 Dahai のいずれかを切った後テンパイ・
-/// 持ち点・残りツモ牌数の全てを満たす場合だけリーチを合法手にする。持ち点と残りツモ牌数が
-/// unknown の場合はリーチ不可と推測せず、明示的に不可能と分かる場合だけ生成しない。
-fn is_reach_legal(context: &GameContext, actions: &[LegalAction]) -> bool {
-    is_menzen_hand(context)
-        && !is_own_reached(context)
-        && has_reach_score(context)
-        && has_reach_remaining_tiles(context)
-        && reaches_tenpai_after_any_legal_dahai(context, actions)
-}
-
-// 自分の副露が分からない場合は非門前と推測しない。暗槓は門前のままなので bot-logic の判定を使う。
-fn is_menzen_hand(context: &GameContext) -> bool {
-    context.own_melds().is_none_or(is_menzen)
-}
-
-fn is_own_reached(context: &GameContext) -> bool {
-    context
-        .player_id()
-        .is_some_and(|player| context.is_reached(usize::from(player)))
-}
-
-fn has_reach_score(context: &GameContext) -> bool {
-    context
-        .own_score()
-        .is_none_or(|score| score >= REACH_MIN_SCORE)
-}
-
-fn has_reach_remaining_tiles(context: &GameContext) -> bool {
-    context
-        .remaining_tiles()
-        .is_none_or(|remaining| remaining >= REACH_MIN_REMAINING_TILES)
+/// 条件そのものは production と共有する [`is_reach_legal`] が持ち、ここでは局面から材料を
+/// 取り出すだけにする。分からない材料は `None` のまま渡し、リーチ不可と推測しない。
+fn reach_legality_facts(context: &GameContext, actions: &[LegalAction]) -> ReachLegalityFacts {
+    ReachLegalityFacts {
+        menzen: context.own_melds().map(is_menzen),
+        already_reached: context
+            .player_id()
+            .map(|player| context.is_reached(usize::from(player))),
+        score: context.own_score(),
+        remaining_tiles: context.remaining_tiles(),
+        tenpai_after_discard: reaches_tenpai_after_any_legal_dahai(context, actions),
+    }
 }
 
 // 副露済み面子数を含む既存の向聴計算をそのまま使い、リーチ専用の向聴・受け入れは計算しない。
