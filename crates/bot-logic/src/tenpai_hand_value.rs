@@ -13,14 +13,21 @@
 //!
 //! # 残枚数の内訳
 //!
-//! 待ち全体の残枚数は [`Acceptance`] のままにしつつ、その内訳を和了牌の物理牌 (variant) ごとに
-//! 持つ。内訳はまだ見えていない物理牌を数えたもので、待ち全体の残枚数を見え牌から計算し直して
-//! 置き換えることはしない。
+//! 待ち全体の残枚数は [`Acceptance`] の値そのもので、見え牌から数え直さない。その内訳を和了牌の
+//! 物理牌 (variant) ごとに持つが、内訳も残枚数を独自に数えるのではなく、[`Acceptance`] の残枚数
+//! から赤5の分だけを分ける。
 //!
-//! 2つは別の入力から求まるため矛盾し得る。そこで variant ごとの残枚数の合計が
-//! [`Acceptance`] の残枚数と一致することを牌種ごとに検証し、一致しなければ
-//! [`TenpaiHandValueError::InconsistentRemaining`] にする。どちらかへ silent に寄せて
-//! 辻褄を合わせない。赤5のある牌種に限らず、全ての待ちで同じ検証を通す。
+//! ```text
+//! total = Acceptance の残枚数
+//! 赤5のある牌種  : 赤5が手牌 / 副露 / 見え牌にあれば赤 0 枚、無ければ赤 1 枚
+//! 赤5の無い牌種  : 赤 0 枚
+//! 黒 = total - 赤
+//! ```
+//!
+//! 数えるのは赤5の有無 ([`TileId::is_red`]) だけで、黒牌の物理牌 identity は数えない。上位層が
+//! 同じ牌種の黒牌へ同じ temporary [`TileId`] を割り当てる場合 (RiichiLab adapter の
+//! `temporary_tile_id_from_observation_tile`) でも、黒牌の枚数は [`Acceptance`] 由来のままなので
+//! 正しく求まる。
 //!
 //! # WinningContext
 //!
@@ -32,11 +39,10 @@
 //!
 //! # 赤5
 //!
-//! 赤5と黒5は同じ牌種で点数だけが違うため、待ちが 5m / 5p / 5s の場合は物理牌単位へ分けて
-//! 評価する。まだ見えていない物理牌に赤5と黒5の両方が残っていれば両方を variant として
-//! 評価し、「黒5として評価」のような推測をしない。赤5と黒5それぞれの残枚数も variant ごとに
-//! 持つため、後段は「5s の残り3枚のうち赤が1枚・黒が2枚」を扱える。赤ドラの数え方自体は既存の
-//! bonus 翻 ([`TileId::is_red`]) に任せ、ここでは物理牌の候補と枚数を分けるだけである。
+//! 赤5と黒5は同じ牌種で点数だけが違うため、待ちが 5m / 5p / 5s の場合は赤 / 黒へ分けて評価する。
+//! 赤5がまだ見えていなければ赤と黒の両方を variant として評価し、「黒5として評価」のような推測を
+//! しない。上の内訳により後段は「5s の残り3枚のうち赤が1枚・黒が2枚」を扱える。赤ドラの数え方
+//! 自体は既存の bonus 翻 ([`TileId::is_red`]) に任せ、ここでは和了牌を赤 / 黒へ分けるだけである。
 
 use thiserror::Error;
 
@@ -53,20 +59,6 @@ use crate::winning_context::WinningContext;
 pub enum TenpaiHandValueError {
     #[error("the hand is not tenpai: min shanten {0}")]
     NotTenpai(i8),
-
-    /// 待ちの残枚数と、まだ見えていない物理牌の枚数が食い違っている。
-    ///
-    /// 受け入れと見え牌が別の時点の局面を指している場合に起きる。どちらが正しいかはこの layer
-    /// では決められないため、silent に補正せずそのまま報告する。
-    #[error(
-        "the remaining of {} disagrees with the unseen physical tiles: acceptance {acceptance}, physical {physical}",
-        winning_tile.to_mjai_string()
-    )]
-    InconsistentRemaining {
-        winning_tile: TileType,
-        acceptance: u8,
-        physical: u8,
-    },
 
     #[error(transparent)]
     CompletedHand(#[from] CompletedHandError),
@@ -89,7 +81,7 @@ impl WinningTileCompletedHand {
         self.winning_tile.is_red()
     }
 
-    /// この variant の残枚数。まだ見えていない同じ赤 / 黒の物理牌の枚数。
+    /// この variant の残枚数。待ち全体の残枚数のうち、赤 / 黒それぞれの枚数。
     pub fn remaining(&self) -> u8 {
         self.remaining
     }
@@ -114,8 +106,7 @@ impl TenpaiWaitCompletedHand {
 
     /// この待ち全体の残枚数。既存 [`Acceptance`] の値そのもの。
     ///
-    /// [`winning_tiles`](Self::winning_tiles) の残枚数の合計と一致することは組み立て時に
-    /// 検証済み。
+    /// [`winning_tiles`](Self::winning_tiles) の残枚数は、この値を赤 / 黒へ分けたもの。
     pub fn remaining(&self) -> u8 {
         self.remaining
     }
@@ -164,10 +155,11 @@ impl<'a> WinningTileHandValue<'a> {
         self.winning_tile.is_red()
     }
 
-    /// この variant の残枚数。まだ見えていない同じ赤 / 黒の物理牌の枚数。
+    /// この variant の残枚数。待ち全体の残枚数のうち、赤 / 黒それぞれの枚数。
     ///
-    /// 5m / 5p / 5s の待ちでは「残り3枚のうち赤が1枚・黒が2枚」のように、赤 / 黒別の枚数に
-    /// なる。同じ待ちの variant の合計は [`TenpaiWaitHandValue::remaining`] と一致する。
+    /// 5m / 5p / 5s の待ちでは「残り3枚のうち赤が1枚・黒が2枚」のように分かれる。それ以外の
+    /// 牌種は黒 variant 1つだけで、その残枚数が待ち全体の残枚数になる。同じ待ちの variant の
+    /// 合計は [`TenpaiWaitHandValue::remaining`] と一致する。
     pub fn remaining(&self) -> u8 {
         self.remaining
     }
@@ -204,8 +196,7 @@ impl<'a> TenpaiWaitHandValue<'a> {
 
     /// この待ち全体の残枚数。既存 [`Acceptance`] の値そのもの。
     ///
-    /// 赤 / 黒別の内訳は [`winning_tiles`](Self::winning_tiles) が持ち、その合計がこの値と
-    /// 一致することは組み立て時に検証済み。
+    /// 赤 / 黒別の内訳は [`winning_tiles`](Self::winning_tiles) が持ち、その合計はこの値になる。
     pub fn remaining(&self) -> u8 {
         self.remaining
     }
@@ -259,13 +250,11 @@ impl<'a> TenpaiHandValueProfile<'a> {
 /// `wait_availability` は同じ受け入れから求めた既存のフリテン診断。ロン可否を持ち回るためだけに
 /// 使い、フリテンをここで判定し直さない。渡さない場合、ロン可否は unknown のままになる。
 ///
-/// `visible_tiles` は手牌以外に物理牌が判明している牌 (自分の河・副露・ドラ表示牌など)。和了牌の
-/// 物理牌と、その赤 / 黒別の残枚数を求めるために使う。待ち全体の残枚数はあくまで `acceptance` の
-/// 値で、見え牌から計算し直して置き換えない。自分の手牌が含まれていてもよい。
+/// `visible_tiles` は手牌以外に物理牌が判明している牌 (自分の河・副露・ドラ表示牌など)。赤5が
+/// 既に見えているかの判定にだけ使い、枚数は数えない。自分の手牌が含まれていてもよい。
 ///
-/// そのため `acceptance` を求めたときと同じ見え牌を渡すこと。牌種ごとに variant の残枚数の合計と
-/// `acceptance` の残枚数を突き合わせ、食い違えば
-/// [`TenpaiHandValueError::InconsistentRemaining`] になる。
+/// 待ち全体の残枚数はあくまで `acceptance` の値で、見え牌から計算し直して置き換えない。赤 / 黒別
+/// の内訳もその残枚数を分けたものになる。
 pub fn tenpai_completed_hands<S: MinShanten>(
     concealed_tiles: &[TileId],
     fixed_melds: &[Meld],
@@ -278,34 +267,23 @@ pub fn tenpai_completed_hands<S: MinShanten>(
         return Err(TenpaiHandValueError::NotTenpai(min_shanten));
     }
 
-    let seen = seen_tiles(concealed_tiles, fixed_melds, visible_tiles);
+    let seen_red_fives = seen_red_fives(concealed_tiles, fixed_melds, visible_tiles);
     let waits = acceptance
         .tiles
         .iter()
         .map(|wait| {
-            let variants: Vec<WinningTileVariant> =
-                winning_tile_variants(wait.tile, &seen).collect();
-            let physical: u8 = variants.iter().map(|variant| variant.remaining).sum();
-            if physical != wait.remaining {
-                return Err(TenpaiHandValueError::InconsistentRemaining {
-                    winning_tile: wait.tile,
-                    acceptance: wait.remaining,
-                    physical,
-                });
-            }
-
-            let winning_tiles = variants
-                .into_iter()
-                .map(|variant| {
-                    completed_hand(concealed_tiles, fixed_melds, variant.winning_tile).map(
-                        |analysis| WinningTileCompletedHand {
-                            winning_tile: variant.winning_tile,
-                            remaining: variant.remaining,
-                            analysis,
-                        },
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let winning_tiles =
+                winning_tile_variants(wait.tile, wait.remaining, seen_red_fives[wait.tile.index()])
+                    .map(|variant| {
+                        completed_hand(concealed_tiles, fixed_melds, variant.winning_tile).map(
+                            |analysis| WinningTileCompletedHand {
+                                winning_tile: variant.winning_tile,
+                                remaining: variant.remaining,
+                                analysis,
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
 
             Ok(TenpaiWaitCompletedHand {
                 winning_tile: wait.tile,
@@ -375,49 +353,60 @@ fn completed_hand(
     analyze_completed_hand(&tiles, fixed_melds)
 }
 
-/// 和了牌として評価すべき物理牌と、その残枚数。
+/// 和了牌として評価すべき赤 / 黒と、その残枚数。
 struct WinningTileVariant {
     winning_tile: TileId,
     remaining: u8,
 }
 
-/// 和了牌として評価すべき物理牌を、まだ見えていない同種牌から求める。
+/// 待ち1牌種の残枚数を、和了牌の赤 / 黒へ分ける。
 ///
-/// 点数が変わるのは赤5かどうかだけなので、赤5と黒5をそれぞれ1つの variant にまとめ、代表牌と
+/// 点数が変わるのは赤5かどうかだけなので、赤と黒をそれぞれ1つの variant にまとめ、代表牌と
 /// 残枚数を返す。同じ赤 / 黒の物理牌はどれを選んでも評価が同じため、代表牌の copy は評価に
-/// 影響しない。赤5と黒5の両方があり得る場合は両方を返し、どちらか一方だと推測しない。
+/// 影響しない。
 ///
-/// 赤5の無い牌種では黒の variant 1つだけになり、その残枚数がその牌種のまだ見えていない枚数に
-/// なる。したがって赤5の有無にかかわらず、同じ数え方で受け入れとの整合性を確認できる。
+/// 数えるのは `remaining` のうち赤5が何枚かだけで、黒牌の物理牌 identity は数えない。赤5は
+/// 牌種ごとに1枚しかないため、まだ見えていなければ赤1枚・黒はその残り、既に見えていれば
+/// すべて黒になる。赤5の無い牌種は黒の variant 1つだけで、その残枚数が待ち全体の残枚数になる。
+/// 赤5がまだ見えていない場合に「黒5として評価」のような推測はしない。
 fn winning_tile_variants(
     winning_tile: TileType,
-    seen: &[bool; TileId::COUNT],
+    remaining: u8,
+    red_five_seen: bool,
 ) -> impl Iterator<Item = WinningTileVariant> {
-    let variant = |red: bool| {
-        let mut unseen =
-            TileId::copies(winning_tile).filter(|tile| tile.is_red() == red && !seen[tile.index()]);
-        let winning_tile = unseen.next()?;
+    let copy = |red: bool| TileId::copies(winning_tile).find(|tile| tile.is_red() == red);
+    let red = copy(true).filter(|_| !red_five_seen);
+    let red_remaining = u8::from(red.is_some()).min(remaining);
+    let variant = |winning_tile: Option<TileId>, remaining: u8| {
+        let winning_tile = winning_tile.filter(|_| remaining > 0)?;
         Some(WinningTileVariant {
             winning_tile,
-            remaining: 1 + unseen.count() as u8,
+            remaining,
         })
     };
 
-    [variant(true), variant(false)].into_iter().flatten()
+    [
+        variant(red, red_remaining),
+        variant(copy(false), remaining - red_remaining),
+    ]
+    .into_iter()
+    .flatten()
 }
 
-fn seen_tiles(
+/// 牌種ごとに、その赤5が手牌・副露・見え牌のどれかに現れているか。
+fn seen_red_fives(
     concealed_tiles: &[TileId],
     fixed_melds: &[Meld],
     visible_tiles: &[TileId],
-) -> [bool; TileId::COUNT] {
-    let mut seen = [false; TileId::COUNT];
+) -> [bool; TileType::COUNT] {
+    let mut seen = [false; TileType::COUNT];
     for tile in concealed_tiles
         .iter()
         .chain(fixed_melds.iter().flat_map(|meld| meld.tiles()))
         .chain(visible_tiles)
+        .filter(|tile| tile.is_red())
     {
-        seen[tile.index()] = true;
+        seen[tile.tile_type().index()] = true;
     }
     seen
 }
@@ -480,12 +469,23 @@ mod tests {
         TileType::from_mjai_type_str(s.trim_end_matches('r')).unwrap()
     }
 
+    /// RiichiLab adapter の `temporary_tile_id_from_observation_tile()` と同じ正規化。
+    ///
+    /// 赤5はその物理牌のまま、それ以外の同牌種は同じ temporary [`TileId`] にまとまる。
+    fn canonical(tile: TileId) -> TileId {
+        if tile.is_red() {
+            return tile;
+        }
+        TileId::copies(tile.tile_type())
+            .find(|copy| !copy.is_red())
+            .unwrap()
+    }
+
     struct Tenpai {
         concealed_tiles: Vec<TileId>,
         fixed_melds: Vec<Meld>,
         source: TileIdSource,
         other_visible_tiles: Vec<TileId>,
-        acceptance_sees_them: bool,
     }
 
     impl Tenpai {
@@ -501,20 +501,41 @@ mod tests {
                 fixed_melds,
                 source,
                 other_visible_tiles: Vec::new(),
-                acceptance_sees_them: true,
             }
         }
 
-        /// 手牌以外の見え牌を、受け入れと layer の両方へ渡す。
-        fn with_visible(mut self, visible: &[&str]) -> Self {
-            self.other_visible_tiles = self.source.tiles(visible);
+        /// 手牌・副露・見え牌の物理牌を RiichiLab adapter と同じ temporary [`TileId`] にする。
+        fn canonicalized(mut self) -> Self {
+            self.concealed_tiles = self
+                .concealed_tiles
+                .iter()
+                .copied()
+                .map(canonical)
+                .collect();
+            self.fixed_melds = self
+                .fixed_melds
+                .iter()
+                .map(|meld| {
+                    Meld::new(
+                        meld.kind(),
+                        meld.tiles().iter().copied().map(canonical).collect(),
+                        meld.called_tile().map(canonical),
+                    )
+                })
+                .collect();
+            self.other_visible_tiles = self
+                .other_visible_tiles
+                .iter()
+                .copied()
+                .map(canonical)
+                .collect();
             self
         }
 
-        /// 手牌以外の見え牌を layer だけへ渡し、受け入れは見え牌を知らないままにする。
-        fn with_visible_unknown_to_the_acceptance(mut self, visible: &[&str]) -> Self {
-            self.acceptance_sees_them = false;
-            self.with_visible(visible)
+        /// 手牌以外の見え牌。受け入れと layer の両方へ同じものを渡す。
+        fn with_visible(mut self, visible: &[&str]) -> Self {
+            self.other_visible_tiles = self.source.tiles(visible);
+            self
         }
 
         /// 自分の手牌を含む見え牌。受け入れの見え牌は手牌を含む前提のため、同じ形で渡す。
@@ -554,18 +575,13 @@ mod tests {
         ) -> Result<TenpaiCompletedHands, TenpaiHandValueError> {
             let counts = self.counts();
             let visible_tiles = self.visible_tiles();
-            let acceptance_visible_tiles: &[TileId] = if self.acceptance_sees_them {
-                &visible_tiles
-            } else {
-                &self.concealed_tiles
-            };
 
             // 門前形は Shanten、副露形は EffectiveShanten の受け入れを渡す。
             if self.fixed_melds.is_empty() {
                 tenpai_completed_hands(
                     &self.concealed_tiles,
                     &self.fixed_melds,
-                    &calculate_acceptance_with_visible_tiles(&counts, acceptance_visible_tiles),
+                    &calculate_acceptance_with_visible_tiles(&counts, &visible_tiles),
                     wait_availability,
                     &visible_tiles,
                 )
@@ -576,7 +592,7 @@ mod tests {
                     &calculate_acceptance_with_fixed_melds_and_visible_tiles(
                         &counts,
                         self.fixed_meld_count(),
-                        acceptance_visible_tiles,
+                        &visible_tiles,
                     ),
                     wait_availability,
                     &visible_tiles,
@@ -1016,37 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn a_remaining_that_disagrees_with_the_unseen_physical_tiles_is_an_error() {
-        // 受け入れは赤5s を見ていないのに、layer だけが見えている状態。silent に寄せない。
-        let tenpai = Tenpai::new(&TANKI_FIVE, &[]).with_visible_unknown_to_the_acceptance(&["5sr"]);
-
-        assert_eq!(
-            tenpai.completed_hands(None),
-            Err(TenpaiHandValueError::InconsistentRemaining {
-                winning_tile: tile_type("5s"),
-                acceptance: 3,
-                physical: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn an_inconsistent_remaining_is_detected_for_a_tile_without_a_red_five() {
-        let tenpai = Tenpai::new(&RYANMEN_SANSHOKU, &[])
-            .with_visible_unknown_to_the_acceptance(&["2s", "2s"]);
-
-        assert_eq!(
-            tenpai.completed_hands(None),
-            Err(TenpaiHandValueError::InconsistentRemaining {
-                winning_tile: tile_type("2s"),
-                acceptance: 4,
-                physical: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn consistent_visible_tiles_change_the_remaining_but_not_the_hand_value() {
+    fn visible_tiles_change_the_remaining_but_not_the_hand_value() {
         let tenpai = Tenpai::new(&RYANMEN_SANSHOKU, &[]);
         let narrowed = Tenpai::new(&RYANMEN_SANSHOKU, &[]).with_visible(&["2s"]);
         let hands = tenpai.hands();
@@ -1071,6 +1057,107 @@ mod tests {
 
         assert_eq!(wait.winning_tiles().len(), 1);
         assert!(!wait.winning_tiles()[0].is_red());
+    }
+
+    // ---- 正規化された temporary TileId ----
+
+    #[test]
+    fn canonicalized_black_tiles_keep_the_acceptance_remaining() {
+        // RiichiLab adapter では同牌種の黒牌が同じ temporary TileId になる。黒牌の枚数を物理牌
+        // identity から数えると 2 枚見えていることを見落とすため、残枚数は受け入れの値を使う。
+        let tenpai = Tenpai::new(&TANKI_FIVE, &[])
+            .with_visible(&["5s", "5s"])
+            .canonicalized();
+        let acceptance = tenpai.acceptance();
+        let hands = tenpai.hands();
+        let profile = profile(&hands, ron());
+        let wait = profile.wait(tile_type("5s")).unwrap();
+
+        let black_fives: Vec<TileId> = tenpai
+            .visible_tiles()
+            .into_iter()
+            .filter(|tile| tile.tile_type() == tile_type("5s") && !tile.is_red())
+            .collect();
+        assert_eq!(black_fives.len(), 3, "手牌の1枚と見え牌の2枚");
+        assert!(
+            black_fives.windows(2).all(|pair| pair[0] == pair[1]),
+            "黒5s が同じ temporary TileId になっている前提の test: {black_fives:?}"
+        );
+        assert_eq!(
+            wait.remaining(),
+            acceptance
+                .tiles
+                .iter()
+                .find(|tile| tile.tile == tile_type("5s"))
+                .unwrap()
+                .remaining
+        );
+        // 黒5s は3枚とも見えているので、残るのは赤5s の1枚だけ。
+        assert_eq!(wait.remaining(), 1);
+        assert_eq!(remaining_by_redness(wait), vec![(true, 1)]);
+    }
+
+    #[test]
+    fn canonicalized_black_tiles_still_split_the_remaining_into_red_and_black() {
+        let tenpai = Tenpai::new(&TANKI_FIVE, &[])
+            .with_visible(&["5s"])
+            .canonicalized();
+        let hands = tenpai.hands();
+        let profile = profile(&hands, ron());
+        let wait = profile.wait(tile_type("5s")).unwrap();
+
+        assert_eq!(wait.remaining(), 2);
+        assert_eq!(remaining_by_redness(wait), vec![(true, 1), (false, 1)]);
+    }
+
+    #[test]
+    fn a_canonicalized_seen_red_five_still_removes_the_red_variant() {
+        let tenpai = Tenpai::new(&TANKI_FIVE, &[])
+            .with_visible(&["5sr"])
+            .canonicalized();
+        let hands = tenpai.hands();
+        let profile = profile(&hands, ron());
+        let wait = profile.wait(tile_type("5s")).unwrap();
+
+        assert_eq!(wait.remaining(), 2);
+        assert_eq!(remaining_by_redness(wait), vec![(false, 2)]);
+    }
+
+    #[test]
+    fn a_canonicalized_non_five_wait_keeps_the_acceptance_remaining() {
+        let tenpai = Tenpai::new(&RYANMEN_SANSHOKU, &[])
+            .with_visible(&["2s", "2s"])
+            .canonicalized();
+        let hands = tenpai.hands();
+        let profile = profile(&hands, ron());
+        let wait = profile.wait(tile_type("2s")).unwrap();
+
+        assert_eq!(wait.remaining(), 2);
+        assert_eq!(remaining_by_redness(wait), vec![(false, 2)]);
+    }
+
+    #[test]
+    fn canonicalized_tiles_do_not_change_the_hand_value() {
+        let tenpai = Tenpai::new(&RYANMEN_SANSHOKU, &[]);
+        let canonicalized = Tenpai::new(&RYANMEN_SANSHOKU, &[]).canonicalized();
+        let hands = tenpai.hands();
+        let canonicalized_hands = canonicalized.hands();
+        let expected = profile(&hands, ron());
+        let profile = profile(&canonicalized_hands, ron());
+
+        assert_eq!(payments(&profile), payments(&expected));
+        assert_eq!(
+            profile
+                .waits()
+                .iter()
+                .map(remaining_by_redness)
+                .collect::<Vec<_>>(),
+            expected
+                .waits()
+                .iter()
+                .map(remaining_by_redness)
+                .collect::<Vec<_>>()
+        );
     }
 
     // ---- WinningContext ----
