@@ -6,6 +6,7 @@ pub mod fu;
 pub mod furiten;
 pub mod han;
 pub mod hand;
+pub mod hand_settlement;
 pub mod hand_value;
 pub mod iishanten;
 pub mod lookahead;
@@ -67,6 +68,10 @@ pub use furiten::{
 };
 pub use han::{WinningYakuHanEvaluation, YakuHan, evaluate_winning_yaku_han};
 pub use hand::{Hand, HandError};
+pub use hand_settlement::{
+    HandSettlement, HandSettlementError, HonbaPayments, MissingSettlementFact,
+    evaluate_hand_settlement,
+};
 pub use hand_value::{HandValue, HandValueError, HandValueOutcome, evaluate_hand_value};
 pub use iishanten::{
     IishantenShape, classify_standard_iishanten_shape,
