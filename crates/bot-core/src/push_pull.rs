@@ -1,7 +1,8 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::{
-    select_best_normal_discard_evaluation, selected_discard_tenpai_wait_availability,
+    concealed_tiles_after_discard, select_best_normal_discard_evaluation,
+    selected_discard_tenpai_wait_availability,
 };
 use crate::open_hand_threat::{
     OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
@@ -12,7 +13,7 @@ use crate::threat::{
 };
 use bot_logic::{
     DiscardEvaluation, IishantenShape, PermanentFuriten, TenpaiWaitAvailability, TileCounts,
-    TileId, TileType, count_dora,
+    TileType, count_dora,
 };
 
 const LOG_TARGET: &str = "bot_core::push_pull";
@@ -147,29 +148,6 @@ impl OffenseValueProxyBreakdown {
     }
 }
 
-/// 補正済み評価が指す物理牌を1枚だけ除いた、打牌後の concealed hand の物理牌一覧を返す。
-///
-/// 手牌とツモ牌を結合した物理牌一覧から、`evaluation.discard` の牌種かつ
-/// `evaluation.discards_red_five` の赤フラグと一致する牌を1枚だけ除く。赤5と通常5の混同を避けるため、
-/// 牌種だけでなく赤フラグも一致させる。一致する物理牌が無ければ `None`。
-fn tiles_after_discard(
-    context: &GameContext,
-    evaluation: &DiscardEvaluation,
-) -> Option<Vec<TileId>> {
-    let mut tiles: Vec<TileId> = context
-        .hand_tiles()
-        .iter()
-        .copied()
-        .chain(context.drawn_tile())
-        .collect();
-
-    let position = tiles.iter().position(|&tile| {
-        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
-    })?;
-    tiles.remove(position);
-    Some(tiles)
-}
-
 /// 打牌後の concealed hand 内で確認できる役牌刻子・槓子候補の翻 proxy。
 ///
 /// 三元牌は常に1。風牌は `round_wind` / `seat_wind` と一致した分だけ数え、連風牌は2。
@@ -191,7 +169,8 @@ fn value_honor_triplet_han(
 /// 補正済み評価と `GameContext` から、打牌後の自分の手牌全体の簡易打点 proxy の内訳を一度だけ計算する。
 ///
 /// 打牌後の concealed hand の寄与と、自分の fixed meld の寄与を一度ずつだけ合計する。fixed meld は
-/// `tiles_after_discard` の牌集合に含まれないため、`visible_tiles` などから数え直して二重計上しない。
+/// `concealed_tiles_after_discard` の牌集合に含まれないため、`visible_tiles` などから数え直して
+/// 二重計上しない。
 fn offense_value_proxy_after_discard(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
@@ -230,7 +209,7 @@ fn own_fixed_meld_value_proxy(context: &GameContext) -> OffenseValueProxyBreakdo
 
 /// 補正済み評価と `GameContext` から、打牌後の concealed hand の簡易打点 proxy の内訳を計算する。
 ///
-/// 実際に切られる物理牌カテゴリ(赤5・通常5)と一致するよう、`tiles_after_discard` で
+/// 実際に切られる物理牌カテゴリ(赤5・通常5)と一致するよう、`concealed_tiles_after_discard` で
 /// 物理牌を1枚除いた打牌後の concealed hand へ処理を一元化する。ドラ総数・赤ドラ数・役牌翻 proxy を同じ牌集合から求める。
 ///
 /// 通常の `ShantenAgent` 経路では補正済み評価と合法 action の物理牌情報が一致する不変条件があるため、
@@ -240,7 +219,7 @@ fn concealed_value_proxy_after_discard(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
 ) -> OffenseValueProxyBreakdown {
-    let Some(tiles) = tiles_after_discard(context, evaluation) else {
+    let Some(tiles) = concealed_tiles_after_discard(context, evaluation) else {
         debug_assert!(
             false,
             "打牌後の concealed hand を構築できない: 補正済み評価と一致する物理牌が手牌・ツモ牌に存在しない"

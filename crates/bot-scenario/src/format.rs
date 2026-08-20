@@ -1,11 +1,11 @@
 use bot_core::{
-    AgentActionSource, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
-    DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind, GameContext,
-    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
-    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
-    PlayerThreatDiagnostic, PonCandidateDiagnostic, PonDecisionDiagnostic, PushPullDecision,
-    PushPullInputs, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
-    ThreatDefenseTarget,
+    AgentActionSource, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic, DamatenValue,
+    DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
+    DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
+    MeldThreatDiagnostic, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic,
+    OpenHandThreatAssessment, PlayerThreatDiagnostic, PonCandidateDiagnostic,
+    PonDecisionDiagnostic, PushPullDecision, PushPullInputs, ReachDecisionDiagnostic, ShantenAgent,
+    ShantenDecisionDiagnostic, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -749,8 +749,40 @@ fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
         "  discarded waits: {}",
         format_discarded_waits(tenpai)
     ));
+    lines.extend(format_damaten_value(reach.damaten_value.as_ref()));
 
     lines.join("\n")
+}
+
+// ダマ打点。判断に使った値そのもので、表示専用に打点を求め直さない。ダマでロンできない場合と
+// ロン可否が unknown の場合は評価していないので、その旨だけを出す。
+fn format_damaten_value(damaten: Option<&DamatenValueDiagnostic>) -> Vec<String> {
+    let Some(damaten) = damaten else {
+        return vec![format!("  damaten value: {NONE}")];
+    };
+
+    let mut lines = vec![format!("  damaten verdict: {:?}", damaten.verdict)];
+    for winning_tile in damaten.winning_tile_values() {
+        lines.push(format!(
+            "    {}: {} remaining / {}",
+            winning_tile.winning_tile.to_mjai_string(),
+            winning_tile.remaining,
+            damaten_value_label(winning_tile.value)
+        ));
+    }
+    lines
+}
+
+fn damaten_value_label(value: DamatenValue) -> String {
+    match value {
+        DamatenValue::Known {
+            payment,
+            is_yakuman: true,
+        } => format!("{} yakuman", payment.total()),
+        DamatenValue::Known { payment, .. } => payment.total().to_string(),
+        DamatenValue::NoYaku => "no yaku".to_string(),
+        DamatenValue::Unknown => UNKNOWN.to_string(),
+    }
 }
 
 fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
@@ -3024,6 +3056,33 @@ mod tests {
     // {5s, 北} の6枚に見えるが、リーチ判断は実際に選んだ打牌後の3枚で行う。
     const REACH_TANKI_WAIT_SCENARIO: &str = include_str!("../scenarios/reach_tanki_wait.json");
 
+    // 打 北 で 3s / 6s の両面テンパイになる平和 + 断幺。3s を全て見せて 6s の1種待ちにし、
+    // 場風・自風・自分の河・履歴依存フリテンを既知にしてダマでロンできる状態にする。ドラだけを
+    // 変えて、ダマ打点が threshold 以上 / 未満の対照ケースを作る。
+    const DAMATEN_HIGH_VALUE_SCENARIO: &str = r#"{
+        "hand": "234678m 22p 34455s",
+        "draw": "N",
+        "dora_indicators": "1p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "extra_visible_tiles": "333s",
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "allow_reach": true
+    }"#;
+
+    const DAMATEN_LOW_VALUE_SCENARIO: &str = r#"{
+        "hand": "234678m 22p 34455s",
+        "draw": "N",
+        "dora_indicators": "1m",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "extra_visible_tiles": "333s",
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "allow_reach": true
+    }"#;
+
     // 同じ単騎テンパイで 5s を1枚、北 を2枚見せた局面。打 北 の待ちは2枚に減る。
     const REACH_SCARCE_TANKI_WAIT_SCENARIO: &str = r#"{
         "hand": "123456789m123p5s",
@@ -3478,6 +3537,92 @@ mod tests {
             "{reach}"
         );
         assert!(reach.contains("  tenpai waits: 5s"), "{reach}");
+    }
+
+    #[test]
+    fn reach_section_reports_the_damaten_value_of_each_wait() {
+        // ダマ打点が threshold 以上ならリーチせず、待ちごとの実点数をそのまま出す。
+        let (_, diagnostic, output) = rendered(DAMATEN_HIGH_VALUE_SCENARIO, false);
+        let reach = section(&output, "Reach");
+        let decision = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(action_label(&diagnostic.selected_action), "N");
+        assert!(reach.contains("  decision: no"), "{reach}");
+        assert!(reach.contains("  reason: HighValueDamaten"), "{reach}");
+        assert!(reach.contains("  ron: yes"), "{reach}");
+        assert!(
+            reach.contains("  live wait: 4 remaining / 1 types"),
+            "{reach}"
+        );
+        assert!(
+            reach.contains("  damaten verdict: AboveThreshold"),
+            "{reach}"
+        );
+        assert!(reach.contains("    6s: 4 remaining / 7700"), "{reach}");
+
+        // 表示は診断が持つ値そのもので、表示専用に打点を求め直さない。
+        let damaten = decision
+            .damaten_value
+            .as_ref()
+            .expect("ダマ打点を評価している");
+        assert_eq!(
+            damaten
+                .winning_tile_values()
+                .map(|value| value.value.total())
+                .collect::<Vec<_>>(),
+            [Some(7700)]
+        );
+    }
+
+    #[test]
+    fn reach_section_reports_a_damaten_value_below_the_threshold() {
+        // 同じ手牌でもダマ打点が threshold 未満ならリーチする。
+        let (_, diagnostic, output) = rendered(DAMATEN_LOW_VALUE_SCENARIO, false);
+        let reach = section(&output, "Reach");
+
+        assert_eq!(action_label(&diagnostic.selected_action), "Reach");
+        assert!(reach.contains("  decision: yes"), "{reach}");
+        assert!(reach.contains("  reason: EligibleLowValue"), "{reach}");
+        assert!(
+            reach.contains("  damaten verdict: BelowThreshold"),
+            "{reach}"
+        );
+        assert!(reach.contains("    6s: 4 remaining / 3900"), "{reach}");
+    }
+
+    #[test]
+    fn reach_section_reports_an_indeterminate_damaten_value() {
+        // 場風・自風が不明でダマ打点を確定できない場合は、推測せず unknown のまま出し、
+        // 待ち枚数だけを見る既存判断へ落ちる。
+        let (_, _, output) = rendered(REACH_TANKI_WAIT_SCENARIO, false);
+        let reach = section(&output, "Reach");
+
+        assert!(reach.contains("  ron: yes"), "{reach}");
+        assert!(
+            reach.contains("  damaten verdict: Indeterminate"),
+            "{reach}"
+        );
+        // 赤5と黒5は別 variant として並ぶ。
+        assert!(reach.contains("    5sr: 1 remaining / unknown"), "{reach}");
+        assert!(reach.contains("    5s: 2 remaining / unknown"), "{reach}");
+        assert!(reach.contains("  reason: Eligible"), "{reach}");
+    }
+
+    #[test]
+    fn reach_section_reports_an_unevaluated_damaten_value() {
+        // ロン可否が unknown ならダマ打点そのものを評価しない。
+        let (_, diagnostic, output) = rendered(REACH_SCENARIO, false);
+        let reach = section(&output, "Reach");
+
+        assert_eq!(
+            diagnostic
+                .reach
+                .as_ref()
+                .and_then(|decision| decision.damaten_value.as_ref()),
+            None
+        );
+        assert!(reach.contains("  ron: unknown"), "{reach}");
+        assert!(reach.contains("  damaten value: none"), "{reach}");
     }
 
     #[test]

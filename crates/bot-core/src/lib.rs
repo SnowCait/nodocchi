@@ -3,6 +3,7 @@ pub mod agent;
 pub mod agents;
 pub mod combined_defense;
 pub mod context;
+pub mod damaten_value;
 pub mod defense;
 pub mod discard_selection;
 pub mod meld;
@@ -31,6 +32,10 @@ pub use combined_defense::{
     suited_safety_rank_for_combined_threats, suji_safety_rank_for_combined_threats,
 };
 pub use context::{GameContext, TableStateFacts, seat_wind_for_player};
+pub use damaten_value::{
+    DAMATEN_MIN_TOTAL, DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DamatenWaitValue,
+    DamatenWinningTileValue, damaten_baseline_context,
+};
 pub use defense::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
     DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank,

@@ -5,6 +5,7 @@ use crate::combined_defense::{
     select_combined_threat_defense_fallback_action_with_kind,
 };
 use crate::context::GameContext;
+use crate::damaten_value::{DamatenValueDiagnostic, DamatenValueVerdict, evaluate_damaten_value};
 use crate::defense::{
     DefenseDecisionDiagnostic, DefenseFallbackKind, log_defense_fallback_decision,
     select_defense_fallback_action_with_kind,
@@ -202,19 +203,31 @@ pub struct PonDecisionDiagnostic {
 
 /// リーチを採用した / しなかった理由。
 ///
-/// `Eligible` 以外はすべて「今回はリーチしない」理由であり、最初に落ちた条件を1つだけ表す。
+/// `Eligible*` 以外はすべて「今回はリーチしない」理由であり、最初に落ちた条件を1つだけ表す。
 /// 判定順は [`ReachDecisionDiagnostic`] のフィールドが埋まる順と一致する。
+///
+/// ダマ打点による判断 ([`DamatenValueVerdict`]) を適用した経路と、ダマ打点を使わない既存判断の
+/// 経路は別の理由として区別する。既存判断へ落ちるのはフリテン・ロン可否 unknown・ダマ打点を
+/// 確定できない場合で、そこでは非フリテンだともダマ打点が十分だとも推測しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReachDecisionReason {
-    /// 全条件を満たし、選んだ打牌後が生きた待ちを十分に持つテンパイになる。
+    /// ダマ打点を使わない既存判断で、選んだ打牌後が生きた待ちを十分に持つテンパイになる。
     Eligible,
+    /// ダマでは役が無い待ちがあるためリーチする。
+    EligibleNoDamatenYaku,
+    /// ダマ打点が threshold 未満の待ちがあるためリーチする。
+    EligibleLowValue,
+    /// 全ての生きた待ちがダマで役ありかつ threshold 以上なのでダマにする。
+    HighValueDamaten,
     /// 合法 action に [`LegalAction::Reach`] が無い。
     NoLegalReach,
     /// 通常打牌 selection が打牌を選べていない。手牌や合法 Dahai が無い局面。
     NoSelectedDiscard,
     /// 選んだ打牌の後がテンパイではない。
     NotTenpai,
-    /// テンパイだが、ツモ和了できる待ちの残枚数が threshold 未満。
+    /// テンパイだが、生きた待ちが1枚も無い。
+    NoLiveWait,
+    /// ダマ打点を使わない既存判断で、ツモ和了できる待ちの残枚数が threshold 未満。
     InsufficientLiveWait,
 }
 
@@ -230,7 +243,9 @@ pub enum ReachDecisionReason {
 ///   ロジックは持たない。
 /// - 判定が進まなかった項目は推測せず `None` のままにする。
 ///
-/// `tenpai_wait` のフリテン・ロン可否は事実として持つだけで、今回のリーチ判断には使わない。
+/// `tenpai_wait` のロン可否は、ダマ打点による判断を適用するかどうかの入口になる。ダマでロン
+/// できる ([`TenpaiWaitAvailability::can_ron`] が `Some(true)`) 場合だけダマ打点を評価し、
+/// フリテンとロン可否 unknown では非フリテンだと推測せず既存判断のままにする。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachDecisionDiagnostic {
     /// 通常打牌 selection が選んだ合法 Dahai。押し引き入力と同じ selection の action。
@@ -243,6 +258,11 @@ pub struct ReachDecisionDiagnostic {
     /// 待ち牌・ロン可否に使った打牌後の履歴依存フリテンを持つ。テンパイにならない場合と
     /// リーチを検討しなかった場合は `None`。
     pub tenpai_wait: Option<TenpaiWaitAvailability>,
+    /// `selected_discard` を切った後の待ちごとのダマ打点と、そこから畳んだ結論。
+    ///
+    /// ダマ打点を評価しなかった場合 (テンパイにならない・ダマでロンできない・ロン可否が
+    /// unknown・打牌後の手牌を組み立てられない) は `None`。
+    pub damaten_value: Option<DamatenValueDiagnostic>,
     /// 採用したリーチ。採用しなかった場合は `None`。
     pub selected: Option<LegalAction>,
     pub reason: ReachDecisionReason,
@@ -288,6 +308,21 @@ impl ReachDecisionDiagnostic {
         self.tenpai_wait
             .as_ref()
             .map_or(&[], TenpaiWaitAvailability::discarded_waits)
+    }
+
+    /// ダマ打点から畳んだ結論。ダマ打点を評価しなかった場合は `None`。
+    pub fn damaten_verdict(&self) -> Option<DamatenValueVerdict> {
+        self.damaten_value
+            .as_ref()
+            .map(|damaten_value| damaten_value.verdict)
+    }
+
+    /// ダマ打点による判断でリーチ / ダマを決めたか。
+    ///
+    /// ダマ打点を評価しなかった場合と、評価しても結論が出なかった場合はどちらも `false`。
+    pub fn used_damaten_value(&self) -> bool {
+        self.damaten_verdict()
+            .is_some_and(DamatenValueVerdict::is_conclusive)
     }
 }
 
@@ -1107,6 +1142,14 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(reach) => format!("{:?}", reach.reason),
         None => "None".to_string(),
     };
+    let damaten_verdict = match decision
+        .reach
+        .as_ref()
+        .and_then(|reach| reach.damaten_verdict())
+    {
+        Some(verdict) => format!("{verdict:?}"),
+        None => "None".to_string(),
+    };
 
     tracing::debug!(
         target: AGENT_DECISION_LOG_TARGET,
@@ -1116,6 +1159,7 @@ fn log_agent_decision(decision: &AgentDecision) {
         push_pull_reason = %push_pull_reason,
         normal_discard = %normal_discard,
         reach_reason = %reach_reason,
+        damaten_verdict = %damaten_verdict,
         defense_kind = %defense_kind,
         open_hand_defense_category = %open_hand_defense_category,
         combined_defense_category = %combined_defense_category,
@@ -1130,8 +1174,14 @@ fn log_agent_decision(decision: &AgentDecision) {
 // 計算し直さない。待ちと恒常フリテンも選択済みの1候補分だけを既存 pure helper から求め、全合法
 // 候補分の診断や2手先探索は構築しない。
 //
-// 補正後の待ち枚数が明らかに少ない即リーチだけを抑制する最小判断であることは変えていない。
-// TODO: 役判定・打点・押し引きを考慮したリーチ判断に置き換える。
+// ダマでロンできる通常のケースでは、その打牌後の全ての生きた待ち・赤黒 variant についてダマの
+// 確定打点を評価し、その結論だけでリーチ / ダマを決める。待ち枚数の threshold
+// (REACH_MIN_REMAINING) をダマ打点より先に適用してリーチを抑制しない。したがって1～2枚待ちでも
+// ダマが安ければリーチする。
+//
+// フリテン・ロン可否 unknown・ダマ打点を確定できない場合は、非フリテンだともダマ打点が十分だとも
+// 推測せず、待ち枚数だけを見る既存判断を維持する。
+// TODO: フリテン専用のリーチ policy を決める。
 fn decide_reach(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
@@ -1144,6 +1194,7 @@ fn decide_reach(
             .as_ref()
             .map(DiscardEvaluation::min_shanten_after_discard),
         tenpai_wait: None,
+        damaten_value: None,
         selected: None,
         reason: ReachDecisionReason::NoLegalReach,
     };
@@ -1173,14 +1224,34 @@ fn decide_reach(
         return diagnostic;
     };
 
+    // ダマでロンできると確定した場合だけダマ打点を評価する。フリテンとロン可否 unknown では
+    // 評価そのものを行わず、既存判断へ委ねる。
+    let damaten_value = (tenpai_wait.can_ron() == Some(true))
+        .then(|| evaluate_damaten_value(ctx, evaluation, &tenpai_wait))
+        .flatten();
+
     // 待ち枚数は既存受け入れそのもので、visible tiles の反映も打牌評価の時点で済んでいる。
-    // 恒常フリテンとロン可否は事実として tenpai_wait に持つだけで、判断には使わない。
-    if tenpai_wait.tsumo_remaining >= REACH_MIN_REMAINING {
-        diagnostic.reason = ReachDecisionReason::Eligible;
-        diagnostic.selected = Some(reach);
-    } else {
-        diagnostic.reason = ReachDecisionReason::InsufficientLiveWait;
-    }
+    let (reason, selected) = match damaten_value.as_ref().map(|value| value.verdict) {
+        Some(DamatenValueVerdict::NoLiveWait) => (ReachDecisionReason::NoLiveWait, None),
+        Some(DamatenValueVerdict::NoYaku) => {
+            (ReachDecisionReason::EligibleNoDamatenYaku, Some(reach))
+        }
+        Some(DamatenValueVerdict::BelowThreshold) => {
+            (ReachDecisionReason::EligibleLowValue, Some(reach))
+        }
+        Some(DamatenValueVerdict::AboveThreshold) => (ReachDecisionReason::HighValueDamaten, None),
+        Some(DamatenValueVerdict::Indeterminate) | None => {
+            if tenpai_wait.tsumo_remaining >= REACH_MIN_REMAINING {
+                (ReachDecisionReason::Eligible, Some(reach))
+            } else {
+                (ReachDecisionReason::InsufficientLiveWait, None)
+            }
+        }
+    };
+
+    diagnostic.reason = reason;
+    diagnostic.selected = selected;
+    diagnostic.damaten_value = damaten_value;
     diagnostic.tenpai_wait = Some(tenpai_wait);
     diagnostic
 }
@@ -1200,6 +1271,7 @@ pub(crate) mod tests {
         ThreatDefenseTarget, combined_threat_defense_targets_from_context,
     };
     use crate::context::TableStateFacts;
+    use crate::damaten_value::{DAMATEN_MIN_TOTAL, DamatenValue, damaten_baseline_context};
     use crate::defense::{HonorSafetyRank, SuitedSafetyRank, select_defense_fallback_action};
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{
@@ -1208,7 +1280,8 @@ pub(crate) mod tests {
     };
     use crate::threat::diagnose_player_threats;
     use bot_logic::{
-        DiscardComparisonReason, PermanentFuriten, TileId, TileType, compare_discard_evaluations,
+        DiscardComparisonReason, HistoryFuritenFacts, PermanentFuriten, RiichiStatus, TileId,
+        TileType, WinMethod, compare_discard_evaluations,
     };
 
     pub(crate) fn tile(value: u8) -> TileId {
@@ -1714,6 +1787,489 @@ pub(crate) mod tests {
         assert!(!reach.should_reach());
         assert_eq!(reach.reason, ReachDecisionReason::NoLegalReach);
         assert_eq!(reach.tenpai_wait, None);
+    }
+
+    // ---- ダマ打点によるリーチ判断 ----
+
+    // ダマ打点を判断できる局面の組み立て。場風・自風・自分の河・履歴依存フリテンをすべて既知に
+    // して、ダマでロンできる (`can_ron() == Some(true)`) 通常ケースを作る。自分は子 (南家) で、
+    // 他家リーチが無いので押し引きは Push になる。
+    struct DamatenCase {
+        ctx: GameContext,
+        actions: Vec<LegalAction>,
+        // ツモ切りしてテンパイを保つ打牌。通常打牌 selection が選ぶはずの action。
+        tsumogiri: LegalAction,
+    }
+
+    impl DamatenCase {
+        // act() が実際に通ったリーチ判断。診断専用に判断し直していないことも同時に確かめる。
+        fn reach(&self) -> ReachDecisionDiagnostic {
+            reach_diagnostic(&self.ctx, &self.actions)
+        }
+
+        fn act(&self) -> LegalAction {
+            ShantenAgent.act(&self.ctx, &self.actions)
+        }
+
+        fn damaten(&self) -> DamatenValueDiagnostic {
+            self.reach().damaten_value.expect("ダマ打点を評価している")
+        }
+
+        // 和了牌の物理牌ごとの「牌・残枚数・ダマの支払い合計」を待ちの順に並べたもの。
+        fn damaten_totals(&self) -> Vec<(String, u8, Option<u32>)> {
+            self.damaten()
+                .winning_tile_values()
+                .map(|value| {
+                    (
+                        value.winning_tile.to_mjai_string(),
+                        value.remaining,
+                        value.value.total(),
+                    )
+                })
+                .collect()
+        }
+
+        fn damaten_values(&self) -> Vec<DamatenValue> {
+            self.damaten()
+                .winning_tile_values()
+                .map(|value| value.value)
+                .collect()
+        }
+    }
+
+    struct TileIdSource {
+        used: [bool; TileId::COUNT],
+    }
+
+    impl TileIdSource {
+        fn new() -> Self {
+            Self {
+                used: [false; TileId::COUNT],
+            }
+        }
+
+        fn tiles(&mut self, strings: &[&str]) -> Vec<TileId> {
+            strings.iter().map(|s| self.tile(s)).collect()
+        }
+
+        fn tile(&mut self, s: &str) -> TileId {
+            let tile_type = TileType::from_mjai_type_str(s.trim_end_matches('r')).unwrap();
+            let red = s.ends_with('r');
+            let id = TileId::copies(tile_type)
+                .find(|id| id.is_red() == red && !self.used[id.index()])
+                .expect("同じ物理牌を使い回していない");
+            self.used[id.index()] = true;
+            id
+        }
+    }
+
+    fn damaten_case(hand: &[&str], drawn: &str, dora_indicators: &[&str]) -> DamatenCase {
+        damaten_case_with(hand, drawn, dora_indicators, &[], &[])
+    }
+
+    fn damaten_case_with(
+        hand: &[&str],
+        drawn: &str,
+        dora_indicators: &[&str],
+        extra_visible: &[&str],
+        own_river: &[&str],
+    ) -> DamatenCase {
+        let mut source = TileIdSource::new();
+        let hand_tiles = source.tiles(hand);
+        let drawn_tile = source.tile(drawn);
+        let dora_indicators = source.tiles(dora_indicators);
+        let extra_visible = source.tiles(extra_visible);
+        let own_river = source.tiles(own_river);
+
+        let visible: Vec<TileId> = hand_tiles
+            .iter()
+            .chain([&drawn_tile])
+            .chain(dora_indicators.iter())
+            .chain(extra_visible.iter())
+            .chain(own_river.iter())
+            .copied()
+            .collect();
+        let actions: Vec<LegalAction> = hand_tiles
+            .iter()
+            .chain([&drawn_tile])
+            .map(|&tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Reach])
+            .collect();
+
+        let ctx = GameContext::from_parts_with_table_state(
+            Some(drawn_tile),
+            hand_tiles,
+            dora_indicators,
+            TileType::from_mjai_type_str("E").ok(),
+            TileType::from_mjai_type_str("S").ok(),
+            visible,
+            Some(0),
+            Some(3),
+            [own_river, vec![], vec![], vec![]],
+            [false; 4],
+        )
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+
+        DamatenCase {
+            ctx,
+            actions,
+            tsumogiri: LegalAction::Dahai { tile: drawn_tile },
+        }
+    }
+
+    // 平和 + 断幺の 3s / 6s 両面テンパイ。ドラ表示牌だけを変えてダマ打点の階段を作る。
+    // 3s であがると一盃口が付くため、同じ手牌でも待ちごとに打点が違う。
+    const PINFU_TANYAO_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "6m", "7m", "8m", "2p", "2p", "3s", "4s", "5s", "4s", "5s",
+    ];
+
+    // 3s を全て見せて 6s の1種待ちにするための見え牌。待ちごとの打点差を消し、ダマ打点の
+    // threshold そのものを確かめるために使う。
+    const PINFU_TANYAO_SINGLE_WAIT_VISIBLE: [&str; 3] = ["3s", "3s", "3s"];
+
+    // 3p 嵌張の役なしテンパイ。9s の対子で断幺が消え、嵌張なので平和も付かない。
+    const NO_YAKU_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "4m", "5m", "6m", "6m", "7m", "8m", "2p", "4p", "9s", "9s",
+    ];
+
+    // 断幺の 5s 単騎テンパイ。赤5と黒5で打点が変わる待ちを作る。
+    const RED_FIVE_TANKI_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "6m", "7m", "8m", "2p", "3p", "4p", "6p", "7p", "8p", "5s",
+    ];
+
+    // 2s 単騎の七対子テンパイ。9p の対子で断幺が消え、2m の3枚目をツモ切りしてテンパイを保つ。
+    const CHIITOITSU_HAND: [&str; 13] = [
+        "2m", "2m", "5m", "5m", "8m", "8m", "2p", "2p", "5p", "5p", "9p", "9p", "2s",
+    ];
+
+    // 13面待ちの国士無双テンパイ。
+    const KOKUSHI_HAND: [&str; 13] = [
+        "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+    ];
+
+    #[test]
+    fn damaten_baseline_is_a_hypothetical_ron_context() {
+        // 打点比較の baseline は局面から推測せず policy が決める。場風・自風だけを既知 fact から
+        // 取り、リーチ後の裏ドラや海底が付かない状況として組み立てる。
+        let case = damaten_case(&PINFU_TANYAO_HAND, "N", &[]);
+        let baseline = damaten_baseline_context(&case.ctx);
+
+        assert_eq!(baseline, case.damaten().baseline);
+        assert_eq!(baseline.win_method(), WinMethod::Ron);
+        assert_eq!(baseline.riichi(), RiichiStatus::NotDeclared);
+        assert_eq!(baseline.chankan(), Some(false));
+        // 海底 / 河底を付けないための policy input で、実際の山残枚数ではない。
+        assert_eq!(baseline.remaining_live_tiles(), Some(1));
+        assert!(!baseline.is_last_live_tile());
+        assert_eq!(baseline.round_wind(), case.ctx.round_wind());
+        assert_eq!(baseline.seat_wind(), case.ctx.seat_wind());
+        assert_eq!(baseline.ippatsu(), None);
+    }
+
+    #[test]
+    fn reaches_when_the_damaten_hand_has_no_yaku() {
+        // ダマでは役が無く、そもそもロンできない待ちならリーチする。
+        let case = damaten_case(&NO_YAKU_HAND, "N", &[]);
+        let reach = case.reach();
+
+        assert_eq!(case.damaten_values(), [DamatenValue::NoYaku]);
+        assert_eq!(reach.damaten_verdict(), Some(DamatenValueVerdict::NoYaku));
+        assert_eq!(reach.reason, ReachDecisionReason::EligibleNoDamatenYaku);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn reaches_when_the_damaten_value_is_below_the_threshold() {
+        // ダマ 3900 は threshold 未満なのでリーチする。
+        let case = damaten_case_with(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1m"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            &[],
+        );
+        let reach = case.reach();
+
+        assert_eq!(case.damaten_totals(), [("6s".to_string(), 4, Some(3900))]);
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::BelowThreshold)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::EligibleLowValue);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn reaches_just_below_the_damaten_threshold() {
+        // threshold 直下のダマ 6400 でもリーチする。7700 は inclusive で、そこに届かない実点数は
+        // すべてリーチ側。
+        let case = damaten_case(&CHIITOITSU_HAND, "2m", &["1m"]);
+        let reach = case.reach();
+
+        assert_eq!(case.damaten_totals(), [("2s".to_string(), 3, Some(6400))]);
+        assert!(case.damaten_totals()[0].2.unwrap() < DAMATEN_MIN_TOTAL);
+        assert_eq!(reach.reason, ReachDecisionReason::EligibleLowValue);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn stays_damaten_at_the_threshold() {
+        // threshold ちょうどのダマ 7700 はダマにする。7700 は inclusive。
+        let case = damaten_case_with(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            &[],
+        );
+        let reach = case.reach();
+
+        assert_eq!(
+            case.damaten_totals(),
+            [("6s".to_string(), 4, Some(DAMATEN_MIN_TOTAL))]
+        );
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::AboveThreshold)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
+        assert!(!reach.should_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn stays_damaten_above_the_threshold() {
+        // ダマ 8000 はダマにする。
+        let case = damaten_case_with(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p", "1m"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            &[],
+        );
+        let reach = case.reach();
+
+        assert_eq!(case.damaten_totals(), [("6s".to_string(), 4, Some(8000))]);
+        assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
+        assert!(!reach.should_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn stays_damaten_on_a_named_yakuman() {
+        // 名前の付いた役満はダマにする。13面待ちでも全ての待ちが役満なので判断は変わらない。
+        let case = damaten_case(&KOKUSHI_HAND, "5m", &[]);
+        let reach = case.reach();
+
+        assert_eq!(case.damaten_totals().len(), 13);
+        assert!(
+            case.damaten_values()
+                .iter()
+                .all(|value| value.is_yakuman() && value.meets_threshold() == Some(true))
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
+        assert!(!reach.should_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn reaches_when_a_mixed_wait_is_below_the_threshold() {
+        // 待ちごとに打点が違う場合、平均や期待値を取らずに1つでも threshold 未満ならリーチする。
+        let case = damaten_case(&PINFU_TANYAO_HAND, "N", &["1m"]);
+        let reach = case.reach();
+
+        assert_eq!(
+            case.damaten_totals(),
+            [
+                ("3s".to_string(), 3, Some(7700)),
+                ("6s".to_string(), 4, Some(3900)),
+            ]
+        );
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::BelowThreshold)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::EligibleLowValue);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn stays_damaten_when_every_mixed_wait_reaches_the_threshold() {
+        // 打点が違っても全ての待ちが threshold 以上ならダマにする。
+        let case = damaten_case(&PINFU_TANYAO_HAND, "N", &["1p"]);
+        let reach = case.reach();
+
+        assert_eq!(
+            case.damaten_totals(),
+            [
+                ("3s".to_string(), 3, Some(8000)),
+                ("6s".to_string(), 4, Some(7700)),
+            ]
+        );
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::AboveThreshold)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
+        assert!(!reach.should_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn reaches_when_only_the_black_five_is_below_the_threshold() {
+        // 赤5と黒5は別 variant として同じ規則を適用する。黒であがると threshold 未満なので、
+        // 赤であがれば足りていてもリーチする。
+        let case = damaten_case(&RED_FIVE_TANKI_HAND, "N", &["1m", "1p"]);
+        let reach = case.reach();
+
+        assert_eq!(
+            case.damaten_totals(),
+            [
+                ("5sr".to_string(), 1, Some(8000)),
+                ("5s".to_string(), 2, Some(5200)),
+            ]
+        );
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::BelowThreshold)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::EligibleLowValue);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn reaches_on_a_scarce_wait_below_the_damaten_threshold() {
+        // 待ち枚数の threshold をダマ打点より先に適用しない。1～2枚待ちでもダマが安ければリーチ
+        // する。
+        let case = damaten_case_with(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &[],
+            &["3s", "3s", "6s", "6s", "6s"],
+            &[],
+        );
+        let reach = case.reach();
+
+        assert_eq!(reach.tsumo_remaining(), Some(2));
+        assert!(reach.tsumo_remaining().expect("テンパイ") < REACH_MIN_REMAINING);
+        assert_eq!(
+            case.damaten_totals(),
+            [
+                ("3s".to_string(), 1, Some(3900)),
+                ("6s".to_string(), 1, Some(2000)),
+            ]
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::EligibleLowValue);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn does_not_reach_without_a_live_wait() {
+        // 待ちが1枚も残っていなければ、ダマ打点を問わずリーチしない。
+        let case = damaten_case_with(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p"],
+            &["3s", "3s", "3s", "6s", "6s", "6s", "6s"],
+            &[],
+        );
+        let reach = case.reach();
+
+        assert_eq!(reach.shanten_after_discard, Some(0));
+        assert_eq!(reach.tsumo_remaining(), Some(0));
+        assert_eq!(case.damaten_totals(), []);
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::NoLiveWait)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::NoLiveWait);
+        assert!(!reach.should_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn furiten_keeps_the_existing_reach_policy() {
+        // フリテンではダマ打点の policy を適用せず、待ち枚数だけを見る既存判断を維持する。
+        // 同じ手牌・同じドラでも、フリテンでなければダマにする打点である。
+        let case = damaten_case_with(&PINFU_TANYAO_HAND, "N", &["1p"], &[], &["6s"]);
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.can_ron(), Some(false));
+        assert_eq!(reach.damaten_value, None);
+        assert_eq!(reach.damaten_verdict(), None);
+        assert!(!reach.used_damaten_value());
+        assert!(reach.tsumo_remaining().expect("テンパイ") >= REACH_MIN_REMAINING);
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+
+        let not_furiten = damaten_case(&PINFU_TANYAO_HAND, "N", &["1p"]);
+        assert_eq!(
+            not_furiten.reach().reason,
+            ReachDecisionReason::HighValueDamaten
+        );
+    }
+
+    #[test]
+    fn an_unknown_ron_availability_keeps_the_existing_reach_policy() {
+        // ロン可否が unknown の場合、非フリテンだと推測してダマ打点の policy を適用しない。
+        let case = damaten_case(&PINFU_TANYAO_HAND, "N", &["1p"]);
+        let ctx = case
+            .ctx
+            .clone()
+            .with_history_furiten_facts(HistoryFuritenFacts::default());
+        let reach = reach_diagnostic(&ctx, &case.actions);
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert_eq!(reach.can_ron(), None);
+        assert_eq!(reach.damaten_value, None);
+        assert!(!reach.used_damaten_value());
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert!(reach.should_reach());
+    }
+
+    #[test]
+    fn damaten_value_uses_the_selected_discard_wait_and_the_known_dora() {
+        // ダマ打点は選択済み打牌の受け入れそのものを待ちとして使い、リーチ用に待ちを求め直さない。
+        let case = damaten_case(&PINFU_TANYAO_HAND, "N", &["1m"]);
+        let reach = case.reach();
+        let tenpai_wait = reach.tenpai_wait.as_ref().expect("テンパイ");
+        let damaten = case.damaten();
+
+        assert_eq!(reach.selected_discard, Some(case.tsumogiri.clone()));
+        assert_eq!(
+            damaten
+                .waits
+                .iter()
+                .map(|wait| wait.winning_tile)
+                .collect::<Vec<_>>(),
+            tenpai_wait.live_waits
+        );
+        assert_eq!(
+            damaten.waits.iter().map(|wait| wait.remaining).sum::<u8>(),
+            tenpai_wait.tsumo_remaining
+        );
+        // 待ち全体の残枚数は赤 / 黒の内訳の合計と一致する。
+        for wait in &damaten.waits {
+            assert_eq!(
+                wait.winning_tiles
+                    .iter()
+                    .map(|winning_tile| winning_tile.remaining)
+                    .sum::<u8>(),
+                wait.remaining
+            );
+        }
+        assert!(reach.used_damaten_value());
     }
 
     #[test]
