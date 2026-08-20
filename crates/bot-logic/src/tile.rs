@@ -6,6 +6,8 @@ pub enum TileParseError {
     InvalidMjaiString(String),
 }
 
+const COPIES_PER_TILE_TYPE: u8 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suit {
     Man,
@@ -217,6 +219,14 @@ impl TileId {
         matches!(self.0, 16 | 52 | 88)
     }
 
+    /// 牌種ごとの物理牌4枚。赤5がある牌種では赤5が先頭になる。
+    ///
+    /// 牌種だけでは赤5と黒5を区別できないため、牌種から物理牌へ戻す必要がある場合に使う。
+    pub fn copies(tile_type: TileType) -> impl Iterator<Item = Self> {
+        (0..COPIES_PER_TILE_TYPE)
+            .filter_map(move |copy| Self::new(tile_type.raw() * COPIES_PER_TILE_TYPE + copy))
+    }
+
     pub fn to_mjai_string(self) -> String {
         let mut s = self.tile_type().to_mjai_string();
         if self.is_red() {
@@ -271,6 +281,10 @@ mod tests {
         TileId::new(value).unwrap()
     }
 
+    fn ids(values: &[u8]) -> Vec<TileId> {
+        values.iter().map(|&value| id(value)).collect()
+    }
+
     #[test]
     fn tile_type_new_accepts_valid_range() {
         assert!(TileType::new(0).is_some());
@@ -308,6 +322,33 @@ mod tests {
         assert!(id(52).is_red());
         assert!(id(88).is_red());
         assert!(!id(17).is_red());
+    }
+
+    #[test]
+    fn copies_lists_every_physical_tile_of_a_tile_type() {
+        assert_eq!(
+            TileId::copies(tt(0)).collect::<Vec<_>>(),
+            ids(&[0, 1, 2, 3])
+        );
+        assert_eq!(
+            TileId::copies(tt(4)).collect::<Vec<_>>(),
+            ids(&[16, 17, 18, 19])
+        );
+        assert_eq!(
+            TileId::copies(tt(33)).collect::<Vec<_>>(),
+            ids(&[132, 133, 134, 135])
+        );
+    }
+
+    #[test]
+    fn copies_puts_the_red_five_first() {
+        for tile_type in [tt(4), tt(13), tt(22)] {
+            let copies: Vec<TileId> = TileId::copies(tile_type).collect();
+            assert_eq!(
+                copies.iter().map(|copy| copy.is_red()).collect::<Vec<_>>(),
+                vec![true, false, false, false]
+            );
+        }
     }
 
     #[test]

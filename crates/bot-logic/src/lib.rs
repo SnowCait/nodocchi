@@ -17,6 +17,7 @@ pub mod payment;
 pub mod scoring_selection;
 pub mod selection;
 pub mod shanten;
+pub mod tenpai_hand_value;
 pub mod tile;
 pub mod tile_counts;
 pub mod winning_context;
@@ -103,6 +104,11 @@ pub use shanten::{
     EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,
     calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     standard_shanten_with_fixed_melds,
+};
+pub use tenpai_hand_value::{
+    TenpaiCompletedHands, TenpaiHandValueError, TenpaiHandValueProfile, TenpaiWaitCompletedHand,
+    TenpaiWaitHandValue, WinningTileCompletedHand, WinningTileHandValue,
+    evaluate_tenpai_hand_value, tenpai_completed_hands,
 };
 pub use tile::{
     Dragon, Suit, TileId, TileParseError, TileType, VisibleTile, count_dora, count_indicated_dora,
