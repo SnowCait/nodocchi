@@ -19,6 +19,7 @@ use crate::open_hand_defense::{
     OpenHandDefenseCategory, OpenHandDefenseDiagnostic, high_open_hand_threat_players,
     select_open_hand_defense_fallback_action_with_kind,
 };
+use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -362,6 +363,14 @@ pub struct ShantenDecisionDiagnostic {
     /// 1向聴の weighted tenpai wait もこの枝評価から集計するが、集計対象と集計規則は選択専用
     /// 経路と同じなので結果は一致する。`act()` の経路では構築しない。
     pub normal_discard_lookahead: Option<LookaheadDiagnostic>,
+    /// `normal_discard_lookahead` の各枝が選んだ2手目打牌の先にあるテンパイの将来打点。
+    /// 2手先診断を構築した場合だけ持ち、同じ候補集合・同じ順序になる。
+    ///
+    /// 評価対象は既存 lookahead が既存 comparator で選んだ `next_discard` そのもので、打点を見て
+    /// 選び直さない。テンパイ枝についてはダマ / リーチ両方の baseline で評価し、未来時点で
+    /// リーチが合法かどうかもリーチするかどうかも決めない。打牌選択・押し引き・リーチ判断の
+    /// どれにも使わない解析専用の情報で、構築の有無は選択結果を変えない。
+    pub normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
     /// 押し引き判定に使った入力。`push_pull_inputs_from_context_with_evaluation()` の実結果。
     pub push_pull_inputs: Option<PushPullInputs>,
     /// 押し引き判定の結果。`decide_push_pull()` の実結果。
@@ -481,6 +490,7 @@ struct DecisionDiagnostics {
     normal_discard: Option<DiscardDecisionDiagnostic>,
     normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
     normal_discard_lookahead: Option<LookaheadDiagnostic>,
+    normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
     defense: Option<DefenseDecisionDiagnostic>,
 }
 
@@ -581,6 +591,7 @@ impl ShantenAgent {
             normal_discard_furiten: diagnostics.normal_discard_furiten,
             history_furiten: context.history_furiten(),
             normal_discard_lookahead: diagnostics.normal_discard_lookahead,
+            normal_discard_lookahead_value: diagnostics.normal_discard_lookahead_value,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
             reach: decision.reach,
@@ -744,6 +755,7 @@ impl ShantenAgent {
         diagnostics.normal_discard = Some(selection.diagnostic);
         diagnostics.normal_discard_furiten = Some(selection.furiten);
         diagnostics.normal_discard_lookahead = selection.lookahead;
+        diagnostics.normal_discard_lookahead_value = selection.lookahead_value;
         selection.selection
     }
 
@@ -4696,10 +4708,15 @@ pub(crate) mod tests {
             with.normal_discard_lookahead.is_some(),
             "2手先診断が構築されていない"
         );
-        // 2手先以外の診断はすべて既定の診断と一致する。
+        assert!(
+            with.normal_discard_lookahead_value.is_some(),
+            "2手先の将来打点が構築されていない"
+        );
+        // 2手先とその将来打点以外の診断はすべて既定の診断と一致する。
         assert_eq!(
             ShantenDecisionDiagnostic {
                 normal_discard_lookahead: None,
+                normal_discard_lookahead_value: None,
                 ..with
             },
             without
