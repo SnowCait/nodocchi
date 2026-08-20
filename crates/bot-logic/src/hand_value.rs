@@ -107,14 +107,29 @@ pub fn evaluate_hand_value<'a>(
     dora_indicators: &[TileId],
     ura_dora_indicators: Option<&[TileId]>,
 ) -> Result<HandValueOutcome<'a>, HandValueError> {
-    let normal_candidates = evaluate_normal_hand_scoring(
+    let normal_scoring = evaluate_normal_hand_scoring(
         analysis,
         context,
         winning_tile,
         dora_indicators,
         ura_dora_indicators,
-    )?;
-    let yakuman_candidates = evaluate_yakuman_scoring(analysis, context, winning_tile)?;
+    );
+    let yakuman_candidates = match evaluate_yakuman_scoring(analysis, context, winning_tile) {
+        Ok(candidates) => candidates,
+        Err(yakuman_error) => {
+            return Err(match normal_scoring {
+                Err(normal_error) => normal_error.into(),
+                Ok(_) => yakuman_error.into(),
+            });
+        }
+    };
+    let normal_candidates = match normal_scoring {
+        Ok(candidates) => candidates,
+        Err(NormalScoringError::IncompleteContext(_)) if !yakuman_candidates.is_empty() => {
+            Vec::new()
+        }
+        Err(normal_error) => return Err(normal_error.into()),
+    };
 
     Ok(
         match select_best_scoring_candidate(&normal_candidates, &yakuman_candidates) {
@@ -262,6 +277,10 @@ mod tests {
 
     fn tsumo() -> WinningContext {
         known_context(WinMethod::Tsumo)
+    }
+
+    fn yakuman_only_context(win_method: WinMethod) -> WinningContext {
+        WinningContext::new(win_method).with_seat_wind(Some(tile_type("S")))
     }
 
     fn riichi(context: WinningContext) -> WinningContext {
@@ -471,6 +490,53 @@ mod tests {
         assert_eq!(
             candidate.payment().map(|payment| payment.total()),
             Some(8000)
+        );
+    }
+
+    #[test]
+    fn a_named_yakuman_does_not_need_the_normal_exact_context() {
+        let setup = hand(&KOKUSHI_HAND);
+        let context = yakuman_only_context(WinMethod::Ron);
+
+        assert_eq!(
+            evaluate_normal_hand_scoring(&setup.analysis, context, tile_type("9m"), &[], None),
+            Err(NormalScoringError::IncompleteContext(
+                MissingScoringFact::RoundWind
+            ))
+        );
+
+        let outcome = setup.outcome(context, "9m", None);
+        let hand_value = outcome.known().unwrap();
+
+        assert!(hand_value.is_yakuman());
+        assert_eq!(
+            hand_value
+                .yakuman()
+                .unwrap()
+                .multiplier_of(Yakuman::KokushiMusou),
+            Some(1)
+        );
+        assert_eq!(
+            hand_value.payment().map(|payment| payment.total()),
+            Some(32000)
+        );
+    }
+
+    #[test]
+    fn a_normal_only_hand_still_needs_the_normal_exact_context() {
+        let setup = hand(&PINFU_TANYAO_HAND);
+        let context = yakuman_only_context(WinMethod::Ron);
+
+        assert_eq!(
+            setup.yakuman_candidates(context, "2m"),
+            [],
+            "the tolerated context shortage needs a hand without a named yakuman"
+        );
+        assert_eq!(
+            evaluate_hand_value(&setup.analysis, context, tile_type("2m"), &[], None),
+            Err(HandValueError::NormalScoring(
+                NormalScoringError::IncompleteContext(MissingScoringFact::RoundWind)
+            ))
         );
     }
 

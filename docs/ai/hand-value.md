@@ -69,7 +69,6 @@
 - 支払点を第一比較軸とする candidate の比較
 - 裏ドラが未観測で最良候補を確定できない状態
 - 完成手からの確定した `HandValue` (`evaluate_hand_value()`)
-- 選択された候補を owned に保持する `HandValue`
 
 未実装:
 
