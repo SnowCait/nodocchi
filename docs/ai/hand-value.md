@@ -68,6 +68,8 @@
 - 通常手と named 役満の candidate からの最良候補の選択 (`select_best_scoring_candidate()`)
 - 支払点を第一比較軸とする candidate の比較
 - 裏ドラが未観測で最良候補を確定できない状態
+- 完成手からの確定した `HandValue` (`evaluate_hand_value()`)
+- 選択された候補を owned に保持する `HandValue`
 
 未実装:
 
@@ -76,8 +78,6 @@
 - 人和の特殊 scoring
 - 責任払い (包)
 - 本場 / 供託
-- 確定した点数
-- 確定した `HandValue`
 
 役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) ([WRC Rules 2025 PDF](https://static1.squarespace.com/static/634a7884c297a25f06589b79/t/6834d67360e19c1da6c0d12c/1748293243651/WRC+Rules+2025.pdf) の `11.5 Yaku list`) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
 
@@ -950,7 +950,7 @@ bonus 翻は通常役由来の翻数へ混ぜません。通常役の翻数合�
 
 役満が成立している手でもドラの枚数は物理牌の事実として数えますが、役満へドラを上乗せせず、役満を翻数へ換算せず、bonus 翻で役満の倍率を変えません。
 
-翻数 + 符から基本点と limit を求める layer は [基本点と limit](#基本点と-limit) にありますが、bonus 翻を通常役由来の翻数へ合成する処理はそこにも含みません。通常役の翻数と bonus 翻の統合、符との統合、確定した点数と `HandValue` は [実装済みと未実装](#実装済みと未実装) のとおり未実装です。
+翻数 + 符から基本点と limit を求める layer は [基本点と limit](#基本点と-limit) にありますが、bonus 翻を通常役由来の翻数へ合成する処理はそこにも含みません。通常役の翻数と bonus 翻の統合、符との統合、確定した点数と `HandValue` は後続 layer が扱います。
 
 ### production policy へは接続しない
 
@@ -1107,7 +1107,7 @@ base payment の合計
 
 表現できない点数を silent に飽和させず、正しい支払いを求められない入力に対して点数を返しません。
 
-確定した `HandValue` は引き続き未実装です。
+確定した `HandValue` の組み立ては後続 layer が扱います。
 
 ### production policy へは接続しない
 
