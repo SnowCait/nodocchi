@@ -42,10 +42,16 @@
 //! 場合は、推測で平均を作らず [`OffenseValue::Unknown`] にする。役なし
 //! ([`HandValueOutcome::NoCandidate`](bot_logic::HandValueOutcome::NoCandidate)) も機械的に0点として
 //! 平均へ入れない。
+//!
+//! ダマのまま進む手の打点はロン和了を前提にした baseline なので、ダマでロンできると確定した
+//! 場合しか使えない。ロン可否は既存のフリテン診断
+//! ([`TenpaiWaitAvailability::can_ron`](bot_logic::TenpaiWaitAvailability::can_ron)) が source of
+//! truth で、恒常フリテンだけでなく同巡内フリテン・リーチ後見逃しも統合した結論になる。どれで
+//! 落ちても同じく [`OffenseValue::Unknown`] にし、ロンできないことを0点として扱わない。
 
 use bot_logic::{
     DiscardEvaluation, HandValue, Payment, RiichiStatus, TenpaiHandValueProfile,
-    TenpaiWaitAvailability, WinMethod, WinningContext, evaluate_tenpai_hand_value,
+    TenpaiWaitAvailability, TileId, WinMethod, WinningContext, evaluate_tenpai_hand_value,
 };
 
 use crate::action::LegalAction;
@@ -66,7 +72,7 @@ const BASELINE_IPPATSU: bool = false;
 const BASELINE_CHANKAN: bool = false;
 
 // リーチ baseline の裏ドラ表示牌。未観測ではなく「観測済みで0枚」として渡す。
-const BASELINE_URA_DORA_INDICATORS: &[bot_logic::TileId] = &[];
+const BASELINE_URA_DORA_INDICATORS: &[TileId] = &[];
 
 /// 攻撃を継続した場合に選ぶ攻撃モード。
 ///
@@ -156,8 +162,8 @@ pub fn reach_baseline_context(context: &GameContext) -> WinningContext {
 /// (ダマでロンできると確定していること) も同じで、そこが満たされない場合は非フリテンだとも
 /// ダマ打点が十分だとも推測せず、待ち枚数だけを見る既存判断へ落ちる。
 ///
-/// 打牌後の手牌を組み立てられない場合や、生きた variant の一部でも支払いを確定できない場合は
-/// [`OffenseValue::Unknown`] になる。推測で平均を作らない。
+/// 打牌後の手牌を組み立てられない場合、ダマのままではロンできない場合、生きた variant の一部でも
+/// 支払いを確定できない場合は [`OffenseValue::Unknown`] になる。推測で平均を作らない。
 pub(crate) fn evaluate_tenpai_offense_value(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
@@ -167,10 +173,13 @@ pub(crate) fn evaluate_tenpai_offense_value(
     let reach_legal = legal_actions
         .iter()
         .any(|action| matches!(action, LegalAction::Reach));
+    // ロン可否は既存のフリテン診断が source of truth。恒常フリテン・同巡内フリテン・リーチ後
+    // 見逃しを統合した結論で、押し引き側でフリテンを判定し直さない。
+    let can_ron = wait_availability.can_ron() == Some(true);
     let hands = tenpai_completed_hands_after_discard(context, evaluation, wait_availability);
 
     // ダマでロンできると確定した場合だけダマ打点を評価する。既存リーチ判断と同じ入口条件。
-    let damaten_verdict = (wait_availability.can_ron() == Some(true))
+    let damaten_verdict = can_ron
         .then(|| {
             hands
                 .as_ref()
@@ -189,25 +198,35 @@ pub(crate) fn evaluate_tenpai_offense_value(
         TenpaiOffenseMode::Damaten
     };
 
-    let (baseline, ura_dora_indicators) = match mode {
-        TenpaiOffenseMode::Reach => (
-            reach_baseline_context(context),
-            Some(BASELINE_URA_DORA_INDICATORS),
-        ),
-        TenpaiOffenseMode::Damaten => (damaten_baseline_context(context), None),
-    };
-
-    let value = hands.as_ref().map_or(OffenseValue::Unknown, |hands| {
-        let profile = evaluate_tenpai_hand_value(
-            hands,
-            baseline,
-            context.dora_indicators(),
-            ura_dora_indicators,
-        );
-        offense_value(&profile)
-    });
+    let value = scoring_inputs(context, mode, can_ron)
+        .zip(hands.as_ref())
+        .map_or(OffenseValue::Unknown, |((baseline, ura_dora), hands)| {
+            let profile =
+                evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
+            offense_value(&profile)
+        });
 
     TenpaiOffenseValue { mode, value }
+}
+
+/// 攻撃モードごとの hypothetical baseline と裏ドラ表示牌。打点を確定できない場合は `None`。
+///
+/// ダマのまま進む手の打点はロン和了を前提にした baseline なので、ダマでロンできると確定した
+/// 場合しか使えない。恒常フリテン・同巡内フリテン・リーチ後見逃しのどれで落ちても同じで、
+/// ロンできない打点を「ダマの確定打点」として押し引きへ渡さない。ロンできないことを0点とも
+/// 扱わず、打点を使わない既存判断へ委ねる。
+fn scoring_inputs(
+    context: &GameContext,
+    mode: TenpaiOffenseMode,
+    can_ron: bool,
+) -> Option<(WinningContext, Option<&'static [TileId]>)> {
+    match mode {
+        TenpaiOffenseMode::Reach => Some((
+            reach_baseline_context(context),
+            Some(BASELINE_URA_DORA_INDICATORS),
+        )),
+        TenpaiOffenseMode::Damaten => can_ron.then(|| (damaten_baseline_context(context), None)),
+    }
 }
 
 /// 待ちごとの評価結果を、生きた variant の残枚数で加重平均した1つの値へ畳む。
@@ -263,7 +282,7 @@ fn weighted_average(variants: impl Iterator<Item = (Option<u32>, u8)>) -> Offens
 mod tests {
     use super::*;
 
-    use bot_logic::{HistoryFuritenFacts, TileId, TileType};
+    use bot_logic::{HistoryFuritenFacts, TileType};
 
     use crate::discard_selection::{
         select_discard_action_with_evaluation, selected_discard_tenpai_wait_availability,
@@ -417,12 +436,34 @@ mod tests {
     impl OffenseCase {
         // 通常打牌 selection が選んだ打牌後テンパイの攻撃打点。production と同じ経路で求める。
         fn value(&self) -> TenpaiOffenseValue {
-            let selection = select_discard_action_with_evaluation(&self.ctx, &self.actions);
+            assert_eq!(self.can_ron(), Some(true), "ダマでロンできる局面である");
+            self.value_with_actions(&self.actions)
+        }
+
+        // 合法 action を差し替えて評価する。ロン可否は確認せず、そのまま production 経路へ渡す。
+        fn value_with_actions(&self, actions: &[LegalAction]) -> TenpaiOffenseValue {
+            let selection = select_discard_action_with_evaluation(&self.ctx, actions);
             let evaluation = selection.evaluation.expect("通常打牌を選べる");
             let wait = selected_discard_tenpai_wait_availability(&self.ctx, &evaluation)
                 .expect("打牌後がテンパイである");
-            assert_eq!(wait.can_ron(), Some(true), "ダマでロンできる局面である");
-            evaluate_tenpai_offense_value(&self.ctx, &evaluation, &wait, &self.actions)
+            evaluate_tenpai_offense_value(&self.ctx, &evaluation, &wait, actions)
+        }
+
+        fn can_ron(&self) -> Option<bool> {
+            let selection = select_discard_action_with_evaluation(&self.ctx, &self.actions);
+            let evaluation = selection.evaluation.expect("通常打牌を選べる");
+            selected_discard_tenpai_wait_availability(&self.ctx, &evaluation)
+                .expect("打牌後がテンパイである")
+                .can_ron()
+        }
+
+        // Reach を取り除いた合法 action。
+        fn actions_without_reach(&self) -> Vec<LegalAction> {
+            self.actions
+                .iter()
+                .filter(|action| !matches!(action, LegalAction::Reach))
+                .cloned()
+                .collect()
         }
     }
 
@@ -435,6 +476,25 @@ mod tests {
         drawn: &str,
         dora_indicators: &[&str],
         extra_visible: &[&str],
+    ) -> OffenseCase {
+        offense_case_with_furiten(
+            hand,
+            drawn,
+            dora_indicators,
+            extra_visible,
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+        )
+    }
+
+    fn offense_case_with_furiten(
+        hand: &[&str],
+        drawn: &str,
+        dora_indicators: &[&str],
+        extra_visible: &[&str],
+        history_furiten: HistoryFuritenFacts,
     ) -> OffenseCase {
         let mut source = TileIdSource::new();
         let hand_tiles = source.tiles(hand);
@@ -468,10 +528,7 @@ mod tests {
             Default::default(),
             [false; 4],
         )
-        .with_history_furiten_facts(HistoryFuritenFacts {
-            same_turn: Some(false),
-            riichi_missed_win: Some(false),
-        });
+        .with_history_furiten_facts(history_furiten);
 
         OffenseCase { ctx, actions }
     }
@@ -646,21 +703,69 @@ mod tests {
     fn an_illegal_reach_values_the_tenpai_as_damaten() {
         // 合法 Reach が無ければ攻撃継続してもダマのままなので、ダマ打点で評価する。
         let case = offense_case(&NO_YAKU_HAND, "N", &[]);
-        let without_reach: Vec<LegalAction> = case
-            .actions
-            .iter()
-            .filter(|action| !matches!(action, LegalAction::Reach))
-            .cloned()
-            .collect();
-
-        let selection = select_discard_action_with_evaluation(&case.ctx, &without_reach);
-        let evaluation = selection.evaluation.expect("通常打牌を選べる");
-        let wait = selected_discard_tenpai_wait_availability(&case.ctx, &evaluation)
-            .expect("打牌後がテンパイである");
-        let value = evaluate_tenpai_offense_value(&case.ctx, &evaluation, &wait, &without_reach);
+        let value = case.value_with_actions(&case.actions_without_reach());
 
         assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
         // ダマでは役が無いので打点を確定できない。役なしを0点として扱わない。
+        assert_eq!(value.value, OffenseValue::Unknown);
+    }
+
+    #[test]
+    fn an_illegal_reach_keeps_the_damaten_value_when_ron_is_available() {
+        // 合法 Reach が無くても、ダマでロンできると確定していればダマ打点をそのまま使える。
+        let case = offense_case_with(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+        );
+        assert_eq!(case.can_ron(), Some(true));
+
+        let value = case.value_with_actions(&case.actions_without_reach());
+        assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(value.value.average_total(), Some(7700));
+    }
+
+    #[test]
+    fn a_damaten_tenpai_that_cannot_ron_keeps_the_value_unknown() {
+        // 恒常フリテンではないが、リーチ後の見逃しでロンできないテンパイ。ダマ打点は
+        // ロン和了を前提にした値なので、7700 と確定できても攻撃打点としては使わない。
+        let case = offense_case_with_furiten(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(true),
+            },
+        );
+        assert_eq!(case.can_ron(), Some(false));
+
+        let value = case.value_with_actions(&case.actions_without_reach());
+        assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(value.value, OffenseValue::Unknown);
+        // ロンできないことを0点として扱わない。
+        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), None);
+    }
+
+    #[test]
+    fn a_damaten_tenpai_with_unknown_ron_keeps_the_value_unknown() {
+        // ロン可否が unknown な局面でも、ロンできると推測してダマ打点を使わない。
+        let case = offense_case_with_furiten(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            HistoryFuritenFacts {
+                same_turn: None,
+                riichi_missed_win: None,
+            },
+        );
+        assert_eq!(case.can_ron(), None);
+
+        let value = case.value_with_actions(&case.actions_without_reach());
+        assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
         assert_eq!(value.value, OffenseValue::Unknown);
     }
 }

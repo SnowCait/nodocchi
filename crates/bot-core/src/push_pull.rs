@@ -1852,6 +1852,29 @@ mod tests {
         dora_indicators: &[&str],
         extra_visible: &[&str],
     ) -> PushPullInputs {
+        exact_value_inputs_with(
+            hand,
+            drawn,
+            dora_indicators,
+            extra_visible,
+            true,
+            bot_logic::HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+        )
+    }
+
+    // `reach_legal` は合法 action に Reach を含めるか。`history_furiten` は現在時点の履歴依存
+    // フリテンで、打牌後のロン可否は既存経路が補正する。
+    fn exact_value_inputs_with(
+        hand: &[&str],
+        drawn: &str,
+        dora_indicators: &[&str],
+        extra_visible: &[&str],
+        reach_legal: bool,
+        history_furiten: bot_logic::HistoryFuritenFacts,
+    ) -> PushPullInputs {
         let mut source = ExactValueTileSource::new();
         let hand_tiles = source.tiles(hand);
         let drawn_tile = source.tile(drawn);
@@ -1869,7 +1892,7 @@ mod tests {
             .iter()
             .chain([&drawn_tile])
             .map(|&tile| LegalAction::Dahai { tile })
-            .chain([LegalAction::Reach])
+            .chain(reach_legal.then_some(LegalAction::Reach))
             .collect();
 
         let context = GameContext::from_parts_with_table_state(
@@ -1884,10 +1907,7 @@ mod tests {
             Default::default(),
             [false, true, false, false],
         )
-        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
-            same_turn: Some(false),
-            riichi_missed_win: Some(false),
-        });
+        .with_history_furiten_facts(history_furiten);
 
         push_pull_inputs_from_context(&context, &actions)
     }
@@ -2004,6 +2024,95 @@ mod tests {
             3
         );
         assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_damaten_tenpai_that_cannot_ron_falls_back_to_the_six_live_wait_boundary() {
+        // 恒常フリテンではないが、リーチ後の見逃しでロンできないテンパイ。ダマ打点はロン和了を
+        // 前提にした値なので、7700 と確定できる手でも攻撃打点としては使わず既存 policy へ落ちる。
+        for extra_visible in [
+            // 6s 待ち4枚。
+            vec!["3s", "3s", "3s"],
+            // 6s 待ち3枚。
+            vec!["3s", "3s", "3s", "6s"],
+        ] {
+            let inputs = exact_value_inputs_with(
+                &HIGH_VALUE_HAND,
+                "N",
+                &["1p"],
+                &extra_visible,
+                false,
+                bot_logic::HistoryFuritenFacts {
+                    same_turn: Some(false),
+                    riichi_missed_win: Some(true),
+                },
+            );
+            let offense = inputs.offense.expect("攻撃評価がある");
+            let wait = offense
+                .tenpai_wait_after_discard
+                .expect("テンパイの待ち facts がある");
+            let value = offense
+                .tenpai_offense_value_after_discard
+                .expect("攻撃打点を評価している");
+
+            assert_eq!(wait.permanent_furiten, PermanentFuriten::No);
+            assert_eq!(wait.can_ron, Some(false));
+            assert!((3..=4).contains(&wait.tsumo_remaining));
+
+            assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
+            assert_eq!(value.value, OffenseValue::Unknown);
+            assert_eq!(offense.tenpai_offense_value_is_high(), None);
+            assert_eq!(
+                offense.strong_tenpai_min_remaining(),
+                Some(STRONG_TENPAI_MIN_REMAINING)
+            );
+
+            assert_decision(
+                &inputs,
+                PushPullMode::Fold,
+                PushPullReason::WeakTenpaiAgainstReach,
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaten_tenpai_with_unknown_ron_falls_back_to_the_six_live_wait_boundary() {
+        // ロン可否が unknown な局面でも、ロンできると推測してダマ打点を使わない。
+        let inputs = exact_value_inputs_with(
+            &HIGH_VALUE_HAND,
+            "N",
+            &["1p"],
+            &["3s", "3s", "3s"],
+            false,
+            bot_logic::HistoryFuritenFacts {
+                same_turn: None,
+                riichi_missed_win: None,
+            },
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+        let wait = offense
+            .tenpai_wait_after_discard
+            .expect("テンパイの待ち facts がある");
+
+        assert_eq!(wait.permanent_furiten, PermanentFuriten::No);
+        assert_eq!(wait.can_ron, None);
+        assert_eq!(
+            offense
+                .tenpai_offense_value_after_discard
+                .expect("攻撃打点を評価している")
+                .value,
+            OffenseValue::Unknown
+        );
+        assert_eq!(
+            offense.strong_tenpai_min_remaining(),
+            Some(STRONG_TENPAI_MIN_REMAINING)
+        );
 
         assert_decision(
             &inputs,
