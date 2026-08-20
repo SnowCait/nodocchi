@@ -46,7 +46,7 @@ use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
 
 // フリテンを判定する向聴数。テンパイ形の待ちだけを対象にする。
-const TENPAI_SHANTEN: i8 = 0;
+pub(crate) const TENPAI_SHANTEN: i8 = 0;
 
 /// 過去の action 履歴に依存するフリテンの観測事実。
 ///
