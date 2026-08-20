@@ -36,6 +36,7 @@ use bot_logic::{
 };
 
 use crate::context::GameContext;
+use crate::discard_selection::concealed_tiles_after_discard;
 
 /// ダマのままで良いと判断する [`Payment::total`] の下限 [点]。inclusive。
 ///
@@ -217,25 +218,6 @@ pub(crate) fn evaluate_damaten_value(
         waits,
         verdict,
     })
-}
-
-// 打牌後13枚の物理牌。選択済み打牌の牌種と赤5かどうかに一致する物理牌を1枚だけ取り除く。
-// 一致する物理牌が無ければ、別の牌で代用せず None にする。
-fn concealed_tiles_after_discard(
-    context: &GameContext,
-    evaluation: &DiscardEvaluation,
-) -> Option<Vec<TileId>> {
-    let mut tiles: Vec<TileId> = context
-        .hand_tiles()
-        .iter()
-        .copied()
-        .chain(context.drawn_tile())
-        .collect();
-    let discarded = tiles.iter().position(|tile| {
-        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
-    })?;
-    tiles.swap_remove(discarded);
-    Some(tiles)
 }
 
 fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<DamatenWaitValue> {

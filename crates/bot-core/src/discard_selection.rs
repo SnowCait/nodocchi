@@ -283,6 +283,33 @@ pub(crate) fn selected_discard_tenpai_wait_availability(
     )
 }
 
+/// 打牌候補1件について、その打牌を1枚だけ除いた打牌後 concealed hand の物理牌一覧を返す。
+///
+/// 手牌とツモ牌を結合した物理牌一覧から、`evaluation.discard` の牌種かつ
+/// `evaluation.discards_red_five` の赤フラグと一致する物理牌を1枚だけ除く。赤5と通常5では打点も
+/// 押し引きの評価も変わるため、牌種だけでなく赤フラグも一致させる。一致する物理牌が無ければ、
+/// 別の牌で代用せず `None`。
+///
+/// 打牌後の手牌を必要とする経路 (押し引きの打点 proxy・ダマ打点) はこの1本を共有し、同じ組み立てを
+/// 複製しない。除去は1枚だけで、残りの牌の並びには意味を持たせない。
+pub(crate) fn concealed_tiles_after_discard(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+) -> Option<Vec<TileId>> {
+    let mut tiles: Vec<TileId> = context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(context.drawn_tile())
+        .collect();
+
+    let discarded = tiles.iter().position(|tile| {
+        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
+    })?;
+    tiles.remove(discarded);
+    Some(tiles)
+}
+
 // 絞り込み済みの合法候補集合から詳細な2手先診断を構築する。要求された場合だけ構築する。
 //
 // 現在打牌後の受け入れは既存評価 (legal.evaluations) が持つ値をそのまま入力にするため、
@@ -2123,5 +2150,120 @@ pub(crate) mod tests {
         assert_eq!(with_diagnostic.selection.evaluation, None);
         assert_eq!(with_diagnostic.diagnostic.selected, None);
         assert!(with_diagnostic.diagnostic.candidates.is_empty());
+    }
+
+    // ---- 打牌後 concealed hand ----
+
+    // 打牌後の手牌の組み立てが読むのは discard 牌種と discards_red_five だけ。他はダミー。
+    fn discard_evaluation(discard: TileType, discards_red_five: bool) -> DiscardEvaluation {
+        let shanten = EffectiveShanten::Concealed(bot_logic::Shanten {
+            standard: 1,
+            chiitoitsu: 6,
+            kokushi: 13,
+        });
+        DiscardEvaluation {
+            discard,
+            count_before_discard: 1,
+            shanten_after_discard: shanten,
+            acceptance_after_discard: bot_logic::Acceptance {
+                current: shanten,
+                tiles: Vec::new(),
+            },
+            shape_penalty: 0,
+            floating_tile_value: 0,
+            discarded_dora_count: 0,
+            discarded_value_honor_count: 0,
+            discards_red_five,
+            discards_isolated_tile: false,
+            standard_iishanten_shape_after_discard: bot_logic::IishantenShape::Unknown,
+        }
+    }
+
+    #[test]
+    fn concealed_tiles_after_discard_removes_one_physical_tile_from_hand_and_draw() {
+        // 手牌とツモ牌を合わせた物理牌から、切る1枚だけを除く。
+        let context = GameContext::from_parts(Some(tile(104)), vec![tile(0), tile(4), tile(5)]);
+        let evaluation = discard_evaluation(tile(4).tile_type(), false);
+
+        let tiles = concealed_tiles_after_discard(&context, &evaluation).expect("一致する物理牌");
+
+        // 同じ牌種を2枚持っていても除くのは1枚だけ。
+        let two_man = tile(4).tile_type();
+        assert_eq!(tiles.len(), 3);
+        assert_eq!(
+            tiles
+                .iter()
+                .filter(|tile| tile.tile_type() == two_man)
+                .count(),
+            1
+        );
+        assert!(tiles.contains(&tile(0)));
+        assert!(tiles.contains(&tile(104)));
+    }
+
+    #[test]
+    fn concealed_tiles_after_discard_can_remove_the_drawn_tile() {
+        let context = GameContext::from_parts(Some(tile(104)), vec![tile(0), tile(4)]);
+        let evaluation = discard_evaluation(tile(104).tile_type(), false);
+
+        let tiles = concealed_tiles_after_discard(&context, &evaluation).expect("一致する物理牌");
+
+        assert_eq!(tiles, vec![tile(0), tile(4)]);
+    }
+
+    #[test]
+    fn concealed_tiles_after_discard_distinguishes_red_and_black_fives() {
+        // 赤5と通常5は同じ牌種なので、赤フラグまで一致させないと切る牌を取り違える。
+        let context = GameContext::from_parts(None, vec![tile(16), tile(17), tile(0)]);
+        let five = tile(16).tile_type();
+
+        let discards_red = concealed_tiles_after_discard(&context, &discard_evaluation(five, true))
+            .expect("赤5が手牌にある");
+        assert!(!discards_red.contains(&tile(16)));
+        assert!(discards_red.contains(&tile(17)));
+
+        let discards_black =
+            concealed_tiles_after_discard(&context, &discard_evaluation(five, false))
+                .expect("通常5が手牌にある");
+        assert!(discards_black.contains(&tile(16)));
+        assert!(!discards_black.contains(&tile(17)));
+    }
+
+    #[test]
+    fn concealed_tiles_after_discard_is_none_without_a_matching_physical_tile() {
+        // 一致する物理牌が無ければ別の牌で代用せず None にする。
+        let black_five_only = GameContext::from_parts(None, vec![tile(17), tile(0)]);
+        assert_eq!(
+            concealed_tiles_after_discard(
+                &black_five_only,
+                &discard_evaluation(tile(16).tile_type(), true)
+            ),
+            None
+        );
+
+        let red_five_only = GameContext::from_parts(None, vec![tile(16), tile(0)]);
+        assert_eq!(
+            concealed_tiles_after_discard(
+                &red_five_only,
+                &discard_evaluation(tile(16).tile_type(), false)
+            ),
+            None
+        );
+
+        assert_eq!(
+            concealed_tiles_after_discard(
+                &black_five_only,
+                &discard_evaluation(tile(104).tile_type(), false)
+            ),
+            None
+        );
+
+        assert_eq!(
+            concealed_tiles_after_discard(
+                &GameContext::default(),
+                &discard_evaluation(tile(0).tile_type(), false)
+            ),
+            None
+        );
     }
 }
