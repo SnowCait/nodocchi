@@ -19,6 +19,7 @@ use crate::scenario::Scenario;
 const NONE: &str = "none";
 const ABSENT: &str = "-";
 const UNKNOWN: &str = "unknown";
+const NOT_EVALUATED: &str = "not evaluated";
 
 pub fn format_diagnostic(
     scenario: &Scenario,
@@ -242,7 +243,7 @@ fn format_pon(pon: Option<&PonDecisionDiagnostic>, verbose: bool) -> String {
     let mut lines = vec!["Pon".to_string()];
 
     let Some(pon) = pon else {
-        lines.push("  not evaluated".to_string());
+        lines.push(format!("  {NOT_EVALUATED}"));
         return lines.join("\n");
     };
 
@@ -325,7 +326,7 @@ fn format_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
     let mut lines = vec!["Normal discard".to_string()];
 
     let Some(normal_discard) = diagnostic.normal_discard.as_ref() else {
-        lines.push("  not evaluated".to_string());
+        lines.push(format!("  {NOT_EVALUATED}"));
         return lines.join("\n");
     };
 
@@ -617,7 +618,7 @@ fn format_push_pull(
     let mut lines = vec!["Push/Pull".to_string()];
 
     if inputs.is_none() && decision.is_none() {
-        lines.push("  not evaluated".to_string());
+        lines.push(format!("  {NOT_EVALUATED}"));
         return lines.join("\n");
     }
 
@@ -698,7 +699,7 @@ fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
     let mut lines = vec!["Reach".to_string()];
 
     let Some(reach) = reach else {
-        lines.push("  not evaluated".to_string());
+        lines.push(format!("  {NOT_EVALUATED}"));
         return lines.join("\n");
     };
 
@@ -789,7 +790,7 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
     let mut lines = vec!["Defense".to_string()];
 
     let Some(defense) = defense else {
-        lines.push("  not evaluated".to_string());
+        lines.push(format!("  {NOT_EVALUATED}"));
         return lines.join("\n");
     };
 
@@ -1181,43 +1182,163 @@ fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
     labels.join(", ")
 }
 
-fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
-    let mut lines = vec!["Summary".to_string()];
+/// 選択結果とその主な理由だけを1画面へ集めた要約。
+///
+/// 値はすべて既存 diagnostic が持つものをそのまま読み、表示のために向聴・受け入れ・待ち・
+/// 打点・安全度を求め直さない。検討しなかった判断は行そのものを出さず、`none` を並べない。
+pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
+    let groups = [
+        summary_selected(diagnostic),
+        summary_push_pull(diagnostic),
+        summary_reach(diagnostic),
+        summary_pon(diagnostic),
+        summary_defense(diagnostic),
+        summary_runner_up(scenario, diagnostic),
+    ];
 
-    lines.push(format!(
-        "  selected: {}",
-        action_label(&diagnostic.selected_action)
-    ));
-    lines.push(format!(
-        "  source: {}",
-        source_label(diagnostic.selected_source)
-    ));
-    if let Some(kind) = diagnostic.defense_fallback_kind() {
-        lines.push(format!("  selected detail: {kind:?}"));
-    }
-    if let Some(category) = diagnostic.open_hand_defense_category() {
-        lines.push(format!("  selected detail: {category:?}"));
-    }
-    if let Some(category) = diagnostic.combined_defense_category() {
-        lines.push(format!("  selected detail: {category:?}"));
-    }
-    if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
-        lines.push(format!("  selected opponent honor value: {value}"));
-    }
+    let body = groups
+        .into_iter()
+        .filter(|lines| !lines.is_empty())
+        .map(|lines| lines.join("\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-    let Some(runner_up) = diagnose_runner_up(scenario, diagnostic) else {
-        lines.push(format!("  runner-up: {ABSENT}"));
-        return lines.join("\n");
+    format!("Summary\n{body}")
+}
+
+fn summary_selected(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    vec![
+        format!("  selected: {}", action_label(&diagnostic.selected_action)),
+        format!("  source: {}", source_label(diagnostic.selected_source)),
+    ]
+}
+
+fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    let Some(decision) = diagnostic.push_pull_decision.as_ref() else {
+        return Vec::new();
+    };
+    vec![
+        format!("  push/pull: {:?}", decision.mode),
+        format!("  push/pull reason: {:?}", decision.reason),
+    ]
+}
+
+fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    let Some(reach) = diagnostic.reach.as_ref() else {
+        return match diagnostic.push_pull_decision {
+            Some(_) => vec![format!("  reach: {NOT_EVALUATED}")],
+            None => Vec::new(),
+        };
     };
 
-    lines.push(format!(
-        "  runner-up: {}",
-        action_label(&runner_up.selected_action)
-    ));
-    lines.push(format!(
-        "  runner-up source: {}",
-        source_label(runner_up.selected_source)
-    ));
+    let mut lines = vec![
+        format!("  reach: {}", yes_no(reach.should_reach())),
+        format!("  reach reason: {:?}", reach.reason),
+    ];
+
+    if let Some(tenpai) = reach.tenpai_wait.as_ref() {
+        lines.push(format!(
+            "  live wait: {} remaining / {} types",
+            tenpai.tsumo_remaining, tenpai.tsumo_type_count
+        ));
+        lines.push(format!(
+            "  ron: {}",
+            format_optional_yes_no(tenpai.can_ron())
+        ));
+    }
+
+    if let Some(damaten) = reach.damaten_value.as_ref() {
+        lines.push(format!("  damaten verdict: {:?}", damaten.verdict));
+        lines.push(format!(
+            "  damaten values: {}",
+            summary_damaten_values(damaten)
+        ));
+    }
+
+    lines
+}
+
+fn summary_damaten_values(damaten: &DamatenValueDiagnostic) -> String {
+    let values: Vec<_> = damaten
+        .winning_tile_values()
+        .map(|winning_tile| {
+            format!(
+                "{}={}",
+                winning_tile.winning_tile.to_mjai_string(),
+                damaten_value_label(winning_tile.value)
+            )
+        })
+        .collect();
+
+    if values.is_empty() {
+        return NONE.to_string();
+    }
+    values.join(", ")
+}
+
+fn summary_pon(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    let Some(pon) = diagnostic.pon.as_ref() else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "  pon: {}",
+            pon.selected
+                .as_ref()
+                .map_or_else(|| "no".to_string(), action_label)
+        ),
+        format!("  pon reason: {:?}", pon.reason),
+    ]
+}
+
+fn summary_defense(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    if let Some(defense) = diagnostic.defense.as_ref() {
+        let Some(selected) = defense.selected.as_ref() else {
+            return vec![format!("  defense: {NONE}")];
+        };
+        let mut lines = vec![
+            format!("  defense: {}", selected.selected_action),
+            format!("  defense detail: {:?}", selected.selected_kind),
+        ];
+        if matches!(selected.selected_kind, DefenseFallbackKind::HonorSafety(_)) {
+            lines.push(format!(
+                "  defense opponent honor value: {}",
+                optional(selected.selected_opponent_honor_value)
+            ));
+        }
+        return lines;
+    }
+
+    if let Some(selected) = diagnostic.combined_defense.selected.as_ref() {
+        return vec![
+            format!("  defense: {}", action_label(&selected.selected_action)),
+            format!("  defense detail: {:?}", selected.selected_category),
+        ];
+    }
+
+    if let Some(selected) = diagnostic.open_hand_defense.selected.as_ref() {
+        return vec![
+            format!("  defense: {}", action_label(&selected.selected_action)),
+            format!("  defense detail: {:?}", selected.selected_category),
+        ];
+    }
+
+    Vec::new()
+}
+
+fn summary_runner_up(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    let Some(runner_up) = diagnose_runner_up(scenario, diagnostic) else {
+        return vec![format!("  runner-up: {ABSENT}")];
+    };
+
+    let mut lines = vec![
+        format!("  runner-up: {}", action_label(&runner_up.selected_action)),
+        format!(
+            "  runner-up source: {}",
+            source_label(runner_up.selected_source)
+        ),
+    ];
+
     if let Some(kind) = runner_up.defense_fallback_kind() {
         lines.push(format!("  runner-up detail: {kind:?}"));
     }
@@ -1234,7 +1355,7 @@ fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -
         lines.push(format!("  runner-up lost by: {reason:?}"));
     }
 
-    lines.join("\n")
+    lines
 }
 
 fn honor_safety_opponent_honor_value(diagnostic: &ShantenDecisionDiagnostic) -> Option<String> {
@@ -1504,6 +1625,15 @@ mod tests {
             .to_string()
     }
 
+    fn summary_section(output: &str) -> String {
+        let index = output
+            .rfind("\n\nSummary\n")
+            .map(|index| index + 2)
+            .or_else(|| output.starts_with("Summary\n").then_some(0))
+            .unwrap_or_else(|| panic!("missing section Summary in:\n{output}"));
+        output[index..].to_string()
+    }
+
     fn is_section_header(block: &str) -> bool {
         matches!(
             block.lines().next().unwrap_or_default(),
@@ -1730,8 +1860,8 @@ mod tests {
             section(&plain_output, "Final decision")
         );
         assert_eq!(
-            section(&table_state_output, "Summary"),
-            section(&plain_output, "Summary")
+            summary_section(&table_state_output),
+            summary_section(&plain_output)
         );
     }
 
@@ -2290,10 +2420,15 @@ mod tests {
     #[test]
     fn pon_reaction_summary_reports_the_pon_source() {
         let (_, _, output) = rendered(PON_REACTION_SCENARIO, false);
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert_eq!(
             summary,
-            "Summary\n  selected: Pon P <- P P\n  source: Pon\n  runner-up: -"
+            "Summary\n  \
+             selected: Pon P <- P P\n  \
+             source: Pon\n\n  \
+             pon: Pon P <- P P\n  \
+             pon reason: EligibleTenpai\n\n  \
+             runner-up: -"
         );
     }
 
@@ -2369,7 +2504,7 @@ mod tests {
     #[test]
     fn fixed_meld_aware_summary_selects_the_tenpai_discard() {
         let (_, _, output) = rendered(ONE_MELD_TENPAI_SCENARIO, false);
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(summary.contains("  selected: N"), "{summary}");
         assert!(summary.contains("  source: NormalDiscard"), "{summary}");
         assert!(
@@ -2420,7 +2555,7 @@ mod tests {
     fn concealed_scenario_selection_is_unchanged() {
         // 副露が無い既存 scenario の selected / runner-up は fixed meld 対応後も変わらない。
         let (_, _, output) = rendered(NORMAL_SCENARIO, false);
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(summary.contains("  selected: W"), "{summary}");
         assert!(summary.contains("  runner-up: N"), "{summary}");
         assert!(
@@ -3125,18 +3260,17 @@ mod tests {
         ] {
             for verbose in [false, true] {
                 let (_, _, output) = rendered(json, verbose);
-                let sections = sections(&output);
-                let last = sections.last().unwrap();
-                assert!(last.starts_with("Summary\n"), "{output}");
+                let summary = summary_section(&output);
+                assert!(summary.starts_with("Summary\n"), "{output}");
                 assert_eq!(
-                    sections
+                    sections(&output)
                         .iter()
                         .filter(|section| section.starts_with("Summary"))
                         .count(),
                     1,
                     "{output}"
                 );
-                assert!(output.ends_with(last), "{output}");
+                assert!(output.ends_with(&summary), "{output}");
             }
         }
     }
@@ -3154,7 +3288,7 @@ mod tests {
         );
         assert_ne!(runner_up.selected_action, diagnostic.selected_action);
 
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(
             summary.contains(&format!(
                 "  selected: {}",
@@ -3200,11 +3334,12 @@ mod tests {
         let (scenario, diagnostic, output) = rendered(HALF_SUJI_SCENARIO, false);
         let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
 
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(summary.contains("  selected: 7s"), "{summary}");
         assert!(summary.contains("  source: DefenseFallback"), "{summary}");
+        assert!(summary.contains("  defense: 7s"), "{summary}");
         assert!(
-            summary.contains("  selected detail: SuitedSafety(Suji)"),
+            summary.contains("  defense detail: SuitedSafety(Suji)"),
             "{summary}"
         );
         assert!(summary.contains("  runner-up: 4p"), "{summary}");
@@ -3221,9 +3356,20 @@ mod tests {
         assert_eq!(
             summary,
             format!(
-                "Summary\n  selected: {}\n  source: {}\n  selected detail: {:?}\n  runner-up: {}\n  runner-up source: {}\n  runner-up detail: {:?}",
+                "Summary\n  \
+                 selected: {}\n  \
+                 source: {}\n\n  \
+                 push/pull: Fold\n  \
+                 push/pull reason: TwoOrMoreShantenAgainstReach\n\n  \
+                 reach: not evaluated\n\n  \
+                 defense: {}\n  \
+                 defense detail: {:?}\n\n  \
+                 runner-up: {}\n  \
+                 runner-up source: {}\n  \
+                 runner-up detail: {:?}",
                 action_label(&diagnostic.selected_action),
                 source_label(diagnostic.selected_source),
+                action_label(&diagnostic.selected_action),
                 diagnostic.defense_fallback_kind().unwrap(),
                 action_label(&runner_up.selected_action),
                 source_label(runner_up.selected_source),
@@ -3278,12 +3424,16 @@ mod tests {
     fn summary_shows_opponent_honor_value_for_guest_wind_over_value_honor() {
         let (_, _, output) = rendered(HONOR_GUEST_VS_VALUE_SCENARIO, false);
         assert_eq!(
-            section(&output, "Summary"),
+            summary_section(&output),
             "Summary\n  \
              selected: N\n  \
-             source: DefenseFallback\n  \
-             selected detail: HonorSafety(OneVisible)\n  \
-             selected opponent honor value: GuestWind\n  \
+             source: DefenseFallback\n\n  \
+             push/pull: Fold\n  \
+             push/pull reason: TwoOrMoreShantenAgainstReach\n\n  \
+             reach: not evaluated\n\n  \
+             defense: N\n  \
+             defense detail: HonorSafety(OneVisible)\n  \
+             defense opponent honor value: GuestWind\n\n  \
              runner-up: C\n  \
              runner-up source: DefenseFallback\n  \
              runner-up detail: HonorSafety(OneVisible)\n  \
@@ -3295,12 +3445,16 @@ mod tests {
     fn summary_shows_opponent_honor_value_for_value_honor_over_double_wind() {
         let (_, _, output) = rendered(HONOR_VALUE_VS_DOUBLE_SCENARIO, false);
         assert_eq!(
-            section(&output, "Summary"),
+            summary_section(&output),
             "Summary\n  \
              selected: C\n  \
-             source: DefenseFallback\n  \
-             selected detail: HonorSafety(OneVisible)\n  \
-             selected opponent honor value: SingleValueHonor\n  \
+             source: DefenseFallback\n\n  \
+             push/pull: Fold\n  \
+             push/pull reason: TwoOrMoreShantenAgainstReach\n\n  \
+             reach: not evaluated\n\n  \
+             defense: C\n  \
+             defense detail: HonorSafety(OneVisible)\n  \
+             defense opponent honor value: SingleValueHonor\n\n  \
              runner-up: E\n  \
              runner-up source: DefenseFallback\n  \
              runner-up detail: HonorSafety(OneVisible)\n  \
@@ -3329,7 +3483,7 @@ mod tests {
     fn summary_omits_opponent_honor_value_outside_honor_safety() {
         for json in [HALF_SUJI_SCENARIO, NORMAL_SCENARIO] {
             let (_, _, output) = rendered(json, false);
-            let summary = section(&output, "Summary");
+            let summary = summary_section(&output);
             assert!(!summary.contains("opponent honor value"), "{summary}");
         }
     }
@@ -3371,7 +3525,7 @@ mod tests {
             ["5mr"]
         );
 
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(summary.contains("  selected: 5m\n"), "{summary}");
         assert!(summary.contains("  runner-up: 5mr"), "{summary}");
     }
@@ -3381,7 +3535,7 @@ mod tests {
         let (scenario, _, output) = rendered(SINGLE_ACTION_SCENARIO, false);
         assert_eq!(scenario.legal_actions.len(), 1);
 
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(summary.contains("  selected: N"), "{summary}");
         assert!(summary.contains("  runner-up: -"), "{summary}");
         assert!(!summary.contains("  runner-up source:"), "{summary}");
@@ -3402,7 +3556,7 @@ mod tests {
             LegalAction::Dahai { .. }
         ));
 
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
         assert!(summary.contains("  selected: Reach"), "{summary}");
         assert!(summary.contains("  source: Reach"), "{summary}");
         assert!(
@@ -3439,7 +3593,7 @@ mod tests {
             assert_eq!(diagnose(&scenario), diagnostic);
 
             let final_decision = section(&output, "Final decision");
-            let summary = section(&output, "Summary");
+            let summary = summary_section(&output);
             let action = action_label(&diagnostic.selected_action);
             let source = source_label(diagnostic.selected_source);
             assert!(
@@ -3451,6 +3605,162 @@ mod tests {
                 "{summary}"
             );
         }
+    }
+
+    const RED_FIVE_DAMATEN_SCENARIO: &str = r#"{
+        "hand": "123456789m123p5s",
+        "draw": "N",
+        "round_wind": "E",
+        "seat_wind": "E",
+        "player_id": 0,
+        "oya": 0,
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "allow_reach": true
+    }"#;
+
+    #[test]
+    fn summary_reports_the_push_pull_decision() {
+        let (_, diagnostic, output) = rendered(DEFENSE_SCENARIO, false);
+        let summary = summary_section(&output);
+        let decision = diagnostic
+            .push_pull_decision
+            .expect("押し引きまで進んでいる");
+
+        assert!(summary.contains("  push/pull: Fold"), "{summary}");
+        assert!(
+            summary.contains("  push/pull reason: TwoOrMoreShantenAgainstReach"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!("  push/pull: {:?}", decision.mode)),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!("  push/pull reason: {:?}", decision.reason)),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_marks_an_unevaluated_reach() {
+        let (_, diagnostic, output) = rendered(DEFENSE_SCENARIO, false);
+        assert!(diagnostic.reach.is_none());
+        assert!(diagnostic.push_pull_decision.is_some());
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  reach: not evaluated"), "{summary}");
+        assert!(!summary.contains("  reach reason:"), "{summary}");
+    }
+
+    #[test]
+    fn summary_omits_the_reach_line_when_the_decision_ends_before_push_pull() {
+        let (_, diagnostic, output) = rendered(PON_REACTION_SCENARIO, false);
+        assert!(diagnostic.push_pull_decision.is_none());
+
+        let summary = summary_section(&output);
+        assert!(!summary.contains("  reach"), "{summary}");
+        assert!(summary.contains("  pon: Pon P <- P P"), "{summary}");
+        assert!(
+            summary.contains("  pon reason: EligibleTenpai"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_the_reach_decision_with_its_damaten_value() {
+        let (_, diagnostic, output) = rendered(DAMATEN_LOW_VALUE_SCENARIO, false);
+        let summary = summary_section(&output);
+        let decision = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(action_label(&diagnostic.selected_action), "Reach");
+        assert!(summary.contains("  reach: yes"), "{summary}");
+        assert!(
+            summary.contains("  reach reason: EligibleLowValue"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  live wait: 4 remaining / 1 types"),
+            "{summary}"
+        );
+        assert!(summary.contains("  ron: yes"), "{summary}");
+        assert!(
+            summary.contains("  damaten verdict: BelowThreshold"),
+            "{summary}"
+        );
+        assert!(summary.contains("  damaten values: 6s=3900"), "{summary}");
+
+        assert_eq!(decision.tsumo_remaining(), Some(4));
+        assert_eq!(decision.tsumo_type_count(), Some(1));
+        assert_eq!(decision.can_ron(), Some(true));
+        assert!(
+            summary.contains(&format!("  reach reason: {:?}", decision.reason)),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!(
+                "  damaten verdict: {:?}",
+                decision.damaten_verdict().unwrap()
+            )),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_a_high_value_damaten_as_no_reach() {
+        let (_, diagnostic, output) = rendered(DAMATEN_HIGH_VALUE_SCENARIO, false);
+        let summary = summary_section(&output);
+
+        assert_eq!(action_label(&diagnostic.selected_action), "N");
+        assert!(summary.contains("  reach: no"), "{summary}");
+        assert!(
+            summary.contains("  reach reason: HighValueDamaten"),
+            "{summary}"
+        );
+        assert!(summary.contains("  ron: yes"), "{summary}");
+        assert!(
+            summary.contains("  damaten verdict: AboveThreshold"),
+            "{summary}"
+        );
+        assert!(summary.contains("  damaten values: 6s=7700"), "{summary}");
+    }
+
+    #[test]
+    fn summary_distinguishes_the_red_and_black_five_damaten_values() {
+        let (_, diagnostic, output) = rendered(RED_FIVE_DAMATEN_SCENARIO, false);
+        let summary = summary_section(&output);
+        let damaten = diagnostic
+            .reach
+            .as_ref()
+            .and_then(|decision| decision.damaten_value.as_ref())
+            .expect("ダマ打点を評価している");
+
+        assert_eq!(
+            damaten
+                .winning_tile_values()
+                .map(|value| (value.winning_tile.to_mjai_string(), value.value.total()))
+                .collect::<Vec<_>>(),
+            [
+                ("5sr".to_string(), Some(7700)),
+                ("5s".to_string(), Some(3900))
+            ]
+        );
+        assert!(
+            summary.contains("  damaten values: 5sr=7700, 5s=3900"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  damaten verdict: BelowThreshold"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_omits_the_damaten_value_when_ron_is_unknown() {
+        let (_, _, output) = rendered(REACH_SCENARIO, false);
+        let summary = summary_section(&output);
+
+        assert!(summary.contains("  ron: unknown"), "{summary}");
+        assert!(!summary.contains("  damaten"), "{summary}");
     }
 
     // ---- Reach 表示 ----
@@ -3690,10 +4000,10 @@ mod tests {
             "Push/Pull",
             "Defense",
             "Player threats",
-            "Summary",
         ] {
             assert_eq!(section(&without, header), section(&with, header));
         }
+        assert_eq!(summary_section(&without), summary_section(&with));
     }
 
     const OPPONENT_THREAT_SCENARIO: &str = include_str!("../scenarios/opponent_threat.json");
@@ -4081,7 +4391,7 @@ mod tests {
         // 最終 action の経路は既存の DefenseFallback / OpenHandDefenseFallback と区別できる。
         let (_, diagnostic, output) = rendered(COMBINED_THREAT_DEFENSE_SCENARIO, false);
         let final_decision = section(&output, "Final decision");
-        let summary = section(&output, "Summary");
+        let summary = summary_section(&output);
 
         assert_eq!(
             diagnostic.selected_source,
@@ -4107,7 +4417,7 @@ mod tests {
             "{output}"
         );
         assert!(
-            summary.contains("  selected detail: SafeAgainstAllThreats"),
+            summary.contains("  defense detail: SafeAgainstAllThreats"),
             "{output}"
         );
     }
