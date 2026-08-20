@@ -90,14 +90,6 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `legal_dahai` | 打牌可能な牌と候補順 |
 | `remaining_tiles` / `honba` / `kyotaku_points` / `scores` / `kyoku` | table state |
 
-### リーチの自動生成
-
-リーチは option ではなく局面から自動生成します。門前・未リーチ・合法 `dahai` のいずれかを切った後にテンパイ・`scores` の自分の持ち点が1000点以上・`remaining_tiles` が4枚以上を全て満たす場合に、`LegalAction::Reach` を合法手へ加えます。
-
-`scores` と `remaining_tiles` が省略されて unknown の場合はリーチ不可と推測せず、他の条件だけで判定します。明示的に不可能と分かる場合だけリーチを生成しません。
-
-RiichiLab capture の合法手は server の possible actions がそのままの source of truth で、この自動生成の対象外です。
-
 ### legal_dahai
 
 `legal_dahai` は打牌可能な牌とその順序を明示します。リーチ後のツモ切りだけの局面や候補順に依存する判断の再現に利用できます。省略時は手牌とツモ牌から自動生成します。手牌に無い牌、赤5と黒5が一致しない指定、意味が重複する指定は error です。
