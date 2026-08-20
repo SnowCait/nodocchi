@@ -3,11 +3,16 @@ use thiserror::Error;
 use crate::scenario::ScenarioSpec;
 
 pub const USAGE: &str = "usage:
-  bot-scenario --hand <TILES> [--draw <TILE>] [--dora <TILES>] [--round-wind <WIND>]
+  bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
                [--seat-wind <WIND>] [--allow-reach] [--allow-hora] [--allow-ryukyoku]
-               [--lookahead] [--verbose]
-  bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose]
-  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]";
+               [--lookahead] [--verbose] [--summary-only]
+  bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose] [--summary-only]
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]
+               [--summary-only]
+
+  --dora is a backward-compatible alias of --dora-indicator
+  --summary-only prints the Summary section only, and cannot be combined with
+  --lookahead or --verbose";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CliError {
@@ -34,6 +39,12 @@ pub enum CliError {
 
     #[error("--request-id must be a number, but is {0:?}")]
     InvalidRequestId(String),
+
+    #[error("--dora-indicator cannot be combined with its alias --dora")]
+    ConflictingDoraIndicator,
+
+    #[error("--summary-only cannot be combined with {0}")]
+    ConflictingSummaryOnly(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +63,8 @@ pub struct CliArgs {
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
     pub lookahead: bool,
+    /// Summary だけを表示するかどうか。判断は同じで、表示する section だけが変わる。
+    pub summary_only: bool,
 }
 
 impl CliArgs {
@@ -66,8 +79,11 @@ impl CliArgs {
         let mut inline_options = false;
         let mut verbose = false;
         let mut lookahead = false;
+        let mut summary_only = false;
         let mut capture: Option<String> = None;
         let mut request_id: Option<u64> = None;
+        let mut dora_indicator = false;
+        let mut dora_alias = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -76,7 +92,19 @@ impl CliArgs {
                     spec.draw = Some(value_of(&mut args, "--draw")?);
                     inline_options = true;
                 }
+                "--dora-indicator" => {
+                    if dora_alias {
+                        return Err(CliError::ConflictingDoraIndicator);
+                    }
+                    dora_indicator = true;
+                    spec.dora_indicators = Some(value_of(&mut args, "--dora-indicator")?);
+                    inline_options = true;
+                }
                 "--dora" => {
+                    if dora_indicator {
+                        return Err(CliError::ConflictingDoraIndicator);
+                    }
+                    dora_alias = true;
                     spec.dora_indicators = Some(value_of(&mut args, "--dora")?);
                     inline_options = true;
                 }
@@ -113,6 +141,7 @@ impl CliArgs {
                 }
                 "--lookahead" => lookahead = true,
                 "--verbose" => verbose = true,
+                "--summary-only" => summary_only = true,
                 other if other.starts_with('-') => {
                     return Err(CliError::UnknownOption(other.to_string()));
                 }
@@ -120,6 +149,15 @@ impl CliArgs {
                     Some(_) => return Err(CliError::MultipleScenarioFiles(other.to_string())),
                     None => path = Some(other.to_string()),
                 },
+            }
+        }
+
+        if summary_only {
+            if lookahead {
+                return Err(CliError::ConflictingSummaryOnly("--lookahead".to_string()));
+            }
+            if verbose {
+                return Err(CliError::ConflictingSummaryOnly("--verbose".to_string()));
             }
         }
 
@@ -151,6 +189,7 @@ impl CliArgs {
             source,
             verbose,
             lookahead,
+            summary_only,
         })
     }
 }
@@ -206,7 +245,7 @@ mod tests {
         let spec = inline_spec(&[
             "--hand",
             "123m",
-            "--dora",
+            "--dora-indicator",
             "3p E",
             "--round-wind",
             "E",
@@ -216,6 +255,59 @@ mod tests {
         assert_eq!(spec.dora_indicators, Some("3p E".to_string()));
         assert_eq!(spec.round_wind, Some("E".to_string()));
         assert_eq!(spec.seat_wind, Some("S".to_string()));
+    }
+
+    #[test]
+    fn dora_is_a_backward_compatible_alias_of_dora_indicator() {
+        let alias = inline_spec(&["--hand", "123m", "--dora", "3p E"]);
+        assert_eq!(alias.dora_indicators, Some("3p E".to_string()));
+        assert_eq!(
+            alias,
+            inline_spec(&["--hand", "123m", "--dora-indicator", "3p E"])
+        );
+    }
+
+    #[test]
+    fn rejects_dora_indicator_with_its_alias() {
+        assert_eq!(
+            parse(&["--hand", "123m", "--dora-indicator", "3p", "--dora", "E"]),
+            Err(CliError::ConflictingDoraIndicator)
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--dora", "3p", "--dora-indicator", "E"]),
+            Err(CliError::ConflictingDoraIndicator)
+        );
+    }
+
+    #[test]
+    fn parses_summary_only_flag() {
+        assert!(!parse(&["--hand", "123m"]).unwrap().summary_only);
+        assert!(
+            parse(&["--hand", "123m", "--summary-only"])
+                .unwrap()
+                .summary_only
+        );
+        assert!(
+            parse(&["scenario.json", "--summary-only"])
+                .unwrap()
+                .summary_only
+        );
+    }
+
+    #[test]
+    fn rejects_summary_only_with_lookahead_or_verbose() {
+        assert_eq!(
+            parse(&["--hand", "123m", "--summary-only", "--lookahead"]),
+            Err(CliError::ConflictingSummaryOnly("--lookahead".to_string()))
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--lookahead", "--summary-only"]),
+            Err(CliError::ConflictingSummaryOnly("--lookahead".to_string()))
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--summary-only", "--verbose"]),
+            Err(CliError::ConflictingSummaryOnly("--verbose".to_string()))
+        );
     }
 
     #[test]
@@ -370,6 +462,10 @@ mod tests {
         assert_eq!(
             parse(&["--hand"]),
             Err(CliError::MissingValue("--hand".to_string()))
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--dora-indicator"]),
+            Err(CliError::MissingValue("--dora-indicator".to_string()))
         );
         assert_eq!(
             parse(&["--hand", "123m", "--dora"]),
