@@ -111,10 +111,12 @@ fn captured_scenario(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenario::ScenarioSpec;
     use bot_core::{
         Agent, LegalAction, MeldKind, PushPullMode, PushPullReason, ShantenAgent,
         player_threat_facts_from_context,
     };
+    use bot_logic::{TileId, TileType};
     use riichilab_client::capture;
     use riichilab_client::observation::{
         fixture_base64, fixture_base64_with_melds, fixture_base64_with_table_state_facts,
@@ -294,6 +296,75 @@ mod tests {
                 .iter()
                 .all(|action| matches!(action, LegalAction::Dahai { .. }))
         );
+    }
+
+    fn tile_types(tiles: &[TileId]) -> Vec<TileType> {
+        tiles.iter().map(|tile| tile.tile_type()).collect()
+    }
+
+    // 打 W で 4p / 7p テンパイになる門前手。inline scenario ならリーチを自動生成する局面。
+    const MENZEN_TENPAI_HAND: [u8; 13] = [0, 4, 8, 28, 29, 53, 56, 76, 80, 84, 96, 100, 104];
+
+    const MENZEN_TENPAI_DRAWN_TILE: u8 = 116;
+
+    const MENZEN_TENPAI_DAHAI: [&str; 13] = [
+        "1m", "2m", "3m", "8m", "5p", "6p", "2s", "3s", "4s", "7s", "8s", "9s", "W",
+    ];
+
+    // capture の合法手は server の possible actions がそのまま source of truth で、局面から
+    // リーチを足さない。同じ手牌の inline scenario ではリーチが自動生成される。
+    #[test]
+    fn replay_does_not_add_reach_to_the_captured_possible_actions() {
+        let possible_actions = MENZEN_TENPAI_DAHAI
+            .iter()
+            .map(|pai| format!(r#"{{"type":"dahai","pai":"{pai}","tsumogiri":false}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let observation = fixture_base64(
+            0,
+            Some(MENZEN_TENPAI_DRAWN_TILE),
+            MENZEN_TENPAI_HAND.to_vec(),
+        );
+        let line = format!(
+            r#"{{"type":"request_action","request_id":430,"possible_actions":[{possible_actions}],"observation":"{observation}"}}"#
+        );
+        let path = write_capture("no-reach", &[line]);
+        let captured = load_captured_scenario(&path, None).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            captured.scenario.legal_actions.len(),
+            MENZEN_TENPAI_DAHAI.len()
+        );
+        assert!(
+            captured
+                .scenario
+                .legal_actions
+                .iter()
+                .all(|action| matches!(action, LegalAction::Dahai { .. }))
+        );
+
+        let inline = Scenario::resolve(&ScenarioSpec {
+            hand: "12388m56p234789s".to_string(),
+            draw: Some("W".to_string()),
+            player_id: Some(0),
+            ..ScenarioSpec::default()
+        })
+        .unwrap();
+        // Observation は牌種で往復するので、物理牌ではなく牌種が一致することを確かめる。
+        assert_eq!(
+            tile_types(captured.scenario.context.hand_tiles()),
+            tile_types(inline.context.hand_tiles())
+        );
+        assert_eq!(
+            captured
+                .scenario
+                .context
+                .drawn_tile()
+                .map(TileId::tile_type),
+            inline.context.drawn_tile().map(TileId::tile_type)
+        );
+        assert!(inline.legal_actions.contains(&LegalAction::Reach));
     }
 
     fn direct_scenario(observation: &str) -> Scenario {

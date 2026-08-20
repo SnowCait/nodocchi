@@ -605,6 +605,15 @@ fn acceptance_tile_types(diagnostic: &ShantenDecisionDiagnostic) -> Vec<TileType
     types
 }
 
+fn legal_dahai_actions(scenario: &Scenario) -> Vec<LegalAction> {
+    scenario
+        .legal_actions
+        .iter()
+        .filter(|action| matches!(action, LegalAction::Dahai { .. }))
+        .cloned()
+        .collect()
+}
+
 fn hand_tiles(scenario: &Scenario) -> Vec<TileId> {
     scenario.context.hand_tiles().to_vec()
 }
@@ -877,13 +886,27 @@ fn assert_the_folding_scenario_selects_the_defense_fallback(evaluated: &Evaluate
     assert_eq!(diagnostic.defense_fallback_kind(), None, "{name}");
 }
 
-// High でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。
+// High でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。リーチが合法な局面では
+// その通常打牌のままリーチを宣言するため、最終 action が Reach でも通常打牌は変わらない。
 fn assert_the_pushing_scenario_keeps_the_normal_discard(evaluated: &Evaluated) {
     let name = evaluated.name();
     let diagnostic = &evaluated.diagnostic;
 
     assert_eq!(diagnostic.open_hand_defense_category(), None, "{name}");
     assert_eq!(diagnostic.open_hand_defense.selected, None, "{name}");
+
+    if diagnostic.selected_action == LegalAction::Reach {
+        assert_eq!(
+            diagnostic
+                .reach
+                .as_ref()
+                .and_then(|reach| reach.selected_discard.clone()),
+            diagnostic.normal_discard_action,
+            "{name}"
+        );
+        return;
+    }
+
     assert_eq!(
         Some(diagnostic.selected_action.clone()),
         diagnostic.normal_discard_action,
@@ -918,7 +941,7 @@ fn assert_the_defense_safety_of_every_legal_dahai(evaluated: &Evaluated, targets
             .iter()
             .map(|candidate| candidate.action.clone())
             .collect::<Vec<LegalAction>>(),
-        evaluated.scenario.legal_actions,
+        legal_dahai_actions(&evaluated.scenario),
         "{name}"
     );
 

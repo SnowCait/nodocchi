@@ -19,7 +19,6 @@ cargo run -p bot-scenario -- \
 | `--dora` | 任意 | ドラ表示牌。ドラそのものではない |
 | `--round-wind` | 任意 | 場風。`E` / `S` / `W` / `N` |
 | `--seat-wind` | 任意 | 自風。`E` / `S` / `W` / `N` |
-| `--allow-reach` | 任意 | リーチを合法手に加える |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要を追加。`--verbose` 併用時は受け入れ牌ごとの詳細も表示 |
@@ -69,7 +68,6 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
   },
   "extra_visible_tiles": "",
   "legal_dahai": null,
-  "allow_reach": false,
   "allow_hora": false,
   "allow_ryukyoku": false
 }
@@ -91,6 +89,14 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌と候補順 |
 | `remaining_tiles` / `honba` / `kyotaku_points` / `scores` / `kyoku` | table state |
+
+### リーチの自動生成
+
+リーチは option ではなく局面から自動生成します。門前・未リーチ・合法 `dahai` のいずれかを切った後にテンパイ・`scores` の自分の持ち点が1000点以上・`remaining_tiles` が4枚以上を全て満たす場合に、`LegalAction::Reach` を合法手へ加えます。
+
+`scores` と `remaining_tiles` が省略されて unknown の場合はリーチ不可と推測せず、他の条件だけで判定します。明示的に不可能と分かる場合だけリーチを生成しません。
+
+RiichiLab capture の合法手は server の possible actions がそのままの source of truth で、この自動生成の対象外です。
 
 ### legal_dahai
 
