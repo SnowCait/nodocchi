@@ -5,17 +5,18 @@ use bot_core::{
     MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
     OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
     PonCandidateDiagnostic, PonDecisionDiagnostic, ProspectiveBaselineValue,
-    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveLookaheadDiagnostic,
-    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue,
-    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent,
-    ShantenDecisionDiagnostic, TenpaiOffenseValue, ThreatDefenseTarget,
+    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveDrawVariantValue,
+    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
+    ProspectiveUnknownReason, ProspectiveValue, PushPullDecision, PushPullInputs,
+    PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
+    TenpaiOffenseValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
     DiscardEvaluation, DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic,
-    DrawLookaheadDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    LookaheadDiagnostic, PermanentFuriten, Shanten, TenpaiWaitAvailability, TenpaiWaitMetric,
-    TileId, TileType,
+    DrawLookaheadDiagnostic, DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile,
+    EffectiveShanten, FixedMeldCount, LookaheadDiagnostic, PermanentFuriten, Shanten,
+    TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
 };
 
 use crate::scenario::Scenario;
@@ -613,37 +614,58 @@ fn format_lookahead_draw(
         draw.shanten_after_draw.min()
     )];
 
-    let Some(next) = draw.next_discard.as_ref() else {
-        lines.push(format!("      next discard: {ABSENT}"));
-        lines.extend(format_prospective_value(value));
+    for variant in &draw.variants {
+        lines.extend(format_lookahead_draw_variant(
+            variant,
+            value.and_then(|value| value.variant(variant.drawn_tile)),
+        ));
+    }
+    lines
+}
+
+// 仮想ツモ牌の物理牌 variant 1つ分。赤5と黒5では2手目の最良打牌も打点も変わり得るので、
+// variant ごとに並べる。
+fn format_lookahead_draw_variant(
+    variant: &DrawVariantLookaheadDiagnostic,
+    value: Option<&ProspectiveDrawVariantValue>,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "      drawn {}: {} remaining",
+        variant.drawn_tile.to_mjai_string(),
+        variant.remaining
+    )];
+
+    let Some(next) = variant.next_discard.as_ref() else {
+        lines.push(format!("        next discard: {ABSENT}"));
+        lines.extend(format_prospective_value(variant, value));
         return lines;
     };
 
     lines.push(format!(
-        "      next discard: {}",
+        "        next discard: {}",
         next.discard.to_mjai_string()
     ));
     lines.push(format!(
-        "      next shanten: {}",
+        "        next shanten: {}",
         next.min_shanten_after_discard()
     ));
     lines.push(format!(
-        "      next acceptance: {} / {} types",
+        "        next acceptance: {} / {} types",
         next.acceptance_total_remaining(),
         next.acceptance_type_count()
     ));
     lines.push(format!(
-        "      next iishanten shape: {:?}",
+        "        next iishanten shape: {:?}",
         next.standard_iishanten_shape_after_discard
     ));
     // 2手目の打牌後がテンパイなら、その受け入れがそのまま最終待ちになる。
     if next.min_shanten_after_discard() == TENPAI_SHANTEN {
         lines.push(format!(
-            "      final wait: {}",
+            "        final wait: {}",
             format_wait_tiles(&next.acceptance_after_discard.tiles)
         ));
     }
-    lines.extend(format_prospective_value(value));
+    lines.extend(format_prospective_value(variant, value));
     lines
 }
 
@@ -660,42 +682,59 @@ fn format_wait_tiles(tiles: &[EffectiveAcceptanceTile]) -> String {
 
 // 2手目の打牌後がテンパイの場合の将来打点。ダマ / リーチ両方の baseline の値をそのまま出し、
 // 表示専用に打点を求め直さない。評価しなかった枝は理由だけを出す。
-fn format_prospective_value(value: Option<&ProspectiveDrawValue>) -> Vec<String> {
+//
+// `selection value` は打牌選択が実際に使った値で、2手先評価が持つ値そのもの。
+fn format_prospective_value(
+    variant: &DrawVariantLookaheadDiagnostic,
+    value: Option<&ProspectiveDrawVariantValue>,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "        selection value: {}",
+        variant
+            .prospective_value
+            .map_or_else(|| UNKNOWN.to_string(), |value| value.to_string())
+    )];
+
     let Some(value) = value else {
-        return Vec::new();
+        return lines;
     };
 
     match &value.outcome {
         ProspectiveOutcome::NoNextDiscard => {
-            vec![format!("      prospective value: {NONE}")]
+            lines.push(format!("        prospective value: {NONE}"));
         }
         ProspectiveOutcome::NotTenpai => {
-            vec![format!(
-                "      prospective value: {NOT_EVALUATED} (not tenpai)"
-            )]
+            lines.push(format!(
+                "        prospective value: {NOT_EVALUATED} (not tenpai)"
+            ));
         }
-        ProspectiveOutcome::Unavailable(reason) => vec![format!(
-            "      prospective value: {UNKNOWN} ({})",
+        ProspectiveOutcome::Unavailable(reason) => lines.push(format!(
+            "        prospective value: {UNKNOWN} ({})",
             prospective_unavailable_label(*reason)
-        )],
+        )),
         ProspectiveOutcome::Evaluated(tenpai) => {
-            let mut lines = vec!["      prospective value".to_string()];
+            // 採用した baseline と、ダマ打点を確定値に使えるかどうかのロン可否を並べる。
+            lines.push(format!(
+                "        prospective value ({:?}, can ron: {})",
+                tenpai.mode,
+                format_optional_yes_no(tenpai.can_ron)
+            ));
             lines.extend(format_prospective_baseline("damaten", &tenpai.damaten));
             lines.extend(format_prospective_baseline("reach", &tenpai.reach));
-            lines
         }
     }
+    lines
 }
 
 // baseline 1つ分の将来打点。残枚数加重平均のあとに、和了牌の物理牌ごとの支払いを並べる。
 fn format_prospective_baseline(label: &str, value: &ProspectiveBaselineValue) -> Vec<String> {
     let mut lines = vec![format!(
-        "        {label}: {}",
+        "          {label}: {}",
         offense_value_label(value.weighted_average)
     )];
     for winning_tile in value.winning_tile_values() {
         lines.push(format!(
-            "          {}: {} remaining / {}",
+            "            {}: {} remaining / {}",
             winning_tile.winning_tile.to_mjai_string(),
             winning_tile.remaining,
             prospective_value_label(winning_tile.value)
@@ -728,7 +767,6 @@ fn prospective_unknown_reason_label(reason: ProspectiveUnknownReason) -> String 
 
 fn prospective_unavailable_label(reason: ProspectiveUnavailable) -> &'static str {
     match reason {
-        ProspectiveUnavailable::UnresolvedRedFive => "unresolved red five",
         ProspectiveUnavailable::CompletedHand => "completed hand",
     }
 }
@@ -4359,16 +4397,19 @@ mod tests {
         let lookahead = section(&output, "Lookahead");
 
         let branch = [
-            "      next discard: 9s",
-            "      next shanten: 0",
-            "      next acceptance: 4 / 1 types",
-            "      next iishanten shape: Unknown",
-            "      final wait: 8p(4)",
-            "      prospective value",
-            "        damaten: 3200",
-            "          8p: 4 remaining / 3200",
-            "        reach: 6400",
-            "          8p: 4 remaining / 6400",
+            "        next discard: 9s",
+            "        next shanten: 0",
+            "        next acceptance: 4 / 1 types",
+            "        next iishanten shape: Unknown",
+            "        final wait: 8p(4)",
+            // ダマ 3200 は threshold 未満なので production 判断はリーチ。選択に使う値は
+            // リーチ打点 6400 × 残枚数 4。
+            "        selection value: 25600",
+            "        prospective value (Reach, can ron: unknown)",
+            "          damaten: 3200",
+            "            8p: 4 remaining / 3200",
+            "          reach: 6400",
+            "            8p: 4 remaining / 6400",
         ]
         .join("\n");
         assert!(lookahead.contains(&branch), "{lookahead}");
@@ -4381,14 +4422,16 @@ mod tests {
         let lookahead = section(&output, "Lookahead");
 
         let branch = [
-            "      final wait: 3m(2) 4p(2)",
-            "      prospective value",
-            "        damaten: unknown",
-            "          3m: 2 remaining / 1300",
-            "          4p: 2 remaining / no yaku",
-            "        reach: 2100",
-            "          3m: 2 remaining / 2600",
-            "          4p: 2 remaining / 1600",
+            "        final wait: 3m(2) 4p(2)",
+            // ダマでは役が無い待ちがあるので production 判断はリーチ。2600 × 2 + 1600 × 2。
+            "        selection value: 8400",
+            "        prospective value (Reach, can ron: unknown)",
+            "          damaten: unknown",
+            "            3m: 2 remaining / 1300",
+            "            4p: 2 remaining / no yaku",
+            "          reach: 2100",
+            "            3m: 2 remaining / 2600",
+            "            4p: 2 remaining / 1600",
         ]
         .join("\n");
         assert!(lookahead.contains(&branch), "{lookahead}");
@@ -4452,8 +4495,8 @@ mod tests {
             .starts_with("unknown (scoring error: "),
         );
         assert_eq!(
-            prospective_unavailable_label(ProspectiveUnavailable::UnresolvedRedFive),
-            "unresolved red five"
+            prospective_unavailable_label(ProspectiveUnavailable::CompletedHand),
+            "completed hand"
         );
     }
 

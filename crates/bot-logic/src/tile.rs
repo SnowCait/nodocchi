@@ -269,6 +269,59 @@ pub fn count_dora(tile: TileId, dora_indicators: &[TileId]) -> u8 {
     count_indicated_dora(tile.tile_type(), dora_indicators) + u8::from(tile.is_red())
 }
 
+/// 牌種単位の残枚数を分けた、物理牌1つ分の内訳。
+///
+/// 点数が変わるのは赤5かどうかだけなので、赤と黒をそれぞれ1つにまとめ、代表牌と残枚数を持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalTileVariant {
+    /// この variant の代表牌。同じ赤 / 黒の物理牌はどれを選んでも打点が同じになる。
+    pub tile: TileId,
+    /// この variant の残枚数。同じ牌種の variant の合計は元の残枚数と一致する。
+    pub remaining: u8,
+}
+
+/// 牌種単位の残枚数を、赤5 / 黒5の物理牌 variant へ分ける。
+///
+/// 数えるのは `remaining` のうち赤5が何枚かだけで、黒牌の物理牌 identity は数えない。赤5は
+/// 牌種ごとに1枚しかないため、まだ見えていなければ赤1枚・黒はその残り、既に見えていれば
+/// すべて黒になる。赤5の無い牌種は黒の variant 1つだけで、その残枚数が元の残枚数になる。
+/// 赤5がまだ見えていない場合に「黒5として扱う」ような推測はしない。
+///
+/// テンパイの最終和了牌 ([`crate::tenpai_hand_value`]) と2手先診断の仮想ツモ牌
+/// ([`crate::lookahead`]) はこの1本を共有し、赤 / 黒の分割規則を複製しない。
+pub fn physical_tile_variants(
+    tile_type: TileType,
+    remaining: u8,
+    red_five_seen: bool,
+) -> impl Iterator<Item = PhysicalTileVariant> {
+    let copy = |red: bool| TileId::copies(tile_type).find(|tile| tile.is_red() == red);
+    let red = copy(true).filter(|_| !red_five_seen);
+    let red_remaining = u8::from(red.is_some()).min(remaining);
+    let variant = |tile: Option<TileId>, remaining: u8| {
+        let tile = tile.filter(|_| remaining > 0)?;
+        Some(PhysicalTileVariant { tile, remaining })
+    };
+
+    [
+        variant(red, red_remaining),
+        variant(copy(false), remaining - red_remaining),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// 牌種ごとに、その赤5が既に見えているか。
+///
+/// 手牌・副露・見え牌など、物理牌が判明している牌をすべて渡す。赤5かどうかだけを見て枚数は
+/// 数えないため、同じ牌が重複して渡されてもよい。
+pub fn seen_red_fives(tiles: impl IntoIterator<Item = TileId>) -> [bool; TileType::COUNT] {
+    let mut seen = [false; TileType::COUNT];
+    for tile in tiles.into_iter().filter(|tile| tile.is_red()) {
+        seen[tile.tile_type().index()] = true;
+    }
+    seen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

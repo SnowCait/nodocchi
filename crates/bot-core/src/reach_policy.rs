@@ -7,8 +7,54 @@
 //! この層は待ち・フリテン・ダマ打点を計算しない。既にそれぞれの source of truth から求めた
 //! 結論 (合法 Reach の有無・[`DamatenValueVerdict`]・生きた待ちの残枚数) を受け取り、そこから
 //! 理由を1つ選ぶだけの pure helper になっている。
+//!
+//! # リーチの合法性
+//!
+//! 「リーチを宣言できる局面か」という条件も [`is_reach_legal`] 1本だけが持つ。合法手を組み立て
+//! る scenario と、将来テンパイの Reach / Damaten 判断を再現する経路が同じ条件を別々に書かない
+//! ようにするための共有 helper で、条件を満たすかどうかの材料 ([`ReachLegalityFacts`]) は
+//! 呼び出し側がそれぞれの局面から集める。
 
 use crate::damaten_value::DamatenValueVerdict;
+
+/// リーチ宣言に必要な持ち点 [点]。inclusive。
+pub const REACH_MIN_SCORE: i32 = 1000;
+
+/// リーチ宣言に必要な山の残りツモ牌数。inclusive。
+pub const REACH_MIN_REMAINING_TILES: u32 = 4;
+
+/// リーチが合法かを決める局面の材料。
+///
+/// unknown な材料は `None` で表す。分からない材料からリーチ不可と推測しないため、`None` は
+/// その条件を満たすものとして扱う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReachLegalityFacts {
+    /// 門前か。自分の副露が分からない場合は `None`。
+    pub menzen: Option<bool>,
+    /// 既にリーチしているか。自分の席を特定できない場合は `None`。
+    pub already_reached: Option<bool>,
+    /// 自分の現在持ち点 [点]。
+    pub score: Option<i32>,
+    /// 山の残りツモ牌数。
+    pub remaining_tiles: Option<u32>,
+    /// その打牌の後がテンパイか。
+    pub tenpai_after_discard: bool,
+}
+
+/// 局面がリーチ宣言の条件を満たすか。
+///
+/// RiichiEnv の4麻 semantics に合わせ、門前・未リーチ・打牌後テンパイ・持ち点・残りツモ牌数の
+/// 全てを満たす場合だけ合法とする。unknown な材料はリーチ不可と推測せず、明示的に不可能と
+/// 分かる場合だけ `false` にする。
+pub fn is_reach_legal(facts: ReachLegalityFacts) -> bool {
+    facts.menzen.unwrap_or(true)
+        && !facts.already_reached.unwrap_or(false)
+        && facts.tenpai_after_discard
+        && facts.score.is_none_or(|score| score >= REACH_MIN_SCORE)
+        && facts
+            .remaining_tiles
+            .is_none_or(|remaining| remaining >= REACH_MIN_REMAINING_TILES)
+}
 
 // 補正後の待ち枚数がこの枚数以上ならリーチする。生牌の単騎は3枚なので、待ち枚数だけを理由に
 // 抑制するのは3枚未満に限る。
@@ -97,6 +143,57 @@ pub fn decide_reach_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legality_facts() -> ReachLegalityFacts {
+        ReachLegalityFacts {
+            menzen: Some(true),
+            already_reached: Some(false),
+            score: Some(25_000),
+            remaining_tiles: Some(70),
+            tenpai_after_discard: true,
+        }
+    }
+
+    #[test]
+    fn every_reach_condition_must_hold() {
+        assert!(is_reach_legal(legality_facts()));
+
+        for facts in [
+            ReachLegalityFacts {
+                menzen: Some(false),
+                ..legality_facts()
+            },
+            ReachLegalityFacts {
+                already_reached: Some(true),
+                ..legality_facts()
+            },
+            ReachLegalityFacts {
+                score: Some(REACH_MIN_SCORE - 100),
+                ..legality_facts()
+            },
+            ReachLegalityFacts {
+                remaining_tiles: Some(REACH_MIN_REMAINING_TILES - 1),
+                ..legality_facts()
+            },
+            ReachLegalityFacts {
+                tenpai_after_discard: false,
+                ..legality_facts()
+            },
+        ] {
+            assert!(!is_reach_legal(facts), "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_facts_do_not_conclude_that_reach_is_illegal() {
+        assert!(is_reach_legal(ReachLegalityFacts {
+            menzen: None,
+            already_reached: None,
+            score: None,
+            remaining_tiles: None,
+            tenpai_after_discard: true,
+        }));
+    }
 
     #[test]
     fn an_illegal_reach_never_selects_reach() {

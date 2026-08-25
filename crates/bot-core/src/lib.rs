@@ -81,15 +81,18 @@ pub use open_hand_threat::{
 };
 pub use prospective_value::{
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
-    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveTenpaiValue,
-    ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
-    ProspectiveWinningTileValue,
+    ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
+    ProspectiveTenpaiValue, ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue,
+    ProspectiveWaitValue, ProspectiveWinningTileValue,
 };
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
     PushPullTenpaiWaitFacts, decide_push_pull, push_pull_inputs_from_context,
 };
-pub use reach_policy::{REACH_MIN_REMAINING, decide_reach_reason};
+pub use reach_policy::{
+    REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
+    decide_reach_reason, is_reach_legal,
+};
 pub use threat::{
     FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,
     PlayerThreatDiagnostic, PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts,

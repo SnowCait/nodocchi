@@ -5,6 +5,7 @@ use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_st
 use crate::selection::{
     DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
     best_discard_selection_index_with_forward_metrics, compare_discard_selection_candidates,
+    resolve_prospective_value_axis,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
@@ -639,6 +640,11 @@ pub enum DiscardComparisonReason {
     Shanten,
     IsolatedTile,
     IsolatedHonor,
+    /// 打点込みの前方評価。Σ(残枚数 × そのテンパイの Σ(和了牌残枚数 × 支払い合計))。
+    ///
+    /// 現在打牌の比較では1手目の物理牌 variant 残枚数で重み付けし、2手目の打牌候補の比較では
+    /// そのテンパイ自身の値をそのまま比べる。両側の値が確定している場合だけ決着させる。
+    WeightedProspectiveValue,
     /// 1向聴限定の前方評価。Σ(受け入れ残枚数 × そのテンパイの和了牌残枚数)。
     WeightedTenpaiWaitRemaining,
     /// 1向聴限定の前方評価。Σ(受け入れ残枚数 × そのテンパイの待ち牌種類数)。
@@ -982,6 +988,8 @@ pub struct DiscardCandidateDiagnostic {
     pub tenpai_wait: Option<TenpaiWaitMetric>,
     /// 2向聴以上で打牌選択に使った weighted next acceptance。
     pub next_acceptance: Option<NextAcceptanceMetric>,
+    /// 打牌選択に使った打点込みの前方集計値。確定しなかった候補と計算しなかった候補は `None`。
+    pub prospective_value: Option<u64>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -1021,6 +1029,9 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
 ) -> DiscardDecisionDiagnostic {
+    // 打点込みの軸は候補集合単位で決まる。診断が報告する比較理由を本番選択と一致させるため、
+    // 診断側でも同じ解決を通した集計値を使う。
+    let forward_metrics = resolve_prospective_value_axis(evaluations, forward_metrics);
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
         tenpai_wait: forward_metrics
@@ -1029,10 +1040,13 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
         next_acceptance: forward_metrics
             .get(index)
             .and_then(|metric| metric.next_acceptance),
+        prospective_value: forward_metrics
+            .get(index)
+            .and_then(|metric| metric.prospective_value),
     };
 
     let best_index =
-        best_discard_selection_index_with_forward_metrics(evaluations, forward_metrics);
+        best_discard_selection_index_with_forward_metrics(evaluations, &forward_metrics);
     let selected = best_index.map(|index| evaluations[index].clone());
 
     let candidates = evaluations
@@ -1078,6 +1092,9 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
                 next_acceptance: forward_metrics
                     .get(index)
                     .and_then(|metric| metric.next_acceptance),
+                prospective_value: forward_metrics
+                    .get(index)
+                    .and_then(|metric| metric.prospective_value),
             }
         })
         .collect();
@@ -1100,6 +1117,7 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
         .map(|&tenpai_wait| ForwardMetrics {
             tenpai_wait,
             next_acceptance: None,
+            prospective_value: tenpai_wait.and_then(|metric| metric.prospective_value),
         })
         .collect();
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
@@ -1479,6 +1497,24 @@ pub(crate) fn decorate_evaluations(
             );
         }
     }
+}
+
+/// 物理牌一覧から、打牌候補1件が実際に切る物理牌を1枚だけ切り離す。
+///
+/// 一致条件は牌種と赤フラグ (`discards_red_five`) の両方で、一致する物理牌が無ければ別の牌で
+/// 代用せず `None`。返り値は切る物理牌と、それを除いた残りの物理牌一覧。赤5と通常5では打点も
+/// 評価も変わるため、牌種だけで代用しない。
+///
+/// 打牌後の手牌を必要とする経路 (2手先評価の仮想局面・押し引きの打点 proxy・ダマ打点) はこの
+/// 1本を共有し、同じ組み立てを複製しない。除去は1枚だけで、残りの牌の並びには意味を持たせない。
+pub fn split_discarded_tile(
+    mut tiles: Vec<TileId>,
+    evaluation: &DiscardEvaluation,
+) -> Option<(TileId, Vec<TileId>)> {
+    let discarded = tiles.iter().position(|tile| {
+        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
+    })?;
+    Some((tiles.remove(discarded), tiles))
 }
 
 /// 指定牌種を切るときに使う物理牌を返す。

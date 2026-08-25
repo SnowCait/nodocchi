@@ -10,6 +10,31 @@
 //! [`DiscardEvaluation`] から求める。テンパイ専用の待ち計算器は持たず、テンパイ形の
 //! `acceptance_total_remaining()` / `acceptance_type_count()` をそのまま和了牌の残枚数・待ち牌
 //! 種類数として使う。
+//!
+//! # 打点込みの集計値
+//!
+//! 将来テンパイの確定打点を重みに含めた [`WeightedForwardMetric::prospective_value`] も持つ。
+//! 打点そのものは bot-logic の責務ではないため、上位層が渡す評価器
+//! ([`crate::lookahead::ProspectiveTenpaiValuator`]) の結果をそのまま集計するだけで、ここでは
+//! Reach / Damaten policy も点数計算も持たない。確定できない枝がある候補と、集計対象の枝が
+//! 1つも無い候補は打点込みの値を持たない (`None`)。
+//!
+//! # 打点込みの軸は候補集合単位で決める
+//!
+//! 打点を確定できない候補が混ざる場合に「その2候補だけ打点軸を飛ばす」と比較が循環する。
+//!
+//! ```text
+//! A: 打点 100 / 待ち 1
+//! B: 打点  50 / 待ち 3
+//! C: 打点 不明 / 待ち 2
+//!
+//! A > B (打点) / B > C (待ち) / C > A (待ち)
+//! ```
+//!
+//! そのため軸の有効・無効は候補ごとや比較ごとではなく、pre-acceptance 軸まで同順位になる候補
+//! 集合 (cohort) 単位で決める ([`resolve_prospective_value_axis`])。cohort の全候補で打点が
+//! 確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化して既存
+//! weighted wait 以降へ委ねる。
 
 use crate::discard::{
     DiscardComparison, DiscardComparisonReason, DiscardEvaluation,
@@ -28,22 +53,56 @@ pub(crate) const TENPAI_WAIT_TARGET_SHANTEN: i8 = 1;
 /// 枝だけを集計する。1向聴では `required_next_shanten = 0` なので next acceptance をテンパイ待ち
 /// として解釈し、2向聴以上では1手進んだ後の次の有効牌として解釈する。
 /// どちらも平均や確率へ正規化しない生の重み付き合計で、桁溢れを避けるため `u32` で保持する。
+///
+/// `prospective_value` は同じ枝を将来テンパイの確定打点で重み付けした
+/// Σ(1手目の物理牌 variant 残枚数 × Σ(最終和了牌 variant 残枚数 × 支払い合計))。打点を確定
+/// できない枝が1つでもある候補と、集計対象の枝が1つも無い候補は `None` で、0点として集計
+/// しない。打点を評価しなかった場合も同じく `None` になり、どれもこの軸を使わないという同じ
+/// 意味になる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WeightedForwardMetric {
     pub weighted_remaining: u32,
     pub weighted_type_count: u32,
+    pub prospective_value: Option<u64>,
 }
 
-impl WeightedForwardMetric {
-    /// 受け入れ牌1枚分の枝を加算する。
+/// 受け入れ牌の枝を1つずつ加算して [`WeightedForwardMetric`] を組み立てる accumulator。
+///
+/// 打点込みの集計は「1つでも確定しない枝があれば候補全体が確定しない」という規則なので、
+/// 加算途中の状態を [`WeightedForwardMetric`] とは別に持つ。集計結果は加算した枝の値だけで
+/// 決まるので、詳細診断から集計する経路と選択専用経路は必ず同じ値になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ForwardMetricAccumulator {
+    weighted_remaining: u32,
+    weighted_type_count: u32,
+    // 集計対象になった枝が1つでもあったか。1つも無ければ打点込みの集計値を持たない。
+    accumulated_any: bool,
+    // 集計対象の枝がすべて確定している場合だけ `Some`。
+    prospective_total: Option<u64>,
+}
+
+impl ForwardMetricAccumulator {
+    pub(crate) fn new() -> Self {
+        Self {
+            prospective_total: Some(0),
+            ..Self::default()
+        }
+    }
+
+    /// 受け入れ牌の物理牌 variant 1つ分の枝を加算する。
     ///
-    /// `next_discard` は既存評価が選んだ2手目の最良打牌。`None` の場合、または次打牌後の向聴数が
-    /// `required_next_shanten` と一致しない場合、その枝の寄与は 0 にする。
+    /// `next_discard` は2手目の最良打牌。`None` の場合、または次打牌後の向聴数が
+    /// `required_next_shanten` と一致しない場合、その枝は集計対象にならず寄与も 0 になる。
+    ///
+    /// `prospective_value` は2手目の最良打牌後のテンパイの確定打点。集計対象の枝で `None`
+    /// (打点を確定できない・評価しなかった) が1つでもあれば、候補全体の打点込み集計値を
+    /// `None` にする。確定しない打点を 0 点として集計しない。
     pub(crate) fn accumulate(
         &mut self,
         first_draw_remaining: u8,
         required_next_shanten: i8,
         next_discard: Option<&DiscardEvaluation>,
+        prospective_value: Option<u64>,
     ) {
         let Some(next) = next_discard else {
             return;
@@ -55,6 +114,20 @@ impl WeightedForwardMetric {
         let weight = u32::from(first_draw_remaining);
         self.weighted_remaining += weight * u32::from(next.acceptance_total_remaining());
         self.weighted_type_count += weight * next.acceptance_type_count() as u32;
+
+        self.accumulated_any = true;
+        self.prospective_total = self
+            .prospective_total
+            .zip(prospective_value)
+            .map(|(total, value)| total + u64::from(first_draw_remaining) * value);
+    }
+
+    pub(crate) fn finish(self) -> WeightedForwardMetric {
+        WeightedForwardMetric {
+            weighted_remaining: self.weighted_remaining,
+            weighted_type_count: self.weighted_type_count,
+            prospective_value: self.prospective_total.filter(|_| self.accumulated_any),
+        }
     }
 }
 
@@ -67,6 +140,22 @@ pub type NextAcceptanceMetric = WeightedForwardMetric;
 pub struct ForwardMetrics {
     pub tenpai_wait: Option<TenpaiWaitMetric>,
     pub next_acceptance: Option<NextAcceptanceMetric>,
+    /// 向聴数に依らない打点込みの集計値。確定できない場合と集計しなかった場合は `None`。
+    ///
+    /// 現在打牌の比較では [`TenpaiWaitMetric::prospective_value`] と同じ値を持ち、2手目の打牌
+    /// 候補の比較ではそのテンパイ自身の確定打点をそのまま持つ。
+    pub prospective_value: Option<u64>,
+}
+
+impl ForwardMetrics {
+    /// 打点込みの集計値だけを持つ前方集計値。2手目の打牌候補の比較で使う。
+    pub fn from_prospective_value(prospective_value: Option<u64>) -> Self {
+        Self {
+            tenpai_wait: None,
+            next_acceptance: None,
+            prospective_value,
+        }
+    }
 }
 
 /// 打牌選択1候補分の入力。1手評価と向聴数別の前方集計値を組にする。
@@ -78,6 +167,12 @@ pub struct DiscardSelectionCandidate<'a> {
     pub evaluation: &'a DiscardEvaluation,
     pub tenpai_wait: Option<TenpaiWaitMetric>,
     pub next_acceptance: Option<NextAcceptanceMetric>,
+    /// 打点込みの前方集計値。
+    ///
+    /// 軸を使うかどうかは候補集合単位で決まるため、比較へ渡す前に
+    /// [`resolve_prospective_value_axis`] を通した値であること。比較そのものは両側が `Some`
+    /// の場合だけ決着させる。
+    pub prospective_value: Option<u64>,
 }
 
 impl<'a> DiscardSelectionCandidate<'a> {
@@ -87,6 +182,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             evaluation,
             tenpai_wait: None,
             next_acceptance: None,
+            prospective_value: None,
         }
     }
 }
@@ -97,12 +193,14 @@ impl<'a> DiscardSelectionCandidate<'a> {
 ///
 /// ```text
 /// Shanten → IsolatedTile → IsolatedHonor
+///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
 ///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ...
 /// ```
 ///
-/// 各軸は両候補の向聴数が等しく、対応する前方集計値が両方にある場合だけ決着させる。
+/// 各軸は両候補の向聴数が等しく、対応する前方集計値が両方にある場合だけ決着させる。打点込みの
+/// 軸だけは向聴数で限定せず、集計した経路 (1向聴の前方評価と2手目の打牌候補) でのみ値が入る。
 pub fn compare_discard_selection_candidates(
     candidate: &DiscardSelectionCandidate,
     current_best: &DiscardSelectionCandidate,
@@ -110,6 +208,10 @@ pub fn compare_discard_selection_candidates(
     if let Some(comparison) =
         compare_discard_before_acceptance(candidate.evaluation, current_best.evaluation)
     {
+        return comparison;
+    }
+
+    if let Some(comparison) = compare_weighted_prospective_value(candidate, current_best) {
         return comparison;
     }
 
@@ -137,20 +239,61 @@ pub fn best_discard_selection_index(
         .map(|&tenpai_wait| ForwardMetrics {
             tenpai_wait,
             next_acceptance: None,
+            prospective_value: tenpai_wait.and_then(|metric| metric.prospective_value),
         })
         .collect();
     best_discard_selection_index_with_forward_metrics(evaluations, &metrics)
+}
+
+/// 打点込みの軸を候補集合単位で有効化した前方集計値を返す。
+///
+/// 打点込みの軸が使われるのは pre-acceptance 軸 (Shanten → IsolatedTile → IsolatedHonor) まで
+/// 同順位になる候補同士の比較だけなので、その cohort 単位で軸の有無を揃える。cohort の全候補で
+/// 打点が確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化する。
+///
+/// 比較ごとに軸の有無が変わると順序が循環し、候補の列挙順で選択結果が変わってしまう。cohort が
+/// 違う候補同士は pre-acceptance 軸で先に決着するため、cohort をまたいで軸の有無が違っても
+/// 順序は壊れない。
+///
+/// 戻り値は `evaluations` と同じ順序・同じ件数。`forward_metrics` の範囲外は前方評価なしとして
+/// 扱う。打点込みの軸以外の集計値は変更しない。
+pub fn resolve_prospective_value_axis(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+) -> Vec<ForwardMetrics> {
+    let metrics_at = |index: usize| forward_metrics.get(index).copied().unwrap_or_default();
+    // pre-acceptance 軸まで同順位という関係は「同じ向聴数・同じ孤立牌区分」の同値関係なので、
+    // 候補ごとに同順位の相手を集めても cohort の判断は一致する。
+    let ties_with = |left: usize, right: usize| {
+        compare_discard_before_acceptance(&evaluations[left], &evaluations[right]).is_none()
+    };
+
+    (0..evaluations.len())
+        .map(|index| {
+            let cohort_is_known = (0..evaluations.len())
+                .filter(|&other| ties_with(index, other))
+                .all(|other| metrics_at(other).prospective_value.is_some());
+            ForwardMetrics {
+                prospective_value: metrics_at(index)
+                    .prospective_value
+                    .filter(|_| cohort_is_known),
+                ..metrics_at(index)
+            }
+        })
+        .collect()
 }
 
 pub fn best_discard_selection_index_with_forward_metrics(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
 ) -> Option<usize> {
-    let metrics_at = |index: usize| forward_metrics.get(index).copied().unwrap_or_default();
+    let resolved = resolve_prospective_value_axis(evaluations, forward_metrics);
+    let metrics_at = |index: usize| resolved.get(index).copied().unwrap_or_default();
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
         tenpai_wait: metrics_at(index).tenpai_wait,
         next_acceptance: metrics_at(index).next_acceptance,
+        prospective_value: metrics_at(index).prospective_value,
     };
 
     let mut best: Option<usize> = None;
@@ -166,6 +309,23 @@ pub fn best_discard_selection_index_with_forward_metrics(
         }
     }
     best
+}
+
+// 打点込みの前方集計値による比較。決着しなければ `None` を返して既存比較へ委ねる。
+//
+// 軸を使うかどうかは呼び出し前に候補集合単位で決まっている ([`resolve_prospective_value_axis`])
+// ため、ここでの `None` は「この cohort では打点軸を使わない」を意味する。確定しない値を 0 点
+// として順位付けしない。
+fn compare_weighted_prospective_value(
+    candidate: &DiscardSelectionCandidate,
+    current_best: &DiscardSelectionCandidate,
+) -> Option<DiscardComparison> {
+    let candidate_value = candidate.prospective_value?;
+    let best_value = current_best.prospective_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::WeightedProspectiveValue,
+    })
 }
 
 // 1向聴限定の前方評価による比較。決着しなければ `None` を返して既存比較へ委ねる。
@@ -336,6 +496,7 @@ mod tests {
         Some(TenpaiWaitMetric {
             weighted_remaining: remaining,
             weighted_type_count: type_count,
+            prospective_value: None,
         })
     }
 
@@ -347,6 +508,20 @@ mod tests {
             evaluation,
             tenpai_wait,
             next_acceptance: None,
+            prospective_value: None,
+        }
+    }
+
+    fn value_candidate<'a>(
+        evaluation: &'a DiscardEvaluation,
+        tenpai_wait: Option<TenpaiWaitMetric>,
+        prospective_value: Option<u64>,
+    ) -> DiscardSelectionCandidate<'a> {
+        DiscardSelectionCandidate {
+            evaluation,
+            tenpai_wait,
+            next_acceptance: None,
+            prospective_value,
         }
     }
 
@@ -358,15 +533,27 @@ mod tests {
             evaluation,
             tenpai_wait: None,
             next_acceptance,
+            prospective_value: None,
         }
+    }
+
+    // 枝を1つずつ加算した集計値。集計規則そのものを固定するために accumulator を直接使う。
+    fn accumulated(
+        branches: &[(u8, Option<&DiscardEvaluation>, Option<u64>)],
+        required_next_shanten: i8,
+    ) -> WeightedForwardMetric {
+        let mut accumulator = ForwardMetricAccumulator::new();
+        for &(remaining, next_discard, value) in branches {
+            accumulator.accumulate(remaining, required_next_shanten, next_discard, value);
+        }
+        accumulator.finish()
     }
 
     #[test]
     fn accumulates_the_weighted_wait_of_a_tenpai_branch() {
-        let mut metric = TenpaiWaitMetric::default();
         let tenpai = evaluation("E", 0, &[("3m", 4), ("6m", 4)]);
 
-        metric.accumulate(4, 0, Some(&tenpai));
+        let metric = accumulated(&[(4, Some(&tenpai), None)], 0);
 
         assert_eq!(metric.weighted_remaining, 4 * 8);
         assert_eq!(metric.weighted_type_count, 4 * 2);
@@ -374,53 +561,210 @@ mod tests {
 
     #[test]
     fn skips_branches_without_a_next_discard() {
-        let mut metric = TenpaiWaitMetric::default();
-        metric.accumulate(4, 0, None);
-        assert_eq!(metric, TenpaiWaitMetric::default());
+        assert_eq!(
+            accumulated(&[(4, None, None)], 0),
+            WeightedForwardMetric::default()
+        );
     }
 
     #[test]
     fn skips_branches_that_do_not_reach_tenpai() {
-        let mut metric = TenpaiWaitMetric::default();
         let iishanten = evaluation("E", 1, &[("3m", 4)]);
 
-        metric.accumulate(4, 0, Some(&iishanten));
-
-        assert_eq!(metric, TenpaiWaitMetric::default());
+        assert_eq!(
+            accumulated(&[(4, Some(&iishanten), None)], 0),
+            WeightedForwardMetric::default()
+        );
     }
 
     #[test]
     fn dead_wait_tenpai_contributes_zero() {
         // 待ちがすべて見えているテンパイへ進む枝は寄与 0。計算していない状態とは区別する。
-        let mut metric = TenpaiWaitMetric::default();
         let dead = evaluation("E", 0, &[]);
 
-        metric.accumulate(4, 0, Some(&dead));
-
-        assert_eq!(metric, TenpaiWaitMetric::default());
+        assert_eq!(
+            accumulated(&[(4, Some(&dead), None)], 0),
+            WeightedForwardMetric::default()
+        );
     }
 
     #[test]
     fn accumulates_weighted_next_acceptance() {
-        let mut metric = WeightedForwardMetric::default();
         let first = evaluation(
             "E",
             2,
             &[("3m", 4), ("6m", 4), ("9m", 4), ("3p", 4), ("6p", 4)],
         );
         let second = evaluation("S", 2, &[("3s", 4), ("6s", 4), ("9s", 2)]);
-        metric.accumulate(4, 2, Some(&first));
-        metric.accumulate(2, 2, Some(&second));
+        let metric = accumulated(&[(4, Some(&first), None), (2, Some(&second), None)], 2);
         assert_eq!(metric.weighted_remaining, 100);
         assert_eq!(metric.weighted_type_count, 26);
+        assert_eq!(metric.prospective_value, None);
     }
 
     #[test]
     fn next_acceptance_skips_a_branch_that_loses_progress() {
-        let mut metric = WeightedForwardMetric::default();
         let back_to_three = evaluation("E", 3, &[("3m", 4)]);
-        metric.accumulate(4, 2, Some(&back_to_three));
-        assert_eq!(metric, WeightedForwardMetric::default());
+        assert_eq!(
+            accumulated(&[(4, Some(&back_to_three), None)], 2),
+            WeightedForwardMetric::default()
+        );
+    }
+
+    #[test]
+    fn accumulates_the_prospective_value_by_the_first_draw_remaining() {
+        let tenpai = evaluation("E", 0, &[("3m", 4)]);
+
+        let metric = accumulated(
+            &[
+                (4, Some(&tenpai), Some(8000)),
+                (2, Some(&tenpai), Some(2000)),
+            ],
+            0,
+        );
+
+        assert_eq!(metric.prospective_value, Some(4 * 8000 + 2 * 2000));
+    }
+
+    #[test]
+    fn an_unknown_branch_value_makes_the_whole_candidate_unknown() {
+        // 打点を確定できない枝がある候補は 0 点として集計せず、軸そのものを使わない。
+        let tenpai = evaluation("E", 0, &[("3m", 4)]);
+
+        assert_eq!(
+            accumulated(
+                &[(4, Some(&tenpai), Some(8000)), (2, Some(&tenpai), None)],
+                0
+            )
+            .prospective_value,
+            None,
+        );
+    }
+
+    #[test]
+    fn a_branch_that_does_not_reach_tenpai_contributes_no_prospective_value() {
+        // テンパイへ進まない枝は将来打点そのものを持たない。確定しない枝とは区別する。
+        let iishanten = evaluation("E", 1, &[("3m", 4)]);
+        let tenpai = evaluation("S", 0, &[("3p", 4)]);
+
+        assert_eq!(
+            accumulated(
+                &[(4, Some(&iishanten), None), (2, Some(&tenpai), Some(5200))],
+                0
+            )
+            .prospective_value,
+            Some(2 * 5200),
+        );
+    }
+
+    #[test]
+    fn a_candidate_without_any_accumulated_branch_has_no_prospective_value() {
+        // 集計対象の枝が1つも無い候補は打点 0 ではなく値を持たない。集計結果が枝の値だけで
+        // 決まるので、詳細診断から集計しても選択専用経路と同じ結論になる。
+        let iishanten = evaluation("E", 1, &[("3m", 4)]);
+
+        assert_eq!(accumulated(&[], 0).prospective_value, None);
+        assert_eq!(
+            accumulated(&[(4, Some(&iishanten), None)], 0).prospective_value,
+            None,
+        );
+    }
+
+    #[test]
+    fn a_branch_without_an_evaluated_value_makes_the_candidate_unknown() {
+        // 評価器を渡さなければテンパイ枝の打点も `None` なので、打点込みの軸は使わない。
+        let tenpai = evaluation("E", 0, &[("3m", 4)]);
+
+        assert_eq!(
+            accumulated(&[(4, Some(&tenpai), None)], 0).prospective_value,
+            None,
+        );
+    }
+
+    #[test]
+    fn prospective_value_outranks_the_weighted_wait() {
+        // 8枚待ち 2000 点より 6枚待ち 8000 点を選ぶ。
+        let wide_wait = evaluation("1m", 1, &[("3m", 4), ("6m", 4)]);
+        let high_value = evaluation("9p", 1, &[("3p", 4), ("6p", 4)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &value_candidate(&high_value, metric(6, 2), Some(6 * 8000)),
+            &value_candidate(&wide_wait, metric(8, 2), Some(8 * 2000)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedProspectiveValue
+        );
+    }
+
+    #[test]
+    fn equal_prospective_value_falls_through_to_the_weighted_wait() {
+        let wide = evaluation("1m", 1, &[("3m", 4), ("6m", 4)]);
+        let narrow = evaluation("9p", 1, &[("3p", 4)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &value_candidate(&wide, metric(64, 16), Some(48_000)),
+            &value_candidate(&narrow, metric(24, 12), Some(48_000)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedTenpaiWaitRemaining
+        );
+    }
+
+    #[test]
+    fn an_unknown_prospective_value_falls_back_to_the_weighted_wait() {
+        let wide = evaluation("1m", 1, &[("3m", 4), ("6m", 4)]);
+        let narrow = evaluation("9p", 1, &[("3p", 4)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &value_candidate(&wide, metric(64, 16), None),
+            &value_candidate(&narrow, metric(24, 12), Some(999_999)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedTenpaiWaitRemaining
+        );
+    }
+
+    #[test]
+    fn shanten_still_outranks_the_prospective_value() {
+        let tenpai = evaluation("1m", 0, &[("3m", 1)]);
+        let iishanten = evaluation("9p", 1, &[("3p", 4), ("6p", 4)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &value_candidate(&iishanten, None, Some(999_999)),
+            &value_candidate(&tenpai, None, Some(0)),
+        );
+
+        assert!(!comparison.candidate_is_better);
+        assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
+    }
+
+    #[test]
+    fn tenpai_candidates_compare_the_prospective_value() {
+        // 2手目の打牌候補はテンパイ同士の比較になる。打点込みの軸は向聴数で限定しない。
+        let wide = evaluation("1m", 0, &[("3m", 4), ("6m", 4)]);
+        let narrow = evaluation("9p", 0, &[("3p", 4)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &value_candidate(&narrow, None, Some(8 * 8000)),
+            &value_candidate(&wide, None, Some(8 * 2000)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedProspectiveValue
+        );
+        // 打点を持たない既存比較では受け入れの広い方が勝つ局面である。
+        assert!(!compare_discard_evaluations(&narrow, &wide).candidate_is_better);
     }
 
     #[test]
@@ -667,6 +1011,222 @@ mod tests {
         assert!(
             compare_discard_selection_candidates(&candidates[1], &candidates[2])
                 .candidate_is_better
+        );
+    }
+
+    // 打点込みの軸を候補ごとに切り替えると循環する典型例。3候補とも同じ1向聴なので、
+    // pre-acceptance 軸まで同順位の1つの cohort に入る。
+    //
+    // ```text
+    // A: 打点 100 / 待ち 1
+    // B: 打点  50 / 待ち 3
+    // C: 打点 不明 / 待ち 2
+    // ```
+    fn cycle_case() -> (Vec<DiscardEvaluation>, Vec<ForwardMetrics>) {
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+            evaluation("1s", 1, &[("4s", 4)]),
+        ];
+        let metrics = vec![
+            forward_metrics(metric(1, 1), Some(100)),
+            forward_metrics(metric(3, 1), Some(50)),
+            forward_metrics(metric(2, 1), None),
+        ];
+        (evaluations, metrics)
+    }
+
+    fn forward_metrics(
+        tenpai_wait: Option<TenpaiWaitMetric>,
+        prospective_value: Option<u64>,
+    ) -> ForwardMetrics {
+        ForwardMetrics {
+            tenpai_wait,
+            next_acceptance: None,
+            prospective_value,
+        }
+    }
+
+    fn candidates_of<'a>(
+        evaluations: &'a [DiscardEvaluation],
+        metrics: &'a [ForwardMetrics],
+    ) -> Vec<DiscardSelectionCandidate<'a>> {
+        evaluations
+            .iter()
+            .zip(metrics)
+            .map(|(evaluation, metric)| DiscardSelectionCandidate {
+                evaluation,
+                tenpai_wait: metric.tenpai_wait,
+                next_acceptance: metric.next_acceptance,
+                prospective_value: metric.prospective_value,
+            })
+            .collect()
+    }
+
+    fn is_better(
+        candidate: &DiscardSelectionCandidate,
+        current_best: &DiscardSelectionCandidate,
+    ) -> bool {
+        compare_discard_selection_candidates(candidate, current_best).candidate_is_better
+    }
+
+    // 全ての順序対で反対称性を、全ての三つ組で推移律を確認する。
+    fn assert_total_order(candidates: &[DiscardSelectionCandidate]) {
+        for left in candidates {
+            for right in candidates {
+                let forward = compare_discard_selection_candidates(left, right);
+                let backward = compare_discard_selection_candidates(right, left);
+                if std::ptr::eq(left.evaluation, right.evaluation) {
+                    assert!(!forward.candidate_is_better);
+                    continue;
+                }
+                assert_ne!(
+                    forward.candidate_is_better, backward.candidate_is_better,
+                    "反対称性"
+                );
+                assert_eq!(forward.reason, backward.reason);
+            }
+        }
+
+        for left in candidates {
+            for middle in candidates {
+                for right in candidates {
+                    if is_better(left, middle) && is_better(middle, right) {
+                        assert!(
+                            is_better(left, right),
+                            "推移律: {:?} > {:?} > {:?}",
+                            left.evaluation.discard,
+                            middle.evaluation.discard,
+                            right.evaluation.discard,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_mixed_cohort_cycles_without_the_axis_resolution() {
+        // 軸を候補ごとに切り替えると A > B (打点) > C (待ち) > A (待ち) で循環する。cohort 単位の
+        // 解決が必要な理由そのものを固定する。
+        let (evaluations, metrics) = cycle_case();
+        let raw = candidates_of(&evaluations, &metrics);
+
+        assert!(is_better(&raw[0], &raw[1]), "打点で A > B");
+        assert!(is_better(&raw[1], &raw[2]), "待ちで B > C");
+        assert!(is_better(&raw[2], &raw[0]), "待ちで C > A");
+    }
+
+    #[test]
+    fn the_axis_resolution_removes_the_cycle_of_a_mixed_cohort() {
+        // cohort に打点不明が1件でもあれば cohort 全体で軸を無効化するので循環しない。
+        let (evaluations, metrics) = cycle_case();
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.prospective_value.is_none()),
+            "cohort 全体で打点軸を使わない"
+        );
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+
+        // 待ち枚数だけの順になる。
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_best_candidate_is_stable_under_permutation() {
+        // 同じ候補集合なら列挙順を変えても同じ打牌を選ぶ。
+        let (evaluations, metrics) = cycle_case();
+        let mut winners = Vec::new();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let permuted: Vec<_> = order.iter().map(|&i| evaluations[i].clone()).collect();
+            let permuted_metrics: Vec<_> = order.iter().map(|&i| metrics[i]).collect();
+            let best =
+                best_discard_selection_index_with_forward_metrics(&permuted, &permuted_metrics)
+                    .expect("最善候補がある");
+            winners.push(permuted[best].discard);
+        }
+
+        assert!(
+            winners.iter().all(|discard| *discard == winners[0]),
+            "{winners:?}"
+        );
+        assert_eq!(winners[0], tile("9p"), "待ち枚数が最大の候補");
+    }
+
+    #[test]
+    fn a_cohort_with_every_value_known_keeps_the_prospective_axis() {
+        // cohort の全候補で打点が確定していれば、従来どおり打点が weighted wait より優先される。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+        ];
+        let metrics = vec![
+            forward_metrics(metric(1, 1), Some(100)),
+            forward_metrics(metric(3, 1), Some(50)),
+        ];
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert_eq!(resolved, metrics, "軸を落とさない");
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(0),
+            "待ちは狭くても打点が高い候補を選ぶ"
+        );
+    }
+
+    #[test]
+    fn another_cohort_does_not_disable_the_prospective_axis() {
+        // cohort が違う候補同士は pre-acceptance 軸で先に決着するので、軸の有無を揃えない。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+            evaluation("1s", 2, &[("4s", 4)]),
+        ];
+        let metrics = vec![
+            forward_metrics(metric(1, 1), Some(100)),
+            forward_metrics(metric(3, 1), Some(50)),
+            forward_metrics(None, None),
+        ];
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert_eq!(resolved[0].prospective_value, Some(100));
+        assert_eq!(resolved[1].prospective_value, Some(50));
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+    }
+
+    #[test]
+    fn fully_equal_candidates_keep_the_first_one() {
+        // 打点込みの値まで完全同値なら、先に現れた候補を維持する既存の安定性を保つ。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+        ];
+        let metrics = vec![
+            ForwardMetrics {
+                tenpai_wait: metric(64, 16),
+                next_acceptance: None,
+                prospective_value: Some(48_000),
+            };
+            2
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(0)
         );
     }
 

@@ -1,19 +1,20 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use crate::prospective_value::{
-    ProspectiveLookaheadDiagnostic, evaluate_prospective_lookahead_value,
+    ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
+    evaluate_prospective_lookahead_value,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    ForwardMetrics, LookaheadDiagnostic, OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId,
-    TileType, best_discard_selection_index, best_discard_selection_index_with_forward_metrics,
+    ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, TenpaiWaitAvailability,
+    TileCounts, TileId, TileType, best_discard_selection_index,
+    best_discard_selection_index_with_forward_metrics,
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics, diagnose_discard_furiten,
-    diagnose_lookahead_with_fixed_melds, diagnose_lookahead_with_fixed_melds_and_visible_tiles,
-    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
-    evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
-    forward_metrics_from_lookahead, forward_metrics_with_fixed_melds,
-    forward_metrics_with_fixed_melds_and_visible_tiles,
+    diagnose_lookahead, discard_tenpai_wait_availability,
+    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
+    forward_metrics_from_lookahead, split_discarded_tile,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -94,7 +95,7 @@ pub(crate) fn select_discard_action_with_evaluation(
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
-    let tenpai_wait = forward_metrics(context, &legal.tiles, &legal.evaluations);
+    let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(
@@ -129,7 +130,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
     let lookahead = with_lookahead.then(|| lookahead_from_legal_evaluations(context, &legal));
     let tenpai_wait = match lookahead.as_ref() {
         Some(lookahead) => forward_metrics_from_lookahead(&legal.evaluations, lookahead),
-        None => forward_metrics(context, &legal.tiles, &legal.evaluations),
+        None => selection_forward_metrics(context, &legal.tiles, &legal.evaluations),
     };
 
     let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
@@ -195,34 +196,32 @@ fn selection_from_legal_evaluations(
 // 行うため、テンパイ・候補1件では前方探索が走らない。現在打牌後の受け入れは既存評価
 // (evaluations) が持つ値をそのまま入力にするため、現在の1手評価を再計算しない。
 // 物理牌・副露済み面子数・visible tiles・ドラ表示牌・場風・自風は本番評価と同じ値を渡す。
-// GameContext 自体は渡さず、bot-logic が必要とする値だけを取り出して渡す。
-fn forward_metrics(
+// GameContext 自体は渡さず、bot-logic が必要とする値と将来打点の評価器だけを渡す。
+fn selection_forward_metrics(
     context: &GameContext,
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
 ) -> SelectionForwardMetrics {
-    let fixed_meld_count = evaluation_fixed_meld_count(context);
+    let valuator = ProductionProspectiveValuator::new(context);
+    forward_metrics(&lookahead_inputs(context, tiles, &valuator), evaluations)
+}
 
-    if context.visible_tiles().is_empty() {
-        forward_metrics_with_fixed_melds(
-            tiles,
-            fixed_meld_count,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-            evaluations,
-        )
-    } else {
-        forward_metrics_with_fixed_melds_and_visible_tiles(
-            tiles,
-            fixed_meld_count,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-            context.visible_tiles(),
-            evaluations,
-        )
-    }
+// 2手先評価の入力。本番選択・詳細診断・将来打点はこの1本を共有し、同じ枝を別々の入力で
+// 評価しない。
+fn lookahead_inputs<'a>(
+    context: &'a GameContext,
+    tiles: &'a [TileId],
+    valuator: &'a ProductionProspectiveValuator<'a>,
+) -> LookaheadInputs<'a> {
+    LookaheadInputs::new(
+        tiles,
+        evaluation_fixed_meld_count(context),
+        context.dora_indicators(),
+        context.round_wind(),
+        context.seat_wind(),
+    )
+    .with_visible_tiles(context.visible_tiles())
+    .with_prospective_valuator(valuator)
 }
 
 // 絞り込み済みの合法候補集合から既存の診断を構築する。診断と tracing ログはこの結果を共有する。
@@ -320,21 +319,6 @@ pub(crate) fn concealed_tiles_after_discard(
     split_discarded_tile(tiles, evaluation).map(|(_, remaining)| remaining)
 }
 
-/// 物理牌一覧から、打牌候補1件が実際に切る物理牌を1枚だけ切り離す。
-///
-/// 一致条件は牌種と赤フラグの両方で、一致する物理牌が無ければ別の牌で代用せず `None`。返り値は
-/// 切る物理牌と、それを除いた残りの物理牌一覧。現在の打牌後の手牌
-/// ([`concealed_tiles_after_discard`]) と、2手先の仮想局面で切る牌の除去はこの1本を共有する。
-pub(crate) fn split_discarded_tile(
-    mut tiles: Vec<TileId>,
-    evaluation: &DiscardEvaluation,
-) -> Option<(TileId, Vec<TileId>)> {
-    let discarded = tiles.iter().position(|tile| {
-        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
-    })?;
-    Some((tiles.remove(discarded), tiles))
-}
-
 // 絞り込み済みの合法候補集合から詳細な2手先診断を構築する。要求された場合だけ構築する。
 //
 // 現在打牌後の受け入れは既存評価 (legal.evaluations) が持つ値をそのまま入力にするため、
@@ -345,28 +329,11 @@ fn lookahead_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
 ) -> LookaheadDiagnostic {
-    let fixed_meld_count = evaluation_fixed_meld_count(context);
-
-    if context.visible_tiles().is_empty() {
-        diagnose_lookahead_with_fixed_melds(
-            &legal.tiles,
-            fixed_meld_count,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-            &legal.evaluations,
-        )
-    } else {
-        diagnose_lookahead_with_fixed_melds_and_visible_tiles(
-            &legal.tiles,
-            fixed_meld_count,
-            context.dora_indicators(),
-            context.round_wind(),
-            context.seat_wind(),
-            context.visible_tiles(),
-            &legal.evaluations,
-        )
-    }
+    let valuator = ProductionProspectiveValuator::new(context);
+    diagnose_lookahead(
+        &lookahead_inputs(context, &legal.tiles, &valuator),
+        &legal.evaluations,
+    )
 }
 
 // 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
@@ -437,7 +404,7 @@ fn evaluate_discard_candidates_with_fixed_meld_count(
 // player 0 の副露数などを推測せず、既存の門前評価経路と同じ `FixedMeldCount::NONE` で評価する。
 // これは情報不足時の fallback であり「副露0と確定した」という診断ではない。診断が報告する
 // `own_fixed_meld_count` は引き続き `None` のままにする。
-fn evaluation_fixed_meld_count(context: &GameContext) -> FixedMeldCount {
+pub(crate) fn evaluation_fixed_meld_count(context: &GameContext) -> FixedMeldCount {
     context
         .own_fixed_meld_count()
         .unwrap_or(FixedMeldCount::NONE)
@@ -499,7 +466,7 @@ pub(crate) fn select_best_normal_discard_evaluation(
     tiles: &[TileId],
 ) -> Option<DiscardEvaluation> {
     let evaluations = evaluate_discard_candidates(context, tiles);
-    let tenpai_wait = forward_metrics(context, tiles, &evaluations);
+    let tenpai_wait = selection_forward_metrics(context, tiles, &evaluations);
 
     best_discard_selection_index_with_forward_metrics(&evaluations, &tenpai_wait)
         .map(|index| evaluations[index].clone())
@@ -665,7 +632,7 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use bot_logic::TileId;
+    use bot_logic::{HistoryFuritenFacts, TileId};
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -1012,7 +979,7 @@ pub(crate) mod tests {
     // 確認する。本番経路と同じ helper だけを通す。
     fn assert_diagnostic_selection_matches(context: &GameContext, actions: &[LegalAction]) {
         let legal = legal_discard_evaluations(context, actions);
-        let tenpai_wait = forward_metrics(context, &legal.tiles, &legal.evaluations);
+        let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
 
         let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
         let selection = selection_from_legal_evaluations(&legal, &tenpai_wait, actions);
@@ -1646,14 +1613,24 @@ pub(crate) mod tests {
             for (draw, draw_value) in candidate.draws.iter().zip(values.draws.iter()) {
                 assert_eq!(draw.draw, draw_value.draw);
                 assert_eq!(draw.remaining, draw_value.remaining);
-                assert_eq!(draw.next_discard_tile(), draw_value.next_discard);
+                assert_eq!(draw.variants.len(), draw_value.variants.len());
+                for (variant, variant_value) in draw.variants.iter().zip(draw_value.variants.iter())
+                {
+                    assert_eq!(variant.drawn_tile, variant_value.drawn_tile);
+                    assert_eq!(variant.remaining, variant_value.remaining);
+                    assert_eq!(variant.next_discard_tile(), variant_value.next_discard);
+                    // 診断は選択が使った値をそのまま持ち、打点を求め直さない。
+                    assert_eq!(variant.prospective_value, variant_value.selection_value);
+                }
             }
         }
     }
 
     #[test]
     fn non_iishanten_candidates_have_no_weighted_tenpai_wait() {
-        // テンパイ・2向聴以上では前方評価を計算しないので、集計値は 0 ではなく None にする。
+        // テンパイでは前方評価そのものを行わず、2向聴以上では weighted next acceptance のための
+        // 前方評価を行う。どちらも1向聴限定の weighted tenpai wait は持たないので、意味の無い 0
+        // ではなく None にする。
         let hands: [(&[u8], i8); 2] = [
             // 123m 456m 789m 12p 55s + ツモ 9p。最善はテンパイ。
             (&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 89, 90, 68], 0),
@@ -1921,6 +1898,9 @@ pub(crate) mod tests {
             .expect("5m candidate exists")
             .draw(tile(108).tile_type())
             .expect("E draw exists")
+            .variants
+            .first()
+            .expect("E draw variant exists")
             .next_discard
             .clone()
             .expect("next discard exists")
@@ -1963,6 +1943,9 @@ pub(crate) mod tests {
             .expect("5m candidate exists")
             .draw(tile(108).tile_type())
             .expect("E draw exists")
+            .variants
+            .first()
+            .expect("E draw variant exists")
             .next_discard
             .clone()
             .expect("next discard exists");
@@ -2350,5 +2333,322 @@ pub(crate) mod tests {
             ),
             None
         );
+    }
+
+    // ---- 1向聴 selection への将来打点の接続 ----
+
+    // mjai 表記の14枚とドラ表示牌から、将来打点を確定できる局面を作る。
+    //
+    // 場風・自風・自分の席を既知にし、手牌とドラ表示牌をそのまま見え牌として渡す。合法 Dahai は
+    // 手牌の全牌にする。
+    fn value_context(hand: &[&str; 14], dora_indicator: &str) -> (GameContext, Vec<LegalAction>) {
+        let mut used: Vec<TileId> = Vec::new();
+        let mut take = |mjai: &str| {
+            let red = mjai.ends_with('r');
+            let tile_type =
+                TileType::from_mjai_type_str(mjai.trim_end_matches('r')).expect("牌種として読める");
+            let tile = TileId::copies(tile_type)
+                .find(|tile| tile.is_red() == red && !used.contains(tile))
+                .expect("未使用の物理牌がある");
+            used.push(tile);
+            tile
+        };
+
+        let tiles: Vec<TileId> = hand.iter().map(|mjai| take(mjai)).collect();
+        let dora_indicators = vec![take(dora_indicator)];
+        let (hand_tiles, drawn) = tiles.split_at(tiles.len() - 1);
+        let visible: Vec<TileId> = tiles
+            .iter()
+            .chain(dora_indicators.iter())
+            .copied()
+            .collect();
+
+        let context = GameContext::from_parts_with_table_state(
+            Some(drawn[0]),
+            hand_tiles.to_vec(),
+            dora_indicators,
+            TileType::from_mjai_type_str("E").ok(),
+            TileType::from_mjai_type_str("S").ok(),
+            visible,
+            Some(0),
+            Some(3),
+            Default::default(),
+            [false; 4],
+        )
+        // 履歴依存フリテンを既知にして、未来テンパイのロン可否まで確定できる局面にする。
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+        let actions = tiles
+            .iter()
+            .map(|&tile| LegalAction::Dahai { tile })
+            .collect();
+        (context, actions)
+    }
+
+    // 打点込みの集計値を外した前方集計値。既存 weighted wait 以降だけで比較した場合を再現する。
+    fn without_prospective_value(metrics: &[ForwardMetrics]) -> Vec<ForwardMetrics> {
+        metrics
+            .iter()
+            .map(|metric| ForwardMetrics {
+                prospective_value: None,
+                ..*metric
+            })
+            .collect()
+    }
+
+    // 打点込みの評価器を渡さない2手先評価。既存比較順だけで2手目を選んだ場合を再現する。
+    fn lookahead_without_valuator(
+        context: &GameContext,
+        tiles: &[TileId],
+        evaluations: &[DiscardEvaluation],
+    ) -> LookaheadDiagnostic {
+        diagnose_lookahead(
+            &LookaheadInputs::new(
+                tiles,
+                evaluation_fixed_meld_count(context),
+                context.dora_indicators(),
+                context.round_wind(),
+                context.seat_wind(),
+            )
+            .with_visible_tiles(context.visible_tiles()),
+            evaluations,
+        )
+    }
+
+    fn discard_of(evaluations: &[DiscardEvaluation], index: usize) -> String {
+        evaluations[index].discard.to_mjai_string()
+    }
+
+    fn metric_of(
+        evaluations: &[DiscardEvaluation],
+        metrics: &[ForwardMetrics],
+        discard: &str,
+    ) -> ForwardMetrics {
+        let index = evaluations
+            .iter()
+            .position(|evaluation| evaluation.discard.to_mjai_string() == discard)
+            .expect("打牌候補がある");
+        metrics[index]
+    }
+
+    // 123m 1p1p 2m2m 3m 7m 8m 9m 4p 5p 5p 6p 8p 相当の1向聴。ドラ表示牌 4p でドラは 5p。
+    //
+    // 打 5p の方が受け入れ後のテンパイ待ちは広いが、ドラ 5p を切ってしまうので将来打点が下がる。
+    const VALUE_OVER_WAIT_HAND: [&str; 14] = [
+        "4p", "2m", "5p", "7m", "8p", "9m", "1p", "1p", "3m", "1m", "6p", "5p", "2m", "8m",
+    ];
+
+    #[test]
+    fn the_prospective_value_outranks_the_weighted_wait_in_the_selection() {
+        // 待ち枚数が狭くても将来打点が高い打牌を選ぶ。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let legal = legal_discard_evaluations(&context, &actions);
+        let metrics = selection_forward_metrics(&context, &legal.tiles, &legal.evaluations);
+
+        let high_value = metric_of(&legal.evaluations, &metrics, "8p");
+        let wide_wait = metric_of(&legal.evaluations, &metrics, "5p");
+        assert!(high_value.prospective_value > wide_wait.prospective_value);
+        assert!(
+            high_value
+                .tenpai_wait
+                .expect("1向聴候補")
+                .weighted_remaining
+                < wide_wait.tenpai_wait.expect("1向聴候補").weighted_remaining,
+            "待ち枚数では 5p が勝つ局面である"
+        );
+
+        let selected =
+            best_discard_selection_index_with_forward_metrics(&legal.evaluations, &metrics)
+                .expect("最善候補がある");
+        assert_eq!(discard_of(&legal.evaluations, selected), "8p");
+
+        // 打点を外すと従来どおり待ち枚数の広い 5p が選ばれる。
+        let without = best_discard_selection_index_with_forward_metrics(
+            &legal.evaluations,
+            &without_prospective_value(&metrics),
+        )
+        .expect("最善候補がある");
+        assert_eq!(discard_of(&legal.evaluations, without), "5p");
+
+        assert_eq!(
+            select_discard_action(&context, &actions),
+            Some(LegalAction::Dahai {
+                tile: legal_dahai_tile_for_type(legal.evaluations[selected].discard, &actions)
+                    .expect("合法 Dahai がある")
+            })
+        );
+    }
+
+    // 11m 2m 33m 7m 8m 9m 2p 3p 4p 7p 9p E 相当の1向聴。ドラ表示牌 2m でドラは 3m。
+    //
+    // 打 E から 1m を引いた枝は、2m を切るか 3m を切るかで最終打点が変わる。
+    const SECOND_DISCARD_HAND: [&str; 14] = [
+        "3p", "4p", "9p", "1m", "8m", "1m", "2p", "3m", "7m", "3m", "2m", "9m", "E", "7p",
+    ];
+
+    #[test]
+    fn the_second_discard_is_chosen_with_the_prospective_value() {
+        // 2手目の最良打牌そのものが将来打点で変わる。
+        let (context, actions) = value_context(&SECOND_DISCARD_HAND, "2m");
+        let legal = legal_discard_evaluations(&context, &actions);
+        let valuator = ProductionProspectiveValuator::new(&context);
+        let aware = diagnose_lookahead(
+            &lookahead_inputs(&context, &legal.tiles, &valuator),
+            &legal.evaluations,
+        );
+        let plain = lookahead_without_valuator(&context, &legal.tiles, &legal.evaluations);
+
+        let branch = |lookahead: &LookaheadDiagnostic| {
+            lookahead
+                .candidate(TileType::from_mjai_type_str("E").unwrap())
+                .expect("打 E の候補がある")
+                .draw(TileType::from_mjai_type_str("1m").unwrap())
+                .expect("1m の受け入れがある")
+                .variants
+                .first()
+                .expect("物理牌 variant がある")
+                .clone()
+        };
+
+        let aware_branch = branch(&aware);
+        let plain_branch = branch(&plain);
+        assert_eq!(
+            aware_branch.next_discard_tile().map(|t| t.to_mjai_string()),
+            Some("2m".to_string()),
+            "打点込みならドラの 3m を残す"
+        );
+        assert_eq!(
+            plain_branch.next_discard_tile().map(|t| t.to_mjai_string()),
+            Some("3m".to_string()),
+            "打点を見なければ 3m を切る"
+        );
+        assert!(aware_branch.prospective_value.is_some());
+        assert_eq!(plain_branch.prospective_value, None);
+    }
+
+    // 2m 3m 4m 4m 6m 6m 7m 8m 1p 2p 4p 4p 5p 6p 8p 相当の1向聴。ドラ表示牌 5m でドラは 6m。
+    //
+    // 打 8p の枝で2手目の最良打牌が打点込みだと変わり、その結果 1手目の weighted wait も変わる。
+    const SECOND_DISCARD_FLIP_HAND: [&str; 14] = [
+        "6m", "8p", "6p", "6m", "4p", "3m", "4m", "5p", "2p", "1p", "4p", "2m", "8m", "7m",
+    ];
+
+    #[test]
+    fn the_value_aware_second_discard_changes_the_first_discard() {
+        // 2手目の変更が1手目の集計値へ伝わり、現在打牌の選択そのものを変える。
+        let (context, actions) = value_context(&SECOND_DISCARD_FLIP_HAND, "5m");
+        let legal = legal_discard_evaluations(&context, &actions);
+        let valuator = ProductionProspectiveValuator::new(&context);
+        let aware = diagnose_lookahead(
+            &lookahead_inputs(&context, &legal.tiles, &valuator),
+            &legal.evaluations,
+        );
+        let plain = lookahead_without_valuator(&context, &legal.tiles, &legal.evaluations);
+
+        // 打点込みで選んだ2手目から集計した weighted wait と、従来の2手目から集計した値は違う。
+        let aware_metrics =
+            without_prospective_value(&forward_metrics_from_lookahead(&legal.evaluations, &aware));
+        let plain_metrics =
+            without_prospective_value(&forward_metrics_from_lookahead(&legal.evaluations, &plain));
+        assert_ne!(
+            metric_of(&legal.evaluations, &aware_metrics, "8p"),
+            metric_of(&legal.evaluations, &plain_metrics, "8p"),
+        );
+
+        // その差だけで現在打牌の選択が変わる。
+        let aware_best =
+            best_discard_selection_index_with_forward_metrics(&legal.evaluations, &aware_metrics)
+                .expect("最善候補がある");
+        let plain_best =
+            best_discard_selection_index_with_forward_metrics(&legal.evaluations, &plain_metrics)
+                .expect("最善候補がある");
+        assert_eq!(discard_of(&legal.evaluations, aware_best), "6m");
+        assert_eq!(discard_of(&legal.evaluations, plain_best), "8p");
+    }
+
+    // 2m 4m 6m 8m 9m 9m 1p 2p 3p 4p 6p 7p 8p 9p 相当の1向聴。ドラ表示牌 7m でドラは 8m。
+    //
+    // 打 2m から 5p を引く枝で、赤5p と黒5p では2手目の最良打牌が変わる。
+    const RED_FIVE_BRANCH_HAND: [&str; 14] = [
+        "6m", "4p", "2m", "4m", "2p", "6p", "9m", "7p", "8p", "1p", "9m", "8m", "9p", "3p",
+    ];
+
+    #[test]
+    fn a_red_and_a_black_first_draw_can_choose_different_second_discards() {
+        // 仮想ツモの赤5 / 黒5は打点だけでなく2手目の最良打牌そのものを変え得る。
+        let (context, actions) = value_context(&RED_FIVE_BRANCH_HAND, "7m");
+        let selection = select_discard_action_with_diagnostic(&context, &actions, true);
+        let draw = selection
+            .lookahead
+            .expect("2手先診断が構築されている")
+            .candidate(TileType::from_mjai_type_str("2m").unwrap())
+            .expect("打 2m の候補がある")
+            .draw(TileType::from_mjai_type_str("5p").unwrap())
+            .expect("5p の受け入れがある")
+            .clone();
+
+        // 牌種単位の残枚数を赤 / 黒へ分け、合計は元の残枚数と一致する。
+        assert_eq!(draw.variants.len(), 2);
+        assert_eq!(
+            draw.variants
+                .iter()
+                .map(|variant| u32::from(variant.remaining))
+                .sum::<u32>(),
+            u32::from(draw.remaining),
+        );
+
+        let variant = |red: bool| {
+            draw.variants
+                .iter()
+                .find(|variant| variant.drawn_tile.is_red() == red)
+                .expect("指定した物理牌 variant がある")
+        };
+        assert_eq!(variant(true).remaining, 1);
+        assert_eq!(variant(false).remaining, draw.remaining - 1);
+        assert_ne!(
+            variant(true).next_discard_tile(),
+            variant(false).next_discard_tile(),
+        );
+        assert_ne!(
+            variant(true).prospective_value,
+            variant(false).prospective_value,
+        );
+    }
+
+    #[test]
+    fn tenpai_and_multi_shanten_candidates_have_no_prospective_value() {
+        // テンパイでは前方評価そのものを行わず、2向聴以上では既存 weighted next acceptance の
+        // ための前方評価を行う。ただし将来打点は1向聴限定なので、どちらも打点込みの集計値は
+        // 持たない。
+        for hand in [
+            // 123m 456m 789m 12p 55s + ツモ 9p。最善はテンパイ。
+            [
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "5s", "5s", "9p",
+            ],
+            // 13m 5m 8m 24p 6p 7p 13s 4s 55z 7z。最善は2向聴以上。
+            [
+                "1m", "3m", "5m", "8m", "2p", "4p", "6p", "7p", "1s", "3s", "4s", "W", "W", "C",
+            ],
+        ] {
+            let (context, actions) = value_context(&hand, "1m");
+            let legal = legal_discard_evaluations(&context, &actions);
+            let metrics = selection_forward_metrics(&context, &legal.tiles, &legal.evaluations);
+
+            assert_ne!(
+                legal
+                    .evaluations
+                    .iter()
+                    .map(DiscardEvaluation::min_shanten_after_discard)
+                    .min(),
+                Some(1),
+            );
+            assert!(
+                metrics
+                    .iter()
+                    .all(|metric| metric.prospective_value.is_none())
+            );
+        }
     }
 }
