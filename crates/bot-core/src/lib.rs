@@ -60,8 +60,7 @@ pub use defense::{
 pub use discard_selection::select_discard_action;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{
-    OffenseValue, PUSH_HIGH_VALUE_MIN_TOTAL, TenpaiOffenseMode, TenpaiOffenseValue,
-    reach_baseline_context,
+    OffenseValue, TenpaiOffenseMode, TenpaiOffenseValue, reach_baseline_context,
 };
 pub use open_hand_defense::{
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
@@ -87,7 +86,8 @@ pub use prospective_value::{
 };
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
-    PushPullTenpaiWaitFacts, decide_push_pull, push_pull_inputs_from_context,
+    PushPullTenpaiWaitFacts, StrongTenpaiRequirement, decide_push_pull,
+    push_pull_inputs_from_context,
 };
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,

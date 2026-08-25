@@ -4,9 +4,7 @@ use crate::discard_selection::{
     concealed_tiles_after_discard, select_best_normal_discard_evaluation,
     selected_discard_tenpai_wait_availability,
 };
-use crate::offense_value::{
-    PUSH_HIGH_VALUE_MIN_TOTAL, TenpaiOffenseValue, evaluate_tenpai_offense_value,
-};
+use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
 use crate::open_hand_threat::{
     OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
 };
@@ -114,36 +112,68 @@ impl PushPullOffenseState {
             .saturating_add(self.value_honor_han_proxy_after_discard)
     }
 
-    /// 攻撃継続時の確定打点が [`PUSH_HIGH_VALUE_MIN_TOTAL`] 以上か。
+    /// 攻撃継続時の確定打点の残枚数加重合計 [点]。
     ///
-    /// 打点を評価していない場合と、評価しても確定しなかった場合はどちらも `None`。
-    pub fn tenpai_offense_value_is_high(&self) -> Option<bool> {
+    /// 打点を評価していない場合と、評価しても確定しなかった場合はどちらも `None`。既存
+    /// [`OffenseValue::Known`](crate::offense_value::OffenseValue::Known) の値をそのまま読み、
+    /// 押し引き側で集計し直さない。
+    pub fn tenpai_offense_weighted_total(&self) -> Option<u64> {
         self.tenpai_offense_value_after_discard?
             .value
-            .meets(PUSH_HIGH_VALUE_MIN_TOTAL)
+            .weighted_total()
     }
 
-    /// 明確な threat に対して押すために要求する打牌後テンパイの待ち枚数。
+    /// 明確な threat に対して押すために要求する打牌後テンパイの条件。
     ///
     /// 打牌後がテンパイにならない場合と、恒常フリテンを判定できない場合は `None` になり、
     /// 強いテンパイと推測しない。
     ///
-    /// - 非フリテン + 攻撃打点が [`PUSH_HIGH_VALUE_MIN_TOTAL`] 以上:
-    ///   [`HIGH_VALUE_TENPAI_MIN_REMAINING`]
-    /// - 非フリテン + 攻撃打点が [`PUSH_HIGH_VALUE_MIN_TOTAL`] 未満:
-    ///   [`LOW_VALUE_TENPAI_MIN_REMAINING`]
-    /// - 非フリテン + 攻撃打点を確定できない: 従来どおり [`STRONG_TENPAI_MIN_REMAINING`]
-    /// - 恒常フリテン: ロンできずツモ依存になるため [`FURITEN_STRONG_TENPAI_MIN_REMAINING`]
-    pub fn strong_tenpai_min_remaining(&self) -> Option<u8> {
+    /// - 非フリテン + 攻撃打点を確定できた: [`StrongTenpaiRequirement::WeightedTotal`]。
+    ///   要求する残枚数加重合計は [`tenpai_push_weighted_total_min`] が決める。
+    /// - 非フリテン + 攻撃打点を確定できない: 従来どおり [`STRONG_TENPAI_MIN_REMAINING`] 枚
+    /// - 恒常フリテン: ロンできずツモ依存になるため [`FURITEN_STRONG_TENPAI_MIN_REMAINING`] 枚
+    ///
+    /// 親リーチ判定は [`PushPullInputs::dealer_reacher`] が source of truth で、ここでは
+    /// 受け取った値をそのまま使う。
+    pub fn strong_tenpai_requirement(
+        &self,
+        dealer_reacher: bool,
+    ) -> Option<StrongTenpaiRequirement> {
         match self.tenpai_wait_after_discard?.permanent_furiten {
-            PermanentFuriten::No => Some(match self.tenpai_offense_value_is_high() {
-                Some(true) => HIGH_VALUE_TENPAI_MIN_REMAINING,
-                Some(false) => LOW_VALUE_TENPAI_MIN_REMAINING,
-                None => STRONG_TENPAI_MIN_REMAINING,
+            PermanentFuriten::No => Some(match self.tenpai_offense_weighted_total() {
+                Some(_) => StrongTenpaiRequirement::WeightedTotal(tenpai_push_weighted_total_min(
+                    dealer_reacher,
+                )),
+                None => StrongTenpaiRequirement::LiveWait(STRONG_TENPAI_MIN_REMAINING),
             }),
-            PermanentFuriten::Yes => Some(FURITEN_STRONG_TENPAI_MIN_REMAINING),
+            PermanentFuriten::Yes => Some(StrongTenpaiRequirement::LiveWait(
+                FURITEN_STRONG_TENPAI_MIN_REMAINING,
+            )),
             PermanentFuriten::Unknown => None,
         }
+    }
+}
+
+/// 明確な threat に対して押せる「強いテンパイ」に要求する条件。
+///
+/// 非フリテンで攻撃打点を確定できたかどうかで、要求する量そのものが変わる。どちらも inclusive。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrongTenpaiRequirement {
+    /// 攻撃打点の残枚数加重合計 [点] の下限。待ち枚数と打点の両方を含む1つの値で判定する。
+    WeightedTotal(u64),
+    /// 待ち枚数の下限。攻撃打点を使えない場合の fallback。
+    LiveWait(u8),
+}
+
+/// 明確な threat に対して exact 打点で押すために要求する残枚数加重合計 [点]。inclusive。
+///
+/// 他家リーチ者に親が含まれるかだけで決まる。自分が親かどうかでは変えない。`dealer_reacher` は
+/// [`PushPullInputs::dealer_reacher`] が source of truth で、ここで親リーチを判定し直さない。
+fn tenpai_push_weighted_total_min(dealer_reacher: bool) -> u64 {
+    if dealer_reacher {
+        DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN
+    } else {
+        TENPAI_PUSH_WEIGHTED_TOTAL_MIN
     }
 }
 
@@ -315,9 +345,10 @@ fn concealed_value_proxy_after_discard(
 ///
 /// `opponent_reach_count` / `dealer_reacher` は `player_threats` から導出する。
 ///
-/// 現在の暫定 policy は `opponent_reach_count` を threat の有無にだけ使い、`dealer_reacher` /
-/// `self_dealer` は判定に使わない。親リーチ・複数リーチ・自分が親でも境界は同じで、これらは
-/// 診断・ログ用の事実として保持する。
+/// 現在の暫定 policy は `opponent_reach_count` を threat の有無にだけ使い、`dealer_reacher` は
+/// exact 打点で押すときの threshold にだけ使う ([`tenpai_push_weighted_total_min`])。複数リーチでも
+/// 親が1人でも含まれていれば親リーチ扱いで、リーチ者数そのものでは境界を変えない。`self_dealer`
+/// は判定に使わず、診断・ログ用の事実として保持する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullInputs {
     pub opponent_reach_count: u8,
@@ -425,10 +456,15 @@ const STRONG_TENPAI_MIN_REMAINING: u8 = 6;
 // 恒常フリテンのテンパイはロンできずツモ依存になるため、非フリテンより2枚多く要求する。
 const FURITEN_STRONG_TENPAI_MIN_REMAINING: u8 = 8;
 
-// 攻撃打点を確定できた非フリテンのテンパイで要求する待ち枚数。打点が
-// PUSH_HIGH_VALUE_MIN_TOTAL 以上なら少ない待ちでも押し、未満なら1枚多く要求する。
-const HIGH_VALUE_TENPAI_MIN_REMAINING: u8 = 3;
-const LOW_VALUE_TENPAI_MIN_REMAINING: u8 = 4;
+// 攻撃打点を確定できた非フリテンのテンパイで要求する残枚数加重合計 [点]。inclusive。
+// 加重合計は待ち枚数と打点の両方を含むので、平均打点と待ち枚数を段階的に見る必要は無い。
+// 旧 policy の代表的な境界 (3900 × 4枚 / 5200 × 3枚) をそのまま連続的な threshold へ置き換えた値。
+const TENPAI_PUSH_WEIGHTED_TOTAL_MIN: u64 = 15_600;
+
+// 他家リーチ者に親が含まれる場合に要求する残枚数加重合計 [点]。inclusive。
+// 放銃時の失点が大きいので基本 threshold の 1.5 倍を要求する。リーチ者が複数いても、親が1人でも
+// 含まれていればこちらを使う。自分が親かどうかでは変えない。
+const DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN: u64 = 23_400;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
@@ -641,17 +677,23 @@ fn threat_kind(inputs: &PushPullInputs) -> Option<ThreatKind> {
 /// 明確な threat に対して押せる「強いテンパイ」の条件。
 ///
 /// 待ち枚数と恒常フリテンは、選択済み打牌の既存 [`TenpaiWaitAvailability`] から転記した事実を
-/// そのまま使う。押し引き側で待ちや残枚数を数え直さない。要求する待ち枚数は
-/// [`PushPullOffenseState::strong_tenpai_min_remaining`] が1か所で決める。
-fn is_strong_tenpai(offense: &PushPullOffenseState) -> bool {
+/// そのまま使う。攻撃打点の残枚数加重合計も既存 [`OffenseValue`](crate::offense_value::OffenseValue)
+/// の値をそのまま読む。押し引き側で待ち・残枚数・打点を数え直さない。要求する条件は
+/// [`PushPullOffenseState::strong_tenpai_requirement`] が1か所で決める。
+fn is_strong_tenpai(offense: &PushPullOffenseState, dealer_reacher: bool) -> bool {
     let Some(wait) = offense.tenpai_wait_after_discard else {
         return false;
     };
-    let Some(min_remaining) = offense.strong_tenpai_min_remaining() else {
-        return false;
-    };
 
-    wait.tsumo_remaining >= min_remaining
+    match offense.strong_tenpai_requirement(dealer_reacher) {
+        Some(StrongTenpaiRequirement::WeightedTotal(min_total)) => offense
+            .tenpai_offense_weighted_total()
+            .is_some_and(|total| total >= min_total),
+        Some(StrongTenpaiRequirement::LiveWait(min_remaining)) => {
+            wait.tsumo_remaining >= min_remaining
+        }
+        None => false,
+    }
 }
 
 /// 押し引きを判定する pure な暫定 helper。
@@ -680,9 +722,9 @@ fn is_strong_tenpai(offense: &PushPullOffenseState) -> bool {
 /// fallback より優先され、実質的に押してしまうため。
 ///
 /// 強いテンパイの境界は打牌後テンパイの恒常フリテンと攻撃打点で決まる
-/// ([`PushPullOffenseState::strong_tenpai_min_remaining`])。非フリテンで攻撃継続時の打点を
-/// 確定できる場合は打点を考慮し、確定できない場合と恒常フリテンでは従来の待ち枚数だけの
-/// policy を維持する。
+/// ([`PushPullOffenseState::strong_tenpai_requirement`])。非フリテンで攻撃継続時の打点を
+/// 確定できる場合は、待ち枚数と打点の両方を含む残枚数加重合計だけで判定し、確定できない場合と
+/// 恒常フリテンでは従来の待ち枚数だけの policy を維持する。
 ///
 /// これは説明可能な暫定 policy であり、以下はまだ考慮していない。
 ///
@@ -717,7 +759,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
 
     // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、または終盤1副露 High だけなら押す。
     if offense.min_shanten_after_discard <= TENPAI_SHANTEN {
-        let (mode, reason) = if is_strong_tenpai(&offense) {
+        let (mode, reason) = if is_strong_tenpai(&offense, inputs.dealer_reacher) {
             (PushPullMode::Push, reasons.strong_tenpai)
         } else if threat == ThreatKind::HighOpenHand
             && inputs.has_only_late_one_meld_high_open_hand_threats()
@@ -786,8 +828,8 @@ pub(crate) fn log_push_pull_decision(
         offense_tenpai_mode = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_after_discard).map(|value| value.mode),
         offense_tenpai_value_known = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_after_discard).map(|value| value.value.is_known()),
         offense_tenpai_average_value = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_after_discard).and_then(|value| value.value.average_total()),
-        offense_tenpai_value_is_high = ?inputs.offense.and_then(|offense| offense.tenpai_offense_value_is_high()),
-        offense_strong_tenpai_min_remaining = ?inputs.offense.and_then(|offense| offense.strong_tenpai_min_remaining()),
+        offense_tenpai_weighted_total = ?inputs.offense.and_then(|offense| offense.tenpai_offense_weighted_total()),
+        offense_strong_tenpai_requirement = ?inputs.offense.and_then(|offense| offense.strong_tenpai_requirement(inputs.dealer_reacher)),
         offense_dora_count_after_discard = ?inputs.offense.map(|offense| offense.dora_count_after_discard),
         offense_red_dora_count_after_discard = ?inputs.offense.map(|offense| offense.red_dora_count_after_discard),
         offense_value_honor_han_proxy_after_discard = ?inputs.offense.map(|offense| offense.value_honor_han_proxy_after_discard),
@@ -840,7 +882,7 @@ mod tests {
     }
 
     // 攻撃打点を確定した非フリテンの打牌後テンパイ。全 variant が同じ支払い合計になる待ちとして
-    // 加重平均を組み立てる。
+    // 加重合計を組み立てる。
     fn valued_tenpai_offense(tsumo_remaining: u8, total: u32) -> PushPullOffenseState {
         PushPullOffenseState {
             tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
@@ -851,6 +893,21 @@ mod tests {
                 },
             }),
             ..tenpai_offense(tsumo_remaining, PermanentFuriten::No)
+        }
+    }
+
+    // 残枚数加重合計だけを指定した非フリテンの打牌後テンパイ。待ち枚数の内訳は判定に使わないので、
+    // 加重合計の境界だけを固定したいときに使う。
+    fn weighted_total_tenpai_offense(weighted_total: u64) -> PushPullOffenseState {
+        PushPullOffenseState {
+            tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
+                mode: TenpaiOffenseMode::Reach,
+                value: OffenseValue::Known {
+                    weighted_total,
+                    total_remaining: 4,
+                },
+            }),
+            ..tenpai_offense(4, PermanentFuriten::No)
         }
     }
 
@@ -1018,8 +1075,14 @@ mod tests {
     #[test]
     fn the_strong_tenpai_boundary_is_six_live_waits() {
         // 非フリテンは残枚数 6 枚が境界。
-        assert!(is_strong_tenpai(&tenpai_offense(6, PermanentFuriten::No)));
-        assert!(!is_strong_tenpai(&tenpai_offense(5, PermanentFuriten::No)));
+        assert!(is_strong_tenpai(
+            &tenpai_offense(6, PermanentFuriten::No),
+            false
+        ));
+        assert!(!is_strong_tenpai(
+            &tenpai_offense(5, PermanentFuriten::No),
+            false
+        ));
 
         assert_decision(
             &inputs(1, false, Some(tenpai_offense(6, PermanentFuriten::No))),
@@ -1036,77 +1099,50 @@ mod tests {
     // ---- 攻撃打点を確定できたテンパイの押し引き ----
 
     #[test]
-    fn a_high_value_tenpai_pushes_from_three_live_waits() {
-        // 非フリテンで残枚数加重平均が 5200 以上なら、3枚待ちから押す。
-        let offense = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL);
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
-        assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(HIGH_VALUE_TENPAI_MIN_REMAINING)
-        );
-        assert!(is_strong_tenpai(&offense));
+    fn the_tenpai_push_boundary_is_the_weighted_total() {
+        // 非フリテンで打点を確定できたテンパイは、待ち枚数と打点の両方を含む残枚数加重合計だけで
+        // 判定する。旧 policy の代表的な境界 (3900 × 4枚 / 5200 × 3枚) がそのまま境界になる。
+        let cases = [
+            (2000, 8, PushPullMode::Push),
+            (3900, 4, PushPullMode::Push),
+            (5200, 3, PushPullMode::Push),
+            (7700, 2, PushPullMode::Fold),
+            (8000, 2, PushPullMode::Push),
+            (12000, 1, PushPullMode::Fold),
+            (16000, 1, PushPullMode::Push),
+        ];
 
-        assert_decision(
-            &inputs(1, false, Some(offense)),
-            PushPullMode::Push,
-            PushPullReason::StrongTenpaiAgainstReach,
-        );
+        for (total, tsumo_remaining, mode) in cases {
+            let offense = valued_tenpai_offense(tsumo_remaining, total);
+            assert_eq!(
+                offense.tenpai_offense_weighted_total(),
+                Some(u64::from(total) * u64::from(tsumo_remaining)),
+                "{total} x {tsumo_remaining}"
+            );
+            assert_eq!(
+                offense.strong_tenpai_requirement(false),
+                Some(StrongTenpaiRequirement::WeightedTotal(
+                    TENPAI_PUSH_WEIGHTED_TOTAL_MIN
+                )),
+                "{total} x {tsumo_remaining}"
+            );
+
+            let reason = match mode {
+                PushPullMode::Push => PushPullReason::StrongTenpaiAgainstReach,
+                _ => PushPullReason::WeakTenpaiAgainstReach,
+            };
+            assert_decision(&inputs(1, false, Some(offense)), mode, reason);
+        }
     }
 
     #[test]
-    fn a_high_value_tenpai_folds_with_two_live_waits() {
-        // 高打点でも2枚待ちなら押さない。
-        let offense = valued_tenpai_offense(2, 8000);
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
-        assert!(!is_strong_tenpai(&offense));
+    fn the_tenpai_push_weighted_total_threshold_is_inclusive() {
+        // 15,600 ちょうどは押し側。加重合計は平均へ割り算せずそのまま threshold と比較する。
+        let exact = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN);
+        let below = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1);
 
-        assert_decision(
-            &inputs(1, false, Some(offense)),
-            PushPullMode::Fold,
-            PushPullReason::WeakTenpaiAgainstReach,
-        );
-    }
-
-    #[test]
-    fn a_low_value_tenpai_pushes_from_four_live_waits() {
-        // 非フリテンで残枚数加重平均が 5200 未満なら、1枚多い4枚待ちから押す。
-        let offense = valued_tenpai_offense(4, PUSH_HIGH_VALUE_MIN_TOTAL - 1);
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
-        assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(LOW_VALUE_TENPAI_MIN_REMAINING)
-        );
-        assert!(is_strong_tenpai(&offense));
-
-        assert_decision(
-            &inputs(1, false, Some(offense)),
-            PushPullMode::Push,
-            PushPullReason::StrongTenpaiAgainstReach,
-        );
-    }
-
-    #[test]
-    fn a_low_value_tenpai_folds_with_three_live_waits() {
-        // 打点が足りなければ、高打点なら押せる3枚待ちでも押さない。
-        let offense = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL - 1);
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
-        assert!(!is_strong_tenpai(&offense));
-
-        assert_decision(
-            &inputs(1, false, Some(offense)),
-            PushPullMode::Fold,
-            PushPullReason::WeakTenpaiAgainstReach,
-        );
-    }
-
-    #[test]
-    fn the_high_value_threshold_is_inclusive() {
-        // 5200 ちょうどは高打点側。加重平均は整数除算で丸めずに threshold と比較する。
-        let exact = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL);
-        let below = valued_tenpai_offense(3, PUSH_HIGH_VALUE_MIN_TOTAL - 1);
-
-        assert_eq!(exact.tenpai_offense_value_is_high(), Some(true));
-        assert_eq!(below.tenpai_offense_value_is_high(), Some(false));
+        assert!(is_strong_tenpai(&exact, false));
+        assert!(!is_strong_tenpai(&below, false));
 
         assert_decision(
             &inputs(1, false, Some(exact)),
@@ -1121,37 +1157,153 @@ mod tests {
     }
 
     #[test]
+    fn the_live_wait_count_alone_does_not_decide_a_valued_tenpai() {
+        // 待ち枚数が多くても打点が足りなければ押さず、待ちが1枚でも打点が足りれば押す。
+        // 旧 policy の 3枚 / 4枚 threshold は使わない。
+        let many_waits = valued_tenpai_offense(8, 1000);
+        assert_eq!(many_waits.tenpai_offense_weighted_total(), Some(8000));
+        assert!(!is_strong_tenpai(&many_waits, false));
+
+        let single_wait = valued_tenpai_offense(1, 16000);
+        assert!(is_strong_tenpai(&single_wait, false));
+    }
+
+    #[test]
+    fn a_dealer_reach_requires_one_and_a_half_times_the_weighted_total() {
+        // 他家リーチ者に親が含まれる場合だけ 1.5 倍の threshold を使う。
+        let cases = [
+            (DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1, false),
+            (DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN, true),
+        ];
+
+        for (weighted_total, pushes) in cases {
+            let offense = weighted_total_tenpai_offense(weighted_total);
+            assert_eq!(
+                offense.strong_tenpai_requirement(true),
+                Some(StrongTenpaiRequirement::WeightedTotal(
+                    DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN
+                ))
+            );
+            assert_eq!(is_strong_tenpai(&offense, true), pushes, "{weighted_total}");
+
+            let (mode, reason) = if pushes {
+                (PushPullMode::Push, PushPullReason::StrongTenpaiAgainstReach)
+            } else {
+                (PushPullMode::Fold, PushPullReason::WeakTenpaiAgainstReach)
+            };
+            assert_decision(&inputs(1, true, Some(offense)), mode, reason);
+        }
+    }
+
+    #[test]
+    fn a_dealer_reach_folds_what_a_non_dealer_reach_pushes() {
+        // 同じ手でも親リーチかどうかで結論が変わる代表例。
+        let cases = [
+            (8000, 2, PushPullMode::Fold),
+            (12000, 2, PushPullMode::Push),
+            (16000, 1, PushPullMode::Fold),
+            (16000, 2, PushPullMode::Push),
+            (32000, 1, PushPullMode::Push),
+        ];
+
+        for (total, tsumo_remaining, mode) in cases {
+            let offense = valued_tenpai_offense(tsumo_remaining, total);
+            let reason = match mode {
+                PushPullMode::Push => PushPullReason::StrongTenpaiAgainstReach,
+                _ => PushPullReason::WeakTenpaiAgainstReach,
+            };
+            assert_decision(&inputs(1, true, Some(offense)), mode, reason);
+        }
+    }
+
+    #[test]
+    fn a_non_dealer_reach_keeps_the_base_weighted_total_threshold() {
+        // 子リーチだけなら 15,600。リーチ者数では threshold を変えない。
+        let offense = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN);
+
+        for reach_count in [1, 2, 3] {
+            assert_decision(
+                &inputs(reach_count, false, Some(offense)),
+                PushPullMode::Push,
+                PushPullReason::StrongTenpaiAgainstReach,
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_reaches_use_the_dealer_threshold_when_a_dealer_is_among_them() {
+        // 複数リーチでも親が1人でも含まれていれば 23,400 を要求する。
+        let offense =
+            weighted_total_tenpai_offense(DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1);
+
+        for reach_count in [2, 3] {
+            assert_decision(
+                &inputs(reach_count, true, Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::WeakTenpaiAgainstReach,
+            );
+            assert_decision(
+                &inputs(reach_count, false, Some(offense)),
+                PushPullMode::Push,
+                PushPullReason::StrongTenpaiAgainstReach,
+            );
+        }
+    }
+
+    #[test]
+    fn a_self_dealer_does_not_change_the_weighted_total_threshold() {
+        // 1.5 倍にするのは相手に親リーチ者がいる場合だけで、自分が親かどうかでは変えない。
+        let offense = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN);
+
+        for self_dealer in [false, true] {
+            assert_decision(
+                &inputs_with_dealer(1, false, self_dealer, Some(offense)),
+                PushPullMode::Push,
+                PushPullReason::StrongTenpaiAgainstReach,
+            );
+        }
+    }
+
+    #[test]
     fn an_unconfirmed_offense_value_keeps_the_six_live_wait_boundary() {
         // 打点を評価していない場合と、評価しても確定しない場合はどちらも既存 policy のまま。
+        // 親リーチでも 6枚 fallback は 1.5 倍しない。
         for offense in [
             tenpai_offense(STRONG_TENPAI_MIN_REMAINING, PermanentFuriten::No),
             unknown_value_tenpai_offense(STRONG_TENPAI_MIN_REMAINING, PermanentFuriten::No),
         ] {
-            assert_eq!(offense.tenpai_offense_value_is_high(), None);
-            assert_eq!(
-                offense.strong_tenpai_min_remaining(),
-                Some(STRONG_TENPAI_MIN_REMAINING)
-            );
-            assert!(is_strong_tenpai(&offense));
+            assert_eq!(offense.tenpai_offense_weighted_total(), None);
+            for dealer_reacher in [false, true] {
+                assert_eq!(
+                    offense.strong_tenpai_requirement(dealer_reacher),
+                    Some(StrongTenpaiRequirement::LiveWait(
+                        STRONG_TENPAI_MIN_REMAINING
+                    ))
+                );
+                assert!(is_strong_tenpai(&offense, dealer_reacher));
+            }
         }
 
         for offense in [
             tenpai_offense(STRONG_TENPAI_MIN_REMAINING - 1, PermanentFuriten::No),
             unknown_value_tenpai_offense(STRONG_TENPAI_MIN_REMAINING - 1, PermanentFuriten::No),
         ] {
-            assert!(!is_strong_tenpai(&offense));
-            assert_decision(
-                &inputs(1, false, Some(offense)),
-                PushPullMode::Fold,
-                PushPullReason::WeakTenpaiAgainstReach,
-            );
+            for dealer_reacher in [false, true] {
+                assert!(!is_strong_tenpai(&offense, dealer_reacher));
+                assert_decision(
+                    &inputs(1, dealer_reacher, Some(offense)),
+                    PushPullMode::Fold,
+                    PushPullReason::WeakTenpaiAgainstReach,
+                );
+            }
         }
     }
 
     #[test]
     fn a_permanent_furiten_tenpai_ignores_the_offense_value() {
-        // 恒常フリテンには exact 打点 policy を適用せず、現行の8枚 policy を維持する。
-        for total in [8000, PUSH_HIGH_VALUE_MIN_TOTAL, 1000] {
+        // 恒常フリテンには残枚数加重合計 policy を適用せず、現行の8枚 policy を維持する。
+        // 加重合計が threshold を大きく超える手でも、待ちが足りなければ押さない。
+        for total in [8000u32, 5200, 1000] {
             let strong = PushPullOffenseState {
                 tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
                     mode: TenpaiOffenseMode::Reach,
@@ -1171,13 +1323,42 @@ mod tests {
                 ..strong
             };
 
-            assert_eq!(
-                strong.strong_tenpai_min_remaining(),
-                Some(FURITEN_STRONG_TENPAI_MIN_REMAINING)
-            );
-            assert!(is_strong_tenpai(&strong));
-            assert!(!is_strong_tenpai(&weak));
+            for dealer_reacher in [false, true] {
+                assert_eq!(
+                    strong.strong_tenpai_requirement(dealer_reacher),
+                    Some(StrongTenpaiRequirement::LiveWait(
+                        FURITEN_STRONG_TENPAI_MIN_REMAINING
+                    ))
+                );
+                assert!(is_strong_tenpai(&strong, dealer_reacher));
+                assert!(!is_strong_tenpai(&weak, dealer_reacher));
+            }
         }
+    }
+
+    #[test]
+    fn a_permanent_furiten_tenpai_is_never_pushed_by_the_weighted_total_alone() {
+        // 加重合計だけを見れば押せる値でも、恒常フリテンなら7枚待ちでは押さない。
+        let offense = PushPullOffenseState {
+            tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
+                mode: TenpaiOffenseMode::Reach,
+                value: OffenseValue::Known {
+                    weighted_total: DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN * 10,
+                    total_remaining: 7,
+                },
+            }),
+            ..tenpai_offense(
+                FURITEN_STRONG_TENPAI_MIN_REMAINING - 1,
+                PermanentFuriten::Yes,
+            )
+        };
+
+        assert!(!is_strong_tenpai(&offense, false));
+        assert_decision(
+            &inputs(1, false, Some(offense)),
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
     }
 
     #[test]
@@ -1194,13 +1375,15 @@ mod tests {
             ..tenpai_offense(20, PermanentFuriten::Unknown)
         };
 
-        assert_eq!(offense.strong_tenpai_min_remaining(), None);
-        assert!(!is_strong_tenpai(&offense));
-        assert_decision(
-            &inputs(1, false, Some(offense)),
-            PushPullMode::Fold,
-            PushPullReason::WeakTenpaiAgainstReach,
-        );
+        for dealer_reacher in [false, true] {
+            assert_eq!(offense.strong_tenpai_requirement(dealer_reacher), None);
+            assert!(!is_strong_tenpai(&offense, dealer_reacher));
+            assert_decision(
+                &inputs(1, dealer_reacher, Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::WeakTenpaiAgainstReach,
+            );
+        }
     }
 
     #[test]
@@ -1222,8 +1405,14 @@ mod tests {
     #[test]
     fn the_furiten_strong_tenpai_boundary_is_eight_live_waits() {
         // 恒常フリテンはロンできずツモ依存になるため、非フリテンより2枚多く要求する。
-        assert!(is_strong_tenpai(&tenpai_offense(8, PermanentFuriten::Yes)));
-        assert!(!is_strong_tenpai(&tenpai_offense(7, PermanentFuriten::Yes)));
+        assert!(is_strong_tenpai(
+            &tenpai_offense(8, PermanentFuriten::Yes),
+            false
+        ));
+        assert!(!is_strong_tenpai(
+            &tenpai_offense(7, PermanentFuriten::Yes),
+            false
+        ));
 
         assert_decision(
             &inputs(1, false, Some(tenpai_offense(8, PermanentFuriten::Yes))),
@@ -1242,7 +1431,7 @@ mod tests {
         // フリテンを判定できない場合は待ち枚数が十分でも強いテンパイと推測しない。
         for remaining in [6, 8, 20] {
             let offense = tenpai_offense(remaining, PermanentFuriten::Unknown);
-            assert!(!is_strong_tenpai(&offense));
+            assert!(!is_strong_tenpai(&offense, false));
             assert_decision(
                 &inputs(1, false, Some(offense)),
                 PushPullMode::Fold,
@@ -1256,7 +1445,7 @@ mod tests {
         // テンパイなのに待ちを構築できない場合も強いテンパイと確認できない。
         let offense = offense(0, 20, 5);
         assert_eq!(offense.tenpai_wait_after_discard, None);
-        assert!(!is_strong_tenpai(&offense));
+        assert!(!is_strong_tenpai(&offense, false));
 
         assert_decision(
             &inputs(1, false, Some(offense)),
@@ -1273,7 +1462,7 @@ mod tests {
             acceptance_type_count: 6,
             ..tenpai_offense(3, PermanentFuriten::No)
         };
-        assert!(!is_strong_tenpai(&offense));
+        assert!(!is_strong_tenpai(&offense, false));
 
         assert_decision(
             &inputs(1, false, Some(offense)),
@@ -1852,6 +2041,8 @@ mod tests {
     struct ExactValueSetup {
         reach_legal: bool,
         self_reached: bool,
+        /// 親の席。既定はリーチしている player 1 ではない席で、子リーチの局面になる。
+        oya: u8,
         history_furiten: bot_logic::HistoryFuritenFacts,
     }
 
@@ -1860,6 +2051,7 @@ mod tests {
             Self {
                 reach_legal: true,
                 self_reached: false,
+                oya: 3,
                 history_furiten: bot_logic::HistoryFuritenFacts {
                     same_turn: Some(false),
                     riichi_missed_win: Some(false),
@@ -1915,10 +2107,10 @@ mod tests {
             hand_tiles,
             dora_indicators,
             TileType::from_mjai_type_str("E").ok(),
-            TileType::from_mjai_type_str("S").ok(),
+            crate::context::seat_wind_for_player(0, setup.oya),
             visible,
             Some(0),
-            Some(3),
+            Some(setup.oya),
             Default::default(),
             [setup.self_reached, true, false, false],
         )
@@ -1938,9 +2130,9 @@ mod tests {
     ];
 
     #[test]
-    fn a_high_value_tenpai_pushes_from_three_live_waits_in_a_real_hand() {
-        // ダマ 7700 の 6s 待ちを3枚まで減らした局面。旧 policy の6枚には届かないが、打点が
-        // 5200 以上なので押す。
+    fn a_high_value_tenpai_pushes_with_three_live_waits_in_a_real_hand() {
+        // ダマ 7700 の 6s 待ちを3枚まで減らした局面。待ち枚数だけの6枚には届かないが、
+        // 加重合計 7700 × 3 = 23,100 が 15,600 以上なので押す。
         let inputs = exact_value_inputs(&HIGH_VALUE_HAND, "N", &["1p"], &["3s", "3s", "3s", "6s"]);
         let offense = inputs.offense.expect("攻撃評価がある");
         let wait = offense
@@ -1955,9 +2147,13 @@ mod tests {
             .expect("攻撃打点を評価している");
         assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
         assert_eq!(value.value.average_total(), Some(7700));
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(23_100));
+        assert!(!inputs.dealer_reacher);
         assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(HIGH_VALUE_TENPAI_MIN_REMAINING)
+            offense.strong_tenpai_requirement(inputs.dealer_reacher),
+            Some(StrongTenpaiRequirement::WeightedTotal(
+                TENPAI_PUSH_WEIGHTED_TOTAL_MIN
+            ))
         );
 
         assert_decision(
@@ -1969,7 +2165,7 @@ mod tests {
 
     #[test]
     fn a_high_value_tenpai_folds_with_two_live_waits_in_a_real_hand() {
-        // 同じ高打点でも残り2枚なら押さない。
+        // 同じ高打点でも残り2枚なら 7700 × 2 = 15,400 で 15,600 に届かず押さない。
         let inputs = exact_value_inputs(
             &HIGH_VALUE_HAND,
             "N",
@@ -1985,7 +2181,7 @@ mod tests {
                 .tsumo_remaining,
             2
         );
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(15_400));
 
         assert_decision(
             &inputs,
@@ -1995,9 +2191,41 @@ mod tests {
     }
 
     #[test]
-    fn a_low_value_tenpai_pushes_from_four_live_waits_in_a_real_hand() {
-        // ダマでは役が無いのでリーチ込みで評価する。リーチのみ 1300 点は 5200 未満なので、
-        // 押すには4枚待ちが要る。
+    fn a_dealer_reach_folds_the_same_high_value_three_wait_tenpai() {
+        // 同じ 7700 × 3 = 23,100 のテンパイでも、親リーチなら 23,400 に届かず押さない。
+        // 親リーチ判定は threat facts から入力へ届いた `dealer_reacher` をそのまま使う。
+        let inputs = exact_value_inputs_with(
+            &HIGH_VALUE_HAND,
+            "N",
+            &["1p"],
+            &["3s", "3s", "3s", "6s"],
+            ExactValueSetup {
+                oya: 1,
+                ..Default::default()
+            },
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+
+        assert!(inputs.dealer_reacher);
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(23_100));
+        assert_eq!(
+            offense.strong_tenpai_requirement(inputs.dealer_reacher),
+            Some(StrongTenpaiRequirement::WeightedTotal(
+                DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN
+            ))
+        );
+
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn a_low_value_tenpai_folds_with_four_live_waits_in_a_real_hand() {
+        // ダマでは役が無いのでリーチ込みで評価する。リーチのみ 1300 点は4枚待ちでも
+        // 1300 × 4 = 5200 にしかならず、旧 policy の4枚 threshold と違って押さない。
         let inputs = exact_value_inputs(&LOW_VALUE_HAND, "N", &[], &[]);
         let offense = inputs.offense.expect("攻撃評価がある");
         let value = offense
@@ -2013,21 +2241,18 @@ mod tests {
         );
         assert_eq!(value.mode, TenpaiOffenseMode::Reach);
         assert_eq!(value.value.average_total(), Some(1300));
-        assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(LOW_VALUE_TENPAI_MIN_REMAINING)
-        );
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(5_200));
 
         assert_decision(
             &inputs,
-            PushPullMode::Push,
-            PushPullReason::StrongTenpaiAgainstReach,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
         );
     }
 
     #[test]
     fn a_low_value_tenpai_folds_with_three_live_waits_in_a_real_hand() {
-        // 同じ低打点で残り3枚なら押さない。
+        // 同じ低打点で残り3枚ならさらに届かない。
         let inputs = exact_value_inputs(&LOW_VALUE_HAND, "N", &[], &["3p"]);
         let offense = inputs.offense.expect("攻撃評価がある");
 
@@ -2038,7 +2263,7 @@ mod tests {
                 .tsumo_remaining,
             3
         );
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(3_900));
 
         assert_decision(
             &inputs,
@@ -2081,11 +2306,7 @@ mod tests {
 
         assert_eq!(value.mode, TenpaiOffenseMode::Reach);
         assert_eq!(value.value.average_total(), Some(7700));
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(true));
-        assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(HIGH_VALUE_TENPAI_MIN_REMAINING)
-        );
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(23_100));
 
         assert_decision(
             &inputs,
@@ -2115,11 +2336,7 @@ mod tests {
 
         assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
         assert_eq!(value.value.average_total(), Some(3900));
-        assert_eq!(offense.tenpai_offense_value_is_high(), Some(false));
-        assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(LOW_VALUE_TENPAI_MIN_REMAINING)
-        );
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(11_700));
 
         assert_decision(
             &inputs,
@@ -2166,10 +2383,12 @@ mod tests {
 
             assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
             assert_eq!(value.value, OffenseValue::Unknown);
-            assert_eq!(offense.tenpai_offense_value_is_high(), None);
+            assert_eq!(offense.tenpai_offense_weighted_total(), None);
             assert_eq!(
-                offense.strong_tenpai_min_remaining(),
-                Some(STRONG_TENPAI_MIN_REMAINING)
+                offense.strong_tenpai_requirement(inputs.dealer_reacher),
+                Some(StrongTenpaiRequirement::LiveWait(
+                    STRONG_TENPAI_MIN_REMAINING
+                ))
             );
 
             assert_decision(
@@ -2212,8 +2431,10 @@ mod tests {
             OffenseValue::Unknown
         );
         assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(STRONG_TENPAI_MIN_REMAINING)
+            offense.strong_tenpai_requirement(inputs.dealer_reacher),
+            Some(StrongTenpaiRequirement::LiveWait(
+                STRONG_TENPAI_MIN_REMAINING
+            ))
         );
 
         assert_decision(
@@ -2259,10 +2480,12 @@ mod tests {
             .expect("攻撃打点を評価している");
 
         assert_eq!(value.value, OffenseValue::Unknown);
-        assert_eq!(offense.tenpai_offense_value_is_high(), None);
+        assert_eq!(offense.tenpai_offense_weighted_total(), None);
         assert_eq!(
-            offense.strong_tenpai_min_remaining(),
-            Some(STRONG_TENPAI_MIN_REMAINING)
+            offense.strong_tenpai_requirement(inputs.dealer_reacher),
+            Some(StrongTenpaiRequirement::LiveWait(
+                STRONG_TENPAI_MIN_REMAINING
+            ))
         );
 
         // 待ちは4枚。打点が確定していれば押せる枚数だが、確定しないので降りる。
@@ -3370,12 +3593,12 @@ mod tests {
     fn the_late_one_meld_exception_does_not_depend_on_the_offense_value() {
         // 打点を確定しても確定しなくても、終盤1副露 High だけならテンパイで押す例外は変わらない。
         for offense in [
-            valued_tenpai_offense(2, PUSH_HIGH_VALUE_MIN_TOTAL - 1),
+            weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1),
             unknown_value_tenpai_offense(2, PermanentFuriten::No),
             tenpai_offense(2, PermanentFuriten::Unknown),
         ] {
             let inputs = late_one_meld_high_inputs(Some(offense));
-            assert!(!is_strong_tenpai(&offense));
+            assert!(!is_strong_tenpai(&offense, false));
             assert_high_open_hand_decision(
                 &inputs,
                 PushPullMode::Push,
@@ -3488,6 +3711,27 @@ mod tests {
             };
             assert_high_open_hand_decision(&high_open_hand_inputs(Some(offense)), mode, reason);
         }
+    }
+
+    #[test]
+    fn a_high_open_hand_threat_alone_uses_the_base_weighted_total_threshold() {
+        // High OpenHandThreat 単独はリーチ者がいないので、親リーチの 1.5 倍は適用しない。
+        let exact = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN);
+        let below = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1);
+
+        let inputs = high_open_hand_inputs(Some(exact));
+        assert_eq!(inputs.opponent_reach_count, 0);
+        assert!(!inputs.dealer_reacher);
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstHighOpenHand,
+        );
+        assert_high_open_hand_decision(
+            &high_open_hand_inputs(Some(below)),
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstHighOpenHand,
+        );
     }
 
     #[test]
