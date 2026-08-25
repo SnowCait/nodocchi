@@ -673,6 +673,7 @@ impl ShantenAgent {
             ctx,
             player_threat_facts_from_context(ctx),
             discard_selection.evaluation.as_ref(),
+            discard_selection.iishanten_forward_metrics,
             legal_actions,
         );
         let push_pull = decide_push_pull(&inputs);

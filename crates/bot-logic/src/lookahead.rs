@@ -345,6 +345,26 @@ pub fn forward_metrics_from_lookahead(
         .collect()
 }
 
+/// 打牌候補1件だけの前方集計値を求める。
+///
+/// 枝の評価も集計規則も [`forward_metrics`] と同じで、対象を渡された1候補に限定するだけ。
+/// 候補集合の中から既に選び終えた1件について集計値が必要な経路のための入口で、
+/// [`LookaheadDiagnostic`] は構築しない。
+///
+/// 集計値を入れる枠 (テンパイ待ち / 次の受け入れ) は渡された候補自身の打牌後向聴数で決める。
+/// 候補集合の最善候補についてはその向聴数が最善向聴数と一致するため、[`forward_metrics`] が
+/// 同じ候補へ返す値と一致する。
+pub fn forward_metrics_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> ForwardMetrics {
+    let shanten = evaluation.min_shanten_after_discard();
+    forward_metrics_for_shanten(
+        shanten,
+        weighted_forward_metric_for_candidate(inputs, evaluation, shanten - 1),
+    )
+}
+
 pub fn tenpai_wait_metrics_from_lookahead(
     evaluations: &[DiscardEvaluation],
     lookahead: &LookaheadDiagnostic,
@@ -1322,6 +1342,28 @@ mod tests {
             }
         }
         assert!(iishanten > 1, "1向聴候補が複数ある局面が必要");
+    }
+
+    #[test]
+    fn a_single_candidate_metric_matches_the_full_comparison() {
+        // 1候補だけの入口は全候補経路と同じ集計値を返す。別の計算器を持たない。
+        let case = &*IISHANTEN_WAIT_CASE;
+        let all = forward_metrics(&inputs(&case.situation), &case.situation.evaluations);
+
+        let mut checked = 0;
+        for (evaluation, metric) in case.situation.evaluations.iter().zip(all.iter()) {
+            if metric.tenpai_wait.is_none() {
+                continue;
+            }
+            assert_eq!(
+                forward_metrics_for_candidate(&inputs(&case.situation), evaluation),
+                *metric,
+                "{:?}",
+                evaluation.discard
+            );
+            checked += 1;
+        }
+        assert!(checked > 1, "前方評価の対象候補が複数ある局面が必要");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::discard_selection::{
     concealed_tiles_after_discard, select_best_normal_discard_evaluation,
-    selected_discard_tenpai_wait_availability,
+    selected_discard_tenpai_wait_availability, selected_iishanten_forward_metrics_from_context,
 };
 use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
 use crate::open_hand_threat::{
@@ -13,8 +13,8 @@ use crate::threat::{
     player_threat_facts_from_context, reached_opponent_count,
 };
 use bot_logic::{
-    DiscardEvaluation, IishantenShape, PermanentFuriten, TenpaiWaitAvailability, TileCounts,
-    TileType, count_dora,
+    DiscardEvaluation, ForwardMetrics, IishantenShape, PermanentFuriten, TenpaiWaitAvailability,
+    TileCounts, TileType, count_dora,
 };
 
 const LOG_TARGET: &str = "bot_core::push_pull";
@@ -65,8 +65,8 @@ pub enum PushPullMode {
 ///
 /// `decide_push_pull()` が現在参照するのは `min_shanten_after_discard` /
 /// `tenpai_wait_after_discard` / `tenpai_offense_value_after_discard` だけで、受け入れ・
-/// 一向聴形・簡易打点 proxy は診断・ログ用に保持する。簡易打点 proxy は exact 打点とは別物で、
-/// 一向聴以上の解析材料として残している。
+/// 一向聴形・簡易打点 proxy・1向聴の前方集計値は診断・ログ用に保持する。簡易打点 proxy は
+/// exact 打点とは別物で、一向聴以上の解析材料として残している。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
     pub min_shanten_after_discard: i8,
@@ -102,6 +102,18 @@ pub struct PushPullOffenseState {
     /// 刻子・槓子候補1組として一度だけ数える。Chi は字牌を含まないため役牌翻を持たない。
     /// 場風・自風が不明な風牌は数えない(三元牌は風情報が無くても数える)。
     pub value_honor_han_proxy_after_discard: u8,
+
+    /// 打牌後が1向聴の場合に、通常打牌選択が使った前方集計値。1向聴でなければ `None`。
+    ///
+    /// 通常打牌選択が持っている値をそのまま転記するだけで、押し引き側で2手先探索も打点集計も
+    /// 行わない。1向聴の押し引きはまだこの値を判断に使わず、threshold を決めるための観測値
+    /// として診断・ログにだけ出す。
+    ///
+    /// [`ForwardMetrics::tenpai_wait`] は将来テンパイの待ちを1手目の残枚数で重み付けした
+    /// 合計、[`ForwardMetrics::prospective_value`] はその枝を確定打点で重み付けした合計。
+    /// 打点を確定できない枝がある場合と、集計対象の枝が1つも無い場合は打点込みの値が `None`
+    /// になる。確定しない打点を 0 点として扱わない。
+    pub iishanten_forward_metrics: Option<ForwardMetrics>,
 }
 
 impl PushPullOffenseState {
@@ -505,15 +517,24 @@ pub fn push_pull_inputs_from_context(
 ///
 /// 脅威 facts をまだ構築していない入口用。すでに構築済みなら
 /// [`push_pull_inputs_from_threat_facts`] へ渡して二重構築を避ける。
+///
+/// この入口は通常打牌選択の結果を保持しないため、1向聴の前方集計値は選んだ1候補についてだけ
+/// 既存の前方評価基盤から求め直す ([`selected_iishanten_forward_metrics_from_context`])。通常の
+/// `act()` 経路は選択が計算済みの値をそのまま渡すので、こちらは通らない。
 pub(crate) fn push_pull_inputs_from_context_with_evaluation(
     context: &GameContext,
     evaluation: Option<&DiscardEvaluation>,
     legal_actions: &[LegalAction],
 ) -> PushPullInputs {
+    let iishanten_forward_metrics = evaluation.and_then(|evaluation| {
+        selected_iishanten_forward_metrics_from_context(context, evaluation)
+    });
+
     push_pull_inputs_from_threat_facts(
         context,
         player_threat_facts_from_context(context),
         evaluation,
+        iishanten_forward_metrics,
         legal_actions,
     )
 }
@@ -538,10 +559,15 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// 攻撃継続時の確定打点は、その打点を使う policy が成立する局面
 /// ([`should_evaluate_tenpai_offense_value`]) でだけ評価する。合法 Reach の有無は
 /// `legal_actions` を source of truth にし、Reach 可否を別経路で推測し直さない。
+///
+/// `iishanten_forward_metrics` は通常打牌選択が同じ `evaluation` について観測した1向聴の前方
+/// 集計値で、押し引き側では転記するだけ。2手先探索も打点集計もここでは行わない。1向聴でない
+/// 打牌では `None` を渡す。
 pub(crate) fn push_pull_inputs_from_threat_facts(
     context: &GameContext,
     player_threats: [PlayerThreatFacts; 4],
     evaluation: Option<&DiscardEvaluation>,
+    iishanten_forward_metrics: Option<ForwardMetrics>,
     legal_actions: &[LegalAction],
 ) -> PushPullInputs {
     let opponent_reach_count = reached_opponent_count(&player_threats);
@@ -580,6 +606,7 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
             dora_count_after_discard: value_proxy.dora_count,
             red_dora_count_after_discard: value_proxy.red_dora_count,
             value_honor_han_proxy_after_discard: value_proxy.value_honor_han_proxy,
+            iishanten_forward_metrics,
         }
     });
 
@@ -834,6 +861,9 @@ pub(crate) fn log_push_pull_decision(
         offense_red_dora_count_after_discard = ?inputs.offense.map(|offense| offense.red_dora_count_after_discard),
         offense_value_honor_han_proxy_after_discard = ?inputs.offense.map(|offense| offense.value_honor_han_proxy_after_discard),
         offense_simple_value_proxy_after_discard = ?inputs.offense.map(|offense| offense.simple_value_proxy_after_discard()),
+        offense_iishanten_prospective_value = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.prospective_value),
+        offense_iishanten_weighted_tenpai_wait_remaining = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_remaining),
+        offense_iishanten_weighted_tenpai_wait_type_count = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_type_count),
         normal_discard = ?normal_discard,
         "push-pull decision",
     );
@@ -844,7 +874,7 @@ mod tests {
     use super::*;
     use crate::meld::{Meld, MeldKind};
     use crate::offense_value::{OffenseValue, TenpaiOffenseMode};
-    use bot_logic::{TileId, TileType};
+    use bot_logic::{TenpaiWaitMetric, TileId, TileType};
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -954,6 +984,7 @@ mod tests {
             dora_count_after_discard: dora,
             red_dora_count_after_discard: red_dora,
             value_honor_han_proxy_after_discard: value_honor_han,
+            iishanten_forward_metrics: None,
         }
     }
 
@@ -1545,6 +1576,52 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_iishanten_forward_metrics_do_not_change_any_branch() {
+        // 1向聴の前方集計値は観測用に保持するだけで、押し引きの判断には一切使わない。
+        // 打点込みの集計値がどれだけ高くても threat があれば Fold のまま。
+        let metrics = |prospective_value: Option<u64>| {
+            Some(ForwardMetrics {
+                tenpai_wait: Some(TenpaiWaitMetric {
+                    weighted_remaining: u32::MAX,
+                    weighted_type_count: u32::MAX,
+                    prospective_value,
+                }),
+                next_acceptance: None,
+                prospective_value,
+            })
+        };
+
+        for forward in [metrics(Some(u64::MAX)), metrics(None), None] {
+            let offense = PushPullOffenseState {
+                iishanten_forward_metrics: forward,
+                ..offense_with_shape(1, 8, 2, IishantenShape::Complete)
+            };
+
+            for self_dealer in [false, true] {
+                for (reach_count, dealer_reacher) in [(1, false), (1, true), (2, false)] {
+                    assert_decision(
+                        &inputs_with_dealer(
+                            reach_count,
+                            dealer_reacher,
+                            self_dealer,
+                            Some(offense),
+                        ),
+                        PushPullMode::Fold,
+                        PushPullReason::IishantenAgainstReach,
+                    );
+                }
+            }
+
+            // threat が無ければ従来どおり Push。集計値で Neutral へ振り分けたりしない。
+            assert_decision(
+                &inputs(0, false, Some(offense)),
+                PushPullMode::Push,
+                PushPullReason::NoThreat,
+            );
         }
     }
 
@@ -3358,7 +3435,7 @@ mod tests {
         let facts = player_threat_facts_from_context(&context);
 
         assert_eq!(
-            push_pull_inputs_from_threat_facts(&context, facts, None, &[]),
+            push_pull_inputs_from_threat_facts(&context, facts, None, None, &[]),
             push_pull_inputs_from_context_with_evaluation(&context, None, &[])
         );
     }
