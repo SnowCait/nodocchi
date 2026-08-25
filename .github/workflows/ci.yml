@@ -19,9 +19,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        run: |
-          rustup default stable
-          rustup component add rustfmt clippy
+        run: rustup toolchain install --no-self-update
 
       - name: Compute Rust cache key
         id: rust-key
@@ -45,7 +43,9 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        env:
+          CARGO_BUILD_WARNINGS: deny
+        run: cargo clippy --locked --all-targets --all-features --keep-going
 
       - name: Save Cargo cache
         if: >-
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        run: rustup default stable
+        run: rustup toolchain install --no-self-update
 
       - name: Compute Rust cache key
         id: rust-key
@@ -102,7 +102,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-v1-${{ steps.rust-key.outputs.rustc }}-
 
       - name: Test
-        run: cargo test ${{ matrix.args }}
+        run: cargo test --locked ${{ matrix.args }}
 
       - name: Save Cargo cache
         if: >-
