@@ -1628,7 +1628,9 @@ pub(crate) mod tests {
 
     #[test]
     fn non_iishanten_candidates_have_no_weighted_tenpai_wait() {
-        // テンパイ・2向聴以上では前方評価を計算しないので、集計値は 0 ではなく None にする。
+        // テンパイでは前方評価そのものを行わず、2向聴以上では weighted next acceptance のための
+        // 前方評価を行う。どちらも1向聴限定の weighted tenpai wait は持たないので、意味の無い 0
+        // ではなく None にする。
         let hands: [(&[u8], i8); 2] = [
             // 123m 456m 789m 12p 55s + ツモ 9p。最善はテンパイ。
             (&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 89, 90, 68], 0),
@@ -2617,7 +2619,9 @@ pub(crate) mod tests {
 
     #[test]
     fn tenpai_and_multi_shanten_candidates_have_no_prospective_value() {
-        // テンパイ・2向聴以上では前方評価そのものを行わないので、打点込みの集計値も持たない。
+        // テンパイでは前方評価そのものを行わず、2向聴以上では既存 weighted next acceptance の
+        // ための前方評価を行う。ただし将来打点は1向聴限定なので、どちらも打点込みの集計値は
+        // 持たない。
         for hand in [
             // 123m 456m 789m 12p 55s + ツモ 9p。最善はテンパイ。
             [

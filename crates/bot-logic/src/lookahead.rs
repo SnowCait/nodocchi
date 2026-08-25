@@ -12,9 +12,11 @@
 //! ([`physical_tile_variants`]) が持ち、牌種単位の残枚数 ([`EffectiveAcceptanceTile::remaining`])
 //! を赤 / 黒へ分ける。
 //!
-//! 赤5と黒5では打点だけでなく2手目の最良打牌そのものが変わり得るため、variant ごとに既存打牌
-//! 評価と既存比較をそのまま通す。仮想ツモ牌以外の牌は現在の手牌の物理牌をそのまま引き継ぐため、
-//! どの variant も通常打牌評価と同じ文脈で評価できる。
+//! 赤5と黒5では和了手の打点が変わるため、variant ごとに既存打牌評価と既存比較をそのまま通す。
+//! 将来打点を使う枝では2手目の最良打牌そのものが変わり得る。打点を使わない枝では、仮想ツモ牌を
+//! 2手目にそのまま切ると向聴が戻って Shanten 軸で必ず負けるため、赤5かどうかは最良打牌を変えず、
+//! 残枚数の内訳だけが赤 / 黒へ分かれる。仮想ツモ牌以外の牌は現在の手牌の物理牌をそのまま
+//! 引き継ぐため、どの variant も通常打牌評価と同じ文脈で評価できる。
 //!
 //! - 副露済み面子数・見え牌・場風・自風・ドラ表示牌: すべて通常打牌評価と同じ値を反映する
 //! - 役牌 (`discarded_value_honor_count`): 牌種と場風・自風だけで決まるので必ず反映する
@@ -569,6 +571,7 @@ impl CandidateBranch {
 mod tests {
     use super::*;
     use crate::discard::{
+        DiscardComparisonReason, diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
         evaluate_discards_from_tiles_with_fixed_melds_and_context,
         evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
         select_best_discard_from_tiles_with_context,
@@ -1314,7 +1317,7 @@ mod tests {
                 assert!(metric.is_some(), "1向聴候補 {:?}", evaluation.discard);
                 iishanten += 1;
             } else {
-                // 1向聴以外は前方探索そのものを行わないので None のままにする。
+                // 最善向聴を維持しない候補は前方評価の対象外なので None のままにする。
                 assert_eq!(*metric, None, "非1向聴候補 {:?}", evaluation.discard);
             }
         }
@@ -1406,7 +1409,8 @@ mod tests {
 
     #[test]
     fn multi_shanten_hands_do_not_compute_the_weighted_wait() {
-        // 2向聴・3向聴以上の局面では1向聴を維持する候補が無いので前方評価を計算しない。
+        // 2向聴・3向聴以上でも前方評価そのものは行うが、その結果は weighted next acceptance へ
+        // 入る。weighted tenpai wait は1向聴限定なので、どの候補も持たない。
         for hand in [
             ids(&[0, 4, 8, 12, 17, 20, 48, 53, 72, 76, 108, 112, 116, 120]),
             ids(&[0, 8, 20, 28, 48, 56, 68, 76, 88, 100, 108, 116, 124, 132]),
@@ -1643,5 +1647,195 @@ mod tests {
             &evaluations,
         );
         assert_eq!(tiles, before);
+    }
+
+    // ---- 2向聴以上の仮想ツモ牌の物理牌 variant ----
+
+    // 2345m 1p 3p 7p 2s 7s 999s CC の2向聴。打 7p / 打 2s が最善向聴を維持し、どちらの枝でも
+    // 赤5が未見の 5m / 5p / 5s を仮想ツモする。5m は手牌に黒5m があるので残枚数 3、5p / 5s は
+    // 手牌にも見え牌にも無いので残枚数 4 になる。
+    fn two_shanten_red_five_hand() -> Vec<TileId> {
+        ids(&[4, 11, 13, 17, 39, 45, 62, 79, 97, 104, 106, 107, 133, 135])
+    }
+
+    static TWO_SHANTEN_RED_FIVE_CASE: LazyLock<Case> = LazyLock::new(|| {
+        let hand = two_shanten_red_five_hand();
+        let visible = hand.clone();
+        visible_case(&hand, FixedMeldCount::NONE, Vec::new(), None, None, visible)
+    });
+
+    fn best_shanten(situation: &Situation) -> i8 {
+        situation
+            .evaluations
+            .iter()
+            .map(DiscardEvaluation::min_shanten_after_discard)
+            .min()
+            .expect("打牌候補がある")
+    }
+
+    #[test]
+    fn a_two_or_more_shanten_draw_splits_into_physical_variants() {
+        // 2向聴以上でも仮想ツモ牌を赤5 / 黒5の物理牌 variant へ分ける。分割規則は最終和了牌と
+        // 共有する既存 helper が source of truth で、テスト側で赤黒の枚数を数え直さない。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        assert!(best_shanten(&case.situation) >= 2, "2向聴以上の局面が必要");
+
+        let red_five_seen = seen_red_fives(case.situation.visible.iter().copied());
+        let mut split_draws = 0;
+        for candidate in &case.lookahead.candidates {
+            for draw in &candidate.draws {
+                let expected: Vec<_> = physical_tile_variants(
+                    draw.draw,
+                    draw.remaining,
+                    red_five_seen[draw.draw.index()],
+                )
+                .map(|variant| (variant.tile, variant.remaining))
+                .collect();
+                let actual: Vec<_> = draw
+                    .variants
+                    .iter()
+                    .map(|variant| (variant.drawn_tile, variant.remaining))
+                    .collect();
+                assert_eq!(
+                    actual, expected,
+                    "discard {:?} draw {:?}",
+                    candidate.discard, draw.draw
+                );
+
+                // 物理牌 variant の残枚数の合計は牌種単位の残枚数と一致する。
+                assert_eq!(
+                    draw.variants
+                        .iter()
+                        .map(|variant| u32::from(variant.remaining))
+                        .sum::<u32>(),
+                    u32::from(draw.remaining),
+                );
+
+                let [red, black] = draw.variants.as_slice() else {
+                    continue;
+                };
+                assert!(red.drawn_tile.is_red());
+                assert!(!black.drawn_tile.is_red());
+                assert_eq!(red.remaining, 1);
+                assert_eq!(black.remaining, draw.remaining - 1);
+                split_draws += 1;
+            }
+        }
+        assert!(split_draws > 0, "赤5が未見の受け入れがある局面が必要");
+    }
+
+    #[test]
+    fn red_and_black_variants_share_the_next_discard_without_a_prospective_value() {
+        // 2向聴以上では将来打点を使わないため、赤5 / 黒5の違いは既存 comparator の結果を変えない。
+        //
+        // 仮想ツモ牌を2手目にそのまま切ると向聴が戻るので Shanten 軸で必ず負け、赤5かどうかが
+        // 効く Dora / RedFive 軸まで落ちない。したがって物理牌 variant が変えるのは残枚数の
+        // 内訳だけで、weighted next acceptance の合計は牌種単位で数えた場合と一致する。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+
+        let mut checked = 0;
+        for candidate in &case.lookahead.candidates {
+            for draw in &candidate.draws {
+                let [red, black] = draw.variants.as_slice() else {
+                    continue;
+                };
+                assert_eq!(
+                    red.next_discard, black.next_discard,
+                    "discard {:?} draw {:?}",
+                    candidate.discard, draw.draw
+                );
+                assert_eq!(red.prospective_value, None);
+                assert_eq!(black.prospective_value, None);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "赤 / 黒へ分かれる受け入れがある局面が必要");
+    }
+
+    #[test]
+    fn weighted_next_acceptance_aggregates_the_physical_variants() {
+        // 2手目の結果は物理牌 variant の残枚数で重み付けして集約する。平均や確率へ正規化しない。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        let required_next_shanten = best_shanten(&case.situation) - 1;
+        let metrics = forward_metrics(&inputs(&case.situation), &case.situation.evaluations);
+
+        let mut checked = 0;
+        for (candidate, metric) in case.lookahead.candidates.iter().zip(metrics.iter()) {
+            let Some(next_acceptance) = metric.next_acceptance else {
+                continue;
+            };
+
+            let mut weighted_remaining = 0u32;
+            let mut weighted_type_count = 0u32;
+            for variant in candidate.draws.iter().flat_map(|draw| draw.variants.iter()) {
+                let Some(next) = variant.next_discard.as_ref() else {
+                    continue;
+                };
+                if next.min_shanten_after_discard() != required_next_shanten {
+                    continue;
+                }
+                weighted_remaining +=
+                    u32::from(variant.remaining) * u32::from(next.acceptance_total_remaining());
+                weighted_type_count +=
+                    u32::from(variant.remaining) * next.acceptance_type_count() as u32;
+            }
+
+            assert_eq!(next_acceptance.weighted_remaining, weighted_remaining);
+            assert_eq!(next_acceptance.weighted_type_count, weighted_type_count);
+            // 2向聴以上では weighted tenpai wait の枠は使わない。
+            assert_eq!(metric.tenpai_wait, None);
+            checked += 1;
+        }
+        assert!(checked > 1, "前方評価の対象候補が複数必要");
+    }
+
+    #[test]
+    fn two_or_more_shanten_decides_by_the_weighted_next_acceptance_only() {
+        // 2向聴以上では打点込みの集計値を持たず、既存 weighted next acceptance だけで決着する。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        let metrics = forward_metrics(&inputs(&case.situation), &case.situation.evaluations);
+
+        assert!(
+            metrics
+                .iter()
+                .all(|metric| metric.prospective_value.is_none())
+        );
+        assert!(
+            metrics
+                .iter()
+                .any(|metric| metric.next_acceptance.is_some())
+        );
+
+        let diagnostic = diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
+            &case.situation.counts,
+            case.situation.fixed_meld_count,
+            &case.situation.evaluations,
+            &metrics,
+        );
+        let candidate = |discard: TileType| {
+            diagnostic
+                .candidates
+                .iter()
+                .find(|candidate| candidate.evaluation.discard == discard)
+                .expect("打牌候補がある")
+        };
+
+        assert_eq!(
+            diagnostic
+                .selected
+                .as_ref()
+                .map(|selected| selected.discard),
+            Some(tile("2s")),
+        );
+        assert_eq!(
+            candidate(tile("7p")).comparison_reason,
+            DiscardComparisonReason::WeightedNextAcceptanceRemaining,
+        );
+        assert!(
+            diagnostic
+                .candidates
+                .iter()
+                .all(|candidate| candidate.prospective_value.is_none())
+        );
     }
 }

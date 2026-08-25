@@ -58,6 +58,8 @@ weighted next acceptance
 
 既存 Acceptance の有効牌を1枚引いた後、既存 comparator が選ぶ次打牌後の受け入れを集計した2手先の牌効率 proxy です。これも期待値や和了率ではありません。
 
+仮想ツモが赤5 / 黒5に分かれる牌種では、物理牌ごとに次打牌を評価し、それぞれの残枚数で集約します。この指標に打点は含めないため、赤 / 黒で変わるのは残枚数の内訳だけです。1向聴の `weighted prospective value` はここでは使いません。
+
 ## lookahead
 
 `bot-scenario --lookahead` は通常打牌候補ごとの2手先概要を追加します。`--verbose` と併用すると受け入れ牌ごとの詳細も表示します。
