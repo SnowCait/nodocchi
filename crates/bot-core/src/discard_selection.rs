@@ -14,21 +14,31 @@ use bot_logic::{
     diagnose_lookahead, discard_tenpai_wait_availability,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
-    forward_metrics_from_lookahead, split_discarded_tile,
+    forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
+
+/// 1向聴の向聴数。押し引きへ渡す前方集計値の対象。
+const IISHANTEN_SHANTEN: i8 = 1;
 
 /// 通常打牌選択の内部結果。
 ///
 /// - `evaluation`: 合法 Dahai 候補の中の最善 `DiscardEvaluation`。合法候補が無ければ `None`。
 /// - `action`: `evaluation` に対応する合法 Dahai。
+/// - `iishanten_forward_metrics`: 選んだ打牌が1向聴の場合の前方集計値。
 ///
 /// `evaluation` と `action` は常に同時に `Some` / `None` になり、`Some` のときは牌種が一致する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscardActionSelection {
     pub evaluation: Option<DiscardEvaluation>,
     pub action: Option<LegalAction>,
+    /// 選んだ打牌が1向聴の場合の前方集計値。1向聴でなければ `None`。
+    ///
+    /// 打牌選択には影響しない観測値で、押し引きの offense state と診断へそのまま渡す。値の
+    /// 出どころは選択に使った前方集計値そのもので、押し引き側で集計し直さない
+    /// ([`selected_iishanten_forward_metrics`])。
+    pub iishanten_forward_metrics: Option<ForwardMetrics>,
 }
 
 /// 通常打牌選択の結果と、その選択に使った全合法候補の構造化診断。
@@ -105,7 +115,7 @@ pub(crate) fn select_discard_action_with_evaluation(
         );
     }
 
-    selection_from_legal_evaluations(&legal, &tenpai_wait, legal_actions)
+    selection_from_legal_evaluations(context, &legal, &tenpai_wait, legal_actions)
 }
 
 /// `select_discard_action_with_evaluation()` と同じ選択結果に、全合法候補の構造化診断を添えて返す。
@@ -145,7 +155,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
     });
 
     DiscardActionSelectionWithDiagnostic {
-        selection: selection_from_legal_evaluations(&legal, &tenpai_wait, legal_actions),
+        selection: selection_from_legal_evaluations(context, &legal, &tenpai_wait, legal_actions),
         diagnostic,
         furiten: furiten_from_legal_evaluations(context, &legal),
         lookahead,
@@ -175,19 +185,86 @@ fn legal_discard_evaluations(
 }
 
 // 補正済みの合法候補集合から最善評価と対応する合法 Dahai を決める。全経路共通の選択処理。
+//
+// 選んだ打牌が1向聴の場合は、押し引きが観測する前方集計値も同時に決める。選択で使った
+// `tenpai_wait` をそのまま再利用するので、比較に使った値と押し引きへ渡る値は同じになる。
 fn selection_from_legal_evaluations(
+    context: &GameContext,
     legal: &LegalDiscardEvaluations,
     tenpai_wait: &[ForwardMetrics],
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
-    let evaluation =
-        best_discard_selection_index_with_forward_metrics(&legal.evaluations, tenpai_wait)
-            .map(|index| legal.evaluations[index].clone());
+    let selected =
+        best_discard_selection_index_with_forward_metrics(&legal.evaluations, tenpai_wait);
+    let evaluation = selected.map(|index| legal.evaluations[index].clone());
     let action = evaluation
         .as_ref()
         .and_then(|evaluation| legal_dahai_for_evaluation(evaluation, legal_actions));
+    let iishanten_forward_metrics = selected.and_then(|index| {
+        selected_iishanten_forward_metrics(
+            context,
+            &legal.tiles,
+            &legal.evaluations[index],
+            tenpai_wait.get(index).copied().unwrap_or_default(),
+        )
+    });
 
-    DiscardActionSelection { evaluation, action }
+    DiscardActionSelection {
+        evaluation,
+        action,
+        iishanten_forward_metrics,
+    }
+}
+
+/// 選んだ打牌1件について、押し引きが観測する1向聴の前方集計値を返す。
+///
+/// 選んだ打牌が1向聴でなければ `None`。2向聴以上の前方集計値は押し引きの判断にも診断にも
+/// 使わないため、ここでは持ち回らない。
+///
+/// `selected` は選択が使った前方集計値。1向聴の前方比較を行った候補集合では最善候補にも必ず
+/// 値が入っているので、その場合は再計算せずそのまま返す。前方比較が不要だった場合 (合法候補が
+/// 1件など) だけ、選んだ1候補について既存の前方評価基盤 ([`bot_logic::forward_metrics_for_candidate`])
+/// から求める。押し引き側で lookahead も打点集計も持たず、全候補分の詳細診断も構築しない。
+fn selected_iishanten_forward_metrics(
+    context: &GameContext,
+    tiles: &[TileId],
+    evaluation: &DiscardEvaluation,
+    selected: ForwardMetrics,
+) -> Option<ForwardMetrics> {
+    if evaluation.min_shanten_after_discard() != IISHANTEN_SHANTEN {
+        return None;
+    }
+    if selected.tenpai_wait.is_some() {
+        return Some(selected);
+    }
+
+    let valuator = ProductionProspectiveValuator::new(context);
+    Some(forward_metrics_for_candidate(
+        &lookahead_inputs(context, tiles, &valuator),
+        evaluation,
+    ))
+}
+
+/// 選択結果を保持していない経路のための、選んだ打牌1件分の1向聴前方集計値。
+///
+/// 選択が使った値を持ち回れる経路 (`select_discard_action_with_evaluation` →
+/// [`DiscardActionSelection::iishanten_forward_metrics`]) はそちらを再利用し、この入口は使わない。
+/// `GameContext` と打牌評価だけから押し引き入力を組み立てる経路
+/// (`push_pull_inputs_from_context`) 専用で、選んだ1候補についてだけ求める。
+///
+/// `evaluation` は同じ `context` の手牌から求めた評価であること。
+pub(crate) fn selected_iishanten_forward_metrics_from_context(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+) -> Option<ForwardMetrics> {
+    let tiles: Vec<_> = context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(context.drawn_tile())
+        .collect();
+
+    selected_iishanten_forward_metrics(context, &tiles, evaluation, ForwardMetrics::default())
 }
 
 // 最善向聴を維持する複数候補について、打牌選択用の前方集計値を求める。
@@ -632,6 +709,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
+    use crate::threat::player_threat_facts_from_context;
     use bot_logic::{HistoryFuritenFacts, TileId};
 
     fn tile(value: u8) -> TileId {
@@ -982,7 +1061,7 @@ pub(crate) mod tests {
         let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
 
         let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
-        let selection = selection_from_legal_evaluations(&legal, &tenpai_wait, actions);
+        let selection = selection_from_legal_evaluations(context, &legal, &tenpai_wait, actions);
 
         assert_eq!(diagnostic.selected, selection.evaluation);
         assert!(diagnostic.selected.is_some());
@@ -2342,6 +2421,16 @@ pub(crate) mod tests {
     // 場風・自風・自分の席を既知にし、手牌とドラ表示牌をそのまま見え牌として渡す。合法 Dahai は
     // 手牌の全牌にする。
     fn value_context(hand: &[&str; 14], dora_indicator: &str) -> (GameContext, Vec<LegalAction>) {
+        value_context_with_winds(hand, dora_indicator, true)
+    }
+
+    // `winds == false` では場風・自風を渡さず、点数計算の入力が足りない局面にする。将来打点を
+    // どの枝でも確定できないため、既存 #175 と同じく打点込みの集計値だけが `None` になる。
+    fn value_context_with_winds(
+        hand: &[&str; 14],
+        dora_indicator: &str,
+        winds: bool,
+    ) -> (GameContext, Vec<LegalAction>) {
         let mut used: Vec<TileId> = Vec::new();
         let mut take = |mjai: &str| {
             let red = mjai.ends_with('r');
@@ -2367,8 +2456,8 @@ pub(crate) mod tests {
             Some(drawn[0]),
             hand_tiles.to_vec(),
             dora_indicators,
-            TileType::from_mjai_type_str("E").ok(),
-            TileType::from_mjai_type_str("S").ok(),
+            winds.then(|| TileType::from_mjai_type_str("E").expect("牌種として読める")),
+            winds.then(|| TileType::from_mjai_type_str("S").expect("牌種として読める")),
             visible,
             Some(0),
             Some(3),
@@ -2615,6 +2704,137 @@ pub(crate) mod tests {
             variant(true).prospective_value,
             variant(false).prospective_value,
         );
+    }
+
+    // ---- 1向聴 selected discard の前方集計値の押し引きへの受け渡し ----
+
+    // 通常打牌選択と押し引き入力を、本番 act() と同じ helper だけを通して組み立てる。
+    fn selected_offense(
+        context: &GameContext,
+        actions: &[LegalAction],
+    ) -> (DiscardActionSelection, PushPullOffenseState) {
+        let selection = select_discard_action_with_evaluation(context, actions);
+        let inputs = push_pull_inputs_from_threat_facts(
+            context,
+            player_threat_facts_from_context(context),
+            selection.evaluation.as_ref(),
+            selection.iishanten_forward_metrics,
+            actions,
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+        (selection, offense)
+    }
+
+    #[test]
+    fn the_selected_iishanten_forward_metrics_reach_the_push_pull_offense_state() {
+        // 選んだ1向聴打牌の前方集計値が、押し引きの offense state から観測できる。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let (selection, offense) = selected_offense(&context, &actions);
+
+        assert_eq!(
+            selection
+                .evaluation
+                .as_ref()
+                .expect("選択できる")
+                .discard
+                .to_mjai_string(),
+            "8p"
+        );
+        assert_eq!(offense.min_shanten_after_discard, 1);
+
+        let forward = offense
+            .iishanten_forward_metrics
+            .expect("1向聴の前方集計値がある");
+        let wait = forward.tenpai_wait.expect("テンパイ待ちの集計値がある");
+        assert!(forward.prospective_value.is_some());
+        assert_eq!(forward.prospective_value, wait.prospective_value);
+        assert!(wait.weighted_remaining > 0);
+        assert!(wait.weighted_type_count > 0);
+    }
+
+    #[test]
+    fn the_push_pull_forward_metrics_are_the_ones_the_comparator_used() {
+        // 押し引きへ渡る集計値は、通常打牌の比較へ入力した集計値そのもの。二重計算しない。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let legal = legal_discard_evaluations(&context, &actions);
+        let metrics = selection_forward_metrics(&context, &legal.tiles, &legal.evaluations);
+        let selected =
+            best_discard_selection_index_with_forward_metrics(&legal.evaluations, &metrics)
+                .expect("最善候補がある");
+
+        let (_, offense) = selected_offense(&context, &actions);
+        assert_eq!(offense.iishanten_forward_metrics, Some(metrics[selected]));
+    }
+
+    #[test]
+    fn a_single_candidate_still_reports_the_selected_forward_metrics() {
+        // 候補が1件で前方比較が要らない場合でも、選んだ打牌が1向聴なら診断用の集計値は取れる。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let single: Vec<LegalAction> = actions
+            .iter()
+            .filter(|action| match action {
+                LegalAction::Dahai { tile } => tile.tile_type().to_mjai_string() == "8p",
+                _ => false,
+            })
+            .cloned()
+            .collect();
+
+        // 候補1件では選択そのものに前方評価が要らないため、selection は集計値を持たない。
+        let legal = legal_discard_evaluations(&context, &single);
+        assert_eq!(legal.evaluations.len(), 1);
+        assert_eq!(
+            selection_forward_metrics(&context, &legal.tiles, &legal.evaluations),
+            vec![ForwardMetrics::default()]
+        );
+
+        // 全候補を比較した経路が同じ打牌へ求めた集計値と一致する。別の計算器を作っていない。
+        let all = legal_discard_evaluations(&context, &actions);
+        let expected = metric_of(
+            &all.evaluations,
+            &selection_forward_metrics(&context, &all.tiles, &all.evaluations),
+            "8p",
+        );
+
+        let (_, offense) = selected_offense(&context, &single);
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        assert_eq!(offense.iishanten_forward_metrics, Some(expected));
+    }
+
+    #[test]
+    fn a_multi_shanten_selection_has_no_iishanten_forward_metrics() {
+        // 1向聴でない打牌では前方集計値を持ち回らない。2向聴以上の押し引きは今回変えない。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let single: Vec<LegalAction> = actions
+            .iter()
+            .filter(|action| match action {
+                LegalAction::Dahai { tile } => tile.tile_type().to_mjai_string() == "1m",
+                _ => false,
+            })
+            .cloned()
+            .collect();
+
+        let (selection, offense) = selected_offense(&context, &single);
+        assert!(selection.evaluation.is_some());
+        assert!(offense.min_shanten_after_discard > 1);
+        assert_eq!(offense.iishanten_forward_metrics, None);
+    }
+
+    #[test]
+    fn an_unknown_prospective_value_stays_unknown_in_the_offense_state() {
+        // 打点を確定できない枝がある場合、押し引きへ渡る打点込みの集計値も 0 ではなく `None`。
+        let (context, actions) = value_context_with_winds(&VALUE_OVER_WAIT_HAND, "4p", false);
+        let (_, offense) = selected_offense(&context, &actions);
+
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        let forward = offense
+            .iishanten_forward_metrics
+            .expect("1向聴の前方集計値がある");
+        assert_eq!(forward.prospective_value, None);
+
+        // 打点を確定できなくても既存 weighted wait は求まる。
+        let wait = forward.tenpai_wait.expect("テンパイ待ちの集計値がある");
+        assert_eq!(wait.prospective_value, None);
+        assert!(wait.weighted_remaining > 0);
     }
 
     #[test]

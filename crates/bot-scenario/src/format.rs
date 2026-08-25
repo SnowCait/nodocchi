@@ -831,6 +831,7 @@ fn format_push_pull(
                     }
                 }
                 lines.extend(format_tenpai_offense_value(offense, inputs.dealer_reacher));
+                lines.extend(format_iishanten_forward_metrics(offense));
                 lines.push(format!(
                     "    dora after discard: {}",
                     offense.dora_count_after_discard
@@ -876,6 +877,37 @@ fn format_tenpai_offense_value(
         strong_tenpai_requirement_label(offense.strong_tenpai_requirement(dealer_reacher))
     ));
     lines
+}
+
+// 通常打牌選択が選んだ打牌が1向聴の場合の前方集計値。選択が使った値をそのまま出し、表示用に
+// 2手先探索も打点集計もやり直さない。打牌後が1向聴でなければ持っていない。
+//
+// `weighted prospective value` は将来テンパイの確定打点を1手目・和了牌の残枚数で重み付けした
+// 合計で、確定できない枝がある場合と集計対象の枝が無い場合は `unknown`。平均へ正規化した値でも
+// 完全な EV でもない。現在の押し引き判断はこの値を使わない。
+fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<String> {
+    let Some(metrics) = offense.iishanten_forward_metrics else {
+        return vec![format!("    iishanten forward metrics: {NONE}")];
+    };
+
+    vec![
+        "    iishanten forward metrics".to_string(),
+        format!(
+            "      weighted prospective value: {}",
+            prospective_total_label(metrics.prospective_value)
+        ),
+        format!(
+            "      weighted tenpai wait: {}",
+            format_tenpai_wait(metrics.tenpai_wait)
+        ),
+    ]
+}
+
+fn prospective_total_label(total: Option<u64>) -> String {
+    match total {
+        Some(total) => total.to_string(),
+        None => UNKNOWN.to_string(),
+    }
 }
 
 fn offense_value_label(value: OffenseValue) -> String {
@@ -3149,6 +3181,82 @@ mod tests {
         );
         assert!(
             push_pull.contains("    strong tenpai requirement: -"),
+            "{push_pull}"
+        );
+    }
+
+    // 場風と自分の席まで既知の1向聴。将来打点まで確定できる局面。
+    const KNOWN_VALUE_IISHANTEN_SCENARIO: &str = r#"{
+        "hand": "12m68m445p789p567s",
+        "draw": "4p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 2,
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "legal_dahai": "1m 5p"
+    }"#;
+
+    #[test]
+    fn push_pull_section_shows_the_iishanten_forward_metrics() {
+        // 選んだ打牌が1向聴なら、通常打牌選択が使った前方集計値をそのまま出す。
+        let (_, diagnostic, output) = rendered(KNOWN_VALUE_IISHANTEN_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        let forward = offense
+            .iishanten_forward_metrics
+            .expect("1向聴の前方集計値がある");
+        let value = forward.prospective_value.expect("将来打点を確定できる");
+        let wait = forward.tenpai_wait.expect("テンパイ待ちの集計値がある");
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains(&format!("      weighted prospective value: {value}")),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      weighted tenpai wait: {} remaining / {} types",
+                wait.weighted_remaining, wait.weighted_type_count
+            )),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn push_pull_section_reports_an_unknown_prospective_value() {
+        // 打点を確定できない枝がある1向聴では、0点へ潰さず unknown と出す。待ちは出る。
+        let (_, diagnostic, output) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        let forward = offense
+            .iishanten_forward_metrics
+            .expect("1向聴の前方集計値がある");
+        assert_eq!(forward.prospective_value, None);
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains("      weighted prospective value: unknown"),
+            "{push_pull}"
+        );
+        assert!(
+            push_pull.contains(&format!(
+                "      weighted tenpai wait: {}",
+                format_tenpai_wait(forward.tenpai_wait)
+            )),
+            "{push_pull}"
+        );
+    }
+
+    #[test]
+    fn push_pull_section_reports_no_forward_metrics_outside_iishanten() {
+        // 1向聴でない打牌では前方集計値を持たないので、その旨だけを出す。
+        let (_, diagnostic, output) = rendered(HIGH_VALUE_TENPAI_UNDER_REACH_SCENARIO, false);
+        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        assert_eq!(offense.min_shanten_after_discard, TENPAI_SHANTEN);
+        assert_eq!(offense.iishanten_forward_metrics, None);
+
+        let push_pull = section(&output, "Push/Pull");
+        assert!(
+            push_pull.contains("    iishanten forward metrics: none"),
             "{push_pull}"
         );
     }

@@ -104,6 +104,8 @@ Push/Pull
 
 `tenpai offense value` は打牌後テンパイを攻撃継続した場合の確定打点です。`offense mode` は既リーチ / これからリーチする手 (`Reach`) かダマにする手 (`Damaten`) か (自分が既リーチかを判断できない場合は `Unknown`)、`weighted average` は生きた待ちの支払点を残枚数で加重平均した打点、`weighted total` は割り算する前の残枚数加重合計です。確定できない場合はどちらも `unknown` になります。`strong tenpai requirement` は押すために要求する条件で、打点を確定できた非フリテンでは `weighted total >= 15600` (他家リーチ者に親が含まれる場合は `23400`)、確定できない場合と恒常フリテンでは `live wait >= 6` / `live wait >= 8` になります。打牌後がテンパイでなければどちらも評価しません。意味は [攻撃継続時の確定打点](ai/push-pull.md#攻撃継続時の確定打点) を参照してください。
 
+`iishanten forward metrics` は、通常打牌選択が選んだ打牌が1向聴の場合の前方集計値です。`weighted prospective value` は将来テンパイの確定打点を1手目と最終和了牌の残枚数で重み付けした合計、`weighted tenpai wait` はその枝のテンパイ待ちの残枚数・種類数です。production の打牌選択が比較に使った値をそのまま表示し、表示用に2手先探索も打点集計もやり直しません。平均へ正規化した値でも局収支EVでもありません。打点を確定できない枝がある場合は `unknown` で、0点として扱いません。打牌後が1向聴でなければ `none` です。現在の押し引き判断はこの値を使いません。
+
 `dora after discard` / `red dora after discard` / `value honor han proxy after discard` / `simple value proxy after discard` は、打牌後の concealed hand と自分の確認できている fixed meld (暗槓を含む) の両方を数えた簡易打点 proxy です。production の `PushPullOffenseState` をそのまま表示し、表示用に数え直しません。正確な打点ではなく、一般役・符・点数計算は含みません。意味は [簡易打点 proxy](ai/push-pull.md#簡易打点-proxy) を参照してください。
 
 ## Reach
