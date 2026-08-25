@@ -94,7 +94,9 @@ pub fn parse_compact_chiihou_pais(s: &str) -> Result<Vec<ChiihouPai>, ChiihouCom
         return Err(ChiihouCompactPaiParseError::OddLength(s.len()));
     }
     s.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
             let token =
                 std::str::from_utf8(chunk).map_err(|_| ChiihouCompactPaiParseError::NotAscii)?;
