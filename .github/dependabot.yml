@@ -4,8 +4,26 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "quarterly"
+    cooldown:
+      default-days: 14
     groups:
       github-actions:
         patterns:
           - "*"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "quarterly"
+    cooldown:
+      default-days: 14
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "nostr-sdk"
+        update-types:
+          - "minor"
+          - "patch"
