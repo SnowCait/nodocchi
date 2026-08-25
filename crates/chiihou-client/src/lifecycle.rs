@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use nostr_sdk::{FromBech32, PublicKey};
+use nostr_sdk::prelude::{FromBech32, Nip19, PublicKey};
 use thiserror::Error;
 
 pub(crate) const CHIIHOU_PLAYER_COUNT: usize = 4;
@@ -207,9 +207,10 @@ fn parse_player_pubkey(token: &str) -> Result<PublicKey, ChiihouLifecycleError> 
 }
 
 pub(crate) fn player_pubkey_from_token(token: &str) -> Option<PublicKey> {
-    token
-        .strip_prefix("nostr:")
-        .and_then(|npub| PublicKey::from_bech32(npub).ok())
+    match token.strip_prefix("nostr:").map(Nip19::from_bech32) {
+        Some(Ok(Nip19::Pubkey(public_key))) => Some(public_key),
+        _ => None,
+    }
 }
 
 fn ensure_unique_players(players: &[PublicKey]) -> Result<(), ChiihouLifecycleError> {
@@ -248,8 +249,8 @@ fn parse_score(token: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::nips::nip19::Nip19Profile;
-    use nostr_sdk::{Keys, RelayUrl, ToBech32};
+    use nostr_sdk::prelude::nip19::Nip19Profile;
+    use nostr_sdk::prelude::{Keys, RelayUrl, ToBech32};
 
     // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
     fn test_keys(index: u64) -> Keys {

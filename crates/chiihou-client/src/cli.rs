@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use nostr_sdk::nips::nip19::Nip19Profile;
-use nostr_sdk::{FromBech32, PublicKey};
+use nostr_sdk::prelude::nip19::Nip19Profile;
+use nostr_sdk::prelude::{FromBech32, PublicKey};
 
 use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
 use crate::secret::{ChiihouSecretError, validate_chiihou_nsec};
@@ -214,7 +214,7 @@ pub fn build_cli_nostr_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::{Keys, RelayUrl, ToBech32};
+    use nostr_sdk::prelude::{Keys, RelayUrl, ToBech32};
 
     // テスト専用の秘密鍵。実際の運用で使用してはならない。
     const TEST_AI_SECRET_KEY_HEX: &str =

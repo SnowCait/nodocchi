@@ -1,4 +1,4 @@
-use nostr_sdk::{FromBech32, SecretKey};
+use nostr_sdk::prelude::{FromBech32, SecretKey};
 
 pub const CHIIHOU_NSEC_ENV: &str = "CHIIHOU_NSEC";
 
@@ -41,7 +41,7 @@ pub fn validate_chiihou_nsec(value: &str) -> Result<String, ChiihouSecretError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::{Keys, ToBech32};
+    use nostr_sdk::prelude::{Keys, ToBech32};
 
     // テスト専用の秘密鍵。実際の運用で使用してはならない。
     const TEST_AI_SECRET_KEY_HEX: &str =

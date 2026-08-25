@@ -976,11 +976,11 @@ nostr:npub1ai000 GET sutehai?"
         );
     }
 
-    fn lifecycle_players() -> Vec<nostr_sdk::PublicKey> {
+    fn lifecycle_players() -> Vec<nostr_sdk::prelude::PublicKey> {
         // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
         (1..=4u64)
             .map(|index| {
-                nostr_sdk::Keys::parse(&format!("{index:064x}"))
+                nostr_sdk::prelude::Keys::parse(&format!("{index:064x}"))
                     .unwrap()
                     .public_key()
             })
@@ -988,7 +988,7 @@ nostr:npub1ai000 GET sutehai?"
     }
 
     fn gamestart_content() -> String {
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let players = lifecycle_players()
             .iter()
             .map(|player| format!("nostr:{}", player.to_bech32().unwrap()))
@@ -1063,7 +1063,7 @@ nostr:npub1ai000 GET sutehai?"
     }
 
     fn ai_npub_token() -> String {
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         format!("nostr:{}", lifecycle_players()[0].to_bech32().unwrap())
     }
 

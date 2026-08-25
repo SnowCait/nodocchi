@@ -1,4 +1,4 @@
-use nostr_sdk::Event;
+use nostr_sdk::prelude::Event;
 
 use crate::config::ChiihouNostrConfig;
 use crate::event::CHIIHOU_CHANNEL_MESSAGE_KIND;
@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, HANCHAN_CHANNEL_ID};
     use crate::nostr_adapter::incoming_event_from_nostr;
-    use nostr_sdk::{Keys, Kind, ToBech32};
+    use nostr_sdk::prelude::{Keys, Kind, ToBech32};
 
     // テスト専用の秘密鍵。実際の運用で使用してはならない。
     const TEST_AI_SECRET_KEY_HEX: &str =

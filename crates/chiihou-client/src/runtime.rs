@@ -1,11 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use bot_core::Agent;
-use nostr_sdk::async_utility::tokio::sync::broadcast::Receiver;
-use nostr_sdk::async_utility::tokio::sync::broadcast::error::RecvError;
-use nostr_sdk::{
-    Client, Event, EventId, Filter, Kind, RelayPoolNotification, RelayUrl, SubscriptionId,
+use nostr_sdk::prelude::{
+    Client, ClientNotification, Event, EventId, Filter, Kind, RelayUrl, StreamExt, SubscriptionId,
     Timestamp,
 };
 
@@ -148,9 +146,9 @@ pub async fn connect_chiihou_client(
     Ok(client)
 }
 
-fn ensure_any_relay_succeeded(
+fn ensure_any_relay_succeeded<S>(
     operation: &str,
-    success: &HashSet<RelayUrl>,
+    success: &HashMap<RelayUrl, S>,
     failed: &HashMap<RelayUrl, String>,
 ) -> Result<(), String> {
     if success.is_empty() {
@@ -167,7 +165,7 @@ pub async fn subscribe_chiihou_requests(
     let filter = build_chiihou_request_filter(config, since)?;
 
     let output = client
-        .subscribe(filter, None)
+        .subscribe(filter)
         .await
         .map_err(|error| ChiihouRuntimeError::Subscribe(error.to_string()))?;
 
@@ -181,7 +179,7 @@ pub async fn subscribe_chiihou_requests(
         );
     }
 
-    Ok(output.val)
+    Ok(output.value)
 }
 
 pub async fn publish_chiihou_event(
@@ -304,94 +302,67 @@ pub async fn run_chiihou_client_auto_enter_with_options<A: Agent>(
     .await
 }
 
-async fn run_chiihou_request_loop<A: Agent>(
+#[derive(Debug)]
+enum ChiihouNotificationStep {
+    Handle(Box<Event>),
+    Ignore,
+    Stop,
+}
+
+fn classify_client_notification(
+    notification: ClientNotification,
+    subscription_id: &SubscriptionId,
+) -> ChiihouNotificationStep {
+    match notification {
+        ClientNotification::Event {
+            subscription_id: received_subscription_id,
+            event,
+            ..
+        } if received_subscription_id == *subscription_id => ChiihouNotificationStep::Handle(event),
+        ClientNotification::Shutdown => ChiihouNotificationStep::Stop,
+        _ => ChiihouNotificationStep::Ignore,
+    }
+}
+
+async fn run_chiihou_request_loop<A, N>(
     client: &Client,
-    notifications: &mut Receiver<RelayPoolNotification>,
+    notifications: &mut N,
     subscription_id: SubscriptionId,
     config: &ChiihouNostrConfig,
     options: ChiihouRuntimeOptions,
     agent: &mut A,
-) -> Result<(), ChiihouRuntimeError> {
+) -> Result<(), ChiihouRuntimeError>
+where
+    A: Agent,
+    N: StreamExt<Item = ClientNotification> + Unpin,
+{
     let mut seen = SeenEventIds::new();
     let mut controller =
         ChiihouLifecycleController::new(config.keys().public_key(), options.auto_next);
 
-    loop {
-        match notifications.recv().await {
-            Ok(RelayPoolNotification::Event {
-                subscription_id: received_subscription_id,
-                event,
-                ..
-            }) if received_subscription_id == subscription_id => {
-                let incoming = incoming_event_from_nostr(&event);
-                let snapshot = controller.table_snapshot();
-                match classify_incoming_event_with_state(
-                    &incoming,
-                    config.event_config(),
-                    &mut seen,
-                    &snapshot,
-                    agent,
-                ) {
-                    Ok(ChiihouIncomingAction::Ignore) => {}
-                    Ok(ChiihouIncomingAction::Reply(reply)) => {
-                        sleep_response_delay(options.response_delay).await?;
+    while let Some(notification) = notifications.next().await {
+        let event = match classify_client_notification(notification, &subscription_id) {
+            ChiihouNotificationStep::Handle(event) => event,
+            ChiihouNotificationStep::Ignore => continue,
+            ChiihouNotificationStep::Stop => break,
+        };
 
-                        match sign_outgoing_reply(&reply, config.keys()) {
-                            Ok(signed) => {
-                                publish_chiihou_reply(client, &signed).await?;
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    event_id = %event.id,
-                                    error = %error,
-                                    "failed to process chiihou event"
-                                );
-                            }
-                        }
-                    }
-                    Ok(ChiihouIncomingAction::Lifecycle(notification)) => {
-                        match controller.apply(&notification) {
-                            ChiihouLifecycleEffect::None => {}
-                            ChiihouLifecycleEffect::PublishNext => {
-                                sleep_response_delay(options.response_delay).await?;
+        let incoming = incoming_event_from_nostr(&event);
+        let snapshot = controller.table_snapshot();
+        match classify_incoming_event_with_state(
+            &incoming,
+            config.event_config(),
+            &mut seen,
+            &snapshot,
+            agent,
+        ) {
+            Ok(ChiihouIncomingAction::Ignore) => {}
+            Ok(ChiihouIncomingAction::Reply(reply)) => {
+                sleep_response_delay(options.response_delay).await?;
 
-                                let next = sign_chiihou_next_command(config)?;
-                                publish_chiihou_event(client, &next).await?;
-                                tracing::info!(
-                                    event_id = %next.id,
-                                    trigger_event_id = %event.id,
-                                    "published chiihou next command"
-                                );
-                            }
-                            ChiihouLifecycleEffect::EndGame => {
-                                client.unsubscribe(&subscription_id).await;
-                                tracing::info!("chiihou game ended");
-                                return Ok(());
-                            }
-                        }
-                    }
-                    Ok(ChiihouIncomingAction::TableNotification(notification)) => {
-                        if let Err(error) = controller.apply_table_notification(&notification) {
-                            tracing::warn!(
-                                event_id = %event.id,
-                                error = %error,
-                                "rejected chiihou table notification"
-                            );
-                        }
-                    }
-                    Err(ChiihouEventError::Lifecycle(error)) => {
-                        tracing::warn!(
-                            event_id = %event.id,
-                            error = %error,
-                            "failed to parse chiihou lifecycle notification"
-                        );
-                    }
-                    Err(ChiihouEventError::TableNotification(error)) => {
-                        tracing::warn!(
-                            event_id = %event.id,
-                            error = %error,
-                            "failed to parse chiihou table notification"
-                        );
+                match sign_outgoing_reply(&reply, config.keys()) {
+                    Ok(signed) => {
+                        publish_chiihou_reply(client, &signed).await?;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -402,10 +373,56 @@ async fn run_chiihou_request_loop<A: Agent>(
                     }
                 }
             }
-            Ok(RelayPoolNotification::Shutdown) | Err(RecvError::Closed) => break,
-            Ok(_) => {}
-            Err(RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "chiihou notification receiver lagged");
+            Ok(ChiihouIncomingAction::Lifecycle(notification)) => {
+                match controller.apply(&notification) {
+                    ChiihouLifecycleEffect::None => {}
+                    ChiihouLifecycleEffect::PublishNext => {
+                        sleep_response_delay(options.response_delay).await?;
+
+                        let next = sign_chiihou_next_command(config)?;
+                        publish_chiihou_event(client, &next).await?;
+                        tracing::info!(
+                            event_id = %next.id,
+                            trigger_event_id = %event.id,
+                            "published chiihou next command"
+                        );
+                    }
+                    ChiihouLifecycleEffect::EndGame => {
+                        let _ = client.unsubscribe(&subscription_id).await;
+                        tracing::info!("chiihou game ended");
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(ChiihouIncomingAction::TableNotification(notification)) => {
+                if let Err(error) = controller.apply_table_notification(&notification) {
+                    tracing::warn!(
+                        event_id = %event.id,
+                        error = %error,
+                        "rejected chiihou table notification"
+                    );
+                }
+            }
+            Err(ChiihouEventError::Lifecycle(error)) => {
+                tracing::warn!(
+                    event_id = %event.id,
+                    error = %error,
+                    "failed to parse chiihou lifecycle notification"
+                );
+            }
+            Err(ChiihouEventError::TableNotification(error)) => {
+                tracing::warn!(
+                    event_id = %event.id,
+                    error = %error,
+                    "failed to parse chiihou table notification"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event_id = %event.id,
+                    error = %error,
+                    "failed to process chiihou event"
+                );
             }
         }
     }
@@ -419,7 +436,9 @@ mod tests {
     use crate::config::{ChiihouChannel, HANCHAN_CHANNEL_ID, TONPUU_CHANNEL_ID};
     use crate::nostr_adapter::nostr_tags_from_strings;
     use bot_core::{GameContext, LegalAction};
-    use nostr_sdk::{Alphabet, EventBuilder, Keys, SingleLetterTag, ToBech32};
+    use nostr_sdk::prelude::{
+        EventBuilder, FinalizeEvent, Keys, RelayMessage, SingleLetterTag, ToBech32,
+    };
 
     // テスト専用の秘密鍵。実際の運用で使用してはならない。
     const TEST_AI_SECRET_KEY_HEX: &str =
@@ -484,8 +503,7 @@ mod tests {
     fn build_request_event(kind: u16, content: &str, tags: &[Vec<String>], keys: &Keys) -> Event {
         EventBuilder::new(Kind::from_u16(kind), content)
             .tags(nostr_tags_from_strings(tags).unwrap())
-            .allow_self_tagging()
-            .sign_with_keys(keys)
+            .finalize(keys)
             .unwrap()
     }
 
@@ -539,7 +557,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let filter = build_chiihou_request_filter(&config(ChiihouChannel::Hanchan), since).unwrap();
         let p_values = filter
             .generic_tags
-            .get(&SingleLetterTag::lowercase(Alphabet::P))
+            .get(&SingleLetterTag::LOWERCASE_P)
             .unwrap();
         assert_eq!(p_values.len(), 1);
         assert!(p_values.contains(&ai_keys().public_key().to_hex()));
@@ -551,7 +569,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let filter = build_chiihou_request_filter(&config(ChiihouChannel::Hanchan), since).unwrap();
         let e_values = filter
             .generic_tags
-            .get(&SingleLetterTag::lowercase(Alphabet::E))
+            .get(&SingleLetterTag::LOWERCASE_E)
             .unwrap();
         assert_eq!(e_values.len(), 1);
         assert!(e_values.contains(HANCHAN_CHANNEL_ID));
@@ -563,7 +581,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
         let filter = build_chiihou_request_filter(&config(ChiihouChannel::Tonpuu), since).unwrap();
         let e_values = filter
             .generic_tags
-            .get(&SingleLetterTag::lowercase(Alphabet::E))
+            .get(&SingleLetterTag::LOWERCASE_E)
             .unwrap();
         assert_eq!(e_values.len(), 1);
         assert!(e_values.contains(TONPUU_CHANNEL_ID));
@@ -966,7 +984,7 @@ nostr:{ai_npub} GET naku? ron pon chi"
 
         // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
         fn other_player_npub(index: u64) -> String {
-            nostr_sdk::Keys::parse(&format!("{index:064x}"))
+            Keys::parse(&format!("{index:064x}"))
                 .unwrap()
                 .public_key()
                 .to_bech32()
@@ -1362,9 +1380,69 @@ nostr:npub1ai000 GET sutehai?"
         RelayUrl::parse(url).unwrap()
     }
 
+    fn subscribed_event() -> Event {
+        build_request_event(42, &sutehai_content(), &request_tags(), &server_keys())
+    }
+
+    #[test]
+    fn client_notification_event_for_the_subscription_is_handled() {
+        let subscription_id = SubscriptionId::new("chiihou");
+        let event = subscribed_event();
+        let step = classify_client_notification(
+            ClientNotification::Event {
+                relay_url: relay_url("wss://relay1.example.com"),
+                subscription_id: subscription_id.clone(),
+                event: Box::new(event.clone()),
+            },
+            &subscription_id,
+        );
+        let ChiihouNotificationStep::Handle(handled) = step else {
+            panic!("expected the event to be handled, got: {step:?}");
+        };
+        assert_eq!(*handled, event);
+    }
+
+    #[test]
+    fn client_notification_event_for_another_subscription_is_ignored() {
+        let step = classify_client_notification(
+            ClientNotification::Event {
+                relay_url: relay_url("wss://relay1.example.com"),
+                subscription_id: SubscriptionId::new("other"),
+                event: Box::new(subscribed_event()),
+            },
+            &SubscriptionId::new("chiihou"),
+        );
+        assert!(matches!(step, ChiihouNotificationStep::Ignore));
+    }
+
+    #[test]
+    fn client_notification_message_is_ignored_even_for_the_subscription() {
+        let subscription_id = SubscriptionId::new("chiihou");
+        let step = classify_client_notification(
+            ClientNotification::Message {
+                relay_url: relay_url("wss://relay1.example.com"),
+                message: Box::new(RelayMessage::event(
+                    subscription_id.clone(),
+                    subscribed_event(),
+                )),
+            },
+            &subscription_id,
+        );
+        assert!(matches!(step, ChiihouNotificationStep::Ignore));
+    }
+
+    #[test]
+    fn client_notification_shutdown_stops_the_loop() {
+        let step = classify_client_notification(
+            ClientNotification::Shutdown,
+            &SubscriptionId::new("chiihou"),
+        );
+        assert!(matches!(step, ChiihouNotificationStep::Stop));
+    }
+
     #[test]
     fn ensure_any_relay_succeeded_is_error_without_success() {
-        let success = HashSet::new();
+        let success: HashMap<RelayUrl, ()> = HashMap::new();
         let failed = HashMap::from([(
             relay_url("wss://relay1.example.com"),
             "connection refused".to_string(),
@@ -1377,14 +1455,14 @@ nostr:npub1ai000 GET sutehai?"
 
     #[test]
     fn ensure_any_relay_succeeded_is_ok_with_all_success() {
-        let success = HashSet::from([relay_url("wss://relay1.example.com")]);
+        let success = HashMap::from([(relay_url("wss://relay1.example.com"), ())]);
         let failed = HashMap::new();
         assert!(ensure_any_relay_succeeded("subscription", &success, &failed).is_ok());
     }
 
     #[test]
     fn ensure_any_relay_succeeded_is_ok_with_partial_failure() {
-        let success = HashSet::from([relay_url("wss://relay1.example.com")]);
+        let success = HashMap::from([(relay_url("wss://relay1.example.com"), ())]);
         let failed = HashMap::from([(
             relay_url("wss://relay2.example.com"),
             "connection refused".to_string(),

@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
-use nostr_sdk::nips::nip19::Nip19Profile;
-use nostr_sdk::{FromBech32, Keys, PublicKey, ToBech32};
+use nostr_sdk::prelude::nip19::Nip19Profile;
+use nostr_sdk::prelude::{FromBech32, Keys, PublicKey, ToBech32};
 
 use crate::event::ChiihouEventConfig;
 
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn accepts_server_nprofile() {
-        let relay = nostr_sdk::RelayUrl::parse("wss://hint.example.com/").unwrap();
+        let relay = nostr_sdk::prelude::RelayUrl::parse("wss://hint.example.com/").unwrap();
         let nprofile = Nip19Profile::new(server_keys().public_key(), [relay])
             .to_bech32()
             .unwrap();
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn server_nprofile_relay_hint_is_not_added_to_relays() {
-        let relay = nostr_sdk::RelayUrl::parse("wss://hint.example.com/").unwrap();
+        let relay = nostr_sdk::prelude::RelayUrl::parse("wss://hint.example.com/").unwrap();
         let nprofile = Nip19Profile::new(server_keys().public_key(), [relay])
             .to_bech32()
             .unwrap();

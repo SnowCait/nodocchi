@@ -1,4 +1,4 @@
-use nostr_sdk::PublicKey;
+use nostr_sdk::prelude::PublicKey;
 use thiserror::Error;
 
 use crate::lifecycle::{parse_u32, player_pubkey_from_token};
@@ -225,8 +225,8 @@ fn ensure_no_remaining_tokens<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::nips::nip19::Nip19Profile;
-    use nostr_sdk::{Keys, RelayUrl, ToBech32};
+    use nostr_sdk::prelude::nip19::Nip19Profile;
+    use nostr_sdk::prelude::{Keys, RelayUrl, ToBech32};
 
     // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
     fn test_keys(index: u64) -> Keys {

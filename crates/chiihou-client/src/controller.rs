@@ -1,4 +1,4 @@
-use nostr_sdk::PublicKey;
+use nostr_sdk::prelude::PublicKey;
 
 use crate::lifecycle::ChiihouLifecycleNotification;
 use crate::match_state::{ChiihouMatchState, ChiihouTableSnapshot, ChiihouTableStateError};
@@ -71,7 +71,7 @@ mod tests {
     use super::*;
     use crate::lifecycle::{ChiihouPlayerScore, ChiihouWind};
     use crate::match_state::ChiihouMatchPhase;
-    use nostr_sdk::Keys;
+    use nostr_sdk::prelude::Keys;
 
     // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
     fn test_keys(index: u64) -> Keys {
