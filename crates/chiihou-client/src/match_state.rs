@@ -1,5 +1,5 @@
 use bot_core::MeldKind;
-use nostr_sdk::PublicKey;
+use nostr_sdk::prelude::PublicKey;
 use thiserror::Error;
 
 use crate::lifecycle::{
@@ -444,7 +444,7 @@ fn seat_wind_from_player_and_dealer(player_id: u8, oya: u8) -> Option<ChiihouWin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::Keys;
+    use nostr_sdk::prelude::Keys;
 
     // テスト専用の秘密鍵から鍵を導出する。実際の運用で使用してはならない。
     fn test_keys(index: u64) -> Keys {
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     fn npub_token(index: u64) -> String {
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         format!("nostr:{}", player_pubkey(index).to_bech32().unwrap())
     }
 

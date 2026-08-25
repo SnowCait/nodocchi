@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nostr_sdk::{Client, Filter, Kind, PublicKey};
+use nostr_sdk::prelude::{Client, Filter, Kind, PublicKey};
 
 use crate::config::ChiihouNostrConfig;
 
@@ -131,7 +131,8 @@ pub async fn fetch_chiihou_table_status(
 ) -> Result<ChiihouTableStatus, ChiihouStatusError> {
     let filter = build_chiihou_status_filter(config)?;
     let events = client
-        .fetch_events(filter, timeout)
+        .fetch_events(filter)
+        .timeout(timeout)
         .await
         .map_err(|error| ChiihouStatusError::Fetch(error.to_string()))?;
     match events.first() {
@@ -144,7 +145,7 @@ pub async fn fetch_chiihou_table_status(
 mod tests {
     use super::*;
     use crate::config::{ChiihouChannel, HANCHAN_CHANNEL_ID, TONPUU_CHANNEL_ID};
-    use nostr_sdk::{Alphabet, Keys, SingleLetterTag};
+    use nostr_sdk::prelude::{Keys, SingleLetterTag};
 
     // テスト専用の秘密鍵。実際の運用で使用してはならない。
     const TEST_AI_SECRET_KEY_HEX: &str =
@@ -388,7 +389,7 @@ mod tests {
         let filter = build_chiihou_status_filter(&config(ChiihouChannel::Hanchan)).unwrap();
         let d_values = filter
             .generic_tags
-            .get(&SingleLetterTag::lowercase(Alphabet::D))
+            .get(&SingleLetterTag::LOWERCASE_D)
             .unwrap();
         assert_eq!(d_values.len(), 1);
         assert!(d_values.contains(HANCHAN_CHANNEL_ID));
@@ -399,7 +400,7 @@ mod tests {
         let filter = build_chiihou_status_filter(&config(ChiihouChannel::Tonpuu)).unwrap();
         let d_values = filter
             .generic_tags
-            .get(&SingleLetterTag::lowercase(Alphabet::D))
+            .get(&SingleLetterTag::LOWERCASE_D)
             .unwrap();
         assert_eq!(d_values.len(), 1);
         assert!(d_values.contains(TONPUU_CHANNEL_ID));
@@ -417,7 +418,7 @@ mod tests {
         assert!(
             !filter
                 .generic_tags
-                .contains_key(&SingleLetterTag::lowercase(Alphabet::P))
+                .contains_key(&SingleLetterTag::LOWERCASE_P)
         );
     }
 
@@ -427,7 +428,7 @@ mod tests {
         assert!(
             !filter
                 .generic_tags
-                .contains_key(&SingleLetterTag::lowercase(Alphabet::E))
+                .contains_key(&SingleLetterTag::LOWERCASE_E)
         );
     }
 

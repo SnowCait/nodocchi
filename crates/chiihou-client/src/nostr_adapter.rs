@@ -1,4 +1,4 @@
-use nostr_sdk::{Event, EventBuilder, Keys, Kind, Tag};
+use nostr_sdk::prelude::{Event, EventBuilder, FinalizeEvent, Keys, Kind, Tag};
 
 use crate::event::{ChiihouIncomingEvent, ChiihouOutgoingReply};
 
@@ -50,8 +50,7 @@ pub fn sign_outgoing_event(
     let tags = nostr_tags_from_strings(tags)?;
     EventBuilder::new(Kind::from_u16(kind), content)
         .tags(tags)
-        .allow_self_tagging()
-        .sign_with_keys(keys)
+        .finalize(keys)
         .map_err(|error| ChiihouNostrAdapterError::Sign(error.to_string()))
 }
 
@@ -97,8 +96,7 @@ mod tests {
     fn build_nostr_event(kind: u16, content: &str, tags: &[Vec<String>]) -> Event {
         EventBuilder::new(Kind::from_u16(kind), content)
             .tags(nostr_tags_from_strings(tags).unwrap())
-            .allow_self_tagging()
-            .sign_with_keys(&server_keys())
+            .finalize(&server_keys())
             .unwrap()
     }
 
