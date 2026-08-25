@@ -41,10 +41,10 @@
 //! # 集約
 //!
 //! 待ちは牌種ごと、さらに和了牌の物理牌 (赤5 / 黒5) ごとの variant に分かれ、variant 1つ1つが
-//! 別の打点を持つ。押し引きはそれらを残枚数で加重平均した1つの値で判断する。待ち牌種の間も
+//! 別の打点を持つ。押し引きはそれらを残枚数で加重した合計で判断する。待ち牌種の間も
 //! 赤 / 黒 variant の間も同じ残枚数 weight で集約する。
 //!
-//! 本場・供託は加えない。判定は純粋な [`Payment::total`] の加重平均だけで行う。生きていない
+//! 本場・供託は加えない。判定は純粋な [`Payment::total`] の残枚数加重だけで行う。生きていない
 //! (残枚数0の) variant は平均へ寄与させない。生きた variant のどれか1つでも支払いを確定できない
 //! 場合は、推測で平均を作らず [`OffenseValue::Unknown`] にする。役なし
 //! ([`HandValueOutcome::NoCandidate`](bot_logic::HandValueOutcome::NoCandidate)) も機械的に0点として
@@ -70,11 +70,6 @@ use crate::damaten_value::{
 };
 use crate::reach_policy::decide_reach_reason;
 
-/// 押し引きが高打点とみなす残枚数加重平均打点の下限 [点]。inclusive。
-///
-/// 親子で別の threshold へ換算せず、実点数の加重平均をそのまま比較する。
-pub const PUSH_HIGH_VALUE_MIN_TOTAL: u32 = 5200;
-
 // リーチ baseline に含める偶発役の有無。未来の偶発要素は加算しない。
 const BASELINE_IPPATSU: bool = false;
 const BASELINE_CHANKAN: bool = false;
@@ -99,7 +94,7 @@ pub enum TenpaiOffenseMode {
 /// 生きた待ちの支払い合計を残枚数で加重平均した攻撃打点。
 ///
 /// 平均そのものは整数除算で丸めず、`weighted_total` と `total_remaining` の組のまま保持する。
-/// threshold 判定は割り算をせずに `weighted_total >= threshold * total_remaining` で行う。
+/// 押し引きの threshold 判定は平均へ割り算せず、`weighted_total` をそのまま比較する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OffenseValue {
     Known {
@@ -113,13 +108,12 @@ pub enum OffenseValue {
 }
 
 impl OffenseValue {
-    /// 加重平均が `threshold` 以上か。確定しない場合は `None`。inclusive。
-    pub fn meets(self, threshold: u32) -> Option<bool> {
+    /// 生きた待ちの支払い合計の残枚数加重合計 [点]。確定しない場合は `None`。
+    ///
+    /// 待ち枚数と打点の両方を含む値で、平均へ割り算する前の生の合計。
+    pub fn weighted_total(self) -> Option<u64> {
         match self {
-            Self::Known {
-                weighted_total,
-                total_remaining,
-            } => Some(weighted_total >= u64::from(threshold) * u64::from(total_remaining)),
+            Self::Known { weighted_total, .. } => Some(weighted_total),
             Self::Unknown => None,
         }
     }
@@ -353,43 +347,26 @@ mod tests {
 
     #[test]
     fn multiple_waits_are_weighted_by_remaining() {
-        // 8000 が 1 枚、2000 が 3 枚 → (8000 + 6000) / 4 = 3500。
+        // 8000 が 1 枚、2000 が 3 枚 → 合計 14000、平均 3500。
         let value = average(&[(Some(8000), 1), (Some(2000), 3)]);
+        assert_eq!(value.weighted_total(), Some(14000));
         assert_eq!(value.average_total(), Some(3500));
-        assert_eq!(value.meets(3500), Some(true));
-        assert_eq!(value.meets(3501), Some(false));
     }
 
     #[test]
     fn red_and_black_variants_are_weighted_by_remaining() {
         // 同じ待ち牌種でも赤5 1枚は 7700、黒5 2枚は 5200。
         let value = average(&[(Some(7700), 1), (Some(5200), 2)]);
+        assert_eq!(value.weighted_total(), Some(18100));
         assert_eq!(value.average_total(), Some(6033));
-        assert_eq!(value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(true));
     }
 
     #[test]
-    fn the_threshold_is_inclusive() {
-        assert_eq!(
-            average(&[(Some(5200), 3)]).meets(PUSH_HIGH_VALUE_MIN_TOTAL),
-            Some(true)
-        );
-        assert_eq!(
-            average(&[(Some(5199), 3)]).meets(PUSH_HIGH_VALUE_MIN_TOTAL),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn the_threshold_does_not_round_the_average() {
-        // 平均は 5200 をわずかに下回るが、整数除算では 5200 になってしまう組。
+    fn the_weighted_total_is_not_rounded_by_the_average() {
+        // 平均は整数除算で丸まるが、加重合計は丸めずに保持する。
         let value = average(&[(Some(5200), 2), (Some(5199), 1)]);
         assert_eq!(value.average_total(), Some(5199));
-        assert_eq!(value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(false));
-
-        // 平均は 5200 をわずかに上回る組。
-        let value = average(&[(Some(5201), 2), (Some(5200), 1)]);
-        assert_eq!(value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(true));
+        assert_eq!(value.weighted_total(), Some(15599));
     }
 
     #[test]
@@ -408,7 +385,7 @@ mod tests {
     fn an_unknown_live_variant_makes_the_whole_value_unknown() {
         let value = average(&[(Some(8000), 3), (None, 1)]);
         assert_eq!(value, OffenseValue::Unknown);
-        assert_eq!(value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), None);
+        assert_eq!(value.weighted_total(), None);
         assert_eq!(value.average_total(), None);
         assert!(!value.is_known());
     }
@@ -700,7 +677,7 @@ mod tests {
             }
         );
         assert_eq!(value.value.average_total(), Some(3466));
-        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(false));
+        assert_eq!(value.value.weighted_total(), Some(10400));
     }
 
     #[test]
@@ -721,7 +698,7 @@ mod tests {
             }
         );
         assert_eq!(value.value.average_total(), Some(7828));
-        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(true));
+        assert_eq!(value.value.weighted_total(), Some(8000 * 3 + 7700 * 4));
     }
 
     #[test]
@@ -760,7 +737,7 @@ mod tests {
         let value = evaluate_tenpai_offense_value(&ctx, &evaluation, &wait, &actions);
 
         assert_eq!(value.value, OffenseValue::Unknown);
-        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), None);
+        assert_eq!(value.value.weighted_total(), None);
     }
 
     #[test]
@@ -810,7 +787,6 @@ mod tests {
         let value = case.value_with_actions(&case.actions_without_reach());
         assert_eq!(value.mode, TenpaiOffenseMode::Reach);
         assert_eq!(value.value.average_total(), Some(7700));
-        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(true));
     }
 
     #[test]
@@ -827,7 +803,6 @@ mod tests {
         let value = case.value_with_actions(&case.actions_without_reach());
         assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
         assert_eq!(value.value.average_total(), Some(3900));
-        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), Some(false));
     }
 
     #[test]
@@ -917,7 +892,7 @@ mod tests {
         assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
         assert_eq!(value.value, OffenseValue::Unknown);
         // ロンできないことを0点として扱わない。
-        assert_eq!(value.value.meets(PUSH_HIGH_VALUE_MIN_TOTAL), None);
+        assert_eq!(value.value.weighted_total(), None);
     }
 
     #[test]

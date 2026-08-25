@@ -9,7 +9,7 @@ use bot_core::{
     ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
     ProspectiveUnknownReason, ProspectiveValue, PushPullDecision, PushPullInputs,
     PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
-    TenpaiOffenseValue, ThreatDefenseTarget,
+    StrongTenpaiRequirement, TenpaiOffenseValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -830,7 +830,7 @@ fn format_push_pull(
                         ));
                     }
                 }
-                lines.extend(format_tenpai_offense_value(offense));
+                lines.extend(format_tenpai_offense_value(offense, inputs.dealer_reacher));
                 lines.push(format!(
                     "    dora after discard: {}",
                     offense.dora_count_after_discard
@@ -854,28 +854,26 @@ fn format_push_pull(
     lines.join("\n")
 }
 
-// 攻撃継続時の確定打点と、それによって決まった強いテンパイの待ち枚数 threshold。判断に使った
-// 値そのもので、表示専用に打点や threshold を求め直さない。打牌後がテンパイでない場合と恒常
-// フリテンの場合は評価していないので、その旨だけを出す。
-fn format_tenpai_offense_value(offense: &PushPullOffenseState) -> Vec<String> {
+// 攻撃継続時の確定打点と、それによって決まった強いテンパイの条件。判断に使った値そのもので、
+// 表示専用に打点や threshold を求め直さない。打牌後がテンパイでない場合と恒常フリテンの場合は
+// 打点を評価していないので、その旨だけを出す。
+fn format_tenpai_offense_value(
+    offense: &PushPullOffenseState,
+    dealer_reacher: bool,
+) -> Vec<String> {
     let mut lines = match offense.tenpai_offense_value_after_discard {
         None => vec![format!("    tenpai offense value: {NOT_EVALUATED}")],
         Some(TenpaiOffenseValue { mode, value }) => vec![
             "    tenpai offense value".to_string(),
             format!("      offense mode: {mode:?}"),
             format!("      weighted average: {}", offense_value_label(value)),
-            format!(
-                "      high value: {}",
-                format_optional_yes_no(offense.tenpai_offense_value_is_high())
-            ),
+            format!("      weighted total: {}", weighted_total_label(value)),
         ],
     };
 
     lines.push(format!(
-        "    strong tenpai min live wait: {}",
-        offense
-            .strong_tenpai_min_remaining()
-            .map_or_else(|| ABSENT.to_string(), |remaining| remaining.to_string())
+        "    strong tenpai requirement: {}",
+        strong_tenpai_requirement_label(offense.strong_tenpai_requirement(dealer_reacher))
     ));
     lines
 }
@@ -884,6 +882,26 @@ fn offense_value_label(value: OffenseValue) -> String {
     match value.average_total() {
         Some(total) => total.to_string(),
         None => UNKNOWN.to_string(),
+    }
+}
+
+fn weighted_total_label(value: OffenseValue) -> String {
+    match value.weighted_total() {
+        Some(total) => total.to_string(),
+        None => UNKNOWN.to_string(),
+    }
+}
+
+// 押すために要求する条件。exact 打点を使う局面は残枚数加重合計、使えない局面は待ち枚数を出す。
+fn strong_tenpai_requirement_label(requirement: Option<StrongTenpaiRequirement>) -> String {
+    match requirement {
+        Some(StrongTenpaiRequirement::WeightedTotal(min_total)) => {
+            format!("weighted total >= {min_total}")
+        }
+        Some(StrongTenpaiRequirement::LiveWait(min_remaining)) => {
+            format!("live wait >= {min_remaining}")
+        }
+        None => ABSENT.to_string(),
     }
 }
 
@@ -1418,11 +1436,10 @@ fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
 
     // 打牌後がテンパイの局面だけ、押し引きが見た待ち・フリテン・攻撃打点と適用 threshold を
     // 添える。テンパイでなければ判断材料にならないので行そのものを出さない。
-    let Some(offense) = diagnostic
-        .push_pull_inputs
-        .as_ref()
-        .and_then(|inputs| inputs.offense)
-    else {
+    let Some(inputs) = diagnostic.push_pull_inputs.as_ref() else {
+        return lines;
+    };
+    let Some(offense) = inputs.offense else {
         return lines;
     };
     let Some(wait) = offense.tenpai_wait_after_discard else {
@@ -1446,22 +1463,20 @@ fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
         summary_offense_value(&offense)
     ));
     lines.push(format!(
-        "  strong tenpai min live wait: {}",
-        offense
-            .strong_tenpai_min_remaining()
-            .map_or_else(|| ABSENT.to_string(), |remaining| remaining.to_string())
+        "  strong tenpai requirement: {}",
+        strong_tenpai_requirement_label(offense.strong_tenpai_requirement(inputs.dealer_reacher))
     ));
     lines
 }
 
-// 攻撃モード・残枚数加重平均打点・高打点かを1行にまとめる。評価していない場合はその旨だけ出す。
+// 攻撃モード・残枚数加重平均打点・残枚数加重合計を1行にまとめる。評価していない場合はその旨だけ出す。
 fn summary_offense_value(offense: &PushPullOffenseState) -> String {
     match offense.tenpai_offense_value_after_discard {
         None => NOT_EVALUATED.to_string(),
         Some(TenpaiOffenseValue { mode, value }) => format!(
-            "{mode:?} {} / high: {}",
+            "{mode:?} {} / total: {}",
             offense_value_label(value),
-            format_optional_yes_no(offense.tenpai_offense_value_is_high())
+            weighted_total_label(value)
         ),
     }
 }
@@ -3076,7 +3091,8 @@ mod tests {
     fn push_pull_section_shows_the_tenpai_offense_value() {
         // 攻撃継続時の攻撃モード・確定打点・適用 threshold は判断に使った値そのものを出す。
         let (_, diagnostic, output) = rendered(DAMATEN_HIGH_VALUE_SCENARIO, false);
-        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        let inputs = diagnostic.push_pull_inputs.unwrap();
+        let offense = inputs.offense.unwrap();
         let value = offense
             .tenpai_offense_value_after_discard
             .expect("攻撃打点を評価している");
@@ -3095,17 +3111,20 @@ mod tests {
         );
         assert!(
             push_pull.contains(&format!(
-                "      high value: {}",
-                format_optional_yes_no(offense.tenpai_offense_value_is_high())
+                "      weighted total: {}",
+                value
+                    .value
+                    .weighted_total()
+                    .expect("攻撃打点が確定している")
             )),
             "{push_pull}"
         );
         assert!(
             push_pull.contains(&format!(
-                "    strong tenpai min live wait: {}",
-                offense
-                    .strong_tenpai_min_remaining()
-                    .expect("適用 threshold が決まっている")
+                "    strong tenpai requirement: {}",
+                strong_tenpai_requirement_label(
+                    offense.strong_tenpai_requirement(inputs.dealer_reacher)
+                )
             )),
             "{push_pull}"
         );
@@ -3115,9 +3134,13 @@ mod tests {
     fn push_pull_section_reports_an_unevaluated_tenpai_offense_value() {
         // 打牌後がテンパイでなければ攻撃打点を評価しないので、その旨だけを出す。
         let (_, diagnostic, output) = rendered(LOW_VALUE_IISHANTEN_SCENARIO, false);
-        let offense = diagnostic.push_pull_inputs.unwrap().offense.unwrap();
+        let inputs = diagnostic.push_pull_inputs.unwrap();
+        let offense = inputs.offense.unwrap();
         assert_eq!(offense.tenpai_offense_value_after_discard, None);
-        assert_eq!(offense.strong_tenpai_min_remaining(), None);
+        assert_eq!(
+            offense.strong_tenpai_requirement(inputs.dealer_reacher),
+            None
+        );
 
         let push_pull = section(&output, "Push/Pull");
         assert!(
@@ -3125,7 +3148,7 @@ mod tests {
             "{push_pull}"
         );
         assert!(
-            push_pull.contains("    strong tenpai min live wait: -"),
+            push_pull.contains("    strong tenpai requirement: -"),
             "{push_pull}"
         );
     }
@@ -3161,11 +3184,11 @@ mod tests {
         assert!(summary.contains("  offense furiten: no"), "{summary}");
         assert!(summary.contains("  offense ron: yes"), "{summary}");
         assert!(
-            summary.contains("  offense value: Damaten 7700 / high: yes"),
+            summary.contains("  offense value: Damaten 7700 / total: 23100"),
             "{summary}"
         );
         assert!(
-            summary.contains("  strong tenpai min live wait: 3"),
+            summary.contains("  strong tenpai requirement: weighted total >= 15600"),
             "{summary}"
         );
     }
@@ -3177,11 +3200,11 @@ mod tests {
         let summary = summary_section(&output);
 
         assert!(
-            summary.contains("  offense value: Reach unknown / high: unknown"),
+            summary.contains("  offense value: Reach unknown / total: unknown"),
             "{summary}"
         );
         assert!(
-            summary.contains("  strong tenpai min live wait: 6"),
+            summary.contains("  strong tenpai requirement: live wait >= 6"),
             "{summary}"
         );
     }
