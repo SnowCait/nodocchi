@@ -1,19 +1,30 @@
 //! 打牌候補ごとの2手先評価。
 //!
-//! 「現在打牌 → その打牌後の各受け入れ牌を1枚ツモった仮想手牌 → 既存打牌評価による次の最良打牌」
-//! を構造化して返す pure な基盤。向聴・受け入れ・一向聴形分類・文脈反映・打牌比較は
+//! 「現在打牌 → その打牌後に実際にツモり得る牌を1枚ツモった仮想手牌 → 既存打牌評価による次の
+//! 最良打牌」を構造化して返す pure な基盤。向聴・受け入れ・一向聴形分類・文脈反映・打牌比較は
 //! すべて既存実装を呼び出し、2手先専用の計算器は持たない。
+//!
+//! # 仮想ツモ対象
+//!
+//! 現在打牌後の状態から、見え牌を反映して残枚数が 1 枚以上ある牌を [`DrawTransition`] で分類
+//! する。向聴数を下げる牌 ([`DrawTransition::Progress`]) は既存の受け入れ
+//! ([`EffectiveAcceptance`]) そのもので、向聴数を維持する牌
+//! ([`DrawTransition::SameShanten`]) は受け入れに含めない lookahead 専用の候補として別に列挙
+//! する。分類はどちらも既存 shanten calculator の結果だけで決まり、向聴数が悪化する牌は対象外。
+//! 受け入れの semantics (「1枚加えると向聴数が下がる牌」) は変えないため、same-shanten の牌が
+//! [`EffectiveAcceptance`] へ混ざることはない。
 //!
 //! # 仮想ツモ牌の物理牌
 //!
-//! 受け入れ ([`EffectiveAcceptanceTile`]) は 34 種の [`TileType`] 単位なので、仮想ツモ牌の物理牌
-//! ([`TileId`]) は1つに決まらない。赤5のある牌種でその赤5がまだ見えていない場合だけ、赤と黒の
-//! 2つの物理牌 variant があり得る。分割は最終和了牌と同じ共有 helper
-//! ([`physical_tile_variants`]) が持ち、牌種単位の残枚数 ([`EffectiveAcceptanceTile::remaining`])
-//! を赤 / 黒へ分ける。
+//! 仮想ツモ対象は 34 種の [`TileType`] 単位なので、仮想ツモ牌の物理牌 ([`TileId`]) は1つに
+//! 決まらない。赤5のある牌種でその赤5がまだ見えていない場合だけ、赤と黒の2つの物理牌 variant が
+//! あり得る。分割は最終和了牌と同じ共有 helper ([`physical_tile_variants`]) が持ち、牌種単位の
+//! 残枚数を赤 / 黒へ分ける。
 //!
 //! 赤5と黒5では和了手の打点が変わるため、variant ごとに既存打牌評価と既存比較をそのまま通す。
-//! 将来打点を使う枝では2手目の最良打牌そのものが変わり得る。打点を使わない枝では、仮想ツモ牌を
+//! 将来打点を使う枝では2手目の最良打牌そのものが変わり得る。同じく same-shanten の枝では仮想
+//! ツモ牌をそのまま切っても向聴数が変わらないため、赤5を切るかどうかを見る既存の軸まで比較が
+//! 進み、最良打牌が赤 / 黒で変わり得る。向聴数を下げる枝で打点を使わない場合だけは、仮想ツモ牌を
 //! 2手目にそのまま切ると向聴が戻って Shanten 軸で必ず負けるため、赤5かどうかは最良打牌を変えず、
 //! 残枚数の内訳だけが赤 / 黒へ分かれる。仮想ツモ牌以外の牌は現在の手牌の物理牌をそのまま
 //! 引き継ぐため、どの variant も通常打牌評価と同じ文脈で評価できる。
@@ -28,9 +39,22 @@
 //! 2手目の打牌後がテンパイになる枝については、上位層が渡す評価器
 //! ([`ProspectiveTenpaiValuator`]) でそのテンパイの確定打点を求め、2手目の打牌候補の比較と
 //! 現在打牌の集計の両方に使う。Reach / Damaten policy も点数計算もこの module は持たず、
-//! 評価器を渡されない場合は打点を一切使わない既存の比較になる。
+//! 評価器を渡されない場合は打点を一切使わない既存の比較になる。same-shanten の枝は2手目を
+//! 切ってもテンパイにならないため、打点を持たない。
+//!
+//! # 打牌選択が使う集計値
+//!
+//! 打牌選択が使う前方集計値 ([`forward_metrics`]) は従来どおり向聴数を下げる枝だけを集計する。
+//! same-shanten の枝は2手目の打牌後も向聴数が変わらず、既存 [`ForwardMetrics`] の集計条件
+//! (次打牌後の向聴数が1つ下がっていること) を満たさないため、集計へ寄与しない。したがって
+//! same-shanten の枝を production の打牌選択へ反映するには Progress と SameShanten をどう
+//! 比較するかの policy 決定が必要で、この module は係数も threshold も持たない。
+//! same-shanten 側の集計値は既存 accumulator をそのまま使う
+//! [`same_shanten_forward_metric_for_candidate`] から観測できる。
 
-use crate::acceptance::{EffectiveAcceptance, EffectiveAcceptanceTile};
+use crate::acceptance::{
+    DrawableTile, EffectiveAcceptance, same_shanten_draws_with_fixed_melds_and_seen,
+};
 use crate::discard::{
     CandidateSeen, DecorationContext, DiscardEvaluation, ShapePenaltyMode, decorate_evaluations,
     evaluate_discards_with_seen, split_discarded_tile,
@@ -67,7 +91,19 @@ pub trait ProspectiveTenpaiValuator {
     fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64>;
 }
 
-/// 現在の打牌候補1件について、その打牌後の受け入れ牌を1枚ツモった仮想手牌を既存打牌評価へ
+/// 仮想ツモ牌が現在打牌後の向聴数をどう変えるか。
+///
+/// 分類は既存 shanten calculator の結果だけで決まる。向聴数が悪化する牌はどちらにも入らず、
+/// 仮想ツモの対象にしない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawTransition {
+    /// 向聴数が下がる牌。既存の受け入れ ([`EffectiveAcceptance`]) そのもの。
+    Progress,
+    /// 向聴数を維持する牌。受け入れには含めない lookahead 専用の仮想ツモ候補。
+    SameShanten,
+}
+
+/// 現在の打牌候補1件について、その打牌後にツモり得る牌を1枚ツモった仮想手牌を既存打牌評価へ
 /// かけた2手先評価。
 ///
 /// pure なデータであり、押し引き・鳴き・リーチ判断のどれにも使用しない。打牌選択が使うのは
@@ -76,13 +112,36 @@ pub trait ProspectiveTenpaiValuator {
 pub struct DiscardLookaheadDiagnostic {
     /// 現在の打牌候補の牌種。
     pub discard: TileType,
-    /// 現在打牌後の受け入れ牌ごとの2手先評価。順序と対象牌は現在打牌後の受け入れと同じ。
+    /// 現在打牌後の仮想ツモ牌ごとの2手先評価。
+    ///
+    /// 先に向聴数を下げる牌 ([`DrawTransition::Progress`]) が現在打牌後の受け入れと同じ順序・
+    /// 同じ対象牌で並び、その後ろに向聴数を維持する牌 ([`DrawTransition::SameShanten`]) が
+    /// 牌種順で並ぶ。牌種はどちらの分類にも重複して現れない。
     pub draws: Vec<DrawLookaheadDiagnostic>,
 }
 
 impl DiscardLookaheadDiagnostic {
     pub fn draw(&self, tile: TileType) -> Option<&DrawLookaheadDiagnostic> {
         self.draws.iter().find(|draw| draw.draw == tile)
+    }
+
+    /// 指定した分類の仮想ツモ枝だけを並べる。
+    pub fn draws_with(
+        &self,
+        transition: DrawTransition,
+    ) -> impl Iterator<Item = &DrawLookaheadDiagnostic> {
+        self.draws
+            .iter()
+            .filter(move |draw| draw.transition == transition)
+    }
+
+    /// 構築済みの枝から same-shanten 手変わりの前方集計値を求める。
+    ///
+    /// 集計規則も accumulator も既存の前方集計値と同じで、対象を same-shanten の枝に、集計する
+    /// 2手目打牌後の向聴数をその枝のツモ後向聴数 (= 現在打牌後の向聴数) に限定するだけ。新しい
+    /// 係数も threshold も持たない。打牌選択はこの値を使わない。
+    pub fn same_shanten_forward_metric(&self) -> WeightedForwardMetric {
+        accumulate_same_shanten_draws(self.draws_with(DrawTransition::SameShanten))
     }
 
     /// 構築済みの枝から打牌選択用の weighted tenpai wait を集計する。
@@ -93,9 +152,16 @@ impl DiscardLookaheadDiagnostic {
         self.weighted_forward_metric(TENPAI_SHANTEN)
     }
 
+    /// 集計対象は向聴数を下げる枝だけで、選択専用経路 ([`forward_metrics`]) と同じ枝集合になる。
+    /// same-shanten の枝は2手目の打牌後も向聴数が変わらず `required_next_shanten` を満たさない
+    /// ため元から寄与しないが、詳細診断の有無で選択結果が変わらないことを枝集合そのもので
+    /// 保証する。
     pub fn weighted_forward_metric(&self, required_next_shanten: i8) -> WeightedForwardMetric {
         let mut accumulator = ForwardMetricAccumulator::new();
-        for variant in self.draws.iter().flat_map(|draw| draw.variants.iter()) {
+        for variant in self
+            .draws_with(DrawTransition::Progress)
+            .flat_map(|draw| draw.variants.iter())
+        {
             accumulator.accumulate(
                 variant.remaining,
                 required_next_shanten,
@@ -107,17 +173,21 @@ impl DiscardLookaheadDiagnostic {
     }
 }
 
-/// 現在打牌後の受け入れ牌1牌種分の2手先評価。
+/// 現在打牌後の仮想ツモ牌1牌種分の2手先評価。
 ///
-/// `draw` / `remaining` / `shanten_after_draw` は現在打牌の [`DiscardEvaluation`] が持つ
-/// 受け入れ ([`EffectiveAcceptanceTile`]) の値そのもので、診断のために再計算しない。
-/// `remaining` は牌種ごとの残枚数を生データのまま保持し、期待値や加重平均へ潰さない。
+/// [`DrawTransition::Progress`] の枝では `draw` / `remaining` / `shanten_after_draw` は現在
+/// 打牌の [`DiscardEvaluation`] が持つ受け入れの値そのもので、診断のために再計算しない。
+/// [`DrawTransition::SameShanten`] の枝も残枚数の数え方とツモ後向聴数の求め方は受け入れと同じ
+/// 列挙を共有する。`remaining` は牌種ごとの残枚数を生データのまま保持し、期待値や加重平均へ
+/// 潰さない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrawLookaheadDiagnostic {
     pub draw: TileType,
     /// 牌種単位の残枚数。`variants` の残枚数の合計と一致する。
     pub remaining: u8,
     pub shanten_after_draw: EffectiveShanten,
+    /// この牌をツモった場合に現在打牌後の向聴数がどう変わるか。
+    pub transition: DrawTransition,
     /// 仮想ツモ牌の物理牌ごとの2手先評価。赤5と黒5のどちらもあり得る牌種では2件になる。
     pub variants: Vec<DrawVariantLookaheadDiagnostic>,
 }
@@ -365,6 +435,24 @@ pub fn forward_metrics_for_candidate(
     )
 }
 
+/// 打牌候補1件について、same-shanten 手変わりの前方集計値を求める。
+///
+/// 枝の評価も集計規則も詳細診断 ([`diagnose_lookahead`]) と同じ helper を共有し、
+/// [`LookaheadDiagnostic`] を構築しない。
+///
+/// 現在の打牌選択はこの値を使わない。Progress と SameShanten は「テンパイまでの距離が違う枝の
+/// 受け入れ」という意味の異なる量なので、1つの scalar へ混ぜるには比較 policy の決定が必要で、
+/// この module は係数も threshold も持たない。
+pub fn same_shanten_forward_metric_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> WeightedForwardMetric {
+    let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
+        return WeightedForwardMetric::default();
+    };
+    accumulate_same_shanten_draws(branch.same_shanten_draws(inputs, evaluation).iter())
+}
+
 pub fn tenpai_wait_metrics_from_lookahead(
     evaluations: &[DiscardEvaluation],
     lookahead: &LookaheadDiagnostic,
@@ -405,17 +493,8 @@ fn lookahead_for_candidate(
         };
     };
 
-    let draws = evaluation
-        .acceptance_after_discard
-        .tiles
-        .iter()
-        .map(|tile| DrawLookaheadDiagnostic {
-            draw: tile.tile,
-            remaining: tile.remaining,
-            shanten_after_draw: tile.shanten_after_draw,
-            variants: branch.draw_variants(inputs, tile),
-        })
-        .collect();
+    let mut draws = branch.progress_draws(inputs, evaluation);
+    draws.extend(branch.same_shanten_draws(inputs, evaluation));
 
     DiscardLookaheadDiagnostic {
         discard: evaluation.discard,
@@ -435,11 +514,32 @@ fn weighted_forward_metric_for_candidate(
         return accumulator.finish();
     };
 
-    for tile in &evaluation.acceptance_after_discard.tiles {
-        for variant in branch.draw_variants(inputs, tile) {
+    for variant in branch
+        .progress_draws(inputs, evaluation)
+        .iter()
+        .flat_map(|draw| draw.variants.iter())
+    {
+        accumulator.accumulate(
+            variant.remaining,
+            required_next_shanten,
+            variant.next_discard.as_ref(),
+            variant.prospective_value,
+        );
+    }
+    accumulator.finish()
+}
+
+// same-shanten の枝を既存 accumulator で集計する。集計対象の2手目打牌後の向聴数は枝ごとの
+// ツモ後向聴数そのもので、向聴数を下げる枝の集計と同じ規則になる。
+fn accumulate_same_shanten_draws<'a>(
+    draws: impl Iterator<Item = &'a DrawLookaheadDiagnostic>,
+) -> WeightedForwardMetric {
+    let mut accumulator = ForwardMetricAccumulator::new();
+    for draw in draws {
+        for variant in &draw.variants {
             accumulator.accumulate(
                 variant.remaining,
-                required_next_shanten,
+                draw.shanten_after_draw.min(),
                 variant.next_discard.as_ref(),
                 variant.prospective_value,
             );
@@ -481,31 +581,87 @@ impl CandidateBranch {
         })
     }
 
-    // 受け入れ牌1牌種を、赤 / 黒の物理牌 variant ごとに仮想ツモして評価する。
-    //
-    // 赤5と黒5では打点だけでなく2手目の最良打牌そのものが変わり得るため、variant ごとに既存
-    // 打牌評価と既存比較を通す。
-    fn draw_variants(
+    // 向聴数を下げる仮想ツモ枝。対象牌・残枚数・ツモ後向聴数は現在打牌の受け入れそのもので、
+    // 2手先評価のために求め直さない。
+    fn progress_draws(
         &self,
         inputs: &LookaheadInputs,
-        tile: &EffectiveAcceptanceTile,
-    ) -> Vec<DrawVariantLookaheadDiagnostic> {
-        physical_tile_variants(
-            tile.tile,
-            tile.remaining,
-            inputs.red_five_seen[tile.tile.index()],
+        evaluation: &DiscardEvaluation,
+    ) -> Vec<DrawLookaheadDiagnostic> {
+        evaluation
+            .acceptance_after_discard
+            .tiles
+            .iter()
+            .map(|tile| {
+                self.draw(
+                    inputs,
+                    tile.tile,
+                    tile.remaining,
+                    tile.shanten_after_draw,
+                    DrawTransition::Progress,
+                )
+            })
+            .collect()
+    }
+
+    // 向聴数を維持する仮想ツモ枝。受け入れと同じ列挙・同じ shanten calculator で求め、条件だけが
+    // 「維持する」になる。残枚数は現在打牌の受け入れを求めたときと同じ見え牌から数えるので、
+    // どちらの分類の枝も同じ基準の残枚数になる。
+    fn same_shanten_draws(
+        &self,
+        inputs: &LookaheadInputs,
+        evaluation: &DiscardEvaluation,
+    ) -> Vec<DrawLookaheadDiagnostic> {
+        same_shanten_draws_with_fixed_melds_and_seen(
+            &self.after_discard,
+            inputs.fixed_meld_count,
+            &inputs.seen.additional_seen(evaluation.discard),
         )
-        .map(|variant| {
-            let (next_discard, prospective_value) =
-                self.next_discard(inputs, tile.tile, variant.tile);
-            DrawVariantLookaheadDiagnostic {
-                drawn_tile: variant.tile,
-                remaining: variant.remaining,
-                next_discard,
-                prospective_value,
-            }
+        .iter()
+        .map(|drawable: &DrawableTile| {
+            self.draw(
+                inputs,
+                drawable.tile,
+                drawable.remaining,
+                drawable.shanten_after_draw,
+                DrawTransition::SameShanten,
+            )
         })
         .collect()
+    }
+
+    // 仮想ツモ牌1牌種を、赤 / 黒の物理牌 variant ごとに仮想ツモして評価する。
+    //
+    // 赤5と黒5では打点だけでなく2手目の最良打牌そのものが変わり得るため、variant ごとに既存
+    // 打牌評価と既存比較を通す。分割規則は最終和了牌と共有する既存 helper が持つ。
+    fn draw(
+        &self,
+        inputs: &LookaheadInputs,
+        draw: TileType,
+        remaining: u8,
+        shanten_after_draw: EffectiveShanten,
+        transition: DrawTransition,
+    ) -> DrawLookaheadDiagnostic {
+        let variants = physical_tile_variants(draw, remaining, inputs.red_five_seen[draw.index()])
+            .map(|variant| {
+                let (next_discard, prospective_value) =
+                    self.next_discard(inputs, draw, variant.tile);
+                DrawVariantLookaheadDiagnostic {
+                    drawn_tile: variant.tile,
+                    remaining: variant.remaining,
+                    next_discard,
+                    prospective_value,
+                }
+            })
+            .collect();
+
+        DrawLookaheadDiagnostic {
+            draw,
+            remaining,
+            shanten_after_draw,
+            transition,
+            variants,
+        }
     }
 
     // 受け入れ牌1枚を仮想的にツモった手牌を作り、既存打牌評価・既存文脈反映・既存比較順で最良
@@ -877,8 +1033,9 @@ mod tests {
             .zip(case.situation.evaluations.iter())
         {
             let acceptance = &evaluation.acceptance_after_discard.tiles;
-            assert_eq!(candidate.draws.len(), acceptance.len());
-            for (draw, accepted) in candidate.draws.iter().zip(acceptance.iter()) {
+            let progress: Vec<_> = candidate.draws_with(DrawTransition::Progress).collect();
+            assert_eq!(progress.len(), acceptance.len());
+            for (draw, accepted) in progress.into_iter().zip(acceptance.iter()) {
                 assert_eq!(draw.draw, accepted.tile);
                 assert_eq!(draw.remaining, accepted.remaining);
                 assert_eq!(draw.shanten_after_draw, accepted.shanten_after_draw);
@@ -1777,7 +1934,9 @@ mod tests {
 
         let mut checked = 0;
         for candidate in &case.lookahead.candidates {
-            for draw in &candidate.draws {
+            // 向聴数を維持する枝では仮想ツモ牌をそのまま切っても向聴が戻らないため、赤5を切るか
+            // どうかを見る既存の軸まで比較が進み得る。この不変条件は向聴数を下げる枝のもの。
+            for draw in candidate.draws_with(DrawTransition::Progress) {
                 let [red, black] = draw.variants.as_slice() else {
                     continue;
                 };
@@ -1878,6 +2037,324 @@ mod tests {
                 .candidates
                 .iter()
                 .all(|candidate| candidate.prospective_value.is_none())
+        );
+    }
+
+    // ---- same-shanten の手変わり ----
+
+    // 門前14枚 13m 68m 456789p 5s 9s EE。打 9s で1向聴 (受け入れ 2m / 7m の8枚) になり、そこから
+    // 4m をツモっても1向聴のままだが、5s を切ると 13m の嵌張が 34m の両面へ変わって受け入れが
+    // 12枚 / 3種類へ広がる。赤5は含まず、5p は黒1枚だけ持つ。
+    fn same_shanten_hand() -> Vec<TileId> {
+        ids(&[0, 8, 20, 28, 48, 53, 56, 60, 64, 68, 89, 104, 108, 109])
+    }
+
+    static SAME_SHANTEN_CASE: LazyLock<Case> = LazyLock::new(|| {
+        let hand = same_shanten_hand();
+        let visible = hand.clone();
+        visible_case(&hand, FixedMeldCount::NONE, Vec::new(), None, None, visible)
+    });
+
+    // 4m が4枚とも見えている同じ局面。
+    static SAME_SHANTEN_WITH_SEEN_DRAW: LazyLock<Case> = LazyLock::new(|| {
+        let hand = same_shanten_hand();
+        let mut visible = hand.clone();
+        visible.extend(ids(&[12, 13, 14, 15]));
+        visible_case(&hand, FixedMeldCount::NONE, Vec::new(), None, None, visible)
+    });
+
+    fn evaluation_of(case: &Case, discard: TileType) -> &DiscardEvaluation {
+        case.situation
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == discard)
+            .expect("打牌候補がある")
+    }
+
+    #[test]
+    fn draws_are_classified_by_the_existing_shanten_result() {
+        // 仮想ツモ対象は「向聴数を下げる牌」と「維持する牌」だけで、悪化する牌は含まない。
+        let case = &*SAME_SHANTEN_CASE;
+
+        let mut same_shanten = 0;
+        for (candidate, evaluation) in case
+            .lookahead
+            .candidates
+            .iter()
+            .zip(case.situation.evaluations.iter())
+        {
+            let current = evaluation.min_shanten_after_discard();
+            let accepted = evaluation.acceptance_after_discard.tile_types();
+            for draw in &candidate.draws {
+                assert!(
+                    draw.remaining > 0,
+                    "{:?} {:?}",
+                    candidate.discard,
+                    draw.draw
+                );
+                match draw.transition {
+                    DrawTransition::Progress => {
+                        assert!(draw.shanten_after_draw.min() < current);
+                        assert!(accepted.contains(&draw.draw));
+                    }
+                    DrawTransition::SameShanten => {
+                        assert_eq!(draw.shanten_after_draw.min(), current);
+                        // 向聴数を維持する牌を既存の受け入れへ混ぜない。
+                        assert!(
+                            !accepted.contains(&draw.draw),
+                            "{:?} {:?}",
+                            candidate.discard,
+                            draw.draw
+                        );
+                        same_shanten += 1;
+                    }
+                }
+            }
+
+            let tiles: Vec<_> = candidate.draws.iter().map(|draw| draw.draw).collect();
+            let mut unique = tiles.clone();
+            unique.sort_by_key(|tile| tile.index());
+            unique.dedup();
+            assert_eq!(unique.len(), tiles.len(), "{:?}", candidate.discard);
+        }
+        assert!(same_shanten > 0, "向聴数を維持する仮想ツモがある局面が必要");
+    }
+
+    #[test]
+    fn a_same_shanten_draw_reaches_a_wider_next_acceptance() {
+        let case = &*SAME_SHANTEN_CASE;
+        let discard = tile("9s");
+        let evaluation = evaluation_of(case, discard);
+        assert_eq!(evaluation.min_shanten_after_discard(), 1);
+        assert_eq!(evaluation.acceptance_total_remaining(), 8);
+        assert_eq!(evaluation.acceptance_type_count(), 2);
+
+        let draw = case
+            .lookahead
+            .candidate(discard)
+            .and_then(|candidate| candidate.draw(tile("4m")))
+            .expect("4m の枝がある");
+        assert_eq!(draw.transition, DrawTransition::SameShanten);
+        assert_eq!(draw.shanten_after_draw.min(), 1);
+        assert_eq!(draw.remaining, 4);
+
+        let [variant] = draw.variants.as_slice() else {
+            panic!("赤5の無い牌種は物理牌 variant が1件");
+        };
+        let next = variant.next_discard.as_ref().expect("next discard exists");
+        assert_eq!(next.discard, tile("5s"));
+        // 2手目を切ってもまだ1向聴で、受け入れだけが広がる。
+        assert_eq!(next.min_shanten_after_discard(), 1);
+        assert_eq!(next.acceptance_total_remaining(), 12);
+        assert_eq!(next.acceptance_type_count(), 3);
+        assert!(next.acceptance_total_remaining() > evaluation.acceptance_total_remaining());
+        assert!(next.acceptance_type_count() > evaluation.acceptance_type_count());
+    }
+
+    #[test]
+    fn same_shanten_next_discard_matches_the_existing_discard_selection() {
+        // 向聴数を維持する枝でも、2手目は同じ仮想手牌を既存打牌選択へ渡した結果と一致する。
+        let case = &*SAME_SHANTEN_CASE;
+
+        let mut checked = 0;
+        for (discard, draw, variant) in variants(&case.lookahead) {
+            if draw.transition != DrawTransition::SameShanten {
+                continue;
+            }
+            assert_eq!(
+                variant.next_discard,
+                expected_next_discard(&case.situation, discard, variant.drawn_tile),
+                "discard {:?} draw {:?} variant {:?}",
+                discard,
+                draw.draw,
+                variant.drawn_tile,
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "向聴数を維持する仮想ツモがある局面が必要");
+    }
+
+    #[test]
+    fn seen_tiles_drop_out_of_the_draws() {
+        // 見え牌で残枚数が 0 になった牌は仮想ツモの対象にしない。
+        let seen_draw = tile("4m");
+        assert!(
+            SAME_SHANTEN_CASE
+                .lookahead
+                .candidate(tile("9s"))
+                .and_then(|candidate| candidate.draw(seen_draw))
+                .is_some()
+        );
+
+        for candidate in &SAME_SHANTEN_WITH_SEEN_DRAW.lookahead.candidates {
+            assert!(
+                candidate.draw(seen_draw).is_none(),
+                "discard {:?}",
+                candidate.discard
+            );
+            assert!(candidate.draws.iter().all(|draw| draw.remaining > 0));
+        }
+    }
+
+    #[test]
+    fn a_same_shanten_five_draw_splits_into_physical_variants() {
+        // 赤5 / 黒5の分割は向聴数を維持する枝でも既存 helper が source of truth。
+        let case = &*SAME_SHANTEN_CASE;
+        let red_five_seen = seen_red_fives(case.situation.visible.iter().copied());
+
+        let mut split_draws = 0;
+        for candidate in &case.lookahead.candidates {
+            for draw in candidate.draws_with(DrawTransition::SameShanten) {
+                let expected: Vec<_> = physical_tile_variants(
+                    draw.draw,
+                    draw.remaining,
+                    red_five_seen[draw.draw.index()],
+                )
+                .map(|variant| (variant.tile, variant.remaining))
+                .collect();
+                let actual: Vec<_> = draw
+                    .variants
+                    .iter()
+                    .map(|variant| (variant.drawn_tile, variant.remaining))
+                    .collect();
+                assert_eq!(
+                    actual, expected,
+                    "discard {:?} draw {:?}",
+                    candidate.discard, draw.draw
+                );
+                split_draws += usize::from(draw.variants.len() == 2);
+            }
+        }
+        assert!(split_draws > 0, "赤5が未見の仮想ツモがある局面が必要");
+
+        // 手牌に黒5pを1枚持つので 5p は残り3枚。赤1枚 / 黒2枚へ分かれる。
+        let five_pin = case
+            .lookahead
+            .candidate(tile("9s"))
+            .and_then(|candidate| candidate.draw(tile("5p")))
+            .expect("5p の枝がある");
+        assert_eq!(five_pin.transition, DrawTransition::SameShanten);
+        assert_eq!(five_pin.remaining, 3);
+        assert_eq!(
+            five_pin
+                .variants
+                .iter()
+                .map(|variant| (variant.drawn_tile.is_red(), variant.remaining))
+                .collect::<Vec<_>>(),
+            vec![(true, 1), (false, 2)],
+        );
+    }
+
+    #[test]
+    fn same_shanten_draws_do_not_change_the_forward_metrics() {
+        // 向聴数を維持する枝は既存の前方集計値へ寄与しない。詳細診断から集計しても同じ値になる。
+        let case = &*SAME_SHANTEN_CASE;
+        let metrics = forward_metrics(&inputs(&case.situation), &case.situation.evaluations);
+        assert_eq!(
+            forward_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+            metrics,
+        );
+
+        let mut checked = 0;
+        for (candidate, evaluation) in case
+            .lookahead
+            .candidates
+            .iter()
+            .zip(case.situation.evaluations.iter())
+        {
+            for variant in candidate
+                .draws_with(DrawTransition::SameShanten)
+                .flat_map(|draw| draw.variants.iter())
+            {
+                let next = variant.next_discard.as_ref().expect("next discard exists");
+                // 2手目を切っても向聴数が変わらないので、既存集計の条件を満たさない。
+                assert_eq!(
+                    next.min_shanten_after_discard(),
+                    evaluation.min_shanten_after_discard()
+                );
+                // まだテンパイではないので将来打点も持たない。
+                assert_eq!(variant.prospective_value, None);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn the_same_shanten_metric_shares_the_branch_evaluation() {
+        // scalar 経路と詳細診断は同じ枝評価・同じ accumulator を共有する。
+        let case = &*SAME_SHANTEN_CASE;
+
+        let mut checked = 0;
+        for (candidate, evaluation) in case
+            .lookahead
+            .candidates
+            .iter()
+            .zip(case.situation.evaluations.iter())
+        {
+            let metric = candidate.same_shanten_forward_metric();
+            assert_eq!(
+                same_shanten_forward_metric_for_candidate(&inputs(&case.situation), evaluation),
+                metric,
+                "{:?}",
+                candidate.discard
+            );
+
+            let mut expected = WeightedForwardMetric::default();
+            for variant in candidate
+                .draws_with(DrawTransition::SameShanten)
+                .flat_map(|draw| draw.variants.iter())
+            {
+                let next = variant.next_discard.as_ref().expect("next discard exists");
+                expected.weighted_remaining +=
+                    u32::from(variant.remaining) * u32::from(next.acceptance_total_remaining());
+                expected.weighted_type_count +=
+                    u32::from(variant.remaining) * next.acceptance_type_count() as u32;
+            }
+            assert_eq!(metric.weighted_remaining, expected.weighted_remaining);
+            assert_eq!(metric.weighted_type_count, expected.weighted_type_count);
+            // テンパイへ届かない枝なので打点込みの集計値は持たない。
+            assert_eq!(metric.prospective_value, None);
+            checked += usize::from(metric.weighted_remaining > 0);
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn shanten_stays_ahead_of_the_same_shanten_hand_change() {
+        // same-shanten 手変わりの集計値が大きくても、打牌後1向聴より2向聴を優先しない。
+        let case = &*SAME_SHANTEN_CASE;
+        let metric_of = |discard: TileType| {
+            case.lookahead
+                .candidate(discard)
+                .map(DiscardLookaheadDiagnostic::same_shanten_forward_metric)
+                .expect("打牌候補がある")
+        };
+
+        let iishanten = tile("9s");
+        let two_shanten = tile("1m");
+        assert_eq!(
+            evaluation_of(case, iishanten).min_shanten_after_discard(),
+            1
+        );
+        assert_eq!(
+            evaluation_of(case, two_shanten).min_shanten_after_discard(),
+            2
+        );
+        assert!(
+            metric_of(two_shanten).weighted_remaining > metric_of(iishanten).weighted_remaining,
+            "2向聴側の手変わりが大きい局面が必要"
+        );
+
+        let metrics = forward_metrics(&inputs(&case.situation), &case.situation.evaluations);
+        let selected = best_discard_selection_index_with_forward_metrics(
+            &case.situation.evaluations,
+            &metrics,
+        )
+        .expect("打牌を選べる");
+        assert_eq!(
+            case.situation.evaluations[selected].min_shanten_after_discard(),
+            1
         );
     }
 }

@@ -138,6 +138,52 @@ pub(crate) fn additional_seen(
     additional_seen
 }
 
+/// 見え牌を反映して実際にツモり得る牌1牌種分の、ツモ後の向聴数付きの列挙結果。
+///
+/// 受け入れ ([`Acceptance`]) は「その牌を1枚加えると向聴数が下がる牌」だけを持つ source of
+/// truth なので、向聴数を維持する牌をそこへ混ぜない。2手先評価 ([`crate::lookahead`]) が仮想
+/// ツモ対象を列挙するための型で、判定条件は列挙する側が持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DrawableTile {
+    pub(crate) tile: TileType,
+    /// 見え牌を反映した残枚数。残枚数 0 の牌種は列挙しない。
+    pub(crate) remaining: u8,
+    pub(crate) shanten_after_draw: EffectiveShanten,
+}
+
+/// 見え牌を反映して実際にツモり得る牌のうち、向聴数を維持する牌を列挙する。
+///
+/// 残枚数もツモ後の向聴数も受け入れと同じ列挙 ([`for_each_drawable_tile`]) から求め、条件だけが
+/// 「下がる (`<`)」ではなく「維持する (`==`)」になる。向聴数が悪化する牌は対象外。
+/// 受け入れの条件を変えないため、ここで列挙した牌が [`Acceptance`] へ入ることはない。
+pub(crate) fn same_shanten_draws_with_fixed_melds_and_seen(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    additional_seen: &[u8; TileType::COUNT],
+) -> Vec<DrawableTile> {
+    let evaluate =
+        |counts: &TileCounts| calculate_shanten_with_fixed_melds(counts, fixed_meld_count);
+    let current_min = evaluate(counts).min();
+    let mut tiles = Vec::new();
+
+    for_each_drawable_tile(
+        counts,
+        additional_seen,
+        evaluate,
+        |tile, remaining, shanten_after_draw: EffectiveShanten| {
+            if shanten_after_draw.min() == current_min {
+                tiles.push(DrawableTile {
+                    tile,
+                    remaining,
+                    shanten_after_draw,
+                });
+            }
+        },
+    );
+
+    tiles
+}
+
 fn collect_acceptance<S: Copy>(
     counts: &TileCounts,
     additional_seen: &[u8; TileType::COUNT],
@@ -148,6 +194,35 @@ fn collect_acceptance<S: Copy>(
     let current_min = effective(current);
     let mut tiles = Vec::new();
 
+    for_each_drawable_tile(
+        counts,
+        additional_seen,
+        &evaluate,
+        |tile, remaining, shanten_after_draw| {
+            // 受け入れの条件は「その牌を1枚加えると向聴数が下がる」。維持する牌を混ぜない。
+            if effective(shanten_after_draw) < current_min {
+                tiles.push(AcceptanceTile {
+                    tile,
+                    remaining,
+                    shanten_after_draw,
+                });
+            }
+        },
+    );
+
+    Acceptance { current, tiles }
+}
+
+// 見え牌を反映して実際にツモり得る牌を1牌種ずつ、その牌を1枚加えた後の向聴数と一緒に渡す。
+//
+// 残枚数 (4枚 - 手牌 - 手牌以外の見え牌) と1枚加えた後の向聴数の求め方はここ1本だけが持ち、
+// 受け入れと2手先評価の仮想ツモ候補で共有する。どの牌を採用するかは呼び出し側の条件で決める。
+fn for_each_drawable_tile<S>(
+    counts: &TileCounts,
+    additional_seen: &[u8; TileType::COUNT],
+    evaluate: impl Fn(&TileCounts) -> S,
+    mut visit: impl FnMut(TileType, u8, S),
+) {
     for tile in TileType::all() {
         let seen = counts.count(tile) + additional_seen[tile.index()];
         let remaining = 4u8.saturating_sub(seen);
@@ -160,17 +235,8 @@ fn collect_acceptance<S: Copy>(
             continue;
         }
 
-        let shanten_after_draw = evaluate(&added);
-        if effective(shanten_after_draw) < current_min {
-            tiles.push(AcceptanceTile {
-                tile,
-                remaining,
-                shanten_after_draw,
-            });
-        }
+        visit(tile, remaining, evaluate(&added));
     }
-
-    Acceptance { current, tiles }
 }
 
 #[cfg(test)]
@@ -199,6 +265,64 @@ mod tests {
             .iter()
             .find(|entry| entry.tile == wait)
             .map(|entry| entry.remaining)
+    }
+
+    // 13m 68m 456789p 5s EE の1向聴。4m は向聴数を維持し、2m / 7m は向聴数を下げる。
+    fn same_shanten_counts() -> TileCounts {
+        counts(&[
+            "1m", "3m", "6m", "8m", "4p", "5p", "6p", "7p", "8p", "9p", "5s", "E", "E",
+        ])
+    }
+
+    #[test]
+    fn same_shanten_draws_share_the_acceptance_calculation_with_a_different_condition() {
+        let counts = same_shanten_counts();
+        let fixed_meld_count = FixedMeldCount::NONE;
+        let seen = [0u8; TileType::COUNT];
+        let acceptance = calculate_acceptance_with_fixed_melds(&counts, fixed_meld_count);
+        let current = acceptance.current.min();
+        let draws = same_shanten_draws_with_fixed_melds_and_seen(&counts, fixed_meld_count, &seen);
+
+        for tile in TileType::all() {
+            let listed = draws.iter().find(|drawable| drawable.tile == tile);
+            let accepted = acceptance.tiles.iter().find(|entry| entry.tile == tile);
+
+            let mut added = counts;
+            let remaining = 4u8.saturating_sub(counts.count(tile));
+            if remaining == 0 || added.try_add(tile).is_err() {
+                assert_eq!(listed, None, "{tile:?}");
+                assert!(accepted.is_none(), "{tile:?}");
+                continue;
+            }
+
+            let after_draw = calculate_shanten_with_fixed_melds(&added, fixed_meld_count);
+            // 受け入れは「下がる」、lookahead 専用の列挙は「維持する」。同じ shanten calculator の
+            // 結果を同じ牌へ適用して、条件だけが違う。
+            assert_eq!(listed.is_some(), after_draw.min() == current, "{tile:?}");
+            assert_eq!(accepted.is_some(), after_draw.min() < current, "{tile:?}");
+            if let Some(listed) = listed {
+                assert_eq!(listed.remaining, remaining);
+                assert_eq!(listed.shanten_after_draw, after_draw);
+            }
+        }
+
+        assert!(draws.iter().any(|drawable| drawable.tile == tile("4m")));
+        assert_eq!(
+            accepted_tiles(&calculate_acceptance(&counts)),
+            vec![tile("2m"), tile("7m")]
+        );
+    }
+
+    #[test]
+    fn same_shanten_draws_skip_the_tiles_that_are_all_seen() {
+        let counts = same_shanten_counts();
+        let fixed_meld_count = FixedMeldCount::NONE;
+        let mut seen = [0u8; TileType::COUNT];
+        seen[tile("4m").index()] = 4;
+
+        let draws = same_shanten_draws_with_fixed_melds_and_seen(&counts, fixed_meld_count, &seen);
+        assert!(!draws.iter().any(|drawable| drawable.tile == tile("4m")));
+        assert!(draws.iter().all(|drawable| drawable.remaining > 0));
     }
 
     #[test]

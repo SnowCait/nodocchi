@@ -60,7 +60,7 @@ Final decision
 
 その打牌でテンパイになる候補には `permanent furiten` / `history furiten after discard` / `ron` を表示します。`ron` は両者を合わせた総合ロン可否で、全候補が選択候補と同じ評価時点 (その打牌を切り終えた後) の facts を使います。
 
-`--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
+`--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。2手先の概要は仮想ツモ牌を向聴数が下がるもの (`draws`) と維持するもの (`same-shanten`) に分けて種類数と残枚数を表示し、`--verbose` の牌ごとの詳細では `transition` にその分類を表示します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
 
 ## Player threats
 

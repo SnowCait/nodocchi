@@ -14,9 +14,9 @@ use bot_core::{
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
     DiscardEvaluation, DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic,
-    DrawLookaheadDiagnostic, DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile,
-    EffectiveShanten, FixedMeldCount, LookaheadDiagnostic, PermanentFuriten, Shanten,
-    TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
+    DrawLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,
+    EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
+    PermanentFuriten, Shanten, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
 };
 
 use crate::scenario::Scenario;
@@ -576,15 +576,11 @@ fn format_lookahead_candidate(
 ) -> Vec<String> {
     let mut lines = vec![format!("  {}", candidate.discard.to_mjai_string())];
 
-    let total_remaining: u32 = candidate
-        .draws
-        .iter()
-        .map(|draw| u32::from(draw.remaining))
-        .sum();
+    // 向聴数を下げる仮想ツモと維持する仮想ツモを1行にまとめて、通常表示の長さを保つ。
     lines.push(format!(
-        "    draws: {} types / {} remaining",
-        candidate.draws.len(),
-        total_remaining
+        "    draws: {}, same-shanten {}",
+        format_draw_summary(candidate, DrawTransition::Progress),
+        format_draw_summary(candidate, DrawTransition::SameShanten),
     ));
 
     if !verbose {
@@ -603,15 +599,26 @@ fn format_lookahead_candidate(
     lines
 }
 
+// 分類ごとの仮想ツモ牌の種類数と残枚数。
+fn format_draw_summary(
+    candidate: &DiscardLookaheadDiagnostic,
+    transition: DrawTransition,
+) -> String {
+    let draws: Vec<_> = candidate.draws_with(transition).collect();
+    let total_remaining: u32 = draws.iter().map(|draw| u32::from(draw.remaining)).sum();
+    format!("{} types / {total_remaining} remaining", draws.len())
+}
+
 fn format_lookahead_draw(
     draw: &DrawLookaheadDiagnostic,
     value: Option<&ProspectiveDrawValue>,
 ) -> Vec<String> {
     let mut lines = vec![format!(
-        "    draw {}: {} remaining, shanten after draw {}",
+        "    draw {}: {} remaining, shanten after draw {}, transition {:?}",
         draw.draw.to_mjai_string(),
         draw.remaining,
-        draw.shanten_after_draw.min()
+        draw.shanten_after_draw.min(),
+        draw.transition,
     )];
 
     for variant in &draw.variants {
@@ -4487,6 +4494,49 @@ mod tests {
         assert!(lookahead.contains(" types / "), "{lookahead}");
         // 通常表示では受け入れ牌ごとの詳細を出さない。
         assert!(!lookahead.contains("next discard:"), "{lookahead}");
+    }
+
+    // 13m 68m 456789p 5s + ツモ 9s。打 9s で1向聴 (受け入れ 2m / 7m の8枚) になり、4m を
+    // ツモってもまだ1向聴だが、5s を切ると 13m の嵌張が 34m の両面へ変わって受け入れが広がる。
+    const SAME_SHANTEN_SCENARIO: &str = r#"{
+        "hand": "1368m456789p5s11z",
+        "draw": "9s"
+    }"#;
+
+    #[test]
+    fn lookahead_summary_separates_the_same_shanten_draws() {
+        // 通常表示は分類ごとの種類数と残枚数を1行にまとめる。
+        let output = rendered_with_lookahead(SAME_SHANTEN_SCENARIO, false);
+        let lookahead = section(&output, "Lookahead");
+
+        assert!(
+            lookahead.contains(
+                "    draws: 2 types / 8 remaining, same-shanten 32 types / 114 remaining"
+            ),
+            "{lookahead}"
+        );
+        assert!(!lookahead.contains("transition"), "{lookahead}");
+    }
+
+    #[test]
+    fn verbose_lookahead_shows_the_same_shanten_hand_change() {
+        // 向聴数を維持する枝も、分類と次打牌後の状態まで追える。
+        let output = rendered_with_lookahead(SAME_SHANTEN_SCENARIO, true);
+        let lookahead = section(&output, "Lookahead");
+
+        let branch = [
+            "    draw 4m: 4 remaining, shanten after draw 1, transition SameShanten",
+            "      drawn 4m: 4 remaining",
+            "        next discard: 5s",
+            "        next shanten: 1",
+            "        next acceptance: 12 / 3 types",
+        ]
+        .join("\n");
+        assert!(lookahead.contains(&branch), "{lookahead}");
+        assert!(
+            lookahead.contains("shanten after draw 0, transition Progress"),
+            "{lookahead}"
+        );
     }
 
     #[test]

@@ -1257,8 +1257,8 @@ pub(crate) mod tests {
     use crate::reach_policy::REACH_MIN_REMAINING;
     use crate::threat::diagnose_player_threats;
     use bot_logic::{
-        DiscardComparisonReason, HistoryFuritenFacts, PermanentFuriten, RiichiStatus, TileId,
-        TileType, WinMethod, compare_discard_evaluations,
+        DiscardComparisonReason, DrawTransition, HistoryFuritenFacts, PermanentFuriten,
+        RiichiStatus, TileId, TileType, WinMethod, compare_discard_evaluations,
     };
 
     pub(crate) fn tile(value: u8) -> TileId {
@@ -4746,11 +4746,21 @@ pub(crate) mod tests {
             assert_eq!(candidate_lookahead.discard, candidate.evaluation.discard);
             // 現在打牌後の受け入れをそのまま引き継ぐので、対象牌と残枚数が一致する。
             let acceptance = &candidate.evaluation.acceptance_after_discard.tiles;
-            assert_eq!(candidate_lookahead.draws.len(), acceptance.len());
-            for (draw, accepted) in candidate_lookahead.draws.iter().zip(acceptance.iter()) {
+            let progress: Vec<_> = candidate_lookahead
+                .draws_with(DrawTransition::Progress)
+                .collect();
+            assert_eq!(progress.len(), acceptance.len());
+            for (draw, accepted) in progress.into_iter().zip(acceptance.iter()) {
                 assert_eq!(draw.draw, accepted.tile);
                 assert_eq!(draw.remaining, accepted.remaining);
             }
+            // 向聴数を維持する仮想ツモは受け入れへ混ざらない。
+            let accepted_tiles = candidate.evaluation.acceptance_after_discard.tile_types();
+            assert!(
+                candidate_lookahead
+                    .draws_with(DrawTransition::SameShanten)
+                    .all(|draw| !accepted_tiles.contains(&draw.draw))
+            );
         }
     }
 
