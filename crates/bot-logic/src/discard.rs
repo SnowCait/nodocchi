@@ -1179,7 +1179,9 @@ impl CandidateSeen {
         Self { base, ..*self }
     }
 
-    fn additional_seen(&self, discard: TileType) -> [u8; TileType::COUNT] {
+    // 打牌候補評価が受け入れ計算へ渡す見え牌。2手先評価はこの seen をそのまま共有して、
+    // 仮想ツモ候補の残枚数を受け入れと同じ基準で数える。
+    pub(crate) fn additional_seen(&self, discard: TileType) -> [u8; TileType::COUNT] {
         let mut additional_seen = self.base;
         if self.counts_candidate_discard {
             additional_seen[discard.index()] = additional_seen[discard.index()].saturating_add(1);
