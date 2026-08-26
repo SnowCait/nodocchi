@@ -1944,6 +1944,7 @@ mod tests {
     use crate::scenario::ScenarioSpec;
     use bot_core::{Agent, DiagnosticOptions, MenzenAgent};
     use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
+    use std::sync::LazyLock;
 
     fn scenario_from_json(json: &str) -> Scenario {
         let spec: ScenarioSpec = serde_json::from_str(json).unwrap();
@@ -4646,11 +4647,15 @@ mod tests {
         "oya": 3
     }"#;
 
+    // 将来打点まで確定する局面の詳細表示。2手先探索は重いので、同じ表示を確認する複数の
+    // テストで構築結果を共有する。
+    static PROSPECTIVE_VALUE_VERBOSE: LazyLock<String> =
+        LazyLock::new(|| rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true));
+
     #[test]
     fn verbose_lookahead_shows_the_final_wait_and_the_prospective_value() {
         // selected / runner-up のどちらの枝も、最終待ちとダマ / リーチ両方の将来打点まで追える。
-        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
-        let lookahead = section(&output, "Lookahead");
+        let lookahead = section(&PROSPECTIVE_VALUE_VERBOSE, "Lookahead");
 
         let branch = [
             "        next discard: 9s",
@@ -4674,8 +4679,7 @@ mod tests {
     #[test]
     fn verbose_lookahead_keeps_every_wait_of_a_multi_wait_branch() {
         // 複数待ちは待ちごとの残枚数と支払いを並べ、ダマ役なしを0点として平均へ入れない。
-        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
-        let lookahead = section(&output, "Lookahead");
+        let lookahead = section(&PROSPECTIVE_VALUE_VERBOSE, "Lookahead");
 
         let branch = [
             "        final wait: 3m(2) 4p(2)",
@@ -4696,8 +4700,7 @@ mod tests {
     #[test]
     fn verbose_lookahead_reports_branches_without_a_prospective_value() {
         // 2手目の打牌後がテンパイでない枝は最終待ちも将来打点も持たない。
-        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
-        let lookahead = section(&output, "Lookahead");
+        let lookahead = section(&PROSPECTIVE_VALUE_VERBOSE, "Lookahead");
 
         assert!(
             lookahead.contains("      prospective value: not evaluated (not tenpai)"),
@@ -5343,7 +5346,7 @@ mod tests {
     #[test]
     fn verbose_lookahead_keeps_the_existing_output_without_the_downstream_option() {
         // 深い探索を要求しない診断では先の枝を出さず、既存の表示のまま変わらない。
-        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
+        let output = &*PROSPECTIVE_VALUE_VERBOSE;
         assert!(!output.contains("downstream"), "{output}");
     }
 }
