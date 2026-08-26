@@ -44,11 +44,13 @@
 //! 同じく「ダマでロンできると確定した場合」だけ確定値として使う。ロン可否は既存のフリテン基盤
 //! ([`tenpai_wait_availability`]) が source of truth で、この層で判定規則を書き直さない。
 //!
-//! 未来テンパイの恒常フリテンは、現在の自分の河へ1手目・2手目の打牌を足した河
-//! ([`OwnDiscards::with_discards`]) で判定できる。自分の河を特定できない場合は既存どおり
-//! [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten) のままにし、非フリテンだと推測
-//! しない。履歴依存フリテンは、2手目が自分のツモを経た打牌であることだけを評価時点の事実として
-//! 補正し ([`HistoryFuritenFacts::after_discard`])、未確定の軸を `false` で埋めない。
+//! 未来テンパイの恒常フリテンは、現在の自分の河へその枝でここまでに切った全打牌
+//! ([`ProspectiveTenpai::discarded_tiles`]) を足した河 ([`OwnDiscards::with_discards`]) で
+//! 判定できる。枝が何手先まで進んでいるかはこの層の判定に影響しない。自分の河を特定できない
+//! 場合は既存どおり [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten) のままにし、
+//! 非フリテンだと推測しない。履歴依存フリテンは、テンパイへ至る打牌が自分のツモを経ていること
+//! だけを評価時点の事実として補正し ([`HistoryFuritenFacts::after_discard`])、未確定の軸を
+//! `false` で埋めない。
 //!
 //! ロン可否が確定しない場合はダマ打点を判断材料にせず、`damaten_verdict = None` として既存の
 //! リーチ判断 ([`decide_reach_reason`]) の fallback へ委ねる。その結果ダマを選んだ枝は、ロン
@@ -91,8 +93,8 @@ use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_lega
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
 
-// 2手目の打牌は必ず仮想ツモを経る。自摸 → 打牌で同巡内フリテンは解除されるので、未来テンパイ
-// 時点の履歴依存フリテンはこの事実だけで補正できる。
+// 枝の中の打牌はどれも必ず仮想ツモを経る。自摸 → 打牌で同巡内フリテンは解除されるので、未来
+// テンパイ時点の履歴依存フリテンはこの事実だけで補正できる。
 const FUTURE_AFTER_OWN_DRAW: bool = true;
 
 /// 和了牌の物理牌1つ分の将来打点。
@@ -316,7 +318,7 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     reach_legal: bool,
     // 自分が既にリーチしているか。自分の席を特定できない場合は `None`。
     own_reached: Option<bool>,
-    // 現在の自分の河。枝ごとに1手目・2手目の打牌を足して恒常フリテンを判定する。
+    // 現在の自分の河。枝ごとに、その枝でここまでに切った全打牌を足して恒常フリテンを判定する。
     own_discards: OwnDiscards,
     // 未来テンパイ時点へ補正した履歴依存フリテン。未確定の軸は unknown のまま持ち回る。
     history_furiten: HistoryFuritenFacts,
@@ -345,7 +347,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
     pub(crate) fn tenpai_facts(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<ProspectiveFacts> {
         let availability = self.wait_availability(tenpai);
 
-        // 1手目と2手目に切った牌はテンパイ時点で見え牌になる。赤5が見えているかの判定に使う。
+        // その枝でここまでに切った牌はテンパイ時点で見え牌になる。赤5が見えているかの判定に使う。
         let mut visible = self.context.visible_tiles().to_vec();
         visible.extend_from_slice(tenpai.discarded_tiles);
 
@@ -367,9 +369,10 @@ impl<'a> ProductionProspectiveValuator<'a> {
     // 未来テンパイの待ちとロン可否。既存のフリテン基盤へ同じ入力を渡すだけで、判定規則をこの層で
     // 書き直さない。
     //
-    // 恒常フリテンは「現在の自分の河 + 1手目の打牌 + 2手目の打牌」で判定する。自分の河を特定
-    // できない場合は既存どおり Unknown のままで、非フリテンだと推測しない。履歴依存フリテンは
-    // 未来テンパイ時点へ補正済みの値をそのまま渡す。
+    // 恒常フリテンは「現在の自分の河 + その枝でここまでに切った全打牌 (`discarded_tiles`)」で
+    // 判定する。何手先の枝でも渡された打牌をそのまま河として扱う。自分の河を特定できない場合は
+    // 既存どおり Unknown のままで、非フリテンだと推測しない。履歴依存フリテンは未来テンパイ
+    // 時点へ補正済みの値をそのまま渡す。
     fn wait_availability(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiWaitAvailability> {
         let counts = TileCounts::from_tiles(tenpai.concealed_tiles.iter().copied());
         tenpai_wait_availability(
