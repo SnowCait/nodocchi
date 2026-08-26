@@ -51,9 +51,42 @@
 //! 比較するかの policy 決定が必要で、この module は係数も threshold も持たない。
 //! same-shanten 側の集計値は既存 accumulator をそのまま使う
 //! [`same_shanten_forward_metric_for_candidate`] から観測できる。
+//!
+//! # same-shanten の枝の先にあるテンパイ
+//!
+//! same-shanten の枝は2手目の打牌後もまだ同じ向聴数なので、その枝がどれだけ強いテンパイへ
+//! 到達するかは2手目までの評価では見えない。現在打牌後が1向聴の候補に限り、same-shanten の枝を
+//! もう1段だけ進めた
+//!
+//! ```text
+//! 現在打牌 → same-shanten ツモ → 2手目の最良打牌 (まだ1向聴)
+//!          → その1向聴が持つ既存受け入れのツモ → 3手目の最良打牌 → テンパイ
+//! ```
+//!
+//! を [`SameShantenDownstreamDiagnostic`] として構築できる。3手目へ進むツモ牌は2手目の打牌評価が
+//! 持つ受け入れ ([`DiscardEvaluation::acceptance_after_discard`]) そのもので、テンパイへ進む牌の
+//! 判定をこの module が作り直すことはない。2手目・3手目の打牌評価・比較・物理牌 variant・将来
+//! 打点はどれも1段目と同じ helper を通る。
+//!
+//! 集計値 ([`DiscardLookaheadDiagnostic::same_shanten_downstream_value`]) は
+//!
+//! ```text
+//! Σ(same-shanten ツモの物理牌 variant 残枚数
+//!   × Σ(3手目へ進むツモの物理牌 variant 残枚数
+//!       × Σ(最終和了牌の物理牌 variant 残枚数 × 支払い合計)))
+//! ```
+//!
+//! で、平均へ正規化しない生の重み付き合計。枝の深さが違うため既存の
+//! [`WeightedForwardMetric::prospective_value`] とは scale が違い、打牌選択はこの値を使わない。
+//! Progress と SameShanten を1つの scalar へ統合する係数も threshold も持たない。
+//!
+//! 探索は2手目の評価よりさらに重いため、詳細診断へ含めるかどうかは
+//! [`LookaheadInputs::with_same_shanten_downstream`] で明示的に指定する。選択に使う値は一切
+//! 変わらないため、含めても打牌選択の結果は変わらない。
 
 use crate::acceptance::{
-    DrawableTile, EffectiveAcceptance, same_shanten_draws_with_fixed_melds_and_seen,
+    DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
+    same_shanten_draws_with_fixed_melds_and_seen,
 };
 use crate::discard::{
     CandidateSeen, DecorationContext, DiscardEvaluation, ShapePenaltyMode, decorate_evaluations,
@@ -67,8 +100,11 @@ use crate::selection::{
     requires_forward_metrics,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
-use crate::tile::{TileId, TileType, physical_tile_variants, seen_red_fives};
+use crate::tile::{PhysicalTileVariant, TileId, TileType, physical_tile_variants, seen_red_fives};
 use crate::tile_counts::TileCounts;
+
+/// same-shanten の枝をテンパイまで追う対象の向聴数。
+const IISHANTEN_SHANTEN: i8 = TENPAI_SHANTEN + 1;
 
 /// 2手目の打牌後に出来上がる仮想テンパイ1つ分の入力。
 ///
@@ -141,7 +177,28 @@ impl DiscardLookaheadDiagnostic {
     /// 2手目打牌後の向聴数をその枝のツモ後向聴数 (= 現在打牌後の向聴数) に限定するだけ。新しい
     /// 係数も threshold も持たない。打牌選択はこの値を使わない。
     pub fn same_shanten_forward_metric(&self) -> WeightedForwardMetric {
-        accumulate_same_shanten_draws(self.draws_with(DrawTransition::SameShanten))
+        accumulate_same_shanten_draws(self.draws_with(DrawTransition::SameShanten), |variant| {
+            variant.prospective_value
+        })
+    }
+
+    /// 構築済みの枝から same-shanten 手変わりの先にある将来テンパイの重み付き打点を求める。
+    ///
+    /// 集計規則も未確定の扱いも既存 accumulator そのままで、重みに使う打点が「2手目打牌後の
+    /// テンパイの確定打点」ではなく「2手目打牌後の1向聴からさらに1段進めたテンパイの重み付き
+    /// 打点」([`SameShantenDownstreamDiagnostic::weighted_value`]) になるだけ。
+    ///
+    /// [`LookaheadInputs::with_same_shanten_downstream`] を指定せずに構築した診断では、
+    /// 集計対象の枝が先の枝を持たないため `None` になる。表示のために探索し直さない。
+    ///
+    /// 打牌選択はこの値を使わない。枝の深さが違うため既存の
+    /// [`WeightedForwardMetric::prospective_value`] とは scale が違い、統合 policy は未決定。
+    pub fn same_shanten_downstream_value(&self) -> Option<u64> {
+        accumulate_same_shanten_draws(
+            self.draws_with(DrawTransition::SameShanten),
+            DrawVariantLookaheadDiagnostic::downstream_value,
+        )
+        .prospective_value
     }
 
     /// 構築済みの枝から打牌選択用の weighted tenpai wait を集計する。
@@ -157,19 +214,11 @@ impl DiscardLookaheadDiagnostic {
     /// ため元から寄与しないが、詳細診断の有無で選択結果が変わらないことを枝集合そのもので
     /// 保証する。
     pub fn weighted_forward_metric(&self, required_next_shanten: i8) -> WeightedForwardMetric {
-        let mut accumulator = ForwardMetricAccumulator::new();
-        for variant in self
-            .draws_with(DrawTransition::Progress)
-            .flat_map(|draw| draw.variants.iter())
-        {
-            accumulator.accumulate(
-                variant.remaining,
-                required_next_shanten,
-                variant.next_discard.as_ref(),
-                variant.prospective_value,
-            );
-        }
-        accumulator.finish()
+        accumulate_draws(
+            self.draws_with(DrawTransition::Progress),
+            |_| required_next_shanten,
+            |variant| variant.prospective_value,
+        )
     }
 }
 
@@ -217,9 +266,23 @@ pub struct DrawVariantLookaheadDiagnostic {
     /// テンパイでない枝・評価器を渡されなかった場合・打点を確定できない場合は `None`。
     /// 2手目の打牌候補の比較にもこの値を使うため、選択と診断で別々の打点を持たない。
     pub prospective_value: Option<u64>,
+    /// `next_discard` 後がまだ同じ向聴数の枝を、テンパイまでもう1段進めた探索結果。
+    ///
+    /// [`LookaheadInputs::with_same_shanten_downstream`] を指定した same-shanten の枝だけが
+    /// 持つ。探索しなかった枝は `None` で、打点を確定できなかったこと
+    /// ([`SameShantenDownstreamDiagnostic::weighted_value`] が `None`) とは区別する。
+    pub downstream: Option<SameShantenDownstreamDiagnostic>,
 }
 
 impl DrawVariantLookaheadDiagnostic {
+    /// 先の枝の重み付き打点。探索しなかった枝と確定できない枝はどちらも `None`。
+    ///
+    /// どちらも「この枝の打点を確定できない」という同じ意味になり、既存 accumulator が候補
+    /// 全体を `None` にする。確定しない打点を 0 点として集計しない。
+    pub fn downstream_value(&self) -> Option<u64> {
+        self.downstream.as_ref()?.weighted_value()
+    }
+
     pub fn next_discard_tile(&self) -> Option<TileType> {
         self.next_discard.as_ref().map(|next| next.discard)
     }
@@ -249,6 +312,36 @@ impl DrawVariantLookaheadDiagnostic {
     }
 }
 
+/// same-shanten の枝の2手目打牌後 (まだ同じ向聴数) から、テンパイまでもう1段進めた探索結果。
+///
+/// `draws` は2手目の打牌評価が持つ既存受け入れ
+/// ([`DiscardEvaluation::acceptance_after_discard`]) そのもので、テンパイへ進む牌をここで判定
+/// し直さない。各枝の `next_discard` は既存打牌評価と既存比較順が選んだ3手目の最良打牌で、
+/// `prospective_value` はその打牌後のテンパイの確定打点。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SameShantenDownstreamDiagnostic {
+    pub draws: Vec<DrawLookaheadDiagnostic>,
+}
+
+impl SameShantenDownstreamDiagnostic {
+    pub fn draw(&self, tile: TileType) -> Option<&DrawLookaheadDiagnostic> {
+        self.draws.iter().find(|draw| draw.draw == tile)
+    }
+
+    /// Σ(3手目へ進むツモの物理牌 variant 残枚数 × 最終テンパイの確定打点)。
+    ///
+    /// 集計規則も未確定の扱いも既存 accumulator そのままで、テンパイにならない枝は集計対象に
+    /// ならず、集計対象の枝が1つでも打点を確定できなければ `None` になる。
+    pub fn weighted_value(&self) -> Option<u64> {
+        accumulate_draws(
+            self.draws.iter(),
+            |_| TENPAI_SHANTEN,
+            |variant| variant.prospective_value,
+        )
+        .prospective_value
+    }
+}
+
 /// 全打牌候補分の2手先診断。
 ///
 /// `candidates` は入力の打牌候補評価と同じ順序・同じ件数で、selected 候補だけでなく runner-up を
@@ -271,15 +364,14 @@ impl LookaheadDiagnostic {
 /// `tiles` は打牌前の全手牌 (物理牌)、`fixed_meld_count` / `dora_indicators` / `round_wind` /
 /// `seat_wind` は現在の打牌評価に使ったものと同じ値を渡す。
 pub struct LookaheadInputs<'a> {
-    tiles: &'a [TileId],
     fixed_meld_count: FixedMeldCount,
     dora_indicators: &'a [TileId],
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
     valuator: Option<&'a dyn ProspectiveTenpaiValuator>,
-    counts: TileCounts,
-    seen: CandidateSeen,
-    red_five_seen: [bool; TileType::COUNT],
+    same_shanten_downstream: bool,
+    // 1手目の打牌前の手牌。深い枝の状態と同じ型で持ち、段ごとに別の組み立てをしない。
+    root: HandState,
 }
 
 impl<'a> LookaheadInputs<'a> {
@@ -291,15 +383,19 @@ impl<'a> LookaheadInputs<'a> {
         seat_wind: Option<TileType>,
     ) -> Self {
         Self {
-            tiles,
             fixed_meld_count,
             dora_indicators,
             round_wind,
             seat_wind,
             valuator: None,
-            counts: TileCounts::from_tiles(tiles.iter().copied()),
-            seen: CandidateSeen::hand_only(),
-            red_five_seen: seen_red_fives(tiles.iter().copied()),
+            same_shanten_downstream: false,
+            root: HandState {
+                counts: TileCounts::from_tiles(tiles.iter().copied()),
+                tiles: tiles.to_vec(),
+                seen: CandidateSeen::hand_only(),
+                red_five_seen: seen_red_fives(tiles.iter().copied()),
+                discarded: Vec::new(),
+            },
         }
     }
 
@@ -313,8 +409,9 @@ impl<'a> LookaheadInputs<'a> {
         if visible_tiles.is_empty() {
             return self;
         }
-        self.seen = CandidateSeen::from_visible_tiles(&self.counts, visible_tiles);
-        self.red_five_seen = seen_red_fives(self.tiles.iter().chain(visible_tiles).copied());
+        self.root.seen = CandidateSeen::from_visible_tiles(&self.root.counts, visible_tiles);
+        self.root.red_five_seen =
+            seen_red_fives(self.root.tiles.iter().chain(visible_tiles).copied());
         self
     }
 
@@ -326,6 +423,20 @@ impl<'a> LookaheadInputs<'a> {
         valuator: &'a dyn ProspectiveTenpaiValuator,
     ) -> Self {
         self.valuator = Some(valuator);
+        self
+    }
+
+    /// same-shanten の枝を、テンパイまでもう1段進めた詳細診断
+    /// ([`DrawVariantLookaheadDiagnostic::downstream`]) を構築する。
+    ///
+    /// 対象は現在打牌後が1向聴の候補の same-shanten の枝だけ。2手目までの評価より探索が
+    /// 深くなるため、詳細診断が必要な経路だけで指定する。この探索の結果は打牌選択にも2手目
+    /// `next_discard` の選択にも使わないため、指定しても選択結果は変わらない。
+    ///
+    /// 選択済みの1候補について集計値だけが必要な場合は詳細診断を構築せず、
+    /// [`same_shanten_downstream_value_for_candidate`] を使う。
+    pub fn with_same_shanten_downstream(mut self) -> Self {
+        self.same_shanten_downstream = true;
         self
     }
 }
@@ -447,10 +558,54 @@ pub fn same_shanten_forward_metric_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> WeightedForwardMetric {
-    let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
+    let Some(branch) = CandidateBranch::new(&inputs.root, evaluation) else {
         return WeightedForwardMetric::default();
     };
-    accumulate_same_shanten_draws(branch.same_shanten_draws(inputs, evaluation).iter())
+    accumulate_same_shanten_draws(branch.same_shanten_draws(inputs, false).iter(), |variant| {
+        variant.prospective_value
+    })
+}
+
+/// 打牌候補1件について、same-shanten 手変わりの先にある将来テンパイの重み付き打点を求める。
+///
+/// 枝の評価も集計規則も詳細診断 ([`diagnose_lookahead`]) と同じ helper を共有し、
+/// [`LookaheadDiagnostic`] を構築しない。詳細診断を
+/// [`LookaheadInputs::with_same_shanten_downstream`] 付きで構築済みの経路は、同じ枝を2回
+/// 評価しないよう [`DiscardLookaheadDiagnostic::same_shanten_downstream_value`] を使う。
+///
+/// 値は
+///
+/// ```text
+/// Σ(same-shanten ツモの物理牌 variant 残枚数
+///   × Σ(3手目へ進むツモの物理牌 variant 残枚数
+///       × Σ(最終和了牌の物理牌 variant 残枚数 × 支払い合計)))
+/// ```
+///
+/// で、平均へ正規化しない生の重み付き合計。打点を確定できない枝が混じる場合は 0 点へ潰さず
+/// `None` になる。
+///
+/// 対象は現在打牌後が1向聴の候補だけで、それ以外は探索せず `None`。現在の打牌選択はこの値を
+/// 使わない。既存 [`WeightedForwardMetric::prospective_value`] とは枝の深さが違うため raw scale
+/// も違い、直接比較できない。統合する係数も threshold もこの module は持たない。
+pub fn same_shanten_downstream_value_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    if !explores_downstream(evaluation) {
+        return None;
+    }
+    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
+    accumulate_same_shanten_draws(
+        branch.same_shanten_draws(inputs, true).iter(),
+        DrawVariantLookaheadDiagnostic::downstream_value,
+    )
+    .prospective_value
+}
+
+// same-shanten の枝をテンパイまで追う対象かどうか。今回の対象は現在打牌後が1向聴の候補だけで、
+// 2向聴以上を任意深度へ一般化しない。
+fn explores_downstream(evaluation: &DiscardEvaluation) -> bool {
+    evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN
 }
 
 pub fn tenpai_wait_metrics_from_lookahead(
@@ -486,15 +641,16 @@ fn lookahead_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> DiscardLookaheadDiagnostic {
-    let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
+    let Some(branch) = CandidateBranch::new(&inputs.root, evaluation) else {
         return DiscardLookaheadDiagnostic {
             discard: evaluation.discard,
             draws: Vec::new(),
         };
     };
 
+    let downstream = inputs.same_shanten_downstream && explores_downstream(evaluation);
     let mut draws = branch.progress_draws(inputs, evaluation);
-    draws.extend(branch.same_shanten_draws(inputs, evaluation));
+    draws.extend(branch.same_shanten_draws(inputs, downstream));
 
     DiscardLookaheadDiagnostic {
         discard: evaluation.discard,
@@ -509,80 +665,106 @@ fn weighted_forward_metric_for_candidate(
     evaluation: &DiscardEvaluation,
     required_next_shanten: i8,
 ) -> WeightedForwardMetric {
-    let mut accumulator = ForwardMetricAccumulator::new();
-    let Some(branch) = CandidateBranch::new(inputs, evaluation) else {
-        return accumulator.finish();
+    let Some(branch) = CandidateBranch::new(&inputs.root, evaluation) else {
+        return WeightedForwardMetric::default();
     };
 
-    for variant in branch
-        .progress_draws(inputs, evaluation)
-        .iter()
-        .flat_map(|draw| draw.variants.iter())
-    {
-        accumulator.accumulate(
-            variant.remaining,
-            required_next_shanten,
-            variant.next_discard.as_ref(),
-            variant.prospective_value,
-        );
-    }
-    accumulator.finish()
+    accumulate_draws(
+        branch.progress_draws(inputs, evaluation).iter(),
+        |_| required_next_shanten,
+        |variant| variant.prospective_value,
+    )
 }
 
 // same-shanten の枝を既存 accumulator で集計する。集計対象の2手目打牌後の向聴数は枝ごとの
-// ツモ後向聴数そのもので、向聴数を下げる枝の集計と同じ規則になる。
+// ツモ後向聴数そのもので、向聴数を下げる枝の集計と同じ規則になる。重みに使う打点だけを
+// 呼び出し側が決める。
 fn accumulate_same_shanten_draws<'a>(
     draws: impl Iterator<Item = &'a DrawLookaheadDiagnostic>,
+    value: impl Fn(&DrawVariantLookaheadDiagnostic) -> Option<u64>,
+) -> WeightedForwardMetric {
+    accumulate_draws(draws, |draw| draw.shanten_after_draw.min(), value)
+}
+
+// 枝を既存 accumulator へ流し込む唯一の経路。集計対象の判定も、確定しない打点を 0 点として
+// 扱わない規則も accumulator が持ち、呼び出し側は対象の枝・集計する向聴数・重みに使う打点だけを
+// 決める。詳細診断から集計する経路と選択専用経路が必ず同じ値になるのはこの共有による。
+fn accumulate_draws<'a>(
+    draws: impl Iterator<Item = &'a DrawLookaheadDiagnostic>,
+    required_next_shanten: impl Fn(&DrawLookaheadDiagnostic) -> i8,
+    value: impl Fn(&DrawVariantLookaheadDiagnostic) -> Option<u64>,
 ) -> WeightedForwardMetric {
     let mut accumulator = ForwardMetricAccumulator::new();
     for draw in draws {
+        let required = required_next_shanten(draw);
         for variant in &draw.variants {
             accumulator.accumulate(
                 variant.remaining,
-                draw.shanten_after_draw.min(),
+                required,
                 variant.next_discard.as_ref(),
-                variant.prospective_value,
+                value(variant),
             );
         }
     }
     accumulator.finish()
 }
 
-// 現在の打牌候補1件について、その打牌後の受け入れ牌を仮想ツモした2手目評価に必要な状態。
-// 受け入れ牌ごとに作り直さず、詳細診断と選択用集計で共有する。
+// 仮想手牌1つ分の探索状態。1手目の打牌前も、仮想ツモを経た各段も同じ型で持ち、段ごとに別の
+// 組み立てをしない。
+//
+// `seen` は手牌以外に見えている牌なので、手牌に加えた仮想ツモ牌は含まない。`discarded` は
+// ここまでに切った物理牌で、将来テンパイ時点の自分の河として既存フリテン基盤へ渡される。
+#[derive(Debug, Clone)]
+struct HandState {
+    counts: TileCounts,
+    // 物理牌一覧。切る牌の赤 / 黒とドラ枚数を確定するために持つ。
+    tiles: Vec<TileId>,
+    seen: CandidateSeen,
+    red_five_seen: [bool; TileType::COUNT],
+    discarded: Vec<TileId>,
+}
+
+// 打牌候補1件について、その打牌後の牌を仮想ツモした次段の評価に必要な状態。
+// 仮想ツモ牌ごとに作り直さず、詳細診断と選択用集計で共有する。
 struct CandidateBranch {
     after_discard: TileCounts,
-    // 1手目に実際に切った物理牌。2手目以降の見え牌として将来打点の評価器へ渡す。
-    first_discarded: Option<TileId>,
     next_tiles: Vec<TileId>,
     seen: CandidateSeen,
+    // 打牌後の仮想ツモ候補を列挙するときの見え牌。打牌評価が受け入れを求めたときと同じ値で、
+    // どちらの分類の枝も同じ基準の残枚数になる。
+    draw_seen: [u8; TileType::COUNT],
+    red_five_seen: [bool; TileType::COUNT],
+    // 打牌前までの河へこの打牌を足したもの。次段の仮想手牌がそのまま引き継ぐ。
+    discarded: Vec<TileId>,
 }
 
 impl CandidateBranch {
     // 打牌候補の牌種を手牌から除けない場合だけ `None`。
-    fn new(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> Option<Self> {
-        let mut after_discard = inputs.counts;
+    fn new(state: &HandState, evaluation: &DiscardEvaluation) -> Option<Self> {
+        let mut after_discard = state.counts;
         after_discard.remove(evaluation.discard).ok()?;
 
-        // 1手目に実際に切られる物理牌を2手目の物理牌一覧から外す。赤5と黒5の両方を持ち
-        // 片方だけが合法な局面でも、通常打牌評価が確定した物理牌をそのまま引き継ぐ。
-        let (first_discarded, next_tiles) =
-            match split_discarded_tile(inputs.tiles.to_vec(), evaluation) {
-                Some((discarded, remaining)) => (Some(discarded), remaining),
-                None => (None, inputs.tiles.to_vec()),
-            };
+        // 実際に切られる物理牌を次段の物理牌一覧から外す。赤5と黒5の両方を持ち片方だけが合法な
+        // 局面でも、打牌評価が確定した物理牌をそのまま引き継ぐ。
+        let (discarded, next_tiles) = match split_discarded_tile(state.tiles.clone(), evaluation) {
+            Some((discarded, remaining)) => (Some(discarded), remaining),
+            None => (None, state.tiles.clone()),
+        };
 
         Some(Self {
             after_discard,
-            first_discarded,
             next_tiles,
-            // 1手目に切った牌は2手目時点で見え牌になる。
-            seen: inputs.seen.after_discard(evaluation.discard),
+            // 切った牌は次段では見え牌になる。
+            seen: state.seen.after_discard(evaluation.discard),
+            draw_seen: state.seen.additional_seen(evaluation.discard),
+            red_five_seen: state.red_five_seen,
+            discarded: state.discarded.iter().copied().chain(discarded).collect(),
         })
     }
 
-    // 向聴数を下げる仮想ツモ枝。対象牌・残枚数・ツモ後向聴数は現在打牌の受け入れそのもので、
-    // 2手先評価のために求め直さない。
+    // 向聴数を下げる仮想ツモ枝。対象牌・残枚数・ツモ後向聴数は打牌評価が持つ受け入れそのもので、
+    // 2手先評価のために求め直さない。3手目へ進む枝もこの入口を共有し、テンパイへ進む牌の判定を
+    // 別に作らない。
     fn progress_draws(
         &self,
         inputs: &LookaheadInputs,
@@ -592,155 +774,201 @@ impl CandidateBranch {
             .acceptance_after_discard
             .tiles
             .iter()
-            .map(|tile| {
-                self.draw(
-                    inputs,
-                    tile.tile,
-                    tile.remaining,
-                    tile.shanten_after_draw,
-                    DrawTransition::Progress,
-                )
-            })
+            .map(|tile| self.draw(inputs, drawable(tile), DrawTransition::Progress, false))
             .collect()
     }
 
     // 向聴数を維持する仮想ツモ枝。受け入れと同じ列挙・同じ shanten calculator で求め、条件だけが
     // 「維持する」になる。残枚数は現在打牌の受け入れを求めたときと同じ見え牌から数えるので、
     // どちらの分類の枝も同じ基準の残枚数になる。
+    //
+    // `downstream` を指定した場合だけ、2手目の打牌後の1向聴からテンパイまでもう1段進める。
     fn same_shanten_draws(
         &self,
         inputs: &LookaheadInputs,
-        evaluation: &DiscardEvaluation,
+        downstream: bool,
     ) -> Vec<DrawLookaheadDiagnostic> {
         same_shanten_draws_with_fixed_melds_and_seen(
             &self.after_discard,
             inputs.fixed_meld_count,
-            &inputs.seen.additional_seen(evaluation.discard),
+            &self.draw_seen,
         )
-        .iter()
-        .map(|drawable: &DrawableTile| {
-            self.draw(
-                inputs,
-                drawable.tile,
-                drawable.remaining,
-                drawable.shanten_after_draw,
-                DrawTransition::SameShanten,
-            )
+        .into_iter()
+        .map(|drawable: DrawableTile| {
+            self.draw(inputs, drawable, DrawTransition::SameShanten, downstream)
         })
         .collect()
     }
 
     // 仮想ツモ牌1牌種を、赤 / 黒の物理牌 variant ごとに仮想ツモして評価する。
     //
-    // 赤5と黒5では打点だけでなく2手目の最良打牌そのものが変わり得るため、variant ごとに既存
-    // 打牌評価と既存比較を通す。分割規則は最終和了牌と共有する既存 helper が持つ。
+    // 赤5と黒5では打点だけでなく次の最良打牌そのものが変わり得るため、variant ごとに既存打牌
+    // 評価と既存比較を通す。分割規則は最終和了牌と共有する既存 helper が持つ。
     fn draw(
         &self,
         inputs: &LookaheadInputs,
-        draw: TileType,
-        remaining: u8,
-        shanten_after_draw: EffectiveShanten,
+        drawable: DrawableTile,
         transition: DrawTransition,
+        downstream: bool,
     ) -> DrawLookaheadDiagnostic {
-        let variants = physical_tile_variants(draw, remaining, inputs.red_five_seen[draw.index()])
-            .map(|variant| {
-                let (next_discard, prospective_value) =
-                    self.next_discard(inputs, draw, variant.tile);
-                DrawVariantLookaheadDiagnostic {
-                    drawn_tile: variant.tile,
-                    remaining: variant.remaining,
-                    next_discard,
-                    prospective_value,
-                }
-            })
-            .collect();
+        let variants = physical_tile_variants(
+            drawable.tile,
+            drawable.remaining,
+            self.red_five_seen[drawable.tile.index()],
+        )
+        .map(|variant| self.draw_variant(inputs, drawable.tile, variant, downstream))
+        .collect();
 
         DrawLookaheadDiagnostic {
-            draw,
-            remaining,
-            shanten_after_draw,
+            draw: drawable.tile,
+            remaining: drawable.remaining,
+            shanten_after_draw: drawable.shanten_after_draw,
             transition,
             variants,
         }
     }
 
-    // 受け入れ牌1枚を仮想的にツモった手牌を作り、既存打牌評価・既存文脈反映・既存比較順で最良
-    // 打牌を求める。仮想ツモ牌の物理牌が決まっているため、赤5も通常打牌評価と同じ経路で反映
-    // できる。テンパイへ進む候補には将来打点を付け、比較の打点軸へ渡す。
-    fn next_discard(
+    // 仮想ツモ牌の物理牌1つ分。仮想ツモ後の手牌に既存打牌評価・既存文脈反映・既存比較順を通して
+    // 最良打牌を求める。
+    fn draw_variant(
         &self,
         inputs: &LookaheadInputs,
         draw: TileType,
-        drawn_tile: TileId,
-    ) -> (Option<DiscardEvaluation>, Option<u64>) {
-        let mut hypothetical = self.after_discard;
-        if hypothetical.try_add(draw).is_err() {
-            return (None, None);
-        }
+        variant: PhysicalTileVariant,
+        downstream: bool,
+    ) -> DrawVariantLookaheadDiagnostic {
+        let Some(state) = self.state_after_draw(draw, variant.tile) else {
+            return DrawVariantLookaheadDiagnostic {
+                drawn_tile: variant.tile,
+                remaining: variant.remaining,
+                next_discard: None,
+                prospective_value: None,
+                downstream: None,
+            };
+        };
 
-        let mut next_tiles = self.next_tiles.clone();
-        next_tiles.push(drawn_tile);
-
-        let mut evaluations =
-            evaluate_discards_with_seen(&hypothetical, inputs.fixed_meld_count, &self.seen);
-        decorate_evaluations(
-            &mut evaluations,
-            &hypothetical,
-            &DecorationContext {
-                tiles: &next_tiles,
-                dora_indicators: inputs.dora_indicators,
-                round_wind: inputs.round_wind,
-                seat_wind: inputs.seat_wind,
-                shape_penalty: ShapePenaltyMode::WithContext {
-                    round_wind: inputs.round_wind,
-                    seat_wind: inputs.seat_wind,
-                    fixed_meld_count: inputs.fixed_meld_count,
-                },
-                unresolved_red_tile: None,
-            },
-        );
-
-        let values: Vec<_> = evaluations
-            .iter()
-            .map(|evaluation| self.prospective_value(inputs, &next_tiles, evaluation))
-            .collect();
-        let metrics: Vec<_> = values
-            .iter()
-            .map(|&value| ForwardMetrics::from_prospective_value(value))
-            .collect();
-
-        match best_discard_selection_index_with_forward_metrics(&evaluations, &metrics) {
-            Some(index) => (Some(evaluations.swap_remove(index)), values[index]),
-            None => (None, None),
+        let (next_discard, prospective_value) = next_discard(inputs, &state);
+        DrawVariantLookaheadDiagnostic {
+            drawn_tile: variant.tile,
+            remaining: variant.remaining,
+            downstream: downstream
+                .then(|| downstream_draws(inputs, &state, next_discard.as_ref()?))
+                .flatten(),
+            next_discard,
+            prospective_value,
         }
     }
 
-    // 2手目の打牌候補1件分の将来打点。テンパイへ進む候補だけが値を持つ。
-    fn prospective_value(
-        &self,
-        inputs: &LookaheadInputs,
-        next_tiles: &[TileId],
-        evaluation: &DiscardEvaluation,
-    ) -> Option<u64> {
-        let valuator = inputs.valuator?;
-        if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
-            return None;
-        }
+    // 仮想ツモ後の手牌の状態。ツモ牌は手牌へ入るので見え牌 (`seen`) へは加えない。赤5をツモった
+    // 枝ではその牌種の赤5が以降見えているので、物理牌 variant の分割へ反映する。
+    fn state_after_draw(&self, draw: TileType, drawn_tile: TileId) -> Option<HandState> {
+        let mut counts = self.after_discard;
+        counts.try_add(draw).ok()?;
 
-        let (next_discarded, concealed_tiles) =
-            split_discarded_tile(next_tiles.to_vec(), evaluation)?;
-        let discarded_tiles: Vec<_> = self
-            .first_discarded
-            .into_iter()
-            .chain([next_discarded])
-            .collect();
+        let mut tiles = self.next_tiles.clone();
+        tiles.push(drawn_tile);
 
-        valuator.tenpai_value(&ProspectiveTenpai {
-            concealed_tiles: &concealed_tiles,
-            acceptance: &evaluation.acceptance_after_discard,
-            discarded_tiles: &discarded_tiles,
+        let mut red_five_seen = self.red_five_seen;
+        red_five_seen[draw.index()] |= drawn_tile.is_red();
+
+        Some(HandState {
+            counts,
+            tiles,
+            seen: self.seen,
+            red_five_seen,
+            discarded: self.discarded.clone(),
         })
     }
+}
+
+// 受け入れ牌を既存の仮想ツモ列挙と同じ形へ揃える。残枚数もツモ後向聴数も受け入れそのもので、
+// 2手先評価のために求め直さない。
+fn drawable(tile: &EffectiveAcceptanceTile) -> DrawableTile {
+    DrawableTile {
+        tile: tile.tile,
+        remaining: tile.remaining,
+        shanten_after_draw: tile.shanten_after_draw,
+    }
+}
+
+// 仮想手牌1つ分の最良打牌を既存打牌評価・既存文脈反映・既存比較順で求める。仮想ツモ牌の物理牌が
+// 決まっているため、赤5も通常打牌評価と同じ経路で反映できる。テンパイへ進む候補には将来打点を
+// 付け、比較の打点軸へ渡す。
+fn next_discard(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+) -> (Option<DiscardEvaluation>, Option<u64>) {
+    let mut evaluations =
+        evaluate_discards_with_seen(&state.counts, inputs.fixed_meld_count, &state.seen);
+    decorate_evaluations(
+        &mut evaluations,
+        &state.counts,
+        &DecorationContext {
+            tiles: &state.tiles,
+            dora_indicators: inputs.dora_indicators,
+            round_wind: inputs.round_wind,
+            seat_wind: inputs.seat_wind,
+            shape_penalty: ShapePenaltyMode::WithContext {
+                round_wind: inputs.round_wind,
+                seat_wind: inputs.seat_wind,
+                fixed_meld_count: inputs.fixed_meld_count,
+            },
+            unresolved_red_tile: None,
+        },
+    );
+
+    let values: Vec<_> = evaluations
+        .iter()
+        .map(|evaluation| prospective_value(inputs, state, evaluation))
+        .collect();
+    let metrics: Vec<_> = values
+        .iter()
+        .map(|&value| ForwardMetrics::from_prospective_value(value))
+        .collect();
+
+    match best_discard_selection_index_with_forward_metrics(&evaluations, &metrics) {
+        Some(index) => (Some(evaluations.swap_remove(index)), values[index]),
+        None => (None, None),
+    }
+}
+
+// 打牌候補1件分の将来打点。テンパイへ進む候補だけが値を持つ。
+//
+// 将来テンパイ時点の自分の河は「現在の自分の河 + ここまでに切った牌 + この打牌」で、既存
+// フリテン基盤へそのまま渡す。フリテン判定はこの module が持たない。
+fn prospective_value(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    let valuator = inputs.valuator?;
+    if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
+        return None;
+    }
+
+    let (discarded, concealed_tiles) = split_discarded_tile(state.tiles.clone(), evaluation)?;
+    let discarded_tiles: Vec<_> = state.discarded.iter().copied().chain([discarded]).collect();
+
+    valuator.tenpai_value(&ProspectiveTenpai {
+        concealed_tiles: &concealed_tiles,
+        acceptance: &evaluation.acceptance_after_discard,
+        discarded_tiles: &discarded_tiles,
+    })
+}
+
+// same-shanten の枝の2手目打牌後から、テンパイまでもう1段進めた枝。
+//
+// 3手目へ進むツモ牌は2手目の打牌評価が持つ既存受け入れそのもので、テンパイへ進む牌の判定を
+// 作らない。2手目の打牌後が同じ向聴数のままでなければ探索しない。
+fn downstream_draws(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    next: &DiscardEvaluation,
+) -> Option<SameShantenDownstreamDiagnostic> {
+    let branch = CandidateBranch::new(state, next)?;
+    Some(SameShantenDownstreamDiagnostic {
+        draws: branch.progress_draws(inputs, next),
+    })
 }
 
 #[cfg(test)]
@@ -2356,5 +2584,418 @@ mod tests {
             case.situation.evaluations[selected].min_shanten_after_discard(),
             1
         );
+    }
+
+    // ---- same-shanten の枝の先にあるテンパイ ----
+
+    // 将来打点の代わりに、テンパイ形の受け入れ残枚数をそのまま返す検証用の評価器。
+    //
+    // 打点そのものは bot-logic の責務ではないので、深い枝の重み付けだけを見るために点数計算を
+    // 持たない評価器を使う。
+    struct AcceptanceRemainingValuator;
+
+    impl ProspectiveTenpaiValuator for AcceptanceRemainingValuator {
+        fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
+            Some(u64::from(tenpai.acceptance.total_remaining()))
+        }
+    }
+
+    // 指定した牌を待ちに含むテンパイだけ打点を確定できない検証用の評価器。
+    struct UnknownWaitValuator {
+        unknown_wait: TileType,
+    }
+
+    impl ProspectiveTenpaiValuator for UnknownWaitValuator {
+        fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
+            tenpai
+                .acceptance
+                .tiles
+                .iter()
+                .all(|wait| wait.tile != self.unknown_wait)
+                .then_some(1)
+        }
+    }
+
+    static ACCEPTANCE_REMAINING_VALUATOR: AcceptanceRemainingValuator = AcceptanceRemainingValuator;
+
+    fn evaluation_in(situation: &Situation, discard: TileType) -> &DiscardEvaluation {
+        situation
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == discard)
+            .expect("打牌候補がある")
+    }
+
+    // 打牌候補1件だけの、same-shanten の枝をテンパイまで追った2手先診断。全候補分の深い探索を
+    // 構築せずに1候補の枝を見るための test 専用 helper。
+    fn downstream_candidate(
+        situation: &Situation,
+        discard: TileType,
+        valuator: &dyn ProspectiveTenpaiValuator,
+    ) -> DiscardLookaheadDiagnostic {
+        diagnose_lookahead(
+            &inputs(situation)
+                .with_prospective_valuator(valuator)
+                .with_same_shanten_downstream(),
+            std::slice::from_ref(evaluation_in(situation, discard)),
+        )
+        .candidates
+        .pop()
+        .expect("打牌候補の診断がある")
+    }
+
+    // same-shanten の枝をテンパイまで追った全候補分の診断。将来打点は持たないので、3手目の
+    // 最良打牌は既存打牌選択と同じ比較で決まる。
+    static SAME_SHANTEN_DOWNSTREAM_CASE: LazyLock<Case> = LazyLock::new(|| {
+        let hand = same_shanten_hand();
+        let visible = hand.clone();
+        let situation =
+            visible_situation(&hand, FixedMeldCount::NONE, Vec::new(), None, None, visible);
+        let lookahead = diagnose_lookahead(
+            &inputs(&situation).with_same_shanten_downstream(),
+            &situation.evaluations,
+        );
+        Case {
+            situation,
+            lookahead,
+        }
+    });
+
+    // 打 9s の枝を将来打点付きでテンパイまで追った診断。重み付けの積算だけを見るので、候補は
+    // 1件に絞る。
+    static SAME_SHANTEN_DOWNSTREAM_VALUE: LazyLock<DiscardLookaheadDiagnostic> =
+        LazyLock::new(|| {
+            downstream_candidate(
+                &SAME_SHANTEN_DOWNSTREAM_CASE.situation,
+                tile("9s"),
+                &ACCEPTANCE_REMAINING_VALUATOR,
+            )
+        });
+
+    #[test]
+    fn a_same_shanten_branch_reaches_a_tenpai_downstream() {
+        // 1向聴 → same-shanten ツモ → 2手目 (まだ1向聴) → 受け入れのツモ → 3手目 → テンパイ。
+        let case = &*SAME_SHANTEN_DOWNSTREAM_CASE;
+        let candidate = case
+            .lookahead
+            .candidate(tile("9s"))
+            .expect("打牌候補の診断がある");
+
+        let draw = candidate.draw(tile("4m")).expect("4m の枝がある");
+        assert_eq!(draw.transition, DrawTransition::SameShanten);
+        let [variant] = draw.variants.as_slice() else {
+            panic!("赤5の無い牌種は物理牌 variant が1件");
+        };
+        let next = variant.next_discard.as_ref().expect("2手目がある");
+        assert_eq!(next.discard, tile("5s"));
+        assert_eq!(next.min_shanten_after_discard(), 1);
+
+        let downstream = variant.downstream.as_ref().expect("先の枝がある");
+        // 3手目へ進むツモ牌は2手目の打牌評価が持つ既存受け入れそのもので、判定を作り直さない。
+        assert_eq!(
+            downstream
+                .draws
+                .iter()
+                .map(|draw| (draw.draw, draw.remaining, draw.shanten_after_draw))
+                .collect::<Vec<_>>(),
+            next.acceptance_after_discard
+                .tiles
+                .iter()
+                .map(|accepted| (
+                    accepted.tile,
+                    accepted.remaining,
+                    accepted.shanten_after_draw
+                ))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut tenpai_waits = 0;
+        for draw in &downstream.draws {
+            assert_eq!(draw.transition, DrawTransition::Progress);
+            for variant in &draw.variants {
+                let third = variant.next_discard.as_ref().expect("3手目がある");
+                assert_eq!(third.min_shanten_after_discard(), TENPAI_SHANTEN);
+                tenpai_waits += third.acceptance_after_discard.tiles.len();
+            }
+        }
+        assert!(
+            tenpai_waits > 0,
+            "最終待ちを持つテンパイへ到達する必要がある"
+        );
+    }
+
+    #[test]
+    fn the_downstream_discard_matches_the_existing_discard_selection() {
+        // 3手目の最良打牌は、同じ仮想手牌を既存打牌選択 API へ渡した結果と一致する。
+        let case = &*SAME_SHANTEN_DOWNSTREAM_CASE;
+
+        let mut checked = 0;
+        for (discard, draw, variant) in variants(&case.lookahead) {
+            let Some(downstream) = variant.downstream.as_ref() else {
+                continue;
+            };
+            assert_eq!(draw.transition, DrawTransition::SameShanten);
+            let next = variant.next_discard.as_ref().expect("2手目がある");
+
+            // 3手目を評価する仮想手牌と見え牌。1手目の打牌は元の手牌として visible に残り、
+            // 仮想ツモ牌だけが新しく見え牌になる。
+            let mut tiles = hypothetical_tiles(&case.situation, discard, variant.drawn_tile);
+            let (_, remaining) =
+                split_discarded_tile(tiles.clone(), next).expect("2手目の物理牌がある");
+            tiles = remaining;
+            let mut visible = hypothetical_visible(&case.situation, variant.drawn_tile);
+
+            for downstream_draw in &downstream.draws {
+                for downstream_variant in &downstream_draw.variants {
+                    let mut third_tiles = tiles.clone();
+                    third_tiles.push(downstream_variant.drawn_tile);
+                    visible.push(downstream_variant.drawn_tile);
+
+                    assert_eq!(
+                        downstream_variant.next_discard,
+                        select_best_discard_from_tiles_with_visible_tiles(
+                            &third_tiles,
+                            &case.situation.dora_indicators,
+                            case.situation.round_wind,
+                            case.situation.seat_wind,
+                            &visible,
+                        ),
+                        "discard {:?} draw {:?} next {:?} downstream draw {:?}",
+                        discard,
+                        variant.drawn_tile,
+                        next.discard,
+                        downstream_variant.drawn_tile,
+                    );
+
+                    visible.pop();
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "先の枝を持つ same-shanten の枝がある局面が必要"
+        );
+    }
+
+    #[test]
+    fn the_downstream_remaining_counts_every_tile_seen_so_far() {
+        // 1手目の打牌・2手目の打牌・仮想ツモ牌はどれも見え牌になり、先の枝の残枚数へ反映される。
+        let case = &*SAME_SHANTEN_DOWNSTREAM_CASE;
+
+        let mut checked = 0;
+        for (discard, _, variant) in variants(&case.lookahead) {
+            let Some(downstream) = variant.downstream.as_ref() else {
+                continue;
+            };
+            // 1手目の打牌も2手目の打牌も元の手牌の物理牌なので visible に含まれる。仮想ツモ牌
+            // だけが新しく見えた牌になる。
+            let seen =
+                TileCounts::from_tiles(hypothetical_visible(&case.situation, variant.drawn_tile));
+            for downstream_draw in &downstream.draws {
+                assert_eq!(
+                    downstream_draw.remaining,
+                    4 - seen.count(downstream_draw.draw),
+                    "discard {:?} draw {:?} downstream draw {:?}",
+                    discard,
+                    variant.drawn_tile,
+                    downstream_draw.draw,
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn the_downstream_value_multiplies_every_physical_variant_remaining() {
+        // same-shanten ツモ・3手目へ進むツモ・最終テンパイの打点がすべて積算される。
+        let candidate = &*SAME_SHANTEN_DOWNSTREAM_VALUE;
+
+        let mut expected = 0u64;
+        let mut split_draws = 0;
+        for draw in candidate.draws_with(DrawTransition::SameShanten) {
+            assert_eq!(
+                draw.variants
+                    .iter()
+                    .map(|variant| u32::from(variant.remaining))
+                    .sum::<u32>(),
+                u32::from(draw.remaining),
+            );
+            split_draws += usize::from(draw.variants.len() == 2);
+
+            for variant in &draw.variants {
+                let downstream = variant.downstream.as_ref().expect("先の枝がある");
+                let mut inner = 0u64;
+                for downstream_draw in &downstream.draws {
+                    for downstream_variant in &downstream_draw.variants {
+                        inner += u64::from(downstream_variant.remaining)
+                            * downstream_variant
+                                .prospective_value
+                                .expect("最終テンパイの打点がある");
+                    }
+                }
+                assert_eq!(downstream.weighted_value(), Some(inner));
+                expected += u64::from(variant.remaining) * inner;
+            }
+        }
+
+        assert!(expected > 0);
+        assert!(split_draws > 0, "赤5 / 黒5へ分かれる枝がある局面が必要");
+        assert_eq!(candidate.same_shanten_downstream_value(), Some(expected));
+    }
+
+    #[test]
+    fn a_red_five_downstream_branch_keeps_its_own_remaining() {
+        // 赤5と黒5は牌種単位へ潰さず、物理牌 variant ごとに先の枝まで別々に評価する。
+        let candidate = &*SAME_SHANTEN_DOWNSTREAM_VALUE;
+
+        // 手牌に黒5pを1枚持つので 5p は残り3枚。赤1枚 / 黒2枚へ分かれる。
+        let draw = candidate.draw(tile("5p")).expect("5p の枝がある");
+        assert_eq!(draw.transition, DrawTransition::SameShanten);
+        assert_eq!(draw.remaining, 3);
+
+        let [red, black] = draw.variants.as_slice() else {
+            panic!("赤5が未見の牌種は物理牌 variant が2件");
+        };
+        assert!(red.drawn_tile.is_red());
+        assert!(!black.drawn_tile.is_red());
+        assert_eq!((red.remaining, black.remaining), (1, 2));
+        assert!(red.downstream_value().is_some());
+        assert!(black.downstream_value().is_some());
+    }
+
+    #[test]
+    fn the_downstream_scalar_path_matches_the_detailed_diagnostic() {
+        // scalar 経路と詳細診断は同じ枝評価・同じ accumulator を共有する。
+        let situation = &SAME_SHANTEN_DOWNSTREAM_CASE.situation;
+        let discard = tile("9s");
+        let inputs = inputs(situation).with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR);
+
+        assert_eq!(
+            same_shanten_downstream_value_for_candidate(&inputs, evaluation_in(situation, discard)),
+            SAME_SHANTEN_DOWNSTREAM_VALUE.same_shanten_downstream_value(),
+        );
+    }
+
+    #[test]
+    fn an_unknown_downstream_tenpai_keeps_the_value_unknown() {
+        // 打点を確定できない枝が1つでもあれば、0点へ潰さず全体を unknown にする。
+        let situation = &SAME_SHANTEN_DOWNSTREAM_CASE.situation;
+        let discard = tile("9s");
+        let known = &*SAME_SHANTEN_DOWNSTREAM_VALUE;
+        assert!(known.same_shanten_downstream_value().is_some());
+
+        // 到達したテンパイの待ちに必ず現れる牌を1つ選ぶと、その枝だけが確定しなくなる。
+        let unknown_wait = known
+            .draws_with(DrawTransition::SameShanten)
+            .flat_map(|draw| draw.variants.iter())
+            .filter_map(|variant| variant.downstream.as_ref())
+            .flat_map(|downstream| downstream.draws.iter())
+            .flat_map(|draw| draw.variants.iter())
+            .filter_map(|variant| variant.next_discard.as_ref())
+            .flat_map(|next| next.acceptance_after_discard.tiles.iter())
+            .map(|wait| wait.tile)
+            .next()
+            .expect("最終待ちがある");
+
+        let valuator = UnknownWaitValuator { unknown_wait };
+        let candidate = downstream_candidate(situation, discard, &valuator);
+        assert_eq!(candidate.same_shanten_downstream_value(), None);
+        assert_eq!(
+            same_shanten_downstream_value_for_candidate(
+                &inputs(situation).with_prospective_valuator(&valuator),
+                evaluation_in(situation, discard),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn only_iishanten_candidates_are_followed_to_a_tenpai() {
+        // 今回の対象は現在打牌後が1向聴の候補だけで、2向聴以上は探索しない。
+        let case = &*SAME_SHANTEN_DOWNSTREAM_CASE;
+
+        let mut iishanten = 0;
+        for (candidate, evaluation) in case
+            .lookahead
+            .candidates
+            .iter()
+            .zip(case.situation.evaluations.iter())
+        {
+            let followed = candidate
+                .draws_with(DrawTransition::SameShanten)
+                .flat_map(|draw| draw.variants.iter())
+                .any(|variant| variant.downstream.is_some());
+            assert_eq!(
+                followed,
+                evaluation.min_shanten_after_discard() == 1,
+                "{:?}",
+                candidate.discard
+            );
+            // 向聴数を下げる枝は今回の対象ではない。
+            assert!(
+                candidate
+                    .draws_with(DrawTransition::Progress)
+                    .flat_map(|draw| draw.variants.iter())
+                    .all(|variant| variant.downstream.is_none())
+            );
+            iishanten += usize::from(followed);
+        }
+        assert!(iishanten > 0);
+
+        let two_shanten = evaluation_in(&case.situation, tile("1m"));
+        assert_eq!(two_shanten.min_shanten_after_discard(), 2);
+        assert_eq!(
+            same_shanten_downstream_value_for_candidate(
+                &inputs(&case.situation).with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR),
+                two_shanten,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn following_the_same_shanten_branch_keeps_the_selection_unchanged() {
+        // 深い枝を追っても打牌選択に使う集計値も選択結果も変わらない。
+        let plain = &*SAME_SHANTEN_CASE;
+        let followed = &*SAME_SHANTEN_DOWNSTREAM_CASE;
+        assert_eq!(plain.situation.evaluations, followed.situation.evaluations);
+
+        let metrics =
+            forward_metrics_from_lookahead(&plain.situation.evaluations, &plain.lookahead);
+        assert_eq!(
+            forward_metrics_from_lookahead(&followed.situation.evaluations, &followed.lookahead),
+            metrics,
+        );
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(
+                &followed.situation.evaluations,
+                &metrics,
+            ),
+            best_discard_selection_index_with_forward_metrics(
+                &plain.situation.evaluations,
+                &metrics,
+            ),
+        );
+
+        for (candidate, plain_candidate) in followed
+            .lookahead
+            .candidates
+            .iter()
+            .zip(plain.lookahead.candidates.iter())
+        {
+            // 既存 same-shanten 集計値も、深い枝を追ったかどうかで変わらない。
+            assert_eq!(
+                candidate.same_shanten_forward_metric(),
+                plain_candidate.same_shanten_forward_metric(),
+                "{:?}",
+                candidate.discard
+            );
+            assert_eq!(
+                candidate.weighted_forward_metric(TENPAI_SHANTEN),
+                plain_candidate.weighted_forward_metric(TENPAI_SHANTEN),
+            );
+        }
     }
 }

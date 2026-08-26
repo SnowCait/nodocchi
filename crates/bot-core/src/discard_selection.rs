@@ -41,6 +41,34 @@ pub(crate) struct DiscardActionSelection {
     pub iishanten_forward_metrics: Option<ForwardMetrics>,
 }
 
+/// 2手先診断をどこまで構築するか。
+///
+/// どの段階でも打牌選択の結果は変わらない。深い段ほど探索が重くなるため、必要な経路が明示的に
+/// 指定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LookaheadDiagnosticScope {
+    /// 2手先診断を構築しない。
+    #[default]
+    None,
+    /// 全合法候補の2手先診断を構築する。
+    Lookahead,
+    /// 2手先診断に加えて、1向聴候補の same-shanten の枝をテンパイまでもう1段追う。
+    ///
+    /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
+    /// [`Self::Lookahead`] よりさらに重い。打牌選択にも押し引きにも使わない観測値。
+    SameShantenDownstream,
+}
+
+impl LookaheadDiagnosticScope {
+    fn builds_lookahead(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn builds_same_shanten_downstream(self) -> bool {
+        matches!(self, Self::SameShantenDownstream)
+    }
+}
+
 /// 通常打牌選択の結果と、その選択に使った全合法候補の構造化診断。
 ///
 /// `selection` は `select_discard_action_with_evaluation()` と同じ helper で導出するため、
@@ -125,19 +153,21 @@ pub(crate) fn select_discard_action_with_evaluation(
 /// 追加情報で、候補ごとの形の内訳や2手先評価など通常経路では計算しない値を含むため、診断が必要な
 /// 経路からのみ呼ぶ。
 ///
-/// `with_lookahead` は2手先診断を構築するかどうか。2手先は
+/// `scope` は2手先診断をどこまで構築するかどうか。2手先は
 /// 「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり通常診断よりさらに重いため、明示的に
 /// 要求された場合だけ構築する。構築の有無は選択結果を変えない。
 pub(crate) fn select_discard_action_with_diagnostic(
     context: &GameContext,
     legal_actions: &[LegalAction],
-    with_lookahead: bool,
+    scope: LookaheadDiagnosticScope,
 ) -> DiscardActionSelectionWithDiagnostic {
     let legal = legal_discard_evaluations(context, legal_actions);
 
     // 2手先診断を構築する場合は、その枝評価から選択用の前方集計値も求める。同じ
     // 「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しない。
-    let lookahead = with_lookahead.then(|| lookahead_from_legal_evaluations(context, &legal));
+    let lookahead = scope
+        .builds_lookahead()
+        .then(|| lookahead_from_legal_evaluations(context, &legal, scope));
     let tenpai_wait = match lookahead.as_ref() {
         Some(lookahead) => forward_metrics_from_lookahead(&legal.evaluations, lookahead),
         None => selection_forward_metrics(context, &legal.tiles, &legal.evaluations),
@@ -405,12 +435,16 @@ pub(crate) fn concealed_tiles_after_discard(
 fn lookahead_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
+    scope: LookaheadDiagnosticScope,
 ) -> LookaheadDiagnostic {
     let valuator = ProductionProspectiveValuator::new(context);
-    diagnose_lookahead(
-        &lookahead_inputs(context, &legal.tiles, &valuator),
-        &legal.evaluations,
-    )
+    let inputs = lookahead_inputs(context, &legal.tiles, &valuator);
+    let inputs = if scope.builds_same_shanten_downstream() {
+        inputs.with_same_shanten_downstream()
+    } else {
+        inputs
+    };
+    diagnose_lookahead(&inputs, &legal.evaluations)
 }
 
 // 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
@@ -1601,7 +1635,11 @@ pub(crate) mod tests {
         let context = iishanten_wait_context();
         let actions = iishanten_wait_actions();
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
         let candidates = &with_diagnostic.diagnostic.candidates;
         let selected = candidates
             .iter()
@@ -1628,8 +1666,16 @@ pub(crate) mod tests {
         let context = iishanten_wait_context();
         let actions = iishanten_wait_actions();
 
-        let without = select_discard_action_with_diagnostic(&context, &actions, false);
-        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+        let without = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let with = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
 
         assert_eq!(without.selection, with.selection);
         assert_eq!(without.diagnostic, with.diagnostic);
@@ -1646,8 +1692,16 @@ pub(crate) mod tests {
         let actions = iishanten_wait_actions();
 
         let production = select_discard_action_with_evaluation(&context, &actions);
-        let with_value = select_discard_action_with_diagnostic(&context, &actions, true);
-        let without_value = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_value = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
+        let without_value = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
 
         assert_eq!(with_value.selection, production);
         for (with, without) in with_value
@@ -1681,7 +1735,11 @@ pub(crate) mod tests {
         let context = iishanten_wait_context();
         let actions = iishanten_wait_actions();
 
-        let selection = select_discard_action_with_diagnostic(&context, &actions, true);
+        let selection = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
         let lookahead = selection.lookahead.expect("2手先診断が構築されている");
         let value = selection.lookahead_value.expect("将来打点が構築されている");
 
@@ -1733,7 +1791,11 @@ pub(crate) mod tests {
             );
             let actions: Vec<LegalAction> = values.iter().map(|&value| dahai(value)).collect();
 
-            let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+            let with_diagnostic = select_discard_action_with_diagnostic(
+                &context,
+                &actions,
+                LookaheadDiagnosticScope::None,
+            );
             let best = with_diagnostic
                 .diagnostic
                 .candidates
@@ -1811,8 +1873,16 @@ pub(crate) mod tests {
         let context = ryanshanten_forward_context();
         let actions = ryanshanten_forward_actions();
         let normal = select_discard_action_with_evaluation(&context, &actions);
-        let without = select_discard_action_with_diagnostic(&context, &actions, false);
-        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+        let without = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let with = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
 
         assert_eq!(normal, without.selection);
         assert_eq!(without.selection, with.selection);
@@ -1848,8 +1918,16 @@ pub(crate) mod tests {
         let legal = legal_discard_evaluations(&context, &actions);
         let one_step = select_best_one_step_evaluation(&legal.evaluations).unwrap();
         let normal = select_discard_action_with_evaluation(&context, &actions);
-        let without = select_discard_action_with_diagnostic(&context, &actions, false);
-        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+        let without = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let with = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
 
         assert_eq!(legal.evaluations.len(), 9);
         assert_eq!(one_step.discard, tile(92).tile_type());
@@ -1898,7 +1976,11 @@ pub(crate) mod tests {
             .chain([dahai(116)])
             .collect();
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
         assert_eq!(
             with_diagnostic.selection,
             select_discard_action_with_evaluation(&context, &actions)
@@ -1968,7 +2050,11 @@ pub(crate) mod tests {
     fn lookahead_next_discard_for_five(legal_five: u8) -> bot_logic::DiscardEvaluation {
         let context = red_five_lookahead_context();
         let actions = red_five_lookahead_actions(legal_five);
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, true);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
 
         with_diagnostic
             .lookahead
@@ -2013,7 +2099,11 @@ pub(crate) mod tests {
         // 両方合法なら既存の黒牌優先方針どおり通常5mを切り、赤5mが残る。
         let context = red_five_lookahead_context();
         let actions = vec![dahai(16), dahai(17)];
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, true);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
 
         let next = with_diagnostic
             .lookahead
@@ -2048,8 +2138,16 @@ pub(crate) mod tests {
             .chain([dahai(90)])
             .collect();
 
-        let without = select_discard_action_with_diagnostic(&context, &actions, false);
-        let with = select_discard_action_with_diagnostic(&context, &actions, true);
+        let without = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let with = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
 
         assert!(without.lookahead.is_none());
         assert_eq!(without.selection, with.selection);
@@ -2077,7 +2175,11 @@ pub(crate) mod tests {
         );
         let actions = vec![dahai(0), dahai(89), dahai(116)];
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
         let candidate_types: Vec<_> = with_diagnostic
             .diagnostic
             .candidates
@@ -2111,7 +2213,11 @@ pub(crate) mod tests {
             GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
         let actions = vec![dahai(16)];
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
         let five = with_diagnostic
             .diagnostic
             .candidates
@@ -2224,7 +2330,11 @@ pub(crate) mod tests {
         let context = one_meld_context([vec![white_dragon_pon()], vec![], vec![], vec![]], Some(0));
         let actions = one_meld_actions();
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
         assert_eq!(
             with_diagnostic.selection,
             select_discard_action_with_evaluation(&context, &actions)
@@ -2292,7 +2402,11 @@ pub(crate) mod tests {
         let context = GameContext::with_hand_tiles(vec![tile(0)]);
         let actions = vec![LegalAction::Reach, LegalAction::None];
 
-        let with_diagnostic = select_discard_action_with_diagnostic(&context, &actions, false);
+        let with_diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
         assert_eq!(with_diagnostic.selection.action, None);
         assert_eq!(with_diagnostic.selection.evaluation, None);
         assert_eq!(with_diagnostic.diagnostic.selected, None);
@@ -2668,7 +2782,11 @@ pub(crate) mod tests {
     fn a_red_and_a_black_first_draw_can_choose_different_second_discards() {
         // 仮想ツモの赤5 / 黒5は打点だけでなく2手目の最良打牌そのものを変え得る。
         let (context, actions) = value_context(&RED_FIVE_BRANCH_HAND, "7m");
-        let selection = select_discard_action_with_diagnostic(&context, &actions, true);
+        let selection = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::Lookahead,
+        );
         let draw = selection
             .lookahead
             .expect("2手先診断が構築されている")

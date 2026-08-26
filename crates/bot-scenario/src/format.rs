@@ -587,6 +587,22 @@ fn format_lookahead_candidate(
         return lines;
     }
 
+    // same-shanten の枝をテンパイまで追った場合だけ、その候補分の重み付き打点を1行で出す。
+    // 追っていない診断では枝が値を持たないため、表示のために探索し直さず省く。
+    if candidate
+        .draws_with(DrawTransition::SameShanten)
+        .any(|draw| {
+            draw.variants
+                .iter()
+                .any(|variant| variant.downstream.is_some())
+        })
+    {
+        lines.push(format!(
+            "    same-shanten downstream value: {}",
+            format_optional_value(candidate.same_shanten_downstream_value())
+        ));
+    }
+
     if candidate.draws.is_empty() {
         lines.push(format!("    {NONE}"));
     }
@@ -594,9 +610,17 @@ fn format_lookahead_candidate(
         lines.extend(format_lookahead_draw(
             draw,
             value.and_then(|value| value.draw(draw.draw)),
+            DRAW_INDENT,
         ));
     }
     lines
+}
+
+// 仮想ツモ枝の見出しの字下げ。深い段はここから4つずつ下げて、どの段の枝かを字下げで示す。
+const DRAW_INDENT: usize = 4;
+
+fn format_optional_value(value: Option<u64>) -> String {
+    value.map_or_else(|| UNKNOWN.to_string(), |value| value.to_string())
 }
 
 // 分類ごとの仮想ツモ牌の種類数と残枚数。
@@ -612,9 +636,11 @@ fn format_draw_summary(
 fn format_lookahead_draw(
     draw: &DrawLookaheadDiagnostic,
     value: Option<&ProspectiveDrawValue>,
+    indent: usize,
 ) -> Vec<String> {
     let mut lines = vec![format!(
-        "    draw {}: {} remaining, shanten after draw {}, transition {:?}",
+        "{:indent$}draw {}: {} remaining, shanten after draw {}, transition {:?}",
+        "",
         draw.draw.to_mjai_string(),
         draw.remaining,
         draw.shanten_after_draw.min(),
@@ -625,6 +651,7 @@ fn format_lookahead_draw(
         lines.extend(format_lookahead_draw_variant(
             variant,
             value.and_then(|value| value.variant(variant.drawn_tile)),
+            indent,
         ));
     }
     lines
@@ -635,44 +662,78 @@ fn format_lookahead_draw(
 fn format_lookahead_draw_variant(
     variant: &DrawVariantLookaheadDiagnostic,
     value: Option<&ProspectiveDrawVariantValue>,
+    indent: usize,
 ) -> Vec<String> {
+    let variant_indent = indent + 2;
+    let detail = indent + 4;
     let mut lines = vec![format!(
-        "      drawn {}: {} remaining",
+        "{:variant_indent$}drawn {}: {} remaining",
+        "",
         variant.drawn_tile.to_mjai_string(),
         variant.remaining
     )];
 
     let Some(next) = variant.next_discard.as_ref() else {
-        lines.push(format!("        next discard: {ABSENT}"));
-        lines.extend(format_prospective_value(variant, value));
+        lines.push(format!("{:detail$}next discard: {ABSENT}", ""));
+        lines.extend(format_prospective_value(variant, value, detail));
         return lines;
     };
 
     lines.push(format!(
-        "        next discard: {}",
+        "{:detail$}next discard: {}",
+        "",
         next.discard.to_mjai_string()
     ));
     lines.push(format!(
-        "        next shanten: {}",
+        "{:detail$}next shanten: {}",
+        "",
         next.min_shanten_after_discard()
     ));
     lines.push(format!(
-        "        next acceptance: {} / {} types",
+        "{:detail$}next acceptance: {} / {} types",
+        "",
         next.acceptance_total_remaining(),
         next.acceptance_type_count()
     ));
     lines.push(format!(
-        "        next iishanten shape: {:?}",
-        next.standard_iishanten_shape_after_discard
+        "{:detail$}next iishanten shape: {:?}",
+        "", next.standard_iishanten_shape_after_discard
     ));
     // 2手目の打牌後がテンパイなら、その受け入れがそのまま最終待ちになる。
     if next.min_shanten_after_discard() == TENPAI_SHANTEN {
         lines.push(format!(
-            "        final wait: {}",
+            "{:detail$}final wait: {}",
+            "",
             format_wait_tiles(&next.acceptance_after_discard.tiles)
         ));
     }
-    lines.extend(format_prospective_value(variant, value));
+    lines.extend(format_prospective_value(variant, value, detail));
+    lines.extend(format_lookahead_downstream(variant, detail));
+    lines
+}
+
+// same-shanten の枝の先にある将来テンパイ。次段の枝は同じ formatter を字下げだけ変えて通す。
+//
+// この段の将来打点は2手先評価が持つ値そのもので、表示のために探索も点数計算もやり直さない。
+fn format_lookahead_downstream(
+    variant: &DrawVariantLookaheadDiagnostic,
+    indent: usize,
+) -> Vec<String> {
+    let Some(downstream) = variant.downstream.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut lines = vec![format!(
+        "{:indent$}downstream value: {}",
+        "",
+        format_optional_value(downstream.weighted_value())
+    )];
+    if downstream.draws.is_empty() {
+        lines.push(format!("{:indent$}{NONE}", ""));
+    }
+    for draw in &downstream.draws {
+        lines.extend(format_lookahead_draw(draw, None, indent));
+    }
     lines
 }
 
@@ -694,12 +755,12 @@ fn format_wait_tiles(tiles: &[EffectiveAcceptanceTile]) -> String {
 fn format_prospective_value(
     variant: &DrawVariantLookaheadDiagnostic,
     value: Option<&ProspectiveDrawVariantValue>,
+    indent: usize,
 ) -> Vec<String> {
     let mut lines = vec![format!(
-        "        selection value: {}",
-        variant
-            .prospective_value
-            .map_or_else(|| UNKNOWN.to_string(), |value| value.to_string())
+        "{:indent$}selection value: {}",
+        "",
+        format_optional_value(variant.prospective_value)
     )];
 
     let Some(value) = value else {
@@ -708,21 +769,24 @@ fn format_prospective_value(
 
     match &value.outcome {
         ProspectiveOutcome::NoNextDiscard => {
-            lines.push(format!("        prospective value: {NONE}"));
+            lines.push(format!("{:indent$}prospective value: {NONE}", ""));
         }
         ProspectiveOutcome::NotTenpai => {
             lines.push(format!(
-                "        prospective value: {NOT_EVALUATED} (not tenpai)"
+                "{:indent$}prospective value: {NOT_EVALUATED} (not tenpai)",
+                ""
             ));
         }
         ProspectiveOutcome::Unavailable(reason) => lines.push(format!(
-            "        prospective value: {UNKNOWN} ({})",
+            "{:indent$}prospective value: {UNKNOWN} ({})",
+            "",
             prospective_unavailable_label(*reason)
         )),
         ProspectiveOutcome::Evaluated(tenpai) => {
             // 採用した baseline と、ダマ打点を確定値に使えるかどうかのロン可否を並べる。
             lines.push(format!(
-                "        prospective value ({:?}, can ron: {})",
+                "{:indent$}prospective value ({:?}, can ron: {})",
+                "",
                 tenpai.mode,
                 format_optional_yes_no(tenpai.can_ron)
             ));
@@ -1912,6 +1976,17 @@ mod tests {
             DiagnosticOptions::WITH_LOOKAHEAD,
         );
         format_diagnostic(&scenario, &diagnostic, verbose)
+    }
+
+    // same-shanten の枝をテンパイまで追った詳細診断。深い探索なので必要なテストだけで使う。
+    fn rendered_with_same_shanten_downstream(json: &str) -> String {
+        let scenario = scenario_from_json(json);
+        let diagnostic = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
+        );
+        format_diagnostic(&scenario, &diagnostic, true)
     }
 
     fn section(output: &str, header: &str) -> String {
@@ -5237,5 +5312,38 @@ mod tests {
                 .contains("  mode: Push\n  reason: NoThreat\n  opponent reach count: 0"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn verbose_lookahead_follows_the_same_shanten_branch_to_a_tenpai() {
+        // same-shanten の枝は2手目のあとも同じ formatter を字下げだけ変えて続き、3手目の打牌後の
+        // 最終待ちまで追える。候補ごとの scalar もこの探索の結果をそのまま出す。
+        let output = rendered_with_same_shanten_downstream(PROSPECTIVE_VALUE_SCENARIO);
+        let lookahead = section(&output, "Lookahead");
+
+        assert!(
+            lookahead.contains("    same-shanten downstream value: "),
+            "{lookahead}"
+        );
+        for line in [
+            "        downstream value:",
+            "        draw ",
+            "          drawn ",
+            "            next discard:",
+            "            final wait:",
+            "            selection value:",
+        ] {
+            assert!(
+                lookahead.lines().any(|rendered| rendered.starts_with(line)),
+                "{line} が無い:\n{lookahead}"
+            );
+        }
+    }
+
+    #[test]
+    fn verbose_lookahead_keeps_the_existing_output_without_the_downstream_option() {
+        // 深い探索を要求しない診断では先の枝を出さず、既存の表示のまま変わらない。
+        let output = rendered_with_lookahead(PROSPECTIVE_VALUE_SCENARIO, true);
+        assert!(!output.contains("downstream"), "{output}");
     }
 }
