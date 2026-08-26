@@ -705,14 +705,17 @@ mod tests {
     use std::sync::LazyLock;
 
     use bot_logic::{
-        ForwardMetrics, MissingScoringFact, NormalScoringError, RiichiStatus, WinMethod,
-        evaluate_payment, forward_metrics_from_lookahead,
+        DrawTransition, EffectiveAcceptance, ForwardMetrics, MissingScoringFact,
+        NormalScoringError, RiichiStatus, WinMethod, evaluate_payment,
+        forward_metrics_from_lookahead,
     };
 
     use crate::action::LegalAction;
     use crate::context::TableStateFacts;
     use crate::damaten_value::DAMATEN_MIN_TOTAL;
-    use crate::discard_selection::select_discard_action_with_diagnostic;
+    use crate::discard_selection::{
+        LookaheadDiagnosticScope, select_discard_action_with_diagnostic,
+    };
 
     struct TileIdSource {
         used: [bool; TileId::COUNT],
@@ -749,6 +752,8 @@ mod tests {
         ctx: GameContext,
         lookahead: LookaheadDiagnostic,
         value: ProspectiveLookaheadDiagnostic,
+        /// 通常打牌選択が選んだ action。診断の範囲で選択結果が変わらないことの確認に使う。
+        selected: Option<LegalAction>,
     }
 
     impl Case {
@@ -810,6 +815,8 @@ mod tests {
         own_river: &'a [&'a str],
         history_furiten: HistoryFuritenFacts,
         table_state: TableStateFacts,
+        /// same-shanten の枝をテンパイまで追うか。
+        downstream: bool,
     }
 
     // 履歴依存フリテンまで観測済みの既定値。production の局開始時と同じ facts。
@@ -830,6 +837,7 @@ mod tests {
                 own_river: &[],
                 history_furiten: known_history_furiten(),
                 table_state: TableStateFacts::default(),
+                downstream: false,
             }
         }
 
@@ -871,11 +879,17 @@ mod tests {
             .with_table_state_facts(self.table_state)
             .with_history_furiten_facts(self.history_furiten);
 
-            let selection = select_discard_action_with_diagnostic(&ctx, &actions, true);
+            let scope = if self.downstream {
+                LookaheadDiagnosticScope::SameShantenDownstream
+            } else {
+                LookaheadDiagnosticScope::Lookahead
+            };
+            let selection = select_discard_action_with_diagnostic(&ctx, &actions, scope);
             Case {
                 ctx,
                 lookahead: selection.lookahead.expect("2手先診断が構築されている"),
                 value: selection.lookahead_value.expect("将来打点が構築されている"),
+                selected: selection.selection.action,
             }
         }
     }
@@ -1515,14 +1529,207 @@ mod tests {
             .into_iter()
             .map(|tile| LegalAction::Dahai { tile })
             .collect();
-        let evaluations = select_discard_action_with_diagnostic(context, &actions, false)
-            .diagnostic
-            .candidates
-            .into_iter()
-            .map(|candidate| candidate.evaluation)
-            .collect::<Vec<_>>();
+        let evaluations = select_discard_action_with_diagnostic(
+            context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        )
+        .diagnostic
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.evaluation)
+        .collect::<Vec<_>>();
 
         assert_eq!(evaluations.len(), lookahead.candidates.len());
         evaluations
+    }
+
+    // ---- same-shanten の枝の先にあるテンパイ ----
+
+    // 深い枝1件分の最終テンパイ。1手目・2手目・3手目に切った物理牌とテンパイ時点の concealed
+    // 手牌は既存 helper ([`split_discarded_tile`]) だけで組み立て、待ちは3手目の打牌評価が持つ
+    // 受け入れそのもの。
+    struct DownstreamBranch {
+        concealed: Vec<TileId>,
+        discarded: Vec<TileId>,
+        acceptance: EffectiveAcceptance,
+        // 2手先評価が枝に持たせた将来打点。
+        value: Option<u64>,
+    }
+
+    impl DownstreamBranch {
+        fn tenpai(&self) -> ProspectiveTenpai<'_> {
+            ProspectiveTenpai {
+                concealed_tiles: &self.concealed,
+                acceptance: &self.acceptance,
+                discarded_tiles: &self.discarded,
+            }
+        }
+
+        // 将来テンパイ時点で自分の河にある牌種。現在の河にこの3枚を足したものが判定材料になる。
+        fn discarded_types(&self) -> Vec<TileType> {
+            self.discarded.iter().map(|tile| tile.tile_type()).collect()
+        }
+
+        fn waits(&self) -> Vec<TileType> {
+            self.acceptance.tiles.iter().map(|wait| wait.tile).collect()
+        }
+    }
+
+    // 構築済みの2手先評価から、same-shanten の枝の先にある最終テンパイをすべて取り出す。
+    // 探索も打牌比較もやり直さず、枝が持つ打牌評価から仮想手牌を組み立てるだけ。
+    fn downstream_branches(case: &Case) -> Vec<DownstreamBranch> {
+        let tiles = hand_tiles(&case.ctx);
+        let evaluations = evaluations(&case.lookahead, &case.ctx);
+        let mut branches = Vec::new();
+
+        for (candidate, evaluation) in case.lookahead.candidates.iter().zip(evaluations.iter()) {
+            let Some((first, after_first)) = split_discarded_tile(tiles.clone(), evaluation) else {
+                continue;
+            };
+            for draw in candidate.draws_with(DrawTransition::SameShanten) {
+                for variant in &draw.variants {
+                    let (Some(downstream), Some(next)) =
+                        (variant.downstream.as_ref(), variant.next_discard.as_ref())
+                    else {
+                        continue;
+                    };
+                    let mut after_draw = after_first.clone();
+                    after_draw.push(variant.drawn_tile);
+                    let Some((second, after_second)) = split_discarded_tile(after_draw, next)
+                    else {
+                        continue;
+                    };
+
+                    for downstream_draw in &downstream.draws {
+                        for downstream_variant in &downstream_draw.variants {
+                            let Some(third) = downstream_variant.next_discard.as_ref() else {
+                                continue;
+                            };
+                            let mut after_downstream_draw = after_second.clone();
+                            after_downstream_draw.push(downstream_variant.drawn_tile);
+                            let Some((third_discarded, concealed)) =
+                                split_discarded_tile(after_downstream_draw, third)
+                            else {
+                                continue;
+                            };
+                            branches.push(DownstreamBranch {
+                                concealed,
+                                discarded: vec![first, second, third_discarded],
+                                acceptance: third.acceptance_after_discard.clone(),
+                                value: downstream_variant.prospective_value,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        branches
+    }
+
+    // 既存の 11m 2m 33m 7m 8m 9m 2p 3p 4p 7p 9p E の1向聴を、same-shanten の枝の先にある
+    // テンパイまで追った case。深い探索は重いので、同じ case を複数のテストで共有する。
+    static LOW_DAMATEN_DOWNSTREAM: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            downstream: true,
+            ..CaseSpec::new(&LOW_DAMATEN_HAND, "2m")
+        }
+        .build()
+    });
+
+    #[test]
+    fn a_downstream_tenpai_keeps_the_production_prospective_value() {
+        // 深い枝が持つ将来打点は、同じテンパイを既存 production 評価器へ渡した値と一致する。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+
+        let branches = downstream_branches(case);
+        assert!(!branches.is_empty(), "先の枝を持つ局面が必要");
+
+        let mut known = 0;
+        for branch in &branches {
+            assert_eq!(branch.value, valuator.tenpai_value(&branch.tenpai()));
+            known += usize::from(branch.value.is_some());
+        }
+        assert!(known > 0, "打点を確定できる枝がある局面が必要");
+    }
+
+    #[test]
+    fn a_downstream_value_aggregates_into_the_candidate_metric() {
+        // 候補ごとの集計値は Σ(same-shanten 残枚数 × Σ(3手目のツモ残枚数 × 最終テンパイの打点))。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+
+        let mut aggregated = 0;
+        for candidate in &case.lookahead.candidates {
+            let Some(value) = candidate.same_shanten_downstream_value() else {
+                continue;
+            };
+            let mut expected = 0u64;
+            for draw in candidate.draws_with(DrawTransition::SameShanten) {
+                for variant in &draw.variants {
+                    expected += u64::from(variant.remaining)
+                        * variant.downstream_value().expect("先の枝の打点がある");
+                }
+            }
+            assert_eq!(value, expected, "{:?}", candidate.discard);
+            assert!(value > 0);
+            aggregated += 1;
+        }
+        assert!(aggregated > 0, "打点を確定できる候補がある局面が必要");
+    }
+
+    #[test]
+    fn a_future_river_wait_is_furiten_for_the_downstream_tenpai() {
+        // 途中で切った牌が最終待ちに含まれる枝は、既存フリテン基盤がロン不可と判断する。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        assert!(
+            case.ctx.own_discards() == Some(&[][..]),
+            "現在の河が空で、将来の河だけでフリテンになる局面が必要"
+        );
+
+        let mut furiten = 0;
+        for branch in downstream_branches(case) {
+            let discarded = branch.discarded_types();
+            let hits_river = branch.waits().iter().any(|wait| discarded.contains(wait));
+            let facts = valuator
+                .tenpai_facts(&branch.tenpai())
+                .expect("完成手を解析できる");
+
+            assert_eq!(facts.ron_availability(), Some(!hits_river));
+            furiten += usize::from(hits_river);
+        }
+        assert!(furiten > 0, "将来の河でフリテンになる枝がある局面が必要");
+    }
+
+    #[test]
+    fn following_the_same_shanten_branch_keeps_the_selection_unchanged() {
+        // 深い枝を追っても、打牌選択の結果も選択に使う前方集計値も変わらない。
+        let followed = &*LOW_DAMATEN_DOWNSTREAM;
+        let plain = &*LOW_DAMATEN;
+
+        assert_eq!(
+            evaluations(&followed.lookahead, &followed.ctx),
+            evaluations(&plain.lookahead, &plain.ctx),
+        );
+        assert_eq!(followed.metrics(), plain.metrics());
+
+        // 2手先診断を作らない通常経路とも同じ action を選ぶ。
+        let actions: Vec<LegalAction> = hand_tiles(&followed.ctx)
+            .into_iter()
+            .map(|tile| LegalAction::Dahai { tile })
+            .collect();
+        assert!(followed.selected.is_some());
+        assert_eq!(followed.selected, plain.selected);
+        assert_eq!(
+            followed.selected,
+            select_discard_action_with_diagnostic(
+                &followed.ctx,
+                &actions,
+                LookaheadDiagnosticScope::None,
+            )
+            .selection
+            .action,
+        );
     }
 }

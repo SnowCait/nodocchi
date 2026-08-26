@@ -11,7 +11,8 @@ use crate::defense::{
     select_defense_fallback_action_with_kind,
 };
 use crate::discard_selection::{
-    DiscardActionSelection, select_best_one_step_discard_evaluation_with_fixed_meld_count,
+    DiscardActionSelection, LookaheadDiagnosticScope,
+    select_best_one_step_discard_evaluation_with_fixed_meld_count,
     select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
     selected_discard_tenpai_wait_availability,
 };
@@ -449,13 +450,39 @@ pub struct DiagnosticOptions {
     /// 2手先は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり既存診断よりさらに重いため、
     /// 既定では構築しない。有効にしても選択結果は変わらない。
     pub lookahead: bool,
+    /// 2手先診断の same-shanten の枝を、テンパイまでもう1段追うかどうか。
+    ///
+    /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
+    /// `lookahead` だけの場合よりさらに重い。対象は現在打牌後が1向聴の候補だけで、`lookahead`
+    /// が無効なら何も構築しない。打牌選択にも押し引きにも使わない観測値なので、有効にしても
+    /// 選択結果は変わらない。
+    pub same_shanten_downstream: bool,
 }
 
 impl DiagnosticOptions {
     /// 既存診断のみ。2手先診断は構築しない。
-    pub const NONE: Self = Self { lookahead: false };
+    pub const NONE: Self = Self {
+        lookahead: false,
+        same_shanten_downstream: false,
+    };
     /// 2手先診断まで構築する。
-    pub const WITH_LOOKAHEAD: Self = Self { lookahead: true };
+    pub const WITH_LOOKAHEAD: Self = Self {
+        lookahead: true,
+        same_shanten_downstream: false,
+    };
+    /// 2手先診断に加えて、same-shanten の枝をテンパイまで追う。
+    pub const WITH_SAME_SHANTEN_DOWNSTREAM: Self = Self {
+        lookahead: true,
+        same_shanten_downstream: true,
+    };
+
+    fn lookahead_scope(self) -> LookaheadDiagnosticScope {
+        match (self.lookahead, self.same_shanten_downstream) {
+            (false, _) => LookaheadDiagnosticScope::None,
+            (true, false) => LookaheadDiagnosticScope::Lookahead,
+            (true, true) => LookaheadDiagnosticScope::SameShantenDownstream,
+        }
+    }
 }
 
 /// `ShantenAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
@@ -751,7 +778,7 @@ impl ShantenAgent {
         let selection = select_discard_action_with_diagnostic(
             ctx,
             legal_actions,
-            diagnostics.options.lookahead,
+            diagnostics.options.lookahead_scope(),
         );
         diagnostics.normal_discard = Some(selection.diagnostic);
         diagnostics.normal_discard_furiten = Some(selection.furiten);

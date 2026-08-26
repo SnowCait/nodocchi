@@ -75,6 +75,17 @@ cargo run -p bot-scenario -- \
 
 仮想ツモ牌ごとの詳細は、仮想ツモ牌の物理牌 variant ごとに並びます。次打牌後がテンパイになる枝では最終待ちと、打牌選択が実際に使った打点 (`selection value`)、採用した baseline とロン可否、ダマ / リーチ両方の打点を表示します。打点は待ち牌種ごと・和了牌の赤5 / 黒5ごとの支払いと、その残枚数加重平均で、役なしや点数計算の入力不足は0点にせずそのまま区別します。
 
+`--lookahead --verbose` では、現在打牌後が1向聴の候補について向聴数を維持する枝をもう1段追います。2手目の打牌後の1向聴が持つ既存 Acceptance を1枚引き、既存 comparator が選ぶ3手目の打牌後のテンパイまで表示します。深い枝は同じ表示を字下げだけ下げて並べ、その枝の合計を `downstream value`、候補ごとの合計を `same-shanten downstream value` に出します。
+
+```text
+same-shanten downstream value
+= Σ(same-shanten ツモの残枚数
+    × Σ(3手目へ進むツモの残枚数
+        × Σ(最終和了牌の残枚数 × 支払い合計)))
+```
+
+これは期待値ではなく、平均へ正規化しない生の重み付き合計です。ロン / ツモ確率も放銃率も巡目も含めません。枝の深さが違うため `weighted prospective value` とは scale が違い、打牌選択はこの値を使いません。向聴数を維持する枝と下げる枝をどう統合するかの policy はまだ決めていません。打点を確定できない枝が1つでもある候補は 0 点にせず値を持ちません。
+
 detailed diagnostics そのものは要求した場合だけ構築し、`act()` の通常経路では作りません。枝の評価は通常経路と同じ1本を共有するので、diagnostics の有無で最終 decision は変わりません。表示する `selection value` も打牌選択が使った値そのもので、diagnostics のために打点を求め直しません。
 
 ## selected と runner-up
