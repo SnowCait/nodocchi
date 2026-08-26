@@ -454,7 +454,9 @@ pub fn diagnose_lookahead(
     LookaheadDiagnostic {
         candidates: evaluations
             .iter()
-            .map(|evaluation| lookahead_for_candidate(inputs, evaluation))
+            .map(|evaluation| {
+                search_candidate(inputs, evaluation, &diagnostic_scopes(inputs, evaluation))
+            })
             .collect(),
     }
 }
@@ -558,12 +560,7 @@ pub fn same_shanten_forward_metric_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> WeightedForwardMetric {
-    let Some(branch) = CandidateBranch::new(&inputs.root, evaluation) else {
-        return WeightedForwardMetric::default();
-    };
-    accumulate_same_shanten_draws(branch.same_shanten_draws(inputs, false).iter(), |variant| {
-        variant.prospective_value
-    })
+    search_candidate(inputs, evaluation, SAME_SHANTEN_ONLY).same_shanten_forward_metric()
 }
 
 /// 打牌候補1件について、same-shanten 手変わりの先にある将来テンパイの重み付き打点を求める。
@@ -594,12 +591,7 @@ pub fn same_shanten_downstream_value_for_candidate(
     if !explores_downstream(evaluation) {
         return None;
     }
-    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
-    accumulate_same_shanten_draws(
-        branch.same_shanten_draws(inputs, true).iter(),
-        DrawVariantLookaheadDiagnostic::downstream_value,
-    )
-    .prospective_value
+    search_candidate(inputs, evaluation, SAME_SHANTEN_DOWNSTREAM).same_shanten_downstream_value()
 }
 
 // same-shanten の枝をテンパイまで追う対象かどうか。今回の対象は現在打牌後が1向聴の候補だけで、
@@ -636,44 +628,26 @@ fn forward_metrics_for_shanten(best_shanten: i8, metric: WeightedForwardMetric) 
     }
 }
 
-// 現在の打牌候補1件分の2手先診断。入力は変更せず、打牌後の手牌を copy で作る。
-fn lookahead_for_candidate(
-    inputs: &LookaheadInputs,
-    evaluation: &DiscardEvaluation,
-) -> DiscardLookaheadDiagnostic {
-    let Some(branch) = CandidateBranch::new(&inputs.root, evaluation) else {
-        return DiscardLookaheadDiagnostic {
-            discard: evaluation.discard,
-            draws: Vec::new(),
-        };
-    };
-
-    let downstream = inputs.same_shanten_downstream && explores_downstream(evaluation);
-    let mut draws = branch.progress_draws(inputs, evaluation);
-    draws.extend(branch.same_shanten_draws(inputs, downstream));
-
-    DiscardLookaheadDiagnostic {
-        discard: evaluation.discard,
-        draws,
-    }
+// 詳細診断が進める枝。深さと対象の違いはこの指定だけが持ち、探索そのものは選択専用集計と
+// 共有する。
+fn diagnostic_scopes(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> [DrawScope; 2] {
+    [
+        DrawScope::Progress,
+        DrawScope::SameShanten {
+            downstream: inputs.same_shanten_downstream && explores_downstream(evaluation),
+        },
+    ]
 }
 
-// 現在の打牌候補1件分の前方集計値。枝の評価は詳細診断と同じ helper を共有し、
-// 診断 object を作らずに集計値だけを求める。
+// 現在の打牌候補1件分の前方集計値。探索は詳細診断と同じ core を共有し、進めるのは既存集計の
+// 対象になる向聴数を下げる枝だけ。全候補分の診断も same-shanten の枝も構築しない。
 fn weighted_forward_metric_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
     required_next_shanten: i8,
 ) -> WeightedForwardMetric {
-    let Some(branch) = CandidateBranch::new(&inputs.root, evaluation) else {
-        return WeightedForwardMetric::default();
-    };
-
-    accumulate_draws(
-        branch.progress_draws(inputs, evaluation).iter(),
-        |_| required_next_shanten,
-        |variant| variant.prospective_value,
-    )
+    search_candidate(inputs, evaluation, PROGRESS_ONLY)
+        .weighted_forward_metric(required_next_shanten)
 }
 
 // same-shanten の枝を既存 accumulator で集計する。集計対象の2手目打牌後の向聴数は枝ごとの
@@ -707,6 +681,75 @@ fn accumulate_draws<'a>(
         }
     }
     accumulator.finish()
+}
+
+/// 探索1段で進める仮想ツモ枝の指定。
+///
+/// 現在扱う深さと対象の違いはこの指定だけが持ち、状態遷移・打牌評価・比較・物理牌 variant は
+/// どの段でも同じ primitive を通る。任意深度の再帰へは一般化しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrawScope {
+    /// 向聴数を下げる枝。対象牌・残枚数・ツモ後向聴数は打牌評価が持つ受け入れそのもの。
+    Progress,
+    /// 向聴数を維持する枝。`downstream` を指定した枝だけ、2手目の打牌後の状態から
+    /// [`DrawScope::Progress`] をもう1段進める。
+    SameShanten { downstream: bool },
+}
+
+impl DrawScope {
+    // この指定で進める枝の分類。
+    fn transition(self) -> DrawTransition {
+        match self {
+            Self::Progress => DrawTransition::Progress,
+            Self::SameShanten { .. } => DrawTransition::SameShanten,
+        }
+    }
+
+    // この指定の枝を、2手目の打牌後からさらに1段進めるか。
+    fn continues_downstream(self) -> bool {
+        matches!(self, Self::SameShanten { downstream: true })
+    }
+}
+
+// 向聴数を下げる枝だけを1段進める指定。選択専用の集計と、same-shanten の枝の先の段が共有する。
+const PROGRESS_ONLY: &[DrawScope] = &[DrawScope::Progress];
+
+// 向聴数を維持する枝だけを1段進める指定。
+const SAME_SHANTEN_ONLY: &[DrawScope] = &[DrawScope::SameShanten { downstream: false }];
+
+// 向聴数を維持する枝を、その先のテンパイまで進める指定。
+const SAME_SHANTEN_DOWNSTREAM: &[DrawScope] = &[DrawScope::SameShanten { downstream: true }];
+
+// 現在の打牌候補1件を、指定した枝だけ探索する。詳細診断も選択専用の集計も same-shanten の
+// 観測値もこの1本を通り、用途ごとに違うのは「どの枝を進めるか」と「結果をどう集計するか」だけ。
+// 入力は変更せず、打牌後の手牌を copy で作る。
+fn search_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    scopes: &[DrawScope],
+) -> DiscardLookaheadDiagnostic {
+    DiscardLookaheadDiagnostic {
+        discard: evaluation.discard,
+        draws: search(inputs, &inputs.root, evaluation, scopes).unwrap_or_default(),
+    }
+}
+
+// 探索の1段。ある状態とその打牌から、指定した分類の仮想ツモ牌ごとに「ツモ → 既存打牌評価 →
+// 既存比較 → 次段の状態」を進める。1手目も same-shanten の枝の先も同じ入口を通り、段ごとに
+// 別の状態遷移を書かない。打牌候補の牌種を手牌から除けない場合だけ `None`。
+fn search(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    evaluation: &DiscardEvaluation,
+    scopes: &[DrawScope],
+) -> Option<Vec<DrawLookaheadDiagnostic>> {
+    let branch = CandidateBranch::new(state, evaluation)?;
+    Some(
+        scopes
+            .iter()
+            .flat_map(|&scope| branch.draws(inputs, evaluation, scope))
+            .collect(),
+    )
 }
 
 // 仮想手牌1つ分の探索状態。1手目の打牌前も、仮想ツモを経た各段も同じ型で持ち、段ごとに別の
@@ -762,42 +805,35 @@ impl CandidateBranch {
         })
     }
 
-    // 向聴数を下げる仮想ツモ枝。対象牌・残枚数・ツモ後向聴数は打牌評価が持つ受け入れそのもので、
-    // 2手先評価のために求め直さない。3手目へ進む枝もこの入口を共有し、テンパイへ進む牌の判定を
-    // 別に作らない。
-    fn progress_draws(
+    // 指定した分類の仮想ツモ枝を列挙して1段進める。
+    //
+    // 向聴数を下げる牌は打牌評価が持つ受け入れそのもので、対象牌も残枚数もツモ後向聴数も2手先
+    // 評価のために求め直さない。3手目へ進む枝もこの入口を共有し、テンパイへ進む牌の判定を別に
+    // 作らない。向聴数を維持する牌は受け入れと同じ列挙・同じ shanten calculator で求め、条件
+    // だけが「維持する」になる。どちらの分類も現在打牌の受け入れを求めたときと同じ見え牌から
+    // 残枚数を数える。
+    fn draws(
         &self,
         inputs: &LookaheadInputs,
         evaluation: &DiscardEvaluation,
+        scope: DrawScope,
     ) -> Vec<DrawLookaheadDiagnostic> {
-        evaluation
-            .acceptance_after_discard
-            .tiles
-            .iter()
-            .map(|tile| self.draw(inputs, drawable(tile), DrawTransition::Progress, false))
-            .collect()
-    }
-
-    // 向聴数を維持する仮想ツモ枝。受け入れと同じ列挙・同じ shanten calculator で求め、条件だけが
-    // 「維持する」になる。残枚数は現在打牌の受け入れを求めたときと同じ見え牌から数えるので、
-    // どちらの分類の枝も同じ基準の残枚数になる。
-    //
-    // `downstream` を指定した場合だけ、2手目の打牌後の1向聴からテンパイまでもう1段進める。
-    fn same_shanten_draws(
-        &self,
-        inputs: &LookaheadInputs,
-        downstream: bool,
-    ) -> Vec<DrawLookaheadDiagnostic> {
-        same_shanten_draws_with_fixed_melds_and_seen(
-            &self.after_discard,
-            inputs.fixed_meld_count,
-            &self.draw_seen,
-        )
-        .into_iter()
-        .map(|drawable: DrawableTile| {
-            self.draw(inputs, drawable, DrawTransition::SameShanten, downstream)
-        })
-        .collect()
+        match scope {
+            DrawScope::Progress => evaluation
+                .acceptance_after_discard
+                .tiles
+                .iter()
+                .map(|tile| self.draw(inputs, drawable(tile), scope))
+                .collect(),
+            DrawScope::SameShanten { .. } => same_shanten_draws_with_fixed_melds_and_seen(
+                &self.after_discard,
+                inputs.fixed_meld_count,
+                &self.draw_seen,
+            )
+            .into_iter()
+            .map(|drawable: DrawableTile| self.draw(inputs, drawable, scope))
+            .collect(),
+        }
     }
 
     // 仮想ツモ牌1牌種を、赤 / 黒の物理牌 variant ごとに仮想ツモして評価する。
@@ -808,22 +844,21 @@ impl CandidateBranch {
         &self,
         inputs: &LookaheadInputs,
         drawable: DrawableTile,
-        transition: DrawTransition,
-        downstream: bool,
+        scope: DrawScope,
     ) -> DrawLookaheadDiagnostic {
         let variants = physical_tile_variants(
             drawable.tile,
             drawable.remaining,
             self.red_five_seen[drawable.tile.index()],
         )
-        .map(|variant| self.draw_variant(inputs, drawable.tile, variant, downstream))
+        .map(|variant| self.draw_variant(inputs, drawable.tile, variant, scope))
         .collect();
 
         DrawLookaheadDiagnostic {
             draw: drawable.tile,
             remaining: drawable.remaining,
             shanten_after_draw: drawable.shanten_after_draw,
-            transition,
+            transition: scope.transition(),
             variants,
         }
     }
@@ -835,7 +870,7 @@ impl CandidateBranch {
         inputs: &LookaheadInputs,
         draw: TileType,
         variant: PhysicalTileVariant,
-        downstream: bool,
+        scope: DrawScope,
     ) -> DrawVariantLookaheadDiagnostic {
         let Some(state) = self.state_after_draw(draw, variant.tile) else {
             return DrawVariantLookaheadDiagnostic {
@@ -851,9 +886,13 @@ impl CandidateBranch {
         DrawVariantLookaheadDiagnostic {
             drawn_tile: variant.tile,
             remaining: variant.remaining,
-            downstream: downstream
-                .then(|| downstream_draws(inputs, &state, next_discard.as_ref()?))
-                .flatten(),
+            // 先の段も同じ探索 primitive を、対象の枝を変えて呼ぶだけ。
+            downstream: scope
+                .continues_downstream()
+                .then_some(next_discard.as_ref())
+                .flatten()
+                .and_then(|next| search(inputs, &state, next, PROGRESS_ONLY))
+                .map(|draws| SameShantenDownstreamDiagnostic { draws }),
             next_discard,
             prospective_value,
         }
@@ -953,21 +992,6 @@ fn prospective_value(
         concealed_tiles: &concealed_tiles,
         acceptance: &evaluation.acceptance_after_discard,
         discarded_tiles: &discarded_tiles,
-    })
-}
-
-// same-shanten の枝の2手目打牌後から、テンパイまでもう1段進めた枝。
-//
-// 3手目へ進むツモ牌は2手目の打牌評価が持つ既存受け入れそのもので、テンパイへ進む牌の判定を
-// 作らない。2手目の打牌後が同じ向聴数のままでなければ探索しない。
-fn downstream_draws(
-    inputs: &LookaheadInputs,
-    state: &HandState,
-    next: &DiscardEvaluation,
-) -> Option<SameShantenDownstreamDiagnostic> {
-    let branch = CandidateBranch::new(state, next)?;
-    Some(SameShantenDownstreamDiagnostic {
-        draws: branch.progress_draws(inputs, next),
     })
 }
 
