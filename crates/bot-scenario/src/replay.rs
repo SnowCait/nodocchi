@@ -236,8 +236,9 @@ mod tests {
         assert_eq!(context.honba(), Some(2));
         assert_eq!(context.kyotaku_points(), Some(3000));
         assert_eq!(context.kyoku(), Some(4));
-        // Observation に山の残り枚数が無いので replay でも unknown のままにする。
-        assert_eq!(context.remaining_tiles(), None);
+        // Observation は山の残り枚数を持たないが、見えている牌から復元できる。配牌 13枚 × 4人と
+        // 王牌 14枚を除いた 70枚から、自分のツモ1枚を引いた 69枚。
+        assert_eq!(context.remaining_tiles(), Some(69));
     }
 
     #[test]
@@ -272,7 +273,7 @@ mod tests {
         assert!(output.contains("  honba: 2"), "{output}");
         assert!(output.contains("  kyotaku: 3000 points"), "{output}");
         assert!(output.contains("  kyoku: 4"), "{output}");
-        assert!(output.contains("  remaining tiles: unknown"), "{output}");
+        assert!(output.contains("  remaining tiles: 69"), "{output}");
     }
 
     #[test]

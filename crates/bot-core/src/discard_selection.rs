@@ -7,8 +7,8 @@ use crate::prospective_value::{
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, TenpaiWaitAvailability,
-    TileCounts, TileId, TileType, best_discard_selection_index,
+    ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, SelfTsumoFacts,
+    TenpaiWaitAvailability, TileCounts, TileId, TileType, best_discard_selection_index,
     best_discard_selection_index_with_forward_metrics,
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics, diagnose_discard_furiten,
     diagnose_lookahead, discard_tenpai_wait_availability,
@@ -92,6 +92,10 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     ///
     /// 打牌選択にも2手目 `next_discard` の選択にも使わない解析専用の情報で、選択結果を変えない。
     pub lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
+    /// self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
+    ///
+    /// 選択が実際に使った値そのもので、診断のために求め直さない。
+    pub self_tsumo_facts: Option<SelfTsumoFacts>,
 }
 
 // 合法 Dahai へ絞り込み・物理牌補正済みの打牌候補評価集合と、その評価対象の物理牌一覧。
@@ -165,12 +169,14 @@ pub(crate) fn select_discard_action_with_diagnostic(
 
     // 2手先診断を構築する場合は、その枝評価から選択用の前方集計値も求める。同じ
     // 「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しない。
+    let valuator = ProductionProspectiveValuator::new(context);
+    let inputs = lookahead_inputs(context, &legal.tiles, &valuator, scope);
     let lookahead = scope
         .builds_lookahead()
-        .then(|| lookahead_from_legal_evaluations(context, &legal, scope));
+        .then(|| diagnose_lookahead(&inputs, &legal.evaluations));
     let tenpai_wait = match lookahead.as_ref() {
-        Some(lookahead) => forward_metrics_from_lookahead(&legal.evaluations, lookahead),
-        None => selection_forward_metrics(context, &legal.tiles, &legal.evaluations),
+        Some(lookahead) => forward_metrics_from_lookahead(&inputs, &legal.evaluations, lookahead),
+        None => forward_metrics(&inputs, &legal.evaluations),
     };
 
     let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
@@ -190,6 +196,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         furiten: furiten_from_legal_evaluations(context, &legal),
         lookahead,
         lookahead_value,
+        self_tsumo_facts: inputs.self_tsumo_facts(),
     }
 }
 
@@ -270,7 +277,7 @@ fn selected_iishanten_forward_metrics(
 
     let valuator = ProductionProspectiveValuator::new(context);
     Some(forward_metrics_for_candidate(
-        &lookahead_inputs(context, tiles, &valuator),
+        &lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None),
         evaluation,
     ))
 }
@@ -310,17 +317,25 @@ fn selection_forward_metrics(
     evaluations: &[DiscardEvaluation],
 ) -> SelectionForwardMetrics {
     let valuator = ProductionProspectiveValuator::new(context);
-    forward_metrics(&lookahead_inputs(context, tiles, &valuator), evaluations)
+    forward_metrics(
+        &lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None),
+        evaluations,
+    )
 }
 
 // 2手先評価の入力。本番選択・詳細診断・将来打点はこの1本を共有し、同じ枝を別々の入力で
 // 評価しない。
-fn lookahead_inputs<'a>(
+//
+// self-tsumo continuation の材料 (ツモ評価器と残り自摸機会) も同じ入口で渡す。残り自摸機会は
+// 山の残枚数という exact fact からしか作らず、取得できない局面では渡さない。その場合 bot-logic
+// 側で新しい軸を持たず、既存の比較へそのまま落ちる。
+pub(crate) fn lookahead_inputs<'a>(
     context: &'a GameContext,
     tiles: &'a [TileId],
     valuator: &'a ProductionProspectiveValuator<'a>,
+    scope: LookaheadDiagnosticScope,
 ) -> LookaheadInputs<'a> {
-    LookaheadInputs::new(
+    let inputs = LookaheadInputs::new(
         tiles,
         evaluation_fixed_meld_count(context),
         context.dora_indicators(),
@@ -329,6 +344,27 @@ fn lookahead_inputs<'a>(
     )
     .with_visible_tiles(context.visible_tiles())
     .with_prospective_valuator(valuator)
+    .with_tsumo_valuator(valuator);
+    let inputs = match own_future_draws(context) {
+        Some(draws) => inputs.with_own_future_draws(draws),
+        None => inputs,
+    };
+    if scope.builds_same_shanten_downstream() {
+        inputs.with_same_shanten_downstream()
+    } else {
+        inputs
+    }
+}
+
+/// 現在打牌後に自分へ残っている自摸機会。山の残枚数が unknown な局面では `None`。
+///
+/// 未来の鳴き・槓を予測しない4人麻雀のモデルでは、現在打牌後に残っている山の枚数を4人で
+/// 順に分けるので `floor(remaining_tiles / 4)` になる。`remaining_tiles` は自分がツモった後の
+/// 山の残枚数なので、ここで1枚引き直さない。
+///
+/// 巡目や河の枚数からの推測はしない。exact な fact が無い局面では新しい軸を使わない。
+pub(crate) fn own_future_draws(context: &GameContext) -> Option<u32> {
+    Some(context.remaining_tiles()? / 4)
 }
 
 // 絞り込み済みの合法候補集合から既存の診断を構築する。診断と tracing ログはこの結果を共有する。
@@ -424,27 +460,6 @@ pub(crate) fn concealed_tiles_after_discard(
         .collect();
 
     split_discarded_tile(tiles, evaluation).map(|(_, remaining)| remaining)
-}
-
-// 絞り込み済みの合法候補集合から詳細な2手先診断を構築する。要求された場合だけ構築する。
-//
-// 現在打牌後の受け入れは既存評価 (legal.evaluations) が持つ値をそのまま入力にするため、
-// 現在の1手評価を再計算しない。物理牌・副露済み面子数・visible tiles・ドラ表示牌・場風・自風は
-// 本番評価と同じ値を渡し、2手目の残枚数計算と文脈反映も既存経路を共有する。GameContext 自体は
-// 渡さず、bot-logic が必要とする値だけを取り出して渡す。
-fn lookahead_from_legal_evaluations(
-    context: &GameContext,
-    legal: &LegalDiscardEvaluations,
-    scope: LookaheadDiagnosticScope,
-) -> LookaheadDiagnostic {
-    let valuator = ProductionProspectiveValuator::new(context);
-    let inputs = lookahead_inputs(context, &legal.tiles, &valuator);
-    let inputs = if scope.builds_same_shanten_downstream() {
-        inputs.with_same_shanten_downstream()
-    } else {
-        inputs
-    };
-    diagnose_lookahead(&inputs, &legal.evaluations)
 }
 
 // 選択された牌種に一致する合法 Dahai を返す。通常牌を赤牌より優先し、なければ赤牌を返す。
@@ -2698,7 +2713,12 @@ pub(crate) mod tests {
         let legal = legal_discard_evaluations(&context, &actions);
         let valuator = ProductionProspectiveValuator::new(&context);
         let aware = diagnose_lookahead(
-            &lookahead_inputs(&context, &legal.tiles, &valuator),
+            &lookahead_inputs(
+                &context,
+                &legal.tiles,
+                &valuator,
+                LookaheadDiagnosticScope::None,
+            ),
             &legal.evaluations,
         );
         let plain = lookahead_without_valuator(&context, &legal.tiles, &legal.evaluations);
@@ -2745,16 +2765,37 @@ pub(crate) mod tests {
         let legal = legal_discard_evaluations(&context, &actions);
         let valuator = ProductionProspectiveValuator::new(&context);
         let aware = diagnose_lookahead(
-            &lookahead_inputs(&context, &legal.tiles, &valuator),
+            &lookahead_inputs(
+                &context,
+                &legal.tiles,
+                &valuator,
+                LookaheadDiagnosticScope::None,
+            ),
             &legal.evaluations,
         );
         let plain = lookahead_without_valuator(&context, &legal.tiles, &legal.evaluations);
 
         // 打点込みで選んだ2手目から集計した weighted wait と、従来の2手目から集計した値は違う。
-        let aware_metrics =
-            without_prospective_value(&forward_metrics_from_lookahead(&legal.evaluations, &aware));
-        let plain_metrics =
-            without_prospective_value(&forward_metrics_from_lookahead(&legal.evaluations, &plain));
+        let aware_metrics = without_prospective_value(&forward_metrics_from_lookahead(
+            &lookahead_inputs(
+                &context,
+                &legal.tiles,
+                &valuator,
+                LookaheadDiagnosticScope::None,
+            ),
+            &legal.evaluations,
+            &aware,
+        ));
+        let plain_metrics = without_prospective_value(&forward_metrics_from_lookahead(
+            &lookahead_inputs(
+                &context,
+                &legal.tiles,
+                &valuator,
+                LookaheadDiagnosticScope::None,
+            ),
+            &legal.evaluations,
+            &plain,
+        ));
         assert_ne!(
             metric_of(&legal.evaluations, &aware_metrics, "8p"),
             metric_of(&legal.evaluations, &plain_metrics, "8p"),
@@ -2988,5 +3029,193 @@ pub(crate) mod tests {
                     .all(|metric| metric.prospective_value.is_none())
             );
         }
+    }
+
+    // ---- 1向聴 selection への self-tsumo continuation の接続 ----
+
+    // 1267m 55567p 5888s + ツモ 9s の1向聴。打 5s と打 9s は打牌後の向聴が同じで、従来は既存
+    // 比較順で 5s を選んでいた。手変わりを1回挟む経路まで含めた期待ツモ支払いでは 9s の方が
+    // 高い。
+    const SELF_TSUMO_FLIP_HAND: [&str; 14] = [
+        "1m", "2m", "6m", "7m", "5p", "5p", "5p", "6p", "7p", "5s", "8s", "8s", "8s", "9s",
+    ];
+
+    // 山の残枚数を既知にした局面。self-tsumo continuation の材料が揃う。
+    fn self_tsumo_context(
+        hand: &[&str; 14],
+        dora_indicator: &str,
+        remaining_tiles: u32,
+    ) -> (GameContext, Vec<LegalAction>) {
+        let (context, actions) = value_context(hand, dora_indicator);
+        let context = context.with_table_state_facts(bot_core_table_state(remaining_tiles));
+        (context, actions)
+    }
+
+    fn bot_core_table_state(remaining_tiles: u32) -> crate::context::TableStateFacts {
+        crate::context::TableStateFacts {
+            remaining_tiles: Some(remaining_tiles),
+            ..Default::default()
+        }
+    }
+
+    fn selected_discard(context: &GameContext, actions: &[LegalAction]) -> String {
+        select_discard_action_with_evaluation(context, actions)
+            .evaluation
+            .expect("打牌候補がある")
+            .discard
+            .to_mjai_string()
+    }
+
+    #[test]
+    fn the_self_tsumo_continuation_changes_the_selected_discard() {
+        // 山の残枚数が分かる局面だけ新しい軸が効き、選ぶ打牌が変わる。
+        let (unknown_wall, actions) = value_context(&SELF_TSUMO_FLIP_HAND, "1p");
+        let (known_wall, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+
+        assert_eq!(selected_discard(&unknown_wall, &actions), "5s");
+        assert_eq!(selected_discard(&known_wall, &actions), "9s");
+    }
+
+    #[test]
+    fn the_new_winner_has_the_higher_expected_self_tsumo_value() {
+        // 期待結果は threshold ではなく、確率 × ツモ支払いの計算結果そのものから決まる。
+        let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let legal = legal_discard_evaluations(&context, &actions);
+        let valuator = ProductionProspectiveValuator::new(&context);
+        let metrics = forward_metrics(
+            &lookahead_inputs(
+                &context,
+                &legal.tiles,
+                &valuator,
+                LookaheadDiagnosticScope::None,
+            ),
+            &legal.evaluations,
+        );
+
+        let value = |discard: &str| {
+            metric_of(&legal.evaluations, &metrics, discard)
+                .expected_self_tsumo_value
+                .expect("ツモ打点を確定できる")
+        };
+        assert!(
+            value("9s") > value("5s"),
+            "9s: {}, 5s: {}",
+            value("9s"),
+            value("5s")
+        );
+    }
+
+    #[test]
+    fn the_losing_candidate_reports_the_self_tsumo_axis() {
+        // 診断の比較理由も production selection と同じ軸になる。
+        let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let selection = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidate = selection
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5s")
+            .expect("打 5s の候補がある");
+
+        assert!(!candidate.selected);
+        assert_eq!(
+            candidate.comparison_reason,
+            bot_logic::DiscardComparisonReason::ExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn the_self_tsumo_axis_does_not_depend_on_the_candidate_order() {
+        // 候補の列挙順を変えても選ぶ打牌は変わらない。
+        let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let mut reversed = actions.clone();
+        reversed.reverse();
+
+        assert_eq!(
+            selected_discard(&context, &actions),
+            selected_discard(&context, &reversed)
+        );
+    }
+
+    #[test]
+    fn the_diagnostic_scope_does_not_change_the_self_tsumo_selection() {
+        // 詳細診断をどこまで構築しても、打牌選択の結果も使う値も変わらない。
+        let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let selections: Vec<_> = [
+            LookaheadDiagnosticScope::None,
+            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::SameShantenDownstream,
+        ]
+        .into_iter()
+        .map(|scope| select_discard_action_with_diagnostic(&context, &actions, scope))
+        .collect();
+
+        for selection in &selections {
+            assert_eq!(selection.selection.action, selections[0].selection.action);
+            assert_eq!(
+                selection.selection.iishanten_forward_metrics,
+                selections[0].selection.iishanten_forward_metrics,
+            );
+        }
+        assert!(
+            selections[0]
+                .selection
+                .iishanten_forward_metrics
+                .expect("1向聴の前方集計値がある")
+                .expected_self_tsumo_value
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_two_shanten_candidate_set_is_unchanged_by_the_self_tsumo_axis() {
+        // 2向聴以上では新しい軸を使わず、既存 winner も前方集計値も変わらない。
+        let hand: [&str; 14] = [
+            "1m", "4m", "7m", "1p", "4p", "7p", "1s", "4s", "7s", "E", "S", "W", "N", "P",
+        ];
+        let (unknown_wall, actions) = value_context(&hand, "1p");
+        let (known_wall, _) = self_tsumo_context(&hand, "1p", 60);
+
+        let metrics = |context: &GameContext| {
+            let legal = legal_discard_evaluations(context, &actions);
+            let valuator = ProductionProspectiveValuator::new(context);
+            forward_metrics(
+                &lookahead_inputs(
+                    context,
+                    &legal.tiles,
+                    &valuator,
+                    LookaheadDiagnosticScope::None,
+                ),
+                &legal.evaluations,
+            )
+        };
+
+        assert_eq!(
+            selected_discard(&known_wall, &actions),
+            selected_discard(&unknown_wall, &actions)
+        );
+        assert_eq!(metrics(&known_wall), metrics(&unknown_wall));
+        assert!(
+            metrics(&known_wall)
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+    }
+
+    #[test]
+    fn the_own_future_draws_come_from_the_remaining_wall() {
+        // 残り自摸機会は山の残枚数の4分の1で、巡目や河の枚数から推測しない。
+        let (context, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        assert_eq!(own_future_draws(&context), Some(15));
+
+        let (context, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 3);
+        assert_eq!(own_future_draws(&context), Some(0));
+
+        let (unknown_wall, _) = value_context(&SELF_TSUMO_FLIP_HAND, "1p");
+        assert_eq!(own_future_draws(&unknown_wall), None);
     }
 }

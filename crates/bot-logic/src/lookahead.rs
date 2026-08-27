@@ -44,13 +44,19 @@
 //!
 //! # 打牌選択が使う集計値
 //!
-//! 打牌選択が使う前方集計値 ([`forward_metrics`]) は従来どおり向聴数を下げる枝だけを集計する。
-//! same-shanten の枝は2手目の打牌後も向聴数が変わらず、既存 [`ForwardMetrics`] の集計条件
-//! (次打牌後の向聴数が1つ下がっていること) を満たさないため、集計へ寄与しない。したがって
-//! same-shanten の枝を production の打牌選択へ反映するには Progress と SameShanten をどう
-//! 比較するかの policy 決定が必要で、この module は係数も threshold も持たない。
-//! same-shanten 側の集計値は既存 accumulator をそのまま使う
+//! 打牌選択が使う前方集計値 ([`forward_metrics`]) のうち、残枚数を重みにした既存の集計値
+//! ([`WeightedForwardMetric`]) は従来どおり向聴数を下げる枝だけを集計する。same-shanten の枝は
+//! 2手目の打牌後も向聴数が変わらず、既存 [`ForwardMetrics`] の集計条件 (次打牌後の向聴数が1つ
+//! 下がっていること) を満たさないため、そこへは寄与しない。same-shanten 側の同じ規則の集計値は
 //! [`same_shanten_forward_metric_for_candidate`] から観測できる。
+//!
+//! Progress と SameShanten を1つの尺度へ統合するのは self-tsumo continuation
+//! ([`ForwardMetrics::expected_self_tsumo_value`]) の方で、深さの違う枝を「その経路を引く確率 ×
+//! テンパイ到達後の期待ツモ支払い」へ揃える。確率も期待支払いも [`crate::self_tsumo`] の
+//! 閉形式そのままで、この module は係数も threshold も固定 horizon も持たない。集計に必要な
+//! ツモ打点は上位層の評価器 ([`ProspectiveTsumoValuator`]) が返し、残り自摸機会は
+//! [`LookaheadInputs::with_own_future_draws`] が受け取る。どちらか一方でも欠ける局面では新しい
+//! 集計値を持たない。
 //!
 //! # same-shanten の枝の先にあるテンパイ
 //!
@@ -78,15 +84,16 @@
 //!
 //! で、平均へ正規化しない生の重み付き合計。枝の深さが違うため既存の
 //! [`WeightedForwardMetric::prospective_value`] とは scale が違い、打牌選択はこの値を使わない。
-//! Progress と SameShanten を1つの scalar へ統合する係数も threshold も持たない。
 //!
-//! 探索は2手目の評価よりさらに重いため、詳細診断へ含めるかどうかは
-//! [`LookaheadInputs::with_same_shanten_downstream`] で明示的に指定する。選択に使う値は一切
-//! 変わらないため、含めても打牌選択の結果は変わらない。
+//! 探索は2手目の評価よりさらに重いため、詳細診断へ無条件に含めるかどうかは
+//! [`LookaheadInputs::with_same_shanten_downstream`] で明示的に指定する。self-tsumo continuation
+//! を集計する局面では、指定が無くても比較対象の候補 ([`forward_target_mask`]) だけ同じ枝を進める。
+//! 選択専用経路と詳細診断がどちらも同じ枝集合を進めるため、詳細診断の有無で打牌選択の結果は
+//! 変わらない。
 
 use crate::acceptance::{
     DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
-    same_shanten_draws_with_fixed_melds_and_seen,
+    same_shanten_draws_with_fixed_melds_and_seen, unknown_tile_count,
 };
 use crate::discard::{
     CandidateSeen, DecorationContext, DiscardEvaluation, ShapePenaltyMode, decorate_evaluations,
@@ -99,6 +106,7 @@ use crate::selection::{
     best_discard_selection_index_with_forward_metrics, forward_target_mask,
     requires_forward_metrics,
 };
+use crate::self_tsumo::{SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{PhysicalTileVariant, TileId, TileType, physical_tile_variants, seen_red_fives};
 use crate::tile_counts::TileCounts;
@@ -125,6 +133,18 @@ pub struct ProspectiveTenpai<'a> {
 /// 場合は 0 点にせず `None` を返す。
 pub trait ProspectiveTenpaiValuator {
     fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64>;
+}
+
+/// 仮想テンパイを自分のツモ和了だけで評価する外部評価器。
+///
+/// [`ProspectiveTenpaiValuator`] はロン baseline の確定打点を返すのに対し、こちらは
+/// [`crate::self_tsumo`] の確率模型が使う「ツモ和了できる待ちの残枚数とツモ打点」を返す。
+/// Reach / Damaten policy も点数計算も bot-logic は持たないため、実装は上位層が渡す。
+///
+/// ツモ baseline で役が無い待ちは和了できないので、成功する待ちにも打点にも含めない。打点を
+/// 確定できない待ちが混じる場合は 0 点にせず `None` を返す。
+pub trait ProspectiveTsumoValuator {
+    fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue>;
 }
 
 /// 仮想ツモ牌が現在打牌後の向聴数をどう変えるか。
@@ -201,6 +221,39 @@ impl DiscardLookaheadDiagnostic {
         .prospective_value
     }
 
+    /// 構築済みの枝から self-tsumo continuation の期待支払いを集計する。
+    ///
+    /// 対象は
+    ///
+    /// ```text
+    /// A. 1回目のツモが向聴数を下げる → 2手目の最良打牌 → テンパイ
+    /// B. 1回目のツモが向聴数を維持する → 2手目の最良打牌 → 1向聴
+    ///    → 2回目のツモが向聴数を下げる → 3手目の最良打牌 → テンパイ
+    /// ```
+    ///
+    /// の2種類で、値は Σ(その経路を引く確率 × テンパイ到達後の期待ツモ支払い)
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。確率も期待支払いも
+    /// [`crate::self_tsumo`] の閉形式そのままで、固定 horizon も係数も持たない。
+    ///
+    /// 2回続けて向聴数を維持する枝は今回の探索範囲外で、寄与 0 になる (未確定ではない)。
+    /// テンパイへ到達した枝のツモ打点を1つでも確定できない場合と、手変わりの枝の先を探索して
+    /// いない場合は 0 点へ潰さず `None`。
+    pub fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
+        let mut total = 0u64;
+        for draw in &self.draws {
+            for variant in &draw.variants {
+                let value = match draw.transition {
+                    DrawTransition::Progress => terminal_self_tsumo_value(variant, facts, || {
+                        SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)
+                    })?,
+                    DrawTransition::SameShanten => same_shanten_self_tsumo_value(variant, facts)?,
+                };
+                total = total.saturating_add(value);
+            }
+        }
+        Some(total)
+    }
+
     /// 構築済みの枝から打牌選択用の weighted tenpai wait を集計する。
     ///
     /// 集計規則は選択専用経路 ([`forward_metrics`]) と共有するため、詳細診断を構築した場合に
@@ -266,6 +319,11 @@ pub struct DrawVariantLookaheadDiagnostic {
     /// テンパイでない枝・評価器を渡されなかった場合・打点を確定できない場合は `None`。
     /// 2手目の打牌候補の比較にもこの値を使うため、選択と診断で別々の打点を持たない。
     pub prospective_value: Option<u64>,
+    /// `next_discard` 後のテンパイをツモ和了だけで評価した continuation の材料。
+    ///
+    /// テンパイでない枝・ツモ評価器を渡されなかった場合・ツモ打点を確定できない場合は `None`。
+    /// ロン baseline の [`Self::prospective_value`] とは別の baseline で、流用しない。
+    pub tsumo_continuation: Option<TenpaiTsumoValue>,
     /// `next_discard` 後がまだ同じ向聴数の枝を、テンパイまでもう1段進めた探索結果。
     ///
     /// [`LookaheadInputs::with_same_shanten_downstream`] を指定した same-shanten の枝だけが
@@ -369,6 +427,9 @@ pub struct LookaheadInputs<'a> {
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
     valuator: Option<&'a dyn ProspectiveTenpaiValuator>,
+    tsumo_valuator: Option<&'a dyn ProspectiveTsumoValuator>,
+    // 現在打牌後に自分へ残っている自摸機会。exact な fact を持たない経路では `None`。
+    own_future_draws: Option<u32>,
     same_shanten_downstream: bool,
     // 1手目の打牌前の手牌。深い枝の状態と同じ型で持ち、段ごとに別の組み立てをしない。
     root: HandState,
@@ -388,6 +449,8 @@ impl<'a> LookaheadInputs<'a> {
             round_wind,
             seat_wind,
             valuator: None,
+            tsumo_valuator: None,
+            own_future_draws: None,
             same_shanten_downstream: false,
             root: HandState {
                 counts: TileCounts::from_tiles(tiles.iter().copied()),
@@ -426,6 +489,37 @@ impl<'a> LookaheadInputs<'a> {
         self
     }
 
+    /// テンパイをツモ和了だけで評価する評価器を設定する。
+    ///
+    /// 残り自摸機会 ([`Self::with_own_future_draws`]) と両方揃った場合だけ、1向聴候補の
+    /// self-tsumo continuation ([`DiscardLookaheadDiagnostic::expected_self_tsumo_value`]) を
+    /// 集計する。片方でも欠ける局面では新しい軸を持たず、既存の集計値だけになる。
+    pub fn with_tsumo_valuator(mut self, valuator: &'a dyn ProspectiveTsumoValuator) -> Self {
+        self.tsumo_valuator = Some(valuator);
+        self
+    }
+
+    /// 現在打牌後に自分へ残っている自摸機会を設定する。
+    ///
+    /// 山の残枚数から導いた exact な fact だけを渡す。推測した巡目や河の枚数から作った近似値を
+    /// 渡さないこと。
+    pub fn with_own_future_draws(mut self, own_future_draws: u32) -> Self {
+        self.own_future_draws = Some(own_future_draws);
+        self
+    }
+
+    /// self-tsumo continuation を集計するための事実。材料が揃わない局面では `None`。
+    ///
+    /// 未確認牌の総数は現在の手牌と見え牌から求めた値で、打牌候補によらず共通になる。打牌で
+    /// 手牌から河へ移る1枚はどちらの経路でも見えているため、候補ごとに変わらない。
+    pub fn self_tsumo_facts(&self) -> Option<SelfTsumoFacts> {
+        self.tsumo_valuator?;
+        Some(SelfTsumoFacts {
+            unknown_tiles: unknown_tile_count(&self.root.counts, self.root.seen.base()),
+            own_future_draws: self.own_future_draws?,
+        })
+    }
+
     /// same-shanten の枝を、テンパイまでもう1段進めた詳細診断
     /// ([`DrawVariantLookaheadDiagnostic::downstream`]) を構築する。
     ///
@@ -451,11 +545,17 @@ pub fn diagnose_lookahead(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
 ) -> LookaheadDiagnostic {
+    let targets = self_tsumo_target_mask(inputs, evaluations);
     LookaheadDiagnostic {
         candidates: evaluations
             .iter()
-            .map(|evaluation| {
-                search_candidate(inputs, evaluation, &diagnostic_scopes(inputs, evaluation))
+            .zip(targets)
+            .map(|(evaluation, target)| {
+                search_candidate(
+                    inputs,
+                    evaluation,
+                    &diagnostic_scopes(inputs, evaluation, target),
+                )
             })
             .collect(),
     }
@@ -487,10 +587,9 @@ pub fn forward_metrics(
             if !target {
                 return ForwardMetrics::default();
             }
-            forward_metrics_for_shanten(
-                best_shanten,
-                weighted_forward_metric_for_candidate(inputs, evaluation, best_shanten - 1),
-            )
+            let candidate =
+                search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
+            forward_metrics_from_candidate(inputs, evaluation, &candidate, best_shanten)
         })
         .collect()
 }
@@ -503,6 +602,7 @@ pub fn forward_metrics(
 /// `lookahead` は `evaluations` から構築したものを渡す。候補の順序・牌種が対応しない場合は
 /// 推測せず [`ForwardMetrics::default`] にする。
 pub fn forward_metrics_from_lookahead(
+    inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
     lookahead: &LookaheadDiagnostic,
 ) -> Vec<ForwardMetrics> {
@@ -520,10 +620,7 @@ pub fn forward_metrics_from_lookahead(
             if !target || candidate.discard != evaluation.discard {
                 return ForwardMetrics::default();
             }
-            forward_metrics_for_shanten(
-                best_shanten,
-                candidate.weighted_forward_metric(best_shanten - 1),
-            )
+            forward_metrics_from_candidate(inputs, evaluation, candidate, best_shanten)
         })
         .collect()
 }
@@ -541,10 +638,12 @@ pub fn forward_metrics_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> ForwardMetrics {
-    let shanten = evaluation.min_shanten_after_discard();
-    forward_metrics_for_shanten(
-        shanten,
-        weighted_forward_metric_for_candidate(inputs, evaluation, shanten - 1),
+    let candidate = search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
+    forward_metrics_from_candidate(
+        inputs,
+        evaluation,
+        &candidate,
+        evaluation.min_shanten_after_discard(),
     )
 }
 
@@ -601,10 +700,11 @@ fn explores_downstream(evaluation: &DiscardEvaluation) -> bool {
 }
 
 pub fn tenpai_wait_metrics_from_lookahead(
+    inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
     lookahead: &LookaheadDiagnostic,
 ) -> Vec<Option<TenpaiWaitMetric>> {
-    forward_metrics_from_lookahead(evaluations, lookahead)
+    forward_metrics_from_lookahead(inputs, evaluations, lookahead)
         .into_iter()
         .map(|metric| metric.tenpai_wait)
         .collect()
@@ -618,36 +718,105 @@ fn best_shanten(evaluations: &[DiscardEvaluation]) -> i8 {
         .unwrap_or(i8::MAX)
 }
 
+// 探索済みの枝から打牌選択用の前方集計値を組み立てる。選択専用経路と詳細診断経路はこの1本を
+// 共有し、集計規則を複製しない。
+fn forward_metrics_from_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    candidate: &DiscardLookaheadDiagnostic,
+    best_shanten: i8,
+) -> ForwardMetrics {
+    forward_metrics_for_shanten(
+        best_shanten,
+        candidate.weighted_forward_metric(best_shanten - 1),
+        self_tsumo_value_for_candidate(inputs, evaluation, candidate),
+    )
+}
+
+// 現在打牌後が1向聴の候補だけが持つ self-tsumo continuation。材料が揃わない局面と1向聴以外は
+// 集計しない。
+fn self_tsumo_value_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    candidate: &DiscardLookaheadDiagnostic,
+) -> Option<u64> {
+    if !explores_downstream(evaluation) {
+        return None;
+    }
+    candidate.expected_self_tsumo_value(inputs.self_tsumo_facts()?)
+}
+
 // 集計値を現在打牌後の向聴数に応じた枠へ入れる。打点込みの集計値は向聴数に依らず持ち回る。
-fn forward_metrics_for_shanten(best_shanten: i8, metric: WeightedForwardMetric) -> ForwardMetrics {
+fn forward_metrics_for_shanten(
+    best_shanten: i8,
+    metric: WeightedForwardMetric,
+    expected_self_tsumo_value: Option<u64>,
+) -> ForwardMetrics {
     let tenpai_wait = (best_shanten == TENPAI_SHANTEN + 1).then_some(metric);
     ForwardMetrics {
         tenpai_wait,
         next_acceptance: (tenpai_wait.is_none()).then_some(metric),
         prospective_value: metric.prospective_value,
+        expected_self_tsumo_value,
     }
 }
 
 // 詳細診断が進める枝。深さと対象の違いはこの指定だけが持ち、探索そのものは選択専用集計と
 // 共有する。
-fn diagnostic_scopes(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> [DrawScope; 2] {
+//
+// self-tsumo continuation を集計する局面では、詳細診断を要求されていなくても手変わりの枝の
+// 先まで進める。詳細診断の有無で選択に使う値が変わらないようにするための条件で、選択専用経路
+// ([`selection_scopes`]) と同じ枝集合になる。
+fn diagnostic_scopes(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    self_tsumo_target: bool,
+) -> [DrawScope; 2] {
     [
         DrawScope::Progress,
         DrawScope::SameShanten {
-            downstream: inputs.same_shanten_downstream && explores_downstream(evaluation),
+            downstream: (inputs.same_shanten_downstream && explores_downstream(evaluation))
+                || self_tsumo_target,
         },
     ]
 }
 
-// 現在の打牌候補1件分の前方集計値。探索は詳細診断と同じ core を共有し、進めるのは既存集計の
-// 対象になる向聴数を下げる枝だけ。全候補分の診断も same-shanten の枝も構築しない。
-fn weighted_forward_metric_for_candidate(
+// 打牌選択用の集計が進める枝。self-tsumo continuation を集計する候補だけ、手変わりの枝を
+// テンパイまで進める。Progress と SameShanten を別々に探索せず、1回の探索で両方の集計値を
+// 求める。
+fn selection_scopes(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> Vec<DrawScope> {
+    if self_tsumo_target(inputs, evaluation) {
+        return vec![
+            DrawScope::Progress,
+            DrawScope::SameShanten { downstream: true },
+        ];
+    }
+    PROGRESS_ONLY.to_vec()
+}
+
+// この候補で self-tsumo continuation を集計するか。材料が揃った局面の1向聴候補だけが対象。
+fn self_tsumo_target(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> bool {
+    inputs.self_tsumo_facts().is_some() && explores_downstream(evaluation)
+}
+
+// self-tsumo continuation を集計する候補の mask。
+//
+// 詳細診断も選択専用集計と同じ絞り込み ([`forward_target_mask`]) を共有し、比較対象にならない
+// 候補まで手変わりの枝を深く探索しない。全合法候補を無条件に深く探索すると、選択が使わない
+// 枝まで「打牌候補 × 手変わり × 次打牌 × 受け入れ × 次打牌」を回すことになる。
+fn self_tsumo_target_mask(
     inputs: &LookaheadInputs,
-    evaluation: &DiscardEvaluation,
-    required_next_shanten: i8,
-) -> WeightedForwardMetric {
-    search_candidate(inputs, evaluation, PROGRESS_ONLY)
-        .weighted_forward_metric(required_next_shanten)
+    evaluations: &[DiscardEvaluation],
+) -> Vec<bool> {
+    if inputs.self_tsumo_facts().is_none() || !requires_forward_metrics(evaluations) {
+        return vec![false; evaluations.len()];
+    }
+
+    forward_target_mask(evaluations)
+        .into_iter()
+        .zip(evaluations)
+        .map(|(target, evaluation)| target && self_tsumo_target(inputs, evaluation))
+        .collect()
 }
 
 // same-shanten の枝を既存 accumulator で集計する。集計対象の2手目打牌後の向聴数は枝ごとの
@@ -878,23 +1047,25 @@ impl CandidateBranch {
                 remaining: variant.remaining,
                 next_discard: None,
                 prospective_value: None,
+                tsumo_continuation: None,
                 downstream: None,
             };
         };
 
-        let (next_discard, prospective_value) = next_discard(inputs, &state);
+        let next = next_discard(inputs, &state);
         DrawVariantLookaheadDiagnostic {
             drawn_tile: variant.tile,
             remaining: variant.remaining,
             // 先の段も同じ探索 primitive を、対象の枝を変えて呼ぶだけ。
             downstream: scope
                 .continues_downstream()
-                .then_some(next_discard.as_ref())
+                .then_some(next.evaluation.as_ref())
                 .flatten()
-                .and_then(|next| search(inputs, &state, next, PROGRESS_ONLY))
+                .and_then(|evaluation| search(inputs, &state, evaluation, PROGRESS_ONLY))
                 .map(|draws| SameShantenDownstreamDiagnostic { draws }),
-            next_discard,
-            prospective_value,
+            next_discard: next.evaluation,
+            prospective_value: next.prospective_value,
+            tsumo_continuation: next.tsumo_continuation,
         }
     }
 
@@ -933,10 +1104,7 @@ fn drawable(tile: &EffectiveAcceptanceTile) -> DrawableTile {
 // 仮想手牌1つ分の最良打牌を既存打牌評価・既存文脈反映・既存比較順で求める。仮想ツモ牌の物理牌が
 // 決まっているため、赤5も通常打牌評価と同じ経路で反映できる。テンパイへ進む候補には将来打点を
 // 付け、比較の打点軸へ渡す。
-fn next_discard(
-    inputs: &LookaheadInputs,
-    state: &HandState,
-) -> (Option<DiscardEvaluation>, Option<u64>) {
+fn next_discard(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
     let mut evaluations =
         evaluate_discards_with_seen(&state.counts, inputs.fixed_meld_count, &state.seen);
     decorate_evaluations(
@@ -965,10 +1133,26 @@ fn next_discard(
         .map(|&value| ForwardMetrics::from_prospective_value(value))
         .collect();
 
-    match best_discard_selection_index_with_forward_metrics(&evaluations, &metrics) {
-        Some(index) => (Some(evaluations.swap_remove(index)), values[index]),
-        None => (None, None),
+    let Some(index) = best_discard_selection_index_with_forward_metrics(&evaluations, &metrics)
+    else {
+        return NextDiscard::default();
+    };
+    let evaluation = evaluations.swap_remove(index);
+    NextDiscard {
+        // ツモ continuation は選ばれた1件だけ求める。2手目の打牌比較は既存の打点軸のままで、
+        // 候補ごとにツモ点数計算を走らせない。
+        tsumo_continuation: tenpai_tsumo_value(inputs, state, &evaluation),
+        prospective_value: values[index],
+        evaluation: Some(evaluation),
     }
+}
+
+// 仮想手牌1つ分の最良打牌と、その打牌後のテンパイの将来打点。
+#[derive(Default)]
+struct NextDiscard {
+    evaluation: Option<DiscardEvaluation>,
+    prospective_value: Option<u64>,
+    tsumo_continuation: Option<TenpaiTsumoValue>,
 }
 
 // 打牌候補1件分の将来打点。テンパイへ進む候補だけが値を持つ。
@@ -981,6 +1165,35 @@ fn prospective_value(
     evaluation: &DiscardEvaluation,
 ) -> Option<u64> {
     let valuator = inputs.valuator?;
+    with_prospective_tenpai(state, evaluation, |tenpai| valuator.tenpai_value(tenpai))
+}
+
+// 打牌候補1件分のツモ continuation。テンパイへ進む候補だけが値を持つ。
+//
+// 仮想テンパイの組み立てはロン baseline の将来打点と同じ helper を共有し、フリテン基盤も河の
+// 組み立ても別に持たない。
+fn tenpai_tsumo_value(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    evaluation: &DiscardEvaluation,
+) -> Option<TenpaiTsumoValue> {
+    // 残り自摸機会が分からない局面では continuation を集計できないので、点数計算も行わない。
+    inputs.self_tsumo_facts()?;
+    let valuator = inputs.tsumo_valuator?;
+    with_prospective_tenpai(state, evaluation, |tenpai| {
+        valuator.tenpai_tsumo_value(tenpai)
+    })
+}
+
+// 打牌後がテンパイの候補について、将来テンパイ1件分の入力を組み立てて評価器へ渡す。
+//
+// 将来テンパイ時点の自分の河は「現在の自分の河 + ここまでに切った牌 + この打牌」で、既存
+// フリテン基盤へそのまま渡す。フリテン判定はこの module が持たない。
+fn with_prospective_tenpai<T>(
+    state: &HandState,
+    evaluation: &DiscardEvaluation,
+    evaluate: impl FnOnce(&ProspectiveTenpai<'_>) -> Option<T>,
+) -> Option<T> {
     if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
         return None;
     }
@@ -988,11 +1201,57 @@ fn prospective_value(
     let (discarded, concealed_tiles) = split_discarded_tile(state.tiles.clone(), evaluation)?;
     let discarded_tiles: Vec<_> = state.discarded.iter().copied().chain([discarded]).collect();
 
-    valuator.tenpai_value(&ProspectiveTenpai {
+    evaluate(&ProspectiveTenpai {
         concealed_tiles: &concealed_tiles,
         acceptance: &evaluation.acceptance_after_discard,
         discarded_tiles: &discarded_tiles,
     })
+}
+
+// terminal tenpai へ到達した枝1つ分の期待支払い。
+//
+// テンパイへ到達しない枝は寄与 0 で、テンパイだがツモ打点を確定できない枝だけが `None`。
+fn terminal_self_tsumo_value(
+    variant: &DrawVariantLookaheadDiagnostic,
+    facts: SelfTsumoFacts,
+    path: impl FnOnce() -> Option<SelfTsumoPath>,
+) -> Option<u64> {
+    let Some(next) = variant.next_discard.as_ref() else {
+        return Some(0);
+    };
+    if next.min_shanten_after_discard() != TENPAI_SHANTEN {
+        return Some(0);
+    }
+    let terminal = variant.tsumo_continuation?;
+    Some(path()?.expected_payment(facts, terminal))
+}
+
+// 手変わりの枝1つ分の期待支払い。2手目の打牌後の1向聴からもう1段進めたテンパイだけを集計する。
+//
+// 2回続けて向聴数を維持する枝はこの探索が持たないため、寄与 0 になる。先の枝を探索していない
+// 場合は「この経路を評価していない」ので、寄与 0 ではなく確定しない値として扱う。
+fn same_shanten_self_tsumo_value(
+    variant: &DrawVariantLookaheadDiagnostic,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    if variant.next_discard.is_none() {
+        return Some(0);
+    }
+
+    let mut total = 0u64;
+    for draw in &variant.downstream.as_ref()?.draws {
+        for second in &draw.variants {
+            let value = terminal_self_tsumo_value(second, facts, || {
+                SelfTsumoPath::via_same_shanten(
+                    variant.remaining,
+                    second.remaining,
+                    facts.unknown_tiles,
+                )
+            })?;
+            total = total.saturating_add(value);
+        }
+    }
+    Some(total)
 }
 
 #[cfg(test)]
@@ -1802,7 +2061,11 @@ mod tests {
         let case = &*IISHANTEN_WAIT_CASE;
 
         assert_eq!(
-            tenpai_wait_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+            tenpai_wait_metrics_from_lookahead(
+                &inputs(&case.situation),
+                &case.situation.evaluations,
+                &case.lookahead,
+            ),
             metrics(&case.situation),
         );
     }
@@ -1989,7 +2252,11 @@ mod tests {
         assert!(metrics.iter().any(Option::is_some), "1向聴候補が必要");
         assert_eq!(
             metrics,
-            tenpai_wait_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+            tenpai_wait_metrics_from_lookahead(
+                &inputs(&case.situation),
+                &case.situation.evaluations,
+                &case.lookahead,
+            ),
         );
 
         for (candidate, metric) in case.lookahead.candidates.iter().zip(metrics.iter()) {
@@ -2020,7 +2287,11 @@ mod tests {
         assert!(metrics.iter().any(Option::is_some));
         assert_eq!(
             metrics,
-            tenpai_wait_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+            tenpai_wait_metrics_from_lookahead(
+                &inputs(&case.situation),
+                &case.situation.evaluations,
+                &case.lookahead,
+            ),
         );
     }
 
@@ -2048,6 +2319,7 @@ mod tests {
 
         assert!(
             tenpai_wait_metrics_from_lookahead(
+                &inputs(&case.situation),
                 &case.situation.evaluations,
                 &LookaheadDiagnostic::default(),
             )
@@ -2503,7 +2775,11 @@ mod tests {
         let case = &*SAME_SHANTEN_CASE;
         let metrics = forward_metrics(&inputs(&case.situation), &case.situation.evaluations);
         assert_eq!(
-            forward_metrics_from_lookahead(&case.situation.evaluations, &case.lookahead),
+            forward_metrics_from_lookahead(
+                &inputs(&case.situation),
+                &case.situation.evaluations,
+                &case.lookahead,
+            ),
             metrics,
         );
 
@@ -2986,10 +3262,17 @@ mod tests {
         let followed = &*SAME_SHANTEN_DOWNSTREAM_CASE;
         assert_eq!(plain.situation.evaluations, followed.situation.evaluations);
 
-        let metrics =
-            forward_metrics_from_lookahead(&plain.situation.evaluations, &plain.lookahead);
+        let metrics = forward_metrics_from_lookahead(
+            &inputs(&plain.situation),
+            &plain.situation.evaluations,
+            &plain.lookahead,
+        );
         assert_eq!(
-            forward_metrics_from_lookahead(&followed.situation.evaluations, &followed.lookahead),
+            forward_metrics_from_lookahead(
+                &inputs(&followed.situation),
+                &followed.situation.evaluations,
+                &followed.lookahead,
+            ),
             metrics,
         );
         assert_eq!(
@@ -3021,5 +3304,301 @@ mod tests {
                 plain_candidate.weighted_forward_metric(TENPAI_SHANTEN),
             );
         }
+    }
+
+    // ---- self-tsumo continuation ----
+
+    // テンパイ形の待ちをそのままツモ和了できる待ちとし、1枚あたり固定打点を持つ検証用の評価器。
+    //
+    // 点数計算は bot-logic の責務ではないので、経路の確率と深さの組み立てだけを見る。
+    struct FixedTsumoValuator {
+        payment: u64,
+    }
+
+    impl ProspectiveTsumoValuator for FixedTsumoValuator {
+        fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
+            let winning_remaining = u32::from(tenpai.acceptance.total_remaining());
+            Some(TenpaiTsumoValue {
+                winning_remaining,
+                weighted_total: u64::from(winning_remaining) * self.payment,
+            })
+        }
+    }
+
+    // 指定した牌を待ちに含むテンパイだけツモ打点を確定できない検証用の評価器。
+    struct UnknownWaitTsumoValuator {
+        unknown_wait: TileType,
+    }
+
+    impl ProspectiveTsumoValuator for UnknownWaitTsumoValuator {
+        fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
+            tenpai
+                .acceptance
+                .tiles
+                .iter()
+                .all(|wait| wait.tile != self.unknown_wait)
+                .then(|| TenpaiTsumoValue {
+                    winning_remaining: u32::from(tenpai.acceptance.total_remaining()),
+                    weighted_total: u64::from(tenpai.acceptance.total_remaining()) * 3900,
+                })
+        }
+    }
+
+    static FIXED_TSUMO_VALUATOR: FixedTsumoValuator = FixedTsumoValuator { payment: 3900 };
+
+    // 検証用の残り自摸機会。局面から導く値ではなく、確率の組み立てだけを固定するための入力。
+    const TEST_OWN_FUTURE_DRAWS: u32 = 10;
+
+    fn self_tsumo_inputs<'a>(
+        situation: &'a Situation,
+        valuator: &'a dyn ProspectiveTsumoValuator,
+    ) -> LookaheadInputs<'a> {
+        inputs(situation)
+            .with_tsumo_valuator(valuator)
+            .with_own_future_draws(TEST_OWN_FUTURE_DRAWS)
+    }
+
+    // 構築済みの枝を辿って期待支払いを組み立て直す。集計対象の経路と深さが実装と一致することを
+    // 確認するためのもので、確率そのものは self_tsumo module の単体テストが固定する。
+    fn expected_paths_value(
+        candidate: &DiscardLookaheadDiagnostic,
+        facts: SelfTsumoFacts,
+    ) -> Option<u64> {
+        let terminal = |variant: &DrawVariantLookaheadDiagnostic, path: Option<SelfTsumoPath>| {
+            let next = variant.next_discard.as_ref()?;
+            (next.min_shanten_after_discard() == TENPAI_SHANTEN).then(|| {
+                path.unwrap()
+                    .expected_payment(facts, variant.tsumo_continuation.unwrap())
+            })
+        };
+
+        let mut total = 0u64;
+        for draw in &candidate.draws {
+            for variant in &draw.variants {
+                match draw.transition {
+                    DrawTransition::Progress => {
+                        let path = SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles);
+                        total += terminal(variant, path).unwrap_or(0);
+                    }
+                    DrawTransition::SameShanten => {
+                        for second_draw in &variant.downstream.as_ref()?.draws {
+                            for second in &second_draw.variants {
+                                let path = SelfTsumoPath::via_same_shanten(
+                                    variant.remaining,
+                                    second.remaining,
+                                    facts.unknown_tiles,
+                                );
+                                total += terminal(second, path).unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(total)
+    }
+
+    #[test]
+    fn the_unknown_tile_count_is_the_same_for_every_candidate() {
+        // 打牌で手牌から河へ移る1枚はどちらでも見えているので、未確認牌の総数は候補で変わらない。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+
+        // 手牌14枚だけが見えている局面なので、未確認牌は 136 - 14 枚。
+        assert_eq!(facts.unknown_tiles, 122);
+        assert_eq!(facts.own_future_draws, TEST_OWN_FUTURE_DRAWS);
+    }
+
+    #[test]
+    fn the_expected_self_tsumo_value_sums_the_immediate_and_hand_change_paths() {
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let evaluation = evaluation_of(case, tile("9s"));
+        let candidate = search_candidate(
+            &inputs,
+            evaluation,
+            &[
+                DrawScope::Progress,
+                DrawScope::SameShanten { downstream: true },
+            ],
+        );
+
+        let value = candidate
+            .expected_self_tsumo_value(facts)
+            .expect("ツモ打点を確定できる");
+        assert_eq!(Some(value), expected_paths_value(&candidate, facts));
+        assert!(value > 0);
+    }
+
+    #[test]
+    fn the_hand_change_paths_are_added_on_the_same_scale_as_the_immediate_ones() {
+        // すぐテンパイする経路と一度手変わりする経路が同じ尺度で足し合わされる。手変わりの枝を
+        // 進めた集計値は、向聴数を下げる枝だけの集計値より必ず大きい。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let evaluation = evaluation_of(case, tile("9s"));
+
+        let immediate = search_candidate(&inputs, evaluation, PROGRESS_ONLY)
+            .expected_self_tsumo_value(facts)
+            .expect("ツモ打点を確定できる");
+        let with_hand_change = search_candidate(
+            &inputs,
+            evaluation,
+            &[
+                DrawScope::Progress,
+                DrawScope::SameShanten { downstream: true },
+            ],
+        )
+        .expected_self_tsumo_value(facts)
+        .expect("ツモ打点を確定できる");
+
+        assert!(
+            with_hand_change > immediate,
+            "with_hand_change: {with_hand_change}, immediate: {immediate}"
+        );
+    }
+
+    #[test]
+    fn a_hand_change_path_needs_the_branch_beyond_it() {
+        // 手変わりの枝の先を探索していない診断は、寄与 0 ではなく確定しない値になる。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let evaluation = evaluation_of(case, tile("9s"));
+        let shallow = search_candidate(
+            &inputs,
+            evaluation,
+            &[
+                DrawScope::Progress,
+                DrawScope::SameShanten { downstream: false },
+            ],
+        );
+
+        assert_eq!(shallow.expected_self_tsumo_value(facts), None);
+    }
+
+    #[test]
+    fn an_unknown_tsumo_value_makes_the_whole_candidate_unknown() {
+        let case = &*SAME_SHANTEN_CASE;
+        let valuator = UnknownWaitTsumoValuator {
+            unknown_wait: tile("2m"),
+        };
+        let inputs = self_tsumo_inputs(&case.situation, &valuator);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let evaluation = evaluation_of(case, tile("9s"));
+        let candidate = search_candidate(
+            &inputs,
+            evaluation,
+            &[
+                DrawScope::Progress,
+                DrawScope::SameShanten { downstream: true },
+            ],
+        );
+
+        assert_eq!(candidate.expected_self_tsumo_value(facts), None);
+    }
+
+    #[test]
+    fn the_facts_need_both_the_valuator_and_the_remaining_draws() {
+        let case = &*SAME_SHANTEN_CASE;
+        assert_eq!(inputs(&case.situation).self_tsumo_facts(), None);
+        assert_eq!(
+            inputs(&case.situation)
+                .with_own_future_draws(TEST_OWN_FUTURE_DRAWS)
+                .self_tsumo_facts(),
+            None
+        );
+        assert_eq!(
+            inputs(&case.situation)
+                .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+                .self_tsumo_facts(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_selection_metric_and_the_detailed_diagnostic_agree() {
+        // 詳細診断の有無で、打牌選択が使う self-tsumo continuation が変わらない。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let evaluations = &case.situation.evaluations;
+
+        let selection = forward_metrics(&inputs, evaluations);
+        let lookahead = diagnose_lookahead(&inputs, evaluations);
+        let from_diagnostic = forward_metrics_from_lookahead(&inputs, evaluations, &lookahead);
+
+        assert_eq!(selection, from_diagnostic);
+        assert!(
+            selection
+                .iter()
+                .any(|metric| metric.expected_self_tsumo_value.is_some())
+        );
+    }
+
+    #[test]
+    fn without_the_remaining_draws_the_new_axis_is_unavailable() {
+        // 山の残枚数が分からない局面では新しい軸を持たず、既存の集計値だけになる。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluations = &case.situation.evaluations;
+        let plain = forward_metrics(
+            &inputs(&case.situation).with_tsumo_valuator(&FIXED_TSUMO_VALUATOR),
+            evaluations,
+        );
+
+        assert!(
+            plain
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+    }
+
+    #[test]
+    fn only_the_comparison_targets_search_the_hand_change_branch() {
+        // 比較対象にならない候補まで手変わりの枝を深く探索しない。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let evaluations = &case.situation.evaluations;
+        let lookahead = diagnose_lookahead(&inputs, evaluations);
+        let targets = forward_target_mask(evaluations);
+
+        for ((candidate, evaluation), target) in
+            lookahead.candidates.iter().zip(evaluations).zip(targets)
+        {
+            let searched = candidate
+                .draws_with(DrawTransition::SameShanten)
+                .any(|draw| {
+                    draw.variants
+                        .iter()
+                        .any(|variant| variant.downstream.is_some())
+                });
+            assert_eq!(
+                searched,
+                target && evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN,
+                "{:?}",
+                candidate.discard
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_shanten_candidate_set_keeps_its_existing_metrics() {
+        // 2向聴以上では新しい軸を持たず、既存の集計値も変わらない。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        let evaluations = &case.situation.evaluations;
+        let with_axis = forward_metrics(
+            &self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR),
+            evaluations,
+        );
+        let without_axis = forward_metrics(&inputs(&case.situation), evaluations);
+
+        assert_eq!(with_axis, without_axis);
+        assert!(
+            with_axis
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
     }
 }

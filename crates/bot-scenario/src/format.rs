@@ -16,7 +16,8 @@ use bot_logic::{
     DiscardEvaluation, DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic,
     DrawLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,
     EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
-    PermanentFuriten, Shanten, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
+    PermanentFuriten, SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath, Shanten,
+    TSUMO_PROBABILITY_SCALE, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
 };
 
 use crate::scenario::Scenario;
@@ -54,6 +55,7 @@ pub fn format_diagnostic(
     if let Some(section) = format_lookahead(
         diagnostic.normal_discard_lookahead.as_ref(),
         diagnostic.normal_discard_lookahead_value.as_ref(),
+        diagnostic.normal_discard_self_tsumo_facts,
         verbose,
     ) {
         sections.push(section);
@@ -410,6 +412,11 @@ fn format_normal_discard_candidate(
         "  weighted next acceptance: {}",
         format_tenpai_wait(candidate.next_acceptance)
     ));
+    // 打牌選択が実際に使った scalar そのもの。表示のために探索も集計もやり直さない。
+    lines.push(format!(
+        "  expected self-tsumo value: {}",
+        format_self_tsumo_value(candidate.expected_self_tsumo_value)
+    ));
     lines.extend(format_candidate_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
@@ -551,6 +558,7 @@ fn format_discarded_waits(tenpai: &TenpaiWaitAvailability) -> String {
 fn format_lookahead(
     lookahead: Option<&LookaheadDiagnostic>,
     value: Option<&ProspectiveLookaheadDiagnostic>,
+    facts: Option<SelfTsumoFacts>,
     verbose: bool,
 ) -> Option<String> {
     let lookahead = lookahead?;
@@ -559,19 +567,36 @@ fn format_lookahead(
     }
 
     let mut lines = vec!["Lookahead".to_string()];
+    lines.extend(format_self_tsumo_facts(facts));
     for candidate in &lookahead.candidates {
         lines.extend(format_lookahead_candidate(
             candidate,
             value.and_then(|value| value.candidate(candidate.discard)),
+            facts,
             verbose,
         ));
     }
     Some(lines.join("\n"))
 }
 
+// self-tsumo continuation の集計に使った局面共通の事実。候補ごとに変わらないので節の先頭で
+// 1回だけ出す。材料が揃わない局面では新しい軸そのものを使っていないので、その旨だけを出す。
+fn format_self_tsumo_facts(facts: Option<SelfTsumoFacts>) -> Vec<String> {
+    let Some(facts) = facts else {
+        return vec![format!("  self-tsumo continuation: {NOT_EVALUATED}")];
+    };
+
+    vec![
+        "  self-tsumo continuation".to_string(),
+        format!("    unknown tiles: {}", facts.unknown_tiles),
+        format!("    current future own draws: {}", facts.own_future_draws),
+    ]
+}
+
 fn format_lookahead_candidate(
     candidate: &DiscardLookaheadDiagnostic,
     value: Option<&ProspectiveDiscardValue>,
+    facts: Option<SelfTsumoFacts>,
     verbose: bool,
 ) -> Vec<String> {
     let mut lines = vec![format!("  {}", candidate.discard.to_mjai_string())];
@@ -611,9 +636,45 @@ fn format_lookahead_candidate(
             draw,
             value.and_then(|value| value.draw(draw.draw)),
             DRAW_INDENT,
+            facts.map(SelfTsumoStep::first),
         ));
     }
     lines
+}
+
+// 仮想ツモ枝1つ分の self-tsumo continuation を表示するための、その枝までの経路。
+#[derive(Debug, Clone, Copy)]
+struct SelfTsumoStep {
+    facts: SelfTsumoFacts,
+    // 1段目の手変わりツモの残枚数。手変わりの先の段だけが持つ。
+    first_remaining: Option<u8>,
+}
+
+impl SelfTsumoStep {
+    fn first(facts: SelfTsumoFacts) -> Self {
+        Self {
+            facts,
+            first_remaining: None,
+        }
+    }
+
+    // 手変わりの枝の先へ進んだ段。1段目のツモ牌の残枚数を経路確率へ持ち越す。
+    fn after_same_shanten(self, remaining: u8) -> Self {
+        Self {
+            first_remaining: Some(remaining),
+            ..self
+        }
+    }
+
+    // この段の物理牌 variant 1つ分の経路。
+    fn path(self, remaining: u8) -> Option<SelfTsumoPath> {
+        match self.first_remaining {
+            None => SelfTsumoPath::immediate(remaining, self.facts.unknown_tiles),
+            Some(first) => {
+                SelfTsumoPath::via_same_shanten(first, remaining, self.facts.unknown_tiles)
+            }
+        }
+    }
 }
 
 // 仮想ツモ枝の見出しの字下げ。深い段はここから4つずつ下げて、どの段の枝かを字下げで示す。
@@ -637,6 +698,7 @@ fn format_lookahead_draw(
     draw: &DrawLookaheadDiagnostic,
     value: Option<&ProspectiveDrawValue>,
     indent: usize,
+    step: Option<SelfTsumoStep>,
 ) -> Vec<String> {
     let mut lines = vec![format!(
         "{:indent$}draw {}: {} remaining, shanten after draw {}, transition {:?}",
@@ -652,6 +714,7 @@ fn format_lookahead_draw(
             variant,
             value.and_then(|value| value.variant(variant.drawn_tile)),
             indent,
+            step,
         ));
     }
     lines
@@ -663,6 +726,7 @@ fn format_lookahead_draw_variant(
     variant: &DrawVariantLookaheadDiagnostic,
     value: Option<&ProspectiveDrawVariantValue>,
     indent: usize,
+    step: Option<SelfTsumoStep>,
 ) -> Vec<String> {
     let variant_indent = indent + 2;
     let detail = indent + 4;
@@ -678,6 +742,7 @@ fn format_lookahead_draw_variant(
         lines.extend(format_prospective_value(variant, value, detail));
         return lines;
     };
+    let step = step.map(|step| (step, step.path(variant.remaining)));
 
     lines.push(format!(
         "{:detail$}next discard: {}",
@@ -708,8 +773,123 @@ fn format_lookahead_draw_variant(
         ));
     }
     lines.extend(format_prospective_value(variant, value, detail));
-    lines.extend(format_lookahead_downstream(variant, detail));
+    if let Some((_, path)) = step {
+        lines.extend(format_self_tsumo_continuation(
+            variant,
+            value,
+            path,
+            step.map(|(step, _)| step.facts),
+            detail,
+        ));
+    }
+    lines.extend(format_lookahead_downstream(
+        variant,
+        detail,
+        step.map(|(step, _)| step.after_same_shanten(variant.remaining)),
+    ));
     lines
+}
+
+// テンパイへ到達した枝1つ分の self-tsumo continuation。閉形式の材料と結果をそのまま出し、
+// テンパイでない枝とツモ打点を確定できない枝は理由だけを出す。
+//
+// 表示のために探索も点数計算もやり直さず、2手先評価が枝に持っている値だけを使う。
+fn format_self_tsumo_continuation(
+    variant: &DrawVariantLookaheadDiagnostic,
+    value: Option<&ProspectiveDrawVariantValue>,
+    path: Option<SelfTsumoPath>,
+    facts: Option<SelfTsumoFacts>,
+    indent: usize,
+) -> Vec<String> {
+    let is_tenpai = variant
+        .next_discard
+        .as_ref()
+        .is_some_and(|next| next.min_shanten_after_discard() == TENPAI_SHANTEN);
+    if !is_tenpai {
+        return Vec::new();
+    }
+
+    let (Some(path), Some(facts)) = (path, facts) else {
+        return vec![format!("{:indent$}tsumo continuation: {UNKNOWN}", "")];
+    };
+    let detail = indent + 2;
+    let mut lines = vec![
+        format!("{:indent$}tsumo continuation", ""),
+        format!(
+            "{:detail$}path probability: {}",
+            "",
+            format_probability(path.probability())
+        ),
+    ];
+
+    let Some(terminal) = variant.tsumo_continuation else {
+        lines.push(format!("{:detail$}terminal tenpai: {UNKNOWN}", ""));
+        return lines;
+    };
+
+    let unknown = path.terminal_unknown_tiles(facts);
+    let draws = path.terminal_own_future_draws(facts);
+    lines.push(format!("{:detail$}terminal tenpai", ""));
+    let terminal_detail = detail + 2;
+    lines.push(format!(
+        "{:terminal_detail$}mode: {}",
+        "",
+        offense_mode_label(value)
+    ));
+    lines.push(format!("{:terminal_detail$}unknown tiles: {unknown}", ""));
+    lines.push(format!("{:terminal_detail$}future own draws: {draws}", ""));
+    lines.push(format!(
+        "{:terminal_detail$}winning variants: {}",
+        "", terminal.winning_remaining
+    ));
+    lines.push(format!(
+        "{:terminal_detail$}hit probability: {}",
+        "",
+        format_probability(bot_logic::tsumo_hit_probability(
+            unknown,
+            terminal.winning_remaining,
+            draws
+        ))
+    ));
+    lines.push(format!(
+        "{:terminal_detail$}weighted tsumo payment: {}",
+        "", terminal.weighted_total
+    ));
+    lines.push(format!(
+        "{:terminal_detail$}continuation value: {}",
+        "",
+        format_self_tsumo_value(Some(terminal.expected_payment(unknown, draws)))
+    ));
+    lines.push(format!(
+        "{:detail$}path continuation value: {}",
+        "",
+        format_self_tsumo_value(Some(path.expected_payment(facts, terminal)))
+    ));
+    lines
+}
+
+// テンパイ到達後にどちらの baseline で評価したか。攻撃モードは既存の将来打点診断が持つ値を
+// そのまま読む。
+fn offense_mode_label(value: Option<&ProspectiveDrawVariantValue>) -> String {
+    match value.and_then(|value| value.outcome.evaluated()) {
+        Some(tenpai) => format!("{:?}", tenpai.mode),
+        None => UNKNOWN.to_string(),
+    }
+}
+
+// 固定小数点の確率を小数表記へ直す。表示のためだけの変換で、比較にも選択にも使わない。
+fn format_probability(scaled: u64) -> String {
+    let fraction = (scaled % TSUMO_PROBABILITY_SCALE) * 1_000_000 / TSUMO_PROBABILITY_SCALE;
+    format!("{}.{fraction:06}", scaled / TSUMO_PROBABILITY_SCALE)
+}
+
+// 固定小数点の期待支払いを点数表記へ直す。表示のためだけの変換で、比較にも選択にも使わない。
+fn format_self_tsumo_value(scaled: Option<u64>) -> String {
+    let Some(scaled) = scaled else {
+        return UNKNOWN.to_string();
+    };
+    let fraction = (scaled % SELF_TSUMO_VALUE_SCALE) * 1_000 / SELF_TSUMO_VALUE_SCALE;
+    format!("{}.{fraction:03}", scaled / SELF_TSUMO_VALUE_SCALE)
 }
 
 // same-shanten の枝の先にある将来テンパイ。次段の枝は同じ formatter を字下げだけ変えて通す。
@@ -718,6 +898,7 @@ fn format_lookahead_draw_variant(
 fn format_lookahead_downstream(
     variant: &DrawVariantLookaheadDiagnostic,
     indent: usize,
+    step: Option<SelfTsumoStep>,
 ) -> Vec<String> {
     let Some(downstream) = variant.downstream.as_ref() else {
         return Vec::new();
@@ -732,7 +913,7 @@ fn format_lookahead_downstream(
         lines.push(format!("{:indent$}{NONE}", ""));
     }
     for draw in &downstream.draws {
-        lines.extend(format_lookahead_draw(draw, None, indent));
+        lines.extend(format_lookahead_draw(draw, None, indent, step));
     }
     lines
 }
@@ -963,6 +1144,10 @@ fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<Strin
 
     vec![
         "    iishanten forward metrics".to_string(),
+        format!(
+            "      expected self-tsumo value: {}",
+            format_self_tsumo_value(metrics.expected_self_tsumo_value)
+        ),
         format!(
             "      weighted prospective value: {}",
             prospective_total_label(metrics.prospective_value)
@@ -5348,5 +5533,130 @@ mod tests {
         // 深い探索を要求しない診断では先の枝を出さず、既存の表示のまま変わらない。
         let output = &*PROSPECTIVE_VALUE_VERBOSE;
         assert!(!output.contains("downstream"), "{output}");
+    }
+
+    // ---- self-tsumo continuation の表示 ----
+
+    // 山の残枚数まで既知にした same-shanten 局面。self-tsumo continuation の材料が揃う。
+    const SELF_TSUMO_SCENARIO: &str = r#"{
+        "hand": "1368m456789p5s11z",
+        "draw": "9s",
+        "dora_indicators": "1p",
+        "round_wind": "E",
+        "seat_wind": "S",
+        "player_id": 0,
+        "oya": 3,
+        "remaining_tiles": 60,
+        "history_furiten": {"same_turn": false, "riichi_missed_win": false}
+    }"#;
+
+    // 2手先探索は重いので、同じ表示を確認する複数のテストで構築結果を共有する。
+    static SELF_TSUMO_VERBOSE: LazyLock<String> =
+        LazyLock::new(|| rendered_with_lookahead(SELF_TSUMO_SCENARIO, true));
+
+    #[test]
+    fn the_lookahead_section_shows_the_shared_self_tsumo_facts() {
+        // 局面共通の未確認牌と残り自摸機会を節の先頭に1回だけ出す。
+        let lookahead = section(&SELF_TSUMO_VERBOSE, "Lookahead");
+
+        // 手牌14枚 + ドラ表示牌1枚が見えているので未確認は 121枚。残り山 60枚を4人で分ける。
+        let facts = [
+            "  self-tsumo continuation",
+            "    unknown tiles: 121",
+            "    current future own draws: 15",
+        ]
+        .join("\n");
+        assert!(lookahead.contains(&facts), "{lookahead}");
+    }
+
+    #[test]
+    fn the_verbose_lookahead_shows_the_tsumo_continuation_of_a_tenpai_branch() {
+        // テンパイへ到達した枝は、経路確率と閉形式の材料・結果まで追える。
+        let lookahead = section(&SELF_TSUMO_VERBOSE, "Lookahead");
+
+        let branch = [
+            "        tsumo continuation",
+            "          path probability: 0.033057",
+            "          terminal tenpai",
+            "            mode: Reach",
+            "            unknown tiles: 120",
+            "            future own draws: 14",
+        ]
+        .join("\n");
+        assert!(lookahead.contains(&branch), "{lookahead}");
+        assert!(
+            lookahead.contains("            hit probability: "),
+            "{lookahead}"
+        );
+        assert!(
+            lookahead.contains("            weighted tsumo payment: "),
+            "{lookahead}"
+        );
+        assert!(
+            lookahead.contains("            continuation value: "),
+            "{lookahead}"
+        );
+        assert!(
+            lookahead.contains("          path continuation value: "),
+            "{lookahead}"
+        );
+    }
+
+    #[test]
+    fn the_candidate_summary_shows_the_selection_scalar() {
+        // 打牌選択が実際に使った scalar を候補ごとの概要で確認できる。
+        let (_, diagnostic, output) = rendered(SELF_TSUMO_SCENARIO, false);
+
+        let selected = diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("通常打牌診断がある")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("選択候補がある");
+        let value = selected
+            .expected_self_tsumo_value
+            .expect("ツモ打点を確定できる");
+
+        assert!(
+            output.contains(&format!(
+                "  expected self-tsumo value: {}",
+                format_self_tsumo_value(Some(value))
+            )),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_remaining_wall_reports_an_unavailable_continuation() {
+        // 山の残枚数が分からない局面では軸そのものを使わないと分かる表示にする。
+        let output = rendered_with_lookahead(SAME_SHANTEN_SCENARIO, false);
+
+        assert!(
+            output.contains("  self-tsumo continuation: not evaluated"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  expected self-tsumo value: unknown"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn the_self_tsumo_value_label_is_a_point_value() {
+        assert_eq!(format_self_tsumo_value(None), UNKNOWN);
+        assert_eq!(format_self_tsumo_value(Some(0)), "0.000");
+        assert_eq!(
+            format_self_tsumo_value(Some(SELF_TSUMO_VALUE_SCALE * 1234 + 567_000)),
+            "1234.567"
+        );
+    }
+
+    #[test]
+    fn the_probability_label_is_a_fraction_of_one() {
+        assert_eq!(format_probability(0), "0.000000");
+        assert_eq!(format_probability(TSUMO_PROBABILITY_SCALE), "1.000000");
+        assert_eq!(format_probability(TSUMO_PROBABILITY_SCALE / 4), "0.250000");
     }
 }

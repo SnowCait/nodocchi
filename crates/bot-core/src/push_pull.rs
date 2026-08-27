@@ -1592,6 +1592,7 @@ mod tests {
                 }),
                 next_acceptance: None,
                 prospective_value,
+                expected_self_tsumo_value: prospective_value,
             })
         };
 

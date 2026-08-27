@@ -35,6 +35,14 @@
 //! 集合 (cohort) 単位で決める ([`resolve_prospective_value_axis`])。cohort の全候補で打点が
 //! 確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化して既存
 //! weighted wait 以降へ委ねる。
+//!
+//! # self-tsumo continuation の軸
+//!
+//! 1向聴では、向聴数を下げる枝と1回だけ手変わりする枝を同じ尺度へ揃えた
+//! [`ForwardMetrics::expected_self_tsumo_value`] を打点込みの軸より先に比較する。値そのものは
+//! 2手先評価 ([`crate::lookahead`]) が [`crate::self_tsumo`] の確率模型で集計したもので、ここでは
+//! 係数も threshold も持たない。確定しない値を持ち得る点も同じなので、軸の有効・無効は打点込みの
+//! 軸と同じ cohort 単位の解決を通す。
 
 use crate::discard::{
     DiscardComparison, DiscardComparisonReason, DiscardEvaluation,
@@ -145,6 +153,12 @@ pub struct ForwardMetrics {
     /// 現在打牌の比較では [`TenpaiWaitMetric::prospective_value`] と同じ値を持ち、2手目の打牌
     /// 候補の比較ではそのテンパイ自身の確定打点をそのまま持つ。
     pub prospective_value: Option<u64>,
+    /// 1向聴限定の self-tsumo continuation 期待支払い
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// Σ(経路確率 × テンパイ到達後の期待ツモ支払い) で、Progress と SameShanten を同じ尺度へ
+    /// 揃えた値。材料が揃わない局面・確定できない枝がある候補・1向聴以外は `None`。
+    pub expected_self_tsumo_value: Option<u64>,
 }
 
 impl ForwardMetrics {
@@ -154,6 +168,7 @@ impl ForwardMetrics {
             tenpai_wait: None,
             next_acceptance: None,
             prospective_value,
+            expected_self_tsumo_value: None,
         }
     }
 }
@@ -173,6 +188,10 @@ pub struct DiscardSelectionCandidate<'a> {
     /// [`resolve_prospective_value_axis`] を通した値であること。比較そのものは両側が `Some`
     /// の場合だけ決着させる。
     pub prospective_value: Option<u64>,
+    /// self-tsumo continuation の期待支払い。
+    ///
+    /// 打点込みの前方集計値と同じく、軸の有無は候補集合単位で決める。
+    pub expected_self_tsumo_value: Option<u64>,
 }
 
 impl<'a> DiscardSelectionCandidate<'a> {
@@ -183,6 +202,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             tenpai_wait: None,
             next_acceptance: None,
             prospective_value: None,
+            expected_self_tsumo_value: None,
         }
     }
 }
@@ -193,6 +213,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
 ///
 /// ```text
 /// Shanten → IsolatedTile → IsolatedHonor
+///   → [1向聴のみ] ExpectedSelfTsumoValue
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
@@ -208,6 +229,10 @@ pub fn compare_discard_selection_candidates(
     if let Some(comparison) =
         compare_discard_before_acceptance(candidate.evaluation, current_best.evaluation)
     {
+        return comparison;
+    }
+
+    if let Some(comparison) = compare_expected_self_tsumo_value(candidate, current_best) {
         return comparison;
     }
 
@@ -240,23 +265,26 @@ pub fn best_discard_selection_index(
             tenpai_wait,
             next_acceptance: None,
             prospective_value: tenpai_wait.and_then(|metric| metric.prospective_value),
+            expected_self_tsumo_value: None,
         })
         .collect();
     best_discard_selection_index_with_forward_metrics(evaluations, &metrics)
 }
 
-/// 打点込みの軸を候補集合単位で有効化した前方集計値を返す。
+/// 確定しない値を持ち得る軸を、候補集合単位で有効化した前方集計値を返す。
 ///
-/// 打点込みの軸が使われるのは pre-acceptance 軸 (Shanten → IsolatedTile → IsolatedHonor) まで
-/// 同順位になる候補同士の比較だけなので、その cohort 単位で軸の有無を揃える。cohort の全候補で
-/// 打点が確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化する。
+/// 対象は self-tsumo continuation ([`ForwardMetrics::expected_self_tsumo_value`]) と打点込みの
+/// 集計値 ([`ForwardMetrics::prospective_value`]) の2つで、どちらも同じ規則で解決する。これらの
+/// 軸が使われるのは pre-acceptance 軸 (Shanten → IsolatedTile → IsolatedHonor) まで同順位になる
+/// 候補同士の比較だけなので、その cohort 単位で軸の有無を揃える。cohort の全候補でその軸が確定
+/// している場合だけ軸を残し、1件でも確定しない場合は cohort 全体でその軸を無効化する。
 ///
 /// 比較ごとに軸の有無が変わると順序が循環し、候補の列挙順で選択結果が変わってしまう。cohort が
 /// 違う候補同士は pre-acceptance 軸で先に決着するため、cohort をまたいで軸の有無が違っても
-/// 順序は壊れない。
+/// 順序は壊れない。2つの軸は互いに独立に解決するので、片方が無効でももう片方は残る。
 ///
 /// 戻り値は `evaluations` と同じ順序・同じ件数。`forward_metrics` の範囲外は前方評価なしとして
-/// 扱う。打点込みの軸以外の集計値は変更しない。
+/// 扱う。この2軸以外の集計値は変更しない。
 pub fn resolve_prospective_value_axis(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
@@ -267,18 +295,21 @@ pub fn resolve_prospective_value_axis(
     let ties_with = |left: usize, right: usize| {
         compare_discard_before_acceptance(&evaluations[left], &evaluations[right]).is_none()
     };
+    let cohort_is_known = |index: usize, axis: fn(ForwardMetrics) -> Option<u64>| {
+        (0..evaluations.len())
+            .filter(|&other| ties_with(index, other))
+            .all(|other| axis(metrics_at(other)).is_some())
+    };
 
     (0..evaluations.len())
-        .map(|index| {
-            let cohort_is_known = (0..evaluations.len())
-                .filter(|&other| ties_with(index, other))
-                .all(|other| metrics_at(other).prospective_value.is_some());
-            ForwardMetrics {
-                prospective_value: metrics_at(index)
-                    .prospective_value
-                    .filter(|_| cohort_is_known),
-                ..metrics_at(index)
-            }
+        .map(|index| ForwardMetrics {
+            expected_self_tsumo_value: metrics_at(index)
+                .expected_self_tsumo_value
+                .filter(|_| cohort_is_known(index, |metrics| metrics.expected_self_tsumo_value)),
+            prospective_value: metrics_at(index)
+                .prospective_value
+                .filter(|_| cohort_is_known(index, |metrics| metrics.prospective_value)),
+            ..metrics_at(index)
         })
         .collect()
 }
@@ -294,6 +325,7 @@ pub fn best_discard_selection_index_with_forward_metrics(
         tenpai_wait: metrics_at(index).tenpai_wait,
         next_acceptance: metrics_at(index).next_acceptance,
         prospective_value: metrics_at(index).prospective_value,
+        expected_self_tsumo_value: metrics_at(index).expected_self_tsumo_value,
     };
 
     let mut best: Option<usize> = None;
@@ -309,6 +341,29 @@ pub fn best_discard_selection_index_with_forward_metrics(
         }
     }
     best
+}
+
+// self-tsumo continuation による比較。決着しなければ `None` を返して既存比較へ委ねる。
+//
+// 対象は現在打牌後が1向聴の候補だけ。軸を使うかどうかは呼び出し前に候補集合単位で決まって
+// いる ([`resolve_prospective_value_axis`]) ため、ここでの `None` は「この cohort では
+// self-tsumo 軸を使わない」を意味する。
+fn compare_expected_self_tsumo_value(
+    candidate: &DiscardSelectionCandidate,
+    current_best: &DiscardSelectionCandidate,
+) -> Option<DiscardComparison> {
+    if candidate.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.expected_self_tsumo_value?;
+    let best_value = current_best.expected_self_tsumo_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::ExpectedSelfTsumoValue,
+    })
 }
 
 // 打点込みの前方集計値による比較。決着しなければ `None` を返して既存比較へ委ねる。
@@ -509,6 +564,7 @@ mod tests {
             tenpai_wait,
             next_acceptance: None,
             prospective_value: None,
+            expected_self_tsumo_value: None,
         }
     }
 
@@ -522,6 +578,7 @@ mod tests {
             tenpai_wait,
             next_acceptance: None,
             prospective_value,
+            expected_self_tsumo_value: None,
         }
     }
 
@@ -534,6 +591,7 @@ mod tests {
             tenpai_wait: None,
             next_acceptance,
             prospective_value: None,
+            expected_self_tsumo_value: None,
         }
     }
 
@@ -1044,6 +1102,7 @@ mod tests {
             tenpai_wait,
             next_acceptance: None,
             prospective_value,
+            expected_self_tsumo_value: None,
         }
     }
 
@@ -1059,6 +1118,7 @@ mod tests {
                 tenpai_wait: metric.tenpai_wait,
                 next_acceptance: metric.next_acceptance,
                 prospective_value: metric.prospective_value,
+                expected_self_tsumo_value: metric.expected_self_tsumo_value,
             })
             .collect()
     }
@@ -1220,6 +1280,7 @@ mod tests {
                 tenpai_wait: metric(64, 16),
                 next_acceptance: None,
                 prospective_value: Some(48_000),
+                expected_self_tsumo_value: Some(1_000),
             };
             2
         ];
@@ -1275,6 +1336,189 @@ mod tests {
         assert_eq!(
             forward_target_mask(&[evaluation("1m", 0, &[])]),
             vec![false]
+        );
+    }
+
+    // ---- self-tsumo continuation の軸 ----
+
+    fn self_tsumo_metrics(
+        tenpai_wait: Option<TenpaiWaitMetric>,
+        prospective_value: Option<u64>,
+        expected_self_tsumo_value: Option<u64>,
+    ) -> ForwardMetrics {
+        ForwardMetrics {
+            tenpai_wait,
+            next_acceptance: None,
+            prospective_value,
+            expected_self_tsumo_value,
+        }
+    }
+
+    #[test]
+    fn the_self_tsumo_axis_is_compared_before_the_prospective_value() {
+        // 打点だけを見れば 9p が勝つが、確率込みの期待支払いでは 1m が勝つ。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+        ];
+        let metrics = vec![
+            self_tsumo_metrics(metric(1, 1), Some(50), Some(200)),
+            self_tsumo_metrics(metric(3, 1), Some(100), Some(100)),
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(0)
+        );
+        assert_eq!(
+            compare_discard_selection_candidates(
+                &candidates_of(&evaluations, &metrics)[0],
+                &candidates_of(&evaluations, &metrics)[1],
+            )
+            .reason,
+            DiscardComparisonReason::ExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn a_cohort_with_an_unknown_self_tsumo_value_falls_back_to_the_existing_axes() {
+        // cohort に1件でも確定しない候補があれば、cohort 全体で新しい軸を無効化する。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+            evaluation("1s", 1, &[("4s", 4)]),
+        ];
+        let metrics = vec![
+            self_tsumo_metrics(metric(1, 1), Some(50), Some(200)),
+            self_tsumo_metrics(metric(3, 1), Some(100), Some(100)),
+            self_tsumo_metrics(metric(2, 1), Some(10), None),
+        ];
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none()),
+            "cohort 全体で self-tsumo 軸を使わない"
+        );
+        // 打点軸は確定しているので残り、そちらで決着する。
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|metric| metric.prospective_value)
+                .collect::<Vec<_>>(),
+            vec![Some(50), Some(100), Some(10)]
+        );
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(1),
+            "既存の打点軸へ委ねる"
+        );
+    }
+
+    #[test]
+    fn the_two_axes_are_resolved_independently() {
+        // 打点が確定しない cohort でも、self-tsumo 軸が全員確定していればそちらは残る。
+        let evaluations = vec![
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+        ];
+        let metrics = vec![
+            self_tsumo_metrics(metric(1, 1), None, Some(200)),
+            self_tsumo_metrics(metric(3, 1), Some(100), Some(100)),
+        ];
+        let resolved = resolve_prospective_value_axis(&evaluations, &metrics);
+
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.prospective_value.is_none())
+        );
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|metric| metric.expected_self_tsumo_value)
+                .collect::<Vec<_>>(),
+            vec![Some(200), Some(100)]
+        );
+        assert_total_order(&candidates_of(&evaluations, &resolved));
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_self_tsumo_winner_is_stable_under_permutation() {
+        // 候補の列挙順を変えても選ぶ打牌は変わらない。
+        let evaluations = [
+            evaluation("1m", 1, &[("3m", 4)]),
+            evaluation("9p", 1, &[("3p", 4)]),
+            evaluation("1s", 1, &[("4s", 4)]),
+        ];
+        let metrics = [
+            self_tsumo_metrics(metric(1, 1), Some(50), Some(200)),
+            self_tsumo_metrics(metric(3, 1), Some(100), Some(100)),
+            self_tsumo_metrics(metric(2, 1), Some(10), None),
+        ];
+
+        let mut winners = Vec::new();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let permuted: Vec<_> = order.iter().map(|&i| evaluations[i].clone()).collect();
+            let permuted_metrics: Vec<_> = order.iter().map(|&i| metrics[i]).collect();
+            let best =
+                best_discard_selection_index_with_forward_metrics(&permuted, &permuted_metrics)
+                    .expect("最善候補がある");
+            winners.push(permuted[best].discard);
+        }
+
+        assert!(
+            winners.iter().all(|discard| *discard == winners[0]),
+            "{winners:?}"
+        );
+    }
+
+    #[test]
+    fn the_self_tsumo_axis_does_not_decide_a_two_shanten_comparison() {
+        // 2向聴以上では新しい軸を使わず、既存の weighted next acceptance へ委ねる。
+        let evaluations = vec![
+            evaluation("1m", 2, &[("3m", 4)]),
+            evaluation("9p", 2, &[("3p", 4)]),
+        ];
+        let metrics = vec![
+            ForwardMetrics {
+                tenpai_wait: None,
+                next_acceptance: metric(1, 1),
+                prospective_value: None,
+                expected_self_tsumo_value: Some(200),
+            },
+            ForwardMetrics {
+                tenpai_wait: None,
+                next_acceptance: metric(3, 1),
+                prospective_value: None,
+                expected_self_tsumo_value: Some(100),
+            },
+        ];
+
+        let comparison = compare_discard_selection_candidates(
+            &candidates_of(&evaluations, &metrics)[0],
+            &candidates_of(&evaluations, &metrics)[1],
+        );
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            Some(1)
         );
     }
 }

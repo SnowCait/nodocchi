@@ -10,6 +10,23 @@ const RIICHI_STICK_POINTS: u32 = 1000;
 
 const PLAYER_COUNT: usize = 4;
 
+/// 4人麻雀で使う牌の総数 [枚]。
+const TOTAL_TILES: u32 = 136;
+
+/// 王牌の枚数 [枚]。riichienv-core の `WallState` は槓の嶺上牌を引いても
+/// `drawable_count = tiles.len() - 14` を保つため、王牌は常にこの枚数になる。
+const DEAD_WALL_TILES: u32 = 14;
+
+/// 副露していない player の手牌枚数 [枚]。
+const CONCEALED_HAND_TILES: u32 = 13;
+
+/// 副露1つが手牌から減らす枚数 [枚]。副露は必ず3枚1組で、槓も嶺上牌1枚を補充するため同じ。
+const TILES_PER_MELD: u32 = 3;
+
+/// 配牌直後の山の残りツモ可能枚数 [枚]。牌の総数から王牌と全員の配牌を引いた上限。
+const INITIAL_LIVE_TILES: u32 =
+    TOTAL_TILES - DEAD_WALL_TILES - CONCEALED_HAND_TILES * PLAYER_COUNT as u32;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationPayload {
     base64: String,
@@ -67,6 +84,17 @@ impl ObservationPayload {
             }
         }
 
+        let own_hand_tiles = hand_tiles.len() + usize::from(drawn_tile.is_some());
+        let table_state = TableStateFacts {
+            remaining_tiles: remaining_tiles_from_observed_tiles(
+                observation.player_id,
+                own_hand_tiles,
+                &discards,
+                &melds,
+            ),
+            ..table_state_facts_from_observation(&observation)
+        };
+
         Ok(DecodedObservation {
             player_id: observation.player_id,
             drawn_tile,
@@ -79,14 +107,15 @@ impl ObservationPayload {
             discards,
             reached: observation.riichi_declared,
             melds,
-            table_state: table_state_facts_from_observation(&observation),
+            table_state,
         })
     }
 }
 
 /// riichienv-core の `Observation` から bot-core の table state facts へ変換する。
 ///
-/// - `remaining_tiles`: `Observation` に山の残り枚数を表す field が無いため unknown。
+/// - `remaining_tiles`: `Observation` に山の残り枚数を表す field が無いため、見えている牌から
+///   復元する ([`remaining_tiles_from_observed_tiles`])。
 /// - `kyotaku_points`: upstream はリーチ棒の本数 `riichi_sticks` で持つので点数へ換算する。
 /// - `kyoku`: upstream の `kyoku_index` は 0 始まりなので 1 始まりへ直す。
 fn table_state_facts_from_observation(observation: &Observation) -> TableStateFacts {
@@ -97,6 +126,56 @@ fn table_state_facts_from_observation(observation: &Observation) -> TableStateFa
         scores: Some(observation.scores),
         kyoku: kyoku_from_kyoku_index(observation.kyoku_index),
     }
+}
+
+/// 現在までに起きた event を反映した、山の残りツモ可能枚数 [枚]。
+///
+/// `Observation` は山の残枚数そのものを持たず、`events` も直前の観測からの差分しか含まないため、
+/// 牌の総数から場に出た牌を差し引いて復元する。
+///
+/// ```text
+/// 山の残りツモ可能枚数
+/// = 牌の総数 - 王牌 - 全員の手牌 - 全員の河 - 副露で手牌から出た牌
+/// ```
+///
+/// 河には鳴かれた牌がそのまま残る upstream semantics に合わせ、副露は鳴いた牌を除いた枚数だけ
+/// を数える ([`meld_visible_tiles`])。同じ物理牌を河と副露で二重に数えないための規則で、
+/// 見え牌 (`visible_tiles`) の組み立てと共有する。
+///
+/// 他家の手牌は伏せられているため枚数だけを使う。自分が行動を求められている観測では他家は
+/// ツモ牌を持たないので、副露1つにつき3枚減った `13 - 3 × 副露数` になる。自分の手牌は伏せられて
+/// いないので、ツモ牌込みの実際の枚数をそのまま使う。
+///
+/// 枚数が矛盾する入力 (差し引きが負になる、配牌直後の上限を超える) では推測せず `None` にする。
+/// 巡目や河の枚数からの近似はしない。
+fn remaining_tiles_from_observed_tiles(
+    player_id: u8,
+    own_hand_tiles: usize,
+    discards: &[Vec<TileId>; PLAYER_COUNT],
+    melds: &[Vec<Meld>; PLAYER_COUNT],
+) -> Option<u32> {
+    let player = usize::from(player_id);
+    if player >= PLAYER_COUNT {
+        return None;
+    }
+
+    let mut accounted = u32::try_from(own_hand_tiles).ok()?;
+    for seat in 0..PLAYER_COUNT {
+        if seat != player {
+            let melded = TILES_PER_MELD.checked_mul(u32::try_from(melds[seat].len()).ok()?)?;
+            accounted = accounted.checked_add(CONCEALED_HAND_TILES.checked_sub(melded)?)?;
+        }
+        accounted = accounted.checked_add(u32::try_from(discards[seat].len()).ok()?)?;
+        for meld in &melds[seat] {
+            accounted =
+                accounted.checked_add(u32::try_from(meld_visible_tiles(meld).len()).ok()?)?;
+        }
+    }
+
+    TOTAL_TILES
+        .checked_sub(DEAD_WALL_TILES)
+        .and_then(|live| live.checked_sub(accounted))
+        .filter(|&remaining| remaining <= INITIAL_LIVE_TILES)
 }
 
 fn kyoku_from_kyoku_index(kyoku_index: u8) -> Option<u8> {
