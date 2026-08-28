@@ -640,6 +640,11 @@ pub enum DiscardComparisonReason {
     Shanten,
     IsolatedTile,
     IsolatedHonor,
+    /// 1向聴限定。Σ(その経路を引く確率 × テンパイ到達後にツモ和了する期待支払い)。
+    ///
+    /// 向聴数を下げる枝と1回だけ手変わりする枝を同じ尺度で比べる軸で、自分のツモ和了だけを
+    /// 含む。ロン和了・他家の和了・放銃は含まない。
+    ExpectedSelfTsumoValue,
     /// 打点込みの前方評価。Σ(残枚数 × そのテンパイの Σ(和了牌残枚数 × 支払い合計))。
     ///
     /// 現在打牌の比較では1手目の物理牌 variant 残枚数で重み付けし、2手目の打牌候補の比較では
@@ -990,6 +995,12 @@ pub struct DiscardCandidateDiagnostic {
     pub next_acceptance: Option<NextAcceptanceMetric>,
     /// 打牌選択に使った打点込みの前方集計値。確定しなかった候補と計算しなかった候補は `None`。
     pub prospective_value: Option<u64>,
+    /// 打牌選択に使った self-tsumo continuation の期待支払い
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// 診断のために再計算せず、選択で使った値をそのまま保持する。候補集合単位で軸を無効化した
+    /// 場合と確定しなかった場合はどちらも `None`。
+    pub expected_self_tsumo_value: Option<u64>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -1043,6 +1054,9 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
         prospective_value: forward_metrics
             .get(index)
             .and_then(|metric| metric.prospective_value),
+        expected_self_tsumo_value: forward_metrics
+            .get(index)
+            .and_then(|metric| metric.expected_self_tsumo_value),
     };
 
     let best_index =
@@ -1095,6 +1109,9 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
                 prospective_value: forward_metrics
                     .get(index)
                     .and_then(|metric| metric.prospective_value),
+                expected_self_tsumo_value: forward_metrics
+                    .get(index)
+                    .and_then(|metric| metric.expected_self_tsumo_value),
             }
         })
         .collect();
@@ -1118,6 +1135,7 @@ pub fn diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait(
             tenpai_wait,
             next_acceptance: None,
             prospective_value: tenpai_wait.and_then(|metric| metric.prospective_value),
+            expected_self_tsumo_value: None,
         })
         .collect();
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
@@ -1177,6 +1195,13 @@ impl CandidateSeen {
         let mut base = self.base;
         base[discard.index()] = base[discard.index()].saturating_add(1);
         Self { base, ..*self }
+    }
+
+    // 打牌候補によらない、手牌以外に見えている枚数。打牌前の手牌と組み合わせて未確認牌の
+    // 総数を数える経路が使う。打牌で手牌から河へ移る1枚はどちらにも数えられるため、未確認牌の
+    // 総数は打牌候補によらず同じになる。
+    pub(crate) fn base(&self) -> &[u8; TileType::COUNT] {
+        &self.base
     }
 
     // 打牌候補評価が受け入れ計算へ渡す見え牌。2手先評価はこの seen をそのまま共有して、

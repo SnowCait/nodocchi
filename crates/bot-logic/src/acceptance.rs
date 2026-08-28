@@ -213,10 +213,34 @@ fn collect_acceptance<S: Copy>(
     Acceptance { current, tiles }
 }
 
+/// 見え牌を反映した、まだ自分から見えていない物理牌の総数。
+///
+/// 牌種ごとの残枚数の合計そのもので、受け入れの残枚数と同じ数え方
+/// ([`remaining_copies`]) を共有する。山の残枚数ではなく、自分がまだ物理的に確認していない牌の
+/// 枚数を表す。
+pub(crate) fn unknown_tile_count(
+    counts: &TileCounts,
+    additional_seen: &[u8; TileType::COUNT],
+) -> u32 {
+    TileType::all()
+        .map(|tile| u32::from(remaining_copies(counts, additional_seen, tile)))
+        .sum()
+}
+
+// 牌種1つ分の残枚数 (4枚 - 手牌 - 手牌以外の見え牌)。受け入れ・2手先評価の仮想ツモ候補・
+// 未確認牌の総数はこの1本を共有し、残枚数の数え方を複製しない。
+fn remaining_copies(
+    counts: &TileCounts,
+    additional_seen: &[u8; TileType::COUNT],
+    tile: TileType,
+) -> u8 {
+    4u8.saturating_sub(counts.count(tile) + additional_seen[tile.index()])
+}
+
 // 見え牌を反映して実際にツモり得る牌を1牌種ずつ、その牌を1枚加えた後の向聴数と一緒に渡す。
 //
-// 残枚数 (4枚 - 手牌 - 手牌以外の見え牌) と1枚加えた後の向聴数の求め方はここ1本だけが持ち、
-// 受け入れと2手先評価の仮想ツモ候補で共有する。どの牌を採用するかは呼び出し側の条件で決める。
+// 1枚加えた後の向聴数の求め方はここ1本だけが持ち、受け入れと2手先評価の仮想ツモ候補で
+// 共有する。どの牌を採用するかは呼び出し側の条件で決める。
 fn for_each_drawable_tile<S>(
     counts: &TileCounts,
     additional_seen: &[u8; TileType::COUNT],
@@ -224,8 +248,7 @@ fn for_each_drawable_tile<S>(
     mut visit: impl FnMut(TileType, u8, S),
 ) {
     for tile in TileType::all() {
-        let seen = counts.count(tile) + additional_seen[tile.index()];
-        let remaining = 4u8.saturating_sub(seen);
+        let remaining = remaining_copies(counts, additional_seen, tile);
         if remaining == 0 {
             continue;
         }

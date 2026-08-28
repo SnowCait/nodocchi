@@ -60,7 +60,11 @@ Final decision
 
 その打牌でテンパイになる候補には `permanent furiten` / `history furiten after discard` / `ron` を表示します。`ron` は両者を合わせた総合ロン可否で、全候補が選択候補と同じ評価時点 (その打牌を切り終えた後) の facts を使います。
 
+候補ごとの `expected self-tsumo value` は、打牌選択が実際に比較へ使った self-tsumo continuation の期待支払い [点] です。表示用に探索も点数計算もやり直しません。軸を使えない局面と、確定できない候補は `unknown` です。
+
 `--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。2手先の概要は仮想ツモ牌を向聴数が下がるもの (`draws`) と維持するもの (`same-shanten`) に分けて種類数と残枚数を表示し、`--verbose` の牌ごとの詳細では `transition` にその分類を表示します。`--lookahead --verbose` では、1向聴候補の向聴数を維持する枝だけをテンパイまでもう1段追い、`downstream value` と候補ごとの `same-shanten downstream value` を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
+
+`Lookahead` の節の先頭には `self-tsumo continuation` として、その局面で共通の `unknown tiles` (自分から見て未確認の物理牌) と `current future own draws` (現在打牌後に自分へ残っている自摸機会) を表示します。材料が揃わない局面では `not evaluated` です。テンパイへ到達した枝には `tsumo continuation` として、`path probability` (その経路を引く確率) と `terminal tenpai` の内訳 (`mode` / `unknown tiles` / `future own draws` / `winning variants` / `hit probability` / `weighted tsumo payment` / `continuation value`)、およびその経路分の `path continuation value` を表示します。確率は 0〜1 の小数、打点は点数です。
 
 ## Player threats
 
@@ -104,7 +108,7 @@ Push/Pull
 
 `tenpai offense value` は打牌後テンパイを攻撃継続した場合の確定打点です。`offense mode` は既リーチ / これからリーチする手 (`Reach`) かダマにする手 (`Damaten`) か (自分が既リーチかを判断できない場合は `Unknown`)、`weighted average` は生きた待ちの支払点を残枚数で加重平均した打点、`weighted total` は割り算する前の残枚数加重合計です。確定できない場合はどちらも `unknown` になります。`strong tenpai requirement` は押すために要求する条件で、打点を確定できた非フリテンでは `weighted total >= 15600` (他家リーチ者に親が含まれる場合は `23400`)、確定できない場合と恒常フリテンでは `live wait >= 6` / `live wait >= 8` になります。打牌後がテンパイでなければどちらも評価しません。意味は [攻撃継続時の確定打点](ai/push-pull.md#攻撃継続時の確定打点) を参照してください。
 
-`iishanten forward metrics` は、通常打牌選択が選んだ打牌が1向聴の場合の前方集計値です。`weighted prospective value` は将来テンパイの確定打点を1手目と最終和了牌の残枚数で重み付けした合計、`weighted tenpai wait` はその枝のテンパイ待ちの残枚数・種類数です。production の打牌選択が比較に使った値をそのまま表示し、表示用に2手先探索も打点集計もやり直しません。平均へ正規化した値でも局収支EVでもありません。打点を確定できない枝がある場合は `unknown` で、0点として扱いません。打牌後が1向聴でなければ `none` です。現在の押し引き判断はこの値を使いません。
+`iishanten forward metrics` は、通常打牌選択が選んだ打牌が1向聴の場合の前方集計値です。`expected self-tsumo value` は経路確率とテンパイ到達後の期待ツモ支払いを掛けた期待値 [点]、`weighted prospective value` は将来テンパイの確定打点を1手目と最終和了牌の残枚数で重み付けした合計、`weighted tenpai wait` はその枝のテンパイ待ちの残枚数・種類数です。前2つは別の尺度なので、区別して読んでください。production の打牌選択が比較に使った値をそのまま表示し、表示用に2手先探索も打点集計もやり直しません。平均へ正規化した値でも局収支EVでもありません。打点を確定できない枝がある場合は `unknown` で、0点として扱いません。打牌後が1向聴でなければ `none` です。現在の押し引き判断はこの値を使いません。
 
 `dora after discard` / `red dora after discard` / `value honor han proxy after discard` / `simple value proxy after discard` は、打牌後の concealed hand と自分の確認できている fixed meld (暗槓を含む) の両方を数えた簡易打点 proxy です。production の `PushPullOffenseState` をそのまま表示し、表示用に数え直しません。正確な打点ではなく、一般役・符・点数計算は含みません。意味は [簡易打点 proxy](ai/push-pull.md#簡易打点-proxy) を参照してください。
 

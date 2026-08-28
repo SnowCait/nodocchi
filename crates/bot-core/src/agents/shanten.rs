@@ -31,8 +31,8 @@ use crate::threat::{
 };
 use bot_logic::{
     DiscardDecisionDiagnostic, DiscardEvaluation, DiscardFuritenDiagnostic, FixedMeldCount,
-    LookaheadDiagnostic, PermanentFuriten, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    calculate_shanten_with_fixed_melds,
+    LookaheadDiagnostic, PermanentFuriten, SelfTsumoFacts, TenpaiWaitAvailability, TileCounts,
+    TileId, TileType, calculate_shanten_with_fixed_melds,
 };
 
 pub use crate::reach_policy::ReachDecisionReason;
@@ -372,6 +372,11 @@ pub struct ShantenDecisionDiagnostic {
     /// リーチが合法かどうかもリーチするかどうかも決めない。打牌選択・押し引き・リーチ判断の
     /// どれにも使わない解析専用の情報で、構築の有無は選択結果を変えない。
     pub normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
+    /// 通常打牌評価で self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
+    ///
+    /// 選択が実際に使った値そのもので、診断のために求め直さない。詳細な2手先診断を構築した
+    /// 場合だけ持つ。
+    pub normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     /// 押し引き判定に使った入力。`push_pull_inputs_from_context_with_evaluation()` の実結果。
     pub push_pull_inputs: Option<PushPullInputs>,
     /// 押し引き判定の結果。`decide_push_pull()` の実結果。
@@ -518,6 +523,7 @@ struct DecisionDiagnostics {
     normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
     normal_discard_lookahead: Option<LookaheadDiagnostic>,
     normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
+    normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     defense: Option<DefenseDecisionDiagnostic>,
 }
 
@@ -619,6 +625,7 @@ impl ShantenAgent {
             history_furiten: context.history_furiten(),
             normal_discard_lookahead: diagnostics.normal_discard_lookahead,
             normal_discard_lookahead_value: diagnostics.normal_discard_lookahead_value,
+            normal_discard_self_tsumo_facts: diagnostics.normal_discard_self_tsumo_facts,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
             reach: decision.reach,
@@ -784,6 +791,7 @@ impl ShantenAgent {
         diagnostics.normal_discard_furiten = Some(selection.furiten);
         diagnostics.normal_discard_lookahead = selection.lookahead;
         diagnostics.normal_discard_lookahead_value = selection.lookahead_value;
+        diagnostics.normal_discard_self_tsumo_facts = selection.self_tsumo_facts;
         selection.selection
     }
 

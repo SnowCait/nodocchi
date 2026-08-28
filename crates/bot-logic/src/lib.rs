@@ -16,6 +16,7 @@ pub mod normal_score;
 pub mod payment;
 pub mod scoring_selection;
 pub mod selection;
+pub mod self_tsumo;
 pub mod shanten;
 pub mod tenpai_hand_value;
 pub mod tile;
@@ -81,10 +82,10 @@ pub use iishanten::{
 pub use lookahead::{
     DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
     DrawVariantLookaheadDiagnostic, LookaheadDiagnostic, LookaheadInputs, ProspectiveTenpai,
-    ProspectiveTenpaiValuator, SameShantenDownstreamDiagnostic, diagnose_lookahead,
-    forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
-    same_shanten_downstream_value_for_candidate, same_shanten_forward_metric_for_candidate,
-    tenpai_wait_metrics_from_lookahead,
+    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, SameShantenDownstreamDiagnostic,
+    diagnose_lookahead, forward_metrics, forward_metrics_for_candidate,
+    forward_metrics_from_lookahead, same_shanten_downstream_value_for_candidate,
+    same_shanten_forward_metric_for_candidate, tenpai_wait_metrics_from_lookahead,
 };
 pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
 pub use normal_hand_scoring::{
@@ -101,6 +102,10 @@ pub use selection::{
     WeightedForwardMetric, best_discard_selection_index,
     best_discard_selection_index_with_forward_metrics, compare_discard_selection_candidates,
     resolve_prospective_value_axis,
+};
+pub use self_tsumo::{
+    SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath, TSUMO_PROBABILITY_SCALE,
+    TenpaiTsumoValue, tsumo_hit_probability,
 };
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,

@@ -74,19 +74,21 @@ use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
     DrawVariantLookaheadDiagnostic, FixedMeldCount, HandValueError, HandValueOutcome,
     HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, Payment, ProspectiveTenpai,
-    ProspectiveTenpaiValuator, TenpaiCompletedHands, TenpaiHandValueProfile,
-    TenpaiWaitAvailability, TileCounts, TileId, TileType, WinningContext,
-    evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
+    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, RiichiStatus, TenpaiCompletedHands,
+    TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
+    WinMethod, WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
     structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
     tenpai_wait_availability,
 };
 
 use crate::context::GameContext;
-use crate::damaten_value::{damaten_baseline_context, damaten_value_from_hands};
+use crate::damaten_value::{
+    BASELINE_REMAINING_LIVE_TILES, damaten_baseline_context, damaten_value_from_hands,
+};
 use crate::discard_selection::evaluation_fixed_meld_count;
 use crate::offense_value::{
-    BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode, reach_baseline_context,
-    variant_total, weighted_average,
+    BASELINE_CHANKAN, BASELINE_IPPATSU, BASELINE_RINSHAN, BASELINE_URA_DORA_INDICATORS,
+    OffenseValue, TenpaiOffenseMode, reach_baseline_context, variant_total, weighted_average,
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 
@@ -444,6 +446,76 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
     }
 }
 
+impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
+    fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
+        let facts = self.tenpai_facts(tenpai)?;
+        let (baseline, ura_dora) = tsumo_scoring_inputs(self.context, self.offense_mode(&facts))?;
+        let profile = evaluate_tenpai_hand_value(
+            &facts.hands,
+            baseline,
+            self.context.dora_indicators(),
+            ura_dora,
+        );
+        tsumo_value(&profile)
+    }
+}
+
+/// ツモ和了だけを評価する hypothetical baseline。
+///
+/// ロン baseline ([`reach_baseline_context`] / [`damaten_baseline_context`]) を流用せず、
+/// [`WinMethod::Tsumo`] として組み立てる。門前ツモの1翻は既存の役判定が付けるので、この層で
+/// 翻を足さない。一発・海底・嶺上開花・槍槓のような未来の偶発要素は既存 baseline と同じ思想で
+/// 加えず、リーチの裏ドラも既存の最低保証 baseline (裏0) と揃える。
+///
+/// ダマ baseline はロンできるかに依らず使う。評価するのが自分のツモ和了だけなので、フリテンは
+/// 打点を確定できない理由にならない。攻撃モードそのものは production のリーチ判断
+/// ([`ProductionProspectiveValuator::offense_mode`]) が決めた結論をそのまま使う。
+fn tsumo_scoring_inputs(
+    context: &GameContext,
+    mode: TenpaiOffenseMode,
+) -> Option<(WinningContext, Option<&'static [TileId]>)> {
+    let riichi = match mode {
+        TenpaiOffenseMode::Reach => RiichiStatus::Riichi,
+        TenpaiOffenseMode::Damaten => RiichiStatus::NotDeclared,
+        TenpaiOffenseMode::Unknown => return None,
+    };
+    let baseline = WinningContext::new(WinMethod::Tsumo)
+        .with_round_wind(context.round_wind())
+        .with_seat_wind(context.seat_wind())
+        .with_riichi(riichi)
+        .with_ippatsu(Some(BASELINE_IPPATSU))
+        .with_chankan(Some(BASELINE_CHANKAN))
+        .with_rinshan(Some(BASELINE_RINSHAN))
+        .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES));
+    let ura_dora = matches!(mode, TenpaiOffenseMode::Reach).then_some(BASELINE_URA_DORA_INDICATORS);
+    Some((baseline, ura_dora))
+}
+
+/// 待ちごとの評価結果を、ツモ和了できる variant の残枚数と重み付き打点へ畳む。
+///
+/// ツモ baseline で役が無い variant はその牌でツモ和了できないので、成功する待ちにも打点にも
+/// 含めない。0点の和了として加算せず、non-winning draw として扱う。点数計算の入力不足・裏ドラ
+/// 未確定のように本当に評価できない variant は推測せず `None` にする。残枚数 0 の variant は
+/// 生きていないのでどちらにも寄与しない。
+fn tsumo_value(profile: &TenpaiHandValueProfile<'_>) -> Option<TenpaiTsumoValue> {
+    let mut value = TenpaiTsumoValue::default();
+    for wait in profile.waits() {
+        for variant in wait.winning_tiles() {
+            if variant.remaining() == 0 {
+                continue;
+            }
+            let total = match prospective_value(variant.outcome()) {
+                ProspectiveValue::Known { payment, .. } => payment.total(),
+                ProspectiveValue::NoYaku => continue,
+                ProspectiveValue::Unknown(_) => return None,
+            };
+            value.winning_remaining += u32::from(variant.remaining());
+            value.weighted_total += u64::from(total) * u64::from(variant.remaining());
+        }
+    }
+    Some(value)
+}
+
 /// 未来テンパイ1件分の評価材料。完成手と、既存フリテン基盤による待ち・ロン可否。
 ///
 /// 打牌選択と診断はこの1組を共有し、同じ枝のロン可否や完成手を別々に組み立てない。
@@ -708,7 +780,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use bot_logic::{
-        DrawTransition, EffectiveAcceptance, ForwardMetrics, MissingScoringFact,
+        DrawTransition, EffectiveAcceptance, ForwardMetrics, MeldKind, MissingScoringFact,
         NormalScoringError, RiichiStatus, WinMethod, evaluate_payment,
         forward_metrics_from_lookahead,
     };
@@ -717,7 +789,7 @@ mod tests {
     use crate::context::TableStateFacts;
     use crate::damaten_value::DAMATEN_MIN_TOTAL;
     use crate::discard_selection::{
-        LookaheadDiagnosticScope, select_discard_action_with_diagnostic,
+        LookaheadDiagnosticScope, lookahead_inputs, select_discard_action_with_diagnostic,
     };
 
     struct TileIdSource {
@@ -799,8 +871,18 @@ mod tests {
 
         // 打牌選択が使う前方集計値。構築済みの2手先評価から集計し、探索し直さない。
         fn metrics(&self) -> Vec<ForwardMetrics> {
+            let evaluations = evaluations(&self.lookahead, &self.ctx);
+            let tiles: Vec<TileId> = self
+                .ctx
+                .hand_tiles()
+                .iter()
+                .copied()
+                .chain(self.ctx.drawn_tile())
+                .collect();
+            let valuator = ProductionProspectiveValuator::new(&self.ctx);
             forward_metrics_from_lookahead(
-                &evaluations(&self.lookahead, &self.ctx),
+                &lookahead_inputs(&self.ctx, &tiles, &valuator, LookaheadDiagnosticScope::None),
+                &evaluations,
                 &self.lookahead,
             )
         }
@@ -1734,5 +1816,259 @@ mod tests {
             .selection
             .action,
         );
+    }
+
+    // ---- ツモ baseline の continuation ----
+
+    // 山の残枚数が既知の局面。self-tsumo continuation の材料が揃う。
+    fn tsumo_case(hand: &[&str], dora_indicator: &str, extra_visible: &[&str]) -> Case {
+        CaseSpec {
+            extra_visible,
+            table_state: TableStateFacts {
+                remaining_tiles: Some(60),
+                ..TableStateFacts::default()
+            },
+            ..CaseSpec::new(hand, dora_indicator)
+        }
+        .build()
+    }
+
+    static TSUMO_NO_YAKU: LazyLock<Case> = LazyLock::new(|| tsumo_case(&NO_YAKU_HAND, "1m", &[]));
+    static TSUMO_RED_FIVE: LazyLock<Case> = LazyLock::new(|| tsumo_case(&RED_FIVE_HAND, "1m", &[]));
+
+    // ツモ打点を確定できない局面。場風・自風が分からず点数計算の入力が足りない。
+    static TSUMO_UNKNOWN_WINDS: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            winds: false,
+            table_state: TableStateFacts {
+                remaining_tiles: Some(60),
+                ..TableStateFacts::default()
+            },
+            ..CaseSpec::new(&RED_FIVE_HAND, "1m")
+        }
+        .build()
+    });
+
+    // 2手先評価の枝が持つツモ continuation。表示のためでも選択のためでも同じ値。
+    fn continuation(case: &Case, discard: &str, draw: &str) -> Option<TenpaiTsumoValue> {
+        case.lookahead
+            .candidate(tile(discard))
+            .expect("打牌候補がある")
+            .draw(tile(draw))
+            .expect("受け入れ牌の枝がある")
+            .variants
+            .first()
+            .expect("物理牌 variant がある")
+            .tsumo_continuation
+    }
+
+    #[test]
+    fn the_tsumo_baseline_is_not_the_ron_baseline() {
+        // ロン baseline の値を流用せず、門前ツモが付いた別の打点になる。
+        let tenpai = TSUMO_RED_FIVE.evaluated("1p", "3m");
+        assert!(tenpai.reach.baseline.win_method().is_ron());
+
+        let tsumo = continuation(&TSUMO_RED_FIVE, "1p", "3m").expect("ツモ打点を確定できる");
+        let ron_weighted: u64 = tenpai
+            .reach
+            .winning_tile_values()
+            .map(|variant| {
+                u64::from(variant.value.total().unwrap_or_default()) * u64::from(variant.remaining)
+            })
+            .sum();
+
+        assert_eq!(tsumo.winning_remaining, 8);
+        assert_ne!(tsumo.weighted_total, ron_weighted);
+    }
+
+    #[test]
+    fn the_tsumo_baseline_keeps_the_production_offense_mode() {
+        // 攻撃モードは既存 production policy の結論そのままで、ここで別の判断を作らない。
+        let mode = TSUMO_RED_FIVE.evaluated("1p", "3m").mode;
+        let (baseline, ura_dora) =
+            tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, mode).expect("baseline を作れる");
+
+        assert_eq!(mode, TenpaiOffenseMode::Reach);
+        assert!(baseline.win_method().is_tsumo());
+        assert_eq!(baseline.riichi(), RiichiStatus::Riichi);
+        // 裏ドラは既存の最低保証 baseline (裏0) と揃える。
+        assert_eq!(ura_dora, Some(BASELINE_URA_DORA_INDICATORS));
+    }
+
+    #[test]
+    fn a_damaten_tsumo_baseline_has_no_riichi_han() {
+        let (baseline, ura_dora) =
+            tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiOffenseMode::Damaten)
+                .expect("baseline を作れる");
+
+        assert!(baseline.win_method().is_tsumo());
+        assert_eq!(baseline.riichi(), RiichiStatus::NotDeclared);
+        assert_eq!(ura_dora, None);
+    }
+
+    #[test]
+    fn an_unknown_offense_mode_has_no_tsumo_baseline() {
+        assert!(tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiOffenseMode::Unknown).is_none());
+    }
+
+    #[test]
+    fn the_red_five_variants_are_aggregated_by_physical_tile() {
+        // 赤5 / 黒5で打点が違う待ちを、牌種へ潰さず variant ごとに重み付けする。
+        let tenpai = TSUMO_RED_FIVE.evaluated("1p", "3m");
+        let reach: Vec<_> = tenpai
+            .reach
+            .winning_tile_values()
+            .map(|variant| (variant.winning_tile.is_red(), variant.remaining))
+            .collect();
+        assert_eq!(reach, vec![(false, 4), (true, 1), (false, 3)]);
+
+        let tsumo = continuation(&TSUMO_RED_FIVE, "1p", "3m").expect("ツモ打点を確定できる");
+        // 2s 4枚 + 5s 4枚 (赤1枚 + 黒3枚)。赤5だけ打点が高いので、牌種単位へ潰した集約とは
+        // 一致しない。
+        assert_eq!(tsumo.winning_remaining, 8);
+    }
+
+    #[test]
+    fn a_seen_red_five_changes_the_weighted_tsumo_payment() {
+        // 赤5が既に見えている局面では、その1枚が待ちから消え、重み付き打点も赤の分だけ下がる。
+        let seen = tsumo_case(&RED_FIVE_HAND, "1m", &["5sr"]);
+        let with_red = continuation(&TSUMO_RED_FIVE, "1p", "3m").expect("ツモ打点を確定できる");
+        let without_red = continuation(&seen, "1p", "3m").expect("ツモ打点を確定できる");
+
+        assert_eq!(
+            with_red.winning_remaining,
+            without_red.winning_remaining + 1
+        );
+        assert!(with_red.weighted_total > without_red.weighted_total);
+        // 赤5以外の variant の打点は変わらないので、平均は赤がある側の方が高い。
+        assert!(
+            u64::from(with_red.winning_remaining) * without_red.weighted_total
+                < u64::from(without_red.winning_remaining) * with_red.weighted_total
+        );
+    }
+
+    #[test]
+    fn the_menzen_tsumo_yaku_comes_from_the_existing_hand_value() {
+        // ダマ (ロン) では役なしになり得る待ちでも、門前ツモは既存の役判定が付ける。この層で
+        // 1翻を足していないことを、ロン baseline との違いで確認する。
+        let damaten = &TSUMO_NO_YAKU.evaluated("1p", "9m").damaten;
+        assert_eq!(variants(damaten), vec![("2s".to_string(), 4, Some(5200))]);
+
+        let tsumo = continuation(&TSUMO_NO_YAKU, "1p", "9m").expect("ツモ打点を確定できる");
+        assert_eq!(tsumo.winning_remaining, 4);
+        assert!(tsumo.weighted_total > 0);
+    }
+
+    // 副露1つのテンパイを組み立てて、ツモ baseline の待ちごとの結論を確認する。
+    //
+    // 333m を pon した 234m 567p 55s 78s のテンパイ。6s なら全て中張牌で断幺が付くが、9s は
+    // 么九牌が入るため副露手では役が無い。
+    fn open_tenpai_tsumo_value(mode: TenpaiOffenseMode) -> Option<TenpaiTsumoValue> {
+        let mut source = TileIdSource::new();
+        let melded = source.tiles(&["3m", "3m", "3m"]);
+        let concealed = source.tiles(&["2m", "3m", "4m", "5p", "6p", "7p", "5s", "5s", "7s", "8s"]);
+        let melds = vec![Meld::new(MeldKind::Pon, melded, None)];
+
+        let counts = TileCounts::from_tiles(concealed.iter().copied());
+        let fixed_meld_count = FixedMeldCount::new(1).expect("副露1つ");
+        let acceptance =
+            bot_logic::calculate_acceptance_with_fixed_melds(&counts, fixed_meld_count);
+        let hands = tenpai_completed_hands(&concealed, &melds, &acceptance, None, &concealed)
+            .expect("テンパイの完成手を解析できる");
+
+        let ctx = GameContext::from_parts_with_context(
+            None,
+            concealed,
+            Vec::new(),
+            Some(tile("E")),
+            Some(tile("S")),
+        );
+        let (baseline, ura_dora) = tsumo_scoring_inputs(&ctx, mode)?;
+        let profile = evaluate_tenpai_hand_value(&hands, baseline, &[], ura_dora);
+        tsumo_value(&profile)
+    }
+
+    #[test]
+    fn a_no_yaku_tsumo_variant_is_not_a_winning_draw() {
+        // ツモ baseline で役が無い待ちは、0点の和了として加算せず success wait から外す。
+        let value =
+            open_tenpai_tsumo_value(TenpaiOffenseMode::Damaten).expect("ツモ打点を確定できる");
+
+        // 待ちは 6s / 9s の各4枚だが、断幺が付くのは 6s だけ。
+        assert_eq!(value.winning_remaining, 4);
+        assert_eq!(value.weighted_total % 4, 0);
+        assert!(value.weighted_total > 0);
+    }
+
+    #[test]
+    fn a_tenpai_without_any_tsumo_yaku_has_no_winning_wait() {
+        // 生きた待ちが全て役なしなら、待ち枚数も打点も 0 になる。0点の和了として加算しない。
+        let value = TenpaiTsumoValue::default();
+        assert_eq!(value.winning_remaining, 0);
+        assert_eq!(value.weighted_total, 0);
+    }
+
+    #[test]
+    fn an_unknown_scoring_input_makes_the_continuation_unknown() {
+        // 点数計算の入力が足りない局面では、推測で打点を作らず continuation を持たない。
+        let unknown = &*TSUMO_UNKNOWN_WINDS;
+        assert!(
+            unknown
+                .lookahead
+                .candidates
+                .iter()
+                .flat_map(|candidate| candidate.draws.iter())
+                .flat_map(|draw| draw.variants.iter())
+                .filter(|variant| variant
+                    .next_discard
+                    .as_ref()
+                    .is_some_and(|next| next.min_shanten_after_discard() == TENPAI_SHANTEN))
+                .all(|variant| variant.tsumo_continuation.is_none())
+        );
+        assert!(
+            unknown
+                .metrics()
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+    }
+
+    #[test]
+    fn an_unknown_remaining_wall_leaves_the_new_axis_unavailable() {
+        // 山の残枚数が unknown な局面では新しい軸を使わず、ツモ点数計算も行わない。
+        let unknown = &*RED_FIVE;
+        assert_eq!(unknown.ctx.remaining_tiles(), None);
+        assert!(continuation(unknown, "1p", "3m").is_none());
+        assert!(
+            unknown
+                .metrics()
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+    }
+
+    #[test]
+    fn the_iishanten_candidates_share_the_same_unknown_pool() {
+        // 未確認牌の総数は打牌候補によらず同じで、残り自摸機会は山の残枚数の4分の1。
+        let case = &*TSUMO_RED_FIVE;
+        let tiles: Vec<TileId> = hand_tiles(&case.ctx);
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        let facts = lookahead_inputs(&case.ctx, &tiles, &valuator, LookaheadDiagnosticScope::None)
+            .self_tsumo_facts()
+            .expect("材料が揃っている");
+
+        assert_eq!(facts.own_future_draws, 15);
+        // 手牌14枚 + ドラ表示牌1枚が見えている。
+        assert_eq!(facts.unknown_tiles, 121);
+    }
+
+    #[test]
+    fn the_expected_self_tsumo_value_reaches_the_iishanten_candidates() {
+        let metrics = TSUMO_RED_FIVE.metrics();
+        assert!(metrics.iter().any(|metric| {
+            metric
+                .expected_self_tsumo_value
+                .is_some_and(|value| value > 0)
+        }));
     }
 }

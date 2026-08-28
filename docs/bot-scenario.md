@@ -183,9 +183,8 @@ cargo run -p bot-scenario -- \
 
 - event 列から積み上げる `post_reach_passed` は空
 - 履歴依存フリテンは unknown
-- observation に無い `remaining_tiles` は unknown
 
-`scores`、`honba`、`kyotaku`、`kyoku` は observation から復元します。RiichiLab live client と Chiihou における履歴依存フリテンの違いは [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。
+`scores`、`honba`、`kyotaku`、`kyoku` は observation から復元します。`remaining_tiles` は observation に field がありませんが、見えている牌 (全員の河・副露・自分の手牌) から復元します。RiichiLab live client と Chiihou における履歴依存フリテンの違いは [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。
 
 ## RiichiLab capture の production latency 計測
 

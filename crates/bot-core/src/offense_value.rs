@@ -71,8 +71,10 @@ use crate::damaten_value::{
 use crate::reach_policy::decide_reach_reason;
 
 // リーチ baseline に含める偶発役の有無。未来の偶発要素は加算しない。
-const BASELINE_IPPATSU: bool = false;
-const BASELINE_CHANKAN: bool = false;
+pub(crate) const BASELINE_IPPATSU: bool = false;
+pub(crate) const BASELINE_CHANKAN: bool = false;
+// ツモ baseline に含める嶺上開花の有無。将来の自分の槓を予測しないため常に付けない。
+pub(crate) const BASELINE_RINSHAN: bool = false;
 
 // リーチ baseline の裏ドラ表示牌。未観測ではなく「観測済みで0枚」として渡す。
 pub(crate) const BASELINE_URA_DORA_INDICATORS: &[TileId] = &[];
