@@ -602,7 +602,7 @@ pub(crate) fn select_best_normal_discard_evaluation(
 ///
 /// 候補評価そのものは通常経路と同じ helper を共有するが、比較は既存の
 /// [`bot_logic::compare_discard_evaluations`] 相当の1手比較だけで、1向聴限定の weighted tenpai
-/// wait は**意図的に使わない**。限定 Pon の「Pon 後に生きた待ちのテンパイになるか」という
+/// wait は**意図的に使わない**。鳴き判断の「鳴いた後に生きた待ちのテンパイになるか」という
 /// シミュレーション用の入口であり、通常打牌 selection の semantics とは切り離す。
 pub(crate) fn select_best_one_step_discard_evaluation_with_fixed_meld_count(
     context: &GameContext,

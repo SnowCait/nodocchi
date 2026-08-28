@@ -541,7 +541,7 @@ WRC Rules 2025 では、和了牌が刻子を完成させた場合、自摸な�
 
 ### production policy へは接続しない
 
-この評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役評価を新しく構築しません。診断表示のために役判定を再実装することもしません。検証は `bot-logic` の unit test を中心に行います。
+この評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead へは接続しません。`act()` / `diagnose()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役評価を新しく構築しません。診断表示のために役判定を再実装することもしません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 役満
 
@@ -692,7 +692,7 @@ Suuankou + Tsuuiisou + Daisuushii
 
 ### production policy へは接続しない
 
-役満評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役満評価を新しく構築しません。診断表示のために役満判定を別実装することもしません。検証は `bot-logic` の unit test を中心に行います。
+役満評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役満評価を新しく構築しません。診断表示のために役満判定を別実装することもしません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 通常 Yaku の翻数
 
@@ -767,7 +767,7 @@ analysis 全体や分解単位へ翻数を union せず、同じ分解の複数�
 
 ### production policy へは接続しない
 
-翻数も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / 鳴き判断 / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の選択結果は変わらず、通常の行動選択のために役 / 翻数評価を新しく実行する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
+翻数も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の選択結果は変わらず、通常の行動選択のために役 / 翻数評価を新しく実行する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 符
 

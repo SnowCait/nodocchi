@@ -40,7 +40,7 @@ Final decision
 | `DefenseFallback` | リーチ者向け防御 fallback |
 | `OpenHandDefenseFallback` | High OpenHandThreat 向け fallback |
 | `CombinedThreatDefenseFallback` | 複合 threat 向け fallback |
-| `Pon` | 鳴き判断で選んだポン |
+| `Call` | 鳴き判断で選んだ Chi / Pon |
 | `LegalDahaiFallback` / `None` | 上位判断で選べない場合の fallback |
 
 防御 source では category や kind も表示されます。

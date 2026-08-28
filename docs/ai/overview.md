@@ -1,6 +1,6 @@
 # 麻雀 AI の概要
 
-この repository には複数の Agent があります。代表的な `ShantenAgent` は向聴数と見え牌を基に通常打牌を評価し、リーチ・押し引き・防御・限定的なポンを同じ decision path で選びます。`MenzenAgent` は基本判断を共有しつつ門前を崩す鳴きを除外します。
+この repository には複数の Agent があります。代表的な `ShantenAgent` は向聴数と見え牌を基に通常打牌を評価し、リーチ・押し引き・防御・鳴き (Chi / Pon) を同じ decision path で選びます。`MenzenAgent` は基本判断を共有しつつ門前を崩す鳴きを除外します。
 
 ## production decision flow
 
@@ -11,7 +11,7 @@ Hora
   ↓
 Ryukyoku
   ↓
-限定 Pon
+鳴き (Chi / Pon)
   ↓
 通常打牌を評価
   ↓

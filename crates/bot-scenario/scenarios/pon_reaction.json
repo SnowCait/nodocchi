@@ -8,6 +8,11 @@
 
   "discards": ["", "P", "", ""],
 
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  },
+
   "legal_dahai": "",
 
   "legal_pon": [

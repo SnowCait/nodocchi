@@ -610,10 +610,10 @@ mod tests {
     use crate::convert::temporary_tile_id_from_mjai_pai;
     use crate::observation::{fixture_base64, fixture_base64_with_discards};
     use bot_core::{
-        AgentActionSource, LegalAction, NormalAgent, PonDecisionReason, ShantenAgent,
+        AgentActionSource, CallDecisionReason, LegalAction, NormalAgent, ShantenAgent,
         TsumogiriAgent,
     };
-    use bot_logic::{FixedMeldCount, TileId, TileType};
+    use bot_logic::{FixedMeldCount, HistoryFuritenFacts, TileId, TileType};
 
     fn possible_dahai(pai: &str) -> MjaiPossibleAction {
         MjaiPossibleAction::Dahai {
@@ -1319,6 +1319,19 @@ mod tests {
         ))
     }
 
+    // 鳴き判断はロン可否が確定していることを求めるので、production の game_context_from_request と
+    // 同じく state が持つ履歴依存フリテンを渡した context を使う。observation だけでは履歴が
+    // 分からず unknown のままになる。
+    fn pon_reaction_context() -> GameContext {
+        let decoded = pon_reaction_observation().decode_4p().unwrap();
+        game_context_from_decoded_observation(&decoded).with_history_furiten_facts(
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+        )
+    }
+
     fn pon_reaction_possible_actions() -> Vec<MjaiPossibleAction> {
         vec![
             MjaiPossibleAction::Pon {
@@ -1375,12 +1388,17 @@ mod tests {
 
     #[test]
     fn shanten_agent_pons_value_honor_through_the_observation_path() {
-        let observation = pon_reaction_observation();
+        let context = pon_reaction_context();
         let possible_actions = pon_reaction_possible_actions();
         let mut agent = ShantenAgent;
-        let response =
-            build_response_for_request(0, 116, &possible_actions, &observation, &mut agent)
-                .expect("pon response");
+        let response = build_response_for_request_with_context(
+            0,
+            116,
+            &possible_actions,
+            &context,
+            &mut agent,
+        )
+        .expect("pon response");
 
         assert_eq!(
             response,
@@ -1398,9 +1416,8 @@ mod tests {
     }
 
     #[test]
-    fn pon_through_the_observation_path_keeps_the_bot_core_pon_judgement() {
-        let decoded = pon_reaction_observation().decode_4p().unwrap();
-        let context = game_context_from_decoded_observation(&decoded);
+    fn pon_through_the_observation_path_keeps_the_bot_core_call_judgement() {
+        let context = pon_reaction_context();
         let legal_actions = possible_actions_to_legal_actions(&pon_reaction_possible_actions());
 
         assert_eq!(context.drawn_tile(), None);
@@ -1409,20 +1426,21 @@ mod tests {
 
         let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
         assert_eq!(diagnostic.selected_action, legal_actions[0]);
-        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Call);
 
-        let pon = diagnostic.pon.as_ref().unwrap();
-        assert_eq!(pon.reason, PonDecisionReason::EligibleTenpai);
-        assert_eq!(pon.candidates.len(), 1);
+        let call = diagnostic.call.as_ref().unwrap();
+        assert_eq!(call.reason, CallDecisionReason::EligibleTenpai);
+        assert_eq!(call.candidates.len(), 1);
 
-        let candidate = &pon.candidates[0];
-        assert!(candidate.value_honor);
+        let candidate = &call.candidates[0];
         assert_eq!(candidate.current_shanten, Some(1));
-        assert_eq!(candidate.post_pon_shanten(), Some(0));
-        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
-        assert_eq!(candidate.post_pon_acceptance_type_count(), Some(2));
+        assert_eq!(candidate.post_call_shanten(), Some(0));
+        assert_eq!(candidate.post_call_acceptance_total_remaining(), Some(8));
+        assert_eq!(candidate.post_call_acceptance_type_count(), Some(2));
+        assert_eq!(candidate.can_ron(), Some(true));
+        assert_eq!(candidate.live_waits_have_yaku(), Some(true));
 
-        let evaluation = candidate.post_pon_discard.as_ref().unwrap();
+        let evaluation = candidate.post_call_discard.as_ref().unwrap();
         assert_eq!(evaluation.discard.to_mjai_string(), "N");
         assert_eq!(
             evaluation
