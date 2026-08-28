@@ -293,23 +293,47 @@ mod tests {
         "1m", "2m", "3m", "4m", "5m", "6m", "5p", "6p", "7s", "8s", "N", "P",
     ];
 
-    fn possible_actions_json() -> String {
-        CAPTURED_DAHAI
+    const SHALLOW_HAND: [u8; 13] = [0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 116, 124, 132];
+
+    const SHALLOW_DRAWN_TILE: u8 = 128;
+
+    const SHALLOW_DAHAI: [&str; 2] = ["F", "1m"];
+
+    fn possible_actions_json(dahai: &[&str]) -> String {
+        dahai
             .iter()
             .map(|pai| format!(r#"{{"type":"dahai","pai":"{pai}","tsumogiri":false}}"#))
             .collect::<Vec<_>>()
             .join(",")
     }
 
-    fn observation_base64() -> String {
-        fixture_base64(0, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec())
+    fn observation_base64(hand: &[u8], drawn_tile: u8) -> String {
+        fixture_base64(0, Some(drawn_tile), hand.to_vec())
     }
 
-    fn request_action_line(request_id: u64) -> String {
+    fn request_action_line(request_id: u64, hand: &[u8], drawn_tile: u8, dahai: &[&str]) -> String {
         format!(
             r#"{{"type":"request_action","request_id":{request_id},"actor":0,"possible_actions":[{}],"observation":"{}"}}"#,
-            possible_actions_json(),
-            observation_base64()
+            possible_actions_json(dahai),
+            observation_base64(hand, drawn_tile)
+        )
+    }
+
+    fn shallow_request_action_line(request_id: u64) -> String {
+        request_action_line(
+            request_id,
+            &SHALLOW_HAND,
+            SHALLOW_DRAWN_TILE,
+            &SHALLOW_DAHAI,
+        )
+    }
+
+    fn captured_request_action_line(request_id: u64) -> String {
+        request_action_line(
+            request_id,
+            &CAPTURED_HAND,
+            CAPTURED_DRAWN_TILE,
+            &CAPTURED_DAHAI,
         )
     }
 
@@ -335,7 +359,7 @@ mod tests {
     fn write_requests(name: &str, request_ids: &[u64]) -> String {
         let lines = request_ids
             .iter()
-            .map(|request_id| request_action_line(*request_id))
+            .map(|request_id| shallow_request_action_line(*request_id))
             .collect::<Vec<_>>();
         write_capture(name, &lines)
     }
@@ -426,16 +450,17 @@ mod tests {
 
     #[test]
     fn measured_selection_is_the_production_agent_decision() {
-        let path = write_requests("production", &[431]);
+        let path = write_capture("production", &[captured_request_action_line(431)]);
         let run = measure_captures(std::slice::from_ref(&path)).unwrap();
         let _ = std::fs::remove_file(&path);
 
-        let decoded = ObservationPayload::new(observation_base64())
-            .decode_4p()
-            .unwrap();
+        let decoded =
+            ObservationPayload::new(observation_base64(&CAPTURED_HAND, CAPTURED_DRAWN_TILE))
+                .decode_4p()
+                .unwrap();
         let context = game_context_from_decoded_observation(&decoded);
         let possible_actions: Vec<MjaiPossibleAction> =
-            serde_json::from_str(&format!("[{}]", possible_actions_json())).unwrap();
+            serde_json::from_str(&format!("[{}]", possible_actions_json(&CAPTURED_DAHAI))).unwrap();
         let legal_actions = possible_actions_to_legal_actions(&possible_actions);
 
         let mut agent = ShantenAgent;
@@ -701,9 +726,9 @@ mod tests {
         let path = write_capture(
             "malformed",
             &[
-                request_action_line(461),
+                shallow_request_action_line(461),
                 r#"{"type":"action_ack","request_id":461,"status":"accepted"}"#.to_string(),
-                request_action_line(462),
+                shallow_request_action_line(462),
             ],
         );
         let error = measure_captures(std::slice::from_ref(&path)).unwrap_err();
@@ -719,9 +744,9 @@ mod tests {
     fn an_undecodable_observation_fails_the_whole_benchmark() {
         let line = format!(
             r#"{{"type":"request_action","request_id":471,"possible_actions":[{}],"observation":"not-base64!!"}}"#,
-            possible_actions_json()
+            possible_actions_json(&SHALLOW_DAHAI)
         );
-        let path = write_capture("undecodable", &[request_action_line(470), line]);
+        let path = write_capture("undecodable", &[shallow_request_action_line(470), line]);
         let error = measure_captures(std::slice::from_ref(&path)).unwrap_err();
         let _ = std::fs::remove_file(&path);
 
