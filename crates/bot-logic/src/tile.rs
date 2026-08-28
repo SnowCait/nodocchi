@@ -127,6 +127,13 @@ impl TileType {
         }
     }
 
+    pub fn previous_in_suit(self) -> Option<TileType> {
+        match self.number()? {
+            2..=9 => Some(Self(self.0 - 1)),
+            _ => None,
+        }
+    }
+
     pub fn second_next_in_suit(self) -> Option<TileType> {
         self.next_in_suit()?.next_in_suit()
     }
@@ -568,6 +575,19 @@ mod tests {
         assert_eq!(tt(25).next_in_suit(), Some(tt(26)));
         assert_eq!(tt(26).next_in_suit(), None);
         assert_eq!(tt(27).next_in_suit(), None);
+    }
+
+    #[test]
+    fn previous_in_suit_stays_within_suit() {
+        assert_eq!(tt(0).previous_in_suit(), None);
+        assert_eq!(tt(1).previous_in_suit(), Some(tt(0)));
+        assert_eq!(tt(8).previous_in_suit(), Some(tt(7)));
+        assert_eq!(tt(9).previous_in_suit(), None);
+        assert_eq!(tt(10).previous_in_suit(), Some(tt(9)));
+        assert_eq!(tt(17).previous_in_suit(), Some(tt(16)));
+        assert_eq!(tt(18).previous_in_suit(), None);
+        assert_eq!(tt(26).previous_in_suit(), Some(tt(25)));
+        assert_eq!(tt(27).previous_in_suit(), None);
     }
 
     #[test]

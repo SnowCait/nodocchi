@@ -80,6 +80,23 @@
 
 役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) ([WRC Rules 2025 PDF](https://static1.squarespace.com/static/634a7884c297a25f06589b79/t/6834d67360e19c1da6c0d12c/1748293243651/WRC+Rules+2025.pdf) の `11.5 Yaku list`) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
 
+## production からの利用
+
+ここで扱う layer はすべて pure な scoring foundation で、局面型や client には依存しません。その値を行動選択が使うかどうかは policy 側の責務です。現在 production が `HandValue` 経由で利用しているのは次の経路です。
+
+| 利用元 | policy が比較する値 |
+| --- | --- |
+| 鳴き判断 (`call_decision`) | 生きた和了牌 variant に役があるか |
+| リーチ / ダマ判断 | ダマ打点の [`Payment::total`](#支払点) |
+| 押し引きの攻撃打点 | 攻撃打点の `Payment::total` の残枚数加重合計 |
+| 通常打牌選択の1向聴 cohort | 打点込みの前方集計値 (`Payment::total` の加重合計) |
+
+鳴き判断が必要とするのは「鳴いた後のテンパイについて、残枚数 > 0 の和了牌 variant それぞれでロン和了できる役があるか」だけです。評価の過程では翻数・符・bonus 翻・基本点・支払点まで求まり得ますが、鳴き policy はそれらを threshold として比較せず、打点や EV の比較も行いません。役の有無は `HandValueOutcome` の区別 (`Known` / `NoCandidate` / `IndeterminateBonusHan`) をそのまま使い、確定しない場合を役ありと推測しません。
+
+`OpenHandThreat` / 防御 / 脅威分類 / `TenpaiQuality` / 順位判断へはまだ接続していません。これらは引き続き既存の観測 heuristic だけで判断し、正確な点数を評価しません。
+
+診断は production selector が使った結果をそのまま載せる責務です。表示のために役 / 翻数 / 符 / 点数を別実装せず、診断専用に評価し直しません。
+
 ## 入力と出力
 
 `analyze_completed_hand(concealed_tiles, fixed_melds)` は門前部分の物理牌 (`TileId`) と確定済み `Meld` を受け取り、`CompletedHandAnalysis` を返します。赤ドラや将来の符計算で物理牌が必要になるため、入力の `TileId` はそのまま保持します。面子分解自体は `TileCounts` 上の `TileType` 単位で行います。
@@ -181,7 +198,7 @@ for evaluation in evaluate_structural_yaku(&analysis) {
 - `Shousangen` は三元牌2種が刻子 / 槓子で残り1種が雀頭のときだけ成立します。三元牌3種が刻子の `Daisangen` 形では成立しません。
 - `CompletedHandDecomposition::Kokushi` は structural Yaku の対象外で、常に空の役集合を返します。
 
-そのため、この評価器が返す空の役集合を「この手には役がない」と解釈する production policy へまだ使えません。和了牌に依存する役と役満は別 API が返すため、この評価器は pure な基盤としてだけ使い、`act()` / `diagnose()` の行動選択へは接続しません。各分解の役一覧は sort と dedup 済みで deterministic です。
+そのため、この評価器が返す空の役集合を「この手には役がない」と解釈する policy へは直接使えません。和了牌に依存する役と役満は別 API が返すため、役の有無を必要とする経路は structural 評価器ではなく `HandValue` を通ります ([production からの利用](#production-からの利用))。各分解の役一覧は sort と dedup 済みで deterministic です。
 
 ## 和了時 context
 
@@ -323,7 +340,7 @@ for interpretation in interpret_winning_tile(&analysis, winning_tile) {
 | 未完成 (`is_complete() == false`) | 空の `Vec` |
 | 和了牌の牌種が門前部分にない | 空の `Vec` |
 
-専用のエラー型を足さず、既存 API と同じく成立するものだけを返す表現にしています。この helper は pure な基盤としてだけ使い、`act()` / `diagnose()` の行動選択へは接続しません。
+専用のエラー型を足さず、既存 API と同じく成立するものだけを返す表現にしています。この helper は行動選択が直接呼ぶ API ではなく、`HandValue` の評価過程から使われます。
 
 ### 待ち形は手牌全体の待ち一覧ではない
 
@@ -539,9 +556,9 @@ WRC Rules 2025 では、和了牌が刻子を完成させた場合、自摸な�
 
 `Suuankou` 自体は通常 `Yaku` ではなく [役満](#役満) 側で判定します。
 
-### production policy へは接続しない
+### production からの利用
 
-この評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役評価を新しく構築しません。診断表示のために役判定を再実装することもしません。検証は `bot-logic` の unit test を中心に行います。
+役の成立事実は [production からの利用](#production-からの利用) の各経路が `HandValue` 経由で使います。鳴き判断が見るのはこの層が返す役の有無だけです。行動選択がこの評価器を直接呼んだり、診断表示のために役判定を再実装したりはしません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 役満
 
@@ -690,9 +707,9 @@ Suuankou + Tsuuiisou + Daisuushii
 - 責任払い (包) は入れません。WRC では `Daisangen` / `Daisuushii` / `Suukantsu` に責任払いが関係する場合がありますが、成立した役満そのものと支払い責任は別責務です。誰が最後の面子 / 槓を鳴かせたかを推測・追跡しません。
 - ドラと確定した `HandValue` はまだ実装しません。役満の基本点と複合役満の倍率は成立判定と分離した点数化 layer の責務で、この layer は成立事実までで止めます。役満を翻数へ換算しないため、[通常 Yaku の翻数](#通常-yaku-の翻数) の合計へも足しません。
 
-### production policy へは接続しない
+### production からの利用
 
-役満評価器も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / リーチ判断 / 押し引き / ベタオリ / 打牌比較 / lookahead / 鳴き判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の行動選択は変わらず、通常の行動選択のために `CompletedHandAnalysis` / `WinningTileInterpretation` / 役満評価を新しく構築しません。診断表示のために役満判定を別実装することもしません。検証は `bot-logic` の unit test を中心に行います。
+役満の成立事実も [production からの利用](#production-からの利用) の各経路が `HandValue` 経由で使います。鳴き判断にとっては役の有無を満たす1つの形で、役満かどうかで扱いを変えません。行動選択がこの評価器を直接呼んだり、診断表示のために役満判定を別実装したりはしません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 通常 Yaku の翻数
 
@@ -765,9 +782,9 @@ analysis 全体や分解単位へ翻数を union せず、同じ分解の複数�
 
 `Renhou` は WRC Rules 2025 `11.5.4 Five han yaku` の5翻役ですが、他の役やドラと複合しない特殊な scoring semantics と first-turn の履歴事実を必要とするため、この generic な翻数合計へ入れません。`Tenhou` / `Chiihou` は既存方針どおり別 scope です。
 
-### production policy へは接続しない
+### production からの利用
 
-翻数も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / 鳴き判断 / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の選択結果は変わらず、通常の行動選択のために役 / 翻数評価を新しく実行する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
+翻数は `HandValue` の評価過程で [基本点と limit](#基本点と-limit) の入力になりますが、翻数そのものを threshold として比較する policy は現在ありません。鳴き判断も翻数を見ず、役の有無だけを見ます ([production からの利用](#production-からの利用))。検証は `bot-logic` の unit test を中心に行います。
 
 ## 符
 
@@ -886,9 +903,9 @@ Fu contribution
 
 符が最大の解釈を選ぶ policy も持ちません。符だけでは最終的な点数が高い解釈を決められないため、すべての評価を保持し、翻数と符をそろえて比較できる形を後続 layer へ残します。
 
-### production policy へは接続しない
+### production からの利用
 
-符も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / 鳴き判断 / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。`act()` / `diagnose()` / `diagnose_with_options()` の選択結果は変わらず、通常の行動選択のために符を評価する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
+符も翻数と同じく [基本点と limit](#基本点と-limit) の入力で、符そのものを threshold として比較する policy はありません。鳴き判断は符を見ません ([production からの利用](#production-からの利用))。検証は `bot-logic` の unit test を中心に行います。
 
 ## ドラ
 
@@ -951,9 +968,9 @@ bonus 翻は通常役由来の翻数へ混ぜません。通常役の翻数合�
 
 翻数 + 符から基本点と limit を求める layer は [基本点と limit](#基本点と-limit) にありますが、bonus 翻を通常役由来の翻数へ合成する処理はそこにも含みません。通常役の翻数と bonus 翻の統合、符との統合、確定した点数と `HandValue` は後続 layer が扱います。
 
-### production policy へは接続しない
+### production からの利用
 
-bonus 翻も pure な `HandValue` 基盤としてだけ使い、打牌選択 / リーチ判断 / 押し引き / ベタオリ / 鳴き判断 / lookahead / EV / 順位判断へは接続しません。行動選択の結果は変わらず、行動選択が使う既存のドラ枚数 heuristic も置き換えません。検証は `bot-logic` の unit test を中心に行います。
+bonus 翻は `HandValue` の点数へ含まれる形でだけ使われ、bonus 翻そのものを threshold として比較する policy はありません。鳴き判断は bonus 翻を見ず、ドラだけで役ありとも扱いません ([production からの利用](#production-からの利用))。押し引きや脅威分類が使う既存のドラ枚数 heuristic も置き換えません。検証は `bot-logic` の unit test を中心に行います。
 
 ## 基本点と limit
 
@@ -1040,9 +1057,9 @@ RiichiEnv 互換として切り上げ満貫を採用しません。4翻30符は1
 
 同じ完成手の複数の解釈から最も高いものを選ぶ処理も持ちません。符が最大の解釈や翻数が最大の解釈が最終的な支払点で最大になるとは限らないため、点数計算の基盤がそろうまですべての解釈を保持します。
 
-### production policy へは接続しない
+### production からの利用
 
-基本点と limit も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / 鳴き判断 / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。`act()` / `diagnose()` の選択結果は変わらず、行動選択のために正確な点数を評価する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
+基本点は [支払点](#支払点) の入力で、limit class そのものを threshold として比較する policy はありません。鳴き判断は基本点も limit も見ません ([production からの利用](#production-からの利用))。検証は `bot-logic` の unit test を中心に行います。
 
 ## 支払点
 
@@ -1108,9 +1125,9 @@ base payment の合計
 
 確定した `HandValue` の組み立ては後続 layer が扱います。
 
-### production policy へは接続しない
+### production からの利用
 
-支払点も pure な `HandValue` 基盤としてだけ使い、`ShantenAgent` / 打牌選択 / リーチ判断 / 押し引き / ベタオリ / `OpenHandThreat` / 鳴き判断 / lookahead / `TenpaiQuality` / EV / 順位判断へは接続しません。行動選択の結果は変わらず、行動選択のために正確な支払点を評価する経路も追加しません。検証は `bot-logic` の unit test を中心に行います。
+`Payment::total` は、リーチ / ダマ判断・押し引きの攻撃打点・通常打牌選択の1向聴 cohort が比較する値そのものです。一方で鳴き判断は支払点を比較せず、役の有無だけを見ます ([production からの利用](#production-からの利用))。検証は `bot-logic` の unit test を中心に行います。
 
 ## 向聴数との関係
 

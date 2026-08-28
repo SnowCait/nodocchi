@@ -1,15 +1,15 @@
 use bot_core::{
-    AgentActionSource, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic, DamatenValue,
+    AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic, CallWaitYaku,
+    CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic, DamatenValue,
     DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
     MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
     OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
-    PonCandidateDiagnostic, PonDecisionDiagnostic, ProspectiveBaselineValue,
-    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveDrawVariantValue,
-    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
-    ProspectiveUnknownReason, ProspectiveValue, PushPullDecision, PushPullInputs,
-    PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent, ShantenDecisionDiagnostic,
-    StrongTenpaiRequirement, TenpaiOffenseValue, ThreatDefenseTarget,
+    ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
+    ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
+    ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, PushPullDecision,
+    PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent,
+    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiOffenseValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -40,7 +40,7 @@ pub fn format_diagnostic(
         format_table_state(&scenario.context),
         format_history_furiten(diagnostic),
         format_final_decision(diagnostic),
-        format_pon(diagnostic.pon.as_ref(), verbose),
+        format_call(diagnostic.call.as_ref(), verbose),
         format_normal_discard(diagnostic),
     ];
 
@@ -253,40 +253,36 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
     lines.join("\n")
 }
 
-fn format_pon(pon: Option<&PonDecisionDiagnostic>, verbose: bool) -> String {
-    let mut lines = vec!["Pon".to_string()];
+fn format_call(call: Option<&CallDecisionDiagnostic>, verbose: bool) -> String {
+    let mut lines = vec!["Call".to_string()];
 
-    let Some(pon) = pon else {
+    let Some(call) = call else {
         lines.push(format!("  {NOT_EVALUATED}"));
         return lines.join("\n");
     };
 
     lines.push("  evaluated".to_string());
-    match pon.selected.as_ref() {
+    match call.selected.as_ref() {
         Some(action) => lines.push(format!("  selected: {}", action_label(action))),
         None => lines.push(format!("  selected: {NONE}")),
     }
-    lines.push(format!("  reason: {:?}", pon.reason));
-    lines.push(format!("  candidates: {}", pon.candidates.len()));
+    lines.push(format!("  reason: {:?}", call.reason));
+    lines.push(format!("  candidates: {}", call.candidates.len()));
 
-    for candidate in &pon.candidates {
-        lines.extend(format_pon_candidate(candidate, verbose));
+    for candidate in &call.candidates {
+        lines.extend(format_call_candidate(candidate, verbose));
     }
 
     lines.join("\n")
 }
 
-fn format_pon_candidate(candidate: &PonCandidateDiagnostic, verbose: bool) -> Vec<String> {
+fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> Vec<String> {
     let mut lines = vec![format!("  {}", action_label(&candidate.action))];
 
     lines.push(format!("    selected: {}", yes_no(candidate.selected)));
     lines.push(format!("    eligible: {}", yes_no(candidate.eligible)));
     lines.push(format!("    reason: {:?}", candidate.reason));
-    lines.push(format!("    target: {}", candidate.target.to_mjai_string()));
-    lines.push(format!(
-        "    value honor: {}",
-        yes_no(candidate.value_honor)
-    ));
+    lines.push(format!("    kind: {:?}", candidate.kind));
     lines.push(format!(
         "    current shanten: {}",
         optional(candidate.current_shanten)
@@ -296,14 +292,21 @@ fn format_pon_candidate(candidate: &PonCandidateDiagnostic, verbose: bool) -> Ve
         format_fixed_meld_count(candidate.current_fixed_meld_count)
     ));
     lines.push(format!(
-        "    post-Pon fixed meld count: {}",
-        format_fixed_meld_count(candidate.post_pon_fixed_meld_count)
+        "    post-call fixed meld count: {}",
+        format_fixed_meld_count(candidate.post_call_fixed_meld_count)
+    ));
+    lines.push(format!(
+        "    forbidden discards: {}",
+        format_forbidden_discards(candidate.post_call_forbidden_discards.as_deref())
     ));
 
-    let Some(evaluation) = candidate.post_pon_discard.as_ref() else {
+    let Some(evaluation) = candidate.post_call_discard.as_ref() else {
         lines.push(format!("    best discard: {ABSENT}"));
         lines.push(format!("    shanten after discard: {ABSENT}"));
         lines.push(format!("    acceptance: {ABSENT}"));
+        lines.push(format!("    live wait remaining: {ABSENT}"));
+        lines.push(format!("    can ron: {ABSENT}"));
+        lines.push(format!("    live waits have yaku: {ABSENT}"));
         return lines;
     };
 
@@ -316,6 +319,19 @@ fn format_pon_candidate(candidate: &PonCandidateDiagnostic, verbose: bool) -> Ve
         "    acceptance: {} / {} types",
         evaluation.acceptance_total_remaining(),
         evaluation.acceptance_type_count()
+    ));
+
+    lines.push(format!(
+        "    live wait remaining: {}",
+        optional(candidate.live_wait_remaining())
+    ));
+    lines.push(format!(
+        "    can ron: {}",
+        format_optional_yes_no(candidate.can_ron())
+    ));
+    lines.push(format!(
+        "    live waits have yaku: {}",
+        format_optional_yes_no(candidate.live_waits_have_yaku())
     ));
 
     if verbose {
@@ -331,9 +347,46 @@ fn format_pon_candidate(candidate: &PonCandidateDiagnostic, verbose: bool) -> Ve
                 tile.shanten_after_draw.min()
             ));
         }
+
+        lines.push("    winning tile yaku:".to_string());
+        match candidate.post_call_wait_yaku.as_deref() {
+            None => lines.push(format!("      {NOT_EVALUATED}")),
+            Some([]) => lines.push(format!("      {NONE}")),
+            Some(waits) => {
+                for wait in waits {
+                    lines.push(format!(
+                        "      {}: {} remaining, yaku {}",
+                        wait.winning_tile.to_mjai_string(),
+                        wait.remaining,
+                        call_wait_yaku_label(wait.yaku)
+                    ));
+                }
+            }
+        }
     }
 
     lines
+}
+
+// 喰い替えで切れない牌種。評価しなかった場合と、禁止牌が無い場合を区別する。
+fn format_forbidden_discards(forbidden: Option<&[TileType]>) -> String {
+    match forbidden {
+        None => ABSENT.to_string(),
+        Some([]) => NONE.to_string(),
+        Some(tiles) => tiles
+            .iter()
+            .map(|tile| tile.to_mjai_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn call_wait_yaku_label(yaku: CallWaitYaku) -> &'static str {
+    match yaku {
+        CallWaitYaku::Present => "yes",
+        CallWaitYaku::Absent => "no",
+        CallWaitYaku::Unknown => UNKNOWN,
+    }
 }
 
 fn format_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
@@ -1692,7 +1745,7 @@ pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnosti
         summary_selected(diagnostic),
         summary_push_pull(diagnostic),
         summary_reach(diagnostic),
-        summary_pon(diagnostic),
+        summary_call(diagnostic),
         summary_defense(diagnostic),
         summary_runner_up(scenario, diagnostic),
     ];
@@ -1823,18 +1876,18 @@ fn summary_damaten_values(damaten: &DamatenValueDiagnostic) -> String {
     values.join(", ")
 }
 
-fn summary_pon(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    let Some(pon) = diagnostic.pon.as_ref() else {
+fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    let Some(call) = diagnostic.call.as_ref() else {
         return Vec::new();
     };
     vec![
         format!(
-            "  pon: {}",
-            pon.selected
+            "  call: {}",
+            call.selected
                 .as_ref()
                 .map_or_else(|| "no".to_string(), action_label)
         ),
-        format!("  pon reason: {:?}", pon.reason),
+        format!("  call reason: {:?}", call.reason),
     ]
 }
 
@@ -2961,22 +3014,22 @@ mod tests {
             scenario.legal_actions[0]
         );
         assert_eq!(diagnostic.selected_action, scenario.legal_actions[0]);
-        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Call);
 
         assert!(
-            output.contains("Final decision\n  action: Pon P <- P P\n  source: Pon"),
+            output.contains("Final decision\n  action: Pon P <- P P\n  source: Call"),
             "{output}"
         );
     }
 
     #[test]
-    fn pon_reaction_section_shows_why_the_pon_is_eligible() {
+    fn pon_reaction_section_shows_why_the_call_is_eligible() {
         let (_, _, output) = rendered(PON_REACTION_SCENARIO, false);
-        let pon = section(&output, "Pon\n");
+        let call = section(&output, "Call\n");
 
         assert_eq!(
-            pon,
-            "Pon\n  \
+            call,
+            "Call\n  \
              evaluated\n  \
              selected: Pon P <- P P\n  \
              reason: EligibleTenpai\n  \
@@ -2985,44 +3038,50 @@ mod tests {
              selected: yes\n    \
              eligible: yes\n    \
              reason: EligibleTenpai\n    \
-             target: P\n    \
-             value honor: yes\n    \
+             kind: Pon\n    \
              current shanten: 1\n    \
              current fixed meld count: 0\n    \
-             post-Pon fixed meld count: 1\n    \
+             post-call fixed meld count: 1\n    \
+             forbidden discards: P\n    \
              best discard: N\n    \
              shanten after discard: 0\n    \
-             acceptance: 8 / 2 types"
+             acceptance: 8 / 2 types\n    \
+             live wait remaining: 8\n    \
+             can ron: yes\n    \
+             live waits have yaku: yes"
         );
     }
 
     #[test]
-    fn verbose_pon_candidate_lists_the_live_acceptance_tiles() {
+    fn verbose_call_candidate_lists_the_live_acceptance_and_yaku() {
         let (_, _, output) = rendered(PON_REACTION_SCENARIO, true);
-        let pon = section(&output, "Pon\n");
+        let call = section(&output, "Call\n");
 
-        assert!(pon.contains("    acceptance tiles:"), "{pon}");
+        assert!(call.contains("    acceptance tiles:"), "{call}");
         assert!(
-            pon.contains("      6s: 4 remaining, shanten after draw -1"),
-            "{pon}"
+            call.contains("      6s: 4 remaining, shanten after draw -1"),
+            "{call}"
         );
         assert!(
-            pon.contains("      9s: 4 remaining, shanten after draw -1"),
-            "{pon}"
+            call.contains("      9s: 4 remaining, shanten after draw -1"),
+            "{call}"
         );
+        assert!(call.contains("    winning tile yaku:"), "{call}");
+        assert!(call.contains("      6s: 4 remaining, yaku yes"), "{call}");
+        assert!(call.contains("      9s: 4 remaining, yaku yes"), "{call}");
     }
 
     #[test]
-    fn pon_reaction_summary_reports_the_pon_source() {
+    fn pon_reaction_summary_reports_the_call_source() {
         let (_, _, output) = rendered(PON_REACTION_SCENARIO, false);
         let summary = summary_section(&output);
         assert_eq!(
             summary,
             "Summary\n  \
              selected: Pon P <- P P\n  \
-             source: Pon\n\n  \
-             pon: Pon P <- P P\n  \
-             pon reason: EligibleTenpai\n\n  \
+             source: Call\n\n  \
+             call: Pon P <- P P\n  \
+             call reason: EligibleTenpai\n\n  \
              runner-up: -"
         );
     }
@@ -3045,10 +3104,10 @@ mod tests {
     }
 
     #[test]
-    fn pon_section_is_not_evaluated_without_a_legal_pon() {
+    fn call_section_is_not_evaluated_without_a_legal_chi_or_pon() {
         let (_, diagnostic, output) = rendered(NORMAL_SCENARIO, false);
-        assert_eq!(diagnostic.pon, None);
-        assert_eq!(section(&output, "Pon\n"), "Pon\n  not evaluated");
+        assert_eq!(diagnostic.call, None);
+        assert_eq!(section(&output, "Call\n"), "Call\n  not evaluated");
     }
 
     #[test]
@@ -4447,9 +4506,9 @@ mod tests {
 
         let summary = summary_section(&output);
         assert!(!summary.contains("  reach"), "{summary}");
-        assert!(summary.contains("  pon: Pon P <- P P"), "{summary}");
+        assert!(summary.contains("  call: Pon P <- P P"), "{summary}");
         assert!(
-            summary.contains("  pon reason: EligibleTenpai"),
+            summary.contains("  call reason: EligibleTenpai"),
             "{summary}"
         );
     }

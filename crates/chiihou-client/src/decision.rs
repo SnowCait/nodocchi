@@ -639,7 +639,7 @@ fn build_naku_reply_for_decision(server_npub: &str, decision: ChiihouNakuDecisio
 mod tests {
     use super::*;
     use crate::protocol::ChiihouNakuAction;
-    use bot_core::{AgentActionSource, PonDecisionReason, ShantenAgent};
+    use bot_core::{AgentActionSource, CallDecisionReason, ShantenAgent};
     use bot_logic::{FixedMeldCount, TileId};
 
     fn pai(s: &str) -> ChiihouPai {
@@ -3317,8 +3317,36 @@ nostr:npub1ai000 GET naku? pon";
         );
     }
 
+    // 地鳳の snapshot は履歴依存フリテンを持たないため、鳴き判断のロン可否が unknown になる。
+    // 鳴きが成立する経路を確認するテストでは、既知の facts を明示的に渡す。
+    fn known_history_furiten_context(hand: &[ChiihouPai]) -> GameContext {
+        game_context_from_naku_request_with_state(hand, &pon_snapshot()).with_history_furiten_facts(
+            bot_logic::HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+        )
+    }
+
     #[test]
     fn shanten_agent_pons_value_honor_from_a_raw_naku_request() {
+        let ChiihouRequest::Naku {
+            hand,
+            target,
+            actions,
+        } = parsed_pon_naku_request()
+        else {
+            panic!("expected naku request");
+        };
+
+        let context = known_history_furiten_context(&hand);
+        let legal_actions = legal_actions_from_naku_request(&hand, target, &actions);
+        assert_eq!(ShantenAgent.act(&context, &legal_actions), pon("5z"));
+    }
+
+    #[test]
+    fn does_not_pon_a_raw_naku_request_while_the_ron_availability_is_unknown() {
+        // 地鳳の snapshot は履歴依存フリテンを持たないので、鳴き後にロンできると確定できない。
         let request = parsed_pon_naku_request();
         let ChiihouRequest::Naku {
             hand,
@@ -3331,25 +3359,24 @@ nostr:npub1ai000 GET naku? pon";
 
         let context = game_context_from_naku_request_with_state(hand, &pon_snapshot());
         let legal_actions = legal_actions_from_naku_request(hand, *target, actions);
-        assert_eq!(ShantenAgent.act(&context, &legal_actions), pon("5z"));
+        assert_eq!(
+            ShantenAgent.act(&context, &legal_actions),
+            LegalAction::None
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
+        let call = diagnostic.call.as_ref().unwrap();
+        assert_eq!(call.reason, CallDecisionReason::CannotRon);
+        assert_eq!(call.candidates[0].can_ron(), None);
 
         assert_eq!(
             choose_naku_decision_with_state(&request, &pon_snapshot(), &mut ShantenAgent),
-            Ok(ChiihouNakuDecision::Pon)
-        );
-        assert_eq!(
-            build_naku_reply_for_request_with_state(
-                "npub1server",
-                &request,
-                &pon_snapshot(),
-                &mut ShantenAgent
-            ),
-            Ok("nostr:npub1server naku? pon".to_string())
+            Ok(ChiihouNakuDecision::No)
         );
     }
 
     #[test]
-    fn pon_from_a_raw_naku_request_keeps_the_bot_core_pon_judgement() {
+    fn pon_from_a_raw_naku_request_keeps_the_bot_core_call_judgement() {
         let ChiihouRequest::Naku {
             hand,
             target,
@@ -3358,29 +3385,30 @@ nostr:npub1ai000 GET naku? pon";
         else {
             panic!("expected naku request");
         };
-        let context = game_context_from_naku_request_with_state(&hand, &pon_snapshot());
+        let context = known_history_furiten_context(&hand);
         let legal_actions = legal_actions_from_naku_request(&hand, target, &actions);
 
         let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
         assert_eq!(diagnostic.selected_action, pon("5z"));
-        assert_eq!(diagnostic.selected_source, AgentActionSource::Pon);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Call);
 
-        let pon = diagnostic.pon.as_ref().unwrap();
-        assert_eq!(pon.reason, PonDecisionReason::EligibleTenpai);
-        assert_eq!(pon.candidates.len(), 1);
+        let call = diagnostic.call.as_ref().unwrap();
+        assert_eq!(call.reason, CallDecisionReason::EligibleTenpai);
+        assert_eq!(call.candidates.len(), 1);
 
-        let candidate = &pon.candidates[0];
-        assert!(candidate.value_honor);
+        let candidate = &call.candidates[0];
         assert_eq!(candidate.current_shanten, Some(1));
         assert_eq!(
             candidate.current_fixed_meld_count.map(FixedMeldCount::get),
             Some(0)
         );
-        assert_eq!(candidate.post_pon_shanten(), Some(0));
-        assert_eq!(candidate.post_pon_acceptance_total_remaining(), Some(8));
-        assert_eq!(candidate.post_pon_acceptance_type_count(), Some(2));
+        assert_eq!(candidate.post_call_shanten(), Some(0));
+        assert_eq!(candidate.post_call_acceptance_total_remaining(), Some(8));
+        assert_eq!(candidate.post_call_acceptance_type_count(), Some(2));
+        assert_eq!(candidate.can_ron(), Some(true));
+        assert_eq!(candidate.live_waits_have_yaku(), Some(true));
 
-        let evaluation = candidate.post_pon_discard.as_ref().unwrap();
+        let evaluation = candidate.post_call_discard.as_ref().unwrap();
         assert_eq!(evaluation.discard.to_mjai_string(), "N");
         assert_eq!(
             evaluation

@@ -42,7 +42,7 @@ impl Agent for MenzenAgent {
 mod tests {
     use super::*;
     use crate::agents::shanten::tests::{
-        PonReaction, TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions,
+        CallReaction, TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions,
         tenpai_context, tile,
     };
 
@@ -255,7 +255,7 @@ mod tests {
     fn keeps_none_where_shanten_agent_pons_a_value_honor_pair() {
         // 123456m 55p 78s N PP に他家が P を捨てた局面。ShantenAgent は Pon するが、
         // MenzenAgent は Pon を除外するので None を維持する。
-        let reaction = PonReaction::new(
+        let reaction = CallReaction::pon(
             &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
             126,
             &[124, 125],
@@ -264,10 +264,10 @@ mod tests {
         let actions = reaction.actions();
 
         let mut shanten = ShantenAgent;
-        assert_eq!(shanten.act(&ctx, &actions), reaction.pon());
+        assert_eq!(shanten.act(&ctx, &actions), reaction.call());
         assert_eq!(
             ShantenAgent::diagnose(&ctx, &actions).selected_source,
-            crate::AgentActionSource::Pon
+            crate::AgentActionSource::Call
         );
 
         let mut agent = MenzenAgent::default();
