@@ -45,10 +45,11 @@
 | 強いテンパイ | `Push` | `StrongTenpaiAgainst*` |
 | 強いと確認できないテンパイ | `Fold` | `WeakTenpaiAgainst*` |
 | 終盤1副露だけが High target のテンパイ | `Push` | `TenpaiAgainstLateOneMeldHighOpenHand` |
-| 一向聴 | `Fold` | `IishantenAgainst*` |
+| ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainst*` |
+| それ以外の一向聴 | `Fold` | `IishantenAgainst*` |
 | 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainst*` |
 
-`PushPullMode` には `Push` / `Neutral` / `Fold` がありますが、現在の暫定 policy は `Neutral` を返しません。`Neutral` は将来の一向聴押し引きと action ordering のために残っています。
+`PushPullMode` には `Push` / `Neutral` / `Fold` がありますが、現在の暫定 policy は `Neutral` を返しません。一向聴では Reach できないため `Push` と `Neutral` の action 順序に実質的な違いがなく、一向聴の判定も `Push` / `Fold` の二値です。`Neutral` は action ordering と、攻撃価値と safety を同時に比較する将来の中間モードのために残っています。
 
 「強いテンパイ」は通常打牌で実際に選んだ牌を切った後の `TenpaiWaitAvailability` から判断します。打牌前14枚の受け入れではなく、見え牌を反映したツモ和了可能な待ちです。要求する条件は恒常フリテンと、[攻撃を継続した場合の確定打点](#攻撃継続時の確定打点)で決まります。
 
@@ -69,7 +70,24 @@
 
 自分が親かどうかでは threshold を変えません。一向聴の受け入れや簡易打点 proxy は diagnostics に残しますが、現在の Push/Pull 判定には使いません。
 
-終盤1副露 High の例外はテンパイだけが対象です。一向聴・二向聴以上は従来どおり `Fold` します。High target に2副露以上の相手が1人でも含まれる場合、Riichi threat、Combined threat では従来の strong-tenpai threshold を維持します。
+終盤1副露 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。High target に2副露以上の相手が1人でも含まれる場合、Riichi threat、Combined threat では従来の strong-tenpai threshold を維持します。
+
+## 一向聴の攻撃価値
+
+明確な threat がある一向聴では、[打牌選択](discard-selection.md)が既に求めている `expected self-tsumo value` だけを見ます。押し引き側で前方探索も打点集計も受け入れ集計も行わず、選んだ打牌の集計値をそのまま比較します。
+
+| 他家リーチ者に親 | 押すために要求する ExpectedSelfTsumoValue |
+| --- | --- |
+| 含まれない | 1,000 点以上 |
+| 含まれる | 1,500 点以上 |
+
+threshold は inclusive です。親リーチのときだけ、テンパイと同じく基本 threshold の 1.5 倍を要求します。リーチ者が複数いても、High OpenHandThreat との複合でも、親が含まれなければ 1,000 点のままです。自分が親かどうかでは変えません。
+
+ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値系なので、同じ threshold で比較しません。
+
+値を確認できない場合 (材料が揃わない局面、打点を確定できない枝がある候補) は `Fold` です。受け入れ枚数・一向聴形・weighted tenpai wait・weighted prospective value・簡易打点 proxy・ドラ枚数へは fallback しません。一向聴から押すのはリスクが高いので、十分な攻撃価値を確認できた場合だけ押す保守的な policy にしています。
+
+二向聴以上ではこの値を使わず、従来どおり `Fold` します。
 
 ## 攻撃継続時の確定打点
 

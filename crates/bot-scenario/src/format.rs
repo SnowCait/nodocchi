@@ -1136,7 +1136,8 @@ fn format_tenpai_offense_value(
 //
 // `weighted prospective value` は将来テンパイの確定打点を1手目・和了牌の残枚数で重み付けした
 // 合計で、確定できない枝がある場合と集計対象の枝が無い場合は `unknown`。平均へ正規化した値でも
-// 完全な EV でもない。現在の押し引き判断はこの値を使わない。
+// 完全な EV でもない。現在の押し引きが一向聴の判定へ使うのは `expected self-tsumo value` だけで、
+// 残りは観測値。
 fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<String> {
     let Some(metrics) = offense.iishanten_forward_metrics else {
         return vec![format!("    iishanten forward metrics: {NONE}")];

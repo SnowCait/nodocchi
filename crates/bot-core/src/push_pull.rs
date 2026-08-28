@@ -13,8 +13,8 @@ use crate::threat::{
     player_threat_facts_from_context, reached_opponent_count,
 };
 use bot_logic::{
-    DiscardEvaluation, ForwardMetrics, IishantenShape, PermanentFuriten, TenpaiWaitAvailability,
-    TileCounts, TileType, count_dora,
+    DiscardEvaluation, ForwardMetrics, IishantenShape, PermanentFuriten, SELF_TSUMO_VALUE_SCALE,
+    TenpaiWaitAvailability, TileCounts, TileType, count_dora,
 };
 
 const LOG_TARGET: &str = "bot_core::push_pull";
@@ -29,9 +29,11 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
 ///
 /// 現在の暫定 policy ([`decide_push_pull`]) は `Neutral` を返さない。明確な threat が無ければ
-/// `Push`、明確な threat があれば強いテンパイだけ `Push` で、それ以外は `Fold` になる。
-/// `Neutral` は `ShantenAgent` の action 順序としては残してあり、本格的な一向聴押し引きを
-/// 実装するときの中間モードとして使う。
+/// `Push`、明確な threat があれば強いテンパイと攻撃価値を確認できた一向聴だけ `Push` で、
+/// それ以外は `Fold` になる。一向聴では Reach できず `Push` と `Neutral` の action 順序に
+/// 実質的な違いが無いため、一向聴の判定も `Push` / `Fold` の二値にしている。`Neutral` は
+/// `ShantenAgent` の action 順序としては残してあり、攻撃価値と safety を同時に比較する本当の
+/// 中間モードを実装するときに使う。
 ///
 /// これは暫定 heuristic であり、以下はまだ考慮していない。
 ///
@@ -41,10 +43,10 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// - 局・順位条件
 ///
 /// 正確な打点は [`PushPullOffenseState::tenpai_offense_value_after_discard`] として持ち、
-/// threat ありの非フリテンテンパイでだけ判定へ反映する。それ以外の局面では打点を判定に
-/// 使わない。打牌後の受け入れ・一向聴形・簡易打点 proxy は
-/// `PushPullInputs` とログに保持するが、現在の判定には使わない。本格的な一向聴押し引きを
-/// 実装するときの解析材料として残している。
+/// threat ありの非フリテンテンパイでだけ判定へ反映する。一向聴では
+/// [`PushPullOffenseState::iishanten_expected_self_tsumo_value`] だけを判定へ反映する。
+/// 打牌後の受け入れ・一向聴形・簡易打点 proxy は `PushPullInputs` とログに保持するが、
+/// 現在の判定には使わない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullMode {
     Push,
@@ -64,9 +66,10 @@ pub enum PushPullMode {
 /// そのまま受け取る。
 ///
 /// `decide_push_pull()` が現在参照するのは `min_shanten_after_discard` /
-/// `tenpai_wait_after_discard` / `tenpai_offense_value_after_discard` だけで、受け入れ・
-/// 一向聴形・簡易打点 proxy・1向聴の前方集計値は診断・ログ用に保持する。簡易打点 proxy は
-/// exact 打点とは別物で、一向聴以上の解析材料として残している。
+/// `tenpai_wait_after_discard` / `tenpai_offense_value_after_discard` と、1向聴の前方集計値の
+/// うち [`ForwardMetrics::expected_self_tsumo_value`] だけで、受け入れ・一向聴形・簡易打点
+/// proxy と残りの前方集計値は診断・ログ用に保持する。簡易打点 proxy は exact 打点とは別物で、
+/// 解析材料として残している。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
     pub min_shanten_after_discard: i8,
@@ -106,8 +109,8 @@ pub struct PushPullOffenseState {
     /// 打牌後が1向聴の場合に、通常打牌選択が使った前方集計値。1向聴でなければ `None`。
     ///
     /// 通常打牌選択が持っている値をそのまま転記するだけで、押し引き側で2手先探索も打点集計も
-    /// 行わない。1向聴の押し引きはまだこの値を判断に使わず、threshold を決めるための観測値
-    /// として診断・ログにだけ出す。
+    /// 行わない。1向聴の押し引きが判定へ使うのは [`ForwardMetrics::expected_self_tsumo_value`]
+    /// だけで、残りは診断・ログ用の観測値として持つ。
     ///
     /// [`ForwardMetrics::tenpai_wait`] は将来テンパイの待ちを1手目の残枚数で重み付けした
     /// 合計、[`ForwardMetrics::prospective_value`] はその枝を確定打点で重み付けした合計。
@@ -133,6 +136,15 @@ impl PushPullOffenseState {
         self.tenpai_offense_value_after_discard?
             .value
             .weighted_total()
+    }
+
+    /// 一向聴から攻撃を継続した場合の ExpectedSelfTsumoValue [[`SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// 打牌後が一向聴でない場合と、確定できない枝があって集計値を持たない場合はどちらも
+    /// `None`。既存 [`ForwardMetrics::expected_self_tsumo_value`] をそのまま読み、押し引き側で
+    /// 集計し直さない。
+    pub fn iishanten_expected_self_tsumo_value(&self) -> Option<u64> {
+        self.iishanten_forward_metrics?.expected_self_tsumo_value
     }
 
     /// 明確な threat に対して押すために要求する打牌後テンパイの条件。
@@ -186,6 +198,21 @@ fn tenpai_push_weighted_total_min(dealer_reacher: bool) -> u64 {
         DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN
     } else {
         TENPAI_PUSH_WEIGHTED_TOTAL_MIN
+    }
+}
+
+/// 明確な threat に対して一向聴から押すために要求する ExpectedSelfTsumoValue
+/// [[`SELF_TSUMO_VALUE_SCALE`]]。inclusive。
+///
+/// テンパイの [`tenpai_push_weighted_total_min`] とは別の数値系なので、残枚数加重合計とは
+/// 比較しない。他家リーチ者に親が含まれるかだけで決まり、リーチ者数や High OpenHandThreat
+/// との複合では変えない。`dealer_reacher` は [`PushPullInputs::dealer_reacher`] が source of
+/// truth で、ここで親リーチを判定し直さない。
+fn iishanten_push_expected_self_tsumo_min(dealer_reacher: bool) -> u64 {
+    if dealer_reacher {
+        DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
+    } else {
+        IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
     }
 }
 
@@ -358,7 +385,8 @@ fn concealed_value_proxy_after_discard(
 /// `opponent_reach_count` / `dealer_reacher` は `player_threats` から導出する。
 ///
 /// 現在の暫定 policy は `opponent_reach_count` を threat の有無にだけ使い、`dealer_reacher` は
-/// exact 打点で押すときの threshold にだけ使う ([`tenpai_push_weighted_total_min`])。複数リーチでも
+/// テンパイと一向聴の threshold にだけ使う ([`tenpai_push_weighted_total_min`] /
+/// [`iishanten_push_expected_self_tsumo_min`])。複数リーチでも
 /// 親が1人でも含まれていれば親リーチ扱いで、リーチ者数そのものでは境界を変えない。`self_dealer`
 /// は判定に使わず、診断・ログ用の事実として保持する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,7 +452,8 @@ impl PushPullInputs {
 
 /// 押し引き判定がどの条件で下されたかを表す理由。
 ///
-/// 自分の状態 (攻撃評価なし / 強いテンパイ / 弱いテンパイ / 一向聴 / 二向聴以上) と、相手の
+/// 自分の状態 (攻撃評価なし / 強いテンパイ / 弱いテンパイ / 攻撃価値のある一向聴 / 一向聴 /
+/// 二向聴以上) と、相手の
 /// threat の種類 (`*AgainstReach` / `*AgainstHighOpenHand` / `*AgainstCombinedThreat`) の組で
 /// できている。threat の種類が混ざることはない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +463,8 @@ pub enum PushPullReason {
     MissingOffenseAgainstReach,
     StrongTenpaiAgainstReach,
     WeakTenpaiAgainstReach,
+    /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
+    ValuableIishantenAgainstReach,
     IishantenAgainstReach,
     TwoOrMoreShantenAgainstReach,
     MissingOffenseAgainstHighOpenHand,
@@ -441,11 +472,15 @@ pub enum PushPullReason {
     /// 終盤の1副露だけが High target の局面で、通常打牌後がテンパイなので押す。
     TenpaiAgainstLateOneMeldHighOpenHand,
     WeakTenpaiAgainstHighOpenHand,
+    /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
+    ValuableIishantenAgainstHighOpenHand,
     IishantenAgainstHighOpenHand,
     TwoOrMoreShantenAgainstHighOpenHand,
     MissingOffenseAgainstCombinedThreat,
     StrongTenpaiAgainstCombinedThreat,
     WeakTenpaiAgainstCombinedThreat,
+    /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
+    ValuableIishantenAgainstCombinedThreat,
     IishantenAgainstCombinedThreat,
     TwoOrMoreShantenAgainstCombinedThreat,
 }
@@ -477,6 +512,16 @@ const TENPAI_PUSH_WEIGHTED_TOTAL_MIN: u64 = 15_600;
 // 放銃時の失点が大きいので基本 threshold の 1.5 倍を要求する。リーチ者が複数いても、親が1人でも
 // 含まれていればこちらを使う。自分が親かどうかでは変えない。
 const DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN: u64 = 23_400;
+
+// 明確な threat に対して一向聴から押すために要求する ExpectedSelfTsumoValue
+// [SELF_TSUMO_VALUE_SCALE]。inclusive。一向聴から押すのはリスクが高いので、十分な攻撃価値を
+// 確認できた場合だけ押す保守的な threshold にする。テンパイの残枚数加重合計とは別の数値系。
+const IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_000 * SELF_TSUMO_VALUE_SCALE;
+
+// 他家リーチ者に親が含まれる場合に一向聴から押すために要求する ExpectedSelfTsumoValue
+// [SELF_TSUMO_VALUE_SCALE]。inclusive。テンパイと同じく基本 threshold の 1.5 倍を要求する。
+// リーチ者が複数いる場合や High OpenHandThreat との複合というだけでは倍率を増やさない。
+const DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_500 * SELF_TSUMO_VALUE_SCALE;
 
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
@@ -654,6 +699,7 @@ struct ThreatReasons {
     missing_offense: PushPullReason,
     strong_tenpai: PushPullReason,
     weak_tenpai: PushPullReason,
+    valuable_iishanten: PushPullReason,
     iishanten: PushPullReason,
     two_or_more_shanten: PushPullReason,
 }
@@ -665,6 +711,7 @@ impl ThreatKind {
                 missing_offense: PushPullReason::MissingOffenseAgainstReach,
                 strong_tenpai: PushPullReason::StrongTenpaiAgainstReach,
                 weak_tenpai: PushPullReason::WeakTenpaiAgainstReach,
+                valuable_iishanten: PushPullReason::ValuableIishantenAgainstReach,
                 iishanten: PushPullReason::IishantenAgainstReach,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstReach,
             },
@@ -672,6 +719,7 @@ impl ThreatKind {
                 missing_offense: PushPullReason::MissingOffenseAgainstHighOpenHand,
                 strong_tenpai: PushPullReason::StrongTenpaiAgainstHighOpenHand,
                 weak_tenpai: PushPullReason::WeakTenpaiAgainstHighOpenHand,
+                valuable_iishanten: PushPullReason::ValuableIishantenAgainstHighOpenHand,
                 iishanten: PushPullReason::IishantenAgainstHighOpenHand,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
             },
@@ -679,6 +727,7 @@ impl ThreatKind {
                 missing_offense: PushPullReason::MissingOffenseAgainstCombinedThreat,
                 strong_tenpai: PushPullReason::StrongTenpaiAgainstCombinedThreat,
                 weak_tenpai: PushPullReason::WeakTenpaiAgainstCombinedThreat,
+                valuable_iishanten: PushPullReason::ValuableIishantenAgainstCombinedThreat,
                 iishanten: PushPullReason::IishantenAgainstCombinedThreat,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
             },
@@ -723,19 +772,34 @@ fn is_strong_tenpai(offense: &PushPullOffenseState, dealer_reacher: bool) -> boo
     }
 }
 
+/// 明確な threat に対して一向聴から押せる攻撃価値があるか。
+///
+/// 通常打牌選択が既に求めた [`ForwardMetrics::expected_self_tsumo_value`] を scalar 比較する
+/// だけで、押し引き側で前方探索も打点集計も受け入れ集計も行わない。要求する値は
+/// [`iishanten_push_expected_self_tsumo_min`] が1か所で決める。
+///
+/// 値を確認できない場合は保守的に押さない。受け入れ・一向聴形・weighted tenpai wait・
+/// weighted prospective value・簡易打点 proxy へ fallback しない。
+fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -> bool {
+    offense
+        .iishanten_expected_self_tsumo_value()
+        .is_some_and(|value| value >= iishanten_push_expected_self_tsumo_min(dealer_reacher))
+}
+
 /// 押し引きを判定する pure な暫定 helper。
 ///
 /// 明確な threat が無ければ従来どおり通常の攻撃判断 (`Push`) を続ける。明確な threat がある
-/// 場合は、原則として打牌後が強いテンパイのときだけ押し、それ以外は降りる。ただし他家リーチが
-/// なく、High target がすべて1副露かつ河12枚以上なら、通常打牌後がテンパイであれば強さを問わず
-/// 押す。
+/// 場合は、打牌後が強いテンパイのときと、一向聴で十分な攻撃価値を確認できたときだけ押し、
+/// それ以外は降りる。ただし他家リーチがなく、High target がすべて1副露かつ河12枚以上なら、
+/// 通常打牌後がテンパイであれば強さを問わず押す。
 ///
 /// | 自分の状態 | mode |
 /// | --- | --- |
 /// | 攻撃評価を作れない | `Fold` |
 /// | 強いテンパイ | `Push` |
 /// | 強いと確認できないテンパイ | `Fold` (終盤1副露 High だけなら `Push`) |
-/// | 一向聴 | `Fold` |
+/// | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
+/// | それ以外の一向聴 | `Fold` |
 /// | 二向聴以上 | `Fold` |
 ///
 /// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
@@ -753,9 +817,13 @@ fn is_strong_tenpai(offense: &PushPullOffenseState, dealer_reacher: bool) -> boo
 /// 確定できる場合は、待ち枚数と打点の両方を含む残枚数加重合計だけで判定し、確定できない場合と
 /// 恒常フリテンでは従来の待ち枚数だけの policy を維持する。
 ///
+/// 一向聴の境界は通常打牌選択が既に求めた ExpectedSelfTsumoValue だけで決まる
+/// ([`iishanten_push_expected_self_tsumo_min`])。値を確認できない一向聴は押さず、受け入れや
+/// 一向聴形などへ fallback しない。二向聴以上ではこの値を使わない。
+///
 /// これは説明可能な暫定 policy であり、以下はまだ考慮していない。
 ///
-/// - 一向聴での本格的な押し引き
+/// - 一向聴でのロン和了・放銃率まで含めた局収支
 /// - 恒常フリテンのテンパイでの正確な打点
 /// - 待ち形(両面・カンチャン・単騎など)
 /// - 相手ごとの放銃率
@@ -801,12 +869,14 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         return PushPullDecision { mode, reason };
     }
 
-    // 4. 一向聴。本格的な一向聴押し引きは別タスクで、現在は押さない。
+    // 4. 一向聴。攻撃価値を確認できた場合だけ押す。
     if offense.min_shanten_after_discard == 1 {
-        return PushPullDecision {
-            mode: PushPullMode::Fold,
-            reason: reasons.iishanten,
+        let (mode, reason) = if is_valuable_iishanten(&offense, inputs.dealer_reacher) {
+            (PushPullMode::Push, reasons.valuable_iishanten)
+        } else {
+            (PushPullMode::Fold, reasons.iishanten)
         };
+        return PushPullDecision { mode, reason };
     }
 
     // 5. 二向聴以上。
@@ -864,6 +934,8 @@ pub(crate) fn log_push_pull_decision(
         offense_iishanten_prospective_value = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.prospective_value),
         offense_iishanten_weighted_tenpai_wait_remaining = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_remaining),
         offense_iishanten_weighted_tenpai_wait_type_count = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_type_count),
+        offense_iishanten_expected_self_tsumo_value = ?inputs.offense.and_then(|offense| offense.iishanten_expected_self_tsumo_value()),
+        offense_iishanten_push_expected_self_tsumo_min = iishanten_push_expected_self_tsumo_min(inputs.dealer_reacher),
         normal_discard = ?normal_discard,
         "push-pull decision",
     );
@@ -952,6 +1024,33 @@ mod tests {
                 value: OffenseValue::Unknown,
             }),
             ..tenpai_offense(tsumo_remaining, furiten)
+        }
+    }
+
+    // 点単位で指定した ExpectedSelfTsumoValue。押し引き側で scale を定義し直さない。
+    fn self_tsumo_points(points: u64) -> u64 {
+        points * SELF_TSUMO_VALUE_SCALE
+    }
+
+    // ExpectedSelfTsumoValue だけを指定した一向聴の攻撃評価。
+    //
+    // 判定に使わない前方集計値 (weighted tenpai wait / weighted prospective value) はあえて
+    // 高い値で埋め、ExpectedSelfTsumoValue だけで境界が決まることを固定する。
+    fn iishanten_offense_with_expected_self_tsumo_value(
+        expected_self_tsumo_value: Option<u64>,
+    ) -> PushPullOffenseState {
+        PushPullOffenseState {
+            iishanten_forward_metrics: Some(ForwardMetrics {
+                tenpai_wait: Some(TenpaiWaitMetric {
+                    weighted_remaining: u32::MAX,
+                    weighted_type_count: u32::MAX,
+                    prospective_value: Some(u64::MAX),
+                }),
+                next_acceptance: None,
+                prospective_value: Some(u64::MAX),
+                expected_self_tsumo_value,
+            }),
+            ..offense_with_shape(1, 16, 5, IishantenShape::Complete)
         }
     }
 
@@ -1549,8 +1648,9 @@ mod tests {
     }
 
     #[test]
-    fn iishanten_against_a_reach_always_folds() {
-        // 旧 strong / complete / dealer / high-value の一向聴補正はすべて撤去した。
+    fn iishanten_without_an_expected_self_tsumo_value_against_a_reach_folds() {
+        // 攻撃価値を確認できない一向聴は押さない。旧 strong / complete / dealer / high-value の
+        // 一向聴補正へ fallback しない。
         let cases = [
             offense_with_shape(1, 12, 4, IishantenShape::Weak),
             offense_with_shape(1, 8, 2, IishantenShape::Weak),
@@ -1580,9 +1680,9 @@ mod tests {
     }
 
     #[test]
-    fn the_iishanten_forward_metrics_do_not_change_any_branch() {
-        // 1向聴の前方集計値は観測用に保持するだけで、押し引きの判断には一切使わない。
-        // 打点込みの集計値がどれだけ高くても threat があれば Fold のまま。
+    fn the_iishanten_forward_metrics_other_than_the_expected_self_tsumo_value_do_not_decide() {
+        // 一向聴の判定に使うのは ExpectedSelfTsumoValue だけ。weighted tenpai wait と
+        // weighted prospective value がどれだけ高くても、それだけでは押す根拠にしない。
         let metrics = |prospective_value: Option<u64>| {
             Some(ForwardMetrics {
                 tenpai_wait: Some(TenpaiWaitMetric {
@@ -1592,7 +1692,7 @@ mod tests {
                 }),
                 next_acceptance: None,
                 prospective_value,
-                expected_self_tsumo_value: prospective_value,
+                expected_self_tsumo_value: None,
             })
         };
 
@@ -1623,6 +1723,184 @@ mod tests {
                 PushPullMode::Push,
                 PushPullReason::NoThreat,
             );
+        }
+    }
+
+    #[test]
+    fn iishanten_against_a_reach_pushes_only_at_or_above_the_expected_self_tsumo_threshold() {
+        // 通常 threat の threshold は 1000 点で inclusive。
+        for (points, mode, reason) in [
+            (
+                999,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstReach,
+            ),
+            (
+                1_000,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstReach,
+            ),
+            (
+                1_001,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstReach,
+            ),
+        ] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
+
+            for self_dealer in [false, true] {
+                for reach_count in [1, 2] {
+                    assert_decision(
+                        &inputs_with_dealer(reach_count, false, self_dealer, Some(offense)),
+                        mode,
+                        reason,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn iishanten_against_a_dealer_reach_requires_one_and_a_half_times_the_threshold() {
+        // 親リーチを含む threat では 1500 点を要求する。こちらも inclusive。
+        for (points, mode, reason) in [
+            (
+                1_000,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstReach,
+            ),
+            (
+                1_499,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstReach,
+            ),
+            (
+                1_500,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstReach,
+            ),
+            (
+                1_501,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstReach,
+            ),
+        ] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
+
+            for self_dealer in [false, true] {
+                assert_decision(
+                    &inputs_with_dealer(1, true, self_dealer, Some(offense)),
+                    mode,
+                    reason,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_expected_self_tsumo_value_folds_the_iishanten() {
+        // 受け入れも一向聴形も打点 proxy も揃っていても、攻撃価値を確認できなければ押さない。
+        let offense = iishanten_offense_with_expected_self_tsumo_value(None);
+        let rich_offense = PushPullOffenseState {
+            dora_count_after_discard: 6,
+            red_dora_count_after_discard: 1,
+            value_honor_han_proxy_after_discard: 2,
+            ..offense
+        };
+
+        for offense in [offense, rich_offense] {
+            for self_dealer in [false, true] {
+                for (reach_count, dealer_reacher) in [(1, false), (1, true), (2, false)] {
+                    assert_decision(
+                        &inputs_with_dealer(
+                            reach_count,
+                            dealer_reacher,
+                            self_dealer,
+                            Some(offense),
+                        ),
+                        PushPullMode::Fold,
+                        PushPullReason::IishantenAgainstReach,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_threat_pushes_the_iishanten_regardless_of_the_expected_self_tsumo_value() {
+        // threat が無い局面まで新しい threshold で降ろさない。
+        for expected_self_tsumo_value in [None, Some(0), Some(self_tsumo_points(999))] {
+            assert_decision(
+                &inputs(
+                    0,
+                    false,
+                    Some(iishanten_offense_with_expected_self_tsumo_value(
+                        expected_self_tsumo_value,
+                    )),
+                ),
+                PushPullMode::Push,
+                PushPullReason::NoThreat,
+            );
+        }
+    }
+
+    #[test]
+    fn two_or_more_shanten_does_not_use_the_expected_self_tsumo_value() {
+        // 二向聴以上へは接続しない。値が threshold を超えていても従来どおり降りる。
+        let offense = PushPullOffenseState {
+            min_shanten_after_discard: 2,
+            ..iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(12_000)))
+        };
+
+        for (reach_count, dealer_reacher) in [(1, false), (1, true)] {
+            assert_decision(
+                &inputs(reach_count, dealer_reacher, Some(offense)),
+                PushPullMode::Fold,
+                PushPullReason::TwoOrMoreShantenAgainstReach,
+            );
+        }
+    }
+
+    #[test]
+    fn the_iishanten_policy_never_returns_neutral() {
+        // 一向聴の押し引きは Push / Fold の二値で、中間モードを返さない。
+        for expected_self_tsumo_value in [
+            None,
+            Some(0),
+            Some(self_tsumo_points(999)),
+            Some(self_tsumo_points(1_000)),
+            Some(self_tsumo_points(1_499)),
+            Some(self_tsumo_points(1_500)),
+            Some(u64::MAX),
+        ] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(expected_self_tsumo_value);
+
+            for dealer_reacher in [false, true] {
+                for reach_count in [0, 1, 2] {
+                    let decision =
+                        decide_push_pull(&inputs(reach_count, dealer_reacher, Some(offense)));
+                    assert_ne!(decision.mode, PushPullMode::Neutral, "{decision:?}");
+                }
+            }
+
+            let high_open_hand = decide_push_pull(&high_open_hand_inputs(Some(offense)));
+            assert_ne!(
+                high_open_hand.mode,
+                PushPullMode::Neutral,
+                "{high_open_hand:?}"
+            );
+
+            let combined = decide_push_pull(&inputs_with_threats(
+                1,
+                false,
+                false,
+                Some(offense),
+                combined_threat_facts(),
+            ));
+            assert_ne!(combined.mode, PushPullMode::Neutral, "{combined:?}");
         }
     }
 
@@ -3813,8 +4091,9 @@ mod tests {
     }
 
     #[test]
-    fn iishanten_against_a_high_open_hand_always_folds() {
-        // 旧 strong / complete / dealer / high-value の一向聴補正は復活させない。
+    fn iishanten_without_an_expected_self_tsumo_value_against_a_high_open_hand_folds() {
+        // 攻撃価値を確認できない一向聴は押さない。旧 strong / complete / dealer / high-value の
+        // 一向聴補正は復活させない。
         let cases = [
             offense(1, 16, 4),
             offense_with_shape(1, 8, 2, IishantenShape::Weak),
@@ -3832,6 +4111,34 @@ mod tests {
                     &high_open_hand_inputs_with_dealer(self_dealer, Some(offense)),
                     PushPullMode::Fold,
                     PushPullReason::IishantenAgainstHighOpenHand,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn iishanten_against_a_high_open_hand_uses_the_base_expected_self_tsumo_threshold() {
+        // 他家リーチがいないので親リーチ threshold は使わない。
+        for (points, mode, reason) in [
+            (
+                999,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            ),
+            (
+                1_000,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            ),
+        ] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
+
+            for self_dealer in [false, true] {
+                assert_high_open_hand_decision(
+                    &high_open_hand_inputs_with_dealer(self_dealer, Some(offense)),
+                    mode,
+                    reason,
                 );
             }
         }
@@ -4068,7 +4375,7 @@ mod tests {
     }
 
     #[test]
-    fn iishanten_against_a_combined_threat_folds() {
+    fn iishanten_without_an_expected_self_tsumo_value_against_a_combined_threat_folds() {
         let cases = [
             offense(1, 8, 2),
             offense_with_shape(1, 6, 2, IishantenShape::Complete),
@@ -4091,6 +4398,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_combined_threat_alone_does_not_raise_the_iishanten_expected_self_tsumo_threshold() {
+        // 複合というだけでは 1.5 倍にしない。親リーチが含まれるかだけで決まる。
+        let offense =
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(1_000)));
+
+        for facts in [
+            combined_threat_facts(),
+            multiple_reach_combined_threat_facts(),
+        ] {
+            assert_combined_threat_decision(
+                &inputs_with_threats(1, false, false, Some(offense), facts),
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstCombinedThreat,
+            );
+        }
+
+        // 親リーチを含む複合 threat では 1000 点では足りない。
+        assert_combined_threat_decision(
+            &inputs_with_threats(1, true, false, Some(offense), combined_threat_facts()),
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstCombinedThreat,
+        );
+        assert_combined_threat_decision(
+            &inputs_with_threats(
+                1,
+                true,
+                false,
+                Some(iishanten_offense_with_expected_self_tsumo_value(Some(
+                    self_tsumo_points(1_500),
+                ))),
+                combined_threat_facts(),
+            ),
+            PushPullMode::Push,
+            PushPullReason::ValuableIishantenAgainstCombinedThreat,
+        );
     }
 
     #[test]
