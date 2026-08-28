@@ -7,6 +7,7 @@ pub mod context;
 pub mod damaten_value;
 pub mod defense;
 pub mod discard_selection;
+pub mod kuikae;
 pub mod meld;
 pub mod offense_value;
 pub mod open_hand_defense;
@@ -63,6 +64,7 @@ pub use defense::{
     wall_tile_types_by_rank,
 };
 pub use discard_selection::select_discard_action;
+pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{
     OffenseValue, TenpaiOffenseMode, TenpaiOffenseValue, reach_baseline_context,

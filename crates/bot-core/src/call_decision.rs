@@ -16,6 +16,7 @@
 //! | 材料 | source of truth |
 //! | --- | --- |
 //! | 面子の形の検証 | [`Meld::shape`] |
+//! | 喰い替え禁止牌 | [`forbidden_discards_after_call`] |
 //! | 副露込みの向聴数 | [`calculate_shanten_with_fixed_melds`] |
 //! | 鳴き後の打牌選択 | [`select_best_one_step_discard_evaluation_with_fixed_meld_count`] |
 //! | 待ちと残枚数 | [`DiscardEvaluation::acceptance_after_discard`] / [`TenpaiWaitAvailability`] |
@@ -23,6 +24,12 @@
 //! | 役の有無 | [`evaluate_tenpai_hand_value`] |
 //!
 //! 向聴・受け入れ・待ち・フリテン・役・点数をこの層で計算し直さない。
+//!
+//! # 鳴き後の打牌
+//!
+//! 鳴いた直後に切れない牌 (喰い替え) は戦術ではなく合法手の制約なので、鳴き後の打牌候補から
+//! 先に取り除いてから既存の打牌比較へ渡す。したがって「喰い替え禁止牌を切ればテンパイする」を
+//! 理由に鳴くことはない。鳴き専用の比較順は持たない。
 //!
 //! # 成立条件
 //!
@@ -47,15 +54,17 @@
 
 use bot_logic::{
     DiscardEvaluation, FixedMeldCount, HandValueError, HandValueOutcome, Meld, MeldKind,
-    OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, best_discard_selection_index,
-    calculate_shanten_with_fixed_melds, discard_tenpai_wait_availability,
-    evaluate_tenpai_hand_value, split_discarded_tile, tenpai_completed_hands,
+    OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
+    best_discard_selection_index, calculate_shanten_with_fixed_melds,
+    discard_tenpai_wait_availability, evaluate_tenpai_hand_value, split_discarded_tile,
+    tenpai_completed_hands,
 };
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::damaten_value::damaten_baseline_context;
 use crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count;
+use crate::kuikae::forbidden_discards_after_call;
 
 /// 鳴きを検討する現在の向聴数。今回は 1向聴 → テンパイ だけを対象にする。
 pub const CALL_CURRENT_SHANTEN: i8 = 1;
@@ -107,7 +116,7 @@ pub enum CallDecisionReason {
     FixedMeldCountOverflow,
     /// 現在の effective shanten が1向聴ではない。
     CurrentShantenNotOne,
-    /// 鳴き後の手牌から打牌候補を評価できない。
+    /// 鳴き後の手牌に、喰い替え禁止牌を除いた合法な打牌候補が無い。
     NoPostCallDiscard,
     /// 鳴き後の最良打牌でもテンパイにならない。
     PostCallNotTenpai,
@@ -170,7 +179,11 @@ pub struct CallCandidateDiagnostic {
     /// `calculate_shanten_with_fixed_melds()` で求めた現在の effective shanten。
     pub current_shanten: Option<i8>,
     pub post_call_fixed_meld_count: Option<FixedMeldCount>,
-    /// 鳴き後の最良打牌評価。
+    /// 鳴いた直後に切れない牌種。打牌候補を評価しなかった場合は `None`。
+    ///
+    /// production の打牌選択が実際に除外に使った値そのもので、診断のために求め直さない。
+    pub post_call_forbidden_discards: Option<Vec<TileType>>,
+    /// 喰い替え禁止牌を除いた合法な打牌候補の中の最良打牌評価。
     pub post_call_discard: Option<DiscardEvaluation>,
     /// 鳴き後の打牌でテンパイになる場合の待ちとロン可否。
     pub post_call_wait: Option<TenpaiWaitAvailability>,
@@ -316,6 +329,7 @@ fn evaluate_call_candidate(
         current_fixed_meld_count: None,
         current_shanten: None,
         post_call_fixed_meld_count: None,
+        post_call_forbidden_discards: None,
         post_call_discard: None,
         post_call_wait: None,
         post_call_wait_yaku: None,
@@ -376,11 +390,17 @@ fn evaluate_call_conditions(
         return CallDecisionReason::CurrentShantenNotOne;
     }
 
-    let Some(evaluation) = select_best_one_step_discard_evaluation_with_fixed_meld_count(
+    // 喰い替え禁止牌は合法手の制約なので、打牌候補を比較する前に取り除く。
+    let forbidden_discards = forbidden_discards_after_call(&meld);
+    let evaluation = select_best_one_step_discard_evaluation_with_fixed_meld_count(
         ctx,
         &post_call_tiles,
         post_call_fixed_meld_count,
-    ) else {
+        &forbidden_discards,
+    );
+    candidate.post_call_forbidden_discards = Some(forbidden_discards);
+
+    let Some(evaluation) = evaluation else {
         return CallDecisionReason::NoPostCallDiscard;
     };
 

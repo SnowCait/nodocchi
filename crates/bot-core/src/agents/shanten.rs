@@ -4799,6 +4799,19 @@ pub(crate) mod tests {
         pub(crate) fn actions(&self) -> Vec<LegalAction> {
             vec![self.call(), LegalAction::None]
         }
+
+        // consumed を除いた鳴き後 concealed hand の物理牌一覧。
+        fn post_call_tiles(&self) -> Vec<TileId> {
+            let mut remaining: Vec<TileId> = self.hand.iter().map(|&value| tile(value)).collect();
+            for consumed in &self.consumed {
+                let position = remaining
+                    .iter()
+                    .position(|held| *held == tile(*consumed))
+                    .expect("consumed は手牌にある");
+                remaining.remove(position);
+            }
+            remaining
+        }
     }
 
     // 実際の client が局開始で確定させる履歴依存フリテン。
@@ -4969,6 +4982,7 @@ pub(crate) mod tests {
                 &ctx,
                 &post_call_tiles,
                 FixedMeldCount::new(1).unwrap(),
+                candidate.post_call_forbidden_discards.as_deref().unwrap(),
             );
 
         assert_eq!(candidate.post_call_discard, expected);
@@ -5673,6 +5687,248 @@ pub(crate) mod tests {
         assert!(call.candidates.iter().all(|candidate| candidate.eligible));
         assert!(call.candidates[0].selected);
         assert!(!call.candidates[1].selected);
+    }
+
+    // ---- 喰い替え (鳴き後の合法打牌) テスト ----
+
+    // 喰い替え禁止を適用しない場合の鳴き後 best discard。制約が効いていることを示す前提として、
+    // 本番と同じ helper へ空の禁止牌を渡して求める。
+    fn unconstrained_post_call_discard(reaction: &CallReaction) -> DiscardEvaluation {
+        crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count(
+            &reaction.context(),
+            &reaction.post_call_tiles(),
+            FixedMeldCount::new(1).unwrap(),
+            &[],
+        )
+        .expect("制約なしの鳴き後 best discard")
+    }
+
+    // 喰い替え禁止牌が制約なしの best discard であること (前提) と、本番がそれを選ばないことを
+    // 確認する。戻り値は本番が実際に選んだ打牌の牌種。
+    fn assert_forbidden_discard_is_not_selected(
+        reaction: &CallReaction,
+        expected_forbidden: &[&str],
+        unconstrained_best: &str,
+        expected_reason: CallDecisionReason,
+    ) -> TileType {
+        assert!(expected_forbidden.contains(&unconstrained_best));
+
+        let candidate = assert_single_call_candidate(reaction, &LegalAction::None, expected_reason);
+
+        let forbidden: Vec<String> = candidate
+            .post_call_forbidden_discards
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tile| tile.to_mjai_string())
+            .collect();
+        assert_eq!(forbidden, expected_forbidden);
+
+        // 制約が無ければ禁止牌が選ばれる局面であることを固定する。
+        let unconstrained = unconstrained_post_call_discard(reaction);
+        assert_eq!(unconstrained.discard.to_mjai_string(), unconstrained_best);
+
+        let selected = candidate.post_call_discard.as_ref().unwrap().discard;
+        assert!(
+            !expected_forbidden.contains(&selected.to_mjai_string().as_str()),
+            "{selected:?}"
+        );
+        selected
+    }
+
+    #[test]
+    fn a_pon_does_not_discard_the_called_tile_type() {
+        // 123456m 55p 1s 9s PPP。Pon 後に残る P は、制約が無ければ best discard になるが、
+        // 鳴いた牌と同じ牌種なので切れない。
+        let reaction = CallReaction::pon(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 72, 104, 124, 125, 126],
+            127,
+            &PON_CONSUMED,
+        );
+
+        let selected = assert_forbidden_discard_is_not_selected(
+            &reaction,
+            &["P"],
+            "P",
+            CallDecisionReason::PostCallNotTenpai,
+        );
+        assert_eq!(selected.to_mjai_string(), "1s");
+    }
+
+    #[test]
+    fn a_chi_does_not_discard_the_called_tile_type() {
+        // 1m 2m 3m 5m 8m 456p 789p 55s。2m3m で 1m を Chi した後、手牌に残る 1m は切れない。
+        let reaction = CallReaction::chi(
+            &[0, 4, 8, 17, 28, 48, 53, 56, 60, 64, 68, 89, 90],
+            1,
+            &[4, 8],
+        );
+
+        let selected = assert_forbidden_discard_is_not_selected(
+            &reaction,
+            &["1m", "4m"],
+            "1m",
+            CallDecisionReason::PostCallNotTenpai,
+        );
+        assert_eq!(selected.to_mjai_string(), "8m");
+    }
+
+    #[test]
+    fn a_chi_does_not_discard_the_forbidden_flank_tile() {
+        // 123m 456m 55p 2s3s4s 2p 8p。3s4s で 5s を Chi すると 345s になり、2s を切ると
+        // 元から持っていた 234s への喰い替えになる。
+        let reaction = CallReaction::chi(
+            &[0, 4, 8, 12, 17, 20, 53, 54, 76, 80, 84, 40, 64],
+            89,
+            &[80, 84],
+        );
+
+        let selected = assert_forbidden_discard_is_not_selected(
+            &reaction,
+            &["5s", "2s"],
+            "2s",
+            CallDecisionReason::PostCallNotTenpai,
+        );
+        assert_eq!(selected.to_mjai_string(), "2p");
+    }
+
+    #[test]
+    fn a_forbidden_discard_never_makes_the_call_eligible() {
+        // 喰い替え禁止牌が制約なしの best discard になる局面では、残った合法候補でテンパイに
+        // ならなければ鳴かない。禁止牌を切ればテンパイする、を理由に鳴くことはない。
+        for (label, reaction) in [
+            (
+                "pon",
+                CallReaction::pon(
+                    &[0, 4, 8, 12, 17, 20, 53, 54, 72, 104, 124, 125, 126],
+                    127,
+                    &PON_CONSUMED,
+                ),
+            ),
+            (
+                "chi",
+                CallReaction::chi(
+                    &[0, 4, 8, 12, 17, 20, 53, 54, 76, 80, 84, 40, 64],
+                    89,
+                    &[80, 84],
+                ),
+            ),
+        ] {
+            let ctx = reaction.context();
+            let actions = reaction.actions();
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+            assert_eq!(diagnostic.selected_action, LegalAction::None, "{label}");
+            let call = diagnostic.call.as_ref().unwrap();
+            assert_eq!(call.selected, None, "{label}");
+            assert_eq!(
+                call.reason,
+                CallDecisionReason::PostCallNotTenpai,
+                "{label}"
+            );
+
+            // 制約なしの best discard もテンパイにならないため、禁止で結論が変わったのではなく
+            // 合法な候補が元からテンパイに届いていない。
+            let candidate = &call.candidates[0];
+            assert_eq!(candidate.post_call_shanten(), Some(1), "{label}");
+            assert_eq!(
+                unconstrained_post_call_discard(&reaction).min_shanten_after_discard(),
+                1,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forbidden_discard_does_not_block_a_call_that_reaches_tenpai_otherwise() {
+        // 既存の混一色 Chi。3s4s で 5s を鳴くので 5s と 2s は切れないが、2s を残したまま
+        // 1m を切ってテンパイになるため鳴く。
+        let reaction = honitsu_chi_reaction();
+        let candidate = assert_single_call_candidate(
+            &reaction,
+            &reaction.call(),
+            CallDecisionReason::EligibleTenpai,
+        );
+
+        let forbidden: Vec<String> = candidate
+            .post_call_forbidden_discards
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tile| tile.to_mjai_string())
+            .collect();
+        assert_eq!(forbidden, ["5s", "2s"]);
+
+        // 禁止牌 2s は鳴き後の手牌に残っているが、選ばれる打牌は 1m でテンパイになる。
+        assert!(
+            reaction
+                .post_call_tiles()
+                .iter()
+                .any(|tile| tile.tile_type().to_mjai_string() == "2s")
+        );
+        assert_eq!(
+            candidate
+                .post_call_discard
+                .as_ref()
+                .unwrap()
+                .discard
+                .to_mjai_string(),
+            "1m"
+        );
+        assert_eq!(candidate.post_call_shanten(), Some(0));
+        // 喰い替え禁止は打牌の制約であって、待ちには影響しない。5s は引き続き待ち。
+        assert_eq!(candidate.live_wait_remaining(), Some(7));
+    }
+
+    #[test]
+    fn a_forbidden_five_excludes_both_the_red_and_the_black_five() {
+        // 123m 456m 789p 9p + 赤5s。制約が無ければ 5s を切ってテンパイだが、5s を Pon した
+        // 直後は赤5s も黒5s も切れない。
+        let reaction = CallReaction::pon(
+            &[0, 4, 8, 12, 17, 20, 60, 64, 68, 69, 88, 89, 90],
+            91,
+            &[89, 90],
+        );
+        let ctx = reaction.context();
+        let post_call_tiles = reaction.post_call_tiles();
+        let fixed_meld_count = FixedMeldCount::new(1).unwrap();
+
+        let forbidden = crate::kuikae::forbidden_discards_after_call(&crate::meld::Meld::new(
+            crate::meld::MeldKind::Pon,
+            vec![tile(91), tile(89), tile(90)],
+            Some(tile(91)),
+        ));
+        assert_eq!(
+            forbidden
+                .iter()
+                .map(|tile| tile.to_mjai_string())
+                .collect::<Vec<_>>(),
+            ["5s"]
+        );
+
+        // 制約が無ければ、手牌に残った赤5s を切ってテンパイする。
+        let unconstrained =
+            crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count(
+                &ctx,
+                &post_call_tiles,
+                fixed_meld_count,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(unconstrained.discard.to_mjai_string(), "5s");
+        assert!(unconstrained.discards_red_five);
+        assert_eq!(unconstrained.min_shanten_after_discard(), 0);
+
+        // 黒5s を鳴いても、牌種単位の禁止なので赤5s も候補から外れる。
+        let constrained =
+            crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count(
+                &ctx,
+                &post_call_tiles,
+                fixed_meld_count,
+                &forbidden,
+            )
+            .unwrap();
+        assert_ne!(constrained.discard.to_mjai_string(), "5s");
     }
 
     // ---- 恒常フリテン診断 ----

@@ -598,19 +598,27 @@ pub(crate) fn select_best_normal_discard_evaluation(
         .map(|index| evaluations[index].clone())
 }
 
-/// 副露済み面子数を明示した1手評価だけの best 評価。
+/// 副露済み面子数と切れない牌種を明示した1手評価だけの best 評価。
 ///
 /// 候補評価そのものは通常経路と同じ helper を共有するが、比較は既存の
 /// [`bot_logic::compare_discard_evaluations`] 相当の1手比較だけで、1向聴限定の weighted tenpai
 /// wait は**意図的に使わない**。鳴き判断の「鳴いた後に生きた待ちのテンパイになるか」という
 /// シミュレーション用の入口であり、通常打牌 selection の semantics とは切り離す。
+///
+/// `forbidden_discards` は鳴いた直後に切れない牌種
+/// ([`forbidden_discards_after_call`](crate::kuikae::forbidden_discards_after_call))。合法手の
+/// 制約なので、比較する前に候補から取り除く。打牌候補の評価は牌種ごとに1件なので、除外も牌種
+/// 単位になり、赤5と黒5の一方だけが残ることはない。実際に切る物理牌の赤黒 preference は残った
+/// 候補の既存 semantics のままで変わらない。
 pub(crate) fn select_best_one_step_discard_evaluation_with_fixed_meld_count(
     context: &GameContext,
     tiles: &[TileId],
     fixed_meld_count: FixedMeldCount,
+    forbidden_discards: &[TileType],
 ) -> Option<DiscardEvaluation> {
-    let evaluations =
+    let mut evaluations =
         evaluate_discard_candidates_with_fixed_meld_count(context, tiles, fixed_meld_count);
+    evaluations.retain(|evaluation| !forbidden_discards.contains(&evaluation.discard));
     select_best_one_step_evaluation(&evaluations).cloned()
 }
 
@@ -1585,6 +1593,7 @@ pub(crate) mod tests {
             context,
             tiles,
             evaluation_fixed_meld_count(context),
+            &[],
         )
     }
 

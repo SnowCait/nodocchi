@@ -295,6 +295,10 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
         "    post-call fixed meld count: {}",
         format_fixed_meld_count(candidate.post_call_fixed_meld_count)
     ));
+    lines.push(format!(
+        "    forbidden discards: {}",
+        format_forbidden_discards(candidate.post_call_forbidden_discards.as_deref())
+    ));
 
     let Some(evaluation) = candidate.post_call_discard.as_ref() else {
         lines.push(format!("    best discard: {ABSENT}"));
@@ -362,6 +366,19 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     }
 
     lines
+}
+
+// 喰い替えで切れない牌種。評価しなかった場合と、禁止牌が無い場合を区別する。
+fn format_forbidden_discards(forbidden: Option<&[TileType]>) -> String {
+    match forbidden {
+        None => ABSENT.to_string(),
+        Some([]) => NONE.to_string(),
+        Some(tiles) => tiles
+            .iter()
+            .map(|tile| tile.to_mjai_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 fn call_wait_yaku_label(yaku: CallWaitYaku) -> &'static str {
@@ -3025,6 +3042,7 @@ mod tests {
              current shanten: 1\n    \
              current fixed meld count: 0\n    \
              post-call fixed meld count: 1\n    \
+             forbidden discards: P\n    \
              best discard: N\n    \
              shanten after discard: 0\n    \
              acceptance: 8 / 2 types\n    \
