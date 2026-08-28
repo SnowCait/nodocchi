@@ -104,6 +104,8 @@ cargo run -p riichilab-client --bin riichilab-client -- \
   --capture-file "logs/ranked-capture-$(date +%Y%m%d-%H%M%S).jsonl"
 ```
 
+対局ごとに分けた capture file は、まとめて [production latency 計測](bot-scenario.md#riichilab-capture-の-production-latency-計測) の入力にできます。
+
 1対局中の複数 record は順次追記されます。JSONL なので途中終了時も書き込み済み record を利用でき、`jq` などで絞り込めます。
 
 ```bash

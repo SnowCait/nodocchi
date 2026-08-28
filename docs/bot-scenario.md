@@ -187,6 +187,113 @@ cargo run -p bot-scenario -- \
 
 `scores`、`honba`、`kyotaku`、`kyoku` は observation から復元します。RiichiLab live client と Chiihou における履歴依存フリテンの違いは [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。
 
+## RiichiLab capture の production latency 計測
+
+capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `ShantenAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
+
+計測に使う `GameContext` は単一 `observation` からの復元です。live client は event 列から積み上げた `post_reach_passed`、`temporary_passed`、履歴依存フリテンを `GameContext` へ足してから `act()` を呼ぶため、capture replay の入力は live client の入力と完全一致しません。復元できない事実は [RiichiLab capture の再生](#riichilab-capture-の再生) と同じで、入力経路ごとの known / unknown は [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。revision 間の比較では同じ capture corpus から同じ入力を復元するので、相対比較の基盤としては有効です。
+
+性能比較は release build で行います。debug build の値は最適化後の decision latency と対応しません。
+
+```bash
+cargo build --release -p bot-scenario
+
+./target/release/bot-scenario \
+  --benchmark-riichilab-capture \
+  logs/game-001.jsonl \
+  logs/game-002.jsonl
+```
+
+| 引数 | 必須 | 内容 |
+| --- | --: | --- |
+| `--benchmark-riichilab-capture` | 必須 | capture JSONL の path。以降に続く path も同じ run の入力として扱う |
+| `--benchmark-json` | 任意 | 集計と request ごとの結果を JSON で保存する path |
+
+shell の glob 展開で複数 file を1回の run にまとめられます。`--riichilab-capture`、`--request-id`、`--hand`、JSON scenario、`--lookahead`、`--verbose`、`--summary-only` とは併用できません。
+
+malformed な record や decode できない `observation` は黙って読み飛ばさず、その時点で error になります。
+
+### 計測区間
+
+timer に含むのは、復元済みの `GameContext` と合法手に対する production `ShantenAgent::act()` だけです。
+
+| | 内容 |
+| --- | --- |
+| 含む | production `ShantenAgent::act()` |
+| 含まない | capture file の読み込み、JSON parse、`observation` decode、`GameContext` 構築、合法手構築、出力整形、file I/O、集計 |
+
+計測のために診断 (`--lookahead` / `--verbose` 相当) は構築しません。各 request は1回だけ実行します。同じ request を繰り返す microbenchmark ではありません。
+
+### 出力
+
+```text
+RiichiLab production latency benchmark
+  captures: 12
+  requests: 742
+  total: 136528.000 ms
+  mean: 184.000 ms
+  p50: 72.000 ms
+  p90: 510.000 ms
+  p95: 820.000 ms
+  p99: 1810.000 ms
+  max: 2470.000 ms
+  > 500 ms: 83
+  > 1 s: 21
+  > 2 s: 3
+  > 3 s: 0
+
+Slowest requests
+  2470.000 ms  logs/game-003.jsonl  request_id=425  selected=9s
+  2310.000 ms  logs/game-008.jsonl  request_id=317  selected=5p
+```
+
+percentile は nearest-rank です。昇順に並べた `n` 件について順位 `ceil(p / 100 * n)` の値をそのまま採用し、補間しません。threshold の件数は閾値を厳密に超えた request だけを数えます。`selected` は計測した production decision そのものです。
+
+`Slowest requests` は elapsed 降順に最大20件表示します。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
+
+```bash
+./target/release/bot-scenario \
+  --riichilab-capture logs/game-003.jsonl \
+  --request-id 425
+```
+
+### machine-readable output
+
+`--benchmark-json` は集計と request ごとの結果を JSON で保存します。時間は ns です。
+
+```json
+{
+  "summary": {
+    "captures": 12,
+    "requests": 742,
+    "total_ns": 136528000000,
+    "mean_ns": 184000000,
+    "p50_ns": 72000000,
+    "p90_ns": 510000000,
+    "p95_ns": 820000000,
+    "p99_ns": 1810000000,
+    "max_ns": 2470000000,
+    "over_500ms": 83,
+    "over_1s": 21,
+    "over_2s": 3,
+    "over_3s": 0
+  },
+  "requests": [
+    {
+      "capture": "logs/game-003.jsonl",
+      "request_id": 425,
+      "actor": 0,
+      "elapsed_ns": 2470000000,
+      "selected": "9s"
+    }
+  ]
+}
+```
+
+`requests` は計測順、つまり capture の指定順と file 内の record 順です。
+
+CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
+
 ## fixture との使い分け
 
 capture は実戦局面を見つけて調べる入口、JSON scenario は恒久的な回帰 fixture です。

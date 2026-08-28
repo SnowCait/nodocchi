@@ -34,19 +34,37 @@ pub fn load_captured_scenario(
     path: &str,
     request_id: Option<u64>,
 ) -> Result<CapturedScenario, ScenarioError> {
-    let text = std::fs::read_to_string(path).map_err(|error| ScenarioError::ReadFile {
-        path: path.to_string(),
-        message: error.to_string(),
-    })?;
+    let text = read_capture_file(path)?;
 
-    captured_scenario(path, select_record(path, &text, request_id)?)
+    captured_scenario(
+        path,
+        select_record(path, parse_records(path, &text)?, request_id)?,
+    )
 }
 
-fn select_record(
-    path: &str,
-    text: &str,
-    request_id: Option<u64>,
-) -> Result<CapturedRequestAction, ScenarioError> {
+pub fn load_captured_scenarios(path: &str) -> Result<Vec<CapturedScenario>, ScenarioError> {
+    let text = read_capture_file(path)?;
+    let records = parse_records(path, &text)?;
+    if records.is_empty() {
+        return Err(ScenarioError::EmptyCapture {
+            path: path.to_string(),
+        });
+    }
+
+    records
+        .into_iter()
+        .map(|record| captured_scenario(path, record))
+        .collect()
+}
+
+fn read_capture_file(path: &str) -> Result<String, ScenarioError> {
+    std::fs::read_to_string(path).map_err(|error| ScenarioError::ReadFile {
+        path: path.to_string(),
+        message: error.to_string(),
+    })
+}
+
+fn parse_records(path: &str, text: &str) -> Result<Vec<CapturedRequestAction>, ScenarioError> {
     let mut records = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -61,7 +79,14 @@ fn select_record(
         })?;
         records.push(record);
     }
+    Ok(records)
+}
 
+fn select_record(
+    path: &str,
+    mut records: Vec<CapturedRequestAction>,
+    request_id: Option<u64>,
+) -> Result<CapturedRequestAction, ScenarioError> {
     let Some(request_id) = request_id else {
         return match records.len() {
             0 => Err(ScenarioError::EmptyCapture {
