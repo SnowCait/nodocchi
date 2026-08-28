@@ -1,3 +1,4 @@
+mod benchmark;
 mod cli;
 #[cfg(test)]
 mod combined_defense;
@@ -16,6 +17,7 @@ use std::process::ExitCode;
 
 use bot_core::{DiagnosticOptions, ShantenAgent};
 
+use crate::benchmark::run_capture_benchmark;
 use crate::cli::{CliArgs, ScenarioSource, USAGE};
 use crate::error::ScenarioError;
 use crate::format::{format_diagnostic, format_summary};
@@ -50,6 +52,7 @@ where
             let captured = load_captured_scenario(path, *request_id)?;
             (Some(captured.header()), captured.scenario)
         }
+        ScenarioSource::RiichilabCaptureBenchmark(spec) => return run_capture_benchmark(spec),
     };
 
     // same-shanten の枝をテンパイまで追う探索は2手先評価よりさらに重いため、枝の詳細を出す
@@ -333,6 +336,115 @@ mod tests {
         assert!(output.contains("\n\nPush/Pull\n"), "{output}");
         assert!(output.contains("\n\nPlayer threats\n"), "{output}");
         assert!(output.contains("\n\nSummary\n"), "{output}");
+    }
+
+    fn write_benchmark_capture(name: &str, request_ids: &[u64]) -> String {
+        let observation = riichilab_client::observation::fixture_base64(
+            0,
+            Some(59),
+            vec![0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
+        );
+        let text = request_ids
+            .iter()
+            .map(|request_id| {
+                format!(
+                    r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = std::env::temp_dir().join(format!(
+            "bot-scenario-main-benchmark-{name}-{}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&path, format!("{text}\n")).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn benchmarks_every_request_of_multiple_captures() {
+        let first = write_benchmark_capture("first", &[425, 426]);
+        let second = write_benchmark_capture("second", &[517]);
+
+        let output = run_args(&[
+            "--benchmark-riichilab-capture",
+            first.as_str(),
+            second.as_str(),
+        ])
+        .unwrap();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+
+        assert!(
+            output.starts_with("RiichiLab production latency benchmark\n"),
+            "{output}"
+        );
+        assert!(output.contains("\n  captures: 2\n"), "{output}");
+        assert!(output.contains("\n  requests: 3\n"), "{output}");
+        assert!(output.contains("\n  p99: "), "{output}");
+        assert!(output.contains("\n  > 3 s: 0\n"), "{output}");
+        assert!(output.contains("\n\nSlowest requests\n"), "{output}");
+        for request_id in [425, 426, 517] {
+            assert!(
+                output.contains(&format!("request_id={request_id}  selected=")),
+                "{output}"
+            );
+        }
+        assert!(output.contains(&first), "{output}");
+        assert!(output.contains(&second), "{output}");
+
+        assert!(!output.contains("Push/Pull"), "{output}");
+        assert!(!output.contains("Player threats"), "{output}");
+    }
+
+    #[test]
+    fn benchmark_writes_the_machine_readable_output() {
+        let capture = write_benchmark_capture("json", &[425, 426]);
+        let json_path = std::env::temp_dir().join(format!(
+            "bot-scenario-main-benchmark-json-{}.json",
+            std::process::id()
+        ));
+
+        run_args(&[
+            "--benchmark-riichilab-capture",
+            capture.as_str(),
+            "--benchmark-json",
+            json_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let text = std::fs::read_to_string(&json_path).unwrap();
+        let _ = std::fs::remove_file(&capture);
+        let _ = std::fs::remove_file(&json_path);
+
+        let json: crate::benchmark::BenchmarkJson = serde_json::from_str(&text).unwrap();
+        assert_eq!(json.summary.captures, 1);
+        assert_eq!(json.summary.requests, 2);
+        assert_eq!(
+            json.requests
+                .iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>(),
+            vec![425, 426]
+        );
+        assert!(
+            json.requests
+                .iter()
+                .all(|request| request.capture == capture && !request.selected.is_empty())
+        );
+    }
+
+    #[test]
+    fn reports_a_missing_benchmark_capture_file() {
+        let error = run_args(&[
+            "--benchmark-riichilab-capture",
+            "missing-benchmark-capture.jsonl",
+        ])
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, ScenarioError::ReadFile { path, .. } if path == "missing-benchmark-capture.jsonl"),
+            "{error:?}"
+        );
     }
 
     #[test]

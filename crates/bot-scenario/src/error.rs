@@ -16,6 +16,9 @@ pub enum ScenarioError {
     #[error("cannot parse scenario JSON {path:?}: {message}")]
     Json { path: String, message: String },
 
+    #[error("cannot write {path:?}: {message}")]
+    WriteFile { path: String, message: String },
+
     #[error("cannot parse capture file {path:?} line {line}: {source}")]
     CaptureRecord {
         path: String,
