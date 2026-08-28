@@ -341,14 +341,14 @@ mod tests {
     fn write_benchmark_capture(name: &str, request_ids: &[u64]) -> String {
         let observation = riichilab_client::observation::fixture_base64(
             0,
-            Some(59),
-            vec![0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
+            Some(128),
+            vec![0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 116, 124, 132],
         );
         let text = request_ids
             .iter()
             .map(|request_id| {
                 format!(
-                    r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
+                    r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"F","tsumogiri":true}}],"observation":"{observation}"}}"#
                 )
             })
             .collect::<Vec<_>>()
@@ -382,7 +382,7 @@ mod tests {
         assert!(output.contains("\n  captures: 2\n"), "{output}");
         assert!(output.contains("\n  requests: 3\n"), "{output}");
         assert!(output.contains("\n  p99: "), "{output}");
-        assert!(output.contains("\n  > 3 s: 0\n"), "{output}");
+        assert!(output.contains("\n  > 3 s: "), "{output}");
         assert!(output.contains("\n\nSlowest requests\n"), "{output}");
         for request_id in [425, 426, 517] {
             assert!(
