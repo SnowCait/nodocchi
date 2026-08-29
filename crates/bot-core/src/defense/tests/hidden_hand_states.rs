@@ -9,7 +9,7 @@ use bot_logic::{
     structural_acceptance_tile_types_with_fixed_melds,
 };
 
-fn ankan(mjai: &str) -> Meld {
+pub(super) fn ankan(mjai: &str) -> Meld {
     Meld::new(
         MeldKind::Ankan,
         TileId::copies(tile_type(mjai)).collect(),
@@ -25,7 +25,7 @@ fn pon(mjai: &str) -> Meld {
 
 // player 1 をリーチ者とし、pool に挙げた牌種だけへ残枚数を残した局面を作る。
 // pool に無い牌種は4枚見え扱いになるので、暗槓に使う牌種も pool から外す。
-fn reached_fixture(
+pub(super) fn reached_fixture(
     pool: &[(&str, u8)],
     melds: Vec<Meld>,
     discards: &[&str],
@@ -39,7 +39,7 @@ fn reached_fixture(
     reached_fixture_with_tile_types(pool, melds, &discards, &post_reach_passed)
 }
 
-fn reached_fixture_with_tile_types(
+pub(super) fn reached_fixture_with_tile_types(
     pool: &[(&str, u8)],
     melds: Vec<Meld>,
     discards: &[TileType],
@@ -120,7 +120,7 @@ fn acceptance_judgement(
     waits.contains(&target) && !waits.iter().any(|wait| forbidden.contains(wait))
 }
 
-fn brute_force_weight(target: &str, context: &GameContext) -> RonCapableStateWeight {
+pub(super) fn brute_force_weight(target: &str, context: &GameContext) -> RonCapableStateWeight {
     let target = tile_type(target);
     let melds = context.melds_of(1).expect("player 1 exists");
     let fixed = fixed_meld_count(melds).expect("at most four melds");
