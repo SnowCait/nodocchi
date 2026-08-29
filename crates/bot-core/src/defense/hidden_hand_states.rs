@@ -1,9 +1,8 @@
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-use bot_logic::{
-    FixedMeldCount, Meld, TileCounts, TileType, calculate_shanten_with_fixed_melds,
-    structural_acceptance_tile_types_with_fixed_melds,
-};
+use bot_logic::{FixedMeldCount, Meld, TileCounts, TileId, TileType, analyze_completed_hand};
 
 use crate::context::GameContext;
 use crate::meld::fixed_meld_count;
@@ -37,6 +36,20 @@ pub struct RonCapableStateWeight {
     pub states: u64,
 }
 
+/// prototype の内訳計測値。数え上げ結果には影響しない。
+///
+/// `candidate_generation` は候補生成と重複排除、`unron_filtering` はロン不能牌との交差判定、
+/// `target_completion` は対象牌の和了判定に費やした累積時間。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HiddenHandStateMetrics {
+    pub generated_candidates: u64,
+    pub evaluated_states: u64,
+    pub completion_checks: u64,
+    pub candidate_generation: Duration,
+    pub unron_filtering: Duration,
+    pub target_completion: Duration,
+}
+
 // 牌種ごとの残枚数 (最大4枚) から k 枚を選ぶ組み合わせ数。
 const BINOMIAL: [[u128; 5]; 5] = [
     [1, 0, 0, 0, 0],
@@ -46,18 +59,24 @@ const BINOMIAL: [[u128; 5]; 5] = [
     [1, 4, 6, 4, 1],
 ];
 
+const MAX_TILE_COPIES: u8 = 4;
+
+// 和了形の枚数。隠れ手牌 (13 - 3 * 固定面子数) に和了牌1枚を足した上限。
+const COMPLETED_HAND_LEN: usize = 14;
+
 type HandCounts = [u8; TileType::COUNT];
 
-// target をまたいで持ち越す待ち判定 cache の上限 entry 数。target 評価の開始時にだけ確認するので、
+// target をまたいで持ち越す判定 cache の上限 entry 数。target 評価の開始時にだけ確認するので、
 // 1つの target 内の重複排除は上限に関係なく完全なままになる。
 const EVALUATED_STATE_CAPACITY: usize = 1 << 22;
 
-// 重複排除と待ち判定結果の cache entry。
+// 重複排除とロン不能牌判定結果の cache entry。
+//
+// ロン不能牌との交差判定は target に依存しないので、同じ player の複数 target で使い回せる。
 #[derive(Debug, Clone, Copy)]
 struct EvaluatedState {
-    // 構造上の待ち牌種 bitmask。テンパイでない手牌は 0。
-    waits: u64,
-    // この手牌状態を weight へ加算済みの target 世代。
+    waits_on_unron_tile: bool,
+    // この手牌状態を評価済みの target 世代。
     counted_generation: u32,
 }
 
@@ -71,14 +90,19 @@ fn state_key(hand: &HandCounts) -> u128 {
         .fold(0u128, |key, &count| (key << 3) | u128::from(count))
 }
 
-fn tile_counts_of(hand: &HandCounts) -> TileCounts {
-    let mut counts = TileCounts::new();
+fn tile_id(tile: TileType, copy: u8) -> TileId {
+    TileId::new(tile.raw() * MAX_TILE_COPIES + copy).expect("at most four copies per tile type")
+}
+
+// 手牌状態を物理牌 id 列にする。牌種ごとに使っていない copy index から順に割り当てる。
+fn concealed_tile_ids(hand: &HandCounts) -> Vec<TileId> {
+    let mut ids = Vec::with_capacity(COMPLETED_HAND_LEN);
     for tile in TileType::all() {
-        for _ in 0..hand[tile.index()] {
-            counts.add(tile);
+        for copy in 0..hand[tile.index()] {
+            ids.push(tile_id(tile, copy));
         }
     }
-    counts
+    ids
 }
 
 /// 公開情報とテンパイ条件に整合する、リーチ者の隠れ手牌状態を exact に数える prototype。
@@ -90,20 +114,31 @@ fn tile_counts_of(hand: &HandCounts) -> TileCounts {
 /// 「フリテン等でロン不能になっていない」隠れ手牌状態の重み総和で、放銃確率ではない。
 /// 待ち形ごとの固定 weight や behavioral prior は持たない。
 ///
+/// **target は今から自分が捨てる牌を想定し、その物理牌は
+/// [`GameContext::visible_tiles`] に反映済みであることを前提にする。** target 自身は隠れ手牌へ
+/// 配る牌ではないので `remaining[]` から消費しないが、候補が保持する target の枚数は
+/// `remaining[target]` の制約を受ける。自分が持っていない牌を target に渡すと、その1枚分の
+/// 見え牌が欠けた残枚数で数えることになる。
+///
 /// 候補生成は対象牌固有の構造から行い、全牌種総当たりも物理牌 subset 総当たりもしない。
-/// テンパイ判定と待ち牌集合は既存の shanten / acceptance を source of truth とする。
+/// 完成形判定は既存 [`analyze_completed_hand`] を source of truth とする。全34牌種の受け入れを
+/// 毎回作らず、対象牌と「その player に対して既にロン不能な牌種」だけを調べる。
 /// 同じ `TileCounts` は decomposition 数によらず1回だけ加算する。
 ///
-/// 待ち判定結果は target 間で共有する cache に載るため、同じ player の複数 target を順に評価する
-/// 場合は同じ instance を使い回す。
+/// ロン不能牌との交差判定は target 間で共有する cache に載るため、同じ player の複数 target を
+/// 順に評価する場合は同じ instance を使い回す。
 pub struct ReachedHiddenHandStates<'a> {
     context: &'a GameContext,
-    fixed_melds: FixedMeldCount,
+    fixed_melds: &'a [Meld],
+    fixed_meld_count: FixedMeldCount,
     concealed_hand_len: u8,
     remaining: HandCounts,
     unron_mask: u64,
+    unron_tiles: Vec<TileType>,
     complete_melds: Vec<[TileType; 3]>,
     evaluated: HashMap<u128, EvaluatedState>,
+    metrics: HiddenHandStateMetrics,
+    completion_checks: Cell<u64>,
     generation: u32,
 }
 
@@ -116,24 +151,26 @@ impl<'a> ReachedHiddenHandStates<'a> {
         player: usize,
         context: &'a GameContext,
     ) -> Result<Self, HiddenHandStateUnsupported> {
-        let melds = context
+        let fixed_melds = context
             .melds_of(player)
             .ok_or(HiddenHandStateUnsupported::UnknownPlayer)?;
         if !context.is_reached(player) {
             return Err(HiddenHandStateUnsupported::NotReached);
         }
-        if melds.iter().any(Meld::is_open) {
+        if fixed_melds.iter().any(Meld::is_open) {
             return Err(HiddenHandStateUnsupported::OpenMeld);
         }
-        let fixed_melds =
-            fixed_meld_count(melds).ok_or(HiddenHandStateUnsupported::TooManyMelds)?;
+        let fixed_meld_count =
+            fixed_meld_count(fixed_melds).ok_or(HiddenHandStateUnsupported::TooManyMelds)?;
 
         let mut remaining = [0u8; TileType::COUNT];
         let mut unron_mask = 0u64;
+        let mut unron_tiles = Vec::new();
         for tile in TileType::all() {
             remaining[tile.index()] = remaining_tile_copies(tile, context);
             if is_genbutsu_for(tile, player, context) {
                 unron_mask |= tile_mask(tile);
+                unron_tiles.push(tile);
             }
         }
 
@@ -142,18 +179,22 @@ impl<'a> ReachedHiddenHandStates<'a> {
         Ok(Self {
             context,
             fixed_melds,
-            concealed_hand_len: 13 - 3 * fixed_melds.get(),
+            fixed_meld_count,
+            concealed_hand_len: 13 - 3 * fixed_meld_count.get(),
             remaining,
             unron_mask,
+            unron_tiles,
             complete_melds,
             evaluated: HashMap::new(),
+            metrics: HiddenHandStateMetrics::default(),
+            completion_checks: Cell::new(0),
             generation: 0,
         })
     }
 
     /// 対象リーチ者の固定面子数。
     pub fn fixed_meld_count(&self) -> FixedMeldCount {
-        self.fixed_melds
+        self.fixed_meld_count
     }
 
     /// 打牌後の concealed hand 枚数 (`13 - 3 * 固定面子数`)。
@@ -166,17 +207,43 @@ impl<'a> ReachedHiddenHandStates<'a> {
         self.unron_mask & tile_mask(tile) != 0
     }
 
+    /// 対象 player に対して既にロン不能な牌種。フリテン判定はこの集合だけを調べる。
+    pub fn unron_capable_tiles(&self) -> &[TileType] {
+        &self.unron_tiles
+    }
+
     /// 評価対象の `GameContext`。
     pub fn context(&self) -> &GameContext {
         self.context
     }
 
-    /// 待ち判定 cache に載っている隠れ手牌状態の数。計測用。
+    /// 判定 cache に載っている隠れ手牌状態の数。計測用。
     pub fn evaluated_state_count(&self) -> usize {
         self.evaluated.len()
     }
 
+    /// これまでの評価の内訳計測値。計測用で、数え上げ結果には影響しない。
+    pub fn metrics(&self) -> HiddenHandStateMetrics {
+        HiddenHandStateMetrics {
+            completion_checks: self.completion_checks.get(),
+            ..self.metrics
+        }
+    }
+
+    /// 隠れ手牌1状態が対象牌でロン可能かを判定する。
+    ///
+    /// cache を使わない素の判定で、`ron_capable_state_weight` の hot path と同じ述語を使う。
+    /// 全34牌種の受け入れを作る従来判定との cross-check 用に公開している。
+    pub fn is_ron_capable_hidden_hand(&self, hand: &TileCounts, target: TileType) -> bool {
+        let hand = hand.as_array();
+        let mut ids = concealed_tile_ids(hand);
+        !self.waits_on_unron_tile(&mut ids, hand) && self.completes_hand(&mut ids, hand, target)
+    }
+
     /// 対象牌で実際にロンできる隠れ手牌状態の重みを exact に数える。
+    ///
+    /// target は今から自分が捨てる牌を想定し、その物理牌は `visible_tiles` に反映済みである
+    /// ことを前提にする。詳細は [`ReachedHiddenHandStates`] を参照。
     pub fn ron_capable_state_weight(&mut self, target: TileType) -> RonCapableStateWeight {
         let mut total = RonCapableStateWeight::default();
         if self.is_unron_capable_tile(target) {
@@ -187,13 +254,22 @@ impl<'a> ReachedHiddenHandStates<'a> {
             self.evaluated.clear();
         }
         self.generation += 1;
+
+        let start = Instant::now();
+        let before = self.judgement_elapsed();
         let mut hand = [0u8; TileType::COUNT];
         self.collect_standard(&mut hand, target, &mut total);
-        if !self.fixed_melds.has_melds() {
+        if !self.fixed_meld_count.has_melds() {
             self.collect_chiitoitsu(&mut hand, target, &mut total);
             self.collect_kokushi(&mut hand, target, &mut total);
         }
+        self.metrics.candidate_generation += start.elapsed() - (self.judgement_elapsed() - before);
+
         total
+    }
+
+    fn judgement_elapsed(&self) -> Duration {
+        self.metrics.unron_filtering + self.metrics.target_completion
     }
 
     fn collect_standard(
@@ -202,7 +278,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         target: TileType,
         total: &mut RonCapableStateWeight,
     ) {
-        let concealed_melds = 4 - self.fixed_melds.get();
+        let concealed_melds = 4 - self.fixed_meld_count.get();
 
         if self.try_add(hand, &[target]) {
             self.collect_meld_multisets(hand, concealed_melds, 0, target, total);
@@ -328,42 +404,76 @@ impl<'a> ReachedHiddenHandStates<'a> {
     }
 
     fn record(&mut self, hand: &HandCounts, target: TileType, total: &mut RonCapableStateWeight) {
+        self.metrics.generated_candidates += 1;
         let generation = self.generation;
         let key = state_key(hand);
-        let evaluated = match self.evaluated.get_mut(&key) {
+        let known = match self.evaluated.get_mut(&key) {
             Some(evaluated) => {
                 if evaluated.counted_generation == generation {
                     return;
                 }
                 evaluated.counted_generation = generation;
-                *evaluated
+                Some(evaluated.waits_on_unron_tile)
             }
-            None => {
-                let evaluated = EvaluatedState {
-                    waits: self.structural_waits(hand),
-                    counted_generation: generation,
-                };
-                self.evaluated.insert(key, evaluated);
-                evaluated
-            }
+            None => None,
         };
-
-        if evaluated.waits & tile_mask(target) == 0 || evaluated.waits & self.unron_mask != 0 {
+        if known == Some(true) {
             return;
         }
+
+        let mut ids = concealed_tile_ids(hand);
+        if known.is_none() {
+            let start = Instant::now();
+            let waits_on_unron_tile = self.waits_on_unron_tile(&mut ids, hand);
+            self.metrics.unron_filtering += start.elapsed();
+            self.metrics.evaluated_states += 1;
+            self.evaluated.insert(
+                key,
+                EvaluatedState {
+                    waits_on_unron_tile,
+                    counted_generation: generation,
+                },
+            );
+            if waits_on_unron_tile {
+                return;
+            }
+        }
+
+        let start = Instant::now();
+        let completes = self.completes_hand(&mut ids, hand, target);
+        self.metrics.target_completion += start.elapsed();
+        if !completes {
+            return;
+        }
+
         total.weight += hand_weight(&self.remaining, hand);
         total.states += 1;
     }
 
-    // テンパイ判定と待ち牌集合は既存 helper を source of truth とする。
-    fn structural_waits(&self, hand: &HandCounts) -> u64 {
-        let counts = tile_counts_of(hand);
-        if calculate_shanten_with_fixed_melds(&counts, self.fixed_melds).min() != 0 {
-            return 0;
+    // 候補の別待ちが、その player に対して既にロン不能な牌種と重なるか。
+    //
+    // 全34牌種の受け入れを作らず、本人の河とリーチ後に通った牌 (`is_genbutsu_for`) だけを調べる。
+    // その牌でも和了形になるなら、その候補はその牌を見逃したことになりロンできない。
+    fn waits_on_unron_tile(&self, ids: &mut Vec<TileId>, hand: &HandCounts) -> bool {
+        self.unron_tiles
+            .iter()
+            .any(|&tile| self.completes_hand(ids, hand, tile))
+    }
+
+    // 隠れ手牌へ1枚加えた形が和了形かを既存 completed hand logic で判定する。
+    //
+    // 5枚目になる牌種は和了牌になり得ないので、受け入れ判定と同じく除外する。
+    fn completes_hand(&self, ids: &mut Vec<TileId>, hand: &HandCounts, tile: TileType) -> bool {
+        let copy = hand[tile.index()];
+        if copy >= MAX_TILE_COPIES {
+            return false;
         }
-        structural_acceptance_tile_types_with_fixed_melds(&counts, self.fixed_melds)
-            .into_iter()
-            .fold(0u64, |mask, tile| mask | tile_mask(tile))
+        self.completion_checks.set(self.completion_checks.get() + 1);
+        ids.push(tile_id(tile, copy));
+        let complete = analyze_completed_hand(ids, self.fixed_melds)
+            .is_ok_and(|analysis| analysis.is_complete());
+        ids.pop();
+        complete
     }
 }
 
@@ -412,8 +522,8 @@ fn incomplete_groups(target: TileType) -> Vec<[TileType; 2]> {
 
 /// 対象牌で実際にロンできる隠れ手牌状態の重みを、単発評価用に求める。
 ///
-/// 同じ player の複数 target を評価する場合は [`ReachedHiddenHandStates`] を使い回すほうが、
-/// 待ち判定 cache を共有できる。
+/// target の前提と数える対象は [`ReachedHiddenHandStates`] と同じ。同じ player の複数 target を
+/// 評価する場合は [`ReachedHiddenHandStates`] を使い回すほうが判定 cache を共有できる。
 pub fn ron_capable_hidden_hand_weight(
     target: TileType,
     player: usize,

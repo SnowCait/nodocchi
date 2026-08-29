@@ -23,8 +23,8 @@ pub use hard_safety::{
     is_genbutsu_for, is_genbutsu_for_all_reached, select_genbutsu_fallback_action,
 };
 pub use hidden_hand_states::{
-    HiddenHandStateUnsupported, ReachedHiddenHandStates, RonCapableStateWeight,
-    ron_capable_hidden_hand_weight,
+    HiddenHandStateMetrics, HiddenHandStateUnsupported, ReachedHiddenHandStates,
+    RonCapableStateWeight, ron_capable_hidden_hand_weight,
 };
 pub use honor::{
     HonorSafetyRank, OpponentHonorValue, honor_dahai_actions_by_safety,

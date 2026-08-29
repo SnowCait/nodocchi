@@ -48,9 +48,9 @@ pub use damaten_value::{
 };
 pub use defense::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
-    DefenseFallbackKind, HiddenHandStateUnsupported, HonorSafetyRank, OpponentHonorValue,
-    ReachedHiddenHandStates, RonCapableStateWeight, SequenceWaitRoute, SequenceWaitShape,
-    SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank, WallRank,
+    DefenseFallbackKind, HiddenHandStateMetrics, HiddenHandStateUnsupported, HonorSafetyRank,
+    OpponentHonorValue, ReachedHiddenHandStates, RonCapableStateWeight, SequenceWaitRoute,
+    SequenceWaitShape, SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank, WallRank,
     genbutsu_dahai_actions_for_all_reached, honor_dahai_actions_by_safety,
     honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
     is_discarded_by_player, is_genbutsu_for, is_genbutsu_for_all_reached, is_no_chance,
