@@ -1,6 +1,6 @@
 {
   "name": "nodocchi",
-  "image": "mcr.microsoft.com/devcontainers/rust:bookworm",
+  "image": "mcr.microsoft.com/devcontainers/rust:2-1-bookworm",
   "postCreateCommand": "rustup toolchain install --no-self-update",
   "customizations": {
     "vscode": {
