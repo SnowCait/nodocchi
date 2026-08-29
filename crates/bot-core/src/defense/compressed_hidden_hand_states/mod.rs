@@ -1,6 +1,7 @@
 mod block_table;
 mod group;
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -16,17 +17,59 @@ use group::{ChiitoitsuShape, GROUP_COUNT, GroupClass, GroupSpec, enumerate_group
 
 /// compressed counting の内訳計測値。数え上げ結果には影響しない。
 ///
-/// `precomputation` は player ごとに1回だけ行う群単位の状態圧縮、`target_evaluation` は target
-/// ごとの畳み込みと DP の累計時間。
+/// `precomputation` は player ごとに1回だけ行う群単位の状態圧縮、`tenpai_calculation` は
+/// target-independent な denominator の畳み込み、`target_evaluation` は target ごとの畳み込みと
+/// DP の累計時間。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CompressedHiddenHandStateMetrics {
     pub enumerated_group_vectors: u64,
     pub retained_group_classes: u64,
+    pub collapsed_tenpai_classes: u64,
     pub collapsed_target_classes: u64,
+    pub tenpai_dp_transitions: u64,
     pub dp_transitions: u64,
     pub block_tables: Duration,
     pub precomputation: Duration,
+    pub tenpai_calculation: Duration,
     pub target_evaluation: Duration,
+}
+
+/// 公開情報と整合する structural tenpai 隠れ手牌状態の総量。
+///
+/// `weight` は各状態の物理牌組み合わせ数 `Π C(remaining[t], count[t])` の総和で、
+/// `states` は hand family や decomposition をまたいで重複排除した `TileCounts` の個数。
+/// 放銃確率ではない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TenpaiStateWeight {
+    pub weight: u128,
+    pub states: u64,
+}
+
+/// 1 target のロン可能 weight と、その player の structural tenpai weight。
+///
+/// production の打牌比較にはまだ接続せず、exact な比率比較の材料だけを保持する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RonRiskEvidence {
+    pub ron_capable_weight: u128,
+    pub tenpai_weight: u128,
+}
+
+impl RonRiskEvidence {
+    /// `self.R / self.T` と `other.R / other.T` を浮動小数点なしで比較する。
+    ///
+    /// synthetic / inconsistent context でどちらかの分母が0なら、比率を0とみなさず `None` を返す。
+    pub fn compare_ratio(&self, other: &Self) -> Option<Ordering> {
+        if self.tenpai_weight == 0 || other.tenpai_weight == 0 {
+            return None;
+        }
+
+        // 136枚・concealed hand 最大13枚では各 weight <= C(136, 13) < 2^59。
+        // R <= T なので cross product も < 2^118 となり、u128 に収まる。
+        Some(
+            (self.ron_capable_weight * other.tenpai_weight)
+                .cmp(&(other.ron_capable_weight * self.tenpai_weight)),
+        )
+    }
 }
 
 // target と、その player に対して既にロン不能な牌種だけへ落とした群 class。
@@ -276,6 +319,7 @@ pub struct CompressedHiddenHandStates<'a> {
     unron_tiles: Vec<TileType>,
     specs: [GroupSpec; GROUP_COUNT],
     groups: [Vec<GroupClass>; GROUP_COUNT],
+    tenpai_state_weight: TenpaiStateWeight,
     metrics: CompressedHiddenHandStateMetrics,
 }
 
@@ -331,7 +375,7 @@ impl<'a> CompressedHiddenHandStates<'a> {
         metrics.precomputation = start.elapsed();
         metrics.retained_group_classes = groups.iter().map(|classes| classes.len() as u64).sum();
 
-        Ok(Self {
+        let mut states = Self {
             context,
             fixed_meld_count,
             concealed_hand_len,
@@ -340,8 +384,15 @@ impl<'a> CompressedHiddenHandStates<'a> {
             unron_tiles,
             specs,
             groups,
+            tenpai_state_weight: TenpaiStateWeight::default(),
             metrics,
-        })
+        };
+
+        let start = Instant::now();
+        states.tenpai_state_weight = states.calculate_tenpai_state_weight();
+        states.metrics.tenpai_calculation = start.elapsed();
+
+        Ok(states)
     }
 
     /// 対象リーチ者の固定面子数。
@@ -374,6 +425,24 @@ impl<'a> CompressedHiddenHandStates<'a> {
         self.metrics
     }
 
+    /// 公開情報と整合する全 structural tenpai 隠れ手牌状態の target-independent な総量。
+    ///
+    /// player 自身の河や post-reach passed tiles はここから状態を直接除外しない。また構造待ちの
+    /// 現在残枚数が0でも、隠れ手牌そのものが `remaining` と整合すれば状態に含める。
+    /// この値は [`Self::new`] で1回だけ計算され、target 評価では再計算しない。
+    pub fn tenpai_state_weight(&self) -> TenpaiStateWeight {
+        self.tenpai_state_weight
+    }
+
+    /// 対象牌の exact `R(p, x)` と、事前計算済みの exact `T(p)` をまとめて返す。
+    pub fn ron_risk_evidence(&mut self, target: TileType) -> RonRiskEvidence {
+        let ron_capable = self.ron_capable_state_weight(target);
+        RonRiskEvidence {
+            ron_capable_weight: ron_capable.weight,
+            tenpai_weight: self.tenpai_state_weight.weight,
+        }
+    }
+
     /// 対象牌で実際にロンできる隠れ手牌状態の重みを exact に数える。
     ///
     /// 結果の定義は [`ReachedHiddenHandStates::ron_capable_state_weight`] と同じ。
@@ -387,12 +456,69 @@ impl<'a> CompressedHiddenHandStates<'a> {
 
         let start = Instant::now();
         let collapsed = self.collapse_groups(target);
-        let mut total = self.fold_groups(&collapsed);
+        let (mut total, transitions) = self.fold_groups(&collapsed);
+        self.metrics.dp_transitions += transitions;
         let kokushi = self.kokushi_weight(target);
         total.weight += kokushi.weight;
         total.states += kokushi.states;
         self.metrics.target_evaluation += start.elapsed();
         total
+    }
+
+    fn calculate_tenpai_state_weight(&mut self) -> TenpaiStateWeight {
+        let collapsed = self.collapse_tenpai_groups();
+        let (standard_or_chiitoitsu, transitions) = self.fold_groups(&collapsed);
+        self.metrics.tenpai_dp_transitions += transitions;
+        let kokushi = self.kokushi_tenpai_weight();
+        TenpaiStateWeight {
+            weight: standard_or_chiitoitsu.weight + kokushi.weight,
+            states: standard_or_chiitoitsu.states + kokushi.states,
+        }
+    }
+
+    // raw wait mask を「何らかの structural wait があるか」だけへ落とす。remaining に待ち牌が
+    // 残っているかや、その牌がフリテンかは見ない。
+    fn collapse_tenpai_groups(&mut self) -> [Vec<TargetClass>; GROUP_COUNT] {
+        let mut collapsed: [Vec<TargetClass>; GROUP_COUNT] = Default::default();
+        for (group, classes) in self.groups.iter().enumerate() {
+            let mut folded: HashMap<TargetClassKey, (u128, u64)> = HashMap::new();
+            for class in classes {
+                let key = TargetClassKey {
+                    size: class.key.size,
+                    complete: class.key.complete,
+                    complete_with_pair: class.key.complete_with_pair,
+                    target_wait_to_complete: class.key.wait_to_complete != 0,
+                    unron_wait_to_complete: false,
+                    target_wait_with_pair: class.key.wait_to_complete_with_pair != 0,
+                    unron_wait_with_pair: false,
+                    chiitoitsu: match class.key.chiitoitsu {
+                        ChiitoitsuShape::Broken => ChiitoitsuState::Broken,
+                        ChiitoitsuShape::Pairs { pairs, single } => ChiitoitsuState::Pairs {
+                            pairs,
+                            single: if single.is_some() {
+                                SingleKind::Target
+                            } else {
+                                SingleKind::None
+                            },
+                        },
+                    },
+                };
+                let entry = folded.entry(key).or_insert((0, 0));
+                entry.0 += u128::from(class.weight);
+                entry.1 += class.states;
+            }
+
+            collapsed[group] = folded
+                .into_iter()
+                .map(|(key, (weight, states))| TargetClass {
+                    key,
+                    weight,
+                    states,
+                })
+                .collect();
+            self.metrics.collapsed_tenpai_classes += collapsed[group].len() as u64;
+        }
+        collapsed
     }
 
     // 群 class を target 依存の bool だけへ落とす。ここで初めて target とロン不能牌が効く。
@@ -452,9 +578,9 @@ impl<'a> CompressedHiddenHandStates<'a> {
 
     // 群 class を順に畳み込み、標準形と七対子の待ちを同時に組み立てる。
     fn fold_groups(
-        &mut self,
+        &self,
         collapsed: &[Vec<TargetClass>; GROUP_COUNT],
-    ) -> RonCapableStateWeight {
+    ) -> (RonCapableStateWeight, u64) {
         let hand_len = usize::from(self.concealed_hand_len);
         let width = PHASE_COUNT * CHIITOITSU_STATE_COUNT;
         let len = (hand_len + 1) * width;
@@ -501,8 +627,6 @@ impl<'a> CompressedHiddenHandStates<'a> {
             }
             current = next;
         }
-        self.metrics.dp_transitions += transitions;
-
         let mut total = RonCapableStateWeight::default();
         for phase in 0..PHASE_COUNT {
             for chiitoitsu in 0..CHIITOITSU_STATE_COUNT {
@@ -533,7 +657,7 @@ impl<'a> CompressedHiddenHandStates<'a> {
                 total.states += states;
             }
         }
-        total
+        (total, transitions)
     }
 
     // 国士無双テンパイの隠れ手牌を直接数える。13面待ちと、target 単騎の12種+対子だけが対象。
@@ -574,6 +698,44 @@ impl<'a> CompressedHiddenHandStates<'a> {
         }
         total
     }
+
+    // 国士の13面待ち1状態と、欠けた么九牌・対子牌の全組み合わせを target 非依存に数える。
+    fn kokushi_tenpai_weight(&self) -> TenpaiStateWeight {
+        if self.fixed_meld_count.has_melds() {
+            return TenpaiStateWeight::default();
+        }
+        let yaochu: Vec<TileType> = TileType::all().filter(|tile| tile.is_yaochu()).collect();
+        let mut total = TenpaiStateWeight::default();
+
+        if yaochu.iter().all(|&tile| self.remaining[tile.index()] >= 1) {
+            total.weight += yaochu
+                .iter()
+                .map(|&tile| u128::from(self.remaining[tile.index()]))
+                .product::<u128>();
+            total.states += 1;
+        }
+
+        for &missing in &yaochu {
+            for &pair in &yaochu {
+                if pair == missing || self.remaining[pair.index()] < 2 {
+                    continue;
+                }
+                let others = yaochu
+                    .iter()
+                    .filter(|&&tile| tile != pair && tile != missing);
+                if others.clone().any(|&tile| self.remaining[tile.index()] < 1) {
+                    continue;
+                }
+                let pair_copies = u128::from(self.remaining[pair.index()]);
+                total.weight += pair_copies * (pair_copies - 1) / 2
+                    * others
+                        .map(|&tile| u128::from(self.remaining[tile.index()]))
+                        .product::<u128>();
+                total.states += 1;
+            }
+        }
+        total
+    }
 }
 
 /// 対象牌で実際にロンできる隠れ手牌状態の重みを、単発評価用に compressed counting で求める。
@@ -586,4 +748,12 @@ pub fn compressed_ron_capable_hidden_hand_weight(
     context: &GameContext,
 ) -> Result<RonCapableStateWeight, HiddenHandStateUnsupported> {
     Ok(CompressedHiddenHandStates::new(player, context)?.ron_capable_state_weight(target))
+}
+
+/// 公開情報と整合する全 structural tenpai 隠れ手牌状態の総量を単発で求める。
+pub fn compressed_tenpai_hidden_hand_weight(
+    player: usize,
+    context: &GameContext,
+) -> Result<TenpaiStateWeight, HiddenHandStateUnsupported> {
+    Ok(CompressedHiddenHandStates::new(player, context)?.tenpai_state_weight())
 }

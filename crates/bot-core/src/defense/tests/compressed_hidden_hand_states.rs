@@ -1,11 +1,13 @@
 use super::common::*;
 use super::hidden_hand_states::{
-    ankan, brute_force_weight, reached_fixture, reached_fixture_with_tile_types,
+    ankan, brute_force_tenpai_state_weight, brute_force_weight, reached_fixture,
+    reached_fixture_with_tile_types,
 };
 use crate::context::GameContext;
 use crate::defense::*;
 use crate::meld::{Meld, MeldKind};
 use bot_logic::{TileId, TileType};
+use std::cmp::Ordering;
 
 fn pon(mjai: &str) -> Meld {
     let tiles: Vec<TileId> = TileId::copies(tile_type(mjai)).take(3).collect();
@@ -27,6 +29,379 @@ fn assert_matches_enumerator(target: &str, context: &GameContext) -> RonCapableS
         target.to_mjai_string()
     );
     compressed
+}
+
+fn assert_tenpai_matches_brute_force(context: &GameContext) -> TenpaiStateWeight {
+    let expected = brute_force_tenpai_state_weight(context);
+    let states = CompressedHiddenHandStates::new(1, context).expect("supported reached state");
+    assert_eq!(states.tenpai_state_weight(), expected);
+    expected
+}
+
+fn remaining_counts(context: &GameContext) -> [u8; TileType::COUNT] {
+    let mut remaining = [0; TileType::COUNT];
+    for tile in TileType::all() {
+        remaining[tile.index()] = remaining_tile_copies(tile, context);
+    }
+    remaining
+}
+
+fn assert_ron_is_subset_for_targets(context: &GameContext, targets: &[&str]) {
+    let mut states = CompressedHiddenHandStates::new(1, context).unwrap();
+    let tenpai = states.tenpai_state_weight();
+    for target in targets {
+        let ron = states.ron_capable_state_weight(tile_type(target));
+        assert!(ron.weight <= tenpai.weight, "target: {target}");
+        assert!(ron.states <= tenpai.states, "target: {target}");
+    }
+}
+
+#[test]
+fn tenpai_denominator_matches_physical_brute_force_on_a_reduced_pool() {
+    let context = reached_fixture(
+        &[
+            ("1m", 2),
+            ("2m", 2),
+            ("3m", 2),
+            ("4m", 2),
+            ("5m", 2),
+            ("6m", 2),
+            ("7m", 2),
+            ("8m", 1),
+        ],
+        vec![],
+        &[],
+        &[],
+    );
+
+    let total = assert_tenpai_matches_brute_force(&context);
+    assert!(total.weight > 0);
+    assert!(total.states > 0);
+}
+
+#[test]
+fn tenpai_denominator_includes_standard_chiitoitsu_and_kokushi() {
+    let standard = reached_fixture(
+        &[
+            ("1m", 1),
+            ("2m", 1),
+            ("3m", 1),
+            ("4m", 1),
+            ("5m", 1),
+            ("6m", 1),
+            ("7m", 1),
+            ("8m", 1),
+            ("9m", 1),
+            ("1p", 2),
+            ("2s", 1),
+            ("3s", 1),
+        ],
+        vec![],
+        &[],
+        &[],
+    );
+    let chiitoitsu = reached_fixture(
+        &[
+            ("1m", 2),
+            ("3m", 2),
+            ("5m", 2),
+            ("7m", 2),
+            ("9m", 2),
+            ("1p", 2),
+            ("3s", 1),
+        ],
+        vec![],
+        &[],
+        &[],
+    );
+    let kokushi = reached_fixture(
+        &[
+            ("1m", 1),
+            ("9m", 1),
+            ("1p", 1),
+            ("9p", 1),
+            ("1s", 1),
+            ("9s", 1),
+            ("E", 1),
+            ("S", 1),
+            ("W", 1),
+            ("N", 1),
+            ("P", 1),
+            ("F", 1),
+            ("C", 1),
+        ],
+        vec![],
+        &[],
+        &[],
+    );
+
+    for (family, context) in [
+        ("standard", standard),
+        ("chiitoitsu", chiitoitsu),
+        ("kokushi", kokushi),
+    ] {
+        assert_eq!(
+            assert_tenpai_matches_brute_force(&context),
+            TenpaiStateWeight {
+                weight: 1,
+                states: 1,
+            },
+            "family: {family}"
+        );
+        assert_ron_is_subset_for_targets(&context, &["1m", "3m", "1p", "E"]);
+    }
+}
+
+#[test]
+fn tenpai_denominator_deduplicates_family_overlap_and_standard_decompositions() {
+    let overlap = reached_fixture(
+        &[
+            ("1m", 2),
+            ("2m", 2),
+            ("3m", 2),
+            ("4m", 2),
+            ("5m", 2),
+            ("6m", 2),
+            ("7m", 1),
+        ],
+        vec![],
+        &[],
+        &[],
+    );
+    let duplicate_decomposition = reached_fixture(
+        &[
+            ("1m", 3),
+            ("2m", 3),
+            ("3m", 3),
+            ("4p", 2),
+            ("5p", 1),
+            ("6p", 1),
+        ],
+        vec![],
+        &[],
+        &[],
+    );
+
+    for (case, context) in [
+        ("standard / chiitoitsu overlap", overlap),
+        ("duplicate standard decomposition", duplicate_decomposition),
+    ] {
+        assert_eq!(
+            assert_tenpai_matches_brute_force(&context),
+            TenpaiStateWeight {
+                weight: 1,
+                states: 1,
+            },
+            "case: {case}"
+        );
+    }
+}
+
+#[test]
+fn furiten_and_post_reach_passed_do_not_directly_filter_the_denominator() {
+    let pool = [
+        ("1m", 2),
+        ("2m", 2),
+        ("3m", 2),
+        ("4m", 2),
+        ("5m", 2),
+        ("6m", 2),
+    ];
+    let melds = || vec![ankan("1p"), ankan("2p"), ankan("3p")];
+    let open = reached_fixture(&pool, melds(), &[], &[]);
+    let own_river = reached_fixture(&pool, melds(), &["6m"], &[]);
+    let passed = reached_fixture(&pool, melds(), &[], &["6m"]);
+
+    assert_eq!(remaining_counts(&open), remaining_counts(&own_river));
+    assert_eq!(remaining_counts(&open), remaining_counts(&passed));
+
+    let open_tenpai = assert_tenpai_matches_brute_force(&open);
+    assert_eq!(assert_tenpai_matches_brute_force(&own_river), open_tenpai);
+    assert_eq!(assert_tenpai_matches_brute_force(&passed), open_tenpai);
+
+    let open_ron = compressed_ron_capable_hidden_hand_weight(tile_type("3m"), 1, &open).unwrap();
+    let river_ron =
+        compressed_ron_capable_hidden_hand_weight(tile_type("3m"), 1, &own_river).unwrap();
+    let passed_ron =
+        compressed_ron_capable_hidden_hand_weight(tile_type("3m"), 1, &passed).unwrap();
+    assert!(river_ron.weight < open_ron.weight);
+    assert_eq!(passed_ron, river_ron);
+}
+
+#[test]
+fn exhausted_structural_wait_remains_in_the_denominator() {
+    // 唯一の hidden hand は 45m + 99s。構造上3m/6m待ちだが、どちらも remaining 0。
+    let context = reached_fixture(
+        &[("4m", 1), ("5m", 1), ("9s", 2)],
+        vec![ankan("1p"), ankan("2p"), ankan("3p")],
+        &[],
+        &[],
+    );
+    assert_eq!(remaining_tile_copies(tile_type("3m"), &context), 0);
+    assert_eq!(remaining_tile_copies(tile_type("6m"), &context), 0);
+    assert_eq!(
+        assert_tenpai_matches_brute_force(&context),
+        TenpaiStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn tenpai_denominator_matches_reference_for_zero_through_four_ankan() {
+    let pools: [&[(&str, u8)]; 5] = [
+        &[
+            ("1m", 1),
+            ("2m", 1),
+            ("3m", 1),
+            ("4m", 1),
+            ("5m", 1),
+            ("6m", 1),
+            ("7m", 1),
+            ("8m", 1),
+            ("9m", 1),
+            ("1s", 2),
+            ("2s", 1),
+            ("3s", 1),
+        ],
+        &[
+            ("1m", 1),
+            ("2m", 1),
+            ("3m", 1),
+            ("4m", 1),
+            ("5m", 1),
+            ("6m", 1),
+            ("1s", 2),
+            ("2s", 1),
+            ("3s", 1),
+        ],
+        &[
+            ("1m", 1),
+            ("2m", 1),
+            ("3m", 1),
+            ("1s", 2),
+            ("2s", 1),
+            ("3s", 1),
+        ],
+        &[("1m", 2), ("2s", 1), ("3s", 1)],
+        &[("1m", 1)],
+    ];
+    let ankan_tiles = ["1p", "2p", "3p", "4p"];
+
+    for (meld_count, pool) in pools.iter().enumerate() {
+        let melds = ankan_tiles
+            .iter()
+            .take(meld_count)
+            .map(|tile| ankan(tile))
+            .collect();
+        let context = reached_fixture(pool, melds, &[], &[]);
+        assert_eq!(
+            assert_tenpai_matches_brute_force(&context),
+            TenpaiStateWeight {
+                weight: 1,
+                states: 1,
+            },
+            "ankan count: {meld_count}"
+        );
+    }
+}
+
+#[test]
+fn ron_risk_evidence_is_a_subset_and_reuses_one_denominator() {
+    let context = reached_fixture(
+        &[
+            ("1m", 2),
+            ("2m", 2),
+            ("3m", 2),
+            ("4m", 2),
+            ("5m", 2),
+            ("6m", 2),
+        ],
+        vec![ankan("1p"), ankan("2p"), ankan("3p")],
+        &[],
+        &[],
+    );
+    let mut states = CompressedHiddenHandStates::new(1, &context).unwrap();
+    let tenpai = states.tenpai_state_weight();
+    let precomputed_metrics = states.metrics();
+
+    for target in ["1m", "3m", "4m", "6m", "E"] {
+        let ron = states.ron_capable_state_weight(tile_type(target));
+        assert!(ron.weight <= tenpai.weight, "target: {target}");
+        assert!(ron.states <= tenpai.states, "target: {target}");
+        assert_eq!(states.tenpai_state_weight(), tenpai);
+        assert_eq!(
+            states.metrics().tenpai_dp_transitions,
+            precomputed_metrics.tenpai_dp_transitions
+        );
+        assert_eq!(
+            states.metrics().tenpai_calculation,
+            precomputed_metrics.tenpai_calculation
+        );
+    }
+
+    let evidence = states.ron_risk_evidence(tile_type("3m"));
+    assert_eq!(evidence.tenpai_weight, tenpai.weight);
+    assert!(evidence.ron_capable_weight <= evidence.tenpai_weight);
+}
+
+#[test]
+fn ron_risk_ratio_comparison_is_exact_and_denominator_zero_is_unavailable() {
+    let half = RonRiskEvidence {
+        ron_capable_weight: 1,
+        tenpai_weight: 2,
+    };
+    let same_denominator_lower = RonRiskEvidence {
+        ron_capable_weight: 0,
+        tenpai_weight: 2,
+    };
+    let equivalent = RonRiskEvidence {
+        ron_capable_weight: 3,
+        tenpai_weight: 6,
+    };
+    let different_denominator_higher = RonRiskEvidence {
+        ron_capable_weight: 2,
+        tenpai_weight: 3,
+    };
+    let unavailable = RonRiskEvidence {
+        ron_capable_weight: 0,
+        tenpai_weight: 0,
+    };
+
+    assert_eq!(
+        half.compare_ratio(&same_denominator_lower),
+        Some(Ordering::Greater)
+    );
+    assert_eq!(half.compare_ratio(&equivalent), Some(Ordering::Equal));
+    assert_eq!(
+        half.compare_ratio(&different_denominator_higher),
+        Some(Ordering::Less)
+    );
+    assert_eq!(half.compare_ratio(&unavailable), None);
+    assert_eq!(unavailable.compare_ratio(&half), None);
+
+    // モデル上限 C(136, 13) = 483,774,556,165,488,000 の cross product も u128 に収まる。
+    let maximum = RonRiskEvidence {
+        ron_capable_weight: 483_774_556_165_488_000,
+        tenpai_weight: 483_774_556_165_488_000,
+    };
+    assert_eq!(maximum.compare_ratio(&maximum), Some(Ordering::Equal));
+}
+
+#[test]
+fn inconsistent_context_can_expose_a_zero_denominator() {
+    let context = reached_fixture(
+        &[],
+        vec![ankan("1p"), ankan("2p"), ankan("3p"), ankan("4p")],
+        &[],
+        &[],
+    );
+    let mut states = CompressedHiddenHandStates::new(1, &context).unwrap();
+    assert_eq!(states.tenpai_state_weight(), TenpaiStateWeight::default());
+    let evidence = states.ron_risk_evidence(tile_type("1m"));
+    assert_eq!(evidence.tenpai_weight, 0);
+    assert_eq!(evidence.compare_ratio(&evidence), None);
 }
 
 #[test]

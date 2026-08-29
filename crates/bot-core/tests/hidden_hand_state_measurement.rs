@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use bot_core::context::GameContext;
 use bot_core::defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, HiddenHandStateMetrics,
-    ReachedHiddenHandStates, RonCapableStateWeight,
+    ReachedHiddenHandStates, RonCapableStateWeight, TenpaiStateWeight,
 };
 use bot_logic::{TileId, TileType};
 
@@ -154,29 +154,39 @@ fn measure_multiple_targets_ron_capable_hidden_hand_weight() {
 }
 
 fn compressed_report(
-    weight: RonCapableStateWeight,
+    tenpai: TenpaiStateWeight,
     metrics: CompressedHiddenHandStateMetrics,
-    total: Duration,
+    player_construction: Duration,
+    evidence_evaluation: Duration,
 ) {
-    println!("  weight={} states={}", weight.weight, weight.states);
+    println!("  T={} (tenpai states={})", tenpai.weight, tenpai.states);
     println!(
         "  enumerated group vectors={} retained group classes={}",
         metrics.enumerated_group_vectors, metrics.retained_group_classes
     );
     println!(
-        "  collapsed target classes={} dp transitions={}",
+        "  collapsed tenpai classes={} tenpai dp transitions={}",
+        metrics.collapsed_tenpai_classes, metrics.tenpai_dp_transitions
+    );
+    println!(
+        "  collapsed target classes={} target dp transitions={}",
         metrics.collapsed_target_classes, metrics.dp_transitions
     );
     println!("  block tables:                 {:?}", metrics.block_tables);
     println!(
-        "  group compression:            {:?}",
+        "  player group precomputation:  {:?}",
         metrics.precomputation
+    );
+    println!(
+        "  T(p) calculation:             {:?}",
+        metrics.tenpai_calculation
     );
     println!(
         "  target evaluation:            {:?}",
         metrics.target_evaluation
     );
-    println!("  total:                        {total:?}");
+    println!("  player construction total:    {player_construction:?}");
+    println!("  R/T evidence wall time:        {evidence_evaluation:?}");
 }
 
 #[test]
@@ -185,17 +195,32 @@ fn measure_one_target_compressed_ron_capable_hidden_hand_weight() {
     let context = representative_context();
     let target = held_target("5p");
 
-    let start = Instant::now();
+    let player_start = Instant::now();
     let mut states = CompressedHiddenHandStates::new(1, &context).expect("menzen reached player");
-    let weight = states.ron_capable_state_weight(target);
-    let elapsed = start.elapsed();
+    let player_construction = player_start.elapsed();
+    let tenpai = states.tenpai_state_weight();
+    let target_start = Instant::now();
+    let evidence = states.ron_risk_evidence(target);
+    let evidence_evaluation = target_start.elapsed();
+    assert_eq!(evidence.tenpai_weight, tenpai.weight);
 
     println!(
-        "compressed 1 player / 1 target ({}), unron tiles={}:",
+        "compressed player precomputation + T(p), then 1 target R/T evidence ({}), unron tiles={}:",
         target.to_mjai_string(),
         states.unron_capable_tiles().len()
     );
-    compressed_report(weight, states.metrics(), elapsed);
+    println!(
+        "  {}: R={} / T={}",
+        target.to_mjai_string(),
+        evidence.ron_capable_weight,
+        evidence.tenpai_weight
+    );
+    compressed_report(
+        tenpai,
+        states.metrics(),
+        player_construction,
+        evidence_evaluation,
+    );
 }
 
 #[test]
@@ -207,23 +232,34 @@ fn measure_multiple_targets_compressed_ron_capable_hidden_hand_weight() {
         .map(|mjai| held_target(mjai))
         .collect();
 
-    let start = Instant::now();
+    let player_start = Instant::now();
     let mut states = CompressedHiddenHandStates::new(1, &context).expect("menzen reached player");
-    let mut total = RonCapableStateWeight::default();
+    let player_construction = player_start.elapsed();
+    let tenpai = states.tenpai_state_weight();
+    let target_start = Instant::now();
     for target in &targets {
-        let weight = states.ron_capable_state_weight(*target);
-        total.weight += weight.weight;
-        total.states += weight.states;
+        let evidence = states.ron_risk_evidence(*target);
+        assert_eq!(evidence.tenpai_weight, tenpai.weight);
         println!(
-            "  {} done at {:?}",
+            "  {}: R={} / T={}, done at {:?}",
             target.to_mjai_string(),
-            start.elapsed()
+            evidence.ron_capable_weight,
+            evidence.tenpai_weight,
+            target_start.elapsed()
         );
     }
-    let elapsed = start.elapsed();
+    let evidence_evaluation = target_start.elapsed();
 
-    println!("compressed 1 player / {} targets:", targets.len());
-    compressed_report(total, states.metrics(), elapsed);
+    println!(
+        "compressed player precomputation + T(p), then {} target R/T evidence values:",
+        targets.len()
+    );
+    compressed_report(
+        tenpai,
+        states.metrics(),
+        player_construction,
+        evidence_evaluation,
+    );
 }
 
 // representative context で enumerating implementation と compressed counting が一致すること。
