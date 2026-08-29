@@ -566,3 +566,304 @@ fn cross_category_rule_does_not_demote_clearly_safe_honors() {
         SuitedSafetyRank::NoChance,
     ));
 }
+
+// ---- SuitedSafetyEvidence ----
+
+fn suited_evidence(wall_rank: WallRank, suji_rank: SujiSafetyRank) -> SuitedSafetyEvidence {
+    SuitedSafetyEvidence {
+        wall_rank,
+        suji_rank,
+    }
+}
+
+// 壁とスジの全組み合わせ。evidence が失わずに保持すべき9通り。
+fn all_suited_evidence_combinations() -> Vec<SuitedSafetyEvidence> {
+    [WallRank::NoWall, WallRank::OneChance, WallRank::NoChance]
+        .into_iter()
+        .flat_map(|wall_rank| {
+            [
+                SujiSafetyRank::NoSuji,
+                SujiSafetyRank::HalfSuji,
+                SujiSafetyRank::Suji,
+            ]
+            .into_iter()
+            .map(move |suji_rank| suited_evidence(wall_rank, suji_rank))
+        })
+        .collect()
+}
+
+#[test]
+fn suited_safety_evidence_distinguishes_every_wall_and_suji_combination() {
+    let combinations = all_suited_evidence_combinations();
+    assert_eq!(combinations.len(), 9);
+    for (left_index, left) in combinations.iter().enumerate() {
+        for (right_index, right) in combinations.iter().enumerate() {
+            assert_eq!(left == right, left_index == right_index);
+        }
+    }
+}
+
+#[test]
+fn suited_safety_evidence_legacy_rank_matches_the_existing_mapping() {
+    for suji_rank in [
+        SujiSafetyRank::NoSuji,
+        SujiSafetyRank::HalfSuji,
+        SujiSafetyRank::Suji,
+    ] {
+        assert_eq!(
+            suited_evidence(WallRank::NoChance, suji_rank).legacy_rank(),
+            SuitedSafetyRank::NoChance
+        );
+        assert_eq!(
+            suited_evidence(WallRank::OneChance, suji_rank).legacy_rank(),
+            SuitedSafetyRank::OneChance
+        );
+    }
+    for (suji_rank, legacy_rank) in [
+        (SujiSafetyRank::Suji, SuitedSafetyRank::Suji),
+        (SujiSafetyRank::HalfSuji, SuitedSafetyRank::HalfSuji),
+        (SujiSafetyRank::NoSuji, SuitedSafetyRank::NoSafety),
+    ] {
+        assert_eq!(
+            suited_evidence(WallRank::NoWall, suji_rank).legacy_rank(),
+            legacy_rank
+        );
+    }
+}
+
+#[test]
+fn suited_safety_evidence_none_for_honor() {
+    let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+    let honor = tile(108).tile_type();
+    assert_eq!(
+        suited_safety_evidence_for_players(honor, &[1], &context),
+        None
+    );
+    assert_eq!(
+        suited_safety_evidence_for_all_reached(honor, &context),
+        None
+    );
+    assert_eq!(
+        suited_safety_evidence_for_any_reached(honor, &context),
+        None
+    );
+}
+
+#[test]
+fn suited_safety_evidence_keeps_the_suji_under_a_one_chance_wall() {
+    // 1m は 4m 河でスジ。経路 [2m,3m] を 2m 3枚で OneChance にしてもスジ根拠は残る。
+    let context = suited_context(
+        vec![tile(4), tile(5), tile(6)],
+        [vec![], vec![tile(12)], vec![], vec![]],
+        [false, true, false, false],
+    );
+    let one_man = tile(0).tile_type();
+    let evidence =
+        suited_safety_evidence_for_all_reached(one_man, &context).expect("数牌の evidence");
+
+    assert_eq!(
+        evidence,
+        suited_evidence(WallRank::OneChance, SujiSafetyRank::Suji)
+    );
+    assert_eq!(evidence.legacy_rank(), SuitedSafetyRank::OneChance);
+    assert_eq!(
+        suited_safety_rank_for_all_reached(one_man, &context),
+        Some(SuitedSafetyRank::OneChance)
+    );
+}
+
+#[test]
+fn suited_safety_evidence_keeps_the_suji_under_a_no_chance_wall() {
+    // 1m は 4m 河でスジ。経路 [2m,3m] を 2m 4枚で NoChance にしてもスジ根拠は残る。
+    let context = suited_context(
+        vec![tile(4), tile(5), tile(6), tile(7)],
+        [vec![], vec![tile(12)], vec![], vec![]],
+        [false, true, false, false],
+    );
+    let one_man = tile(0).tile_type();
+    let evidence =
+        suited_safety_evidence_for_all_reached(one_man, &context).expect("数牌の evidence");
+
+    assert_eq!(
+        evidence,
+        suited_evidence(WallRank::NoChance, SujiSafetyRank::Suji)
+    );
+    assert_eq!(evidence.legacy_rank(), SuitedSafetyRank::NoChance);
+    assert_eq!(
+        suited_safety_rank_for_all_reached(one_man, &context),
+        Some(SuitedSafetyRank::NoChance)
+    );
+}
+
+#[test]
+fn suited_safety_evidence_keeps_the_half_suji_under_a_one_chance_wall() {
+    // 5m は 2m 河だけで片スジ。経路 [3m,4m] を 3m 3枚、[6m,7m] を 6m 4枚で塞ぐと OneChance。
+    let visible = vec![
+        tile(8),
+        tile(9),
+        tile(10),
+        tile(20),
+        tile(21),
+        tile(22),
+        tile(23),
+    ];
+    let context = suited_context(
+        visible,
+        [vec![], vec![tile(4)], vec![], vec![]],
+        [false, true, false, false],
+    );
+    let five_man = tile(16).tile_type();
+    let evidence =
+        suited_safety_evidence_for_all_reached(five_man, &context).expect("数牌の evidence");
+
+    assert_eq!(
+        evidence,
+        suited_evidence(WallRank::OneChance, SujiSafetyRank::HalfSuji)
+    );
+    assert_eq!(evidence.legacy_rank(), SuitedSafetyRank::OneChance);
+}
+
+#[test]
+fn suited_safety_evidence_without_a_wall_carries_the_suji_rank() {
+    // 壁が無い局面では legacy rank がスジ評価そのままの写像になる。
+    let context = half_suji_regression_context();
+    for (tile_id, suji_rank, legacy_rank) in [
+        (96, SujiSafetyRank::Suji, SuitedSafetyRank::Suji),
+        (48, SujiSafetyRank::HalfSuji, SuitedSafetyRank::HalfSuji),
+        (0, SujiSafetyRank::NoSuji, SuitedSafetyRank::NoSafety),
+    ] {
+        let tile_type = tile(tile_id).tile_type();
+        let evidence =
+            suited_safety_evidence_for_all_reached(tile_type, &context).expect("数牌の evidence");
+
+        assert_eq!(evidence, suited_evidence(WallRank::NoWall, suji_rank));
+        assert_eq!(evidence.legacy_rank(), legacy_rank);
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile_type, &context),
+            Some(legacy_rank)
+        );
+    }
+}
+
+#[test]
+fn suited_safety_evidence_with_only_a_wall_keeps_no_suji() {
+    // リーチ者の河が空なのでスジ根拠は無い。壁だけで legacy rank が決まる。
+    for (visible, wall_rank, legacy_rank) in [
+        (
+            vec![tile(4), tile(5), tile(6)],
+            WallRank::OneChance,
+            SuitedSafetyRank::OneChance,
+        ),
+        (
+            vec![tile(4), tile(5), tile(6), tile(7)],
+            WallRank::NoChance,
+            SuitedSafetyRank::NoChance,
+        ),
+    ] {
+        let context = suited_context(visible, Default::default(), [false, true, false, false]);
+        let one_man = tile(0).tile_type();
+        let evidence =
+            suited_safety_evidence_for_all_reached(one_man, &context).expect("数牌の evidence");
+
+        assert_eq!(evidence, suited_evidence(wall_rank, SujiSafetyRank::NoSuji));
+        assert_eq!(evidence.legacy_rank(), legacy_rank);
+    }
+}
+
+#[test]
+fn suited_safety_evidence_for_all_reached_excludes_genbutsu_reachers() {
+    // player1 の河に 1m があるので集約対象から外れ、player2 の 4m だけでスジが成立する。
+    let context = suited_context(
+        vec![],
+        [vec![], vec![tile(0)], vec![tile(12)], vec![]],
+        [false, true, true, false],
+    );
+    let one_man = tile(0).tile_type();
+
+    assert_eq!(
+        suited_safety_evidence_for_all_reached(one_man, &context),
+        Some(suited_evidence(WallRank::NoWall, SujiSafetyRank::Suji))
+    );
+    assert_eq!(
+        suited_safety_evidence_for_players(one_man, &[1, 2], &context),
+        Some(suited_evidence(WallRank::NoWall, SujiSafetyRank::NoSuji))
+    );
+}
+
+#[test]
+fn suited_safety_evidence_for_any_reached_keeps_the_safest_suji_aggregation() {
+    // player1 にだけスジ。any_reached は最も安全な評価、all_reached は最も危険な評価。
+    let context = suited_context(
+        vec![],
+        [vec![], vec![tile(12)], vec![], vec![]],
+        [false, true, true, false],
+    );
+    let one_man = tile(0).tile_type();
+
+    assert_eq!(
+        suited_safety_evidence_for_any_reached(one_man, &context),
+        Some(suited_evidence(WallRank::NoWall, SujiSafetyRank::Suji))
+    );
+    assert_eq!(
+        suited_safety_evidence_for_all_reached(one_man, &context),
+        Some(suited_evidence(WallRank::NoWall, SujiSafetyRank::NoSuji))
+    );
+}
+
+#[test]
+fn suited_safety_evidence_for_players_treats_an_empty_set_as_no_suji() {
+    let context = suited_context(
+        vec![tile(4), tile(5), tile(6)],
+        [vec![], vec![tile(12)], vec![], vec![]],
+        [false, true, false, false],
+    );
+
+    assert_eq!(
+        suited_safety_evidence_for_players(tile(0).tile_type(), &[], &context),
+        Some(suited_evidence(WallRank::OneChance, SujiSafetyRank::NoSuji))
+    );
+}
+
+#[test]
+fn suited_safety_evidence_does_not_change_the_production_ordering() {
+    // 1m は NoWall + Suji、9s は OneChance + NoSuji。evidence を導入しても legacy ranking では
+    // 壁のある 9s が先。composite comparator を入れるまで production の順位は変えない。
+    let context = suited_context(
+        vec![tile(96), tile(97), tile(98)],
+        [vec![], vec![tile(12)], vec![], vec![]],
+        [false, true, false, false],
+    );
+    let one_man = tile(0).tile_type();
+    let nine_sou = tile(104).tile_type();
+
+    assert_eq!(
+        suited_safety_evidence_for_all_reached(one_man, &context),
+        Some(suited_evidence(WallRank::NoWall, SujiSafetyRank::Suji))
+    );
+    assert_eq!(
+        suited_safety_evidence_for_all_reached(nine_sou, &context),
+        Some(suited_evidence(WallRank::OneChance, SujiSafetyRank::NoSuji))
+    );
+
+    let actions = vec![
+        LegalAction::Dahai { tile: tile(0) },
+        LegalAction::Dahai { tile: tile(104) },
+    ];
+    assert_eq!(
+        suited_dahai_actions_by_safety(&actions, &context),
+        vec![
+            (
+                &LegalAction::Dahai { tile: tile(104) },
+                SuitedSafetyRank::OneChance
+            ),
+            (
+                &LegalAction::Dahai { tile: tile(0) },
+                SuitedSafetyRank::Suji
+            ),
+        ]
+    );
+    assert_eq!(
+        select_suited_safety_fallback_action(&actions, &context),
+        Some(&LegalAction::Dahai { tile: tile(104) })
+    );
+}

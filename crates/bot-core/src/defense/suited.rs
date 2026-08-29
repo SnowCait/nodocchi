@@ -18,13 +18,81 @@ pub enum SuitedSafetyRank {
     NoChance,
 }
 
-// スジ安全度を数牌防御の安全度へ写す。壁が無い場合の分類にだけ使う。
-fn suited_safety_rank_from_suji(rank: SujiSafetyRank) -> SuitedSafetyRank {
-    match rank {
-        SujiSafetyRank::Suji => SuitedSafetyRank::Suji,
-        SujiSafetyRank::HalfSuji => SuitedSafetyRank::HalfSuji,
-        SujiSafetyRank::NoSuji => SuitedSafetyRank::NoSafety,
+/// 数牌の防御根拠を壁とスジの両方について保持する evidence。
+///
+/// [`SuitedSafetyRank`] は壁がある時点でスジ評価を捨ててしまうため、`OneChance` + `Suji` と
+/// `OneChance` + `NoSuji` を区別できない。こちらは両方の根拠をそのまま持つ。
+///
+/// 壁は見え牌由来で対象 player に依らず、スジは対象 player 集合ごとに変わる。どの player 集合に
+/// 対する evidence かは構築側 ([`suited_safety_evidence_for_players`]) が決める。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuitedSafetyEvidence {
+    pub wall_rank: WallRank,
+    pub suji_rank: SujiSafetyRank,
+}
+
+impl SuitedSafetyEvidence {
+    /// evidence を既存の [`SuitedSafetyRank`] へ写す互換用 mapping。
+    ///
+    /// 壁があればスジ評価を捨てて壁の分類だけを返す、という既存 production の挙動をそのまま
+    /// 再現するためだけのもので、安全度の policy として設計された変換ではない。壁とスジを
+    /// 同時に評価する comparator は別途導入する。
+    pub fn legacy_rank(self) -> SuitedSafetyRank {
+        match self.wall_rank {
+            WallRank::NoChance => SuitedSafetyRank::NoChance,
+            WallRank::OneChance => SuitedSafetyRank::OneChance,
+            WallRank::NoWall => match self.suji_rank {
+                SujiSafetyRank::Suji => SuitedSafetyRank::Suji,
+                SujiSafetyRank::HalfSuji => SuitedSafetyRank::HalfSuji,
+                SujiSafetyRank::NoSuji => SuitedSafetyRank::NoSafety,
+            },
+        }
     }
+}
+
+/// 指定 player 集合に対する数牌の防御 evidence。字牌は対象外で `None`。
+///
+/// 壁とスジの判定規則はここで再実装せず、[`wall_rank`] と [`suji_safety_rank_for_players`] の
+/// 結果を組み合わせるだけにする。集合が空ならスジ評価は `NoSuji`。
+///
+/// リーチ / OpenHand / Combined はいずれも「まだロンされ得る player 集合」を決めたうえで
+/// この helper を通す。evidence の意味を経路ごとに変えない。
+pub fn suited_safety_evidence_for_players(
+    tile: TileType,
+    players: &[usize],
+    context: &GameContext,
+) -> Option<SuitedSafetyEvidence> {
+    let suji_rank = suji_safety_rank_for_players(tile, players, context)?;
+    Some(SuitedSafetyEvidence {
+        wall_rank: wall_rank(tile, context),
+        suji_rank,
+    })
+}
+
+/// 現物ではない全リーチ者に対する数牌の防御 evidence。字牌は対象外で `None`。
+///
+/// 対象牌が現物のリーチ者を [`ron_capable_reached_players`] で除外し、まだロンされ得る
+/// リーチ者だけを [`suited_safety_evidence_for_players`] へ渡す薄い adapter。
+pub fn suited_safety_evidence_for_all_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SuitedSafetyEvidence> {
+    suited_safety_evidence_for_players(tile, &ron_capable_reached_players(tile, context), context)
+}
+
+/// いずれかのリーチ者に対する数牌の防御 evidence。字牌は対象外で `None`。
+///
+/// スジ評価だけは [`suji_safety_rank_for_any_reached`] の最も安全な評価を使う。`*_for_all_reached`
+/// とは集約の向きが違うので、こちらの evidence を全リーチ者向けの安全根拠として使わない。
+pub fn suited_safety_evidence_for_any_reached(
+    tile: TileType,
+    context: &GameContext,
+) -> Option<SuitedSafetyEvidence> {
+    let suji_rank = suji_safety_rank_for_any_reached(tile, context)?;
+    Some(SuitedSafetyEvidence {
+        wall_rank: wall_rank(tile, context),
+        suji_rank,
+    })
 }
 
 // いずれかのリーチ者の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
@@ -32,38 +100,21 @@ pub fn suited_safety_rank_for_any_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    if tile.is_honor() {
-        return None;
-    }
-    let rank = match wall_rank(tile, context) {
-        WallRank::NoChance => SuitedSafetyRank::NoChance,
-        WallRank::OneChance => SuitedSafetyRank::OneChance,
-        WallRank::NoWall => suji_safety_rank_for_any_reached(tile, context)
-            .map_or(SuitedSafetyRank::NoSafety, suited_safety_rank_from_suji),
-    };
-    Some(rank)
+    suited_safety_evidence_for_any_reached(tile, context).map(SuitedSafetyEvidence::legacy_rank)
 }
 
 /// 指定 player 集合の河に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で `None`。
 ///
-/// 壁評価はスジ評価より優先する。壁は見え牌由来で対象 player に依らないため [`wall_rank`] を
-/// そのまま使い、スジ評価は [`suji_safety_rank_for_players`] の最小値(最も危険な評価)を使う。
+/// [`suited_safety_evidence_for_players`] の evidence を
+/// [`SuitedSafetyEvidence::legacy_rank`] で潰す薄い wrapper。壁評価はスジ評価より優先し、
 /// 集合が空なら壁が無い限り `NoSafety`。
 pub fn suited_safety_rank_for_players(
     tile: TileType,
     players: &[usize],
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    if tile.is_honor() {
-        return None;
-    }
-    let rank = match wall_rank(tile, context) {
-        WallRank::NoChance => SuitedSafetyRank::NoChance,
-        WallRank::OneChance => SuitedSafetyRank::OneChance,
-        WallRank::NoWall => suji_safety_rank_for_players(tile, players, context)
-            .map_or(SuitedSafetyRank::NoSafety, suited_safety_rank_from_suji),
-    };
-    Some(rank)
+    suited_safety_evidence_for_players(tile, players, context)
+        .map(SuitedSafetyEvidence::legacy_rank)
 }
 
 // 現物ではない全リーチ者に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で None。
@@ -72,7 +123,7 @@ pub fn suited_safety_rank_for_all_reached(
     tile: TileType,
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    suited_safety_rank_for_players(tile, &ron_capable_reached_players(tile, context), context)
+    suited_safety_evidence_for_all_reached(tile, context).map(SuitedSafetyEvidence::legacy_rank)
 }
 
 /// 合法 Dahai のうち数牌のみを安全度の高い順

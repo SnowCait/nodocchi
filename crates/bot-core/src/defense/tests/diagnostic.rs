@@ -421,3 +421,49 @@ fn defense_decision_diagnostic_keeps_candidates_without_selection() {
             .all(|candidate| candidate.suited_safety_rank == Some(SuitedSafetyRank::NoSafety))
     );
 }
+
+#[test]
+fn defense_diagnostics_carry_the_suited_safety_evidence() {
+    // 1m は 4m 河でスジ、経路 [2m,3m] は 2m 3枚で OneChance。診断からは両方の根拠が分かる。
+    let context = suited_context(
+        vec![tile(4), tile(5), tile(6)],
+        [vec![], vec![tile(12)], vec![], vec![]],
+        [false, true, false, false],
+    );
+    let action = LegalAction::Dahai { tile: tile(0) };
+    let expected = Some(SuitedSafetyEvidence {
+        wall_rank: WallRank::OneChance,
+        suji_rank: SujiSafetyRank::Suji,
+    });
+
+    let candidate = DefenseCandidateDiagnostic::for_dahai_action(&context, &action, true).unwrap();
+    assert_eq!(candidate.suited_safety_evidence, expected);
+    assert_eq!(
+        candidate.suited_safety_rank,
+        Some(SuitedSafetyRank::OneChance)
+    );
+
+    let diagnostic = DefenseFallbackDiagnostic::from_selection(
+        &context,
+        &action,
+        DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::OneChance),
+    );
+    assert_eq!(diagnostic.selected_suited_safety_evidence, expected);
+    assert_eq!(
+        diagnostic.selected_suited_safety_rank,
+        Some(SuitedSafetyRank::OneChance)
+    );
+}
+
+#[test]
+fn defense_diagnostics_have_no_suited_safety_evidence_for_honor() {
+    let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+    let action = LegalAction::Dahai { tile: tile(108) };
+
+    let candidate = DefenseCandidateDiagnostic::for_dahai_action(&context, &action, false).unwrap();
+    assert_eq!(candidate.suited_safety_evidence, None);
+
+    let diagnostic =
+        DefenseFallbackDiagnostic::from_selection(&context, &action, DefenseFallbackKind::Genbutsu);
+    assert_eq!(diagnostic.selected_suited_safety_evidence, None);
+}

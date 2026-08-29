@@ -16,10 +16,10 @@
 use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
-    HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
-    honor_dahai_actions_by_safety_with, honor_safety_rank, is_genbutsu_for,
+    HonorSafetyRank, OpponentHonorValue, SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank,
+    WallRank, honor_dahai_actions_by_safety_with, honor_safety_rank, is_genbutsu_for,
     opponent_honor_value_for_players, suited_dahai_actions_by_safety_with,
-    suited_safety_rank_for_players, suji_safety_rank_for, suji_safety_rank_for_players, wall_rank,
+    suited_safety_evidence_for_players, suji_safety_rank_for, suji_safety_rank_for_players,
 };
 use crate::open_hand_defense::{high_open_hand_threat_players, is_ron_safe_for_open_hand_target};
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
@@ -195,21 +195,34 @@ pub fn suji_safety_rank_for_combined_threats(
     )
 }
 
+/// target に対する数牌の防御 evidence。字牌は対象外で `None`。
+///
+/// 壁とスジをここで組み立てず、まだロンされ得る target ([`ron_capable_target_players`]) を
+/// 決めて既存 Defense の [`suited_safety_evidence_for_players`] へ渡すだけにする。evidence の
+/// 意味はリーチ / OpenHand と同じ。
+pub fn suited_safety_evidence_for_combined_threats(
+    tile: TileType,
+    targets: &[ThreatDefenseTarget],
+    context: &GameContext,
+) -> Option<SuitedSafetyEvidence> {
+    suited_safety_evidence_for_players(
+        tile,
+        &ron_capable_target_players(tile, targets, context),
+        context,
+    )
+}
+
 /// target に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で `None`。
 ///
-/// 壁は見え牌由来で target に依らないため既存 [`wall_rank`] をそのまま共有し、スジは
-/// [`suji_safety_rank_for_combined_threats`] と同じ集合だけを集約する。分類は既存 Defense の
-/// [`suited_safety_rank_for_players`] と共有する。
+/// [`suited_safety_evidence_for_combined_threats`] の evidence を
+/// [`SuitedSafetyEvidence::legacy_rank`] で潰す薄い wrapper。
 pub fn suited_safety_rank_for_combined_threats(
     tile: TileType,
     targets: &[ThreatDefenseTarget],
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    suited_safety_rank_for_players(
-        tile,
-        &ron_capable_target_players(tile, targets, context),
-        context,
-    )
+    suited_safety_evidence_for_combined_threats(tile, targets, context)
+        .map(SuitedSafetyEvidence::legacy_rank)
 }
 
 /// 複合 threat に対する防御候補の大分類。
@@ -400,6 +413,11 @@ pub struct CombinedDefenseCandidateDiagnostic {
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// [`opponent_honor_value_for_combined_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
+    /// [`suited_safety_evidence_for_combined_threats`] の結果そのもの。
+    ///
+    /// 壁とスジを潰さずに持つので、`suited_safety_rank` が壁由来の `OneChance` / `NoChance` に
+    /// なっている場合でも、同時にスジが成立していたかどうかを確認できる。字牌では `None`。
+    pub suited_safety_evidence: Option<SuitedSafetyEvidence>,
     pub wall_rank: Option<WallRank>,
     /// [`suji_safety_rank_for_combined_threats`] の結果そのもの。
     ///
@@ -427,7 +445,7 @@ impl CombinedDefenseCandidateDiagnostic {
             return None;
         };
         let tile_type = tile.tile_type();
-        let suited_tile = (!tile_type.is_honor()).then_some(tile_type);
+        let evidence = suited_safety_evidence_for_combined_threats(tile_type, targets, context);
 
         Some(Self {
             action: action.clone(),
@@ -446,11 +464,10 @@ impl CombinedDefenseCandidateDiagnostic {
             opponent_honor_value: opponent_honor_value_for_combined_threats(
                 tile_type, targets, context,
             ),
-            wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
-            suji_safety_rank: suji_safety_rank_for_combined_threats(tile_type, targets, context),
-            suited_safety_rank: suited_safety_rank_for_combined_threats(
-                tile_type, targets, context,
-            ),
+            suited_safety_evidence: evidence,
+            wall_rank: evidence.map(|evidence| evidence.wall_rank),
+            suji_safety_rank: evidence.map(|evidence| evidence.suji_rank),
+            suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
             category: combined_defense_category(tile_type, targets, context),
         })
     }
@@ -571,7 +588,10 @@ impl CombinedDefenseDiagnostic {
 mod tests {
     use super::*;
     use crate::defense::is_discarded_by_player;
-    use crate::defense::{is_genbutsu_for_all_reached, suited_safety_rank_for_all_reached};
+    use crate::defense::{
+        is_genbutsu_for_all_reached, suited_safety_evidence_for_players,
+        suited_safety_rank_for_all_reached, wall_rank,
+    };
     use crate::meld::{Meld, MeldKind};
     use crate::open_hand_threat::OpenHandThreatLevel;
     use bot_logic::TileId;
@@ -1103,6 +1123,44 @@ mod tests {
         assert_eq!(
             suited_safety_rank_for_combined_threats(tile_type("1s"), &targets, &context),
             Some(SuitedSafetyRank::NoChance)
+        );
+    }
+
+    #[test]
+    fn the_suited_safety_evidence_is_shared_with_the_existing_defense() {
+        // 壁とスジを別々に組み立てず、ロンされ得る target を決めて共有 helper へ渡すだけ。
+        let context = ContextSpec::combined()
+            .discards_of(RIICHI_TARGET, "2m 8m")
+            .discards_of(OPEN_HAND_TARGET, "2m 8m")
+            .visible(
+                (0..3)
+                    .map(|copy| tile_copy("3m", copy))
+                    .chain((0..4).map(|copy| tile_copy("6m", copy)))
+                    .collect(),
+            )
+            .build();
+        let targets = targets(&context);
+        let five_man = tile_type("5m");
+        let evidence = suited_safety_evidence_for_combined_threats(five_man, &targets, &context)
+            .expect("数牌の evidence");
+
+        assert_eq!(evidence.wall_rank, WallRank::OneChance);
+        assert_eq!(evidence.suji_rank, SujiSafetyRank::Suji);
+        assert_eq!(
+            Some(evidence),
+            suited_safety_evidence_for_players(
+                five_man,
+                &[RIICHI_TARGET, OPEN_HAND_TARGET],
+                &context
+            )
+        );
+        assert_eq!(
+            suited_safety_rank_for_combined_threats(five_man, &targets, &context),
+            Some(evidence.legacy_rank())
+        );
+        assert_eq!(
+            suited_safety_evidence_for_combined_threats(tile_type("N"), &targets, &context),
+            None
         );
     }
 

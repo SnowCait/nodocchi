@@ -7,9 +7,11 @@ use super::hard_safety::is_genbutsu_for_all_reached;
 use super::honor::{
     HonorSafetyRank, OpponentHonorValue, honor_safety_rank, opponent_honor_value_for_reached,
 };
-use super::suited::{SuitedSafetyRank, suited_safety_rank_for_all_reached};
-use super::suji::{SujiSafetyRank, is_suji_for_all_reached, suji_safety_rank_for_all_reached};
-use super::wall::{WallRank, wall_rank};
+use super::suited::{
+    SuitedSafetyEvidence, SuitedSafetyRank, suited_safety_evidence_for_all_reached,
+};
+use super::suji::{SujiSafetyRank, is_suji_for_all_reached};
+use super::wall::WallRank;
 
 const LOG_TARGET: &str = "bot_core::defense";
 
@@ -28,12 +30,18 @@ pub struct DefenseFallbackDiagnostic {
     ///
     /// 同じ `selected_honor_safety_rank` の字牌どうしの tie-break に使った値。数牌では `None`。
     pub selected_opponent_honor_value: Option<OpponentHonorValue>,
+    /// 現物ではない全リーチ者に対する [`suited_safety_evidence_for_all_reached`] の結果そのもの。
+    ///
+    /// 壁とスジを潰さずに持つので、`selected_suited_safety_rank` が壁由来の
+    /// `OneChance` / `NoChance` になっている場合でも、同時にスジが成立していたかどうかを
+    /// 確認できる。字牌では `None`。
+    pub selected_suited_safety_evidence: Option<SuitedSafetyEvidence>,
     pub selected_wall_rank: Option<WallRank>,
     /// 現物ではない、まだロンされ得る全リーチ者に対して完全なスジなら `true`。
     /// そのうち一人でも片スジ / 無スジなら `false`。集約対象が空の場合も `false`。片スジと
     /// 無スジの区別は `selected_suji_safety_rank_for_all_reached` で分かる。
     pub selected_suji_for_all_reached: Option<bool>,
-    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`](super::suji_safety_rank_for_all_reached) の結果そのもの。
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`selected_suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
@@ -44,9 +52,9 @@ pub struct DefenseFallbackDiagnostic {
 impl DefenseFallbackDiagnostic {
     /// 選択された防御 fallback の action と種別から診断データを構築する pure helper。
     ///
-    /// 数牌に対しては `wall_rank` / `is_suji_for_all_reached` / `suji_safety_rank_for_all_reached`
-    /// / `suited_safety_rank_for_all_reached` を、字牌に対しては `honor_safety_rank` を計算する。
-    /// Dahai 以外の action では牌由来の値は空。
+    /// 数牌に対しては `suited_safety_evidence_for_all_reached` と `is_suji_for_all_reached` を、
+    /// 字牌に対しては `honor_safety_rank` を計算する。壁 / スジ / 数牌 safety は evidence から
+    /// 取り出し、診断のために別計算しない。Dahai 以外の action では牌由来の値は空。
     pub fn from_selection(
         context: &GameContext,
         action: &LegalAction,
@@ -60,6 +68,8 @@ impl DefenseFallbackDiagnostic {
             LegalAction::Dahai { tile } => tile.to_mjai_string(),
             other => format!("{other:?}"),
         };
+        let evidence =
+            tile_type.and_then(|tile| suited_safety_evidence_for_all_reached(tile, context));
         let suited_tile = tile_type.filter(|tile| !tile.is_honor());
 
         Self {
@@ -71,13 +81,12 @@ impl DefenseFallbackDiagnostic {
             selected_honor_safety_rank: tile_type.and_then(|tile| honor_safety_rank(tile, context)),
             selected_opponent_honor_value: tile_type
                 .and_then(|tile| opponent_honor_value_for_reached(tile, context)),
-            selected_wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
+            selected_suited_safety_evidence: evidence,
+            selected_wall_rank: evidence.map(|evidence| evidence.wall_rank),
             selected_suji_for_all_reached: suited_tile
                 .map(|tile| is_suji_for_all_reached(tile, context)),
-            selected_suji_safety_rank_for_all_reached: tile_type
-                .and_then(|tile| suji_safety_rank_for_all_reached(tile, context)),
-            selected_suited_safety_rank: tile_type
-                .and_then(|tile| suited_safety_rank_for_all_reached(tile, context)),
+            selected_suji_safety_rank_for_all_reached: evidence.map(|evidence| evidence.suji_rank),
+            selected_suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
         }
     }
 }
@@ -104,12 +113,17 @@ pub struct DefenseCandidateDiagnostic {
     ///
     /// 同じ `honor_safety_rank` の字牌どうしの tie-break に使う値。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
+    /// 現物ではない全リーチ者に対する [`suited_safety_evidence_for_all_reached`] の結果そのもの。
+    ///
+    /// 壁とスジを潰さずに持つので、`suited_safety_rank` が壁由来の `OneChance` / `NoChance` に
+    /// なっている場合でも、同時にスジが成立していたかどうかを確認できる。字牌では `None`。
+    pub suited_safety_evidence: Option<SuitedSafetyEvidence>,
     pub wall_rank: Option<WallRank>,
     /// 現物ではない、まだロンされ得る全リーチ者に対して完全なスジなら `true`。
     /// そのうち一人でも片スジ / 無スジなら `false`。集約対象が空の場合も `false`。片スジと
     /// 無スジの区別は `suji_safety_rank_for_all_reached` で分かる。
     pub suji_for_all_reached: Option<bool>,
-    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`] の結果そのもの。
+    /// 現物ではない全リーチ者に対する [`suji_safety_rank_for_all_reached`](super::suji_safety_rank_for_all_reached) の結果そのもの。
     ///
     /// 壁と統合する前の純粋なスジ評価なので、`suited_safety_rank` が壁由来の
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
@@ -128,6 +142,7 @@ impl DefenseCandidateDiagnostic {
             return None;
         };
         let tile_type = tile.tile_type();
+        let evidence = suited_safety_evidence_for_all_reached(tile_type, context);
         let suited_tile = (!tile_type.is_honor()).then_some(tile_type);
 
         Some(Self {
@@ -137,10 +152,11 @@ impl DefenseCandidateDiagnostic {
             genbutsu_for_all: is_genbutsu_for_all_reached(tile_type, context),
             honor_safety_rank: honor_safety_rank(tile_type, context),
             opponent_honor_value: opponent_honor_value_for_reached(tile_type, context),
-            wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
+            suited_safety_evidence: evidence,
+            wall_rank: evidence.map(|evidence| evidence.wall_rank),
             suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
-            suji_safety_rank_for_all_reached: suji_safety_rank_for_all_reached(tile_type, context),
-            suited_safety_rank: suited_safety_rank_for_all_reached(tile_type, context),
+            suji_safety_rank_for_all_reached: evidence.map(|evidence| evidence.suji_rank),
+            suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
         })
     }
 
