@@ -1,3 +1,4 @@
+mod compressed_hidden_hand_states;
 mod diagnostic;
 mod hard_safety;
 mod hidden_hand_states;
@@ -14,6 +15,10 @@ use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use bot_logic::TileType;
 
+pub use compressed_hidden_hand_states::{
+    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates,
+    compressed_ron_capable_hidden_hand_weight,
+};
 pub use diagnostic::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
     log_defense_fallback_decision,

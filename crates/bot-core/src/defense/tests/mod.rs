@@ -1,4 +1,5 @@
 mod common;
+mod compressed_hidden_hand_states;
 mod diagnostic;
 mod hard_safety;
 mod hidden_hand_states;
