@@ -1,6 +1,7 @@
 mod common;
 mod diagnostic;
 mod hard_safety;
+mod hidden_hand_states;
 mod honor;
 mod selection;
 mod suited;

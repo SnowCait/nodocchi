@@ -1,5 +1,6 @@
 mod diagnostic;
 mod hard_safety;
+mod hidden_hand_states;
 mod honor;
 mod suited;
 mod suji;
@@ -20,6 +21,10 @@ pub use diagnostic::{
 pub use hard_safety::{
     genbutsu_dahai_actions_for_all_reached, is_discarded_by_all_players, is_discarded_by_player,
     is_genbutsu_for, is_genbutsu_for_all_reached, select_genbutsu_fallback_action,
+};
+pub use hidden_hand_states::{
+    HiddenHandStateMetrics, HiddenHandStateUnsupported, ReachedHiddenHandStates,
+    RonCapableStateWeight, ron_capable_hidden_hand_weight,
 };
 pub use honor::{
     HonorSafetyRank, OpponentHonorValue, honor_dahai_actions_by_safety,
