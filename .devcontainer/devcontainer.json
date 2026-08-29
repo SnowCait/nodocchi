@@ -1,0 +1,15 @@
+{
+  "name": "nodocchi",
+  "image": "mcr.microsoft.com/devcontainers/rust:2-1-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "postCreateCommand": "rustup toolchain install --no-self-update",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}
