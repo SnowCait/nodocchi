@@ -70,10 +70,10 @@ jobs:
         include:
           - name: bot-logic
             args: -p bot-logic
-          - name: bot-core
-            args: -p bot-core
-          - name: scenario-clients
-            args: -p bot-scenario -p chiihou-client -p riichilab-client
+          - name: bot-scenario
+            args: -p bot-scenario
+          - name: clients
+            args: -p chiihou-client -p riichilab-client
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,6 +103,66 @@ jobs:
 
       - name: Test
         run: cargo test --locked ${{ matrix.args }}
+
+      - name: Save Cargo cache
+        if: >-
+          success() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  test-bot-core:
+    name: test / bot-core (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: rustup toolchain install --no-self-update
+
+      - name: Set up cargo-nextest
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Compute Rust cache key
+        id: rust-key
+        run: |
+          echo "rustc=$(rustc -Vv | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-v2-bot-core-${{ matrix.shard }}-${{ steps.rust-key.outputs.rustc }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-v2-bot-core-${{ matrix.shard }}-${{ steps.rust-key.outputs.rustc }}-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-v1-${{ steps.rust-key.outputs.rustc }}-
+
+      - name: Test
+        run: cargo nextest run --locked --no-fail-fast -p bot-core --partition slice:${{ matrix.shard }}/4
+
+      - name: Doctest
+        if: matrix.shard == 1
+        run: cargo test --locked -p bot-core --doc
 
       - name: Save Cargo cache
         if: >-
