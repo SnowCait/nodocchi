@@ -3,6 +3,7 @@ use bot_logic::TileType;
 
 use super::hard_safety::is_discarded_by_player;
 use super::visible_count_of;
+use super::wait_candidates::remaining_tile_copies;
 
 // 数牌の順子待ち経路ごとの壁 / ワンチャンス分類。見えているほど当たり筋が減る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -105,7 +106,7 @@ pub fn sequence_route_remaining_combinations(
     route
         .required_tiles
         .iter()
-        .map(|&tile| 4_u8.saturating_sub(visible_count_of(tile, context)))
+        .map(|&tile| remaining_tile_copies(tile, context))
         .product()
 }
 

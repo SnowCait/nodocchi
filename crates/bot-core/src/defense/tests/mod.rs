@@ -5,4 +5,5 @@ mod honor;
 mod selection;
 mod suited;
 mod suji;
+mod wait_candidates;
 mod wall;

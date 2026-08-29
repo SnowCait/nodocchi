@@ -3,6 +3,7 @@ mod hard_safety;
 mod honor;
 mod suited;
 mod suji;
+mod wait_candidates;
 mod wall;
 
 #[cfg(test)]
@@ -38,6 +39,11 @@ pub use suji::{
     SujiSafetyRank, is_suji_for, is_suji_for_all_reached, is_suji_for_any_reached,
     suji_dahai_actions_by_safety, suji_safety_rank_for, suji_safety_rank_for_all_reached,
     suji_safety_rank_for_any_reached, suji_safety_rank_for_players,
+};
+pub use wait_candidates::{
+    remaining_tile_copies, shanpon_remaining_combinations,
+    shanpon_remaining_combinations_for_player, tanki_remaining_candidates,
+    tanki_remaining_candidates_for_player,
 };
 pub use wall::{
     SequenceWaitRoute, SequenceWaitShape, WallRank, is_no_chance, is_one_chance,
