@@ -1,6 +1,7 @@
 use crate::context::GameContext;
 use bot_logic::TileType;
 
+use super::hard_safety::is_discarded_by_player;
 use super::visible_count_of;
 
 // 数牌の順子待ち経路ごとの壁 / ワンチャンス分類。見えているほど当たり筋が減る。
@@ -23,6 +24,16 @@ enum SequenceRouteRank {
     Blocked,
 }
 
+/// 対象牌を和了牌とする順子待ち経路。
+///
+/// `required_tiles` はその経路を構成する未知の2牌種。`suji_partner` は両面待ちの
+/// もう片方の和了牌で、ペンチャン経路では `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequenceWaitRoute {
+    pub required_tiles: [TileType; 2],
+    pub suji_partner: Option<TileType>,
+}
+
 // 対象牌 n を和了牌とする、同一色内の順子待ち経路を列挙する。
 //
 // - n >= 3: [n-2, n-1]
@@ -30,7 +41,7 @@ enum SequenceRouteRank {
 //
 // 字牌は対象外で空。1〜9 の範囲外へは進まないので、端牌は経路が1本だけになる。
 // 対象牌自身の見え枚数は経路に含めない。
-pub(super) fn sequence_wait_routes(tile: TileType) -> Vec<[TileType; 2]> {
+pub fn sequence_wait_routes(tile: TileType) -> Vec<SequenceWaitRoute> {
     let Some(number) = tile.number() else {
         return Vec::new();
     };
@@ -40,17 +51,58 @@ pub(super) fn sequence_wait_routes(tile: TileType) -> Vec<[TileType; 2]> {
 
     let mut routes = Vec::new();
     if number >= 3 {
-        routes.push([in_suit(number - 2), in_suit(number - 1)]);
+        routes.push(SequenceWaitRoute {
+            required_tiles: [in_suit(number - 2), in_suit(number - 1)],
+            suji_partner: (number >= 4).then(|| in_suit(number - 3)),
+        });
     }
     if number <= 7 {
-        routes.push([in_suit(number + 1), in_suit(number + 2)]);
+        routes.push(SequenceWaitRoute {
+            required_tiles: [in_suit(number + 1), in_suit(number + 2)],
+            suji_partner: (number <= 6).then(|| in_suit(number + 3)),
+        });
     }
     routes
 }
 
+/// 見え牌だけから、順子待ち経路を構成し得る未知牌の組み合わせ数を返す。
+///
+/// 各 required tile の残り枚数 (`4 - visible_count`) の積であり、相手の手牌分布などを
+/// 考慮した放銃確率ではない。
+pub fn sequence_route_remaining_combinations(
+    route: SequenceWaitRoute,
+    context: &GameContext,
+) -> u8 {
+    route
+        .required_tiles
+        .iter()
+        .map(|&tile| 4_u8.saturating_sub(visible_count_of(tile, context)))
+        .product()
+}
+
+/// 指定 player の河も考慮した、順子待ち経路の未知牌組み合わせ数を返す。
+///
+/// 両面経路の `suji_partner` が player 自身の河にあれば、その経路では対象牌へのロンが
+/// フリテンにより成立しないため0を返す。ペンチャン経路にはこの elimination を適用しない。
+pub fn sequence_route_remaining_combinations_for_player(
+    route: SequenceWaitRoute,
+    player: usize,
+    context: &GameContext,
+) -> u8 {
+    if route
+        .suji_partner
+        .is_some_and(|partner| is_discarded_by_player(partner, player, context))
+    {
+        0
+    } else {
+        sequence_route_remaining_combinations(route, context)
+    }
+}
+
 // 順子待ち経路1本の壁分類。経路を構成する牌の見え枚数だけを使う。
-fn sequence_route_rank(route: [TileType; 2], context: &GameContext) -> SequenceRouteRank {
+fn sequence_route_rank(route: SequenceWaitRoute, context: &GameContext) -> SequenceRouteRank {
     let max_visible = route
+        .required_tiles
         .iter()
         .map(|&tile| visible_count_of(tile, context))
         .max()
