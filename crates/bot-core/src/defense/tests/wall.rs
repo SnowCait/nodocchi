@@ -1,7 +1,150 @@
 use super::common::*;
 use crate::defense::wall::sequence_wait_routes;
 use crate::defense::*;
-use bot_logic::TileType;
+use bot_logic::{TileId, TileType};
+
+fn route(target: &str, required: [&str; 2], partner: Option<&str>) -> SequenceWaitRoute {
+    sequence_wait_routes(tile_type(target))
+        .into_iter()
+        .find(|route| {
+            route.required_tiles == [tile_type(required[0]), tile_type(required[1])]
+                && route.suji_partner == partner.map(tile_type)
+        })
+        .unwrap()
+}
+
+fn route_context(visible: Vec<TileId>, player_one_discards: Vec<TileId>) -> GameContext {
+    suited_context(
+        visible,
+        [vec![], player_one_discards, vec![], vec![]],
+        [false; 4],
+    )
+}
+
+#[test]
+fn sequence_route_represents_required_tiles_and_ryanmen_partner() {
+    assert_eq!(
+        route("6p", ["4p", "5p"], Some("3p")),
+        SequenceWaitRoute {
+            required_tiles: [tile_type("4p"), tile_type("5p")],
+            suji_partner: Some(tile_type("3p")),
+        }
+    );
+    assert_eq!(
+        route("6p", ["7p", "8p"], Some("9p")).suji_partner,
+        Some(tile_type("9p"))
+    );
+}
+
+#[test]
+fn sequence_route_remaining_combinations_cover_tile_count_products() {
+    let route = route("6p", ["4p", "5p"], Some("3p"));
+    for (visible, expected) in [
+        (vec![], 16),
+        (vec![discarded("5p")], 12),
+        (vec![discarded("5p"), held("5p")], 8),
+        (vec![discarded("5p"), held("5p"), tile(54)], 4),
+        (
+            vec![
+                discarded("4p"),
+                held("4p"),
+                tile(50),
+                discarded("5p"),
+                held("5p"),
+                tile(54),
+            ],
+            1,
+        ),
+        (vec![discarded("4p"), held("4p"), tile(50), tile(51)], 0),
+    ] {
+        assert_eq!(
+            sequence_route_remaining_combinations(route, &visible_context(visible)),
+            expected
+        );
+    }
+}
+
+#[test]
+fn blocked_route_is_zero_while_other_route_remains_open() {
+    let routes = sequence_wait_routes(tile_type("6p"));
+    let context = visible_context(vec![discarded("5p"), held("5p"), tile(54), tile(55)]);
+    assert_eq!(
+        sequence_route_remaining_combinations(routes[0], &context),
+        0
+    );
+    assert_eq!(
+        sequence_route_remaining_combinations(routes[1], &context),
+        16
+    );
+    assert_eq!(wall_rank(tile_type("6p"), &context), WallRank::NoWall);
+}
+
+#[test]
+fn one_chance_route_is_eliminated_by_target_players_suji() {
+    let route = route("6p", ["4p", "5p"], Some("3p"));
+    let context = route_context(
+        vec![discarded("5p"), held("5p"), tile(54)],
+        vec![discarded("3p")],
+    );
+    assert_eq!(sequence_route_remaining_combinations(route, &context), 4);
+    assert_eq!(
+        sequence_route_remaining_combinations_for_player(route, 1, &context),
+        0
+    );
+}
+
+#[test]
+fn middle_tile_only_eliminates_route_matching_discarded_suji_partner() {
+    for (target, discarded_partner, eliminated_required, remaining_required) in [
+        ("4p", "1p", ["2p", "3p"], ["5p", "6p"]),
+        ("5p", "2p", ["3p", "4p"], ["6p", "7p"]),
+        ("6p", "3p", ["4p", "5p"], ["7p", "8p"]),
+    ] {
+        let routes = sequence_wait_routes(tile_type(target));
+        let context = route_context(vec![], vec![discarded(discarded_partner)]);
+        let eliminated = routes
+            .iter()
+            .find(|route| route.required_tiles == eliminated_required.map(tile_type))
+            .copied()
+            .unwrap();
+        let remaining = routes
+            .iter()
+            .find(|route| route.required_tiles == remaining_required.map(tile_type))
+            .copied()
+            .unwrap();
+        assert_eq!(
+            sequence_route_remaining_combinations_for_player(eliminated, 1, &context),
+            0
+        );
+        assert_eq!(
+            sequence_route_remaining_combinations_for_player(remaining, 1, &context),
+            16
+        );
+    }
+}
+
+#[test]
+fn penchan_routes_have_no_suji_partner_and_are_not_eliminated() {
+    for (target, required, discarded_suji) in
+        [("3p", ["1p", "2p"], "6p"), ("7p", ["8p", "9p"], "4p")]
+    {
+        let route = route(target, required, None);
+        let context = route_context(vec![], vec![discarded(discarded_suji)]);
+        assert_eq!(route.suji_partner, None);
+        assert_eq!(
+            sequence_route_remaining_combinations_for_player(route, 1, &context),
+            16
+        );
+    }
+}
+
+#[test]
+fn route_remaining_combinations_count_red_five_as_normal_five() {
+    let route = route("6p", ["4p", "5p"], Some("3p"));
+    let context = visible_context(vec![tile(52)]);
+    assert_eq!(visible_count_of(tile_type("5p"), &context), 1);
+    assert_eq!(sequence_route_remaining_combinations(route, &context), 12);
+}
 
 // 6p(tile 56-59)を対象に、経路構成牌 4p/5p/7p/8p の見え枚数で壁を作る helper。
 // 4p: 48-51, 5p: 52-55, 6p: 56-59, 7p: 60-63, 8p: 64-67。

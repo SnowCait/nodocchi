@@ -39,7 +39,11 @@ pub use suji::{
     suji_dahai_actions_by_safety, suji_safety_rank_for, suji_safety_rank_for_all_reached,
     suji_safety_rank_for_any_reached, suji_safety_rank_for_players,
 };
-pub use wall::{WallRank, is_no_chance, is_one_chance, wall_rank, wall_tile_types_by_rank};
+pub use wall::{
+    SequenceWaitRoute, WallRank, is_no_chance, is_one_chance,
+    sequence_route_remaining_combinations, sequence_route_remaining_combinations_for_player,
+    sequence_wait_routes, wall_rank, wall_tile_types_by_rank,
+};
 
 // visible_tiles 中で同じ TileType の枚数を数える。赤5も通常5と同じ TileType として数える。
 pub fn visible_count_of(tile: TileType, context: &GameContext) -> u8 {

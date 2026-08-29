@@ -2,7 +2,8 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::TileType;
 
-use super::hard_safety::ron_capable_reached_players;
+use super::hard_safety::{is_discarded_by_player, ron_capable_reached_players};
+use super::wall::sequence_wait_routes;
 
 /// スジ安全度。両側スジ / 片スジ / 無スジ の3段階。
 ///
@@ -18,22 +19,6 @@ pub enum SujiSafetyRank {
     Suji,
 }
 
-// 対象牌のスジ根拠となる同一色の数字。4/5/6 だけが両側の2本を持つ。
-fn suji_partner_numbers(number: u8) -> &'static [u8] {
-    match number {
-        1 => &[4],
-        2 => &[5],
-        3 => &[6],
-        4 => &[1, 7],
-        5 => &[2, 8],
-        6 => &[3, 9],
-        7 => &[4],
-        8 => &[5],
-        9 => &[6],
-        _ => &[],
-    }
-}
-
 /// 指定 player の河に対するスジ安全度を求める pure helper。字牌は対象外で `None`。
 ///
 /// 同一色のスジ根拠牌(1/2/3 と 7/8/9 は1本、4/5/6 は両側2本)が河に何本あるかで分類する。
@@ -45,24 +30,19 @@ pub fn suji_safety_rank_for(
     player: usize,
     context: &GameContext,
 ) -> Option<SujiSafetyRank> {
-    let (Some(number), Some(suit)) = (tile.number(), tile.suit()) else {
+    if tile.is_honor() {
         return None;
-    };
-    let partners = suji_partner_numbers(number);
+    }
+    let partners: Vec<TileType> = sequence_wait_routes(tile)
+        .into_iter()
+        .filter_map(|route| route.suji_partner)
+        .collect();
     if partners.is_empty() {
         return Some(SujiSafetyRank::NoSuji);
     }
-    let Some(discards) = context.discards_of(player) else {
-        return Some(SujiSafetyRank::NoSuji);
-    };
     let found = partners
         .iter()
-        .filter(|&&partner| {
-            discards.iter().any(|discarded| {
-                let discarded = discarded.tile_type();
-                discarded.suit() == Some(suit) && discarded.number() == Some(partner)
-            })
-        })
+        .filter(|&&partner| is_discarded_by_player(partner, player, context))
         .count();
     let rank = if found == partners.len() {
         SujiSafetyRank::Suji
