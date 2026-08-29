@@ -57,18 +57,23 @@ pub struct RonRiskEvidence {
 impl RonRiskEvidence {
     /// `self.R / self.T` と `other.R / other.T` を浮動小数点なしで比較する。
     ///
-    /// synthetic / inconsistent context でどちらかの分母が0なら、比率を0とみなさず `None` を返す。
+    /// synthetic / inconsistent evidence で分母が0、`R > T`、または cross multiplication が
+    /// `u128` に収まらない場合は、比率を推測せず `None` を返す。
     pub fn compare_ratio(&self, other: &Self) -> Option<Ordering> {
-        if self.tenpai_weight == 0 || other.tenpai_weight == 0 {
+        if self.tenpai_weight == 0
+            || other.tenpai_weight == 0
+            || self.ron_capable_weight > self.tenpai_weight
+            || other.ron_capable_weight > other.tenpai_weight
+        {
             return None;
         }
 
         // 136枚・concealed hand 最大13枚では各 weight <= C(136, 13) < 2^59。
-        // R <= T なので cross product も < 2^118 となり、u128 に収まる。
-        Some(
-            (self.ron_capable_weight * other.tenpai_weight)
-                .cmp(&(other.ron_capable_weight * self.tenpai_weight)),
-        )
+        // 内部 model の evidence は R <= T なので cross product も < 2^118 となる。public fields
+        // から作られた model 外の値についても panic しないよう、両辺を checked multiplication する。
+        let lhs = self.ron_capable_weight.checked_mul(other.tenpai_weight)?;
+        let rhs = other.ron_capable_weight.checked_mul(self.tenpai_weight)?;
+        Some(lhs.cmp(&rhs))
     }
 }
 

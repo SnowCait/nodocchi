@@ -368,6 +368,14 @@ fn ron_risk_ratio_comparison_is_exact_and_denominator_zero_is_unavailable() {
         ron_capable_weight: 0,
         tenpai_weight: 0,
     };
+    let invalid = RonRiskEvidence {
+        ron_capable_weight: 2,
+        tenpai_weight: 1,
+    };
+    let overflow = RonRiskEvidence {
+        ron_capable_weight: u128::MAX,
+        tenpai_weight: u128::MAX,
+    };
 
     assert_eq!(
         half.compare_ratio(&same_denominator_lower),
@@ -380,6 +388,10 @@ fn ron_risk_ratio_comparison_is_exact_and_denominator_zero_is_unavailable() {
     );
     assert_eq!(half.compare_ratio(&unavailable), None);
     assert_eq!(unavailable.compare_ratio(&half), None);
+    assert_eq!(half.compare_ratio(&invalid), None);
+    assert_eq!(invalid.compare_ratio(&half), None);
+    assert_eq!(overflow.compare_ratio(&half), None);
+    assert_eq!(half.compare_ratio(&overflow), None);
 
     // モデル上限 C(136, 13) = 483,774,556,165,488,000 の cross product も u128 に収まる。
     let maximum = RonRiskEvidence {
