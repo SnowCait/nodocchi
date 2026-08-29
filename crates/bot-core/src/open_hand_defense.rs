@@ -13,10 +13,10 @@
 use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
-    HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
-    honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
+    HonorSafetyRank, OpponentHonorValue, SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank,
+    WallRank, honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
     is_discarded_by_player, opponent_honor_value_for_players, suited_dahai_actions_by_safety_with,
-    suited_safety_rank_for_players, suji_safety_rank_for, suji_safety_rank_for_players, wall_rank,
+    suited_safety_evidence_for_players, suji_safety_rank_for, suji_safety_rank_for_players,
 };
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
@@ -130,17 +130,30 @@ pub fn suji_safety_rank_for_open_hand_threats(
     suji_safety_rank_for_players(tile, &ron_capable_targets(tile, targets, context), context)
 }
 
+/// target に対する数牌の防御 evidence。字牌は対象外で `None`。
+///
+/// 壁とスジをここで組み立てず、まだロンされ得る target ([`ron_capable_targets`]) を決めて
+/// 既存 Defense の [`suited_safety_evidence_for_players`] へ渡すだけにする。evidence の意味は
+/// リーチ向けと同じ。
+pub fn suited_safety_evidence_for_open_hand_threats(
+    tile: TileType,
+    targets: &[usize],
+    context: &GameContext,
+) -> Option<SuitedSafetyEvidence> {
+    suited_safety_evidence_for_players(tile, &ron_capable_targets(tile, targets, context), context)
+}
+
 /// target に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で `None`。
 ///
-/// 壁は見え牌由来で target に依らないため既存 [`wall_rank`] をそのまま使い、スジは
-/// [`suji_safety_rank_for_open_hand_threats`] と同じ [`ron_capable_targets`] だけを集約する。
-/// 分類は既存 Defense の [`suited_safety_rank_for_players`] と共有する。
+/// [`suited_safety_evidence_for_open_hand_threats`] の evidence を
+/// [`SuitedSafetyEvidence::legacy_rank`] で潰す薄い wrapper。
 pub fn suited_safety_rank_for_open_hand_threats(
     tile: TileType,
     targets: &[usize],
     context: &GameContext,
 ) -> Option<SuitedSafetyRank> {
-    suited_safety_rank_for_players(tile, &ron_capable_targets(tile, targets, context), context)
+    suited_safety_evidence_for_open_hand_threats(tile, targets, context)
+        .map(SuitedSafetyEvidence::legacy_rank)
 }
 
 /// target に対する防御候補の大分類。
@@ -335,6 +348,11 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// target に対する [`opponent_honor_value_for_open_hand_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
+    /// target に対する [`suited_safety_evidence_for_open_hand_threats`] の結果そのもの。
+    ///
+    /// 壁とスジを潰さずに持つので、`suited_safety_rank` が壁由来の `OneChance` / `NoChance` に
+    /// なっている場合でも、同時にスジが成立していたかどうかを確認できる。字牌では `None`。
+    pub suited_safety_evidence: Option<SuitedSafetyEvidence>,
     pub wall_rank: Option<WallRank>,
     /// target に対する [`suji_safety_rank_for_open_hand_threats`] の結果そのもの。
     ///
@@ -362,7 +380,7 @@ impl OpenHandDefenseCandidateDiagnostic {
             return None;
         };
         let tile_type = tile.tile_type();
-        let suited_tile = (!tile_type.is_honor()).then_some(tile_type);
+        let evidence = suited_safety_evidence_for_open_hand_threats(tile_type, targets, context);
 
         Some(Self {
             action: action.clone(),
@@ -387,11 +405,10 @@ impl OpenHandDefenseCandidateDiagnostic {
             opponent_honor_value: opponent_honor_value_for_open_hand_threats(
                 tile_type, targets, context,
             ),
-            wall_rank: suited_tile.map(|tile| wall_rank(tile, context)),
-            suji_safety_rank: suji_safety_rank_for_open_hand_threats(tile_type, targets, context),
-            suited_safety_rank: suited_safety_rank_for_open_hand_threats(
-                tile_type, targets, context,
-            ),
+            suited_safety_evidence: evidence,
+            wall_rank: evidence.map(|evidence| evidence.wall_rank),
+            suji_safety_rank: evidence.map(|evidence| evidence.suji_rank),
+            suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
             category: open_hand_defense_category(tile_type, targets, context),
         })
     }
@@ -508,6 +525,7 @@ impl OpenHandDefenseDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::defense::{suited_safety_evidence_for_players, wall_rank};
     use crate::meld::{Meld, MeldKind};
     use crate::open_hand_threat::{
         OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
@@ -1224,6 +1242,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_suited_safety_evidence_keeps_both_the_wall_and_the_suji() {
+        // player3 の河 2m 8m で 5m は完全スジ。壁を OneChance にしてもスジ根拠は失われない。
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .discards_of(3, "2m 8m")
+            .visible(
+                (0..3)
+                    .map(|copy| tile_copy("3m", copy))
+                    .chain((0..4).map(|copy| tile_copy("6m", copy)))
+                    .collect(),
+            )
+            .build();
+        let targets = targets(&context);
+        let five_man = tile_type("5m");
+        let evidence = suited_safety_evidence_for_open_hand_threats(five_man, &targets, &context)
+            .expect("数牌の evidence");
+
+        assert_eq!(evidence.wall_rank, WallRank::OneChance);
+        assert_eq!(evidence.suji_rank, SujiSafetyRank::Suji);
+        // 責務は target の絞り込みだけで、evidence の意味は共有 helper と同じ。
+        assert_eq!(
+            Some(evidence),
+            suited_safety_evidence_for_players(five_man, &[3], &context)
+        );
+        assert_eq!(
+            suited_safety_rank_for_open_hand_threats(five_man, &targets, &context),
+            Some(evidence.legacy_rank())
+        );
+        assert_eq!(
+            suited_safety_evidence_for_open_hand_threats(tile_type("N"), &targets, &context),
+            None
+        );
+    }
+
+    #[test]
+    fn the_suited_safety_evidence_excludes_ron_safe_targets() {
+        // 5m が本人の河にある player2 は集約対象から外れ、player3 の片スジだけが残る。
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .discards_of(2, "5m 2m 8m")
+            .discards_of(3, "2m")
+            .build();
+        let targets = targets(&context);
+        let five_man = tile_type("5m");
+
+        assert_eq!(
+            suited_safety_evidence_for_open_hand_threats(five_man, &targets, &context),
+            suited_safety_evidence_for_players(five_man, &[3], &context)
+        );
+        assert_eq!(
+            suited_safety_evidence_for_open_hand_threats(five_man, &targets, &context)
+                .map(|evidence| evidence.suji_rank),
+            Some(SujiSafetyRank::HalfSuji)
+        );
+    }
+
     // ---- 候補診断 ----
 
     fn dahai(mjai: &str) -> LegalAction {
@@ -1269,6 +1345,13 @@ mod tests {
         );
         assert!(!candidate.discarded_by_all_targets);
         assert_eq!(candidate.suji_safety_rank, Some(SujiSafetyRank::HalfSuji));
+        assert_eq!(
+            candidate.suited_safety_evidence,
+            Some(SuitedSafetyEvidence {
+                wall_rank: WallRank::NoWall,
+                suji_rank: SujiSafetyRank::HalfSuji,
+            })
+        );
         assert_eq!(
             candidate.suited_safety_rank,
             Some(SuitedSafetyRank::HalfSuji)

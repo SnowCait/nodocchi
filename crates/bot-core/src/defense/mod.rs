@@ -27,8 +27,10 @@ pub use honor::{
     select_honor_safety_fallback_action,
 };
 pub use suited::{
-    SuitedSafetyRank, select_suited_safety_fallback_action, suited_dahai_actions_by_safety,
-    suited_dahai_actions_by_safety_with, suited_safety_outweighs_honor,
+    SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,
+    suited_dahai_actions_by_safety, suited_dahai_actions_by_safety_with,
+    suited_safety_evidence_for_all_reached, suited_safety_evidence_for_any_reached,
+    suited_safety_evidence_for_players, suited_safety_outweighs_honor,
     suited_safety_rank_for_all_reached, suited_safety_rank_for_any_reached,
     suited_safety_rank_for_players,
 };

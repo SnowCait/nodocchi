@@ -38,7 +38,8 @@ pub use combined_defense::{
     is_ron_safe_for_target, is_safe_against_all_threats, opponent_honor_value_for_combined_threats,
     safe_against_all_threats_dahai_actions, select_combined_threat_defense_fallback_action,
     select_combined_threat_defense_fallback_action_with_kind,
-    suited_safety_rank_for_combined_threats, suji_safety_rank_for_combined_threats,
+    suited_safety_evidence_for_combined_threats, suited_safety_rank_for_combined_threats,
+    suji_safety_rank_for_combined_threats,
 };
 pub use context::{GameContext, TableStateFacts, seat_wind_for_player};
 pub use damaten_value::{
@@ -47,16 +48,18 @@ pub use damaten_value::{
 };
 pub use defense::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
-    DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank,
-    WallRank, genbutsu_dahai_actions_for_all_reached, honor_dahai_actions_by_safety,
-    honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
-    is_discarded_by_player, is_genbutsu_for, is_genbutsu_for_all_reached, is_no_chance,
-    is_one_chance, is_suji_for, is_suji_for_all_reached, is_suji_for_any_reached,
-    log_defense_fallback_decision, opponent_honor_value_for, opponent_honor_value_for_players,
-    opponent_honor_value_for_reached, select_defense_fallback_action,
-    select_defense_fallback_action_with_kind, select_genbutsu_fallback_action,
-    select_honor_safety_fallback_action, select_suited_safety_fallback_action,
-    suited_dahai_actions_by_safety, suited_dahai_actions_by_safety_with,
+    DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SuitedSafetyEvidence,
+    SuitedSafetyRank, SujiSafetyRank, WallRank, genbutsu_dahai_actions_for_all_reached,
+    honor_dahai_actions_by_safety, honor_dahai_actions_by_safety_with, honor_safety_rank,
+    is_discarded_by_all_players, is_discarded_by_player, is_genbutsu_for,
+    is_genbutsu_for_all_reached, is_no_chance, is_one_chance, is_suji_for, is_suji_for_all_reached,
+    is_suji_for_any_reached, log_defense_fallback_decision, opponent_honor_value_for,
+    opponent_honor_value_for_players, opponent_honor_value_for_reached,
+    select_defense_fallback_action, select_defense_fallback_action_with_kind,
+    select_genbutsu_fallback_action, select_honor_safety_fallback_action,
+    select_suited_safety_fallback_action, suited_dahai_actions_by_safety,
+    suited_dahai_actions_by_safety_with, suited_safety_evidence_for_all_reached,
+    suited_safety_evidence_for_any_reached, suited_safety_evidence_for_players,
     suited_safety_outweighs_honor, suited_safety_rank_for_all_reached,
     suited_safety_rank_for_any_reached, suited_safety_rank_for_players,
     suji_dahai_actions_by_safety, suji_safety_rank_for, suji_safety_rank_for_all_reached,
@@ -78,7 +81,8 @@ pub use open_hand_defense::{
     open_hand_honor_dahai_actions_by_safety, open_hand_suited_dahai_actions_by_safety,
     opponent_honor_value_for_open_hand_threats, safe_against_all_targets_dahai_actions,
     select_open_hand_defense_fallback_action, select_open_hand_defense_fallback_action_with_kind,
-    suited_safety_rank_for_open_hand_threats, suji_safety_rank_for_open_hand_threats,
+    suited_safety_evidence_for_open_hand_threats, suited_safety_rank_for_open_hand_threats,
+    suji_safety_rank_for_open_hand_threats,
 };
 pub use open_hand_threat::{
     OpenHandThreatAssessment, OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
