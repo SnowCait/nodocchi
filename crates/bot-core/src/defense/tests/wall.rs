@@ -3,11 +3,17 @@ use crate::defense::wall::sequence_wait_routes;
 use crate::defense::*;
 use bot_logic::{TileId, TileType};
 
-fn route(target: &str, required: [&str; 2], partner: Option<&str>) -> SequenceWaitRoute {
+fn route(
+    target: &str,
+    required: [&str; 2],
+    shape: SequenceWaitShape,
+    partner: Option<&str>,
+) -> SequenceWaitRoute {
     sequence_wait_routes(tile_type(target))
         .into_iter()
         .find(|route| {
             route.required_tiles == [tile_type(required[0]), tile_type(required[1])]
+                && route.shape == shape
                 && route.suji_partner == partner.map(tile_type)
         })
         .unwrap()
@@ -22,23 +28,85 @@ fn route_context(visible: Vec<TileId>, player_one_discards: Vec<TileId>) -> Game
 }
 
 #[test]
-fn sequence_route_represents_required_tiles_and_ryanmen_partner() {
-    assert_eq!(
-        route("6p", ["4p", "5p"], Some("3p")),
-        SequenceWaitRoute {
-            required_tiles: [tile_type("4p"), tile_type("5p")],
-            suji_partner: Some(tile_type("3p")),
-        }
-    );
-    assert_eq!(
-        route("6p", ["7p", "8p"], Some("9p")).suji_partner,
-        Some(tile_type("9p"))
-    );
+fn sequence_wait_routes_cover_every_shape_for_each_number() {
+    use SequenceWaitShape::{Kanchan, Penchan, Ryanmen};
+
+    let expected = [
+        ("1p", vec![("2p", "3p", Ryanmen, Some("4p"))]),
+        (
+            "2p",
+            vec![
+                ("1p", "3p", Kanchan, None),
+                ("3p", "4p", Ryanmen, Some("5p")),
+            ],
+        ),
+        (
+            "3p",
+            vec![
+                ("1p", "2p", Penchan, None),
+                ("2p", "4p", Kanchan, None),
+                ("4p", "5p", Ryanmen, Some("6p")),
+            ],
+        ),
+        (
+            "4p",
+            vec![
+                ("2p", "3p", Ryanmen, Some("1p")),
+                ("3p", "5p", Kanchan, None),
+                ("5p", "6p", Ryanmen, Some("7p")),
+            ],
+        ),
+        (
+            "5p",
+            vec![
+                ("3p", "4p", Ryanmen, Some("2p")),
+                ("4p", "6p", Kanchan, None),
+                ("6p", "7p", Ryanmen, Some("8p")),
+            ],
+        ),
+        (
+            "6p",
+            vec![
+                ("4p", "5p", Ryanmen, Some("3p")),
+                ("5p", "7p", Kanchan, None),
+                ("7p", "8p", Ryanmen, Some("9p")),
+            ],
+        ),
+        (
+            "7p",
+            vec![
+                ("5p", "6p", Ryanmen, Some("4p")),
+                ("6p", "8p", Kanchan, None),
+                ("8p", "9p", Penchan, None),
+            ],
+        ),
+        (
+            "8p",
+            vec![
+                ("6p", "7p", Ryanmen, Some("5p")),
+                ("7p", "9p", Kanchan, None),
+            ],
+        ),
+        ("9p", vec![("7p", "8p", Ryanmen, Some("6p"))]),
+    ];
+
+    for (target, expected) in expected {
+        let actual = sequence_wait_routes(tile_type(target));
+        let expected: Vec<SequenceWaitRoute> = expected
+            .into_iter()
+            .map(|(first, second, shape, partner)| SequenceWaitRoute {
+                required_tiles: [tile_type(first), tile_type(second)],
+                shape,
+                suji_partner: partner.map(tile_type),
+            })
+            .collect();
+        assert_eq!(actual, expected, "target: {target}");
+    }
 }
 
 #[test]
 fn sequence_route_remaining_combinations_cover_tile_count_products() {
-    let route = route("6p", ["4p", "5p"], Some("3p"));
+    let route = route("6p", ["4p", "5p"], SequenceWaitShape::Ryanmen, Some("3p"));
     for (visible, expected) in [
         (vec![], 16),
         (vec![discarded("5p")], 12),
@@ -73,15 +141,45 @@ fn blocked_route_is_zero_while_other_route_remains_open() {
         0
     );
     assert_eq!(
-        sequence_route_remaining_combinations(routes[1], &context),
+        sequence_route_remaining_combinations(routes[2], &context),
         16
     );
     assert_eq!(wall_rank(tile_type("6p"), &context), WallRank::NoWall);
 }
 
 #[test]
+fn discarded_suji_partners_eliminate_only_ryanmen_routes() {
+    let routes = sequence_wait_routes(tile_type("6p"));
+    assert_eq!(
+        routes.iter().map(|route| route.shape).collect::<Vec<_>>(),
+        vec![
+            SequenceWaitShape::Ryanmen,
+            SequenceWaitShape::Kanchan,
+            SequenceWaitShape::Ryanmen,
+        ]
+    );
+    let context = route_context(
+        vec![discarded("5p"), discarded("7p"), held("7p")],
+        vec![discarded("3p"), discarded("9p")],
+    );
+
+    assert_eq!(
+        sequence_route_remaining_combinations_for_player(routes[0], 1, &context),
+        0
+    );
+    assert_eq!(
+        sequence_route_remaining_combinations_for_player(routes[1], 1, &context),
+        6
+    );
+    assert_eq!(
+        sequence_route_remaining_combinations_for_player(routes[2], 1, &context),
+        0
+    );
+}
+
+#[test]
 fn one_chance_route_is_eliminated_by_target_players_suji() {
-    let route = route("6p", ["4p", "5p"], Some("3p"));
+    let route = route("6p", ["4p", "5p"], SequenceWaitShape::Ryanmen, Some("3p"));
     let context = route_context(
         vec![discarded("5p"), held("5p"), tile(54)],
         vec![discarded("3p")],
@@ -128,7 +226,7 @@ fn penchan_routes_have_no_suji_partner_and_are_not_eliminated() {
     for (target, required, discarded_suji) in
         [("3p", ["1p", "2p"], "6p"), ("7p", ["8p", "9p"], "4p")]
     {
-        let route = route(target, required, None);
+        let route = route(target, required, SequenceWaitShape::Penchan, None);
         let context = route_context(vec![], vec![discarded(discarded_suji)]);
         assert_eq!(route.suji_partner, None);
         assert_eq!(
@@ -140,7 +238,7 @@ fn penchan_routes_have_no_suji_partner_and_are_not_eliminated() {
 
 #[test]
 fn route_remaining_combinations_count_red_five_as_normal_five() {
-    let route = route("6p", ["4p", "5p"], Some("3p"));
+    let route = route("6p", ["4p", "5p"], SequenceWaitShape::Ryanmen, Some("3p"));
     let context = visible_context(vec![tile(52)]);
     assert_eq!(visible_count_of(tile_type("5p"), &context), 1);
     assert_eq!(sequence_route_remaining_combinations(route, &context), 12);
@@ -194,6 +292,23 @@ fn wall_rank_no_chance_when_both_routes_blocked() {
         wall_rank(six_pin, &visible_context(visible)),
         WallRank::NoChance
     );
+}
+
+#[test]
+fn wall_rank_ignores_an_open_kanchan_route() {
+    // 6p の従来経路 [4p,5p] / [7p,8p] は Blocked。[5p,7p] は Open だが壁判定には含めない。
+    let context = visible_context(vec![
+        tile(48),
+        tile(49),
+        tile(50),
+        tile(51),
+        tile(64),
+        tile(65),
+        tile(66),
+        tile(67),
+    ]);
+    assert_eq!(wall_rank(tile_type("6p"), &context), WallRank::NoChance);
+    assert!(is_no_chance(tile_type("6p"), &context));
 }
 
 #[test]
@@ -274,13 +389,26 @@ fn wall_rank_terminal_uses_only_in_range_route() {
 
 #[test]
 fn sequence_wait_routes_stay_in_suit_and_in_range() {
-    // 端牌は経路1本、中張牌は2本。suit をまたがず 1〜9 の範囲内に収まる。
+    // 端牌は経路1本、5は3本。suit をまたがず 1〜9 の範囲内に収まる。
     let one_pin = tile(36).tile_type();
     assert_eq!(sequence_wait_routes(one_pin).len(), 1);
     let nine_pin = tile(68).tile_type();
     assert_eq!(sequence_wait_routes(nine_pin).len(), 1);
     let five_pin = tile(52).tile_type();
-    assert_eq!(sequence_wait_routes(five_pin).len(), 2);
+    assert_eq!(sequence_wait_routes(five_pin).len(), 3);
+    for target in [
+        tile_type("9m"),
+        tile_type("1p"),
+        tile_type("9p"),
+        tile_type("1s"),
+    ] {
+        assert!(
+            sequence_wait_routes(target)
+                .iter()
+                .flat_map(|route| route.required_tiles)
+                .all(|required| required.suit() == target.suit())
+        );
+    }
     // 字牌は経路なし。
     assert!(sequence_wait_routes(tile(108).tile_type()).is_empty());
 }

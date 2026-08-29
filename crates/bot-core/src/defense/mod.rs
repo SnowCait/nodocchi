@@ -40,7 +40,7 @@ pub use suji::{
     suji_safety_rank_for_any_reached, suji_safety_rank_for_players,
 };
 pub use wall::{
-    SequenceWaitRoute, WallRank, is_no_chance, is_one_chance,
+    SequenceWaitRoute, SequenceWaitShape, WallRank, is_no_chance, is_one_chance,
     sequence_route_remaining_combinations, sequence_route_remaining_combinations_for_player,
     sequence_wait_routes, wall_rank, wall_tile_types_by_rank,
 };
