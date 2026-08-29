@@ -16,8 +16,9 @@ use crate::context::GameContext;
 use bot_logic::TileType;
 
 pub use compressed_hidden_hand_states::{
-    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates,
-    compressed_ron_capable_hidden_hand_weight,
+    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, RonRiskEvidence,
+    TenpaiStateWeight, compressed_ron_capable_hidden_hand_weight,
+    compressed_tenpai_hidden_hand_weight,
 };
 pub use diagnostic::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,

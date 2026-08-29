@@ -156,6 +156,40 @@ pub(super) fn brute_force_weight(target: &str, context: &GameContext) -> RonCapa
     total
 }
 
+// compressed denominator 専用の correctness oracle。未知の物理牌 subset を全列挙し、既存の
+// shanten logic だけで structural tenpai を判定する。同じ TileCounts の複数 physical subset は
+// weight へ個別に寄与するが、states へは1回だけ寄与する。
+pub(super) fn brute_force_tenpai_state_weight(context: &GameContext) -> TenpaiStateWeight {
+    let melds = context.melds_of(1).expect("player 1 exists");
+    let fixed = fixed_meld_count(melds).expect("at most four melds");
+    let hand_len = usize::from(13 - 3 * fixed.get());
+    let pool: Vec<TileType> = TileType::all()
+        .flat_map(|tile| {
+            std::iter::repeat_n(tile, usize::from(remaining_tile_copies(tile, context)))
+        })
+        .collect();
+
+    let mut total = TenpaiStateWeight::default();
+    let mut states: HashSet<[u8; TileType::COUNT]> = HashSet::new();
+    let mut counts = TileCounts::new();
+    choose_physical(
+        &pool,
+        0,
+        hand_len,
+        &mut counts,
+        &mut |counts: &TileCounts| {
+            if calculate_shanten_with_fixed_melds(counts, fixed).min() != 0 {
+                return;
+            }
+            total.weight += 1;
+            if states.insert(*counts.as_array()) {
+                total.states += 1;
+            }
+        },
+    );
+    total
+}
+
 fn assert_matches_brute_force(target: &str, context: &GameContext) -> RonCapableStateWeight {
     let exact = weight_of(target, context);
     assert_eq!(exact, brute_force_weight(target, context));
