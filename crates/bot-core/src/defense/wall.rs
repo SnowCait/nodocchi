@@ -24,19 +24,29 @@ enum SequenceRouteRank {
     Blocked,
 }
 
+/// 対象牌を和了牌とする順子待ち経路の待ち形。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceWaitShape {
+    Ryanmen,
+    Kanchan,
+    Penchan,
+}
+
 /// 対象牌を和了牌とする順子待ち経路。
 ///
 /// `required_tiles` はその経路を構成する未知の2牌種。`suji_partner` は両面待ちの
-/// もう片方の和了牌で、ペンチャン経路では `None`。
+/// もう片方の和了牌で、嵌張・ペンチャン経路では `None`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceWaitRoute {
     pub required_tiles: [TileType; 2],
+    pub shape: SequenceWaitShape,
     pub suji_partner: Option<TileType>,
 }
 
 // 対象牌 n を和了牌とする、同一色内の順子待ち経路を列挙する。
 //
 // - n >= 3: [n-2, n-1]
+// - 2 <= n <= 8: [n-1, n+1]
 // - n <= 7: [n+1, n+2]
 //
 // 字牌は対象外で空。1〜9 の範囲外へは進まないので、端牌は経路が1本だけになる。
@@ -51,14 +61,33 @@ pub fn sequence_wait_routes(tile: TileType) -> Vec<SequenceWaitRoute> {
 
     let mut routes = Vec::new();
     if number >= 3 {
+        let shape = if number == 3 {
+            SequenceWaitShape::Penchan
+        } else {
+            SequenceWaitShape::Ryanmen
+        };
         routes.push(SequenceWaitRoute {
             required_tiles: [in_suit(number - 2), in_suit(number - 1)],
+            shape,
             suji_partner: (number >= 4).then(|| in_suit(number - 3)),
         });
     }
+    if (2..=8).contains(&number) {
+        routes.push(SequenceWaitRoute {
+            required_tiles: [in_suit(number - 1), in_suit(number + 1)],
+            shape: SequenceWaitShape::Kanchan,
+            suji_partner: None,
+        });
+    }
     if number <= 7 {
+        let shape = if number == 7 {
+            SequenceWaitShape::Penchan
+        } else {
+            SequenceWaitShape::Ryanmen
+        };
         routes.push(SequenceWaitRoute {
             required_tiles: [in_suit(number + 1), in_suit(number + 2)],
+            shape,
             suji_partner: (number <= 6).then(|| in_suit(number + 3)),
         });
     }
@@ -83,15 +112,17 @@ pub fn sequence_route_remaining_combinations(
 /// 指定 player の河も考慮した、順子待ち経路の未知牌組み合わせ数を返す。
 ///
 /// 両面経路の `suji_partner` が player 自身の河にあれば、その経路では対象牌へのロンが
-/// フリテンにより成立しないため0を返す。ペンチャン経路にはこの elimination を適用しない。
+/// フリテンにより成立しないため0を返す。嵌張・ペンチャン経路にはこの elimination を
+/// 適用しない。
 pub fn sequence_route_remaining_combinations_for_player(
     route: SequenceWaitRoute,
     player: usize,
     context: &GameContext,
 ) -> u8 {
-    if route
-        .suji_partner
-        .is_some_and(|partner| is_discarded_by_player(partner, player, context))
+    if route.shape == SequenceWaitShape::Ryanmen
+        && route
+            .suji_partner
+            .is_some_and(|partner| is_discarded_by_player(partner, player, context))
     {
         0
     } else {
@@ -131,7 +162,11 @@ fn sequence_route_rank(route: SequenceWaitRoute, context: &GameContext) -> Seque
 /// これは順子待ちに関する限定的な安全度でしかなく、単騎・双碰・嵌張などへの絶対的な安全は
 /// 意味しない。字牌は対象外で常に `NoWall`。
 pub fn wall_rank(tile: TileType, context: &GameContext) -> WallRank {
-    let routes = sequence_wait_routes(tile);
+    // 従来の壁 heuristic は両面・ペンチャン経路だけを対象とし、嵌張経路は含めない。
+    let routes: Vec<SequenceWaitRoute> = sequence_wait_routes(tile)
+        .into_iter()
+        .filter(|route| route.shape != SequenceWaitShape::Kanchan)
+        .collect();
     if routes.is_empty() {
         return WallRank::NoWall;
     }

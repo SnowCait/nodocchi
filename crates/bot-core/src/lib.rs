@@ -48,7 +48,7 @@ pub use damaten_value::{
 };
 pub use defense::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
-    DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SequenceWaitRoute,
+    DefenseFallbackKind, HonorSafetyRank, OpponentHonorValue, SequenceWaitRoute, SequenceWaitShape,
     SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank, WallRank,
     genbutsu_dahai_actions_for_all_reached, honor_dahai_actions_by_safety,
     honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
