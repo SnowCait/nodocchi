@@ -1,5 +1,7 @@
+mod block_table;
+mod group;
+
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use bot_logic::{FixedMeldCount, Meld, TileType};
@@ -10,28 +12,7 @@ use crate::meld::fixed_meld_count;
 use super::hard_safety::is_genbutsu_for;
 use super::hidden_hand_states::{HiddenHandStateUnsupported, RonCapableStateWeight};
 use super::wait_candidates::remaining_tile_copies;
-
-const MAX_TILE_COPIES: usize = 4;
-
-// 数牌1色分の牌種数と字牌の牌種数。手牌は面子・雀頭が色をまたがないので、この4群に分けて数える。
-const SUITED_TILES: usize = 9;
-const HONOR_TILES: usize = 7;
-const GROUP_COUNT: usize = 4;
-
-// 隠れ手牌に入り得る1群あたりの面子数上限。4面子1雀頭を1群へ寄せても4面子で足りる。
-const MAX_BLOCKS: usize = 4;
-
-// 群ごとの牌数ベクタを 0..=4 の5進数へ詰めた index の桁重み。
-const POW5: [usize; SUITED_TILES + 1] = [1, 5, 25, 125, 625, 3125, 15625, 78125, 390625, 1953125];
-
-// 牌種ごとの残枚数 (最大4枚) から k 枚を選ぶ組み合わせ数。
-const BINOMIAL: [[u64; 5]; 5] = [
-    [1, 0, 0, 0, 0],
-    [1, 1, 0, 0, 0],
-    [1, 2, 1, 0, 0],
-    [1, 3, 3, 1, 0],
-    [1, 4, 6, 4, 1],
-];
+use group::{ChiitoitsuShape, GROUP_COUNT, GroupClass, GroupSpec, enumerate_group_classes};
 
 /// compressed counting の内訳計測値。数え上げ結果には影響しない。
 ///
@@ -46,293 +27,6 @@ pub struct CompressedHiddenHandStateMetrics {
     pub block_tables: Duration,
     pub precomputation: Duration,
     pub target_evaluation: Duration,
-}
-
-// 群ごとの牌数ベクタ index から引く、完成形と待ちの事前計算表。
-//
-// `complete` は「ちょうど size/3 面子へ分解できる」、`complete_with_pair` は「(size-2)/3 面子と
-// 雀頭1つへ分解できる」。`wait_*` はそれぞれ、1枚足すとその形になる牌種の bit mask。
-// 表は牌数ベクタだけで決まるので残枚数に依存せず、process 全体で共有できる。
-const WAIT_WITH_PAIR_SHIFT: u32 = 9;
-const COMPLETE_BIT: u32 = 1 << 18;
-const COMPLETE_WITH_PAIR_BIT: u32 = 1 << 19;
-const WAIT_MASK: u32 = (1 << SUITED_TILES) - 1;
-
-#[derive(Debug, Clone, Copy)]
-struct BlockInfo {
-    complete: bool,
-    complete_with_pair: bool,
-    wait_to_complete: u16,
-    wait_to_complete_with_pair: u16,
-}
-
-impl BlockInfo {
-    // 完成形にも待ちにも寄与しない群は、どの config でも標準形の待ちを空にする。
-    fn is_inert(&self) -> bool {
-        !self.complete
-            && !self.complete_with_pair
-            && self.wait_to_complete == 0
-            && self.wait_to_complete_with_pair == 0
-    }
-}
-
-struct BlockTable {
-    entries: Vec<u32>,
-}
-
-impl BlockTable {
-    fn suited() -> &'static Self {
-        static TABLE: OnceLock<BlockTable> = OnceLock::new();
-        TABLE.get_or_init(|| Self::build(SUITED_TILES, &suited_block_shapes()))
-    }
-
-    fn honor() -> &'static Self {
-        static TABLE: OnceLock<BlockTable> = OnceLock::new();
-        TABLE.get_or_init(|| Self::build(HONOR_TILES, &honor_block_shapes()))
-    }
-
-    // 面子の多重集合から完成形 index を直接作り、その index から1枚抜いた先へ待ち bit を配る。
-    // 全 index を走査せずに済むので、表の構築は完成形の個数だけで決まる。
-    fn build(tiles: usize, shapes: &[BlockShape]) -> Self {
-        let mut marks = BlockMarks::default();
-        let mut counts = [0u8; SUITED_TILES];
-        mark_block_indices(shapes, tiles, 0, 0, 0, &mut counts, &mut marks);
-        marks.complete.sort_unstable();
-        marks.complete.dedup();
-        marks.with_pair.sort_unstable();
-        marks.with_pair.dedup();
-
-        let mut entries = vec![0u32; POW5[tiles]];
-        for &index in &marks.complete {
-            entries[index] |= COMPLETE_BIT;
-            spread_wait(&mut entries, tiles, index, 0);
-        }
-        for &index in &marks.with_pair {
-            entries[index] |= COMPLETE_WITH_PAIR_BIT;
-            spread_wait(&mut entries, tiles, index, WAIT_WITH_PAIR_SHIFT);
-        }
-        Self { entries }
-    }
-
-    fn info(&self, index: usize) -> BlockInfo {
-        let entry = self.entries[index];
-        BlockInfo {
-            complete: entry & COMPLETE_BIT != 0,
-            complete_with_pair: entry & COMPLETE_WITH_PAIR_BIT != 0,
-            wait_to_complete: (entry & WAIT_MASK) as u16,
-            wait_to_complete_with_pair: ((entry >> WAIT_WITH_PAIR_SHIFT) & WAIT_MASK) as u16,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BlockShape {
-    counts: [u8; SUITED_TILES],
-    index: usize,
-}
-
-#[derive(Debug, Default)]
-struct BlockMarks {
-    complete: Vec<usize>,
-    with_pair: Vec<usize>,
-}
-
-fn suited_block_shapes() -> Vec<BlockShape> {
-    let mut shapes = Vec::new();
-    for tile in 0..SUITED_TILES {
-        let mut counts = [0u8; SUITED_TILES];
-        counts[tile] = 3;
-        shapes.push(BlockShape {
-            counts,
-            index: 3 * POW5[tile],
-        });
-    }
-    for start in 0..SUITED_TILES - 2 {
-        let mut counts = [0u8; SUITED_TILES];
-        for offset in 0..3 {
-            counts[start + offset] = 1;
-        }
-        shapes.push(BlockShape {
-            counts,
-            index: POW5[start] + POW5[start + 1] + POW5[start + 2],
-        });
-    }
-    shapes
-}
-
-fn honor_block_shapes() -> Vec<BlockShape> {
-    (0..HONOR_TILES)
-        .map(|tile| {
-            let mut counts = [0u8; SUITED_TILES];
-            counts[tile] = 3;
-            BlockShape {
-                counts,
-                index: 3 * POW5[tile],
-            }
-        })
-        .collect()
-}
-
-fn mark_block_indices(
-    shapes: &[BlockShape],
-    tiles: usize,
-    start: usize,
-    depth: usize,
-    index: usize,
-    counts: &mut [u8; SUITED_TILES],
-    marks: &mut BlockMarks,
-) {
-    marks.complete.push(index);
-    for (pair, &count) in counts.iter().take(tiles).enumerate() {
-        if usize::from(count) + 2 <= MAX_TILE_COPIES {
-            marks.with_pair.push(index + 2 * POW5[pair]);
-        }
-    }
-    if depth == MAX_BLOCKS {
-        return;
-    }
-    for (position, shape) in shapes.iter().enumerate().skip(start) {
-        if (0..tiles).any(|tile| usize::from(counts[tile] + shape.counts[tile]) > MAX_TILE_COPIES) {
-            continue;
-        }
-        for (count, added) in counts.iter_mut().zip(shape.counts).take(tiles) {
-            *count += added;
-        }
-        mark_block_indices(
-            shapes,
-            tiles,
-            position,
-            depth + 1,
-            index + shape.index,
-            counts,
-            marks,
-        );
-        for (count, added) in counts.iter_mut().zip(shape.counts).take(tiles) {
-            *count -= added;
-        }
-    }
-}
-
-fn spread_wait(entries: &mut [u32], tiles: usize, index: usize, shift: u32) {
-    for tile in 0..tiles {
-        if (index / POW5[tile]) % 5 >= 1 {
-            entries[index - POW5[tile]] |= 1 << (shift + tile as u32);
-        }
-    }
-}
-
-// 七対子の並び。手牌全体で対子6・単騎1でなければ七対子テンパイにならない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum ChiitoitsuShape {
-    Broken,
-    Pairs { pairs: u8, single: Option<u8> },
-}
-
-// 群単位で圧縮した隠れ手牌の部分状態。同じ key の牌数ベクタはまとめて数える。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct GroupClassKey {
-    size: u8,
-    complete: bool,
-    complete_with_pair: bool,
-    wait_to_complete: u16,
-    wait_to_complete_with_pair: u16,
-    chiitoitsu: ChiitoitsuShape,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct GroupClass {
-    key: GroupClassKey,
-    weight: u64,
-    states: u64,
-}
-
-#[derive(Clone, Copy)]
-struct GroupSpec {
-    base: usize,
-    tiles: usize,
-    table: &'static BlockTable,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PartialGroup {
-    index: usize,
-    size: u8,
-    weight: u64,
-    pairs: u8,
-    single: Option<u8>,
-    chiitoitsu_compatible: bool,
-}
-
-struct GroupEnumeration<'a> {
-    spec: GroupSpec,
-    remaining: &'a [u8; TileType::COUNT],
-    hand_len: u8,
-    chiitoitsu_possible: bool,
-    classes: HashMap<GroupClassKey, (u64, u64)>,
-    visited: u64,
-}
-
-impl GroupEnumeration<'_> {
-    // 群内の牌種ごとに枚数を選び、牌数ベクタを網羅する。完成状態は作らず、牌数ベクタのまま
-    // class へ畳み込むので、同じ牌数ベクタが複数の面子分解を持っていても1状態のままになる。
-    fn walk(&mut self, tile: usize, partial: PartialGroup) {
-        if tile == self.spec.tiles {
-            self.record(partial);
-            return;
-        }
-        let remaining = usize::from(self.remaining[self.spec.base + tile]);
-        for (count, &combinations) in BINOMIAL[remaining].iter().take(remaining + 1).enumerate() {
-            let size = partial.size + count as u8;
-            if size > self.hand_len {
-                break;
-            }
-            self.walk(
-                tile + 1,
-                PartialGroup {
-                    index: partial.index + count * POW5[tile],
-                    size,
-                    weight: partial.weight * combinations,
-                    pairs: partial.pairs + u8::from(count == 2),
-                    single: if count == 1 {
-                        partial.single.or(Some(tile as u8))
-                    } else {
-                        partial.single
-                    },
-                    chiitoitsu_compatible: partial.chiitoitsu_compatible
-                        && count <= 2
-                        && !(count == 1 && partial.single.is_some()),
-                },
-            );
-        }
-    }
-
-    fn record(&mut self, partial: PartialGroup) {
-        self.visited += 1;
-        let info = self.spec.table.info(partial.index);
-        let chiitoitsu = if self.chiitoitsu_possible && partial.chiitoitsu_compatible {
-            ChiitoitsuShape::Pairs {
-                pairs: partial.pairs,
-                single: partial.single,
-            }
-        } else {
-            ChiitoitsuShape::Broken
-        };
-        if info.is_inert() && chiitoitsu == ChiitoitsuShape::Broken {
-            return;
-        }
-
-        let key = GroupClassKey {
-            size: partial.size,
-            complete: info.complete,
-            complete_with_pair: info.complete_with_pair,
-            wait_to_complete: info.wait_to_complete,
-            wait_to_complete_with_pair: info.wait_to_complete_with_pair,
-            chiitoitsu,
-        };
-        let entry = self.classes.entry(key).or_insert((0, 0));
-        entry.0 += partial.weight;
-        entry.1 += 1;
-    }
 }
 
 // target と、その player に対して既にロン不能な牌種だけへ落とした群 class。
@@ -619,62 +313,20 @@ impl<'a> CompressedHiddenHandStates<'a> {
 
         let mut metrics = CompressedHiddenHandStateMetrics::default();
         let table_start = Instant::now();
-        let specs = [
-            GroupSpec {
-                base: 0,
-                tiles: SUITED_TILES,
-                table: BlockTable::suited(),
-            },
-            GroupSpec {
-                base: SUITED_TILES,
-                tiles: SUITED_TILES,
-                table: BlockTable::suited(),
-            },
-            GroupSpec {
-                base: 2 * SUITED_TILES,
-                tiles: SUITED_TILES,
-                table: BlockTable::suited(),
-            },
-            GroupSpec {
-                base: 3 * SUITED_TILES,
-                tiles: HONOR_TILES,
-                table: BlockTable::honor(),
-            },
-        ];
+        let specs = GroupSpec::all();
         metrics.block_tables = table_start.elapsed();
 
         let concealed_hand_len = 13 - 3 * fixed_meld_count.get();
         let start = Instant::now();
         let groups = specs.map(|spec| {
-            let mut enumeration = GroupEnumeration {
+            let (classes, visited) = enumerate_group_classes(
                 spec,
-                remaining: &remaining,
-                hand_len: concealed_hand_len,
-                chiitoitsu_possible: !fixed_meld_count.has_melds(),
-                classes: HashMap::new(),
-                visited: 0,
-            };
-            enumeration.walk(
-                0,
-                PartialGroup {
-                    index: 0,
-                    size: 0,
-                    weight: 1,
-                    pairs: 0,
-                    single: None,
-                    chiitoitsu_compatible: true,
-                },
+                &remaining,
+                concealed_hand_len,
+                !fixed_meld_count.has_melds(),
             );
-            metrics.enumerated_group_vectors += enumeration.visited;
-            enumeration
-                .classes
-                .into_iter()
-                .map(|(key, (weight, states))| GroupClass {
-                    key,
-                    weight,
-                    states,
-                })
-                .collect::<Vec<_>>()
+            metrics.enumerated_group_vectors += visited;
+            classes
         });
         metrics.precomputation = start.elapsed();
         metrics.retained_group_classes = groups.iter().map(|classes| classes.len() as u64).sum();
