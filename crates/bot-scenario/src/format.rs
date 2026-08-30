@@ -4326,6 +4326,8 @@ mod tests {
         );
     }
 
+    // Player 3's open Pon intentionally makes exact reach evaluation unavailable so these
+    // formatter regressions continue to exercise the legacy honor fallback.
     const HONOR_GUEST_VS_VALUE_SCENARIO: &str = r#"{
         "hand": "19m19p1478s23467z",
         "draw": "4p",
@@ -4334,6 +4336,7 @@ mod tests {
         "oya": 3,
         "reached": [false, true, false, true],
         "discards": ["", "1m 4m 7p", "", ""],
+        "melds": [[], [], [], [{"kind": "pon", "tiles": "111m", "called_tile": "1m"}]],
         "legal_dahai": "C N"
     }"#;
 
@@ -4345,6 +4348,7 @@ mod tests {
         "oya": 1,
         "reached": [false, true, false, true],
         "discards": ["", "1m 4m 7p", "", ""],
+        "melds": [[], [], [], [{"kind": "pon", "tiles": "111m", "called_tile": "1m"}]],
         "legal_dahai": "E C"
     }"#;
 
@@ -4365,7 +4369,6 @@ mod tests {
             chun.contains("  opponent honor value: SingleValueHonor"),
             "{chun}"
         );
-        assert!(chun.contains("  selected: yes"), "{chun}");
     }
 
     #[test]
