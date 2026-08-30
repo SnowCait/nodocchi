@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 
 use super::common::*;
-use crate::context::GameContext;
+use crate::context::{GameContext, TableStateFacts};
 use crate::defense::*;
 use crate::meld::{Meld, MeldKind, fixed_meld_count};
 use bot_logic::{
-    FixedMeldCount, TileCounts, TileId, TileType, calculate_shanten_with_fixed_melds,
-    structural_acceptance_tile_types_with_fixed_melds,
+    FixedMeldCount, RiichiStatus, TileCounts, TileId, TileType, WinMethod, WinningContext,
+    analyze_completed_hand, calculate_shanten_with_fixed_melds, evaluate_winning_yaku,
+    evaluate_winning_yakuman, structural_acceptance_tile_types_with_fixed_melds,
 };
 
 pub(super) fn ankan(mjai: &str) -> Meld {
@@ -142,6 +143,19 @@ pub(super) fn open_hand_fixture_with_discards(
     melds: Vec<Meld>,
     discards: &[&str],
 ) -> GameContext {
+    open_hand_fixture_with_ron_facts(pool, melds, discards, None, None, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_hand_fixture_with_ron_facts(
+    pool: &[(&str, u8)],
+    melds: Vec<Meld>,
+    discards: &[&str],
+    round_wind: Option<&str>,
+    oya: Option<u8>,
+    remaining_tiles: Option<u32>,
+    temporary_passed: Option<&[&str]>,
+) -> GameContext {
     let mut remaining = [0u8; TileType::COUNT];
     for (mjai, copies) in pool {
         remaining[tile_type(mjai).index()] = *copies;
@@ -154,19 +168,29 @@ pub(super) fn open_hand_fixture_with_discards(
     let mut all_discards: [Vec<TileId>; 4] = Default::default();
     all_discards[1] = discards.iter().map(|tile| discarded(tile)).collect();
 
+    let mut temporary_passed_tiles: [Vec<TileType>; 4] = Default::default();
+    if let Some(tiles) = temporary_passed {
+        temporary_passed_tiles[1] = tiles.iter().map(|tile| tile_type(tile)).collect();
+    }
+
     GameContext::from_parts_with_melds(
         None,
         vec![],
         vec![],
-        None,
+        round_wind.map(tile_type),
         None,
         visible,
         Some(0),
-        None,
+        oya,
         all_discards,
         [false; 4],
         all_melds,
     )
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles,
+        ..TableStateFacts::default()
+    })
+    .with_temporary_passed_tiles(temporary_passed.map(|_| temporary_passed_tiles))
 }
 
 fn weight_of(target: &str, context: &GameContext) -> RonCapableStateWeight {
@@ -269,6 +293,73 @@ pub(super) fn brute_force_tenpai_state_weight(context: &GameContext) -> TenpaiSt
         &mut counts,
         &mut |counts: &TileCounts| {
             if calculate_shanten_with_fixed_melds(counts, fixed).min() != 0 {
+                return;
+            }
+            total.weight += 1;
+            if states.insert(*counts.as_array()) {
+                total.states += 1;
+            }
+        },
+    );
+    total
+}
+
+pub(super) fn brute_force_open_ron_capable_weight(
+    target: &str,
+    context: &GameContext,
+) -> RonCapableStateWeight {
+    let target = tile_type(target);
+    let melds = context.melds_of(1).expect("player 1 exists");
+    let fixed = fixed_meld_count(melds).expect("at most four melds");
+    let hand_len = usize::from(13 - 3 * fixed.get());
+    let pool: Vec<TileType> = TileType::all()
+        .flat_map(|tile| {
+            std::iter::repeat_n(tile, usize::from(remaining_tile_copies(tile, context)))
+        })
+        .collect();
+    let winning_context = WinningContext::new(WinMethod::Ron)
+        .with_round_wind(context.round_wind())
+        .with_seat_wind(context.seat_wind_of(1))
+        .with_riichi(RiichiStatus::NotDeclared)
+        .with_ippatsu(Some(false))
+        .with_rinshan(Some(false))
+        .with_chankan(Some(false))
+        .with_remaining_live_tiles(context.remaining_tiles());
+
+    let mut total = RonCapableStateWeight::default();
+    let mut states: HashSet<[u8; TileType::COUNT]> = HashSet::new();
+    let mut counts = TileCounts::new();
+    choose_physical(
+        &pool,
+        0,
+        hand_len,
+        &mut counts,
+        &mut |counts: &TileCounts| {
+            let waits = structural_acceptance_tile_types_with_fixed_melds(counts, fixed);
+            if !waits.contains(&target)
+                || waits.iter().any(|&wait| {
+                    crate::open_hand_defense::is_ron_safe_for_open_hand_target(wait, 1, context)
+                })
+            {
+                return;
+            }
+
+            let mut concealed: Vec<TileId> = TileType::all()
+                .flat_map(|tile| TileId::copies(tile).take(usize::from(counts.count(tile))))
+                .collect();
+            concealed.push(
+                TileId::copies(target)
+                    .nth(usize::from(counts.count(target)))
+                    .expect("target is not a fifth copy"),
+            );
+            let analysis = analyze_completed_hand(&concealed, melds).expect("physical state");
+            let has_yaku = evaluate_winning_yaku(&analysis, winning_context, target)
+                .iter()
+                .any(|evaluation| !evaluation.is_empty())
+                || evaluate_winning_yakuman(&analysis, winning_context, target)
+                    .iter()
+                    .any(|evaluation| !evaluation.is_empty());
+            if !has_yaku {
                 return;
             }
             total.weight += 1;

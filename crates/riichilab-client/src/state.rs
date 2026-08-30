@@ -110,12 +110,10 @@ impl ValidationState {
         }
         self.record_post_reach_passed_tile(actor, pai);
         self.establish_pending_reach(actor);
-        self.pending_passed_tile = TileType::from_mjai_type_str(pai)
-            .ok()
-            .map(|tile| (actor, tile));
+        self.set_pending_passed_tile(actor, pai);
     }
 
-    /// 鳴き・槓による手牌変化。直前の打牌はロンされず局が継続したと確定してから、
+    /// 鳴き・槓による手牌変化。直前のロン機会は見逃されて局が継続したと確定してから、
     /// actor の旧手牌に対する一時安全情報を消す。
     pub fn on_hand_change(&mut self, actor: u8) {
         self.confirm_pending_passed_tile();
@@ -123,7 +121,16 @@ impl ValidationState {
         self.clear_same_hand_passed_tiles(actor);
     }
 
-    /// 和了イベントでは直前の打牌が「通った」とは言えないため pending を破棄する。
+    /// 加槓による手牌変化を反映し、加槓牌を新しいロン機会として pending にする。
+    pub fn on_kakan(&mut self, actor: u8, pai: &str) {
+        if usize::from(actor) >= PLAYER_COUNT {
+            return;
+        }
+        self.on_hand_change(actor);
+        self.set_pending_passed_tile(actor, pai);
+    }
+
+    /// 和了イベントでは直前のロン機会が「通った」とは言えないため pending を破棄する。
     pub fn on_hora(&mut self) {
         self.pending_passed_tile = None;
     }
@@ -188,6 +195,12 @@ impl ValidationState {
                 }
             }
         }
+    }
+
+    fn set_pending_passed_tile(&mut self, actor: u8, pai: &str) {
+        self.pending_passed_tile = TileType::from_mjai_type_str(pai)
+            .ok()
+            .map(|tile| (actor, tile));
     }
 
     fn clear_temporary_passed_tiles(&mut self, actor: u8) {
@@ -693,6 +706,38 @@ mod tests {
         }
 
         #[test]
+        fn kakan_is_confirmed_for_other_players_when_the_hand_continues() {
+            let mut state = started();
+            state.on_kakan(0, "5m");
+            assert!((0..4).all(|player| !is_passed(&state, player, "5m")));
+
+            state.on_tsumo(0, "?".to_string());
+            assert!(!is_passed(&state, 0, "5m"));
+            assert!((1..4).all(|player| is_passed(&state, player, "5m")));
+        }
+
+        #[test]
+        fn hora_does_not_confirm_the_kakan_tile_as_passed() {
+            let mut state = started();
+            state.on_kakan(0, "5m");
+            state.on_hora();
+            state.on_tsumo(0, "?".to_string());
+
+            assert!((0..4).all(|player| !is_passed(&state, player, "5m")));
+        }
+
+        #[test]
+        fn target_draw_clears_a_confirmed_kakan_tile() {
+            let mut state = started();
+            state.on_kakan(0, "5m");
+            state.on_tsumo(0, "?".to_string());
+            assert!(is_passed(&state, 2, "5m"));
+
+            state.on_tsumo(2, "?".to_string());
+            assert!(!is_passed(&state, 2, "5m"));
+        }
+
+        #[test]
         fn next_tsumo_clears_only_the_drawing_players_previous_safety() {
             let mut state = started();
             state.on_dahai(0, "9m");
@@ -800,6 +845,16 @@ mod tests {
 
             assert!(is_temporary_passed(&state, 2, "9m"));
             assert!(is_same_hand_passed(&state, 2, "9m"));
+        }
+
+        #[test]
+        fn confirmed_kakan_enters_same_hand_history_for_other_players() {
+            let mut state = started();
+            state.on_kakan(0, "5m");
+            state.on_tsumo(0, "?".to_string());
+
+            assert!(!is_same_hand_passed(&state, 0, "5m"));
+            assert!((1..4).all(|player| is_same_hand_passed(&state, player, "5m")));
         }
 
         #[test]

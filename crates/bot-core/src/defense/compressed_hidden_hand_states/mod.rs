@@ -11,7 +11,7 @@ use crate::context::GameContext;
 
 use super::hidden_hand_states::{
     HiddenHandModelInput, HiddenHandModelMode, HiddenHandStateUnsupported, RonCapableStateWeight,
-    StructuralCompletionStateWeight,
+    StructuralCompletionStateWeight, StructuralTenpaiHiddenHandStates,
 };
 use group::{ChiitoitsuShape, GROUP_COUNT, GroupClass, GroupSpec, enumerate_group_classes};
 
@@ -734,10 +734,14 @@ impl<'a> CompressedHiddenHandStates<'a> {
 /// 公開副露を固定した、非リーチ相手の compressed conditional-tenpai model。
 ///
 /// structural tenpai denominator と、対象牌を加えると Standard の structural completion になる
-/// state weight を exact に数える。役・フリテン・ロン可能性・テンパイ確率は扱わず、
-/// [`RonRiskEvidence`] も生成しない。
+/// state weight を exact に数える。`T` は compressed DP で数え、`R` は yaku rule を DP へ複製せず
+/// target completion 候補だけを共通 enumerator で列挙して既存 evaluator を呼ぶ。
+/// current furiten を反映した [`RonRiskEvidence`] を構築できるが、テンパイ確率は扱わない。
 pub struct CompressedStructuralTenpaiHiddenHandStates<'a> {
+    player: usize,
+    context: &'a GameContext,
     inner: CompressedHiddenHandStates<'a>,
+    ron_counter: Option<StructuralTenpaiHiddenHandStates<'a>>,
 }
 
 impl<'a> CompressedStructuralTenpaiHiddenHandStates<'a> {
@@ -752,7 +756,10 @@ impl<'a> CompressedStructuralTenpaiHiddenHandStates<'a> {
             HiddenHandModelMode::OpenHandStructuralTenpai,
         )?;
         Ok(Self {
+            player,
+            context,
             inner: CompressedHiddenHandStates::from_input(input),
+            ron_counter: None,
         })
     }
 
@@ -780,6 +787,38 @@ impl<'a> CompressedStructuralTenpaiHiddenHandStates<'a> {
         target: TileType,
     ) -> StructuralCompletionStateWeight {
         self.inner.completion_state_weight(target).into()
+    }
+
+    /// 対象牌で現在ロン可能な Standard hidden-hand state weight を exact に数える。
+    pub fn ron_capable_state_weight(
+        &mut self,
+        target: TileType,
+    ) -> Result<RonCapableStateWeight, HiddenHandStateUnsupported> {
+        if self.ron_counter.is_none() {
+            self.ron_counter = Some(StructuralTenpaiHiddenHandStates::new(
+                self.player,
+                self.context,
+            )?);
+        }
+        self.ron_counter
+            .as_mut()
+            .expect("initialized above")
+            .ron_capable_state_weight(target)
+    }
+
+    /// OpenHand target の exact `R(p, x)` と structural tenpai `T(p)` を返す。
+    ///
+    /// `R` は役・named Yakuman・current furiten を反映するが、`T` は役なし state も含む PR #209
+    /// の structural denominator をそのまま使う。必要な局面情報が unknown なら unavailable。
+    pub fn ron_risk_evidence(
+        &mut self,
+        target: TileType,
+    ) -> Result<RonRiskEvidence, HiddenHandStateUnsupported> {
+        let ron_capable = self.ron_capable_state_weight(target)?;
+        Ok(RonRiskEvidence {
+            ron_capable_weight: ron_capable.weight,
+            tenpai_weight: self.tenpai_state_weight().weight,
+        })
     }
 
     /// 評価対象の `GameContext`。

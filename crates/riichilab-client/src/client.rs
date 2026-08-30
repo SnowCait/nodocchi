@@ -346,7 +346,7 @@ where
                         consumed,
                     } => {
                         debug!(actor, pai = %pai, consumed = ?consumed, "kakan");
-                        state.on_hand_change(actor);
+                        state.on_kakan(actor, &pai);
                     }
                     MjaiEvent::Reach { actor } => {
                         debug!(actor, "reach");
@@ -828,6 +828,21 @@ mod tests {
         let nine_man = TileType::from_mjai_type_str("9m").unwrap();
         assert!(context.is_temporary_passed(nine_man, 3));
         assert!(!context.is_temporary_passed(nine_man, 0));
+    }
+
+    #[test]
+    fn context_for_request_carries_a_confirmed_kakan_tile() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_kakan(2, "5m");
+        state.on_tsumo(2, "?".to_string());
+
+        let context = context_for_request(&observation, &state, 8);
+        let five_man = TileType::from_mjai_type_str("5m").unwrap();
+        assert!(context.is_temporary_passed(five_man, 1));
+        assert!(!context.is_temporary_passed(five_man, 2));
     }
 
     #[test]

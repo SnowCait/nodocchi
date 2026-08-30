@@ -203,7 +203,7 @@ impl GameContext {
         self
     }
 
-    /// 各 player の次のツモまでに、他家から切られてロンされず通った牌種。
+    /// 各 player の次のツモまでに、打牌・加槓のロン機会で通った牌種。
     ///
     /// `None` は入力経路から履歴を取得できないことを表し、空配列 (`Some`) と区別する。
     pub fn with_temporary_passed_tiles(
@@ -214,7 +214,7 @@ impl GameContext {
         self
     }
 
-    /// 各 player の concealed hand が最後に変化して以降に、他家から切られて通った牌種。
+    /// 各 player の concealed hand が最後に変化して以降に、打牌・加槓のロン機会で通った牌種。
     ///
     /// `None` は入力経路から履歴を取得できないことを表し、空配列 (`Some`) と区別する。
     pub fn with_same_hand_passed_tiles(

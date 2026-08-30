@@ -1,18 +1,33 @@
 use super::common::*;
 use super::hidden_hand_states::{
-    ankan, brute_force_tenpai_state_weight, brute_force_weight, open_hand_fixture,
-    open_hand_fixture_with_discards, reached_fixture, reached_fixture_with_tile_types,
+    ankan, brute_force_open_ron_capable_weight, brute_force_tenpai_state_weight,
+    brute_force_weight, open_hand_fixture, open_hand_fixture_with_discards,
+    open_hand_fixture_with_ron_facts, reached_fixture, reached_fixture_with_tile_types,
 };
 use crate::context::GameContext;
 use crate::defense::*;
 use crate::meld::{Meld, MeldKind};
-use bot_logic::{TileId, TileType};
+use bot_logic::{
+    RiichiStatus, TileId, TileType, WinMethod, WinningContext, Yakuman, analyze_completed_hand,
+    evaluate_winning_yakuman,
+};
 use std::cmp::Ordering;
 
 fn pon(mjai: &str) -> Meld {
     let tiles: Vec<TileId> = TileId::copies(tile_type(mjai)).take(3).collect();
     let called = tiles[0];
     Meld::new(MeldKind::Pon, tiles, Some(called))
+}
+
+fn chi(start: &str) -> Meld {
+    let tiles: Vec<TileId> = tile_type(start)
+        .sequence()
+        .expect("suited sequence start")
+        .into_iter()
+        .map(|tile| TileId::copies(tile).next().expect("first copy"))
+        .collect();
+    let called = tiles[0];
+    Meld::new(MeldKind::Chi, tiles, Some(called))
 }
 
 // enumerating implementation を correctness oracle として、compressed counting の結果と比べる。
@@ -63,6 +78,37 @@ fn assert_open_tenpai_matches_brute_force(context: &GameContext) -> TenpaiStateW
     let states = CompressedStructuralTenpaiHiddenHandStates::new(1, context)
         .expect("compressed open hand model");
     assert_eq!(states.tenpai_state_weight(), expected);
+    expected
+}
+
+fn assert_open_ron_matches_all_counters(
+    target: &str,
+    context: &GameContext,
+) -> RonCapableStateWeight {
+    let target_type = tile_type(target);
+    let expected = brute_force_open_ron_capable_weight(target, context);
+    let mut enumerated =
+        StructuralTenpaiHiddenHandStates::new(1, context).expect("open hand enumerator");
+    let enumerated = enumerated
+        .ron_capable_state_weight(target_type)
+        .expect("known winning context");
+    let mut compressed = CompressedStructuralTenpaiHiddenHandStates::new(1, context)
+        .expect("compressed open hand model");
+    let compressed_weight = compressed
+        .ron_capable_state_weight(target_type)
+        .expect("known winning context");
+    let evidence = compressed
+        .ron_risk_evidence(target_type)
+        .expect("known winning context");
+
+    assert_eq!(enumerated, expected, "enumerator target: {target}");
+    assert_eq!(compressed_weight, expected, "compressed target: {target}");
+    assert_eq!(evidence.ron_capable_weight, expected.weight);
+    assert_eq!(
+        evidence.tenpai_weight,
+        compressed.tenpai_state_weight().weight
+    );
+    assert!(evidence.ron_capable_weight <= evidence.tenpai_weight);
     expected
 }
 
@@ -147,6 +193,267 @@ fn open_hand_target_completion_is_structural_not_a_furiten_judgement() {
             states: 1,
         }
     );
+}
+
+fn open_hand_yakuhai_melds() -> Vec<Meld> {
+    vec![pon("P"), chi("1p"), chi("4s")]
+}
+
+fn open_hand_no_yaku_melds() -> Vec<Meld> {
+    vec![chi("1p"), chi("4p"), chi("7s")]
+}
+
+fn known_open_hand_ron_fixture(
+    melds: Vec<Meld>,
+    discards: &[&str],
+    temporary_passed: &[&str],
+    remaining_tiles: u32,
+) -> GameContext {
+    open_hand_fixture_with_ron_facts(
+        &[("2m", 1), ("3m", 1), ("4m", 1), ("5m", 1)],
+        melds,
+        discards,
+        Some("E"),
+        Some(0),
+        Some(remaining_tiles),
+        Some(temporary_passed),
+    )
+}
+
+#[test]
+fn open_hand_structural_completion_with_yakuhai_is_ron_capable() {
+    let context = known_open_hand_ron_fixture(open_hand_yakuhai_melds(), &[], &[], 1);
+
+    assert_eq!(
+        assert_open_target_matches_enumerator("5m", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &context),
+        RonCapableStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_named_yakuman_is_ron_capable() {
+    let context = known_open_hand_ron_fixture(vec![pon("P"), pon("F"), pon("C")], &[], &[], 1);
+    let concealed = ["2m", "3m", "4m", "5m", "5m"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, tile)| {
+            TileId::copies(tile_type(tile))
+                .nth(usize::from(tile == "5m" && index == 4))
+                .expect("physical tile")
+        })
+        .collect::<Vec<_>>();
+    let analysis = analyze_completed_hand(
+        &concealed,
+        context.melds_of(1).expect("player 1 fixed melds"),
+    )
+    .expect("completed Daisangen hand");
+    let winning_context = WinningContext::new(WinMethod::Ron)
+        .with_round_wind(Some(tile_type("E")))
+        .with_seat_wind(Some(tile_type("S")))
+        .with_riichi(RiichiStatus::NotDeclared)
+        .with_ippatsu(Some(false))
+        .with_rinshan(Some(false))
+        .with_chankan(Some(false))
+        .with_remaining_live_tiles(Some(1));
+    assert!(
+        evaluate_winning_yakuman(&analysis, winning_context, tile_type("5m"))
+            .iter()
+            .any(|evaluation| evaluation.contains(Yakuman::Daisangen))
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &context),
+        RonCapableStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_structural_completion_without_yaku_has_zero_ron_weight() {
+    let context = known_open_hand_ron_fixture(open_hand_no_yaku_melds(), &[], &[], 1);
+
+    assert_eq!(
+        assert_open_target_matches_enumerator("5m", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &context),
+        RonCapableStateWeight::default()
+    );
+}
+
+#[test]
+fn open_hand_houtei_makes_an_otherwise_yakuless_state_ron_capable() {
+    let before_houtei = known_open_hand_ron_fixture(open_hand_no_yaku_melds(), &[], &[], 1);
+    let houtei = known_open_hand_ron_fixture(open_hand_no_yaku_melds(), &[], &[], 0);
+
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &before_houtei),
+        RonCapableStateWeight::default()
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &houtei),
+        RonCapableStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_target_in_own_river_has_zero_ron_weight() {
+    let context = known_open_hand_ron_fixture(open_hand_yakuhai_melds(), &["5m"], &[], 1);
+
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &context),
+        RonCapableStateWeight::default()
+    );
+}
+
+#[test]
+fn open_hand_other_wait_in_own_river_makes_the_multi_wait_furiten() {
+    let context = open_hand_fixture_with_ron_facts(
+        &[("2m", 1), ("3m", 1), ("5p", 2)],
+        open_hand_yakuhai_melds(),
+        &["1m"],
+        Some("E"),
+        Some(0),
+        Some(1),
+        Some(&[]),
+    );
+
+    assert_eq!(
+        assert_open_target_matches_enumerator("4m", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("4m", &context),
+        RonCapableStateWeight::default()
+    );
+}
+
+#[test]
+fn open_hand_current_temporary_passed_has_zero_ron_weight() {
+    let context = known_open_hand_ron_fixture(open_hand_yakuhai_melds(), &[], &["5m"], 1);
+
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &context),
+        RonCapableStateWeight::default()
+    );
+}
+
+#[test]
+fn open_hand_missed_kakan_wait_makes_another_wait_temporarily_furiten() {
+    let context = open_hand_fixture_with_ron_facts(
+        &[("2m", 1), ("3m", 1), ("5p", 2)],
+        open_hand_yakuhai_melds(),
+        &[],
+        Some("E"),
+        Some(0),
+        Some(1),
+        Some(&["1m"]),
+    );
+
+    assert_eq!(
+        assert_open_target_matches_enumerator("4m", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("4m", &context),
+        RonCapableStateWeight::default()
+    );
+}
+
+#[test]
+fn open_hand_same_hand_passed_alone_does_not_remove_ron_capable_states() {
+    let mut same_hand_passed: [Vec<TileType>; 4] = Default::default();
+    same_hand_passed[1].push(tile_type("5m"));
+    let context = known_open_hand_ron_fixture(open_hand_yakuhai_melds(), &[], &[], 1)
+        .with_same_hand_passed_tiles(Some(same_hand_passed));
+
+    assert_eq!(
+        assert_open_ron_matches_all_counters("5m", &context),
+        RonCapableStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_ron_counting_is_unavailable_when_required_context_is_unknown() {
+    let cases = [
+        (
+            None,
+            Some(0),
+            Some(1),
+            Some(&[][..]),
+            HiddenHandStateUnsupported::UnknownRoundWind,
+        ),
+        (
+            Some("E"),
+            None,
+            Some(1),
+            Some(&[][..]),
+            HiddenHandStateUnsupported::UnknownSeatWind,
+        ),
+        (
+            Some("E"),
+            Some(0),
+            None,
+            Some(&[][..]),
+            HiddenHandStateUnsupported::UnknownRemainingTiles,
+        ),
+        (
+            Some("E"),
+            Some(0),
+            Some(1),
+            None,
+            HiddenHandStateUnsupported::UnknownTemporaryPassedTiles,
+        ),
+    ];
+
+    for (round_wind, oya, remaining_tiles, temporary_passed, expected) in cases {
+        let context = open_hand_fixture_with_ron_facts(
+            &[("2m", 1), ("3m", 1), ("4m", 1), ("5m", 1)],
+            open_hand_yakuhai_melds(),
+            &[],
+            round_wind,
+            oya,
+            remaining_tiles,
+            temporary_passed,
+        );
+        let mut enumerated =
+            StructuralTenpaiHiddenHandStates::new(1, &context).expect("structural model");
+        let mut compressed = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+            .expect("compressed structural model");
+
+        assert_eq!(
+            enumerated.ron_capable_state_weight(tile_type("5m")),
+            Err(expected)
+        );
+        assert_eq!(compressed.ron_risk_evidence(tile_type("5m")), Err(expected));
+    }
 }
 
 #[test]
