@@ -40,7 +40,12 @@ pub use honor::{
     opponent_honor_value_for_players, opponent_honor_value_for_reached,
     select_honor_safety_fallback_action,
 };
-pub use single_reach::{DahaiRonRiskEvidence, single_reach_dahai_actions_by_ron_risk};
+pub(crate) use single_reach::reached_opponents_dahai_actions_by_ron_risk;
+pub use single_reach::{
+    DahaiRonRiskEvidence, DahaiRonRiskVector, PlayerRonRiskEvidence,
+    compare_lexicographic_minimax_ron_risk, reached_player_dahai_actions_by_ron_risk,
+    single_reach_dahai_actions_by_ron_risk,
+};
 pub use suited::{
     SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,
     suited_dahai_actions_by_safety, suited_dahai_actions_by_safety_with,
@@ -85,12 +90,13 @@ pub enum DefenseFallbackKind {
 #[derive(Debug)]
 pub(crate) struct DefenseFallbackEvaluation<'a> {
     pub(crate) selected: Option<(&'a LegalAction, DefenseFallbackKind)>,
-    pub(crate) ron_risk_evidence: Option<Vec<DahaiRonRiskEvidence<'a>>>,
+    pub(crate) ron_risk_vectors: Option<Vec<DahaiRonRiskVector<'a>>>,
 }
 
 // 他家リーチ中の防御 fallback を優先順位付きで選ぶ。
-// 全リーチ者への共通現物を最優先にし、単独リーチでは全 Dahai を exact R の昇順、複数
-// リーチでは従来の字牌 / 数牌 safety で比較して、選ばれた種別を添えて返す。
+// 全リーチ者への共通現物を最優先にし、それ以外は各リーチ者の exact R/T を worst-first に
+// 並べた risk vector の辞書順で比較する。1人でも exact model が unavailable なら局面全体を
+// 従来の字牌 / 数牌 safety へ戻し、選ばれた種別を添えて返す。
 //
 // 現物は黒5対応済みの select_genbutsu_fallback_action をそのまま利用する。exact / legacy
 // いずれも牌種を決めてから prefer_black_five_for_action で同じ5牌種の黒牌へ正規化する。
@@ -106,48 +112,73 @@ pub(crate) fn evaluate_defense_fallback_action_with_kind<'a>(
     legal_actions: &'a [LegalAction],
     collect_exact_evidence_for_genbutsu: bool,
 ) -> DefenseFallbackEvaluation<'a> {
-    let reached = context.reached_opponents();
     let genbutsu = select_genbutsu_fallback_action(context, legal_actions);
     if let Some(action) = genbutsu
-        && (!collect_exact_evidence_for_genbutsu || reached.len() != 1)
+        && !collect_exact_evidence_for_genbutsu
     {
         return DefenseFallbackEvaluation {
             selected: Some((action, DefenseFallbackKind::Genbutsu)),
-            ron_risk_evidence: None,
+            ron_risk_vectors: None,
         };
     }
 
-    let ron_risk_evidence = reached
-        .first()
-        .filter(|_| reached.len() == 1)
-        .and_then(|&player| single_reach_dahai_actions_by_ron_risk(player, context, legal_actions));
+    let ron_risk_vectors = reached_opponents_dahai_actions_by_ron_risk(context, legal_actions);
 
     if let Some(action) = genbutsu {
         return DefenseFallbackEvaluation {
             selected: Some((action, DefenseFallbackKind::Genbutsu)),
-            ron_risk_evidence,
+            ron_risk_vectors,
         };
     }
 
-    if let Some(evidence) = ron_risk_evidence.as_ref()
-        && let Some(chosen) = evidence
-            .iter()
-            .min_by_key(|candidate| candidate.evidence.ron_capable_weight)
-    {
-        let action = prefer_black_five_for_action(legal_actions, chosen.action);
-        return DefenseFallbackEvaluation {
-            selected: Some((action, DefenseFallbackKind::ExactRonRisk)),
-            ron_risk_evidence,
-        };
+    if let Some(vectors) = ron_risk_vectors.as_ref() {
+        match select_lexicographic_minimax_action(vectors) {
+            Ok(Some(chosen)) => {
+                let action = prefer_black_five_for_action(legal_actions, chosen);
+                return DefenseFallbackEvaluation {
+                    selected: Some((action, DefenseFallbackKind::ExactRonRisk)),
+                    ron_risk_vectors,
+                };
+            }
+            Ok(None) => {}
+            Err(()) => {
+                return DefenseFallbackEvaluation {
+                    selected: select_legacy_defense_fallback_action_with_kind(
+                        context,
+                        legal_actions,
+                    ),
+                    ron_risk_vectors: None,
+                };
+            }
+        }
     }
 
     DefenseFallbackEvaluation {
         selected: select_legacy_defense_fallback_action_with_kind(context, legal_actions),
-        ron_risk_evidence: None,
+        ron_risk_vectors: None,
     }
 }
 
-// 複数リーチ、または単独リーチの exact model が unavailable な場合の従来 selection。
+fn select_lexicographic_minimax_action<'a>(
+    vectors: &[DahaiRonRiskVector<'a>],
+) -> Result<Option<&'a LegalAction>, ()> {
+    let Some(mut chosen) = vectors.first() else {
+        return Ok(None);
+    };
+    for candidate in &vectors[1..] {
+        match compare_lexicographic_minimax_ron_risk(
+            &candidate.player_evidence,
+            &chosen.player_evidence,
+        ) {
+            Some(std::cmp::Ordering::Less) => chosen = candidate,
+            Some(_) => {}
+            None => return Err(()),
+        }
+    }
+    Ok(Some(chosen.action))
+}
+
+// 1人でも exact model が unavailable な場合の従来 selection。
 fn select_legacy_defense_fallback_action_with_kind<'a>(
     context: &GameContext,
     legal_actions: &'a [LegalAction],

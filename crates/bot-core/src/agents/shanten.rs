@@ -1060,6 +1060,11 @@ pub(crate) mod tests {
         LegalAction::Dahai { tile: tile(value) }
     }
 
+    fn unavailable_reach_meld() -> crate::meld::Meld {
+        let tiles = vec![tile(68), tile(69), tile(70)];
+        crate::meld::Meld::new(crate::meld::MeldKind::Pon, tiles.clone(), Some(tiles[0]))
+    }
+
     #[test]
     fn picks_hora_first() {
         let mut agent = ShantenAgent;
@@ -2554,7 +2559,9 @@ pub(crate) mod tests {
 
     fn multiple_reach_wind_context(oya: u8, drawn_tile: Option<u8>) -> GameContext {
         let discards = [vec![], vec![tile(16)], vec![], vec![]];
-        GameContext::from_parts_with_table_state(
+        let mut melds: [Vec<_>; 4] = Default::default();
+        melds[3] = vec![unavailable_reach_meld()];
+        GameContext::from_parts_with_melds(
             drawn_tile.map(tile),
             vec![],
             vec![],
@@ -2565,6 +2572,7 @@ pub(crate) mod tests {
             Some(oya),
             discards,
             [false, true, false, true],
+            melds,
         )
     }
 
@@ -2661,7 +2669,18 @@ pub(crate) mod tests {
             vec![],
             vec![],
         ];
-        GameContext::from_parts_with_table_state(
+        let mut melds: [Vec<_>; 4] = Default::default();
+        if reached.iter().filter(|&&is_reached| is_reached).count() >= 2 {
+            let unavailable_player = reached
+                .iter()
+                .enumerate()
+                .filter(|(player, is_reached)| *player != 0 && **is_reached)
+                .nth(1)
+                .map(|(player, _)| player)
+                .expect("two reached opponents");
+            melds[unavailable_player] = vec![unavailable_reach_meld()];
+        }
+        GameContext::from_parts_with_melds(
             drawn_tile.map(tile),
             hand_values.iter().map(|&value| tile(value)).collect(),
             vec![],
@@ -2672,6 +2691,7 @@ pub(crate) mod tests {
             None,
             discards,
             reached,
+            melds,
         )
     }
 
@@ -2748,7 +2768,9 @@ pub(crate) mod tests {
         // 経路壁で安全度を作る。1p は 2p 4枚で NoChance、9p は 8p 3枚で OneChance、
         // 1s は両リーチ者の 4s 河でスジ(Suji)、5s は無スジ・壁なし(NoSafety)。複数リーチの
         // legacy path で最も安全な NoChance を選ぶ。
-        let ctx = GameContext::from_parts_with_table_state(
+        let mut melds: [Vec<_>; 4] = Default::default();
+        melds[2] = vec![unavailable_reach_meld()];
+        let ctx = GameContext::from_parts_with_melds(
             Some(tile(0)),
             vec![],
             vec![],
@@ -2759,6 +2781,7 @@ pub(crate) mod tests {
             None,
             [vec![], vec![tile(84)], vec![tile(85)], vec![]],
             [false, true, true, false],
+            melds,
         );
         let actions = vec![dahai(88), dahai(72), dahai(68), dahai(36)];
         assert_eq!(

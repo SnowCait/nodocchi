@@ -17,10 +17,45 @@ pub(super) fn ankan(mjai: &str) -> Meld {
     )
 }
 
-fn pon(mjai: &str) -> Meld {
+pub(super) fn pon(mjai: &str) -> Meld {
     let tiles: Vec<TileId> = TileId::copies(tile_type(mjai)).take(3).collect();
     let called = tiles[0];
     Meld::new(MeldKind::Pon, tiles, Some(called))
+}
+
+// 複数リーチ者を同じ縮小 unknown pool 上で個別評価する fixture。
+pub(super) fn multiple_reached_fixture(
+    pool: &[(&str, u8)],
+    melds: [Vec<Meld>; 4],
+    discards: &[(usize, &[&str])],
+    reached: [bool; 4],
+) -> GameContext {
+    let mut remaining = [0u8; TileType::COUNT];
+    for (mjai, copies) in pool {
+        remaining[tile_type(mjai).index()] = *copies;
+    }
+    let visible: Vec<TileId> = TileType::all()
+        .flat_map(|tile| TileId::copies(tile).take(usize::from(4 - remaining[tile.index()])))
+        .collect();
+
+    let mut all_discards: [Vec<TileId>; 4] = Default::default();
+    for &(player, tiles) in discards {
+        all_discards[player] = tiles.iter().map(|tile| discarded(tile)).collect();
+    }
+
+    GameContext::from_parts_with_melds(
+        None,
+        vec![],
+        vec![],
+        None,
+        None,
+        visible,
+        Some(0),
+        None,
+        all_discards,
+        reached,
+        melds,
+    )
 }
 
 // player 1 をリーチ者とし、pool に挙げた牌種だけへ残枚数を残した局面を作る。

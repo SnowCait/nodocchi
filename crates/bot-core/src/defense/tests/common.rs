@@ -1,4 +1,5 @@
 use crate::context::GameContext;
+use crate::meld::{Meld, MeldKind};
 use bot_logic::{TileId, TileType};
 
 pub(super) fn tile(value: u8) -> TileId {
@@ -113,10 +114,44 @@ pub(super) fn suited_context(
     )
 }
 
+// exact model を一人だけ unavailable にして、複数リーチの legacy fallback 自体を検証する。
+pub(super) fn legacy_suited_context(
+    visible_tiles: Vec<TileId>,
+    discards: [Vec<TileId>; 4],
+    reached: [bool; 4],
+) -> GameContext {
+    let mut melds: [Vec<Meld>; 4] = Default::default();
+    let unavailable_player = reached
+        .iter()
+        .enumerate()
+        .find(|(player, reached)| *player != 0 && **reached)
+        .map(|(player, _)| player)
+        .expect("at least one reached opponent");
+    let pon_tiles: Vec<_> = TileId::copies(tile_type("9p")).take(3).collect();
+    melds[unavailable_player] = vec![Meld::new(
+        MeldKind::Pon,
+        pon_tiles.clone(),
+        Some(pon_tiles[0]),
+    )];
+    GameContext::from_parts_with_melds(
+        None,
+        vec![],
+        vec![],
+        None,
+        None,
+        visible_tiles,
+        Some(0),
+        None,
+        discards,
+        reached,
+        melds,
+    )
+}
+
 // 二人のリーチ者について、2m は全員にスジ・1m は一人にだけスジになる状況を作る。
 // player1 の河: 4m(1m スジ根拠) と 5m(2m スジ根拠)。player2 の河: 5m のみ。
 pub(super) fn all_reached_partial_suji_context(visible_tiles: Vec<TileId>) -> GameContext {
-    suited_context(
+    legacy_suited_context(
         visible_tiles,
         [vec![], vec![tile(12), tile(16)], vec![tile(17)], vec![]],
         [false, true, true, false],
@@ -167,7 +202,7 @@ pub(super) fn multiple_reach_half_suji_regression_context() -> GameContext {
         tile(96),
         tile(32),
     ];
-    suited_context(
+    legacy_suited_context(
         hand,
         [
             vec![],

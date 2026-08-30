@@ -1402,6 +1402,18 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
                 .map(|evidence| evidence.tenpai_weight)
         )
     ));
+    if let Some(evidence) = selected
+        .selected_player_ron_risk_evidence
+        .as_ref()
+        .filter(|evidence| evidence.len() > 1)
+    {
+        for player in evidence {
+            lines.push(format!(
+                "  player {} ron risk: {} / {}",
+                player.player, player.evidence.ron_capable_weight, player.evidence.tenpai_weight
+            ));
+        }
+    }
 
     lines.join("\n")
 }
@@ -1461,6 +1473,18 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
                 .map(|evidence| evidence.tenpai_weight)
         )
     ));
+    if let Some(evidence) = candidate
+        .player_ron_risk_evidence
+        .as_ref()
+        .filter(|evidence| evidence.len() > 1)
+    {
+        for player in evidence {
+            lines.push(format!(
+                "  player {} ron risk: {} / {}",
+                player.player, player.evidence.ron_capable_weight, player.evidence.tenpai_weight
+            ));
+        }
+    }
 
     lines.join("\n")
 }
@@ -2424,6 +2448,38 @@ mod tests {
         let four_pin_r = candidates[0].ron_risk_evidence.unwrap().ron_capable_weight;
         let seven_sou_r = candidates[1].ron_risk_evidence.unwrap().ron_capable_weight;
         assert!(four_pin_r < seven_sou_r);
+    }
+
+    const MULTI_REACH_EXACT_DEFENSE_SCENARIO: &str = r#"{
+        "hand": "444p147m258p123s7s",
+        "draw": "9m",
+        "player_id": 0,
+        "oya": 3,
+        "reached": [false, true, true, false],
+        "discards": ["", "1p 4s", "9p", ""],
+        "legal_dahai": "4p 7s"
+    }"#;
+
+    #[test]
+    fn multiple_reach_defense_candidates_show_each_players_exact_ratio() {
+        let (_, diagnostic, output) = rendered(MULTI_REACH_EXACT_DEFENSE_SCENARIO, false);
+        let defense = diagnostic.defense.as_ref().unwrap();
+        assert_eq!(
+            defense.selected_kind(),
+            Some(DefenseFallbackKind::ExactRonRisk)
+        );
+
+        for tile in ["4p", "7s"] {
+            let candidate = candidate_block(&output, "Defense candidates", tile);
+            assert!(candidate.contains("  player 1 ron risk: "), "{candidate}");
+            assert!(candidate.contains("  player 2 ron risk: "), "{candidate}");
+        }
+        assert!(defense.candidates.iter().all(|candidate| {
+            candidate
+                .player_ron_risk_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.len() == 2)
+        }));
     }
 
     const TABLE_STATE_SCENARIO: &str = r#"{
