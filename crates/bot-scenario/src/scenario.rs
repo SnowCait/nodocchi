@@ -2788,6 +2788,8 @@ mod tests {
 
     #[test]
     fn multi_riichi_double_wind_scenario_prefers_suji_and_keeps_diagnostics_consistent() {
+        // Player 2's open guest-wind Pon intentionally makes exact reach evaluation unavailable,
+        // keeping this scenario focused on the legacy multi-riichi Suji fallback.
         let scenario = resolve(&spec_from_json(MULTI_RIICHI_DOUBLE_WIND_SCENARIO));
         let nine_man = tile_type("9m");
         let south = tile_type("S");

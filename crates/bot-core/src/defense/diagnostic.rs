@@ -12,8 +12,8 @@ use super::suited::{
 use super::suji::{SujiSafetyRank, is_suji_for_all_reached};
 use super::wall::WallRank;
 use super::{
-    DahaiRonRiskEvidence, DefenseFallbackEvaluation, DefenseFallbackKind, RonRiskEvidence,
-    single_reach_dahai_actions_by_ron_risk,
+    DahaiRonRiskVector, DefenseFallbackEvaluation, DefenseFallbackKind, PlayerRonRiskEvidence,
+    RonRiskEvidence, reached_opponents_dahai_actions_by_ron_risk,
 };
 
 const LOG_TARGET: &str = "bot_core::defense";
@@ -50,8 +50,10 @@ pub struct DefenseFallbackDiagnostic {
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
     pub selected_suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub selected_suited_safety_rank: Option<SuitedSafetyRank>,
-    /// 単独リーチ exact model が利用可能な場合の、選択牌に対する `R/T` evidence。
+    /// 単独リーチ exact model が利用可能な場合の、選択牌に対する既存 `R/T` evidence。
     pub selected_ron_risk_evidence: Option<RonRiskEvidence>,
+    /// 全リーチ者の exact model が利用可能な場合の、選択牌に対する player 別 `R/T` evidence。
+    pub selected_player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
 }
 
 impl DefenseFallbackDiagnostic {
@@ -65,21 +67,21 @@ impl DefenseFallbackDiagnostic {
         action: &LegalAction,
         kind: DefenseFallbackKind,
     ) -> Self {
-        let ron_risk_evidence =
-            single_reach_ron_risk_evidence(context, std::slice::from_ref(action));
-        Self::from_selection_with_ron_risk(
+        let ron_risk_vectors =
+            reached_opponents_dahai_actions_by_ron_risk(context, std::slice::from_ref(action));
+        Self::from_selection_with_ron_risk_vector(
             context,
             action,
             kind,
-            ron_risk_for_action(ron_risk_evidence.as_deref(), action),
+            ron_risk_vector_for_action(ron_risk_vectors.as_deref(), action),
         )
     }
 
-    fn from_selection_with_ron_risk(
+    fn from_selection_with_ron_risk_vector(
         context: &GameContext,
         action: &LegalAction,
         kind: DefenseFallbackKind,
-        ron_risk_evidence: Option<RonRiskEvidence>,
+        player_ron_risk_evidence: Option<&[PlayerRonRiskEvidence]>,
     ) -> Self {
         let tile_type = match action {
             LegalAction::Dahai { tile } => Some(tile.tile_type()),
@@ -108,7 +110,8 @@ impl DefenseFallbackDiagnostic {
                 .map(|tile| is_suji_for_all_reached(tile, context)),
             selected_suji_safety_rank_for_all_reached: evidence.map(|evidence| evidence.suji_rank),
             selected_suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
-            selected_ron_risk_evidence: ron_risk_evidence,
+            selected_ron_risk_evidence: single_player_evidence(player_ron_risk_evidence),
+            selected_player_ron_risk_evidence: player_ron_risk_evidence.map(<[_]>::to_vec),
         }
     }
 }
@@ -151,8 +154,10 @@ pub struct DefenseCandidateDiagnostic {
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
     pub suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
-    /// 単独リーチ exact model が利用可能な場合の、この候補に対する `R/T` evidence。
+    /// 単独リーチ exact model が利用可能な場合の、この候補に対する既存 `R/T` evidence。
     pub ron_risk_evidence: Option<RonRiskEvidence>,
+    /// 全リーチ者の exact model が利用可能な場合の、この候補に対する player 別 `R/T` evidence。
+    pub player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
 }
 
 impl DefenseCandidateDiagnostic {
@@ -162,21 +167,21 @@ impl DefenseCandidateDiagnostic {
         action: &LegalAction,
         selected: bool,
     ) -> Option<Self> {
-        let ron_risk_evidence =
-            single_reach_ron_risk_evidence(context, std::slice::from_ref(action));
-        Self::for_dahai_action_with_ron_risk(
+        let ron_risk_vectors =
+            reached_opponents_dahai_actions_by_ron_risk(context, std::slice::from_ref(action));
+        Self::for_dahai_action_with_ron_risk_vector(
             context,
             action,
             selected,
-            ron_risk_for_action(ron_risk_evidence.as_deref(), action),
+            ron_risk_vector_for_action(ron_risk_vectors.as_deref(), action),
         )
     }
 
-    fn for_dahai_action_with_ron_risk(
+    fn for_dahai_action_with_ron_risk_vector(
         context: &GameContext,
         action: &LegalAction,
         selected: bool,
-        ron_risk_evidence: Option<RonRiskEvidence>,
+        player_ron_risk_evidence: Option<&[PlayerRonRiskEvidence]>,
     ) -> Option<Self> {
         let LegalAction::Dahai { tile } = action else {
             return None;
@@ -197,7 +202,8 @@ impl DefenseCandidateDiagnostic {
             suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
             suji_safety_rank_for_all_reached: evidence.map(|evidence| evidence.suji_rank),
             suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
-            ron_risk_evidence,
+            ron_risk_evidence: single_player_evidence(player_ron_risk_evidence),
+            player_ron_risk_evidence: player_ron_risk_evidence.map(<[_]>::to_vec),
         })
     }
 
@@ -210,29 +216,29 @@ impl DefenseCandidateDiagnostic {
         legal_actions: &[LegalAction],
         selected_action: Option<&LegalAction>,
     ) -> Vec<Self> {
-        let ron_risk_evidence = single_reach_ron_risk_evidence(context, legal_actions);
-        Self::for_legal_actions_with_ron_risk(
+        let ron_risk_vectors = reached_opponents_dahai_actions_by_ron_risk(context, legal_actions);
+        Self::for_legal_actions_with_ron_risk_vectors(
             context,
             legal_actions,
             selected_action,
-            ron_risk_evidence.as_deref(),
+            ron_risk_vectors.as_deref(),
         )
     }
 
-    fn for_legal_actions_with_ron_risk(
+    fn for_legal_actions_with_ron_risk_vectors(
         context: &GameContext,
         legal_actions: &[LegalAction],
         selected_action: Option<&LegalAction>,
-        ron_risk_evidence: Option<&[DahaiRonRiskEvidence<'_>]>,
+        ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
     ) -> Vec<Self> {
         legal_actions
             .iter()
             .filter_map(|action| {
-                Self::for_dahai_action_with_ron_risk(
+                Self::for_dahai_action_with_ron_risk_vector(
                     context,
                     action,
                     selected_action == Some(action),
-                    ron_risk_for_action(ron_risk_evidence, action),
+                    ron_risk_vector_for_action(ron_risk_vectors, action),
                 )
             })
             .collect()
@@ -262,12 +268,12 @@ impl DefenseDecisionDiagnostic {
         legal_actions: &[LegalAction],
         selected: Option<(&LegalAction, DefenseFallbackKind)>,
     ) -> Self {
-        let ron_risk_evidence = single_reach_ron_risk_evidence(context, legal_actions);
+        let ron_risk_vectors = reached_opponents_dahai_actions_by_ron_risk(context, legal_actions);
         Self::from_parts(
             context,
             legal_actions,
             selected,
-            ron_risk_evidence.as_deref(),
+            ron_risk_vectors.as_deref(),
         )
     }
 
@@ -280,7 +286,7 @@ impl DefenseDecisionDiagnostic {
             context,
             legal_actions,
             evaluation.selected,
-            evaluation.ron_risk_evidence.as_deref(),
+            evaluation.ron_risk_vectors.as_deref(),
         )
     }
 
@@ -288,22 +294,22 @@ impl DefenseDecisionDiagnostic {
         context: &GameContext,
         legal_actions: &[LegalAction],
         selected: Option<(&LegalAction, DefenseFallbackKind)>,
-        ron_risk_evidence: Option<&[DahaiRonRiskEvidence<'_>]>,
+        ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
     ) -> Self {
         Self {
             selected: selected.map(|(action, kind)| {
-                DefenseFallbackDiagnostic::from_selection_with_ron_risk(
+                DefenseFallbackDiagnostic::from_selection_with_ron_risk_vector(
                     context,
                     action,
                     kind,
-                    ron_risk_for_action(ron_risk_evidence, action),
+                    ron_risk_vector_for_action(ron_risk_vectors, action),
                 )
             }),
-            candidates: DefenseCandidateDiagnostic::for_legal_actions_with_ron_risk(
+            candidates: DefenseCandidateDiagnostic::for_legal_actions_with_ron_risk_vectors(
                 context,
                 legal_actions,
                 selected.map(|(action, _)| action),
-                ron_risk_evidence,
+                ron_risk_vectors,
             ),
         }
     }
@@ -316,21 +322,10 @@ impl DefenseDecisionDiagnostic {
     }
 }
 
-fn single_reach_ron_risk_evidence<'a>(
-    context: &GameContext,
-    legal_actions: &'a [LegalAction],
-) -> Option<Vec<DahaiRonRiskEvidence<'a>>> {
-    let reached = context.reached_opponents();
-    let &[player] = reached.as_slice() else {
-        return None;
-    };
-    single_reach_dahai_actions_by_ron_risk(player, context, legal_actions)
-}
-
-fn ron_risk_for_action(
-    evidence: Option<&[DahaiRonRiskEvidence<'_>]>,
+fn ron_risk_vector_for_action<'a>(
+    evidence: Option<&'a [DahaiRonRiskVector<'_>]>,
     action: &LegalAction,
-) -> Option<RonRiskEvidence> {
+) -> Option<&'a [PlayerRonRiskEvidence]> {
     let LegalAction::Dahai { tile } = action else {
         return None;
     };
@@ -339,7 +334,14 @@ fn ron_risk_for_action(
         .find(|candidate| {
             matches!(candidate.action, LegalAction::Dahai { tile: candidate_tile } if candidate_tile.tile_type() == tile.tile_type())
         })
-        .map(|candidate| candidate.evidence)
+        .map(|candidate| candidate.player_evidence.as_slice())
+}
+
+fn single_player_evidence(evidence: Option<&[PlayerRonRiskEvidence]>) -> Option<RonRiskEvidence> {
+    let &[evidence] = evidence? else {
+        return None;
+    };
+    Some(evidence.evidence)
 }
 
 /// 防御 fallback を実際に採用したとき DEBUG イベントを1件出す opt-in ログ。
@@ -359,13 +361,13 @@ pub fn log_defense_fallback_decision(
         return;
     }
 
-    let ron_risk_evidence = single_reach_ron_risk_evidence(context, legal_actions);
-    log_defense_fallback_decision_with_ron_risk(
+    let ron_risk_vectors = reached_opponents_dahai_actions_by_ron_risk(context, legal_actions);
+    log_defense_fallback_decision_with_ron_risk_vectors(
         context,
         action,
         kind,
         legal_actions,
-        ron_risk_evidence.as_deref(),
+        ron_risk_vectors.as_deref(),
     );
 }
 
@@ -380,27 +382,27 @@ pub(crate) fn log_defense_fallback_evaluation(
     let Some((action, kind)) = evaluation.selected else {
         return;
     };
-    log_defense_fallback_decision_with_ron_risk(
+    log_defense_fallback_decision_with_ron_risk_vectors(
         context,
         action,
         kind,
         legal_actions,
-        evaluation.ron_risk_evidence.as_deref(),
+        evaluation.ron_risk_vectors.as_deref(),
     );
 }
 
-fn log_defense_fallback_decision_with_ron_risk(
+fn log_defense_fallback_decision_with_ron_risk_vectors(
     context: &GameContext,
     action: &LegalAction,
     kind: DefenseFallbackKind,
     legal_actions: &[LegalAction],
-    ron_risk_evidence: Option<&[DahaiRonRiskEvidence<'_>]>,
+    ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
 ) {
-    let diagnostic = DefenseFallbackDiagnostic::from_selection_with_ron_risk(
+    let diagnostic = DefenseFallbackDiagnostic::from_selection_with_ron_risk_vector(
         context,
         action,
         kind,
-        ron_risk_for_action(ron_risk_evidence, action),
+        ron_risk_vector_for_action(ron_risk_vectors, action),
     );
     tracing::debug!(
         target: LOG_TARGET,
@@ -416,15 +418,16 @@ fn log_defense_fallback_decision_with_ron_risk(
         selected_suited_safety_rank = ?diagnostic.selected_suited_safety_rank,
         selected_ron_capable_weight = diagnostic.selected_ron_risk_evidence.map(|evidence| evidence.ron_capable_weight),
         selected_tenpai_weight = diagnostic.selected_ron_risk_evidence.map(|evidence| evidence.tenpai_weight),
+        selected_player_ron_risk_evidence = ?diagnostic.selected_player_ron_risk_evidence,
         "defense fallback decision",
     );
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
-        for candidate in DefenseCandidateDiagnostic::for_legal_actions_with_ron_risk(
+        for candidate in DefenseCandidateDiagnostic::for_legal_actions_with_ron_risk_vectors(
             context,
             legal_actions,
             Some(action),
-            ron_risk_evidence,
+            ron_risk_vectors,
         ) {
             log_defense_fallback_candidate(&candidate);
         }
@@ -450,6 +453,7 @@ fn log_defense_fallback_candidate(candidate: &DefenseCandidateDiagnostic) {
         suited_safety_rank = ?candidate.suited_safety_rank,
         ron_capable_weight = candidate.ron_risk_evidence.map(|evidence| evidence.ron_capable_weight),
         tenpai_weight = candidate.ron_risk_evidence.map(|evidence| evidence.tenpai_weight),
+        player_ron_risk_evidence = ?candidate.player_ron_risk_evidence,
         "defense fallback candidate",
     );
 }

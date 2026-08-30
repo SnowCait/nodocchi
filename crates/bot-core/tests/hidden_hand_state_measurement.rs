@@ -4,7 +4,8 @@ use bot_core::action::LegalAction;
 use bot_core::context::GameContext;
 use bot_core::defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseFallbackKind,
-    HiddenHandStateMetrics, ReachedHiddenHandStates, RonCapableStateWeight, TenpaiStateWeight,
+    HiddenHandStateMetrics, PlayerRonRiskEvidence, ReachedHiddenHandStates, RonCapableStateWeight,
+    TenpaiStateWeight, compare_lexicographic_minimax_ron_risk,
     select_defense_fallback_action_with_kind,
 };
 use bot_logic::{TileId, TileType};
@@ -46,6 +47,10 @@ fn tile_type(mjai: &str) -> TileType {
 
 // player 1 がリーチしている中盤の局面。見え牌は自分の手牌・4人の河・ドラ表示牌。
 fn representative_context() -> GameContext {
+    representative_context_with_reached([false, true, false, false])
+}
+
+fn representative_context_with_reached(reached: [bool; 4]) -> GameContext {
     let mut source = TileSource::new();
     let hand = source.tiles(&REPRESENTATIVE_HAND);
     let dora_indicator = source.tile("9s");
@@ -72,9 +77,93 @@ fn representative_context() -> GameContext {
         Some(0),
         Some(0),
         discards,
-        [false, true, false, false],
+        reached,
     )
     .with_post_reach_passed_tiles([vec![], vec![tile_type("4s")], vec![], vec![]])
+}
+
+#[test]
+#[ignore = "release build 前提の multi-reach production-like fallback 計測用。wall-clock threshold は持たない"]
+fn measure_multi_reach_exact_defense_fallback_selection() {
+    for reached in [[false, true, true, false], [false, true, true, true]] {
+        let context = representative_context_with_reached(reached);
+        let actions: Vec<LegalAction> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .map(|tile| LegalAction::Dahai { tile })
+            .collect();
+        let mut targets = Vec::new();
+        let mut seen = [false; TileType::COUNT];
+        for action in &actions {
+            let LegalAction::Dahai { tile } = action else {
+                continue;
+            };
+            let target = tile.tile_type();
+            if !seen[target.index()] {
+                seen[target.index()] = true;
+                targets.push(target);
+            }
+        }
+
+        let players = context.reached_opponents();
+        let mut vectors = vec![Vec::with_capacity(players.len()); targets.len()];
+        let mut construction_total = Duration::ZERO;
+        let mut target_evaluation_total = Duration::ZERO;
+        for &player in &players {
+            let start = Instant::now();
+            let mut states =
+                CompressedHiddenHandStates::new(player, &context).expect("reached player");
+            let construction = start.elapsed();
+            construction_total += construction;
+
+            let start = Instant::now();
+            for (vector, &target) in vectors.iter_mut().zip(&targets) {
+                vector.push(PlayerRonRiskEvidence {
+                    player,
+                    evidence: states.ron_risk_evidence(target),
+                });
+            }
+            let target_evaluation = start.elapsed();
+            target_evaluation_total += target_evaluation;
+            println!(
+                "  player {player}: construction={construction:?}, all targets={target_evaluation:?}"
+            );
+        }
+
+        let start = Instant::now();
+        let mut best = 0;
+        for candidate in 1..vectors.len() {
+            if compare_lexicographic_minimax_ron_risk(&vectors[candidate], &vectors[best])
+                == Some(std::cmp::Ordering::Less)
+            {
+                best = candidate;
+            }
+        }
+        let risk_vector_comparison = start.elapsed();
+
+        let start = Instant::now();
+        let selected = select_defense_fallback_action_with_kind(&context, &actions)
+            .expect("representative multi-reach fallback");
+        let total_selection = start.elapsed();
+        assert_eq!(selected.1, DefenseFallbackKind::ExactRonRisk);
+
+        println!(
+            "production-like {}-reach exact minimax defense fallback:",
+            players.len()
+        );
+        println!("  legal Dahai actions:          {}", actions.len());
+        println!("  unique TileType evaluations:  {}", targets.len());
+        println!("  construction total:           {construction_total:?}");
+        println!("  all target evaluations total: {target_evaluation_total:?}");
+        println!("  risk-vector comparison:       {risk_vector_comparison:?}");
+        println!("  total fallback selection:     {total_selection:?}");
+        println!(
+            "  comparator best target:       {}",
+            targets[best].to_mjai_string()
+        );
+        println!("  production selected:          {:?}", selected.0);
+    }
 }
 
 // target は自分が今から捨てる牌なので、必ず自分の手牌にある牌種から選ぶ。

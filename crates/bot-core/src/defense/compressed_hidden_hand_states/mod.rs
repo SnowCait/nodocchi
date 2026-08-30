@@ -47,7 +47,7 @@ pub struct TenpaiStateWeight {
 
 /// 1 target のロン可能 weight と、その player の structural tenpai weight。
 ///
-/// production の打牌比較にはまだ接続せず、exact な比率比較の材料だけを保持する。
+/// exact な比率比較の材料を保持する。これは実際の放銃確率ではない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RonRiskEvidence {
     pub ron_capable_weight: u128,

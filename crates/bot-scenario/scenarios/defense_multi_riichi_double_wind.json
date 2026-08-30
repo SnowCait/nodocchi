@@ -12,5 +12,11 @@
     "6m 1m 8s 4m 5m 1p 3s 7m 2p",
     "9p F 9m C 2p 6m 2s C 4m",
     "E W N C 1p 1m 1m 6m"
+  ],
+  "melds": [
+    [],
+    [],
+    [{"kind": "pon", "tiles": "W W W", "called_tile": "W"}],
+    []
   ]
 }

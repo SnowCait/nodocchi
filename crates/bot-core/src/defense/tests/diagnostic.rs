@@ -1,5 +1,5 @@
 use super::common::*;
-use super::hidden_hand_states::{ankan, reached_fixture};
+use super::hidden_hand_states::{ankan, multiple_reached_fixture, reached_fixture};
 use crate::action::LegalAction;
 use crate::defense::*;
 
@@ -396,7 +396,7 @@ fn defense_decision_diagnostic_holds_actual_selection() {
 #[test]
 fn defense_decision_diagnostic_keeps_candidates_without_selection() {
     // 防御 fallback 候補が無い(全て NoSafety)局面でも、候補評価は保持する。
-    let context = suited_context(vec![], Default::default(), [false, true, true, false]);
+    let context = legacy_suited_context(vec![], Default::default(), [false, true, true, false]);
     let actions = vec![
         LegalAction::Dahai { tile: tile(0) },
         LegalAction::Dahai { tile: tile(56) },
@@ -526,29 +526,69 @@ fn single_reach_diagnostic_reports_exact_evidence_for_every_candidate() {
         .unwrap()
         .ron_capable_weight;
     assert_eq!(selected_weight, minimum);
-}
-
-#[test]
-fn multiple_reach_diagnostic_does_not_claim_aggregated_exact_evidence() {
-    let context = all_reached_partial_suji_context(vec![]);
-    let actions = vec![
-        LegalAction::Dahai { tile: tile(0) },
-        LegalAction::Dahai { tile: tile(4) },
-    ];
-    let selected = select_defense_fallback_action_with_kind(&context, &actions);
-    let diagnostic = DefenseDecisionDiagnostic::from_selection(&context, &actions, selected);
-
     assert_eq!(
-        diagnostic.selected_kind(),
-        Some(DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji))
-    );
-    assert!(
         diagnostic
             .selected
             .as_ref()
             .unwrap()
-            .selected_ron_risk_evidence
-            .is_none()
+            .selected_player_ron_risk_evidence
+            .as_ref()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn multiple_reach_diagnostic_reports_each_players_exact_evidence() {
+    let mut melds: [Vec<_>; 4] = Default::default();
+    melds[1] = ["5p", "6p", "7p", "8p"].map(ankan).to_vec();
+    melds[2] = ["1s", "2s", "3s", "4s"].map(ankan).to_vec();
+    let context = multiple_reached_fixture(
+        &[("1m", 3), ("2m", 2), ("3m", 3)],
+        melds,
+        &[(1, &["3m"]), (2, &["1m"])],
+        [false, true, true, false],
+    );
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("2m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("3m"),
+        },
+    ];
+    let evaluation = evaluate_defense_fallback_action_with_kind(&context, &actions, true);
+    let diagnostic = DefenseDecisionDiagnostic::from_evaluation(&context, &actions, &evaluation);
+
+    assert_eq!(
+        diagnostic.selected_kind(),
+        Some(DefenseFallbackKind::ExactRonRisk)
+    );
+    let selected = diagnostic.selected.as_ref().unwrap();
+    assert_eq!(selected.selected_action, "2m");
+    assert_eq!(selected.selected_ron_risk_evidence, None);
+    assert_eq!(
+        selected.selected_player_ron_risk_evidence,
+        Some(vec![
+            PlayerRonRiskEvidence {
+                player: 1,
+                evidence: RonRiskEvidence {
+                    ron_capable_weight: 2,
+                    tenpai_weight: 8,
+                },
+            },
+            PlayerRonRiskEvidence {
+                player: 2,
+                evidence: RonRiskEvidence {
+                    ron_capable_weight: 2,
+                    tenpai_weight: 8,
+                },
+            },
+        ])
     );
     assert!(
         diagnostic
@@ -556,4 +596,25 @@ fn multiple_reach_diagnostic_does_not_claim_aggregated_exact_evidence() {
             .iter()
             .all(|candidate| candidate.ron_risk_evidence.is_none())
     );
+    assert!(diagnostic.candidates.iter().all(|candidate| {
+        candidate
+            .player_ron_risk_evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.len() == 2)
+    }));
+
+    let selected_vector = diagnostic
+        .candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .unwrap()
+        .player_ron_risk_evidence
+        .as_deref()
+        .unwrap();
+    assert!(diagnostic.candidates.iter().all(|candidate| {
+        compare_lexicographic_minimax_ron_risk(
+            selected_vector,
+            candidate.player_ron_risk_evidence.as_deref().unwrap(),
+        ) != Some(std::cmp::Ordering::Greater)
+    }));
 }
