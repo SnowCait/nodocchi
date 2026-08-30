@@ -244,17 +244,36 @@ OpenHand defense
 | `targets` | High の相手。いなければ `none` |
 | `discarded by target[n]` | target 自身の河に同じ牌種があるか |
 | `discarded by all targets` | 全 target 自身の河にあるか |
-| `ron safe[n]` | 本人の河または現在有効な一時通過牌により target にロンされないか |
+| `ron safe[n]` | 本人の河または現在有効な一時通過牌により target にロンされないか (hard-safe) |
 | `ron safe for all targets` | 全 target にロンされないか |
+| `same hand passed[n]` | target の concealed hand が最後に変化して以降にこの牌が通ったか。成立時だけ表示 |
+| `same hand passed for all targets` | 全 target が hard-safe または same-hand passed で覆われるか。成立時だけ表示 |
 | `honor safety` | 字牌の見え枚数による safety |
-| `opponent honor value` | まだロン可能な target に対する最も危険な役牌価値 |
+| `opponent honor value` | hard-safe でも same-hand passed でもない target に対する最も危険な役牌価値 |
 | `wall` | 壁 / ワンチャンス |
 | `suji safety[n]` / `suji safety` | target 個別 / 集約後のスジ safety |
-| `category` | `SafeAgainstAllTargets` / `HonorSafety` / `SuitedSafety` |
+| `category` | `SafeAgainstAllTargets` / `SameHandPassed` / `HonorSafety` / `SuitedSafety` |
 
 `discarded by *` は target 本人の河だけを表す観測事実、`ron safe *` は本人の河と現在有効な一時通過牌を合わせたロン安全性です。`SafeAgainstAllTargets` の source of truth は後者なので、`discarded by all targets: no` と同時に成立することがあります。
 
-target 選択と `post_reach_passed` / `temporary_passed` の違いは [OpenHand Defense](ai/defense.md#openhand-defense) を参照してください。
+`same hand passed *` は hard-safe とは別の evidence で、成立している場合だけ行が出ます。行が無いことは「通っていない」と「履歴が unknown」のどちらでもあり得ます。`ron safe[n]: no` と `same hand passed[n]: yes` が同時に出るのは正常で、全 target がこの2つで覆われていれば `category` は `SameHandPassed` になります。
+
+```text
+2s
+  selected: yes
+  discarded by all targets: no
+  ron safe for all targets: no
+  same hand passed for all targets: yes
+  discarded by target[3]: no
+  ron safe[3]: no
+  same hand passed[3]: yes
+  ...
+  category: SameHandPassed
+```
+
+`same hand passed` の履歴を持つ入力では、`Scenario` section にも `same hand passed[n]` が牌種で出ます。現在この履歴を供給するのは RiichiLab live client だけで、JSON scenario と capture replay には入力 field が無いため unknown です。unknown の局面ではこれらの行が出ず、`category` も `SameHandPassed` になりません。
+
+target 選択と `post_reach_passed` / `temporary_passed` / `same_hand_passed` の違いは [OpenHand Defense](ai/defense.md#openhand-defense) と [passed tile の区別](ai/defense.md#passed-tile-の区別) を参照してください。
 
 ## Combined defense
 
@@ -267,7 +286,11 @@ Combined defense
   selected category: SafeAgainstAllThreats
 ```
 
-`ron safe[n kind]` は target ごとの根拠でロン安全か、`safe against all threats` は全 target に安全かを示します。リーチ者と副露相手では根拠が異なります。詳細は [Combined Defense](ai/defense.md#combined-defense) を参照してください。
+`ron safe[n kind]` は target ごとの根拠でロン安全か、`safe against all threats` は全 target に安全かを示します。リーチ者と副露相手では根拠が異なります。
+
+`same hand passed[n kind]` と `same hand passed for all threats` は OpenHand defense と同じ evidence で、成立時だけ出ます。same-hand passed を根拠にできるのは `HighOpenHand` の target だけなので、`Riichi` の target にはこの行が出ません。`selected category` は `SafeAgainstAllThreats` / `SameHandPassed` / `HonorSafety` / `SuitedSafety` です。
+
+詳細は [Combined Defense](ai/defense.md#combined-defense) を参照してください。
 
 ## Summary と runner-up
 

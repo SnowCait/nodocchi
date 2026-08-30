@@ -190,7 +190,7 @@ cargo run -p bot-scenario -- \
 
 capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `ShantenAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
 
-計測に使う `GameContext` は単一 `observation` からの復元です。live client は event 列から積み上げた `post_reach_passed`、`temporary_passed`、履歴依存フリテンを `GameContext` へ足してから `act()` を呼ぶため、capture replay の入力は live client の入力と完全一致しません。復元できない事実は [RiichiLab capture の再生](#riichilab-capture-の再生) と同じで、入力経路ごとの known / unknown は [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。revision 間の比較では同じ capture corpus から同じ入力を復元するので、相対比較の基盤としては有効です。
+計測に使う `GameContext` は単一 `observation` からの復元です。live client は event 列から積み上げた `post_reach_passed`、`temporary_passed`、`same_hand_passed`、履歴依存フリテンを `GameContext` へ足してから `act()` を呼ぶため、capture replay の入力は live client の入力と完全一致しません。復元できない事実は [RiichiLab capture の再生](#riichilab-capture-の再生) と同じで、入力経路ごとの known / unknown は [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。revision 間の比較では同じ capture corpus から同じ入力を復元するので、相対比較の基盤としては有効です。
 
 性能比較は release build で行います。debug build の値は最適化後の decision latency と対応しません。
 
