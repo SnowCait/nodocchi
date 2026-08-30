@@ -11,17 +11,22 @@ use super::hard_safety::is_genbutsu_for;
 use super::wait_candidates::remaining_tile_copies;
 use super::wall::sequence_wait_routes;
 
-/// リーチ者の隠れ手牌状態を数えられない理由。
+/// exact hidden-hand model で隠れ手牌状態を数えられない理由。
 ///
-/// リーチの前提と矛盾する入力を推測で補完しないための区別で、`0` 通りという結論とは別物。
+/// 選択した model の前提と矛盾する入力を推測で補完しないための区別で、`0` 通りという結論とは
+/// 別物。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HiddenHandStateUnsupported {
     /// player が範囲外で席を取得できない。
     UnknownPlayer,
     /// 対象 player がリーチしていない。
     NotReached,
+    /// conditional-tenpai model の対象 player が既にリーチしている。
+    Reached,
     /// 副露を持つ player で、リーチ者の門前前提と矛盾する。暗槓は対象外。
     OpenMeld,
+    /// conditional-tenpai model の対象 player に公開副露がない。
+    NoOpenMeld,
     /// 固定面子が5個以上で `FixedMeldCount` にならない。
     TooManyMelds,
 }
@@ -34,6 +39,26 @@ pub enum HiddenHandStateUnsupported {
 pub struct RonCapableStateWeight {
     pub weight: u128,
     pub states: u64,
+}
+
+/// 対象牌を加えると structural completion になる隠れ手牌状態の重み。
+///
+/// `weight` は条件を満たす手牌状態ごとの物理牌組み合わせ数
+/// `Π C(remaining[t], count[t])` の総和で、放銃確率でもロン可能 weight でもない。
+/// `states` は重複排除後の手牌状態そのものの個数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StructuralCompletionStateWeight {
+    pub weight: u128,
+    pub states: u64,
+}
+
+impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
+    fn from(value: RonCapableStateWeight) -> Self {
+        Self {
+            weight: value.weight,
+            states: value.states,
+        }
+    }
 }
 
 /// prototype の内訳計測値。数え上げ結果には影響しない。
@@ -105,6 +130,75 @@ fn concealed_tile_ids(hand: &HandCounts) -> Vec<TileId> {
     ids
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HiddenHandModelMode {
+    Riichi,
+    OpenHandStructuralTenpai,
+}
+
+pub(super) struct HiddenHandModelInput<'a> {
+    pub(super) context: &'a GameContext,
+    pub(super) fixed_melds: &'a [Meld],
+    pub(super) fixed_meld_count: FixedMeldCount,
+    pub(super) concealed_hand_len: u8,
+    pub(super) remaining: HandCounts,
+    pub(super) unron_mask: u64,
+    pub(super) unron_tiles: Vec<TileType>,
+}
+
+impl<'a> HiddenHandModelInput<'a> {
+    pub(super) fn new(
+        player: usize,
+        context: &'a GameContext,
+        mode: HiddenHandModelMode,
+    ) -> Result<Self, HiddenHandStateUnsupported> {
+        let fixed_melds = context
+            .melds_of(player)
+            .ok_or(HiddenHandStateUnsupported::UnknownPlayer)?;
+        match mode {
+            HiddenHandModelMode::Riichi => {
+                if !context.is_reached(player) {
+                    return Err(HiddenHandStateUnsupported::NotReached);
+                }
+                if fixed_melds.iter().any(Meld::is_open) {
+                    return Err(HiddenHandStateUnsupported::OpenMeld);
+                }
+            }
+            HiddenHandModelMode::OpenHandStructuralTenpai => {
+                if context.is_reached(player) {
+                    return Err(HiddenHandStateUnsupported::Reached);
+                }
+                if !fixed_melds.iter().any(Meld::is_open) {
+                    return Err(HiddenHandStateUnsupported::NoOpenMeld);
+                }
+            }
+        }
+        let fixed_meld_count =
+            fixed_meld_count(fixed_melds).ok_or(HiddenHandStateUnsupported::TooManyMelds)?;
+
+        let mut remaining = [0u8; TileType::COUNT];
+        let mut unron_mask = 0u64;
+        let mut unron_tiles = Vec::new();
+        for tile in TileType::all() {
+            remaining[tile.index()] = remaining_tile_copies(tile, context);
+            if mode == HiddenHandModelMode::Riichi && is_genbutsu_for(tile, player, context) {
+                unron_mask |= tile_mask(tile);
+                unron_tiles.push(tile);
+            }
+        }
+
+        Ok(Self {
+            context,
+            fixed_melds,
+            fixed_meld_count,
+            concealed_hand_len: 13 - 3 * fixed_meld_count.get(),
+            remaining,
+            unron_mask,
+            unron_tiles,
+        })
+    }
+}
+
 /// 公開情報とテンパイ条件に整合する、リーチ者の隠れ手牌状態を exact に数える prototype。
 ///
 /// 対象は門前を保っているリーチ者1人で、暗槓による固定面子だけを許す。打牌後の concealed hand
@@ -151,45 +245,30 @@ impl<'a> ReachedHiddenHandStates<'a> {
         player: usize,
         context: &'a GameContext,
     ) -> Result<Self, HiddenHandStateUnsupported> {
-        let fixed_melds = context
-            .melds_of(player)
-            .ok_or(HiddenHandStateUnsupported::UnknownPlayer)?;
-        if !context.is_reached(player) {
-            return Err(HiddenHandStateUnsupported::NotReached);
-        }
-        if fixed_melds.iter().any(Meld::is_open) {
-            return Err(HiddenHandStateUnsupported::OpenMeld);
-        }
-        let fixed_meld_count =
-            fixed_meld_count(fixed_melds).ok_or(HiddenHandStateUnsupported::TooManyMelds)?;
-
-        let mut remaining = [0u8; TileType::COUNT];
-        let mut unron_mask = 0u64;
-        let mut unron_tiles = Vec::new();
-        for tile in TileType::all() {
-            remaining[tile.index()] = remaining_tile_copies(tile, context);
-            if is_genbutsu_for(tile, player, context) {
-                unron_mask |= tile_mask(tile);
-                unron_tiles.push(tile);
-            }
-        }
-
-        let complete_melds = feasible_complete_melds(&remaining);
-
-        Ok(Self {
+        Ok(Self::from_input(HiddenHandModelInput::new(
+            player,
             context,
-            fixed_melds,
-            fixed_meld_count,
-            concealed_hand_len: 13 - 3 * fixed_meld_count.get(),
-            remaining,
-            unron_mask,
-            unron_tiles,
+            HiddenHandModelMode::Riichi,
+        )?))
+    }
+
+    fn from_input(input: HiddenHandModelInput<'a>) -> Self {
+        let complete_melds = feasible_complete_melds(&input.remaining);
+
+        Self {
+            context: input.context,
+            fixed_melds: input.fixed_melds,
+            fixed_meld_count: input.fixed_meld_count,
+            concealed_hand_len: input.concealed_hand_len,
+            remaining: input.remaining,
+            unron_mask: input.unron_mask,
+            unron_tiles: input.unron_tiles,
             complete_melds,
             evaluated: HashMap::new(),
             metrics: HiddenHandStateMetrics::default(),
             completion_checks: Cell::new(0),
             generation: 0,
-        })
+        }
     }
 
     /// 対象リーチ者の固定面子数。
@@ -245,6 +324,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
     /// target は今から自分が捨てる牌を想定し、その物理牌は `visible_tiles` に反映済みである
     /// ことを前提にする。詳細は [`ReachedHiddenHandStates`] を参照。
     pub fn ron_capable_state_weight(&mut self, target: TileType) -> RonCapableStateWeight {
+        self.completion_state_weight(target)
+    }
+
+    fn completion_state_weight(&mut self, target: TileType) -> RonCapableStateWeight {
         let mut total = RonCapableStateWeight::default();
         if self.is_unron_capable_tile(target) {
             return total;
@@ -474,6 +557,63 @@ impl<'a> ReachedHiddenHandStates<'a> {
             .is_ok_and(|analysis| analysis.is_complete());
         ids.pop();
         complete
+    }
+}
+
+/// 公開副露を固定した、非リーチ相手の conditional-tenpai hidden-hand model。
+///
+/// 公開情報と固定副露に整合する structural tenpai state space だけを扱う。固定副露があるため
+/// hand family は Standard に限定される。役・フリテン・ロン可能性・テンパイ確率は扱わない。
+/// production defense からは利用しない counting foundation である。
+pub struct StructuralTenpaiHiddenHandStates<'a> {
+    inner: ReachedHiddenHandStates<'a>,
+}
+
+impl<'a> StructuralTenpaiHiddenHandStates<'a> {
+    /// 非リーチかつ公開副露を1つ以上持つ player の公開情報から model を組み立てる。
+    pub fn new(
+        player: usize,
+        context: &'a GameContext,
+    ) -> Result<Self, HiddenHandStateUnsupported> {
+        let input = HiddenHandModelInput::new(
+            player,
+            context,
+            HiddenHandModelMode::OpenHandStructuralTenpai,
+        )?;
+        Ok(Self {
+            inner: ReachedHiddenHandStates::from_input(input),
+        })
+    }
+
+    /// 対象 player の固定面子数。
+    pub fn fixed_meld_count(&self) -> FixedMeldCount {
+        self.inner.fixed_meld_count()
+    }
+
+    /// 打牌後の concealed hand 枚数 (`13 - 3 * 固定面子数`)。
+    pub fn concealed_hand_len(&self) -> u8 {
+        self.inner.concealed_hand_len()
+    }
+
+    /// 対象牌を加えると Standard の structural completion になる state weight を数える。
+    ///
+    /// target は今から自分が捨てる牌を想定し、その物理牌は `visible_tiles` に反映済みである
+    /// ことを前提にする。
+    pub fn target_completion_state_weight(
+        &mut self,
+        target: TileType,
+    ) -> StructuralCompletionStateWeight {
+        self.inner.completion_state_weight(target).into()
+    }
+
+    /// 評価対象の `GameContext`。
+    pub fn context(&self) -> &GameContext {
+        self.inner.context()
+    }
+
+    /// これまでの評価の内訳計測値。計測用で、数え上げ結果には影響しない。
+    pub fn metrics(&self) -> HiddenHandStateMetrics {
+        self.inner.metrics()
     }
 }
 
