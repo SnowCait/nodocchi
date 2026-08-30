@@ -3690,7 +3690,7 @@ pub(crate) mod tests {
         assert_eq!(south.wall_rank, None);
         assert_eq!(east.tile, tile(108).tile_type());
         assert_eq!(east.honor_safety_rank, Some(HonorSafetyRank::TwoVisible));
-        assert!(east.ron_risk_evidence.is_some());
+        assert!(east.ron_risk_evidence().is_some());
         assert!(east.selected);
     }
 
@@ -3724,7 +3724,7 @@ pub(crate) mod tests {
         assert_eq!(two_man.wall_rank, Some(WallRank::NoChance));
         assert_eq!(two_man.suji_for_all_reached, Some(false));
         assert_eq!(two_man.suited_safety_rank, Some(SuitedSafetyRank::NoChance));
-        assert!(two_man.ron_risk_evidence.is_some());
+        assert!(two_man.ron_risk_evidence().is_some());
         assert!(two_man.selected);
     }
 

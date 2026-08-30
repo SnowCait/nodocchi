@@ -3,7 +3,7 @@ mod diagnostic;
 mod hard_safety;
 mod hidden_hand_states;
 mod honor;
-mod single_reach;
+mod ron_risk;
 mod suited;
 mod suji;
 mod wait_candidates;
@@ -40,12 +40,8 @@ pub use honor::{
     opponent_honor_value_for_players, opponent_honor_value_for_reached,
     select_honor_safety_fallback_action,
 };
-pub(crate) use single_reach::reached_opponents_dahai_actions_by_ron_risk;
-pub use single_reach::{
-    DahaiRonRiskEvidence, DahaiRonRiskVector, PlayerRonRiskEvidence,
-    compare_lexicographic_minimax_ron_risk, reached_player_dahai_actions_by_ron_risk,
-    single_reach_dahai_actions_by_ron_risk,
-};
+pub(crate) use ron_risk::{DahaiRonRiskVector, reached_opponents_dahai_actions_by_ron_risk};
+pub use ron_risk::{PlayerRonRiskEvidence, compare_lexicographic_minimax_ron_risk};
 pub use suited::{
     SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,
     suited_dahai_actions_by_safety, suited_dahai_actions_by_safety_with,

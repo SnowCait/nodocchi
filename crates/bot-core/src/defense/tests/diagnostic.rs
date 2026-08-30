@@ -500,7 +500,7 @@ fn single_reach_diagnostic_reports_exact_evidence_for_every_candidate() {
             .selected
             .as_ref()
             .unwrap()
-            .selected_ron_risk_evidence
+            .selected_ron_risk_evidence()
             .unwrap()
             .ron_capable_weight,
         1
@@ -509,12 +509,12 @@ fn single_reach_diagnostic_reports_exact_evidence_for_every_candidate() {
         diagnostic
             .candidates
             .iter()
-            .all(|candidate| candidate.ron_risk_evidence.is_some())
+            .all(|candidate| candidate.ron_risk_evidence().is_some())
     );
     let minimum = diagnostic
         .candidates
         .iter()
-        .map(|candidate| candidate.ron_risk_evidence.unwrap().ron_capable_weight)
+        .map(|candidate| candidate.ron_risk_evidence().unwrap().ron_capable_weight)
         .min()
         .unwrap();
     let selected_weight = diagnostic
@@ -522,7 +522,7 @@ fn single_reach_diagnostic_reports_exact_evidence_for_every_candidate() {
         .iter()
         .find(|candidate| candidate.selected)
         .unwrap()
-        .ron_risk_evidence
+        .ron_risk_evidence()
         .unwrap()
         .ron_capable_weight;
     assert_eq!(selected_weight, minimum);
@@ -570,7 +570,7 @@ fn multiple_reach_diagnostic_reports_each_players_exact_evidence() {
     );
     let selected = diagnostic.selected.as_ref().unwrap();
     assert_eq!(selected.selected_action, "2m");
-    assert_eq!(selected.selected_ron_risk_evidence, None);
+    assert_eq!(selected.selected_ron_risk_evidence(), None);
     assert_eq!(
         selected.selected_player_ron_risk_evidence,
         Some(vec![
@@ -594,7 +594,7 @@ fn multiple_reach_diagnostic_reports_each_players_exact_evidence() {
         diagnostic
             .candidates
             .iter()
-            .all(|candidate| candidate.ron_risk_evidence.is_none())
+            .all(|candidate| candidate.ron_risk_evidence().is_none())
     );
     assert!(diagnostic.candidates.iter().all(|candidate| {
         candidate

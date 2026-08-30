@@ -1,6 +1,7 @@
 use super::common::*;
 use super::hidden_hand_states::{ankan, multiple_reached_fixture, pon, reached_fixture};
 use crate::action::LegalAction;
+use crate::defense::ron_risk::dahai_ron_risk_evidence_for_player;
 use crate::defense::*;
 use std::cmp::Ordering;
 
@@ -16,6 +17,15 @@ fn multiple_reacher_ankans(include_player_three: bool) -> [Vec<crate::meld::Meld
         melds[3] = ["6s", "7s", "8s", "9s"].map(ankan).to_vec();
     }
     melds
+}
+
+// 単独リーチの risk vector から唯一の player evidence を取り出す。vectors は legal_actions 中の
+// Dahai と同じ順序なので index で対応付けられる。
+fn sole_risk_at(vectors: &[DahaiRonRiskVector<'_>], index: usize) -> RonRiskEvidence {
+    let [evidence] = vectors[index].player_evidence.as_slice() else {
+        panic!("single reach evidence");
+    };
+    evidence.evidence
 }
 
 fn risk_for(vectors: &[DahaiRonRiskVector<'_>], tile: &str, player: usize) -> RonRiskEvidence {
@@ -274,8 +284,10 @@ fn real_world_regression_prefers_suji_1s_over_self_visible_6p() {
         LegalAction::Dahai { tile: tile(56) },
         LegalAction::Dahai { tile: tile(72) },
     ];
-    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
-    assert!(evidence[1].evidence.ron_capable_weight < evidence[0].evidence.ron_capable_weight);
+    let vectors = reached_opponents_dahai_actions_by_ron_risk(&context, &actions).unwrap();
+    assert!(
+        sole_risk_at(&vectors, 1).ron_capable_weight < sole_risk_at(&vectors, 0).ron_capable_weight
+    );
     assert_eq!(
         select_defense_fallback_action_with_kind(&context, &actions),
         Some((
@@ -776,13 +788,13 @@ fn one_unavailable_reacher_falls_back_the_whole_position_to_legacy() {
     ];
 
     assert_eq!(
-        reached_player_dahai_actions_by_ron_risk(1, &context, &actions)
+        dahai_ron_risk_evidence_for_player(1, &context, &actions)
             .unwrap()
             .len(),
         2
     );
     assert_eq!(
-        reached_player_dahai_actions_by_ron_risk(2, &context, &actions),
+        dahai_ron_risk_evidence_for_player(2, &context, &actions),
         None
     );
     assert_eq!(
@@ -860,11 +872,11 @@ fn single_reach_exact_prefers_smaller_weight_with_same_legacy_rank() {
         Some(SuitedSafetyRank::NoChance)
     );
 
-    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
-    assert_eq!(evidence[0].evidence.ron_capable_weight, 2);
-    assert_eq!(evidence[1].evidence.ron_capable_weight, 1);
-    assert_eq!(evidence[0].evidence.tenpai_weight, 3);
-    assert_eq!(evidence[1].evidence.tenpai_weight, 3);
+    let vectors = reached_opponents_dahai_actions_by_ron_risk(&context, &actions).unwrap();
+    assert_eq!(sole_risk_at(&vectors, 0).ron_capable_weight, 2);
+    assert_eq!(sole_risk_at(&vectors, 1).ron_capable_weight, 1);
+    assert_eq!(sole_risk_at(&vectors, 0).tenpai_weight, 3);
+    assert_eq!(sole_risk_at(&vectors, 1).tenpai_weight, 3);
     assert_eq!(
         select_defense_fallback_action_with_kind(&context, &actions),
         Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
@@ -898,9 +910,9 @@ fn single_reach_exact_wait_structure_changes_production_selection() {
             tile: discarded("1m"),
         },
     ];
-    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
-    assert_eq!(evidence[0].evidence.ron_capable_weight, 7);
-    assert_eq!(evidence[1].evidence.ron_capable_weight, 4);
+    let vectors = reached_opponents_dahai_actions_by_ron_risk(&context, &actions).unwrap();
+    assert_eq!(sole_risk_at(&vectors, 0).ron_capable_weight, 7);
+    assert_eq!(sole_risk_at(&vectors, 1).ron_capable_weight, 4);
     assert_eq!(
         select_defense_fallback_action_with_kind(&context, &actions),
         Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
@@ -929,9 +941,9 @@ fn single_reach_exact_compares_honor_and_suited_in_one_model() {
         SuitedSafetyRank::NoChance,
     ));
 
-    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
-    assert_eq!(evidence[0].evidence.ron_capable_weight, 3);
-    assert_eq!(evidence[1].evidence.ron_capable_weight, 1);
+    let vectors = reached_opponents_dahai_actions_by_ron_risk(&context, &actions).unwrap();
+    assert_eq!(sole_risk_at(&vectors, 0).ron_capable_weight, 3);
+    assert_eq!(sole_risk_at(&vectors, 1).ron_capable_weight, 1);
     assert_eq!(
         select_defense_fallback_action_with_kind(&context, &actions),
         Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
@@ -980,7 +992,7 @@ fn single_reach_zero_denominator_falls_back_to_legacy() {
         },
     ];
     assert_eq!(
-        single_reach_dahai_actions_by_ron_risk(1, &context, &actions),
+        reached_opponents_dahai_actions_by_ron_risk(&context, &actions),
         None
     );
     assert_eq!(
@@ -1011,7 +1023,7 @@ fn single_reach_unsupported_open_meld_falls_back_to_legacy() {
     ];
 
     assert_eq!(
-        single_reach_dahai_actions_by_ron_risk(1, &context, &actions),
+        reached_opponents_dahai_actions_by_ron_risk(&context, &actions),
         None
     );
     assert_eq!(
