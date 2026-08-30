@@ -146,13 +146,13 @@ Reach
 | kind | 意味 |
 | --- | --- |
 | `Genbutsu` | 全リーチ者に共通する現物。単独・複数どちらでも最優先 |
-| `ExactRonRisk` | 単独リーチの exact hidden-hand model で選んだ候補 |
+| `ExactRonRisk` | exact hidden-hand model で選んだ候補。単独・複数どちらのリーチでも出る |
 | `HonorSafety(rank)` | legacy path の字牌 safety |
 | `SuitedSafety(rank)` | legacy path の数牌 safety (壁 / スジ) |
 
-複数リーチでは `ExactRonRisk` は出ず、従来どおり `Genbutsu` / `HonorSafety` / `SuitedSafety` になります。同じ値は `Summary` の `defense detail` にも出ます。
+複数リーチでも、全リーチ者の exact model が利用可能なら `ExactRonRisk` になります。共通現物があれば従来どおり `Genbutsu` が最優先です。リーチ者の1人でも exact model が使えない局面は局面全体が legacy へ落ちるので、`HonorSafety(...)` / `SuitedSafety(...)` になります。同じ値は `Summary` の `defense detail` にも出ます。
 
-### exact ron risk evidence
+### 単独リーチの exact ron risk evidence
 
 単独リーチで exact model が使えた候補には、`Defense` と `Defense candidates` の両方に次の2行が出ます。
 
@@ -177,15 +177,54 @@ ron capable weight が小さい候補
 exact model 上でより安全
 ```
 
-と読めます。ただしこれは実放銃率ではありません。`ron capable weight / tenpai weight` を割合として読む場合も、あくまで combinatorial hidden-hand model 上の比率です。現物は `ron capable weight: 0` になります。定義は [単独リーチの exact ron risk](ai/defense.md#単独リーチの-exact-ron-risk) を参照してください。
+と読めます。ただしこれは実放銃率ではありません。`ron capable weight / tenpai weight` を割合として読む場合も、あくまで combinatorial hidden-hand model 上の比率です。現物は `ron capable weight: 0` になります。定義は [リーチ者ごとの exact ron risk](ai/defense.md#リーチ者ごとの-exact-ron-risk) を参照してください。
 
 evidence の収集は診断のためだけに行い、選択結果を変えません。現物を採用した単独リーチ局面でも候補ごとの evidence を表示します。
 
-### 複数リーチと legacy diagnostics
+### 複数リーチの player 別 exact evidence
 
-複数リーチでは joint exact evidence を計算していないため、`ron capable weight` と `tenpai weight` はどちらも `-` になります。各リーチ者の exact risk を集約した値ではありません。単独リーチでも exact model が使えない場合は同じく `-` です。
+複数リーチで全リーチ者の exact model が使えた場合、`Defense` と `Defense candidates` にリーチ者ごとの行が出ます。
 
-`genbutsu` / `honor safety` / `opponent honor value` / `wall` / `suji` / `suji safety` / `suited safety` は、`ExactRonRisk` で選んだ候補にも表示されます。これらは従来の safety evidence を観察するための診断情報で、exact selection の第2 key ではありません。
+```text
+Defense
+  evaluated
+  selected action: 4p
+  selected kind: ExactRonRisk
+  opponent reach count: 2
+  ...
+  ron capable weight: -
+  tenpai weight: -
+  player 1 ron risk: 153021210679 / 4886615584793
+  player 2 ron risk: 234842796892 / 4886615584793
+
+Defense candidates
+
+4p
+  selected: yes
+  ...
+  player 1 ron risk: 153021210679 / 4886615584793
+  player 2 ron risk: 234842796892 / 4886615584793
+
+7s
+  selected: no
+  ...
+  player 1 ron risk: 203424857360 / 4886615584793
+  player 2 ron risk: 287210037589 / 4886615584793
+```
+
+形式は `player {id} ron risk: {ron_capable_weight} / {tenpai_weight}` で、左が `R(p, x)`、右が `T(p)` です。`T(p)` はリーチ者ごとに異なり得るので、左側の physical weight を player をまたいで直接比べても意味がありません。player 間は `R/T` の比として読んでください。
+
+`ron capable weight` / `tenpai weight` は単独リーチ向けに残している backward-compatible な単一値です。複数リーチではこの2行が `-` になりますが、これは**「exact evaluation が無い」という意味ではありません**。`selected kind: ExactRonRisk` と player 別の行が出ていれば exact path です。複数リーチでは player 別の行を確認してください。
+
+#### minimax の読み方
+
+player 別の行は player id 順に並べた表示で、comparator の優先順ではありません。production は候補ごとにリーチ者の risk を危険な順へ並べ直し、その vector を辞書順で比較して最も小さい候補を選びます。上の例では `4p` / `7s` とも player 2 のほうが危険なので、まず player 2 の `R/T` どうしを比べ、同率なら player 1 を比べます。定義は [複数リーチの worst-first lexicographic minimax](ai/defense.md#複数リーチの-worst-first-lexicographic-minimax) を参照してください。
+
+### exact model が使えない場合
+
+リーチ者の1人でも exact model が使えない局面は、partial exact と partial legacy を混在させず局面全体が legacy fallback になります。この場合は `ron capable weight` / `tenpai weight` がどちらも `-` になり、player 別の行も出ません。部分的な exact evidence を selection の根拠として読まないでください。
+
+`genbutsu` / `honor safety` / `opponent honor value` / `wall` / `suji` / `suji safety` / `suited safety` は、`ExactRonRisk` で選んだ候補にも表示されます。これらは従来の safety evidence を観察するための診断情報で、`ExactRonRisk` minimax の第2 key や tie-break ではありません。
 
 ## OpenHand defense
 
