@@ -1,12 +1,17 @@
 use std::time::{Duration, Instant};
 
 use bot_core::action::LegalAction;
-use bot_core::context::GameContext;
+use bot_core::context::{GameContext, TableStateFacts};
 use bot_core::defense::{
-    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseFallbackKind,
-    HiddenHandStateMetrics, PlayerRonRiskEvidence, ReachedHiddenHandStates, RonCapableStateWeight,
-    TenpaiStateWeight, compare_lexicographic_minimax_ron_risk,
-    select_defense_fallback_action_with_kind,
+    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates,
+    CompressedStructuralTenpaiHiddenHandStates, DefenseFallbackKind, HiddenHandStateMetrics,
+    PlayerRonRiskEvidence, ReachedHiddenHandStates, RonCapableStateWeight, TenpaiStateWeight,
+    compare_lexicographic_minimax_ron_risk, select_defense_fallback_action_with_kind,
+};
+use bot_core::meld::{Meld, MeldKind};
+use bot_core::open_hand_defense::{
+    OpenHandDefenseCategory, high_open_hand_threat_players_from_context,
+    select_open_hand_defense_fallback_action_with_kind,
 };
 use bot_logic::{TileId, TileType};
 
@@ -403,6 +408,163 @@ fn measure_single_reach_exact_defense_fallback_selection() {
         selected.0, selected.1
     );
     println!("  T={} states={}", tenpai.weight, tenpai.states);
+}
+
+fn open_hand_measurement_context(open_meld_count: usize) -> GameContext {
+    assert!((1..=3).contains(&open_meld_count));
+
+    let mut source = TileSource::new();
+    let hand = source.tiles(&REPRESENTATIVE_HAND);
+    let dora_indicator = source.tile("C");
+    let discards = [
+        source.tiles(&["1m", "5m", "9m", "1p", "6p", "9p", "1s", "N"]),
+        source.tiles(&[
+            "1m", "5m", "8m", "9m", "1p", "2p", "6p", "9p", "1s", "4s", "5s", "6s",
+        ]),
+        source.tiles(&["2m", "4m", "7m", "3p", "7p", "2s", "S", "W"]),
+        source.tiles(&["3m", "6m", "8m", "4p", "8p", "3s", "F", "C"]),
+    ];
+
+    let mut target_melds = Vec::with_capacity(open_meld_count);
+    let white = source.tiles(&["P", "P", "P"]);
+    target_melds.push(Meld::new(MeldKind::Pon, white.clone(), Some(white[0])));
+    if open_meld_count >= 2 {
+        let chi = source.tiles(&["4s", "5s", "6s"]);
+        target_melds.push(Meld::new(MeldKind::Chi, chi.clone(), Some(chi[0])));
+    }
+    if open_meld_count >= 3 {
+        let chi = source.tiles(&["7s", "8s", "9s"]);
+        target_melds.push(Meld::new(MeldKind::Chi, chi.clone(), Some(chi[0])));
+    }
+
+    let mut visible = hand.clone();
+    visible.push(dora_indicator);
+    for river in &discards {
+        visible.extend(river.iter().copied());
+    }
+    for meld in &target_melds {
+        visible.extend(meld.tiles().iter().copied());
+    }
+
+    let mut melds: [Vec<Meld>; 4] = Default::default();
+    melds[1] = target_melds;
+    GameContext::from_parts_with_melds(
+        None,
+        hand,
+        vec![dora_indicator],
+        Some(tile_type("E")),
+        Some(tile_type("S")),
+        visible,
+        Some(0),
+        Some(1),
+        discards,
+        [false; 4],
+        melds,
+    )
+    .with_temporary_passed_tiles(Some(Default::default()))
+    .with_same_hand_passed_tiles(Some(Default::default()))
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles: Some(16),
+        ..TableStateFacts::default()
+    })
+}
+
+#[test]
+#[ignore = "release build 前提の OpenHand production-like fallback 計測用。wall-clock threshold は持たない"]
+fn measure_open_hand_exact_defense_fallback_selection() {
+    for open_meld_count in 1..=3 {
+        let context = open_hand_measurement_context(open_meld_count);
+        let actions: Vec<LegalAction> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .map(|tile| LegalAction::Dahai { tile })
+            .collect();
+        let targets = high_open_hand_threat_players_from_context(&context);
+        assert_eq!(targets, vec![1]);
+
+        let mut tile_types = Vec::new();
+        let mut seen = [false; TileType::COUNT];
+        for action in &actions {
+            let LegalAction::Dahai { tile } = action else {
+                continue;
+            };
+            let tile_type = tile.tile_type();
+            if !seen[tile_type.index()] {
+                seen[tile_type.index()] = true;
+                tile_types.push(tile_type);
+            }
+        }
+
+        let mut vectors = vec![Vec::with_capacity(targets.len()); tile_types.len()];
+        let mut construction_total = Duration::ZERO;
+        let mut evaluation_total = Duration::ZERO;
+        for &player in &targets {
+            let construction_start = Instant::now();
+            let mut states = CompressedStructuralTenpaiHiddenHandStates::new(player, &context)
+                .expect("High OpenHand target");
+            let construction = construction_start.elapsed();
+            construction_total += construction;
+            let tenpai = states.tenpai_state_weight();
+
+            let evaluation_start = Instant::now();
+            for (vector, &tile) in vectors.iter_mut().zip(&tile_types) {
+                let evidence = states
+                    .ron_risk_evidence(tile)
+                    .expect("known OpenHand winning context");
+                assert_eq!(evidence.tenpai_weight, tenpai.weight);
+                vector.push(PlayerRonRiskEvidence { player, evidence });
+            }
+            let evaluation = evaluation_start.elapsed();
+            evaluation_total += evaluation;
+
+            println!(
+                "  player {player}: model construction={construction:?}, all candidate R/T={evaluation:?}, T={} states={}",
+                tenpai.weight, tenpai.states
+            );
+            compressed_report(tenpai, states.metrics(), construction, evaluation);
+        }
+
+        let comparison_start = Instant::now();
+        let mut best = 0;
+        for candidate in 1..vectors.len() {
+            if compare_lexicographic_minimax_ron_risk(&vectors[candidate], &vectors[best])
+                == Some(std::cmp::Ordering::Less)
+            {
+                best = candidate;
+            }
+        }
+        let minimax_comparison = comparison_start.elapsed();
+
+        let selector_start = Instant::now();
+        let selected =
+            select_open_hand_defense_fallback_action_with_kind(&context, &actions, &targets)
+                .expect("production OpenHand fallback");
+        let production_selector = selector_start.elapsed();
+        assert_eq!(selected.1, OpenHandDefenseCategory::ExactRonRisk);
+        let LegalAction::Dahai {
+            tile: selected_tile,
+        } = selected.0
+        else {
+            panic!("OpenHand fallback must select Dahai");
+        };
+        assert_eq!(selected_tile.tile_type(), tile_types[best]);
+
+        println!("production-like OpenHand exact defense fallback ({open_meld_count} open melds):");
+        println!("  open meld count:              {open_meld_count}");
+        println!("  legal Dahai actions:          {}", actions.len());
+        println!("  unique TileType evaluations:  {}", tile_types.len());
+        println!("  exact target count:           {}", targets.len());
+        println!("  model construction total:     {construction_total:?}");
+        println!("  all candidate R/T total:      {evaluation_total:?}");
+        println!("  minimax comparison:           {minimax_comparison:?}");
+        println!("  production selector total:    {production_selector:?}");
+        println!(
+            "  selected tile:                {}",
+            selected_tile.to_mjai_string()
+        );
+        println!("  selected category:            {:?}", selected.1);
+    }
 }
 
 // representative context で enumerating implementation と compressed counting が一致すること。
