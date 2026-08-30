@@ -315,13 +315,16 @@ pub fn safe_against_all_threats_dahai_actions<'a>(
         .collect()
 }
 
-/// 合法 Dahai のうち、全 target が hard-safe または same-hand passed で覆われる牌を抽出する。
+/// 合法 Dahai のうち、全 target が hard-safe または same-hand passed で覆われる牌を、
+/// hard-safe な target 数の多い順に並べる。
+///
+/// hard-safe 数が同じ候補は、合法 Dahai の元順序を維持する。
 pub fn same_hand_passed_combined_dahai_actions<'a>(
     legal_actions: &'a [LegalAction],
     targets: &[ThreatDefenseTarget],
     context: &GameContext,
 ) -> Vec<&'a LegalAction> {
-    legal_actions
+    let mut actions: Vec<&LegalAction> = legal_actions
         .iter()
         .filter(|action| match action {
             LegalAction::Dahai { tile } => {
@@ -329,7 +332,19 @@ pub fn same_hand_passed_combined_dahai_actions<'a>(
             }
             _ => false,
         })
-        .collect()
+        .collect();
+    actions.sort_by_key(|action| {
+        let LegalAction::Dahai { tile } = action else {
+            unreachable!("filtered to Dahai actions")
+        };
+        std::cmp::Reverse(
+            targets
+                .iter()
+                .filter(|&&target| is_ron_safe_for_target(tile.tile_type(), target, context))
+                .count(),
+        )
+    });
+    actions
 }
 
 /// 合法 Dahai のうち字牌のみを、target に対する安全度順に並べる。
@@ -368,7 +383,8 @@ pub fn combined_suited_dahai_actions_by_safety<'a>(
 /// `None`。
 ///
 /// - `SafeAgainstAllThreats`: 全 target にロンされない牌。同順位では合法 Dahai の元順序を保つ。
-/// - `SameHandPassed`: 全 target が hard-safe または same-hand passed で覆われる牌。
+/// - `SameHandPassed`: 全 target が hard-safe または same-hand passed で覆われる牌。hard-safe な
+///   target 数が多い候補を優先し、同数なら元順序を保つ。
 /// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存 Defense と同じ ranking。
 /// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存 Defense と同じく
 ///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
@@ -1326,6 +1342,44 @@ mod tests {
         assert_eq!(
             fallback(&context, &[dahai("9m"), dahai("2s")]),
             Some((dahai("2s"), CombinedDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_prefers_more_hard_safe_targets() {
+        let context = ContextSpec::combined()
+            .melds_of(OTHER_PLAYER, open_melds(3))
+            .post_reach_passed(RIICHI_TARGET, "2s 3s")
+            .same_hand_passed(OTHER_PLAYER, "2s 3s")
+            .same_hand_passed(OPEN_HAND_TARGET, "2s 3s")
+            .discards_of(OTHER_PLAYER, "3s")
+            .build();
+        let targets = targets(&context);
+
+        for tile in [tile_type("2s"), tile_type("3s")] {
+            assert_eq!(
+                combined_defense_category(tile, &targets, &context),
+                Some(CombinedDefenseCategory::SameHandPassed)
+            );
+        }
+        assert_eq!(
+            fallback(&context, &[dahai("2s"), dahai("3s")]),
+            Some((dahai("3s"), CombinedDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_hard_safe_count_tie_keeps_legal_order() {
+        let context = ContextSpec::combined()
+            .melds_of(OTHER_PLAYER, open_melds(3))
+            .post_reach_passed(RIICHI_TARGET, "2s 3s")
+            .same_hand_passed(OTHER_PLAYER, "2s 3s")
+            .same_hand_passed(OPEN_HAND_TARGET, "2s 3s")
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("3s"), dahai("2s")]),
+            Some((dahai("3s"), CombinedDefenseCategory::SameHandPassed))
         );
     }
 
