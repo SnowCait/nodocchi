@@ -360,6 +360,31 @@ fn open_hand_current_temporary_passed_has_zero_ron_weight() {
 }
 
 #[test]
+fn open_hand_missed_kakan_wait_makes_another_wait_temporarily_furiten() {
+    let context = open_hand_fixture_with_ron_facts(
+        &[("2m", 1), ("3m", 1), ("5p", 2)],
+        open_hand_yakuhai_melds(),
+        &[],
+        Some("E"),
+        Some(0),
+        Some(1),
+        Some(&["1m"]),
+    );
+
+    assert_eq!(
+        assert_open_target_matches_enumerator("4m", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+    assert_eq!(
+        assert_open_ron_matches_all_counters("4m", &context),
+        RonCapableStateWeight::default()
+    );
+}
+
+#[test]
 fn open_hand_same_hand_passed_alone_does_not_remove_ron_capable_states() {
     let mut same_hand_passed: [Vec<TileType>; 4] = Default::default();
     same_hand_passed[1].push(tile_type("5m"));
