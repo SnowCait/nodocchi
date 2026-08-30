@@ -173,6 +173,7 @@ pub(crate) fn context_for_request(
         .unwrap_or_else(|| game_context_from_validation_state(state))
         .with_post_reach_passed_tiles(state.post_reach_passed_tiles().clone())
         .with_temporary_passed_tiles(state.temporary_passed_tiles().cloned())
+        .with_same_hand_passed_tiles(state.same_hand_passed_tiles().cloned())
         .with_history_furiten_facts(state.history_furiten())
 }
 
@@ -312,7 +313,7 @@ where
                         tsumogiri,
                     } => {
                         debug!(actor, pai = %pai, tsumogiri = ?tsumogiri, "dahai");
-                        state.on_dahai(actor, &pai);
+                        state.on_dahai_with_tsumogiri(actor, &pai, tsumogiri);
                     }
                     MjaiEvent::Chi {
                         actor,
@@ -830,12 +831,28 @@ mod tests {
     }
 
     #[test]
+    fn context_for_request_carries_confirmed_same_hand_passed_tiles() {
+        let observation = ObservationPayload::new("not-valid-base64!!");
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_dahai_with_tsumogiri(1, "9m", Some(false));
+        state.on_tsumo(3, "?".to_string());
+
+        let context = context_for_request(&observation, &state, 8);
+        let nine_man = TileType::from_mjai_type_str("9m").unwrap();
+        assert!(context.is_same_hand_passed(nine_man, 3));
+        assert!(!context.is_temporary_passed(nine_man, 3));
+    }
+
+    #[test]
     fn context_for_request_keeps_unavailable_temporary_history_unknown() {
         let observation = ObservationPayload::new("not-valid-base64!!");
         let mut state = ValidationState::new();
         state.on_start_game(0);
         let context = context_for_request(&observation, &state, 8);
         assert_eq!(context.temporary_passed_tiles(), None);
+        assert_eq!(context.same_hand_passed_tiles(), None);
     }
 
     #[test]

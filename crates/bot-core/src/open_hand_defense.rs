@@ -4,8 +4,9 @@
 //! 別実装しない。リーチ者向けの `*_for_all_reached` と違うのは対象 player 集合の決め方と、
 //! 「現物相当」の根拠だけ。
 //!
-//! ロン安全の根拠は対象 player 自身の河と、その player の手牌が最後に変化してから他家から
-//! 切られて通った一時安全牌。`post_reach_passed_tiles` はリーチ固有なので流用しない。
+//! hard-safe の根拠は対象 player 自身の河と、次のツモまで有効な一時通過牌。
+//! concealed hand が最後に変化してから通った牌は別 evidence として扱う。
+//! `post_reach_passed_tiles` はリーチ固有なので流用しない。
 //!
 //! 防御 fallback の action 選択は [`select_open_hand_defense_fallback_action_with_kind`] が
 //! source of truth で、[`OpenHandDefenseDiagnostic`] はその結果を写すだけにする。
@@ -58,6 +59,18 @@ pub fn is_ron_safe_for_open_hand_target(
     is_discarded_by_player(tile, player, context) || context.is_temporary_passed(tile, player)
 }
 
+/// target の concealed hand が最後に変化して以降、この牌が実際に通ったか。
+///
+/// temporary furiten による hard-safe とは区別し、[`is_ron_safe_for_open_hand_target`] には
+/// 含めない。
+pub fn is_same_hand_passed_for_open_hand_target(
+    tile: TileType,
+    player: usize,
+    context: &GameContext,
+) -> bool {
+    context.is_same_hand_passed(tile, player)
+}
+
 /// 全 target 自身の河にある牌か判定する。target が0人なら `false`。
 ///
 /// 判定は [`is_discarded_by_player`] の集約 ([`is_discarded_by_all_players`]) で、
@@ -82,25 +95,45 @@ pub fn is_ron_safe_for_all_open_hand_targets(
             .all(|&player| is_ron_safe_for_open_hand_target(tile, player, context))
 }
 
-// 対象牌でまだロンされ得る target。target ごとに評価が変わる safety はこの集合だけを集約する。
+// Wall / OneChance / Suji / Honor の heuristic で評価する target。
 //
-// 対象牌が本人の河または現在有効な一時通過牌にある target はロンできないため、その target の
-// 評価が全体の安全度を悪化させないよう除外する。`post_reach_passed_tiles` は使わない。
+// hard-safe の target と same-hand passed evidence がある target は、それより弱い heuristic の
+// 集約から除外する。`post_reach_passed_tiles` は使わない。
 //
-// 全 target が対象牌にロンできない場合は空になる。空集合は「安全と確定した」ではなく
-// 「target ごとの評価が無い」で、その場合の安全根拠は
-// [`OpenHandDefenseCategory::SafeAgainstAllTargets`] が表す。
-fn ron_capable_targets(tile: TileType, targets: &[usize], context: &GameContext) -> Vec<usize> {
+// 全 target が hard-safe または same-hand passed の場合は空になる。空集合は「hard-safe」と
+// いう意味ではなく、強い根拠は [`OpenHandDefenseCategory`] の別 category が表す。
+fn heuristic_targets(tile: TileType, targets: &[usize], context: &GameContext) -> Vec<usize> {
     targets
         .iter()
         .copied()
-        .filter(|&player| !is_ron_safe_for_open_hand_target(tile, player, context))
+        .filter(|&player| {
+            !is_ron_safe_for_open_hand_target(tile, player, context)
+                && !is_same_hand_passed_for_open_hand_target(tile, player, context)
+        })
         .collect()
+}
+
+/// 全 target が hard-safe または same-hand passed で覆われ、少なくとも1人には
+/// same-hand passed が必要かを判定する。target が0人なら `false`。
+pub fn has_same_hand_passed_for_all_open_hand_targets(
+    tile: TileType,
+    targets: &[usize],
+    context: &GameContext,
+) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|&player| {
+            is_ron_safe_for_open_hand_target(tile, player, context)
+                || is_same_hand_passed_for_open_hand_target(tile, player, context)
+        })
+        && targets.iter().any(|&player| {
+            !is_ron_safe_for_open_hand_target(tile, player, context)
+                && is_same_hand_passed_for_open_hand_target(tile, player, context)
+        })
 }
 
 /// target に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
 ///
-/// 対象牌にロンできない target は集約対象から除外する ([`ron_capable_targets`])。target が
+/// 強い evidence がある target は集約対象から除外する ([`heuristic_targets`])。target が
 /// いない場合、全 target にロンされない場合、情報不足で
 /// 誰の分も確定できない場合は `None` (unknown)。情報不足を `GuestWind` と推測しない。
 ///
@@ -110,13 +143,13 @@ pub fn opponent_honor_value_for_open_hand_threats(
     targets: &[usize],
     context: &GameContext,
 ) -> Option<OpponentHonorValue> {
-    opponent_honor_value_for_players(tile, &ron_capable_targets(tile, targets, context), context)
+    opponent_honor_value_for_players(tile, &heuristic_targets(tile, targets, context), context)
 }
 
 /// target の河に対するスジ安全度。数牌なら `Some`、字牌なら `None`。
 ///
-/// 対象牌にロンできない target は役牌価値と同じく集約対象から除外する
-/// ([`ron_capable_targets`])。その target の河にスジが無いことを
+/// 強い evidence がある target は役牌価値と同じく集約対象から除外する
+/// ([`heuristic_targets`])。その target の河にスジが無いことを
 /// 全体の危険度に持ち込まない。
 ///
 /// 残った target の [`suji_safety_rank_for`] の最小値(最も危険な評価)を採る。target が0人の
@@ -127,12 +160,12 @@ pub fn suji_safety_rank_for_open_hand_threats(
     targets: &[usize],
     context: &GameContext,
 ) -> Option<SujiSafetyRank> {
-    suji_safety_rank_for_players(tile, &ron_capable_targets(tile, targets, context), context)
+    suji_safety_rank_for_players(tile, &heuristic_targets(tile, targets, context), context)
 }
 
 /// target に対する数牌の防御 evidence。字牌は対象外で `None`。
 ///
-/// 壁とスジをここで組み立てず、まだロンされ得る target ([`ron_capable_targets`]) を決めて
+/// 壁とスジをここで組み立てず、heuristic で評価する target ([`heuristic_targets`]) を決めて
 /// 既存 Defense の [`suited_safety_evidence_for_players`] へ渡すだけにする。evidence の意味は
 /// リーチ向けと同じ。
 pub fn suited_safety_evidence_for_open_hand_threats(
@@ -140,7 +173,7 @@ pub fn suited_safety_evidence_for_open_hand_threats(
     targets: &[usize],
     context: &GameContext,
 ) -> Option<SuitedSafetyEvidence> {
-    suited_safety_evidence_for_players(tile, &ron_capable_targets(tile, targets, context), context)
+    suited_safety_evidence_for_players(tile, &heuristic_targets(tile, targets, context), context)
 }
 
 /// target に対する数牌の安全度を壁 / スジから分類する。字牌は対象外で `None`。
@@ -159,7 +192,7 @@ pub fn suited_safety_rank_for_open_hand_threats(
 /// target に対する防御候補の大分類。
 ///
 /// 優先順位は既存 Defense ([`DefenseFallbackKind`](crate::defense::DefenseFallbackKind)) に
-/// 合わせて `SafeAgainstAllTargets` → `HonorSafety` → `SuitedSafety`。
+/// 合わせて `SafeAgainstAllTargets` → `SameHandPassed` → `HonorSafety` → `SuitedSafety`。
 ///
 /// 第一分類を `Genbutsu` と呼ばないのは、リーチ固有の `post_reach_passed_tiles` と、手牌変化まで
 /// だけ有効な一時通過牌の意味と寿命を混ぜないため。
@@ -169,6 +202,8 @@ pub fn suited_safety_rank_for_open_hand_threats(
 pub enum OpenHandDefenseCategory {
     /// 本人の河または現在有効な一時通過牌により、全 target にロンされない。
     SafeAgainstAllTargets,
+    /// 全 target が hard-safe または same-hand passed で覆われる。
+    SameHandPassed,
     HonorSafety(HonorSafetyRank),
     SuitedSafety(SuitedSafetyRank),
 }
@@ -183,6 +218,9 @@ pub fn open_hand_defense_category(
 ) -> Option<OpenHandDefenseCategory> {
     if is_ron_safe_for_all_open_hand_targets(tile, targets, context) {
         return Some(OpenHandDefenseCategory::SafeAgainstAllTargets);
+    }
+    if has_same_hand_passed_for_all_open_hand_targets(tile, targets, context) {
+        return Some(OpenHandDefenseCategory::SameHandPassed);
     }
     if let Some(rank) = honor_safety_rank(tile, context) {
         return Some(OpenHandDefenseCategory::HonorSafety(rank));
@@ -209,6 +247,40 @@ pub fn safe_against_all_targets_dahai_actions<'a>(
             _ => false,
         })
         .collect()
+}
+
+/// 合法 Dahai のうち、全 target が hard-safe または same-hand passed で覆われる牌を、
+/// hard-safe な target 数の多い順に並べる。
+///
+/// hard-safe 数が同じ候補は、合法 Dahai の元順序を維持する。
+pub fn same_hand_passed_open_hand_dahai_actions<'a>(
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+    context: &GameContext,
+) -> Vec<&'a LegalAction> {
+    let mut actions: Vec<&LegalAction> = legal_actions
+        .iter()
+        .filter(|action| match action {
+            LegalAction::Dahai { tile } => {
+                has_same_hand_passed_for_all_open_hand_targets(tile.tile_type(), targets, context)
+            }
+            _ => false,
+        })
+        .collect();
+    actions.sort_by_key(|action| {
+        let LegalAction::Dahai { tile } = action else {
+            unreachable!("filtered to Dahai actions")
+        };
+        std::cmp::Reverse(
+            targets
+                .iter()
+                .filter(|&&player| {
+                    is_ron_safe_for_open_hand_target(tile.tile_type(), player, context)
+                })
+                .count(),
+        )
+    });
+    actions
 }
 
 /// 合法 Dahai のうち字牌のみを、target に対する安全度順に並べる。
@@ -242,10 +314,13 @@ pub fn open_hand_suited_dahai_actions_by_safety<'a>(
 
 /// High OpenHandThreat 相手に対する防御 fallback を優先順位付きで選ぶ production selector。
 ///
-/// [`OpenHandDefenseCategory`] の並びどおり、全 target へのロン安全 → 字牌 safety → 数牌 safety の
-/// 順に評価し、選ばれた大分類を添えて返す。target が0人なら `None`。
+/// [`OpenHandDefenseCategory`] の並びどおり、全 target へのロン安全 → same-hand passed →
+/// 字牌 safety → 数牌 safety の順に評価し、選ばれた大分類を添えて返す。target が0人なら
+/// `None`。
 ///
 /// - `SafeAgainstAllTargets`: 全 target にロンされない牌。同順位では合法 Dahai の元順序を保つ。
+/// - `SameHandPassed`: 全 target が hard-safe または same-hand passed で覆われる牌。hard-safe な
+///   target 数が多い候補を優先し、同数なら元順序を保つ。
 /// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存リーチ Defense と同じ ranking。
 /// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存リーチ Defense と同じく
 ///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
@@ -271,6 +346,14 @@ pub fn select_open_hand_defense_fallback_action_with_kind<'a>(
     {
         let action = prefer_black_five_for_action(legal_actions, action);
         return Some((action, OpenHandDefenseCategory::SafeAgainstAllTargets));
+    }
+
+    if let Some(action) = same_hand_passed_open_hand_dahai_actions(legal_actions, targets, context)
+        .into_iter()
+        .next()
+    {
+        let action = prefer_black_five_for_action(legal_actions, action);
+        return Some((action, OpenHandDefenseCategory::SameHandPassed));
     }
 
     if let Some((action, rank)) =
@@ -314,6 +397,8 @@ pub struct OpenHandDefenseTargetSafety {
     pub discarded_by_target: bool,
     /// 本人の河または現在有効な一時通過牌により、この target にロンされないか。
     pub ron_safe: bool,
+    /// target の concealed hand が最後に変化して以降に通ったか。hard-safe とは別 evidence。
+    pub same_hand_passed: bool,
     /// この target の河に対する [`suji_safety_rank_for`]。字牌では `None`。
     ///
     /// この target 単独の評価そのもので、`discarded_by_target` による除外は行わない。集約側
@@ -345,6 +430,8 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     pub discarded_by_all_targets: bool,
     /// 全 target に対して本人の河または一時通過牌によりロン安全か。
     pub ron_safe_for_all_targets: bool,
+    /// 全 target が hard-safe または same-hand passed で覆われるか。
+    pub same_hand_passed_for_all_targets: bool,
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// target に対する [`opponent_honor_value_for_open_hand_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
@@ -392,6 +479,9 @@ impl OpenHandDefenseCandidateDiagnostic {
                     player,
                     discarded_by_target: is_discarded_by_player(tile_type, player, context),
                     ron_safe: is_ron_safe_for_open_hand_target(tile_type, player, context),
+                    same_hand_passed: is_same_hand_passed_for_open_hand_target(
+                        tile_type, player, context,
+                    ),
                     suji_safety_rank: suji_safety_rank_for(tile_type, player, context),
                 })
                 .collect(),
@@ -399,6 +489,9 @@ impl OpenHandDefenseCandidateDiagnostic {
                 tile_type, targets, context,
             ),
             ron_safe_for_all_targets: is_ron_safe_for_all_open_hand_targets(
+                tile_type, targets, context,
+            ),
+            same_hand_passed_for_all_targets: has_same_hand_passed_for_all_open_hand_targets(
                 tile_type, targets, context,
             ),
             honor_safety_rank: honor_safety_rank(tile_type, context),
@@ -591,6 +684,7 @@ mod tests {
         melds: [Vec<Meld>; 4],
         visible_tiles: Vec<TileId>,
         post_reach_passed: [Vec<TileType>; 4],
+        same_hand_passed: Option<[Vec<TileType>; 4]>,
     }
 
     impl ContextSpec {
@@ -632,6 +726,14 @@ mod tests {
             self
         }
 
+        fn same_hand_passed(mut self, player: usize, mjai: &str) -> Self {
+            let passed = self
+                .same_hand_passed
+                .get_or_insert_with(|| std::array::from_fn(|_| Vec::new()));
+            passed[player] = mjai.split_whitespace().map(tile_type).collect();
+            self
+        }
+
         fn build(self) -> GameContext {
             GameContext::from_parts_with_melds(
                 None,
@@ -647,6 +749,7 @@ mod tests {
                 self.melds,
             )
             .with_post_reach_passed_tiles(self.post_reach_passed)
+            .with_same_hand_passed_tiles(self.same_hand_passed)
         }
     }
 
@@ -1162,6 +1265,35 @@ mod tests {
     }
 
     #[test]
+    fn a_same_hand_passed_tile_is_evidence_without_becoming_ron_safe() {
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .same_hand_passed(3, "2s")
+            .build();
+        let targets = targets(&context);
+
+        assert!(is_same_hand_passed_for_open_hand_target(
+            tile_type("2s"),
+            3,
+            &context
+        ));
+        assert!(!is_ron_safe_for_open_hand_target(
+            tile_type("2s"),
+            3,
+            &context
+        ));
+        assert!(!is_ron_safe_for_all_open_hand_targets(
+            tile_type("2s"),
+            &targets,
+            &context
+        ));
+        assert_eq!(
+            open_hand_defense_category(tile_type("2s"), &targets, &context),
+            Some(OpenHandDefenseCategory::SameHandPassed)
+        );
+    }
+
+    #[test]
     fn a_post_reach_passed_tile_does_not_exclude_a_target_from_the_aggregate() {
         // post_reach_passed_tiles は非リーチ副露相手の除外根拠にしない。player 2 は 5m を
         // 河に切っていないので、その無スジも役牌価値もそのまま集約へ入る。
@@ -1333,12 +1465,14 @@ mod tests {
                     player: 2,
                     discarded_by_target: true,
                     ron_safe: true,
+                    same_hand_passed: false,
                     suji_safety_rank: Some(SujiSafetyRank::Suji),
                 },
                 OpenHandDefenseTargetSafety {
                     player: 3,
                     discarded_by_target: false,
                     ron_safe: false,
+                    same_hand_passed: false,
                     suji_safety_rank: Some(SujiSafetyRank::HalfSuji),
                 },
             ]
@@ -1559,6 +1693,73 @@ mod tests {
         assert_eq!(
             fallback(&context, &[dahai("5m"), dahai("N"), dahai("4s")]),
             Some((dahai("N"), OpenHandDefenseCategory::SafeAgainstAllTargets))
+        );
+    }
+
+    #[test]
+    fn the_fallback_prefers_same_hand_passed_over_normal_heuristics() {
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .same_hand_passed(3, "2s")
+            .visible((0..3).map(|copy| tile_copy("8m", copy)).collect())
+            .build();
+
+        assert_eq!(wall_rank(tile_type("9m"), &context), WallRank::OneChance);
+        assert_eq!(
+            fallback(&context, &[dahai("9m"), dahai("2s")]),
+            Some((dahai("2s"), OpenHandDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_prefers_more_hard_safe_targets() {
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .same_hand_passed(2, "2s 3s")
+            .same_hand_passed(3, "2s 3s")
+            .discards_of(2, "3s")
+            .build();
+        let targets = targets(&context);
+
+        for tile in [tile_type("2s"), tile_type("3s")] {
+            assert_eq!(
+                open_hand_defense_category(tile, &targets, &context),
+                Some(OpenHandDefenseCategory::SameHandPassed)
+            );
+        }
+        assert_eq!(
+            fallback(&context, &[dahai("2s"), dahai("3s")]),
+            Some((dahai("3s"), OpenHandDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_hard_safe_count_tie_keeps_legal_order() {
+        let context = ContextSpec::new()
+            .melds_of(2, open_melds(3))
+            .melds_of(3, open_melds(3))
+            .same_hand_passed(2, "2s 3s")
+            .same_hand_passed(3, "2s 3s")
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("3s"), dahai("2s")]),
+            Some((dahai("3s"), OpenHandDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn the_fallback_prefers_hard_safe_over_same_hand_passed() {
+        let context = ContextSpec::new()
+            .melds_of(3, open_melds(3))
+            .same_hand_passed(3, "2s")
+            .discards_of(3, "9m")
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("2s"), dahai("9m")]),
+            Some((dahai("9m"), OpenHandDefenseCategory::SafeAgainstAllTargets))
         );
     }
 

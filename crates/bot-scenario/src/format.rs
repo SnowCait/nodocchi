@@ -162,6 +162,17 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
         }
     }
 
+    if let Some(same_hand_passed) = context.same_hand_passed_tiles() {
+        for (player, passed) in same_hand_passed.iter().enumerate() {
+            if !passed.is_empty() {
+                lines.push(format!(
+                    "  same hand passed[{player}]: {}",
+                    format_tile_types(passed)
+                ));
+            }
+        }
+    }
+
     for (player, melds) in context.melds().iter().enumerate() {
         if !melds.is_empty() {
             lines.push(format!("  melds[{player}]: {}", format_melds(melds)));
@@ -1541,6 +1552,9 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
         "  ron safe for all targets: {}",
         yes_no(candidate.ron_safe_for_all_targets)
     ));
+    if candidate.same_hand_passed_for_all_targets {
+        lines.push("  same hand passed for all targets: yes".to_string());
+    }
     for target in &candidate.targets {
         lines.push(format!(
             "  discarded by target[{}]: {}",
@@ -1552,6 +1566,9 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
             target.player,
             yes_no(target.ron_safe)
         ));
+        if target.same_hand_passed {
+            lines.push(format!("  same hand passed[{}]: yes", target.player));
+        }
     }
     lines.push(format!(
         "  honor safety: {}",
@@ -1634,6 +1651,9 @@ fn format_combined_defense_candidate(candidate: &CombinedDefenseCandidateDiagnos
         "  safe against all threats: {}",
         yes_no(candidate.safe_against_all_threats)
     ));
+    if candidate.same_hand_passed_for_all_threats {
+        lines.push("  same hand passed for all threats: yes".to_string());
+    }
     for target in &candidate.targets {
         lines.push(format!(
             "  ron safe[{} {:?}]: {}",
@@ -1641,6 +1661,13 @@ fn format_combined_defense_candidate(candidate: &CombinedDefenseCandidateDiagnos
             target.kind(),
             yes_no(target.ron_safe)
         ));
+        if target.same_hand_passed {
+            lines.push(format!(
+                "  same hand passed[{} {:?}]: yes",
+                target.player(),
+                target.kind()
+            ));
+        }
     }
     lines.push(format!(
         "  honor safety: {}",

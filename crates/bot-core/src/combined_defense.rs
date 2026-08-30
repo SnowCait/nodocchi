@@ -9,6 +9,7 @@
 //!   ([`is_genbutsu_for`])。
 //! - [`ThreatDefenseTargetKind::HighOpenHand`]：本人の河または現在有効な一時通過牌
 //!   ([`is_ron_safe_for_open_hand_target`])。`post_reach_passed_tiles` は流用しない。
+//! - same-hand passed：`HighOpenHand` target の hard-safe とは区別する独立 evidence。
 //!
 //! 防御 fallback の action 選択は [`select_combined_threat_defense_fallback_action_with_kind`] が
 //! source of truth で、[`CombinedDefenseDiagnostic`] はその結果を写すだけにする。
@@ -125,6 +126,18 @@ pub fn is_ron_safe_for_target(
     }
 }
 
+/// target に対する same-hand passed evidence。
+///
+/// `HighOpenHand` にだけ適用し、hard-safe の [`is_ron_safe_for_target`] には含めない。
+pub fn is_same_hand_passed_for_target(
+    tile: TileType,
+    target: ThreatDefenseTarget,
+    context: &GameContext,
+) -> bool {
+    target.kind == ThreatDefenseTargetKind::HighOpenHand
+        && context.is_same_hand_passed(tile, target.player)
+}
+
 /// 全 target に対してロン安全か判定する。target が0人なら `false`。
 ///
 /// リーチ者の現物と副露相手本人の河が混ざった集合なので、リーチ者向けの現物
@@ -140,28 +153,49 @@ pub fn is_safe_against_all_threats(
             .all(|&target| is_ron_safe_for_target(tile, target, context))
 }
 
-// 対象牌でまだロンされ得る target の席。target ごとに評価が変わる safety はこの集合だけを集約する。
+// Wall / OneChance / Suji / Honor の heuristic で評価する target の席。
 //
-// 除外根拠は target の種類ごとの [`is_ron_safe_for_target`] で、リーチ者は現物、副露相手は本人の
-// 河または一時通過牌。すでにロン不能な target の無スジや役牌価値を持ち込まない。
+// hard-safe の target と same-hand passed evidence がある target は、それより弱い heuristic の
+// 集約から除外する。
 //
-// 全 target がロン不能な場合は空になる。空集合は「安全と確定した」ではなく「target ごとの評価が
-// 無い」で、その場合の安全根拠は [`CombinedDefenseCategory::SafeAgainstAllThreats`] が表す。
-fn ron_capable_target_players(
+// 全 target が hard-safe または same-hand passed の場合は空になる。空集合は「hard-safe」と
+// いう意味ではなく、強い根拠は [`CombinedDefenseCategory`] の別 category が表す。
+fn heuristic_target_players(
     tile: TileType,
     targets: &[ThreatDefenseTarget],
     context: &GameContext,
 ) -> Vec<usize> {
     targets
         .iter()
-        .filter(|&&target| !is_ron_safe_for_target(tile, target, context))
+        .filter(|&&target| {
+            !is_ron_safe_for_target(tile, target, context)
+                && !is_same_hand_passed_for_target(tile, target, context)
+        })
         .map(|target| target.player)
         .collect()
 }
 
+/// 全 target が hard-safe または same-hand passed で覆われ、少なくとも1人には
+/// same-hand passed が必要かを判定する。target が0人なら `false`。
+pub fn has_same_hand_passed_for_all_threats(
+    tile: TileType,
+    targets: &[ThreatDefenseTarget],
+    context: &GameContext,
+) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|&target| {
+            is_ron_safe_for_target(tile, target, context)
+                || is_same_hand_passed_for_target(tile, target, context)
+        })
+        && targets.iter().any(|&target| {
+            !is_ron_safe_for_target(tile, target, context)
+                && is_same_hand_passed_for_target(tile, target, context)
+        })
+}
+
 /// target に対する役牌価値のうち最も危険な評価。数牌は対象外で `None`。
 ///
-/// まだロンされ得る target ([`ron_capable_target_players`]) だけを集約する。target がいない場合、
+/// heuristic で評価する target ([`heuristic_target_players`]) だけを集約する。target がいない場合、
 /// 全 target がロン不能な場合、情報不足で誰の分も確定できない場合は `None` (unknown)。情報不足を
 /// `GuestWind` と推測しない。
 ///
@@ -173,7 +207,7 @@ pub fn opponent_honor_value_for_combined_threats(
 ) -> Option<OpponentHonorValue> {
     opponent_honor_value_for_players(
         tile,
-        &ron_capable_target_players(tile, targets, context),
+        &heuristic_target_players(tile, targets, context),
         context,
     )
 }
@@ -190,14 +224,14 @@ pub fn suji_safety_rank_for_combined_threats(
 ) -> Option<SujiSafetyRank> {
     suji_safety_rank_for_players(
         tile,
-        &ron_capable_target_players(tile, targets, context),
+        &heuristic_target_players(tile, targets, context),
         context,
     )
 }
 
 /// target に対する数牌の防御 evidence。字牌は対象外で `None`。
 ///
-/// 壁とスジをここで組み立てず、まだロンされ得る target ([`ron_capable_target_players`]) を
+/// 壁とスジをここで組み立てず、heuristic で評価する target ([`heuristic_target_players`]) を
 /// 決めて既存 Defense の [`suited_safety_evidence_for_players`] へ渡すだけにする。evidence の
 /// 意味はリーチ / OpenHand と同じ。
 pub fn suited_safety_evidence_for_combined_threats(
@@ -207,7 +241,7 @@ pub fn suited_safety_evidence_for_combined_threats(
 ) -> Option<SuitedSafetyEvidence> {
     suited_safety_evidence_for_players(
         tile,
-        &ron_capable_target_players(tile, targets, context),
+        &heuristic_target_players(tile, targets, context),
         context,
     )
 }
@@ -227,8 +261,7 @@ pub fn suited_safety_rank_for_combined_threats(
 
 /// 複合 threat に対する防御候補の大分類。
 ///
-/// 優先順位は既存 Defense / OpenHand Defense に合わせて `SafeAgainstAllThreats` →
-/// `HonorSafety` → `SuitedSafety`。
+/// 優先順位は `SafeAgainstAllThreats` → `SameHandPassed` → `HonorSafety` → `SuitedSafety`。
 ///
 /// 第一分類を `Genbutsu` と呼ばないのは、リーチ者の現物と、副露相手本人の河または現在有効な
 /// 一時通過牌という根拠の違う安全牌が混ざった集合だから。既存の
@@ -238,6 +271,8 @@ pub fn suited_safety_rank_for_combined_threats(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CombinedDefenseCategory {
     SafeAgainstAllThreats,
+    /// 全 target が hard-safe または same-hand passed で覆われる。
+    SameHandPassed,
     HonorSafety(HonorSafetyRank),
     SuitedSafety(SuitedSafetyRank),
 }
@@ -250,6 +285,9 @@ pub fn combined_defense_category(
 ) -> Option<CombinedDefenseCategory> {
     if is_safe_against_all_threats(tile, targets, context) {
         return Some(CombinedDefenseCategory::SafeAgainstAllThreats);
+    }
+    if has_same_hand_passed_for_all_threats(tile, targets, context) {
+        return Some(CombinedDefenseCategory::SameHandPassed);
     }
     if let Some(rank) = honor_safety_rank(tile, context) {
         return Some(CombinedDefenseCategory::HonorSafety(rank));
@@ -275,6 +313,38 @@ pub fn safe_against_all_threats_dahai_actions<'a>(
             _ => false,
         })
         .collect()
+}
+
+/// 合法 Dahai のうち、全 target が hard-safe または same-hand passed で覆われる牌を、
+/// hard-safe な target 数の多い順に並べる。
+///
+/// hard-safe 数が同じ候補は、合法 Dahai の元順序を維持する。
+pub fn same_hand_passed_combined_dahai_actions<'a>(
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+    context: &GameContext,
+) -> Vec<&'a LegalAction> {
+    let mut actions: Vec<&LegalAction> = legal_actions
+        .iter()
+        .filter(|action| match action {
+            LegalAction::Dahai { tile } => {
+                has_same_hand_passed_for_all_threats(tile.tile_type(), targets, context)
+            }
+            _ => false,
+        })
+        .collect();
+    actions.sort_by_key(|action| {
+        let LegalAction::Dahai { tile } = action else {
+            unreachable!("filtered to Dahai actions")
+        };
+        std::cmp::Reverse(
+            targets
+                .iter()
+                .filter(|&&target| is_ron_safe_for_target(tile.tile_type(), target, context))
+                .count(),
+        )
+    });
+    actions
 }
 
 /// 合法 Dahai のうち字牌のみを、target に対する安全度順に並べる。
@@ -308,10 +378,13 @@ pub fn combined_suited_dahai_actions_by_safety<'a>(
 
 /// 複合 threat に対する防御 fallback を優先順位付きで選ぶ production selector。
 ///
-/// [`CombinedDefenseCategory`] の並びどおり、全 target へのロン安全 → 字牌 safety → 数牌 safety の
-/// 順に評価し、選ばれた大分類を添えて返す。target が0人なら `None`。
+/// [`CombinedDefenseCategory`] の並びどおり、全 target へのロン安全 → same-hand passed →
+/// 字牌 safety → 数牌 safety の順に評価し、選ばれた大分類を添えて返す。target が0人なら
+/// `None`。
 ///
 /// - `SafeAgainstAllThreats`: 全 target にロンされない牌。同順位では合法 Dahai の元順序を保つ。
+/// - `SameHandPassed`: 全 target が hard-safe または same-hand passed で覆われる牌。hard-safe な
+///   target 数が多い候補を優先し、同数なら元順序を保つ。
 /// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存 Defense と同じ ranking。
 /// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存 Defense と同じく
 ///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
@@ -333,6 +406,14 @@ pub fn select_combined_threat_defense_fallback_action_with_kind<'a>(
     {
         let action = prefer_black_five_for_action(legal_actions, action);
         return Some((action, CombinedDefenseCategory::SafeAgainstAllThreats));
+    }
+
+    if let Some(action) = same_hand_passed_combined_dahai_actions(legal_actions, targets, context)
+        .into_iter()
+        .next()
+    {
+        let action = prefer_black_five_for_action(legal_actions, action);
+        return Some((action, CombinedDefenseCategory::SameHandPassed));
     }
 
     if let Some((action, rank)) =
@@ -374,6 +455,8 @@ pub struct CombinedDefenseTargetSafety {
     /// この target にこの牌でロンされないか ([`is_ron_safe_for_target`])。根拠は種類ごとに違い、
     /// リーチ者は現物、`High` の副露相手は本人の河または現在有効な一時通過牌。
     pub ron_safe: bool,
+    /// `HighOpenHand` target の concealed hand が最後に変化して以降に通ったか。
+    pub same_hand_passed: bool,
     /// この target の河に対する [`suji_safety_rank_for`]。字牌では `None`。
     ///
     /// この target 単独の評価そのもので、`ron_safe` による除外は行わない。集約側
@@ -410,6 +493,8 @@ pub struct CombinedDefenseCandidateDiagnostic {
     pub targets: Vec<CombinedDefenseTargetSafety>,
     /// 全 target に対してロン安全か。target が0人なら `false`。
     pub safe_against_all_threats: bool,
+    /// 全 target が hard-safe または same-hand passed で覆われるか。
+    pub same_hand_passed_for_all_threats: bool,
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// [`opponent_honor_value_for_combined_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
@@ -456,10 +541,14 @@ impl CombinedDefenseCandidateDiagnostic {
                 .map(|&target| CombinedDefenseTargetSafety {
                     target,
                     ron_safe: is_ron_safe_for_target(tile_type, target, context),
+                    same_hand_passed: is_same_hand_passed_for_target(tile_type, target, context),
                     suji_safety_rank: suji_safety_rank_for(tile_type, target.player, context),
                 })
                 .collect(),
             safe_against_all_threats: is_safe_against_all_threats(tile_type, targets, context),
+            same_hand_passed_for_all_threats: has_same_hand_passed_for_all_threats(
+                tile_type, targets, context,
+            ),
             honor_safety_rank: honor_safety_rank(tile_type, context),
             opponent_honor_value: opponent_honor_value_for_combined_threats(
                 tile_type, targets, context,
@@ -645,6 +734,7 @@ mod tests {
         visible_tiles: Vec<TileId>,
         post_reach_passed: [Vec<TileType>; 4],
         temporary_passed: Option<[Vec<TileType>; 4]>,
+        same_hand_passed: Option<[Vec<TileType>; 4]>,
     }
 
     impl ContextSpec {
@@ -701,6 +791,14 @@ mod tests {
             self
         }
 
+        fn same_hand_passed(mut self, player: usize, mjai: &str) -> Self {
+            let passed = self
+                .same_hand_passed
+                .get_or_insert_with(|| std::array::from_fn(|_| Vec::new()));
+            passed[player] = mjai.split_whitespace().map(tile_type).collect();
+            self
+        }
+
         fn build(self) -> GameContext {
             GameContext::from_parts_with_melds(
                 None,
@@ -717,6 +815,7 @@ mod tests {
             )
             .with_post_reach_passed_tiles(self.post_reach_passed)
             .with_temporary_passed_tiles(self.temporary_passed)
+            .with_same_hand_passed_tiles(self.same_hand_passed)
         }
     }
 
@@ -940,6 +1039,36 @@ mod tests {
         assert_eq!(
             combined_defense_category(tile_type("9m"), &targets, &context),
             Some(CombinedDefenseCategory::SafeAgainstAllThreats)
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_is_not_hard_safe_for_the_open_hand_target() {
+        let context = ContextSpec::combined()
+            .post_reach_passed(RIICHI_TARGET, "2s")
+            .same_hand_passed(OPEN_HAND_TARGET, "2s")
+            .build();
+        let targets = targets(&context);
+        let open_hand = ThreatDefenseTarget::high_open_hand(OPEN_HAND_TARGET);
+
+        assert!(is_same_hand_passed_for_target(
+            tile_type("2s"),
+            open_hand,
+            &context
+        ));
+        assert!(!is_ron_safe_for_target(
+            tile_type("2s"),
+            open_hand,
+            &context
+        ));
+        assert!(!is_safe_against_all_threats(
+            tile_type("2s"),
+            &targets,
+            &context
+        ));
+        assert_eq!(
+            combined_defense_category(tile_type("2s"), &targets, &context),
+            Some(CombinedDefenseCategory::SameHandPassed)
         );
     }
 
@@ -1193,6 +1322,64 @@ mod tests {
         assert_eq!(
             fallback(&context, &[dahai("5m"), dahai("N"), dahai("4s")]),
             Some((dahai("N"), CombinedDefenseCategory::SafeAgainstAllThreats))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_two_sou_beats_one_chance_nine_man_regression() {
+        let context = ContextSpec::combined()
+            .post_reach_passed(RIICHI_TARGET, "2s")
+            .same_hand_passed(OPEN_HAND_TARGET, "2s")
+            .visible((0..3).map(|copy| tile_copy("8m", copy)).collect())
+            .build();
+
+        assert!(is_ron_safe_for_target(
+            tile_type("2s"),
+            ThreatDefenseTarget::riichi(RIICHI_TARGET),
+            &context
+        ));
+        assert_eq!(wall_rank(tile_type("9m"), &context), WallRank::OneChance);
+        assert_eq!(
+            fallback(&context, &[dahai("9m"), dahai("2s")]),
+            Some((dahai("2s"), CombinedDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_prefers_more_hard_safe_targets() {
+        let context = ContextSpec::combined()
+            .melds_of(OTHER_PLAYER, open_melds(3))
+            .post_reach_passed(RIICHI_TARGET, "2s 3s")
+            .same_hand_passed(OTHER_PLAYER, "2s 3s")
+            .same_hand_passed(OPEN_HAND_TARGET, "2s 3s")
+            .discards_of(OTHER_PLAYER, "3s")
+            .build();
+        let targets = targets(&context);
+
+        for tile in [tile_type("2s"), tile_type("3s")] {
+            assert_eq!(
+                combined_defense_category(tile, &targets, &context),
+                Some(CombinedDefenseCategory::SameHandPassed)
+            );
+        }
+        assert_eq!(
+            fallback(&context, &[dahai("2s"), dahai("3s")]),
+            Some((dahai("3s"), CombinedDefenseCategory::SameHandPassed))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_hard_safe_count_tie_keeps_legal_order() {
+        let context = ContextSpec::combined()
+            .melds_of(OTHER_PLAYER, open_melds(3))
+            .post_reach_passed(RIICHI_TARGET, "2s 3s")
+            .same_hand_passed(OTHER_PLAYER, "2s 3s")
+            .same_hand_passed(OPEN_HAND_TARGET, "2s 3s")
+            .build();
+
+        assert_eq!(
+            fallback(&context, &[dahai("3s"), dahai("2s")]),
+            Some((dahai("3s"), CombinedDefenseCategory::SameHandPassed))
         );
     }
 

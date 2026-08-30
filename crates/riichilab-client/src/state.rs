@@ -10,6 +10,7 @@ pub struct ValidationState {
     active_reach: [bool; PLAYER_COUNT],
     post_reach_passed_tiles: [Vec<TileType>; PLAYER_COUNT],
     temporary_passed_tiles: Option<[Vec<TileType>; PLAYER_COUNT]>,
+    same_hand_passed_tiles: Option<[Vec<TileType>; PLAYER_COUNT]>,
     pending_passed_tile: Option<(u8, TileType)>,
     history_furiten: HistoryFuritenFacts,
     own_tsumo_pending_discard: bool,
@@ -44,6 +45,10 @@ impl ValidationState {
         self.temporary_passed_tiles.as_ref()
     }
 
+    pub fn same_hand_passed_tiles(&self) -> Option<&[Vec<TileType>; PLAYER_COUNT]> {
+        self.same_hand_passed_tiles.as_ref()
+    }
+
     pub fn history_furiten(&self) -> HistoryFuritenFacts {
         self.history_furiten
     }
@@ -58,7 +63,7 @@ impl ValidationState {
 
     pub fn on_start_kyoku(&mut self) {
         self.reset_reach_tracking();
-        self.start_temporary_passed_tracking();
+        self.start_passed_tracking();
         self.last_tsumo = None;
         self.history_furiten = HistoryFuritenFacts {
             same_turn: Some(false),
@@ -85,6 +90,10 @@ impl ValidationState {
     }
 
     pub fn on_dahai(&mut self, actor: u8, pai: &str) {
+        self.on_dahai_with_tsumogiri(actor, pai, None);
+    }
+
+    pub fn on_dahai_with_tsumogiri(&mut self, actor: u8, pai: &str, tsumogiri: Option<bool>) {
         if usize::from(actor) >= PLAYER_COUNT {
             return;
         }
@@ -96,6 +105,9 @@ impl ValidationState {
             self.last_tsumo = None;
         }
         self.confirm_pending_passed_tile();
+        if tsumogiri != Some(true) {
+            self.clear_same_hand_passed_tiles(actor);
+        }
         self.record_post_reach_passed_tile(actor, pai);
         self.establish_pending_reach(actor);
         self.pending_passed_tile = TileType::from_mjai_type_str(pai)
@@ -108,6 +120,7 @@ impl ValidationState {
     pub fn on_hand_change(&mut self, actor: u8) {
         self.confirm_pending_passed_tile();
         self.clear_temporary_passed_tiles(actor);
+        self.clear_same_hand_passed_tiles(actor);
     }
 
     /// 和了イベントでは直前の打牌が「通った」とは言えないため pending を破棄する。
@@ -148,11 +161,13 @@ impl ValidationState {
         self.active_reach = [false; PLAYER_COUNT];
         self.post_reach_passed_tiles = Default::default();
         self.temporary_passed_tiles = None;
+        self.same_hand_passed_tiles = None;
         self.pending_passed_tile = None;
     }
 
-    fn start_temporary_passed_tracking(&mut self) {
+    fn start_passed_tracking(&mut self) {
         self.temporary_passed_tiles = Some(Default::default());
+        self.same_hand_passed_tiles = Some(Default::default());
         self.pending_passed_tile = None;
     }
 
@@ -160,12 +175,17 @@ impl ValidationState {
         let Some((actor, tile)) = self.pending_passed_tile.take() else {
             return;
         };
-        let Some(passed) = self.temporary_passed_tiles.as_mut() else {
-            return;
-        };
-        for (player, tiles) in passed.iter_mut().enumerate() {
-            if player != usize::from(actor) && !tiles.contains(&tile) {
-                tiles.push(tile);
+        for passed in [
+            self.temporary_passed_tiles.as_mut(),
+            self.same_hand_passed_tiles.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for (player, tiles) in passed.iter_mut().enumerate() {
+                if player != usize::from(actor) && !tiles.contains(&tile) {
+                    tiles.push(tile);
+                }
             }
         }
     }
@@ -173,6 +193,16 @@ impl ValidationState {
     fn clear_temporary_passed_tiles(&mut self, actor: u8) {
         if let Some(tiles) = self
             .temporary_passed_tiles
+            .as_mut()
+            .and_then(|passed| passed.get_mut(usize::from(actor)))
+        {
+            tiles.clear();
+        }
+    }
+
+    fn clear_same_hand_passed_tiles(&mut self, actor: u8) {
+        if let Some(tiles) = self
+            .same_hand_passed_tiles
             .as_mut()
             .and_then(|passed| passed.get_mut(usize::from(actor)))
         {
@@ -728,6 +758,116 @@ mod tests {
             let mut state = ValidationState::new();
             state.on_start_game(0);
             assert_eq!(state.temporary_passed_tiles(), None);
+        }
+    }
+
+    mod same_hand_passed_tracking {
+        use super::*;
+
+        fn tile(mjai: &str) -> TileType {
+            TileType::from_mjai_type_str(mjai).unwrap()
+        }
+
+        fn started() -> ValidationState {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            state.on_start_kyoku();
+            state
+        }
+
+        fn is_temporary_passed(state: &ValidationState, player: usize, mjai: &str) -> bool {
+            state
+                .temporary_passed_tiles()
+                .is_some_and(|passed| passed[player].contains(&tile(mjai)))
+        }
+
+        fn is_same_hand_passed(state: &ValidationState, player: usize, mjai: &str) -> bool {
+            state
+                .same_hand_passed_tiles()
+                .is_some_and(|passed| passed[player].contains(&tile(mjai)))
+        }
+
+        fn confirm_nine_man_against(state: &mut ValidationState, player: u8) {
+            state.on_dahai_with_tsumogiri((player + 1) % 4, "9m", Some(false));
+            state.on_tsumo(player, "?".to_string());
+        }
+
+        #[test]
+        fn confirmed_tile_enters_temporary_and_same_hand_history() {
+            let mut state = started();
+            state.on_dahai_with_tsumogiri(0, "9m", Some(false));
+            state.on_tsumo(1, "?".to_string());
+
+            assert!(is_temporary_passed(&state, 2, "9m"));
+            assert!(is_same_hand_passed(&state, 2, "9m"));
+        }
+
+        #[test]
+        fn draw_clears_only_temporary_history_for_the_drawing_player() {
+            let mut state = started();
+            confirm_nine_man_against(&mut state, 2);
+
+            assert!(!is_temporary_passed(&state, 2, "9m"));
+            assert!(is_same_hand_passed(&state, 2, "9m"));
+        }
+
+        #[test]
+        fn consecutive_tsumogiri_keeps_same_hand_history() {
+            let mut state = started();
+            confirm_nine_man_against(&mut state, 2);
+
+            for pai in ["1p", "2p"] {
+                state.on_dahai_with_tsumogiri(2, pai, Some(true));
+                for actor in [3, 0, 1] {
+                    state.on_tsumo(actor, "?".to_string());
+                    state.on_dahai_with_tsumogiri(actor, "1m", Some(true));
+                }
+                state.on_tsumo(2, "?".to_string());
+            }
+
+            assert!(is_same_hand_passed(&state, 2, "9m"));
+        }
+
+        #[test]
+        fn tedashi_and_unknown_tsumogiri_clear_same_hand_history() {
+            for tsumogiri in [Some(false), None] {
+                let mut state = started();
+                confirm_nine_man_against(&mut state, 2);
+
+                state.on_dahai_with_tsumogiri(2, "1p", tsumogiri);
+
+                assert!(!is_same_hand_passed(&state, 2, "9m"));
+            }
+        }
+
+        #[test]
+        fn calls_and_kans_clear_same_hand_history() {
+            for actor in 0..4 {
+                let mut state = started();
+                confirm_nine_man_against(&mut state, actor);
+
+                state.on_hand_change(actor);
+
+                assert!(!is_same_hand_passed(&state, usize::from(actor), "9m"));
+            }
+        }
+
+        #[test]
+        fn another_players_hand_change_keeps_same_hand_history() {
+            let mut state = started();
+            confirm_nine_man_against(&mut state, 2);
+
+            state.on_hand_change(3);
+            state.on_dahai_with_tsumogiri(3, "1p", Some(false));
+
+            assert!(is_same_hand_passed(&state, 2, "9m"));
+        }
+
+        #[test]
+        fn tracking_is_unknown_until_start_kyoku_is_observed() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+            assert_eq!(state.same_hand_passed_tiles(), None);
         }
     }
 }
