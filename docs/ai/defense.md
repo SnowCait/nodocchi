@@ -4,23 +4,26 @@
 
 ## Riichi Defense
 
-他家リーチ者に対する `Defense` です。リーチ者が1人か複数かで、現物の次に使う根拠が変わります。
+他家リーチ者に対する `Defense` です。リーチ者が1人でも複数でも、全リーチ者の exact model が利用可能なら exact ron-risk path を通ります。
 
 | 局面 | 優先順 |
 | --- | --- |
-| 共通 | Genbutsu が最優先 |
-| 単独リーチ | Genbutsu → exact hidden-hand ron risk |
-| 複数リーチ | Genbutsu → 従来の HonorSafety / wall / Suji ordering |
+| 共通 | 全リーチ者への共通 Genbutsu が最優先 |
+| 単独リーチ (exact 利用可) | Genbutsu → そのリーチ者の exact `R/T` 比較 |
+| 複数リーチ (全員 exact 利用可) | Genbutsu → リーチ者ごとの exact `R/T` を worst-first に並べた lexicographic minimax |
+| 1人でも exact 利用不可 | Genbutsu → 局面全体を legacy HonorSafety / wall / Suji ordering |
 
-exact hidden-hand model を使うのは単独リーチの Riichi Defense だけです。複数リーチと、[OpenHand Defense](#openhand-defense) / [Combined Defense](#combined-defense) は従来 behavior のままです。
+exact path はリーチ者を1人ずつ既存の single-player hidden-hand model で評価します。単独リーチはその評価が1要素になった場合、複数リーチは要素が2〜3個の vector になった場合です。exact hidden-hand model を使うのは Riichi Defense だけで、[OpenHand Defense](#openhand-defense) / [Combined Defense](#combined-defense) は従来 behavior のままです。
 
 ### Genbutsu
 
-リーチ者本人の河と、リーチ成立後に他家から切られて通った `post_reach_passed` の両方を現物とします。複数リーチでは全 target に対する安全性を集約します。現物は単独・複数どちらでも最優先で、exact model より先に選びます。
+リーチ者本人の河と、リーチ成立後に他家から切られて通った `post_reach_passed` の両方を現物とします。**全リーチ者に共通する現物**は単独・複数どちらでも最優先で、exact minimax より先に選びます。
 
-### 単独リーチの exact ron risk
+一部のリーチ者にだけ現物の牌は、この共通 Genbutsu にはなりません。exact path ではそのリーチ者に対する `R` が0になり、他のリーチ者の risk と並んで risk vector の1要素になります。
 
-リーチ者が1人で、共通現物がない場合の選択です。数牌と字牌を分けず、同じ exact hidden-hand model の上で比較します。「両面は何点」「嵌張は何点」のような固定の wait-shape coefficient は持ちません。
+### リーチ者ごとの exact ron risk
+
+共通現物がない場合の選択です。数牌と字牌を分けず、同じ exact hidden-hand model の上で比較します。「両面は何点」「嵌張は何点」のような固定の wait-shape coefficient は持ちません。
 
 数えるのは、そのリーチ者が持ち得る隠れ手牌 (hidden hand) の状態です。見え牌から牌種ごとの残枚数 `remaining[t]` が決まり、隠れ手牌1状態 `H` の physical weight は、その手牌を実際の物理牌で作る組み合わせ数
 
@@ -40,15 +43,15 @@ R(p, x)
   hidden-hand states の physical weight
 ```
 
-`T(p)` は target に依存しないので、リーチ者ごとに1回だけ計算します。
+`T(p)` は target に依存しないので、リーチ者ごとに1回だけ計算します。複数リーチでも、この `T(p)` / `R(p, x)` はリーチ者 `p` 単独の model から求めます。
 
 #### `R/T` が表すもの
 
-`R(p, x) / T(p)` は、**この exact combinatorial hidden-hand model 上で、target `x` が現在ロン可能な hidden-hand state の比率**です。
+`R(p, x) / T(p)` は、**この exact combinatorial hidden-hand model 上で、リーチ者 `p` が target `x` で現在ロン可能な hidden-hand state の比率**です。リーチ者ごとの individual exact structural risk evidence であり、複数リーチでも player ごとに独立した量として保持します。
 
 実放銃率でも実際のロン確率でもなく、牌譜統計から求めた empirical probability でも、相手の打ち方を表す opponent behavior probability でもありません。model は behavioral prior も牌譜統計も持たず、「公開情報と矛盾しない隠れ手牌」を物理牌の組み合わせ数として数えているだけです。
 
-#### production の比較
+#### 単独リーチの比較
 
 同じ単独リーチ者・同じ局面では `T(p)` が全 target で共通です。そのため production selection は
 
@@ -57,6 +60,48 @@ ron_capable_weight R(p, x)
 ```
 
 の小さい候補をそのまま安全と比較できます。候補ごとに浮動小数点の `R/T` を計算してはいません。同じ牌種は1回だけ評価し、赤5と黒5は同じ evidence を共有します。
+
+#### 複数リーチの worst-first lexicographic minimax
+
+リーチ者が2人以上の場合、候補 `x` についてリーチ者ごとの exact risk を個別に求めます。
+
+```text
+player A: R(A, x) / T(A)
+player B: R(B, x) / T(B)
+player C: R(C, x) / T(C)
+```
+
+`T(p)` はリーチ者ごとに異なるので、`R(A, x)` と `R(B, x)` のような raw physical weight を player をまたいで直接比較してはいけません。player 間の比較は必ず `R/T` の exact ratio comparison (`RonRiskEvidence::compare_ratio()`) で行います。
+
+候補ごとに、そのリーチ者たちの risk を**危険な順**へ並べます。
+
+```text
+[worst, second-worst, third-worst]
+```
+
+この vector を候補どうしで辞書順に比較し、最小の候補を選びます。
+
+```text
+候補 A: [20%, 5%]
+候補 B: [12%, 10%]
+候補 C: [18%, 3%]
+
+→ B
+```
+
+`%` は説明のための表記です。production は比率を浮動小数点へ変換せず、`compare_ratio()` の cross multiplication で exact に比較します。1組でも比較不能なら値を推測せず、局面全体を legacy fallback へ落とします。
+
+この policy が最小化するのは、**最も危険なリーチ者に対する individual exact structural risk** です。それが同率なら2番目、さらに同率なら3番目を比べます。次のいずれでもありません。
+
+- リーチ者ごとの risk の単純和
+- 平均 / 加重平均
+- `1 - Π(1 - p)` のような独立事象の合成
+- リーチ者どうしが独立という仮定
+- joint hidden-hand probability
+
+また、複数リーチの exact path はリーチ者を1人ずつ single-player hidden-hand model で評価したものです。複数リーチ者の隠れ手牌を同じ unknown 物理牌 pool から同時に割り当てる joint hidden-hand exact model ではありません。joint model を独立確率で近似しているのでもなく、joint な量を作らずに individual risk の minimax で比較しています。
+
+単独リーチはこの vector が1要素になった場合にすぎず、結果は [単独リーチの比較](#単独リーチの比較) と同じです。
 
 #### 数える手役形
 
@@ -82,17 +127,24 @@ Standard の structural waits には Ryanmen / Kanchan / Penchan / Shanpon / Tan
 
 #### exact model が使えない場合
 
-対象がリーチしていない、副露を持つ、固定面子が多すぎる、player を取得できないなど model の前提と矛盾する入力では、推測で補完せず legacy Riichi Defense へ fallback します。denominator `T(p)` が0の場合や、`R > T` のように model invariant と矛盾する evidence が出た場合も同じく fallback します。通常の単独リーチでは exact path を使います。
+exact path を使うのは、**全リーチ者**の exact model が利用可能な場合だけです。1人でも
 
-### 複数リーチと legacy fallback
+- 対象がリーチしていない、副露を持つ、固定面子が多すぎる、player を取得できないなど model の前提と矛盾する unsupported state
+- denominator `T(p)` が0
+- `R > T` のような model invariant との矛盾
+- exact ratio comparison が不能
 
-リーチ者が2人以上いる場合、exact hidden-hand model は使いません。joint hidden-hand exact model も、各リーチ者の `R/T` の和・max・independence approximation も計算していません。現物の次は従来どおり次の safety で比較します。
+になった場合は、推測で補完せず、partial exact と partial legacy を混在させもせず、**局面全体**を [legacy safety fallback](#legacy-safety-fallback) へ落とします。通常のリーチ局面では exact path を使います。
+
+### legacy safety fallback
+
+exact model が利用できない場合の従来 selection です。全リーチ者の exact model が揃わない限り、単独リーチでも複数リーチでも局面全体がこの経路になります。現物の次は次の safety で比較します。
 
 - HonorSafety
 - wall / one-chance
 - Suji / HalfSuji
 
-単独リーチで exact model が使えない場合も同じ経路です。
+この経路では joint hidden-hand exact model も、リーチ者ごとの `R/T` の和・max・independence approximation も計算しません。
 
 ### HonorSafety
 
@@ -120,7 +172,7 @@ Standard の structural waits には Ryanmen / Kanchan / Penchan / Shanpon / Tan
 
 数牌は `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で fallback を探し、`NoSafety` だけなら選びません。選べる防御候補がない場合は通常打牌へ戻ります。
 
-exact hidden-hand model はここでは使いません。単独リーチ向けの exact path は Riichi Defense 限定です。
+exact hidden-hand model はここでは使いません。リーチ者ごとの exact path は Riichi Defense 限定です。
 
 ## Combined Defense
 
@@ -147,10 +199,10 @@ OpenHand Defense と同じく、複合 threat でも exact hidden-hand model は
 
 `post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実で、リーチ者の手牌が変化しないため局中継続します。`temporary_passed` は非リーチを含む各 player について「最後の手牌変化後に通った」事実で、対象 player の次のツモ、chi / pon / daiminkan / ankan / kakan で消えます。両者は寿命が異なる別 state で、前者を非リーチ副露相手へ流用しません。
 
-単独リーチの exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、リーチ者本人の河と `post_reach_passed` です。
+exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、リーチ者本人の河と `post_reach_passed` です。
 
 入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。
 
 ## fallback と source of truth
 
-selection は production selector が source of truth です。diagnostics は同じ selector の結果を `selected` として表示し、`act()` と `diagnose()` で別の防御ロジックを持ちません。単独リーチの exact evidence も、選択に使ったものと同じ evaluation を表示します。`Push` では通常打牌の優先順を変えず、`Fold` のときだけ該当 threat 用 fallback を先に試します。
+selection は production selector が source of truth です。diagnostics は同じ selector の結果を `selected` として表示し、`act()` と `diagnose()` で別の防御ロジックを持ちません。リーチ者ごとの exact evidence も、選択に使ったものと同じ evaluation を表示します。`Push` では通常打牌の優先順を変えず、`Fold` のときだけ該当 threat 用 fallback を先に試します。
