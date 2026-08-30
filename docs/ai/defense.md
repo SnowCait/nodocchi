@@ -13,7 +13,7 @@
 | 複数リーチ (全員 exact 利用可) | Genbutsu → リーチ者ごとの exact `R/T` を worst-first に並べた lexicographic minimax |
 | 1人でも exact 利用不可 | Genbutsu → 局面全体を legacy HonorSafety / wall / Suji ordering |
 
-exact path はリーチ者を1人ずつ既存の single-player hidden-hand model で評価します。単独リーチはその評価が1要素になった場合、複数リーチは要素が2〜3個の vector になった場合です。exact hidden-hand model を使うのは Riichi Defense だけで、[OpenHand Defense](#openhand-defense) / [Combined Defense](#combined-defense) は従来 behavior のままです。
+exact path はリーチ者を1人ずつ既存の single-player hidden-hand model で評価します。単独リーチはその評価が1要素になった場合、複数リーチは要素が2〜3個の vector になった場合です。exact hidden-hand model を使うのは Riichi Defense だけで、[OpenHand Defense](#openhand-defense) / [Combined Defense](#combined-defense) では使いません。
 
 ### Genbutsu
 
@@ -165,10 +165,15 @@ exact model が利用できない場合の従来 selection です。全リーチ
 候補の大分類は次の順です。
 
 1. `SafeAgainstAllTargets`
-2. `HonorSafety`
-3. `SuitedSafety`
+2. `SameHandPassed`
+3. `HonorSafety`
+4. `SuitedSafety`
 
-第一分類 `SafeAgainstAllTargets` は、本人の河または現在有効な一時通過牌によって全 target にロンされない牌です。「全 target 自身の河にある」という意味ではありません。字牌・役牌価値・壁・スジは legacy Riichi Defense と同じ helper を共有します。複数 target の集約では、まだその牌でロン可能な相手のうち最も危険な評価を採ります。
+第一分類 `SafeAgainstAllTargets` は、本人の河または現在有効な一時通過牌によって全 target にロンされない牌 (hard-safe) です。「全 target 自身の河にある」という意味ではありません。
+
+`SameHandPassed` は、全 target が hard-safe または same-hand passed で覆われ、少なくとも1人は same-hand passed だけを根拠とする牌です。same-hand passed は hard-safe ではないので第一分類には入れず、字牌・数牌の heuristic より先に選びます。候補が複数ある場合は hard-safe な target 数が多いものを優先し、同数なら合法 Dahai の元順序を維持します。根拠の違いは [passed tile の区別](#passed-tile-の区別) を参照してください。
+
+字牌・役牌価値・壁・スジは legacy Riichi Defense と同じ helper を共有します。複数 target の集約では、その牌が hard-safe な target と same-hand passed のある target を除いた相手のうち、最も危険な評価を採ります。
 
 数牌は `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で fallback を探し、`NoSafety` だけなら選びません。選べる防御候補がない場合は通常打牌へ戻ります。
 
@@ -181,10 +186,13 @@ exact hidden-hand model はここでは使いません。リーチ者ごとの e
 候補の大分類は次の順です。
 
 1. `SafeAgainstAllThreats`
-2. `HonorSafety`
-3. `SuitedSafety`
+2. `SameHandPassed`
+3. `HonorSafety`
+4. `SuitedSafety`
 
-ロン安全な target はその牌をロンできないため、その相手の無スジや役牌価値を集約から除きます。wall は見え牌由来なので全 target で共有します。
+`SameHandPassed` の条件は OpenHand Defense と同じで、全 target が hard-safe または same-hand passed で覆われ、少なくとも1人は same-hand passed だけを根拠とする牌です。same-hand passed を根拠にできるのは `HighOpenHand` の target だけで、`Riichi` の target には適用しません。候補が複数ある場合は hard-safe な target 数が多いものを優先し、同数なら合法 Dahai の元順序を維持します。
+
+その牌が hard-safe な target と same-hand passed のある target は、それより弱い heuristic の集約から除き、その相手の無スジや役牌価値を持ち込みません。wall は見え牌由来なので全 target で共有します。
 
 OpenHand Defense と同じく、複合 threat でも exact hidden-hand model は使いません。
 
@@ -192,16 +200,34 @@ OpenHand Defense と同じく、複合 threat でも exact hidden-hand model は
 
 ここは3経路で混同しない重要な差です。
 
-| target | ロン安全の根拠 |
+| target | hard-safe の根拠 |
 | --- | --- |
 | `Riichi` | 本人の河 + `post_reach_passed` |
 | `HighOpenHand` | 本人の河 + 現在有効な `temporary_passed` |
 
-`post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実で、リーチ者の手牌が変化しないため局中継続します。`temporary_passed` は非リーチを含む各 player について「最後の手牌変化後に通った」事実で、対象 player の次のツモ、chi / pon / daiminkan / ankan / kakan で消えます。両者は寿命が異なる別 state で、前者を非リーチ副露相手へ流用しません。
+`post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実で、リーチ者の手牌が変化しないため局中継続します。`temporary_passed` は非リーチを含む各 player について「一時フリテンで現在ロンできない」事実で、対象 player の次のツモ、chi / pon / daiminkan / ankan / kakan で消えます。両者は寿命が異なる別 state で、前者を非リーチ副露相手へ流用しません。
+
+hard-safe ではない `same_hand_passed` はこの表に入りません。区別は [passed tile の区別](#passed-tile-の区別) を参照してください。
 
 exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、リーチ者本人の河と `post_reach_passed` です。
 
-入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。
+### passed tile の区別
+
+「通った牌」は3種類あり、意味・強さ・寿命がそれぞれ違います。
+
+| state | 意味 | hard-safe | 失効 | 使う target |
+| --- | --- | --- | --- | --- |
+| `post_reach_passed` | リーチ成立後に他家から切られて通った牌 | ○ | 局中継続 | `Riichi` |
+| `temporary_passed` | 一時フリテンにより現在ロンできない牌 | ○ | 対象 player の次のツモ、鳴き・槓 | `HighOpenHand` |
+| `same_hand_passed` | concealed hand が最後に変化して以降に実際に通った牌 | × | 手出し、ツモ切りか不明な打牌、鳴き・槓 | `HighOpenHand` |
+
+`temporary_passed` は、対象 player がその牌を見逃した直後で一時フリテンによりロンできない、という現在の事実です。ツモを経ると一時フリテンが解けるので、対象 player の次の draw で失効します。chi / pon / daiminkan / ankan / kakan でも消えます。
+
+`same_hand_passed` は、対象 player の concealed hand が最後に変化して以降に実際に通った牌です。一時フリテンはすでに解けている可能性があるので hard-safe ではありません。ただし「同じ手牌のままその牌を見逃した」という観測事実なので、Wall / OneChance / Suji のような見え牌・河由来の heuristic より強い safety evidence として扱い、hard-safe の次に置きます。ツモ切りは concealed hand を変えないので維持し、手出し、ツモ切りかどうか判別できない打牌、chi / pon / daiminkan / ankan / kakan では失効します。判別できない打牌を手牌不変とは推測しません。
+
+`post_reach_passed` はリーチ固有の hard-safe (現物) で、リーチ者の手牌が変化しないため局中継続します。`same_hand_passed` は非リーチ副露相手 (`HighOpenHand`) の evidence で、`Riichi` の target には使いません。3つは互いに流用しない別 state です。
+
+入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。`same_hand_passed` は RiichiLab live client が MJAI event の `tsumogiri` から積み上げる履歴で、bot-scenario の入力 field はありません。
 
 ## fallback と source of truth
 
