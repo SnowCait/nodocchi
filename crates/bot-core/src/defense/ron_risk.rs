@@ -6,15 +6,6 @@ use bot_logic::TileType;
 
 use super::{CompressedHiddenHandStates, RonRiskEvidence};
 
-/// 単独リーチ者に対する合法 Dahai 1件の exact structural risk evidence。
-///
-/// 同じ `TileType` の赤5 / 黒5は同じ evidence を共有する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DahaiRonRiskEvidence<'a> {
-    pub action: &'a LegalAction,
-    pub evidence: RonRiskEvidence,
-}
-
 /// 1候補牌について、指定リーチ者1人から得た exact structural risk evidence。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerRonRiskEvidence {
@@ -24,23 +15,26 @@ pub struct PlayerRonRiskEvidence {
 
 /// 合法 Dahai 1件について、全リーチ者を個別評価した exact risk vector。
 ///
-/// `player_evidence` は player id 順で保持する。production comparator はこの順序を意味に使わず、
-/// 各 `R/T` を exact に比較して worst-first へ並べてから辞書順比較する。
+/// 単独リーチも `player_evidence` が1要素の risk vector として同じ表現で扱う。同じ `TileType`
+/// の赤5 / 黒5は同じ evidence を共有する。`player_evidence` は player id 順で保持する。
+/// production comparator はこの順序を意味に使わず、各 `R/T` を exact に比較して worst-first へ
+/// 並べてから辞書順比較する。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DahaiRonRiskVector<'a> {
+pub(crate) struct DahaiRonRiskVector<'a> {
     pub action: &'a LegalAction,
     pub player_evidence: Vec<PlayerRonRiskEvidence>,
 }
 
 /// 指定したリーチ者について、全合法 Dahai を exact `R/T` evidence へ変換する。
 ///
-/// `CompressedHiddenHandStates` は1回だけ構築し、同じ `TileType` も1回だけ評価する。exact model
-/// が unsupported、`T == 0`、または model invariant と矛盾する場合は `None` を返す。
-pub fn reached_player_dahai_actions_by_ron_risk<'a>(
+/// 戻り値は `legal_actions` 中の Dahai と同じ順序で並ぶ。`CompressedHiddenHandStates` は1回だけ
+/// 構築し、同じ `TileType` も1回だけ評価する。exact model が unsupported、`T == 0`、または model
+/// invariant と矛盾する場合は `None` を返す。
+pub(super) fn dahai_ron_risk_evidence_for_player(
     player: usize,
     context: &GameContext,
-    legal_actions: &'a [LegalAction],
-) -> Option<Vec<DahaiRonRiskEvidence<'a>>> {
+    legal_actions: &[LegalAction],
+) -> Option<Vec<PlayerRonRiskEvidence>> {
     let mut states = CompressedHiddenHandStates::new(player, context).ok()?;
     let tenpai_weight = states.tenpai_state_weight().weight;
     if tenpai_weight == 0 {
@@ -70,25 +64,9 @@ pub fn reached_player_dahai_actions_by_ron_risk<'a>(
                 evidence
             }
         };
-        evaluated.push(DahaiRonRiskEvidence { action, evidence });
+        evaluated.push(PlayerRonRiskEvidence { player, evidence });
     }
     Some(evaluated)
-}
-
-/// 単独リーチ者について、全合法 Dahai を exact `R/T` evidence へ変換する。
-///
-/// `CompressedHiddenHandStates` は1回だけ構築し、同じ `TileType` も1回だけ評価する。exact model
-/// が unsupported、`T == 0`、または model invariant と矛盾する場合は `None` を返す。
-pub fn single_reach_dahai_actions_by_ron_risk<'a>(
-    player: usize,
-    context: &GameContext,
-    legal_actions: &'a [LegalAction],
-) -> Option<Vec<DahaiRonRiskEvidence<'a>>> {
-    if context.reached_opponents().as_slice() != [player] {
-        return None;
-    }
-
-    reached_player_dahai_actions_by_ron_risk(player, context, legal_actions)
 }
 
 /// 全リーチ者を既存 single-player exact model で個別評価する。
@@ -114,18 +92,12 @@ pub(crate) fn reached_opponents_dahai_actions_by_ron_risk<'a>(
         .collect();
 
     for player in reached {
-        let evaluated = reached_player_dahai_actions_by_ron_risk(player, context, legal_actions)?;
+        let evaluated = dahai_ron_risk_evidence_for_player(player, context, legal_actions)?;
         if evaluated.len() != vectors.len() {
             return None;
         }
-        for (vector, candidate) in vectors.iter_mut().zip(evaluated) {
-            if vector.action != candidate.action {
-                return None;
-            }
-            vector.player_evidence.push(PlayerRonRiskEvidence {
-                player,
-                evidence: candidate.evidence,
-            });
+        for (vector, evidence) in vectors.iter_mut().zip(evaluated) {
+            vector.player_evidence.push(evidence);
         }
     }
 

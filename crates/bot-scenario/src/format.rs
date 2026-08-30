@@ -1390,7 +1390,7 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
         "  ron capable weight: {}",
         optional(
             selected
-                .selected_ron_risk_evidence
+                .selected_ron_risk_evidence()
                 .map(|evidence| evidence.ron_capable_weight)
         )
     ));
@@ -1398,7 +1398,7 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
         "  tenpai weight: {}",
         optional(
             selected
-                .selected_ron_risk_evidence
+                .selected_ron_risk_evidence()
                 .map(|evidence| evidence.tenpai_weight)
         )
     ));
@@ -1461,7 +1461,7 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
         "  ron capable weight: {}",
         optional(
             candidate
-                .ron_risk_evidence
+                .ron_risk_evidence()
                 .map(|evidence| evidence.ron_capable_weight)
         )
     ));
@@ -1469,7 +1469,7 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
         "  tenpai weight: {}",
         optional(
             candidate
-                .ron_risk_evidence
+                .ron_risk_evidence()
                 .map(|evidence| evidence.tenpai_weight)
         )
     ));
@@ -2445,8 +2445,14 @@ mod tests {
         assert!(defense.contains("  suji safety: HalfSuji"), "{defense}");
 
         let candidates = &diagnostic.defense.as_ref().unwrap().candidates;
-        let four_pin_r = candidates[0].ron_risk_evidence.unwrap().ron_capable_weight;
-        let seven_sou_r = candidates[1].ron_risk_evidence.unwrap().ron_capable_weight;
+        let four_pin_r = candidates[0]
+            .ron_risk_evidence()
+            .unwrap()
+            .ron_capable_weight;
+        let seven_sou_r = candidates[1]
+            .ron_risk_evidence()
+            .unwrap()
+            .ron_capable_weight;
         assert!(four_pin_r < seven_sou_r);
     }
 

@@ -50,9 +50,10 @@ pub struct DefenseFallbackDiagnostic {
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
     pub selected_suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub selected_suited_safety_rank: Option<SuitedSafetyRank>,
-    /// 単独リーチ exact model が利用可能な場合の、選択牌に対する既存 `R/T` evidence。
-    pub selected_ron_risk_evidence: Option<RonRiskEvidence>,
     /// 全リーチ者の exact model が利用可能な場合の、選択牌に対する player 別 `R/T` evidence。
+    ///
+    /// 単独リーチの `R/T` もこの1要素 vector が canonical で、
+    /// [`selected_ron_risk_evidence`](Self::selected_ron_risk_evidence) はそこから導出する。
     pub selected_player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
 }
 
@@ -110,9 +111,15 @@ impl DefenseFallbackDiagnostic {
                 .map(|tile| is_suji_for_all_reached(tile, context)),
             selected_suji_safety_rank_for_all_reached: evidence.map(|evidence| evidence.suji_rank),
             selected_suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
-            selected_ron_risk_evidence: single_player_evidence(player_ron_risk_evidence),
             selected_player_ron_risk_evidence: player_ron_risk_evidence.map(<[_]>::to_vec),
         }
+    }
+
+    /// 単独リーチ exact model が利用可能な場合の、選択牌に対する既存 `R/T` evidence。
+    ///
+    /// canonical な player 別 vector が1要素のときだけ `Some`。複数リーチでは `None`。
+    pub fn selected_ron_risk_evidence(&self) -> Option<RonRiskEvidence> {
+        single_player_evidence(self.selected_player_ron_risk_evidence.as_deref())
     }
 }
 
@@ -154,9 +161,10 @@ pub struct DefenseCandidateDiagnostic {
     /// `OneChance` / `NoChance` になっている場合でも `HalfSuji` と `NoSuji` を区別できる。
     pub suji_safety_rank_for_all_reached: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
-    /// 単独リーチ exact model が利用可能な場合の、この候補に対する既存 `R/T` evidence。
-    pub ron_risk_evidence: Option<RonRiskEvidence>,
     /// 全リーチ者の exact model が利用可能な場合の、この候補に対する player 別 `R/T` evidence。
+    ///
+    /// 単独リーチの `R/T` もこの1要素 vector が canonical で、
+    /// [`ron_risk_evidence`](Self::ron_risk_evidence) はそこから導出する。
     pub player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
 }
 
@@ -202,9 +210,15 @@ impl DefenseCandidateDiagnostic {
             suji_for_all_reached: suited_tile.map(|tile| is_suji_for_all_reached(tile, context)),
             suji_safety_rank_for_all_reached: evidence.map(|evidence| evidence.suji_rank),
             suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
-            ron_risk_evidence: single_player_evidence(player_ron_risk_evidence),
             player_ron_risk_evidence: player_ron_risk_evidence.map(<[_]>::to_vec),
         })
+    }
+
+    /// 単独リーチ exact model が利用可能な場合の、この候補に対する既存 `R/T` evidence。
+    ///
+    /// canonical な player 別 vector が1要素のときだけ `Some`。複数リーチでは `None`。
+    pub fn ron_risk_evidence(&self) -> Option<RonRiskEvidence> {
+        single_player_evidence(self.player_ron_risk_evidence.as_deref())
     }
 
     /// 合法 action のうち Dahai だけを、元の順序を保って防御候補評価へ変換する。
@@ -416,8 +430,8 @@ fn log_defense_fallback_decision_with_ron_risk_vectors(
         selected_suji_for_all_reached = ?diagnostic.selected_suji_for_all_reached,
         selected_suji_safety_rank = ?diagnostic.selected_suji_safety_rank_for_all_reached,
         selected_suited_safety_rank = ?diagnostic.selected_suited_safety_rank,
-        selected_ron_capable_weight = diagnostic.selected_ron_risk_evidence.map(|evidence| evidence.ron_capable_weight),
-        selected_tenpai_weight = diagnostic.selected_ron_risk_evidence.map(|evidence| evidence.tenpai_weight),
+        selected_ron_capable_weight = diagnostic.selected_ron_risk_evidence().map(|evidence| evidence.ron_capable_weight),
+        selected_tenpai_weight = diagnostic.selected_ron_risk_evidence().map(|evidence| evidence.tenpai_weight),
         selected_player_ron_risk_evidence = ?diagnostic.selected_player_ron_risk_evidence,
         "defense fallback decision",
     );
@@ -451,8 +465,8 @@ fn log_defense_fallback_candidate(candidate: &DefenseCandidateDiagnostic) {
         suji_for_all_reached = ?candidate.suji_for_all_reached,
         suji_safety_rank = ?candidate.suji_safety_rank_for_all_reached,
         suited_safety_rank = ?candidate.suited_safety_rank,
-        ron_capable_weight = candidate.ron_risk_evidence.map(|evidence| evidence.ron_capable_weight),
-        tenpai_weight = candidate.ron_risk_evidence.map(|evidence| evidence.tenpai_weight),
+        ron_capable_weight = candidate.ron_risk_evidence().map(|evidence| evidence.ron_capable_weight),
+        tenpai_weight = candidate.ron_risk_evidence().map(|evidence| evidence.tenpai_weight),
         player_ron_risk_evidence = ?candidate.player_ron_risk_evidence,
         "defense fallback candidate",
     );
