@@ -1,7 +1,7 @@
 use super::common::*;
 use super::hidden_hand_states::{
-    ankan, brute_force_tenpai_state_weight, brute_force_weight, reached_fixture,
-    reached_fixture_with_tile_types,
+    ankan, brute_force_tenpai_state_weight, brute_force_weight, open_hand_fixture,
+    open_hand_fixture_with_discards, reached_fixture, reached_fixture_with_tile_types,
 };
 use crate::context::GameContext;
 use crate::defense::*;
@@ -38,6 +38,34 @@ fn assert_tenpai_matches_brute_force(context: &GameContext) -> TenpaiStateWeight
     expected
 }
 
+fn assert_open_target_matches_enumerator(
+    target: &str,
+    context: &GameContext,
+) -> StructuralCompletionStateWeight {
+    let target = tile_type(target);
+    let mut enumerated =
+        StructuralTenpaiHiddenHandStates::new(1, context).expect("open hand enumerator");
+    let mut compressed = CompressedStructuralTenpaiHiddenHandStates::new(1, context)
+        .expect("compressed open hand model");
+    let enumerated = enumerated.target_completion_state_weight(target);
+    let compressed = compressed.target_completion_state_weight(target);
+    assert_eq!(
+        compressed,
+        enumerated,
+        "target: {}",
+        target.to_mjai_string()
+    );
+    compressed
+}
+
+fn assert_open_tenpai_matches_brute_force(context: &GameContext) -> TenpaiStateWeight {
+    let expected = brute_force_tenpai_state_weight(context);
+    let states = CompressedStructuralTenpaiHiddenHandStates::new(1, context)
+        .expect("compressed open hand model");
+    assert_eq!(states.tenpai_state_weight(), expected);
+    expected
+}
+
 fn remaining_counts(context: &GameContext) -> [u8; TileType::COUNT] {
     let mut remaining = [0; TileType::COUNT];
     for tile in TileType::all() {
@@ -53,6 +81,110 @@ fn assert_ron_is_subset_for_targets(context: &GameContext, targets: &[&str]) {
         let ron = states.ron_capable_state_weight(tile_type(target));
         assert!(ron.weight <= tenpai.weight, "target: {target}");
         assert!(ron.states <= tenpai.states, "target: {target}");
+    }
+}
+
+#[test]
+fn open_hand_exact_model_counts_conditional_tenpai_and_target_completion() {
+    // 3副露なので concealed hand は4枚。未知 pool の5枚から4枚を選ぶ5 physical states は
+    // すべて Standard tenpai。234m5p の2 physical states だけが5p追加で完成する。
+    let context = open_hand_fixture(
+        &[("2m", 1), ("3m", 1), ("4m", 1), ("5p", 2)],
+        vec![pon("P"), pon("F"), pon("C")],
+    );
+
+    assert_eq!(
+        assert_open_tenpai_matches_brute_force(&context),
+        TenpaiStateWeight {
+            weight: 5,
+            states: 4,
+        }
+    );
+    assert_eq!(
+        assert_open_target_matches_enumerator("5p", &context),
+        StructuralCompletionStateWeight {
+            weight: 2,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_exact_model_reflects_visible_tile_copies() {
+    let context = open_hand_fixture(
+        &[("2m", 1), ("3m", 1), ("4m", 1), ("5p", 1)],
+        vec![pon("P"), pon("F"), pon("C")],
+    );
+
+    assert_eq!(
+        assert_open_tenpai_matches_brute_force(&context),
+        TenpaiStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+    assert_eq!(
+        assert_open_target_matches_enumerator("5p", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_target_completion_is_structural_not_a_furiten_judgement() {
+    let context = open_hand_fixture_with_discards(
+        &[("2m", 1), ("3m", 1), ("4m", 1), ("5p", 1)],
+        vec![pon("P"), pon("F"), pon("C")],
+        &["5p"],
+    );
+
+    assert_eq!(
+        assert_open_target_matches_enumerator("5p", &context),
+        StructuralCompletionStateWeight {
+            weight: 1,
+            states: 1,
+        }
+    );
+}
+
+#[test]
+fn open_hand_exact_model_excludes_chiitoitsu_and_kokushi() {
+    let chiitoitsu_only = open_hand_fixture(
+        &[("E", 2), ("S", 2), ("W", 2), ("N", 2), ("P", 2)],
+        vec![pon("C")],
+    );
+    let kokushi_only = open_hand_fixture(
+        &[
+            ("1m", 1),
+            ("9m", 1),
+            ("1p", 1),
+            ("9p", 1),
+            ("1s", 1),
+            ("9s", 1),
+            ("E", 1),
+            ("S", 1),
+            ("W", 1),
+            ("N", 1),
+        ],
+        vec![pon("C")],
+    );
+
+    for (family, context, target) in [
+        ("chiitoitsu", chiitoitsu_only, "E"),
+        ("kokushi", kokushi_only, "P"),
+    ] {
+        assert_eq!(
+            assert_open_tenpai_matches_brute_force(&context),
+            TenpaiStateWeight::default(),
+            "family: {family}"
+        );
+        assert_eq!(
+            assert_open_target_matches_enumerator(target, &context),
+            StructuralCompletionStateWeight::default(),
+            "family: {family}"
+        );
     }
 }
 

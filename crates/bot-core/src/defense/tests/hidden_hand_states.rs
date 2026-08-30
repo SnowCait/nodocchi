@@ -23,6 +23,24 @@ pub(super) fn pon(mjai: &str) -> Meld {
     Meld::new(MeldKind::Pon, tiles, Some(called))
 }
 
+fn chi(start: &str) -> Meld {
+    let tiles: Vec<TileId> = tile_type(start)
+        .sequence()
+        .expect("suited sequence start")
+        .into_iter()
+        .map(|tile| TileId::copies(tile).next().expect("first copy"))
+        .collect();
+    let called = tiles[0];
+    Meld::new(MeldKind::Chi, tiles, Some(called))
+}
+
+fn open_kan(kind: MeldKind, mjai: &str) -> Meld {
+    assert!(matches!(kind, MeldKind::Daiminkan | MeldKind::Kakan));
+    let tiles: Vec<TileId> = TileId::copies(tile_type(mjai)).collect();
+    let called = tiles[0];
+    Meld::new(kind, tiles, Some(called))
+}
+
 // 複数リーチ者を同じ縮小 unknown pool 上で個別評価する fixture。
 pub(super) fn multiple_reached_fixture(
     pool: &[(&str, u8)],
@@ -112,6 +130,43 @@ pub(super) fn reached_fixture_with_tile_types(
         all_melds,
     )
     .with_post_reach_passed_tiles(all_passed)
+}
+
+// player 1 を公開副露のある非リーチ者とし、pool に挙げた牌種だけへ残枚数を残す。
+pub(super) fn open_hand_fixture(pool: &[(&str, u8)], melds: Vec<Meld>) -> GameContext {
+    open_hand_fixture_with_discards(pool, melds, &[])
+}
+
+pub(super) fn open_hand_fixture_with_discards(
+    pool: &[(&str, u8)],
+    melds: Vec<Meld>,
+    discards: &[&str],
+) -> GameContext {
+    let mut remaining = [0u8; TileType::COUNT];
+    for (mjai, copies) in pool {
+        remaining[tile_type(mjai).index()] = *copies;
+    }
+    let visible: Vec<TileId> = TileType::all()
+        .flat_map(|tile| TileId::copies(tile).take(usize::from(4 - remaining[tile.index()])))
+        .collect();
+    let mut all_melds: [Vec<Meld>; 4] = Default::default();
+    all_melds[1] = melds;
+    let mut all_discards: [Vec<TileId>; 4] = Default::default();
+    all_discards[1] = discards.iter().map(|tile| discarded(tile)).collect();
+
+    GameContext::from_parts_with_melds(
+        None,
+        vec![],
+        vec![],
+        None,
+        None,
+        visible,
+        Some(0),
+        None,
+        all_discards,
+        [false; 4],
+        all_melds,
+    )
 }
 
 fn weight_of(target: &str, context: &GameContext) -> RonCapableStateWeight {
@@ -744,6 +799,131 @@ fn four_ankan_leaves_only_the_tanki_state() {
             states: 1,
         }
     );
+}
+
+#[test]
+fn open_hand_structural_model_uses_fixed_meld_concealed_lengths() {
+    for meld_count in 1..=3usize {
+        let melds: Vec<Meld> = ["P", "F", "C"]
+            .iter()
+            .take(meld_count)
+            .map(|tile| pon(tile))
+            .collect();
+        let context = open_hand_fixture(&[("1m", 4)], melds);
+        let enumerated =
+            StructuralTenpaiHiddenHandStates::new(1, &context).expect("open hand model");
+        let compressed = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+            .expect("compressed open hand model");
+
+        assert_eq!(enumerated.fixed_meld_count().get(), meld_count as u8);
+        assert_eq!(compressed.fixed_meld_count().get(), meld_count as u8);
+        assert_eq!(enumerated.concealed_hand_len(), 13 - 3 * meld_count as u8);
+        assert_eq!(compressed.concealed_hand_len(), 13 - 3 * meld_count as u8);
+    }
+}
+
+#[test]
+fn every_open_fixed_meld_kind_is_accepted() {
+    let melds = [
+        chi("1p"),
+        pon("P"),
+        open_kan(MeldKind::Daiminkan, "9s"),
+        open_kan(MeldKind::Kakan, "1s"),
+    ];
+
+    for meld in melds {
+        let context = open_hand_fixture(&[("1m", 4)], vec![meld]);
+        assert_eq!(
+            StructuralTenpaiHiddenHandStates::new(1, &context)
+                .expect("supported open meld")
+                .fixed_meld_count()
+                .get(),
+            1
+        );
+        assert_eq!(
+            CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+                .expect("supported open meld")
+                .fixed_meld_count()
+                .get(),
+            1
+        );
+    }
+}
+
+#[test]
+fn fixed_open_meld_is_not_counted_again_in_the_hidden_state() {
+    let context = open_hand_fixture(
+        &[
+            ("1m", 1),
+            ("2m", 1),
+            ("3m", 1),
+            ("4m", 1),
+            ("5m", 1),
+            ("6m", 1),
+            ("7m", 1),
+            ("8m", 1),
+            ("9m", 1),
+            ("E", 1),
+        ],
+        vec![pon("P")],
+    );
+    let mut enumerated =
+        StructuralTenpaiHiddenHandStates::new(1, &context).expect("open hand model");
+    let mut compressed = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+        .expect("compressed open hand model");
+    let expected = StructuralCompletionStateWeight {
+        weight: 1,
+        states: 1,
+    };
+
+    assert_eq!(
+        enumerated.target_completion_state_weight(tile_type("E")),
+        expected
+    );
+    assert_eq!(
+        compressed.target_completion_state_weight(tile_type("E")),
+        expected
+    );
+}
+
+#[test]
+fn open_hand_structural_model_rejects_more_than_four_fixed_melds() {
+    let context = open_hand_fixture(
+        &[("1m", 4)],
+        ["E", "S", "W", "N", "P"].into_iter().map(pon).collect(),
+    );
+
+    assert!(matches!(
+        StructuralTenpaiHiddenHandStates::new(1, &context),
+        Err(HiddenHandStateUnsupported::TooManyMelds)
+    ));
+    assert!(matches!(
+        CompressedStructuralTenpaiHiddenHandStates::new(1, &context),
+        Err(HiddenHandStateUnsupported::TooManyMelds)
+    ));
+}
+
+#[test]
+fn open_hand_structural_model_requires_a_non_reached_player_with_an_open_meld() {
+    let reached = reached_fixture(&[("1m", 4)], vec![pon("P")], &[], &[]);
+    assert!(matches!(
+        StructuralTenpaiHiddenHandStates::new(1, &reached),
+        Err(HiddenHandStateUnsupported::Reached)
+    ));
+    assert!(matches!(
+        CompressedStructuralTenpaiHiddenHandStates::new(1, &reached),
+        Err(HiddenHandStateUnsupported::Reached)
+    ));
+
+    let closed = open_hand_fixture(&[("1m", 4)], vec![]);
+    assert!(matches!(
+        StructuralTenpaiHiddenHandStates::new(1, &closed),
+        Err(HiddenHandStateUnsupported::NoOpenMeld)
+    ));
+    assert!(matches!(
+        CompressedStructuralTenpaiHiddenHandStates::new(1, &closed),
+        Err(HiddenHandStateUnsupported::NoOpenMeld)
+    ));
 }
 
 #[test]

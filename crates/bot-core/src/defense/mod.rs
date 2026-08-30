@@ -17,9 +17,9 @@ use crate::context::GameContext;
 use bot_logic::TileType;
 
 pub use compressed_hidden_hand_states::{
-    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, RonRiskEvidence,
-    TenpaiStateWeight, compressed_ron_capable_hidden_hand_weight,
-    compressed_tenpai_hidden_hand_weight,
+    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates,
+    CompressedStructuralTenpaiHiddenHandStates, RonRiskEvidence, TenpaiStateWeight,
+    compressed_ron_capable_hidden_hand_weight, compressed_tenpai_hidden_hand_weight,
 };
 pub(crate) use diagnostic::log_defense_fallback_evaluation;
 pub use diagnostic::{
@@ -32,7 +32,8 @@ pub use hard_safety::{
 };
 pub use hidden_hand_states::{
     HiddenHandStateMetrics, HiddenHandStateUnsupported, ReachedHiddenHandStates,
-    RonCapableStateWeight, ron_capable_hidden_hand_weight,
+    RonCapableStateWeight, StructuralCompletionStateWeight, StructuralTenpaiHiddenHandStates,
+    ron_capable_hidden_hand_weight,
 };
 pub use honor::{
     HonorSafetyRank, OpponentHonorValue, honor_dahai_actions_by_safety,

@@ -5,14 +5,14 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use bot_logic::{FixedMeldCount, Meld, TileType};
+use bot_logic::{FixedMeldCount, TileType};
 
 use crate::context::GameContext;
-use crate::meld::fixed_meld_count;
 
-use super::hard_safety::is_genbutsu_for;
-use super::hidden_hand_states::{HiddenHandStateUnsupported, RonCapableStateWeight};
-use super::wait_candidates::remaining_tile_copies;
+use super::hidden_hand_states::{
+    HiddenHandModelInput, HiddenHandModelMode, HiddenHandStateUnsupported, RonCapableStateWeight,
+    StructuralCompletionStateWeight,
+};
 use group::{ChiitoitsuShape, GROUP_COUNT, GroupClass, GroupSpec, enumerate_group_classes};
 
 /// compressed counting の内訳計測値。数え上げ結果には影響しない。
@@ -337,42 +337,26 @@ impl<'a> CompressedHiddenHandStates<'a> {
         player: usize,
         context: &'a GameContext,
     ) -> Result<Self, HiddenHandStateUnsupported> {
-        let fixed_melds = context
-            .melds_of(player)
-            .ok_or(HiddenHandStateUnsupported::UnknownPlayer)?;
-        if !context.is_reached(player) {
-            return Err(HiddenHandStateUnsupported::NotReached);
-        }
-        if fixed_melds.iter().any(Meld::is_open) {
-            return Err(HiddenHandStateUnsupported::OpenMeld);
-        }
-        let fixed_meld_count =
-            fixed_meld_count(fixed_melds).ok_or(HiddenHandStateUnsupported::TooManyMelds)?;
+        Ok(Self::from_input(HiddenHandModelInput::new(
+            player,
+            context,
+            HiddenHandModelMode::Riichi,
+        )?))
+    }
 
-        let mut remaining = [0u8; TileType::COUNT];
-        let mut unron_mask = 0u64;
-        let mut unron_tiles = Vec::new();
-        for tile in TileType::all() {
-            remaining[tile.index()] = remaining_tile_copies(tile, context);
-            if is_genbutsu_for(tile, player, context) {
-                unron_mask |= 1 << tile.index();
-                unron_tiles.push(tile);
-            }
-        }
-
+    fn from_input(input: HiddenHandModelInput<'a>) -> Self {
         let mut metrics = CompressedHiddenHandStateMetrics::default();
         let table_start = Instant::now();
         let specs = GroupSpec::all();
         metrics.block_tables = table_start.elapsed();
 
-        let concealed_hand_len = 13 - 3 * fixed_meld_count.get();
         let start = Instant::now();
         let groups = specs.map(|spec| {
             let (classes, visited) = enumerate_group_classes(
                 spec,
-                &remaining,
-                concealed_hand_len,
-                !fixed_meld_count.has_melds(),
+                &input.remaining,
+                input.concealed_hand_len,
+                !input.fixed_meld_count.has_melds(),
             );
             metrics.enumerated_group_vectors += visited;
             classes
@@ -381,12 +365,12 @@ impl<'a> CompressedHiddenHandStates<'a> {
         metrics.retained_group_classes = groups.iter().map(|classes| classes.len() as u64).sum();
 
         let mut states = Self {
-            context,
-            fixed_meld_count,
-            concealed_hand_len,
-            remaining,
-            unron_mask,
-            unron_tiles,
+            context: input.context,
+            fixed_meld_count: input.fixed_meld_count,
+            concealed_hand_len: input.concealed_hand_len,
+            remaining: input.remaining,
+            unron_mask: input.unron_mask,
+            unron_tiles: input.unron_tiles,
             specs,
             groups,
             tenpai_state_weight: TenpaiStateWeight::default(),
@@ -397,7 +381,7 @@ impl<'a> CompressedHiddenHandStates<'a> {
         states.tenpai_state_weight = states.calculate_tenpai_state_weight();
         states.metrics.tenpai_calculation = start.elapsed();
 
-        Ok(states)
+        states
     }
 
     /// 対象リーチ者の固定面子数。
@@ -455,6 +439,10 @@ impl<'a> CompressedHiddenHandStates<'a> {
     /// [`ReachedHiddenHandStates::ron_capable_state_weight`]:
     ///     super::ReachedHiddenHandStates::ron_capable_state_weight
     pub fn ron_capable_state_weight(&mut self, target: TileType) -> RonCapableStateWeight {
+        self.completion_state_weight(target)
+    }
+
+    fn completion_state_weight(&mut self, target: TileType) -> RonCapableStateWeight {
         if self.is_unron_capable_tile(target) {
             return RonCapableStateWeight::default();
         }
@@ -740,6 +728,68 @@ impl<'a> CompressedHiddenHandStates<'a> {
             }
         }
         total
+    }
+}
+
+/// 公開副露を固定した、非リーチ相手の compressed conditional-tenpai model。
+///
+/// structural tenpai denominator と、対象牌を加えると Standard の structural completion になる
+/// state weight を exact に数える。役・フリテン・ロン可能性・テンパイ確率は扱わず、
+/// [`RonRiskEvidence`] も生成しない。
+pub struct CompressedStructuralTenpaiHiddenHandStates<'a> {
+    inner: CompressedHiddenHandStates<'a>,
+}
+
+impl<'a> CompressedStructuralTenpaiHiddenHandStates<'a> {
+    /// 非リーチかつ公開副露を1つ以上持つ player の公開情報から model を組み立てる。
+    pub fn new(
+        player: usize,
+        context: &'a GameContext,
+    ) -> Result<Self, HiddenHandStateUnsupported> {
+        let input = HiddenHandModelInput::new(
+            player,
+            context,
+            HiddenHandModelMode::OpenHandStructuralTenpai,
+        )?;
+        Ok(Self {
+            inner: CompressedHiddenHandStates::from_input(input),
+        })
+    }
+
+    /// 対象 player の固定面子数。
+    pub fn fixed_meld_count(&self) -> FixedMeldCount {
+        self.inner.fixed_meld_count()
+    }
+
+    /// 打牌後の concealed hand 枚数 (`13 - 3 * 固定面子数`)。
+    pub fn concealed_hand_len(&self) -> u8 {
+        self.inner.concealed_hand_len()
+    }
+
+    /// 公開情報と固定副露に整合する全 Standard structural tenpai state の総量。
+    pub fn tenpai_state_weight(&self) -> TenpaiStateWeight {
+        self.inner.tenpai_state_weight()
+    }
+
+    /// 対象牌を加えると Standard の structural completion になる state weight を数える。
+    ///
+    /// target は今から自分が捨てる牌を想定し、その物理牌は `visible_tiles` に反映済みである
+    /// ことを前提にする。
+    pub fn target_completion_state_weight(
+        &mut self,
+        target: TileType,
+    ) -> StructuralCompletionStateWeight {
+        self.inner.completion_state_weight(target).into()
+    }
+
+    /// 評価対象の `GameContext`。
+    pub fn context(&self) -> &GameContext {
+        self.inner.context()
+    }
+
+    /// これまでの評価の内訳計測値。計測用で、数え上げ結果には影響しない。
+    pub fn metrics(&self) -> CompressedHiddenHandStateMetrics {
+        self.inner.metrics()
     }
 }
 
