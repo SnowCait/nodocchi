@@ -13,7 +13,7 @@
 | 複数リーチ (全員 exact 利用可) | Genbutsu → リーチ者ごとの exact `R/T` を worst-first に並べた lexicographic minimax |
 | 1人でも exact 利用不可 | Genbutsu → 局面全体を legacy HonorSafety / wall / Suji ordering |
 
-exact path はリーチ者を1人ずつ既存の single-player hidden-hand model で評価します。単独リーチはその評価が1要素になった場合、複数リーチは要素が2〜3個の vector になった場合です。exact hidden-hand model を使うのは Riichi Defense だけで、[OpenHand Defense](#openhand-defense) / [Combined Defense](#combined-defense) では使いません。
+exact path はリーチ者を1人ずつ既存の single-player hidden-hand model で評価します。単独リーチはその評価が1要素になった場合、複数リーチは要素が2〜3個の vector になった場合です。同じ `R/T` 表現と comparator は [OpenHand Defense](#openhand-defense) でも使いますが、[Combined Defense](#combined-defense) には接続しません。
 
 ### Genbutsu
 
@@ -166,18 +166,18 @@ exact model が利用できない場合の従来 selection です。全リーチ
 
 1. `SafeAgainstAllTargets`
 2. `SameHandPassed`
-3. `HonorSafety`
-4. `SuitedSafety`
+3. `ExactRonRisk`
+4. exact unavailable の場合だけ `HonorSafety` / `SuitedSafety`
 
 第一分類 `SafeAgainstAllTargets` は、本人の河または現在有効な一時通過牌によって全 target にロンされない牌 (hard-safe) です。「全 target 自身の河にある」という意味ではありません。
 
 `SameHandPassed` は、全 target が hard-safe または same-hand passed で覆われ、少なくとも1人は same-hand passed だけを根拠とする牌です。same-hand passed は hard-safe ではないので第一分類には入れず、字牌・数牌の heuristic より先に選びます。候補が複数ある場合は hard-safe な target 数が多いものを優先し、同数なら合法 Dahai の元順序を維持します。根拠の違いは [passed tile の区別](#passed-tile-の区別) を参照してください。
 
-字牌・役牌価値・壁・スジは legacy Riichi Defense と同じ helper を共有します。複数 target の集約では、その牌が hard-safe な target と same-hand passed のある target を除いた相手のうち、最も危険な評価を採ります。
+上の2分類で決まらない場合は、各 High target の conditional-tenpai model から structural tenpai state の総 weight `T(p)` と、候補牌 `x` で役・current furiten を含めて現在ロン可能な state weight `R(p,x)` を exact に数えます。複数 target は Riichi Defense と同じく各 `R/T` を危険な順へ並べた lexicographic minimax で比較し、exact tie は合法 Dahai の元順序を維持します。same-hand passed は hard-safe ではなく `R=0` の条件にもなりません。
+
+target の1人でも exact model unavailable なら partial exact と heuristic を混在させず、局面全体を従来の heuristic fallback へ戻します。字牌・役牌価値・壁・スジは legacy Riichi Defense と同じ helper を共有します。複数 target の heuristic 集約では、その牌が hard-safe な target と same-hand passed のある target を除いた相手のうち、最も危険な評価を採ります。
 
 数牌は `NoChance` → `OneChance` → `Suji` → `HalfSuji` の順で fallback を探し、`NoSafety` だけなら選びません。選べる防御候補がない場合は通常打牌へ戻ります。
-
-exact hidden-hand model はここでは使いません。リーチ者ごとの exact path は Riichi Defense 限定です。
 
 ## Combined Defense
 
@@ -194,7 +194,7 @@ exact hidden-hand model はここでは使いません。リーチ者ごとの e
 
 その牌が hard-safe な target と same-hand passed のある target は、それより弱い heuristic の集約から除き、その相手の無スジや役牌価値を持ち込みません。wall は見え牌由来なので全 target で共有します。
 
-OpenHand Defense と同じく、複合 threat でも exact hidden-hand model は使いません。
+Combined Defense には exact hidden-hand model を接続せず、従来の heuristic ordering を維持します。
 
 ## target ごとのロン安全根拠
 

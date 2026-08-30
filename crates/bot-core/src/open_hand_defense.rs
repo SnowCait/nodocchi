@@ -8,15 +8,20 @@
 //! concealed hand が最後に変化してから通った牌は別 evidence として扱う。
 //! `post_reach_passed_tiles` はリーチ固有なので流用しない。
 //!
-//! 防御 fallback の action 選択は [`select_open_hand_defense_fallback_action_with_kind`] が
-//! source of truth で、[`OpenHandDefenseDiagnostic`] はその結果を写すだけにする。
+//! production selection は hard-safe → same-hand passed → exact `R/T` の順。exact model が
+//! target 1人でも unavailable の場合だけ、既存の Honor / Wall / OneChance / Suji heuristic へ
+//! 局面全体を戻す。action 選択は [`select_open_hand_defense_fallback_action_with_kind`] が source of
+//! truth で、[`OpenHandDefenseDiagnostic`] はその結果を写すだけにする。
 
 use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
-    HonorSafetyRank, OpponentHonorValue, SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank,
-    WallRank, honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
-    is_discarded_by_player, opponent_honor_value_for_players, suited_dahai_actions_by_safety_with,
+    DahaiRonRiskVector, HonorSafetyRank, OpponentHonorValue, PlayerRonRiskEvidence,
+    RonRiskEvidence, SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank, WallRank,
+    honor_dahai_actions_by_safety_with, honor_safety_rank, is_discarded_by_all_players,
+    is_discarded_by_player, open_hand_targets_dahai_actions_by_ron_risk,
+    opponent_honor_value_for_players, player_ron_risk_evidence_for_action,
+    select_lexicographic_minimax_action, suited_dahai_actions_by_safety_with,
     suited_safety_evidence_for_players, suji_safety_rank_for, suji_safety_rank_for_players,
 };
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
@@ -191,26 +196,29 @@ pub fn suited_safety_rank_for_open_hand_threats(
 
 /// target に対する防御候補の大分類。
 ///
-/// 優先順位は既存 Defense ([`DefenseFallbackKind`](crate::defense::DefenseFallbackKind)) に
-/// 合わせて `SafeAgainstAllTargets` → `SameHandPassed` → `HonorSafety` → `SuitedSafety`。
+/// production の優先順位は `SafeAgainstAllTargets` → `SameHandPassed` → `ExactRonRisk`。
+/// exact unavailable の場合だけ `HonorSafety` → `SuitedSafety` を使う。
 ///
 /// 第一分類を `Genbutsu` と呼ばないのは、リーチ固有の `post_reach_passed_tiles` と、手牌変化まで
 /// だけ有効な一時通過牌の意味と寿命を混ぜないため。
 ///
-/// 現時点では診断専用で、この順位で action を選ぶことはしない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenHandDefenseCategory {
     /// 本人の河または現在有効な一時通過牌により、全 target にロンされない。
     SafeAgainstAllTargets,
     /// 全 target が hard-safe または same-hand passed で覆われる。
     SameHandPassed,
+    /// 全 target の exact `R/T` を lexicographic minimax で比較した。
+    ExactRonRisk,
     HonorSafety(HonorSafetyRank),
     SuitedSafety(SuitedSafetyRank),
 }
 
-/// 牌1つ分の防御候補の大分類を求める pure helper。
+/// 牌1つ分の hard-safe / same-hand passed / legacy heuristic 大分類を求める pure helper。
 ///
-/// 字牌でも数牌でもない牌は無いため、実際に `None` になるのは分類できない場合だけ。
+/// exact は全合法候補と全 target をまとめて比較するため、この単牌 helper は
+/// [`OpenHandDefenseCategory::ExactRonRisk`] を返さない。字牌でも数牌でもない牌は無いため、
+/// 実際に `None` になるのは分類できない場合だけ。
 pub fn open_hand_defense_category(
     tile: TileType,
     targets: &[usize],
@@ -314,13 +322,15 @@ pub fn open_hand_suited_dahai_actions_by_safety<'a>(
 
 /// High OpenHandThreat 相手に対する防御 fallback を優先順位付きで選ぶ production selector。
 ///
-/// [`OpenHandDefenseCategory`] の並びどおり、全 target へのロン安全 → same-hand passed →
-/// 字牌 safety → 数牌 safety の順に評価し、選ばれた大分類を添えて返す。target が0人なら
-/// `None`。
+/// 全 target へのロン安全 → same-hand passed → exact `R/T` の順に評価する。exact model が
+/// target 1人でも unavailable の場合だけ、既存の字牌 safety → 数牌 safety へ局面全体を戻す。
+/// target が0人なら `None`。
 ///
 /// - `SafeAgainstAllTargets`: 全 target にロンされない牌。同順位では合法 Dahai の元順序を保つ。
 /// - `SameHandPassed`: 全 target が hard-safe または same-hand passed で覆われる牌。hard-safe な
 ///   target 数が多い候補を優先し、同数なら元順序を保つ。
+/// - `ExactRonRisk`: target ごとの `R/T` を risk の高い順に並べた lexicographic minimax。
+///   exact tie は元順序を保つ。
 /// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存リーチ Defense と同じ ranking。
 /// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存リーチ Defense と同じく
 ///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
@@ -336,8 +346,25 @@ pub fn select_open_hand_defense_fallback_action_with_kind<'a>(
     legal_actions: &'a [LegalAction],
     targets: &[usize],
 ) -> Option<(&'a LegalAction, OpenHandDefenseCategory)> {
+    evaluate_open_hand_defense_fallback_action_with_kind(context, legal_actions, targets).selected
+}
+
+#[derive(Debug)]
+pub(crate) struct OpenHandDefenseEvaluation<'a> {
+    pub(crate) selected: Option<(&'a LegalAction, OpenHandDefenseCategory)>,
+    pub(crate) ron_risk_vectors: Option<Vec<DahaiRonRiskVector<'a>>>,
+}
+
+pub(crate) fn evaluate_open_hand_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+) -> OpenHandDefenseEvaluation<'a> {
     if targets.is_empty() {
-        return None;
+        return OpenHandDefenseEvaluation {
+            selected: None,
+            ron_risk_vectors: None,
+        };
     }
 
     if let Some(action) = safe_against_all_targets_dahai_actions(legal_actions, targets, context)
@@ -345,7 +372,10 @@ pub fn select_open_hand_defense_fallback_action_with_kind<'a>(
         .next()
     {
         let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, OpenHandDefenseCategory::SafeAgainstAllTargets));
+        return OpenHandDefenseEvaluation {
+            selected: Some((action, OpenHandDefenseCategory::SafeAgainstAllTargets)),
+            ron_risk_vectors: None,
+        };
     }
 
     if let Some(action) = same_hand_passed_open_hand_dahai_actions(legal_actions, targets, context)
@@ -353,9 +383,52 @@ pub fn select_open_hand_defense_fallback_action_with_kind<'a>(
         .next()
     {
         let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, OpenHandDefenseCategory::SameHandPassed));
+        return OpenHandDefenseEvaluation {
+            selected: Some((action, OpenHandDefenseCategory::SameHandPassed)),
+            ron_risk_vectors: None,
+        };
     }
 
+    let ron_risk_vectors =
+        open_hand_targets_dahai_actions_by_ron_risk(context, legal_actions, targets);
+    if let Some(vectors) = ron_risk_vectors.as_ref() {
+        match select_lexicographic_minimax_action(vectors) {
+            Ok(Some(chosen)) => {
+                let action = prefer_black_five_for_action(legal_actions, chosen);
+                return OpenHandDefenseEvaluation {
+                    selected: Some((action, OpenHandDefenseCategory::ExactRonRisk)),
+                    ron_risk_vectors,
+                };
+            }
+            Ok(None) => {}
+            Err(()) => {
+                return OpenHandDefenseEvaluation {
+                    selected: select_legacy_open_hand_defense_fallback_action_with_kind(
+                        context,
+                        legal_actions,
+                        targets,
+                    ),
+                    ron_risk_vectors: None,
+                };
+            }
+        }
+    }
+
+    OpenHandDefenseEvaluation {
+        selected: select_legacy_open_hand_defense_fallback_action_with_kind(
+            context,
+            legal_actions,
+            targets,
+        ),
+        ron_risk_vectors,
+    }
+}
+
+fn select_legacy_open_hand_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+) -> Option<(&'a LegalAction, OpenHandDefenseCategory)> {
     if let Some((action, rank)) =
         open_hand_honor_dahai_actions_by_safety(legal_actions, targets, context)
             .into_iter()
@@ -432,6 +505,8 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     pub ron_safe_for_all_targets: bool,
     /// 全 target が hard-safe または same-hand passed で覆われるか。
     pub same_hand_passed_for_all_targets: bool,
+    /// exact comparison が利用可能な場合の、target ごとの `R/T` evidence。
+    pub player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// target に対する [`opponent_honor_value_for_open_hand_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
@@ -449,7 +524,7 @@ pub struct OpenHandDefenseCandidateDiagnostic {
     /// `suji_safety_rank` をそのまま最小値へ潰した値とは一致しないことがある。
     pub suji_safety_rank: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
-    /// [`open_hand_defense_category`] による大分類。
+    /// exact comparison 時は `ExactRonRisk`、fallback 時は [`open_hand_defense_category`] の大分類。
     pub category: Option<OpenHandDefenseCategory>,
 }
 
@@ -462,6 +537,16 @@ impl OpenHandDefenseCandidateDiagnostic {
         action: &LegalAction,
         targets: &[usize],
         selected: bool,
+    ) -> Option<Self> {
+        Self::for_dahai_action_with_ron_risk_vector(context, action, targets, selected, None)
+    }
+
+    fn for_dahai_action_with_ron_risk_vector(
+        context: &GameContext,
+        action: &LegalAction,
+        targets: &[usize],
+        selected: bool,
+        player_ron_risk_evidence: Option<&[PlayerRonRiskEvidence]>,
     ) -> Option<Self> {
         let LegalAction::Dahai { tile } = action else {
             return None;
@@ -494,6 +579,7 @@ impl OpenHandDefenseCandidateDiagnostic {
             same_hand_passed_for_all_targets: has_same_hand_passed_for_all_open_hand_targets(
                 tile_type, targets, context,
             ),
+            player_ron_risk_evidence: player_ron_risk_evidence.map(<[_]>::to_vec),
             honor_safety_rank: honor_safety_rank(tile_type, context),
             opponent_honor_value: opponent_honor_value_for_open_hand_threats(
                 tile_type, targets, context,
@@ -502,8 +588,17 @@ impl OpenHandDefenseCandidateDiagnostic {
             wall_rank: evidence.map(|evidence| evidence.wall_rank),
             suji_safety_rank: evidence.map(|evidence| evidence.suji_rank),
             suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
-            category: open_hand_defense_category(tile_type, targets, context),
+            category: if player_ron_risk_evidence.is_some() {
+                Some(OpenHandDefenseCategory::ExactRonRisk)
+            } else {
+                open_hand_defense_category(tile_type, targets, context)
+            },
         })
+    }
+
+    /// target が1人の場合の exact `R/T` evidence。
+    pub fn ron_risk_evidence(&self) -> Option<RonRiskEvidence> {
+        single_player_ron_risk_evidence(self.player_ron_risk_evidence.as_deref())
     }
 
     /// 合法 action のうち Dahai だけを、元の順序を保って防御評価へ変換する。
@@ -516,10 +611,32 @@ impl OpenHandDefenseCandidateDiagnostic {
         targets: &[usize],
         selected_action: Option<&LegalAction>,
     ) -> Vec<Self> {
+        Self::for_legal_actions_with_ron_risk_vectors(
+            context,
+            legal_actions,
+            targets,
+            selected_action,
+            None,
+        )
+    }
+
+    fn for_legal_actions_with_ron_risk_vectors(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        targets: &[usize],
+        selected_action: Option<&LegalAction>,
+        ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
+    ) -> Vec<Self> {
         legal_actions
             .iter()
             .filter_map(|action| {
-                Self::for_dahai_action(context, action, targets, selected_action == Some(action))
+                Self::for_dahai_action_with_ron_risk_vector(
+                    context,
+                    action,
+                    targets,
+                    selected_action == Some(action),
+                    player_ron_risk_evidence_for_action(ron_risk_vectors, action),
+                )
             })
             .collect()
     }
@@ -535,6 +652,15 @@ pub struct OpenHandDefenseSelectionDiagnostic {
     pub selected_action: LegalAction,
     /// その action が選ばれた大分類。
     pub selected_category: OpenHandDefenseCategory,
+    /// exact comparison を使った場合の、選択牌に対する target ごとの `R/T` evidence。
+    pub selected_player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
+}
+
+impl OpenHandDefenseSelectionDiagnostic {
+    /// target が1人の場合の exact `R/T` evidence。
+    pub fn selected_ron_risk_evidence(&self) -> Option<RonRiskEvidence> {
+        single_player_ron_risk_evidence(self.selected_player_ron_risk_evidence.as_deref())
+    }
 }
 
 /// High OpenHandThreat 相手に対する防御 safety の構造化診断。
@@ -568,14 +694,52 @@ impl OpenHandDefenseDiagnostic {
         selected: Option<(&LegalAction, OpenHandDefenseCategory)>,
     ) -> Self {
         let targets = high_open_hand_threat_players(assessments);
+        let ron_risk_vectors =
+            if matches!(selected, Some((_, OpenHandDefenseCategory::ExactRonRisk))) {
+                open_hand_targets_dahai_actions_by_ron_risk(context, legal_actions, &targets)
+            } else {
+                None
+            };
+        Self::from_parts(
+            context,
+            legal_actions,
+            targets,
+            selected,
+            ron_risk_vectors.as_deref(),
+        )
+    }
+
+    pub(crate) fn from_evaluation(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        assessments: &[OpenHandThreatAssessment; 4],
+        evaluation: &OpenHandDefenseEvaluation<'_>,
+    ) -> Self {
+        Self::from_parts(
+            context,
+            legal_actions,
+            high_open_hand_threat_players(assessments),
+            evaluation.selected,
+            evaluation.ron_risk_vectors.as_deref(),
+        )
+    }
+
+    fn from_parts(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        targets: Vec<usize>,
+        selected: Option<(&LegalAction, OpenHandDefenseCategory)>,
+        ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
+    ) -> Self {
         let candidates = if targets.is_empty() {
             Vec::new()
         } else {
-            OpenHandDefenseCandidateDiagnostic::for_legal_actions(
+            OpenHandDefenseCandidateDiagnostic::for_legal_actions_with_ron_risk_vectors(
                 context,
                 legal_actions,
                 &targets,
                 selected.map(|(action, _)| action),
+                ron_risk_vectors,
             )
         };
         Self {
@@ -583,6 +747,11 @@ impl OpenHandDefenseDiagnostic {
             selected: selected.map(|(action, category)| OpenHandDefenseSelectionDiagnostic {
                 selected_action: action.clone(),
                 selected_category: category,
+                selected_player_ron_risk_evidence: player_ron_risk_evidence_for_action(
+                    ron_risk_vectors,
+                    action,
+                )
+                .map(<[_]>::to_vec),
             }),
             candidates,
         }
@@ -613,12 +782,29 @@ impl OpenHandDefenseDiagnostic {
             .as_ref()
             .map(|selection| selection.selected_category)
     }
+
+    /// production selection が exact `R/T` comparison を使ったか。
+    pub fn uses_exact_ron_risk(&self) -> bool {
+        self.selected_category() == Some(OpenHandDefenseCategory::ExactRonRisk)
+    }
+}
+
+fn single_player_ron_risk_evidence(
+    evidence: Option<&[PlayerRonRiskEvidence]>,
+) -> Option<RonRiskEvidence> {
+    let &[evidence] = evidence? else {
+        return None;
+    };
+    Some(evidence.evidence)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defense::{suited_safety_evidence_for_players, wall_rank};
+    use crate::context::TableStateFacts;
+    use crate::defense::{
+        compare_lexicographic_minimax_ron_risk, suited_safety_evidence_for_players, wall_rank,
+    };
     use crate::meld::{Meld, MeldKind};
     use crate::open_hand_threat::{
         OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
@@ -674,6 +860,62 @@ mod tests {
         (0..count).map(|_| chi()).collect()
     }
 
+    fn chi_from(mjai: &str) -> Meld {
+        let tiles = tiles(mjai);
+        Meld::new(MeldKind::Chi, tiles.clone(), Some(tiles[0]))
+    }
+
+    fn exact_open_melds_a() -> Vec<Meld> {
+        vec![
+            value_pon(),
+            chi_from("1p 2p 3p"),
+            chi_from("4p 5p 6p"),
+            chi_from("7p 8p 9p"),
+        ]
+    }
+
+    fn exact_open_melds_b() -> Vec<Meld> {
+        let green_pon = Meld::new(
+            MeldKind::Pon,
+            (0..3).map(|copy| tile_copy("F", copy)).collect(),
+            Some(tile("F")),
+        );
+        vec![
+            green_pon,
+            chi_from("1s 2s 3s"),
+            chi_from("4s 5s 6s"),
+            chi_from("7s 8s 9s"),
+        ]
+    }
+
+    fn visible_with_remaining(pool: &[(&str, u8)]) -> Vec<TileId> {
+        let mut remaining = [0u8; TileType::COUNT];
+        for &(mjai, copies) in pool {
+            remaining[tile_type(mjai).index()] = copies;
+        }
+        TileType::all()
+            .flat_map(|tile| TileId::copies(tile).take(usize::from(4 - remaining[tile.index()])))
+            .collect()
+    }
+
+    fn exact_open_context(pool: &[(&str, u8)], target_players: &[usize]) -> ContextSpec {
+        let mut spec = ContextSpec::new()
+            .visible(visible_with_remaining(pool))
+            .known_empty_temporary_passed()
+            .remaining_tiles(1);
+        for (index, &player) in target_players.iter().enumerate() {
+            spec = spec.melds_of(
+                player,
+                if index % 2 == 0 {
+                    exact_open_melds_a()
+                } else {
+                    exact_open_melds_b()
+                },
+            );
+        }
+        spec
+    }
+
     #[derive(Debug, Clone, Default)]
     struct ContextSpec {
         player_id: Option<u8>,
@@ -684,7 +926,9 @@ mod tests {
         melds: [Vec<Meld>; 4],
         visible_tiles: Vec<TileId>,
         post_reach_passed: [Vec<TileType>; 4],
+        temporary_passed: Option<[Vec<TileType>; 4]>,
         same_hand_passed: Option<[Vec<TileType>; 4]>,
+        remaining_tiles: Option<u32>,
     }
 
     impl ContextSpec {
@@ -734,6 +978,24 @@ mod tests {
             self
         }
 
+        fn temporary_passed(mut self, player: usize, mjai: &str) -> Self {
+            let passed = self
+                .temporary_passed
+                .get_or_insert_with(|| std::array::from_fn(|_| Vec::new()));
+            passed[player] = mjai.split_whitespace().map(tile_type).collect();
+            self
+        }
+
+        fn known_empty_temporary_passed(mut self) -> Self {
+            self.temporary_passed = Some(Default::default());
+            self
+        }
+
+        fn remaining_tiles(mut self, remaining_tiles: u32) -> Self {
+            self.remaining_tiles = Some(remaining_tiles);
+            self
+        }
+
         fn build(self) -> GameContext {
             GameContext::from_parts_with_melds(
                 None,
@@ -749,7 +1011,12 @@ mod tests {
                 self.melds,
             )
             .with_post_reach_passed_tiles(self.post_reach_passed)
+            .with_temporary_passed_tiles(self.temporary_passed)
             .with_same_hand_passed_tiles(self.same_hand_passed)
+            .with_table_state_facts(TableStateFacts {
+                remaining_tiles: self.remaining_tiles,
+                ..TableStateFacts::default()
+            })
         }
     }
 
@@ -1665,6 +1932,234 @@ mod tests {
     }
 
     #[test]
+    fn single_target_exact_selects_the_smaller_ron_risk_ratio() {
+        let context = exact_open_context(&[("1m", 1), ("2m", 2)], &[3]).build();
+        let legal_actions = vec![dahai("2m"), dahai("1m")];
+        let evaluation = evaluate_open_hand_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert_eq!(
+            evaluation.selected,
+            Some((&legal_actions[1], OpenHandDefenseCategory::ExactRonRisk))
+        );
+        let vectors = evaluation.ron_risk_vectors.as_deref().unwrap();
+        assert_eq!(
+            player_ron_risk_evidence_for_action(Some(vectors), &legal_actions[0]),
+            Some(
+                &[PlayerRonRiskEvidence {
+                    player: 3,
+                    evidence: RonRiskEvidence {
+                        ron_capable_weight: 2,
+                        tenpai_weight: 3,
+                    },
+                }][..]
+            )
+        );
+        assert_eq!(
+            player_ron_risk_evidence_for_action(Some(vectors), &legal_actions[1]),
+            Some(
+                &[PlayerRonRiskEvidence {
+                    player: 3,
+                    evidence: RonRiskEvidence {
+                        ron_capable_weight: 1,
+                        tenpai_weight: 3,
+                    },
+                }][..]
+            )
+        );
+
+        let diagnostic = OpenHandDefenseDiagnostic::from_evaluation(
+            &context,
+            &legal_actions,
+            &assessments(&context),
+            &evaluation,
+        );
+        assert!(diagnostic.uses_exact_ron_risk());
+        assert_eq!(
+            diagnostic
+                .selected
+                .as_ref()
+                .and_then(OpenHandDefenseSelectionDiagnostic::selected_ron_risk_evidence),
+            Some(RonRiskEvidence {
+                ron_capable_weight: 1,
+                tenpai_weight: 3,
+            })
+        );
+        assert!(diagnostic.candidates.iter().all(|candidate| {
+            candidate.category == Some(OpenHandDefenseCategory::ExactRonRisk)
+                && candidate.player_ron_risk_evidence.is_some()
+        }));
+    }
+
+    #[test]
+    fn multiple_targets_use_lexicographic_minimax_instead_of_aggregation() {
+        let context = exact_open_context(&[("1m", 1), ("2m", 1)], &[1, 2])
+            .temporary_passed(2, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+        let evaluation = evaluate_open_hand_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert_eq!(targets(&context), vec![1, 2]);
+        assert_eq!(
+            evaluation.selected,
+            Some((&legal_actions[1], OpenHandDefenseCategory::ExactRonRisk))
+        );
+        let vectors = evaluation.ron_risk_vectors.as_deref().unwrap();
+        let first = player_ron_risk_evidence_for_action(Some(vectors), &legal_actions[0]).unwrap();
+        let second = player_ron_risk_evidence_for_action(Some(vectors), &legal_actions[1]).unwrap();
+        assert_eq!(
+            first.iter().map(|risk| risk.evidence).collect::<Vec<_>>(),
+            vec![
+                RonRiskEvidence {
+                    ron_capable_weight: 1,
+                    tenpai_weight: 2,
+                },
+                RonRiskEvidence {
+                    ron_capable_weight: 1,
+                    tenpai_weight: 2,
+                },
+            ]
+        );
+        assert_eq!(
+            second.iter().map(|risk| risk.evidence).collect::<Vec<_>>(),
+            vec![
+                RonRiskEvidence {
+                    ron_capable_weight: 1,
+                    tenpai_weight: 2,
+                },
+                RonRiskEvidence {
+                    ron_capable_weight: 0,
+                    tenpai_weight: 2,
+                },
+            ]
+        );
+        assert_eq!(
+            compare_lexicographic_minimax_ron_risk(second, first),
+            Some(std::cmp::Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn hard_safe_precedes_exact_comparison() {
+        let context = exact_open_context(&[("1m", 1), ("2m", 2)], &[3])
+            .discards_of(3, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+
+        assert_eq!(
+            fallback(&context, &legal_actions),
+            Some((
+                legal_actions[1].clone(),
+                OpenHandDefenseCategory::SafeAgainstAllTargets,
+            ))
+        );
+    }
+
+    #[test]
+    fn same_hand_passed_precedes_a_smaller_exact_ratio() {
+        let context = exact_open_context(&[("1m", 1), ("2m", 2)], &[3])
+            .same_hand_passed(3, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+
+        assert_eq!(
+            fallback(&context, &legal_actions),
+            Some((
+                legal_actions[1].clone(),
+                OpenHandDefenseCategory::SameHandPassed,
+            ))
+        );
+
+        let vectors = open_hand_targets_dahai_actions_by_ron_risk(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        )
+        .unwrap();
+        assert_eq!(
+            player_ron_risk_evidence_for_action(Some(&vectors), &legal_actions[1]).unwrap()[0]
+                .evidence,
+            RonRiskEvidence {
+                ron_capable_weight: 2,
+                tenpai_weight: 3,
+            },
+            "same-hand passed は exact numerator を 0 にしない"
+        );
+    }
+
+    #[test]
+    fn one_unavailable_target_returns_the_whole_position_to_legacy_fallback() {
+        let context = exact_open_context(&[("1m", 1), ("E", 1)], &[1])
+            .melds_of(2, open_melds(5))
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("E")];
+        let evaluation = evaluate_open_hand_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert_eq!(targets(&context), vec![1, 2]);
+        assert!(evaluation.ron_risk_vectors.is_none());
+        assert_eq!(
+            evaluation.selected,
+            Some((
+                &legal_actions[1],
+                OpenHandDefenseCategory::HonorSafety(HonorSafetyRank::ThreeOrMoreVisible),
+            ))
+        );
+        let diagnostic = OpenHandDefenseDiagnostic::from_evaluation(
+            &context,
+            &legal_actions,
+            &assessments(&context),
+            &evaluation,
+        );
+        assert!(!diagnostic.uses_exact_ron_risk());
+        assert!(diagnostic.candidates.iter().all(|candidate| {
+            candidate.player_ron_risk_evidence.is_none()
+                && candidate.category != Some(OpenHandDefenseCategory::ExactRonRisk)
+        }));
+    }
+
+    #[test]
+    fn exact_ratio_tie_keeps_the_original_legal_action_order() {
+        let context = exact_open_context(&[("1m", 1), ("2m", 1)], &[3]).build();
+        let legal_actions = vec![dahai("2m"), dahai("1m")];
+
+        assert_eq!(
+            fallback(&context, &legal_actions),
+            Some((
+                legal_actions[0].clone(),
+                OpenHandDefenseCategory::ExactRonRisk,
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_selection_preserves_the_black_five_preference() {
+        let context = exact_open_context(&[("5m", 1)], &[3]).build();
+        let red_five = LegalAction::Dahai {
+            tile: tile_copy("5m", 0),
+        };
+        let black_five = LegalAction::Dahai {
+            tile: tile_copy("5m", 1),
+        };
+        let legal_actions = vec![red_five, black_five.clone()];
+
+        assert_eq!(
+            fallback(&context, &legal_actions),
+            Some((black_five, OpenHandDefenseCategory::ExactRonRisk))
+        );
+    }
+
+    #[test]
     fn the_fallback_is_none_without_targets() {
         // Present しかいない局面では OpenHand 防御 fallback を選ばない。
         let context = ContextSpec::new()
@@ -2040,6 +2535,7 @@ mod tests {
                 selected_category: OpenHandDefenseCategory::SuitedSafety(
                     SuitedSafetyRank::NoChance
                 ),
+                selected_player_ron_risk_evidence: None,
             })
         );
         assert_eq!(

@@ -13,7 +13,8 @@ use super::suji::{SujiSafetyRank, is_suji_for_all_reached};
 use super::wall::WallRank;
 use super::{
     DahaiRonRiskVector, DefenseFallbackEvaluation, DefenseFallbackKind, PlayerRonRiskEvidence,
-    RonRiskEvidence, reached_opponents_dahai_actions_by_ron_risk,
+    RonRiskEvidence, player_ron_risk_evidence_for_action,
+    reached_opponents_dahai_actions_by_ron_risk,
 };
 
 const LOG_TARGET: &str = "bot_core::defense";
@@ -74,7 +75,7 @@ impl DefenseFallbackDiagnostic {
             context,
             action,
             kind,
-            ron_risk_vector_for_action(ron_risk_vectors.as_deref(), action),
+            player_ron_risk_evidence_for_action(ron_risk_vectors.as_deref(), action),
         )
     }
 
@@ -181,7 +182,7 @@ impl DefenseCandidateDiagnostic {
             context,
             action,
             selected,
-            ron_risk_vector_for_action(ron_risk_vectors.as_deref(), action),
+            player_ron_risk_evidence_for_action(ron_risk_vectors.as_deref(), action),
         )
     }
 
@@ -252,7 +253,7 @@ impl DefenseCandidateDiagnostic {
                     context,
                     action,
                     selected_action == Some(action),
-                    ron_risk_vector_for_action(ron_risk_vectors, action),
+                    player_ron_risk_evidence_for_action(ron_risk_vectors, action),
                 )
             })
             .collect()
@@ -316,7 +317,7 @@ impl DefenseDecisionDiagnostic {
                     context,
                     action,
                     kind,
-                    ron_risk_vector_for_action(ron_risk_vectors, action),
+                    player_ron_risk_evidence_for_action(ron_risk_vectors, action),
                 )
             }),
             candidates: DefenseCandidateDiagnostic::for_legal_actions_with_ron_risk_vectors(
@@ -334,21 +335,6 @@ impl DefenseDecisionDiagnostic {
             .as_ref()
             .map(|diagnostic| diagnostic.selected_kind)
     }
-}
-
-fn ron_risk_vector_for_action<'a>(
-    evidence: Option<&'a [DahaiRonRiskVector<'_>]>,
-    action: &LegalAction,
-) -> Option<&'a [PlayerRonRiskEvidence]> {
-    let LegalAction::Dahai { tile } = action else {
-        return None;
-    };
-    evidence?
-        .iter()
-        .find(|candidate| {
-            matches!(candidate.action, LegalAction::Dahai { tile: candidate_tile } if candidate_tile.tile_type() == tile.tile_type())
-        })
-        .map(|candidate| candidate.player_evidence.as_slice())
 }
 
 fn single_player_evidence(evidence: Option<&[PlayerRonRiskEvidence]>) -> Option<RonRiskEvidence> {
@@ -416,7 +402,7 @@ fn log_defense_fallback_decision_with_ron_risk_vectors(
         context,
         action,
         kind,
-        ron_risk_vector_for_action(ron_risk_vectors, action),
+        player_ron_risk_evidence_for_action(ron_risk_vectors, action),
     );
     tracing::debug!(
         target: LOG_TARGET,

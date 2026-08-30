@@ -4,16 +4,18 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use bot_logic::TileType;
 
-use super::{CompressedHiddenHandStates, RonRiskEvidence};
+use super::{
+    CompressedHiddenHandStates, CompressedStructuralTenpaiHiddenHandStates, RonRiskEvidence,
+};
 
-/// 1候補牌について、指定リーチ者1人から得た exact structural risk evidence。
+/// 1候補牌について、指定 target 1人から得た exact `R/T` evidence。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerRonRiskEvidence {
     pub player: usize,
     pub evidence: RonRiskEvidence,
 }
 
-/// 合法 Dahai 1件について、全リーチ者を個別評価した exact risk vector。
+/// 合法 Dahai 1件について、全 target を個別評価した exact risk vector。
 ///
 /// 単独リーチも `player_evidence` が1要素の risk vector として同じ表現で扱う。同じ `TileType`
 /// の赤5 / 黒5は同じ evidence を共有する。`player_evidence` は player id 順で保持する。
@@ -23,6 +25,21 @@ pub struct PlayerRonRiskEvidence {
 pub(crate) struct DahaiRonRiskVector<'a> {
     pub action: &'a LegalAction,
     pub player_evidence: Vec<PlayerRonRiskEvidence>,
+}
+
+pub(crate) fn player_ron_risk_evidence_for_action<'a>(
+    vectors: Option<&'a [DahaiRonRiskVector<'_>]>,
+    action: &LegalAction,
+) -> Option<&'a [PlayerRonRiskEvidence]> {
+    let LegalAction::Dahai { tile } = action else {
+        return None;
+    };
+    vectors?
+        .iter()
+        .find(|candidate| {
+            matches!(candidate.action, LegalAction::Dahai { tile: candidate_tile } if candidate_tile.tile_type() == tile.tile_type())
+        })
+        .map(|candidate| candidate.player_evidence.as_slice())
 }
 
 /// 指定したリーチ者について、全合法 Dahai を exact `R/T` evidence へ変換する。
@@ -37,6 +54,30 @@ pub(super) fn dahai_ron_risk_evidence_for_player(
 ) -> Option<Vec<PlayerRonRiskEvidence>> {
     let mut states = CompressedHiddenHandStates::new(player, context).ok()?;
     let tenpai_weight = states.tenpai_state_weight().weight;
+    collect_dahai_ron_risk_evidence(player, legal_actions, tenpai_weight, |tile| {
+        Some(states.ron_risk_evidence(tile))
+    })
+}
+
+/// 指定した非リーチ副露 target について、全合法 Dahai を exact `R/T` evidence へ変換する。
+fn open_hand_dahai_ron_risk_evidence_for_player(
+    player: usize,
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+) -> Option<Vec<PlayerRonRiskEvidence>> {
+    let mut states = CompressedStructuralTenpaiHiddenHandStates::new(player, context).ok()?;
+    let tenpai_weight = states.tenpai_state_weight().weight;
+    collect_dahai_ron_risk_evidence(player, legal_actions, tenpai_weight, |tile| {
+        states.ron_risk_evidence(tile).ok()
+    })
+}
+
+fn collect_dahai_ron_risk_evidence(
+    player: usize,
+    legal_actions: &[LegalAction],
+    tenpai_weight: u128,
+    mut evidence_for_tile: impl FnMut(TileType) -> Option<RonRiskEvidence>,
+) -> Option<Vec<PlayerRonRiskEvidence>> {
     if tenpai_weight == 0 {
         return None;
     }
@@ -51,7 +92,7 @@ pub(super) fn dahai_ron_risk_evidence_for_player(
         let evidence = match by_tile[tile_type.index()] {
             Some(evidence) => evidence,
             None => {
-                let evidence = states.ron_risk_evidence(tile_type);
+                let evidence = evidence_for_tile(tile_type)?;
                 // All targets share this player's denominator. Treat an internal invariant
                 // mismatch or an unavailable exact ratio as unavailable instead of clamping it.
                 if evidence.tenpai_weight != tenpai_weight
@@ -78,7 +119,30 @@ pub(crate) fn reached_opponents_dahai_actions_by_ron_risk<'a>(
     legal_actions: &'a [LegalAction],
 ) -> Option<Vec<DahaiRonRiskVector<'a>>> {
     let reached = context.reached_opponents();
-    if reached.is_empty() {
+    dahai_actions_by_ron_risk(&reached, legal_actions, |player| {
+        dahai_ron_risk_evidence_for_player(player, context, legal_actions)
+    })
+}
+
+/// 全 OpenHand target を conditional-tenpai exact model で個別評価する。
+///
+/// 1人でも model unavailable なら exact と heuristic を混在させず `None` を返す。
+pub(crate) fn open_hand_targets_dahai_actions_by_ron_risk<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[usize],
+) -> Option<Vec<DahaiRonRiskVector<'a>>> {
+    dahai_actions_by_ron_risk(targets, legal_actions, |player| {
+        open_hand_dahai_ron_risk_evidence_for_player(player, context, legal_actions)
+    })
+}
+
+fn dahai_actions_by_ron_risk<'a>(
+    targets: &[usize],
+    legal_actions: &'a [LegalAction],
+    mut evidence_for_player: impl FnMut(usize) -> Option<Vec<PlayerRonRiskEvidence>>,
+) -> Option<Vec<DahaiRonRiskVector<'a>>> {
+    if targets.is_empty() {
         return None;
     }
 
@@ -87,12 +151,12 @@ pub(crate) fn reached_opponents_dahai_actions_by_ron_risk<'a>(
         .filter(|action| matches!(action, LegalAction::Dahai { .. }))
         .map(|action| DahaiRonRiskVector {
             action,
-            player_evidence: Vec::with_capacity(reached.len()),
+            player_evidence: Vec::with_capacity(targets.len()),
         })
         .collect();
 
-    for player in reached {
-        let evaluated = dahai_ron_risk_evidence_for_player(player, context, legal_actions)?;
+    for &player in targets {
+        let evaluated = evidence_for_player(player)?;
         if evaluated.len() != vectors.len() {
             return None;
         }
