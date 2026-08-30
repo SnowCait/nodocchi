@@ -2,10 +2,14 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use bot_logic::{FixedMeldCount, Meld, TileCounts, TileId, TileType, analyze_completed_hand};
+use bot_logic::{
+    FixedMeldCount, Meld, RiichiStatus, TileCounts, TileId, TileType, WinMethod, WinningContext,
+    analyze_completed_hand, evaluate_winning_yaku, evaluate_winning_yakuman,
+};
 
 use crate::context::GameContext;
 use crate::meld::fixed_meld_count;
+use crate::open_hand_defense::is_ron_safe_for_open_hand_target;
 
 use super::hard_safety::is_genbutsu_for;
 use super::wait_candidates::remaining_tile_copies;
@@ -27,6 +31,14 @@ pub enum HiddenHandStateUnsupported {
     OpenMeld,
     /// conditional-tenpai model の対象 player に公開副露がない。
     NoOpenMeld,
+    /// OpenHand ron-capable model に必要な場風が不明。
+    UnknownRoundWind,
+    /// OpenHand ron-capable model に必要な対象 player の自風が不明。
+    UnknownSeatWind,
+    /// OpenHand ron-capable model に必要な残りツモ可能枚数が不明。
+    UnknownRemainingTiles,
+    /// OpenHand ron-capable model に必要な current temporary-passed 履歴が不明。
+    UnknownTemporaryPassedTiles,
     /// 固定面子が5個以上で `FixedMeldCount` にならない。
     TooManyMelds,
 }
@@ -134,6 +146,7 @@ fn concealed_tile_ids(hand: &HandCounts) -> Vec<TileId> {
 pub(super) enum HiddenHandModelMode {
     Riichi,
     OpenHandStructuralTenpai,
+    OpenHandRonCapable,
 }
 
 pub(super) struct HiddenHandModelInput<'a> {
@@ -164,12 +177,18 @@ impl<'a> HiddenHandModelInput<'a> {
                     return Err(HiddenHandStateUnsupported::OpenMeld);
                 }
             }
-            HiddenHandModelMode::OpenHandStructuralTenpai => {
+            HiddenHandModelMode::OpenHandStructuralTenpai
+            | HiddenHandModelMode::OpenHandRonCapable => {
                 if context.is_reached(player) {
                     return Err(HiddenHandStateUnsupported::Reached);
                 }
                 if !fixed_melds.iter().any(Meld::is_open) {
                     return Err(HiddenHandStateUnsupported::NoOpenMeld);
+                }
+                if mode == HiddenHandModelMode::OpenHandRonCapable
+                    && context.temporary_passed_tiles_of(player).is_none()
+                {
+                    return Err(HiddenHandStateUnsupported::UnknownTemporaryPassedTiles);
                 }
             }
         }
@@ -181,7 +200,14 @@ impl<'a> HiddenHandModelInput<'a> {
         let mut unron_tiles = Vec::new();
         for tile in TileType::all() {
             remaining[tile.index()] = remaining_tile_copies(tile, context);
-            if mode == HiddenHandModelMode::Riichi && is_genbutsu_for(tile, player, context) {
+            let is_unron = match mode {
+                HiddenHandModelMode::Riichi => is_genbutsu_for(tile, player, context),
+                HiddenHandModelMode::OpenHandStructuralTenpai => false,
+                HiddenHandModelMode::OpenHandRonCapable => {
+                    is_ron_safe_for_open_hand_target(tile, player, context)
+                }
+            };
+            if is_unron {
                 unron_mask |= tile_mask(tile);
                 unron_tiles.push(tile);
             }
@@ -197,6 +223,29 @@ impl<'a> HiddenHandModelInput<'a> {
             unron_tiles,
         })
     }
+}
+
+fn open_hand_winning_context(
+    player: usize,
+    context: &GameContext,
+) -> Result<WinningContext, HiddenHandStateUnsupported> {
+    let round_wind = context
+        .round_wind()
+        .ok_or(HiddenHandStateUnsupported::UnknownRoundWind)?;
+    let seat_wind = context
+        .seat_wind_of(player)
+        .ok_or(HiddenHandStateUnsupported::UnknownSeatWind)?;
+    let remaining_live_tiles = context
+        .remaining_tiles()
+        .ok_or(HiddenHandStateUnsupported::UnknownRemainingTiles)?;
+    Ok(WinningContext::new(WinMethod::Ron)
+        .with_round_wind(Some(round_wind))
+        .with_seat_wind(Some(seat_wind))
+        .with_riichi(RiichiStatus::NotDeclared)
+        .with_ippatsu(Some(false))
+        .with_rinshan(Some(false))
+        .with_chankan(Some(false))
+        .with_remaining_live_tiles(Some(remaining_live_tiles)))
 }
 
 /// 公開情報とテンパイ条件に整合する、リーチ者の隠れ手牌状態を exact に数える prototype。
@@ -328,6 +377,22 @@ impl<'a> ReachedHiddenHandStates<'a> {
     }
 
     fn completion_state_weight(&mut self, target: TileType) -> RonCapableStateWeight {
+        self.filtered_completion_state_weight(target, None)
+    }
+
+    fn yaku_qualified_state_weight(
+        &mut self,
+        target: TileType,
+        winning_context: WinningContext,
+    ) -> RonCapableStateWeight {
+        self.filtered_completion_state_weight(target, Some(winning_context))
+    }
+
+    fn filtered_completion_state_weight(
+        &mut self,
+        target: TileType,
+        winning_context: Option<WinningContext>,
+    ) -> RonCapableStateWeight {
         let mut total = RonCapableStateWeight::default();
         if self.is_unron_capable_tile(target) {
             return total;
@@ -341,10 +406,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
         let start = Instant::now();
         let before = self.judgement_elapsed();
         let mut hand = [0u8; TileType::COUNT];
-        self.collect_standard(&mut hand, target, &mut total);
+        self.collect_standard(&mut hand, target, winning_context, &mut total);
         if !self.fixed_meld_count.has_melds() {
-            self.collect_chiitoitsu(&mut hand, target, &mut total);
-            self.collect_kokushi(&mut hand, target, &mut total);
+            self.collect_chiitoitsu(&mut hand, target, winning_context, &mut total);
+            self.collect_kokushi(&mut hand, target, winning_context, &mut total);
         }
         self.metrics.candidate_generation += start.elapsed() - (self.judgement_elapsed() - before);
 
@@ -359,12 +424,13 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &mut HandCounts,
         target: TileType,
+        winning_context: Option<WinningContext>,
         total: &mut RonCapableStateWeight,
     ) {
         let concealed_melds = 4 - self.fixed_meld_count.get();
 
         if self.try_add(hand, &[target]) {
-            self.collect_meld_multisets(hand, concealed_melds, 0, target, total);
+            self.collect_meld_multisets(hand, concealed_melds, 0, target, winning_context, total);
             remove(hand, &[target]);
         }
 
@@ -378,7 +444,14 @@ impl<'a> ReachedHiddenHandStates<'a> {
             }
             for head in TileType::all() {
                 if self.try_add(hand, &[head, head]) {
-                    self.collect_meld_multisets(hand, concealed_melds - 1, 0, target, total);
+                    self.collect_meld_multisets(
+                        hand,
+                        concealed_melds - 1,
+                        0,
+                        target,
+                        winning_context,
+                        total,
+                    );
                     remove(hand, &[head, head]);
                 }
             }
@@ -393,16 +466,24 @@ impl<'a> ReachedHiddenHandStates<'a> {
         melds_left: u8,
         start: usize,
         target: TileType,
+        winning_context: Option<WinningContext>,
         total: &mut RonCapableStateWeight,
     ) {
         if melds_left == 0 {
-            self.record(hand, target, total);
+            self.record(hand, target, winning_context, total);
             return;
         }
         for index in start..self.complete_melds.len() {
             let meld = self.complete_melds[index];
             if self.try_add(hand, &meld) {
-                self.collect_meld_multisets(hand, melds_left - 1, index, target, total);
+                self.collect_meld_multisets(
+                    hand,
+                    melds_left - 1,
+                    index,
+                    target,
+                    winning_context,
+                    total,
+                );
                 remove(hand, &meld);
             }
         }
@@ -412,12 +493,13 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &mut HandCounts,
         target: TileType,
+        winning_context: Option<WinningContext>,
         total: &mut RonCapableStateWeight,
     ) {
         if !self.try_add(hand, &[target]) {
             return;
         }
-        self.collect_chiitoitsu_pairs(hand, 6, 0, target, total);
+        self.collect_chiitoitsu_pairs(hand, 6, 0, target, winning_context, total);
         remove(hand, &[target]);
     }
 
@@ -427,10 +509,11 @@ impl<'a> ReachedHiddenHandStates<'a> {
         pairs_left: usize,
         start: usize,
         target: TileType,
+        winning_context: Option<WinningContext>,
         total: &mut RonCapableStateWeight,
     ) {
         if pairs_left == 0 {
-            self.record(hand, target, total);
+            self.record(hand, target, winning_context, total);
             return;
         }
         let last = TileType::COUNT - pairs_left;
@@ -440,7 +523,14 @@ impl<'a> ReachedHiddenHandStates<'a> {
                 continue;
             }
             hand[index] += 2;
-            self.collect_chiitoitsu_pairs(hand, pairs_left - 1, index + 1, target, total);
+            self.collect_chiitoitsu_pairs(
+                hand,
+                pairs_left - 1,
+                index + 1,
+                target,
+                winning_context,
+                total,
+            );
             hand[index] -= 2;
         }
     }
@@ -449,6 +539,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &mut HandCounts,
         target: TileType,
+        winning_context: Option<WinningContext>,
         total: &mut RonCapableStateWeight,
     ) {
         if !target.is_yaochu() {
@@ -457,7 +548,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         let yaochu: Vec<TileType> = TileType::all().filter(|tile| tile.is_yaochu()).collect();
 
         if self.try_add(hand, &yaochu) {
-            self.record(hand, target, total);
+            self.record(hand, target, winning_context, total);
             remove(hand, &yaochu);
         }
 
@@ -467,7 +558,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         }
         for &extra in &others {
             if self.try_add(hand, &[extra]) {
-                self.record(hand, target, total);
+                self.record(hand, target, winning_context, total);
                 remove(hand, &[extra]);
             }
         }
@@ -486,7 +577,13 @@ impl<'a> ReachedHiddenHandStates<'a> {
         true
     }
 
-    fn record(&mut self, hand: &HandCounts, target: TileType, total: &mut RonCapableStateWeight) {
+    fn record(
+        &mut self,
+        hand: &HandCounts,
+        target: TileType,
+        winning_context: Option<WinningContext>,
+        total: &mut RonCapableStateWeight,
+    ) {
         self.metrics.generated_candidates += 1;
         let generation = self.generation;
         let key = state_key(hand);
@@ -523,7 +620,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
         }
 
         let start = Instant::now();
-        let completes = self.completes_hand(&mut ids, hand, target);
+        let completes = match winning_context {
+            Some(context) => self.completes_hand_with_yaku(&mut ids, hand, target, context),
+            None => self.completes_hand(&mut ids, hand, target),
+        };
         self.metrics.target_completion += start.elapsed();
         if !completes {
             return;
@@ -558,15 +658,45 @@ impl<'a> ReachedHiddenHandStates<'a> {
         ids.pop();
         complete
     }
+
+    fn completes_hand_with_yaku(
+        &self,
+        ids: &mut Vec<TileId>,
+        hand: &HandCounts,
+        tile: TileType,
+        winning_context: WinningContext,
+    ) -> bool {
+        let copy = hand[tile.index()];
+        if copy >= MAX_TILE_COPIES {
+            return false;
+        }
+        self.completion_checks.set(self.completion_checks.get() + 1);
+        ids.push(tile_id(tile, copy));
+        let ron_capable = analyze_completed_hand(ids, self.fixed_melds).is_ok_and(|analysis| {
+            analysis.is_complete()
+                && (evaluate_winning_yaku(&analysis, winning_context, tile)
+                    .iter()
+                    .any(|evaluation| !evaluation.is_empty())
+                    || evaluate_winning_yakuman(&analysis, winning_context, tile)
+                        .iter()
+                        .any(|evaluation| !evaluation.is_empty()))
+        });
+        ids.pop();
+        ron_capable
+    }
 }
 
 /// 公開副露を固定した、非リーチ相手の conditional-tenpai hidden-hand model。
 ///
-/// 公開情報と固定副露に整合する structural tenpai state space だけを扱う。固定副露があるため
-/// hand family は Standard に限定される。役・フリテン・ロン可能性・テンパイ確率は扱わない。
-/// production defense からは利用しない counting foundation である。
+/// 公開情報と固定副露に整合する structural tenpai state space を扱う。固定副露があるため hand
+/// family は Standard に限定される。structural completion の計数に加え、必要な局面情報が既知なら
+/// 役・named Yakuman・current furiten を反映した ron-capable state も数えられる。
+/// テンパイ確率は扱わず、production defense からは利用しない counting foundation である。
 pub struct StructuralTenpaiHiddenHandStates<'a> {
+    player: usize,
+    context: &'a GameContext,
     inner: ReachedHiddenHandStates<'a>,
+    ron_inner: Option<ReachedHiddenHandStates<'a>>,
 }
 
 impl<'a> StructuralTenpaiHiddenHandStates<'a> {
@@ -581,7 +711,10 @@ impl<'a> StructuralTenpaiHiddenHandStates<'a> {
             HiddenHandModelMode::OpenHandStructuralTenpai,
         )?;
         Ok(Self {
+            player,
+            context,
             inner: ReachedHiddenHandStates::from_input(input),
+            ron_inner: None,
         })
     }
 
@@ -604,6 +737,31 @@ impl<'a> StructuralTenpaiHiddenHandStates<'a> {
         target: TileType,
     ) -> StructuralCompletionStateWeight {
         self.inner.completion_state_weight(target).into()
+    }
+
+    /// 対象牌で現在ロン可能な Standard hidden-hand state weight を exact に数える。
+    ///
+    /// structural completion に加えて、既存 yaku / named Yakuman evaluator で役成立を確認し、
+    /// target 本人の河または current temporary-passed と重なる待ちを持つ state を除外する。
+    /// 必要な局面情報が unknown の場合は `0` と推測せず [`HiddenHandStateUnsupported`] を返す。
+    pub fn ron_capable_state_weight(
+        &mut self,
+        target: TileType,
+    ) -> Result<RonCapableStateWeight, HiddenHandStateUnsupported> {
+        let winning_context = open_hand_winning_context(self.player, self.context)?;
+        if self.ron_inner.is_none() {
+            let input = HiddenHandModelInput::new(
+                self.player,
+                self.context,
+                HiddenHandModelMode::OpenHandRonCapable,
+            )?;
+            self.ron_inner = Some(ReachedHiddenHandStates::from_input(input));
+        }
+        Ok(self
+            .ron_inner
+            .as_mut()
+            .expect("initialized above")
+            .yaku_qualified_state_weight(target, winning_context))
     }
 
     /// 評価対象の `GameContext`。
