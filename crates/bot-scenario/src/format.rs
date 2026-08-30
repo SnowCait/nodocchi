@@ -1518,6 +1518,16 @@ fn format_open_hand_defense(open_hand_defense: &OpenHandDefenseDiagnostic) -> St
                 "  selected category: {:?}",
                 selected.selected_category
             ));
+            if let Some(evidence) = &selected.selected_player_ron_risk_evidence {
+                for player in evidence {
+                    header.push(format!(
+                        "  player {} ron risk: {} / {}",
+                        player.player,
+                        player.evidence.ron_capable_weight,
+                        player.evidence.tenpai_weight
+                    ));
+                }
+            }
         }
         None => header.push(format!("  selected: {NONE}")),
     }
@@ -1568,6 +1578,14 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
         ));
         if target.same_hand_passed {
             lines.push(format!("  same hand passed[{}]: yes", target.player));
+        }
+    }
+    if let Some(evidence) = &candidate.player_ron_risk_evidence {
+        for player in evidence {
+            lines.push(format!(
+                "  player {} ron risk: {} / {}",
+                player.player, player.evidence.ron_capable_weight, player.evidence.tenpai_weight
+            ));
         }
     }
     lines.push(format!(
@@ -2264,7 +2282,10 @@ fn format_optional_yes_no(value: Option<bool>) -> &'static str {
 mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
-    use bot_core::{Agent, DiagnosticOptions, MenzenAgent};
+    use bot_core::{
+        Agent, DiagnosticOptions, MenzenAgent, OpenHandDefenseCategory,
+        OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence, RonRiskEvidence,
+    };
     use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
     use std::sync::LazyLock;
 
@@ -5314,6 +5335,42 @@ mod tests {
     }
 
     const OPEN_HAND_DEFENSE_SCENARIO: &str = include_str!("../scenarios/open_hand_defense.json");
+
+    #[test]
+    fn open_hand_defense_section_reports_exact_risk_for_each_target() {
+        let selected_action = LegalAction::Dahai {
+            tile: TileId::new(0).unwrap(),
+        };
+        let diagnostic = OpenHandDefenseDiagnostic {
+            targets: vec![1, 3],
+            selected: Some(OpenHandDefenseSelectionDiagnostic {
+                selected_action,
+                selected_category: OpenHandDefenseCategory::ExactRonRisk,
+                selected_player_ron_risk_evidence: Some(vec![
+                    PlayerRonRiskEvidence {
+                        player: 1,
+                        evidence: RonRiskEvidence {
+                            ron_capable_weight: 2,
+                            tenpai_weight: 5,
+                        },
+                    },
+                    PlayerRonRiskEvidence {
+                        player: 3,
+                        evidence: RonRiskEvidence {
+                            ron_capable_weight: 1,
+                            tenpai_weight: 4,
+                        },
+                    },
+                ]),
+            }),
+            candidates: Vec::new(),
+        };
+
+        assert_eq!(
+            format_open_hand_defense(&diagnostic),
+            "OpenHand defense\n  targets: 1, 3\n  selected action: 1m\n  selected category: ExactRonRisk\n  player 1 ron risk: 2 / 5\n  player 3 ron risk: 1 / 4"
+        );
+    }
 
     #[test]
     fn open_hand_defense_section_lists_the_high_targets_and_their_safety() {

@@ -248,15 +248,18 @@ OpenHand defense
 | `ron safe for all targets` | 全 target にロンされないか |
 | `same hand passed[n]` | target の concealed hand が最後に変化して以降にこの牌が通ったか。成立時だけ表示 |
 | `same hand passed for all targets` | 全 target が hard-safe または same-hand passed で覆われるか。成立時だけ表示 |
+| `player n ron risk: R / T` | `ExactRonRisk` 使用時の target ごとの exact evidence |
 | `honor safety` | 字牌の見え枚数による safety |
 | `opponent honor value` | hard-safe でも same-hand passed でもない target に対する最も危険な役牌価値 |
 | `wall` | 壁 / ワンチャンス |
 | `suji safety[n]` / `suji safety` | target 個別 / 集約後のスジ safety |
-| `category` | `SafeAgainstAllTargets` / `SameHandPassed` / `HonorSafety` / `SuitedSafety` |
+| `category` | `SafeAgainstAllTargets` / `SameHandPassed` / `ExactRonRisk` / `HonorSafety` / `SuitedSafety` |
 
 `discarded by *` は target 本人の河だけを表す観測事実、`ron safe *` は本人の河と現在有効な一時通過牌を合わせたロン安全性です。`SafeAgainstAllTargets` の source of truth は後者なので、`discarded by all targets: no` と同時に成立することがあります。
 
 `same hand passed *` は hard-safe とは別の evidence で、成立している場合だけ行が出ます。行が無いことは「通っていない」と「履歴が unknown」のどちらでもあり得ます。`ron safe[n]: no` と `same hand passed[n]: yes` が同時に出るのは正常で、全 target がこの2つで覆われていれば `category` は `SameHandPassed` になります。
+
+`ExactRonRisk` では selected header と各候補に target ごとの `player n ron risk: R / T` が出ます。target の1人でも exact model unavailable なら局面全体が既存 heuristic fallback へ戻り、この行は出ません。
 
 ```text
 2s

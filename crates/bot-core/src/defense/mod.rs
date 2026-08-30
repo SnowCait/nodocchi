@@ -41,7 +41,10 @@ pub use honor::{
     opponent_honor_value_for_players, opponent_honor_value_for_reached,
     select_honor_safety_fallback_action,
 };
-pub(crate) use ron_risk::{DahaiRonRiskVector, reached_opponents_dahai_actions_by_ron_risk};
+pub(crate) use ron_risk::{
+    DahaiRonRiskVector, open_hand_targets_dahai_actions_by_ron_risk,
+    player_ron_risk_evidence_for_action, reached_opponents_dahai_actions_by_ron_risk,
+};
 pub use ron_risk::{PlayerRonRiskEvidence, compare_lexicographic_minimax_ron_risk};
 pub use suited::{
     SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,
@@ -156,7 +159,7 @@ pub(crate) fn evaluate_defense_fallback_action_with_kind<'a>(
     }
 }
 
-fn select_lexicographic_minimax_action<'a>(
+pub(crate) fn select_lexicographic_minimax_action<'a>(
     vectors: &[DahaiRonRiskVector<'a>],
 ) -> Result<Option<&'a LegalAction>, ()> {
     let Some(mut chosen) = vectors.first() else {

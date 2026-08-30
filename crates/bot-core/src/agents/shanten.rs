@@ -16,8 +16,8 @@ use crate::discard_selection::{
     select_discard_action_with_evaluation, selected_discard_tenpai_wait_availability,
 };
 use crate::open_hand_defense::{
-    OpenHandDefenseCategory, OpenHandDefenseDiagnostic, high_open_hand_threat_players,
-    select_open_hand_defense_fallback_action_with_kind,
+    OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
+    evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
 };
 use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{
@@ -430,6 +430,7 @@ struct DecisionDiagnostics {
     normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
     normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     defense: Option<DefenseDecisionDiagnostic>,
+    open_hand_defense: Option<OpenHandDefenseDiagnostic>,
 }
 
 impl DecisionDiagnostics {
@@ -498,15 +499,17 @@ impl ShantenAgent {
             std::array::from_fn(|player| player_threats[player].open_hand_threat);
 
         // 採用された OpenHand 防御 fallback は act() が通った経路そのもの。診断側で選び直さない。
-        let open_hand_defense = OpenHandDefenseDiagnostic::from_assessments(
-            context,
-            legal_actions,
-            &open_hand_threats,
-            decision
-                .source
-                .open_hand_defense_category()
-                .map(|category| (&decision.action, category)),
-        );
+        let open_hand_defense = diagnostics.open_hand_defense.take().unwrap_or_else(|| {
+            OpenHandDefenseDiagnostic::from_assessments(
+                context,
+                legal_actions,
+                &open_hand_threats,
+                decision
+                    .source
+                    .open_hand_defense_category()
+                    .map(|category| (&decision.action, category)),
+            )
+        });
 
         // 複合 threat の target も同じ facts と classification から作り、リーチ者も High の相手も
         // 判定し直さない。採用された防御 fallback は act() が通った経路そのもの。
@@ -776,7 +779,7 @@ impl ShantenAgent {
         if inputs.opponent_reach_count > 0 {
             return self.select_defense_fallback(ctx, legal_actions, diagnostics);
         }
-        self.select_open_hand_defense_fallback(ctx, legal_actions, inputs)
+        self.select_open_hand_defense_fallback(ctx, legal_actions, inputs, diagnostics)
     }
 
     // リーチ者と High OpenHandThreat の相手が同時にいる局面の防御 fallback。target は押し引き
@@ -807,10 +810,20 @@ impl ShantenAgent {
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         inputs: &PushPullInputs,
+        diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
         let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
-        let (action, category) =
-            select_open_hand_defense_fallback_action_with_kind(ctx, legal_actions, &targets)?;
+        let evaluation =
+            evaluate_open_hand_defense_fallback_action_with_kind(ctx, legal_actions, &targets);
+        if diagnostics.enabled {
+            diagnostics.open_hand_defense = Some(OpenHandDefenseDiagnostic::from_evaluation(
+                ctx,
+                legal_actions,
+                &inputs.open_hand_threats,
+                &evaluation,
+            ));
+        }
+        let (action, category) = evaluation.selected?;
         Some((
             action.clone(),
             AgentActionSource::OpenHandDefenseFallback(category),
