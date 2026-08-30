@@ -179,7 +179,7 @@ exact model 上でより安全
 
 と読めます。ただしこれは実放銃率ではありません。`ron capable weight / tenpai weight` を割合として読む場合も、あくまで combinatorial hidden-hand model 上の比率です。現物は `ron capable weight: 0` になります。定義は [リーチ者ごとの exact ron risk](ai/defense.md#リーチ者ごとの-exact-ron-risk) を参照してください。
 
-evidence の収集は診断のためだけに行い、選択結果を変えません。現物を採用した単独リーチ局面でも候補ごとの evidence を表示します。
+共通現物がない局面では、この exact evidence は production selection が比較へ使ったものそのものです。共通現物を採用した局面でも候補ごとの evidence を表示しますが、そちらは diagnostics 表示のための追加収集で、選択結果を変えません。
 
 ### 複数リーチの player 別 exact evidence
 
