@@ -15,7 +15,8 @@
 | `Player threats` | player ごとの reach / meld facts と OpenHandThreat classification |
 | `Push/Pull` | threat と offense を組み合わせた押し引き |
 | `Reach` | 通常打牌後のテンパイに対するリーチ判断 |
-| `Defense` | リーチ者向け防御候補 |
+| `Defense` | リーチ者向け防御候補のうち採用したもの |
+| `Defense candidates` | 全合法 Dahai の防御評価 |
 | `OpenHand defense` | High OpenHandThreat 向け防御候補 |
 | `Combined defense` | リーチと High OpenHandThreat が同時にいる場合の候補 |
 | `Summary` | 最終選択と次点を末尾で要約 |
@@ -136,7 +137,55 @@ Reach
 
 ## Defense
 
-リーチ者向けの候補を `Genbutsu`、字牌 safety、壁、スジなどで表示します。`selected` は production fallback が採用した候補です。詳しい safety と優先順は [防御](ai/defense.md#riichi-defense) を参照してください。
+`Defense` は採用した防御候補、`Defense candidates` は全合法 Dahai の防御評価です。`selected` は production fallback が採用した候補そのもので、表示側で選び直しません。safety と優先順の定義は [防御](ai/defense.md#riichi-defense) を参照してください。
+
+### selected kind
+
+`selected kind` は採用した `DefenseFallbackKind` です。
+
+| kind | 意味 |
+| --- | --- |
+| `Genbutsu` | 全リーチ者に共通する現物。単独・複数どちらでも最優先 |
+| `ExactRonRisk` | 単独リーチの exact hidden-hand model で選んだ候補 |
+| `HonorSafety(rank)` | legacy path の字牌 safety |
+| `SuitedSafety(rank)` | legacy path の数牌 safety (壁 / スジ) |
+
+複数リーチでは `ExactRonRisk` は出ず、従来どおり `Genbutsu` / `HonorSafety` / `SuitedSafety` になります。同じ値は `Summary` の `defense detail` にも出ます。
+
+### exact ron risk evidence
+
+単独リーチで exact model が使えた候補には、`Defense` と `Defense candidates` の両方に次の2行が出ます。
+
+```text
+4p
+  selected: yes
+  ...
+  ron capable weight: 12345
+  tenpai weight: 678901
+```
+
+| 行 | 意味 |
+| --- | --- |
+| `ron capable weight` | `R(p, x)`。その候補で現在ロン可能な hidden-hand states の physical weight |
+| `tenpai weight` | `T(p)`。structural tenpai hidden-hand states 全体の physical weight |
+
+同じ単独リーチ局面の候補どうしでは `tenpai weight` が共通なので、
+
+```text
+ron capable weight が小さい候補
+=
+exact model 上でより安全
+```
+
+と読めます。ただしこれは実放銃率ではありません。`ron capable weight / tenpai weight` を割合として読む場合も、あくまで combinatorial hidden-hand model 上の比率です。現物は `ron capable weight: 0` になります。定義は [単独リーチの exact ron risk](ai/defense.md#単独リーチの-exact-ron-risk) を参照してください。
+
+evidence の収集は診断のためだけに行い、選択結果を変えません。現物を採用した単独リーチ局面でも候補ごとの evidence を表示します。
+
+### 複数リーチと legacy diagnostics
+
+複数リーチでは joint exact evidence を計算していないため、`ron capable weight` と `tenpai weight` はどちらも `-` になります。各リーチ者の exact risk を集約した値ではありません。単独リーチでも exact model が使えない場合は同じく `-` です。
+
+`genbutsu` / `honor safety` / `opponent honor value` / `wall` / `suji` / `suji safety` / `suited safety` は、`ExactRonRisk` で選んだ候補にも表示されます。これらは従来の safety evidence を観察するための診断情報で、exact selection の第2 key ではありません。
 
 ## OpenHand defense
 
