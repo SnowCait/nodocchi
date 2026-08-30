@@ -248,6 +248,9 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
         "  action: {}",
         action_label(&diagnostic.selected_action)
     ));
+    if let Some(discard) = selected_reach_discard(diagnostic) {
+        lines.push(format!("  discard: {}", action_label(discard)));
+    }
     lines.push(format!(
         "  source: {}",
         source_label(diagnostic.selected_source)
@@ -1839,17 +1842,24 @@ fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
 
 /// 選択結果とその主な理由だけを1画面へ集めた要約。
 ///
-/// 値はすべて既存 diagnostic が持つものをそのまま読み、表示のために向聴・受け入れ・待ち・
-/// 打点・安全度を求め直さない。検討しなかった判断は行そのものを出さず、`none` を並べない。
+/// 各 choice は同じ production 診断を、上位 choice を合法手から順に除外して得る。個々の値は
+/// diagnostic が持つものをそのまま読み、表示専用の評価や comparator は持たない。
 pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
-    let groups = [
-        summary_selected(diagnostic),
+    let choices = diagnose_choices(scenario, diagnostic, 3);
+    let mut groups = vec![
+        summary_choice(1, &choices[0], None),
         summary_push_pull(diagnostic),
         summary_reach(diagnostic),
         summary_call(diagnostic),
         summary_defense(diagnostic),
-        summary_runner_up(scenario, diagnostic),
     ];
+    groups.extend(
+        choices
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, choice)| summary_choice(index + 1, choice, Some(&choices[index - 1]))),
+    );
 
     let body = groups
         .into_iter()
@@ -1861,11 +1871,46 @@ pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnosti
     format!("Summary\n{body}")
 }
 
-fn summary_selected(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    vec![
-        format!("  selected: {}", action_label(&diagnostic.selected_action)),
-        format!("  source: {}", source_label(diagnostic.selected_source)),
-    ]
+fn summary_choice(
+    rank: usize,
+    diagnostic: &ShantenDecisionDiagnostic,
+    previous: Option<&ShantenDecisionDiagnostic>,
+) -> Vec<String> {
+    let prefix = format!("choice {rank}");
+    let mut lines = vec![format!(
+        "  {prefix}: {}",
+        action_label(&diagnostic.selected_action)
+    )];
+    if let Some(discard) = selected_reach_discard(diagnostic) {
+        lines.push(format!("  {prefix} discard: {}", action_label(discard)));
+    }
+    lines.push(format!(
+        "  {prefix} source: {}",
+        source_label(diagnostic.selected_source)
+    ));
+
+    // choice 1 の防御情報は既存の defense group が表示する。再診断した下位 choice はその
+    // diagnostic だけが持つ情報なので、同じ既存 accessor から順位名付きで表示する。
+    let Some(previous) = previous else {
+        return lines;
+    };
+    if let Some(kind) = diagnostic.defense_fallback_kind() {
+        lines.push(format!("  {prefix} detail: {kind:?}"));
+    }
+    if let Some(category) = diagnostic.open_hand_defense_category() {
+        lines.push(format!("  {prefix} detail: {category:?}"));
+    }
+    if let Some(category) = diagnostic.combined_defense_category() {
+        lines.push(format!("  {prefix} detail: {category:?}"));
+    }
+    if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
+        lines.push(format!("  {prefix} opponent honor value: {value}"));
+    }
+    if let Some(reason) = choice_comparison_reason(previous, diagnostic) {
+        lines.push(format!("  {prefix} lost by: {reason:?}"));
+    }
+
+    lines
 }
 
 fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
@@ -2027,36 +2072,11 @@ fn summary_defense(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     Vec::new()
 }
 
-fn summary_runner_up(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    let Some(runner_up) = diagnose_runner_up(scenario, diagnostic) else {
-        return vec![format!("  runner-up: {ABSENT}")];
-    };
-
-    let mut lines = vec![
-        format!("  runner-up: {}", action_label(&runner_up.selected_action)),
-        format!(
-            "  runner-up source: {}",
-            source_label(runner_up.selected_source)
-        ),
-    ];
-
-    if let Some(kind) = runner_up.defense_fallback_kind() {
-        lines.push(format!("  runner-up detail: {kind:?}"));
+fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&LegalAction> {
+    if !matches!(diagnostic.selected_action, LegalAction::Reach) {
+        return None;
     }
-    if let Some(category) = runner_up.open_hand_defense_category() {
-        lines.push(format!("  runner-up detail: {category:?}"));
-    }
-    if let Some(category) = runner_up.combined_defense_category() {
-        lines.push(format!("  runner-up detail: {category:?}"));
-    }
-    if let Some(value) = honor_safety_opponent_honor_value(&runner_up) {
-        lines.push(format!("  runner-up opponent honor value: {value}"));
-    }
-    if let Some(reason) = runner_up_comparison_reason(diagnostic, &runner_up) {
-        lines.push(format!("  runner-up lost by: {reason:?}"));
-    }
-
-    lines
+    diagnostic.reach.as_ref()?.selected_discard.as_ref()
 }
 
 fn honor_safety_opponent_honor_value(diagnostic: &ShantenDecisionDiagnostic) -> Option<String> {
@@ -2070,26 +2090,37 @@ fn honor_safety_opponent_honor_value(diagnostic: &ShantenDecisionDiagnostic) -> 
     Some(optional(selected.selected_opponent_honor_value))
 }
 
-fn diagnose_runner_up(
+fn diagnose_choices(
     scenario: &Scenario,
     diagnostic: &ShantenDecisionDiagnostic,
-) -> Option<ShantenDecisionDiagnostic> {
-    if diagnostic.selected_action == LegalAction::None {
-        return None;
+    limit: usize,
+) -> Vec<ShantenDecisionDiagnostic> {
+    if limit == 0 {
+        return Vec::new();
     }
 
-    let runner_up_actions =
-        legal_actions_without_selected(&scenario.legal_actions, &diagnostic.selected_action);
-    if runner_up_actions.is_empty() {
-        return None;
+    let mut choices = vec![diagnostic.clone()];
+    let mut remaining_actions = scenario.legal_actions.clone();
+    while choices.len() < limit {
+        let selected = &choices.last().unwrap().selected_action;
+        if *selected == LegalAction::None {
+            break;
+        }
+
+        let next_actions = legal_actions_without_selected(&remaining_actions, selected);
+        if next_actions.is_empty() || next_actions.len() == remaining_actions.len() {
+            break;
+        }
+
+        let next = ShantenAgent::diagnose(&scenario.context, &next_actions);
+        if next.selected_action == LegalAction::None {
+            break;
+        }
+        remaining_actions = next_actions;
+        choices.push(next);
     }
 
-    let runner_up = ShantenAgent::diagnose(&scenario.context, &runner_up_actions);
-    if runner_up.selected_action == LegalAction::None {
-        return None;
-    }
-
-    Some(runner_up)
+    choices
 }
 
 fn legal_actions_without_selected(
@@ -2110,17 +2141,17 @@ fn legal_actions_without_selected(
         .collect()
 }
 
-fn runner_up_comparison_reason(
+fn choice_comparison_reason(
     diagnostic: &ShantenDecisionDiagnostic,
-    runner_up: &ShantenDecisionDiagnostic,
+    choice: &ShantenDecisionDiagnostic,
 ) -> Option<DiscardComparisonReason> {
     if diagnostic.selected_source != AgentActionSource::NormalDiscard
-        || runner_up.selected_source != AgentActionSource::NormalDiscard
+        || choice.selected_source != AgentActionSource::NormalDiscard
     {
         return None;
     }
 
-    let LegalAction::Dahai { tile } = &runner_up.selected_action else {
+    let LegalAction::Dahai { tile } = &choice.selected_action else {
         return None;
     };
 
@@ -2762,7 +2793,7 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.contains("runner-up lost by: WeightedNextAcceptanceRemaining"),
+            output.contains("choice 2 lost by: WeightedNextAcceptanceRemaining"),
             "{output}"
         );
     }
@@ -2852,7 +2883,7 @@ mod tests {
                     .weighted_remaining
         );
         assert!(
-            output.contains("  runner-up lost by: WeightedTenpaiWaitRemaining"),
+            output.contains("  choice 2 lost by: WeightedTenpaiWaitRemaining"),
             "{output}"
         );
     }
@@ -3136,7 +3167,7 @@ mod tests {
 
         let summary = summary_section(&output);
         assert!(
-            summary.contains("  selected: Reach\n  source: Reach"),
+            summary.contains("  choice 1: Reach\n  choice 1 discard: W\n  choice 1 source: Reach"),
             "{summary}"
         );
     }
@@ -3232,11 +3263,10 @@ mod tests {
         assert_eq!(
             summary,
             "Summary\n  \
-             selected: Pon P <- P P\n  \
-             source: Call\n\n  \
+             choice 1: Pon P <- P P\n  \
+             choice 1 source: Call\n\n  \
              call: Pon P <- P P\n  \
-             call reason: EligibleTenpai\n\n  \
-             runner-up: -"
+             call reason: EligibleTenpai"
         );
     }
 
@@ -3313,12 +3343,12 @@ mod tests {
     fn fixed_meld_aware_summary_selects_the_tenpai_discard() {
         let (_, _, output) = rendered(ONE_MELD_TENPAI_SCENARIO, false);
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: N"), "{summary}");
-        assert!(summary.contains("  source: NormalDiscard"), "{summary}");
+        assert!(summary.contains("  choice 1: N"), "{summary}");
         assert!(
-            summary.contains("  runner-up lost by: Shanten"),
+            summary.contains("  choice 1 source: NormalDiscard"),
             "{summary}"
         );
+        assert!(summary.contains("  choice 2 lost by: Shanten"), "{summary}");
 
         let push_pull = section(&output, "Push/Pull");
         assert!(
@@ -3361,13 +3391,18 @@ mod tests {
 
     #[test]
     fn concealed_scenario_selection_is_unchanged() {
-        // 副露が無い既存 scenario の selected / runner-up は fixed meld 対応後も変わらない。
+        // 副露が無い既存 scenario の上位 choice は fixed meld 対応後も変わらない。
         let (_, _, output) = rendered(NORMAL_SCENARIO, false);
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: W"), "{summary}");
-        assert!(summary.contains("  runner-up: N"), "{summary}");
+        assert!(summary.contains("  choice 1: W"), "{summary}");
+        assert!(summary.contains("  choice 2: N"), "{summary}");
+        assert!(summary.contains("  choice 3: S"), "{summary}");
         assert!(
-            summary.contains("  runner-up lost by: StableOrder"),
+            summary.contains("  choice 2 lost by: StableOrder"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  choice 3 lost by: ValueHonor"),
             "{summary}"
         );
     }
@@ -4244,12 +4279,21 @@ mod tests {
         remaining
     }
 
-    fn expected_runner_up(
-        scenario: &Scenario,
-        selected: &LegalAction,
-    ) -> ShantenDecisionDiagnostic {
-        let remaining = without_selected_action(&scenario.legal_actions, selected);
-        ShantenAgent::diagnose(&scenario.context, &remaining)
+    fn expected_choices(scenario: &Scenario, limit: usize) -> Vec<ShantenDecisionDiagnostic> {
+        let mut remaining = scenario.legal_actions.clone();
+        let mut choices = Vec::new();
+        while choices.len() < limit && !remaining.is_empty() {
+            let choice = ShantenAgent::diagnose(&scenario.context, &remaining);
+            if choice.selected_action == LegalAction::None {
+                if choices.is_empty() {
+                    choices.push(choice);
+                }
+                break;
+            }
+            remaining = without_selected_action(&remaining, &choice.selected_action);
+            choices.push(choice);
+        }
+        choices
     }
 
     #[test]
@@ -4278,55 +4322,37 @@ mod tests {
     }
 
     #[test]
-    fn summary_shows_normal_discard_runner_up() {
+    fn summary_shows_three_normal_discard_choices() {
         let (scenario, diagnostic, output) = rendered(NORMAL_SCENARIO, false);
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
 
-        let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
-        assert_eq!(
-            runner_up.selected_source,
-            AgentActionSource::NormalDiscard,
+        let choices = expected_choices(&scenario, 3);
+        assert_eq!(choices.len(), 3);
+        assert_eq!(choices[0], diagnostic);
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.selected_source == AgentActionSource::NormalDiscard),
             "{output}"
         );
-        assert_ne!(runner_up.selected_action, diagnostic.selected_action);
 
         let summary = summary_section(&output);
+        for (index, choice) in choices.iter().enumerate() {
+            let rank = index + 1;
+            assert!(
+                summary.contains(&format!(
+                    "  choice {rank}: {}\n  choice {rank} source: NormalDiscard",
+                    action_label(&choice.selected_action)
+                )),
+                "{summary}"
+            );
+        }
         assert!(
-            summary.contains(&format!(
-                "  selected: {}",
-                action_label(&diagnostic.selected_action)
-            )),
+            summary.contains("  choice 2 lost by: StableOrder"),
             "{summary}"
         );
-        assert!(summary.contains("  source: NormalDiscard"), "{summary}");
         assert!(
-            summary.contains(&format!(
-                "  runner-up: {}",
-                action_label(&runner_up.selected_action)
-            )),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("  runner-up source: NormalDiscard"),
-            "{summary}"
-        );
-
-        let LegalAction::Dahai { tile } = &runner_up.selected_action else {
-            panic!("expected a dahai runner-up:\n{summary}");
-        };
-        let candidate = diagnostic
-            .normal_discard
-            .as_ref()
-            .unwrap()
-            .candidates
-            .iter()
-            .find(|candidate| candidate.evaluation.discard == tile.tile_type())
-            .unwrap_or_else(|| panic!("missing runner-up candidate:\n{output}"));
-        assert!(
-            summary.contains(&format!(
-                "  runner-up lost by: {:?}",
-                candidate.comparison_reason
-            )),
+            summary.contains("  choice 3 lost by: ValueHonor"),
             "{summary}"
         );
     }
@@ -4334,48 +4360,52 @@ mod tests {
     #[test]
     fn summary_shows_defense_fallback_details() {
         let (scenario, diagnostic, output) = rendered(HALF_SUJI_SCENARIO, false);
-        let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
+        let choices = expected_choices(&scenario, 3);
+        let choice_2 = &choices[1];
 
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: 4p"), "{summary}");
-        assert!(summary.contains("  source: DefenseFallback"), "{summary}");
+        assert!(summary.contains("  choice 1: 4p"), "{summary}");
+        assert!(
+            summary.contains("  choice 1 source: DefenseFallback"),
+            "{summary}"
+        );
         assert!(summary.contains("  defense: 4p"), "{summary}");
         assert!(
             summary.contains("  defense detail: ExactRonRisk"),
             "{summary}"
         );
-        assert!(summary.contains("  runner-up: 7s"), "{summary}");
+        assert!(summary.contains("  choice 2: 7s"), "{summary}");
         assert!(
-            summary.contains("  runner-up source: DefenseFallback"),
+            summary.contains("  choice 2 source: DefenseFallback"),
             "{summary}"
         );
         assert!(
-            summary.contains("  runner-up detail: ExactRonRisk"),
+            summary.contains("  choice 2 detail: ExactRonRisk"),
             "{summary}"
         );
-        assert!(!summary.contains("  runner-up lost by:"), "{summary}");
+        assert!(!summary.contains("  choice 2 lost by:"), "{summary}");
 
         assert_eq!(
             summary,
             format!(
                 "Summary\n  \
-                 selected: {}\n  \
-                 source: {}\n\n  \
+                 choice 1: {}\n  \
+                 choice 1 source: {}\n\n  \
                  push/pull: Fold\n  \
                  push/pull reason: TwoOrMoreShantenAgainstReach\n\n  \
                  reach: not evaluated\n\n  \
                  defense: {}\n  \
                  defense detail: {:?}\n\n  \
-                 runner-up: {}\n  \
-                 runner-up source: {}\n  \
-                 runner-up detail: {:?}",
+                 choice 2: {}\n  \
+                 choice 2 source: {}\n  \
+                 choice 2 detail: {:?}",
                 action_label(&diagnostic.selected_action),
                 source_label(diagnostic.selected_source),
                 action_label(&diagnostic.selected_action),
                 diagnostic.defense_fallback_kind().unwrap(),
-                action_label(&runner_up.selected_action),
-                source_label(runner_up.selected_source),
-                runner_up.defense_fallback_kind().unwrap(),
+                action_label(&choice_2.selected_action),
+                source_label(choice_2.selected_source),
+                choice_2.defense_fallback_kind().unwrap(),
             )
         );
     }
@@ -4431,18 +4461,18 @@ mod tests {
         assert_eq!(
             summary_section(&output),
             "Summary\n  \
-             selected: N\n  \
-             source: DefenseFallback\n\n  \
+             choice 1: N\n  \
+             choice 1 source: DefenseFallback\n\n  \
              push/pull: Fold\n  \
              push/pull reason: TwoOrMoreShantenAgainstReach\n\n  \
              reach: not evaluated\n\n  \
              defense: N\n  \
              defense detail: HonorSafety(OneVisible)\n  \
              defense opponent honor value: GuestWind\n\n  \
-             runner-up: C\n  \
-             runner-up source: DefenseFallback\n  \
-             runner-up detail: HonorSafety(OneVisible)\n  \
-             runner-up opponent honor value: SingleValueHonor"
+             choice 2: C\n  \
+             choice 2 source: DefenseFallback\n  \
+             choice 2 detail: HonorSafety(OneVisible)\n  \
+             choice 2 opponent honor value: SingleValueHonor"
         );
     }
 
@@ -4452,18 +4482,18 @@ mod tests {
         assert_eq!(
             summary_section(&output),
             "Summary\n  \
-             selected: C\n  \
-             source: DefenseFallback\n\n  \
+             choice 1: C\n  \
+             choice 1 source: DefenseFallback\n\n  \
              push/pull: Fold\n  \
              push/pull reason: TwoOrMoreShantenAgainstReach\n\n  \
              reach: not evaluated\n\n  \
              defense: C\n  \
              defense detail: HonorSafety(OneVisible)\n  \
              defense opponent honor value: SingleValueHonor\n\n  \
-             runner-up: E\n  \
-             runner-up source: DefenseFallback\n  \
-             runner-up detail: HonorSafety(OneVisible)\n  \
-             runner-up opponent honor value: DoubleWind"
+             choice 2: E\n  \
+             choice 2 source: DefenseFallback\n  \
+             choice 2 detail: HonorSafety(OneVisible)\n  \
+             choice 2 opponent honor value: DoubleWind"
         );
     }
 
@@ -4531,51 +4561,52 @@ mod tests {
         );
 
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: 5m\n"), "{summary}");
-        assert!(summary.contains("  runner-up: 5mr"), "{summary}");
+        assert!(summary.contains("  choice 1: 5m\n"), "{summary}");
+        assert!(summary.contains("  choice 2: 5mr"), "{summary}");
+        assert!(!summary.contains("  choice 3:"), "{summary}");
     }
 
     #[test]
-    fn summary_marks_a_missing_runner_up() {
+    fn summary_omits_missing_choices() {
         let (scenario, _, output) = rendered(SINGLE_ACTION_SCENARIO, false);
         assert_eq!(scenario.legal_actions.len(), 1);
 
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: N"), "{summary}");
-        assert!(summary.contains("  runner-up: -"), "{summary}");
-        assert!(!summary.contains("  runner-up source:"), "{summary}");
-        assert!(!summary.contains("  runner-up detail:"), "{summary}");
-        assert!(!summary.contains("  runner-up lost by:"), "{summary}");
+        assert!(summary.contains("  choice 1: N"), "{summary}");
+        assert!(!summary.contains("  choice 2:"), "{summary}");
+        assert!(!summary.contains("  choice 3:"), "{summary}");
     }
 
     #[test]
-    fn summary_runner_up_source_can_differ_from_selected_source() {
+    fn summary_choice_source_can_differ_from_the_previous_choice() {
         let (scenario, diagnostic, output) = rendered(REACH_SCENARIO, false);
         assert_eq!(diagnostic.selected_action, LegalAction::Reach);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
 
-        let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
-        assert_eq!(runner_up.selected_source, AgentActionSource::NormalDiscard);
+        let choices = expected_choices(&scenario, 3);
+        let choice_2 = &choices[1];
+        assert_eq!(choice_2.selected_source, AgentActionSource::NormalDiscard);
         assert!(matches!(
-            runner_up.selected_action,
+            choice_2.selected_action,
             LegalAction::Dahai { .. }
         ));
 
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: Reach"), "{summary}");
-        assert!(summary.contains("  source: Reach"), "{summary}");
+        assert!(summary.contains("  choice 1: Reach"), "{summary}");
+        assert!(summary.contains("  choice 1 discard: N"), "{summary}");
+        assert!(summary.contains("  choice 1 source: Reach"), "{summary}");
         assert!(
             summary.contains(&format!(
-                "  runner-up: {}",
-                action_label(&runner_up.selected_action)
+                "  choice 2: {}",
+                action_label(&choice_2.selected_action)
             )),
             "{summary}"
         );
         assert!(
-            summary.contains("  runner-up source: NormalDiscard"),
+            summary.contains("  choice 2 source: NormalDiscard"),
             "{summary}"
         );
-        assert!(!summary.contains("  runner-up lost by:"), "{summary}");
+        assert!(!summary.contains("  choice 2 lost by:"), "{summary}");
     }
 
     #[test]
@@ -4601,14 +4632,50 @@ mod tests {
             let summary = summary_section(&output);
             let action = action_label(&diagnostic.selected_action);
             let source = source_label(diagnostic.selected_source);
-            assert!(
-                final_decision.contains(&format!("  action: {action}\n  source: {source}")),
-                "{final_decision}"
-            );
-            assert!(
-                summary.contains(&format!("  selected: {action}\n  source: {source}")),
-                "{summary}"
-            );
+            if diagnostic.selected_action == LegalAction::Reach {
+                assert!(
+                    final_decision.contains("  action: Reach\n  discard: N\n  source: Reach"),
+                    "{final_decision}"
+                );
+                assert!(
+                    summary.contains(
+                        "  choice 1: Reach\n  choice 1 discard: N\n  choice 1 source: Reach"
+                    ),
+                    "{summary}"
+                );
+            } else {
+                assert!(
+                    final_decision.contains(&format!("  action: {action}\n  source: {source}")),
+                    "{final_decision}"
+                );
+                assert!(
+                    summary.contains(&format!(
+                        "  choice 1: {action}\n  choice 1 source: {source}"
+                    )),
+                    "{summary}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reach_choices_in_lower_ranks_include_their_discard() {
+        for (earlier_actions, expected) in [
+            (
+                vec![LegalAction::Hora],
+                "  choice 1: Hora\n  choice 1 source: Hora\n\n  choice 2: Reach\n  choice 2 discard: N\n  choice 2 source: Reach",
+            ),
+            (
+                vec![LegalAction::Hora, LegalAction::Ryukyoku],
+                "  choice 2: Ryukyoku\n  choice 2 source: Ryukyoku\n\n  choice 3: Reach\n  choice 3 discard: N\n  choice 3 source: Reach",
+            ),
+        ] {
+            let mut scenario = scenario_from_json(REACH_SCENARIO);
+            scenario.legal_actions.splice(0..0, earlier_actions);
+            let diagnostic = diagnose(&scenario);
+            let summary = format_summary(&scenario, &diagnostic);
+
+            assert!(summary.contains(expected), "{summary}");
         }
     }
 
@@ -5621,11 +5688,23 @@ mod tests {
             "{output}"
         );
         assert!(
-            summary.contains("  source: CombinedThreatDefenseFallback"),
+            summary.contains("  choice 1 source: CombinedThreatDefenseFallback"),
             "{output}"
         );
         assert!(
             summary.contains("  defense detail: SafeAgainstAllThreats"),
+            "{output}"
+        );
+        assert!(
+            summary.contains(
+                "  choice 2: E\n  choice 2 source: CombinedThreatDefenseFallback\n  choice 2 detail: HonorSafety(OneVisible)"
+            ),
+            "{output}"
+        );
+        assert!(
+            summary.contains(
+                "  choice 3: 9m\n  choice 3 source: CombinedThreatDefenseFallback\n  choice 3 detail: SuitedSafety(NoChance)"
+            ),
             "{output}"
         );
     }

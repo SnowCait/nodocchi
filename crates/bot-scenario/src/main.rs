@@ -117,9 +117,38 @@ mod tests {
         .unwrap();
 
         assert!(
-            output.starts_with("Summary\n  selected: Reach\n  source: Reach\n"),
+            output.starts_with(
+                "Summary\n  choice 1: Reach\n  choice 1 discard: W\n  choice 1 source: Reach\n"
+            ),
             "{output}"
         );
+    }
+
+    #[test]
+    fn reported_reach_scenario_shows_three_production_choices() {
+        let args = ["--hand", "34599m235p345567s"];
+        let full = run_args(&args).unwrap();
+        let summary = run_args(&[args.as_slice(), &["--summary-only"]].concat()).unwrap();
+
+        assert!(
+            full.contains("Final decision\n  action: Reach\n  discard: 5p\n  source: Reach"),
+            "{full}"
+        );
+        assert!(
+            summary.starts_with(
+                "Summary\n  choice 1: Reach\n  choice 1 discard: 5p\n  choice 1 source: Reach"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  choice 2: 5p\n  choice 2 source: NormalDiscard"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  choice 3: 2p\n  choice 3 source: NormalDiscard"),
+            "{summary}"
+        );
+        assert!(full.ends_with(&summary), "{full}");
     }
 
     #[test]
