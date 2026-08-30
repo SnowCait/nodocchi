@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
 
+use bot_core::action::LegalAction;
 use bot_core::context::GameContext;
 use bot_core::defense::{
-    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, HiddenHandStateMetrics,
-    ReachedHiddenHandStates, RonCapableStateWeight, TenpaiStateWeight,
+    CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseFallbackKind,
+    HiddenHandStateMetrics, ReachedHiddenHandStates, RonCapableStateWeight, TenpaiStateWeight,
+    select_defense_fallback_action_with_kind,
 };
 use bot_logic::{TileId, TileType};
 
@@ -260,6 +262,58 @@ fn measure_multiple_targets_compressed_ron_capable_hidden_hand_weight() {
         player_construction,
         evidence_evaluation,
     );
+}
+
+#[test]
+#[ignore = "release build 前提の production-like fallback 計測用。wall-clock threshold は持たない"]
+fn measure_single_reach_exact_defense_fallback_selection() {
+    let context = representative_context();
+    let actions: Vec<LegalAction> = context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .map(|tile| LegalAction::Dahai { tile })
+        .collect();
+
+    let construction_start = Instant::now();
+    let mut states = CompressedHiddenHandStates::new(1, &context).expect("single reached player");
+    let construction = construction_start.elapsed();
+    let tenpai = states.tenpai_state_weight();
+
+    let evaluation_start = Instant::now();
+    let mut evaluated = [false; TileType::COUNT];
+    let mut unique_targets = 0;
+    for action in &actions {
+        let LegalAction::Dahai { tile } = action else {
+            continue;
+        };
+        let target = tile.tile_type();
+        if !evaluated[target.index()] {
+            evaluated[target.index()] = true;
+            unique_targets += 1;
+            let evidence = states.ron_risk_evidence(target);
+            assert_eq!(evidence.tenpai_weight, tenpai.weight);
+        }
+    }
+    let all_unique_evaluations = evaluation_start.elapsed();
+
+    let selection_start = Instant::now();
+    let selected = select_defense_fallback_action_with_kind(&context, &actions)
+        .expect("representative single-reach fallback");
+    let total_selection = selection_start.elapsed();
+    assert_eq!(selected.1, DefenseFallbackKind::ExactRonRisk);
+
+    println!("production-like single-reach exact defense fallback:");
+    println!("  legal Dahai actions:          {}", actions.len());
+    println!("  unique TileType evaluations:  {unique_targets}");
+    println!("  CompressedHiddenHandStates:   {construction:?}");
+    println!("  all unique R/T evaluations:   {all_unique_evaluations:?}");
+    println!("  total fallback selection:     {total_selection:?}");
+    println!(
+        "  selected:                     {:?} ({:?})",
+        selected.0, selected.1
+    );
+    println!("  T={} states={}", tenpai.weight, tenpai.states);
 }
 
 // representative context で enumerating implementation と compressed counting が一致すること。

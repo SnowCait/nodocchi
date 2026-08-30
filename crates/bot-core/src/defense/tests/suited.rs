@@ -495,8 +495,9 @@ fn suited_dahai_actions_by_safety_orders_full_suji_over_half_suji() {
 
 #[test]
 fn half_suji_regression_prefers_full_suji_regardless_of_action_order() {
-    // 合法 action の順序に関係なく、完全スジの 7s を片スジの 4p より優先する。
-    let context = half_suji_regression_context();
+    // 複数リーチの legacy path では、合法 action の順序に関係なく完全スジの 7s を片スジの
+    // 4p より優先する。
+    let context = multiple_reach_half_suji_regression_context();
     let expected = Some((
         &LegalAction::Dahai { tile: tile(96) },
         DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji),

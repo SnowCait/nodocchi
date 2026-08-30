@@ -149,3 +149,32 @@ pub(super) fn half_suji_regression_context() -> GameContext {
         [false, true, false, false],
     )
 }
+
+pub(super) fn multiple_reach_half_suji_regression_context() -> GameContext {
+    let hand = vec![
+        tile(48),
+        tile(49),
+        tile(50),
+        tile(0),
+        tile(12),
+        tile(24),
+        tile(40),
+        tile(52),
+        tile(64),
+        tile(72),
+        tile(76),
+        tile(80),
+        tile(96),
+        tile(32),
+    ];
+    suited_context(
+        hand,
+        [
+            vec![],
+            vec![tile(36), tile(84)],
+            vec![tile(37), tile(85)],
+            vec![],
+        ],
+        [false, true, true, false],
+    )
+}

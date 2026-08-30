@@ -3,6 +3,7 @@ mod diagnostic;
 mod hard_safety;
 mod hidden_hand_states;
 mod honor;
+mod single_reach;
 mod suited;
 mod suji;
 mod wait_candidates;
@@ -20,6 +21,7 @@ pub use compressed_hidden_hand_states::{
     TenpaiStateWeight, compressed_ron_capable_hidden_hand_weight,
     compressed_tenpai_hidden_hand_weight,
 };
+pub(crate) use diagnostic::log_defense_fallback_evaluation;
 pub use diagnostic::{
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackDiagnostic,
     log_defense_fallback_decision,
@@ -38,6 +40,7 @@ pub use honor::{
     opponent_honor_value_for_players, opponent_honor_value_for_reached,
     select_honor_safety_fallback_action,
 };
+pub use single_reach::{DahaiRonRiskEvidence, single_reach_dahai_actions_by_ron_risk};
 pub use suited::{
     SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,
     suited_dahai_actions_by_safety, suited_dahai_actions_by_safety_with,
@@ -74,26 +77,81 @@ pub fn visible_count_of(tile: TileType, context: &GameContext) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefenseFallbackKind {
     Genbutsu,
+    ExactRonRisk,
     HonorSafety(HonorSafetyRank),
     SuitedSafety(SuitedSafetyRank),
 }
 
+#[derive(Debug)]
+pub(crate) struct DefenseFallbackEvaluation<'a> {
+    pub(crate) selected: Option<(&'a LegalAction, DefenseFallbackKind)>,
+    pub(crate) ron_risk_evidence: Option<Vec<DahaiRonRiskEvidence<'a>>>,
+}
+
 // 他家リーチ中の防御 fallback を優先順位付きで選ぶ。
-// 全リーチ者への共通現物を最優先にし、その候補が無い場合は最上位の字牌・数牌候補を限定的に
-// 横断比較して、選ばれた種別を添えて返す。
+// 全リーチ者への共通現物を最優先にし、単独リーチでは全 Dahai を exact R の昇順、複数
+// リーチでは従来の字牌 / 数牌 safety で比較して、選ばれた種別を添えて返す。
 //
-// 現物は黒5対応済みの select_genbutsu_fallback_action をそのまま利用する。字牌 safety と
-// 数牌 safety は DefenseFallbackKind に載せる rank を候補列から一度に得るため、候補列を直接
-// 使ったうえで prefer_black_five_for_action で黒5へ正規化する(冪等)。字牌に赤5は無いので
-// 字牌側の正規化は実質 no-op。いずれも牌種選択・種別・安全度 rank は変えない。
+// 現物は黒5対応済みの select_genbutsu_fallback_action をそのまま利用する。exact / legacy
+// いずれも牌種を決めてから prefer_black_five_for_action で同じ5牌種の黒牌へ正規化する。
 pub fn select_defense_fallback_action_with_kind<'a>(
     context: &GameContext,
     legal_actions: &'a [LegalAction],
 ) -> Option<(&'a LegalAction, DefenseFallbackKind)> {
-    if let Some(action) = select_genbutsu_fallback_action(context, legal_actions) {
-        return Some((action, DefenseFallbackKind::Genbutsu));
+    evaluate_defense_fallback_action_with_kind(context, legal_actions, false).selected
+}
+
+pub(crate) fn evaluate_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    collect_exact_evidence_for_genbutsu: bool,
+) -> DefenseFallbackEvaluation<'a> {
+    let reached = context.reached_opponents();
+    let genbutsu = select_genbutsu_fallback_action(context, legal_actions);
+    if let Some(action) = genbutsu
+        && (!collect_exact_evidence_for_genbutsu || reached.len() != 1)
+    {
+        return DefenseFallbackEvaluation {
+            selected: Some((action, DefenseFallbackKind::Genbutsu)),
+            ron_risk_evidence: None,
+        };
     }
 
+    let ron_risk_evidence = reached
+        .first()
+        .filter(|_| reached.len() == 1)
+        .and_then(|&player| single_reach_dahai_actions_by_ron_risk(player, context, legal_actions));
+
+    if let Some(action) = genbutsu {
+        return DefenseFallbackEvaluation {
+            selected: Some((action, DefenseFallbackKind::Genbutsu)),
+            ron_risk_evidence,
+        };
+    }
+
+    if let Some(evidence) = ron_risk_evidence.as_ref()
+        && let Some(chosen) = evidence
+            .iter()
+            .min_by_key(|candidate| candidate.evidence.ron_capable_weight)
+    {
+        let action = prefer_black_five_for_action(legal_actions, chosen.action);
+        return DefenseFallbackEvaluation {
+            selected: Some((action, DefenseFallbackKind::ExactRonRisk)),
+            ron_risk_evidence,
+        };
+    }
+
+    DefenseFallbackEvaluation {
+        selected: select_legacy_defense_fallback_action_with_kind(context, legal_actions),
+        ron_risk_evidence: None,
+    }
+}
+
+// 複数リーチ、または単独リーチの exact model が unavailable な場合の従来 selection。
+fn select_legacy_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+) -> Option<(&'a LegalAction, DefenseFallbackKind)> {
     if context.any_opponent_reached() {
         let honor = honor_dahai_actions_by_safety(legal_actions, context)
             .into_iter()

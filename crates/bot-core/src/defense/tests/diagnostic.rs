@@ -1,4 +1,5 @@
 use super::common::*;
+use super::hidden_hand_states::{ankan, reached_fixture};
 use crate::action::LegalAction;
 use crate::defense::*;
 
@@ -80,7 +81,7 @@ fn defense_candidate_diagnostic_reports_no_suji_and_full_suji() {
 #[test]
 fn defense_fallback_diagnostic_reports_pure_suji_safety_rank() {
     // 選択牌側でも同じ rank を保持する。7s は完全スジ、4p は片スジ。
-    let context = half_suji_regression_context();
+    let context = multiple_reach_half_suji_regression_context();
     let actions = vec![
         LegalAction::Dahai { tile: tile(48) },
         LegalAction::Dahai { tile: tile(96) },
@@ -395,7 +396,7 @@ fn defense_decision_diagnostic_holds_actual_selection() {
 #[test]
 fn defense_decision_diagnostic_keeps_candidates_without_selection() {
     // 防御 fallback 候補が無い(全て NoSafety)局面でも、候補評価は保持する。
-    let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+    let context = suited_context(vec![], Default::default(), [false, true, true, false]);
     let actions = vec![
         LegalAction::Dahai { tile: tile(0) },
         LegalAction::Dahai { tile: tile(56) },
@@ -466,4 +467,93 @@ fn defense_diagnostics_have_no_suited_safety_evidence_for_honor() {
     let diagnostic =
         DefenseFallbackDiagnostic::from_selection(&context, &action, DefenseFallbackKind::Genbutsu);
     assert_eq!(diagnostic.selected_suited_safety_evidence, None);
+}
+
+#[test]
+fn single_reach_diagnostic_reports_exact_evidence_for_every_candidate() {
+    let context = reached_fixture(
+        &[("1m", 1), ("2m", 2), ("E", 3)],
+        ["5p", "6p", "7p", "8p"].map(ankan).to_vec(),
+        &[],
+        &[],
+    );
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("2m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("E"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+    ];
+    let selected = select_defense_fallback_action_with_kind(&context, &actions);
+    let diagnostic = DefenseDecisionDiagnostic::from_selection(&context, &actions, selected);
+
+    assert_eq!(
+        diagnostic.selected_kind(),
+        Some(DefenseFallbackKind::ExactRonRisk)
+    );
+    assert_eq!(
+        diagnostic
+            .selected
+            .as_ref()
+            .unwrap()
+            .selected_ron_risk_evidence
+            .unwrap()
+            .ron_capable_weight,
+        1
+    );
+    assert!(
+        diagnostic
+            .candidates
+            .iter()
+            .all(|candidate| candidate.ron_risk_evidence.is_some())
+    );
+    let minimum = diagnostic
+        .candidates
+        .iter()
+        .map(|candidate| candidate.ron_risk_evidence.unwrap().ron_capable_weight)
+        .min()
+        .unwrap();
+    let selected_weight = diagnostic
+        .candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .unwrap()
+        .ron_risk_evidence
+        .unwrap()
+        .ron_capable_weight;
+    assert_eq!(selected_weight, minimum);
+}
+
+#[test]
+fn multiple_reach_diagnostic_does_not_claim_aggregated_exact_evidence() {
+    let context = all_reached_partial_suji_context(vec![]);
+    let actions = vec![
+        LegalAction::Dahai { tile: tile(0) },
+        LegalAction::Dahai { tile: tile(4) },
+    ];
+    let selected = select_defense_fallback_action_with_kind(&context, &actions);
+    let diagnostic = DefenseDecisionDiagnostic::from_selection(&context, &actions, selected);
+
+    assert_eq!(
+        diagnostic.selected_kind(),
+        Some(DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji))
+    );
+    assert!(
+        diagnostic
+            .selected
+            .as_ref()
+            .unwrap()
+            .selected_ron_risk_evidence
+            .is_none()
+    );
+    assert!(
+        diagnostic
+            .candidates
+            .iter()
+            .all(|candidate| candidate.ron_risk_evidence.is_none())
+    );
 }

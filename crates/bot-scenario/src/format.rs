@@ -1386,6 +1386,22 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
         "  suited safety: {}",
         optional(selected.selected_suited_safety_rank)
     ));
+    lines.push(format!(
+        "  ron capable weight: {}",
+        optional(
+            selected
+                .selected_ron_risk_evidence
+                .map(|evidence| evidence.ron_capable_weight)
+        )
+    ));
+    lines.push(format!(
+        "  tenpai weight: {}",
+        optional(
+            selected
+                .selected_ron_risk_evidence
+                .map(|evidence| evidence.tenpai_weight)
+        )
+    ));
 
     lines.join("\n")
 }
@@ -1428,6 +1444,22 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
     lines.push(format!(
         "  suited safety: {}",
         optional(candidate.suited_safety_rank)
+    ));
+    lines.push(format!(
+        "  ron capable weight: {}",
+        optional(
+            candidate
+                .ron_risk_evidence
+                .map(|evidence| evidence.ron_capable_weight)
+        )
+    ));
+    lines.push(format!(
+        "  tenpai weight: {}",
+        optional(
+            candidate
+                .ron_risk_evidence
+                .map(|evidence| evidence.tenpai_weight)
+        )
     ));
 
     lines.join("\n")
@@ -2365,21 +2397,33 @@ mod tests {
 
     #[test]
     fn defense_shows_pure_suji_safety_rank() {
-        // 4p は 1p だけ河にある片スジ、7s は 4s でスジ。bool の suji とは別に rank を表示する。
-        let (_, _, output) = rendered(HALF_SUJI_SCENARIO, false);
+        // 4p は 1p だけ河にある片スジ、7s は 4s でスジ。legacy diagnostic を残しつつ、単独
+        // リーチ production selection は exact R/T の小さい4pを選ぶことを表示で確認する。
+        let (_, diagnostic, output) = rendered(HALF_SUJI_SCENARIO, false);
 
         let four_pin = candidate_block(&output, "Defense candidates", "4p");
         assert!(four_pin.contains("  suji: false"), "{four_pin}");
         assert!(four_pin.contains("  suji safety: HalfSuji"), "{four_pin}");
         assert!(four_pin.contains("  suited safety: HalfSuji"), "{four_pin}");
+        assert!(four_pin.contains("  ron capable weight: "), "{four_pin}");
+        assert!(four_pin.contains("  tenpai weight: "), "{four_pin}");
 
         let seven_sou = candidate_block(&output, "Defense candidates", "7s");
         assert!(seven_sou.contains("  suji: true"), "{seven_sou}");
         assert!(seven_sou.contains("  suji safety: Suji"), "{seven_sou}");
 
         let defense = section(&output, "Defense\n");
-        assert!(defense.contains("  selected action: 7s"), "{defense}");
-        assert!(defense.contains("  suji safety: Suji"), "{defense}");
+        assert!(defense.contains("  selected action: 4p"), "{defense}");
+        assert!(
+            defense.contains("  selected kind: ExactRonRisk"),
+            "{defense}"
+        );
+        assert!(defense.contains("  suji safety: HalfSuji"), "{defense}");
+
+        let candidates = &diagnostic.defense.as_ref().unwrap().candidates;
+        let four_pin_r = candidates[0].ron_risk_evidence.unwrap().ron_capable_weight;
+        let seven_sou_r = candidates[1].ron_risk_evidence.unwrap().ron_capable_weight;
+        assert!(four_pin_r < seven_sou_r);
     }
 
     const TABLE_STATE_SCENARIO: &str = r#"{
@@ -4183,20 +4227,20 @@ mod tests {
         let runner_up = expected_runner_up(&scenario, &diagnostic.selected_action);
 
         let summary = summary_section(&output);
-        assert!(summary.contains("  selected: 7s"), "{summary}");
+        assert!(summary.contains("  selected: 4p"), "{summary}");
         assert!(summary.contains("  source: DefenseFallback"), "{summary}");
-        assert!(summary.contains("  defense: 7s"), "{summary}");
+        assert!(summary.contains("  defense: 4p"), "{summary}");
         assert!(
-            summary.contains("  defense detail: SuitedSafety(Suji)"),
+            summary.contains("  defense detail: ExactRonRisk"),
             "{summary}"
         );
-        assert!(summary.contains("  runner-up: 4p"), "{summary}");
+        assert!(summary.contains("  runner-up: 7s"), "{summary}");
         assert!(
             summary.contains("  runner-up source: DefenseFallback"),
             "{summary}"
         );
         assert!(
-            summary.contains("  runner-up detail: SuitedSafety(HalfSuji)"),
+            summary.contains("  runner-up detail: ExactRonRisk"),
             "{summary}"
         );
         assert!(!summary.contains("  runner-up lost by:"), "{summary}");
@@ -4232,7 +4276,7 @@ mod tests {
         "round_wind": "E",
         "player_id": 0,
         "oya": 3,
-        "reached": [false, true, false, false],
+        "reached": [false, true, false, true],
         "discards": ["", "1m 4m 7p", "", ""],
         "legal_dahai": "C N"
     }"#;
@@ -4243,7 +4287,7 @@ mod tests {
         "round_wind": "E",
         "player_id": 0,
         "oya": 1,
-        "reached": [false, true, false, false],
+        "reached": [false, true, false, true],
         "discards": ["", "1m 4m 7p", "", ""],
         "legal_dahai": "E C"
     }"#;

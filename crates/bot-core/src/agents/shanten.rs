@@ -8,8 +8,8 @@ use crate::combined_defense::{
 use crate::context::GameContext;
 use crate::damaten_value::{DamatenValueDiagnostic, DamatenValueVerdict, evaluate_damaten_value};
 use crate::defense::{
-    DefenseDecisionDiagnostic, DefenseFallbackKind, log_defense_fallback_decision,
-    select_defense_fallback_action_with_kind,
+    DefenseDecisionDiagnostic, DefenseFallbackKind, evaluate_defense_fallback_action_with_kind,
+    log_defense_fallback_evaluation,
 };
 use crate::discard_selection::{
     DiscardActionSelection, LookaheadDiagnosticScope, select_discard_action_with_diagnostic,
@@ -820,24 +820,29 @@ impl ShantenAgent {
     // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action と種別を返す。
     //
     // 診断が有効な場合は、採用の有無にかかわらず検討した候補評価を収集する。候補評価の収集は
-    // 選択結果に影響せず、選択は select_defense_fallback_action_with_kind() が source of truth。
+    // 選択結果に影響せず、選択と exact candidate evidence は同じ evaluation を共有する。
     fn select_defense_fallback(
         &self,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
-        let selected = select_defense_fallback_action_with_kind(ctx, legal_actions);
+        let collect_exact_evidence = diagnostics.enabled
+            || tracing::enabled!(
+                target: "bot_core::defense",
+                tracing::Level::DEBUG
+            );
+        let evaluation =
+            evaluate_defense_fallback_action_with_kind(ctx, legal_actions, collect_exact_evidence);
+        let selected = evaluation.selected;
 
-        if let Some((action, kind)) = selected {
-            log_defense_fallback_decision(ctx, action, kind, legal_actions);
-        }
+        log_defense_fallback_evaluation(ctx, &evaluation, legal_actions);
 
         if diagnostics.enabled {
-            diagnostics.defense = Some(DefenseDecisionDiagnostic::from_selection(
+            diagnostics.defense = Some(DefenseDecisionDiagnostic::from_evaluation(
                 ctx,
                 legal_actions,
-                selected,
+                &evaluation,
             ));
         }
 
@@ -1030,7 +1035,11 @@ pub(crate) mod tests {
     };
     use crate::context::TableStateFacts;
     use crate::damaten_value::{DAMATEN_MIN_TOTAL, DamatenValue, damaten_baseline_context};
-    use crate::defense::{HonorSafetyRank, SuitedSafetyRank, select_defense_fallback_action};
+    use crate::defense::{
+        HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, honor_safety_rank,
+        is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
+        select_defense_fallback_action, suited_safety_rank_for_all_reached,
+    };
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{
         PushPullReason, push_pull_inputs_from_context,
@@ -2543,7 +2552,7 @@ pub(crate) mod tests {
         assert_eq!(agent.act(&ctx, &actions), dahai(112));
     }
 
-    fn opponent_reach_wind_context(oya: u8, drawn_tile: Option<u8>) -> GameContext {
+    fn multiple_reach_wind_context(oya: u8, drawn_tile: Option<u8>) -> GameContext {
         let discards = [vec![], vec![tile(16)], vec![], vec![]];
         GameContext::from_parts_with_table_state(
             drawn_tile.map(tile),
@@ -2555,18 +2564,52 @@ pub(crate) mod tests {
             Some(0),
             Some(oya),
             discards,
-            [false, true, false, false],
+            [false, true, false, true],
         )
     }
 
     #[test]
     fn honor_safety_fallback_breaks_same_rank_ties_by_opponent_honor_value() {
         let mut agent = ShantenAgent;
-        let ctx = opponent_reach_wind_context(3, Some(0));
+        // player 1 / 3 の複数リーチで legacy path を通す。oya=3 では両者にとって N は
+        // GuestWind、C は SingleValueHonor のままなので、同じ HonorSafetyRank を N が制する。
+        let ctx = multiple_reach_wind_context(3, Some(0));
+        assert_eq!(
+            honor_safety_rank(tile(120).tile_type(), &ctx),
+            Some(HonorSafetyRank::NoVisible)
+        );
+        assert_eq!(
+            honor_safety_rank(tile(132).tile_type(), &ctx),
+            Some(HonorSafetyRank::NoVisible)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(tile(120).tile_type(), &ctx),
+            Some(OpponentHonorValue::GuestWind)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(tile(132).tile_type(), &ctx),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+        assert!(!is_genbutsu_for_all_reached(tile(120).tile_type(), &ctx));
+        assert!(!is_genbutsu_for_all_reached(tile(132).tile_type(), &ctx));
         assert_eq!(agent.act(&ctx, &[dahai(132), dahai(120)]), dahai(120));
         assert_eq!(agent.act(&ctx, &[dahai(120), dahai(132)]), dahai(120));
 
-        let ctx = opponent_reach_wind_context(1, Some(0));
+        // oya=1 では E が player 1 の DoubleWind、C が SingleValueHonor、N が両者の
+        // GuestWind。player 3 を加えても intended ordering は変わらない。
+        let ctx = multiple_reach_wind_context(1, Some(0));
+        assert_eq!(
+            opponent_honor_value_for_reached(tile(108).tile_type(), &ctx),
+            Some(OpponentHonorValue::DoubleWind)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(tile(132).tile_type(), &ctx),
+            Some(OpponentHonorValue::SingleValueHonor)
+        );
+        assert_eq!(
+            opponent_honor_value_for_reached(tile(120).tile_type(), &ctx),
+            Some(OpponentHonorValue::GuestWind)
+        );
         assert_eq!(agent.act(&ctx, &[dahai(108), dahai(132)]), dahai(132));
         assert_eq!(agent.act(&ctx, &[dahai(108), dahai(120)]), dahai(120));
     }
@@ -2596,6 +2639,22 @@ pub(crate) mod tests {
         visible_values: &[u8],
         reacher_discards: &[u8],
     ) -> GameContext {
+        suited_reach_context_with_reached(
+            drawn_tile,
+            hand_values,
+            visible_values,
+            reacher_discards,
+            [false, true, false, false],
+        )
+    }
+
+    fn suited_reach_context_with_reached(
+        drawn_tile: Option<u8>,
+        hand_values: &[u8],
+        visible_values: &[u8],
+        reacher_discards: &[u8],
+        reached: [bool; 4],
+    ) -> GameContext {
         let discards = [
             vec![],
             reacher_discards.iter().map(|&value| tile(value)).collect(),
@@ -2612,7 +2671,7 @@ pub(crate) mod tests {
             Some(0),
             None,
             discards,
-            [false, true, false, false],
+            reached,
         )
     }
 
@@ -2647,10 +2706,30 @@ pub(crate) mod tests {
     #[test]
     fn picks_one_chance_suited_dahai_when_no_genbutsu_or_honor() {
         let mut agent = ShantenAgent;
-        // 共通現物も字牌もなし。4m を3枚見えにして経路 [3m,4m] を OneChance にし 2m を OneChance。
-        // 無スジ 0(1m) より OneChance 4(2m) を選ぶ。
-        let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14], &[]);
+        // 複数リーチの legacy path。共通現物も字牌もなく、4m を3枚見えにして経路
+        // [3m,4m] を OneChance にする。無スジ 1m より OneChance 2m を選ぶ。
+        let ctx = suited_reach_context_with_reached(
+            Some(0),
+            &[],
+            &[12, 13, 14],
+            &[],
+            [false, true, true, false],
+        );
         let actions = vec![dahai(0), dahai(4)];
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(0).tile_type(), &ctx),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(4).tile_type(), &ctx),
+            Some(SuitedSafetyRank::OneChance)
+        );
+        assert!(actions.iter().all(|action| {
+            let LegalAction::Dahai { tile } = action else {
+                return false;
+            };
+            !is_genbutsu_for_all_reached(tile.tile_type(), &ctx)
+        }));
         assert_eq!(agent.act(&ctx, &actions), dahai(4));
     }
 
@@ -2667,9 +2746,43 @@ pub(crate) mod tests {
     fn suited_safety_fallback_follows_safety_order() {
         let mut agent = ShantenAgent;
         // 経路壁で安全度を作る。1p は 2p 4枚で NoChance、9p は 8p 3枚で OneChance、
-        // 1s は 4s(84) 河でスジ(Suji)、5s は無スジ・壁なし(NoSafety)。最も安全な NoChance を選ぶ。
-        let ctx = suited_reach_context(Some(0), &[], &[40, 41, 42, 43, 64, 65, 66], &[84]);
+        // 1s は両リーチ者の 4s 河でスジ(Suji)、5s は無スジ・壁なし(NoSafety)。複数リーチの
+        // legacy path で最も安全な NoChance を選ぶ。
+        let ctx = GameContext::from_parts_with_table_state(
+            Some(tile(0)),
+            vec![],
+            vec![],
+            None,
+            None,
+            [40, 41, 42, 43, 64, 65, 66].map(tile).to_vec(),
+            Some(0),
+            None,
+            [vec![], vec![tile(84)], vec![tile(85)], vec![]],
+            [false, true, true, false],
+        );
         let actions = vec![dahai(88), dahai(72), dahai(68), dahai(36)];
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(36).tile_type(), &ctx),
+            Some(SuitedSafetyRank::NoChance)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(68).tile_type(), &ctx),
+            Some(SuitedSafetyRank::OneChance)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(72).tile_type(), &ctx),
+            Some(SuitedSafetyRank::Suji)
+        );
+        assert_eq!(
+            suited_safety_rank_for_all_reached(tile(88).tile_type(), &ctx),
+            Some(SuitedSafetyRank::NoSafety)
+        );
+        assert!(actions.iter().all(|action| {
+            let LegalAction::Dahai { tile } = action else {
+                return false;
+            };
+            !is_genbutsu_for_all_reached(tile.tile_type(), &ctx)
+        }));
         assert_eq!(agent.act(&ctx, &actions), dahai(36));
     }
 
@@ -3086,12 +3199,10 @@ pub(crate) mod tests {
     // Fold 時に異なり得ることを、SuitedSafety 経路で確認する。
     // 実牌姿での防御は河・visible の正確な再現が必要なため、pure な選択経路として構築する。
     #[test]
-    fn decide_reports_defense_fallback_suited_safety_source_on_fold() {
-        use crate::defense::SuitedSafetyRank;
-
+    fn decide_reports_exact_ron_risk_defense_source_on_single_reach_fold() {
         let agent = ShantenAgent;
-        // 共通現物も字牌もなし。4m を4枚見せて 2m を NoChance にする。
-        // ツモ 1m(0) だけが手牌評価対象なので通常打牌は 1m、防御 fallback は NoChance の 2m。
+        // 共通現物なしの単独リーチ。ツモ 1m(0) だけが手牌評価対象なので通常打牌は 1m、
+        // exact defense fallback は R の小さい 2m。
         let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
         let actions = vec![dahai(0), dahai(4)];
         assert_eq!(
@@ -3102,9 +3213,7 @@ pub(crate) mod tests {
         assert_eq!(decision.action, dahai(4));
         assert_eq!(
             decision.source,
-            AgentActionSource::DefenseFallback(DefenseFallbackKind::SuitedSafety(
-                SuitedSafetyRank::NoChance
-            ))
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::ExactRonRisk)
         );
         assert_eq!(decision.normal_discard, Some(dahai(0)));
         assert_ne!(decision.normal_discard, Some(decision.action.clone()));
@@ -3114,7 +3223,8 @@ pub(crate) mod tests {
     fn decide_falls_through_to_normal_discard_when_fold_has_no_defense() {
         let agent = ShantenAgent;
         // Fold だが共通現物・字牌・数牌 safety がいずれも無い局面。通常打牌へ進む。
-        let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        let ctx =
+            suited_reach_context_with_reached(Some(0), &[], &[], &[], [false, true, true, false]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
         assert_eq!(
             decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
@@ -3536,9 +3646,7 @@ pub(crate) mod tests {
         assert_eq!(diagnostic.selected_action, dahai(108));
         assert_eq!(
             diagnostic.defense_fallback_kind(),
-            Some(DefenseFallbackKind::HonorSafety(
-                HonorSafetyRank::TwoVisible
-            ))
+            Some(DefenseFallbackKind::ExactRonRisk)
         );
 
         let defense = diagnostic.defense.as_ref().unwrap();
@@ -3559,6 +3667,7 @@ pub(crate) mod tests {
         assert_eq!(south.wall_rank, None);
         assert_eq!(east.tile, tile(108).tile_type());
         assert_eq!(east.honor_safety_rank, Some(HonorSafetyRank::TwoVisible));
+        assert!(east.ron_risk_evidence.is_some());
         assert!(east.selected);
     }
 
@@ -3575,9 +3684,7 @@ pub(crate) mod tests {
         assert_eq!(diagnostic.selected_action, dahai(4));
         assert_eq!(
             diagnostic.defense_fallback_kind(),
-            Some(DefenseFallbackKind::SuitedSafety(
-                SuitedSafetyRank::NoChance
-            ))
+            Some(DefenseFallbackKind::ExactRonRisk)
         );
 
         let defense = diagnostic.defense.as_ref().unwrap();
@@ -3594,13 +3701,15 @@ pub(crate) mod tests {
         assert_eq!(two_man.wall_rank, Some(WallRank::NoChance));
         assert_eq!(two_man.suji_for_all_reached, Some(false));
         assert_eq!(two_man.suited_safety_rank, Some(SuitedSafetyRank::NoChance));
+        assert!(two_man.ron_risk_evidence.is_some());
         assert!(two_man.selected);
     }
 
     #[test]
     fn diagnose_keeps_defense_candidates_when_fallback_is_not_adopted() {
         // Fold だが防御候補が無い局面。防御を検討した記録として候補評価だけ残る。
-        let ctx = suited_reach_context(Some(0), &[], &[], &[]);
+        let ctx =
+            suited_reach_context_with_reached(Some(0), &[], &[], &[], [false, true, true, false]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
 
         let diagnostic = diagnose_matching_act(&ctx, &actions);

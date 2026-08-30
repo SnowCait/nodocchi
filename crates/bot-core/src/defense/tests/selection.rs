@@ -1,6 +1,11 @@
 use super::common::*;
+use super::hidden_hand_states::{ankan, reached_fixture};
 use crate::action::LegalAction;
 use crate::defense::*;
+
+fn four_ankans() -> Vec<crate::meld::Meld> {
+    ["5p", "6p", "7p", "8p"].map(ankan).to_vec()
+}
 
 #[test]
 fn select_defense_fallback_action_with_kind_none_without_opponent_reach() {
@@ -67,7 +72,7 @@ fn select_defense_fallback_action_with_kind_returns_honor_safety_with_rank() {
     let context = suited_context(
         vec![tile(108), tile(109)],
         Default::default(),
-        [false, true, false, false],
+        [false, true, true, false],
     );
     let actions = vec![
         LegalAction::Dahai { tile: tile(112) },
@@ -88,7 +93,7 @@ fn select_defense_fallback_action_with_kind_returns_suited_safety_no_chance() {
     let context = suited_context(
         vec![tile(12), tile(13), tile(14), tile(15)],
         Default::default(),
-        [false, true, false, false],
+        [false, true, true, false],
     );
     let actions = vec![
         LegalAction::Dahai { tile: tile(0) },
@@ -109,7 +114,7 @@ fn select_defense_fallback_action_with_kind_returns_suited_safety_one_chance() {
     let context = suited_context(
         vec![tile(12), tile(13), tile(14)],
         Default::default(),
-        [false, true, false, false],
+        [false, true, true, false],
     );
     let actions = vec![
         LegalAction::Dahai { tile: tile(0) },
@@ -129,8 +134,8 @@ fn select_defense_fallback_action_with_kind_returns_suited_safety_suji() {
     // リーチ者の河に 12(4m)。1m はスジで Suji。
     let context = suited_context(
         vec![],
-        [vec![], vec![tile(12)], vec![], vec![]],
-        [false, true, false, false],
+        [vec![], vec![tile(12)], vec![tile(13)], vec![]],
+        [false, true, true, false],
     );
     let actions = vec![
         LegalAction::Dahai { tile: tile(16) },
@@ -148,7 +153,7 @@ fn select_defense_fallback_action_with_kind_returns_suited_safety_suji() {
 #[test]
 fn select_defense_fallback_action_with_kind_none_when_only_no_safety() {
     // 共通現物も字牌もなく、数牌が全て NoSafety なら None。
-    let context = suited_context(vec![], Default::default(), [false, true, false, false]);
+    let context = suited_context(vec![], Default::default(), [false, true, true, false]);
     let actions = vec![
         LegalAction::Dahai { tile: tile(0) },
         LegalAction::Dahai { tile: tile(16) },
@@ -238,11 +243,13 @@ fn real_world_regression_prefers_suji_1s_over_self_visible_6p() {
         LegalAction::Dahai { tile: tile(56) },
         LegalAction::Dahai { tile: tile(72) },
     ];
+    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
+    assert!(evidence[1].evidence.ron_capable_weight < evidence[0].evidence.ron_capable_weight);
     assert_eq!(
         select_defense_fallback_action_with_kind(&context, &actions),
         Some((
             &LegalAction::Dahai { tile: tile(72) },
-            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
+            DefenseFallbackKind::ExactRonRisk
         ))
     );
 }
@@ -333,7 +340,7 @@ fn defense_fallback_suited_safety_prefers_black_five() {
         tile(22),
         tile(23),
     ];
-    let context = suited_context(visible, Default::default(), [false, true, false, false]);
+    let context = suited_context(visible, Default::default(), [false, true, true, false]);
     // 5m の合法 Dahai が [赤5m, 黒5m]。NoChance の 5m を選び、物理牌は黒5m。
     let actions = vec![
         LegalAction::Dahai { tile: tile(16) },
@@ -361,7 +368,7 @@ fn defense_fallback_suited_safety_keeps_red_when_only_red_legal() {
         tile(22),
         tile(23),
     ];
-    let context = suited_context(visible, Default::default(), [false, true, false, false]);
+    let context = suited_context(visible, Default::default(), [false, true, true, false]);
     let actions = vec![LegalAction::Dahai { tile: tile(16) }];
     assert_eq!(
         select_defense_fallback_action_with_kind(&context, &actions),
@@ -411,6 +418,191 @@ fn defense_fallback_keeps_leading_tile_type_over_black_five() {
         Some((
             &LegalAction::Dahai { tile: tile(36) },
             DefenseFallbackKind::Genbutsu
+        ))
+    );
+}
+
+#[test]
+fn single_reach_exact_prefers_smaller_weight_with_same_legacy_rank() {
+    // 4暗槓なら concealed hand は1枚で、target と同種の1枚だけが Tanki state になる。
+    // 1m/2m はどちらも周辺牌が見え切った NoChance だが、remaining が1対2なので exact R は異なる。
+    let context = reached_fixture(&[("1m", 1), ("2m", 2)], four_ankans(), &[], &[]);
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("2m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+    ];
+    assert_eq!(
+        suited_safety_rank_for_all_reached(tile_type("1m"), &context),
+        Some(SuitedSafetyRank::NoChance)
+    );
+    assert_eq!(
+        suited_safety_rank_for_all_reached(tile_type("2m"), &context),
+        Some(SuitedSafetyRank::NoChance)
+    );
+
+    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
+    assert_eq!(evidence[0].evidence.ron_capable_weight, 2);
+    assert_eq!(evidence[1].evidence.ron_capable_weight, 1);
+    assert_eq!(evidence[0].evidence.tenpai_weight, 3);
+    assert_eq!(evidence[1].evidence.tenpai_weight, 3);
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
+    );
+}
+
+#[test]
+fn single_reach_exact_wait_structure_changes_production_selection() {
+    // concealed 4枚。1m は PP/EE + 23m の Ryanmen states (weight 3 + 1) から、東は
+    // PPP + E / 789s + E の Tanki と PP + EE の Shanpon states (weight 2 + 2 + 3) から
+    // ロン可能になる。同じ fixed coefficient ではなく、hidden-hand state の構造差が R に出る。
+    let context = reached_fixture(
+        &[
+            ("P", 3),
+            ("2m", 1),
+            ("3m", 1),
+            ("7s", 1),
+            ("8s", 1),
+            ("9s", 1),
+            ("E", 2),
+        ],
+        ["5p", "6p", "7p"].map(ankan).to_vec(),
+        &[],
+        &[],
+    );
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("E"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+    ];
+    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
+    assert_eq!(evidence[0].evidence.ron_capable_weight, 7);
+    assert_eq!(evidence[1].evidence.ron_capable_weight, 4);
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
+    );
+}
+
+#[test]
+fn single_reach_exact_compares_honor_and_suited_in_one_model() {
+    // legacy は字牌候補を優先する局面だが、exact model では R(1m)=1 < R(E)=3。
+    let context = reached_fixture(&[("1m", 1), ("E", 3)], four_ankans(), &[], &[]);
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("E"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+    ];
+    assert_eq!(
+        honor_safety_rank(tile_type("E"), &context),
+        Some(HonorSafetyRank::OneVisible)
+    );
+    assert!(!suited_safety_outweighs_honor(
+        HonorSafetyRank::OneVisible,
+        opponent_honor_value_for_reached(tile_type("E"), &context),
+        SuitedSafetyRank::NoChance,
+    ));
+
+    let evidence = single_reach_dahai_actions_by_ron_risk(1, &context, &actions).unwrap();
+    assert_eq!(evidence[0].evidence.ron_capable_weight, 3);
+    assert_eq!(evidence[1].evidence.ron_capable_weight, 1);
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
+    );
+}
+
+#[test]
+fn single_reach_exact_tie_keeps_original_action_order() {
+    let context = reached_fixture(&[("1m", 1), ("2m", 1)], four_ankans(), &[], &[]);
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("2m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+    ];
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((&actions[0], DefenseFallbackKind::ExactRonRisk))
+    );
+}
+
+#[test]
+fn single_reach_exact_prefers_black_five_within_selected_tile_type() {
+    let context = reached_fixture(&[("5m", 1)], four_ankans(), &[], &[]);
+    let actions = vec![
+        LegalAction::Dahai { tile: tile(16) },
+        LegalAction::Dahai { tile: tile(17) },
+    ];
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((&actions[1], DefenseFallbackKind::ExactRonRisk))
+    );
+}
+
+#[test]
+fn single_reach_zero_denominator_falls_back_to_legacy() {
+    let context = reached_fixture(&[], four_ankans(), &[], &[]);
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("E"),
+        },
+    ];
+    assert_eq!(
+        single_reach_dahai_actions_by_ron_risk(1, &context, &actions),
+        None
+    );
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((
+            &actions[1],
+            DefenseFallbackKind::HonorSafety(HonorSafetyRank::ThreeOrMoreVisible)
+        ))
+    );
+}
+
+#[test]
+fn single_reach_unsupported_open_meld_falls_back_to_legacy() {
+    let pon_tiles: Vec<_> = bot_logic::TileId::copies(tile_type("9p")).take(3).collect();
+    let pon = crate::meld::Meld::new(
+        crate::meld::MeldKind::Pon,
+        pon_tiles.clone(),
+        Some(pon_tiles[0]),
+    );
+    let context = reached_fixture(&[("1m", 1), ("E", 3)], vec![pon], &[], &[]);
+    let actions = vec![
+        LegalAction::Dahai {
+            tile: discarded("1m"),
+        },
+        LegalAction::Dahai {
+            tile: discarded("E"),
+        },
+    ];
+
+    assert_eq!(
+        single_reach_dahai_actions_by_ron_risk(1, &context, &actions),
+        None
+    );
+    assert_eq!(
+        select_defense_fallback_action_with_kind(&context, &actions),
+        Some((
+            &actions[1],
+            DefenseFallbackKind::HonorSafety(HonorSafetyRank::OneVisible)
         ))
     );
 }
