@@ -484,6 +484,14 @@ fn format_normal_discard_candidate(
         "  expected self-tsumo value: {}",
         format_self_tsumo_value(candidate.expected_self_tsumo_value)
     ));
+    lines.push(format!(
+        "  current tenpai offense weighted total: {}",
+        if evaluation.min_shanten_after_discard() == 0 {
+            format_optional_value(candidate.current_tenpai_offense_weighted_total)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
     lines.extend(format_candidate_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
@@ -2781,8 +2789,44 @@ mod tests {
 
     const IISHANTEN_TENPAI_WAIT_SCENARIO: &str =
         include_str!("../scenarios/iishanten_tenpai_wait.json");
+    const CURRENT_TENPAI_OFFENSE_SCENARIO: &str =
+        include_str!("../scenarios/current_tenpai_offense.json");
     const RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO: &str =
         include_str!("../scenarios/ryanshanten_next_acceptance.json");
+
+    #[test]
+    fn current_tenpai_offense_scenario_selects_the_higher_weighted_total() {
+        let (_, diagnostic, output) = rendered(CURRENT_TENPAI_OFFENSE_SCENARIO, false);
+        let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
+        let two_p = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "2p")
+            .unwrap();
+        let five_p = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5p")
+            .unwrap();
+
+        assert!(two_p.selected);
+        assert_eq!(two_p.current_tenpai_offense_weighted_total, Some(20_800));
+        assert_eq!(five_p.current_tenpai_offense_weighted_total, Some(16_000));
+        assert_eq!(
+            five_p.comparison_reason,
+            DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        );
+        assert!(
+            output.contains("Final decision\n  action: Reach\n  discard: 2p"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  current tenpai offense weighted total: 20800"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{output}"
+        );
+    }
 
     #[test]
     fn ryanshanten_scenario_reports_weighted_next_acceptance_selection() {

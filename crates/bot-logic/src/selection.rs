@@ -32,7 +32,8 @@
 //! ```
 //!
 //! そのため軸の有効・無効は候補ごとや比較ごとではなく、pre-acceptance 軸まで同順位になる候補
-//! 集合 (cohort) 単位で決める ([`resolve_prospective_value_axis`])。cohort の全候補で打点が
+//! 集合 (cohort) 単位で決める ([`resolve_prospective_value_axis`] /
+//! [`resolve_current_tenpai_value_axis`])。cohort の全候補で打点が
 //! 確定している場合だけ軸を残し、1件でも確定しない場合は cohort 全体で軸を無効化して既存
 //! weighted wait 以降へ委ねる。
 //!
@@ -51,6 +52,8 @@ use crate::discard::{
 
 /// 既存 weighted tenpai wait を適用する現在打牌後の向聴数。
 pub(crate) const TENPAI_WAIT_TARGET_SHANTEN: i8 = 1;
+/// 現在聴牌の offense value を適用する現在打牌後の向聴数。
+const CURRENT_TENPAI_SHANTEN: i8 = 0;
 
 /// 1手目の有効牌の残枚数で、その後の受け入れを重み付けした共通集計値。
 ///
@@ -161,6 +164,18 @@ pub struct ForwardMetrics {
     pub expected_self_tsumo_value: Option<u64>,
 }
 
+/// 現在打牌の直後に成立する聴牌を比較するための supplemental metric。
+///
+/// 点数計算や Reach / Damaten policy は上位層の責務で、bot-logic は確定済みの
+/// `weighted_total` を比較するだけにする。前方探索の値ではないため [`ForwardMetrics`] とは
+/// 分離して持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CurrentTenpaiMetrics {
+    /// Σ(生きた和了牌 physical variant の残枚数 × 支払い合計)。
+    /// 確定しない場合と評価対象外は `None`。
+    pub offense_weighted_total: Option<u64>,
+}
+
 impl ForwardMetrics {
     /// 打点込みの集計値だけを持つ前方集計値。2手目の打牌候補の比較で使う。
     pub fn from_prospective_value(prospective_value: Option<u64>) -> Self {
@@ -192,6 +207,10 @@ pub struct DiscardSelectionCandidate<'a> {
     ///
     /// 打点込みの前方集計値と同じく、軸の有無は候補集合単位で決める。
     pub expected_self_tsumo_value: Option<u64>,
+    /// 現在打牌後が聴牌になる候補の確定 offense weighted total。
+    ///
+    /// 軸の有無は候補集合単位で解決済みであること。点数計算はこの層で行わない。
+    pub current_tenpai_offense_weighted_total: Option<u64>,
 }
 
 impl<'a> DiscardSelectionCandidate<'a> {
@@ -203,6 +222,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             next_acceptance: None,
             prospective_value: None,
             expected_self_tsumo_value: None,
+            current_tenpai_offense_weighted_total: None,
         }
     }
 }
@@ -217,6 +237,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
+///   → [聴牌のみ] CurrentTenpaiOffenseWeightedTotal
 ///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ...
 /// ```
 ///
@@ -245,6 +266,10 @@ pub fn compare_discard_selection_candidates(
     }
 
     if let Some(comparison) = compare_weighted_next_acceptance(candidate, current_best) {
+        return comparison;
+    }
+
+    if let Some(comparison) = compare_current_tenpai_offense_value(candidate, current_best) {
         return comparison;
     }
 
@@ -290,15 +315,10 @@ pub fn resolve_prospective_value_axis(
     forward_metrics: &[ForwardMetrics],
 ) -> Vec<ForwardMetrics> {
     let metrics_at = |index: usize| forward_metrics.get(index).copied().unwrap_or_default();
-    // pre-acceptance 軸まで同順位という関係は「同じ向聴数・同じ孤立牌区分」の同値関係なので、
-    // 候補ごとに同順位の相手を集めても cohort の判断は一致する。
-    let ties_with = |left: usize, right: usize| {
-        compare_discard_before_acceptance(&evaluations[left], &evaluations[right]).is_none()
-    };
     let cohort_is_known = |index: usize, axis: fn(ForwardMetrics) -> Option<u64>| {
-        (0..evaluations.len())
-            .filter(|&other| ties_with(index, other))
-            .all(|other| axis(metrics_at(other)).is_some())
+        cohort_axis_is_known(evaluations, index, |other| {
+            axis(metrics_at(other)).is_some()
+        })
     };
 
     (0..evaluations.len())
@@ -314,11 +334,38 @@ pub fn resolve_prospective_value_axis(
         .collect()
 }
 
+// pre-acceptance 軸まで同順位の cohort で optional axis が全件確定しているか。
+// prospective / self-tsumo / current tenpai の各軸が同じ cohort 定義を重複して持たないための
+// 共通 helper。pre-acceptance の同順位は同値関係なので、候補ごとの結論も一致する。
+fn cohort_axis_is_known(
+    evaluations: &[DiscardEvaluation],
+    index: usize,
+    is_known: impl Fn(usize) -> bool,
+) -> bool {
+    (0..evaluations.len())
+        .filter(|&other| {
+            compare_discard_before_acceptance(&evaluations[index], &evaluations[other]).is_none()
+        })
+        .all(is_known)
+}
+
 pub fn best_discard_selection_index_with_forward_metrics(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
 ) -> Option<usize> {
+    best_discard_selection_index_with_metrics(evaluations, forward_metrics, &[])
+}
+
+/// 前方集計値と現在聴牌の supplemental metric を含む比較順で最善候補の index を返す。
+/// 完全同値では先に現れた候補を維持する。
+pub fn best_discard_selection_index_with_metrics(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+) -> Option<usize> {
     let resolved = resolve_prospective_value_axis(evaluations, forward_metrics);
+    let current_tenpai_metrics =
+        resolve_current_tenpai_value_axis(evaluations, current_tenpai_metrics);
     let metrics_at = |index: usize| resolved.get(index).copied().unwrap_or_default();
     let candidate_at = |index: usize| DiscardSelectionCandidate {
         evaluation: &evaluations[index],
@@ -326,6 +373,9 @@ pub fn best_discard_selection_index_with_forward_metrics(
         next_acceptance: metrics_at(index).next_acceptance,
         prospective_value: metrics_at(index).prospective_value,
         expected_self_tsumo_value: metrics_at(index).expected_self_tsumo_value,
+        current_tenpai_offense_weighted_total: current_tenpai_metrics
+            .get(index)
+            .and_then(|metric| metric.offense_weighted_total),
     };
 
     let mut best: Option<usize> = None;
@@ -341,6 +391,30 @@ pub fn best_discard_selection_index_with_forward_metrics(
         }
     }
     best
+}
+
+/// 現在聴牌の打点軸を pre-acceptance 同順位の cohort 単位で有効化する。
+///
+/// 同じ cohort の全候補で値が確定した場合だけ値を残す。1件でも `None` なら cohort 全体を
+/// `None` にし、比較ごとに軸の有無が変わることで非推移的になるのを防ぐ。
+pub fn resolve_current_tenpai_value_axis(
+    evaluations: &[DiscardEvaluation],
+    metrics: &[CurrentTenpaiMetrics],
+) -> Vec<CurrentTenpaiMetrics> {
+    let metric_at = |index: usize| metrics.get(index).copied().unwrap_or_default();
+    let cohort_is_known = |index: usize| {
+        cohort_axis_is_known(evaluations, index, |other| {
+            metric_at(other).offense_weighted_total.is_some()
+        })
+    };
+
+    (0..evaluations.len())
+        .map(|index| CurrentTenpaiMetrics {
+            offense_weighted_total: metric_at(index)
+                .offense_weighted_total
+                .filter(|_| cohort_is_known(index)),
+        })
+        .collect()
 }
 
 // self-tsumo continuation による比較。決着しなければ `None` を返して既存比較へ委ねる。
@@ -443,6 +517,27 @@ fn compare_weighted_next_acceptance(
         });
     }
     None
+}
+
+// 現在打牌後が聴牌になる候補だけの offense weighted total 比較。平均打点ではなく、生きた
+// 和了牌の残枚数を含む weighted total そのものを使う。軸の有無は呼び出し前に cohort 単位で
+// 解決済みなので、ここでの `None` は後続の既存 Acceptance 比較へ委ねることを意味する。
+fn compare_current_tenpai_offense_value(
+    candidate: &DiscardSelectionCandidate,
+    current_best: &DiscardSelectionCandidate,
+) -> Option<DiscardComparison> {
+    if candidate.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.current_tenpai_offense_weighted_total?;
+    let best_value = current_best.current_tenpai_offense_weighted_total?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal,
+    })
 }
 
 /// 打牌候補集合が前方評価の対象かどうか。
@@ -565,6 +660,7 @@ mod tests {
             next_acceptance: None,
             prospective_value: None,
             expected_self_tsumo_value: None,
+            current_tenpai_offense_weighted_total: None,
         }
     }
 
@@ -579,6 +675,7 @@ mod tests {
             next_acceptance: None,
             prospective_value,
             expected_self_tsumo_value: None,
+            current_tenpai_offense_weighted_total: None,
         }
     }
 
@@ -592,6 +689,21 @@ mod tests {
             next_acceptance,
             prospective_value: None,
             expected_self_tsumo_value: None,
+            current_tenpai_offense_weighted_total: None,
+        }
+    }
+
+    fn current_tenpai_candidate<'a>(
+        evaluation: &'a DiscardEvaluation,
+        weighted_total: Option<u64>,
+    ) -> DiscardSelectionCandidate<'a> {
+        DiscardSelectionCandidate {
+            evaluation,
+            tenpai_wait: None,
+            next_acceptance: None,
+            prospective_value: None,
+            expected_self_tsumo_value: None,
+            current_tenpai_offense_weighted_total: weighted_total,
         }
     }
 
@@ -823,6 +935,106 @@ mod tests {
         );
         // 打点を持たない既存比較では受け入れの広い方が勝つ局面である。
         assert!(!compare_discard_evaluations(&narrow, &wide).candidate_is_better);
+    }
+
+    #[test]
+    fn current_tenpai_offense_value_outranks_acceptance_remaining() {
+        // 1枚待ち × 12,000点は、6枚待ち × 1,300点より weighted total が高い。
+        let narrow_high = evaluation("1m", 0, &[("3m", 1)]);
+        let wide_low = evaluation("9p", 0, &[("3p", 3), ("6p", 3)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &current_tenpai_candidate(&narrow_high, Some(12_000)),
+            &current_tenpai_candidate(&wide_low, Some(7_800)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        );
+        assert!(!compare_discard_evaluations(&narrow_high, &wide_low).candidate_is_better);
+    }
+
+    #[test]
+    fn equal_current_tenpai_offense_value_falls_through_to_acceptance() {
+        let wide = evaluation("1m", 0, &[("3m", 3), ("6m", 3)]);
+        let narrow = evaluation("9p", 0, &[("3p", 1)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &current_tenpai_candidate(&wide, Some(12_000)),
+            &current_tenpai_candidate(&narrow, Some(12_000)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn an_unknown_current_tenpai_value_disables_the_axis_for_the_whole_cohort() {
+        // A > B (打点) だが、C が unknown なので cohort 全体で打点軸を外し、最も広い B が勝つ。
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+            evaluation("E", 0, &[("E", 2)]),
+        ];
+        let metrics = vec![
+            CurrentTenpaiMetrics {
+                offense_weighted_total: Some(99_999),
+            },
+            CurrentTenpaiMetrics {
+                offense_weighted_total: Some(1),
+            },
+            CurrentTenpaiMetrics {
+                offense_weighted_total: None,
+            },
+        ];
+
+        let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.offense_weighted_total.is_none())
+        );
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let permuted: Vec<_> = order
+                .iter()
+                .map(|&index| evaluations[index].clone())
+                .collect();
+            let permuted_metrics: Vec<_> = order.iter().map(|&index| metrics[index]).collect();
+            let best = best_discard_selection_index_with_metrics(&permuted, &[], &permuted_metrics)
+                .expect("best candidate");
+            assert_eq!(permuted[best].discard, tile("9p"), "order={order:?}");
+        }
+    }
+
+    #[test]
+    fn current_tenpai_value_does_not_change_iishanten_or_ryanshanten_comparison() {
+        for shanten in [1, 2] {
+            let wide = evaluation("1m", shanten, &[("3m", 3), ("6m", 3)]);
+            let narrow = evaluation("9p", shanten, &[("3p", 1)]);
+            let comparison = compare_discard_selection_candidates(
+                &current_tenpai_candidate(&narrow, Some(999_999)),
+                &current_tenpai_candidate(&wide, Some(1)),
+            );
+
+            assert!(!comparison.candidate_is_better, "shanten={shanten}");
+            assert_eq!(
+                comparison.reason,
+                DiscardComparisonReason::AcceptanceRemaining,
+                "shanten={shanten}"
+            );
+        }
     }
 
     #[test]
@@ -1119,6 +1331,7 @@ mod tests {
                 next_acceptance: metric.next_acceptance,
                 prospective_value: metric.prospective_value,
                 expected_self_tsumo_value: metric.expected_self_tsumo_value,
+                current_tenpai_offense_weighted_total: None,
             })
             .collect()
     }
