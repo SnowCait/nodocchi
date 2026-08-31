@@ -531,13 +531,13 @@ const DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_500 * SELF_TS
 /// 対象にする。
 ///
 /// 攻撃評価は既存の通常打牌 best 評価 ([`select_best_normal_discard_evaluation`]) を再利用する。
-/// 比較 semantics は `ShantenAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait を
-/// 含む。打牌候補の絞り込みには `legal_actions` を使わないので、対象は手牌から切れる全打牌候補に
-/// なる。手牌とツモ牌が空なら `offense == None`。
+/// 比較 semantics は `ShantenAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait と
+/// 現在聴牌の offense weighted total を含む。打牌候補の絞り込みには `legal_actions` を使わない
+/// ので、対象は手牌から切れる全打牌候補になる。手牌とツモ牌が空なら `offense == None`。
 ///
-/// `legal_actions` は攻撃打点を求めるときの合法 Reach 判定にだけ使う。Reach 可否を別経路で
-/// 推測し直さないため、合法 action を持たない呼び出し元は空スライスを渡し、その場合は
-/// 「リーチできない局面」として扱う。
+/// `legal_actions` は通常打牌の現在聴牌比較と、選択後の攻撃打点を求めるときの合法 Reach 判定に
+/// 使う。Reach 可否を別経路で推測し直さないため、合法 action を持たない呼び出し元は空スライスを
+/// 渡し、その場合は「リーチできない局面」として扱う。
 pub fn push_pull_inputs_from_context(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -552,7 +552,7 @@ pub fn push_pull_inputs_from_context(
     let evaluation = if tiles.is_empty() {
         None
     } else {
-        select_best_normal_discard_evaluation(context, &tiles)
+        select_best_normal_discard_evaluation(context, &tiles, legal_actions)
     };
 
     push_pull_inputs_from_context_with_evaluation(context, evaluation.as_ref(), legal_actions)
@@ -580,6 +580,8 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
         player_threat_facts_from_context(context),
         evaluation,
         iishanten_forward_metrics,
+        None,
+        None,
         legal_actions,
     )
 }
@@ -608,11 +610,18 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 /// `iishanten_forward_metrics` は通常打牌選択が同じ `evaluation` について観測した1向聴の前方
 /// 集計値で、押し引き側では転記するだけ。2手先探索も打点集計もここでは行わない。1向聴でない
 /// 打牌では `None` を渡す。
+///
+/// `selected_tenpai_wait` / `selected_tenpai_offense_value` は、複数の現在聴牌候補を通常打牌選択が
+/// 比較した場合の計算済み結果。渡された場合は押し引き用に待ち・hand valueを再評価せず転記する。
+/// ただし既存 [`should_evaluate_tenpai_offense_value`] の入口条件は維持し、恒常フリテン等で従来
+/// exact打点を使わない局面へキャッシュ値を持ち込まない。
 pub(crate) fn push_pull_inputs_from_threat_facts(
     context: &GameContext,
     player_threats: [PlayerThreatFacts; 4],
     evaluation: Option<&DiscardEvaluation>,
     iishanten_forward_metrics: Option<ForwardMetrics>,
+    selected_tenpai_wait: Option<&TenpaiWaitAvailability>,
+    selected_tenpai_offense_value: Option<TenpaiOffenseValue>,
     legal_actions: &[LegalAction],
 ) -> PushPullInputs {
     let opponent_reach_count = reached_opponent_count(&player_threats);
@@ -624,21 +633,25 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
 
     let offense = evaluation.map(|evaluation| {
         let value_proxy = offense_value_proxy_after_discard(context, evaluation);
-        let tenpai_wait = selected_discard_tenpai_wait_availability(context, evaluation);
+        let tenpai_wait = selected_tenpai_wait
+            .cloned()
+            .or_else(|| selected_discard_tenpai_wait_availability(context, evaluation));
         let tenpai_wait_facts = tenpai_wait
             .as_ref()
             .map(PushPullTenpaiWaitFacts::from_availability);
-        let tenpai_offense_value = tenpai_wait
-            .as_ref()
-            .filter(|_| {
-                should_evaluate_tenpai_offense_value(
-                    evaluation.min_shanten_after_discard(),
-                    tenpai_wait_facts,
-                )
+        let should_evaluate = should_evaluate_tenpai_offense_value(
+            evaluation.min_shanten_after_discard(),
+            tenpai_wait_facts,
+        );
+        let tenpai_offense_value = if should_evaluate {
+            selected_tenpai_offense_value.or_else(|| {
+                tenpai_wait.as_ref().map(|tenpai_wait| {
+                    evaluate_tenpai_offense_value(context, evaluation, tenpai_wait, legal_actions)
+                })
             })
-            .map(|tenpai_wait| {
-                evaluate_tenpai_offense_value(context, evaluation, tenpai_wait, legal_actions)
-            });
+        } else {
+            None
+        };
 
         PushPullOffenseState {
             min_shanten_after_discard: evaluation.min_shanten_after_discard(),
@@ -2129,7 +2142,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles, &[]);
 
         let shared =
             push_pull_inputs_from_context_with_evaluation(&context, evaluation.as_ref(), &[]);
@@ -2150,7 +2163,7 @@ mod tests {
         let context = iishanten_wait_context();
         let tiles = iishanten_wait_tiles();
 
-        let normal = select_best_normal_discard_evaluation(&context, &tiles);
+        let normal = select_best_normal_discard_evaluation(&context, &tiles, &[]);
         let one_step = one_step_best_evaluation(&context, &tiles);
         assert!(normal.is_some());
         assert_ne!(normal, one_step, "両者が分かれる局面である必要がある");
@@ -2194,7 +2207,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let mut evaluation = select_best_normal_discard_evaluation(&context, &tiles)
+        let mut evaluation = select_best_normal_discard_evaluation(&context, &tiles, &[])
             .expect("evaluation should exist");
 
         for shape in [IishantenShape::Complete, IishantenShape::Unknown] {
@@ -2242,7 +2255,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles, &[]);
         let evaluation_before = evaluation.clone();
 
         let inputs =
@@ -2907,7 +2920,8 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_normal_discard_evaluation(context, &tiles).unwrap();
+        let evaluation =
+            select_best_normal_discard_evaluation(context, &tiles, legal_actions).unwrap();
         push_pull_inputs_from_context_with_evaluation(context, Some(&evaluation), legal_actions)
             .offense
             .unwrap()
@@ -3556,7 +3570,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_normal_discard_evaluation(&context, &tiles)
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles, &[])
             .expect("evaluation should exist");
         let expected = offense_value_proxy_after_discard(&context, &evaluation);
 
@@ -3590,7 +3604,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_normal_discard_evaluation(&context, &tiles);
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles, &[]);
 
         let public = push_pull_inputs_from_context(&context, &[]);
         let shared =
@@ -3657,7 +3671,7 @@ mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let evaluation = select_best_normal_discard_evaluation(&context, &tiles)
+        let evaluation = select_best_normal_discard_evaluation(&context, &tiles, &[])
             .expect("evaluation should exist");
         let evaluation_before = evaluation.clone();
 
@@ -3714,7 +3728,7 @@ mod tests {
         let facts = player_threat_facts_from_context(&context);
 
         assert_eq!(
-            push_pull_inputs_from_threat_facts(&context, facts, None, None, &[]),
+            push_pull_inputs_from_threat_facts(&context, facts, None, None, None, None, &[]),
             push_pull_inputs_from_context_with_evaluation(&context, None, &[])
         );
     }

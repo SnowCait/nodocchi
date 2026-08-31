@@ -24,6 +24,31 @@ AcceptanceRemaining
 
 適用するのは両候補とも七対子テンパイで、七対子を完成させる牌が一意に定まる場合だけです。通常形テンパイ、国士テンパイ、一向聴以上、副露形には広げません。`bot-scenario` の候補表示では `lost by: ChiitoitsuWaitQuality` として現れます。
 
+## 現在聴牌: CurrentTenpaiOffenseWeightedTotal
+
+現在打牌の直後が聴牌になる候補同士では、既存の Reach / Damaten policy と手牌価値評価で求めた `current tenpai offense weighted total` を、現在の Acceptance より先に比較します。
+
+```text
+Shanten → existing pre-acceptance axes
+→ [聴牌のみ] CurrentTenpaiOffenseWeightedTotal
+→ AcceptanceRemaining → AcceptanceTypeCount → ...
+```
+
+値は生きた和了牌を赤5 / 黒5の physical variant まで分け、既存 `Payment.total()` を残枚数で重み付けした合計です。
+
+```text
+current tenpai offense weighted total
+= Σ(生きた和了牌 physical variant の残枚数 × Payment.total())
+```
+
+平均打点ではありません。例えば「1枚 × 12,000点」は12,000、「6枚 × 3,900点」は23,400なので、後者を上位にします。また、これはロン / ツモ確率を掛けたEVではなく、本場・供託・点棒状況も含みません。
+
+攻撃モードは既存 production policy と同じです。既にリーチ済みならReach、未リーチなら既存の `decide_reach_reason()` に従ってReachまたはDamatenを選びます。ダマ値は既存フリテン判定で `can_ron == Some(true)` と確定した場合だけ利用し、ロン可否unknown・役なし・点数計算不能などを0点とは扱いません。
+
+軸の有効・無効は `Shanten` / `IsolatedTile` / `IsolatedHonor` まで同順位の候補集合 (cohort) 単位で決めます。cohortの全聴牌候補で値が確定した場合だけ使い、1件でもunknownならcohort全体で無効化して従来のAcceptance比較へ戻します。
+
+評価対象は現在打牌直後の待ちと打点だけです。聴牌後に非和了牌を引いて別の待ちへ移る手変わりや、ダマ手変わりの2手先評価は行いません。既存の1向聴・2向聴以上の先読み軸も変更しません。
+
 ## 1向聴: ExpectedSelfTsumoValue
 
 1向聴候補では、テンパイまでの経路を実際に引く確率と、テンパイ到達後に自分のツモで和了する期待支払いを掛けた `expected self-tsumo value` を最初に比較します。

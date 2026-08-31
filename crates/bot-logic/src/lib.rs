@@ -47,7 +47,8 @@ pub use discard::{
     ShapeBreakdown, compare_discard_evaluations, diagnose_discard_evaluations,
     diagnose_discard_evaluations_with_fixed_melds,
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
-    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait, discard_block_context,
+    diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait,
+    diagnose_discard_evaluations_with_metrics, discard_block_context,
     discard_block_context_with_fixed_melds, evaluate_discards, evaluate_discards_from_tiles,
     evaluate_discards_from_tiles_with_context, evaluate_discards_from_tiles_with_dora,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
@@ -99,9 +100,10 @@ pub use scoring_selection::{
     BestScoringSelection, ScoringCandidateRef, select_best_scoring_candidate,
 };
 pub use selection::{
-    DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
-    WeightedForwardMetric, best_discard_selection_index,
-    best_discard_selection_index_with_forward_metrics, compare_discard_selection_candidates,
+    CurrentTenpaiMetrics, DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric,
+    TenpaiWaitMetric, WeightedForwardMetric, best_discard_selection_index,
+    best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
+    compare_discard_selection_candidates, resolve_current_tenpai_value_axis,
     resolve_prospective_value_axis,
 };
 pub use self_tsumo::{

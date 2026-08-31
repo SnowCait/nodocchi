@@ -57,16 +57,15 @@
 //! 落ちても同じく [`OffenseValue::Unknown`] にし、ロンできないことを0点として扱わない。
 
 use bot_logic::{
-    DiscardEvaluation, HandValue, Payment, RiichiStatus, TenpaiCompletedHands,
-    TenpaiHandValueProfile, TenpaiWaitAvailability, TileId, WinMethod, WinningContext,
-    evaluate_tenpai_hand_value,
+    DiscardEvaluation, HandValue, Payment, RiichiStatus, TenpaiHandValueProfile,
+    TenpaiWaitAvailability, TileId, WinMethod, WinningContext, evaluate_tenpai_hand_value,
 };
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::damaten_value::{
-    BASELINE_REMAINING_LIVE_TILES, damaten_baseline_context, damaten_value_from_hands,
-    tenpai_completed_hands_after_discard,
+    BASELINE_REMAINING_LIVE_TILES, DamatenValueDiagnostic, damaten_baseline_context,
+    damaten_value_from_hands, tenpai_completed_hands_after_discard,
 };
 use crate::reach_policy::decide_reach_reason;
 
@@ -145,6 +144,16 @@ pub struct TenpaiOffenseValue {
     pub value: OffenseValue,
 }
 
+/// 攻撃打点と、その mode 決定時に既存 policy が評価したダマ打点診断。
+///
+/// 通常打牌選択・押し引き・リーチ診断が同じ候補を扱う場合に、hand-value evaluation を表示や
+/// policy 診断のためにやり直さず共有するための crate-private result。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TenpaiOffenseEvaluation {
+    pub offense: TenpaiOffenseValue,
+    pub damaten_value: Option<DamatenValueDiagnostic>,
+}
+
 /// リーチ打点比較用の hypothetical baseline を組み立てる。
 ///
 /// 既にリーチしている手とこれからリーチする手のどちらにも使う。どちらもリーチ1翻が付く点は
@@ -182,16 +191,34 @@ pub(crate) fn evaluate_tenpai_offense_value(
     wait_availability: &TenpaiWaitAvailability,
     legal_actions: &[LegalAction],
 ) -> TenpaiOffenseValue {
+    evaluate_tenpai_offense(context, evaluation, wait_availability, legal_actions).offense
+}
+
+/// [`evaluate_tenpai_offense_value`] と同じ production evaluation を行い、Reach / Damaten mode の
+/// 決定に使ったダマ打点診断も保持して返す。
+pub(crate) fn evaluate_tenpai_offense(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+    wait_availability: &TenpaiWaitAvailability,
+    legal_actions: &[LegalAction],
+) -> TenpaiOffenseEvaluation {
     // ロン可否は既存のフリテン診断が source of truth。恒常フリテン・同巡内フリテン・リーチ後
     // 見逃しを統合した結論で、押し引き側でフリテンを判定し直さない。
     let can_ron = wait_availability.can_ron() == Some(true);
     let hands = tenpai_completed_hands_after_discard(context, evaluation, wait_availability);
+    // production のリーチ判断と同じ入口条件で求めた結果を、mode 決定と後続診断で共有する。
+    let damaten_value = (context.own_reached() == Some(false) && can_ron)
+        .then(|| {
+            hands
+                .as_ref()
+                .map(|hands| damaten_value_from_hands(context, hands))
+        })
+        .flatten();
     let mode = offense_mode(
         context,
         wait_availability,
         legal_actions,
-        hands.as_ref(),
-        can_ron,
+        damaten_value.as_ref().map(|value| value.verdict),
     );
 
     let value = scoring_inputs(context, mode, can_ron)
@@ -202,7 +229,10 @@ pub(crate) fn evaluate_tenpai_offense_value(
             offense_value(&profile)
         });
 
-    TenpaiOffenseValue { mode, value }
+    TenpaiOffenseEvaluation {
+        offense: TenpaiOffenseValue { mode, value },
+        damaten_value,
+    }
 }
 
 /// 攻撃を継続した場合の攻撃モード。
@@ -218,8 +248,7 @@ fn offense_mode(
     context: &GameContext,
     wait_availability: &TenpaiWaitAvailability,
     legal_actions: &[LegalAction],
-    hands: Option<&TenpaiCompletedHands>,
-    can_ron: bool,
+    damaten_verdict: Option<crate::damaten_value::DamatenValueVerdict>,
 ) -> TenpaiOffenseMode {
     match context.own_reached() {
         None => TenpaiOffenseMode::Unknown,
@@ -228,11 +257,6 @@ fn offense_mode(
             let reach_legal = legal_actions
                 .iter()
                 .any(|action| matches!(action, LegalAction::Reach));
-
-            // ダマでロンできると確定した場合だけダマ打点を評価する。既存リーチ判断と同じ入口条件。
-            let damaten_verdict = can_ron
-                .then(|| hands.map(|hands| damaten_value_from_hands(context, hands).verdict))
-                .flatten();
 
             let reason = decide_reach_reason(
                 reach_legal,

@@ -148,6 +148,16 @@ mod tests {
             summary.contains("  choice 3: 2p\n  choice 3 source: NormalDiscard"),
             "{summary}"
         );
+        // inline CLI は自席を特定できず offense mode が Unknown なので、新軸を0点扱いせず
+        // cohort 全体で無効化し、従来の Acceptance 比較を維持する。
+        assert!(
+            summary.contains("  choice 3 lost by: AcceptanceRemaining"),
+            "{summary}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: unknown"),
+            "{full}"
+        );
         assert!(full.ends_with(&summary), "{full}");
     }
 

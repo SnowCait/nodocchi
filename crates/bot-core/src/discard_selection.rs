@@ -1,17 +1,17 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
+use crate::offense_value::{TenpaiOffenseEvaluation, TenpaiOffenseValue, evaluate_tenpai_offense};
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
 };
 use bot_logic::{
-    DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
+    CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, SelfTsumoFacts,
     TenpaiWaitAvailability, TileCounts, TileId, TileType, best_discard_selection_index,
-    best_discard_selection_index_with_forward_metrics,
-    diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics, diagnose_discard_furiten,
-    diagnose_lookahead, discard_tenpai_wait_availability,
+    best_discard_selection_index_with_metrics, diagnose_discard_evaluations_with_metrics,
+    diagnose_discard_furiten, diagnose_lookahead, discard_tenpai_wait_availability,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
@@ -21,12 +21,15 @@ const LOG_TARGET: &str = "bot_core::discard_selection";
 
 /// 1向聴の向聴数。押し引きへ渡す前方集計値の対象。
 const IISHANTEN_SHANTEN: i8 = 1;
+/// 現在聴牌の offense value 比較を適用する向聴数。
+const TENPAI_SHANTEN: i8 = 0;
 
 /// 通常打牌選択の内部結果。
 ///
 /// - `evaluation`: 合法 Dahai 候補の中の最善 `DiscardEvaluation`。合法候補が無ければ `None`。
 /// - `action`: `evaluation` に対応する合法 Dahai。
 /// - `iishanten_forward_metrics`: 選んだ打牌が1向聴の場合の前方集計値。
+/// - `tenpai_wait` / `tenpai_offense_value`: 複数の現在聴牌候補を比較した場合の選択済み評価。
 ///
 /// `evaluation` と `action` は常に同時に `Some` / `None` になり、`Some` のときは牌種が一致する。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +42,12 @@ pub(crate) struct DiscardActionSelection {
     /// 出どころは選択に使った前方集計値そのもので、押し引き側で集計し直さない
     /// ([`selected_iishanten_forward_metrics`])。
     pub iishanten_forward_metrics: Option<ForwardMetrics>,
+    /// 複数の現在聴牌候補を比較した場合に、選ばれた候補について計算済みの待ち。
+    pub tenpai_wait: Option<TenpaiWaitAvailability>,
+    /// 複数の現在聴牌候補を比較した場合に、選ばれた候補について計算済みの offense value。
+    pub tenpai_offense_value: Option<TenpaiOffenseValue>,
+    /// offense mode の決定時に計算済みなら、そのダマ打点診断。
+    pub damaten_value: Option<crate::damaten_value::DamatenValueDiagnostic>,
 }
 
 /// 2手先診断をどこまで構築するか。
@@ -110,6 +119,15 @@ struct LegalDiscardEvaluations {
 // 二重に評価しない。
 type SelectionForwardMetrics = Vec<ForwardMetrics>;
 
+/// 現在聴牌候補1件について、selection のために一度だけ求めた既存 wait / offense evaluation。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CurrentTenpaiCandidateEvaluation {
+    wait: Option<TenpaiWaitAvailability>,
+    offense: Option<TenpaiOffenseEvaluation>,
+}
+
+type CurrentTenpaiCandidateEvaluations = Vec<CurrentTenpaiCandidateEvaluation>;
+
 pub fn select_discard_action(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -138,16 +156,24 @@ pub(crate) fn select_discard_action_with_evaluation(
 ) -> DiscardActionSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
     let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
+    let current_tenpai =
+        current_tenpai_candidate_evaluations(context, &legal.evaluations, legal_actions);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(
             context,
             &legal.tiles,
-            &diagnose_legal_evaluations(context, &legal, &tenpai_wait),
+            &diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai),
         );
     }
 
-    selection_from_legal_evaluations(context, &legal, &tenpai_wait, legal_actions)
+    selection_from_legal_evaluations(
+        context,
+        &legal,
+        &tenpai_wait,
+        &current_tenpai,
+        legal_actions,
+    )
 }
 
 /// `select_discard_action_with_evaluation()` と同じ選択結果に、全合法候補の構造化診断を添えて返す。
@@ -178,8 +204,10 @@ pub(crate) fn select_discard_action_with_diagnostic(
         Some(lookahead) => forward_metrics_from_lookahead(&inputs, &legal.evaluations, lookahead),
         None => forward_metrics(&inputs, &legal.evaluations),
     };
+    let current_tenpai =
+        current_tenpai_candidate_evaluations(context, &legal.evaluations, legal_actions);
 
-    let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
+    let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai);
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(context, &legal.tiles, &diagnostic);
@@ -191,9 +219,15 @@ pub(crate) fn select_discard_action_with_diagnostic(
     });
 
     DiscardActionSelectionWithDiagnostic {
-        selection: selection_from_legal_evaluations(context, &legal, &tenpai_wait, legal_actions),
+        selection: selection_from_legal_evaluations(
+            context,
+            &legal,
+            &tenpai_wait,
+            &current_tenpai,
+            legal_actions,
+        ),
         diagnostic,
-        furiten: furiten_from_legal_evaluations(context, &legal),
+        furiten: furiten_from_legal_evaluations(context, &legal, &current_tenpai),
         lookahead,
         lookahead_value,
         self_tsumo_facts: inputs.self_tsumo_facts(),
@@ -229,10 +263,15 @@ fn selection_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
     tenpai_wait: &[ForwardMetrics],
+    current_tenpai: &[CurrentTenpaiCandidateEvaluation],
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
-    let selected =
-        best_discard_selection_index_with_forward_metrics(&legal.evaluations, tenpai_wait);
+    let current_tenpai_metrics = current_tenpai_metrics(current_tenpai);
+    let selected = best_discard_selection_index_with_metrics(
+        &legal.evaluations,
+        tenpai_wait,
+        &current_tenpai_metrics,
+    );
     let evaluation = selected.map(|index| legal.evaluations[index].clone());
     let action = evaluation
         .as_ref()
@@ -245,12 +284,68 @@ fn selection_from_legal_evaluations(
             tenpai_wait.get(index).copied().unwrap_or_default(),
         )
     });
+    let selected_tenpai = selected.and_then(|index| current_tenpai.get(index));
 
     DiscardActionSelection {
         evaluation,
         action,
         iishanten_forward_metrics,
+        tenpai_wait: selected_tenpai.and_then(|value| value.wait.clone()),
+        tenpai_offense_value: selected_tenpai
+            .and_then(|value| value.offense.as_ref())
+            .map(|value| value.offense),
+        damaten_value: selected_tenpai
+            .and_then(|value| value.offense.as_ref())
+            .and_then(|value| value.damaten_value.clone()),
     }
+}
+
+/// 最善向聴が現在聴牌で、競合する合法候補が複数ある場合だけ既存 wait / offense evaluator を
+/// 各候補へ適用する。1向聴・2向聴以上・聴牌候補1件の production behavior と計算量は変えない。
+fn current_tenpai_candidate_evaluations(
+    context: &GameContext,
+    evaluations: &[DiscardEvaluation],
+    legal_actions: &[LegalAction],
+) -> CurrentTenpaiCandidateEvaluations {
+    let best_shanten = evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min();
+    let target_count = evaluations
+        .iter()
+        .filter(|evaluation| evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+        .count();
+    if best_shanten != Some(TENPAI_SHANTEN) || target_count <= 1 {
+        return vec![CurrentTenpaiCandidateEvaluation::default(); evaluations.len()];
+    }
+
+    evaluations
+        .iter()
+        .map(|evaluation| {
+            if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
+                return CurrentTenpaiCandidateEvaluation::default();
+            }
+            let wait = selected_discard_tenpai_wait_availability(context, evaluation);
+            let offense = wait
+                .as_ref()
+                .map(|wait| evaluate_tenpai_offense(context, evaluation, wait, legal_actions));
+            CurrentTenpaiCandidateEvaluation { wait, offense }
+        })
+        .collect()
+}
+
+fn current_tenpai_metrics(
+    evaluations: &[CurrentTenpaiCandidateEvaluation],
+) -> Vec<CurrentTenpaiMetrics> {
+    evaluations
+        .iter()
+        .map(|evaluation| CurrentTenpaiMetrics {
+            offense_weighted_total: evaluation
+                .offense
+                .as_ref()
+                .and_then(|value| value.offense.value.weighted_total()),
+        })
+        .collect()
 }
 
 /// 選んだ打牌1件について、押し引きが観測する1向聴の前方集計値を返す。
@@ -374,17 +469,20 @@ fn diagnose_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
     tenpai_wait: &[ForwardMetrics],
+    current_tenpai: &[CurrentTenpaiCandidateEvaluation],
 ) -> DiscardDecisionDiagnostic {
     let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
-    diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics(
+    diagnose_discard_evaluations_with_metrics(
         &counts,
         evaluation_fixed_meld_count(context),
         &legal.evaluations,
         tenpai_wait,
+        &current_tenpai_metrics(current_tenpai),
     )
 }
 
-// 絞り込み済みの合法候補集合からフリテン診断を構築する。
+// 絞り込み済みの合法候補集合からフリテン診断を構築する。現在聴牌の比較で待ちを計算済みの
+// 候補はその値を転記し、診断表示のために同じ wait evaluation をやり直さない。
 //
 // ツモ側は既存の打牌評価が持つ受け入れをそのまま使い、恒常フリテン判定に使う構造上のアガリ牌種と
 // 「context の自分の河 + その打牌」は bot-logic の pure helper 側で組み立てる。副露済み面子数は
@@ -396,15 +494,45 @@ fn diagnose_legal_evaluations(
 fn furiten_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
+    current_tenpai: &[CurrentTenpaiCandidateEvaluation],
 ) -> Vec<DiscardFuritenDiagnostic> {
     let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
-    diagnose_discard_furiten(
-        &counts,
-        evaluation_fixed_meld_count(context),
-        &legal.evaluations,
-        &OwnDiscards::from_optional_river(context.own_discards()),
-        context.history_furiten_after_own_discard(),
-    )
+    if current_tenpai
+        .iter()
+        .all(|evaluation| evaluation.wait.is_none())
+    {
+        return diagnose_discard_furiten(
+            &counts,
+            evaluation_fixed_meld_count(context),
+            &legal.evaluations,
+            &OwnDiscards::from_optional_river(context.own_discards()),
+            context.history_furiten_after_own_discard(),
+        );
+    }
+
+    let own_discards = OwnDiscards::from_optional_river(context.own_discards());
+    let history_furiten = context.history_furiten_after_own_discard();
+    let fixed_meld_count = evaluation_fixed_meld_count(context);
+    legal
+        .evaluations
+        .iter()
+        .enumerate()
+        .map(|(index, evaluation)| DiscardFuritenDiagnostic {
+            discard: evaluation.discard,
+            tenpai: current_tenpai
+                .get(index)
+                .and_then(|evaluation| evaluation.wait.clone())
+                .or_else(|| {
+                    discard_tenpai_wait_availability(
+                        &counts,
+                        fixed_meld_count,
+                        evaluation,
+                        &own_discards,
+                        history_furiten,
+                    )
+                }),
+        })
+        .collect()
 }
 
 /// 通常打牌選択が選んだ打牌1件について、その打牌後のテンパイの待ちとロン可否を返す。
@@ -581,8 +709,9 @@ fn select_best_one_step_evaluation(
 /// 合法 Dahai を受け取らない経路のための、通常打牌としての best 評価。
 ///
 /// 比較 semantics は合法 Dahai 付きの通常打牌選択 (`select_discard_action_with_evaluation`) と
-/// 同じで、1向聴限定の weighted tenpai wait を含む。違いは対象候補だけで、こちらは合法 Dahai
-/// による絞り込みと物理牌補正を行わず、手牌から切れる全打牌候補を対象にする。
+/// 同じで、1向聴限定の weighted tenpai wait と現在聴牌の offense weighted total を含む。
+/// `legal_actions` は現在聴牌候補の既存 Reach / Damaten policy に渡す。違いは対象候補だけで、
+/// こちらは合法 Dahai による絞り込みと物理牌補正を行わず、手牌から切れる全打牌候補を対象にする。
 ///
 /// 押し引き入力の単独構築 (`push_pull_inputs_from_context`) のように、`GameContext` だけから
 /// 「通常打牌なら何を切るか」を求める経路で使う。鳴き後シミュレーションのような1手評価には
@@ -590,12 +719,18 @@ fn select_best_one_step_evaluation(
 pub(crate) fn select_best_normal_discard_evaluation(
     context: &GameContext,
     tiles: &[TileId],
+    legal_actions: &[LegalAction],
 ) -> Option<DiscardEvaluation> {
     let evaluations = evaluate_discard_candidates(context, tiles);
     let tenpai_wait = selection_forward_metrics(context, tiles, &evaluations);
+    let current_tenpai = current_tenpai_candidate_evaluations(context, &evaluations, legal_actions);
 
-    best_discard_selection_index_with_forward_metrics(&evaluations, &tenpai_wait)
-        .map(|index| evaluations[index].clone())
+    best_discard_selection_index_with_metrics(
+        &evaluations,
+        &tenpai_wait,
+        &current_tenpai_metrics(&current_tenpai),
+    )
+    .map(|index| evaluations[index].clone())
 }
 
 /// 副露済み面子数と切れない牌種を明示した1手評価だけの best 評価。
@@ -643,6 +778,11 @@ fn log_discard_diagnostic(
         .iter()
         .find(|candidate| candidate.selected)
         .and_then(|candidate| candidate.tenpai_wait);
+    let selected_current_tenpai_offense_weighted_total = diagnostic
+        .candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .and_then(|candidate| candidate.current_tenpai_offense_weighted_total);
 
     let hand_tiles = tiles_to_mjai(context.hand_tiles());
     let all_tiles = tiles_to_mjai(tiles);
@@ -672,6 +812,8 @@ fn log_discard_diagnostic(
             .map(|metric| metric.weighted_remaining),
         normal_weighted_tenpai_wait_type_count = ?selected_tenpai_wait
             .map(|metric| metric.weighted_type_count),
+        normal_current_tenpai_offense_weighted_total =
+            ?selected_current_tenpai_offense_weighted_total,
         normal_shape_penalty = selected.shape_penalty,
         normal_iishanten_shape_after_discard = ?selected.standard_iishanten_shape_after_discard,
         normal_floating_tile_value = selected.floating_tile_value,
@@ -748,6 +890,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
         weighted_next_acceptance_type_count = ?candidate
             .next_acceptance
             .map(|metric| metric.weighted_type_count),
+        current_tenpai_offense_weighted_total =
+            ?candidate.current_tenpai_offense_weighted_total,
         shape_penalty = evaluation.shape_penalty,
         iishanten_shape_after_discard = ?evaluation.standard_iishanten_shape_after_discard,
         floating_tile_value = evaluation.floating_tile_value,
@@ -768,7 +912,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
     use crate::threat::player_threat_facts_from_context;
-    use bot_logic::{HistoryFuritenFacts, TileId};
+    use bot_logic::{
+        HistoryFuritenFacts, TileId, best_discard_selection_index_with_forward_metrics,
+    };
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -929,6 +1075,125 @@ pub(crate) mod tests {
             GameContext::from_parts_with_dora(None, vec![tile(16), tile(17)], vec![tile(12)]);
         let actions = vec![dahai(16), dahai(17)];
         assert_eq!(select_discard_action(&context, &actions), Some(dahai(17)));
+    }
+
+    fn current_tenpai_regression_context() -> (GameContext, Vec<LegalAction>) {
+        // 34599m235p345567s。CLI regression と同じ14枚に、自席・河・履歴フリテンを既知として
+        // 与え、既存 Reach / Damaten policy と scoring を確定できる局面にする。
+        let hand = vec![
+            tile(8),
+            tile(12),
+            tile(17),
+            tile(32),
+            tile(33),
+            tile(40),
+            tile(44),
+            tile(53),
+            tile(80),
+            tile(84),
+            tile(89),
+            tile(90),
+            tile(92),
+            tile(96),
+        ];
+        let visible = hand.clone();
+        let actions = hand
+            .iter()
+            .copied()
+            .map(|tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Reach])
+            .collect();
+        let context = GameContext::from_parts_with_table_state(
+            None,
+            hand,
+            vec![],
+            TileType::from_mjai_type_str("E").ok(),
+            TileType::from_mjai_type_str("N").ok(),
+            visible,
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false; 4],
+        )
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+        (context, actions)
+    }
+
+    #[test]
+    fn current_tenpai_selection_uses_the_existing_weighted_offense_value() {
+        let (context, actions) = current_tenpai_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(&context, &legal.evaluations, &actions);
+        let candidate = |name: &str| {
+            let index = legal
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard.to_mjai_string() == name)
+                .expect("candidate exists");
+            (&legal.evaluations[index], &current[index])
+        };
+
+        let (two_p, two_p_value) = candidate("2p");
+        let two_p_wait = two_p_value.wait.as_ref().expect("2p wait");
+        let two_p_offense = two_p_value.offense.as_ref().expect("2p offense").offense;
+        assert_eq!(two_p.acceptance_total_remaining(), 4);
+        assert_eq!(
+            two_p_wait.live_waits,
+            vec![TileType::from_mjai_type_str("4p").unwrap()]
+        );
+        assert_eq!(
+            two_p_offense.mode,
+            crate::offense_value::TenpaiOffenseMode::Reach
+        );
+        assert_eq!(two_p_offense.value.weighted_total(), Some(20_800));
+        assert_eq!(two_p_offense.value.average_total(), Some(5_200));
+
+        let (five_p, five_p_value) = candidate("5p");
+        let five_p_wait = five_p_value.wait.as_ref().expect("5p wait");
+        let five_p_offense = five_p_value.offense.as_ref().expect("5p offense").offense;
+        assert_eq!(five_p.acceptance_total_remaining(), 8);
+        assert_eq!(
+            five_p_wait.live_waits,
+            vec![
+                TileType::from_mjai_type_str("1p").unwrap(),
+                TileType::from_mjai_type_str("4p").unwrap(),
+            ]
+        );
+        assert_eq!(
+            five_p_offense.mode,
+            crate::offense_value::TenpaiOffenseMode::Reach
+        );
+        assert_eq!(five_p_offense.value.weighted_total(), Some(16_000));
+        assert_eq!(five_p_offense.value.average_total(), Some(2_000));
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        assert_eq!(
+            result
+                .selection
+                .evaluation
+                .as_ref()
+                .map(|value| value.discard),
+            Some(TileType::from_mjai_type_str("2p").unwrap())
+        );
+        assert_eq!(result.selection.tenpai_wait, Some(two_p_wait.clone()));
+        assert_eq!(result.selection.tenpai_offense_value, Some(two_p_offense));
+        let five_p_diagnostic = result
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5p")
+            .expect("5p diagnostic");
+        assert_eq!(
+            five_p_diagnostic.comparison_reason,
+            bot_logic::DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        );
     }
 
     #[test]
@@ -1116,9 +1381,17 @@ pub(crate) mod tests {
     fn assert_diagnostic_selection_matches(context: &GameContext, actions: &[LegalAction]) {
         let legal = legal_discard_evaluations(context, actions);
         let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
+        let current_tenpai =
+            current_tenpai_candidate_evaluations(context, &legal.evaluations, actions);
 
-        let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait);
-        let selection = selection_from_legal_evaluations(context, &legal, &tenpai_wait, actions);
+        let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai);
+        let selection = selection_from_legal_evaluations(
+            context,
+            &legal,
+            &tenpai_wait,
+            &current_tenpai,
+            actions,
+        );
 
         assert_eq!(diagnostic.selected, selection.evaluation);
         assert!(diagnostic.selected.is_some());
@@ -1283,7 +1556,7 @@ pub(crate) mod tests {
             .copied()
             .chain(context.drawn_tile())
             .collect();
-        let expected = select_best_normal_discard_evaluation(&context, &tiles);
+        let expected = select_best_normal_discard_evaluation(&context, &tiles, &actions);
 
         let selection = select_discard_action_with_evaluation(&context, &actions);
         assert_eq!(selection.evaluation, expected);
@@ -1610,7 +1883,7 @@ pub(crate) mod tests {
 
         let one_step = one_step_best_evaluation(&context, &tiles).expect("1手評価の best");
         let normal =
-            select_best_normal_discard_evaluation(&context, &tiles).expect("通常打牌の best");
+            select_best_normal_discard_evaluation(&context, &tiles, &[]).expect("通常打牌の best");
 
         assert_eq!(one_step.min_shanten_after_discard(), 1);
         assert_eq!(normal.min_shanten_after_discard(), 1);
@@ -1630,7 +1903,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             select_discard_action_with_evaluation(&context, &actions).evaluation,
-            select_best_normal_discard_evaluation(&context, &iishanten_wait_tiles()),
+            select_best_normal_discard_evaluation(&context, &iishanten_wait_tiles(), &actions,),
         );
     }
 
@@ -2887,6 +3160,8 @@ pub(crate) mod tests {
             player_threat_facts_from_context(context),
             selection.evaluation.as_ref(),
             selection.iishanten_forward_metrics,
+            selection.tenpai_wait.as_ref(),
+            selection.tenpai_offense_value,
             actions,
         );
         let offense = inputs.offense.expect("攻撃評価がある");

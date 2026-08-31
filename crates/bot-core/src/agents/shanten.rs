@@ -619,6 +619,8 @@ impl ShantenAgent {
             player_threat_facts_from_context(ctx),
             discard_selection.evaluation.as_ref(),
             discard_selection.iishanten_forward_metrics,
+            discard_selection.tenpai_wait.as_ref(),
+            discard_selection.tenpai_offense_value,
             legal_actions,
         );
         let push_pull = decide_push_pull(&inputs);
@@ -971,8 +973,8 @@ fn log_agent_decision(decision: &AgentDecision) {
 // リーチ判断の本体。act() と構造化診断はこの1本を共有し、診断は結果を載せるだけにする。
 //
 // 判断材料は通常打牌 selection が選んだ打牌の評価だけで、リーチ専用に手牌から向聴・受け入れを
-// 計算し直さない。待ちと恒常フリテンも選択済みの1候補分だけを既存 pure helper から求め、全合法
-// 候補分の診断や2手先探索は構築しない。
+// 計算し直さない。現在聴牌の比較で待ち・ダマ打点を計算済みならその結果を共有し、未計算の経路
+// だけ選択済み1候補分を既存 pure helper から求める。全合法候補分の診断や2手先探索は構築しない。
 //
 // ダマでロンできる通常のケースでは、その打牌後の全ての生きた待ち・赤黒 variant についてダマの
 // 確定打点を評価し、その結論だけでリーチ / ダマを決める。待ち枚数の threshold
@@ -1023,7 +1025,11 @@ fn decide_reach(
         return diagnostic;
     }
 
-    let Some(tenpai_wait) = selected_discard_tenpai_wait_availability(ctx, evaluation) else {
+    let Some(tenpai_wait) = selection
+        .tenpai_wait
+        .clone()
+        .or_else(|| selected_discard_tenpai_wait_availability(ctx, evaluation))
+    else {
         diagnostic.reason = ReachDecisionReason::NotTenpai;
         return diagnostic;
     };
@@ -1031,7 +1037,12 @@ fn decide_reach(
     // ダマでロンできると確定した場合だけダマ打点を評価する。フリテンとロン可否 unknown では
     // 評価そのものを行わず、既存判断へ委ねる。
     let damaten_value = (tenpai_wait.can_ron() == Some(true))
-        .then(|| evaluate_damaten_value(ctx, evaluation, &tenpai_wait))
+        .then(|| {
+            selection
+                .damaten_value
+                .clone()
+                .or_else(|| evaluate_damaten_value(ctx, evaluation, &tenpai_wait))
+        })
         .flatten();
 
     // 待ち枚数は既存受け入れそのもので、visible tiles の反映も打牌評価の時点で済んでいる。
@@ -3092,7 +3103,7 @@ pub(crate) mod tests {
             .collect();
 
         // 非合法な全体最善候補はテンパイだが、単騎の待ちは 3 枚しかないので弱いテンパイ。
-        let global_best = select_best_normal_discard_evaluation(&ctx, &tiles).unwrap();
+        let global_best = select_best_normal_discard_evaluation(&ctx, &tiles, &[]).unwrap();
         assert_eq!(global_best.min_shanten_after_discard(), 0);
         // 合法なのはツモ切り 3p だけ。
         let actions = vec![dahai(drawn)];
