@@ -1641,6 +1641,16 @@ fn format_combined_defense(combined_defense: &CombinedDefenseDiagnostic) -> Stri
                 "  selected category: {:?}",
                 selected.selected_category
             ));
+            if let Some(evidence) = &selected.selected_player_ron_risk_evidence {
+                for player in evidence {
+                    header.push(format!(
+                        "  player {} ron risk: {} / {}",
+                        player.player,
+                        player.evidence.ron_capable_weight,
+                        player.evidence.tenpai_weight
+                    ));
+                }
+            }
         }
         None => header.push(format!("  selected: {NONE}")),
     }
@@ -1687,6 +1697,14 @@ fn format_combined_defense_candidate(candidate: &CombinedDefenseCandidateDiagnos
                 "  same hand passed[{} {:?}]: yes",
                 target.player(),
                 target.kind()
+            ));
+        }
+    }
+    if let Some(evidence) = &candidate.player_ron_risk_evidence {
+        for player in evidence {
+            lines.push(format!(
+                "  player {} ron risk: {} / {}",
+                player.player, player.evidence.ron_capable_weight, player.evidence.tenpai_weight
             ));
         }
     }
@@ -2314,8 +2332,9 @@ mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
     use bot_core::{
-        Agent, DiagnosticOptions, MenzenAgent, OpenHandDefenseCategory,
-        OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence, RonRiskEvidence,
+        Agent, CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
+        OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
+        RonRiskEvidence,
     };
     use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
     use std::sync::LazyLock;
@@ -5546,6 +5565,44 @@ mod tests {
 
     const COMBINED_THREAT_DEFENSE_SCENARIO: &str =
         include_str!("../scenarios/combined_threat_defense.json");
+
+    #[test]
+    fn combined_defense_section_reports_exact_risk_for_each_threat_kind() {
+        let diagnostic = CombinedDefenseDiagnostic {
+            targets: vec![
+                bot_core::ThreatDefenseTarget::riichi(1),
+                bot_core::ThreatDefenseTarget::high_open_hand(3),
+            ],
+            selected: Some(CombinedDefenseSelectionDiagnostic {
+                selected_action: LegalAction::Dahai {
+                    tile: TileId::new(0).unwrap(),
+                },
+                selected_category: bot_core::CombinedDefenseCategory::ExactRonRisk,
+                selected_player_ron_risk_evidence: Some(vec![
+                    PlayerRonRiskEvidence {
+                        player: 1,
+                        evidence: RonRiskEvidence {
+                            ron_capable_weight: 2,
+                            tenpai_weight: 5,
+                        },
+                    },
+                    PlayerRonRiskEvidence {
+                        player: 3,
+                        evidence: RonRiskEvidence {
+                            ron_capable_weight: 1,
+                            tenpai_weight: 4,
+                        },
+                    },
+                ]),
+            }),
+            candidates: Vec::new(),
+        };
+
+        assert_eq!(
+            format_combined_defense(&diagnostic),
+            "Combined defense\n  targets: 1(Riichi), 3(HighOpenHand)\n  selected action: 1m\n  selected category: ExactRonRisk\n  player 1 ron risk: 2 / 5\n  player 3 ron risk: 1 / 4"
+        );
+    }
 
     #[test]
     fn combined_defense_section_lists_both_threat_kinds_and_their_safety() {

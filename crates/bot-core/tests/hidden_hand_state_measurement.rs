@@ -1,6 +1,10 @@
 use std::time::{Duration, Instant};
 
 use bot_core::action::LegalAction;
+use bot_core::combined_defense::{
+    CombinedDefenseCategory, combined_threat_defense_targets_from_context,
+    select_combined_threat_defense_fallback_action_with_kind,
+};
 use bot_core::context::{GameContext, TableStateFacts};
 use bot_core::defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates,
@@ -742,7 +746,16 @@ fn measure_single_reach_exact_defense_fallback_selection() {
 }
 
 fn open_hand_measurement_context(open_meld_count: usize) -> GameContext {
+    open_hand_measurement_context_for(open_meld_count, 1, [false; 4])
+}
+
+fn open_hand_measurement_context_for(
+    open_meld_count: usize,
+    open_hand_player: usize,
+    reached: [bool; 4],
+) -> GameContext {
     assert!((1..=3).contains(&open_meld_count));
+    assert!((1..4).contains(&open_hand_player));
 
     let mut source = TileSource::new();
     let hand = source.tiles(&REPRESENTATIVE_HAND);
@@ -778,7 +791,7 @@ fn open_hand_measurement_context(open_meld_count: usize) -> GameContext {
     }
 
     let mut melds: [Vec<Meld>; 4] = Default::default();
-    melds[1] = target_melds;
+    melds[open_hand_player] = target_melds;
     GameContext::from_parts_with_melds(
         None,
         hand,
@@ -789,7 +802,7 @@ fn open_hand_measurement_context(open_meld_count: usize) -> GameContext {
         Some(0),
         Some(1),
         discards,
-        [false; 4],
+        reached,
         melds,
     )
     .with_temporary_passed_tiles(Some(Default::default()))
@@ -798,6 +811,33 @@ fn open_hand_measurement_context(open_meld_count: usize) -> GameContext {
         remaining_tiles: Some(16),
         ..TableStateFacts::default()
     })
+}
+
+#[test]
+#[ignore = "release build 前提の Combined production-like fallback 計測用。wall-clock threshold は持たない"]
+fn measure_combined_exact_defense_fallback_selection() {
+    let context = open_hand_measurement_context_for(3, 3, [false, true, false, false]);
+    let actions: Vec<LegalAction> = context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .map(|tile| LegalAction::Dahai { tile })
+        .collect();
+    let targets = combined_threat_defense_targets_from_context(&context);
+    assert_eq!(targets.len(), 2);
+
+    let start = Instant::now();
+    let selected =
+        select_combined_threat_defense_fallback_action_with_kind(&context, &actions, &targets)
+            .expect("representative Combined fallback");
+    let elapsed = start.elapsed();
+    assert_eq!(selected.1, CombinedDefenseCategory::ExactRonRisk);
+
+    println!("production-like Combined exact defense fallback (1 Riichi + 1 High OpenHand):");
+    println!("  legal Dahai actions:      {}", actions.len());
+    println!("  exact target count:       {}", targets.len());
+    println!("  total fallback selection: {elapsed:?}");
+    println!("  selected:                 {:?}", selected.0);
 }
 
 #[test]
