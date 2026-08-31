@@ -472,7 +472,7 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
         estimated_cache_insertion
     );
     println!(
-        "        cache growth insertion: {:?}",
+        "        actual capacity-growth insertion: {:?}",
         metrics.cache_growth_insertion
     );
     println!("        hand-weight:           {:?}", estimated_hand_weight);
@@ -503,7 +503,7 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     println!("      misses/evaluated states: {}", metrics.cache_misses);
     println!("      inserts:                  {}", metrics.cache_inserts);
     println!(
-        "        capacity grows:        {} ({:?})",
+        "        actual capacity grows: {} ({:?})",
         metrics.cache_capacity_grows, metrics.cache_growth_insertion
     );
     println!("      clears:                   {}", metrics.cache_clears);

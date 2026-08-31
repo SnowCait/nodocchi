@@ -293,6 +293,7 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(metrics.cache_misses, metrics.evaluated_states);
     assert_eq!(metrics.cache_inserts, metrics.cache_misses);
     assert!(metrics.cache_capacity_grows <= metrics.cache_inserts);
+    assert_eq!(metrics.cache_capacity_grows, 1);
     assert_eq!(
         metrics.completion_checks,
         metrics.furiten_completion_checks

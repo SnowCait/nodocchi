@@ -100,7 +100,9 @@ pub struct HiddenHandStateMetrics {
     pub cross_target_cache_reuses: u64,
     pub cache_misses: u64,
     pub cache_inserts: u64,
+    /// `HashMap::insert()` 前後で capacity が実際に増加した回数。
     pub cache_capacity_grows: u64,
+    /// insert 前後で capacity が実際に増加した insertion だけの elapsed。
     pub cache_growth_insertion: Duration,
     pub cache_clears: u64,
     pub cached_states: usize,
@@ -875,12 +877,15 @@ impl<'a> ReachedHiddenHandStates<'a> {
                 self.metrics.furiten_completion_checks += completion_checks;
             }
             self.metrics.evaluated_states += 1;
-            let grows_cache = self.evaluated.len() == self.evaluated.capacity();
-            let cache_insertion_start = (!grows_cache
-                && timing_sample == CandidateTimingSample::CacheInsertion)
+            let capacity_before = self.evaluated.capacity();
+            // `capacity()` は lower bound なので、この条件は actual growth の判定には使わない。
+            // capacity 未満なら reallocation なしで保持できる契約を使い、全insertのclock readを
+            // 避けつつ、growthの可能性があるinsertだけを全件計時する。
+            let reaches_reported_capacity = self.evaluated.len() == capacity_before;
+            let insertion_start = (self.metrics.candidate_timing_interval != 0
+                && (reaches_reported_capacity
+                    || timing_sample == CandidateTimingSample::CacheInsertion))
                 .then(Instant::now);
-            let cache_growth_start =
-                (grows_cache && self.metrics.candidate_timing_interval != 0).then(Instant::now);
             self.evaluated.insert(
                 key,
                 EvaluatedState {
@@ -888,18 +893,21 @@ impl<'a> ReachedHiddenHandStates<'a> {
                     counted_generation: generation,
                 },
             );
+            let insertion_elapsed = insertion_start.map(|start| start.elapsed());
             self.metrics.cache_inserts += 1;
-            if let Some(cache_growth_start) = cache_growth_start {
-                let elapsed = cache_growth_start.elapsed();
+            let capacity_after = self.evaluated.capacity();
+            let actually_grew = capacity_after > capacity_before;
+            if actually_grew && self.metrics.candidate_timing_interval != 0 {
+                let elapsed = insertion_elapsed.expect("a capacity-exhausting insertion is timed");
                 self.metrics.cache_capacity_grows += 1;
                 self.metrics.cache_growth_insertion += elapsed;
                 if timing_sample == CandidateTimingSample::Record {
                     self.metrics.sampled_record_cache_growth += elapsed;
                 }
-            }
-            if let Some(cache_insertion_start) = cache_insertion_start {
+            } else if timing_sample == CandidateTimingSample::CacheInsertion {
+                let elapsed = insertion_elapsed.expect("sampled insertion is timed");
                 self.metrics.sampled_cache_inserts += 1;
-                self.metrics.sampled_cache_insertion += cache_insertion_start.elapsed();
+                self.metrics.sampled_cache_insertion += elapsed;
             }
             if waits_on_unron_tile {
                 self.metrics.furiten_states_filtered += 1;
