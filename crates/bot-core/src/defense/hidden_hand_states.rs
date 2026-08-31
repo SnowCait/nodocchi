@@ -78,9 +78,10 @@ impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
 ///
 /// 件数と時間は同じ instance で行った全 target 評価の累計。`unique_candidates` は同一 target
 /// 内の重複を除いた状態数、`cache_hits` は同一 target 内の重複と target 間の再利用を合わせた
-/// 件数。`target_completion` は target の structural completed-hand analysis だけを含み、
+/// 件数。`target_completion` は target の structural completion 判定だけを含み、
 /// `guaranteed_yaku_shortcuts` は実 evaluator を呼ばず固定面子の通常役で確定した completed
-/// state 数。役と named Yakuman の評価時間はそれぞれ別に記録する。
+/// state 数。guaranteed-yaku では boolean 判定、それ以外では materialized analysis を使った
+/// 件数も分けて記録する。役と named Yakuman の評価時間はそれぞれ別に記録する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HiddenHandStateMetrics {
     pub generated_candidates: u64,
@@ -95,6 +96,8 @@ pub struct HiddenHandStateMetrics {
     pub furiten_states_filtered: u64,
     pub furiten_completion_checks: u64,
     pub target_completion_checks: u64,
+    pub target_boolean_completion_checks: u64,
+    pub target_materialized_analyses: u64,
     pub completed_states: u64,
     pub guaranteed_yaku_shortcuts: u64,
     pub yaku_evaluations: u64,
@@ -114,6 +117,8 @@ pub struct HiddenHandStateMetrics {
 #[derive(Debug, Clone, Copy, Default)]
 struct YakuQualifiedCompletion {
     structural_checked: bool,
+    boolean_completion_checked: bool,
+    materialized_analysis: bool,
     structurally_complete: bool,
     guaranteed_yaku_shortcut: bool,
     yaku_evaluated: bool,
@@ -184,6 +189,17 @@ fn concealed_tile_ids(hand: &HandCounts) -> Vec<TileId> {
         }
     }
     ids
+}
+
+pub(super) fn is_standard_hand_complete_with_target(
+    hand: &HandCounts,
+    target: TileType,
+    fixed_meld_count: FixedMeldCount,
+) -> bool {
+    let mut counts = TileCounts::from_tile_types(
+        TileType::all().flat_map(|tile| std::iter::repeat_n(tile, usize::from(hand[tile.index()]))),
+    );
+    counts.try_add(target).is_ok() && is_standard_hand_complete(&counts, fixed_meld_count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,10 +326,11 @@ fn open_hand_winning_context(
 /// 見え牌が欠けた残枚数で数えることになる。
 ///
 /// 候補生成は対象牌固有の構造から行い、全牌種総当たりも物理牌 subset 総当たりもしない。
-/// target の完成形判定は既存 [`analyze_completed_hand`] を source of truth とする。OpenHand の
-/// furiten 判定は同じ Standard decomposition 探索を共有する boolean helper を使う。全34牌種の
-/// 受け入れを毎回作らず、対象牌と「その player に対して既にロン不能な牌種」だけを調べる。
-/// 同じ `TileCounts` は decomposition 数によらず1回だけ加算する。
+/// target の完成形判定は既存 completed-hand logic を source of truth とする。OpenHand の
+/// guaranteed-yaku と furiten 判定では Standard decomposition 探索を共有する boolean helper、
+/// 役評価に analysis が必要な場合は [`analyze_completed_hand`] を使う。全34牌種の受け入れを毎回
+/// 作らず、対象牌と「その player に対して既にロン不能な牌種」だけを調べる。同じ
+/// `TileCounts` は decomposition 数によらず1回だけ加算する。
 ///
 /// ロン不能牌との交差判定は target 間で共有する cache に載るため、同じ player の複数 target を
 /// 順に評価する場合は同じ instance を使い回す。
@@ -699,6 +716,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
                 self.metrics.yaku_evaluation += result.yaku_evaluation;
                 self.metrics.yakuman_evaluation += result.yakuman_evaluation;
                 self.metrics.target_completion_checks += u64::from(result.structural_checked);
+                self.metrics.target_boolean_completion_checks +=
+                    u64::from(result.boolean_completion_checked);
+                self.metrics.target_materialized_analyses +=
+                    u64::from(result.materialized_analysis);
                 self.metrics.completed_states += u64::from(result.structurally_complete);
                 self.metrics.guaranteed_yaku_shortcuts +=
                     u64::from(result.guaranteed_yaku_shortcut);
@@ -786,6 +807,21 @@ impl<'a> ReachedHiddenHandStates<'a> {
             return YakuQualifiedCompletion::default();
         }
         self.completion_checks.set(self.completion_checks.get() + 1);
+
+        if qualification.guaranteed_yaku {
+            let structural_start = Instant::now();
+            let structurally_complete =
+                is_standard_hand_complete_with_target(hand, tile, self.fixed_meld_count);
+            return YakuQualifiedCompletion {
+                structural_checked: true,
+                boolean_completion_checked: true,
+                structurally_complete,
+                guaranteed_yaku_shortcut: structurally_complete,
+                structural_completion: structural_start.elapsed(),
+                ..YakuQualifiedCompletion::default()
+            };
+        }
+
         ids.push(tile_id(tile, copy));
         let structural_start = Instant::now();
         let analysis = analyze_completed_hand(ids, self.fixed_melds);
@@ -796,6 +832,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
 
         let mut result = YakuQualifiedCompletion {
             structural_checked: true,
+            materialized_analysis: true,
             structurally_complete,
             structural_completion,
             ..YakuQualifiedCompletion::default()
@@ -803,21 +840,16 @@ impl<'a> ReachedHiddenHandStates<'a> {
         if let Ok(analysis) = analysis
             && structurally_complete
         {
-            if qualification.guaranteed_yaku {
-                result.guaranteed_yaku_shortcut = true;
-            } else {
-                result.yaku_evaluated = true;
-                let yaku_start = Instant::now();
-                result.yaku_successful =
-                    evaluate_winning_yaku(&analysis, qualification.context, tile)
-                        .iter()
-                        .any(|evaluation| !evaluation.is_empty());
-                result.yaku_evaluation = yaku_start.elapsed();
-            }
+            result.yaku_evaluated = true;
+            let yaku_start = Instant::now();
+            result.yaku_successful = evaluate_winning_yaku(&analysis, qualification.context, tile)
+                .iter()
+                .any(|evaluation| !evaluation.is_empty());
+            result.yaku_evaluation = yaku_start.elapsed();
 
             // Preserve the existing short-circuit order: named Yakuman is evaluated only when
             // ordinary yaku did not make this state ron-capable.
-            if !result.guaranteed_yaku_shortcut && !result.yaku_successful {
+            if !result.yaku_successful {
                 result.yakuman_evaluated = true;
                 let yakuman_start = Instant::now();
                 result.yakuman_successful =
