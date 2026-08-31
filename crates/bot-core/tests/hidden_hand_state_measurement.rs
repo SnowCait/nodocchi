@@ -291,6 +291,10 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
         metrics.furiten_completion_checks + metrics.target_completion_checks
     );
     assert_eq!(
+        metrics.target_completion_checks,
+        metrics.target_boolean_completion_checks + metrics.target_materialized_analyses
+    );
+    assert_eq!(
         metrics.ron_capable_states,
         metrics.guaranteed_yaku_shortcuts
             + metrics.yaku_successful_states
@@ -341,6 +345,14 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     println!(
         "      completed states:         {}",
         metrics.completed_states
+    );
+    println!(
+        "      boolean checks:           {}",
+        metrics.target_boolean_completion_checks
+    );
+    println!(
+        "      materialized analyses:    {}",
+        metrics.target_materialized_analyses
     );
     println!(
         "      elapsed:                  {:?}",

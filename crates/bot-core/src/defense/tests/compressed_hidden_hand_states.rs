@@ -5,11 +5,12 @@ use super::hidden_hand_states::{
     open_hand_fixture_with_ron_facts, reached_fixture, reached_fixture_with_tile_types,
 };
 use crate::context::GameContext;
+use crate::defense::hidden_hand_states::is_standard_hand_complete_with_target;
 use crate::defense::*;
 use crate::meld::{Meld, MeldKind};
 use bot_logic::{
-    RiichiStatus, TileId, TileType, WinMethod, WinningContext, Yakuman, analyze_completed_hand,
-    evaluate_winning_yakuman,
+    FixedMeldCount, RiichiStatus, TileCounts, TileId, TileType, WinMethod, WinningContext, Yakuman,
+    analyze_completed_hand, evaluate_winning_yakuman,
 };
 use std::cmp::Ordering;
 
@@ -241,6 +242,32 @@ fn open_hand_structural_completion_with_yakuhai_is_ron_capable() {
 }
 
 #[test]
+fn guaranteed_yaku_boolean_target_completion_rejects_incomplete_shapes() {
+    let fixed_meld_count = FixedMeldCount::new(3).expect("three fixed melds");
+    let complete = TileCounts::from_tile_types(["2m", "3m", "5m", "5m"].into_iter().map(tile_type));
+    assert!(is_standard_hand_complete_with_target(
+        complete.as_array(),
+        tile_type("4m"),
+        fixed_meld_count
+    ));
+
+    let incomplete =
+        TileCounts::from_tile_types(["2m", "4m", "5m", "5m"].into_iter().map(tile_type));
+    assert!(!is_standard_hand_complete_with_target(
+        incomplete.as_array(),
+        tile_type("7m"),
+        fixed_meld_count
+    ));
+
+    let fifth_copy = TileCounts::from_tile_types([tile_type("5m"); 4]);
+    assert!(!is_standard_hand_complete_with_target(
+        fifth_copy.as_array(),
+        tile_type("5m"),
+        fixed_meld_count
+    ));
+}
+
+#[test]
 fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     let context = known_open_hand_ron_fixture(open_hand_yakuhai_melds(), &[], &[], 1);
     let mut states = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
@@ -262,6 +289,8 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
         metrics.furiten_completion_checks + metrics.target_completion_checks
     );
     assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.target_boolean_completion_checks, 1);
+    assert_eq!(metrics.target_materialized_analyses, 0);
     assert_eq!(metrics.guaranteed_yaku_shortcuts, 1);
     assert_eq!(metrics.yaku_evaluations, 0);
     assert_eq!(metrics.yaku_successful_states, 0);
@@ -278,6 +307,8 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(metrics.ron_capable_weight, weight.weight);
     assert_eq!(metrics.ron_capable_states, weight.states);
     assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.target_boolean_completion_checks, 0);
+    assert_eq!(metrics.target_materialized_analyses, 1);
     assert_eq!(metrics.guaranteed_yaku_shortcuts, 0);
     assert_eq!(metrics.yaku_evaluations, 1);
     assert_eq!(metrics.yaku_successful_states, 0);
