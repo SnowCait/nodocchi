@@ -175,6 +175,19 @@ impl Default for TileCounts {
     }
 }
 
+impl TryFrom<[u8; 34]> for TileCounts {
+    type Error = TileCountError;
+
+    fn try_from(counts: [u8; 34]) -> Result<Self, Self::Error> {
+        for tile in TileType::all() {
+            if counts[tile.index()] > 4 {
+                return Err(TileCountError::Overflow(tile));
+            }
+        }
+        Ok(Self { counts })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +277,34 @@ mod tests {
         assert_eq!(counts.count(tt(4)), 1);
         assert_eq!(counts.count(tt(33)), 1);
         assert_eq!(counts.count(tt(1)), 0);
+    }
+
+    #[test]
+    fn try_from_counts_preserves_valid_counts() {
+        let raw = std::array::from_fn(|index| (index % 5) as u8);
+        let counts = TileCounts::try_from(raw).expect("zero through four copies are valid");
+
+        for tile in TileType::all() {
+            assert_eq!(counts.count(tile), raw[tile.index()]);
+        }
+        assert_eq!(counts.total(), raw.into_iter().sum());
+
+        let from_types = TileCounts::from_tile_types(
+            TileType::all()
+                .flat_map(|tile| std::iter::repeat_n(tile, usize::from(raw[tile.index()]))),
+        );
+        assert_eq!(counts, from_types);
+    }
+
+    #[test]
+    fn try_from_counts_rejects_a_fifth_copy() {
+        let mut raw = [0; 34];
+        raw[tt(7).index()] = 5;
+
+        assert_eq!(
+            TileCounts::try_from(raw),
+            Err(TileCountError::Overflow(tt(7)))
+        );
     }
 
     #[test]

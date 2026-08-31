@@ -246,7 +246,7 @@ fn guaranteed_yaku_boolean_target_completion_rejects_incomplete_shapes() {
     let fixed_meld_count = FixedMeldCount::new(3).expect("three fixed melds");
     let complete = TileCounts::from_tile_types(["2m", "3m", "5m", "5m"].into_iter().map(tile_type));
     assert!(is_standard_hand_complete_with_target(
-        complete.as_array(),
+        &complete,
         tile_type("4m"),
         fixed_meld_count
     ));
@@ -254,14 +254,14 @@ fn guaranteed_yaku_boolean_target_completion_rejects_incomplete_shapes() {
     let incomplete =
         TileCounts::from_tile_types(["2m", "4m", "5m", "5m"].into_iter().map(tile_type));
     assert!(!is_standard_hand_complete_with_target(
-        incomplete.as_array(),
+        &incomplete,
         tile_type("7m"),
         fixed_meld_count
     ));
 
     let fifth_copy = TileCounts::from_tile_types([tile_type("5m"); 4]);
     assert!(!is_standard_hand_complete_with_target(
-        fifth_copy.as_array(),
+        &fifth_copy,
         tile_type("5m"),
         fixed_meld_count
     ));
@@ -289,6 +289,8 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
         metrics.furiten_completion_checks + metrics.target_completion_checks
     );
     assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.tile_count_constructions, 1);
+    assert_eq!(metrics.tile_id_materializations, 0);
     assert_eq!(metrics.target_boolean_completion_checks, 1);
     assert_eq!(metrics.target_materialized_analyses, 0);
     assert_eq!(metrics.guaranteed_yaku_shortcuts, 1);
@@ -307,6 +309,8 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(metrics.ron_capable_weight, weight.weight);
     assert_eq!(metrics.ron_capable_states, weight.states);
     assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.tile_count_constructions, 0);
+    assert_eq!(metrics.tile_id_materializations, 1);
     assert_eq!(metrics.target_boolean_completion_checks, 0);
     assert_eq!(metrics.target_materialized_analyses, 1);
     assert_eq!(metrics.guaranteed_yaku_shortcuts, 0);

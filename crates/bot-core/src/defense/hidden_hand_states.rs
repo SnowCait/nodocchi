@@ -81,7 +81,9 @@ impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
 /// 件数。`target_completion` は target の structural completion 判定だけを含み、
 /// `guaranteed_yaku_shortcuts` は実 evaluator を呼ばず固定面子の通常役で確定した completed
 /// state 数。guaranteed-yaku では boolean 判定、それ以外では materialized analysis を使った
-/// 件数も分けて記録する。役と named Yakuman の評価時間はそれぞれ別に記録する。
+/// 件数も分けて記録する。`tile_count_constructions` と `tile_id_materializations` は hidden state
+/// から各 representation を実際に構築した回数。役と named Yakuman の評価時間はそれぞれ別に
+/// 記録する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HiddenHandStateMetrics {
     pub generated_candidates: u64,
@@ -91,6 +93,8 @@ pub struct HiddenHandStateMetrics {
     pub cache_misses: u64,
     pub cache_clears: u64,
     pub cached_states: usize,
+    pub tile_count_constructions: u64,
+    pub tile_id_materializations: u64,
     pub completion_checks: u64,
     pub furiten_states_checked: u64,
     pub furiten_states_filtered: u64,
@@ -191,14 +195,16 @@ fn concealed_tile_ids(hand: &HandCounts) -> Vec<TileId> {
     ids
 }
 
+fn tile_counts(hand: &HandCounts) -> TileCounts {
+    TileCounts::try_from(*hand).expect("generated hand has at most four copies per tile type")
+}
+
 pub(super) fn is_standard_hand_complete_with_target(
-    hand: &HandCounts,
+    counts: &TileCounts,
     target: TileType,
     fixed_meld_count: FixedMeldCount,
 ) -> bool {
-    let mut counts = TileCounts::from_tile_types(
-        TileType::all().flat_map(|tile| std::iter::repeat_n(tile, usize::from(hand[tile.index()]))),
-    );
+    let mut counts = *counts;
     counts.try_add(target).is_ok() && is_standard_hand_complete(&counts, fixed_meld_count)
 }
 
@@ -433,7 +439,8 @@ impl<'a> ReachedHiddenHandStates<'a> {
     pub fn is_ron_capable_hidden_hand(&self, hand: &TileCounts, target: TileType) -> bool {
         let hand = hand.as_array();
         let mut ids = concealed_tile_ids(hand);
-        !self.waits_on_unron_tile(&mut ids, hand) && self.completes_hand(&mut ids, hand, target)
+        !self.waits_on_unron_tile_with_ids(&mut ids, hand)
+            && self.completes_hand(&mut ids, hand, target)
     }
 
     /// 対象牌で実際にロンできる隠れ手牌状態の重みを exact に数える。
@@ -687,11 +694,31 @@ impl<'a> ReachedHiddenHandStates<'a> {
             return;
         }
 
-        let mut ids = concealed_tile_ids(hand);
+        let guaranteed_yaku = qualification.is_some_and(|value| value.guaranteed_yaku);
+        let needs_counts = self.use_standard_completion_for_furiten
+            && (guaranteed_yaku || known.is_none() && !self.unron_tiles.is_empty());
+        let counts = needs_counts.then(|| {
+            self.metrics.tile_count_constructions += 1;
+            tile_counts(hand)
+        });
+        let mut ids = (!self.use_standard_completion_for_furiten).then(|| {
+            self.metrics.tile_id_materializations += 1;
+            concealed_tile_ids(hand)
+        });
         if known.is_none() {
             let checks_before = self.completion_checks.get();
             let start = Instant::now();
-            let waits_on_unron_tile = self.waits_on_unron_tile(&mut ids, hand);
+            let waits_on_unron_tile = if self.use_standard_completion_for_furiten {
+                counts
+                    .as_ref()
+                    .is_some_and(|counts| self.waits_on_unron_tile_with_counts(counts))
+            } else {
+                let ids = ids.get_or_insert_with(|| {
+                    self.metrics.tile_id_materializations += 1;
+                    concealed_tile_ids(hand)
+                });
+                self.waits_on_unron_tile_with_ids(ids, hand)
+            };
             self.metrics.unron_filtering += start.elapsed();
             self.metrics.furiten_states_checked += 1;
             self.metrics.furiten_completion_checks += self.completion_checks.get() - checks_before;
@@ -711,7 +738,20 @@ impl<'a> ReachedHiddenHandStates<'a> {
 
         let completes = match qualification {
             Some(qualification) => {
-                let result = self.completes_hand_with_yaku(&mut ids, hand, target, qualification);
+                let result = if qualification.guaranteed_yaku {
+                    self.completes_hand_with_guaranteed_yaku(
+                        counts
+                            .as_ref()
+                            .expect("guaranteed-yaku target uses count representation"),
+                        target,
+                    )
+                } else {
+                    let ids = ids.get_or_insert_with(|| {
+                        self.metrics.tile_id_materializations += 1;
+                        concealed_tile_ids(hand)
+                    });
+                    self.completes_hand_with_yaku(ids, hand, target, qualification.context)
+                };
                 self.metrics.target_completion += result.structural_completion;
                 self.metrics.yaku_evaluation += result.yaku_evaluation;
                 self.metrics.yakuman_evaluation += result.yakuman_evaluation;
@@ -732,9 +772,13 @@ impl<'a> ReachedHiddenHandStates<'a> {
                     || result.yakuman_successful
             }
             None => {
+                let ids = ids.get_or_insert_with(|| {
+                    self.metrics.tile_id_materializations += 1;
+                    concealed_tile_ids(hand)
+                });
                 let checks_before = self.completion_checks.get();
                 let start = Instant::now();
-                let completes = self.completes_hand(&mut ids, hand, target);
+                let completes = self.completes_hand(ids, hand, target);
                 self.metrics.target_completion += start.elapsed();
                 self.metrics.target_completion_checks +=
                     self.completion_checks.get() - checks_before;
@@ -757,26 +801,23 @@ impl<'a> ReachedHiddenHandStates<'a> {
     //
     // 全34牌種の受け入れを作らず、本人の河と各 mode の current passed evidence から得た
     // ロン不能牌だけを調べる。その牌でも和了形になるなら、その候補はロンできない。
-    fn waits_on_unron_tile(&self, ids: &mut Vec<TileId>, hand: &HandCounts) -> bool {
-        if self.use_standard_completion_for_furiten {
-            if self.unron_tiles.is_empty() {
-                return false;
-            }
-            let mut counts = TileCounts::from_tiles(ids.iter().copied());
-            return self.unron_tiles.iter().any(|&tile| {
-                if counts.try_add(tile).is_err() {
-                    return false;
-                }
-                self.completion_checks.set(self.completion_checks.get() + 1);
-                let complete = is_standard_hand_complete(&counts, self.fixed_meld_count);
-                counts.remove(tile).expect("just added the candidate tile");
-                complete
-            });
-        }
-
+    fn waits_on_unron_tile_with_ids(&self, ids: &mut Vec<TileId>, hand: &HandCounts) -> bool {
         self.unron_tiles
             .iter()
             .any(|&tile| self.completes_hand(ids, hand, tile))
+    }
+
+    fn waits_on_unron_tile_with_counts(&self, counts: &TileCounts) -> bool {
+        let mut counts = *counts;
+        self.unron_tiles.iter().any(|&tile| {
+            if counts.try_add(tile).is_err() {
+                return false;
+            }
+            self.completion_checks.set(self.completion_checks.get() + 1);
+            let complete = is_standard_hand_complete(&counts, self.fixed_meld_count);
+            counts.remove(tile).expect("just added the candidate tile");
+            complete
+        })
     }
 
     // 隠れ手牌へ1枚加えた形が和了形かを既存 completed hand logic で判定する。
@@ -795,32 +836,40 @@ impl<'a> ReachedHiddenHandStates<'a> {
         complete
     }
 
+    fn completes_hand_with_guaranteed_yaku(
+        &self,
+        counts: &TileCounts,
+        tile: TileType,
+    ) -> YakuQualifiedCompletion {
+        if counts.count(tile) >= MAX_TILE_COPIES {
+            return YakuQualifiedCompletion::default();
+        }
+        self.completion_checks.set(self.completion_checks.get() + 1);
+        let structural_start = Instant::now();
+        let structurally_complete =
+            is_standard_hand_complete_with_target(counts, tile, self.fixed_meld_count);
+        YakuQualifiedCompletion {
+            structural_checked: true,
+            boolean_completion_checked: true,
+            structurally_complete,
+            guaranteed_yaku_shortcut: structurally_complete,
+            structural_completion: structural_start.elapsed(),
+            ..YakuQualifiedCompletion::default()
+        }
+    }
+
     fn completes_hand_with_yaku(
         &self,
         ids: &mut Vec<TileId>,
         hand: &HandCounts,
         tile: TileType,
-        qualification: RonQualification,
+        context: WinningContext,
     ) -> YakuQualifiedCompletion {
         let copy = hand[tile.index()];
         if copy >= MAX_TILE_COPIES {
             return YakuQualifiedCompletion::default();
         }
         self.completion_checks.set(self.completion_checks.get() + 1);
-
-        if qualification.guaranteed_yaku {
-            let structural_start = Instant::now();
-            let structurally_complete =
-                is_standard_hand_complete_with_target(hand, tile, self.fixed_meld_count);
-            return YakuQualifiedCompletion {
-                structural_checked: true,
-                boolean_completion_checked: true,
-                structurally_complete,
-                guaranteed_yaku_shortcut: structurally_complete,
-                structural_completion: structural_start.elapsed(),
-                ..YakuQualifiedCompletion::default()
-            };
-        }
 
         ids.push(tile_id(tile, copy));
         let structural_start = Instant::now();
@@ -842,7 +891,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         {
             result.yaku_evaluated = true;
             let yaku_start = Instant::now();
-            result.yaku_successful = evaluate_winning_yaku(&analysis, qualification.context, tile)
+            result.yaku_successful = evaluate_winning_yaku(&analysis, context, tile)
                 .iter()
                 .any(|evaluation| !evaluation.is_empty());
             result.yaku_evaluation = yaku_start.elapsed();
@@ -852,10 +901,9 @@ impl<'a> ReachedHiddenHandStates<'a> {
             if !result.yaku_successful {
                 result.yakuman_evaluated = true;
                 let yakuman_start = Instant::now();
-                result.yakuman_successful =
-                    evaluate_winning_yakuman(&analysis, qualification.context, tile)
-                        .iter()
-                        .any(|evaluation| !evaluation.is_empty());
+                result.yakuman_successful = evaluate_winning_yakuman(&analysis, context, tile)
+                    .iter()
+                    .any(|evaluation| !evaluation.is_empty());
                 result.yakuman_evaluation = yakuman_start.elapsed();
             }
         }

@@ -320,6 +320,15 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     println!("      misses/evaluated states: {}", metrics.cache_misses);
     println!("      clears:                   {}", metrics.cache_clears);
     println!("      cached states:            {}", metrics.cached_states);
+    println!("    representation construction:");
+    println!(
+        "      TileCounts constructions: {}",
+        metrics.tile_count_constructions
+    );
+    println!(
+        "      TileId materializations:  {}",
+        metrics.tile_id_materializations
+    );
     println!("    furiten filtering:");
     println!(
         "      states checked:           {}",
