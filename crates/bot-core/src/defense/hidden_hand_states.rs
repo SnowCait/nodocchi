@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use bot_logic::{
     FixedMeldCount, Meld, RiichiStatus, TileCounts, TileId, TileType, WinMethod, WinningContext,
     analyze_completed_hand, evaluate_winning_yaku, evaluate_winning_yakuman,
-    fixed_melds_guarantee_yaku, is_standard_hand_complete,
+    fixed_melds_guarantee_yaku, is_standard_hand_complete, standard_completion_intersects,
 };
 
 use crate::context::GameContext;
@@ -98,7 +98,12 @@ pub struct HiddenHandStateMetrics {
     pub completion_checks: u64,
     pub furiten_states_checked: u64,
     pub furiten_states_filtered: u64,
+    /// candidate tile ごとに完成判定を呼んだ回数。batch path の判定は含まない。
     pub furiten_completion_checks: u64,
+    /// hidden state の candidate 集合へ一括 Standard completion 判定を行った回数。
+    pub furiten_batch_checks: u64,
+    /// batch 判定へ渡した、5枚目にならない candidate tile 数の累計。
+    pub furiten_candidate_tiles: u64,
     pub target_completion_checks: u64,
     pub target_boolean_completion_checks: u64,
     pub target_materialized_analyses: u64,
@@ -709,9 +714,14 @@ impl<'a> ReachedHiddenHandStates<'a> {
             let checks_before = self.completion_checks.get();
             let start = Instant::now();
             let waits_on_unron_tile = if self.use_standard_completion_for_furiten {
-                counts
-                    .as_ref()
-                    .is_some_and(|counts| self.waits_on_unron_tile_with_counts(counts))
+                counts.as_ref().is_some_and(|counts| {
+                    self.metrics.furiten_candidate_tiles += self
+                        .unron_tiles
+                        .iter()
+                        .filter(|&&tile| counts.count(tile) < MAX_TILE_COPIES)
+                        .count() as u64;
+                    self.waits_on_unron_tile_with_counts(counts)
+                })
             } else {
                 let ids = ids.get_or_insert_with(|| {
                     self.metrics.tile_id_materializations += 1;
@@ -721,7 +731,12 @@ impl<'a> ReachedHiddenHandStates<'a> {
             };
             self.metrics.unron_filtering += start.elapsed();
             self.metrics.furiten_states_checked += 1;
-            self.metrics.furiten_completion_checks += self.completion_checks.get() - checks_before;
+            let completion_checks = self.completion_checks.get() - checks_before;
+            if self.use_standard_completion_for_furiten {
+                self.metrics.furiten_batch_checks += completion_checks;
+            } else {
+                self.metrics.furiten_completion_checks += completion_checks;
+            }
             self.metrics.evaluated_states += 1;
             self.evaluated.insert(
                 key,
@@ -808,16 +823,8 @@ impl<'a> ReachedHiddenHandStates<'a> {
     }
 
     fn waits_on_unron_tile_with_counts(&self, counts: &TileCounts) -> bool {
-        let mut counts = *counts;
-        self.unron_tiles.iter().any(|&tile| {
-            if counts.try_add(tile).is_err() {
-                return false;
-            }
-            self.completion_checks.set(self.completion_checks.get() + 1);
-            let complete = is_standard_hand_complete(&counts, self.fixed_meld_count);
-            counts.remove(tile).expect("just added the candidate tile");
-            complete
-        })
+        self.completion_checks.set(self.completion_checks.get() + 1);
+        standard_completion_intersects(counts, self.fixed_meld_count, &self.unron_tiles)
     }
 
     // 隠れ手牌へ1枚加えた形が和了形かを既存 completed hand logic で判定する。

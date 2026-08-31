@@ -39,7 +39,7 @@ pub use bonus_han::{BonusHanBreakdown, UraDoraHan, evaluate_bonus_han};
 pub use completed_hand::{
     ChiitoitsuDecomposition, CompletedHandAnalysis, CompletedHandDecomposition, CompletedHandError,
     ConcealedMeld, KokushiDecomposition, StandardDecomposition, analyze_completed_hand,
-    is_standard_hand_complete,
+    is_standard_hand_complete, standard_completion_intersects,
 };
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
