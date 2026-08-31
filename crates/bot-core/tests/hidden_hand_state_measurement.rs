@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use bot_core::action::LegalAction;
 use bot_core::combined_defense::{
-    CombinedDefenseCategory, combined_threat_defense_targets_from_context,
+    CombinedDefenseCategory, ThreatDefenseTarget, ThreatDefenseTargetKind,
+    combined_threat_defense_targets_from_context,
     select_combined_threat_defense_fallback_action_with_kind,
 };
 use bot_core::context::{GameContext, TableStateFacts};
@@ -16,6 +17,9 @@ use bot_core::meld::{Meld, MeldKind};
 use bot_core::open_hand_defense::{
     OpenHandDefenseCategory, high_open_hand_threat_players_from_context,
     select_open_hand_defense_fallback_action_with_kind,
+};
+use bot_core::{
+    OpenHandThreatReason, classify_open_hand_threats, player_threat_facts_from_context,
 };
 use bot_logic::{TileId, TileType};
 
@@ -746,39 +750,110 @@ fn measure_single_reach_exact_defense_fallback_selection() {
 }
 
 fn open_hand_measurement_context(open_meld_count: usize) -> GameContext {
-    open_hand_measurement_context_for(open_meld_count, 1, [false; 4])
+    combined_measurement_context(
+        &[OpenHandMeasurementSpec {
+            player: 1,
+            open_meld_count,
+            discard_count: 12,
+            first_meld: FirstOpenMeld::WhitePon,
+            expected_reason: match open_meld_count {
+                1 => OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+                2 => OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+                3 => OpenHandThreatReason::ThreeOrMoreOpenMelds,
+                _ => unreachable!("validated below"),
+            },
+        }],
+        [false; 4],
+    )
 }
 
-fn open_hand_measurement_context_for(
+#[derive(Debug, Clone, Copy)]
+enum FirstOpenMeld {
+    WhitePon,
+    RoundWindPon,
+    SuitedChi,
+}
+
+impl FirstOpenMeld {
+    fn guarantees_yaku(self) -> bool {
+        matches!(self, Self::WhitePon | Self::RoundWindPon)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpenHandMeasurementSpec {
+    player: usize,
     open_meld_count: usize,
-    open_hand_player: usize,
+    discard_count: usize,
+    first_meld: FirstOpenMeld,
+    expected_reason: OpenHandThreatReason,
+}
+
+fn combined_measurement_context(
+    open_hands: &[OpenHandMeasurementSpec],
     reached: [bool; 4],
 ) -> GameContext {
-    assert!((1..=3).contains(&open_meld_count));
-    assert!((1..4).contains(&open_hand_player));
+    for spec in open_hands {
+        assert!((1..=3).contains(&spec.open_meld_count));
+        assert!((1..4).contains(&spec.player));
+        assert!(!reached[spec.player]);
+        if !matches!(spec.first_meld, FirstOpenMeld::WhitePon) {
+            assert_eq!(spec.open_meld_count, 1);
+        }
+    }
 
     let mut source = TileSource::new();
     let hand = source.tiles(&REPRESENTATIVE_HAND);
     let dora_indicator = source.tile("C");
-    let discards = [
-        source.tiles(&["1m", "5m", "9m", "1p", "6p", "9p", "1s", "N"]),
-        source.tiles(&[
+    let river_tiles: [&[&str]; 4] = [
+        &["1m", "5m", "9m", "1p", "6p", "9p", "1s", "N"],
+        &[
             "1m", "5m", "8m", "9m", "1p", "2p", "6p", "9p", "1s", "4s", "5s", "6s",
-        ]),
-        source.tiles(&["2m", "4m", "7m", "3p", "7p", "2s", "S", "W"]),
-        source.tiles(&["3m", "6m", "8m", "4p", "8p", "3s", "F", "C"]),
+        ],
+        &[
+            "2m", "4m", "7m", "3p", "7p", "2s", "S", "W", "6p", "8s", "9s", "C",
+        ],
+        &[
+            "3m", "6m", "8m", "4p", "8p", "3s", "F", "C", "2p", "5s", "7s", "9s",
+        ],
     ];
+    let discards = std::array::from_fn(|player| {
+        let default_count = if player <= 1 {
+            river_tiles[player].len()
+        } else {
+            8
+        };
+        let count = open_hands
+            .iter()
+            .find(|spec| spec.player == player)
+            .map_or(default_count, |spec| spec.discard_count);
+        source.tiles(&river_tiles[player][..count])
+    });
 
-    let mut target_melds = Vec::with_capacity(open_meld_count);
-    let white = source.tiles(&["P", "P", "P"]);
-    target_melds.push(Meld::new(MeldKind::Pon, white.clone(), Some(white[0])));
-    if open_meld_count >= 2 {
-        let chi = source.tiles(&["4s", "5s", "6s"]);
-        target_melds.push(Meld::new(MeldKind::Chi, chi.clone(), Some(chi[0])));
-    }
-    if open_meld_count >= 3 {
-        let chi = source.tiles(&["7s", "8s", "9s"]);
-        target_melds.push(Meld::new(MeldKind::Chi, chi.clone(), Some(chi[0])));
+    let mut melds: [Vec<Meld>; 4] = Default::default();
+    for spec in open_hands {
+        let first_tiles = match spec.first_meld {
+            FirstOpenMeld::WhitePon => source.tiles(&["P", "P", "P"]),
+            FirstOpenMeld::RoundWindPon => source.tiles(&["E", "E", "E"]),
+            FirstOpenMeld::SuitedChi => source.tiles(&["4s", "5s", "6s"]),
+        };
+        let first_kind = match spec.first_meld {
+            FirstOpenMeld::WhitePon | FirstOpenMeld::RoundWindPon => MeldKind::Pon,
+            FirstOpenMeld::SuitedChi => MeldKind::Chi,
+        };
+        melds[spec.player].push(Meld::new(
+            first_kind,
+            first_tiles.clone(),
+            Some(first_tiles[0]),
+        ));
+        if spec.open_meld_count >= 2 {
+            let chi = source.tiles(&["4s", "5s", "6s"]);
+            melds[spec.player].push(Meld::new(MeldKind::Chi, chi.clone(), Some(chi[0])));
+        }
+        if spec.open_meld_count >= 3 {
+            let chi = source.tiles(&["7s", "8s", "9s"]);
+            melds[spec.player].push(Meld::new(MeldKind::Chi, chi.clone(), Some(chi[0])));
+        }
     }
 
     let mut visible = hand.clone();
@@ -786,12 +861,12 @@ fn open_hand_measurement_context_for(
     for river in &discards {
         visible.extend(river.iter().copied());
     }
-    for meld in &target_melds {
-        visible.extend(meld.tiles().iter().copied());
+    for player_melds in &melds {
+        for meld in player_melds {
+            visible.extend(meld.tiles().iter().copied());
+        }
     }
 
-    let mut melds: [Vec<Meld>; 4] = Default::default();
-    melds[open_hand_player] = target_melds;
     GameContext::from_parts_with_melds(
         None,
         hand,
@@ -813,31 +888,212 @@ fn open_hand_measurement_context_for(
     })
 }
 
+#[derive(Debug)]
+struct CombinedMeasurementCase {
+    name: &'static str,
+    open_hands: Vec<OpenHandMeasurementSpec>,
+}
+
+fn combined_measurement_cases() -> Vec<CombinedMeasurementCase> {
+    vec![
+        CombinedMeasurementCase {
+            name: "A: 1 Riichi + 1-meld High OpenHand (YakuhaiWhite)",
+            open_hands: vec![OpenHandMeasurementSpec {
+                player: 3,
+                open_meld_count: 1,
+                discard_count: 12,
+                first_meld: FirstOpenMeld::WhitePon,
+                expected_reason: OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+            }],
+        },
+        CombinedMeasurementCase {
+            name: "B: 1 Riichi + 2-meld High OpenHand (visible han proxy)",
+            open_hands: vec![OpenHandMeasurementSpec {
+                player: 3,
+                open_meld_count: 2,
+                discard_count: 8,
+                first_meld: FirstOpenMeld::WhitePon,
+                expected_reason: OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+            }],
+        },
+        CombinedMeasurementCase {
+            name: "C: 1 Riichi + 3-meld High OpenHand",
+            open_hands: vec![OpenHandMeasurementSpec {
+                player: 3,
+                open_meld_count: 3,
+                discard_count: 8,
+                first_meld: FirstOpenMeld::WhitePon,
+                expected_reason: OpenHandThreatReason::ThreeOrMoreOpenMelds,
+            }],
+        },
+        CombinedMeasurementCase {
+            name: "D: 1 Riichi + 1-meld High OpenHand (no guaranteed yaku)",
+            open_hands: vec![OpenHandMeasurementSpec {
+                player: 3,
+                open_meld_count: 1,
+                discard_count: 12,
+                first_meld: FirstOpenMeld::SuitedChi,
+                expected_reason: OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+            }],
+        },
+        CombinedMeasurementCase {
+            name: "E: 1 Riichi + 2 High OpenHand targets",
+            open_hands: vec![
+                OpenHandMeasurementSpec {
+                    player: 2,
+                    open_meld_count: 1,
+                    discard_count: 12,
+                    first_meld: FirstOpenMeld::WhitePon,
+                    expected_reason: OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+                },
+                OpenHandMeasurementSpec {
+                    player: 3,
+                    open_meld_count: 1,
+                    discard_count: 12,
+                    first_meld: FirstOpenMeld::RoundWindPon,
+                    expected_reason: OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+                },
+            ],
+        },
+    ]
+}
+
 #[test]
 #[ignore = "release build 前提の Combined production-like fallback 計測用。wall-clock threshold は持たない"]
 fn measure_combined_exact_defense_fallback_selection() {
-    let context = open_hand_measurement_context_for(3, 3, [false, true, false, false]);
-    let actions: Vec<LegalAction> = context
-        .hand_tiles()
-        .iter()
-        .copied()
-        .map(|tile| LegalAction::Dahai { tile })
-        .collect();
-    let targets = combined_threat_defense_targets_from_context(&context);
-    assert_eq!(targets.len(), 2);
+    for case in combined_measurement_cases() {
+        let context = combined_measurement_context(&case.open_hands, [false, true, false, false]);
+        let actions: Vec<LegalAction> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .map(|tile| LegalAction::Dahai { tile })
+            .collect();
+        let facts = player_threat_facts_from_context(&context);
+        let assessments = classify_open_hand_threats(&facts);
+        let targets = combined_threat_defense_targets_from_context(&context);
+        let expected_targets: Vec<_> = std::iter::once(ThreatDefenseTarget::riichi(1))
+            .chain(
+                case.open_hands
+                    .iter()
+                    .map(|spec| ThreatDefenseTarget::high_open_hand(spec.player)),
+            )
+            .collect();
+        assert_eq!(targets, expected_targets, "{}", case.name);
+        let riichi_target_count = targets
+            .iter()
+            .filter(|target| target.kind == ThreatDefenseTargetKind::Riichi)
+            .count();
+        let high_open_hand_target_count = targets
+            .iter()
+            .filter(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand)
+            .count();
+        assert_eq!(riichi_target_count, 1, "{}", case.name);
+        assert_eq!(
+            high_open_hand_target_count,
+            case.open_hands.len(),
+            "{}",
+            case.name
+        );
+        for spec in &case.open_hands {
+            assert_eq!(
+                facts[spec.player].open_meld_count, spec.open_meld_count,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                facts[spec.player].discard_count, spec.discard_count,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                assessments[spec.player].reason(),
+                Some(spec.expected_reason),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                facts[spec.player].open_value_honor_melds.confirmed_han() > 0,
+                spec.first_meld.guarantees_yaku(),
+                "{}",
+                case.name
+            );
+            if matches!(spec.first_meld, FirstOpenMeld::SuitedChi) {
+                assert_eq!(facts[spec.player].open_visible_han_proxy(), 0);
+            }
+            if spec.expected_reason == OpenHandThreatReason::TwoOrMoreWithVisibleHan {
+                assert!(facts[spec.player].open_visible_han_proxy() >= 2);
+            }
+        }
 
-    let start = Instant::now();
-    let selected =
-        select_combined_threat_defense_fallback_action_with_kind(&context, &actions, &targets)
-            .expect("representative Combined fallback");
-    let elapsed = start.elapsed();
-    assert_eq!(selected.1, CombinedDefenseCategory::ExactRonRisk);
+        // End-to-end production selector を各 case で1回だけ測る。内訳取得のために exact model や
+        // selector を別途実行せず、この elapsed を Combined measurement の source of truth にする。
+        let start = Instant::now();
+        let selected =
+            select_combined_threat_defense_fallback_action_with_kind(&context, &actions, &targets)
+                .expect("representative Combined fallback");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            selected.1,
+            CombinedDefenseCategory::ExactRonRisk,
+            "{}",
+            case.name
+        );
 
-    println!("production-like Combined exact defense fallback (1 Riichi + 1 High OpenHand):");
-    println!("  legal Dahai actions:      {}", actions.len());
-    println!("  exact target count:       {}", targets.len());
-    println!("  total fallback selection: {elapsed:?}");
-    println!("  selected:                 {:?}", selected.0);
+        println!("{}:", case.name);
+        println!("  Riichi target count:              {riichi_target_count}");
+        println!(
+            "  High OpenHand target count:       {}",
+            high_open_hand_target_count
+        );
+        println!(
+            "  High OpenHand meld count(s):      {:?}",
+            case.open_hands
+                .iter()
+                .map(|spec| facts[spec.player].open_meld_count)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  High OpenHand discard count(s):   {:?}",
+            case.open_hands
+                .iter()
+                .map(|spec| facts[spec.player].discard_count)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  High open visible han proxy(s):   {:?}",
+            case.open_hands
+                .iter()
+                .map(|spec| facts[spec.player].open_visible_han_proxy())
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  High OpenHand dealer status(es):  {:?}",
+            case.open_hands
+                .iter()
+                .map(|spec| facts[spec.player].is_dealer)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  High classification reason(s):   {:?}",
+            case.open_hands
+                .iter()
+                .map(|spec| assessments[spec.player].reason().unwrap())
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  guaranteed yaku from fixed melds: {:?}",
+            case.open_hands
+                .iter()
+                .map(|spec| { facts[spec.player].open_value_honor_melds.confirmed_han() > 0 })
+                .collect::<Vec<_>>()
+        );
+        println!("  legal Dahai actions:              {}", actions.len());
+        println!("  exact target count:               {}", targets.len());
+        println!("  total Combined fallback elapsed:  {elapsed:?}");
+        println!("  selected action:                  {:?}", selected.0);
+        println!("  selected category:                {:?}", selected.1);
+    }
 }
 
 #[test]
