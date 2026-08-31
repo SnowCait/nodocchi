@@ -137,6 +137,37 @@ pub(crate) fn open_hand_targets_dahai_actions_by_ron_risk<'a>(
     })
 }
 
+/// Riichi target と High OpenHand target を、それぞれ既存の exact model で評価して同じ
+/// [`DahaiRonRiskVector`] へ積む。
+///
+/// target kind の分類は呼び出し側の責務とし、ここでは席一覧だけを受け取る。どちらかの一覧が空、
+/// または1人でも model unavailable なら partial vector を返さず `None` にする。
+pub(crate) fn combined_targets_dahai_actions_by_ron_risk<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    riichi_targets: &[usize],
+    open_hand_targets: &[usize],
+) -> Option<Vec<DahaiRonRiskVector<'a>>> {
+    if riichi_targets.is_empty() || open_hand_targets.is_empty() {
+        return None;
+    }
+
+    let mut vectors = dahai_actions_by_ron_risk(riichi_targets, legal_actions, |player| {
+        dahai_ron_risk_evidence_for_player(player, context, legal_actions)
+    })?;
+    append_players_to_ron_risk_vectors(&mut vectors, open_hand_targets, |player| {
+        open_hand_dahai_ron_risk_evidence_for_player(player, context, legal_actions)
+    })?;
+
+    // The two input lists are grouped by kind, while diagnostics promise seat order.
+    for vector in &mut vectors {
+        vector
+            .player_evidence
+            .sort_by_key(|evidence| evidence.player);
+    }
+    Some(vectors)
+}
+
 fn dahai_actions_by_ron_risk<'a>(
     targets: &[usize],
     legal_actions: &'a [LegalAction],
@@ -155,6 +186,16 @@ fn dahai_actions_by_ron_risk<'a>(
         })
         .collect();
 
+    append_players_to_ron_risk_vectors(&mut vectors, targets, &mut evidence_for_player)?;
+
+    Some(vectors)
+}
+
+fn append_players_to_ron_risk_vectors(
+    vectors: &mut [DahaiRonRiskVector<'_>],
+    targets: &[usize],
+    mut evidence_for_player: impl FnMut(usize) -> Option<Vec<PlayerRonRiskEvidence>>,
+) -> Option<()> {
     for &player in targets {
         let evaluated = evidence_for_player(player)?;
         if evaluated.len() != vectors.len() {
@@ -164,8 +205,7 @@ fn dahai_actions_by_ron_risk<'a>(
             vector.player_evidence.push(evidence);
         }
     }
-
-    Some(vectors)
+    Some(())
 }
 
 /// 2候補の opponent risk vector を worst-first の辞書順で exact 比較する。

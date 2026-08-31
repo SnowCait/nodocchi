@@ -12,15 +12,20 @@
 //! - same-hand passed：`HighOpenHand` target の hard-safe とは区別する独立 evidence。
 //!
 //! 防御 fallback の action 選択は [`select_combined_threat_defense_fallback_action_with_kind`] が
-//! source of truth で、[`CombinedDefenseDiagnostic`] はその結果を写すだけにする。
+//! source of truth。hard-safe → same-hand passed → 全 target の exact `R/T` → exact unavailable
+//! 時だけ legacy safety の順で選び、[`CombinedDefenseDiagnostic`] は同じ evaluation の結果と
+//! evidence を写すだけにする。
 
 use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
-    HonorSafetyRank, OpponentHonorValue, SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank,
-    WallRank, honor_dahai_actions_by_safety_with, honor_safety_rank, is_genbutsu_for,
-    opponent_honor_value_for_players, suited_dahai_actions_by_safety_with,
-    suited_safety_evidence_for_players, suji_safety_rank_for, suji_safety_rank_for_players,
+    DahaiRonRiskVector, HonorSafetyRank, OpponentHonorValue, PlayerRonRiskEvidence,
+    SuitedSafetyEvidence, SuitedSafetyRank, SujiSafetyRank, WallRank,
+    combined_targets_dahai_actions_by_ron_risk, honor_dahai_actions_by_safety_with,
+    honor_safety_rank, is_genbutsu_for, opponent_honor_value_for_players,
+    player_ron_risk_evidence_for_action, select_lexicographic_minimax_action,
+    suited_dahai_actions_by_safety_with, suited_safety_evidence_for_players, suji_safety_rank_for,
+    suji_safety_rank_for_players,
 };
 use crate::open_hand_defense::{high_open_hand_threat_players, is_ron_safe_for_open_hand_target};
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
@@ -32,7 +37,7 @@ use bot_logic::TileType;
 pub enum ThreatDefenseTargetKind {
     /// 他家リーチ者。現物 ([`is_genbutsu_for`]) がロン安全の根拠。
     Riichi,
-    /// `High` の非リーチ副露相手。本人の河 ([`is_discarded_by_player`]) だけがロン安全の根拠。
+    /// `High` の非リーチ副露相手。本人の河または現在有効な一時通過牌がロン安全の根拠。
     HighOpenHand,
 }
 
@@ -261,7 +266,8 @@ pub fn suited_safety_rank_for_combined_threats(
 
 /// 複合 threat に対する防御候補の大分類。
 ///
-/// 優先順位は `SafeAgainstAllThreats` → `SameHandPassed` → `HonorSafety` → `SuitedSafety`。
+/// 優先順位は `SafeAgainstAllThreats` → `SameHandPassed` → `ExactRonRisk` → `HonorSafety` →
+/// `SuitedSafety`。exact が1 target でも unavailable の場合だけ legacy safety を使う。
 ///
 /// 第一分類を `Genbutsu` と呼ばないのは、リーチ者の現物と、副露相手本人の河または現在有効な
 /// 一時通過牌という根拠の違う安全牌が混ざった集合だから。既存の
@@ -273,11 +279,16 @@ pub enum CombinedDefenseCategory {
     SafeAgainstAllThreats,
     /// 全 target が hard-safe または same-hand passed で覆われる。
     SameHandPassed,
+    /// 全 target の exact `R/T` を worst-first lexicographic minimax で比較する。
+    ExactRonRisk,
     HonorSafety(HonorSafetyRank),
     SuitedSafety(SuitedSafetyRank),
 }
 
-/// 牌1つ分の防御候補の大分類を求める pure helper。
+/// 牌1つ分の hard-safe / same-hand passed / legacy safety の大分類を求める pure helper。
+///
+/// exact model は評価しないため `ExactRonRisk` は返さない。production の exact category と
+/// evidence は [`evaluate_combined_threat_defense_fallback_action_with_kind`] が決める。
 pub fn combined_defense_category(
     tile: TileType,
     targets: &[ThreatDefenseTarget],
@@ -378,13 +389,15 @@ pub fn combined_suited_dahai_actions_by_safety<'a>(
 
 /// 複合 threat に対する防御 fallback を優先順位付きで選ぶ production selector。
 ///
-/// [`CombinedDefenseCategory`] の並びどおり、全 target へのロン安全 → same-hand passed →
-/// 字牌 safety → 数牌 safety の順に評価し、選ばれた大分類を添えて返す。target が0人なら
-/// `None`。
+/// [`CombinedDefenseCategory`] の並びどおり、全 target へのロン安全 → same-hand passed → exact
+/// `R/T` → 字牌 safety → 数牌 safety の順に評価し、選ばれた大分類を添えて返す。target が0人
+/// なら `None`。
 ///
 /// - `SafeAgainstAllThreats`: 全 target にロンされない牌。同順位では合法 Dahai の元順序を保つ。
 /// - `SameHandPassed`: 全 target が hard-safe または same-hand passed で覆われる牌。hard-safe な
 ///   target 数が多い候補を優先し、同数なら元順序を保つ。
+/// - `ExactRonRisk`: target ごとの `R/T` を risk の高い順に並べた lexicographic minimax。
+///   exact tie は元順序を保つ。1 target でも unavailable なら局面全体を legacy へ戻す。
 /// - `HonorSafety`: 見え枚数の安全度 → 役牌価値 → 元の順序。既存 Defense と同じ ranking。
 /// - `SuitedSafety`: 壁 / スジを統合した安全度順。既存 Defense と同じく
 ///   [`SuitedSafetyRank::NoSafety`] は fallback として選ばない。
@@ -396,8 +409,26 @@ pub fn select_combined_threat_defense_fallback_action_with_kind<'a>(
     legal_actions: &'a [LegalAction],
     targets: &[ThreatDefenseTarget],
 ) -> Option<(&'a LegalAction, CombinedDefenseCategory)> {
+    evaluate_combined_threat_defense_fallback_action_with_kind(context, legal_actions, targets)
+        .selected
+}
+
+#[derive(Debug)]
+pub(crate) struct CombinedDefenseEvaluation<'a> {
+    pub(crate) selected: Option<(&'a LegalAction, CombinedDefenseCategory)>,
+    pub(crate) ron_risk_vectors: Option<Vec<DahaiRonRiskVector<'a>>>,
+}
+
+pub(crate) fn evaluate_combined_threat_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+) -> CombinedDefenseEvaluation<'a> {
     if targets.is_empty() {
-        return None;
+        return CombinedDefenseEvaluation {
+            selected: None,
+            ron_risk_vectors: None,
+        };
     }
 
     if let Some(action) = safe_against_all_threats_dahai_actions(legal_actions, targets, context)
@@ -405,7 +436,10 @@ pub fn select_combined_threat_defense_fallback_action_with_kind<'a>(
         .next()
     {
         let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, CombinedDefenseCategory::SafeAgainstAllThreats));
+        return CombinedDefenseEvaluation {
+            selected: Some((action, CombinedDefenseCategory::SafeAgainstAllThreats)),
+            ron_risk_vectors: None,
+        };
     }
 
     if let Some(action) = same_hand_passed_combined_dahai_actions(legal_actions, targets, context)
@@ -413,9 +447,68 @@ pub fn select_combined_threat_defense_fallback_action_with_kind<'a>(
         .next()
     {
         let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, CombinedDefenseCategory::SameHandPassed));
+        return CombinedDefenseEvaluation {
+            selected: Some((action, CombinedDefenseCategory::SameHandPassed)),
+            ron_risk_vectors: None,
+        };
     }
 
+    // Target kind remains owned by this module. The ron-risk layer only receives the two player
+    // lists and reuses the corresponding existing evaluator for each list.
+    let riichi_targets: Vec<_> = targets
+        .iter()
+        .filter(|target| target.kind == ThreatDefenseTargetKind::Riichi)
+        .map(|target| target.player)
+        .collect();
+    let open_hand_targets: Vec<_> = targets
+        .iter()
+        .filter(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand)
+        .map(|target| target.player)
+        .collect();
+    let ron_risk_vectors = combined_targets_dahai_actions_by_ron_risk(
+        context,
+        legal_actions,
+        &riichi_targets,
+        &open_hand_targets,
+    );
+    if let Some(vectors) = ron_risk_vectors.as_ref() {
+        match select_lexicographic_minimax_action(vectors) {
+            Ok(Some(chosen)) => {
+                let action = prefer_black_five_for_action(legal_actions, chosen);
+                return CombinedDefenseEvaluation {
+                    selected: Some((action, CombinedDefenseCategory::ExactRonRisk)),
+                    ron_risk_vectors,
+                };
+            }
+            Ok(None) => {}
+            Err(()) => {
+                return CombinedDefenseEvaluation {
+                    selected: select_legacy_combined_threat_defense_fallback_action_with_kind(
+                        context,
+                        legal_actions,
+                        targets,
+                    ),
+                    ron_risk_vectors: None,
+                };
+            }
+        }
+    }
+
+    CombinedDefenseEvaluation {
+        selected: select_legacy_combined_threat_defense_fallback_action_with_kind(
+            context,
+            legal_actions,
+            targets,
+        ),
+        ron_risk_vectors,
+    }
+}
+
+fn select_legacy_combined_threat_defense_fallback_action_with_kind<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+) -> Option<(&'a LegalAction, CombinedDefenseCategory)> {
     if let Some((action, rank)) =
         combined_honor_dahai_actions_by_safety(legal_actions, targets, context)
             .into_iter()
@@ -495,6 +588,8 @@ pub struct CombinedDefenseCandidateDiagnostic {
     pub safe_against_all_threats: bool,
     /// 全 target が hard-safe または same-hand passed で覆われるか。
     pub same_hand_passed_for_all_threats: bool,
+    /// exact comparison が利用可能な場合の、target ごとの `R/T` evidence。
+    pub player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
     pub honor_safety_rank: Option<HonorSafetyRank>,
     /// [`opponent_honor_value_for_combined_threats`] の結果。数牌では `None`。
     pub opponent_honor_value: Option<OpponentHonorValue>,
@@ -512,7 +607,7 @@ pub struct CombinedDefenseCandidateDiagnostic {
     /// 最小値へ潰した値とは一致しないことがある。
     pub suji_safety_rank: Option<SujiSafetyRank>,
     pub suited_safety_rank: Option<SuitedSafetyRank>,
-    /// [`combined_defense_category`] による大分類。
+    /// exact evidence があれば `ExactRonRisk`、なければ [`combined_defense_category`] の大分類。
     pub category: Option<CombinedDefenseCategory>,
 }
 
@@ -525,6 +620,16 @@ impl CombinedDefenseCandidateDiagnostic {
         action: &LegalAction,
         targets: &[ThreatDefenseTarget],
         selected: bool,
+    ) -> Option<Self> {
+        Self::for_dahai_action_with_ron_risk_vector(context, action, targets, selected, None)
+    }
+
+    fn for_dahai_action_with_ron_risk_vector(
+        context: &GameContext,
+        action: &LegalAction,
+        targets: &[ThreatDefenseTarget],
+        selected: bool,
+        player_ron_risk_evidence: Option<&[PlayerRonRiskEvidence]>,
     ) -> Option<Self> {
         let LegalAction::Dahai { tile } = action else {
             return None;
@@ -549,6 +654,7 @@ impl CombinedDefenseCandidateDiagnostic {
             same_hand_passed_for_all_threats: has_same_hand_passed_for_all_threats(
                 tile_type, targets, context,
             ),
+            player_ron_risk_evidence: player_ron_risk_evidence.map(<[_]>::to_vec),
             honor_safety_rank: honor_safety_rank(tile_type, context),
             opponent_honor_value: opponent_honor_value_for_combined_threats(
                 tile_type, targets, context,
@@ -557,7 +663,11 @@ impl CombinedDefenseCandidateDiagnostic {
             wall_rank: evidence.map(|evidence| evidence.wall_rank),
             suji_safety_rank: evidence.map(|evidence| evidence.suji_rank),
             suited_safety_rank: evidence.map(SuitedSafetyEvidence::legacy_rank),
-            category: combined_defense_category(tile_type, targets, context),
+            category: if player_ron_risk_evidence.is_some() {
+                Some(CombinedDefenseCategory::ExactRonRisk)
+            } else {
+                combined_defense_category(tile_type, targets, context)
+            },
         })
     }
 
@@ -571,10 +681,32 @@ impl CombinedDefenseCandidateDiagnostic {
         targets: &[ThreatDefenseTarget],
         selected_action: Option<&LegalAction>,
     ) -> Vec<Self> {
+        Self::for_legal_actions_with_ron_risk_vectors(
+            context,
+            legal_actions,
+            targets,
+            selected_action,
+            None,
+        )
+    }
+
+    fn for_legal_actions_with_ron_risk_vectors(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        targets: &[ThreatDefenseTarget],
+        selected_action: Option<&LegalAction>,
+        ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
+    ) -> Vec<Self> {
         legal_actions
             .iter()
             .filter_map(|action| {
-                Self::for_dahai_action(context, action, targets, selected_action == Some(action))
+                Self::for_dahai_action_with_ron_risk_vector(
+                    context,
+                    action,
+                    targets,
+                    selected_action == Some(action),
+                    player_ron_risk_evidence_for_action(ron_risk_vectors, action),
+                )
             })
             .collect()
     }
@@ -590,6 +722,8 @@ pub struct CombinedDefenseSelectionDiagnostic {
     pub selected_action: LegalAction,
     /// その action が選ばれた大分類。
     pub selected_category: CombinedDefenseCategory,
+    /// exact comparison を使った場合の、選択牌に対する target ごとの `R/T` evidence。
+    pub selected_player_ron_risk_evidence: Option<Vec<PlayerRonRiskEvidence>>,
 }
 
 /// 複合 threat に対する防御 safety の構造化診断。
@@ -615,7 +749,8 @@ impl CombinedDefenseDiagnostic {
     ///
     /// target を作り直さないので、押し引きが参照した threat と診断の target が必ず一致する。
     /// `selected` には [`select_combined_threat_defense_fallback_action_with_kind`] の戻り値を
-    /// そのまま渡す。ここで防御 fallback を選び直さない。
+    /// そのまま渡す。ここで防御 fallback や exact evidence を計算し直さない。production が
+    /// exact を使った診断は、保持済み evidence を受け取る `from_evaluation` 経路で構築する。
     pub fn from_threats(
         context: &GameContext,
         legal_actions: &[LegalAction],
@@ -624,14 +759,41 @@ impl CombinedDefenseDiagnostic {
         selected: Option<(&LegalAction, CombinedDefenseCategory)>,
     ) -> Self {
         let targets = combined_threat_defense_targets(player_threats, assessments);
+        Self::from_parts(context, legal_actions, targets, selected, None)
+    }
+
+    pub(crate) fn from_evaluation(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        player_threats: &[PlayerThreatFacts; 4],
+        assessments: &[OpenHandThreatAssessment; 4],
+        evaluation: &CombinedDefenseEvaluation<'_>,
+    ) -> Self {
+        Self::from_parts(
+            context,
+            legal_actions,
+            combined_threat_defense_targets(player_threats, assessments),
+            evaluation.selected,
+            evaluation.ron_risk_vectors.as_deref(),
+        )
+    }
+
+    fn from_parts(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+        targets: Vec<ThreatDefenseTarget>,
+        selected: Option<(&LegalAction, CombinedDefenseCategory)>,
+        ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
+    ) -> Self {
         let candidates = if targets.is_empty() {
             Vec::new()
         } else {
-            CombinedDefenseCandidateDiagnostic::for_legal_actions(
+            CombinedDefenseCandidateDiagnostic::for_legal_actions_with_ron_risk_vectors(
                 context,
                 legal_actions,
                 &targets,
                 selected.map(|(action, _)| action),
+                ron_risk_vectors,
             )
         };
         Self {
@@ -639,6 +801,11 @@ impl CombinedDefenseDiagnostic {
             selected: selected.map(|(action, category)| CombinedDefenseSelectionDiagnostic {
                 selected_action: action.clone(),
                 selected_category: category,
+                selected_player_ron_risk_evidence: player_ron_risk_evidence_for_action(
+                    ron_risk_vectors,
+                    action,
+                )
+                .map(<[_]>::to_vec),
             }),
             candidates,
         }
@@ -676,10 +843,12 @@ impl CombinedDefenseDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::TableStateFacts;
     use crate::defense::is_discarded_by_player;
     use crate::defense::{
-        is_genbutsu_for_all_reached, suited_safety_evidence_for_players,
-        suited_safety_rank_for_all_reached, wall_rank,
+        RonRiskEvidence, compare_lexicographic_minimax_ron_risk, is_genbutsu_for_all_reached,
+        open_hand_targets_dahai_actions_by_ron_risk, reached_opponents_dahai_actions_by_ron_risk,
+        suited_safety_evidence_for_players, suited_safety_rank_for_all_reached, wall_rank,
     };
     use crate::meld::{Meld, MeldKind};
     use crate::open_hand_threat::OpenHandThreatLevel;
@@ -723,6 +892,58 @@ mod tests {
         (0..count).map(|_| chi()).collect()
     }
 
+    fn chi_from(mjai: &str) -> Meld {
+        let tiles = tiles(mjai);
+        Meld::new(MeldKind::Chi, tiles.clone(), Some(tiles[0]))
+    }
+
+    fn exact_open_melds() -> Vec<Meld> {
+        let value_pon = Meld::new(
+            MeldKind::Pon,
+            (0..3).map(|copy| tile_copy("P", copy)).collect(),
+            Some(tile("P")),
+        );
+        vec![
+            value_pon,
+            chi_from("1p 2p 3p"),
+            chi_from("4p 5p 6p"),
+            chi_from("7p 8p 9p"),
+        ]
+    }
+
+    fn riichi_ankans() -> Vec<Meld> {
+        ["1s", "2s", "3s", "4s"]
+            .into_iter()
+            .map(|mjai| {
+                Meld::new(
+                    MeldKind::Ankan,
+                    (0..4).map(|copy| tile_copy(mjai, copy)).collect(),
+                    None,
+                )
+            })
+            .collect()
+    }
+
+    fn visible_with_remaining(pool: &[(&str, u8)]) -> Vec<TileId> {
+        let mut remaining = [0u8; TileType::COUNT];
+        for &(mjai, copies) in pool {
+            remaining[tile_type(mjai).index()] = copies;
+        }
+        TileType::all()
+            .flat_map(|tile| TileId::copies(tile).take(usize::from(4 - remaining[tile.index()])))
+            .collect()
+    }
+
+    fn exact_combined_context(pool: &[(&str, u8)]) -> ContextSpec {
+        ContextSpec::new()
+            .reached(RIICHI_TARGET)
+            .melds_of(RIICHI_TARGET, riichi_ankans())
+            .melds_of(OPEN_HAND_TARGET, exact_open_melds())
+            .visible(visible_with_remaining(pool))
+            .known_empty_temporary_passed()
+            .remaining_tiles(1)
+    }
+
     #[derive(Debug, Clone, Default)]
     struct ContextSpec {
         player_id: Option<u8>,
@@ -735,6 +956,7 @@ mod tests {
         post_reach_passed: [Vec<TileType>; 4],
         temporary_passed: Option<[Vec<TileType>; 4]>,
         same_hand_passed: Option<[Vec<TileType>; 4]>,
+        remaining_tiles: Option<u32>,
     }
 
     impl ContextSpec {
@@ -799,6 +1021,16 @@ mod tests {
             self
         }
 
+        fn known_empty_temporary_passed(mut self) -> Self {
+            self.temporary_passed = Some(Default::default());
+            self
+        }
+
+        fn remaining_tiles(mut self, remaining_tiles: u32) -> Self {
+            self.remaining_tiles = Some(remaining_tiles);
+            self
+        }
+
         fn build(self) -> GameContext {
             GameContext::from_parts_with_melds(
                 None,
@@ -816,6 +1048,10 @@ mod tests {
             .with_post_reach_passed_tiles(self.post_reach_passed)
             .with_temporary_passed_tiles(self.temporary_passed)
             .with_same_hand_passed_tiles(self.same_hand_passed)
+            .with_table_state_facts(TableStateFacts {
+                remaining_tiles: self.remaining_tiles,
+                ..TableStateFacts::default()
+            })
         }
     }
 
@@ -1293,6 +1529,319 @@ mod tests {
         );
     }
 
+    // ---- exact ron-risk vector ----
+
+    #[test]
+    fn riichi_and_high_open_hand_share_one_exact_risk_vector() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)]).build();
+        let legal_actions = vec![dahai("2m"), dahai("1m")];
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert_eq!(
+            evaluation.selected,
+            Some((&legal_actions[1], CombinedDefenseCategory::ExactRonRisk))
+        );
+        let vectors = evaluation.ron_risk_vectors.as_deref().unwrap();
+        for action in &legal_actions {
+            assert_eq!(
+                player_ron_risk_evidence_for_action(Some(vectors), action)
+                    .unwrap()
+                    .iter()
+                    .map(|evidence| evidence.player)
+                    .collect::<Vec<_>>(),
+                vec![RIICHI_TARGET, OPEN_HAND_TARGET]
+            );
+        }
+
+        let facts = player_threat_facts_from_context(&context);
+        let diagnostic = CombinedDefenseDiagnostic::from_evaluation(
+            &context,
+            &legal_actions,
+            &facts,
+            &classify_open_hand_threats(&facts),
+            &evaluation,
+        );
+        assert_eq!(
+            diagnostic.selected_category(),
+            Some(CombinedDefenseCategory::ExactRonRisk)
+        );
+        assert!(diagnostic.candidates.iter().all(|candidate| {
+            candidate.category == Some(CombinedDefenseCategory::ExactRonRisk)
+                && candidate
+                    .player_ron_risk_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.len() == 2)
+        }));
+        assert_eq!(
+            diagnostic
+                .selected
+                .as_ref()
+                .unwrap()
+                .selected_player_ron_risk_evidence
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn mixed_threat_ratios_use_worst_first_lexicographic_minimax() {
+        // A=[1/10, 9/10], B=[5/10, 5/10]。target kind による weight を入れず B が安全。
+        let candidate_a = [
+            PlayerRonRiskEvidence {
+                player: RIICHI_TARGET,
+                evidence: RonRiskEvidence {
+                    ron_capable_weight: 1,
+                    tenpai_weight: 10,
+                },
+            },
+            PlayerRonRiskEvidence {
+                player: OPEN_HAND_TARGET,
+                evidence: RonRiskEvidence {
+                    ron_capable_weight: 9,
+                    tenpai_weight: 10,
+                },
+            },
+        ];
+        let candidate_b = [
+            PlayerRonRiskEvidence {
+                player: RIICHI_TARGET,
+                evidence: RonRiskEvidence {
+                    ron_capable_weight: 5,
+                    tenpai_weight: 10,
+                },
+            },
+            PlayerRonRiskEvidence {
+                player: OPEN_HAND_TARGET,
+                evidence: RonRiskEvidence {
+                    ron_capable_weight: 5,
+                    tenpai_weight: 10,
+                },
+            },
+        ];
+        assert_eq!(
+            compare_lexicographic_minimax_ron_risk(&candidate_b, &candidate_a),
+            Some(std::cmp::Ordering::Less)
+        );
+
+        let context = exact_combined_context(&[("1m", 3), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "1m")
+            .discards_of(OPEN_HAND_TARGET, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+        let vectors = evaluation.ron_risk_vectors.as_deref().unwrap();
+        let first = player_ron_risk_evidence_for_action(Some(vectors), &legal_actions[0]).unwrap();
+        let second = player_ron_risk_evidence_for_action(Some(vectors), &legal_actions[1]).unwrap();
+
+        assert_eq!(first[0].evidence.ron_capable_weight, 0);
+        assert!(first[1].evidence.ron_capable_weight > second[0].evidence.ron_capable_weight);
+        assert_eq!(second[1].evidence.ron_capable_weight, 0);
+        assert_eq!(
+            compare_lexicographic_minimax_ron_risk(second, first),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            evaluation.selected,
+            Some((&legal_actions[1], CombinedDefenseCategory::ExactRonRisk))
+        );
+    }
+
+    #[test]
+    fn hard_safe_precedes_exact_without_collecting_a_vector() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "2m")
+            .discards_of(OPEN_HAND_TARGET, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert_eq!(
+            evaluation.selected,
+            Some((
+                &legal_actions[1],
+                CombinedDefenseCategory::SafeAgainstAllThreats
+            ))
+        );
+        assert!(evaluation.ron_risk_vectors.is_none());
+    }
+
+    #[test]
+    fn open_hand_same_hand_passed_with_riichi_hard_safe_precedes_exact() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "2m")
+            .same_hand_passed(OPEN_HAND_TARGET, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert_eq!(
+            evaluation.selected,
+            Some((&legal_actions[1], CombinedDefenseCategory::SameHandPassed))
+        );
+        assert!(evaluation.ron_risk_vectors.is_none());
+
+        let vectors = combined_targets_dahai_actions_by_ron_risk(
+            &context,
+            &legal_actions,
+            &[RIICHI_TARGET],
+            &[OPEN_HAND_TARGET],
+        )
+        .unwrap();
+        let evidence =
+            player_ron_risk_evidence_for_action(Some(&vectors), &legal_actions[1]).unwrap();
+        assert!(
+            evidence
+                .iter()
+                .find(|evidence| evidence.player == OPEN_HAND_TARGET)
+                .unwrap()
+                .evidence
+                .ron_capable_weight
+                > 0,
+            "same-hand passed must not turn exact R into zero"
+        );
+    }
+
+    #[test]
+    fn riichi_same_hand_passed_does_not_cover_that_target() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .same_hand_passed(RIICHI_TARGET, "2m")
+            .same_hand_passed(OPEN_HAND_TARGET, "2m")
+            .build();
+        let targets = targets(&context);
+
+        assert!(!is_same_hand_passed_for_target(
+            tile_type("2m"),
+            ThreatDefenseTarget::riichi(RIICHI_TARGET),
+            &context
+        ));
+        assert!(!has_same_hand_passed_for_all_threats(
+            tile_type("2m"),
+            &targets,
+            &context
+        ));
+        assert_eq!(
+            fallback(&context, &[dahai("2m")]).unwrap().1,
+            CombinedDefenseCategory::ExactRonRisk
+        );
+    }
+
+    #[test]
+    fn one_unavailable_target_returns_the_whole_position_to_legacy() {
+        let mut invalid_open_melds = exact_open_melds();
+        invalid_open_melds.push(chi_from("1s 2s 3s"));
+        let context = exact_combined_context(&[("1m", 1), ("E", 1)])
+            .melds_of(OPEN_HAND_TARGET, invalid_open_melds)
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("E")];
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+
+        assert!(
+            reached_opponents_dahai_actions_by_ron_risk(&context, &legal_actions).is_some(),
+            "Riichi exact remains available"
+        );
+        assert!(
+            open_hand_targets_dahai_actions_by_ron_risk(
+                &context,
+                &legal_actions,
+                &[OPEN_HAND_TARGET]
+            )
+            .is_none(),
+            "High OpenHand exact is unavailable"
+        );
+        assert!(evaluation.ron_risk_vectors.is_none());
+        assert_eq!(
+            evaluation.selected,
+            Some((
+                &legal_actions[1],
+                CombinedDefenseCategory::HonorSafety(HonorSafetyRank::ThreeOrMoreVisible)
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_ratio_tie_keeps_legal_order() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 1)]).build();
+        let legal_actions = vec![dahai("2m"), dahai("1m")];
+
+        assert_eq!(
+            fallback(&context, &legal_actions),
+            Some((
+                legal_actions[0].clone(),
+                CombinedDefenseCategory::ExactRonRisk
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_selection_preserves_black_five_preference() {
+        let context = exact_combined_context(&[("5m", 1)]).build();
+        let red_five = LegalAction::Dahai {
+            tile: tile_copy("5m", 0),
+        };
+        let black_five = LegalAction::Dahai {
+            tile: tile_copy("5m", 1),
+        };
+
+        assert_eq!(
+            fallback(&context, &[red_five, black_five.clone()]),
+            Some((black_five, CombinedDefenseCategory::ExactRonRisk))
+        );
+    }
+
+    #[test]
+    fn combined_evidence_matches_each_standalone_exact_evaluator() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)]).build();
+        let legal_actions = vec![dahai("2m"), dahai("1m")];
+        let combined = combined_targets_dahai_actions_by_ron_risk(
+            &context,
+            &legal_actions,
+            &[RIICHI_TARGET],
+            &[OPEN_HAND_TARGET],
+        )
+        .unwrap();
+        let riichi = reached_opponents_dahai_actions_by_ron_risk(&context, &legal_actions).unwrap();
+        let open_hand = open_hand_targets_dahai_actions_by_ron_risk(
+            &context,
+            &legal_actions,
+            &[OPEN_HAND_TARGET],
+        )
+        .unwrap();
+
+        for action in &legal_actions {
+            let mixed = player_ron_risk_evidence_for_action(Some(&combined), action).unwrap();
+            assert_eq!(
+                mixed[0],
+                player_ron_risk_evidence_for_action(Some(&riichi), action).unwrap()[0]
+            );
+            assert_eq!(
+                mixed[1],
+                player_ron_risk_evidence_for_action(Some(&open_hand), action).unwrap()[0]
+            );
+        }
+    }
+
     // ---- 防御 fallback の選択 ----
 
     #[test]
@@ -1636,6 +2185,7 @@ mod tests {
                 selected_category: CombinedDefenseCategory::SuitedSafety(
                     SuitedSafetyRank::NoChance
                 ),
+                selected_player_ron_risk_evidence: None,
             })
         );
         assert_eq!(

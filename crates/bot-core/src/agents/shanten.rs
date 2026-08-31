@@ -3,7 +3,7 @@ use crate::agent::Agent;
 use crate::call_decision::{CallDecisionDiagnostic, evaluate_call_decision};
 use crate::combined_defense::{
     CombinedDefenseCategory, CombinedDefenseDiagnostic, combined_threat_defense_targets,
-    select_combined_threat_defense_fallback_action_with_kind,
+    evaluate_combined_threat_defense_fallback_action_with_kind,
 };
 use crate::context::GameContext;
 use crate::damaten_value::{DamatenValueDiagnostic, DamatenValueVerdict, evaluate_damaten_value};
@@ -431,6 +431,7 @@ struct DecisionDiagnostics {
     normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     defense: Option<DefenseDecisionDiagnostic>,
     open_hand_defense: Option<OpenHandDefenseDiagnostic>,
+    combined_defense: Option<CombinedDefenseDiagnostic>,
 }
 
 impl DecisionDiagnostics {
@@ -513,16 +514,18 @@ impl ShantenAgent {
 
         // 複合 threat の target も同じ facts と classification から作り、リーチ者も High の相手も
         // 判定し直さない。採用された防御 fallback は act() が通った経路そのもの。
-        let combined_defense = CombinedDefenseDiagnostic::from_threats(
-            context,
-            legal_actions,
-            &player_threat_facts,
-            &open_hand_threats,
-            decision
-                .source
-                .combined_defense_category()
-                .map(|category| (&decision.action, category)),
-        );
+        let combined_defense = diagnostics.combined_defense.take().unwrap_or_else(|| {
+            CombinedDefenseDiagnostic::from_threats(
+                context,
+                legal_actions,
+                &player_threat_facts,
+                &open_hand_threats,
+                decision
+                    .source
+                    .combined_defense_category()
+                    .map(|category| (&decision.action, category)),
+            )
+        });
 
         ShantenDecisionDiagnostic {
             selected_action: decision.action,
@@ -774,7 +777,12 @@ impl ShantenAgent {
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
         if inputs.has_combined_threat() {
-            return self.select_combined_threat_defense_fallback(ctx, legal_actions, inputs);
+            return self.select_combined_threat_defense_fallback(
+                ctx,
+                legal_actions,
+                inputs,
+                diagnostics,
+            );
         }
         if inputs.opponent_reach_count > 0 {
             return self.select_defense_fallback(ctx, legal_actions, diagnostics);
@@ -791,11 +799,25 @@ impl ShantenAgent {
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         inputs: &PushPullInputs,
+        diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
         let targets =
             combined_threat_defense_targets(&inputs.player_threats, &inputs.open_hand_threats);
-        let (action, category) =
-            select_combined_threat_defense_fallback_action_with_kind(ctx, legal_actions, &targets)?;
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            ctx,
+            legal_actions,
+            &targets,
+        );
+        if diagnostics.enabled {
+            diagnostics.combined_defense = Some(CombinedDefenseDiagnostic::from_evaluation(
+                ctx,
+                legal_actions,
+                &inputs.player_threats,
+                &inputs.open_hand_threats,
+                &evaluation,
+            ));
+        }
+        let (action, category) = evaluation.selected?;
         Some((
             action.clone(),
             AgentActionSource::CombinedThreatDefenseFallback(category),
@@ -1045,6 +1067,7 @@ pub(crate) mod tests {
     };
     use crate::combined_defense::{
         ThreatDefenseTarget, combined_threat_defense_targets_from_context,
+        select_combined_threat_defense_fallback_action_with_kind,
     };
     use crate::context::TableStateFacts;
     use crate::damaten_value::{DAMATEN_MIN_TOTAL, DamatenValue, damaten_baseline_context};
