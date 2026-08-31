@@ -292,7 +292,9 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     );
     assert_eq!(
         metrics.ron_capable_states,
-        metrics.yaku_successful_states + metrics.yakuman_successful_states
+        metrics.guaranteed_yaku_shortcuts
+            + metrics.yaku_successful_states
+            + metrics.yakuman_successful_states
     );
 
     println!("  R enumerator:");
@@ -343,6 +345,10 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     println!(
         "      elapsed:                  {:?}",
         metrics.target_completion
+    );
+    println!(
+        "    guaranteed-yaku shortcuts: {}",
+        metrics.guaranteed_yaku_shortcuts
     );
     println!("    yaku evaluation:");
     println!(

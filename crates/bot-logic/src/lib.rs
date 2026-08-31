@@ -129,6 +129,7 @@ pub use winning_yaku::{WinningYakuEvaluation, concealed_set_count, evaluate_winn
 pub use winning_yakuman::{WinningYakumanEvaluation, evaluate_winning_yakuman};
 pub use yaku::{
     StructuralYakuEvaluation, Yaku, YakuEvaluation, evaluate_structural_yaku, evaluate_yaku,
+    fixed_melds_guarantee_yaku,
 };
 pub use yakuman::{Yakuman, YakumanEvaluation, evaluate_yakuman};
 pub use yakuman_scoring::{
