@@ -78,7 +78,10 @@ impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
 ///
 /// 件数と時間は同じ instance で行った全 target 評価の累計。`unique_candidates` は同一 target
 /// 内の重複を除いた状態数、`cache_hits` は同一 target 内の重複と target 間の再利用を合わせた
-/// 件数。`target_completion` は target の structural completion 判定だけを含み、
+/// 件数。candidate record 内の細粒度 elapsed は全件を数える counter と違い、hot path への影響を
+/// 抑えるため排他的な sampling cohort で計測する。候補数が多いほど interval を広げ、各candidate
+/// で追加する timer は最大1組にする。`target_completion` は target の structural completion 判定
+/// だけを含み、
 /// `guaranteed_yaku_shortcuts` は実 evaluator を呼ばず固定面子の通常役で確定した completed
 /// state 数。guaranteed-yaku では boolean 判定、それ以外では materialized analysis を使った
 /// 件数も分けて記録する。`tile_count_constructions` と `tile_id_materializations` は hidden state
@@ -87,14 +90,26 @@ impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HiddenHandStateMetrics {
     pub generated_candidates: u64,
+    pub record_calls: u64,
     pub unique_candidates: u64,
     pub evaluated_states: u64,
+    pub state_key_constructions: u64,
+    pub cache_lookups: u64,
     pub cache_hits: u64,
+    pub same_generation_duplicates: u64,
+    pub cross_target_cache_reuses: u64,
     pub cache_misses: u64,
+    pub cache_inserts: u64,
+    /// `HashMap::insert()` 前後で capacity が実際に増加した回数。
+    pub cache_capacity_grows: u64,
+    /// insert 前後で capacity が実際に増加した insertion だけの elapsed。
+    pub cache_growth_insertion: Duration,
     pub cache_clears: u64,
     pub cached_states: usize,
     pub tile_count_constructions: u64,
     pub tile_id_materializations: u64,
+    pub hand_weight_calculations: u64,
+    pub result_accumulations: u64,
     pub completion_checks: u64,
     pub furiten_states_checked: u64,
     pub furiten_states_filtered: u64,
@@ -115,7 +130,31 @@ pub struct HiddenHandStateMetrics {
     pub yakuman_successful_states: u64,
     pub ron_capable_weight: u128,
     pub ron_capable_states: u64,
+    /// judgement elapsed を除いた candidate traversal / record の旧 residual bucket。
     pub candidate_generation: Duration,
+    /// 細粒度 elapsed の sampling interval。対象外の model では `0`。
+    pub candidate_timing_interval: u64,
+    pub candidate_timing_samples: u64,
+    pub sampled_timer_overhead_measurements: u64,
+    pub sampled_timer_overhead: Duration,
+    /// sampled `record()` 全体。furiten / target / yaku / Yakuman の時間も含む。
+    pub sampled_record_total: Duration,
+    /// sampled `record()` から上記 judgement elapsed を除いた時間。
+    pub sampled_record_residual: Duration,
+    /// record cohort に偶然含まれた cache growth。全 growth の実測値へ置換するため分離する。
+    pub sampled_record_cache_growth: Duration,
+    pub sampled_state_key_constructions: u64,
+    pub sampled_state_key: Duration,
+    pub sampled_cache_lookups: u64,
+    pub sampled_cache_lookup: Duration,
+    pub sampled_representation_constructions: u64,
+    pub sampled_representation_construction: Duration,
+    pub sampled_cache_inserts: u64,
+    pub sampled_cache_insertion: Duration,
+    pub sampled_hand_weight_calculations: u64,
+    pub sampled_hand_weight: Duration,
+    pub sampled_result_accumulations: u64,
+    pub sampled_result_accumulation: Duration,
     pub unron_filtering: Duration,
     pub target_completion: Duration,
     pub yaku_evaluation: Duration,
@@ -164,6 +203,48 @@ type HandCounts = [u8; TileType::COUNT];
 // target をまたいで持ち越す判定 cache の上限 entry 数。target 評価の開始時にだけ確認するので、
 // 1つの target 内の重複排除は上限に関係なく完全なままになる。
 const EVALUATED_STATE_CAPACITY: usize = 1 << 22;
+
+// candidate ごとの clock read が measurement 自体を支配しないよう、細粒度 elapsed はこの間隔で
+// sampling する。全件の処理回数は別 counter で記録する。
+const LARGE_CANDIDATE_TIMING_SAMPLE_INTERVAL: u64 = 127;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateTimingSample {
+    None,
+    Record,
+    StateKey,
+    CacheLookup,
+    Representation,
+    CacheInsertion,
+    HandWeight,
+    ResultAccumulation,
+    TimerOverhead,
+}
+
+fn candidate_timing_sample(record_call: u64, interval: u64) -> CandidateTimingSample {
+    if interval == 0 {
+        return CandidateTimingSample::None;
+    }
+    match record_call % interval {
+        0 => CandidateTimingSample::Record,
+        1 => CandidateTimingSample::StateKey,
+        2 => CandidateTimingSample::CacheLookup,
+        3 => CandidateTimingSample::Representation,
+        4 => CandidateTimingSample::CacheInsertion,
+        5 => CandidateTimingSample::HandWeight,
+        6 => CandidateTimingSample::ResultAccumulation,
+        7 => CandidateTimingSample::TimerOverhead,
+        _ => CandidateTimingSample::None,
+    }
+}
+
+fn candidate_timing_interval(fixed_meld_count: FixedMeldCount) -> u64 {
+    match fixed_meld_count.get() {
+        2 => 31,
+        3.. => 11,
+        _ => LARGE_CANDIDATE_TIMING_SAMPLE_INTERVAL,
+    }
+}
 
 // 重複排除とロン不能牌判定結果の cache entry。
 //
@@ -379,6 +460,11 @@ impl<'a> ReachedHiddenHandStates<'a> {
 
     fn from_input(input: HiddenHandModelInput<'a>) -> Self {
         let complete_melds = feasible_complete_melds(&input.remaining);
+        let candidate_timing_interval = if input.mode == HiddenHandModelMode::OpenHandRonCapable {
+            candidate_timing_interval(input.fixed_meld_count)
+        } else {
+            0
+        };
 
         Self {
             context: input.context,
@@ -392,7 +478,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
             use_standard_completion_for_furiten: input.mode
                 == HiddenHandModelMode::OpenHandRonCapable,
             evaluated: HashMap::new(),
-            metrics: HiddenHandStateMetrics::default(),
+            metrics: HiddenHandStateMetrics {
+                candidate_timing_interval,
+                ..HiddenHandStateMetrics::default()
+            },
             completion_checks: Cell::new(0),
             generation: 0,
         }
@@ -676,23 +765,77 @@ impl<'a> ReachedHiddenHandStates<'a> {
         qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
+        let timing_sample = candidate_timing_sample(
+            self.metrics.record_calls,
+            self.metrics.candidate_timing_interval,
+        );
+        if timing_sample == CandidateTimingSample::TimerOverhead {
+            let start = Instant::now();
+            self.metrics.sampled_timer_overhead_measurements += 1;
+            self.metrics.sampled_timer_overhead += start.elapsed();
+        }
+        let record_start = (timing_sample == CandidateTimingSample::Record).then(Instant::now);
+        let judgement_before = self.judgement_elapsed();
+        self.metrics.record_calls += 1;
         self.metrics.generated_candidates += 1;
+
+        self.record_inner(hand, target, qualification, total, timing_sample);
+
+        if let Some(record_start) = record_start {
+            let elapsed = record_start.elapsed();
+            let judgement = self.judgement_elapsed() - judgement_before;
+            self.metrics.candidate_timing_samples += 1;
+            self.metrics.sampled_record_total += elapsed;
+            self.metrics.sampled_record_residual += elapsed.saturating_sub(judgement);
+        }
+    }
+
+    fn record_inner(
+        &mut self,
+        hand: &HandCounts,
+        target: TileType,
+        qualification: Option<RonQualification>,
+        total: &mut RonCapableStateWeight,
+        timing_sample: CandidateTimingSample,
+    ) {
         let generation = self.generation;
+
+        let state_key_start = (timing_sample == CandidateTimingSample::StateKey).then(Instant::now);
         let key = state_key(hand);
-        let known = match self.evaluated.get_mut(&key) {
+        self.metrics.state_key_constructions += 1;
+        if let Some(state_key_start) = state_key_start {
+            self.metrics.sampled_state_key_constructions += 1;
+            self.metrics.sampled_state_key += state_key_start.elapsed();
+        }
+
+        let cache_lookup_start =
+            (timing_sample == CandidateTimingSample::CacheLookup).then(Instant::now);
+        self.metrics.cache_lookups += 1;
+        let (known, same_generation_duplicate) = match self.evaluated.get_mut(&key) {
             Some(evaluated) => {
                 self.metrics.cache_hits += 1;
                 if evaluated.counted_generation == generation {
-                    return;
+                    self.metrics.same_generation_duplicates += 1;
+                    (Some(evaluated.waits_on_unron_tile), true)
+                } else {
+                    self.metrics.cross_target_cache_reuses += 1;
+                    evaluated.counted_generation = generation;
+                    (Some(evaluated.waits_on_unron_tile), false)
                 }
-                evaluated.counted_generation = generation;
-                Some(evaluated.waits_on_unron_tile)
             }
             None => {
                 self.metrics.cache_misses += 1;
-                None
+                (None, false)
             }
         };
+        if let Some(cache_lookup_start) = cache_lookup_start {
+            self.metrics.sampled_cache_lookups += 1;
+            self.metrics.sampled_cache_lookup += cache_lookup_start.elapsed();
+        }
+        if same_generation_duplicate {
+            return;
+        }
+
         self.metrics.unique_candidates += 1;
         if known == Some(true) {
             self.metrics.furiten_states_filtered += 1;
@@ -702,14 +845,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
         let guaranteed_yaku = qualification.is_some_and(|value| value.guaranteed_yaku);
         let needs_counts = self.use_standard_completion_for_furiten
             && (guaranteed_yaku || known.is_none() && !self.unron_tiles.is_empty());
-        let counts = needs_counts.then(|| {
-            self.metrics.tile_count_constructions += 1;
-            tile_counts(hand)
-        });
-        let mut ids = (!self.use_standard_completion_for_furiten).then(|| {
-            self.metrics.tile_id_materializations += 1;
-            concealed_tile_ids(hand)
-        });
+        let counts =
+            needs_counts.then(|| self.construct_tile_counts_for_record(hand, timing_sample));
+        let mut ids = (!self.use_standard_completion_for_furiten)
+            .then(|| self.materialize_tile_ids_for_record(hand, timing_sample));
         if known.is_none() {
             let checks_before = self.completion_checks.get();
             let start = Instant::now();
@@ -723,10 +862,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
                     self.waits_on_unron_tile_with_counts(counts)
                 })
             } else {
-                let ids = ids.get_or_insert_with(|| {
-                    self.metrics.tile_id_materializations += 1;
-                    concealed_tile_ids(hand)
-                });
+                if ids.is_none() {
+                    ids = Some(self.materialize_tile_ids_for_record(hand, timing_sample));
+                }
+                let ids = ids.as_mut().expect("initialized above");
                 self.waits_on_unron_tile_with_ids(ids, hand)
             };
             self.metrics.unron_filtering += start.elapsed();
@@ -738,6 +877,15 @@ impl<'a> ReachedHiddenHandStates<'a> {
                 self.metrics.furiten_completion_checks += completion_checks;
             }
             self.metrics.evaluated_states += 1;
+            let capacity_before = self.evaluated.capacity();
+            // `capacity()` は lower bound なので、この条件は actual growth の判定には使わない。
+            // capacity 未満なら reallocation なしで保持できる契約を使い、全insertのclock readを
+            // 避けつつ、growthの可能性があるinsertだけを全件計時する。
+            let reaches_reported_capacity = self.evaluated.len() == capacity_before;
+            let insertion_start = (self.metrics.candidate_timing_interval != 0
+                && (reaches_reported_capacity
+                    || timing_sample == CandidateTimingSample::CacheInsertion))
+                .then(Instant::now);
             self.evaluated.insert(
                 key,
                 EvaluatedState {
@@ -745,6 +893,22 @@ impl<'a> ReachedHiddenHandStates<'a> {
                     counted_generation: generation,
                 },
             );
+            let insertion_elapsed = insertion_start.map(|start| start.elapsed());
+            self.metrics.cache_inserts += 1;
+            let capacity_after = self.evaluated.capacity();
+            let actually_grew = capacity_after > capacity_before;
+            if actually_grew && self.metrics.candidate_timing_interval != 0 {
+                let elapsed = insertion_elapsed.expect("a capacity-exhausting insertion is timed");
+                self.metrics.cache_capacity_grows += 1;
+                self.metrics.cache_growth_insertion += elapsed;
+                if timing_sample == CandidateTimingSample::Record {
+                    self.metrics.sampled_record_cache_growth += elapsed;
+                }
+            } else if timing_sample == CandidateTimingSample::CacheInsertion {
+                let elapsed = insertion_elapsed.expect("sampled insertion is timed");
+                self.metrics.sampled_cache_inserts += 1;
+                self.metrics.sampled_cache_insertion += elapsed;
+            }
             if waits_on_unron_tile {
                 self.metrics.furiten_states_filtered += 1;
                 return;
@@ -761,10 +925,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
                         target,
                     )
                 } else {
-                    let ids = ids.get_or_insert_with(|| {
-                        self.metrics.tile_id_materializations += 1;
-                        concealed_tile_ids(hand)
-                    });
+                    if ids.is_none() {
+                        ids = Some(self.materialize_tile_ids_for_record(hand, timing_sample));
+                    }
+                    let ids = ids.as_mut().expect("initialized above");
                     self.completes_hand_with_yaku(ids, hand, target, qualification.context)
                 };
                 self.metrics.target_completion += result.structural_completion;
@@ -787,10 +951,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
                     || result.yakuman_successful
             }
             None => {
-                let ids = ids.get_or_insert_with(|| {
-                    self.metrics.tile_id_materializations += 1;
-                    concealed_tile_ids(hand)
-                });
+                if ids.is_none() {
+                    ids = Some(self.materialize_tile_ids_for_record(hand, timing_sample));
+                }
+                let ids = ids.as_mut().expect("initialized above");
                 let checks_before = self.completion_checks.get();
                 let start = Instant::now();
                 let completes = self.completes_hand(ids, hand, target);
@@ -805,11 +969,56 @@ impl<'a> ReachedHiddenHandStates<'a> {
             return;
         }
 
+        let hand_weight_start =
+            (timing_sample == CandidateTimingSample::HandWeight).then(Instant::now);
         let weight = hand_weight(&self.remaining, hand);
+        self.metrics.hand_weight_calculations += 1;
+        if let Some(hand_weight_start) = hand_weight_start {
+            self.metrics.sampled_hand_weight_calculations += 1;
+            self.metrics.sampled_hand_weight += hand_weight_start.elapsed();
+        }
+
+        let result_accumulation_start =
+            (timing_sample == CandidateTimingSample::ResultAccumulation).then(Instant::now);
+        self.metrics.result_accumulations += 1;
         total.weight += weight;
         total.states += 1;
         self.metrics.ron_capable_weight += weight;
         self.metrics.ron_capable_states += 1;
+        if let Some(result_accumulation_start) = result_accumulation_start {
+            self.metrics.sampled_result_accumulations += 1;
+            self.metrics.sampled_result_accumulation += result_accumulation_start.elapsed();
+        }
+    }
+
+    fn construct_tile_counts_for_record(
+        &mut self,
+        hand: &HandCounts,
+        timing_sample: CandidateTimingSample,
+    ) -> TileCounts {
+        let start = (timing_sample == CandidateTimingSample::Representation).then(Instant::now);
+        let counts = tile_counts(hand);
+        self.metrics.tile_count_constructions += 1;
+        if let Some(start) = start {
+            self.metrics.sampled_representation_constructions += 1;
+            self.metrics.sampled_representation_construction += start.elapsed();
+        }
+        counts
+    }
+
+    fn materialize_tile_ids_for_record(
+        &mut self,
+        hand: &HandCounts,
+        timing_sample: CandidateTimingSample,
+    ) -> Vec<TileId> {
+        let start = (timing_sample == CandidateTimingSample::Representation).then(Instant::now);
+        let ids = concealed_tile_ids(hand);
+        self.metrics.tile_id_materializations += 1;
+        if let Some(start) = start {
+            self.metrics.sampled_representation_constructions += 1;
+            self.metrics.sampled_representation_construction += start.elapsed();
+        }
+        ids
     }
 
     // 候補の別待ちが、その player に対して既にロン不能な牌種と重なるか。

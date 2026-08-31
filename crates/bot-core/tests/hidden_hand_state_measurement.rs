@@ -285,6 +285,26 @@ fn compressed_report(
     println!("  R/T evidence wall time:        {evidence_evaluation:?}");
 }
 
+fn estimated_elapsed(
+    sampled: Duration,
+    sampled_calls: u64,
+    total_calls: u64,
+    sampled_timer_overhead: Duration,
+    overhead_measurements: u64,
+) -> Duration {
+    if sampled_calls == 0 || total_calls == 0 {
+        return Duration::ZERO;
+    }
+    let estimated_overhead = if overhead_measurements == 0 {
+        Duration::ZERO
+    } else {
+        sampled_timer_overhead.mul_f64(sampled_calls as f64 / overhead_measurements as f64)
+    };
+    sampled
+        .saturating_sub(estimated_overhead)
+        .mul_f64(total_calls as f64 / sampled_calls as f64)
+}
+
 fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     assert_eq!(
         metrics.completion_checks,
@@ -302,9 +322,98 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
             + metrics.yaku_successful_states
             + metrics.yakuman_successful_states
     );
+    assert_eq!(metrics.record_calls, metrics.generated_candidates);
+    assert_eq!(metrics.state_key_constructions, metrics.record_calls);
+    assert_eq!(metrics.cache_lookups, metrics.record_calls);
+    assert_eq!(
+        metrics.cache_hits,
+        metrics.same_generation_duplicates + metrics.cross_target_cache_reuses
+    );
+    assert_eq!(metrics.cache_inserts, metrics.cache_misses);
+    assert!(metrics.cache_capacity_grows <= metrics.cache_inserts);
+    assert_eq!(metrics.hand_weight_calculations, metrics.ron_capable_states);
+    assert_eq!(metrics.result_accumulations, metrics.ron_capable_states);
+
+    let estimated_record_total = estimated_elapsed(
+        metrics
+            .sampled_record_total
+            .saturating_sub(metrics.sampled_record_cache_growth),
+        metrics.candidate_timing_samples,
+        metrics.record_calls,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    ) + metrics.cache_growth_insertion;
+    let estimated_record_residual = estimated_elapsed(
+        metrics
+            .sampled_record_residual
+            .saturating_sub(metrics.sampled_record_cache_growth),
+        metrics.candidate_timing_samples,
+        metrics.record_calls,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    ) + metrics.cache_growth_insertion;
+    let estimated_state_key = estimated_elapsed(
+        metrics.sampled_state_key,
+        metrics.sampled_state_key_constructions,
+        metrics.state_key_constructions,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    );
+    let estimated_cache_lookup = estimated_elapsed(
+        metrics.sampled_cache_lookup,
+        metrics.sampled_cache_lookups,
+        metrics.cache_lookups,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    );
+    let representation_constructions =
+        metrics.tile_count_constructions + metrics.tile_id_materializations;
+    let estimated_representation = estimated_elapsed(
+        metrics.sampled_representation_construction,
+        metrics.sampled_representation_constructions,
+        representation_constructions,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    );
+    let normal_cache_inserts = metrics
+        .cache_inserts
+        .saturating_sub(metrics.cache_capacity_grows);
+    let estimated_cache_insertion = estimated_elapsed(
+        metrics.sampled_cache_insertion,
+        metrics.sampled_cache_inserts,
+        normal_cache_inserts,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    );
+    let estimated_hand_weight = estimated_elapsed(
+        metrics.sampled_hand_weight,
+        metrics.sampled_hand_weight_calculations,
+        metrics.hand_weight_calculations,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    );
+    let estimated_result_accumulation = estimated_elapsed(
+        metrics.sampled_result_accumulation,
+        metrics.sampled_result_accumulations,
+        metrics.result_accumulations,
+        metrics.sampled_timer_overhead,
+        metrics.sampled_timer_overhead_measurements,
+    );
+    let classified_record_residual = estimated_state_key
+        + estimated_cache_lookup
+        + estimated_representation
+        + estimated_cache_insertion
+        + metrics.cache_growth_insertion
+        + estimated_hand_weight
+        + estimated_result_accumulation;
+    let estimated_unclassified_record =
+        estimated_record_residual.saturating_sub(classified_record_residual);
+    let estimated_enumeration = metrics
+        .candidate_generation
+        .saturating_sub(estimated_record_residual);
 
     println!("  R enumerator:");
-    println!("    candidate generation:");
+    println!("    candidate residual:");
     println!(
         "      generated candidates:     {}",
         metrics.generated_candidates
@@ -314,12 +423,89 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
         metrics.unique_candidates
     );
     println!(
-        "      elapsed:                  {:?}",
+        "      residual elapsed:         {:?}",
         metrics.candidate_generation
     );
+    println!(
+        "      timing samples:           {} / {} record calls (interval={})",
+        metrics.candidate_timing_samples, metrics.record_calls, metrics.candidate_timing_interval
+    );
+    println!(
+        "        timer-overhead samples: {} ({:?})",
+        metrics.sampled_timer_overhead_measurements, metrics.sampled_timer_overhead
+    );
+    println!(
+        "        state-key/cache samples: {} / {}",
+        metrics.sampled_state_key_constructions, metrics.sampled_cache_lookups
+    );
+    println!(
+        "        representation/insert samples: {} / {}",
+        metrics.sampled_representation_constructions, metrics.sampled_cache_inserts
+    );
+    println!(
+        "        hand-weight/accumulation samples: {} / {}",
+        metrics.sampled_hand_weight_calculations, metrics.sampled_result_accumulations
+    );
+    println!(
+        "      enumeration/non-record estimate: {:?}",
+        estimated_enumeration
+    );
+    println!(
+        "      record total estimate (incl. judgement): {:?}",
+        estimated_record_total
+    );
+    println!(
+        "      record residual estimate: {:?}",
+        estimated_record_residual
+    );
+    println!("        state-key construction: {:?}", estimated_state_key);
+    println!(
+        "        cache lookup/dedup:     {:?}",
+        estimated_cache_lookup
+    );
+    println!(
+        "        representation:        {:?}",
+        estimated_representation
+    );
+    println!(
+        "        cache insertion (no growth): {:?}",
+        estimated_cache_insertion
+    );
+    println!(
+        "        actual capacity-growth insertion: {:?}",
+        metrics.cache_growth_insertion
+    );
+    println!("        hand-weight:           {:?}", estimated_hand_weight);
+    println!(
+        "        result accumulation:   {:?}",
+        estimated_result_accumulation
+    );
+    println!(
+        "        unclassified record:   {:?}",
+        estimated_unclassified_record
+    );
     println!("    dedup/cache:");
+    println!("      record calls:             {}", metrics.record_calls);
+    println!(
+        "      state-key constructions: {}",
+        metrics.state_key_constructions
+    );
+    println!("      cache lookups:            {}", metrics.cache_lookups);
     println!("      hits:                     {}", metrics.cache_hits);
+    println!(
+        "        same-generation duplicates: {}",
+        metrics.same_generation_duplicates
+    );
+    println!(
+        "        cross-target reused states: {}",
+        metrics.cross_target_cache_reuses
+    );
     println!("      misses/evaluated states: {}", metrics.cache_misses);
+    println!("      inserts:                  {}", metrics.cache_inserts);
+    println!(
+        "        actual capacity grows: {} ({:?})",
+        metrics.cache_capacity_grows, metrics.cache_growth_insertion
+    );
     println!("      clears:                   {}", metrics.cache_clears);
     println!("      cached states:            {}", metrics.cached_states);
     println!("    representation construction:");
@@ -408,6 +594,14 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
         metrics.yakuman_evaluation
     );
     println!("    weight/count result:");
+    println!(
+        "      hand-weight calculations: {}",
+        metrics.hand_weight_calculations
+    );
+    println!(
+        "      result accumulations:     {}",
+        metrics.result_accumulations
+    );
     println!(
         "      ron-capable weight:        {}",
         metrics.ron_capable_weight

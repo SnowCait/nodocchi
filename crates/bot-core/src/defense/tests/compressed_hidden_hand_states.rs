@@ -283,7 +283,17 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(states.ron_metrics(), Some(metrics));
     assert_eq!(metrics.ron_capable_weight, weight.weight);
     assert_eq!(metrics.ron_capable_states, weight.states);
+    assert_eq!(metrics.record_calls, metrics.generated_candidates);
+    assert_eq!(metrics.state_key_constructions, metrics.record_calls);
+    assert_eq!(metrics.cache_lookups, metrics.record_calls);
+    assert_eq!(
+        metrics.cache_hits,
+        metrics.same_generation_duplicates + metrics.cross_target_cache_reuses
+    );
     assert_eq!(metrics.cache_misses, metrics.evaluated_states);
+    assert_eq!(metrics.cache_inserts, metrics.cache_misses);
+    assert!(metrics.cache_capacity_grows <= metrics.cache_inserts);
+    assert_eq!(metrics.cache_capacity_grows, 1);
     assert_eq!(
         metrics.completion_checks,
         metrics.furiten_completion_checks
@@ -296,6 +306,9 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(metrics.target_boolean_completion_checks, 1);
     assert_eq!(metrics.target_materialized_analyses, 0);
     assert_eq!(metrics.guaranteed_yaku_shortcuts, 1);
+    assert_eq!(metrics.hand_weight_calculations, 1);
+    assert_eq!(metrics.result_accumulations, 1);
+    assert!(metrics.candidate_timing_samples > 0);
     assert_eq!(metrics.yaku_evaluations, 0);
     assert_eq!(metrics.yaku_successful_states, 0);
     assert_eq!(metrics.yakuman_evaluations, 0);
