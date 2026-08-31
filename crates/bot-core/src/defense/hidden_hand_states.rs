@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use bot_logic::{
     FixedMeldCount, Meld, RiichiStatus, TileCounts, TileId, TileType, WinMethod, WinningContext,
     analyze_completed_hand, evaluate_winning_yaku, evaluate_winning_yakuman,
+    is_standard_hand_complete,
 };
 
 use crate::context::GameContext;
@@ -184,6 +185,7 @@ pub(super) enum HiddenHandModelMode {
 }
 
 pub(super) struct HiddenHandModelInput<'a> {
+    pub(super) mode: HiddenHandModelMode,
     pub(super) context: &'a GameContext,
     pub(super) fixed_melds: &'a [Meld],
     pub(super) fixed_meld_count: FixedMeldCount,
@@ -248,6 +250,7 @@ impl<'a> HiddenHandModelInput<'a> {
         }
 
         Ok(Self {
+            mode,
             context,
             fixed_melds,
             fixed_meld_count,
@@ -298,8 +301,9 @@ fn open_hand_winning_context(
 /// 見え牌が欠けた残枚数で数えることになる。
 ///
 /// 候補生成は対象牌固有の構造から行い、全牌種総当たりも物理牌 subset 総当たりもしない。
-/// 完成形判定は既存 [`analyze_completed_hand`] を source of truth とする。全34牌種の受け入れを
-/// 毎回作らず、対象牌と「その player に対して既にロン不能な牌種」だけを調べる。
+/// target の完成形判定は既存 [`analyze_completed_hand`] を source of truth とする。OpenHand の
+/// furiten 判定は同じ Standard decomposition 探索を共有する boolean helper を使う。全34牌種の
+/// 受け入れを毎回作らず、対象牌と「その player に対して既にロン不能な牌種」だけを調べる。
 /// 同じ `TileCounts` は decomposition 数によらず1回だけ加算する。
 ///
 /// ロン不能牌との交差判定は target 間で共有する cache に載るため、同じ player の複数 target を
@@ -313,6 +317,7 @@ pub struct ReachedHiddenHandStates<'a> {
     unron_mask: u64,
     unron_tiles: Vec<TileType>,
     complete_melds: Vec<[TileType; 3]>,
+    use_standard_completion_for_furiten: bool,
     evaluated: HashMap<u128, EvaluatedState>,
     metrics: HiddenHandStateMetrics,
     completion_checks: Cell<u64>,
@@ -347,6 +352,8 @@ impl<'a> ReachedHiddenHandStates<'a> {
             unron_mask: input.unron_mask,
             unron_tiles: input.unron_tiles,
             complete_melds,
+            use_standard_completion_for_furiten: input.mode
+                == HiddenHandModelMode::OpenHandRonCapable,
             evaluated: HashMap::new(),
             metrics: HiddenHandStateMetrics::default(),
             completion_checks: Cell::new(0),
@@ -710,9 +717,25 @@ impl<'a> ReachedHiddenHandStates<'a> {
 
     // 候補の別待ちが、その player に対して既にロン不能な牌種と重なるか。
     //
-    // 全34牌種の受け入れを作らず、本人の河とリーチ後に通った牌 (`is_genbutsu_for`) だけを調べる。
-    // その牌でも和了形になるなら、その候補はその牌を見逃したことになりロンできない。
+    // 全34牌種の受け入れを作らず、本人の河と各 mode の current passed evidence から得た
+    // ロン不能牌だけを調べる。その牌でも和了形になるなら、その候補はロンできない。
     fn waits_on_unron_tile(&self, ids: &mut Vec<TileId>, hand: &HandCounts) -> bool {
+        if self.use_standard_completion_for_furiten {
+            if self.unron_tiles.is_empty() {
+                return false;
+            }
+            let mut counts = TileCounts::from_tiles(ids.iter().copied());
+            return self.unron_tiles.iter().any(|&tile| {
+                if counts.try_add(tile).is_err() {
+                    return false;
+                }
+                self.completion_checks.set(self.completion_checks.get() + 1);
+                let complete = is_standard_hand_complete(&counts, self.fixed_meld_count);
+                counts.remove(tile).expect("just added the candidate tile");
+                complete
+            });
+        }
+
         self.unron_tiles
             .iter()
             .any(|&tile| self.completes_hand(ids, hand, tile))

@@ -220,10 +220,10 @@ fn standard_decompositions(
     concealed: &TileCounts,
     fixed_meld_count: FixedMeldCount,
 ) -> Vec<StandardDecomposition> {
-    let concealed_meld_count = usize::from(FixedMeldCount::MAX - fixed_meld_count.get());
-    if usize::from(concealed.total()) != 2 + 3 * concealed_meld_count {
+    let Some(concealed_meld_count) = completed_concealed_meld_count(concealed, fixed_meld_count)
+    else {
         return Vec::new();
-    }
+    };
 
     let mut decompositions = Vec::new();
     for (pair, count) in concealed.iter() {
@@ -236,11 +236,13 @@ fn standard_decompositions(
             continue;
         }
 
-        let mut melds = Vec::with_capacity(concealed_meld_count);
-        let mut found = Vec::new();
-        collect_concealed_melds(rest, concealed_meld_count, &mut melds, &mut found);
+        let mut visitor = DecompositionCollector {
+            melds: Vec::with_capacity(concealed_meld_count),
+            found: Vec::new(),
+        };
+        visit_concealed_melds(rest, concealed_meld_count, &mut visitor);
 
-        decompositions.extend(found.into_iter().map(|mut concealed_melds| {
+        decompositions.extend(visitor.found.into_iter().map(|mut concealed_melds| {
             concealed_melds.sort_unstable();
             StandardDecomposition {
                 pair,
@@ -255,39 +257,115 @@ fn standard_decompositions(
     decompositions
 }
 
-fn collect_concealed_melds(
+/// 固定面子を含めて Standard hand が構造上完成しているか。
+///
+/// [`analyze_completed_hand`] の Standard decomposition と同じ探索を使うが、最初の完成形で
+/// 打ち切り、decomposition や物理牌列を構築しない。七対子・国士無双は対象外。
+pub fn is_standard_hand_complete(concealed: &TileCounts, fixed_meld_count: FixedMeldCount) -> bool {
+    let Some(concealed_meld_count) = completed_concealed_meld_count(concealed, fixed_meld_count)
+    else {
+        return false;
+    };
+
+    for (pair, count) in concealed.iter() {
+        if count < 2 {
+            continue;
+        }
+
+        let mut rest = *concealed;
+        if rest.remove_pair(pair).is_err() {
+            continue;
+        }
+        if visit_concealed_melds(rest, concealed_meld_count, &mut CompletionFinder) {
+            return true;
+        }
+    }
+    false
+}
+
+fn completed_concealed_meld_count(
+    concealed: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> Option<usize> {
+    let concealed_meld_count = usize::from(FixedMeldCount::MAX - fixed_meld_count.get());
+    (usize::from(concealed.total()) == 2 + 3 * concealed_meld_count).then_some(concealed_meld_count)
+}
+
+trait ConcealedMeldVisitor {
+    // `true` stops the traversal after the first result needed by a boolean caller.
+    fn complete(&mut self) -> bool;
+    fn push(&mut self, meld: ConcealedMeld);
+    fn pop(&mut self);
+}
+
+struct DecompositionCollector {
+    melds: Vec<ConcealedMeld>,
+    found: Vec<Vec<ConcealedMeld>>,
+}
+
+impl ConcealedMeldVisitor for DecompositionCollector {
+    fn complete(&mut self) -> bool {
+        self.found.push(self.melds.clone());
+        false
+    }
+
+    fn push(&mut self, meld: ConcealedMeld) {
+        self.melds.push(meld);
+    }
+
+    fn pop(&mut self) {
+        self.melds.pop();
+    }
+}
+
+struct CompletionFinder;
+
+impl ConcealedMeldVisitor for CompletionFinder {
+    fn complete(&mut self) -> bool {
+        true
+    }
+
+    fn push(&mut self, _meld: ConcealedMeld) {}
+
+    fn pop(&mut self) {}
+}
+
+fn visit_concealed_melds(
     counts: TileCounts,
     remaining: usize,
-    melds: &mut Vec<ConcealedMeld>,
-    found: &mut Vec<Vec<ConcealedMeld>>,
-) {
+    visitor: &mut impl ConcealedMeldVisitor,
+) -> bool {
     if remaining == 0 {
-        if counts.is_empty() {
-            found.push(melds.clone());
-        }
-        return;
+        return counts.is_empty() && visitor.complete();
     }
 
     let Some(tile) = counts
         .iter()
         .find_map(|(tile, count)| (count >= 1).then_some(tile))
     else {
-        return;
+        return false;
     };
 
     let mut triplet_removed = counts;
     if triplet_removed.remove_triplet(tile).is_ok() {
-        melds.push(ConcealedMeld::Triplet { tile });
-        collect_concealed_melds(triplet_removed, remaining - 1, melds, found);
-        melds.pop();
+        visitor.push(ConcealedMeld::Triplet { tile });
+        let complete = visit_concealed_melds(triplet_removed, remaining - 1, visitor);
+        visitor.pop();
+        if complete {
+            return true;
+        }
     }
 
     let mut sequence_removed = counts;
     if sequence_removed.remove_sequence(tile).is_ok() {
-        melds.push(ConcealedMeld::Sequence { start: tile });
-        collect_concealed_melds(sequence_removed, remaining - 1, melds, found);
-        melds.pop();
+        visitor.push(ConcealedMeld::Sequence { start: tile });
+        let complete = visit_concealed_melds(sequence_removed, remaining - 1, visitor);
+        visitor.pop();
+        if complete {
+            return true;
+        }
     }
+    false
 }
 
 fn chiitoitsu_decomposition(concealed: &TileCounts) -> Option<ChiitoitsuDecomposition> {
@@ -389,8 +467,159 @@ mod tests {
         TileCounts::from_tiles(tiles.iter().copied())
     }
 
+    fn fixed_pons(source: &mut TileIdSource, count: usize) -> Vec<Meld> {
+        ["P", "F", "C"]
+            .iter()
+            .take(count)
+            .map(|honor| source.meld(MeldKind::Pon, &[honor, honor, honor]))
+            .collect()
+    }
+
     fn fixed_count(value: u8) -> FixedMeldCount {
         FixedMeldCount::new(value).unwrap()
+    }
+
+    #[test]
+    fn boolean_standard_completion_matches_analysis_across_open_hand_counts() {
+        let palette = ["1m", "2m", "3m", "4m", "5m", "E"];
+
+        for meld_count in 1..=3usize {
+            let mut source = TileIdSource::new();
+            let fixed = fixed_pons(&mut source, meld_count);
+            let concealed_len = 14 - 3 * meld_count;
+
+            // 6牌種の各0..=4枚を横断する。順子・刻子・字牌・複数分解候補を含み、
+            // OpenHand 1/2/3副露の正しい concealed 枚数だけを materialized analysis と比較する。
+            for mut encoded in 0..5u32.pow(palette.len() as u32) {
+                let mut counts = TileCounts::new();
+                let mut concealed = Vec::with_capacity(concealed_len);
+                for mjai in palette {
+                    let copies = (encoded % 5) as usize;
+                    encoded /= 5;
+                    let tile = tile_type(mjai);
+                    for id in TileId::copies(tile).take(copies) {
+                        counts.add(tile);
+                        concealed.push(id);
+                    }
+                }
+                if concealed.len() != concealed_len {
+                    continue;
+                }
+
+                let materialized = analyze_completed_hand(&concealed, &fixed)
+                    .expect("at most four copies")
+                    .standard_decompositions()
+                    .next()
+                    .is_some();
+                assert_eq!(
+                    is_standard_hand_complete(&counts, fixed_count(meld_count as u8)),
+                    materialized,
+                    "meld count={meld_count}, counts={:?}",
+                    counts.as_array()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_standard_completion_covers_open_hand_wait_boundaries() {
+        let cases: &[(&str, u8, &[&str], &str, bool)] = &[
+            (
+                "ryanmen",
+                1,
+                &["2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                "1m",
+                true,
+            ),
+            (
+                "kanchan",
+                1,
+                &["1m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                "2m",
+                true,
+            ),
+            (
+                "penchan",
+                1,
+                &["1m", "2m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                "3m",
+                true,
+            ),
+            (
+                "shanpon",
+                1,
+                &["1m", "1m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                "1m",
+                true,
+            ),
+            (
+                "honor shanpon",
+                1,
+                &["1m", "2m", "3m", "4p", "5p", "6p", "E", "E", "S", "S"],
+                "E",
+                true,
+            ),
+            (
+                "tanki",
+                1,
+                &["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E"],
+                "E",
+                true,
+            ),
+            (
+                "multiple decompositions",
+                1,
+                &["1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "5m"],
+                "5m",
+                true,
+            ),
+            (
+                "two fixed melds",
+                2,
+                &["1m", "2m", "3m", "4p", "5p", "6p", "E"],
+                "E",
+                true,
+            ),
+            ("three fixed melds", 3, &["1m", "2m", "E", "E"], "3m", true),
+            (
+                "incomplete",
+                1,
+                &["1m", "3m", "4p", "6p", "7s", "9s", "E", "E", "S", "S"],
+                "2m",
+                false,
+            ),
+        ];
+
+        for &(name, meld_count, hidden, wait, expected) in cases {
+            let mut counts = TileCounts::from_tile_types(hidden.iter().map(|mjai| tile_type(mjai)));
+            counts.try_add(tile_type(wait)).expect("not a fifth copy");
+
+            let mut source = TileIdSource::new();
+            let fixed = fixed_pons(&mut source, usize::from(meld_count));
+            let concealed: Vec<TileId> = TileType::all()
+                .flat_map(|tile| TileId::copies(tile).take(usize::from(counts.count(tile))))
+                .collect();
+            let materialized = analyze_completed_hand(&concealed, &fixed)
+                .expect("physical hand")
+                .standard_decompositions()
+                .next()
+                .is_some();
+
+            assert_eq!(materialized, expected, "oracle case: {name}");
+            assert_eq!(
+                is_standard_hand_complete(&counts, fixed_count(meld_count)),
+                materialized,
+                "boolean case: {name}"
+            );
+        }
+
+        let mut four_copies = TileCounts::from_tile_types([
+            tile_type("1m"),
+            tile_type("1m"),
+            tile_type("1m"),
+            tile_type("1m"),
+        ]);
+        assert!(four_copies.try_add(tile_type("1m")).is_err());
     }
 
     fn standard_shapes(analysis: &CompletedHandAnalysis) -> Vec<(TileType, Vec<ConcealedMeld>)> {
