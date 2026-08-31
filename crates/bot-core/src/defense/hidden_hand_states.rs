@@ -73,18 +73,52 @@ impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
     }
 }
 
-/// prototype の内訳計測値。数え上げ結果には影響しない。
+/// enumerating hidden-hand model の内訳計測値。数え上げ結果には影響しない。
 ///
-/// `candidate_generation` は候補生成と重複排除、`unron_filtering` はロン不能牌との交差判定、
-/// `target_completion` は対象牌の和了判定に費やした累積時間。
+/// 件数と時間は同じ instance で行った全 target 評価の累計。`unique_candidates` は同一 target
+/// 内の重複を除いた状態数、`cache_hits` は同一 target 内の重複と target 間の再利用を合わせた
+/// 件数。`target_completion` は target の structural completed-hand analysis だけを含み、役と
+/// named Yakuman の評価時間はそれぞれ別に記録する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HiddenHandStateMetrics {
     pub generated_candidates: u64,
+    pub unique_candidates: u64,
     pub evaluated_states: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_clears: u64,
+    pub cached_states: usize,
     pub completion_checks: u64,
+    pub furiten_states_checked: u64,
+    pub furiten_states_filtered: u64,
+    pub furiten_completion_checks: u64,
+    pub target_completion_checks: u64,
+    pub completed_states: u64,
+    pub yaku_evaluations: u64,
+    pub yaku_successful_states: u64,
+    pub yakuman_evaluations: u64,
+    pub yakuman_successful_states: u64,
+    pub ron_capable_weight: u128,
+    pub ron_capable_states: u64,
     pub candidate_generation: Duration,
     pub unron_filtering: Duration,
     pub target_completion: Duration,
+    pub yaku_evaluation: Duration,
+    pub yakuman_evaluation: Duration,
+    pub total_r_evaluation: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct YakuQualifiedCompletion {
+    structural_checked: bool,
+    structurally_complete: bool,
+    yaku_evaluated: bool,
+    yaku_successful: bool,
+    yakuman_evaluated: bool,
+    yakuman_successful: bool,
+    structural_completion: Duration,
+    yaku_evaluation: Duration,
+    yakuman_evaluation: Duration,
 }
 
 // 牌種ごとの残枚数 (最大4枚) から k 枚を選ぶ組み合わせ数。
@@ -353,6 +387,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
     /// これまでの評価の内訳計測値。計測用で、数え上げ結果には影響しない。
     pub fn metrics(&self) -> HiddenHandStateMetrics {
         HiddenHandStateMetrics {
+            cached_states: self.evaluated.len(),
             completion_checks: self.completion_checks.get(),
             ..self.metrics
         }
@@ -393,17 +428,19 @@ impl<'a> ReachedHiddenHandStates<'a> {
         target: TileType,
         winning_context: Option<WinningContext>,
     ) -> RonCapableStateWeight {
+        let total_start = Instant::now();
         let mut total = RonCapableStateWeight::default();
         if self.is_unron_capable_tile(target) {
+            self.metrics.total_r_evaluation += total_start.elapsed();
             return total;
         }
 
         if self.evaluated.len() >= EVALUATED_STATE_CAPACITY {
             self.evaluated.clear();
+            self.metrics.cache_clears += 1;
         }
         self.generation += 1;
 
-        let start = Instant::now();
         let before = self.judgement_elapsed();
         let mut hand = [0u8; TileType::COUNT];
         self.collect_standard(&mut hand, target, winning_context, &mut total);
@@ -411,13 +448,19 @@ impl<'a> ReachedHiddenHandStates<'a> {
             self.collect_chiitoitsu(&mut hand, target, winning_context, &mut total);
             self.collect_kokushi(&mut hand, target, winning_context, &mut total);
         }
-        self.metrics.candidate_generation += start.elapsed() - (self.judgement_elapsed() - before);
+        let total_elapsed = total_start.elapsed();
+        self.metrics.candidate_generation +=
+            total_elapsed.saturating_sub(self.judgement_elapsed() - before);
+        self.metrics.total_r_evaluation += total_elapsed;
 
         total
     }
 
     fn judgement_elapsed(&self) -> Duration {
-        self.metrics.unron_filtering + self.metrics.target_completion
+        self.metrics.unron_filtering
+            + self.metrics.target_completion
+            + self.metrics.yaku_evaluation
+            + self.metrics.yakuman_evaluation
     }
 
     fn collect_standard(
@@ -589,23 +632,32 @@ impl<'a> ReachedHiddenHandStates<'a> {
         let key = state_key(hand);
         let known = match self.evaluated.get_mut(&key) {
             Some(evaluated) => {
+                self.metrics.cache_hits += 1;
                 if evaluated.counted_generation == generation {
                     return;
                 }
                 evaluated.counted_generation = generation;
                 Some(evaluated.waits_on_unron_tile)
             }
-            None => None,
+            None => {
+                self.metrics.cache_misses += 1;
+                None
+            }
         };
+        self.metrics.unique_candidates += 1;
         if known == Some(true) {
+            self.metrics.furiten_states_filtered += 1;
             return;
         }
 
         let mut ids = concealed_tile_ids(hand);
         if known.is_none() {
+            let checks_before = self.completion_checks.get();
             let start = Instant::now();
             let waits_on_unron_tile = self.waits_on_unron_tile(&mut ids, hand);
             self.metrics.unron_filtering += start.elapsed();
+            self.metrics.furiten_states_checked += 1;
+            self.metrics.furiten_completion_checks += self.completion_checks.get() - checks_before;
             self.metrics.evaluated_states += 1;
             self.evaluated.insert(
                 key,
@@ -615,22 +667,45 @@ impl<'a> ReachedHiddenHandStates<'a> {
                 },
             );
             if waits_on_unron_tile {
+                self.metrics.furiten_states_filtered += 1;
                 return;
             }
         }
 
-        let start = Instant::now();
         let completes = match winning_context {
-            Some(context) => self.completes_hand_with_yaku(&mut ids, hand, target, context),
-            None => self.completes_hand(&mut ids, hand, target),
+            Some(context) => {
+                let result = self.completes_hand_with_yaku(&mut ids, hand, target, context);
+                self.metrics.target_completion += result.structural_completion;
+                self.metrics.yaku_evaluation += result.yaku_evaluation;
+                self.metrics.yakuman_evaluation += result.yakuman_evaluation;
+                self.metrics.target_completion_checks += u64::from(result.structural_checked);
+                self.metrics.completed_states += u64::from(result.structurally_complete);
+                self.metrics.yaku_evaluations += u64::from(result.yaku_evaluated);
+                self.metrics.yaku_successful_states += u64::from(result.yaku_successful);
+                self.metrics.yakuman_evaluations += u64::from(result.yakuman_evaluated);
+                self.metrics.yakuman_successful_states += u64::from(result.yakuman_successful);
+                result.yaku_successful || result.yakuman_successful
+            }
+            None => {
+                let checks_before = self.completion_checks.get();
+                let start = Instant::now();
+                let completes = self.completes_hand(&mut ids, hand, target);
+                self.metrics.target_completion += start.elapsed();
+                self.metrics.target_completion_checks +=
+                    self.completion_checks.get() - checks_before;
+                self.metrics.completed_states += u64::from(completes);
+                completes
+            }
         };
-        self.metrics.target_completion += start.elapsed();
         if !completes {
             return;
         }
 
-        total.weight += hand_weight(&self.remaining, hand);
+        let weight = hand_weight(&self.remaining, hand);
+        total.weight += weight;
         total.states += 1;
+        self.metrics.ron_capable_weight += weight;
+        self.metrics.ron_capable_states += 1;
     }
 
     // 候補の別待ちが、その player に対して既にロン不能な牌種と重なるか。
@@ -665,24 +740,50 @@ impl<'a> ReachedHiddenHandStates<'a> {
         hand: &HandCounts,
         tile: TileType,
         winning_context: WinningContext,
-    ) -> bool {
+    ) -> YakuQualifiedCompletion {
         let copy = hand[tile.index()];
         if copy >= MAX_TILE_COPIES {
-            return false;
+            return YakuQualifiedCompletion::default();
         }
         self.completion_checks.set(self.completion_checks.get() + 1);
         ids.push(tile_id(tile, copy));
-        let ron_capable = analyze_completed_hand(ids, self.fixed_melds).is_ok_and(|analysis| {
-            analysis.is_complete()
-                && (evaluate_winning_yaku(&analysis, winning_context, tile)
-                    .iter()
-                    .any(|evaluation| !evaluation.is_empty())
-                    || evaluate_winning_yakuman(&analysis, winning_context, tile)
+        let structural_start = Instant::now();
+        let analysis = analyze_completed_hand(ids, self.fixed_melds);
+        let structural_completion = structural_start.elapsed();
+        let structurally_complete = analysis
+            .as_ref()
+            .is_ok_and(|analysis| analysis.is_complete());
+
+        let mut result = YakuQualifiedCompletion {
+            structural_checked: true,
+            structurally_complete,
+            structural_completion,
+            ..YakuQualifiedCompletion::default()
+        };
+        if let Ok(analysis) = analysis
+            && structurally_complete
+        {
+            result.yaku_evaluated = true;
+            let yaku_start = Instant::now();
+            result.yaku_successful = evaluate_winning_yaku(&analysis, winning_context, tile)
+                .iter()
+                .any(|evaluation| !evaluation.is_empty());
+            result.yaku_evaluation = yaku_start.elapsed();
+
+            // Preserve the existing short-circuit order: named Yakuman is evaluated only when
+            // ordinary yaku did not make this state ron-capable.
+            if !result.yaku_successful {
+                result.yakuman_evaluated = true;
+                let yakuman_start = Instant::now();
+                result.yakuman_successful =
+                    evaluate_winning_yakuman(&analysis, winning_context, tile)
                         .iter()
-                        .any(|evaluation| !evaluation.is_empty()))
-        });
+                        .any(|evaluation| !evaluation.is_empty());
+                result.yakuman_evaluation = yakuman_start.elapsed();
+            }
+        }
         ids.pop();
-        ron_capable
+        result
     }
 }
 
@@ -772,6 +873,15 @@ impl<'a> StructuralTenpaiHiddenHandStates<'a> {
     /// これまでの評価の内訳計測値。計測用で、数え上げ結果には影響しない。
     pub fn metrics(&self) -> HiddenHandStateMetrics {
         self.inner.metrics()
+    }
+
+    /// 遅延生成された OpenHand `R` enumerator の内訳計測値。
+    ///
+    /// `ron_capable_state_weight` がまだ呼ばれていない場合は `None`。
+    pub fn ron_metrics(&self) -> Option<HiddenHandStateMetrics> {
+        self.ron_inner
+            .as_ref()
+            .map(ReachedHiddenHandStates::metrics)
     }
 }
 

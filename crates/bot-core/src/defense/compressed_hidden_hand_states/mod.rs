@@ -10,8 +10,8 @@ use bot_logic::{FixedMeldCount, TileType};
 use crate::context::GameContext;
 
 use super::hidden_hand_states::{
-    HiddenHandModelInput, HiddenHandModelMode, HiddenHandStateUnsupported, RonCapableStateWeight,
-    StructuralCompletionStateWeight, StructuralTenpaiHiddenHandStates,
+    HiddenHandModelInput, HiddenHandModelMode, HiddenHandStateMetrics, HiddenHandStateUnsupported,
+    RonCapableStateWeight, StructuralCompletionStateWeight, StructuralTenpaiHiddenHandStates,
 };
 use group::{ChiitoitsuShape, GROUP_COUNT, GroupClass, GroupSpec, enumerate_group_classes};
 
@@ -829,6 +829,16 @@ impl<'a> CompressedStructuralTenpaiHiddenHandStates<'a> {
     /// これまでの評価の内訳計測値。計測用で、数え上げ結果には影響しない。
     pub fn metrics(&self) -> CompressedHiddenHandStateMetrics {
         self.inner.metrics()
+    }
+
+    /// 遅延生成された OpenHand `R` enumerator の内訳計測値。
+    ///
+    /// `ron_capable_state_weight` がまだ呼ばれていない場合は `None`。compressed `T` 側の
+    /// [`Self::metrics`] と異なり、実際に `R` を数えた enumerating path の累計を返す。
+    pub fn ron_metrics(&self) -> Option<HiddenHandStateMetrics> {
+        self.ron_counter
+            .as_ref()
+            .and_then(StructuralTenpaiHiddenHandStates::ron_metrics)
     }
 }
 
