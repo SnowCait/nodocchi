@@ -285,6 +285,106 @@ fn compressed_report(
     println!("  R/T evidence wall time:        {evidence_evaluation:?}");
 }
 
+fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
+    assert_eq!(
+        metrics.completion_checks,
+        metrics.furiten_completion_checks + metrics.target_completion_checks
+    );
+    assert_eq!(
+        metrics.ron_capable_states,
+        metrics.yaku_successful_states + metrics.yakuman_successful_states
+    );
+
+    println!("  R enumerator:");
+    println!("    candidate generation:");
+    println!(
+        "      generated candidates:     {}",
+        metrics.generated_candidates
+    );
+    println!(
+        "      unique target states:     {}",
+        metrics.unique_candidates
+    );
+    println!(
+        "      elapsed:                  {:?}",
+        metrics.candidate_generation
+    );
+    println!("    dedup/cache:");
+    println!("      hits:                     {}", metrics.cache_hits);
+    println!("      misses/evaluated states: {}", metrics.cache_misses);
+    println!("      clears:                   {}", metrics.cache_clears);
+    println!("      cached states:            {}", metrics.cached_states);
+    println!("    furiten filtering:");
+    println!(
+        "      states checked:           {}",
+        metrics.furiten_states_checked
+    );
+    println!(
+        "      states filtered:          {}",
+        metrics.furiten_states_filtered
+    );
+    println!(
+        "      completion checks:        {}",
+        metrics.furiten_completion_checks
+    );
+    println!(
+        "      elapsed:                  {:?}",
+        metrics.unron_filtering
+    );
+    println!("    target structural completion:");
+    println!(
+        "      completion checks:        {}",
+        metrics.target_completion_checks
+    );
+    println!(
+        "      completed states:         {}",
+        metrics.completed_states
+    );
+    println!(
+        "      elapsed:                  {:?}",
+        metrics.target_completion
+    );
+    println!("    yaku evaluation:");
+    println!(
+        "      evaluations:              {}",
+        metrics.yaku_evaluations
+    );
+    println!(
+        "      successful states:        {}",
+        metrics.yaku_successful_states
+    );
+    println!(
+        "      elapsed:                  {:?}",
+        metrics.yaku_evaluation
+    );
+    println!("    yakuman evaluation:");
+    println!(
+        "      evaluations:              {}",
+        metrics.yakuman_evaluations
+    );
+    println!(
+        "      successful states:        {}",
+        metrics.yakuman_successful_states
+    );
+    println!(
+        "      elapsed:                  {:?}",
+        metrics.yakuman_evaluation
+    );
+    println!("    weight/count result:");
+    println!(
+        "      ron-capable weight:        {}",
+        metrics.ron_capable_weight
+    );
+    println!(
+        "      ron-capable states:        {}",
+        metrics.ron_capable_states
+    );
+    println!(
+        "    total R evaluation elapsed: {:?}",
+        metrics.total_r_evaluation
+    );
+}
+
 #[test]
 #[ignore = "release build 前提の計測用。wall-clock threshold は持たない"]
 fn measure_one_target_compressed_ron_capable_hidden_hand_weight() {
@@ -523,6 +623,11 @@ fn measure_open_hand_exact_defense_fallback_selection() {
                 tenpai.weight, tenpai.states
             );
             compressed_report(tenpai, states.metrics(), construction, evaluation);
+            open_hand_ron_enumerator_report(
+                states
+                    .ron_metrics()
+                    .expect("all candidate R/T initialized the OpenHand R enumerator"),
+            );
         }
 
         let comparison_start = Instant::now();

@@ -241,6 +241,49 @@ fn open_hand_structural_completion_with_yakuhai_is_ron_capable() {
 }
 
 #[test]
+fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
+    let context = known_open_hand_ron_fixture(open_hand_yakuhai_melds(), &[], &[], 1);
+    let mut states = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+        .expect("compressed open hand model");
+    let compressed_metrics = states.metrics();
+    assert_eq!(states.ron_metrics(), None);
+
+    let weight = states
+        .ron_capable_state_weight(tile_type("5m"))
+        .expect("known winning context");
+    let metrics = states.ron_metrics().expect("initialized R enumerator");
+    assert_eq!(states.metrics(), compressed_metrics);
+    assert_eq!(states.ron_metrics(), Some(metrics));
+    assert_eq!(metrics.ron_capable_weight, weight.weight);
+    assert_eq!(metrics.ron_capable_states, weight.states);
+    assert_eq!(metrics.cache_misses, metrics.evaluated_states);
+    assert_eq!(
+        metrics.completion_checks,
+        metrics.furiten_completion_checks + metrics.target_completion_checks
+    );
+    assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.yaku_evaluations, 1);
+    assert_eq!(metrics.yaku_successful_states, 1);
+    assert_eq!(metrics.yakuman_evaluations, 0);
+    assert_eq!(metrics.yakuman_successful_states, 0);
+
+    let context = known_open_hand_ron_fixture(open_hand_no_yaku_melds(), &[], &[], 1);
+    let mut states = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+        .expect("compressed open hand model");
+    let weight = states
+        .ron_capable_state_weight(tile_type("5m"))
+        .expect("known winning context");
+    let metrics = states.ron_metrics().expect("initialized R enumerator");
+    assert_eq!(metrics.ron_capable_weight, weight.weight);
+    assert_eq!(metrics.ron_capable_states, weight.states);
+    assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.yaku_evaluations, 1);
+    assert_eq!(metrics.yaku_successful_states, 0);
+    assert_eq!(metrics.yakuman_evaluations, 1);
+    assert_eq!(metrics.yakuman_successful_states, 0);
+}
+
+#[test]
 fn open_hand_named_yakuman_is_ron_capable() {
     let context = known_open_hand_ron_fixture(vec![pon("P"), pon("F"), pon("C")], &[], &[], 1);
     let concealed = ["2m", "3m", "4m", "5m", "5m"]
