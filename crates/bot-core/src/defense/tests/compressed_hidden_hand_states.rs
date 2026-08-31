@@ -262,8 +262,9 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
         metrics.furiten_completion_checks + metrics.target_completion_checks
     );
     assert_eq!(metrics.completed_states, 1);
-    assert_eq!(metrics.yaku_evaluations, 1);
-    assert_eq!(metrics.yaku_successful_states, 1);
+    assert_eq!(metrics.guaranteed_yaku_shortcuts, 1);
+    assert_eq!(metrics.yaku_evaluations, 0);
+    assert_eq!(metrics.yaku_successful_states, 0);
     assert_eq!(metrics.yakuman_evaluations, 0);
     assert_eq!(metrics.yakuman_successful_states, 0);
 
@@ -277,6 +278,7 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(metrics.ron_capable_weight, weight.weight);
     assert_eq!(metrics.ron_capable_states, weight.states);
     assert_eq!(metrics.completed_states, 1);
+    assert_eq!(metrics.guaranteed_yaku_shortcuts, 0);
     assert_eq!(metrics.yaku_evaluations, 1);
     assert_eq!(metrics.yaku_successful_states, 0);
     assert_eq!(metrics.yakuman_evaluations, 1);

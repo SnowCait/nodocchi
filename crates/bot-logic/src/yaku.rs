@@ -141,6 +141,22 @@ fn yakuhai_yaku(melds: &[MeldShape], context: WinningContext) -> Vec<Yaku> {
         .collect()
 }
 
+/// 固定面子だけで通常役が必ず成立するか。
+///
+/// 現在は固定面子の役牌だけを対象とし、通常の役評価と同じ [`yakuhai_yaku`] を使う。固定面子の
+/// shape が不正な場合や、風牌に必要な場風・自風が不明な場合は保証を推測せず `false` を返す。
+/// concealed hand、decomposition、和了牌に依存する役は対象外。
+pub fn fixed_melds_guarantee_yaku(fixed_melds: &[Meld], context: WinningContext) -> bool {
+    let Some(melds) = fixed_melds
+        .iter()
+        .map(Meld::shape)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    !yakuhai_yaku(&melds, context).is_empty()
+}
+
 fn tile_yakuhai(tile: TileType, context: WinningContext) -> Vec<Yaku> {
     if let Some(dragon) = tile.dragon() {
         return vec![dragon_yakuhai(dragon)];
@@ -1203,6 +1219,33 @@ mod tests {
         only_yaku(&evaluate_yaku(&analysis, context))
     }
 
+    fn fixed_set(source: &mut TileIdSource, kind: MeldKind, honor: &str) -> Meld {
+        let copies = if kind.is_kan() { 4 } else { 3 };
+        source.meld(kind, &vec![honor; copies])
+    }
+
+    fn assert_guarantee_matches_completed_hands(fixed: &[Meld], context: WinningContext) {
+        assert!(fixed_melds_guarantee_yaku(fixed, context));
+        for concealed in [
+            [
+                "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "9s", "9s",
+            ],
+            [
+                "1m", "1m", "1m", "4p", "5p", "6p", "7s", "8s", "9s", "9m", "9m",
+            ],
+        ] {
+            let mut source = TileIdSource::new();
+            let concealed = source.tiles(&concealed);
+            let analysis = analyze_completed_hand(&concealed, fixed).expect("completed hand");
+            assert!(analysis.is_complete());
+            assert!(
+                evaluate_yaku(&analysis, context)
+                    .iter()
+                    .all(|evaluation| !evaluation.is_empty())
+            );
+        }
+    }
+
     fn menzen_tanyao_yaku(context: WinningContext) -> Vec<Yaku> {
         let mut source = TileIdSource::new();
         let concealed = menzen_tanyao_hand(&mut source);
@@ -1236,6 +1279,71 @@ mod tests {
                 "honor: {honor}"
             );
         }
+    }
+
+    #[test]
+    fn fixed_melds_guarantee_yaku_uses_canonical_yakuhai_rules() {
+        for dragon in ["P", "F", "C"] {
+            let mut source = TileIdSource::new();
+            let fixed = vec![fixed_set(&mut source, MeldKind::Pon, dragon)];
+            assert_guarantee_matches_completed_hands(&fixed, ron_context());
+        }
+
+        for kind in [
+            MeldKind::Pon,
+            MeldKind::Daiminkan,
+            MeldKind::Ankan,
+            MeldKind::Kakan,
+        ] {
+            let mut source = TileIdSource::new();
+            let fixed = vec![fixed_set(&mut source, kind, "P")];
+            assert!(fixed_melds_guarantee_yaku(&fixed, ron_context()));
+        }
+
+        for (wind, context) in [
+            ("E", wind_context(Some("E"), Some("S"))),
+            ("S", wind_context(Some("E"), Some("S"))),
+        ] {
+            let mut source = TileIdSource::new();
+            let fixed = vec![fixed_set(&mut source, MeldKind::Pon, wind)];
+            assert_guarantee_matches_completed_hands(&fixed, context);
+        }
+
+        for (wind, context) in [
+            ("W", wind_context(Some("E"), Some("S"))),
+            ("E", wind_context(None, Some("S"))),
+            ("S", wind_context(Some("E"), None)),
+            ("E", wind_context(None, None)),
+        ] {
+            let mut source = TileIdSource::new();
+            let fixed = vec![fixed_set(&mut source, MeldKind::Pon, wind)];
+            assert!(!fixed_melds_guarantee_yaku(&fixed, context));
+        }
+
+        let mut source = TileIdSource::new();
+        for fixed in [
+            vec![source.meld(MeldKind::Chi, &["2m", "3m", "4m"])],
+            vec![source.meld(MeldKind::Pon, &["2m", "2m", "2m"])],
+        ] {
+            assert!(!fixed_melds_guarantee_yaku(&fixed, ron_context()));
+        }
+
+        let malformed = Meld::new(
+            MeldKind::Pon,
+            TileId::copies(tile_type("P")).take(2).collect(),
+            None,
+        );
+        assert!(!fixed_melds_guarantee_yaku(
+            std::slice::from_ref(&malformed),
+            ron_context()
+        ));
+
+        let mut source = TileIdSource::new();
+        let valid = fixed_set(&mut source, MeldKind::Pon, "P");
+        assert!(!fixed_melds_guarantee_yaku(
+            &[valid, malformed],
+            ron_context()
+        ));
     }
 
     #[test]

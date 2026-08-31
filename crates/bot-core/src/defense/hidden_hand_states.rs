@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use bot_logic::{
     FixedMeldCount, Meld, RiichiStatus, TileCounts, TileId, TileType, WinMethod, WinningContext,
     analyze_completed_hand, evaluate_winning_yaku, evaluate_winning_yakuman,
-    is_standard_hand_complete,
+    fixed_melds_guarantee_yaku, is_standard_hand_complete,
 };
 
 use crate::context::GameContext;
@@ -78,8 +78,9 @@ impl From<RonCapableStateWeight> for StructuralCompletionStateWeight {
 ///
 /// 件数と時間は同じ instance で行った全 target 評価の累計。`unique_candidates` は同一 target
 /// 内の重複を除いた状態数、`cache_hits` は同一 target 内の重複と target 間の再利用を合わせた
-/// 件数。`target_completion` は target の structural completed-hand analysis だけを含み、役と
-/// named Yakuman の評価時間はそれぞれ別に記録する。
+/// 件数。`target_completion` は target の structural completed-hand analysis だけを含み、
+/// `guaranteed_yaku_shortcuts` は実 evaluator を呼ばず固定面子の通常役で確定した completed
+/// state 数。役と named Yakuman の評価時間はそれぞれ別に記録する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HiddenHandStateMetrics {
     pub generated_candidates: u64,
@@ -95,6 +96,7 @@ pub struct HiddenHandStateMetrics {
     pub furiten_completion_checks: u64,
     pub target_completion_checks: u64,
     pub completed_states: u64,
+    pub guaranteed_yaku_shortcuts: u64,
     pub yaku_evaluations: u64,
     pub yaku_successful_states: u64,
     pub yakuman_evaluations: u64,
@@ -113,6 +115,7 @@ pub struct HiddenHandStateMetrics {
 struct YakuQualifiedCompletion {
     structural_checked: bool,
     structurally_complete: bool,
+    guaranteed_yaku_shortcut: bool,
     yaku_evaluated: bool,
     yaku_successful: bool,
     yakuman_evaluated: bool,
@@ -120,6 +123,12 @@ struct YakuQualifiedCompletion {
     structural_completion: Duration,
     yaku_evaluation: Duration,
     yakuman_evaluation: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RonQualification {
+    context: WinningContext,
+    guaranteed_yaku: bool,
 }
 
 // 牌種ごとの残枚数 (最大4枚) から k 枚を選ぶ組み合わせ数。
@@ -427,13 +436,17 @@ impl<'a> ReachedHiddenHandStates<'a> {
         target: TileType,
         winning_context: WinningContext,
     ) -> RonCapableStateWeight {
-        self.filtered_completion_state_weight(target, Some(winning_context))
+        let qualification = RonQualification {
+            context: winning_context,
+            guaranteed_yaku: fixed_melds_guarantee_yaku(self.fixed_melds, winning_context),
+        };
+        self.filtered_completion_state_weight(target, Some(qualification))
     }
 
     fn filtered_completion_state_weight(
         &mut self,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
     ) -> RonCapableStateWeight {
         let total_start = Instant::now();
         let mut total = RonCapableStateWeight::default();
@@ -450,10 +463,10 @@ impl<'a> ReachedHiddenHandStates<'a> {
 
         let before = self.judgement_elapsed();
         let mut hand = [0u8; TileType::COUNT];
-        self.collect_standard(&mut hand, target, winning_context, &mut total);
+        self.collect_standard(&mut hand, target, qualification, &mut total);
         if !self.fixed_meld_count.has_melds() {
-            self.collect_chiitoitsu(&mut hand, target, winning_context, &mut total);
-            self.collect_kokushi(&mut hand, target, winning_context, &mut total);
+            self.collect_chiitoitsu(&mut hand, target, qualification, &mut total);
+            self.collect_kokushi(&mut hand, target, qualification, &mut total);
         }
         let total_elapsed = total_start.elapsed();
         self.metrics.candidate_generation +=
@@ -474,13 +487,13 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &mut HandCounts,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
         let concealed_melds = 4 - self.fixed_meld_count.get();
 
         if self.try_add(hand, &[target]) {
-            self.collect_meld_multisets(hand, concealed_melds, 0, target, winning_context, total);
+            self.collect_meld_multisets(hand, concealed_melds, 0, target, qualification, total);
             remove(hand, &[target]);
         }
 
@@ -499,7 +512,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
                         concealed_melds - 1,
                         0,
                         target,
-                        winning_context,
+                        qualification,
                         total,
                     );
                     remove(hand, &[head, head]);
@@ -516,11 +529,11 @@ impl<'a> ReachedHiddenHandStates<'a> {
         melds_left: u8,
         start: usize,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
         if melds_left == 0 {
-            self.record(hand, target, winning_context, total);
+            self.record(hand, target, qualification, total);
             return;
         }
         for index in start..self.complete_melds.len() {
@@ -531,7 +544,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
                     melds_left - 1,
                     index,
                     target,
-                    winning_context,
+                    qualification,
                     total,
                 );
                 remove(hand, &meld);
@@ -543,13 +556,13 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &mut HandCounts,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
         if !self.try_add(hand, &[target]) {
             return;
         }
-        self.collect_chiitoitsu_pairs(hand, 6, 0, target, winning_context, total);
+        self.collect_chiitoitsu_pairs(hand, 6, 0, target, qualification, total);
         remove(hand, &[target]);
     }
 
@@ -559,11 +572,11 @@ impl<'a> ReachedHiddenHandStates<'a> {
         pairs_left: usize,
         start: usize,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
         if pairs_left == 0 {
-            self.record(hand, target, winning_context, total);
+            self.record(hand, target, qualification, total);
             return;
         }
         let last = TileType::COUNT - pairs_left;
@@ -578,7 +591,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
                 pairs_left - 1,
                 index + 1,
                 target,
-                winning_context,
+                qualification,
                 total,
             );
             hand[index] -= 2;
@@ -589,7 +602,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &mut HandCounts,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
         if !target.is_yaochu() {
@@ -598,7 +611,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         let yaochu: Vec<TileType> = TileType::all().filter(|tile| tile.is_yaochu()).collect();
 
         if self.try_add(hand, &yaochu) {
-            self.record(hand, target, winning_context, total);
+            self.record(hand, target, qualification, total);
             remove(hand, &yaochu);
         }
 
@@ -608,7 +621,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         }
         for &extra in &others {
             if self.try_add(hand, &[extra]) {
-                self.record(hand, target, winning_context, total);
+                self.record(hand, target, qualification, total);
                 remove(hand, &[extra]);
             }
         }
@@ -631,7 +644,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         &mut self,
         hand: &HandCounts,
         target: TileType,
-        winning_context: Option<WinningContext>,
+        qualification: Option<RonQualification>,
         total: &mut RonCapableStateWeight,
     ) {
         self.metrics.generated_candidates += 1;
@@ -679,19 +692,23 @@ impl<'a> ReachedHiddenHandStates<'a> {
             }
         }
 
-        let completes = match winning_context {
-            Some(context) => {
-                let result = self.completes_hand_with_yaku(&mut ids, hand, target, context);
+        let completes = match qualification {
+            Some(qualification) => {
+                let result = self.completes_hand_with_yaku(&mut ids, hand, target, qualification);
                 self.metrics.target_completion += result.structural_completion;
                 self.metrics.yaku_evaluation += result.yaku_evaluation;
                 self.metrics.yakuman_evaluation += result.yakuman_evaluation;
                 self.metrics.target_completion_checks += u64::from(result.structural_checked);
                 self.metrics.completed_states += u64::from(result.structurally_complete);
+                self.metrics.guaranteed_yaku_shortcuts +=
+                    u64::from(result.guaranteed_yaku_shortcut);
                 self.metrics.yaku_evaluations += u64::from(result.yaku_evaluated);
                 self.metrics.yaku_successful_states += u64::from(result.yaku_successful);
                 self.metrics.yakuman_evaluations += u64::from(result.yakuman_evaluated);
                 self.metrics.yakuman_successful_states += u64::from(result.yakuman_successful);
-                result.yaku_successful || result.yakuman_successful
+                result.guaranteed_yaku_shortcut
+                    || result.yaku_successful
+                    || result.yakuman_successful
             }
             None => {
                 let checks_before = self.completion_checks.get();
@@ -762,7 +779,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         ids: &mut Vec<TileId>,
         hand: &HandCounts,
         tile: TileType,
-        winning_context: WinningContext,
+        qualification: RonQualification,
     ) -> YakuQualifiedCompletion {
         let copy = hand[tile.index()];
         if copy >= MAX_TILE_COPIES {
@@ -786,20 +803,25 @@ impl<'a> ReachedHiddenHandStates<'a> {
         if let Ok(analysis) = analysis
             && structurally_complete
         {
-            result.yaku_evaluated = true;
-            let yaku_start = Instant::now();
-            result.yaku_successful = evaluate_winning_yaku(&analysis, winning_context, tile)
-                .iter()
-                .any(|evaluation| !evaluation.is_empty());
-            result.yaku_evaluation = yaku_start.elapsed();
+            if qualification.guaranteed_yaku {
+                result.guaranteed_yaku_shortcut = true;
+            } else {
+                result.yaku_evaluated = true;
+                let yaku_start = Instant::now();
+                result.yaku_successful =
+                    evaluate_winning_yaku(&analysis, qualification.context, tile)
+                        .iter()
+                        .any(|evaluation| !evaluation.is_empty());
+                result.yaku_evaluation = yaku_start.elapsed();
+            }
 
             // Preserve the existing short-circuit order: named Yakuman is evaluated only when
             // ordinary yaku did not make this state ron-capable.
-            if !result.yaku_successful {
+            if !result.guaranteed_yaku_shortcut && !result.yaku_successful {
                 result.yakuman_evaluated = true;
                 let yakuman_start = Instant::now();
                 result.yakuman_successful =
-                    evaluate_winning_yakuman(&analysis, winning_context, tile)
+                    evaluate_winning_yakuman(&analysis, qualification.context, tile)
                         .iter()
                         .any(|evaluation| !evaluation.is_empty());
                 result.yakuman_evaluation = yakuman_start.elapsed();
