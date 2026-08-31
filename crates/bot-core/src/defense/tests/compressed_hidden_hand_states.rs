@@ -286,7 +286,9 @@ fn open_hand_ron_metrics_follow_the_actual_evaluator_boundaries() {
     assert_eq!(metrics.cache_misses, metrics.evaluated_states);
     assert_eq!(
         metrics.completion_checks,
-        metrics.furiten_completion_checks + metrics.target_completion_checks
+        metrics.furiten_completion_checks
+            + metrics.furiten_batch_checks
+            + metrics.target_completion_checks
     );
     assert_eq!(metrics.completed_states, 1);
     assert_eq!(metrics.tile_count_constructions, 1);
@@ -427,6 +429,19 @@ fn open_hand_other_wait_in_own_river_makes_the_multi_wait_furiten() {
         assert_open_ron_matches_all_counters("4m", &context),
         RonCapableStateWeight::default()
     );
+
+    let mut states = CompressedStructuralTenpaiHiddenHandStates::new(1, &context)
+        .expect("compressed open hand model");
+    assert_eq!(
+        states
+            .ron_capable_state_weight(tile_type("4m"))
+            .expect("known winning context"),
+        RonCapableStateWeight::default()
+    );
+    let metrics = states.ron_metrics().expect("initialized R enumerator");
+    assert!(metrics.furiten_batch_checks > 0);
+    assert!(metrics.furiten_candidate_tiles > 0);
+    assert_eq!(metrics.furiten_completion_checks, 0);
 }
 
 #[test]

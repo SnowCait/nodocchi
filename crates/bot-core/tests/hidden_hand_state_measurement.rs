@@ -288,7 +288,9 @@ fn compressed_report(
 fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
     assert_eq!(
         metrics.completion_checks,
-        metrics.furiten_completion_checks + metrics.target_completion_checks
+        metrics.furiten_completion_checks
+            + metrics.furiten_batch_checks
+            + metrics.target_completion_checks
     );
     assert_eq!(
         metrics.target_completion_checks,
@@ -339,8 +341,16 @@ fn open_hand_ron_enumerator_report(metrics: HiddenHandStateMetrics) {
         metrics.furiten_states_filtered
     );
     println!(
-        "      completion checks:        {}",
+        "      per-tile completion checks: {}",
         metrics.furiten_completion_checks
+    );
+    println!(
+        "      batch evaluations:        {}",
+        metrics.furiten_batch_checks
+    );
+    println!(
+        "      candidate tiles supplied: {}",
+        metrics.furiten_candidate_tiles
     );
     println!(
         "      elapsed:                  {:?}",

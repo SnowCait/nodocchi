@@ -283,6 +283,69 @@ pub fn is_standard_hand_complete(concealed: &TileCounts, fixed_meld_count: Fixed
     false
 }
 
+/// 指定した牌種集合のいずれか1枚で Standard hand が構造上完成するか。
+///
+/// 完成形を牌種ごとに作り直さず、1枚不足した concealed hand を一度探索する。不足牌を雀頭か
+/// 面子へ割り当てた後は [`is_standard_hand_complete`] と同じ [`visit_concealed_melds`] に合流
+/// する。手牌に4枚ある牌種は5枚目になり得ないため candidate から除外する。
+pub fn standard_completion_intersects(
+    concealed: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    candidate_tiles: &[TileType],
+) -> bool {
+    let concealed_meld_count = usize::from(FixedMeldCount::MAX - fixed_meld_count.get());
+    if usize::from(concealed.total()) != 1 + 3 * concealed_meld_count {
+        return false;
+    }
+
+    let candidates = CompletionCandidates::new(concealed, candidate_tiles);
+    if candidates.is_empty() {
+        return false;
+    }
+
+    for (pair, count) in concealed.iter() {
+        if count >= 1 && candidates.contains(pair) {
+            let mut rest = *concealed;
+            rest.remove(pair).expect("pair candidate tile is present");
+            if visit_concealed_melds(rest, concealed_meld_count, &mut CompletionFinder) {
+                return true;
+            }
+        }
+
+        if count >= 2 {
+            let mut rest = *concealed;
+            rest.remove_pair(pair).expect("checked pair count");
+            if visit_concealed_melds_with_candidate(rest, concealed_meld_count, &candidates) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompletionCandidates([bool; TileType::COUNT]);
+
+impl CompletionCandidates {
+    fn new(concealed: &TileCounts, candidate_tiles: &[TileType]) -> Self {
+        let mut candidates = [false; TileType::COUNT];
+        for &tile in candidate_tiles {
+            if concealed.count(tile) < 4 {
+                candidates[tile.index()] = true;
+            }
+        }
+        Self(candidates)
+    }
+
+    fn contains(&self, tile: TileType) -> bool {
+        self.0[tile.index()]
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.0.iter().any(|&candidate| candidate)
+    }
+}
+
 fn completed_concealed_meld_count(
     concealed: &TileCounts,
     fixed_meld_count: FixedMeldCount,
@@ -368,6 +431,74 @@ fn visit_concealed_melds(
     false
 }
 
+// 1枚不足した面子集合を探索する。不足牌を含まない完全な面子は canonical traversal と同じ
+// triplet / sequence removal を行い、不足牌を含む面子を確定した時点で visit_concealed_melds()
+// へ合流する。
+fn visit_concealed_melds_with_candidate(
+    counts: TileCounts,
+    remaining: usize,
+    candidates: &CompletionCandidates,
+) -> bool {
+    if remaining == 0 {
+        return false;
+    }
+
+    let Some(tile) = counts
+        .iter()
+        .find_map(|(tile, count)| (count >= 1).then_some(tile))
+    else {
+        return false;
+    };
+
+    let mut triplet_removed = counts;
+    if triplet_removed.remove_triplet(tile).is_ok()
+        && visit_concealed_melds_with_candidate(triplet_removed, remaining - 1, candidates)
+    {
+        return true;
+    }
+
+    let mut sequence_removed = counts;
+    if sequence_removed.remove_sequence(tile).is_ok()
+        && visit_concealed_melds_with_candidate(sequence_removed, remaining - 1, candidates)
+    {
+        return true;
+    }
+
+    let mut pair_removed = counts;
+    if candidates.contains(tile)
+        && pair_removed.remove_pair(tile).is_ok()
+        && visit_concealed_melds(pair_removed, remaining - 1, &mut CompletionFinder)
+    {
+        return true;
+    }
+
+    let mut adjacent_removed = counts;
+    let adjacent_candidate = tile
+        .previous_in_suit()
+        .is_some_and(|candidate| candidates.contains(candidate))
+        || tile
+            .second_next_in_suit()
+            .is_some_and(|candidate| candidates.contains(candidate));
+    if adjacent_candidate
+        && adjacent_removed.remove_adjacent_wait(tile).is_ok()
+        && visit_concealed_melds(adjacent_removed, remaining - 1, &mut CompletionFinder)
+    {
+        return true;
+    }
+
+    let mut skip_removed = counts;
+    if tile
+        .next_in_suit()
+        .is_some_and(|candidate| candidates.contains(candidate))
+        && skip_removed.remove_skip_wait(tile).is_ok()
+        && visit_concealed_melds(skip_removed, remaining - 1, &mut CompletionFinder)
+    {
+        return true;
+    }
+
+    false
+}
+
 fn chiitoitsu_decomposition(concealed: &TileCounts) -> Option<ChiitoitsuDecomposition> {
     if concealed.total() != COMPLETED_HAND_TILE_COUNT {
         return None;
@@ -413,6 +544,7 @@ fn kokushi_decomposition(concealed: &TileCounts) -> Option<KokushiDecomposition>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acceptance::structural_acceptance_tile_types_with_fixed_melds;
     use crate::meld::MeldKind;
     use crate::shanten::{
         calculate_shanten, calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten,
@@ -477,6 +609,38 @@ mod tests {
 
     fn fixed_count(value: u8) -> FixedMeldCount {
         FixedMeldCount::new(value).unwrap()
+    }
+
+    fn narrow_standard_completion_intersects(
+        counts: &TileCounts,
+        fixed_meld_count: FixedMeldCount,
+        candidates: &[TileType],
+    ) -> bool {
+        candidates.iter().any(|&tile| {
+            let mut completed = *counts;
+            completed.try_add(tile).is_ok()
+                && is_standard_hand_complete(&completed, fixed_meld_count)
+        })
+    }
+
+    fn assert_completion_intersection_oracles(
+        counts: &TileCounts,
+        fixed_meld_count: FixedMeldCount,
+        candidates: &[TileType],
+    ) {
+        let batch = standard_completion_intersects(counts, fixed_meld_count, candidates);
+        let narrow = narrow_standard_completion_intersects(counts, fixed_meld_count, candidates);
+        assert_eq!(
+            batch, narrow,
+            "counts={counts:?}, candidates={candidates:?}"
+        );
+
+        let waits = structural_acceptance_tile_types_with_fixed_melds(counts, fixed_meld_count);
+        let acceptance = candidates.iter().any(|candidate| waits.contains(candidate));
+        assert_eq!(
+            batch, acceptance,
+            "acceptance counts={counts:?}, candidates={candidates:?}, waits={waits:?}"
+        );
     }
 
     #[test]
@@ -620,6 +784,132 @@ mod tests {
             tile_type("1m"),
         ]);
         assert!(four_copies.try_add(tile_type("1m")).is_err());
+    }
+
+    #[test]
+    fn standard_completion_intersection_covers_wait_boundaries() {
+        let cases: &[(&str, u8, &[&str], &[&str])] = &[
+            (
+                "ryanmen",
+                1,
+                &["2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                &["1m", "4m"],
+            ),
+            (
+                "kanchan",
+                1,
+                &["1m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                &["2m"],
+            ),
+            (
+                "penchan",
+                1,
+                &["1m", "2m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                &["3m"],
+            ),
+            (
+                "shanpon",
+                1,
+                &["1m", "1m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"],
+                &["1m", "E"],
+            ),
+            (
+                "honor shanpon",
+                1,
+                &["1m", "2m", "3m", "4p", "5p", "6p", "E", "E", "S", "S"],
+                &["E", "S"],
+            ),
+            (
+                "tanki",
+                1,
+                &["1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E"],
+                &["E"],
+            ),
+            (
+                "multiple decompositions",
+                1,
+                &["1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "5m"],
+                &["2m", "3m", "4m", "5m"],
+            ),
+            (
+                "two fixed melds",
+                2,
+                &["1m", "2m", "3m", "4p", "5p", "6p", "E"],
+                &["E"],
+            ),
+            ("three fixed melds", 3, &["1m", "2m", "E", "E"], &["3m"]),
+        ];
+
+        for &(name, meld_count, hidden, waits) in cases {
+            let counts = TileCounts::from_tile_types(hidden.iter().map(|mjai| tile_type(mjai)));
+            let fixed_meld_count = fixed_count(meld_count);
+            let waits: Vec<_> = waits.iter().map(|mjai| tile_type(mjai)).collect();
+            let non_wait = tile_type("9p");
+
+            for candidates in [
+                Vec::new(),
+                vec![non_wait],
+                vec![non_wait, waits[0]],
+                waits.clone(),
+            ] {
+                assert_completion_intersection_oracles(&counts, fixed_meld_count, &candidates);
+            }
+            assert!(
+                standard_completion_intersects(&counts, fixed_meld_count, &waits),
+                "case: {name}"
+            );
+        }
+
+        let four_copies = TileCounts::from_tile_types([tile_type("5m"); 4]);
+        assert_completion_intersection_oracles(&four_copies, fixed_count(3), &[tile_type("5m")]);
+        assert!(!standard_completion_intersects(
+            &four_copies,
+            fixed_count(3),
+            &[tile_type("5m")]
+        ));
+    }
+
+    #[test]
+    fn standard_completion_intersection_matches_oracles_across_open_hand_counts() {
+        let palette = ["1m", "2m", "3m", "4m", "5m", "E"];
+
+        for meld_count in 1..=3u8 {
+            let fixed_meld_count = fixed_count(meld_count);
+            let concealed_len = 13 - 3 * usize::from(meld_count);
+            let mut checked = 0;
+
+            for mut encoded in 0..5u32.pow(palette.len() as u32) {
+                let mut counts = TileCounts::new();
+                for mjai in palette {
+                    let copies = (encoded % 5) as usize;
+                    encoded /= 5;
+                    let tile = tile_type(mjai);
+                    for _ in 0..copies {
+                        counts.add(tile);
+                    }
+                }
+                if usize::from(counts.total()) != concealed_len
+                    || standard_shanten_with_fixed_melds(&counts, fixed_meld_count) != 0
+                {
+                    continue;
+                }
+                checked += 1;
+
+                let candidate_sets = [
+                    Vec::new(),
+                    vec![tile_type("9p")],
+                    vec![tile_type("1m")],
+                    vec![tile_type("2m"), tile_type("4m")],
+                    vec![tile_type("9p"), tile_type("3m"), tile_type("E")],
+                    TileType::all().collect(),
+                ];
+                for candidates in candidate_sets {
+                    assert_completion_intersection_oracles(&counts, fixed_meld_count, &candidates);
+                }
+            }
+
+            assert!(checked > 0, "meld count: {meld_count}");
+        }
     }
 
     fn standard_shapes(analysis: &CompletedHandAnalysis) -> Vec<(TileType, Vec<ConcealedMeld>)> {
