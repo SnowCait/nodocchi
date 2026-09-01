@@ -436,6 +436,26 @@ impl<'a> ProductionProspectiveValuator<'a> {
         }
     }
 
+    /// 指定した攻撃モードの Tsumo baseline で評価したツモ打点。確定できない場合は `None`。
+    ///
+    /// production のリーチ判断が決めたモードで評価する [`ProspectiveTsumoValuator`] と、現在
+    /// 聴牌を forced Reach / forced Damaten で評価する診断が同じ scoring 経路を共有するための
+    /// 入口。baseline の組み立ても集約規則もここから先は1本しかない。
+    pub(crate) fn tsumo_value_with_mode(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> Option<TenpaiTsumoValue> {
+        let (baseline, ura_dora) = tsumo_scoring_inputs(self.context, mode)?;
+        let profile = evaluate_tenpai_hand_value(
+            &facts.hands,
+            baseline,
+            self.context.dora_indicators(),
+            ura_dora,
+        );
+        tsumo_value(&profile)
+    }
+
     // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計)。確定できない場合は `None`。
     fn selection_value(&self, facts: &ProspectiveFacts) -> Option<u64> {
         let (baseline, ura_dora) =
@@ -459,14 +479,7 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
 impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
         let facts = self.tenpai_facts(tenpai)?;
-        let (baseline, ura_dora) = tsumo_scoring_inputs(self.context, self.offense_mode(&facts))?;
-        let profile = evaluate_tenpai_hand_value(
-            &facts.hands,
-            baseline,
-            self.context.dora_indicators(),
-            ura_dora,
-        );
-        tsumo_value(&profile)
+        self.tsumo_value_with_mode(&facts, self.offense_mode(&facts))
     }
 }
 

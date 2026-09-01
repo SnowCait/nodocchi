@@ -593,6 +593,11 @@ mod tests {
             "{summary_only}"
         );
         assert!(!summary_only.contains("Lookahead"), "{summary_only}");
+        // self-tsumo 比較のための点数計算も Summary だけの経路では行わない。
+        assert!(
+            !summary_only.contains("self-tsumo comparison"),
+            "{summary_only}"
+        );
 
         let lookahead = run_args(&[hand.as_slice(), &["--lookahead"]].concat()).unwrap();
         assert!(
@@ -604,7 +609,31 @@ mod tests {
             lookahead.contains("    continuation branches: "),
             "{lookahead}"
         );
+        assert!(
+            lookahead.contains("    self-tsumo comparison"),
+            "{lookahead}"
+        );
         assert!(!lookahead.contains("      new wait: "), "{lookahead}");
+    }
+
+    #[test]
+    fn the_self_tsumo_comparison_needs_the_remaining_tiles() {
+        // 山の残枚数を渡した局面だけ「今すぐリーチ」と「ダマ継続」を同じ尺度で比べられる。
+        // 渡さない局面では推測せず unknown のままにする。
+        let hand = ["--hand", "340678m789p34789s", "--lookahead"];
+        let unknown = run_args(&hand).unwrap();
+        assert!(unknown.contains("      reach now: unknown"), "{unknown}");
+
+        let known = run_args(&[hand.as_slice(), &["--remaining-tiles", "70"]].concat()).unwrap();
+        assert!(!known.contains("      reach now: unknown"), "{known}");
+        for line in [
+            "      reach now: ",
+            "      damaten continuation: ",
+            "      damaten immediate tsumo: ",
+            "      damaten after non-winning draw: ",
+        ] {
+            assert!(known.contains(line), "{line}\n{known}");
+        }
     }
 
     #[test]

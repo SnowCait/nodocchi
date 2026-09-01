@@ -11,7 +11,8 @@ use bot_core::{
     PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic,
     RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic,
     StrongTenpaiRequirement, TenpaiContinuationBranch, TenpaiContinuationCandidate,
-    TenpaiContinuationDiagnostic, TenpaiOffenseValue, ThreatDefenseTarget,
+    TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
+    ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -1044,6 +1045,7 @@ fn format_tenpai_continuation_candidate(
             candidate.branch_remaining()
         ),
     ];
+    lines.extend(format_tenpai_self_tsumo_comparison(&candidate.self_tsumo));
 
     if !verbose {
         return lines;
@@ -1056,6 +1058,33 @@ fn format_tenpai_continuation_candidate(
         lines.extend(format_tenpai_continuation_branch(branch));
     }
     lines
+}
+
+// 「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べる。内訳のダマ即ツモ・手変わり
+// 後もそのまま出し、どちらが大きいかの結論はまだ出さない。
+//
+// 値は継続診断が既存 self-tsumo 確率模型で求めたものそのもので、表示のために評価をやり直さない。
+// 評価できなかった値は 0 点にせず unknown として出す。
+fn format_tenpai_self_tsumo_comparison(comparison: &TenpaiSelfTsumoComparison) -> Vec<String> {
+    vec![
+        "    self-tsumo comparison".to_string(),
+        format!(
+            "      reach now: {}",
+            format_self_tsumo_value(comparison.reach_now)
+        ),
+        format!(
+            "      damaten continuation: {}",
+            format_self_tsumo_value(comparison.damaten_continuation())
+        ),
+        format!(
+            "      damaten immediate tsumo: {}",
+            format_self_tsumo_value(comparison.damaten_immediate_tsumo)
+        ),
+        format!(
+            "      damaten after non-winning draw: {}",
+            format_self_tsumo_value(comparison.damaten_continuation_branches)
+        ),
+    ]
 }
 
 // 成立した継続枝1件。非和了ツモの物理牌から次の待ちと攻撃モードまでを1つの塊で並べ、
@@ -2575,13 +2604,27 @@ mod tests {
     }"#;
 
     fn rendered_with_lookahead(json: &str, verbose: bool) -> String {
+        rendered_with_lookahead_diagnostic(json, verbose).rendered
+    }
+
+    // 表示と、その表示の元になった診断。表示した値が診断の値そのものであることを確認する
+    // テストが、同じ局面を2回探索しなくてよいように1回の構築から両方を取り出す。
+    struct RenderedDiagnostic {
+        rendered: String,
+        diagnostic: ShantenDecisionDiagnostic,
+    }
+
+    fn rendered_with_lookahead_diagnostic(json: &str, verbose: bool) -> RenderedDiagnostic {
         let scenario = scenario_from_json(json);
         let diagnostic = ShantenAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
         );
-        format_diagnostic(&scenario, &diagnostic, verbose)
+        RenderedDiagnostic {
+            rendered: format_diagnostic(&scenario, &diagnostic, verbose),
+            diagnostic,
+        }
     }
 
     // same-shanten の枝をテンパイまで追った詳細診断。深い探索なので必要なテストだけで使う。
@@ -6614,22 +6657,43 @@ mod tests {
     }
 
     // 345m 678m 789p 789s + 34s の実戦形 (5m は赤5)。打 3s で 4s 単騎テンパイになり、そこから
-    // 3m を引いて 4s を切ると 3m / 6m / 9m の三面待ちへ変わる。簡易 CLI と同じ baseline を明示する。
+    // 3m を引いて 4s を切ると 3m / 6m / 9m の三面待ちへ変わる。簡易 CLI と同じ baseline を明示し、
+    // 山の残枚数まで既知にして self-tsumo 比較の材料も揃える。
     const TENPAI_CONTINUATION_REAL_SCENARIO: &str = r#"{
         "hand": "340678m789p34789s",
         "round_wind": "E",
         "player_id": 0,
-        "oya": 1
+        "oya": 1,
+        "remaining_tiles": 70
     }"#;
 
-    static TENPAI_CONTINUATION_REAL: LazyLock<String> =
-        LazyLock::new(|| rendered_with_lookahead(TENPAI_CONTINUATION_REAL_SCENARIO, true));
+    static TENPAI_CONTINUATION_REAL: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
+        rendered_with_lookahead_diagnostic(TENPAI_CONTINUATION_REAL_SCENARIO, true)
+    });
+
+    // 継続診断が持つ self-tsumo 比較。表示した値が診断の値そのものであることを確認するために
+    // 使い、テスト側で期待値を組み立て直さない。
+    fn tenpai_continuation_self_tsumo(
+        rendered: &RenderedDiagnostic,
+        discard: &str,
+    ) -> TenpaiSelfTsumoComparison {
+        rendered
+            .diagnostic
+            .normal_discard_tenpai_continuation
+            .as_ref()
+            .expect("継続診断がある")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.discard.to_mjai_string() == discard)
+            .unwrap_or_else(|| panic!("打 {discard} の候補がある"))
+            .self_tsumo
+    }
 
     #[test]
     fn verbose_tenpai_continuation_follows_a_real_tenpai_to_a_three_sided_wait() {
         // 打 3s の 4s 単騎から 3m ツモ → 打 4s で 3m / 6m / 9m の9枚待ちへ変わる。待ちも残枚数も
         // 既存 next discard 評価の受け入れそのもの。
-        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL, "3s");
+        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL.rendered, "3s");
 
         assert!(
             continuation.contains("    current wait: 4s(3) / 3 remaining"),
@@ -6647,10 +6711,64 @@ mod tests {
     }
 
     #[test]
+    fn tenpai_continuation_shows_the_self_tsumo_comparison() {
+        // 「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べ、内訳も出す。値は
+        // 継続診断が持つものそのままで、表示のために評価をやり直さない。
+        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL.rendered, "3s");
+        let comparison = tenpai_continuation_self_tsumo(&TENPAI_CONTINUATION_REAL, "3s");
+
+        assert!(
+            continuation.contains(
+                &[
+                    "    self-tsumo comparison",
+                    &format!(
+                        "      reach now: {}",
+                        format_self_tsumo_value(comparison.reach_now)
+                    ),
+                    &format!(
+                        "      damaten continuation: {}",
+                        format_self_tsumo_value(comparison.damaten_continuation())
+                    ),
+                    &format!(
+                        "      damaten immediate tsumo: {}",
+                        format_self_tsumo_value(comparison.damaten_immediate_tsumo)
+                    ),
+                    &format!(
+                        "      damaten after non-winning draw: {}",
+                        format_self_tsumo_value(comparison.damaten_continuation_branches)
+                    ),
+                ]
+                .join("\n")
+            ),
+            "{continuation}"
+        );
+        assert!(comparison.reach_now.is_some(), "{continuation}");
+        assert!(
+            comparison.damaten_continuation().is_some(),
+            "{continuation}"
+        );
+    }
+
+    #[test]
+    fn the_self_tsumo_comparison_is_unknown_without_the_remaining_tiles() {
+        // 山の残枚数が分からない局面では自摸機会を推測しないので、0 点ではなく unknown を出す。
+        let continuation = continuation_candidate(&TENPAI_CONTINUATION_VERBOSE, "E");
+
+        for line in [
+            format!("      reach now: {UNKNOWN}"),
+            format!("      damaten continuation: {UNKNOWN}"),
+            format!("      damaten immediate tsumo: {UNKNOWN}"),
+            format!("      damaten after non-winning draw: {UNKNOWN}"),
+        ] {
+            assert!(continuation.contains(&line), "{line}\n{continuation}");
+        }
+    }
+
+    #[test]
     fn tenpai_continuation_keeps_the_branch_that_holds_the_current_wait() {
         // ツモ切りで元の待ちを維持する枝も継続枝に含める。「今すぐリーチ」と「ダマ継続」を
         // 比べるには待ちが変わらない場合の価値も必要なので、待ちが変わる枝だけへは絞らない。
-        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL, "3s");
+        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL.rendered, "3s");
 
         let branch = [
             "    drawn 1p: 4 remaining (1p: 4 remaining)",

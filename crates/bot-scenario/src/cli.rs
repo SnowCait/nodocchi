@@ -5,7 +5,8 @@ use crate::scenario::{HistoryFuritenSpec, ScenarioSpec};
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
                [--seat-wind <WIND>] [--player-id <0..3>] [--oya <0..3>]
-               [--extra-visible-tiles <TILES>] [--no-history-furiten] [--allow-hora]
+               [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
+               [--no-history-furiten] [--allow-hora]
                [--allow-ryukyoku] [--lookahead] [--verbose] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]
@@ -14,6 +15,7 @@ pub const USAGE: &str = "usage:
 
   --dora is a backward-compatible alias of --dora-indicator
   --extra-visible-tiles adds visible tiles that no other option expresses
+  --remaining-tiles is the live wall count, which the self-tsumo continuation needs
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
@@ -51,6 +53,9 @@ pub enum CliError {
 
     #[error("{option} must be a number, but is {value:?}")]
     InvalidSeatValue { option: String, value: String },
+
+    #[error("{option} must be a number, but is {value:?}")]
+    InvalidCount { option: String, value: String },
 
     #[error("--dora-indicator cannot be combined with its alias --dora")]
     ConflictingDoraIndicator,
@@ -153,6 +158,10 @@ impl CliArgs {
                 }
                 "--oya" => {
                     spec.oya = Some(seat_value_of(&mut args, "--oya")?);
+                    inline_options = true;
+                }
+                "--remaining-tiles" => {
+                    spec.remaining_tiles = Some(count_value_of(&mut args, "--remaining-tiles")?);
                     inline_options = true;
                 }
                 "--no-history-furiten" => {
@@ -325,6 +334,19 @@ where
     })
 }
 
+// 山の残枚数も CLI は数値化だけを担当し、局面としての妥当性は JSON scenario と同じ
+// `Scenario::resolve()` の canonical path に任せる。
+fn count_value_of<I>(args: &mut I, option: &str) -> Result<u32, CliError>
+where
+    I: Iterator<Item = String>,
+{
+    let value = value_of(args, option)?;
+    value.parse::<u32>().map_err(|_| CliError::InvalidCount {
+        option: option.to_string(),
+        value,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,6 +498,34 @@ mod tests {
             Err(CliError::ConflictingBenchmarkInput(
                 "scenario options".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn parses_remaining_tiles() {
+        // self-tsumo continuation は山の残枚数から残り自摸機会を求めるので、簡易 CLI からも
+        // 渡せるようにする。省略した局面では unknown のまま推測しない。
+        let spec = inline_spec(&["--hand", "123m", "--remaining-tiles", "70"]);
+        assert_eq!(spec.remaining_tiles, Some(70));
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap().context.remaining_tiles(),
+            Some(70)
+        );
+        assert_eq!(inline_spec(&["--hand", "123m"]).remaining_tiles, None);
+    }
+
+    #[test]
+    fn rejects_remaining_tiles_without_a_number() {
+        assert_eq!(
+            parse(&["--hand", "123m", "--remaining-tiles", "many"]),
+            Err(CliError::InvalidCount {
+                option: "--remaining-tiles".to_string(),
+                value: "many".to_string(),
+            })
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--remaining-tiles"]),
+            Err(CliError::MissingValue("--remaining-tiles".to_string()))
         );
     }
 

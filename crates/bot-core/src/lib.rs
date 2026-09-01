@@ -125,6 +125,7 @@ pub use ryukyoku_decision::{
 };
 pub use tenpai_continuation::{
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
+    TenpaiSelfTsumoComparison,
 };
 pub use threat::{
     FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,

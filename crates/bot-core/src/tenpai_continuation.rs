@@ -35,28 +35,70 @@
 //! 判断できない局面でも未リーチだと推測しない。どちらも [`TenpaiContinuationDiagnostic`] を
 //! 構築しない (`None`)。
 //!
+//! # self-tsumo 比較
+//!
+//! 「今すぐリーチする」と「ダマで1巡継続する」を、既存 self-tsumo 確率模型
+//! ([`bot_logic::self_tsumo`](bot_logic)) の期待ツモ支払い
+//! [[`SELF_TSUMO_VALUE_SCALE`](bot_logic::SELF_TSUMO_VALUE_SCALE)] という同じ単位へ揃える。
+//!
+//! ```text
+//! U0 = 現在打牌後の unknown physical tiles
+//! n  = 現在打牌後に残っている自分の自摸機会
+//!
+//! reach now         = 現在聴牌の forced Reach Tsumo baseline を
+//!                     TenpaiTsumoValue::expected_payment(U0, n) で評価
+//!
+//! damaten           = 現在聴牌の Damaten Tsumo baseline を最初の1自摸だけ
+//!   immediate tsumo   評価した expected_payment(U0, 1)
+//!
+//! damaten           = Σ(非和了牌 variant を最初に引く経路確率
+//!   continuation         × その先の terminal tenpai の期待ツモ支払い)
+//!   branches
+//! ```
+//!
+//! 経路確率も terminal tenpai の horizon も既存 [`SelfTsumoPath::immediate`] そのままなので、
+//! 継続後は自然に `U0 - 1` / `n - 1` になる。この `-1` をこの層が数え直すことはない。
+//! terminal tenpai のツモ打点も、既存2手先評価が枝に持っている
+//! [`DrawVariantLookaheadDiagnostic::tsumo_continuation`] をそのまま使う。したがって継続後の
+//! Reach / Damaten も既存 prospective evaluation が決めたモードのままで、「今ダマを選んだから
+//! 未来もダマ」と固定しない。
+//!
+//! 現在の和了牌は最初の自摸で引く枝 (Damaten Tsumo baseline) としてだけ数え、継続枝
+//! ([`DrawTransition::SameShanten`]) には現れないので二重計上にならない。
+//!
+//! 評価できない値は 0 点にしない。[`SelfTsumoFacts`] を作れない・ツモ打点の入力が足りない・
+//! リーチが現在局面で合法でない・継続枝の terminal ツモ打点が確定しない場合は、その集計値を
+//! `None` にする。「探索していない」と「0点」を混同しない。
+//!
 //! # 打牌選択への接続
 //!
-//! 現時点では diagnostics 専用で、打牌選択には接続していない。
-//! Σ(残枚数 × 継続後の打点) のような集計値も、現在聴牌の
-//! [`OffenseValue`](crate::offense_value::OffenseValue) と比較する係数も threshold も持たない。
-//! 継続枝と現在聴牌の攻撃打点はまだ同じ確率模型・同じ horizon に揃っていないため、単純に
-//! 足したり比べたりできる量ではない。
+//! 現時点では diagnostics 専用で、打牌選択には接続していない。self-tsumo 比較にも winner も
+//! `should_reach` も持たせず、現在聴牌の
+//! [`OffenseValue`](crate::offense_value::OffenseValue) のような別単位の値と比べる係数も
+//! threshold も持たない。
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
-    DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile, LookaheadDiagnostic, TileId, TileType,
+    DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile, LookaheadDiagnostic,
+    ProspectiveTenpai, SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue, TileId, TileType,
+    is_menzen, split_discarded_tile,
 };
 
 use crate::context::GameContext;
 use crate::offense_value::TenpaiOffenseMode;
 use crate::prospective_value::{
-    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveDrawVariantValue,
-    ProspectiveLookaheadDiagnostic, ProspectiveTenpaiValue, ProspectiveWaitValue,
+    ProductionProspectiveValuator, ProspectiveDiscardValue, ProspectiveDrawValue,
+    ProspectiveDrawVariantValue, ProspectiveFacts, ProspectiveLookaheadDiagnostic,
+    ProspectiveTenpaiValue, ProspectiveWaitValue,
 };
+use crate::reach_policy::{ReachLegalityFacts, is_reach_legal};
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
+
+// ダマで現在の待ちをツモ和了できるのは、手変わりする前の1自摸だけ。2巡目以降は継続枝側が
+// terminal tenpai として評価する。
+const FIRST_DRAW: u32 = 1;
 
 /// 現在聴牌候補をダマで継続した場合の診断。
 ///
@@ -86,6 +128,8 @@ pub struct TenpaiContinuationCandidate {
     ///
     /// 待ちが変わる枝と、ツモ切りで元の待ちを維持する枝の両方を含む。
     pub branches: Vec<TenpaiContinuationBranch>,
+    /// 「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べた比較。
+    pub self_tsumo: TenpaiSelfTsumoComparison,
 }
 
 impl TenpaiContinuationCandidate {
@@ -121,6 +165,11 @@ pub struct TenpaiContinuationBranch {
     pub draw_remaining: u8,
     /// 物理牌 variant 単位の枝。次打牌・将来打点は既存診断が持つ値そのもの。
     pub variant: ProspectiveDrawVariantValue,
+    /// 継続後の terminal tenpai のツモ打点。既存2手先評価が枝に持っている値そのもの。
+    ///
+    /// ツモ打点を確定できない枝 (攻撃モードが [`TenpaiOffenseMode::Unknown`]・点数計算の入力
+    /// 不足など) は `None`。0点として扱わない。
+    pub tsumo_continuation: Option<TenpaiTsumoValue>,
 }
 
 impl TenpaiContinuationBranch {
@@ -173,73 +222,156 @@ impl TenpaiContinuationBranch {
         self.variant.selection_value
     }
 
+    /// この非和了ツモを最初の1自摸で引く経路の期待ツモ支払い
+    /// [[`SELF_TSUMO_VALUE_SCALE`](bot_logic::SELF_TSUMO_VALUE_SCALE)]。
+    ///
+    /// 経路確率も terminal tenpai の horizon も既存 [`SelfTsumoPath::immediate`] そのままで、
+    /// この層は確率も期待支払いも組み立てない。terminal tenpai のツモ打点を確定できない枝と、
+    /// 未確認牌が1枚も無く経路を作れない局面は 0 点にせず `None`。
+    pub fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
+        let terminal = self.tsumo_continuation?;
+        let path = SelfTsumoPath::immediate(self.remaining(), facts.unknown_tiles)?;
+        Some(path.expected_payment(facts, terminal))
+    }
+
     fn evaluated(&self) -> Option<&ProspectiveTenpaiValue> {
         self.variant.outcome.evaluated()
     }
 }
 
+/// 現在聴牌1件分の「今すぐリーチ」と「ダマで1巡継続」の比較。
+///
+/// どちらも既存 self-tsumo 確率模型の期待ツモ支払い
+/// [[`SELF_TSUMO_VALUE_SCALE`](bot_logic::SELF_TSUMO_VALUE_SCALE)] で、同じ `U0` / `n` から
+/// 組み立てた同じ単位の値になる。どちらを選ぶかの結論 (winner / `should_reach`) はまだ持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TenpaiSelfTsumoComparison {
+    /// 今すぐリーチして手変わりせず、残り自摸機会全体でツモ和了する期待支払い。
+    ///
+    /// リーチが現在局面で合法でない場合と、ツモ打点を確定できない場合は `None`。
+    pub reach_now: Option<u64>,
+    /// ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い。
+    pub damaten_immediate_tsumo: Option<u64>,
+    /// 非和了牌を引いて手変わりした先の terminal tenpai の期待支払い合計。
+    ///
+    /// 継続枝が1件も無い場合は寄与が無いので 0 で、枝の terminal ツモ打点を1つでも確定できない
+    /// 場合は `None`。
+    pub damaten_continuation_branches: Option<u64>,
+}
+
+impl TenpaiSelfTsumoComparison {
+    /// ダマで1巡継続した場合の期待ツモ支払い合計。
+    ///
+    /// 「最初の1自摸で現在の待ちを引く枝」と「非和了牌を引いて手変わりする枝」の和で、どちらかを
+    /// 確定できない場合は `None`。
+    pub fn damaten_continuation(&self) -> Option<u64> {
+        Some(
+            self.damaten_immediate_tsumo?
+                .saturating_add(self.damaten_continuation_branches?),
+        )
+    }
+}
+
+/// 現在聴牌の継続診断を構築するための材料。
+///
+/// どれも打牌選択が既に構築・使用した値そのもので、この診断のために作り直したものは無い。
+/// `evaluations` / `lookahead` / `value` は同じ候補集合から作った同じ順序のものを渡す。
+pub(crate) struct TenpaiContinuationInputs<'a> {
+    pub context: &'a GameContext,
+    /// 現在打牌前の全物理牌 (手牌 + ツモ牌)。現在聴牌の手牌を組み立てるために使う。
+    pub tiles: &'a [TileId],
+    /// 打牌選択が使ったものと同じ評価器。ツモ打点の baseline もモード判定もこれが持つ。
+    pub valuator: &'a ProductionProspectiveValuator<'a>,
+    /// self-tsumo 確率模型の事実。材料が揃わない局面では `None`。
+    pub self_tsumo_facts: Option<SelfTsumoFacts>,
+    pub evaluations: &'a [DiscardEvaluation],
+    pub lookahead: &'a LookaheadDiagnostic,
+    pub value: &'a ProspectiveLookaheadDiagnostic,
+}
+
 /// 構築済みの2手先評価とその将来打点から、現在聴牌候補の継続枝を絞り込む。
 ///
-/// 探索も打牌評価も点数計算も行わず、既に構築済みの枝を選び直すだけ。`evaluations` /
-/// `lookahead` / `value` は同じ候補集合から作った同じ順序のものを渡す。対応しない場合は推測せず
-/// `None` にする。
+/// 枝の探索も打牌評価も待ち計算も行わず、既に構築済みの枝を選び直すだけ。self-tsumo 比較の
+/// ための点数計算だけは、現在打牌後の聴牌が既存2手先評価の対象に無いため既存 Tsumo scoring
+/// helper へ委ねる。確率模型も待ちも点数計算規則もこの層は持たない。候補の順序が対応しない
+/// 場合は推測せず `None` にする。
 ///
 /// 自分が未リーチと確定していない局面 (既リーチ・自分の席が不明) では `None`。
 pub(crate) fn diagnose_tenpai_continuation(
-    context: &GameContext,
-    evaluations: &[DiscardEvaluation],
-    lookahead: &LookaheadDiagnostic,
-    value: &ProspectiveLookaheadDiagnostic,
+    inputs: &TenpaiContinuationInputs,
 ) -> Option<TenpaiContinuationDiagnostic> {
-    if context.own_reached() != Some(false) {
+    if inputs.context.own_reached() != Some(false) {
         return None;
     }
-    if lookahead.candidates.len() != evaluations.len()
-        || value.candidates.len() != evaluations.len()
+    if inputs.lookahead.candidates.len() != inputs.evaluations.len()
+        || inputs.value.candidates.len() != inputs.evaluations.len()
     {
         return None;
     }
 
+    let reach_legal = current_reach_legal(inputs.context);
     Some(TenpaiContinuationDiagnostic {
-        candidates: evaluations
+        candidates: inputs
+            .evaluations
             .iter()
-            .zip(&lookahead.candidates)
-            .zip(&value.candidates)
+            .zip(&inputs.lookahead.candidates)
+            .zip(&inputs.value.candidates)
             .filter(|((evaluation, candidate), value)| {
                 evaluation.min_shanten_after_discard() == TENPAI_SHANTEN
                     && candidate.discard == evaluation.discard
                     && value.discard == evaluation.discard
             })
             .map(|((evaluation, candidate), value)| {
-                candidate_continuation(evaluation, candidate, value)
+                candidate_continuation(inputs, reach_legal, evaluation, candidate, value)
             })
             .collect(),
+    })
+}
+
+// 現在局面でリーチが合法か。合法条件は production と共有する [`is_reach_legal`] だけが持つ。
+//
+// 候補ごとに変わるのは打牌後テンパイかどうかだけで、この診断の候補は全て現在打牌後が聴牌
+// なので局面全体で1回だけ判定する。未来テンパイの判定 (`prospective_value`) と違い現在局面の
+// 山残枚数は既知の fact なのでそのまま渡し、分からない材料はリーチ不可と推測しない。
+fn current_reach_legal(context: &GameContext) -> bool {
+    is_reach_legal(ReachLegalityFacts {
+        menzen: context.own_melds().map(is_menzen),
+        already_reached: context.own_reached(),
+        score: context.own_score(),
+        remaining_tiles: context.remaining_tiles(),
+        tenpai_after_discard: true,
     })
 }
 
 // 現在聴牌候補1件分の継続枝。非和了ツモは既存分類 (same-shanten) そのもので、和了牌の枝
 // (Progress) はここへ入らない。
 fn candidate_continuation(
+    inputs: &TenpaiContinuationInputs,
+    reach_legal: bool,
     evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
     value: &ProspectiveDiscardValue,
 ) -> TenpaiContinuationCandidate {
+    let branches: Vec<_> = candidate
+        .draws
+        .iter()
+        .zip(&value.draws)
+        .filter(|(draw, value)| {
+            draw.transition == DrawTransition::SameShanten && draw.draw == value.draw
+        })
+        .flat_map(|(draw, value)| draw_branches(draw, value))
+        .collect();
+
     TenpaiContinuationCandidate {
         discard: evaluation.discard,
         current_wait: evaluation.acceptance_after_discard.tiles.clone(),
-        branches: candidate
-            .draws
-            .iter()
-            .zip(&value.draws)
-            .filter(|(draw, value)| {
-                draw.transition == DrawTransition::SameShanten && draw.draw == value.draw
-            })
-            .flat_map(|(draw, value)| draw_branches(draw, value))
-            .collect(),
+        self_tsumo: candidate_self_tsumo(inputs, reach_legal, evaluation, &branches),
+        branches,
     }
 }
 
-// 非和了ツモ1牌種分の枝。既存2手先評価が構造 (次打牌後が聴牌か) を、既存将来打点が値を持つ。
+// 非和了ツモ1牌種分の枝。既存2手先評価が構造 (次打牌後が聴牌か) と terminal ツモ打点を、
+// 既存将来打点が待ち・モード・ロン baseline の打点を持つ。
 fn draw_branches<'a>(
     draw: &'a DrawLookaheadDiagnostic,
     value: &'a ProspectiveDrawValue,
@@ -250,11 +382,77 @@ fn draw_branches<'a>(
         .filter(|(variant, value)| {
             variant.drawn_tile == value.drawn_tile && continues_tenpai(variant)
         })
-        .map(|(_, value)| TenpaiContinuationBranch {
+        .map(|(variant, value)| TenpaiContinuationBranch {
             draw: draw.draw,
             draw_remaining: draw.remaining,
             variant: value.clone(),
+            tsumo_continuation: variant.tsumo_continuation,
         })
+}
+
+// 現在聴牌候補1件分の self-tsumo 比較。
+//
+// 確率模型の材料が揃わない局面ではどの値も持たない。現在聴牌の手牌を組み立てられない候補でも
+// 継続枝側の集計は成立するので、確定できない値だけを `None` にする。
+fn candidate_self_tsumo(
+    inputs: &TenpaiContinuationInputs,
+    reach_legal: bool,
+    evaluation: &DiscardEvaluation,
+    branches: &[TenpaiContinuationBranch],
+) -> TenpaiSelfTsumoComparison {
+    let Some(facts) = inputs.self_tsumo_facts else {
+        return TenpaiSelfTsumoComparison::default();
+    };
+    let current = current_tenpai_facts(inputs.valuator, inputs.tiles, evaluation);
+    let expected_payment = |mode, own_draws| {
+        baseline_expected_payment(inputs.valuator, current.as_ref()?, mode, own_draws, facts)
+    };
+
+    TenpaiSelfTsumoComparison {
+        reach_now: reach_legal
+            .then(|| expected_payment(TenpaiOffenseMode::Reach, facts.own_future_draws))
+            .flatten(),
+        damaten_immediate_tsumo: expected_payment(TenpaiOffenseMode::Damaten, FIRST_DRAW),
+        damaten_continuation_branches: branch_total(branches, facts),
+    }
+}
+
+// 現在打牌後の聴牌を、指定した攻撃モードの Tsumo baseline で `own_draws` 回以内に自摸和了する
+// 期待支払いへ畳む。baseline も点数計算も集約も既存 Tsumo scoring helper が持つ。
+fn baseline_expected_payment(
+    valuator: &ProductionProspectiveValuator,
+    current: &ProspectiveFacts,
+    mode: TenpaiOffenseMode,
+    own_draws: u32,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    Some(
+        valuator
+            .tsumo_value_with_mode(current, mode)?
+            .expected_payment(facts.unknown_tiles, own_draws),
+    )
+}
+
+// 現在打牌後の聴牌1件分の評価材料。手牌の組み立てもフリテン判定も、既存2手先評価の将来テンパイ
+// と同じ helper を通す。
+fn current_tenpai_facts(
+    valuator: &ProductionProspectiveValuator,
+    tiles: &[TileId],
+    evaluation: &DiscardEvaluation,
+) -> Option<ProspectiveFacts> {
+    let (discarded, concealed_tiles) = split_discarded_tile(tiles.to_vec(), evaluation)?;
+    valuator.tenpai_facts(&ProspectiveTenpai {
+        concealed_tiles: &concealed_tiles,
+        acceptance: &evaluation.acceptance_after_discard,
+        discarded_tiles: &[discarded],
+    })
+}
+
+// 継続枝の期待支払い合計。1つでも確定できない枝があれば 0 点へ潰さず `None`。
+fn branch_total(branches: &[TenpaiContinuationBranch], facts: SelfTsumoFacts) -> Option<u64> {
+    branches.iter().try_fold(0, |total: u64, branch| {
+        Some(total.saturating_add(branch.expected_self_tsumo_value(facts)?))
+    })
 }
 
 // 最善打牌後が再び聴牌になった枝だけが継続成立。打牌候補が1件も無い枝と、聴牌に戻らない枝は
@@ -272,10 +470,12 @@ mod tests {
     use bot_logic::HistoryFuritenFacts;
 
     use crate::action::LegalAction;
+    use crate::context::TableStateFacts;
     use crate::discard_selection::{
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic,
     };
+    use crate::reach_policy::REACH_MIN_SCORE;
 
     // 123m 456m 789m 123p 東 の門前13枚に南をツモった単騎テンパイ。打 E で南単騎、打 S で東単騎
     // になり、どちらの現在聴牌からも、非和了ツモ1枚とその後の最善打牌でダマ継続できる。
@@ -283,6 +483,18 @@ mod tests {
         "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "E",
     ];
     const DRAW: &str = "S";
+
+    // 345m 678m 789p 789s + 34s の実戦形 (5m は赤5)。打 3s で 4s 単騎テンパイになり、3m を
+    // ツモって 4s を切ると 3m / 6m / 9m の三面待ちへ変わる。
+    const REAL_HAND: [&str; 14] = [
+        "3m", "4m", "5mr", "6m", "7m", "8m", "7p", "8p", "9p", "3s", "4s", "7s", "8s", "9s",
+    ];
+
+    // 山の残枚数。4人で分けて自分の残り自摸機会になる。
+    const REMAINING_TILES: u32 = 70;
+
+    // リーチ宣言に足りない持ち点。
+    const BELOW_REACH_SCORE: i32 = REACH_MIN_SCORE - 100;
 
     // 同じ牌種の赤5 / 黒5を取り違えないよう、物理牌を1枚ずつ払い出す。
     struct TileIdSource {
@@ -315,40 +527,60 @@ mod tests {
     }
 
     struct CaseSpec<'a> {
+        /// 打牌前の手牌。ツモ牌を含まない13枚か、ツモ牌まで含んだ14枚。
+        hand: &'a [&'a str],
+        /// 直前のツモ牌。`hand` が14枚の局面では `None`。
+        draw: Option<&'a str>,
         extra_visible: &'a [&'a str],
         own_reached: bool,
         /// 自分の席。`None` では既リーチかどうかを判断できない。
         player_id: Option<u8>,
+        /// 山の残枚数。`None` では self-tsumo 確率模型の材料が揃わない。
+        remaining_tiles: Option<u32>,
+        /// 全員の持ち点。`None` では持ち点が分からない。
+        scores: Option<[i32; 4]>,
         scope: LookaheadDiagnosticScope,
     }
 
     impl Default for CaseSpec<'_> {
         fn default() -> Self {
             Self {
+                hand: &HAND,
+                draw: Some(DRAW),
                 extra_visible: &[],
                 own_reached: false,
                 player_id: Some(0),
+                remaining_tiles: None,
+                scores: None,
                 scope: LookaheadDiagnosticScope::Lookahead,
             }
         }
     }
 
+    // 局面と、その局面で打牌評価の対象になる物理牌。診断が使うものと同じ材料をテストからも
+    // 組み立てられるようにする。
+    struct CaseContext {
+        context: GameContext,
+        tiles: Vec<TileId>,
+        actions: Vec<LegalAction>,
+    }
+
     impl CaseSpec<'_> {
-        fn build(self) -> DiscardActionSelectionWithDiagnostic {
+        fn build(&self) -> DiscardActionSelectionWithDiagnostic {
+            let case = self.context();
+            select_discard_action_with_diagnostic(&case.context, &case.actions, self.scope)
+        }
+
+        fn context(&self) -> CaseContext {
             let mut source = TileIdSource::new();
-            let hand_tiles = source.tiles(&HAND);
-            let drawn_tile = source.tile(DRAW);
+            let hand_tiles = source.tiles(self.hand);
+            let drawn_tile = self.draw.map(|draw| source.tile(draw));
             let extra_visible = source.tiles(self.extra_visible);
 
-            let visible: Vec<TileId> = hand_tiles
+            let tiles: Vec<TileId> = hand_tiles.iter().copied().chain(drawn_tile).collect();
+            let visible: Vec<TileId> = tiles.iter().chain(extra_visible.iter()).copied().collect();
+            let actions: Vec<LegalAction> = tiles
                 .iter()
-                .chain([&drawn_tile])
-                .chain(extra_visible.iter())
-                .copied()
-                .collect();
-            let actions: Vec<LegalAction> = hand_tiles
-                .iter()
-                .chain([&drawn_tile])
                 .map(|&tile| LegalAction::Dahai { tile })
                 .collect();
 
@@ -358,7 +590,7 @@ mod tests {
             }
 
             let context = GameContext::from_parts_with_table_state(
-                Some(drawn_tile),
+                drawn_tile,
                 hand_tiles,
                 Vec::new(),
                 Some(tile("E")),
@@ -369,12 +601,39 @@ mod tests {
                 Default::default(),
                 reached,
             )
+            .with_table_state_facts(TableStateFacts {
+                remaining_tiles: self.remaining_tiles,
+                scores: self.scores,
+                ..Default::default()
+            })
             .with_history_furiten_facts(HistoryFuritenFacts {
                 same_turn: Some(false),
                 riichi_missed_win: Some(false),
             });
 
-            select_discard_action_with_diagnostic(&context, &actions, self.scope)
+            CaseContext {
+                context,
+                tiles,
+                actions,
+            }
+        }
+    }
+
+    // self-tsumo 比較の材料が揃う局面。山の残枚数だけを既知にする。
+    fn self_tsumo_spec() -> CaseSpec<'static> {
+        CaseSpec {
+            remaining_tiles: Some(REMAINING_TILES),
+            ..CaseSpec::default()
+        }
+    }
+
+    // 打 3s で 4s 単騎になる実戦形。self-tsumo 比較の材料まで揃える。
+    fn real_spec() -> CaseSpec<'static> {
+        CaseSpec {
+            hand: &REAL_HAND,
+            draw: None,
+            remaining_tiles: Some(REMAINING_TILES),
+            ..CaseSpec::default()
         }
     }
 
@@ -388,6 +647,10 @@ mod tests {
         }
         .build()
     });
+    static SELF_TSUMO_CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
+        LazyLock::new(|| self_tsumo_spec().build());
+    static REAL_CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
+        LazyLock::new(|| real_spec().build());
 
     fn continuation(
         selection: &DiscardActionSelectionWithDiagnostic,
@@ -428,6 +691,78 @@ mod tests {
             .iter()
             .map(|wait| wait.winning_tile)
             .collect()
+    }
+
+    // self-tsumo 比較に使われた確率模型の事実。打牌選択が使った値そのもの。
+    fn self_tsumo_facts(selection: &DiscardActionSelectionWithDiagnostic) -> SelfTsumoFacts {
+        selection
+            .self_tsumo_facts
+            .expect("self-tsumo 確率模型の材料が揃っている")
+    }
+
+    // 打牌候補1件の評価。打牌選択が実際に使った (合法 Dahai へ絞り込み・物理牌補正済みの)
+    // 評価そのものを診断から取り出す。
+    fn evaluation_of<'a>(
+        selection: &'a DiscardActionSelectionWithDiagnostic,
+        discard: &str,
+    ) -> &'a DiscardEvaluation {
+        selection
+            .diagnostic
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.evaluation)
+            .find(|evaluation| evaluation.discard == tile(discard))
+            .unwrap_or_else(|| panic!("打 {discard} の評価がある"))
+    }
+
+    // 現在打牌後の聴牌を、指定した攻撃モードの Tsumo baseline で評価したツモ打点。テスト側でも
+    // 診断と同じ既存 helper だけを通し、確率も点数計算も書き直さない。
+    fn current_tsumo_value(
+        case: &CaseContext,
+        selection: &DiscardActionSelectionWithDiagnostic,
+        discard: &str,
+        mode: TenpaiOffenseMode,
+    ) -> TenpaiTsumoValue {
+        let valuator = ProductionProspectiveValuator::new(&case.context);
+        let facts = current_tenpai_facts(&valuator, &case.tiles, evaluation_of(selection, discard))
+            .expect("現在聴牌を組み立てられる");
+        valuator
+            .tsumo_value_with_mode(&facts, mode)
+            .expect("ツモ打点を確定できる")
+    }
+
+    // 継続枝の terminal tenpai を、既存2手先評価と同じ手順で組み立て直した評価材料。物理牌の
+    // 出し入れだけを追い、待ちも点数計算もこの helper は行わない。
+    fn branch_tenpai_facts(
+        valuator: &ProductionProspectiveValuator,
+        case: &CaseContext,
+        evaluation: &DiscardEvaluation,
+        variant: &DrawVariantLookaheadDiagnostic,
+    ) -> ProspectiveFacts {
+        let (first, after_first) =
+            split_discarded_tile(case.tiles.clone(), evaluation).expect("現在打牌を切れる");
+        let mut after_draw = after_first;
+        after_draw.push(variant.drawn_tile);
+        let next = variant.next_discard.as_ref().expect("次打牌がある");
+        let (second, concealed_tiles) =
+            split_discarded_tile(after_draw, next).expect("次打牌を切れる");
+
+        valuator
+            .tenpai_facts(&ProspectiveTenpai {
+                concealed_tiles: &concealed_tiles,
+                acceptance: &next.acceptance_after_discard,
+                discarded_tiles: &[first, second],
+            })
+            .expect("継続後の聴牌を組み立てられる")
+    }
+
+    // 打 3s (4s 単騎テンパイ) の継続枝。
+    fn discard_three_sou(
+        selection: &DiscardActionSelectionWithDiagnostic,
+    ) -> &TenpaiContinuationCandidate {
+        continuation(selection)
+            .candidate(tile("3s"))
+            .expect("打 3s の現在聴牌候補がある")
     }
 
     #[test]
@@ -646,5 +981,298 @@ mod tests {
     #[test]
     fn continuation_does_not_change_the_normal_selection() {
         assert_eq!(CASE.selection, NO_LOOKAHEAD.selection);
+    }
+
+    // ---- self-tsumo 比較 ----
+
+    #[test]
+    fn reach_now_uses_the_forced_reach_tsumo_baseline_of_the_current_tenpai() {
+        let selection = &*SELF_TSUMO_CASE;
+        let case = self_tsumo_spec().context();
+        let facts = self_tsumo_facts(selection);
+        let reach = current_tsumo_value(&case, selection, "E", TenpaiOffenseMode::Reach);
+
+        // production が現在ダマを選ぶかどうかに依らず、比較対象は forced Reach baseline。
+        assert_eq!(
+            discard_east(selection).self_tsumo.reach_now,
+            Some(reach.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+        );
+
+        // ダマ baseline とは別の baseline で、リーチ1翻の分だけツモ打点が高い。
+        let damaten = current_tsumo_value(&case, selection, "E", TenpaiOffenseMode::Damaten);
+        assert_eq!(reach.winning_remaining, damaten.winning_remaining);
+        assert!(reach.weighted_total > damaten.weighted_total);
+    }
+
+    #[test]
+    fn reach_now_evaluates_every_remaining_own_draw() {
+        let selection = &*SELF_TSUMO_CASE;
+        let case = self_tsumo_spec().context();
+        let facts = self_tsumo_facts(selection);
+        let reach = current_tsumo_value(&case, selection, "E", TenpaiOffenseMode::Reach);
+        let unknown = facts.unknown_tiles;
+
+        // 手変わりしないまま残り自摸機会全体を既存閉形式で評価した値そのもの。
+        assert!(facts.own_future_draws > FIRST_DRAW);
+        assert_eq!(
+            discard_east(selection).self_tsumo.reach_now,
+            Some(reach.expected_payment(unknown, facts.own_future_draws))
+        );
+        assert!(
+            reach.expected_payment(unknown, facts.own_future_draws)
+                > reach.expected_payment(unknown, facts.own_future_draws - 1)
+        );
+        assert!(
+            reach.expected_payment(unknown, facts.own_future_draws)
+                > reach.expected_payment(unknown, FIRST_DRAW)
+        );
+    }
+
+    #[test]
+    fn the_damaten_continuation_includes_an_immediate_tsumo_of_the_current_wait() {
+        let selection = &*SELF_TSUMO_CASE;
+        let case = self_tsumo_spec().context();
+        let facts = self_tsumo_facts(selection);
+        let damaten = current_tsumo_value(&case, selection, "E", TenpaiOffenseMode::Damaten);
+        let comparison = discard_east(selection).self_tsumo;
+
+        // 現在の待ちをダマのまま引く枝は、手変わりする前の最初の1自摸だけ。
+        assert_eq!(
+            comparison.damaten_immediate_tsumo,
+            Some(damaten.expected_payment(facts.unknown_tiles, FIRST_DRAW))
+        );
+        assert!(comparison.damaten_immediate_tsumo > Some(0));
+        assert!(
+            comparison.damaten_immediate_tsumo
+                < Some(damaten.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+        );
+    }
+
+    #[test]
+    fn the_current_wait_is_not_counted_twice_in_the_continuation_branches() {
+        let selection = &*SELF_TSUMO_CASE;
+        let candidate = discard_east(selection);
+        let comparison = candidate.self_tsumo;
+
+        // 現在の和了牌 (南) は即ツモ枝としてだけ数え、継続枝には現れない。
+        assert!(
+            !candidate
+                .branches
+                .iter()
+                .any(|branch| branch.draw == tile("S"))
+        );
+        assert_eq!(
+            comparison.damaten_continuation(),
+            Some(
+                comparison
+                    .damaten_immediate_tsumo
+                    .expect("即ツモ枝を確定できる")
+                    + comparison
+                        .damaten_continuation_branches
+                        .expect("手変わり枝を確定できる")
+            )
+        );
+    }
+
+    #[test]
+    fn a_non_winning_draw_branch_uses_the_immediate_path_probability() {
+        let selection = &*SELF_TSUMO_CASE;
+        let facts = self_tsumo_facts(selection);
+        let candidate = discard_east(selection);
+
+        let mut total = 0u64;
+        for branch in &candidate.branches {
+            let path = SelfTsumoPath::immediate(branch.remaining(), facts.unknown_tiles)
+                .expect("経路を作れる");
+            let terminal = branch
+                .tsumo_continuation
+                .expect("terminal ツモ打点を確定できる");
+            let value = branch.expected_self_tsumo_value(facts);
+
+            assert_eq!(value, Some(path.expected_payment(facts, terminal)));
+            total += value.expect("枝の期待支払いを確定できる");
+        }
+
+        // 集計値は枝の期待支払いの単純な合計で、係数も正規化も入らない。
+        assert_eq!(
+            candidate.self_tsumo.damaten_continuation_branches,
+            Some(total)
+        );
+    }
+
+    #[test]
+    fn a_continuation_branch_consumes_one_unknown_tile_and_one_own_draw() {
+        let selection = &*SELF_TSUMO_CASE;
+        let facts = self_tsumo_facts(selection);
+        let branch = branch(discard_east(selection), "1m");
+        let path = SelfTsumoPath::immediate(branch.remaining(), facts.unknown_tiles)
+            .expect("経路を作れる");
+
+        // 継続後の terminal tenpai は U0 - 1 / n - 1 で、既存 SelfTsumoPath の semantics そのもの。
+        assert_eq!(
+            path.terminal_unknown_tiles(facts),
+            facts.unknown_tiles - FIRST_DRAW
+        );
+        assert_eq!(
+            path.terminal_own_future_draws(facts),
+            facts.own_future_draws - FIRST_DRAW
+        );
+        assert_eq!(
+            branch.expected_self_tsumo_value(facts),
+            Some(path.expected_payment(
+                facts,
+                branch.tsumo_continuation.expect("terminal ツモ打点がある")
+            ))
+        );
+    }
+
+    #[test]
+    fn the_tsumogiri_branch_that_holds_the_wait_contributes_to_the_aggregate() {
+        let selection = &*SELF_TSUMO_CASE;
+        let facts = self_tsumo_facts(selection);
+        let candidate = discard_east(selection);
+        let branch = branch(candidate, "2m");
+
+        // ツモ切りで南単騎のまま継続する枝も、待ちが変わる枝と同じ集計に入る。
+        assert_eq!(branch.next_discard(), Some(tile("2m")));
+        assert_eq!(wait_tiles(branch), vec![tile("S")]);
+        let value = branch
+            .expected_self_tsumo_value(facts)
+            .expect("枝の期待支払いを確定できる");
+        assert!(value > 0);
+        assert!(candidate.self_tsumo.damaten_continuation_branches >= Some(value));
+    }
+
+    #[test]
+    fn a_wait_improving_branch_contributes_to_the_damaten_continuation() {
+        let selection = &*REAL_CASE;
+        let facts = self_tsumo_facts(selection);
+        let candidate = discard_three_sou(selection);
+        let branch = branch(candidate, "3m");
+
+        // 4s 単騎から 3m ツモ → 打 4s で 3m / 6m / 9m の9枚待ちへ変わる枝。
+        assert_eq!(candidate.current_wait_remaining(), 3);
+        assert_eq!(branch.next_discard(), Some(tile("4s")));
+        assert_eq!(wait_tiles(branch), vec![tile("3m"), tile("6m"), tile("9m")]);
+        assert_eq!(branch.wait_type_count(), 3);
+        assert_eq!(branch.wait_remaining(), 9);
+
+        let value = branch
+            .expected_self_tsumo_value(facts)
+            .expect("枝の期待支払いを確定できる");
+        assert!(value > 0);
+        assert!(candidate.self_tsumo.damaten_continuation_branches >= Some(value));
+    }
+
+    #[test]
+    fn red_and_black_five_branches_keep_their_own_tsumo_value() {
+        let selection = &*SELF_TSUMO_CASE;
+        let facts = self_tsumo_facts(selection);
+        let candidate = discard_east(selection);
+        let red = branch(candidate, "5mr");
+        let black = branch(candidate, "5m");
+
+        // 待ちは同じでも、赤5を手牌へ残す枝の方が継続後のツモ打点が高い。
+        let red_terminal = red.tsumo_continuation.expect("terminal ツモ打点がある");
+        let black_terminal = black.tsumo_continuation.expect("terminal ツモ打点がある");
+        assert_eq!(wait_tiles(red), wait_tiles(black));
+        assert_eq!(
+            red_terminal.winning_remaining,
+            black_terminal.winning_remaining
+        );
+        assert!(red_terminal.weighted_total > black_terminal.weighted_total);
+
+        // 経路確率は物理牌 variant ごとの残枚数のままで、牌種の残枚数へ潰さない。
+        assert_eq!((red.remaining(), black.remaining()), (1, 2));
+        assert_eq!(red.draw_remaining, black.draw_remaining);
+        for branch in [red, black] {
+            let path = SelfTsumoPath::immediate(branch.remaining(), facts.unknown_tiles)
+                .expect("経路を作れる");
+            assert_eq!(
+                branch.expected_self_tsumo_value(facts),
+                Some(path.expected_payment(
+                    facts,
+                    branch.tsumo_continuation.expect("terminal ツモ打点がある")
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn a_continuation_branch_keeps_the_mode_of_the_existing_prospective_evaluation() {
+        let selection = &*REAL_CASE;
+        let case = real_spec().context();
+        let valuator = ProductionProspectiveValuator::new(&case.context);
+        let evaluation = evaluation_of(selection, "3s");
+        let lookahead = selection.lookahead.as_ref().expect("2手先診断がある");
+        let candidate = discard_three_sou(selection);
+
+        for branch in &candidate.branches {
+            let variant = lookahead
+                .candidate(candidate.discard)
+                .expect("同じ候補の2手先評価がある")
+                .draw(branch.draw)
+                .expect("同じ牌種の枝がある")
+                .variant(branch.drawn_tile())
+                .expect("同じ物理牌の枝がある");
+            let mode = branch.offense_mode().expect("攻撃モードが確定している");
+            let facts = branch_tenpai_facts(&valuator, &case, evaluation, variant);
+
+            // 継続後のツモ打点は、既存 prospective evaluation が決めたモードの baseline のまま。
+            assert_eq!(branch.tsumo_continuation, variant.tsumo_continuation);
+            assert_eq!(
+                branch.tsumo_continuation,
+                valuator.tsumo_value_with_mode(&facts, mode)
+            );
+
+            // モードを取り違えれば別の baseline になり、値も変わる。
+            let other = match mode {
+                TenpaiOffenseMode::Reach => TenpaiOffenseMode::Damaten,
+                TenpaiOffenseMode::Damaten | TenpaiOffenseMode::Unknown => TenpaiOffenseMode::Reach,
+            };
+            assert_ne!(
+                branch.tsumo_continuation,
+                valuator.tsumo_value_with_mode(&facts, other)
+            );
+        }
+    }
+
+    #[test]
+    fn an_illegal_reach_has_no_reach_now_value() {
+        let selection = CaseSpec {
+            scores: Some([BELOW_REACH_SCORE; 4]),
+            ..self_tsumo_spec()
+        }
+        .build();
+        let comparison = discard_east(&selection).self_tsumo;
+
+        // 合法でないリーチを仮定して値を作らない。ダマ側は同じ材料のまま確定する。
+        assert_eq!(comparison.reach_now, None);
+        assert!(comparison.damaten_continuation().is_some());
+    }
+
+    #[test]
+    fn unknown_remaining_tiles_do_not_produce_a_guessed_value() {
+        // 山の残枚数が分からない局面では自摸機会を推測せず、どの集計値も持たない。
+        let comparison = discard_east(&CASE).self_tsumo;
+
+        assert_eq!(CASE.self_tsumo_facts, None);
+        assert_eq!(comparison.reach_now, None);
+        assert_eq!(comparison.damaten_immediate_tsumo, None);
+        assert_eq!(comparison.damaten_continuation_branches, None);
+        assert_eq!(comparison.damaten_continuation(), None);
+    }
+
+    #[test]
+    fn the_self_tsumo_comparison_does_not_change_the_normal_selection() {
+        assert_eq!(
+            SELF_TSUMO_CASE.selection,
+            CaseSpec {
+                scope: LookaheadDiagnosticScope::None,
+                ..self_tsumo_spec()
+            }
+            .build()
+            .selection
+        );
     }
 }
