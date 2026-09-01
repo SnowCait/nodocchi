@@ -46,17 +46,35 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 ## Logging
 
-`--log-file <PATH>` を指定すると console 出力を維持したまま同じ log を file にも保存します。file 側は ANSI escape sequence を含みません。directory は自動生成しないため、file を開けない場合は起動時 error になります。
+`RUST_LOG` を指定せずに起動した場合、console は従来どおり `info` だけを表示します。`--log-file <PATH>` を指定すると、console を静かに保ったまま file 側へ判断調査用 preset を自動適用します。
+
+| 出力先 | `RUST_LOG` 未指定時の filter |
+| --- | --- |
+| console | 全体 `info` |
+| log file | 全体 `info`、agent decision `debug`、push/pull `debug`、通常打牌候補比較 `trace`、防御候補比較 `trace` |
+
+通常の実戦調査では、次のように `--log-file` を指定するだけで後から判断根拠を確認できます。
 
 ```bash
-RUST_LOG=info,bot_core::agent_decision=debug,bot_core::discard_selection=debug \
 cargo run -p riichilab-client --bin riichilab-client -- \
   ranked \
   --agent shanten \
   --log-file logs/ranked.log
 ```
 
-`RUST_LOG` の filter は console と file で共通です。`agent decision` や `discard_selection` の診断 log も双方へ出力されます。
+investigation preset の target は既存 instrumentation の `bot_core::agent_decision=debug`、`bot_core::push_pull=debug`、`bot_core::discard_selection=trace`、`bot_core::defense=trace` です。`bot_core` 全体の trace は有効にしません。
+
+`RUST_LOG` を明示した場合は特殊調査用の override として扱い、console と file の両方へその filter をそのまま適用します。この場合、investigation preset は暗黙に追加しません。
+
+```bash
+RUST_LOG=bot_core::push_pull=trace \
+cargo run -p riichilab-client --bin riichilab-client -- \
+  ranked \
+  --agent shanten \
+  --log-file logs/ranked.log
+```
+
+file は既存どおり追記で、ANSI escape sequence を含みません。directory は自動生成しないため、file を開けない場合は起動時 error になります。
 
 ## request_action の capture
 
