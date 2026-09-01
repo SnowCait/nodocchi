@@ -15,6 +15,7 @@ pub mod open_hand_threat;
 pub mod prospective_value;
 pub mod push_pull;
 pub mod reach_policy;
+pub mod tenpai_hand_change;
 pub mod threat;
 
 pub use action::LegalAction;
@@ -115,6 +116,9 @@ pub use push_pull::{
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
     decide_reach_reason, is_reach_legal,
+};
+pub use tenpai_hand_change::{
+    TenpaiHandChangeBranch, TenpaiHandChangeCandidate, TenpaiHandChangeDiagnostic,
 };
 pub use threat::{
     FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,
