@@ -21,6 +21,7 @@ cargo run -p bot-scenario -- \
 | `--seat-wind` | 任意 | 自風。`E` / `S` / `W` / `N` |
 | `--player-id <0..3>` | 任意 | 自分の席 |
 | `--oya <0..3>` | 任意 | 親の席 |
+| `--extra-visible-tiles` | 任意 | 他の option で表現していない見え牌 |
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
@@ -43,6 +44,15 @@ history_furiten.riichi_missed_win = false
 
 `--no-history-furiten` は baseline と結果上は同じですが、「現在は同巡内フリテンではなく、かつリーチ後見逃しフリテンでもない」と明示する shorthand です。いずれかが `true` の局面や、履歴フリテンを unknown のまま扱う局面は JSON scenario で指定します。
 
+`--extra-visible-tiles` は JSON scenario の `extra_visible_tiles` と同じ意味で、手牌・ツモ牌・ドラ表示牌以外に見えている牌を加えます。加えた牌は受け入れ残枚数や待ちの残枚数へ反映されます。JSON scenario、RiichiLab capture、benchmark とは他の inline option と同じく併用できません。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "34599m235p345567s" \
+  --extra-visible-tiles "11p 44p" \
+  --summary-only
+```
+
 `reached` と `discards` は簡易 CLI からは指定できません。防御を含む局面や正確な実戦局面は JSON scenario または RiichiLab capture を使用してください。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。
 
 ### 入力モードごとの fact
@@ -55,6 +65,31 @@ history_furiten.riichi_missed_win = false
 | production AI | 実際の入力 facts を使用し、unknown を inline baseline で補完しない |
 
 inline baseline は `bot-scenario` の入力補助であり、AI 本体が未知の局面情報を推測するルールではありません。正確な再現には JSON scenario、実戦観測の再生には RiichiLab capture を使用してください。
+
+## Summary
+
+`--summary-only` は Summary section だけを表示します。Summary は「何を選んだか」と「次点がなぜ負けたか」を短く確認するためのもので、候補ごとの metric 一覧は持ちません。
+
+choice 2 / 3 が数値 comparator で負けた場合だけ、`lost by` の下へ比較値を1行追加します。
+
+```text
+  choice 1: 7p
+  choice 1 source: NormalDiscard
+
+  choice 2: 6s
+  choice 2 source: NormalDiscard
+  choice 2 lost by: WeightedNextAcceptanceRemaining
+  choice 2 comparison: choice 1 428 > choice 2 396
+
+  choice 3: W
+  choice 3 source: NormalDiscard
+  choice 3 lost by: WeightedNextAcceptanceRemaining
+  choice 3 comparison: choice 2 396 > choice 3 384
+```
+
+`comparison:` の値は、その `lost by` を実際に決めた同一比較の winner と loser の値です。下位 choice は上位 choice を除いて再診断するため候補集合が変わり、候補集合単位で有効・無効が決まる軸もあります。順位ごとに別々の診断から値を混ぜず、決着した比較と同じ候補集合から両方の値を取ります。choice 3 が choice 2 に負けた比較なら、比較相手も choice 2 になります。
+
+`StableOrder` や category / bool 系のように、決着した比較から両方の値を取得できない comparator では従来どおり `lost by` だけを表示します。候補ごとの metric 一覧は `Normal discard candidates` を参照してください。
 
 ## 牌表記
 

@@ -1932,8 +1932,15 @@ fn summary_choice(
     if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
         lines.push(format!("  {prefix} opponent honor value: {value}"));
     }
-    if let Some(reason) = choice_comparison_reason(previous, diagnostic) {
+    if let Some(comparison) = choice_comparison(previous, diagnostic) {
+        let reason = comparison.loser.comparison_reason;
         lines.push(format!("  {prefix} lost by: {reason:?}"));
+        if let Some((winner_value, loser_value)) = choice_comparison_values(&comparison) {
+            lines.push(format!(
+                "  {prefix} comparison: choice {} {winner_value} > choice {rank} {loser_value}",
+                rank - 1
+            ));
+        }
     }
 
     lines
@@ -2167,10 +2174,15 @@ fn legal_actions_without_selected(
         .collect()
 }
 
-fn choice_comparison_reason(
-    diagnostic: &ShantenDecisionDiagnostic,
+struct ChoiceComparison<'a> {
+    winner: &'a DiscardCandidateDiagnostic,
+    loser: &'a DiscardCandidateDiagnostic,
+}
+
+fn choice_comparison<'a>(
+    diagnostic: &'a ShantenDecisionDiagnostic,
     choice: &ShantenDecisionDiagnostic,
-) -> Option<DiscardComparisonReason> {
+) -> Option<ChoiceComparison<'a>> {
     if diagnostic.selected_source != AgentActionSource::NormalDiscard
         || choice.selected_source != AgentActionSource::NormalDiscard
     {
@@ -2181,16 +2193,57 @@ fn choice_comparison_reason(
         return None;
     };
 
-    diagnostic
-        .normal_discard
-        .as_ref()?
-        .candidates
-        .iter()
-        .find(|candidate| {
-            candidate.evaluation.discard == tile.tile_type()
-                && candidate.evaluation.discards_red_five == tile.is_red()
-        })
-        .map(|candidate| candidate.comparison_reason)
+    let candidates = &diagnostic.normal_discard.as_ref()?.candidates;
+    let loser = candidates.iter().find(|candidate| {
+        candidate.evaluation.discard == tile.tile_type()
+            && candidate.evaluation.discards_red_five == tile.is_red()
+    })?;
+    let winner = candidates.iter().find(|candidate| candidate.selected)?;
+    Some(ChoiceComparison { winner, loser })
+}
+
+fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, String)> {
+    let ChoiceComparison { winner, loser } = comparison;
+    let pair = match loser.comparison_reason {
+        DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal => (
+            winner.current_tenpai_offense_weighted_total?.to_string(),
+            loser.current_tenpai_offense_weighted_total?.to_string(),
+        ),
+        DiscardComparisonReason::ExpectedSelfTsumoValue => (
+            format_self_tsumo_value(Some(winner.expected_self_tsumo_value?)),
+            format_self_tsumo_value(Some(loser.expected_self_tsumo_value?)),
+        ),
+        DiscardComparisonReason::WeightedProspectiveValue => (
+            winner.prospective_value?.to_string(),
+            loser.prospective_value?.to_string(),
+        ),
+        DiscardComparisonReason::WeightedTenpaiWaitRemaining => (
+            winner.tenpai_wait?.weighted_remaining.to_string(),
+            loser.tenpai_wait?.weighted_remaining.to_string(),
+        ),
+        DiscardComparisonReason::WeightedTenpaiWaitTypeCount => (
+            winner.tenpai_wait?.weighted_type_count.to_string(),
+            loser.tenpai_wait?.weighted_type_count.to_string(),
+        ),
+        DiscardComparisonReason::WeightedNextAcceptanceRemaining => (
+            winner.next_acceptance?.weighted_remaining.to_string(),
+            loser.next_acceptance?.weighted_remaining.to_string(),
+        ),
+        DiscardComparisonReason::WeightedNextAcceptanceTypeCount => (
+            winner.next_acceptance?.weighted_type_count.to_string(),
+            loser.next_acceptance?.weighted_type_count.to_string(),
+        ),
+        DiscardComparisonReason::AcceptanceRemaining => (
+            winner.evaluation.acceptance_total_remaining().to_string(),
+            loser.evaluation.acceptance_total_remaining().to_string(),
+        ),
+        DiscardComparisonReason::AcceptanceTypeCount => (
+            winner.evaluation.acceptance_type_count().to_string(),
+            loser.evaluation.acceptance_type_count().to_string(),
+        ),
+        _ => return None,
+    };
+    Some(pair)
 }
 
 fn discard_label(evaluation: &DiscardEvaluation) -> String {
@@ -4417,6 +4470,213 @@ mod tests {
         assert!(
             summary.contains("  choice 3 lost by: ValueHonor"),
             "{summary}"
+        );
+    }
+
+    const CURRENT_TENPAI_OFFENSE_WITHOUT_REACH_SCENARIO: &str = r#"{
+        "hand": "34599m235p345567s",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 1,
+        "discards": ["", "", "", ""],
+        "remaining_tiles": 3,
+        "history_furiten": {
+            "same_turn": false,
+            "riichi_missed_win": false
+        }
+    }"#;
+
+    fn cohort_candidate<'a>(
+        diagnostic: &'a ShantenDecisionDiagnostic,
+        tile: &str,
+    ) -> &'a DiscardCandidateDiagnostic {
+        diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated")
+            .candidates
+            .iter()
+            .find(|candidate| discard_label(&candidate.evaluation) == tile)
+            .unwrap_or_else(|| panic!("missing candidate {tile}"))
+    }
+
+    fn cohort_winner(diagnostic: &ShantenDecisionDiagnostic) -> &DiscardCandidateDiagnostic {
+        diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("selected candidate")
+    }
+
+    #[test]
+    fn summary_shows_the_current_tenpai_offense_comparison() {
+        let (_, diagnostic, output) =
+            rendered(CURRENT_TENPAI_OFFENSE_WITHOUT_REACH_SCENARIO, false);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+
+        let winner = cohort_candidate(&diagnostic, "2p");
+        let loser = cohort_candidate(&diagnostic, "5p");
+        assert!(winner.selected);
+        assert_eq!(
+            loser.comparison_reason,
+            DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        );
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  choice 1: 2p"), "{summary}");
+        assert!(summary.contains("  choice 2: 5p"), "{summary}");
+        assert!(
+            summary.contains("  choice 2 lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!(
+                "  choice 2 comparison: choice 1 {} > choice 2 {}",
+                winner
+                    .current_tenpai_offense_weighted_total
+                    .expect("winner weighted total"),
+                loser
+                    .current_tenpai_offense_weighted_total
+                    .expect("loser weighted total"),
+            )),
+            "{summary}"
+        );
+
+        assert!(summary.contains("  choice 3 lost by: Shanten"), "{summary}");
+        assert!(!summary.contains("  choice 3 comparison:"), "{summary}");
+    }
+
+    #[test]
+    fn summary_shows_the_weighted_tenpai_wait_comparison() {
+        let (selected, runner_up, output) = iishanten_tenpai_wait_candidates();
+
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  choice 2 lost by: WeightedTenpaiWaitRemaining"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!(
+                "  choice 2 comparison: choice 1 {} > choice 2 {}",
+                selected
+                    .tenpai_wait
+                    .expect("weighted wait")
+                    .weighted_remaining,
+                runner_up
+                    .tenpai_wait
+                    .expect("weighted wait")
+                    .weighted_remaining,
+            )),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_compares_choice_3_against_choice_2() {
+        let (scenario, _, output) = rendered(RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO, false);
+        let choices = expected_choices(&scenario, 3);
+        let deciding = &choices[1];
+        let winner = cohort_winner(deciding);
+        let loser = cohort_candidate(deciding, &action_label(&choices[2].selected_action));
+        assert_eq!(
+            loser.comparison_reason,
+            DiscardComparisonReason::WeightedNextAcceptanceRemaining
+        );
+
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  choice 3 lost by: WeightedNextAcceptanceRemaining"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!(
+                "  choice 3 comparison: choice 2 {} > choice 3 {}",
+                winner
+                    .next_acceptance
+                    .expect("winner next acceptance")
+                    .weighted_remaining,
+                loser
+                    .next_acceptance
+                    .expect("loser next acceptance")
+                    .weighted_remaining,
+            )),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_comparison_comes_from_the_diagnostic_that_decided_the_loss() {
+        let (scenario, diagnostic, output) = rendered(CURRENT_TENPAI_OFFENSE_SCENARIO, false);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+
+        let choices = expected_choices(&scenario, 3);
+        let deciding = &choices[1];
+        let winner = cohort_candidate(deciding, "2p");
+        let loser = cohort_candidate(deciding, "5p");
+        assert!(winner.selected);
+
+        let first_choice_winner = cohort_candidate(&diagnostic, "2p")
+            .current_tenpai_offense_weighted_total
+            .expect("winner weighted total");
+        assert_ne!(
+            Some(first_choice_winner),
+            winner.current_tenpai_offense_weighted_total
+        );
+
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  choice 3 lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&format!(
+                "  choice 3 comparison: choice 2 {} > choice 3 {}",
+                winner
+                    .current_tenpai_offense_weighted_total
+                    .expect("winner weighted total"),
+                loser
+                    .current_tenpai_offense_weighted_total
+                    .expect("loser weighted total"),
+            )),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains(&format!("choice 2 {first_choice_winner}")),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_omits_the_comparison_for_a_non_numeric_reason() {
+        let (_, _, output) = rendered(NORMAL_SCENARIO, false);
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  choice 2 lost by: StableOrder"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  choice 3 lost by: ValueHonor"),
+            "{summary}"
+        );
+        assert!(!summary.contains("comparison:"), "{summary}");
+    }
+
+    #[test]
+    fn summary_comparison_does_not_build_lookahead() {
+        let (scenario, diagnostic, _) =
+            rendered(CURRENT_TENPAI_OFFENSE_WITHOUT_REACH_SCENARIO, false);
+        let choices = diagnose_choices(&scenario, &diagnostic, 3);
+
+        assert_eq!(choices.len(), 3);
+        assert!(
+            choices.iter().all(|choice| {
+                choice.normal_discard_lookahead.is_none()
+                    && choice.normal_discard_lookahead_value.is_none()
+            }),
+            "summary must not enable lookahead"
         );
     }
 
