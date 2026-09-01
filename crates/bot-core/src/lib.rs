@@ -15,6 +15,7 @@ pub mod open_hand_threat;
 pub mod prospective_value;
 pub mod push_pull;
 pub mod reach_policy;
+pub mod ryukyoku_decision;
 pub mod tenpai_continuation;
 pub mod threat;
 
@@ -116,6 +117,11 @@ pub use push_pull::{
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
     decide_reach_reason, is_reach_legal,
+};
+pub use ryukyoku_decision::{
+    RYUKYOKU_CONTINUE_CHIITOITSU_SHANTEN, RYUKYOKU_CONTINUE_KOKUSHI_SHANTEN,
+    RYUKYOKU_CONTINUE_STANDARD_SHANTEN, RyukyokuDecisionDiagnostic, RyukyokuVerdict,
+    continues_with_shanten, evaluate_ryukyoku_decision,
 };
 pub use tenpai_continuation::{
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,

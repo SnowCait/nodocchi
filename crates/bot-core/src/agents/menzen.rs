@@ -42,8 +42,11 @@ impl Agent for MenzenAgent {
 mod tests {
     use super::*;
     use crate::agents::shanten::tests::{
-        CallReaction, TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions,
-        tenpai_context, tile,
+        CallReaction, TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, ryukyoku_actions,
+        tenpai_actions, tenpai_context, tile,
+    };
+    use crate::ryukyoku_decision::tests::{
+        KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND, context_from_hand,
     };
 
     fn chi() -> LegalAction {
@@ -280,5 +283,40 @@ mod tests {
         let mut agent = MenzenAgent::default();
         let ctx = GameContext::default();
         assert_eq!(agent.act(&ctx, &[]), LegalAction::None);
+    }
+
+    // 九種九牌の宣言 / 続行 policy は ShantenAgent が持ち、MenzenAgent は委譲するだけで
+    // 同じ結論になる。判断 logic を複製しない。
+    #[test]
+    fn delegates_the_ryukyoku_decision_to_the_shanten_agent() {
+        for hand in [&KOKUSHI_FOUR_HAND, &KOKUSHI_THREE_HAND] {
+            let ctx = context_from_hand(hand);
+            let actions = ryukyoku_actions(&ctx);
+
+            let mut menzen = MenzenAgent::default();
+            let mut shanten = ShantenAgent;
+            assert_eq!(
+                menzen.act(&ctx, &actions),
+                shanten.act(&ctx, &actions),
+                "{hand:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn declares_ryukyoku_only_on_the_far_hand() {
+        let mut agent = MenzenAgent::default();
+
+        let far = context_from_hand(&KOKUSHI_FOUR_HAND);
+        assert_eq!(
+            agent.act(&far, &ryukyoku_actions(&far)),
+            LegalAction::Ryukyoku
+        );
+
+        let close = context_from_hand(&KOKUSHI_THREE_HAND);
+        assert_ne!(
+            agent.act(&close, &ryukyoku_actions(&close)),
+            LegalAction::Ryukyoku
+        );
     }
 }

@@ -24,7 +24,7 @@ cargo run -p bot-scenario -- \
 | `--extra-visible-tiles` | 任意 | 他の option で表現していない見え牌 |
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
-| `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
+| `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
@@ -60,6 +60,50 @@ cargo run -p bot-scenario -- \
   --hand "340678m789p34789s" \
   --lookahead --verbose
 ```
+
+### --allow-ryukyoku
+
+`--allow-ryukyoku` は九種九牌を**合法手として与える** option です。入力した手牌が九種九牌の成立条件 (么九牌9種以上) を満たすかどうかは判定しません。実対局と同じく、九種九牌が合法かどうかは入力側が source of truth で、nodocchi は成立条件を再判定しません。
+
+合法手として与えたうえで、宣言するか続行するかは production の policy が決めます。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "158m158p5s123456z" \
+  --draw "7z" \
+  --allow-ryukyoku \
+  --summary-only
+```
+
+```text
+Summary
+  choice 1: Ryukyoku
+  choice 1 source: Ryukyoku
+
+  ryukyoku: declare
+  ryukyoku shanten: standard 8 / chiitoitsu 6 / kokushi 4
+```
+
+么九牌が10種あって国士3向聴になる手牌では、同じ option でも宣言せず続行します。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "158m15p15s123456z" \
+  --draw "7z" \
+  --allow-ryukyoku \
+  --summary-only
+```
+
+```text
+Summary
+  choice 1: 8m
+  choice 1 source: NormalDiscard
+
+  ryukyoku: continue
+  ryukyoku shanten: standard 8 / chiitoitsu 6 / kokushi 3
+```
+
+条件は [麻雀 AI の概要](ai/overview.md#九種九牌-ryukyoku)、出力の読み方は [Structured diagnostics](diagnostics.md#ryukyoku-九種九牌) を参照してください。
 
 `reached` と `discards` は簡易 CLI からは指定できません。防御を含む局面や正確な実戦局面は JSON scenario または RiichiLab capture を使用してください。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。
 
@@ -146,7 +190,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 }
 ```
 
-`hand`、`draw`、`dora_indicators`、`round_wind`、`seat_wind`、`allow_*` は簡易 CLI の同名 option と同じ意味です。`hand` 以外は省略でき、河は空、`reached` は全員 `false`、`allow_*` は `false` になります。
+`hand`、`draw`、`dora_indicators`、`round_wind`、`seat_wind`、`allow_*` は簡易 CLI の同名 option と同じ意味です。`allow_ryukyoku` も同じく九種九牌を合法手に加えるだけで、成立条件は判定しません。`hand` 以外は省略でき、河は空、`reached` は全員 `false`、`allow_*` は `false` になります。
 
 ### JSON field
 
