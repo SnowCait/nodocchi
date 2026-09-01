@@ -1,10 +1,11 @@
 use thiserror::Error;
 
-use crate::scenario::ScenarioSpec;
+use crate::scenario::{HistoryFuritenSpec, ScenarioSpec};
 
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
-               [--seat-wind <WIND>] [--allow-hora] [--allow-ryukyoku]
+               [--seat-wind <WIND>] [--player-id <0..3>] [--oya <0..3>]
+               [--no-history-furiten] [--allow-hora] [--allow-ryukyoku]
                [--lookahead] [--verbose] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]
@@ -12,6 +13,8 @@ pub const USAGE: &str = "usage:
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
 
   --dora is a backward-compatible alias of --dora-indicator
+  --no-history-furiten declares both same-turn and post-riichi missed-win furiten false;
+  without it, both facts remain unknown
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -43,6 +46,9 @@ pub enum CliError {
 
     #[error("--request-id must be a number, but is {0:?}")]
     InvalidRequestId(String),
+
+    #[error("{option} must be a number, but is {value:?}")]
+    InvalidSeatValue { option: String, value: String },
 
     #[error("--dora-indicator cannot be combined with its alias --dora")]
     ConflictingDoraIndicator,
@@ -133,6 +139,21 @@ impl CliArgs {
                 }
                 "--seat-wind" => {
                     spec.seat_wind = Some(value_of(&mut args, "--seat-wind")?);
+                    inline_options = true;
+                }
+                "--player-id" => {
+                    spec.player_id = Some(seat_value_of(&mut args, "--player-id")?);
+                    inline_options = true;
+                }
+                "--oya" => {
+                    spec.oya = Some(seat_value_of(&mut args, "--oya")?);
+                    inline_options = true;
+                }
+                "--no-history-furiten" => {
+                    spec.history_furiten = Some(HistoryFuritenSpec {
+                        same_turn: Some(false),
+                        riichi_missed_win: Some(false),
+                    });
                     inline_options = true;
                 }
                 "--allow-hora" => {
@@ -265,6 +286,19 @@ where
         .ok_or_else(|| CliError::MissingValue(option.to_string()))
 }
 
+// CLI は数値化だけを担当する。0..=3 の範囲検証と seat wind の整合性検証は、JSON scenario と
+// 同じ `Scenario::resolve()` の canonical path に任せる。
+fn seat_value_of<I>(args: &mut I, option: &str) -> Result<u8, CliError>
+where
+    I: Iterator<Item = String>,
+{
+    let value = value_of(args, option)?;
+    value.parse::<u8>().map_err(|_| CliError::InvalidSeatValue {
+        option: option.to_string(),
+        value,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +352,80 @@ mod tests {
         assert_eq!(spec.dora_indicators, Some("3p E".to_string()));
         assert_eq!(spec.round_wind, Some("E".to_string()));
         assert_eq!(spec.seat_wind, Some("S".to_string()));
+    }
+
+    #[test]
+    fn parses_player_id_boundaries() {
+        for value in [0, 3] {
+            let value = value.to_string();
+            let spec = inline_spec(&["--hand", "123m", "--player-id", &value]);
+            assert_eq!(spec.player_id, value.parse().ok());
+            Scenario::resolve(&spec).unwrap();
+        }
+    }
+
+    #[test]
+    fn parses_each_oya_seat() {
+        for value in 0..=3 {
+            let value = value.to_string();
+            let spec = inline_spec(&["--hand", "123m", "--oya", &value]);
+            assert_eq!(spec.oya, value.parse().ok());
+            Scenario::resolve(&spec).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_non_numeric_seats_as_cli_usage_errors() {
+        for option in ["--player-id", "--oya"] {
+            assert_eq!(
+                parse(&["--hand", "123m", option, "foo"]),
+                Err(CliError::InvalidSeatValue {
+                    option: option.to_string(),
+                    value: "foo".to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_numeric_seat_range_validation_to_scenario_resolution() {
+        for (option, field) in [("--player-id", "player_id"), ("--oya", "oya")] {
+            let spec = inline_spec(&["--hand", "123m", option, "4"]);
+            assert_eq!(
+                Scenario::resolve(&spec),
+                Err(crate::error::ScenarioError::SeatOutOfRange {
+                    field: field.to_string(),
+                    value: 4,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn no_history_furiten_is_opt_in() {
+        let unspecified = inline_spec(&["--hand", "123m"]);
+        assert_eq!(unspecified.history_furiten, None);
+        let unspecified_facts = Scenario::resolve(&unspecified)
+            .unwrap()
+            .context
+            .history_furiten();
+        assert_eq!(unspecified_facts.same_turn, None);
+        assert_eq!(unspecified_facts.riichi_missed_win, None);
+
+        let specified = inline_spec(&["--hand", "123m", "--no-history-furiten"]);
+        assert_eq!(
+            specified.history_furiten,
+            Some(HistoryFuritenSpec {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            })
+        );
+        let specified_facts = Scenario::resolve(&specified)
+            .unwrap()
+            .context
+            .history_furiten();
+        assert_eq!(specified_facts.same_turn, Some(false));
+        assert_eq!(specified_facts.riichi_missed_win, Some(false));
     }
 
     #[test]
@@ -719,6 +827,12 @@ mod tests {
             parse(&["--hand", "123m", "--dora"]),
             Err(CliError::MissingValue("--dora".to_string()))
         );
+        for option in ["--player-id", "--oya"] {
+            assert_eq!(
+                parse(&["--hand", "123m", option]),
+                Err(CliError::MissingValue(option.to_string()))
+            );
+        }
     }
 
     #[test]

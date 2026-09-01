@@ -162,6 +162,43 @@ mod tests {
     }
 
     #[test]
+    fn reported_reach_scenario_uses_current_tenpai_value_with_inline_facts() {
+        let args = [
+            "--hand",
+            "34599m235p345567s",
+            "--player-id",
+            "0",
+            "--oya",
+            "1",
+            "--round-wind",
+            "E",
+            "--no-history-furiten",
+        ];
+        let full = run_args(&args).unwrap();
+        let summary = run_args(&[args.as_slice(), &["--summary-only"]].concat()).unwrap();
+
+        assert!(
+            summary.starts_with(
+                "Summary\n  choice 1: Reach\n  choice 1 discard: 2p\n  choice 1 source: Reach"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  choice 3: 5p\n  choice 3 source: NormalDiscard\n  choice 3 lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{summary}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: 20800"),
+            "{full}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: 16000"),
+            "{full}"
+        );
+        assert!(full.ends_with(&summary), "{full}");
+    }
+
+    #[test]
     fn runs_a_simple_cli_scenario_with_red_five() {
         let output = run_args(&["--hand", "340m455p789s1123z", "--draw", "N"]).unwrap();
         assert!(output.contains("5mr"), "{output}");
