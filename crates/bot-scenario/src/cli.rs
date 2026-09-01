@@ -5,14 +5,15 @@ use crate::scenario::{HistoryFuritenSpec, ScenarioSpec};
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
                [--seat-wind <WIND>] [--player-id <0..3>] [--oya <0..3>]
-               [--no-history-furiten] [--allow-hora] [--allow-ryukyoku]
-               [--lookahead] [--verbose] [--summary-only]
+               [--extra-visible-tiles <TILES>] [--no-history-furiten] [--allow-hora]
+               [--allow-ryukyoku] [--lookahead] [--verbose] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]
                [--summary-only]
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
 
   --dora is a backward-compatible alias of --dora-indicator
+  --extra-visible-tiles adds visible tiles that no other option expresses
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
@@ -132,6 +133,10 @@ impl CliArgs {
                     }
                     dora_alias = true;
                     spec.dora_indicators = Some(value_of(&mut args, "--dora")?);
+                    inline_options = true;
+                }
+                "--extra-visible-tiles" => {
+                    spec.extra_visible_tiles = Some(value_of(&mut args, "--extra-visible-tiles")?);
                     inline_options = true;
                 }
                 "--round-wind" => {
@@ -324,6 +329,7 @@ where
 mod tests {
     use super::*;
     use crate::scenario::Scenario;
+    use bot_core::ShantenAgent;
 
     fn parse(args: &[&str]) -> Result<CliArgs, CliError> {
         CliArgs::parse(args.iter().map(|arg| arg.to_string()))
@@ -334,6 +340,22 @@ mod tests {
             ScenarioSource::Inline(spec) => *spec,
             other => panic!("expected an inline scenario, got {other:?}"),
         }
+    }
+
+    fn inline_scenario(args: &[&str]) -> Scenario {
+        Scenario::resolve(&inline_spec(args)).unwrap()
+    }
+
+    fn acceptance_remaining(scenario: &Scenario, discard: &str) -> u8 {
+        ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+            .normal_discard
+            .expect("normal discard evaluated")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == discard)
+            .expect("discard candidate")
+            .evaluation
+            .acceptance_total_remaining()
     }
 
     #[test]
@@ -398,6 +420,70 @@ mod tests {
         assert_eq!(
             scenario.context.history_furiten().riichi_missed_win,
             Some(false)
+        );
+    }
+
+    #[test]
+    fn parses_extra_visible_tiles() {
+        let spec = inline_spec(&["--hand", "123m", "--extra-visible-tiles", "11p 44p"]);
+        assert_eq!(spec.extra_visible_tiles, Some("11p 44p".to_string()));
+
+        let scenario = Scenario::resolve(&spec).unwrap();
+        let visible: Vec<String> = scenario
+            .context
+            .visible_tiles()
+            .iter()
+            .map(|tile| tile.to_mjai_string())
+            .collect();
+        assert_eq!(visible, ["1m", "2m", "3m", "1p", "1p", "4p", "4p"]);
+        assert_eq!(scenario.context.hand_tiles().len(), 3);
+    }
+
+    #[test]
+    fn extra_visible_tiles_reduce_the_acceptance_remaining() {
+        let hand = "34599m235p345567s";
+        let baseline = inline_scenario(&["--hand", hand]);
+        let with_extra = inline_scenario(&["--hand", hand, "--extra-visible-tiles", "11p 44p"]);
+
+        assert_eq!(acceptance_remaining(&baseline, "3m"), 15);
+        assert_eq!(acceptance_remaining(&with_extra, "3m"), 11);
+    }
+
+    #[test]
+    fn rejects_extra_visible_tiles_with_other_input_modes() {
+        assert_eq!(
+            parse(&["scenario.json", "--extra-visible-tiles", "444p"]),
+            Err(CliError::ConflictingInput("scenario.json".to_string()))
+        );
+        assert_eq!(
+            parse(&[
+                "--riichilab-capture",
+                "capture.jsonl",
+                "--extra-visible-tiles",
+                "444p"
+            ]),
+            Err(CliError::ConflictingCaptureInput(
+                "scenario options".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&[
+                "--benchmark-riichilab-capture",
+                "capture.jsonl",
+                "--extra-visible-tiles",
+                "444p"
+            ]),
+            Err(CliError::ConflictingBenchmarkInput(
+                "scenario options".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_extra_visible_tiles_without_a_value() {
+        assert_eq!(
+            parse(&["--hand", "123m", "--extra-visible-tiles"]),
+            Err(CliError::MissingValue("--extra-visible-tiles".to_string()))
         );
     }
 
