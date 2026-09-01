@@ -581,6 +581,33 @@ mod tests {
     }
 
     #[test]
+    fn tenpai_continuation_follows_the_lookahead_option() {
+        // 現在聴牌のダマ継続は既存の --lookahead と同じ範囲でだけ出す。
+        let hand = ["--hand", "123m456m789m123p1z", "--draw", "2z"];
+        let default = run_args(&hand).unwrap();
+        assert!(!default.contains("Tenpai continuation"), "{default}");
+
+        let summary_only = run_args(&[hand.as_slice(), &["--summary-only"]].concat()).unwrap();
+        assert!(
+            !summary_only.contains("Tenpai continuation"),
+            "{summary_only}"
+        );
+        assert!(!summary_only.contains("Lookahead"), "{summary_only}");
+
+        let lookahead = run_args(&[hand.as_slice(), &["--lookahead"]].concat()).unwrap();
+        assert!(
+            lookahead.contains("\n\nTenpai continuation\n"),
+            "{lookahead}"
+        );
+        assert!(lookahead.contains("    current wait: "), "{lookahead}");
+        assert!(
+            lookahead.contains("    continuation branches: "),
+            "{lookahead}"
+        );
+        assert!(!lookahead.contains("      new wait: "), "{lookahead}");
+    }
+
+    #[test]
     fn verbose_lookahead_adds_each_draw() {
         let summary = run_args(&["--hand", "12m12p55s", "--draw", "9p", "--lookahead"]).unwrap();
         let verbose = run_args(&[

@@ -210,6 +210,16 @@ pub struct ProspectiveTenpaiValue {
     pub can_ron: Option<bool>,
 }
 
+impl ProspectiveTenpaiValue {
+    /// このテンパイの待ちと残枚数。
+    ///
+    /// ダマとリーチは同じ完成手集合を別の baseline で評価したものなので、待ちも残枚数も baseline
+    /// に依らない。支払いだけが baseline ごとに違うため、待ちを見るだけならどちらでもよい。
+    pub fn waits(&self) -> &[ProspectiveWaitValue] {
+        &self.damaten.waits
+    }
+}
+
 /// 将来打点を評価できない理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProspectiveUnavailable {

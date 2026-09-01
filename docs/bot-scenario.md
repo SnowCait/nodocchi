@@ -25,7 +25,7 @@ cargo run -p bot-scenario -- \
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
-| `--lookahead` | 任意 | 打牌候補ごとの2手先概要を追加。`--verbose` 併用時は受け入れ牌ごとの詳細も表示 |
+| `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -51,6 +51,14 @@ cargo run -p bot-scenario -- \
   --hand "34599m235p345567s" \
   --extra-visible-tiles "11p 44p" \
   --summary-only
+```
+
+`--lookahead` は2手先概要に加えて、現在打牌後が聴牌になる候補の `Tenpai continuation` (現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌) も表示します。待ちが変わる枝とツモ切りで元の待ちを維持する枝の両方を含みます。現時点では diagnostics 専用で打牌選択には接続しておらず、既にリーチしている局面と自分の席が分からない局面では表示しません。詳細は [打牌選択](ai/discard-selection.md#現在聴牌のダマ継続-diagnostics-only) を参照してください。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "340678m789p34789s" \
+  --lookahead --verbose
 ```
 
 `reached` と `discards` は簡易 CLI からは指定できません。防御を含む局面や正確な実戦局面は JSON scenario または RiichiLab capture を使用してください。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。

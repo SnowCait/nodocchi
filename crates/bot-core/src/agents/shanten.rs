@@ -25,6 +25,7 @@ use crate::push_pull::{
     push_pull_inputs_from_threat_facts,
 };
 use crate::reach_policy::decide_reach_reason;
+use crate::tenpai_continuation::TenpaiContinuationDiagnostic;
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };
@@ -277,6 +278,17 @@ pub struct ShantenDecisionDiagnostic {
     /// リーチが合法かどうかもリーチするかどうかも決めない。打牌選択・押し引き・リーチ判断の
     /// どれにも使わない解析専用の情報で、構築の有無は選択結果を変えない。
     pub normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
+    /// 現在打牌後が聴牌の候補について、非和了ツモ1枚と最善打牌で再び聴牌になるダマ継続。
+    /// 2手先診断を構築し、かつ自分が未リーチと確定している局面だけ持つ。
+    ///
+    /// 枝は既存2手先評価の same-shanten の枝そのもの、次打牌は既存 comparator が選んだもの、
+    /// 打点は `normal_discard_lookahead_value` が評価済みの値そのもので、この診断のために探索も
+    /// 点数計算もやり直さない。現在の和了牌を引いた枝は既存分類上 same-shanten にならないため
+    /// 含まれない。待ちが変わる枝も、ツモ切りで元の待ちを維持する枝も同じ枝集合に含む。
+    ///
+    /// 現時点では diagnostics 専用で、打牌選択・押し引き・リーチ判断のどれにも接続していない。
+    /// 構築の有無は選択結果を変えない。
+    pub normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
     /// 通常打牌評価で self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。詳細な2手先診断を構築した
@@ -428,6 +440,7 @@ struct DecisionDiagnostics {
     normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
     normal_discard_lookahead: Option<LookaheadDiagnostic>,
     normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
+    normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
     normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     defense: Option<DefenseDecisionDiagnostic>,
     open_hand_defense: Option<OpenHandDefenseDiagnostic>,
@@ -536,6 +549,7 @@ impl ShantenAgent {
             history_furiten: context.history_furiten(),
             normal_discard_lookahead: diagnostics.normal_discard_lookahead,
             normal_discard_lookahead_value: diagnostics.normal_discard_lookahead_value,
+            normal_discard_tenpai_continuation: diagnostics.normal_discard_tenpai_continuation,
             normal_discard_self_tsumo_facts: diagnostics.normal_discard_self_tsumo_facts,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
@@ -704,6 +718,7 @@ impl ShantenAgent {
         diagnostics.normal_discard_furiten = Some(selection.furiten);
         diagnostics.normal_discard_lookahead = selection.lookahead;
         diagnostics.normal_discard_lookahead_value = selection.lookahead_value;
+        diagnostics.normal_discard_tenpai_continuation = selection.tenpai_continuation;
         diagnostics.normal_discard_self_tsumo_facts = selection.self_tsumo_facts;
         selection.selection
     }
@@ -4782,6 +4797,7 @@ pub(crate) mod tests {
             ShantenDecisionDiagnostic {
                 normal_discard_lookahead: None,
                 normal_discard_lookahead_value: None,
+                normal_discard_tenpai_continuation: None,
                 ..with
             },
             without

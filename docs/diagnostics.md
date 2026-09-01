@@ -12,6 +12,7 @@
 | `Final decision` | 最終 action と採用経路 |
 | `Normal discard` | 通常打牌 evaluation の有無、選択 action、候補数 |
 | `Normal discard candidates` | 通常打牌候補ごとの評価と比較 |
+| `Tenpai continuation` | 現在聴牌候補のダマ継続 (diagnostics only) |
 | `Player threats` | player ごとの reach / meld facts と OpenHandThreat classification |
 | `Push/Pull` | threat と offense を組み合わせた押し引き |
 | `Reach` | 通常打牌後のテンパイに対するリーチ判断 |
@@ -66,6 +67,14 @@ Final decision
 `--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。2手先の概要は仮想ツモ牌を向聴数が下がるもの (`draws`) と維持するもの (`same-shanten`) に分けて種類数と残枚数を表示し、`--verbose` の牌ごとの詳細では `transition` にその分類を表示します。`--lookahead --verbose` では、1向聴候補の向聴数を維持する枝だけをテンパイまでもう1段追い、`downstream value` と候補ごとの `same-shanten downstream value` を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
 
 `Lookahead` の節の先頭には `self-tsumo continuation` として、その局面で共通の `unknown tiles` (自分から見て未確認の物理牌) と `current future own draws` (現在打牌後に自分へ残っている自摸機会) を表示します。材料が揃わない局面では `not evaluated` です。テンパイへ到達した枝には `tsumo continuation` として、`path probability` (その経路を引く確率) と `terminal tenpai` の内訳 (`mode` / `unknown tiles` / `future own draws` / `winning variants` / `hit probability` / `weighted tsumo payment` / `continuation value`)、およびその経路分の `path continuation value` を表示します。確率は 0〜1 の小数、打点は点数です。
+
+## Tenpai continuation
+
+`--lookahead` は、現在打牌後が聴牌になる候補について `現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌` の枝を表示します。通常表示は候補ごとに `current wait` (現在聴牌の待ちと残枚数) と `continuation branches` (成立した枝の数と残枚数合計) だけで、`--verbose` で枝ごとに `drawn` (非和了ツモの物理牌と残枚数) / `next discard` / `new wait` / `mode` / `prospective value` を出します。待ちが変わる枝と、ツモ切りで元の待ちを維持する枝の両方を含みます。
+
+枝は既存2手先評価の向聴数を維持する枝、次打牌は既存 comparator の選択、打点は既存の将来打点評価の値そのもので、この節のために探索も点数計算もやり直しません。現在の和了牌を引いた枝は含みません。既にリーチしている局面と、自分の席が分からず未リーチかどうかを判断できない局面では節そのものを出しません。
+
+**この節の値は打牌選択・押し引き・リーチ判断のどれにも使いません。** 現時点では diagnostics 専用で、selection には接続していません。判断への接続方針は [打牌選択](ai/discard-selection.md#現在聴牌のダマ継続-diagnostics-only) を参照してください。
 
 ## Player threats
 
