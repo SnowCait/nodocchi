@@ -285,8 +285,14 @@ impl CliArgs {
 // 必ず優先される。
 fn apply_inline_baseline(spec: &mut ScenarioSpec) {
     spec.round_wind.get_or_insert_with(|| "E".to_string());
-    spec.player_id.get_or_insert(0);
-    spec.oya.get_or_insert(1);
+    if spec.seat_wind.is_none() {
+        spec.player_id.get_or_insert(0);
+        spec.oya.get_or_insert(1);
+    } else if spec.player_id.is_none() && spec.oya.is_none() {
+        // 明示 seat wind と baseline identity からの導出値を競合させない。自分の河を特定する
+        // player_id だけは補い、oya は明示 seat wind を source of truth にするため unknown に保つ。
+        spec.player_id = Some(0);
+    }
     spec.history_furiten.get_or_insert(HistoryFuritenSpec {
         same_turn: Some(false),
         riichi_missed_win: Some(false),
@@ -416,6 +422,19 @@ mod tests {
         assert_eq!(scenario.context.player_id(), Some(2));
         assert_eq!(scenario.context.oya(), Some(3));
         assert_eq!(scenario.context.seat_wind().unwrap().to_mjai_string(), "N");
+    }
+
+    #[test]
+    fn explicit_seat_wind_is_not_overridden_by_the_identity_baseline() {
+        let spec = inline_spec(&["--hand", "123m", "--seat-wind", "E"]);
+        assert_eq!(spec.seat_wind, Some("E".to_string()));
+        assert_eq!(spec.player_id, Some(0));
+        assert_eq!(spec.oya, None);
+
+        let scenario = Scenario::resolve(&spec).unwrap();
+        assert_eq!(scenario.context.seat_wind().unwrap().to_mjai_string(), "E");
+        assert_eq!(scenario.context.player_id(), Some(0));
+        assert_eq!(scenario.context.oya(), None);
     }
 
     #[test]
