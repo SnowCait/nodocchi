@@ -78,6 +78,24 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 file は既存どおり追記で、ANSI escape sequence を含みません。directory は自動生成しないため、file を開けない場合は起動時 error になります。
 
+### 送受信 action の照合
+
+送信 action と server が適用した結果は、`RUST_LOG` を指定せず `--log-file` だけで照合できます。
+
+| log | 内容 |
+| --- | --- |
+| `action sent` | `request_id`、`request_action_id`、`actor`、`action_type`、`tile`、`tsumogiri` に加え、`response` へ WebSocket へ送信した JSON payload そのもの |
+| `meld applied` | server から受信した chi / pon / daiminkan の `actor`、`target`、`pai`、`consumed` |
+
+`response` は送信直前の serialize 結果をそのまま記録するため、Chi / Pon / Daiminkan では `pai` と `consumed` を exact に確認できます。`MjaiAction` からの再構築ではありません。
+
+```text
+action sent request_id=Some(131) request_action_id=131 actor=Some(1) action_type="chi" tile=None tsumogiri=None response={"type":"chi","actor":1,"pai":"7p","consumed":["6p","8p"],"request_id":131}
+meld applied actor=1 target=0 pai="7p" consumed=["5p", "6p"]
+```
+
+この2行を比較すると、送信した副露と server が実際に適用した副露が一致しているかを log だけで判定できます。
+
 ## request_action の capture
 
 `--capture-file <PATH>` を指定すると、server から受信した `request_action` の raw JSON を保存します。保存した record は [`bot-scenario`](bot-scenario.md#riichilab-capture-の再生) で再生できます。
