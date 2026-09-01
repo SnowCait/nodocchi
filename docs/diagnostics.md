@@ -37,7 +37,7 @@ Final decision
 
 | source | 意味 |
 | --- | --- |
-| `Hora` / `Ryukyoku` / `Reach` | 和了、流局、リーチ |
+| `Hora` / `Ryukyoku` / `Reach` | 和了、九種九牌、リーチ |
 | `NormalDiscard` | 通常打牌 selector |
 | `DefenseFallback` | リーチ者向け防御 fallback |
 | `OpenHandDefenseFallback` | High OpenHandThreat 向け fallback |
@@ -303,6 +303,33 @@ Combined defense
 `same hand passed[n kind]` と `same hand passed for all threats` は OpenHand defense と同じ evidence で、成立時だけ出ます。same-hand passed を根拠にできるのは `HighOpenHand` の target だけなので、`Riichi` の target にはこの行が出ません。`selected category` は `SafeAgainstAllThreats` / `SameHandPassed` / `HonorSafety` / `SuitedSafety` です。
 
 詳細は [Combined Defense](ai/defense.md#combined-defense) を参照してください。
+
+## Ryukyoku (九種九牌)
+
+`LegalAction::Ryukyoku` が合法だった局面だけ、`Summary` に宣言 / 続行の結論と判断に使った向聴数が出ます。
+
+```text
+  ryukyoku: continue
+  ryukyoku shanten: standard 4 / chiitoitsu 5 / kokushi 2
+```
+
+```text
+  ryukyoku: declare
+  ryukyoku shanten: standard 5 / chiitoitsu 4 / kokushi 4
+```
+
+`ryukyoku` は `declare` (九種九牌を宣言) か `continue` (宣言せず打牌判断へ進む) です。`ryukyoku shanten` は現在の自摸後手牌の通常手・七対子・国士の向聴数で、production が判断に使った [`calculate_shanten()`](ai/discard-selection.md) の結果そのものです。表示のために数え直しません。
+
+**九種九牌が合法かどうかは入力側 (server / scenario) が source of truth** で、nodocchi は成立条件を再判定しません。したがってこの行は「九種九牌が成立しているか」ではなく「合法な九種九牌を宣言するか」を表します。合法でない局面には行そのものを出しません。Hora が同時に合法な局面は Hora が優先され、九種九牌を検討しないので行が出ません。
+
+自摸牌が分からないなどで自摸後手牌を復元できない局面では、向聴数が `unknown` になり結論は `declare` を維持します。
+
+```text
+  ryukyoku: declare
+  ryukyoku shanten: standard unknown / chiitoitsu unknown / kokushi unknown
+```
+
+条件と threshold は [麻雀 AI の概要](ai/overview.md#九種九牌-ryukyoku) を source document とします。
 
 ## Summary と runner-up
 

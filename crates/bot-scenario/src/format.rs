@@ -8,10 +8,10 @@ use bot_core::{
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
     ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
-    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent,
-    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
-    TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
-    ThreatDefenseTarget,
+    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic,
+    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic,
+    StrongTenpaiRequirement, TenpaiContinuationBranch, TenpaiContinuationCandidate,
+    TenpaiContinuationDiagnostic, TenpaiOffenseValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -1995,6 +1995,7 @@ pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnosti
     let choices = diagnose_choices(scenario, diagnostic, 3);
     let mut groups = vec![
         summary_choice(1, &choices[0], None),
+        summary_ryukyoku(diagnostic),
         summary_push_pull(diagnostic),
         summary_reach(diagnostic),
         summary_call(diagnostic),
@@ -2065,6 +2066,35 @@ fn summary_choice(
     }
 
     lines
+}
+
+// 九種九牌が合法だった局面だけ、宣言 / 続行の結論と判断に使った3種類の向聴数を出す。
+// 通常局面では行を追加しない。
+fn summary_ryukyoku(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
+    let Some(ryukyoku) = diagnostic.ryukyoku.as_ref() else {
+        return Vec::new();
+    };
+    vec![
+        format!("  ryukyoku: {}", ryukyoku_verdict_label(ryukyoku.verdict)),
+        format!("  ryukyoku shanten: {}", summary_ryukyoku_shanten(ryukyoku)),
+    ]
+}
+
+fn ryukyoku_verdict_label(verdict: RyukyokuVerdict) -> &'static str {
+    match verdict {
+        RyukyokuVerdict::Declare => "declare",
+        RyukyokuVerdict::Continue => "continue",
+    }
+}
+
+// 手牌を評価できなかった場合は 0 や適当な向聴数で埋めず unknown のまま出す。
+fn summary_ryukyoku_shanten(ryukyoku: &RyukyokuDecisionDiagnostic) -> String {
+    format!(
+        "standard {} / chiitoitsu {} / kokushi {}",
+        format_optional_count(ryukyoku.standard_shanten()),
+        format_optional_count(ryukyoku.chiitoitsu_shanten()),
+        format_optional_count(ryukyoku.kokushi_shanten())
+    )
 }
 
 fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
@@ -5106,22 +5136,100 @@ mod tests {
 
     #[test]
     fn reach_choices_in_lower_ranks_include_their_discard() {
-        for (earlier_actions, expected) in [
-            (
-                vec![LegalAction::Hora],
-                "  choice 1: Hora\n  choice 1 source: Hora\n\n  choice 2: Reach\n  choice 2 discard: N\n  choice 2 source: Reach",
-            ),
-            (
-                vec![LegalAction::Hora, LegalAction::Ryukyoku],
-                "  choice 2: Ryukyoku\n  choice 2 source: Ryukyoku\n\n  choice 3: Reach\n  choice 3 discard: N\n  choice 3 source: Reach",
-            ),
+        // 合法な Ryukyoku を足しても、テンパイ手では九種九牌を宣言せず続行するので順位は
+        // 変わらない。
+        for earlier_actions in [
+            vec![LegalAction::Hora],
+            vec![LegalAction::Hora, LegalAction::Ryukyoku],
         ] {
             let mut scenario = scenario_from_json(REACH_SCENARIO);
             scenario.legal_actions.splice(0..0, earlier_actions);
             let diagnostic = diagnose(&scenario);
             let summary = format_summary(&scenario, &diagnostic);
 
-            assert!(summary.contains(expected), "{summary}");
+            assert!(
+                summary.contains(
+                    "  choice 1: Hora\n  choice 1 source: Hora\n\n  choice 2: Reach\n  choice 2 discard: N\n  choice 2 source: Reach"
+                ),
+                "{summary}"
+            );
+        }
+    }
+
+    // 九種九牌が成立する么九牌9種・対子なしの手牌。国士4向聴で通常手・七対子も遠い。
+    const RYUKYOKU_DECLARE_SCENARIO: &str = r#"{
+        "hand": "158m158p5s123456z",
+        "draw": "7z",
+        "allow_ryukyoku": true
+    }"#;
+
+    // 九種九牌が成立する么九牌10種・対子なしの手牌。国士3向聴なので続行する。
+    const RYUKYOKU_CONTINUE_SCENARIO: &str = r#"{
+        "hand": "158m15p15s123456z",
+        "draw": "7z",
+        "allow_ryukyoku": true
+    }"#;
+
+    // 自摸牌が分からない局面。自摸後手牌を復元できないので向聴数は unknown のままにする。
+    const RYUKYOKU_UNKNOWN_HAND_SCENARIO: &str = r#"{
+        "hand": "158m158p5s123456z",
+        "allow_ryukyoku": true
+    }"#;
+
+    #[test]
+    fn summary_reports_a_declared_ryukyoku() {
+        let (_, diagnostic, output) = rendered(RYUKYOKU_DECLARE_SCENARIO, false);
+        assert_eq!(diagnostic.selected_action, LegalAction::Ryukyoku);
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  choice 1: Ryukyoku"), "{summary}");
+        assert!(summary.contains("  ryukyoku: declare"), "{summary}");
+        assert!(
+            summary.contains("  ryukyoku shanten: standard 8 / chiitoitsu 6 / kokushi 4"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_a_continued_ryukyoku() {
+        let (_, diagnostic, output) = rendered(RYUKYOKU_CONTINUE_SCENARIO, false);
+        assert!(matches!(
+            diagnostic.selected_action,
+            LegalAction::Dahai { .. }
+        ));
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  ryukyoku: continue"), "{summary}");
+        assert!(
+            summary.contains("  ryukyoku shanten: standard 8 / chiitoitsu 6 / kokushi 3"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_an_unevaluable_hand_as_unknown() {
+        let (_, diagnostic, output) = rendered(RYUKYOKU_UNKNOWN_HAND_SCENARIO, false);
+        assert_eq!(diagnostic.selected_action, LegalAction::Ryukyoku);
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  ryukyoku: declare"), "{summary}");
+        assert!(
+            summary.contains(
+                "  ryukyoku shanten: standard unknown / chiitoitsu unknown / kokushi unknown"
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_omits_the_ryukyoku_lines_without_a_legal_ryukyoku() {
+        for json in [NORMAL_SCENARIO, DEFENSE_SCENARIO, REACH_SCENARIO] {
+            let (scenario, diagnostic, output) = rendered(json, false);
+            assert!(!scenario.legal_actions.contains(&LegalAction::Ryukyoku));
+            assert_eq!(diagnostic.ryukyoku, None);
+
+            let summary = summary_section(&output);
+            assert!(!summary.contains("  ryukyoku"), "{summary}");
         }
     }
 

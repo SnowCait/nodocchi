@@ -25,6 +25,7 @@ use crate::push_pull::{
     push_pull_inputs_from_threat_facts,
 };
 use crate::reach_policy::decide_reach_reason;
+use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
 use crate::tenpai_continuation::TenpaiContinuationDiagnostic;
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
@@ -208,7 +209,8 @@ impl ReachDecisionDiagnostic {
 /// ログのためだけに判断ロジックを再実行しないよう、action 選択の過程で得た情報を保持する。
 /// `push_pull` / `push_pull_inputs` / `normal_discard` は Hora / Ryukyoku / 鳴きの早期 return では
 /// `None`。`call` は合法な Chi / Pon が1件も無い局面では `None`。`reach` はリーチを検討する Push
-/// mode 以外では `None`。
+/// mode 以外では `None`。`ryukyoku` は `LegalAction::Ryukyoku` が合法だった局面だけ `Some` で、
+/// Hora で早期終了した場合は検討自体を行わないので `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentDecision {
     action: LegalAction,
@@ -218,6 +220,7 @@ pub(crate) struct AgentDecision {
     normal_discard: Option<LegalAction>,
     reach: Option<ReachDecisionDiagnostic>,
     call: Option<CallDecisionDiagnostic>,
+    ryukyoku: Option<RyukyokuDecisionDiagnostic>,
 }
 
 /// `ShantenAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
@@ -232,6 +235,8 @@ pub(crate) struct AgentDecision {
 /// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku / 鳴きで
 ///   早期終了した場合は `normal_discard` / `normal_discard_action` / `push_pull_inputs` /
 ///   `push_pull_decision` / `reach` / `defense` がすべて `None`。
+/// - `ryukyoku` は `LegalAction::Ryukyoku` が合法だった局面だけ `Some`。九種九牌を宣言せず
+///   続行した局面でも保持するので、続行の判断根拠をそのまま辿れる。
 ///
 /// tracing ログとは独立した pure なデータであり、ログをパースして構築することはない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +313,13 @@ pub struct ShantenDecisionDiagnostic {
     /// 鳴きを検討した場合の診断。合法な Chi / Pon が1件も無ければ `None`。採用しなかった
     /// 場合も候補ごとの理由を保持する。
     pub call: Option<CallDecisionDiagnostic>,
+    /// 九種九牌を検討した場合の診断。`LegalAction::Ryukyoku` が合法でない局面と、Hora で
+    /// 早期終了した局面では `None`。
+    ///
+    /// 宣言・続行のどちらでも判断に使った3種類の向聴数を保持する。`act()` と同じ helper の
+    /// 実結果で、診断用の別判断ロジックは持たない。手牌を評価できなかった場合の向聴数は
+    /// `None` のままで、推測して埋めない。
+    pub ryukyoku: Option<RyukyokuDecisionDiagnostic>,
     pub own_fixed_meld_count: Option<FixedMeldCount>,
     /// 全4席分の脅威診断。`context` から読み取れる副露・リーチ・親・ドラの観測事実だけを持つ。
     ///
@@ -556,6 +568,7 @@ impl ShantenAgent {
             reach: decision.reach,
             defense: diagnostics.defense,
             call: decision.call,
+            ryukyoku: decision.ryukyoku,
             own_fixed_meld_count: context.own_fixed_meld_count(),
             player_threats,
             open_hand_defense,
@@ -589,12 +602,20 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call: None,
+                ryukyoku: None,
             };
         }
 
-        if let Some(action) = legal_actions
+        // 九種九牌。合法性は入力側が source of truth なので成立条件は再判定せず、宣言するか
+        // 続行するかだけを決める。続行する場合は Ryukyoku を合法手から取り除かず、そのまま
+        // 既存の判断へ進む。
+        let legal_ryukyoku = legal_actions
             .iter()
-            .find(|a| matches!(a, LegalAction::Ryukyoku))
+            .find(|a| matches!(a, LegalAction::Ryukyoku));
+        let ryukyoku = legal_ryukyoku.map(|_| evaluate_ryukyoku_decision(ctx));
+
+        if let Some(action) = legal_ryukyoku
+            && ryukyoku.is_some_and(|decision| decision.should_declare())
         {
             return AgentDecision {
                 action: action.clone(),
@@ -604,6 +625,7 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call: None,
+                ryukyoku,
             };
         }
 
@@ -618,6 +640,7 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call,
+                ryukyoku,
             };
         }
 
@@ -660,6 +683,7 @@ impl ShantenAgent {
                 normal_discard,
                 reach,
                 call,
+                ryukyoku,
             };
         }
 
@@ -678,6 +702,7 @@ impl ShantenAgent {
                 normal_discard,
                 reach,
                 call,
+                ryukyoku,
             };
         }
 
@@ -694,6 +719,7 @@ impl ShantenAgent {
             normal_discard,
             reach,
             call,
+            ryukyoku,
         }
     }
 
@@ -959,6 +985,10 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(call) => format!("{:?}", call.reason),
         None => "None".to_string(),
     };
+    let ryukyoku_verdict = match &decision.ryukyoku {
+        Some(ryukyoku) => format!("{:?}", ryukyoku.verdict),
+        None => "None".to_string(),
+    };
     let reach_reason = match &decision.reach {
         Some(reach) => format!("{:?}", reach.reason),
         None => "None".to_string(),
@@ -985,6 +1015,7 @@ fn log_agent_decision(decision: &AgentDecision) {
         open_hand_defense_category = %open_hand_defense_category,
         combined_defense_category = %combined_defense_category,
         call_reason = %call_reason,
+        ryukyoku_verdict = %ryukyoku_verdict,
         "agent decision",
     );
 }
@@ -1112,10 +1143,16 @@ pub(crate) mod tests {
         push_pull_inputs_from_context_with_evaluation,
     };
     use crate::reach_policy::REACH_MIN_REMAINING;
+    use crate::ryukyoku_decision::RyukyokuVerdict;
+    use crate::ryukyoku_decision::tests::{
+        CHIITOITSU_THREE_HAND, CHIITOITSU_TWO_HAND, KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND,
+        STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand, hand_tiles,
+    };
     use crate::threat::diagnose_player_threats;
     use bot_logic::{
         DiscardComparisonReason, DrawTransition, HistoryFuritenFacts, PermanentFuriten,
-        RiichiStatus, TileId, TileType, WinMethod, compare_discard_evaluations,
+        RiichiStatus, TileCounts, TileId, TileType, WinMethod, calculate_shanten,
+        chiitoitsu_shanten, compare_discard_evaluations, kokushi_shanten, standard_shanten,
     };
 
     pub(crate) fn tile(value: u8) -> TileId {
@@ -4146,6 +4183,33 @@ pub(crate) mod tests {
         )
     }
 
+    // 他家 (player 1) だけが副露している局面を、自分の自摸後14枚を指定して作る。手牌の最後の
+    // 1枚をツモ牌として渡す。
+    fn opponent_meld_context_with_hand(
+        hand: &[&str],
+        opponent_melds: Vec<crate::meld::Meld>,
+    ) -> GameContext {
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[1] = opponent_melds;
+
+        let mut tiles = hand_tiles(hand);
+        let drawn_tile = tiles.pop().expect("手牌が空でない");
+
+        GameContext::from_parts_with_melds(
+            Some(drawn_tile),
+            tiles,
+            vec![],
+            TileType::new(27),
+            TileType::new(27),
+            Vec::new(),
+            Some(0),
+            Some(0),
+            Default::default(),
+            [false; 4],
+            melds,
+        )
+    }
+
     fn opponent_meld_actions() -> Vec<LegalAction> {
         OPPONENT_MELD_HAND
             .iter()
@@ -4551,11 +4615,20 @@ pub(crate) mod tests {
 
     #[test]
     fn threat_facts_are_built_for_early_return_paths() {
-        // 和了・流局で早期終了した場合も、診断は4席分の facts を持つ。
-        let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon()]);
-
-        for actions in [vec![LegalAction::Hora], vec![LegalAction::Ryukyoku]] {
+        // 和了・九種九牌で早期終了した場合も、診断は4席分の facts を持つ。九種九牌は宣言する
+        // 遠い手牌でだけ早期終了するので、そちらは専用の手牌で確認する。
+        for (ctx, actions) in [
+            (
+                opponent_meld_context(Some(0), vec![white_dragon_pon()]),
+                vec![LegalAction::Hora],
+            ),
+            (
+                opponent_meld_context_with_hand(&KOKUSHI_FOUR_HAND, vec![white_dragon_pon()]),
+                vec![LegalAction::Ryukyoku],
+            ),
+        ] {
             let diagnostic = diagnose_matching_act(&ctx, &actions);
+            assert_eq!(diagnostic.selected_action, actions[0]);
             assert_eq!(diagnostic.push_pull_inputs, None);
             assert_eq!(diagnostic.player_threats, diagnose_player_threats(&ctx));
             assert_eq!(diagnostic.player_threats[1].facts.open_meld_count, 1);
@@ -7877,5 +7950,158 @@ pub(crate) mod tests {
                 "{facts:?}"
             );
         }
+    }
+
+    // ---- 九種九牌の宣言 / 続行 ----
+
+    // 自摸後14枚の手牌から、全ての牌を切る合法 Dahai を作る。
+    pub(crate) fn ryukyoku_dahai_actions(ctx: &GameContext) -> Vec<LegalAction> {
+        ctx.hand_tiles()
+            .iter()
+            .copied()
+            .chain(ctx.drawn_tile())
+            .map(|tile| LegalAction::Dahai { tile })
+            .collect()
+    }
+
+    pub(crate) fn ryukyoku_actions(ctx: &GameContext) -> Vec<LegalAction> {
+        let mut actions = ryukyoku_dahai_actions(ctx);
+        actions.push(LegalAction::Ryukyoku);
+        actions
+    }
+
+    fn ryukyoku_diagnostic(
+        ctx: &GameContext,
+        actions: &[LegalAction],
+    ) -> RyukyokuDecisionDiagnostic {
+        ShantenAgent::diagnose(ctx, actions)
+            .ryukyoku
+            .expect("九種九牌を検討している")
+    }
+
+    #[test]
+    fn prefers_hora_over_ryukyoku() {
+        let mut agent = ShantenAgent;
+        let ctx = context_from_hand(&KOKUSHI_FOUR_HAND);
+        let mut actions = ryukyoku_actions(&ctx);
+        actions.push(LegalAction::Hora);
+
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
+
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Hora);
+        // Hora で早期終了するので九種九牌は検討していない。
+        assert_eq!(diagnostic.ryukyoku, None);
+    }
+
+    #[test]
+    fn keeps_the_existing_selection_without_a_legal_ryukyoku() {
+        let mut agent = ShantenAgent;
+        let ctx = context_from_hand(&KOKUSHI_FOUR_HAND);
+        let actions = ryukyoku_dahai_actions(&ctx);
+
+        assert_eq!(
+            agent.act(&ctx, &actions),
+            select_discard_action(&ctx, &actions).expect("通常打牌を選べる")
+        );
+
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(diagnostic.ryukyoku, None);
+    }
+
+    #[test]
+    fn declares_ryukyoku_when_every_shanten_is_too_far() {
+        let mut agent = ShantenAgent;
+        for hand in [
+            &KOKUSHI_FOUR_HAND,
+            &STANDARD_THREE_HAND,
+            &CHIITOITSU_THREE_HAND,
+        ] {
+            let ctx = context_from_hand(hand);
+            let actions = ryukyoku_actions(&ctx);
+
+            assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku, "{hand:?}");
+
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+            assert_eq!(
+                diagnostic.selected_source,
+                AgentActionSource::Ryukyoku,
+                "{hand:?}"
+            );
+            assert_eq!(
+                ryukyoku_diagnostic(&ctx, &actions).verdict,
+                RyukyokuVerdict::Declare,
+                "{hand:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn continues_past_ryukyoku_when_any_shanten_is_close_enough() {
+        let mut agent = ShantenAgent;
+        for hand in [
+            &STANDARD_TWO_HAND,
+            &CHIITOITSU_TWO_HAND,
+            &KOKUSHI_THREE_HAND,
+        ] {
+            let ctx = context_from_hand(hand);
+            let actions = ryukyoku_actions(&ctx);
+            let acted = agent.act(&ctx, &actions);
+
+            assert_ne!(acted, LegalAction::Ryukyoku, "{hand:?}");
+            assert_eq!(
+                ryukyoku_diagnostic(&ctx, &actions).verdict,
+                RyukyokuVerdict::Continue,
+                "{hand:?}"
+            );
+
+            // 続行後の打牌選択は、Ryukyoku が合法手に無い場合とまったく同じ。
+            let without_ryukyoku = ryukyoku_dahai_actions(&ctx);
+            assert_eq!(acted, agent.act(&ctx, &without_ryukyoku), "{hand:?}");
+
+            let diagnostic = diagnose_matching_act(&ctx, &actions);
+            assert_eq!(
+                diagnostic.selected_source,
+                ShantenAgent::diagnose(&ctx, &without_ryukyoku).selected_source,
+                "{hand:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ryukyoku_diagnostic_reports_the_existing_shanten() {
+        let ctx = context_from_hand(&KOKUSHI_THREE_HAND);
+        let actions = ryukyoku_actions(&ctx);
+        let ryukyoku = ryukyoku_diagnostic(&ctx, &actions);
+
+        let counts =
+            TileCounts::from_tiles(ctx.hand_tiles().iter().copied().chain(ctx.drawn_tile()));
+        assert_eq!(ryukyoku.shanten, Some(calculate_shanten(&counts)));
+        assert_eq!(ryukyoku.standard_shanten(), Some(standard_shanten(&counts)));
+        assert_eq!(
+            ryukyoku.chiitoitsu_shanten(),
+            Some(chiitoitsu_shanten(&counts))
+        );
+        assert_eq!(ryukyoku.kokushi_shanten(), Some(kokushi_shanten(&counts)));
+    }
+
+    #[test]
+    fn keeps_ryukyoku_when_the_current_hand_cannot_be_evaluated() {
+        let mut agent = ShantenAgent;
+        // 自摸牌が分からない context では自摸後手牌を復元できない。向聴数を推測して続行せず、
+        // 従来どおり Ryukyoku を選ぶ。
+        let evaluable = context_from_hand(&KOKUSHI_THREE_HAND);
+        let ctx = GameContext::from_parts(None, evaluable.hand_tiles().to_vec());
+        let actions = ryukyoku_actions(&evaluable);
+
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
+
+        let ryukyoku = ryukyoku_diagnostic(&ctx, &actions);
+        assert_eq!(ryukyoku.verdict, RyukyokuVerdict::Declare);
+        assert_eq!(ryukyoku.shanten, None);
+        assert_eq!(ryukyoku.standard_shanten(), None);
+        assert_eq!(ryukyoku.chiitoitsu_shanten(), None);
+        assert_eq!(ryukyoku.kokushi_shanten(), None);
     }
 }
