@@ -82,15 +82,33 @@ where
 }
 
 #[cfg(test)]
+pub(crate) fn temp_log_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "riichilab-client-{name}-{}.log",
+        std::process::id()
+    ))
+}
+
+/// `--log-file` の investigation preset をそのまま適用した file layer で `f` の出力を取得する。
+#[cfg(test)]
+pub(crate) fn capture_investigation_log(name: &str, f: impl FnOnce()) -> String {
+    let path = temp_log_path(name);
+    let _ = std::fs::remove_file(&path);
+
+    let (writer, guard) = tracing_appender::non_blocking(open_log_file(&path).unwrap());
+    let subscriber = tracing_subscriber::registry()
+        .with(file_layer(writer).with_filter(env_filter(INVESTIGATION_FILE_FILTER)));
+    tracing::subscriber::with_default(subscriber, f);
+    drop(guard);
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    contents
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_log_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "riichilab-client-{name}-{}.log",
-            std::process::id()
-        ))
-    }
 
     #[test]
     fn no_file_without_rust_log_uses_info_console_only() {

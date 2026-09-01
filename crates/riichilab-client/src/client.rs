@@ -250,6 +250,40 @@ pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields
     }
 }
 
+/// 送信直前の serialize 結果から WebSocket へ送る text message を作る。
+///
+/// `action sent` INFO の `response` へ渡すのも同じ `json` なので、記録した response JSON と
+/// 実際に送信した payload は再 serialize なしで一致する。
+pub(crate) fn response_text_message(json: &str) -> Message {
+    Message::Text(json.into())
+}
+
+/// WebSocket へ送った `json` そのものを `action sent` INFO へ1件だけ記録する。
+///
+/// INFO 無効時は診断値を一切構築しないよう `enabled!` で先に打ち切る。`enabled!` と `info!` は
+/// target 未指定で同じ module path を使う。
+pub(crate) fn log_action_sent(response: &MjaiAction, request_action_id: u64, json: &str) {
+    if !tracing::enabled!(tracing::Level::INFO) {
+        return;
+    }
+    let sent = sent_action_log_fields(response);
+    info!(
+        request_id = ?sent.request_id,
+        request_action_id,
+        actor = ?sent.actor,
+        action_type = sent.action_type,
+        tile = ?sent.tile,
+        tsumogiri = ?sent.tsumogiri,
+        response = %json,
+        "action sent"
+    );
+}
+
+/// server が実際に適用した副露を、送信 payload と突き合わせられるよう INFO で記録する。
+pub(crate) fn log_meld_applied(actor: u8, target: u8, pai: &str, consumed: &[String]) {
+    info!(actor, target, pai = ?pai, consumed = ?consumed, "meld applied");
+}
+
 pub async fn run_riichilab_client<A, P>(
     config: ClientConfig,
     agent: &mut A,
@@ -333,7 +367,7 @@ where
                         pai,
                         consumed,
                     } => {
-                        debug!(actor, target, pai = %pai, consumed = ?consumed, "meld");
+                        log_meld_applied(actor, target, &pai, &consumed);
                         state.on_hand_change(actor);
                     }
                     MjaiEvent::Ankan { actor, consumed } => {
@@ -432,7 +466,7 @@ where
                         );
 
                         let send_start = Instant::now();
-                        ws_stream.send(Message::Text(json.into())).await?;
+                        ws_stream.send(response_text_message(&json)).await?;
                         state.on_action_response(
                             possible_actions
                                 .iter()
@@ -441,20 +475,7 @@ where
                         );
                         let send_ms = send_start.elapsed().as_millis() as u64;
 
-                        // INFO 無効時は診断値を一切構築しないよう、有効時だけ helper を呼ぶ。
-                        // `enabled!` と `info!` は target 未指定で同じ module path を使う。
-                        if tracing::enabled!(tracing::Level::INFO) {
-                            let sent = sent_action_log_fields(&response);
-                            info!(
-                                request_id = ?sent.request_id,
-                                request_action_id = request_id,
-                                actor = ?sent.actor,
-                                action_type = sent.action_type,
-                                tile = ?sent.tile,
-                                tsumogiri = ?sent.tsumogiri,
-                                "action sent"
-                            );
-                        }
+                        log_action_sent(&response, request_id, &json);
 
                         let total_ms = request_start.elapsed().as_millis() as u64;
 
@@ -1261,6 +1282,147 @@ mod tests {
             &mut agent,
         );
         assert_eq!(response, None);
+    }
+
+    // 同じ pai に複数の chi 候補があるとき、指定した consumed の候補だけを選ぶテスト専用 Agent。
+    struct FixedChiAgent {
+        tile: TileId,
+        consumed: Vec<TileId>,
+    }
+
+    impl Agent for FixedChiAgent {
+        fn act(&mut self, _ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
+            legal_actions
+                .iter()
+                .find(|a| {
+                    matches!(
+                        a,
+                        LegalAction::Chi { tile, consumed }
+                            if *tile == self.tile && *consumed == self.consumed
+                    )
+                })
+                .cloned()
+                .unwrap_or(LegalAction::None)
+        }
+    }
+
+    fn possible_chi_pai(pai: &str, consumed: [&str; 2]) -> MjaiPossibleAction {
+        MjaiPossibleAction::Chi {
+            pai: pai.to_string(),
+            consumed: consumed.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn tile_of(pai: &str) -> TileId {
+        temporary_tile_id_from_mjai_pai(pai).unwrap()
+    }
+
+    fn chi_7p_possible_actions() -> Vec<MjaiPossibleAction> {
+        vec![
+            possible_chi_pai("7p", ["5p", "6p"]),
+            possible_chi_pai("7p", ["6p", "8p"]),
+            MjaiPossibleAction::None,
+        ]
+    }
+
+    fn chi_7p_response(consumed: [&str; 2]) -> MjaiAction {
+        let mut agent = FixedChiAgent {
+            tile: tile_of("7p"),
+            consumed: consumed.iter().map(|pai| tile_of(pai)).collect(),
+        };
+        build_response_for_request_with_context(
+            1,
+            131,
+            &chi_7p_possible_actions(),
+            &GameContext::default(),
+            &mut agent,
+        )
+        .expect("chi response should be built")
+    }
+
+    #[test]
+    fn chi_sends_the_selected_consumed_when_the_same_pai_has_multiple_candidates() {
+        // 実戦症状の再現: 7p を 5p6p でも 6p8p でも鳴ける状況で 6p8p を選んだ場合、
+        // 送信 payload の consumed が 6p8p のままであることを固定する。
+        let response = chi_7p_response(["6p", "8p"]);
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"type":"chi","actor":1,"pai":"7p","consumed":["6p","8p"],"request_id":131}"#
+        );
+    }
+
+    #[test]
+    fn chi_does_not_send_another_candidate_consumed_for_the_same_pai() {
+        let six_eight = chi_7p_response(["6p", "8p"]);
+        let five_six = chi_7p_response(["5p", "6p"]);
+        let MjaiAction::Chi { consumed, .. } = &six_eight else {
+            panic!("expected chi response: {six_eight:?}");
+        };
+        assert_eq!(consumed, &["6p".to_string(), "8p".to_string()]);
+        assert_ne!(six_eight, five_six);
+        assert_eq!(
+            serde_json::to_string(&five_six).unwrap(),
+            r#"{"type":"chi","actor":1,"pai":"7p","consumed":["5p","6p"],"request_id":131}"#
+        );
+    }
+
+    #[test]
+    fn action_sent_records_the_exact_json_sent_over_the_websocket() {
+        let response = chi_7p_response(["6p", "8p"]);
+        let json = serde_json::to_string(&response).unwrap();
+        let sent_payload = response_text_message(&json)
+            .into_text()
+            .expect("text message");
+        let contents = crate::logging::capture_investigation_log("action-sent-response", || {
+            log_action_sent(&response, 131, &json);
+        });
+
+        assert_eq!(sent_payload.as_str(), json);
+        assert!(contents.contains("action sent"), "{contents}");
+        assert!(contents.contains(&format!("response={json}")), "{contents}");
+        assert!(
+            contents.contains(r#"response={"type":"chi","actor":1,"pai":"7p","consumed":["6p","8p"],"request_id":131}"#),
+            "{contents}"
+        );
+    }
+
+    #[test]
+    fn action_sent_keeps_the_existing_fields() {
+        let response = MjaiAction::Dahai {
+            actor: 1,
+            pai: "4p".to_string(),
+            tsumogiri: Some(false),
+            request_id: Some(200),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let contents = crate::logging::capture_investigation_log("action-sent-fields", || {
+            log_action_sent(&response, 131, &json);
+        });
+
+        for field in [
+            "request_id=Some(200)",
+            "request_action_id=131",
+            "actor=Some(1)",
+            "action_type=\"dahai\"",
+            "tile=Some(\"4p\")",
+            "tsumogiri=Some(false)",
+            &format!("response={json}"),
+        ] {
+            assert!(contents.contains(field), "{field}: {contents}");
+        }
+    }
+
+    #[test]
+    fn meld_applied_records_pai_and_consumed_from_the_server_event() {
+        let contents = crate::logging::capture_investigation_log("meld-applied", || {
+            log_meld_applied(1, 0, "7p", &["5p".to_string(), "6p".to_string()]);
+        });
+
+        assert!(contents.contains("meld applied"), "{contents}");
+        assert!(contents.contains("actor=1"), "{contents}");
+        assert!(contents.contains("target=0"), "{contents}");
+        assert!(contents.contains(r#"pai="7p""#), "{contents}");
+        assert!(contents.contains(r#"consumed=["5p", "6p"]"#), "{contents}");
     }
 
     #[test]
