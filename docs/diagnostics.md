@@ -72,7 +72,30 @@ Final decision
 
 `--lookahead` は、現在打牌後が聴牌になる候補について `現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌` の枝を表示します。通常表示は候補ごとに `current wait` (現在聴牌の待ちと残枚数) と `continuation branches` (成立した枝の数と残枚数合計) だけで、`--verbose` で枝ごとに `drawn` (非和了ツモの物理牌と残枚数) / `next discard` / `new wait` / `mode` / `prospective value` を出します。待ちが変わる枝と、ツモ切りで元の待ちを維持する枝の両方を含みます。
 
-枝は既存2手先評価の向聴数を維持する枝、次打牌は既存 comparator の選択、打点は既存の将来打点評価の値そのもので、この節のために探索も点数計算もやり直しません。現在の和了牌を引いた枝は含みません。既にリーチしている局面と、自分の席が分からず未リーチかどうかを判断できない局面では節そのものを出しません。
+枝は既存2手先評価の枝のうち実戦上の非和了ツモ (向聴数を維持する牌と、構造上は和了形でもダマツモでは役が無く和了できない牌)、次打牌は既存 comparator の選択、打点は既存の将来打点評価の値そのもので、この節のために探索も点数計算もやり直しません。ダマツモで実際に和了できる牌を引いた枝は含みません。既にリーチしている局面と、自分の席が分からず未リーチかどうかを判断できない局面では節そのものを出しません。
+
+候補ごとに `self-tsumo comparison` として、「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べます。
+
+```text
+Tenpai continuation
+  3s
+    current wait: 4s(3) / 3 remaining
+    continuation branches: 35 / 119 remaining
+    self-tsumo comparison
+      reach now: 1460.235
+      damaten continuation: 2094.467
+      damaten immediate tsumo: 49.180
+      damaten after non-winning draw: 2045.286
+```
+
+| 行 | 意味 |
+| --- | --- |
+| `reach now` | 今リーチして手変わりせず、残り自摸機会全体でツモ和了する期待支払い |
+| `damaten continuation` | ダマで1巡継続した場合の合計。下の2行の和 |
+| `damaten immediate tsumo` | ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い |
+| `damaten after non-winning draw` | 非和了牌を引いて手変わりした先の terminal tenpai の期待支払い合計 |
+
+どれも `Lookahead` の `self-tsumo continuation` と同じ確率模型・同じ単位 (点数) で、`unknown tiles` と `current future own draws` もその節に表示した局面共通の値をそのまま使います。山の残枚数が分からない局面など、材料が揃わない値は 0 ではなく `unknown` です。合法手に `LegalAction::Reach` が無い局面の `reach now` も `unknown` です (現在局面のリーチ可否は production のリーチ判断と同じく実際の合法手が source of truth です)。**この比較にも winner や `should_reach` はありません。**
 
 **この節の値は打牌選択・押し引き・リーチ判断のどれにも使いません。** 現時点では diagnostics 専用で、selection には接続していません。判断への接続方針は [打牌選択](ai/discard-selection.md#現在聴牌のダマ継続-diagnostics-only) を参照してください。
 

@@ -22,6 +22,7 @@ cargo run -p bot-scenario -- \
 | `--player-id <0..3>` | 任意 | 自分の席 |
 | `--oya <0..3>` | 任意 | 親の席 |
 | `--extra-visible-tiles` | 任意 | 他の option で表現していない見え牌 |
+| `--remaining-tiles` | 任意 | 山の残りツモ可能枚数 |
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
@@ -44,6 +45,8 @@ history_furiten.riichi_missed_win = false
 
 `--no-history-furiten` は baseline と結果上は同じですが、「現在は同巡内フリテンではなく、かつリーチ後見逃しフリテンでもない」と明示する shorthand です。いずれかが `true` の局面や、履歴フリテンを unknown のまま扱う局面は JSON scenario で指定します。
 
+`--remaining-tiles` は JSON scenario の `remaining_tiles` と同じ意味で、山に残っているツモ可能な牌の枚数です。自分のツモを終えた後の枚数を渡します。self-tsumo continuation は残り自摸機会をこの枚数からだけ求め、巡目や河の枚数から推測しません。省略した局面では unknown のままで、その軸を使いません。
+
 `--extra-visible-tiles` は JSON scenario の `extra_visible_tiles` と同じ意味で、手牌・ツモ牌・ドラ表示牌以外に見えている牌を加えます。加えた牌は受け入れ残枚数や待ちの残枚数へ反映されます。JSON scenario、RiichiLab capture、benchmark とは他の inline option と同じく併用できません。
 
 ```bash
@@ -55,9 +58,12 @@ cargo run -p bot-scenario -- \
 
 `--lookahead` は2手先概要に加えて、現在打牌後が聴牌になる候補の `Tenpai continuation` (現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌) も表示します。待ちが変わる枝とツモ切りで元の待ちを維持する枝の両方を含みます。現時点では diagnostics 専用で打牌選択には接続しておらず、既にリーチしている局面と自分の席が分からない局面では表示しません。詳細は [打牌選択](ai/discard-selection.md#現在聴牌のダマ継続-diagnostics-only) を参照してください。
 
+候補ごとの `self-tsumo comparison` (「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べた比較) は、残り自摸機会が確定する局面でだけ値になります。`--remaining-tiles` で山の残枚数を渡さない局面では、自摸機会を推測せず `unknown` のままにします。
+
 ```bash
 cargo run -p bot-scenario -- \
   --hand "340678m789p34789s" \
+  --remaining-tiles 70 \
   --lookahead --verbose
 ```
 

@@ -5,7 +5,9 @@ use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
 };
-use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, diagnose_tenpai_continuation};
+use crate::tenpai_continuation::{
+    TenpaiContinuationDiagnostic, TenpaiContinuationInputs, diagnose_tenpai_continuation,
+};
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
@@ -227,13 +229,26 @@ pub(crate) fn select_discard_action_with_diagnostic(
         evaluate_prospective_lookahead_value(context, &legal.tiles, &legal.evaluations, lookahead)
     });
 
-    // 現在聴牌のダマ継続も構築済みの枝の絞り込みだけで、追加の探索は行わない。
+    // 現在聴牌のダマ継続も構築済みの枝の絞り込みだけで、追加の探索は行わない。self-tsumo 比較の
+    // ための点数計算も、打牌選択が使ったものと同じ評価器・同じ事実をそのまま渡す。現在局面の
+    // リーチ可否は production のリーチ判断と同じく実際の合法手を source of truth にする。
     let tenpai_continuation =
         lookahead
             .as_ref()
             .zip(lookahead_value.as_ref())
             .and_then(|(lookahead, value)| {
-                diagnose_tenpai_continuation(context, &legal.evaluations, lookahead, value)
+                diagnose_tenpai_continuation(&TenpaiContinuationInputs {
+                    context,
+                    tiles: &legal.tiles,
+                    valuator: &valuator,
+                    reach_legal: legal_actions
+                        .iter()
+                        .any(|action| matches!(action, LegalAction::Reach)),
+                    self_tsumo_facts: inputs.self_tsumo_facts(),
+                    evaluations: &legal.evaluations,
+                    lookahead,
+                    value,
+                })
             });
 
     DiscardActionSelectionWithDiagnostic {
