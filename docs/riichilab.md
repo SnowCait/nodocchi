@@ -64,6 +64,8 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 investigation preset の target は既存 instrumentation の `bot_core::agent_decision=debug`、`bot_core::push_pull=debug`、`bot_core::discard_selection=trace`、`bot_core::defense=trace` です。`bot_core` 全体の trace は有効にしません。
 
+判断ログは production selection が既に計算した exact evidence を記録します。現物などで production decision が exact model を必要としなかった場合は、ログのためだけに追加評価せず、R/T fields を unknown のまま残します。
+
 `RUST_LOG` を明示した場合は特殊調査用の override として扱い、console と file の両方へその filter をそのまま適用します。この場合、investigation preset は暗黙に追加しません。
 
 ```bash

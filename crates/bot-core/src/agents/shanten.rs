@@ -856,21 +856,16 @@ impl ShantenAgent {
 
     // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action と種別を返す。
     //
-    // 診断が有効な場合は、採用の有無にかかわらず検討した候補評価を収集する。候補評価の収集は
-    // 選択結果に影響せず、選択と exact candidate evidence は同じ evaluation を共有する。
+    // 構造化診断が有効な場合だけ、現物で早期決着しても exact candidate evidence を追加収集する。
+    // tracing は production evaluation が既に持つ evidence だけを使い、ログのために exact model を
+    // 起動しない。候補評価の収集は選択結果に影響せず、選択とログ・診断は同じ evaluation を共有する。
     fn select_defense_fallback(
         &self,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
-        let collect_exact_evidence = diagnostics.enabled
-            || tracing::enabled!(
-                target: "bot_core::defense",
-                tracing::Level::DEBUG
-            );
-        let evaluation =
-            evaluate_defense_fallback_action_with_kind(ctx, legal_actions, collect_exact_evidence);
+        let evaluation = self.evaluate_defense_fallback(ctx, legal_actions, diagnostics);
         let selected = evaluation.selected;
 
         log_defense_fallback_evaluation(ctx, &evaluation, legal_actions);
@@ -885,6 +880,15 @@ impl ShantenAgent {
 
         let (action, kind) = selected?;
         Some((action.clone(), AgentActionSource::DefenseFallback(kind)))
+    }
+
+    fn evaluate_defense_fallback<'a>(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &'a [LegalAction],
+        diagnostics: &DecisionDiagnostics,
+    ) -> crate::defense::DefenseFallbackEvaluation<'a> {
+        evaluate_defense_fallback_action_with_kind(ctx, legal_actions, diagnostics.enabled)
     }
 }
 
@@ -1105,6 +1109,33 @@ pub(crate) mod tests {
 
     pub(crate) fn dahai(value: u8) -> LegalAction {
         LegalAction::Dahai { tile: tile(value) }
+    }
+
+    #[derive(Debug)]
+    struct DefenseTraceSubscriber;
+
+    impl tracing::Subscriber for DefenseTraceSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "bot_core::defense"
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn with_defense_trace<T>(f: impl FnOnce() -> T) -> T {
+        tracing::subscriber::with_default(DefenseTraceSubscriber, f)
     }
 
     fn unavailable_reach_meld() -> crate::meld::Meld {
@@ -3263,6 +3294,72 @@ pub(crate) mod tests {
             decision.source.defense_kind(),
             Some(DefenseFallbackKind::Genbutsu)
         );
+    }
+
+    #[test]
+    fn defense_trace_does_not_collect_exact_evidence_for_genbutsu() {
+        let agent = ShantenAgent;
+        let ctx = fold_under_reach_context();
+        let actions = fold_actions();
+        let diagnostics = DecisionDiagnostics::disabled();
+
+        let without_trace = agent.evaluate_defense_fallback(&ctx, &actions, &diagnostics);
+        assert_eq!(
+            without_trace.selected.map(|(_, kind)| kind),
+            Some(DefenseFallbackKind::Genbutsu)
+        );
+        assert_eq!(without_trace.ron_risk_vectors, None);
+
+        let with_trace = with_defense_trace(|| {
+            assert!(tracing::enabled!(
+                target: "bot_core::defense",
+                tracing::Level::TRACE
+            ));
+            agent.evaluate_defense_fallback(&ctx, &actions, &diagnostics)
+        });
+        assert_eq!(
+            with_trace.selected.map(|(_, kind)| kind),
+            Some(DefenseFallbackKind::Genbutsu)
+        );
+        assert_eq!(with_trace.ron_risk_vectors, None);
+
+        let untraced_decision = agent.decide(&ctx, &actions);
+        let traced_decision = with_defense_trace(|| agent.decide(&ctx, &actions));
+        assert_eq!(traced_decision.action, untraced_decision.action);
+        assert_eq!(traced_decision.source, untraced_decision.source);
+    }
+
+    #[test]
+    fn defense_trace_reuses_exact_evidence_when_selection_requires_it() {
+        let agent = ShantenAgent;
+        // 共通現物なし。production selector 自体が exact R/T を比較して 2m を選ぶ。
+        let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
+        let actions = vec![dahai(0), dahai(4)];
+        let diagnostics = DecisionDiagnostics::disabled();
+
+        let evaluation =
+            with_defense_trace(|| agent.evaluate_defense_fallback(&ctx, &actions, &diagnostics));
+        assert_eq!(
+            evaluation.selected.map(|(_, kind)| kind),
+            Some(DefenseFallbackKind::ExactRonRisk)
+        );
+        assert!(evaluation.ron_risk_vectors.is_some());
+
+        // logging と構造化診断が受け取るのは production evaluation が保持する同じ vector。
+        let diagnostic = DefenseDecisionDiagnostic::from_evaluation(&ctx, &actions, &evaluation);
+        assert!(
+            diagnostic
+                .selected
+                .as_ref()
+                .unwrap()
+                .selected_player_ron_risk_evidence
+                .is_some()
+        );
+
+        let untraced_decision = agent.decide(&ctx, &actions);
+        let traced_decision = with_defense_trace(|| agent.decide(&ctx, &actions));
+        assert_eq!(traced_decision.action, untraced_decision.action);
+        assert_eq!(traced_decision.source, untraced_decision.source);
     }
 
     // 回帰構造: normal_discard(通常打牌)と最終 selected_action(防御 fallback)が
