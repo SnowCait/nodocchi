@@ -6,7 +6,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_tungstenite::tungstenite::{Error as WsError, Message, Utf8Bytes};
 use tracing::{debug, error, info, warn};
 
 use crate::capture::{RequestActionCapture, capture_server_event};
@@ -250,15 +250,7 @@ pub(crate) fn sent_action_log_fields(action: &MjaiAction) -> SentActionLogFields
     }
 }
 
-/// 送信直前の serialize 結果から WebSocket へ送る text message を作る。
-///
-/// `action sent` INFO の `response` へ渡すのも同じ `json` なので、記録した response JSON と
-/// 実際に送信した payload は再 serialize なしで一致する。
-pub(crate) fn response_text_message(json: &str) -> Message {
-    Message::Text(json.into())
-}
-
-/// WebSocket へ送った `json` そのものを `action sent` INFO へ1件だけ記録する。
+/// WebSocket へ送った payload そのものを `action sent` INFO へ1件だけ記録する。
 ///
 /// INFO 無効時は診断値を一切構築しないよう `enabled!` で先に打ち切る。`enabled!` と `info!` は
 /// target 未指定で同じ module path を使う。
@@ -454,19 +446,21 @@ where
                         let response_type = mjai_action_type(&response);
 
                         let serialize_start = Instant::now();
-                        let json = serde_json::to_string(&response)?;
+                        // String の buffer をそのまま Utf8Bytes へ move し、送信と logging は
+                        // その cheap clone で共有する。payload 全体の copy も再 serialize もしない。
+                        let payload = Utf8Bytes::from(serde_json::to_string(&response)?);
                         let serialize_ms = serialize_start.elapsed().as_millis() as u64;
 
                         debug!(
                             request_id,
                             possible_actions = possible_actions.len(),
                             response_type,
-                            response = %json,
+                            response = %payload,
                             "sending response"
                         );
 
                         let send_start = Instant::now();
-                        ws_stream.send(response_text_message(&json)).await?;
+                        ws_stream.send(Message::Text(payload.clone())).await?;
                         state.on_action_response(
                             possible_actions
                                 .iter()
@@ -475,7 +469,7 @@ where
                         );
                         let send_ms = send_start.elapsed().as_millis() as u64;
 
-                        log_action_sent(&response, request_id, &json);
+                        log_action_sent(&response, request_id, &payload);
 
                         let total_ms = request_start.elapsed().as_millis() as u64;
 
@@ -1368,18 +1362,20 @@ mod tests {
 
     #[test]
     fn action_sent_records_the_exact_json_sent_over_the_websocket() {
+        // production と同じ ownership: serialize した String を Utf8Bytes へ move し、
+        // 送信 message と log は同じ buffer を cheap clone で共有する。
         let response = chi_7p_response(["6p", "8p"]);
-        let json = serde_json::to_string(&response).unwrap();
-        let sent_payload = response_text_message(&json)
-            .into_text()
-            .expect("text message");
+        let payload = Utf8Bytes::from(serde_json::to_string(&response).unwrap());
+        let message = Message::Text(payload.clone());
         let contents = crate::logging::capture_investigation_log("action-sent-response", || {
-            log_action_sent(&response, 131, &json);
+            log_action_sent(&response, 131, &payload);
         });
 
-        assert_eq!(sent_payload.as_str(), json);
+        let sent = message.into_text().expect("text message");
+        assert_eq!(sent.as_str(), payload.as_str());
+        assert_eq!(sent.as_ptr(), payload.as_ptr());
         assert!(contents.contains("action sent"), "{contents}");
-        assert!(contents.contains(&format!("response={json}")), "{contents}");
+        assert!(contents.contains(&format!("response={sent}")), "{contents}");
         assert!(
             contents.contains(r#"response={"type":"chi","actor":1,"pai":"7p","consumed":["6p","8p"],"request_id":131}"#),
             "{contents}"
@@ -1394,9 +1390,9 @@ mod tests {
             tsumogiri: Some(false),
             request_id: Some(200),
         };
-        let json = serde_json::to_string(&response).unwrap();
+        let payload = Utf8Bytes::from(serde_json::to_string(&response).unwrap());
         let contents = crate::logging::capture_investigation_log("action-sent-fields", || {
-            log_action_sent(&response, 131, &json);
+            log_action_sent(&response, 131, &payload);
         });
 
         for field in [
@@ -1406,7 +1402,7 @@ mod tests {
             "action_type=\"dahai\"",
             "tile=Some(\"4p\")",
             "tsumogiri=Some(false)",
-            &format!("response={json}"),
+            &format!("response={payload}"),
         ] {
             assert!(contents.contains(field), "{field}: {contents}");
         }
