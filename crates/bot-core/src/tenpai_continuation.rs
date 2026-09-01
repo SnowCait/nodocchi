@@ -1,4 +1,4 @@
-//! 現在聴牌の「1回だけの手変わり」を観測するための診断層。
+//! 現在聴牌をダマで継続した場合の、次の1巡分を観測するための診断層。
 //!
 //! ```text
 //! 現在聴牌 → 非和了牌を1枚ツモ → 既存 selector の最善打牌 → 再び聴牌
@@ -8,33 +8,40 @@
 //! ([`LookaheadDiagnostic`]) が構築済みの枝と、その枝を評価済みの将来打点
 //! ([`ProspectiveLookaheadDiagnostic`]) を絞り込むだけである。
 //!
+//! # 継続枝に含めるもの
+//!
+//! 待ちが実際に変わる枝 (手変わり) だけでなく、ツモった牌をそのまま切って元の聴牌・元の待ちを
+//! 維持する枝も継続枝として扱う。「今すぐリーチする」と「ダマで継続する」を比べるには、次の
+//! 1巡で待ちが変わらない場合の価値も同じ枝集合の中に必要になるためである。枝を待ちの変化で
+//! 分類 (据え置き / 待ち改善 / 打点改善) することは、この層ではまだ行わない。
+//!
 //! # 枝の出どころ
 //!
 //! 非和了ツモは既存2手先評価の [`DrawTransition::SameShanten`] そのものである。現在打牌後が
 //! 聴牌の候補では、和了牌は向聴数を下げるので [`DrawTransition::Progress`] に分類され、向聴数を
-//! 維持する牌 = 非和了牌になる。手変わりの対象からの和了牌の除外は、この既存分類をそのまま
-//! 使うだけで、この層が和了牌を判定し直すことはない。
+//! 維持する牌 = 非和了牌になる。継続枝からの和了牌の除外は、この既存分類をそのまま使うだけで、
+//! この層が和了牌を判定し直すことはない。
 //!
 //! 次打牌も既存の打牌評価と既存 comparator が選んだ [`DrawVariantLookaheadDiagnostic::next_discard`]
 //! そのもので、向聴・受け入れ・赤5・ドラ・形・将来打点のどの比較もここで作り直さない。その
-//! 打牌後が再び聴牌の枝だけを手変わり成立として扱い、聴牌に戻らない枝は含めない。
+//! 打牌後が再び聴牌の枝だけを継続成立として扱い、聴牌に戻らない枝は含めない。
 //!
-//! horizon は「1ツモ → 1打牌 → 新しい聴牌」で必ず打ち切る。2回目の非和了ツモは追わない。
+//! horizon は「1ツモ → 1打牌 → 次の聴牌」で必ず打ち切る。2回目の非和了ツモは追わない。
 //!
 //! # 対象局面
 //!
 //! 自分が未リーチと確定している局面の、現在打牌後が聴牌の候補だけを対象にする。既にリーチ
-//! していれば手牌を変えられないので探索対象にせず、自分の席が分からず未リーチかどうかを
-//! 判断できない局面でも未リーチだと推測しない。どちらも [`TenpaiHandChangeDiagnostic`] を
+//! していればダマで継続する選択肢が無いので探索対象にせず、自分の席が分からず未リーチかどうかを
+//! 判断できない局面でも未リーチだと推測しない。どちらも [`TenpaiContinuationDiagnostic`] を
 //! 構築しない (`None`)。
 //!
 //! # 打牌選択への接続
 //!
 //! 現時点では diagnostics 専用で、打牌選択には接続していない。
-//! Σ(残枚数 × 手変わり後の打点) のような集計値も、現在聴牌の
+//! Σ(残枚数 × 継続後の打点) のような集計値も、現在聴牌の
 //! [`OffenseValue`](crate::offense_value::OffenseValue) と比較する係数も threshold も持たない。
-//! 手変わりの枝と現在聴牌の攻撃打点はまだ同じ確率模型・同じ horizon に揃っていないため、
-//! 単純に足したり比べたりできる量ではない。
+//! 継続枝と現在聴牌の攻撃打点はまだ同じ確率模型・同じ horizon に揃っていないため、単純に
+//! 足したり比べたりできる量ではない。
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
@@ -51,35 +58,37 @@ use crate::prospective_value::{
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
 
-/// 現在聴牌候補の1回だけの手変わり診断。
+/// 現在聴牌候補をダマで継続した場合の診断。
 ///
 /// `candidates` は現在打牌後が聴牌の候補だけを、既存2手先評価と同じ順序で並べる。打牌選択にも
 /// 押し引きにもリーチ判断にも使わない解析専用の情報で、構築の有無は選択結果を変えない。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TenpaiHandChangeDiagnostic {
-    pub candidates: Vec<TenpaiHandChangeCandidate>,
+pub struct TenpaiContinuationDiagnostic {
+    pub candidates: Vec<TenpaiContinuationCandidate>,
 }
 
-impl TenpaiHandChangeDiagnostic {
-    pub fn candidate(&self, discard: TileType) -> Option<&TenpaiHandChangeCandidate> {
+impl TenpaiContinuationDiagnostic {
+    pub fn candidate(&self, discard: TileType) -> Option<&TenpaiContinuationCandidate> {
         self.candidates
             .iter()
             .find(|candidate| candidate.discard == discard)
     }
 }
 
-/// 現在聴牌候補1件分の手変わり枝。
+/// 現在聴牌候補1件分の継続枝。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TenpaiHandChangeCandidate {
+pub struct TenpaiContinuationCandidate {
     /// 現在の打牌候補の牌種。この打牌後が現在聴牌になる。
     pub discard: TileType,
-    /// 現在聴牌の待ち。既存打牌評価の受け入れそのもので、手変わり診断のために求め直さない。
+    /// 現在聴牌の待ち。既存打牌評価の受け入れそのもので、この診断のために求め直さない。
     pub current_wait: Vec<EffectiveAcceptanceTile>,
-    /// 手変わりが成立した枝。非和了ツモの物理牌 variant 単位で並ぶ。
-    pub branches: Vec<TenpaiHandChangeBranch>,
+    /// 継続が成立した枝。非和了ツモの物理牌 variant 単位で並ぶ。
+    ///
+    /// 待ちが変わる枝と、ツモ切りで元の待ちを維持する枝の両方を含む。
+    pub branches: Vec<TenpaiContinuationBranch>,
 }
 
-impl TenpaiHandChangeCandidate {
+impl TenpaiContinuationCandidate {
     /// 現在聴牌の待ちの残枚数合計。
     pub fn current_wait_remaining(&self) -> u32 {
         self.current_wait
@@ -88,9 +97,9 @@ impl TenpaiHandChangeCandidate {
             .sum()
     }
 
-    /// 手変わりが成立した枝の残枚数合計。
+    /// 継続が成立した枝の残枚数合計。
     ///
-    /// 期待値でも和了率でもなく、成立枝の物理牌が何枚あるかを数えただけの観測値。手変わり後の
+    /// 期待値でも和了率でもなく、成立枝の物理牌が何枚あるかを数えただけの観測値。継続後の
     /// 打点で重み付けした集計値はこの段階では作らない。
     pub fn branch_remaining(&self) -> u32 {
         self.branches
@@ -100,12 +109,12 @@ impl TenpaiHandChangeCandidate {
     }
 }
 
-/// 成立した手変わり枝1件。
+/// 成立した継続枝1件。
 ///
 /// 枝の中身は既存 prospective diagnostic の物理牌 variant ([`ProspectiveDrawVariantValue`])
 /// そのもので、この型はそれが「どの非和了ツモ牌種の枝か」を添えるだけ。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TenpaiHandChangeBranch {
+pub struct TenpaiContinuationBranch {
     /// 非和了ツモの牌種。
     pub draw: TileType,
     /// その牌種全体の残枚数。`variant` はこのうち赤5 / 黒5どちらか一方の枚数を持つ。
@@ -114,7 +123,7 @@ pub struct TenpaiHandChangeBranch {
     pub variant: ProspectiveDrawVariantValue,
 }
 
-impl TenpaiHandChangeBranch {
+impl TenpaiContinuationBranch {
     /// 仮想的にツモった物理牌。赤5と黒5は別の枝になる。
     pub fn drawn_tile(&self) -> TileId {
         self.variant.drawn_tile
@@ -125,12 +134,12 @@ impl TenpaiHandChangeBranch {
         self.variant.remaining
     }
 
-    /// 既存 selector が選んだ次打牌。
+    /// 既存 selector が選んだ次打牌。ツモ切りで元の待ちを維持する枝ではツモ牌と同じ牌種になる。
     pub fn next_discard(&self) -> Option<TileType> {
         self.variant.next_discard
     }
 
-    /// 手変わり後のテンパイを production のリーチ判断が評価した攻撃モード。
+    /// 継続後のテンパイを production のリーチ判断が評価した攻撃モード。
     ///
     /// 自分の席が分からず既リーチかどうかを判断できない枝は
     /// [`TenpaiOffenseMode::Unknown`]、テンパイを評価できなかった枝は `None`。
@@ -138,12 +147,12 @@ impl TenpaiHandChangeBranch {
         self.evaluated().map(|tenpai| tenpai.mode)
     }
 
-    /// 手変わり後の待ちと残枚数。評価できなかった枝は空。
+    /// 継続後の待ちと残枚数。評価できなかった枝は空。
     pub fn waits(&self) -> &[ProspectiveWaitValue] {
         self.evaluated().map_or(&[], ProspectiveTenpaiValue::waits)
     }
 
-    /// 手変わり後の待ちの残枚数合計。
+    /// 継続後の待ちの残枚数合計。
     pub fn wait_remaining(&self) -> u32 {
         self.waits()
             .iter()
@@ -151,7 +160,7 @@ impl TenpaiHandChangeBranch {
             .sum()
     }
 
-    /// 手変わり後の待ちの牌種数。
+    /// 継続後の待ちの牌種数。
     pub fn wait_type_count(&self) -> usize {
         self.waits().len()
     }
@@ -169,19 +178,19 @@ impl TenpaiHandChangeBranch {
     }
 }
 
-/// 構築済みの2手先評価とその将来打点から、現在聴牌候補の手変わり枝を絞り込む。
+/// 構築済みの2手先評価とその将来打点から、現在聴牌候補の継続枝を絞り込む。
 ///
 /// 探索も打牌評価も点数計算も行わず、既に構築済みの枝を選び直すだけ。`evaluations` /
 /// `lookahead` / `value` は同じ候補集合から作った同じ順序のものを渡す。対応しない場合は推測せず
 /// `None` にする。
 ///
 /// 自分が未リーチと確定していない局面 (既リーチ・自分の席が不明) では `None`。
-pub(crate) fn diagnose_tenpai_hand_change(
+pub(crate) fn diagnose_tenpai_continuation(
     context: &GameContext,
     evaluations: &[DiscardEvaluation],
     lookahead: &LookaheadDiagnostic,
     value: &ProspectiveLookaheadDiagnostic,
-) -> Option<TenpaiHandChangeDiagnostic> {
+) -> Option<TenpaiContinuationDiagnostic> {
     if context.own_reached() != Some(false) {
         return None;
     }
@@ -191,7 +200,7 @@ pub(crate) fn diagnose_tenpai_hand_change(
         return None;
     }
 
-    Some(TenpaiHandChangeDiagnostic {
+    Some(TenpaiContinuationDiagnostic {
         candidates: evaluations
             .iter()
             .zip(&lookahead.candidates)
@@ -202,20 +211,20 @@ pub(crate) fn diagnose_tenpai_hand_change(
                     && value.discard == evaluation.discard
             })
             .map(|((evaluation, candidate), value)| {
-                candidate_hand_change(evaluation, candidate, value)
+                candidate_continuation(evaluation, candidate, value)
             })
             .collect(),
     })
 }
 
-// 現在聴牌候補1件分の手変わり枝。非和了ツモは既存分類 (same-shanten) そのもので、和了牌の枝
+// 現在聴牌候補1件分の継続枝。非和了ツモは既存分類 (same-shanten) そのもので、和了牌の枝
 // (Progress) はここへ入らない。
-fn candidate_hand_change(
+fn candidate_continuation(
     evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
     value: &ProspectiveDiscardValue,
-) -> TenpaiHandChangeCandidate {
-    TenpaiHandChangeCandidate {
+) -> TenpaiContinuationCandidate {
+    TenpaiContinuationCandidate {
         discard: evaluation.discard,
         current_wait: evaluation.acceptance_after_discard.tiles.clone(),
         branches: candidate
@@ -234,21 +243,23 @@ fn candidate_hand_change(
 fn draw_branches<'a>(
     draw: &'a DrawLookaheadDiagnostic,
     value: &'a ProspectiveDrawValue,
-) -> impl Iterator<Item = TenpaiHandChangeBranch> + 'a {
+) -> impl Iterator<Item = TenpaiContinuationBranch> + 'a {
     draw.variants
         .iter()
         .zip(&value.variants)
-        .filter(|(variant, value)| variant.drawn_tile == value.drawn_tile && changes_hand(variant))
-        .map(|(_, value)| TenpaiHandChangeBranch {
+        .filter(|(variant, value)| {
+            variant.drawn_tile == value.drawn_tile && continues_tenpai(variant)
+        })
+        .map(|(_, value)| TenpaiContinuationBranch {
             draw: draw.draw,
             draw_remaining: draw.remaining,
             variant: value.clone(),
         })
 }
 
-// 最善打牌後が再び聴牌になった枝だけが手変わり成立。打牌候補が1件も無い枝と、聴牌に戻らない
-// 枝は成立として扱わない。
-fn changes_hand(variant: &DrawVariantLookaheadDiagnostic) -> bool {
+// 最善打牌後が再び聴牌になった枝だけが継続成立。打牌候補が1件も無い枝と、聴牌に戻らない枝は
+// 成立として扱わない。
+fn continues_tenpai(variant: &DrawVariantLookaheadDiagnostic) -> bool {
     variant.next_min_shanten() == Some(TENPAI_SHANTEN)
 }
 
@@ -267,7 +278,7 @@ mod tests {
     };
 
     // 123m 456m 789m 123p 東 の門前13枚に南をツモった単騎テンパイ。打 E で南単騎、打 S で東単騎
-    // になり、どちらの現在聴牌からも非和了ツモで別の待ちへ手変わりする。
+    // になり、どちらの現在聴牌からも、非和了ツモ1枚とその後の最善打牌でダマ継続できる。
     const HAND: [&str; 13] = [
         "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "E",
     ];
@@ -378,28 +389,28 @@ mod tests {
         .build()
     });
 
-    fn hand_change(
+    fn continuation(
         selection: &DiscardActionSelectionWithDiagnostic,
-    ) -> &TenpaiHandChangeDiagnostic {
+    ) -> &TenpaiContinuationDiagnostic {
         selection
-            .tenpai_hand_change
+            .tenpai_continuation
             .as_ref()
-            .expect("手変わり診断が構築されている")
+            .expect("継続診断が構築されている")
     }
 
-    // 打 E (南単騎テンパイ) の手変わり枝。
+    // 打 E (南単騎テンパイ) の継続枝。
     fn discard_east(
         selection: &DiscardActionSelectionWithDiagnostic,
-    ) -> &TenpaiHandChangeCandidate {
-        hand_change(selection)
+    ) -> &TenpaiContinuationCandidate {
+        continuation(selection)
             .candidate(tile("E"))
             .expect("打 E の現在聴牌候補がある")
     }
 
     fn branch<'a>(
-        candidate: &'a TenpaiHandChangeCandidate,
+        candidate: &'a TenpaiContinuationCandidate,
         drawn: &str,
-    ) -> &'a TenpaiHandChangeBranch {
+    ) -> &'a TenpaiContinuationBranch {
         let drawn_tile = tile(drawn);
         let red = drawn.ends_with('r');
         candidate
@@ -408,10 +419,10 @@ mod tests {
             .find(|branch| {
                 branch.drawn_tile().tile_type() == drawn_tile && branch.drawn_tile().is_red() == red
             })
-            .unwrap_or_else(|| panic!("{drawn} の手変わり枝がある"))
+            .unwrap_or_else(|| panic!("{drawn} の継続枝がある"))
     }
 
-    fn wait_tiles(branch: &TenpaiHandChangeBranch) -> Vec<TileType> {
+    fn wait_tiles(branch: &TenpaiContinuationBranch) -> Vec<TileType> {
         branch
             .waits()
             .iter()
@@ -422,7 +433,7 @@ mod tests {
     #[test]
     fn only_current_tenpai_candidates_are_searched() {
         let selection = &*CASE;
-        let discards: Vec<TileType> = hand_change(&selection)
+        let discards: Vec<TileType> = continuation(selection)
             .candidates
             .iter()
             .map(|candidate| candidate.discard)
@@ -435,9 +446,9 @@ mod tests {
     #[test]
     fn non_winning_draw_reaches_a_new_tenpai() {
         let selection = &*CASE;
-        let candidate = discard_east(&selection);
+        let candidate = discard_east(selection);
 
-        // 現在は南単騎。1m を引くと南を切って三面張へ手変わりする。
+        // 現在は南単騎。1m を引くと南を切って三面張へ待ちが変わる。
         assert_eq!(
             candidate
                 .current_wait
@@ -458,11 +469,23 @@ mod tests {
     }
 
     #[test]
-    fn current_winning_tile_is_not_a_hand_change_branch() {
-        let selection = &*CASE;
-        let candidate = discard_east(&selection);
+    fn tsumogiri_that_holds_the_wait_is_a_continuation_branch() {
+        // ツモ切りで元の待ちを維持する枝も継続枝に含める。「今すぐリーチ」と「ダマ継続」を
+        // 比べるには待ちが変わらない場合の価値も必要なので、待ちが変わる枝だけへは絞らない。
+        let candidate = discard_east(&CASE);
+        let branch = branch(candidate, "2m");
 
-        // 南は現在の和了牌なので、手変わり枝には現れない。
+        assert_eq!(branch.next_discard(), Some(tile("2m")));
+        assert_eq!(wait_tiles(branch), vec![tile("S")]);
+        assert_eq!(branch.wait_remaining(), candidate.current_wait_remaining());
+    }
+
+    #[test]
+    fn current_winning_tile_is_not_a_continuation_branch() {
+        let selection = &*CASE;
+        let candidate = discard_east(selection);
+
+        // 南は現在の和了牌なので、継続枝には現れない。
         assert!(
             !candidate
                 .branches
@@ -484,7 +507,7 @@ mod tests {
         let selection = &*CASE;
         let lookahead = selection.lookahead.as_ref().expect("2手先診断がある");
 
-        for candidate in &hand_change(&selection).candidates {
+        for candidate in &continuation(selection).candidates {
             let draws = lookahead
                 .candidate(candidate.discard)
                 .expect("同じ候補の2手先評価がある");
@@ -507,7 +530,7 @@ mod tests {
         }
         .build();
 
-        // 手牌の1枚に加えて2枚が見えているので、1m の手変わり枝は残り1枚になる。
+        // 手牌の1枚に加えて2枚が見えているので、1m の継続枝は残り1枚になる。
         assert_eq!(branch(discard_east(&CASE), "1m").remaining(), 3);
         let seen = branch(discard_east(&visible), "1m");
         assert_eq!(seen.remaining(), 1);
@@ -533,7 +556,7 @@ mod tests {
     #[test]
     fn red_and_black_five_stay_separate_branches() {
         let selection = &*CASE;
-        let candidate = discard_east(&selection);
+        let candidate = discard_east(selection);
 
         let red = branch(candidate, "5mr");
         let black = branch(candidate, "5m");
@@ -552,7 +575,7 @@ mod tests {
         let selection = &*CASE;
         let lookahead = selection.lookahead.as_ref().expect("2手先診断がある");
 
-        for candidate in &hand_change(&selection).candidates {
+        for candidate in &continuation(selection).candidates {
             let draws = lookahead
                 .candidate(candidate.discard)
                 .expect("同じ候補の2手先評価がある");
@@ -576,7 +599,7 @@ mod tests {
         let selection = &*CASE;
         let value = selection.lookahead_value.as_ref().expect("将来打点がある");
 
-        for candidate in &hand_change(&selection).candidates {
+        for candidate in &continuation(selection).candidates {
             let draws = value
                 .candidate(candidate.discard)
                 .expect("同じ候補の将来打点がある");
@@ -599,8 +622,8 @@ mod tests {
         }
         .build();
 
-        assert!(reached.tenpai_hand_change.is_none());
-        // 2手先診断そのものは既存どおり構築する。手変わり診断だけを行わない。
+        assert!(reached.tenpai_continuation.is_none());
+        // 2手先診断そのものは既存どおり構築する。継続診断だけを行わない。
         assert!(reached.lookahead.is_some());
     }
 
@@ -612,16 +635,16 @@ mod tests {
         }
         .build();
 
-        assert!(unknown_seat.tenpai_hand_change.is_none());
+        assert!(unknown_seat.tenpai_continuation.is_none());
     }
 
     #[test]
-    fn hand_change_is_not_searched_without_lookahead() {
-        assert!(NO_LOOKAHEAD.tenpai_hand_change.is_none());
+    fn continuation_is_not_searched_without_lookahead() {
+        assert!(NO_LOOKAHEAD.tenpai_continuation.is_none());
     }
 
     #[test]
-    fn hand_change_does_not_change_the_normal_selection() {
+    fn continuation_does_not_change_the_normal_selection() {
         assert_eq!(CASE.selection, NO_LOOKAHEAD.selection);
     }
 }

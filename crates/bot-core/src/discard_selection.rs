@@ -5,7 +5,7 @@ use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
 };
-use crate::tenpai_hand_change::{TenpaiHandChangeDiagnostic, diagnose_tenpai_hand_change};
+use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, diagnose_tenpai_continuation};
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
@@ -102,13 +102,14 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     ///
     /// 打牌選択にも2手目 `next_discard` の選択にも使わない解析専用の情報で、選択結果を変えない。
     pub lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
-    /// `lookahead` / `lookahead_value` の枝から絞り込んだ、現在聴牌候補の1回だけの手変わり。
+    /// `lookahead` / `lookahead_value` の枝から絞り込んだ、現在聴牌候補をダマで継続した場合の
+    /// 次の1巡。
     ///
     /// 2手先診断を構築し、かつ自分が未リーチと確定している局面だけ持つ。枝も打点も既存診断が
     /// 構築済みのものを絞り込むだけで、この診断のために探索も点数計算もやり直さない。
     ///
     /// 打牌選択にも押し引きにもリーチ判断にも使わない解析専用の情報で、選択結果を変えない。
-    pub tenpai_hand_change: Option<TenpaiHandChangeDiagnostic>,
+    pub tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
     /// self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。
@@ -226,13 +227,13 @@ pub(crate) fn select_discard_action_with_diagnostic(
         evaluate_prospective_lookahead_value(context, &legal.tiles, &legal.evaluations, lookahead)
     });
 
-    // 現在聴牌の手変わりも構築済みの枝の絞り込みだけで、追加の探索は行わない。
-    let tenpai_hand_change =
+    // 現在聴牌のダマ継続も構築済みの枝の絞り込みだけで、追加の探索は行わない。
+    let tenpai_continuation =
         lookahead
             .as_ref()
             .zip(lookahead_value.as_ref())
             .and_then(|(lookahead, value)| {
-                diagnose_tenpai_hand_change(context, &legal.evaluations, lookahead, value)
+                diagnose_tenpai_continuation(context, &legal.evaluations, lookahead, value)
             });
 
     DiscardActionSelectionWithDiagnostic {
@@ -247,7 +248,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         furiten: furiten_from_legal_evaluations(context, &legal, &current_tenpai),
         lookahead,
         lookahead_value,
-        tenpai_hand_change,
+        tenpai_continuation,
         self_tsumo_facts: inputs.self_tsumo_facts(),
     }
 }

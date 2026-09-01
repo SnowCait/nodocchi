@@ -9,8 +9,9 @@ use bot_core::{
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
     ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
     PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic, ShantenAgent,
-    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiHandChangeBranch,
-    TenpaiHandChangeCandidate, TenpaiHandChangeDiagnostic, TenpaiOffenseValue, ThreatDefenseTarget,
+    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
+    TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
+    ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -62,8 +63,8 @@ pub fn format_diagnostic(
         sections.push(section);
     }
 
-    if let Some(section) = format_tenpai_hand_change(
-        diagnostic.normal_discard_tenpai_hand_change.as_ref(),
+    if let Some(section) = format_tenpai_continuation(
+        diagnostic.normal_discard_tenpai_continuation.as_ref(),
         verbose,
     ) {
         sections.push(section);
@@ -1001,32 +1002,33 @@ fn format_lookahead_downstream(
     lines
 }
 
-// 現在聴牌の1回だけの手変わり (`現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌`) の表示。
+// 現在聴牌をダマで継続した場合 (`現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌`) の表示。
 //
-// 枝も次打牌も打点も既存2手先評価 / 将来打点診断が持つ値そのもので、この節のために探索も
-// 点数計算もやり直さない。通常表示は候補ごとの概要だけにして出力を短く保ち、verbose で枝ごとの
-// 詳細を出す。現時点では打牌選択に接続していない観測値。
-fn format_tenpai_hand_change(
-    hand_change: Option<&TenpaiHandChangeDiagnostic>,
+// 待ちが変わる枝も、ツモ切りで元の待ちを維持する枝も同じ枝集合に並べる。枝も次打牌も打点も
+// 既存2手先評価 / 将来打点診断が持つ値そのもので、この節のために探索も点数計算もやり直さない。
+// 通常表示は候補ごとの概要だけにして出力を短く保ち、verbose で枝ごとの詳細を出す。現時点では
+// 打牌選択に接続していない観測値。
+fn format_tenpai_continuation(
+    continuation: Option<&TenpaiContinuationDiagnostic>,
     verbose: bool,
 ) -> Option<String> {
-    let hand_change = hand_change?;
-    if hand_change.candidates.is_empty() {
+    let continuation = continuation?;
+    if continuation.candidates.is_empty() {
         return None;
     }
 
     let mut lines = vec![
-        "Tenpai hand change".to_string(),
+        "Tenpai continuation".to_string(),
         "  diagnostics only, not connected to discard selection".to_string(),
     ];
-    for candidate in &hand_change.candidates {
-        lines.extend(format_tenpai_hand_change_candidate(candidate, verbose));
+    for candidate in &continuation.candidates {
+        lines.extend(format_tenpai_continuation_candidate(candidate, verbose));
     }
     Some(lines.join("\n"))
 }
 
-fn format_tenpai_hand_change_candidate(
-    candidate: &TenpaiHandChangeCandidate,
+fn format_tenpai_continuation_candidate(
+    candidate: &TenpaiContinuationCandidate,
     verbose: bool,
 ) -> Vec<String> {
     let mut lines = vec![
@@ -1037,7 +1039,7 @@ fn format_tenpai_hand_change_candidate(
             candidate.current_wait_remaining()
         ),
         format!(
-            "    hand changes: {} branches / {} remaining",
+            "    continuation branches: {} / {} remaining",
             candidate.branches.len(),
             candidate.branch_remaining()
         ),
@@ -1051,14 +1053,14 @@ fn format_tenpai_hand_change_candidate(
         lines.push(format!("    {NONE}"));
     }
     for branch in &candidate.branches {
-        lines.extend(format_tenpai_hand_change_branch(branch));
+        lines.extend(format_tenpai_continuation_branch(branch));
     }
     lines
 }
 
-// 成立した手変わり枝1件。非和了ツモの物理牌から新しい待ちと攻撃モードまでを1つの塊で並べ、
-// 「どのツモで何を切るとどの待ちへ変わるか」を追えるようにする。
-fn format_tenpai_hand_change_branch(branch: &TenpaiHandChangeBranch) -> Vec<String> {
+// 成立した継続枝1件。非和了ツモの物理牌から次の待ちと攻撃モードまでを1つの塊で並べ、
+// 「どのツモで何を切るとどの待ちになるか」を追えるようにする。
+fn format_tenpai_continuation_branch(branch: &TenpaiContinuationBranch) -> Vec<String> {
     let indent = DRAW_INDENT;
     let detail = indent + 2;
     let mut lines = vec![format!(
@@ -1099,7 +1101,7 @@ fn format_tenpai_hand_change_branch(branch: &TenpaiHandChangeBranch) -> Vec<Stri
     lines
 }
 
-// 手変わり後の待ち。既存将来打点診断が持つ待ち牌種と残枚数そのままで、既存 lookahead の
+// 継続後の待ち。既存将来打点診断が持つ待ち牌種と残枚数そのままで、既存 lookahead の
 // `final wait` と同じ形で並べる。
 fn format_prospective_wait_tiles(waits: &[ProspectiveWaitValue]) -> String {
     if waits.is_empty() {
@@ -2591,7 +2593,7 @@ mod tests {
                 | "Normal discard"
                 | "Normal discard candidates"
                 | "Lookahead"
-                | "Tenpai hand change"
+                | "Tenpai continuation"
                 | "Push/Pull"
                 | "Reach"
                 | "Defense"
@@ -4795,7 +4797,7 @@ mod tests {
             choices.iter().all(|choice| {
                 choice.normal_discard_lookahead.is_none()
                     && choice.normal_discard_lookahead_value.is_none()
-                    && choice.normal_discard_tenpai_hand_change.is_none()
+                    && choice.normal_discard_tenpai_continuation.is_none()
             }),
             "summary must not enable lookahead"
         );
@@ -6349,12 +6351,12 @@ mod tests {
         assert!(!output.contains("downstream"), "{output}");
     }
 
-    // ---- Tenpai hand change (現在聴牌の1回手変わり) 表示 ----
+    // ---- Tenpai continuation (現在聴牌のダマ継続) 表示 ----
 
     // 123m 456m 789m 123p 東 + ツモ 南 の単騎テンパイ。打 E で南単騎、打 S で東単騎になり、
-    // どちらも非和了牌を1枚引くと別の待ちへ手変わりする。将来打点まで確定するよう場風・自風と
+    // どちらも非和了牌を1枚引くとダマで継続できる。将来打点まで確定するよう場風・自風と
     // 自分の席を既知にする。
-    const TENPAI_HAND_CHANGE_SCENARIO: &str = r#"{
+    const TENPAI_CONTINUATION_SCENARIO: &str = r#"{
         "hand": "123m456m789m123p1z",
         "draw": "2z",
         "round_wind": "E",
@@ -6364,16 +6366,16 @@ mod tests {
     }"#;
 
     // 2手先探索は重いので、同じ表示を確認する複数のテストで構築結果を共有する。
-    static TENPAI_HAND_CHANGE: LazyLock<String> =
-        LazyLock::new(|| rendered_with_lookahead(TENPAI_HAND_CHANGE_SCENARIO, false));
-    static TENPAI_HAND_CHANGE_VERBOSE: LazyLock<String> =
-        LazyLock::new(|| rendered_with_lookahead(TENPAI_HAND_CHANGE_SCENARIO, true));
+    static TENPAI_CONTINUATION: LazyLock<String> =
+        LazyLock::new(|| rendered_with_lookahead(TENPAI_CONTINUATION_SCENARIO, false));
+    static TENPAI_CONTINUATION_VERBOSE: LazyLock<String> =
+        LazyLock::new(|| rendered_with_lookahead(TENPAI_CONTINUATION_SCENARIO, true));
 
     // 候補1件分の表示を取り出す。候補の見出しは字下げ2、枝の詳細は字下げ4以上なので、次に
     // 現れる字下げ2の行が候補の区切りになる。
-    fn hand_change_candidate(output: &str, discard: &str) -> String {
+    fn continuation_candidate(output: &str, discard: &str) -> String {
         let heading = format!("  {discard}");
-        let section = section(output, "Tenpai hand change");
+        let section = section(output, "Tenpai continuation");
         let mut lines = section.lines().skip_while(|line| *line != heading);
         let first = lines
             .next()
@@ -6386,33 +6388,33 @@ mod tests {
     }
 
     #[test]
-    fn tenpai_hand_change_section_is_absent_without_the_option() {
-        let (_, _, output) = rendered(TENPAI_HAND_CHANGE_SCENARIO, true);
-        assert!(!output.contains("Tenpai hand change"), "{output}");
+    fn tenpai_continuation_section_is_absent_without_the_option() {
+        let (_, _, output) = rendered(TENPAI_CONTINUATION_SCENARIO, true);
+        assert!(!output.contains("Tenpai continuation"), "{output}");
     }
 
     #[test]
-    fn tenpai_hand_change_summarises_every_current_tenpai_candidate() {
+    fn tenpai_continuation_summarises_every_current_tenpai_candidate() {
         // 通常表示は現在待ちと成立枝の枚数だけにまとめ、枝ごとの詳細は出さない。
-        let hand_change = section(&TENPAI_HAND_CHANGE, "Tenpai hand change");
+        let continuation = section(&TENPAI_CONTINUATION, "Tenpai continuation");
 
         assert!(
-            hand_change.contains("  diagnostics only, not connected to discard selection"),
-            "{hand_change}"
+            continuation.contains("  diagnostics only, not connected to discard selection"),
+            "{continuation}"
         );
         for candidate in [
-            "  E\n    current wait: S(3) / 3 remaining\n    hand changes: 36 branches / 119 remaining",
-            "  S\n    current wait: E(3) / 3 remaining\n    hand changes: 36 branches / 119 remaining",
+            "  E\n    current wait: S(3) / 3 remaining\n    continuation branches: 36 / 119 remaining",
+            "  S\n    current wait: E(3) / 3 remaining\n    continuation branches: 36 / 119 remaining",
         ] {
-            assert!(hand_change.contains(candidate), "{hand_change}");
+            assert!(continuation.contains(candidate), "{continuation}");
         }
-        assert!(!hand_change.contains("next discard:"), "{hand_change}");
+        assert!(!continuation.contains("next discard:"), "{continuation}");
     }
 
     #[test]
-    fn verbose_tenpai_hand_change_follows_a_branch_to_the_new_wait() {
-        // 現在待ち → 非和了ツモ → 次打牌 → 新しい待ち → mode / value まで1つの塊で追える。
-        let hand_change = section(&TENPAI_HAND_CHANGE_VERBOSE, "Tenpai hand change");
+    fn verbose_tenpai_continuation_follows_a_branch_to_the_next_wait() {
+        // 現在待ち → 非和了ツモ → 次打牌 → 次の待ち → mode / value まで1つの塊で追える。
+        let continuation = section(&TENPAI_CONTINUATION_VERBOSE, "Tenpai continuation");
 
         let branch = [
             "    drawn 1m: 3 remaining (1m: 3 remaining)",
@@ -6422,13 +6424,13 @@ mod tests {
             "      prospective value: 27400",
         ]
         .join("\n");
-        assert!(hand_change.contains(&branch), "{hand_change}");
+        assert!(continuation.contains(&branch), "{continuation}");
     }
 
     #[test]
-    fn verbose_tenpai_hand_change_keeps_the_red_five_variant_separate() {
+    fn verbose_tenpai_continuation_keeps_the_red_five_variant_separate() {
         // 赤5と黒5は別の枝で、待ちは同じでも将来打点が変わる。
-        let hand_change = section(&TENPAI_HAND_CHANGE_VERBOSE, "Tenpai hand change");
+        let continuation = section(&TENPAI_CONTINUATION_VERBOSE, "Tenpai continuation");
 
         let red = [
             "    drawn 5mr: 1 remaining (5m: 3 remaining)",
@@ -6446,21 +6448,21 @@ mod tests {
             "      prospective value: 15600",
         ]
         .join("\n");
-        assert!(hand_change.contains(&red), "{hand_change}");
-        assert!(hand_change.contains(&black), "{hand_change}");
+        assert!(continuation.contains(&red), "{continuation}");
+        assert!(continuation.contains(&black), "{continuation}");
     }
 
     #[test]
-    fn verbose_tenpai_hand_change_excludes_the_current_winning_tile() {
-        // 打 E の現在待ちは南なので、南を引いた枝は手変わりではなく和了。
-        let candidate = hand_change_candidate(&TENPAI_HAND_CHANGE_VERBOSE, "E");
+    fn verbose_tenpai_continuation_excludes_the_current_winning_tile() {
+        // 打 E の現在待ちは南なので、南を引いた枝は継続ではなく和了。
+        let candidate = continuation_candidate(&TENPAI_CONTINUATION_VERBOSE, "E");
         assert!(candidate.contains("current wait: S(3)"), "{candidate}");
         assert!(!candidate.contains("drawn S:"), "{candidate}");
         assert!(candidate.contains("drawn E:"), "{candidate}");
     }
 
     #[test]
-    fn seen_tiles_reduce_the_hand_change_remaining() {
+    fn seen_tiles_reduce_the_continuation_remaining() {
         // 1m が2枚見えている局面では、その枝の有効枚数だけが減る。
         let seen = rendered_with_lookahead(
             r#"{
@@ -6474,17 +6476,17 @@ mod tests {
             }"#,
             false,
         );
-        let hand_change = section(&seen, "Tenpai hand change");
+        let continuation = section(&seen, "Tenpai continuation");
 
         assert!(
-            hand_change.contains("    hand changes: 36 branches / 117 remaining"),
-            "{hand_change}"
+            continuation.contains("    continuation branches: 36 / 117 remaining"),
+            "{continuation}"
         );
     }
 
     #[test]
-    fn tenpai_hand_change_is_absent_for_a_reached_hand() {
-        // 既にリーチしていれば手牌を変えられないので、手変わりを探索しない。
+    fn tenpai_continuation_is_absent_for_a_reached_hand() {
+        // 既にリーチしていればダマで継続する選択肢が無いので、継続を探索しない。
         let reached = rendered_with_lookahead(
             r#"{
                 "hand": "123m456m789m123p1z",
@@ -6498,9 +6500,57 @@ mod tests {
             true,
         );
 
-        assert!(!reached.contains("Tenpai hand change"), "{reached}");
+        assert!(!reached.contains("Tenpai continuation"), "{reached}");
         // 既存の2手先診断そのものは変わらず構築する。
         assert!(reached.contains("\n\nLookahead\n"), "{reached}");
+    }
+
+    // 345m 678m 789p 789s + 34s の実戦形 (5m は赤5)。打 3s で 4s 単騎テンパイになり、そこから
+    // 3m を引いて 4s を切ると 3m / 6m / 9m の三面待ちへ変わる。簡易 CLI と同じ baseline を明示する。
+    const TENPAI_CONTINUATION_REAL_SCENARIO: &str = r#"{
+        "hand": "340678m789p34789s",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 1
+    }"#;
+
+    static TENPAI_CONTINUATION_REAL: LazyLock<String> =
+        LazyLock::new(|| rendered_with_lookahead(TENPAI_CONTINUATION_REAL_SCENARIO, true));
+
+    #[test]
+    fn verbose_tenpai_continuation_follows_a_real_tenpai_to_a_three_sided_wait() {
+        // 打 3s の 4s 単騎から 3m ツモ → 打 4s で 3m / 6m / 9m の9枚待ちへ変わる。待ちも残枚数も
+        // 既存 next discard 評価の受け入れそのもの。
+        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL, "3s");
+
+        assert!(
+            continuation.contains("    current wait: 4s(3) / 3 remaining"),
+            "{continuation}"
+        );
+        let branch = [
+            "    drawn 3m: 3 remaining (3m: 3 remaining)",
+            "      next discard: 4s",
+            "      new wait: 3m(2) 6m(3) 9m(4) / 9 remaining / 3 types",
+            "      mode: Reach",
+            "      prospective value: 51500",
+        ]
+        .join("\n");
+        assert!(continuation.contains(&branch), "{continuation}");
+    }
+
+    #[test]
+    fn tenpai_continuation_keeps_the_branch_that_holds_the_current_wait() {
+        // ツモ切りで元の待ちを維持する枝も継続枝に含める。「今すぐリーチ」と「ダマ継続」を
+        // 比べるには待ちが変わらない場合の価値も必要なので、待ちが変わる枝だけへは絞らない。
+        let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL, "3s");
+
+        let branch = [
+            "    drawn 1p: 4 remaining (1p: 4 remaining)",
+            "      next discard: 1p",
+            "      new wait: 4s(3) / 3 remaining / 1 types",
+        ]
+        .join("\n");
+        assert!(continuation.contains(&branch), "{continuation}");
     }
 
     // ---- self-tsumo continuation の表示 ----
