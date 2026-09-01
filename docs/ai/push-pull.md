@@ -34,7 +34,9 @@
 
 複数条件に一致した場合、diagnostic reason は production code の固定優先順で1つだけ表示します。自分、リーチ済み、player id が不明な席は classification 対象外です。
 
-この classification 自体は Push/Pull policy とは分離されています。したがって、1副露かつ河12枚以上の相手は引き続き `High` です。そのうえで、他家リーチがなく、`High` target がすべて「1副露かつ河12枚以上」の場合に限り、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。複数の `High` target がいても、全員がこの条件なら同じです。
+この classification 自体は Push/Pull policy とは分離されています。したがって、1副露かつ河12枚以上の相手は引き続き `High` です。そのうえで、他家リーチがなく、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが全 `High` target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します。hard-safe は OpenHand 防御と同じ「本人の河または現在有効な一時通過牌」で判定し、手牌内の別の安全牌は根拠にしません。
+
+また、他家リーチがなく、`High` target がすべて「1副露かつ河12枚以上」の場合も、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。どちらの例外も複数の `High` target がいる場合は全 target が条件を満たす必要があります。Riichi threat と Combined threat には適用しません。
 
 ## offense state と mode
 
@@ -43,6 +45,7 @@
 | 明確な threat なし | `Push` | `NoThreat` |
 | offense evaluation なし | `Fold` | `MissingOffenseAgainst*` |
 | 強いテンパイ | `Push` | `StrongTenpaiAgainst*` |
+| 選択したテンパイ打牌が全 High target に hard-safe | `Push` | `SafeTenpaiAgainstHighOpenHand` |
 | 強いと確認できないテンパイ | `Fold` | `WeakTenpaiAgainst*` |
 | 終盤1副露だけが High target のテンパイ | `Push` | `TenpaiAgainstLateOneMeldHighOpenHand` |
 | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainst*` |
@@ -70,7 +73,7 @@
 
 自分が親かどうかでは threshold を変えません。一向聴の受け入れや簡易打点 proxy は diagnostics に残しますが、現在の Push/Pull 判定には使いません。
 
-終盤1副露 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。High target に2副露以上の相手が1人でも含まれる場合、Riichi threat、Combined threat では従来の strong-tenpai threshold を維持します。
+選択打牌の hard-safe 例外と終盤1副露 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。終盤1副露の例外は High target に2副露以上の相手が1人でも含まれる場合は使いません。Riichi threat、Combined threat ではどちらの例外も使わず、従来の strong-tenpai threshold を維持します。
 
 ## 一向聴の攻撃価値
 

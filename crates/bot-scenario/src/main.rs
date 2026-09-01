@@ -164,6 +164,40 @@ mod tests {
     }
 
     #[test]
+    fn request_407_safe_tenpai_discard_pushes_in_the_summary() {
+        let path = format!(
+            "{}/scenarios/request_407_safe_tenpai.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let output = run([path, "--summary-only".to_string()]).unwrap();
+
+        assert!(
+            output.starts_with(
+                "Summary\n  choice 1: Reach\n  choice 1 discard: 5m\n  choice 1 source: Reach"
+            ),
+            "{output}"
+        );
+        assert!(output.contains("  push/pull: Push"), "{output}");
+        assert!(
+            output.contains("  push/pull reason: SafeTenpaiAgainstHighOpenHand"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  offense live wait: 5 remaining / 2 types"),
+            "{output}"
+        );
+        assert!(output.contains("  offense furiten: no"), "{output}");
+        assert!(
+            output.contains("  offense value: Reach 2600 / total: 13000"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  strong tenpai requirement: weighted total >= 15600"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn explicit_inline_baseline_facts_select_the_same_current_tenpai_value() {
         let args = [
             "--hand",

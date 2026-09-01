@@ -1,0 +1,36 @@
+{
+  "hand": "23566m 22p 123s 0s67s",
+  "draw": "2p",
+
+  "dora_indicators": "8p",
+  "round_wind": "E",
+
+  "player_id": 3,
+  "oya": 2,
+  "scores": [25000, 25000, 29600, 20400],
+
+  "reached": [false, false, false, false],
+  "discards": ["4p 7s", "5m 1m 1m 4m 7m 8m 9m 1p 3p", "", ""],
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  },
+
+  "melds": [
+    [],
+    [
+      {
+        "kind": "chi",
+        "tiles": "4p 5p 6p",
+        "called_tile": "4p"
+      },
+      {
+        "kind": "chi",
+        "tiles": "7s 8s 9s",
+        "called_tile": "7s"
+      }
+    ],
+    [],
+    []
+  ]
+}
