@@ -19,12 +19,42 @@ cargo run -p bot-scenario -- \
 | `--dora` | 任意 | ドラ表示牌。ドラそのものではない |
 | `--round-wind` | 任意 | 場風。`E` / `S` / `W` / `N` |
 | `--seat-wind` | 任意 | 自風。`E` / `S` / `W` / `N` |
+| `--player-id <0..3>` | 任意 | 自分の席 |
+| `--oya <0..3>` | 任意 | 親の席 |
+| `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 流局を合法手に加える |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要を追加。`--verbose` 併用時は受け入れ牌ごとの詳細も表示 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
-`player_id`、`oya`、`reached`、`discards` は簡易 CLI では指定できません。防御を含む局面は JSON scenario を使用します。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。
+簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
+
+```text
+round wind = E
+player_id = 0
+oya = 1
+reached = 全員 false
+discards = 全員空
+history_furiten.same_turn = false
+history_furiten.riichi_missed_win = false
+```
+
+明示した CLI option は baseline より優先されます。`--round-wind`、`--seat-wind`、`--player-id`、`--oya` を指定した場合はその値を使用します。自風は既存の局面解決規則に従い、`player_id` と `oya` が揃えば導出され、両者からの導出値と明示 `--seat-wind` が矛盾する場合は error です。
+
+`--no-history-furiten` は baseline と結果上は同じですが、「現在は同巡内フリテンではなく、かつリーチ後見逃しフリテンでもない」と明示する shorthand です。いずれかが `true` の局面や、履歴フリテンを unknown のまま扱う局面は JSON scenario で指定します。
+
+`reached` と `discards` は簡易 CLI からは指定できません。防御を含む局面や正確な実戦局面は JSON scenario または RiichiLab capture を使用してください。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。
+
+### 入力モードごとの fact
+
+| 入力モード | 省略・観測されない fact の扱い |
+| --- | --- |
+| inline `--hand` | 簡易「何切る」用の上記 baseline を使用 |
+| JSON scenario | 省略 field は従来どおり unknown。必要な fact は JSON で明示 |
+| RiichiLab capture | capture の observation から観測できる fact を使用し、復元できない履歴 fact は unknown |
+| production AI | 実際の入力 facts を使用し、unknown を inline baseline で補完しない |
+
+inline baseline は `bot-scenario` の入力補助であり、AI 本体が未知の局面情報を推測するルールではありません。正確な再現には JSON scenario、実戦観測の再生には RiichiLab capture を使用してください。
 
 ## 牌表記
 
