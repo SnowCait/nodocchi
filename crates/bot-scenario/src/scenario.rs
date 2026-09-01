@@ -1009,6 +1009,7 @@ mod tests {
         assert_eq!(spec.discards, None);
         assert_eq!(spec.post_reach_passed, None);
         assert_eq!(spec.extra_visible_tiles, None);
+        assert_eq!(spec.history_furiten, None);
         assert_eq!(spec.legal_dahai, None);
         assert_eq!(spec.legal_pon, None);
         assert!(!spec.allow_hora);
@@ -1023,6 +1024,8 @@ mod tests {
         assert_eq!(context.seat_wind(), None);
         assert_eq!(context.player_id(), None);
         assert_eq!(context.oya(), None);
+        assert_eq!(context.history_furiten().same_turn, None);
+        assert_eq!(context.history_furiten().riichi_missed_win, None);
         assert_eq!(context.reached(), &[false; 4]);
         assert!(
             context

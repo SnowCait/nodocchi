@@ -131,31 +131,70 @@ mod tests {
         let summary = run_args(&[args.as_slice(), &["--summary-only"]].concat()).unwrap();
 
         assert!(
-            full.contains("Final decision\n  action: Reach\n  discard: 5p\n  source: Reach"),
+            full.contains("Final decision\n  action: Reach\n  discard: 2p\n  source: Reach"),
             "{full}"
         );
         assert!(
             summary.starts_with(
-                "Summary\n  choice 1: Reach\n  choice 1 discard: 5p\n  choice 1 source: Reach"
+                "Summary\n  choice 1: Reach\n  choice 1 discard: 2p\n  choice 1 source: Reach"
             ),
             "{summary}"
         );
         assert!(
-            summary.contains("  choice 2: 5p\n  choice 2 source: NormalDiscard"),
+            summary.contains("  choice 2: 2p\n  choice 2 source: NormalDiscard"),
             "{summary}"
         );
         assert!(
-            summary.contains("  choice 3: 2p\n  choice 3 source: NormalDiscard"),
-            "{summary}"
-        );
-        // inline CLI は自席を特定できず offense mode が Unknown なので、新軸を0点扱いせず
-        // cohort 全体で無効化し、従来の Acceptance 比較を維持する。
-        assert!(
-            summary.contains("  choice 3 lost by: AcceptanceRemaining"),
+            summary.contains("  choice 3: 5p\n  choice 3 source: NormalDiscard"),
             "{summary}"
         );
         assert!(
-            full.contains("  current tenpai offense weighted total: unknown"),
+            summary.contains("  choice 3 lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{summary}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: 20800"),
+            "{full}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: 16000"),
+            "{full}"
+        );
+        assert!(full.ends_with(&summary), "{full}");
+    }
+
+    #[test]
+    fn explicit_inline_baseline_facts_select_the_same_current_tenpai_value() {
+        let args = [
+            "--hand",
+            "34599m235p345567s",
+            "--player-id",
+            "0",
+            "--oya",
+            "1",
+            "--round-wind",
+            "E",
+            "--no-history-furiten",
+        ];
+        let full = run_args(&args).unwrap();
+        let summary = run_args(&[args.as_slice(), &["--summary-only"]].concat()).unwrap();
+
+        assert!(
+            summary.starts_with(
+                "Summary\n  choice 1: Reach\n  choice 1 discard: 2p\n  choice 1 source: Reach"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  choice 3: 5p\n  choice 3 source: NormalDiscard\n  choice 3 lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{summary}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: 20800"),
+            "{full}"
+        );
+        assert!(
+            full.contains("  current tenpai offense weighted total: 16000"),
             "{full}"
         );
         assert!(full.ends_with(&summary), "{full}");
