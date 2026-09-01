@@ -13,8 +13,9 @@ pub const USAGE: &str = "usage:
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
 
   --dora is a backward-compatible alias of --dora-indicator
-  --no-history-furiten declares both same-turn and post-riichi missed-win furiten false;
-  without it, both facts remain unknown
+  inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
+  explicit inline options override these defaults
+  --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -264,6 +265,7 @@ impl CliArgs {
             (None, Some(path), _) => return Err(CliError::ConflictingInput(path)),
             (None, None, Some(hand)) => {
                 spec.hand = hand;
+                apply_inline_baseline(&mut spec);
                 ScenarioSource::Inline(Box::new(spec))
             }
             (None, None, None) => return Err(CliError::MissingHand),
@@ -276,6 +278,19 @@ impl CliArgs {
             summary_only,
         })
     }
+}
+
+// 簡易「何切る」用の deterministic baseline。ScenarioSpec 一般の default にはせず、inline
+// `--hand` source の構築時だけ未指定 field を補う。明示 CLI option は `get_or_insert*` により
+// 必ず優先される。
+fn apply_inline_baseline(spec: &mut ScenarioSpec) {
+    spec.round_wind.get_or_insert_with(|| "E".to_string());
+    spec.player_id.get_or_insert(0);
+    spec.oya.get_or_insert(1);
+    spec.history_furiten.get_or_insert(HistoryFuritenSpec {
+        same_turn: Some(false),
+        riichi_missed_win: Some(false),
+    });
 }
 
 fn value_of<I>(args: &mut I, option: &str) -> Result<String, CliError>
@@ -355,6 +370,55 @@ mod tests {
     }
 
     #[test]
+    fn inline_hand_applies_the_deterministic_baseline() {
+        let spec = inline_spec(&["--hand", "123m"]);
+        assert_eq!(spec.round_wind, Some("E".to_string()));
+        assert_eq!(spec.player_id, Some(0));
+        assert_eq!(spec.oya, Some(1));
+        assert_eq!(
+            spec.history_furiten,
+            Some(HistoryFuritenSpec {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            })
+        );
+
+        let scenario = Scenario::resolve(&spec).unwrap();
+        assert_eq!(scenario.context.round_wind().unwrap().to_mjai_string(), "E");
+        assert_eq!(scenario.context.player_id(), Some(0));
+        assert_eq!(scenario.context.oya(), Some(1));
+        assert_eq!(scenario.context.seat_wind().unwrap().to_mjai_string(), "N");
+        assert_eq!(scenario.context.history_furiten().same_turn, Some(false));
+        assert_eq!(
+            scenario.context.history_furiten().riichi_missed_win,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn explicit_inline_options_override_the_baseline() {
+        let spec = inline_spec(&[
+            "--hand",
+            "123m",
+            "--round-wind",
+            "S",
+            "--player-id",
+            "2",
+            "--oya",
+            "3",
+        ]);
+        assert_eq!(spec.round_wind, Some("S".to_string()));
+        assert_eq!(spec.player_id, Some(2));
+        assert_eq!(spec.oya, Some(3));
+
+        let scenario = Scenario::resolve(&spec).unwrap();
+        assert_eq!(scenario.context.round_wind().unwrap().to_mjai_string(), "S");
+        assert_eq!(scenario.context.player_id(), Some(2));
+        assert_eq!(scenario.context.oya(), Some(3));
+        assert_eq!(scenario.context.seat_wind().unwrap().to_mjai_string(), "N");
+    }
+
+    #[test]
     fn parses_player_id_boundaries() {
         for value in [0, 3] {
             let value = value.to_string();
@@ -402,15 +466,21 @@ mod tests {
     }
 
     #[test]
-    fn no_history_furiten_is_opt_in() {
+    fn no_history_furiten_is_an_explicit_shorthand_for_the_inline_baseline() {
         let unspecified = inline_spec(&["--hand", "123m"]);
-        assert_eq!(unspecified.history_furiten, None);
+        assert_eq!(
+            unspecified.history_furiten,
+            Some(HistoryFuritenSpec {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            })
+        );
         let unspecified_facts = Scenario::resolve(&unspecified)
             .unwrap()
             .context
             .history_furiten();
-        assert_eq!(unspecified_facts.same_turn, None);
-        assert_eq!(unspecified_facts.riichi_missed_win, None);
+        assert_eq!(unspecified_facts.same_turn, Some(false));
+        assert_eq!(unspecified_facts.riichi_missed_win, Some(false));
 
         let specified = inline_spec(&["--hand", "123m", "--no-history-furiten"]);
         assert_eq!(
@@ -426,6 +496,7 @@ mod tests {
             .history_furiten();
         assert_eq!(specified_facts.same_turn, Some(false));
         assert_eq!(specified_facts.riichi_missed_win, Some(false));
+        assert_eq!(specified.history_furiten, unspecified.history_furiten);
     }
 
     #[test]
