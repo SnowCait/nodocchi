@@ -95,7 +95,7 @@ Tenpai continuation
 | `damaten immediate tsumo` | ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い |
 | `damaten after non-winning draw` | 非和了牌を引いて手変わりした先の terminal tenpai の期待支払い合計 |
 
-どれも `Lookahead` の `self-tsumo continuation` と同じ確率模型・同じ単位 (点数) で、`unknown tiles` と `current future own draws` もその節に表示した局面共通の値をそのまま使います。山の残枚数が分からない局面など、材料が揃わない値は 0 ではなく `unknown` です。現在局面でリーチが合法でない場合の `reach now` も `unknown` になります。**この比較にも winner や `should_reach` はありません。**
+どれも `Lookahead` の `self-tsumo continuation` と同じ確率模型・同じ単位 (点数) で、`unknown tiles` と `current future own draws` もその節に表示した局面共通の値をそのまま使います。山の残枚数が分からない局面など、材料が揃わない値は 0 ではなく `unknown` です。合法手に `LegalAction::Reach` が無い局面の `reach now` も `unknown` です (現在局面のリーチ可否は production のリーチ判断と同じく実際の合法手が source of truth です)。**この比較にも winner や `should_reach` はありません。**
 
 **この節の値は打牌選択・押し引き・リーチ判断のどれにも使いません。** 現時点では diagnostics 専用で、selection には接続していません。判断への接続方針は [打牌選択](ai/discard-selection.md#現在聴牌のダマ継続-diagnostics-only) を参照してください。
 

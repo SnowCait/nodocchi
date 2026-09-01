@@ -66,9 +66,19 @@
 //! 現在の和了牌は最初の自摸で引く枝 (Damaten Tsumo baseline) としてだけ数え、継続枝
 //! ([`DrawTransition::SameShanten`]) には現れないので二重計上にならない。
 //!
+//! 現在局面でリーチできるかは、production の現在リーチ判断と同じく実際の合法手
+//! ([`LegalAction::Reach`](crate::action::LegalAction::Reach)) だけが source of truth になる。
+//! 局面から合法条件を組み立て直さない。継続後の未来テンパイのリーチ可否だけは現在の合法手を
+//! 流用できないので、既存の将来テンパイ判定 ([`crate::prospective_value`]) がそのまま持つ。
+//!
+//! ```text
+//! 現在の reach now        → 実際の LegalAction::Reach
+//! 継続後の未来テンパイ    → 既存の将来テンパイ Reach 判定
+//! ```
+//!
 //! 評価できない値は 0 点にしない。[`SelfTsumoFacts`] を作れない・ツモ打点の入力が足りない・
-//! リーチが現在局面で合法でない・継続枝の terminal ツモ打点が確定しない場合は、その集計値を
-//! `None` にする。「探索していない」と「0点」を混同しない。
+//! 合法手にリーチが無い・継続枝の terminal ツモ打点が確定しない場合は、その集計値を `None` に
+//! する。「探索していない」と「0点」を混同しない。
 //!
 //! # 打牌選択への接続
 //!
@@ -81,7 +91,7 @@ use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
     DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile, LookaheadDiagnostic,
     ProspectiveTenpai, SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue, TileId, TileType,
-    is_menzen, split_discarded_tile,
+    split_discarded_tile,
 };
 
 use crate::context::GameContext;
@@ -91,7 +101,6 @@ use crate::prospective_value::{
     ProspectiveDrawVariantValue, ProspectiveFacts, ProspectiveLookaheadDiagnostic,
     ProspectiveTenpaiValue, ProspectiveWaitValue,
 };
-use crate::reach_policy::{ReachLegalityFacts, is_reach_legal};
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
@@ -248,7 +257,7 @@ impl TenpaiContinuationBranch {
 pub struct TenpaiSelfTsumoComparison {
     /// 今すぐリーチして手変わりせず、残り自摸機会全体でツモ和了する期待支払い。
     ///
-    /// リーチが現在局面で合法でない場合と、ツモ打点を確定できない場合は `None`。
+    /// 現在局面の合法手にリーチが無い場合と、ツモ打点を確定できない場合は `None`。
     pub reach_now: Option<u64>,
     /// ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い。
     pub damaten_immediate_tsumo: Option<u64>,
@@ -282,6 +291,11 @@ pub(crate) struct TenpaiContinuationInputs<'a> {
     pub tiles: &'a [TileId],
     /// 打牌選択が使ったものと同じ評価器。ツモ打点の baseline もモード判定もこれが持つ。
     pub valuator: &'a ProductionProspectiveValuator<'a>,
+    /// 現在局面の合法手に [`LegalAction::Reach`](crate::action::LegalAction::Reach) があるか。
+    ///
+    /// production の現在リーチ判断と同じく、現在局面のリーチ可否は実際の合法手だけを source of
+    /// truth にする。局面から合法条件を組み立て直さない。
+    pub reach_legal: bool,
     /// self-tsumo 確率模型の事実。材料が揃わない局面では `None`。
     pub self_tsumo_facts: Option<SelfTsumoFacts>,
     pub evaluations: &'a [DiscardEvaluation],
@@ -309,7 +323,6 @@ pub(crate) fn diagnose_tenpai_continuation(
         return None;
     }
 
-    let reach_legal = current_reach_legal(inputs.context);
     Some(TenpaiContinuationDiagnostic {
         candidates: inputs
             .evaluations
@@ -322,24 +335,9 @@ pub(crate) fn diagnose_tenpai_continuation(
                     && value.discard == evaluation.discard
             })
             .map(|((evaluation, candidate), value)| {
-                candidate_continuation(inputs, reach_legal, evaluation, candidate, value)
+                candidate_continuation(inputs, evaluation, candidate, value)
             })
             .collect(),
-    })
-}
-
-// 現在局面でリーチが合法か。合法条件は production と共有する [`is_reach_legal`] だけが持つ。
-//
-// 候補ごとに変わるのは打牌後テンパイかどうかだけで、この診断の候補は全て現在打牌後が聴牌
-// なので局面全体で1回だけ判定する。未来テンパイの判定 (`prospective_value`) と違い現在局面の
-// 山残枚数は既知の fact なのでそのまま渡し、分からない材料はリーチ不可と推測しない。
-fn current_reach_legal(context: &GameContext) -> bool {
-    is_reach_legal(ReachLegalityFacts {
-        menzen: context.own_melds().map(is_menzen),
-        already_reached: context.own_reached(),
-        score: context.own_score(),
-        remaining_tiles: context.remaining_tiles(),
-        tenpai_after_discard: true,
     })
 }
 
@@ -347,7 +345,6 @@ fn current_reach_legal(context: &GameContext) -> bool {
 // (Progress) はここへ入らない。
 fn candidate_continuation(
     inputs: &TenpaiContinuationInputs,
-    reach_legal: bool,
     evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
     value: &ProspectiveDiscardValue,
@@ -365,7 +362,7 @@ fn candidate_continuation(
     TenpaiContinuationCandidate {
         discard: evaluation.discard,
         current_wait: evaluation.acceptance_after_discard.tiles.clone(),
-        self_tsumo: candidate_self_tsumo(inputs, reach_legal, evaluation, &branches),
+        self_tsumo: candidate_self_tsumo(inputs, evaluation, &branches),
         branches,
     }
 }
@@ -396,7 +393,6 @@ fn draw_branches<'a>(
 // 継続枝側の集計は成立するので、確定できない値だけを `None` にする。
 fn candidate_self_tsumo(
     inputs: &TenpaiContinuationInputs,
-    reach_legal: bool,
     evaluation: &DiscardEvaluation,
     branches: &[TenpaiContinuationBranch],
 ) -> TenpaiSelfTsumoComparison {
@@ -409,7 +405,8 @@ fn candidate_self_tsumo(
     };
 
     TenpaiSelfTsumoComparison {
-        reach_now: reach_legal
+        reach_now: inputs
+            .reach_legal
             .then(|| expected_payment(TenpaiOffenseMode::Reach, facts.own_future_draws))
             .flatten(),
         damaten_immediate_tsumo: expected_payment(TenpaiOffenseMode::Damaten, FIRST_DRAW),
@@ -475,7 +472,7 @@ mod tests {
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic,
     };
-    use crate::reach_policy::REACH_MIN_SCORE;
+    use crate::reach_policy::{ReachLegalityFacts, is_reach_legal};
 
     // 123m 456m 789m 123p 東 の門前13枚に南をツモった単騎テンパイ。打 E で南単騎、打 S で東単騎
     // になり、どちらの現在聴牌からも、非和了ツモ1枚とその後の最善打牌でダマ継続できる。
@@ -493,8 +490,8 @@ mod tests {
     // 山の残枚数。4人で分けて自分の残り自摸機会になる。
     const REMAINING_TILES: u32 = 70;
 
-    // リーチ宣言に足りない持ち点。
-    const BELOW_REACH_SCORE: i32 = REACH_MIN_SCORE - 100;
+    // リーチ宣言の条件を満たす持ち点。
+    const REACH_SCORE: i32 = 25_000;
 
     // 同じ牌種の赤5 / 黒5を取り違えないよう、物理牌を1枚ずつ払い出す。
     struct TileIdSource {
@@ -539,6 +536,8 @@ mod tests {
         remaining_tiles: Option<u32>,
         /// 全員の持ち点。`None` では持ち点が分からない。
         scores: Option<[i32; 4]>,
+        /// 合法手にリーチを含めるか。現在局面のリーチ可否はこの合法手だけが source of truth。
+        legal_reach: bool,
         scope: LookaheadDiagnosticScope,
     }
 
@@ -552,6 +551,7 @@ mod tests {
                 player_id: Some(0),
                 remaining_tiles: None,
                 scores: None,
+                legal_reach: false,
                 scope: LookaheadDiagnosticScope::Lookahead,
             }
         }
@@ -582,6 +582,7 @@ mod tests {
             let actions: Vec<LegalAction> = tiles
                 .iter()
                 .map(|&tile| LegalAction::Dahai { tile })
+                .chain(self.legal_reach.then_some(LegalAction::Reach))
                 .collect();
 
             let mut reached = [false; 4];
@@ -619,10 +620,12 @@ mod tests {
         }
     }
 
-    // self-tsumo 比較の材料が揃う局面。山の残枚数だけを既知にする。
+    // self-tsumo 比較の材料が揃う局面。山の残枚数と持ち点を既知にし、合法手にもリーチを含める。
     fn self_tsumo_spec() -> CaseSpec<'static> {
         CaseSpec {
             remaining_tiles: Some(REMAINING_TILES),
+            scores: Some([REACH_SCORE; 4]),
+            legal_reach: true,
             ..CaseSpec::default()
         }
     }
@@ -632,8 +635,7 @@ mod tests {
         CaseSpec {
             hand: &REAL_HAND,
             draw: None,
-            remaining_tiles: Some(REMAINING_TILES),
-            ..CaseSpec::default()
+            ..self_tsumo_spec()
         }
     }
 
@@ -1238,17 +1240,36 @@ mod tests {
     }
 
     #[test]
-    fn an_illegal_reach_has_no_reach_now_value() {
-        let selection = CaseSpec {
-            scores: Some([BELOW_REACH_SCORE; 4]),
+    fn reach_now_follows_the_actual_legal_reach_action() {
+        // 現在局面のリーチ可否は production のリーチ判断と同じく、実際の合法手だけが source of
+        // truth。局面の条件をすべて満たしていても、合法手にリーチが無ければ値を作らない。
+        assert!(is_reach_legal(ReachLegalityFacts {
+            menzen: Some(true),
+            already_reached: Some(false),
+            score: Some(REACH_SCORE),
+            remaining_tiles: Some(REMAINING_TILES),
+            tenpai_after_discard: true,
+        }));
+
+        let without_reach = CaseSpec {
+            legal_reach: false,
             ..self_tsumo_spec()
         }
         .build();
-        let comparison = discard_east(&selection).self_tsumo;
-
-        // 合法でないリーチを仮定して値を作らない。ダマ側は同じ材料のまま確定する。
+        let comparison = discard_east(&without_reach).self_tsumo;
         assert_eq!(comparison.reach_now, None);
+        // ダマ側は同じ材料のまま確定する。
         assert!(comparison.damaten_continuation().is_some());
+
+        // 同じ局面へ合法手のリーチを足した場合だけ、forced Reach Tsumo baseline の値になる。
+        let selection = &*SELF_TSUMO_CASE;
+        let case = self_tsumo_spec().context();
+        let facts = self_tsumo_facts(selection);
+        let reach = current_tsumo_value(&case, selection, "E", TenpaiOffenseMode::Reach);
+        assert_eq!(
+            discard_east(selection).self_tsumo.reach_now,
+            Some(reach.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+        );
     }
 
     #[test]
