@@ -7155,11 +7155,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn request_407_safe_tenpai_discard_pushes_against_a_high_open_hand() {
-        use crate::offense_value::TenpaiOffenseMode;
-        use crate::open_hand_threat::{OpenHandThreatLevel, OpenHandThreatReason};
-
+    fn request_407_context_and_actions() -> (GameContext, Vec<LegalAction>) {
         // Capture request_id=407 相当。player 3 の 14 枚は
         // 23566m 222p 123s 0s67s。player 1 は2副露かつ河9枚で High になり、
         // 通常打牌 selector が選ぶ 5m はその河にある。
@@ -7215,6 +7211,16 @@ pub(crate) mod tests {
             .map(|&value| dahai(value))
             .chain([LegalAction::Reach])
             .collect();
+
+        (ctx, actions)
+    }
+
+    #[test]
+    fn request_407_safe_tenpai_discard_pushes_against_a_high_open_hand() {
+        use crate::offense_value::TenpaiOffenseMode;
+        use crate::open_hand_threat::{OpenHandThreatLevel, OpenHandThreatReason};
+
+        let (ctx, actions) = request_407_context_and_actions();
 
         let diagnostic = diagnose_matching_act(&ctx, &actions);
         assert_eq!(diagnostic.normal_discard_action, Some(dahai(17)));
@@ -7283,6 +7289,75 @@ pub(crate) mod tests {
             Some(dahai(17))
         );
         assert_eq!(diagnostic.open_hand_defense.selected, None);
+    }
+
+    #[test]
+    fn public_push_pull_inputs_do_not_use_an_illegal_global_best_for_hard_safe() {
+        let (ctx, actions) = request_407_context_and_actions();
+
+        // public API は offense の既存 global-best semantics を維持するが、追加した hard-safe
+        // fact には非合法な global best を使わない。5m を合法候補から外し、実際に選べる通常打牌を
+        // hard-safe でない 2m だけに制限する。
+        let restricted_actions = vec![dahai(4), LegalAction::Reach];
+        let tiles: Vec<TileId> = ctx
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(ctx.drawn_tile())
+            .collect();
+        let global_best = select_best_normal_discard_evaluation(&ctx, &tiles, &restricted_actions)
+            .expect("全手牌候補の global best がある");
+        assert_eq!(global_best.discard, TileType::new(4).unwrap());
+        assert!(
+            !restricted_actions.iter().any(
+                |action| matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == global_best.discard)
+            )
+        );
+
+        let legal_selection = select_discard_action_with_evaluation(&ctx, &restricted_actions);
+        assert_eq!(legal_selection.action, Some(dahai(4)));
+        assert_eq!(
+            legal_selection
+                .evaluation
+                .as_ref()
+                .map(|evaluation| evaluation.discard),
+            TileType::new(1)
+        );
+        let legal_inputs = push_pull_inputs_from_context_with_evaluation(
+            &ctx,
+            legal_selection.evaluation.as_ref(),
+            &restricted_actions,
+        );
+        assert!(!legal_inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets);
+
+        let restricted_public = push_pull_inputs_from_context(&ctx, &restricted_actions);
+        assert_eq!(
+            restricted_public
+                .offense
+                .expect("global-best offense は既存どおり保持する")
+                .min_shanten_after_discard,
+            0
+        );
+        assert!(
+            !restricted_public.selected_normal_discard_hard_safe_for_all_high_open_hand_targets
+        );
+        assert_eq!(
+            decide_push_pull(&restricted_public),
+            crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::WeakTenpaiAgainstHighOpenHand,
+            }
+        );
+
+        // 同じ public 入口でも global best の 5m が合法なら、all-target hard-safe fact は true。
+        let unrestricted_public = push_pull_inputs_from_context(&ctx, &actions);
+        assert!(
+            unrestricted_public.selected_normal_discard_hard_safe_for_all_high_open_hand_targets
+        );
+        assert_eq!(
+            decide_push_pull(&unrestricted_public).reason,
+            PushPullReason::SafeTenpaiAgainstHighOpenHand
+        );
     }
 
     #[test]

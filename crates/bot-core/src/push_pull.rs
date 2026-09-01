@@ -1,4 +1,4 @@
-use crate::action::LegalAction;
+use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use crate::discard_selection::{
     concealed_tiles_after_discard, select_best_normal_discard_evaluation,
@@ -548,9 +548,10 @@ const DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_500 * SELF_TS
 /// 現在聴牌の offense weighted total を含む。打牌候補の絞り込みには `legal_actions` を使わない
 /// ので、対象は手牌から切れる全打牌候補になる。手牌とツモ牌が空なら `offense == None`。
 ///
-/// `legal_actions` は通常打牌の現在聴牌比較と、選択後の攻撃打点を求めるときの合法 Reach 判定に
-/// 使う。Reach 可否を別経路で推測し直さないため、合法 action を持たない呼び出し元は空スライスを
-/// 渡し、その場合は「リーチできない局面」として扱う。
+/// `legal_actions` は通常打牌の現在聴牌比較、選択後の攻撃打点を求めるときの合法 Reach 判定、
+/// 選択打牌の hard-safe fact が実際に合法 Dahai かの確認に使う。Reach 可否を別経路で推測し直さ
+/// ないため、合法 action を持たない呼び出し元は空スライスを渡し、その場合は「リーチできず、
+/// hard-safe な選択打牌も確認できない局面」として扱う。
 pub fn push_pull_inputs_from_context(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -611,6 +612,8 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 ///
 /// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
 /// evaluation が `None` なら offense も `None`。
+/// 選択打牌の hard-safe fact は evaluation の牌種に一致する合法 Dahai がある場合だけ構築し、
+/// 非合法な global best を safety の根拠にしない。
 ///
 /// 打牌後テンパイの待ちと恒常フリテンも、選択済み打牌の既存経路
 /// ([`selected_discard_tenpai_wait_availability`]) から scalar facts だけを転記する。
@@ -650,6 +653,7 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
             context,
             &open_hand_threats,
             evaluation.map(|evaluation| evaluation.discard),
+            legal_actions,
         );
 
     let offense = evaluation.map(|evaluation| {
@@ -703,15 +707,21 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
 /// 通常打牌として選択した牌そのものが全 High OpenHand target に hard-safe か。
 ///
 /// target 抽出と hard-safe 判定は OpenHand 防御の helper を共有する。選択打牌がない場合と
-/// High target がいない場合は `false`。
+/// その牌種に一致する合法 Dahai がない場合、High target がいない場合は `false`。public
+/// [`push_pull_inputs_from_context`] が全手牌候補から global best を渡す場合でも、非合法な候補を
+/// safety の根拠にはしない。
 fn selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
     context: &GameContext,
     open_hand_threats: &[OpenHandThreatAssessment; 4],
     selected_normal_discard: Option<TileType>,
+    legal_actions: &[LegalAction],
 ) -> bool {
     let Some(discard) = selected_normal_discard else {
         return false;
     };
+    if preferred_dahai_action_for_type(legal_actions, discard).is_none() {
+        return false;
+    }
     let targets = high_open_hand_threat_players(open_hand_threats);
     is_ron_safe_for_all_open_hand_targets(discard, &targets, context)
 }
@@ -4122,6 +4132,7 @@ mod tests {
                 &context(true),
                 &assessments,
                 Some(five_man),
+                &[LegalAction::Dahai { tile: tile(16) }],
             )
         );
         assert!(
@@ -4129,6 +4140,7 @@ mod tests {
                 &context(false),
                 &assessments,
                 Some(five_man),
+                &[LegalAction::Dahai { tile: tile(16) }],
             )
         );
         assert!(
@@ -4136,6 +4148,7 @@ mod tests {
                 &context(true),
                 &assessments,
                 None,
+                &[LegalAction::Dahai { tile: tile(16) }],
             )
         );
     }
