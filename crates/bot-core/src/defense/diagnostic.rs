@@ -382,6 +382,8 @@ pub(crate) fn log_defense_fallback_evaluation(
     let Some((action, kind)) = evaluation.selected else {
         return;
     };
+    // production act() が既に計算した vector だけを転記する。現物で早期決着して `None` なら、
+    // logging のために exact model を再実行せず、R/T fields も `None` のまま出力する。
     log_defense_fallback_decision_with_ron_risk_vectors(
         context,
         action,
