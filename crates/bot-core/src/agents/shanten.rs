@@ -4311,6 +4311,12 @@ pub(crate) mod tests {
                 .map(|wait| wait.tsumo_remaining),
             Some(3)
         );
+        assert!(
+            !melded
+                .push_pull_inputs
+                .expect("押し引き入力がある")
+                .selected_normal_discard_hard_safe_for_all_high_open_hand_targets
+        );
         assert_eq!(melded_decision.mode, PushPullMode::Fold);
         assert_eq!(
             melded_decision.reason,
@@ -7147,6 +7153,136 @@ pub(crate) mod tests {
             without_reach.selected_action,
             without_reach.normal_discard_action.clone().unwrap()
         );
+    }
+
+    #[test]
+    fn request_407_safe_tenpai_discard_pushes_against_a_high_open_hand() {
+        use crate::offense_value::TenpaiOffenseMode;
+        use crate::open_hand_threat::{OpenHandThreatLevel, OpenHandThreatReason};
+
+        // Capture request_id=407 相当。player 3 の 14 枚は
+        // 23566m 222p 123s 0s67s。player 1 は2副露かつ河9枚で High になり、
+        // 通常打牌 selector が選ぶ 5m はその河にある。
+        let hand = [4, 8, 17, 20, 21, 40, 41, 72, 76, 80, 88, 92, 96];
+        let drawn = 42;
+        let opponent_discards = [16, 0, 1, 12, 24, 28, 32, 36, 44];
+        let opponent_melds = vec![
+            crate::meld::Meld::new(
+                crate::meld::MeldKind::Chi,
+                vec![tile(48), tile(52), tile(56)],
+                Some(tile(48)),
+            ),
+            crate::meld::Meld::new(
+                crate::meld::MeldKind::Chi,
+                vec![tile(97), tile(100), tile(104)],
+                Some(tile(97)),
+            ),
+        ];
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[1] = opponent_melds.clone();
+        let discards: [Vec<TileId>; 4] = [
+            vec![],
+            opponent_discards.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            vec![],
+        ];
+        let dora_indicator = tile(64);
+        let mut visible: Vec<TileId> = hand.iter().map(|&value| tile(value)).collect();
+        visible.push(tile(drawn));
+        visible.push(dora_indicator);
+        visible.extend(discards.iter().flatten().copied());
+        visible.extend(opponent_melds.iter().flat_map(|meld| meld.tiles().to_vec()));
+        let ctx = GameContext::from_parts_with_melds(
+            Some(tile(drawn)),
+            hand.iter().map(|&value| tile(value)).collect(),
+            vec![dora_indicator],
+            TileType::new(27),
+            TileType::new(28),
+            visible,
+            Some(3),
+            Some(2),
+            discards,
+            [false; 4],
+            melds,
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+        let actions: Vec<LegalAction> = hand
+            .iter()
+            .chain([&drawn])
+            .map(|&value| dahai(value))
+            .chain([LegalAction::Reach])
+            .collect();
+
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        assert_eq!(diagnostic.normal_discard_action, Some(dahai(17)));
+
+        let selected = diagnostic
+            .normal_discard
+            .as_ref()
+            .and_then(|normal| normal.selected.as_ref())
+            .expect("通常打牌評価が選ばれている");
+        assert_eq!(selected.discard, TileType::new(4).unwrap());
+        assert_eq!(selected.min_shanten_after_discard(), 0);
+        assert_eq!(selected.acceptance_total_remaining(), 5);
+        assert_eq!(selected.acceptance_type_count(), 2);
+
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+        assert_eq!(inputs.player_threats[1].open_meld_count, 2);
+        assert_eq!(inputs.player_threats[1].discard_count, 9);
+        assert_eq!(
+            inputs.open_hand_threats[1].level(),
+            Some(OpenHandThreatLevel::High)
+        );
+        assert_eq!(
+            inputs.open_hand_threats[1].reason(),
+            Some(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards)
+        );
+        assert!(inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets);
+
+        let offense = inputs.offense.expect("offense がある");
+        let wait = offense
+            .tenpai_wait_after_discard
+            .expect("選択打牌後の待ちがある");
+        assert_eq!(wait.tsumo_remaining, 5);
+        assert_eq!(wait.tsumo_type_count, 2);
+        assert_eq!(wait.permanent_furiten, bot_logic::PermanentFuriten::No);
+        assert_eq!(wait.can_ron, Some(true));
+        let reach_wait = diagnostic
+            .reach
+            .as_ref()
+            .and_then(|reach| reach.tenpai_wait.as_ref())
+            .expect("リーチ判断にも選択済み待ちが共有される");
+        assert_eq!(
+            reach_wait.live_waits,
+            vec![TileType::new(0).unwrap(), TileType::new(3).unwrap()]
+        );
+        let tenpai_value = offense
+            .tenpai_offense_value_after_discard
+            .expect("現在聴牌 offense value がある");
+        assert_eq!(tenpai_value.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(tenpai_value.value.weighted_total(), Some(13_000));
+        assert!(tenpai_value.value.weighted_total().unwrap() < 15_600);
+
+        assert_eq!(
+            diagnostic.push_pull_decision,
+            Some(crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::SafeTenpaiAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+        assert_eq!(
+            diagnostic
+                .reach
+                .as_ref()
+                .and_then(|reach| reach.selected_discard.clone()),
+            Some(dahai(17))
+        );
+        assert_eq!(diagnostic.open_hand_defense.selected, None);
     }
 
     #[test]

@@ -5,6 +5,9 @@ use crate::discard_selection::{
     selected_discard_tenpai_wait_availability, selected_iishanten_forward_metrics_from_context,
 };
 use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
+use crate::open_hand_defense::{
+    high_open_hand_threat_players, is_ron_safe_for_all_open_hand_targets,
+};
 use crate::open_hand_threat::{
     OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
 };
@@ -381,6 +384,8 @@ fn concealed_value_proxy_after_discard(
 /// - `offense`: 攻撃評価を構築できない場合は `None`。
 /// - `player_threats`: 全4席分の軽量な脅威 facts。
 /// - `open_hand_threats`: `player_threats` から導出した全4席分の OpenHandThreat classification。
+/// - `selected_normal_discard_hard_safe_for_all_high_open_hand_targets`: 通常打牌として選択した
+///   牌そのものが、全 High OpenHand target に対して hard-safe か。
 ///
 /// `opponent_reach_count` / `dealer_reacher` は `player_threats` から導出する。
 ///
@@ -407,6 +412,12 @@ pub struct PushPullInputs {
     /// 書き直さない。自分の席・リーチ済みの席・`player_id` 不明の席は level を持たない
     /// [`OpenHandThreatAssessment::NotApplicable`] になる。
     pub open_hand_threats: [OpenHandThreatAssessment; 4],
+    /// 通常打牌として選択した牌そのものが、全 High OpenHand target に対して hard-safe か。
+    ///
+    /// target と hard-safe の判定は OpenHand 防御の source of truth を共有する。手牌内の別の
+    /// safe tile はこの fact に含めない。High target がいない場合や通常打牌評価がない場合は
+    /// `false`。
+    pub selected_normal_discard_hard_safe_for_all_high_open_hand_targets: bool,
 }
 
 impl PushPullInputs {
@@ -469,6 +480,8 @@ pub enum PushPullReason {
     TwoOrMoreShantenAgainstReach,
     MissingOffenseAgainstHighOpenHand,
     StrongTenpaiAgainstHighOpenHand,
+    /// 通常打牌として選択したテンパイ打牌が全 High OpenHand target に hard-safe なので押す。
+    SafeTenpaiAgainstHighOpenHand,
     /// 終盤の1副露だけが High target の局面で、通常打牌後がテンパイなので押す。
     TenpaiAgainstLateOneMeldHighOpenHand,
     WeakTenpaiAgainstHighOpenHand,
@@ -631,6 +644,14 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
         _ => false,
     };
 
+    let open_hand_threats = classify_open_hand_threats(&player_threats);
+    let selected_normal_discard_hard_safe_for_all_high_open_hand_targets =
+        selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
+            context,
+            &open_hand_threats,
+            evaluation.map(|evaluation| evaluation.discard),
+        );
+
     let offense = evaluation.map(|evaluation| {
         let value_proxy = offense_value_proxy_after_discard(context, evaluation);
         let tenpai_wait = selected_tenpai_wait
@@ -674,8 +695,25 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
         self_dealer,
         offense,
         player_threats,
-        open_hand_threats: classify_open_hand_threats(&player_threats),
+        open_hand_threats,
+        selected_normal_discard_hard_safe_for_all_high_open_hand_targets,
     }
+}
+
+/// 通常打牌として選択した牌そのものが全 High OpenHand target に hard-safe か。
+///
+/// target 抽出と hard-safe 判定は OpenHand 防御の helper を共有する。選択打牌がない場合と
+/// High target がいない場合は `false`。
+fn selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
+    context: &GameContext,
+    open_hand_threats: &[OpenHandThreatAssessment; 4],
+    selected_normal_discard: Option<TileType>,
+) -> bool {
+    let Some(discard) = selected_normal_discard else {
+        return false;
+    };
+    let targets = high_open_hand_threat_players(open_hand_threats);
+    is_ron_safe_for_all_open_hand_targets(discard, &targets, context)
 }
 
 /// 攻撃継続時の確定打点を評価する局面か。
@@ -803,21 +841,23 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 ///
 /// 明確な threat が無ければ従来どおり通常の攻撃判断 (`Push`) を続ける。明確な threat がある
 /// 場合は、打牌後が強いテンパイのときと、一向聴で十分な攻撃価値を確認できたときだけ押し、
-/// それ以外は降りる。ただし他家リーチがなく、High target がすべて1副露かつ河12枚以上なら、
-/// 通常打牌後がテンパイであれば強さを問わず押す。
+/// それ以外は降りる。ただし他家リーチがなく、通常打牌として選んだテンパイ打牌そのものが全
+/// High target に hard-safe な場合、または High target がすべて1副露かつ河12枚以上なら、
+/// テンパイの強さを問わず押す。
 ///
 /// | 自分の状態 | mode |
 /// | --- | --- |
 /// | 攻撃評価を作れない | `Fold` |
 /// | 強いテンパイ | `Push` |
-/// | 強いと確認できないテンパイ | `Fold` (終盤1副露 High だけなら `Push`) |
+/// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 High target に hard-safe、または終盤1副露 High だけなら `Push`) |
 /// | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
 /// | それ以外の一向聴 | `Fold` |
 /// | 二向聴以上 | `Fold` |
 ///
 /// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
-/// 終盤1副露 High だけの例外は High OpenHandThreat 単独に限り、Riichi / Combined や2副露以上を
-/// 含む High には適用しない。`Present` の副露相手は threat に数えない。
+/// 選択打牌の hard-safe と終盤1副露 High の例外は High OpenHandThreat 単独に限り、Riichi /
+/// Combined には適用しない。hard-safe 判定は OpenHand 防御の既存 helper を入力構築時に共有し、
+/// 手牌内の別候補は見ない。`Present` の副露相手は threat に数えない。
 ///
 /// 情報不足 (攻撃評価なし / テンパイなのに待ちを構築できない / 恒常フリテンが判定不能) の場合は
 /// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1副露 High だけを相手にしたテンパイの
@@ -865,10 +905,18 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         };
     };
 
-    // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、または終盤1副露 High だけなら押す。
+    // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、選択打牌が全 High target に hard-safe、
+    // または終盤1副露 High だけなら押す。
     if offense.min_shanten_after_discard <= TENPAI_SHANTEN {
         let (mode, reason) = if is_strong_tenpai(&offense, inputs.dealer_reacher) {
             (PushPullMode::Push, reasons.strong_tenpai)
+        } else if threat == ThreatKind::HighOpenHand
+            && inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets
+        {
+            (
+                PushPullMode::Push,
+                PushPullReason::SafeTenpaiAgainstHighOpenHand,
+            )
         } else if threat == ThreatKind::HighOpenHand
             && inputs.has_only_late_one_meld_high_open_hand_threats()
         {
@@ -927,6 +975,7 @@ pub(crate) fn log_push_pull_decision(
         self_dealer = inputs.self_dealer,
         high_open_hand_threat = inputs.has_high_open_hand_threat(),
         combined_threat = inputs.has_combined_threat(),
+        selected_normal_discard_hard_safe_for_all_high_open_hand_targets = inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets,
         offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
         offense_acceptance_total_remaining = ?inputs.offense.map(|offense| offense.acceptance_total_remaining),
         offense_acceptance_type_count = ?inputs.offense.map(|offense| offense.acceptance_type_count),
@@ -1137,6 +1186,7 @@ mod tests {
             offense,
             player_threats,
             open_hand_threats: classify_open_hand_threats(&player_threats),
+            selected_normal_discard_hard_safe_for_all_high_open_hand_targets: false,
         }
     }
 
@@ -3881,6 +3931,11 @@ mod tests {
         high_open_hand_inputs_with_dealer(false, offense)
     }
 
+    fn with_selected_normal_discard_hard_safe(mut inputs: PushPullInputs) -> PushPullInputs {
+        inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets = true;
+        inputs
+    }
+
     fn high_open_hand_inputs_with_dealer(
         self_dealer: bool,
         offense: Option<PushPullOffenseState>,
@@ -3939,6 +3994,150 @@ mod tests {
                 PushPullReason::StrongTenpaiAgainstHighOpenHand,
             );
         }
+    }
+
+    #[test]
+    fn weak_tenpai_with_a_hard_safe_selected_discard_against_high_open_hand_pushes() {
+        let inputs = with_selected_normal_discard_hard_safe(high_open_hand_inputs(Some(
+            weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1),
+        )));
+        let offense = inputs.offense.expect("offense is present");
+        assert!(!is_strong_tenpai(&offense, inputs.dealer_reacher));
+
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Push,
+            PushPullReason::SafeTenpaiAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_hard_safe_tile_elsewhere_in_the_hand_does_not_push_a_weak_tenpai() {
+        // この fact は「選択された通常打牌」だけを表す。手牌内の別候補が hard-safe でも、
+        // 選択打牌が safe でなければ false のままで従来 policy に従う。
+        let inputs = high_open_hand_inputs(Some(weighted_total_tenpai_offense(
+            TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1,
+        )));
+        assert!(!inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets);
+
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn the_hard_safe_selected_discard_exception_is_not_used_for_combined_threats() {
+        let mut facts = high_open_hand_facts();
+        facts[2].reached = true;
+        let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
+            1,
+            false,
+            false,
+            Some(weighted_total_tenpai_offense(
+                TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1,
+            )),
+            facts,
+        ));
+
+        assert!(inputs.has_combined_threat());
+        assert_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstCombinedThreat,
+        );
+    }
+
+    #[test]
+    fn the_selected_discard_must_be_hard_safe_for_every_high_open_hand_target() {
+        let mut facts = high_open_hand_facts();
+        let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
+        facts[2] = second[2];
+
+        let weak = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1);
+        let all_safe = with_selected_normal_discard_hard_safe(inputs_with_threats(
+            0,
+            false,
+            false,
+            Some(weak),
+            facts,
+        ));
+        assert_eq!(
+            all_safe
+                .open_hand_threats
+                .iter()
+                .filter(|assessment| assessment.is_high())
+                .count(),
+            2
+        );
+        assert_high_open_hand_decision(
+            &all_safe,
+            PushPullMode::Push,
+            PushPullReason::SafeTenpaiAgainstHighOpenHand,
+        );
+
+        // 入力構築時の既存 all-target hard-safe helper は1 target でも unsafe なら false にする。
+        let one_unsafe = PushPullInputs {
+            selected_normal_discard_hard_safe_for_all_high_open_hand_targets: false,
+            ..all_safe
+        };
+        assert_high_open_hand_decision(
+            &one_unsafe,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn selected_discard_hard_safe_fact_uses_every_classified_high_target() {
+        let mut facts = high_open_hand_facts();
+        let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
+        facts[2] = second[2];
+        let assessments = classify_open_hand_threats(&facts);
+        let five_man = TileType::new(4).unwrap();
+
+        let context = |second_target_discards_five_man: bool| {
+            let mut discards: [Vec<TileId>; 4] = Default::default();
+            discards[1].push(tile(16));
+            if second_target_discards_five_man {
+                discards[2].push(tile(17));
+            }
+            GameContext::from_parts_with_table_state(
+                None,
+                vec![],
+                vec![],
+                None,
+                None,
+                vec![],
+                Some(0),
+                Some(3),
+                discards,
+                [false; 4],
+            )
+        };
+
+        assert!(
+            selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
+                &context(true),
+                &assessments,
+                Some(five_man),
+            )
+        );
+        assert!(
+            !selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
+                &context(false),
+                &assessments,
+                Some(five_man),
+            )
+        );
+        assert!(
+            !selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
+                &context(true),
+                &assessments,
+                None,
+            )
+        );
     }
 
     #[test]
