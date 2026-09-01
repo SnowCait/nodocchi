@@ -17,10 +17,21 @@
 //!
 //! # 枝の出どころ
 //!
-//! 非和了ツモは既存2手先評価の [`DrawTransition::SameShanten`] そのものである。現在打牌後が
-//! 聴牌の候補では、和了牌は向聴数を下げるので [`DrawTransition::Progress`] に分類され、向聴数を
-//! 維持する牌 = 非和了牌になる。継続枝からの和了牌の除外は、この既存分類をそのまま使うだけで、
-//! この層が和了牌を判定し直すことはない。
+//! 仮想ツモは既存2手先評価の枝そのもので、この層は「その牌が実戦上の非和了ツモか」で振り分ける
+//! だけである。振り分けの材料も既存のもので、[`DrawTransition`] の意味は変えない。
+//!
+//! ```text
+//! SameShanten            → 非和了ツモ。継続枝の候補
+//! Progress + ツモ和了可  → 実際に和了する牌。継続枝に入れない
+//! Progress + 役なし      → 実戦上は非和了ツモ。継続枝の候補
+//! Progress + 判定不能    → 和了枝か継続枝か決められない
+//! ```
+//!
+//! 構造上は和了形になる牌でも、副露手では役が無くてツモ和了できないことがある。その牌は実際に
+//! は和了できず、引いた後に打牌してテンパイを続けられるので継続枝として扱う。役の有無は既存の
+//! Damaten Tsumo scoring ([`ProductionProspectiveValuator::tsumo_variant_outcomes`]) の結論
+//! そのままで、この層が役や翻数を判定し直すことはない。門前手のツモ和了には必ず門前清自摸和が
+//! 付くため、この振り分けで継続枝が増えるのは副露手だけになる。
 //!
 //! 次打牌も既存の打牌評価と既存 comparator が選んだ [`DrawVariantLookaheadDiagnostic::next_discard`]
 //! そのもので、向聴・受け入れ・赤5・ドラ・形・将来打点のどの比較もここで作り直さない。その
@@ -63,8 +74,9 @@
 //! Reach / Damaten も既存 prospective evaluation が決めたモードのままで、「今ダマを選んだから
 //! 未来もダマ」と固定しない。
 //!
-//! 現在の和了牌は最初の自摸で引く枝 (Damaten Tsumo baseline) としてだけ数え、継続枝
-//! ([`DrawTransition::SameShanten`]) には現れないので二重計上にならない。
+//! ダマツモで実際に和了できる牌は最初の自摸で引く枝としてだけ数え、継続枝には現れないので
+//! 二重計上にならない。役が無くて和了できない牌は逆に、即ツモ側の集計 (ツモ baseline で役の
+//! 無い variant を成功する待ちに含めない) から外れ、継続枝側だけが数える。
 //!
 //! 現在局面でリーチできるかは、production の現在リーチ判断と同じく実際の合法手
 //! ([`LegalAction::Reach`](crate::action::LegalAction::Reach)) だけが source of truth になる。
@@ -77,8 +89,8 @@
 //! ```
 //!
 //! 評価できない値は 0 点にしない。[`SelfTsumoFacts`] を作れない・ツモ打点の入力が足りない・
-//! 合法手にリーチが無い・継続枝の terminal ツモ打点が確定しない場合は、その集計値を `None` に
-//! する。「探索していない」と「0点」を混同しない。
+//! 合法手にリーチが無い・継続枝の terminal ツモ打点が確定しない・仮想ツモが和了枝か継続枝か
+//! 決められない場合は、その集計値を `None` にする。「探索していない」と「0点」を混同しない。
 //!
 //! # 打牌選択への接続
 //!
@@ -88,18 +100,17 @@
 //! threshold も持たない。
 
 use bot_logic::{
-    DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
-    DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile, LookaheadDiagnostic,
-    ProspectiveTenpai, SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue, TileId, TileType,
-    split_discarded_tile,
+    DiscardEvaluation, DiscardLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,
+    EffectiveAcceptanceTile, LookaheadDiagnostic, ProspectiveTenpai, SelfTsumoFacts, SelfTsumoPath,
+    TenpaiTsumoValue, TileId, TileType, split_discarded_tile,
 };
 
 use crate::context::GameContext;
 use crate::offense_value::TenpaiOffenseMode;
 use crate::prospective_value::{
-    ProductionProspectiveValuator, ProspectiveDiscardValue, ProspectiveDrawValue,
-    ProspectiveDrawVariantValue, ProspectiveFacts, ProspectiveLookaheadDiagnostic,
-    ProspectiveTenpaiValue, ProspectiveWaitValue,
+    ProductionProspectiveValuator, ProspectiveDiscardValue, ProspectiveDrawVariantValue,
+    ProspectiveFacts, ProspectiveLookaheadDiagnostic, ProspectiveTenpaiValue, ProspectiveWaitValue,
+    TsumoVariantOutcomes, TsumoVariantStatus,
 };
 
 // テンパイの向聴数。
@@ -341,67 +352,130 @@ pub(crate) fn diagnose_tenpai_continuation(
     })
 }
 
-// 現在聴牌候補1件分の継続枝。非和了ツモは既存分類 (same-shanten) そのもので、和了牌の枝
-// (Progress) はここへ入らない。
+// 現在聴牌候補1件分の継続枝。
+//
+// 現在聴牌は継続枝の分類と self-tsumo 比較の両方で使うので、組み立ても評価も1候補につき1回
+// だけにする。
 fn candidate_continuation(
     inputs: &TenpaiContinuationInputs,
     evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
     value: &ProspectiveDiscardValue,
 ) -> TenpaiContinuationCandidate {
-    let branches: Vec<_> = candidate
-        .draws
-        .iter()
-        .zip(&value.draws)
-        .filter(|(draw, value)| {
-            draw.transition == DrawTransition::SameShanten && draw.draw == value.draw
-        })
-        .flat_map(|(draw, value)| draw_branches(draw, value))
-        .collect();
+    let current = current_tenpai_facts(inputs.valuator, inputs.tiles, evaluation);
+    // 構造上の和了牌が実際にツモ和了できるかは、既存 Damaten Tsumo scoring の結論をそのまま使う。
+    let outcomes = current.as_ref().map(|facts| {
+        inputs
+            .valuator
+            .tsumo_variant_outcomes(facts, TenpaiOffenseMode::Damaten)
+    });
+    let branches = candidate_branches(candidate, value, outcomes.as_ref());
 
     TenpaiContinuationCandidate {
         discard: evaluation.discard,
         current_wait: evaluation.acceptance_after_discard.tiles.clone(),
-        self_tsumo: candidate_self_tsumo(inputs, evaluation, &branches),
-        branches,
+        self_tsumo: candidate_self_tsumo(inputs, current.as_ref(), &branches),
+        branches: branches.branches,
     }
 }
 
-// 非和了ツモ1牌種分の枝。既存2手先評価が構造 (次打牌後が聴牌か) と terminal ツモ打点を、
-// 既存将来打点が待ち・モード・ロン baseline の打点を持つ。
-fn draw_branches<'a>(
-    draw: &'a DrawLookaheadDiagnostic,
-    value: &'a ProspectiveDrawValue,
-) -> impl Iterator<Item = TenpaiContinuationBranch> + 'a {
-    draw.variants
-        .iter()
-        .zip(&value.variants)
-        .filter(|(variant, value)| {
-            variant.drawn_tile == value.drawn_tile && continues_tenpai(variant)
+// 現在聴牌候補1件分の継続枝と、その分類が確定したか。
+struct CandidateBranches {
+    branches: Vec<TenpaiContinuationBranch>,
+    /// 実際にツモ和了できるかを確定できない仮想ツモがあったか。
+    ///
+    /// その牌を和了とも非和了とも決められないので、継続枝の集計値を推測しない。
+    unresolved: bool,
+}
+
+impl CandidateBranches {
+    // 継続枝の期待支払い合計。1つでも確定できない枝と、分類そのものが確定しない仮想ツモが
+    // あった候補は 0 点へ潰さず `None`。
+    fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
+        if self.unresolved {
+            return None;
+        }
+        self.branches.iter().try_fold(0, |total: u64, branch| {
+            Some(total.saturating_add(branch.expected_self_tsumo_value(facts)?))
         })
-        .map(|(variant, value)| TenpaiContinuationBranch {
-            draw: draw.draw,
-            draw_remaining: draw.remaining,
-            variant: value.clone(),
-            tsumo_continuation: variant.tsumo_continuation,
-        })
+    }
+}
+
+// 非和了ツモの枝を物理牌 variant 単位で集める。既存2手先評価が構造 (次打牌後が聴牌か) と
+// terminal ツモ打点を、既存将来打点が待ち・モード・ロン baseline の打点を持つ。
+fn candidate_branches(
+    candidate: &DiscardLookaheadDiagnostic,
+    value: &ProspectiveDiscardValue,
+    outcomes: Option<&TsumoVariantOutcomes>,
+) -> CandidateBranches {
+    let mut branches = Vec::new();
+    let mut unresolved = false;
+
+    for (draw, draw_value) in candidate.draws.iter().zip(&value.draws) {
+        if draw.draw != draw_value.draw {
+            continue;
+        }
+        for (variant, variant_value) in draw.variants.iter().zip(&draw_value.variants) {
+            if variant.drawn_tile != variant_value.drawn_tile {
+                continue;
+            }
+            match is_non_winning_draw(draw.transition, variant.drawn_tile, outcomes) {
+                Some(true) if continues_tenpai(variant) => {
+                    branches.push(TenpaiContinuationBranch {
+                        draw: draw.draw,
+                        draw_remaining: draw.remaining,
+                        variant: variant_value.clone(),
+                        tsumo_continuation: variant.tsumo_continuation,
+                    });
+                }
+                Some(_) => {}
+                None => unresolved = true,
+            }
+        }
+    }
+
+    CandidateBranches {
+        branches,
+        unresolved,
+    }
+}
+
+// この仮想ツモを実戦上の非和了ツモとして扱うか。確定できない場合は `None`。
+//
+// 構造上テンパイを維持する牌 ([`DrawTransition::SameShanten`]) は常に非和了ツモ。構造上は
+// 和了形になる牌 ([`DrawTransition::Progress`]) は、ダマのまま実際にツモ和了できるかで分かれる。
+// 副露手では役が無くて和了できない和了牌があり、その牌は引いた後も打牌してテンパイを続けられる
+// ので継続枝として扱う。役の有無は既存 Damaten Tsumo scoring の結論そのままで、この層で役を
+// 判定し直さない。
+fn is_non_winning_draw(
+    transition: DrawTransition,
+    drawn_tile: TileId,
+    outcomes: Option<&TsumoVariantOutcomes>,
+) -> Option<bool> {
+    match transition {
+        DrawTransition::SameShanten => Some(true),
+        DrawTransition::Progress => match outcomes?.status(drawn_tile) {
+            TsumoVariantStatus::Winning => Some(false),
+            TsumoVariantStatus::NoYaku => Some(true),
+            TsumoVariantStatus::Unknown => None,
+        },
+    }
 }
 
 // 現在聴牌候補1件分の self-tsumo 比較。
 //
-// 確率模型の材料が揃わない局面ではどの値も持たない。現在聴牌の手牌を組み立てられない候補でも
-// 継続枝側の集計は成立するので、確定できない値だけを `None` にする。
+// 確率模型の材料が揃わない局面ではどの値も持たない。それ以外は確定できない値だけを `None` に
+// する。
 fn candidate_self_tsumo(
     inputs: &TenpaiContinuationInputs,
-    evaluation: &DiscardEvaluation,
-    branches: &[TenpaiContinuationBranch],
+    current: Option<&ProspectiveFacts>,
+    branches: &CandidateBranches,
 ) -> TenpaiSelfTsumoComparison {
     let Some(facts) = inputs.self_tsumo_facts else {
         return TenpaiSelfTsumoComparison::default();
     };
-    let current = current_tenpai_facts(inputs.valuator, inputs.tiles, evaluation);
     let expected_payment = |mode, own_draws| {
-        baseline_expected_payment(inputs.valuator, current.as_ref()?, mode, own_draws, facts)
+        baseline_expected_payment(inputs.valuator, current?, mode, own_draws, facts)
     };
 
     TenpaiSelfTsumoComparison {
@@ -410,7 +484,7 @@ fn candidate_self_tsumo(
             .then(|| expected_payment(TenpaiOffenseMode::Reach, facts.own_future_draws))
             .flatten(),
         damaten_immediate_tsumo: expected_payment(TenpaiOffenseMode::Damaten, FIRST_DRAW),
-        damaten_continuation_branches: branch_total(branches, facts),
+        damaten_continuation_branches: branches.expected_self_tsumo_value(facts),
     }
 }
 
@@ -445,13 +519,6 @@ fn current_tenpai_facts(
     })
 }
 
-// 継続枝の期待支払い合計。1つでも確定できない枝があれば 0 点へ潰さず `None`。
-fn branch_total(branches: &[TenpaiContinuationBranch], facts: SelfTsumoFacts) -> Option<u64> {
-    branches.iter().try_fold(0, |total: u64, branch| {
-        Some(total.saturating_add(branch.expected_self_tsumo_value(facts)?))
-    })
-}
-
 // 最善打牌後が再び聴牌になった枝だけが継続成立。打牌候補が1件も無い枝と、聴牌に戻らない枝は
 // 成立として扱わない。
 fn continues_tenpai(variant: &DrawVariantLookaheadDiagnostic) -> bool {
@@ -472,6 +539,7 @@ mod tests {
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic,
     };
+    use crate::meld::{Meld, MeldKind};
     use crate::reach_policy::{ReachLegalityFacts, is_reach_legal};
 
     // 123m 456m 789m 123p 東 の門前13枚に南をツモった単騎テンパイ。打 E で南単騎、打 S で東単騎
@@ -486,6 +554,13 @@ mod tests {
     const REAL_HAND: [&str; 14] = [
         "3m", "4m", "5mr", "6m", "7m", "8m", "7p", "8p", "9p", "3s", "4s", "7s", "8s", "9s",
     ];
+
+    // 123m をチーした副露手。concealed 45678m 99p 234s にツモ N の形で、打 N が 3m / 6m / 9m の
+    // テンパイになる。ダマツモで役があるのは一気通貫 (123m 456m 789m) になる 9m だけで、3m と
+    // 6m は構造上の和了牌でも役が無く実際には和了できない。
+    const OPEN_HAND: [&str; 10] = ["4m", "5m", "6m", "7m", "8m", "9p", "9p", "2s", "3s", "4s"];
+    const OPEN_DRAW: &str = "N";
+    const OPEN_MELD: [&str; 3] = ["1m", "2m", "3m"];
 
     // 山の残枚数。4人で分けて自分の残り自摸機会になる。
     const REMAINING_TILES: u32 = 70;
@@ -524,10 +599,14 @@ mod tests {
     }
 
     struct CaseSpec<'a> {
-        /// 打牌前の手牌。ツモ牌を含まない13枚か、ツモ牌まで含んだ14枚。
+        /// 打牌前の手牌。ツモ牌を含まない13枚か、ツモ牌まで含んだ14枚。副露牌は含まない。
         hand: &'a [&'a str],
         /// 直前のツモ牌。`hand` が14枚の局面では `None`。
         draw: Option<&'a str>,
+        /// 自分の副露。空なら門前。
+        melds: &'a [MeldSpec<'a>],
+        /// 場風。`None` では点数計算の入力が足りず、打点を確定できない。
+        round_wind: Option<&'a str>,
         extra_visible: &'a [&'a str],
         own_reached: bool,
         /// 自分の席。`None` では既リーチかどうかを判断できない。
@@ -546,6 +625,8 @@ mod tests {
             Self {
                 hand: &HAND,
                 draw: Some(DRAW),
+                melds: &[],
+                round_wind: Some("E"),
                 extra_visible: &[],
                 own_reached: false,
                 player_id: Some(0),
@@ -555,6 +636,12 @@ mod tests {
                 scope: LookaheadDiagnosticScope::Lookahead,
             }
         }
+    }
+
+    // 副露1組分の指定。物理牌は他の牌と同じ払い出しで決める。
+    struct MeldSpec<'a> {
+        kind: MeldKind,
+        tiles: &'a [&'a str],
     }
 
     // 局面と、その局面で打牌評価の対象になる物理牌。診断が使うものと同じ材料をテストからも
@@ -575,10 +662,25 @@ mod tests {
             let mut source = TileIdSource::new();
             let hand_tiles = source.tiles(self.hand);
             let drawn_tile = self.draw.map(|draw| source.tile(draw));
+            let melds: Vec<Meld> = self
+                .melds
+                .iter()
+                .map(|meld| {
+                    let tiles = source.tiles(meld.tiles);
+                    let called_tile = meld.kind.is_open().then(|| tiles[0]);
+                    Meld::new(meld.kind, tiles, called_tile)
+                })
+                .collect();
             let extra_visible = source.tiles(self.extra_visible);
 
+            // 打牌候補になるのは手牌とツモ牌だけで、副露牌は切れない。
             let tiles: Vec<TileId> = hand_tiles.iter().copied().chain(drawn_tile).collect();
-            let visible: Vec<TileId> = tiles.iter().chain(extra_visible.iter()).copied().collect();
+            let visible: Vec<TileId> = tiles
+                .iter()
+                .chain(melds.iter().flat_map(|meld| meld.tiles()))
+                .chain(extra_visible.iter())
+                .copied()
+                .collect();
             let actions: Vec<LegalAction> = tiles
                 .iter()
                 .map(|&tile| LegalAction::Dahai { tile })
@@ -586,21 +688,24 @@ mod tests {
                 .collect();
 
             let mut reached = [false; 4];
+            let mut own_melds: [Vec<Meld>; 4] = Default::default();
             if let Some(player_id) = self.player_id {
                 reached[usize::from(player_id)] = self.own_reached;
+                own_melds[usize::from(player_id)] = melds;
             }
 
-            let context = GameContext::from_parts_with_table_state(
+            let context = GameContext::from_parts_with_melds(
                 drawn_tile,
                 hand_tiles,
                 Vec::new(),
-                Some(tile("E")),
+                self.round_wind.map(tile),
                 Some(tile("S")),
                 visible,
                 self.player_id,
                 Some(3),
                 Default::default(),
                 reached,
+                own_melds,
             )
             .with_table_state_facts(TableStateFacts {
                 remaining_tiles: self.remaining_tiles,
@@ -639,6 +744,20 @@ mod tests {
         }
     }
 
+    // 打 N が 3m / 6m / 9m テンパイになる副露手。副露しているのでリーチは合法にならない。
+    fn open_spec() -> CaseSpec<'static> {
+        CaseSpec {
+            hand: &OPEN_HAND,
+            draw: Some(OPEN_DRAW),
+            melds: &[MeldSpec {
+                kind: MeldKind::Chi,
+                tiles: &OPEN_MELD,
+            }],
+            legal_reach: false,
+            ..self_tsumo_spec()
+        }
+    }
+
     // 2手先探索は重いので、同じ局面を使う複数のテストで構築結果を共有する。
     static CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
         LazyLock::new(|| CaseSpec::default().build());
@@ -653,6 +772,8 @@ mod tests {
         LazyLock::new(|| self_tsumo_spec().build());
     static REAL_CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
         LazyLock::new(|| real_spec().build());
+    static OPEN_CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
+        LazyLock::new(|| open_spec().build());
 
     fn continuation(
         selection: &DiscardActionSelectionWithDiagnostic,
@@ -756,6 +877,35 @@ mod tests {
                 discarded_tiles: &[first, second],
             })
             .expect("継続後の聴牌を組み立てられる")
+    }
+
+    // 打 N (3m / 6m / 9m テンパイ) の継続枝。
+    fn discard_north(
+        selection: &DiscardActionSelectionWithDiagnostic,
+    ) -> &TenpaiContinuationCandidate {
+        continuation(selection)
+            .candidate(tile("N"))
+            .expect("打 N の現在聴牌候補がある")
+    }
+
+    // 現在打牌後の聴牌の和了牌を、既存 Damaten Tsumo scoring で物理牌 variant ごとに分類した
+    // 結果。テスト側で役判定を書き直さず、診断が使うのと同じ helper を通す。
+    fn damaten_tsumo_outcomes(
+        case: &CaseContext,
+        selection: &DiscardActionSelectionWithDiagnostic,
+        discard: &str,
+    ) -> TsumoVariantOutcomes {
+        let valuator = ProductionProspectiveValuator::new(&case.context);
+        let facts = current_tenpai_facts(&valuator, &case.tiles, evaluation_of(selection, discard))
+            .expect("現在聴牌を組み立てられる");
+        valuator.tsumo_variant_outcomes(&facts, TenpaiOffenseMode::Damaten)
+    }
+
+    // 指定した牌種の黒牌1枚。物理牌 variant 単位の分類を引くために使う。
+    fn black_tile(s: &str) -> TileId {
+        TileId::copies(tile(s))
+            .find(|id| !id.is_red())
+            .expect("黒牌がある")
     }
 
     // 打 3s (4s 単騎テンパイ) の継続枝。
@@ -1282,6 +1432,144 @@ mod tests {
         assert_eq!(comparison.damaten_immediate_tsumo, None);
         assert_eq!(comparison.damaten_continuation_branches, None);
         assert_eq!(comparison.damaten_continuation(), None);
+    }
+
+    // ---- 副露手の非和了ツモ ----
+
+    #[test]
+    fn a_no_yaku_winning_tile_is_a_continuation_branch() {
+        // 副露手では構造上の和了牌でも役が無ければ実際には和了できない。その牌はツモった後に
+        // 打牌してテンパイを続けられるので、非和了ツモとして継続枝に入る。
+        let selection = &*OPEN_CASE;
+        let case = open_spec().context();
+        let facts = self_tsumo_facts(selection);
+        let candidate = discard_north(selection);
+
+        // 6m は構造上は向聴数を下げる枝だが、ダマツモでは役が無い。
+        let lookahead = selection.lookahead.as_ref().expect("2手先診断がある");
+        let draw = lookahead
+            .candidate(tile("N"))
+            .expect("打 N の2手先評価がある")
+            .draw(tile("6m"))
+            .expect("6m の枝がある");
+        assert_eq!(draw.transition, DrawTransition::Progress);
+        assert_eq!(
+            damaten_tsumo_outcomes(&case, selection, "N").status(black_tile("6m")),
+            TsumoVariantStatus::NoYaku
+        );
+
+        // 即ツモには寄与しない。ツモ和了できる待ちは 9m だけになる。
+        let damaten = current_tsumo_value(&case, selection, "N", TenpaiOffenseMode::Damaten);
+        assert_eq!(damaten.winning_remaining, 4);
+        assert_eq!(
+            candidate.self_tsumo.damaten_immediate_tsumo,
+            Some(damaten.expected_payment(facts.unknown_tiles, FIRST_DRAW))
+        );
+
+        // 継続枝としては、既存 next_discard の後のテンパイをそのまま評価する。
+        let branch = branch(candidate, "6m");
+        assert_eq!(branch.next_discard(), Some(tile("6m")));
+        assert_eq!(branch.offense_mode(), Some(TenpaiOffenseMode::Damaten));
+        let value = branch
+            .expected_self_tsumo_value(facts)
+            .expect("枝の期待支払いを確定できる");
+        assert!(value > 0);
+        assert!(candidate.self_tsumo.damaten_continuation_branches >= Some(value));
+    }
+
+    #[test]
+    fn a_winning_tile_with_a_yaku_stays_an_immediate_tsumo() {
+        // 実際にツモ和了できる牌は即ツモ側だけで、継続枝には入らない。
+        let selection = &*OPEN_CASE;
+        let case = open_spec().context();
+        let outcomes = damaten_tsumo_outcomes(&case, selection, "N");
+        let candidate = discard_north(selection);
+
+        // 9m は一気通貫になるのでダマツモでも和了できる。
+        assert_eq!(
+            outcomes.status(black_tile("9m")),
+            TsumoVariantStatus::Winning
+        );
+        assert!(
+            !candidate
+                .branches
+                .iter()
+                .any(|branch| branch.draw == tile("9m"))
+        );
+
+        // 二重計上しないよう、ツモ和了できると判定した物理牌は継続枝に1つも無い。
+        for branch in &candidate.branches {
+            assert_ne!(
+                outcomes.status(branch.drawn_tile()),
+                TsumoVariantStatus::Winning,
+                "{:?}",
+                branch.drawn_tile()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_tsumo_outcome_does_not_produce_a_guessed_aggregate() {
+        // 場風が分からずツモ打点を確定できない局面では、その牌を和了とも非和了とも決められない。
+        // 0 点として集計せず、継続側の集計値そのものを持たない。
+        let unknown = CaseSpec {
+            round_wind: None,
+            ..open_spec()
+        }
+        .build();
+        let comparison = discard_north(&unknown).self_tsumo;
+
+        assert_eq!(comparison.damaten_continuation_branches, None);
+        assert_eq!(comparison.damaten_continuation(), None);
+        // 同じ局面でも場風が分かれば確定する。
+        assert!(
+            discard_north(&OPEN_CASE)
+                .self_tsumo
+                .damaten_continuation()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn an_open_hand_keeps_the_damaten_side_without_a_reach_now_value() {
+        // 副露手はリーチできないので reach now は持たないが、ダマ側は評価できる。
+        let comparison = discard_north(&OPEN_CASE).self_tsumo;
+
+        assert_eq!(comparison.reach_now, None);
+        assert!(comparison.damaten_immediate_tsumo.is_some_and(|v| v > 0));
+        assert!(
+            comparison
+                .damaten_continuation_branches
+                .is_some_and(|v| v > 0)
+        );
+    }
+
+    #[test]
+    fn a_menzen_hand_has_no_no_yaku_winning_tile() {
+        // 門前手のツモ和了は必ず門前清自摸和が付くので、構造上の和了牌はすべて即ツモ側のまま。
+        // 継続枝の集合は向聴数を維持する枝だけで変わらない。
+        let selection = &*REAL_CASE;
+        let case = real_spec().context();
+        let outcomes = damaten_tsumo_outcomes(&case, selection, "3s");
+        let candidate = discard_three_sou(selection);
+        let lookahead = selection.lookahead.as_ref().expect("2手先診断がある");
+        let draws = lookahead
+            .candidate(tile("3s"))
+            .expect("打 3s の2手先評価がある");
+
+        assert_eq!(
+            outcomes.status(black_tile("4s")),
+            TsumoVariantStatus::Winning
+        );
+        for branch in &candidate.branches {
+            assert_eq!(
+                draws
+                    .draw(branch.draw)
+                    .expect("同じ牌種の枝がある")
+                    .transition,
+                DrawTransition::SameShanten
+            );
+        }
     }
 
     #[test]

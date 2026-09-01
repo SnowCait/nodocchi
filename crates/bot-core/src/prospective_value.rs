@@ -446,14 +446,52 @@ impl<'a> ProductionProspectiveValuator<'a> {
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
     ) -> Option<TenpaiTsumoValue> {
+        tsumo_value(&self.tsumo_profile(facts, mode)?)
+    }
+
+    /// 指定した攻撃モードの Tsumo baseline で、和了牌の物理牌 variant ごとにツモ和了できるかを
+    /// 求める。
+    ///
+    /// 集計値 ([`Self::tsumo_value_with_mode`]) と同じ profile を同じ判定で読み、variant 単位の
+    /// 結論だけを残したもの。役判定も点数計算もここでやり直さない。baseline を組み立てられない
+    /// 場合はどの牌も確定しない。
+    pub(crate) fn tsumo_variant_outcomes(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> TsumoVariantOutcomes {
+        let Some(profile) = self.tsumo_profile(facts, mode) else {
+            return TsumoVariantOutcomes::default();
+        };
+        TsumoVariantOutcomes {
+            variants: profile
+                .waits()
+                .iter()
+                .flat_map(|wait| wait.winning_tiles().iter())
+                .map(|variant| {
+                    (
+                        variant.winning_tile(),
+                        TsumoVariantStatus::from_value(prospective_value(variant.outcome())),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    // 指定モードの Tsumo baseline で評価した待ちごとの手牌価値。モードから baseline を作れない
+    // 場合は `None`。
+    fn tsumo_profile<'t>(
+        &self,
+        facts: &'t ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> Option<TenpaiHandValueProfile<'t>> {
         let (baseline, ura_dora) = tsumo_scoring_inputs(self.context, mode)?;
-        let profile = evaluate_tenpai_hand_value(
+        Some(evaluate_tenpai_hand_value(
             &facts.hands,
             baseline,
             self.context.dora_indicators(),
             ura_dora,
-        );
-        tsumo_value(&profile)
+        ))
     }
 
     // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計)。確定できない場合は `None`。
@@ -480,6 +518,46 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
         let facts = self.tenpai_facts(tenpai)?;
         self.tsumo_value_with_mode(&facts, self.offense_mode(&facts))
+    }
+}
+
+/// 和了牌の物理牌 variant 1つを、Tsumo baseline でツモ和了できるか。
+///
+/// 既存のツモ集計 ([`tsumo_value`]) が「ツモ baseline で役が無い variant は和了できないので
+/// 成功する待ちに含めない」としているのと同じ判定を、variant 単位で取り出したもの。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TsumoVariantStatus {
+    /// 役があり、その牌でツモ和了できる。
+    Winning,
+    /// ツモ baseline で役が無く、その牌ではツモ和了できない。
+    NoYaku,
+    /// ツモ和了できるかを確定できない。0点とも和了とも扱わない。
+    Unknown,
+}
+
+impl TsumoVariantStatus {
+    fn from_value(value: ProspectiveValue) -> Self {
+        match value {
+            ProspectiveValue::Known { .. } => Self::Winning,
+            ProspectiveValue::NoYaku => Self::NoYaku,
+            ProspectiveValue::Unknown(_) => Self::Unknown,
+        }
+    }
+}
+
+/// テンパイ1件分の、和了牌の物理牌 variant ごとの Tsumo baseline の結論。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct TsumoVariantOutcomes {
+    variants: Vec<(TileId, TsumoVariantStatus)>,
+}
+
+impl TsumoVariantOutcomes {
+    /// 指定した物理牌の結論。評価対象に無い牌は推測せず [`TsumoVariantStatus::Unknown`]。
+    pub(crate) fn status(&self, winning_tile: TileId) -> TsumoVariantStatus {
+        self.variants
+            .iter()
+            .find(|(tile, _)| *tile == winning_tile)
+            .map_or(TsumoVariantStatus::Unknown, |(_, status)| *status)
     }
 }
 
