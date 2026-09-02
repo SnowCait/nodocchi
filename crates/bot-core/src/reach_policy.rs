@@ -14,6 +14,30 @@
 //! る scenario と、将来テンパイの Reach / Damaten 判断を再現する経路が同じ条件を別々に書かない
 //! ようにするための共有 helper で、条件を満たすかどうかの材料 ([`ReachLegalityFacts`]) は
 //! 呼び出し側がそれぞれの局面から集める。
+//!
+//! # リーチの timing
+//!
+//! [`decide_reach_reason`] が Reach を選んだ後に、そのリーチを**今回の request で宣言するか**を
+//! 決めるのが [`ReachTimingDecision`] の層である。base policy とは別概念で、
+//!
+//! ```text
+//! ReachDecisionReason   Reach か Damaten かという base policy
+//! ReachTimingDecision   base policy が Reach の場合に、今回宣言するか見送るか
+//! ```
+//!
+//! という関係になる。base policy がダマを選んだ聴牌では timing 判断そのものを行わず、
+//! [`ReachTimingDecision`] に Damaten は含まれない。
+//!
+//! [`ReachTimingDecision::DeferReach`] は「今回はリーチを宣言せず、通常打牌 selection が選んだ
+//! Dahai を行う」だけの意味で、次の局面では状態を持たずに通常 policy を評価し直す。「必ず1巡
+//! 待ってからリーチする」という production state ではない。判断材料に使う `1巡 defer` は
+//! counterfactual の評価 horizon であって、production action の約束ではない。
+//!
+//! production で timing を評価するのは恒常フリテンが確定した聴牌だけで
+//! ([`evaluates_reach_timing`])、比較そのものは既存 self-tsumo metric の大小だけを見る
+//! ([`decide_permanent_furiten_reach_timing`])。この層も待ち・打点・確率を計算しない。
+
+use bot_logic::PermanentFuriten;
 
 use crate::damaten_value::DamatenValueVerdict;
 
@@ -140,6 +164,108 @@ pub fn decide_reach_reason(
     }
 }
 
+/// base policy がリーチを選んだ聴牌で、そのリーチを今回宣言するかどうか。
+///
+/// base policy ([`decide_reach_reason`]) の Reach / Damaten とは別の層で、Damaten はこの enum に
+/// 含まれない。base policy がダマを選んだ聴牌では timing 判断そのものを行わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReachTimingDecision {
+    /// 今回の request でリーチを宣言する。
+    ReachNow,
+    /// 今回の request ではリーチを宣言せず、通常打牌 selection が選んだ Dahai を行う。
+    ///
+    /// 「必ず1巡待ってからリーチする」という production state ではない。次の局面では状態を
+    /// 記憶せず、通常 policy をその局面から評価し直す。
+    DeferReach,
+}
+
+/// timing 判断の理由。最初に落ちた条件を1つだけ表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReachTimingReason {
+    /// 恒常フリテンが確定していないので timing evaluation の対象外。base policy のままリーチする。
+    NotPermanentFuriten,
+    /// 恒常フリテン聴牌だが、self-tsumo 比較のどちらかを確定できなかった。
+    ///
+    /// 比較不能を 0 点と混同せず、base policy のままリーチする。
+    SelfTsumoComparisonUnknown,
+    /// 恒常フリテン聴牌の self-tsumo 比較が確定した。決定はその大小そのもの。
+    PermanentFuritenSelfTsumo,
+}
+
+/// timing 判断とその材料。
+///
+/// `reach_now` / `defer_forced_reach` は評価した場合だけ持つ既存 self-tsumo 比較の値そのもので、
+/// この層が確率模型も点数計算も持たない。評価対象外の局面ではどちらも `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReachTimingDiagnostic {
+    pub decision: ReachTimingDecision,
+    pub reason: ReachTimingReason,
+    /// 今すぐリーチして現在の待ちのまま残り自摸機会を使い切る期待ツモ支払い。
+    pub reach_now: Option<u64>,
+    /// 1巡 defer し、次のテンパイで合法ならリーチする counterfactual の期待ツモ支払い。
+    pub defer_forced_reach: Option<u64>,
+}
+
+impl ReachTimingDiagnostic {
+    /// timing evaluation の対象ではなかった局面の結果。
+    pub fn not_evaluated() -> Self {
+        Self {
+            decision: ReachTimingDecision::ReachNow,
+            reason: ReachTimingReason::NotPermanentFuriten,
+            reach_now: None,
+            defer_forced_reach: None,
+        }
+    }
+
+    /// 今回はリーチを宣言しないか。
+    pub fn defers_reach(&self) -> bool {
+        matches!(self.decision, ReachTimingDecision::DeferReach)
+    }
+}
+
+/// 恒常フリテン聴牌の timing evaluation を行う局面か。
+///
+/// 恒常フリテンは既存の [`PermanentFuriten`] だけが source of truth で、
+/// [`PermanentFuriten::Unknown`] を恒常フリテンだと推測しない。非フリテン聴牌では今リーチすると
+/// 最初の1巡からロン機会が生まれるが、nodocchi は Ron probability を持たないため self-tsumo
+/// 比較だけで優劣を決めない。
+pub fn evaluates_reach_timing(permanent_furiten: PermanentFuriten, tsumo_remaining: u8) -> bool {
+    permanent_furiten == PermanentFuriten::Yes && tsumo_remaining > 0
+}
+
+/// 恒常フリテン聴牌の self-tsumo 比較から timing を決める。
+///
+/// 比べるのは既存 self-tsumo metric の大小だけで、点差・割合・待ち枚数の threshold は持たない。
+/// 同値は [`ReachTimingDecision::ReachNow`]。
+///
+/// どちらかを確定できない場合は 0 点として扱わず、比較不能として base policy のリーチを維持する。
+pub fn decide_permanent_furiten_reach_timing(
+    reach_now: Option<u64>,
+    defer_forced_reach: Option<u64>,
+) -> ReachTimingDiagnostic {
+    let (decision, reason) = match (reach_now, defer_forced_reach) {
+        (Some(now), Some(defer)) if defer > now => (
+            ReachTimingDecision::DeferReach,
+            ReachTimingReason::PermanentFuritenSelfTsumo,
+        ),
+        (Some(_), Some(_)) => (
+            ReachTimingDecision::ReachNow,
+            ReachTimingReason::PermanentFuritenSelfTsumo,
+        ),
+        _ => (
+            ReachTimingDecision::ReachNow,
+            ReachTimingReason::SelfTsumoComparisonUnknown,
+        ),
+    };
+
+    ReachTimingDiagnostic {
+        decision,
+        reason,
+        reach_now,
+        defer_forced_reach,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +369,61 @@ mod tests {
                 ReachDecisionReason::InsufficientLiveWait
             );
         }
+    }
+
+    #[test]
+    fn only_a_confirmed_permanent_furiten_evaluates_the_timing() {
+        assert!(evaluates_reach_timing(PermanentFuriten::Yes, 1));
+
+        // 恒常フリテンが確定していない局面と、生きた待ちが1枚も無い聴牌は対象外。unknown を
+        // 恒常フリテンだと推測しない。
+        for facts in [
+            (PermanentFuriten::No, 8),
+            (PermanentFuriten::Unknown, 8),
+            (PermanentFuriten::Yes, 0),
+        ] {
+            assert!(!evaluates_reach_timing(facts.0, facts.1), "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_strictly_higher_defer_value_defers_the_reach() {
+        let defer = decide_permanent_furiten_reach_timing(Some(100), Some(101));
+        assert_eq!(defer.decision, ReachTimingDecision::DeferReach);
+        assert_eq!(defer.reason, ReachTimingReason::PermanentFuritenSelfTsumo);
+        assert!(defer.defers_reach());
+
+        // 同値は ReachNow。点差や割合の threshold は持たない。
+        for (reach_now, defer_forced_reach) in [(100, 100), (100, 99), (100, 0)] {
+            let timing =
+                decide_permanent_furiten_reach_timing(Some(reach_now), Some(defer_forced_reach));
+            assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+            assert_eq!(timing.reason, ReachTimingReason::PermanentFuritenSelfTsumo);
+            assert!(!timing.defers_reach());
+        }
+    }
+
+    #[test]
+    fn an_unresolved_comparison_never_defers_the_reach() {
+        // 確定できない値を 0 点として扱わない。比較不能なら base policy のリーチを維持する。
+        for values in [(None, Some(100)), (Some(100), None), (None, None)] {
+            let timing = decide_permanent_furiten_reach_timing(values.0, values.1);
+            assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+            assert_eq!(timing.reason, ReachTimingReason::SelfTsumoComparisonUnknown);
+            assert_eq!(timing.reach_now, values.0);
+            assert_eq!(timing.defer_forced_reach, values.1);
+        }
+    }
+
+    #[test]
+    fn a_timing_that_was_not_evaluated_keeps_the_base_reach() {
+        let timing = ReachTimingDiagnostic::not_evaluated();
+
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(timing.reason, ReachTimingReason::NotPermanentFuriten);
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+        assert!(!timing.defers_reach());
     }
 
     #[test]

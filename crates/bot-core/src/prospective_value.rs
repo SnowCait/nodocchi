@@ -733,11 +733,26 @@ pub(crate) fn evaluate_prospective_lookahead_value(
             .candidates
             .iter()
             .zip(evaluations)
-            .map(|(candidate, evaluation)| ProspectiveDiscardValue {
-                discard: candidate.discard,
-                draws: candidate_draws(&valuator, tiles, candidate, evaluation),
+            .map(|(candidate, evaluation)| {
+                evaluate_prospective_candidate_value(&valuator, tiles, evaluation, candidate)
             })
             .collect(),
+    }
+}
+
+/// 構築済みの2手先評価のうち、打牌候補1件分の枝だけについて将来打点を展開する。
+///
+/// 展開する枝も評価器も [`evaluate_prospective_lookahead_value`] と同じで、対象を渡された1候補に
+/// 限定するだけ。全候補分の [`ProspectiveLookaheadDiagnostic`] は構築しない。
+pub(crate) fn evaluate_prospective_candidate_value(
+    valuator: &ProductionProspectiveValuator,
+    tiles: &[TileId],
+    evaluation: &DiscardEvaluation,
+    candidate: &DiscardLookaheadDiagnostic,
+) -> ProspectiveDiscardValue {
+    ProspectiveDiscardValue {
+        discard: candidate.discard,
+        draws: candidate_draws(valuator, tiles, candidate, evaluation),
     }
 }
 

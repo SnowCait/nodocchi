@@ -157,7 +157,7 @@ detailed diagnostics そのものは要求した場合だけ構築し、`act()` 
 
 枝には、待ちが実際に変わるもの (手変わり) だけでなく、**ツモった牌をそのまま切って元の聴牌・元の待ちを維持するものも含みます**。「今すぐリーチする」と「ダマで継続する」を比べるには、次の1巡で待ちが変わらない場合の価値も同じ枝集合の中に必要になるためです。枝を待ちの変化で分類 (据え置き / 待ち改善 / 打点改善) することはまだ行いません。
 
-**現時点では diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` の比較にも、リーチ / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。`CurrentTenpaiOffenseWeightedTotal` や `weighted prospective value` は単位の違う値なので、下の self-tsumo 比較と直接並べることはしません。
+**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` の比較にも、base の Reach / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。production が使うのは、この枝集合と同じ基盤を選択済み1候補にだけ適用する [恒常フリテンのリーチ timing](#恒常フリテンのリーチ-timing) だけです。`CurrentTenpaiOffenseWeightedTotal` や `weighted prospective value` は単位の違う値なので、下の self-tsumo 比較と直接並べることはしません。
 
 枝はすべて既存基盤そのものです。
 
@@ -212,11 +212,111 @@ defer → forced Damaten
 
 手変わりは1回だけです。terminal tenpai へ到達した後は既存の閉形式で残り自摸機会全体を評価するので、継続後の unknown tiles と自摸機会は経路の semantics どおり `U0 - 1` / `n - 1` になります。ダマツモで実際に和了できる現在待ちは、3 mode 共通の最初の1自摸として1回だけ構築し、継続枝には入れないため二重計上しません。役が無くて和了できない牌は逆に即ツモ側から外れ、継続枝側だけが数えます。
 
-`reach now` と `defer → forced Reach` を比べることで、既存 Reach / Damaten threshold から独立して「今すぐリーチするか、1巡だけ手変わりを見るか」を観測できます。これは診断値であり、production Reach policy は変更していません。
+`reach now` と `defer → forced Reach` を比べることで、既存 Reach / Damaten threshold から独立して「今すぐリーチするか、1巡だけ手変わりを見るか」を観測できます。
 
 材料が揃わない場合は 0 点ではなく値を持ちません。山の残枚数が分からず自摸機会を確定できない局面、ツモ打点を確定できない現在聴牌、terminal tenpai のツモ打点が確定しない継続枝はどれも `None` です。
 
-**この比較も diagnostics 専用で、どれを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、リーチ判断にも打牌選択にも接続していません。Ron probability は含まず、self-tsumo と Ron baseline の aggregate も作りません。
+**全候補分のこの比較 (`Tenpai continuation` 節) は diagnostics 専用で、どれを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、打牌選択にも押し引きにも接続していません。Ron probability は含まず、self-tsumo と Ron baseline の aggregate も作りません。production が使うのは、次に述べる恒常フリテン聴牌の [リーチ timing](#恒常フリテンのリーチ-timing) だけです。
+
+## 恒常フリテンのリーチ timing
+
+`ReachDecisionReason` (base Reach / Damaten policy) と `ReachTimingDecision` は**別の層**です。
+
+```text
+ReachDecisionReason    Reach か Damaten かを決める base policy
+ReachTimingDecision    base policy が Reach の場合に、そのリーチを今回宣言するか
+```
+
+`ReachTimingDecision` は base policy がリーチを選んだ場合だけ適用します。base policy がダマを選んだ聴牌 (`HighValueDamaten` など)、リーチが合法でない局面、打牌後がテンパイでない局面では timing 判断そのものを行わず (`timing` は `None`)、`ReachTimingDecision` に `Damaten` は含まれません。base の `reason` を timing の理由で上書きすることもありません。
+
+`DeferReach` の意味は次の1つだけです。
+
+```text
+今回の request では Reach を宣言しない
+→ 通常 discard selection が既に選んだ Dahai を行う
+→ 状態を記憶せず、次の局面で通常 policy を評価し直す
+```
+
+**「必ず1巡待ち、その後必ずリーチする」という production state ではありません。** persistent flag も turn counter も残り巡数も持ちません。RiichiLab では Reach 宣言と Dahai が別 response なので ([RiichiLab client](../riichilab.md) の capture 例を参照)、`DeferReach` は「今回は Reach response を送らず Dahai を行う」という production behavior そのものです。
+
+判断材料に使う `one draw → forced Reach` は上の counterfactual の**評価 horizon** であって、production action の約束ではありません。実際の対局では次の自分のツモまでに他家和了・他家リーチ・副露機会・局終了が起こり得ます。production は次の request で必ず現在局面から評価し直します。
+
+### production 接続対象は `PermanentFuriten::Yes` だけ
+
+timing evaluation を行うのは、次をすべて満たす場合だけです。
+
+```text
+- 合法手に LegalAction::Reach がある
+- 通常 discard selection が打牌を選んでいる
+- その打牌後がテンパイ
+- 生きた待ちが1枚以上ある
+- base decide_reach_reason() が Reach を選んだ
+- その聴牌が PermanentFuriten::Yes
+```
+
+恒常フリテンは既存の `PermanentFuriten` だけが source of truth です。`can_ron() == Some(false)` だけでは足りず、`PermanentFuriten::No` / `PermanentFuriten::Unknown` / 履歴依存フリテンだけの局面は対象外で、unknown を恒常フリテンだと推測しません。
+
+非フリテン聴牌を production 対象にしないのは、**Ron probability が無いから**です。非フリテンなら今リーチした最初の1巡からロン機会が生まれますが、nodocchi はまだ「他家がその牌を切る確率」の模型を持たないため、self-tsumo だけの比較で通常聴牌の優劣を決めることはできません。恒常フリテンなら現在の待ちでロンできないので、self-tsumo counterfactual だけで比較が閉じます。[Ron opportunity](#ron-opportunity-structural-facts-only) の suji / 壁 / 現物 / 字牌 safety / 外的 threat も probability ではないため、timing policy には使いません。
+
+### 選択済み1候補だけを評価します
+
+production 経路は次の順です。
+
+```text
+通常 discard selection
+↓
+selected discard 確定
+↓
+base Reach policy (decide_reach_reason)
+↓
+PermanentFuriten::Yes の gate
+↓
+selected candidate 1件だけ
+  reach now
+  vs
+  defer one draw → forced Reach
+```
+
+`--lookahead` の全候補継続診断は production では構築しません。gate を通った局面で評価するのは通常打牌 selection が選んだ1候補だけで、枝の分類も次打牌も打点も既存の `TenpaiContinuation` / `ProspectiveTenpaiValue` / `SelfTsumoPath` / 既存 selector / 既存 scoring をそのまま通ります (`selected_tenpai_self_tsumo_comparison()`)。counterfactual の semantics も上の diagnostics と同一で、2回目の手変わり探索も、terminal mode への `decide_reach_reason()` の再注入も行いません。診断の有無で production action が変わることもありません。
+
+### 比較するのは大小だけです
+
+```text
+defer forced Reach >  reach now  → DeferReach
+defer forced Reach <= reach now  → ReachNow
+```
+
+同値は `ReachNow` です。点差・割合・待ち枚数のような arbitrary threshold は持たず、実戦統計も Ron probability も使いません。
+
+どちらかを確定できない場合 (山の残枚数 unknown、`reach now` のツモ打点 unknown、terminal のツモ打点 unknown、将来 Reach legality を解決できないなど) は **0 点として扱わず**、比較不能として既存 base Reach をそのまま維持します。
+
+### 押し引きとは別の層です
+
+timing は、既存 base Reach / Damaten policy と既存押し引きが攻撃継続を許した**後**に、最終的に今回リーチを宣言するかだけを決める層です。
+
+```text
+base offense mode      押し引きが攻撃打点を求めるときの Reach / Damaten (decide_reach_reason)
+current Reach timing   今回の request で Reach を宣言するか (ReachTimingDecision)
+```
+
+この2つは別概念で、`DeferReach` のために push/pull threshold も `TenpaiOffenseValue` threshold も Defense selection も変更していません。押し引きが `Fold` を選んだ局面ではリーチ判断そのものを行わないため、防御 fallback や鳴き・和了・流局が採用した action を timing が上書きすることもありません。
+
+### 表示
+
+`Reach` 節に `timing` を、`Summary` に `reach: deferred` と `reach timing reason` を出します。timing evaluation の対象外は評価しなかったことだけを軽量に出し、self-tsumo 比較の値は production でも構築しません。
+
+```text
+Reach
+  base decision: yes
+  base reason: Eligible
+  ...
+  timing
+    decision: DeferReach
+    reason: PermanentFuritenSelfTsumo
+    reach now: 980.401
+    defer one draw
+      forced Reach: 1076.190
+```
 
 ## Reach / Damaten の判断材料 (diagnostics only)
 

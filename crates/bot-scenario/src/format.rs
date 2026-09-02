@@ -10,11 +10,11 @@ use bot_core::{
     ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
     PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
     ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
-    RonOpportunityDiagnostic, RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic,
-    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic,
-    StrongTenpaiRequirement, TenpaiContinuationBranch, TenpaiContinuationCandidate,
-    TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
-    ThreatDefenseTarget,
+    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
+    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
+    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
+    TenpaiOffenseValue, TenpaiSelfTsumoComparison, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -1441,8 +1441,11 @@ fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
     };
 
     lines.push("  evaluated".to_string());
-    lines.push(format!("  decision: {}", yes_no(reach.should_reach())));
-    lines.push(format!("  reason: {:?}", reach.reason));
+    lines.push(format!(
+        "  base decision: {}",
+        yes_no(reach.base_selects_reach())
+    ));
+    lines.push(format!("  base reason: {:?}", reach.reason));
     match reach.selected_discard.as_ref() {
         Some(action) => lines.push(format!("  selected discard: {}", action_label(action))),
         None => lines.push(format!("  selected discard: {NONE}")),
@@ -1488,8 +1491,40 @@ fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
         format_discarded_waits(tenpai)
     ));
     lines.extend(format_damaten_value(reach.damaten_value.as_ref()));
+    lines.extend(format_reach_timing(reach.timing.as_ref()));
 
     lines.join("\n")
+}
+
+// base policy がリーチを選んだ場合に、そのリーチを今回宣言するかどうかの判断。
+//
+// base の decision / reason はこの節が上書きしない。恒常フリテンが確定した聴牌以外は評価対象
+// ではないので、その旨だけを出して self-tsumo 比較を行わない。値は production が実際に比べた
+// ものそのもので、表示のために評価をやり直さない。
+fn format_reach_timing(timing: Option<&ReachTimingDiagnostic>) -> Vec<String> {
+    let Some(timing) = timing else {
+        return Vec::new();
+    };
+
+    let mut lines = vec![
+        "  timing".to_string(),
+        format!("    decision: {:?}", timing.decision),
+        format!("    reason: {:?}", timing.reason),
+    ];
+    if timing.reason == ReachTimingReason::NotPermanentFuriten {
+        return lines;
+    }
+
+    lines.push(format!(
+        "    reach now: {}",
+        format_self_tsumo_value(timing.reach_now)
+    ));
+    lines.push("    defer one draw".to_string());
+    lines.push(format!(
+        "      forced Reach: {}",
+        format_self_tsumo_value(timing.defer_forced_reach)
+    ));
+    lines
 }
 
 // ダマ打点による production の結論。判断に使った値そのもので、表示専用に打点を求め直さない。
@@ -2437,9 +2472,17 @@ fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     };
 
     let mut lines = vec![
-        format!("  reach: {}", yes_no(reach.should_reach())),
-        format!("  reach reason: {:?}", reach.reason),
+        format!("  reach: {}", summary_reach_decision(reach)),
+        format!("  reach base reason: {:?}", reach.reason),
     ];
+
+    // timing で今回の宣言を見送った場合だけ、その理由を判別できるようにする。重い枝の内訳は
+    // Summary に入れず、`Reach` 節が持つ。
+    if reach.defers_reach()
+        && let Some(timing) = reach.timing.as_ref()
+    {
+        lines.push(format!("  reach timing reason: {:?}", timing.reason));
+    }
 
     if let Some(tenpai) = reach.tenpai_wait.as_ref() {
         lines.push(format!(
@@ -2461,6 +2504,15 @@ fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     }
 
     lines
+}
+
+// リーチの採否。base policy がリーチを選んだうえで timing が今回の宣言を見送った局面は、
+// base policy がダマを選んだ局面と区別する。
+fn summary_reach_decision(reach: &ReachDecisionDiagnostic) -> &'static str {
+    if reach.defers_reach() {
+        return "deferred";
+    }
+    yes_no(reach.should_reach())
 }
 
 fn summary_damaten_values(damaten: &DamatenValueDiagnostic) -> String {
@@ -5564,7 +5616,7 @@ mod tests {
 
         let summary = summary_section(&output);
         assert!(summary.contains("  reach: not evaluated"), "{summary}");
-        assert!(!summary.contains("  reach reason:"), "{summary}");
+        assert!(!summary.contains("  reach base reason:"), "{summary}");
     }
 
     #[test]
@@ -5590,7 +5642,7 @@ mod tests {
         assert_eq!(action_label(&diagnostic.selected_action), "Reach");
         assert!(summary.contains("  reach: yes"), "{summary}");
         assert!(
-            summary.contains("  reach reason: EligibleLowValue"),
+            summary.contains("  reach base reason: EligibleLowValue"),
             "{summary}"
         );
         assert!(
@@ -5608,7 +5660,7 @@ mod tests {
         assert_eq!(decision.tsumo_type_count(), Some(1));
         assert_eq!(decision.can_ron(), Some(true));
         assert!(
-            summary.contains(&format!("  reach reason: {:?}", decision.reason)),
+            summary.contains(&format!("  reach base reason: {:?}", decision.reason)),
             "{summary}"
         );
         assert!(
@@ -5628,7 +5680,7 @@ mod tests {
         assert_eq!(action_label(&diagnostic.selected_action), "N");
         assert!(summary.contains("  reach: no"), "{summary}");
         assert!(
-            summary.contains("  reach reason: HighValueDamaten"),
+            summary.contains("  reach base reason: HighValueDamaten"),
             "{summary}"
         );
         assert!(summary.contains("  ron: yes"), "{summary}");
@@ -5680,6 +5732,107 @@ mod tests {
 
     // ---- Reach 表示 ----
 
+    // 345m 678m 789p 22s 55s の 2s / 5s シャンポンテンパイ。2s を自分で切ってあるので恒常
+    // フリテンで、山の残枚数と持ち点まで既知なので self-tsumo 比較が確定する。
+    const DEFERRED_REACH_SCENARIO: &str = r#"{
+        "hand": "345678m789p2255s",
+        "draw": "4z",
+        "round_wind": "1z",
+        "player_id": 0,
+        "oya": 3,
+        "discards": ["2s", "", "", ""],
+        "remaining_tiles": 70,
+        "scores": [25000, 25000, 25000, 25000],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
+    // 恒常フリテンの timing 評価は選択済み1候補の継続枝を辿るため、同じ局面を使うテストで
+    // 構築結果を共有する。
+    static DEFERRED_REACH: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
+        let (_, diagnostic, rendered) = rendered(DEFERRED_REACH_SCENARIO, false);
+        RenderedDiagnostic {
+            rendered,
+            diagnostic,
+        }
+    });
+
+    #[test]
+    fn reach_section_reports_the_deferred_timing() {
+        let reach = section(&DEFERRED_REACH.rendered, "Reach");
+        let timing = DEFERRED_REACH
+            .diagnostic
+            .reach
+            .as_ref()
+            .and_then(|reach| reach.timing)
+            .expect("base policy がリーチを選んでいる");
+
+        // base の decision / reason は timing で上書きしない。
+        assert!(reach.contains("  base decision: yes"), "{reach}");
+        assert!(reach.contains("  base reason: Eligible"), "{reach}");
+        assert!(reach.contains("  permanent furiten: yes"), "{reach}");
+
+        assert!(
+            reach.contains(
+                "  timing\n    decision: DeferReach\n    reason: PermanentFuritenSelfTsumo"
+            ),
+            "{reach}"
+        );
+        // 表示は production が実際に比べた値そのもの。
+        assert!(
+            reach.contains(&format!(
+                "    reach now: {}\n    defer one draw\n      forced Reach: {}",
+                format_self_tsumo_value(timing.reach_now),
+                format_self_tsumo_value(timing.defer_forced_reach),
+            )),
+            "{reach}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_a_deferred_reach_with_its_timing_reason() {
+        let summary = summary_section(&DEFERRED_REACH.rendered);
+
+        assert!(matches!(
+            DEFERRED_REACH.diagnostic.selected_action,
+            LegalAction::Dahai { .. }
+        ));
+        assert_eq!(
+            DEFERRED_REACH.diagnostic.selected_source,
+            AgentActionSource::NormalDiscard
+        );
+        assert!(summary.contains("  reach: deferred"), "{summary}");
+        assert!(
+            summary.contains("  reach base reason: Eligible"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  reach timing reason: PermanentFuritenSelfTsumo"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_non_furiten_reach_reports_a_lightweight_timing() {
+        // timing evaluation の対象外は、評価しなかったことだけを軽量に出す。self-tsumo 比較の
+        // 値は production でも構築しない。
+        let (_, diagnostic, output) = rendered(REACH_SCENARIO, false);
+        let reach = section(&output, "Reach");
+        let timing = diagnostic
+            .reach
+            .as_ref()
+            .and_then(|reach| reach.timing)
+            .expect("base policy がリーチを選んでいる");
+
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+        assert!(
+            reach.contains("  timing\n    decision: ReachNow\n    reason: NotPermanentFuriten"),
+            "{reach}"
+        );
+        assert!(!reach.contains("    reach now:"), "{reach}");
+        assert!(!summary_section(&output).contains("  reach timing reason:"));
+    }
+
     #[test]
     fn reach_section_reports_the_selected_discard_and_its_wait() {
         let (_, diagnostic, output) = rendered(REACH_SCENARIO, false);
@@ -5687,8 +5840,8 @@ mod tests {
         let decision = diagnostic.reach.as_ref().expect("リーチを検討している");
 
         assert_eq!(diagnostic.selected_action, LegalAction::Reach);
-        assert!(reach.contains("  decision: yes"), "{reach}");
-        assert!(reach.contains("  reason: Eligible"), "{reach}");
+        assert!(reach.contains("  base decision: yes"), "{reach}");
+        assert!(reach.contains("  base reason: Eligible"), "{reach}");
         assert!(reach.contains("  selected discard: N"), "{reach}");
         assert!(reach.contains("  shanten: 0"), "{reach}");
         assert!(
@@ -5733,8 +5886,8 @@ mod tests {
 
         assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
         assert_eq!(action_label(&diagnostic.selected_action), "Reach");
-        assert!(reach.contains("  decision: yes"), "{reach}");
-        assert!(reach.contains("  reason: Eligible"), "{reach}");
+        assert!(reach.contains("  base decision: yes"), "{reach}");
+        assert!(reach.contains("  base reason: Eligible"), "{reach}");
         assert!(reach.contains("  selected discard: N"), "{reach}");
         assert!(reach.contains("  shanten: 0"), "{reach}");
         assert!(
@@ -5754,8 +5907,11 @@ mod tests {
 
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
         assert_eq!(action_label(&diagnostic.selected_action), "N");
-        assert!(reach.contains("  decision: no"), "{reach}");
-        assert!(reach.contains("  reason: InsufficientLiveWait"), "{reach}");
+        assert!(reach.contains("  base decision: no"), "{reach}");
+        assert!(
+            reach.contains("  base reason: InsufficientLiveWait"),
+            "{reach}"
+        );
         assert!(reach.contains("  selected discard: N"), "{reach}");
         assert!(
             reach.contains("  live wait: 2 remaining / 1 types"),
@@ -5772,8 +5928,8 @@ mod tests {
         let decision = diagnostic.reach.as_ref().expect("リーチを検討している");
 
         assert_eq!(action_label(&diagnostic.selected_action), "N");
-        assert!(reach.contains("  decision: no"), "{reach}");
-        assert!(reach.contains("  reason: HighValueDamaten"), "{reach}");
+        assert!(reach.contains("  base decision: no"), "{reach}");
+        assert!(reach.contains("  base reason: HighValueDamaten"), "{reach}");
         assert!(reach.contains("  ron: yes"), "{reach}");
         assert!(
             reach.contains("  live wait: 4 remaining / 1 types"),
@@ -5812,8 +5968,8 @@ mod tests {
         let reach = section(&output, "Reach");
 
         assert_eq!(action_label(&diagnostic.selected_action), "Reach");
-        assert!(reach.contains("  decision: yes"), "{reach}");
-        assert!(reach.contains("  reason: EligibleLowValue"), "{reach}");
+        assert!(reach.contains("  base decision: yes"), "{reach}");
+        assert!(reach.contains("  base reason: EligibleLowValue"), "{reach}");
         assert!(
             reach.contains("  damaten verdict: BelowThreshold"),
             "{reach}"
@@ -5837,7 +5993,7 @@ mod tests {
             reach.contains("  damaten verdict: Indeterminate"),
             "{reach}"
         );
-        assert!(reach.contains("  reason: Eligible"), "{reach}");
+        assert!(reach.contains("  base reason: Eligible"), "{reach}");
 
         // 赤5と黒5は別 variant として並ぶ。
         let comparison = section(&output, "Reach / Damaten comparison");

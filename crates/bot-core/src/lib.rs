@@ -120,7 +120,9 @@ pub use push_pull::{
 pub use reach_damaten_comparison::ReachDamatenComparisonDiagnostic;
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
-    decide_reach_reason, is_reach_legal,
+    ReachTimingDecision, ReachTimingDiagnostic, ReachTimingReason,
+    decide_permanent_furiten_reach_timing, decide_reach_reason, evaluates_reach_timing,
+    is_reach_legal,
 };
 pub use ron_opportunity::{
     HonorPublicSafetyEvidence, ReachPublicSafetyEvidence, RonOpportunityDiagnostic,

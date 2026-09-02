@@ -561,6 +561,26 @@ pub fn diagnose_lookahead(
     }
 }
 
+/// 打牌候補1件だけの2手先診断を構築する。
+///
+/// 進める枝も既存打牌評価の呼び出しも [`diagnose_lookahead`] と同じ helper を共有し、対象を
+/// 渡された1候補に限定するだけ。全候補分の [`LookaheadDiagnostic`] は構築しない。
+///
+/// 現在打牌後がテンパイの候補では、[`diagnose_lookahead`] が同じ候補へ進める枝と一致する
+/// (`Progress` と、手変わりを1段だけ進める `SameShanten`)。1向聴候補では、候補集合全体を見て
+/// 決まる前方集計の絞り込みをこの入口では適用できないため、[`diagnose_lookahead`] が
+/// 集計対象から外した候補より深い枝まで進むことがある。
+pub fn diagnose_lookahead_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> DiscardLookaheadDiagnostic {
+    search_candidate(
+        inputs,
+        evaluation,
+        &diagnostic_scopes(inputs, evaluation, self_tsumo_target(inputs, evaluation)),
+    )
+}
+
 /// 打牌選択用の前方集計値を求める。
 ///
 /// 戻り値は `evaluations` と同じ順序・同じ件数で、前方評価を計算しなかった候補は
