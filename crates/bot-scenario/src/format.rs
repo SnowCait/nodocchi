@@ -1505,8 +1505,8 @@ fn format_damaten_value(damaten: Option<&DamatenValueDiagnostic>) -> Vec<String>
 // 自摸確率を含んだ期待支払い、Ron baseline は「その待ちで和了した場合の支払い」で、ロンの
 // 発生確率を含まない。したがって2つを足した合計も、どちらを選ぶかの結論も出さない。
 //
-// 値はすべて production 判断と既存診断が持つものそのままで、この節のために探索も点数計算も
-// 集計もやり直さない。
+// self-tsumo と production facts は判断と既存診断が持つ値そのままで、この節のために探索も集計も
+// やり直さない。リーチ Ron baseline だけは診断が評価した観測値で、表示側で求め直さない。
 fn format_reach_damaten_comparison(
     comparison: Option<&ReachDamatenComparisonDiagnostic>,
 ) -> String {

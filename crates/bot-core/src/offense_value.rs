@@ -150,14 +150,13 @@ pub struct TenpaiOffenseValue {
 /// 通常打牌選択・押し引き・リーチ診断が同じ候補を扱う場合に、hand-value evaluation を表示や
 /// policy 診断のためにやり直さず共有するための crate-private result。
 ///
-/// `hands` は打点評価に使った打牌後テンパイの完成手そのもの。ダマ Ron baseline とリーチ Ron
-/// baseline は同じ完成手集合を別の baseline で評価するだけなので、待ち計算も受け入れも完成手の
-/// 組み立ても後段でやり直さないよう持ち回る。
+/// 完成手 ([`TenpaiCompletedHands`]) はこの評価の中だけで共有し、結果には持ち回らない。完成手は
+/// 待ちごとの解析を丸ごと所有する重い値なので、診断でしか使わない値のために production の
+/// 打牌選択へ持ち出さない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TenpaiOffenseEvaluation {
     pub offense: TenpaiOffenseValue,
     pub damaten_value: Option<DamatenValueDiagnostic>,
-    pub hands: Option<TenpaiCompletedHands>,
 }
 
 /// リーチ打点比較用の hypothetical baseline を組み立てる。
@@ -331,7 +330,6 @@ pub(crate) fn evaluate_tenpai_offense(
     TenpaiOffenseEvaluation {
         offense: TenpaiOffenseValue { mode, value },
         damaten_value,
-        hands,
     }
 }
 

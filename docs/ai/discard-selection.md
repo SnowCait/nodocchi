@@ -222,7 +222,7 @@ Reach / Damaten comparison
   Ron                              reach legal / 2つの Ron baseline / ロン可否 / ダマ verdict
 ```
 
-値はすべて既存診断が持っているものそのままです。self-tsumo は選んだ打牌に対応する `Tenpai continuation` の候補1件の比較そのもので、Ron 側の production facts (reason・ロン可否・ダマ打点) は既存のリーチ判断そのものです。統合のために探索も点数計算も集計もやり直しません。
+self-tsumo は選んだ打牌に対応する `Tenpai continuation` の候補1件の比較そのもので、Ron 側の production facts (reason・ロン可否・ダマ打点) は既存のリーチ判断そのものです。統合のために探索も集計もやり直しません。新しく点数計算するのは下の `reach baseline` だけで、これは production 判断が評価しない観測値です。
 
 ### 2つの軸は足しません
 
@@ -240,7 +240,7 @@ nodocchi はまだ「他家がその牌を切る確率」の模型を持たな�
 - `reach baseline` は今リーチしてその待ちでロン和了した場合の最低保証打点です。既存のリーチ baseline (`reach_baseline_context()`) をそのまま使うので、リーチ1翻を含み、一発・裏ドラ・河底のような上振れは加算しません (裏ドラは未観測ではなく「0枚と確定」として扱います)。集約も押し引きの攻撃打点と同じ残枚数加重で、赤5 / 黒5は別 variant のまま残します。self-tsumo の `reach now` と同じく、実際にリーチできる局面 (合法手に `LegalAction::Reach` がある) だけ評価します。
 - `damaten baseline` はダマのままロン和了した場合の打点で、既存のリーチ / ダマ判断が評価したダマ打点診断そのものです ([手牌価値](hand-value.md) を参照)。ダマでロンできない場合とロン可否が unknown の場合は既存 semantics どおり評価せず `unavailable` にします。**0 点としては扱いません。**
 
-どちらの baseline も、選んだ打牌後のテンパイについて既に組み立て済みの完成手 (`TenpaiCompletedHands`) を共有して評価します。待ち・受け入れ・完成手を統合表示のために組み立て直しません。
+`reach baseline` の評価は**診断経路だけ**で行います。通常の `act()` はこの層を通らないので、完成手 (`TenpaiCompletedHands`) の組み立ても hand-value evaluation も production には入りません。完成手は待ちごとの解析を丸ごと所有する重い値なので、診断のために production の打牌選択へ持ち回らせません。リーチ判断がダマ打点のために組み立てた集合があればその所有権をそのまま受け取り、無い経路でだけ選んだ打牌1件について既存 helper で1回組み立てます (待ちは既存の受け入れから求めるので、向聴も受け入れも計算し直しません)。
 
 フリテンでロンできない局面でも、Tsumo 側の `damaten continuation` は独立した軸として評価します。逆に、ツモれることを理由に Ron 側の値を確定させることもしません。
 

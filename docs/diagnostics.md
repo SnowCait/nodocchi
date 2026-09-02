@@ -198,7 +198,7 @@ Reach / Damaten comparison
       4s: 3 remaining / no yaku
 ```
 
-`production` は既存のリーチ判断の結論そのものです。`self-tsumo` は選んだ打牌に対応する `Tenpai continuation` の候補1件の比較そのもので、`--lookahead` を指定していない局面では `self-tsumo: unavailable` になります (統合表示のために2手先探索を追加しません)。
+`production` は既存のリーチ判断の結論そのものです。`self-tsumo` は選んだ打牌に対応する `Tenpai continuation` の候補1件の比較そのもので、`--lookahead` を指定していない局面では `self-tsumo: unavailable` になります (統合表示のために2手先探索を追加しません)。`reach baseline` だけが今回新しく評価する観測値で、その点数計算は診断経路だけで行います。
 
 `Ron` の2つの baseline はどちらも「その待ちで和了した場合の支払い」で、**ロンの発生確率を含みません**。`reach baseline` は今リーチした場合の最低保証打点 (リーチ1翻を含み、一発・裏ドラ・河底は加算しない) で、合法手に `LegalAction::Reach` が無い局面では `unavailable` です。`damaten baseline` は production 判断が評価したダマ打点そのもので、ダマでロンできない局面とロン可否が unknown の局面では評価しないまま `unavailable` になります (0 点として扱いません)。
 

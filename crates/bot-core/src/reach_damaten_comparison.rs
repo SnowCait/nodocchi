@@ -1,15 +1,26 @@
 //! 現在聴牌の Reach / Damaten 判断材料を1か所へ並べる診断層。
 //!
 //! 通常打牌 selection が選んだ打牌後のテンパイについて、既に別々の診断が持っている材料を1つの
-//! 構造へ集めるだけの層である。判断も探索も点数計算もここでは行わず、値の出どころは全て既存の
-//! source of truth そのままになる。
+//! 構造へ集める層である。判断も探索もここでは行わず、材料の出どころは既存の source of truth
+//! そのままになる。
 //!
 //! ```text
 //! production Reach 判断  → ReachDecisionDiagnostic (reason / should_reach / can_ron)
 //! ダマ Ron 打点          → ReachDecisionDiagnostic の DamatenValueDiagnostic
 //! self-tsumo 期待支払い  → TenpaiContinuationCandidate の TenpaiSelfTsumoComparison
-//! リーチ Ron 打点        → 既存 reach_baseline_context() を同じ完成手集合へ適用した値
+//! リーチ Ron 打点        → 既存 reach_baseline_context() を同じ完成手集合へ適用した観測値
 //! ```
+//!
+//! # 診断経路だけで評価する
+//!
+//! リーチ Ron 打点だけは production 判断が評価しない観測値なので、この層が既存 scoring rule で
+//! 評価する。診断のために新しく点数計算するのはこの1つで、他の材料は既存値をそのまま読む。
+//!
+//! 評価するのは診断が有効な経路だけ。通常の [`ShantenAgent::act()`](crate::agents::ShantenAgent)
+//! はこの層を通らないので、完成手の組み立ても hand-value evaluation も production には入らない。
+//! 完成手は待ちごとの解析を丸ごと所有する重い値なので、production の打牌選択へ持ち回らせない。
+//! リーチ判断がダマ打点のために組み立てた集合があればその所有権を受け取り、無い場合だけ選んだ
+//! 打牌1件について既存 helper で1回組み立てる。
 //!
 //! # 2つの軸
 //!
@@ -60,9 +71,9 @@ const TENPAI_SHANTEN: i8 = 0;
 
 /// 現在聴牌の Reach / Damaten 判断材料をまとめた統合診断。
 ///
-/// どの値も既存診断が持っているものそのままで、この診断のために探索も点数計算も集計もやり直さ
-/// ない。打牌選択・押し引き・リーチ判断のどれにも接続していない解析専用の情報で、構築の有無は
-/// 選択結果を変えない。
+/// リーチ Ron baseline 以外はどれも既存診断が持っているものそのままで、この診断のために探索も
+/// 集計もやり直さない。打牌選択・押し引き・リーチ判断のどれにも接続していない解析専用の情報で、
+/// 構築の有無は選択結果を変えない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachDamatenComparisonDiagnostic {
     /// 通常打牌 selection が選んだ合法 Dahai。リーチ判断が見たものと同じ action。
@@ -125,50 +136,68 @@ impl ReachDamatenComparisonDiagnostic {
 
 /// 統合診断を組み立てるための材料。
 ///
-/// どれも production 判断と通常打牌 selection が構築済みの値そのもので、この診断のために作り
-/// 直したものは無い。
+/// production 判断と通常打牌 selection が既に構築済みの値をそのまま受け取る。`hands` だけは
+/// 所有権ごと受け取り、診断のために deep clone しない。
 pub(crate) struct ReachDamatenComparisonInputs<'a> {
     pub context: &'a GameContext,
     /// 現在局面の合法手に [`LegalAction::Reach`] があるか。
     pub reach_legal: bool,
     /// production のリーチ判断の結果。理由・ロン可否・ダマ打点の source of truth。
     pub reach: &'a ReachDecisionDiagnostic,
-    /// 通常打牌 selection の結果。選んだ打牌の評価と、計算済みの待ち・ダマ打点・完成手を持つ。
+    /// 通常打牌 selection の結果。選んだ打牌の評価と、計算済みの待ち・ダマ打点を持つ。
     pub selection: &'a DiscardActionSelection,
-    /// リーチ判断が組み立てた打牌後テンパイの完成手。未構築の経路では `None`。
-    pub hands: Option<&'a TenpaiCompletedHands>,
+    /// リーチ判断がダマ打点の評価のために組み立てた打牌後テンパイの完成手。
+    ///
+    /// 判断がその経路を通らなかった場合は `None`。完成手は待ちごとの解析を丸ごと所有する重い値
+    /// なので、production 側で持ち回らずここで所有権を受け取る。
+    pub hands: Option<TenpaiCompletedHands>,
     /// 現在聴牌のダマ継続診断。2手先探索を要求していない局面では `None`。
     pub continuation: Option<&'a TenpaiContinuationDiagnostic>,
 }
 
 /// production 判断と既存診断から、Reach / Damaten の判断材料を1つの診断へまとめる。
+///
+/// 呼ぶのは診断が有効な経路だけ。通常の `act()` はこの層を通らないので、リーチ Ron baseline の
+/// 完成手の組み立ても点数計算も production には入らない。
 pub(crate) fn diagnose_reach_damaten_comparison(
-    inputs: &ReachDamatenComparisonInputs,
+    inputs: ReachDamatenComparisonInputs,
 ) -> ReachDamatenComparisonDiagnostic {
-    let tenpai = tenpai_facts(inputs);
+    let ReachDamatenComparisonInputs {
+        context,
+        reach_legal,
+        reach,
+        selection,
+        hands,
+        continuation,
+    } = inputs;
+    let tenpai = selected_tenpai(context, reach, selection, hands);
 
     ReachDamatenComparisonDiagnostic {
-        selected_discard: inputs.reach.selected_discard.clone(),
-        production_reason: inputs.reach.reason,
-        production_should_reach: inputs.reach.should_reach(),
-        reach_legal: inputs.reach_legal,
-        self_tsumo: selected_discard_self_tsumo(inputs),
-        reach_ron_baseline: tenpai
-            .as_ref()
-            .and_then(|tenpai| reach_ron_baseline(inputs, tenpai)),
+        selected_discard: reach.selected_discard.clone(),
+        production_reason: reach.reason,
+        production_should_reach: reach.should_reach(),
+        reach_legal,
+        self_tsumo: selected_discard_self_tsumo(selection, continuation),
+        reach_ron_baseline: tenpai.as_ref().and_then(|tenpai| {
+            // 実際にリーチできる局面だけ評価する。副露手のようにリーチが合法でない局面で、
+            // あり得ないリーチ手の打点を作らない。self-tsumo の `reach now` と同じ入口条件で、
+            // 局面から合法条件を組み立て直さない。
+            reach_legal.then(|| reach_ron_baseline_from_hands(context, &tenpai.hands))
+        }),
         can_ron: tenpai.as_ref().and_then(|tenpai| tenpai.wait.can_ron()),
         damaten_ron_value: tenpai
             .as_ref()
-            .and_then(|tenpai| damaten_ron_value(inputs, tenpai)),
+            .and_then(|tenpai| damaten_ron_value(context, reach, selection, tenpai)),
     }
 }
 
 // 選んだ打牌に対応する継続候補の self-tsumo 比較。対応する候補が無ければ推測せず `None`。
 fn selected_discard_self_tsumo(
-    inputs: &ReachDamatenComparisonInputs,
+    selection: &DiscardActionSelection,
+    continuation: Option<&TenpaiContinuationDiagnostic>,
 ) -> Option<TenpaiSelfTsumoComparison> {
-    let discard: TileType = inputs.selection.evaluation.as_ref()?.discard;
-    Some(inputs.continuation?.candidate(discard)?.self_tsumo)
+    let discard: TileType = selection.evaluation.as_ref()?.discard;
+    Some(continuation?.candidate(discard)?.self_tsumo)
 }
 
 // 選んだ打牌後のテンパイの待ちと完成手。Ron 側の2つの baseline はこの1組を共有する。
@@ -179,43 +208,35 @@ struct SelectedTenpai {
 
 // 選んだ打牌後のテンパイを、既に計算済みの値から組み立てる。
 //
-// 待ちもダマ打点も完成手も、リーチ判断か通常打牌 selection が計算済みならそれを使う。どちらも
-// 計算していない経路 (合法 Reach が無く、現在聴牌候補も1件だけの局面) だけ、同じ既存 helper を
-// 1回だけ通す。待ちは既存の受け入れ (`acceptance_after_discard`) から求めるので、向聴も受け入れも
+// 待ちはリーチ判断か通常打牌 selection が計算済みならそれを使い、どちらも計算していない経路だけ
+// 同じ既存 helper を通す。完成手はリーチ判断がダマ打点のために組み立てた集合を所有権ごと受け取り、
+// 組み立てていない経路 (ダマでロンできない・ロン可否 unknown・現在聴牌比較がダマ打点を評価済み)
+// だけ、選んだ打牌1件について既存 helper で1回組み立てる。
+//
+// 再構築が入るのは診断経路だけで、production の打牌選択・押し引き・リーチ判断は増えない。
+// 診断のために production 側へ完成手の deep clone を持ち回るより、必要な診断でだけ1回組み立てる
+// 方を選ぶ。待ちは既存の受け入れ (`acceptance_after_discard`) から求めるので、向聴も受け入れも
 // ここで計算し直すことにはならない。
-fn tenpai_facts(inputs: &ReachDamatenComparisonInputs) -> Option<SelectedTenpai> {
-    let evaluation: &DiscardEvaluation = inputs.selection.evaluation.as_ref()?;
+fn selected_tenpai(
+    context: &GameContext,
+    reach: &ReachDecisionDiagnostic,
+    selection: &DiscardActionSelection,
+    hands: Option<TenpaiCompletedHands>,
+) -> Option<SelectedTenpai> {
+    let evaluation: &DiscardEvaluation = selection.evaluation.as_ref()?;
     if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
         return None;
     }
 
-    let wait = inputs
-        .reach
+    let wait = reach
         .tenpai_wait
         .clone()
-        .or_else(|| inputs.selection.tenpai_wait.clone())
-        .or_else(|| selected_discard_tenpai_wait_availability(inputs.context, evaluation))?;
-    let hands = inputs
-        .hands
-        .cloned()
-        .or_else(|| inputs.selection.tenpai_completed_hands.clone())
-        .or_else(|| tenpai_completed_hands_after_discard(inputs.context, evaluation, &wait))?;
+        .or_else(|| selection.tenpai_wait.clone())
+        .or_else(|| selected_discard_tenpai_wait_availability(context, evaluation))?;
+    let hands =
+        hands.or_else(|| tenpai_completed_hands_after_discard(context, evaluation, &wait))?;
 
     Some(SelectedTenpai { wait, hands })
-}
-
-// 今リーチしてロン和了した場合の最低保証打点。
-//
-// 実際にリーチできる局面だけ評価する。副露手のようにリーチが合法でない局面で、あり得ないリーチ
-// 手の打点を作らない。self-tsumo の `reach now` と同じ入口条件で、局面から合法条件を組み立て
-// 直さない。
-fn reach_ron_baseline(
-    inputs: &ReachDamatenComparisonInputs,
-    tenpai: &SelectedTenpai,
-) -> Option<ReachRonBaselineDiagnostic> {
-    inputs
-        .reach_legal
-        .then(|| reach_ron_baseline_from_hands(inputs.context, &tenpai.hands))
 }
 
 // ダマのままロン和了した場合の打点。
@@ -225,19 +246,20 @@ fn reach_ron_baseline(
 // production 判断か通常打牌 selection が既に評価していればその診断そのもので、同じ hand-value
 // evaluation を二度実行しない。
 fn damaten_ron_value(
-    inputs: &ReachDamatenComparisonInputs,
+    context: &GameContext,
+    reach: &ReachDecisionDiagnostic,
+    selection: &DiscardActionSelection,
     tenpai: &SelectedTenpai,
 ) -> Option<DamatenValueDiagnostic> {
-    if inputs.context.own_reached() != Some(false) || tenpai.wait.can_ron() != Some(true) {
+    if context.own_reached() != Some(false) || tenpai.wait.can_ron() != Some(true) {
         return None;
     }
 
-    inputs
-        .reach
+    reach
         .damaten_value
         .clone()
-        .or_else(|| inputs.selection.damaten_value.clone())
-        .or_else(|| Some(damaten_value_from_hands(inputs.context, &tenpai.hands)))
+        .or_else(|| selection.damaten_value.clone())
+        .or_else(|| Some(damaten_value_from_hands(context, &tenpai.hands)))
 }
 
 #[cfg(test)]

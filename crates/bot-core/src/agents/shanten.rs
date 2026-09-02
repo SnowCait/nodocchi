@@ -798,17 +798,17 @@ impl ShantenAgent {
                 let ReachDecision { diagnostic, hands } =
                     decide_reach(ctx, legal_actions, discard_selection);
                 let decision = reach.insert(diagnostic);
-                // 統合診断は判断が終わった後の観測値だけを集める。判断も探索も点数計算もやり直さ
-                // ず、ダマ打点が使ったものと同じ完成手をリーチ Ron baseline へ渡す。
+                // 統合診断は判断が終わった後の観測値だけを集める。診断が無効な act() 経路では
+                // 何も構築せず、リーチ判断が組み立てた完成手もそのまま捨てる。
                 let comparison = diagnostics.enabled.then(|| {
-                    diagnose_reach_damaten_comparison(&ReachDamatenComparisonInputs {
+                    diagnose_reach_damaten_comparison(ReachDamatenComparisonInputs {
                         context: ctx,
                         reach_legal: legal_actions
                             .iter()
                             .any(|action| matches!(action, LegalAction::Reach)),
                         reach: decision,
                         selection: discard_selection,
-                        hands: hands.as_ref(),
+                        hands,
                         continuation: diagnostics.normal_discard_tenpai_continuation.as_ref(),
                     })
                 });
@@ -1059,11 +1059,11 @@ fn log_agent_decision(decision: &AgentDecision) {
 
 // リーチ判断の結果と、その判断のためにここで組み立てた打牌後テンパイの完成手。
 //
-// 完成手はダマ打点を評価した集合そのもので、統合診断のリーチ Ron baseline も同じ集合を別の
-// baseline で評価する。通常打牌 selection が既に組み立てている場合はそちらを借りるだけなので
-// `None` になり、統合診断は selection が持つ同じ集合を見る。ダマ打点を評価しない経路
-// (ダマでロンできない・ロン可否 unknown) でも組み立てないので `None`。act() 経路は診断を
-// 作らないのでそのまま捨てる。
+// 完成手はダマ打点を評価するために組み立てたものそのもの。統合診断のリーチ Ron baseline も
+// 同じ集合を別の baseline で評価できるよう、判断の後で捨てずに返すだけで、この診断のために
+// 組み立てる条件は増やさない。ダマ打点を評価しない経路 (ダマでロンできない・ロン可否 unknown)
+// と、通常打牌 selection が既にダマ打点を評価済みの経路では組み立てないので `None`。act() は
+// 診断を作らないのでそのまま捨てる。
 struct ReachDecision {
     diagnostic: ReachDecisionDiagnostic,
     hands: Option<TenpaiCompletedHands>,
@@ -1146,25 +1146,22 @@ fn decide_reach(
     };
 
     // ダマでロンできると確定した場合だけダマ打点を評価する。フリテンとロン可否 unknown では
-    // 評価そのものを行わず、既存判断へ委ねる。
+    // 評価そのものを行わず、既存判断へ委ねる。現在聴牌比較が評価済みならその結論をそのまま使う。
     //
-    // 完成手は現在聴牌比較が組み立て済みならそれを借りるだけにし、未構築の経路だけここで1回
-    // 組み立てる。ダマ打点と統合診断のリーチ Ron baseline はこの同じ集合を別の baseline で
-    // 評価する。
+    // 完成手を組み立てるのは、この経路で実際にダマ打点を評価する場合だけ。組み立てた集合は
+    // 統合診断のリーチ Ron baseline へそのまま渡せるよう返すが、そのために組み立てる条件を
+    // 増やさない。
     let can_ron = tenpai_wait.can_ron() == Some(true);
-    let built_hands = (can_ron && selection.tenpai_completed_hands.is_none())
+    let hands = (can_ron && selection.damaten_value.is_none())
         .then(|| tenpai_completed_hands_after_discard(ctx, evaluation, &tenpai_wait))
         .flatten();
-    let hands = selection
-        .tenpai_completed_hands
-        .as_ref()
-        .or(built_hands.as_ref());
     let damaten_value = can_ron
         .then(|| {
-            selection
-                .damaten_value
-                .clone()
-                .or_else(|| hands.map(|hands| damaten_value_from_hands(ctx, hands)))
+            selection.damaten_value.clone().or_else(|| {
+                hands
+                    .as_ref()
+                    .map(|hands| damaten_value_from_hands(ctx, hands))
+            })
         })
         .flatten();
 
@@ -1180,10 +1177,7 @@ fn decide_reach(
     diagnostic.selected = reason.selects_reach().then_some(reach);
     diagnostic.damaten_value = damaten_value;
     diagnostic.tenpai_wait = Some(tenpai_wait);
-    ReachDecision {
-        diagnostic,
-        hands: built_hands,
-    }
+    ReachDecision { diagnostic, hands }
 }
 
 impl Agent for ShantenAgent {
@@ -4842,6 +4836,39 @@ pub(crate) mod tests {
         assert_eq!(decision.action, dahai(89));
         assert!(diagnostics.normal_discard.is_none());
         assert!(diagnostics.defense.is_none());
+    }
+
+    #[test]
+    fn act_path_does_not_build_the_reach_damaten_comparison() {
+        // リーチを検討する Push mode でも、診断が無効な act() 経路では統合診断を構築しない。
+        // 統合診断だけが必要とする完成手の組み立てとリーチ Ron baseline の点数計算は、この経路
+        // へ入る唯一の入口 (diagnose_reach_damaten_comparison) を通らないので実行されない。
+        let ctx = tenpai_context(&[]);
+        let actions = tenpai_actions();
+
+        let mut diagnostics = DecisionDiagnostics::disabled();
+        let decision = ShantenAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
+
+        assert_eq!(decision.action, LegalAction::Reach);
+        assert!(decision.reach.is_some());
+        assert!(diagnostics.reach_damaten_comparison.is_none());
+    }
+
+    #[test]
+    fn the_reach_damaten_comparison_is_built_only_with_diagnostics() {
+        // 診断経路では同じ判断のまま統合診断とリーチ Ron baseline を構築する。
+        let ctx = tenpai_context(&[]);
+        let actions = tenpai_actions();
+
+        let mut agent = ShantenAgent;
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let comparison = diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断を構築している");
+
+        assert_eq!(diagnostic.selected_action, agent.act(&ctx, &actions));
+        assert!(comparison.reach_ron_baseline.is_some());
     }
 
     #[test]
