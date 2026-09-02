@@ -1511,7 +1511,11 @@ fn format_reach_timing(timing: Option<&ReachTimingDiagnostic>) -> Vec<String> {
         format!("    decision: {:?}", timing.decision),
         format!("    reason: {:?}", timing.reason),
     ];
-    if timing.reason == ReachTimingReason::NotPermanentFuriten {
+    if matches!(
+        timing.reason,
+        ReachTimingReason::NotPermanentFuriten
+            | ReachTimingReason::NonFuritenBadWaitHeuristicNotEligible
+    ) {
         return lines;
     }
 
@@ -5746,6 +5750,19 @@ mod tests {
         "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
+    // 非フリテンの限定 heuristic の代表局面。打 3s → 4s 単騎3枚で、Reach public safety は
+    // NoSafety、external threat は無く、defer → forced Reach が reach now を上回る。
+    const NON_FURITEN_BAD_WAIT_DEFERRED_REACH_SCENARIO: &str = r#"{
+        "hand": "340678m789p4789s",
+        "draw": "3s",
+        "round_wind": "1z",
+        "player_id": 0,
+        "oya": 3,
+        "remaining_tiles": 70,
+        "scores": [25000, 25000, 25000, 25000],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
     // 恒常フリテンの timing 評価は選択済み1候補の継続枝を辿るため、同じ局面を使うテストで
     // 構築結果を共有する。
     static DEFERRED_REACH: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
@@ -5755,6 +5772,16 @@ mod tests {
             diagnostic,
         }
     });
+
+    static NON_FURITEN_BAD_WAIT_DEFERRED_REACH: LazyLock<RenderedDiagnostic> =
+        LazyLock::new(|| {
+            let (_, diagnostic, rendered) =
+                rendered(NON_FURITEN_BAD_WAIT_DEFERRED_REACH_SCENARIO, false);
+            RenderedDiagnostic {
+                rendered,
+                diagnostic,
+            }
+        });
 
     #[test]
     fn reach_section_reports_the_deferred_timing() {
@@ -5807,6 +5834,45 @@ mod tests {
         );
         assert!(
             summary.contains("  reach timing reason: PermanentFuritenSelfTsumo"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn the_non_furiten_bad_wait_heuristic_is_visible_in_reach_and_summary() {
+        let diagnostic = &NON_FURITEN_BAD_WAIT_DEFERRED_REACH.diagnostic;
+        let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
+        let timing = reach.timing.expect("base policy がリーチを選んでいる");
+        let reach_section = section(&NON_FURITEN_BAD_WAIT_DEFERRED_REACH.rendered, "Reach");
+        let summary = summary_section(&NON_FURITEN_BAD_WAIT_DEFERRED_REACH.rendered);
+
+        assert_eq!(action_label(&diagnostic.selected_action), "3s");
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert!(reach.base_selects_reach());
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert_eq!(reach.can_ron(), Some(true));
+        assert_eq!(reach.tsumo_type_count(), Some(1));
+        assert_eq!(reach.tsumo_remaining(), Some(3));
+        assert_eq!(timing.decision, bot_core::ReachTimingDecision::DeferReach);
+        assert_eq!(timing.reason, ReachTimingReason::NonFuritenBadWaitHeuristic);
+
+        assert!(
+            reach_section.contains(
+                "  timing\n    decision: DeferReach\n    reason: NonFuritenBadWaitHeuristic"
+            ),
+            "{reach_section}"
+        );
+        assert!(
+            reach_section.contains("    reach now: 1460.235"),
+            "{reach_section}"
+        );
+        assert!(
+            reach_section.contains("      forced Reach: 2094.467"),
+            "{reach_section}"
+        );
+        assert!(summary.contains("  reach: deferred"), "{summary}");
+        assert!(
+            summary.contains("  reach timing reason: NonFuritenBadWaitHeuristic"),
             "{summary}"
         );
     }

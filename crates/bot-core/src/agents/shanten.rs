@@ -22,6 +22,7 @@ use crate::open_hand_defense::{
     OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
     evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
 };
+use crate::open_hand_threat::OpenHandThreatAssessment;
 use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
@@ -32,8 +33,11 @@ use crate::reach_damaten_comparison::{
     diagnose_reach_damaten_comparison,
 };
 use crate::reach_policy::{
-    decide_permanent_furiten_reach_timing, decide_reach_reason, evaluates_reach_timing,
+    NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
+    decide_permanent_furiten_reach_timing, decide_reach_reason,
+    evaluates_non_furiten_bad_wait_reach_timing, evaluates_reach_timing,
 };
+use crate::ron_opportunity::reach_public_safety_after_discard;
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, selected_tenpai_self_tsumo_comparison,
@@ -767,8 +771,8 @@ impl ShantenAgent {
 
     // 通常打牌選択。production selection は診断の有無にかかわらず、既存 forward_metrics の
     // 2手先枝評価を利用する。通常 act() では詳細な LookaheadDiagnostic は構築しない。
-    // 恒常フリテンの Reach timing は gate 後に selected candidate 1件だけ既存 lookahead
-    // evaluator を利用する。診断が有効な場合だけ、表示用の全候補の構造化診断と
+    // Reach timing は恒常フリテンまたは限定した非フリテン悪形の gate 後に、selected candidate
+    // 1件だけ既存 lookahead evaluator を利用する。診断が有効な場合だけ、表示用の全候補の構造化診断と
     // LookaheadDiagnostic 等を追加で構築する。
     fn select_normal_discard(
         &self,
@@ -821,8 +825,12 @@ impl ShantenAgent {
         let normal_discard = discard_selection.action.as_ref();
         match mode {
             PushPullMode::Push => {
-                let ReachDecision { diagnostic, hands } =
-                    decide_reach(ctx, legal_actions, discard_selection);
+                let ReachDecision { diagnostic, hands } = decide_reach(
+                    ctx,
+                    legal_actions,
+                    discard_selection,
+                    &inputs.open_hand_threats,
+                );
                 let decision = reach.insert(diagnostic);
                 // 統合診断は判断が終わった後の観測値だけを集める。診断が無効な act() 経路では
                 // 何も構築せず、リーチ判断が組み立てた完成手もそのまま捨てる。
@@ -1131,6 +1139,7 @@ fn decide_reach(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
     selection: &DiscardActionSelection,
+    open_hand_threats: &[OpenHandThreatAssessment; 4],
 ) -> ReachDecision {
     let mut diagnostic = ReachDecisionDiagnostic {
         selected_discard: selection.action.clone(),
@@ -1218,7 +1227,7 @@ fn decide_reach(
     // そのリーチを今回宣言するかどうかを決める層として後ろに続く。
     let timing = reason
         .selects_reach()
-        .then(|| reach_timing(ctx, evaluation, &tenpai_wait));
+        .then(|| reach_timing(ctx, selection, evaluation, &tenpai_wait, open_hand_threats));
 
     diagnostic.reason = reason;
     diagnostic.selected = timing
@@ -1232,25 +1241,77 @@ fn decide_reach(
 
 // base policy がリーチを選んだ聴牌の timing 判断。
 //
-// 恒常フリテンが確定した聴牌だけが対象で、それ以外では選択済み候補の continuation を一切
-// 評価しない。非フリテン聴牌では今リーチした瞬間からロン機会が生まれるが、nodocchi は Ron
-// probability を持たないため self-tsumo 比較だけで優劣を決めない。
+// 恒常フリテンに加え、非フリテンでは「生きた待ち1種・3枚以下・非么九牌・Reach 後に非現物かつ
+// 壁なし・無スジ・external threat なし」の暫定 structural gate をすべて満たす場合だけ対象に
+// する。これらは Ron probability の代用ではなく、公開 safety evidence 上の安全根拠が無いこと
+// だけを見る。
 //
 // 対象になった場合に評価するのは通常打牌 selection が選んだ1候補だけで、全合法 Dahai 候補の
 // 継続枝は production では構築しない。比較する値も既存 self-tsumo 比較そのもので、この経路が
 // 確率模型も点数計算も持たない。
 fn reach_timing(
     ctx: &GameContext,
+    selection: &DiscardActionSelection,
     evaluation: &DiscardEvaluation,
     tenpai_wait: &TenpaiWaitAvailability,
+    open_hand_threats: &[OpenHandThreatAssessment; 4],
 ) -> ReachTimingDiagnostic {
-    if !evaluates_reach_timing(tenpai_wait.permanent_furiten(), tenpai_wait.tsumo_remaining) {
+    if evaluates_reach_timing(tenpai_wait.permanent_furiten(), tenpai_wait.tsumo_remaining) {
+        // ここへ来るのは合法手にリーチがあった経路だけ。現在局面のリーチ可否は決め直さない。
+        let comparison = selected_tenpai_self_tsumo_comparison(ctx, evaluation, true);
+        return decide_permanent_furiten_reach_timing(
+            comparison.and_then(|comparison| comparison.reach_now),
+            comparison.and_then(|comparison| comparison.defer_forced_reach()),
+        );
+    }
+
+    if tenpai_wait.permanent_furiten() != PermanentFuriten::No {
         return ReachTimingDiagnostic::not_evaluated();
     }
 
-    // ここへ来るのは合法手にリーチがあった経路だけ。現在局面のリーチ可否は決め直さない。
+    // public-state projection より前に、既存の打牌後待ちと threat classification だけで判定できる
+    // gate を落とす。対象外では selected candidate continuation も public safety も評価しない。
+    if tenpai_wait.can_ron() != Some(true)
+        || tenpai_wait.live_waits.len() != 1
+        || tenpai_wait.tsumo_remaining == 0
+        || tenpai_wait.tsumo_remaining > 3
+    {
+        return ReachTimingDiagnostic::non_furiten_heuristic_not_evaluated();
+    }
+
+    let wait_tile = tenpai_wait.live_waits[0];
+    let wait_is_non_yaochu = !wait_tile.is_yaochu();
+    if !wait_is_non_yaochu {
+        return ReachTimingDiagnostic::non_furiten_heuristic_not_evaluated();
+    }
+
+    let reached_opponents = ctx.reached_opponents();
+    let high_open_hand_targets = high_open_hand_threat_players(open_hand_threats);
+    if !reached_opponents.is_empty() || !high_open_hand_targets.is_empty() {
+        return ReachTimingDiagnostic::non_furiten_heuristic_not_evaluated();
+    }
+
+    let safety = selection.action.as_ref().and_then(|selected_discard| {
+        reach_public_safety_after_discard(ctx, selected_discard, wait_tile)
+    });
+    let facts = NonFuritenBadWaitTimingFacts {
+        permanent_furiten: tenpai_wait.permanent_furiten(),
+        can_ron: tenpai_wait.can_ron(),
+        live_wait_type_count: tenpai_wait.live_waits.len(),
+        live_copies: tenpai_wait.tsumo_remaining,
+        wait_is_non_yaochu,
+        reach_genbutsu: safety.map(|safety| safety.genbutsu),
+        wall_rank: safety.and_then(|safety| safety.suited.map(|suited| suited.wall_rank)),
+        suji_rank: safety.and_then(|safety| safety.suited.map(|suited| suited.suji_rank)),
+        reached_opponent_count: reached_opponents.len(),
+        high_open_hand_target_count: high_open_hand_targets.len(),
+    };
+    if !evaluates_non_furiten_bad_wait_reach_timing(facts) {
+        return ReachTimingDiagnostic::non_furiten_heuristic_not_evaluated();
+    }
+
     let comparison = selected_tenpai_self_tsumo_comparison(ctx, evaluation, true);
-    decide_permanent_furiten_reach_timing(
+    decide_non_furiten_bad_wait_reach_timing(
         comparison.and_then(|comparison| comparison.reach_now),
         comparison.and_then(|comparison| comparison.defer_forced_reach()),
     )
@@ -1279,8 +1340,8 @@ pub(crate) mod tests {
     use crate::context::TableStateFacts;
     use crate::damaten_value::{DAMATEN_MIN_TOTAL, DamatenValue, damaten_baseline_context};
     use crate::defense::{
-        HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, honor_safety_rank,
-        is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
+        HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
+        honor_safety_rank, is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
         select_defense_fallback_action, suited_safety_rank_for_all_reached,
     };
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
@@ -8399,6 +8460,16 @@ pub(crate) mod tests {
     ];
     const TANKI_DRAW: &str = "3s";
 
+    // 123m 456m 789m 123p + 1s の 1s 単騎。么九牌 gate の regression。
+    const TERMINAL_TANKI_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "1s",
+    ];
+
+    // 114477m 225588p + 4s の七対子専用 4s 単騎。hand family では除外しない regression。
+    const CHIITOITSU_MIDDLE_TANKI_HAND: [&str; 13] = [
+        "1m", "1m", "4m", "4m", "7m", "7m", "2p", "2p", "5p", "5p", "8p", "8p", "4s",
+    ];
+
     // 2s を自分で切ってある恒常フリテンのシャンポン。生きた待ちは 2s 1枚 + 5s 2枚で、
     // base policy はリーチを選ぶ。
     fn furiten_shanpon_spec() -> ReachTimingSpec<'static> {
@@ -8502,9 +8573,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_non_furiten_tenpai_reaches_even_when_deferring_would_score_higher() {
-        // 非フリテンでは今リーチした最初の1巡からロン機会が生まれるが、nodocchi は Ron
-        // probability を持たない。counterfactual 上 defer が上回っても production は変えない。
+    fn a_non_furiten_bad_single_wait_defers_when_one_more_draw_scores_higher() {
+        // 既知局面: 打 3s → 4s 単騎3枚。非フリテンでも限定 structural gate をすべて満たし、
+        // counterfactual 上 defer が上回るため、今回は selected Dahai を行う。
         let case = ReachTimingSpec {
             hand: &TANKI_HAND,
             draw: TANKI_DRAW,
@@ -8518,15 +8589,154 @@ pub(crate) mod tests {
             .expect("self-tsumo 比較の材料が揃っている");
 
         assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert_eq!(reach.can_ron(), Some(true));
+        assert_eq!(reach.tsumo_type_count(), Some(1));
+        assert_eq!(reach.tsumo_remaining(), Some(3));
+        assert_eq!(reach.selected_discard, Some(case.tsumogiri.clone()));
         assert!(reach.base_selects_reach());
         assert!(
             comparison.defer_forced_reach() > comparison.reach_now,
             "{comparison:?}"
         );
 
-        // 対象外なので self-tsumo 比較の値も持たない。
+        let safety = reach_public_safety_after_discard(
+            &case.ctx,
+            reach.selected_discard.as_ref().expect("selected Dahai"),
+            reach.tenpai_wait.as_ref().expect("テンパイ").live_waits[0],
+        )
+        .expect("Reach public safety");
+        assert!(!safety.genbutsu);
+        let suited = safety.suited.expect("数牌の public safety");
+        assert_eq!(suited.wall_rank, WallRank::NoWall);
+        assert_eq!(suited.suji_rank, SujiSafetyRank::NoSuji);
+
+        assert_eq!(timing.decision, ReachTimingDecision::DeferReach);
+        assert_eq!(timing.reason, ReachTimingReason::NonFuritenBadWaitHeuristic);
+        assert_eq!(timing.reach_now, comparison.reach_now);
+        assert_eq!(timing.defer_forced_reach, comparison.defer_forced_reach());
+        assert!(reach.defers_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+        assert_eq!(
+            ShantenAgent::diagnose(&case.ctx, &case.actions).selected_source,
+            AgentActionSource::NormalDiscard
+        );
+    }
+
+    #[test]
+    fn an_ordinary_non_furiten_multi_wait_reaches_now() {
+        let case = ReachTimingSpec::default().build();
+        let reach = case.reach();
+        let timing = case.timing();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert_eq!(reach.can_ron(), Some(true));
+        assert!(reach.tsumo_type_count().is_some_and(|count| count > 1));
         assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
-        assert_eq!(timing.reason, ReachTimingReason::NotPermanentFuriten);
+        assert_eq!(
+            timing.reason,
+            ReachTimingReason::NonFuritenBadWaitHeuristicNotEligible
+        );
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn a_terminal_single_wait_is_not_eligible_for_the_non_furiten_heuristic() {
+        let case = ReachTimingSpec {
+            hand: &TERMINAL_TANKI_HAND,
+            ..ReachTimingSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+        let timing = case.timing();
+        let wait = reach.tenpai_wait.as_ref().expect("テンパイ").live_waits[0];
+
+        assert!(wait.is_yaochu());
+        assert_eq!(reach.tsumo_type_count(), Some(1));
+        assert!(reach.base_selects_reach());
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(
+            timing.reason,
+            ReachTimingReason::NonFuritenBadWaitHeuristicNotEligible
+        );
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn a_chiitoitsu_middle_tile_single_wait_is_not_excluded_by_hand_family() {
+        let mut case = ReachTimingSpec {
+            hand: &CHIITOITSU_MIDDLE_TANKI_HAND,
+            ..ReachTimingSpec::default()
+        }
+        .build();
+        // この regression は family gate だけを観測するため、ツモ切りで 4s 単騎を維持する合法手に
+        // 固定する。別の単騎へ移る通常 selector の優劣は対象外。
+        case.actions = vec![case.tsumogiri.clone(), LegalAction::Reach];
+        let reach = case.reach();
+        let timing = case.timing();
+        let wait = reach.tenpai_wait.as_ref().expect("テンパイ").live_waits[0];
+
+        assert!(!wait.is_yaochu());
+        assert_eq!(reach.tsumo_type_count(), Some(1));
+        assert!(reach.base_selects_reach());
+        // eligibility reason まで進むことで、七対子 family を除外していないことを保証する。
+        assert_eq!(timing.reason, ReachTimingReason::NonFuritenBadWaitHeuristic);
+        assert!(timing.reach_now.is_some());
+        assert!(timing.defer_forced_reach.is_some());
+    }
+
+    #[test]
+    fn a_non_furiten_single_wait_with_public_safety_reaches_now() {
+        // 自分の河の 1s により、Reach 後の 4s は片スジ。NoSuji ではないため self-tsumo
+        // comparison を production では評価せず、base Reach を維持する。
+        let case = ReachTimingSpec {
+            hand: &TANKI_HAND,
+            draw: TANKI_DRAW,
+            own_river: &["1s"],
+            ..ReachTimingSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+        let timing = case.timing();
+        let safety = reach_public_safety_after_discard(
+            &case.ctx,
+            reach.selected_discard.as_ref().expect("selected Dahai"),
+            reach.tenpai_wait.as_ref().expect("テンパイ").live_waits[0],
+        )
+        .expect("Reach public safety");
+
+        let suited = safety.suited.expect("数牌の public safety");
+        assert_eq!(suited.wall_rank, WallRank::NoWall);
+        assert_eq!(suited.suji_rank, SujiSafetyRank::HalfSuji);
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(
+            timing.reason,
+            ReachTimingReason::NonFuritenBadWaitHeuristicNotEligible
+        );
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn an_unknown_non_furiten_bad_wait_comparison_reaches_now() {
+        let case = ReachTimingSpec {
+            hand: &TANKI_HAND,
+            draw: TANKI_DRAW,
+            remaining_tiles: None,
+            ..ReachTimingSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+        let timing = case.timing();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert_eq!(reach.can_ron(), Some(true));
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(timing.reason, ReachTimingReason::SelfTsumoComparisonUnknown);
         assert_eq!(timing.reach_now, None);
         assert_eq!(timing.defer_forced_reach, None);
         assert_eq!(case.act(), LegalAction::Reach);

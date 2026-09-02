@@ -102,10 +102,11 @@
 //! threshold も持たない。
 //!
 //! production へ接続しているのは、選択済み1候補だけを評価する
-//! [`selected_tenpai_self_tsumo_comparison`] の経路だけである。恒常フリテンが確定した聴牌の
-//! リーチ timing ([`ReachTimingDecision`](crate::reach_policy::ReachTimingDecision)) が、
-//! `reach now` と `defer → forced Reach` の大小だけを見る。全合法 Dahai 候補の継続枝を
-//! production で構築することはない。
+//! [`selected_tenpai_self_tsumo_comparison`] の経路だけである。恒常フリテンが確定した聴牌と、
+//! structural gate をすべて満たす限定的な非フリテン悪形のリーチ timing
+//! ([`ReachTimingDecision`](crate::reach_policy::ReachTimingDecision)) が、`reach now` と
+//! `defer → forced Reach` の大小だけを見る。全合法 Dahai 候補の継続枝を production で構築する
+//! ことはない。
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,

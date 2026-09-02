@@ -33,13 +33,15 @@
 //! 待ってからリーチする」という production state ではない。判断材料に使う `1巡 defer` は
 //! counterfactual の評価 horizon であって、production action の約束ではない。
 //!
-//! production で timing を評価するのは恒常フリテンが確定した聴牌だけで
-//! ([`evaluates_reach_timing`])、比較そのものは既存 self-tsumo metric の大小だけを見る
-//! ([`decide_permanent_furiten_reach_timing`])。この層も待ち・打点・確率を計算しない。
+//! production で timing を評価するのは、恒常フリテンが確定した聴牌
+//! ([`evaluates_reach_timing`]) と、structural gate をすべて満たす非フリテン悪形の暫定 heuristic
+//! ([`evaluates_non_furiten_bad_wait_reach_timing`]) だけである。比較はどちらも既存 self-tsumo
+//! metric の大小だけを見る。この層も待ち・打点・確率を計算しない。
 
 use bot_logic::PermanentFuriten;
 
 use crate::damaten_value::DamatenValueVerdict;
+use crate::defense::{SujiSafetyRank, WallRank};
 
 /// リーチ宣言に必要な持ち点 [点]。inclusive。
 pub const REACH_MIN_SCORE: i32 = 1000;
@@ -184,12 +186,21 @@ pub enum ReachTimingDecision {
 pub enum ReachTimingReason {
     /// 恒常フリテンが確定していないので timing evaluation の対象外。base policy のままリーチする。
     NotPermanentFuriten,
-    /// 恒常フリテン聴牌だが、self-tsumo 比較のどちらかを確定できなかった。
+    /// timing evaluation の gate は通ったが、self-tsumo 比較のどちらかを確定できなかった。
     ///
     /// 比較不能を 0 点と混同せず、base policy のままリーチする。
     SelfTsumoComparisonUnknown,
     /// 恒常フリテン聴牌の self-tsumo 比較が確定した。決定はその大小そのもの。
     PermanentFuritenSelfTsumo,
+    /// 非フリテン悪形の暫定 heuristic の structural gate を満たさないため対象外。
+    ///
+    /// Ron probability を推定した結果ではなく、base policy のままリーチする。
+    NonFuritenBadWaitHeuristicNotEligible,
+    /// 非フリテン悪形の暫定 heuristic が対象にした self-tsumo 比較。決定はその大小そのもの。
+    ///
+    /// 非現物・壁なし・無スジは公開情報上の安全根拠が無いという structural gate にだけ使い、
+    /// ロン確率や数値係数には変換しない。
+    NonFuritenBadWaitHeuristic,
 }
 
 /// timing 判断とその材料。
@@ -217,6 +228,16 @@ impl ReachTimingDiagnostic {
         }
     }
 
+    /// 非フリテン悪形の暫定 heuristic の対象ではなかった局面の結果。
+    pub fn non_furiten_heuristic_not_evaluated() -> Self {
+        Self {
+            decision: ReachTimingDecision::ReachNow,
+            reason: ReachTimingReason::NonFuritenBadWaitHeuristicNotEligible,
+            reach_now: None,
+            defer_forced_reach: None,
+        }
+    }
+
     /// 今回はリーチを宣言しないか。
     pub fn defers_reach(&self) -> bool {
         matches!(self.decision, ReachTimingDecision::DeferReach)
@@ -226,11 +247,48 @@ impl ReachTimingDiagnostic {
 /// 恒常フリテン聴牌の timing evaluation を行う局面か。
 ///
 /// 恒常フリテンは既存の [`PermanentFuriten`] だけが source of truth で、
-/// [`PermanentFuriten::Unknown`] を恒常フリテンだと推測しない。非フリテン聴牌では今リーチすると
-/// 最初の1巡からロン機会が生まれるが、nodocchi は Ron probability を持たないため self-tsumo
-/// 比較だけで優劣を決めない。
+/// [`PermanentFuriten::Unknown`] を恒常フリテンだと推測しない。非フリテン聴牌のうち暫定
+/// structural heuristic の対象だけは、別の [`evaluates_non_furiten_bad_wait_reach_timing`] で
+/// 判定する。非フリテン全般を self-tsumo 比較へ入れるものではない。
 pub fn evaluates_reach_timing(permanent_furiten: PermanentFuriten, tsumo_remaining: u8) -> bool {
     permanent_furiten == PermanentFuriten::Yes && tsumo_remaining > 0
+}
+
+/// 非フリテン悪形へ timing evaluation を接続する暫定 heuristic の structural facts。
+///
+/// 待ち・残枚数・ロン可否は選択済み打牌後の既存値、public safety は Reach 宣言牌を河へ置いた
+/// 状態へ既存 Defense helper を適用した値、external threats は既存 classification の件数を
+/// 受け取る。この型は確率も safety の数値係数も持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonFuritenBadWaitTimingFacts {
+    pub permanent_furiten: PermanentFuriten,
+    pub can_ron: Option<bool>,
+    pub live_wait_type_count: usize,
+    pub live_copies: u8,
+    /// 既存 [`bot_logic::TileType::is_yaochu`] を反転した判定そのもの。
+    pub wait_is_non_yaochu: bool,
+    pub reach_genbutsu: Option<bool>,
+    pub wall_rank: Option<WallRank>,
+    pub suji_rank: Option<SujiSafetyRank>,
+    pub reached_opponent_count: usize,
+    pub high_open_hand_target_count: usize,
+}
+
+/// 非フリテン悪形の暫定 heuristic が selected wait を評価対象にするか。
+///
+/// 非現物・壁なし・無スジは「ロンされやすい」という確率的意味ではなく、Reach 後の public
+/// safety に既存の現物・壁・スジによる安全根拠が無いことだけを表す structural gate。
+pub fn evaluates_non_furiten_bad_wait_reach_timing(facts: NonFuritenBadWaitTimingFacts) -> bool {
+    facts.permanent_furiten == PermanentFuriten::No
+        && facts.can_ron == Some(true)
+        && facts.live_wait_type_count == 1
+        && (1..=3).contains(&facts.live_copies)
+        && facts.wait_is_non_yaochu
+        && facts.reach_genbutsu == Some(false)
+        && facts.wall_rank == Some(WallRank::NoWall)
+        && facts.suji_rank == Some(SujiSafetyRank::NoSuji)
+        && facts.reached_opponent_count == 0
+        && facts.high_open_hand_target_count == 0
 }
 
 /// 恒常フリテン聴牌の self-tsumo 比較から timing を決める。
@@ -243,15 +301,37 @@ pub fn decide_permanent_furiten_reach_timing(
     reach_now: Option<u64>,
     defer_forced_reach: Option<u64>,
 ) -> ReachTimingDiagnostic {
+    decide_self_tsumo_reach_timing(
+        ReachTimingReason::PermanentFuritenSelfTsumo,
+        reach_now,
+        defer_forced_reach,
+    )
+}
+
+/// 非フリテン悪形の暫定 heuristic で既存 self-tsumo 比較から timing を決める。
+///
+/// 比べるのは大小だけで、同値は ReachNow。点差・割合 threshold や Ron probability は持たない。
+pub fn decide_non_furiten_bad_wait_reach_timing(
+    reach_now: Option<u64>,
+    defer_forced_reach: Option<u64>,
+) -> ReachTimingDiagnostic {
+    decide_self_tsumo_reach_timing(
+        ReachTimingReason::NonFuritenBadWaitHeuristic,
+        reach_now,
+        defer_forced_reach,
+    )
+}
+
+fn decide_self_tsumo_reach_timing(
+    evaluated_reason: ReachTimingReason,
+    reach_now: Option<u64>,
+    defer_forced_reach: Option<u64>,
+) -> ReachTimingDiagnostic {
     let (decision, reason) = match (reach_now, defer_forced_reach) {
-        (Some(now), Some(defer)) if defer > now => (
-            ReachTimingDecision::DeferReach,
-            ReachTimingReason::PermanentFuritenSelfTsumo,
-        ),
-        (Some(_), Some(_)) => (
-            ReachTimingDecision::ReachNow,
-            ReachTimingReason::PermanentFuritenSelfTsumo,
-        ),
+        (Some(now), Some(defer)) if defer > now => {
+            (ReachTimingDecision::DeferReach, evaluated_reason)
+        }
+        (Some(_), Some(_)) => (ReachTimingDecision::ReachNow, evaluated_reason),
         _ => (
             ReachTimingDecision::ReachNow,
             ReachTimingReason::SelfTsumoComparisonUnknown,
@@ -386,6 +466,120 @@ mod tests {
         }
     }
 
+    fn non_furiten_bad_wait_facts() -> NonFuritenBadWaitTimingFacts {
+        NonFuritenBadWaitTimingFacts {
+            permanent_furiten: PermanentFuriten::No,
+            can_ron: Some(true),
+            live_wait_type_count: 1,
+            live_copies: 3,
+            wait_is_non_yaochu: true,
+            reach_genbutsu: Some(false),
+            wall_rank: Some(WallRank::NoWall),
+            suji_rank: Some(SujiSafetyRank::NoSuji),
+            reached_opponent_count: 0,
+            high_open_hand_target_count: 0,
+        }
+    }
+
+    #[test]
+    fn only_the_limited_non_furiten_bad_wait_evaluates_the_timing() {
+        assert!(evaluates_non_furiten_bad_wait_reach_timing(
+            non_furiten_bad_wait_facts()
+        ));
+
+        // 各 structural gate を1つずつ外す。壁・スジは既存 enum の生 facts を直接見る。
+        for facts in [
+            NonFuritenBadWaitTimingFacts {
+                permanent_furiten: PermanentFuriten::Yes,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                permanent_furiten: PermanentFuriten::Unknown,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                can_ron: Some(false),
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                can_ron: None,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                live_wait_type_count: 2,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                live_copies: 0,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                live_copies: 4,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                wait_is_non_yaochu: false,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                reached_opponent_count: 1,
+                ..non_furiten_bad_wait_facts()
+            },
+            NonFuritenBadWaitTimingFacts {
+                high_open_hand_target_count: 1,
+                ..non_furiten_bad_wait_facts()
+            },
+        ] {
+            assert!(
+                !evaluates_non_furiten_bad_wait_reach_timing(facts),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_non_furiten_bad_wait_requires_raw_no_wall_no_suji_non_genbutsu_evidence() {
+        let eligible = non_furiten_bad_wait_facts();
+        assert_eq!(eligible.reach_genbutsu, Some(false));
+        assert_eq!(eligible.wall_rank, Some(WallRank::NoWall));
+        assert_eq!(eligible.suji_rank, Some(SujiSafetyRank::NoSuji));
+        assert!(evaluates_non_furiten_bad_wait_reach_timing(eligible));
+
+        for facts in [
+            NonFuritenBadWaitTimingFacts {
+                reach_genbutsu: Some(true),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                wall_rank: Some(WallRank::OneChance),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                wall_rank: Some(WallRank::NoChance),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                suji_rank: Some(SujiSafetyRank::HalfSuji),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                suji_rank: Some(SujiSafetyRank::Suji),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                reach_genbutsu: None,
+                wall_rank: None,
+                suji_rank: None,
+                ..eligible
+            },
+        ] {
+            assert!(
+                !evaluates_non_furiten_bad_wait_reach_timing(facts),
+                "{facts:?}"
+            );
+        }
+    }
+
     #[test]
     fn only_a_strictly_higher_defer_value_defers_the_reach() {
         let defer = decide_permanent_furiten_reach_timing(Some(100), Some(101));
@@ -412,6 +606,27 @@ mod tests {
             assert_eq!(timing.reason, ReachTimingReason::SelfTsumoComparisonUnknown);
             assert_eq!(timing.reach_now, values.0);
             assert_eq!(timing.defer_forced_reach, values.1);
+        }
+    }
+
+    #[test]
+    fn the_non_furiten_bad_wait_heuristic_uses_only_strict_ordering() {
+        let defer = decide_non_furiten_bad_wait_reach_timing(Some(100), Some(101));
+        assert_eq!(defer.decision, ReachTimingDecision::DeferReach);
+        assert_eq!(defer.reason, ReachTimingReason::NonFuritenBadWaitHeuristic);
+
+        // 同値と defer 劣位は ReachNow。比率や点差 threshold は持たない。
+        for values in [(Some(100), Some(100)), (Some(100), Some(99))] {
+            let timing = decide_non_furiten_bad_wait_reach_timing(values.0, values.1);
+            assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+            assert_eq!(timing.reason, ReachTimingReason::NonFuritenBadWaitHeuristic);
+        }
+
+        // unknown は 0 と扱わず、base Reach を維持する。
+        for values in [(None, Some(100)), (Some(100), None), (None, None)] {
+            let timing = decide_non_furiten_bad_wait_reach_timing(values.0, values.1);
+            assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+            assert_eq!(timing.reason, ReachTimingReason::SelfTsumoComparisonUnknown);
         }
     }
 
