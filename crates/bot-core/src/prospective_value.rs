@@ -81,22 +81,21 @@
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
     DrawVariantLookaheadDiagnostic, FixedMeldCount, HandValueError, HandValueOutcome,
-    HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, Payment, ProspectiveTenpai,
-    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, RiichiStatus, TenpaiCompletedHands,
+    HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, Payment, PermanentFuriten,
+    ProspectiveTenpai, ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
     TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    WinMethod, WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
+    WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
     structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
     tenpai_wait_availability,
 };
 
 use crate::context::GameContext;
-use crate::damaten_value::{
-    BASELINE_REMAINING_LIVE_TILES, damaten_baseline_context, damaten_value_from_hands,
-};
+use crate::damaten_value::{damaten_baseline_context, damaten_value_from_hands};
 use crate::discard_selection::evaluation_fixed_meld_count;
 use crate::offense_value::{
-    BASELINE_CHANKAN, BASELINE_IPPATSU, BASELINE_RINSHAN, BASELINE_URA_DORA_INDICATORS,
-    OffenseValue, TenpaiOffenseMode, reach_baseline_context, variant_total, weighted_average,
+    BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode,
+    all_live_tsumo_variants_are_named_yakuman, reach_baseline_context, tsumo_scoring_inputs,
+    variant_total, weighted_average,
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 
@@ -430,8 +429,16 @@ impl<'a> ProductionProspectiveValuator<'a> {
                 let damaten_verdict = facts
                     .can_ron()
                     .then(|| damaten_value_from_hands(self.context, &facts.hands).verdict);
-                let reason =
-                    decide_reach_reason(self.reach_legal, damaten_verdict, facts.tsumo_remaining());
+                let named_yakuman_damaten = self.reach_legal
+                    && facts.tsumo_remaining() > 0
+                    && facts.permanent_furiten() == Some(PermanentFuriten::Yes)
+                    && all_live_tsumo_variants_are_named_yakuman(self.context, &facts.hands);
+                let reason = decide_reach_reason(
+                    self.reach_legal,
+                    named_yakuman_damaten,
+                    damaten_verdict,
+                    facts.tsumo_remaining(),
+                );
                 if reason.selects_reach() {
                     TenpaiOffenseMode::Reach
                 } else {
@@ -582,37 +589,6 @@ impl TsumoVariantOutcomes {
     }
 }
 
-/// ツモ和了だけを評価する hypothetical baseline。
-///
-/// ロン baseline ([`reach_baseline_context`] / [`damaten_baseline_context`]) を流用せず、
-/// [`WinMethod::Tsumo`] として組み立てる。門前ツモの1翻は既存の役判定が付けるので、この層で
-/// 翻を足さない。一発・海底・嶺上開花・槍槓のような未来の偶発要素は既存 baseline と同じ思想で
-/// 加えず、リーチの裏ドラも既存の最低保証 baseline (裏0) と揃える。
-///
-/// ダマ baseline はロンできるかに依らず使う。評価するのが自分のツモ和了だけなので、フリテンは
-/// 打点を確定できない理由にならない。攻撃モードそのものは production のリーチ判断
-/// ([`ProductionProspectiveValuator::offense_mode`]) が決めた結論をそのまま使う。
-fn tsumo_scoring_inputs(
-    context: &GameContext,
-    mode: TenpaiOffenseMode,
-) -> Option<(WinningContext, Option<&'static [TileId]>)> {
-    let riichi = match mode {
-        TenpaiOffenseMode::Reach => RiichiStatus::Riichi,
-        TenpaiOffenseMode::Damaten => RiichiStatus::NotDeclared,
-        TenpaiOffenseMode::Unknown => return None,
-    };
-    let baseline = WinningContext::new(WinMethod::Tsumo)
-        .with_round_wind(context.round_wind())
-        .with_seat_wind(context.seat_wind())
-        .with_riichi(riichi)
-        .with_ippatsu(Some(BASELINE_IPPATSU))
-        .with_chankan(Some(BASELINE_CHANKAN))
-        .with_rinshan(Some(BASELINE_RINSHAN))
-        .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES));
-    let ura_dora = matches!(mode, TenpaiOffenseMode::Reach).then_some(BASELINE_URA_DORA_INDICATORS);
-    Some((baseline, ura_dora))
-}
-
 /// 待ちごとの評価結果を、ツモ和了できる variant の残枚数と重み付き打点へ畳む。
 ///
 /// ツモ baseline で役が無い variant はその牌でツモ和了できないので、成功する待ちにも打点にも
@@ -657,6 +633,12 @@ impl ProspectiveFacts {
     // ダマ打点を確定値として使えるか。unknown はロンできると推測しない。
     fn can_ron(&self) -> bool {
         self.ron_availability() == Some(true)
+    }
+
+    fn permanent_furiten(&self) -> Option<PermanentFuriten> {
+        self.availability
+            .as_ref()
+            .map(TenpaiWaitAvailability::permanent_furiten)
     }
 
     // 生きた待ちの残枚数。既存の受け入れそのもので、リーチ判断の fallback へ渡す。

@@ -9,8 +9,8 @@ use bot_core::{
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
     ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
     PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
-    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
-    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    ReachDecisionDiagnostic, ReachDecisionReason, ReachPublicSafetyEvidence,
+    ReachRonBaselineDiagnostic, ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
     RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
     RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
@@ -4870,6 +4870,18 @@ mod tests {
         "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
+    // 1m を自分で切ってある恒常フリテンの13面待ち国士。全ての生きた
+    // Tsumo physical variant は既存 scoring で named 役満と確定する。
+    const PERMANENT_FURITEN_NAMED_YAKUMAN_SCENARIO: &str = r#"{
+        "hand": "19m 19p 19s 1234567z",
+        "draw": "5m",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "discards": ["1m", "", "", ""],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
     // 同じ単騎テンパイで 5s を1枚、北 を2枚見せた局面。打 北 の待ちは2枚に減る。
     const REACH_SCARCE_TANKI_WAIT_SCENARIO: &str = r#"{
         "hand": "123456789m123p5s",
@@ -5693,6 +5705,32 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("  damaten values: 6s=7700"), "{summary}");
+    }
+
+    #[test]
+    fn diagnostics_report_the_permanent_furiten_named_yakuman_reason() {
+        let (_, diagnostic, output) = rendered(PERMANENT_FURITEN_NAMED_YAKUMAN_SCENARIO, false);
+        let decision = diagnostic.reach.as_ref().expect("リーチを検討している");
+        let reach = section(&output, "Reach");
+        let summary = summary_section(&output);
+
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(action_label(&diagnostic.selected_action), "5m");
+        assert_eq!(decision.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert_eq!(decision.timing, None);
+        assert!(reach.contains("  base decision: no"), "{reach}");
+        assert!(
+            reach.contains("  base reason: NamedYakumanDamaten"),
+            "{reach}"
+        );
+        assert!(reach.contains("  permanent furiten: yes"), "{reach}");
+        assert!(reach.contains("  ron: no"), "{reach}");
+        assert!(!reach.contains("  timing"), "{reach}");
+        assert!(summary.contains("  reach: no"), "{summary}");
+        assert!(
+            summary.contains("  reach base reason: NamedYakumanDamaten"),
+            "{summary}"
+        );
     }
 
     #[test]

@@ -105,6 +105,9 @@ pub enum ReachDecisionReason {
     EligibleLowValue,
     /// 全ての生きた待ちがダマで役ありかつ threshold 以上なのでダマにする。
     HighValueDamaten,
+    /// 恒常フリテンで、全ての生きた Tsumo physical variant が named 役満と
+    /// 確定しているためダマにする。
+    NamedYakumanDamaten,
     /// 合法 action に [`LegalAction::Reach`](crate::action::LegalAction::Reach) が無い。
     NoLegalReach,
     /// 通常打牌 selection が打牌を選べていない。手牌や合法 Dahai が無い局面。
@@ -139,16 +142,26 @@ impl ReachDecisionReason {
 /// ロン可否が unknown・打牌後の手牌を組み立てられない) は `None` で、その場合は非フリテンだとも
 /// ダマ打点が十分だとも推測せず、待ち枚数だけを見る既存判断になる。
 ///
+/// `named_yakuman_damaten` は、恒常フリテンで全ての生きた Tsumo physical variant が
+/// existing scoring 上 named 役満と確定した場合だけ `true`。ダマ打点 threshold
+/// による [`ReachDecisionReason::HighValueDamaten`] とは別の categorical policy として先に
+/// 判断する。
+///
 /// `tsumo_remaining` は生きた待ちの残枚数。ダマ打点で結論が出る場合、待ち枚数の threshold
 /// ([`REACH_MIN_REMAINING`]) を先に適用してリーチを抑制しない。したがって1～2枚待ちでもダマが
 /// 安ければリーチする。
 pub fn decide_reach_reason(
     reach_legal: bool,
+    named_yakuman_damaten: bool,
     damaten_verdict: Option<DamatenValueVerdict>,
     tsumo_remaining: u8,
 ) -> ReachDecisionReason {
     if !reach_legal {
         return ReachDecisionReason::NoLegalReach;
+    }
+
+    if named_yakuman_damaten && tsumo_remaining > 0 {
+        return ReachDecisionReason::NamedYakumanDamaten;
     }
 
     match damaten_verdict {
@@ -409,7 +422,7 @@ mod tests {
             Some(DamatenValueVerdict::BelowThreshold),
             Some(DamatenValueVerdict::AboveThreshold),
         ] {
-            let reason = decide_reach_reason(false, verdict, 20);
+            let reason = decide_reach_reason(false, true, verdict, 20);
             assert_eq!(reason, ReachDecisionReason::NoLegalReach);
             assert!(!reason.selects_reach());
         }
@@ -419,19 +432,34 @@ mod tests {
     fn a_conclusive_damaten_verdict_ignores_the_live_wait_threshold() {
         for remaining in [0, 1, REACH_MIN_REMAINING, 20] {
             assert_eq!(
-                decide_reach_reason(true, Some(DamatenValueVerdict::NoYaku), remaining),
+                decide_reach_reason(true, false, Some(DamatenValueVerdict::NoYaku), remaining),
                 ReachDecisionReason::EligibleNoDamatenYaku
             );
             assert_eq!(
-                decide_reach_reason(true, Some(DamatenValueVerdict::BelowThreshold), remaining),
+                decide_reach_reason(
+                    true,
+                    false,
+                    Some(DamatenValueVerdict::BelowThreshold),
+                    remaining,
+                ),
                 ReachDecisionReason::EligibleLowValue
             );
             assert_eq!(
-                decide_reach_reason(true, Some(DamatenValueVerdict::AboveThreshold), remaining),
+                decide_reach_reason(
+                    true,
+                    false,
+                    Some(DamatenValueVerdict::AboveThreshold),
+                    remaining,
+                ),
                 ReachDecisionReason::HighValueDamaten
             );
             assert_eq!(
-                decide_reach_reason(true, Some(DamatenValueVerdict::NoLiveWait), remaining),
+                decide_reach_reason(
+                    true,
+                    false,
+                    Some(DamatenValueVerdict::NoLiveWait),
+                    remaining,
+                ),
                 ReachDecisionReason::NoLiveWait
             );
         }
@@ -441,14 +469,34 @@ mod tests {
     fn an_indeterminate_damaten_value_falls_back_to_the_live_wait_threshold() {
         for verdict in [None, Some(DamatenValueVerdict::Indeterminate)] {
             assert_eq!(
-                decide_reach_reason(true, verdict, REACH_MIN_REMAINING),
+                decide_reach_reason(true, false, verdict, REACH_MIN_REMAINING),
                 ReachDecisionReason::Eligible
             );
             assert_eq!(
-                decide_reach_reason(true, verdict, REACH_MIN_REMAINING - 1),
+                decide_reach_reason(true, false, verdict, REACH_MIN_REMAINING - 1),
                 ReachDecisionReason::InsufficientLiveWait
             );
         }
+    }
+
+    #[test]
+    fn a_confirmed_named_yakuman_damaten_precedes_the_value_policy() {
+        for verdict in [
+            None,
+            Some(DamatenValueVerdict::NoYaku),
+            Some(DamatenValueVerdict::BelowThreshold),
+            Some(DamatenValueVerdict::AboveThreshold),
+        ] {
+            assert_eq!(
+                decide_reach_reason(true, true, verdict, 1),
+                ReachDecisionReason::NamedYakumanDamaten
+            );
+        }
+
+        assert_eq!(
+            decide_reach_reason(true, true, None, 0),
+            ReachDecisionReason::InsufficientLiveWait
+        );
     }
 
     #[test]
@@ -653,6 +701,7 @@ mod tests {
 
         for reason in [
             ReachDecisionReason::HighValueDamaten,
+            ReachDecisionReason::NamedYakumanDamaten,
             ReachDecisionReason::NoLegalReach,
             ReachDecisionReason::NoSelectedDiscard,
             ReachDecisionReason::NotTenpai,

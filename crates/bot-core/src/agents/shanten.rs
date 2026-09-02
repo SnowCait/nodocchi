@@ -18,6 +18,7 @@ use crate::discard_selection::{
     DiscardActionSelection, LookaheadDiagnosticScope, select_discard_action_with_diagnostic,
     select_discard_action_with_evaluation, selected_discard_tenpai_wait_availability,
 };
+use crate::offense_value::all_live_tsumo_variants_are_named_yakuman;
 use crate::open_hand_defense::{
     OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
     evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
@@ -1132,9 +1133,10 @@ struct ReachDecision {
 // ときの攻撃モードもそこを共有する。ここでは合法 Reach と打牌後テンパイを確認して結論を載せる
 // だけにする。
 //
-// フリテン・ロン可否 unknown・ダマ打点を確定できない場合は、非フリテンだともダマ打点が十分だとも
-// 推測せず、待ち枚数だけを見る既存判断を維持する。
-// TODO: フリテン専用のリーチ policy を決める。
+// 恒常フリテンで全生き Tsumo physical variant が named 役満と確定する場合だけは、
+// ダマ打点 threshold と分けた categorical policy でダマを選ぶ。それ以外のフリテン・ロン可否
+// unknown・ダマ打点を確定できない場合は、非フリテンだともダマ打点が十分だとも推測せず、
+// 待ち枚数だけを見る既存判断を維持する。
 fn decide_reach(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
@@ -1195,14 +1197,15 @@ fn decide_reach(
         };
     };
 
-    // ダマでロンできると確定した場合だけダマ打点を評価する。フリテンとロン可否 unknown では
-    // 評価そのものを行わず、既存判断へ委ねる。現在聴牌比較が評価済みならその結論をそのまま使う。
+    // ダマでロンできると確定した場合だけダマ打点を評価する。恒常フリテンでは、
+    // 全生き Tsumo variant が named 役満かを確定する場合に限り、同じ完成手を組み立てる。
+    // それ以外のフリテンとロン可否 unknown ではダマ打点評価を行わず、既存判断へ委ねる。
+    // 現在聴牌比較がダマ打点を評価済みならその結論をそのまま使う。
     //
-    // 完成手を組み立てるのは、この経路で実際にダマ打点を評価する場合だけ。組み立てた集合は
-    // 統合診断のリーチ Ron baseline へそのまま渡せるよう返すが、そのために組み立てる条件を
-    // 増やさない。
     let can_ron = tenpai_wait.can_ron() == Some(true);
-    let hands = (can_ron && selection.damaten_value.is_none())
+    let evaluates_named_yakuman =
+        tenpai_wait.tsumo_remaining > 0 && tenpai_wait.permanent_furiten() == PermanentFuriten::Yes;
+    let hands = ((can_ron && selection.damaten_value.is_none()) || evaluates_named_yakuman)
         .then(|| tenpai_completed_hands_after_discard(ctx, evaluation, &tenpai_wait))
         .flatten();
     let damaten_value = can_ron
@@ -1214,11 +1217,16 @@ fn decide_reach(
             })
         })
         .flatten();
+    let named_yakuman_damaten = evaluates_named_yakuman
+        && hands
+            .as_ref()
+            .is_some_and(|hands| all_live_tsumo_variants_are_named_yakuman(ctx, hands));
 
     // 待ち枚数は既存受け入れそのもので、visible tiles の反映も打牌評価の時点で済んでいる。
     // リーチ / ダマの条件そのものは押し引きの攻撃打点と共有し、ここで書き直さない。
     let reason = decide_reach_reason(
         true,
+        named_yakuman_damaten,
         damaten_value.as_ref().map(|value| value.verdict),
         tenpai_wait.tsumo_remaining,
     );
@@ -2173,11 +2181,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stays_damaten_on_a_named_yakuman() {
-        // 名前の付いた役満はダマにする。13面待ちでも全ての待ちが役満なので判断は変わらない。
+    fn a_non_furiten_named_yakuman_keeps_the_high_value_damaten_reason() {
+        // 非フリテンの named 役満は従来どおりダマ打点 threshold でダマにする。
+        // 13面待ちでも全ての待ちが役満なので判断は変わらない。
         let case = damaten_case(&KOKUSHI_HAND, "5m", &[]);
         let reach = case.reach();
 
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
         assert_eq!(case.damaten_totals().len(), 13);
         assert!(
             case.damaten_values()
@@ -2187,6 +2197,34 @@ pub(crate) mod tests {
         assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
         assert!(!reach.should_reach());
         assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn a_permanent_furiten_named_yakuman_stays_damaten_without_timing_evaluation() {
+        // 1m を自分の河に置いた13面待ち国士。Ron はできないが、全生き Tsumo
+        // physical variant が既存 scoring で named 役満と確定するため、base policy 自体が
+        // 専用 reason でダマを選び、Reach timing へは進まない。
+        let case = damaten_case_with(&KOKUSHI_HAND, "5m", &[], &[], &["1m"]);
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.can_ron(), Some(false));
+        assert!(
+            reach
+                .tsumo_remaining()
+                .is_some_and(|remaining| remaining > 0)
+        );
+        assert_eq!(reach.damaten_value, None);
+        assert_eq!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert!(!reach.base_selects_reach());
+        assert!(!reach.should_reach());
+        assert_eq!(reach.selected, None);
+        assert_eq!(reach.timing, None);
+        assert_eq!(case.act(), case.tsumogiri);
+        assert_eq!(
+            ShantenAgent::diagnose(&case.ctx, &case.actions).selected_source,
+            AgentActionSource::NormalDiscard
+        );
     }
 
     #[test]

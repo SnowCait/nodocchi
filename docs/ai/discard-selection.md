@@ -227,7 +227,24 @@ ReachDecisionReason    Reach か Damaten かを決める base policy
 ReachTimingDecision    base policy が Reach の場合に、そのリーチを今回宣言するか
 ```
 
-`ReachTimingDecision` は base policy がリーチを選んだ場合だけ適用します。base policy がダマを選んだ聴牌 (`HighValueDamaten` など)、リーチが合法でない局面、打牌後がテンパイでない局面では timing 判断そのものを行わず (`timing` は `None`)、`ReachTimingDecision` に `Damaten` は含まれません。base の `reason` を timing の理由で上書きすることもありません。
+base policy でダマを選ぶ主な reason の責務は次のように分かれます。
+
+```text
+HighValueDamaten
+  = ダマ Ron 打点が DAMATEN_MIN_TOTAL 以上かを見る threshold heuristic
+
+NamedYakumanDamaten
+  = PermanentFuriten::Yes で、全ての生きた Tsumo physical variant が
+    既存 scoring で named 役満と確定した場合の categorical policy
+```
+
+`NamedYakumanDamaten` は `TenpaiCompletedHands` と既存 Tsumo baseline を
+`evaluate_tenpai_hand_value()` で評価し、各 live variant の `HandValue::is_yakuman()` が全て
+`true` の場合だけ選びます。一部でも unknown または named 役満でない variant が
+あれば従来 policy へ fallback します。点数 threshold から役満と推測せず、数え役満もこの
+特例に含めません。非フリテンでは従来どおり `HighValueDamaten` のみが適用されます。
+
+`ReachTimingDecision` は base policy がリーチを選んだ場合だけ適用します。base policy がダマを選んだ聴牌 (`HighValueDamaten` / `NamedYakumanDamaten` など)、リーチが合法でない局面、打牌後がテンパイでない局面では timing 判断そのものを行わず (`timing` は `None`)、`ReachTimingDecision` に `Damaten` は含まれません。base の `reason` を timing の理由で上書きすることもありません。
 
 `DeferReach` の意味は次の1つだけです。
 

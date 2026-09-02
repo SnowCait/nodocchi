@@ -57,7 +57,7 @@
 //! 落ちても同じく [`OffenseValue::Unknown`] にし、ロンできないことを0点として扱わない。
 
 use bot_logic::{
-    DiscardEvaluation, HandValue, Payment, RiichiStatus, TenpaiCompletedHands,
+    DiscardEvaluation, HandValue, Payment, PermanentFuriten, RiichiStatus, TenpaiCompletedHands,
     TenpaiHandValueProfile, TenpaiWaitAvailability, TileId, TileType, WinMethod, WinningContext,
     evaluate_tenpai_hand_value,
 };
@@ -174,6 +174,71 @@ pub fn reach_baseline_context(context: &GameContext) -> WinningContext {
         .with_ippatsu(Some(BASELINE_IPPATSU))
         .with_chankan(Some(BASELINE_CHANKAN))
         .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES))
+}
+
+/// Tsumo 打点用の hypothetical baseline と裏ドラ表示牌を組み立てる。
+///
+/// 門前ツモの1翻は既存の役判定が付ける。一発・海底・嶺上開花・槍槓のような
+/// 未来の偶発要素は加えず、Reach 時の裏ドラも既存の最低保証 baseline (裏0) と
+/// 揃える。フリテンでも自分の Tsumo 和了は評価できるため、ロン可否は入力にしない。
+pub(crate) fn tsumo_scoring_inputs(
+    context: &GameContext,
+    mode: TenpaiOffenseMode,
+) -> Option<(WinningContext, Option<&'static [TileId]>)> {
+    let riichi = match mode {
+        TenpaiOffenseMode::Reach => RiichiStatus::Riichi,
+        TenpaiOffenseMode::Damaten => RiichiStatus::NotDeclared,
+        TenpaiOffenseMode::Unknown => return None,
+    };
+    let baseline = WinningContext::new(WinMethod::Tsumo)
+        .with_round_wind(context.round_wind())
+        .with_seat_wind(context.seat_wind())
+        .with_riichi(riichi)
+        .with_ippatsu(Some(BASELINE_IPPATSU))
+        .with_chankan(Some(BASELINE_CHANKAN))
+        .with_rinshan(Some(BASELINE_RINSHAN))
+        .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES));
+    let ura_dora = matches!(mode, TenpaiOffenseMode::Reach).then_some(BASELINE_URA_DORA_INDICATORS);
+    Some((baseline, ura_dora))
+}
+
+/// 全ての生きた Tsumo physical variant が named 役満と確定しているか。
+///
+/// 役満判定は既存 scoring の [`HandValue::is_yakuman`] だけを source of truth とする。
+/// 数え役満は `HandValue::Normal` のため対象にならない。生きた variant が1つでも
+/// unknown または named 役満でなければ `false`。
+pub(crate) fn all_live_tsumo_variants_are_named_yakuman(
+    context: &GameContext,
+    hands: &TenpaiCompletedHands,
+) -> bool {
+    let Some((baseline, ura_dora)) = tsumo_scoring_inputs(context, TenpaiOffenseMode::Damaten)
+    else {
+        return false;
+    };
+    let profile = evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
+
+    all_live_variants_are_named_yakuman(profile.waits().iter().flat_map(|wait| {
+        wait.winning_tiles().iter().map(|variant| {
+            (
+                variant.remaining(),
+                variant.known().map(HandValue::is_yakuman),
+            )
+        })
+    }))
+}
+
+fn all_live_variants_are_named_yakuman(variants: impl Iterator<Item = (u8, Option<bool>)>) -> bool {
+    let mut saw_live_variant = false;
+    for (remaining, is_yakuman) in variants {
+        if remaining == 0 {
+            continue;
+        }
+        saw_live_variant = true;
+        if is_yakuman != Some(true) {
+            return false;
+        }
+    }
+    saw_live_variant
 }
 
 /// 和了牌の物理牌1つ分の forced Reach Ron baseline 打点。
@@ -316,6 +381,7 @@ pub(crate) fn evaluate_tenpai_offense(
         context,
         wait_availability,
         legal_actions,
+        hands.as_ref(),
         damaten_value.as_ref().map(|value| value.verdict),
     );
 
@@ -346,6 +412,7 @@ fn offense_mode(
     context: &GameContext,
     wait_availability: &TenpaiWaitAvailability,
     legal_actions: &[LegalAction],
+    hands: Option<&TenpaiCompletedHands>,
     damaten_verdict: Option<crate::damaten_value::DamatenValueVerdict>,
 ) -> TenpaiOffenseMode {
     match context.own_reached() {
@@ -355,9 +422,15 @@ fn offense_mode(
             let reach_legal = legal_actions
                 .iter()
                 .any(|action| matches!(action, LegalAction::Reach));
+            let named_yakuman_damaten = reach_legal
+                && wait_availability.tsumo_remaining > 0
+                && wait_availability.permanent_furiten() == PermanentFuriten::Yes
+                && hands
+                    .is_some_and(|hands| all_live_tsumo_variants_are_named_yakuman(context, hands));
 
             let reason = decide_reach_reason(
                 reach_legal,
+                named_yakuman_damaten,
                 damaten_verdict,
                 wait_availability.tsumo_remaining,
             );
@@ -454,6 +527,29 @@ mod tests {
 
     fn average(variants: &[(Option<u32>, u8)]) -> OffenseValue {
         weighted_average(variants.iter().copied())
+    }
+
+    fn all_named_yakuman(variants: &[(u8, Option<bool>)]) -> bool {
+        all_live_variants_are_named_yakuman(variants.iter().copied())
+    }
+
+    #[test]
+    fn every_live_tsumo_variant_must_be_a_confirmed_named_yakuman() {
+        assert!(all_named_yakuman(&[
+            (1, Some(true)),
+            (3, Some(true)),
+            // 残枚数0の physical variant は判定対象ではない。
+            (0, None),
+        ]));
+
+        // 一部 unknown、全て unknown、一部だけ named 役満のどれも推測しない。
+        assert!(!all_named_yakuman(&[(1, Some(true)), (1, None)]));
+        assert!(!all_named_yakuman(&[(1, None), (2, None)]));
+        assert!(!all_named_yakuman(&[(1, Some(true)), (1, Some(false))]));
+
+        // live variant が無い場合も対象外。
+        assert!(!all_named_yakuman(&[]));
+        assert!(!all_named_yakuman(&[(0, Some(true))]));
     }
 
     #[test]
