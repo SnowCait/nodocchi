@@ -9,10 +9,12 @@ use bot_core::{
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
     ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
     PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
-    ReachDecisionDiagnostic, ReachRonBaselineDiagnostic, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
-    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
-    TenpaiOffenseValue, TenpaiSelfTsumoComparison, ThreatDefenseTarget,
+    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
+    RonOpportunityDiagnostic, RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic,
+    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic,
+    StrongTenpaiRequirement, TenpaiContinuationBranch, TenpaiContinuationCandidate,
+    TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
+    ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -1593,7 +1595,101 @@ fn format_comparison_ron(comparison: &ReachDamatenComparisonDiagnostic) -> Vec<S
     lines.extend(format_damaten_ron_baseline(
         comparison.damaten_ron_value.as_ref(),
     ));
+    lines.extend(format_ron_opportunity(comparison.ron_opportunity.as_ref()));
     lines
+}
+
+// 待ちが公開情報上どう見えるかの structural facts。ロン確率でも放銃率でもなく、既存 Defense
+// helper の観測値そのままを並べる。
+//
+// 実際にロンできない局面 (フリテン・ロン可否 unknown) では診断が構築されないので、0 として
+// 扱わず評価していないことだけを出す。
+fn format_ron_opportunity(opportunity: Option<&RonOpportunityDiagnostic>) -> Vec<String> {
+    let Some(opportunity) = opportunity else {
+        return vec![format!("    opportunity: {UNAVAILABLE}")];
+    };
+
+    let mut lines = vec!["    opportunity (structural facts, no ron probability)".to_string()];
+    if opportunity.waits.is_empty() {
+        lines.push(format!("      waits: {NONE}"));
+    }
+    for wait in &opportunity.waits {
+        lines.extend(format_ron_opportunity_wait(wait));
+    }
+    lines.extend(format_ron_opportunity_external_threats(
+        &opportunity.external_threats,
+    ));
+    lines
+}
+
+// 生きている待ち牌1種。赤5 / 黒5は同じ牌種として1件にまとめる。
+fn format_ron_opportunity_wait(wait: &RonOpportunityWaitDiagnostic) -> Vec<String> {
+    let mut lines = vec![
+        format!("      wait {}", wait.tile.to_mjai_string()),
+        format!("        live copies: {}", wait.live_copies),
+    ];
+    lines.extend(format_reach_public_safety(
+        wait.reach_public_safety.as_ref(),
+    ));
+    lines.push("        if Damaten".to_string());
+    lines.push(format!(
+        "          declaration visible: {}",
+        yes_no(wait.damaten_declaration_visible)
+    ));
+    lines
+}
+
+// リーチを宣言した場合の公開 safety evidence。リーチが合法でない局面では評価しない。
+fn format_reach_public_safety(safety: Option<&ReachPublicSafetyEvidence>) -> Vec<String> {
+    let Some(safety) = safety else {
+        return vec![format!("        if Reach: {UNAVAILABLE}")];
+    };
+
+    let mut lines = vec![
+        "        if Reach".to_string(),
+        format!(
+            "          declaration visible: {}",
+            yes_no(safety.declaration_visible)
+        ),
+        format!("          genbutsu: {}", yes_no(safety.genbutsu)),
+    ];
+    if let Some(suited) = safety.suited {
+        lines.push("          suited safety".to_string());
+        lines.push(format!("            suji: {:?}", suited.suji_rank));
+        lines.push(format!("            wall: {:?}", suited.wall_rank));
+        lines.push(format!("            combined: {:?}", suited.legacy_rank()));
+    }
+    if let Some(honor) = safety.honor {
+        lines.push("          honor safety".to_string());
+        lines.push(format!("            rank: {:?}", honor.rank));
+        lines.push(format!("            visible: {}", honor.visible_count));
+    }
+    lines
+}
+
+// 他家 threat の存在。既存 classification の観測値そのもので、確率へは変換しない。
+fn format_ron_opportunity_external_threats(threats: &RonOpportunityExternalThreats) -> Vec<String> {
+    vec![
+        "      external threats".to_string(),
+        format!(
+            "        reached opponents: {}",
+            format_threat_players(&threats.reached_opponents)
+        ),
+        format!(
+            "        high open-hand targets: {}",
+            format_threat_players(&threats.high_open_hand_targets)
+        ),
+    ]
+}
+
+// 席数と、0 人でない場合はその席番号。数と席番号を取り違えないよう別に書く。
+fn format_threat_players(players: &[usize]) -> String {
+    if players.is_empty() {
+        return players.len().to_string();
+    }
+
+    let ids: Vec<String> = players.iter().map(usize::to_string).collect();
+    format!("{} (players {})", players.len(), ids.join(", "))
 }
 
 // リーチしてロン和了した場合の最低保証打点。リーチ1翻を含み、一発・裏ドラ・河底は含まない。
@@ -5911,6 +6007,146 @@ mod tests {
         );
     }
 
+    // 南単騎の門前テンパイ。待ちが字牌1種なので字牌 safety を表示する。
+    const HONOR_WAIT_SCENARIO: &str = r#"{
+        "hand": "123456789m 123p E",
+        "draw": "S",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "legal_dahai": "E",
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
+    #[test]
+    fn the_comparison_section_shows_the_structural_ron_opportunity() {
+        // 待ちが公開情報上どう見えるかの structural facts。ロン確率でも放銃率でもない。
+        let (_, diagnostic, output) = rendered(DAMATEN_LOW_VALUE_SCENARIO, false);
+        let comparison = section(&output, "Reach / Damaten comparison");
+        let opportunity = diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .and_then(|facts| facts.ron_opportunity.as_ref())
+            .expect("Ron opportunity がある");
+
+        assert!(
+            comparison.contains(
+                &[
+                    "    opportunity (structural facts, no ron probability)",
+                    "      wait 6s",
+                    "        live copies: 4",
+                    "        if Reach",
+                    "          declaration visible: yes",
+                    "          genbutsu: no",
+                    "          suited safety",
+                    "            suji: NoSuji",
+                    "            wall: NoWall",
+                    "            combined: NoSafety",
+                    "        if Damaten",
+                    "          declaration visible: no",
+                    "      external threats",
+                    "        reached opponents: 0",
+                    "        high open-hand targets: 0",
+                ]
+                .join("\n")
+            ),
+            "{comparison}"
+        );
+
+        // 表示は診断が持つ値そのもの。
+        assert_eq!(
+            opportunity
+                .waits
+                .iter()
+                .map(|wait| (wait.tile.to_mjai_string(), wait.live_copies))
+                .collect::<Vec<_>>(),
+            [("6s".to_string(), 4)]
+        );
+        // 確率も score も表示しない。
+        assert!(!comparison.contains("probability:"), "{comparison}");
+        assert!(!comparison.contains("ron risk"), "{comparison}");
+    }
+
+    #[test]
+    fn the_comparison_section_shows_the_honor_safety_of_an_honor_wait() {
+        let (_, _, output) = rendered(HONOR_WAIT_SCENARIO, false);
+        let comparison = section(&output, "Reach / Damaten comparison");
+
+        assert!(
+            comparison.contains(
+                &[
+                    "      wait S",
+                    "        live copies: 3",
+                    "        if Reach",
+                    "          declaration visible: yes",
+                    "          genbutsu: no",
+                    "          honor safety",
+                    "            rank: OneVisible",
+                    "            visible: 1",
+                ]
+                .join("\n")
+            ),
+            "{comparison}"
+        );
+        assert!(!comparison.contains("suited safety"), "{comparison}");
+    }
+
+    #[test]
+    fn the_comparison_section_keeps_the_ron_opportunity_unavailable_without_ron() {
+        // フリテンとロン可否 unknown では、ロン不能な待ちを確率候補のように並べない。
+        let furiten_rendered = rendered_with_lookahead_diagnostic(
+            r#"{
+                "hand": "234567789m345p10s",
+                "round_wind": "E",
+                "player_id": 0,
+                "oya": 1,
+                "remaining_tiles": 70,
+                "discards": ["1s 5s", "", "", ""],
+                "legal_dahai": "1s",
+                "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+            }"#,
+            false,
+        );
+        let furiten = section(&furiten_rendered.rendered, "Reach / Damaten comparison");
+
+        assert_eq!(
+            furiten_rendered
+                .diagnostic
+                .reach_damaten_comparison
+                .as_ref()
+                .and_then(|facts| facts.ron_opportunity.as_ref()),
+            None
+        );
+        assert!(furiten.contains("    can ron: no"), "{furiten}");
+        assert!(
+            furiten.contains(&format!("    opportunity: {UNAVAILABLE}")),
+            "{furiten}"
+        );
+
+        let (_, _, output) = rendered(REACH_SCENARIO, false);
+        let unknown = section(&output, "Reach / Damaten comparison");
+
+        assert!(unknown.contains("    can ron: unknown"), "{unknown}");
+        assert!(
+            unknown.contains(&format!("    opportunity: {UNAVAILABLE}")),
+            "{unknown}"
+        );
+    }
+
+    #[test]
+    fn the_tenpai_continuation_section_does_not_repeat_the_ron_opportunity() {
+        // 同じ structural facts を継続診断の枝ごとに重複表示しない。
+        let output = rendered_with_lookahead(LOOKAHEAD_SCENARIO, true);
+
+        for header in ["Tenpai continuation", "Lookahead"] {
+            let Some(block) = output.split("\n\n").find(|block| block.starts_with(header)) else {
+                continue;
+            };
+            assert!(!block.contains("declaration visible"), "{block}");
+            assert!(!block.contains("live copies"), "{block}");
+        }
+    }
+
     #[test]
     fn the_comparison_section_is_not_evaluated_outside_push() {
         // 防御局面 (Fold) ではリーチを検討しないので、統合診断も作らない。
@@ -5932,6 +6168,8 @@ mod tests {
         assert!(!summary.contains("reach baseline"), "{summary}");
         assert!(!summary.contains("damaten baseline"), "{summary}");
         assert!(!summary.contains("self-tsumo"), "{summary}");
+        assert!(!summary.contains("opportunity"), "{summary}");
+        assert!(!summary.contains("declaration visible"), "{summary}");
     }
 
     #[test]

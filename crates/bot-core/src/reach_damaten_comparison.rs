@@ -55,8 +55,17 @@
 //! ダマでロンできない / ロン可否が unknown の場合、ダマ Ron 打点は既存 semantics どおり評価
 //! しないまま (`None`) にする。0 点として扱わない。ロンできないことは Tsumo 側の軸とは独立
 //! なので、self-tsumo の値を Ron 可否で潰すこともしない。
+//!
+//! # Ron opportunity
+//!
+//! Ron 側の baseline は「和了した場合の支払い」だけで、他家が待ち牌を切る確率を持たない。その
+//! 前段として、待ちが公開情報上どう見えるかの structural facts を
+//! [`RonOpportunityDiagnostic`](crate::ron_opportunity::RonOpportunityDiagnostic) が持つ。確率
+//! ではないので、Ron baseline と掛け合わせた EV もここでは作らない。
 
-use bot_logic::{DiscardEvaluation, TenpaiCompletedHands, TenpaiWaitAvailability, TileType};
+use bot_logic::{
+    DiscardEvaluation, EffectiveAcceptance, TenpaiCompletedHands, TenpaiWaitAvailability, TileType,
+};
 
 use crate::action::LegalAction;
 use crate::agents::{ReachDecisionDiagnostic, ReachDecisionReason};
@@ -67,6 +76,10 @@ use crate::damaten_value::{
 };
 use crate::discard_selection::{DiscardActionSelection, selected_discard_tenpai_wait_availability};
 use crate::offense_value::{ReachRonBaselineDiagnostic, reach_ron_baseline_from_hands};
+use crate::open_hand_threat::OpenHandThreatAssessment;
+use crate::ron_opportunity::{
+    RonOpportunityDiagnostic, RonOpportunityInputs, diagnose_ron_opportunity,
+};
 use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, TenpaiSelfTsumoComparison};
 
 // テンパイの向聴数。
@@ -108,6 +121,11 @@ pub struct ReachDamatenComparisonDiagnostic {
     /// ダマでロンできない場合とロン可否が unknown の場合は既存 semantics どおり評価しないので
     /// `None`。0 点として扱わない。
     pub damaten_ron_value: Option<DamatenValueDiagnostic>,
+    /// 現在の待ちが公開情報上どう見えるかの structural facts。ロン確率ではない。
+    ///
+    /// 実際にロンできる (`can_ron() == Some(true)`) 局面だけで構築し、フリテンとロン可否 unknown
+    /// では 0 として扱わず `None` (unavailable) にする。
+    pub ron_opportunity: Option<RonOpportunityDiagnostic>,
 }
 
 impl ReachDamatenComparisonDiagnostic {
@@ -171,6 +189,10 @@ pub(crate) struct ReachDamatenComparisonInputs<'a> {
     pub hands: Option<TenpaiCompletedHands>,
     /// 現在聴牌のダマ継続診断。2手先探索を要求していない局面では `None`。
     pub continuation: Option<&'a TenpaiContinuationDiagnostic>,
+    /// 押し引きが既に構築した全4席分の OpenHandThreat classification。
+    ///
+    /// Ron opportunity の external threats がそのまま借りる。診断のために分類し直さない。
+    pub open_hand_threats: &'a [OpenHandThreatAssessment; 4],
 }
 
 /// production 判断と既存診断から、Reach / Damaten の判断材料を1つの診断へまとめる。
@@ -187,6 +209,7 @@ pub(crate) fn diagnose_reach_damaten_comparison(
         selection,
         hands,
         continuation,
+        open_hand_threats,
     } = inputs;
     let tenpai = selected_tenpai(context, reach, selection, hands);
 
@@ -206,6 +229,16 @@ pub(crate) fn diagnose_reach_damaten_comparison(
         damaten_ron_value: tenpai
             .as_ref()
             .and_then(|tenpai| damaten_ron_value(context, reach, selection, tenpai)),
+        ron_opportunity: tenpai.as_ref().and_then(|tenpai| {
+            diagnose_ron_opportunity(RonOpportunityInputs {
+                context,
+                reach_legal,
+                wait: &tenpai.wait,
+                acceptance: tenpai.acceptance,
+                selected_discard: reach.selected_discard.as_ref(),
+                open_hand_threats,
+            })
+        }),
     }
 }
 
@@ -219,9 +252,11 @@ fn selected_discard_self_tsumo(
 }
 
 // 選んだ打牌後のテンパイの待ちと完成手。Ron 側の2つの baseline はこの1組を共有する。
-struct SelectedTenpai {
+struct SelectedTenpai<'a> {
     wait: TenpaiWaitAvailability,
     hands: TenpaiCompletedHands,
+    // 打牌後の受け入れ。待ち牌種ごとの残枚数の source of truth で、借用するだけで複製しない。
+    acceptance: &'a EffectiveAcceptance,
 }
 
 // 選んだ打牌後のテンパイを、既に計算済みの値から組み立てる。
@@ -235,12 +270,12 @@ struct SelectedTenpai {
 // 診断のために production 側へ完成手の deep clone を持ち回るより、必要な診断でだけ1回組み立てる
 // 方を選ぶ。待ちは既存の受け入れ (`acceptance_after_discard`) から求めるので、向聴も受け入れも
 // ここで計算し直すことにはならない。
-fn selected_tenpai(
+fn selected_tenpai<'a>(
     context: &GameContext,
     reach: &ReachDecisionDiagnostic,
-    selection: &DiscardActionSelection,
+    selection: &'a DiscardActionSelection,
     hands: Option<TenpaiCompletedHands>,
-) -> Option<SelectedTenpai> {
+) -> Option<SelectedTenpai<'a>> {
     let evaluation: &DiscardEvaluation = selection.evaluation.as_ref()?;
     if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
         return None;
@@ -254,7 +289,11 @@ fn selected_tenpai(
     let hands =
         hands.or_else(|| tenpai_completed_hands_after_discard(context, evaluation, &wait))?;
 
-    Some(SelectedTenpai { wait, hands })
+    Some(SelectedTenpai {
+        wait,
+        hands,
+        acceptance: &evaluation.acceptance_after_discard,
+    })
 }
 
 // ダマのままロン和了した場合の打点。
@@ -267,7 +306,7 @@ fn damaten_ron_value(
     context: &GameContext,
     reach: &ReachDecisionDiagnostic,
     selection: &DiscardActionSelection,
-    tenpai: &SelectedTenpai,
+    tenpai: &SelectedTenpai<'_>,
 ) -> Option<DamatenValueDiagnostic> {
     if context.own_reached() != Some(false) || tenpai.wait.can_ron() != Some(true) {
         return None;
@@ -292,8 +331,12 @@ mod tests {
     use crate::agents::{DiagnosticOptions, ShantenAgent, ShantenDecisionDiagnostic};
     use crate::context::TableStateFacts;
     use crate::damaten_value::DamatenValue;
+    use crate::defense::{
+        honor_safety_rank, is_genbutsu_for, suited_safety_evidence_for_players, visible_count_of,
+    };
     use crate::meld::{Meld, MeldKind};
     use crate::offense_value::{TenpaiOffenseMode, reach_baseline_context};
+    use crate::open_hand_defense::high_open_hand_threat_players_from_context;
     use crate::reach_policy::ReachDecisionReason;
     use crate::tenpai_continuation::TenpaiContinuationCandidate;
 
@@ -321,6 +364,12 @@ mod tests {
         "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
     ];
     const RED_WAIT_DRAW: &str = "E";
+
+    // 一気通貫の 4s 単騎。1s をツモって打 1s とすると、宣言牌がそのまま 4s のスジ根拠になる。
+    const SUJI_WAIT_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4s",
+    ];
+    const SUJI_WAIT_DRAW: &str = "1s";
 
     // 山の残枚数。4人で分けて自分の残り自摸機会になる。
     const REMAINING_TILES: u32 = 70;
@@ -488,6 +537,16 @@ mod tests {
                 .reach
                 .as_ref()
                 .expect("リーチを検討している")
+        }
+
+        // 選んだ打牌を河へ置いた直後の公開状態。公開 safety の期待値はここから求める。
+        fn public(&self) -> GameContext {
+            let Some(LegalAction::Dahai { tile }) = self.comparison().selected_discard else {
+                panic!("通常打牌 selection が Dahai を選んでいる");
+            };
+            self.context
+                .after_own_discard(tile)
+                .expect("自分の席が分かっている")
         }
 
         fn continuation_candidate(&self, discard: &str) -> &TenpaiContinuationCandidate {
@@ -829,6 +888,248 @@ mod tests {
         );
     }
 
+    // ---- Ron opportunity ----
+
+    #[test]
+    fn the_ron_opportunity_only_lists_the_live_waits_of_the_selected_tenpai() {
+        // 選んだ打牌後のテンパイが既に持つ live wait そのままで、待ちを別経路で数え直さない。
+        let case = &*ASYMMETRIC;
+        let comparison = case.comparison();
+        let wait = case
+            .reach()
+            .tenpai_wait
+            .as_ref()
+            .expect("選んだ打牌後の待ちを計算している");
+        let opportunity = comparison
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンできる待ちなので Ron opportunity がある");
+
+        assert_eq!(comparison.can_ron, Some(true));
+        assert_eq!(
+            opportunity
+                .waits
+                .iter()
+                .map(|opportunity_wait| opportunity_wait.tile)
+                .collect::<Vec<_>>(),
+            wait.live_waits
+        );
+        assert!(
+            opportunity
+                .waits
+                .iter()
+                .all(|opportunity_wait| opportunity_wait.live_copies > 0)
+        );
+    }
+
+    #[test]
+    fn the_ron_opportunity_shares_the_tile_type_of_the_red_and_black_variants() {
+        // Ron baseline は赤5 / 黒5を別 variant のまま残すが、structural safety は牌種1件を
+        // 共有する。物理 variant ごとの打点と safety evidence を混同しない。
+        let case = CaseSpec {
+            hand: &RED_WAIT_HAND,
+            draw: Some(RED_WAIT_DRAW),
+            legal_dahai: Some(&[RED_WAIT_DRAW]),
+            options: DiagnosticOptions::NONE,
+            ..CaseSpec::default()
+        }
+        .build();
+        let comparison = case.comparison();
+        let opportunity = comparison
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンできる待ちなので Ron opportunity がある");
+        let baseline = comparison
+            .reach_ron_baseline
+            .as_ref()
+            .expect("リーチ Ron baseline を評価している");
+
+        assert_eq!(
+            opportunity
+                .waits
+                .iter()
+                .map(|wait| (wait.tile, wait.live_copies))
+                .collect::<Vec<_>>(),
+            [(tile("5s"), 3)]
+        );
+        assert_eq!(
+            baseline
+                .winning_tile_values()
+                .map(|value| (value.is_red(), value.remaining))
+                .collect::<Vec<_>>(),
+            [(true, 1), (false, 2)]
+        );
+    }
+
+    #[test]
+    fn the_reach_public_safety_matches_the_existing_defense_helpers() {
+        // 公開 safety は、選んだ打牌を河へ置いた直後の公開状態へ既存 Defense helper を通した
+        // 観測値そのもの。新しい rank も係数も作らない。
+        let case = &*ASYMMETRIC;
+        let public = case.public();
+        let opportunity = case
+            .comparison()
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンできる待ちなので Ron opportunity がある");
+
+        for wait in &opportunity.waits {
+            let safety = wait
+                .reach_public_safety
+                .expect("リーチが合法なら公開 safety を評価する");
+
+            assert!(safety.declaration_visible);
+            assert_eq!(safety.genbutsu, is_genbutsu_for(wait.tile, 0, &public));
+            assert_eq!(
+                safety.suited,
+                suited_safety_evidence_for_players(wait.tile, &[0], &public)
+            );
+            assert_eq!(
+                safety.honor.map(|honor| honor.rank),
+                honor_safety_rank(wait.tile, &public)
+            );
+            // ダマ側には同じ rank を付けず、宣言が公開されない事実だけを持つ。
+            assert!(!wait.damaten_declaration_visible);
+        }
+    }
+
+    #[test]
+    fn the_reach_declaration_tile_is_reflected_in_the_public_suji() {
+        // 打 1s の 4s 単騎。宣言牌の 1s は 4s のスジ根拠になるので、打牌前の状態で評価すると
+        // 片スジを取り落とす。
+        let case = CaseSpec {
+            hand: &SUJI_WAIT_HAND,
+            draw: Some(SUJI_WAIT_DRAW),
+            legal_dahai: Some(&[SUJI_WAIT_DRAW]),
+            options: DiagnosticOptions::NONE,
+            ..CaseSpec::default()
+        }
+        .build();
+        let public = case.public();
+        let evidence = case
+            .comparison()
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンできる待ちなので Ron opportunity がある")
+            .waits
+            .iter()
+            .find(|wait| wait.tile == tile("4s"))
+            .expect("4s の待ちがある")
+            .reach_public_safety
+            .expect("リーチが合法なら公開 safety を評価する")
+            .suited
+            .expect("数牌の evidence がある");
+
+        assert_eq!(case.comparison().selected_discard, Some(dahai(&case, "1s")));
+        // 期待値は打牌後の公開状態へ既存 helper を通した結果そのもの。
+        assert_eq!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &public)
+        );
+        // 打牌前の状態とは違う評価になる。
+        assert_ne!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.context)
+        );
+    }
+
+    #[test]
+    fn an_honor_wait_carries_the_existing_honor_safety() {
+        // 南単騎。字牌の待ちは既存の字牌 safety と見え枚数を載せ、数牌 evidence は持たない。
+        let case = &*ITTSUU;
+        let opportunity = case
+            .comparison()
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンできる待ちなので Ron opportunity がある");
+
+        assert_eq!(
+            opportunity
+                .waits
+                .iter()
+                .map(|wait| wait.tile)
+                .collect::<Vec<_>>(),
+            [tile("S")]
+        );
+        let safety = opportunity.waits[0]
+            .reach_public_safety
+            .expect("リーチが合法なら公開 safety を評価する");
+        let honor = safety.honor.expect("字牌の evidence がある");
+
+        let public = case.public();
+        assert_eq!(Some(honor.rank), honor_safety_rank(tile("S"), &public));
+        assert_eq!(honor.visible_count, visible_count_of(tile("S"), &public));
+        assert_eq!(safety.suited, None);
+    }
+
+    #[test]
+    fn an_open_hand_keeps_the_reach_public_safety_unavailable() {
+        // 副露手ではリーチできないので、リーチ時の公開 safety は評価しない。ダマ側の事実と
+        // 待ちそのものは残す。
+        let case = &*OPEN;
+        let comparison = case.comparison();
+        let opportunity = comparison
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンはできるので Ron opportunity がある");
+
+        assert!(!comparison.reach_legal);
+        assert_eq!(comparison.can_ron, Some(true));
+        assert!(!opportunity.waits.is_empty());
+        for wait in &opportunity.waits {
+            assert_eq!(wait.reach_public_safety, None);
+            assert!(!wait.damaten_declaration_visible);
+        }
+    }
+
+    #[test]
+    fn a_furiten_tenpai_has_no_ron_opportunity() {
+        // ロンできない待ちを確率候補のように並べない。0 として扱わず評価しないままにする。
+        let case = CaseSpec {
+            own_discards: &["1s", "5s"],
+            ..CaseSpec::default()
+        }
+        .build();
+        let comparison = case.comparison();
+
+        assert_eq!(comparison.can_ron, Some(false));
+        assert_eq!(comparison.ron_opportunity, None);
+        // Tsumo 側は独立した軸なので評価したまま。
+        assert!(comparison.reach_now_self_tsumo().is_some());
+    }
+
+    #[test]
+    fn an_unknown_ron_availability_has_no_ron_opportunity() {
+        // ロン可否が分からない局面では非フリテンだと推測しない。
+        let case = CaseSpec {
+            history_furiten: HistoryFuritenFacts::default(),
+            ..ittsuu_spec()
+        }
+        .build();
+        let comparison = case.comparison();
+
+        assert_eq!(comparison.can_ron, None);
+        assert_eq!(comparison.ron_opportunity, None);
+    }
+
+    #[test]
+    fn the_external_threats_match_the_existing_sources() {
+        for case in [&*ASYMMETRIC, &*ITTSUU, &*OPEN] {
+            let threats = &case
+                .comparison()
+                .ron_opportunity
+                .as_ref()
+                .expect("ロンできる待ちなので Ron opportunity がある")
+                .external_threats;
+
+            assert_eq!(threats.reached_opponents, case.context.reached_opponents());
+            assert_eq!(
+                threats.high_open_hand_targets,
+                high_open_hand_threat_players_from_context(&case.context)
+            );
+        }
+    }
+
     // ---- 単位 ----
 
     #[test]
@@ -844,6 +1145,7 @@ mod tests {
             reach_ron_baseline: None,
             can_ron: None,
             damaten_ron_value: None,
+            ron_opportunity: None,
         };
 
         assert_eq!(comparison.reach_now_self_tsumo(), None);

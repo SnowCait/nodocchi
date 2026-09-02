@@ -810,6 +810,7 @@ impl ShantenAgent {
                         selection: discard_selection,
                         hands,
                         continuation: diagnostics.normal_discard_tenpai_continuation.as_ref(),
+                        open_hand_threats: &inputs.open_hand_threats,
                     })
                 });
                 diagnostics.reach_damaten_comparison = comparison;

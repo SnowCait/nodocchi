@@ -330,6 +330,33 @@ impl GameContext {
         self.discards_of(usize::from(self.player_id?))
     }
 
+    /// 自分がこの物理牌を切り終えた直後の公開状態を表す projection。
+    ///
+    /// 元の context は書き換えず、切った物理牌を自分の手牌 (ツモ牌を含む) から自分の河へ移した
+    /// 複製を返す。自分の席を特定できない場合は player 0 などを推測せず `None`。
+    ///
+    /// 見え牌 (`visible_tiles`) は自分の手牌を既に含むので、同じ物理牌が河へ移っても見え枚数は
+    /// 変わらない。この projection で変わるのは河 (`discards`) だけで、現物やスジのように河を
+    /// 読む既存 helper を「打牌した直後」の時点で評価するために使う。
+    ///
+    /// 打牌後の自分の手牌そのものを必要とする評価 (向聴・受け入れ・打点・履歴依存フリテン) には
+    /// 使わない。あちらは既存の打牌評価が source of truth。
+    pub fn after_own_discard(&self, discard: TileId) -> Option<Self> {
+        let own_seat = usize::from(self.player_id?);
+        if own_seat >= self.discards.len() {
+            return None;
+        }
+
+        let mut context = self.clone();
+        if context.drawn_tile == Some(discard) {
+            context.drawn_tile = None;
+        } else if let Some(index) = context.hand_tiles.iter().position(|&tile| tile == discard) {
+            context.hand_tiles.remove(index);
+        }
+        context.discards[own_seat].push(discard);
+        Some(context)
+    }
+
     pub fn melds(&self) -> &[Vec<Meld>; 4] {
         &self.melds
     }
