@@ -1,4 +1,4 @@
-use riichilab_client::CapturedRequestAction;
+use riichilab_client::{CaptureRecord, CapturedRequestAction};
 
 use crate::error::ScenarioError;
 use crate::scenario::Scenario;
@@ -64,20 +64,23 @@ fn read_capture_file(path: &str) -> Result<String, ScenarioError> {
     })
 }
 
+// session capture には server event と client action が並ぶ。replay 対象は server の
+// request_action だけで、他の record は skip する。envelope 自体が壊れている行は error。
 fn parse_records(path: &str, text: &str) -> Result<Vec<CapturedRequestAction>, ScenarioError> {
     let mut records = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let record = CapturedRequestAction::from_json_line(line).map_err(|source| {
-            ScenarioError::CaptureRecord {
-                path: path.to_string(),
-                line: index + 1,
-                source,
-            }
-        })?;
-        records.push(record);
+        let capture_error = |source| ScenarioError::CaptureRecord {
+            path: path.to_string(),
+            line: index + 1,
+            source,
+        };
+        let record = CaptureRecord::from_json_line(line).map_err(capture_error)?;
+        if let Some(request_action) = record.request_action().map_err(capture_error)? {
+            records.push(request_action);
+        }
     }
     Ok(records)
 }
@@ -142,7 +145,7 @@ mod tests {
         player_threat_facts_from_context,
     };
     use bot_logic::{TileId, TileType};
-    use riichilab_client::capture;
+    use riichilab_client::capture::{self, CaptureDirection};
     use riichilab_client::observation::{
         fixture_base64, fixture_base64_with_melds, fixture_base64_with_table_state_facts,
         fixture_meld, game_context_from_decoded_observation,
@@ -168,11 +171,23 @@ mod tests {
             .join(",")
     }
 
-    fn request_action_line(request_id: u64, observation: &str) -> String {
+    fn request_action_event(request_id: u64, observation: &str) -> String {
         format!(
             r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{}],"observation":"{observation}"}}"#,
             possible_actions_json()
         )
+    }
+
+    fn server_line(event: &str) -> String {
+        capture::record_line(CaptureDirection::Server, event).unwrap()
+    }
+
+    fn client_line(event: &str) -> String {
+        capture::record_line(CaptureDirection::Client, event).unwrap()
+    }
+
+    fn request_action_line(request_id: u64, observation: &str) -> String {
+        server_line(&request_action_event(request_id, observation))
     }
 
     fn observation_base64() -> String {
@@ -351,9 +366,9 @@ mod tests {
             Some(MENZEN_TENPAI_DRAWN_TILE),
             MENZEN_TENPAI_HAND.to_vec(),
         );
-        let line = format!(
+        let line = server_line(&format!(
             r#"{{"type":"request_action","request_id":430,"possible_actions":[{possible_actions}],"observation":"{observation}"}}"#
-        );
+        ));
         let path = write_capture("no-reach", &[line]);
         let captured = load_captured_scenario(&path, None).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -446,7 +461,7 @@ mod tests {
 
         let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
         for request_id in [431, 432, 433] {
-            capture.write_record(&request_action_line(request_id, &observation));
+            capture.write_server_event(&request_action_event(request_id, &observation));
         }
         drop(capture);
         drop(guard);
@@ -567,26 +582,118 @@ mod tests {
         assert_eq!(error, ScenarioError::EmptyCapture { path });
     }
 
+    // 正常な session capture は request_action の前後に server event と client action を大量に
+    // 含む。replay はそれらを skip し、server の request_action だけを対象にする。
     #[test]
-    fn reports_a_record_that_is_not_a_request_action() {
+    fn skips_the_server_and_client_records_around_a_request_action() {
         let observation = observation_base64();
         let path = write_capture(
-            "not-request-action",
+            "session",
             &[
+                server_line(r#"{"type":"start_game","id":0}"#),
+                server_line(r#"{"type":"start_kyoku","kyoku":1,"oya":0}"#),
+                server_line(r#"{"type":"tsumo","actor":0,"pai":"5s"}"#),
                 request_action_line(418, &observation),
-                r#"{"type":"action_ack","request_id":418,"status":"accepted"}"#.to_string(),
+                client_line(r#"{"type":"dahai","actor":0,"pai":"1m","request_id":418}"#),
+                server_line(r#"{"type":"action_ack","request_id":418,"status":"accepted"}"#),
+                server_line(r#"{"type":"dahai","actor":0,"pai":"1m","tsumogiri":false}"#),
+                server_line(r#"{"type":"reach","actor":1}"#),
+                server_line(r#"{"type":"hora","actor":1,"target":0,"pai":"1m"}"#),
+                server_line(r#"{"type":"end_kyoku"}"#),
+                server_line(r#"{"type":"end_game","scores":[25000,25000,25000,25000]}"#),
             ],
         );
-        let error = load_captured_scenario(&path, Some(418)).unwrap_err();
+
+        let captured = load_captured_scenario(&path, None).unwrap();
+        assert_eq!(captured.request_id, 418);
+        assert_eq!(captured.possible_action_count, CAPTURED_DAHAI.len());
+
+        let by_request_id = load_captured_scenario(&path, Some(418)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(by_request_id, captured);
+    }
+
+    // client action と action_ack は同じ request_id を持つが、request selection の対象は
+    // server の request_action だけ。
+    #[test]
+    fn does_not_count_client_actions_and_acks_as_requests() {
+        let observation = observation_base64();
+        let path = write_capture(
+            "same-request-id",
+            &[
+                request_action_line(419, &observation),
+                client_line(&request_action_event(419, &observation)),
+                client_line(r#"{"type":"reach","actor":0,"request_id":419}"#),
+                server_line(r#"{"type":"action_ack","request_id":419,"status":"accepted"}"#),
+            ],
+        );
+
+        let captured = load_captured_scenario(&path, None).unwrap();
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(
-            error,
-            ScenarioError::CaptureRecord {
-                path,
-                line: 2,
-                source: CaptureRecordError::UnexpectedType(Some("action_ack".to_string())),
-            }
+        assert_eq!(captured.request_id, 419);
+    }
+
+    #[test]
+    fn reports_a_malformed_capture_envelope() {
+        let observation = observation_base64();
+        let path = write_capture(
+            "malformed-envelope",
+            &[
+                request_action_line(420, &observation),
+                r#"{"version":1,"event":{"type":"reach","actor":1}}"#.to_string(),
+            ],
+        );
+        let error = load_captured_scenario(&path, Some(420)).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::CaptureRecord {
+                    line: 2,
+                    source: CaptureRecordError::Envelope(_),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        let path = write_capture("broken-json", &["{".to_string()]);
+        let error = load_captured_scenario(&path, None).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::CaptureRecord {
+                    line: 1,
+                    source: CaptureRecordError::Json(_),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    // 旧 capture 形式 (1行 = request_action の raw JSON) は読まない。fallback を持たないことを
+    // 固定する。
+    #[test]
+    fn does_not_read_the_old_raw_request_action_schema() {
+        let observation = observation_base64();
+        let path = write_capture("old-schema", &[request_action_event(421, &observation)]);
+        let error = load_captured_scenario(&path, None).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::CaptureRecord {
+                    line: 1,
+                    source: CaptureRecordError::Envelope(_),
+                    ..
+                }
+            ),
+            "{error:?}"
         );
     }
 
