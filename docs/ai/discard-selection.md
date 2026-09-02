@@ -252,7 +252,71 @@ nodocchi はまだ「他家がその牌を切る確率」の模型を持たな�
 
 フリテンでロンできない局面でも、Tsumo 側の `reach now` と3つの defer counterfactual はそれぞれの既存入力に従う独立した軸として評価します。逆に、ツモれることを理由に `reach baseline` を含む Ron 側の値を確定させることもしません。
 
-**この統合診断も diagnostics 専用です。** production の Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持たず、構築の有無は最終 action を変えません。
+### Ron opportunity (structural facts only)
+
+`reach baseline` / `damaten baseline` は「その待ちで和了した場合の支払い」でしかなく、他家がその待ち牌を切る確率を持ちません。その前段として、`Ron` 節の `opportunity` に**待ち牌が公開情報上どう見えるか**を並べます。
+
+```text
+Ron
+  reach baseline: ...
+  can ron: yes
+  damaten baseline: ...
+  opportunity (structural facts, no ron probability)
+    wait 4s
+      live copies: 3
+      if Reach
+        declaration visible: yes
+        genbutsu: no
+        suited safety
+          suji / wall / combined
+      if Damaten
+        declaration visible: no
+    external threats
+      reached opponents: 0
+      high open-hand targets: 0
+```
+
+**これは Ron 確率ではありません。** 追加したのは既存の公開情報から観測できる structural facts だけで、ron probability・discard probability・deal-in probability・「スジなら何%」のような係数・Reach / Damaten のロン率補正はどれも持ちません。self-tsumo と Ron baseline を統合した EV も、winner も、新しい `should_reach` も作りません。
+
+- **live copies** は選んだ打牌後の既存受け入れが持つ残枚数そのものです。見え牌を別経路で数え直しません。残枚数 0 の牌種は待ちとして並べません。赤5 / 黒5は同じ牌種として1件にまとめ、structural safety を共有します。物理 variant ごとの打点は従来どおり Ron baseline 側が別々に持ちます。
+- **reach public safety** は「自分が今リーチを宣言した場合、その待ち牌が他家から見てどう見えるか」の evidence です。現物は既存の hard-safety helper (`is_genbutsu_for()`) と既存フリテン診断が持つ「自分の河と重複した待ち」、数牌は既存 [`SuitedSafetyEvidence`](defense.md#suji--halfsuji) (スジ + 壁 + 既存の統合 rank)、字牌は既存 [`HonorSafety`](defense.md#honorsafety) の rank と見え枚数をそのまま載せます。新しい safety rank も係数も作らず、Defense selection の comparator も呼びません。スジは既存 helper が読む現在の河そのままで、まだ切っていないリーチ宣言牌は含めません。
+- **Damaten** 側には Reach と同じ safety rank を付けません。`declaration visible: no` という事実だけです。これは「ダマなら安全牌評価が無効」という意味ではなく、**他家がこちらの待ちに対する防御を開始する公開トリガーが無い**という事実を表します。
+- **external threats** は既存 classification の観測値です。リーチ者は `GameContext::reached_opponents()`、High OpenHand target は既存 [`OpenHandThreat`](push-pull.md#openhandthreat) の分類そのままで、threat を分類し直すことも確率へ変換することもしません。
+
+#### Defense の exact `R/T` は使いません
+
+[リーチ者ごとの exact ron risk](defense.md#リーチ者ごとの-exact-ron-risk) (`RonRiskEvidence` / `ron_capable_weight` / `tenpai_weight` / `R/T`) はこの診断に入れません。exact model が表すのは
+
+```text
+自分が牌 x を切った場合、相手が x でロン可能な hidden-hand state の structural weight
+```
+
+で、Ron opportunity が欲しい
+
+```text
+自分が x 待ちでテンパイしている場合、他家から見て x がどう見えるか
+```
+
+とは意味が違うためです。`R/T` は実放銃率でもロン確率でも opponent behavior probability でもないので、ロン確率の代用にもしません。
+
+#### 相手別の打牌確率はまだありません
+
+`GameContext` は player ごとの河・副露・リーチ状態を持ちますが、empirical discard model は持ちません。河は `TileId` の列で、core context 上では各河牌の手出し / ツモ切りも保持していません。したがって「opponent 1 が 4s を切る確率」のような opponent behavior probability はまだ存在せず、この層でも作りません。self-tsumo と Ron baseline を統合した EV も、この模型が入るまで作りません。
+
+#### ロンできない待ちは unavailable
+
+目的が Ron opportunity なので、実際にロンできない局面では 0 として扱わず評価しないままにします。
+
+| 局面 | Ron opportunity |
+| --- | --- |
+| `can_ron = Some(true)` | 待ちごとの facts を並べる |
+| `can_ron = Some(false)` (フリテン) | `unavailable` |
+| `can_ron = None` (ロン可否 unknown) | `unavailable` |
+| リーチが合法でない | 待ちは並べるが `if Reach` は `unavailable` |
+
+フリテンでも公開 safety 自体は計算できますが、ロン不能な待ちを確率候補のように並べないことを優先します。既存の `TenpaiWaitAvailability` / フリテン semantics と矛盾する値は作りません。
+
+**この統合診断も diagnostics 専用です。** production の Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持たず、構築の有無は最終 action を変えません。Ron opportunity のために safety 評価も threat 分類も追加探索も production 経路へ入れず、押し引きが既に構築した classification を借りるだけにします。
 
 ## selected と runner-up
 

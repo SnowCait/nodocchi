@@ -16,6 +16,7 @@ pub mod prospective_value;
 pub mod push_pull;
 pub mod reach_damaten_comparison;
 pub mod reach_policy;
+pub mod ron_opportunity;
 pub mod ryukyoku_decision;
 pub mod tenpai_continuation;
 pub mod threat;
@@ -120,6 +121,10 @@ pub use reach_damaten_comparison::ReachDamatenComparisonDiagnostic;
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
     decide_reach_reason, is_reach_legal,
+};
+pub use ron_opportunity::{
+    HonorPublicSafetyEvidence, ReachPublicSafetyEvidence, RonOpportunityDiagnostic,
+    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic,
 };
 pub use ryukyoku_decision::{
     RYUKYOKU_CONTINUE_CHIITOITSU_SHANTEN, RYUKYOKU_CONTINUE_KOKUSHI_SHANTEN,

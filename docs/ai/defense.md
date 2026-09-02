@@ -229,6 +229,12 @@ exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、�
 
 入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。`same_hand_passed` は RiichiLab live client が MJAI event の `tsumogiri` から積み上げる履歴で、bot-scenario の入力 field はありません。
 
+## 防御 helper の他所からの参照
+
+現物 (`is_genbutsu_for()`)・[Suji / HalfSuji](#suji--halfsuji) と [wall / one-chance](#wall--one-chance) を束ねた `SuitedSafetyEvidence`・[HonorSafety](#honorsafety) の rank と見え枚数は、防御以外の診断からも観測値として参照します。攻撃側では [Ron opportunity](discard-selection.md#ron-opportunity-structural-facts-only) が「自分がリーチした場合に待ち牌が他家からどう見えるか」を、これらの helper の結果そのままで持ちます。
+
+参照するのは1牌種ぶんの evidence だけで、Defense selection の comparator は呼びません。exact `R/T` は意味が違うので攻撃側の診断へは渡しません ([`R/T` が表すもの](#rt-が表すもの))。防御の semantics そのものは変わりません。
+
 ## fallback と source of truth
 
 selection は production selector が source of truth です。diagnostics は同じ selector の結果を `selected` として表示し、`act()` と `diagnose()` で別の防御ロジックを持ちません。リーチ者ごとの exact evidence も、選択に使ったものと同じ evaluation を表示します。`Push` では通常打牌の優先順を変えず、`Fold` のときだけ該当 threat 用 fallback を先に試します。
