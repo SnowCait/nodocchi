@@ -11,8 +11,8 @@ pub mod tls;
 pub mod validation_policy;
 
 pub use capture::{
-    CaptureError, CaptureRecordError, CapturedRequestAction, RequestActionCapture,
-    capture_server_event, should_capture_event,
+    CAPTURE_VERSION, CaptureDirection, CaptureError, CaptureRecord, CaptureRecordError,
+    CapturedRequestAction, SessionCapture, capture_client_action, capture_server_event,
 };
 pub use cli::{CliArgs, CliError, ConnectionMode, USAGE};
 pub use client::{

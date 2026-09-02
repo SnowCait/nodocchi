@@ -96,9 +96,9 @@ meld applied actor=1 target=0 pai="7p" consumed=["5p", "6p"]
 
 この2行を比較すると、送信した副露と server が実際に適用した副露が一致しているかを log だけで判定できます。
 
-## request_action の capture
+## Session capture
 
-`--capture-file <PATH>` を指定すると、server から受信した `request_action` の raw JSON を保存します。保存した record は [`bot-scenario`](bot-scenario.md#riichilab-capture-の再生) で再生できます。
+`--capture-file <PATH>` を指定すると、1対局の protocol payload を JSONL で保存します。server から受信したイベントと、nodocchi が WebSocket へ送信した action の双方向を、client が観測した時系列順に記録します。保存した record は [`bot-scenario`](bot-scenario.md#riichilab-capture-の再生) で再生できます。
 
 ```bash
 RIICHILAB_BOT_TOKEN=... \
@@ -121,14 +121,32 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 | 項目 | 内容 |
 | --- | --- |
-| 形式 | JSONL。`request_action` 1件が1行1 JSON object |
-| 保存内容 | `request_id`、`possible_actions`、`observation`、`time` など受信した field を含む raw JSON |
-| 保存対象 | `request_action` のみ。`start_game`、`action_ack`、`end_game` などは保存しない |
+| 形式 | JSONL。1行1 record の direction envelope |
 | 単位 | client 1起動 = 1対局 = capture file 1つ |
+| 保存対象 (server) | `MjaiEvent` が扱う受信イベントすべて。`start_game`、`start_kyoku`、`tsumo`、`dahai`、`chi`、`pon`、`daiminkan`、`ankan`、`kakan`、`reach`、`hora`、`ryukyoku`、`end_kyoku`、`request_action`、`action_ack`、`end_game`、`validation_result` |
+| 保存対象 (client) | WebSocket へ送信した action payload |
+| 保存内容 | 受信 / 送信した protocol payload そのもの |
+| 順序 | client が観測した event / action の時系列順。`request_id` で並べ替えない |
 | file | `--log-file` とは別 file。大きな base64 observation を通常 log に混ぜない |
-| 未指定時 | clone、JSON 変換、file I/O を含む capture 処理を行わない |
+| 未指定時 | envelope 構築、clone、file I/O を含む capture 処理を行わない |
 
-`GameContext` から逆生成せず受信 JSON をそのまま書くため、decode と再 serialize による情報欠落を避けられます。
+### record envelope
+
+各行は `version`、`direction`、`event` を持つ envelope です。`event` は受信 / 送信した payload そのもので、`GameContext` や diagnostic からの再構築ではありません。
+
+```json
+{"version":1,"direction":"server","event":{"type":"request_action","request_id":123,"possible_actions":[{"type":"dahai","pai":"1m","tsumogiri":false}],"observation":"..."}}
+{"version":1,"direction":"client","event":{"type":"reach","actor":1,"request_id":123}}
+{"version":1,"direction":"server","event":{"type":"action_ack","request_id":123,"status":"accepted"}}
+{"version":1,"direction":"server","event":{"type":"reach","actor":1}}
+{"version":1,"direction":"server","event":{"type":"dahai","actor":1,"pai":"1m","tsumogiri":true}}
+```
+
+`direction` は `server` (受信) と `client` (送信) を区別します。`dahai`、`reach`、`hora` などの `type` は双方に現れるため、`type` だけから向きを推測しません。
+
+client record は通常 log の `action sent` の `response=` と同じ、送信直前に serialize した payload です。`MjaiAction` からの再構築ではないため、Chi / Pon の `pai` と `consumed`、`request_id` は送信した値と完全に一致します。
+
+`version` は capture schema の version です。旧形式 (1行がそのまま `request_action` の raw JSON) との後方互換は意図的に持たず、envelope の無い行は読みません。
 
 ### session semantics
 
@@ -144,12 +162,31 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 対局ごとに分けた capture file は、まとめて [production latency 計測](bot-scenario.md#riichilab-capture-の-production-latency-計測) の入力にできます。
 
-1対局中の複数 record は順次追記されます。JSONL なので途中終了時も書き込み済み record を利用でき、`jq` などで絞り込めます。
+1対局中の record は順次追記されます。JSONL なので途中終了時も書き込み済み record を利用でき、`jq` などで絞り込めます。
 
 ```bash
-jq -r 'select(.request_id == 425)' logs/ranked-capture.jsonl
+jq -c 'select(.direction == "server" and .event.type == "request_action" and .event.request_id == 425)' logs/ranked-capture.jsonl
+jq -c 'select(.direction == "client")' logs/ranked-capture.jsonl
 ```
 
 書き込みは通常 log と同じ non-blocking writer を使い、request deadline より capture I/O を優先しません。buffer overflow 時は応答を遅らせる代わりに record を落とし、件数を warning log に出します。capture file を開けない場合は起動時 error です。
+
+### 局の時系列を追う
+
+同じ file に request と応答と結果が並ぶため、1局を次の時系列として追えます。
+
+```text
+start_kyoku
+  → server request_action
+  → client action
+  → server action_ack
+  → server reach / dahai / 副露
+  → server hora / ryukyoku
+end_kyoku
+```
+
+capture record には `ShantenDiagnostic`、`RonOpportunityDiagnostic`、`ReachDamatenComparisonDiagnostic` などの bot-core diagnostic を埋め込みません。これらは同じ `request_action` の observation から replay / offline analyzer 側で再計算します。capture は protocol の観測記録に限定し、agent の diagnostic とは密結合させません。
+
+この双方向 capture により、[Ron opportunity](ai/discard-selection.md#ron-opportunity-structural-facts-only) の structural facts と、実戦でその後に発生した opponent の `dahai` / `hora` / `ryukyoku` を offline で対応付けられます。Ron probability の推定や dataset 化は今後の課題で、現時点では実装していません。
 
 capture は実戦局面を発見・調査する入口です。原因を特定した後は必要な局面を `bot-scenario` の JSON scenario に落とし、恒久的な回帰 fixture としてください。詳しい使い分けは [bot-scenario の capture replay](bot-scenario.md#fixture-との使い分け) を参照してください。

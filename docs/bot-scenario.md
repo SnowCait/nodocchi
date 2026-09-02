@@ -285,7 +285,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/history_furiten_same_
 
 ## RiichiLab capture の再生
 
-[`riichilab-client --capture-file`](riichilab.md#request_action-の-capture) で保存した `request_action` を1件再生できます。
+[`riichilab-client --capture-file`](riichilab.md#session-capture) で保存した [session capture](riichilab.md#record-envelope) の `request_action` を1件再生できます。
 
 ```bash
 cargo run -p bot-scenario -- \
@@ -295,10 +295,12 @@ cargo run -p bot-scenario -- \
 
 | 引数 | 必須 | 内容 |
 | --- | --: | --- |
-| `--riichilab-capture` | 必須 | capture JSONL の path |
-| `--request-id` | 任意 | 再生する `request_id`。record が1件だけなら省略可能 |
+| `--riichilab-capture` | 必須 | session capture JSONL の path |
+| `--request-id` | 任意 | 再生する `request_id`。`request_action` が1件だけなら省略可能 |
 
-複数 record の file で `--request-id` を省略すると、対象を推測せず error になります。`--hand` や JSON scenario とは併用できません。
+再生対象は `direction` が `server` で `type` が `request_action` の record だけです。session capture に並ぶ `start_kyoku`、`dahai`、client action、`action_ack` などは skip します。client action や `action_ack` が同じ `request_id` を持っていても、`--request-id` の対象件数には数えません。
+
+複数の `request_action` を含む file で `--request-id` を省略すると、対象を推測せず error になります。record envelope 自体が壊れている行は skip せず error です。旧 capture 形式 (1行がそのまま `request_action` の raw JSON) は読みません。`--hand` や JSON scenario とは併用できません。
 
 `observation` decoder と `possible_actions` 変換は `riichilab-client` の実装を共有します。先頭に capture の出所を表示し、以降は JSON scenario と同じ [structured diagnostics](diagnostics.md) です。
 
@@ -311,7 +313,7 @@ cargo run -p bot-scenario -- \
 
 ## RiichiLab capture の production latency 計測
 
-capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `ShantenAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
+session capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `ShantenAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
 
 計測に使う `GameContext` は単一 `observation` からの復元です。live client は event 列から積み上げた `post_reach_passed`、`temporary_passed`、`same_hand_passed`、履歴依存フリテンを `GameContext` へ足してから `act()` を呼ぶため、capture replay の入力は live client の入力と完全一致しません。復元できない事実は [RiichiLab capture の再生](#riichilab-capture-の再生) と同じで、入力経路ごとの known / unknown は [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。revision 間の比較では同じ capture corpus から同じ入力を復元するので、相対比較の基盤としては有効です。
 
@@ -328,7 +330,7 @@ cargo build --release -p bot-scenario
 
 | 引数 | 必須 | 内容 |
 | --- | --: | --- |
-| `--benchmark-riichilab-capture` | 必須 | capture JSONL の path。以降に続く path も同じ run の入力として扱う |
+| `--benchmark-riichilab-capture` | 必須 | session capture JSONL の path。以降に続く path も同じ run の入力として扱う |
 | `--benchmark-json` | 任意 | 集計と request ごとの結果を JSON で保存する path |
 
 shell の glob 展開で複数 file を1回の run にまとめられます。`--riichilab-capture`、`--request-id`、`--hand`、JSON scenario、`--lookahead`、`--verbose`、`--summary-only` とは併用できません。
@@ -412,7 +414,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の record 順です。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 
@@ -421,7 +423,7 @@ CI の共有 runner は実行時間が安定しないため、CI では集計や
 capture は実戦局面を見つけて調べる入口、JSON scenario は恒久的な回帰 fixture です。
 
 1. `riichilab-client` で対局を capture する
-2. log の `action sent` / `action_ack` から問題の `request_id` を特定する
+2. capture の client action と `action_ack`、または log の `action sent` から問題の `request_id` を特定する
 3. `bot-scenario --riichilab-capture ... --request-id ...` で再生する
 4. diagnostics から判断経路を確認する
 5. 原因が分かったら局面を JSON scenario に落として回帰 fixture にする

@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message, Utf8Bytes};
 use tracing::{debug, error, info, warn};
 
-use crate::capture::{RequestActionCapture, capture_server_event};
+use crate::capture::{SessionCapture, capture_client_action, capture_server_event};
 use crate::config::ClientConfig;
 use crate::convert::{
     checked_legal_action_to_mjai_action, fallback_mjai_action_from_possible_actions,
@@ -281,7 +281,7 @@ pub async fn run_riichilab_client<A, P>(
     agent: &mut A,
     policy: P,
     exit_condition: ClientExitCondition,
-    mut capture: Option<RequestActionCapture>,
+    mut capture: Option<SessionCapture>,
 ) -> Result<(), ClientError>
 where
     A: Agent,
@@ -317,7 +317,7 @@ where
                     }
                 };
                 let finish = should_finish_after_event(exit_condition, &event);
-                capture_server_event(capture.as_mut(), &event, text.as_str());
+                capture_server_event(capture.as_mut(), text.as_str());
                 match event {
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
@@ -470,6 +470,7 @@ where
                         let send_ms = send_start.elapsed().as_millis() as u64;
 
                         log_action_sent(&response, request_id, &payload);
+                        capture_client_action(capture.as_mut(), &payload);
 
                         let total_ms = request_start.elapsed().as_millis() as u64;
 
@@ -1643,9 +1644,9 @@ mod tests {
         );
     }
 
-    mod capture_replay {
+    mod capture_session {
         use super::*;
-        use crate::capture::{self, CapturedRequestAction};
+        use crate::capture::{self, CaptureDirection, CaptureRecord, CapturedRequestAction};
         use bot_core::ShantenAgent;
 
         const CAPTURED_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
@@ -1669,6 +1670,16 @@ mod tests {
             format!(
                 r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{possible_actions}],"observation":"{observation}"}}"#
             )
+        }
+
+        fn captured_request_action(text: &str) -> CapturedRequestAction {
+            CaptureRecord::from_json_line(
+                &capture::record_line(CaptureDirection::Server, text).unwrap(),
+            )
+            .unwrap()
+            .request_action()
+            .unwrap()
+            .unwrap()
         }
 
         fn temp_capture_path(name: &str) -> std::path::PathBuf {
@@ -1697,20 +1708,49 @@ mod tests {
             )
         }
 
+        /// production の送信経路と同じ ownership で payload を作り、送信 message と capture が
+        /// 同じ buffer を共有することを確かめたうえで capture 済みの record を返す。
+        fn capture_sent_action(
+            name: &str,
+            response: &MjaiAction,
+        ) -> (String, String, CaptureRecord) {
+            let path = temp_capture_path(name);
+            let _ = std::fs::remove_file(&path);
+
+            let payload = Utf8Bytes::from(serde_json::to_string(response).unwrap());
+            let message = Message::Text(payload.clone());
+
+            let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
+            capture_client_action(Some(&mut capture), &payload);
+            drop(capture);
+            drop(guard);
+
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+
+            let sent = message.into_text().expect("text message");
+            assert_eq!(sent.as_str(), payload.as_str());
+            assert_eq!(sent.as_ptr(), payload.as_ptr());
+
+            let line = contents.lines().next().expect("one capture record");
+            let record = CaptureRecord::from_json_line(line).unwrap();
+            assert_eq!(record.direction(), CaptureDirection::Client);
+            (sent.as_str().to_string(), line.to_string(), record)
+        }
+
         #[test]
         fn capture_does_not_change_the_sent_action() {
             let path = temp_capture_path("same-action");
             let _ = std::fs::remove_file(&path);
             let text = request_action_text(300, &captured_observation());
-            let event = parse_server_event(&text).unwrap().unwrap();
 
             let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
-            capture_server_event(Some(&mut capture), &event, &text);
+            capture_server_event(Some(&mut capture), &text);
             let with_capture = response_for(&text);
             drop(capture);
             drop(guard);
 
-            capture_server_event(None, &event, &text);
+            capture_server_event(None, &text);
             let without_capture = response_for(&text);
 
             let contents = std::fs::read_to_string(&path).unwrap();
@@ -1722,10 +1762,117 @@ mod tests {
         }
 
         #[test]
+        fn the_captured_client_action_is_the_websocket_payload_itself() {
+            let response = chi_7p_response(["6p", "8p"]);
+            let (sent, line, record) = capture_sent_action("client-payload", &response);
+
+            // 再 serialize ではなく送信 payload の文字列そのものを event に載せる。
+            assert_eq!(
+                line,
+                format!(r#"{{"version":1,"direction":"client","event":{sent}}}"#)
+            );
+            assert_eq!(
+                record.event(),
+                &serde_json::from_str::<serde_json::Value>(&sent).unwrap()
+            );
+        }
+
+        #[test]
+        fn the_captured_meld_keeps_the_sent_pai_and_consumed() {
+            let response = chi_7p_response(["6p", "8p"]);
+            let (sent, _, record) = capture_sent_action("client-chi", &response);
+            assert_eq!(
+                sent,
+                r#"{"type":"chi","actor":1,"pai":"7p","consumed":["6p","8p"],"request_id":131}"#
+            );
+            assert_eq!(record.event_type(), Some("chi"));
+            assert_eq!(record.event()["pai"], serde_json::json!("7p"));
+            assert_eq!(record.event()["consumed"], serde_json::json!(["6p", "8p"]));
+
+            let pon = MjaiAction::Pon {
+                actor: 2,
+                pai: "5p".to_string(),
+                consumed: vec!["5p".to_string(), "5pr".to_string()],
+                request_id: Some(132),
+            };
+            let (sent, _, record) = capture_sent_action("client-pon", &pon);
+            assert_eq!(
+                sent,
+                r#"{"type":"pon","actor":2,"pai":"5p","consumed":["5p","5pr"],"request_id":132}"#
+            );
+            assert_eq!(record.event_type(), Some("pon"));
+            assert_eq!(record.event()["pai"], serde_json::json!("5p"));
+            assert_eq!(record.event()["consumed"], serde_json::json!(["5p", "5pr"]));
+        }
+
+        #[test]
+        fn the_captured_client_action_keeps_the_sent_request_id() {
+            let response = MjaiAction::Reach {
+                actor: 1,
+                request_id: Some(133),
+            };
+            let (sent, _, record) = capture_sent_action("client-request-id", &response);
+
+            assert_eq!(sent, r#"{"type":"reach","actor":1,"request_id":133}"#);
+            assert_eq!(record.event()["request_id"], serde_json::json!(133));
+            assert_eq!(
+                sent_action_log_fields(&response).request_id,
+                record.event()["request_id"].as_u64()
+            );
+        }
+
+        #[test]
+        fn a_request_action_and_the_answering_client_action_share_the_request_id() {
+            let path = temp_capture_path("session-order");
+            let _ = std::fs::remove_file(&path);
+            let text = request_action_text(303, &captured_observation());
+            let response = response_for(&text).unwrap();
+            let payload = Utf8Bytes::from(serde_json::to_string(&response).unwrap());
+
+            let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
+            capture_server_event(Some(&mut capture), &text);
+            capture_client_action(Some(&mut capture), &payload);
+            capture_server_event(
+                Some(&mut capture),
+                r#"{"type":"action_ack","request_id":303,"status":"accepted"}"#,
+            );
+            drop(capture);
+            drop(guard);
+
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+
+            let records: Vec<CaptureRecord> = contents
+                .lines()
+                .map(|line| CaptureRecord::from_json_line(line).unwrap())
+                .collect();
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|record| (record.direction(), record.event_type().unwrap()))
+                    .collect::<Vec<_>>(),
+                [
+                    (CaptureDirection::Server, "request_action"),
+                    (CaptureDirection::Client, "dahai"),
+                    (CaptureDirection::Server, "action_ack"),
+                ]
+            );
+            assert_eq!(records[1].event()["request_id"], serde_json::json!(303));
+            assert_eq!(
+                records
+                    .iter()
+                    .filter_map(|record| record.request_action().unwrap())
+                    .map(|request| request.request_id)
+                    .collect::<Vec<_>>(),
+                [303]
+            );
+        }
+
+        #[test]
         fn captured_record_reproduces_the_client_context_and_legal_actions() {
             let observation = captured_observation();
             let text = request_action_text(301, &observation);
-            let record = CapturedRequestAction::from_json_line(&text).unwrap();
+            let record = captured_request_action(&text);
 
             let MjaiEvent::RequestAction {
                 possible_actions, ..
@@ -1749,7 +1896,7 @@ mod tests {
         #[test]
         fn act_diagnose_and_the_sent_action_agree_for_a_captured_record() {
             let text = request_action_text(302, &captured_observation());
-            let record = CapturedRequestAction::from_json_line(&text).unwrap();
+            let record = captured_request_action(&text);
             let context = record.game_context().unwrap();
             let legal_actions = record.legal_actions();
 

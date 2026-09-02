@@ -300,9 +300,13 @@ mod tests {
             Some(59),
             vec![0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
         );
-        let line = format!(
-            r#"{{"type":"request_action","request_id":425,"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
-        );
+        let line = riichilab_client::capture::record_line(
+            riichilab_client::CaptureDirection::Server,
+            &format!(
+                r#"{{"type":"request_action","request_id":425,"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
+            ),
+        )
+        .unwrap();
         let path = std::env::temp_dir().join(format!(
             "bot-scenario-main-summary-only-capture-{}.jsonl",
             std::process::id()
@@ -422,9 +426,13 @@ mod tests {
             Some(59),
             vec![0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
         );
-        let line = format!(
-            r#"{{"type":"request_action","request_id":425,"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
-        );
+        let line = riichilab_client::capture::record_line(
+            riichilab_client::CaptureDirection::Server,
+            &format!(
+                r#"{{"type":"request_action","request_id":425,"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"6p","tsumogiri":true}}],"observation":"{observation}"}}"#
+            ),
+        )
+        .unwrap();
         let path = std::env::temp_dir().join(format!(
             "bot-scenario-main-capture-{}.jsonl",
             std::process::id()
@@ -459,9 +467,13 @@ mod tests {
         let text = request_ids
             .iter()
             .map(|request_id| {
-                format!(
-                    r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"F","tsumogiri":true}}],"observation":"{observation}"}}"#
+                riichilab_client::capture::record_line(
+                    riichilab_client::CaptureDirection::Server,
+                    &format!(
+                        r#"{{"type":"request_action","request_id":{request_id},"possible_actions":[{{"type":"dahai","pai":"1m","tsumogiri":false}},{{"type":"dahai","pai":"F","tsumogiri":true}}],"observation":"{observation}"}}"#
+                    ),
                 )
+                .unwrap()
             })
             .collect::<Vec<_>>()
             .join("\n");

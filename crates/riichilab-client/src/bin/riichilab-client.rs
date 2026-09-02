@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(mode = %args.mode, agent_kind = %agent_kind, "selected mode and agent");
     if let Some(path) = args.capture_file.as_deref() {
-        info!(capture_file = %path.display(), "capturing request_action to JSONL");
+        info!(capture_file = %path.display(), "capturing the session to JSONL");
     }
 
     run_riichilab_client(config, &mut fallback_agent, policy, exit_condition, capture).await?;

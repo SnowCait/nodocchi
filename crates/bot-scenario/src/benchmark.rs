@@ -282,7 +282,7 @@ mod tests {
     use bot_logic::TileId;
     use riichilab_client::observation::{fixture_base64, game_context_from_decoded_observation};
     use riichilab_client::{
-        MjaiPossibleAction, ObservationPayload, possible_actions_to_legal_actions,
+        CaptureDirection, MjaiPossibleAction, ObservationPayload, possible_actions_to_legal_actions,
     };
 
     const CAPTURED_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
@@ -311,12 +311,20 @@ mod tests {
         fixture_base64(0, Some(drawn_tile), hand.to_vec())
     }
 
+    fn server_record_line(event: &str) -> String {
+        riichilab_client::capture::record_line(CaptureDirection::Server, event).unwrap()
+    }
+
+    fn client_record_line(event: &str) -> String {
+        riichilab_client::capture::record_line(CaptureDirection::Client, event).unwrap()
+    }
+
     fn request_action_line(request_id: u64, hand: &[u8], drawn_tile: u8, dahai: &[&str]) -> String {
-        format!(
+        server_record_line(&format!(
             r#"{{"type":"request_action","request_id":{request_id},"actor":0,"possible_actions":[{}],"observation":"{}"}}"#,
             possible_actions_json(dahai),
             observation_base64(hand, drawn_tile)
-        )
+        ))
     }
 
     fn shallow_request_action_line(request_id: u64) -> String {
@@ -741,11 +749,36 @@ mod tests {
     }
 
     #[test]
+    fn measures_only_the_request_actions_of_a_session_capture() {
+        let path = write_capture(
+            "session",
+            &[
+                server_record_line(r#"{"type":"start_kyoku","kyoku":1}"#),
+                shallow_request_action_line(463),
+                client_record_line(r#"{"type":"dahai","actor":0,"pai":"1m","request_id":463}"#),
+                server_record_line(r#"{"type":"action_ack","request_id":463,"status":"accepted"}"#),
+                shallow_request_action_line(464),
+                server_record_line(r#"{"type":"end_game","scores":[25000,25000,25000,25000]}"#),
+            ],
+        );
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            run.requests
+                .iter()
+                .map(|measurement| measurement.request_id)
+                .collect::<Vec<_>>(),
+            [463, 464]
+        );
+    }
+
+    #[test]
     fn an_undecodable_observation_fails_the_whole_benchmark() {
-        let line = format!(
+        let line = server_record_line(&format!(
             r#"{{"type":"request_action","request_id":471,"possible_actions":[{}],"observation":"not-base64!!"}}"#,
             possible_actions_json(&SHALLOW_DAHAI)
-        );
+        ));
         let path = write_capture("undecodable", &[shallow_request_action_line(470), line]);
         let error = measure_captures(std::slice::from_ref(&path)).unwrap_err();
         let _ = std::fs::remove_file(&path);
