@@ -12,7 +12,7 @@ use bot_core::{
     ReachDecisionDiagnostic, ReachRonBaselineDiagnostic, RyukyokuDecisionDiagnostic,
     RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
-    TenpaiOffenseMode, TenpaiOffenseValue, TenpaiSelfTsumoComparison, ThreatDefenseTarget,
+    TenpaiOffenseValue, TenpaiSelfTsumoComparison, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -2725,7 +2725,7 @@ mod tests {
     use bot_core::{
         Agent, CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
         OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
-        RonRiskEvidence,
+        RonRiskEvidence, TenpaiOffenseMode,
     };
     use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
     use std::sync::LazyLock;
