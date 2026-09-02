@@ -617,6 +617,36 @@ mod tests {
     }
 
     #[test]
+    fn the_reach_damaten_comparison_stays_out_of_the_summary() {
+        // 統合表示は detailed diagnostics の section で、Summary には足さない。
+        let hand = ["--hand", "340678m789p34789s", "--remaining-tiles", "70"];
+        let default = run_args(&hand).unwrap();
+        assert!(
+            default.contains("\n\nReach / Damaten comparison\n"),
+            "{default}"
+        );
+        // 2手先探索を要求していない局面では self-tsumo の材料を作らない。
+        assert!(default.contains("  self-tsumo: unavailable"), "{default}");
+        assert!(default.contains("    reach baseline"), "{default}");
+
+        let summary_only = run_args(&[hand.as_slice(), &["--summary-only"]].concat()).unwrap();
+        assert!(
+            !summary_only.contains("Reach / Damaten comparison"),
+            "{summary_only}"
+        );
+        assert!(!summary_only.contains("reach baseline"), "{summary_only}");
+        assert!(!summary_only.contains("damaten baseline"), "{summary_only}");
+
+        // --lookahead を付けた場合だけ self-tsumo の比較まで並ぶ。
+        let lookahead = run_args(&[hand.as_slice(), &["--lookahead"]].concat()).unwrap();
+        assert!(
+            lookahead.contains("  self-tsumo (expected tsumo payment)"),
+            "{lookahead}"
+        );
+        assert!(lookahead.contains("    reach now: 1460.235"), "{lookahead}");
+    }
+
+    #[test]
     fn the_self_tsumo_comparison_needs_the_remaining_tiles() {
         // 山の残枚数を渡した局面だけ「今すぐリーチ」と「ダマ継続」を同じ尺度で比べられる。
         // 渡さない局面では推測せず unknown のままにする。

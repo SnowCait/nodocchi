@@ -186,24 +186,6 @@ pub fn damaten_baseline_context(context: &GameContext) -> WinningContext {
         .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES))
 }
 
-/// 選択済みの打牌1件について、その打牌後のテンパイのダマ打点を待ちごとに求める。
-///
-/// `evaluation` は通常打牌 selection が選んだ打牌の評価で、待ち牌種と残枚数はその受け入れ
-/// (`acceptance_after_discard`) をそのまま使う。リーチ判断のために向聴・受け入れ・待ち・
-/// フリテンを計算し直さない。`wait_availability` は同じ打牌から求めた既存のフリテン診断で、
-/// ロン可否を持ち回るためだけに渡す。
-///
-/// 打牌後の手牌を組み立てられない場合 (打牌の物理牌が手牌に無い、完成手を解析できないなど) は
-/// `None`。その場合はダマ打点を推測せず、呼び出し側が既存判断へ委ねる。
-pub(crate) fn evaluate_damaten_value(
-    context: &GameContext,
-    evaluation: &DiscardEvaluation,
-    wait_availability: &TenpaiWaitAvailability,
-) -> Option<DamatenValueDiagnostic> {
-    let hands = tenpai_completed_hands_after_discard(context, evaluation, wait_availability)?;
-    Some(damaten_value_from_hands(context, &hands))
-}
-
 /// 選択済みの打牌1件について、その打牌後のテンパイの待ちごとの完成手を組み立てる。
 ///
 /// 待ち牌種と残枚数は `evaluation` の受け入れ (`acceptance_after_discard`) がそのまま source of

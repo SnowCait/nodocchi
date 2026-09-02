@@ -14,6 +14,7 @@ pub mod open_hand_defense;
 pub mod open_hand_threat;
 pub mod prospective_value;
 pub mod push_pull;
+pub mod reach_damaten_comparison;
 pub mod reach_policy;
 pub mod ryukyoku_decision;
 pub mod tenpai_continuation;
@@ -82,7 +83,8 @@ pub use discard_selection::select_discard_action;
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{
-    OffenseValue, TenpaiOffenseMode, TenpaiOffenseValue, reach_baseline_context,
+    OffenseValue, ReachRonBaselineDiagnostic, ReachRonWaitValue, ReachRonWinningTileValue,
+    TenpaiOffenseMode, TenpaiOffenseValue, reach_baseline_context,
 };
 pub use open_hand_defense::{
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
@@ -114,6 +116,7 @@ pub use push_pull::{
     PushPullTenpaiWaitFacts, StrongTenpaiRequirement, decide_push_pull,
     push_pull_inputs_from_context,
 };
+pub use reach_damaten_comparison::ReachDamatenComparisonDiagnostic;
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
     decide_reach_reason, is_reach_legal,

@@ -959,6 +959,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_selection_does_not_own_the_completed_hands() {
+        // 通常打牌 selection は production の act() でも構築される。完成手 (TenpaiCompletedHands)
+        // は待ちごとの解析を丸ごと所有する重い値なので、診断でしか使わない値を持たせない。
+        // 診断用の field が増えるとこの構築が壊れる。
+        let selection = DiscardActionSelection {
+            evaluation: None,
+            action: None,
+            iishanten_forward_metrics: None,
+            tenpai_wait: None,
+            tenpai_offense_value: None,
+            damaten_value: None,
+        };
+
+        assert_eq!(selection.action, None);
+    }
+
+    #[test]
     fn returns_none_for_empty_legal_actions() {
         let context = GameContext::from_parts(Some(tile(0)), vec![tile(4)]);
         assert_eq!(select_discard_action(&context, &[]), None);

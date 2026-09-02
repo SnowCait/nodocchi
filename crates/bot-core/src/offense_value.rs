@@ -57,8 +57,9 @@
 //! 落ちても同じく [`OffenseValue::Unknown`] にし、ロンできないことを0点として扱わない。
 
 use bot_logic::{
-    DiscardEvaluation, HandValue, Payment, RiichiStatus, TenpaiHandValueProfile,
-    TenpaiWaitAvailability, TileId, WinMethod, WinningContext, evaluate_tenpai_hand_value,
+    DiscardEvaluation, HandValue, Payment, RiichiStatus, TenpaiCompletedHands,
+    TenpaiHandValueProfile, TenpaiWaitAvailability, TileId, TileType, WinMethod, WinningContext,
+    evaluate_tenpai_hand_value,
 };
 
 use crate::action::LegalAction;
@@ -148,6 +149,10 @@ pub struct TenpaiOffenseValue {
 ///
 /// 通常打牌選択・押し引き・リーチ診断が同じ候補を扱う場合に、hand-value evaluation を表示や
 /// policy 診断のためにやり直さず共有するための crate-private result。
+///
+/// 完成手 ([`TenpaiCompletedHands`]) はこの評価の中だけで共有し、結果には持ち回らない。完成手は
+/// 待ちごとの解析を丸ごと所有する重い値なので、診断でしか使わない値のために production の
+/// 打牌選択へ持ち出さない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TenpaiOffenseEvaluation {
     pub offense: TenpaiOffenseValue,
@@ -169,6 +174,99 @@ pub fn reach_baseline_context(context: &GameContext) -> WinningContext {
         .with_ippatsu(Some(BASELINE_IPPATSU))
         .with_chankan(Some(BASELINE_CHANKAN))
         .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES))
+}
+
+/// 和了牌の物理牌1つ分の forced Reach Ron baseline 打点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReachRonWinningTileValue {
+    pub winning_tile: TileId,
+    /// この variant の残枚数。待ち全体の残枚数のうち、赤 / 黒それぞれの枚数。
+    pub remaining: u8,
+    /// 確定した支払い合計 [点]。確定しない場合と役なしの場合は `None`。
+    ///
+    /// 既存 [`variant_total`] そのままで、役なしも点数計算の入力不足も 0 点として扱わない。
+    pub total: Option<u32>,
+}
+
+impl ReachRonWinningTileValue {
+    pub fn is_red(&self) -> bool {
+        self.winning_tile.is_red()
+    }
+}
+
+/// 待ち1牌種分の forced Reach Ron baseline 打点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachRonWaitValue {
+    pub winning_tile: TileType,
+    /// この待ち全体の残枚数。既存の受け入れの値そのもの。
+    pub remaining: u8,
+    /// 和了牌の物理牌ごとの打点。赤5と黒5のどちらもあり得る場合は両方を含む。
+    pub winning_tiles: Vec<ReachRonWinningTileValue>,
+}
+
+/// 今リーチしてロン和了した場合の最低保証打点。
+///
+/// ロンの発生確率は含まない。「その待ちで和了した場合にいくら入るか」であって期待値ではないので、
+/// 確率込みの期待ツモ支払いと直接足し合わせない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachRonBaselineDiagnostic {
+    /// 打点比較に使った hypothetical baseline。実際の和了状況ではない。
+    pub baseline: WinningContext,
+    pub waits: Vec<ReachRonWaitValue>,
+    /// 生きた待ちの残枚数加重集計。既存 [`weighted_average`] と同じ集約規則。
+    pub value: OffenseValue,
+}
+
+impl ReachRonBaselineDiagnostic {
+    /// 和了牌の物理牌ごとの打点を待ちの順に並べた iterator。
+    pub fn winning_tile_values(&self) -> impl Iterator<Item = &ReachRonWinningTileValue> {
+        self.waits.iter().flat_map(|wait| wait.winning_tiles.iter())
+    }
+}
+
+/// 組み立て済みの完成手を、リーチの hypothetical baseline で評価して待ちごとのロン打点へ畳む。
+///
+/// baseline も裏ドラの扱いも押し引きのリーチ打点と同じ [`reach_baseline_context`] /
+/// [`BASELINE_URA_DORA_INDICATORS`] で、一発・裏ドラ・河底のような上振れを含めない最低保証
+/// 打点になる。完成手はダマ打点が評価したものと同じ集合を受け取り、待ちも受け入れも完成手も
+/// ここで組み立て直さない。
+///
+/// リーチ後はフリテンでもツモ和了できるため、ダマ打点と違いロン可否を評価の入口条件にしない。
+/// 押し引きのリーチ打点 ([`scoring_inputs`]) と同じ扱いで、フリテンかどうかは
+/// [`TenpaiWaitAvailability`] 側の独立した観測値のまま残す。
+pub(crate) fn reach_ron_baseline_from_hands(
+    context: &GameContext,
+    hands: &TenpaiCompletedHands,
+) -> ReachRonBaselineDiagnostic {
+    let baseline = reach_baseline_context(context);
+    let profile = evaluate_tenpai_hand_value(
+        hands,
+        baseline,
+        context.dora_indicators(),
+        Some(BASELINE_URA_DORA_INDICATORS),
+    );
+
+    ReachRonBaselineDiagnostic {
+        baseline,
+        waits: profile
+            .waits()
+            .iter()
+            .map(|wait| ReachRonWaitValue {
+                winning_tile: wait.winning_tile(),
+                remaining: wait.remaining(),
+                winning_tiles: wait
+                    .winning_tiles()
+                    .iter()
+                    .map(|variant| ReachRonWinningTileValue {
+                        winning_tile: variant.winning_tile(),
+                        remaining: variant.remaining(),
+                        total: variant_total(variant),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        value: offense_value(&profile),
+    }
 }
 
 /// 選択済みの打牌1件について、その打牌後のテンパイを攻撃継続した場合の打点を求める。

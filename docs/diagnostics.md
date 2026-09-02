@@ -16,6 +16,7 @@
 | `Player threats` | player ごとの reach / meld facts と OpenHandThreat classification |
 | `Push/Pull` | threat と offense を組み合わせた押し引き |
 | `Reach` | 通常打牌後のテンパイに対するリーチ判断 |
+| `Reach / Damaten comparison` | Reach / Damaten の判断材料をまとめた統合観測 (diagnostics only) |
 | `Defense` | リーチ者向け防御候補のうち採用したもの |
 | `Defense candidates` | 全合法 Dahai の防御評価 |
 | `OpenHand defense` | High OpenHandThreat 向け防御候補 |
@@ -166,6 +167,42 @@ Reach
 ```
 
 `tenpai waits` は構造上の待ち、`live tenpai waits` は見え牌を反映して残っている待ちです。`ron` は恒常フリテンと `history furiten after discard` を合わせた総合ロン可否です。フリテンについては [フリテン](ai/furiten.md) を参照してください。
+
+`damaten verdict` はダマ打点から畳んだ結論だけで、待ちごとの実点数は下の `Reach / Damaten comparison` がリーチ Ron baseline と並べて出します。
+
+## Reach / Damaten comparison
+
+`Reach / Damaten comparison` は、選んだ打牌1件について Reach / Damaten の判断材料を1か所へ並べた観測です。`Reach` と同じく押し引きが `Push` のときだけ評価します。
+
+```text
+Reach / Damaten comparison
+  diagnostics only, not connected to the Reach / Damaten decision
+  discard: 3s
+  production
+    reason: EligibleNoDamatenYaku
+    selected: yes
+  self-tsumo (expected tsumo payment)
+    reach now: 1460.235
+    damaten continuation: 2094.467
+    damaten immediate tsumo: 49.180
+    damaten after non-winning draw: 2045.286
+  Ron (payment when winning, no ron probability)
+    reach legal: yes
+    reach baseline
+      weighted average: 2600
+      weighted total: 7800
+      4s: 3 remaining / 2600
+    can ron: yes
+    damaten baseline
+      verdict: NoYaku
+      4s: 3 remaining / no yaku
+```
+
+`production` は既存のリーチ判断の結論そのものです。`self-tsumo` は選んだ打牌に対応する `Tenpai continuation` の候補1件の比較そのもので、`--lookahead` を指定していない局面では `self-tsumo: unavailable` になります (統合表示のために2手先探索を追加しません)。`reach baseline` だけが今回新しく評価する観測値で、その点数計算は診断経路だけで行います。
+
+`Ron` の2つの baseline はどちらも「その待ちで和了した場合の支払い」で、**ロンの発生確率を含みません**。`reach baseline` は今リーチした場合の最低保証打点 (リーチ1翻を含み、一発・裏ドラ・河底は加算しない) で、合法手に `LegalAction::Reach` があり、かつ `TenpaiWaitAvailability::can_ron() == Some(true)` の場合だけ評価します。リーチが非合法、フリテン、ロン可否 unknown の場合は `unavailable` です。`damaten baseline` は production 判断が評価したダマ打点そのもので、ダマでロンできない局面とロン可否が unknown の局面では評価しないまま `unavailable` になります (0 点として扱いません)。
+
+**self-tsumo と Ron baseline は単位の違う別の軸で、足した合計は出しません。** フリテンやロン可否 unknown で Ron baseline が `unavailable` でも、self-tsumo はその軸の入力があれば引き続き評価します。winner も新しい `should_reach` も持たず、production の Reach / Damaten 判断には接続していません。詳細は [打牌選択](ai/discard-selection.md#reach--damaten-の判断材料-diagnostics-only) を参照してください。
 
 ## Defense
 

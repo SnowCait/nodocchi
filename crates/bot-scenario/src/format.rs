@@ -8,11 +8,11 @@ use bot_core::{
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
     ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
-    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDecisionDiagnostic,
-    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic,
-    StrongTenpaiRequirement, TenpaiContinuationBranch, TenpaiContinuationCandidate,
-    TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
-    ThreatDefenseTarget,
+    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
+    ReachDecisionDiagnostic, ReachRonBaselineDiagnostic, RyukyokuDecisionDiagnostic,
+    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
+    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
+    TenpaiOffenseValue, TenpaiSelfTsumoComparison, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -29,6 +29,8 @@ const NONE: &str = "none";
 const ABSENT: &str = "-";
 const UNKNOWN: &str = "unknown";
 const NOT_EVALUATED: &str = "not evaluated";
+// 評価していない値。0 点と混同しないよう、確定した打点とは別の表記にする。
+const UNAVAILABLE: &str = "unavailable";
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
@@ -76,6 +78,9 @@ pub fn format_diagnostic(
         diagnostic.push_pull_decision.as_ref(),
     ));
     sections.push(format_reach(diagnostic.reach.as_ref()));
+    sections.push(format_reach_damaten_comparison(
+        diagnostic.reach_damaten_comparison.as_ref(),
+    ));
     sections.push(format_defense(diagnostic.defense.as_ref()));
 
     if let Some(section) = format_defense_candidates(diagnostic.defense.as_ref()) {
@@ -1481,17 +1486,153 @@ fn format_reach(reach: Option<&ReachDecisionDiagnostic>) -> String {
     lines.join("\n")
 }
 
-// ダマ打点。判断に使った値そのもので、表示専用に打点を求め直さない。ダマでロンできない場合と
-// ロン可否が unknown の場合は評価していないので、その旨だけを出す。
+// ダマ打点による production の結論。判断に使った値そのもので、表示専用に打点を求め直さない。
+// ダマでロンできない場合とロン可否が unknown の場合は評価していないので、その旨だけを出す。
+//
+// 待ちごとの打点は、リーチ Ron baseline と並べて比べられる `Reach / Damaten comparison` の
+// ダマ baseline が出す。同じ値をこの節でも並べない。
 fn format_damaten_value(damaten: Option<&DamatenValueDiagnostic>) -> Vec<String> {
     let Some(damaten) = damaten else {
         return vec![format!("  damaten value: {NONE}")];
     };
 
-    let mut lines = vec![format!("  damaten verdict: {:?}", damaten.verdict)];
+    vec![format!("  damaten verdict: {:?}", damaten.verdict)]
+}
+
+// Reach / Damaten の判断材料をまとめた統合表示。
+//
+// self-tsumo と Ron は単位の違う別の軸なので、節の中でも別の軸として並べる。self-tsumo は
+// 自摸確率を含んだ期待支払い、Ron baseline は「その待ちで和了した場合の支払い」で、ロンの
+// 発生確率を含まない。したがって2つを足した合計も、どちらを選ぶかの結論も出さない。
+//
+// self-tsumo と production facts は判断と既存診断が持つ値そのままで、この節のために探索も集計も
+// やり直さない。リーチ Ron baseline だけは診断が評価した観測値で、表示側で求め直さない。
+fn format_reach_damaten_comparison(
+    comparison: Option<&ReachDamatenComparisonDiagnostic>,
+) -> String {
+    let mut lines = vec!["Reach / Damaten comparison".to_string()];
+
+    let Some(comparison) = comparison else {
+        lines.push(format!("  {NOT_EVALUATED}"));
+        return lines.join("\n");
+    };
+
+    lines.push("  diagnostics only, not connected to the Reach / Damaten decision".to_string());
+    match comparison.selected_discard.as_ref() {
+        Some(action) => lines.push(format!("  discard: {}", action_label(action))),
+        None => lines.push(format!("  discard: {NONE}")),
+    }
+
+    lines.push("  production".to_string());
+    lines.push(format!("    reason: {:?}", comparison.production_reason));
+    lines.push(format!(
+        "    selected: {}",
+        yes_no(comparison.production_should_reach)
+    ));
+
+    lines.extend(format_comparison_self_tsumo(comparison));
+    lines.extend(format_comparison_ron(comparison));
+
+    lines.join("\n")
+}
+
+// 確率込みの期待ツモ支払い。継続診断が持つ値そのもので、2手先探索を要求していない局面と選んだ
+// 打牌に対応する継続候補が無い局面では材料が無いことだけを出す。
+fn format_comparison_self_tsumo(comparison: &ReachDamatenComparisonDiagnostic) -> Vec<String> {
+    let Some(self_tsumo) = comparison.self_tsumo else {
+        return vec![format!("  self-tsumo: {UNAVAILABLE}")];
+    };
+
+    vec![
+        "  self-tsumo (expected tsumo payment)".to_string(),
+        format!(
+            "    reach now: {}",
+            format_self_tsumo_value(self_tsumo.reach_now)
+        ),
+        format!(
+            "    damaten continuation: {}",
+            format_self_tsumo_value(self_tsumo.damaten_continuation())
+        ),
+        format!(
+            "    damaten immediate tsumo: {}",
+            format_self_tsumo_value(self_tsumo.damaten_immediate_tsumo)
+        ),
+        format!(
+            "    damaten after non-winning draw: {}",
+            format_self_tsumo_value(self_tsumo.damaten_continuation_branches)
+        ),
+    ]
+}
+
+// 和了した場合の支払い。ロンの発生確率を含まないので、self-tsumo の期待支払いとは足さない。
+//
+// リーチ側は「今リーチしてその待ちでロンした場合」の最低保証打点、ダマ側は production 判断が
+// 評価したダマ打点そのもの。どちらもロンできない局面とロン可否が unknown の局面は評価して
+// いないので、0 点ではなく評価していないことを出す。
+fn format_comparison_ron(comparison: &ReachDamatenComparisonDiagnostic) -> Vec<String> {
+    let mut lines = vec![
+        "  Ron (payment when winning, no ron probability)".to_string(),
+        format!("    reach legal: {}", yes_no(comparison.reach_legal)),
+    ];
+    lines.extend(format_reach_ron_baseline(
+        comparison.reach_ron_baseline.as_ref(),
+    ));
+    lines.push(format!(
+        "    can ron: {}",
+        format_optional_yes_no(comparison.can_ron)
+    ));
+    lines.extend(format_damaten_ron_baseline(
+        comparison.damaten_ron_value.as_ref(),
+    ));
+    lines
+}
+
+// リーチしてロン和了した場合の最低保証打点。リーチ1翻を含み、一発・裏ドラ・河底は含まない。
+// 集約は押し引きの攻撃打点と同じ残枚数加重で、赤5 / 黒5は別 variant のまま並べる。
+fn format_reach_ron_baseline(baseline: Option<&ReachRonBaselineDiagnostic>) -> Vec<String> {
+    let Some(baseline) = baseline else {
+        return vec![format!("    reach baseline: {UNAVAILABLE}")];
+    };
+
+    let mut lines = vec![
+        "    reach baseline".to_string(),
+        format!(
+            "      weighted average: {}",
+            offense_value_label(baseline.value)
+        ),
+        format!(
+            "      weighted total: {}",
+            weighted_total_label(baseline.value)
+        ),
+    ];
+    for winning_tile in baseline.winning_tile_values() {
+        lines.push(format!(
+            "      {}: {} remaining / {}",
+            winning_tile.winning_tile.to_mjai_string(),
+            winning_tile.remaining,
+            match winning_tile.total {
+                Some(total) => total.to_string(),
+                None => UNKNOWN.to_string(),
+            }
+        ));
+    }
+    lines
+}
+
+// ダマのままロン和了した場合の打点。production 判断が評価した診断そのもので、表示のために
+// 点数計算をやり直さない。
+fn format_damaten_ron_baseline(damaten: Option<&DamatenValueDiagnostic>) -> Vec<String> {
+    let Some(damaten) = damaten else {
+        return vec![format!("    damaten baseline: {UNAVAILABLE}")];
+    };
+
+    let mut lines = vec![
+        "    damaten baseline".to_string(),
+        format!("      verdict: {:?}", damaten.verdict),
+    ];
     for winning_tile in damaten.winning_tile_values() {
         lines.push(format!(
-            "    {}: {} remaining / {}",
+            "      {}: {} remaining / {}",
             winning_tile.winning_tile.to_mjai_string(),
             winning_tile.remaining,
             damaten_value_label(winning_tile.value)
@@ -2669,6 +2810,7 @@ mod tests {
                 | "Tenpai continuation"
                 | "Push/Pull"
                 | "Reach"
+                | "Reach / Damaten comparison"
                 | "Defense"
                 | "Defense candidates"
                 | "OpenHand defense"
@@ -5536,7 +5678,13 @@ mod tests {
             reach.contains("  damaten verdict: AboveThreshold"),
             "{reach}"
         );
-        assert!(reach.contains("    6s: 4 remaining / 7700"), "{reach}");
+        // 待ちごとの実点数は、リーチ Ron baseline と並ぶ統合表示のダマ baseline が出す。
+        assert!(!reach.contains("    6s: 4 remaining"), "{reach}");
+        let comparison = section(&output, "Reach / Damaten comparison");
+        assert!(
+            comparison.contains("      6s: 4 remaining / 7700"),
+            "{comparison}"
+        );
 
         // 表示は診断が持つ値そのもので、表示専用に打点を求め直さない。
         let damaten = decision
@@ -5565,7 +5713,11 @@ mod tests {
             reach.contains("  damaten verdict: BelowThreshold"),
             "{reach}"
         );
-        assert!(reach.contains("    6s: 4 remaining / 3900"), "{reach}");
+        let comparison = section(&output, "Reach / Damaten comparison");
+        assert!(
+            comparison.contains("      6s: 4 remaining / 3900"),
+            "{comparison}"
+        );
     }
 
     #[test]
@@ -5580,10 +5732,18 @@ mod tests {
             reach.contains("  damaten verdict: Indeterminate"),
             "{reach}"
         );
-        // 赤5と黒5は別 variant として並ぶ。
-        assert!(reach.contains("    5sr: 1 remaining / unknown"), "{reach}");
-        assert!(reach.contains("    5s: 2 remaining / unknown"), "{reach}");
         assert!(reach.contains("  reason: Eligible"), "{reach}");
+
+        // 赤5と黒5は別 variant として並ぶ。
+        let comparison = section(&output, "Reach / Damaten comparison");
+        assert!(
+            comparison.contains("      5sr: 1 remaining / unknown"),
+            "{comparison}"
+        );
+        assert!(
+            comparison.contains("      5s: 2 remaining / unknown"),
+            "{comparison}"
+        );
     }
 
     #[test]
@@ -5601,6 +5761,168 @@ mod tests {
         );
         assert!(reach.contains("  ron: unknown"), "{reach}");
         assert!(reach.contains("  damaten value: none"), "{reach}");
+    }
+
+    // ---- Reach / Damaten comparison 表示 ----
+
+    #[test]
+    fn the_comparison_section_lines_up_both_ron_baselines() {
+        // リーチ Ron baseline はリーチ1翻を含む最低保証打点、ダマ側は production 判断が評価した
+        // 打点そのもの。どちらも和了した場合の支払いで、ロンの発生確率は含まない。
+        let (_, diagnostic, output) = rendered(DAMATEN_LOW_VALUE_SCENARIO, false);
+        let comparison = section(&output, "Reach / Damaten comparison");
+        let facts = diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断がある");
+
+        assert!(comparison.contains("  discard: N"), "{comparison}");
+        assert!(
+            comparison.contains("  production\n    reason: EligibleLowValue\n    selected: yes"),
+            "{comparison}"
+        );
+        assert!(
+            comparison.contains(
+                &[
+                    "  Ron (payment when winning, no ron probability)",
+                    "    reach legal: yes",
+                    "    reach baseline",
+                    "      weighted average: 7700",
+                    "      weighted total: 30800",
+                    "      6s: 4 remaining / 7700",
+                    "    can ron: yes",
+                    "    damaten baseline",
+                    "      verdict: BelowThreshold",
+                    "      6s: 4 remaining / 3900",
+                ]
+                .join("\n")
+            ),
+            "{comparison}"
+        );
+
+        // 表示は診断が持つ値そのもので、表示専用に打点を求め直さない。
+        assert_eq!(
+            facts
+                .reach_ron_baseline
+                .as_ref()
+                .expect("リーチ Ron baseline がある")
+                .winning_tile_values()
+                .map(|value| value.total)
+                .collect::<Vec<_>>(),
+            [Some(7700)]
+        );
+        // 2つの軸を足した aggregate は表示にも診断にも無い。
+        assert!(!comparison.contains("38500"), "{comparison}");
+    }
+
+    #[test]
+    fn the_comparison_section_has_no_self_tsumo_without_the_lookahead() {
+        // 統合表示のために2手先探索を追加しない。材料が無いことをそのまま出す。
+        let (_, diagnostic, output) = rendered(DAMATEN_LOW_VALUE_SCENARIO, false);
+        let comparison = section(&output, "Reach / Damaten comparison");
+
+        assert!(diagnostic.normal_discard_tenpai_continuation.is_none());
+        assert!(
+            comparison.contains(&format!("  self-tsumo: {UNAVAILABLE}")),
+            "{comparison}"
+        );
+    }
+
+    #[test]
+    fn the_comparison_section_keeps_furiten_ron_unavailable_but_self_tsumo_available() {
+        // リーチが合法でもフリテンなら両 Ron baseline は評価しない。Tsumo 側は独立して表示する。
+        // 山の残枚数など self-tsumo の入力も揃え、どちらの選択打牌でも待ちが自分の河と重なる
+        // 局面にする。
+        let rendered = rendered_with_lookahead_diagnostic(
+            r#"{
+                "hand": "234567789m345p10s",
+                "round_wind": "E",
+                "player_id": 0,
+                "oya": 1,
+                "remaining_tiles": 70,
+                "discards": ["1s 5s", "", "", ""],
+                "legal_dahai": "1s",
+                "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+            }"#,
+            false,
+        );
+        let comparison = section(&rendered.rendered, "Reach / Damaten comparison");
+        let facts = rendered
+            .diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断がある");
+
+        assert!(facts.reach_legal);
+        assert_eq!(facts.can_ron, Some(false));
+        assert_eq!(facts.reach_ron_baseline, None);
+        assert_eq!(facts.damaten_ron_value, None);
+        assert!(facts.reach_now_self_tsumo().is_some());
+        assert!(facts.damaten_continuation_self_tsumo().is_some());
+        assert!(comparison.contains("    reach legal: yes"), "{comparison}");
+        assert!(
+            comparison.contains(&format!("    reach baseline: {UNAVAILABLE}")),
+            "{comparison}"
+        );
+        assert!(comparison.contains("    can ron: no"), "{comparison}");
+        assert!(
+            comparison.contains(&format!("    damaten baseline: {UNAVAILABLE}")),
+            "{comparison}"
+        );
+        assert!(
+            comparison.contains("  self-tsumo (expected tsumo payment)\n    reach now:"),
+            "{comparison}"
+        );
+        assert!(!comparison.contains("baseline: 0"), "{comparison}");
+    }
+
+    #[test]
+    fn the_comparison_section_keeps_an_unknown_ron_availability_unavailable() {
+        // ロン可否が unknown なら非フリテンだと推測せず、ダマ打点も評価しない。
+        let (_, diagnostic, output) = rendered(REACH_SCENARIO, false);
+        let comparison = section(&output, "Reach / Damaten comparison");
+
+        let facts = diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断がある");
+        assert!(facts.reach_legal);
+        assert_eq!(facts.can_ron, None);
+        assert_eq!(facts.reach_ron_baseline, None);
+        assert_eq!(facts.damaten_ron_value, None);
+        assert!(comparison.contains("    reach legal: yes"), "{comparison}");
+        assert!(
+            comparison.contains(&format!("    reach baseline: {UNAVAILABLE}")),
+            "{comparison}"
+        );
+        assert!(comparison.contains("    can ron: unknown"), "{comparison}");
+        assert!(
+            comparison.contains(&format!("    damaten baseline: {UNAVAILABLE}")),
+            "{comparison}"
+        );
+    }
+
+    #[test]
+    fn the_comparison_section_is_not_evaluated_outside_push() {
+        // 防御局面 (Fold) ではリーチを検討しないので、統合診断も作らない。
+        let (_, diagnostic, output) = rendered(DEFENSE_SCENARIO, false);
+
+        assert!(diagnostic.reach_damaten_comparison.is_none());
+        assert_eq!(
+            section(&output, "Reach / Damaten comparison"),
+            "Reach / Damaten comparison\n  not evaluated"
+        );
+    }
+
+    #[test]
+    fn the_summary_does_not_grow_with_the_comparison() {
+        // Summary には self-tsumo も Ron baseline の詳細も足さない。
+        let (_, _, output) = rendered(DAMATEN_LOW_VALUE_SCENARIO, false);
+        let summary = summary_section(&output);
+
+        assert!(!summary.contains("reach baseline"), "{summary}");
+        assert!(!summary.contains("damaten baseline"), "{summary}");
+        assert!(!summary.contains("self-tsumo"), "{summary}");
     }
 
     #[test]
@@ -6746,6 +7068,66 @@ mod tests {
         assert!(
             comparison.damaten_continuation().is_some(),
             "{continuation}"
+        );
+    }
+
+    #[test]
+    fn the_comparison_section_reuses_the_selected_discard_self_tsumo() {
+        // 通常打牌 selection が選んだ打 3s に対応する継続候補の値そのものを統合表示へ載せる。
+        // 統合のために探索も集計もやり直さない。
+        let rendered = &*TENPAI_CONTINUATION_REAL;
+        let comparison = section(&rendered.rendered, "Reach / Damaten comparison");
+        let candidate = tenpai_continuation_self_tsumo(rendered, "3s");
+        let facts = rendered
+            .diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断がある");
+
+        assert_eq!(facts.self_tsumo, Some(candidate));
+        assert!(comparison.contains("  discard: 3s"), "{comparison}");
+        assert!(
+            comparison.contains(
+                &[
+                    "  self-tsumo (expected tsumo payment)",
+                    &format!(
+                        "    reach now: {}",
+                        format_self_tsumo_value(candidate.reach_now)
+                    ),
+                    &format!(
+                        "    damaten continuation: {}",
+                        format_self_tsumo_value(candidate.damaten_continuation())
+                    ),
+                    &format!(
+                        "    damaten immediate tsumo: {}",
+                        format_self_tsumo_value(candidate.damaten_immediate_tsumo)
+                    ),
+                    &format!(
+                        "    damaten after non-winning draw: {}",
+                        format_self_tsumo_value(candidate.damaten_continuation_branches)
+                    ),
+                ]
+                .join("\n")
+            ),
+            "{comparison}"
+        );
+
+        // 別候補 (打 4s) の値を結び付けない。
+        assert_ne!(
+            rendered
+                .diagnostic
+                .normal_discard_tenpai_continuation
+                .as_ref()
+                .expect("継続診断がある")
+                .candidates
+                .iter()
+                .find(|other| other.discard.to_mjai_string() == "4s")
+                .map(|other| other.self_tsumo),
+            None
+        );
+        assert_eq!(
+            facts.selected_discard.as_ref().map(action_label),
+            Some("3s".to_string())
         );
     }
 
