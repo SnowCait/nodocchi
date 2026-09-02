@@ -178,9 +178,9 @@ horizon は「1ツモ → 1打牌 → 次の聴牌」で必ず打ち切り、2�
 
 対象は自分が未リーチと確定している局面だけです。既にリーチしていればダマで継続する選択肢が無いので探索せず、自分の席が分からず未リーチかどうかを判断できない局面でも未リーチだとは推測せず探索しません。
 
-### 「今すぐリーチ」と「ダマで1巡継続」の比較
+### 「今すぐリーチ」と「1巡 defer」の counterfactual 比較
 
-同じ候補について、次の2つを [`expected self-tsumo value`](#1向聴-expectedselftsumovalue) と同じ確率模型・同じ単位 (期待ツモ支払い) で並べます。
+同じ候補について、次の4つを [`expected self-tsumo value`](#1向聴-expectedselftsumovalue) と同じ確率模型・同じ単位 (期待ツモ支払い) で並べます。
 
 ```text
 U0 = 現在打牌後の unknown physical tiles
@@ -190,9 +190,11 @@ reach now
   = 現在聴牌を forced Reach の Tsumo baseline で評価した TenpaiTsumoValue を、
     残り自摸機会 n 全体の閉形式へ通した期待支払い
 
-damaten continuation
-  = ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い (Damaten Tsumo baseline)
-  + Σ(非和了牌 variant を最初に引く経路確率 × その先の terminal tenpai の期待支払い)
+defer → production
+defer → forced Reach
+defer → forced Damaten
+  = 共通の、最初の1自摸で現在待ちを引く Damaten Tsumo
+  + Σ(共通の非和了牌 variant の経路確率 × mode 別 terminal tenpai の期待支払い)
 ```
 
 `reach now` は「今リーチして手変わりせず、現在の待ちのまま残り自摸機会を使い切る」という仮定の値で、production が現在ダマを選ぶかどうかとは無関係な forced Reach baseline です。現在局面でリーチできるかは production のリーチ判断と同じく実際の合法手 (`LegalAction::Reach`) だけが source of truth で、合法手にリーチが無ければ値を作らず unavailable にします。局面から合法条件を組み立て直しません。
@@ -204,11 +206,17 @@ damaten continuation
 継続後の未来テンパイ → 既存の将来テンパイ Reach 判定
 ```
 
-ダマ側の手変わりは1回だけです。terminal tenpai へ到達した後は既存の閉形式で残り自摸機会全体を評価するので、継続後の unknown tiles と自摸機会は経路の semantics どおり `U0 - 1` / `n - 1` になります。継続後のテンパイでリーチするかダマのままかは既存の将来打点評価が決めたモードのままで、「今ダマを選んだから未来もダマ」とは固定しません。ダマツモで実際に和了できる牌は最初の1自摸の枝としてだけ数え、継続枝には現れないので二重計上にはなりません。役が無くて和了できない牌は逆に、即ツモ側 (ツモ baseline で役の無い待ちを成功する待ちに含めない既存の集計) から外れ、継続枝側だけが数えます。副露手では `reach now` が unavailable でも、ダマ側の値は評価できる限り出します。
+従来 `damaten continuation` と表示していた値は、**将来も強制ダマにする値ではありません**。「今はリーチせず1巡待つ」ものの、terminal tenpai の mode は既存 `decide_reach_reason()` が選ぶ production policy でした。この production continuation は意味を変えず `defer → production` として残し、今回 `defer → forced Reach` と `defer → forced Damaten` を counterfactual として分離しました。
+
+3つの defer は、最初のツモ、非和了牌の物理 variant、既存 selector が選んだ `next discard`、`SelfTsumoPath::immediate()` をすべて共有します。切り替えるのは同じ terminal tenpai に適用する Reach / Damaten Tsumo baseline だけです。`defer → forced Reach` は既存の将来 Reach legality が合法とした枝だけを Reach baseline で評価し、違法な枝は 0 点ではなく unavailable にします。`defer → forced Damaten` は Ron の役有無ではなく既存 Damaten Tsumo baseline を使い、副露手で Tsumo が役なしになる physical variant は既存 semantics どおり成功待ちに含めません。
+
+手変わりは1回だけです。terminal tenpai へ到達した後は既存の閉形式で残り自摸機会全体を評価するので、継続後の unknown tiles と自摸機会は経路の semantics どおり `U0 - 1` / `n - 1` になります。ダマツモで実際に和了できる現在待ちは、3 mode 共通の最初の1自摸として1回だけ構築し、継続枝には入れないため二重計上しません。役が無くて和了できない牌は逆に即ツモ側から外れ、継続枝側だけが数えます。
+
+`reach now` と `defer → forced Reach` を比べることで、既存 Reach / Damaten threshold から独立して「今すぐリーチするか、1巡だけ手変わりを見るか」を観測できます。これは診断値であり、production Reach policy は変更していません。
 
 材料が揃わない場合は 0 点ではなく値を持ちません。山の残枚数が分からず自摸機会を確定できない局面、ツモ打点を確定できない現在聴牌、terminal tenpai のツモ打点が確定しない継続枝はどれも `None` です。
 
-**この比較も diagnostics 専用で、どちらを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、リーチ判断にも打牌選択にも接続していません。
+**この比較も diagnostics 専用で、どれを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、リーチ判断にも打牌選択にも接続していません。Ron probability は含まず、self-tsumo と Ron baseline の aggregate も作りません。
 
 ## Reach / Damaten の判断材料 (diagnostics only)
 
@@ -218,7 +226,7 @@ damaten continuation
 Reach / Damaten comparison
   discard                          通常打牌 selection が実際に選んだ打牌
   production                       既存 Reach 判断の reason と採否
-  self-tsumo                       reach now / damaten continuation の期待ツモ支払い
+  self-tsumo                       reach now / 3つの defer counterfactual の期待ツモ支払い
   Ron                              reach legal / 2つの Ron baseline / ロン可否 / ダマ verdict
 ```
 
@@ -242,7 +250,7 @@ nodocchi はまだ「他家がその牌を切る確率」の模型を持たな�
 
 `reach baseline` の評価は**診断経路だけ**で行います。通常の `act()` はこの層を通らないので、完成手 (`TenpaiCompletedHands`) の組み立ても hand-value evaluation も production には入りません。完成手は待ちごとの解析を丸ごと所有する重い値なので、診断のために production の打牌選択へ持ち回らせません。リーチ判断がダマ打点のために組み立てた集合があればその所有権をそのまま受け取り、無い経路でだけ選んだ打牌1件について既存 helper で1回組み立てます (待ちは既存の受け入れから求めるので、向聴も受け入れも計算し直しません)。
 
-フリテンでロンできない局面でも、Tsumo 側の `reach now` と `damaten continuation` はそれぞれの既存入力に従う独立した軸として評価します。逆に、ツモれることを理由に `reach baseline` を含む Ron 側の値を確定させることもしません。
+フリテンでロンできない局面でも、Tsumo 側の `reach now` と3つの defer counterfactual はそれぞれの既存入力に従う独立した軸として評価します。逆に、ツモれることを理由に `reach baseline` を含む Ron 側の値を確定させることもしません。
 
 **この統合診断も diagnostics 専用です。** production の Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持たず、構築の有無は最終 action を変えません。
 

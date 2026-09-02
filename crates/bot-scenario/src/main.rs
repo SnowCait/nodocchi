@@ -648,21 +648,30 @@ mod tests {
 
     #[test]
     fn the_self_tsumo_comparison_needs_the_remaining_tiles() {
-        // 山の残枚数を渡した局面だけ「今すぐリーチ」と「ダマ継続」を同じ尺度で比べられる。
+        // 山の残枚数を渡した局面だけ「今すぐリーチ」と「1巡 defer」を同じ尺度で比べられる。
         // 渡さない局面では推測せず unknown のままにする。
         let hand = ["--hand", "340678m789p34789s", "--lookahead"];
         let unknown = run_args(&hand).unwrap();
-        assert!(unknown.contains("      reach now: unknown"), "{unknown}");
-
         let known = run_args(&[hand.as_slice(), &["--remaining-tiles", "70"]].concat()).unwrap();
-        assert!(!known.contains("      reach now: unknown"), "{known}");
-        for line in [
+
+        assert!(unknown.contains("      defer one draw"), "{unknown}");
+        assert!(known.contains("      defer one draw"), "{known}");
+        for label in [
             "      reach now: ",
-            "      damaten continuation: ",
-            "      damaten immediate tsumo: ",
-            "      damaten after non-winning draw: ",
+            "        production policy: ",
+            "        forced Reach: ",
+            "        forced Damaten: ",
+            "        immediate Damaten tsumo: ",
         ] {
-            assert!(known.contains(line), "{line}\n{known}");
+            assert!(
+                unknown.contains(&format!("{label}unknown")),
+                "{label}\n{unknown}"
+            );
+            assert!(known.contains(label), "{label}\n{known}");
+            assert!(
+                !known.contains(&format!("{label}unknown")),
+                "{label}\n{known}"
+            );
         }
     }
 

@@ -48,7 +48,8 @@
 //!
 //! # self-tsumo 比較
 //!
-//! 「今すぐリーチする」と「ダマで1巡継続する」を、既存 self-tsumo 確率模型
+//! 「今すぐリーチする」と「1巡 defer してから3つの terminal mode で評価する」を、既存
+//! self-tsumo 確率模型
 //! ([`bot_logic::self_tsumo`](bot_logic)) の期待ツモ支払い
 //! [[`SELF_TSUMO_VALUE_SCALE`](bot_logic::SELF_TSUMO_VALUE_SCALE)] という同じ単位へ揃える。
 //!
@@ -59,20 +60,21 @@
 //! reach now         = 現在聴牌の forced Reach Tsumo baseline を
 //!                     TenpaiTsumoValue::expected_payment(U0, n) で評価
 //!
-//! damaten           = 現在聴牌の Damaten Tsumo baseline を最初の1自摸だけ
-//!   immediate tsumo   評価した expected_payment(U0, 1)
+//! immediate         = 現在聴牌の Damaten Tsumo baseline を最初の1自摸だけ
+//!   Damaten tsumo     評価した expected_payment(U0, 1)。3 defer mode で共有
 //!
-//! damaten           = Σ(非和了牌 variant を最初に引く経路確率
-//!   continuation         × その先の terminal tenpai の期待ツモ支払い)
-//!   branches
+//! defer production      = immediate + production terminal branches
+//! defer forced Reach    = immediate + forced Reach terminal branches
+//! defer forced Damaten  = immediate + forced Damaten terminal branches
 //! ```
 //!
 //! 経路確率も terminal tenpai の horizon も既存 [`SelfTsumoPath::immediate`] そのままなので、
 //! 継続後は自然に `U0 - 1` / `n - 1` になる。この `-1` をこの層が数え直すことはない。
-//! terminal tenpai のツモ打点も、既存2手先評価が枝に持っている
-//! [`DrawVariantLookaheadDiagnostic::tsumo_continuation`] をそのまま使う。したがって継続後の
-//! Reach / Damaten も既存 prospective evaluation が決めたモードのままで、「今ダマを選んだから
-//! 未来もダマ」と固定しない。
+//! production terminal のツモ打点は、既存2手先評価が枝に持っている
+//! [`DrawVariantLookaheadDiagnostic::tsumo_continuation`] をそのまま使う。forced 2 mode は同じ
+//! terminal tenpai の既存 scoring facts へ別 baseline だけを適用する。3 mode で仮想ツモ枝も
+//! next discard も経路も変えない。従来 `damaten continuation` と呼んでいた値は将来を forced
+//! Damaten にするものではなく、この production terminal mode の値である。
 //!
 //! ダマツモで実際に和了できる牌は最初の自摸で引く枝としてだけ数え、継続枝には現れないので
 //! 二重計上にならない。役が無くて和了できない牌は逆に、即ツモ側の集計 (ツモ baseline で役の
@@ -148,7 +150,7 @@ pub struct TenpaiContinuationCandidate {
     ///
     /// 待ちが変わる枝と、ツモ切りで元の待ちを維持する枝の両方を含む。
     pub branches: Vec<TenpaiContinuationBranch>,
-    /// 「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べた比較。
+    /// 「今すぐリーチ」と3つの「1巡 defer」を同じ期待ツモ支払いで並べた比較。
     pub self_tsumo: TenpaiSelfTsumoComparison,
 }
 
@@ -185,7 +187,8 @@ pub struct TenpaiContinuationBranch {
     pub draw_remaining: u8,
     /// 物理牌 variant 単位の枝。次打牌・将来打点は既存診断が持つ値そのもの。
     pub variant: ProspectiveDrawVariantValue,
-    /// 継続後の terminal tenpai のツモ打点。既存2手先評価が枝に持っている値そのもの。
+    /// 継続後の terminal tenpai を production policy の mode で評価したツモ打点。
+    /// 既存2手先評価が枝に持っている値そのもの。
     ///
     /// ツモ打点を確定できない枝 (攻撃モードが [`TenpaiOffenseMode::Unknown`]・点数計算の入力
     /// 不足など) は `None`。0点として扱わない。
@@ -214,6 +217,21 @@ impl TenpaiContinuationBranch {
     /// [`TenpaiOffenseMode::Unknown`]、テンパイを評価できなかった枝は `None`。
     pub fn offense_mode(&self) -> Option<TenpaiOffenseMode> {
         self.evaluated().map(|tenpai| tenpai.mode)
+    }
+
+    /// 既存の将来テンパイ判定による Reach legality。`mode` から逆算しない。
+    pub fn future_reach_legal(&self) -> Option<bool> {
+        self.evaluated().map(|tenpai| tenpai.future_reach_legal)
+    }
+
+    /// 同じ terminal tenpai の forced Reach Tsumo baseline。Reach illegal / unknown は `None`。
+    pub fn forced_reach_tsumo_continuation(&self) -> Option<TenpaiTsumoValue> {
+        self.evaluated()?.forced_reach_tsumo
+    }
+
+    /// 同じ terminal tenpai の forced Damaten Tsumo baseline。Ron 可否には依存しない。
+    pub fn forced_damaten_tsumo_continuation(&self) -> Option<TenpaiTsumoValue> {
+        self.evaluated()?.forced_damaten_tsumo
     }
 
     /// 継続後の待ちと残枚数。評価できなかった枝は空。
@@ -248,10 +266,22 @@ impl TenpaiContinuationBranch {
     /// 経路確率も terminal tenpai の horizon も既存 [`SelfTsumoPath::immediate`] そのままで、
     /// この層は確率も期待支払いも組み立てない。terminal tenpai のツモ打点を確定できない枝と、
     /// 未確認牌が1枚も無く経路を作れない局面は 0 点にせず `None`。
+    fn terminal_tsumo_values(&self) -> TerminalTsumoValues {
+        TerminalTsumoValues {
+            production: self.tsumo_continuation,
+            forced_reach: self
+                .evaluated()
+                .and_then(|tenpai| tenpai.forced_reach_tsumo),
+            forced_damaten: self
+                .evaluated()
+                .and_then(|tenpai| tenpai.forced_damaten_tsumo),
+        }
+    }
+
+    /// production policy の terminal mode を使う、この枝1本の期待ツモ支払い。
     pub fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
-        let terminal = self.tsumo_continuation?;
         let path = SelfTsumoPath::immediate(self.remaining(), facts.unknown_tiles)?;
-        Some(path.expected_payment(facts, terminal))
+        Some(path.expected_payment(facts, self.tsumo_continuation?))
     }
 
     fn evaluated(&self) -> Option<&ProspectiveTenpaiValue> {
@@ -259,36 +289,66 @@ impl TenpaiContinuationBranch {
     }
 }
 
-/// 現在聴牌1件分の「今すぐリーチ」と「ダマで1巡継続」の比較。
+/// 現在聴牌1件分の「今すぐリーチ」と3つの「1巡 defer」の比較。
 ///
-/// どちらも既存 self-tsumo 確率模型の期待ツモ支払い
+/// いずれも既存 self-tsumo 確率模型の期待ツモ支払い
 /// [[`SELF_TSUMO_VALUE_SCALE`](bot_logic::SELF_TSUMO_VALUE_SCALE)] で、同じ `U0` / `n` から
-/// 組み立てた同じ単位の値になる。どちらを選ぶかの結論 (winner / `should_reach`) はまだ持たない。
+/// 組み立てた同じ単位の値になる。どれを選ぶかの結論 (winner / `should_reach`) はまだ持たない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TenpaiSelfTsumoComparison {
     /// 今すぐリーチして手変わりせず、残り自摸機会全体でツモ和了する期待支払い。
     ///
     /// 現在局面の合法手にリーチが無い場合と、ツモ打点を確定できない場合は `None`。
     pub reach_now: Option<u64>,
-    /// ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い。
+    /// ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い。3つの defer mode が共有する。
     pub damaten_immediate_tsumo: Option<u64>,
-    /// 非和了牌を引いて手変わりした先の terminal tenpai の期待支払い合計。
+    /// 非和了牌を引いた先を production policy の terminal mode で評価した期待支払い合計。
     ///
+    /// field 名は API 互換のため従来名を維持しているが、forced Damaten の意味ではない。
     /// 継続枝が1件も無い場合は寄与が無いので 0 で、枝の terminal ツモ打点を1つでも確定できない
     /// 場合は `None`。
     pub damaten_continuation_branches: Option<u64>,
+    /// 非和了牌を引いた先を forced Reach で評価した期待支払い合計。
+    ///
+    /// live branch の将来リーチが不可能、または評価不能なら `None`。他 mode の値は潰さない。
+    pub defer_forced_reach_branches: Option<u64>,
+    /// 非和了牌を引いた先を forced Damaten で評価した期待支払い合計。
+    ///
+    /// live branch のツモ打点を評価できない場合は `None`。Ron 可否には依存しない。
+    pub defer_forced_damaten_branches: Option<u64>,
 }
 
 impl TenpaiSelfTsumoComparison {
-    /// ダマで1巡継続した場合の期待ツモ支払い合計。
+    /// 1巡 defer し、terminal tenpai では production policy に従う期待ツモ支払い合計。
     ///
     /// 「最初の1自摸で現在の待ちを引く枝」と「非和了牌を引いて手変わりする枝」の和で、どちらかを
     /// 確定できない場合は `None`。
-    pub fn damaten_continuation(&self) -> Option<u64> {
+    pub fn defer_production(&self) -> Option<u64> {
         Some(
             self.damaten_immediate_tsumo?
                 .saturating_add(self.damaten_continuation_branches?),
         )
+    }
+
+    /// 1巡 defer し、terminal tenpai では合法な場合に forced Reach とする期待ツモ支払い合計。
+    pub fn defer_forced_reach(&self) -> Option<u64> {
+        Some(
+            self.damaten_immediate_tsumo?
+                .saturating_add(self.defer_forced_reach_branches?),
+        )
+    }
+
+    /// 1巡 defer し、terminal tenpai では forced Damaten とする期待ツモ支払い合計。
+    pub fn defer_forced_damaten(&self) -> Option<u64> {
+        Some(
+            self.damaten_immediate_tsumo?
+                .saturating_add(self.defer_forced_damaten_branches?),
+        )
+    }
+
+    /// 従来名との互換 accessor。将来を forced Damaten にする値ではなく production policy の値。
+    pub fn damaten_continuation(&self) -> Option<u64> {
+        self.defer_production()
     }
 }
 
@@ -388,17 +448,66 @@ struct CandidateBranches {
     unresolved: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+struct TerminalTsumoValues {
+    production: Option<TenpaiTsumoValue>,
+    forced_reach: Option<TenpaiTsumoValue>,
+    forced_damaten: Option<TenpaiTsumoValue>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DeferBranchValues {
+    production: Option<u64>,
+    forced_reach: Option<u64>,
+    forced_damaten: Option<u64>,
+}
+
 impl CandidateBranches {
-    // 継続枝の期待支払い合計。1つでも確定できない枝と、分類そのものが確定しない仮想ツモが
-    // あった候補は 0 点へ潰さず `None`。
-    fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
+    // 3 mode の継続枝を同時に集約する。同じ物理牌 branch の `SelfTsumoPath::immediate` は1回だけ
+    // 構築して共有し、terminal baseline の unknown は該当 mode だけを `None` にする。
+    fn expected_self_tsumo_values(&self, facts: SelfTsumoFacts) -> DeferBranchValues {
         if self.unresolved {
-            return None;
+            return DeferBranchValues::default();
         }
-        self.branches.iter().try_fold(0, |total: u64, branch| {
-            Some(total.saturating_add(branch.expected_self_tsumo_value(facts)?))
-        })
+
+        let mut totals = DeferBranchValues {
+            production: Some(0),
+            forced_reach: Some(0),
+            forced_damaten: Some(0),
+        };
+        for branch in &self.branches {
+            let Some(path) = SelfTsumoPath::immediate(branch.remaining(), facts.unknown_tiles)
+            else {
+                return DeferBranchValues::default();
+            };
+            let terminal = branch.terminal_tsumo_values();
+            accumulate_path(&mut totals.production, terminal.production, path, facts);
+            accumulate_path(&mut totals.forced_reach, terminal.forced_reach, path, facts);
+            accumulate_path(
+                &mut totals.forced_damaten,
+                terminal.forced_damaten,
+                path,
+                facts,
+            );
+        }
+        totals
     }
+}
+
+fn accumulate_path(
+    total: &mut Option<u64>,
+    terminal: Option<TenpaiTsumoValue>,
+    path: SelfTsumoPath,
+    facts: SelfTsumoFacts,
+) {
+    let Some(accumulator) = total else {
+        return;
+    };
+    let Some(terminal) = terminal else {
+        *total = None;
+        return;
+    };
+    *accumulator = accumulator.saturating_add(path.expected_payment(facts, terminal));
 }
 
 // 非和了ツモの枝を物理牌 variant 単位で集める。既存2手先評価が構造 (次打牌後が聴牌か) と
@@ -477,6 +586,7 @@ fn candidate_self_tsumo(
     let expected_payment = |mode, own_draws| {
         baseline_expected_payment(inputs.valuator, current?, mode, own_draws, facts)
     };
+    let branch_values = branches.expected_self_tsumo_values(facts);
 
     TenpaiSelfTsumoComparison {
         reach_now: inputs
@@ -484,7 +594,9 @@ fn candidate_self_tsumo(
             .then(|| expected_payment(TenpaiOffenseMode::Reach, facts.own_future_draws))
             .flatten(),
         damaten_immediate_tsumo: expected_payment(TenpaiOffenseMode::Damaten, FIRST_DRAW),
-        damaten_continuation_branches: branches.expected_self_tsumo_value(facts),
+        damaten_continuation_branches: branch_values.production,
+        defer_forced_reach_branches: branch_values.forced_reach,
+        defer_forced_damaten_branches: branch_values.forced_damaten,
     }
 }
 
@@ -1327,12 +1439,23 @@ mod tests {
         // 待ちは同じでも、赤5を手牌へ残す枝の方が継続後のツモ打点が高い。
         let red_terminal = red.tsumo_continuation.expect("terminal ツモ打点がある");
         let black_terminal = black.tsumo_continuation.expect("terminal ツモ打点がある");
+        let red_damaten = red
+            .forced_damaten_tsumo_continuation()
+            .expect("forced Damaten ツモ打点がある");
+        let black_damaten = black
+            .forced_damaten_tsumo_continuation()
+            .expect("forced Damaten ツモ打点がある");
         assert_eq!(wait_tiles(red), wait_tiles(black));
         assert_eq!(
             red_terminal.winning_remaining,
             black_terminal.winning_remaining
         );
         assert!(red_terminal.weighted_total > black_terminal.weighted_total);
+        assert_eq!(
+            red_damaten.winning_remaining,
+            black_damaten.winning_remaining
+        );
+        assert!(red_damaten.weighted_total > black_damaten.weighted_total);
 
         // 経路確率は物理牌 variant ごとの残枚数のままで、牌種の残枚数へ潰さない。
         assert_eq!((red.remaining(), black.remaining()), (1, 2));
@@ -1390,6 +1513,69 @@ mod tests {
     }
 
     #[test]
+    fn all_defer_modes_share_the_immediate_tsumo_and_existing_next_discard() {
+        let candidate = discard_three_sou(&REAL_CASE);
+        let comparison = candidate.self_tsumo;
+
+        // 3つの total は同じ immediate Damaten Tsumo に、それぞれの terminal branch 合計だけを
+        // 足す。現在待ちの和了牌は branches から除外済みなので二重計上もしない。
+        let immediate = comparison
+            .damaten_immediate_tsumo
+            .expect("共通の即ツモ寄与がある");
+        assert_eq!(
+            comparison.defer_production(),
+            comparison.damaten_continuation()
+        );
+        assert_eq!(
+            comparison.defer_production(),
+            comparison
+                .damaten_continuation_branches
+                .map(|branches| immediate + branches)
+        );
+        assert_eq!(
+            comparison.defer_forced_reach(),
+            comparison
+                .defer_forced_reach_branches
+                .map(|branches| immediate + branches)
+        );
+        assert_eq!(
+            comparison.defer_forced_damaten(),
+            comparison
+                .defer_forced_damaten_branches
+                .map(|branches| immediate + branches)
+        );
+
+        // forced baseline は同じ枝へ載るだけで、counterfactual ごとの next discard は存在しない。
+        for branch in &candidate.branches {
+            assert!(branch.next_discard().is_some());
+            assert!(branch.forced_reach_tsumo_continuation().is_some());
+            assert!(branch.forced_damaten_tsumo_continuation().is_some());
+        }
+    }
+
+    #[test]
+    fn forced_damaten_remains_available_when_future_reach_is_illegal() {
+        let candidate = discard_north(&OPEN_CASE);
+        let comparison = candidate.self_tsumo;
+
+        assert!(
+            candidate
+                .branches
+                .iter()
+                .all(|branch| branch.future_reach_legal() == Some(false))
+        );
+        assert!(
+            candidate
+                .branches
+                .iter()
+                .all(|branch| branch.forced_reach_tsumo_continuation().is_none())
+        );
+        assert_eq!(comparison.defer_forced_reach(), None);
+        assert!(comparison.defer_production().is_some());
+        assert!(comparison.defer_forced_damaten().is_some());
+    }
+
+    #[test]
     fn reach_now_follows_the_actual_legal_reach_action() {
         // 現在局面のリーチ可否は production のリーチ判断と同じく、実際の合法手だけが source of
         // truth。局面の条件をすべて満たしていても、合法手にリーチが無ければ値を作らない。
@@ -1431,7 +1617,9 @@ mod tests {
         assert_eq!(comparison.reach_now, None);
         assert_eq!(comparison.damaten_immediate_tsumo, None);
         assert_eq!(comparison.damaten_continuation_branches, None);
-        assert_eq!(comparison.damaten_continuation(), None);
+        assert_eq!(comparison.defer_production(), None);
+        assert_eq!(comparison.defer_forced_reach(), None);
+        assert_eq!(comparison.defer_forced_damaten(), None);
     }
 
     // ---- 副露手の非和了ツモ ----
@@ -1470,6 +1658,10 @@ mod tests {
         let branch = branch(candidate, "6m");
         assert_eq!(branch.next_discard(), Some(tile("6m")));
         assert_eq!(branch.offense_mode(), Some(TenpaiOffenseMode::Damaten));
+        assert_eq!(
+            branch.forced_damaten_tsumo_continuation(),
+            branch.tsumo_continuation
+        );
         let value = branch
             .expected_self_tsumo_value(facts)
             .expect("枝の期待支払いを確定できる");
@@ -1520,7 +1712,9 @@ mod tests {
         let comparison = discard_north(&unknown).self_tsumo;
 
         assert_eq!(comparison.damaten_continuation_branches, None);
-        assert_eq!(comparison.damaten_continuation(), None);
+        assert_eq!(comparison.defer_production(), None);
+        assert_eq!(comparison.defer_forced_reach(), None);
+        assert_eq!(comparison.defer_forced_damaten(), None);
         // 同じ局面でも場風が分かれば確定する。
         assert!(
             discard_north(&OPEN_CASE)
@@ -1542,6 +1736,8 @@ mod tests {
                 .damaten_continuation_branches
                 .is_some_and(|v| v > 0)
         );
+        assert_eq!(comparison.defer_forced_reach(), None);
+        assert!(comparison.defer_forced_damaten().is_some());
     }
 
     #[test]

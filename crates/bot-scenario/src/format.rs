@@ -1065,8 +1065,7 @@ fn format_tenpai_continuation_candidate(
     lines
 }
 
-// 「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べる。内訳のダマ即ツモ・手変わり
-// 後もそのまま出し、どちらが大きいかの結論はまだ出さない。
+// 「今すぐリーチ」と、同じ1巡後の手変わりを3つの terminal mode で評価した値を並べる。
 //
 // 値は継続診断が既存 self-tsumo 確率模型で求めたものそのもので、表示のために評価をやり直さない。
 // 評価できなかった値は 0 点にせず unknown として出す。
@@ -1077,17 +1076,22 @@ fn format_tenpai_self_tsumo_comparison(comparison: &TenpaiSelfTsumoComparison) -
             "      reach now: {}",
             format_self_tsumo_value(comparison.reach_now)
         ),
+        "      defer one draw".to_string(),
         format!(
-            "      damaten continuation: {}",
-            format_self_tsumo_value(comparison.damaten_continuation())
+            "        production policy: {}",
+            format_self_tsumo_value(comparison.defer_production())
         ),
         format!(
-            "      damaten immediate tsumo: {}",
+            "        forced Reach: {}",
+            format_self_tsumo_value(comparison.defer_forced_reach())
+        ),
+        format!(
+            "        forced Damaten: {}",
+            format_self_tsumo_value(comparison.defer_forced_damaten())
+        ),
+        format!(
+            "        immediate Damaten tsumo: {}",
             format_self_tsumo_value(comparison.damaten_immediate_tsumo)
-        ),
-        format!(
-            "      damaten after non-winning draw: {}",
-            format_self_tsumo_value(comparison.damaten_continuation_branches)
         ),
     ]
 }
@@ -1549,17 +1553,22 @@ fn format_comparison_self_tsumo(comparison: &ReachDamatenComparisonDiagnostic) -
             "    reach now: {}",
             format_self_tsumo_value(self_tsumo.reach_now)
         ),
+        "    defer one draw".to_string(),
         format!(
-            "    damaten continuation: {}",
-            format_self_tsumo_value(self_tsumo.damaten_continuation())
+            "      production policy: {}",
+            format_self_tsumo_value(self_tsumo.defer_production())
         ),
         format!(
-            "    damaten immediate tsumo: {}",
+            "      forced Reach: {}",
+            format_self_tsumo_value(self_tsumo.defer_forced_reach())
+        ),
+        format!(
+            "      forced Damaten: {}",
+            format_self_tsumo_value(self_tsumo.defer_forced_damaten())
+        ),
+        format!(
+            "      immediate Damaten tsumo: {}",
             format_self_tsumo_value(self_tsumo.damaten_immediate_tsumo)
-        ),
-        format!(
-            "    damaten after non-winning draw: {}",
-            format_self_tsumo_value(self_tsumo.damaten_continuation_branches)
         ),
     ]
 }
@@ -2716,7 +2725,7 @@ mod tests {
     use bot_core::{
         Agent, CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
         OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
-        RonRiskEvidence,
+        RonRiskEvidence, TenpaiOffenseMode,
     };
     use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
     use std::sync::LazyLock;
@@ -6989,8 +6998,38 @@ mod tests {
         "remaining_tiles": 70
     }"#;
 
+    const DAMATEN_HIGH_VALUE_LOOKAHEAD_SCENARIO: &str = r#"{
+        "hand": "234678m 22p 34455s",
+        "draw": "N",
+        "dora_indicators": "1p",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "remaining_tiles": 70,
+        "extra_visible_tiles": "333s",
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
+    const DAMATEN_LOW_VALUE_LOOKAHEAD_SCENARIO: &str = r#"{
+        "hand": "234678m 22p 34455s",
+        "draw": "N",
+        "dora_indicators": "1m",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "remaining_tiles": 70,
+        "extra_visible_tiles": "333s",
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
     static TENPAI_CONTINUATION_REAL: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
         rendered_with_lookahead_diagnostic(TENPAI_CONTINUATION_REAL_SCENARIO, true)
+    });
+    static DAMATEN_HIGH_VALUE_LOOKAHEAD: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
+        rendered_with_lookahead_diagnostic(DAMATEN_HIGH_VALUE_LOOKAHEAD_SCENARIO, true)
+    });
+    static DAMATEN_LOW_VALUE_LOOKAHEAD: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
+        rendered_with_lookahead_diagnostic(DAMATEN_LOW_VALUE_LOOKAHEAD_SCENARIO, true)
     });
 
     // 継続診断が持つ self-tsumo 比較。表示した値が診断の値そのものであることを確認するために
@@ -7009,6 +7048,21 @@ mod tests {
             .find(|candidate| candidate.discard.to_mjai_string() == discard)
             .unwrap_or_else(|| panic!("打 {discard} の候補がある"))
             .self_tsumo
+    }
+
+    fn selected_tenpai_continuation<'a>(
+        rendered: &'a RenderedDiagnostic,
+        discard: &str,
+    ) -> &'a TenpaiContinuationCandidate {
+        rendered
+            .diagnostic
+            .normal_discard_tenpai_continuation
+            .as_ref()
+            .expect("継続診断がある")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.discard.to_mjai_string() == discard)
+            .unwrap_or_else(|| panic!("打 {discard} の候補がある"))
     }
 
     #[test]
@@ -7034,8 +7088,7 @@ mod tests {
 
     #[test]
     fn tenpai_continuation_shows_the_self_tsumo_comparison() {
-        // 「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べ、内訳も出す。値は
-        // 継続診断が持つものそのままで、表示のために評価をやり直さない。
+        // 「今すぐリーチ」と同じ1巡後の手変わりを3 terminal mode で評価した値を並べる。
         let continuation = continuation_candidate(&TENPAI_CONTINUATION_REAL.rendered, "3s");
         let comparison = tenpai_continuation_self_tsumo(&TENPAI_CONTINUATION_REAL, "3s");
 
@@ -7047,17 +7100,22 @@ mod tests {
                         "      reach now: {}",
                         format_self_tsumo_value(comparison.reach_now)
                     ),
+                    "      defer one draw",
                     &format!(
-                        "      damaten continuation: {}",
-                        format_self_tsumo_value(comparison.damaten_continuation())
+                        "        production policy: {}",
+                        format_self_tsumo_value(comparison.defer_production())
                     ),
                     &format!(
-                        "      damaten immediate tsumo: {}",
+                        "        forced Reach: {}",
+                        format_self_tsumo_value(comparison.defer_forced_reach())
+                    ),
+                    &format!(
+                        "        forced Damaten: {}",
+                        format_self_tsumo_value(comparison.defer_forced_damaten())
+                    ),
+                    &format!(
+                        "        immediate Damaten tsumo: {}",
                         format_self_tsumo_value(comparison.damaten_immediate_tsumo)
-                    ),
-                    &format!(
-                        "      damaten after non-winning draw: {}",
-                        format_self_tsumo_value(comparison.damaten_continuation_branches)
                     ),
                 ]
                 .join("\n")
@@ -7069,6 +7127,60 @@ mod tests {
             comparison.damaten_continuation().is_some(),
             "{continuation}"
         );
+    }
+
+    #[test]
+    fn high_value_damaten_still_has_an_independent_forced_reach_defer_value() {
+        let rendered = &*DAMATEN_HIGH_VALUE_LOOKAHEAD;
+        let comparison = section(&rendered.rendered, "Reach / Damaten comparison");
+        let candidate = selected_tenpai_continuation(rendered, "N");
+        let branch = candidate
+            .branches
+            .iter()
+            .find(|branch| {
+                branch.offense_mode() == Some(TenpaiOffenseMode::Damaten)
+                    && branch.forced_reach_tsumo_continuation()
+                        != branch.forced_damaten_tsumo_continuation()
+            })
+            .expect("production Damaten と forced Reach の打点が異なる枝がある");
+
+        assert!(
+            comparison.contains("    reason: HighValueDamaten"),
+            "{comparison}"
+        );
+        assert!(comparison.contains("      forced Reach:"), "{comparison}");
+        assert_eq!(
+            branch.tsumo_continuation,
+            branch.forced_damaten_tsumo_continuation()
+        );
+        assert!(candidate.self_tsumo.defer_forced_reach().is_some());
+    }
+
+    #[test]
+    fn low_value_reach_still_has_an_independent_forced_damaten_defer_value() {
+        let rendered = &*DAMATEN_LOW_VALUE_LOOKAHEAD;
+        let comparison = section(&rendered.rendered, "Reach / Damaten comparison");
+        let candidate = selected_tenpai_continuation(rendered, "N");
+        let branch = candidate
+            .branches
+            .iter()
+            .find(|branch| {
+                branch.offense_mode() == Some(TenpaiOffenseMode::Reach)
+                    && branch.forced_reach_tsumo_continuation()
+                        != branch.forced_damaten_tsumo_continuation()
+            })
+            .expect("production Reach と forced Damaten の打点が異なる枝がある");
+
+        assert!(
+            comparison.contains("    reason: EligibleLowValue"),
+            "{comparison}"
+        );
+        assert!(comparison.contains("      forced Damaten:"), "{comparison}");
+        assert_eq!(
+            branch.tsumo_continuation,
+            branch.forced_reach_tsumo_continuation()
+        );
+        assert!(candidate.self_tsumo.defer_forced_damaten().is_some());
     }
 
     #[test]
@@ -7094,17 +7206,22 @@ mod tests {
                         "    reach now: {}",
                         format_self_tsumo_value(candidate.reach_now)
                     ),
+                    "    defer one draw",
                     &format!(
-                        "    damaten continuation: {}",
-                        format_self_tsumo_value(candidate.damaten_continuation())
+                        "      production policy: {}",
+                        format_self_tsumo_value(candidate.defer_production())
                     ),
                     &format!(
-                        "    damaten immediate tsumo: {}",
+                        "      forced Reach: {}",
+                        format_self_tsumo_value(candidate.defer_forced_reach())
+                    ),
+                    &format!(
+                        "      forced Damaten: {}",
+                        format_self_tsumo_value(candidate.defer_forced_damaten())
+                    ),
+                    &format!(
+                        "      immediate Damaten tsumo: {}",
                         format_self_tsumo_value(candidate.damaten_immediate_tsumo)
-                    ),
-                    &format!(
-                        "    damaten after non-winning draw: {}",
-                        format_self_tsumo_value(candidate.damaten_continuation_branches)
                     ),
                 ]
                 .join("\n")
@@ -7138,9 +7255,10 @@ mod tests {
 
         for line in [
             format!("      reach now: {UNKNOWN}"),
-            format!("      damaten continuation: {UNKNOWN}"),
-            format!("      damaten immediate tsumo: {UNKNOWN}"),
-            format!("      damaten after non-winning draw: {UNKNOWN}"),
+            format!("        production policy: {UNKNOWN}"),
+            format!("        forced Reach: {UNKNOWN}"),
+            format!("        forced Damaten: {UNKNOWN}"),
+            format!("        immediate Damaten tsumo: {UNKNOWN}"),
         ] {
             assert!(continuation.contains(&line), "{line}\n{continuation}");
         }
