@@ -96,23 +96,30 @@
 //!
 //! # 打牌選択への接続
 //!
-//! 現時点では diagnostics 専用で、打牌選択には接続していない。self-tsumo 比較にも winner も
-//! `should_reach` も持たせず、現在聴牌の
+//! 全候補分の [`TenpaiContinuationDiagnostic`] は diagnostics 専用で、打牌選択には接続して
+//! いない。self-tsumo 比較にも winner も `should_reach` も持たせず、現在聴牌の
 //! [`OffenseValue`](crate::offense_value::OffenseValue) のような別単位の値と比べる係数も
 //! threshold も持たない。
+//!
+//! production へ接続しているのは、選択済み1候補だけを評価する
+//! [`selected_tenpai_self_tsumo_comparison`] の経路だけである。恒常フリテンが確定した聴牌の
+//! リーチ timing ([`ReachTimingDecision`](crate::reach_policy::ReachTimingDecision)) が、
+//! `reach now` と `defer → forced Reach` の大小だけを見る。全合法 Dahai 候補の継続枝を
+//! production で構築することはない。
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,
     EffectiveAcceptanceTile, LookaheadDiagnostic, ProspectiveTenpai, SelfTsumoFacts, SelfTsumoPath,
-    TenpaiTsumoValue, TileId, TileType, split_discarded_tile,
+    TenpaiTsumoValue, TileId, TileType, diagnose_lookahead_candidate, split_discarded_tile,
 };
 
 use crate::context::GameContext;
+use crate::discard_selection::{LookaheadDiagnosticScope, lookahead_inputs};
 use crate::offense_value::TenpaiOffenseMode;
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveDiscardValue, ProspectiveDrawVariantValue,
     ProspectiveFacts, ProspectiveLookaheadDiagnostic, ProspectiveTenpaiValue, ProspectiveWaitValue,
-    TsumoVariantOutcomes, TsumoVariantStatus,
+    TsumoVariantOutcomes, TsumoVariantStatus, evaluate_prospective_candidate_value,
 };
 
 // テンパイの向聴数。
@@ -374,6 +381,28 @@ pub(crate) struct TenpaiContinuationInputs<'a> {
     pub value: &'a ProspectiveLookaheadDiagnostic,
 }
 
+impl<'a> TenpaiContinuationInputs<'a> {
+    fn candidate_inputs(&self) -> CandidateInputs<'a> {
+        CandidateInputs {
+            tiles: self.tiles,
+            valuator: self.valuator,
+            reach_legal: self.reach_legal,
+            self_tsumo_facts: self.self_tsumo_facts,
+        }
+    }
+}
+
+// 現在聴牌候補1件を評価するための材料。全候補分の診断を構築する経路と、選択済み1候補だけを
+// 評価する production 経路が同じ helper を共有するために切り出したもので、候補ごとに変わらない
+// 値だけを持つ。
+#[derive(Clone, Copy)]
+struct CandidateInputs<'a> {
+    tiles: &'a [TileId],
+    valuator: &'a ProductionProspectiveValuator<'a>,
+    reach_legal: bool,
+    self_tsumo_facts: Option<SelfTsumoFacts>,
+}
+
 /// 構築済みの2手先評価とその将来打点から、現在聴牌候補の継続枝を絞り込む。
 ///
 /// 枝の探索も打牌評価も待ち計算も行わず、既に構築済みの枝を選び直すだけ。self-tsumo 比較の
@@ -394,6 +423,7 @@ pub(crate) fn diagnose_tenpai_continuation(
         return None;
     }
 
+    let candidate_inputs = inputs.candidate_inputs();
     Some(TenpaiContinuationDiagnostic {
         candidates: inputs
             .evaluations
@@ -406,10 +436,59 @@ pub(crate) fn diagnose_tenpai_continuation(
                     && value.discard == evaluation.discard
             })
             .map(|((evaluation, candidate), value)| {
-                candidate_continuation(inputs, evaluation, candidate, value)
+                candidate_continuation(&candidate_inputs, evaluation, candidate, value)
             })
             .collect(),
     })
+}
+
+/// 通常打牌 selection が選んだ現在聴牌候補1件だけについて、「今すぐリーチ」と「1巡 defer」の
+/// self-tsumo 比較を求める。
+///
+/// production のリーチ timing 判断が使う唯一の入口。全合法 Dahai 候補の継続枝
+/// ([`diagnose_tenpai_continuation`]) は構築せず、渡された1候補についてだけ既存2手先評価・既存
+/// 将来打点評価・既存 self-tsumo 確率模型を通す。枝の分類も次打牌も打点も既存基盤そのままで、
+/// 比較のために新しい探索も点数計算も持たない。
+///
+/// 現在打牌後がテンパイでない候補と、自分が未リーチと確定していない局面 (既リーチ・自分の席が
+/// 不明) では評価せず `None`。
+pub(crate) fn selected_tenpai_self_tsumo_comparison(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+    reach_legal: bool,
+) -> Option<TenpaiSelfTsumoComparison> {
+    if context.own_reached() != Some(false) {
+        return None;
+    }
+    if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
+        return None;
+    }
+
+    let tiles: Vec<_> = context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(context.drawn_tile())
+        .collect();
+    let valuator = ProductionProspectiveValuator::new(context);
+    let inputs = lookahead_inputs(context, &tiles, &valuator, LookaheadDiagnosticScope::None);
+    let candidate = diagnose_lookahead_candidate(&inputs, evaluation);
+    let value = evaluate_prospective_candidate_value(&valuator, &tiles, evaluation, &candidate);
+
+    Some(
+        candidate_continuation(
+            &CandidateInputs {
+                tiles: &tiles,
+                valuator: &valuator,
+                reach_legal,
+                self_tsumo_facts: inputs.self_tsumo_facts(),
+            },
+            evaluation,
+            &candidate,
+            &value,
+        )
+        .self_tsumo,
+    )
 }
 
 // 現在聴牌候補1件分の継続枝。
@@ -417,7 +496,7 @@ pub(crate) fn diagnose_tenpai_continuation(
 // 現在聴牌は継続枝の分類と self-tsumo 比較の両方で使うので、組み立ても評価も1候補につき1回
 // だけにする。
 fn candidate_continuation(
-    inputs: &TenpaiContinuationInputs,
+    inputs: &CandidateInputs,
     evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
     value: &ProspectiveDiscardValue,
@@ -576,7 +655,7 @@ fn is_non_winning_draw(
 // 確率模型の材料が揃わない局面ではどの値も持たない。それ以外は確定できない値だけを `None` に
 // する。
 fn candidate_self_tsumo(
-    inputs: &TenpaiContinuationInputs,
+    inputs: &CandidateInputs,
     current: Option<&ProspectiveFacts>,
     branches: &CandidateBranches,
 ) -> TenpaiSelfTsumoComparison {
@@ -1211,6 +1290,59 @@ mod tests {
                 assert_eq!(&branch.variant, variant);
             }
         }
+    }
+
+    // ---- 選択済み1候補だけの評価 (production 経路) ----
+
+    #[test]
+    fn the_selected_candidate_comparison_matches_the_full_diagnostic() {
+        // production の timing 判断が使う入口は、全候補分の継続診断と同じ枝・同じ打点・同じ
+        // 確率模型を通る。選択済み1候補について同じ値になることを固定する。
+        let spec = real_spec();
+        let case = spec.context();
+        let built = spec.build();
+        let evaluation = built.selection.evaluation.expect("打牌を選べる");
+
+        let selected = selected_tenpai_self_tsumo_comparison(&case.context, &evaluation, true)
+            .expect("現在打牌後がテンパイ");
+        let full = built
+            .tenpai_continuation
+            .expect("継続診断を構築している")
+            .candidate(evaluation.discard)
+            .expect("選んだ打牌の候補がある")
+            .self_tsumo;
+
+        assert_eq!(selected, full);
+    }
+
+    #[test]
+    fn the_selected_candidate_reach_now_follows_the_legal_reach() {
+        // 現在局面のリーチ可否は呼び出し側が渡す実際の合法手だけが source of truth。
+        let spec = real_spec();
+        let case = spec.context();
+        let evaluation = spec.build().selection.evaluation.expect("打牌を選べる");
+
+        assert!(
+            selected_tenpai_self_tsumo_comparison(&case.context, &evaluation, false)
+                .expect("現在打牌後がテンパイ")
+                .reach_now
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_reached_hand_has_no_selected_candidate_comparison() {
+        let spec = CaseSpec {
+            own_reached: true,
+            ..real_spec()
+        };
+        let case = spec.context();
+        let evaluation = spec.build().selection.evaluation.expect("打牌を選べる");
+
+        assert_eq!(
+            selected_tenpai_self_tsumo_comparison(&case.context, &evaluation, true),
+            None
+        );
     }
 
     #[test]

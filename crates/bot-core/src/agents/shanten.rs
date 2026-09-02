@@ -31,9 +31,13 @@ use crate::reach_damaten_comparison::{
     ReachDamatenComparisonDiagnostic, ReachDamatenComparisonInputs,
     diagnose_reach_damaten_comparison,
 };
-use crate::reach_policy::decide_reach_reason;
+use crate::reach_policy::{
+    decide_permanent_furiten_reach_timing, decide_reach_reason, evaluates_reach_timing,
+};
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
-use crate::tenpai_continuation::TenpaiContinuationDiagnostic;
+use crate::tenpai_continuation::{
+    TenpaiContinuationDiagnostic, selected_tenpai_self_tsumo_comparison,
+};
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };
@@ -43,7 +47,9 @@ use bot_logic::{
     TenpaiWaitAvailability, TileType,
 };
 
-pub use crate::reach_policy::ReachDecisionReason;
+pub use crate::reach_policy::{
+    ReachDecisionReason, ReachTimingDecision, ReachTimingDiagnostic, ReachTimingReason,
+};
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
@@ -152,12 +158,29 @@ pub struct ReachDecisionDiagnostic {
     /// 採用したリーチ。採用しなかった場合は `None`。
     pub selected: Option<LegalAction>,
     pub reason: ReachDecisionReason,
+    /// base policy がリーチを選んだ場合の、そのリーチを今回宣言するかどうかの判断。
+    ///
+    /// base policy がダマを選んだ場合とリーチを検討できなかった場合は `None`。`reason` を
+    /// この判断で上書きすることはない。
+    pub timing: Option<ReachTimingDiagnostic>,
 }
 
 impl ReachDecisionDiagnostic {
     /// リーチすべきと判断したか。`selected` が `Some` であることと同値。
     pub fn should_reach(&self) -> bool {
         self.selected.is_some()
+    }
+
+    /// base policy はリーチを選んだか。timing で今回の宣言を見送った場合も `true`。
+    pub fn base_selects_reach(&self) -> bool {
+        self.reason.selects_reach()
+    }
+
+    /// base policy がリーチを選んだうえで、timing が今回の宣言を見送ったか。
+    pub fn defers_reach(&self) -> bool {
+        self.timing
+            .as_ref()
+            .is_some_and(ReachTimingDiagnostic::defers_reach)
     }
 
     /// 打牌後テンパイの恒常フリテン状態。テンパイにならない場合は `None`。
@@ -1039,6 +1062,17 @@ fn log_agent_decision(decision: &AgentDecision) {
         Some(verdict) => format!("{verdict:?}"),
         None => "None".to_string(),
     };
+    // base policy がリーチを選んだのに action が Dahai になった局面を、log だけで判別できる
+    // ようにする。base の reason はそのまま別 field に残す。
+    let timing = decision.reach.as_ref().and_then(|reach| reach.timing);
+    let reach_timing = match timing {
+        Some(timing) => format!("{:?}", timing.decision),
+        None => "None".to_string(),
+    };
+    let reach_timing_reason = match timing {
+        Some(timing) => format!("{:?}", timing.reason),
+        None => "None".to_string(),
+    };
 
     tracing::debug!(
         target: AGENT_DECISION_LOG_TARGET,
@@ -1048,6 +1082,8 @@ fn log_agent_decision(decision: &AgentDecision) {
         push_pull_reason = %push_pull_reason,
         normal_discard = %normal_discard,
         reach_reason = %reach_reason,
+        reach_timing = %reach_timing,
+        reach_timing_reason = %reach_timing_reason,
         damaten_verdict = %damaten_verdict,
         defense_kind = %defense_kind,
         open_hand_defense_category = %open_hand_defense_category,
@@ -1103,6 +1139,7 @@ fn decide_reach(
         damaten_value: None,
         selected: None,
         reason: ReachDecisionReason::NoLegalReach,
+        timing: None,
     };
 
     // 合法手にリーチが無ければ待ちもフリテンも求めない。
@@ -1174,11 +1211,46 @@ fn decide_reach(
         tenpai_wait.tsumo_remaining,
     );
 
+    // timing はここまでの base policy を上書きしない。base policy がリーチを選んだ場合だけ、
+    // そのリーチを今回宣言するかどうかを決める層として後ろに続く。
+    let timing = reason
+        .selects_reach()
+        .then(|| reach_timing(ctx, evaluation, &tenpai_wait));
+
     diagnostic.reason = reason;
-    diagnostic.selected = reason.selects_reach().then_some(reach);
+    diagnostic.selected = timing
+        .filter(|timing| !timing.defers_reach())
+        .map(|_| reach);
+    diagnostic.timing = timing;
     diagnostic.damaten_value = damaten_value;
     diagnostic.tenpai_wait = Some(tenpai_wait);
     ReachDecision { diagnostic, hands }
+}
+
+// base policy がリーチを選んだ聴牌の timing 判断。
+//
+// 恒常フリテンが確定した聴牌だけが対象で、それ以外では選択済み候補の continuation を一切
+// 評価しない。非フリテン聴牌では今リーチした瞬間からロン機会が生まれるが、nodocchi は Ron
+// probability を持たないため self-tsumo 比較だけで優劣を決めない。
+//
+// 対象になった場合に評価するのは通常打牌 selection が選んだ1候補だけで、全合法 Dahai 候補の
+// 継続枝は production では構築しない。比較する値も既存 self-tsumo 比較そのもので、この経路が
+// 確率模型も点数計算も持たない。
+fn reach_timing(
+    ctx: &GameContext,
+    evaluation: &DiscardEvaluation,
+    tenpai_wait: &TenpaiWaitAvailability,
+) -> ReachTimingDiagnostic {
+    if !evaluates_reach_timing(tenpai_wait.permanent_furiten(), tenpai_wait.tsumo_remaining) {
+        return ReachTimingDiagnostic::not_evaluated();
+    }
+
+    // ここへ来るのは合法手にリーチがあった経路だけ。現在局面のリーチ可否は決め直さない。
+    let comparison = selected_tenpai_self_tsumo_comparison(ctx, evaluation, true);
+    decide_permanent_furiten_reach_timing(
+        comparison.and_then(|comparison| comparison.reach_now),
+        comparison.and_then(|comparison| comparison.defer_forced_reach()),
+    )
 }
 
 impl Agent for ShantenAgent {
@@ -1219,6 +1291,7 @@ pub(crate) mod tests {
         CHIITOITSU_THREE_HAND, CHIITOITSU_TWO_HAND, KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND,
         STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand, hand_tiles,
     };
+    use crate::tenpai_continuation::TenpaiSelfTsumoComparison;
     use crate::threat::diagnose_player_threats;
     use bot_logic::{
         DiscardComparisonReason, DrawTransition, HistoryFuritenFacts, PermanentFuriten,
@@ -8193,6 +8266,333 @@ pub(crate) mod tests {
             Some(chiitoitsu_shanten(&counts))
         );
         assert_eq!(ryukyoku.kokushi_shanten(), Some(kokushi_shanten(&counts)));
+    }
+
+    // ---- リーチ timing ----
+
+    // リーチ timing の局面。恒常フリテンにするための自分の河と、self-tsumo 比較の材料
+    // (山の残枚数・持ち点) を指定できるようにする。
+    struct ReachTimingSpec<'a> {
+        hand: &'a [&'a str],
+        draw: &'a str,
+        own_river: &'a [&'a str],
+        /// 下家のリーチ後の河。空なら他家リーチ無しで、押し引きは Push になる。
+        opponent_reach_river: &'a [&'a str],
+        remaining_tiles: Option<u32>,
+        legal_reach: bool,
+    }
+
+    impl Default for ReachTimingSpec<'_> {
+        fn default() -> Self {
+            Self {
+                hand: &FURITEN_RYANMEN_HAND,
+                draw: TSUMOGIRI_DRAW,
+                own_river: &[],
+                opponent_reach_river: &[],
+                remaining_tiles: Some(REACH_TIMING_REMAINING_TILES),
+                legal_reach: true,
+            }
+        }
+    }
+
+    struct ReachTimingCase {
+        ctx: GameContext,
+        actions: Vec<LegalAction>,
+        tsumogiri: LegalAction,
+    }
+
+    impl ReachTimingCase {
+        fn reach(&self) -> ReachDecisionDiagnostic {
+            reach_diagnostic(&self.ctx, &self.actions)
+        }
+
+        fn timing(&self) -> ReachTimingDiagnostic {
+            self.reach()
+                .timing
+                .expect("base policy がリーチを選んでいる")
+        }
+
+        fn act(&self) -> LegalAction {
+            ShantenAgent.act(&self.ctx, &self.actions)
+        }
+
+        // 選択済み候補1件の self-tsumo 比較。timing 判断が対象外にした局面でも counterfactual を
+        // 確かめられるよう、production と同じ入口をテストから直接呼ぶ。
+        fn self_tsumo_comparison(&self) -> Option<TenpaiSelfTsumoComparison> {
+            let tiles: Vec<TileId> = self
+                .ctx
+                .hand_tiles()
+                .iter()
+                .copied()
+                .chain(self.ctx.drawn_tile())
+                .collect();
+            let evaluation =
+                select_best_normal_discard_evaluation(&self.ctx, &tiles, &self.actions)?;
+            selected_tenpai_self_tsumo_comparison(&self.ctx, &evaluation, true)
+        }
+    }
+
+    impl ReachTimingSpec<'_> {
+        fn build(&self) -> ReachTimingCase {
+            let mut source = TileIdSource::new();
+            let hand_tiles = source.tiles(self.hand);
+            let drawn_tile = source.tile(self.draw);
+            let own_river = source.tiles(self.own_river);
+            let opponent_river = source.tiles(self.opponent_reach_river);
+
+            let visible: Vec<TileId> = hand_tiles
+                .iter()
+                .chain([&drawn_tile])
+                .chain(own_river.iter())
+                .chain(opponent_river.iter())
+                .copied()
+                .collect();
+            let actions: Vec<LegalAction> = hand_tiles
+                .iter()
+                .chain([&drawn_tile])
+                .map(|&tile| LegalAction::Dahai { tile })
+                .chain(self.legal_reach.then_some(LegalAction::Reach))
+                .collect();
+
+            let ctx = GameContext::from_parts_with_table_state(
+                Some(drawn_tile),
+                hand_tiles,
+                Vec::new(),
+                TileType::from_mjai_type_str("E").ok(),
+                TileType::from_mjai_type_str("S").ok(),
+                visible,
+                Some(0),
+                Some(3),
+                [own_river, opponent_river, vec![], vec![]],
+                [false, !self.opponent_reach_river.is_empty(), false, false],
+            )
+            .with_table_state_facts(TableStateFacts {
+                remaining_tiles: self.remaining_tiles,
+                scores: Some([REACH_TIMING_SCORE; 4]),
+                ..Default::default()
+            })
+            .with_history_furiten_facts(HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            });
+
+            ReachTimingCase {
+                ctx,
+                actions,
+                tsumogiri: LegalAction::Dahai { tile: drawn_tile },
+            }
+        }
+    }
+
+    // 345m 678m 789p 22s 55s の 2s / 5s シャンポンテンパイ。ツモ切りでテンパイを保つ。
+    const SHANPON_HAND: [&str; 13] = [
+        "3m", "4m", "5m", "6m", "7m", "8m", "7p", "8p", "9p", "2s", "2s", "5s", "5s",
+    ];
+
+    // 345m 678m 789p 789s + 3s4s の実戦形 (5m は赤5)。打 3s の 4s 単騎から 3m ツモで
+    // 3m / 6m / 9m の三面待ちへ変わるため、counterfactual では defer が上回る。
+    const TANKI_HAND: [&str; 13] = [
+        "3m", "4m", "5mr", "6m", "7m", "8m", "7p", "8p", "9p", "4s", "7s", "8s", "9s",
+    ];
+    const TANKI_DRAW: &str = "3s";
+
+    // 2s を自分で切ってある恒常フリテンのシャンポン。生きた待ちは 2s 1枚 + 5s 2枚で、
+    // base policy はリーチを選ぶ。
+    fn furiten_shanpon_spec() -> ReachTimingSpec<'static> {
+        ReachTimingSpec {
+            hand: &SHANPON_HAND,
+            own_river: &["2s"],
+            ..ReachTimingSpec::default()
+        }
+    }
+
+    fn furiten_shanpon_case() -> ReachTimingCase {
+        furiten_shanpon_spec().build()
+    }
+
+    // 234m 678m 789p 45s 99s の 3s / 6s 両面テンパイ。ツモ切りでテンパイを保つ。
+    const FURITEN_RYANMEN_HAND: [&str; 13] = [
+        "2m", "3m", "4m", "6m", "7m", "8m", "7p", "8p", "9p", "4s", "5s", "9s", "9s",
+    ];
+    // どの面子にも関係しないツモ牌。
+    const TSUMOGIRI_DRAW: &str = "N";
+    // 山の残枚数。4人で分けて自分の残り自摸機会になる。
+    const REACH_TIMING_REMAINING_TILES: u32 = 70;
+    // リーチ宣言の条件を満たす持ち点。
+    const REACH_TIMING_SCORE: i32 = 25_000;
+
+    #[test]
+    fn a_permanent_furiten_tenpai_defers_the_reach_when_one_more_draw_scores_higher() {
+        // 恒常フリテンで現在の待ちではロンできないので、「今リーチ」と「1巡 defer して次の
+        // テンパイでリーチ」を self-tsumo だけで比べられる。defer が上回るならリーチを見送り、
+        // 通常打牌 selection が既に選んだ打牌をそのまま行う。
+        let case = furiten_shanpon_case();
+        let reach = case.reach();
+        let timing = case.timing();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.can_ron(), Some(false));
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert!(reach.base_selects_reach());
+
+        assert_eq!(timing.decision, ReachTimingDecision::DeferReach);
+        assert_eq!(timing.reason, ReachTimingReason::PermanentFuritenSelfTsumo);
+        assert!(timing.defer_forced_reach > timing.reach_now, "{timing:?}");
+
+        // 今回の request でリーチを宣言しないだけで、defer 用に別の打牌を探索しない。
+        assert!(reach.defers_reach());
+        assert!(!reach.should_reach());
+        assert_eq!(reach.selected, None);
+        assert_eq!(reach.selected_discard, Some(case.tsumogiri.clone()));
+        assert_eq!(case.act(), case.tsumogiri);
+        assert_eq!(
+            ShantenAgent::diagnose(&case.ctx, &case.actions).selected_source,
+            AgentActionSource::NormalDiscard
+        );
+    }
+
+    #[test]
+    fn a_permanent_furiten_tenpai_reaches_now_when_deferring_does_not_score_higher() {
+        // 同じ恒常フリテンでも defer が上回らなければ今リーチする。同値も ReachNow。
+        let case = ReachTimingSpec {
+            own_river: &["3s"],
+            ..ReachTimingSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+        let timing = case.timing();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(timing.reason, ReachTimingReason::PermanentFuritenSelfTsumo);
+        assert!(timing.reach_now >= timing.defer_forced_reach, "{timing:?}");
+
+        assert!(!reach.defers_reach());
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn an_unresolvable_comparison_keeps_the_base_reach() {
+        // 山の残枚数が分からないと self-tsumo 確率模型の材料が揃わない。比較不能を 0 点と
+        // 混同せず、既存 base Reach を維持する。
+        let case = ReachTimingSpec {
+            remaining_tiles: None,
+            ..furiten_shanpon_spec()
+        }
+        .build();
+        let reach = case.reach();
+        let timing = case.timing();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(timing.reason, ReachTimingReason::SelfTsumoComparisonUnknown);
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+
+        // 同じ手牌でも残枚数が既知なら defer していた局面。
+        assert!(furiten_shanpon_case().reach().defers_reach());
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn a_non_furiten_tenpai_reaches_even_when_deferring_would_score_higher() {
+        // 非フリテンでは今リーチした最初の1巡からロン機会が生まれるが、nodocchi は Ron
+        // probability を持たない。counterfactual 上 defer が上回っても production は変えない。
+        let case = ReachTimingSpec {
+            hand: &TANKI_HAND,
+            draw: TANKI_DRAW,
+            ..ReachTimingSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+        let timing = case.timing();
+        let comparison = case
+            .self_tsumo_comparison()
+            .expect("self-tsumo 比較の材料が揃っている");
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert!(reach.base_selects_reach());
+        assert!(
+            comparison.defer_forced_reach() > comparison.reach_now,
+            "{comparison:?}"
+        );
+
+        // 対象外なので self-tsumo 比較の値も持たない。
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(timing.reason, ReachTimingReason::NotPermanentFuriten);
+        assert_eq!(timing.reach_now, None);
+        assert_eq!(timing.defer_forced_reach, None);
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn a_damaten_base_policy_does_not_evaluate_the_timing() {
+        // base policy がダマを選んだ聴牌では timing 判断そのものを行わない。
+        let case = damaten_case(&KOKUSHI_HAND, "5m", &[]);
+        let reach = case.reach();
+
+        assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
+        assert!(!reach.base_selects_reach());
+        assert_eq!(reach.timing, None);
+        assert!(!reach.defers_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn the_timing_is_not_evaluated_without_a_base_reach() {
+        // 選択済み候補の continuation を評価するのは base policy がリーチを選んだ場合だけ。
+        // それ以外では timing 判断そのものを持たない。
+        let not_tenpai = {
+            let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 56, 89];
+            let ctx = GameContext::from_parts(
+                Some(tile(116)),
+                hand_values.iter().map(|&value| tile(value)).collect(),
+            );
+            let actions: Vec<LegalAction> = hand_values
+                .iter()
+                .map(|&value| dahai(value))
+                .chain([dahai(116), LegalAction::Reach])
+                .collect();
+            reach_diagnostic(&ctx, &actions)
+        };
+        assert_eq!(not_tenpai.reason, ReachDecisionReason::NotTenpai);
+        assert_eq!(not_tenpai.timing, None);
+
+        let illegal_reach = ReachTimingSpec {
+            legal_reach: false,
+            ..furiten_shanpon_spec()
+        }
+        .build();
+        let illegal_reach = illegal_reach.reach();
+        assert_eq!(illegal_reach.reason, ReachDecisionReason::NoLegalReach);
+        assert_eq!(illegal_reach.timing, None);
+    }
+
+    #[test]
+    fn a_fold_keeps_its_defense_action() {
+        // threat で防御へ倒れた局面ではリーチ判断そのものを行わないので、timing がその action を
+        // 上書きすることはない。
+        let case = ReachTimingSpec {
+            opponent_reach_river: &["N", "1p", "1m"],
+            ..furiten_shanpon_spec()
+        }
+        .build();
+        let diagnostic = ShantenAgent::diagnose(&case.ctx, &case.actions);
+
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.reach, None);
+        assert_eq!(
+            diagnostic.selected_source,
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
+        );
+        assert_eq!(diagnostic.selected_action, case.act());
     }
 
     #[test]
