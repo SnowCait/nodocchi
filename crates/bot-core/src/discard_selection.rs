@@ -12,10 +12,10 @@ use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, SelfTsumoFacts,
-    TenpaiWaitAvailability, TileCounts, TileId, TileType, best_discard_selection_index,
-    best_discard_selection_index_with_metrics, diagnose_discard_evaluations_with_metrics,
-    diagnose_discard_furiten, diagnose_lookahead, discard_tenpai_wait_availability,
-    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
+    best_discard_selection_index, best_discard_selection_index_with_metrics,
+    diagnose_discard_evaluations_with_metrics, diagnose_discard_furiten, diagnose_lookahead,
+    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
 };
@@ -51,6 +51,11 @@ pub(crate) struct DiscardActionSelection {
     pub tenpai_offense_value: Option<TenpaiOffenseValue>,
     /// offense mode の決定時に計算済みなら、そのダマ打点診断。
     pub damaten_value: Option<crate::damaten_value::DamatenValueDiagnostic>,
+    /// offense value の評価時に組み立て済みなら、その打牌後テンパイの完成手。
+    ///
+    /// ダマ Ron baseline とリーチ Ron baseline は同じ完成手集合を別の baseline で評価するだけ
+    /// なので、後段が待ち計算も受け入れも完成手の組み立てもやり直さないよう持ち回る。
+    pub tenpai_completed_hands: Option<TenpaiCompletedHands>,
 }
 
 /// 2手先診断をどこまで構築するか。
@@ -331,6 +336,9 @@ fn selection_from_legal_evaluations(
         damaten_value: selected_tenpai
             .and_then(|value| value.offense.as_ref())
             .and_then(|value| value.damaten_value.clone()),
+        tenpai_completed_hands: selected_tenpai
+            .and_then(|value| value.offense.as_ref())
+            .and_then(|value| value.hands.clone()),
     }
 }
 

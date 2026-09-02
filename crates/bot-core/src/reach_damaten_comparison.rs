@@ -1,0 +1,836 @@
+//! 現在聴牌の Reach / Damaten 判断材料を1か所へ並べる診断層。
+//!
+//! 通常打牌 selection が選んだ打牌後のテンパイについて、既に別々の診断が持っている材料を1つの
+//! 構造へ集めるだけの層である。判断も探索も点数計算もここでは行わず、値の出どころは全て既存の
+//! source of truth そのままになる。
+//!
+//! ```text
+//! production Reach 判断  → ReachDecisionDiagnostic (reason / should_reach / can_ron)
+//! ダマ Ron 打点          → ReachDecisionDiagnostic の DamatenValueDiagnostic
+//! self-tsumo 期待支払い  → TenpaiContinuationCandidate の TenpaiSelfTsumoComparison
+//! リーチ Ron 打点        → 既存 reach_baseline_context() を同じ完成手集合へ適用した値
+//! ```
+//!
+//! # 2つの軸
+//!
+//! self-tsumo と Ron は単位が違う別の軸で、この層でも別の軸のまま並べる。
+//!
+//! ```text
+//! self-tsumo   → 自摸確率を含んだ期待ツモ支払い
+//! Ron baseline → その待ちで和了した場合の支払い。ロンの発生確率を含まない
+//! ```
+//!
+//! nodocchi はまだ「他家がその牌を切る確率」の模型を持たないため、Ron baseline を期待値へ
+//! 変換できない。したがって2つの軸を足した合計も、係数で重み付けした score も作らない。
+//!
+//! # 判断しない
+//!
+//! winner も新しい `should_reach` も持たない。production の Reach / Damaten 判断は既存
+//! [`decide_reach_reason`](crate::reach_policy::decide_reach_reason) だけが決めており、この層が
+//! 持つのはその結論の観測値 (`production_reason` / `production_should_reach`) だけで、判断へは
+//! 接続していない。
+//!
+//! # 対応付け
+//!
+//! self-tsumo 比較は、通常打牌 selection が実際に選んだ打牌に対応する継続候補のものだけを参照
+//! する。別の打牌候補の継続を結び付けない。継続診断そのものが構築されていない (2手先探索を
+//! 要求していない) 局面と、選んだ打牌に対応する候補が無い局面では推測せず `None` にする。
+//!
+//! # 評価しない値
+//!
+//! ダマでロンできない / ロン可否が unknown の場合、ダマ Ron 打点は既存 semantics どおり評価
+//! しないまま (`None`) にする。0 点として扱わない。ロンできないことは Tsumo 側の軸とは独立
+//! なので、self-tsumo の値を Ron 可否で潰すこともしない。
+
+use bot_logic::{DiscardEvaluation, TenpaiCompletedHands, TenpaiWaitAvailability, TileType};
+
+use crate::action::LegalAction;
+use crate::agents::{ReachDecisionDiagnostic, ReachDecisionReason};
+use crate::context::GameContext;
+use crate::damaten_value::{
+    DamatenValueDiagnostic, DamatenValueVerdict, damaten_value_from_hands,
+    tenpai_completed_hands_after_discard,
+};
+use crate::discard_selection::{DiscardActionSelection, selected_discard_tenpai_wait_availability};
+use crate::offense_value::{ReachRonBaselineDiagnostic, reach_ron_baseline_from_hands};
+use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, TenpaiSelfTsumoComparison};
+
+// テンパイの向聴数。
+const TENPAI_SHANTEN: i8 = 0;
+
+/// 現在聴牌の Reach / Damaten 判断材料をまとめた統合診断。
+///
+/// どの値も既存診断が持っているものそのままで、この診断のために探索も点数計算も集計もやり直さ
+/// ない。打牌選択・押し引き・リーチ判断のどれにも接続していない解析専用の情報で、構築の有無は
+/// 選択結果を変えない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachDamatenComparisonDiagnostic {
+    /// 通常打牌 selection が選んだ合法 Dahai。リーチ判断が見たものと同じ action。
+    pub selected_discard: Option<LegalAction>,
+    /// production のリーチ判断の理由。既存判断の結論そのもので、ここで決め直さない。
+    pub production_reason: ReachDecisionReason,
+    /// production がリーチを採用したか。既存 [`ReachDecisionDiagnostic::should_reach`] そのもの。
+    ///
+    /// 観測値であって、この層が作った別の結論ではない。
+    pub production_should_reach: bool,
+    /// 現在局面の合法手に [`LegalAction::Reach`] があるか。
+    ///
+    /// self-tsumo 比較の `reach now` と同じく、実際の合法手だけを source of truth にする。
+    pub reach_legal: bool,
+    /// 選んだ打牌に対応する継続候補の self-tsumo 比較そのもの。
+    ///
+    /// 2手先探索を要求していない局面と、選んだ打牌に対応する継続候補が無い局面では `None`。
+    /// この診断のために2手先探索を追加しない。
+    pub self_tsumo: Option<TenpaiSelfTsumoComparison>,
+    /// 今リーチしてロン和了した場合の最低保証打点。ロンの発生確率は含まない。
+    ///
+    /// self-tsumo の `reach now` と同じく、実際にリーチできる局面だけ評価する。副露手のように
+    /// リーチが合法でない局面では、あり得ないリーチ手の打点を作らず `None` にする。
+    pub reach_ron_baseline: Option<ReachRonBaselineDiagnostic>,
+    /// ダマのままロンできるか。既存フリテン診断の結論そのもの。
+    pub can_ron: Option<bool>,
+    /// ダマのままロン和了した場合の打点。
+    ///
+    /// ダマでロンできない場合とロン可否が unknown の場合は既存 semantics どおり評価しないので
+    /// `None`。0 点として扱わない。
+    pub damaten_ron_value: Option<DamatenValueDiagnostic>,
+}
+
+impl ReachDamatenComparisonDiagnostic {
+    /// 今すぐリーチした場合の期待ツモ支払い。self-tsumo 材料が無ければ `None`。
+    pub fn reach_now_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.reach_now
+    }
+
+    /// ダマで1巡継続した場合の期待ツモ支払い合計。self-tsumo 材料が無ければ `None`。
+    pub fn damaten_continuation_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.damaten_continuation()
+    }
+
+    /// ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い。
+    pub fn damaten_immediate_tsumo_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.damaten_immediate_tsumo
+    }
+
+    /// 非和了牌を引いて手変わりした先の期待支払い合計。
+    pub fn damaten_continuation_branches_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.damaten_continuation_branches
+    }
+
+    /// ダマ打点から畳んだ結論。ダマ打点を評価しなかった場合は `None`。
+    pub fn damaten_verdict(&self) -> Option<DamatenValueVerdict> {
+        self.damaten_ron_value.as_ref().map(|value| value.verdict)
+    }
+}
+
+/// 統合診断を組み立てるための材料。
+///
+/// どれも production 判断と通常打牌 selection が構築済みの値そのもので、この診断のために作り
+/// 直したものは無い。
+pub(crate) struct ReachDamatenComparisonInputs<'a> {
+    pub context: &'a GameContext,
+    /// 現在局面の合法手に [`LegalAction::Reach`] があるか。
+    pub reach_legal: bool,
+    /// production のリーチ判断の結果。理由・ロン可否・ダマ打点の source of truth。
+    pub reach: &'a ReachDecisionDiagnostic,
+    /// 通常打牌 selection の結果。選んだ打牌の評価と、計算済みの待ち・ダマ打点・完成手を持つ。
+    pub selection: &'a DiscardActionSelection,
+    /// リーチ判断が組み立てた打牌後テンパイの完成手。未構築の経路では `None`。
+    pub hands: Option<&'a TenpaiCompletedHands>,
+    /// 現在聴牌のダマ継続診断。2手先探索を要求していない局面では `None`。
+    pub continuation: Option<&'a TenpaiContinuationDiagnostic>,
+}
+
+/// production 判断と既存診断から、Reach / Damaten の判断材料を1つの診断へまとめる。
+pub(crate) fn diagnose_reach_damaten_comparison(
+    inputs: &ReachDamatenComparisonInputs,
+) -> ReachDamatenComparisonDiagnostic {
+    let tenpai = tenpai_facts(inputs);
+
+    ReachDamatenComparisonDiagnostic {
+        selected_discard: inputs.reach.selected_discard.clone(),
+        production_reason: inputs.reach.reason,
+        production_should_reach: inputs.reach.should_reach(),
+        reach_legal: inputs.reach_legal,
+        self_tsumo: selected_discard_self_tsumo(inputs),
+        reach_ron_baseline: tenpai
+            .as_ref()
+            .and_then(|tenpai| reach_ron_baseline(inputs, tenpai)),
+        can_ron: tenpai.as_ref().and_then(|tenpai| tenpai.wait.can_ron()),
+        damaten_ron_value: tenpai
+            .as_ref()
+            .and_then(|tenpai| damaten_ron_value(inputs, tenpai)),
+    }
+}
+
+// 選んだ打牌に対応する継続候補の self-tsumo 比較。対応する候補が無ければ推測せず `None`。
+fn selected_discard_self_tsumo(
+    inputs: &ReachDamatenComparisonInputs,
+) -> Option<TenpaiSelfTsumoComparison> {
+    let discard: TileType = inputs.selection.evaluation.as_ref()?.discard;
+    Some(inputs.continuation?.candidate(discard)?.self_tsumo)
+}
+
+// 選んだ打牌後のテンパイの待ちと完成手。Ron 側の2つの baseline はこの1組を共有する。
+struct SelectedTenpai {
+    wait: TenpaiWaitAvailability,
+    hands: TenpaiCompletedHands,
+}
+
+// 選んだ打牌後のテンパイを、既に計算済みの値から組み立てる。
+//
+// 待ちもダマ打点も完成手も、リーチ判断か通常打牌 selection が計算済みならそれを使う。どちらも
+// 計算していない経路 (合法 Reach が無く、現在聴牌候補も1件だけの局面) だけ、同じ既存 helper を
+// 1回だけ通す。待ちは既存の受け入れ (`acceptance_after_discard`) から求めるので、向聴も受け入れも
+// ここで計算し直すことにはならない。
+fn tenpai_facts(inputs: &ReachDamatenComparisonInputs) -> Option<SelectedTenpai> {
+    let evaluation: &DiscardEvaluation = inputs.selection.evaluation.as_ref()?;
+    if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
+        return None;
+    }
+
+    let wait = inputs
+        .reach
+        .tenpai_wait
+        .clone()
+        .or_else(|| inputs.selection.tenpai_wait.clone())
+        .or_else(|| selected_discard_tenpai_wait_availability(inputs.context, evaluation))?;
+    let hands = inputs
+        .hands
+        .cloned()
+        .or_else(|| inputs.selection.tenpai_completed_hands.clone())
+        .or_else(|| tenpai_completed_hands_after_discard(inputs.context, evaluation, &wait))?;
+
+    Some(SelectedTenpai { wait, hands })
+}
+
+// 今リーチしてロン和了した場合の最低保証打点。
+//
+// 実際にリーチできる局面だけ評価する。副露手のようにリーチが合法でない局面で、あり得ないリーチ
+// 手の打点を作らない。self-tsumo の `reach now` と同じ入口条件で、局面から合法条件を組み立て
+// 直さない。
+fn reach_ron_baseline(
+    inputs: &ReachDamatenComparisonInputs,
+    tenpai: &SelectedTenpai,
+) -> Option<ReachRonBaselineDiagnostic> {
+    inputs
+        .reach_legal
+        .then(|| reach_ron_baseline_from_hands(inputs.context, &tenpai.hands))
+}
+
+// ダマのままロン和了した場合の打点。
+//
+// 入口条件は既存 policy と同じで、自分が未リーチと確定していてダマでロンできる場合だけ評価する。
+// フリテンとロン可否 unknown では非フリテンだと推測せず、0 点でもなく評価しないままにする。
+// production 判断か通常打牌 selection が既に評価していればその診断そのもので、同じ hand-value
+// evaluation を二度実行しない。
+fn damaten_ron_value(
+    inputs: &ReachDamatenComparisonInputs,
+    tenpai: &SelectedTenpai,
+) -> Option<DamatenValueDiagnostic> {
+    if inputs.context.own_reached() != Some(false) || tenpai.wait.can_ron() != Some(true) {
+        return None;
+    }
+
+    inputs
+        .reach
+        .damaten_value
+        .clone()
+        .or_else(|| inputs.selection.damaten_value.clone())
+        .or_else(|| Some(damaten_value_from_hands(inputs.context, &tenpai.hands)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::LazyLock;
+
+    use bot_logic::{HistoryFuritenFacts, RiichiStatus, TileId, WinMethod};
+
+    use crate::agent::Agent;
+    use crate::agents::{DiagnosticOptions, ShantenAgent, ShantenDecisionDiagnostic};
+    use crate::context::TableStateFacts;
+    use crate::damaten_value::DamatenValue;
+    use crate::meld::{Meld, MeldKind};
+    use crate::offense_value::{TenpaiOffenseMode, reach_baseline_context};
+    use crate::reach_policy::ReachDecisionReason;
+    use crate::tenpai_continuation::TenpaiContinuationCandidate;
+
+    // 234m 567m 789m 345p + 1s + 赤5s。打 1s で赤5s を残した 5s 単騎、打 5sr で 1s 単騎になる。
+    // 赤5s を持つかどうかで打点が変わるので、2つの現在聴牌候補は別の self-tsumo 比較を持つ。
+    const ASYMMETRIC_HAND: [&str; 14] = [
+        "2m", "3m", "4m", "5m", "6m", "7m", "7m", "8m", "9m", "3p", "4p", "5p", "1s", "5sr",
+    ];
+
+    // 123m 456m 789m 123p 東 の門前13枚に南をツモった単騎テンパイ。打 E で南単騎になり、一気通貫
+    // だけの手なのでダマでも役があり、リーチすると1翻増える。
+    const ITTSUU_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "E",
+    ];
+    const ITTSUU_DRAW: &str = "S";
+
+    // 123m をチーした副露手。打 N が 3m / 6m / 9m のテンパイになり、ダマツモで役があるのは
+    // 一気通貫になる 9m だけ。副露しているのでリーチは合法にならない。
+    const OPEN_HAND: [&str; 10] = ["4m", "5m", "6m", "7m", "8m", "9p", "9p", "2s", "3s", "4s"];
+    const OPEN_DRAW: &str = "N";
+    const OPEN_MELD: [&str; 3] = ["1m", "2m", "3m"];
+
+    // 一気通貫の 5s 単騎。待ちの 5s は赤5が1枚と黒5が2枚に分かれる。
+    const RED_WAIT_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+    ];
+    const RED_WAIT_DRAW: &str = "E";
+
+    // 山の残枚数。4人で分けて自分の残り自摸機会になる。
+    const REMAINING_TILES: u32 = 70;
+
+    // リーチ宣言の条件を満たす持ち点。
+    const REACH_SCORE: i32 = 25_000;
+
+    // 同じ牌種の赤5 / 黒5を取り違えないよう、物理牌を1枚ずつ払い出す。
+    struct TileIdSource {
+        used: [bool; TileId::COUNT],
+    }
+
+    impl TileIdSource {
+        fn new() -> Self {
+            Self {
+                used: [false; TileId::COUNT],
+            }
+        }
+
+        fn tiles(&mut self, strings: &[&str]) -> Vec<TileId> {
+            strings.iter().map(|s| self.tile(s)).collect()
+        }
+
+        fn tile(&mut self, s: &str) -> TileId {
+            let red = s.ends_with('r');
+            let id = TileId::copies(tile(s))
+                .find(|id| id.is_red() == red && !self.used[id.index()])
+                .expect("同じ物理牌を使い回していない");
+            self.used[id.index()] = true;
+            id
+        }
+    }
+
+    fn tile(s: &str) -> TileType {
+        TileType::from_mjai_type_str(s.trim_end_matches('r')).expect("牌種として読める")
+    }
+
+    struct MeldSpec<'a> {
+        kind: MeldKind,
+        tiles: &'a [&'a str],
+    }
+
+    struct CaseSpec<'a> {
+        /// 打牌前の手牌。ツモ牌を含まない13枚か、ツモ牌まで含んだ14枚。副露牌は含まない。
+        hand: &'a [&'a str],
+        draw: Option<&'a str>,
+        melds: &'a [MeldSpec<'a>],
+        /// 自分の河。待ち牌を置くとフリテンになる。
+        own_discards: &'a [&'a str],
+        /// 合法手にリーチを含めるか。現在局面のリーチ可否はこの合法手だけが source of truth。
+        legal_reach: bool,
+        /// 合法 Dahai を絞る牌。`None` では手牌とツモ牌のすべてを切れる。
+        legal_dahai: Option<&'a [&'a str]>,
+        options: DiagnosticOptions,
+    }
+
+    impl Default for CaseSpec<'_> {
+        fn default() -> Self {
+            Self {
+                hand: &ASYMMETRIC_HAND,
+                draw: None,
+                melds: &[],
+                own_discards: &[],
+                legal_reach: true,
+                legal_dahai: None,
+                options: DiagnosticOptions::WITH_LOOKAHEAD,
+            }
+        }
+    }
+
+    // 局面と、その局面で act() / 診断が使う合法手。
+    struct Case {
+        context: GameContext,
+        actions: Vec<LegalAction>,
+        diagnostic: ShantenDecisionDiagnostic,
+    }
+
+    impl CaseSpec<'_> {
+        fn build(&self) -> Case {
+            let mut source = TileIdSource::new();
+            let hand_tiles = source.tiles(self.hand);
+            let drawn_tile = self.draw.map(|draw| source.tile(draw));
+            let melds: Vec<Meld> = self
+                .melds
+                .iter()
+                .map(|meld| {
+                    let tiles = source.tiles(meld.tiles);
+                    let called_tile = meld.kind.is_open().then(|| tiles[0]);
+                    Meld::new(meld.kind, tiles, called_tile)
+                })
+                .collect();
+            let own_discards = source.tiles(self.own_discards);
+
+            let tiles: Vec<TileId> = hand_tiles.iter().copied().chain(drawn_tile).collect();
+            let visible: Vec<TileId> = tiles
+                .iter()
+                .chain(melds.iter().flat_map(|meld| meld.tiles()))
+                .chain(own_discards.iter())
+                .copied()
+                .collect();
+            let actions: Vec<LegalAction> = tiles
+                .iter()
+                .filter(|id| {
+                    self.legal_dahai.is_none_or(|dahai| {
+                        dahai
+                            .iter()
+                            .any(|s| id.tile_type() == tile(s) && id.is_red() == s.ends_with('r'))
+                    })
+                })
+                .map(|&tile| LegalAction::Dahai { tile })
+                .chain(self.legal_reach.then_some(LegalAction::Reach))
+                .collect();
+
+            let mut discards: [Vec<TileId>; 4] = Default::default();
+            let mut own_melds: [Vec<Meld>; 4] = Default::default();
+            discards[0] = own_discards;
+            own_melds[0] = melds;
+
+            let context = GameContext::from_parts_with_melds(
+                drawn_tile,
+                hand_tiles,
+                Vec::new(),
+                Some(tile("E")),
+                Some(tile("S")),
+                visible,
+                Some(0),
+                Some(3),
+                discards,
+                [false; 4],
+                own_melds,
+            )
+            .with_table_state_facts(TableStateFacts {
+                remaining_tiles: Some(REMAINING_TILES),
+                scores: Some([REACH_SCORE; 4]),
+                ..Default::default()
+            })
+            .with_history_furiten_facts(HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            });
+
+            let diagnostic = ShantenAgent::diagnose_with_options(&context, &actions, self.options);
+
+            Case {
+                context,
+                actions,
+                diagnostic,
+            }
+        }
+    }
+
+    impl Case {
+        fn comparison(&self) -> &ReachDamatenComparisonDiagnostic {
+            self.diagnostic
+                .reach_damaten_comparison
+                .as_ref()
+                .expect("統合診断が構築されている")
+        }
+
+        fn reach(&self) -> &ReachDecisionDiagnostic {
+            self.diagnostic
+                .reach
+                .as_ref()
+                .expect("リーチを検討している")
+        }
+
+        fn continuation_candidate(&self, discard: &str) -> &TenpaiContinuationCandidate {
+            self.diagnostic
+                .normal_discard_tenpai_continuation
+                .as_ref()
+                .expect("継続診断が構築されている")
+                .candidate(tile(discard))
+                .unwrap_or_else(|| panic!("打 {discard} の継続候補がある"))
+        }
+    }
+
+    fn ittsuu_spec() -> CaseSpec<'static> {
+        CaseSpec {
+            hand: &ITTSUU_HAND,
+            draw: Some(ITTSUU_DRAW),
+            ..CaseSpec::default()
+        }
+    }
+
+    fn open_spec() -> CaseSpec<'static> {
+        CaseSpec {
+            hand: &OPEN_HAND,
+            draw: Some(OPEN_DRAW),
+            melds: &[MeldSpec {
+                kind: MeldKind::Chi,
+                tiles: &OPEN_MELD,
+            }],
+            legal_reach: false,
+            ..CaseSpec::default()
+        }
+    }
+
+    // 2手先探索は重いので、同じ局面を使う複数のテストで構築結果を共有する。
+    static ASYMMETRIC: LazyLock<Case> = LazyLock::new(|| CaseSpec::default().build());
+    static ITTSUU: LazyLock<Case> = LazyLock::new(|| ittsuu_spec().build());
+    static OPEN: LazyLock<Case> = LazyLock::new(|| open_spec().build());
+
+    // ---- 選んだ打牌との対応付け ----
+
+    #[test]
+    fn the_self_tsumo_comparison_comes_from_the_selected_discard_candidate() {
+        // 通常打牌 selection が選んだ打牌に対応する継続候補の比較そのものを載せる。
+        let case = &*ASYMMETRIC;
+        let comparison = case.comparison();
+
+        assert_eq!(comparison.selected_discard, Some(dahai(case, "1s")));
+        assert_eq!(
+            comparison.self_tsumo,
+            Some(case.continuation_candidate("1s").self_tsumo)
+        );
+        assert!(comparison.reach_now_self_tsumo().is_some());
+        assert!(comparison.damaten_continuation_self_tsumo().is_some());
+    }
+
+    #[test]
+    fn the_self_tsumo_comparison_never_comes_from_another_candidate() {
+        // 打 5sr は赤5を切る別の現在聴牌候補で、比較の値も違う。選ばなかった候補の値を
+        // 結び付けない。
+        let case = &*ASYMMETRIC;
+        let other = case.continuation_candidate("5s").self_tsumo;
+
+        assert_ne!(case.continuation_candidate("1s").self_tsumo, other);
+        assert_ne!(case.comparison().self_tsumo, Some(other));
+    }
+
+    #[test]
+    fn the_self_tsumo_comparison_is_unavailable_without_the_continuation_diagnostic() {
+        // 2手先探索を要求していない局面では、統合診断のために探索を追加せず材料無しにする。
+        let case = CaseSpec {
+            options: DiagnosticOptions::NONE,
+            ..CaseSpec::default()
+        }
+        .build();
+
+        assert!(case.diagnostic.normal_discard_tenpai_continuation.is_none());
+        assert_eq!(case.comparison().self_tsumo, None);
+        assert_eq!(case.comparison().reach_now_self_tsumo(), None);
+        assert_eq!(case.comparison().damaten_continuation_self_tsumo(), None);
+        assert_eq!(case.comparison().damaten_immediate_tsumo_self_tsumo(), None);
+        assert_eq!(
+            case.comparison().damaten_continuation_branches_self_tsumo(),
+            None
+        );
+        // Ron 側は self-tsumo の材料が無くても評価できる。
+        assert!(case.comparison().reach_ron_baseline.is_some());
+    }
+
+    // ---- production 判断の観測 ----
+
+    #[test]
+    fn the_production_decision_is_observed_as_is() {
+        for case in [&*ASYMMETRIC, &*ITTSUU, &*OPEN] {
+            let reach = case.reach();
+            let comparison = case.comparison();
+
+            assert_eq!(comparison.production_reason, reach.reason);
+            assert_eq!(comparison.production_should_reach, reach.should_reach());
+            assert_eq!(comparison.selected_discard, reach.selected_discard);
+        }
+
+        // リーチ判断が待ちとダマ打点まで進んだ局面では、その結論そのものを載せる。
+        for case in [&*ASYMMETRIC, &*ITTSUU] {
+            let reach = case.reach();
+            let comparison = case.comparison();
+
+            assert!(reach.tenpai_wait.is_some());
+            assert_eq!(comparison.can_ron, reach.can_ron());
+            assert_eq!(comparison.damaten_verdict(), reach.damaten_verdict());
+            assert_eq!(comparison.damaten_ron_value, reach.damaten_value);
+        }
+    }
+
+    #[test]
+    fn the_comparison_does_not_change_the_selected_action() {
+        for spec in [CaseSpec::default(), ittsuu_spec(), open_spec()] {
+            let case = spec.build();
+            let mut agent = ShantenAgent;
+
+            assert_eq!(
+                case.diagnostic.selected_action,
+                agent.act(&case.context, &case.actions)
+            );
+            assert!(case.diagnostic.reach_damaten_comparison.is_some());
+        }
+    }
+
+    // ---- ダマ Ron 軸 ----
+
+    #[test]
+    fn the_damaten_ron_value_is_the_production_diagnostic_itself() {
+        // 待ちも赤 / 黒 variant も production 判断が評価した診断そのもので、点数計算をやり直さない。
+        let case = &*ITTSUU;
+        let comparison = case.comparison();
+        let production = case
+            .reach()
+            .damaten_value
+            .as_ref()
+            .expect("ダマ打点を評価している");
+
+        assert_eq!(case.comparison().can_ron, Some(true));
+        assert_eq!(comparison.damaten_ron_value.as_ref(), Some(production));
+        assert_eq!(comparison.damaten_verdict(), Some(production.verdict));
+        assert_eq!(
+            comparison
+                .damaten_ron_value
+                .as_ref()
+                .expect("ダマ打点がある")
+                .winning_tile_values()
+                .map(|value| (value.winning_tile, value.remaining, value.value))
+                .collect::<Vec<_>>(),
+            production
+                .winning_tile_values()
+                .map(|value| (value.winning_tile, value.remaining, value.value))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_furiten_tenpai_keeps_the_damaten_ron_value_unavailable() {
+        // ダマでロンできない待ちのダマ打点は評価しないまま。0 点として扱わない。
+        // 1s / 5s のどちらを切っても自分の河と重なる恒常フリテンにする。
+        let case = CaseSpec {
+            own_discards: &["1s", "5s"],
+            ..CaseSpec::default()
+        }
+        .build();
+        let comparison = case.comparison();
+
+        assert_eq!(comparison.selected_discard, case.reach().selected_discard);
+        assert_eq!(comparison.can_ron, Some(false));
+        assert_eq!(comparison.damaten_ron_value, None);
+        assert_eq!(comparison.damaten_verdict(), None);
+
+        // Tsumo 側は独立した軸なので、ロンできなくても評価する。
+        assert!(comparison.damaten_continuation_self_tsumo().is_some());
+        assert!(comparison.reach_now_self_tsumo().is_some());
+        // リーチ後はフリテンでもツモ和了できるので、リーチ Ron baseline も評価する。
+        assert!(comparison.reach_ron_baseline.is_some());
+    }
+
+    #[test]
+    fn an_unknown_ron_availability_is_not_guessed() {
+        // ロン可否が分からない局面では非フリテンだと推測せず、ダマ打点も評価しない。
+        let context = GameContext::from_parts_with_melds(
+            Some(TileId::copies(tile("S")).next().expect("南がある")),
+            TileIdSource::new().tiles(&ITTSUU_HAND),
+            Vec::new(),
+            Some(tile("E")),
+            Some(tile("S")),
+            Vec::new(),
+            None,
+            Some(3),
+            Default::default(),
+            [false; 4],
+            Default::default(),
+        );
+        let actions: Vec<LegalAction> = context
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(context.drawn_tile())
+            .map(|tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Reach])
+            .collect();
+        let diagnostic = ShantenAgent::diagnose(&context, &actions);
+        let comparison = diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断が構築されている");
+
+        assert_eq!(comparison.can_ron, None);
+        assert_eq!(comparison.damaten_ron_value, None);
+        assert_eq!(comparison.damaten_verdict(), None);
+    }
+
+    // ---- リーチ Ron baseline ----
+
+    #[test]
+    fn the_reach_ron_baseline_uses_the_existing_forced_reach_context() {
+        let case = &*ITTSUU;
+        let baseline = case
+            .comparison()
+            .reach_ron_baseline
+            .as_ref()
+            .expect("リーチ Ron baseline を評価している");
+
+        assert_eq!(baseline.baseline, reach_baseline_context(&case.context));
+        assert_eq!(baseline.baseline.win_method(), WinMethod::Ron);
+        assert_eq!(baseline.baseline.riichi(), RiichiStatus::Riichi);
+        assert_eq!(baseline.baseline.ippatsu(), Some(false));
+        assert_eq!(baseline.baseline.chankan(), Some(false));
+    }
+
+    #[test]
+    fn the_reach_ron_baseline_adds_the_riichi_han_and_nothing_else() {
+        // 一気通貫だけのダマ 2600 に対し、リーチ1翻を足した 5200 が最低保証打点。一発も裏ドラも
+        // 加算しない。
+        let case = &*ITTSUU;
+        let comparison = case.comparison();
+        let baseline = comparison
+            .reach_ron_baseline
+            .as_ref()
+            .expect("リーチ Ron baseline を評価している");
+
+        assert_eq!(
+            baseline
+                .winning_tile_values()
+                .map(|value| value.total)
+                .collect::<Vec<_>>(),
+            [Some(5200)]
+        );
+        assert_eq!(
+            comparison
+                .damaten_ron_value
+                .as_ref()
+                .expect("ダマ打点がある")
+                .winning_tile_values()
+                .map(|value| value.value.total())
+                .collect::<Vec<_>>(),
+            [Some(2600)]
+        );
+    }
+
+    #[test]
+    fn the_reach_ron_baseline_shares_the_aggregation_of_the_offense_value() {
+        // 集約規則も裏ドラの扱いも押し引きのリーチ打点と同じ1本。診断用の別集計を作らない。
+        let case = &*ITTSUU;
+        let offense = case
+            .diagnostic
+            .push_pull_inputs
+            .as_ref()
+            .and_then(|inputs| inputs.offense.as_ref())
+            .and_then(|offense| offense.tenpai_offense_value_after_discard)
+            .expect("押し引きの攻撃打点を評価している");
+        let baseline = case
+            .comparison()
+            .reach_ron_baseline
+            .as_ref()
+            .expect("リーチ Ron baseline を評価している");
+
+        assert_eq!(offense.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(baseline.value, offense.value);
+    }
+
+    #[test]
+    fn the_reach_ron_baseline_keeps_the_red_and_black_variants() {
+        // 待ちが赤5 / 黒5に分かれる場合、variant を潰さずそれぞれの打点を残す。赤5で和了する
+        // 枝だけドラ1枚分高い。
+        let case = CaseSpec {
+            hand: &RED_WAIT_HAND,
+            draw: Some(RED_WAIT_DRAW),
+            legal_dahai: Some(&[RED_WAIT_DRAW]),
+            options: DiagnosticOptions::NONE,
+            ..CaseSpec::default()
+        }
+        .build();
+        let baseline = case
+            .comparison()
+            .reach_ron_baseline
+            .as_ref()
+            .expect("リーチ Ron baseline を評価している");
+
+        assert_eq!(
+            baseline
+                .winning_tile_values()
+                .map(|value| (value.is_red(), value.remaining, value.total))
+                .collect::<Vec<_>>(),
+            [(true, 1, Some(8000)), (false, 2, Some(5200))]
+        );
+    }
+
+    // ---- 副露手 ----
+
+    #[test]
+    fn an_open_hand_keeps_the_damaten_axis_without_a_legal_reach() {
+        // 副露手ではリーチできないので reach now は材料が無い。ダマ側は既存情報で評価できる。
+        let case = &*OPEN;
+        let comparison = case.comparison();
+
+        assert!(!comparison.reach_legal);
+        assert_eq!(
+            comparison.production_reason,
+            ReachDecisionReason::NoLegalReach
+        );
+        assert!(!comparison.production_should_reach);
+        assert_eq!(comparison.reach_now_self_tsumo(), None);
+        assert!(comparison.damaten_continuation_self_tsumo().is_some());
+        assert!(comparison.damaten_immediate_tsumo_self_tsumo().is_some());
+    }
+
+    #[test]
+    fn an_open_hand_keeps_the_no_yaku_waits_of_the_damaten_ron_value() {
+        // 3m / 6m はダマで役が無い。役なしを 0 点にせず、役なしのまま残す。
+        let case = &*OPEN;
+        let damaten = case
+            .comparison()
+            .damaten_ron_value
+            .as_ref()
+            .expect("ダマ打点を評価している");
+        let no_yaku: Vec<_> = damaten
+            .winning_tile_values()
+            .filter(|value| value.value == DamatenValue::NoYaku)
+            .map(|value| value.winning_tile.tile_type())
+            .collect();
+
+        assert_eq!(no_yaku, [tile("3m"), tile("6m")]);
+        assert_eq!(
+            case.comparison().damaten_verdict(),
+            Some(DamatenValueVerdict::NoYaku)
+        );
+    }
+
+    // ---- 単位 ----
+
+    #[test]
+    fn the_comparison_only_carries_observations() {
+        // self-tsumo と Ron baseline は単位の違う別の軸で、足した aggregate も winner も
+        // 持たない。観測値以外のフィールドが増えるとこの構築が壊れる。
+        let comparison = ReachDamatenComparisonDiagnostic {
+            selected_discard: None,
+            production_reason: ReachDecisionReason::NoLegalReach,
+            production_should_reach: false,
+            reach_legal: false,
+            self_tsumo: None,
+            reach_ron_baseline: None,
+            can_ron: None,
+            damaten_ron_value: None,
+        };
+
+        assert_eq!(comparison.reach_now_self_tsumo(), None);
+        assert_eq!(comparison.damaten_continuation_self_tsumo(), None);
+        assert_eq!(comparison.damaten_verdict(), None);
+    }
+
+    // 打牌候補の物理牌に対応する合法 Dahai。
+    fn dahai(case: &Case, discard: &str) -> LegalAction {
+        case.actions
+            .iter()
+            .find(|action| match action {
+                LegalAction::Dahai { tile: id } => {
+                    id.tile_type() == tile(discard) && id.is_red() == discard.ends_with('r')
+                }
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("打 {discard} が合法手にある"))
+            .clone()
+    }
+}
