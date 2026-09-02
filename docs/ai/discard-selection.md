@@ -264,7 +264,7 @@ can_ron == Some(true)
 live wait は1種類だけ
 live copies は1〜3枚
 待ち牌は么九牌ではない (`TileType::is_yaochu() == false`、つまり2〜8の中張牌)
-Reach 宣言牌を河へ置いた後の public safety が SuitedSafetyRank::NoSafety
+Reach 宣言牌を河へ置いた後の public safety が非現物かつ NoWall かつ NoSuji
 reached opponents = 0
 High OpenHand targets = 0
 ```
@@ -273,7 +273,7 @@ High OpenHand targets = 0
 
 非フリテン全般を self-tsumo だけで比較する policy ではありません。非フリテンなら今リーチした最初の1巡からロン機会が生まれますが、nodocchi はまだ「他家がその牌を切る確率」の模型を持たないためです。今回の接続は、明らかな悪形を上記の structural facts で狭く限定する**暫定 policy**です。
 
-`NoSafety` は「ロン確率が高い」という意味ではありません。Reach 後に既存 public safety evidence 上のスジ・壁・現物による安全根拠が無いことだけを確認する gate です。safety rank を数値係数へ変換せず、[Ron opportunity](#ron-opportunity-structural-facts-only) の Defense exact `R/T` も流用しません。Ron probability / discard probability は追加していません。
+`genbutsu == false` かつ `wall_rank == NoWall` かつ `suji_rank == NoSuji` は「ロン確率が高い」という意味ではありません。Reach 後に既存 public safety evidence 上の現物・壁・スジによる安全根拠が無いことだけを確認する structural gate です。`SuitedSafetyEvidence::legacy_rank()` には依存せず、各 evidence を数値係数へ変換しません。[Ron opportunity](#ron-opportunity-structural-facts-only) の Defense exact `R/T` も流用せず、Ron probability / discard probability は追加していません。
 
 么九牌かどうかは既存 `TileType::is_yaochu()` だけを source of truth にします。標準形と七対子の2〜8単騎は対象になり得ますが、1 / 9単騎・字牌単騎・待ちがすべて么九牌の国士無双は対象外です。七対子や国士を hand family / shanten の特殊分岐で判定しません。
 

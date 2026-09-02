@@ -41,7 +41,7 @@
 use bot_logic::PermanentFuriten;
 
 use crate::damaten_value::DamatenValueVerdict;
-use crate::defense::SuitedSafetyRank;
+use crate::defense::{SujiSafetyRank, WallRank};
 
 /// リーチ宣言に必要な持ち点 [点]。inclusive。
 pub const REACH_MIN_SCORE: i32 = 1000;
@@ -198,8 +198,8 @@ pub enum ReachTimingReason {
     NonFuritenBadWaitHeuristicNotEligible,
     /// 非フリテン悪形の暫定 heuristic が対象にした self-tsumo 比較。決定はその大小そのもの。
     ///
-    /// `NoSafety` は公開情報上の安全根拠が無いという structural gate にだけ使い、ロン確率や
-    /// 数値係数には変換しない。
+    /// 非現物・壁なし・無スジは公開情報上の安全根拠が無いという structural gate にだけ使い、
+    /// ロン確率や数値係数には変換しない。
     NonFuritenBadWaitHeuristic,
 }
 
@@ -268,15 +268,16 @@ pub struct NonFuritenBadWaitTimingFacts {
     /// 既存 [`bot_logic::TileType::is_yaochu`] を反転した判定そのもの。
     pub wait_is_non_yaochu: bool,
     pub reach_genbutsu: Option<bool>,
-    pub suited_safety_rank: Option<SuitedSafetyRank>,
+    pub wall_rank: Option<WallRank>,
+    pub suji_rank: Option<SujiSafetyRank>,
     pub reached_opponent_count: usize,
     pub high_open_hand_target_count: usize,
 }
 
 /// 非フリテン悪形の暫定 heuristic が selected wait を評価対象にするか。
 ///
-/// `SuitedSafetyRank::NoSafety` は「ロンされやすい」という確率的意味ではなく、Reach 後の
-/// public safety に既存のスジ・壁・現物による安全根拠が無いことだけを表す structural gate。
+/// 非現物・壁なし・無スジは「ロンされやすい」という確率的意味ではなく、Reach 後の public
+/// safety に既存の現物・壁・スジによる安全根拠が無いことだけを表す structural gate。
 pub fn evaluates_non_furiten_bad_wait_reach_timing(facts: NonFuritenBadWaitTimingFacts) -> bool {
     facts.permanent_furiten == PermanentFuriten::No
         && facts.can_ron == Some(true)
@@ -284,7 +285,8 @@ pub fn evaluates_non_furiten_bad_wait_reach_timing(facts: NonFuritenBadWaitTimin
         && (1..=3).contains(&facts.live_copies)
         && facts.wait_is_non_yaochu
         && facts.reach_genbutsu == Some(false)
-        && facts.suited_safety_rank == Some(SuitedSafetyRank::NoSafety)
+        && facts.wall_rank == Some(WallRank::NoWall)
+        && facts.suji_rank == Some(SujiSafetyRank::NoSuji)
         && facts.reached_opponent_count == 0
         && facts.high_open_hand_target_count == 0
 }
@@ -472,7 +474,8 @@ mod tests {
             live_copies: 3,
             wait_is_non_yaochu: true,
             reach_genbutsu: Some(false),
-            suited_safety_rank: Some(SuitedSafetyRank::NoSafety),
+            wall_rank: Some(WallRank::NoWall),
+            suji_rank: Some(SujiSafetyRank::NoSuji),
             reached_opponent_count: 0,
             high_open_hand_target_count: 0,
         }
@@ -484,7 +487,7 @@ mod tests {
             non_furiten_bad_wait_facts()
         ));
 
-        // 各 structural gate を1つずつ外す。NoSafety は確率に変換せず enum の一致だけを見る。
+        // 各 structural gate を1つずつ外す。壁・スジは既存 enum の生 facts を直接見る。
         for facts in [
             NonFuritenBadWaitTimingFacts {
                 permanent_furiten: PermanentFuriten::Yes,
@@ -519,40 +522,55 @@ mod tests {
                 ..non_furiten_bad_wait_facts()
             },
             NonFuritenBadWaitTimingFacts {
-                reach_genbutsu: Some(true),
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
-                reach_genbutsu: None,
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
-                suited_safety_rank: None,
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
-                suited_safety_rank: Some(SuitedSafetyRank::HalfSuji),
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
-                suited_safety_rank: Some(SuitedSafetyRank::Suji),
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
-                suited_safety_rank: Some(SuitedSafetyRank::OneChance),
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
-                suited_safety_rank: Some(SuitedSafetyRank::NoChance),
-                ..non_furiten_bad_wait_facts()
-            },
-            NonFuritenBadWaitTimingFacts {
                 reached_opponent_count: 1,
                 ..non_furiten_bad_wait_facts()
             },
             NonFuritenBadWaitTimingFacts {
                 high_open_hand_target_count: 1,
                 ..non_furiten_bad_wait_facts()
+            },
+        ] {
+            assert!(
+                !evaluates_non_furiten_bad_wait_reach_timing(facts),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_non_furiten_bad_wait_requires_raw_no_wall_no_suji_non_genbutsu_evidence() {
+        let eligible = non_furiten_bad_wait_facts();
+        assert_eq!(eligible.reach_genbutsu, Some(false));
+        assert_eq!(eligible.wall_rank, Some(WallRank::NoWall));
+        assert_eq!(eligible.suji_rank, Some(SujiSafetyRank::NoSuji));
+        assert!(evaluates_non_furiten_bad_wait_reach_timing(eligible));
+
+        for facts in [
+            NonFuritenBadWaitTimingFacts {
+                reach_genbutsu: Some(true),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                wall_rank: Some(WallRank::OneChance),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                wall_rank: Some(WallRank::NoChance),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                suji_rank: Some(SujiSafetyRank::HalfSuji),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                suji_rank: Some(SujiSafetyRank::Suji),
+                ..eligible
+            },
+            NonFuritenBadWaitTimingFacts {
+                reach_genbutsu: None,
+                wall_rank: None,
+                suji_rank: None,
+                ..eligible
             },
         ] {
             assert!(

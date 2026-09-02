@@ -1241,9 +1241,10 @@ fn decide_reach(
 
 // base policy がリーチを選んだ聴牌の timing 判断。
 //
-// 恒常フリテンに加え、非フリテンでは「生きた待ち1種・3枚以下・非么九牌・Reach 後 NoSafety・
-// external threat なし」の暫定 structural gate をすべて満たす場合だけ対象にする。NoSafety は
-// Ron probability の代用ではなく、公開 safety evidence 上の安全根拠が無いことだけを見る。
+// 恒常フリテンに加え、非フリテンでは「生きた待ち1種・3枚以下・非么九牌・Reach 後に非現物かつ
+// 壁なし・無スジ・external threat なし」の暫定 structural gate をすべて満たす場合だけ対象に
+// する。これらは Ron probability の代用ではなく、公開 safety evidence 上の安全根拠が無いこと
+// だけを見る。
 //
 // 対象になった場合に評価するのは通常打牌 selection が選んだ1候補だけで、全合法 Dahai 候補の
 // 継続枝は production では構築しない。比較する値も既存 self-tsumo 比較そのもので、この経路が
@@ -1300,9 +1301,8 @@ fn reach_timing(
         live_copies: tenpai_wait.tsumo_remaining,
         wait_is_non_yaochu,
         reach_genbutsu: safety.map(|safety| safety.genbutsu),
-        suited_safety_rank: safety
-            .and_then(|safety| safety.suited)
-            .map(|evidence| evidence.legacy_rank()),
+        wall_rank: safety.and_then(|safety| safety.suited.map(|suited| suited.wall_rank)),
+        suji_rank: safety.and_then(|safety| safety.suited.map(|suited| suited.suji_rank)),
         reached_opponent_count: reached_opponents.len(),
         high_open_hand_target_count: high_open_hand_targets.len(),
     };
@@ -1340,8 +1340,8 @@ pub(crate) mod tests {
     use crate::context::TableStateFacts;
     use crate::damaten_value::{DAMATEN_MIN_TOTAL, DamatenValue, damaten_baseline_context};
     use crate::defense::{
-        HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, honor_safety_rank,
-        is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
+        HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
+        honor_safety_rank, is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
         select_defense_fallback_action, suited_safety_rank_for_all_reached,
     };
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
@@ -8606,10 +8606,9 @@ pub(crate) mod tests {
         )
         .expect("Reach public safety");
         assert!(!safety.genbutsu);
-        assert_eq!(
-            safety.suited.map(|evidence| evidence.legacy_rank()),
-            Some(SuitedSafetyRank::NoSafety)
-        );
+        let suited = safety.suited.expect("数牌の public safety");
+        assert_eq!(suited.wall_rank, WallRank::NoWall);
+        assert_eq!(suited.suji_rank, SujiSafetyRank::NoSuji);
 
         assert_eq!(timing.decision, ReachTimingDecision::DeferReach);
         assert_eq!(timing.reason, ReachTimingReason::NonFuritenBadWaitHeuristic);
@@ -8691,8 +8690,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_non_furiten_single_wait_with_public_safety_reaches_now() {
-        // 自分の河の 1s により、Reach 後の 4s は少なくとも片スジ。NoSafety ではないため
-        // self-tsumo comparison を production では評価せず、base Reach を維持する。
+        // 自分の河の 1s により、Reach 後の 4s は片スジ。NoSuji ではないため self-tsumo
+        // comparison を production では評価せず、base Reach を維持する。
         let case = ReachTimingSpec {
             hand: &TANKI_HAND,
             draw: TANKI_DRAW,
@@ -8709,10 +8708,9 @@ pub(crate) mod tests {
         )
         .expect("Reach public safety");
 
-        assert_ne!(
-            safety.suited.map(|evidence| evidence.legacy_rank()),
-            Some(SuitedSafetyRank::NoSafety)
-        );
+        let suited = safety.suited.expect("数牌の public safety");
+        assert_eq!(suited.wall_rank, WallRank::NoWall);
+        assert_eq!(suited.suji_rank, SujiSafetyRank::HalfSuji);
         assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
         assert_eq!(
             timing.reason,
