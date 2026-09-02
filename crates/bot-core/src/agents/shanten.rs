@@ -2221,10 +2221,27 @@ pub(crate) mod tests {
         assert_eq!(reach.selected, None);
         assert_eq!(reach.timing, None);
         assert_eq!(case.act(), case.tsumogiri);
+        let diagnostic = ShantenAgent::diagnose(&case.ctx, &case.actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        let offense = diagnostic
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense)
+            .and_then(|offense| offense.tenpai_offense_value_after_discard)
+            .expect("恒常フリテンの Tsumo 攻撃打点を評価している");
         assert_eq!(
-            ShantenAgent::diagnose(&case.ctx, &case.actions).selected_source,
-            AgentActionSource::NormalDiscard
+            offense.mode,
+            crate::offense_value::TenpaiOffenseMode::Damaten
         );
+        assert_eq!(offense.value.average_total(), Some(64_000));
+        assert!(offense.value.weighted_total().is_some());
+        let (baseline, _) = crate::offense_value::offense_scoring_inputs(
+            &case.ctx,
+            offense.mode,
+            Some(PermanentFuriten::Yes),
+            Some(false),
+        )
+        .expect("named 役満専用でない恒常フリテン共通の Tsumo baseline");
+        assert_eq!(baseline.win_method(), WinMethod::Tsumo);
     }
 
     #[test]

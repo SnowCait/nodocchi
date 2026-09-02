@@ -17,10 +17,15 @@
 //! 未リーチだともリーチ済みだとも推測せず、攻撃モードを [`TenpaiOffenseMode::Unknown`] にして
 //! 打点も確定しない。
 //!
-//! # hypothetical baseline
+//! # scoring basis と hypothetical baseline
+//!
+//! [`TenpaiOffenseMode`] はリーチを宣言するかであり、和了方法ではない。非フリテンは
+//! 従来どおり Ron baseline、[`PermanentFuriten::Yes`] は Ron 不可が確定しているため
+//! Tsumo baseline で評価する。恒常フリテン unknown をどちらかと推測せず、
+//! 履歴依存フリテンだけを self-tsumo only ともみなさない。
 //!
 //! 打点比較のための和了状況は、現在の局面から推測するのではなく明示的な baseline として
-//! 組み立てる。ダマの baseline は既存の [`damaten_baseline_context`] をそのまま使う。
+//! 組み立てる。Ron のダマ baseline は既存の [`damaten_baseline_context`] をそのまま使う。
 //!
 //! ```text
 //! WinMethod              = Ron
@@ -50,11 +55,10 @@
 //! ([`HandValueOutcome::NoCandidate`](bot_logic::HandValueOutcome::NoCandidate)) も機械的に0点として
 //! 平均へ入れない。
 //!
-//! ダマのまま進む手の打点はロン和了を前提にした baseline なので、ダマでロンできると確定した
-//! 場合しか使えない。ロン可否は既存のフリテン診断
-//! ([`TenpaiWaitAvailability::can_ron`](bot_logic::TenpaiWaitAvailability::can_ron)) が source of
-//! truth で、恒常フリテンだけでなく同巡内フリテン・リーチ後見逃しも統合した結論になる。どれで
-//! 落ちても同じく [`OffenseValue::Unknown`] にし、ロンできないことを0点として扱わない。
+//! 非フリテンのダマで Ron baseline を使うのは、既存フリテン診断でロンできると
+//! 確定した場合だけ。恒常フリテンは Tsumo baseline を使うが、同巡内フリテン・
+//! リーチ後見逃しのみの局面は従来どおり Ron baseline を確定値にせず
+//! [`OffenseValue::Unknown`] にする。いずれもロンできないことを0点として扱わない。
 
 use bot_logic::{
     DiscardEvaluation, HandValue, Payment, PermanentFuriten, RiichiStatus, TenpaiCompletedHands,
@@ -91,6 +95,43 @@ pub enum TenpaiOffenseMode {
     Damaten,
     /// 攻撃モードを確定できない。自分がリーチ済みかを判断できない場合。
     Unknown,
+}
+
+/// 攻撃打点をどの和了方法で評価するか。
+///
+/// [`TenpaiOffenseMode`] の Reach / Damaten とは独立した軸。例えば恒常フリテンの
+/// Damaten は、リーチを宣言しないモードを Damaten Tsumo baseline で評価する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TenpaiOffenseScoringBasis {
+    Ron,
+    Tsumo,
+}
+
+/// production の攻撃モードと既存フリテン facts から scoring basis を選ぶ。
+///
+/// 恒常フリテンだけを self-tsumo only とし、履歴依存フリテンだけの局面や
+/// [`PermanentFuriten::Unknown`] を恒常フリテンと推測しない。Reach mode の
+/// 非恒常フリテンは、履歴依存フリテンを含め既存どおり Ron baseline を使う。
+pub(crate) fn offense_scoring_basis(
+    mode: TenpaiOffenseMode,
+    permanent_furiten: Option<PermanentFuriten>,
+    can_ron: Option<bool>,
+) -> Option<TenpaiOffenseScoringBasis> {
+    if mode == TenpaiOffenseMode::Unknown {
+        return None;
+    }
+
+    match permanent_furiten? {
+        PermanentFuriten::Yes => Some(TenpaiOffenseScoringBasis::Tsumo),
+        PermanentFuriten::No => match mode {
+            TenpaiOffenseMode::Reach => Some(TenpaiOffenseScoringBasis::Ron),
+            TenpaiOffenseMode::Damaten if can_ron == Some(true) => {
+                Some(TenpaiOffenseScoringBasis::Ron)
+            }
+            TenpaiOffenseMode::Damaten | TenpaiOffenseMode::Unknown => None,
+        },
+        PermanentFuriten::Unknown => None,
+    }
 }
 
 /// 生きた待ちの支払い合計を残枚数で加重平均した攻撃打点。
@@ -341,13 +382,12 @@ pub(crate) fn reach_ron_baseline_from_hands(
 /// 向聴・受け入れ・待ち・フリテンを計算し直さない。
 ///
 /// 攻撃モードは自分がリーチ済みかで決まり、未リーチの場合だけ production のリーチ判断と同じ
-/// policy でリーチするかを決める。ダマ打点を評価する入口条件 (ダマでロンできると確定している
-/// こと) も同じで、そこが満たされない場合は非フリテンだともダマ打点が十分だとも推測せず、
-/// 待ち枚数だけを見る既存判断へ落ちる。
+/// policy でリーチするかを決める。その後に mode と独立した scoring basis を選び、
+/// 非フリテンは Ron、恒常フリテンは Tsumo の支払いを同じ単位へ集約する。
 ///
-/// 攻撃モードを確定できない場合、打牌後の手牌を組み立てられない場合、ダマのままではロンできない
-/// 場合、生きた variant の一部でも支払いを確定できない場合は [`OffenseValue::Unknown`] になる。
-/// 推測で平均を作らない。
+/// 攻撃モードまたは scoring basis を確定できない場合、打牌後の手牌を組み立てられない
+/// 場合、生きた variant の一部でも支払いを確定できない場合は [`OffenseValue::Unknown`] に
+/// なる。推測で平均を作らない。
 pub(crate) fn evaluate_tenpai_offense_value(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
@@ -385,13 +425,18 @@ pub(crate) fn evaluate_tenpai_offense(
         damaten_value.as_ref().map(|value| value.verdict),
     );
 
-    let value = scoring_inputs(context, mode, can_ron)
-        .zip(hands.as_ref())
-        .map_or(OffenseValue::Unknown, |((baseline, ura_dora), hands)| {
-            let profile =
-                evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
-            offense_value(&profile)
-        });
+    let value = offense_scoring_inputs(
+        context,
+        mode,
+        Some(wait_availability.permanent_furiten()),
+        wait_availability.can_ron(),
+    )
+    .zip(hands.as_ref())
+    .map_or(OffenseValue::Unknown, |((baseline, ura_dora), hands)| {
+        let profile =
+            evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
+        offense_value(&profile)
+    });
 
     TenpaiOffenseEvaluation {
         offense: TenpaiOffenseValue { mode, value },
@@ -443,24 +488,27 @@ fn offense_mode(
     }
 }
 
-/// 攻撃モードごとの hypothetical baseline と裏ドラ表示牌。打点を確定できない場合は `None`。
+/// 攻撃モードと scoring basis に対応する hypothetical baseline と裏ドラ表示牌。
 ///
-/// ダマのまま進む手の打点はロン和了を前提にした baseline なので、ダマでロンできると確定した
-/// 場合しか使えない。恒常フリテン・同巡内フリテン・リーチ後見逃しのどれで落ちても同じで、
-/// ロンできない打点を「ダマの確定打点」として押し引きへ渡さない。ロンできないことを0点とも
-/// 扱わず、打点を使わない既存判断へ委ねる。
-fn scoring_inputs(
+/// [`offense_scoring_basis`] が Ron を選ぶ非フリテンでは従来 baseline、Tsumo を
+/// 選ぶ恒常フリテンでは既存 [`tsumo_scoring_inputs`] を使う。判定材料が確定しない
+/// 場合は `None` で、0点やどちらかの和了方法と推測しない。
+pub(crate) fn offense_scoring_inputs(
     context: &GameContext,
     mode: TenpaiOffenseMode,
-    can_ron: bool,
+    permanent_furiten: Option<PermanentFuriten>,
+    can_ron: Option<bool>,
 ) -> Option<(WinningContext, Option<&'static [TileId]>)> {
-    match mode {
-        TenpaiOffenseMode::Reach => Some((
-            reach_baseline_context(context),
-            Some(BASELINE_URA_DORA_INDICATORS),
-        )),
-        TenpaiOffenseMode::Damaten => can_ron.then(|| (damaten_baseline_context(context), None)),
-        TenpaiOffenseMode::Unknown => None,
+    match offense_scoring_basis(mode, permanent_furiten, can_ron)? {
+        TenpaiOffenseScoringBasis::Ron => match mode {
+            TenpaiOffenseMode::Reach => Some((
+                reach_baseline_context(context),
+                Some(BASELINE_URA_DORA_INDICATORS),
+            )),
+            TenpaiOffenseMode::Damaten => Some((damaten_baseline_context(context), None)),
+            TenpaiOffenseMode::Unknown => None,
+        },
+        TenpaiOffenseScoringBasis::Tsumo => tsumo_scoring_inputs(context, mode),
     }
 }
 
@@ -700,6 +748,14 @@ mod tests {
                 .can_ron()
         }
 
+        fn permanent_furiten(&self) -> PermanentFuriten {
+            let selection = select_discard_action_with_evaluation(&self.ctx, &self.actions);
+            let evaluation = selection.evaluation.expect("通常打牌を選べる");
+            selected_discard_tenpai_wait_availability(&self.ctx, &evaluation)
+                .expect("打牌後がテンパイである")
+                .permanent_furiten()
+        }
+
         // Reach を取り除いた合法 action。
         fn actions_without_reach(&self) -> Vec<LegalAction> {
             self.actions
@@ -744,6 +800,7 @@ mod tests {
             drawn,
             dora_indicators,
             extra_visible,
+            &[],
             history_furiten,
             false,
         )
@@ -754,6 +811,7 @@ mod tests {
         drawn: &str,
         dora_indicators: &[&str],
         extra_visible: &[&str],
+        own_river: &[&str],
         history_furiten: HistoryFuritenFacts,
         self_reached: bool,
     ) -> OffenseCase {
@@ -762,12 +820,14 @@ mod tests {
         let drawn_tile = source.tile(drawn);
         let dora_indicators = source.tiles(dora_indicators);
         let extra_visible = source.tiles(extra_visible);
+        let own_river = source.tiles(own_river);
 
         let visible: Vec<TileId> = hand_tiles
             .iter()
             .chain([&drawn_tile])
             .chain(dora_indicators.iter())
             .chain(extra_visible.iter())
+            .chain(own_river.iter())
             .copied()
             .collect();
         let actions: Vec<LegalAction> = hand_tiles
@@ -786,7 +846,7 @@ mod tests {
             visible,
             Some(0),
             Some(3),
-            Default::default(),
+            [own_river, Vec::new(), Vec::new(), Vec::new()],
             [self_reached, false, false, false],
         )
         .with_history_furiten_facts(history_furiten);
@@ -996,6 +1056,7 @@ mod tests {
             "N",
             &["1m"],
             &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            &[],
             HistoryFuritenFacts {
                 same_turn: Some(false),
                 riichi_missed_win: Some(false),
@@ -1026,6 +1087,72 @@ mod tests {
     }
 
     #[test]
+    fn a_permanent_furiten_damaten_uses_the_tsumo_offense_value() {
+        // 6s を自分で切ってある通常手の恒常フリテン。Reach を合法手から外して
+        // production mode を Damaten に固定しても、Ron 不可を unknown 値にせず Damaten
+        // Tsumo baseline の Payment::total() を同じ残枚数加重単位で使う。
+        let case = offense_case_inner(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1p"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            &["6s"],
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+            false,
+        );
+        assert_eq!(case.permanent_furiten(), PermanentFuriten::Yes);
+        assert_eq!(case.can_ron(), Some(false));
+
+        let value = case.value_with_actions(&case.actions_without_reach());
+        assert_eq!(value.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(value.value.average_total(), Some(8000));
+        assert_eq!(value.value.weighted_total(), Some(8000 * 3));
+
+        let (baseline, ura_dora) = offense_scoring_inputs(
+            &case.ctx,
+            value.mode,
+            Some(PermanentFuriten::Yes),
+            Some(false),
+        )
+        .expect("恒常フリテンは Tsumo baseline を使う");
+        assert_eq!(baseline.win_method(), WinMethod::Tsumo);
+        assert_eq!(baseline.riichi(), RiichiStatus::NotDeclared);
+        assert_eq!(ura_dora, None);
+    }
+
+    #[test]
+    fn scoring_basis_does_not_guess_unknown_or_history_only_furiten_as_permanent() {
+        assert_eq!(
+            offense_scoring_basis(
+                TenpaiOffenseMode::Damaten,
+                Some(PermanentFuriten::Unknown),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            offense_scoring_basis(
+                TenpaiOffenseMode::Damaten,
+                Some(PermanentFuriten::No),
+                Some(false),
+            ),
+            None
+        );
+        // 履歴依存フリテンでも Reach mode の従来 Ron baseline は維持する。
+        assert_eq!(
+            offense_scoring_basis(
+                TenpaiOffenseMode::Reach,
+                Some(PermanentFuriten::No),
+                Some(false),
+            ),
+            Some(TenpaiOffenseScoringBasis::Ron)
+        );
+    }
+
+    #[test]
     fn an_already_reached_tenpai_keeps_the_reach_value_without_ron() {
         // ダマ打点のロン可否 gate はダマ手だけのもの。既リーチ手はリーチ込みの baseline を
         // 使うため、リーチ後の見逃しでロンできなくても打点は確定したままになる。
@@ -1034,6 +1161,7 @@ mod tests {
             "N",
             &["1m"],
             &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            &[],
             HistoryFuritenFacts {
                 same_turn: Some(false),
                 riichi_missed_win: Some(true),

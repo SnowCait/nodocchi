@@ -46,11 +46,12 @@
 //! Tsumo scoring helper へ異なる baseline だけを渡す。production と同じ mode は再評価しない。
 //! Reach legality も [`is_reach_legal`] の既存評価結果を保持し、production `mode` から逆算しない。
 //!
-//! # ロン可否
+//! # scoring basis とロン可否
 //!
-//! ダマ打点はロン和了を前提にした baseline なので、production ([`crate::offense_value`]) と
-//! 同じく「ダマでロンできると確定した場合」だけ確定値として使う。ロン可否は既存のフリテン基盤
-//! ([`tenpai_wait_availability`]) が source of truth で、この層で判定規則を書き直さない。
+//! Reach / Damaten の攻撃モードと Ron / Tsumo の scoring basis を分ける。非フリテンは
+//! 従来どおり Ron baseline、恒常フリテンは Tsumo baseline で選択用 weighted total を
+//! 求める。Ron / Tsumo の選択は [`crate::offense_value::offense_scoring_basis`] を共有し、
+//! この層で判定規則を書き直さない。
 //!
 //! 未来テンパイの恒常フリテンは、現在の自分の河へその枝でここまでに切った全打牌
 //! ([`ProspectiveTenpai::discarded_tiles`]) を足した河 ([`OwnDiscards::with_discards`]) で
@@ -60,10 +61,11 @@
 //! だけを評価時点の事実として補正し ([`HistoryFuritenFacts::after_discard`])、未確定の軸を
 //! `false` で埋めない。
 //!
-//! ロン可否が確定しない場合はダマ打点を判断材料にせず、`damaten_verdict = None` として既存の
-//! リーチ判断 ([`decide_reach_reason`]) の fallback へ委ねる。その結果ダマを選んだ枝は、ロン
-//! できると確定していない限り確定打点を持たない。将来フリテンによる価値補正や EV 補正は
-//! 追加しない。
+//! ロン可否が確定しない場合はダマ Ron 打点を判断材料にせず、
+//! `damaten_verdict = None` として既存のリーチ判断 ([`decide_reach_reason`]) の fallback へ
+//! 委ねる。ただし [`PermanentFuriten::Yes`](bot_logic::PermanentFuriten::Yes) が確定した
+//! 枝は、production mode が Damaten でも Tsumo scoring を確定できれば選択値を持つ。履歴依存
+//! フリテンだけを Tsumo-only とみなさず、将来フリテンによる価値補正や EV 補正も追加しない。
 //!
 //! # 仮想ツモ牌の赤5
 //!
@@ -93,9 +95,9 @@ use crate::context::GameContext;
 use crate::damaten_value::{damaten_baseline_context, damaten_value_from_hands};
 use crate::discard_selection::evaluation_fixed_meld_count;
 use crate::offense_value::{
-    BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode,
-    all_live_tsumo_variants_are_named_yakuman, reach_baseline_context, tsumo_scoring_inputs,
-    variant_total, weighted_average,
+    BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode, TenpaiOffenseScoringBasis,
+    all_live_tsumo_variants_are_named_yakuman, offense_scoring_basis, reach_baseline_context,
+    tsumo_scoring_inputs, variant_total, weighted_average,
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 
@@ -448,19 +450,22 @@ impl<'a> ProductionProspectiveValuator<'a> {
         }
     }
 
-    // 攻撃モードごとの hypothetical baseline と裏ドラ表示牌。確定できない場合は `None`。
+    // production 攻撃モードと共通 scoring basis に対応する hypothetical baseline。
     //
-    // ダマのまま進む手の打点はロン和了を前提にした baseline なので、ダマでロンできると確定した
-    // 場合しか使えない。押し引きの攻撃打点と同じ入口条件で、ロンできない打点を確定値にしない。
+    // Ron / Tsumo の選択は offense 共通 helper だけが行う。Ron の baseline は枝ごとに
+    // 組み立て直さず、valuator が保持する既存値を使う。
     fn scoring_inputs(
         &self,
+        facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
-        can_ron: bool,
     ) -> Option<(WinningContext, Option<&'static [TileId]>)> {
-        match mode {
-            TenpaiOffenseMode::Reach => Some((self.reach, Some(BASELINE_URA_DORA_INDICATORS))),
-            TenpaiOffenseMode::Damaten => can_ron.then_some((self.damaten, None)),
-            TenpaiOffenseMode::Unknown => None,
+        match offense_scoring_basis(mode, facts.permanent_furiten(), facts.ron_availability())? {
+            TenpaiOffenseScoringBasis::Ron => match mode {
+                TenpaiOffenseMode::Reach => Some((self.reach, Some(BASELINE_URA_DORA_INDICATORS))),
+                TenpaiOffenseMode::Damaten => Some((self.damaten, None)),
+                TenpaiOffenseMode::Unknown => None,
+            },
+            TenpaiOffenseScoringBasis::Tsumo => tsumo_scoring_inputs(self.context, mode),
         }
     }
 
@@ -524,8 +529,8 @@ impl<'a> ProductionProspectiveValuator<'a> {
 
     // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計)。確定できない場合は `None`。
     fn selection_value(&self, facts: &ProspectiveFacts) -> Option<u64> {
-        let (baseline, ura_dora) =
-            self.scoring_inputs(self.offense_mode(facts), facts.can_ron())?;
+        let mode = self.offense_mode(facts);
+        let (baseline, ura_dora) = self.scoring_inputs(facts, mode)?;
         let profile = evaluate_tenpai_hand_value(
             &facts.hands,
             baseline,
@@ -1554,6 +1559,20 @@ mod tests {
         .build()
     });
 
+    // 同じ恒常フリテンで、持ち点不足により未来テンパイの production mode が
+    // Damaten になる局面。
+    static HIGH_DAMATEN_FURITEN_NO_REACH: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            own_river: &["3p"],
+            table_state: TableStateFacts {
+                scores: Some([500, 25_000, 25_000, 25_000]),
+                ..TableStateFacts::default()
+            },
+            ..CaseSpec::new(&HIGH_DAMATEN_HAND, "1p")
+        }
+        .build()
+    });
+
     // 同じ局面で、履歴依存フリテンが未観測。恒常フリテンは非フリテンでも総合ロン可否は
     // 確定しない。
     static HIGH_DAMATEN_UNKNOWN_RON: LazyLock<Case> = LazyLock::new(|| {
@@ -1639,10 +1658,27 @@ mod tests {
         // ダマ打点そのものは threshold 以上のまま。それでもダマは選ばない。
         assert!(damaten_meets_threshold(tenpai));
         assert_eq!(tenpai.mode, TenpaiOffenseMode::Reach);
-        assert_eq!(
+        assert_eq!(variant.selection_value, Some(84_000));
+        assert_ne!(
             variant.selection_value,
             reach_weighted_total(tenpai),
-            "リーチ baseline の打点で選択値を作る"
+            "恒常フリテンでは Reach mode でも Ron でなく Tsumo baseline を使う"
+        );
+    }
+
+    #[test]
+    fn a_permanent_furiten_damaten_branch_keeps_its_tsumo_selection_value() {
+        let variant = HIGH_DAMATEN_FURITEN_NO_REACH.red_variant("8m", "5p", true);
+        let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
+
+        assert!(!tenpai.future_reach_legal);
+        assert_eq!(tenpai.can_ron, Some(false));
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(variant.selection_value, Some(56_000));
+        assert_ne!(
+            variant.selection_value,
+            tenpai.damaten.weighted_average.weighted_total(),
+            "Damaten Ron baseline の値は使わない"
         );
     }
 

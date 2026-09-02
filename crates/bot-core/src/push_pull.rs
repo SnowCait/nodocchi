@@ -155,10 +155,12 @@ impl PushPullOffenseState {
     /// 打牌後がテンパイにならない場合と、恒常フリテンを判定できない場合は `None` になり、
     /// 強いテンパイと推測しない。
     ///
-    /// - 非フリテン + 攻撃打点を確定できた: [`StrongTenpaiRequirement::WeightedTotal`]。
+    /// - 攻撃打点を確定できた非フリテン / 恒常フリテン:
+    ///   [`StrongTenpaiRequirement::WeightedTotal`]。
     ///   要求する残枚数加重合計は [`tenpai_push_weighted_total_min`] が決める。
     /// - 非フリテン + 攻撃打点を確定できない: 従来どおり [`STRONG_TENPAI_MIN_REMAINING`] 枚
-    /// - 恒常フリテン: ロンできずツモ依存になるため [`FURITEN_STRONG_TENPAI_MIN_REMAINING`] 枚
+    /// - 恒常フリテン + Tsumo 攻撃打点を確定できない:
+    ///   [`FURITEN_STRONG_TENPAI_MIN_REMAINING`] 枚
     ///
     /// 親リーチ判定は [`PushPullInputs::dealer_reacher`] が source of truth で、ここでは
     /// 受け取った値をそのまま使う。
@@ -173,9 +175,12 @@ impl PushPullOffenseState {
                 )),
                 None => StrongTenpaiRequirement::LiveWait(STRONG_TENPAI_MIN_REMAINING),
             }),
-            PermanentFuriten::Yes => Some(StrongTenpaiRequirement::LiveWait(
-                FURITEN_STRONG_TENPAI_MIN_REMAINING,
-            )),
+            PermanentFuriten::Yes => Some(match self.tenpai_offense_weighted_total() {
+                Some(_) => StrongTenpaiRequirement::WeightedTotal(tenpai_push_weighted_total_min(
+                    dealer_reacher,
+                )),
+                None => StrongTenpaiRequirement::LiveWait(FURITEN_STRONG_TENPAI_MIN_REMAINING),
+            }),
             PermanentFuriten::Unknown => None,
         }
     }
@@ -629,8 +634,8 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
 ///
 /// `selected_tenpai_wait` / `selected_tenpai_offense_value` は、複数の現在聴牌候補を通常打牌選択が
 /// 比較した場合の計算済み結果。渡された場合は押し引き用に待ち・hand valueを再評価せず転記する。
-/// ただし既存 [`should_evaluate_tenpai_offense_value`] の入口条件は維持し、恒常フリテン等で従来
-/// exact打点を使わない局面へキャッシュ値を持ち込まない。
+/// ただし [`should_evaluate_tenpai_offense_value`] の入口条件は維持し、恒常フリテンを
+/// 判定できない局面へキャッシュ値を持ち込まない。
 pub(crate) fn push_pull_inputs_from_threat_facts(
     context: &GameContext,
     player_threats: [PlayerThreatFacts; 4],
@@ -728,9 +733,9 @@ fn selected_normal_discard_hard_safe_for_all_high_open_hand_targets(
 
 /// 攻撃継続時の確定打点を評価する局面か。
 ///
-/// exact 打点を使う policy が「打牌後がテンパイで、恒常フリテンでない」場合だけなので、それ以外
-/// では点数計算そのものを行わない。恒常フリテンのテンパイの挙動は今回変えないため、その打点は
-/// 求めても使い道が無い。
+/// 打牌後テンパイで、非フリテンまたは恒常フリテンと確定した場合だけ評価する。
+/// 後者は共通 offense scoring basis が Tsumo baseline を選び、確定した weighted total を
+/// 前者と同じ点単位で判定する。恒常フリテンかを判定できない場合は評価しない。
 ///
 /// 判定材料は自分の手牌から求めた事実だけで、相手の threat には依存しない。offense は threat の
 /// 有無で変わらないという既存の性質を保つ。
@@ -739,7 +744,7 @@ fn should_evaluate_tenpai_offense_value(
     wait: Option<PushPullTenpaiWaitFacts>,
 ) -> bool {
     min_shanten_after_discard <= TENPAI_SHANTEN
-        && wait.is_some_and(|wait| wait.permanent_furiten == PermanentFuriten::No)
+        && wait.is_some_and(|wait| wait.permanent_furiten != PermanentFuriten::Unknown)
 }
 
 /// 明確な threat の種類。reason の系列を選ぶためだけに使う。
@@ -1503,65 +1508,41 @@ mod tests {
     }
 
     #[test]
-    fn a_permanent_furiten_tenpai_ignores_the_offense_value() {
-        // 恒常フリテンには残枚数加重合計 policy を適用せず、現行の8枚 policy を維持する。
-        // 加重合計が threshold を大きく超える手でも、待ちが足りなければ押さない。
-        for total in [8000u32, 5200, 1000] {
-            let strong = PushPullOffenseState {
+    fn a_permanent_furiten_tenpai_uses_a_known_tsumo_weighted_total() {
+        // 同じ8枚待ちでも Tsumo offense weighted total が threshold の上下なら、待ち枚数
+        // fallback で同じに扱わず、既存 WeightedTotal policy で打点を区別する。
+        for dealer_reacher in [false, true] {
+            let threshold = tenpai_push_weighted_total_min(dealer_reacher);
+            let offense = |weighted_total| PushPullOffenseState {
                 tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
-                    mode: TenpaiOffenseMode::Reach,
+                    mode: TenpaiOffenseMode::Damaten,
                     value: OffenseValue::Known {
-                        weighted_total: u64::from(total) * 8,
+                        weighted_total,
                         total_remaining: 8,
                     },
                 }),
-                ..tenpai_offense(FURITEN_STRONG_TENPAI_MIN_REMAINING, PermanentFuriten::Yes)
+                ..tenpai_offense(8, PermanentFuriten::Yes)
             };
-            let weak = PushPullOffenseState {
-                tenpai_wait_after_discard: tenpai_offense(
-                    FURITEN_STRONG_TENPAI_MIN_REMAINING - 1,
-                    PermanentFuriten::Yes,
-                )
-                .tenpai_wait_after_discard,
-                ..strong
-            };
+            let high = offense(threshold);
+            let low = offense(threshold - 1);
 
-            for dealer_reacher in [false, true] {
-                assert_eq!(
-                    strong.strong_tenpai_requirement(dealer_reacher),
-                    Some(StrongTenpaiRequirement::LiveWait(
-                        FURITEN_STRONG_TENPAI_MIN_REMAINING
-                    ))
-                );
-                assert!(is_strong_tenpai(&strong, dealer_reacher));
-                assert!(!is_strong_tenpai(&weak, dealer_reacher));
-            }
+            assert_eq!(
+                high.strong_tenpai_requirement(dealer_reacher),
+                Some(StrongTenpaiRequirement::WeightedTotal(threshold))
+            );
+            assert!(is_strong_tenpai(&high, dealer_reacher));
+            assert!(!is_strong_tenpai(&low, dealer_reacher));
+            assert_decision(
+                &inputs(1, dealer_reacher, Some(high)),
+                PushPullMode::Push,
+                PushPullReason::StrongTenpaiAgainstReach,
+            );
+            assert_decision(
+                &inputs(1, dealer_reacher, Some(low)),
+                PushPullMode::Fold,
+                PushPullReason::WeakTenpaiAgainstReach,
+            );
         }
-    }
-
-    #[test]
-    fn a_permanent_furiten_tenpai_is_never_pushed_by_the_weighted_total_alone() {
-        // 加重合計だけを見れば押せる値でも、恒常フリテンなら7枚待ちでは押さない。
-        let offense = PushPullOffenseState {
-            tenpai_offense_value_after_discard: Some(TenpaiOffenseValue {
-                mode: TenpaiOffenseMode::Reach,
-                value: OffenseValue::Known {
-                    weighted_total: DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN * 10,
-                    total_remaining: 7,
-                },
-            }),
-            ..tenpai_offense(
-                FURITEN_STRONG_TENPAI_MIN_REMAINING - 1,
-                PermanentFuriten::Yes,
-            )
-        };
-
-        assert!(!is_strong_tenpai(&offense, false));
-        assert_decision(
-            &inputs(1, false, Some(offense)),
-            PushPullMode::Fold,
-            PushPullReason::WeakTenpaiAgainstReach,
-        );
     }
 
     #[test]
@@ -1607,15 +1588,26 @@ mod tests {
 
     #[test]
     fn the_furiten_strong_tenpai_boundary_is_eight_live_waits() {
-        // 恒常フリテンはロンできずツモ依存になるため、非フリテンより2枚多く要求する。
-        assert!(is_strong_tenpai(
-            &tenpai_offense(8, PermanentFuriten::Yes),
-            false
-        ));
-        assert!(!is_strong_tenpai(
-            &tenpai_offense(7, PermanentFuriten::Yes),
-            false
-        ));
+        // Tsumo scoring を評価しない場合と評価しても unknown の場合は、どちらも
+        // 保守的な既存8枚 fallback を維持する。
+        for offense in [
+            tenpai_offense(8, PermanentFuriten::Yes),
+            unknown_value_tenpai_offense(8, PermanentFuriten::Yes),
+        ] {
+            assert_eq!(
+                offense.strong_tenpai_requirement(false),
+                Some(StrongTenpaiRequirement::LiveWait(
+                    FURITEN_STRONG_TENPAI_MIN_REMAINING
+                ))
+            );
+            assert!(is_strong_tenpai(&offense, false));
+        }
+        for offense in [
+            tenpai_offense(7, PermanentFuriten::Yes),
+            unknown_value_tenpai_offense(7, PermanentFuriten::Yes),
+        ] {
+            assert!(!is_strong_tenpai(&offense, false));
+        }
 
         assert_decision(
             &inputs(1, false, Some(tenpai_offense(8, PermanentFuriten::Yes))),
@@ -2470,6 +2462,7 @@ mod tests {
     struct ExactValueSetup {
         reach_legal: bool,
         self_reached: bool,
+        own_river: &'static [&'static str],
         /// 親の席。既定はリーチしている player 1 ではない席で、子リーチの局面になる。
         oya: u8,
         history_furiten: bot_logic::HistoryFuritenFacts,
@@ -2480,6 +2473,7 @@ mod tests {
             Self {
                 reach_legal: true,
                 self_reached: false,
+                own_river: &[],
                 oya: 3,
                 history_furiten: bot_logic::HistoryFuritenFacts {
                     same_turn: Some(false),
@@ -2516,12 +2510,14 @@ mod tests {
         let drawn_tile = source.tile(drawn);
         let dora_indicators = source.tiles(dora_indicators);
         let extra_visible = source.tiles(extra_visible);
+        let own_river = source.tiles(setup.own_river);
 
         let visible: Vec<TileId> = hand_tiles
             .iter()
             .chain([&drawn_tile])
             .chain(dora_indicators.iter())
             .chain(extra_visible.iter())
+            .chain(own_river.iter())
             .copied()
             .collect();
         let actions: Vec<LegalAction> = hand_tiles
@@ -2540,7 +2536,7 @@ mod tests {
             visible,
             Some(0),
             Some(setup.oya),
-            Default::default(),
+            [own_river, Vec::new(), Vec::new(), Vec::new()],
             [setup.self_reached, true, false, false],
         )
         .with_history_furiten_facts(setup.history_furiten);
@@ -2696,6 +2692,64 @@ mod tests {
 
         assert_decision(
             &inputs,
+            PushPullMode::Fold,
+            PushPullReason::WeakTenpaiAgainstReach,
+        );
+    }
+
+    #[test]
+    fn permanent_furiten_tsumo_values_distinguish_high_and_low_hands_with_three_live_tiles() {
+        let high = exact_value_inputs_with(
+            &HIGH_VALUE_HAND,
+            "N",
+            &["1p"],
+            &["3s", "3s", "3s"],
+            ExactValueSetup {
+                own_river: &["6s"],
+                ..Default::default()
+            },
+        );
+        let low = exact_value_inputs_with(
+            &LOW_VALUE_HAND,
+            "N",
+            &[],
+            &[],
+            ExactValueSetup {
+                own_river: &["3p"],
+                ..Default::default()
+            },
+        );
+
+        let offense = |inputs: &PushPullInputs| inputs.offense.expect("攻撃評価がある");
+        for inputs in [&high, &low] {
+            let offense = offense(inputs);
+            let wait = offense
+                .tenpai_wait_after_discard
+                .expect("テンパイの待ち facts がある");
+            assert_eq!(wait.permanent_furiten, PermanentFuriten::Yes);
+            assert_eq!(wait.can_ron, Some(false));
+            assert_eq!(wait.tsumo_remaining, 3);
+            assert!(offense.tenpai_offense_weighted_total().is_some());
+            assert_eq!(
+                offense
+                    .tenpai_offense_value_after_discard
+                    .expect("Tsumo offense を評価している")
+                    .mode,
+                TenpaiOffenseMode::Reach
+            );
+        }
+
+        assert!(
+            offense(&high).tenpai_offense_weighted_total()
+                > offense(&low).tenpai_offense_weighted_total()
+        );
+        assert_decision(
+            &high,
+            PushPullMode::Push,
+            PushPullReason::StrongTenpaiAgainstReach,
+        );
+        assert_decision(
+            &low,
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstReach,
         );

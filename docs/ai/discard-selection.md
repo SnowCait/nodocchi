@@ -43,9 +43,21 @@ current tenpai offense weighted total
 
 平均打点ではありません。例えば「1枚 × 12,000点」は12,000、「6枚 × 3,900点」は23,400なので、後者を上位にします。また、これはロン / ツモ確率を掛けたEVではなく、本場・供託・点棒状況も含みません。
 
-攻撃モードは既存 production policy と同じです。既にリーチ済みならReach、未リーチなら既存の `decide_reach_reason()` に従ってReachまたはDamatenを選びます。ダマ値は既存フリテン判定で `can_ron == Some(true)` と確定した場合だけ利用し、ロン可否unknown・役なし・点数計算不能などを0点とは扱いません。
+攻撃モードは既存 production policy と同じです。既にリーチ済みならReach、未リーチなら既存の `decide_reach_reason()` に従ってReachまたはDamatenを選びます。このモードと scoring basis は別の軸です。
+
+```text
+PermanentFuriten::No
+  Reach / Damaten mode に対応する Ron baseline
+
+PermanentFuriten::Yes
+  Reach / Damaten mode に対応する Tsumo baseline
+```
+
+非フリテンの Damaten Ron 値は `can_ron == Some(true)` と確定した場合だけ利用します。恒常フリテンは Ron 不可が確定しているため、既存 Tsumo scoring の `Payment.total()` を同じ残枚数加重単位で使います。`PermanentFuriten::Unknown` はどちらとも推測せず、`PermanentFuriten::No` で同巡内フリテン・見逃しフリテンのみのダマ手も Tsumo-only とはみなしません。役なし・点数計算不能などを0点とは扱いません。
 
 軸の有効・無効は `Shanten` / `IsolatedTile` / `IsolatedHonor` まで同順位の候補集合 (cohort) 単位で決めます。cohortの全聴牌候補で値が確定した場合だけ使い、1件でもunknownならcohort全体で無効化して従来のAcceptance比較へ戻します。
+
+押し引きも同じ offense weighted total を共有します。恒常フリテンで Tsumo 打点を確定できる場合は既存 `WeightedTotal` threshold、確定できない場合だけは従来の `FURITEN_STRONG_TENPAI_MIN_REMAINING` による待ち枚数 fallback を使います。
 
 評価対象は現在打牌直後の待ちと打点だけです。聴牌後に非和了牌を引いて別の待ちへ移る手変わりや、ダマ手変わりの2手先評価は行いません。既存の1向聴・2向聴以上の先読み軸も変更しません。ダマで継続した場合の次の1巡は [現在聴牌のダマ継続 (diagnostics only)](#現在聴牌のダマ継続-diagnostics-only) で観測できますが、この比較には接続していません。
 
@@ -94,9 +106,9 @@ weighted prospective value
 
 仮想ツモ牌も最終和了牌も赤5 / 黒5の物理牌 variant へ分けて別々に評価するため、赤5を引く枝では2手目の最良打牌そのものが変わり得ます。
 
-リーチかダマかは押し引き・リーチ判断と同じ policy で決め、その baseline の支払い合計を使います。ダマ打点はロン和了を前提にした値なので、既存のフリテン判定で**ダマでロンできると確定した場合だけ**判断材料と確定値に使います。未来テンパイの恒常フリテンは「現在の自分の河 + 1手目の打牌 + 2手目の打牌」で判定でき、自分の河や履歴依存フリテンが分からない場合は非フリテンだと推測せず unknown のままにします。ロン可否が確定しない枝は、ダマ打点が高くてもダマと確定させず、待ち枚数だけを見る既存のリーチ判断へ委ねます。将来フリテンによる打点の割引や EV 補正は行いません。
+リーチかダマかは押し引き・リーチ判断と同じ policy で決め、その mode と共通 offense scoring basis に対応する支払い合計を使います。非フリテンは Ron baseline、恒常フリテンは Tsumo baseline です。したがって未来テンパイが `PermanentFuriten::Yes` かつ production mode が Damaten でも、Tsumo scoring を確定できれば weighted prospective value を持ちます。未来テンパイの恒常フリテンは「現在の自分の河 + 1手目の打牌 + 2手目の打牌」で判定します。自分の河や恒常フリテンを確定できない場合はどちらとも推測せず、履歴依存フリテンだけで Tsumo-only ともみなしません。将来フリテンによる打点の割引や EV 補正は行いません。
 
-これは期待得点でも和了率でもありません。本場・供託・ロン / ツモ確率・放銃率は含めません。点数計算の入力が足りない、ダマでロンできると確定しないなど、打点を確定できない枝がある候補は 0 点にせず値を持ちません。
+これは期待得点でも和了率でもありません。本場・供託・ロン / ツモ確率・放銃率は含めません。点数計算の入力が足りない、または Ron / Tsumo scoring basis を確定できないなど、打点を確定できない枝がある候補は 0 点にせず値を持ちません。
 
 打点軸を使うかどうかは候補ごとではなく、`Shanten` / `IsolatedTile` / `IsolatedHonor` まで同順位になる候補集合 (cohort) 単位で決めます。cohort の全候補で打点が確定している場合だけ軸を使い、1件でも確定しなければ cohort 全体で軸を無効化して `weighted tenpai wait` 以降へ落とします。比較ごとに軸を切り替えると順序が循環し、候補の列挙順で選択結果が変わってしまうためです。
 
@@ -243,6 +255,8 @@ NamedYakumanDamaten
 `true` の場合だけ選びます。一部でも unknown または named 役満でない variant が
 あれば従来 policy へ fallback します。点数 threshold から役満と推測せず、数え役満もこの
 特例に含めません。非フリテンでは従来どおり `HighValueDamaten` のみが適用されます。
+`NamedYakumanDamaten` はこの一般 scoring-basis 規則の上で Reach / Damaten を選ぶ categorical
+policy であり、役満の offense value だけを `Unknown` から補う workaround ではありません。
 
 `ReachTimingDecision` は base policy がリーチを選んだ場合だけ適用します。base policy がダマを選んだ聴牌 (`HighValueDamaten` / `NamedYakumanDamaten` など)、リーチが合法でない局面、打牌後がテンパイでない局面では timing 判断そのものを行わず (`timing` は `None`)、`ReachTimingDecision` に `Damaten` は含まれません。base の `reason` を timing の理由で上書きすることもありません。
 

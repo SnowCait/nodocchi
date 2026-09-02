@@ -5731,6 +5731,10 @@ mod tests {
             summary.contains("  reach base reason: NamedYakumanDamaten"),
             "{summary}"
         );
+        assert!(
+            summary.contains("  offense value: Damaten 64000 / total: 2432000"),
+            "{summary}"
+        );
     }
 
     #[test]

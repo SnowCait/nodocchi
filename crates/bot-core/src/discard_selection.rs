@@ -1129,6 +1129,12 @@ pub(crate) mod tests {
     }
 
     fn current_tenpai_regression_context() -> (GameContext, Vec<LegalAction>) {
+        current_tenpai_regression_context_with_own_river(&[])
+    }
+
+    fn current_tenpai_regression_context_with_own_river(
+        own_river_values: &[u8],
+    ) -> (GameContext, Vec<LegalAction>) {
         // 34599m235p345567s。CLI regression と同じ14枚に、自席・河・履歴フリテンを既知として
         // 与え、既存 Reach / Damaten policy と scoring を確定できる局面にする。
         let hand = vec![
@@ -1147,7 +1153,8 @@ pub(crate) mod tests {
             tile(92),
             tile(96),
         ];
-        let visible = hand.clone();
+        let own_river: Vec<_> = own_river_values.iter().map(|&value| tile(value)).collect();
+        let visible = hand.iter().chain(own_river.iter()).copied().collect();
         let actions = hand
             .iter()
             .copied()
@@ -1163,7 +1170,7 @@ pub(crate) mod tests {
             visible,
             Some(0),
             Some(1),
-            Default::default(),
+            [own_river, Vec::new(), Vec::new(), Vec::new()],
             [false; 4],
         )
         .with_history_furiten_facts(HistoryFuritenFacts {
@@ -1245,6 +1252,47 @@ pub(crate) mod tests {
             five_p_diagnostic.comparison_reason,
             bot_logic::DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
         );
+    }
+
+    #[test]
+    fn current_tenpai_selection_uses_known_tsumo_values_for_permanent_furiten_candidates() {
+        // 4p を自分の河に追加し、現在聴牌の両候補を恒常フリテンにする。どちらも
+        // Tsumo baseline で weighted total を確定できるため、cohort の軸を unknown に
+        // 落とさず CurrentTenpaiOffenseWeightedTotal で比較する。
+        let (context, actions) = current_tenpai_regression_context_with_own_river(&[48]);
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(&context, &legal.evaluations, &actions);
+        let tenpai_candidates: Vec<_> = legal
+            .evaluations
+            .iter()
+            .zip(current.iter())
+            .filter(|(evaluation, _)| evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+
+        assert!(tenpai_candidates.len() > 1);
+        for (_, candidate) in tenpai_candidates {
+            let wait = candidate.wait.as_ref().expect("現在聴牌の待ち");
+            assert_eq!(wait.permanent_furiten(), bot_logic::PermanentFuriten::Yes);
+            assert_eq!(wait.can_ron(), Some(false));
+            assert!(
+                candidate
+                    .offense
+                    .as_ref()
+                    .and_then(|value| value.offense.value.weighted_total())
+                    .is_some(),
+                "{candidate:?}"
+            );
+        }
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        assert!(result.diagnostic.candidates.iter().any(|candidate| {
+            candidate.comparison_reason
+                == bot_logic::DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        }));
     }
 
     #[test]
