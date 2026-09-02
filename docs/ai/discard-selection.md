@@ -279,9 +279,29 @@ Ron
 **これは Ron 確率ではありません。** 追加したのは既存の公開情報から観測できる structural facts だけで、ron probability・discard probability・deal-in probability・「スジなら何%」のような係数・Reach / Damaten のロン率補正はどれも持ちません。self-tsumo と Ron baseline を統合した EV も、winner も、新しい `should_reach` も作りません。
 
 - **live copies** は選んだ打牌後の既存受け入れが持つ残枚数そのものです。見え牌を別経路で数え直しません。残枚数 0 の牌種は待ちとして並べません。赤5 / 黒5は同じ牌種として1件にまとめ、structural safety を共有します。物理 variant ごとの打点は従来どおり Ron baseline 側が別々に持ちます。
-- **reach public safety** は「自分が今リーチを宣言した場合、その待ち牌が他家から見てどう見えるか」の evidence です。現物は既存の hard-safety helper (`is_genbutsu_for()`) と既存フリテン診断が持つ「自分の河と重複した待ち」、数牌は既存 [`SuitedSafetyEvidence`](defense.md#suji--halfsuji) (スジ + 壁 + 既存の統合 rank)、字牌は既存 [`HonorSafety`](defense.md#honorsafety) の rank と見え枚数をそのまま載せます。新しい safety rank も係数も作らず、Defense selection の comparator も呼びません。スジは既存 helper が読む現在の河そのままで、まだ切っていないリーチ宣言牌は含めません。
+- **reach public safety** は「自分が今リーチを宣言した場合、その待ち牌が他家から見てどう見えるか」の evidence です。現物は既存の hard-safety helper (`is_genbutsu_for()`)、数牌は既存 [`SuitedSafetyEvidence`](defense.md#suji--halfsuji) (スジ + 壁 + 既存の統合 rank)、字牌は既存 [`HonorSafety`](defense.md#honorsafety) の rank と見え枚数をそのまま載せます。新しい safety rank も係数も作らず、Defense selection の comparator も呼びません。
 - **Damaten** 側には Reach と同じ safety rank を付けません。`declaration visible: no` という事実だけです。これは「ダマなら安全牌評価が無効」という意味ではなく、**他家がこちらの待ちに対する防御を開始する公開トリガーが無い**という事実を表します。
 - **external threats** は既存 classification の観測値です。リーチ者は `GameContext::reached_opponents()`、High OpenHand target は既存 [`OpenHandThreat`](push-pull.md#openhandthreat) の分類そのままで、threat を分類し直すことも確率へ変換することもしません。
+
+#### 評価時点は打牌後の公開状態
+
+reach public safety は、**通常打牌 selection が選んだ打牌を河へ置いた直後の公開状態**に対して既存 Defense helper を適用します。
+
+```text
+現在の GameContext
++ selected discard を自分の河へ移す (GameContext::after_own_discard)
+↓
+打牌後の公開状態
+↓
+既存 Defense helper (is_genbutsu_for() / suited_safety_evidence_for_players() /
+                     honor_safety_rank() / visible_count_of())
+```
+
+待ちとロン可否 (`TenpaiWaitAvailability`) も打牌後の状態なので、両者の評価時点が揃います。リーチ宣言牌が作るスジと現物は、この打牌後の河を既存 helper が読むことでそのまま反映されます。「宣言牌が 1s ならスジを1本足す」のような safety rule を診断側に書くことはしません。
+
+見え枚数 (壁・字牌の見え枚数) は打牌で変わりません。`visible_tiles` は自分の手牌を既に含むので、同じ物理牌が手牌から河へ移っても枚数が変わらないためです。値は同じ打牌後の状態を既存 helper へ通した結果そのもので、打牌前の値を別に保持しているわけではありません。
+
+切る物理牌は通常打牌 selection が選んだ合法 `Dahai` そのもので、どの牌を切るかを別経路で推測しません。projection は元の `GameContext` を書き換えず、診断が有効な経路でだけ組み立てます。リーチが合法でない局面と、選んだ打牌が分からない局面では打牌前の状態で代用せず `unavailable` にします。
 
 #### Defense の exact `R/T` は使いません
 

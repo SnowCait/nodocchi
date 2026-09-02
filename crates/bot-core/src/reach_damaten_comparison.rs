@@ -235,6 +235,7 @@ pub(crate) fn diagnose_reach_damaten_comparison(
                 reach_legal,
                 wait: &tenpai.wait,
                 acceptance: tenpai.acceptance,
+                selected_discard: reach.selected_discard.as_ref(),
                 open_hand_threats,
             })
         }),
@@ -363,6 +364,12 @@ mod tests {
         "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
     ];
     const RED_WAIT_DRAW: &str = "E";
+
+    // 一気通貫の 4s 単騎。1s をツモって打 1s とすると、宣言牌がそのまま 4s のスジ根拠になる。
+    const SUJI_WAIT_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4s",
+    ];
+    const SUJI_WAIT_DRAW: &str = "1s";
 
     // 山の残枚数。4人で分けて自分の残り自摸機会になる。
     const REMAINING_TILES: u32 = 70;
@@ -530,6 +537,16 @@ mod tests {
                 .reach
                 .as_ref()
                 .expect("リーチを検討している")
+        }
+
+        // 選んだ打牌を河へ置いた直後の公開状態。公開 safety の期待値はここから求める。
+        fn public(&self) -> GameContext {
+            let Some(LegalAction::Dahai { tile }) = self.comparison().selected_discard else {
+                panic!("通常打牌 selection が Dahai を選んでいる");
+            };
+            self.context
+                .after_own_discard(tile)
+                .expect("自分の席が分かっている")
         }
 
         fn continuation_candidate(&self, discard: &str) -> &TenpaiContinuationCandidate {
@@ -946,8 +963,10 @@ mod tests {
 
     #[test]
     fn the_reach_public_safety_matches_the_existing_defense_helpers() {
-        // 公開 safety は既存 Defense helper の観測値そのもの。新しい rank も係数も作らない。
+        // 公開 safety は、選んだ打牌を河へ置いた直後の公開状態へ既存 Defense helper を通した
+        // 観測値そのもの。新しい rank も係数も作らない。
         let case = &*ASYMMETRIC;
+        let public = case.public();
         let opportunity = case
             .comparison()
             .ron_opportunity
@@ -960,21 +979,58 @@ mod tests {
                 .expect("リーチが合法なら公開 safety を評価する");
 
             assert!(safety.declaration_visible);
-            assert_eq!(
-                safety.genbutsu,
-                is_genbutsu_for(wait.tile, 0, &case.context)
-            );
+            assert_eq!(safety.genbutsu, is_genbutsu_for(wait.tile, 0, &public));
             assert_eq!(
                 safety.suited,
-                suited_safety_evidence_for_players(wait.tile, &[0], &case.context)
+                suited_safety_evidence_for_players(wait.tile, &[0], &public)
             );
             assert_eq!(
                 safety.honor.map(|honor| honor.rank),
-                honor_safety_rank(wait.tile, &case.context)
+                honor_safety_rank(wait.tile, &public)
             );
             // ダマ側には同じ rank を付けず、宣言が公開されない事実だけを持つ。
             assert!(!wait.damaten_declaration_visible);
         }
+    }
+
+    #[test]
+    fn the_reach_declaration_tile_is_reflected_in_the_public_suji() {
+        // 打 1s の 4s 単騎。宣言牌の 1s は 4s のスジ根拠になるので、打牌前の状態で評価すると
+        // 片スジを取り落とす。
+        let case = CaseSpec {
+            hand: &SUJI_WAIT_HAND,
+            draw: Some(SUJI_WAIT_DRAW),
+            legal_dahai: Some(&[SUJI_WAIT_DRAW]),
+            options: DiagnosticOptions::NONE,
+            ..CaseSpec::default()
+        }
+        .build();
+        let public = case.public();
+        let evidence = case
+            .comparison()
+            .ron_opportunity
+            .as_ref()
+            .expect("ロンできる待ちなので Ron opportunity がある")
+            .waits
+            .iter()
+            .find(|wait| wait.tile == tile("4s"))
+            .expect("4s の待ちがある")
+            .reach_public_safety
+            .expect("リーチが合法なら公開 safety を評価する")
+            .suited
+            .expect("数牌の evidence がある");
+
+        assert_eq!(case.comparison().selected_discard, Some(dahai(&case, "1s")));
+        // 期待値は打牌後の公開状態へ既存 helper を通した結果そのもの。
+        assert_eq!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &public)
+        );
+        // 打牌前の状態とは違う評価になる。
+        assert_ne!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.context)
+        );
     }
 
     #[test]
@@ -1000,14 +1056,9 @@ mod tests {
             .expect("リーチが合法なら公開 safety を評価する");
         let honor = safety.honor.expect("字牌の evidence がある");
 
-        assert_eq!(
-            Some(honor.rank),
-            honor_safety_rank(tile("S"), &case.context)
-        );
-        assert_eq!(
-            honor.visible_count,
-            visible_count_of(tile("S"), &case.context)
-        );
+        let public = case.public();
+        assert_eq!(Some(honor.rank), honor_safety_rank(tile("S"), &public));
+        assert_eq!(honor.visible_count, visible_count_of(tile("S"), &public));
         assert_eq!(safety.suited, None);
     }
 

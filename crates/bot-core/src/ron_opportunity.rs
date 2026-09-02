@@ -44,6 +44,28 @@
 //! で意味が違うため、`R/T` を Ron opportunity へ持ち込まない。放銃率でもロン確率でもない値を
 //! ロン確率の代用にしない。
 //!
+//! # 評価時点は打牌後の公開状態
+//!
+//! 公開 safety は、通常打牌 selection が選んだ打牌を河へ置いた**直後**の公開状態に対して評価する。
+//!
+//! ```text
+//! 現在の GameContext
+//! + selected discard を自分の河へ移す (GameContext::after_own_discard)
+//! ↓
+//! 打牌後の公開状態
+//! ↓
+//! 既存 Defense helper (is_genbutsu_for / suited_safety_evidence_for_players /
+//!                      honor_safety_rank / visible_count_of)
+//! ```
+//!
+//! 待ちとロン可否 ([`TenpaiWaitAvailability`]) も打牌後の状態なので、両者の評価時点が揃う。
+//! 宣言牌が作るスジと現物は、この打牌後の河を既存 helper が読むことでそのまま反映される。この層に
+//! 「宣言牌が 1s ならスジを1本足す」のような safety rule は書かない。
+//!
+//! 見え枚数 (壁・字牌の見え枚数) は打牌で変わらない。`visible_tiles` は自分の手牌を既に含むので、
+//! 同じ物理牌が手牌から河へ移っても枚数は同じになる。同じ post-discard 状態を既存 helper へ通した
+//! 結果そのものであり、打牌前の値を別に持っているわけではない。
+//!
 //! # ロンできない待ちは unavailable
 //!
 //! 目的が Ron opportunity なので、実際にロンできない局面では 0 として扱わず診断ごと `None` に
@@ -62,8 +84,9 @@
 //! この診断のために safety 評価も threat 分類も追加探索も production へ入れない。External threats は
 //! 押し引きが既に構築した classification を借りるだけで、分類し直さない。
 
-use bot_logic::{EffectiveAcceptance, TenpaiWaitAvailability, TileType};
+use bot_logic::{EffectiveAcceptance, TenpaiWaitAvailability, TileId, TileType};
 
+use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::defense::{
     HonorSafetyRank, SuitedSafetyEvidence, honor_safety_rank, is_genbutsu_for,
@@ -99,7 +122,8 @@ pub struct RonOpportunityWaitDiagnostic {
     pub live_copies: u8,
     /// 今リーチを宣言した場合の公開 safety evidence。
     ///
-    /// リーチが合法でない場合と自分の席を特定できない場合は `None` (unavailable)。
+    /// リーチが合法でない場合と、打牌後の公開状態を組み立てられない場合 (選んだ打牌が無い・
+    /// 自分の席を特定できない) は `None` (unavailable)。
     pub reach_public_safety: Option<ReachPublicSafetyEvidence>,
     /// ダマのまま続けた場合に、他家へこちらのテンパイが宣言されるか。常に `false`。
     ///
@@ -110,29 +134,26 @@ pub struct RonOpportunityWaitDiagnostic {
 
 /// 自分がリーチを宣言した場合に、その待ち牌が他家から見て公開情報上どう見えるかの evidence。
 ///
-/// 他家が実際にその牌を切る確率ではない。既存 Defense helper の観測値をそのまま持つだけで、
-/// 新しい safety rank も係数も作らない。
+/// 他家が実際にその牌を切る確率ではない。宣言牌を河へ置いた直後の公開状態へ既存 Defense helper を
+/// 適用した観測値そのもので、新しい safety rank も係数も作らない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReachPublicSafetyEvidence {
     /// リーチ宣言が他家へ公開されるか。リーチなので常に `true`。
     pub declaration_visible: bool,
-    /// 宣言後の自分の河から見て、その待ち牌が現物になるか。
+    /// 宣言牌まで含めた自分の河から見て、その待ち牌が現物になるか。
     ///
-    /// 判定は既存 hard-safety helper ([`is_genbutsu_for`]) と、既存フリテン診断が持つ
-    /// 「自分の河と重複した待ち」([`TenpaiWaitAvailability::discarded_waits`]) だけを使う。
-    /// 宣言牌も宣言後の自分の河に入るため、後者が同じ現物根拠として効く。現物判定はここで
-    /// 実装し直さない。
+    /// 判定は既存 hard-safety helper ([`is_genbutsu_for`]) を打牌後の公開状態へ通すだけで、
+    /// 現物判定をここで実装し直さない。
     ///
     /// 現在の和了可能待ちが自分の河にあれば恒常フリテンになるので、この診断が構築される局面
-    /// では通常 `false` になる。既存 furiten semantics と矛盾する値は作らない。
+    /// では `false` になる。待ちとロン可否も同じ打牌後の状態なので、既存 furiten semantics と
+    /// 矛盾する値にはならない。
     pub genbutsu: bool,
     /// 数牌の場合の既存 Defense evidence。字牌では `None`。
     ///
-    /// 壁は見え牌由来、スジは自分の河由来で、どちらも既存 [`suited_safety_evidence_for_players`]
-    /// そのもの。Defense selection の comparator は呼ばない。
-    ///
-    /// スジは既存 helper が読む現在の河そのままで、まだ切っていないリーチ宣言牌は含まない。
-    /// 宣言牌を足したスジ評価は別実装になるため、ここでは既存 evidence を書き換えない。
+    /// 壁は見え牌由来、スジは自分の河由来で、どちらも打牌後の公開状態へ通した既存
+    /// [`suited_safety_evidence_for_players`] そのもの。宣言牌が作るスジもこの河から出る。
+    /// Defense selection の comparator は呼ばない。
     pub suited: Option<SuitedSafetyEvidence>,
     /// 字牌の場合の既存 Defense evidence。数牌では `None`。
     pub honor: Option<HonorPublicSafetyEvidence>,
@@ -140,8 +161,8 @@ pub struct ReachPublicSafetyEvidence {
 
 /// 字牌の待ちについての公開 safety evidence。
 ///
-/// 既存の字牌 safety ([`honor_safety_rank`]) と見え枚数 ([`visible_count_of`]) そのもので、
-/// 役牌価値のような別軸はここでは持たない。
+/// 打牌後の公開状態へ通した既存の字牌 safety ([`honor_safety_rank`]) と見え枚数
+/// ([`visible_count_of`]) そのもので、役牌価値のような別軸はここでは持たない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HonorPublicSafetyEvidence {
     pub rank: HonorSafetyRank,
@@ -182,6 +203,12 @@ pub(crate) struct RonOpportunityInputs<'a> {
     pub wait: &'a TenpaiWaitAvailability,
     /// 選んだ打牌後の受け入れ。待ち牌種ごとの残枚数の source of truth で、見え牌を数え直さない。
     pub acceptance: &'a EffectiveAcceptance,
+    /// 通常打牌 selection が選んだ合法 Dahai。Reach / Damaten comparison が載せるものと同じ
+    /// action で、どの牌を切るかをここで推測しない。
+    ///
+    /// 公開 safety を打牌後の状態で評価するために、この物理牌を自分の河へ移した projection を
+    /// 作る。赤5 / 黒5の区別も selection が選んだ物理牌そのままにする。
+    pub selected_discard: Option<&'a LegalAction>,
     /// 押し引きが既に構築した全4席分の OpenHandThreat classification。
     pub open_hand_threats: &'a [OpenHandThreatAssessment; 4],
 }
@@ -198,12 +225,19 @@ pub(crate) fn diagnose_ron_opportunity(
         reach_legal,
         wait,
         acceptance,
+        selected_discard,
         open_hand_threats,
     } = inputs;
 
     if wait.can_ron() != Some(true) {
         return None;
     }
+
+    // 公開 safety の評価時点を打牌後へ揃えるための projection。リーチが合法でない局面では
+    // 組み立てない。
+    let public_state = reach_legal
+        .then(|| reach_declaration_public_state(context, selected_discard?))
+        .flatten();
 
     let waits = wait
         .live_waits
@@ -212,9 +246,9 @@ pub(crate) fn diagnose_ron_opportunity(
             Some(RonOpportunityWaitDiagnostic {
                 tile,
                 live_copies: live_copies_of(tile, acceptance)?,
-                reach_public_safety: reach_legal
-                    .then(|| reach_public_safety(tile, wait, context))
-                    .flatten(),
+                reach_public_safety: public_state
+                    .as_ref()
+                    .and_then(|public| reach_public_safety(tile, public)),
                 damaten_declaration_visible: DAMATEN_DECLARATION_VISIBLE,
             })
         })
@@ -240,25 +274,35 @@ fn live_copies_of(tile: TileType, acceptance: &EffectiveAcceptance) -> Option<u8
         .filter(|&remaining| remaining > 0)
 }
 
-// リーチを宣言した場合の公開 safety evidence。自分の席を特定できない場合は推測せず None。
+// リーチ宣言牌を自分の河へ置いた直後の公開状態。既存 projection をそのまま使い、河の組み立てを
+// ここで書き直さない。選んだ action が Dahai でない場合と自分の席を特定できない場合は推測せず
+// None にして、公開 safety を unavailable にする。
+fn reach_declaration_public_state(
+    context: &GameContext,
+    selected_discard: &LegalAction,
+) -> Option<GameContext> {
+    let LegalAction::Dahai { tile } = selected_discard else {
+        return None;
+    };
+    let discard: TileId = *tile;
+    context.after_own_discard(discard)
+}
+
+// リーチを宣言した場合の公開 safety evidence。`public` は宣言牌を河へ置いた後の公開状態で、
+// 現物もスジもその河から出る。
 //
 // スジは他家が自分の河から読む情報なので、対象 player 集合は自分の席だけにする。壁は見え牌由来で
 // 対象 player に依らない。どちらも既存 helper の結果そのままで、rank も係数もここでは作らない。
-fn reach_public_safety(
-    tile: TileType,
-    wait: &TenpaiWaitAvailability,
-    context: &GameContext,
-) -> Option<ReachPublicSafetyEvidence> {
-    let own_seat = usize::from(context.player_id()?);
+fn reach_public_safety(tile: TileType, public: &GameContext) -> Option<ReachPublicSafetyEvidence> {
+    let own_seat = usize::from(public.player_id()?);
 
     Some(ReachPublicSafetyEvidence {
         declaration_visible: REACH_DECLARATION_VISIBLE,
-        genbutsu: is_genbutsu_for(tile, own_seat, context)
-            || wait.discarded_waits().contains(&tile),
-        suited: suited_safety_evidence_for_players(tile, &[own_seat], context),
-        honor: honor_safety_rank(tile, context).map(|rank| HonorPublicSafetyEvidence {
+        genbutsu: is_genbutsu_for(tile, own_seat, public),
+        suited: suited_safety_evidence_for_players(tile, &[own_seat], public),
+        honor: honor_safety_rank(tile, public).map(|rank| HonorPublicSafetyEvidence {
             rank,
-            visible_count: visible_count_of(tile, context),
+            visible_count: visible_count_of(tile, public),
         }),
     })
 }
@@ -268,47 +312,68 @@ mod tests {
     use super::*;
 
     use bot_logic::{
-        EffectiveAcceptance, FixedMeldCount, HistoryFuritenFacts, OwnDiscards, TileCounts, TileId,
+        FixedMeldCount, HistoryFuritenFacts, OwnDiscards, TileCounts,
         calculate_acceptance_with_fixed_melds_and_visible_tiles, structural_acceptance_tile_types,
         tenpai_wait_availability,
     };
 
-    use crate::defense::{SujiSafetyRank, WallRank, suited_safety_rank_for_players};
+    use crate::defense::{SujiSafetyRank, WallRank, suited_safety_rank_for_players, wall_rank};
     use crate::meld::{Meld, MeldKind};
     use crate::open_hand_defense::high_open_hand_threat_players_from_context;
     use crate::open_hand_threat::classify_open_hand_threats;
     use crate::threat::player_threat_facts_from_context;
 
-    // 123m 456m 789m 123p の門前13枚に東単騎。待ちは字牌1種。
-    const HONOR_WAIT_HAND: [&str; 13] = [
-        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "E",
-    ];
-    // 123m 456m 789m 123p の門前13枚に 4s 単騎。待ちは数牌1種。
+    // 打牌後の門前13枚。123m 456m 789m 123p + 単騎牌で、単騎牌がそのまま待ちになる。
     const SUITED_WAIT_HAND: [&str; 13] = [
         "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4s",
     ];
+    const HONOR_WAIT_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "E",
+    ];
+    const RED_WAIT_HAND: [&str; 13] = [
+        "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
+    ];
+
+    // 待ちにもスジにも壁にも関係しない打牌。
+    const NEUTRAL_DISCARD: &str = "9p";
+    // 4s のスジ根拠になる打牌。宣言後の河へ入って初めて片スジになる。
+    const SUJI_PARTNER_DISCARD: &str = "1s";
 
     fn tile(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).expect("牌種として読める")
     }
 
-    fn tiles(strings: &[&str]) -> Vec<TileId> {
-        let mut used = [false; TileId::COUNT];
-        strings
-            .iter()
-            .map(|s| {
-                let id = TileId::copies(tile(s))
-                    .find(|id| !id.is_red() && !used[id.index()])
-                    .expect("同じ物理牌を使い回していない");
-                used[id.index()] = true;
-                id
-            })
-            .collect()
+    // 同じ物理牌を手牌・河・副露で使い回さないよう、1枚ずつ払い出す。
+    struct TileIdSource {
+        used: [bool; TileId::COUNT],
+    }
+
+    impl TileIdSource {
+        fn new() -> Self {
+            Self {
+                used: [false; TileId::COUNT],
+            }
+        }
+
+        fn tiles(&mut self, strings: &[&str]) -> Vec<TileId> {
+            strings.iter().map(|s| self.tile(s)).collect()
+        }
+
+        fn tile(&mut self, s: &str) -> TileId {
+            let id = TileId::copies(tile(s))
+                .find(|id| !id.is_red() && !self.used[id.index()])
+                .expect("同じ物理牌を使い回していない");
+            self.used[id.index()] = true;
+            id
+        }
     }
 
     struct CaseSpec<'a> {
+        /// 打牌後の門前13枚。そのままテンパイ形になる。
         hand: &'a [&'a str],
-        /// 自分の河。スジ・現物の根拠になる。
+        /// 通常打牌 selection が選ぶ打牌。ツモ牌として持ち、これを切って `hand` のテンパイになる。
+        discard: &'a str,
+        /// 打牌前の自分の河。
         own_discards: &'a [&'a str],
         /// リーチしている他家の席。
         reached_opponents: &'a [usize],
@@ -320,6 +385,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 hand: &SUITED_WAIT_HAND,
+                discard: NEUTRAL_DISCARD,
                 own_discards: &[],
                 reached_opponents: &[],
                 opponent_melds: &[],
@@ -328,23 +394,30 @@ mod tests {
     }
 
     struct Case {
+        /// 打牌前の局面。
         context: GameContext,
+        /// 打牌を河へ置いた直後の公開状態。期待値の source of truth。
+        public: GameContext,
+        selected_discard: LegalAction,
         wait: TenpaiWaitAvailability,
         acceptance: EffectiveAcceptance,
     }
 
     impl CaseSpec<'_> {
         fn build(&self) -> Case {
-            let hand_tiles = tiles(self.hand);
-            let own_discards = tiles(self.own_discards);
+            let mut source = TileIdSource::new();
+            let hand_tiles = source.tiles(self.hand);
+            let drawn_tile = source.tile(self.discard);
+            let own_discards = source.tiles(self.own_discards);
             let melds: Vec<(usize, Vec<TileId>)> = self
                 .opponent_melds
                 .iter()
-                .map(|(player, meld)| (*player, tiles(meld)))
+                .map(|(player, meld)| (*player, source.tiles(meld)))
                 .collect();
 
             let visible: Vec<TileId> = hand_tiles
                 .iter()
+                .chain(std::iter::once(&drawn_tile))
                 .chain(own_discards.iter())
                 .chain(melds.iter().flat_map(|(_, meld)| meld.iter()))
                 .copied()
@@ -363,7 +436,7 @@ mod tests {
             }
 
             let context = GameContext::from_parts_with_melds(
-                None,
+                Some(drawn_tile),
                 hand_tiles.clone(),
                 Vec::new(),
                 Some(tile("E")),
@@ -379,7 +452,11 @@ mod tests {
                 same_turn: Some(false),
                 riichi_missed_win: Some(false),
             });
+            let public = context
+                .after_own_discard(drawn_tile)
+                .expect("自分の席が分かっている");
 
+            // 待ちとロン可否も打牌後の状態で求め、公開 safety と評価時点を揃える。
             let counts = TileCounts::from_tiles(hand_tiles.iter().copied());
             let acceptance = calculate_acceptance_with_fixed_melds_and_visible_tiles(
                 &counts,
@@ -389,13 +466,15 @@ mod tests {
             let wait = tenpai_wait_availability(
                 &acceptance,
                 &structural_acceptance_tile_types(&counts),
-                &OwnDiscards::from_optional_river(context.own_discards()),
-                context.history_furiten(),
+                &OwnDiscards::from_optional_river(public.own_discards()),
+                context.history_furiten_after_own_discard(),
             )
             .expect("テンパイしている");
 
             Case {
                 context,
+                public,
+                selected_discard: LegalAction::Dahai { tile: drawn_tile },
                 wait,
                 acceptance,
             }
@@ -404,11 +483,20 @@ mod tests {
 
     impl Case {
         fn diagnose(&self, reach_legal: bool) -> Option<RonOpportunityDiagnostic> {
+            self.diagnose_with(reach_legal, Some(&self.selected_discard))
+        }
+
+        fn diagnose_with(
+            &self,
+            reach_legal: bool,
+            selected_discard: Option<&LegalAction>,
+        ) -> Option<RonOpportunityDiagnostic> {
             diagnose_ron_opportunity(RonOpportunityInputs {
                 context: &self.context,
                 reach_legal,
                 wait: &self.wait,
                 acceptance: &self.acceptance,
+                selected_discard,
                 open_hand_threats: &classify_open_hand_threats(&player_threat_facts_from_context(
                     &self.context,
                 )),
@@ -417,6 +505,12 @@ mod tests {
 
         fn opportunity(&self) -> RonOpportunityDiagnostic {
             self.diagnose(true).expect("Ron opportunity を構築している")
+        }
+
+        fn safety(&self, tile: TileType) -> ReachPublicSafetyEvidence {
+            wait_of(&self.opportunity(), tile)
+                .reach_public_safety
+                .expect("リーチが合法なら公開 safety を評価する")
         }
     }
 
@@ -468,7 +562,7 @@ mod tests {
     fn the_live_copies_come_from_the_existing_acceptance() {
         // 見え牌を別経路で数え直さず、打牌後受け入れが持つ残枚数そのものを載せる。
         let case = CaseSpec {
-            own_discards: &["1s", "4p"],
+            own_discards: &["4p"],
             ..CaseSpec::default()
         }
         .build();
@@ -489,6 +583,65 @@ mod tests {
         assert_eq!(wait_of(&opportunity, tile("4s")).live_copies, 3);
     }
 
+    // ---- 評価時点 ----
+
+    #[test]
+    fn the_reach_declaration_tile_is_reflected_in_the_public_suji() {
+        // 宣言牌の 1s は 4s のスジ根拠になる。宣言前の河には無いので、打牌前の状態で評価すると
+        // 片スジを取り落とす。
+        let case = CaseSpec {
+            discard: SUJI_PARTNER_DISCARD,
+            ..CaseSpec::default()
+        }
+        .build();
+        let evidence = case
+            .safety(tile("4s"))
+            .suited
+            .expect("数牌の evidence がある");
+
+        // 期待値は打牌後の公開状態へ既存 helper を通した結果そのもの。
+        assert_eq!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.public)
+        );
+        // 打牌前の状態とは違う評価になる。
+        assert_ne!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.context)
+        );
+        assert_eq!(evidence.suji_rank, SujiSafetyRank::HalfSuji);
+        assert_eq!(
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.context)
+                .map(|before| before.suji_rank),
+            Some(SujiSafetyRank::NoSuji)
+        );
+    }
+
+    #[test]
+    fn the_public_visible_count_uses_the_post_discard_state() {
+        // 壁と字牌の見え枚数も打牌後の公開状態で評価する。宣言牌は既に自分の手牌として見えて
+        // いるので、河へ移っても見え枚数は変わらない。
+        let case = CaseSpec {
+            discard: "3s",
+            ..CaseSpec::default()
+        }
+        .build();
+        let evidence = case
+            .safety(tile("4s"))
+            .suited
+            .expect("数牌の evidence がある");
+
+        assert_eq!(
+            Some(evidence),
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.public)
+        );
+        assert_eq!(evidence.wall_rank, wall_rank(tile("4s"), &case.public));
+        assert_eq!(
+            visible_count_of(tile("3s"), &case.public),
+            visible_count_of(tile("3s"), &case.context)
+        );
+    }
+
     // ---- 公開 safety ----
 
     #[test]
@@ -499,54 +652,46 @@ mod tests {
             ..CaseSpec::default()
         }
         .build();
-        let safety = wait_of(&case.opportunity(), tile("4s"))
-            .reach_public_safety
-            .expect("リーチが合法なら公開 safety を評価する");
+        let safety = case.safety(tile("4s"));
 
         let evidence = safety.suited.expect("数牌の evidence がある");
         assert_eq!(
             Some(evidence),
-            suited_safety_evidence_for_players(tile("4s"), &[0], &case.context)
+            suited_safety_evidence_for_players(tile("4s"), &[0], &case.public)
         );
         assert_eq!(evidence.suji_rank, SujiSafetyRank::HalfSuji);
         assert_eq!(evidence.wall_rank, WallRank::NoWall);
         assert_eq!(
             Some(evidence.legacy_rank()),
-            suited_safety_rank_for_players(tile("4s"), &[0], &case.context)
+            suited_safety_rank_for_players(tile("4s"), &[0], &case.public)
         );
         assert_eq!(safety.honor, None);
     }
 
     #[test]
     fn an_honor_wait_reuses_the_existing_honor_safety() {
-        let case = CaseSpec {
+        // 東を捨てた恒常フリテンでは Ron opportunity ごと unavailable。
+        let furiten = CaseSpec {
             hand: &HONOR_WAIT_HAND,
             own_discards: &["E"],
             ..CaseSpec::default()
         }
         .build();
-        // 東を捨てた恒常フリテンでは Ron opportunity ごと unavailable なので、東の見え枚数は
-        // 自分の手牌1枚だけの局面で観測する。
-        assert_eq!(case.diagnose(true), None);
+        assert_eq!(furiten.diagnose(true), None);
 
         let case = CaseSpec {
             hand: &HONOR_WAIT_HAND,
             ..CaseSpec::default()
         }
         .build();
-        let safety = wait_of(&case.opportunity(), tile("E"))
-            .reach_public_safety
-            .expect("リーチが合法なら公開 safety を評価する");
+        let safety = case.safety(tile("E"));
 
         let honor = safety.honor.expect("字牌の evidence がある");
-        assert_eq!(
-            Some(honor.rank),
-            honor_safety_rank(tile("E"), &case.context)
-        );
+        assert_eq!(Some(honor.rank), honor_safety_rank(tile("E"), &case.public));
         assert_eq!(honor.rank, HonorSafetyRank::OneVisible);
         assert_eq!(
             honor.visible_count,
-            visible_count_of(tile("E"), &case.context)
+            visible_count_of(tile("E"), &case.public)
         );
         assert_eq!(safety.suited, None);
     }
@@ -554,14 +699,12 @@ mod tests {
     #[test]
     fn the_genbutsu_fact_matches_the_existing_hard_safety_helper() {
         let case = CaseSpec::default().build();
-        let safety = wait_of(&case.opportunity(), tile("4s"))
-            .reach_public_safety
-            .expect("リーチが合法なら公開 safety を評価する");
+        let safety = case.safety(tile("4s"));
 
         assert!(!safety.genbutsu);
         assert_eq!(
             safety.genbutsu,
-            is_genbutsu_for(tile("4s"), 0, &case.context)
+            is_genbutsu_for(tile("4s"), 0, &case.public)
         );
         assert!(safety.declaration_visible);
     }
@@ -588,15 +731,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_missing_selected_discard_keeps_the_reach_public_safety_unavailable() {
+        // どの牌を切るか分からなければ打牌後の公開状態を組み立てられない。打牌前の状態で
+        // 代用せず unavailable にする。
+        let case = CaseSpec::default().build();
+        let opportunity = case.diagnose_with(true, None).expect("ダマ側は評価できる");
+
+        for wait in &opportunity.waits {
+            assert_eq!(wait.reach_public_safety, None);
+        }
+    }
+
     // ---- 赤5 / 黒5 ----
 
     #[test]
     fn the_red_and_black_five_share_one_structural_safety_evidence() {
         // 5s 単騎。赤5も黒5も同じ牌種なので、structural safety は1件を共有する。
         let case = CaseSpec {
-            hand: &[
-                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5s",
-            ],
+            hand: &RED_WAIT_HAND,
             ..CaseSpec::default()
         }
         .build();
@@ -610,7 +763,7 @@ mod tests {
             wait.reach_public_safety
                 .and_then(|safety| safety.suited)
                 .map(|evidence| evidence.legacy_rank()),
-            suited_safety_rank_for_players(tile("5s"), &[0], &case.context)
+            suited_safety_rank_for_players(tile("5s"), &[0], &case.public)
         );
     }
 
@@ -643,6 +796,7 @@ mod tests {
                 reach_legal: true,
                 wait: &wait,
                 acceptance: &case.acceptance,
+                selected_discard: Some(&case.selected_discard),
                 open_hand_threats: &classify_open_hand_threats(&player_threat_facts_from_context(
                     &case.context
                 )),
@@ -665,10 +819,7 @@ mod tests {
         }
         .build();
 
-        assert_eq!(
-            wait_of(&base.opportunity(), tile("4s")).reach_public_safety,
-            wait_of(&reached.opportunity(), tile("4s")).reach_public_safety
-        );
+        assert_eq!(base.safety(tile("4s")), reached.safety(tile("4s")));
         // リーチ者の存在は external threats にだけ現れる。
         assert_eq!(
             reached.opportunity().external_threats.reached_opponents,
