@@ -38,6 +38,14 @@
 //! 自分の席を特定できず既リーチかどうかも判断できない場合は、未リーチだともリーチ済みだとも
 //! 推測せず [`TenpaiOffenseMode::Unknown`] にして打点も確定しない。
 //!
+//! # terminal Tsumo counterfactual
+//!
+//! 現在聴牌を1巡 defer する診断では、同じ terminal tenpai を production / forced Reach /
+//! forced Damaten の3 mode で観測する。production の Tsumo value は2手先評価が構築済みの
+//! `tsumo_continuation` をそのまま保持し、forced counterfactual は同じ [`ProspectiveFacts`] と
+//! Tsumo scoring helper へ異なる baseline だけを渡す。production と同じ mode は再評価しない。
+//! Reach legality も [`is_reach_legal`] の既存評価結果を保持し、production `mode` から逆算しない。
+//!
 //! # ロン可否
 //!
 //! ダマ打点はロン和了を前提にした baseline なので、production ([`crate::offense_value`]) と
@@ -204,6 +212,19 @@ pub struct ProspectiveTenpaiValue {
     pub reach: ProspectiveBaselineValue,
     /// production のリーチ判断と同じ policy が選んだ攻撃モード。
     pub mode: TenpaiOffenseMode,
+    /// 既存の将来テンパイ Reach legality 判定。その結論を counterfactual でも source of truth
+    /// として共有し、`mode` から逆算しない。
+    pub future_reach_legal: bool,
+    /// production mode に関係なく Reach Tsumo baseline で評価した terminal self-tsumo value。
+    ///
+    /// 将来リーチが不可能な場合と、ツモ打点を確定できない場合は `None`。production mode が
+    /// Reach の場合は既存 lookahead の `tsumo_continuation` そのものを保持する。
+    pub forced_reach_tsumo: Option<TenpaiTsumoValue>,
+    /// production mode に関係なく Damaten Tsumo baseline で評価した terminal self-tsumo value。
+    ///
+    /// production mode が Damaten の場合は既存 lookahead の `tsumo_continuation` そのものを
+    /// 保持する。Tsumo baseline なので Ron 可否には依存しない。
+    pub forced_damaten_tsumo: Option<TenpaiTsumoValue>,
     /// 既存のフリテン基盤による、この未来テンパイの総合ロン可否。判断できない場合は `None`。
     ///
     /// `Some(true)` の場合だけダマ打点を判断材料と確定値に使う。
@@ -800,6 +821,7 @@ fn variant_outcome(
     };
 
     let dora_indicators = valuator.context.dora_indicators();
+    let mode = valuator.offense_mode(&facts);
     ProspectiveOutcome::Evaluated(ProspectiveTenpaiValue {
         damaten: baseline_value(&facts.hands, valuator.damaten, dora_indicators, None),
         reach: baseline_value(
@@ -808,9 +830,48 @@ fn variant_outcome(
             dora_indicators,
             Some(BASELINE_URA_DORA_INDICATORS),
         ),
-        mode: valuator.offense_mode(&facts),
+        mode,
+        future_reach_legal: valuator.reach_legal,
+        forced_reach_tsumo: valuator
+            .reach_legal
+            .then(|| {
+                terminal_tsumo_value_with_mode(
+                    valuator,
+                    &facts,
+                    mode,
+                    variant.tsumo_continuation,
+                    TenpaiOffenseMode::Reach,
+                )
+            })
+            .flatten(),
+        forced_damaten_tsumo: terminal_tsumo_value_with_mode(
+            valuator,
+            &facts,
+            mode,
+            variant.tsumo_continuation,
+            TenpaiOffenseMode::Damaten,
+        ),
         can_ron: facts.ron_availability(),
     })
+}
+
+// 同じ terminal tenpai を指定 Tsumo baseline で評価する。production mode と一致する場合は
+// lookahead が既に構築した値をそのまま返し、同じ scoring を診断側でもう一度実行しない。
+fn terminal_tsumo_value_with_mode(
+    valuator: &ProductionProspectiveValuator<'_>,
+    facts: &ProspectiveFacts,
+    production_mode: TenpaiOffenseMode,
+    production_value: Option<TenpaiTsumoValue>,
+    mode: TenpaiOffenseMode,
+) -> Option<TenpaiTsumoValue> {
+    // production continuation が構築されていない局面では counterfactual だけを追加評価しない。
+    // `SelfTsumoFacts` 不足や terminal scoring 不足を、別 mode なら既知だと推測しないためでもある。
+    let production_value = production_value?;
+    if production_mode == mode {
+        Some(production_value)
+    } else {
+        valuator.tsumo_value_with_mode(facts, mode)
+    }
 }
 
 // テンパイの完成手を baseline 1つで評価し、待ちごとの打点と残枚数加重平均へ畳む。
@@ -1936,6 +1997,10 @@ mod tests {
 
     static TSUMO_NO_YAKU: LazyLock<Case> = LazyLock::new(|| tsumo_case(&NO_YAKU_HAND, "1m", &[]));
     static TSUMO_RED_FIVE: LazyLock<Case> = LazyLock::new(|| tsumo_case(&RED_FIVE_HAND, "1m", &[]));
+    static TSUMO_LOW_DAMATEN: LazyLock<Case> =
+        LazyLock::new(|| tsumo_case(&LOW_DAMATEN_HAND, "2m", &[]));
+    static TSUMO_HIGH_DAMATEN: LazyLock<Case> =
+        LazyLock::new(|| tsumo_case(&HIGH_DAMATEN_HAND, "1p", &[]));
 
     // ツモ打点を確定できない局面。場風・自風が分からず点数計算の入力が足りない。
     static TSUMO_UNKNOWN_WINDS: LazyLock<Case> = LazyLock::new(|| {
@@ -1994,6 +2059,36 @@ mod tests {
         assert_eq!(baseline.riichi(), RiichiStatus::Riichi);
         // 裏ドラは既存の最低保証 baseline (裏0) と揃える。
         assert_eq!(ura_dora, Some(BASELINE_URA_DORA_INDICATORS));
+    }
+
+    #[test]
+    fn forced_reach_reuses_the_reach_baseline_when_production_selects_damaten() {
+        let case = &*TSUMO_HIGH_DAMATEN;
+        let production = continuation(case, "8m", "5p").expect("production ツモ打点がある");
+        let tenpai = case
+            .red_variant("8m", "5p", true)
+            .outcome
+            .evaluated()
+            .expect("テンパイ枝");
+
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Damaten);
+        assert!(tenpai.future_reach_legal);
+        assert_eq!(tenpai.forced_damaten_tsumo, Some(production));
+        assert!(tenpai.forced_reach_tsumo.is_some());
+        assert_ne!(tenpai.forced_reach_tsumo, Some(production));
+    }
+
+    #[test]
+    fn forced_damaten_reuses_the_damaten_baseline_when_production_selects_reach() {
+        let case = &*TSUMO_LOW_DAMATEN;
+        let production = continuation(case, "7p", "2m").expect("production ツモ打点がある");
+        let tenpai = case.evaluated("7p", "2m");
+
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Reach);
+        assert!(tenpai.future_reach_legal);
+        assert_eq!(tenpai.forced_reach_tsumo, Some(production));
+        assert!(tenpai.forced_damaten_tsumo.is_some());
+        assert_ne!(tenpai.forced_damaten_tsumo, Some(production));
     }
 
     #[test]

@@ -116,9 +116,24 @@ impl ReachDamatenComparisonDiagnostic {
         self.self_tsumo?.reach_now
     }
 
-    /// ダマで1巡継続した場合の期待ツモ支払い合計。self-tsumo 材料が無ければ `None`。
+    /// 従来名との互換 accessor。terminal mode は forced Damaten ではなく production policy。
     pub fn damaten_continuation_self_tsumo(&self) -> Option<u64> {
-        self.self_tsumo?.damaten_continuation()
+        self.self_tsumo?.defer_production()
+    }
+
+    /// 1巡 defer し、terminal tenpai では production policy に従う期待ツモ支払い合計。
+    pub fn defer_production_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.defer_production()
+    }
+
+    /// 1巡 defer し、terminal tenpai では合法な場合に forced Reach とする期待ツモ支払い合計。
+    pub fn defer_forced_reach_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.defer_forced_reach()
+    }
+
+    /// 1巡 defer し、terminal tenpai では forced Damaten とする期待ツモ支払い合計。
+    pub fn defer_forced_damaten_self_tsumo(&self) -> Option<u64> {
+        self.self_tsumo?.defer_forced_damaten()
     }
 
     /// ダマのまま最初の1自摸で現在の待ちをツモ和了する期待支払い。
