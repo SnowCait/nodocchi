@@ -765,8 +765,11 @@ impl ShantenAgent {
         }
     }
 
-    // 通常打牌選択。選択結果は診断の有無で変わらず、診断が有効な場合だけ全合法候補の
-    // 構造化診断と2手先診断を追加で受け取る。2手先探索は診断が無効な act() 経路には入らない。
+    // 通常打牌選択。production selection は診断の有無にかかわらず、既存 forward_metrics の
+    // 2手先枝評価を利用する。通常 act() では詳細な LookaheadDiagnostic は構築しない。
+    // 恒常フリテンの Reach timing は gate 後に selected candidate 1件だけ既存 lookahead
+    // evaluator を利用する。診断が有効な場合だけ、表示用の全候補の構造化診断と
+    // LookaheadDiagnostic 等を追加で構築する。
     fn select_normal_discard(
         &self,
         ctx: &GameContext,

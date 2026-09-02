@@ -2478,10 +2478,10 @@ fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
 
     // timing で今回の宣言を見送った場合だけ、その理由を判別できるようにする。重い枝の内訳は
     // Summary に入れず、`Reach` 節が持つ。
-    if reach.defers_reach() {
-        if let Some(timing) = reach.timing.as_ref() {
-            lines.push(format!("  reach timing reason: {:?}", timing.reason));
-        }
+    if reach.defers_reach()
+        && let Some(timing) = reach.timing.as_ref()
+    {
+        lines.push(format!("  reach timing reason: {:?}", timing.reason));
     }
 
     if let Some(tenpai) = reach.tenpai_wait.as_ref() {
