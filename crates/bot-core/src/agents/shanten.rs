@@ -4856,18 +4856,23 @@ pub(crate) mod tests {
 
     #[test]
     fn the_reach_damaten_comparison_is_built_only_with_diagnostics() {
-        // 診断経路では同じ判断のまま統合診断とリーチ Ron baseline を構築する。
-        let ctx = tenpai_context(&[]);
-        let actions = tenpai_actions();
+        // 診断経路では同じ判断のまま統合診断を構築する。リーチが合法で Ron availability も
+        // Some(true) の通常ケースでは、リーチ Ron baseline も構築する。
+        let case = damaten_case(&PINFU_TANYAO_HAND, "N", &[]);
 
         let mut agent = ShantenAgent;
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = ShantenAgent::diagnose(&case.ctx, &case.actions);
         let comparison = diagnostic
             .reach_damaten_comparison
             .as_ref()
             .expect("統合診断を構築している");
 
-        assert_eq!(diagnostic.selected_action, agent.act(&ctx, &actions));
+        assert_eq!(
+            diagnostic.selected_action,
+            agent.act(&case.ctx, &case.actions)
+        );
+        assert!(comparison.reach_legal);
+        assert_eq!(comparison.can_ron, Some(true));
         assert!(comparison.reach_ron_baseline.is_some());
     }
 

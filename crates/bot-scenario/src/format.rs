@@ -1567,8 +1567,8 @@ fn format_comparison_self_tsumo(comparison: &ReachDamatenComparisonDiagnostic) -
 // 和了した場合の支払い。ロンの発生確率を含まないので、self-tsumo の期待支払いとは足さない。
 //
 // リーチ側は「今リーチしてその待ちでロンした場合」の最低保証打点、ダマ側は production 判断が
-// 評価したダマ打点そのもの。ダマでロンできない局面とロン可否が unknown の局面は評価していない
-// ので、0 点ではなく評価していないことを出す。
+// 評価したダマ打点そのもの。どちらもロンできない局面とロン可否が unknown の局面は評価して
+// いないので、0 点ではなく評価していないことを出す。
 fn format_comparison_ron(comparison: &ReachDamatenComparisonDiagnostic) -> Vec<String> {
     let mut lines = vec![
         "  Ron (payment when winning, no ron probability)".to_string(),
@@ -5829,23 +5829,51 @@ mod tests {
     }
 
     #[test]
-    fn the_comparison_section_keeps_a_furiten_damaten_value_unavailable() {
-        // ダマでロンできない局面のダマ打点は評価していない。0 点として出さない。
-        let (_, diagnostic, output) = rendered(PERMANENT_FURITEN_SCENARIO, false);
-        let comparison = section(&output, "Reach / Damaten comparison");
-        let facts = diagnostic
+    fn the_comparison_section_keeps_furiten_ron_unavailable_but_self_tsumo_available() {
+        // リーチが合法でもフリテンなら両 Ron baseline は評価しない。Tsumo 側は独立して表示する。
+        // 山の残枚数など self-tsumo の入力も揃え、どちらの選択打牌でも待ちが自分の河と重なる
+        // 局面にする。
+        let rendered = rendered_with_lookahead_diagnostic(
+            r#"{
+                "hand": "234567789m345p10s",
+                "round_wind": "E",
+                "player_id": 0,
+                "oya": 1,
+                "remaining_tiles": 70,
+                "discards": ["1s 5s", "", "", ""],
+                "legal_dahai": "1s",
+                "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+            }"#,
+            false,
+        );
+        let comparison = section(&rendered.rendered, "Reach / Damaten comparison");
+        let facts = rendered
+            .diagnostic
             .reach_damaten_comparison
             .as_ref()
             .expect("統合診断がある");
 
+        assert!(facts.reach_legal);
         assert_eq!(facts.can_ron, Some(false));
+        assert_eq!(facts.reach_ron_baseline, None);
         assert_eq!(facts.damaten_ron_value, None);
+        assert!(facts.reach_now_self_tsumo().is_some());
+        assert!(facts.damaten_continuation_self_tsumo().is_some());
+        assert!(comparison.contains("    reach legal: yes"), "{comparison}");
+        assert!(
+            comparison.contains(&format!("    reach baseline: {UNAVAILABLE}")),
+            "{comparison}"
+        );
         assert!(comparison.contains("    can ron: no"), "{comparison}");
         assert!(
             comparison.contains(&format!("    damaten baseline: {UNAVAILABLE}")),
             "{comparison}"
         );
-        assert!(!comparison.contains("damaten baseline: 0"), "{comparison}");
+        assert!(
+            comparison.contains("  self-tsumo (expected tsumo payment)\n    reach now:"),
+            "{comparison}"
+        );
+        assert!(!comparison.contains("baseline: 0"), "{comparison}");
     }
 
     #[test]
@@ -5854,13 +5882,18 @@ mod tests {
         let (_, diagnostic, output) = rendered(REACH_SCENARIO, false);
         let comparison = section(&output, "Reach / Damaten comparison");
 
-        assert_eq!(
-            diagnostic
-                .reach_damaten_comparison
-                .as_ref()
-                .expect("統合診断がある")
-                .can_ron,
-            None
+        let facts = diagnostic
+            .reach_damaten_comparison
+            .as_ref()
+            .expect("統合診断がある");
+        assert!(facts.reach_legal);
+        assert_eq!(facts.can_ron, None);
+        assert_eq!(facts.reach_ron_baseline, None);
+        assert_eq!(facts.damaten_ron_value, None);
+        assert!(comparison.contains("    reach legal: yes"), "{comparison}");
+        assert!(
+            comparison.contains(&format!("    reach baseline: {UNAVAILABLE}")),
+            "{comparison}"
         );
         assert!(comparison.contains("    can ron: unknown"), "{comparison}");
         assert!(

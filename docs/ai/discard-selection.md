@@ -237,12 +237,12 @@ nodocchi はまだ「他家がその牌を切る確率」の模型を持たな�
 
 ### Ron baseline
 
-- `reach baseline` は今リーチしてその待ちでロン和了した場合の最低保証打点です。既存のリーチ baseline (`reach_baseline_context()`) をそのまま使うので、リーチ1翻を含み、一発・裏ドラ・河底のような上振れは加算しません (裏ドラは未観測ではなく「0枚と確定」として扱います)。集約も押し引きの攻撃打点と同じ残枚数加重で、赤5 / 黒5は別 variant のまま残します。self-tsumo の `reach now` と同じく、実際にリーチできる局面 (合法手に `LegalAction::Reach` がある) だけ評価します。
+- `reach baseline` は今リーチしてその待ちでロン和了した場合の最低保証打点です。既存のリーチ baseline (`reach_baseline_context()`) をそのまま使うので、リーチ1翻を含み、一発・裏ドラ・河底のような上振れは加算しません (裏ドラは未観測ではなく「0枚と確定」として扱います)。集約も押し引きの攻撃打点と同じ残枚数加重で、赤5 / 黒5は別 variant のまま残します。実際にリーチできる局面 (合法手に `LegalAction::Reach` がある) かつ既存 Ron availability (`TenpaiWaitAvailability::can_ron()`) が `Some(true)` の場合だけ評価し、フリテンとロン可否 unknown では `unavailable` にします。
 - `damaten baseline` はダマのままロン和了した場合の打点で、既存のリーチ / ダマ判断が評価したダマ打点診断そのものです ([手牌価値](hand-value.md) を参照)。ダマでロンできない場合とロン可否が unknown の場合は既存 semantics どおり評価せず `unavailable` にします。**0 点としては扱いません。**
 
 `reach baseline` の評価は**診断経路だけ**で行います。通常の `act()` はこの層を通らないので、完成手 (`TenpaiCompletedHands`) の組み立ても hand-value evaluation も production には入りません。完成手は待ちごとの解析を丸ごと所有する重い値なので、診断のために production の打牌選択へ持ち回らせません。リーチ判断がダマ打点のために組み立てた集合があればその所有権をそのまま受け取り、無い経路でだけ選んだ打牌1件について既存 helper で1回組み立てます (待ちは既存の受け入れから求めるので、向聴も受け入れも計算し直しません)。
 
-フリテンでロンできない局面でも、Tsumo 側の `damaten continuation` は独立した軸として評価します。逆に、ツモれることを理由に Ron 側の値を確定させることもしません。
+フリテンでロンできない局面でも、Tsumo 側の `reach now` と `damaten continuation` はそれぞれの既存入力に従う独立した軸として評価します。逆に、ツモれることを理由に `reach baseline` を含む Ron 側の値を確定させることもしません。
 
 **この統合診断も diagnostics 専用です。** production の Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持たず、構築の有無は最終 action を変えません。
 

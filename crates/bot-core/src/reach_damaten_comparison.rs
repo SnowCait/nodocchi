@@ -33,6 +33,9 @@
 //!
 //! nodocchi はまだ「他家がその牌を切る確率」の模型を持たないため、Ron baseline を期待値へ
 //! 変換できない。したがって2つの軸を足した合計も、係数で重み付けした score も作らない。
+//! リーチ Ron baseline は実際にリーチが合法で、かつ既存 Ron availability が `Some(true)` の
+//! 場合だけ評価する。フリテンとロン可否 unknown では評価しないが、self-tsumo は独立して評価
+//! 可能なままにする。
 //!
 //! # 判断しない
 //!
@@ -95,8 +98,8 @@ pub struct ReachDamatenComparisonDiagnostic {
     pub self_tsumo: Option<TenpaiSelfTsumoComparison>,
     /// 今リーチしてロン和了した場合の最低保証打点。ロンの発生確率は含まない。
     ///
-    /// self-tsumo の `reach now` と同じく、実際にリーチできる局面だけ評価する。副露手のように
-    /// リーチが合法でない局面では、あり得ないリーチ手の打点を作らず `None` にする。
+    /// 実際にリーチでき、かつ既存 Ron availability が `Some(true)` の局面だけ評価する。リーチが
+    /// 合法でない場合、フリテンの場合、ロン可否が unknown の場合は `None` にする。
     pub reach_ron_baseline: Option<ReachRonBaselineDiagnostic>,
     /// ダマのままロンできるか。既存フリテン診断の結論そのもの。
     pub can_ron: Option<bool>,
@@ -179,10 +182,10 @@ pub(crate) fn diagnose_reach_damaten_comparison(
         reach_legal,
         self_tsumo: selected_discard_self_tsumo(selection, continuation),
         reach_ron_baseline: tenpai.as_ref().and_then(|tenpai| {
-            // 実際にリーチできる局面だけ評価する。副露手のようにリーチが合法でない局面で、
-            // あり得ないリーチ手の打点を作らない。self-tsumo の `reach now` と同じ入口条件で、
-            // 局面から合法条件を組み立て直さない。
-            reach_legal.then(|| reach_ron_baseline_from_hands(context, &tenpai.hands))
+            // Reach の合法性と Ron availability は別の条件。リーチが合法でもフリテンは解除されず、
+            // unknown を非フリテンとも推測しない。Ron 軸は既存の総合値だけを source of truth にする。
+            (reach_legal && tenpai.wait.can_ron() == Some(true))
+                .then(|| reach_ron_baseline_from_hands(context, &tenpai.hands))
         }),
         can_ron: tenpai.as_ref().and_then(|tenpai| tenpai.wait.can_ron()),
         damaten_ron_value: tenpai
@@ -356,6 +359,8 @@ mod tests {
         legal_reach: bool,
         /// 合法 Dahai を絞る牌。`None` では手牌とツモ牌のすべてを切れる。
         legal_dahai: Option<&'a [&'a str]>,
+        /// 選んだ打牌後の Ron availability に使う履歴依存フリテン facts。
+        history_furiten: HistoryFuritenFacts,
         options: DiagnosticOptions,
     }
 
@@ -368,6 +373,10 @@ mod tests {
                 own_discards: &[],
                 legal_reach: true,
                 legal_dahai: None,
+                history_furiten: HistoryFuritenFacts {
+                    same_turn: Some(false),
+                    riichi_missed_win: Some(false),
+                },
                 options: DiagnosticOptions::WITH_LOOKAHEAD,
             }
         }
@@ -439,10 +448,7 @@ mod tests {
                 scores: Some([REACH_SCORE; 4]),
                 ..Default::default()
             })
-            .with_history_furiten_facts(HistoryFuritenFacts {
-                same_turn: Some(false),
-                riichi_missed_win: Some(false),
-            });
+            .with_history_furiten_facts(self.history_furiten);
 
             let diagnostic = ShantenAgent::diagnose_with_options(&context, &actions, self.options);
 
@@ -637,50 +643,35 @@ mod tests {
         let comparison = case.comparison();
 
         assert_eq!(comparison.selected_discard, case.reach().selected_discard);
+        assert!(comparison.reach_legal);
         assert_eq!(comparison.can_ron, Some(false));
+        assert_eq!(comparison.reach_ron_baseline, None);
         assert_eq!(comparison.damaten_ron_value, None);
         assert_eq!(comparison.damaten_verdict(), None);
 
         // Tsumo 側は独立した軸なので、ロンできなくても評価する。
         assert!(comparison.damaten_continuation_self_tsumo().is_some());
         assert!(comparison.reach_now_self_tsumo().is_some());
-        // リーチ後はフリテンでもツモ和了できるので、リーチ Ron baseline も評価する。
-        assert!(comparison.reach_ron_baseline.is_some());
     }
 
     #[test]
     fn an_unknown_ron_availability_is_not_guessed() {
-        // ロン可否が分からない局面では非フリテンだと推測せず、ダマ打点も評価しない。
-        let context = GameContext::from_parts_with_melds(
-            Some(TileId::copies(tile("S")).next().expect("南がある")),
-            TileIdSource::new().tiles(&ITTSUU_HAND),
-            Vec::new(),
-            Some(tile("E")),
-            Some(tile("S")),
-            Vec::new(),
-            None,
-            Some(3),
-            Default::default(),
-            [false; 4],
-            Default::default(),
-        );
-        let actions: Vec<LegalAction> = context
-            .hand_tiles()
-            .iter()
-            .copied()
-            .chain(context.drawn_tile())
-            .map(|tile| LegalAction::Dahai { tile })
-            .chain([LegalAction::Reach])
-            .collect();
-        let diagnostic = ShantenAgent::diagnose(&context, &actions);
-        let comparison = diagnostic
-            .reach_damaten_comparison
-            .as_ref()
-            .expect("統合診断が構築されている");
+        // ロン可否が分からない局面では非フリテンだと推測せず、どちらの Ron baseline も評価
+        // しない。Tsumo 側は独立しており、入力が揃っているので引き続き評価できる。
+        let case = CaseSpec {
+            history_furiten: HistoryFuritenFacts::default(),
+            ..ittsuu_spec()
+        }
+        .build();
+        let comparison = case.comparison();
 
+        assert!(comparison.reach_legal);
         assert_eq!(comparison.can_ron, None);
+        assert_eq!(comparison.reach_ron_baseline, None);
         assert_eq!(comparison.damaten_ron_value, None);
         assert_eq!(comparison.damaten_verdict(), None);
+        assert!(comparison.reach_now_self_tsumo().is_some());
+        assert!(comparison.damaten_continuation_self_tsumo().is_some());
     }
 
     // ---- リーチ Ron baseline ----
@@ -688,6 +679,8 @@ mod tests {
     #[test]
     fn the_reach_ron_baseline_uses_the_existing_forced_reach_context() {
         let case = &*ITTSUU;
+        assert!(case.comparison().reach_legal);
+        assert_eq!(case.comparison().can_ron, Some(true));
         let baseline = case
             .comparison()
             .reach_ron_baseline
@@ -794,6 +787,7 @@ mod tests {
         );
         assert!(!comparison.production_should_reach);
         assert_eq!(comparison.reach_now_self_tsumo(), None);
+        assert_eq!(comparison.reach_ron_baseline, None);
         assert!(comparison.damaten_continuation_self_tsumo().is_some());
         assert!(comparison.damaten_immediate_tsumo_self_tsumo().is_some());
     }

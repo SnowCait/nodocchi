@@ -200,9 +200,9 @@ Reach / Damaten comparison
 
 `production` は既存のリーチ判断の結論そのものです。`self-tsumo` は選んだ打牌に対応する `Tenpai continuation` の候補1件の比較そのもので、`--lookahead` を指定していない局面では `self-tsumo: unavailable` になります (統合表示のために2手先探索を追加しません)。`reach baseline` だけが今回新しく評価する観測値で、その点数計算は診断経路だけで行います。
 
-`Ron` の2つの baseline はどちらも「その待ちで和了した場合の支払い」で、**ロンの発生確率を含みません**。`reach baseline` は今リーチした場合の最低保証打点 (リーチ1翻を含み、一発・裏ドラ・河底は加算しない) で、合法手に `LegalAction::Reach` が無い局面では `unavailable` です。`damaten baseline` は production 判断が評価したダマ打点そのもので、ダマでロンできない局面とロン可否が unknown の局面では評価しないまま `unavailable` になります (0 点として扱いません)。
+`Ron` の2つの baseline はどちらも「その待ちで和了した場合の支払い」で、**ロンの発生確率を含みません**。`reach baseline` は今リーチした場合の最低保証打点 (リーチ1翻を含み、一発・裏ドラ・河底は加算しない) で、合法手に `LegalAction::Reach` があり、かつ `TenpaiWaitAvailability::can_ron() == Some(true)` の場合だけ評価します。リーチが非合法、フリテン、ロン可否 unknown の場合は `unavailable` です。`damaten baseline` は production 判断が評価したダマ打点そのもので、ダマでロンできない局面とロン可否が unknown の局面では評価しないまま `unavailable` になります (0 点として扱いません)。
 
-**self-tsumo と Ron baseline は単位の違う別の軸で、足した合計は出しません。** winner も新しい `should_reach` も持たず、production の Reach / Damaten 判断には接続していません。詳細は [打牌選択](ai/discard-selection.md#reach--damaten-の判断材料-diagnostics-only) を参照してください。
+**self-tsumo と Ron baseline は単位の違う別の軸で、足した合計は出しません。** フリテンやロン可否 unknown で Ron baseline が `unavailable` でも、self-tsumo はその軸の入力があれば引き続き評価します。winner も新しい `should_reach` も持たず、production の Reach / Damaten 判断には接続していません。詳細は [打牌選択](ai/discard-selection.md#reach--damaten-の判断材料-diagnostics-only) を参照してください。
 
 ## Defense
 
