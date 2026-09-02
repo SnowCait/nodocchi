@@ -78,11 +78,13 @@
 //! reach illegal         → 待ちは並べるが reach public safety は unavailable
 //! ```
 //!
-//! # diagnostics only
+//! # full diagnostic is diagnostics only
 //!
-//! production の Reach / Damaten 判断も打牌選択も変更しない。構築するのは診断が有効な経路だけで、
-//! この診断のために safety 評価も threat 分類も追加探索も production へ入れない。External threats は
-//! 押し引きが既に構築した classification を借りるだけで、分類し直さない。
+//! [`RonOpportunityDiagnostic`] 全体を構築するのは診断が有効な経路だけで、production の base
+//! Reach / Damaten 判断は変更しない。非フリテン悪形の限定 Reach timing は、他の structural gate
+//! をすべて通った selected wait 1件について [`reach_public_safety_after_discard`] だけを共有し、
+//! diagnostic 全体は構築しない。External threats は押し引きが既に構築した classification を借り、
+//! 分類し直さない。
 
 use bot_logic::{EffectiveAcceptance, TenpaiWaitAvailability, TileId, TileType};
 
@@ -233,12 +235,6 @@ pub(crate) fn diagnose_ron_opportunity(
         return None;
     }
 
-    // 公開 safety の評価時点を打牌後へ揃えるための projection。リーチが合法でない局面では
-    // 組み立てない。
-    let public_state = reach_legal
-        .then(|| reach_declaration_public_state(context, selected_discard?))
-        .flatten();
-
     let waits = wait
         .live_waits
         .iter()
@@ -246,9 +242,9 @@ pub(crate) fn diagnose_ron_opportunity(
             Some(RonOpportunityWaitDiagnostic {
                 tile,
                 live_copies: live_copies_of(tile, acceptance)?,
-                reach_public_safety: public_state
-                    .as_ref()
-                    .and_then(|public| reach_public_safety(tile, public)),
+                reach_public_safety: reach_legal
+                    .then(|| reach_public_safety_after_discard(context, selected_discard?, tile))
+                    .flatten(),
                 damaten_declaration_visible: DAMATEN_DECLARATION_VISIBLE,
             })
         })
@@ -286,6 +282,22 @@ fn reach_declaration_public_state(
     };
     let discard: TileId = *tile;
     context.after_own_discard(discard)
+}
+
+/// 選択済みの宣言牌を河へ置いた直後に、指定した待ち1件の Reach public safety を求める。
+///
+/// Ron opportunity diagnostics と限定的な production Reach timing gate が共有する pure helper。
+/// [`GameContext::after_own_discard`] と既存 Defense helper をそのまま通し、スジ・壁・現物や
+/// public-state projection を呼び出し側で再実装させない。選択済み action が Dahai でない場合、
+/// 自分の席を特定できない場合、数牌・字牌それぞれの既存 evidence を組み立てられない場合は
+/// 推測せず `None` にする。
+pub(crate) fn reach_public_safety_after_discard(
+    context: &GameContext,
+    selected_discard: &LegalAction,
+    wait: TileType,
+) -> Option<ReachPublicSafetyEvidence> {
+    let public = reach_declaration_public_state(context, selected_discard)?;
+    reach_public_safety(wait, &public)
 }
 
 // リーチを宣言した場合の公開 safety evidence。`public` は宣言牌を河へ置いた後の公開状態で、
@@ -614,6 +626,12 @@ mod tests {
             suited_safety_evidence_for_players(tile("4s"), &[0], &case.context)
                 .map(|before| before.suji_rank),
             Some(SujiSafetyRank::NoSuji)
+        );
+
+        // production の selected-wait gate も diagnostics 全体を構築せず同じ helper を通る。
+        assert_eq!(
+            reach_public_safety_after_discard(&case.context, &case.selected_discard, tile("4s")),
+            wait_of(&case.opportunity(), tile("4s")).reach_public_safety
         );
     }
 

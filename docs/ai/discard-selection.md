@@ -157,7 +157,7 @@ detailed diagnostics そのものは要求した場合だけ構築し、`act()` 
 
 枝には、待ちが実際に変わるもの (手変わり) だけでなく、**ツモった牌をそのまま切って元の聴牌・元の待ちを維持するものも含みます**。「今すぐリーチする」と「ダマで継続する」を比べるには、次の1巡で待ちが変わらない場合の価値も同じ枝集合の中に必要になるためです。枝を待ちの変化で分類 (据え置き / 待ち改善 / 打点改善) することはまだ行いません。
 
-**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` の比較にも、base の Reach / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。production が使うのは、この枝集合と同じ基盤を選択済み1候補にだけ適用する [恒常フリテンのリーチ timing](#恒常フリテンのリーチ-timing) だけです。`CurrentTenpaiOffenseWeightedTotal` や `weighted prospective value` は単位の違う値なので、下の self-tsumo 比較と直接並べることはしません。
+**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` の比較にも、base の Reach / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。production が使うのは、この枝集合と同じ基盤を選択済み1候補にだけ適用する [リーチ timing](#リーチ-timing) だけです。`CurrentTenpaiOffenseWeightedTotal` や `weighted prospective value` は単位の違う値なので、下の self-tsumo 比較と直接並べることはしません。
 
 枝はすべて既存基盤そのものです。
 
@@ -216,9 +216,9 @@ defer → forced Damaten
 
 材料が揃わない場合は 0 点ではなく値を持ちません。山の残枚数が分からず自摸機会を確定できない局面、ツモ打点を確定できない現在聴牌、terminal tenpai のツモ打点が確定しない継続枝はどれも `None` です。
 
-**全候補分のこの比較 (`Tenpai continuation` 節) は diagnostics 専用で、どれを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、打牌選択にも押し引きにも接続していません。Ron probability は含まず、self-tsumo と Ron baseline の aggregate も作りません。production が使うのは、次に述べる恒常フリテン聴牌の [リーチ timing](#恒常フリテンのリーチ-timing) だけです。
+**全候補分のこの比較 (`Tenpai continuation` 節) は diagnostics 専用で、どれを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、打牌選択にも押し引きにも接続していません。Ron probability は含まず、self-tsumo と Ron baseline の aggregate も作りません。production が使うのは、次に述べる限定条件下の [リーチ timing](#リーチ-timing) だけです。
 
-## 恒常フリテンのリーチ timing
+## リーチ timing
 
 `ReachDecisionReason` (base Reach / Damaten policy) と `ReachTimingDecision` は**別の層**です。
 
@@ -241,9 +241,9 @@ ReachTimingDecision    base policy が Reach の場合に、そのリーチを�
 
 判断材料に使う `one draw → forced Reach` は上の counterfactual の**評価 horizon** であって、production action の約束ではありません。実際の対局では次の自分のツモまでに他家和了・他家リーチ・副露機会・局終了が起こり得ます。production は次の request で必ず現在局面から評価し直します。
 
-### production 接続対象は `PermanentFuriten::Yes` だけ
+### production 接続対象は2つの限定経路だけ
 
-timing evaluation を行うのは、次をすべて満たす場合だけです。
+共通して、次をすべて満たす場合だけ timing evaluation へ進みます。
 
 ```text
 - 合法手に LegalAction::Reach がある
@@ -251,12 +251,33 @@ timing evaluation を行うのは、次をすべて満たす場合だけです�
 - その打牌後がテンパイ
 - 生きた待ちが1枚以上ある
 - base decide_reach_reason() が Reach を選んだ
-- その聴牌が PermanentFuriten::Yes
 ```
 
-恒常フリテンは既存の `PermanentFuriten` だけが source of truth です。`can_ron() == Some(false)` だけでは足りず、`PermanentFuriten::No` / `PermanentFuriten::Unknown` / 履歴依存フリテンだけの局面は対象外で、unknown を恒常フリテンだと推測しません。
+その後、次のどちらかだけを対象にします。
 
-非フリテン聴牌を production 対象にしないのは、**Ron probability が無いから**です。非フリテンなら今リーチした最初の1巡からロン機会が生まれますが、nodocchi はまだ「他家がその牌を切る確率」の模型を持たないため、self-tsumo だけの比較で通常聴牌の優劣を決めることはできません。恒常フリテンなら現在の待ちでロンできないので、self-tsumo counterfactual だけで比較が閉じます。[Ron opportunity](#ron-opportunity-structural-facts-only) の suji / 壁 / 現物 / 字牌 safety / 外的 threat も probability ではないため、timing policy には使いません。
+1. `PermanentFuriten::Yes` が確定した恒常フリテン聴牌
+2. 次を**すべて**満たす非フリテン悪形の暫定 heuristic
+
+```text
+PermanentFuriten::No
+can_ron == Some(true)
+live wait は1種類だけ
+live copies は1〜3枚
+待ち牌は么九牌ではない (`TileType::is_yaochu() == false`、つまり2〜8の中張牌)
+Reach 宣言牌を河へ置いた後の public safety が SuitedSafetyRank::NoSafety
+reached opponents = 0
+High OpenHand targets = 0
+```
+
+恒常フリテンは既存の `PermanentFuriten` だけが source of truth です。`can_ron() == Some(false)` だけで恒常フリテンだと推測しません。`PermanentFuriten::Unknown` と履歴依存フリテンだけの局面はどちらの経路にも入れず、従来どおり `ReachNow` を維持します。
+
+非フリテン全般を self-tsumo だけで比較する policy ではありません。非フリテンなら今リーチした最初の1巡からロン機会が生まれますが、nodocchi はまだ「他家がその牌を切る確率」の模型を持たないためです。今回の接続は、明らかな悪形を上記の structural facts で狭く限定する**暫定 policy**です。
+
+`NoSafety` は「ロン確率が高い」という意味ではありません。Reach 後に既存 public safety evidence 上のスジ・壁・現物による安全根拠が無いことだけを確認する gate です。safety rank を数値係数へ変換せず、[Ron opportunity](#ron-opportunity-structural-facts-only) の Defense exact `R/T` も流用しません。Ron probability / discard probability は追加していません。
+
+么九牌かどうかは既存 `TileType::is_yaochu()` だけを source of truth にします。標準形と七対子の2〜8単騎は対象になり得ますが、1 / 9単騎・字牌単騎・待ちがすべて么九牌の国士無双は対象外です。七対子や国士を hand family / shanten の特殊分岐で判定しません。
+
+恒常フリテンなら現在の待ちでロンできないので self-tsumo counterfactual だけで比較が閉じます。非フリテン悪形はそうではないため、この限定 heuristic を恒常フリテンの reason と区別して診断します。
 
 ### 選択済み1候補だけを評価します
 
@@ -269,7 +290,8 @@ selected discard 確定
 ↓
 base Reach policy (decide_reach_reason)
 ↓
-PermanentFuriten::Yes の gate
+PermanentFuriten::Yes
+または限定した非フリテン悪形の structural gate
 ↓
 selected candidate 1件だけ
   reach now
@@ -317,6 +339,8 @@ Reach
     defer one draw
       forced Reach: 1076.190
 ```
+
+恒常フリテン経路は `PermanentFuritenSelfTsumo`、非フリテン悪形の暫定 heuristic は `NonFuritenBadWaitHeuristic` と表示し、両者を混同しません。
 
 ## Reach / Damaten の判断材料 (diagnostics only)
 
@@ -401,7 +425,7 @@ reach public safety は、**通常打牌 selection が選んだ打牌を河へ�
 
 見え枚数 (壁・字牌の見え枚数) は打牌で変わりません。`visible_tiles` は自分の手牌を既に含むので、同じ物理牌が手牌から河へ移っても枚数が変わらないためです。値は同じ打牌後の状態を既存 helper へ通した結果そのもので、打牌前の値を別に保持しているわけではありません。
 
-切る物理牌は通常打牌 selection が選んだ合法 `Dahai` そのもので、どの牌を切るかを別経路で推測しません。projection は元の `GameContext` を書き換えず、診断が有効な経路でだけ組み立てます。リーチが合法でない局面と、選んだ打牌が分からない局面では打牌前の状態で代用せず `unavailable` にします。
+切る物理牌は通常打牌 selection が選んだ合法 `Dahai` そのもので、どの牌を切るかを別経路で推測しません。projection は元の `GameContext` を書き換えません。統合診断のほか、上記の非フリテン悪形 heuristic が他の cheap gate をすべて通過した selected wait 1件だけも、同じ pure helper を共有します。リーチが合法でない局面と、選んだ打牌が分からない局面では打牌前の状態で代用せず `unavailable` にします。
 
 #### Defense の exact `R/T` は使いません
 
@@ -436,7 +460,9 @@ reach public safety は、**通常打牌 selection が選んだ打牌を河へ�
 
 フリテンでも公開 safety 自体は計算できますが、ロン不能な待ちを確率候補のように並べないことを優先します。既存の `TenpaiWaitAvailability` / フリテン semantics と矛盾する値は作りません。
 
-**この統合診断も diagnostics 専用です。** production の Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持たず、構築の有無は最終 action を変えません。Ron opportunity のために safety 評価も threat 分類も追加探索も production 経路へ入れず、押し引きが既に構築した classification を借りるだけにします。
+**`RonOpportunityDiagnostic` 全体は diagnostics 専用です。** production の base Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持ちません。
+
+非フリテン悪形の暫定 timing heuristic は診断全体を構築せず、selected wait 1件の Reach public safety だけを同じ pure helper から取得します。High OpenHand target も押し引きが既に構築した classification を借り、分類し直しません。この gate を通過した場合にだけ既存 `selected_tenpai_self_tsumo_comparison()` を評価します。
 
 ## selected と runner-up
 
