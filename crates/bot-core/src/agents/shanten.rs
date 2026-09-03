@@ -1227,7 +1227,7 @@ fn decide_reach(
     let reason = if selects_named_yakuman_damaten(
         tenpai_wait.permanent_furiten(),
         tenpai_wait.tsumo_remaining,
-        tsumo_named_yakuman(ctx, evaluation, &tenpai_wait),
+        tsumo_named_yakuman(ctx, evaluation, &tenpai_wait).is_established(),
     ) {
         ReachDecisionReason::NamedYakumanDamaten
     } else {

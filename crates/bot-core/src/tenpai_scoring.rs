@@ -244,6 +244,13 @@ pub enum NamedYakumanTsumo {
     NotEstablished,
 }
 
+impl NamedYakumanTsumo {
+    /// named 役満だと確定したか。consumer の policy へ渡す1つの事実へ畳む。
+    pub fn is_established(self) -> bool {
+        matches!(self, Self::AllLiveVariants)
+    }
+}
+
 /// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価し、生きた
 /// 和了牌の物理牌 variant がすべて named 役満になるかを求める。
 ///
