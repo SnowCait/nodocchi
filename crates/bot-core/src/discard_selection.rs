@@ -25,15 +25,15 @@ use crate::tenpai_scoring::{NamedYakumanTsumo, evaluate_tenpai_tsumo, tenpai_tsu
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, SelfTsumoFacts,
+    ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     best_discard_selection_index, best_discard_selection_index_with_metrics,
     current_tenpai_continuation_targets, diagnose_discard_evaluations_with_metrics,
     diagnose_discard_furiten, diagnose_lookahead, discard_tenpai_wait_availability,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
-    evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
-    forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
-    tsumo_hit_probability,
+    evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
+    forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
+    split_discarded_tile, tsumo_hit_probability,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -1000,8 +1000,21 @@ fn evaluate_discard_candidates_with_fixed_meld_count(
 // これは情報不足時の fallback であり「副露0と確定した」という診断ではない。診断が報告する
 // `own_fixed_meld_count` は引き続き `None` のままにする。
 pub(crate) fn evaluation_fixed_meld_count(context: &GameContext) -> FixedMeldCount {
-    context
-        .own_fixed_meld_count()
+    evaluation_fixed_meld_count_of(context.own_melds())
+}
+
+// 評価対象の副露から求める打牌評価用の副露済み面子数。
+//
+// 副露済み面子数は副露そのものから導出される fact なので、既存の
+// [`bot_logic::fixed_meld_count`] をそのまま source of truth にする。ここで新しい meld count の
+// 妥当性規則は持たない。副露が unknown な場合と面子数として読めない場合は、
+// `evaluation_fixed_meld_count()` と同じ `FixedMeldCount::NONE` の fallback になる。
+//
+// 仮想的な鳴きの後の副露のように、`GameContext` の副露と違う評価対象を持つ経路が同じ導出を
+// 共有するための入口。
+pub(crate) fn evaluation_fixed_meld_count_of(melds: Option<&[Meld]>) -> FixedMeldCount {
+    melds
+        .and_then(fixed_meld_count)
         .unwrap_or(FixedMeldCount::NONE)
 }
 
