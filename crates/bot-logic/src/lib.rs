@@ -105,7 +105,8 @@ pub use selection::{
     NextAcceptanceMetric, TenpaiWaitMetric, WeightedForwardMetric, best_discard_selection_index,
     best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
     classify_current_tenpai_furiten_cohort, compare_discard_selection_candidates,
-    resolve_current_tenpai_value_axis, resolve_prospective_value_axis,
+    current_tenpai_continuation_targets, resolve_current_tenpai_value_axis,
+    resolve_prospective_value_axis,
 };
 pub use self_tsumo::{
     SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath, TSUMO_PROBABILITY_SCALE,

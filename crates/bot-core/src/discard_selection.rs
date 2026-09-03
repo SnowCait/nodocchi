@@ -13,8 +13,12 @@ use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
 };
+use crate::reach_policy::{
+    ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_reach_timing,
+};
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, TenpaiContinuationInputs, diagnose_tenpai_continuation,
+    tenpai_candidate_self_tsumo_comparison,
 };
 use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
 use bot_logic::{
@@ -22,9 +26,9 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, SelfTsumoFacts,
     TenpaiWaitAvailability, TileCounts, TileId, TileType, best_discard_selection_index,
-    best_discard_selection_index_with_metrics, diagnose_discard_evaluations_with_metrics,
-    diagnose_discard_furiten, diagnose_lookahead, discard_tenpai_wait_availability,
-    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    best_discard_selection_index_with_metrics, current_tenpai_continuation_targets,
+    diagnose_discard_evaluations_with_metrics, diagnose_discard_furiten, diagnose_lookahead,
+    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
     tsumo_hit_probability,
@@ -156,6 +160,10 @@ struct CurrentTenpaiCandidateEvaluation {
     expected_self_tsumo_value: Option<u64>,
     /// `expected_self_tsumo_value` と同じ terminal tenpai から求めたツモ和了確率。診断専用。
     self_tsumo_hit_probability: Option<u64>,
+    /// 恒常フリテン確定 cohort の候補だけについて、既存 Reach timing policy を適用した結果。
+    ///
+    /// 対象外の cohort・対象外の候補では継続評価そのものを走らせないので `None`。
+    continuation_timing: Option<ReachTimingDiagnostic>,
 }
 
 type CurrentTenpaiCandidateEvaluations = Vec<CurrentTenpaiCandidateEvaluation>;
@@ -378,7 +386,32 @@ fn selection_from_legal_evaluations(
 
 /// 最善向聴が現在聴牌で、競合する合法候補が複数ある場合だけ既存 wait / offense evaluator を
 /// 各候補へ適用する。1向聴・2向聴以上・聴牌候補1件の production behavior と計算量は変えない。
+///
+/// 恒常フリテンが全候補で確定し、全候補の base offense mode がリーチの cohort についてだけ、
+/// 続けて既存の1候補継続評価を通した timing 込みの self-tsumo value も求める
+/// ([`attach_current_tenpai_continuation`])。それ以外の cohort では継続評価を構築しないので、
+/// 従来の計算量のまま変わらない。
 fn current_tenpai_candidate_evaluations(
+    context: &GameContext,
+    tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+    legal_actions: &[LegalAction],
+) -> CurrentTenpaiCandidateEvaluations {
+    let mut candidates =
+        base_current_tenpai_candidate_evaluations(context, tiles, evaluations, legal_actions);
+    attach_current_tenpai_continuation(
+        context,
+        evaluations,
+        &mut candidates,
+        legal_actions
+            .iter()
+            .any(|action| matches!(action, LegalAction::Reach)),
+    );
+    candidates
+}
+
+// 現在聴牌候補ごとの既存 wait / offense / self-tsumo 評価。継続 timing はまだ持たない。
+fn base_current_tenpai_candidate_evaluations(
     context: &GameContext,
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
@@ -439,9 +472,61 @@ fn current_tenpai_candidate_evaluations(
                 offense,
                 expected_self_tsumo_value: self_tsumo.map(|(value, _)| value),
                 self_tsumo_hit_probability: self_tsumo.map(|(_, probability)| probability),
+                continuation_timing: None,
             }
         })
         .collect()
+}
+
+/// 恒常フリテン確定 cohort の候補について、既存 Reach timing policy を適用した結果を付ける。
+///
+/// 対象は「cohort が AllPermanentFuriten かつ cohort の全候補の base offense mode がリーチ」の
+/// 候補だけで、cohort 判定は打牌選択と同じ [`current_tenpai_continuation_targets`] が source of
+/// truth。さらに既存 [`evaluates_reach_timing`] の適用条件も満たす候補に限ることで、選択済み
+/// 候補へ後段で適用される production の Reach timing と同じ意味の値になる。
+///
+/// 評価そのものは既存の1候補継続 helper ([`tenpai_candidate_self_tsumo_comparison`]) と既存
+/// timing policy ([`decide_permanent_furiten_reach_timing`]) をそのまま通すだけで、この経路は
+/// 探索も打点計算も待ち計算も timing policy も持たない。対象外の cohort では継続評価を1件も
+/// 走らせない。
+fn attach_current_tenpai_continuation(
+    context: &GameContext,
+    evaluations: &[DiscardEvaluation],
+    candidates: &mut CurrentTenpaiCandidateEvaluations,
+    reach_legal: bool,
+) {
+    if !reach_legal {
+        return;
+    }
+
+    let metrics = current_tenpai_metrics(candidates);
+    let base_reach: Vec<bool> = current_tenpai_offense_modes(candidates)
+        .into_iter()
+        .map(|mode| mode == Some(TenpaiOffenseMode::Reach))
+        .collect();
+    for (index, target) in current_tenpai_continuation_targets(evaluations, &metrics, &base_reach)
+        .into_iter()
+        .enumerate()
+    {
+        if !target {
+            continue;
+        }
+        let candidate = &mut candidates[index];
+        let evaluates_timing = candidate.wait.as_ref().is_some_and(|wait| {
+            evaluates_reach_timing(wait.permanent_furiten(), wait.tsumo_remaining)
+        });
+        if !evaluates_timing {
+            continue;
+        }
+
+        // ここへ来るのは合法手にリーチがあった経路だけ。リーチ可否は決め直さない。
+        let comparison =
+            tenpai_candidate_self_tsumo_comparison(context, &evaluations[index], reach_legal);
+        candidate.continuation_timing = Some(decide_permanent_furiten_reach_timing(
+            comparison.and_then(|comparison| comparison.reach_now),
+            comparison.and_then(|comparison| comparison.defer_forced_reach()),
+        ));
+    }
 }
 
 // 候補ごとの既存 base offense mode。現在聴牌の評価対象外は `None`。
@@ -470,6 +555,11 @@ fn current_tenpai_metrics(
                 .and_then(|value| value.offense.value.weighted_total()),
             expected_self_tsumo_value: evaluation.expected_self_tsumo_value,
             self_tsumo_hit_probability: evaluation.self_tsumo_hit_probability,
+            // 既存 timing policy が選んだ側の値そのもの。比較不能を 0 点で補わない。
+            continuation_self_tsumo_value: evaluation
+                .continuation_timing
+                .as_ref()
+                .and_then(ReachTimingDiagnostic::self_tsumo_value),
         })
         .collect()
 }
@@ -1028,6 +1118,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
             ?candidate.current_tenpai_offense_weighted_total,
         current_tenpai_expected_self_tsumo_value =
             ?candidate.current_tenpai_expected_self_tsumo_value,
+        current_tenpai_continuation_self_tsumo_value =
+            ?candidate.current_tenpai_continuation_self_tsumo_value,
         current_tenpai_self_tsumo_hit_probability =
             ?candidate.current_tenpai_self_tsumo_hit_probability,
         shape_penalty = evaluation.shape_penalty,
@@ -1050,6 +1142,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::context::TableStateFacts;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
+    use crate::reach_policy::ReachTimingDecision;
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
         HistoryFuritenFacts, PermanentFuriten, TileId,
@@ -1372,22 +1465,32 @@ pub(crate) mod tests {
             five_p_diagnostic.comparison_reason,
             bot_logic::DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
         );
+        // 全候補が非フリテンの cohort では継続評価も self-tsumo 軸も使わない。
         assert!(
-            result
-                .diagnostic
-                .candidates
+            current
                 .iter()
-                .all(|candidate| candidate.current_tenpai_expected_self_tsumo_value.is_none())
+                .all(|value| value.continuation_timing.is_none())
         );
+        assert!(result.diagnostic.candidates.iter().all(|candidate| {
+            candidate.current_tenpai_expected_self_tsumo_value.is_none()
+                && candidate
+                    .current_tenpai_continuation_self_tsumo_value
+                    .is_none()
+        }));
     }
 
-    #[test]
-    fn permanent_furiten_current_tenpai_candidates_use_expected_self_tsumo_value() {
-        let (context, actions) = current_tenpai_regression_context_with_facts(
+    // 全候補が恒常フリテンで、全候補の base offense mode がリーチになる局面。
+    fn all_permanent_furiten_context() -> (GameContext, Vec<LegalAction>) {
+        current_tenpai_regression_context_with_facts(
             [vec![tile(36), tile(48)], vec![], vec![], vec![]],
             Some(70),
             Some(0),
-        );
+        )
+    }
+
+    #[test]
+    fn permanent_furiten_current_tenpai_candidates_use_the_continuation_self_tsumo_value() {
+        let (context, actions) = all_permanent_furiten_context();
         let legal = legal_discard_evaluations(&context, &actions);
         let current = current_tenpai_candidate_evaluations(
             &context,
@@ -1408,7 +1511,81 @@ pub(crate) mod tests {
                 .as_ref()
                 .map(TenpaiWaitAvailability::permanent_furiten)
                 == Some(PermanentFuriten::Yes)
+                && value.offense.as_ref().map(|offense| offense.offense.mode)
+                    == Some(TenpaiOffenseMode::Reach)
                 && value.expected_self_tsumo_value.is_some()
+        }));
+        // 候補値は既存 timing policy が選んだ側の self-tsumo value そのもの。
+        assert!(targets.iter().all(|(_, value)| {
+            let timing = value
+                .continuation_timing
+                .expect("継続 timing を評価している");
+            timing.self_tsumo_value()
+                == match timing.decision {
+                    ReachTimingDecision::ReachNow => timing.reach_now,
+                    ReachTimingDecision::DeferReach => timing.defer_forced_reach,
+                }
+        }));
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidates: Vec<_> = result
+            .diagnostic
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert_eq!(candidates.len(), 2);
+        // 新しい軸を使う cohort では、現在の待ちのままの self-tsumo 軸は使わない。
+        assert!(candidates.iter().all(|candidate| {
+            candidate.current_tenpai_offense_weighted_total.is_none()
+                && candidate.current_tenpai_expected_self_tsumo_value.is_none()
+                && candidate
+                    .current_tenpai_continuation_self_tsumo_value
+                    .is_some()
+        }));
+        let winner = candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("selected current tenpai candidate");
+        let loser = candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up current tenpai candidate");
+        assert_eq!(winner.evaluation.discard.to_mjai_string(), "2p");
+        assert!(
+            winner.current_tenpai_continuation_self_tsumo_value
+                > loser.current_tenpai_continuation_self_tsumo_value
+        );
+        assert_eq!(
+            loser.comparison_reason,
+            bot_logic::DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn base_damaten_current_tenpai_candidates_keep_the_expected_self_tsumo_axis() {
+        // 合法手にリーチが無ければ base offense mode はダマ。リーチ timing の比較対象ではない
+        // ので継続評価そのものを構築せず、現在の待ちのままの self-tsumo 軸を維持する。
+        let (context, actions) = all_permanent_furiten_context();
+        let actions: Vec<_> = actions
+            .into_iter()
+            .filter(|action| !matches!(action, LegalAction::Reach))
+            .collect();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        assert!(current.iter().all(|value| {
+            value.continuation_timing.is_none()
+                && value.offense.as_ref().map(|offense| offense.offense.mode)
+                    != Some(TenpaiOffenseMode::Reach)
         }));
 
         let result = select_discard_action_with_diagnostic(
@@ -1424,26 +1601,51 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().all(|candidate| {
-            candidate.current_tenpai_offense_weighted_total.is_none()
+            candidate
+                .current_tenpai_continuation_self_tsumo_value
+                .is_none()
                 && candidate.current_tenpai_expected_self_tsumo_value.is_some()
         }));
-        let winner = candidates
-            .iter()
-            .find(|candidate| candidate.selected)
-            .expect("selected current tenpai candidate");
         let loser = candidates
             .iter()
             .find(|candidate| !candidate.selected)
             .expect("runner-up current tenpai candidate");
-        assert_eq!(winner.evaluation.discard.to_mjai_string(), "2p");
-        assert!(
-            winner.current_tenpai_expected_self_tsumo_value
-                > loser.current_tenpai_expected_self_tsumo_value
-        );
         assert_eq!(
             loser.comparison_reason,
             bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
         );
+    }
+
+    #[test]
+    fn the_selected_candidate_reach_timing_matches_the_comparator_continuation() {
+        // 打牌選択の候補比較と、選択済み候補へ後段で適用される production の Reach timing は
+        // 同じ既存 policy の結論そのものになる。
+        let (context, actions) = all_permanent_furiten_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        let selected = best_discard_selection_index_with_metrics(
+            &legal.evaluations,
+            &selection_forward_metrics(&context, &legal.tiles, &legal.evaluations),
+            &current_tenpai_metrics(&current),
+        )
+        .expect("selected candidate");
+        let comparator_timing = current[selected]
+            .continuation_timing
+            .expect("選択済み候補の継続 timing");
+
+        let diagnostic = crate::agents::ShantenAgent::diagnose_with_options(
+            &context,
+            &actions,
+            crate::agents::DiagnosticOptions::NONE,
+        );
+        let reach = diagnostic.reach.expect("リーチ判断がある");
+
+        assert_eq!(reach.timing, Some(comparator_timing));
     }
 
     #[test]
@@ -1495,9 +1697,18 @@ pub(crate) mod tests {
             .iter()
             .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
             .collect();
+        // 恒常フリテンと非フリテンが混ざる cohort では継続評価そのものを構築しない。
+        assert!(
+            current
+                .iter()
+                .all(|value| value.continuation_timing.is_none())
+        );
         assert!(candidates.iter().all(|candidate| {
             candidate.current_tenpai_offense_weighted_total.is_none()
                 && candidate.current_tenpai_expected_self_tsumo_value.is_some()
+                && candidate
+                    .current_tenpai_continuation_self_tsumo_value
+                    .is_none()
         }));
         let winner = candidates
             .iter()

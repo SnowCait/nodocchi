@@ -49,6 +49,12 @@
 //! `PermanentFuriten::Yes` を含み、全候補の恒常フリテンと self-tsumo value が確定した cohort
 //! だけ、Ron を含まない共通尺度として current-tenpai self-tsumo expected payment を使う。
 //! Ron の生値との加算や換算は行わない。
+//!
+//! 全候補が恒常フリテンの cohort については、上位層が Reach timing policy を織り込んだ
+//! self-tsumo value を全候補分確定できた場合だけ、そちらを尺度にする
+//! ([`current_tenpai_continuation_targets`])。1件でも確定しない場合は現在の待ちのままの
+//! self-tsumo expected payment へ戻る。どちらの値も上位層が求めたもので、この層は timing
+//! policy も threshold も持たない。
 
 use crate::discard::{
     DiscardComparison, DiscardComparisonReason, DiscardEvaluation,
@@ -193,6 +199,15 @@ pub struct CurrentTenpaiMetrics {
     /// `expected_self_tsumo_value` と同じ terminal tenpai から求めた観測値で、候補比較には
     /// 一切使わない。確定しない場合と評価対象外は `None`。
     pub self_tsumo_hit_probability: Option<u64>,
+    /// 恒常フリテン確定 cohort の候補について、上位層の Reach timing policy が選んだ側の
+    /// self-tsumo expected payment [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// `expected_self_tsumo_value` が「今の待ちのまま残り自摸機会を使い切る」値なのに対し、
+    /// こちらは「今リーチする」と「1巡 defer して次のテンパイでリーチする」のうち timing
+    /// policy が選んだ側の値。どちらを選ぶかも値そのものも上位層の既存 policy が決めるもので、
+    /// この層は threshold も係数も持たない。上位層が評価しなかった候補と確定しない候補は
+    /// `None`。
+    pub continuation_self_tsumo_value: Option<u64>,
 }
 
 impl ForwardMetrics {
@@ -234,6 +249,12 @@ pub struct DiscardSelectionCandidate<'a> {
     ///
     /// 軸の有無は候補集合単位で解決済みであること。Ron の値とは加算しない。
     pub current_tenpai_expected_self_tsumo_value: Option<u64>,
+    /// 現在打牌後が聴牌になる候補の、Reach timing policy を織り込んだ self-tsumo expected
+    /// payment。
+    ///
+    /// 軸の有無は候補集合単位で解決済みであること。Ron の値とは加算せず、
+    /// `current_tenpai_expected_self_tsumo_value` と同時には使わない。
+    pub current_tenpai_continuation_self_tsumo_value: Option<u64>,
 }
 
 impl<'a> DiscardSelectionCandidate<'a> {
@@ -247,6 +268,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
             current_tenpai_expected_self_tsumo_value: None,
+            current_tenpai_continuation_self_tsumo_value: None,
         }
     }
 }
@@ -261,7 +283,8 @@ impl<'a> DiscardSelectionCandidate<'a> {
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
-///   → [聴牌のみ] CurrentTenpaiExpectedSelfTsumoValue / CurrentTenpaiOffenseWeightedTotal
+///   → [聴牌のみ] CurrentTenpaiContinuationSelfTsumoValue
+///              / CurrentTenpaiExpectedSelfTsumoValue / CurrentTenpaiOffenseWeightedTotal
 ///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ...
 /// ```
 ///
@@ -290,6 +313,12 @@ pub fn compare_discard_selection_candidates(
     }
 
     if let Some(comparison) = compare_weighted_next_acceptance(candidate, current_best) {
+        return comparison;
+    }
+
+    if let Some(comparison) =
+        compare_current_tenpai_continuation_self_tsumo_value(candidate, current_best)
+    {
         return comparison;
     }
 
@@ -417,6 +446,9 @@ pub fn best_discard_selection_index_with_metrics(
         current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.expected_self_tsumo_value),
+        current_tenpai_continuation_self_tsumo_value: current_tenpai_metrics
+            .get(index)
+            .and_then(|metric| metric.continuation_self_tsumo_value),
     };
 
     let mut best: Option<usize> = None;
@@ -491,12 +523,32 @@ pub fn classify_current_tenpai_furiten_cohort(
     }
 }
 
+/// 現在聴牌 cohort が使う値軸。cohort 単位で1つだけ選ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentTenpaiValueAxis {
+    /// どの値軸も使わず、既存 Acceptance 以降の比較へ委ねる。
+    None,
+    /// 既存 Ron offense weighted total。
+    OffenseWeightedTotal,
+    /// 現在の待ちのままの self-tsumo expected payment。
+    ExpectedSelfTsumoValue,
+    /// Reach timing を織り込んだ self-tsumo expected payment。
+    ContinuationSelfTsumoValue,
+}
+
 /// 現在聴牌の値軸を pre-acceptance 同順位の cohort 単位で有効化する。
 ///
 /// 全候補が非フリテンなら既存 Ron offense weighted total を維持する。恒常フリテンを1件以上
 /// 含み、全候補が `Yes` / `No` のどちらかに確定している場合は、全候補に共通する self-tsumo
 /// expected payment だけを使う。恒常フリテン unknown、または選んだ軸の値が1件でも unknown
 /// なら cohort 全体で両軸を外し、比較ごとに軸の有無が変わることを防ぐ。
+///
+/// 全候補が恒常フリテンで、かつ上位層が全候補の
+/// [`CurrentTenpaiMetrics::continuation_self_tsumo_value`] を確定できた cohort だけは、その
+/// timing 込みの値を使う。1件でも確定しない場合は現在の待ちのままの
+/// [`CurrentTenpaiMetrics::expected_self_tsumo_value`] へ戻り、確定しない値を 0 点で補わない。
+/// `MixedKnown` cohort は `Yes` 側にロン機会が無く `No` 側にはあるため、timing 込みの値を
+/// 持っていても使わない。
 ///
 /// cohort の恒常フリテン分類は [`classify_current_tenpai_furiten_cohort`] が source of truth で、
 /// この軸解決のために判定し直さない。分類そのものは新しい比較軸を作らない。
@@ -505,7 +557,7 @@ pub fn resolve_current_tenpai_value_axis(
     metrics: &[CurrentTenpaiMetrics],
 ) -> Vec<CurrentTenpaiMetrics> {
     let metric_at = |index: usize| metrics.get(index).copied().unwrap_or_default();
-    let cohort_uses = |index: usize| {
+    let cohort_axis = |index: usize| {
         let cohort_is_known = |axis: fn(CurrentTenpaiMetrics) -> Option<u64>| {
             cohort_axis_is_known(evaluations, index, |other| axis(metric_at(other)).is_some())
         };
@@ -514,32 +566,70 @@ pub fn resolve_current_tenpai_value_axis(
             CurrentTenpaiFuritenCohort::AllNonFuriten
                 if cohort_is_known(|metric| metric.offense_weighted_total) =>
             {
-                (true, false)
+                CurrentTenpaiValueAxis::OffenseWeightedTotal
+            }
+            CurrentTenpaiFuritenCohort::AllPermanentFuriten
+                if cohort_is_known(|metric| metric.continuation_self_tsumo_value) =>
+            {
+                CurrentTenpaiValueAxis::ContinuationSelfTsumoValue
             }
             CurrentTenpaiFuritenCohort::AllPermanentFuriten
             | CurrentTenpaiFuritenCohort::MixedKnown
                 if cohort_is_known(|metric| metric.expected_self_tsumo_value) =>
             {
-                (false, true)
+                CurrentTenpaiValueAxis::ExpectedSelfTsumoValue
             }
-            _ => (false, false),
+            _ => CurrentTenpaiValueAxis::None,
         }
     };
 
     (0..evaluations.len())
         .map(|index| {
-            let (use_offense, use_self_tsumo) = cohort_uses(index);
+            let axis = cohort_axis(index);
+            let value_for =
+                |axis_of_cohort, value: Option<u64>| value.filter(|_| axis == axis_of_cohort);
             CurrentTenpaiMetrics {
                 permanent_furiten: metric_at(index).permanent_furiten,
-                offense_weighted_total: metric_at(index)
-                    .offense_weighted_total
-                    .filter(|_| use_offense),
-                expected_self_tsumo_value: metric_at(index)
-                    .expected_self_tsumo_value
-                    .filter(|_| use_self_tsumo),
+                offense_weighted_total: value_for(
+                    CurrentTenpaiValueAxis::OffenseWeightedTotal,
+                    metric_at(index).offense_weighted_total,
+                ),
+                expected_self_tsumo_value: value_for(
+                    CurrentTenpaiValueAxis::ExpectedSelfTsumoValue,
+                    metric_at(index).expected_self_tsumo_value,
+                ),
+                continuation_self_tsumo_value: value_for(
+                    CurrentTenpaiValueAxis::ContinuationSelfTsumoValue,
+                    metric_at(index).continuation_self_tsumo_value,
+                ),
                 // 比較へ使わない観測値なので、cohort 単位の軸解決で落とさずそのまま通す。
                 self_tsumo_hit_probability: metric_at(index).self_tsumo_hit_probability,
             }
+        })
+        .collect()
+}
+
+/// timing 込みの self-tsumo value を評価する現在聴牌候補の mask を返す。
+///
+/// 対象は「cohort が [`CurrentTenpaiFuritenCohort::AllPermanentFuriten`] で、かつ cohort の全
+/// 候補の既存 base offense mode がリーチ」の cohort だけ。上位層はこの mask が `true` の候補に
+/// ついてだけ継続評価を走らせ、対象外の cohort では継続評価そのものを構築しない。
+///
+/// `base_reach` は候補ごとの「既存 base offense mode がリーチか」で、`evaluations` と同じ順序。
+/// 範囲外の index はリーチではない候補として扱う。リーチ・ダマの選択そのものは上位層の既存
+/// policy が決めるもので、この層はその結論を受け取るだけ。cohort の定義も恒常フリテン分類も
+/// [`classify_current_tenpai_furiten_cohort`] と同じ source of truth を使う。
+pub fn current_tenpai_continuation_targets(
+    evaluations: &[DiscardEvaluation],
+    metrics: &[CurrentTenpaiMetrics],
+    base_reach: &[bool],
+) -> Vec<bool> {
+    (0..evaluations.len())
+        .map(|index| {
+            classify_current_tenpai_furiten_cohort(evaluations, metrics, index)
+                == CurrentTenpaiFuritenCohort::AllPermanentFuriten
+                && cohort_members(evaluations, index)
+                    .all(|other| base_reach.get(other).copied().unwrap_or(false))
         })
         .collect()
 }
@@ -664,6 +754,27 @@ fn compare_current_tenpai_offense_value(
     (candidate_value != best_value).then_some(DiscardComparison {
         candidate_is_better: candidate_value > best_value,
         reason: DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal,
+    })
+}
+
+// 現在打牌後が聴牌になる候補だけの、Reach timing を織り込んだ self-tsumo expected payment 比較。
+// 恒常フリテンが全候補で確定し、上位層が全候補の timing を確定できた cohort でだけ値が残る。
+// 同じ cohort で current wait の self-tsumo 軸と併用しないので、決着させるのはどちらか一方だけ。
+fn compare_current_tenpai_continuation_self_tsumo_value(
+    candidate: &DiscardSelectionCandidate,
+    current_best: &DiscardSelectionCandidate,
+) -> Option<DiscardComparison> {
+    if candidate.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.current_tenpai_continuation_self_tsumo_value?;
+    let best_value = current_best.current_tenpai_continuation_self_tsumo_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue,
     })
 }
 
@@ -810,6 +921,7 @@ mod tests {
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
             current_tenpai_expected_self_tsumo_value: None,
+            current_tenpai_continuation_self_tsumo_value: None,
         }
     }
 
@@ -826,6 +938,7 @@ mod tests {
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
             current_tenpai_expected_self_tsumo_value: None,
+            current_tenpai_continuation_self_tsumo_value: None,
         }
     }
 
@@ -841,6 +954,7 @@ mod tests {
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
             current_tenpai_expected_self_tsumo_value: None,
+            current_tenpai_continuation_self_tsumo_value: None,
         }
     }
 
@@ -856,6 +970,7 @@ mod tests {
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: weighted_total,
             current_tenpai_expected_self_tsumo_value: None,
+            current_tenpai_continuation_self_tsumo_value: None,
         }
     }
 
@@ -871,6 +986,7 @@ mod tests {
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
             current_tenpai_expected_self_tsumo_value: expected_self_tsumo_value,
+            current_tenpai_continuation_self_tsumo_value: None,
         }
     }
 
@@ -884,6 +1000,21 @@ mod tests {
             offense_weighted_total,
             expected_self_tsumo_value,
             self_tsumo_hit_probability: None,
+            continuation_self_tsumo_value: None,
+        }
+    }
+
+    fn continuation_metric(
+        expected_self_tsumo_value: Option<u64>,
+        continuation_self_tsumo_value: Option<u64>,
+    ) -> CurrentTenpaiMetrics {
+        CurrentTenpaiMetrics {
+            continuation_self_tsumo_value,
+            ..current_metric(
+                PermanentFuriten::Yes,
+                Some(99_999),
+                expected_self_tsumo_value,
+            )
         }
     }
 
@@ -1335,6 +1466,136 @@ mod tests {
     }
 
     #[test]
+    fn an_all_permanent_furiten_cohort_uses_the_timing_aware_self_tsumo_axis() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        // 現在の待ちのままなら第2候補が上だが、timing 込みでは第1候補が上。
+        let metrics = vec![
+            continuation_metric(Some(1), Some(20)),
+            continuation_metric(Some(2), Some(10)),
+        ];
+
+        let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+        assert_eq!(resolved[0].continuation_self_tsumo_value, Some(20));
+        assert_eq!(resolved[1].continuation_self_tsumo_value, Some(10));
+        assert!(resolved.iter().all(|metric| {
+            metric.offense_weighted_total.is_none() && metric.expected_self_tsumo_value.is_none()
+        }));
+        assert_eq!(
+            best_discard_selection_index_with_metrics(&evaluations, &[], &metrics),
+            Some(0)
+        );
+
+        let candidate_at = |index: usize| DiscardSelectionCandidate {
+            current_tenpai_continuation_self_tsumo_value: resolved[index]
+                .continuation_self_tsumo_value,
+            ..current_tenpai_self_candidate(&evaluations[index], None)
+        };
+        let comparison = compare_discard_selection_candidates(&candidate_at(0), &candidate_at(1));
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn an_unknown_timing_aware_value_falls_back_to_the_expected_self_tsumo_axis() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        // 1件でも timing 込みの値が確定しなければ、cohort 全体で現在の待ちの軸へ戻す。確定
+        // しない値を 0 点で補わない。
+        let metrics = vec![
+            continuation_metric(Some(1), Some(20)),
+            continuation_metric(Some(2), None),
+        ];
+
+        let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.continuation_self_tsumo_value.is_none())
+        );
+        assert_eq!(resolved[0].expected_self_tsumo_value, Some(1));
+        assert_eq!(resolved[1].expected_self_tsumo_value, Some(2));
+        assert_eq!(
+            best_discard_selection_index_with_metrics(&evaluations, &[], &metrics),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_mixed_known_cohort_keeps_the_expected_self_tsumo_axis() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        // `No` 側にだけロン機会がある cohort では、timing 込みの値を持っていても使わない。
+        let metrics = vec![
+            CurrentTenpaiMetrics {
+                permanent_furiten: Some(PermanentFuriten::No),
+                ..continuation_metric(Some(1), Some(20))
+            },
+            continuation_metric(Some(2), Some(10)),
+        ];
+
+        let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.continuation_self_tsumo_value.is_none())
+        );
+        assert_eq!(resolved[0].expected_self_tsumo_value, Some(1));
+        assert_eq!(resolved[1].expected_self_tsumo_value, Some(2));
+        assert_eq!(
+            best_discard_selection_index_with_metrics(&evaluations, &[], &metrics),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_timing_aware_axis_targets_only_all_base_reach_permanent_furiten_cohorts() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        let permanent_furiten = vec![
+            continuation_metric(Some(1), None),
+            continuation_metric(Some(2), None),
+        ];
+        let mixed_known = vec![
+            CurrentTenpaiMetrics {
+                permanent_furiten: Some(PermanentFuriten::No),
+                ..continuation_metric(Some(1), None)
+            },
+            continuation_metric(Some(2), None),
+        ];
+        let non_furiten = vec![
+            current_metric(PermanentFuriten::No, Some(1), Some(1)),
+            current_metric(PermanentFuriten::No, Some(2), Some(2)),
+        ];
+        let cases = [
+            (&permanent_furiten, [true, true], vec![true, true]),
+            // 1件でもダマなら cohort 全体で対象外。リーチとダマの非対称な比較を作らない。
+            (&permanent_furiten, [true, false], vec![false, false]),
+            (&mixed_known, [true, true], vec![false, false]),
+            (&non_furiten, [true, true], vec![false, false]),
+        ];
+
+        for (metrics, base_reach, expected) in cases {
+            assert_eq!(
+                current_tenpai_continuation_targets(&evaluations, metrics, &base_reach),
+                expected,
+                "base_reach={base_reach:?}"
+            );
+        }
+    }
+
+    #[test]
     fn current_tenpai_self_tsumo_axis_requires_known_furiten_and_values_for_the_whole_cohort() {
         let evaluations = vec![
             evaluation("1m", 0, &[("3m", 1)]),
@@ -1379,18 +1640,21 @@ mod tests {
                 offense_weighted_total: Some(99_999),
                 expected_self_tsumo_value: None,
                 self_tsumo_hit_probability: None,
+                continuation_self_tsumo_value: None,
             },
             CurrentTenpaiMetrics {
                 permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: Some(1),
                 expected_self_tsumo_value: None,
                 self_tsumo_hit_probability: None,
+                continuation_self_tsumo_value: None,
             },
             CurrentTenpaiMetrics {
                 permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: None,
                 expected_self_tsumo_value: None,
                 self_tsumo_hit_probability: None,
+                continuation_self_tsumo_value: None,
             },
         ];
 
@@ -1734,6 +1998,7 @@ mod tests {
                 expected_self_tsumo_value: metric.expected_self_tsumo_value,
                 current_tenpai_offense_weighted_total: None,
                 current_tenpai_expected_self_tsumo_value: None,
+                current_tenpai_continuation_self_tsumo_value: None,
             })
             .collect()
     }

@@ -49,10 +49,7 @@ use bot_logic::{
 };
 
 use crate::offense_value::TenpaiOffenseMode;
-use crate::reach_policy::{
-    ReachTimingDecision, ReachTimingDiagnostic, ReachTimingReason,
-    decide_permanent_furiten_reach_timing,
-};
+use crate::reach_policy::{ReachTimingDiagnostic, decide_permanent_furiten_reach_timing};
 use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, TenpaiSelfTsumoComparison};
 
 // テンパイの向聴数。
@@ -99,17 +96,10 @@ impl CurrentTenpaiContinuationCandidate {
 
     /// 既存 timing policy を適用した場合の self-tsumo value。
     ///
-    /// [`ReachTimingDecision::ReachNow`] なら `reach now`、
-    /// [`ReachTimingDecision::DeferReach`] なら `defer → forced Reach` の値そのもの。比較不能
-    /// で base policy のリーチを維持した場合は 0 点にせず `None`。
+    /// 値の選び方は既存 [`ReachTimingDiagnostic::self_tsumo_value`] そのままで、打牌選択が使う
+    /// timing 込みの候補値と同じ semantics になる。
     pub fn timing_self_tsumo_value(&self) -> Option<u64> {
-        if self.timing.reason == ReachTimingReason::SelfTsumoComparisonUnknown {
-            return None;
-        }
-        match self.timing.decision {
-            ReachTimingDecision::ReachNow => self.reach_now(),
-            ReachTimingDecision::DeferReach => self.defer_forced_reach(),
-        }
+        self.timing.self_tsumo_value()
     }
 }
 
@@ -189,7 +179,7 @@ mod tests {
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
     };
-    use crate::reach_policy::ReachTimingReason;
+    use crate::reach_policy::{ReachTimingDecision, ReachTimingReason};
 
     // 234m 678m 789p 99s 34s + 6s。打 6s で 2s / 5s 待ち、打 3s で 4s6s の 5s 待ちになり、
     // どちらも現在聴牌の候補になる。打 4s は 3s / 6s が浮いて1向聴。
