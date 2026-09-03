@@ -1,23 +1,15 @@
 use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::agent::Agent;
 use crate::call_decision::{CallDecisionDiagnostic, evaluate_call_decision};
-use crate::combined_defense::{
-    CombinedDefenseCategory, combined_threat_defense_targets,
-    evaluate_combined_threat_defense_fallback_action_with_kind,
-};
+use crate::combined_defense::CombinedDefenseCategory;
 use crate::context::GameContext;
-use crate::defense::{
-    DefenseFallbackKind, evaluate_defense_fallback_action_with_kind,
-    log_defense_fallback_evaluation,
-};
+use crate::defense::{DefenseFallbackKind, log_defense_fallback_evaluation};
 use crate::discard_selection::{
     DiscardActionSelection, select_discard_action_with_diagnostic,
     select_discard_action_with_evaluation,
 };
-use crate::open_hand_defense::{
-    OpenHandDefenseCategory, evaluate_open_hand_defense_fallback_action_with_kind,
-    high_open_hand_threat_players,
-};
+use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
+use crate::open_hand_defense::OpenHandDefenseCategory;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -381,103 +373,26 @@ impl ShantenAgent {
                 self.select_defense_fallback(ctx, legal_actions, diagnostics)
             }
             PushPullMode::Fold => {
-                if let Some(result) =
-                    self.select_fold_defense(ctx, legal_actions, inputs, diagnostics)
-                {
-                    return Some(result);
+                let evaluation =
+                    evaluate_fold_defense(ctx, legal_actions, inputs, diagnostics.is_enabled());
+                diagnostics.collect_fold_defense(ctx, legal_actions, inputs, &evaluation);
+                if let Some(selection) = evaluation.selected() {
+                    let source = match selection.kind {
+                        FoldDefenseKind::Reach(kind) => AgentActionSource::DefenseFallback(kind),
+                        FoldDefenseKind::OpenHand(category) => {
+                            AgentActionSource::OpenHandDefenseFallback(category)
+                        }
+                        FoldDefenseKind::Combined(category) => {
+                            AgentActionSource::CombinedThreatDefenseFallback(category)
+                        }
+                    };
+                    return Some((selection.action.clone(), source));
                 }
                 normal_discard
                     .cloned()
                     .map(|action| (action, AgentActionSource::NormalDiscard))
             }
         }
-    }
-
-    // Fold 時の防御 fallback。threat の組み合わせごとに経路を分ける。
-    //
-    // - リーチ者 + High OpenHandThreat: 複合 threat 用の防御 fallback。全 threat に対する safety を
-    //   集約する。
-    // - リーチ者だけ: 従来どおりリーチ者向けの防御 fallback。
-    // - High OpenHandThreat だけ: OpenHand 防御 fallback。
-    //
-    // 複合 threat 以外では safety の集約対象を変えないので、既存局面の選択結果は変わらない。
-    fn select_fold_defense(
-        &self,
-        ctx: &GameContext,
-        legal_actions: &[LegalAction],
-        inputs: &PushPullInputs,
-        diagnostics: &mut DecisionDiagnostics,
-    ) -> Option<(LegalAction, AgentActionSource)> {
-        if inputs.has_combined_threat() {
-            return self.select_combined_threat_defense_fallback(
-                ctx,
-                legal_actions,
-                inputs,
-                diagnostics,
-            );
-        }
-        if inputs.opponent_reach_count > 0 {
-            return self.select_defense_fallback(ctx, legal_actions, diagnostics);
-        }
-        self.select_open_hand_defense_fallback(ctx, legal_actions, inputs, diagnostics)
-    }
-
-    // リーチ者と High OpenHandThreat の相手が同時にいる局面の防御 fallback。target は押し引き
-    // 入力が持つ facts と classification をそのまま使い、リーチ者も High の相手も判定し直さない。
-    // 選択は production selector が source of truth で、通常 act() では候補ごとの構造化診断を
-    // 構築しない。
-    fn select_combined_threat_defense_fallback(
-        &self,
-        ctx: &GameContext,
-        legal_actions: &[LegalAction],
-        inputs: &PushPullInputs,
-        diagnostics: &mut DecisionDiagnostics,
-    ) -> Option<(LegalAction, AgentActionSource)> {
-        let targets =
-            combined_threat_defense_targets(&inputs.player_threats, &inputs.open_hand_threats);
-        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
-            ctx,
-            legal_actions,
-            &targets,
-        );
-        diagnostics.collect_combined_defense(
-            ctx,
-            legal_actions,
-            &inputs.player_threats,
-            &inputs.open_hand_threats,
-            &evaluation,
-        );
-        let (action, category) = evaluation.selected?;
-        Some((
-            action.clone(),
-            AgentActionSource::CombinedThreatDefenseFallback(category),
-        ))
-    }
-
-    // High OpenHandThreat の相手に対する防御 fallback。target は押し引き入力が持つ
-    // classification をそのまま使い、分類し直さない。選択は production selector が source of
-    // truth で、通常 act() では候補ごとの構造化診断を構築しない。
-    fn select_open_hand_defense_fallback(
-        &self,
-        ctx: &GameContext,
-        legal_actions: &[LegalAction],
-        inputs: &PushPullInputs,
-        diagnostics: &mut DecisionDiagnostics,
-    ) -> Option<(LegalAction, AgentActionSource)> {
-        let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
-        let evaluation =
-            evaluate_open_hand_defense_fallback_action_with_kind(ctx, legal_actions, &targets);
-        diagnostics.collect_open_hand_defense(
-            ctx,
-            legal_actions,
-            &inputs.open_hand_threats,
-            &evaluation,
-        );
-        let (action, category) = evaluation.selected?;
-        Some((
-            action.clone(),
-            AgentActionSource::OpenHandDefenseFallback(category),
-        ))
     }
 
     // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action と種別を返す。
@@ -491,7 +406,7 @@ impl ShantenAgent {
         legal_actions: &[LegalAction],
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
-        let evaluation = self.evaluate_defense_fallback(ctx, legal_actions, diagnostics);
+        let evaluation = evaluate_reach_defense(ctx, legal_actions, diagnostics.is_enabled());
         let selected = evaluation.selected;
 
         log_defense_fallback_evaluation(ctx, &evaluation, legal_actions);
@@ -500,15 +415,6 @@ impl ShantenAgent {
 
         let (action, kind) = selected?;
         Some((action.clone(), AgentActionSource::DefenseFallback(kind)))
-    }
-
-    fn evaluate_defense_fallback<'a>(
-        &self,
-        ctx: &GameContext,
-        legal_actions: &'a [LegalAction],
-        diagnostics: &DecisionDiagnostics,
-    ) -> crate::defense::DefenseFallbackEvaluation<'a> {
-        evaluate_defense_fallback_action_with_kind(ctx, legal_actions, diagnostics.is_enabled())
     }
 }
 
@@ -3100,7 +3006,7 @@ pub(crate) mod tests {
         let actions = fold_actions();
         let diagnostics = DecisionDiagnostics::disabled();
 
-        let without_trace = agent.evaluate_defense_fallback(&ctx, &actions, &diagnostics);
+        let without_trace = evaluate_reach_defense(&ctx, &actions, diagnostics.is_enabled());
         assert_eq!(
             without_trace.selected.map(|(_, kind)| kind),
             Some(DefenseFallbackKind::Genbutsu)
@@ -3112,7 +3018,7 @@ pub(crate) mod tests {
                 target: "bot_core::defense",
                 tracing::Level::TRACE
             ));
-            agent.evaluate_defense_fallback(&ctx, &actions, &diagnostics)
+            evaluate_reach_defense(&ctx, &actions, diagnostics.is_enabled())
         });
         assert_eq!(
             with_trace.selected.map(|(_, kind)| kind),
@@ -3135,7 +3041,7 @@ pub(crate) mod tests {
         let diagnostics = DecisionDiagnostics::disabled();
 
         let evaluation =
-            with_defense_trace(|| agent.evaluate_defense_fallback(&ctx, &actions, &diagnostics));
+            with_defense_trace(|| evaluate_reach_defense(&ctx, &actions, diagnostics.is_enabled()));
         assert_eq!(
             evaluation.selected.map(|(_, kind)| kind),
             Some(DefenseFallbackKind::ExactRonRisk)

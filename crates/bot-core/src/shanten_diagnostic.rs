@@ -3,17 +3,14 @@
 use crate::action::LegalAction;
 use crate::agents::{AgentActionSource, AgentDecision, ShantenAgent, log_agent_decision};
 use crate::call_decision::CallDecisionDiagnostic;
-use crate::combined_defense::{
-    CombinedDefenseCategory, CombinedDefenseDiagnostic, CombinedDefenseEvaluation,
-};
+use crate::combined_defense::{CombinedDefenseCategory, CombinedDefenseDiagnostic};
 use crate::context::GameContext;
 use crate::defense::{DefenseDecisionDiagnostic, DefenseFallbackEvaluation, DefenseFallbackKind};
 use crate::discard_selection::{
     DiscardActionSelection, DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
 };
-use crate::open_hand_defense::{
-    OpenHandDefenseCategory, OpenHandDefenseDiagnostic, OpenHandDefenseEvaluation,
-};
+use crate::fold_defense::FoldDefenseEvaluation;
+use crate::open_hand_defense::{OpenHandDefenseCategory, OpenHandDefenseDiagnostic};
 use crate::open_hand_threat::OpenHandThreatAssessment;
 use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{PushPullDecision, PushPullInputs};
@@ -25,8 +22,7 @@ use crate::reach_decision::ReachDecisionDiagnostic;
 use crate::ryukyoku_decision::RyukyokuDecisionDiagnostic;
 use crate::tenpai_continuation::TenpaiContinuationDiagnostic;
 use crate::threat::{
-    PlayerThreatDiagnostic, PlayerThreatFacts, diagnose_player_threats_with_facts,
-    player_threat_facts_from_context,
+    PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };
 use bot_logic::{
     DiscardDecisionDiagnostic, DiscardFuritenDiagnostic, FixedMeldCount, LookaheadDiagnostic,
@@ -349,39 +345,42 @@ impl DecisionDiagnostics {
         ));
     }
 
-    pub(crate) fn collect_combined_defense(
+    pub(crate) fn collect_fold_defense(
         &mut self,
         context: &GameContext,
         legal_actions: &[LegalAction],
-        player_threats: &[PlayerThreatFacts; 4],
-        open_hand_threats: &[OpenHandThreatAssessment; 4],
-        evaluation: &CombinedDefenseEvaluation<'_>,
+        inputs: &PushPullInputs,
+        evaluation: &FoldDefenseEvaluation<'_>,
     ) {
-        if self.enabled {
-            self.combined_defense = Some(CombinedDefenseDiagnostic::from_evaluation(
-                context,
-                legal_actions,
-                player_threats,
-                open_hand_threats,
-                evaluation,
-            ));
+        if !self.enabled {
+            return;
         }
-    }
 
-    pub(crate) fn collect_open_hand_defense(
-        &mut self,
-        context: &GameContext,
-        legal_actions: &[LegalAction],
-        open_hand_threats: &[OpenHandThreatAssessment; 4],
-        evaluation: &OpenHandDefenseEvaluation<'_>,
-    ) {
-        if self.enabled {
-            self.open_hand_defense = Some(OpenHandDefenseDiagnostic::from_evaluation(
-                context,
-                legal_actions,
-                open_hand_threats,
-                evaluation,
-            ));
+        match evaluation {
+            FoldDefenseEvaluation::Reach(evaluation) => {
+                self.defense = Some(DefenseDecisionDiagnostic::from_evaluation(
+                    context,
+                    legal_actions,
+                    evaluation,
+                ));
+            }
+            FoldDefenseEvaluation::OpenHand(evaluation) => {
+                self.open_hand_defense = Some(OpenHandDefenseDiagnostic::from_evaluation(
+                    context,
+                    legal_actions,
+                    &inputs.open_hand_threats,
+                    evaluation,
+                ));
+            }
+            FoldDefenseEvaluation::Combined(evaluation) => {
+                self.combined_defense = Some(CombinedDefenseDiagnostic::from_evaluation(
+                    context,
+                    legal_actions,
+                    &inputs.player_threats,
+                    &inputs.open_hand_threats,
+                    evaluation,
+                ));
+            }
         }
     }
 
