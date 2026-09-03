@@ -187,6 +187,12 @@ pub struct CurrentTenpaiMetrics {
     /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
     /// 確定しない場合と評価対象外は `None`。
     pub expected_self_tsumo_value: Option<u64>,
+    /// 残り自摸機会内にツモ和了できる確率
+    /// [[`crate::self_tsumo::TSUMO_PROBABILITY_SCALE`]]。
+    ///
+    /// `expected_self_tsumo_value` と同じ terminal tenpai から求めた観測値で、候補比較には
+    /// 一切使わない。確定しない場合と評価対象外は `None`。
+    pub self_tsumo_hit_probability: Option<u64>,
 }
 
 impl ForwardMetrics {
@@ -480,6 +486,8 @@ pub fn resolve_current_tenpai_value_axis(
                 expected_self_tsumo_value: metric_at(index)
                     .expected_self_tsumo_value
                     .filter(|_| use_self_tsumo),
+                // 比較へ使わない観測値なので、cohort 単位の軸解決で落とさずそのまま通す。
+                self_tsumo_hit_probability: metric_at(index).self_tsumo_hit_probability,
             }
         })
         .collect()
@@ -680,6 +688,7 @@ mod tests {
     use crate::acceptance::{Acceptance, AcceptanceTile, EffectiveAcceptance};
     use crate::discard::compare_discard_evaluations;
     use crate::iishanten::IishantenShape;
+    use crate::self_tsumo::TSUMO_PROBABILITY_SCALE;
     use crate::shanten::{EffectiveShanten, Shanten};
     use crate::tile::TileType;
 
@@ -823,6 +832,7 @@ mod tests {
             permanent_furiten: Some(permanent_furiten),
             offense_weighted_total,
             expected_self_tsumo_value,
+            self_tsumo_hit_probability: None,
         }
     }
 
@@ -1135,6 +1145,48 @@ mod tests {
     }
 
     #[test]
+    fn current_tenpai_self_tsumo_hit_probability_is_observed_without_changing_the_selection() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        let metrics = vec![
+            current_metric(PermanentFuriten::No, Some(12_000), Some(1)),
+            current_metric(PermanentFuriten::No, Some(7_800), Some(99_999)),
+        ];
+        let selected = best_discard_selection_index_with_metrics(&evaluations, &[], &metrics);
+
+        // 打点で負けている候補へ高い確率を与えても、選択も比較理由も変わらない。
+        let with_probability: Vec<_> = metrics
+            .iter()
+            .zip([Some(1), Some(TSUMO_PROBABILITY_SCALE)])
+            .map(|(metric, probability)| CurrentTenpaiMetrics {
+                self_tsumo_hit_probability: probability,
+                ..*metric
+            })
+            .collect();
+        let resolved = resolve_current_tenpai_value_axis(&evaluations, &with_probability);
+
+        assert_eq!(resolved[0].self_tsumo_hit_probability, Some(1));
+        assert_eq!(
+            resolved[1].self_tsumo_hit_probability,
+            Some(TSUMO_PROBABILITY_SCALE)
+        );
+        assert_eq!(
+            best_discard_selection_index_with_metrics(&evaluations, &[], &with_probability),
+            selected
+        );
+        assert_eq!(
+            compare_discard_selection_candidates(
+                &current_tenpai_candidate(&evaluations[0], Some(12_000)),
+                &current_tenpai_candidate(&evaluations[1], Some(7_800)),
+            )
+            .reason,
+            DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        );
+    }
+
+    #[test]
     fn permanent_furiten_and_mixed_current_tenpai_cohorts_use_the_self_tsumo_axis() {
         let evaluations = vec![
             evaluation("1m", 0, &[("3m", 1)]),
@@ -1210,16 +1262,19 @@ mod tests {
                 permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: Some(99_999),
                 expected_self_tsumo_value: None,
+                self_tsumo_hit_probability: None,
             },
             CurrentTenpaiMetrics {
                 permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: Some(1),
                 expected_self_tsumo_value: None,
+                self_tsumo_hit_probability: None,
             },
             CurrentTenpaiMetrics {
                 permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: None,
                 expected_self_tsumo_value: None,
+                self_tsumo_hit_probability: None,
             },
         ];
 

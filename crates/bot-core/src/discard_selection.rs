@@ -22,6 +22,7 @@ use bot_logic::{
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
+    tsumo_hit_probability,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -140,6 +141,8 @@ struct CurrentTenpaiCandidateEvaluation {
     wait: Option<TenpaiWaitAvailability>,
     offense: Option<TenpaiOffenseEvaluation>,
     expected_self_tsumo_value: Option<u64>,
+    /// `expected_self_tsumo_value` と同じ terminal tenpai から求めたツモ和了確率。診断専用。
+    self_tsumo_hit_probability: Option<u64>,
 }
 
 type CurrentTenpaiCandidateEvaluations = Vec<CurrentTenpaiCandidateEvaluation>;
@@ -387,20 +390,29 @@ fn current_tenpai_candidate_evaluations(
             let offense = wait.as_ref().map(|wait| {
                 evaluate_tenpai_offense_with_hands(context, wait, legal_actions, hands.as_ref())
             });
-            let expected_self_tsumo_value =
-                offense
-                    .as_ref()
-                    .zip(self_tsumo_facts)
-                    .and_then(|(offense, facts)| {
-                        let hands = hands.as_ref()?;
-                        let terminal =
-                            tenpai_tsumo_value_from_hands(context, hands, offense.offense.mode)?;
-                        Some(terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws))
-                    });
+            // 期待支払いとツモ和了確率は同じ terminal tenpai から一度に求め、点数計算も待ちも
+            // 二重に評価しない。
+            let self_tsumo = offense
+                .as_ref()
+                .zip(self_tsumo_facts)
+                .and_then(|(offense, facts)| {
+                    let hands = hands.as_ref()?;
+                    let terminal =
+                        tenpai_tsumo_value_from_hands(context, hands, offense.offense.mode)?;
+                    Some((
+                        terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws),
+                        tsumo_hit_probability(
+                            facts.unknown_tiles,
+                            terminal.winning_remaining,
+                            facts.own_future_draws,
+                        ),
+                    ))
+                });
             CurrentTenpaiCandidateEvaluation {
                 wait,
                 offense,
-                expected_self_tsumo_value,
+                expected_self_tsumo_value: self_tsumo.map(|(value, _)| value),
+                self_tsumo_hit_probability: self_tsumo.map(|(_, probability)| probability),
             }
         })
         .collect()
@@ -421,6 +433,7 @@ fn current_tenpai_metrics(
                 .as_ref()
                 .and_then(|value| value.offense.value.weighted_total()),
             expected_self_tsumo_value: evaluation.expected_self_tsumo_value,
+            self_tsumo_hit_probability: evaluation.self_tsumo_hit_probability,
         })
         .collect()
 }
@@ -979,6 +992,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
             ?candidate.current_tenpai_offense_weighted_total,
         current_tenpai_expected_self_tsumo_value =
             ?candidate.current_tenpai_expected_self_tsumo_value,
+        current_tenpai_self_tsumo_hit_probability =
+            ?candidate.current_tenpai_self_tsumo_hit_probability,
         shape_penalty = evaluation.shape_penalty,
         iishanten_shape_after_discard = ?evaluation.standard_iishanten_shape_after_discard,
         floating_tile_value = evaluation.floating_tile_value,
@@ -1520,6 +1535,135 @@ pub(crate) mod tests {
             candidate.current_tenpai_expected_self_tsumo_value.is_none()
                 && candidate.comparison_reason
                     != bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        }));
+    }
+
+    #[test]
+    fn current_tenpai_hit_probability_shares_the_expected_value_terminal() {
+        let (context, actions) = current_tenpai_regression_context_with_facts(
+            [vec![tile(36)], vec![], vec![], vec![]],
+            Some(70),
+            Some(0),
+        );
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        let index = legal
+            .evaluations
+            .iter()
+            .position(|evaluation| evaluation.discard.to_mjai_string() == "2p")
+            .expect("2p candidate");
+        let evaluation = &legal.evaluations[index];
+        let candidate = &current[index];
+        let wait = candidate.wait.as_ref().expect("tenpai wait");
+        let mode = candidate.offense.as_ref().expect("offense").offense.mode;
+        let facts = lookahead_inputs(
+            &context,
+            &legal.tiles,
+            &ProductionProspectiveValuator::new(&context),
+            LookaheadDiagnosticScope::None,
+        )
+        .self_tsumo_facts()
+        .expect("self-tsumo facts");
+        let hands = tenpai_completed_hands_after_discard(&context, evaluation, wait)
+            .expect("completed hands");
+        let terminal =
+            tenpai_tsumo_value_from_hands(&context, &hands, mode).expect("tsumo scoring");
+
+        assert_eq!(
+            candidate.expected_self_tsumo_value,
+            Some(terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+        );
+        assert_eq!(
+            candidate.self_tsumo_hit_probability,
+            Some(tsumo_hit_probability(
+                facts.unknown_tiles,
+                terminal.winning_remaining,
+                facts.own_future_draws,
+            ))
+        );
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let diagnostic = result
+            .diagnostic
+            .candidates
+            .iter()
+            .find(|diagnostic| diagnostic.evaluation.discard.to_mjai_string() == "2p")
+            .expect("2p diagnostic");
+        assert_eq!(
+            diagnostic.current_tenpai_self_tsumo_hit_probability,
+            candidate.self_tsumo_hit_probability
+        );
+    }
+
+    #[test]
+    fn the_ron_axis_cohort_still_observes_the_current_tenpai_hit_probability() {
+        // 非フリテン cohort は既存 Ron 軸のままで、期待支払いは軸解決で落ちる。診断専用の
+        // 確率だけは落とさず、打点軸で選んだ候補の和了確率も観測できる。
+        let (context, actions) =
+            current_tenpai_regression_context_with_facts(Default::default(), Some(70), Some(0));
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidates: Vec<_> = result
+            .diagnostic
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.current_tenpai_offense_weighted_total.is_some()
+                && candidate.current_tenpai_expected_self_tsumo_value.is_none()
+                && candidate
+                    .current_tenpai_self_tsumo_hit_probability
+                    .is_some()
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.comparison_reason
+                == bot_logic::DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        }));
+    }
+
+    #[test]
+    fn unknown_self_tsumo_facts_leave_the_current_tenpai_hit_probability_unknown() {
+        let (context, actions) = current_tenpai_regression_context_with_facts(
+            [vec![tile(36)], vec![], vec![], vec![]],
+            None,
+            Some(0),
+        );
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        assert!(
+            current
+                .iter()
+                .all(|candidate| candidate.self_tsumo_hit_probability.is_none())
+        );
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        assert!(result.diagnostic.candidates.iter().all(|candidate| {
+            candidate
+                .current_tenpai_self_tsumo_hit_probability
+                .is_none()
         }));
     }
 

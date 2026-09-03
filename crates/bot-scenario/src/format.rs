@@ -517,6 +517,15 @@ fn format_normal_discard_candidate(
             ABSENT.to_string()
         }
     ));
+    // 期待支払いと同じ terminal tenpai から得た観測値。打牌選択には使わない。
+    lines.push(format!(
+        "  current tenpai self-tsumo hit probability: {}",
+        if evaluation.min_shanten_after_discard() == 0 {
+            format_optional_probability(candidate.current_tenpai_self_tsumo_hit_probability)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
     lines.extend(format_candidate_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
@@ -981,6 +990,14 @@ fn offense_mode_label(value: Option<&ProspectiveDrawVariantValue>) -> String {
 fn format_probability(scaled: u64) -> String {
     let fraction = (scaled % TSUMO_PROBABILITY_SCALE) * 1_000_000 / TSUMO_PROBABILITY_SCALE;
     format!("{}.{fraction:06}", scaled / TSUMO_PROBABILITY_SCALE)
+}
+
+// 確定しなかった確率を 0 で埋めずに unknown のまま出す。表記は既存 formatter をそのまま使う。
+fn format_optional_probability(scaled: Option<u64>) -> String {
+    match scaled {
+        Some(scaled) => format_probability(scaled),
+        None => UNKNOWN.to_string(),
+    }
 }
 
 // 固定小数点の期待支払いを点数表記へ直す。表示のためだけの変換で、比較にも選択にも使わない。
@@ -2385,6 +2402,14 @@ fn summary_choice(
                 rank - 1
             ));
         }
+        if let Some((winner_value, loser_value)) =
+            choice_current_tenpai_hit_probabilities(&comparison)
+        {
+            lines.push(format!(
+                "  {prefix} self-tsumo hit probability: choice {} {winner_value} / choice {rank} {loser_value}",
+                rank - 1
+            ));
+        }
     }
 
     lines
@@ -2738,6 +2763,23 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
         _ => return None,
     };
     Some(pair)
+}
+
+// selected / runner-up の現在聴牌ツモ和了確率。打点を取る代わりにどれだけ和了確率を落として
+// いるかを見るための観測値で、比較にも選択にも使わない。どちらも確定しなければ行を出さない。
+fn choice_current_tenpai_hit_probabilities(
+    comparison: &ChoiceComparison,
+) -> Option<(String, String)> {
+    let ChoiceComparison { winner, loser } = comparison;
+    let winner_probability = winner.current_tenpai_self_tsumo_hit_probability;
+    let loser_probability = loser.current_tenpai_self_tsumo_hit_probability;
+    if winner_probability.is_none() && loser_probability.is_none() {
+        return None;
+    }
+    Some((
+        format_optional_probability(winner_probability),
+        format_optional_probability(loser_probability),
+    ))
 }
 
 fn discard_label(evaluation: &DiscardEvaluation) -> String {
@@ -3428,6 +3470,80 @@ mod tests {
             summary.contains("  choice 2 lost by: CurrentTenpaiExpectedSelfTsumoValue"),
             "{summary}"
         );
+    }
+
+    #[test]
+    fn current_tenpai_scenario_reports_the_self_tsumo_hit_probability() {
+        let (_, diagnostic, output) = rendered(CURRENT_TENPAI_SELF_TSUMO_SCENARIO, false);
+        let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
+        let two_p = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "2p")
+            .unwrap();
+        let five_p = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5p")
+            .unwrap();
+
+        // 打点で勝った 2p の方がツモ和了確率は低い。診断はその差をそのまま表示する。
+        assert!(two_p.selected);
+        assert!(
+            two_p.current_tenpai_expected_self_tsumo_value
+                > five_p.current_tenpai_expected_self_tsumo_value
+        );
+        assert!(
+            two_p.current_tenpai_self_tsumo_hit_probability
+                < five_p.current_tenpai_self_tsumo_hit_probability
+        );
+        assert!(
+            output.contains(&format!(
+                "  current tenpai self-tsumo hit probability: {}",
+                format_probability(two_p.current_tenpai_self_tsumo_hit_probability.unwrap())
+            )),
+            "{output}"
+        );
+
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains(&format!(
+                "  choice 2 self-tsumo hit probability: choice 1 {} / choice 2 {}",
+                format_probability(two_p.current_tenpai_self_tsumo_hit_probability.unwrap()),
+                format_probability(five_p.current_tenpai_self_tsumo_hit_probability.unwrap()),
+            )),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn unknown_self_tsumo_facts_keep_the_hit_probability_unknown() {
+        let (_, diagnostic, output) = rendered(CURRENT_TENPAI_OFFENSE_SCENARIO, false);
+        let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
+        let tenpai: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == 0)
+            .collect();
+
+        assert_eq!(tenpai.len(), 2);
+        assert!(tenpai.iter().all(|candidate| {
+            candidate
+                .current_tenpai_self_tsumo_hit_probability
+                .is_none()
+        }));
+        assert!(
+            output.contains("  current tenpai self-tsumo hit probability: unknown"),
+            "{output}"
+        );
+        // 確率が unknown でも既存の打点軸の選択と比較理由は変わらない。
+        assert!(
+            output.contains("Final decision\n  action: Reach\n  discard: 2p"),
+            "{output}"
+        );
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  choice 3 lost by: CurrentTenpaiOffenseWeightedTotal"),
+            "{summary}"
+        );
+        assert!(!summary.contains("self-tsumo hit probability"), "{summary}");
     }
 
     #[test]
@@ -7955,5 +8071,7 @@ mod tests {
         assert_eq!(format_probability(0), "0.000000");
         assert_eq!(format_probability(TSUMO_PROBABILITY_SCALE), "1.000000");
         assert_eq!(format_probability(TSUMO_PROBABILITY_SCALE / 4), "0.250000");
+        assert_eq!(format_optional_probability(Some(0)), "0.000000");
+        assert_eq!(format_optional_probability(None), "unknown");
     }
 }
