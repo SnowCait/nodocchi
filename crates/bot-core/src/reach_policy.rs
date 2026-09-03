@@ -18,8 +18,9 @@
 //!
 //! この rule を適用するのは production の Reach action 判断だけで、押し引きの攻撃モードと将来
 //! テンパイの selection value は従来どおり [`decide_reach_reason`] の結論のまま変えない。役満
-//! 判定そのものもこの層は持たず、既存 scoring の結論 ([`NamedYakumanTsumo`]) を受け取るだけで
-//! ある。
+//! 判定そのものもこの層は持たず、共通 Tsumo scoring が定義する scoring fact
+//! ([`NamedYakumanTsumo`](crate::tenpai_scoring::NamedYakumanTsumo)) を consumer として受け取る
+//! だけである。
 //!
 //! # リーチの合法性
 //!
@@ -55,6 +56,7 @@ use bot_logic::PermanentFuriten;
 
 use crate::damaten_value::DamatenValueVerdict;
 use crate::defense::{SujiSafetyRank, WallRank};
+use crate::tenpai_scoring::NamedYakumanTsumo;
 
 /// リーチ宣言に必要な持ち点 [点]。inclusive。
 pub const REACH_MIN_SCORE: i32 = 1000;
@@ -184,22 +186,6 @@ pub fn decide_reach_reason(
             }
         }
     }
-}
-
-/// 打牌後テンパイのツモ和了が named 役満だと既存 scoring 上確定したか。
-///
-/// 役満判定は既存 scoring の結論 ([`HandValue::is_yakuman`](bot_logic::HandValue::is_yakuman))
-/// だけが source of truth で、牌姿・役満名の列挙・点数 threshold から役満を推測しない。数え役満は
-/// 名前の付いた役満ではないので [`Self::NotEstablished`] になる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamedYakumanTsumo {
-    /// 生きた physical variant が1件以上あり、その全ての Tsumo 打点が named 役満と確定した。
-    AllLiveVariants,
-    /// named 役満だと確定しない。
-    ///
-    /// 一部の variant だけ named 役満・役なしを含む・数え役満・scoring unknown・生きた
-    /// physical variant が1件も無い場合と、この経路で評価しなかった場合をすべて含む。
-    NotEstablished,
 }
 
 /// named 役満の categorical rule を評価する局面か。

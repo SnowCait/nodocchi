@@ -34,7 +34,7 @@ use crate::reach_damaten_comparison::{
     diagnose_reach_damaten_comparison,
 };
 use crate::reach_policy::{
-    NamedYakumanTsumo, NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
+    NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
     decide_permanent_furiten_reach_timing, decide_reach_reason, evaluates_named_yakuman_damaten,
     evaluates_non_furiten_bad_wait_reach_timing, evaluates_reach_timing,
     selects_named_yakuman_damaten,
@@ -44,7 +44,7 @@ use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_dec
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, selected_tenpai_self_tsumo_comparison,
 };
-use crate::tenpai_scoring::tenpai_tsumo_named_yakuman;
+use crate::tenpai_scoring::{NamedYakumanTsumo, tenpai_tsumo_named_yakuman};
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };

@@ -54,7 +54,6 @@ use crate::offense_value::{
     BASELINE_CHANKAN, BASELINE_IPPATSU, BASELINE_RINSHAN, BASELINE_URA_DORA_INDICATORS,
     TenpaiOffenseMode,
 };
-use crate::reach_policy::NamedYakumanTsumo;
 
 /// 和了牌の物理牌1つ分の打点。
 ///
@@ -223,6 +222,26 @@ pub(crate) fn tenpai_tsumo_value_from_hands(
     mode: TenpaiOffenseMode,
 ) -> Option<TenpaiTsumoValue> {
     tsumo_value(&tenpai_tsumo_profile(context, hands, mode)?)
+}
+
+/// テンパイのツモ和了が named 役満だと既存 scoring 上確定したか。
+///
+/// 役満判定は既存 scoring の結論 ([`HandValue::is_yakuman`](bot_logic::HandValue::is_yakuman))
+/// だけが source of truth で、牌姿・役満名の列挙・点数 threshold から役満を推測しない。数え役満は
+/// 名前の付いた役満ではないので [`Self::NotEstablished`] になる。
+///
+/// この結論をどう使うかは consumer 側の policy が決める。恒常フリテン聴牌の categorical rule
+/// ([`selects_named_yakuman_damaten`](crate::reach_policy::selects_named_yakuman_damaten)) が
+/// 現在の consumer で、この層は rule を持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedYakumanTsumo {
+    /// 生きた physical variant が1件以上あり、その全ての Tsumo 打点が named 役満と確定した。
+    AllLiveVariants,
+    /// named 役満だと確定しない。
+    ///
+    /// 一部の variant だけ named 役満・役なしを含む・数え役満・scoring unknown・生きた
+    /// physical variant が1件も無い場合と、この経路で評価しなかった場合をすべて含む。
+    NotEstablished,
 }
 
 /// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価し、生きた
