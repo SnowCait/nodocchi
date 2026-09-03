@@ -62,6 +62,10 @@
 //! [`CallIishantenAcceptanceDiagnostic`] を観測用に残す。成立条件にも候補の選択にも使わない
 //! diagnostics 専用の値で、これがあるかどうかで `ShantenAgent::act()` の結果は変わらない。
 //!
+//! 解析専用なので、収集するのは `diagnose()` 経路だけ。通常の `act()` 経路は
+//! `collect_iishanten_acceptance == false` で呼ばれ、鳴かない場合の受け入れも固定面子の役保証も
+//! そもそも計算しない。鳴き policy 自体は enabled / disabled で共通の1本のまま。
+//!
 //! 2向聴から鳴いて1向聴になる候補は対象にしない。鳴かない側と鳴いた側で探索の深さが揃わず、
 //! 受け入れ枚数をそのまま比べられないため。
 
@@ -315,15 +319,26 @@ pub struct CallDecisionDiagnostic {
 //
 // 合法な Chi / Pon が1件も無ければ検討自体を行わず None。1件以上ある場合は候補ごとに独立して
 // 条件を評価し、成立した候補の中から1件を選ぶ。
+//
+// `collect_iishanten_acceptance` は解析専用の [`CallIishantenAcceptanceDiagnostic`] を集めるか
+// どうかだけを切り替える。判断に使う fact の評価と候補の選択は切り替えの影響を受けない。
 pub(crate) fn evaluate_call_decision(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
+    collect_iishanten_acceptance: bool,
 ) -> Option<CallDecisionDiagnostic> {
     let mut candidates: Vec<CallCandidateDiagnostic> = legal_actions
         .iter()
         .filter_map(|action| {
             normalize_call(action).map(|(kind, tile, consumed)| {
-                evaluate_call_candidate(ctx, action, kind, tile, consumed)
+                evaluate_call_candidate(
+                    ctx,
+                    action,
+                    kind,
+                    tile,
+                    consumed,
+                    collect_iishanten_acceptance,
+                )
             })
         })
         .collect();
@@ -383,6 +398,7 @@ fn evaluate_call_candidate(
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
+    collect_iishanten_acceptance: bool,
 ) -> CallCandidateDiagnostic {
     let mut candidate = CallCandidateDiagnostic {
         action: action.clone(),
@@ -400,7 +416,14 @@ fn evaluate_call_candidate(
         reason: CallDecisionReason::EligibleTenpai,
     };
 
-    let reason = evaluate_call_conditions(ctx, kind, tile, consumed, &mut candidate);
+    let reason = evaluate_call_conditions(
+        ctx,
+        kind,
+        tile,
+        consumed,
+        collect_iishanten_acceptance,
+        &mut candidate,
+    );
     candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
     candidate.reason = reason;
     candidate
@@ -408,11 +431,15 @@ fn evaluate_call_candidate(
 
 // 鳴き成立条件を順に評価し、最初に落ちた条件を理由として返す。評価が進んだ範囲の値だけを
 // candidate へ書き込み、評価しなかった項目は None のままにする。
+//
+// 判断に使う fact は `collect_iishanten_acceptance` にかかわらず常に同じ順序で評価する。この
+// flag が切り替えるのは、判断に使わない観測値を最後に足すかどうかだけ。
 fn evaluate_call_conditions(
     ctx: &GameContext,
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
+    collect_iishanten_acceptance: bool,
     candidate: &mut CallCandidateDiagnostic,
 ) -> CallDecisionReason {
     if ctx.any_opponent_reached() {
@@ -467,13 +494,16 @@ fn evaluate_call_conditions(
     };
 
     if evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
-        candidate.iishanten_acceptance = iishanten_acceptance_diagnostic(
-            ctx,
-            &counts,
-            current_fixed_meld_count,
-            &meld,
-            &evaluation,
-        );
+        // 判断はここで確定していて、以降は解析用の観測値を足すだけ。
+        if collect_iishanten_acceptance {
+            candidate.iishanten_acceptance = iishanten_acceptance_diagnostic(
+                ctx,
+                &counts,
+                current_fixed_meld_count,
+                &meld,
+                &evaluation,
+            );
+        }
         candidate.post_call_discard = Some(evaluation);
         return CallDecisionReason::PostCallNotTenpai;
     }
@@ -498,7 +528,7 @@ fn evaluate_call_conditions(
 
 // 鳴いても1向聴のままの候補について、鳴かない場合と鳴いた場合の受け入れを並べる。
 //
-// production の判断材料ではなく観測専用で、返り値は成立条件にも候補の選択にも使わない。鳴いた
+// diagnostics が有効な場合だけ呼ばれる。返り値は成立条件にも候補の選択にも使わない。鳴いた
 // 後の向聴・受け入れは本番の打牌評価 `evaluation` が持つ値をそのまま読み、鳴かない場合の受け
 // 入れは既存の受け入れ計算へそのまま渡す。どちらもここで数え直さない。
 //
@@ -737,9 +767,14 @@ mod tests {
     fn single_candidate(
         ctx: &GameContext,
         action: &LegalAction,
+        collect_iishanten_acceptance: bool,
     ) -> (CallDecisionDiagnostic, CallCandidateDiagnostic) {
-        let decision =
-            evaluate_call_decision(ctx, &[action.clone(), LegalAction::None]).expect("evaluated");
+        let decision = evaluate_call_decision(
+            ctx,
+            &[action.clone(), LegalAction::None],
+            collect_iishanten_acceptance,
+        )
+        .expect("evaluated");
         assert_eq!(decision.candidates.len(), 1);
         let candidate = decision.candidates[0].clone();
         (decision, candidate)
@@ -770,7 +805,7 @@ mod tests {
     fn an_iishanten_call_that_stays_iishanten_compares_the_pass_and_post_call_acceptance() {
         let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let (decision, candidate) = single_candidate(&ctx, &action);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
 
         assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
         assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
@@ -830,7 +865,7 @@ mod tests {
     fn the_fixed_meld_yaku_guarantee_comes_from_the_shared_helper() {
         let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let (_, candidate) = single_candidate(&ctx, &action);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
 
         let acceptance = candidate
             .iishanten_acceptance
@@ -856,7 +891,7 @@ mod tests {
     fn a_chi_meld_does_not_guarantee_a_yaku() {
         let ctx = reaction_context(&IISHANTEN_CHI_HAND, IISHANTEN_CHI_TARGET);
         let action = chi_action(IISHANTEN_CHI_TARGET, &IISHANTEN_CHI_CONSUMED);
-        let (_, candidate) = single_candidate(&ctx, &action);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
 
         assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
         assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
@@ -885,21 +920,26 @@ mod tests {
     fn an_immediate_tenpai_call_keeps_the_existing_eligible_tenpai_decision() {
         let ctx = reaction_context(&TENPAI_PON_HAND, TENPAI_PON_TARGET);
         let action = pon_action(TENPAI_PON_TARGET, &TENPAI_PON_CONSUMED);
-        let (decision, candidate) = single_candidate(&ctx, &action);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
 
         assert_eq!(candidate.reason, CallDecisionReason::EligibleTenpai);
         assert!(candidate.eligible);
-        assert_eq!(decision.selected, Some(action));
+        assert_eq!(decision.selected.as_ref(), Some(&action));
         assert_eq!(candidate.post_call_shanten(), Some(CALL_TENPAI_SHANTEN));
         // 即テンパイ候補は既存診断で足りるので、1向聴 → 1向聴 の観測対象にしない。
         assert_eq!(candidate.iishanten_acceptance, None);
+
+        // 診断を集めない通常経路でも同じ判断。
+        let (production, production_candidate) = single_candidate(&ctx, &action, false);
+        assert_eq!(production_candidate, candidate);
+        assert_eq!(production.selected, decision.selected);
     }
 
     #[test]
     fn two_shanten_is_not_part_of_the_iishanten_acceptance_diagnostic() {
         let ctx = reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let (decision, candidate) = single_candidate(&ctx, &action);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
 
         assert_eq!(candidate.reason, CallDecisionReason::CurrentShantenNotOne);
         assert_eq!(candidate.current_shanten, Some(2));
@@ -908,20 +948,48 @@ mod tests {
     }
 
     #[test]
+    fn the_iishanten_acceptance_is_not_collected_without_diagnostics() {
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+
+        // 解析専用の観測値なので、通常の判断経路では構築しない。
+        assert_eq!(candidate.iishanten_acceptance, None);
+
+        // 判断に使う fact と結論は診断の有無で変わらない。
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
+        assert!(!candidate.eligible);
+        assert_eq!(decision.selected, None);
+
+        let (_, diagnosed) = single_candidate(&ctx, &action, true);
+        assert!(diagnosed.iishanten_acceptance.is_some());
+        assert_eq!(
+            CallCandidateDiagnostic {
+                iishanten_acceptance: None,
+                ..diagnosed
+            },
+            candidate
+        );
+    }
+
+    #[test]
     fn the_iishanten_acceptance_diagnostic_does_not_change_the_selected_action() {
         let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
         let actions = [action, LegalAction::None];
 
-        let decision = evaluate_call_decision(&ctx, &actions).expect("evaluated");
-        assert!(decision.candidates[0].iishanten_acceptance.is_some());
-        assert_eq!(decision.selected, None);
-
         let mut agent = crate::agents::ShantenAgent;
-        assert_eq!(
-            crate::agent::Agent::act(&mut agent, &ctx, &actions),
-            LegalAction::None
-        );
+        let acted = crate::agent::Agent::act(&mut agent, &ctx, &actions);
+        assert_eq!(acted, LegalAction::None);
+
+        // diagnose() は観測値を集めるが、選ぶ action は act() と同じ。
+        let diagnostic = crate::agents::ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_action, acted);
+        let call = diagnostic.call.as_ref().expect("evaluated");
+        assert_eq!(call.selected, None);
+        assert!(call.candidates[0].iishanten_acceptance.is_some());
     }
 
     #[test]

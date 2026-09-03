@@ -197,7 +197,7 @@ impl ShantenAgent {
         }
 
         // 鳴き。和了・流局より後、通常打牌 / 押し引き / 防御より前に検討する。
-        let call = evaluate_call_decision(ctx, legal_actions);
+        let call = evaluate_call_decision(ctx, legal_actions, diagnostics.is_enabled());
         if let Some(action) = call.as_ref().and_then(|call| call.selected.clone()) {
             return AgentDecision {
                 action,
