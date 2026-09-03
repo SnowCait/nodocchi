@@ -18,8 +18,8 @@
 //!
 //! この rule を適用するのは production の Reach action 判断だけで、押し引きの攻撃モードと将来
 //! テンパイの selection value は従来どおり [`decide_reach_reason`] の結論のまま変えない。役満
-//! 判定そのものもこの層は持たず、既存 scoring の結論 ([`NamedYakumanTsumo`]) を受け取るだけで
-//! ある。
+//! 判定そのものもこの層は持たず、既存 scoring が named 役満と確定したかどうかという事実だけを
+//! 受け取る。
 //!
 //! # リーチの合法性
 //!
@@ -186,22 +186,6 @@ pub fn decide_reach_reason(
     }
 }
 
-/// 打牌後テンパイのツモ和了が named 役満だと既存 scoring 上確定したか。
-///
-/// 役満判定は既存 scoring の結論 ([`HandValue::is_yakuman`](bot_logic::HandValue::is_yakuman))
-/// だけが source of truth で、牌姿・役満名の列挙・点数 threshold から役満を推測しない。数え役満は
-/// 名前の付いた役満ではないので [`Self::NotEstablished`] になる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamedYakumanTsumo {
-    /// 生きた physical variant が1件以上あり、その全ての Tsumo 打点が named 役満と確定した。
-    AllLiveVariants,
-    /// named 役満だと確定しない。
-    ///
-    /// 一部の variant だけ named 役満・役なしを含む・数え役満・scoring unknown・生きた
-    /// physical variant が1件も無い場合と、この経路で評価しなかった場合をすべて含む。
-    NotEstablished,
-}
-
 /// named 役満の categorical rule を評価する局面か。
 ///
 /// 恒常フリテンが確定していて、生きた待ちが残っている聴牌だけを対象にする。恒常フリテンは既存の
@@ -223,13 +207,17 @@ pub fn evaluates_named_yakuman_damaten(
 ///
 /// 対象は [`evaluates_named_yakuman_damaten`] を満たす局面だけで、非恒常フリテンの named 役満は
 /// 従来どおりダマ打点 threshold の結論になる。
+///
+/// `named_yakuman_established` は「生きた Tsumo physical variant がすべて named 役満だと既存
+/// scoring 上確定した」かどうかで、呼び出し側の scoring がその1つの事実へ畳んで渡す。一部の
+/// variant だけ役満・数え役満・scoring unknown・生きた variant なし・そもそも評価していない場合は
+/// どれも `false` で、この層は役満を判定し直さない。
 pub fn selects_named_yakuman_damaten(
     permanent_furiten: PermanentFuriten,
     tsumo_remaining: u8,
-    tsumo_named_yakuman: NamedYakumanTsumo,
+    named_yakuman_established: bool,
 ) -> bool {
-    evaluates_named_yakuman_damaten(permanent_furiten, tsumo_remaining)
-        && tsumo_named_yakuman == NamedYakumanTsumo::AllLiveVariants
+    evaluates_named_yakuman_damaten(permanent_furiten, tsumo_remaining) && named_yakuman_established
 }
 
 /// base policy がリーチを選んだ聴牌で、そのリーチを今回宣言するかどうか。
@@ -713,7 +701,7 @@ mod tests {
         assert!(selects_named_yakuman_damaten(
             PermanentFuriten::Yes,
             1,
-            NamedYakumanTsumo::AllLiveVariants
+            true
         ));
 
         // 恒常フリテンが確定していない聴牌と、生きた待ちが1枚も無い聴牌は対象外。unknown を
@@ -728,11 +716,7 @@ mod tests {
                 "{facts:?}"
             );
             assert!(
-                !selects_named_yakuman_damaten(
-                    facts.0,
-                    facts.1,
-                    NamedYakumanTsumo::AllLiveVariants
-                ),
+                !selects_named_yakuman_damaten(facts.0, facts.1, true),
                 "{facts:?}"
             );
         }
@@ -745,7 +729,7 @@ mod tests {
         assert!(!selects_named_yakuman_damaten(
             PermanentFuriten::Yes,
             8,
-            NamedYakumanTsumo::NotEstablished
+            false
         ));
         assert_eq!(
             decide_reach_reason(true, None, REACH_MIN_REMAINING),

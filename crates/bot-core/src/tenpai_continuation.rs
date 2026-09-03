@@ -120,8 +120,9 @@ use crate::offense_value::TenpaiOffenseMode;
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveDiscardValue, ProspectiveDrawVariantValue,
     ProspectiveFacts, ProspectiveLookaheadDiagnostic, ProspectiveTenpaiValue, ProspectiveWaitValue,
-    TsumoVariantOutcomes, TsumoVariantStatus, evaluate_prospective_candidate_value,
+    evaluate_prospective_candidate_value,
 };
+use crate::tenpai_scoring::{TsumoVariantOutcomes, TsumoVariantStatus};
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;

@@ -24,7 +24,7 @@ use crate::open_hand_defense::{
     evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
 };
 use crate::open_hand_threat::OpenHandThreatAssessment;
-use crate::prospective_value::{ProspectiveLookaheadDiagnostic, tenpai_tsumo_named_yakuman};
+use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -34,7 +34,7 @@ use crate::reach_damaten_comparison::{
     diagnose_reach_damaten_comparison,
 };
 use crate::reach_policy::{
-    NamedYakumanTsumo, NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
+    NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
     decide_permanent_furiten_reach_timing, decide_reach_reason, evaluates_named_yakuman_damaten,
     evaluates_non_furiten_bad_wait_reach_timing, evaluates_reach_timing,
     selects_named_yakuman_damaten,
@@ -44,6 +44,7 @@ use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_dec
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, selected_tenpai_self_tsumo_comparison,
 };
+use crate::tenpai_scoring::{NamedYakumanTsumo, tenpai_tsumo_named_yakuman};
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };
@@ -1226,7 +1227,7 @@ fn decide_reach(
     let reason = if selects_named_yakuman_damaten(
         tenpai_wait.permanent_furiten(),
         tenpai_wait.tsumo_remaining,
-        tsumo_named_yakuman(ctx, evaluation, &tenpai_wait),
+        tsumo_named_yakuman(ctx, evaluation, &tenpai_wait).is_established(),
     ) {
         ReachDecisionReason::NamedYakumanDamaten
     } else {
