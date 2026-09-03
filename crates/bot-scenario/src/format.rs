@@ -1,21 +1,22 @@
 use bot_core::{
-    AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic, CallWaitYaku,
-    CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
-    CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
-    DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
-    DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
-    MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
-    OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
-    ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
-    ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
-    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
-    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
-    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
-    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
-    RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent,
-    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
-    TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
-    TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
+    AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
+    CallIishantenAcceptanceDiagnostic, CallWaitYaku, CombinedDefenseCandidateDiagnostic,
+    CombinedDefenseDiagnostic, CurrentTenpaiContinuationCandidate,
+    CurrentTenpaiContinuationDiagnostic, DamatenValue, DamatenValueDiagnostic,
+    DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind, GameContext,
+    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
+    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
+    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
+    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic,
+    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision,
+    PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
+    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
+    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
+    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
+    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
+    TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
+    ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -375,6 +376,10 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
         format_optional_yes_no(candidate.live_waits_have_yaku())
     ));
 
+    lines.extend(format_call_iishanten_acceptance(
+        candidate.iishanten_acceptance.as_ref(),
+    ));
+
     if verbose {
         lines.push("    acceptance tiles:".to_string());
         if evaluation.acceptance_after_discard.tiles.is_empty() {
@@ -407,6 +412,31 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     }
 
     lines
+}
+
+// 鳴いても1向聴のままの候補についてだけ出る観測用の受け入れ比較。対象外の候補には行を足さない。
+fn format_call_iishanten_acceptance(
+    acceptance: Option<&CallIishantenAcceptanceDiagnostic>,
+) -> Vec<String> {
+    let Some(acceptance) = acceptance else {
+        return Vec::new();
+    };
+
+    vec![
+        format!(
+            "    iishanten acceptance: pass {} / {} types -> call {} / {} types (delta {:+} / {:+} types)",
+            acceptance.pass_acceptance_remaining,
+            acceptance.pass_acceptance_type_count,
+            acceptance.post_call_acceptance_remaining,
+            acceptance.post_call_acceptance_type_count,
+            acceptance.acceptance_remaining_delta(),
+            acceptance.acceptance_type_delta(),
+        ),
+        format!(
+            "    fixed meld yaku guaranteed: {}",
+            yes_no(acceptance.fixed_melds_guarantee_yaku)
+        ),
+    ]
 }
 
 // 喰い替えで切れない牌種。評価しなかった場合と、禁止牌が無い場合を区別する。
@@ -4114,6 +4144,92 @@ mod tests {
         assert!(call.contains("    winning tile yaku:"), "{call}");
         assert!(call.contains("      6s: 4 remaining, yaku yes"), "{call}");
         assert!(call.contains("      9s: 4 remaining, yaku yes"), "{call}");
+    }
+
+    // 234567m 68p 24s E FF の一向聴。FF を Pon して E を切っても一向聴のままで、鳴くと受け入れ
+    // だけが増える局面。
+    const IISHANTEN_PON_REACTION_SCENARIO: &str = r#"{
+        "hand": "234567m68p24s166z",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 0,
+        "discards": ["", "F", "", ""],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "legal_dahai": "",
+        "legal_pon": [{ "from_player": 1, "tile": "F", "consumed": "F F" }],
+        "allow_none": true
+    }"#;
+
+    #[test]
+    fn an_iishanten_call_candidate_shows_the_pass_and_post_call_acceptance() {
+        let (_, diagnostic, output) = rendered(IISHANTEN_PON_REACTION_SCENARIO, false);
+        let call = section(&output, "Call\n");
+
+        assert_eq!(
+            call,
+            "Call\n  \
+             evaluated\n  \
+             selected: none\n  \
+             reason: PostCallNotTenpai\n  \
+             candidates: 1\n  \
+             Pon F <- F F\n    \
+             selected: no\n    \
+             eligible: no\n    \
+             reason: PostCallNotTenpai\n    \
+             kind: Pon\n    \
+             current shanten: 1\n    \
+             current fixed meld count: 0\n    \
+             post-call fixed meld count: 1\n    \
+             forbidden discards: F\n    \
+             best discard: E\n    \
+             shanten after discard: 1\n    \
+             acceptance: 20 / 6 types\n    \
+             live wait remaining: -\n    \
+             can ron: unknown\n    \
+             live waits have yaku: unknown\n    \
+             iishanten acceptance: pass 8 / 2 types -> call 20 / 6 types (delta +12 / +4 types)\n    \
+             fixed meld yaku guaranteed: yes"
+        );
+
+        // 表示した値は診断が持つ値そのもので、formatter は受け入れも役保証も求め直さない。
+        let candidate = &diagnostic.call.as_ref().unwrap().candidates[0];
+        let acceptance = candidate.iishanten_acceptance.unwrap();
+        assert_eq!(acceptance.pass_acceptance_remaining, 8);
+        assert_eq!(acceptance.pass_acceptance_type_count, 2);
+        assert_eq!(acceptance.post_call_acceptance_remaining, 20);
+        assert_eq!(acceptance.post_call_acceptance_type_count, 6);
+        assert_eq!(acceptance.acceptance_remaining_delta(), 12);
+        assert_eq!(acceptance.acceptance_type_delta(), 4);
+        assert!(acceptance.fixed_melds_guarantee_yaku);
+    }
+
+    #[test]
+    fn an_iishanten_call_candidate_is_still_not_selected() {
+        let (scenario, diagnostic, output) = rendered(IISHANTEN_PON_REACTION_SCENARIO, false);
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&scenario.context, &scenario.legal_actions),
+            LegalAction::None
+        );
+        assert_eq!(diagnostic.call.as_ref().unwrap().selected, None);
+        assert!(
+            output.contains("Final decision\n  action: None"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn an_immediate_tenpai_call_candidate_has_no_iishanten_acceptance_lines() {
+        let (_, diagnostic, output) = rendered(PON_REACTION_SCENARIO, false);
+        let call = section(&output, "Call\n");
+
+        assert_eq!(
+            diagnostic.call.as_ref().unwrap().candidates[0].iishanten_acceptance,
+            None
+        );
+        assert!(!call.contains("iishanten acceptance"), "{call}");
+        assert!(!call.contains("fixed meld yaku guaranteed"), "{call}");
     }
 
     #[test]

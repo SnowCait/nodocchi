@@ -51,12 +51,30 @@
 //! 役の有無は牌種単位ではなく、和了牌の物理牌 (赤5 / 黒5) ごとの variant 単位で見る。残枚数が
 //! 0 の variant は現在ロンできないので判定対象にせず、残枚数 > 0 の variant に1つでも役なしが
 //! あれば鳴かない。役の有無を確定できない variant がある場合も、役ありだと推測せず鳴かない。
+//!
+//! # 1向聴のまま鳴く候補の観測
+//!
+//! ```text
+//! 現在1向聴 → 鳴く → 最良打牌 → 1向聴のまま
+//! ```
+//!
+//! で [`CallDecisionReason::PostCallNotTenpai`] として落ちる候補についてだけ、
+//! [`CallIishantenAcceptanceDiagnostic`] を観測用に残す。成立条件にも候補の選択にも使わない
+//! diagnostics 専用の値で、これがあるかどうかで `ShantenAgent::act()` の結果は変わらない。
+//!
+//! 解析専用なので、収集するのは `diagnose()` 経路だけ。通常の `act()` 経路は
+//! `collect_iishanten_acceptance == false` で呼ばれ、鳴かない場合の受け入れも固定面子の役保証も
+//! そもそも計算しない。鳴き policy 自体は enabled / disabled で共通の1本のまま。
+//!
+//! 2向聴から鳴いて1向聴になる候補は対象にしない。鳴かない側と鳴いた側で探索の深さが揃わず、
+//! 受け入れ枚数をそのまま比べられないため。
 
 use bot_logic::{
     DiscardEvaluation, FixedMeldCount, HandValueError, HandValueOutcome, Meld, MeldKind,
     OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    best_discard_selection_index, calculate_shanten_with_fixed_melds,
-    discard_tenpai_wait_availability, evaluate_tenpai_hand_value, split_discarded_tile,
+    best_discard_selection_index, calculate_acceptance_with_fixed_melds_and_visible_tiles,
+    calculate_shanten_with_fixed_melds, discard_tenpai_wait_availability,
+    evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku, split_discarded_tile,
     tenpai_completed_hands,
 };
 
@@ -166,6 +184,50 @@ impl CallWaitYakuDiagnostic {
     }
 }
 
+/// 1向聴のまま鳴く候補についての、鳴かない場合と鳴いた場合の受け入れ比較。
+///
+/// production の鳴き判断はこの値を読まない。将来
+/// 「1向聴 → 鳴いて1向聴だが受け入れが大きく改善する」を policy へ入れるかどうかを実戦局面で
+/// 観測するためだけに持つ。閾値も比も置かない。
+///
+/// | 値 | source of truth |
+/// | --- | --- |
+/// | 鳴かない場合の受け入れ | [`calculate_acceptance_with_fixed_melds_and_visible_tiles`] |
+/// | 鳴いた後の向聴と受け入れ | [`CallCandidateDiagnostic::post_call_discard`] |
+/// | 固定面子だけの役保証 | [`fixed_melds_guarantee_yaku`] |
+///
+/// どれも production 評価が既に求めた値か既存 calculator の結果そのもので、診断のために向聴・
+/// 受け入れ・役を計算し直さない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallIishantenAcceptanceDiagnostic {
+    /// 鳴かずに現在の手牌のまま進めた場合の受け入れ残枚数 [枚]。
+    pub pass_acceptance_remaining: u8,
+    /// 同じく受け入れ牌種数。
+    pub pass_acceptance_type_count: usize,
+    /// 鳴き後の最良打牌の向聴数。この診断を持つ候補では常に [`CALL_CURRENT_SHANTEN`]。
+    pub post_call_shanten: i8,
+    /// 鳴き後の最良打牌の受け入れ残枚数 [枚]。
+    pub post_call_acceptance_remaining: u8,
+    /// 同じく受け入れ牌種数。
+    pub post_call_acceptance_type_count: usize,
+    /// 既存副露 + 今回の Chi / Pon の固定面子だけで、将来の完成形に役が保証されるか。
+    ///
+    /// 場風・自風が不明な場合は既存 semantics のまま `false`。役ありだと推測しない。
+    pub fixed_melds_guarantee_yaku: bool,
+}
+
+impl CallIishantenAcceptanceDiagnostic {
+    /// 鳴いた場合 - 鳴かない場合の受け入れ残枚数差 [枚]。符号付き。
+    pub fn acceptance_remaining_delta(&self) -> i16 {
+        i16::from(self.post_call_acceptance_remaining) - i16::from(self.pass_acceptance_remaining)
+    }
+
+    /// 鳴いた場合 - 鳴かない場合の受け入れ牌種数差。符号付き。
+    pub fn acceptance_type_delta(&self) -> isize {
+        self.post_call_acceptance_type_count as isize - self.pass_acceptance_type_count as isize
+    }
+}
+
 /// 合法な `LegalAction::Chi` / `LegalAction::Pon` 1件ごとの判断内訳。
 ///
 /// 各フィールドは判定が実際にそこまで進んだ場合だけ `Some` になり、進まなかった判定は推測せず
@@ -189,6 +251,9 @@ pub struct CallCandidateDiagnostic {
     pub post_call_wait: Option<TenpaiWaitAvailability>,
     /// 鳴き後テンパイの和了牌の物理牌ごとの役診断。役を評価しなかった場合は `None`。
     pub post_call_wait_yaku: Option<Vec<CallWaitYakuDiagnostic>>,
+    /// 鳴いても1向聴のままの候補についてだけ求める観測用の受け入れ比較。対象外の候補と、
+    /// そこまで評価が進まなかった候補では `None`。
+    pub iishanten_acceptance: Option<CallIishantenAcceptanceDiagnostic>,
     pub eligible: bool,
     pub selected: bool,
     pub reason: CallDecisionReason,
@@ -254,15 +319,26 @@ pub struct CallDecisionDiagnostic {
 //
 // 合法な Chi / Pon が1件も無ければ検討自体を行わず None。1件以上ある場合は候補ごとに独立して
 // 条件を評価し、成立した候補の中から1件を選ぶ。
+//
+// `collect_iishanten_acceptance` は解析専用の [`CallIishantenAcceptanceDiagnostic`] を集めるか
+// どうかだけを切り替える。判断に使う fact の評価と候補の選択は切り替えの影響を受けない。
 pub(crate) fn evaluate_call_decision(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
+    collect_iishanten_acceptance: bool,
 ) -> Option<CallDecisionDiagnostic> {
     let mut candidates: Vec<CallCandidateDiagnostic> = legal_actions
         .iter()
         .filter_map(|action| {
             normalize_call(action).map(|(kind, tile, consumed)| {
-                evaluate_call_candidate(ctx, action, kind, tile, consumed)
+                evaluate_call_candidate(
+                    ctx,
+                    action,
+                    kind,
+                    tile,
+                    consumed,
+                    collect_iishanten_acceptance,
+                )
             })
         })
         .collect();
@@ -322,6 +398,7 @@ fn evaluate_call_candidate(
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
+    collect_iishanten_acceptance: bool,
 ) -> CallCandidateDiagnostic {
     let mut candidate = CallCandidateDiagnostic {
         action: action.clone(),
@@ -333,12 +410,20 @@ fn evaluate_call_candidate(
         post_call_discard: None,
         post_call_wait: None,
         post_call_wait_yaku: None,
+        iishanten_acceptance: None,
         eligible: false,
         selected: false,
         reason: CallDecisionReason::EligibleTenpai,
     };
 
-    let reason = evaluate_call_conditions(ctx, kind, tile, consumed, &mut candidate);
+    let reason = evaluate_call_conditions(
+        ctx,
+        kind,
+        tile,
+        consumed,
+        collect_iishanten_acceptance,
+        &mut candidate,
+    );
     candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
     candidate.reason = reason;
     candidate
@@ -346,11 +431,15 @@ fn evaluate_call_candidate(
 
 // 鳴き成立条件を順に評価し、最初に落ちた条件を理由として返す。評価が進んだ範囲の値だけを
 // candidate へ書き込み、評価しなかった項目は None のままにする。
+//
+// 判断に使う fact は `collect_iishanten_acceptance` にかかわらず常に同じ順序で評価する。この
+// flag が切り替えるのは、判断に使わない観測値を最後に足すかどうかだけ。
 fn evaluate_call_conditions(
     ctx: &GameContext,
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
+    collect_iishanten_acceptance: bool,
     candidate: &mut CallCandidateDiagnostic,
 ) -> CallDecisionReason {
     if ctx.any_opponent_reached() {
@@ -405,6 +494,16 @@ fn evaluate_call_conditions(
     };
 
     if evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
+        // 判断はここで確定していて、以降は解析用の観測値を足すだけ。
+        if collect_iishanten_acceptance {
+            candidate.iishanten_acceptance = iishanten_acceptance_diagnostic(
+                ctx,
+                &counts,
+                current_fixed_meld_count,
+                &meld,
+                &evaluation,
+            );
+        }
         candidate.post_call_discard = Some(evaluation);
         return CallDecisionReason::PostCallNotTenpai;
     }
@@ -425,6 +524,50 @@ fn evaluate_call_conditions(
     candidate.post_call_discard = Some(evaluation);
     candidate.post_call_wait = Some(wait);
     reason
+}
+
+// 鳴いても1向聴のままの候補について、鳴かない場合と鳴いた場合の受け入れを並べる。
+//
+// diagnostics が有効な場合だけ呼ばれる。返り値は成立条件にも候補の選択にも使わない。鳴いた
+// 後の向聴・受け入れは本番の打牌評価 `evaluation` が持つ値をそのまま読み、鳴かない場合の受け
+// 入れは既存の受け入れ計算へそのまま渡す。どちらもここで数え直さない。
+//
+// 対象は鳴き後の最良打牌が1向聴のままの候補だけ。テンパイになる候補は既存診断で足り、2向聴から
+// の鳴きは尺度が揃わないので対象にしない。
+fn iishanten_acceptance_diagnostic(
+    ctx: &GameContext,
+    counts: &TileCounts,
+    current_fixed_meld_count: FixedMeldCount,
+    meld: &Meld,
+    evaluation: &DiscardEvaluation,
+) -> Option<CallIishantenAcceptanceDiagnostic> {
+    let post_call_shanten = evaluation.min_shanten_after_discard();
+    if post_call_shanten != CALL_CURRENT_SHANTEN {
+        return None;
+    }
+
+    // 鳴かない場合の受け入れは、現在の副露済み面子数と見え牌をそのまま反映した既存計算。
+    let pass_acceptance = calculate_acceptance_with_fixed_melds_and_visible_tiles(
+        counts,
+        current_fixed_meld_count,
+        ctx.visible_tiles(),
+    );
+
+    // 役保証の対象は既存副露 + 今回の面子。牌種による役牌判定をこの層で持たない。
+    let mut fixed_melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+    fixed_melds.push(meld.clone());
+
+    Some(CallIishantenAcceptanceDiagnostic {
+        pass_acceptance_remaining: pass_acceptance.total_remaining(),
+        pass_acceptance_type_count: pass_acceptance.tiles.len(),
+        post_call_shanten,
+        post_call_acceptance_remaining: evaluation.acceptance_total_remaining(),
+        post_call_acceptance_type_count: evaluation.acceptance_type_count(),
+        fixed_melds_guarantee_yaku: fixed_melds_guarantee_yaku(
+            &fixed_melds,
+            damaten_baseline_context(ctx),
+        ),
+    })
 }
 
 // 鳴き後テンパイが確定してからの条件を評価する。待ち枚数・ロン可否・役の順に見る。
@@ -578,6 +721,275 @@ mod tests {
             remaining,
             yaku,
         }
+    }
+
+    // 他家 (player 1) の打牌へ反応する局面。東場東家・リーチ者なし・副露なし・ツモ牌なしで、
+    // 鳴き判断が読む fact だけを組み立てる。
+    fn reaction_context(hand: &[u8], target: u8) -> GameContext {
+        let hand_tiles = tiles(hand);
+        let mut visible = hand_tiles.clone();
+        visible.push(tile(target));
+
+        GameContext::from_parts_with_melds(
+            None,
+            hand_tiles,
+            vec![],
+            TileType::new(EAST),
+            TileType::new(EAST),
+            visible,
+            Some(0),
+            Some(0),
+            [vec![], vec![tile(target)], vec![], vec![]],
+            [false; 4],
+            Default::default(),
+        )
+        // 実際の client が局開始で確定させる値。unknown だと全ての鳴きがロン可否不明で落ちる。
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        })
+    }
+
+    fn pon_action(target: u8, consumed: &[u8]) -> LegalAction {
+        LegalAction::Pon {
+            tile: tile(target),
+            consumed: tiles(consumed),
+        }
+    }
+
+    fn chi_action(target: u8, consumed: &[u8]) -> LegalAction {
+        LegalAction::Chi {
+            tile: tile(target),
+            consumed: tiles(consumed),
+        }
+    }
+
+    fn single_candidate(
+        ctx: &GameContext,
+        action: &LegalAction,
+        collect_iishanten_acceptance: bool,
+    ) -> (CallDecisionDiagnostic, CallCandidateDiagnostic) {
+        let decision = evaluate_call_decision(
+            ctx,
+            &[action.clone(), LegalAction::None],
+            collect_iishanten_acceptance,
+        )
+        .expect("evaluated");
+        assert_eq!(decision.candidates.len(), 1);
+        let candidate = decision.candidates[0].clone();
+        (decision, candidate)
+    }
+
+    const EAST: u8 = 27;
+
+    // 234567m 68p 24s E FF の一向聴。FF を Pon して E を切っても一向聴のままで、雀頭が無い
+    // 3面子2搭子になる。
+    const IISHANTEN_PON_HAND: [u8; 13] = [4, 8, 12, 17, 20, 24, 56, 64, 76, 84, 108, 128, 129];
+    const IISHANTEN_PON_TARGET: u8 = 130;
+    const IISHANTEN_PON_CONSUMED: [u8; 2] = [128, 129];
+
+    // 345m 789m 68p 24s E FF の一向聴。4m5m で 3m を Chi して E を切っても一向聴のまま。
+    const IISHANTEN_CHI_HAND: [u8; 13] = [8, 12, 17, 24, 28, 32, 56, 64, 76, 84, 108, 128, 129];
+    const IISHANTEN_CHI_TARGET: u8 = 9;
+    const IISHANTEN_CHI_CONSUMED: [u8; 2] = [12, 17];
+
+    // 123456m 55p 78s N PP の一向聴。PP を Pon して N を切ると即テンパイ。
+    const TENPAI_PON_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
+    const TENPAI_PON_TARGET: u8 = 126;
+    const TENPAI_PON_CONSUMED: [u8; 2] = [124, 125];
+
+    // 234m 68m 68p 24s E C FF の二向聴。
+    const RYANSHANTEN_PON_HAND: [u8; 13] = [4, 8, 12, 20, 28, 56, 64, 76, 84, 108, 132, 128, 129];
+
+    #[test]
+    fn an_iishanten_call_that_stays_iishanten_compares_the_pass_and_post_call_acceptance() {
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
+
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
+
+        let acceptance = candidate
+            .iishanten_acceptance
+            .expect("1向聴 → 1向聴 が対象");
+
+        // 鳴かなかった場合の受け入れは、現在の副露済み面子数と見え牌を反映した既存計算そのもの。
+        let pass = calculate_acceptance_with_fixed_melds_and_visible_tiles(
+            &TileCounts::from_tiles(ctx.hand_tiles().iter().copied()),
+            ctx.own_fixed_meld_count().unwrap(),
+            ctx.visible_tiles(),
+        );
+        assert_eq!(acceptance.pass_acceptance_remaining, pass.total_remaining());
+        assert_eq!(acceptance.pass_acceptance_type_count, pass.tiles.len());
+
+        // 鳴いた後の向聴と受け入れは、本番の鳴き後打牌評価が持つ値そのもの。
+        let evaluation = candidate.post_call_discard.as_ref().unwrap();
+        assert_eq!(
+            acceptance.post_call_shanten,
+            evaluation.min_shanten_after_discard()
+        );
+        assert_eq!(
+            acceptance.post_call_acceptance_remaining,
+            evaluation.acceptance_total_remaining()
+        );
+        assert_eq!(
+            acceptance.post_call_acceptance_type_count,
+            evaluation.acceptance_type_count()
+        );
+
+        assert_eq!(
+            (
+                acceptance.pass_acceptance_remaining,
+                acceptance.pass_acceptance_type_count
+            ),
+            (8, 2)
+        );
+        assert_eq!(
+            (
+                acceptance.post_call_acceptance_remaining,
+                acceptance.post_call_acceptance_type_count
+            ),
+            (20, 6)
+        );
+        assert_eq!(acceptance.acceptance_remaining_delta(), 12);
+        assert_eq!(acceptance.acceptance_type_delta(), 4);
+
+        // 観測用の値で、受け入れが増えても鳴かない判断のまま。
+        assert!(!candidate.eligible);
+        assert_eq!(decision.selected, None);
+    }
+
+    #[test]
+    fn the_fixed_meld_yaku_guarantee_comes_from_the_shared_helper() {
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
+
+        let acceptance = candidate
+            .iishanten_acceptance
+            .expect("1向聴 → 1向聴 が対象");
+        let melds = vec![Meld::new(
+            MeldKind::Pon,
+            tiles(&[
+                IISHANTEN_PON_TARGET,
+                IISHANTEN_PON_CONSUMED[0],
+                IISHANTEN_PON_CONSUMED[1],
+            ]),
+            Some(tile(IISHANTEN_PON_TARGET)),
+        )];
+
+        assert_eq!(
+            acceptance.fixed_melds_guarantee_yaku,
+            fixed_melds_guarantee_yaku(&melds, damaten_baseline_context(&ctx))
+        );
+        assert!(acceptance.fixed_melds_guarantee_yaku);
+    }
+
+    #[test]
+    fn a_chi_meld_does_not_guarantee_a_yaku() {
+        let ctx = reaction_context(&IISHANTEN_CHI_HAND, IISHANTEN_CHI_TARGET);
+        let action = chi_action(IISHANTEN_CHI_TARGET, &IISHANTEN_CHI_CONSUMED);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
+
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
+
+        let acceptance = candidate
+            .iishanten_acceptance
+            .expect("1向聴 → 1向聴 が対象");
+        let melds = vec![Meld::new(
+            MeldKind::Chi,
+            tiles(&[
+                IISHANTEN_CHI_TARGET,
+                IISHANTEN_CHI_CONSUMED[0],
+                IISHANTEN_CHI_CONSUMED[1],
+            ]),
+            Some(tile(IISHANTEN_CHI_TARGET)),
+        )];
+
+        assert_eq!(
+            acceptance.fixed_melds_guarantee_yaku,
+            fixed_melds_guarantee_yaku(&melds, damaten_baseline_context(&ctx))
+        );
+        assert!(!acceptance.fixed_melds_guarantee_yaku);
+    }
+
+    #[test]
+    fn an_immediate_tenpai_call_keeps_the_existing_eligible_tenpai_decision() {
+        let ctx = reaction_context(&TENPAI_PON_HAND, TENPAI_PON_TARGET);
+        let action = pon_action(TENPAI_PON_TARGET, &TENPAI_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
+
+        assert_eq!(candidate.reason, CallDecisionReason::EligibleTenpai);
+        assert!(candidate.eligible);
+        assert_eq!(decision.selected.as_ref(), Some(&action));
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_TENPAI_SHANTEN));
+        // 即テンパイ候補は既存診断で足りるので、1向聴 → 1向聴 の観測対象にしない。
+        assert_eq!(candidate.iishanten_acceptance, None);
+
+        // 診断を集めない通常経路でも同じ判断。
+        let (production, production_candidate) = single_candidate(&ctx, &action, false);
+        assert_eq!(production_candidate, candidate);
+        assert_eq!(production.selected, decision.selected);
+    }
+
+    #[test]
+    fn two_shanten_is_not_part_of_the_iishanten_acceptance_diagnostic() {
+        let ctx = reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
+
+        assert_eq!(candidate.reason, CallDecisionReason::CurrentShantenNotOne);
+        assert_eq!(candidate.current_shanten, Some(2));
+        assert_eq!(candidate.iishanten_acceptance, None);
+        assert_eq!(decision.selected, None);
+    }
+
+    #[test]
+    fn the_iishanten_acceptance_is_not_collected_without_diagnostics() {
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+
+        // 解析専用の観測値なので、通常の判断経路では構築しない。
+        assert_eq!(candidate.iishanten_acceptance, None);
+
+        // 判断に使う fact と結論は診断の有無で変わらない。
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
+        assert!(!candidate.eligible);
+        assert_eq!(decision.selected, None);
+
+        let (_, diagnosed) = single_candidate(&ctx, &action, true);
+        assert!(diagnosed.iishanten_acceptance.is_some());
+        assert_eq!(
+            CallCandidateDiagnostic {
+                iishanten_acceptance: None,
+                ..diagnosed
+            },
+            candidate
+        );
+    }
+
+    #[test]
+    fn the_iishanten_acceptance_diagnostic_does_not_change_the_selected_action() {
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let actions = [action, LegalAction::None];
+
+        let mut agent = crate::agents::ShantenAgent;
+        let acted = crate::agent::Agent::act(&mut agent, &ctx, &actions);
+        assert_eq!(acted, LegalAction::None);
+
+        // diagnose() は観測値を集めるが、選ぶ action は act() と同じ。
+        let diagnostic = crate::agents::ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_action, acted);
+        let call = diagnostic.call.as_ref().expect("evaluated");
+        assert_eq!(call.selected, None);
+        assert!(call.candidates[0].iishanten_acceptance.is_some());
     }
 
     #[test]
