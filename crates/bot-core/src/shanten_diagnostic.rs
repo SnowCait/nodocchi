@@ -5,6 +5,7 @@ use crate::agents::{AgentActionSource, AgentDecision, ShantenAgent, log_agent_de
 use crate::call_decision::CallDecisionDiagnostic;
 use crate::combined_defense::{CombinedDefenseCategory, CombinedDefenseDiagnostic};
 use crate::context::GameContext;
+use crate::current_tenpai_continuation::CurrentTenpaiContinuationDiagnostic;
 use crate::defense::{DefenseDecisionDiagnostic, DefenseFallbackEvaluation, DefenseFallbackKind};
 use crate::discard_selection::{
     DiscardActionSelection, DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
@@ -100,6 +101,13 @@ pub struct ShantenDecisionDiagnostic {
     /// 現時点では diagnostics 専用で、打牌選択・押し引き・リーチ判断のどれにも接続していない。
     /// 構築の有無は選択結果を変えない。
     pub normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
+    /// 恒常フリテンが確定した現在聴牌 cohort の `reach now` / `defer → forced Reach` と、既存
+    /// timing policy を診断のためだけに適用した結果。
+    ///
+    /// `normal_discard_tenpai_continuation` が持つ既存 self-tsumo 比較を候補ごとに再利用しており、
+    /// この診断のために2手先評価を再実行しない。打牌選択・Reach / Damaten・production Reach
+    /// timing のどれにも接続しない。
+    pub normal_discard_current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
     /// 通常打牌評価で self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。詳細な2手先診断を構築した
@@ -271,6 +279,7 @@ pub(crate) struct DecisionDiagnostics {
     pub(crate) normal_discard_lookahead: Option<LookaheadDiagnostic>,
     normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
     normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
+    normal_discard_current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
     normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     pub(crate) reach_damaten_comparison: Option<ReachDamatenComparisonDiagnostic>,
     pub(crate) defense: Option<DefenseDecisionDiagnostic>,
@@ -313,6 +322,7 @@ impl DecisionDiagnostics {
         self.normal_discard_lookahead = selection.lookahead;
         self.normal_discard_lookahead_value = selection.lookahead_value;
         self.normal_discard_tenpai_continuation = selection.tenpai_continuation;
+        self.normal_discard_current_tenpai_continuation = selection.current_tenpai_continuation;
         self.normal_discard_self_tsumo_facts = selection.self_tsumo_facts;
         selection.selection
     }
@@ -452,6 +462,8 @@ impl DecisionDiagnostics {
             normal_discard_lookahead: self.normal_discard_lookahead,
             normal_discard_lookahead_value: self.normal_discard_lookahead_value,
             normal_discard_tenpai_continuation: self.normal_discard_tenpai_continuation,
+            normal_discard_current_tenpai_continuation: self
+                .normal_discard_current_tenpai_continuation,
             normal_discard_self_tsumo_facts: self.normal_discard_self_tsumo_facts,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,

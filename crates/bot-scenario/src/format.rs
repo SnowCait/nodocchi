@@ -1,6 +1,7 @@
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic, CallWaitYaku,
-    CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic, DamatenValue,
+    CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
+    CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
     DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
     MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
@@ -71,6 +72,15 @@ pub fn format_diagnostic(
     if let Some(section) = format_tenpai_continuation(
         diagnostic.normal_discard_tenpai_continuation.as_ref(),
         verbose,
+    ) {
+        sections.push(section);
+    }
+
+    if let Some(section) = format_current_tenpai_continuation(
+        diagnostic
+            .normal_discard_current_tenpai_continuation
+            .as_ref(),
+        diagnostic.normal_discard.as_ref(),
     ) {
         sections.push(section);
     }
@@ -1119,6 +1129,62 @@ fn format_tenpai_self_tsumo_comparison(comparison: &TenpaiSelfTsumoComparison) -
         format!(
             "        immediate Damaten tsumo: {}",
             format_self_tsumo_value(comparison.damaten_immediate_tsumo)
+        ),
+    ]
+}
+
+// 恒常フリテン確定 cohort の現在聴牌候補について、既存継続診断から再利用した self-tsumo
+// 比較と diagnostics-only の timing を並べる。selected / runner-up を同じ候補欄で追えるよう、
+// 通常打牌診断が持つ selected flag も牌種で対応付けて表示する。
+fn format_current_tenpai_continuation(
+    continuation: Option<&CurrentTenpaiContinuationDiagnostic>,
+    normal_discard: Option<&DiscardDecisionDiagnostic>,
+) -> Option<String> {
+    let continuation = continuation?;
+    if continuation.candidates.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "Current tenpai continuation".to_string(),
+        "  diagnostics only, not connected to discard selection or Reach timing".to_string(),
+    ];
+    for candidate in &continuation.candidates {
+        let selected = normal_discard.and_then(|normal_discard| {
+            normal_discard
+                .candidates
+                .iter()
+                .find(|normal| normal.evaluation.discard == candidate.discard)
+                .map(|normal| normal.selected)
+        });
+        lines.extend(format_current_tenpai_continuation_candidate(
+            candidate, selected,
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
+fn format_current_tenpai_continuation_candidate(
+    candidate: &CurrentTenpaiContinuationCandidate,
+    selected: Option<bool>,
+) -> Vec<String> {
+    vec![
+        format!("  {}", candidate.discard.to_mjai_string()),
+        format!("    selected: {}", format_optional_yes_no(selected)),
+        format!(
+            "    reach now: {}",
+            format_self_tsumo_value(candidate.reach_now())
+        ),
+        "    defer one draw".to_string(),
+        format!(
+            "      forced Reach: {}",
+            format_self_tsumo_value(candidate.defer_forced_reach())
+        ),
+        format!("    timing decision: {:?}", candidate.timing.decision),
+        format!("    timing reason: {:?}", candidate.timing.reason),
+        format!(
+            "    timing self-tsumo value: {}",
+            format_self_tsumo_value(candidate.timing_self_tsumo_value())
         ),
     ]
 }
@@ -7522,6 +7588,24 @@ mod tests {
     static TENPAI_CONTINUATION_VERBOSE: LazyLock<String> =
         LazyLock::new(|| rendered_with_lookahead(TENPAI_CONTINUATION_SCENARIO, true));
 
+    // 打 6s (2s / 5s 待ち) と打 3s (5s 待ち) が同じ current-tenpai cohort に入り、どちらも
+    // 自分の河の 5s により恒常フリテンになる。base policy は両方 Reach。
+    const CURRENT_TENPAI_CONTINUATION_SCENARIO: &str = r#"{
+        "hand": "234678m789p99s34s",
+        "draw": "6s",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "discards": ["5s", "", "", ""],
+        "remaining_tiles": 70,
+        "scores": [25000, 25000, 25000, 25000],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
+    static CURRENT_TENPAI_CONTINUATION: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
+        rendered_with_lookahead_diagnostic(CURRENT_TENPAI_CONTINUATION_SCENARIO, false)
+    });
+
     // 候補1件分の表示を取り出す。候補の見出しは字下げ2、枝の詳細は字下げ4以上なので、次に
     // 現れる字下げ2の行が候補の区切りになる。
     fn continuation_candidate(output: &str, discard: &str) -> String {
@@ -7536,6 +7620,74 @@ mod tests {
             .chain(lines.take_while(|line| line.starts_with("    ")))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn current_tenpai_continuation_candidate(output: &str, discard: TileType) -> String {
+        let heading = format!("  {}", discard.to_mjai_string());
+        let section = section(output, "Current tenpai continuation");
+        let mut lines = section.lines().skip_while(|line| *line != heading);
+        let first = lines
+            .next()
+            .unwrap_or_else(|| panic!("打 {discard:?} の候補が無い:\n{section}"));
+
+        std::iter::once(first)
+            .chain(lines.take_while(|line| line.starts_with("    ")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn current_tenpai_continuation_shows_selected_and_runner_up_timing_values() {
+        let rendered = &*CURRENT_TENPAI_CONTINUATION;
+        let continuation = rendered
+            .diagnostic
+            .normal_discard_current_tenpai_continuation
+            .as_ref()
+            .expect("最終診断が current-tenpai continuation を保持している");
+        assert_eq!(continuation.candidates.len(), 2);
+
+        let selected = rendered
+            .diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("通常打牌診断がある")
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("selected candidate がある")
+            .evaluation
+            .discard;
+        let runner_up = continuation
+            .candidates
+            .iter()
+            .find(|candidate| candidate.discard != selected)
+            .expect("runner-up も current-tenpai continuation にある")
+            .discard;
+
+        for (discard, selected_label) in [(selected, "yes"), (runner_up, "no")] {
+            let candidate = continuation.candidate(discard).expect("対象候補がある");
+            let block = current_tenpai_continuation_candidate(&rendered.rendered, discard);
+            assert!(candidate.reach_now().is_some(), "{candidate:?}");
+            assert!(candidate.defer_forced_reach().is_some(), "{candidate:?}");
+            for expected in [
+                format!("    selected: {selected_label}"),
+                format!(
+                    "    reach now: {}",
+                    format_self_tsumo_value(candidate.reach_now())
+                ),
+                format!(
+                    "      forced Reach: {}",
+                    format_self_tsumo_value(candidate.defer_forced_reach())
+                ),
+                format!("    timing decision: {:?}", candidate.timing.decision),
+                format!(
+                    "    timing self-tsumo value: {}",
+                    format_self_tsumo_value(candidate.timing_self_tsumo_value())
+                ),
+            ] {
+                assert!(block.contains(&expected), "{block}");
+            }
+        }
     }
 
     #[test]

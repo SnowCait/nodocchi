@@ -364,19 +364,27 @@ pub fn resolve_prospective_value_axis(
         .collect()
 }
 
+// pre-acceptance 軸まで同順位になる cohort の候補 index。
+//
+// prospective / self-tsumo / current tenpai の各軸と恒常フリテン分類が、同じ cohort 定義を
+// 重複して持たないための共通 helper。pre-acceptance の同順位は同値関係なので、cohort の
+// どの候補から見ても同じ集合になる。
+fn cohort_members(
+    evaluations: &[DiscardEvaluation],
+    index: usize,
+) -> impl Iterator<Item = usize> + '_ {
+    (0..evaluations.len()).filter(move |&other| {
+        compare_discard_before_acceptance(&evaluations[index], &evaluations[other]).is_none()
+    })
+}
+
 // pre-acceptance 軸まで同順位の cohort で optional axis が全件確定しているか。
-// prospective / self-tsumo / current tenpai の各軸が同じ cohort 定義を重複して持たないための
-// 共通 helper。pre-acceptance の同順位は同値関係なので、候補ごとの結論も一致する。
 fn cohort_axis_is_known(
     evaluations: &[DiscardEvaluation],
     index: usize,
     is_known: impl Fn(usize) -> bool,
 ) -> bool {
-    (0..evaluations.len())
-        .filter(|&other| {
-            compare_discard_before_acceptance(&evaluations[index], &evaluations[other]).is_none()
-        })
-        .all(is_known)
+    cohort_members(evaluations, index).all(is_known)
 }
 
 pub fn best_discard_selection_index_with_forward_metrics(
@@ -426,52 +434,95 @@ pub fn best_discard_selection_index_with_metrics(
     best
 }
 
+/// 現在聴牌 cohort の恒常フリテン分類。
+///
+/// pre-acceptance 軸まで同順位になる cohort 単位の分類で、候補の組ごとに判定を変えない。
+/// [`PermanentFuriten::Unknown`] と、恒常フリテンを評価していない候補 (`None`) は
+/// `Yes` / `No` のどちらとも推測せず [`Self::Unknown`] にする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentTenpaiFuritenCohort {
+    /// cohort の全候補が `PermanentFuriten::No`。
+    AllNonFuriten,
+    /// cohort の全候補が `PermanentFuriten::Yes`。
+    AllPermanentFuriten,
+    /// cohort の全候補が `Yes` / `No` のどちらかに確定し、両方を含む。
+    MixedKnown,
+    /// cohort に恒常フリテンを確定できない候補が1件以上ある。
+    Unknown,
+}
+
+/// 現在聴牌 cohort の恒常フリテン分類を返す。
+///
+/// cohort は既存の pre-acceptance 同順位 (Shanten → IsolatedTile → IsolatedHonor) そのもので、
+/// 分類の材料も既存の [`CurrentTenpaiMetrics::permanent_furiten`] だけ。`metrics` の範囲外は
+/// 恒常フリテンを評価していない候補として扱う。`index` が `evaluations` の範囲外なら
+/// [`CurrentTenpaiFuritenCohort::Unknown`]。
+pub fn classify_current_tenpai_furiten_cohort(
+    evaluations: &[DiscardEvaluation],
+    metrics: &[CurrentTenpaiMetrics],
+    index: usize,
+) -> CurrentTenpaiFuritenCohort {
+    if index >= evaluations.len() {
+        return CurrentTenpaiFuritenCohort::Unknown;
+    }
+
+    let mut includes_permanent_furiten = false;
+    let mut includes_non_furiten = false;
+    for other in cohort_members(evaluations, index) {
+        match metrics
+            .get(other)
+            .copied()
+            .unwrap_or_default()
+            .permanent_furiten
+        {
+            Some(PermanentFuriten::Yes) => includes_permanent_furiten = true,
+            Some(PermanentFuriten::No) => includes_non_furiten = true,
+            Some(PermanentFuriten::Unknown) | None => {
+                return CurrentTenpaiFuritenCohort::Unknown;
+            }
+        }
+    }
+
+    match (includes_permanent_furiten, includes_non_furiten) {
+        (true, true) => CurrentTenpaiFuritenCohort::MixedKnown,
+        (true, false) => CurrentTenpaiFuritenCohort::AllPermanentFuriten,
+        (false, true) => CurrentTenpaiFuritenCohort::AllNonFuriten,
+        (false, false) => CurrentTenpaiFuritenCohort::Unknown,
+    }
+}
+
 /// 現在聴牌の値軸を pre-acceptance 同順位の cohort 単位で有効化する。
 ///
 /// 全候補が非フリテンなら既存 Ron offense weighted total を維持する。恒常フリテンを1件以上
 /// 含み、全候補が `Yes` / `No` のどちらかに確定している場合は、全候補に共通する self-tsumo
 /// expected payment だけを使う。恒常フリテン unknown、または選んだ軸の値が1件でも unknown
 /// なら cohort 全体で両軸を外し、比較ごとに軸の有無が変わることを防ぐ。
+///
+/// cohort の恒常フリテン分類は [`classify_current_tenpai_furiten_cohort`] が source of truth で、
+/// この軸解決のために判定し直さない。分類そのものは新しい比較軸を作らない。
 pub fn resolve_current_tenpai_value_axis(
     evaluations: &[DiscardEvaluation],
     metrics: &[CurrentTenpaiMetrics],
 ) -> Vec<CurrentTenpaiMetrics> {
     let metric_at = |index: usize| metrics.get(index).copied().unwrap_or_default();
     let cohort_uses = |index: usize| {
-        let cohort: Vec<_> = (0..evaluations.len())
-            .filter(|&other| {
-                compare_discard_before_acceptance(&evaluations[index], &evaluations[other])
-                    .is_none()
-            })
-            .collect();
-        let all_non_furiten = cohort
-            .iter()
-            .all(|&other| metric_at(other).permanent_furiten == Some(PermanentFuriten::No));
-        let all_furiten_known = cohort.iter().all(|&other| {
-            matches!(
-                metric_at(other).permanent_furiten,
-                Some(PermanentFuriten::Yes | PermanentFuriten::No)
-            )
-        });
-        let includes_permanent_furiten = cohort
-            .iter()
-            .any(|&other| metric_at(other).permanent_furiten == Some(PermanentFuriten::Yes));
+        let cohort_is_known = |axis: fn(CurrentTenpaiMetrics) -> Option<u64>| {
+            cohort_axis_is_known(evaluations, index, |other| axis(metric_at(other)).is_some())
+        };
 
-        if all_non_furiten
-            && cohort
-                .iter()
-                .all(|&other| metric_at(other).offense_weighted_total.is_some())
-        {
-            (true, false)
-        } else if all_furiten_known
-            && includes_permanent_furiten
-            && cohort
-                .iter()
-                .all(|&other| metric_at(other).expected_self_tsumo_value.is_some())
-        {
-            (false, true)
-        } else {
-            (false, false)
+        match classify_current_tenpai_furiten_cohort(evaluations, metrics, index) {
+            CurrentTenpaiFuritenCohort::AllNonFuriten
+                if cohort_is_known(|metric| metric.offense_weighted_total) =>
+            {
+                (true, false)
+            }
+            CurrentTenpaiFuritenCohort::AllPermanentFuriten
+            | CurrentTenpaiFuritenCohort::MixedKnown
+                if cohort_is_known(|metric| metric.expected_self_tsumo_value) =>
+            {
+                (false, true)
+            }
+            _ => (false, false),
         }
     };
 
@@ -1116,6 +1167,71 @@ mod tests {
         assert_eq!(
             comparison.reason,
             DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn the_current_tenpai_furiten_cohort_classifies_the_pre_acceptance_tie() {
+        // pre-acceptance 軸まで同順位の2候補。分類の材料は恒常フリテンだけで、候補の組ごとに
+        // 変わらない。
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        let cases = [
+            (
+                [PermanentFuriten::No, PermanentFuriten::No],
+                CurrentTenpaiFuritenCohort::AllNonFuriten,
+            ),
+            (
+                [PermanentFuriten::Yes, PermanentFuriten::Yes],
+                CurrentTenpaiFuritenCohort::AllPermanentFuriten,
+            ),
+            (
+                [PermanentFuriten::No, PermanentFuriten::Yes],
+                CurrentTenpaiFuritenCohort::MixedKnown,
+            ),
+            (
+                [PermanentFuriten::Yes, PermanentFuriten::Unknown],
+                CurrentTenpaiFuritenCohort::Unknown,
+            ),
+        ];
+
+        for (furiten, expected) in cases {
+            let metrics = vec![
+                current_metric(furiten[0], Some(1), Some(1)),
+                current_metric(furiten[1], Some(1), Some(1)),
+            ];
+            for index in 0..evaluations.len() {
+                assert_eq!(
+                    classify_current_tenpai_furiten_cohort(&evaluations, &metrics, index),
+                    expected,
+                    "furiten={furiten:?} index={index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_current_tenpai_furiten_cohort_only_covers_the_pre_acceptance_tie() {
+        // 向聴数が違う候補は pre-acceptance で先に決着するので同じ cohort に入らない。現在
+        // 聴牌の評価対象外は恒常フリテンを持たず、その候補自身の cohort は unknown になる。
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 1, &[("3p", 3)]),
+        ];
+        let metrics = vec![
+            current_metric(PermanentFuriten::Yes, Some(1), Some(1)),
+            CurrentTenpaiMetrics::default(),
+        ];
+
+        assert_eq!(
+            classify_current_tenpai_furiten_cohort(&evaluations, &metrics, 0),
+            CurrentTenpaiFuritenCohort::AllPermanentFuriten
+        );
+        assert_eq!(
+            classify_current_tenpai_furiten_cohort(&evaluations, &metrics, 1),
+            CurrentTenpaiFuritenCohort::Unknown
         );
     }
 

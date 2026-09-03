@@ -4560,6 +4560,7 @@ pub(crate) mod tests {
                 normal_discard_lookahead: None,
                 normal_discard_lookahead_value: None,
                 normal_discard_tenpai_continuation: None,
+                normal_discard_current_tenpai_continuation: None,
                 ..with
             },
             without
