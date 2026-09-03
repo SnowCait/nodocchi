@@ -19,19 +19,15 @@ use crate::ron_opportunity::reach_public_safety_after_discard;
 use crate::shanten_diagnostic::{
     DecisionDiagnostics, DiagnosticOptions, ShantenDecisionDiagnostic,
 };
-use crate::shanten_test_support::{fold_actions, fold_under_reach_context};
+use crate::shanten_test_support::{
+    TENPAI_DRAWN, TENPAI_HAND, TENPAI_SCARCE_VISIBLE, dahai, fold_actions,
+    fold_under_reach_context, tenpai_actions, tenpai_context, tile, weak_tenpai_actions,
+    weak_tenpai_under_reach_context,
+};
 use crate::tenpai_continuation::{
     TenpaiSelfTsumoComparison, selected_tenpai_self_tsumo_comparison,
 };
 use bot_logic::{HistoryFuritenFacts, PermanentFuriten, RiichiStatus, TileId, TileType, WinMethod};
-
-fn tile(value: u8) -> TileId {
-    TileId::new(value).unwrap()
-}
-
-fn dahai(value: u8) -> LegalAction {
-    LegalAction::Dahai { tile: tile(value) }
-}
 
 fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
     let mut agent = ShantenAgent;
@@ -96,78 +92,10 @@ fn three_sided_actions() -> Vec<LegalAction> {
     vec![dahai(36), dahai(0)]
 }
 
-const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 44, 48, 89, 90];
-const TENPAI_DRAWN: u8 = 116;
-
-// 2p / 5p を3枚ずつ見せて、テンパイのまま待ち枚数だけを threshold 未満(2枚)にする見え牌。
-pub(crate) const TENPAI_SCARCE_VISIBLE: [u8; 6] = [40, 41, 42, 53, 54, 55];
-
-pub(crate) fn tenpai_context(extra_visible: &[u8]) -> GameContext {
-    let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
-    let mut visible = hand.clone();
-    visible.push(tile(TENPAI_DRAWN));
-    visible.extend(extra_visible.iter().map(|&value| tile(value)));
-    GameContext::from_parts_with_visible_tiles(
-        Some(tile(TENPAI_DRAWN)),
-        hand,
-        vec![],
-        None,
-        None,
-        visible,
-    )
-}
-
 // 同じテンパイ手牌で visible tiles だけを空にした局面。
 fn tenpai_context_without_visible_tiles() -> GameContext {
     let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
     GameContext::from_parts(Some(tile(TENPAI_DRAWN)), hand)
-}
-
-pub(crate) fn tenpai_actions() -> Vec<LegalAction> {
-    tenpai_dahai_actions()
-        .into_iter()
-        .chain([LegalAction::Reach])
-        .collect()
-}
-
-fn tenpai_dahai_actions() -> Vec<LegalAction> {
-    TENPAI_HAND
-        .iter()
-        .map(|&value| dahai(value))
-        .chain([dahai(TENPAI_DRAWN)])
-        .collect()
-}
-
-// 待ち枚数が足りないテンパイで他家リーチを受ける局面。リーチ者の河に 1m を置いて手牌の
-// 1m を現物にし、2m を4枚見えにする。
-const WEAK_TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
-const WEAK_TENPAI_DRAWN: u8 = 88;
-
-fn weak_tenpai_under_reach_context() -> GameContext {
-    weak_tenpai_under_reach_context_with(None, [false, true, false, false])
-}
-
-fn weak_tenpai_under_reach_context_with(oya: Option<u8>, reached: [bool; 4]) -> GameContext {
-    GameContext::from_parts_with_table_state(
-        Some(tile(WEAK_TENPAI_DRAWN)),
-        WEAK_TENPAI_HAND.iter().map(|&value| tile(value)).collect(),
-        vec![],
-        None,
-        None,
-        [4u8, 5, 6, 7].iter().map(|&value| tile(value)).collect(),
-        Some(0),
-        oya,
-        [vec![], vec![tile(1)], vec![], vec![]],
-        reached,
-    )
-}
-
-fn weak_tenpai_actions() -> Vec<LegalAction> {
-    WEAK_TENPAI_HAND
-        .iter()
-        .map(|&value| dahai(value))
-        .chain([dahai(WEAK_TENPAI_DRAWN)])
-        .collect()
 }
 
 // 123456789m 123p 5s + ツモ 北。打 北 で 5s 単騎テンパイになり、待ちは3枚だけ。

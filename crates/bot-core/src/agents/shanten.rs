@@ -555,20 +555,17 @@ mod tests {
         STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
     };
     use crate::shanten_test_support::{
-        OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, opponent_meld_actions, pon_meld,
+        OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, TENPAI_DRAWN, dahai, fold_actions,
+        fold_under_reach_context, opponent_meld_actions, opponent_reach_context,
+        opponent_reach_context_with_visible, pon_meld, suited_reach_context,
+        suited_reach_context_with_reached, tenpai_actions, tenpai_context, tenpai_dahai_actions,
+        tenpai_under_reach_context, tile, unavailable_reach_meld, weak_tenpai_actions,
+        weak_tenpai_under_reach_context, weak_tenpai_under_reach_context_with,
     };
     use bot_logic::{
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
         TileId, TileType, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     };
-
-    fn tile(value: u8) -> TileId {
-        TileId::new(value).unwrap()
-    }
-
-    fn dahai(value: u8) -> LegalAction {
-        LegalAction::Dahai { tile: tile(value) }
-    }
 
     #[derive(Debug)]
     struct DefenseTraceSubscriber;
@@ -595,11 +592,6 @@ mod tests {
 
     fn with_defense_trace<T>(f: impl FnOnce() -> T) -> T {
         tracing::subscriber::with_default(DefenseTraceSubscriber, f)
-    }
-
-    fn unavailable_reach_meld() -> crate::meld::Meld {
-        let tiles = vec![tile(68), tile(69), tile(70)];
-        crate::meld::Meld::new(crate::meld::MeldKind::Pon, tiles.clone(), Some(tiles[0]))
     }
 
     #[test]
@@ -782,76 +774,10 @@ mod tests {
         assert_eq!(tile.tile_type().to_mjai_string(), "9p");
     }
 
-    // 123m456m789m 34p 55s + ツモ 北。打 北 で 2p / 5p の両面テンパイになり、待ちは8枚。
-    const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 44, 48, 89, 90];
-    const TENPAI_DRAWN: u8 = 116;
-
-    fn tenpai_context(extra_visible: &[u8]) -> GameContext {
-        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
-        let mut visible = hand.clone();
-        visible.push(tile(TENPAI_DRAWN));
-        visible.extend(extra_visible.iter().map(|&value| tile(value)));
-        GameContext::from_parts_with_visible_tiles(
-            Some(tile(TENPAI_DRAWN)),
-            hand,
-            vec![],
-            None,
-            None,
-            visible,
-        )
-    }
-
-    fn tenpai_actions() -> Vec<LegalAction> {
-        tenpai_dahai_actions()
-            .into_iter()
-            .chain([LegalAction::Reach])
-            .collect()
-    }
-
-    fn tenpai_dahai_actions() -> Vec<LegalAction> {
-        TENPAI_HAND
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(TENPAI_DRAWN)])
-            .collect()
-    }
-
     fn reach_diagnostic(ctx: &GameContext, actions: &[LegalAction]) -> ReachDecisionDiagnostic {
         ShantenAgent::diagnose(ctx, actions)
             .reach
             .expect("リーチを検討している")
-    }
-
-    // 待ち枚数が足りないテンパイで他家リーチを受ける局面。リーチ者の河に 1m を置いて手牌の
-    // 1m を現物にし、2m を4枚見えにする。
-    const WEAK_TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
-    const WEAK_TENPAI_DRAWN: u8 = 88;
-
-    fn weak_tenpai_under_reach_context() -> GameContext {
-        weak_tenpai_under_reach_context_with(None, [false, true, false, false])
-    }
-
-    fn weak_tenpai_under_reach_context_with(oya: Option<u8>, reached: [bool; 4]) -> GameContext {
-        GameContext::from_parts_with_table_state(
-            Some(tile(WEAK_TENPAI_DRAWN)),
-            WEAK_TENPAI_HAND.iter().map(|&value| tile(value)).collect(),
-            vec![],
-            None,
-            None,
-            [4u8, 5, 6, 7].iter().map(|&value| tile(value)).collect(),
-            Some(0),
-            oya,
-            [vec![], vec![tile(1)], vec![], vec![]],
-            reached,
-        )
-    }
-
-    fn weak_tenpai_actions() -> Vec<LegalAction> {
-        WEAK_TENPAI_HAND
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(WEAK_TENPAI_DRAWN)])
-            .collect()
     }
 
     // 114477m 114477p + 1s + ツモ E。どちらの孤立牌を切っても七対子単騎テンパイになり、
@@ -919,23 +845,6 @@ mod tests {
         let expected = select_discard_action(&ctx, &actions).unwrap();
 
         assert_eq!(agent.act(&ctx, &actions), expected);
-    }
-
-    // 他家(player 1)がリーチしており、その河に 16(5m) がある局面。自分は player 0。
-    fn opponent_reach_context(drawn_tile: Option<u8>, hand_values: &[u8]) -> GameContext {
-        let discards = [vec![], vec![tile(16)], vec![], vec![]];
-        GameContext::from_parts_with_table_state(
-            drawn_tile.map(tile),
-            hand_values.iter().map(|&value| tile(value)).collect(),
-            vec![],
-            None,
-            None,
-            Vec::new(),
-            Some(0),
-            None,
-            discards,
-            [false, true, false, false],
-        )
     }
 
     #[test]
@@ -1029,27 +938,6 @@ mod tests {
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::None];
         assert_eq!(agent.act(&ctx, &actions), dahai(16));
-    }
-
-    // 他家(player 1)がリーチしており、その河に 16(5m) がある局面に visible_tiles を加える。
-    fn opponent_reach_context_with_visible(
-        drawn_tile: Option<u8>,
-        hand_values: &[u8],
-        visible_values: &[u8],
-    ) -> GameContext {
-        let discards = [vec![], vec![tile(16)], vec![], vec![]];
-        GameContext::from_parts_with_table_state(
-            drawn_tile.map(tile),
-            hand_values.iter().map(|&value| tile(value)).collect(),
-            vec![],
-            None,
-            None,
-            visible_values.iter().map(|&value| tile(value)).collect(),
-            Some(0),
-            None,
-            discards,
-            [false, true, false, false],
-        )
     }
 
     #[test]
@@ -1237,61 +1125,6 @@ mod tests {
         assert_eq!(agent.act(&ctx, &[dahai(120), dahai(135)]), dahai(135));
     }
 
-    // 他家(player 1)がリーチしている局面。河・visible・手牌・引き牌を個別に指定する。
-    fn suited_reach_context(
-        drawn_tile: Option<u8>,
-        hand_values: &[u8],
-        visible_values: &[u8],
-        reacher_discards: &[u8],
-    ) -> GameContext {
-        suited_reach_context_with_reached(
-            drawn_tile,
-            hand_values,
-            visible_values,
-            reacher_discards,
-            [false, true, false, false],
-        )
-    }
-
-    fn suited_reach_context_with_reached(
-        drawn_tile: Option<u8>,
-        hand_values: &[u8],
-        visible_values: &[u8],
-        reacher_discards: &[u8],
-        reached: [bool; 4],
-    ) -> GameContext {
-        let discards = [
-            vec![],
-            reacher_discards.iter().map(|&value| tile(value)).collect(),
-            vec![],
-            vec![],
-        ];
-        let mut melds: [Vec<_>; 4] = Default::default();
-        if reached.iter().filter(|&&is_reached| is_reached).count() >= 2 {
-            let unavailable_player = reached
-                .iter()
-                .enumerate()
-                .filter(|(player, is_reached)| *player != 0 && **is_reached)
-                .nth(1)
-                .map(|(player, _)| player)
-                .expect("two reached opponents");
-            melds[unavailable_player] = vec![unavailable_reach_meld()];
-        }
-        GameContext::from_parts_with_melds(
-            drawn_tile.map(tile),
-            hand_values.iter().map(|&value| tile(value)).collect(),
-            vec![],
-            None,
-            None,
-            visible_values.iter().map(|&value| tile(value)).collect(),
-            Some(0),
-            None,
-            discards,
-            reached,
-            melds,
-        )
-    }
-
     #[test]
     fn prefers_genbutsu_fallback_over_suited_safety_fallback() {
         let mut agent = ShantenAgent;
@@ -1469,26 +1302,6 @@ mod tests {
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 
-    // テンパイ手牌で他家リーチを受ける局面。oya と reached を指定してモードを作り分ける。
-    // visible は空にして、待ち枚数の見え牌補正が入らない状態で押し引きの分岐だけを確認する。
-    fn tenpai_under_reach_context(oya: Option<u8>, reached: [bool; 4]) -> GameContext {
-        let hand: Vec<_> = TENPAI_HAND.iter().map(|&value| tile(value)).collect();
-        // リーチ者(player 1)の河に 5m を置き、テンパイ手牌の 5m を現物にする。
-        let discards = [vec![], vec![tile(16)], vec![], vec![]];
-        GameContext::from_parts_with_table_state(
-            Some(tile(TENPAI_DRAWN)),
-            hand,
-            vec![],
-            None,
-            None,
-            Vec::new(),
-            Some(0),
-            oya,
-            discards,
-            reached,
-        )
-    }
-
     #[test]
     fn push_tenpai_against_single_non_dealer_reaches() {
         let mut agent = ShantenAgent;
@@ -1575,35 +1388,6 @@ mod tests {
             assert_eq!(decision.mode, PushPullMode::Fold);
             assert_eq!(decision.reason, PushPullReason::WeakTenpaiAgainstReach);
         }
-    }
-
-    // 2向聴以上で他家リーチを受ける Fold 局面。リーチ者の河に 5s を置き手牌の 5s を現物にする。
-    const FOLD_HAND: [u8; 13] = [0, 4, 17, 20, 36, 40, 56, 60, 89, 108, 112, 120, 124];
-    const FOLD_DRAWN: u8 = 16;
-
-    fn fold_under_reach_context() -> GameContext {
-        let hand: Vec<_> = FOLD_HAND.iter().map(|&value| tile(value)).collect();
-        let discards = [vec![], vec![tile(89)], vec![], vec![]];
-        GameContext::from_parts_with_table_state(
-            Some(tile(FOLD_DRAWN)),
-            hand,
-            vec![],
-            None,
-            None,
-            Vec::new(),
-            Some(0),
-            None,
-            discards,
-            [false, true, false, false],
-        )
-    }
-
-    fn fold_actions() -> Vec<LegalAction> {
-        FOLD_HAND
-            .iter()
-            .map(|&value| dahai(value))
-            .chain([dahai(FOLD_DRAWN)])
-            .collect()
     }
 
     #[test]

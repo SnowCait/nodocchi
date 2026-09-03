@@ -1,7 +1,7 @@
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::meld::{Meld, MeldKind};
-use bot_logic::{HistoryFuritenFacts, TileId, TileType};
+use bot_logic::TileId;
 
 pub(crate) fn tile(value: u8) -> TileId {
     TileId::new(value).unwrap()
@@ -19,8 +19,8 @@ pub(crate) fn pon_meld() -> Meld {
     )
 }
 
-const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 44, 48, 89, 90];
-const TENPAI_DRAWN: u8 = 116;
+pub(crate) const TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 44, 48, 89, 90];
+pub(crate) const TENPAI_DRAWN: u8 = 116;
 pub(crate) const TENPAI_SCARCE_VISIBLE: [u8; 6] = [40, 41, 42, 53, 54, 55];
 
 pub(crate) fn tenpai_context(extra_visible: &[u8]) -> GameContext {
@@ -72,7 +72,16 @@ pub(crate) fn tenpai_under_reach_context(oya: Option<u8>, reached: [bool; 4]) ->
 const WEAK_TENPAI_HAND: [u8; 13] = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
 const WEAK_TENPAI_DRAWN: u8 = 88;
 
+// 待ち枚数が足りないテンパイで他家リーチを受ける局面。リーチ者の河に 1m を置いて手牌の
+// 1m を現物にし、2m を4枚見えにする。
 pub(crate) fn weak_tenpai_under_reach_context() -> GameContext {
+    weak_tenpai_under_reach_context_with(None, [false, true, false, false])
+}
+
+pub(crate) fn weak_tenpai_under_reach_context_with(
+    oya: Option<u8>,
+    reached: [bool; 4],
+) -> GameContext {
     GameContext::from_parts_with_table_state(
         Some(tile(WEAK_TENPAI_DRAWN)),
         WEAK_TENPAI_HAND.iter().map(|&value| tile(value)).collect(),
@@ -81,9 +90,9 @@ pub(crate) fn weak_tenpai_under_reach_context() -> GameContext {
         None,
         [4u8, 5, 6, 7].iter().map(|&value| tile(value)).collect(),
         Some(0),
-        None,
+        oya,
         [vec![], vec![tile(1)], vec![], vec![]],
-        [false, true, false, false],
+        reached,
     )
 }
 
@@ -145,7 +154,7 @@ pub(crate) fn opponent_reach_context_with_visible(
     )
 }
 
-fn unavailable_reach_meld() -> Meld {
+pub(crate) fn unavailable_reach_meld() -> Meld {
     let tiles = vec![tile(68), tile(69), tile(70)];
     Meld::new(MeldKind::Pon, tiles.clone(), Some(tiles[0]))
 }
@@ -213,47 +222,4 @@ pub(crate) fn opponent_meld_actions() -> Vec<LegalAction> {
         .map(|&value| dahai(value))
         .chain([dahai(OPPONENT_MELD_DRAW)])
         .collect()
-}
-
-pub(crate) fn pinfu_tanyao_context_and_actions() -> (GameContext, Vec<LegalAction>) {
-    const HAND: [&str; 13] = [
-        "2m", "3m", "4m", "6m", "7m", "8m", "2p", "2p", "3s", "4s", "5s", "4s", "5s",
-    ];
-
-    let mut used = [false; 136];
-    let mut allocate = |value: &str| {
-        let tile_type = TileType::from_mjai_type_str(value).unwrap();
-        let tile = TileId::copies(tile_type)
-            .find(|tile| !tile.is_red() && !used[tile.index()])
-            .expect("fixture does not reuse a physical tile");
-        used[tile.index()] = true;
-        tile
-    };
-    let hand: Vec<_> = HAND.iter().map(|value| allocate(value)).collect();
-    let drawn = allocate("N");
-    let visible = hand.iter().chain([&drawn]).copied().collect();
-    let actions = hand
-        .iter()
-        .chain([&drawn])
-        .map(|&tile| LegalAction::Dahai { tile })
-        .chain([LegalAction::Reach])
-        .collect();
-    let context = GameContext::from_parts_with_table_state(
-        Some(drawn),
-        hand,
-        vec![],
-        TileType::from_mjai_type_str("E").ok(),
-        TileType::from_mjai_type_str("S").ok(),
-        visible,
-        Some(0),
-        Some(3),
-        Default::default(),
-        [false; 4],
-    )
-    .with_history_furiten_facts(HistoryFuritenFacts {
-        same_turn: Some(false),
-        riichi_missed_win: Some(false),
-    });
-
-    (context, actions)
 }

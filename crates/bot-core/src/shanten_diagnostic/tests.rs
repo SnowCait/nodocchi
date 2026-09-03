@@ -12,10 +12,11 @@ use crate::push_pull::{
 use crate::reach_policy::ReachDecisionReason;
 use crate::ryukyoku_decision::tests::{KOKUSHI_FOUR_HAND, hand_tiles};
 use crate::shanten_test_support::{
-    dahai, fold_actions, fold_under_reach_context, opponent_reach_context,
-    opponent_reach_context_with_visible, pinfu_tanyao_context_and_actions, suited_reach_context,
-    suited_reach_context_with_reached, tenpai_actions, tenpai_context, tenpai_dahai_actions,
-    tenpai_under_reach_context, tile, weak_tenpai_actions, weak_tenpai_under_reach_context,
+    OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, dahai, fold_actions, fold_under_reach_context,
+    opponent_meld_actions, opponent_reach_context, opponent_reach_context_with_visible, pon_meld,
+    suited_reach_context, suited_reach_context_with_reached, tenpai_actions, tenpai_context,
+    tenpai_dahai_actions, tenpai_under_reach_context, tile, weak_tenpai_actions,
+    weak_tenpai_under_reach_context,
 };
 use crate::threat::diagnose_player_threats;
 use bot_logic::{
@@ -37,6 +38,49 @@ fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> ShantenD
         agent.decide(ctx, actions).source
     );
     diagnostic
+}
+
+fn pinfu_tanyao_context_and_actions() -> (GameContext, Vec<LegalAction>) {
+    const HAND: [&str; 13] = [
+        "2m", "3m", "4m", "6m", "7m", "8m", "2p", "2p", "3s", "4s", "5s", "4s", "5s",
+    ];
+
+    let mut used = [false; 136];
+    let mut allocate = |value: &str| {
+        let tile_type = TileType::from_mjai_type_str(value).unwrap();
+        let tile = TileId::copies(tile_type)
+            .find(|tile| !tile.is_red() && !used[tile.index()])
+            .expect("fixture does not reuse a physical tile");
+        used[tile.index()] = true;
+        tile
+    };
+    let hand: Vec<_> = HAND.iter().map(|value| allocate(value)).collect();
+    let drawn = allocate("N");
+    let visible = hand.iter().chain([&drawn]).copied().collect();
+    let actions = hand
+        .iter()
+        .chain([&drawn])
+        .map(|&tile| LegalAction::Dahai { tile })
+        .chain([LegalAction::Reach])
+        .collect();
+    let context = GameContext::from_parts_with_table_state(
+        Some(drawn),
+        hand,
+        vec![],
+        TileType::from_mjai_type_str("E").ok(),
+        TileType::from_mjai_type_str("S").ok(),
+        visible,
+        Some(0),
+        Some(3),
+        Default::default(),
+        [false; 4],
+    )
+    .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+        same_turn: Some(false),
+        riichi_missed_win: Some(false),
+    });
+
+    (context, actions)
 }
 
 #[test]
@@ -486,14 +530,6 @@ fn diagnose_reports_none_source_for_empty_actions() {
     assert!(normal_discard.candidates.is_empty());
 }
 
-fn pon_meld() -> crate::meld::Meld {
-    crate::meld::Meld::new(
-        crate::meld::MeldKind::Pon,
-        vec![tile(108), tile(109), tile(110)],
-        Some(tile(108)),
-    )
-}
-
 fn context_with_own_melds(
     player_id: Option<u8>,
     hand_values: &[u8],
@@ -633,10 +669,6 @@ fn diagnose_reports_no_own_fixed_meld_count_without_player_id() {
     assert_eq!(diagnostic.own_fixed_meld_count, None);
 }
 
-// 123456789m 123p 5s + ツモ N。他家 (player 1) だけが副露しており、リーチ者はいない。
-const OPPONENT_MELD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
-const OPPONENT_MELD_DRAW: u8 = 120;
-
 fn red_five_chi() -> crate::meld::Meld {
     crate::meld::Meld::new(
         crate::meld::MeldKind::Chi,
@@ -712,14 +744,6 @@ fn opponent_meld_context_with_hand(
         [false; 4],
         melds,
     )
-}
-
-fn opponent_meld_actions() -> Vec<LegalAction> {
-    OPPONENT_MELD_HAND
-        .iter()
-        .map(|&value| dahai(value))
-        .chain([dahai(OPPONENT_MELD_DRAW)])
-        .collect()
 }
 
 #[test]
