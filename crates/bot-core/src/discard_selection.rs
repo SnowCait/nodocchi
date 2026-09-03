@@ -125,7 +125,7 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     /// 恒常フリテンが確定した現在聴牌 cohort の、`reach now` / `defer → forced Reach` 観測。
     ///
     /// 2手先診断を要求した場合だけ持つ。対象は AllPermanentFuriten cohort かつ base offense
-    /// mode がリーチの候補だけで、1候補ごとに既存の継続評価を1回走らせる。
+    /// mode がリーチの候補だけで、構築済み `tenpai_continuation` の self-tsumo 比較を再利用する。
     ///
     /// 打牌選択にもリーチ判断にもリーチ timing にも使わない解析専用の情報で、選択結果を
     /// 変えない。
@@ -280,18 +280,15 @@ pub(crate) fn select_discard_action_with_diagnostic(
                 })
             });
 
-    // 恒常フリテン確定 cohort の継続 timing は1候補ごとに既存の継続評価を走らせる重い経路
-    // なので、2手先診断を要求した場合だけ構築する。cohort 分類も base offense mode も、
-    // 打牌選択が既に求めた値そのものを渡す。
-    let current_tenpai_continuation = scope.builds_lookahead().then(|| {
+    // 恒常フリテン確定 cohort の継続 timing は構築済みの2手先継続診断から self-tsumo 比較を
+    // 取り出し、このために探索・将来打点・待ち・scoring を再実行しない。cohort 分類も base
+    // offense mode も、打牌選択が既に求めた値そのものを渡す。
+    let current_tenpai_continuation = tenpai_continuation.as_ref().map(|tenpai_continuation| {
         diagnose_current_tenpai_continuation(&CurrentTenpaiContinuationInputs {
-            context,
             evaluations: &legal.evaluations,
             metrics: &current_tenpai_metrics(&current_tenpai),
             offense_modes: &current_tenpai_offense_modes(&current_tenpai),
-            reach_legal: legal_actions
-                .iter()
-                .any(|action| matches!(action, LegalAction::Reach)),
+            tenpai_continuation,
         })
     });
 

@@ -108,10 +108,10 @@
 //! `defer → forced Reach` の大小だけを見る。全合法 Dahai 候補の継続枝を production で構築する
 //! ことはない。
 //!
-//! 同じ1候補 helper ([`tenpai_candidate_self_tsumo_comparison`]) は、恒常フリテンが確定した
-//! 現在聴牌 cohort の候補ごとの観測 ([`crate::current_tenpai_continuation`]) でも共有する。
-//! そちらは診断を要求した経路だけで構築する diagnostics 専用で、打牌選択にも Reach timing にも
-//! 接続していない。
+//! 恒常フリテンが確定した現在聴牌 cohort の候補ごとの観測
+//! ([`crate::current_tenpai_continuation`]) は、診断を要求した経路で既に構築済みの
+//! [`TenpaiContinuationDiagnostic`] から `self_tsumo` を再利用し、1候補 helper を再実行しない。
+//! その観測も diagnostics 専用で、打牌選択にも Reach timing にも接続していない。
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,

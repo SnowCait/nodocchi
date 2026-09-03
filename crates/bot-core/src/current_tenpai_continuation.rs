@@ -6,9 +6,10 @@
 //!   → reach now / defer → forced Reach
 //! ```
 //!
-//! 既存 [`crate::tenpai_continuation`] の1候補評価をそのまま呼ぶだけで、この層は探索も打点
-//! 計算も待ち計算も持たない。向聴・受け入れ・次打牌・待ち・打点・役判定はすべて既存基盤の
-//! 結論そのままで、継続 horizon も既存の「1ツモ → 1打牌 → 次の聴牌」から延ばさない。
+//! 既に構築済みの [`TenpaiContinuationDiagnostic`] から候補ごとの self-tsumo 比較を取り出す
+//! だけで、この層は探索も打点計算も待ち計算も持たない。向聴・受け入れ・次打牌・待ち・打点・
+//! 役判定はすべて既存診断の結論そのままで、継続 horizon も既存の「1ツモ → 1打牌 → 次の
+//! 聴牌」から延ばさない。
 //!
 //! # 対象を AllPermanentFuriten だけにする理由
 //!
@@ -39,23 +40,20 @@
 //!
 //! # 構築する経路
 //!
-//! 1候補につき既存2手先評価を1回走らせる重い経路なので、診断を要求した経路だけで構築する。
-//! 通常の `act()` / 打牌選択が全候補分を構築することはなく、既存 current-tenpai comparator の
-//! 計算量も変わらない。
+//! 既存2手先診断を要求した経路だけで構築する。通常の `act()` / 打牌選択が全候補分を構築する
+//! ことはなく、この診断のために2手先評価を再実行しない。
 
 use bot_logic::{
     CurrentTenpaiFuritenCohort, CurrentTenpaiMetrics, DiscardEvaluation, TileType,
     classify_current_tenpai_furiten_cohort,
 };
 
-use crate::context::GameContext;
 use crate::offense_value::TenpaiOffenseMode;
 use crate::reach_policy::{
-    ReachTimingDecision, ReachTimingDiagnostic, decide_permanent_furiten_reach_timing,
+    ReachTimingDecision, ReachTimingDiagnostic, ReachTimingReason,
+    decide_permanent_furiten_reach_timing,
 };
-use crate::tenpai_continuation::{
-    TenpaiSelfTsumoComparison, tenpai_candidate_self_tsumo_comparison,
-};
+use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, TenpaiSelfTsumoComparison};
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
@@ -105,6 +103,9 @@ impl CurrentTenpaiContinuationCandidate {
     /// [`ReachTimingDecision::DeferReach`] なら `defer → forced Reach` の値そのもの。比較不能
     /// で base policy のリーチを維持した場合は 0 点にせず `None`。
     pub fn timing_self_tsumo_value(&self) -> Option<u64> {
+        if self.timing.reason == ReachTimingReason::SelfTsumoComparisonUnknown {
+            return None;
+        }
         match self.timing.decision {
             ReachTimingDecision::ReachNow => self.reach_now(),
             ReachTimingDecision::DeferReach => self.defer_forced_reach(),
@@ -117,14 +118,13 @@ impl CurrentTenpaiContinuationCandidate {
 /// `evaluations` / `metrics` / `offense_modes` は打牌選択が既に構築・使用した値そのもので、
 /// 同じ候補集合から作った同じ順序のものを渡す。
 pub(crate) struct CurrentTenpaiContinuationInputs<'a> {
-    pub context: &'a GameContext,
     pub evaluations: &'a [DiscardEvaluation],
     /// 打牌選択が cohort 単位の軸解決へ渡すものと同じ現在聴牌 metric。
     pub metrics: &'a [CurrentTenpaiMetrics],
     /// 候補ごとの既存 base offense mode。現在聴牌の評価対象外は `None`。
     pub offense_modes: &'a [Option<TenpaiOffenseMode>],
-    /// 現在局面の合法手に [`LegalAction::Reach`](crate::action::LegalAction::Reach) があるか。
-    pub reach_legal: bool,
+    /// 同じ全候補について既に構築済みの2手先継続診断。この診断の `self_tsumo` を再利用する。
+    pub tenpai_continuation: &'a TenpaiContinuationDiagnostic,
 }
 
 /// 対象候補について `reach now` と `defer → forced Reach` を観測する。
@@ -139,11 +139,10 @@ pub(crate) fn diagnose_current_tenpai_continuation(
         candidates: continuation_targets(inputs.evaluations, inputs.metrics, inputs.offense_modes)
             .filter_map(|index| {
                 let evaluation = &inputs.evaluations[index];
-                let self_tsumo = tenpai_candidate_self_tsumo_comparison(
-                    inputs.context,
-                    evaluation,
-                    inputs.reach_legal,
-                )?;
+                let self_tsumo = inputs
+                    .tenpai_continuation
+                    .candidate(evaluation.discard)?
+                    .self_tsumo;
                 Some(CurrentTenpaiContinuationCandidate {
                     discard: evaluation.discard,
                     timing: decide_permanent_furiten_reach_timing(
@@ -184,7 +183,8 @@ mod tests {
     use bot_logic::{HistoryFuritenFacts, TileId};
 
     use crate::action::LegalAction;
-    use crate::context::TableStateFacts;
+    use crate::agents::{DiagnosticOptions, ShantenAgent};
+    use crate::context::{GameContext, TableStateFacts};
     use crate::discard_selection::{
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
@@ -379,6 +379,40 @@ mod tests {
     }
 
     #[test]
+    fn current_tenpai_timing_reuses_the_existing_continuation_self_tsumo() {
+        let selection = &*FURITEN_CASE;
+        let existing = selection
+            .tenpai_continuation
+            .as_ref()
+            .expect("既存2手先継続診断がある");
+
+        for candidate in &continuation(selection).candidates {
+            assert_eq!(
+                candidate.self_tsumo,
+                existing
+                    .candidate(candidate.discard)
+                    .expect("同じ打牌候補の既存継続診断がある")
+                    .self_tsumo
+            );
+        }
+    }
+
+    #[test]
+    fn current_tenpai_continuation_is_carried_to_the_final_shanten_diagnostic() {
+        let case = CaseSpec::default().context();
+        let diagnostic = ShantenAgent::diagnose_with_options(
+            &case.context,
+            &case.actions,
+            DiagnosticOptions::WITH_LOOKAHEAD,
+        );
+
+        assert_eq!(
+            diagnostic.normal_discard_current_tenpai_continuation,
+            FURITEN_CASE.current_tenpai_continuation
+        );
+    }
+
+    #[test]
     fn diagnostics_do_not_change_the_selected_discard() {
         let case = CaseSpec::default().context();
         let without = select_discard_action_with_evaluation(&case.context, &case.actions);
@@ -433,6 +467,30 @@ mod tests {
                 ReachTimingReason::SelfTsumoComparisonUnknown
             );
         }
+    }
+
+    #[test]
+    fn timing_value_is_unknown_when_only_reach_now_is_available() {
+        let self_tsumo = TenpaiSelfTsumoComparison {
+            reach_now: Some(123),
+            ..Default::default()
+        };
+        let candidate = CurrentTenpaiContinuationCandidate {
+            discard: tile("6s"),
+            timing: decide_permanent_furiten_reach_timing(
+                self_tsumo.reach_now,
+                self_tsumo.defer_forced_reach(),
+            ),
+            self_tsumo,
+        };
+
+        assert_eq!(candidate.timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(
+            candidate.timing.reason,
+            ReachTimingReason::SelfTsumoComparisonUnknown
+        );
+        assert_eq!(candidate.reach_now(), Some(123));
+        assert_eq!(candidate.timing_self_tsumo_value(), None);
     }
 
     #[test]
