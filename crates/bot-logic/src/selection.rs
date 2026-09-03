@@ -44,11 +44,17 @@
 //! 2手先評価 ([`crate::lookahead`]) が [`crate::self_tsumo`] の確率模型で集計したもので、ここでは
 //! 係数も threshold も持たない。確定しない値を持ち得る点も同じなので、軸の有効・無効は打点込みの
 //! 軸と同じ cohort 単位の解決を通す。
+//!
+//! 現在聴牌では、全候補が非フリテンの cohort は既存 Ron offense weighted total を維持する。
+//! `PermanentFuriten::Yes` を含み、全候補の恒常フリテンと self-tsumo value が確定した cohort
+//! だけ、Ron を含まない共通尺度として current-tenpai self-tsumo expected payment を使う。
+//! Ron の生値との加算や換算は行わない。
 
 use crate::discard::{
     DiscardComparison, DiscardComparisonReason, DiscardEvaluation,
     compare_discard_before_acceptance, compare_discard_from_acceptance,
 };
+use crate::furiten::PermanentFuriten;
 
 /// 既存 weighted tenpai wait を適用する現在打牌後の向聴数。
 pub(crate) const TENPAI_WAIT_TARGET_SHANTEN: i8 = 1;
@@ -167,13 +173,20 @@ pub struct ForwardMetrics {
 /// 現在打牌の直後に成立する聴牌を比較するための supplemental metric。
 ///
 /// 点数計算や Reach / Damaten policy は上位層の責務で、bot-logic は確定済みの
-/// `weighted_total` を比較するだけにする。前方探索の値ではないため [`ForwardMetrics`] とは
-/// 分離して持つ。
+/// 候補ごとの恒常フリテンと、Ron / self-tsumo の各尺度を保持する。どちらを比較へ使うかは
+/// cohort 全体の恒常フリテン状態から [`resolve_current_tenpai_value_axis`] が決める。前方探索の
+/// 値ではないため [`ForwardMetrics`] とは分離して持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CurrentTenpaiMetrics {
+    /// 打牌後の既存フリテン判定。現在聴牌の評価対象外は `None`。
+    pub permanent_furiten: Option<PermanentFuriten>,
     /// Σ(生きた和了牌 physical variant の残枚数 × 支払い合計)。
     /// 確定しない場合と評価対象外は `None`。
     pub offense_weighted_total: Option<u64>,
+    /// 残り自摸機会内にツモ和了する期待支払い
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    /// 確定しない場合と評価対象外は `None`。
+    pub expected_self_tsumo_value: Option<u64>,
 }
 
 impl ForwardMetrics {
@@ -211,6 +224,10 @@ pub struct DiscardSelectionCandidate<'a> {
     ///
     /// 軸の有無は候補集合単位で解決済みであること。点数計算はこの層で行わない。
     pub current_tenpai_offense_weighted_total: Option<u64>,
+    /// 現在打牌後が聴牌になる候補の self-tsumo-only expected payment。
+    ///
+    /// 軸の有無は候補集合単位で解決済みであること。Ron の値とは加算しない。
+    pub current_tenpai_expected_self_tsumo_value: Option<u64>,
 }
 
 impl<'a> DiscardSelectionCandidate<'a> {
@@ -223,6 +240,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             prospective_value: None,
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
+            current_tenpai_expected_self_tsumo_value: None,
         }
     }
 }
@@ -237,7 +255,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
-///   → [聴牌のみ] CurrentTenpaiOffenseWeightedTotal
+///   → [聴牌のみ] CurrentTenpaiExpectedSelfTsumoValue / CurrentTenpaiOffenseWeightedTotal
 ///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ...
 /// ```
 ///
@@ -266,6 +284,12 @@ pub fn compare_discard_selection_candidates(
     }
 
     if let Some(comparison) = compare_weighted_next_acceptance(candidate, current_best) {
+        return comparison;
+    }
+
+    if let Some(comparison) =
+        compare_current_tenpai_expected_self_tsumo_value(candidate, current_best)
+    {
         return comparison;
     }
 
@@ -376,6 +400,9 @@ pub fn best_discard_selection_index_with_metrics(
         current_tenpai_offense_weighted_total: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.offense_weighted_total),
+        current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
+            .get(index)
+            .and_then(|metric| metric.expected_self_tsumo_value),
     };
 
     let mut best: Option<usize> = None;
@@ -393,26 +420,67 @@ pub fn best_discard_selection_index_with_metrics(
     best
 }
 
-/// 現在聴牌の打点軸を pre-acceptance 同順位の cohort 単位で有効化する。
+/// 現在聴牌の値軸を pre-acceptance 同順位の cohort 単位で有効化する。
 ///
-/// 同じ cohort の全候補で値が確定した場合だけ値を残す。1件でも `None` なら cohort 全体を
-/// `None` にし、比較ごとに軸の有無が変わることで非推移的になるのを防ぐ。
+/// 全候補が非フリテンなら既存 Ron offense weighted total を維持する。恒常フリテンを1件以上
+/// 含み、全候補が `Yes` / `No` のどちらかに確定している場合は、全候補に共通する self-tsumo
+/// expected payment だけを使う。恒常フリテン unknown、または選んだ軸の値が1件でも unknown
+/// なら cohort 全体で両軸を外し、比較ごとに軸の有無が変わることを防ぐ。
 pub fn resolve_current_tenpai_value_axis(
     evaluations: &[DiscardEvaluation],
     metrics: &[CurrentTenpaiMetrics],
 ) -> Vec<CurrentTenpaiMetrics> {
     let metric_at = |index: usize| metrics.get(index).copied().unwrap_or_default();
-    let cohort_is_known = |index: usize| {
-        cohort_axis_is_known(evaluations, index, |other| {
-            metric_at(other).offense_weighted_total.is_some()
-        })
+    let cohort_uses = |index: usize| {
+        let cohort: Vec<_> = (0..evaluations.len())
+            .filter(|&other| {
+                compare_discard_before_acceptance(&evaluations[index], &evaluations[other])
+                    .is_none()
+            })
+            .collect();
+        let all_non_furiten = cohort
+            .iter()
+            .all(|&other| metric_at(other).permanent_furiten == Some(PermanentFuriten::No));
+        let all_furiten_known = cohort.iter().all(|&other| {
+            matches!(
+                metric_at(other).permanent_furiten,
+                Some(PermanentFuriten::Yes | PermanentFuriten::No)
+            )
+        });
+        let includes_permanent_furiten = cohort
+            .iter()
+            .any(|&other| metric_at(other).permanent_furiten == Some(PermanentFuriten::Yes));
+
+        if all_non_furiten
+            && cohort
+                .iter()
+                .all(|&other| metric_at(other).offense_weighted_total.is_some())
+        {
+            (true, false)
+        } else if all_furiten_known
+            && includes_permanent_furiten
+            && cohort
+                .iter()
+                .all(|&other| metric_at(other).expected_self_tsumo_value.is_some())
+        {
+            (false, true)
+        } else {
+            (false, false)
+        }
     };
 
     (0..evaluations.len())
-        .map(|index| CurrentTenpaiMetrics {
-            offense_weighted_total: metric_at(index)
-                .offense_weighted_total
-                .filter(|_| cohort_is_known(index)),
+        .map(|index| {
+            let (use_offense, use_self_tsumo) = cohort_uses(index);
+            CurrentTenpaiMetrics {
+                permanent_furiten: metric_at(index).permanent_furiten,
+                offense_weighted_total: metric_at(index)
+                    .offense_weighted_total
+                    .filter(|_| use_offense),
+                expected_self_tsumo_value: metric_at(index)
+                    .expected_self_tsumo_value
+                    .filter(|_| use_self_tsumo),
+            }
         })
         .collect()
 }
@@ -540,6 +608,26 @@ fn compare_current_tenpai_offense_value(
     })
 }
 
+// 現在打牌後が聴牌になる候補だけの self-tsumo expected payment 比較。恒常フリテンを含む
+// known cohort でだけ値が残るため、Ron の生値とは混ぜず全候補に共通する尺度として使う。
+fn compare_current_tenpai_expected_self_tsumo_value(
+    candidate: &DiscardSelectionCandidate,
+    current_best: &DiscardSelectionCandidate,
+) -> Option<DiscardComparison> {
+    if candidate.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.current_tenpai_expected_self_tsumo_value?;
+    let best_value = current_best.current_tenpai_expected_self_tsumo_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue,
+    })
+}
+
 /// 打牌候補集合が前方評価の対象かどうか。
 ///
 /// 全合法候補の1手評価から求めた最善向聴数が1向聴で、かつ1向聴を維持する候補が複数ある場合
@@ -661,6 +749,7 @@ mod tests {
             prospective_value: None,
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
+            current_tenpai_expected_self_tsumo_value: None,
         }
     }
 
@@ -676,6 +765,7 @@ mod tests {
             prospective_value,
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
+            current_tenpai_expected_self_tsumo_value: None,
         }
     }
 
@@ -690,6 +780,7 @@ mod tests {
             prospective_value: None,
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: None,
+            current_tenpai_expected_self_tsumo_value: None,
         }
     }
 
@@ -704,6 +795,34 @@ mod tests {
             prospective_value: None,
             expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: weighted_total,
+            current_tenpai_expected_self_tsumo_value: None,
+        }
+    }
+
+    fn current_tenpai_self_candidate<'a>(
+        evaluation: &'a DiscardEvaluation,
+        expected_self_tsumo_value: Option<u64>,
+    ) -> DiscardSelectionCandidate<'a> {
+        DiscardSelectionCandidate {
+            evaluation,
+            tenpai_wait: None,
+            next_acceptance: None,
+            prospective_value: None,
+            expected_self_tsumo_value: None,
+            current_tenpai_offense_weighted_total: None,
+            current_tenpai_expected_self_tsumo_value: expected_self_tsumo_value,
+        }
+    }
+
+    fn current_metric(
+        permanent_furiten: PermanentFuriten,
+        offense_weighted_total: Option<u64>,
+        expected_self_tsumo_value: Option<u64>,
+    ) -> CurrentTenpaiMetrics {
+        CurrentTenpaiMetrics {
+            permanent_furiten: Some(permanent_furiten),
+            offense_weighted_total,
+            expected_self_tsumo_value,
         }
     }
 
@@ -974,6 +1093,111 @@ mod tests {
     }
 
     #[test]
+    fn current_tenpai_self_tsumo_value_outranks_acceptance_remaining() {
+        let narrow_high = evaluation("1m", 0, &[("3m", 1)]);
+        let wide_low = evaluation("9p", 0, &[("3p", 3), ("6p", 3)]);
+
+        let comparison = compare_discard_selection_candidates(
+            &current_tenpai_self_candidate(&narrow_high, Some(12_000)),
+            &current_tenpai_self_candidate(&wide_low, Some(7_800)),
+        );
+
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn all_non_furiten_current_tenpai_cohort_keeps_the_ron_axis() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        let metrics = vec![
+            current_metric(PermanentFuriten::No, Some(12_000), Some(1)),
+            current_metric(PermanentFuriten::No, Some(7_800), Some(99_999)),
+        ];
+
+        let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+        assert_eq!(resolved[0].offense_weighted_total, Some(12_000));
+        assert_eq!(resolved[1].offense_weighted_total, Some(7_800));
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+        assert_eq!(
+            best_discard_selection_index_with_metrics(&evaluations, &[], &metrics),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn permanent_furiten_and_mixed_current_tenpai_cohorts_use_the_self_tsumo_axis() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+
+        for furiten in [
+            [PermanentFuriten::Yes, PermanentFuriten::Yes],
+            [PermanentFuriten::No, PermanentFuriten::Yes],
+        ] {
+            // Ron の生値では第1候補が上だが、共通 self-tsumo 尺度では第2候補が上。
+            let metrics = vec![
+                current_metric(furiten[0], Some(99_999), Some(1)),
+                current_metric(furiten[1], Some(1), Some(2)),
+            ];
+            let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+            assert!(
+                resolved
+                    .iter()
+                    .all(|metric| metric.offense_weighted_total.is_none())
+            );
+            assert_eq!(resolved[0].expected_self_tsumo_value, Some(1));
+            assert_eq!(resolved[1].expected_self_tsumo_value, Some(2));
+            assert_eq!(
+                best_discard_selection_index_with_metrics(&evaluations, &[], &metrics),
+                Some(1),
+                "furiten={furiten:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_tenpai_self_tsumo_axis_requires_known_furiten_and_values_for_the_whole_cohort() {
+        let evaluations = vec![
+            evaluation("1m", 0, &[("3m", 1)]),
+            evaluation("9p", 0, &[("3p", 3), ("6p", 3)]),
+        ];
+        let cases = [
+            vec![
+                current_metric(PermanentFuriten::Yes, Some(99_999), Some(1)),
+                current_metric(PermanentFuriten::Unknown, Some(1), Some(2)),
+            ],
+            vec![
+                current_metric(PermanentFuriten::Yes, Some(99_999), Some(1)),
+                current_metric(PermanentFuriten::No, Some(1), None),
+            ],
+        ];
+
+        for metrics in cases {
+            let resolved = resolve_current_tenpai_value_axis(&evaluations, &metrics);
+            assert!(resolved.iter().all(|metric| {
+                metric.offense_weighted_total.is_none()
+                    && metric.expected_self_tsumo_value.is_none()
+            }));
+            // With both current-tenpai value axes disabled, existing acceptance selects wide.
+            assert_eq!(
+                best_discard_selection_index_with_metrics(&evaluations, &[], &metrics),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_current_tenpai_value_disables_the_axis_for_the_whole_cohort() {
         // A > B (打点) だが、C が unknown なので cohort 全体で打点軸を外し、最も広い B が勝つ。
         let evaluations = vec![
@@ -983,13 +1207,19 @@ mod tests {
         ];
         let metrics = vec![
             CurrentTenpaiMetrics {
+                permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: Some(99_999),
+                expected_self_tsumo_value: None,
             },
             CurrentTenpaiMetrics {
+                permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: Some(1),
+                expected_self_tsumo_value: None,
             },
             CurrentTenpaiMetrics {
+                permanent_furiten: Some(PermanentFuriten::No),
                 offense_weighted_total: None,
+                expected_self_tsumo_value: None,
             },
         ];
 
@@ -1332,6 +1562,7 @@ mod tests {
                 prospective_value: metric.prospective_value,
                 expected_self_tsumo_value: metric.expected_self_tsumo_value,
                 current_tenpai_offense_weighted_total: None,
+                current_tenpai_expected_self_tsumo_value: None,
             })
             .collect()
     }
