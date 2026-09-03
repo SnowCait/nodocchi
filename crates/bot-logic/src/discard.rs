@@ -1012,6 +1012,12 @@ pub struct DiscardCandidateDiagnostic {
     /// 打牌選択に使った現在聴牌の self-tsumo-only expected payment。
     /// cohort に unknown が混ざって軸を無効化した場合も `None`。
     pub current_tenpai_expected_self_tsumo_value: Option<u64>,
+    /// 現在聴牌候補が残り自摸機会内にツモ和了できる確率
+    /// [[`crate::self_tsumo::TSUMO_PROBABILITY_SCALE`]]。
+    ///
+    /// `current_tenpai_expected_self_tsumo_value` と同じ terminal tenpai から求めた観測値で、
+    /// 打牌選択には使わない。値軸を cohort 単位で無効化した場合も確率は落とさない。
+    pub current_tenpai_self_tsumo_hit_probability: Option<u64>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -1158,6 +1164,9 @@ pub fn diagnose_discard_evaluations_with_metrics(
                 current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.expected_self_tsumo_value),
+                current_tenpai_self_tsumo_hit_probability: current_tenpai_metrics
+                    .get(index)
+                    .and_then(|metric| metric.self_tsumo_hit_probability),
             }
         })
         .collect();
