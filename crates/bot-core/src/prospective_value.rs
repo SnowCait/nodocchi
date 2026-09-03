@@ -467,7 +467,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
     ) -> Option<TenpaiTsumoValue> {
-        tsumo_value(&self.tsumo_profile(facts, mode)?)
+        tenpai_tsumo_value_from_hands(self.context, &facts.hands, mode)
     }
 
     /// 指定した攻撃モードの Tsumo baseline で、和了牌の物理牌 variant ごとにツモ和了できるかを
@@ -611,6 +611,21 @@ fn tsumo_scoring_inputs(
         .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES));
     let ura_dora = matches!(mode, TenpaiOffenseMode::Reach).then_some(BASELINE_URA_DORA_INDICATORS);
     Some((baseline, ura_dora))
+}
+
+/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価する。
+///
+/// prospective tenpai と現在打牌後の tenpai が同じ baseline・点数計算・physical variant 集約を
+/// 共用するための入口。Reach / Damaten はリーチ宣言の有無だけを表し、どちらも Tsumo として
+/// 評価する。Reach timing はこの helper の責務外。
+pub(crate) fn tenpai_tsumo_value_from_hands(
+    context: &GameContext,
+    hands: &TenpaiCompletedHands,
+    mode: TenpaiOffenseMode,
+) -> Option<TenpaiTsumoValue> {
+    let (baseline, ura_dora) = tsumo_scoring_inputs(context, mode)?;
+    let profile = evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
+    tsumo_value(&profile)
 }
 
 /// 待ちごとの評価結果を、ツモ和了できる variant の残枚数と重み付き打点へ畳む。

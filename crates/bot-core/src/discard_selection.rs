@@ -1,9 +1,10 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
+use crate::damaten_value::tenpai_completed_hands_after_discard;
 use crate::offense_value::{TenpaiOffenseEvaluation, TenpaiOffenseValue, evaluate_tenpai_offense};
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
-    evaluate_prospective_lookahead_value,
+    evaluate_prospective_lookahead_value, tenpai_tsumo_value_from_hands,
 };
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, TenpaiContinuationInputs, diagnose_tenpai_continuation,
@@ -135,6 +136,7 @@ type SelectionForwardMetrics = Vec<ForwardMetrics>;
 struct CurrentTenpaiCandidateEvaluation {
     wait: Option<TenpaiWaitAvailability>,
     offense: Option<TenpaiOffenseEvaluation>,
+    expected_self_tsumo_value: Option<u64>,
 }
 
 type CurrentTenpaiCandidateEvaluations = Vec<CurrentTenpaiCandidateEvaluation>;
@@ -167,8 +169,12 @@ pub(crate) fn select_discard_action_with_evaluation(
 ) -> DiscardActionSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
     let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
-    let current_tenpai =
-        current_tenpai_candidate_evaluations(context, &legal.evaluations, legal_actions);
+    let current_tenpai = current_tenpai_candidate_evaluations(
+        context,
+        &legal.tiles,
+        &legal.evaluations,
+        legal_actions,
+    );
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(
@@ -215,8 +221,12 @@ pub(crate) fn select_discard_action_with_diagnostic(
         Some(lookahead) => forward_metrics_from_lookahead(&inputs, &legal.evaluations, lookahead),
         None => forward_metrics(&inputs, &legal.evaluations),
     };
-    let current_tenpai =
-        current_tenpai_candidate_evaluations(context, &legal.evaluations, legal_actions);
+    let current_tenpai = current_tenpai_candidate_evaluations(
+        context,
+        &legal.tiles,
+        &legal.evaluations,
+        legal_actions,
+    );
 
     let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai);
 
@@ -338,6 +348,7 @@ fn selection_from_legal_evaluations(
 /// 各候補へ適用する。1向聴・2向聴以上・聴牌候補1件の production behavior と計算量は変えない。
 fn current_tenpai_candidate_evaluations(
     context: &GameContext,
+    tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
     legal_actions: &[LegalAction],
 ) -> CurrentTenpaiCandidateEvaluations {
@@ -353,6 +364,13 @@ fn current_tenpai_candidate_evaluations(
         return vec![CurrentTenpaiCandidateEvaluation::default(); evaluations.len()];
     }
 
+    // 現在聴牌候補も1向聴の既存 self-tsumo 軸と同じ exact facts を使う。ここでは候補選択前の
+    // base Reach / Damaten mode だけを使い、選択済み候補に対する Reach timing は評価しない。
+    let valuator = ProductionProspectiveValuator::new(context);
+    let self_tsumo_facts =
+        lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None)
+            .self_tsumo_facts();
+
     evaluations
         .iter()
         .map(|evaluation| {
@@ -363,7 +381,21 @@ fn current_tenpai_candidate_evaluations(
             let offense = wait
                 .as_ref()
                 .map(|wait| evaluate_tenpai_offense(context, evaluation, wait, legal_actions));
-            CurrentTenpaiCandidateEvaluation { wait, offense }
+            let expected_self_tsumo_value = wait
+                .as_ref()
+                .zip(offense.as_ref())
+                .zip(self_tsumo_facts)
+                .and_then(|((wait, offense), facts)| {
+                    let hands = tenpai_completed_hands_after_discard(context, evaluation, wait)?;
+                    let terminal =
+                        tenpai_tsumo_value_from_hands(context, &hands, offense.offense.mode)?;
+                    Some(terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+                });
+            CurrentTenpaiCandidateEvaluation {
+                wait,
+                offense,
+                expected_self_tsumo_value,
+            }
         })
         .collect()
 }
@@ -374,10 +406,15 @@ fn current_tenpai_metrics(
     evaluations
         .iter()
         .map(|evaluation| CurrentTenpaiMetrics {
+            permanent_furiten: evaluation
+                .wait
+                .as_ref()
+                .map(TenpaiWaitAvailability::permanent_furiten),
             offense_weighted_total: evaluation
                 .offense
                 .as_ref()
                 .and_then(|value| value.offense.value.weighted_total()),
+            expected_self_tsumo_value: evaluation.expected_self_tsumo_value,
         })
         .collect()
 }
@@ -757,7 +794,8 @@ pub(crate) fn select_best_normal_discard_evaluation(
 ) -> Option<DiscardEvaluation> {
     let evaluations = evaluate_discard_candidates(context, tiles);
     let tenpai_wait = selection_forward_metrics(context, tiles, &evaluations);
-    let current_tenpai = current_tenpai_candidate_evaluations(context, &evaluations, legal_actions);
+    let current_tenpai =
+        current_tenpai_candidate_evaluations(context, tiles, &evaluations, legal_actions);
 
     best_discard_selection_index_with_metrics(
         &evaluations,
@@ -817,6 +855,11 @@ fn log_discard_diagnostic(
         .iter()
         .find(|candidate| candidate.selected)
         .and_then(|candidate| candidate.current_tenpai_offense_weighted_total);
+    let selected_current_tenpai_expected_self_tsumo_value = diagnostic
+        .candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .and_then(|candidate| candidate.current_tenpai_expected_self_tsumo_value);
 
     let hand_tiles = tiles_to_mjai(context.hand_tiles());
     let all_tiles = tiles_to_mjai(tiles);
@@ -848,6 +891,8 @@ fn log_discard_diagnostic(
             .map(|metric| metric.weighted_type_count),
         normal_current_tenpai_offense_weighted_total =
             ?selected_current_tenpai_offense_weighted_total,
+        normal_current_tenpai_expected_self_tsumo_value =
+            ?selected_current_tenpai_expected_self_tsumo_value,
         normal_shape_penalty = selected.shape_penalty,
         normal_iishanten_shape_after_discard = ?selected.standard_iishanten_shape_after_discard,
         normal_floating_tile_value = selected.floating_tile_value,
@@ -926,6 +971,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
             .map(|metric| metric.weighted_type_count),
         current_tenpai_offense_weighted_total =
             ?candidate.current_tenpai_offense_weighted_total,
+        current_tenpai_expected_self_tsumo_value =
+            ?candidate.current_tenpai_expected_self_tsumo_value,
         shape_penalty = evaluation.shape_penalty,
         iishanten_shape_after_discard = ?evaluation.standard_iishanten_shape_after_discard,
         floating_tile_value = evaluation.floating_tile_value,
@@ -944,10 +991,12 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::context::TableStateFacts;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
-        HistoryFuritenFacts, TileId, best_discard_selection_index_with_forward_metrics,
+        HistoryFuritenFacts, PermanentFuriten, TileId,
+        best_discard_selection_index_with_forward_metrics,
     };
 
     fn tile(value: u8) -> TileId {
@@ -1129,6 +1178,14 @@ pub(crate) mod tests {
     }
 
     fn current_tenpai_regression_context() -> (GameContext, Vec<LegalAction>) {
+        current_tenpai_regression_context_with_facts(Default::default(), None, Some(0))
+    }
+
+    fn current_tenpai_regression_context_with_facts(
+        discards: [Vec<TileId>; 4],
+        remaining_tiles: Option<u32>,
+        player_id: Option<u8>,
+    ) -> (GameContext, Vec<LegalAction>) {
         // 34599m235p345567s。CLI regression と同じ14枚に、自席・河・履歴フリテンを既知として
         // 与え、既存 Reach / Damaten policy と scoring を確定できる局面にする。
         let hand = vec![
@@ -1147,7 +1204,11 @@ pub(crate) mod tests {
             tile(92),
             tile(96),
         ];
-        let visible = hand.clone();
+        let visible = hand
+            .iter()
+            .copied()
+            .chain(discards.iter().flatten().copied())
+            .collect();
         let actions = hand
             .iter()
             .copied()
@@ -1161,11 +1222,15 @@ pub(crate) mod tests {
             TileType::from_mjai_type_str("E").ok(),
             TileType::from_mjai_type_str("N").ok(),
             visible,
-            Some(0),
+            player_id,
             Some(1),
-            Default::default(),
+            discards,
             [false; 4],
         )
+        .with_table_state_facts(TableStateFacts {
+            remaining_tiles,
+            ..Default::default()
+        })
         .with_history_furiten_facts(HistoryFuritenFacts {
             same_turn: Some(false),
             riichi_missed_win: Some(false),
@@ -1177,7 +1242,12 @@ pub(crate) mod tests {
     fn current_tenpai_selection_uses_the_existing_weighted_offense_value() {
         let (context, actions) = current_tenpai_regression_context();
         let legal = legal_discard_evaluations(&context, &actions);
-        let current = current_tenpai_candidate_evaluations(&context, &legal.evaluations, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
         let candidate = |name: &str| {
             let index = legal
                 .evaluations
@@ -1244,6 +1314,286 @@ pub(crate) mod tests {
         assert_eq!(
             five_p_diagnostic.comparison_reason,
             bot_logic::DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal
+        );
+        assert!(
+            result
+                .diagnostic
+                .candidates
+                .iter()
+                .all(|candidate| candidate.current_tenpai_expected_self_tsumo_value.is_none())
+        );
+    }
+
+    #[test]
+    fn permanent_furiten_current_tenpai_candidates_use_expected_self_tsumo_value() {
+        let (context, actions) = current_tenpai_regression_context_with_facts(
+            [vec![tile(36), tile(48)], vec![], vec![], vec![]],
+            Some(70),
+            Some(0),
+        );
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        let targets: Vec<_> = legal
+            .evaluations
+            .iter()
+            .zip(&current)
+            .filter(|(evaluation, _)| evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|(_, value)| {
+            value
+                .wait
+                .as_ref()
+                .map(TenpaiWaitAvailability::permanent_furiten)
+                == Some(PermanentFuriten::Yes)
+                && value.expected_self_tsumo_value.is_some()
+        }));
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidates: Vec<_> = result
+            .diagnostic
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.current_tenpai_offense_weighted_total.is_none()
+                && candidate.current_tenpai_expected_self_tsumo_value.is_some()
+        }));
+        let winner = candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("selected current tenpai candidate");
+        let loser = candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up current tenpai candidate");
+        assert_eq!(winner.evaluation.discard.to_mjai_string(), "2p");
+        assert!(
+            winner.current_tenpai_expected_self_tsumo_value
+                > loser.current_tenpai_expected_self_tsumo_value
+        );
+        assert_eq!(
+            loser.comparison_reason,
+            bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn mixed_current_tenpai_candidates_compare_only_expected_self_tsumo_value() {
+        // 打5pの1p/4p待ちだけが1pの恒常フリテン。打2pの4p待ちは非フリテンのまま。
+        let (context, actions) = current_tenpai_regression_context_with_facts(
+            [vec![tile(36)], vec![], vec![], vec![]],
+            Some(70),
+            Some(0),
+        );
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        let value = |discard: &str| {
+            let index = legal
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard.to_mjai_string() == discard)
+                .expect("candidate exists");
+            &current[index]
+        };
+        assert_eq!(
+            value("2p")
+                .wait
+                .as_ref()
+                .map(TenpaiWaitAvailability::permanent_furiten),
+            Some(PermanentFuriten::No)
+        );
+        assert_eq!(
+            value("5p")
+                .wait
+                .as_ref()
+                .map(TenpaiWaitAvailability::permanent_furiten),
+            Some(PermanentFuriten::Yes)
+        );
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidates: Vec<_> = result
+            .diagnostic
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert!(candidates.iter().all(|candidate| {
+            candidate.current_tenpai_offense_weighted_total.is_none()
+                && candidate.current_tenpai_expected_self_tsumo_value.is_some()
+        }));
+        let winner = candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("selected current tenpai candidate");
+        let loser = candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up current tenpai candidate");
+        assert_eq!(winner.evaluation.discard.to_mjai_string(), "2p");
+        assert!(
+            winner.current_tenpai_expected_self_tsumo_value
+                > loser.current_tenpai_expected_self_tsumo_value
+        );
+        assert_eq!(
+            loser.comparison_reason,
+            bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn unknown_current_tenpai_self_tsumo_value_disables_the_axis_for_the_cohort() {
+        let (context, actions) = current_tenpai_regression_context_with_facts(
+            [vec![tile(36)], vec![], vec![], vec![]],
+            None,
+            Some(0),
+        );
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidates: Vec<_> = result
+            .diagnostic
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert!(candidates.iter().all(|candidate| {
+            candidate.current_tenpai_offense_weighted_total.is_none()
+                && candidate.current_tenpai_expected_self_tsumo_value.is_none()
+                && candidate.comparison_reason
+                    != bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        }));
+    }
+
+    #[test]
+    fn unknown_permanent_furiten_does_not_enable_the_current_tenpai_self_tsumo_axis() {
+        let (context, actions) =
+            current_tenpai_regression_context_with_facts(Default::default(), Some(70), None);
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        assert!(
+            current
+                .iter()
+                .filter_map(|candidate| candidate.wait.as_ref())
+                .all(|wait| wait.permanent_furiten() == PermanentFuriten::Unknown)
+        );
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        assert!(result.diagnostic.candidates.iter().all(|candidate| {
+            candidate.current_tenpai_expected_self_tsumo_value.is_none()
+                && candidate.comparison_reason
+                    != bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        }));
+    }
+
+    #[test]
+    fn current_tenpai_self_tsumo_uses_the_production_base_mode() {
+        let (context, actions) = current_tenpai_regression_context_with_facts(
+            [vec![tile(36)], vec![], vec![], vec![]],
+            Some(70),
+            Some(0),
+        );
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        let index = legal
+            .evaluations
+            .iter()
+            .position(|evaluation| evaluation.discard.to_mjai_string() == "2p")
+            .expect("2p candidate");
+        let evaluation = &legal.evaluations[index];
+        let candidate = &current[index];
+        let wait = candidate.wait.as_ref().expect("tenpai wait");
+        let mode = candidate.offense.as_ref().expect("offense").offense.mode;
+        assert_eq!(mode, crate::offense_value::TenpaiOffenseMode::Reach);
+        let facts = lookahead_inputs(
+            &context,
+            &legal.tiles,
+            &ProductionProspectiveValuator::new(&context),
+            LookaheadDiagnosticScope::None,
+        )
+        .self_tsumo_facts()
+        .expect("self-tsumo facts");
+        let hands = tenpai_completed_hands_after_discard(&context, evaluation, wait)
+            .expect("completed hands");
+        let expected = |mode| {
+            tenpai_tsumo_value_from_hands(&context, &hands, mode)
+                .map(|value| value.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+        };
+
+        assert_eq!(candidate.expected_self_tsumo_value, expected(mode));
+        assert_ne!(
+            candidate.expected_self_tsumo_value,
+            expected(crate::offense_value::TenpaiOffenseMode::Damaten)
+        );
+
+        // Reach が合法でない同じ局面は production base policy が Damaten を選ぶ。候補比較は
+        // Reach timing を呼ばず、この base mode を Tsumo baseline へそのまま反映する。
+        let damaten_actions: Vec<_> = actions
+            .iter()
+            .filter(|action| !matches!(action, LegalAction::Reach))
+            .cloned()
+            .collect();
+        let damaten_legal = legal_discard_evaluations(&context, &damaten_actions);
+        let damaten_current = current_tenpai_candidate_evaluations(
+            &context,
+            &damaten_legal.tiles,
+            &damaten_legal.evaluations,
+            &damaten_actions,
+        );
+        let damaten_index = damaten_legal
+            .evaluations
+            .iter()
+            .position(|evaluation| evaluation.discard.to_mjai_string() == "2p")
+            .expect("2p candidate");
+        let damaten_candidate = &damaten_current[damaten_index];
+        assert_eq!(
+            damaten_candidate
+                .offense
+                .as_ref()
+                .expect("offense")
+                .offense
+                .mode,
+            crate::offense_value::TenpaiOffenseMode::Damaten
+        );
+        assert_eq!(
+            damaten_candidate.expected_self_tsumo_value,
+            expected(crate::offense_value::TenpaiOffenseMode::Damaten)
         );
     }
 
@@ -1432,8 +1782,12 @@ pub(crate) mod tests {
     fn assert_diagnostic_selection_matches(context: &GameContext, actions: &[LegalAction]) {
         let legal = legal_discard_evaluations(context, actions);
         let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
-        let current_tenpai =
-            current_tenpai_candidate_evaluations(context, &legal.evaluations, actions);
+        let current_tenpai = current_tenpai_candidate_evaluations(
+            context,
+            &legal.tiles,
+            &legal.evaluations,
+            actions,
+        );
 
         let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai);
         let selection = selection_from_legal_evaluations(

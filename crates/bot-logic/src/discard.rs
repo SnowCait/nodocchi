@@ -661,6 +661,8 @@ pub enum DiscardComparisonReason {
     WeightedNextAcceptanceTypeCount,
     /// 現在聴牌限定。Σ(生きた和了牌 physical variant 残枚数 × 支払い合計)。
     CurrentTenpaiOffenseWeightedTotal,
+    /// 現在聴牌限定。残り自摸機会内にツモ和了する self-tsumo-only expected payment。
+    CurrentTenpaiExpectedSelfTsumoValue,
     AcceptanceRemaining,
     AcceptanceTypeCount,
     /// 七対子テンパイ限定。単騎待ち牌の固定順位。
@@ -1007,6 +1009,9 @@ pub struct DiscardCandidateDiagnostic {
     /// 打牌選択に使った現在聴牌の offense weighted total。
     /// cohort に unknown が混ざって軸を無効化した場合も `None`。
     pub current_tenpai_offense_weighted_total: Option<u64>,
+    /// 打牌選択に使った現在聴牌の self-tsumo-only expected payment。
+    /// cohort に unknown が混ざって軸を無効化した場合も `None`。
+    pub current_tenpai_expected_self_tsumo_value: Option<u64>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -1086,6 +1091,9 @@ pub fn diagnose_discard_evaluations_with_metrics(
         current_tenpai_offense_weighted_total: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.offense_weighted_total),
+        current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
+            .get(index)
+            .and_then(|metric| metric.expected_self_tsumo_value),
     };
 
     let best_index = best_discard_selection_index_with_metrics(
@@ -1147,6 +1155,9 @@ pub fn diagnose_discard_evaluations_with_metrics(
                 current_tenpai_offense_weighted_total: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.offense_weighted_total),
+                current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
+                    .get(index)
+                    .and_then(|metric| metric.expected_self_tsumo_value),
             }
         })
         .collect();

@@ -1,0 +1,13 @@
+{
+  "hand": "34599m235p345567s",
+  "round_wind": "E",
+  "player_id": 0,
+  "oya": 1,
+  "discards": ["1p", "", "", ""],
+  "remaining_tiles": 70,
+  "scores": [900, 25000, 25000, 25000],
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  }
+}

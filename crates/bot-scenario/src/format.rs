@@ -509,6 +509,14 @@ fn format_normal_discard_candidate(
             ABSENT.to_string()
         }
     ));
+    lines.push(format!(
+        "  current tenpai expected self-tsumo value: {}",
+        if evaluation.min_shanten_after_discard() == 0 {
+            format_self_tsumo_value(candidate.current_tenpai_expected_self_tsumo_value)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
     lines.extend(format_candidate_furiten(furiten));
     lines.push(format!(
         "  iishanten shape: {:?}",
@@ -2691,6 +2699,10 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
             winner.current_tenpai_offense_weighted_total?.to_string(),
             loser.current_tenpai_offense_weighted_total?.to_string(),
         ),
+        DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue => (
+            format_self_tsumo_value(Some(winner.current_tenpai_expected_self_tsumo_value?)),
+            format_self_tsumo_value(Some(loser.current_tenpai_expected_self_tsumo_value?)),
+        ),
         DiscardComparisonReason::ExpectedSelfTsumoValue => (
             format_self_tsumo_value(Some(winner.expected_self_tsumo_value?)),
             format_self_tsumo_value(Some(loser.expected_self_tsumo_value?)),
@@ -3342,6 +3354,8 @@ mod tests {
         include_str!("../scenarios/iishanten_tenpai_wait.json");
     const CURRENT_TENPAI_OFFENSE_SCENARIO: &str =
         include_str!("../scenarios/current_tenpai_offense.json");
+    const CURRENT_TENPAI_SELF_TSUMO_SCENARIO: &str =
+        include_str!("../scenarios/current_tenpai_self_tsumo.json");
     const RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO: &str =
         include_str!("../scenarios/ryanshanten_next_acceptance.json");
 
@@ -3376,6 +3390,43 @@ mod tests {
         assert!(
             output.contains("  lost by: CurrentTenpaiOffenseWeightedTotal"),
             "{output}"
+        );
+    }
+
+    #[test]
+    fn mixed_furiten_current_tenpai_scenario_reports_the_self_tsumo_axis() {
+        let (_, diagnostic, output) = rendered(CURRENT_TENPAI_SELF_TSUMO_SCENARIO, false);
+        let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
+        let two_p = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "2p")
+            .unwrap();
+        let five_p = candidates
+            .iter()
+            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5p")
+            .unwrap();
+
+        assert!(two_p.selected);
+        assert!(two_p.current_tenpai_expected_self_tsumo_value.is_some());
+        assert!(five_p.current_tenpai_expected_self_tsumo_value.is_some());
+        assert_eq!(two_p.current_tenpai_offense_weighted_total, None);
+        assert_eq!(five_p.current_tenpai_offense_weighted_total, None);
+        assert_eq!(
+            five_p.comparison_reason,
+            DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        );
+        assert!(
+            output.contains("  current tenpai expected self-tsumo value:"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  lost by: CurrentTenpaiExpectedSelfTsumoValue"),
+            "{output}"
+        );
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  choice 2 lost by: CurrentTenpaiExpectedSelfTsumoValue"),
+            "{summary}"
         );
     }
 

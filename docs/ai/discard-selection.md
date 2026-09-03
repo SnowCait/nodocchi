@@ -24,17 +24,21 @@ AcceptanceRemaining
 
 適用するのは両候補とも七対子テンパイで、七対子を完成させる牌が一意に定まる場合だけです。通常形テンパイ、国士テンパイ、一向聴以上、副露形には広げません。`bot-scenario` の候補表示では `lost by: ChiitoitsuWaitQuality` として現れます。
 
-## 現在聴牌: CurrentTenpaiOffenseWeightedTotal
+## 現在聴牌: Ron / self-tsumo の cohort 比較
 
-現在打牌の直後が聴牌になる候補同士では、既存の Reach / Damaten policy と手牌価値評価で求めた `current tenpai offense weighted total` を、現在の Acceptance より先に比較します。
+現在打牌の直後が聴牌になる候補同士では、候補集合 (cohort) の恒常フリテン状態に応じて、現在の Acceptance より先に使う値軸を切り替えます。
 
 ```text
 Shanten → existing pre-acceptance axes
-→ [聴牌のみ] CurrentTenpaiOffenseWeightedTotal
+→ [聴牌のみ]
+   全候補 PermanentFuriten::No
+     : CurrentTenpaiOffenseWeightedTotal
+   PermanentFuriten::Yes を含む known cohort
+     : CurrentTenpaiExpectedSelfTsumoValue
 → AcceptanceRemaining → AcceptanceTypeCount → ...
 ```
 
-値は生きた和了牌を赤5 / 黒5の physical variant まで分け、既存 `Payment.total()` を残枚数で重み付けした合計です。
+全候補が非フリテンの場合は、従来どおり既存の Reach / Damaten policy と手牌価値評価で求めた `current tenpai offense weighted total` を使います。値は生きた和了牌を赤5 / 黒5の physical variant まで分け、既存 `Payment.total()` を残枚数で重み付けした合計です。
 
 ```text
 current tenpai offense weighted total
@@ -43,9 +47,20 @@ current tenpai offense weighted total
 
 平均打点ではありません。例えば「1枚 × 12,000点」は12,000、「6枚 × 3,900点」は23,400なので、後者を上位にします。また、これはロン / ツモ確率を掛けたEVではなく、本場・供託・点棒状況も含みません。
 
+cohort の全候補で `PermanentFuriten` が `Yes` / `No` のどちらかに確定し、少なくとも1候補が `Yes` の場合は、Ron の生値を候補間で比較せず `current tenpai expected self-tsumo value` を共通軸にします。全候補が恒常フリテンの場合も、恒常フリテン / 非フリテンが混在する場合も同じです。
+
+```text
+current tenpai expected self-tsumo value
+= P(残り自摸機会内にツモ和了) × ツモ和了時の期待 Payment.total()
+```
+
+この値は既存 `TenpaiTsumoValue::expected_payment()` の固定小数点尺度そのもので、打牌後の `SelfTsumoFacts`、live physical variant、Tsumo scoring を再利用します。production の base Reach / Damaten policy が選んだ mode に対応する Tsumo baseline を使いますが、候補ごとの `ReachTimingDecision` は評価しません。Reach timing は候補選択後、選択済み1候補へだけ適用する後段 policy です。
+
+Ron probability を持っていないため、mixed cohort でも `ExpectedSelfTsumoValue` に Ron opportunity や Ron weighted total を加算しません。これは自分のツモ和了だけを見る self-tsumo-only offense continuation value であり、局収支EVではありません。非フリテン同士では従来の Ron-based 軸を維持し、フリテンとの共通比較が必要な cohort だけ、全候補で意味が同じ self-tsumo 尺度を使う暫定 policy です。
+
 攻撃モードは既存 production policy と同じです。既にリーチ済みならReach、未リーチなら既存の `decide_reach_reason()` に従ってReachまたはDamatenを選びます。ダマ値は既存フリテン判定で `can_ron == Some(true)` と確定した場合だけ利用し、ロン可否unknown・役なし・点数計算不能などを0点とは扱いません。
 
-軸の有効・無効は `Shanten` / `IsolatedTile` / `IsolatedHonor` まで同順位の候補集合 (cohort) 単位で決めます。cohortの全聴牌候補で値が確定した場合だけ使い、1件でもunknownならcohort全体で無効化して従来のAcceptance比較へ戻します。
+軸の有効・無効は `Shanten` / `IsolatedTile` / `IsolatedHonor` まで同順位の cohort 単位で決めます。`PermanentFuriten::Unknown` が1件でもあれば新しい furiten-aware self-tsumo 軸を使いません。また self-tsumo value が1件でもunknownなら、値を0とせず cohort 全体で軸を無効化します。どちらも既存の次軸へ fallback し、pairwise に軸の有無を変えません。
 
 評価対象は現在打牌直後の待ちと打点だけです。聴牌後に非和了牌を引いて別の待ちへ移る手変わりや、ダマ手変わりの2手先評価は行いません。既存の1向聴・2向聴以上の先読み軸も変更しません。ダマで継続した場合の次の1巡は [現在聴牌のダマ継続 (diagnostics only)](#現在聴牌のダマ継続-diagnostics-only) で観測できますが、この比較には接続していません。
 
@@ -157,7 +172,7 @@ detailed diagnostics そのものは要求した場合だけ構築し、`act()` 
 
 枝には、待ちが実際に変わるもの (手変わり) だけでなく、**ツモった牌をそのまま切って元の聴牌・元の待ちを維持するものも含みます**。「今すぐリーチする」と「ダマで継続する」を比べるには、次の1巡で待ちが変わらない場合の価値も同じ枝集合の中に必要になるためです。枝を待ちの変化で分類 (据え置き / 待ち改善 / 打点改善) することはまだ行いません。
 
-**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` の比較にも、base の Reach / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。production が使うのは、この枝集合と同じ基盤を選択済み1候補にだけ適用する [リーチ timing](#リーチ-timing) だけです。`CurrentTenpaiOffenseWeightedTotal` や `weighted prospective value` は単位の違う値なので、下の self-tsumo 比較と直接並べることはしません。
+**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` と `CurrentTenpaiExpectedSelfTsumoValue` の比較にも、base の Reach / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。現在聴牌の新しい self-tsumo 軸は、現在の待ちを残り自摸機会全体で評価するだけで、下記の非和了牌からの手変わり枝を含みません。production がこの枝集合を使うのは、選択済み1候補にだけ適用する [リーチ timing](#リーチ-timing) です。Ron の生値や `weighted prospective value` は単位の違う値なので、self-tsumo expected value と加算しません。
 
 枝はすべて既存基盤そのものです。
 
