@@ -13,24 +13,24 @@ use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
 };
-use crate::reach_decision::tsumo_named_yakuman_from_hands;
 use crate::reach_policy::{
-    ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_reach_timing,
-    selects_named_yakuman_damaten,
+    ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_named_yakuman_damaten,
+    evaluates_reach_timing, selects_named_yakuman_damaten,
 };
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, TenpaiContinuationInputs, TenpaiSelfTsumoComparison,
     diagnose_tenpai_continuation, tenpai_candidate_self_tsumo_comparison,
 };
-use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
+use crate::tenpai_scoring::{NamedYakumanTsumo, evaluate_tenpai_tsumo, tenpai_tsumo_named_yakuman};
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, OwnDiscards, SelfTsumoFacts,
-    TenpaiWaitAvailability, TileCounts, TileId, TileType, best_discard_selection_index,
-    best_discard_selection_index_with_metrics, current_tenpai_continuation_targets,
-    diagnose_discard_evaluations_with_metrics, diagnose_discard_furiten, diagnose_lookahead,
-    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
+    best_discard_selection_index, best_discard_selection_index_with_metrics,
+    current_tenpai_continuation_targets, diagnose_discard_evaluations_with_metrics,
+    diagnose_discard_furiten, diagnose_lookahead, discard_tenpai_wait_availability,
+    evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, split_discarded_tile,
     tsumo_hit_probability,
@@ -506,7 +506,7 @@ fn base_current_tenpai_candidate_evaluations(
                 .and_then(|(offense, facts)| {
                     let hands = hands.as_ref()?;
                     let terminal =
-                        tenpai_tsumo_value_from_hands(context, hands, offense.offense.mode)?;
+                        evaluate_tenpai_tsumo(context, hands, offense.offense.mode).value?;
                     Some((
                         terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws),
                         tsumo_hit_probability(
@@ -516,21 +516,8 @@ fn base_current_tenpai_candidate_evaluations(
                         ),
                     ))
                 });
-            // 実際の base policy がリーチを選ぶかは、offense mode の前段にある categorical rule
-            // も通した結論。組み立て済みの待ちと完成手をそのまま渡し、この判定のために待ちも
-            // 完成手も Tsumo scoring も作り直さない。役満判定は既存 scoring の結論そのもので、
-            // リーチ判断が使う rule ([`tsumo_named_yakuman_from_hands`]) を共有する。
-            let base_selects_reach = offense
-                .as_ref()
-                .is_some_and(|offense| offense.offense.mode == TenpaiOffenseMode::Reach)
-                && !wait.as_ref().is_some_and(|wait| {
-                    selects_named_yakuman_damaten(
-                        wait.permanent_furiten(),
-                        wait.tsumo_remaining,
-                        tsumo_named_yakuman_from_hands(context, wait, hands.as_ref())
-                            .is_established(),
-                    )
-                });
+            let base_selects_reach =
+                base_policy_selects_reach(context, wait.as_ref(), hands.as_ref(), offense.as_ref());
 
             CurrentTenpaiCandidateEvaluation {
                 wait,
@@ -621,6 +608,47 @@ fn attach_current_tenpai_continuation(
             comparison.and_then(|comparison| comparison.defer_forced_reach()),
         ));
     }
+}
+
+/// 現在聴牌候補1件について、実際の base Reach / Damaten policy がリーチを選ぶか。
+///
+/// offense mode ([`crate::reach_policy::decide_reach_reason`]) だけでなく、その前段の
+/// categorical rule ([`selects_named_yakuman_damaten`]) も通した、リーチ判断と同じ結論。
+///
+/// 材料は候補評価が既に組み立てた待ちと完成手そのままで、この判定のために待ちも完成手も作り
+/// 直さない。役満判定は「リーチを宣言しない場合のツモ」を見る既存 rule そのままなので Damaten
+/// baseline で、期待支払い (base offense mode) とは baseline が違う。対象になるのは既存 rule の
+/// 適用局面 ([`evaluates_named_yakuman_damaten`]) の base Reach 候補だけで、それ以外では役満
+/// 判定そのものを走らせない。
+fn base_policy_selects_reach(
+    context: &GameContext,
+    wait: Option<&TenpaiWaitAvailability>,
+    hands: Option<&TenpaiCompletedHands>,
+    offense: Option<&TenpaiOffenseEvaluation>,
+) -> bool {
+    if offense.map(|offense| offense.offense.mode) != Some(TenpaiOffenseMode::Reach) {
+        return false;
+    }
+    let Some(wait) = wait else {
+        return false;
+    };
+
+    // rule の対象局面でだけ役満判定を走らせる。対象外では点数計算そのものを行わない。
+    let named_yakuman =
+        evaluates_named_yakuman_damaten(wait.permanent_furiten(), wait.tsumo_remaining)
+            .then(|| {
+                hands.map(|hands| {
+                    tenpai_tsumo_named_yakuman(context, hands, TenpaiOffenseMode::Damaten)
+                })
+            })
+            .flatten()
+            .unwrap_or(NamedYakumanTsumo::NotEstablished);
+
+    !selects_named_yakuman_damaten(
+        wait.permanent_furiten(),
+        wait.tsumo_remaining,
+        named_yakuman.is_established(),
+    )
 }
 
 // 候補ごとの「実際の base Reach / Damaten policy がリーチを選ぶか」。
@@ -1237,6 +1265,7 @@ pub(crate) mod tests {
     use crate::context::TableStateFacts;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
+    use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
         HistoryFuritenFacts, PermanentFuriten, TileId,
