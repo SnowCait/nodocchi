@@ -98,7 +98,9 @@ use crate::offense_value::{
     BASELINE_CHANKAN, BASELINE_IPPATSU, BASELINE_RINSHAN, BASELINE_URA_DORA_INDICATORS,
     OffenseValue, TenpaiOffenseMode, reach_baseline_context, variant_total, weighted_average,
 };
-use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
+use crate::reach_policy::{
+    NamedYakumanTsumo, ReachLegalityFacts, decide_reach_reason, is_reach_legal,
+};
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
@@ -626,6 +628,43 @@ pub(crate) fn tenpai_tsumo_value_from_hands(
     let (baseline, ura_dora) = tsumo_scoring_inputs(context, mode)?;
     let profile = evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
     tsumo_value(&profile)
+}
+
+/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価し、生きた
+/// 和了牌の物理牌 variant がすべて named 役満になるかを求める。
+///
+/// baseline も点数計算も variant の分け方も [`tenpai_tsumo_value_from_hands`] と同じで、役満か
+/// どうかは既存 scoring の結論そのもの。残枚数 0 の variant は引けないので判定に含めず、生きた
+/// variant が1件も無いテンパイは named 役満と確定しない。役なし・数え役満・scoring unknown も
+/// 同じく確定しない扱いで、名前の付いた役満だと推測しない。
+pub(crate) fn tenpai_tsumo_named_yakuman(
+    context: &GameContext,
+    hands: &TenpaiCompletedHands,
+    mode: TenpaiOffenseMode,
+) -> NamedYakumanTsumo {
+    let Some((baseline, ura_dora)) = tsumo_scoring_inputs(context, mode) else {
+        return NamedYakumanTsumo::NotEstablished;
+    };
+    let profile = evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
+    named_yakuman_tsumo(&profile)
+}
+
+fn named_yakuman_tsumo(profile: &TenpaiHandValueProfile<'_>) -> NamedYakumanTsumo {
+    let mut live_variants = profile
+        .waits()
+        .iter()
+        .flat_map(|wait| wait.winning_tiles().iter())
+        .filter(|variant| variant.remaining() > 0)
+        .peekable();
+
+    if live_variants.peek().is_none() {
+        return NamedYakumanTsumo::NotEstablished;
+    }
+    if live_variants.all(|variant| prospective_value(variant.outcome()).is_yakuman()) {
+        NamedYakumanTsumo::AllLiveVariants
+    } else {
+        NamedYakumanTsumo::NotEstablished
+    }
 }
 
 /// 待ちごとの評価結果を、ツモ和了できる variant の残枚数と重み付き打点へ畳む。
@@ -2212,6 +2251,115 @@ mod tests {
         let (baseline, ura_dora) = tsumo_scoring_inputs(&ctx, mode)?;
         let profile = evaluate_tenpai_hand_value(&hands, baseline, &[], ura_dora);
         tsumo_value(&profile)
+    }
+
+    // 13面待ちの国士無双テンパイ。
+    const KOKUSHI_TENPAI_HAND: [&str; 13] = [
+        "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P", "F", "C",
+    ];
+
+    // 白白白 發發發 中中 + 234m + 5m5m の 中 / 5m シャンポン。中ツモは大三元だが、5m ツモは
+    // 小三元にしかならない。
+    const DAISANGEN_SHANPON_HAND: [&str; 13] = [
+        "P", "P", "P", "F", "F", "F", "C", "C", "2m", "3m", "4m", "5m", "5m",
+    ];
+
+    // 555m 123p 789p + 5s5s 9s9s の 5s / 9s シャンポン。ドラ表示牌 4m を4枚見せると 5m の
+    // ドラ12翻 + 門前ツモで数え役満になる。
+    const KAZOE_SHANPON_HAND: [&str; 13] = [
+        "5m", "5m", "5m", "1p", "2p", "3p", "7p", "8p", "9p", "5s", "5s", "9s", "9s",
+    ];
+    const KAZOE_DORA_INDICATORS: [&str; 4] = ["4m", "4m", "4m", "4m"];
+
+    // 門前テンパイ1件を組み立てて、ダマの Tsumo baseline で named 役満と確定するかを求める。
+    // 待ちも残枚数も既存の受け入れそのもので、`extra_visible` は見え牌として残枚数へ反映する。
+    fn named_yakuman_tsumo_of(
+        hand: &[&str],
+        dora_indicators: &[&str],
+        extra_visible: &[&str],
+        known_winds: bool,
+    ) -> NamedYakumanTsumo {
+        let mut source = TileIdSource::new();
+        let concealed = source.tiles(hand);
+        let dora_indicators = source.tiles(dora_indicators);
+        let extra_visible = source.tiles(extra_visible);
+        let visible: Vec<TileId> = concealed
+            .iter()
+            .chain(dora_indicators.iter())
+            .chain(extra_visible.iter())
+            .copied()
+            .collect();
+
+        let counts = TileCounts::from_tiles(concealed.iter().copied());
+        let acceptance = bot_logic::calculate_acceptance_with_visible_tiles(&counts, &visible);
+        let hands = tenpai_completed_hands(&concealed, &[], &acceptance, None, &visible)
+            .expect("テンパイの完成手を解析できる");
+        let ctx = GameContext::from_parts_with_visible_tiles(
+            None,
+            concealed,
+            dora_indicators,
+            known_winds.then(|| tile("E")),
+            known_winds.then(|| tile("S")),
+            visible,
+        );
+
+        tenpai_tsumo_named_yakuman(&ctx, &hands, TenpaiOffenseMode::Damaten)
+    }
+
+    #[test]
+    fn every_live_variant_of_a_named_yakuman_tenpai_is_established() {
+        assert_eq!(
+            named_yakuman_tsumo_of(&KOKUSHI_TENPAI_HAND, &[], &[], true),
+            NamedYakumanTsumo::AllLiveVariants
+        );
+    }
+
+    #[test]
+    fn a_partly_named_yakuman_tenpai_is_not_established() {
+        // 中ツモだけが大三元で、5m ツモは小三元にしかならない。
+        assert_eq!(
+            named_yakuman_tsumo_of(&DAISANGEN_SHANPON_HAND, &[], &[], true),
+            NamedYakumanTsumo::NotEstablished
+        );
+    }
+
+    #[test]
+    fn a_kazoe_yakuman_tenpai_is_not_a_named_yakuman() {
+        // 数え役満は名前の付いた役満ではないので、点数が役満でも確定しない。
+        assert_eq!(
+            named_yakuman_tsumo_of(&KAZOE_SHANPON_HAND, &KAZOE_DORA_INDICATORS, &[], true),
+            NamedYakumanTsumo::NotEstablished
+        );
+    }
+
+    #[test]
+    fn an_unknown_scoring_variant_is_not_inferred_as_a_named_yakuman() {
+        // 同じ国士でも、自風が不明で親子が決まらないと支払いを確定できない。役満だと推測せず、
+        // 確定しない variant として扱う。
+        assert_eq!(
+            named_yakuman_tsumo_of(&KOKUSHI_TENPAI_HAND, &[], &[], false),
+            NamedYakumanTsumo::NotEstablished
+        );
+    }
+
+    #[test]
+    fn a_variant_without_any_remaining_tile_is_not_judged() {
+        // 残枚数 0 の 5m は引けないので判定に含めない。生きた variant が中だけになれば確定する。
+        assert_eq!(
+            named_yakuman_tsumo_of(
+                &DAISANGEN_SHANPON_HAND,
+                &[],
+                &["5m", "5mr", "1m", "1m", "1m"],
+                true
+            ),
+            NamedYakumanTsumo::AllLiveVariants
+        );
+
+        // 生きた variant が1件も無いテンパイは和了しようが無いので確定しない。
+        assert_eq!(
+            named_yakuman_tsumo_of(&DAISANGEN_SHANPON_HAND, &[], &["5m", "5mr", "C", "C"], true),
+            NamedYakumanTsumo::NotEstablished
+        );
     }
 
     #[test]

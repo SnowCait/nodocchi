@@ -170,6 +170,8 @@ Reach
 
 `damaten verdict` はダマ打点から畳んだ結論だけで、待ちごとの実点数は下の `Reach / Damaten comparison` がリーチ Ron baseline と並べて出します。
 
+`base reason` が `NamedYakumanDamaten` の場合は、恒常フリテンで全ての生きた Tsumo variant が named 役満と確定したためのダマです。ダマ打点 threshold の `HighValueDamaten` とは別の理由で、`damaten verdict` を持たず timing も評価しません。違いは [打牌選択](ai/discard-selection.md#base-reach--damaten-policy-の-categorical-rule) を参照してください。
+
 ## Reach / Damaten comparison
 
 `Reach / Damaten comparison` は、選んだ打牌1件について Reach / Damaten の判断材料を1か所へ並べた観測です。`Reach` と同じく押し引きが `Push` のときだけ評価します。

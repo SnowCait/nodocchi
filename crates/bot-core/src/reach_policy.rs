@@ -2,11 +2,24 @@
 //!
 //! リーチ判断そのもの ([`crate::agents::ShantenAgent`] の Reach action 選択) と、押し引きが
 //! 攻撃打点を求めるときの攻撃モード判定は、同じ結論でなければならない。両者が同じ条件を別々に
-//! 書くと片方だけがずれるため、条件は [`decide_reach_reason`] 1本だけが持つ。
+//! 書くと片方だけがずれるため、条件は [`decide_reach_reason`] 1本だけが持つ。Reach action 判断
+//! だけに適用する categorical rule も同じく1本の helper が持ち、条件を呼び出し側へ散らさない。
 //!
 //! この層は待ち・フリテン・ダマ打点を計算しない。既にそれぞれの source of truth から求めた
 //! 結論 (合法 Reach の有無・[`DamatenValueVerdict`]・生きた待ちの残枚数) を受け取り、そこから
 //! 理由を1つ選ぶだけの pure helper になっている。
+//!
+//! # categorical rule
+//!
+//! ダマ打点 threshold とは別に、既存 scoring が named 役満と確定した恒常フリテン聴牌だけを
+//! 対象にする categorical rule ([`selects_named_yakuman_damaten`]) を持つ。ダマ打点の大小では
+//! なく「ロンできない聴牌のツモ和了が名前の付いた役満で確定している」という別の事実に基づく
+//! ため、[`ReachDecisionReason::HighValueDamaten`] へ統合せず専用の理由で区別する。
+//!
+//! この rule を適用するのは production の Reach action 判断だけで、押し引きの攻撃モードと将来
+//! テンパイの selection value は従来どおり [`decide_reach_reason`] の結論のまま変えない。役満
+//! 判定そのものもこの層は持たず、既存 scoring の結論 ([`NamedYakumanTsumo`]) を受け取るだけで
+//! ある。
 //!
 //! # リーチの合法性
 //!
@@ -105,6 +118,13 @@ pub enum ReachDecisionReason {
     EligibleLowValue,
     /// 全ての生きた待ちがダマで役ありかつ threshold 以上なのでダマにする。
     HighValueDamaten,
+    /// 恒常フリテンで、全ての生きた Tsumo physical variant が named 役満と確定したのでダマに
+    /// する。
+    ///
+    /// ダマ打点 threshold ([`Self::HighValueDamaten`]) とは別の categorical rule で、判断材料も
+    /// 既存 scoring の役満判定だけになる。数え役満・一部だけ named 役満・scoring unknown は
+    /// 含まない。
+    NamedYakumanDamaten,
     /// 合法 action に [`LegalAction::Reach`](crate::action::LegalAction::Reach) が無い。
     NoLegalReach,
     /// 通常打牌 selection が打牌を選べていない。手牌や合法 Dahai が無い局面。
@@ -164,6 +184,52 @@ pub fn decide_reach_reason(
             }
         }
     }
+}
+
+/// 打牌後テンパイのツモ和了が named 役満だと既存 scoring 上確定したか。
+///
+/// 役満判定は既存 scoring の結論 ([`HandValue::is_yakuman`](bot_logic::HandValue::is_yakuman))
+/// だけが source of truth で、牌姿・役満名の列挙・点数 threshold から役満を推測しない。数え役満は
+/// 名前の付いた役満ではないので [`Self::NotEstablished`] になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedYakumanTsumo {
+    /// 生きた physical variant が1件以上あり、その全ての Tsumo 打点が named 役満と確定した。
+    AllLiveVariants,
+    /// named 役満だと確定しない。
+    ///
+    /// 一部の variant だけ named 役満・役なしを含む・数え役満・scoring unknown・生きた
+    /// physical variant が1件も無い場合と、この経路で評価しなかった場合をすべて含む。
+    NotEstablished,
+}
+
+/// named 役満の categorical rule を評価する局面か。
+///
+/// 恒常フリテンが確定していて、生きた待ちが残っている聴牌だけを対象にする。恒常フリテンは既存の
+/// [`PermanentFuriten`] だけが source of truth で、[`PermanentFuriten::Unknown`] を恒常フリテン
+/// だと推測しない。対象外の局面では役満判定そのものを行わない。
+pub fn evaluates_named_yakuman_damaten(
+    permanent_furiten: PermanentFuriten,
+    tsumo_remaining: u8,
+) -> bool {
+    permanent_furiten == PermanentFuriten::Yes && tsumo_remaining > 0
+}
+
+/// 恒常フリテンの named 役満聴牌でリーチを宣言しない categorical rule。
+///
+/// ロンできない聴牌のツモ和了が既存 scoring 上 named 役満で確定しているという事実だけで
+/// [`ReachDecisionReason::NamedYakumanDamaten`] を選ぶ。ダマ打点の大小を見る
+/// [`ReachDecisionReason::HighValueDamaten`] とは別の判断で、打点 threshold も待ち枚数
+/// threshold も持たない。
+///
+/// 対象は [`evaluates_named_yakuman_damaten`] を満たす局面だけで、非恒常フリテンの named 役満は
+/// 従来どおりダマ打点 threshold の結論になる。
+pub fn selects_named_yakuman_damaten(
+    permanent_furiten: PermanentFuriten,
+    tsumo_remaining: u8,
+    tsumo_named_yakuman: NamedYakumanTsumo,
+) -> bool {
+    evaluates_named_yakuman_damaten(permanent_furiten, tsumo_remaining)
+        && tsumo_named_yakuman == NamedYakumanTsumo::AllLiveVariants
 }
 
 /// base policy がリーチを選んだ聴牌で、そのリーチを今回宣言するかどうか。
@@ -642,6 +708,52 @@ mod tests {
     }
 
     #[test]
+    fn only_a_confirmed_permanent_furiten_named_yakuman_becomes_a_categorical_damaten() {
+        assert!(evaluates_named_yakuman_damaten(PermanentFuriten::Yes, 1));
+        assert!(selects_named_yakuman_damaten(
+            PermanentFuriten::Yes,
+            1,
+            NamedYakumanTsumo::AllLiveVariants
+        ));
+
+        // 恒常フリテンが確定していない聴牌と、生きた待ちが1枚も無い聴牌は対象外。unknown を
+        // 恒常フリテンだと推測しない。
+        for facts in [
+            (PermanentFuriten::No, 8),
+            (PermanentFuriten::Unknown, 8),
+            (PermanentFuriten::Yes, 0),
+        ] {
+            assert!(
+                !evaluates_named_yakuman_damaten(facts.0, facts.1),
+                "{facts:?}"
+            );
+            assert!(
+                !selects_named_yakuman_damaten(
+                    facts.0,
+                    facts.1,
+                    NamedYakumanTsumo::AllLiveVariants
+                ),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unestablished_named_yakuman_keeps_the_existing_base_policy() {
+        // 一部だけ役満・数え役満・scoring unknown はどれも確定しない扱いで、categorical rule へ
+        // 入れない。恒常フリテンでも既存判断のままになる。
+        assert!(!selects_named_yakuman_damaten(
+            PermanentFuriten::Yes,
+            8,
+            NamedYakumanTsumo::NotEstablished
+        ));
+        assert_eq!(
+            decide_reach_reason(true, None, REACH_MIN_REMAINING),
+            ReachDecisionReason::Eligible
+        );
+    }
+
+    #[test]
     fn only_the_eligible_reasons_select_reach() {
         for reason in [
             ReachDecisionReason::Eligible,
@@ -653,6 +765,7 @@ mod tests {
 
         for reason in [
             ReachDecisionReason::HighValueDamaten,
+            ReachDecisionReason::NamedYakumanDamaten,
             ReachDecisionReason::NoLegalReach,
             ReachDecisionReason::NoSelectedDiscard,
             ReachDecisionReason::NotTenpai,

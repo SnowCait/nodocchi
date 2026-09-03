@@ -18,12 +18,13 @@ use crate::discard_selection::{
     DiscardActionSelection, LookaheadDiagnosticScope, select_discard_action_with_diagnostic,
     select_discard_action_with_evaluation, selected_discard_tenpai_wait_availability,
 };
+use crate::offense_value::TenpaiOffenseMode;
 use crate::open_hand_defense::{
     OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
     evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
 };
 use crate::open_hand_threat::OpenHandThreatAssessment;
-use crate::prospective_value::ProspectiveLookaheadDiagnostic;
+use crate::prospective_value::{ProspectiveLookaheadDiagnostic, tenpai_tsumo_named_yakuman};
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -33,9 +34,10 @@ use crate::reach_damaten_comparison::{
     diagnose_reach_damaten_comparison,
 };
 use crate::reach_policy::{
-    NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
-    decide_permanent_furiten_reach_timing, decide_reach_reason,
+    NamedYakumanTsumo, NonFuritenBadWaitTimingFacts, decide_non_furiten_bad_wait_reach_timing,
+    decide_permanent_furiten_reach_timing, decide_reach_reason, evaluates_named_yakuman_damaten,
     evaluates_non_furiten_bad_wait_reach_timing, evaluates_reach_timing,
+    selects_named_yakuman_damaten,
 };
 use crate::ron_opportunity::reach_public_safety_after_discard;
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
@@ -1217,11 +1219,23 @@ fn decide_reach(
 
     // 待ち枚数は既存受け入れそのもので、visible tiles の反映も打牌評価の時点で済んでいる。
     // リーチ / ダマの条件そのものは押し引きの攻撃打点と共有し、ここで書き直さない。
-    let reason = decide_reach_reason(
-        true,
-        damaten_value.as_ref().map(|value| value.verdict),
+    //
+    // 恒常フリテンの named 役満だけは、ダマ打点 threshold とは別の categorical rule でダマに
+    // する。ロンできない聴牌なのでダマ打点は評価しておらず、材料は既存 scoring の Tsumo 評価
+    // だけになる。
+    let reason = if selects_named_yakuman_damaten(
+        tenpai_wait.permanent_furiten(),
         tenpai_wait.tsumo_remaining,
-    );
+        tsumo_named_yakuman(ctx, evaluation, &tenpai_wait),
+    ) {
+        ReachDecisionReason::NamedYakumanDamaten
+    } else {
+        decide_reach_reason(
+            true,
+            damaten_value.as_ref().map(|value| value.verdict),
+            tenpai_wait.tsumo_remaining,
+        )
+    };
 
     // timing はここまでの base policy を上書きしない。base policy がリーチを選んだ場合だけ、
     // そのリーチを今回宣言するかどうかを決める層として後ろに続く。
@@ -1237,6 +1251,29 @@ fn decide_reach(
     diagnostic.damaten_value = damaten_value;
     diagnostic.tenpai_wait = Some(tenpai_wait);
     ReachDecision { diagnostic, hands }
+}
+
+// 打牌後テンパイのツモ和了が named 役満と確定するか。
+//
+// 役満判定は既存 scoring の結論そのもので、牌姿からも点数 threshold からも役満を推測しない。
+// 評価するモードは、リーチを宣言しない場合の Tsumo baseline (Damaten) 1つだけ。categorical rule
+// の対象になる恒常フリテン聴牌でしか完成手を組み立てず、それ以外では点数計算も走らせない。
+fn tsumo_named_yakuman(
+    ctx: &GameContext,
+    evaluation: &DiscardEvaluation,
+    tenpai_wait: &TenpaiWaitAvailability,
+) -> NamedYakumanTsumo {
+    if !evaluates_named_yakuman_damaten(
+        tenpai_wait.permanent_furiten(),
+        tenpai_wait.tsumo_remaining,
+    ) {
+        return NamedYakumanTsumo::NotEstablished;
+    }
+
+    tenpai_completed_hands_after_discard(ctx, evaluation, tenpai_wait)
+        .map_or(NamedYakumanTsumo::NotEstablished, |hands| {
+            tenpai_tsumo_named_yakuman(ctx, &hands, TenpaiOffenseMode::Damaten)
+        })
 }
 
 // base policy がリーチを選んだ聴牌の timing 判断。
@@ -1974,6 +2011,86 @@ pub(crate) mod tests {
         }
     }
 
+    // ダマ打点を判断できる局面の材料。既定は場風・自風も自分の席も既知で、`own_river` を持たない
+    // 非フリテンのテンパイになる。
+    struct DamatenSpec<'a> {
+        hand: &'a [&'a str],
+        drawn: &'a str,
+        dora_indicators: &'a [&'a str],
+        extra_visible: &'a [&'a str],
+        own_river: &'a [&'a str],
+        /// 場風・自風が既知か。不明にすると点数計算の入力が足りない局面になる。
+        known_winds: bool,
+        /// 自分の席が既知か。不明にすると自分の河を特定できず、恒常フリテンが
+        /// [`PermanentFuriten::Unknown`] になる。
+        known_seat: bool,
+    }
+
+    impl Default for DamatenSpec<'_> {
+        fn default() -> Self {
+            Self {
+                hand: &PINFU_TANYAO_HAND,
+                drawn: "N",
+                dora_indicators: &[],
+                extra_visible: &[],
+                own_river: &[],
+                known_winds: true,
+                known_seat: true,
+            }
+        }
+    }
+
+    impl DamatenSpec<'_> {
+        fn build(self) -> DamatenCase {
+            let mut source = TileIdSource::new();
+            let hand_tiles = source.tiles(self.hand);
+            let drawn_tile = source.tile(self.drawn);
+            let dora_indicators = source.tiles(self.dora_indicators);
+            let extra_visible = source.tiles(self.extra_visible);
+            let own_river = source.tiles(self.own_river);
+
+            let visible: Vec<TileId> = hand_tiles
+                .iter()
+                .chain([&drawn_tile])
+                .chain(dora_indicators.iter())
+                .chain(extra_visible.iter())
+                .chain(own_river.iter())
+                .copied()
+                .collect();
+            let actions: Vec<LegalAction> = hand_tiles
+                .iter()
+                .chain([&drawn_tile])
+                .map(|&tile| LegalAction::Dahai { tile })
+                .chain([LegalAction::Reach])
+                .collect();
+
+            let ctx = GameContext::from_parts_with_table_state(
+                Some(drawn_tile),
+                hand_tiles,
+                dora_indicators,
+                self.known_winds
+                    .then(|| TileType::from_mjai_type_str("E").unwrap()),
+                self.known_winds
+                    .then(|| TileType::from_mjai_type_str("S").unwrap()),
+                visible,
+                self.known_seat.then_some(0),
+                Some(3),
+                [own_river, vec![], vec![], vec![]],
+                [false; 4],
+            )
+            .with_history_furiten_facts(HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            });
+
+            DamatenCase {
+                ctx,
+                actions,
+                tsumogiri: LegalAction::Dahai { tile: drawn_tile },
+            }
+        }
+    }
+
     fn damaten_case(hand: &[&str], drawn: &str, dora_indicators: &[&str]) -> DamatenCase {
         damaten_case_with(hand, drawn, dora_indicators, &[], &[])
     }
@@ -1985,50 +2102,15 @@ pub(crate) mod tests {
         extra_visible: &[&str],
         own_river: &[&str],
     ) -> DamatenCase {
-        let mut source = TileIdSource::new();
-        let hand_tiles = source.tiles(hand);
-        let drawn_tile = source.tile(drawn);
-        let dora_indicators = source.tiles(dora_indicators);
-        let extra_visible = source.tiles(extra_visible);
-        let own_river = source.tiles(own_river);
-
-        let visible: Vec<TileId> = hand_tiles
-            .iter()
-            .chain([&drawn_tile])
-            .chain(dora_indicators.iter())
-            .chain(extra_visible.iter())
-            .chain(own_river.iter())
-            .copied()
-            .collect();
-        let actions: Vec<LegalAction> = hand_tiles
-            .iter()
-            .chain([&drawn_tile])
-            .map(|&tile| LegalAction::Dahai { tile })
-            .chain([LegalAction::Reach])
-            .collect();
-
-        let ctx = GameContext::from_parts_with_table_state(
-            Some(drawn_tile),
-            hand_tiles,
+        DamatenSpec {
+            hand,
+            drawn,
             dora_indicators,
-            TileType::from_mjai_type_str("E").ok(),
-            TileType::from_mjai_type_str("S").ok(),
-            visible,
-            Some(0),
-            Some(3),
-            [own_river, vec![], vec![], vec![]],
-            [false; 4],
-        )
-        .with_history_furiten_facts(HistoryFuritenFacts {
-            same_turn: Some(false),
-            riichi_missed_win: Some(false),
-        });
-
-        DamatenCase {
-            ctx,
-            actions,
-            tsumogiri: LegalAction::Dahai { tile: drawn_tile },
+            extra_visible,
+            own_river,
+            ..DamatenSpec::default()
         }
+        .build()
     }
 
     // 平和 + 断幺の 3s / 6s 両面テンパイ。ドラ表示牌だけを変えてダマ打点の階段を作る。
@@ -3433,6 +3515,192 @@ pub(crate) mod tests {
         // Agent は合法候補(ツモ切り 3p)を切る。
         let mut agent = ShantenAgent;
         assert_eq!(agent.act(&ctx, &actions), dahai(drawn));
+    }
+
+    // ---- 恒常フリテンの named 役満 ----
+
+    // 白白白 發發發 中中 + 234m + 5m5m の 中 / 5m シャンポン。中ツモは大三元だが、5m ツモは
+    // 小三元にしかならないので、生きた variant の一部だけが named 役満になる。
+    const DAISANGEN_SHANPON_HAND: [&str; 13] = [
+        "P", "P", "P", "F", "F", "F", "C", "C", "2m", "3m", "4m", "5m", "5m",
+    ];
+
+    // 555m 123p 789p + 5s5s 9s9s の 5s / 9s シャンポン。ドラ表示牌 4m を4枚見せると 5m のドラ
+    // 12翻になり、門前ツモと合わせて数え役満になる。名前の付いた役満は付かない。
+    const KAZOE_SHANPON_HAND: [&str; 13] = [
+        "5m", "5m", "5m", "1p", "2p", "3p", "7p", "8p", "9p", "5s", "5s", "9s", "9s",
+    ];
+    const KAZOE_DORA_INDICATORS: [&str; 4] = ["4m", "4m", "4m", "4m"];
+
+    #[test]
+    fn a_permanent_furiten_named_yakuman_tenpai_never_declares_the_reach() {
+        // 国士無双を自分で切って恒常フリテンになった聴牌。ロンできないので、生きた待ちはすべて
+        // ツモ和了の役満だけになる。リーチしても和了形が変わらないので宣言しない。
+        let case = DamatenSpec {
+            hand: &KOKUSHI_HAND,
+            drawn: "5m",
+            own_river: &["1m"],
+            ..DamatenSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.can_ron(), Some(false));
+        assert!(
+            reach
+                .tsumo_remaining()
+                .is_some_and(|remaining| remaining > 0)
+        );
+        // ロンできない聴牌ではダマ打点そのものを評価しない。判断材料は既存 scoring の Tsumo
+        // 評価だけで、ダマ打点 threshold の結論ではない。
+        assert_eq!(reach.damaten_value, None);
+        assert_eq!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert!(!reach.base_selects_reach());
+
+        // base policy がダマなので timing 判断そのものを行わない。DeferReach でもない。
+        assert_eq!(reach.timing, None);
+        assert!(!reach.defers_reach());
+        assert!(!reach.should_reach());
+        assert_eq!(reach.selected, None);
+
+        // 通常打牌 selection が選んだ打牌をそのまま行う。
+        assert_eq!(reach.selected_discard, Some(case.tsumogiri.clone()));
+        assert_eq!(case.act(), case.tsumogiri);
+        let diagnostic = ShantenAgent::diagnose(&case.ctx, &case.actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(
+            diagnostic.normal_discard_action,
+            Some(case.tsumogiri.clone())
+        );
+    }
+
+    #[test]
+    fn a_non_furiten_named_yakuman_keeps_the_damaten_value_reason() {
+        // 非フリテンの国士はダマでロンできるので、従来どおりダマ打点 threshold の結論になる。
+        let case = damaten_case(&KOKUSHI_HAND, "5m", &[]);
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::No));
+        assert_eq!(reach.can_ron(), Some(true));
+        assert_eq!(
+            reach.damaten_verdict(),
+            Some(DamatenValueVerdict::AboveThreshold)
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::HighValueDamaten);
+        assert!(!reach.should_reach());
+        assert_eq!(case.act(), case.tsumogiri);
+    }
+
+    #[test]
+    fn a_permanent_furiten_ordinary_tenpai_keeps_the_existing_reach_policy() {
+        // 恒常フリテンでも役満でなければ categorical rule に入らない。base policy も timing も
+        // 従来のまま。
+        let case = damaten_case_with(&PINFU_TANYAO_HAND, "N", &[], &[], &["3s"]);
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+        assert!(reach.base_selects_reach());
+
+        // base policy がリーチなので timing 判断へ進む。この局面は山の残枚数が不明で self-tsumo
+        // 比較が確定しないため、既存どおり base のリーチを維持する。
+        let timing = reach
+            .timing
+            .expect("base policy がリーチなら timing を評価する");
+        assert_eq!(timing.decision, ReachTimingDecision::ReachNow);
+        assert_eq!(timing.reason, ReachTimingReason::SelfTsumoComparisonUnknown);
+        assert!(reach.should_reach());
+        assert_eq!(case.act(), LegalAction::Reach);
+    }
+
+    #[test]
+    fn a_partly_named_yakuman_permanent_furiten_tenpai_keeps_the_existing_reach_policy() {
+        // 中ツモだけが大三元で、5m ツモは小三元。全ての生きた variant が named 役満ではないので
+        // categorical rule に入らない。
+        let case = DamatenSpec {
+            hand: &DAISANGEN_SHANPON_HAND,
+            own_river: &["C"],
+            ..DamatenSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_ne!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+
+        // 同じ手牌を非フリテンにすると、役満なのは中だけだと既存のダマ打点でも確認できる。
+        let non_furiten = DamatenSpec {
+            hand: &DAISANGEN_SHANPON_HAND,
+            ..DamatenSpec::default()
+        }
+        .build();
+        let yakuman: Vec<bool> = non_furiten
+            .damaten_values()
+            .iter()
+            .map(|value| value.is_yakuman())
+            .collect();
+        assert!(
+            yakuman.contains(&true) && yakuman.contains(&false),
+            "{yakuman:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_scoring_input_does_not_infer_a_named_yakuman() {
+        // 自風が不明で親子が決まらないと支払いを確定できない。役満だと推測せず、既存 policy へ
+        // fallback する。
+        let case = DamatenSpec {
+            hand: &KOKUSHI_HAND,
+            drawn: "5m",
+            own_river: &["1m"],
+            known_winds: false,
+            ..DamatenSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_ne!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+    }
+
+    #[test]
+    fn a_kazoe_yakuman_permanent_furiten_tenpai_is_not_a_named_yakuman() {
+        // 数え役満は名前の付いた役満ではないので categorical rule に入らない。
+        let case = DamatenSpec {
+            hand: &KAZOE_SHANPON_HAND,
+            dora_indicators: &KAZOE_DORA_INDICATORS,
+            own_river: &["5s"],
+            ..DamatenSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Yes));
+        assert_ne!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
+    }
+
+    #[test]
+    fn an_unknown_permanent_furiten_named_yakuman_keeps_the_existing_reach_policy() {
+        // 自分の席が分からず自分の河を特定できない局面。恒常フリテンだと推測しないので
+        // categorical rule に入らない。
+        let case = DamatenSpec {
+            hand: &KOKUSHI_HAND,
+            drawn: "5m",
+            own_river: &["1m"],
+            known_seat: false,
+            ..DamatenSpec::default()
+        }
+        .build();
+        let reach = case.reach();
+
+        assert_eq!(reach.permanent_furiten(), Some(PermanentFuriten::Unknown));
+        assert_eq!(reach.can_ron(), None);
+        assert_ne!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert_eq!(reach.reason, ReachDecisionReason::Eligible);
     }
 
     // ---- decide() の選択経路(AgentActionSource)テスト ----
