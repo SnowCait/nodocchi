@@ -7,14 +7,14 @@ use bot_core::{
     OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
-    ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue, ProspectiveWaitValue,
-    PushPullDecision, PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
-    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
-    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
-    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
-    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
-    TenpaiOffenseValue, TenpaiSelfTsumoComparison, ThreatDefenseTarget,
+    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
+    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
+    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
+    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
+    RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent,
+    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
+    TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
+    TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -1239,25 +1239,25 @@ fn format_prospective_baseline(label: &str, value: &ProspectiveBaselineValue) ->
     lines
 }
 
-fn prospective_value_label(value: ProspectiveValue) -> String {
+fn prospective_value_label(value: TenpaiVariantValue) -> String {
     match value {
-        ProspectiveValue::Known {
+        TenpaiVariantValue::Known {
             payment,
             is_yakuman: true,
         } => format!("{} yakuman", payment.total()),
-        ProspectiveValue::Known { payment, .. } => payment.total().to_string(),
-        ProspectiveValue::NoYaku => "no yaku".to_string(),
-        ProspectiveValue::Unknown(reason) => {
+        TenpaiVariantValue::Known { payment, .. } => payment.total().to_string(),
+        TenpaiVariantValue::NoYaku => "no yaku".to_string(),
+        TenpaiVariantValue::Unknown(reason) => {
             format!("{UNKNOWN} ({})", prospective_unknown_reason_label(reason))
         }
     }
 }
 
-fn prospective_unknown_reason_label(reason: ProspectiveUnknownReason) -> String {
+fn prospective_unknown_reason_label(reason: TenpaiVariantUnknownReason) -> String {
     match reason {
-        ProspectiveUnknownReason::IndeterminateBonusHan => "indeterminate".to_string(),
-        ProspectiveUnknownReason::Scoring(error) => format!("scoring error: {error}"),
-        ProspectiveUnknownReason::MissingPayment => "no payment".to_string(),
+        TenpaiVariantUnknownReason::IndeterminateBonusHan => "indeterminate".to_string(),
+        TenpaiVariantUnknownReason::Scoring(error) => format!("scoring error: {error}"),
+        TenpaiVariantUnknownReason::MissingPayment => "no payment".to_string(),
     }
 }
 
@@ -6669,29 +6669,32 @@ mod tests {
     fn the_prospective_value_label_keeps_every_outcome() {
         // 役なし・裏ドラ未確定・点数計算エラーを 0 点や同じ unknown へ潰さずに書き分ける。
         assert_eq!(
-            prospective_value_label(ProspectiveValue::Known {
+            prospective_value_label(TenpaiVariantValue::Known {
                 payment: bot_logic::evaluate_payment(1920, false, bot_logic::WinMethod::Ron)
                     .expect("子のロン"),
                 is_yakuman: false,
             }),
             "7700"
         );
-        assert_eq!(prospective_value_label(ProspectiveValue::NoYaku), "no yaku");
         assert_eq!(
-            prospective_value_label(ProspectiveValue::Unknown(
-                ProspectiveUnknownReason::IndeterminateBonusHan
+            prospective_value_label(TenpaiVariantValue::NoYaku),
+            "no yaku"
+        );
+        assert_eq!(
+            prospective_value_label(TenpaiVariantValue::Unknown(
+                TenpaiVariantUnknownReason::IndeterminateBonusHan
             )),
             "unknown (indeterminate)"
         );
         assert_eq!(
-            prospective_value_label(ProspectiveValue::Unknown(
-                ProspectiveUnknownReason::MissingPayment
+            prospective_value_label(TenpaiVariantValue::Unknown(
+                TenpaiVariantUnknownReason::MissingPayment
             )),
             "unknown (no payment)"
         );
         assert!(
-            prospective_value_label(ProspectiveValue::Unknown(
-                ProspectiveUnknownReason::Scoring(
+            prospective_value_label(TenpaiVariantValue::Unknown(
+                TenpaiVariantUnknownReason::Scoring(
                     bot_logic::NormalScoringError::IncompleteContext(
                         bot_logic::MissingScoringFact::RoundWind
                     )

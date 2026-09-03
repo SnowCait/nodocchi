@@ -24,7 +24,7 @@ use crate::open_hand_defense::{
     evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
 };
 use crate::open_hand_threat::OpenHandThreatAssessment;
-use crate::prospective_value::{ProspectiveLookaheadDiagnostic, tenpai_tsumo_named_yakuman};
+use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
@@ -44,6 +44,7 @@ use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_dec
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, selected_tenpai_self_tsumo_comparison,
 };
+use crate::tenpai_scoring::tenpai_tsumo_named_yakuman;
 use crate::threat::{
     PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
 };

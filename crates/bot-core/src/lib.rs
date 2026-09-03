@@ -19,6 +19,7 @@ pub mod reach_policy;
 pub mod ron_opportunity;
 pub mod ryukyoku_decision;
 pub mod tenpai_continuation;
+pub mod tenpai_scoring;
 pub mod threat;
 
 pub use action::LegalAction;
@@ -109,8 +110,8 @@ pub use open_hand_threat::{
 pub use prospective_value::{
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
     ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
-    ProspectiveTenpaiValue, ProspectiveUnavailable, ProspectiveUnknownReason, ProspectiveValue,
-    ProspectiveWaitValue, ProspectiveWinningTileValue,
+    ProspectiveTenpaiValue, ProspectiveUnavailable, ProspectiveWaitValue,
+    ProspectiveWinningTileValue,
 };
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
@@ -137,6 +138,7 @@ pub use tenpai_continuation::{
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
     TenpaiSelfTsumoComparison,
 };
+pub use tenpai_scoring::{TenpaiVariantUnknownReason, TenpaiVariantValue};
 pub use threat::{
     FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,
     PlayerThreatDiagnostic, PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts,

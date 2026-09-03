@@ -4,11 +4,12 @@ use crate::damaten_value::tenpai_completed_hands_after_discard;
 use crate::offense_value::{TenpaiOffenseEvaluation, TenpaiOffenseValue, evaluate_tenpai_offense};
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
-    evaluate_prospective_lookahead_value, tenpai_tsumo_value_from_hands,
+    evaluate_prospective_lookahead_value,
 };
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, TenpaiContinuationInputs, diagnose_tenpai_continuation,
 };
+use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
