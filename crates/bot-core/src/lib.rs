@@ -22,6 +22,8 @@ pub mod reach_policy;
 pub mod ron_opportunity;
 pub mod ryukyoku_decision;
 pub mod shanten_diagnostic;
+#[cfg(test)]
+pub(crate) mod shanten_test_support;
 pub mod tenpai_continuation;
 pub mod tenpai_scoring;
 pub mod threat;

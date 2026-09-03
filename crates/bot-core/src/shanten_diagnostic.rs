@@ -30,6 +30,9 @@ use bot_logic::{
     SelfTsumoFacts, TenpaiCompletedHands,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// `ShantenAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
 ///
 /// 契約:

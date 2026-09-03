@@ -41,13 +41,54 @@ impl Agent for MenzenAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::shanten::tests::{
-        CallReaction, TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, ryukyoku_actions,
-        tenpai_actions, tenpai_context, tile,
-    };
     use crate::ryukyoku_decision::tests::{
         KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND, context_from_hand,
     };
+    use crate::shanten_test_support::{
+        TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
+    };
+    use bot_logic::{HistoryFuritenFacts, TileType};
+
+    fn ryukyoku_actions(ctx: &GameContext) -> Vec<LegalAction> {
+        ctx.hand_tiles()
+            .iter()
+            .copied()
+            .chain(ctx.drawn_tile())
+            .map(|tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Ryukyoku])
+            .collect()
+    }
+
+    fn value_honor_pon_context_and_actions() -> (GameContext, Vec<LegalAction>, LegalAction) {
+        let hand_values = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
+        let hand: Vec<_> = hand_values.iter().map(|&value| tile(value)).collect();
+        let target = tile(126);
+        let call = LegalAction::Pon {
+            tile: target,
+            consumed: vec![tile(124), tile(125)],
+        };
+        let mut visible = hand.clone();
+        visible.push(target);
+        let context = GameContext::from_parts_with_melds(
+            None,
+            hand,
+            vec![],
+            TileType::new(27),
+            TileType::new(27),
+            visible,
+            Some(0),
+            Some(0),
+            [vec![], vec![target], vec![], vec![]],
+            [false; 4],
+            Default::default(),
+        )
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+
+        (context, vec![call.clone(), LegalAction::None], call)
+    }
 
     fn chi() -> LegalAction {
         LegalAction::Chi {
@@ -258,16 +299,10 @@ mod tests {
     fn keeps_none_where_shanten_agent_pons_a_value_honor_pair() {
         // 123456m 55p 78s N PP に他家が P を捨てた局面。ShantenAgent は Pon するが、
         // MenzenAgent は Pon を除外するので None を維持する。
-        let reaction = CallReaction::pon(
-            &[0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125],
-            126,
-            &[124, 125],
-        );
-        let ctx = reaction.context();
-        let actions = reaction.actions();
+        let (ctx, actions, call) = value_honor_pon_context_and_actions();
 
         let mut shanten = ShantenAgent;
-        assert_eq!(shanten.act(&ctx, &actions), reaction.call());
+        assert_eq!(shanten.act(&ctx, &actions), call);
         assert_eq!(
             ShantenAgent::diagnose(&ctx, &actions).selected_source,
             crate::AgentActionSource::Call
