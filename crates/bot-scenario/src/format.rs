@@ -4921,6 +4921,18 @@ mod tests {
         "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
+    // 打 5m で13面待ちの国士無双テンパイ。自分の河の 1m で恒常フリテンになり、生きた待ちは
+    // すべてツモ和了の役満だけになる。
+    const PERMANENT_FURITEN_KOKUSHI_SCENARIO: &str = r#"{
+        "hand": "19m19p19s1234567z",
+        "draw": "5m",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 3,
+        "discards": ["1m", "", "", ""],
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false }
+    }"#;
+
     // 同じ単騎テンパイで 5s を1枚、北 を2枚見せた局面。打 北 の待ちは2枚に減る。
     const REACH_SCARCE_TANKI_WAIT_SCENARIO: &str = r#"{
         "hand": "123456789m123p5s",
@@ -5725,6 +5737,33 @@ mod tests {
             )),
             "{summary}"
         );
+    }
+
+    #[test]
+    fn reach_diagnostics_report_the_permanent_furiten_named_yakuman_damaten() {
+        // 恒常フリテンの named 役満は専用 reason で Damaten になり、base policy がダマなので
+        // timing 節そのものを出さない。
+        let (_, diagnostic, output) = rendered(PERMANENT_FURITEN_KOKUSHI_SCENARIO, false);
+        let reach = section(&output, "Reach");
+        let summary = summary_section(&output);
+
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(action_label(&diagnostic.selected_action), "5m");
+        assert!(reach.contains("  base decision: no"), "{reach}");
+        assert!(
+            reach.contains("  base reason: NamedYakumanDamaten"),
+            "{reach}"
+        );
+        assert!(reach.contains("  permanent furiten: yes"), "{reach}");
+        assert!(reach.contains("  ron: no"), "{reach}");
+        assert!(!reach.contains("  timing"), "{reach}");
+
+        assert!(summary.contains("  reach: no"), "{summary}");
+        assert!(
+            summary.contains("  reach base reason: NamedYakumanDamaten"),
+            "{summary}"
+        );
+        assert!(!summary.contains("  reach timing"), "{summary}");
     }
 
     #[test]

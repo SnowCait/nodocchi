@@ -233,6 +233,48 @@ defer → forced Damaten
 
 **全候補分のこの比較 (`Tenpai continuation` 節) は diagnostics 専用で、どれを選ぶかの結論は持ちません。** winner も `should_reach` も作らず、打牌選択にも押し引きにも接続していません。Ron probability は含まず、self-tsumo と Ron baseline の aggregate も作りません。production が使うのは、次に述べる限定条件下の [リーチ timing](#リーチ-timing) だけです。
 
+## base Reach / Damaten policy の categorical rule
+
+base policy (`ReachDecisionReason`) がダマを選ぶ理由のうち、ダマ打点 threshold による判断と恒常フリテンの named 役満は別の事実に基づきます。
+
+```text
+HighValueDamaten
+= 通常のダマ打点 threshold heuristic
+
+NamedYakumanDamaten
+= PermanentFuriten::Yes で
+  全 live Tsumo variant が named yakuman と確定した場合の categorical policy
+```
+
+`HighValueDamaten` は「全ての生きた待ちがダマで役ありかつ `Payment.total()` が threshold 以上」という打点の大小の heuristic です。`NamedYakumanDamaten` は打点の大小ではなく、ロンできない聴牌のツモ和了が既存 scoring 上**名前の付いた役満で確定している**という別の事実だけに基づく categorical rule なので、`HighValueDamaten` へは統合しません。
+
+条件は次をすべて満たす場合だけです。
+
+```text
+選んだ打牌後がテンパイ
+PermanentFuriten::Yes
+live wait > 0
+生きた physical variant が1件以上あり、その全ての Tsumo HandValue が確定かつ named 役満
+```
+
+役満かどうかは既存 scoring (`TenpaiCompletedHands` → `evaluate_tenpai_hand_value()` → `HandValue::is_yakuman()`) だけが source of truth です。国士無双の向聴・役満名の列挙・牌姿からの独自判定・点数 threshold からの推測はどれも行いません。Tsumo baseline も共通化済みの既存 Tsumo scoring をそのまま使い、リーチを宣言しない場合のモード (Damaten) で評価します。
+
+次はどれも対象外で、従来どおりの base policy になります。
+
+```text
+数え役満 (名前の付いた役満ではない)
+一部の live variant だけ named 役満
+役なし variant を含む
+scoring unknown
+live remaining == 0 の variant (判定に含めない)
+PermanentFuriten::No / PermanentFuriten::Unknown
+same-turn furiten / リーチ後見逃しフリテンだけの局面
+```
+
+**数え役満はこの特例に入れません。** 点数が役満相当でも名前の付いた役満ではないので、既存のダマ打点 threshold の結論になります。非フリテンの named 役満も従来どおり `HighValueDamaten` のままで、四暗刻シャンポンのように「ツモなら役満・ロンなら役満ではない」可能性がある非フリテン局面の扱いも変えていません。
+
+`NamedYakumanDamaten` は base policy がダマを選ぶ理由なので、[リーチ timing](#リーチ-timing) は評価しません (`timing` は `None`)。`DeferReach` ではなく、通常打牌 selection が選んだ Dahai をそのまま行います。この categorical rule を適用するのはリーチ action の判断だけで、押し引きの攻撃モードと現在聴牌 / 将来テンパイの selection value は変更していません。
+
 ## リーチ timing
 
 `ReachDecisionReason` (base Reach / Damaten policy) と `ReachTimingDecision` は**別の層**です。
