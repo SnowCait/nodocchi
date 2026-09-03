@@ -1,8 +1,13 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
+use crate::current_tenpai_continuation::{
+    CurrentTenpaiContinuationDiagnostic, CurrentTenpaiContinuationInputs,
+    diagnose_current_tenpai_continuation,
+};
 use crate::damaten_value::tenpai_completed_hands_after_discard;
 use crate::offense_value::{
-    TenpaiOffenseEvaluation, TenpaiOffenseValue, evaluate_tenpai_offense_with_hands,
+    TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
+    evaluate_tenpai_offense_with_hands,
 };
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
@@ -117,6 +122,14 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     ///
     /// 打牌選択にも押し引きにもリーチ判断にも使わない解析専用の情報で、選択結果を変えない。
     pub tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
+    /// 恒常フリテンが確定した現在聴牌 cohort の、`reach now` / `defer → forced Reach` 観測。
+    ///
+    /// 2手先診断を要求した場合だけ持つ。対象は AllPermanentFuriten cohort かつ base offense
+    /// mode がリーチの候補だけで、1候補ごとに既存の継続評価を1回走らせる。
+    ///
+    /// 打牌選択にもリーチ判断にもリーチ timing にも使わない解析専用の情報で、選択結果を
+    /// 変えない。
+    pub current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
     /// self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。
@@ -267,6 +280,21 @@ pub(crate) fn select_discard_action_with_diagnostic(
                 })
             });
 
+    // 恒常フリテン確定 cohort の継続 timing は1候補ごとに既存の継続評価を走らせる重い経路
+    // なので、2手先診断を要求した場合だけ構築する。cohort 分類も base offense mode も、
+    // 打牌選択が既に求めた値そのものを渡す。
+    let current_tenpai_continuation = scope.builds_lookahead().then(|| {
+        diagnose_current_tenpai_continuation(&CurrentTenpaiContinuationInputs {
+            context,
+            evaluations: &legal.evaluations,
+            metrics: &current_tenpai_metrics(&current_tenpai),
+            offense_modes: &current_tenpai_offense_modes(&current_tenpai),
+            reach_legal: legal_actions
+                .iter()
+                .any(|action| matches!(action, LegalAction::Reach)),
+        })
+    });
+
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(
             context,
@@ -280,6 +308,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         lookahead,
         lookahead_value,
         tenpai_continuation,
+        current_tenpai_continuation,
         self_tsumo_facts: inputs.self_tsumo_facts(),
     }
 }
@@ -415,6 +444,16 @@ fn current_tenpai_candidate_evaluations(
                 self_tsumo_hit_probability: self_tsumo.map(|(_, probability)| probability),
             }
         })
+        .collect()
+}
+
+// 候補ごとの既存 base offense mode。現在聴牌の評価対象外は `None`。
+fn current_tenpai_offense_modes(
+    evaluations: &[CurrentTenpaiCandidateEvaluation],
+) -> Vec<Option<TenpaiOffenseMode>> {
+    evaluations
+        .iter()
+        .map(|evaluation| evaluation.offense.as_ref().map(|value| value.offense.mode))
         .collect()
 }
 

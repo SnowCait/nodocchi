@@ -4,6 +4,7 @@ pub mod agents;
 pub mod call_decision;
 pub mod combined_defense;
 pub mod context;
+pub mod current_tenpai_continuation;
 pub mod damaten_value;
 pub mod defense;
 pub mod discard_selection;
@@ -50,6 +51,9 @@ pub use combined_defense::{
     suji_safety_rank_for_combined_threats,
 };
 pub use context::{GameContext, TableStateFacts, seat_wind_for_player};
+pub use current_tenpai_continuation::{
+    CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic,
+};
 pub use damaten_value::{
     DAMATEN_MIN_TOTAL, DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DamatenWaitValue,
     DamatenWinningTileValue, damaten_baseline_context,

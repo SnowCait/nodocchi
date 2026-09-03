@@ -107,6 +107,11 @@
 //! ([`ReachTimingDecision`](crate::reach_policy::ReachTimingDecision)) が、`reach now` と
 //! `defer → forced Reach` の大小だけを見る。全合法 Dahai 候補の継続枝を production で構築する
 //! ことはない。
+//!
+//! 同じ1候補 helper ([`tenpai_candidate_self_tsumo_comparison`]) は、恒常フリテンが確定した
+//! 現在聴牌 cohort の候補ごとの観測 ([`crate::current_tenpai_continuation`]) でも共有する。
+//! そちらは診断を要求した経路だけで構築する diagnostics 専用で、打牌選択にも Reach timing にも
+//! 接続していない。
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,
@@ -448,13 +453,27 @@ pub(crate) fn diagnose_tenpai_continuation(
 /// self-tsumo 比較を求める。
 ///
 /// production のリーチ timing 判断が使う唯一の入口。全合法 Dahai 候補の継続枝
-/// ([`diagnose_tenpai_continuation`]) は構築せず、渡された1候補についてだけ既存2手先評価・既存
-/// 将来打点評価・既存 self-tsumo 確率模型を通す。枝の分類も次打牌も打点も既存基盤そのままで、
-/// 比較のために新しい探索も点数計算も持たない。
+/// ([`diagnose_tenpai_continuation`]) は構築せず、選択済みの1候補についてだけ
+/// [`tenpai_candidate_self_tsumo_comparison`] を通す。選択済み候補という意味以外は同じもので、
+/// 評価する内容も結果も候補ごとの helper そのまま。
+pub(crate) fn selected_tenpai_self_tsumo_comparison(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+    reach_legal: bool,
+) -> Option<TenpaiSelfTsumoComparison> {
+    tenpai_candidate_self_tsumo_comparison(context, evaluation, reach_legal)
+}
+
+/// 現在聴牌候補1件について、「今すぐリーチ」と「1巡 defer」の self-tsumo 比較を求める。
+///
+/// 選択済み候補かどうかに依らず、渡された1候補についてだけ既存2手先評価・既存将来打点評価・
+/// 既存 self-tsumo 確率模型を通す。枝の分類も次打牌も打点も既存基盤そのままで、比較のために
+/// 新しい探索も点数計算も持たない。1候補ごとに2手先評価を1回走らせるため、通常の打牌選択が
+/// 全候補分をまとめて評価する経路では使わない。
 ///
 /// 現在打牌後がテンパイでない候補と、自分が未リーチと確定していない局面 (既リーチ・自分の席が
 /// 不明) では評価せず `None`。
-pub(crate) fn selected_tenpai_self_tsumo_comparison(
+pub(crate) fn tenpai_candidate_self_tsumo_comparison(
     context: &GameContext,
     evaluation: &DiscardEvaluation,
     reach_legal: bool,
