@@ -17,8 +17,8 @@ use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_reach_timing,
 };
 use crate::tenpai_continuation::{
-    TenpaiContinuationDiagnostic, TenpaiContinuationInputs, diagnose_tenpai_continuation,
-    tenpai_candidate_self_tsumo_comparison,
+    TenpaiContinuationDiagnostic, TenpaiContinuationInputs, TenpaiSelfTsumoComparison,
+    diagnose_tenpai_continuation, tenpai_candidate_self_tsumo_comparison,
 };
 use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
 use bot_logic::{
@@ -46,7 +46,8 @@ const TENPAI_SHANTEN: i8 = 0;
 /// - `evaluation`: 合法 Dahai 候補の中の最善 `DiscardEvaluation`。合法候補が無ければ `None`。
 /// - `action`: `evaluation` に対応する合法 Dahai。
 /// - `iishanten_forward_metrics`: 選んだ打牌が1向聴の場合の前方集計値。
-/// - `tenpai_wait` / `tenpai_offense_value`: 複数の現在聴牌候補を比較した場合の選択済み評価。
+/// - `tenpai_wait` / `tenpai_offense_value` / `tenpai_reach_timing`: 複数の現在聴牌候補を比較した
+///   場合の選択済み評価。
 ///
 /// `evaluation` と `action` は常に同時に `Some` / `None` になり、`Some` のときは牌種が一致する。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,13 @@ pub(crate) struct DiscardActionSelection {
     pub tenpai_offense_value: Option<TenpaiOffenseValue>,
     /// offense mode の決定時に計算済みなら、そのダマ打点診断。
     pub damaten_value: Option<crate::damaten_value::DamatenValueDiagnostic>,
+    /// 候補比較が継続 timing を評価した場合に、選ばれた候補について計算済みの Reach timing。
+    ///
+    /// 候補比較の対象外だった場合 (現在聴牌候補が1件・cohort が新しい継続軸の対象外・継続評価を
+    /// 走らせていない) は `None` で、後段のリーチ判断が選択済み1候補について従来どおり評価する。
+    /// 値は既存 [`decide_permanent_furiten_reach_timing`] の結論そのもので、この field のために
+    /// timing policy を複製しない。
+    pub tenpai_reach_timing: Option<ReachTimingDiagnostic>,
 }
 
 /// 2手先診断をどこまで構築するか。
@@ -248,19 +256,6 @@ pub(crate) fn select_discard_action_with_diagnostic(
         Some(lookahead) => forward_metrics_from_lookahead(&inputs, &legal.evaluations, lookahead),
         None => forward_metrics(&inputs, &legal.evaluations),
     };
-    let current_tenpai = current_tenpai_candidate_evaluations(
-        context,
-        &legal.tiles,
-        &legal.evaluations,
-        legal_actions,
-    );
-
-    let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai);
-
-    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
-        log_discard_diagnostic(context, &legal.tiles, &diagnostic);
-    }
-
     // 将来打点は構築済みの2手先診断の枝をそのまま評価対象にする。枝の探索も打牌比較もやり直さない。
     let lookahead_value = lookahead.as_ref().map(|lookahead| {
         evaluate_prospective_lookahead_value(context, &legal.tiles, &legal.evaluations, lookahead)
@@ -287,6 +282,22 @@ pub(crate) fn select_discard_action_with_diagnostic(
                     value,
                 })
             });
+
+    // 選択が使う継続 timing も、構築済みの全候補継続診断から取り出す。同じ候補の2手先評価を
+    // 選択用にもう一度走らせない。診断を構築していない場合だけ通常経路と同じ1候補評価を通る。
+    let current_tenpai = current_tenpai_candidate_evaluations_with_continuation(
+        context,
+        &legal.tiles,
+        &legal.evaluations,
+        legal_actions,
+        tenpai_continuation.as_ref(),
+    );
+
+    let diagnostic = diagnose_legal_evaluations(context, &legal, &tenpai_wait, &current_tenpai);
+
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        log_discard_diagnostic(context, &legal.tiles, &diagnostic);
+    }
 
     // 恒常フリテン確定 cohort の継続 timing は構築済みの2手先継続診断から self-tsumo 比較を
     // 取り出し、このために探索・将来打点・待ち・scoring を再実行しない。cohort 分類も base
@@ -381,6 +392,9 @@ fn selection_from_legal_evaluations(
         damaten_value: selected_tenpai
             .and_then(|value| value.offense.as_ref())
             .and_then(|value| value.damaten_value.clone()),
+        // 候補比較が使った timing をそのまま転記する。後段のリーチ判断は同じ候補について
+        // 継続評価をやり直さない。
+        tenpai_reach_timing: selected_tenpai.and_then(|value| value.continuation_timing),
     }
 }
 
@@ -397,6 +411,28 @@ fn current_tenpai_candidate_evaluations(
     evaluations: &[DiscardEvaluation],
     legal_actions: &[LegalAction],
 ) -> CurrentTenpaiCandidateEvaluations {
+    current_tenpai_candidate_evaluations_with_continuation(
+        context,
+        tiles,
+        evaluations,
+        legal_actions,
+        None,
+    )
+}
+
+/// 2手先継続診断を構築済みの経路のための現在聴牌候補評価。
+///
+/// `tenpai_continuation` を渡した場合、継続 timing の材料は構築済みの全候補継続診断から取り出す
+/// だけで、同じ候補の2手先評価を選択用にもう一度走らせない。渡さない場合は選択専用経路と同じく
+/// 対象候補についてだけ既存の1候補継続 helper を通す。どちらの経路も対象の決め方も timing policy
+/// も同じで、選択結果は診断の有無で変わらない。
+fn current_tenpai_candidate_evaluations_with_continuation(
+    context: &GameContext,
+    tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+    legal_actions: &[LegalAction],
+    tenpai_continuation: Option<&TenpaiContinuationDiagnostic>,
+) -> CurrentTenpaiCandidateEvaluations {
     let mut candidates =
         base_current_tenpai_candidate_evaluations(context, tiles, evaluations, legal_actions);
     attach_current_tenpai_continuation(
@@ -406,6 +442,10 @@ fn current_tenpai_candidate_evaluations(
         legal_actions
             .iter()
             .any(|action| matches!(action, LegalAction::Reach)),
+        match tenpai_continuation {
+            Some(continuation) => CurrentTenpaiContinuationSource::Diagnostic(continuation),
+            None => CurrentTenpaiContinuationSource::Candidate(context),
+        },
     );
     candidates
 }
@@ -478,6 +518,35 @@ fn base_current_tenpai_candidate_evaluations(
         .collect()
 }
 
+/// 継続 self-tsumo 比較の取得元。
+///
+/// どちらも同じ [`TenpaiSelfTsumoComparison`] を返し、対象の決め方も timing policy も共有する。
+/// 継続の探索・将来打点・待ち・scoring はどちらの経路でも既存基盤そのままで、比較のために評価を
+/// 追加しない。
+enum CurrentTenpaiContinuationSource<'a> {
+    /// 選択専用経路。対象候補についてだけ既存の1候補継続 helper を通す。
+    Candidate(&'a GameContext),
+    /// 2手先継続診断を構築済みの経路。全候補分の既存診断からそのまま取り出す。
+    Diagnostic(&'a TenpaiContinuationDiagnostic),
+}
+
+impl CurrentTenpaiContinuationSource<'_> {
+    fn self_tsumo(
+        &self,
+        evaluation: &DiscardEvaluation,
+        reach_legal: bool,
+    ) -> Option<TenpaiSelfTsumoComparison> {
+        match self {
+            Self::Candidate(context) => {
+                tenpai_candidate_self_tsumo_comparison(context, evaluation, reach_legal)
+            }
+            Self::Diagnostic(continuation) => continuation
+                .candidate(evaluation.discard)
+                .map(|candidate| candidate.self_tsumo),
+        }
+    }
+}
+
 /// 恒常フリテン確定 cohort の候補について、既存 Reach timing policy を適用した結果を付ける。
 ///
 /// 対象は「cohort が AllPermanentFuriten かつ cohort の全候補の base offense mode がリーチ」の
@@ -485,17 +554,20 @@ fn base_current_tenpai_candidate_evaluations(
 /// truth。さらに既存 [`evaluates_reach_timing`] の適用条件も満たす候補に限ることで、選択済み
 /// 候補へ後段で適用される production の Reach timing と同じ意味の値になる。
 ///
-/// 評価そのものは既存の1候補継続 helper ([`tenpai_candidate_self_tsumo_comparison`]) と既存
-/// timing policy ([`decide_permanent_furiten_reach_timing`]) をそのまま通すだけで、この経路は
-/// 探索も打点計算も待ち計算も timing policy も持たない。対象外の cohort では継続評価を1件も
-/// 走らせない。
+/// 継続比較そのものは `source` が持つ既存評価で、この経路は探索も打点計算も待ち計算も持たない。
+/// timing は取得元に依らず既存 [`decide_permanent_furiten_reach_timing`] だけが決める。対象外の
+/// cohort では継続比較を1件も取得しない。
 fn attach_current_tenpai_continuation(
     context: &GameContext,
     evaluations: &[DiscardEvaluation],
     candidates: &mut CurrentTenpaiCandidateEvaluations,
     reach_legal: bool,
+    source: CurrentTenpaiContinuationSource,
 ) {
-    if !reach_legal {
+    // 残り自摸機会が確定しない局面では self-tsumo 確率模型の材料が揃わず、継続比較のどの値も
+    // 確定しない。同じ材料から決まる cohort の expected self-tsumo value も確定しないので、
+    // 評価しても必ず既存軸へ落ちる。exact fact だけで安く分かるので2手先評価の前に外す。
+    if !reach_legal || own_future_draws(context).is_none() {
         return;
     }
 
@@ -520,8 +592,7 @@ fn attach_current_tenpai_continuation(
         }
 
         // ここへ来るのは合法手にリーチがあった経路だけ。リーチ可否は決め直さない。
-        let comparison =
-            tenpai_candidate_self_tsumo_comparison(context, &evaluations[index], reach_legal);
+        let comparison = source.self_tsumo(&evaluations[index], reach_legal);
         candidate.continuation_timing = Some(decide_permanent_furiten_reach_timing(
             comparison.and_then(|comparison| comparison.reach_now),
             comparison.and_then(|comparison| comparison.defer_forced_reach()),
@@ -1169,6 +1240,7 @@ pub(crate) mod tests {
             tenpai_wait: None,
             tenpai_offense_value: None,
             damaten_value: None,
+            tenpai_reach_timing: None,
         };
 
         assert_eq!(selection.action, None);
@@ -1617,9 +1689,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_selected_candidate_reach_timing_matches_the_comparator_continuation() {
-        // 打牌選択の候補比較と、選択済み候補へ後段で適用される production の Reach timing は
-        // 同じ既存 policy の結論そのものになる。
+    fn the_selected_candidate_reach_timing_reuses_the_comparator_continuation() {
+        // 候補比較が評価した継続 timing は選択結果へそのまま乗り、後段の Reach timing は同じ
+        // 候補の2手先評価をやり直さずその値を使う。
         let (context, actions) = all_permanent_furiten_context();
         let legal = legal_discard_evaluations(&context, &actions);
         let current = current_tenpai_candidate_evaluations(
@@ -1638,6 +1710,9 @@ pub(crate) mod tests {
             .continuation_timing
             .expect("選択済み候補の継続 timing");
 
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(selection.tenpai_reach_timing, Some(comparator_timing));
+
         let diagnostic = crate::agents::ShantenAgent::diagnose_with_options(
             &context,
             &actions,
@@ -1646,6 +1721,44 @@ pub(crate) mod tests {
         let reach = diagnostic.reach.expect("リーチ判断がある");
 
         assert_eq!(reach.timing, Some(comparator_timing));
+        assert_eq!(
+            comparator_timing.reason,
+            crate::reach_policy::ReachTimingReason::PermanentFuritenSelfTsumo
+        );
+    }
+
+    #[test]
+    fn a_single_current_tenpai_candidate_falls_back_to_the_selected_candidate_timing() {
+        // 現在聴牌候補が1件だけなら候補比較そのものが不要なので、継続評価も走らない。後段の
+        // Reach timing は従来どおり選択済み1候補について評価する。
+        let (context, actions) = all_permanent_furiten_context();
+        let selected_discard = select_discard_action(&context, &actions).expect("打牌を選んでいる");
+        let actions: Vec<_> = actions
+            .into_iter()
+            .filter(|action| matches!(action, LegalAction::Reach) || action == &selected_discard)
+            .collect();
+
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(selection.action, Some(selected_discard));
+        assert_eq!(selection.tenpai_reach_timing, None);
+
+        let diagnostic = crate::agents::ShantenAgent::diagnose_with_options(
+            &context,
+            &actions,
+            crate::agents::DiagnosticOptions::NONE,
+        );
+        let timing = diagnostic
+            .reach
+            .expect("リーチ判断がある")
+            .timing
+            .expect("base policy がリーチを選んでいる");
+
+        assert_eq!(
+            timing.reason,
+            crate::reach_policy::ReachTimingReason::PermanentFuritenSelfTsumo
+        );
+        assert!(timing.reach_now.is_some(), "{timing:?}");
+        assert!(timing.defer_forced_reach.is_some(), "{timing:?}");
     }
 
     #[test]
@@ -1736,6 +1849,21 @@ pub(crate) mod tests {
             None,
             Some(0),
         );
+        // 残り自摸機会が確定しないと継続比較のどの値も確定しないので、継続評価そのものを
+        // 走らせない。
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        assert!(
+            current
+                .iter()
+                .all(|value| value.continuation_timing.is_none())
+        );
+
         let result = select_discard_action_with_diagnostic(
             &context,
             &actions,
@@ -1750,6 +1878,9 @@ pub(crate) mod tests {
         assert!(candidates.iter().all(|candidate| {
             candidate.current_tenpai_offense_weighted_total.is_none()
                 && candidate.current_tenpai_expected_self_tsumo_value.is_none()
+                && candidate
+                    .current_tenpai_continuation_self_tsumo_value
+                    .is_none()
                 && candidate.comparison_reason
                     != bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
         }));

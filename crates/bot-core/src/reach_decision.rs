@@ -326,7 +326,8 @@ fn tsumo_named_yakuman(
 //
 // 対象になった場合に評価するのは通常打牌 selection が選んだ1候補だけで、全合法 Dahai 候補の
 // 継続枝は production では構築しない。比較する値も既存 self-tsumo 比較そのもので、この経路が
-// 確率模型も点数計算も持たない。
+// 確率模型も点数計算も持たない。現在聴牌候補の比較が同じ candidate の継続 timing を評価済みなら、
+// その結論をそのまま使い同じ2手先評価を繰り返さない。
 fn reach_timing(
     ctx: &GameContext,
     selection: &DiscardActionSelection,
@@ -335,6 +336,11 @@ fn reach_timing(
     open_hand_threats: &[OpenHandThreatAssessment; 4],
 ) -> ReachTimingDiagnostic {
     if evaluates_reach_timing(tenpai_wait.permanent_furiten(), tenpai_wait.tsumo_remaining) {
+        // 現在聴牌候補の比較が同じ gate と同じ timing policy で評価済みなら、その結論そのもの。
+        if let Some(timing) = selection.tenpai_reach_timing {
+            return timing;
+        }
+
         // ここへ来るのは合法手にリーチがあった経路だけ。現在局面のリーチ可否は決め直さない。
         let comparison = selected_tenpai_self_tsumo_comparison(ctx, evaluation, true);
         return decide_permanent_furiten_reach_timing(

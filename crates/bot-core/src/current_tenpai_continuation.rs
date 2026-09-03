@@ -407,8 +407,49 @@ mod tests {
         let case = CaseSpec::default().context();
         let without = select_discard_action_with_evaluation(&case.context, &case.actions);
 
+        // 選択結果には選択済み候補の継続 timing も含む。診断経路は構築済み全候補継続診断から、
+        // 通常経路は1候補評価から同じ値を得るので、両者は一致する。
+        assert!(FURITEN_CASE.selection.tenpai_reach_timing.is_some());
         assert_eq!(FURITEN_CASE.selection, without);
         assert!(!continuation(&FURITEN_CASE).candidates.is_empty());
+    }
+
+    #[test]
+    fn the_selection_timing_comes_from_the_existing_all_candidate_continuation() {
+        // 2手先診断を構築した経路では、選択が使う継続 timing も既存全候補継続診断そのもの。
+        // 同じ候補の2手先評価を選択用に走らせ直さない。
+        let selection = &*FURITEN_CASE;
+        let selected = selection
+            .selection
+            .evaluation
+            .as_ref()
+            .expect("現在聴牌候補が選ばれている");
+        let existing = selection
+            .tenpai_continuation
+            .as_ref()
+            .expect("既存2手先継続診断がある")
+            .candidate(selected.discard)
+            .expect("選択済み候補の既存継続診断がある");
+        let timing = selection
+            .selection
+            .tenpai_reach_timing
+            .expect("選択済み候補の継続 timing");
+
+        assert_eq!(
+            timing,
+            decide_permanent_furiten_reach_timing(
+                existing.self_tsumo.reach_now,
+                existing.self_tsumo.defer_forced_reach(),
+            )
+        );
+        // 診断用の観測と選択が使う値は同じ timing policy の結論そのもの。
+        assert_eq!(
+            continuation(selection)
+                .candidate(selected.discard)
+                .expect("選択済み候補を観測している")
+                .timing,
+            timing
+        );
     }
 
     #[test]

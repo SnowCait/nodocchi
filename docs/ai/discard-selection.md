@@ -87,7 +87,21 @@ DeferReach  → defer → forced Reach
 
 全候補が恒常フリテンで、ロンできる候補が1件も無いからこそ、self-tsumo だけで比較が閉じます。`MixedKnown` cohort は `No` 側にだけロン機会があるため対象外で、従来どおり `CurrentTenpaiExpectedSelfTsumoValue` のままです。base policy がダマを選んだ候補 (`HighValueDamaten` / `NamedYakumanDamaten`) を含む cohort も対象外で、「片方は timing 込み・片方は現在待ち」という非対称な比較は作りません。
 
-比較に使う値も、選択済み候補へ後段で適用する Reach timing も、同じ既存1候補継続 helper (`tenpai_candidate_self_tsumo_comparison()`) と同じ timing policy を通します。policy を複製しないので、候補比較が `DeferReach` を選んだ値と、その候補が選ばれた後の Reach timing の結論は一致します。通常の打牌選択では全候補分の詳細な2手先継続診断を構築せず、この gate を通った cohort の候補についてだけ既存の1候補評価を走らせます。
+比較に使う値も、選択済み候補へ後段で適用する Reach timing も、同じ既存の継続評価と同じ timing policy を通します。policy を複製しないので、候補比較が `DeferReach` を選んだ値と、その候補が選ばれた後の Reach timing の結論は一致します。同じ候補の2手先評価を consumer ごとに繰り返さないよう、経路ごとに source を1つへ寄せています。
+
+```text
+通常 discard selection
+  gate を通った候補だけ 1-candidate continuation helper
+  → Reach timing → 候補比較 → 選択済み候補の timing をそのまま後段のリーチ判断へ
+
+--lookahead 診断
+  既存 all-candidate TenpaiContinuationDiagnostic
+  → 対象候補の self_tsumo を抽出 → 同じ Reach timing policy → 候補比較
+```
+
+後段のリーチ判断は、候補比較が同じ gate で timing を評価済みならその結論をそのまま使い、評価していない場合 (現在聴牌候補が1件・cohort が対象外) だけ従来どおり選択済み1候補を評価します。`--lookahead` では既存の全候補継続診断が selection 用 continuation の source になるので、同じ候補について個別の2手先評価を追加で走らせません。診断の有無で選択された打牌・比較理由・Reach timing は変わりません。
+
+残り自摸機会が確定しない局面 (`remaining_tiles` unknown) では self-tsumo 確率模型の材料が揃わず、継続比較のどの値も確定しません。同じ材料から決まる `current tenpai expected self-tsumo value` も確定せず必ず既存軸へ落ちるので、exact fact だけで分かるこの場合は2手先評価そのものを走らせません。
 
 ダマで継続した場合の次の1巡そのものは [現在聴牌のダマ継続 (diagnostics only)](#現在聴牌のダマ継続-diagnostics-only) で観測できます。
 
@@ -384,6 +398,8 @@ selected candidate 1件だけ
 ```
 
 `--lookahead` の全候補継続診断は production では構築しません。gate を通った局面で評価するのは通常打牌 selection が選んだ1候補だけで、枝の分類も次打牌も打点も既存の `TenpaiContinuation` / `ProspectiveTenpaiValue` / `SelfTsumoPath` / 既存 selector / 既存 scoring をそのまま通ります (`selected_tenpai_self_tsumo_comparison()`)。counterfactual の semantics も上の diagnostics と同一で、2回目の手変わり探索も、terminal mode への `decide_reach_reason()` の再注入も行いません。診断の有無で production action が変わることもありません。
+
+[恒常フリテン cohort の timing 込み self-tsumo 軸](#恒常フリテン-cohort-の-timing-込み-self-tsumo-軸) が同じ候補の timing を既に評価している場合は、その結論をそのまま使います。同じ候補・同じ gate・同じ policy なので結論は変わらず、2手先評価を繰り返さないだけです。
 
 ### 比較するのは大小だけです
 
