@@ -15,6 +15,7 @@ pub mod open_hand_threat;
 pub mod prospective_value;
 pub mod push_pull;
 pub mod reach_damaten_comparison;
+pub mod reach_decision;
 pub mod reach_policy;
 pub mod ron_opportunity;
 pub mod ryukyoku_decision;
@@ -25,9 +26,9 @@ pub mod threat;
 pub use action::LegalAction;
 pub use agent::Agent;
 pub use agents::{
-    AgentActionSource, DiagnosticOptions, MenzenAgent, NormalAgent, ReachDecisionDiagnostic,
-    ReachDecisionReason, ShantenAgent, ShantenDecisionDiagnostic, TsumogiriAgent,
-    diagnose_shanten_decision, diagnose_shanten_decision_with_options,
+    AgentActionSource, DiagnosticOptions, MenzenAgent, NormalAgent, ReachDecisionReason,
+    ShantenAgent, ShantenDecisionDiagnostic, TsumogiriAgent, diagnose_shanten_decision,
+    diagnose_shanten_decision_with_options,
 };
 pub use call_decision::{
     CALL_CURRENT_SHANTEN, CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN,
@@ -119,6 +120,7 @@ pub use push_pull::{
     push_pull_inputs_from_context,
 };
 pub use reach_damaten_comparison::ReachDamatenComparisonDiagnostic;
+pub use reach_decision::ReachDecisionDiagnostic;
 pub use reach_policy::{
     REACH_MIN_REMAINING, REACH_MIN_REMAINING_TILES, REACH_MIN_SCORE, ReachLegalityFacts,
     ReachTimingDecision, ReachTimingDiagnostic, ReachTimingReason,
