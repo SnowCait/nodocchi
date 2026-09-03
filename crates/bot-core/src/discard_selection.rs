@@ -1,7 +1,9 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use crate::damaten_value::tenpai_completed_hands_after_discard;
-use crate::offense_value::{TenpaiOffenseEvaluation, TenpaiOffenseValue, evaluate_tenpai_offense};
+use crate::offense_value::{
+    TenpaiOffenseEvaluation, TenpaiOffenseValue, evaluate_tenpai_offense_with_hands,
+};
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
@@ -379,19 +381,22 @@ fn current_tenpai_candidate_evaluations(
                 return CurrentTenpaiCandidateEvaluation::default();
             }
             let wait = selected_discard_tenpai_wait_availability(context, evaluation);
-            let offense = wait
+            let hands = wait
                 .as_ref()
-                .map(|wait| evaluate_tenpai_offense(context, evaluation, wait, legal_actions));
-            let expected_self_tsumo_value = wait
-                .as_ref()
-                .zip(offense.as_ref())
-                .zip(self_tsumo_facts)
-                .and_then(|((wait, offense), facts)| {
-                    let hands = tenpai_completed_hands_after_discard(context, evaluation, wait)?;
-                    let terminal =
-                        tenpai_tsumo_value_from_hands(context, &hands, offense.offense.mode)?;
-                    Some(terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws))
-                });
+                .and_then(|wait| tenpai_completed_hands_after_discard(context, evaluation, wait));
+            let offense = wait.as_ref().map(|wait| {
+                evaluate_tenpai_offense_with_hands(context, wait, legal_actions, hands.as_ref())
+            });
+            let expected_self_tsumo_value =
+                offense
+                    .as_ref()
+                    .zip(self_tsumo_facts)
+                    .and_then(|(offense, facts)| {
+                        let hands = hands.as_ref()?;
+                        let terminal =
+                            tenpai_tsumo_value_from_hands(context, hands, offense.offense.mode)?;
+                        Some(terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+                    });
             CurrentTenpaiCandidateEvaluation {
                 wait,
                 offense,

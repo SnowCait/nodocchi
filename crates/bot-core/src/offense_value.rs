@@ -150,9 +150,9 @@ pub struct TenpaiOffenseValue {
 /// 通常打牌選択・押し引き・リーチ診断が同じ候補を扱う場合に、hand-value evaluation を表示や
 /// policy 診断のためにやり直さず共有するための crate-private result。
 ///
-/// 完成手 ([`TenpaiCompletedHands`]) はこの評価の中だけで共有し、結果には持ち回らない。完成手は
-/// 待ちごとの解析を丸ごと所有する重い値なので、診断でしか使わない値のために production の
-/// 打牌選択へ持ち出さない。
+/// 完成手 ([`TenpaiCompletedHands`]) は候補1件の評価中だけで offense / self-tsumo 間で共有し、
+/// 結果には持ち回らない。完成手は待ちごとの解析を丸ごと所有する重い値なので、production の
+/// 打牌選択結果へ持ち出さない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TenpaiOffenseEvaluation {
     pub offense: TenpaiOffenseValue,
@@ -300,17 +300,27 @@ pub(crate) fn evaluate_tenpai_offense(
     wait_availability: &TenpaiWaitAvailability,
     legal_actions: &[LegalAction],
 ) -> TenpaiOffenseEvaluation {
+    let hands = tenpai_completed_hands_after_discard(context, evaluation, wait_availability);
+    evaluate_tenpai_offense_with_hands(context, wait_availability, legal_actions, hands.as_ref())
+}
+
+/// 構築済みの完成手を使って [`evaluate_tenpai_offense`] と同じ production evaluation を行う。
+///
+/// current-tenpai 候補の offense と self-tsumo が候補1件の評価中だけ完成手を共有するための入口。
+/// `hands` が `None` の場合も、standalone evaluator で完成手の構築に失敗した場合と同じ fallback
+/// (mode は既存 facts から決め、打点は [`OffenseValue::Unknown`]) を維持する。
+pub(crate) fn evaluate_tenpai_offense_with_hands(
+    context: &GameContext,
+    wait_availability: &TenpaiWaitAvailability,
+    legal_actions: &[LegalAction],
+    hands: Option<&TenpaiCompletedHands>,
+) -> TenpaiOffenseEvaluation {
     // ロン可否は既存のフリテン診断が source of truth。恒常フリテン・同巡内フリテン・リーチ後
     // 見逃しを統合した結論で、押し引き側でフリテンを判定し直さない。
     let can_ron = wait_availability.can_ron() == Some(true);
-    let hands = tenpai_completed_hands_after_discard(context, evaluation, wait_availability);
     // production のリーチ判断と同じ入口条件で求めた結果を、mode 決定と後続診断で共有する。
     let damaten_value = (context.own_reached() == Some(false) && can_ron)
-        .then(|| {
-            hands
-                .as_ref()
-                .map(|hands| damaten_value_from_hands(context, hands))
-        })
+        .then(|| hands.map(|hands| damaten_value_from_hands(context, hands)))
         .flatten();
     let mode = offense_mode(
         context,
@@ -319,13 +329,14 @@ pub(crate) fn evaluate_tenpai_offense(
         damaten_value.as_ref().map(|value| value.verdict),
     );
 
-    let value = scoring_inputs(context, mode, can_ron)
-        .zip(hands.as_ref())
-        .map_or(OffenseValue::Unknown, |((baseline, ura_dora), hands)| {
+    let value = scoring_inputs(context, mode, can_ron).zip(hands).map_or(
+        OffenseValue::Unknown,
+        |((baseline, ura_dora), hands)| {
             let profile =
                 evaluate_tenpai_hand_value(hands, baseline, context.dora_indicators(), ura_dora);
             offense_value(&profile)
-        });
+        },
+    );
 
     TenpaiOffenseEvaluation {
         offense: TenpaiOffenseValue { mode, value },
