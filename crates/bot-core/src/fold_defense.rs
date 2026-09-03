@@ -122,3 +122,6 @@ pub(crate) fn evaluate_reach_defense<'a>(
         collect_exact_evidence_for_genbutsu,
     )
 }
+
+#[cfg(test)]
+mod tests;

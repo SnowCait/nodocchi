@@ -33,6 +33,9 @@ use crate::ron_opportunity::reach_public_safety_after_discard;
 use crate::tenpai_continuation::selected_tenpai_self_tsumo_comparison;
 use crate::tenpai_scoring::{NamedYakumanTsumo, tenpai_tsumo_named_yakuman};
 
+#[cfg(test)]
+mod tests;
+
 // リーチを検討する打牌後の向聴数。
 const REACH_TENPAI_SHANTEN: i8 = 0;
 
