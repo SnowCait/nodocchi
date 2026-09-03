@@ -296,6 +296,22 @@ impl ReachTimingDiagnostic {
     pub fn defers_reach(&self) -> bool {
         matches!(self.decision, ReachTimingDecision::DeferReach)
     }
+
+    /// この timing 判断が選んだ側の self-tsumo value。
+    ///
+    /// [`ReachTimingDecision::ReachNow`] なら `reach now`、
+    /// [`ReachTimingDecision::DeferReach`] なら `defer → forced Reach` の値そのもの。比較不能
+    /// ([`ReachTimingReason::SelfTsumoComparisonUnknown`]) で base policy のリーチを維持した
+    /// 場合は、確定しない比較を 0 点にせず `None`。
+    pub fn self_tsumo_value(&self) -> Option<u64> {
+        if self.reason == ReachTimingReason::SelfTsumoComparisonUnknown {
+            return None;
+        }
+        match self.decision {
+            ReachTimingDecision::ReachNow => self.reach_now,
+            ReachTimingDecision::DeferReach => self.defer_forced_reach,
+        }
+    }
 }
 
 /// 恒常フリテン聴牌の timing evaluation を行う局面か。

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! current-tenpai cohort = AllPermanentFuriten
-//! + candidate の既存 base offense mode = Reach
+//! + candidate の既存 base Reach / Damaten policy がリーチを選ぶ
 //!   → reach now / defer → forced Reach
 //! ```
 //!
@@ -27,9 +27,10 @@
 //! self-tsumo だけで比べると `No` 側のロンを 0 として扱うことになるため、ロン確率を持たない
 //! この層では比較しない。
 //!
-//! base offense mode が Damaten の候補 (`HighValueDamaten` / `NamedYakumanDamaten` など既存
-//! policy がダマを選んだ候補) も対象にしない。この診断が比べるのは「base policy が選んだ
-//! リーチを今宣言するか1巡 defer するか」であって、リーチとダマの選択そのものではない。
+//! base policy がダマを選んだ候補 (`HighValueDamaten` / `NamedYakumanDamaten`) も対象にしない。
+//! この診断が比べるのは「base policy が選んだリーチを今宣言するか1巡 defer するか」であって、
+//! リーチとダマの選択そのものではない。判定は打牌選択と同じく、offense mode だけでなくその
+//! 前段の categorical rule も含めた実際のリーチ判断の結論を受け取る。
 //!
 //! # 観測値であること
 //!
@@ -48,11 +49,7 @@ use bot_logic::{
     classify_current_tenpai_furiten_cohort,
 };
 
-use crate::offense_value::TenpaiOffenseMode;
-use crate::reach_policy::{
-    ReachTimingDecision, ReachTimingDiagnostic, ReachTimingReason,
-    decide_permanent_furiten_reach_timing,
-};
+use crate::reach_policy::{ReachTimingDiagnostic, decide_permanent_furiten_reach_timing};
 use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, TenpaiSelfTsumoComparison};
 
 // テンパイの向聴数。
@@ -99,44 +96,38 @@ impl CurrentTenpaiContinuationCandidate {
 
     /// 既存 timing policy を適用した場合の self-tsumo value。
     ///
-    /// [`ReachTimingDecision::ReachNow`] なら `reach now`、
-    /// [`ReachTimingDecision::DeferReach`] なら `defer → forced Reach` の値そのもの。比較不能
-    /// で base policy のリーチを維持した場合は 0 点にせず `None`。
+    /// 値の選び方は既存 [`ReachTimingDiagnostic::self_tsumo_value`] そのままで、打牌選択が使う
+    /// timing 込みの候補値と同じ semantics になる。
     pub fn timing_self_tsumo_value(&self) -> Option<u64> {
-        if self.timing.reason == ReachTimingReason::SelfTsumoComparisonUnknown {
-            return None;
-        }
-        match self.timing.decision {
-            ReachTimingDecision::ReachNow => self.reach_now(),
-            ReachTimingDecision::DeferReach => self.defer_forced_reach(),
-        }
+        self.timing.self_tsumo_value()
     }
 }
 
 /// 継続 timing を観測するための材料。
 ///
-/// `evaluations` / `metrics` / `offense_modes` は打牌選択が既に構築・使用した値そのもので、
+/// `evaluations` / `metrics` / `base_reach` は打牌選択が既に構築・使用した値そのもので、
 /// 同じ候補集合から作った同じ順序のものを渡す。
 pub(crate) struct CurrentTenpaiContinuationInputs<'a> {
     pub evaluations: &'a [DiscardEvaluation],
     /// 打牌選択が cohort 単位の軸解決へ渡すものと同じ現在聴牌 metric。
     pub metrics: &'a [CurrentTenpaiMetrics],
-    /// 候補ごとの既存 base offense mode。現在聴牌の評価対象外は `None`。
-    pub offense_modes: &'a [Option<TenpaiOffenseMode>],
+    /// 候補ごとの「実際の base Reach / Damaten policy がリーチを選ぶか」。
+    ///
+    /// 打牌選択が既存 rule で確定した値そのもので、現在聴牌の評価対象外は `false`。
+    pub base_reach: &'a [bool],
     /// 同じ全候補について既に構築済みの2手先継続診断。この診断の `self_tsumo` を再利用する。
     pub tenpai_continuation: &'a TenpaiContinuationDiagnostic,
 }
 
 /// 対象候補について `reach now` と `defer → forced Reach` を観測する。
 ///
-/// 対象は AllPermanentFuriten cohort かつ base offense mode が
-/// [`TenpaiOffenseMode::Reach`] の現在聴牌候補だけ。それ以外の候補では継続比較そのものを
-/// 構築しない。
+/// 対象は AllPermanentFuriten cohort かつ base policy がリーチを選んだ現在聴牌候補だけ。
+/// それ以外の候補では継続比較そのものを構築しない。
 pub(crate) fn diagnose_current_tenpai_continuation(
     inputs: &CurrentTenpaiContinuationInputs,
 ) -> CurrentTenpaiContinuationDiagnostic {
     CurrentTenpaiContinuationDiagnostic {
-        candidates: continuation_targets(inputs.evaluations, inputs.metrics, inputs.offense_modes)
+        candidates: continuation_targets(inputs.evaluations, inputs.metrics, inputs.base_reach)
             .filter_map(|index| {
                 let evaluation = &inputs.evaluations[index];
                 let self_tsumo = inputs
@@ -159,18 +150,18 @@ pub(crate) fn diagnose_current_tenpai_continuation(
 // 継続比較を構築する候補の index。
 //
 // cohort の分類は打牌選択と同じ pure classification をそのまま使い、候補の組ごとに判定を
-// 変えない。base offense mode も既存 policy が決めた値そのもので、ここでリーチ・ダマを
-// 決め直さない。
+// 変えない。base policy がリーチを選んだかも既存 rule が決めた値そのもので、ここでリーチ・
+// ダマを決め直さない。
 fn continuation_targets<'a>(
     evaluations: &'a [DiscardEvaluation],
     metrics: &'a [CurrentTenpaiMetrics],
-    offense_modes: &'a [Option<TenpaiOffenseMode>],
+    base_reach: &'a [bool],
 ) -> impl Iterator<Item = usize> + 'a {
     (0..evaluations.len()).filter(move |&index| {
         evaluations[index].min_shanten_after_discard() == TENPAI_SHANTEN
             && classify_current_tenpai_furiten_cohort(evaluations, metrics, index)
                 == CurrentTenpaiFuritenCohort::AllPermanentFuriten
-            && offense_modes.get(index).copied().flatten() == Some(TenpaiOffenseMode::Reach)
+            && base_reach.get(index).copied().unwrap_or(false)
     })
 }
 
@@ -189,7 +180,7 @@ mod tests {
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic, select_discard_action_with_evaluation,
     };
-    use crate::reach_policy::ReachTimingReason;
+    use crate::reach_policy::{ReachTimingDecision, ReachTimingReason};
 
     // 234m 678m 789p 99s 34s + 6s。打 6s で 2s / 5s 待ち、打 3s で 4s6s の 5s 待ちになり、
     // どちらも現在聴牌の候補になる。打 4s は 3s / 6s が浮いて1向聴。
@@ -417,8 +408,49 @@ mod tests {
         let case = CaseSpec::default().context();
         let without = select_discard_action_with_evaluation(&case.context, &case.actions);
 
+        // 選択結果には選択済み候補の継続 timing も含む。診断経路は構築済み全候補継続診断から、
+        // 通常経路は1候補評価から同じ値を得るので、両者は一致する。
+        assert!(FURITEN_CASE.selection.tenpai_reach_timing.is_some());
         assert_eq!(FURITEN_CASE.selection, without);
         assert!(!continuation(&FURITEN_CASE).candidates.is_empty());
+    }
+
+    #[test]
+    fn the_selection_timing_comes_from_the_existing_all_candidate_continuation() {
+        // 2手先診断を構築した経路では、選択が使う継続 timing も既存全候補継続診断そのもの。
+        // 同じ候補の2手先評価を選択用に走らせ直さない。
+        let selection = &*FURITEN_CASE;
+        let selected = selection
+            .selection
+            .evaluation
+            .as_ref()
+            .expect("現在聴牌候補が選ばれている");
+        let existing = selection
+            .tenpai_continuation
+            .as_ref()
+            .expect("既存2手先継続診断がある")
+            .candidate(selected.discard)
+            .expect("選択済み候補の既存継続診断がある");
+        let timing = selection
+            .selection
+            .tenpai_reach_timing
+            .expect("選択済み候補の継続 timing");
+
+        assert_eq!(
+            timing,
+            decide_permanent_furiten_reach_timing(
+                existing.self_tsumo.reach_now,
+                existing.self_tsumo.defer_forced_reach(),
+            )
+        );
+        // 診断用の観測と選択が使う値は同じ timing policy の結論そのもの。
+        assert_eq!(
+            continuation(selection)
+                .candidate(selected.discard)
+                .expect("選択済み候補を観測している")
+                .timing,
+            timing
+        );
     }
 
     #[test]

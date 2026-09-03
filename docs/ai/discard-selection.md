@@ -33,7 +33,9 @@ Shanten → existing pre-acceptance axes
 → [聴牌のみ]
    全候補 PermanentFuriten::No
      : CurrentTenpaiOffenseWeightedTotal
-   PermanentFuriten::Yes を含む known cohort
+   全候補 PermanentFuriten::Yes かつ全候補 base Reach かつ timing 込みの値が全件確定
+     : CurrentTenpaiContinuationSelfTsumoValue
+   その他の PermanentFuriten::Yes を含む known cohort
      : CurrentTenpaiExpectedSelfTsumoValue
 → AcceptanceRemaining → AcceptanceTypeCount → ...
 ```
@@ -54,7 +56,7 @@ current tenpai expected self-tsumo value
 = P(残り自摸機会内にツモ和了) × ツモ和了時の期待 Payment.total()
 ```
 
-この値は既存 `TenpaiTsumoValue::expected_payment()` の固定小数点尺度そのもので、打牌後の `SelfTsumoFacts`、live physical variant、Tsumo scoring を再利用します。production の base Reach / Damaten policy が選んだ mode に対応する Tsumo baseline を使いますが、候補ごとの `ReachTimingDecision` は評価しません。Reach timing は候補選択後、選択済み1候補へだけ適用する後段 policy です。
+この値は既存 `TenpaiTsumoValue::expected_payment()` の固定小数点尺度そのもので、打牌後の `SelfTsumoFacts`、live physical variant、Tsumo scoring を再利用します。production の base Reach / Damaten policy が選んだ mode に対応する Tsumo baseline を使い、現在の待ちのまま残り自摸機会を使い切る値です。候補ごとの `ReachTimingDecision` を織り込むのは、次に述べる限定 cohort だけです。
 
 Ron probability を持っていないため、mixed cohort でも `ExpectedSelfTsumoValue` に Ron opportunity や Ron weighted total を加算しません。これは自分のツモ和了だけを見る self-tsumo-only offense continuation value であり、局収支EVではありません。非フリテン同士では従来の Ron-based 軸を維持し、フリテンとの共通比較が必要な cohort だけ、全候補で意味が同じ self-tsumo 尺度を使う暫定 policy です。
 
@@ -62,7 +64,48 @@ Ron probability を持っていないため、mixed cohort でも `ExpectedSelfT
 
 軸の有効・無効は `Shanten` / `IsolatedTile` / `IsolatedHonor` まで同順位の cohort 単位で決めます。`PermanentFuriten::Unknown` が1件でもあれば新しい furiten-aware self-tsumo 軸を使いません。また self-tsumo value が1件でもunknownなら、値を0とせず cohort 全体で軸を無効化します。どちらも既存の次軸へ fallback し、pairwise に軸の有無を変えません。
 
-評価対象は現在打牌直後の待ちと打点だけです。聴牌後に非和了牌を引いて別の待ちへ移る手変わりや、ダマ手変わりの2手先評価は行いません。既存の1向聴・2向聴以上の先読み軸も変更しません。ダマで継続した場合の次の1巡は [現在聴牌のダマ継続 (diagnostics only)](#現在聴牌のダマ継続-diagnostics-only) で観測できますが、この比較には接続していません。
+`CurrentTenpaiExpectedSelfTsumoValue` の評価対象は現在打牌直後の待ちと打点だけです。聴牌後に非和了牌を引いて別の待ちへ移る手変わりや、ダマ手変わりの2手先評価は行いません。既存の1向聴・2向聴以上の先読み軸も変更しません。
+
+### 恒常フリテン cohort の timing 込み self-tsumo 軸
+
+cohort が次をすべて満たす場合だけ、現在の待ちのままの値ではなく `current tenpai continuation self-tsumo value` を使います。1つでも満たさない cohort では、この軸のために継続評価そのものを行いません。
+
+```text
+CurrentTenpaiFuritenCohort::AllPermanentFuriten
++ cohort の全候補で既存 base Reach / Damaten policy がリーチを選ぶ
++ 全候補で reach now / defer → forced Reach の比較が確定し、timing 込みの値が Some
+```
+
+「base policy がリーチを選ぶ」は実際のリーチ判断と同じ結論です。押し引きの `TenpaiOffenseMode` (`decide_reach_reason()`) だけでなく、その前段の categorical rule (`selects_named_yakuman_damaten()`) も通します。恒常フリテンの named 役満候補は `TenpaiOffenseMode` ではリーチでも base policy はダマ (`NamedYakumanDamaten`) を選ぶので、continuation axis の対象にしません。役満判定は既存 Tsumo scoring の結論そのままで、候補比較のために待ちも完成手も作り直しません。
+
+候補値は既存 [リーチ timing](#リーチ-timing) policy (`decide_permanent_furiten_reach_timing()`) が選んだ側の self-tsumo value そのものです。
+
+```text
+ReachNow    → reach now
+DeferReach  → defer → forced Reach
+```
+
+比較不能 (`SelfTsumoComparisonUnknown`) の候補は 0 点にせず値を持ちません。1件でも確定しなければ cohort 全体でこの軸を外し、現在の待ちのままの `CurrentTenpaiExpectedSelfTsumoValue` へ戻します。新しい threshold も係数も持たず、Ron probability も Ron EV も導入しません。
+
+全候補が恒常フリテンで、ロンできる候補が1件も無いからこそ、self-tsumo だけで比較が閉じます。`MixedKnown` cohort は `No` 側にだけロン機会があるため対象外で、従来どおり `CurrentTenpaiExpectedSelfTsumoValue` のままです。base policy がダマを選んだ候補 (`HighValueDamaten` / `NamedYakumanDamaten`) を1件でも含む cohort も対象外で、「片方は timing 込み・片方は現在待ち」という非対称な比較は作りません。そのような cohort は全体で既存 `CurrentTenpaiExpectedSelfTsumoValue` へ落とし、選ばれた候補の base reason と Reach timing も従来どおりです。
+
+比較に使う値も、選択済み候補へ後段で適用する Reach timing も、同じ既存の継続評価と同じ timing policy を通します。policy を複製しないので、候補比較が `DeferReach` を選んだ値と、その候補が選ばれた後の Reach timing の結論は一致します。同じ候補の2手先評価を consumer ごとに繰り返さないよう、経路ごとに source を1つへ寄せています。
+
+```text
+通常 discard selection
+  gate を通った候補だけ 1-candidate continuation helper
+  → Reach timing → 候補比較 → 選択済み候補の timing をそのまま後段のリーチ判断へ
+
+--lookahead 診断
+  既存 all-candidate TenpaiContinuationDiagnostic
+  → 対象候補の self_tsumo を抽出 → 同じ Reach timing policy → 候補比較
+```
+
+後段のリーチ判断は、候補比較が同じ gate で timing を評価済みならその結論をそのまま使い、評価していない場合 (現在聴牌候補が1件・cohort が対象外) だけ従来どおり選択済み1候補を評価します。`--lookahead` では既存の全候補継続診断が selection 用 continuation の source になるので、同じ候補について個別の2手先評価を追加で走らせません。診断の有無で選択された打牌・比較理由・Reach timing は変わりません。
+
+残り自摸機会が確定しない局面 (`remaining_tiles` unknown) では self-tsumo 確率模型の材料が揃わず、継続比較のどの値も確定しません。同じ材料から決まる `current tenpai expected self-tsumo value` も確定せず必ず既存軸へ落ちるので、exact fact だけで分かるこの場合は2手先評価そのものを走らせません。
+
+ダマで継続した場合の次の1巡そのものは [現在聴牌のダマ継続 (diagnostics only)](#現在聴牌のダマ継続-diagnostics-only) で観測できます。
 
 ## 1向聴: ExpectedSelfTsumoValue
 
@@ -172,7 +215,7 @@ detailed diagnostics そのものは要求した場合だけ構築し、`act()` 
 
 枝には、待ちが実際に変わるもの (手変わり) だけでなく、**ツモった牌をそのまま切って元の聴牌・元の待ちを維持するものも含みます**。「今すぐリーチする」と「ダマで継続する」を比べるには、次の1巡で待ちが変わらない場合の価値も同じ枝集合の中に必要になるためです。枝を待ちの変化で分類 (据え置き / 待ち改善 / 打点改善) することはまだ行いません。
 
-**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用で、打牌選択には接続していません。** `CurrentTenpaiOffenseWeightedTotal` と `CurrentTenpaiExpectedSelfTsumoValue` の比較にも、base の Reach / ダマ判断にも、押し引きにも使いません。継続 bonus も係数も threshold も持ちません。現在聴牌の新しい self-tsumo 軸は、現在の待ちを残り自摸機会全体で評価するだけで、下記の非和了牌からの手変わり枝を含みません。production がこの枝集合を使うのは、選択済み1候補にだけ適用する [リーチ timing](#リーチ-timing) です。Ron の生値や `weighted prospective value` は単位の違う値なので、self-tsumo expected value と加算しません。
+**`Tenpai continuation` 節が並べる全候補分の継続枝は diagnostics 専用です。** base の Reach / ダマ判断にも押し引きにも使わず、継続 bonus も係数も threshold も持ちません。`CurrentTenpaiOffenseWeightedTotal` と `CurrentTenpaiExpectedSelfTsumoValue` は、この枝集合を含まない現在の待ちだけの軸です。production がこの継続 semantics を使うのは、選択済み1候補にだけ適用する [リーチ timing](#リーチ-timing) と、[恒常フリテン cohort の timing 込み self-tsumo 軸](#恒常フリテン-cohort-の-timing-込み-self-tsumo-軸) の2つで、どちらも全候補分の詳細診断ではなく既存の1候補継続 helper を通ります。Ron の生値や `weighted prospective value` は単位の違う値なので、self-tsumo expected value と加算しません。
 
 枝はすべて既存基盤そのものです。
 
@@ -357,6 +400,8 @@ selected candidate 1件だけ
 ```
 
 `--lookahead` の全候補継続診断は production では構築しません。gate を通った局面で評価するのは通常打牌 selection が選んだ1候補だけで、枝の分類も次打牌も打点も既存の `TenpaiContinuation` / `ProspectiveTenpaiValue` / `SelfTsumoPath` / 既存 selector / 既存 scoring をそのまま通ります (`selected_tenpai_self_tsumo_comparison()`)。counterfactual の semantics も上の diagnostics と同一で、2回目の手変わり探索も、terminal mode への `decide_reach_reason()` の再注入も行いません。診断の有無で production action が変わることもありません。
+
+[恒常フリテン cohort の timing 込み self-tsumo 軸](#恒常フリテン-cohort-の-timing-込み-self-tsumo-軸) が同じ候補の timing を既に評価している場合は、その結論をそのまま使います。同じ候補・同じ gate・同じ policy なので結論は変わらず、2手先評価を繰り返さないだけです。
 
 ### 比較するのは大小だけです
 

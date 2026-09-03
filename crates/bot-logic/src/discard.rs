@@ -663,6 +663,10 @@ pub enum DiscardComparisonReason {
     CurrentTenpaiOffenseWeightedTotal,
     /// 現在聴牌限定。残り自摸機会内にツモ和了する self-tsumo-only expected payment。
     CurrentTenpaiExpectedSelfTsumoValue,
+    /// 現在聴牌限定。上位層の Reach timing policy を織り込んだ self-tsumo-only expected payment。
+    ///
+    /// 全候補が恒常フリテンで、その timing 込みの値を全候補分確定できた cohort だけで使う。
+    CurrentTenpaiContinuationSelfTsumoValue,
     AcceptanceRemaining,
     AcceptanceTypeCount,
     /// 七対子テンパイ限定。単騎待ち牌の固定順位。
@@ -1012,6 +1016,11 @@ pub struct DiscardCandidateDiagnostic {
     /// 打牌選択に使った現在聴牌の self-tsumo-only expected payment。
     /// cohort に unknown が混ざって軸を無効化した場合も `None`。
     pub current_tenpai_expected_self_tsumo_value: Option<u64>,
+    /// 打牌選択に使った、Reach timing を織り込んだ現在聴牌の self-tsumo-only expected payment。
+    ///
+    /// 診断のために再計算せず、選択が使った値をそのまま保持する。cohort 単位で軸を無効化した
+    /// 場合と確定しなかった場合はどちらも `None`。
+    pub current_tenpai_continuation_self_tsumo_value: Option<u64>,
     /// 現在聴牌候補が残り自摸機会内にツモ和了できる確率
     /// [[`crate::self_tsumo::TSUMO_PROBABILITY_SCALE`]]。
     ///
@@ -1100,6 +1109,9 @@ pub fn diagnose_discard_evaluations_with_metrics(
         current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.expected_self_tsumo_value),
+        current_tenpai_continuation_self_tsumo_value: current_tenpai_metrics
+            .get(index)
+            .and_then(|metric| metric.continuation_self_tsumo_value),
     };
 
     let best_index = best_discard_selection_index_with_metrics(
@@ -1164,6 +1176,9 @@ pub fn diagnose_discard_evaluations_with_metrics(
                 current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.expected_self_tsumo_value),
+                current_tenpai_continuation_self_tsumo_value: current_tenpai_metrics
+                    .get(index)
+                    .and_then(|metric| metric.continuation_self_tsumo_value),
                 current_tenpai_self_tsumo_hit_probability: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.self_tsumo_hit_probability),

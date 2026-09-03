@@ -211,17 +211,52 @@ fn tenpai_tsumo_profile<'a>(
     ))
 }
 
-/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価する。
+/// 同じ完成手・同じ Tsumo baseline を1回だけ評価して導いた事実。
+///
+/// 同じテンパイについて複数の事実が必要な経路が、点数計算を2回走らせないための共通入口
+/// ([`evaluate_tenpai_tsumo`]) の結果。事実そのものを求める helper は単独入口
+/// ([`tenpai_tsumo_value_from_hands`] / [`tenpai_tsumo_named_yakuman`]) と共有するので、
+/// どの経路から求めても結論は変わらない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TenpaiTsumoEvaluation {
+    /// ツモ和了できる variant の残枚数と重み付き打点。確定しない場合と baseline を組み立て
+    /// られない場合は `None`。
+    pub value: Option<TenpaiTsumoValue>,
+    /// 生きた全 variant が named 役満と確定したか。
+    pub named_yakuman: NamedYakumanTsumo,
+}
+
+/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で1回評価する。
 ///
 /// prospective tenpai と現在打牌後の tenpai が同じ baseline・点数計算・physical variant 集約を
 /// 共用するための入口。Reach / Damaten はリーチ宣言の有無だけを表し、どちらも Tsumo として
-/// 評価する。Reach timing はこの helper の責務外。
+/// 評価する。Reach timing も Reach / Damaten policy もこの層の責務外で、返すのは事実だけ。
+pub(crate) fn evaluate_tenpai_tsumo(
+    context: &GameContext,
+    hands: &TenpaiCompletedHands,
+    mode: TenpaiOffenseMode,
+) -> TenpaiTsumoEvaluation {
+    tenpai_tsumo_profile(context, hands, mode).map_or(
+        TenpaiTsumoEvaluation {
+            value: None,
+            named_yakuman: NamedYakumanTsumo::NotEstablished,
+        },
+        |profile| TenpaiTsumoEvaluation {
+            value: tsumo_value(&profile),
+            named_yakuman: named_yakuman_tsumo(&profile),
+        },
+    )
+}
+
+/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価する。
+///
+/// 打点だけが必要な経路のための [`evaluate_tenpai_tsumo`] の薄い入口。
 pub(crate) fn tenpai_tsumo_value_from_hands(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
     mode: TenpaiOffenseMode,
 ) -> Option<TenpaiTsumoValue> {
-    tsumo_value(&tenpai_tsumo_profile(context, hands, mode)?)
+    evaluate_tenpai_tsumo(context, hands, mode).value
 }
 
 /// テンパイのツモ和了が named 役満だと既存 scoring 上確定したか。
@@ -254,19 +289,17 @@ impl NamedYakumanTsumo {
 /// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価し、生きた
 /// 和了牌の物理牌 variant がすべて named 役満になるかを求める。
 ///
-/// baseline も点数計算も variant の分け方も [`tenpai_tsumo_value_from_hands`] と同じで、役満か
-/// どうかは既存 scoring の結論そのもの。残枚数 0 の variant は引けないので判定に含めず、生きた
-/// variant が1件も無いテンパイは named 役満と確定しない。役なし・数え役満・scoring unknown も
-/// 同じく確定しない扱いで、名前の付いた役満だと推測しない。
+/// 役満判定が必要な経路のための [`evaluate_tenpai_tsumo`] の薄い入口。baseline も点数計算も
+/// variant の分け方も [`tenpai_tsumo_value_from_hands`] と同じで、役満かどうかは既存 scoring の
+/// 結論そのもの。残枚数 0 の variant は引けないので判定に含めず、生きた variant が1件も無い
+/// テンパイは named 役満と確定しない。役なし・数え役満・scoring unknown も同じく確定しない
+/// 扱いで、名前の付いた役満だと推測しない。
 pub(crate) fn tenpai_tsumo_named_yakuman(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
     mode: TenpaiOffenseMode,
 ) -> NamedYakumanTsumo {
-    tenpai_tsumo_profile(context, hands, mode)
-        .map_or(NamedYakumanTsumo::NotEstablished, |profile| {
-            named_yakuman_tsumo(&profile)
-        })
+    evaluate_tenpai_tsumo(context, hands, mode).named_yakuman
 }
 
 /// 組み立て済みの完成手を、指定した攻撃モードの Tsumo baseline で評価し、和了牌の物理牌
@@ -424,13 +457,24 @@ mod tests {
     const KAZOE_DORA_INDICATORS: [&str; 4] = ["4m", "4m", "4m", "4m"];
 
     // 門前テンパイ1件を組み立てて、ダマの Tsumo baseline で named 役満と確定するかを求める。
-    // 待ちも残枚数も既存の受け入れそのもので、`extra_visible` は見え牌として残枚数へ反映する。
     fn named_yakuman_tsumo_of(
         hand: &[&str],
         dora_indicators: &[&str],
         extra_visible: &[&str],
         known_winds: bool,
     ) -> NamedYakumanTsumo {
+        let (ctx, hands) = tenpai_case(hand, dora_indicators, extra_visible, known_winds);
+        tenpai_tsumo_named_yakuman(&ctx, &hands, TenpaiOffenseMode::Damaten)
+    }
+
+    // 門前テンパイ1件の局面と完成手。待ちも残枚数も既存の受け入れそのもので、`extra_visible` は
+    // 見え牌として残枚数へ反映する。
+    fn tenpai_case(
+        hand: &[&str],
+        dora_indicators: &[&str],
+        extra_visible: &[&str],
+        known_winds: bool,
+    ) -> (GameContext, TenpaiCompletedHands) {
         let mut source = TileIdSource::new();
         let concealed = source.tiles(hand);
         let dora_indicators = source.tiles(dora_indicators);
@@ -455,7 +499,51 @@ mod tests {
             visible,
         );
 
-        tenpai_tsumo_named_yakuman(&ctx, &hands, TenpaiOffenseMode::Damaten)
+        (ctx, hands)
+    }
+
+    #[test]
+    fn the_shared_tsumo_evaluation_matches_each_single_fact_entry() {
+        // 単独入口と共通入口は同じ profile から同じ helper で事実を導くので、どちらから求めても
+        // 結論は変わらない。共通入口は同じ完成手・同じ baseline を1回しか評価しない。
+        let cases = [
+            (&KOKUSHI_TENPAI_HAND[..], &[][..]),
+            (&DAISANGEN_SHANPON_HAND[..], &[][..]),
+            (&KAZOE_SHANPON_HAND[..], &KAZOE_DORA_INDICATORS[..]),
+        ];
+
+        for (hand, dora_indicators) in cases {
+            let (ctx, hands) = tenpai_case(hand, dora_indicators, &[], true);
+            for mode in [
+                TenpaiOffenseMode::Reach,
+                TenpaiOffenseMode::Damaten,
+                TenpaiOffenseMode::Unknown,
+            ] {
+                let evaluation = evaluate_tenpai_tsumo(&ctx, &hands, mode);
+
+                assert_eq!(
+                    evaluation.value,
+                    tenpai_tsumo_value_from_hands(&ctx, &hands, mode),
+                    "{hand:?} {mode:?}"
+                );
+                assert_eq!(
+                    evaluation.named_yakuman,
+                    tenpai_tsumo_named_yakuman(&ctx, &hands, mode),
+                    "{hand:?} {mode:?}"
+                );
+            }
+        }
+
+        // 両方の事実が実際に確定する組み合わせがあることも確かめ、一致だけの空振りにしない。
+        let (ctx, hands) = tenpai_case(&KOKUSHI_TENPAI_HAND, &[], &[], true);
+        let evaluation = evaluate_tenpai_tsumo(&ctx, &hands, TenpaiOffenseMode::Damaten);
+
+        assert!(
+            evaluation
+                .value
+                .is_some_and(|value| value.winning_remaining > 0)
+        );
+        assert_eq!(evaluation.named_yakuman, NamedYakumanTsumo::AllLiveVariants);
     }
 
     #[test]

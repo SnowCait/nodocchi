@@ -527,6 +527,15 @@ fn format_normal_discard_candidate(
             ABSENT.to_string()
         }
     ));
+    // 恒常フリテン確定 cohort だけで打牌選択が使った、Reach timing 込みの値そのもの。
+    lines.push(format!(
+        "  current tenpai continuation self-tsumo value: {}",
+        if evaluation.min_shanten_after_discard() == 0 {
+            format_self_tsumo_value(candidate.current_tenpai_continuation_self_tsumo_value)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
     // 期待支払いと同じ terminal tenpai から得た観測値。打牌選択には使わない。
     lines.push(format!(
         "  current tenpai self-tsumo hit probability: {}",
@@ -2793,6 +2802,10 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
         DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue => (
             format_self_tsumo_value(Some(winner.current_tenpai_expected_self_tsumo_value?)),
             format_self_tsumo_value(Some(loser.current_tenpai_expected_self_tsumo_value?)),
+        ),
+        DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue => (
+            format_self_tsumo_value(Some(winner.current_tenpai_continuation_self_tsumo_value?)),
+            format_self_tsumo_value(Some(loser.current_tenpai_continuation_self_tsumo_value?)),
         ),
         DiscardComparisonReason::ExpectedSelfTsumoValue => (
             format_self_tsumo_value(Some(winner.expected_self_tsumo_value?)),
