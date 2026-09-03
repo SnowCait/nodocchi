@@ -19,6 +19,7 @@ pub mod reach_decision;
 pub mod reach_policy;
 pub mod ron_opportunity;
 pub mod ryukyoku_decision;
+pub mod shanten_diagnostic;
 pub mod tenpai_continuation;
 pub mod tenpai_scoring;
 pub mod threat;
@@ -26,9 +27,7 @@ pub mod threat;
 pub use action::LegalAction;
 pub use agent::Agent;
 pub use agents::{
-    AgentActionSource, DiagnosticOptions, MenzenAgent, NormalAgent, ReachDecisionReason,
-    ShantenAgent, ShantenDecisionDiagnostic, TsumogiriAgent, diagnose_shanten_decision,
-    diagnose_shanten_decision_with_options,
+    AgentActionSource, MenzenAgent, NormalAgent, ReachDecisionReason, ShantenAgent, TsumogiriAgent,
 };
 pub use call_decision::{
     CALL_CURRENT_SHANTEN, CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN,
@@ -135,6 +134,10 @@ pub use ryukyoku_decision::{
     RYUKYOKU_CONTINUE_CHIITOITSU_SHANTEN, RYUKYOKU_CONTINUE_KOKUSHI_SHANTEN,
     RYUKYOKU_CONTINUE_STANDARD_SHANTEN, RyukyokuDecisionDiagnostic, RyukyokuVerdict,
     continues_with_shanten, evaluate_ryukyoku_decision,
+};
+pub use shanten_diagnostic::{
+    DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,
+    diagnose_shanten_decision_with_options,
 };
 pub use tenpai_continuation::{
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,

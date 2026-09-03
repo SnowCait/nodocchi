@@ -2,41 +2,33 @@ use crate::action::{LegalAction, prefer_black_five_for_action};
 use crate::agent::Agent;
 use crate::call_decision::{CallDecisionDiagnostic, evaluate_call_decision};
 use crate::combined_defense::{
-    CombinedDefenseCategory, CombinedDefenseDiagnostic, combined_threat_defense_targets,
+    CombinedDefenseCategory, combined_threat_defense_targets,
     evaluate_combined_threat_defense_fallback_action_with_kind,
 };
 use crate::context::GameContext;
 use crate::defense::{
-    DefenseDecisionDiagnostic, DefenseFallbackKind, evaluate_defense_fallback_action_with_kind,
+    DefenseFallbackKind, evaluate_defense_fallback_action_with_kind,
     log_defense_fallback_evaluation,
 };
 use crate::discard_selection::{
-    DiscardActionSelection, LookaheadDiagnosticScope, select_discard_action_with_diagnostic,
+    DiscardActionSelection, select_discard_action_with_diagnostic,
     select_discard_action_with_evaluation,
 };
 use crate::open_hand_defense::{
-    OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
-    evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
+    OpenHandDefenseCategory, evaluate_open_hand_defense_fallback_action_with_kind,
+    high_open_hand_threat_players,
 };
-use crate::prospective_value::ProspectiveLookaheadDiagnostic;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
     push_pull_inputs_from_threat_facts,
 };
-use crate::reach_damaten_comparison::{
-    ReachDamatenComparisonDiagnostic, ReachDamatenComparisonInputs,
-    diagnose_reach_damaten_comparison,
-};
 use crate::reach_decision::{ReachDecision, ReachDecisionDiagnostic, decide_reach};
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
-use crate::tenpai_continuation::TenpaiContinuationDiagnostic;
-use crate::threat::{
-    PlayerThreatDiagnostic, diagnose_player_threats_with_facts, player_threat_facts_from_context,
+use crate::shanten_diagnostic::{
+    DecisionDiagnostics, DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,
+    diagnose_shanten_decision_with_options,
 };
-use bot_logic::{
-    DiscardDecisionDiagnostic, DiscardFuritenDiagnostic, FixedMeldCount, LookaheadDiagnostic,
-    SelfTsumoFacts,
-};
+use crate::threat::player_threat_facts_from_context;
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
@@ -109,286 +101,22 @@ impl AgentActionSource {
 
 /// `ShantenAgent` が下した最終判断と、その選択経路・ログ用文脈をまとめた内部表現。
 ///
-/// ログのためだけに判断ロジックを再実行しないよう、action 選択の過程で得た情報を保持する。
+/// ログや diagnostics assembly のために判断ロジックを再実行しないよう、action 選択の過程で
+/// 得た情報を保持する。
 /// `push_pull` / `push_pull_inputs` / `normal_discard` は Hora / Ryukyoku / 鳴きの早期 return では
 /// `None`。`call` は合法な Chi / Pon が1件も無い局面では `None`。`reach` はリーチを検討する Push
 /// mode 以外では `None`。`ryukyoku` は `LegalAction::Ryukyoku` が合法だった局面だけ `Some` で、
 /// Hora で早期終了した場合は検討自体を行わないので `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentDecision {
-    action: LegalAction,
-    source: AgentActionSource,
-    push_pull_inputs: Option<PushPullInputs>,
-    push_pull: Option<PushPullDecision>,
-    normal_discard: Option<LegalAction>,
-    reach: Option<ReachDecisionDiagnostic>,
-    call: Option<CallDecisionDiagnostic>,
-    ryukyoku: Option<RyukyokuDecisionDiagnostic>,
-}
-
-/// `ShantenAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
-///
-/// 契約:
-///
-/// - `selected_action` / `selected_source` は `ShantenAgent::act()` と**同じ selection logic** の
-///   結果である。診断専用の別判断ロジックは持たない。
-///   常に `selected_action == ShantenAgent::act(context, legal_actions)` が成り立つ。
-/// - 追加診断情報(候補ごとの形の内訳、全防御候補評価など)は解析用途であり、action 選択には
-///   影響しない。
-/// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku / 鳴きで
-///   早期終了した場合は `normal_discard` / `normal_discard_action` / `push_pull_inputs` /
-///   `push_pull_decision` / `reach` / `defense` がすべて `None`。
-/// - `ryukyoku` は `LegalAction::Ryukyoku` が合法だった局面だけ `Some`。九種九牌を宣言せず
-///   続行した局面でも保持するので、続行の判断根拠をそのまま辿れる。
-///
-/// tracing ログとは独立した pure なデータであり、ログをパースして構築することはない。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShantenDecisionDiagnostic {
-    /// 最終的に選んだ action。`ShantenAgent::act()` の結果と一致する。
-    pub selected_action: LegalAction,
-    /// 最終 action をどの経路で選んだか。
-    pub selected_source: AgentActionSource,
-    /// 通常打牌評価が選んだ合法 Dahai。最終 action が別経路でも、比較用に保持する。
-    pub normal_discard_action: Option<LegalAction>,
-    /// 通常打牌評価を行った場合の全合法候補診断。合法 Dahai が無い場合は
-    /// `selected == None` かつ `candidates` が空の診断になる。
-    pub normal_discard: Option<DiscardDecisionDiagnostic>,
-    /// 通常打牌評価を行った場合の全合法候補のフリテン診断。`normal_discard` と同じ候補集合・
-    /// 同じ順序で、候補ごとに「その打牌でテンパイになる場合の待ち・ツモ和了の残枚数と種類数・
-    /// ロン可否・自分の河と重複した待ち牌・ロン可否に使った打牌後の履歴依存フリテン」を持つ。
-    ///
-    /// 判定に使う自分の河は「context の自分の河 + その打牌」で、他家の河や見え牌は使わない。
-    /// `player_id` が無く自分の河を特定できない場合は非フリテンと断定せず
-    /// [`PermanentFuriten::Unknown`](bot_logic::PermanentFuriten::Unknown) になる。
-    /// 打牌選択・押し引き・リーチ判断のどれにも使わない解析専用の情報。
-    pub normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
-    /// 現在時点 (今回の打牌の前) の履歴依存フリテンの production facts。
-    ///
-    /// [`bot_logic::TenpaiWaitAvailability::can_ron`] が使うのは、この facts を「選択した打牌を切った後」
-    /// へ補正した値 ([`GameContext::history_furiten_after_own_discard`]) であり、同じ値とは
-    /// 限らない。補正後の facts は各 [`bot_logic::TenpaiWaitAvailability::history_furiten`] が持つ。
-    /// 例えば現在 `same_turn = Some(true)` でも、自分のツモを経た今回の打牌後は `Some(false)`
-    /// になり、他の軸が非フリテン確定ならロンできる。
-    pub history_furiten: bot_logic::HistoryFuritenFacts,
-    /// 通常打牌評価を行った場合の全合法候補の詳細な2手先診断。`normal_discard` と同じ候補集合・
-    /// 同じ順序で、selected 候補だけでなく runner-up を含む全候補に対応する。
-    ///
-    /// 構築の有無は `selected_action` / `selected_source` / `normal_discard_action` /
-    /// `push_pull_decision` / `defense` / `call` のどれも変えない。構築した場合は打牌選択が使う
-    /// 1向聴の weighted tenpai wait もこの枝評価から集計するが、集計対象と集計規則は選択専用
-    /// 経路と同じなので結果は一致する。`act()` の経路では構築しない。
-    pub normal_discard_lookahead: Option<LookaheadDiagnostic>,
-    /// `normal_discard_lookahead` の各枝が選んだ2手目打牌の先にあるテンパイの将来打点。
-    /// 2手先診断を構築した場合だけ持ち、同じ候補集合・同じ順序になる。
-    ///
-    /// 評価対象は既存 lookahead が既存 comparator で選んだ `next_discard` そのもので、打点を見て
-    /// 選び直さない。テンパイ枝についてはダマ / リーチ両方の baseline で評価し、未来時点で
-    /// リーチが合法かどうかもリーチするかどうかも決めない。打牌選択・押し引き・リーチ判断の
-    /// どれにも使わない解析専用の情報で、構築の有無は選択結果を変えない。
-    pub normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
-    /// 現在打牌後が聴牌の候補について、非和了ツモ1枚と最善打牌で再び聴牌になるダマ継続。
-    /// 2手先診断を構築し、かつ自分が未リーチと確定している局面だけ持つ。
-    ///
-    /// 枝は既存2手先評価の same-shanten の枝そのもの、次打牌は既存 comparator が選んだもの、
-    /// 打点は `normal_discard_lookahead_value` が評価済みの値そのもので、この診断のために探索も
-    /// 点数計算もやり直さない。現在の和了牌を引いた枝は既存分類上 same-shanten にならないため
-    /// 含まれない。待ちが変わる枝も、ツモ切りで元の待ちを維持する枝も同じ枝集合に含む。
-    ///
-    /// 現時点では diagnostics 専用で、打牌選択・押し引き・リーチ判断のどれにも接続していない。
-    /// 構築の有無は選択結果を変えない。
-    pub normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
-    /// 通常打牌評価で self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
-    ///
-    /// 選択が実際に使った値そのもので、診断のために求め直さない。詳細な2手先診断を構築した
-    /// 場合だけ持つ。
-    pub normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
-    /// 押し引き判定に使った入力。`push_pull_inputs_from_context_with_evaluation()` の実結果。
-    pub push_pull_inputs: Option<PushPullInputs>,
-    /// 押し引き判定の結果。`decide_push_pull()` の実結果。
-    pub push_pull_decision: Option<PushPullDecision>,
-    /// リーチを検討した場合の判断内訳。リーチを検討する Push mode 以外では `None`。
-    ///
-    /// 採用しなかった場合も、通常打牌 selection が選んだ打牌・打牌後の向聴・待ち・恒常フリテンと
-    /// 理由を保持する。`act()` と同じ helper の実結果で、診断用の別判断ロジックは持たない。
-    pub reach: Option<ReachDecisionDiagnostic>,
-    /// リーチを検討した場合の Reach / Damaten 判断材料の統合診断。
-    ///
-    /// production の判断結果・ダマ Ron 打点・self-tsumo 比較・リーチ Ron baseline を1か所へ
-    /// 並べただけの観測値で、どの値も既存診断が持っているものそのもの。self-tsumo 比較は2手先
-    /// 診断を構築した場合だけ持ち、この診断のために2手先探索を追加しない。
-    ///
-    /// 現時点では diagnostics 専用で、Reach / Damaten の production 判断には接続していない。
-    /// winner も `should_reach` の再判断も持たず、構築の有無は選択結果を変えない。
-    pub reach_damaten_comparison: Option<ReachDamatenComparisonDiagnostic>,
-    /// 防御 fallback を検討した場合の診断。採用されなかった場合も候補評価を保持する。
-    pub defense: Option<DefenseDecisionDiagnostic>,
-    /// 鳴きを検討した場合の診断。合法な Chi / Pon が1件も無ければ `None`。採用しなかった
-    /// 場合も候補ごとの理由を保持する。
-    pub call: Option<CallDecisionDiagnostic>,
-    /// 九種九牌を検討した場合の診断。`LegalAction::Ryukyoku` が合法でない局面と、Hora で
-    /// 早期終了した局面では `None`。
-    ///
-    /// 宣言・続行のどちらでも判断に使った3種類の向聴数を保持する。`act()` と同じ helper の
-    /// 実結果で、診断用の別判断ロジックは持たない。手牌を評価できなかった場合の向聴数は
-    /// `None` のままで、推測して埋めない。
-    pub ryukyoku: Option<RyukyokuDecisionDiagnostic>,
-    pub own_fixed_meld_count: Option<FixedMeldCount>,
-    /// 全4席分の脅威診断。`context` から読み取れる副露・リーチ・親・ドラの観測事実だけを持つ。
-    ///
-    /// 集計値 (`facts`) は `act()` が押し引き入力へ渡したものと同じ
-    /// [`PlayerThreatFacts`](crate::threat::PlayerThreatFacts) そのもので、診断のために数え直さ
-    /// ない。`melds` の物理牌など表示用の詳細だけをこの経路で追加する。
-    ///
-    /// `player_id` が不明でも席を除外せず常に4席分あり、自分か他家かは各 facts の `is_self` /
-    /// `is_opponent()` が unknown で表す。危険度の判断は含まず、現時点では押し引き・防御・
-    /// 打牌選択のどれにも影響しない解析専用の情報。
-    pub player_threats: [PlayerThreatDiagnostic; 4],
-    /// `High` OpenHandThreat の相手に対する防御 safety の診断。
-    ///
-    /// target は `player_threats` が持つ classification をそのまま source of truth にして選ぶ。
-    /// `High` の相手がいない局面では `targets` も `candidates` も空になる。
-    ///
-    /// 防御 fallback ([`Self::defense`]) がリーチ者向けなのに対し、こちらは非リーチ副露相手
-    /// 向けで、現物相当の根拠に `post_reach_passed_tiles` を使わない。`selected` は `act()` が
-    /// 実際に採用した OpenHand 防御 fallback で、診断側で選び直さない。採用しなかった局面では
-    /// `None` になり、候補評価だけが解析用に残る。
-    pub open_hand_defense: OpenHandDefenseDiagnostic,
-    /// リーチ者と `High` OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety の診断。
-    ///
-    /// target はリーチ情報と `player_threats` が持つ classification をそのまま source of truth に
-    /// して選ぶ。複合 threat ではない局面 (リーチ者だけ / `High` の相手だけ / threat なし) では
-    /// `targets` も `candidates` も空になり、防御は既存の [`Self::defense`] /
-    /// [`Self::open_hand_defense`] が担当する。
-    ///
-    /// target ごとに「ロン安全」の根拠が違い、リーチ者は現物 (本人の河 + post_reach_passed)、
-    /// `High` の副露相手は本人の河と現在有効な一時通過牌を使う。`selected` は `act()` が実際に
-    /// 採用した複合 threat 用の防御 fallback で、診断側で選び直さない。
-    pub combined_defense: CombinedDefenseDiagnostic,
-}
-
-impl ShantenDecisionDiagnostic {
-    /// 最終 action がリーチ者向けの防御 fallback 由来の場合のその種別。他の経路では `None`。
-    pub fn defense_fallback_kind(&self) -> Option<DefenseFallbackKind> {
-        self.selected_source.defense_kind()
-    }
-
-    /// 最終 action が非リーチ副露相手向けの防御 fallback 由来の場合のその大分類。
-    /// 他の経路では `None`。
-    pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
-        self.selected_source.open_hand_defense_category()
-    }
-
-    /// 最終 action が複合 threat 向けの防御 fallback 由来の場合のその大分類。他の経路では `None`。
-    pub fn combined_defense_category(&self) -> Option<CombinedDefenseCategory> {
-        self.selected_source.combined_defense_category()
-    }
-}
-
-/// 診断で追加構築する解析情報の指定。
-///
-/// 追加情報の有無は選択結果を変えない。既定 ([`DiagnosticOptions::default`]) では、既存診断だけを
-/// 構築して重い追加探索を行わない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DiagnosticOptions {
-    /// 通常打牌候補の2手先診断 ([`ShantenDecisionDiagnostic::normal_discard_lookahead`]) を
-    /// 構築するかどうか。
-    ///
-    /// 2手先は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり既存診断よりさらに重いため、
-    /// 既定では構築しない。有効にしても選択結果は変わらない。
-    pub lookahead: bool,
-    /// 2手先診断の same-shanten の枝を、テンパイまでもう1段追うかどうか。
-    ///
-    /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
-    /// `lookahead` だけの場合よりさらに重い。対象は現在打牌後が1向聴の候補だけで、`lookahead`
-    /// が無効なら何も構築しない。打牌選択にも押し引きにも使わない観測値なので、有効にしても
-    /// 選択結果は変わらない。
-    pub same_shanten_downstream: bool,
-}
-
-impl DiagnosticOptions {
-    /// 既存診断のみ。2手先診断は構築しない。
-    pub const NONE: Self = Self {
-        lookahead: false,
-        same_shanten_downstream: false,
-    };
-    /// 2手先診断まで構築する。
-    pub const WITH_LOOKAHEAD: Self = Self {
-        lookahead: true,
-        same_shanten_downstream: false,
-    };
-    /// 2手先診断に加えて、same-shanten の枝をテンパイまで追う。
-    pub const WITH_SAME_SHANTEN_DOWNSTREAM: Self = Self {
-        lookahead: true,
-        same_shanten_downstream: true,
-    };
-
-    fn lookahead_scope(self) -> LookaheadDiagnosticScope {
-        match (self.lookahead, self.same_shanten_downstream) {
-            (false, _) => LookaheadDiagnosticScope::None,
-            (true, false) => LookaheadDiagnosticScope::Lookahead,
-            (true, true) => LookaheadDiagnosticScope::SameShantenDownstream,
-        }
-    }
-}
-
-/// `ShantenAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
-///
-/// [`ShantenAgent::diagnose`] の別名。契約は [`ShantenDecisionDiagnostic`] を参照。
-pub fn diagnose_shanten_decision(
-    context: &GameContext,
-    legal_actions: &[LegalAction],
-) -> ShantenDecisionDiagnostic {
-    ShantenAgent::diagnose(context, legal_actions)
-}
-
-/// 追加診断を指定して `ShantenAgent::act()` と同じ判断を行う。
-///
-/// [`ShantenAgent::diagnose_with_options`] の別名。
-pub fn diagnose_shanten_decision_with_options(
-    context: &GameContext,
-    legal_actions: &[LegalAction],
-    options: DiagnosticOptions,
-) -> ShantenDecisionDiagnostic {
-    ShantenAgent::diagnose_with_options(context, legal_actions, options)
-}
-
-// 解析専用の追加診断を集める内部収集器。
-//
-// `enabled == false` の通常 act() 経路では、候補ごとの形の内訳や全防御候補評価といった
-// action 選択に不要な情報を一切構築しない。selection logic 自体は enabled にかかわらず共通。
-#[derive(Debug, Default)]
-struct DecisionDiagnostics {
-    enabled: bool,
-    options: DiagnosticOptions,
-    normal_discard: Option<DiscardDecisionDiagnostic>,
-    normal_discard_furiten: Option<Vec<DiscardFuritenDiagnostic>>,
-    normal_discard_lookahead: Option<LookaheadDiagnostic>,
-    normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
-    normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
-    normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
-    reach_damaten_comparison: Option<ReachDamatenComparisonDiagnostic>,
-    defense: Option<DefenseDecisionDiagnostic>,
-    open_hand_defense: Option<OpenHandDefenseDiagnostic>,
-    combined_defense: Option<CombinedDefenseDiagnostic>,
-}
-
-impl DecisionDiagnostics {
-    fn disabled() -> Self {
-        Self::default()
-    }
-
-    fn enabled_with(options: DiagnosticOptions) -> Self {
-        Self {
-            enabled: true,
-            options,
-            ..Self::default()
-        }
-    }
-
-    #[cfg(test)]
-    fn enabled() -> Self {
-        Self::enabled_with(DiagnosticOptions::NONE)
-    }
+    pub(crate) action: LegalAction,
+    pub(crate) source: AgentActionSource,
+    pub(crate) push_pull_inputs: Option<PushPullInputs>,
+    pub(crate) push_pull: Option<PushPullDecision>,
+    pub(crate) normal_discard: Option<LegalAction>,
+    pub(crate) reach: Option<ReachDecisionDiagnostic>,
+    pub(crate) call: Option<CallDecisionDiagnostic>,
+    pub(crate) ryukyoku: Option<RyukyokuDecisionDiagnostic>,
 }
 
 #[derive(Debug, Default)]
@@ -407,7 +135,7 @@ impl ShantenAgent {
         context: &GameContext,
         legal_actions: &[LegalAction],
     ) -> ShantenDecisionDiagnostic {
-        Self::diagnose_with_options(context, legal_actions, DiagnosticOptions::NONE)
+        diagnose_shanten_decision(context, legal_actions)
     }
 
     /// 追加診断を指定して `act()` と同じ判断を行い、その過程を構造化診断として返す。
@@ -420,74 +148,7 @@ impl ShantenAgent {
         legal_actions: &[LegalAction],
         options: DiagnosticOptions,
     ) -> ShantenDecisionDiagnostic {
-        let mut diagnostics = DecisionDiagnostics::enabled_with(options);
-        let decision =
-            ShantenAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
-        log_agent_decision(&decision);
-
-        // 押し引きまで進んだ場合はそのとき使った facts をそのまま診断へ載せ、集計を作り直さない。
-        // Hora / Ryukyoku / 鳴きで早期終了した場合だけ、診断のためにここで facts を作る。
-        let player_threat_facts = decision.push_pull_inputs.map_or_else(
-            || player_threat_facts_from_context(context),
-            |inputs| inputs.player_threats,
-        );
-        let player_threats = diagnose_player_threats_with_facts(context, &player_threat_facts);
-
-        // OpenHand 防御の target は診断が持つ classification をそのまま使い、分類し直さない。
-        let open_hand_threats =
-            std::array::from_fn(|player| player_threats[player].open_hand_threat);
-
-        // 採用された OpenHand 防御 fallback は act() が通った経路そのもの。診断側で選び直さない。
-        let open_hand_defense = diagnostics.open_hand_defense.take().unwrap_or_else(|| {
-            OpenHandDefenseDiagnostic::from_assessments(
-                context,
-                legal_actions,
-                &open_hand_threats,
-                decision
-                    .source
-                    .open_hand_defense_category()
-                    .map(|category| (&decision.action, category)),
-            )
-        });
-
-        // 複合 threat の target も同じ facts と classification から作り、リーチ者も High の相手も
-        // 判定し直さない。採用された防御 fallback は act() が通った経路そのもの。
-        let combined_defense = diagnostics.combined_defense.take().unwrap_or_else(|| {
-            CombinedDefenseDiagnostic::from_threats(
-                context,
-                legal_actions,
-                &player_threat_facts,
-                &open_hand_threats,
-                decision
-                    .source
-                    .combined_defense_category()
-                    .map(|category| (&decision.action, category)),
-            )
-        });
-
-        ShantenDecisionDiagnostic {
-            selected_action: decision.action,
-            selected_source: decision.source,
-            normal_discard_action: decision.normal_discard,
-            normal_discard: diagnostics.normal_discard,
-            normal_discard_furiten: diagnostics.normal_discard_furiten,
-            history_furiten: context.history_furiten(),
-            normal_discard_lookahead: diagnostics.normal_discard_lookahead,
-            normal_discard_lookahead_value: diagnostics.normal_discard_lookahead_value,
-            normal_discard_tenpai_continuation: diagnostics.normal_discard_tenpai_continuation,
-            normal_discard_self_tsumo_facts: diagnostics.normal_discard_self_tsumo_facts,
-            push_pull_inputs: decision.push_pull_inputs,
-            push_pull_decision: decision.push_pull,
-            reach: decision.reach,
-            reach_damaten_comparison: diagnostics.reach_damaten_comparison,
-            defense: diagnostics.defense,
-            call: decision.call,
-            ryukyoku: decision.ryukyoku,
-            own_fixed_meld_count: context.own_fixed_meld_count(),
-            player_threats,
-            open_hand_defense,
-            combined_defense,
-        }
+        diagnose_shanten_decision_with_options(context, legal_actions, options)
     }
 
     // 最終 action と選択経路を1回で決める内部 helper。act() はこの結果を返し、
@@ -498,7 +159,7 @@ impl ShantenAgent {
 
     // 判断経路の本体。act() と構造化診断はこの1本を共有し、diagnostics が有効な場合だけ
     // 解析専用の追加情報を収集する。追加情報の収集は action 選択に影響しない。
-    fn decide_with_diagnostics(
+    pub(crate) fn decide_with_diagnostics(
         &self,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
@@ -648,22 +309,16 @@ impl ShantenAgent {
         legal_actions: &[LegalAction],
         diagnostics: &mut DecisionDiagnostics,
     ) -> DiscardActionSelection {
-        if !diagnostics.enabled {
+        if !diagnostics.is_enabled() {
             return select_discard_action_with_evaluation(ctx, legal_actions);
         }
 
         let selection = select_discard_action_with_diagnostic(
             ctx,
             legal_actions,
-            diagnostics.options.lookahead_scope(),
+            diagnostics.lookahead_scope(),
         );
-        diagnostics.normal_discard = Some(selection.diagnostic);
-        diagnostics.normal_discard_furiten = Some(selection.furiten);
-        diagnostics.normal_discard_lookahead = selection.lookahead;
-        diagnostics.normal_discard_lookahead_value = selection.lookahead_value;
-        diagnostics.normal_discard_tenpai_continuation = selection.tenpai_continuation;
-        diagnostics.normal_discard_self_tsumo_facts = selection.self_tsumo_facts;
-        selection.selection
+        diagnostics.collect_normal_discard(selection)
     }
 
     // 押し引きモードに応じた action 選択。候補は必要になった時点でのみ計算する。
@@ -702,20 +357,14 @@ impl ShantenAgent {
                 let decision = reach.insert(diagnostic);
                 // 統合診断は判断が終わった後の観測値だけを集める。診断が無効な act() 経路では
                 // 何も構築せず、リーチ判断が組み立てた完成手もそのまま捨てる。
-                let comparison = diagnostics.enabled.then(|| {
-                    diagnose_reach_damaten_comparison(ReachDamatenComparisonInputs {
-                        context: ctx,
-                        reach_legal: legal_actions
-                            .iter()
-                            .any(|action| matches!(action, LegalAction::Reach)),
-                        reach: decision,
-                        selection: discard_selection,
-                        hands,
-                        continuation: diagnostics.normal_discard_tenpai_continuation.as_ref(),
-                        open_hand_threats: &inputs.open_hand_threats,
-                    })
-                });
-                diagnostics.reach_damaten_comparison = comparison;
+                diagnostics.collect_reach_damaten_comparison(
+                    ctx,
+                    legal_actions,
+                    decision,
+                    discard_selection,
+                    hands,
+                    &inputs.open_hand_threats,
+                );
 
                 if let Some(action) = decision.selected.clone() {
                     return Some((action, AgentActionSource::Reach));
@@ -791,15 +440,13 @@ impl ShantenAgent {
             legal_actions,
             &targets,
         );
-        if diagnostics.enabled {
-            diagnostics.combined_defense = Some(CombinedDefenseDiagnostic::from_evaluation(
-                ctx,
-                legal_actions,
-                &inputs.player_threats,
-                &inputs.open_hand_threats,
-                &evaluation,
-            ));
-        }
+        diagnostics.collect_combined_defense(
+            ctx,
+            legal_actions,
+            &inputs.player_threats,
+            &inputs.open_hand_threats,
+            &evaluation,
+        );
         let (action, category) = evaluation.selected?;
         Some((
             action.clone(),
@@ -820,14 +467,12 @@ impl ShantenAgent {
         let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
         let evaluation =
             evaluate_open_hand_defense_fallback_action_with_kind(ctx, legal_actions, &targets);
-        if diagnostics.enabled {
-            diagnostics.open_hand_defense = Some(OpenHandDefenseDiagnostic::from_evaluation(
-                ctx,
-                legal_actions,
-                &inputs.open_hand_threats,
-                &evaluation,
-            ));
-        }
+        diagnostics.collect_open_hand_defense(
+            ctx,
+            legal_actions,
+            &inputs.open_hand_threats,
+            &evaluation,
+        );
         let (action, category) = evaluation.selected?;
         Some((
             action.clone(),
@@ -851,13 +496,7 @@ impl ShantenAgent {
 
         log_defense_fallback_evaluation(ctx, &evaluation, legal_actions);
 
-        if diagnostics.enabled {
-            diagnostics.defense = Some(DefenseDecisionDiagnostic::from_evaluation(
-                ctx,
-                legal_actions,
-                &evaluation,
-            ));
-        }
+        diagnostics.collect_defense(ctx, legal_actions, &evaluation);
 
         let (action, kind) = selected?;
         Some((action.clone(), AgentActionSource::DefenseFallback(kind)))
@@ -869,7 +508,7 @@ impl ShantenAgent {
         legal_actions: &'a [LegalAction],
         diagnostics: &DecisionDiagnostics,
     ) -> crate::defense::DefenseFallbackEvaluation<'a> {
-        evaluate_defense_fallback_action_with_kind(ctx, legal_actions, diagnostics.enabled)
+        evaluate_defense_fallback_action_with_kind(ctx, legal_actions, diagnostics.is_enabled())
     }
 }
 
@@ -890,7 +529,7 @@ fn agent_action_label(action: &LegalAction) -> String {
 ///
 /// `RUST_LOG=bot_core::agent_decision=debug` で有効化する。debug が無効な通常時は
 /// ログ用の文字列変換などを一切行わない。
-fn log_agent_decision(decision: &AgentDecision) {
+pub(crate) fn log_agent_decision(decision: &AgentDecision) {
     if !tracing::enabled!(target: AGENT_DECISION_LOG_TARGET, tracing::Level::DEBUG) {
         return;
     }
@@ -999,9 +638,10 @@ pub(crate) mod tests {
         damaten_baseline_context,
     };
     use crate::defense::{
-        HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank, WallRank,
-        honor_safety_rank, is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
-        select_defense_fallback_action, suited_safety_rank_for_all_reached,
+        DefenseDecisionDiagnostic, HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank,
+        SujiSafetyRank, WallRank, honor_safety_rank, is_genbutsu_for_all_reached,
+        opponent_honor_value_for_reached, select_defense_fallback_action,
+        suited_safety_rank_for_all_reached,
     };
     use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
     use crate::push_pull::{
@@ -1023,10 +663,10 @@ pub(crate) mod tests {
     };
     use crate::threat::diagnose_player_threats;
     use bot_logic::{
-        DiscardComparisonReason, DiscardEvaluation, DrawTransition, HistoryFuritenFacts,
-        PermanentFuriten, RiichiStatus, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-        WinMethod, calculate_shanten, chiitoitsu_shanten, compare_discard_evaluations,
-        kokushi_shanten, standard_shanten,
+        DiscardComparisonReason, DiscardEvaluation, DiscardFuritenDiagnostic, DrawTransition,
+        FixedMeldCount, HistoryFuritenFacts, PermanentFuriten, RiichiStatus,
+        TenpaiWaitAvailability, TileCounts, TileId, TileType, WinMethod, calculate_shanten,
+        chiitoitsu_shanten, compare_discard_evaluations, kokushi_shanten, standard_shanten,
     };
 
     pub(crate) fn tile(value: u8) -> TileId {
