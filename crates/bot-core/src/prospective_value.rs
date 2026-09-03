@@ -31,6 +31,16 @@
 //! ([`ProspectiveDrawVariantValue::selection_value`]) は評価器が返した値そのものを持つ。診断が
 //! 別の打点を求め直して production と食い違うことはない。
 //!
+//! # 評価対象の手牌状態
+//!
+//! [`ProductionProspectiveValuator`] は卓・局の事実 (ドラ表示牌・場風 / 自風・持ち点・既リーチ・
+//! 自分の河・履歴依存フリテン・見え牌・山残枚数) を `GameContext` から取り、手牌側の状態
+//! (副露・副露済み面子数・門前) だけを構築時に確定した evaluation hand state から取る。この分離
+//! により、仮想的な鳴きの後の手牌状態を synthetic な `GameContext` を作らずに評価できる。
+//!
+//! 副露の unknown (`GameContext::own_melds() == None`) は副露0件と別物で、完成手へは既存
+//! fallback と同じ空の副露を渡しつつ門前判定は unknown のままにする。
+//!
 //! # Reach / Damaten
 //!
 //! 将来テンパイでリーチするかどうかは、production のリーチ判断と同じ [`decide_reach_reason`] で
@@ -294,7 +304,11 @@ impl ProspectiveLookaheadDiagnostic {
 /// bot-logic の2手先評価へ渡され、2手目の打牌比較と現在打牌の集計の両方で同じ値が使われる。
 pub(crate) struct ProductionProspectiveValuator<'a> {
     context: &'a GameContext,
-    melds: &'a [Meld],
+    // 評価対象の副露。unknown (`None`) と副露0件 (`Some(&[])`) は別物なので潰さない。完成手・
+    // 門前判定・リーチ合法性はすべてこの1つを source of truth にし、`GameContext` から取り直さない。
+    melds: Option<&'a [Meld]>,
+    // 評価対象の副露済み面子数。`melds` と同じ evaluation hand state の一部で、2手先評価
+    // ([`crate::discard_selection::lookahead_inputs`]) へもここから渡す。
     fixed_meld_count: FixedMeldCount,
     // ダマ / リーチ両方の hypothetical baseline。枝ごとに組み立て直さない。
     damaten: WinningContext,
@@ -311,20 +325,46 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
+    /// 現在の `GameContext` の副露状態をそのまま評価対象にする入口。
     pub(crate) fn new(context: &'a GameContext) -> Self {
+        Self::new_with_hand_state(
+            context,
+            context.own_melds(),
+            evaluation_fixed_meld_count(context),
+        )
+    }
+
+    /// 評価対象の副露状態を明示する入口。
+    ///
+    /// 卓・局の事実 (ドラ表示牌・場風 / 自風・持ち点・既リーチ・自分の河・履歴依存フリテン・
+    /// 見え牌) は渡された `context` のままで、手牌側の状態だけを差し替える。仮想的な鳴きの後を
+    /// 評価するために synthetic な `GameContext` を組み立てない。
+    ///
+    /// `melds` の `None` は「自分の副露が分からない」で、副露0件 (`Some(&[])`) と区別する。
+    /// 完成手へは既存 fallback と同じ空の副露を渡し、門前判定は unknown のままにする。
+    pub(crate) fn new_with_hand_state(
+        context: &'a GameContext,
+        melds: Option<&'a [Meld]>,
+        fixed_meld_count: FixedMeldCount,
+    ) -> Self {
         Self {
             context,
-            melds: context.own_melds().unwrap_or_default(),
-            fixed_meld_count: evaluation_fixed_meld_count(context),
+            melds,
+            fixed_meld_count,
             damaten: damaten_baseline_context(context),
             reach: reach_baseline_context(context),
-            reach_legal: future_reach_legal(context),
+            reach_legal: future_reach_legal(context, melds.map(is_menzen)),
             own_reached: context.own_reached(),
             own_discards: OwnDiscards::from_optional_river(context.own_discards()),
             history_furiten: context
                 .history_furiten()
                 .after_discard(FUTURE_AFTER_OWN_DRAW),
         }
+    }
+
+    /// 評価対象の副露済み面子数。2手先評価へ渡す値もここから取り、評価器と食い違わせない。
+    pub(crate) fn fixed_meld_count(&self) -> FixedMeldCount {
+        self.fixed_meld_count
     }
 
     // 枝1つ分の評価材料。完成手と、既存フリテン基盤で求めた待ち・ロン可否を組にする。
@@ -339,7 +379,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
 
         let hands = tenpai_completed_hands(
             tenpai.concealed_tiles,
-            self.melds,
+            self.melds.unwrap_or_default(),
             tenpai.acceptance,
             availability.as_ref(),
             &visible,
@@ -493,12 +533,15 @@ impl ProspectiveFacts {
 /// 将来テンパイでリーチが合法か。
 ///
 /// 現在局面の `legal_actions` を未来へ流用せず、共有条件 ([`is_reach_legal`]) を将来テンパイの
-/// 材料で評価する。門前・既リーチ・持ち点は自分のツモと打牌では変わらないので現在の既知 fact を
+/// 材料で評価する。既リーチ・持ち点は自分のツモと打牌では変わらないので現在の既知 fact を
 /// そのまま使い、打牌後テンパイは枝の構成上必ず満たす。未来時点の山残枚数だけは確定できないので
 /// 現在の枚数で代用せず unknown として渡し、共有条件の unknown 規則へ委ねる。
-fn future_reach_legal(context: &GameContext) -> bool {
+///
+/// `menzen` は評価対象の副露状態から求めた値を渡す。`context` の副露から取り直さないので、
+/// 仮想的な鳴きを含む evaluation hand state ではその副露がそのままリーチ合法性へ効く。
+fn future_reach_legal(context: &GameContext, menzen: Option<bool>) -> bool {
     is_reach_legal(ReachLegalityFacts {
-        menzen: context.own_melds().map(is_menzen),
+        menzen,
         already_reached: context.own_reached(),
         score: context.own_score(),
         remaining_tiles: None,
@@ -763,8 +806,9 @@ mod tests {
 
     use bot_logic::{
         DrawTransition, EffectiveAcceptance, ForwardMetrics, MissingScoringFact,
-        NormalScoringError, RiichiStatus, WinMethod, evaluate_payment,
-        forward_metrics_from_lookahead,
+        NormalScoringError, RiichiStatus, WinMethod, calculate_acceptance_with_fixed_melds,
+        diagnose_lookahead, evaluate_discards_from_tiles_with_fixed_melds_and_context,
+        evaluate_payment, forward_metrics_from_lookahead,
     };
 
     use crate::action::LegalAction;
@@ -773,6 +817,7 @@ mod tests {
     use crate::discard_selection::{
         LookaheadDiagnosticScope, lookahead_inputs, select_discard_action_with_diagnostic,
     };
+    use crate::meld::MeldKind;
     use crate::tenpai_scoring::{TenpaiVariantUnknownReason, tsumo_scoring_inputs};
 
     struct TileIdSource {
@@ -2038,5 +2083,251 @@ mod tests {
                 .expected_self_tsumo_value
                 .is_some_and(|value| value > 0)
         }));
+    }
+
+    // 卓・局の事実だけを固定した base 局面。副露状態を評価器へ明示的に渡す test のために、
+    // context 側の副露は呼び出し側が指定する。
+    fn hand_state_context(
+        hand: Vec<TileId>,
+        dora_indicators: Vec<TileId>,
+        own_melds: Vec<Meld>,
+    ) -> GameContext {
+        let visible: Vec<TileId> = hand.iter().chain(dora_indicators.iter()).copied().collect();
+        GameContext::from_parts_with_melds(
+            None,
+            hand,
+            dora_indicators,
+            Some(tile("E")),
+            Some(tile("S")),
+            visible,
+            Some(0),
+            Some(3),
+            Default::default(),
+            [false; 4],
+            [own_melds, Vec::new(), Vec::new(), Vec::new()],
+        )
+        .with_table_state_facts(TableStateFacts {
+            scores: Some([25000; 4]),
+            ..TableStateFacts::default()
+        })
+        .with_history_furiten_facts(known_history_furiten())
+    }
+
+    // 白ポン1件。仮想的な鳴きの後の evaluation hand state として渡す。
+    fn haku_pon(source: &mut TileIdSource) -> Vec<Meld> {
+        let tiles = source.tiles(&["P", "P", "P"]);
+        let called = tiles[0];
+        vec![Meld::new(MeldKind::Pon, tiles, Some(called))]
+    }
+
+    fn fixed(count: u8) -> FixedMeldCount {
+        FixedMeldCount::new(count).expect("副露済み面子数として読める")
+    }
+
+    // 副露済み面子数が届いた枝だけがテンパイまで進むので、その枝数を数える。
+    fn tenpai_branch_count(lookahead: &LookaheadDiagnostic) -> usize {
+        lookahead
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.draws.iter())
+            .flat_map(|draw| draw.variants.iter())
+            .filter(|variant| {
+                variant
+                    .next_discard
+                    .as_ref()
+                    .is_some_and(|next| next.min_shanten_after_discard() == TENPAI_SHANTEN)
+            })
+            .count()
+    }
+
+    // 現在 context の副露状態を明示的に渡した場合と、context から取る既存入口の評価状態が
+    // 一致することの確認。unknown / 門前 / 副露済みのどれでも同じ hand state になる。
+    fn assert_matches_context_hand_state(context: &GameContext) {
+        let from_context = ProductionProspectiveValuator::new(context);
+        let explicit = ProductionProspectiveValuator::new_with_hand_state(
+            context,
+            context.own_melds(),
+            evaluation_fixed_meld_count(context),
+        );
+
+        assert_eq!(from_context.melds, explicit.melds);
+        assert_eq!(from_context.fixed_meld_count, explicit.fixed_meld_count);
+        assert_eq!(from_context.reach_legal, explicit.reach_legal);
+    }
+
+    #[test]
+    fn the_context_constructor_keeps_the_known_menzen_hand_state() {
+        // 副露0件と分かっている局面。
+        let mut source = TileIdSource::new();
+        let context = hand_state_context(
+            source.tiles(&["1m", "2m", "3m"]),
+            source.tiles(&["1p"]),
+            Vec::new(),
+        );
+        let valuator = ProductionProspectiveValuator::new(&context);
+
+        assert_eq!(valuator.melds, Some([].as_slice()));
+        assert_eq!(valuator.fixed_meld_count, FixedMeldCount::NONE);
+        assert!(valuator.reach_legal);
+        assert_matches_context_hand_state(&context);
+    }
+
+    #[test]
+    fn the_context_constructor_keeps_the_known_open_hand_state() {
+        // 副露済みと分かっている局面。門前でないのでリーチは合法にならない。
+        let mut source = TileIdSource::new();
+        let melds = haku_pon(&mut source);
+        let context = hand_state_context(
+            source.tiles(&["1m", "2m", "3m"]),
+            source.tiles(&["1p"]),
+            melds.clone(),
+        );
+        let valuator = ProductionProspectiveValuator::new(&context);
+
+        assert_eq!(valuator.melds, Some(melds.as_slice()));
+        assert_eq!(valuator.fixed_meld_count, fixed(1));
+        assert!(!valuator.reach_legal);
+        assert_matches_context_hand_state(&context);
+    }
+
+    #[test]
+    fn the_context_constructor_keeps_the_unknown_hand_state() {
+        // 自分の席を特定できず副露が unknown な局面。副露0件と確定したことにしない。
+        let mut source = TileIdSource::new();
+        let context = GameContext::from_parts_with_dora(
+            None,
+            source.tiles(&["1m", "2m", "3m"]),
+            source.tiles(&["1p"]),
+        );
+        let valuator = ProductionProspectiveValuator::new(&context);
+
+        assert_eq!(context.own_melds(), None);
+        assert_eq!(valuator.melds, None);
+        assert_eq!(valuator.melds.map(is_menzen), None);
+        assert_eq!(valuator.fixed_meld_count, FixedMeldCount::NONE);
+        assert_matches_context_hand_state(&context);
+    }
+
+    #[test]
+    fn an_explicit_open_hand_state_makes_the_future_reach_illegal() {
+        // base 局面自体は門前でリーチ条件を満たすが、評価対象の hand state が副露済みなら
+        // 将来リーチは合法にならない。
+        let mut source = TileIdSource::new();
+        let melds = haku_pon(&mut source);
+        let context = hand_state_context(
+            source.tiles(&["1m", "2m", "3m"]),
+            source.tiles(&["1p"]),
+            Vec::new(),
+        );
+
+        assert_eq!(context.own_melds(), Some([].as_slice()));
+        assert!(ProductionProspectiveValuator::new(&context).reach_legal);
+
+        let valuator =
+            ProductionProspectiveValuator::new_with_hand_state(&context, Some(&melds), fixed(1));
+
+        assert!(!valuator.reach_legal);
+        assert_eq!(valuator.fixed_meld_count, fixed(1));
+    }
+
+    #[test]
+    fn an_explicit_fixed_meld_count_reaches_the_lookahead() {
+        // 234m 567m 99p 3s 6s + 1p の11枚。白ポン1件と合わせた場合だけ1向聴で、打 1p の枝が
+        // テンパイまで進む。2手先評価の副露済み面子数を context から取り直していれば、同じ
+        // 手牌でも門前評価になってテンパイの枝が現れない。
+        let mut source = TileIdSource::new();
+        let melds = haku_pon(&mut source);
+        let tiles = source.tiles(&[
+            "2m", "3m", "4m", "5m", "6m", "7m", "9p", "9p", "3s", "6s", "1p",
+        ]);
+        let context = hand_state_context(tiles.clone(), source.tiles(&["1p"]), Vec::new());
+
+        let evaluations = evaluate_discards_from_tiles_with_fixed_melds_and_context(
+            &tiles,
+            fixed(1),
+            context.dora_indicators(),
+            context.round_wind(),
+            context.seat_wind(),
+        );
+
+        let open =
+            ProductionProspectiveValuator::new_with_hand_state(&context, Some(&melds), fixed(1));
+        let menzen = ProductionProspectiveValuator::new(&context);
+        assert_eq!(menzen.fixed_meld_count, FixedMeldCount::NONE);
+
+        let with_melds = diagnose_lookahead(
+            &lookahead_inputs(&context, &tiles, &open, LookaheadDiagnosticScope::None),
+            &evaluations,
+        );
+        let without_melds = diagnose_lookahead(
+            &lookahead_inputs(&context, &tiles, &menzen, LookaheadDiagnosticScope::None),
+            &evaluations,
+        );
+
+        assert!(tenpai_branch_count(&with_melds) > 0);
+        assert_eq!(tenpai_branch_count(&without_melds), 0);
+    }
+
+    #[test]
+    fn an_explicit_meld_reaches_the_completed_hands() {
+        // 234m 567m 99p 7s 8s の10枚。白ポン1件と合わせて 6s / 9s 待ちのテンパイになり、
+        // 完成手の役は副露した白だけになる。
+        let mut source = TileIdSource::new();
+        let melds = haku_pon(&mut source);
+        let concealed = source.tiles(&["2m", "3m", "4m", "5m", "6m", "7m", "9p", "9p", "7s", "8s"]);
+        let context = hand_state_context(concealed.clone(), source.tiles(&["1p"]), Vec::new());
+
+        let counts = TileCounts::from_tiles(concealed.iter().copied());
+        let acceptance = calculate_acceptance_with_fixed_melds(&counts, fixed(1));
+        let tenpai = ProspectiveTenpai {
+            concealed_tiles: &concealed,
+            acceptance: &acceptance,
+            discarded_tiles: &[],
+        };
+
+        let damaten_totals = |valuator: &ProductionProspectiveValuator<'_>| {
+            let facts = valuator.tenpai_facts(&tenpai)?;
+            let profile = evaluate_tenpai_hand_value(
+                &facts.hands,
+                damaten_baseline_context(&context),
+                context.dora_indicators(),
+                None,
+            );
+            Some(
+                profile
+                    .waits()
+                    .iter()
+                    .flat_map(|wait| wait.winning_tiles().iter())
+                    .map(|variant| {
+                        (
+                            variant.winning_tile().to_mjai_string(),
+                            variant.remaining(),
+                            variant_total(variant),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        // 役牌 白 の1翻30符。副露が完成手へ届いていなければこの打点にならない。
+        let open =
+            ProductionProspectiveValuator::new_with_hand_state(&context, Some(&melds), fixed(1));
+        assert_eq!(
+            damaten_totals(&open),
+            Some(vec![
+                ("6s".to_string(), 4, Some(1000)),
+                ("9s".to_string(), 4, Some(1000)),
+            ])
+        );
+
+        // base context の副露状態 (門前) を使うと、白の面子が無い完成手になって打点が確定しない。
+        let menzen = ProductionProspectiveValuator::new(&context);
+        assert_eq!(
+            damaten_totals(&menzen),
+            Some(vec![
+                ("6s".to_string(), 4, None),
+                ("9s".to_string(), 4, None)
+            ])
+        );
     }
 }

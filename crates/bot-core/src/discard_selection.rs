@@ -762,6 +762,9 @@ fn selection_forward_metrics(
 // self-tsumo continuation の材料 (ツモ評価器と残り自摸機会) も同じ入口で渡す。残り自摸機会は
 // 山の残枚数という exact fact からしか作らず、取得できない局面では渡さない。その場合 bot-logic
 // 側で新しい軸を持たず、既存の比較へそのまま落ちる。
+//
+// 副露済み面子数は context から取り直さず、同時に渡す評価器が持つ evaluation hand state の値を
+// 使う。仮想的な鳴きの後を評価する場合でも、2手先評価と将来打点評価が別の副露数で動かない。
 pub(crate) fn lookahead_inputs<'a>(
     context: &'a GameContext,
     tiles: &'a [TileId],
@@ -770,7 +773,7 @@ pub(crate) fn lookahead_inputs<'a>(
 ) -> LookaheadInputs<'a> {
     let inputs = LookaheadInputs::new(
         tiles,
-        evaluation_fixed_meld_count(context),
+        valuator.fixed_meld_count(),
         context.dora_indicators(),
         context.round_wind(),
         context.seat_wind(),
