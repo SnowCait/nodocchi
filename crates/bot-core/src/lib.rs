@@ -7,6 +7,7 @@ pub mod context;
 pub mod damaten_value;
 pub mod defense;
 pub mod discard_selection;
+mod fold_defense;
 pub mod kuikae;
 pub mod meld;
 pub mod offense_value;
