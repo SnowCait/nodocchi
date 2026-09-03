@@ -68,7 +68,6 @@ use bot_logic::{
 };
 
 use crate::action::LegalAction;
-use crate::agents::{ReachDecisionDiagnostic, ReachDecisionReason};
 use crate::context::GameContext;
 use crate::damaten_value::{
     DamatenValueDiagnostic, DamatenValueVerdict, damaten_value_from_hands,
@@ -77,6 +76,8 @@ use crate::damaten_value::{
 use crate::discard_selection::{DiscardActionSelection, selected_discard_tenpai_wait_availability};
 use crate::offense_value::{ReachRonBaselineDiagnostic, reach_ron_baseline_from_hands};
 use crate::open_hand_threat::OpenHandThreatAssessment;
+use crate::reach_decision::ReachDecisionDiagnostic;
+use crate::reach_policy::ReachDecisionReason;
 use crate::ron_opportunity::{
     RonOpportunityDiagnostic, RonOpportunityInputs, diagnose_ron_opportunity,
 };

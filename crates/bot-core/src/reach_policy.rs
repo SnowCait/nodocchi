@@ -102,8 +102,8 @@ pub const REACH_MIN_REMAINING: u8 = 3;
 /// リーチを採用した / しなかった理由。
 ///
 /// `Eligible*` 以外はすべて「今回はリーチしない」理由であり、最初に落ちた条件を1つだけ表す。
-/// 判定順は [`ReachDecisionDiagnostic`](crate::agents::ReachDecisionDiagnostic) のフィールドが
-/// 埋まる順と一致する。
+/// 判定順は [`ReachDecisionDiagnostic`](crate::reach_decision::ReachDecisionDiagnostic) の
+/// フィールドが埋まる順と一致する。
 ///
 /// ダマ打点による判断 ([`DamatenValueVerdict`]) を適用した経路と、ダマ打点を使わない既存判断の
 /// 経路は別の理由として区別する。既存判断へ落ちるのはフリテン・ロン可否 unknown・ダマ打点を
