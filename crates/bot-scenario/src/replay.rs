@@ -35,25 +35,39 @@ pub fn load_captured_scenario(
     request_id: Option<u64>,
 ) -> Result<CapturedScenario, ScenarioError> {
     let text = read_capture_file(path)?;
-
-    captured_scenario(
-        path,
-        select_record(path, parse_records(path, &text)?, request_id)?,
-    )
+    captured_scenario_from_text(path, &text, request_id)
 }
 
 pub fn load_captured_scenarios(path: &str) -> Result<Vec<CapturedScenario>, ScenarioError> {
     let text = read_capture_file(path)?;
-    let records = parse_records(path, &text)?;
+    captured_scenarios_from_text(path, &text)
+}
+
+fn captured_scenario_from_text(
+    source: &str,
+    text: &str,
+    request_id: Option<u64>,
+) -> Result<CapturedScenario, ScenarioError> {
+    captured_scenario(
+        source,
+        select_record(source, parse_records(source, text)?, request_id)?,
+    )
+}
+
+fn captured_scenarios_from_text(
+    source: &str,
+    text: &str,
+) -> Result<Vec<CapturedScenario>, ScenarioError> {
+    let records = parse_records(source, text)?;
     if records.is_empty() {
         return Err(ScenarioError::EmptyCapture {
-            path: path.to_string(),
+            path: source.to_string(),
         });
     }
 
     records
         .into_iter()
-        .map(|record| captured_scenario(path, record))
+        .map(|record| captured_scenario(source, record))
         .collect()
 }
 
@@ -154,6 +168,7 @@ mod tests {
         CaptureRecordError, MjaiPossibleAction, ObservationPayload, build_response_for_request,
         checked_legal_action_to_mjai_action, possible_actions_to_legal_actions,
     };
+    use tempfile::TempDir;
 
     const CAPTURED_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
 
@@ -212,23 +227,21 @@ mod tests {
         )
     }
 
-    fn write_capture(name: &str, lines: &[String]) -> String {
-        let path = std::env::temp_dir().join(format!(
-            "bot-scenario-replay-{name}-{}.jsonl",
-            std::process::id()
-        ));
+    const CAPTURE_SOURCE: &str = "fixture.jsonl";
+
+    fn replay_capture(
+        lines: &[String],
+        request_id: Option<u64>,
+    ) -> Result<CapturedScenario, ScenarioError> {
         let mut text = lines.join("\n");
         text.push('\n');
-        std::fs::write(&path, text).unwrap();
-        path.to_str().unwrap().to_string()
+        captured_scenario_from_text(CAPTURE_SOURCE, &text, request_id)
     }
 
     #[test]
     fn replays_the_only_captured_request() {
         let observation = observation_base64();
-        let path = write_capture("single", &[request_action_line(410, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(410, &observation)], None).unwrap();
 
         assert_eq!(captured.request_id, 410);
         assert_eq!(captured.possible_action_count, CAPTURED_DAHAI.len());
@@ -237,9 +250,7 @@ mod tests {
     #[test]
     fn replay_context_matches_the_client_observation_decoding() {
         let observation = observation_base64();
-        let path = write_capture("context", &[request_action_line(411, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(411, &observation)], None).unwrap();
 
         let decoded = ObservationPayload::new(observation).decode_4p().unwrap();
         assert_eq!(
@@ -265,9 +276,7 @@ mod tests {
             2,
             3,
         );
-        let path = write_capture("table-state", &[request_action_line(413, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(413, &observation)], None).unwrap();
 
         let decoded = ObservationPayload::new(observation).decode_4p().unwrap();
         let context = &captured.scenario.context;
@@ -294,12 +303,7 @@ mod tests {
             2,
             3,
         );
-        let path = write_capture(
-            "table-state-format",
-            &[request_action_line(414, &observation)],
-        );
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(414, &observation)], None).unwrap();
 
         let diagnostic =
             ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
@@ -319,9 +323,7 @@ mod tests {
     #[test]
     fn replay_legal_actions_match_the_client_conversion() {
         let observation = observation_base64();
-        let path = write_capture("legal-actions", &[request_action_line(412, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(412, &observation)], None).unwrap();
 
         let possible_actions: Vec<MjaiPossibleAction> =
             serde_json::from_str(&format!("[{}]", possible_actions_json()))
@@ -369,9 +371,7 @@ mod tests {
         let line = server_line(&format!(
             r#"{{"type":"request_action","request_id":430,"possible_actions":[{possible_actions}],"observation":"{observation}"}}"#
         ));
-        let path = write_capture("no-reach", &[line]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[line], None).unwrap();
 
         assert_eq!(
             captured.scenario.legal_actions.len(),
@@ -424,9 +424,7 @@ mod tests {
     #[test]
     fn replay_diagnostic_matches_a_direct_diagnose_on_the_same_context() {
         let observation = observation_base64();
-        let path = write_capture("diagnose", &[request_action_line(413, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(413, &observation)], None).unwrap();
 
         let direct = direct_scenario(&observation);
         let replayed =
@@ -451,13 +449,28 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_missing_capture_file() {
+        let directory = TempDir::new().unwrap();
+        let path = directory
+            .path()
+            .join("missing.jsonl")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let error = load_captured_scenario(&path, None).unwrap_err();
+
+        assert!(
+            matches!(&error, ScenarioError::ReadFile { path: source, .. } if *source == path),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn selects_a_record_of_a_capture_session_written_by_the_client() {
         let observation = observation_base64();
-        let path = std::env::temp_dir().join(format!(
-            "bot-scenario-replay-session-{}.jsonl",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("capture.jsonl");
 
         let (mut capture, guard) = capture::init(Some(&path)).unwrap().unwrap();
         for request_id in [431, 432, 433] {
@@ -469,7 +482,6 @@ mod tests {
         let path = path.to_str().unwrap().to_string();
         let captured = load_captured_scenario(&path, Some(432)).unwrap();
         let error = load_captured_scenario(&path, None).unwrap_err();
-        let _ = std::fs::remove_file(&path);
 
         assert_eq!(captured.request_id, 432);
         assert_eq!(captured.possible_action_count, CAPTURED_DAHAI.len());
@@ -479,9 +491,7 @@ mod tests {
     #[test]
     fn replayed_selection_matches_the_client_response_for_the_same_request() {
         let observation = observation_base64();
-        let path = write_capture("client-response", &[request_action_line(421, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(421, &observation)], None).unwrap();
 
         let possible_actions: Vec<MjaiPossibleAction> =
             serde_json::from_str(&format!("[{}]", possible_actions_json()))
@@ -512,9 +522,7 @@ mod tests {
     #[test]
     fn replay_keeps_open_melds_of_a_non_reaching_opponent() {
         let observation = observation_base64_with_opponent_pon();
-        let path = write_capture("open-melds", &[request_action_line(414, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(414, &observation)], None).unwrap();
 
         let context = &captured.scenario.context;
         let diagnostic = ShantenAgent::diagnose(context, &captured.scenario.legal_actions);
@@ -542,33 +550,29 @@ mod tests {
     #[test]
     fn selects_a_record_by_request_id() {
         let observation = observation_base64();
-        let path = write_capture(
-            "select",
-            &[
-                request_action_line(415, &observation),
-                request_action_line(416, &observation),
-                request_action_line(417, &observation),
-            ],
-        );
+        let lines = [
+            request_action_line(415, &observation),
+            request_action_line(416, &observation),
+            request_action_line(417, &observation),
+        ];
 
-        let captured = load_captured_scenario(&path, Some(416)).unwrap();
+        let captured = replay_capture(&lines, Some(416)).unwrap();
         assert_eq!(captured.request_id, 416);
 
-        let error = load_captured_scenario(&path, Some(999)).unwrap_err();
+        let error = replay_capture(&lines, Some(999)).unwrap_err();
         assert_eq!(
             error,
             ScenarioError::CapturedRequestNotFound {
-                path: path.clone(),
+                path: CAPTURE_SOURCE.to_string(),
                 request_id: 999,
             }
         );
 
-        let error = load_captured_scenario(&path, None).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+        let error = replay_capture(&lines, None).unwrap_err();
         assert_eq!(
             error,
             ScenarioError::AmbiguousCapture {
-                path: path.clone(),
+                path: CAPTURE_SOURCE.to_string(),
                 count: 3,
             }
         );
@@ -576,10 +580,13 @@ mod tests {
 
     #[test]
     fn reports_an_empty_capture_file() {
-        let path = write_capture("empty", &[]);
-        let error = load_captured_scenario(&path, None).unwrap_err();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(error, ScenarioError::EmptyCapture { path });
+        let error = replay_capture(&[], None).unwrap_err();
+        assert_eq!(
+            error,
+            ScenarioError::EmptyCapture {
+                path: CAPTURE_SOURCE.to_string(),
+            }
+        );
     }
 
     // 正常な session capture は request_action の前後に server event と client action を大量に
@@ -587,29 +594,25 @@ mod tests {
     #[test]
     fn skips_the_server_and_client_records_around_a_request_action() {
         let observation = observation_base64();
-        let path = write_capture(
-            "session",
-            &[
-                server_line(r#"{"type":"start_game","id":0}"#),
-                server_line(r#"{"type":"start_kyoku","kyoku":1,"oya":0}"#),
-                server_line(r#"{"type":"tsumo","actor":0,"pai":"5s"}"#),
-                request_action_line(418, &observation),
-                client_line(r#"{"type":"dahai","actor":0,"pai":"1m","request_id":418}"#),
-                server_line(r#"{"type":"action_ack","request_id":418,"status":"accepted"}"#),
-                server_line(r#"{"type":"dahai","actor":0,"pai":"1m","tsumogiri":false}"#),
-                server_line(r#"{"type":"reach","actor":1}"#),
-                server_line(r#"{"type":"hora","actor":1,"target":0,"pai":"1m"}"#),
-                server_line(r#"{"type":"end_kyoku"}"#),
-                server_line(r#"{"type":"end_game","scores":[25000,25000,25000,25000]}"#),
-            ],
-        );
+        let lines = [
+            server_line(r#"{"type":"start_game","id":0}"#),
+            server_line(r#"{"type":"start_kyoku","kyoku":1,"oya":0}"#),
+            server_line(r#"{"type":"tsumo","actor":0,"pai":"5s"}"#),
+            request_action_line(418, &observation),
+            client_line(r#"{"type":"dahai","actor":0,"pai":"1m","request_id":418}"#),
+            server_line(r#"{"type":"action_ack","request_id":418,"status":"accepted"}"#),
+            server_line(r#"{"type":"dahai","actor":0,"pai":"1m","tsumogiri":false}"#),
+            server_line(r#"{"type":"reach","actor":1}"#),
+            server_line(r#"{"type":"hora","actor":1,"target":0,"pai":"1m"}"#),
+            server_line(r#"{"type":"end_kyoku"}"#),
+            server_line(r#"{"type":"end_game","scores":[25000,25000,25000,25000]}"#),
+        ];
 
-        let captured = load_captured_scenario(&path, None).unwrap();
+        let captured = replay_capture(&lines, None).unwrap();
         assert_eq!(captured.request_id, 418);
         assert_eq!(captured.possible_action_count, CAPTURED_DAHAI.len());
 
-        let by_request_id = load_captured_scenario(&path, Some(418)).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let by_request_id = replay_capture(&lines, Some(418)).unwrap();
         assert_eq!(by_request_id, captured);
     }
 
@@ -618,18 +621,16 @@ mod tests {
     #[test]
     fn does_not_count_client_actions_and_acks_as_requests() {
         let observation = observation_base64();
-        let path = write_capture(
-            "same-request-id",
+        let captured = replay_capture(
             &[
                 request_action_line(419, &observation),
                 client_line(&request_action_event(419, &observation)),
                 client_line(r#"{"type":"reach","actor":0,"request_id":419}"#),
                 server_line(r#"{"type":"action_ack","request_id":419,"status":"accepted"}"#),
             ],
-        );
-
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+            None,
+        )
+        .unwrap();
 
         assert_eq!(captured.request_id, 419);
     }
@@ -637,15 +638,14 @@ mod tests {
     #[test]
     fn reports_a_malformed_capture_envelope() {
         let observation = observation_base64();
-        let path = write_capture(
-            "malformed-envelope",
+        let error = replay_capture(
             &[
                 request_action_line(420, &observation),
                 r#"{"version":1,"event":{"type":"reach","actor":1}}"#.to_string(),
             ],
-        );
-        let error = load_captured_scenario(&path, Some(420)).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+            Some(420),
+        )
+        .unwrap_err();
 
         assert!(
             matches!(
@@ -659,9 +659,7 @@ mod tests {
             "{error:?}"
         );
 
-        let path = write_capture("broken-json", &["{".to_string()]);
-        let error = load_captured_scenario(&path, None).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+        let error = replay_capture(&["{".to_string()], None).unwrap_err();
         assert!(
             matches!(
                 &error,
@@ -680,9 +678,7 @@ mod tests {
     #[test]
     fn does_not_read_the_old_raw_request_action_schema() {
         let observation = observation_base64();
-        let path = write_capture("old-schema", &[request_action_event(421, &observation)]);
-        let error = load_captured_scenario(&path, None).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+        let error = replay_capture(&[request_action_event(421, &observation)], None).unwrap_err();
 
         assert!(
             matches!(
@@ -699,12 +695,7 @@ mod tests {
 
     #[test]
     fn reports_an_undecodable_observation() {
-        let path = write_capture(
-            "broken-observation",
-            &[request_action_line(419, "not-base64!!")],
-        );
-        let error = load_captured_scenario(&path, None).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+        let error = replay_capture(&[request_action_line(419, "not-base64!!")], None).unwrap_err();
 
         assert!(
             matches!(&error, ScenarioError::CaptureObservation { request_id, .. } if *request_id == 419),
@@ -715,13 +706,14 @@ mod tests {
     #[test]
     fn header_shows_the_capture_source() {
         let observation = observation_base64();
-        let path = write_capture("header", &[request_action_line(420, &observation)]);
-        let captured = load_captured_scenario(&path, None).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let captured = replay_capture(&[request_action_line(420, &observation)], None).unwrap();
 
         let header = captured.header();
         assert!(header.starts_with("RiichiLab capture\n"), "{header}");
-        assert!(header.contains(&format!("  file: {path}")), "{header}");
+        assert!(
+            header.contains(&format!("  file: {CAPTURE_SOURCE}")),
+            "{header}"
+        );
         assert!(header.contains("  request_id: 420"), "{header}");
         assert!(header.contains("  actor: None"), "{header}");
         assert!(header.contains("  possible actions: 12"), "{header}");
