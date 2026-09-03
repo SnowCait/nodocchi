@@ -311,10 +311,36 @@ fn tsumo_named_yakuman(
         return NamedYakumanTsumo::NotEstablished;
     }
 
-    tenpai_completed_hands_after_discard(ctx, evaluation, tenpai_wait)
-        .map_or(NamedYakumanTsumo::NotEstablished, |hands| {
-            tenpai_tsumo_named_yakuman(ctx, &hands, TenpaiOffenseMode::Damaten)
-        })
+    tsumo_named_yakuman_from_hands(
+        ctx,
+        tenpai_wait,
+        tenpai_completed_hands_after_discard(ctx, evaluation, tenpai_wait).as_ref(),
+    )
+}
+
+/// 組み立て済みの完成手から、打牌後テンパイのツモ和了が named 役満と確定するかを求める。
+///
+/// 対象局面の判定も役満判定も上と同じ既存 rule / 既存 scoring そのもので、違いは完成手を
+/// 呼び出し側から受け取ることだけ。完成手を組み立てられなかった場合と評価対象外の局面は
+/// [`NamedYakumanTsumo::NotEstablished`]。
+///
+/// 現在聴牌候補の比較のように、同じ候補の待ちと完成手を既に組み立てている経路が、それらを
+/// 二重に構築せず同じ categorical rule を共有するための入口。
+pub(crate) fn tsumo_named_yakuman_from_hands(
+    ctx: &GameContext,
+    tenpai_wait: &TenpaiWaitAvailability,
+    hands: Option<&TenpaiCompletedHands>,
+) -> NamedYakumanTsumo {
+    if !evaluates_named_yakuman_damaten(
+        tenpai_wait.permanent_furiten(),
+        tenpai_wait.tsumo_remaining,
+    ) {
+        return NamedYakumanTsumo::NotEstablished;
+    }
+
+    hands.map_or(NamedYakumanTsumo::NotEstablished, |hands| {
+        tenpai_tsumo_named_yakuman(ctx, hands, TenpaiOffenseMode::Damaten)
+    })
 }
 
 // base policy がリーチを選んだ聴牌の timing 判断。

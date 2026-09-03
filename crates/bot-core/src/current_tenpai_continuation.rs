@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! current-tenpai cohort = AllPermanentFuriten
-//! + candidate の既存 base offense mode = Reach
+//! + candidate の既存 base Reach / Damaten policy がリーチを選ぶ
 //!   → reach now / defer → forced Reach
 //! ```
 //!
@@ -27,9 +27,10 @@
 //! self-tsumo だけで比べると `No` 側のロンを 0 として扱うことになるため、ロン確率を持たない
 //! この層では比較しない。
 //!
-//! base offense mode が Damaten の候補 (`HighValueDamaten` / `NamedYakumanDamaten` など既存
-//! policy がダマを選んだ候補) も対象にしない。この診断が比べるのは「base policy が選んだ
-//! リーチを今宣言するか1巡 defer するか」であって、リーチとダマの選択そのものではない。
+//! base policy がダマを選んだ候補 (`HighValueDamaten` / `NamedYakumanDamaten`) も対象にしない。
+//! この診断が比べるのは「base policy が選んだリーチを今宣言するか1巡 defer するか」であって、
+//! リーチとダマの選択そのものではない。判定は打牌選択と同じく、offense mode だけでなくその
+//! 前段の categorical rule も含めた実際のリーチ判断の結論を受け取る。
 //!
 //! # 観測値であること
 //!
@@ -48,7 +49,6 @@ use bot_logic::{
     classify_current_tenpai_furiten_cohort,
 };
 
-use crate::offense_value::TenpaiOffenseMode;
 use crate::reach_policy::{ReachTimingDiagnostic, decide_permanent_furiten_reach_timing};
 use crate::tenpai_continuation::{TenpaiContinuationDiagnostic, TenpaiSelfTsumoComparison};
 
@@ -105,28 +105,29 @@ impl CurrentTenpaiContinuationCandidate {
 
 /// 継続 timing を観測するための材料。
 ///
-/// `evaluations` / `metrics` / `offense_modes` は打牌選択が既に構築・使用した値そのもので、
+/// `evaluations` / `metrics` / `base_reach` は打牌選択が既に構築・使用した値そのもので、
 /// 同じ候補集合から作った同じ順序のものを渡す。
 pub(crate) struct CurrentTenpaiContinuationInputs<'a> {
     pub evaluations: &'a [DiscardEvaluation],
     /// 打牌選択が cohort 単位の軸解決へ渡すものと同じ現在聴牌 metric。
     pub metrics: &'a [CurrentTenpaiMetrics],
-    /// 候補ごとの既存 base offense mode。現在聴牌の評価対象外は `None`。
-    pub offense_modes: &'a [Option<TenpaiOffenseMode>],
+    /// 候補ごとの「実際の base Reach / Damaten policy がリーチを選ぶか」。
+    ///
+    /// 打牌選択が既存 rule で確定した値そのもので、現在聴牌の評価対象外は `false`。
+    pub base_reach: &'a [bool],
     /// 同じ全候補について既に構築済みの2手先継続診断。この診断の `self_tsumo` を再利用する。
     pub tenpai_continuation: &'a TenpaiContinuationDiagnostic,
 }
 
 /// 対象候補について `reach now` と `defer → forced Reach` を観測する。
 ///
-/// 対象は AllPermanentFuriten cohort かつ base offense mode が
-/// [`TenpaiOffenseMode::Reach`] の現在聴牌候補だけ。それ以外の候補では継続比較そのものを
-/// 構築しない。
+/// 対象は AllPermanentFuriten cohort かつ base policy がリーチを選んだ現在聴牌候補だけ。
+/// それ以外の候補では継続比較そのものを構築しない。
 pub(crate) fn diagnose_current_tenpai_continuation(
     inputs: &CurrentTenpaiContinuationInputs,
 ) -> CurrentTenpaiContinuationDiagnostic {
     CurrentTenpaiContinuationDiagnostic {
-        candidates: continuation_targets(inputs.evaluations, inputs.metrics, inputs.offense_modes)
+        candidates: continuation_targets(inputs.evaluations, inputs.metrics, inputs.base_reach)
             .filter_map(|index| {
                 let evaluation = &inputs.evaluations[index];
                 let self_tsumo = inputs
@@ -149,18 +150,18 @@ pub(crate) fn diagnose_current_tenpai_continuation(
 // 継続比較を構築する候補の index。
 //
 // cohort の分類は打牌選択と同じ pure classification をそのまま使い、候補の組ごとに判定を
-// 変えない。base offense mode も既存 policy が決めた値そのもので、ここでリーチ・ダマを
-// 決め直さない。
+// 変えない。base policy がリーチを選んだかも既存 rule が決めた値そのもので、ここでリーチ・
+// ダマを決め直さない。
 fn continuation_targets<'a>(
     evaluations: &'a [DiscardEvaluation],
     metrics: &'a [CurrentTenpaiMetrics],
-    offense_modes: &'a [Option<TenpaiOffenseMode>],
+    base_reach: &'a [bool],
 ) -> impl Iterator<Item = usize> + 'a {
     (0..evaluations.len()).filter(move |&index| {
         evaluations[index].min_shanten_after_discard() == TENPAI_SHANTEN
             && classify_current_tenpai_furiten_cohort(evaluations, metrics, index)
                 == CurrentTenpaiFuritenCohort::AllPermanentFuriten
-            && offense_modes.get(index).copied().flatten() == Some(TenpaiOffenseMode::Reach)
+            && base_reach.get(index).copied().unwrap_or(false)
     })
 }
 

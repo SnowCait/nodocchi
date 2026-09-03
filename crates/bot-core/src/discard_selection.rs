@@ -13,8 +13,10 @@ use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
     evaluate_prospective_lookahead_value,
 };
+use crate::reach_decision::tsumo_named_yakuman_from_hands;
 use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_reach_timing,
+    selects_named_yakuman_damaten,
 };
 use crate::tenpai_continuation::{
     TenpaiContinuationDiagnostic, TenpaiContinuationInputs, TenpaiSelfTsumoComparison,
@@ -172,6 +174,13 @@ struct CurrentTenpaiCandidateEvaluation {
     ///
     /// 対象外の cohort・対象外の候補では継続評価そのものを走らせないので `None`。
     continuation_timing: Option<ReachTimingDiagnostic>,
+    /// 実際の base Reach / Damaten policy がこの候補でリーチを選ぶか。
+    ///
+    /// offense mode ([`decide_reach_reason`](crate::reach_policy::decide_reach_reason)) だけで
+    /// なく、その前段の categorical rule
+    /// ([`selects_named_yakuman_damaten`](crate::reach_policy::selects_named_yakuman_damaten))
+    /// も含めた、リーチ判断と同じ結論。現在聴牌の評価対象外は `false`。
+    base_selects_reach: bool,
 }
 
 type CurrentTenpaiCandidateEvaluations = Vec<CurrentTenpaiCandidateEvaluation>;
@@ -306,7 +315,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         diagnose_current_tenpai_continuation(&CurrentTenpaiContinuationInputs {
             evaluations: &legal.evaluations,
             metrics: &current_tenpai_metrics(&current_tenpai),
-            offense_modes: &current_tenpai_offense_modes(&current_tenpai),
+            base_reach: &current_tenpai_base_reach(&current_tenpai),
             tenpai_continuation,
         })
     });
@@ -507,12 +516,29 @@ fn base_current_tenpai_candidate_evaluations(
                         ),
                     ))
                 });
+            // 実際の base policy がリーチを選ぶかは、offense mode の前段にある categorical rule
+            // も通した結論。組み立て済みの待ちと完成手をそのまま渡し、この判定のために待ちも
+            // 完成手も Tsumo scoring も作り直さない。役満判定は既存 scoring の結論そのもので、
+            // リーチ判断が使う rule ([`tsumo_named_yakuman_from_hands`]) を共有する。
+            let base_selects_reach = offense
+                .as_ref()
+                .is_some_and(|offense| offense.offense.mode == TenpaiOffenseMode::Reach)
+                && !wait.as_ref().is_some_and(|wait| {
+                    selects_named_yakuman_damaten(
+                        wait.permanent_furiten(),
+                        wait.tsumo_remaining,
+                        tsumo_named_yakuman_from_hands(context, wait, hands.as_ref())
+                            .is_established(),
+                    )
+                });
+
             CurrentTenpaiCandidateEvaluation {
                 wait,
                 offense,
                 expected_self_tsumo_value: self_tsumo.map(|(value, _)| value),
                 self_tsumo_hit_probability: self_tsumo.map(|(_, probability)| probability),
                 continuation_timing: None,
+                base_selects_reach,
             }
         })
         .collect()
@@ -572,10 +598,7 @@ fn attach_current_tenpai_continuation(
     }
 
     let metrics = current_tenpai_metrics(candidates);
-    let base_reach: Vec<bool> = current_tenpai_offense_modes(candidates)
-        .into_iter()
-        .map(|mode| mode == Some(TenpaiOffenseMode::Reach))
-        .collect();
+    let base_reach = current_tenpai_base_reach(candidates);
     for (index, target) in current_tenpai_continuation_targets(evaluations, &metrics, &base_reach)
         .into_iter()
         .enumerate()
@@ -600,13 +623,13 @@ fn attach_current_tenpai_continuation(
     }
 }
 
-// 候補ごとの既存 base offense mode。現在聴牌の評価対象外は `None`。
-fn current_tenpai_offense_modes(
-    evaluations: &[CurrentTenpaiCandidateEvaluation],
-) -> Vec<Option<TenpaiOffenseMode>> {
+// 候補ごとの「実際の base Reach / Damaten policy がリーチを選ぶか」。
+//
+// 判定そのものは候補評価が既存 rule で確定済みの値で、ここでリーチ・ダマを決め直さない。
+fn current_tenpai_base_reach(evaluations: &[CurrentTenpaiCandidateEvaluation]) -> Vec<bool> {
     evaluations
         .iter()
-        .map(|evaluation| evaluation.offense.as_ref().map(|value| value.offense.mode))
+        .map(|evaluation| evaluation.base_selects_reach)
         .collect()
 }
 
@@ -1213,7 +1236,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::context::TableStateFacts;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
-    use crate::reach_policy::ReachTimingDecision;
+    use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
         HistoryFuritenFacts, PermanentFuriten, TileId,
@@ -1636,6 +1659,144 @@ pub(crate) mod tests {
             loser.comparison_reason,
             bot_logic::DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue
         );
+    }
+
+    // 111m 222m 333m 99p 4s 5s5s。打 4s は 9p / 5s シャンポンの四暗刻で、打 5s は 3s6s 待ちの
+    // 通常形。河の 9p / 3s でどちらも恒常フリテンになり、cohort は AllPermanentFuriten。
+    fn named_yakuman_cohort_context() -> (GameContext, Vec<LegalAction>) {
+        let hand: Vec<TileId> = [0u8, 1, 2, 4, 5, 6, 8, 9, 10, 68, 69, 84, 89, 90]
+            .iter()
+            .map(|&value| tile(value))
+            .collect();
+        let river: Vec<TileId> = [70u8, 80].iter().map(|&value| tile(value)).collect();
+        let visible: Vec<TileId> = hand.iter().chain(river.iter()).copied().collect();
+        let actions: Vec<LegalAction> = hand
+            .iter()
+            .copied()
+            .map(|tile| LegalAction::Dahai { tile })
+            .chain([LegalAction::Reach])
+            .collect();
+        let context = GameContext::from_parts_with_table_state(
+            None,
+            hand,
+            vec![],
+            TileType::from_mjai_type_str("E").ok(),
+            TileType::from_mjai_type_str("N").ok(),
+            visible,
+            Some(0),
+            Some(1),
+            [river, vec![], vec![], vec![]],
+            [false; 4],
+        )
+        .with_table_state_facts(TableStateFacts {
+            remaining_tiles: Some(70),
+            scores: Some([25_000; 4]),
+            ..Default::default()
+        })
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+
+        (context, actions)
+    }
+
+    #[test]
+    fn a_named_yakuman_damaten_candidate_disables_the_continuation_axis_for_the_cohort() {
+        // 恒常フリテンの named 役満候補は offense mode ではリーチだが、実際の base policy は
+        // categorical rule でダマを選ぶ。リーチとダマが混ざる cohort なので、cohort 全体で
+        // 継続軸を使わず既存の self-tsumo 軸へ落とす。
+        let (context, actions) = named_yakuman_cohort_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let current = current_tenpai_candidate_evaluations(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &actions,
+        );
+        let candidate = |discard: &str| {
+            let index = legal
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard.to_mjai_string() == discard)
+                .expect("candidate exists");
+            &current[index]
+        };
+        let targets: Vec<_> = legal
+            .evaluations
+            .iter()
+            .zip(&current)
+            .filter(|(evaluation, _)| evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|(_, value)| {
+            value
+                .wait
+                .as_ref()
+                .map(TenpaiWaitAvailability::permanent_furiten)
+                == Some(PermanentFuriten::Yes)
+                && value.offense.as_ref().map(|offense| offense.offense.mode)
+                    == Some(TenpaiOffenseMode::Reach)
+        }));
+        // offense mode はリーチでも、その前段の categorical rule がダマを選ぶ候補。
+        assert!(!candidate("4s").base_selects_reach);
+        assert!(candidate("5s").base_selects_reach);
+        // 対象外の cohort なので、継続評価そのものを1件も走らせない。
+        assert!(
+            current
+                .iter()
+                .all(|value| value.continuation_timing.is_none())
+        );
+
+        let result = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        let candidates: Vec<_> = result
+            .diagnostic
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.evaluation.min_shanten_after_discard() == TENPAI_SHANTEN)
+            .collect();
+        assert!(candidates.iter().all(|candidate| {
+            candidate
+                .current_tenpai_continuation_self_tsumo_value
+                .is_none()
+                && candidate.current_tenpai_expected_self_tsumo_value.is_some()
+                && candidate.comparison_reason
+                    != bot_logic::DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue
+        }));
+        let loser = candidates
+            .iter()
+            .find(|candidate| !candidate.selected)
+            .expect("runner-up current tenpai candidate");
+        assert_eq!(
+            loser.comparison_reason,
+            bot_logic::DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue
+        );
+
+        // 選ばれた named 役満候補には継続 timing が付かず、後段の base policy も従来どおり。
+        assert_eq!(result.selection.tenpai_reach_timing, None);
+        let reach = crate::agents::ShantenAgent::diagnose_with_options(
+            &context,
+            &actions,
+            crate::agents::DiagnosticOptions::NONE,
+        )
+        .reach
+        .expect("リーチ判断がある");
+
+        assert_eq!(reach.selected_discard, result.selection.action);
+        assert_eq!(
+            reach.selected_discard.as_ref().map(|action| match action {
+                LegalAction::Dahai { tile } => tile.tile_type().to_mjai_string(),
+                _ => panic!("expected dahai"),
+            }),
+            Some("4s".to_string())
+        );
+        assert_eq!(reach.reason, ReachDecisionReason::NamedYakumanDamaten);
+        assert_eq!(reach.timing, None);
     }
 
     #[test]

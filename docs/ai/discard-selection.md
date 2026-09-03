@@ -72,9 +72,11 @@ cohort が次をすべて満たす場合だけ、現在の待ちのままの値�
 
 ```text
 CurrentTenpaiFuritenCohort::AllPermanentFuriten
-+ cohort の全候補の既存 base offense mode が Reach
++ cohort の全候補で既存 base Reach / Damaten policy がリーチを選ぶ
 + 全候補で reach now / defer → forced Reach の比較が確定し、timing 込みの値が Some
 ```
+
+「base policy がリーチを選ぶ」は実際のリーチ判断と同じ結論です。押し引きの `TenpaiOffenseMode` (`decide_reach_reason()`) だけでなく、その前段の categorical rule (`selects_named_yakuman_damaten()`) も通します。恒常フリテンの named 役満候補は `TenpaiOffenseMode` ではリーチでも base policy はダマ (`NamedYakumanDamaten`) を選ぶので、continuation axis の対象にしません。役満判定は既存 Tsumo scoring の結論そのままで、候補比較のために待ちも完成手も作り直しません。
 
 候補値は既存 [リーチ timing](#リーチ-timing) policy (`decide_permanent_furiten_reach_timing()`) が選んだ側の self-tsumo value そのものです。
 
@@ -85,7 +87,7 @@ DeferReach  → defer → forced Reach
 
 比較不能 (`SelfTsumoComparisonUnknown`) の候補は 0 点にせず値を持ちません。1件でも確定しなければ cohort 全体でこの軸を外し、現在の待ちのままの `CurrentTenpaiExpectedSelfTsumoValue` へ戻します。新しい threshold も係数も持たず、Ron probability も Ron EV も導入しません。
 
-全候補が恒常フリテンで、ロンできる候補が1件も無いからこそ、self-tsumo だけで比較が閉じます。`MixedKnown` cohort は `No` 側にだけロン機会があるため対象外で、従来どおり `CurrentTenpaiExpectedSelfTsumoValue` のままです。base policy がダマを選んだ候補 (`HighValueDamaten` / `NamedYakumanDamaten`) を含む cohort も対象外で、「片方は timing 込み・片方は現在待ち」という非対称な比較は作りません。
+全候補が恒常フリテンで、ロンできる候補が1件も無いからこそ、self-tsumo だけで比較が閉じます。`MixedKnown` cohort は `No` 側にだけロン機会があるため対象外で、従来どおり `CurrentTenpaiExpectedSelfTsumoValue` のままです。base policy がダマを選んだ候補 (`HighValueDamaten` / `NamedYakumanDamaten`) を1件でも含む cohort も対象外で、「片方は timing 込み・片方は現在待ち」という非対称な比較は作りません。そのような cohort は全体で既存 `CurrentTenpaiExpectedSelfTsumoValue` へ落とし、選ばれた候補の base reason と Reach timing も従来どおりです。
 
 比較に使う値も、選択済み候補へ後段で適用する Reach timing も、同じ既存の継続評価と同じ timing policy を通します。policy を複製しないので、候補比較が `DeferReach` を選んだ値と、その候補が選ばれた後の Reach timing の結論は一致します。同じ候補の2手先評価を consumer ごとに繰り返さないよう、経路ごとに source を1つへ寄せています。
 

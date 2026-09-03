@@ -612,13 +612,14 @@ pub fn resolve_current_tenpai_value_axis(
 /// timing 込みの self-tsumo value を評価する現在聴牌候補の mask を返す。
 ///
 /// 対象は「cohort が [`CurrentTenpaiFuritenCohort::AllPermanentFuriten`] で、かつ cohort の全
-/// 候補の既存 base offense mode がリーチ」の cohort だけ。上位層はこの mask が `true` の候補に
-/// ついてだけ継続評価を走らせ、対象外の cohort では継続評価そのものを構築しない。
+/// 候補で上位層の base policy がリーチを選んだ」cohort だけ。上位層はこの mask が `true` の候補
+/// についてだけ継続評価を走らせ、対象外の cohort では継続評価そのものを構築しない。
 ///
-/// `base_reach` は候補ごとの「既存 base offense mode がリーチか」で、`evaluations` と同じ順序。
-/// 範囲外の index はリーチではない候補として扱う。リーチ・ダマの選択そのものは上位層の既存
-/// policy が決めるもので、この層はその結論を受け取るだけ。cohort の定義も恒常フリテン分類も
-/// [`classify_current_tenpai_furiten_cohort`] と同じ source of truth を使う。
+/// `base_reach` は候補ごとの「上位層の既存 Reach / Damaten policy がリーチを選んだか」で、
+/// `evaluations` と同じ順序。範囲外の index はリーチではない候補として扱う。リーチ・ダマの
+/// 選択そのものは上位層の既存 policy が決めるもので、この層はその結論を受け取るだけ。cohort の
+/// 定義も恒常フリテン分類も [`classify_current_tenpai_furiten_cohort`] と同じ source of truth を
+/// 使う。
 pub fn current_tenpai_continuation_targets(
     evaluations: &[DiscardEvaluation],
     metrics: &[CurrentTenpaiMetrics],
