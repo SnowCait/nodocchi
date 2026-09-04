@@ -30,9 +30,10 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    best_discard_selection_index, best_discard_selection_index_with_forward_metrics,
-    best_discard_selection_index_with_metrics, current_tenpai_continuation_targets,
-    diagnose_discard_evaluations_with_metrics, diagnose_discard_furiten, diagnose_lookahead,
+    TwoShantenSelfTsumoDiagnostic, best_discard_selection_index,
+    best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
+    current_tenpai_continuation_targets, diagnose_discard_evaluations_with_metrics,
+    diagnose_discard_furiten, diagnose_lookahead, diagnose_two_shanten_self_tsumo,
     discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
@@ -82,7 +83,7 @@ pub(crate) struct DiscardActionSelection {
 
 /// 2手先診断をどこまで構築するか。
 ///
-/// どの段階でも打牌選択の結果は変わらない。深い段ほど探索が重くなるため、必要な経路が明示的に
+/// どの指定でも打牌選択の結果は変わらない。追加の深い探索ほど重くなるため、必要な経路が明示的に
 /// 指定する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LookaheadDiagnosticScope {
@@ -90,21 +91,59 @@ pub(crate) enum LookaheadDiagnosticScope {
     #[default]
     None,
     /// 全合法候補の2手先診断を構築する。
-    Lookahead,
-    /// 2手先診断に加えて、1向聴候補の same-shanten の枝をテンパイまでもう1段追う。
     ///
-    /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
-    /// [`Self::Lookahead`] よりさらに重い。打牌選択にも押し引きにも使わない観測値。
-    SameShantenDownstream,
+    /// 追加の深い探索は互いに独立で、要求されたものだけを構築する。どちらも2手先診断の枝を
+    /// 起点にするため、2手先診断を構築しない場合は指定できない。
+    Lookahead {
+        /// 1向聴候補の same-shanten の枝をテンパイまでもう1段追うかどうか。
+        ///
+        /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
+        /// 2手先診断だけの場合よりさらに重い。打牌選択にも押し引きにも使わない観測値。
+        same_shanten_downstream: bool,
+        /// 現在打牌後が2向聴の候補の ExpectedSelfTsumoValue を求めるかどうか。
+        ///
+        /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存 continuation」まで
+        /// 探索するため、この中で最も重い。打牌選択にも押し引きにも使わない観測値。
+        two_shanten_self_tsumo: bool,
+    },
 }
 
 impl LookaheadDiagnosticScope {
+    /// 2手先診断だけを構築する。
+    #[cfg(test)]
+    pub(crate) const LOOKAHEAD: Self = Self::Lookahead {
+        same_shanten_downstream: false,
+        two_shanten_self_tsumo: false,
+    };
+    /// 2手先診断に加えて、same-shanten の枝をテンパイまで追う。
+    #[cfg(test)]
+    pub(crate) const SAME_SHANTEN_DOWNSTREAM: Self = Self::Lookahead {
+        same_shanten_downstream: true,
+        two_shanten_self_tsumo: false,
+    };
+
     fn builds_lookahead(self) -> bool {
         !matches!(self, Self::None)
     }
 
     fn builds_same_shanten_downstream(self) -> bool {
-        matches!(self, Self::SameShantenDownstream)
+        matches!(
+            self,
+            Self::Lookahead {
+                same_shanten_downstream: true,
+                ..
+            }
+        )
+    }
+
+    fn builds_two_shanten_self_tsumo(self) -> bool {
+        matches!(
+            self,
+            Self::Lookahead {
+                two_shanten_self_tsumo: true,
+                ..
+            }
+        )
     }
 }
 
@@ -147,6 +186,11 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     /// 打牌選択にもリーチ判断にもリーチ timing にも使わない解析専用の情報で、選択結果を
     /// 変えない。
     pub current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
+    /// 現在打牌後が2向聴の候補の ExpectedSelfTsumoValue。要求された場合だけ構築する。
+    ///
+    /// 探索は `lookahead` よりさらに深く、既存の2手先評価と同じ helper だけを通る。打牌選択にも
+    /// 押し引きにもリーチ判断にも使わない解析専用の情報で、構築の有無は選択結果を変えない。
+    pub two_shanten_self_tsumo: Option<TwoShantenSelfTsumoDiagnostic>,
     /// self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。
@@ -351,6 +395,12 @@ pub(crate) fn select_discard_action_with_diagnostic(
         })
     });
 
+    // 2向聴候補の ExpectedSelfTsumoValue も同じ2手先評価の入力をそのまま使う。枝の探索も打牌
+    // 比較も将来打点も既存 helper が持ち、この診断のために別の評価器を作らない。
+    let two_shanten_self_tsumo = scope
+        .builds_two_shanten_self_tsumo()
+        .then(|| diagnose_two_shanten_self_tsumo(&inputs, &legal.evaluations));
+
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(
             context,
@@ -365,6 +415,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         lookahead_value,
         tenpai_continuation,
         current_tenpai_continuation,
+        two_shanten_self_tsumo,
         self_tsumo_facts: inputs.self_tsumo_facts(),
     }
 }
@@ -3322,7 +3373,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert_eq!(without.selection, with.selection);
@@ -3343,7 +3394,7 @@ pub(crate) mod tests {
         let with_value = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
         let without_value = select_discard_action_with_diagnostic(
             &context,
@@ -3386,7 +3437,7 @@ pub(crate) mod tests {
         let selection = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
         let lookahead = selection.lookahead.expect("2手先診断が構築されている");
         let value = selection.lookahead_value.expect("将来打点が構築されている");
@@ -3529,7 +3580,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert_eq!(normal, without.selection);
@@ -3574,7 +3625,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert_eq!(legal.evaluations.len(), 9);
@@ -3701,7 +3752,7 @@ pub(crate) mod tests {
         let with_diagnostic = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         with_diagnostic
@@ -3750,7 +3801,7 @@ pub(crate) mod tests {
         let with_diagnostic = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         let next = with_diagnostic
@@ -3794,7 +3845,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert!(without.lookahead.is_none());
@@ -4459,7 +4510,7 @@ pub(crate) mod tests {
         let selection = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
         let draw = selection
             .lookahead
@@ -4782,8 +4833,8 @@ pub(crate) mod tests {
         let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
         let selections: Vec<_> = [
             LookaheadDiagnosticScope::None,
-            LookaheadDiagnosticScope::Lookahead,
-            LookaheadDiagnosticScope::SameShantenDownstream,
+            LookaheadDiagnosticScope::LOOKAHEAD,
+            LookaheadDiagnosticScope::SAME_SHANTEN_DOWNSTREAM,
         ]
         .into_iter()
         .map(|scope| select_discard_action_with_diagnostic(&context, &actions, scope))

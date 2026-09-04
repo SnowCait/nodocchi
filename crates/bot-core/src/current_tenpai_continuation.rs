@@ -210,7 +210,7 @@ mod tests {
                 own_river: &["5s"],
                 legal_reach: true,
                 remaining_tiles: Some(REMAINING_TILES),
-                scope: LookaheadDiagnosticScope::Lookahead,
+                scope: LookaheadDiagnosticScope::LOOKAHEAD,
             }
         }
     }

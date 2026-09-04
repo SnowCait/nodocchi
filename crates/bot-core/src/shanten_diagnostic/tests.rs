@@ -6,6 +6,7 @@ use crate::agents::{AgentActionSource, ShantenAgent};
 use crate::context::{GameContext, TableStateFacts};
 use crate::defense::{DefenseFallbackKind, HonorSafetyRank};
 use crate::discard_selection::{select_discard_action, select_discard_action_with_evaluation};
+use crate::meld::{Meld, MeldKind};
 use crate::push_pull::{
     PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context_with_evaluation,
 };
@@ -1353,6 +1354,288 @@ fn enabling_diagnostics_does_not_change_decision() {
             agent.decide_with_diagnostics(&ctx, &actions, &mut DecisionDiagnostics::enabled());
         assert_eq!(production, with_diagnostics);
     }
+}
+
+// ---- 2向聴の ExpectedSelfTsumoValue (DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO) テスト ----
+
+// 3副露済みの concealed 5枚 1m 5p 9s 白 發。どの牌を切っても2向聴のままになる小さい局面で、
+// 診断の構造と選択への非干渉を確認する。
+fn two_shanten_context(remaining_tiles: Option<u32>) -> GameContext {
+    let hand: Vec<_> = [0u8, 53, 104, 124].iter().map(|&v| tile(v)).collect();
+    two_shanten_melded_context(hand, tile(128), remaining_tiles)
+}
+
+// 東・南・西のポン3組を持つ副露局面。concealed 5枚だけを差し替えて向聴数を変える。
+fn two_shanten_melded_context(
+    hand: Vec<TileId>,
+    drawn: TileId,
+    remaining_tiles: Option<u32>,
+) -> GameContext {
+    let mut visible = hand.clone();
+    visible.push(drawn);
+    let melds = [
+        vec![
+            Meld::new(
+                MeldKind::Pon,
+                vec![tile(108), tile(109), tile(110)],
+                Some(tile(108)),
+            ),
+            Meld::new(
+                MeldKind::Pon,
+                vec![tile(112), tile(113), tile(114)],
+                Some(tile(112)),
+            ),
+            Meld::new(
+                MeldKind::Pon,
+                vec![tile(116), tile(117), tile(118)],
+                Some(tile(116)),
+            ),
+        ],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+    visible.extend(
+        melds[0]
+            .iter()
+            .flat_map(|meld| meld.tiles().iter().copied()),
+    );
+
+    GameContext::from_parts_with_melds(
+        Some(drawn),
+        hand,
+        vec![],
+        TileType::from_mjai_type_str("E").ok(),
+        TileType::from_mjai_type_str("N").ok(),
+        visible,
+        Some(0),
+        Some(1),
+        Default::default(),
+        [false; 4],
+        melds,
+    )
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles,
+        ..Default::default()
+    })
+}
+
+fn two_shanten_actions() -> Vec<LegalAction> {
+    [0u8, 53, 104, 124, 128].iter().map(|&v| dahai(v)).collect()
+}
+
+// 同じ3副露で concealed 5枚 1m 2m 5p 9s 白。どの牌を切っても1向聴のままで、2向聴診断は空に
+// なるが same-shanten の枝は持つ。追加探索が互いに独立であることの確認に使う。
+fn iishanten_context() -> GameContext {
+    let hand: Vec<_> = [0u8, 4, 53, 104].iter().map(|&v| tile(v)).collect();
+    two_shanten_melded_context(hand, tile(124), None)
+}
+
+fn iishanten_actions() -> Vec<LegalAction> {
+    [0u8, 4, 53, 104, 124].iter().map(|&v| dahai(v)).collect()
+}
+
+// 構築済みの2手先診断が持つ same-shanten downstream の枝数。
+fn same_shanten_downstream_count(lookahead: &LookaheadDiagnostic) -> usize {
+    lookahead
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.draws.iter())
+        .flat_map(|draw| draw.variants.iter())
+        .filter(|variant| variant.downstream.is_some())
+        .count()
+}
+
+#[test]
+fn the_diagnostic_options_map_to_independent_lookahead_scopes() {
+    // 2つの追加探索は互いに含まない。指定した組み合わせがそのまま scope になる。
+    assert_eq!(
+        DiagnosticOptions::NONE.lookahead_scope(),
+        LookaheadDiagnosticScope::None
+    );
+    assert_eq!(
+        DiagnosticOptions::WITH_LOOKAHEAD.lookahead_scope(),
+        LookaheadDiagnosticScope::Lookahead {
+            same_shanten_downstream: false,
+            two_shanten_self_tsumo: false,
+        }
+    );
+    assert_eq!(
+        DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM.lookahead_scope(),
+        LookaheadDiagnosticScope::Lookahead {
+            same_shanten_downstream: true,
+            two_shanten_self_tsumo: false,
+        }
+    );
+    assert_eq!(
+        DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO.lookahead_scope(),
+        LookaheadDiagnosticScope::Lookahead {
+            same_shanten_downstream: false,
+            two_shanten_self_tsumo: true,
+        }
+    );
+    assert_eq!(
+        DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM_AND_TWO_SHANTEN_SELF_TSUMO
+            .lookahead_scope(),
+        LookaheadDiagnosticScope::Lookahead {
+            same_shanten_downstream: true,
+            two_shanten_self_tsumo: true,
+        }
+    );
+}
+
+#[test]
+fn the_two_shanten_self_tsumo_diagnostic_does_not_build_the_same_shanten_downstream() {
+    // 1向聴局面で2向聴診断だけを要求しても、2向聴診断は空のままで重い downstream 探索は
+    // 走らない。2手先診断は `WITH_LOOKAHEAD` と同じものになる。
+    let ctx = iishanten_context();
+    let actions = iishanten_actions();
+
+    let lookahead_only =
+        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+    let downstream = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
+    );
+    let two_shanten = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+    );
+
+    let count = |diagnostic: &ShantenDecisionDiagnostic| {
+        same_shanten_downstream_count(
+            diagnostic
+                .normal_discard_lookahead
+                .as_ref()
+                .expect("2手先診断が構築されている"),
+        )
+    };
+    assert_eq!(count(&lookahead_only), 0);
+    assert!(count(&downstream) > 0);
+    assert_eq!(count(&two_shanten), 0);
+    assert_eq!(
+        two_shanten.normal_discard_lookahead,
+        lookahead_only.normal_discard_lookahead
+    );
+
+    // 最善向聴数が2向聴でないので、2向聴診断そのものは空になる。
+    assert!(
+        two_shanten
+            .normal_discard_two_shanten_self_tsumo
+            .as_ref()
+            .expect("2向聴診断が構築されている")
+            .candidates
+            .is_empty()
+    );
+
+    // scope の違いは選ぶ action を変えない。
+    let mut agent = ShantenAgent;
+    let expected = agent.act(&ctx, &actions);
+    for diagnostic in [&lookahead_only, &downstream, &two_shanten] {
+        assert_eq!(diagnostic.selected_action, expected);
+    }
+}
+
+#[test]
+fn the_two_shanten_self_tsumo_diagnostic_is_opt_in() {
+    // 明示的に要求した場合だけ構築する。2手先診断だけでは持たない。
+    let ctx = two_shanten_context(None);
+    let actions = two_shanten_actions();
+
+    for options in [
+        DiagnosticOptions::NONE,
+        DiagnosticOptions::WITH_LOOKAHEAD,
+        DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
+    ] {
+        assert!(
+            ShantenAgent::diagnose_with_options(&ctx, &actions, options)
+                .normal_discard_two_shanten_self_tsumo
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn the_two_shanten_self_tsumo_diagnostic_does_not_change_the_selected_action() {
+    // 山の残枚数が unknown な局面では self-tsumo 確率模型の材料が揃わないので、候補は並ぶが値は
+    // 確定しない。構築しても選択も他の診断も変わらない。
+    let ctx = two_shanten_context(None);
+    let actions = two_shanten_actions();
+
+    let mut agent = ShantenAgent;
+    let expected = agent.act(&ctx, &actions);
+    let without = ShantenAgent::diagnose(&ctx, &actions);
+    let with = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+    );
+
+    assert_eq!(with.selected_action, expected);
+    let two_shanten = with
+        .normal_discard_two_shanten_self_tsumo
+        .clone()
+        .expect("2向聴診断が構築されている");
+    let candidates = with
+        .normal_discard
+        .as_ref()
+        .expect("normal discard evaluated")
+        .candidates
+        .clone();
+    assert_eq!(two_shanten.candidates.len(), candidates.len());
+    for (candidate, evaluated) in two_shanten.candidates.iter().zip(candidates.iter()) {
+        assert_eq!(candidate.discard, evaluated.evaluation.discard);
+        assert_eq!(evaluated.evaluation.min_shanten_after_discard(), 2);
+        // 残り自摸機会が分からない局面では 0 点で補完せず unknown のままにする。
+        assert_eq!(candidate.expected_self_tsumo_value, None);
+    }
+
+    // 2向聴診断以外の診断はすべて既定の診断と一致する。
+    assert_eq!(
+        ShantenDecisionDiagnostic {
+            normal_discard_lookahead: None,
+            normal_discard_lookahead_value: None,
+            normal_discard_tenpai_continuation: None,
+            normal_discard_current_tenpai_continuation: None,
+            normal_discard_two_shanten_self_tsumo: None,
+            ..with
+        },
+        without
+    );
+}
+
+#[test]
+fn only_a_two_shanten_candidate_set_has_the_two_shanten_self_tsumo_value() {
+    // 打牌候補集合の最善向聴数が2向聴でない局面では、比較できる候補が無いので空の診断になる。
+    let ctx = lookahead_context();
+    let actions = lookahead_actions();
+
+    let diagnostic = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+    );
+
+    assert_ne!(
+        diagnostic
+            .normal_discard
+            .as_ref()
+            .expect("normal discard evaluated")
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evaluation.min_shanten_after_discard())
+            .min(),
+        Some(2)
+    );
+    assert!(
+        diagnostic
+            .normal_discard_two_shanten_self_tsumo
+            .expect("2向聴診断が構築されている")
+            .candidates
+            .is_empty()
+    );
 }
 
 // ---- 2手先診断 (DiagnosticOptions::WITH_LOOKAHEAD) テスト ----

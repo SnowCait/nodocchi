@@ -132,6 +132,29 @@
 //! 2向聴を維持する枝は追わないため、2向聴の ExpectedSelfTsumoValue ではない。1枚ツモを消費した
 //! 後の未確認牌と残り自摸機会は既存 semantics のまま1つ進み、接続先は1向聴 state の
 //! [`awaiting_draw_expected_self_tsumo_value`] と同じ枝集合・同じ集計になる。
+//!
+//! # 2向聴の ExpectedSelfTsumoValue
+//!
+//! その Progress 枝へ、最初のツモで2向聴を維持する枝を1回だけ足したものが2向聴の
+//! ExpectedSelfTsumoValue で、
+//!
+//! ```text
+//! 2向聴
+//! ├─ Progress → 最良打牌 → 1向聴 → 既存の1向聴 continuation
+//! └─ SameShanten → 最良打牌 → 2向聴 → Progress → 最良打牌 → 1向聴
+//!                → 既存の1向聴 continuation
+//! ```
+//!
+//! を集計する。次の自摸を待つ state からは
+//! [`awaiting_draw_two_shanten_expected_self_tsumo_value`]、現在打牌後が2向聴の打牌候補からは
+//! [`two_shanten_expected_self_tsumo_value_for_candidate`] が入口になる。2向聴を維持する枝は
+//! 最初の1回だけで、その先でもう一度維持する枝は追わない。維持した先の Progress 枝は上の
+//! 2向聴 Progress helper そのもので、接続先の1向聴 continuation も既存のまま共有する。
+//!
+//! 深さの違う枝を1つの尺度へ揃えるのは1向聴と同じ「その経路を引く確率 × テンパイ到達後の
+//! 期待ツモ支払い」で、この module は係数も threshold も固定 horizon も持たない。1向聴の
+//! ExpectedSelfTsumoValue とは起点の向聴数が違うため、同じ軸として混ぜない。現在の打牌選択は
+//! この値を使わない。
 
 use crate::acceptance::{
     DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
@@ -473,6 +496,34 @@ impl LookaheadDiagnostic {
             .iter()
             .find(|candidate| candidate.discard == discard)
     }
+}
+
+/// 現在打牌後が2向聴の打牌候補を、同じ self-tsumo 尺度で並べた診断。
+///
+/// `candidates` は打牌候補集合の最善向聴数が2向聴の場合の、その2向聴候補だけ。向聴数が違う
+/// 候補は同じ尺度で比較できないため、値を推測せず候補そのものを持たない。
+///
+/// 打牌選択・押し引き・リーチ判断のどれにも使わない解析専用の情報。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TwoShantenSelfTsumoDiagnostic {
+    pub candidates: Vec<TwoShantenSelfTsumoCandidate>,
+}
+
+impl TwoShantenSelfTsumoDiagnostic {
+    pub fn candidate(&self, discard: TileType) -> Option<&TwoShantenSelfTsumoCandidate> {
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.discard == discard)
+    }
+}
+
+/// 2向聴の打牌候補1件分の ExpectedSelfTsumoValue。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwoShantenSelfTsumoCandidate {
+    pub discard: TileType,
+    /// [`two_shanten_expected_self_tsumo_value_for_candidate`] の値
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。確定できない場合は 0 点へ潰さず `None`。
+    pub expected_self_tsumo_value: Option<u64>,
 }
 
 /// 2手先評価の入力。通常打牌評価が使う値と同じものだけを持ち、上位層の局面型には依存しない。
@@ -899,18 +950,183 @@ pub fn awaiting_draw_two_shanten_progress_self_tsumo_value(
     }
     let facts = inputs.self_tsumo_facts()?;
     let branch = CandidateBranch::from_waiting_state(&inputs.root);
+    two_shanten_progress_self_tsumo_value(inputs, &branch, acceptance, facts)
+}
 
+/// 次の自摸を待つ2向聴 state の ExpectedSelfTsumoValue
+/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+///
+/// [`awaiting_draw_two_shanten_progress_self_tsumo_value`] が追う Progress 枝に、最初のツモで
+/// 2向聴を維持する枝を1回だけ足した値。
+///
+/// ```text
+/// 2向聴
+/// ├─ Progress → 最良打牌 → 1向聴 → 既存の1向聴 continuation
+/// └─ SameShanten → 最良打牌 → 2向聴 → Progress → 最良打牌 → 1向聴
+///                → 既存の1向聴 continuation
+/// ```
+///
+/// 2向聴を維持する枝は最初の1回だけで、その先でもう一度維持する枝は追わない。1向聴 state の
+/// [`awaiting_draw_expected_self_tsumo_value`] とは起点の向聴数が違うため、同じ名前の値として
+/// 混ぜないこと。
+///
+/// 2向聴以外の state・ツモ打点や残り自摸機会が欠ける局面・接続先の値を確定できない枝がある
+/// 場合は、0 点で補完せず `None`。
+pub fn awaiting_draw_two_shanten_expected_self_tsumo_value(
+    inputs: &LookaheadInputs,
+    acceptance: &EffectiveAcceptance,
+) -> Option<u64> {
+    if acceptance.current_min_shanten() != RYANSHANTEN_SHANTEN {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::from_waiting_state(&inputs.root);
+    two_shanten_self_tsumo_value(inputs, &branch, acceptance, facts)
+}
+
+/// 現在打牌後が2向聴の打牌候補1件について、その打牌後の state の ExpectedSelfTsumoValue
+/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+///
+/// 枝も確率も集計も [`awaiting_draw_two_shanten_expected_self_tsumo_value`] と同じで、起点が
+/// 「次の自摸を待つ state」ではなく「この打牌候補を切った後の state」になるだけ。打牌後の
+/// 受け入れは打牌評価が持つ値そのもので、この入口のために求め直さない。
+///
+/// 現在の打牌選択はこの値を使わない。1向聴候補の
+/// [`DiscardLookaheadDiagnostic::expected_self_tsumo_value`] とは起点の向聴数が違うため、
+/// 直接比較できるのは2向聴候補同士だけになる。
+///
+/// 打牌後が2向聴でない候補・ツモ打点や残り自摸機会が欠ける局面・接続先の値を確定できない枝が
+/// ある場合は、0 点で補完せず `None`。
+pub fn two_shanten_expected_self_tsumo_value_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
+    two_shanten_self_tsumo_value(inputs, &branch, &evaluation.acceptance_after_discard, facts)
+}
+
+/// 打牌候補集合の最善向聴数が2向聴の場合に、その2向聴候補の ExpectedSelfTsumoValue を並べる。
+///
+/// 値は候補ごとに [`two_shanten_expected_self_tsumo_value_for_candidate`] そのもので、この入口の
+/// ために別の探索も別の集計も持たない。最善向聴数が2向聴でない候補集合では空の診断になる。
+///
+/// 探索は既存の2手先診断よりさらに深いため、必要な経路だけが明示的に呼ぶ。打牌選択には使わない
+/// 解析専用の情報で、構築の有無で選択結果は変わらない。
+pub fn diagnose_two_shanten_self_tsumo(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+) -> TwoShantenSelfTsumoDiagnostic {
+    if best_shanten(evaluations) != RYANSHANTEN_SHANTEN {
+        return TwoShantenSelfTsumoDiagnostic::default();
+    }
+
+    TwoShantenSelfTsumoDiagnostic {
+        candidates: evaluations
+            .iter()
+            .filter(|evaluation| evaluation.min_shanten_after_discard() == RYANSHANTEN_SHANTEN)
+            .map(|evaluation| TwoShantenSelfTsumoCandidate {
+                discard: evaluation.discard,
+                expected_self_tsumo_value: two_shanten_expected_self_tsumo_value_for_candidate(
+                    inputs, evaluation,
+                ),
+            })
+            .collect(),
+    }
+}
+
+// 次の自摸を待つ2向聴 state 1つ分の ExpectedSelfTsumoValue。Progress 枝と、最初の1回だけ許す
+// SameShanten 枝の和。どちらの枝も最初のツモで分かれるため重複しない。
+fn two_shanten_self_tsumo_value(
+    inputs: &LookaheadInputs,
+    branch: &CandidateBranch,
+    acceptance: &EffectiveAcceptance,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    let progress = two_shanten_progress_self_tsumo_value(inputs, branch, acceptance, facts)?;
+    let same_shanten = two_shanten_same_shanten_self_tsumo_value(inputs, branch, facts)?;
+    Some(progress.saturating_add(same_shanten))
+}
+
+// 最初のツモが1向聴へ進む枝だけの寄与。2向聴 state を起点にする経路はどの段でもこの1本を通る。
+fn two_shanten_progress_self_tsumo_value(
+    inputs: &LookaheadInputs,
+    branch: &CandidateBranch,
+    acceptance: &EffectiveAcceptance,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
     let mut total = 0u64;
     for accepted in &acceptance.tiles {
         let drawable = drawable(accepted);
         for variant in branch.variants_of(&drawable) {
             let value = iishanten_continuation_after_progress_draw(
-                inputs, &branch, &drawable, variant, facts,
+                inputs, branch, &drawable, variant, facts,
             )?;
             total = total.saturating_add(value);
         }
     }
     Some(total)
+}
+
+// 最初のツモが2向聴を維持する枝だけの寄与。維持する枝はここで1回だけ列挙し、その先は
+// Progress 枝しか進めない。
+fn two_shanten_same_shanten_self_tsumo_value(
+    inputs: &LookaheadInputs,
+    branch: &CandidateBranch,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    let mut total = 0u64;
+    for drawable in branch.same_shanten_drawables(inputs) {
+        for variant in branch.variants_of(&drawable) {
+            let value = two_shanten_progress_after_same_shanten_draw(
+                inputs, branch, &drawable, variant, facts,
+            )?;
+            total = total.saturating_add(value);
+        }
+    }
+    Some(total)
+}
+
+// 2向聴を維持するツモ1枚分の continuation。ツモ後の最良打牌がまだ2向聴の枝だけ、その打牌後の
+// state を起点にした Progress 枝へつなぐ。
+//
+// 打牌候補が無い枝は寄与 0 で、接続先の値を確定できない場合だけ `None` になる。
+fn two_shanten_progress_after_same_shanten_draw(
+    inputs: &LookaheadInputs,
+    branch: &CandidateBranch,
+    drawable: &DrawableTile,
+    variant: PhysicalTileVariant,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    let Some(state) = branch.state_after_draw(drawable.tile, variant.tile) else {
+        return Some(0);
+    };
+    let Some(evaluation) = next_discard(inputs, &state).evaluation else {
+        return Some(0);
+    };
+    if evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN {
+        return Some(0);
+    }
+    let Some(next) = CandidateBranch::new(&state, &evaluation) else {
+        return Some(0);
+    };
+
+    let path = SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)?;
+    // 1枚ツモを消費した後の horizon。未確認牌も残り自摸機会も既存の経路と同じだけ進む。
+    let continuation = SelfTsumoFacts {
+        unknown_tiles: path.terminal_unknown_tiles(facts),
+        own_future_draws: path.terminal_own_future_draws(facts),
+    };
+    let value = two_shanten_progress_self_tsumo_value(
+        inputs,
+        &next,
+        &evaluation.acceptance_after_discard,
+        continuation,
+    )?;
+    Some(path.weighted_continuation(value))
 }
 
 // 1向聴へ進むツモ1枚分の continuation。ツモ後の最良打牌が1向聴のままの枝だけ、その打牌後の
@@ -1328,15 +1544,22 @@ impl CandidateBranch {
                 .iter()
                 .map(|tile| self.draw(inputs, drawable(tile), scope))
                 .collect(),
-            DrawScope::SameShanten { .. } => same_shanten_draws_with_fixed_melds_and_seen(
-                &self.after_discard,
-                inputs.fixed_meld_count,
-                &self.draw_seen,
-            )
-            .into_iter()
-            .map(|drawable: DrawableTile| self.draw(inputs, drawable, scope))
-            .collect(),
+            DrawScope::SameShanten { .. } => self
+                .same_shanten_drawables(inputs)
+                .into_iter()
+                .map(|drawable| self.draw(inputs, drawable, scope))
+                .collect(),
         }
+    }
+
+    // 向聴数を維持する仮想ツモ牌の列挙。対象牌も残枚数も既存の受け入れと同じ列挙・同じ
+    // shanten calculator が決め、条件だけが「維持する」になる。
+    fn same_shanten_drawables(&self, inputs: &LookaheadInputs) -> Vec<DrawableTile> {
+        same_shanten_draws_with_fixed_melds_and_seen(
+            &self.after_discard,
+            inputs.fixed_meld_count,
+            &self.draw_seen,
+        )
     }
 
     // 仮想ツモ牌1牌種を赤 / 黒の物理牌 variant へ分ける。分割規則は最終和了牌と共有する既存
@@ -4321,6 +4544,331 @@ mod tests {
             forward_metrics(&inputs(&case.situation), evaluations)
         );
         assert_eq!(diagnose_lookahead(&with_facts, evaluations), case.lookahead);
+    }
+
+    // ---- 2向聴の ExpectedSelfTsumoValue ----
+
+    // 同じ3副露で concealed 5枚 1m 5p 9s W N。どの牌を切っても2向聴のままで、切った後の state は
+    // 最初のツモで1向聴へ進む枝も2向聴を維持する枝も持つ。
+    fn two_shanten_candidate_hand() -> Vec<TileId> {
+        ids(&[0, 53, 104, 116, 120])
+    }
+
+    // 2向聴 state 1つ分の入力・受け入れ・事実・打牌後の枝をまとめて組み立てる。
+    struct TwoShantenState<'a> {
+        inputs: LookaheadInputs<'a>,
+        acceptance: EffectiveAcceptance,
+    }
+
+    fn two_shanten_state(tiles: &[TileId]) -> TwoShantenState<'_> {
+        let acceptance = awaiting_draw_acceptance(tiles, fixed(3), tiles);
+        assert_eq!(acceptance.current_min_shanten(), RYANSHANTEN_SHANTEN);
+        TwoShantenState {
+            inputs: awaiting_draw_inputs(
+                tiles,
+                fixed(3),
+                &FIXED_TSUMO_VALUATOR,
+                TEST_OWN_FUTURE_DRAWS,
+            ),
+            acceptance,
+        }
+    }
+
+    // 2向聴を維持するツモ1枚と、その最良打牌まで進めた後の state。切った牌は見え牌になる。
+    struct AfterSameShantenDraw {
+        path: SelfTsumoPath,
+        continuation: SelfTsumoFacts,
+        concealed: Vec<TileId>,
+        visible: Vec<TileId>,
+    }
+
+    fn after_same_shanten_draw(
+        inputs: &LookaheadInputs,
+        branch: &CandidateBranch,
+        drawable: &DrawableTile,
+        variant: PhysicalTileVariant,
+        facts: SelfTsumoFacts,
+    ) -> AfterSameShantenDraw {
+        let state = branch
+            .state_after_draw(drawable.tile, variant.tile)
+            .expect("ツモ後の手牌を作れる");
+        let evaluation = next_discard(inputs, &state)
+            .evaluation
+            .expect("次打牌がある");
+        assert_eq!(
+            evaluation.min_shanten_after_discard(),
+            RYANSHANTEN_SHANTEN,
+            "2向聴を維持するツモの最良打牌は2向聴のまま"
+        );
+
+        let (discarded, concealed) =
+            split_discarded_tile(state.tiles.clone(), &evaluation).expect("打牌を確定できる");
+        let mut visible = concealed.clone();
+        visible.push(discarded);
+
+        let path =
+            SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles).expect("経路を作れる");
+        AfterSameShantenDraw {
+            path,
+            // 1枚ツモを消費した分だけ未確認牌も残り自摸機会も進んでいる。
+            continuation: SelfTsumoFacts {
+                unknown_tiles: path.terminal_unknown_tiles(facts),
+                own_future_draws: path.terminal_own_future_draws(facts),
+            },
+            concealed,
+            visible,
+        }
+    }
+
+    impl AfterSameShantenDraw {
+        // 打牌後の手牌を、改めて「次の自摸を待つ2向聴 state」として組み立てた入力。
+        fn inputs(&self) -> LookaheadInputs<'_> {
+            let inputs = LookaheadInputs::new(&self.concealed, fixed(3), &[], None, None)
+                .with_visible_tiles(&self.visible)
+                .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+                .with_own_future_draws(self.continuation.own_future_draws);
+            assert_eq!(inputs.self_tsumo_facts(), Some(self.continuation));
+            inputs
+        }
+
+        fn acceptance(&self) -> EffectiveAcceptance {
+            awaiting_draw_acceptance(&self.concealed, fixed(3), &self.visible)
+        }
+    }
+
+    #[test]
+    fn the_two_shanten_value_adds_the_same_shanten_branch_to_the_existing_progress_branch() {
+        // Progress 枝の寄与は既存 helper そのもので、新しい値はそこへ手変わりの枝を足したもの。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let state = two_shanten_state(&tiles);
+        let facts = state.inputs.self_tsumo_facts().expect("材料が揃っている");
+        let branch = CandidateBranch::from_waiting_state(&state.inputs.root);
+
+        let progress =
+            awaiting_draw_two_shanten_progress_self_tsumo_value(&state.inputs, &state.acceptance)
+                .expect("ツモ打点を確定できる");
+        let same_shanten = two_shanten_same_shanten_self_tsumo_value(&state.inputs, &branch, facts)
+            .expect("ツモ打点を確定できる");
+        let value =
+            awaiting_draw_two_shanten_expected_self_tsumo_value(&state.inputs, &state.acceptance)
+                .expect("ツモ打点を確定できる");
+
+        assert!(progress > 0);
+        assert!(same_shanten > 0);
+        assert_eq!(value, progress + same_shanten);
+    }
+
+    #[test]
+    fn the_first_same_shanten_branch_connects_to_the_two_shanten_progress_branch() {
+        // 2向聴を維持するツモ1本ずつが、打牌後の state を「次の自摸を待つ2向聴 state」として
+        // 既存の Progress helper へ渡した値と、経路確率で重み付けして一致する。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let state = two_shanten_state(&tiles);
+        let facts = state.inputs.self_tsumo_facts().expect("材料が揃っている");
+        let branch = CandidateBranch::from_waiting_state(&state.inputs.root);
+        let drawables = branch.same_shanten_drawables(&state.inputs);
+        assert!(!drawables.is_empty());
+
+        let mut expected = 0u64;
+        for drawable in &drawables {
+            assert_eq!(drawable.shanten_after_draw.min(), RYANSHANTEN_SHANTEN);
+            for variant in branch.variants_of(drawable) {
+                let after =
+                    after_same_shanten_draw(&state.inputs, &branch, drawable, variant, facts);
+                let progress = awaiting_draw_two_shanten_progress_self_tsumo_value(
+                    &after.inputs(),
+                    &after.acceptance(),
+                )
+                .expect("ツモ打点を確定できる");
+                expected = expected.saturating_add(after.path.weighted_continuation(progress));
+            }
+        }
+
+        assert!(expected > 0);
+        assert_eq!(
+            two_shanten_same_shanten_self_tsumo_value(&state.inputs, &branch, facts),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn the_same_shanten_branch_is_allowed_only_once() {
+        // 維持した先で進めるのは Progress 枝だけで、もう一度維持する枝は追わない。枝1本の寄与が
+        // 「その先の Progress 枝だけ」と一致し、完全な2向聴 ExpectedSelfTsumoValue へ置き換えると
+        // 増えることで確認する。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let state = two_shanten_state(&tiles);
+        let facts = state.inputs.self_tsumo_facts().expect("材料が揃っている");
+        let branch = CandidateBranch::from_waiting_state(&state.inputs.root);
+        let drawables = branch.same_shanten_drawables(&state.inputs);
+        let drawable = drawables.first().expect("2向聴を維持するツモがある");
+        let variant = branch
+            .variants_of(drawable)
+            .next()
+            .expect("物理牌 variant がある");
+
+        let actual = two_shanten_progress_after_same_shanten_draw(
+            &state.inputs,
+            &branch,
+            drawable,
+            variant,
+            facts,
+        )
+        .expect("ツモ打点を確定できる");
+
+        let after = after_same_shanten_draw(&state.inputs, &branch, drawable, variant, facts);
+        let inputs = after.inputs();
+        let acceptance = after.acceptance();
+        let progress_only = after.path.weighted_continuation(
+            awaiting_draw_two_shanten_progress_self_tsumo_value(&inputs, &acceptance)
+                .expect("ツモ打点を確定できる"),
+        );
+        let with_second_keep = after.path.weighted_continuation(
+            awaiting_draw_two_shanten_expected_self_tsumo_value(&inputs, &acceptance)
+                .expect("ツモ打点を確定できる"),
+        );
+
+        assert!(actual > 0);
+        assert_eq!(actual, progress_only);
+        assert!(
+            with_second_keep > actual,
+            "with_second_keep: {with_second_keep}, actual: {actual}"
+        );
+    }
+
+    #[test]
+    fn a_two_shanten_discard_candidate_has_the_same_value_as_its_awaiting_draw_state() {
+        // 打牌候補の入口は、その打牌後の state を「次の自摸を待つ2向聴 state」として渡した場合と
+        // 同じ枝集合・同じ集計になる。
+        let tiles = two_shanten_candidate_hand();
+        // 打牌後の state を組み立て直す側は切った牌が見え牌になるので、候補側も見え牌を反映した
+        // 既存 semantics で評価する。
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+
+        let evaluation = situation.evaluations.first().expect("打牌候補がある");
+        assert_eq!(evaluation.min_shanten_after_discard(), RYANSHANTEN_SHANTEN);
+        let value = two_shanten_expected_self_tsumo_value_for_candidate(&inputs, evaluation)
+            .expect("ツモ打点を確定できる");
+        assert!(value > 0);
+
+        let (discarded, concealed) =
+            split_discarded_tile(situation.tiles.clone(), evaluation).expect("打牌を確定できる");
+        let mut visible = concealed.clone();
+        visible.push(discarded);
+        let awaiting = LookaheadInputs::new(&concealed, fixed(3), &[], None, None)
+            .with_visible_tiles(&visible)
+            .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+            .with_own_future_draws(facts.own_future_draws);
+
+        assert_eq!(
+            awaiting_draw_two_shanten_expected_self_tsumo_value(
+                &awaiting,
+                &awaiting_draw_acceptance(&concealed, fixed(3), &visible),
+            ),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn without_the_self_tsumo_facts_the_two_shanten_value_is_unknown() {
+        // ツモ打点も残り自摸機会も、欠ける場合は 0 点で補完せず `None` のままにする。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed(3), &tiles);
+        let base =
+            || LookaheadInputs::new(&tiles, fixed(3), &[], None, None).with_visible_tiles(&tiles);
+
+        // ツモ評価器が無い局面。
+        assert_eq!(
+            awaiting_draw_two_shanten_expected_self_tsumo_value(
+                &base().with_own_future_draws(TEST_OWN_FUTURE_DRAWS),
+                &acceptance,
+            ),
+            None
+        );
+        // 残り自摸機会が分からない局面。
+        assert_eq!(
+            awaiting_draw_two_shanten_expected_self_tsumo_value(
+                &base().with_tsumo_valuator(&FIXED_TSUMO_VALUATOR),
+                &acceptance,
+            ),
+            None
+        );
+        // 到達したテンパイのツモ打点を確定できない局面。
+        assert_eq!(
+            awaiting_draw_two_shanten_expected_self_tsumo_value(
+                &awaiting_draw_inputs(
+                    &tiles,
+                    fixed(3),
+                    &UnknownTsumoValuator,
+                    TEST_OWN_FUTURE_DRAWS,
+                ),
+                &acceptance,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_two_shanten_input_has_the_two_shanten_value() {
+        // 1向聴 state と1向聴候補は既存の continuation が受け持つので、この入口は値を持たない。
+        let tiles = iishanten_awaiting_draw_hand();
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed(3), &tiles);
+        let inputs = awaiting_draw_inputs(
+            &tiles,
+            fixed(3),
+            &FIXED_TSUMO_VALUATOR,
+            TEST_OWN_FUTURE_DRAWS,
+        );
+        assert_eq!(acceptance.current_min_shanten(), IISHANTEN_SHANTEN);
+        assert_eq!(
+            awaiting_draw_two_shanten_expected_self_tsumo_value(&inputs, &acceptance),
+            None
+        );
+
+        let case = &*SAME_SHANTEN_CASE;
+        let iishanten_inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        for evaluation in &case.situation.evaluations {
+            if evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN {
+                assert_eq!(
+                    two_shanten_expected_self_tsumo_value_for_candidate(
+                        &iishanten_inputs,
+                        evaluation
+                    ),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_shanten_value_does_not_change_the_discard_selection() {
+        // 新しい入口を呼んでも、選択専用の前方集計値も詳細診断も選ぶ打牌も変わらない。
+        let tiles = two_shanten_candidate_hand();
+        let situation = hand_only_situation(&tiles, fixed(3), Vec::new(), None, None);
+        let evaluations = &situation.evaluations;
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+
+        let before = forward_metrics(&inputs, evaluations);
+        let selected = best_discard_selection_index_with_forward_metrics(evaluations, &before);
+        let lookahead = diagnose_lookahead(&inputs, evaluations);
+
+        let evaluation = evaluations.first().expect("打牌候補がある");
+        assert!(two_shanten_expected_self_tsumo_value_for_candidate(&inputs, evaluation).is_some());
+
+        let after = forward_metrics(&inputs, evaluations);
+        assert_eq!(before, after);
+        assert!(
+            after
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+        assert_eq!(
+            selected,
+            best_discard_selection_index_with_forward_metrics(evaluations, &after)
+        );
+        assert_eq!(lookahead, diagnose_lookahead(&inputs, evaluations));
     }
 
     // ---- 探索 node 間の base 打牌評価 ----

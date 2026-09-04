@@ -193,6 +193,36 @@ weighted next acceptance
 
 仮想ツモが赤5 / 黒5に分かれる牌種では、物理牌ごとに次打牌を評価し、それぞれの残枚数で集約します。この指標に打点は含めないため、赤 / 黒で変わるのは残枚数の内訳だけです。1向聴の `weighted prospective value` はここでは使いません。
 
+## 2向聴: ExpectedSelfTsumoValue (diagnostics only)
+
+2向聴の候補も、1向聴と同じ self-tsumo 尺度へ揃えて観測できます。
+
+```text
+two-shanten expected self-tsumo value
+= Σ(その経路を引く確率 × テンパイ到達後の期待ツモ支払い)
+```
+
+対象の経路は次の2種類で、最初のツモで2向聴を維持する枝は1回だけ許します。
+
+```text
+A. 2向聴 → Progress → 最良打牌 → 1向聴 → 1向聴の ExpectedSelfTsumoValue
+B. 2向聴 → SameShanten → 最良打牌 → 2向聴 → Progress → 最良打牌 → 1向聴
+   → 1向聴の ExpectedSelfTsumoValue
+```
+
+確率も期待支払いも1向聴と同じ閉形式で、接続先は1向聴の `ExpectedSelfTsumoValue` そのものです。
+向聴・受け入れ・見え牌・赤5・打牌比較・将来打点はどれも既存 layer が source of truth で、この
+軸のために係数も threshold も pruning も追加しません。2回目の SameShanten はこの評価モデルの
+探索範囲外で、確定しない値ではなく寄与 0 として扱います。
+
+**この軸は diagnostics 専用です。** 2向聴以上の production 比較は従来どおり
+[WeightedNextAcceptance](#2向聴以上-weightednextacceptance) のままで、この値は打牌選択にも
+押し引きにもリーチ判断にも接続していません。起点の向聴数が違うため、1向聴の
+`ExpectedSelfTsumoValue` と同じ軸として混ぜることもしません。
+
+材料 (ツモ打点と残り自摸機会) が揃わない局面と、到達したテンパイのツモ打点を1つでも確定できない
+候補は、0点で補完せず値を持ちません。`bot-scenario --two-shanten-self-tsumo` で表示できます。
+
 ## lookahead
 
 `bot-scenario --lookahead` は通常打牌候補ごとの2手先概要を追加します。`--verbose` と併用すると仮想ツモ牌ごとの詳細も表示します。

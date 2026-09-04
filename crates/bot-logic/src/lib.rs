@@ -85,12 +85,14 @@ pub use lookahead::{
     DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
     DrawVariantLookaheadDiagnostic, ForwardMetricsObserver, ForwardMetricsPhase,
     LookaheadDiagnostic, LookaheadInputs, ProspectiveTenpai, ProspectiveTenpaiValuator,
-    ProspectiveTsumoValuator, SameShantenDownstreamDiagnostic,
-    awaiting_draw_expected_self_tsumo_value, awaiting_draw_two_shanten_progress_self_tsumo_value,
-    diagnose_lookahead, diagnose_lookahead_candidate, forward_metrics,
+    ProspectiveTsumoValuator, SameShantenDownstreamDiagnostic, TwoShantenSelfTsumoCandidate,
+    TwoShantenSelfTsumoDiagnostic, awaiting_draw_expected_self_tsumo_value,
+    awaiting_draw_two_shanten_expected_self_tsumo_value,
+    awaiting_draw_two_shanten_progress_self_tsumo_value, diagnose_lookahead,
+    diagnose_lookahead_candidate, diagnose_two_shanten_self_tsumo, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, forward_metrics_instrumented,
     same_shanten_downstream_value_for_candidate, same_shanten_forward_metric_for_candidate,
-    tenpai_wait_metrics_from_lookahead,
+    tenpai_wait_metrics_from_lookahead, two_shanten_expected_self_tsumo_value_for_candidate,
 };
 pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
 pub use normal_hand_scoring::{
