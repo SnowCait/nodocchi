@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod bonus_han;
 pub mod completed_hand;
+mod count_hasher;
 pub mod discard;
 pub mod fu;
 pub mod furiten;

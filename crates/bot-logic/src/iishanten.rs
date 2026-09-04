@@ -1,3 +1,4 @@
+use crate::count_hasher::CountHasherBuilder;
 use crate::shanten::standard_shanten;
 use crate::tile::TileType;
 use crate::tile_counts::{TileCountError, TileCounts};
@@ -59,7 +60,7 @@ pub(crate) fn classify_standard_iishanten_shape_with_standard_shanten(
 ///
 /// 複数の分解が可能な場合は `Complete > Headless > Kuttsuki` の優先順位で一つに決定する。
 fn classify_standard_iishanten_shape_exact(counts: &TileCounts) -> IishantenShape {
-    let mut memo = DecomposeMemo::new();
+    let mut memo = DecomposeMemo::default();
     if can_decompose(*counts, Target::COMPLETE, &mut memo) {
         IishantenShape::Complete
     } else if can_decompose(*counts, Target::HEADLESS, &mut memo) {
@@ -123,7 +124,7 @@ impl Target {
     }
 }
 
-type DecomposeMemo = HashMap<([u8; 34], Target), bool>;
+type DecomposeMemo = HashMap<([u8; 34], Target), bool, CountHasherBuilder>;
 
 fn can_decompose(counts: TileCounts, target: Target, memo: &mut DecomposeMemo) -> bool {
     if target.is_empty() {
@@ -440,7 +441,7 @@ mod tests {
         ]);
         assert_eq!(standard_shanten(&hand), 1);
 
-        let mut memo = DecomposeMemo::new();
+        let mut memo = DecomposeMemo::default();
         assert!(can_decompose(hand, Target::COMPLETE, &mut memo));
         assert!(can_decompose(hand, Target::HEADLESS, &mut memo));
 

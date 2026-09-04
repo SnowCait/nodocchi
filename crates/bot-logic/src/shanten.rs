@@ -1,3 +1,4 @@
+use crate::count_hasher::CountHasherBuilder;
 use crate::tile::TileType;
 use crate::tile_counts::{TileCountError, TileCounts};
 use std::collections::HashMap;
@@ -157,7 +158,7 @@ pub fn kokushi_shanten(counts: &TileCounts) -> i8 {
     13 - unique_yaochu - i8::from(has_yaochu_pair)
 }
 
-type SearchMemo = HashMap<([u8; 34], SearchState), i8>;
+type SearchMemo = HashMap<([u8; 34], SearchState), i8, CountHasherBuilder>;
 
 // 探索 memo を保持する上限エントリ数。超えたら丸ごと捨てて使用量を上限内に保つ。
 const SEARCH_MEMO_CAPACITY: usize = 1 << 17;
@@ -169,7 +170,7 @@ const SEARCH_MEMO_CAPACITY: usize = 1 << 17;
 // 直さずスレッドローカルで使い回し、重複探索だけを省く。向聴数そのものは変わらない。
 thread_local! {
     static SEARCH_MEMO: std::cell::RefCell<SearchMemo> =
-        std::cell::RefCell::new(SearchMemo::new());
+        std::cell::RefCell::new(SearchMemo::default());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
