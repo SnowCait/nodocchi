@@ -1236,7 +1236,7 @@ fn value_honor_count(
 // - `counts_candidate_discard`: 今から切る候補牌1枚を seen へ加えるかどうか。visible tiles を
 //   持つ経路だけ `true` にして、自分が今切った牌を山に残っている牌として数えない。visible tiles
 //   が無い経路では既存どおり `false` で、候補牌を seen に数えない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct CandidateSeen {
     base: [u8; TileType::COUNT],
     counts_candidate_discard: bool,

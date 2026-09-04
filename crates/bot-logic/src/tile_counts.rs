@@ -10,7 +10,7 @@ pub enum TileCountError {
     Overflow(TileType),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileCounts {
     counts: [u8; 34],
 }
