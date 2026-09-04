@@ -1,9 +1,10 @@
 use std::fs::File;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracing::{Metadata, Subscriber, warn};
+use tracing::{Metadata, Subscriber};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::filter::{FilterFn, filter_fn};
 use tracing_subscriber::layer::Context;
@@ -41,9 +42,11 @@ impl LoggingGuard {
     /// 正常終了後に呼び、slow request があった起動だけ console へ1回通知する。
     pub fn warn_if_slow_requests_recorded(&self) {
         let count = self.slow_request_count.load(Ordering::Relaxed);
-        if let Some(message) = slow_request_completion_warning(count, &self.slow_log_path) {
-            warn!("{message}");
-        }
+        let _ = write_slow_request_completion_warning(
+            &mut io::stderr().lock(),
+            count,
+            &self.slow_log_path,
+        );
     }
 }
 
@@ -143,13 +146,19 @@ where
     }
 }
 
-fn slow_request_completion_warning(count: usize, path: &Path) -> Option<String> {
-    (count > 0).then(|| {
-        format!(
-            "{count} slow request_action responses recorded: {}",
+fn write_slow_request_completion_warning(
+    writer: &mut impl Write,
+    count: usize,
+    path: &Path,
+) -> io::Result<()> {
+    if count > 0 {
+        writeln!(
+            writer,
+            "WARN {count} slow request_action responses recorded: {}",
             path.display()
-        )
-    })
+        )?;
+    }
+    Ok(())
 }
 
 fn open_log_file(path: &Path) -> Result<File, LoggingError> {
@@ -359,12 +368,32 @@ mod tests {
     }
 
     #[test]
-    fn completion_warning_is_omitted_for_zero_and_includes_count_and_path_otherwise() {
+    fn completion_warning_is_omitted_for_zero() {
         let path = Path::new("logs/ranked-slow.log");
-        assert_eq!(slow_request_completion_warning(0, path), None);
+        let mut output = Vec::new();
+
+        write_slow_request_completion_warning(&mut output, 0, path).unwrap();
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn completion_warning_bypasses_the_tracing_console_filter() {
+        let path = Path::new("logs/ranked-slow.log");
+        let mut output = Vec::new();
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .with_writer(io::sink)
+                .with_filter(env_filter("error")),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            write_slow_request_completion_warning(&mut output, 2, path).unwrap();
+        });
+
         assert_eq!(
-            slow_request_completion_warning(1, path),
-            Some("1 slow request_action responses recorded: logs/ranked-slow.log".to_string())
+            String::from_utf8(output).unwrap(),
+            "WARN 2 slow request_action responses recorded: logs/ranked-slow.log\n"
         );
     }
 
