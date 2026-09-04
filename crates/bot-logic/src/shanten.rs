@@ -1,7 +1,10 @@
-use crate::count_hasher::CountHasherBuilder;
-use crate::tile::TileType;
-use crate::tile_counts::{TileCountError, TileCounts};
-use std::collections::HashMap;
+use crate::tile_counts::TileCounts;
+
+mod decomposition;
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod reference;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shanten {
@@ -115,18 +118,7 @@ pub fn standard_shanten_with_fixed_melds(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
 ) -> i8 {
-    let state = SearchState {
-        melds: fixed_meld_count.get(),
-        has_pair: false,
-        partials: 0,
-    };
-
-    SEARCH_MEMO.with_borrow_mut(|memo| {
-        if memo.len() >= SEARCH_MEMO_CAPACITY {
-            memo.clear();
-        }
-        search(*counts, state, memo)
-    })
+    decomposition::standard_shanten(counts.as_array(), fixed_meld_count.get())
 }
 
 pub fn chiitoitsu_shanten(counts: &TileCounts) -> i8 {
@@ -158,151 +150,10 @@ pub fn kokushi_shanten(counts: &TileCounts) -> i8 {
     13 - unique_yaochu - i8::from(has_yaochu_pair)
 }
 
-type SearchMemo = HashMap<([u8; 34], SearchState), i8, CountHasherBuilder>;
-
-// 探索 memo を保持する上限エントリ数。超えたら丸ごと捨てて使用量を上限内に保つ。
-const SEARCH_MEMO_CAPACITY: usize = 1 << 17;
-
-// 通常形向聴数探索の memo。
-//
-// `search()` は `(counts, state)` に対する純関数で、結果は memo の中身に依存しない。打牌候補
-// 評価・受け入れ計算・2手先評価は同じ部分形を何度も探索するため、呼び出しごとに memo を作り
-// 直さずスレッドローカルで使い回し、重複探索だけを省く。向聴数そのものは変わらない。
-thread_local! {
-    static SEARCH_MEMO: std::cell::RefCell<SearchMemo> =
-        std::cell::RefCell::new(SearchMemo::default());
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct SearchState {
-    melds: u8,
-    has_pair: bool,
-    partials: u8,
-}
-
-impl SearchState {
-    fn shanten(self) -> i8 {
-        let melds = self.melds.min(4);
-        let capped_partials = self.partials.min(4 - melds);
-        let pair_bonus = i8::from(self.has_pair);
-        8 - 2 * melds as i8 - capped_partials as i8 - pair_bonus
-    }
-
-    fn with_meld(self) -> Self {
-        Self {
-            melds: self.melds + 1,
-            ..self
-        }
-    }
-
-    fn with_pair_head(self) -> Self {
-        Self {
-            has_pair: true,
-            ..self
-        }
-    }
-
-    fn with_partial(self) -> Self {
-        Self {
-            partials: self.partials + 1,
-            ..self
-        }
-    }
-}
-
-fn search(counts: TileCounts, state: SearchState, memo: &mut SearchMemo) -> i8 {
-    let mut best = state.shanten();
-
-    let Some(tile) = counts
-        .iter()
-        .find_map(|(tile, count)| (count >= 1).then_some(tile))
-    else {
-        return best;
-    };
-
-    let key = (*counts.as_array(), state);
-    if let Some(&cached) = memo.get(&key) {
-        return cached;
-    }
-
-    if state.melds < 4 {
-        best = best.min(try_branch(
-            counts,
-            tile,
-            TileCounts::remove_triplet,
-            state.with_meld(),
-            memo,
-        ));
-        best = best.min(try_branch(
-            counts,
-            tile,
-            TileCounts::remove_sequence,
-            state.with_meld(),
-            memo,
-        ));
-    }
-
-    if !state.has_pair {
-        best = best.min(try_branch(
-            counts,
-            tile,
-            TileCounts::remove_pair,
-            state.with_pair_head(),
-            memo,
-        ));
-    }
-
-    if state.melds + state.partials < 4 {
-        best = best.min(try_branch(
-            counts,
-            tile,
-            TileCounts::remove_pair,
-            state.with_partial(),
-            memo,
-        ));
-        best = best.min(try_branch(
-            counts,
-            tile,
-            TileCounts::remove_adjacent_wait,
-            state.with_partial(),
-            memo,
-        ));
-        best = best.min(try_branch(
-            counts,
-            tile,
-            TileCounts::remove_skip_wait,
-            state.with_partial(),
-            memo,
-        ));
-    }
-
-    let mut removed = counts;
-    if removed.remove(tile).is_ok() {
-        best = best.min(search(removed, state, memo));
-    }
-
-    memo.insert(key, best);
-    best
-}
-
-fn try_branch(
-    counts: TileCounts,
-    tile: TileType,
-    remove: fn(&mut TileCounts, TileType) -> Result<(), TileCountError>,
-    next_state: SearchState,
-    memo: &mut SearchMemo,
-) -> i8 {
-    let mut removed = counts;
-    if remove(&mut removed, tile).is_ok() {
-        search(removed, next_state, memo)
-    } else {
-        i8::MAX
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tile::TileType;
 
     fn tile(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).unwrap()
@@ -373,8 +224,8 @@ mod tests {
     }
 
     #[test]
-    fn reused_memo_keeps_the_same_shanten() {
-        // memo を呼び出し間で使い回しても、呼び出し順にかかわらず同じ向聴数を返す。
+    fn reused_profile_tables_keep_the_same_shanten() {
+        // 色ごとの要約表を呼び出し間で使い回しても、呼び出し順にかかわらず同じ向聴数を返す。
         let hands = [
             counts(&[
                 "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "5s", "E", "E",
@@ -403,7 +254,7 @@ mod tests {
             forward,
             hands.iter().map(standard_shanten).collect::<Vec<_>>()
         );
-        // 副露済み面子数は memo の key に含まれるので、門前の結果と混ざらない。
+        // 要約表は牌姿だけの表なので、副露済み面子数を足す段が門前の結果と混ざらない。
         assert_ne!(melded, forward);
         assert_eq!(
             melded,
