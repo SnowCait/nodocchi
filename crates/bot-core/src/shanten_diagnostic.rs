@@ -231,9 +231,12 @@ pub struct DiagnosticOptions {
     /// ([`ShantenDecisionDiagnostic::normal_discard_two_shanten_self_tsumo`]) を構築するかどうか。
     ///
     /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation」まで
-    /// 探索するため、`same_shanten_downstream` よりさらに重い。対象は打牌候補集合の最善向聴数が
-    /// 2向聴の場合だけで、`lookahead` が無効なら何も構築しない。打牌選択にも押し引きにも
-    /// 使わない観測値なので、有効にしても選択結果は変わらない。
+    /// 探索するため、追加探索の中で最も重い。対象は打牌候補集合の最善向聴数が2向聴の場合だけで、
+    /// `lookahead` が無効なら何も構築しない。打牌選択にも押し引きにも使わない観測値なので、
+    /// 有効にしても選択結果は変わらない。
+    ///
+    /// `same_shanten_downstream` とは対象も枝も別なので、互いに含まない。片方だけを要求した
+    /// 場合、もう片方の探索は走らない。
     pub two_shanten_self_tsumo: bool,
 }
 
@@ -256,23 +259,30 @@ impl DiagnosticOptions {
         same_shanten_downstream: true,
         two_shanten_self_tsumo: false,
     };
-    /// さらに、2向聴候補の ExpectedSelfTsumoValue も求める。
+    /// 2手先診断に加えて、2向聴候補の ExpectedSelfTsumoValue を求める。
+    ///
+    /// 対象も枝も違う `same_shanten_downstream` は含まない。両方必要な場合は
+    /// [`Self::WITH_SAME_SHANTEN_DOWNSTREAM_AND_TWO_SHANTEN_SELF_TSUMO`] を使う。
     pub const WITH_TWO_SHANTEN_SELF_TSUMO: Self = Self {
+        lookahead: true,
+        same_shanten_downstream: false,
+        two_shanten_self_tsumo: true,
+    };
+    /// 追加探索を両方とも構築する。
+    pub const WITH_SAME_SHANTEN_DOWNSTREAM_AND_TWO_SHANTEN_SELF_TSUMO: Self = Self {
         lookahead: true,
         same_shanten_downstream: true,
         two_shanten_self_tsumo: true,
     };
 
     pub(crate) fn lookahead_scope(self) -> LookaheadDiagnosticScope {
-        match (
-            self.lookahead,
-            self.same_shanten_downstream,
-            self.two_shanten_self_tsumo,
-        ) {
-            (false, _, _) => LookaheadDiagnosticScope::None,
-            (true, false, false) => LookaheadDiagnosticScope::Lookahead,
-            (true, _, true) => LookaheadDiagnosticScope::TwoShantenSelfTsumo,
-            (true, true, false) => LookaheadDiagnosticScope::SameShantenDownstream,
+        if !self.lookahead {
+            return LookaheadDiagnosticScope::None;
+        }
+        // 2つの追加探索は互いに独立で、要求されたものだけをそのまま伝える。
+        LookaheadDiagnosticScope::Lookahead {
+            same_shanten_downstream: self.same_shanten_downstream,
+            two_shanten_self_tsumo: self.two_shanten_self_tsumo,
         }
     }
 }

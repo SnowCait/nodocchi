@@ -81,6 +81,8 @@ Final decision
 
 枝は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` で、確率も打点も1向聴の `expected self-tsumo value` と同じ尺度です。diagnostics 専用で打牌選択には接続しておらず、起点の向聴数が違うため1向聴の値と同じ軸としては比較できません。読み方は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue-diagnostics-only) を参照してください。
 
+`--lookahead --verbose` の same-shanten downstream とは独立した診断で、互いに含みません。`--two-shanten-self-tsumo` 単独では downstream 探索は走らず、両方出す場合は `--two-shanten-self-tsumo --verbose` を指定します。
+
 ```text
 Two-shanten expected self-tsumo value
   self-tsumo continuation

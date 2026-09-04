@@ -845,7 +845,7 @@ mod tests {
                 remaining_tiles: None,
                 scores: None,
                 legal_reach: false,
-                scope: LookaheadDiagnosticScope::Lookahead,
+                scope: LookaheadDiagnosticScope::LOOKAHEAD,
             }
         }
     }

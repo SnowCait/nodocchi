@@ -55,17 +55,11 @@ where
         ScenarioSource::RiichilabCaptureBenchmark(spec) => return run_capture_benchmark(spec),
     };
 
-    // same-shanten の枝をテンパイまで追う探索は2手先評価よりさらに重いため、枝の詳細を出す
-    // --verbose と組み合わせた場合だけ構築する。2向聴候補の ExpectedSelfTsumoValue はさらに
-    // 重いので、明示的に要求された場合だけ構築する。診断の範囲は選択結果を変えない。
-    let options = match (args.lookahead, args.two_shanten_self_tsumo, args.verbose) {
-        (false, _, _) => DiagnosticOptions::NONE,
-        (true, true, _) => DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
-        (true, false, false) => DiagnosticOptions::WITH_LOOKAHEAD,
-        (true, false, true) => DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
-    };
-    let diagnostic =
-        ShantenAgent::diagnose_with_options(&scenario.context, &scenario.legal_actions, options);
+    let diagnostic = ShantenAgent::diagnose_with_options(
+        &scenario.context,
+        &scenario.legal_actions,
+        diagnostic_options(&args),
+    );
 
     let output = if args.summary_only {
         format_summary(&scenario, &diagnostic)
@@ -76,6 +70,18 @@ where
         Some(header) => format!("{header}\n\n{output}"),
         None => output,
     })
+}
+
+// CLI option から構築する診断の範囲。追加の深い探索は互いに独立で、要求されたものだけを
+// 構築する。same-shanten の枝をテンパイまで追う探索は枝の詳細を出す --verbose と組み合わせた
+// 場合だけ、2向聴候補の ExpectedSelfTsumoValue は --two-shanten-self-tsumo を指定した場合だけに
+// なる。診断の範囲は選択結果を変えない。
+fn diagnostic_options(args: &CliArgs) -> DiagnosticOptions {
+    DiagnosticOptions {
+        lookahead: args.lookahead,
+        same_shanten_downstream: args.lookahead && args.verbose,
+        two_shanten_self_tsumo: args.two_shanten_self_tsumo,
+    }
 }
 
 fn read_spec(path: &str) -> Result<ScenarioSpec, ScenarioError> {
@@ -96,6 +102,34 @@ mod tests {
 
     fn run_args(args: &[&str]) -> Result<String, ScenarioError> {
         run(args.iter().map(|arg| arg.to_string()))
+    }
+
+    fn options_of(args: &[&str]) -> DiagnosticOptions {
+        let parsed = CliArgs::parse(args.iter().map(|arg| arg.to_string())).unwrap();
+        diagnostic_options(&parsed)
+    }
+
+    #[test]
+    fn the_diagnostic_scope_options_are_independent() {
+        // 追加の深い探索は互いに含まない。--two-shanten-self-tsumo 単独では
+        // same-shanten downstream を構築しない。
+        assert_eq!(options_of(&["--hand", "123m"]), DiagnosticOptions::NONE);
+        assert_eq!(
+            options_of(&["--hand", "123m", "--lookahead"]),
+            DiagnosticOptions::WITH_LOOKAHEAD
+        );
+        assert_eq!(
+            options_of(&["--hand", "123m", "--lookahead", "--verbose"]),
+            DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM
+        );
+        assert_eq!(
+            options_of(&["--hand", "123m", "--two-shanten-self-tsumo"]),
+            DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO
+        );
+        assert_eq!(
+            options_of(&["--hand", "123m", "--two-shanten-self-tsumo", "--verbose"]),
+            DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM_AND_TWO_SHANTEN_SELF_TSUMO
+        );
     }
 
     #[test]

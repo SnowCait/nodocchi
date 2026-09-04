@@ -70,6 +70,8 @@ cargo run -p bot-scenario -- \
 
 `--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に `Two-shanten expected self-tsumo value` を追加します。1向聴の `ExpectedSelfTsumoValue` と同じ尺度で2向聴候補を並べる diagnostics 専用の値で、打牌選択には接続していません。探索は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` まで進むため、他のどの診断よりも重くなります。残り自摸機会が要るので `--remaining-tiles` と併用してください。詳細は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue-diagnostics-only) を参照してください。
 
+`--lookahead --verbose` が追う1向聴候補の same-shanten downstream とは対象も枝も別なので、互いに含みません。`--two-shanten-self-tsumo` 単独では downstream 探索は走らず、両方必要な場合は `--two-shanten-self-tsumo --verbose` を指定します。
+
 ```bash
 cargo run -p bot-scenario -- \
   --hand "11258m234789p13s" \

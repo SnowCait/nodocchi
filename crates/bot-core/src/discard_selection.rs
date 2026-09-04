@@ -83,7 +83,7 @@ pub(crate) struct DiscardActionSelection {
 
 /// 2手先診断をどこまで構築するか。
 ///
-/// どの段階でも打牌選択の結果は変わらない。深い段ほど探索が重くなるため、必要な経路が明示的に
+/// どの指定でも打牌選択の結果は変わらない。追加の深い探索ほど重くなるため、必要な経路が明示的に
 /// 指定する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LookaheadDiagnosticScope {
@@ -91,21 +91,37 @@ pub(crate) enum LookaheadDiagnosticScope {
     #[default]
     None,
     /// 全合法候補の2手先診断を構築する。
-    Lookahead,
-    /// 2手先診断に加えて、1向聴候補の same-shanten の枝をテンパイまでもう1段追う。
     ///
-    /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
-    /// [`Self::Lookahead`] よりさらに重い。打牌選択にも押し引きにも使わない観測値。
-    SameShantenDownstream,
-    /// [`Self::SameShantenDownstream`] に加えて、現在打牌後が2向聴の候補の
-    /// ExpectedSelfTsumoValue も求める。
-    ///
-    /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存 continuation」まで探索する
-    /// ため、この中で最も重い。打牌選択にも押し引きにも使わない観測値。
-    TwoShantenSelfTsumo,
+    /// 追加の深い探索は互いに独立で、要求されたものだけを構築する。どちらも2手先診断の枝を
+    /// 起点にするため、2手先診断を構築しない場合は指定できない。
+    Lookahead {
+        /// 1向聴候補の same-shanten の枝をテンパイまでもう1段追うかどうか。
+        ///
+        /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
+        /// 2手先診断だけの場合よりさらに重い。打牌選択にも押し引きにも使わない観測値。
+        same_shanten_downstream: bool,
+        /// 現在打牌後が2向聴の候補の ExpectedSelfTsumoValue を求めるかどうか。
+        ///
+        /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存 continuation」まで
+        /// 探索するため、この中で最も重い。打牌選択にも押し引きにも使わない観測値。
+        two_shanten_self_tsumo: bool,
+    },
 }
 
 impl LookaheadDiagnosticScope {
+    /// 2手先診断だけを構築する。
+    #[cfg(test)]
+    pub(crate) const LOOKAHEAD: Self = Self::Lookahead {
+        same_shanten_downstream: false,
+        two_shanten_self_tsumo: false,
+    };
+    /// 2手先診断に加えて、same-shanten の枝をテンパイまで追う。
+    #[cfg(test)]
+    pub(crate) const SAME_SHANTEN_DOWNSTREAM: Self = Self::Lookahead {
+        same_shanten_downstream: true,
+        two_shanten_self_tsumo: false,
+    };
+
     fn builds_lookahead(self) -> bool {
         !matches!(self, Self::None)
     }
@@ -113,12 +129,21 @@ impl LookaheadDiagnosticScope {
     fn builds_same_shanten_downstream(self) -> bool {
         matches!(
             self,
-            Self::SameShantenDownstream | Self::TwoShantenSelfTsumo
+            Self::Lookahead {
+                same_shanten_downstream: true,
+                ..
+            }
         )
     }
 
     fn builds_two_shanten_self_tsumo(self) -> bool {
-        matches!(self, Self::TwoShantenSelfTsumo)
+        matches!(
+            self,
+            Self::Lookahead {
+                two_shanten_self_tsumo: true,
+                ..
+            }
+        )
     }
 }
 
@@ -3348,7 +3373,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert_eq!(without.selection, with.selection);
@@ -3369,7 +3394,7 @@ pub(crate) mod tests {
         let with_value = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
         let without_value = select_discard_action_with_diagnostic(
             &context,
@@ -3412,7 +3437,7 @@ pub(crate) mod tests {
         let selection = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
         let lookahead = selection.lookahead.expect("2手先診断が構築されている");
         let value = selection.lookahead_value.expect("将来打点が構築されている");
@@ -3555,7 +3580,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert_eq!(normal, without.selection);
@@ -3600,7 +3625,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert_eq!(legal.evaluations.len(), 9);
@@ -3727,7 +3752,7 @@ pub(crate) mod tests {
         let with_diagnostic = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         with_diagnostic
@@ -3776,7 +3801,7 @@ pub(crate) mod tests {
         let with_diagnostic = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         let next = with_diagnostic
@@ -3820,7 +3845,7 @@ pub(crate) mod tests {
         let with = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
 
         assert!(without.lookahead.is_none());
@@ -4485,7 +4510,7 @@ pub(crate) mod tests {
         let selection = select_discard_action_with_diagnostic(
             &context,
             &actions,
-            LookaheadDiagnosticScope::Lookahead,
+            LookaheadDiagnosticScope::LOOKAHEAD,
         );
         let draw = selection
             .lookahead
@@ -4808,8 +4833,8 @@ pub(crate) mod tests {
         let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
         let selections: Vec<_> = [
             LookaheadDiagnosticScope::None,
-            LookaheadDiagnosticScope::Lookahead,
-            LookaheadDiagnosticScope::SameShantenDownstream,
+            LookaheadDiagnosticScope::LOOKAHEAD,
+            LookaheadDiagnosticScope::SAME_SHANTEN_DOWNSTREAM,
         ]
         .into_iter()
         .map(|scope| select_discard_action_with_diagnostic(&context, &actions, scope))

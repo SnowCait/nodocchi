@@ -1007,9 +1007,9 @@ mod tests {
             .with_history_furiten_facts(self.history_furiten);
 
             let scope = if self.downstream {
-                LookaheadDiagnosticScope::SameShantenDownstream
+                LookaheadDiagnosticScope::SAME_SHANTEN_DOWNSTREAM
             } else {
-                LookaheadDiagnosticScope::Lookahead
+                LookaheadDiagnosticScope::LOOKAHEAD
             };
             let selection = select_discard_action_with_diagnostic(&ctx, &actions, scope);
             Case {
