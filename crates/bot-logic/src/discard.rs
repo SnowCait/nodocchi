@@ -1285,6 +1285,38 @@ impl CandidateSeen {
     }
 }
 
+// 打牌候補1件分の受け入れを求める経路。
+//
+// 既定は既存の受け入れ計算そのもの ([`CalculatedAcceptance`]) で、2手先評価だけが1回の探索の
+// 間に同じ入力の結果を共有する実装を渡す。受け入れの求め方そのものはどちらの経路でも
+// [`calculate_acceptance_with_fixed_melds_and_seen`] 1本で、打牌評価本体は共有する。
+pub(crate) trait DiscardAcceptance {
+    fn acceptance(
+        &self,
+        after_discard: &TileCounts,
+        fixed_meld_count: FixedMeldCount,
+        additional_seen: &[u8; TileType::COUNT],
+    ) -> EffectiveAcceptance;
+}
+
+// 打牌候補ごとに受け入れをそのまま計算する既定の経路。
+pub(crate) struct CalculatedAcceptance;
+
+impl DiscardAcceptance for CalculatedAcceptance {
+    fn acceptance(
+        &self,
+        after_discard: &TileCounts,
+        fixed_meld_count: FixedMeldCount,
+        additional_seen: &[u8; TileType::COUNT],
+    ) -> EffectiveAcceptance {
+        calculate_acceptance_with_fixed_melds_and_seen(
+            after_discard,
+            fixed_meld_count,
+            additional_seen,
+        )
+    }
+}
+
 // 打牌候補評価の本体。門前・副露と visible tiles の有無で共有する唯一の生成経路。
 //
 // 副露済み面子数は受け入れ計算 (PR #108 の fixed meld 対応 API)・一向聴形分類・形ペナルティの
@@ -1293,6 +1325,23 @@ pub(crate) fn evaluate_discards_with_seen(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     seen: &CandidateSeen,
+) -> Vec<DiscardEvaluation> {
+    evaluate_discards_with_seen_and_acceptance(
+        counts,
+        fixed_meld_count,
+        seen,
+        &CalculatedAcceptance,
+    )
+}
+
+// 受け入れを求める経路だけを差し替えられる打牌候補評価。候補の列挙・一向聴形分類・形ペナルティ・
+// 孤立牌判定は [`evaluate_discards_with_seen`] と同じものを通り、`acceptance` が返す受け入れも
+// 同じ入力に対して同じ値でなければならない。
+pub(crate) fn evaluate_discards_with_seen_and_acceptance(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    seen: &CandidateSeen,
+    acceptance: &dyn DiscardAcceptance,
 ) -> Vec<DiscardEvaluation> {
     let mut evaluations = Vec::new();
 
@@ -1307,7 +1356,7 @@ pub(crate) fn evaluate_discards_with_seen(
             continue;
         }
 
-        let acceptance_after_discard = calculate_acceptance_with_fixed_melds_and_seen(
+        let acceptance_after_discard = acceptance.acceptance(
             &after_discard,
             fixed_meld_count,
             &seen.additional_seen(tile),

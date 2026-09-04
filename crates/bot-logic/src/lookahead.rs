@@ -93,12 +93,31 @@
 //!
 //! # 探索 node 間の base 打牌評価
 //!
-//! 既存打牌評価 ([`evaluate_discards_with_seen`]) は打牌前の手牌・副露済み面子数・見え牌だけで
-//! 決まる。したがって、この3つが一致する探索 node は同じ base 評価になり、1回の探索の間だけ
-//! 結果を共有する。共有するのは3つとも一致する場合だけで、1手目に切った牌が違えば見え牌も
-//! 違うため別の評価になる。物理牌・ドラ・赤5・場風 / 自風は base 評価の入力ではなく、node
-//! ごとに [`decorate_evaluations`] が反映するため、共有しても枝ごとの文脈は失われない。
-//! 探索する枝も比較も集計も変わらない。
+//! 既存打牌評価 ([`evaluate_discards_with_seen`](crate::discard::evaluate_discards_with_seen)) は
+//! 打牌前の手牌・副露済み面子数・見え牌だけで決まる。したがって、この3つが一致する探索 node は
+//! 同じ base 評価になり、1回の探索の間だけ結果を共有する。共有するのは3つとも一致する場合
+//! だけで、1手目に切った牌が違えば見え牌も違うため別の評価になる。物理牌・ドラ・赤5・場風 /
+//! 自風は base 評価の入力ではなく、node ごとに [`decorate_evaluations`] が反映するため、共有
+//! しても枝ごとの文脈は失われない。探索する枝も比較も集計も変わらない。
+//!
+//! # 探索 node 間の打牌後の受け入れ
+//!
+//! base 打牌評価が一致するのは打牌前の手牌・副露済み面子数・見え牌が3つとも一致する node だけ
+//! だが、その内側の打牌候補1件分の受け入れ計算はもう一段細かい単位で一致する。受け入れ計算の
+//! 入力は「打牌後の手牌・副露済み面子数・その候補を切ったときの見え牌」だけなので、
+//!
+//! ```text
+//! 打 A → ツモ X → 打 B    と    打 B → ツモ X → 打 A
+//! ```
+//!
+//! のように到達順が違っても打牌後の手牌と見え牌は同じになり、同じ受け入れになる。base 評価は
+//! 打牌前の手牌が違う (`手牌 - A + X` と `手牌 - B + X`) ため共有できないが、候補単位の受け入れ
+//! はこの重複を除ける。1回の探索の間だけ結果を共有する。
+//!
+//! 共有する値は受け入れ計算そのものの戻り値で、打牌候補の列挙・一向聴形分類・形ペナルティ・
+//! 孤立牌判定・文脈反映はどの node でも従来どおり通る。見え牌は候補打牌1枚を足した後の実際の
+//! 入力 ([`CandidateSeen::additional_seen`] の戻り値) を key にするため、`counts_candidate_discard`
+//! を含む既存 seen semantics のまま同じ入力だけを共有する。
 //!
 //! # 2向聴から1向聴へ進む枝
 //!
@@ -116,11 +135,12 @@
 
 use crate::acceptance::{
     DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
-    same_shanten_draws_with_fixed_melds_and_seen, unknown_tile_count,
+    calculate_acceptance_with_fixed_melds_and_seen, same_shanten_draws_with_fixed_melds_and_seen,
+    unknown_tile_count,
 };
 use crate::discard::{
-    CandidateSeen, DecorationContext, DiscardEvaluation, ShapePenaltyMode, decorate_evaluations,
-    evaluate_discards_with_seen, split_discarded_tile,
+    CandidateSeen, DecorationContext, DiscardAcceptance, DiscardEvaluation, ShapePenaltyMode,
+    decorate_evaluations, evaluate_discards_with_seen_and_acceptance, split_discarded_tile,
 };
 use crate::furiten::TENPAI_SHANTEN;
 use crate::iishanten::IishantenShape;
@@ -473,14 +493,55 @@ pub struct LookaheadInputs<'a> {
     root: HandState,
     // この探索で評価済みの base 打牌評価。
     base_evaluations: RefCell<HashMap<BaseEvaluationKey, Vec<DiscardEvaluation>>>,
+    // この探索で求めた打牌候補1件分の受け入れ。
+    after_discard_acceptances: RefCell<HashMap<AfterDiscardAcceptanceKey, EffectiveAcceptance>>,
 }
 
-/// base 打牌評価 ([`evaluate_discards_with_seen`]) の入力そのもの。
+/// base 打牌評価 ([`evaluate_discards_with_seen`](crate::discard::evaluate_discards_with_seen)) の
+/// 入力そのもの。
 ///
 /// 打牌候補の列挙・向聴・受け入れ・一向聴形分類・形ペナルティはこの3つだけで決まるため、同じ
 /// 入力の探索 node は同じ base 評価になる。物理牌・ドラ・場風 / 自風は入力に含まれず、node
 /// ごとに [`decorate_evaluations`] が反映する。
 type BaseEvaluationKey = (TileCounts, FixedMeldCount, CandidateSeen);
+
+/// 打牌候補1件分の受け入れ計算 ([`calculate_acceptance_with_fixed_melds_and_seen`]) の入力その
+/// もの。
+///
+/// 見え牌は候補打牌1枚を足した後の実際の入力なので、`counts_candidate_discard` の有無を含めた
+/// 既存 seen semantics のまま同じ入力だけが一致する。
+type AfterDiscardAcceptanceKey = (TileCounts, FixedMeldCount, [u8; TileType::COUNT]);
+
+// 1回の探索の間だけ、同じ入力の受け入れ計算の結果を共有する経路。
+//
+// 受け入れ ([`EffectiveAcceptance`]) は入力だけで決まる値なので、同じ入力なら計算し直しても
+// 同じ値になる。共有するのは3つとも一致する場合だけで、打牌後の手牌・副露済み面子数・見え牌の
+// どれかが違えば従来どおり別々に計算する。
+struct SearchedAcceptances<'a> {
+    searched: &'a RefCell<HashMap<AfterDiscardAcceptanceKey, EffectiveAcceptance>>,
+}
+
+impl DiscardAcceptance for SearchedAcceptances<'_> {
+    fn acceptance(
+        &self,
+        after_discard: &TileCounts,
+        fixed_meld_count: FixedMeldCount,
+        additional_seen: &[u8; TileType::COUNT],
+    ) -> EffectiveAcceptance {
+        let key = (*after_discard, fixed_meld_count, *additional_seen);
+        if let Some(searched) = self.searched.borrow().get(&key) {
+            return searched.clone();
+        }
+
+        let acceptance = calculate_acceptance_with_fixed_melds_and_seen(
+            after_discard,
+            fixed_meld_count,
+            additional_seen,
+        );
+        self.searched.borrow_mut().insert(key, acceptance.clone());
+        acceptance
+    }
+}
 
 impl<'a> LookaheadInputs<'a> {
     pub fn new(
@@ -507,6 +568,7 @@ impl<'a> LookaheadInputs<'a> {
                 discarded: Vec::new(),
             },
             base_evaluations: RefCell::new(HashMap::new()),
+            after_discard_acceptances: RefCell::new(HashMap::new()),
         }
     }
 
@@ -584,10 +646,13 @@ impl<'a> LookaheadInputs<'a> {
 
     // 仮想手牌1つ分の base 打牌評価。物理牌・ドラ・場風 / 自風を反映する前の値を返す。
     //
-    // [`evaluate_discards_with_seen`] は counts・副露済み面子数・見え牌だけで決まるため、探索
-    // 中に同じ入力の node が現れたらこの探索の間だけ結果を共有する。共有するのは3つとも一致
-    // する場合だけで、見え牌や副露済み面子数が違う node は別の評価になる。物理牌・ドラ・赤5の
-    // 違いは呼び出し側が node ごとに [`decorate_evaluations`] で反映する。
+    // 既存打牌評価は counts・副露済み面子数・見え牌だけで決まるため、探索中に同じ入力の node が
+    // 現れたらこの探索の間だけ結果を共有する。共有するのは3つとも一致する場合だけで、見え牌や
+    // 副露済み面子数が違う node は別の評価になる。物理牌・ドラ・赤5の違いは呼び出し側が node
+    // ごとに [`decorate_evaluations`] で反映する。
+    //
+    // 3つが一致しない node でも打牌候補1件分の受け入れは一致し得るので、その単位の共有は
+    // [`SearchedAcceptances`] が担う。
     fn base_evaluations(
         &self,
         counts: &TileCounts,
@@ -598,7 +663,14 @@ impl<'a> LookaheadInputs<'a> {
             return cached.clone();
         }
 
-        let evaluations = evaluate_discards_with_seen(counts, self.fixed_meld_count, seen);
+        let evaluations = evaluate_discards_with_seen_and_acceptance(
+            counts,
+            self.fixed_meld_count,
+            seen,
+            &SearchedAcceptances {
+                searched: &self.after_discard_acceptances,
+            },
+        );
         self.base_evaluations
             .borrow_mut()
             .insert(key, evaluations.clone());
@@ -1530,7 +1602,7 @@ mod tests {
         DiscardComparisonReason, diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
         evaluate_discards_from_tiles_with_fixed_melds_and_context,
         evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
-        select_best_discard_from_tiles_with_context,
+        evaluate_discards_with_seen, select_best_discard_from_tiles_with_context,
         select_best_discard_from_tiles_with_visible_tiles,
     };
     use crate::tile::count_indicated_dora;
@@ -4473,5 +4545,157 @@ mod tests {
             diagnose(&melded, &melded.evaluations),
             diagnose(&more_melds, &more_melds.evaluations),
         );
+    }
+
+    // ---- 探索 node 間の打牌後の受け入れ ----
+
+    // 探索が打牌後の受け入れを要求した回数と、実際に計算した入力の数。
+    //
+    // base 打牌評価は miss のときだけ全打牌候補分の受け入れを求めるので、要求回数は共有済みの
+    // base 評価が持つ打牌候補の合計になる。
+    fn searched_acceptances(inputs: &LookaheadInputs) -> (usize, usize) {
+        let requested = inputs
+            .base_evaluations
+            .borrow()
+            .values()
+            .map(Vec::len)
+            .sum();
+        (requested, inputs.after_discard_acceptances.borrow().len())
+    }
+
+    // 共有した受け入れが、その入力から求め直した受け入れと一致することを確認する。
+    fn assert_searched_acceptances_match_a_fresh_calculation(inputs: &LookaheadInputs) {
+        let searched = inputs.after_discard_acceptances.borrow();
+        assert!(!searched.is_empty());
+        for ((after_discard, fixed_meld_count, additional_seen), acceptance) in searched.iter() {
+            assert_eq!(
+                &calculate_acceptance_with_fixed_melds_and_seen(
+                    after_discard,
+                    *fixed_meld_count,
+                    additional_seen,
+                ),
+                acceptance,
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_nodes_share_an_acceptance_that_matches_a_fresh_one() {
+        // 同じ入力の打牌候補が共有する受け入れは、その入力から求め直した受け入れと一致する。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        let inputs = inputs(&case.situation);
+        let lookahead = diagnose_lookahead(&inputs, &case.situation.evaluations);
+        assert_eq!(lookahead, case.lookahead);
+
+        assert_searched_acceptances_match_a_fresh_calculation(&inputs);
+
+        // 要求回数より計算した入力の数のほうが少ない = 同じ入力の受け入れを共有している。
+        let (requested, calculated) = searched_acceptances(&inputs);
+        assert!(
+            calculated < requested,
+            "共有していない: requested {requested} calculated {calculated}"
+        );
+
+        // 共有した受け入れを持つ枝の最良打牌が、その枝だけを既存 API で評価し直した結果と
+        // 一致する。受け入れも打点も比較も既存経路のままなので、選ぶ打牌も変わらない。
+        assert!(assert_next_discard_matches_existing_evaluation(case) > 0);
+    }
+
+    #[test]
+    fn a_reused_acceptance_keeps_the_forward_metrics_and_the_selection() {
+        // 受け入れを共有しても、集計値も選ぶ打牌も変わらない。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluations = &case.situation.evaluations;
+
+        let searched = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let metrics = forward_metrics(&searched, evaluations);
+        let (requested, calculated) = searched_acceptances(&searched);
+        assert!(
+            calculated < requested,
+            "共有していない: requested {requested} calculated {calculated}"
+        );
+        assert_searched_acceptances_match_a_fresh_calculation(&searched);
+
+        // 別の探索でも同じ集計値になる。
+        let fresh = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let fresh_metrics = forward_metrics(&fresh, evaluations);
+        assert_eq!(fresh_metrics, metrics);
+        assert!(
+            metrics
+                .iter()
+                .any(|metric| *metric != ForwardMetrics::default())
+        );
+
+        let selected = best_discard_selection_index_with_forward_metrics(evaluations, &metrics);
+        assert_eq!(
+            selected,
+            best_discard_selection_index_with_forward_metrics(evaluations, &fresh_metrics),
+        );
+        assert!(selected.is_some());
+    }
+
+    #[test]
+    fn an_acceptance_is_shared_only_between_the_same_hand_melds_and_seen() {
+        // 打牌後の手牌・副露済み面子数・見え牌のどれかが違えば、同じ受け入れとして扱わない。
+        let searched = RefCell::new(HashMap::new());
+        let acceptances = SearchedAcceptances {
+            searched: &searched,
+        };
+
+        // 門前14枚 112233m 456p 789p EE。打 E の後は E の単騎待ちで、残枚数が見え牌で変わる。
+        let tiles = ids(&[0, 1, 4, 5, 8, 9, 48, 53, 57, 60, 64, 68, 108, 109]);
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let mut after_discard = counts;
+        after_discard.remove(tile("E")).expect("E を切れる");
+
+        // 見え牌を持たない経路は、今から切る候補牌を seen に数えない既存 semantics のまま。
+        let hand_only = CandidateSeen::hand_only();
+        // 自分の手牌だけが見えている経路は、今から切る E を seen へ数える。
+        let own_hand_visible = CandidateSeen::from_visible_tiles(&counts, &tiles);
+        // 他家からもう1枚 E が見えている経路。
+        let mut with_public_east = tiles.clone();
+        with_public_east.push(TileId::new(110).expect("3枚目の E"));
+        let another_east_visible = CandidateSeen::from_visible_tiles(&counts, &with_public_east);
+
+        let of = |seen: &CandidateSeen| {
+            acceptances.acceptance(
+                &after_discard,
+                FixedMeldCount::NONE,
+                &seen.additional_seen(tile("E")),
+            )
+        };
+        let counted_candidate = of(&own_hand_visible);
+        assert_ne!(of(&hand_only), counted_candidate);
+        assert_ne!(of(&another_east_visible), counted_candidate);
+
+        // 同じ入力は共有し、その値は求め直した受け入れと一致する。
+        assert_eq!(of(&own_hand_visible), counted_candidate);
+        assert_eq!(
+            counted_candidate,
+            calculate_acceptance_with_fixed_melds_and_seen(
+                &after_discard,
+                FixedMeldCount::NONE,
+                &own_hand_visible.additional_seen(tile("E")),
+            ),
+        );
+
+        // 副露済み面子数だけが違う入力も共有しない。
+        let melded = TileCounts::from_tiles(melded_hand().iter().copied());
+        let melded_seen = CandidateSeen::from_visible_tiles(&melded, &melded_hand());
+        let mut after_melded_discard = melded;
+        after_melded_discard
+            .remove(tile("9p"))
+            .expect("9p を切れる");
+        let melded_of = |fixed_meld_count| {
+            acceptances.acceptance(
+                &after_melded_discard,
+                fixed_meld_count,
+                &melded_seen.additional_seen(tile("9p")),
+            )
+        };
+        assert_ne!(melded_of(fixed(2)), melded_of(fixed(3)));
+
+        // 違う入力は別々に持つ。
+        assert_eq!(searched.borrow().len(), 5);
     }
 }
