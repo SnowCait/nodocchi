@@ -112,7 +112,7 @@ fn env_filter(directives: &str) -> EnvFilter {
 pub fn slow_log_path(log_file: &Path) -> PathBuf {
     let mut file_name = log_file
         .file_stem()
-        .unwrap_or_else(|| log_file.as_os_str())
+        .unwrap_or(log_file.as_os_str())
         .to_os_string();
     file_name.push("-slow.log");
     log_file.with_file_name(file_name)
