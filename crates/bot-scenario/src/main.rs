@@ -15,12 +15,12 @@ mod tiles;
 
 use std::process::ExitCode;
 
-use bot_core::{DiagnosticOptions, ShantenAgent};
+use bot_core::{DiagnosticOptions, ShantenAgent, measure_two_shanten_self_tsumo};
 
 use crate::benchmark::run_capture_benchmark;
 use crate::cli::{CliArgs, ScenarioSource, USAGE};
 use crate::error::ScenarioError;
-use crate::format::{format_diagnostic, format_summary};
+use crate::format::{format_diagnostic, format_summary, format_two_shanten_self_tsumo_cost};
 use crate::replay::load_captured_scenario;
 use crate::scenario::{Scenario, ScenarioSpec};
 
@@ -65,6 +65,20 @@ where
         format_summary(&scenario, &diagnostic)
     } else {
         format_diagnostic(&scenario, &diagnostic, args.verbose)
+    };
+    // 計測は他の診断とは別の section として後ろに足すだけで、その手前の判断も表示も変えない。
+    let output = match args.two_shanten_self_tsumo_cost {
+        Some(scope) => {
+            let cost =
+                measure_two_shanten_self_tsumo(&scenario.context, &scenario.legal_actions, scope);
+            let section = format_two_shanten_self_tsumo_cost(
+                scope,
+                &cost,
+                diagnostic.normal_discard_self_tsumo_facts,
+            );
+            format!("{output}\n\n{section}")
+        }
+        None => output,
     };
     Ok(match header {
         Some(header) => format!("{header}\n\n{output}"),

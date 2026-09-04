@@ -20,9 +20,11 @@ use crate::shanten_test_support::{
     weak_tenpai_under_reach_context,
 };
 use crate::threat::diagnose_player_threats;
+use crate::two_shanten_self_tsumo_cost::measure_two_shanten_self_tsumo;
 use bot_logic::{
     DiscardComparisonReason, DiscardFuritenDiagnostic, DrawTransition, FixedMeldCount,
-    PermanentFuriten, TenpaiWaitAvailability, TileId, TileType, compare_discard_evaluations,
+    PermanentFuriten, TenpaiWaitAvailability, TileId, TileType, TwoShantenSelfTsumoScope,
+    compare_discard_evaluations,
 };
 
 // ---- 構造化診断 (ShantenAgent::diagnose) テスト ----
@@ -1604,6 +1606,135 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_change_the_selected_action() {
         },
         without
     );
+}
+
+#[test]
+fn the_two_shanten_self_tsumo_cost_measurement_returns_the_same_values_as_the_diagnostic() {
+    // 計測経路が求める値は診断そのもの。候補ごとの実測を取るだけで、探索も集計も変わらない。
+    let ctx = two_shanten_context(Some(66));
+    let actions = two_shanten_actions();
+
+    let expected = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+    )
+    .normal_discard_two_shanten_self_tsumo
+    .expect("2向聴診断が構築されている");
+    assert!(
+        expected
+            .candidates
+            .iter()
+            .all(|candidate| candidate.expected_self_tsumo_value.is_some())
+    );
+
+    let measured =
+        measure_two_shanten_self_tsumo(&ctx, &actions, TwoShantenSelfTsumoScope::AllCandidates);
+
+    assert_eq!(measured.diagnostic, expected);
+    assert_eq!(measured.two_shanten_candidates, expected.candidates.len());
+    assert_eq!(
+        measured
+            .candidates
+            .iter()
+            .map(|(discard, _)| *discard)
+            .collect::<Vec<_>>(),
+        expected
+            .candidates
+            .iter()
+            .map(|candidate| candidate.discard)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_forward_target_scope_evaluates_only_the_production_comparison_cohort() {
+    // production の比較対象にならない候補は評価そのものを行わない。残った候補の値は全候補で
+    // 求めた場合と完全に一致する。
+    let ctx = two_shanten_context(Some(66));
+    let actions = two_shanten_actions();
+
+    let all =
+        measure_two_shanten_self_tsumo(&ctx, &actions, TwoShantenSelfTsumoScope::AllCandidates);
+    let targets =
+        measure_two_shanten_self_tsumo(&ctx, &actions, TwoShantenSelfTsumoScope::ForwardTargets);
+
+    // 打牌後が2向聴の候補数は範囲によらず同じで、比較対象はその真部分集合になる。
+    assert_eq!(
+        targets.two_shanten_candidates,
+        all.diagnostic.candidates.len()
+    );
+    assert!(!targets.diagnostic.candidates.is_empty());
+    assert!(targets.diagnostic.candidates.len() < all.diagnostic.candidates.len());
+
+    // 比較対象は打牌選択が実際に前方評価へ回す候補と一致する。
+    let compared = compared_discards(&ctx, &actions);
+    assert_eq!(
+        targets
+            .diagnostic
+            .candidates
+            .iter()
+            .map(|candidate| candidate.discard)
+            .collect::<Vec<_>>(),
+        compared
+    );
+    assert_eq!(
+        targets
+            .candidates
+            .iter()
+            .map(|(discard, _)| *discard)
+            .collect::<Vec<_>>(),
+        compared
+    );
+
+    for candidate in &targets.diagnostic.candidates {
+        assert_eq!(all.diagnostic.candidate(candidate.discard), Some(candidate));
+    }
+}
+
+#[test]
+fn the_two_shanten_self_tsumo_cost_measurement_does_not_change_the_selected_action() {
+    // 計測は打牌選択を通らない別の入口で、計測の前後でも範囲を変えても選ぶ action は同じ。
+    let ctx = two_shanten_context(Some(66));
+    let actions = two_shanten_actions();
+
+    let mut agent = ShantenAgent;
+    let expected = agent.act(&ctx, &actions);
+    for scope in [
+        TwoShantenSelfTsumoScope::AllCandidates,
+        TwoShantenSelfTsumoScope::ForwardTargets,
+    ] {
+        measure_two_shanten_self_tsumo(&ctx, &actions, scope);
+        assert_eq!(agent.act(&ctx, &actions), expected);
+    }
+}
+
+// production の打牌比較が Shanten / IsolatedTile / IsolatedHonor で決着させず、前方評価まで
+// 残した候補。診断そのものではなく打牌比較の結果から求める。
+fn compared_discards(ctx: &GameContext, actions: &[LegalAction]) -> Vec<TileType> {
+    let candidates = ShantenAgent::diagnose(ctx, actions)
+        .normal_discard
+        .expect("normal discard evaluated")
+        .candidates;
+    let best = candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .expect("最善候補がある");
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.selected
+                || (candidate.evaluation.min_shanten_after_discard()
+                    == best.evaluation.min_shanten_after_discard()
+                    && !matches!(
+                        candidate.comparison_reason,
+                        DiscardComparisonReason::Shanten
+                            | DiscardComparisonReason::IsolatedTile
+                            | DiscardComparisonReason::IsolatedHonor
+                    ))
+        })
+        .map(|candidate| candidate.evaluation.discard)
+        .collect()
 }
 
 #[test]

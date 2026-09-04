@@ -1,3 +1,4 @@
+use bot_logic::TwoShantenSelfTsumoScope;
 use thiserror::Error;
 
 use crate::scenario::{HistoryFuritenSpec, ScenarioSpec};
@@ -8,9 +9,9 @@ pub const USAGE: &str = "usage:
                [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
                [--no-history-furiten] [--allow-hora]
                [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
-               [--summary-only]
+               [--two-shanten-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--two-shanten-self-tsumo] [--verbose]
-               [--summary-only]
+               [--two-shanten-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
                [--two-shanten-self-tsumo] [--verbose] [--summary-only]
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
@@ -23,6 +24,10 @@ pub const USAGE: &str = "usage:
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
   --two-shanten-self-tsumo adds the expected self-tsumo value of the two-shanten discard
   candidates; it implies --lookahead and searches deeper than any other diagnostic
+  --two-shanten-self-tsumo-cost measures that same search instead of rendering it, with
+  <SCOPE> all for every two-shanten candidate and forward-targets for the production
+  comparison cohort only; it cannot be combined with any other diagnostic option, so that
+  no deeper search warms the shanten and acceptance memos before the measurement
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -72,6 +77,12 @@ pub enum CliError {
 
     #[error("--benchmark-json requires --benchmark-riichilab-capture")]
     BenchmarkJsonWithoutBenchmark,
+
+    #[error("--two-shanten-self-tsumo-cost must be all or forward-targets, but is {0:?}")]
+    InvalidTwoShantenSelfTsumoCostScope(String),
+
+    #[error("--two-shanten-self-tsumo-cost cannot be combined with {0}")]
+    ConflictingTwoShantenSelfTsumoCost(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +111,9 @@ pub struct CliArgs {
     /// 2向聴候補の ExpectedSelfTsumoValue を構築して表示するかどうか。2手先診断よりさらに重い
     /// 探索なので既定では行わない。指定した場合は2手先診断も構築する。
     pub two_shanten_self_tsumo: bool,
+    /// 2向聴候補の ExpectedSelfTsumoValue の実行コストを計測する対象の範囲。計測する場合だけ
+    /// `Some`。表示するのは実測時間と値だけで、打牌選択も他の診断も変わらない。
+    pub two_shanten_self_tsumo_cost: Option<TwoShantenSelfTsumoScope>,
     /// Summary だけを表示するかどうか。判断は同じで、表示する section だけが変わる。
     pub summary_only: bool,
 }
@@ -117,6 +131,7 @@ impl CliArgs {
         let mut verbose = false;
         let mut lookahead = false;
         let mut two_shanten_self_tsumo = false;
+        let mut two_shanten_self_tsumo_cost = None;
         let mut summary_only = false;
         let mut capture: Option<String> = None;
         let mut request_id: Option<u64> = None;
@@ -206,6 +221,10 @@ impl CliArgs {
                 }
                 "--lookahead" => lookahead = true,
                 "--two-shanten-self-tsumo" => two_shanten_self_tsumo = true,
+                "--two-shanten-self-tsumo-cost" => {
+                    let value = value_of(&mut args, "--two-shanten-self-tsumo-cost")?;
+                    two_shanten_self_tsumo_cost = Some(two_shanten_self_tsumo_cost_scope(&value)?);
+                }
                 "--verbose" => verbose = true,
                 "--summary-only" => summary_only = true,
                 other if other.starts_with('-') => {
@@ -236,6 +255,8 @@ impl CliArgs {
                 Some("--lookahead".to_string())
             } else if two_shanten_self_tsumo {
                 Some("--two-shanten-self-tsumo".to_string())
+            } else if two_shanten_self_tsumo_cost.is_some() {
+                Some("--two-shanten-self-tsumo-cost".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -255,12 +276,32 @@ impl CliArgs {
                 verbose: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
+                two_shanten_self_tsumo_cost: None,
                 summary_only: false,
             });
         }
 
         if benchmark_json.is_some() {
             return Err(CliError::BenchmarkJsonWithoutBenchmark);
+        }
+
+        // 計測は cost measurement より前に追加の深い探索を走らせない。先行する探索は向聴・
+        // 受け入れの memo を温めるため、後続の計測が本来より速く見えてしまう。
+        if two_shanten_self_tsumo_cost.is_some() {
+            let conflict = if two_shanten_self_tsumo {
+                Some("--two-shanten-self-tsumo")
+            } else if lookahead {
+                Some("--lookahead")
+            } else if verbose {
+                Some("--verbose")
+            } else {
+                None
+            };
+            if let Some(conflict) = conflict {
+                return Err(CliError::ConflictingTwoShantenSelfTsumoCost(
+                    conflict.to_string(),
+                ));
+            }
         }
 
         if summary_only {
@@ -270,6 +311,11 @@ impl CliArgs {
             if two_shanten_self_tsumo {
                 return Err(CliError::ConflictingSummaryOnly(
                     "--two-shanten-self-tsumo".to_string(),
+                ));
+            }
+            if two_shanten_self_tsumo_cost.is_some() {
+                return Err(CliError::ConflictingSummaryOnly(
+                    "--two-shanten-self-tsumo-cost".to_string(),
                 ));
             }
             if verbose {
@@ -308,6 +354,7 @@ impl CliArgs {
             // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
             lookahead: lookahead || two_shanten_self_tsumo,
             two_shanten_self_tsumo,
+            two_shanten_self_tsumo_cost,
             summary_only,
         })
     }
@@ -330,6 +377,16 @@ fn apply_inline_baseline(spec: &mut ScenarioSpec) {
         same_turn: Some(false),
         riichi_missed_win: Some(false),
     });
+}
+
+fn two_shanten_self_tsumo_cost_scope(value: &str) -> Result<TwoShantenSelfTsumoScope, CliError> {
+    match value {
+        "all" => Ok(TwoShantenSelfTsumoScope::AllCandidates),
+        "forward-targets" => Ok(TwoShantenSelfTsumoScope::ForwardTargets),
+        other => Err(CliError::InvalidTwoShantenSelfTsumoCostScope(
+            other.to_string(),
+        )),
+    }
 }
 
 fn value_of<I>(args: &mut I, option: &str) -> Result<String, CliError>
@@ -790,6 +847,91 @@ mod tests {
                 "--two-shanten-self-tsumo".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn parses_two_shanten_self_tsumo_cost_scope() {
+        // 計測は既定では行わない。範囲は明示指定した値がそのまま入り、他の診断は変わらない。
+        let default = parse(&["--hand", "123m"]).unwrap();
+        assert_eq!(default.two_shanten_self_tsumo_cost, None);
+
+        let all = parse(&["--hand", "123m", "--two-shanten-self-tsumo-cost", "all"]).unwrap();
+        assert_eq!(
+            all.two_shanten_self_tsumo_cost,
+            Some(TwoShantenSelfTsumoScope::AllCandidates)
+        );
+        assert!(!all.two_shanten_self_tsumo);
+        assert!(!all.lookahead);
+
+        assert_eq!(
+            parse(&[
+                "--hand",
+                "123m",
+                "--two-shanten-self-tsumo-cost",
+                "forward-targets"
+            ])
+            .unwrap()
+            .two_shanten_self_tsumo_cost,
+            Some(TwoShantenSelfTsumoScope::ForwardTargets)
+        );
+
+        assert_eq!(
+            parse(&["--hand", "123m", "--two-shanten-self-tsumo-cost", "cohort"]),
+            Err(CliError::InvalidTwoShantenSelfTsumoCostScope(
+                "cohort".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--two-shanten-self-tsumo-cost"]),
+            Err(CliError::MissingValue(
+                "--two-shanten-self-tsumo-cost".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_self_tsumo_cost_cannot_be_combined_with_another_diagnostic() {
+        // 計測より前に深い探索を走らせると memo が温まって実測が本来より速く見えるため、他の
+        // 診断 option とは同時に指定できない。どちらの範囲でも同じ扱いになる。
+        for scope in ["all", "forward-targets"] {
+            for option in ["--lookahead", "--verbose", "--two-shanten-self-tsumo"] {
+                assert_eq!(
+                    parse(&[
+                        "--hand",
+                        "123m",
+                        "--two-shanten-self-tsumo-cost",
+                        scope,
+                        option
+                    ]),
+                    Err(CliError::ConflictingTwoShantenSelfTsumoCost(
+                        option.to_string()
+                    )),
+                    "{scope} と {option}"
+                );
+            }
+
+            assert_eq!(
+                parse(&[
+                    "--hand",
+                    "123m",
+                    "--summary-only",
+                    "--two-shanten-self-tsumo-cost",
+                    scope
+                ]),
+                Err(CliError::ConflictingSummaryOnly(
+                    "--two-shanten-self-tsumo-cost".to_string()
+                )),
+                "{scope} と --summary-only"
+            );
+
+            // 単独指定は引き続き有効で、他の診断は要求しない。
+            let args = parse(&["--hand", "123m", "--two-shanten-self-tsumo-cost", scope]).unwrap();
+            assert!(args.two_shanten_self_tsumo_cost.is_some());
+            assert!(!args.lookahead);
+            assert!(!args.two_shanten_self_tsumo);
+            assert!(!args.verbose);
+            assert!(!args.summary_only);
+        }
     }
 
     #[test]
