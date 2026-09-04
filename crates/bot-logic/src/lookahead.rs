@@ -90,6 +90,20 @@
 //! を集計する局面では、指定が無くても比較対象の候補 ([`forward_target_mask`]) だけ同じ枝を進める。
 //! 選択専用経路と詳細診断がどちらも同じ枝集合を進めるため、詳細診断の有無で打牌選択の結果は
 //! 変わらない。
+//!
+//! # 2向聴から1向聴へ進む枝
+//!
+//! 次の自摸を待つ2向聴 state については、
+//!
+//! ```text
+//! 次の自摸を待つ2向聴 state → 1枚ツモって1向聴へ進む → 既存比較が選ぶ次打牌 (打牌後も1向聴)
+//!   → 既存の1向聴 self-tsumo continuation
+//! ```
+//!
+//! だけを [`awaiting_draw_two_shanten_progress_self_tsumo_value`] で評価できる。最初のツモで
+//! 2向聴を維持する枝は追わないため、2向聴の ExpectedSelfTsumoValue ではない。1枚ツモを消費した
+//! 後の未確認牌と残り自摸機会は既存 semantics のまま1つ進み、接続先は1向聴 state の
+//! [`awaiting_draw_expected_self_tsumo_value`] と同じ枝集合・同じ集計になる。
 
 use crate::acceptance::{
     DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
@@ -113,6 +127,9 @@ use crate::tile_counts::TileCounts;
 
 /// same-shanten の枝をテンパイまで追う対象の向聴数。
 const IISHANTEN_SHANTEN: i8 = TENPAI_SHANTEN + 1;
+
+/// 最初のツモで1向聴へ進む枝だけを追う対象の向聴数。
+const RYANSHANTEN_SHANTEN: i8 = IISHANTEN_SHANTEN + 1;
 
 /// 2手目の打牌後に出来上がる仮想テンパイ1つ分の入力。
 ///
@@ -690,12 +707,86 @@ pub fn awaiting_draw_expected_self_tsumo_value(
         return None;
     }
     let facts = inputs.self_tsumo_facts()?;
-    let scopes = [
-        DrawScope::Progress,
-        DrawScope::SameShanten { downstream: true },
-    ];
-    let draws = search_waiting_state(inputs, acceptance, &scopes);
+    let draws = search_waiting_state(inputs, acceptance, IISHANTEN_CONTINUATION);
     expected_self_tsumo_value_from_draws(&draws, facts)
+}
+
+/// 次の自摸を待つ2向聴 state から、最初のツモで1向聴へ進む枝だけを既存の1向聴 self-tsumo
+/// continuation へ接続した期待支払い [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+///
+/// 評価するのは
+///
+/// ```text
+/// 次の自摸を待つ2向聴 state
+/// → 1枚ツモって1向聴へ進む
+/// → 既存比較が選ぶ次打牌 (打牌後も1向聴)
+/// → 既存の1向聴 self-tsumo continuation
+/// ```
+///
+/// だけで、最初のツモで2向聴を維持する枝は追わない。したがってこれは2向聴の
+/// ExpectedSelfTsumoValue ではなく、この1種類の枝の寄与でしかない。1向聴の
+/// [`awaiting_draw_expected_self_tsumo_value`] と同じ意味の完全な期待値として扱わないこと。
+///
+/// 最初のツモ牌は既存 acceptance そのもので、物理牌 variant への分割・次打牌の選択・その先の
+/// 集計はすべて既存 primitive を通る。1枚ツモを消費した後の未確認牌と残り自摸機会は既存
+/// semantics のまま1つ進め、接続先は同じ state を
+/// [`awaiting_draw_expected_self_tsumo_value`] へ渡した場合と同じ枝集合・同じ集計になる。
+///
+/// 2向聴以外の state・ツモ打点や残り自摸機会が欠ける局面・接続先の値を確定できない枝がある
+/// 場合は、0 点で補完せず `None`。
+pub fn awaiting_draw_two_shanten_progress_self_tsumo_value(
+    inputs: &LookaheadInputs,
+    acceptance: &EffectiveAcceptance,
+) -> Option<u64> {
+    if acceptance.current_min_shanten() != RYANSHANTEN_SHANTEN {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::from_waiting_state(&inputs.root);
+
+    let mut total = 0u64;
+    for accepted in &acceptance.tiles {
+        let drawable = drawable(accepted);
+        for variant in branch.variants_of(&drawable) {
+            let value = iishanten_continuation_after_progress_draw(
+                inputs, &branch, &drawable, variant, facts,
+            )?;
+            total = total.saturating_add(value);
+        }
+    }
+    Some(total)
+}
+
+// 1向聴へ進むツモ1枚分の continuation。ツモ後の最良打牌が1向聴のままの枝だけ、その打牌後の
+// state を起点にした既存の1向聴 continuation へつなぐ。
+//
+// 打牌候補が無い枝と打牌後が1向聴にならない枝は寄与 0 で、接続先の値を確定できない場合だけ
+// `None` になる。
+fn iishanten_continuation_after_progress_draw(
+    inputs: &LookaheadInputs,
+    branch: &CandidateBranch,
+    drawable: &DrawableTile,
+    variant: PhysicalTileVariant,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    let Some(state) = branch.state_after_draw(drawable.tile, variant.tile) else {
+        return Some(0);
+    };
+    let Some(evaluation) = next_discard(inputs, &state).evaluation else {
+        return Some(0);
+    };
+    if evaluation.min_shanten_after_discard() != IISHANTEN_SHANTEN {
+        return Some(0);
+    }
+
+    let path = SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)?;
+    // 1枚ツモを消費した後の horizon。未確認牌も残り自摸機会も既存の経路と同じだけ進む。
+    let continuation = SelfTsumoFacts {
+        unknown_tiles: path.terminal_unknown_tiles(facts),
+        own_future_draws: path.terminal_own_future_draws(facts),
+    };
+    let draws = search(inputs, &state, &evaluation, IISHANTEN_CONTINUATION)?;
+    Some(path.weighted_continuation(expected_self_tsumo_value_from_draws(&draws, continuation)?))
 }
 
 /// 打牌候補1件について、same-shanten 手変わりの前方集計値を求める。
@@ -940,6 +1031,13 @@ const SAME_SHANTEN_ONLY: &[DrawScope] = &[DrawScope::SameShanten { downstream: f
 // 向聴数を維持する枝を、その先のテンパイまで進める指定。
 const SAME_SHANTEN_DOWNSTREAM: &[DrawScope] = &[DrawScope::SameShanten { downstream: true }];
 
+// 1向聴 state の self-tsumo continuation が進める枝。すぐテンパイする枝と、一度手変わりして
+// からテンパイする枝を1回の探索で両方進める。
+const IISHANTEN_CONTINUATION: &[DrawScope] = &[
+    DrawScope::Progress,
+    DrawScope::SameShanten { downstream: true },
+];
+
 // 現在の打牌候補1件を、指定した枝だけ探索する。詳細診断も選択専用の集計も same-shanten の
 // 観測値もこの1本を通り、用途ごとに違うのは「どの枝を進めるか」と「結果をどう集計するか」だけ。
 // 入力は変更せず、打牌後の手牌を copy で作る。
@@ -1082,6 +1180,16 @@ impl CandidateBranch {
         }
     }
 
+    // 仮想ツモ牌1牌種を赤 / 黒の物理牌 variant へ分ける。分割規則は最終和了牌と共有する既存
+    // helper が持ち、枝を1段進める経路はどれもこの1本を通る。
+    fn variants_of(&self, drawable: &DrawableTile) -> impl Iterator<Item = PhysicalTileVariant> {
+        physical_tile_variants(
+            drawable.tile,
+            drawable.remaining,
+            self.red_five_seen[drawable.tile.index()],
+        )
+    }
+
     // 仮想ツモ牌1牌種を、赤 / 黒の物理牌 variant ごとに仮想ツモして評価する。
     //
     // 赤5と黒5では打点だけでなく次の最良打牌そのものが変わり得るため、variant ごとに既存打牌
@@ -1092,13 +1200,10 @@ impl CandidateBranch {
         drawable: DrawableTile,
         scope: DrawScope,
     ) -> DrawLookaheadDiagnostic {
-        let variants = physical_tile_variants(
-            drawable.tile,
-            drawable.remaining,
-            self.red_five_seen[drawable.tile.index()],
-        )
-        .map(|variant| self.draw_variant(inputs, drawable.tile, variant, scope))
-        .collect();
+        let variants = self
+            .variants_of(&drawable)
+            .map(|variant| self.draw_variant(inputs, drawable.tile, variant, scope))
+            .collect();
 
         DrawLookaheadDiagnostic {
             draw: drawable.tile,
@@ -1334,6 +1439,7 @@ fn same_shanten_self_tsumo_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acceptance::calculate_acceptance_with_fixed_melds_and_visible_tiles;
     use crate::discard::{
         DiscardComparisonReason, diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
         evaluate_discards_from_tiles_with_fixed_melds_and_context,
@@ -3721,5 +3827,259 @@ mod tests {
                 .iter()
                 .all(|metric| metric.expected_self_tsumo_value.is_none())
         );
+    }
+
+    // ---- 2向聴から1向聴へ進む枝 ----
+
+    // どのテンパイのツモ打点も確定できない検証用の評価器。
+    struct UnknownTsumoValuator;
+
+    impl ProspectiveTsumoValuator for UnknownTsumoValuator {
+        fn tenpai_tsumo_value(&self, _tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
+            None
+        }
+    }
+
+    // 3副露済みとみなした concealed 4枚 1m 5p 9s W の2向聴。最初のツモで1向聴へ進む枝も、
+    // 2向聴のままの手変わりの枝も持つ。赤5は含まない。
+    fn two_shanten_awaiting_draw_hand() -> Vec<TileId> {
+        ids(&[0, 53, 104, 116])
+    }
+
+    // 同じ3副露で concealed 4枚 1m 2m 5p 9s の1向聴。
+    fn iishanten_awaiting_draw_hand() -> Vec<TileId> {
+        ids(&[0, 4, 53, 104])
+    }
+
+    // 次の自摸を待つ state の受け入れ。`visible` は手牌を含む見え牌で、既存の受け入れ計算へ
+    // そのまま渡す。
+    fn awaiting_draw_acceptance(
+        tiles: &[TileId],
+        fixed_meld_count: FixedMeldCount,
+        visible: &[TileId],
+    ) -> EffectiveAcceptance {
+        calculate_acceptance_with_fixed_melds_and_visible_tiles(
+            &TileCounts::from_tiles(tiles.iter().copied()),
+            fixed_meld_count,
+            visible,
+        )
+    }
+
+    // 架空の現在打牌を作らず、次の自摸を待つ state をそのまま渡す入力。
+    fn awaiting_draw_inputs<'a>(
+        tiles: &'a [TileId],
+        fixed_meld_count: FixedMeldCount,
+        valuator: &'a dyn ProspectiveTsumoValuator,
+        own_future_draws: u32,
+    ) -> LookaheadInputs<'a> {
+        LookaheadInputs::new(tiles, fixed_meld_count, &[], None, None)
+            .with_visible_tiles(tiles)
+            .with_tsumo_valuator(valuator)
+            .with_own_future_draws(own_future_draws)
+    }
+
+    // 受け入れ牌を指定した牌種だけへ絞った受け入れ。current の向聴数は変えない。
+    fn acceptance_restricted_to(
+        acceptance: &EffectiveAcceptance,
+        keep: impl Fn(TileType) -> bool,
+    ) -> EffectiveAcceptance {
+        let mut restricted = acceptance.clone();
+        restricted.tiles.retain(|accepted| keep(accepted.tile));
+        restricted
+    }
+
+    #[test]
+    fn the_two_shanten_progress_branch_connects_to_the_existing_iishanten_continuation() {
+        // 最初のツモで1向聴へ進む枝1本ずつが、打牌後の state を「次の自摸を待つ1向聴 state」と
+        // して既存 continuation へ渡した値と、経路確率で重み付けして一致する。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let fixed_meld_count = fixed(3);
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed_meld_count, &tiles);
+        assert_eq!(acceptance.current_min_shanten(), RYANSHANTEN_SHANTEN);
+
+        let inputs = awaiting_draw_inputs(
+            &tiles,
+            fixed_meld_count,
+            &FIXED_TSUMO_VALUATOR,
+            TEST_OWN_FUTURE_DRAWS,
+        );
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let branch = CandidateBranch::from_waiting_state(&inputs.root);
+
+        let mut expected = 0u64;
+        for accepted in &acceptance.tiles {
+            let drawable = drawable(accepted);
+            assert_eq!(drawable.shanten_after_draw.min(), IISHANTEN_SHANTEN);
+
+            for variant in branch.variants_of(&drawable) {
+                let state = branch
+                    .state_after_draw(drawable.tile, variant.tile)
+                    .expect("ツモ後の手牌を作れる");
+                let evaluation = next_discard(&inputs, &state)
+                    .evaluation
+                    .expect("次打牌がある");
+                assert_eq!(evaluation.min_shanten_after_discard(), IISHANTEN_SHANTEN);
+
+                // 打牌後の手牌を、改めて「次の自摸を待つ1向聴 state」として組み立てる。切った牌は
+                // 見え牌になる。
+                let (discarded, concealed) = split_discarded_tile(state.tiles.clone(), &evaluation)
+                    .expect("打牌を確定できる");
+                let mut visible = concealed.clone();
+                visible.push(discarded);
+
+                let path = SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)
+                    .expect("経路を作れる");
+                let iishanten_inputs =
+                    LookaheadInputs::new(&concealed, fixed_meld_count, &[], None, None)
+                        .with_visible_tiles(&visible)
+                        .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+                        .with_own_future_draws(path.terminal_own_future_draws(facts));
+                let iishanten_facts = iishanten_inputs
+                    .self_tsumo_facts()
+                    .expect("材料が揃っている");
+
+                // 1枚ツモを消費した分だけ未確認牌も残り自摸機会も進んでいる。
+                assert_eq!(
+                    iishanten_facts.unknown_tiles,
+                    path.terminal_unknown_tiles(facts)
+                );
+                assert_eq!(iishanten_facts.own_future_draws, TEST_OWN_FUTURE_DRAWS - 1);
+
+                let continuation = awaiting_draw_expected_self_tsumo_value(
+                    &iishanten_inputs,
+                    &awaiting_draw_acceptance(&concealed, fixed_meld_count, &visible),
+                )
+                .expect("1向聴 continuation を確定できる");
+                expected = expected.saturating_add(path.weighted_continuation(continuation));
+            }
+        }
+
+        let value = awaiting_draw_two_shanten_progress_self_tsumo_value(&inputs, &acceptance)
+            .expect("ツモ打点を確定できる");
+        assert!(value > 0);
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn a_first_draw_keeping_the_two_shanten_is_not_included() {
+        // 最初のツモで2向聴を維持する牌は受け入れに含まれず、今回の値にも寄与しない。値は
+        // 受け入れ牌ごとの寄与の和そのものになる。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let fixed_meld_count = fixed(3);
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed_meld_count, &tiles);
+        let same_shanten = same_shanten_draws_with_fixed_melds_and_seen(
+            &TileCounts::from_tiles(tiles.iter().copied()),
+            fixed_meld_count,
+            &[0; TileType::COUNT],
+        );
+
+        assert!(!same_shanten.is_empty());
+        let accepted = acceptance.tile_types();
+        for drawable in &same_shanten {
+            assert_eq!(drawable.shanten_after_draw.min(), RYANSHANTEN_SHANTEN);
+            assert!(drawable.remaining > 0);
+            assert!(!accepted.contains(&drawable.tile));
+        }
+
+        let inputs = awaiting_draw_inputs(
+            &tiles,
+            fixed_meld_count,
+            &FIXED_TSUMO_VALUATOR,
+            TEST_OWN_FUTURE_DRAWS,
+        );
+        let first = acceptance.tiles.first().expect("受け入れがある").tile;
+        let value = |acceptance: &EffectiveAcceptance| {
+            awaiting_draw_two_shanten_progress_self_tsumo_value(&inputs, acceptance)
+                .expect("ツモ打点を確定できる")
+        };
+        let head = value(&acceptance_restricted_to(&acceptance, |tile| tile == first));
+        let rest = value(&acceptance_restricted_to(&acceptance, |tile| tile != first));
+
+        assert!(head > 0);
+        assert_eq!(value(&acceptance), head + rest);
+    }
+
+    #[test]
+    fn without_the_self_tsumo_facts_the_two_shanten_value_is_unavailable() {
+        // ツモ打点も残り自摸機会も、欠ける場合は 0 点で補完せず `None` のままにする。
+        let tiles = two_shanten_awaiting_draw_hand();
+        let fixed_meld_count = fixed(3);
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed_meld_count, &tiles);
+        let base = || {
+            LookaheadInputs::new(&tiles, fixed_meld_count, &[], None, None)
+                .with_visible_tiles(&tiles)
+        };
+
+        // ツモ評価器が無い局面。
+        assert_eq!(
+            awaiting_draw_two_shanten_progress_self_tsumo_value(
+                &base().with_own_future_draws(TEST_OWN_FUTURE_DRAWS),
+                &acceptance,
+            ),
+            None
+        );
+        // 残り自摸機会が分からない局面。
+        assert_eq!(
+            awaiting_draw_two_shanten_progress_self_tsumo_value(
+                &base().with_tsumo_valuator(&FIXED_TSUMO_VALUATOR),
+                &acceptance,
+            ),
+            None
+        );
+        // 到達したテンパイのツモ打点を確定できない局面。
+        assert_eq!(
+            awaiting_draw_two_shanten_progress_self_tsumo_value(
+                &awaiting_draw_inputs(
+                    &tiles,
+                    fixed_meld_count,
+                    &UnknownTsumoValuator,
+                    TEST_OWN_FUTURE_DRAWS,
+                ),
+                &acceptance,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_two_shanten_state_has_the_progress_branch_value() {
+        // 1向聴 state は既存の continuation が受け持つので、この入口は値を持たない。
+        let tiles = iishanten_awaiting_draw_hand();
+        let fixed_meld_count = fixed(3);
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed_meld_count, &tiles);
+        assert_eq!(acceptance.current_min_shanten(), IISHANTEN_SHANTEN);
+
+        let inputs = awaiting_draw_inputs(
+            &tiles,
+            fixed_meld_count,
+            &FIXED_TSUMO_VALUATOR,
+            TEST_OWN_FUTURE_DRAWS,
+        );
+
+        assert_eq!(
+            awaiting_draw_two_shanten_progress_self_tsumo_value(&inputs, &acceptance),
+            None
+        );
+        assert!(awaiting_draw_expected_self_tsumo_value(&inputs, &acceptance).is_some());
+    }
+
+    #[test]
+    fn the_two_shanten_progress_branch_is_opt_in_only() {
+        // 新しい入口は明示的に呼んだ経路だけが使う。2向聴の打牌選択も詳細診断も従来のまま。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        let evaluations = &case.situation.evaluations;
+        let with_facts = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let metrics = forward_metrics(&with_facts, evaluations);
+
+        assert!(
+            metrics
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+        assert_eq!(
+            metrics,
+            forward_metrics(&inputs(&case.situation), evaluations)
+        );
+        assert_eq!(diagnose_lookahead(&with_facts, evaluations), case.lookahead);
     }
 }
