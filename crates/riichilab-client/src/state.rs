@@ -53,6 +53,13 @@ impl ValidationState {
         self.history_furiten
     }
 
+    /// 現在 response を待っている直前の打牌者。
+    ///
+    /// `pending_passed_tile` が無い局面では reaction 元を推測せず `None` を返す。
+    pub fn reaction_source_player(&self) -> Option<u8> {
+        self.pending_passed_tile.map(|(actor, _)| actor)
+    }
+
     pub fn on_start_game(&mut self, id: u8) {
         self.seat_id = Some(id);
         self.last_tsumo = None;

@@ -1,22 +1,22 @@
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
-    CallIishantenAcceptanceDiagnostic, CallWaitYaku, CombinedDefenseCandidateDiagnostic,
-    CombinedDefenseDiagnostic, CurrentTenpaiContinuationCandidate,
-    CurrentTenpaiContinuationDiagnostic, DamatenValue, DamatenValueDiagnostic,
-    DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, DefenseFallbackKind, GameContext,
-    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
-    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
-    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
-    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic,
-    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision,
-    PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
-    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
-    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
-    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
-    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
-    TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
-    ThreatDefenseTarget,
+    CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
+    CallWaitYaku, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
+    CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
+    DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
+    DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
+    MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
+    OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
+    ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
+    ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
+    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
+    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
+    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
+    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
+    RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent,
+    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
+    TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
+    TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -161,6 +161,10 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
     ));
     lines.push(format!("  seat wind: {}", format_wind(context.seat_wind())));
     lines.push(format!("  player id: {}", format_seat(context.player_id())));
+    lines.push(format!(
+        "  reaction source player: {}",
+        format_seat(context.reaction_source_player())
+    ));
     lines.push(format!("  oya: {}", format_seat(context.oya())));
     lines.push(format!("  reached players: {}", format_reached(context)));
 
@@ -379,6 +383,9 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     lines.extend(format_call_iishanten_acceptance(
         candidate.iishanten_acceptance.as_ref(),
     ));
+    lines.extend(format_call_iishanten_self_tsumo(
+        candidate.iishanten_self_tsumo.as_ref(),
+    ));
 
     if verbose {
         lines.push("    acceptance tiles:".to_string());
@@ -412,6 +419,37 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     }
 
     lines
+}
+
+fn format_call_iishanten_self_tsumo(
+    comparison: Option<&CallIishantenSelfTsumoDiagnostic>,
+) -> Vec<String> {
+    let Some(comparison) = comparison else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "    iishanten self-tsumo: pass {} / call {}",
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+        ),
+        format!(
+            "    iishanten comparison: {}",
+            call_iishanten_comparison_label(comparison.comparison)
+        ),
+        format!(
+            "    reaction source player: {}",
+            format_seat(comparison.reaction_source_player)
+        ),
+    ]
+}
+
+fn call_iishanten_comparison_label(comparison: CallIishantenComparison) -> &'static str {
+    match comparison {
+        CallIishantenComparison::CallHigher => "call higher",
+        CallIishantenComparison::PassNotLower => "pass not lower",
+        CallIishantenComparison::Unknown => UNKNOWN,
+    }
 }
 
 // 鳴いても1向聴のままの候補についてだけ出る観測用の受け入れ比較。対象外の候補には行を足さない。
@@ -2679,7 +2717,7 @@ fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     let Some(call) = diagnostic.call.as_ref() else {
         return Vec::new();
     };
-    vec![
+    let mut lines = vec![
         format!(
             "  call: {}",
             call.selected
@@ -2687,7 +2725,35 @@ fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
                 .map_or_else(|| "no".to_string(), action_label)
         ),
         format!("  call reason: {:?}", call.reason),
-    ]
+    ];
+    let compared_candidate = call
+        .candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .or_else(|| {
+            call.candidates
+                .iter()
+                .find(|candidate| candidate.iishanten_self_tsumo.is_some())
+        });
+    if let Some(candidate) = compared_candidate
+        && let Some(compared) = candidate.iishanten_self_tsumo.as_ref()
+    {
+        lines.push(format!(
+            "  call self-tsumo: pass {} / call {} ({})",
+            format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(compared.call_expected_self_tsumo_value),
+            call_iishanten_comparison_label(compared.comparison),
+        ));
+        lines.push(format!(
+            "  call post-call discard: {}",
+            candidate
+                .post_call_discard
+                .as_ref()
+                .map(discard_label)
+                .unwrap_or_else(|| UNKNOWN.to_string())
+        ));
+    }
+    lines
 }
 
 fn summary_defense(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
@@ -4170,12 +4236,12 @@ mod tests {
             "Call\n  \
              evaluated\n  \
              selected: none\n  \
-             reason: PostCallNotTenpai\n  \
+             reason: IishantenSelfTsumoUnknown\n  \
              candidates: 1\n  \
              Pon F <- F F\n    \
              selected: no\n    \
              eligible: no\n    \
-             reason: PostCallNotTenpai\n    \
+             reason: IishantenSelfTsumoUnknown\n    \
              kind: Pon\n    \
              current shanten: 1\n    \
              current fixed meld count: 0\n    \
@@ -4188,7 +4254,10 @@ mod tests {
              can ron: unknown\n    \
              live waits have yaku: unknown\n    \
              iishanten acceptance: pass 8 / 2 types -> call 20 / 6 types (delta +12 / +4 types)\n    \
-             fixed meld yaku guaranteed: yes"
+             fixed meld yaku guaranteed: yes\n    \
+             iishanten self-tsumo: pass unknown / call unknown\n    \
+             iishanten comparison: unknown\n    \
+             reaction source player: 1"
         );
 
         // 表示した値は診断が持つ値そのもので、formatter は受け入れも役保証も求め直さない。
@@ -4217,6 +4286,32 @@ mod tests {
             output.contains("Final decision\n  action: None"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn summary_only_reports_the_production_iishanten_call_comparison() {
+        let json = IISHANTEN_PON_REACTION_SCENARIO.replace(
+            "\"allow_none\": true",
+            "\"remaining_tiles\": 60, \"allow_none\": true",
+        );
+        let (scenario, diagnostic, output) = rendered(&json, false);
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+
+        assert_eq!(diagnostic.selected_action, acted);
+        assert!(matches!(acted, LegalAction::Pon { .. }));
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  call reason: EligibleIishantenSelfTsumo"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("  call self-tsumo: pass ")
+                && summary.contains(" / call ")
+                && summary.contains("(call higher)"),
+            "{summary}"
+        );
+        assert!(summary.contains("  call post-call discard: E"), "{summary}");
     }
 
     #[test]

@@ -239,21 +239,31 @@ impl DiscardLookaheadDiagnostic {
     /// テンパイへ到達した枝のツモ打点を1つでも確定できない場合と、手変わりの枝の先を探索して
     /// いない場合は 0 点へ潰さず `None`。
     pub fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
-        let mut total = 0u64;
-        for draw in &self.draws {
-            for variant in &draw.variants {
-                let value = match draw.transition {
-                    DrawTransition::Progress => terminal_self_tsumo_value(variant, facts, || {
-                        SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)
-                    })?,
-                    DrawTransition::SameShanten => same_shanten_self_tsumo_value(variant, facts)?,
-                };
-                total = total.saturating_add(value);
-            }
-        }
-        Some(total)
+        expected_self_tsumo_value_from_draws(&self.draws, facts)
     }
+}
 
+// 現在打牌後と「action 済みで次の自摸を待つ状態」の両方が共有する集計本体。
+fn expected_self_tsumo_value_from_draws(
+    draws: &[DrawLookaheadDiagnostic],
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    let mut total = 0u64;
+    for draw in draws {
+        for variant in &draw.variants {
+            let value = match draw.transition {
+                DrawTransition::Progress => terminal_self_tsumo_value(variant, facts, || {
+                    SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)
+                })?,
+                DrawTransition::SameShanten => same_shanten_self_tsumo_value(variant, facts)?,
+            };
+            total = total.saturating_add(value);
+        }
+    }
+    Some(total)
+}
+
+impl DiscardLookaheadDiagnostic {
     /// 構築済みの枝から打牌選択用の weighted tenpai wait を集計する。
     ///
     /// 集計規則は選択専用経路 ([`forward_metrics`]) と共有するため、詳細診断を構築した場合に
@@ -667,6 +677,27 @@ pub fn forward_metrics_for_candidate(
     )
 }
 
+/// 既に action が終わり、次の自摸を待っている1向聴 state の self-tsumo continuation。
+///
+/// 通常の lookahead の「現在打牌後」と同じ Progress / SameShanten 探索、打牌比較、terminal
+/// scoring、確率集計を使う。架空の現在打牌は作らず、`acceptance` はこの state に対して既存
+/// acceptance calculator が返した値をそのまま渡す。
+pub fn awaiting_draw_expected_self_tsumo_value(
+    inputs: &LookaheadInputs,
+    acceptance: &EffectiveAcceptance,
+) -> Option<u64> {
+    if acceptance.current_min_shanten() != IISHANTEN_SHANTEN {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let scopes = [
+        DrawScope::Progress,
+        DrawScope::SameShanten { downstream: true },
+    ];
+    let draws = search_waiting_state(inputs, acceptance, &scopes);
+    expected_self_tsumo_value_from_draws(&draws, facts)
+}
+
 /// 打牌候補1件について、same-shanten 手変わりの前方集計値を求める。
 ///
 /// 枝の評価も集計規則も詳細診断 ([`diagnose_lookahead`]) と同じ helper を共有し、
@@ -936,9 +967,23 @@ fn search(
     Some(
         scopes
             .iter()
-            .flat_map(|&scope| branch.draws(inputs, evaluation, scope))
+            .flat_map(|&scope| branch.draws(inputs, &evaluation.acceptance_after_discard, scope))
             .collect(),
     )
+}
+
+// 架空の現在打牌を挟まず、action 済みの state から次の自摸を進める。以降の探索は通常打牌後と
+// 同じ CandidateBranch::draws を共有する。
+fn search_waiting_state(
+    inputs: &LookaheadInputs,
+    acceptance: &EffectiveAcceptance,
+    scopes: &[DrawScope],
+) -> Vec<DrawLookaheadDiagnostic> {
+    let branch = CandidateBranch::from_waiting_state(&inputs.root);
+    scopes
+        .iter()
+        .flat_map(|&scope| branch.draws(inputs, acceptance, scope))
+        .collect()
 }
 
 // 仮想手牌1つ分の探索状態。1手目の打牌前も、仮想ツモを経た各段も同じ型で持ち、段ごとに別の
@@ -994,6 +1039,19 @@ impl CandidateBranch {
         })
     }
 
+    // 既に action が終わった state は現在打牌を除去せず、そのまま次の自摸を待つ。見え牌にも
+    // 架空の打牌を追加しない。
+    fn from_waiting_state(state: &HandState) -> Self {
+        Self {
+            after_discard: state.counts,
+            next_tiles: state.tiles.clone(),
+            seen: state.seen,
+            draw_seen: *state.seen.base(),
+            red_five_seen: state.red_five_seen,
+            discarded: state.discarded.clone(),
+        }
+    }
+
     // 指定した分類の仮想ツモ枝を列挙して1段進める。
     //
     // 向聴数を下げる牌は打牌評価が持つ受け入れそのもので、対象牌も残枚数もツモ後向聴数も2手先
@@ -1004,12 +1062,11 @@ impl CandidateBranch {
     fn draws(
         &self,
         inputs: &LookaheadInputs,
-        evaluation: &DiscardEvaluation,
+        acceptance: &EffectiveAcceptance,
         scope: DrawScope,
     ) -> Vec<DrawLookaheadDiagnostic> {
         match scope {
-            DrawScope::Progress => evaluation
-                .acceptance_after_discard
+            DrawScope::Progress => acceptance
                 .tiles
                 .iter()
                 .map(|tile| self.draw(inputs, drawable(tile), scope))
@@ -3450,6 +3507,50 @@ mod tests {
             .expect("ツモ打点を確定できる");
         assert_eq!(Some(value), expected_paths_value(&candidate, facts));
         assert!(value > 0);
+    }
+
+    #[test]
+    fn an_awaiting_draw_state_uses_the_same_self_tsumo_semantics_without_a_fake_discard() {
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluation = evaluation_of(case, tile("9s"));
+        let mut full_visible = case.situation.tiles.clone();
+        full_visible.extend_from_slice(&case.situation.visible);
+        let original_inputs = LookaheadInputs::new(
+            &case.situation.tiles,
+            case.situation.fixed_meld_count,
+            &case.situation.dora_indicators,
+            case.situation.round_wind,
+            case.situation.seat_wind,
+        )
+        .with_visible_tiles(&full_visible)
+        .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+        .with_own_future_draws(TEST_OWN_FUTURE_DRAWS);
+        let expected =
+            forward_metrics_for_candidate(&original_inputs, evaluation).expected_self_tsumo_value;
+
+        let (discarded, after_discard_tiles) =
+            split_discarded_tile(case.situation.tiles.clone(), evaluation).expect("discard");
+        let mut visible_after_discard = after_discard_tiles.clone();
+        visible_after_discard.extend_from_slice(&case.situation.visible);
+        visible_after_discard.push(discarded);
+        let awaiting_inputs = LookaheadInputs::new(
+            &after_discard_tiles,
+            case.situation.fixed_meld_count,
+            &case.situation.dora_indicators,
+            case.situation.round_wind,
+            case.situation.seat_wind,
+        )
+        .with_visible_tiles(&visible_after_discard)
+        .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+        .with_own_future_draws(TEST_OWN_FUTURE_DRAWS);
+
+        assert_eq!(
+            awaiting_draw_expected_self_tsumo_value(
+                &awaiting_inputs,
+                &evaluation.acceptance_after_discard,
+            ),
+            expected
+        );
     }
 
     #[test]

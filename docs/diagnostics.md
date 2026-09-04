@@ -48,6 +48,12 @@ Final decision
 
 防御 source では category や kind も表示されます。
 
+`Call` の `iishanten self-tsumo` は、鳴き後も1向聴になる候補について production が比較した
+`Pass ExpectedSelfTsumoValue / Call ExpectedSelfTsumoValue` です。`unknown` は reaction 元、山の
+残枚数、または terminal scoring を確定できないことを表し、0点として扱いません。Call が Pass
+より厳密に高い場合だけ鳴き、同値では Pass を維持します。`iishanten acceptance` は引き続き観測用で
+policy には使いません。`Summary` にも同じ値、比較結果、鳴き後の採用打牌を表示します。
+
 ```text
 Final decision
   action: 5m

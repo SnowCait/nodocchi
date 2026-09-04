@@ -1986,7 +1986,10 @@ mod tests {
         assert_eq!(candidate.reason, expected_reason);
         assert_eq!(
             candidate.eligible,
-            expected_reason == CallDecisionReason::EligibleTenpai
+            matches!(
+                expected_reason,
+                CallDecisionReason::EligibleTenpai | CallDecisionReason::EligibleIishantenSelfTsumo
+            )
         );
         assert_eq!(candidate.selected, candidate.eligible);
         assert_eq!(
@@ -2467,7 +2470,7 @@ mod tests {
         let candidate = assert_single_call_candidate(
             &reaction,
             &LegalAction::None,
-            CallDecisionReason::PostCallNotTenpai,
+            CallDecisionReason::ReactionSourceUnknown,
         );
         assert_eq!(candidate.current_shanten, Some(1));
         assert_eq!(candidate.post_call_shanten(), Some(1));
@@ -2877,7 +2880,7 @@ mod tests {
             &reaction,
             &["P"],
             "P",
-            CallDecisionReason::PostCallNotTenpai,
+            CallDecisionReason::ReactionSourceUnknown,
         );
         assert_eq!(selected.to_mjai_string(), "1s");
     }
@@ -2895,7 +2898,7 @@ mod tests {
             &reaction,
             &["1m", "4m"],
             "1m",
-            CallDecisionReason::PostCallNotTenpai,
+            CallDecisionReason::ReactionSourceUnknown,
         );
         assert_eq!(selected.to_mjai_string(), "8m");
     }
@@ -2950,7 +2953,7 @@ mod tests {
             assert_eq!(call.selected, None, "{label}");
             assert_eq!(
                 call.reason,
-                CallDecisionReason::PostCallNotTenpai,
+                CallDecisionReason::ReactionSourceUnknown,
                 "{label}"
             );
 

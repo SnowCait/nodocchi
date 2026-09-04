@@ -50,6 +50,8 @@ pub struct GameContext {
     seat_wind: Option<TileType>,
     visible_tiles: Vec<TileId>,
     player_id: Option<u8>,
+    // Chi / Pon を検討している直前の打牌者。reaction でない入力や取得できない入力では None。
+    reaction_source_player: Option<u8>,
     oya: Option<u8>,
     discards: [Vec<TileId>; 4],
     reached: [bool; 4],
@@ -203,6 +205,14 @@ impl GameContext {
         self
     }
 
+    /// Chi / Pon の reaction 元 player を設定する。
+    ///
+    /// 観測できない入力経路では `None` のままにし、席順や合法 action から推測しない。
+    pub fn with_reaction_source_player(mut self, player: Option<u8>) -> Self {
+        self.reaction_source_player = player;
+        self
+    }
+
     /// 各 player の次のツモまでに、打牌・加槓のロン機会で通った牌種。
     ///
     /// `None` は入力経路から履歴を取得できないことを表し、空配列 (`Some`) と区別する。
@@ -298,6 +308,11 @@ impl GameContext {
 
     pub fn player_id(&self) -> Option<u8> {
         self.player_id
+    }
+
+    /// Chi / Pon を検討している直前の打牌者。取得できない場合は `None`。
+    pub fn reaction_source_player(&self) -> Option<u8> {
+        self.reaction_source_player
     }
 
     pub fn oya(&self) -> Option<u8> {

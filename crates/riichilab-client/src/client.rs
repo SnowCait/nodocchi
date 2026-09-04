@@ -172,6 +172,7 @@ pub(crate) fn context_for_request(
         .map(game_context_from_decoded_observation)
         .unwrap_or_else(|| game_context_from_validation_state(state))
         .with_post_reach_passed_tiles(state.post_reach_passed_tiles().clone())
+        .with_reaction_source_player(state.reaction_source_player())
         .with_temporary_passed_tiles(state.temporary_passed_tiles().cloned())
         .with_same_hand_passed_tiles(state.same_hand_passed_tiles().cloned())
         .with_history_furiten_facts(state.history_furiten())
@@ -799,6 +800,22 @@ mod tests {
             context.hand_tiles(),
             &[TileId::new(0).unwrap(), TileId::new(104).unwrap()]
         );
+    }
+
+    #[test]
+    fn context_for_request_carries_the_observed_reaction_source() {
+        let observation = ObservationPayload::new(fixture_base64(0, None, vec![]));
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_dahai(2, "4s");
+
+        let context = context_for_request(&observation, &state, 6);
+        assert_eq!(context.reaction_source_player(), Some(2));
+
+        state.on_tsumo(3, "?".to_string());
+        let context = context_for_request(&observation, &state, 7);
+        assert_eq!(context.reaction_source_player(), None);
     }
 
     fn state_after_two_reaches() -> ValidationState {

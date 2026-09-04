@@ -141,6 +141,22 @@ B. 1回目のツモが向聴数を維持する → 次打牌 → 1向聴
 
 軸を使うかどうかは打点軸と同じく cohort 単位で決めます。
 
+### 鳴き後も1向聴になる Call
+
+現在1向聴から Chi / Pon と合法打牌を経ても1向聴の候補は、上記と同じ
+`ExpectedSelfTsumoValue` で Pass と比較します。鳴き後の全合法打牌候補は喰い替え禁止牌を先に
+除外し、通常打牌と同じ forward metric と comparator で選びます。terminal scoring は今回の
+副露を含む hand state から fixed meld count・門前・将来リーチ可否・完成手を一方向に導出します。
+
+Pass は架空の現在打牌を作らず、「action 済みで次の自摸を待つ1向聴 state」から通常打牌後と
+同じ Progress / SameShanten 探索へ入ります。流局までの horizon は観測済みの reaction 元 player
+から Pass 後の最初の自摸位置を求めて揃えます。reaction 元または残り山が unknown なら値も
+unknown のままです。
+
+Call が Pass より厳密に高い場合だけ鳴き、同値・どちらか unknown では鳴きません。倍率、固定点、
+受け入れ threshold、Chi / Pon 別補正はありません。既存の「Call → 即テンパイ」policy は先に
+評価され、成立した候補を従来どおり優先します。
+
 ## 1向聴: WeightedProspectiveValue
 
 `expected self-tsumo value` が同値、またはその軸を使えない場合は、受け入れ牌を引いた後に進むテンパイの確定打点まで含めた `weighted prospective value` を比較します。

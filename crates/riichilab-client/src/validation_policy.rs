@@ -194,6 +194,7 @@ pub(crate) fn game_context_from_validation_state(state: &ValidationState) -> Gam
         .and_then(temporary_tile_id_from_mjai_pai)
         .map(GameContext::with_drawn_tile)
         .unwrap_or_default()
+        .with_reaction_source_player(state.reaction_source_player())
 }
 
 #[cfg(test)]

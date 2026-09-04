@@ -162,6 +162,13 @@ impl Scenario {
         let round_wind = parse_wind("round_wind", spec.round_wind.as_deref())?;
         let seat_wind = resolve_seat_wind(spec.seat_wind.as_deref(), player_id, oya)?;
         let table_state = resolve_table_state_facts(spec)?;
+        let reaction_source_player = spec.legal_pon.as_deref().and_then(|calls| {
+            let source = calls.first()?.from_player;
+            calls
+                .iter()
+                .all(|call| call.from_player == source)
+                .then_some(source)
+        });
 
         let mut allocator = TileAllocator::new();
         let hand = allocate_field(&mut allocator, "hand", &spec.hand)?;
@@ -203,6 +210,7 @@ impl Scenario {
             reached,
             melds,
         )
+        .with_reaction_source_player(reaction_source_player)
         .with_post_reach_passed_tiles(post_reach_passed_tiles)
         .with_temporary_passed_tiles(temporary_passed_tiles)
         .with_table_state_facts(table_state)
@@ -1939,6 +1947,7 @@ mod tests {
     #[test]
     fn legal_pon_builds_a_pon_action() {
         let scenario = resolve(&spec_from_json(PON_REACTION_SCENARIO));
+        assert_eq!(scenario.context.reaction_source_player(), Some(1));
         let actions = pon_actions_of(&scenario);
         assert_eq!(actions.len(), 1);
 
