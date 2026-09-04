@@ -361,6 +361,20 @@ timer に含むのは、復元済みの `GameContext` と合法手に対する p
 
 計測のために診断 (`--lookahead` / `--verbose` 相当) は構築しません。各 request は1回だけ実行します。同じ request を繰り返す microbenchmark ではありません。
 
+#### phase 別の内訳
+
+request ごとに、production の判断経路をそのまま3つの phase へ分けて計測します。判断を再実行せず、通った経路の経過時間をその場で計上するだけなので、選択結果は計測の有無で変わりません。
+
+| phase | 内容 |
+| --- | --- |
+| `early` | Hora / Ryukyoku / 鳴きなど、通常打牌選択より前 |
+| `normal_discard` | 通常打牌選択の全体 |
+| `post_discard` | 通常打牌選択より後の押し引き / Reach / 防御 / 最終 action 選択 |
+
+Hora などで早期 return した request は、到達しなかった phase が 0 のままになります。lookahead の内部はまだ細分化していません。phase 別の集計や percentile は出しません。
+
+この計測は benchmark でだけ有効にします。通常の RiichiLab client は計測しません。
+
 ### 出力
 
 ```text
@@ -380,13 +394,13 @@ RiichiLab production latency benchmark
   > 3 s: 0
 
 Slowest requests
-  2470.000 ms  logs/game-003.jsonl  request_id=425  selected=9s
-  2310.000 ms  logs/game-008.jsonl  request_id=317  selected=5p
+  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms  normal_discard=2401.000 ms  post_discard=68.988 ms  selected=9s
+  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms  normal_discard=2200.000 ms  post_discard=109.990 ms  selected=5p
 ```
 
 percentile は nearest-rank です。昇順に並べた `n` 件について順位 `ceil(p / 100 * n)` の値をそのまま採用し、補間しません。threshold の件数は閾値を厳密に超えた request だけを数えます。`selected` は計測した production decision そのものです。
 
-`Slowest requests` は elapsed 降順に最大20件表示します。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
+`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳です。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
 
 ```bash
 ./target/release/bot-scenario \
@@ -421,13 +435,16 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
       "request_id": 425,
       "actor": 0,
       "elapsed_ns": 2470000000,
+      "early_ns": 12000,
+      "normal_discard_ns": 2401000000,
+      "post_discard_ns": 68988000,
       "selected": "9s"
     }
   ]
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

@@ -6,6 +6,7 @@ pub mod combined_defense;
 pub mod context;
 pub mod current_tenpai_continuation;
 pub mod damaten_value;
+pub mod decision_timing;
 pub mod defense;
 pub mod discard_selection;
 mod fold_defense;
@@ -61,6 +62,7 @@ pub use damaten_value::{
     DAMATEN_MIN_TOTAL, DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DamatenWaitValue,
     DamatenWinningTileValue, damaten_baseline_context,
 };
+pub use decision_timing::{DecisionPhaseDurations, TimedAgentAction};
 pub use defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseCandidateDiagnostic,
     DefenseDecisionDiagnostic, DefenseFallbackDiagnostic, DefenseFallbackKind,

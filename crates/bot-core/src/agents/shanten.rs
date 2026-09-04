@@ -3,6 +3,7 @@ use crate::agent::Agent;
 use crate::call_decision::{CallDecisionDiagnostic, evaluate_call_decision};
 use crate::combined_defense::CombinedDefenseCategory;
 use crate::context::GameContext;
+use crate::decision_timing::{DecisionPhase, DecisionPhaseTimer, TimedAgentAction};
 use crate::defense::{DefenseFallbackKind, log_defense_fallback_evaluation};
 use crate::discard_selection::{
     DiscardActionSelection, select_discard_action_with_diagnostic,
@@ -143,19 +144,61 @@ impl ShantenAgent {
         diagnose_shanten_decision_with_options(context, legal_actions, options)
     }
 
+    /// `act()` と同じ判断を1回だけ行い、phase ごとの実測時間を併せて返す。
+    ///
+    /// 判断経路は `act()` と共通で、計測のために判断を再実行しない。計測を有効にしても
+    /// 選択結果は変わらず、`act_with_phase_timing(...).action == ShantenAgent::act(...)` が
+    /// 常に成り立つ。
+    pub fn act_with_phase_timing(
+        &mut self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+    ) -> TimedAgentAction {
+        let mut timing = DecisionPhaseTimer::started();
+        let decision = self.decide_instrumented(
+            ctx,
+            legal_actions,
+            &mut DecisionDiagnostics::disabled(),
+            &mut timing,
+        );
+        let phases = timing.finish();
+        log_agent_decision(&decision);
+        TimedAgentAction {
+            action: decision.action,
+            phases,
+        }
+    }
+
     // 最終 action と選択経路を1回で決める内部 helper。act() はこの結果を返し、
     // 共通箇所で agent decision ログを1件だけ出す。
     pub(crate) fn decide(&self, ctx: &GameContext, legal_actions: &[LegalAction]) -> AgentDecision {
         self.decide_with_diagnostics(ctx, legal_actions, &mut DecisionDiagnostics::disabled())
     }
 
-    // 判断経路の本体。act() と構造化診断はこの1本を共有し、diagnostics が有効な場合だけ
-    // 解析専用の追加情報を収集する。追加情報の収集は action 選択に影響しない。
     pub(crate) fn decide_with_diagnostics(
         &self,
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         diagnostics: &mut DecisionDiagnostics,
+    ) -> AgentDecision {
+        self.decide_instrumented(
+            ctx,
+            legal_actions,
+            diagnostics,
+            &mut DecisionPhaseTimer::disabled(),
+        )
+    }
+
+    // 判断経路の本体。act() と構造化診断はこの1本を共有し、diagnostics が有効な場合だけ
+    // 解析専用の追加情報を収集する。追加情報の収集は action 選択に影響しない。
+    //
+    // `timing` は無効な場合に何もしない optional な計測で、判断の順序も内容も変えない。
+    fn decide_instrumented(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        diagnostics: &mut DecisionDiagnostics,
+        timing: &mut DecisionPhaseTimer,
     ) -> AgentDecision {
         if let Some(action) = legal_actions
             .iter()
@@ -217,7 +260,10 @@ impl ShantenAgent {
         // 脅威 facts もここで一度だけ構築し、押し引き入力へそのまま渡す。meld ごとの Vec を
         // 作らない軽量 facts なので、通常 act() で allocation は増えない。構造化診断は
         // この facts を再利用して full diagnostic を組み立てる。
+        timing.enter(DecisionPhase::NormalDiscard);
         let discard_selection = self.select_normal_discard(ctx, legal_actions, diagnostics);
+        timing.enter(DecisionPhase::PostDiscard);
+
         let inputs = push_pull_inputs_from_threat_facts(
             ctx,
             player_threat_facts_from_context(ctx),
@@ -566,6 +612,7 @@ mod tests {
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
         TileId, TileType, calculate_shanten, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     };
+    use std::time::Duration;
 
     #[derive(Debug)]
     struct DefenseTraceSubscriber;
@@ -592,6 +639,78 @@ mod tests {
 
     fn with_defense_trace<T>(f: impl FnOnce() -> T) -> T {
         tracing::subscriber::with_default(DefenseTraceSubscriber, f)
+    }
+
+    fn phase_timing_contexts() -> Vec<(GameContext, Vec<LegalAction>)> {
+        vec![
+            (
+                GameContext::with_drawn_tile(tile(0)),
+                vec![dahai(0), LegalAction::Hora],
+            ),
+            (
+                GameContext::with_drawn_tile(tile(0)),
+                vec![dahai(0), LegalAction::Ryukyoku],
+            ),
+            (tenpai_context(&[]), tenpai_actions()),
+            (fold_under_reach_context(), fold_actions()),
+        ]
+    }
+
+    #[test]
+    fn phase_timing_does_not_change_the_selected_action() {
+        for (ctx, actions) in phase_timing_contexts() {
+            let mut timed = ShantenAgent;
+            let mut untimed = ShantenAgent;
+            assert_eq!(
+                timed.act_with_phase_timing(&ctx, &actions).action,
+                untimed.act(&ctx, &actions),
+                "{actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_early_return_keeps_the_phases_it_never_reached_at_zero() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::with_drawn_tile(tile(0));
+
+        let hora = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Hora]);
+        assert_eq!(hora.action, LegalAction::Hora);
+        assert_eq!(hora.phases.normal_discard, Duration::ZERO);
+        assert_eq!(hora.phases.post_discard, Duration::ZERO);
+        assert_eq!(hora.phases.total(), hora.phases.early);
+
+        let ryukyoku = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Ryukyoku]);
+        assert_eq!(ryukyoku.action, LegalAction::Ryukyoku);
+        assert_eq!(ryukyoku.phases.normal_discard, Duration::ZERO);
+        assert_eq!(ryukyoku.phases.post_discard, Duration::ZERO);
+        assert_eq!(ryukyoku.phases.total(), ryukyoku.phases.early);
+    }
+
+    #[test]
+    fn phase_timing_runs_the_decision_only_once() {
+        let production = include_str!("shanten.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let timed_entry_point = production
+            .split("pub fn act_with_phase_timing(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn decide(")
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            timed_entry_point.matches("decide_instrumented(").count(),
+            1,
+            "{timed_entry_point}"
+        );
+        assert_eq!(
+            production.matches("self.select_normal_discard(").count(),
+            1,
+            "{production}"
+        );
     }
 
     #[test]

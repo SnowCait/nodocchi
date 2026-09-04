@@ -510,10 +510,15 @@ mod tests {
         assert!(output.contains("\n\nSlowest requests\n"), "{output}");
         for request_id in [425, 426, 517] {
             assert!(
-                output.contains(&format!("request_id={request_id}  selected=")),
+                output.contains(&format!("request_id={request_id}  early=")),
                 "{output}"
             );
         }
+        assert!(
+            output.contains("  normal_discard=") && output.contains("  post_discard="),
+            "{output}"
+        );
+        assert!(output.contains("  selected="), "{output}");
         assert!(output.contains(&first), "{output}");
         assert!(output.contains(&second), "{output}");
 
