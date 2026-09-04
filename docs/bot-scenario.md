@@ -383,6 +383,16 @@ Hora などで早期 return した request は、到達しなかった phase が
 
 3つの合計は同じ request の `normal_discard` を超えません。通常打牌選択を通らなかった request では 0 のままです。`early` / `post_discard` の内部は細分化していません。
 
+`forward` はさらに前方集計値の内部処理別へ分けます。こちらも既存の処理境界そのままで、探索する枝も scoring も集計も変えません。
+
+| subphase | 内容 |
+| --- | --- |
+| `search` | 仮想ツモ枝の探索。ツモ後の次打牌評価と、その枝が使う将来打点の scoring を含む |
+| `aggregate` | 探索済みの枝からの重み付き集計 (WeightedNextAcceptance / weighted tenpai wait) |
+| `self_tsumo` | 探索済みの枝からの ExpectedSelfTsumoValue の集計 |
+
+3つの合計は同じ request の `forward` を超えません。前方集計値の入力を組み立てる時間はどの内訳にも入りません。前方集計値を計算しない局面 (テンパイ、最善向聴を維持する候補が1件など) では 0 のままです。
+
 この計測は benchmark でだけ有効にします。通常の RiichiLab client は計測しません。
 
 ### 出力
@@ -404,13 +414,13 @@ RiichiLab production latency benchmark
   > 3 s: 0
 
 Slowest requests
-  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms  normal_discard=2401.000 ms (base=30.000 ms forward=2351.000 ms finalize=20.000 ms)  post_discard=68.988 ms  selected=9s
-  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms  normal_discard=2200.000 ms (base=28.000 ms forward=2152.000 ms finalize=20.000 ms)  post_discard=109.990 ms  selected=5p
+  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms  normal_discard=2401.000 ms (base=30.000 ms forward=2351.000 ms [search=2300.000 ms aggregate=31.000 ms self_tsumo=20.000 ms] finalize=20.000 ms)  post_discard=68.988 ms  selected=9s
+  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms  normal_discard=2200.000 ms (base=28.000 ms forward=2152.000 ms [search=2100.000 ms aggregate=32.000 ms self_tsumo=20.000 ms] finalize=20.000 ms)  post_discard=109.990 ms  selected=5p
 ```
 
 percentile は nearest-rank です。昇順に並べた `n` 件について順位 `ceil(p / 100 * n)` の値をそのまま採用し、補間しません。threshold の件数は閾値を厳密に超えた request だけを数えます。`selected` は計測した production decision そのものです。
 
-`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳で、`normal_discard` の括弧内はその内訳です。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
+`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳で、`normal_discard` の括弧内はその内訳、`forward` の角括弧内はさらにその内訳です。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
 
 ```bash
 ./target/release/bot-scenario \
@@ -449,6 +459,9 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
       "normal_discard_ns": 2401000000,
       "normal_discard_base_ns": 30000000,
       "normal_discard_forward_ns": 2351000000,
+      "forward_candidate_search_ns": 2300000000,
+      "forward_weighted_aggregation_ns": 31000000,
+      "forward_self_tsumo_ns": 20000000,
       "normal_discard_finalize_ns": 20000000,
       "post_discard_ns": 68988000,
       "selected": "9s"
@@ -457,7 +470,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_candidate_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の内訳で、合計は `normal_discard_forward_ns` を超えません。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

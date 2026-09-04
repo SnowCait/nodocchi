@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use bot_core::{DecisionPhaseDurations, LegalAction, NormalDiscardPhaseDurations, ShantenAgent};
+use bot_core::{
+    DecisionPhaseDurations, ForwardMetricsPhaseDurations, LegalAction, NormalDiscardPhaseDurations,
+    ShantenAgent,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::CaptureBenchmarkSpec;
@@ -199,10 +202,21 @@ fn format_duration(duration: Duration) -> String {
 // normal discard の内訳は同じ request の normal_discard に括弧で添える。phase 別の集計は出さない。
 fn format_normal_discard_phases(phases: &NormalDiscardPhaseDurations) -> String {
     format!(
-        "base={} forward={} finalize={}",
+        "base={} forward={} [{}] finalize={}",
         format_duration(phases.base_evaluation),
         format_duration(phases.forward_metrics),
+        format_forward_metrics_phases(&phases.forward_metrics_phases),
         format_duration(phases.selection_finalize),
+    )
+}
+
+// forward metrics の内訳は同じ request の forward に角括弧で添える。
+fn format_forward_metrics_phases(phases: &ForwardMetricsPhaseDurations) -> String {
+    format!(
+        "search={} aggregate={} self_tsumo={}",
+        format_duration(phases.candidate_search),
+        format_duration(phases.weighted_aggregation),
+        format_duration(phases.self_tsumo_continuation),
     )
 }
 
@@ -239,6 +253,9 @@ pub struct BenchmarkRequestJson {
     pub normal_discard_ns: u64,
     pub normal_discard_base_ns: u64,
     pub normal_discard_forward_ns: u64,
+    pub forward_candidate_search_ns: u64,
+    pub forward_weighted_aggregation_ns: u64,
+    pub forward_self_tsumo_ns: u64,
     pub normal_discard_finalize_ns: u64,
     pub post_discard_ns: u64,
     pub selected: String,
@@ -278,6 +295,27 @@ impl BenchmarkJson {
                     ),
                     normal_discard_forward_ns: nanos(
                         measurement.phases.normal_discard_phases.forward_metrics,
+                    ),
+                    forward_candidate_search_ns: nanos(
+                        measurement
+                            .phases
+                            .normal_discard_phases
+                            .forward_metrics_phases
+                            .candidate_search,
+                    ),
+                    forward_weighted_aggregation_ns: nanos(
+                        measurement
+                            .phases
+                            .normal_discard_phases
+                            .forward_metrics_phases
+                            .weighted_aggregation,
+                    ),
+                    forward_self_tsumo_ns: nanos(
+                        measurement
+                            .phases
+                            .normal_discard_phases
+                            .forward_metrics_phases
+                            .self_tsumo_continuation,
                     ),
                     normal_discard_finalize_ns: nanos(
                         measurement.phases.normal_discard_phases.selection_finalize,
@@ -440,8 +478,28 @@ mod tests {
                 base_evaluation: Duration::from_millis(base),
                 forward_metrics: Duration::from_millis(forward),
                 selection_finalize: Duration::from_millis(finalize),
+                ..NormalDiscardPhaseDurations::default()
             },
             ..phases(early, normal_discard, post_discard)
+        }
+    }
+
+    fn with_forward_breakdown(
+        phases: DecisionPhaseDurations,
+        search: u64,
+        aggregate: u64,
+        self_tsumo: u64,
+    ) -> DecisionPhaseDurations {
+        DecisionPhaseDurations {
+            normal_discard_phases: NormalDiscardPhaseDurations {
+                forward_metrics_phases: ForwardMetricsPhaseDurations {
+                    candidate_search: Duration::from_millis(search),
+                    weighted_aggregation: Duration::from_millis(aggregate),
+                    self_tsumo_continuation: Duration::from_millis(self_tsumo),
+                },
+                ..phases.normal_discard_phases
+            },
+            ..phases
         }
     }
 
@@ -689,7 +747,12 @@ mod tests {
                 "game-002.jsonl",
                 2,
                 2470,
-                phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2350, 20),
+                with_forward_breakdown(
+                    phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2350, 20),
+                    2300,
+                    30,
+                    20,
+                ),
             ),
         ]);
         let report = format_benchmark(&run);
@@ -712,7 +775,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms (base=30.000 ms forward=2350.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms (base=30.000 ms forward=2350.000 ms [search=2300.000 ms aggregate=30.000 ms self_tsumo=20.000 ms] finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [search=0.000 ms aggregate=0.000 ms self_tsumo=0.000 ms] finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -737,7 +800,12 @@ mod tests {
                 "game-002.jsonl",
                 2,
                 2470,
-                phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2350, 20),
+                with_forward_breakdown(
+                    phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2350, 20),
+                    2300,
+                    30,
+                    20,
+                ),
             ),
         ]);
         let json = BenchmarkJson::from_run(&run);
@@ -765,6 +833,9 @@ mod tests {
                     normal_discard_ns: 0,
                     normal_discard_base_ns: 0,
                     normal_discard_forward_ns: 0,
+                    forward_candidate_search_ns: 0,
+                    forward_weighted_aggregation_ns: 0,
+                    forward_self_tsumo_ns: 0,
                     normal_discard_finalize_ns: 0,
                     post_discard_ns: 0,
                     selected: "1m".to_string(),
@@ -778,6 +849,9 @@ mod tests {
                     normal_discard_ns: 2_400_000_000,
                     normal_discard_base_ns: 30_000_000,
                     normal_discard_forward_ns: 2_350_000_000,
+                    forward_candidate_search_ns: 2_300_000_000,
+                    forward_weighted_aggregation_ns: 30_000_000,
+                    forward_self_tsumo_ns: 20_000_000,
                     normal_discard_finalize_ns: 20_000_000,
                     post_discard_ns: 69_000_000,
                     selected: "1m".to_string(),
@@ -888,6 +962,67 @@ mod tests {
         assert!(text.contains("\"normal_discard_forward_ns\""), "{text}");
         assert!(text.contains("\"normal_discard_finalize_ns\""), "{text}");
         assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn benchmark_json_keeps_the_forward_subphases_of_every_request() {
+        let path = write_requests("json-forward-subphases", &[486]);
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let json = BenchmarkJson::from_run(&run);
+        let json_path = temp_path("json-forward-subphases", "json");
+        write_benchmark_json(&json_path, &run).unwrap();
+        let text = std::fs::read_to_string(&json_path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&json_path);
+
+        let phases = &run.requests[0]
+            .phases
+            .normal_discard_phases
+            .forward_metrics_phases;
+        let request = &json.requests[0];
+        assert_eq!(request.request_id, 486);
+        assert_eq!(
+            request.forward_candidate_search_ns,
+            nanos(phases.candidate_search)
+        );
+        assert_eq!(
+            request.forward_weighted_aggregation_ns,
+            nanos(phases.weighted_aggregation)
+        );
+        assert_eq!(
+            request.forward_self_tsumo_ns,
+            nanos(phases.self_tsumo_continuation)
+        );
+
+        assert!(text.contains("\"forward_candidate_search_ns\""), "{text}");
+        assert!(
+            text.contains("\"forward_weighted_aggregation_ns\""),
+            "{text}"
+        );
+        assert!(text.contains("\"forward_self_tsumo_ns\""), "{text}");
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn an_early_return_request_keeps_the_forward_subphases_at_zero() {
+        let observation = fixture_base64(0, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec());
+        let path = write_capture(
+            "early-return-forward-subphases",
+            &[server_record_line(&format!(
+                r#"{{"type":"request_action","request_id":487,"actor":0,"possible_actions":[{{"type":"hora"}},{{"type":"none"}}],"observation":"{observation}"}}"#
+            ))],
+        );
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(run.requests[0].selected_action, LegalAction::Hora);
+        assert_eq!(
+            run.requests[0]
+                .phases
+                .normal_discard_phases
+                .forward_metrics_phases,
+            ForwardMetricsPhaseDurations::default()
+        );
     }
 
     #[test]

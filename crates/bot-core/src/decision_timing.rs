@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
+use bot_logic::{ForwardMetricsObserver, ForwardMetricsPhase};
+
 use crate::action::LegalAction;
 
 /// 意思決定1回を phase 別に分けた実測時間。
@@ -35,6 +37,9 @@ pub struct NormalDiscardPhaseDurations {
     pub base_evaluation: Duration,
     /// 打牌選択が使う前方集計値 (lookahead / forward metrics)。
     pub forward_metrics: Duration,
+    /// `forward_metrics` の内訳。前方集計値を計算しなかった局面では、すべて `Duration::ZERO` の
+    /// ままになる。
+    pub forward_metrics_phases: ForwardMetricsPhaseDurations,
     /// 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定。
     pub selection_finalize: Duration,
 }
@@ -42,6 +47,26 @@ pub struct NormalDiscardPhaseDurations {
 impl NormalDiscardPhaseDurations {
     pub fn total(&self) -> Duration {
         self.base_evaluation + self.forward_metrics + self.selection_finalize
+    }
+}
+
+/// 前方集計値1回を内部処理別に分けた実測時間。
+///
+/// 合計は `NormalDiscardPhaseDurations::forward_metrics` を超えない。前方集計値の入力を
+/// 組み立てる時間はどの内訳にも入らない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForwardMetricsPhaseDurations {
+    /// 仮想ツモ枝の探索。ツモ後の次打牌評価と、その枝が使う将来打点の scoring を含む。
+    pub candidate_search: Duration,
+    /// 探索済みの枝からの重み付き集計 (weighted tenpai wait / weighted next acceptance)。
+    pub weighted_aggregation: Duration,
+    /// 探索済みの枝からの self-tsumo continuation の集計。
+    pub self_tsumo_continuation: Duration,
+}
+
+impl ForwardMetricsPhaseDurations {
+    pub fn total(&self) -> Duration {
+        self.candidate_search + self.weighted_aggregation + self.self_tsumo_continuation
     }
 }
 
@@ -90,6 +115,20 @@ impl PhaseDurations for DecisionPhaseDurations {
     }
 }
 
+impl PhaseDurations for ForwardMetricsPhaseDurations {
+    type Phase = ForwardMetricsPhase;
+
+    const FIRST: Self::Phase = ForwardMetricsPhase::CandidateSearch;
+
+    fn accumulate(&mut self, phase: Self::Phase, elapsed: Duration) {
+        match phase {
+            ForwardMetricsPhase::CandidateSearch => self.candidate_search += elapsed,
+            ForwardMetricsPhase::WeightedAggregation => self.weighted_aggregation += elapsed,
+            ForwardMetricsPhase::SelfTsumoContinuation => self.self_tsumo_continuation += elapsed,
+        }
+    }
+}
+
 impl PhaseDurations for NormalDiscardPhaseDurations {
     type Phase = NormalDiscardPhase;
 
@@ -115,10 +154,13 @@ pub(crate) struct PhaseTimer<D: PhaseDurations> {
 
 pub(crate) type DecisionPhaseTimer = PhaseTimer<DecisionPhaseDurations>;
 pub(crate) type NormalDiscardPhaseTimer = PhaseTimer<NormalDiscardPhaseDurations>;
+pub(crate) type ForwardMetricsPhaseTimer = PhaseTimer<ForwardMetricsPhaseDurations>;
 
 #[derive(Debug)]
 struct TimerState<D: PhaseDurations> {
-    phase: D::Phase,
+    /// 計上先の phase。最初の `enter()` を待っている間は `None` で、その間の経過時間はどの
+    /// phase にも計上しない。
+    phase: Option<D::Phase>,
     since: Instant,
     durations: D,
 }
@@ -131,7 +173,19 @@ impl<D: PhaseDurations> PhaseTimer<D> {
     pub(crate) fn started() -> Self {
         Self {
             state: Some(TimerState {
-                phase: D::FIRST,
+                phase: Some(D::FIRST),
+                since: Instant::now(),
+                durations: D::default(),
+            }),
+        }
+    }
+
+    /// 最初の `enter()` まで計上を始めない計測器。区切りを通らなかった経路では、どの phase も
+    /// `Duration::ZERO` のままになる。
+    pub(crate) fn armed() -> Self {
+        Self {
+            state: Some(TimerState {
+                phase: None,
                 since: Instant::now(),
                 durations: D::default(),
             }),
@@ -142,7 +196,7 @@ impl<D: PhaseDurations> PhaseTimer<D> {
     pub(crate) fn enter(&mut self, phase: D::Phase) {
         if let Some(state) = self.state.as_mut() {
             state.flush();
-            state.phase = phase;
+            state.phase = Some(phase);
         }
     }
 
@@ -177,12 +231,43 @@ impl DecisionPhaseTimer {
     }
 }
 
+impl NormalDiscardPhaseTimer {
+    /// 前方集計値の内訳を計る子計測器。外側の計測が有効な場合だけ有効にする。
+    ///
+    /// 前方集計値を計算しない局面では区切りを1つも通らないため、内訳は 0 のままになる。
+    pub(crate) fn forward_metrics_timer(&self) -> ForwardMetricsPhaseTimer {
+        match self.state {
+            Some(_) => ForwardMetricsPhaseTimer::armed(),
+            None => ForwardMetricsPhaseTimer::disabled(),
+        }
+    }
+
+    /// 前方集計値の内訳を計上する。
+    pub(crate) fn record_forward_metrics_phases(
+        &mut self,
+        durations: ForwardMetricsPhaseDurations,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.durations.forward_metrics_phases = durations;
+        }
+    }
+}
+
+/// 前方集計値の区切りをそのまま実測へ変える。計測が無効な場合は `Instant` を取得しない。
+impl ForwardMetricsObserver for ForwardMetricsPhaseTimer {
+    fn enter_phase(&mut self, phase: ForwardMetricsPhase) {
+        self.enter(phase);
+    }
+}
+
 impl<D: PhaseDurations> TimerState<D> {
     fn flush(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.since);
         self.since = now;
-        self.durations.accumulate(self.phase, elapsed);
+        if let Some(phase) = self.phase {
+            self.durations.accumulate(phase, elapsed);
+        }
     }
 }
 
@@ -244,9 +329,70 @@ mod tests {
             base_evaluation: Duration::from_millis(1),
             forward_metrics: Duration::from_millis(2),
             selection_finalize: Duration::from_millis(3),
+            ..NormalDiscardPhaseDurations::default()
         });
 
         assert_eq!(timer.finish(), DecisionPhaseDurations::default());
+    }
+
+    #[test]
+    fn an_armed_timer_measures_nothing_until_the_first_phase() {
+        // 区切りを1つも通らない経路では、どの phase も 0 のままになる。
+        let timer = ForwardMetricsPhaseTimer::armed();
+
+        assert_eq!(timer.finish(), ForwardMetricsPhaseDurations::default());
+    }
+
+    #[test]
+    fn an_armed_timer_accounts_only_from_the_first_phase() {
+        let mut timer = ForwardMetricsPhaseTimer::armed();
+        timer.enter(ForwardMetricsPhase::WeightedAggregation);
+        let durations = timer.finish();
+
+        assert_eq!(durations.candidate_search, Duration::ZERO);
+        assert_eq!(durations.self_tsumo_continuation, Duration::ZERO);
+        assert_eq!(durations.total(), durations.weighted_aggregation);
+    }
+
+    #[test]
+    fn a_disabled_timer_hands_out_a_disabled_forward_metrics_timer() {
+        let timer = NormalDiscardPhaseTimer::disabled();
+        let mut forward_metrics = timer.forward_metrics_timer();
+        forward_metrics.enter_phase(ForwardMetricsPhase::CandidateSearch);
+        forward_metrics.enter_phase(ForwardMetricsPhase::WeightedAggregation);
+
+        assert_eq!(
+            forward_metrics.finish(),
+            ForwardMetricsPhaseDurations::default()
+        );
+    }
+
+    #[test]
+    fn a_disabled_timer_keeps_the_recorded_forward_metrics_phases_at_zero() {
+        let mut timer = NormalDiscardPhaseTimer::disabled();
+        timer.record_forward_metrics_phases(ForwardMetricsPhaseDurations {
+            candidate_search: Duration::from_millis(1),
+            weighted_aggregation: Duration::from_millis(2),
+            self_tsumo_continuation: Duration::from_millis(3),
+        });
+
+        assert_eq!(timer.finish(), NormalDiscardPhaseDurations::default());
+    }
+
+    #[test]
+    fn the_recorded_forward_metrics_phases_are_kept_as_the_breakdown() {
+        let mut timer = NormalDiscardPhaseTimer::started();
+        let mut forward_metrics = timer.forward_metrics_timer();
+        forward_metrics.enter_phase(ForwardMetricsPhase::CandidateSearch);
+        let breakdown = forward_metrics.finish();
+        timer.record_forward_metrics_phases(breakdown);
+        let durations = timer.finish();
+
+        assert_eq!(durations.forward_metrics_phases, breakdown);
+        assert_eq!(
+            durations.forward_metrics_phases.weighted_aggregation,
+            Duration::ZERO
+        );
     }
 
     #[test]

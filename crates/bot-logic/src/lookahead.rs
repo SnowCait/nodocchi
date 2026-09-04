@@ -608,6 +608,32 @@ pub fn diagnose_lookahead_candidate(
     )
 }
 
+/// 打牌選択用の前方集計値を求める処理の区切り。
+///
+/// 通知される順序は1候補につき探索 → 集計の順で、対象候補の分だけ繰り返す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardMetricsPhase {
+    /// 仮想ツモ枝の探索。ツモ後の次打牌評価と、その枝が使う将来打点の scoring を含む。
+    CandidateSearch,
+    /// 探索済みの枝からの重み付き集計 (weighted tenpai wait / weighted next acceptance)。
+    WeightedAggregation,
+    /// 探索済みの枝からの self-tsumo continuation の集計。
+    SelfTsumoContinuation,
+}
+
+/// 前方集計値の内部処理の区切りを受け取る観測器。
+///
+/// bot-logic は時計を持たないため、実測は上位層が行う。観測器は区切りを受け取るだけで、
+/// 対象候補も枝の探索も集計もその有無で変わらない。
+pub trait ForwardMetricsObserver {
+    fn enter_phase(&mut self, phase: ForwardMetricsPhase);
+}
+
+/// 区切りを受け取らない観測器。計測しない経路はこれを通る。
+impl ForwardMetricsObserver for () {
+    fn enter_phase(&mut self, _phase: ForwardMetricsPhase) {}
+}
+
 /// 打牌選択用の前方集計値を求める。
 ///
 /// 戻り値は `evaluations` と同じ順序・同じ件数で、前方評価を計算しなかった候補は
@@ -620,6 +646,18 @@ pub fn diagnose_lookahead_candidate(
 pub fn forward_metrics(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
+) -> Vec<ForwardMetrics> {
+    forward_metrics_instrumented(inputs, evaluations, &mut ())
+}
+
+/// [`forward_metrics`] と同じ集計を、内部処理の区切りの通知付きで行う。
+///
+/// 通知するのは通った経路の区切りだけで、対象候補の絞り込みも枝の探索も集計も
+/// [`forward_metrics`] と同じものを1回ずつ通る。`observer` の有無で戻り値は変わらない。
+pub fn forward_metrics_instrumented(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+    observer: &mut impl ForwardMetricsObserver,
 ) -> Vec<ForwardMetrics> {
     if !requires_forward_metrics(evaluations) {
         return vec![ForwardMetrics::default(); evaluations.len()];
@@ -634,9 +672,10 @@ pub fn forward_metrics(
             if !target {
                 return ForwardMetrics::default();
             }
+            observer.enter_phase(ForwardMetricsPhase::CandidateSearch);
             let candidate =
                 search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
-            forward_metrics_from_candidate(inputs, evaluation, &candidate, best_shanten)
+            forward_metrics_from_candidate(inputs, evaluation, &candidate, best_shanten, observer)
         })
         .collect()
 }
@@ -667,7 +706,7 @@ pub fn forward_metrics_from_lookahead(
             if !target || candidate.discard != evaluation.discard {
                 return ForwardMetrics::default();
             }
-            forward_metrics_from_candidate(inputs, evaluation, candidate, best_shanten)
+            forward_metrics_from_candidate(inputs, evaluation, candidate, best_shanten, &mut ())
         })
         .collect()
 }
@@ -691,6 +730,7 @@ pub fn forward_metrics_for_candidate(
         evaluation,
         &candidate,
         evaluation.min_shanten_after_discard(),
+        &mut (),
     )
 }
 
@@ -867,12 +907,15 @@ fn forward_metrics_from_candidate(
     evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
     best_shanten: i8,
+    observer: &mut impl ForwardMetricsObserver,
 ) -> ForwardMetrics {
-    forward_metrics_for_shanten(
-        best_shanten,
-        candidate.weighted_forward_metric(best_shanten - 1),
-        self_tsumo_value_for_candidate(inputs, evaluation, candidate),
-    )
+    observer.enter_phase(ForwardMetricsPhase::WeightedAggregation);
+    let metric = candidate.weighted_forward_metric(best_shanten - 1);
+
+    observer.enter_phase(ForwardMetricsPhase::SelfTsumoContinuation);
+    let expected_self_tsumo_value = self_tsumo_value_for_candidate(inputs, evaluation, candidate);
+
+    forward_metrics_for_shanten(best_shanten, metric, expected_self_tsumo_value)
 }
 
 // 現在打牌後が1向聴の候補だけが持つ self-tsumo continuation。材料が揃わない局面と1向聴以外は
@@ -2193,6 +2236,88 @@ mod tests {
             }
         }
         assert!(iishanten > 1, "1向聴候補が複数ある局面が必要");
+    }
+
+    // ---- 前方集計値の内部処理の区切り ----
+
+    // 通知された区切りをそのまま並べる観測器。実測は上位層が行うため、bot-logic 側は順序と
+    // 回数だけを固定する。
+    #[derive(Debug, Default)]
+    struct RecordedPhases(Vec<ForwardMetricsPhase>);
+
+    impl ForwardMetricsObserver for RecordedPhases {
+        fn enter_phase(&mut self, phase: ForwardMetricsPhase) {
+            self.0.push(phase);
+        }
+    }
+
+    fn forward_targets(situation: &Situation) -> usize {
+        forward_target_mask(&situation.evaluations)
+            .into_iter()
+            .filter(|&target| target)
+            .count()
+    }
+
+    #[test]
+    fn observing_the_phases_does_not_change_the_forward_metrics() {
+        let case = &*IISHANTEN_WAIT_CASE;
+        let mut observed = RecordedPhases::default();
+
+        assert_eq!(
+            forward_metrics_instrumented(
+                &inputs(&case.situation),
+                &case.situation.evaluations,
+                &mut observed,
+            ),
+            forward_metrics(&inputs(&case.situation), &case.situation.evaluations),
+        );
+    }
+
+    #[test]
+    fn each_target_candidate_is_searched_once_and_then_aggregated() {
+        // 区切りの通知は「探索 → 重み付き集計 → self-tsumo 集計」を対象候補の数だけ繰り返す。
+        // 探索の通知が候補数と一致することで、計測のために枝探索をやり直していないことを固定する。
+        let case = &*IISHANTEN_WAIT_CASE;
+        let targets = forward_targets(&case.situation);
+        assert!(targets > 1, "前方評価の対象候補が複数ある局面が必要");
+
+        let mut observed = RecordedPhases::default();
+        forward_metrics_instrumented(
+            &inputs(&case.situation),
+            &case.situation.evaluations,
+            &mut observed,
+        );
+
+        assert_eq!(
+            observed.0,
+            std::iter::repeat_n(
+                [
+                    ForwardMetricsPhase::CandidateSearch,
+                    ForwardMetricsPhase::WeightedAggregation,
+                    ForwardMetricsPhase::SelfTsumoContinuation,
+                ],
+                targets,
+            )
+            .flatten()
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_situation_without_forward_metrics_notifies_no_phase() {
+        // 前方評価を計算しないテンパイ局面では区切りを1つも通らない。
+        let situation = hand_only_situation(
+            &ids(&[0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 89, 90, 68]),
+            FixedMeldCount::NONE,
+            Vec::new(),
+            None,
+            None,
+        );
+        let mut observed = RecordedPhases::default();
+
+        forward_metrics_instrumented(&inputs(&situation), &situation.evaluations, &mut observed);
+
+        assert_eq!(observed.0, Vec::new());
     }
 
     #[test]
