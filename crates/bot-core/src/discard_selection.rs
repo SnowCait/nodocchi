@@ -5,6 +5,7 @@ use crate::current_tenpai_continuation::{
     diagnose_current_tenpai_continuation,
 };
 use crate::damaten_value::tenpai_completed_hands_after_discard;
+use crate::decision_timing::{NormalDiscardPhase, NormalDiscardPhaseTimer};
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
     evaluate_tenpai_offense_with_hands,
@@ -211,8 +212,29 @@ pub(crate) fn select_discard_action_with_evaluation(
     context: &GameContext,
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
+    select_discard_action_with_evaluation_instrumented(
+        context,
+        legal_actions,
+        &mut NormalDiscardPhaseTimer::disabled(),
+    )
+}
+
+/// `select_discard_action_with_evaluation()` と同じ選択を、内部処理別の optional な計測付きで行う。
+///
+/// `timing` は無効な場合に何もせず、有効な場合も通った経路の経過時間をその場で計上するだけ。
+/// 候補生成も前方集計値も候補比較も1回ずつのままで、計測のために評価を再実行しない。選択結果は
+/// 計測の有無で変わらない。
+pub(crate) fn select_discard_action_with_evaluation_instrumented(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    timing: &mut NormalDiscardPhaseTimer,
+) -> DiscardActionSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
+
+    timing.enter(NormalDiscardPhase::ForwardMetrics);
     let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
+
+    timing.enter(NormalDiscardPhase::SelectionFinalize);
     let current_tenpai = current_tenpai_candidate_evaluations(
         context,
         &legal.tiles,
@@ -1342,6 +1364,7 @@ pub(crate) mod tests {
     use crate::context::TableStateFacts;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
+    use crate::shanten_test_support::{tenpai_actions, tenpai_context};
     use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
@@ -1373,6 +1396,46 @@ pub(crate) mod tests {
         };
 
         assert_eq!(selection.action, None);
+    }
+
+    #[test]
+    fn the_normal_discard_subphase_timing_does_not_change_the_selection() {
+        let context = tenpai_context(&[]);
+        let legal_actions = tenpai_actions();
+
+        let mut timing = NormalDiscardPhaseTimer::started();
+        let timed = select_discard_action_with_evaluation_instrumented(
+            &context,
+            &legal_actions,
+            &mut timing,
+        );
+
+        assert_eq!(
+            timed,
+            select_discard_action_with_evaluation(&context, &legal_actions)
+        );
+    }
+
+    #[test]
+    fn the_instrumented_selection_runs_every_stage_only_once() {
+        // 内訳の計測は既存の選択経路へ phase の区切りを入れるだけで、候補生成も前方集計値も
+        // 候補比較も計測のために再実行しない。
+        let instrumented = include_str!("discard_selection.rs")
+            .split("pub(crate) fn select_discard_action_with_evaluation_instrumented(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn select_discard_action_with_diagnostic(")
+            .next()
+            .unwrap();
+
+        for stage in [
+            "legal_discard_evaluations(",
+            "selection_forward_metrics(",
+            "current_tenpai_candidate_evaluations(",
+            "selection_from_legal_evaluations(",
+        ] {
+            assert_eq!(instrumented.matches(stage).count(), 1, "{stage}");
+        }
     }
 
     #[test]
