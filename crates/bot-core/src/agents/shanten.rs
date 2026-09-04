@@ -2523,7 +2523,7 @@ mod tests {
         let candidate = assert_single_call_candidate(
             &reaction,
             &LegalAction::None,
-            CallDecisionReason::PostCallNotTenpai,
+            CallDecisionReason::ReactionSourceUnknown,
         );
         assert_eq!(candidate.current_shanten, Some(1));
         assert_eq!(candidate.post_call_shanten(), Some(1));
@@ -2917,7 +2917,7 @@ mod tests {
             &reaction,
             &["5s", "2s"],
             "2s",
-            CallDecisionReason::PostCallNotTenpai,
+            CallDecisionReason::ReactionSourceUnknown,
         );
         assert_eq!(selected.to_mjai_string(), "2p");
     }

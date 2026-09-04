@@ -1159,9 +1159,11 @@ pub(crate) fn select_best_iishanten_post_call_discard(
     let metrics: Vec<_> = evaluations
         .iter()
         .map(|evaluation| {
-            (evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN)
-                .then(|| forward_metrics_for_candidate(&inputs, evaluation))
-                .unwrap_or_default()
+            if evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN {
+                forward_metrics_for_candidate(&inputs, evaluation)
+            } else {
+                ForwardMetrics::default()
+            }
         })
         .collect();
     let index = best_discard_selection_index_with_forward_metrics(evaluations, &metrics)?;
