@@ -1,13 +1,19 @@
 //! Chi / Pon の鳴き判断 policy 層。
 //!
-//! 対象は
+//! 既存の production 対象は
 //!
 //! ```text
 //! 現在1向聴 → Chi / Pon → 打牌 → テンパイ
 //! ```
 //!
-//! だけで、Chi と Pon は同じ評価 path を通る。鳴き種別ごとの専用 rule は持たず、役牌 Pon の
-//! ような牌種による gating も行わない。
+//! で、これを満たさなかった候補のうち
+//!
+//! ```text
+//! 現在1向聴 → Chi / Pon → 打牌 → 1向聴
+//! ```
+//!
+//! だけを Pass と同じ self-tsumo continuation 尺度で比較する。Chi と Pon は同じ評価 path を
+//! 通り、鳴き種別ごとの専用 rule や牌種による gating は持たない。
 //!
 //! # source of truth
 //!
@@ -18,7 +24,9 @@
 //! | 面子の形の検証 | [`Meld::shape`] |
 //! | 喰い替え禁止牌 | [`forbidden_discards_after_call`] |
 //! | 副露込みの向聴数 | [`calculate_shanten_with_fixed_melds`] |
-//! | 鳴き後の打牌選択 | [`select_best_one_step_discard_evaluation_with_fixed_meld_count`] |
+//! | 鳴き後の打牌候補 | [`post_call_discard_evaluations`] |
+//! | 1向聴の打牌比較 | [`select_best_iishanten_post_call_discard`] |
+//! | Pass の継続評価 | [`awaiting_draw_expected_self_tsumo_value`] |
 //! | 待ちと残枚数 | [`DiscardEvaluation::acceptance_after_discard`] / [`TenpaiWaitAvailability`] |
 //! | ロン可否 | [`TenpaiWaitAvailability::can_ron`] |
 //! | 役の有無 | [`evaluate_tenpai_hand_value`] |
@@ -43,8 +51,9 @@
 //! AND 残枚数 > 0 の全ての和了牌 variant に役がある
 //! ```
 //!
-//! これ以外では鳴かない。他家にリーチ者がいる局面の鳴きは押し引きへ通さず、打点による例外も
-//! 持たない。
+//! 即テンパイ候補は従来どおり最優先する。それが無い場合だけ Call 後1向聴の ExpectedSelfTsumoValue
+//! と Pass を同じ流局 horizon で比較し、Call が厳密に高い場合だけ鳴く。同値・unknown は鳴かない。
+//! 他家にリーチ者がいる局面の鳴きは押し引きへ通さず、打点による例外も持たない。
 //!
 //! # 片和了
 //!
@@ -52,19 +61,19 @@
 //! 0 の variant は現在ロンできないので判定対象にせず、残枚数 > 0 の variant に1つでも役なしが
 //! あれば鳴かない。役の有無を確定できない variant がある場合も、役ありだと推測せず鳴かない。
 //!
-//! # 1向聴のまま鳴く候補の観測
+//! # 1向聴のまま鳴く候補
 //!
 //! ```text
 //! 現在1向聴 → 鳴く → 最良打牌 → 1向聴のまま
 //! ```
 //!
-//! で [`CallDecisionReason::PostCallNotTenpai`] として落ちる候補についてだけ、
-//! [`CallIishantenAcceptanceDiagnostic`] を観測用に残す。成立条件にも候補の選択にも使わない
-//! diagnostics 専用の値で、これがあるかどうかで `ShantenAgent::act()` の結果は変わらない。
+//! は [`ForwardMetrics::expected_self_tsumo_value`](bot_logic::ForwardMetrics) と同じ Progress /
+//! SameShanten 探索・terminal scoring・確率模型で評価する。Pass は架空の現在打牌を作らず、既に
+//! action が終わり次の自摸を待つ state 用の共有入口から同じ探索へ入る。
 //!
-//! 解析専用なので、収集するのは `diagnose()` 経路だけ。通常の `act()` 経路は
-//! `collect_iishanten_acceptance == false` で呼ばれ、鳴かない場合の受け入れも固定面子の役保証も
-//! そもそも計算しない。鳴き policy 自体は enabled / disabled で共通の1本のまま。
+//! raw acceptance と固定面子の役保証は [`CallIishantenAcceptanceDiagnostic`] に観測用として残すが、
+//! policy は読まない。diagnostics の有無で action は変わらず、production が使った self-tsumo 値を
+//! [`CallIishantenSelfTsumoDiagnostic`] へそのまま保持する。
 //!
 //! 2向聴から鳴いて1向聴になる候補は対象にしない。鳴かない側と鳴いた側で探索の深さが揃わず、
 //! 受け入れ枚数をそのまま比べられないため。
@@ -72,19 +81,24 @@
 use bot_logic::{
     DiscardEvaluation, FixedMeldCount, HandValueError, HandValueOutcome, Meld, MeldKind,
     OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    best_discard_selection_index, calculate_acceptance_with_fixed_melds_and_visible_tiles,
-    calculate_shanten_with_fixed_melds, discard_tenpai_wait_availability,
-    evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku, split_discarded_tile,
-    tenpai_completed_hands,
+    awaiting_draw_expected_self_tsumo_value, best_discard_selection_index,
+    calculate_acceptance_with_fixed_melds_and_visible_tiles, calculate_shanten_with_fixed_melds,
+    discard_tenpai_wait_availability, evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku,
+    split_discarded_tile, tenpai_completed_hands,
 };
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::damaten_value::damaten_baseline_context;
-use crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count;
+use crate::discard_selection::{
+    LookaheadDiagnosticScope, lookahead_inputs_with_own_future_draws,
+    post_call_discard_evaluations, select_best_iishanten_post_call_discard,
+    select_best_one_step_evaluation,
+};
 use crate::kuikae::forbidden_discards_after_call;
+use crate::prospective_value::ProductionProspectiveValuator;
 
-/// 鳴きを検討する現在の向聴数。今回は 1向聴 → テンパイ だけを対象にする。
+/// 鳴きを検討する現在の向聴数。
 pub const CALL_CURRENT_SHANTEN: i8 = 1;
 
 /// 鳴き後の打牌でテンパイと判断する向聴数。
@@ -115,12 +129,15 @@ impl CallKind {
 
 /// 鳴きを採用した / しなかった理由。
 ///
-/// [`Self::EligibleTenpai`] 以外はすべて「今回は鳴かない」理由であり、最初に落ちた条件を1つ
-/// だけ表す。判定順は [`CallCandidateDiagnostic`] のフィールドが埋まる順と一致する。
+/// `EligibleTenpai` / `EligibleIishantenSelfTsumo` 以外はすべて「今回は鳴かない」理由であり、
+/// 最初に落ちた条件を1つだけ表す。判定順は [`CallCandidateDiagnostic`] のフィールドが埋まる順と
+/// 一致する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallDecisionReason {
     /// 全条件を満たし、鳴き後に生きた待ちのテンパイになる。
     EligibleTenpai,
+    /// 鳴き後も1向聴だが、同じ horizon の ExpectedSelfTsumoValue が Pass より厳密に高い。
+    EligibleIishantenSelfTsumo,
     /// 他家にリーチ者がいる。今回の鳴きは押し引きへ通さない。
     OpponentReached,
     /// reaction context に `drawn_tile` があり局面として不整合。14枚扱いで判断しない。
@@ -138,6 +155,12 @@ pub enum CallDecisionReason {
     NoPostCallDiscard,
     /// 鳴き後の最良打牌でもテンパイにならない。
     PostCallNotTenpai,
+    /// 鳴き後1向聴と Pass の ExpectedSelfTsumoValue のどちらかを確定できない。
+    IishantenSelfTsumoUnknown,
+    /// Pass の正確な horizon に必要な reaction 元 player が不明。
+    ReactionSourceUnknown,
+    /// Pass の ExpectedSelfTsumoValue が Call 以上。同値でも鳴かない。
+    PassSelfTsumoNotLower,
     /// 鳴き後はテンパイだが、待ち牌がすべて見えている。
     NoLiveAcceptance,
     /// 生きた待ちはあるが、残枚数合計が [`CALL_MIN_LIVE_WAIT_REMAINING`] 未満。
@@ -148,6 +171,23 @@ pub enum CallDecisionReason {
     YakuMissing,
     /// 残枚数 > 0 の和了牌 variant に、役の有無を確定できないものがある。
     HandValueUnknown,
+}
+
+/// `Call -> 打牌 -> 1向聴` と Pass の self-tsumo continuation 比較結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallIishantenComparison {
+    CallHigher,
+    PassNotLower,
+    Unknown,
+}
+
+/// production が使用した1向聴 Call / Pass の ExpectedSelfTsumoValue。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallIishantenSelfTsumoDiagnostic {
+    pub reaction_source_player: Option<u8>,
+    pub pass_expected_self_tsumo_value: Option<u64>,
+    pub call_expected_self_tsumo_value: Option<u64>,
+    pub comparison: CallIishantenComparison,
 }
 
 /// 和了牌の物理牌1つ分の役の有無。
@@ -254,6 +294,8 @@ pub struct CallCandidateDiagnostic {
     /// 鳴いても1向聴のままの候補についてだけ求める観測用の受け入れ比較。対象外の候補と、
     /// そこまで評価が進まなかった候補では `None`。
     pub iishanten_acceptance: Option<CallIishantenAcceptanceDiagnostic>,
+    /// 鳴き後も1向聴の候補に対して production が実際に使った Call / Pass 比較。
+    pub iishanten_self_tsumo: Option<CallIishantenSelfTsumoDiagnostic>,
     pub eligible: bool,
     pub selected: bool,
     pub reason: CallDecisionReason,
@@ -347,6 +389,8 @@ pub(crate) fn evaluate_call_decision(
         return None;
     }
 
+    apply_iishanten_self_tsumo_policy(ctx, &mut candidates);
+
     let selected_index = select_eligible_candidate(&candidates);
     if let Some(index) = selected_index {
         candidates[index].selected = true;
@@ -380,7 +424,7 @@ fn select_eligible_candidate(candidates: &[CallCandidateDiagnostic]) -> Option<u
     let (indices, evaluations): (Vec<usize>, Vec<DiscardEvaluation>) = candidates
         .iter()
         .enumerate()
-        .filter(|(_, candidate)| candidate.eligible)
+        .filter(|(_, candidate)| candidate.reason == CallDecisionReason::EligibleTenpai)
         .filter_map(|(index, candidate)| {
             candidate
                 .post_call_discard
@@ -389,7 +433,28 @@ fn select_eligible_candidate(candidates: &[CallCandidateDiagnostic]) -> Option<u
         })
         .unzip();
 
-    best_discard_selection_index(&evaluations, &[]).map(|best| indices[best])
+    if let Some(best) = best_discard_selection_index(&evaluations, &[]) {
+        return Some(indices[best]);
+    }
+
+    // 既存の即テンパイ候補が無い場合だけ、Pass より厳密に高い1向聴 Call の最大値を選ぶ。
+    // 同値の Call 候補では合法 action の先頭を維持する。
+    let mut best: Option<(usize, u64)> = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.reason != CallDecisionReason::EligibleIishantenSelfTsumo {
+            continue;
+        }
+        let Some(value) = candidate
+            .iishanten_self_tsumo
+            .and_then(|diagnostic| diagnostic.call_expected_self_tsumo_value)
+        else {
+            continue;
+        };
+        if best.is_none_or(|(_, best_value)| value > best_value) {
+            best = Some((index, value));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 fn evaluate_call_candidate(
@@ -411,6 +476,7 @@ fn evaluate_call_candidate(
         post_call_wait: None,
         post_call_wait_yaku: None,
         iishanten_acceptance: None,
+        iishanten_self_tsumo: None,
         eligible: false,
         selected: false,
         reason: CallDecisionReason::EligibleTenpai,
@@ -481,7 +547,7 @@ fn evaluate_call_conditions(
 
     // 喰い替え禁止牌は合法手の制約なので、打牌候補を比較する前に取り除く。
     let forbidden_discards = forbidden_discards_after_call(&meld);
-    let evaluation = select_best_one_step_discard_evaluation_with_fixed_meld_count(
+    let evaluations = post_call_discard_evaluations(
         ctx,
         &post_call_tiles,
         post_call_fixed_meld_count,
@@ -489,12 +555,29 @@ fn evaluate_call_conditions(
     );
     candidate.post_call_forbidden_discards = Some(forbidden_discards);
 
-    let Some(evaluation) = evaluation else {
+    let Some(one_step_evaluation) = select_best_one_step_evaluation(&evaluations).cloned() else {
         return CallDecisionReason::NoPostCallDiscard;
     };
 
-    if evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
-        // 判断はここで確定していて、以降は解析用の観測値を足すだけ。
+    if one_step_evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
+        let mut evaluation = one_step_evaluation;
+        if evaluation.min_shanten_after_discard() == CALL_CURRENT_SHANTEN {
+            let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+            melds.push(meld.clone());
+            if let Some((selected, call_value)) =
+                select_best_iishanten_post_call_discard(ctx, &post_call_tiles, &melds, &evaluations)
+            {
+                evaluation = selected;
+                candidate.iishanten_self_tsumo = Some(CallIishantenSelfTsumoDiagnostic {
+                    reaction_source_player: ctx.reaction_source_player(),
+                    pass_expected_self_tsumo_value: None,
+                    call_expected_self_tsumo_value: call_value,
+                    comparison: CallIishantenComparison::Unknown,
+                });
+            }
+        }
+
+        // production が選んだ打牌評価を診断にもそのまま載せる。
         if collect_iishanten_acceptance {
             candidate.iishanten_acceptance = iishanten_acceptance_diagnostic(
                 ctx,
@@ -507,6 +590,7 @@ fn evaluate_call_conditions(
         candidate.post_call_discard = Some(evaluation);
         return CallDecisionReason::PostCallNotTenpai;
     }
+    let evaluation = one_step_evaluation;
 
     let Some(wait) = discard_tenpai_wait_availability(
         &TileCounts::from_tiles(post_call_tiles.iter().copied()),
@@ -524,6 +608,115 @@ fn evaluate_call_conditions(
     candidate.post_call_discard = Some(evaluation);
     candidate.post_call_wait = Some(wait);
     reason
+}
+
+// 1向聴のままの Call 候補がある場合だけ Pass を1回評価し、全候補へ同じ値を配る。
+fn apply_iishanten_self_tsumo_policy(
+    ctx: &GameContext,
+    candidates: &mut [CallCandidateDiagnostic],
+) {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate.iishanten_self_tsumo.is_some())
+    {
+        return;
+    }
+
+    let reaction_source_known = reaction_draw_distance(ctx).is_some();
+    let pass_value = reaction_source_known
+        .then(|| pass_iishanten_expected_self_tsumo_value(ctx))
+        .flatten();
+
+    for candidate in candidates {
+        let Some(mut diagnostic) = candidate.iishanten_self_tsumo else {
+            continue;
+        };
+        diagnostic.pass_expected_self_tsumo_value = pass_value;
+        let (comparison, reason) = compare_iishanten_self_tsumo_values(
+            reaction_source_known,
+            diagnostic.call_expected_self_tsumo_value,
+            diagnostic.pass_expected_self_tsumo_value,
+        );
+        diagnostic.comparison = comparison;
+        candidate.iishanten_self_tsumo = Some(diagnostic);
+        candidate.eligible = reason == CallDecisionReason::EligibleIishantenSelfTsumo;
+        candidate.reason = reason;
+    }
+}
+
+fn compare_iishanten_self_tsumo_values(
+    reaction_source_known: bool,
+    call: Option<u64>,
+    pass: Option<u64>,
+) -> (CallIishantenComparison, CallDecisionReason) {
+    if !reaction_source_known {
+        return (
+            CallIishantenComparison::Unknown,
+            CallDecisionReason::ReactionSourceUnknown,
+        );
+    }
+    match (call, pass) {
+        (Some(call), Some(pass)) if call > pass => (
+            CallIishantenComparison::CallHigher,
+            CallDecisionReason::EligibleIishantenSelfTsumo,
+        ),
+        (Some(_), Some(_)) => (
+            CallIishantenComparison::PassNotLower,
+            CallDecisionReason::PassSelfTsumoNotLower,
+        ),
+        _ => (
+            CallIishantenComparison::Unknown,
+            CallDecisionReason::IishantenSelfTsumoUnknown,
+        ),
+    }
+}
+
+// reaction 元の次巡から自分の次の自摸までに山から引かれる枚数。観測できない席や自家打牌は
+// reaction として不整合なので None のままにする。
+fn reaction_draw_distance(ctx: &GameContext) -> Option<u32> {
+    let own = ctx.player_id()?;
+    let source = ctx.reaction_source_player()?;
+    if own >= 4 || source >= 4 || own == source {
+        return None;
+    }
+    Some(u32::from((own + 4 - source) % 4))
+}
+
+// Pass 後から流局までの自分の自摸回数。source の次席から順に残り山を配るため、通常打牌後や
+// Call 後の floor(remaining / 4) とは最初の自摸位置だけが異なる。
+fn pass_own_future_draws(ctx: &GameContext) -> Option<u32> {
+    let remaining = ctx.remaining_tiles()?;
+    let distance = reaction_draw_distance(ctx)?;
+    if remaining < distance {
+        Some(0)
+    } else {
+        Some(1 + (remaining - distance) / 4)
+    }
+}
+
+// 架空の現在打牌を作らず、現在の13枚を「action 済みで次の自摸を待つ state」として既存
+// lookahead へ渡す。
+fn pass_iishanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
+    let fixed_meld_count = ctx.own_fixed_meld_count()?;
+    let counts = TileCounts::from_tiles(ctx.hand_tiles().iter().copied());
+    let acceptance = calculate_acceptance_with_fixed_melds_and_visible_tiles(
+        &counts,
+        fixed_meld_count,
+        ctx.visible_tiles(),
+    );
+    if acceptance.current_min_shanten() != CALL_CURRENT_SHANTEN {
+        return None;
+    }
+
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(ctx, ctx.own_melds());
+    let inputs = lookahead_inputs_with_own_future_draws(
+        ctx,
+        ctx.hand_tiles(),
+        &valuator,
+        LookaheadDiagnosticScope::None,
+        Some(pass_own_future_draws(ctx)?),
+    );
+    awaiting_draw_expected_self_tsumo_value(&inputs, &acceptance)
 }
 
 // 鳴いても1向聴のままの候補について、鳴かない場合と鳴いた場合の受け入れを並べる。
@@ -750,6 +943,163 @@ mod tests {
         })
     }
 
+    fn valued_reaction_context(
+        hand: &[u8],
+        target: u8,
+        source: u8,
+        remaining_tiles: u32,
+    ) -> GameContext {
+        reaction_context(hand, target)
+            .with_reaction_source_player(Some(source))
+            .with_table_state_facts(crate::context::TableStateFacts {
+                remaining_tiles: Some(remaining_tiles),
+                ..Default::default()
+            })
+    }
+
+    #[test]
+    fn an_iishanten_call_with_a_higher_expected_self_tsumo_value_is_selected() {
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 60);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
+        let comparison = candidate.iishanten_self_tsumo.expect("comparison");
+
+        assert_eq!(
+            candidate.reason,
+            CallDecisionReason::EligibleIishantenSelfTsumo
+        );
+        assert!(candidate.eligible);
+        assert_eq!(decision.selected, Some(action));
+        assert_eq!(comparison.comparison, CallIishantenComparison::CallHigher);
+        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(163_704_412));
+        assert_eq!(comparison.call_expected_self_tsumo_value, Some(164_352_823));
+        assert!(
+            comparison.call_expected_self_tsumo_value > comparison.pass_expected_self_tsumo_value
+        );
+        // forward-selected discard is legal after the call; the forbidden called tile is excluded.
+        assert!(
+            !candidate
+                .post_call_forbidden_discards
+                .as_ref()
+                .unwrap()
+                .contains(&candidate.post_call_discard.as_ref().unwrap().discard)
+        );
+        assert_eq!(candidate.post_call_fixed_meld_count, FixedMeldCount::new(1));
+
+        let meld = Meld::new(
+            MeldKind::Pon,
+            tiles(&[
+                IISHANTEN_PON_TARGET,
+                IISHANTEN_PON_CONSUMED[0],
+                IISHANTEN_PON_CONSUMED[1],
+            ]),
+            Some(tile(IISHANTEN_PON_TARGET)),
+        );
+        let melds = [meld];
+        let post_call = ProductionProspectiveValuator::new_with_hand_state(&ctx, Some(&melds));
+        assert_eq!(
+            post_call.fixed_meld_count(),
+            FixedMeldCount::new(1).unwrap()
+        );
+        assert!(!post_call.reach_legal());
+    }
+
+    #[test]
+    fn an_iishanten_pass_with_a_higher_expected_self_tsumo_value_is_kept() {
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63);
+        let (decision, candidate) = single_candidate(&ctx, &action, true);
+        let comparison = candidate.iishanten_self_tsumo.expect("comparison");
+
+        assert_eq!(candidate.reason, CallDecisionReason::PassSelfTsumoNotLower);
+        assert!(!candidate.eligible);
+        assert_eq!(decision.selected, None);
+        assert_eq!(comparison.comparison, CallIishantenComparison::PassNotLower);
+        assert!(
+            comparison.pass_expected_self_tsumo_value > comparison.call_expected_self_tsumo_value
+        );
+    }
+
+    #[test]
+    fn equal_production_iishanten_values_keep_the_pass() {
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 0);
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+        let comparison = candidate.iishanten_self_tsumo.expect("comparison");
+
+        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(0));
+        assert_eq!(comparison.call_expected_self_tsumo_value, Some(0));
+        assert_eq!(comparison.comparison, CallIishantenComparison::PassNotLower);
+        assert_eq!(candidate.reason, CallDecisionReason::PassSelfTsumoNotLower);
+        assert_eq!(decision.selected, None);
+    }
+
+    #[test]
+    fn an_unknown_production_iishanten_value_keeps_the_pass() {
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET)
+            .with_reaction_source_player(Some(1));
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+        let comparison = candidate.iishanten_self_tsumo.expect("comparison");
+
+        assert_eq!(comparison.pass_expected_self_tsumo_value, None);
+        assert_eq!(comparison.call_expected_self_tsumo_value, None);
+        assert_eq!(comparison.comparison, CallIishantenComparison::Unknown);
+        assert_eq!(
+            candidate.reason,
+            CallDecisionReason::IishantenSelfTsumoUnknown
+        );
+        assert_eq!(decision.selected, None);
+    }
+
+    #[test]
+    fn equal_and_unknown_iishanten_values_keep_the_pass() {
+        assert_eq!(
+            compare_iishanten_self_tsumo_values(true, Some(100), Some(100)),
+            (
+                CallIishantenComparison::PassNotLower,
+                CallDecisionReason::PassSelfTsumoNotLower
+            )
+        );
+        for values in [(None, Some(100)), (Some(100), None), (None, None)] {
+            assert_eq!(
+                compare_iishanten_self_tsumo_values(true, values.0, values.1),
+                (
+                    CallIishantenComparison::Unknown,
+                    CallDecisionReason::IishantenSelfTsumoUnknown
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_reaction_source_is_not_inferred() {
+        assert_eq!(
+            reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET).reaction_source_player(),
+            None
+        );
+        assert_eq!(
+            compare_iishanten_self_tsumo_values(false, Some(200), Some(100)),
+            (
+                CallIishantenComparison::Unknown,
+                CallDecisionReason::ReactionSourceUnknown
+            )
+        );
+    }
+
+    #[test]
+    fn pass_draw_count_uses_the_observed_source_position() {
+        for (remaining, expected) in [(60, 15), (63, 16)] {
+            let context =
+                valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, remaining);
+            assert_eq!(pass_own_future_draws(&context), Some(expected));
+        }
+        assert_eq!(
+            pass_own_future_draws(&reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET)),
+            None
+        );
+    }
+
     fn pon_action(target: u8, consumed: &[u8]) -> LegalAction {
         LegalAction::Pon {
             tile: tile(target),
@@ -807,7 +1157,7 @@ mod tests {
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
         let (decision, candidate) = single_candidate(&ctx, &action, true);
 
-        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.reason, CallDecisionReason::ReactionSourceUnknown);
         assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
         assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
 
@@ -893,7 +1243,7 @@ mod tests {
         let action = chi_action(IISHANTEN_CHI_TARGET, &IISHANTEN_CHI_CONSUMED);
         let (_, candidate) = single_candidate(&ctx, &action, true);
 
-        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.reason, CallDecisionReason::ReactionSourceUnknown);
         assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
 
         let acceptance = candidate
@@ -957,7 +1307,7 @@ mod tests {
         assert_eq!(candidate.iishanten_acceptance, None);
 
         // 判断に使う fact と結論は診断の有無で変わらない。
-        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotTenpai);
+        assert_eq!(candidate.reason, CallDecisionReason::ReactionSourceUnknown);
         assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
         assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
         assert!(!candidate.eligible);
@@ -976,20 +1326,27 @@ mod tests {
 
     #[test]
     fn the_iishanten_acceptance_diagnostic_does_not_change_the_selected_action() {
-        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 60);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let actions = [action, LegalAction::None];
+        let actions = [action.clone(), LegalAction::None];
 
         let mut agent = crate::agents::ShantenAgent;
         let acted = crate::agent::Agent::act(&mut agent, &ctx, &actions);
-        assert_eq!(acted, LegalAction::None);
+        assert_eq!(acted, action);
 
         // diagnose() は観測値を集めるが、選ぶ action は act() と同じ。
         let diagnostic = crate::agents::ShantenAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_action, acted);
         let call = diagnostic.call.as_ref().expect("evaluated");
-        assert_eq!(call.selected, None);
+        assert_eq!(call.selected, Some(acted));
         assert!(call.candidates[0].iishanten_acceptance.is_some());
+        assert_eq!(
+            call.candidates[0]
+                .iishanten_self_tsumo
+                .expect("production comparison")
+                .comparison,
+            CallIishantenComparison::CallHigher
+        );
     }
 
     #[test]

@@ -172,6 +172,7 @@ pub(crate) fn context_for_request(
         .map(game_context_from_decoded_observation)
         .unwrap_or_else(|| game_context_from_validation_state(state))
         .with_post_reach_passed_tiles(state.post_reach_passed_tiles().clone())
+        .with_reaction_source_player(state.reaction_source_player())
         .with_temporary_passed_tiles(state.temporary_passed_tiles().cloned())
         .with_same_hand_passed_tiles(state.same_hand_passed_tiles().cloned())
         .with_history_furiten_facts(state.history_furiten())
@@ -318,20 +319,18 @@ where
                 };
                 let finish = should_finish_after_event(exit_condition, &event);
                 capture_server_event(capture.as_mut(), text.as_str());
+                state.on_event(&event);
                 match event {
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
-                        state.on_start_game(id);
                     }
                     MjaiEvent::StartKyoku {
                         kyoku, honba, oya, ..
                     } => {
                         info!(kyoku = ?kyoku, honba = ?honba, oya = ?oya, "start_kyoku");
-                        state.on_start_kyoku();
                     }
                     MjaiEvent::Tsumo { actor, pai } => {
                         debug!(actor, pai = %pai, "tsumo");
-                        state.on_tsumo(actor, pai);
                     }
                     MjaiEvent::Dahai {
                         actor,
@@ -339,7 +338,6 @@ where
                         tsumogiri,
                     } => {
                         debug!(actor, pai = %pai, tsumogiri = ?tsumogiri, "dahai");
-                        state.on_dahai_with_tsumogiri(actor, &pai, tsumogiri);
                     }
                     MjaiEvent::Chi {
                         actor,
@@ -360,11 +358,9 @@ where
                         consumed,
                     } => {
                         log_meld_applied(actor, target, &pai, &consumed);
-                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Ankan { actor, consumed } => {
                         debug!(actor, consumed = ?consumed, "ankan");
-                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Kakan {
                         actor,
@@ -372,15 +368,12 @@ where
                         consumed,
                     } => {
                         debug!(actor, pai = %pai, consumed = ?consumed, "kakan");
-                        state.on_kakan(actor, &pai);
                     }
                     MjaiEvent::Reach { actor } => {
                         debug!(actor, "reach");
-                        state.on_reach(actor);
                     }
                     MjaiEvent::Hora { actor, target, pai } => {
                         info!(actor, target = ?target, pai = ?pai, "hora");
-                        state.on_hora();
                     }
                     MjaiEvent::Ryukyoku { reason } => {
                         info!(reason = ?reason, "ryukyoku");
@@ -799,6 +792,22 @@ mod tests {
             context.hand_tiles(),
             &[TileId::new(0).unwrap(), TileId::new(104).unwrap()]
         );
+    }
+
+    #[test]
+    fn context_for_request_carries_the_observed_reaction_source() {
+        let observation = ObservationPayload::new(fixture_base64(0, None, vec![]));
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+        state.on_start_kyoku();
+        state.on_dahai(2, "4s");
+
+        let context = context_for_request(&observation, &state, 6);
+        assert_eq!(context.reaction_source_player(), Some(2));
+
+        state.on_tsumo(3, "?".to_string());
+        let context = context_for_request(&observation, &state, 7);
+        assert_eq!(context.reaction_source_player(), None);
     }
 
     fn state_after_two_reaches() -> ValidationState {

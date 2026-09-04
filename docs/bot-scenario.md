@@ -281,7 +281,9 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/history_furiten_same_
 }
 ```
 
-現在これらは AI の打牌、押し引き、リーチ、防御、鳴きには使用せず、`Table state` diagnostics で確認するための観測事実です。
+`remaining_tiles` は `Call -> 打牌 -> 1向聴` における Pass / Call の
+`ExpectedSelfTsumoValue` 比較で、流局までの残り自摸回数を求めるためにも使用します。各値は
+`Table state` diagnostics でも確認できます。
 
 ## RiichiLab capture の再生
 
@@ -298,11 +300,16 @@ cargo run -p bot-scenario -- \
 | `--riichilab-capture` | 必須 | session capture JSONL の path |
 | `--request-id` | 任意 | 再生する `request_id`。`request_action` が1件だけなら省略可能 |
 
-再生対象は `direction` が `server` で `type` が `request_action` の record だけです。session capture に並ぶ `start_kyoku`、`dahai`、client action、`action_ack` などは skip します。client action や `action_ack` が同じ `request_id` を持っていても、`--request-id` の対象件数には数えません。
+再生対象は `direction` が `server` で `type` が `request_action` の record だけです。ただし session
+record は先頭から順に処理し、server の `dahai` 等を live client と同じ validation state へ反映して、
+対象 request の reaction source を復元します。client action や `action_ack` が同じ `request_id` を
+持っていても、`--request-id` の対象件数には数えません。
 
 複数の `request_action` を含む file で `--request-id` を省略すると、対象を推測せず error になります。record envelope 自体が壊れている行は skip せず error です。旧 capture 形式 (1行がそのまま `request_action` の raw JSON) は読みません。`--hand` や JSON scenario とは併用できません。
 
-`observation` decoder と `possible_actions` 変換は `riichilab-client` の実装を共有します。先頭に capture の出所を表示し、以降は JSON scenario と同じ [structured diagnostics](diagnostics.md) です。
+`observation` decoder、`possible_actions` 変換、reaction source の validation state は
+`riichilab-client` の実装を共有します。先頭に capture の出所を表示し、以降は JSON scenario と同じ
+[structured diagnostics](diagnostics.md) です。
 
 単一 request の observation だけでは次を復元できません。
 
@@ -315,7 +322,13 @@ cargo run -p bot-scenario -- \
 
 session capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `ShantenAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
 
-計測に使う `GameContext` は単一 `observation` からの復元です。live client は event 列から積み上げた `post_reach_passed`、`temporary_passed`、`same_hand_passed`、履歴依存フリテンを `GameContext` へ足してから `act()` を呼ぶため、capture replay の入力は live client の入力と完全一致しません。復元できない事実は [RiichiLab capture の再生](#riichilab-capture-の再生) と同じで、入力経路ごとの known / unknown は [フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。revision 間の比較では同じ capture corpus から同じ入力を復元するので、相対比較の基盤としては有効です。
+計測に使う `GameContext` は replay と同じ経路で、`observation` と capture の server event 列から
+復元します。reaction source は event 列から反映しますが、live client が積み上げる
+`post_reach_passed`、`temporary_passed`、`same_hand_passed`、履歴依存フリテンは引き続き含まれないため、
+capture replay の入力は live client の入力と完全一致しません。復元できない事実は
+[RiichiLab capture の再生](#riichilab-capture-の再生) と同じで、入力経路ごとの known / unknown は
+[フリテン](ai/furiten.md#入力経路ごとの-known--unknown) を参照してください。revision 間の比較では
+同じ capture corpus から同じ入力を復元するので、相対比較の基盤としては有効です。
 
 性能比較は release build で行います。debug build の値は最適化後の decision latency と対応しません。
 

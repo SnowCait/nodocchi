@@ -774,6 +774,32 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_uses_the_replay_context_with_its_reaction_source() {
+        let observation = fixture_base64(0, None, CAPTURED_HAND.to_vec());
+        let request = server_record_line(&format!(
+            r#"{{"type":"request_action","request_id":465,"actor":0,"possible_actions":[{{"type":"none"}}],"observation":"{observation}"}}"#
+        ));
+        let path = write_capture(
+            "reaction-source",
+            &[
+                server_record_line(r#"{"type":"dahai","actor":2,"pai":"4s"}"#),
+                request,
+            ],
+        );
+
+        let captured = load_captured_scenarios(&path).unwrap();
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            captured[0].scenario.context.reaction_source_player(),
+            Some(2)
+        );
+        assert_eq!(run.requests.len(), 1);
+        assert_eq!(run.requests[0].selected_action, LegalAction::None);
+    }
+
+    #[test]
     fn an_undecodable_observation_fails_the_whole_benchmark() {
         let line = server_record_line(&format!(
             r#"{{"type":"request_action","request_id":471,"possible_actions":[{}],"observation":"not-base64!!"}}"#,

@@ -27,10 +27,10 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    best_discard_selection_index, best_discard_selection_index_with_metrics,
-    current_tenpai_continuation_targets, diagnose_discard_evaluations_with_metrics,
-    diagnose_discard_furiten, diagnose_lookahead, discard_tenpai_wait_availability,
-    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    best_discard_selection_index, best_discard_selection_index_with_forward_metrics,
+    best_discard_selection_index_with_metrics, current_tenpai_continuation_targets,
+    diagnose_discard_evaluations_with_metrics, diagnose_discard_furiten, diagnose_lookahead,
+    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
     split_discarded_tile, tsumo_hit_probability,
@@ -771,6 +771,24 @@ pub(crate) fn lookahead_inputs<'a>(
     valuator: &'a ProductionProspectiveValuator<'a>,
     scope: LookaheadDiagnosticScope,
 ) -> LookaheadInputs<'a> {
+    lookahead_inputs_with_own_future_draws(
+        context,
+        tiles,
+        valuator,
+        scope,
+        own_future_draws(context),
+    )
+}
+
+/// 通常打牌とは開始地点が異なる経路向けに、残り自摸機会を明示して同じ lookahead 入力を作る。
+/// その他の局面 fact と scoring evaluator は [`lookahead_inputs`] と共有する。
+pub(crate) fn lookahead_inputs_with_own_future_draws<'a>(
+    context: &'a GameContext,
+    tiles: &'a [TileId],
+    valuator: &'a ProductionProspectiveValuator<'a>,
+    scope: LookaheadDiagnosticScope,
+    own_future_draws: Option<u32>,
+) -> LookaheadInputs<'a> {
     let inputs = LookaheadInputs::new(
         tiles,
         valuator.fixed_meld_count(),
@@ -781,7 +799,7 @@ pub(crate) fn lookahead_inputs<'a>(
     .with_visible_tiles(context.visible_tiles())
     .with_prospective_valuator(valuator)
     .with_tsumo_valuator(valuator);
-    let inputs = match own_future_draws(context) {
+    let inputs = match own_future_draws {
         Some(draws) => inputs.with_own_future_draws(draws),
         None => inputs,
     };
@@ -1054,7 +1072,7 @@ fn evaluation_for_legal_dahai(
 // 前方集計値を渡さないため、1向聴限定の weighted tenpai wait は適用しない。通常打牌選択が使う
 // 比較は selection_from_legal_evaluations() /
 // select_best_normal_discard_evaluation() 側にあり、こちらは意図的に1手比較だけを行う。
-fn select_best_one_step_evaluation(
+pub(crate) fn select_best_one_step_evaluation(
     evaluations: &[DiscardEvaluation],
 ) -> Option<&DiscardEvaluation> {
     best_discard_selection_index(evaluations, &[]).map(|index| &evaluations[index])
@@ -1068,8 +1086,8 @@ fn select_best_one_step_evaluation(
 /// こちらは合法 Dahai による絞り込みと物理牌補正を行わず、手牌から切れる全打牌候補を対象にする。
 ///
 /// 押し引き入力の単独構築 (`push_pull_inputs_from_context`) のように、`GameContext` だけから
-/// 「通常打牌なら何を切るか」を求める経路で使う。鳴き後シミュレーションのような1手評価には
-/// [`select_best_one_step_discard_evaluation_with_fixed_meld_count`] を使い、こちらは使わない。
+/// 「通常打牌なら何を切るか」を求める経路で使う。鳴き後シミュレーションの1手評価は
+/// [`post_call_discard_evaluations`] と [`select_best_one_step_evaluation`] を使い、こちらは使わない。
 pub(crate) fn select_best_normal_discard_evaluation(
     context: &GameContext,
     tiles: &[TileId],
@@ -1100,16 +1118,59 @@ pub(crate) fn select_best_normal_discard_evaluation(
 /// 制約なので、比較する前に候補から取り除く。打牌候補の評価は牌種ごとに1件なので、除外も牌種
 /// 単位になり、赤5と黒5の一方だけが残ることはない。実際に切る物理牌の赤黒 preference は残った
 /// 候補の既存 semantics のままで変わらない。
+#[cfg(test)]
 pub(crate) fn select_best_one_step_discard_evaluation_with_fixed_meld_count(
     context: &GameContext,
     tiles: &[TileId],
     fixed_meld_count: FixedMeldCount,
     forbidden_discards: &[TileType],
 ) -> Option<DiscardEvaluation> {
+    let evaluations =
+        post_call_discard_evaluations(context, tiles, fixed_meld_count, forbidden_discards);
+    select_best_one_step_evaluation(&evaluations).cloned()
+}
+
+/// 鳴き後の全合法打牌候補。喰い替え禁止牌は比較前に除外する。
+pub(crate) fn post_call_discard_evaluations(
+    context: &GameContext,
+    tiles: &[TileId],
+    fixed_meld_count: FixedMeldCount,
+    forbidden_discards: &[TileType],
+) -> Vec<DiscardEvaluation> {
     let mut evaluations =
         evaluate_discard_candidates_with_fixed_meld_count(context, tiles, fixed_meld_count);
     evaluations.retain(|evaluation| !forbidden_discards.contains(&evaluation.discard));
-    select_best_one_step_evaluation(&evaluations).cloned()
+    evaluations
+}
+
+/// 鳴き後も1向聴の打牌候補を、通常打牌と同じ forward/self-tsumo semantics で選ぶ。
+///
+/// `melds` は今回の鳴きを含む評価対象副露で、打牌評価の fixed meld count と terminal scoring /
+/// future Reach legality の両方を同じ state から導出する。返す self-tsumo value は選択に使った
+/// metric そのもので、診断表示のために探索し直さない。
+pub(crate) fn select_best_iishanten_post_call_discard(
+    context: &GameContext,
+    tiles: &[TileId],
+    melds: &[Meld],
+    evaluations: &[DiscardEvaluation],
+) -> Option<(DiscardEvaluation, Option<u64>)> {
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds));
+    let inputs = lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None);
+    let metrics: Vec<_> = evaluations
+        .iter()
+        .map(|evaluation| {
+            if evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN {
+                forward_metrics_for_candidate(&inputs, evaluation)
+            } else {
+                ForwardMetrics::default()
+            }
+        })
+        .collect();
+    let index = best_discard_selection_index_with_forward_metrics(evaluations, &metrics)?;
+    Some((
+        evaluations[index].clone(),
+        metrics[index].expected_self_tsumo_value,
+    ))
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {

@@ -376,6 +376,11 @@ impl<'a> ProductionProspectiveValuator<'a> {
         self.fixed_meld_count
     }
 
+    #[cfg(test)]
+    pub(crate) fn reach_legal(&self) -> bool {
+        self.reach_legal
+    }
+
     // 枝1つ分の評価材料。完成手と、既存フリテン基盤で求めた待ち・ロン可否を組にする。
     //
     // 物理牌を組み立てられない場合と完成手を解析できない場合だけ `None`。

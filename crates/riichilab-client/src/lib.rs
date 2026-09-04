@@ -31,7 +31,7 @@ pub use observation::{
 };
 pub use protocol::{
     ActionAckStatus, MjaiAction, MjaiEvent, MjaiPossibleAction, RequestTimeBudget, TimeControl,
-    mjai_action_type, parse_server_event, request_time_budget,
+    mjai_action_type, parse_server_event, parse_server_event_value, request_time_budget,
 };
 pub use state::ValidationState;
 pub use tls::install_default_crypto_provider;

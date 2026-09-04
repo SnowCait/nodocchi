@@ -1,5 +1,7 @@
 use bot_logic::{HistoryFuritenFacts, TileType};
 
+use crate::protocol::MjaiEvent;
+
 const PLAYER_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -51,6 +53,45 @@ impl ValidationState {
 
     pub fn history_furiten(&self) -> HistoryFuritenFacts {
         self.history_furiten
+    }
+
+    /// 現在 response を待っている直前の打牌者。
+    ///
+    /// `pending_passed_tile` が無い局面では reaction 元を推測せず `None` を返す。
+    pub fn reaction_source_player(&self) -> Option<u8> {
+        self.pending_passed_tile.map(|(actor, _)| actor)
+    }
+
+    /// 解釈できない server event を跨いで直前の reaction source が有効だと推測しない。
+    pub fn invalidate_reaction_source_player(&mut self) {
+        self.pending_passed_tile = None;
+    }
+
+    /// server event を live client と replay で共通の validation state へ反映する。
+    pub fn on_event(&mut self, event: &MjaiEvent) {
+        match event {
+            MjaiEvent::StartGame { id } => self.on_start_game(*id),
+            MjaiEvent::StartKyoku { .. } => self.on_start_kyoku(),
+            MjaiEvent::Tsumo { actor, pai } => self.on_tsumo(*actor, pai.clone()),
+            MjaiEvent::Dahai {
+                actor,
+                pai,
+                tsumogiri,
+            } => self.on_dahai_with_tsumogiri(*actor, pai, *tsumogiri),
+            MjaiEvent::Chi { actor, .. }
+            | MjaiEvent::Pon { actor, .. }
+            | MjaiEvent::Daiminkan { actor, .. }
+            | MjaiEvent::Ankan { actor, .. } => self.on_hand_change(*actor),
+            MjaiEvent::Kakan { actor, pai, .. } => self.on_kakan(*actor, pai),
+            MjaiEvent::Reach { actor } => self.on_reach(*actor),
+            MjaiEvent::Hora { .. } => self.on_hora(),
+            MjaiEvent::Ryukyoku { .. }
+            | MjaiEvent::EndKyoku { .. }
+            | MjaiEvent::RequestAction { .. }
+            | MjaiEvent::ActionAck { .. }
+            | MjaiEvent::EndGame { .. }
+            | MjaiEvent::ValidationResult { .. } => {}
+        }
     }
 
     pub fn on_start_game(&mut self, id: u8) {
