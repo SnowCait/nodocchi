@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use bot_core::{Agent, LegalAction, ShantenAgent};
+use bot_core::{DecisionPhaseDurations, LegalAction, ShantenAgent};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::CaptureBenchmarkSpec;
@@ -21,6 +21,7 @@ pub struct RequestMeasurement {
     pub request_id: u64,
     pub actor: Option<u8>,
     pub elapsed: Duration,
+    pub phases: DecisionPhaseDurations,
     pub selected_action: LegalAction,
 }
 
@@ -85,7 +86,7 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
     let legal_actions = captured.scenario.legal_actions.as_slice();
 
     let start = Instant::now();
-    let selected_action = agent.act(context, legal_actions);
+    let timed = agent.act_with_phase_timing(context, legal_actions);
     let elapsed = start.elapsed();
 
     RequestMeasurement {
@@ -93,7 +94,8 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
         request_id: captured.request_id,
         actor: captured.actor,
         elapsed,
-        selected_action,
+        phases: timed.phases,
+        selected_action: timed.action,
     }
 }
 
@@ -175,10 +177,13 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
 
     for measurement in slowest_requests(run, SLOWEST_REQUEST_COUNT) {
         lines.push(format!(
-            "  {}  {}  request_id={}  selected={}",
+            "  {}  {}  request_id={}  early={}  normal_discard={}  post_discard={}  selected={}",
             format_duration(measurement.elapsed),
             measurement.capture,
             measurement.request_id,
+            format_duration(measurement.phases.early),
+            format_duration(measurement.phases.normal_discard),
+            format_duration(measurement.phases.post_discard),
             action_label(&measurement.selected_action),
         ));
     }
@@ -219,6 +224,9 @@ pub struct BenchmarkRequestJson {
     pub request_id: u64,
     pub actor: Option<u8>,
     pub elapsed_ns: u64,
+    pub early_ns: u64,
+    pub normal_discard_ns: u64,
+    pub post_discard_ns: u64,
     pub selected: String,
 }
 
@@ -249,6 +257,9 @@ impl BenchmarkJson {
                     request_id: measurement.request_id,
                     actor: measurement.actor,
                     elapsed_ns: nanos(measurement.elapsed),
+                    early_ns: nanos(measurement.phases.early),
+                    normal_discard_ns: nanos(measurement.phases.normal_discard),
+                    post_discard_ns: nanos(measurement.phases.post_discard),
                     selected: action_label(&measurement.selected_action),
                 })
                 .collect(),
@@ -279,6 +290,7 @@ fn write_benchmark_json(path: &str, run: &BenchmarkRun) -> Result<(), ScenarioEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bot_core::Agent;
     use bot_logic::TileId;
     use riichilab_client::observation::{fixture_base64, game_context_from_decoded_observation};
     use riichilab_client::{
@@ -383,12 +395,35 @@ mod tests {
         millis.iter().copied().map(Duration::from_millis).collect()
     }
 
+    fn phases(early: u64, normal_discard: u64, post_discard: u64) -> DecisionPhaseDurations {
+        DecisionPhaseDurations {
+            early: Duration::from_millis(early),
+            normal_discard: Duration::from_millis(normal_discard),
+            post_discard: Duration::from_millis(post_discard),
+        }
+    }
+
     fn measurement(capture: &str, request_id: u64, millis: u64) -> RequestMeasurement {
+        measurement_with_phases(
+            capture,
+            request_id,
+            millis,
+            DecisionPhaseDurations::default(),
+        )
+    }
+
+    fn measurement_with_phases(
+        capture: &str,
+        request_id: u64,
+        millis: u64,
+        phases: DecisionPhaseDurations,
+    ) -> RequestMeasurement {
         RequestMeasurement {
             capture: capture.to_string(),
             request_id,
             actor: Some(0),
             elapsed: Duration::from_millis(millis),
+            phases,
             selected_action: LegalAction::Dahai {
                 tile: TileId::new(0).unwrap(),
             },
@@ -608,7 +643,7 @@ mod tests {
     fn report_shows_the_statistics_and_the_slowest_requests() {
         let run = synthetic_run(vec![
             measurement("game-001.jsonl", 1, 10),
-            measurement("game-002.jsonl", 2, 2470),
+            measurement_with_phases("game-002.jsonl", 2, 2470, phases(1, 2400, 69)),
         ]);
         let report = format_benchmark(&run);
 
@@ -630,7 +665,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -651,7 +686,7 @@ mod tests {
     fn benchmark_json_keeps_the_summary_and_every_request() {
         let run = synthetic_run(vec![
             measurement("game-001.jsonl", 1, 10),
-            measurement("game-002.jsonl", 2, 2470),
+            measurement_with_phases("game-002.jsonl", 2, 2470, phases(1, 2400, 69)),
         ]);
         let json = BenchmarkJson::from_run(&run);
 
@@ -674,6 +709,9 @@ mod tests {
                     request_id: 1,
                     actor: Some(0),
                     elapsed_ns: 10_000_000,
+                    early_ns: 0,
+                    normal_discard_ns: 0,
+                    post_discard_ns: 0,
                     selected: "1m".to_string(),
                 },
                 BenchmarkRequestJson {
@@ -681,12 +719,83 @@ mod tests {
                     request_id: 2,
                     actor: Some(0),
                     elapsed_ns: 2_470_000_000,
+                    early_ns: 1_000_000,
+                    normal_discard_ns: 2_400_000_000,
+                    post_discard_ns: 69_000_000,
                     selected: "1m".to_string(),
                 },
             ]
         );
 
         let text = serde_json::to_string(&json).unwrap();
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn an_early_return_request_keeps_the_phases_it_never_reached_at_zero() {
+        let observation = fixture_base64(0, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec());
+        let path = write_capture(
+            "early-return",
+            &[server_record_line(&format!(
+                r#"{{"type":"request_action","request_id":482,"actor":0,"possible_actions":[{{"type":"hora"}},{{"type":"none"}}],"observation":"{observation}"}}"#
+            ))],
+        );
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(run.requests[0].selected_action, LegalAction::Hora);
+        assert_eq!(run.requests[0].phases.normal_discard, Duration::ZERO);
+        assert_eq!(run.requests[0].phases.post_discard, Duration::ZERO);
+    }
+
+    #[test]
+    fn the_measured_selection_is_the_same_with_and_without_phase_timing() {
+        let decoded =
+            ObservationPayload::new(observation_base64(&CAPTURED_HAND, CAPTURED_DRAWN_TILE))
+                .decode_4p()
+                .unwrap();
+        let context = game_context_from_decoded_observation(&decoded);
+        let possible_actions: Vec<MjaiPossibleAction> =
+            serde_json::from_str(&format!("[{}]", possible_actions_json(&CAPTURED_DAHAI))).unwrap();
+        let legal_actions = possible_actions_to_legal_actions(&possible_actions);
+
+        let mut timed_agent = ShantenAgent;
+        let mut untimed_agent = ShantenAgent;
+        assert_eq!(
+            timed_agent
+                .act_with_phase_timing(&context, &legal_actions)
+                .action,
+            untimed_agent.act(&context, &legal_actions)
+        );
+    }
+
+    #[test]
+    fn benchmark_json_keeps_the_phase_timing_of_every_request() {
+        let path = write_requests("json-phase-timing", &[483]);
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let json = BenchmarkJson::from_run(&run);
+        let json_path = temp_path("json-phase-timing", "json");
+        write_benchmark_json(&json_path, &run).unwrap();
+        let text = std::fs::read_to_string(&json_path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&json_path);
+
+        let measurement = &run.requests[0];
+        let request = &json.requests[0];
+        assert_eq!(request.request_id, 483);
+        assert_eq!(request.early_ns, nanos(measurement.phases.early));
+        assert_eq!(
+            request.normal_discard_ns,
+            nanos(measurement.phases.normal_discard)
+        );
+        assert_eq!(
+            request.post_discard_ns,
+            nanos(measurement.phases.post_discard)
+        );
+
+        assert!(text.contains("\"early_ns\""), "{text}");
+        assert!(text.contains("\"normal_discard_ns\""), "{text}");
+        assert!(text.contains("\"post_discard_ns\""), "{text}");
         assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
     }
 
