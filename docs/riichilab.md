@@ -78,6 +78,8 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 file は既存どおり追記で、ANSI escape sequence を含みません。directory は自動生成しないため、file を開けない場合は起動時 error になります。
 
+`--log-file logs/ranked.log` を指定すると、同じ directory に `logs/ranked-slow.log` も自動生成します。この file には `slow request_action response` だけを記録し、investigation file filter や `RUST_LOG` には依存しません。正常終了までに slow request が1件以上あった場合は、件数と slow log の path を console へ WARN で1回通知します。
+
 ### 送受信 action の照合
 
 送信 action と server が適用した結果は、`RUST_LOG` を指定せず `--log-file` だけで照合できます。

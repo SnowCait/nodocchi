@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     install_default_crypto_provider();
 
-    let _log_guard = match logging::init(args.log_file.as_deref()) {
+    let log_guard = match logging::init(args.log_file.as_deref()) {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("{error}");
@@ -54,5 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     run_riichilab_client(config, &mut fallback_agent, policy, exit_condition, capture).await?;
+    if let Some(log_guard) = &log_guard {
+        log_guard.warn_if_slow_requests_recorded();
+    }
     Ok(())
 }

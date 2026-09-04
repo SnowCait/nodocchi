@@ -501,6 +501,19 @@ where
                                 deadline_ms = ?budget.deadline_ms,
                                 "slow request_action response"
                             );
+                            warn!(
+                                target: crate::logging::SLOW_REQUEST_TARGET,
+                                request_id,
+                                response_type,
+                                context_ms,
+                                policy_ms,
+                                serialize_ms,
+                                send_ms,
+                                total_ms,
+                                grace_ms = ?budget.grace_ms,
+                                deadline_ms = ?budget.deadline_ms,
+                                "slow request_action response"
+                            );
                         } else {
                             debug!(
                                 request_id,
