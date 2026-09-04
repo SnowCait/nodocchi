@@ -161,6 +161,19 @@ impl SelfTsumoPath {
             * u128::from(terminal.winning_remaining);
         u64::try_from(numerator / denominator).unwrap_or(u64::MAX)
     }
+
+    /// この経路の terminal state を起点に求めた continuation value を、経路確率で重み付けする
+    /// [[`SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// 手前の経路と、その先で別に求めた期待支払いをつなぐための合成。`value` はこの経路の
+    /// terminal state ([`Self::terminal_unknown_tiles`] / [`Self::terminal_own_future_draws`])
+    /// を起点に、同じ scale で求めた値を渡す。確率は [`Self::probability`] と同じ分数のまま
+    /// 掛け、途中で丸めない。
+    pub fn weighted_continuation(self, value: u64) -> u64 {
+        let weighted =
+            u128::from(value) * u128::from(self.numerator) / u128::from(self.denominator);
+        u64::try_from(weighted).unwrap_or(u64::MAX)
+    }
 }
 
 /// `unknown` 枚の未確認牌から `own_draws` 回引く間に、`winning` 枚のうち少なくとも1枚を引く確率
@@ -331,6 +344,15 @@ mod tests {
         let via = SelfTsumoPath::via_same_shanten(4, 6, 100).expect("経路を作れる");
         assert_probability(via.probability(), 4 * 6, 100 * 99);
         assert_eq!(via.own_draws(), 2);
+    }
+
+    #[test]
+    fn a_continuation_is_weighted_by_the_path_probability() {
+        // 先で別に求めた期待支払いを、その経路を引く確率でそのまま重み付けする。
+        let path = SelfTsumoPath::immediate(4, 100).expect("経路を作れる");
+        let value = 7 * SELF_TSUMO_VALUE_SCALE;
+        assert_eq!(path.weighted_continuation(value), value * 4 / 100);
+        assert_eq!(path.weighted_continuation(0), 0);
     }
 
     #[test]
