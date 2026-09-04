@@ -1,8 +1,12 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracing::Subscriber;
+use tracing::{Metadata, Subscriber, warn};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_subscriber::filter::{FilterFn, filter_fn};
+use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -14,6 +18,7 @@ const INVESTIGATION_FILE_FILTER: &str = "info,\
     bot_core::push_pull=debug,\
     bot_core::discard_selection=trace,\
     bot_core::defense=trace";
+pub(crate) const SLOW_REQUEST_TARGET: &str = "riichilab_client::slow_request";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
@@ -25,24 +30,62 @@ pub enum LoggingError {
     },
 }
 
-pub fn init(log_file: Option<&Path>) -> Result<Option<WorkerGuard>, LoggingError> {
+pub struct LoggingGuard {
+    _file_guard: WorkerGuard,
+    _slow_file_guard: WorkerGuard,
+    slow_request_count: Arc<AtomicUsize>,
+    slow_log_path: PathBuf,
+}
+
+impl LoggingGuard {
+    /// 正常終了後に呼び、slow request があった起動だけ console へ1回通知する。
+    pub fn warn_if_slow_requests_recorded(&self) {
+        let count = self.slow_request_count.load(Ordering::Relaxed);
+        if let Some(message) = slow_request_completion_warning(count, &self.slow_log_path) {
+            warn!("{message}");
+        }
+    }
+}
+
+pub fn init(log_file: Option<&Path>) -> Result<Option<LoggingGuard>, LoggingError> {
     let rust_log = std::env::var("RUST_LOG").ok();
     let policy = resolve_filter_policy(rust_log.as_deref(), log_file.is_some());
-    let subscriber =
-        tracing_subscriber::registry().with(fmt::layer().with_filter(env_filter(&policy.console)));
+    let subscriber = tracing_subscriber::registry().with(
+        fmt::layer()
+            .with_filter(env_filter(&policy.console))
+            .with_filter(regular_log_filter()),
+    );
 
     let Some(path) = log_file else {
         subscriber.init();
         return Ok(None);
     };
 
-    let (writer, guard) = tracing_appender::non_blocking(open_log_file(path)?);
+    let (writer, file_guard) = tracing_appender::non_blocking(open_log_file(path)?);
+    let slow_log_path = slow_log_path(path);
+    let (slow_writer, slow_file_guard) =
+        tracing_appender::non_blocking(open_log_file(&slow_log_path)?);
+    let slow_request_count = Arc::new(AtomicUsize::new(0));
     subscriber
-        .with(file_layer(writer).with_filter(env_filter(
-            policy.file.as_deref().expect("file filter should exist"),
-        )))
+        .with(
+            file_layer(writer)
+                .with_filter(env_filter(
+                    policy.file.as_deref().expect("file filter should exist"),
+                ))
+                .with_filter(regular_log_filter()),
+        )
+        .with(file_layer(slow_writer).with_filter(slow_request_filter()))
+        .with(
+            SlowRequestCounter::new(Arc::clone(&slow_request_count))
+                .with_filter(slow_request_filter()),
+        )
         .init();
-    Ok(Some(guard))
+    Ok(Some(LoggingGuard {
+        _file_guard: file_guard,
+        _slow_file_guard: slow_file_guard,
+        slow_request_count,
+        slow_log_path,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +104,52 @@ fn resolve_filter_policy(rust_log: Option<&str>, has_log_file: bool) -> FilterPo
 
 fn env_filter(directives: &str) -> EnvFilter {
     EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new(DEFAULT_CONSOLE_FILTER))
+}
+
+pub fn slow_log_path(log_file: &Path) -> PathBuf {
+    let mut file_name = log_file
+        .file_stem()
+        .unwrap_or_else(|| log_file.as_os_str())
+        .to_os_string();
+    file_name.push("-slow.log");
+    log_file.with_file_name(file_name)
+}
+
+fn slow_request_filter() -> FilterFn<impl Fn(&Metadata<'_>) -> bool + Clone> {
+    filter_fn(|metadata| metadata.target() == SLOW_REQUEST_TARGET)
+}
+
+fn regular_log_filter() -> FilterFn<impl Fn(&Metadata<'_>) -> bool + Clone> {
+    filter_fn(|metadata| metadata.target() != SLOW_REQUEST_TARGET)
+}
+
+#[derive(Clone)]
+struct SlowRequestCounter {
+    count: Arc<AtomicUsize>,
+}
+
+impl SlowRequestCounter {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        Self { count }
+    }
+}
+
+impl<S> Layer<S> for SlowRequestCounter
+where
+    S: Subscriber,
+{
+    fn on_event(&self, _event: &tracing::Event<'_>, _context: Context<'_, S>) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn slow_request_completion_warning(count: usize, path: &Path) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "{count} slow request_action responses recorded: {}",
+            path.display()
+        )
+    })
 }
 
 fn open_log_file(path: &Path) -> Result<File, LoggingError> {
@@ -153,6 +242,129 @@ mod tests {
                 console: directives.to_string(),
                 file: Some(directives.to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn slow_log_path_adds_suffix_before_log_extension() {
+        assert_eq!(
+            slow_log_path(Path::new("foo.log")),
+            PathBuf::from("foo-slow.log")
+        );
+    }
+
+    #[test]
+    fn slow_log_path_keeps_parent_directory() {
+        assert_eq!(
+            slow_log_path(Path::new("logs/ranked.log")),
+            PathBuf::from("logs/ranked-slow.log")
+        );
+    }
+
+    #[test]
+    fn slow_layer_records_only_its_target_with_required_fields() {
+        let path = temp_log_path("slow-target-filter");
+        let _ = std::fs::remove_file(&path);
+
+        let (writer, guard) = tracing_appender::non_blocking(open_log_file(&path).unwrap());
+        let subscriber = tracing_subscriber::registry()
+            .with(file_layer(writer).with_filter(slow_request_filter()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "unrelated", "unrelated warn excluded");
+            tracing::info!(target: "unrelated", "unrelated info excluded");
+            tracing::warn!(
+                target: SLOW_REQUEST_TARGET,
+                request_id = 42,
+                response_type = "dahai",
+                context_ms = 10,
+                policy_ms = 20,
+                serialize_ms = 1,
+                send_ms = 2,
+                total_ms = 33,
+                grace_ms = ?Some(30_u64),
+                deadline_ms = ?Some(100_u64),
+                "slow request_action response"
+            );
+        });
+        drop(guard);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        for included in [
+            "slow request_action response",
+            "request_id=42",
+            "response_type=\"dahai\"",
+            "context_ms=10",
+            "policy_ms=20",
+            "serialize_ms=1",
+            "send_ms=2",
+            "total_ms=33",
+            "grace_ms=Some(30)",
+            "deadline_ms=Some(100)",
+        ] {
+            assert!(contents.contains(included), "{included}: {contents}");
+        }
+        assert!(!contents.contains("unrelated warn excluded"), "{contents}");
+        assert!(!contents.contains("unrelated info excluded"), "{contents}");
+    }
+
+    #[test]
+    fn slow_layer_ignores_rust_log_filter_used_by_other_layers() {
+        let normal_path = temp_log_path("slow-rust-log-normal");
+        let slow_path = temp_log_path("slow-rust-log-dedicated");
+        let _ = std::fs::remove_file(&normal_path);
+        let _ = std::fs::remove_file(&slow_path);
+
+        let (normal_writer, normal_guard) =
+            tracing_appender::non_blocking(open_log_file(&normal_path).unwrap());
+        let (slow_writer, slow_guard) =
+            tracing_appender::non_blocking(open_log_file(&slow_path).unwrap());
+        let subscriber = tracing_subscriber::registry()
+            .with(file_layer(normal_writer).with_filter(env_filter("unrelated=error")))
+            .with(file_layer(slow_writer).with_filter(slow_request_filter()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                target: SLOW_REQUEST_TARGET,
+                request_id = 43,
+                "slow request_action response"
+            );
+        });
+        drop(normal_guard);
+        drop(slow_guard);
+
+        let normal_contents = std::fs::read_to_string(&normal_path).unwrap();
+        let slow_contents = std::fs::read_to_string(&slow_path).unwrap();
+        let _ = std::fs::remove_file(&normal_path);
+        let _ = std::fs::remove_file(&slow_path);
+
+        assert!(!normal_contents.contains("slow request_action response"));
+        assert!(
+            slow_contents.contains("slow request_action response"),
+            "{slow_contents}"
+        );
+    }
+
+    #[test]
+    fn slow_counter_counts_only_slow_target_events() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(SlowRequestCounter::new(Arc::clone(&count)).with_filter(slow_request_filter()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "unrelated", "unrelated warn");
+            tracing::warn!(target: SLOW_REQUEST_TARGET, "slow request_action response");
+        });
+
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn completion_warning_is_omitted_for_zero_and_includes_count_and_path_otherwise() {
+        let path = Path::new("logs/ranked-slow.log");
+        assert_eq!(slow_request_completion_warning(0, path), None);
+        assert_eq!(
+            slow_request_completion_warning(1, path),
+            Some("1 slow request_action responses recorded: logs/ranked-slow.log".to_string())
         );
     }
 
