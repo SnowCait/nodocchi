@@ -319,20 +319,18 @@ where
                 };
                 let finish = should_finish_after_event(exit_condition, &event);
                 capture_server_event(capture.as_mut(), text.as_str());
+                state.on_event(&event);
                 match event {
                     MjaiEvent::StartGame { id } => {
                         info!(actor = id, "start_game");
-                        state.on_start_game(id);
                     }
                     MjaiEvent::StartKyoku {
                         kyoku, honba, oya, ..
                     } => {
                         info!(kyoku = ?kyoku, honba = ?honba, oya = ?oya, "start_kyoku");
-                        state.on_start_kyoku();
                     }
                     MjaiEvent::Tsumo { actor, pai } => {
                         debug!(actor, pai = %pai, "tsumo");
-                        state.on_tsumo(actor, pai);
                     }
                     MjaiEvent::Dahai {
                         actor,
@@ -340,7 +338,6 @@ where
                         tsumogiri,
                     } => {
                         debug!(actor, pai = %pai, tsumogiri = ?tsumogiri, "dahai");
-                        state.on_dahai_with_tsumogiri(actor, &pai, tsumogiri);
                     }
                     MjaiEvent::Chi {
                         actor,
@@ -361,11 +358,9 @@ where
                         consumed,
                     } => {
                         log_meld_applied(actor, target, &pai, &consumed);
-                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Ankan { actor, consumed } => {
                         debug!(actor, consumed = ?consumed, "ankan");
-                        state.on_hand_change(actor);
                     }
                     MjaiEvent::Kakan {
                         actor,
@@ -373,15 +368,12 @@ where
                         consumed,
                     } => {
                         debug!(actor, pai = %pai, consumed = ?consumed, "kakan");
-                        state.on_kakan(actor, &pai);
                     }
                     MjaiEvent::Reach { actor } => {
                         debug!(actor, "reach");
-                        state.on_reach(actor);
                     }
                     MjaiEvent::Hora { actor, target, pai } => {
                         info!(actor, target = ?target, pai = ?pai, "hora");
-                        state.on_hora();
                     }
                     MjaiEvent::Ryukyoku { reason } => {
                         info!(reason = ?reason, "ryukyoku");

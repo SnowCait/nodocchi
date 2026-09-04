@@ -1,4 +1,4 @@
-use riichilab_client::{CaptureRecord, CapturedRequestAction};
+use riichilab_client::{CaptureRecord, CapturedRequestAction, MjaiEvent, ValidationState};
 
 use crate::error::ScenarioError;
 use crate::scenario::Scenario;
@@ -10,6 +10,12 @@ pub struct CapturedScenario {
     pub actor: Option<u8>,
     pub possible_action_count: usize,
     pub scenario: Scenario,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ReplayRequest {
+    request_action: CapturedRequestAction,
+    reaction_source_player: Option<u8>,
 }
 
 impl CapturedScenario {
@@ -78,10 +84,13 @@ fn read_capture_file(path: &str) -> Result<String, ScenarioError> {
     })
 }
 
-// session capture には server event と client action が並ぶ。replay 対象は server の
-// request_action だけで、他の record は skip する。envelope 自体が壊れている行は error。
-fn parse_records(path: &str, text: &str) -> Result<Vec<CapturedRequestAction>, ScenarioError> {
+// session capture を順に読み、server event は live client と同じ ValidationState へ反映する。
+// replay 対象は server の request_action だけだが、その時点の reaction source も一緒に保持する。
+// client record と未知・不完全な server event から source を推測しない。envelope 自体が壊れて
+// いる行は従来どおり error。
+fn parse_records(path: &str, text: &str) -> Result<Vec<ReplayRequest>, ScenarioError> {
     let mut records = Vec::new();
+    let mut state = ValidationState::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -93,17 +102,26 @@ fn parse_records(path: &str, text: &str) -> Result<Vec<CapturedRequestAction>, S
         };
         let record = CaptureRecord::from_json_line(line).map_err(capture_error)?;
         if let Some(request_action) = record.request_action().map_err(capture_error)? {
-            records.push(request_action);
+            records.push(ReplayRequest {
+                request_action,
+                reaction_source_player: state.reaction_source_player(),
+            });
+        } else if let Some(event) = captured_server_event(&record) {
+            state.on_event(&event);
         }
     }
     Ok(records)
 }
 
+fn captured_server_event(record: &CaptureRecord) -> Option<MjaiEvent> {
+    serde_json::from_value(record.server_event()?.clone()).ok()
+}
+
 fn select_record(
     path: &str,
-    mut records: Vec<CapturedRequestAction>,
+    mut records: Vec<ReplayRequest>,
     request_id: Option<u64>,
-) -> Result<CapturedRequestAction, ScenarioError> {
+) -> Result<ReplayRequest, ScenarioError> {
     let Some(request_id) = request_id else {
         return match records.len() {
             0 => Err(ScenarioError::EmptyCapture {
@@ -119,33 +137,32 @@ fn select_record(
 
     records
         .into_iter()
-        .find(|record| record.request_id == request_id)
+        .find(|record| record.request_action.request_id == request_id)
         .ok_or(ScenarioError::CapturedRequestNotFound {
             path: path.to_string(),
             request_id,
         })
 }
 
-fn captured_scenario(
-    path: &str,
-    record: CapturedRequestAction,
-) -> Result<CapturedScenario, ScenarioError> {
-    let context = record
+fn captured_scenario(path: &str, record: ReplayRequest) -> Result<CapturedScenario, ScenarioError> {
+    let request_action = record.request_action;
+    let context = request_action
         .game_context()
         .map_err(|error| ScenarioError::CaptureObservation {
             path: path.to_string(),
-            request_id: record.request_id,
+            request_id: request_action.request_id,
             message: error.to_string(),
-        })?;
+        })?
+        .with_reaction_source_player(record.reaction_source_player);
 
     Ok(CapturedScenario {
         path: path.to_string(),
-        request_id: record.request_id,
-        actor: record.actor,
-        possible_action_count: record.possible_actions.len(),
+        request_id: request_action.request_id,
+        actor: request_action.actor,
+        possible_action_count: request_action.possible_actions.len(),
         scenario: Scenario {
             context,
-            legal_actions: record.legal_actions(),
+            legal_actions: request_action.legal_actions(),
         },
     })
 }
@@ -155,14 +172,14 @@ mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
     use bot_core::{
-        Agent, LegalAction, MeldKind, PushPullMode, PushPullReason, ShantenAgent,
-        player_threat_facts_from_context,
+        Agent, CallDecisionReason, CallIishantenComparison, LegalAction, MeldKind, PushPullMode,
+        PushPullReason, ShantenAgent, player_threat_facts_from_context,
     };
     use bot_logic::{TileId, TileType};
     use riichilab_client::capture::{self, CaptureDirection};
     use riichilab_client::observation::{
-        fixture_base64, fixture_base64_with_melds, fixture_base64_with_table_state_facts,
-        fixture_meld, game_context_from_decoded_observation,
+        fixture_base64, fixture_base64_with_discards, fixture_base64_with_melds,
+        fixture_base64_with_table_state_facts, fixture_meld, game_context_from_decoded_observation,
     };
     use riichilab_client::{
         CaptureRecordError, MjaiPossibleAction, ObservationPayload, build_response_for_request,
@@ -203,6 +220,22 @@ mod tests {
 
     fn request_action_line(request_id: u64, observation: &str) -> String {
         server_line(&request_action_event(request_id, observation))
+    }
+
+    fn iishanten_pon_request_action_line(request_id: u64) -> String {
+        let mut discards: [Vec<u8>; 4] = Default::default();
+        // 10枚の河で remaining_tiles = 60。最後の F が直前の reaction 対象。
+        discards[1] = vec![112, 113, 114, 115, 116, 117, 118, 119, 120, 130];
+        let observation = fixture_base64_with_discards(
+            0,
+            None,
+            vec![4, 8, 12, 17, 20, 24, 56, 64, 76, 84, 108, 128, 129],
+            vec![],
+            discards,
+        );
+        server_line(&format!(
+            r#"{{"type":"request_action","request_id":{request_id},"actor":0,"possible_actions":[{{"type":"pon","pai":"F","consumed":["F","F"]}},{{"type":"none"}}],"observation":"{observation}"}}"#
+        ))
     }
 
     fn observation_base64() -> String {
@@ -261,6 +294,74 @@ mod tests {
             captured.scenario.context.history_furiten(),
             bot_logic::HistoryFuritenFacts::default()
         );
+    }
+
+    #[test]
+    fn replay_context_carries_the_captured_dahai_actor_as_reaction_source() {
+        let observation = fixture_base64(0, None, CAPTURED_HAND.to_vec());
+        let captured = replay_capture(
+            &[
+                server_line(r#"{"type":"dahai","actor":2,"pai":"4s"}"#),
+                request_action_line(422, &observation),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(captured.scenario.context.reaction_source_player(), Some(2));
+    }
+
+    #[test]
+    fn replay_context_has_no_reaction_source_after_a_tsumo() {
+        let observation = observation_base64();
+        let captured = replay_capture(
+            &[
+                server_line(r#"{"type":"dahai","actor":2,"pai":"4s"}"#),
+                server_line(r#"{"type":"tsumo","actor":0,"pai":"6p"}"#),
+                request_action_line(423, &observation),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(captured.scenario.context.reaction_source_player(), None);
+    }
+
+    #[test]
+    fn replay_does_not_infer_a_reaction_source_from_a_legal_pon() {
+        let captured = replay_capture(&[iishanten_pon_request_action_line(424)], None).unwrap();
+        let diagnostic =
+            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+
+        assert_eq!(captured.scenario.context.reaction_source_player(), None);
+        assert_eq!(
+            diagnostic.call.expect("call diagnostic").reason,
+            CallDecisionReason::ReactionSourceUnknown
+        );
+    }
+
+    #[test]
+    fn replayed_iishanten_call_reaches_the_production_value_comparison() {
+        let captured = replay_capture(
+            &[
+                server_line(r#"{"type":"dahai","actor":1,"pai":"F"}"#),
+                iishanten_pon_request_action_line(425),
+            ],
+            None,
+        )
+        .unwrap();
+        let diagnostic =
+            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+        let call = diagnostic.call.expect("call diagnostic");
+        let comparison = call.candidates[0]
+            .iishanten_self_tsumo
+            .expect("production comparison");
+
+        assert_ne!(call.reason, CallDecisionReason::ReactionSourceUnknown);
+        assert_eq!(comparison.reaction_source_player, Some(1));
+        assert!(comparison.pass_expected_self_tsumo_value.is_some());
+        assert!(comparison.call_expected_self_tsumo_value.is_some());
+        assert_ne!(comparison.comparison, CallIishantenComparison::Unknown);
     }
 
     #[test]
@@ -590,9 +691,9 @@ mod tests {
     }
 
     // 正常な session capture は request_action の前後に server event と client action を大量に
-    // 含む。replay はそれらを skip し、server の request_action だけを対象にする。
+    // 含む。server event は state へ反映するが、replay 対象として数えるのは request_action だけ。
     #[test]
-    fn skips_the_server_and_client_records_around_a_request_action() {
+    fn selects_only_the_request_action_while_processing_session_records() {
         let observation = observation_base64();
         let lines = [
             server_line(r#"{"type":"start_game","id":0}"#),
