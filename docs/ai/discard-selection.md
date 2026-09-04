@@ -243,6 +243,10 @@ cargo run --release -p bot-scenario -- \
 絞り込みそのもので、残った候補の値は全候補で求めた場合と一致します。計測は打牌選択を通らない
 解析専用の入口で、選ぶ action も他の診断も変えません。
 
+計測より前に深い探索を走らせると向聴・受け入れの memo が温まり、後続の計測が本来より速く
+見えてしまいます。そのため `--lookahead` / `--verbose` / `--two-shanten-self-tsumo` /
+`--summary-only` とは同時に指定できません。
+
 ## lookahead
 
 `bot-scenario --lookahead` は通常打牌候補ごとの2手先概要を追加します。`--verbose` と併用すると仮想ツモ牌ごとの詳細も表示します。
