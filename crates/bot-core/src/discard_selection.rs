@@ -30,7 +30,7 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    TwoShantenSelfTsumoDiagnostic, best_discard_selection_index,
+    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope, best_discard_selection_index,
     best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
     current_tenpai_continuation_targets, diagnose_discard_evaluations_with_metrics,
     diagnose_discard_furiten, diagnose_lookahead, diagnose_two_shanten_self_tsumo,
@@ -121,6 +121,11 @@ impl LookaheadDiagnosticScope {
         same_shanten_downstream: true,
         two_shanten_self_tsumo: false,
     };
+    /// 2手先診断に加えて、2向聴候補の ExpectedSelfTsumoValue を求める。
+    pub(crate) const TWO_SHANTEN_SELF_TSUMO: Self = Self::Lookahead {
+        same_shanten_downstream: false,
+        two_shanten_self_tsumo: true,
+    };
 
     fn builds_lookahead(self) -> bool {
         !matches!(self, Self::None)
@@ -199,9 +204,9 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
 
 // 合法 Dahai へ絞り込み・物理牌補正済みの打牌候補評価集合と、その評価対象の物理牌一覧。
 // 本番選択・構造化診断・tracing ログはすべてこの集合を共有する。
-struct LegalDiscardEvaluations {
-    tiles: Vec<TileId>,
-    evaluations: Vec<DiscardEvaluation>,
+pub(crate) struct LegalDiscardEvaluations {
+    pub(crate) tiles: Vec<TileId>,
+    pub(crate) evaluations: Vec<DiscardEvaluation>,
 }
 
 // 打牌選択に使う前方集計値。`evaluations` と同じ順序・同じ件数で、前方評価を
@@ -397,9 +402,13 @@ pub(crate) fn select_discard_action_with_diagnostic(
 
     // 2向聴候補の ExpectedSelfTsumoValue も同じ2手先評価の入力をそのまま使う。枝の探索も打牌
     // 比較も将来打点も既存 helper が持ち、この診断のために別の評価器を作らない。
-    let two_shanten_self_tsumo = scope
-        .builds_two_shanten_self_tsumo()
-        .then(|| diagnose_two_shanten_self_tsumo(&inputs, &legal.evaluations));
+    let two_shanten_self_tsumo = scope.builds_two_shanten_self_tsumo().then(|| {
+        diagnose_two_shanten_self_tsumo(
+            &inputs,
+            &legal.evaluations,
+            TwoShantenSelfTsumoScope::AllCandidates,
+        )
+    });
 
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(
@@ -421,7 +430,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
 }
 
 // 評価対象の物理牌一覧を作り、全打牌候補を評価してから合法 Dahai へ絞り込み・物理牌補正する。
-fn legal_discard_evaluations(
+pub(crate) fn legal_discard_evaluations(
     context: &GameContext,
     legal_actions: &[LegalAction],
 ) -> LegalDiscardEvaluations {

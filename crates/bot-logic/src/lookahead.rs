@@ -1009,16 +1009,61 @@ pub fn two_shanten_expected_self_tsumo_value_for_candidate(
     two_shanten_self_tsumo_value(inputs, &branch, &evaluation.acceptance_after_discard, facts)
 }
 
+/// 2向聴候補の ExpectedSelfTsumoValue を求める対象の範囲。
+///
+/// どちらを選んでも1候補あたりの枝も確率も集計も同じで、対象候補の数だけが変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TwoShantenSelfTsumoScope {
+    /// 打牌後が2向聴の全候補。
+    #[default]
+    AllCandidates,
+    /// そのうち production の打牌比較が前方評価の対象にする候補だけ
+    /// ([`crate::selection`] の絞り込みそのもの)。Shanten / IsolatedTile / IsolatedHonor で
+    /// 既に決着する候補は評価しない。
+    ForwardTargets,
+}
+
+/// 2向聴 ExpectedSelfTsumoValue の候補ごとの区切りを受け取る観測器。
+///
+/// bot-logic は時計を持たないため、実測は上位層が行う。観測器は区切りを受け取るだけで、
+/// 対象候補も枝の探索も集計もその有無で変わらない。
+pub trait TwoShantenSelfTsumoObserver {
+    /// この打牌候補の評価に入る。最後の候補の区切りは呼び出し側が閉じる。
+    fn enter_candidate(&mut self, discard: TileType);
+}
+
+/// 区切りを受け取らない観測器。計測しない経路はこれを通る。
+impl TwoShantenSelfTsumoObserver for () {
+    fn enter_candidate(&mut self, _discard: TileType) {}
+}
+
 /// 打牌候補集合の最善向聴数が2向聴の場合に、その2向聴候補の ExpectedSelfTsumoValue を並べる。
 ///
 /// 値は候補ごとに [`two_shanten_expected_self_tsumo_value_for_candidate`] そのもので、この入口の
 /// ために別の探索も別の集計も持たない。最善向聴数が2向聴でない候補集合では空の診断になる。
+///
+/// `scope` は対象候補の範囲だけを決める。範囲を狭めても残った候補の値は変わらない。
 ///
 /// 探索は既存の2手先診断よりさらに深いため、必要な経路だけが明示的に呼ぶ。打牌選択には使わない
 /// 解析専用の情報で、構築の有無で選択結果は変わらない。
 pub fn diagnose_two_shanten_self_tsumo(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
+    scope: TwoShantenSelfTsumoScope,
+) -> TwoShantenSelfTsumoDiagnostic {
+    diagnose_two_shanten_self_tsumo_instrumented(inputs, evaluations, scope, &mut ())
+}
+
+/// [`diagnose_two_shanten_self_tsumo`] と同じ診断を、候補ごとの区切りの通知付きで行う。
+///
+/// 通知するのは評価に入った候補だけで、対象候補の絞り込みも枝の探索も集計も
+/// [`diagnose_two_shanten_self_tsumo`] と同じものを1回ずつ通る。`observer` の有無で戻り値は
+/// 変わらない。
+pub fn diagnose_two_shanten_self_tsumo_instrumented(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+    scope: TwoShantenSelfTsumoScope,
+    observer: &mut impl TwoShantenSelfTsumoObserver,
 ) -> TwoShantenSelfTsumoDiagnostic {
     if best_shanten(evaluations) != RYANSHANTEN_SHANTEN {
         return TwoShantenSelfTsumoDiagnostic::default();
@@ -1027,14 +1072,32 @@ pub fn diagnose_two_shanten_self_tsumo(
     TwoShantenSelfTsumoDiagnostic {
         candidates: evaluations
             .iter()
-            .filter(|evaluation| evaluation.min_shanten_after_discard() == RYANSHANTEN_SHANTEN)
-            .map(|evaluation| TwoShantenSelfTsumoCandidate {
-                discard: evaluation.discard,
-                expected_self_tsumo_value: two_shanten_expected_self_tsumo_value_for_candidate(
-                    inputs, evaluation,
-                ),
+            .zip(two_shanten_self_tsumo_target_mask(evaluations, scope))
+            .filter(|(evaluation, target)| {
+                *target && evaluation.min_shanten_after_discard() == RYANSHANTEN_SHANTEN
+            })
+            .map(|(evaluation, _)| {
+                observer.enter_candidate(evaluation.discard);
+                TwoShantenSelfTsumoCandidate {
+                    discard: evaluation.discard,
+                    expected_self_tsumo_value: two_shanten_expected_self_tsumo_value_for_candidate(
+                        inputs, evaluation,
+                    ),
+                }
             })
             .collect(),
+    }
+}
+
+// 2向聴 ExpectedSelfTsumoValue を求める候補の mask。production 比較対象へ絞る場合の判定は
+// 打牌選択が使う [`forward_target_mask`] そのもので、ここで同じ条件を別実装しない。
+fn two_shanten_self_tsumo_target_mask(
+    evaluations: &[DiscardEvaluation],
+    scope: TwoShantenSelfTsumoScope,
+) -> Vec<bool> {
+    match scope {
+        TwoShantenSelfTsumoScope::AllCandidates => vec![true; evaluations.len()],
+        TwoShantenSelfTsumoScope::ForwardTargets => forward_target_mask(evaluations),
     }
 }
 
@@ -4733,6 +4796,90 @@ mod tests {
         assert!(
             with_second_keep > actual,
             "with_second_keep: {with_second_keep}, actual: {actual}"
+        );
+    }
+
+    #[test]
+    fn the_forward_target_scope_evaluates_only_the_comparison_targets() {
+        // production 比較対象へ絞る判定は打牌選択の絞り込みそのもので、対象外の候補は評価せず
+        // 診断にも現れない。残った候補の値は全候補で求めた場合と完全に一致する。
+        let tiles = two_shanten_candidate_hand();
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+
+        let all = diagnose_two_shanten_self_tsumo(
+            &inputs,
+            &situation.evaluations,
+            TwoShantenSelfTsumoScope::AllCandidates,
+        );
+        let targets = diagnose_two_shanten_self_tsumo(
+            &inputs,
+            &situation.evaluations,
+            TwoShantenSelfTsumoScope::ForwardTargets,
+        );
+
+        let expected: Vec<_> = situation
+            .evaluations
+            .iter()
+            .zip(forward_target_mask(&situation.evaluations))
+            .filter(|(_, target)| *target)
+            .map(|(evaluation, _)| evaluation.discard)
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(all.candidates.len(), situation.evaluations.len());
+        assert!(expected.len() < all.candidates.len());
+        assert_eq!(
+            targets
+                .candidates
+                .iter()
+                .map(|candidate| candidate.discard)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for candidate in &targets.candidates {
+            assert!(candidate.expected_self_tsumo_value.is_some());
+            assert_eq!(all.candidate(candidate.discard), Some(candidate));
+        }
+    }
+
+    #[test]
+    fn the_instrumented_two_shanten_diagnostic_notifies_every_evaluated_candidate() {
+        // 通知されるのは評価した候補だけで、順序も診断そのもの。観測器の有無で戻り値は変わらない。
+        struct RecordedCandidates(Vec<TileType>);
+
+        impl TwoShantenSelfTsumoObserver for RecordedCandidates {
+            fn enter_candidate(&mut self, discard: TileType) {
+                self.0.push(discard);
+            }
+        }
+
+        let tiles = two_shanten_candidate_hand();
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+
+        let mut recorded = RecordedCandidates(Vec::new());
+        let diagnostic = diagnose_two_shanten_self_tsumo_instrumented(
+            &inputs,
+            &situation.evaluations,
+            TwoShantenSelfTsumoScope::ForwardTargets,
+            &mut recorded,
+        );
+
+        assert_eq!(
+            recorded.0,
+            diagnostic
+                .candidates
+                .iter()
+                .map(|candidate| candidate.discard)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            diagnostic,
+            diagnose_two_shanten_self_tsumo(
+                &inputs,
+                &situation.evaluations,
+                TwoShantenSelfTsumoScope::ForwardTargets,
+            )
         );
     }
 

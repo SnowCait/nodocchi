@@ -28,6 +28,7 @@ pub(crate) mod shanten_test_support;
 pub mod tenpai_continuation;
 pub mod tenpai_scoring;
 pub mod threat;
+pub mod two_shanten_self_tsumo_cost;
 
 pub use action::LegalAction;
 pub use agent::Agent;
@@ -165,3 +166,4 @@ pub use threat::{
     fixed_meld_value_facts, has_reached_dealer, meld_threat_facts, player_threat_facts,
     player_threat_facts_from_context, player_threat_inputs, reached_opponent_count,
 };
+pub use two_shanten_self_tsumo_cost::{TwoShantenSelfTsumoCost, measure_two_shanten_self_tsumo};

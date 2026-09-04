@@ -223,6 +223,26 @@ B. 2向聴 → SameShanten → 最良打牌 → 2向聴 → Progress → 最良�
 材料 (ツモ打点と残り自摸機会) が揃わない局面と、到達したテンパイのツモ打点を1つでも確定できない
 候補は、0点で補完せず値を持ちません。`bot-scenario --two-shanten-self-tsumo` で表示できます。
 
+### 実行コストの計測
+
+この軸は探索が最も深く、全2向聴候補について求めると1局面で数十秒かかります。将来 production
+比較へ接続する場合に評価が必要になるのは、production の打牌比較が Shanten / IsolatedTile /
+IsolatedHonor までで決着させず前方評価まで残した候補だけです。その範囲へ絞った場合の実行コストは
+`bot-scenario --two-shanten-self-tsumo-cost` で計測できます。
+
+```bash
+cargo run --release -p bot-scenario -- \
+  --hand "11258m234789p13s" \
+  --draw "9s" \
+  --remaining-tiles 66 \
+  --two-shanten-self-tsumo-cost forward-targets
+```
+
+`--two-shanten-self-tsumo-cost all` は全2向聴候補、`forward-targets` は production の比較対象
+だけを評価し、候補ごとの期待値と実測時間を表示します。範囲の絞り込みは打牌選択が使う前方評価の
+絞り込みそのもので、残った候補の値は全候補で求めた場合と一致します。計測は打牌選択を通らない
+解析専用の入口で、選ぶ action も他の診断も変えません。
+
 ## lookahead
 
 `bot-scenario --lookahead` は通常打牌候補ごとの2手先概要を追加します。`--verbose` と併用すると仮想ツモ牌ごとの詳細も表示します。
