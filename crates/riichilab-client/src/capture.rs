@@ -12,7 +12,7 @@ use crate::convert::possible_actions_to_legal_actions;
 use crate::observation::{
     DecodedObservation, ObservationError, ObservationPayload, game_context_from_decoded_observation,
 };
-use crate::protocol::{MjaiPossibleAction, TimeControl};
+use crate::protocol::{MjaiEvent, MjaiPossibleAction, TimeControl, parse_server_event_value};
 
 pub const CAPTURE_VERSION: u32 = 1;
 
@@ -42,6 +42,9 @@ pub enum CaptureRecordError {
 
     #[error("capture record is not a valid {REQUEST_ACTION_TYPE}: {0}")]
     Fields(String),
+
+    #[error("capture server event is malformed: {0}")]
+    ServerEvent(String),
 }
 
 /// Capture record の向き。同じ `type` が server event と client action の双方に現れるため、
@@ -241,6 +244,15 @@ impl CaptureRecord {
         serde_json::from_value(event.clone())
             .map(Some)
             .map_err(|error| CaptureRecordError::Fields(error.to_string()))
+    }
+
+    /// server record を live client と同じ parser semantics で MJAI event にする。
+    pub fn mjai_event(&self) -> Result<Option<MjaiEvent>, CaptureRecordError> {
+        let Some(event) = self.server_event() else {
+            return Ok(None);
+        };
+        parse_server_event_value(event.clone())
+            .map_err(|error| CaptureRecordError::ServerEvent(error.to_string()))
     }
 }
 
@@ -674,6 +686,25 @@ mod tests {
             CaptureRecord::from_json_line(&server_line(r#"{"type":"request_action"}"#)).unwrap();
         let error = record.request_action().unwrap_err();
         assert!(matches!(error, CaptureRecordError::Fields(_)), "{error:?}");
+    }
+
+    #[test]
+    fn captured_server_events_share_the_live_parser_semantics() {
+        let malformed =
+            CaptureRecord::from_json_line(&server_line(r#"{"type":"tsumo","actor":0}"#)).unwrap();
+        assert!(
+            matches!(
+                malformed.mjai_event(),
+                Err(CaptureRecordError::ServerEvent(_))
+            ),
+            "{:?}",
+            malformed.mjai_event()
+        );
+
+        let unknown =
+            CaptureRecord::from_json_line(&server_line(r#"{"type":"future_event","actor":2}"#))
+                .unwrap();
+        assert_eq!(unknown.mjai_event().unwrap(), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use riichilab_client::{CaptureRecord, CapturedRequestAction, MjaiEvent, ValidationState};
+use riichilab_client::{CaptureRecord, CapturedRequestAction, ValidationState};
 
 use crate::error::ScenarioError;
 use crate::scenario::Scenario;
@@ -106,15 +106,14 @@ fn parse_records(path: &str, text: &str) -> Result<Vec<ReplayRequest>, ScenarioE
                 request_action,
                 reaction_source_player: state.reaction_source_player(),
             });
-        } else if let Some(event) = captured_server_event(&record) {
-            state.on_event(&event);
+        } else if record.server_event().is_some() {
+            match record.mjai_event().map_err(capture_error)? {
+                Some(event) => state.on_event(&event),
+                None => state.invalidate_reaction_source_player(),
+            }
         }
     }
     Ok(records)
-}
-
-fn captured_server_event(record: &CaptureRecord) -> Option<MjaiEvent> {
-    serde_json::from_value(record.server_event()?.clone()).ok()
 }
 
 fn select_record(
@@ -319,6 +318,48 @@ mod tests {
                 server_line(r#"{"type":"dahai","actor":2,"pai":"4s"}"#),
                 server_line(r#"{"type":"tsumo","actor":0,"pai":"6p"}"#),
                 request_action_line(423, &observation),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(captured.scenario.context.reaction_source_player(), None);
+    }
+
+    #[test]
+    fn replay_rejects_a_malformed_known_event_instead_of_using_a_stale_source() {
+        let observation = observation_base64();
+        let error = replay_capture(
+            &[
+                server_line(r#"{"type":"dahai","actor":2,"pai":"4s"}"#),
+                server_line(r#"{"type":"tsumo","actor":0}"#),
+                request_action_line(426, &observation),
+            ],
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::CaptureRecord {
+                    line: 2,
+                    source: CaptureRecordError::ServerEvent(_),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn replay_invalidates_the_reaction_source_across_an_unknown_server_event() {
+        let observation = fixture_base64(0, None, CAPTURED_HAND.to_vec());
+        let captured = replay_capture(
+            &[
+                server_line(r#"{"type":"dahai","actor":2,"pai":"4s"}"#),
+                server_line(r#"{"type":"future_event","actor":2}"#),
+                request_action_line(427, &observation),
             ],
             None,
         )

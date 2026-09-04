@@ -348,6 +348,16 @@ impl ActionAckStatus {
 
 pub fn parse_server_event(text: &str) -> Result<Option<MjaiEvent>, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(text)?;
+    parse_server_event_value(value)
+}
+
+/// JSON として parse 済みの server payload を MJAI event として解釈する共通境界。
+///
+/// 未知の event type は既存どおり `Ok(None)`、既知 type の必須 field 不足などは deserialize
+/// error として返す。
+pub fn parse_server_event_value(
+    value: serde_json::Value,
+) -> Result<Option<MjaiEvent>, serde_json::Error> {
     let event_type = value.get("type").and_then(|v| v.as_str());
 
     match event_type {
@@ -1354,6 +1364,23 @@ mod tests {
     fn parse_server_event_ignores_unknown_event_type() {
         let event = parse_server_event(r#"{"type":"future_event","foo":1}"#).unwrap();
         assert_eq!(event, None);
+    }
+
+    #[test]
+    fn parsed_value_uses_the_same_known_and_unknown_event_semantics() {
+        assert_eq!(
+            parse_server_event_value(serde_json::json!({"type": "future_event", "foo": 1}))
+                .unwrap(),
+            None
+        );
+        assert!(
+            parse_server_event_value(serde_json::json!({"type": "tsumo", "actor": 0})).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_server_event_rejects_a_malformed_known_event() {
+        assert!(parse_server_event(r#"{"type":"tsumo","actor":0}"#).is_err());
     }
 
     #[test]

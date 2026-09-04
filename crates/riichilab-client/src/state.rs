@@ -62,6 +62,11 @@ impl ValidationState {
         self.pending_passed_tile.map(|(actor, _)| actor)
     }
 
+    /// 解釈できない server event を跨いで直前の reaction source が有効だと推測しない。
+    pub fn invalidate_reaction_source_player(&mut self) {
+        self.pending_passed_tile = None;
+    }
+
     /// server event を live client と replay で共通の validation state へ反映する。
     pub fn on_event(&mut self, event: &MjaiEvent) {
         match event {
