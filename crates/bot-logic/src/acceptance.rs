@@ -1,9 +1,11 @@
+use crate::count_hasher::CountHasherBuilder;
 use crate::shanten::{
     EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,
     calculate_shanten_with_fixed_melds,
 };
 use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptanceTile<S = Shanten> {
@@ -112,12 +114,29 @@ pub(crate) fn calculate_acceptance_with_fixed_melds_and_seen(
     fixed_meld_count: FixedMeldCount,
     additional_seen: &[u8; TileType::COUNT],
 ) -> EffectiveAcceptance {
-    collect_acceptance(
+    let skeleton = acceptance_skeleton(counts, fixed_meld_count);
+    let current_min = skeleton.current.min();
+    let mut tiles = Vec::new();
+
+    skeleton.for_each_drawable_tile(
         counts,
         additional_seen,
-        |counts| calculate_shanten_with_fixed_melds(counts, fixed_meld_count),
-        EffectiveShanten::min,
-    )
+        |tile, remaining, shanten_after_draw| {
+            // 受け入れの条件は「その牌を1枚加えると向聴数が下がる」。維持する牌を混ぜない。
+            if shanten_after_draw.min() < current_min {
+                tiles.push(AcceptanceTile {
+                    tile,
+                    remaining,
+                    shanten_after_draw,
+                });
+            }
+        },
+    );
+
+    Acceptance {
+        current: skeleton.current,
+        tiles,
+    }
 }
 
 /// 手牌以外に見えている枚数を visible tiles と手牌から求める。
@@ -161,16 +180,14 @@ pub(crate) fn same_shanten_draws_with_fixed_melds_and_seen(
     fixed_meld_count: FixedMeldCount,
     additional_seen: &[u8; TileType::COUNT],
 ) -> Vec<DrawableTile> {
-    let evaluate =
-        |counts: &TileCounts| calculate_shanten_with_fixed_melds(counts, fixed_meld_count);
-    let current_min = evaluate(counts).min();
+    let skeleton = acceptance_skeleton(counts, fixed_meld_count);
+    let current_min = skeleton.current.min();
     let mut tiles = Vec::new();
 
-    for_each_drawable_tile(
+    skeleton.for_each_drawable_tile(
         counts,
         additional_seen,
-        evaluate,
-        |tile, remaining, shanten_after_draw: EffectiveShanten| {
+        |tile, remaining, shanten_after_draw| {
             if shanten_after_draw.min() == current_min {
                 tiles.push(DrawableTile {
                     tile,
@@ -182,6 +199,94 @@ pub(crate) fn same_shanten_draws_with_fixed_melds_and_seen(
     );
 
     tiles
+}
+
+/// 見え牌によらない受け入れの骨格。現在の向聴数と、牌種を1枚加えた後の向聴数だけを持つ。
+///
+/// 受け入れのうち見え牌で変わるのは残枚数 ([`remaining_copies`]) だけで、向聴数はどれも手牌と
+/// 副露済み面子数だけで決まる。2手先評価は同じ手牌を経路ごとに違う見え牌で何度も評価するため、
+/// 向聴数探索をこの単位で共有する。受け入れの判定条件も列挙する牌も骨格の外にあるので、共有の
+/// 有無で受け入れそのものは変わらない。
+#[derive(Clone, Copy)]
+struct AcceptanceSkeleton {
+    current: EffectiveShanten,
+    // 牌種を1枚加えられる場合だけ、加えた後の向聴数を持つ。
+    after_draw: [Option<EffectiveShanten>; TileType::COUNT],
+}
+
+impl AcceptanceSkeleton {
+    fn calculate(counts: &TileCounts, fixed_meld_count: FixedMeldCount) -> Self {
+        let mut after_draw = [None; TileType::COUNT];
+        for tile in TileType::all() {
+            let mut added = *counts;
+            if added.try_add(tile).is_ok() {
+                after_draw[tile.index()] =
+                    Some(calculate_shanten_with_fixed_melds(&added, fixed_meld_count));
+            }
+        }
+
+        Self {
+            current: calculate_shanten_with_fixed_melds(counts, fixed_meld_count),
+            after_draw,
+        }
+    }
+
+    // 見え牌を反映して実際にツモり得る牌を1牌種ずつ、その牌を1枚加えた後の向聴数と一緒に渡す。
+    // 除外する条件も渡す値も [`for_each_drawable_tile`] と同じで、向聴数だけを骨格から取る。
+    fn for_each_drawable_tile(
+        &self,
+        counts: &TileCounts,
+        additional_seen: &[u8; TileType::COUNT],
+        mut visit: impl FnMut(TileType, u8, EffectiveShanten),
+    ) {
+        for tile in TileType::all() {
+            let remaining = remaining_copies(counts, additional_seen, tile);
+            if remaining == 0 {
+                continue;
+            }
+
+            let Some(shanten_after_draw) = self.after_draw[tile.index()] else {
+                continue;
+            };
+
+            visit(tile, remaining, shanten_after_draw);
+        }
+    }
+}
+
+type SkeletonMemo =
+    HashMap<([u8; TileType::COUNT], FixedMeldCount), AcceptanceSkeleton, CountHasherBuilder>;
+
+// 骨格を保持する上限エントリ数。超えたら丸ごと捨てて使用量を上限内に保つ。
+const SKELETON_MEMO_CAPACITY: usize = 1 << 17;
+
+// 見え牌によらない受け入れの骨格。
+//
+// [`AcceptanceSkeleton::calculate`] は (手牌, 副露済み面子数) に対する純関数で、結果は memo の
+// 中身に依存しない。2手先評価は同じ手牌を経路ごとに違う見え牌で何度も評価するため、呼び出し
+// ごとに向聴数探索をやり直さずスレッドローカルで使い回す。受け入れそのものは変わらない。
+thread_local! {
+    static SKELETON_MEMO: std::cell::RefCell<SkeletonMemo> =
+        std::cell::RefCell::new(SkeletonMemo::default());
+}
+
+fn acceptance_skeleton(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> AcceptanceSkeleton {
+    let key = (*counts.as_array(), fixed_meld_count);
+    if let Some(cached) = SKELETON_MEMO.with_borrow(|memo| memo.get(&key).copied()) {
+        return cached;
+    }
+
+    let skeleton = AcceptanceSkeleton::calculate(counts, fixed_meld_count);
+    SKELETON_MEMO.with_borrow_mut(|memo| {
+        if memo.len() >= SKELETON_MEMO_CAPACITY {
+            memo.clear();
+        }
+        memo.insert(key, skeleton);
+    });
+    skeleton
 }
 
 fn collect_acceptance<S: Copy>(
