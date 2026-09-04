@@ -518,6 +518,12 @@ mod tests {
             output.contains("  normal_discard=") && output.contains("  post_discard="),
             "{output}"
         );
+        assert!(
+            output.contains(" (base=")
+                && output.contains(" forward=")
+                && output.contains(" finalize="),
+            "{output}"
+        );
         assert!(output.contains("  selected="), "{output}");
         assert!(output.contains(&first), "{output}");
         assert!(output.contains(&second), "{output}");

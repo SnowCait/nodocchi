@@ -371,7 +371,17 @@ request ごとに、production の判断経路をそのまま3つの phase へ�
 | `normal_discard` | 通常打牌選択の全体 |
 | `post_discard` | 通常打牌選択より後の押し引き / Reach / 防御 / 最終 action 選択 |
 
-Hora などで早期 return した request は、到達しなかった phase が 0 のままになります。lookahead の内部はまだ細分化していません。phase 別の集計や percentile は出しません。
+Hora などで早期 return した request は、到達しなかった phase が 0 のままになります。phase 別の集計や percentile は出しません。
+
+`normal_discard` はさらに内部処理別へ分けます。区切りは通常打牌選択の既存の責務境界そのままで、探索も scoring も比較も変えません。
+
+| subphase | 内容 |
+| --- | --- |
+| `base` | 合法打牌候補の生成と、向聴 / 受け入れなどの基本評価 |
+| `forward` | 打牌選択が使う前方集計値 (lookahead / ExpectedSelfTsumoValue / WeightedNextAcceptance など) |
+| `finalize` | 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定 |
+
+3つの合計は同じ request の `normal_discard` を超えません。通常打牌選択を通らなかった request では 0 のままです。`early` / `post_discard` の内部は細分化していません。
 
 この計測は benchmark でだけ有効にします。通常の RiichiLab client は計測しません。
 
@@ -394,13 +404,13 @@ RiichiLab production latency benchmark
   > 3 s: 0
 
 Slowest requests
-  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms  normal_discard=2401.000 ms  post_discard=68.988 ms  selected=9s
-  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms  normal_discard=2200.000 ms  post_discard=109.990 ms  selected=5p
+  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms  normal_discard=2401.000 ms (base=30.000 ms forward=2351.000 ms finalize=20.000 ms)  post_discard=68.988 ms  selected=9s
+  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms  normal_discard=2200.000 ms (base=28.000 ms forward=2152.000 ms finalize=20.000 ms)  post_discard=109.990 ms  selected=5p
 ```
 
 percentile は nearest-rank です。昇順に並べた `n` 件について順位 `ceil(p / 100 * n)` の値をそのまま採用し、補間しません。threshold の件数は閾値を厳密に超えた request だけを数えます。`selected` は計測した production decision そのものです。
 
-`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳です。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
+`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳で、`normal_discard` の括弧内はその内訳です。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
 
 ```bash
 ./target/release/bot-scenario \
@@ -437,6 +447,9 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
       "elapsed_ns": 2470000000,
       "early_ns": 12000,
       "normal_discard_ns": 2401000000,
+      "normal_discard_base_ns": 30000000,
+      "normal_discard_forward_ns": 2351000000,
+      "normal_discard_finalize_ns": 20000000,
       "post_discard_ns": 68988000,
       "selected": "9s"
     }
@@ -444,7 +457,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

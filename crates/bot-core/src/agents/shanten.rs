@@ -7,7 +7,7 @@ use crate::decision_timing::{DecisionPhase, DecisionPhaseTimer, TimedAgentAction
 use crate::defense::{DefenseFallbackKind, log_defense_fallback_evaluation};
 use crate::discard_selection::{
     DiscardActionSelection, select_discard_action_with_diagnostic,
-    select_discard_action_with_evaluation,
+    select_discard_action_with_evaluation_instrumented,
 };
 use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
 use crate::open_hand_defense::OpenHandDefenseCategory;
@@ -261,7 +261,7 @@ impl ShantenAgent {
         // 作らない軽量 facts なので、通常 act() で allocation は増えない。構造化診断は
         // この facts を再利用して full diagnostic を組み立てる。
         timing.enter(DecisionPhase::NormalDiscard);
-        let discard_selection = self.select_normal_discard(ctx, legal_actions, diagnostics);
+        let discard_selection = self.select_normal_discard(ctx, legal_actions, diagnostics, timing);
         timing.enter(DecisionPhase::PostDiscard);
 
         let inputs = push_pull_inputs_from_threat_facts(
@@ -346,9 +346,18 @@ impl ShantenAgent {
         ctx: &GameContext,
         legal_actions: &[LegalAction],
         diagnostics: &mut DecisionDiagnostics,
+        timing: &mut DecisionPhaseTimer,
     ) -> DiscardActionSelection {
         if !diagnostics.is_enabled() {
-            return select_discard_action_with_evaluation(ctx, legal_actions);
+            // 内訳の計測も act() と同じ選択を1回通すだけで、選択のために評価を再実行しない。
+            let mut normal_discard_timing = timing.normal_discard_timer();
+            let selection = select_discard_action_with_evaluation_instrumented(
+                ctx,
+                legal_actions,
+                &mut normal_discard_timing,
+            );
+            timing.record_normal_discard_phases(normal_discard_timing.finish());
+            return selection;
         }
 
         let selection = select_discard_action_with_diagnostic(
@@ -584,12 +593,16 @@ mod tests {
         ThreatDefenseTarget, combined_threat_defense_targets_from_context,
         select_combined_threat_defense_fallback_action_with_kind,
     };
+    use crate::decision_timing::NormalDiscardPhaseDurations;
     use crate::defense::{
         DefenseDecisionDiagnostic, HonorSafetyRank, OpponentHonorValue, SuitedSafetyRank,
         honor_safety_rank, is_genbutsu_for_all_reached, opponent_honor_value_for_reached,
         select_defense_fallback_action, suited_safety_rank_for_all_reached,
     };
-    use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
+    use crate::discard_selection::{
+        select_best_normal_discard_evaluation, select_discard_action,
+        select_discard_action_with_evaluation,
+    };
     use crate::push_pull::{
         PushPullReason, push_pull_inputs_from_context,
         push_pull_inputs_from_context_with_evaluation,
@@ -685,6 +698,56 @@ mod tests {
         assert_eq!(ryukyoku.phases.normal_discard, Duration::ZERO);
         assert_eq!(ryukyoku.phases.post_discard, Duration::ZERO);
         assert_eq!(ryukyoku.phases.total(), ryukyoku.phases.early);
+    }
+
+    #[test]
+    fn an_early_return_keeps_the_normal_discard_subphases_at_zero() {
+        let mut agent = ShantenAgent;
+        let ctx = GameContext::with_drawn_tile(tile(0));
+
+        let hora = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Hora]);
+        assert_eq!(hora.action, LegalAction::Hora);
+        assert_eq!(
+            hora.phases.normal_discard_phases,
+            NormalDiscardPhaseDurations::default()
+        );
+
+        let ryukyoku = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Ryukyoku]);
+        assert_eq!(ryukyoku.action, LegalAction::Ryukyoku);
+        assert_eq!(
+            ryukyoku.phases.normal_discard_phases,
+            NormalDiscardPhaseDurations::default()
+        );
+    }
+
+    #[test]
+    fn the_normal_discard_breakdown_measures_a_single_selection() {
+        let production = include_str!("shanten.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let select_normal_discard = production
+            .split("fn select_normal_discard(")
+            .nth(1)
+            .unwrap()
+            .split("fn select_action_for_push_pull_mode(")
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            select_normal_discard
+                .matches("select_discard_action_with_evaluation_instrumented(")
+                .count(),
+            1,
+            "{select_normal_discard}"
+        );
+        assert_eq!(
+            select_normal_discard
+                .matches("select_discard_action_with_diagnostic(")
+                .count(),
+            1,
+            "{select_normal_discard}"
+        );
     }
 
     #[test]

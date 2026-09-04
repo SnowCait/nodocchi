@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use bot_core::{DecisionPhaseDurations, LegalAction, ShantenAgent};
+use bot_core::{DecisionPhaseDurations, LegalAction, NormalDiscardPhaseDurations, ShantenAgent};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::CaptureBenchmarkSpec;
@@ -177,12 +177,13 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
 
     for measurement in slowest_requests(run, SLOWEST_REQUEST_COUNT) {
         lines.push(format!(
-            "  {}  {}  request_id={}  early={}  normal_discard={}  post_discard={}  selected={}",
+            "  {}  {}  request_id={}  early={}  normal_discard={} ({})  post_discard={}  selected={}",
             format_duration(measurement.elapsed),
             measurement.capture,
             measurement.request_id,
             format_duration(measurement.phases.early),
             format_duration(measurement.phases.normal_discard),
+            format_normal_discard_phases(&measurement.phases.normal_discard_phases),
             format_duration(measurement.phases.post_discard),
             action_label(&measurement.selected_action),
         ));
@@ -193,6 +194,16 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
 
 fn format_duration(duration: Duration) -> String {
     format!("{:.3} ms", duration.as_secs_f64() * 1_000.0)
+}
+
+// normal discard の内訳は同じ request の normal_discard に括弧で添える。phase 別の集計は出さない。
+fn format_normal_discard_phases(phases: &NormalDiscardPhaseDurations) -> String {
+    format!(
+        "base={} forward={} finalize={}",
+        format_duration(phases.base_evaluation),
+        format_duration(phases.forward_metrics),
+        format_duration(phases.selection_finalize),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +237,9 @@ pub struct BenchmarkRequestJson {
     pub elapsed_ns: u64,
     pub early_ns: u64,
     pub normal_discard_ns: u64,
+    pub normal_discard_base_ns: u64,
+    pub normal_discard_forward_ns: u64,
+    pub normal_discard_finalize_ns: u64,
     pub post_discard_ns: u64,
     pub selected: String,
 }
@@ -259,6 +273,15 @@ impl BenchmarkJson {
                     elapsed_ns: nanos(measurement.elapsed),
                     early_ns: nanos(measurement.phases.early),
                     normal_discard_ns: nanos(measurement.phases.normal_discard),
+                    normal_discard_base_ns: nanos(
+                        measurement.phases.normal_discard_phases.base_evaluation,
+                    ),
+                    normal_discard_forward_ns: nanos(
+                        measurement.phases.normal_discard_phases.forward_metrics,
+                    ),
+                    normal_discard_finalize_ns: nanos(
+                        measurement.phases.normal_discard_phases.selection_finalize,
+                    ),
                     post_discard_ns: nanos(measurement.phases.post_discard),
                     selected: action_label(&measurement.selected_action),
                 })
@@ -399,7 +422,26 @@ mod tests {
         DecisionPhaseDurations {
             early: Duration::from_millis(early),
             normal_discard: Duration::from_millis(normal_discard),
+            normal_discard_phases: NormalDiscardPhaseDurations::default(),
             post_discard: Duration::from_millis(post_discard),
+        }
+    }
+
+    fn phases_with_normal_discard_breakdown(
+        early: u64,
+        normal_discard: u64,
+        post_discard: u64,
+        base: u64,
+        forward: u64,
+        finalize: u64,
+    ) -> DecisionPhaseDurations {
+        DecisionPhaseDurations {
+            normal_discard_phases: NormalDiscardPhaseDurations {
+                base_evaluation: Duration::from_millis(base),
+                forward_metrics: Duration::from_millis(forward),
+                selection_finalize: Duration::from_millis(finalize),
+            },
+            ..phases(early, normal_discard, post_discard)
         }
     }
 
@@ -643,7 +685,12 @@ mod tests {
     fn report_shows_the_statistics_and_the_slowest_requests() {
         let run = synthetic_run(vec![
             measurement("game-001.jsonl", 1, 10),
-            measurement_with_phases("game-002.jsonl", 2, 2470, phases(1, 2400, 69)),
+            measurement_with_phases(
+                "game-002.jsonl",
+                2,
+                2470,
+                phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2350, 20),
+            ),
         ]);
         let report = format_benchmark(&run);
 
@@ -665,7 +712,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms (base=30.000 ms forward=2350.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -686,7 +733,12 @@ mod tests {
     fn benchmark_json_keeps_the_summary_and_every_request() {
         let run = synthetic_run(vec![
             measurement("game-001.jsonl", 1, 10),
-            measurement_with_phases("game-002.jsonl", 2, 2470, phases(1, 2400, 69)),
+            measurement_with_phases(
+                "game-002.jsonl",
+                2,
+                2470,
+                phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2350, 20),
+            ),
         ]);
         let json = BenchmarkJson::from_run(&run);
 
@@ -711,6 +763,9 @@ mod tests {
                     elapsed_ns: 10_000_000,
                     early_ns: 0,
                     normal_discard_ns: 0,
+                    normal_discard_base_ns: 0,
+                    normal_discard_forward_ns: 0,
+                    normal_discard_finalize_ns: 0,
                     post_discard_ns: 0,
                     selected: "1m".to_string(),
                 },
@@ -721,6 +776,9 @@ mod tests {
                     elapsed_ns: 2_470_000_000,
                     early_ns: 1_000_000,
                     normal_discard_ns: 2_400_000_000,
+                    normal_discard_base_ns: 30_000_000,
+                    normal_discard_forward_ns: 2_350_000_000,
+                    normal_discard_finalize_ns: 20_000_000,
                     post_discard_ns: 69_000_000,
                     selected: "1m".to_string(),
                 },
@@ -797,6 +855,58 @@ mod tests {
         assert!(text.contains("\"normal_discard_ns\""), "{text}");
         assert!(text.contains("\"post_discard_ns\""), "{text}");
         assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn benchmark_json_keeps_the_normal_discard_subphases_of_every_request() {
+        let path = write_requests("json-normal-discard-subphases", &[484]);
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let json = BenchmarkJson::from_run(&run);
+        let json_path = temp_path("json-normal-discard-subphases", "json");
+        write_benchmark_json(&json_path, &run).unwrap();
+        let text = std::fs::read_to_string(&json_path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&json_path);
+
+        let phases = &run.requests[0].phases.normal_discard_phases;
+        let request = &json.requests[0];
+        assert_eq!(request.request_id, 484);
+        assert_eq!(
+            request.normal_discard_base_ns,
+            nanos(phases.base_evaluation)
+        );
+        assert_eq!(
+            request.normal_discard_forward_ns,
+            nanos(phases.forward_metrics)
+        );
+        assert_eq!(
+            request.normal_discard_finalize_ns,
+            nanos(phases.selection_finalize)
+        );
+
+        assert!(text.contains("\"normal_discard_base_ns\""), "{text}");
+        assert!(text.contains("\"normal_discard_forward_ns\""), "{text}");
+        assert!(text.contains("\"normal_discard_finalize_ns\""), "{text}");
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn an_early_return_request_keeps_the_normal_discard_subphases_at_zero() {
+        let observation = fixture_base64(0, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec());
+        let path = write_capture(
+            "early-return-subphases",
+            &[server_record_line(&format!(
+                r#"{{"type":"request_action","request_id":485,"actor":0,"possible_actions":[{{"type":"hora"}},{{"type":"none"}}],"observation":"{observation}"}}"#
+            ))],
+        );
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(run.requests[0].selected_action, LegalAction::Hora);
+        assert_eq!(
+            run.requests[0].phases.normal_discard_phases,
+            NormalDiscardPhaseDurations::default()
+        );
     }
 
     #[test]
