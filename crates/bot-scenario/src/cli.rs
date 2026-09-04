@@ -7,10 +7,12 @@ pub const USAGE: &str = "usage:
                [--seat-wind <WIND>] [--player-id <0..3>] [--oya <0..3>]
                [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
                [--no-history-furiten] [--allow-hora]
-               [--allow-ryukyoku] [--lookahead] [--verbose] [--summary-only]
-  bot-scenario <SCENARIO_JSON> [--lookahead] [--verbose] [--summary-only]
-  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead] [--verbose]
+               [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
                [--summary-only]
+  bot-scenario <SCENARIO_JSON> [--lookahead] [--two-shanten-self-tsumo] [--verbose]
+               [--summary-only]
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
+               [--two-shanten-self-tsumo] [--verbose] [--summary-only]
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
 
   --dora is a backward-compatible alias of --dora-indicator
@@ -19,8 +21,10 @@ pub const USAGE: &str = "usage:
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
+  --two-shanten-self-tsumo adds the expected self-tsumo value of the two-shanten discard
+  candidates; it implies --lookahead and searches deeper than any other diagnostic
   --summary-only prints the Summary section only, and cannot be combined with
-  --lookahead or --verbose
+  --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
   production agent decision only; it takes all following capture paths and cannot be
   combined with the other scenario or diagnostic options";
@@ -93,6 +97,9 @@ pub struct CliArgs {
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
     pub lookahead: bool,
+    /// 2向聴候補の ExpectedSelfTsumoValue を構築して表示するかどうか。2手先診断よりさらに重い
+    /// 探索なので既定では行わない。指定した場合は2手先診断も構築する。
+    pub two_shanten_self_tsumo: bool,
     /// Summary だけを表示するかどうか。判断は同じで、表示する section だけが変わる。
     pub summary_only: bool,
 }
@@ -109,6 +116,7 @@ impl CliArgs {
         let mut inline_options = false;
         let mut verbose = false;
         let mut lookahead = false;
+        let mut two_shanten_self_tsumo = false;
         let mut summary_only = false;
         let mut capture: Option<String> = None;
         let mut request_id: Option<u64> = None;
@@ -197,6 +205,7 @@ impl CliArgs {
                     );
                 }
                 "--lookahead" => lookahead = true,
+                "--two-shanten-self-tsumo" => two_shanten_self_tsumo = true,
                 "--verbose" => verbose = true,
                 "--summary-only" => summary_only = true,
                 other if other.starts_with('-') => {
@@ -225,6 +234,8 @@ impl CliArgs {
                 Some("--request-id".to_string())
             } else if lookahead {
                 Some("--lookahead".to_string())
+            } else if two_shanten_self_tsumo {
+                Some("--two-shanten-self-tsumo".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -243,6 +254,7 @@ impl CliArgs {
                 }),
                 verbose: false,
                 lookahead: false,
+                two_shanten_self_tsumo: false,
                 summary_only: false,
             });
         }
@@ -254,6 +266,11 @@ impl CliArgs {
         if summary_only {
             if lookahead {
                 return Err(CliError::ConflictingSummaryOnly("--lookahead".to_string()));
+            }
+            if two_shanten_self_tsumo {
+                return Err(CliError::ConflictingSummaryOnly(
+                    "--two-shanten-self-tsumo".to_string(),
+                ));
             }
             if verbose {
                 return Err(CliError::ConflictingSummaryOnly("--verbose".to_string()));
@@ -288,7 +305,9 @@ impl CliArgs {
         Ok(Self {
             source,
             verbose,
-            lookahead,
+            // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
+            lookahead: lookahead || two_shanten_self_tsumo,
+            two_shanten_self_tsumo,
             summary_only,
         })
     }
@@ -742,6 +761,35 @@ mod tests {
         assert!(!parse(&["--hand", "123m"]).unwrap().lookahead);
         assert!(parse(&["--hand", "123m", "--lookahead"]).unwrap().lookahead);
         assert!(parse(&["scenario.json", "--lookahead"]).unwrap().lookahead);
+    }
+
+    #[test]
+    fn parses_two_shanten_self_tsumo_flag() {
+        let default = parse(&["--hand", "123m"]).unwrap();
+        assert!(!default.two_shanten_self_tsumo);
+        assert!(!default.lookahead);
+
+        // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
+        let requested = parse(&["--hand", "123m", "--two-shanten-self-tsumo"]).unwrap();
+        assert!(requested.two_shanten_self_tsumo);
+        assert!(requested.lookahead);
+
+        assert!(
+            parse(&["scenario.json", "--two-shanten-self-tsumo"])
+                .unwrap()
+                .two_shanten_self_tsumo
+        );
+        assert_eq!(
+            parse(&[
+                "--hand",
+                "123m",
+                "--summary-only",
+                "--two-shanten-self-tsumo"
+            ]),
+            Err(CliError::ConflictingSummaryOnly(
+                "--two-shanten-self-tsumo".to_string()
+            ))
+        );
     }
 
     #[test]

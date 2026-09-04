@@ -75,6 +75,22 @@ Final decision
 
 `Lookahead` の節の先頭には `self-tsumo continuation` として、その局面で共通の `unknown tiles` (自分から見て未確認の物理牌) と `current future own draws` (現在打牌後に自分へ残っている自摸機会) を表示します。材料が揃わない局面では `not evaluated` です。テンパイへ到達した枝には `tsumo continuation` として、`path probability` (その経路を引く確率) と `terminal tenpai` の内訳 (`mode` / `unknown tiles` / `future own draws` / `winning variants` / `hit probability` / `weighted tsumo payment` / `continuation value`)、およびその経路分の `path continuation value` を表示します。確率は 0〜1 の小数、打点は点数です。
 
+## Two-shanten expected self-tsumo value
+
+`--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に、候補ごとの ExpectedSelfTsumoValue [点] を表示します。節の先頭には `Lookahead` と同じ `self-tsumo continuation` (`unknown tiles` / `current future own draws`) を出し、材料が揃わない局面では `not evaluated`、値を確定できない候補は `unknown` です。
+
+枝は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` で、確率も打点も1向聴の `expected self-tsumo value` と同じ尺度です。diagnostics 専用で打牌選択には接続しておらず、起点の向聴数が違うため1向聴の値と同じ軸としては比較できません。読み方は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue-diagnostics-only) を参照してください。
+
+```text
+Two-shanten expected self-tsumo value
+  self-tsumo continuation
+    unknown tiles: 122
+    current future own draws: 16
+  5m: 125.188
+  8m: 133.548
+  9s: 131.729
+```
+
 ## Tenpai continuation
 
 `--lookahead` は、現在打牌後が聴牌になる候補について `現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌` の枝を表示します。通常表示は候補ごとに `current wait` (現在聴牌の待ちと残枚数) と `continuation branches` (成立した枝の数と残枚数合計) だけで、`--verbose` で枝ごとに `drawn` (非和了ツモの物理牌と残枚数) / `next discard` / `new wait` / `mode` / `prospective value` を出します。待ちが変わる枝と、ツモ切りで元の待ちを維持する枝の両方を含みます。

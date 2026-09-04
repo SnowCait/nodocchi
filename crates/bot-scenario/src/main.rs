@@ -56,11 +56,13 @@ where
     };
 
     // same-shanten の枝をテンパイまで追う探索は2手先評価よりさらに重いため、枝の詳細を出す
-    // --verbose と組み合わせた場合だけ構築する。診断の範囲は選択結果を変えない。
-    let options = match (args.lookahead, args.verbose) {
-        (false, _) => DiagnosticOptions::NONE,
-        (true, false) => DiagnosticOptions::WITH_LOOKAHEAD,
-        (true, true) => DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
+    // --verbose と組み合わせた場合だけ構築する。2向聴候補の ExpectedSelfTsumoValue はさらに
+    // 重いので、明示的に要求された場合だけ構築する。診断の範囲は選択結果を変えない。
+    let options = match (args.lookahead, args.two_shanten_self_tsumo, args.verbose) {
+        (false, _, _) => DiagnosticOptions::NONE,
+        (true, true, _) => DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+        (true, false, false) => DiagnosticOptions::WITH_LOOKAHEAD,
+        (true, false, true) => DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
     };
     let diagnostic =
         ShantenAgent::diagnose_with_options(&scenario.context, &scenario.legal_actions, options);

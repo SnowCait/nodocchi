@@ -27,6 +27,7 @@ cargo run -p bot-scenario -- \
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
+| `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -65,6 +66,16 @@ cargo run -p bot-scenario -- \
   --hand "340678m789p34789s" \
   --remaining-tiles 70 \
   --lookahead --verbose
+```
+
+`--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に `Two-shanten expected self-tsumo value` を追加します。1向聴の `ExpectedSelfTsumoValue` と同じ尺度で2向聴候補を並べる diagnostics 専用の値で、打牌選択には接続していません。探索は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` まで進むため、他のどの診断よりも重くなります。残り自摸機会が要るので `--remaining-tiles` と併用してください。詳細は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue-diagnostics-only) を参照してください。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "11258m234789p13s" \
+  --draw "9s" \
+  --remaining-tiles 66 \
+  --two-shanten-self-tsumo
 ```
 
 ### --allow-ryukyoku

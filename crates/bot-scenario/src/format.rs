@@ -25,6 +25,7 @@ use bot_logic::{
     EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
     PermanentFuriten, SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath, Shanten,
     TSUMO_PROBABILITY_SCALE, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
+    TwoShantenSelfTsumoDiagnostic,
 };
 
 use crate::scenario::Scenario;
@@ -66,6 +67,13 @@ pub fn format_diagnostic(
         diagnostic.normal_discard_lookahead_value.as_ref(),
         diagnostic.normal_discard_self_tsumo_facts,
         verbose,
+    ) {
+        sections.push(section);
+    }
+
+    if let Some(section) = format_two_shanten_self_tsumo(
+        diagnostic.normal_discard_two_shanten_self_tsumo.as_ref(),
+        diagnostic.normal_discard_self_tsumo_facts,
     ) {
         sections.push(section);
     }
@@ -746,6 +754,29 @@ fn format_discarded_waits(tenpai: &TenpaiWaitAvailability) -> String {
         PermanentFuriten::Unknown => ABSENT.to_string(),
         _ => format_tile_types(tenpai.discarded_waits()),
     }
+}
+
+// 2向聴の打牌候補を、1向聴と同じ self-tsumo 尺度で並べた表示。打牌選択には一切使われない
+// 解析専用の情報で、探索も集計も既存 lookahead 基盤そのもの。
+fn format_two_shanten_self_tsumo(
+    diagnostic: Option<&TwoShantenSelfTsumoDiagnostic>,
+    facts: Option<SelfTsumoFacts>,
+) -> Option<String> {
+    let diagnostic = diagnostic?;
+    if diagnostic.candidates.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec!["Two-shanten expected self-tsumo value".to_string()];
+    lines.extend(format_self_tsumo_facts(facts));
+    for candidate in &diagnostic.candidates {
+        lines.push(format!(
+            "  {}: {}",
+            candidate.discard.to_mjai_string(),
+            format_self_tsumo_value(candidate.expected_self_tsumo_value)
+        ));
+    }
+    Some(lines.join("\n"))
 }
 
 // 2手先診断 (lookahead) の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、
@@ -3108,7 +3139,9 @@ mod tests {
         OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
         RonRiskEvidence, TenpaiOffenseMode,
     };
-    use bot_logic::{TileCounts, calculate_acceptance_with_visible_tiles};
+    use bot_logic::{
+        TileCounts, TwoShantenSelfTsumoCandidate, calculate_acceptance_with_visible_tiles,
+    };
     use std::sync::LazyLock;
 
     fn scenario_from_json(json: &str) -> Scenario {
@@ -6896,6 +6929,113 @@ mod tests {
         let (_, diagnostic, output) = rendered(DEFENSE_SCENARIO, false);
         assert!(diagnostic.reach.is_none());
         assert_eq!(section(&output, "Reach"), "Reach\n  not evaluated");
+    }
+
+    // ---- Two-shanten expected self-tsumo value 表示 ----
+
+    // 3副露済みの concealed 5枚 1m 5p 9s 白 發。どの牌を切っても2向聴のままになる小さい局面で、
+    // 節の構造だけを確認する。山の残枚数を渡していないので、値は unknown になる。
+    const TWO_SHANTEN_SCENARIO: &str = r#"{
+        "hand": "1m5p9s5z",
+        "draw": "6z",
+        "round_wind": "E",
+        "seat_wind": "N",
+        "player_id": 0,
+        "discards": ["", "E S W", "", ""],
+        "melds": [
+            [
+                {"kind": "pon", "tiles": "E E E", "called_tile": "E"},
+                {"kind": "pon", "tiles": "S S S", "called_tile": "S"},
+                {"kind": "pon", "tiles": "W W W", "called_tile": "W"}
+            ],
+            [],
+            [],
+            []
+        ],
+        "history_furiten": {"same_turn": false, "riichi_missed_win": false}
+    }"#;
+
+    fn rendered_with_two_shanten_self_tsumo(json: &str) -> String {
+        let scenario = scenario_from_json(json);
+        let diagnostic = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+        );
+        format_diagnostic(&scenario, &diagnostic, false)
+    }
+
+    #[test]
+    fn the_two_shanten_self_tsumo_section_is_absent_without_the_option() {
+        let output = rendered_with_lookahead(TWO_SHANTEN_SCENARIO, true);
+        assert!(
+            !output.contains("Two-shanten expected self-tsumo value"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_self_tsumo_section_lists_every_two_shanten_candidate() {
+        let output = rendered_with_two_shanten_self_tsumo(TWO_SHANTEN_SCENARIO);
+        let two_shanten = section(&output, "Two-shanten expected self-tsumo value");
+
+        // 材料が揃わない局面なので、値は 0 点で補完せず unknown のままになる。
+        for tile in ["1m", "5p", "9s", "P", "F"] {
+            assert!(
+                two_shanten.contains(&format!("\n  {tile}: {UNKNOWN}")),
+                "{two_shanten}"
+            );
+        }
+        assert!(
+            two_shanten.contains(&format!("  self-tsumo continuation: {NOT_EVALUATED}")),
+            "{two_shanten}"
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_self_tsumo_section_shows_the_value_of_each_candidate() {
+        // 表示は診断が持つ値をそのまま点数表記へ直すだけで、確定しない候補と区別する。
+        let facts = SelfTsumoFacts {
+            unknown_tiles: 122,
+            own_future_draws: 16,
+        };
+        let diagnostic = TwoShantenSelfTsumoDiagnostic {
+            candidates: vec![
+                TwoShantenSelfTsumoCandidate {
+                    discard: TileType::from_mjai_type_str("5m").unwrap(),
+                    expected_self_tsumo_value: Some(125_188_000),
+                },
+                TwoShantenSelfTsumoCandidate {
+                    discard: TileType::from_mjai_type_str("8m").unwrap(),
+                    expected_self_tsumo_value: None,
+                },
+            ],
+        };
+
+        assert_eq!(
+            format_two_shanten_self_tsumo(Some(&diagnostic), Some(facts)),
+            Some(
+                [
+                    "Two-shanten expected self-tsumo value",
+                    "  self-tsumo continuation",
+                    "    unknown tiles: 122",
+                    "    current future own draws: 16",
+                    "  5m: 125.188",
+                    &format!("  8m: {UNKNOWN}"),
+                ]
+                .join("\n")
+            )
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_self_tsumo_section_is_absent_without_a_two_shanten_candidate() {
+        // 比較できる候補が無い診断では節そのものを出さない。
+        assert_eq!(
+            format_two_shanten_self_tsumo(Some(&TwoShantenSelfTsumoDiagnostic::default()), None),
+            None
+        );
+        assert_eq!(format_two_shanten_self_tsumo(None, None), None);
     }
 
     // ---- Lookahead (2手先診断) 表示 ----

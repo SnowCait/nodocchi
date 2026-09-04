@@ -27,7 +27,7 @@ use crate::threat::{
 };
 use bot_logic::{
     DiscardDecisionDiagnostic, DiscardFuritenDiagnostic, FixedMeldCount, LookaheadDiagnostic,
-    SelfTsumoFacts, TenpaiCompletedHands,
+    SelfTsumoFacts, TenpaiCompletedHands, TwoShantenSelfTsumoDiagnostic,
 };
 
 #[cfg(test)]
@@ -111,6 +111,16 @@ pub struct ShantenDecisionDiagnostic {
     /// この診断のために2手先評価を再実行しない。打牌選択・Reach / Damaten・production Reach
     /// timing のどれにも接続しない。
     pub normal_discard_current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
+    /// 現在打牌後が2向聴の候補を、1向聴と同じ self-tsumo 尺度へ揃えた ExpectedSelfTsumoValue。
+    /// 打牌候補集合の最善向聴数が2向聴で、かつ2向聴診断を要求した場合だけ持つ。
+    ///
+    /// 枝は「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation」で、
+    /// 向聴・受け入れ・打牌比較・将来打点・確率はどれも既存 layer そのまま。
+    ///
+    /// 現時点では diagnostics 専用で、打牌選択・押し引き・リーチ判断のどれにも接続していない。
+    /// 1向聴候補の `expected_self_tsumo_value` とは起点の向聴数が違うため、同じ軸として混ぜない。
+    /// 構築の有無は選択結果を変えない。
+    pub normal_discard_two_shanten_self_tsumo: Option<TwoShantenSelfTsumoDiagnostic>,
     /// 通常打牌評価で self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。詳細な2手先診断を構築した
@@ -217,6 +227,14 @@ pub struct DiagnosticOptions {
     /// が無効なら何も構築しない。打牌選択にも押し引きにも使わない観測値なので、有効にしても
     /// 選択結果は変わらない。
     pub same_shanten_downstream: bool,
+    /// 現在打牌後が2向聴の候補の ExpectedSelfTsumoValue
+    /// ([`ShantenDecisionDiagnostic::normal_discard_two_shanten_self_tsumo`]) を構築するかどうか。
+    ///
+    /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation」まで
+    /// 探索するため、`same_shanten_downstream` よりさらに重い。対象は打牌候補集合の最善向聴数が
+    /// 2向聴の場合だけで、`lookahead` が無効なら何も構築しない。打牌選択にも押し引きにも
+    /// 使わない観測値なので、有効にしても選択結果は変わらない。
+    pub two_shanten_self_tsumo: bool,
 }
 
 impl DiagnosticOptions {
@@ -224,23 +242,37 @@ impl DiagnosticOptions {
     pub const NONE: Self = Self {
         lookahead: false,
         same_shanten_downstream: false,
+        two_shanten_self_tsumo: false,
     };
     /// 2手先診断まで構築する。
     pub const WITH_LOOKAHEAD: Self = Self {
         lookahead: true,
         same_shanten_downstream: false,
+        two_shanten_self_tsumo: false,
     };
     /// 2手先診断に加えて、same-shanten の枝をテンパイまで追う。
     pub const WITH_SAME_SHANTEN_DOWNSTREAM: Self = Self {
         lookahead: true,
         same_shanten_downstream: true,
+        two_shanten_self_tsumo: false,
+    };
+    /// さらに、2向聴候補の ExpectedSelfTsumoValue も求める。
+    pub const WITH_TWO_SHANTEN_SELF_TSUMO: Self = Self {
+        lookahead: true,
+        same_shanten_downstream: true,
+        two_shanten_self_tsumo: true,
     };
 
     pub(crate) fn lookahead_scope(self) -> LookaheadDiagnosticScope {
-        match (self.lookahead, self.same_shanten_downstream) {
-            (false, _) => LookaheadDiagnosticScope::None,
-            (true, false) => LookaheadDiagnosticScope::Lookahead,
-            (true, true) => LookaheadDiagnosticScope::SameShantenDownstream,
+        match (
+            self.lookahead,
+            self.same_shanten_downstream,
+            self.two_shanten_self_tsumo,
+        ) {
+            (false, _, _) => LookaheadDiagnosticScope::None,
+            (true, false, false) => LookaheadDiagnosticScope::Lookahead,
+            (true, _, true) => LookaheadDiagnosticScope::TwoShantenSelfTsumo,
+            (true, true, false) => LookaheadDiagnosticScope::SameShantenDownstream,
         }
     }
 }
@@ -283,6 +315,7 @@ pub(crate) struct DecisionDiagnostics {
     normal_discard_lookahead_value: Option<ProspectiveLookaheadDiagnostic>,
     normal_discard_tenpai_continuation: Option<TenpaiContinuationDiagnostic>,
     normal_discard_current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
+    normal_discard_two_shanten_self_tsumo: Option<TwoShantenSelfTsumoDiagnostic>,
     normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
     pub(crate) reach_damaten_comparison: Option<ReachDamatenComparisonDiagnostic>,
     pub(crate) defense: Option<DefenseDecisionDiagnostic>,
@@ -326,6 +359,7 @@ impl DecisionDiagnostics {
         self.normal_discard_lookahead_value = selection.lookahead_value;
         self.normal_discard_tenpai_continuation = selection.tenpai_continuation;
         self.normal_discard_current_tenpai_continuation = selection.current_tenpai_continuation;
+        self.normal_discard_two_shanten_self_tsumo = selection.two_shanten_self_tsumo;
         self.normal_discard_self_tsumo_facts = selection.self_tsumo_facts;
         selection.selection
     }
@@ -467,6 +501,7 @@ impl DecisionDiagnostics {
             normal_discard_tenpai_continuation: self.normal_discard_tenpai_continuation,
             normal_discard_current_tenpai_continuation: self
                 .normal_discard_current_tenpai_continuation,
+            normal_discard_two_shanten_self_tsumo: self.normal_discard_two_shanten_self_tsumo,
             normal_discard_self_tsumo_facts: self.normal_discard_self_tsumo_facts,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,

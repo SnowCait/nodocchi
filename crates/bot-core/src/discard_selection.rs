@@ -30,9 +30,10 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    best_discard_selection_index, best_discard_selection_index_with_forward_metrics,
-    best_discard_selection_index_with_metrics, current_tenpai_continuation_targets,
-    diagnose_discard_evaluations_with_metrics, diagnose_discard_furiten, diagnose_lookahead,
+    TwoShantenSelfTsumoDiagnostic, best_discard_selection_index,
+    best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
+    current_tenpai_continuation_targets, diagnose_discard_evaluations_with_metrics,
+    diagnose_discard_furiten, diagnose_lookahead, diagnose_two_shanten_self_tsumo,
     discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
@@ -96,6 +97,12 @@ pub(crate) enum LookaheadDiagnosticScope {
     /// 「same-shanten ツモ → 2手目 → 受け入れのツモ → 3手目 → テンパイ」まで探索するため
     /// [`Self::Lookahead`] よりさらに重い。打牌選択にも押し引きにも使わない観測値。
     SameShantenDownstream,
+    /// [`Self::SameShantenDownstream`] に加えて、現在打牌後が2向聴の候補の
+    /// ExpectedSelfTsumoValue も求める。
+    ///
+    /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存 continuation」まで探索する
+    /// ため、この中で最も重い。打牌選択にも押し引きにも使わない観測値。
+    TwoShantenSelfTsumo,
 }
 
 impl LookaheadDiagnosticScope {
@@ -104,7 +111,14 @@ impl LookaheadDiagnosticScope {
     }
 
     fn builds_same_shanten_downstream(self) -> bool {
-        matches!(self, Self::SameShantenDownstream)
+        matches!(
+            self,
+            Self::SameShantenDownstream | Self::TwoShantenSelfTsumo
+        )
+    }
+
+    fn builds_two_shanten_self_tsumo(self) -> bool {
+        matches!(self, Self::TwoShantenSelfTsumo)
     }
 }
 
@@ -147,6 +161,11 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
     /// 打牌選択にもリーチ判断にもリーチ timing にも使わない解析専用の情報で、選択結果を
     /// 変えない。
     pub current_tenpai_continuation: Option<CurrentTenpaiContinuationDiagnostic>,
+    /// 現在打牌後が2向聴の候補の ExpectedSelfTsumoValue。要求された場合だけ構築する。
+    ///
+    /// 探索は `lookahead` よりさらに深く、既存の2手先評価と同じ helper だけを通る。打牌選択にも
+    /// 押し引きにもリーチ判断にも使わない解析専用の情報で、構築の有無は選択結果を変えない。
+    pub two_shanten_self_tsumo: Option<TwoShantenSelfTsumoDiagnostic>,
     /// self-tsumo continuation の集計に使った事実。材料が揃わない局面では `None`。
     ///
     /// 選択が実際に使った値そのもので、診断のために求め直さない。
@@ -351,6 +370,12 @@ pub(crate) fn select_discard_action_with_diagnostic(
         })
     });
 
+    // 2向聴候補の ExpectedSelfTsumoValue も同じ2手先評価の入力をそのまま使う。枝の探索も打牌
+    // 比較も将来打点も既存 helper が持ち、この診断のために別の評価器を作らない。
+    let two_shanten_self_tsumo = scope
+        .builds_two_shanten_self_tsumo()
+        .then(|| diagnose_two_shanten_self_tsumo(&inputs, &legal.evaluations));
+
     DiscardActionSelectionWithDiagnostic {
         selection: selection_from_legal_evaluations(
             context,
@@ -365,6 +390,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         lookahead_value,
         tenpai_continuation,
         current_tenpai_continuation,
+        two_shanten_self_tsumo,
         self_tsumo_facts: inputs.self_tsumo_facts(),
     }
 }
