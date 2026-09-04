@@ -91,6 +91,15 @@
 //! 選択専用経路と詳細診断がどちらも同じ枝集合を進めるため、詳細診断の有無で打牌選択の結果は
 //! 変わらない。
 //!
+//! # 探索 node 間の base 打牌評価
+//!
+//! 既存打牌評価 ([`evaluate_discards_with_seen`]) は打牌前の手牌・副露済み面子数・見え牌だけで
+//! 決まる。したがって、この3つが一致する探索 node は同じ base 評価になり、1回の探索の間だけ
+//! 結果を共有する。共有するのは3つとも一致する場合だけで、1手目に切った牌が違えば見え牌も
+//! 違うため別の評価になる。物理牌・ドラ・赤5・場風 / 自風は base 評価の入力ではなく、node
+//! ごとに [`decorate_evaluations`] が反映するため、共有しても枝ごとの文脈は失われない。
+//! 探索する枝も比較も集計も変わらない。
+//!
 //! # 2向聴から1向聴へ進む枝
 //!
 //! 次の自摸を待つ2向聴 state については、
@@ -124,6 +133,8 @@ use crate::self_tsumo::{SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{PhysicalTileVariant, TileId, TileType, physical_tile_variants, seen_red_fives};
 use crate::tile_counts::TileCounts;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// same-shanten の枝をテンパイまで追う対象の向聴数。
 const IISHANTEN_SHANTEN: i8 = TENPAI_SHANTEN + 1;
@@ -460,7 +471,16 @@ pub struct LookaheadInputs<'a> {
     same_shanten_downstream: bool,
     // 1手目の打牌前の手牌。深い枝の状態と同じ型で持ち、段ごとに別の組み立てをしない。
     root: HandState,
+    // この探索で評価済みの base 打牌評価。
+    base_evaluations: RefCell<HashMap<BaseEvaluationKey, Vec<DiscardEvaluation>>>,
 }
+
+/// base 打牌評価 ([`evaluate_discards_with_seen`]) の入力そのもの。
+///
+/// 打牌候補の列挙・向聴・受け入れ・一向聴形分類・形ペナルティはこの3つだけで決まるため、同じ
+/// 入力の探索 node は同じ base 評価になる。物理牌・ドラ・場風 / 自風は入力に含まれず、node
+/// ごとに [`decorate_evaluations`] が反映する。
+type BaseEvaluationKey = (TileCounts, FixedMeldCount, CandidateSeen);
 
 impl<'a> LookaheadInputs<'a> {
     pub fn new(
@@ -486,6 +506,7 @@ impl<'a> LookaheadInputs<'a> {
                 red_five_seen: seen_red_fives(tiles.iter().copied()),
                 discarded: Vec::new(),
             },
+            base_evaluations: RefCell::new(HashMap::new()),
         }
     }
 
@@ -559,6 +580,29 @@ impl<'a> LookaheadInputs<'a> {
     pub fn with_same_shanten_downstream(mut self) -> Self {
         self.same_shanten_downstream = true;
         self
+    }
+
+    // 仮想手牌1つ分の base 打牌評価。物理牌・ドラ・場風 / 自風を反映する前の値を返す。
+    //
+    // [`evaluate_discards_with_seen`] は counts・副露済み面子数・見え牌だけで決まるため、探索
+    // 中に同じ入力の node が現れたらこの探索の間だけ結果を共有する。共有するのは3つとも一致
+    // する場合だけで、見え牌や副露済み面子数が違う node は別の評価になる。物理牌・ドラ・赤5の
+    // 違いは呼び出し側が node ごとに [`decorate_evaluations`] で反映する。
+    fn base_evaluations(
+        &self,
+        counts: &TileCounts,
+        seen: &CandidateSeen,
+    ) -> Vec<DiscardEvaluation> {
+        let key = (*counts, self.fixed_meld_count, *seen);
+        if let Some(cached) = self.base_evaluations.borrow().get(&key) {
+            return cached.clone();
+        }
+
+        let evaluations = evaluate_discards_with_seen(counts, self.fixed_meld_count, seen);
+        self.base_evaluations
+            .borrow_mut()
+            .insert(key, evaluations.clone());
+        evaluations
     }
 }
 
@@ -1330,8 +1374,7 @@ fn drawable(tile: &EffectiveAcceptanceTile) -> DrawableTile {
 // 決まっているため、赤5も通常打牌評価と同じ経路で反映できる。テンパイへ進む候補には将来打点を
 // 付け、比較の打点軸へ渡す。
 fn next_discard(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
-    let mut evaluations =
-        evaluate_discards_with_seen(&state.counts, inputs.fixed_meld_count, &state.seen);
+    let mut evaluations = inputs.base_evaluations(&state.counts, &state.seen);
     decorate_evaluations(
         &mut evaluations,
         &state.counts,
@@ -4206,5 +4249,229 @@ mod tests {
             forward_metrics(&inputs(&case.situation), evaluations)
         );
         assert_eq!(diagnose_lookahead(&with_facts, evaluations), case.lookahead);
+    }
+
+    // ---- 探索 node 間の base 打牌評価 ----
+
+    // 探索が仮想手牌を評価した回数。物理牌 variant ごと、その先の枝の分まで数える。
+    fn evaluated_hand_count(lookahead: &LookaheadDiagnostic) -> usize {
+        fn count(branch: &[DrawLookaheadDiagnostic]) -> usize {
+            branch
+                .iter()
+                .flat_map(|draw| draw.variants.iter())
+                .map(|variant| {
+                    usize::from(variant.next_discard.is_some())
+                        + variant
+                            .downstream
+                            .as_ref()
+                            .map(|downstream| count(&downstream.draws))
+                            .unwrap_or(0)
+                })
+                .sum()
+        }
+
+        lookahead
+            .candidates
+            .iter()
+            .map(|candidate| count(&candidate.draws))
+            .sum()
+    }
+
+    #[test]
+    fn sibling_nodes_share_a_base_evaluation_that_matches_a_fresh_one() {
+        // 同じ入力の探索 node が共有する base 評価は、その入力から作り直した評価と一致する。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+        let inputs = inputs(&case.situation);
+        let lookahead = diagnose_lookahead(&inputs, &case.situation.evaluations);
+        assert_eq!(lookahead, case.lookahead);
+
+        let shared = inputs.base_evaluations.borrow();
+        assert!(!shared.is_empty());
+        for ((counts, fixed_meld_count, seen), evaluations) in shared.iter() {
+            assert_eq!(
+                &evaluate_discards_with_seen(counts, *fixed_meld_count, seen),
+                evaluations,
+            );
+        }
+
+        // 評価した仮想手牌より base 評価の数のほうが少ない = 同じ入力の node を共有している。
+        assert!(shared.len() < evaluated_hand_count(&lookahead));
+    }
+
+    #[test]
+    fn nodes_with_the_same_hand_but_different_seen_are_evaluated_separately() {
+        // 1手目に切った牌は2手目の見え牌なので、仮想手牌が同じでも見え牌が違えば別の評価になる。
+        let case = &*TWO_SHANTEN_RED_FIVE_CASE;
+
+        let mut by_hand: HashMap<TileCounts, Vec<&DiscardEvaluation>> = HashMap::new();
+        for (discard, _, variant) in variants(&case.lookahead) {
+            let Some(next) = variant.next_discard.as_ref() else {
+                continue;
+            };
+            // 枝ごとの評価が、その枝だけを既存 API で評価し直した結果と一致する。
+            assert_eq!(
+                Some(next.clone()),
+                expected_next_discard(&case.situation, discard, variant.drawn_tile),
+                "discard {:?} draw {:?}",
+                discard,
+                variant.drawn_tile,
+            );
+            let tiles = hypothetical_tiles(&case.situation, discard, variant.drawn_tile);
+            by_hand
+                .entry(TileCounts::from_tiles(tiles.iter().copied()))
+                .or_default()
+                .push(next);
+        }
+
+        // 仮想手牌が同じでも受け入れの残枚数が違う枝がある = 見え牌を無視して共有していない。
+        let differing = by_hand
+            .values()
+            .filter(|group| {
+                group
+                    .iter()
+                    .any(|next| next.acceptance_after_discard != group[0].acceptance_after_discard)
+            })
+            .count();
+        assert!(
+            differing > 0,
+            "同じ仮想手牌へ複数の1手目から到達する局面が必要"
+        );
+    }
+
+    #[test]
+    fn red_and_black_variants_keep_their_own_decoration() {
+        // 赤5 / 黒5は base 評価の入力が同じでも、物理牌に依存する文脈は枝ごとに反映する。
+        let case = &*CONCEALED_WITH_VISIBLE;
+
+        let mut split = 0;
+        let mut decorated_apart = 0;
+        for candidate in &case.lookahead.candidates {
+            for draw in &candidate.draws {
+                let [red, black] = draw.variants.as_slice() else {
+                    continue;
+                };
+                split += 1;
+
+                for variant in [red, black] {
+                    // 枝ごとの評価が、その枝だけを既存 API で評価し直した結果と一致する。
+                    assert_eq!(
+                        variant.next_discard,
+                        expected_next_discard(
+                            &case.situation,
+                            candidate.discard,
+                            variant.drawn_tile
+                        ),
+                        "discard {:?} draw {:?} variant {:?}",
+                        candidate.discard,
+                        draw.draw,
+                        variant.drawn_tile,
+                    );
+                }
+
+                let (Some(red_next), Some(black_next)) =
+                    (red.next_discard.as_ref(), black.next_discard.as_ref())
+                else {
+                    continue;
+                };
+                if red_next.discard == black_next.discard {
+                    // 同じ牌種を切る枝は base 評価も同じで、違い得るのは文脈だけ。
+                    assert_eq!(
+                        red_next.shanten_after_discard,
+                        black_next.shanten_after_discard,
+                    );
+                    assert_eq!(
+                        red_next.acceptance_after_discard,
+                        black_next.acceptance_after_discard,
+                    );
+                }
+                if (red_next.discards_red_five, red_next.discarded_dora_count)
+                    != (
+                        black_next.discards_red_five,
+                        black_next.discarded_dora_count,
+                    )
+                {
+                    decorated_apart += 1;
+                }
+            }
+        }
+
+        assert!(split > 0, "赤5 / 黒5へ分かれる枝がある局面が必要");
+        assert!(
+            decorated_apart > 0,
+            "赤5 / 黒5で decoration が変わる枝がある局面が必要"
+        );
+    }
+
+    #[test]
+    fn a_reused_evaluation_keeps_the_forward_metrics_and_the_selection() {
+        // 同じ探索を2回通しても、集計値も選ぶ打牌も変わらない。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluations = &case.situation.evaluations;
+
+        let cold = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let cold_metrics = forward_metrics(&cold, evaluations);
+
+        let warm = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let first = forward_metrics(&warm, evaluations);
+        let second = forward_metrics(&warm, evaluations);
+
+        assert_eq!(first, cold_metrics);
+        assert_eq!(second, cold_metrics);
+        assert!(
+            cold_metrics
+                .iter()
+                .any(|metric| *metric != ForwardMetrics::default())
+        );
+
+        let selected =
+            best_discard_selection_index_with_forward_metrics(evaluations, &cold_metrics);
+        assert_eq!(
+            selected,
+            best_discard_selection_index_with_forward_metrics(evaluations, &second),
+        );
+        assert!(selected.is_some());
+    }
+
+    #[test]
+    fn visible_tiles_and_fixed_melds_are_evaluated_separately() {
+        // 見え牌も副露済み面子数も base 評価の入力なので、違えば別の評価になる。
+        let hand = concealed_hand();
+        let mut visible = hand.clone();
+        visible.extend(public_visible_tiles());
+
+        let hand_only = hand_only_situation(&hand, FixedMeldCount::NONE, Vec::new(), None, None);
+        let with_visible = visible_situation(
+            &hand,
+            FixedMeldCount::NONE,
+            Vec::new(),
+            None,
+            None,
+            visible.clone(),
+        );
+        assert_ne!(
+            diagnose(&hand_only, &hand_only.evaluations),
+            diagnose(&with_visible, &with_visible.evaluations),
+        );
+
+        let melded = visible_situation(
+            &melded_hand(),
+            fixed(2),
+            Vec::new(),
+            None,
+            None,
+            melded_hand(),
+        );
+        let more_melds = visible_situation(
+            &melded_hand(),
+            fixed(3),
+            Vec::new(),
+            None,
+            None,
+            melded_hand(),
+        );
+        assert_ne!(
+            diagnose(&melded, &melded.evaluations),
+            diagnose(&more_melds, &more_melds.evaluations),
+        );
     }
 }
