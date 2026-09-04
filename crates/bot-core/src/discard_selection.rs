@@ -5,7 +5,9 @@ use crate::current_tenpai_continuation::{
     diagnose_current_tenpai_continuation,
 };
 use crate::damaten_value::tenpai_completed_hands_after_discard;
-use crate::decision_timing::{NormalDiscardPhase, NormalDiscardPhaseTimer};
+use crate::decision_timing::{
+    ForwardMetricsPhaseTimer, NormalDiscardPhase, NormalDiscardPhaseTimer,
+};
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
     evaluate_tenpai_offense_with_hands,
@@ -34,7 +36,7 @@ use bot_logic::{
     discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
-    split_discarded_tile, tsumo_hit_probability,
+    forward_metrics_instrumented, split_discarded_tile, tsumo_hit_probability,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -232,7 +234,14 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
     let legal = legal_discard_evaluations(context, legal_actions);
 
     timing.enter(NormalDiscardPhase::ForwardMetrics);
-    let tenpai_wait = selection_forward_metrics(context, &legal.tiles, &legal.evaluations);
+    let mut forward_timing = timing.forward_metrics_timer();
+    let tenpai_wait = selection_forward_metrics_instrumented(
+        context,
+        &legal.tiles,
+        &legal.evaluations,
+        &mut forward_timing,
+    );
+    timing.record_forward_metrics_phases(forward_timing.finish());
 
     timing.enter(NormalDiscardPhase::SelectionFinalize);
     let current_tenpai = current_tenpai_candidate_evaluations(
@@ -771,10 +780,30 @@ fn selection_forward_metrics(
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
 ) -> SelectionForwardMetrics {
+    selection_forward_metrics_instrumented(
+        context,
+        tiles,
+        evaluations,
+        &mut ForwardMetricsPhaseTimer::disabled(),
+    )
+}
+
+// `selection_forward_metrics()` と同じ集計を、内部処理別の optional な計測付きで行う。
+//
+// `timing` は無効な場合に何もせず、有効な場合も通った区切りの経過時間をその場で計上するだけ。
+// 枝の探索も集計も1回ずつのままで、計測のために前方評価を再実行しない。集計結果は計測の有無で
+// 変わらない。
+fn selection_forward_metrics_instrumented(
+    context: &GameContext,
+    tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+    timing: &mut ForwardMetricsPhaseTimer,
+) -> SelectionForwardMetrics {
     let valuator = ProductionProspectiveValuator::new(context);
-    forward_metrics(
+    forward_metrics_instrumented(
         &lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None),
         evaluations,
+        timing,
     )
 }
 
@@ -1362,6 +1391,7 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 pub(crate) mod tests {
     use super::*;
     use crate::context::TableStateFacts;
+    use crate::decision_timing::ForwardMetricsPhaseDurations;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
     use crate::shanten_test_support::{tenpai_actions, tenpai_context};
@@ -1430,12 +1460,70 @@ pub(crate) mod tests {
 
         for stage in [
             "legal_discard_evaluations(",
-            "selection_forward_metrics(",
+            "selection_forward_metrics_instrumented(",
             "current_tenpai_candidate_evaluations(",
             "selection_from_legal_evaluations(",
         ] {
             assert_eq!(instrumented.matches(stage).count(), 1, "{stage}");
         }
+    }
+
+    #[test]
+    fn the_forward_metrics_subphase_timing_does_not_change_the_selection() {
+        // 前方集計値を実際に通る1向聴局面で、計測の有無が選択を変えないことを固定する。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+
+        let mut timing = NormalDiscardPhaseTimer::started();
+        let timed =
+            select_discard_action_with_evaluation_instrumented(&context, &actions, &mut timing);
+        let phases = timing.finish();
+
+        assert_eq!(
+            timed,
+            select_discard_action_with_evaluation(&context, &actions)
+        );
+        // 内訳は前方集計値の実測を分けたものなので、その合計は外側の phase を超えない。
+        assert!(
+            phases.forward_metrics_phases.total() <= phases.forward_metrics,
+            "{phases:?}"
+        );
+    }
+
+    #[test]
+    fn a_selection_without_forward_metrics_keeps_the_forward_subphases_at_zero() {
+        // 前方集計値を計算しないテンパイ局面では、通常打牌選択を通っても内訳は 0 のままになる。
+        let context = tenpai_context(&[]);
+        let legal_actions = tenpai_actions();
+
+        let mut timing = NormalDiscardPhaseTimer::started();
+        select_discard_action_with_evaluation_instrumented(&context, &legal_actions, &mut timing);
+        let phases = timing.finish();
+
+        assert_eq!(
+            phases.forward_metrics_phases,
+            ForwardMetricsPhaseDurations::default()
+        );
+    }
+
+    #[test]
+    fn the_instrumented_forward_metrics_run_the_search_only_once() {
+        // 前方集計値の内訳も既存の集計経路へ区切りを入れるだけで、計測のために枝探索も集計も
+        // 再実行しない。
+        let instrumented = include_str!("discard_selection.rs")
+            .split("fn selection_forward_metrics_instrumented(")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            instrumented
+                .matches("forward_metrics_instrumented(")
+                .count(),
+            1,
+            "{instrumented}"
+        );
     }
 
     #[test]

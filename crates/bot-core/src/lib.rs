@@ -62,7 +62,10 @@ pub use damaten_value::{
     DAMATEN_MIN_TOTAL, DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DamatenWaitValue,
     DamatenWinningTileValue, damaten_baseline_context,
 };
-pub use decision_timing::{DecisionPhaseDurations, NormalDiscardPhaseDurations, TimedAgentAction};
+pub use decision_timing::{
+    DecisionPhaseDurations, ForwardMetricsPhaseDurations, NormalDiscardPhaseDurations,
+    TimedAgentAction,
+};
 pub use defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseCandidateDiagnostic,
     DefenseDecisionDiagnostic, DefenseFallbackDiagnostic, DefenseFallbackKind,
