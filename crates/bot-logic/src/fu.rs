@@ -129,6 +129,10 @@ impl<'a> WinningFuEvaluation<'a> {
     pub fn breakdown(&self) -> Option<&FuBreakdown> {
         self.breakdown.as_ref()
     }
+
+    pub(crate) fn into_breakdown(self) -> Option<FuBreakdown> {
+        self.breakdown
+    }
 }
 
 pub fn evaluate_winning_fu(
