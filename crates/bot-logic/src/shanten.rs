@@ -1,5 +1,8 @@
+use crate::tile::TileType;
 use crate::tile_counts::TileCounts;
 
+#[cfg(test)]
+mod after_draw_differential;
 mod decomposition;
 #[cfg(test)]
 mod differential;
@@ -122,32 +125,153 @@ pub fn standard_shanten_with_fixed_melds(
 }
 
 pub fn chiitoitsu_shanten(counts: &TileCounts) -> i8 {
-    let pairs = counts
-        .iter()
-        .filter(|(_, count)| *count >= 2)
-        .count()
-        .min(7) as i8;
-
-    let unique = counts
-        .iter()
-        .filter(|(_, count)| *count >= 1)
-        .count()
-        .min(7) as i8;
-
-    6 - pairs + (7 - unique)
+    ChiitoitsuTally::of(counts).shanten()
 }
 
 pub fn kokushi_shanten(counts: &TileCounts) -> i8 {
-    let unique_yaochu = counts
-        .iter()
-        .filter(|(tile, count)| tile.is_yaochu() && *count >= 1)
-        .count() as i8;
+    KokushiTally::of(counts).shanten()
+}
 
-    let has_yaochu_pair = counts
-        .iter()
-        .any(|(tile, count)| tile.is_yaochu() && count >= 2);
+/// 七対子向聴数を決める集計。
+///
+/// 対子数も牌種数も牌種ごとの枚数だけで決まるので、1牌加えた後の集計は加える前の枚数から差分で
+/// 導ける。向聴数の式は [`shanten`](Self::shanten) 1本だけが持つ。
+#[derive(Debug, Clone, Copy)]
+struct ChiitoitsuTally {
+    pairs: usize,
+    unique: usize,
+}
 
-    13 - unique_yaochu - i8::from(has_yaochu_pair)
+impl ChiitoitsuTally {
+    fn of(counts: &TileCounts) -> Self {
+        let mut tally = Self {
+            pairs: 0,
+            unique: 0,
+        };
+        for (_, count) in counts.iter() {
+            tally.unique += usize::from(count >= 1);
+            tally.pairs += usize::from(count >= 2);
+        }
+        tally
+    }
+
+    /// 現在 `count` 枚持っている牌種を1枚加えた後の集計。
+    ///
+    /// 0枚なら牌種が1つ増え、1枚なら対子が1つ増える。2枚以上ならどちらも変わらない。
+    fn with_drawn(self, count: u8) -> Self {
+        Self {
+            pairs: self.pairs + usize::from(count == 1),
+            unique: self.unique + usize::from(count == 0),
+        }
+    }
+
+    fn shanten(self) -> i8 {
+        6 - self.pairs.min(7) as i8 + (7 - self.unique.min(7) as i8)
+    }
+}
+
+/// 国士無双向聴数を決める集計。
+///
+/// 幺九牌の種類数も対子の有無も牌種ごとの枚数だけで決まるので、1牌加えた後の集計は加える前の
+/// 枚数から差分で導ける。向聴数の式は [`shanten`](Self::shanten) 1本だけが持つ。
+#[derive(Debug, Clone, Copy)]
+struct KokushiTally {
+    unique_yaochu: i8,
+    has_yaochu_pair: bool,
+}
+
+impl KokushiTally {
+    fn of(counts: &TileCounts) -> Self {
+        let mut tally = Self {
+            unique_yaochu: 0,
+            has_yaochu_pair: false,
+        };
+        for (tile, count) in counts.iter() {
+            if !tile.is_yaochu() {
+                continue;
+            }
+            tally.unique_yaochu += i8::from(count >= 1);
+            tally.has_yaochu_pair |= count >= 2;
+        }
+        tally
+    }
+
+    /// 現在 `count` 枚持っている牌種を1枚加えた後の集計。
+    ///
+    /// 0枚なら幺九牌の種類が1つ増え、1枚以上なら対子ができる。幺九牌以外は何も変わらない。
+    fn with_drawn(self, tile: TileType, count: u8) -> Self {
+        if !tile.is_yaochu() {
+            return self;
+        }
+        Self {
+            unique_yaochu: self.unique_yaochu + i8::from(count == 0),
+            has_yaochu_pair: self.has_yaochu_pair || count >= 1,
+        }
+    }
+
+    fn shanten(self) -> i8 {
+        13 - self.unique_yaochu - i8::from(self.has_yaochu_pair)
+    }
+}
+
+/// 現在の向聴数と、牌種を1枚加えた後の向聴数をまとめた結果。
+///
+/// 受け入れは牌種ごとに「1枚加えると向聴数が下がるか」を見るため、同じ手牌に対して現在の向聴数と
+/// 34牌種分のツモ後向聴数を必ず揃って必要とする。
+pub(crate) struct ShantenWithAfterDraws {
+    pub(crate) current: EffectiveShanten,
+    /// 既に4枚持っていて5枚目が無い牌種は [`None`]。
+    pub(crate) after_draw: [Option<EffectiveShanten>; TileType::COUNT],
+}
+
+/// 現在の向聴数と、牌種を1枚加えた後の向聴数をまとめて求める。
+///
+/// 牌種ごとに [`calculate_shanten_with_fixed_melds`] を呼び直した場合と同じ値を返す。通常形は
+/// 1牌で変わらない3群の畳み込みを、七対子と国士無双は1牌で変わらない集計を、牌種をまたいで
+/// 使い回すだけで、向聴数の規則そのものは変えない。
+pub(crate) fn calculate_shanten_with_after_draws(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+) -> ShantenWithAfterDraws {
+    let mut standard_after_draw = [None; TileType::COUNT];
+    let standard = decomposition::standard_shanten_with_after_draws(
+        counts.as_array(),
+        fixed_meld_count.get(),
+        &mut standard_after_draw,
+    );
+
+    if fixed_meld_count.has_melds() {
+        return ShantenWithAfterDraws {
+            current: EffectiveShanten::Melded { standard },
+            after_draw: standard_after_draw
+                .map(|standard| standard.map(|standard| EffectiveShanten::Melded { standard })),
+        };
+    }
+
+    let chiitoitsu = ChiitoitsuTally::of(counts);
+    let kokushi = KokushiTally::of(counts);
+
+    let mut after_draw = [None; TileType::COUNT];
+    for tile in TileType::all() {
+        let Some(standard) = standard_after_draw[tile.index()] else {
+            continue;
+        };
+        let count = counts.count(tile);
+        after_draw[tile.index()] = Some(EffectiveShanten::Concealed(Shanten {
+            standard,
+            chiitoitsu: chiitoitsu.with_drawn(count).shanten(),
+            kokushi: kokushi.with_drawn(tile, count).shanten(),
+        }));
+    }
+
+    ShantenWithAfterDraws {
+        current: EffectiveShanten::Concealed(Shanten {
+            standard,
+            chiitoitsu: chiitoitsu.shanten(),
+            kokushi: kokushi.shanten(),
+        }),
+        after_draw,
+    }
 }
 
 #[cfg(test)]
