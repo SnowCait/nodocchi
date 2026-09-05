@@ -84,7 +84,7 @@ pub(crate) fn winning_yaku_han_evaluations<'a>(
         .collect()
 }
 
-fn winning_yaku_han<'a>(
+pub(crate) fn winning_yaku_han<'a>(
     evaluation: &WinningYakuEvaluation<'a>,
     menzen: bool,
 ) -> WinningYakuHanEvaluation<'a> {

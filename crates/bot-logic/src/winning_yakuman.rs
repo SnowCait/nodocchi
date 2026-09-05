@@ -5,7 +5,7 @@ use crate::winning_context::WinningContext;
 use crate::winning_tile::{WinningTileInterpretation, interpret_winning_tile};
 use crate::winning_yaku::concealed_set_count;
 use crate::yaku::standard_meld_shapes;
-use crate::yakuman::{Yakuman, evaluate_yakuman};
+use crate::yakuman::{Yakuman, decomposition_yakuman};
 
 const SUUANKOU_CONCEALED_SET_COUNT: usize = 4;
 
@@ -47,6 +47,7 @@ pub fn evaluate_winning_yakuman(
         context,
         &interpret_winning_tile(analysis, winning_tile),
     )
+    .collect()
 }
 
 /// 和了牌の解釈を求めてある場合の [`evaluate_winning_yakuman`]。
@@ -57,30 +58,38 @@ pub(crate) fn winning_yakuman_evaluations<'a>(
     analysis: &'a CompletedHandAnalysis,
     context: WinningContext,
     interpretations: &[WinningTileInterpretation<'a>],
-) -> Vec<WinningYakumanEvaluation<'a>> {
-    let evaluations = evaluate_yakuman(analysis);
+) -> impl Iterator<Item = WinningYakumanEvaluation<'a>> {
+    // 役の評価と同じく、decomposition ごとに base を共有し、最後の解釈へ移す。
     interpretations
-        .iter()
-        .copied()
-        .map(|interpretation| {
-            let mut yakuman = evaluations
-                .iter()
-                .find(|evaluation| evaluation.decomposition() == interpretation.decomposition())
-                .map(|evaluation| evaluation.yakuman().to_vec())
-                .unwrap_or_default();
-            yakuman.extend(winning_tile_yakuman(
+        .chunk_by(|left, right| left.decomposition() == right.decomposition())
+        .flat_map(move |group| {
+            let mut base = decomposition_yakuman(
+                group[0].decomposition(),
                 analysis.fixed_melds(),
-                context,
-                &interpretation,
-            ));
-            yakuman.sort_unstable();
-            yakuman.dedup();
-            WinningYakumanEvaluation {
-                interpretation,
-                yakuman,
-            }
+                analysis.tile_type_counts(),
+            );
+            group
+                .iter()
+                .enumerate()
+                .map(move |(index, &interpretation)| {
+                    let mut yakuman = if index + 1 == group.len() {
+                        std::mem::take(&mut base)
+                    } else {
+                        base.clone()
+                    };
+                    yakuman.extend(winning_tile_yakuman(
+                        analysis.fixed_melds(),
+                        context,
+                        &interpretation,
+                    ));
+                    yakuman.sort_unstable();
+                    yakuman.dedup();
+                    WinningYakumanEvaluation {
+                        interpretation,
+                        yakuman,
+                    }
+                })
         })
-        .collect()
 }
 
 fn winning_tile_yakuman(
@@ -108,6 +117,9 @@ fn is_suuankou(
     }
     context.win_method().is_tsumo() || interpretation.group().is_pair()
 }
+
+#[cfg(test)]
+mod differential;
 
 #[cfg(test)]
 mod tests {

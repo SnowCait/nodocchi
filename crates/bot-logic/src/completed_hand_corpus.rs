@@ -7,6 +7,39 @@
 use crate::completed_hand::{CompletedHandAnalysis, analyze_completed_hand};
 use crate::meld::{Meld, MeldKind};
 use crate::tile::{TileId, TileType};
+use crate::winning_context::{RiichiStatus, WinMethod, WinningContext};
+
+/// ロン・ツモ、状況役、点数計算に必要な事実の欠落を含む差分検証用の入力。
+pub(crate) fn winning_contexts() -> impl Iterator<Item = WinningContext> {
+    [WinMethod::Ron, WinMethod::Tsumo]
+        .into_iter()
+        .flat_map(|method| {
+            let exact = WinningContext::new(method)
+                .with_round_wind(Some(TileType::from_mjai_type_str("E").unwrap()))
+                .with_seat_wind(Some(TileType::from_mjai_type_str("S").unwrap()))
+                .with_riichi(RiichiStatus::NotDeclared)
+                .with_ippatsu(Some(false))
+                .with_rinshan(Some(false))
+                .with_chankan(Some(false))
+                .with_remaining_live_tiles(Some(12));
+            [
+                WinningContext::new(method),
+                exact,
+                exact.with_riichi(RiichiStatus::Riichi),
+                exact
+                    .with_riichi(RiichiStatus::DoubleRiichi)
+                    .with_ippatsu(Some(true)),
+                exact.with_remaining_live_tiles(Some(0)),
+                exact.with_rinshan(Some(true)).with_chankan(Some(true)),
+                exact.with_round_wind(None),
+                exact.with_seat_wind(None),
+                exact.with_riichi(RiichiStatus::Unknown),
+                exact.with_riichi(RiichiStatus::Riichi).with_ippatsu(None),
+                exact.with_rinshan(None).with_chankan(None),
+                exact.with_remaining_live_tiles(None),
+            ]
+        })
+}
 
 /// 面子1つ分の牌姿。
 #[derive(Debug, Clone, Copy)]

@@ -3,7 +3,7 @@ use crate::meld::{Meld, MeldShape, is_menzen};
 use crate::tile::TileType;
 use crate::winning_context::{WinMethod, WinningContext};
 use crate::winning_tile::{WaitType, WinningTileInterpretation, interpret_winning_tile};
-use crate::yaku::{Yaku, evaluate_yaku, standard_meld_shapes};
+use crate::yaku::{Yaku, decomposition_yaku_with_context, standard_meld_shapes};
 
 const SANANKOU_CONCEALED_SET_COUNT: usize = 3;
 
@@ -45,6 +45,7 @@ pub fn evaluate_winning_yaku(
         context,
         &interpret_winning_tile(analysis, winning_tile),
     )
+    .collect()
 }
 
 /// 和了牌の解釈を求めてある場合の [`evaluate_winning_yaku`]。
@@ -56,30 +57,39 @@ pub(crate) fn winning_yaku_evaluations<'a>(
     analysis: &'a CompletedHandAnalysis,
     context: WinningContext,
     interpretations: &[WinningTileInterpretation<'a>],
-) -> Vec<WinningYakuEvaluation<'a>> {
-    let evaluations = evaluate_yaku(analysis, context);
+) -> impl Iterator<Item = WinningYakuEvaluation<'a>> {
+    let menzen = is_menzen(analysis.fixed_melds());
+    // interpret_winning_tile は decomposition ごとに解釈を連続して返す。
+    // base の役はその一群で1回だけ求め、最後の解釈には Vec の所有権を渡す。
+    // 解釈が複数ある場合だけ、それより前の解釈用に base を複製する。
     interpretations
-        .iter()
-        .copied()
-        .map(|interpretation| {
-            let mut yaku = evaluations
-                .iter()
-                .find(|evaluation| evaluation.decomposition() == interpretation.decomposition())
-                .map(|evaluation| evaluation.yaku().to_vec())
-                .unwrap_or_default();
-            yaku.extend(winning_tile_yaku(
+        .chunk_by(|left, right| left.decomposition() == right.decomposition())
+        .flat_map(move |group| {
+            let mut base = decomposition_yaku_with_context(
+                group[0].decomposition(),
                 analysis.fixed_melds(),
+                analysis.tile_type_counts(),
                 context,
-                &interpretation,
-            ));
-            yaku.sort_unstable();
-            yaku.dedup();
-            WinningYakuEvaluation {
-                interpretation,
-                yaku,
-            }
+                menzen,
+            );
+            group
+                .iter()
+                .enumerate()
+                .map(move |(index, &interpretation)| {
+                    let mut yaku = if index + 1 == group.len() {
+                        std::mem::take(&mut base)
+                    } else {
+                        base.clone()
+                    };
+                    winning_tile_yaku(analysis.fixed_melds(), context, &interpretation, &mut yaku);
+                    yaku.sort_unstable();
+                    yaku.dedup();
+                    WinningYakuEvaluation {
+                        interpretation,
+                        yaku,
+                    }
+                })
         })
-        .collect()
 }
 
 pub fn concealed_set_count(
@@ -119,15 +129,15 @@ fn winning_tile_yaku(
     fixed_melds: &[Meld],
     context: WinningContext,
     interpretation: &WinningTileInterpretation<'_>,
-) -> Vec<Yaku> {
+    yaku: &mut Vec<Yaku>,
+) {
     let Some(standard) = interpretation.decomposition().as_standard() else {
-        return Vec::new();
+        return;
     };
     let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
-        return Vec::new();
+        return;
     };
 
-    let mut yaku = Vec::new();
     if is_pinfu(
         standard.pair(),
         &melds,
@@ -142,7 +152,6 @@ fn winning_tile_yaku(
     {
         yaku.push(Yaku::Sanankou);
     }
-    yaku
 }
 
 fn is_pinfu(
@@ -174,6 +183,9 @@ fn pair_is_confirmed_non_value(pair: TileType, context: WinningContext) -> bool 
 }
 
 #[cfg(test)]
+mod differential;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::completed_hand::analyze_completed_hand;
@@ -181,6 +193,7 @@ mod tests {
     use crate::tile::TileId;
     use crate::winning_context::RiichiStatus;
     use crate::winning_tile::WinningGroup;
+    use crate::yaku::evaluate_yaku;
 
     struct TileIdSource {
         used: [u8; TileType::COUNT],

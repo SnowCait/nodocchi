@@ -70,7 +70,7 @@ pub fn evaluate_yakuman(analysis: &CompletedHandAnalysis) -> Vec<YakumanEvaluati
         .collect()
 }
 
-fn decomposition_yakuman(
+pub(crate) fn decomposition_yakuman(
     decomposition: &CompletedHandDecomposition,
     fixed_melds: &[Meld],
     counts: &TileCounts,

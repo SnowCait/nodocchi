@@ -98,27 +98,35 @@ pub fn evaluate_yaku(
     context: WinningContext,
 ) -> Vec<YakuEvaluation<'_>> {
     let menzen = is_menzen(analysis.fixed_melds());
-    evaluate_structural_yaku(analysis)
-        .into_iter()
-        .map(|evaluation| {
-            let YakuEvaluation {
-                decomposition,
-                mut yaku,
-            } = evaluation;
-            yaku.extend(contextual_yaku(
+    analysis
+        .decompositions()
+        .iter()
+        .map(|decomposition| YakuEvaluation {
+            decomposition,
+            yaku: decomposition_yaku_with_context(
                 decomposition,
                 analysis.fixed_melds(),
+                analysis.tile_type_counts(),
                 context,
                 menzen,
-            ));
-            yaku.sort_unstable();
-            yaku.dedup();
-            YakuEvaluation {
-                decomposition,
-                yaku,
-            }
+            ),
         })
         .collect()
+}
+
+/// 1つの decomposition の役。公開 API と和了牌ごとの streaming 評価で共有する。
+pub(crate) fn decomposition_yaku_with_context(
+    decomposition: &CompletedHandDecomposition,
+    fixed_melds: &[Meld],
+    counts: &TileCounts,
+    context: WinningContext,
+    menzen: bool,
+) -> Vec<Yaku> {
+    let mut yaku = decomposition_yaku(decomposition, fixed_melds, counts, menzen);
+    yaku.extend(contextual_yaku(decomposition, fixed_melds, context, menzen));
+    yaku.sort_unstable();
+    yaku.dedup();
+    yaku
 }
 
 fn contextual_yaku(
