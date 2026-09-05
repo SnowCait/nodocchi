@@ -110,7 +110,6 @@ pub(crate) fn yakuman_scoring_candidates<'a>(
     let is_dealer = TileType::wind_from_seat_index(DEALER_SEAT_INDEX) == Some(seat_wind);
 
     winning_yakuman_evaluations(analysis, context, interpretations)
-        .into_iter()
         .filter(|evaluation| !evaluation.is_empty())
         .map(|evaluation| candidate(analysis, &evaluation, context, is_dealer))
         .collect()

@@ -159,7 +159,7 @@ pub(crate) fn winning_fu_evaluations<'a>(
         .collect()
 }
 
-fn winning_fu<'a>(
+pub(crate) fn winning_fu<'a>(
     evaluation: &WinningYakuEvaluation<'a>,
     fixed_melds: &[Meld],
     context: WinningContext,

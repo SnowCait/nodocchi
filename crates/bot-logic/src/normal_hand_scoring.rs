@@ -2,8 +2,9 @@ use thiserror::Error;
 
 use crate::bonus_han::{BonusHanBreakdown, evaluate_bonus_han};
 use crate::completed_hand::{CompletedHandAnalysis, CompletedHandDecomposition};
-use crate::fu::{FuBreakdown, WinningFuEvaluation, winning_fu_evaluations};
-use crate::han::{WinningYakuHanEvaluation, YakuHan, winning_yaku_han_evaluations};
+use crate::fu::{FuBreakdown, winning_fu};
+use crate::han::{WinningYakuHanEvaluation, YakuHan, winning_yaku_han};
+use crate::meld::is_menzen;
 use crate::normal_score::{NormalScoreBase, NormalScoreError, evaluate_normal_score_base};
 use crate::payment::{Payment, PaymentError, evaluate_payment};
 use crate::tile::{TileId, TileType};
@@ -156,14 +157,15 @@ pub(crate) fn normal_scoring_candidates<'a>(
 
     let bonus_han = evaluate_bonus_han(analysis, context, dora_indicators, ura_dora_indicators);
     // 符も翻も同じ役評価から導くので、同じ完成手・同じ和了牌の役判定は1回だけ走らせる。
-    let yaku_evaluations = winning_yaku_evaluations(analysis, context, interpretations);
-    let fu_evaluations = winning_fu_evaluations(&yaku_evaluations, analysis.fixed_melds(), context);
-
-    winning_yaku_han_evaluations(&yaku_evaluations, analysis.fixed_melds())
-        .into_iter()
-        .filter(|evaluation| !evaluation.is_empty())
+    let menzen = is_menzen(analysis.fixed_melds());
+    winning_yaku_evaluations(analysis, context, interpretations)
         .filter_map(|evaluation| {
-            let fu = fu_breakdown(&fu_evaluations, evaluation.interpretation())?;
+            let fu = winning_fu(&evaluation, analysis.fixed_melds(), context);
+            let evaluation = winning_yaku_han(&evaluation, menzen);
+            if evaluation.is_empty() {
+                return None;
+            }
+            let fu = fu.breakdown()?;
             Some(candidate(
                 &evaluation,
                 fu.clone(),
@@ -213,16 +215,6 @@ fn exact_scoring_context(context: WinningContext) -> Result<TileType, NormalScor
 
 fn incomplete_context(fact: MissingScoringFact) -> NormalScoringError {
     NormalScoringError::IncompleteContext(fact)
-}
-
-fn fu_breakdown<'a, 'b>(
-    evaluations: &'a [WinningFuEvaluation<'b>],
-    interpretation: WinningTileInterpretation<'b>,
-) -> Option<&'a FuBreakdown> {
-    evaluations
-        .iter()
-        .find(|evaluation| evaluation.interpretation() == interpretation)
-        .and_then(WinningFuEvaluation::breakdown)
 }
 
 fn candidate<'a>(
@@ -547,7 +539,10 @@ mod tests {
             .into_iter()
             .filter(|evaluation| !evaluation.is_empty())
             .filter_map(|evaluation| {
-                let fu = fu_breakdown(&fu_evaluations, evaluation.interpretation())?;
+                let fu = fu_evaluations
+                    .iter()
+                    .find(|fu| fu.interpretation() == evaluation.interpretation())?
+                    .breakdown()?;
                 Some(candidate(
                     &evaluation,
                     fu.clone(),
@@ -557,6 +552,28 @@ mod tests {
                 ))
             })
             .collect()
+    }
+
+    #[test]
+    fn streaming_scoring_matches_materialized_scoring_over_the_completed_hand_corpus() {
+        for analysis in crate::completed_hand_corpus::analyses() {
+            for context in crate::completed_hand_corpus::winning_contexts() {
+                for winning_tile in TileType::all() {
+                    for ura in [None, Some([].as_slice())] {
+                        assert_eq!(
+                            evaluate_normal_hand_scoring(
+                                &analysis,
+                                context,
+                                winning_tile,
+                                &[],
+                                ura
+                            ),
+                            reference_candidates(&analysis, context, winning_tile, &[], ura),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
