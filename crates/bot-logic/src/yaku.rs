@@ -115,6 +115,9 @@ pub fn evaluate_yaku(
 }
 
 /// 1つの decomposition の役。公開 API と和了牌ごとの streaming 評価で共有する。
+///
+/// 構成役と状況役は段ごとに `Vec` へ集めず、返す `Vec` へ直接足していく。並べ替えて重複を
+/// 消すのは全部足してから1回だけなので、途中で並んでいる順序も重複も結果には出ない。
 pub(crate) fn decomposition_yaku_with_context(
     decomposition: &CompletedHandDecomposition,
     fixed_melds: &[Meld],
@@ -122,46 +125,46 @@ pub(crate) fn decomposition_yaku_with_context(
     context: WinningContext,
     menzen: bool,
 ) -> Vec<Yaku> {
-    let mut yaku = decomposition_yaku(decomposition, fixed_melds, counts, menzen);
-    yaku.extend(contextual_yaku(decomposition, fixed_melds, context, menzen));
+    let mut yaku = Vec::new();
+    push_decomposition_yaku(&mut yaku, decomposition, fixed_melds, counts, menzen);
+    push_contextual_yaku(&mut yaku, decomposition, fixed_melds, context, menzen);
     yaku.sort_unstable();
     yaku.dedup();
     yaku
 }
 
-fn contextual_yaku(
+fn push_contextual_yaku(
+    yaku: &mut Vec<Yaku>,
     decomposition: &CompletedHandDecomposition,
     fixed_melds: &[Meld],
     context: WinningContext,
     menzen: bool,
-) -> Vec<Yaku> {
+) {
     match decomposition {
         CompletedHandDecomposition::Standard(standard) => {
             let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
-                return Vec::new();
+                return;
             };
-            let mut yaku = yakuhai_yaku(&melds, context);
-            yaku.extend(win_context_yaku(context, menzen));
-            yaku
+            push_yakuhai_yaku(yaku, &melds, context);
+            push_win_context_yaku(yaku, context, menzen);
         }
         CompletedHandDecomposition::Chiitoitsu(_) | CompletedHandDecomposition::Kokushi(_) => {
-            win_context_yaku(context, menzen)
+            push_win_context_yaku(yaku, context, menzen);
         }
     }
 }
 
-fn yakuhai_yaku(melds: &[MeldShape], context: WinningContext) -> Vec<Yaku> {
-    melds
-        .iter()
-        .filter_map(|meld| meld.triplet_tile_type())
-        .flat_map(|tile| tile_yakuhai(tile, context))
-        .collect()
+fn push_yakuhai_yaku(yaku: &mut Vec<Yaku>, melds: &[MeldShape], context: WinningContext) {
+    for tile in melds.iter().filter_map(|meld| meld.triplet_tile_type()) {
+        push_tile_yakuhai(yaku, tile, context);
+    }
 }
 
 /// 固定面子だけで通常役が必ず成立するか。
 ///
-/// 現在は固定面子の役牌だけを対象とし、通常の役評価と同じ [`yakuhai_yaku`] を使う。固定面子の
-/// shape が不正な場合や、風牌に必要な場風・自風が不明な場合は保証を推測せず `false` を返す。
+/// 現在は固定面子の役牌だけを対象とし、通常の役評価と同じ [`push_yakuhai_yaku`] を使う。
+/// 固定面子の shape が不正な場合や、風牌に必要な場風・自風が不明な場合は保証を推測せず
+/// `false` を返す。
 /// concealed hand、decomposition、和了牌に依存する役は対象外。
 pub fn fixed_melds_guarantee_yaku(fixed_melds: &[Meld], context: WinningContext) -> bool {
     let Some(melds) = fixed_melds
@@ -171,25 +174,26 @@ pub fn fixed_melds_guarantee_yaku(fixed_melds: &[Meld], context: WinningContext)
     else {
         return false;
     };
-    !yakuhai_yaku(&melds, context).is_empty()
+    let mut yaku = Vec::new();
+    push_yakuhai_yaku(&mut yaku, &melds, context);
+    !yaku.is_empty()
 }
 
-fn tile_yakuhai(tile: TileType, context: WinningContext) -> Vec<Yaku> {
+fn push_tile_yakuhai(yaku: &mut Vec<Yaku>, tile: TileType, context: WinningContext) {
     if let Some(dragon) = tile.dragon() {
-        return vec![dragon_yakuhai(dragon)];
+        yaku.push(dragon_yakuhai(dragon));
+        return;
     }
     if !tile.is_wind() {
-        return Vec::new();
+        return;
     }
 
-    let mut yaku = Vec::new();
     if context.round_wind() == Some(tile) {
         yaku.push(Yaku::YakuhaiRoundWind);
     }
     if context.seat_wind() == Some(tile) {
         yaku.push(Yaku::YakuhaiSeatWind);
     }
-    yaku
 }
 
 fn dragon_yakuhai(dragon: Dragon) -> Yaku {
@@ -200,10 +204,9 @@ fn dragon_yakuhai(dragon: Dragon) -> Yaku {
     }
 }
 
-fn win_context_yaku(context: WinningContext, menzen: bool) -> Vec<Yaku> {
-    let mut yaku = Vec::new();
+fn push_win_context_yaku(yaku: &mut Vec<Yaku>, context: WinningContext, menzen: bool) {
     if menzen {
-        yaku.extend(menzen_context_yaku(context));
+        push_menzen_context_yaku(yaku, context);
     }
     if context.win_method().is_tsumo() && context.rinshan() == Some(true) {
         yaku.push(Yaku::RinshanKaihou);
@@ -212,11 +215,9 @@ fn win_context_yaku(context: WinningContext, menzen: bool) -> Vec<Yaku> {
         yaku.push(Yaku::Chankan);
     }
     yaku.extend(last_live_tile_yaku(context));
-    yaku
 }
 
-fn menzen_context_yaku(context: WinningContext) -> Vec<Yaku> {
-    let mut yaku = Vec::new();
+fn push_menzen_context_yaku(yaku: &mut Vec<Yaku>, context: WinningContext) {
     match context.riichi() {
         RiichiStatus::Riichi => yaku.push(Yaku::Riichi),
         RiichiStatus::DoubleRiichi => yaku.push(Yaku::DoubleRiichi),
@@ -228,7 +229,6 @@ fn menzen_context_yaku(context: WinningContext) -> Vec<Yaku> {
     if context.win_method().is_tsumo() {
         yaku.push(Yaku::MenzenTsumo);
     }
-    yaku
 }
 
 fn last_live_tile_yaku(context: WinningContext) -> Option<Yaku> {
@@ -247,39 +247,50 @@ fn decomposition_yaku(
     counts: &TileCounts,
     menzen: bool,
 ) -> Vec<Yaku> {
-    let mut yaku = match decomposition {
-        CompletedHandDecomposition::Standard(standard) => {
-            standard_yaku(standard, fixed_melds, counts, menzen)
-        }
-        CompletedHandDecomposition::Chiitoitsu(_) => chiitoitsu_yaku(counts),
-        CompletedHandDecomposition::Kokushi(_) => Vec::new(),
-    };
+    let mut yaku = Vec::new();
+    push_decomposition_yaku(&mut yaku, decomposition, fixed_melds, counts, menzen);
     yaku.sort_unstable();
     yaku.dedup();
     yaku
 }
 
-fn chiitoitsu_yaku(counts: &TileCounts) -> Vec<Yaku> {
-    let mut yaku = vec![Yaku::Chiitoitsu];
-    yaku.extend(tile_composition_yaku(counts));
-    yaku
+fn push_decomposition_yaku(
+    yaku: &mut Vec<Yaku>,
+    decomposition: &CompletedHandDecomposition,
+    fixed_melds: &[Meld],
+    counts: &TileCounts,
+    menzen: bool,
+) {
+    match decomposition {
+        CompletedHandDecomposition::Standard(standard) => {
+            push_standard_yaku(yaku, standard, fixed_melds, counts, menzen);
+        }
+        CompletedHandDecomposition::Chiitoitsu(_) => push_chiitoitsu_yaku(yaku, counts),
+        CompletedHandDecomposition::Kokushi(_) => {}
+    }
 }
 
-fn standard_yaku(
+fn push_chiitoitsu_yaku(yaku: &mut Vec<Yaku>, counts: &TileCounts) {
+    yaku.push(Yaku::Chiitoitsu);
+    push_tile_composition_yaku(yaku, counts);
+}
+
+fn push_standard_yaku(
+    yaku: &mut Vec<Yaku>,
     standard: &StandardDecomposition,
     fixed_melds: &[Meld],
     counts: &TileCounts,
     menzen: bool,
-) -> Vec<Yaku> {
+) {
     let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
-        return Vec::new();
+        return;
     };
 
     let pair = standard.pair();
     let sequences = suit_number_grid(melds.iter().filter_map(|meld| meld.sequence_start()));
     let triplets = suit_number_grid(melds.iter().filter_map(|meld| meld.triplet_tile_type()));
 
-    let mut yaku = tile_composition_yaku(counts);
+    push_tile_composition_yaku(yaku, counts);
 
     if melds.iter().all(|meld| meld.is_triplet_like()) {
         yaku.push(Yaku::Toitoi);
@@ -309,14 +320,11 @@ fn standard_yaku(
     if is_shousangen(pair, &melds) {
         yaku.push(Yaku::Shousangen);
     }
-
-    yaku
 }
 
-fn tile_composition_yaku(counts: &TileCounts) -> Vec<Yaku> {
-    let mut yaku = Vec::new();
+fn push_tile_composition_yaku(yaku: &mut Vec<Yaku>, counts: &TileCounts) {
     if counts.total() == 0 {
-        return yaku;
+        return;
     }
 
     if hand_tile_types(counts).all(|tile| !tile.is_yaochu()) {
@@ -332,8 +340,6 @@ fn tile_composition_yaku(counts: &TileCounts) -> Vec<Yaku> {
             yaku.push(Yaku::Chinitsu);
         }
     }
-
-    yaku
 }
 
 /// 通常形の面子4つの shape。門前の面子と固定面子を合わせて4つに満たない場合と、固定面子の

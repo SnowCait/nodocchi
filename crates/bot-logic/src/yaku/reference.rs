@@ -1,13 +1,69 @@
-//! 差分検証用に残した、置き換え前の牌種構成まわりの実装。
+//! 差分検証用に残した、置き換え前の実装。
 //!
-//! 手牌の牌種を毎回 `Vec<TileType>` に並べ直していた頃のものそのままで、production からは
-//! 呼ばない。牌種ごとの枚数 ([`crate::tile_counts::TileCounts`]) を読む新しい実装が同じ役を
-//! 返すことを確かめる reference としてだけ使う。
+//! 手牌の牌種を毎回 `Vec<TileType>` に並べ直していた頃のものと、役を段ごとに `Vec<Yaku>` へ
+//! 集めてから連結していた頃の合成順で、production からは呼ばない。新しい実装が同じ役を返す
+//! ことを確かめる reference としてだけ使う。役の成立規則は production 側の関数を呼ぶだけで、
+//! ここには書き直さない。
 
-use crate::completed_hand::CompletedHandAnalysis;
-use crate::meld::MeldShape;
+use crate::completed_hand::{CompletedHandAnalysis, CompletedHandDecomposition};
+use crate::meld::{Meld, MeldShape};
 use crate::tile::{Suit, TileType};
-use crate::yaku::{SHOUSANGEN_DRAGON_SET_COUNT, Yaku};
+use crate::tile_counts::TileCounts;
+use crate::winning_context::WinningContext;
+use crate::yaku::{
+    SHOUSANGEN_DRAGON_SET_COUNT, Yaku, decomposition_yaku, push_win_context_yaku,
+    push_yakuhai_yaku, standard_meld_shapes,
+};
+
+/// 置き換え前の [`crate::yaku::decomposition_yaku_with_context`]。
+///
+/// 構成役の `Vec` を作ってから状況役の `Vec` を連結し、最後に並べ替えて重複を消していた。
+pub(crate) fn decomposition_yaku_with_context(
+    decomposition: &CompletedHandDecomposition,
+    fixed_melds: &[Meld],
+    counts: &TileCounts,
+    context: WinningContext,
+    menzen: bool,
+) -> Vec<Yaku> {
+    let mut yaku = decomposition_yaku(decomposition, fixed_melds, counts, menzen);
+    yaku.extend(contextual_yaku(decomposition, fixed_melds, context, menzen));
+    yaku.sort_unstable();
+    yaku.dedup();
+    yaku
+}
+
+fn contextual_yaku(
+    decomposition: &CompletedHandDecomposition,
+    fixed_melds: &[Meld],
+    context: WinningContext,
+    menzen: bool,
+) -> Vec<Yaku> {
+    match decomposition {
+        CompletedHandDecomposition::Standard(standard) => {
+            let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
+                return Vec::new();
+            };
+            let mut yaku = yakuhai_yaku(&melds, context);
+            yaku.extend(win_context_yaku(context, menzen));
+            yaku
+        }
+        CompletedHandDecomposition::Chiitoitsu(_) | CompletedHandDecomposition::Kokushi(_) => {
+            win_context_yaku(context, menzen)
+        }
+    }
+}
+
+fn yakuhai_yaku(melds: &[MeldShape], context: WinningContext) -> Vec<Yaku> {
+    let mut yaku = Vec::new();
+    push_yakuhai_yaku(&mut yaku, melds, context);
+    yaku
+}
+
+fn win_context_yaku(context: WinningContext, menzen: bool) -> Vec<Yaku> {
+    let mut yaku = Vec::new();
+    push_win_context_yaku(&mut yaku, context, menzen);
+    yaku
+}
 
 pub(crate) fn hand_tile_types(analysis: &CompletedHandAnalysis) -> Vec<TileType> {
     analysis
