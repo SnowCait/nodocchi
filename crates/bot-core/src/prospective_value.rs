@@ -107,12 +107,13 @@
 
 use bot_logic::{
     DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
-    DrawVariantLookaheadDiagnostic, FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld,
-    OwnDiscards, ProspectiveTenpai, ProspectiveTenpaiValuator, ProspectiveTsumoValuator,
-    TenpaiCompletedHands, TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability,
-    TileCounts, TileId, TileType, WinningContext, evaluate_tenpai_hand_value, is_menzen,
-    split_discarded_tile, structural_acceptance_tile_types_with_fixed_melds,
-    tenpai_completed_hands, tenpai_wait_availability,
+    DrawVariantLookaheadDiagnostic, EffectiveAcceptance, FixedMeldCount, HistoryFuritenFacts,
+    LookaheadDiagnostic, Meld, OwnDiscards, ProspectiveTenpai, ProspectiveTenpaiValuator,
+    ProspectiveTsumoValuator, TenpaiCompletedHands, TenpaiHandValueProfile, TenpaiTsumoValue,
+    TenpaiWaitAvailability, TileCounts, TileId, TileType, WinningContext,
+    evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
+    structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
+    tenpai_wait_availability,
 };
 
 use crate::context::GameContext;
@@ -127,6 +128,7 @@ use crate::tenpai_scoring::{
     TenpaiVariantValue, TsumoVariantOutcomes, tenpai_tsumo_value_from_hands,
     tenpai_tsumo_variant_outcomes, tenpai_variant_value,
 };
+use std::cell::Cell;
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
@@ -335,6 +337,8 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     own_discards: OwnDiscards,
     // 未来テンパイ時点へ補正した履歴依存フリテン。未確定の軸は unknown のまま持ち回る。
     history_furiten: HistoryFuritenFacts,
+    // 直近に評価した未来テンパイ1件分の評価材料。
+    evaluated: Cell<Option<Box<EvaluatedTenpai>>>,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -368,6 +372,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
             history_furiten: context
                 .history_furiten()
                 .after_discard(FUTURE_AFTER_OWN_DRAW),
+            evaluated: Cell::new(None),
         }
     }
 
@@ -488,10 +493,39 @@ impl<'a> ProductionProspectiveValuator<'a> {
         tenpai_tsumo_variant_outcomes(self.context, &facts.hands, mode)
     }
 
+    // 未来テンパイ1件分の評価材料と攻撃モードを1組だけ組み立てて、そこから値を1つ求める。
+    //
+    // どちらも [`ProspectiveTenpai`] の入力だけで決まるので、入力が直前の枝とすべて一致する場合
+    // だけ [`EvaluatedTenpai`] の1組をそのまま使い、同じ材料を2回組み立て直さない。1つでも違えば
+    // 従来どおり組み立てる。
+    fn with_evaluated_tenpai<T>(
+        &self,
+        tenpai: &ProspectiveTenpai<'_>,
+        value: impl FnOnce(&ProspectiveFacts, TenpaiOffenseMode) -> Option<T>,
+    ) -> Option<T> {
+        let evaluated = match self.evaluated.take() {
+            Some(evaluated) if evaluated.is_for(tenpai) => evaluated,
+            evaluated => {
+                let facts = self.tenpai_facts(tenpai)?;
+                let mode = self.offense_mode(&facts);
+                match evaluated {
+                    Some(mut evaluated) => {
+                        evaluated.reset(tenpai, facts, mode);
+                        evaluated
+                    }
+                    None => Box::new(EvaluatedTenpai::new(tenpai, facts, mode)),
+                }
+            }
+        };
+
+        let value = value(&evaluated.facts, evaluated.mode);
+        self.evaluated.set(Some(evaluated));
+        value
+    }
+
     // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計)。確定できない場合は `None`。
-    fn selection_value(&self, facts: &ProspectiveFacts) -> Option<u64> {
-        let (baseline, ura_dora) =
-            self.scoring_inputs(self.offense_mode(facts), facts.can_ron())?;
+    fn selection_value(&self, facts: &ProspectiveFacts, mode: TenpaiOffenseMode) -> Option<u64> {
+        let (baseline, ura_dora) = self.scoring_inputs(mode, facts.can_ron())?;
         let profile = evaluate_tenpai_hand_value(
             &facts.hands,
             baseline,
@@ -504,14 +538,77 @@ impl<'a> ProductionProspectiveValuator<'a> {
 
 impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
-        self.selection_value(&self.tenpai_facts(tenpai)?)
+        self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode))
     }
 }
 
 impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
-        let facts = self.tenpai_facts(tenpai)?;
-        self.tsumo_value_with_mode(&facts, self.offense_mode(&facts))
+        self.with_evaluated_tenpai(tenpai, |facts, mode| {
+            self.tsumo_value_with_mode(facts, mode)
+        })
+    }
+}
+
+/// 直近に評価した未来テンパイ1件分の評価材料。
+///
+/// 2手先評価は選んだ2手目の打牌について、ロン baseline の選択値
+/// ([`ProspectiveTenpaiValuator::tenpai_value`]) とツモ continuation
+/// ([`ProspectiveTsumoValuator::tenpai_tsumo_value`]) を続けて求める。どちらも同じ
+/// [`ProspectiveTenpai`] から同じ [`ProspectiveFacts`] と同じ [`TenpaiOffenseMode`] を導くので、
+/// 入力が直前とすべて一致する枝ではその1組をそのまま使う。
+///
+/// [`ProspectiveTenpai`] の入力3つがすべて一致する場合だけ共有し、1つでも違えば従来どおり
+/// 組み立て直す。評価材料は共有参照でしか渡さないため、ある枝の評価が別の枝の評価材料を
+/// 書き換えることはない。
+struct EvaluatedTenpai {
+    concealed_tiles: Vec<TileId>,
+    acceptance: EffectiveAcceptance,
+    discarded_tiles: Vec<TileId>,
+    facts: ProspectiveFacts,
+    mode: TenpaiOffenseMode,
+}
+
+impl EvaluatedTenpai {
+    fn new(
+        tenpai: &ProspectiveTenpai<'_>,
+        facts: ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> Self {
+        Self {
+            concealed_tiles: tenpai.concealed_tiles.to_vec(),
+            acceptance: tenpai.acceptance.clone(),
+            discarded_tiles: tenpai.discarded_tiles.to_vec(),
+            facts,
+            mode,
+        }
+    }
+
+    fn is_for(&self, tenpai: &ProspectiveTenpai<'_>) -> bool {
+        self.concealed_tiles == tenpai.concealed_tiles
+            && self.acceptance == *tenpai.acceptance
+            && self.discarded_tiles == tenpai.discarded_tiles
+    }
+
+    fn reset(
+        &mut self,
+        tenpai: &ProspectiveTenpai<'_>,
+        facts: ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) {
+        self.concealed_tiles.clear();
+        self.concealed_tiles
+            .extend_from_slice(tenpai.concealed_tiles);
+        self.acceptance.current = tenpai.acceptance.current;
+        self.acceptance.tiles.clear();
+        self.acceptance
+            .tiles
+            .extend_from_slice(&tenpai.acceptance.tiles);
+        self.discarded_tiles.clear();
+        self.discarded_tiles
+            .extend_from_slice(tenpai.discarded_tiles);
+        self.facts = facts;
+        self.mode = mode;
     }
 }
 
@@ -1779,6 +1876,100 @@ mod tests {
             known += usize::from(branch.value.is_some());
         }
         assert!(known > 0, "打点を確定できる枝がある局面が必要");
+    }
+
+    // 枝1件分の、評価材料を一切使い回さない基準値。評価器ごと作り直して求める。
+    fn fresh_values(
+        case: &Case,
+        tenpai: &ProspectiveTenpai<'_>,
+    ) -> (Option<u64>, Option<TenpaiTsumoValue>) {
+        (
+            ProductionProspectiveValuator::new(&case.ctx).tenpai_value(tenpai),
+            ProductionProspectiveValuator::new(&case.ctx).tenpai_tsumo_value(tenpai),
+        )
+    }
+
+    #[test]
+    fn a_shared_valuator_keeps_every_branch_value_independent() {
+        // 1つの評価器で枝を続けて評価しても、各枝の値はその枝だけを新しい評価器へ渡した値と
+        // 一致する。直前に評価した枝の材料が別の枝へ漏れない。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let branches = downstream_branches(case);
+        assert!(branches.len() > 1, "枝が複数ある局面が必要");
+
+        let expected: Vec<_> = branches
+            .iter()
+            .map(|branch| fresh_values(case, &branch.tenpai()))
+            .collect();
+        assert!(
+            expected.iter().any(|values| *values != expected[0]),
+            "値が違う枝がある局面が必要",
+        );
+
+        let shared = ProductionProspectiveValuator::new(&case.ctx);
+        for (branch, expected) in branches.iter().zip(&expected) {
+            let tenpai = branch.tenpai();
+            assert_eq!(
+                (
+                    shared.tenpai_value(&tenpai),
+                    shared.tenpai_tsumo_value(&tenpai)
+                ),
+                *expected,
+            );
+        }
+
+        // 逆順でもう一度たどっても、間に別の枝を挟んだ値は変わらない。
+        for (branch, expected) in branches.iter().zip(&expected).rev() {
+            let tenpai = branch.tenpai();
+            assert_eq!(
+                (
+                    shared.tenpai_value(&tenpai),
+                    shared.tenpai_tsumo_value(&tenpai)
+                ),
+                *expected,
+            );
+        }
+    }
+
+    #[test]
+    fn an_evaluated_tenpai_is_reused_only_for_the_same_input() {
+        // 評価材料を使い回す条件は、未来テンパイの入力3つがすべて一致すること。concealed 手牌・
+        // 受け入れ・その枝でここまでに切った牌のどれか1つでも違えば使い回さない。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let branches = downstream_branches(case);
+        let branch = branches.first().expect("枝がある");
+        let other = branches
+            .iter()
+            .find(|other| {
+                other.concealed != branch.concealed
+                    && other.acceptance != branch.acceptance
+                    && other.discarded != branch.discarded
+            })
+            .expect("入力が3つとも違う枝がある局面が必要");
+
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        let facts = valuator
+            .tenpai_facts(&branch.tenpai())
+            .expect("完成手を解析できる");
+        let mode = valuator.offense_mode(&facts);
+        let evaluated = EvaluatedTenpai::new(&branch.tenpai(), facts, mode);
+
+        assert!(evaluated.is_for(&branch.tenpai()));
+        assert!(!evaluated.is_for(&ProspectiveTenpai {
+            concealed_tiles: &other.concealed,
+            acceptance: &branch.acceptance,
+            discarded_tiles: &branch.discarded,
+        }));
+        assert!(!evaluated.is_for(&ProspectiveTenpai {
+            concealed_tiles: &branch.concealed,
+            acceptance: &other.acceptance,
+            discarded_tiles: &branch.discarded,
+        }));
+        assert!(!evaluated.is_for(&ProspectiveTenpai {
+            concealed_tiles: &branch.concealed,
+            acceptance: &branch.acceptance,
+            discarded_tiles: &other.discarded,
+        }));
     }
 
     #[test]
