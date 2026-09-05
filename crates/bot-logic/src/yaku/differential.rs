@@ -1,14 +1,14 @@
-//! 牌種構成から決まる通常役が、置き換え前の実装 ([`super::reference`]) と完全に一致すること
-//! を確かめる差分検証。
+//! 通常役が、置き換え前の実装 ([`super::reference`]) と完全に一致することを確かめる差分検証。
 //!
-//! 判定規則は reference 側にしか無く、ここは同じ完成手を両方へ渡して結果を比べるだけ。
+//! ここは同じ完成手を両方へ渡して結果を比べるだけで、判定規則は書かない。
 
 use super::reference;
 use crate::completed_hand_corpus;
+use crate::meld::is_menzen;
 use crate::tile::TileType;
 use crate::yaku::{
-    hand_tile_types, is_shousangen, single_suit, standard_meld_shapes, tile_composition_yaku,
-    triplet_tile_types,
+    decomposition_yaku_with_context, hand_tile_types, is_shousangen, push_tile_composition_yaku,
+    single_suit, standard_meld_shapes, triplet_tile_types,
 };
 
 #[test]
@@ -26,10 +26,9 @@ fn the_hand_tile_types_are_the_tile_types_the_hand_holds() {
 fn the_tile_composition_yaku_match_the_reference() {
     for analysis in completed_hand_corpus::analyses() {
         let tiles = reference::hand_tile_types(&analysis);
-        assert_eq!(
-            tile_composition_yaku(analysis.tile_type_counts()),
-            reference::tile_composition_yaku(&tiles),
-        );
+        let mut actual = Vec::new();
+        push_tile_composition_yaku(&mut actual, analysis.tile_type_counts());
+        assert_eq!(actual, reference::tile_composition_yaku(&tiles));
         assert_eq!(
             single_suit(analysis.tile_type_counts()),
             reference::single_suit(&tiles),
@@ -71,6 +70,33 @@ fn the_triplet_tile_types_match_the_reference() {
                 for tile in TileType::all() {
                     assert_eq!(actual.contains(tile), expected.contains(&tile));
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_decomposition_yaku_with_context_match_the_reference() {
+    for analysis in completed_hand_corpus::analyses() {
+        let menzen = is_menzen(analysis.fixed_melds());
+        for context in completed_hand_corpus::winning_contexts() {
+            for decomposition in analysis.decompositions() {
+                assert_eq!(
+                    decomposition_yaku_with_context(
+                        decomposition,
+                        analysis.fixed_melds(),
+                        analysis.tile_type_counts(),
+                        context,
+                        menzen,
+                    ),
+                    reference::decomposition_yaku_with_context(
+                        decomposition,
+                        analysis.fixed_melds(),
+                        analysis.tile_type_counts(),
+                        context,
+                        menzen,
+                    ),
+                );
             }
         }
     }
