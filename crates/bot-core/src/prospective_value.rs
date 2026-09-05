@@ -434,14 +434,20 @@ impl<'a> ProductionProspectiveValuator<'a> {
     //
     // ダマでロンできると確定した場合だけダマ打点を判断材料にする。ロン可否 unknown を非フリテン
     // だと推測せず、`damaten_verdict = None` として既存の待ち枚数だけを見る fallback へ委ねる。
+    //
+    // 合法 Reach が無い枝では [`decide_reach_reason`] が `damaten_verdict` を見ずに
+    // `NoLegalReach` を返すので、そこではダマ打点そのものを評価しない。policy の条件をこの層へ
+    // 複製せず、policy が参照しないと確定している入力の計算だけを省く。
     pub(crate) fn offense_mode(&self, facts: &ProspectiveFacts) -> TenpaiOffenseMode {
         match self.own_reached {
             None => TenpaiOffenseMode::Unknown,
             Some(true) => TenpaiOffenseMode::Reach,
             Some(false) => {
-                let damaten_verdict = facts
-                    .can_ron()
-                    .then(|| damaten_value_from_hands(self.context, &facts.hands).verdict);
+                let damaten_verdict = (self.reach_legal && facts.can_ron()).then(|| {
+                    #[cfg(test)]
+                    damaten_evaluation_counter::bump();
+                    damaten_value_from_hands(self.context, &facts.hands).verdict
+                });
                 let reason =
                     decide_reach_reason(self.reach_legal, damaten_verdict, facts.tsumo_remaining());
                 if reason.selects_reach() {
@@ -907,6 +913,28 @@ fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<ProspectiveWaitValue
                 .collect(),
         })
         .collect()
+}
+
+/// ダマ打点を評価した回数。合法 Reach が無い枝で評価しないことを test から観測するためだけの
+/// counter で、production build には残らない。
+#[cfg(test)]
+mod damaten_evaluation_counter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn bump() {
+        COUNT.with(|count| count.set(count.get() + 1));
+    }
+
+    /// `body` の実行と、その間にダマ打点を評価した回数。
+    pub(super) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64) {
+        let before = COUNT.with(Cell::get);
+        let value = body();
+        (value, COUNT.with(Cell::get) - before)
+    }
 }
 
 #[cfg(test)]
@@ -1558,6 +1586,27 @@ mod tests {
         .build()
     });
 
+    // 持ち点が足りず将来リーチが合法にならない局面。ロン可否は確定していて、ダマ打点は
+    // threshold 未満 (5200) のまま。合法 Reach が無いので、それでもリーチは選べない。
+    static LOW_DAMATEN_NO_REACH: LazyLock<Case> =
+        LazyLock::new(|| no_reach_case(&LOW_DAMATEN_HAND, "2m"));
+
+    // 同じく持ち点が足りない局面で、ダマ打点は threshold 以上 (7700)。
+    static HIGH_DAMATEN_NO_REACH_RON: LazyLock<Case> =
+        LazyLock::new(|| no_reach_case(&HIGH_DAMATEN_HAND, "1p"));
+
+    // 持ち点だけをリーチ条件未満にした局面。手牌もロン可否も変えない。
+    fn no_reach_case(hand: &[&str], dora_indicator: &str) -> Case {
+        CaseSpec {
+            table_state: TableStateFacts {
+                scores: Some([500, 25_000, 25_000, 25_000]),
+                ..TableStateFacts::default()
+            },
+            ..CaseSpec::new(hand, dora_indicator)
+        }
+        .build()
+    }
+
     fn totals(baseline: &ProspectiveBaselineValue) -> Vec<(u8, Option<u32>)> {
         baseline
             .winning_tile_values()
@@ -1637,6 +1686,67 @@ mod tests {
         assert!(damaten_meets_threshold(tenpai));
         assert_eq!(tenpai.mode, TenpaiOffenseMode::Reach);
         assert_eq!(variant.selection_value, reach_weighted_total(tenpai));
+    }
+
+    #[test]
+    fn an_illegal_future_reach_keeps_the_low_damaten_branch_damaten() {
+        // 合法 Reach が無い枝。ダマ打点が threshold 未満でもリーチは選べないので、攻撃モードは
+        // 従来どおりダマになり、選択値もダマ打点で作る。
+        let variant = LOW_DAMATEN_NO_REACH.variant("7p", "2m");
+        let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
+
+        assert!(!tenpai.future_reach_legal);
+        assert_eq!(tenpai.can_ron, Some(true));
+        assert_eq!(totals(&tenpai.damaten), vec![(3, Some(5200))]);
+        assert!(!damaten_meets_threshold(tenpai));
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(variant.selection_value, Some(3 * 5200));
+    }
+
+    #[test]
+    fn an_illegal_future_reach_keeps_the_high_damaten_branch_damaten() {
+        // 同じ枝でダマ打点が threshold 以上の場合も、結論は合法 Reach の有無だけで決まる。
+        let variant = HIGH_DAMATEN_NO_REACH_RON.red_variant("8m", "5p", true);
+        let tenpai = variant.outcome.evaluated().expect("テンパイ枝");
+
+        assert!(!tenpai.future_reach_legal);
+        assert_eq!(tenpai.can_ron, Some(true));
+        assert!(damaten_meets_threshold(tenpai));
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Damaten);
+        assert_eq!(variant.selection_value, Some(8 * 7700));
+    }
+
+    #[test]
+    fn an_illegal_future_reach_does_not_evaluate_the_damaten_value() {
+        // 合法 Reach が無い枝では policy がダマ打点を参照しないので、ダマ打点そのものを評価
+        // しない。持ち点以外が同じ局面では従来どおり評価する。
+        let (legal, legal_evaluations) = damaten_evaluation_counter::count_during(|| {
+            case_with_dora(&LOW_DAMATEN_HAND, "2m", &[], true)
+        });
+        let (illegal, illegal_evaluations) =
+            damaten_evaluation_counter::count_during(|| no_reach_case(&LOW_DAMATEN_HAND, "2m"));
+
+        assert!(
+            legal
+                .variant("7p", "2m")
+                .outcome
+                .evaluated()
+                .expect("テンパイ枝")
+                .future_reach_legal
+        );
+        assert!(
+            !illegal
+                .variant("7p", "2m")
+                .outcome
+                .evaluated()
+                .expect("テンパイ枝")
+                .future_reach_legal
+        );
+        assert!(
+            legal_evaluations > 0,
+            "合法 Reach がある枝では従来どおり評価する"
+        );
+        assert_eq!(illegal_evaluations, 0);
     }
 
     #[test]
