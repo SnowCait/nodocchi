@@ -55,6 +55,10 @@ impl<'a> WinningYakuHanEvaluation<'a> {
     pub fn is_empty(&self) -> bool {
         self.yaku_han.is_empty()
     }
+
+    pub(crate) fn into_yaku_han(self) -> Vec<YakuHan> {
+        self.yaku_han
+    }
 }
 
 pub fn evaluate_winning_yaku_han(

@@ -187,14 +187,8 @@ pub(crate) fn for_each_normal_scoring_candidate<'a>(
             if evaluation.is_empty() {
                 return None;
             }
-            let fu = fu.breakdown()?;
-            Some(candidate(
-                &evaluation,
-                fu.clone(),
-                bonus_han,
-                context,
-                is_dealer,
-            ))
+            let fu = fu.into_breakdown()?;
+            Some(candidate(evaluation, fu, bonus_han, context, is_dealer))
         })
         .try_for_each(|candidate| {
             visit(candidate?);
@@ -243,7 +237,7 @@ fn incomplete_context(fact: MissingScoringFact) -> NormalScoringError {
 }
 
 fn candidate<'a>(
-    evaluation: &WinningYakuHanEvaluation<'a>,
+    evaluation: WinningYakuHanEvaluation<'a>,
     fu: FuBreakdown,
     bonus_han: BonusHanBreakdown,
     context: WinningContext,
@@ -259,7 +253,7 @@ fn candidate<'a>(
 
     Ok(NormalScoringCandidate {
         interpretation: evaluation.interpretation(),
-        yaku_han: evaluation.yaku_han().to_vec(),
+        yaku_han: evaluation.into_yaku_han(),
         fu,
         bonus_han,
         state,
@@ -569,7 +563,7 @@ mod tests {
                     .find(|fu| fu.interpretation() == evaluation.interpretation())?
                     .breakdown()?;
                 Some(candidate(
-                    &evaluation,
+                    evaluation,
                     fu.clone(),
                     bonus_han,
                     context,
