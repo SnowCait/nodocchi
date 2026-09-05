@@ -6,6 +6,9 @@ use crate::shanten::FixedMeldCount;
 use crate::tile::{Dragon, Suit, TileType};
 use crate::winning_context::{RiichiStatus, WinMethod, WinningContext};
 
+// 通常形の面子数。門前の面子と固定面子の合計で、[`FixedMeldCount::MAX`] と同じ値。
+const STANDARD_MELD_COUNT: usize = FixedMeldCount::MAX as usize;
+
 const SANKANTSU_KAN_COUNT: usize = 3;
 const SHOUSANGEN_DRAGON_SET_COUNT: usize = 2;
 const SUIT_COUNT: usize = 3;
@@ -319,19 +322,37 @@ fn tile_composition_yaku(tiles: &[TileType]) -> Vec<Yaku> {
     yaku
 }
 
+/// 通常形の面子4つの shape。門前の面子と固定面子を合わせて4つに満たない場合と、固定面子の
+/// shape が不正な場合は `None`。
+///
+/// 通常形の面子数は常に [`FixedMeldCount::MAX`] なので、確保し直す `Vec` を作らずに固定長の
+/// 配列で返す。役・符・役満の判定はどれもこの面子一式をそのまま読むだけで、面子の求め方は
+/// 変わらない。
 pub(crate) fn standard_meld_shapes(
     standard: &StandardDecomposition,
     fixed_melds: &[Meld],
-) -> Option<Vec<MeldShape>> {
-    let mut shapes: Vec<MeldShape> = standard
-        .concealed_melds()
-        .iter()
-        .map(|meld| meld.shape())
-        .collect();
-    for meld in fixed_melds {
-        shapes.push(meld.shape()?);
+) -> Option<[MeldShape; STANDARD_MELD_COUNT]> {
+    if standard.concealed_melds().len() + fixed_melds.len() != STANDARD_MELD_COUNT {
+        return None;
     }
-    (shapes.len() == usize::from(FixedMeldCount::MAX)).then_some(shapes)
+
+    let mut shapes = [None; STANDARD_MELD_COUNT];
+    for (slot, shape) in shapes.iter_mut().zip(
+        standard
+            .concealed_melds()
+            .iter()
+            .map(|meld| Some(meld.shape()))
+            .chain(fixed_melds.iter().map(Meld::shape)),
+    ) {
+        *slot = shape;
+    }
+
+    match shapes {
+        [Some(first), Some(second), Some(third), Some(fourth)] => {
+            Some([first, second, third, fourth])
+        }
+        _ => None,
+    }
 }
 
 fn identical_concealed_sequence_pairs(standard: &StandardDecomposition) -> usize {
@@ -471,6 +492,71 @@ mod tests {
 
     fn tile_type(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).unwrap()
+    }
+
+    #[test]
+    fn the_standard_meld_shapes_are_the_four_melds_of_the_decomposition() {
+        // 門前形と副露形のどちらでも、門前の面子と固定面子を合わせた4面子をそのまま並べる。
+        let mut source = TileIdSource::new();
+        let tiles = source.tiles(&[
+            "2m", "3m", "4m", "3m", "4m", "5m", "4p", "5p", "6p", "7s", "8s", "9s", "1p", "1p",
+        ]);
+        let analysis = analyze_completed_hand(&tiles, &[]).unwrap();
+        let standard = analysis.standard_decompositions().next().unwrap();
+
+        assert_eq!(
+            standard_meld_shapes(standard, &[]),
+            Some([
+                MeldShape::Sequence {
+                    start: tile_type("2m")
+                },
+                MeldShape::Sequence {
+                    start: tile_type("3m")
+                },
+                MeldShape::Sequence {
+                    start: tile_type("4p")
+                },
+                MeldShape::Sequence {
+                    start: tile_type("7s")
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_meld_count_other_than_four_has_no_standard_meld_shapes() {
+        // 面子が4つに満たない / 多すぎる組み合わせは面子一式にならない。同じ decomposition
+        // でも渡された固定面子と合わせて4つでなければ確定しない。
+        let mut source = TileIdSource::new();
+        let melded = source.meld(MeldKind::Pon, &["1s", "1s", "1s"]);
+        let tiles = source.tiles(&[
+            "2m", "3m", "4m", "3m", "4m", "5m", "4p", "5p", "6p", "1p", "1p",
+        ]);
+        let analysis = analyze_completed_hand(&tiles, std::slice::from_ref(&melded)).unwrap();
+        let standard = analysis.standard_decompositions().next().unwrap();
+
+        assert!(standard_meld_shapes(standard, std::slice::from_ref(&melded)).is_some());
+        assert_eq!(standard_meld_shapes(standard, &[]), None);
+        assert_eq!(
+            standard_meld_shapes(standard, &[melded.clone(), melded.clone()]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_fixed_meld_without_a_shape_has_no_standard_meld_shapes() {
+        // 固定面子の shape が不正なら、面子一式を推測しない。
+        let mut source = TileIdSource::new();
+        let melded = source.meld(MeldKind::Pon, &["1s", "1s", "1s"]);
+        let tiles = source.tiles(&[
+            "2m", "3m", "4m", "3m", "4m", "5m", "4p", "5p", "6p", "1p", "1p",
+        ]);
+        let analysis = analyze_completed_hand(&tiles, std::slice::from_ref(&melded)).unwrap();
+        let standard = analysis.standard_decompositions().next().unwrap();
+        let broken = Meld::new(MeldKind::Pon, source.tiles(&["2s", "3s", "4s"]), None);
+
+        assert_eq!(broken.shape(), None);
+        assert_eq!(standard_meld_shapes(standard, &[broken]), None);
     }
 
     fn only_yaku(evaluations: &[StructuralYakuEvaluation<'_>]) -> Vec<Yaku> {

@@ -136,9 +136,26 @@ pub fn evaluate_winning_fu(
     context: WinningContext,
     winning_tile: TileType,
 ) -> Vec<WinningFuEvaluation<'_>> {
-    evaluate_winning_yaku(analysis, context, winning_tile)
+    winning_fu_evaluations(
+        &evaluate_winning_yaku(analysis, context, winning_tile),
+        analysis.fixed_melds(),
+        context,
+    )
+}
+
+/// 評価済みの待ちごとの役から符を求める。
+///
+/// 符は役 (平和) に依存するため、必ず同じ完成手・同じ和了牌の役評価から導く。役評価を持って
+/// いる呼び出し側が同じ判定をもう一度走らせないための入口で、結果は
+/// [`evaluate_winning_fu`] と同じ。
+pub(crate) fn winning_fu_evaluations<'a>(
+    yaku_evaluations: &[WinningYakuEvaluation<'a>],
+    fixed_melds: &[Meld],
+    context: WinningContext,
+) -> Vec<WinningFuEvaluation<'a>> {
+    yaku_evaluations
         .iter()
-        .map(|evaluation| winning_fu(evaluation, analysis.fixed_melds(), context))
+        .map(|evaluation| winning_fu(evaluation, fixed_melds, context))
         .collect()
 }
 
