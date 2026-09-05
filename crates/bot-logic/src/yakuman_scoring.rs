@@ -104,6 +104,21 @@ pub(crate) fn yakuman_scoring_candidates<'a>(
     context: WinningContext,
     interpretations: &[WinningTileInterpretation<'a>],
 ) -> Result<Vec<YakumanScoringCandidate<'a>>, YakumanScoringError> {
+    let mut candidates = Vec::new();
+    for_each_yakuman_scoring_candidate(analysis, context, interpretations, |candidate| {
+        candidates.push(candidate)
+    })?;
+    Ok(candidates)
+}
+
+/// 候補は順番どおりに所有権を渡し、最初の error で停止する。
+/// error の場合、それまでに渡した候補も呼び出し側で破棄する。
+pub(crate) fn for_each_yakuman_scoring_candidate<'a>(
+    analysis: &'a CompletedHandAnalysis,
+    context: WinningContext,
+    interpretations: &[WinningTileInterpretation<'a>],
+    mut visit: impl FnMut(YakumanScoringCandidate<'a>),
+) -> Result<(), YakumanScoringError> {
     let Some(seat_wind) = context.seat_wind() else {
         return Err(YakumanScoringError::MissingSeatWind);
     };
@@ -112,7 +127,10 @@ pub(crate) fn yakuman_scoring_candidates<'a>(
     winning_yakuman_evaluations(analysis, context, interpretations)
         .filter(|evaluation| !evaluation.is_empty())
         .map(|evaluation| candidate(analysis, &evaluation, context, is_dealer))
-        .collect()
+        .try_for_each(|candidate| {
+            visit(candidate?);
+            Ok(())
+        })
 }
 
 fn candidate<'a>(

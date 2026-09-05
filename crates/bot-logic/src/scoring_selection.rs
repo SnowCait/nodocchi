@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use crate::normal_hand_scoring::{NormalScoringCandidate, NormalScoringState};
 use crate::payment::Payment;
 use crate::winning_tile::WinningTileInterpretation;
@@ -71,22 +73,22 @@ pub fn select_best_scoring_candidate<'a, 'h>(
     normal_candidates: &'a [NormalScoringCandidate<'h>],
     yakuman_candidates: &'a [YakumanScoringCandidate<'h>],
 ) -> BestScoringSelection<'a, 'h> {
-    let best_normal = best_known_normal_candidate(normal_candidates);
-
-    if let Some(best_yakuman) = best_yakuman_candidate(yakuman_candidates) {
-        return BestScoringSelection::Known(best_route(best_normal, best_yakuman));
+    let mut selection = ScoringSelector::new();
+    for candidate in normal_candidates {
+        selection.consider_normal(candidate);
     }
-
-    if normal_candidates
-        .iter()
-        .any(|candidate| !candidate.state().is_known())
-    {
-        return BestScoringSelection::IndeterminateBonusHan;
+    for candidate in yakuman_candidates {
+        selection.consider_yakuman(candidate);
     }
-
-    match best_normal {
-        Some((candidate, _)) => BestScoringSelection::Known(ScoringCandidateRef::Normal(candidate)),
-        None => BestScoringSelection::NoCandidate,
+    match selection.finish() {
+        ScoringSelection::NoCandidate => BestScoringSelection::NoCandidate,
+        ScoringSelection::Normal(candidate) => {
+            BestScoringSelection::Known(ScoringCandidateRef::Normal(candidate))
+        }
+        ScoringSelection::Yakuman(candidate) => {
+            BestScoringSelection::Known(ScoringCandidateRef::Yakuman(candidate))
+        }
+        ScoringSelection::IndeterminateBonusHan => BestScoringSelection::IndeterminateBonusHan,
     }
 }
 
@@ -97,49 +99,80 @@ struct KnownNormalScore {
     fu: u8,
 }
 
-fn best_route<'a, 'h>(
-    normal: Option<(&'a NormalScoringCandidate<'h>, KnownNormalScore)>,
-    yakuman: &'a YakumanScoringCandidate<'h>,
-) -> ScoringCandidateRef<'a, 'h> {
-    match normal {
-        Some((candidate, score)) if score.payment_total > yakuman.payment().total() => {
-            ScoringCandidateRef::Normal(candidate)
-        }
-        _ => ScoringCandidateRef::Yakuman(yakuman),
-    }
+pub(crate) enum ScoringSelection<N, Y> {
+    NoCandidate,
+    Normal(N),
+    Yakuman(Y),
+    IndeterminateBonusHan,
 }
 
-fn best_known_normal_candidate<'a, 'h>(
-    candidates: &'a [NormalScoringCandidate<'h>],
-) -> Option<(&'a NormalScoringCandidate<'h>, KnownNormalScore)> {
-    let mut best: Option<(&'a NormalScoringCandidate<'h>, KnownNormalScore)> = None;
+/// public slice API は参照を、best-value 経路は候補そのものを保持する。
+/// 比較規則と unknown の扱いは両方で共有し、完全同点なら先の候補を残す。
+pub(crate) struct ScoringSelector<N, Y> {
+    best_normal: Option<(N, KnownNormalScore)>,
+    best_yakuman: Option<Y>,
+    unknown_normal: bool,
+}
 
-    for candidate in candidates {
-        let Some(score) = known_normal_score(candidate) else {
-            continue;
+impl<'h, N, Y> ScoringSelector<N, Y>
+where
+    N: Borrow<NormalScoringCandidate<'h>>,
+    Y: Borrow<YakumanScoringCandidate<'h>>,
+{
+    pub(crate) fn new() -> Self {
+        Self {
+            best_normal: None,
+            best_yakuman: None,
+            unknown_normal: false,
+        }
+    }
+
+    pub(crate) fn consider_normal(&mut self, candidate: N) {
+        let Some(score) = known_normal_score(candidate.borrow()) else {
+            self.unknown_normal = true;
+            return;
         };
-        match best {
+        match self.best_normal {
             Some((_, best_score)) if !normal_score_is_better(score, best_score) => {}
-            _ => best = Some((candidate, score)),
+            _ => self.best_normal = Some((candidate, score)),
         }
     }
 
-    best
-}
-
-fn best_yakuman_candidate<'a, 'h>(
-    candidates: &'a [YakumanScoringCandidate<'h>],
-) -> Option<&'a YakumanScoringCandidate<'h>> {
-    let mut best: Option<&'a YakumanScoringCandidate<'h>> = None;
-
-    for candidate in candidates {
-        match best {
-            Some(best_candidate) if !yakuman_candidate_is_better(candidate, best_candidate) => {}
-            _ => best = Some(candidate),
+    pub(crate) fn consider_yakuman(&mut self, candidate: Y) {
+        match &self.best_yakuman {
+            Some(best) if !yakuman_candidate_is_better(candidate.borrow(), best.borrow()) => {}
+            _ => self.best_yakuman = Some(candidate),
         }
     }
 
-    best
+    pub(crate) fn has_yakuman(&self) -> bool {
+        self.best_yakuman.is_some()
+    }
+
+    pub(crate) fn discard_normal(&mut self) {
+        self.best_normal = None;
+        self.unknown_normal = false;
+    }
+
+    pub(crate) fn finish(self) -> ScoringSelection<N, Y> {
+        if let Some(yakuman) = self.best_yakuman {
+            return match self.best_normal {
+                Some((normal, score))
+                    if score.payment_total > yakuman.borrow().payment().total() =>
+                {
+                    ScoringSelection::Normal(normal)
+                }
+                _ => ScoringSelection::Yakuman(yakuman),
+            };
+        }
+        if self.unknown_normal {
+            return ScoringSelection::IndeterminateBonusHan;
+        }
+        match self.best_normal {
+            Some((candidate, _)) => ScoringSelection::Normal(candidate),
+            None => ScoringSelection::NoCandidate,
+        }
+    }
 }
 
 fn known_normal_score(candidate: &NormalScoringCandidate<'_>) -> Option<KnownNormalScore> {
@@ -551,6 +584,85 @@ mod tests {
             select_best_scoring_candidate(&normal, &yakuman),
             BestScoringSelection::Known(ScoringCandidateRef::Yakuman(&yakuman[0]))
         );
+    }
+
+    #[test]
+    fn a_yakuman_allows_known_normal_payment_to_win_despite_an_unknown_normal() {
+        let setup = Setup::new(&TANYAO_SUUANKOU, &[], &["1m", "2m", "3p"]);
+        // public selection は異なる状況の候補も受け取れる。親の数え役満を子の役満と比較する。
+        let mut normal =
+            setup.normal_candidates(tsumo().with_seat_wind(Some(tile_type("E"))), "5s");
+        normal.extend(setup.normal_candidates(riichi(tsumo()), "5s"));
+        let yakuman = setup.yakuman_candidates(tsumo(), "5s");
+        assert_eq!(payment_totals(&normal), vec![Some(48000), None]);
+        assert_eq!(yakuman[0].payment().total(), 32000);
+        assert_eq!(
+            select_best_scoring_candidate(&normal, &[]),
+            BestScoringSelection::IndeterminateBonusHan
+        );
+        for reverse in [false, true] {
+            if reverse {
+                normal.reverse();
+            }
+            let best_index = usize::from(reverse);
+            assert_eq!(
+                select_best_scoring_candidate(&normal, &yakuman),
+                BestScoringSelection::Known(ScoringCandidateRef::Normal(&normal[best_index]))
+            );
+            let mut owned = ScoringSelector::new();
+            for candidate in normal.clone() {
+                owned.consider_normal(candidate);
+            }
+            for candidate in yakuman.clone() {
+                owned.consider_yakuman(candidate);
+            }
+            assert!(
+                matches!(owned.finish(), ScoringSelection::Normal(candidate) if candidate == normal[best_index])
+            );
+        }
+    }
+
+    #[test]
+    fn equal_yakuman_payments_choose_the_higher_multiplier() {
+        let double = hand(&TANYAO_SUUANKOU);
+        let triple = hand(&GREEN_TWO_DECOMPOSITIONS);
+        let mut yakuman =
+            double.yakuman_candidates(ron().with_seat_wind(Some(tile_type("E"))), "6p");
+        yakuman.push(triple.yakuman_candidates(ron(), "6s").remove(1));
+        assert_eq!(
+            yakuman
+                .iter()
+                .map(|c| (c.payment().total(), c.total_multiplier()))
+                .collect::<Vec<_>>(),
+            vec![(96000, 2), (96000, 3)]
+        );
+        for reverse in [false, true] {
+            if reverse {
+                yakuman.reverse();
+            }
+            assert_eq!(
+                select_best_scoring_candidate(&[], &yakuman),
+                BestScoringSelection::Known(ScoringCandidateRef::Yakuman(
+                    &yakuman[usize::from(!reverse)]
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn equal_yakuman_scores_keep_the_first_candidate() {
+        let setup = hand(&KOKUSHI_HAND);
+        let mut yakuman = setup.yakuman_candidates(ron(), "9m");
+        yakuman.extend(setup.yakuman_candidates(ron(), "9p"));
+        for reverse in [false, true] {
+            if reverse {
+                yakuman.reverse();
+            }
+            assert_eq!(
+                select_best_scoring_candidate(&[], &yakuman),
+                BestScoringSelection::Known(ScoringCandidateRef::Yakuman(&yakuman[0]))
+            );
+        }
     }
 
     #[test]

@@ -2,17 +2,15 @@ use thiserror::Error;
 
 use crate::completed_hand::{CompletedHandAnalysis, CompletedHandDecomposition};
 use crate::normal_hand_scoring::{
-    NormalScoringCandidate, NormalScoringError, normal_scoring_candidates,
+    NormalScoringCandidate, NormalScoringError, for_each_normal_scoring_candidate,
 };
 use crate::payment::Payment;
-use crate::scoring_selection::{
-    BestScoringSelection, ScoringCandidateRef, select_best_scoring_candidate,
-};
+use crate::scoring_selection::{ScoringCandidateRef, ScoringSelection, ScoringSelector};
 use crate::tile::{TileId, TileType};
 use crate::winning_context::WinningContext;
 use crate::winning_tile::{WinningTileInterpretation, interpret_winning_tile};
 use crate::yakuman_scoring::{
-    YakumanScoringCandidate, YakumanScoringError, yakuman_scoring_candidates,
+    YakumanScoringCandidate, YakumanScoringError, for_each_yakuman_scoring_candidate,
 };
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -109,51 +107,50 @@ pub fn evaluate_hand_value<'a>(
 ) -> Result<HandValueOutcome<'a>, HandValueError> {
     // 和了牌の解釈は和了状況にもドラにも依らないので、役と役満で1回だけ求める。
     let interpretations = interpret_winning_tile(analysis, winning_tile);
-    let normal_scoring = normal_scoring_candidates(
+    let mut selection = ScoringSelector::new();
+    let normal_scoring = for_each_normal_scoring_candidate(
         analysis,
         context,
         dora_indicators,
         ura_dora_indicators,
         &interpretations,
+        |candidate| selection.consider_normal(candidate),
     );
-    let yakuman_candidates = match yakuman_scoring_candidates(analysis, context, &interpretations) {
-        Ok(candidates) => candidates,
-        Err(yakuman_error) => {
-            return Err(match normal_scoring {
-                Err(normal_error) => normal_error.into(),
-                Ok(_) => yakuman_error.into(),
-            });
-        }
-    };
-    let normal_candidates = match normal_scoring {
-        Ok(candidates) => candidates,
-        Err(NormalScoringError::IncompleteContext(_)) if !yakuman_candidates.is_empty() => {
-            Vec::new()
+    if let Err(yakuman_error) =
+        for_each_yakuman_scoring_candidate(analysis, context, &interpretations, |candidate| {
+            selection.consider_yakuman(candidate)
+        })
+    {
+        return Err(match normal_scoring {
+            Err(normal_error) => normal_error.into(),
+            Ok(()) => yakuman_error.into(),
+        });
+    }
+    match normal_scoring {
+        Ok(()) => {}
+        Err(NormalScoringError::IncompleteContext(_)) if selection.has_yakuman() => {
+            selection.discard_normal();
         }
         Err(normal_error) => return Err(normal_error.into()),
-    };
-
-    Ok(
-        match select_best_scoring_candidate(&normal_candidates, &yakuman_candidates) {
-            BestScoringSelection::NoCandidate => HandValueOutcome::NoCandidate,
-            BestScoringSelection::IndeterminateBonusHan => HandValueOutcome::IndeterminateBonusHan,
-            BestScoringSelection::Known(candidate) => {
-                HandValueOutcome::Known(hand_value(candidate))
-            }
-        },
-    )
-}
-
-fn hand_value<'h>(candidate: ScoringCandidateRef<'_, 'h>) -> HandValue<'h> {
-    match candidate {
-        ScoringCandidateRef::Normal(candidate) => HandValue::Normal(candidate.clone()),
-        ScoringCandidateRef::Yakuman(candidate) => HandValue::Yakuman(candidate.clone()),
     }
+
+    Ok(match selection.finish() {
+        ScoringSelection::NoCandidate => HandValueOutcome::NoCandidate,
+        ScoringSelection::IndeterminateBonusHan => HandValueOutcome::IndeterminateBonusHan,
+        ScoringSelection::Normal(candidate) => {
+            HandValueOutcome::Known(HandValue::Normal(candidate))
+        }
+        ScoringSelection::Yakuman(candidate) => {
+            HandValueOutcome::Known(HandValue::Yakuman(candidate))
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scoring_selection::{BestScoringSelection, select_best_scoring_candidate};
+
     use crate::completed_hand::analyze_completed_hand;
     use crate::meld::{Meld, MeldKind};
     use crate::normal_hand_scoring::MissingScoringFact;
@@ -163,6 +160,13 @@ mod tests {
     use crate::yaku::Yaku;
     use crate::yakuman::Yakuman;
     use crate::yakuman_scoring::evaluate_yakuman_scoring;
+
+    fn hand_value<'h>(candidate: ScoringCandidateRef<'_, 'h>) -> HandValue<'h> {
+        match candidate {
+            ScoringCandidateRef::Normal(candidate) => HandValue::Normal(candidate.clone()),
+            ScoringCandidateRef::Yakuman(candidate) => HandValue::Yakuman(candidate.clone()),
+        }
+    }
 
     struct TileIdSource {
         used: [bool; TileId::COUNT],
@@ -422,6 +426,47 @@ mod tests {
                 }
             },
         )
+    }
+
+    #[test]
+    fn streaming_matches_materialized_hand_value_over_the_completed_hand_corpus() {
+        for analysis in crate::completed_hand_corpus::analyses() {
+            for context in crate::completed_hand_corpus::winning_contexts() {
+                for raw in 0..TileType::COUNT as u8 {
+                    let winning_tile = TileType::new(raw).unwrap();
+                    for ura in [None, Some(&[][..])] {
+                        assert_eq!(
+                            evaluate_hand_value(&analysis, context, winning_tile, &[], ura),
+                            reference_outcome(&analysis, context, winning_tile, &[], ura),
+                            "{analysis:?} {context:?} {winning_tile:?} {ura:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_error_takes_precedence_when_both_routes_fail() {
+        let setup = hand(&KOKUSHI_HAND);
+        for (context, missing) in [
+            (
+                WinningContext::new(WinMethod::Ron),
+                MissingScoringFact::RoundWind,
+            ),
+            (ron().with_seat_wind(None), MissingScoringFact::SeatWind),
+        ] {
+            assert_eq!(
+                evaluate_yakuman_scoring(&setup.analysis, context, tile_type("9m")),
+                Err(YakumanScoringError::MissingSeatWind)
+            );
+            assert_eq!(
+                evaluate_hand_value(&setup.analysis, context, tile_type("9m"), &[], None),
+                Err(HandValueError::NormalScoring(
+                    NormalScoringError::IncompleteContext(missing)
+                ))
+            );
+        }
     }
 
     #[test]
