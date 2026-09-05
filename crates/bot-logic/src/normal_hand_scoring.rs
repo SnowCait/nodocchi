@@ -152,6 +152,28 @@ pub(crate) fn normal_scoring_candidates<'a>(
     ura_dora_indicators: Option<&[TileId]>,
     interpretations: &[WinningTileInterpretation<'a>],
 ) -> Result<Vec<NormalScoringCandidate<'a>>, NormalScoringError> {
+    let mut candidates = Vec::new();
+    for_each_normal_scoring_candidate(
+        analysis,
+        context,
+        dora_indicators,
+        ura_dora_indicators,
+        interpretations,
+        |candidate| candidates.push(candidate),
+    )?;
+    Ok(candidates)
+}
+
+/// 候補は順番どおりに所有権を渡し、最初の error で停止する。
+/// error の場合、それまでに渡した候補も呼び出し側で破棄する。
+pub(crate) fn for_each_normal_scoring_candidate<'a>(
+    analysis: &'a CompletedHandAnalysis,
+    context: WinningContext,
+    dora_indicators: &[TileId],
+    ura_dora_indicators: Option<&[TileId]>,
+    interpretations: &[WinningTileInterpretation<'a>],
+    mut visit: impl FnMut(NormalScoringCandidate<'a>),
+) -> Result<(), NormalScoringError> {
     let seat_wind = exact_scoring_context(context)?;
     let is_dealer = TileType::wind_from_seat_index(DEALER_SEAT_INDEX) == Some(seat_wind);
 
@@ -174,7 +196,10 @@ pub(crate) fn normal_scoring_candidates<'a>(
                 is_dealer,
             ))
         })
-        .collect()
+        .try_for_each(|candidate| {
+            visit(candidate?);
+            Ok(())
+        })
 }
 
 fn exact_scoring_context(context: WinningContext) -> Result<TileType, NormalScoringError> {
