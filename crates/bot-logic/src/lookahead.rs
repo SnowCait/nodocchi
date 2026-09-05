@@ -1761,7 +1761,7 @@ fn next_discard(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
         .iter()
         .map(|evaluation| {
             let view = evaluation.view();
-            view.decorated(discard_decoration(view, &state.counts, &context))
+            view.decorated(discard_decoration(&view, &state.counts, &context))
         })
         .collect();
 

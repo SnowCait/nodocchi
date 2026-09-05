@@ -295,7 +295,7 @@ pub fn compare_discard_selection_candidates(
     current_best: &DiscardSelectionCandidate,
 ) -> DiscardComparison {
     if let Some(comparison) =
-        compare_discard_before_acceptance(candidate.evaluation, current_best.evaluation)
+        compare_discard_before_acceptance(&candidate.evaluation, &current_best.evaluation)
     {
         return comparison;
     }
@@ -332,7 +332,7 @@ pub fn compare_discard_selection_candidates(
         return comparison;
     }
 
-    compare_discard_from_acceptance(candidate.evaluation, current_best.evaluation)
+    compare_discard_from_acceptance(&candidate.evaluation, &current_best.evaluation)
 }
 
 /// 前方集計値を含む比較順で最善候補の index を返す。完全同値では先に現れた候補を維持する。
@@ -411,7 +411,7 @@ fn cohort_members<'a>(
     index: usize,
 ) -> impl Iterator<Item = usize> + 'a {
     (0..evaluations.len()).filter(move |&other| {
-        compare_discard_before_acceptance(evaluations[index], evaluations[other]).is_none()
+        compare_discard_before_acceptance(&evaluations[index], &evaluations[other]).is_none()
     })
 }
 
@@ -884,8 +884,8 @@ pub(crate) fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool
     };
     for index in 1..evaluations.len() {
         if compare_discard_before_acceptance(
-            evaluations[index].view(),
-            evaluations[best_index].view(),
+            &evaluations[index].view(),
+            &evaluations[best_index].view(),
         )
         .is_some_and(|comparison| comparison.candidate_is_better)
         {
@@ -898,7 +898,7 @@ pub(crate) fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool
     evaluations
         .iter()
         .map(|evaluation| {
-            compare_discard_before_acceptance(evaluation.view(), evaluations[best_index].view())
+            compare_discard_before_acceptance(&evaluation.view(), &evaluations[best_index].view())
                 .is_none()
         })
         .collect()
