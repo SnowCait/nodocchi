@@ -6,6 +6,9 @@
 //! 計算は要約4つの組み合わせだけにする。
 //!
 //! 群ごとの列挙は牌姿だけで決まるので、副露済み面子数は組み合わせ側で足す。
+//!
+//! 1牌だけ加えた牌姿は元の牌姿と3群を共有するので、加えた牌が属する群の要約だけを取り直し、
+//! 残り3群の畳み込み結果を使い回す ([`standard_shanten_with_after_draws`])。
 
 use crate::tile::TileType;
 use std::cell::RefCell;
@@ -28,6 +31,14 @@ const COMPUTED_FLAG: u32 = 1 << 30;
 const SUIT_PATTERNS: usize = 5usize.pow(SUIT_TILES as u32);
 const HONOR_PATTERNS: usize = 5usize.pow(HONOR_TILES as u32);
 
+/// 面子も搭子も跨がない4群 (萬子・筒子・索子・字牌) の範囲と、順子を作れるかどうか。
+const GROUPS: [(usize, usize, bool); 4] = [
+    (0, 9, true),
+    (9, 18, true),
+    (18, 27, true),
+    (27, TileType::COUNT, false),
+];
+
 /// 1群から取り出せる面子・搭子・雀頭の組み合わせの要約。
 ///
 /// `max_partials[面子数][雀頭を取ったか]` は、その面子数と雀頭の取り方で同時に取れる搭子の最大数。
@@ -42,6 +53,82 @@ impl BlockProfile {
     const EMPTY: Self = Self {
         max_partials: [[INFEASIBLE; 2]; MAX_BLOCKS + 1],
     };
+
+    /// どの群からも何も取っていない状態。群を足し合わせる畳み込みの単位元。
+    const NOTHING_TAKEN: Self = {
+        let mut max_partials = [[INFEASIBLE; 2]; MAX_BLOCKS + 1];
+        max_partials[0][0] = 0;
+        Self { max_partials }
+    };
+
+    /// 牌を共有しない2つの取り出し方を足し合わせる。
+    ///
+    /// 面子数は4を超えても、搭子数は `4 - 面子数` を超えても向聴数に効かないため、いずれも途中で
+    /// 頭打ちにする。頭打ちにした組み合わせと同じ値を持つ「面子も搭子も4個以内」の取り出し方は
+    /// 必ず存在する (余分な面子や搭子を捨てるだけ) ので、これで過大評価は起きない。
+    ///
+    /// 雀頭は手牌全体で1つだけなので、両側が雀頭を取った組み合わせは作らない。どちらの側が雀頭を
+    /// 出しても同じ枠へ入れるので、群をどの順で足しても同じ結果になる。
+    ///
+    /// 面子数を減らせば必ず取り出せる (余った面子を崩すだけ) ので、雀頭なしで取り出せない面子数
+    /// より先は両側とも見なくてよい。この性質は足し合わせた結果でも保たれる。
+    fn merge(&self, other: &Self) -> Self {
+        let mut merged = Self::EMPTY;
+
+        for (melds, by_pair) in self.max_partials.iter().enumerate() {
+            if by_pair[0] < 0 {
+                break;
+            }
+
+            for (added, added_by_pair) in other.max_partials.iter().enumerate() {
+                let without_pair = added_by_pair[0];
+                if without_pair < 0 {
+                    break;
+                }
+                let with_pair = added_by_pair[1];
+                let total = (melds + added).min(MAX_BLOCKS);
+
+                for (pair, &partials) in by_pair.iter().enumerate() {
+                    if partials < 0 {
+                        continue;
+                    }
+
+                    let combined = (partials + without_pair).min(MAX_BLOCKS as i8);
+                    if combined > merged.max_partials[total][pair] {
+                        merged.max_partials[total][pair] = combined;
+                    }
+
+                    if pair == 0 && with_pair >= 0 {
+                        let combined = (partials + with_pair).min(MAX_BLOCKS as i8);
+                        if combined > merged.max_partials[total][1] {
+                            merged.max_partials[total][1] = combined;
+                        }
+                    }
+                }
+            }
+        }
+
+        merged
+    }
+
+    /// 手牌全体の取り出し方から向聴数を求める。副露済み面子数は面子として数える。
+    fn shanten(&self, fixed_melds: u8) -> i8 {
+        let mut value = 0i8;
+        for (melds, by_pair) in self.max_partials.iter().enumerate() {
+            let total = (usize::from(fixed_melds) + melds).min(MAX_BLOCKS) as i8;
+            for (pair, &partials) in by_pair.iter().enumerate() {
+                if partials < 0 {
+                    continue;
+                }
+                let candidate = 2 * total + partials.min(MAX_BLOCKS as i8 - total) + pair as i8;
+                if candidate > value {
+                    value = candidate;
+                }
+            }
+        }
+
+        8 - value
+    }
 
     fn record(&mut self, taken: Extraction) {
         let slot = &mut self.max_partials[taken.melds][usize::from(taken.has_pair)];
@@ -145,85 +232,66 @@ fn pattern_index(counts: &[u8]) -> Option<usize> {
 }
 
 pub(super) fn standard_shanten(counts: &[u8; TileType::COUNT], fixed_melds: u8) -> i8 {
-    let profiles = PROFILE_TABLES.with_borrow_mut(|tables| {
-        [
-            tables.profile(&counts[0..9], true),
-            tables.profile(&counts[9..18], true),
-            tables.profile(&counts[18..27], true),
-            tables.profile(&counts[27..34], false),
-        ]
-    });
-
-    combine(&profiles, fixed_melds)
+    PROFILE_TABLES.with_borrow_mut(|tables| {
+        let mut combined = BlockProfile::NOTHING_TAKEN;
+        for &(start, end, suited) in &GROUPS {
+            combined = combined.merge(&tables.profile(&counts[start..end], suited));
+        }
+        combined.shanten(fixed_melds)
+    })
 }
 
-/// 群ごとの要約を足し合わせて向聴数にする。
+/// 現在の牌姿と、牌種を1枚ずつ加えた牌姿の通常形向聴数をまとめて求める。
 ///
-/// 面子数は4を超えても、搭子数は `4 - 面子数` を超えても向聴数に効かないため、いずれも途中で
-/// 頭打ちにする。頭打ちにした組み合わせと同じ値を持つ「面子も搭子も4個以内」の取り出し方は必ず
-/// 存在する (余分な面子や搭子を捨てるだけ) ので、これで過大評価は起きない。
-fn combine(profiles: &[BlockProfile; 4], fixed_melds: u8) -> i8 {
-    // best[面子数][雀頭を取ったか] = そこまでの群から取れる搭子の最大数。
-    let mut best = [[INFEASIBLE; 2]; MAX_BLOCKS + 1];
-    best[0][0] = 0;
-    let mut reach = 0usize;
+/// 1牌加えても要約が変わるのはその牌が属する1群だけなので、群ごとに「自分以外の3群の畳み込み」を
+/// 一度だけ作り、牌ごとには取り直した1群を足すだけにする。牌ごとに4群を組み立て直した場合と同じ
+/// 畳み込みを同じ順序制約なしで得るための構造で、向聴数そのものは [`standard_shanten`] と同じ。
+///
+/// `after_draw[牌種]` は5枚目が無い (既に4枚持っている) 牌種では [`None`]。
+pub(super) fn standard_shanten_with_after_draws(
+    counts: &[u8; TileType::COUNT],
+    fixed_melds: u8,
+    after_draw: &mut [Option<i8>; TileType::COUNT],
+) -> i8 {
+    PROFILE_TABLES.with_borrow_mut(|tables| {
+        let base: [BlockProfile; GROUPS.len()] = std::array::from_fn(|group| {
+            let (start, end, suited) = GROUPS[group];
+            tables.profile(&counts[start..end], suited)
+        });
 
-    for profile in profiles {
-        let mut next = [[INFEASIBLE; 2]; MAX_BLOCKS + 1];
+        // prefix[i] は群 0..i の、suffix[i] は群 i.. の畳み込み。
+        let mut prefix = [BlockProfile::NOTHING_TAKEN; GROUPS.len() + 1];
+        for group in 0..GROUPS.len() {
+            prefix[group + 1] = prefix[group].merge(&base[group]);
+        }
+        let mut suffix = [BlockProfile::NOTHING_TAKEN; GROUPS.len() + 1];
+        for group in (0..GROUPS.len()).rev() {
+            suffix[group] = suffix[group + 1].merge(&base[group]);
+        }
 
-        for (added, by_pair) in profile.max_partials.iter().enumerate() {
-            let without_pair = by_pair[0];
-            // 面子数を減らせば必ず取り出せるので、取り出せない面子数より先は見なくてよい。
-            if without_pair < 0 {
-                break;
-            }
-            let with_pair = by_pair[1];
+        let mut working = [0u8; SUIT_TILES];
+        for (group, &(start, end, suited)) in GROUPS.iter().enumerate() {
+            let others = prefix[group].merge(&suffix[group + 1]);
+            let width = end - start;
+            working[..width].copy_from_slice(&counts[start..end]);
 
-            for (melds, carried) in best.iter().enumerate().take(reach + 1) {
-                let total = (melds + added).min(MAX_BLOCKS);
-
-                for (pair, &partials) in carried.iter().enumerate() {
-                    if partials < 0 {
-                        continue;
-                    }
-
-                    let combined = (partials + without_pair).min(MAX_BLOCKS as i8);
-                    if combined > next[total][pair] {
-                        next[total][pair] = combined;
-                    }
-
-                    if pair == 0 && with_pair >= 0 {
-                        let combined = (partials + with_pair).min(MAX_BLOCKS as i8);
-                        if combined > next[total][1] {
-                            next[total][1] = combined;
-                        }
-                    }
+            for offset in 0..width {
+                let tile = start + offset;
+                if counts[tile] >= MAX_COPIES {
+                    after_draw[tile] = None;
+                    continue;
                 }
+
+                working[offset] += 1;
+                let drawn = tables.profile(&working[..width], suited);
+                working[offset] -= 1;
+
+                after_draw[tile] = Some(others.merge(&drawn).shanten(fixed_melds));
             }
         }
 
-        best = next;
-        reach = best
-            .iter()
-            .rposition(|carried| carried.iter().any(|&partials| partials >= 0))
-            .unwrap_or(0);
-    }
-
-    let mut value = 0i8;
-    for (melds, carried) in best.iter().enumerate() {
-        let total = (usize::from(fixed_melds) + melds).min(MAX_BLOCKS) as i8;
-        for (pair, &partials) in carried.iter().enumerate() {
-            if partials < 0 {
-                continue;
-            }
-            let candidate = 2 * total + partials.min(MAX_BLOCKS as i8 - total) + pair as i8;
-            if candidate > value {
-                value = candidate;
-            }
-        }
-    }
-
-    8 - value
+        prefix[GROUPS.len()].shanten(fixed_melds)
+    })
 }
 
 fn compute_profile(counts: &[u8], suited: bool) -> BlockProfile {

@@ -1,11 +1,14 @@
 use crate::count_hasher::CountHasherBuilder;
 use crate::shanten::{
     EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,
-    calculate_shanten_with_fixed_melds,
+    calculate_shanten_with_after_draws,
 };
 use crate::tile::{TileId, TileType};
 use crate::tile_counts::TileCounts;
 use std::collections::HashMap;
+
+#[cfg(test)]
+mod differential;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptanceTile<S = Shanten> {
@@ -216,18 +219,13 @@ struct AcceptanceSkeleton {
 
 impl AcceptanceSkeleton {
     fn calculate(counts: &TileCounts, fixed_meld_count: FixedMeldCount) -> Self {
-        let mut after_draw = [None; TileType::COUNT];
-        for tile in TileType::all() {
-            let mut added = *counts;
-            if added.try_add(tile).is_ok() {
-                after_draw[tile.index()] =
-                    Some(calculate_shanten_with_fixed_melds(&added, fixed_meld_count));
-            }
-        }
+        // 現在の向聴数とツモ後の向聴数は必ず揃って要るので、向聴計算側でまとめて求める。骨格は
+        // その結果を持つだけで、向聴数の規則も牌種の絞り込みも持たない。
+        let batch = calculate_shanten_with_after_draws(counts, fixed_meld_count);
 
         Self {
-            current: calculate_shanten_with_fixed_melds(counts, fixed_meld_count),
-            after_draw,
+            current: batch.current,
+            after_draw: batch.after_draw,
         }
     }
 
@@ -370,6 +368,7 @@ fn for_each_drawable_tile<S>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shanten::calculate_shanten_with_fixed_melds;
 
     fn tile(s: &str) -> TileType {
         TileType::from_mjai_type_str(s).unwrap()
