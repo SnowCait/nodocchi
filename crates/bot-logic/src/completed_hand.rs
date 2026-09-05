@@ -134,12 +134,21 @@ impl CompletedHandDecomposition {
 pub struct CompletedHandAnalysis {
     concealed_tiles: Vec<TileId>,
     fixed_melds: Vec<Meld>,
+    tile_type_counts: TileCounts,
     decompositions: Vec<CompletedHandDecomposition>,
 }
 
 impl CompletedHandAnalysis {
     pub fn concealed_tiles(&self) -> &[TileId] {
         &self.concealed_tiles
+    }
+
+    /// 門前の牌と固定面子の牌を合わせた牌種ごとの枚数。
+    ///
+    /// [`analyze_completed_hand`] が枚数の検査に使う数え上げをそのまま持つ。decomposition に
+    /// 依らないので、役・役満の牌種構成の判定はどれもこれを読む。
+    pub fn tile_type_counts(&self) -> &TileCounts {
+        &self.tile_type_counts
     }
 
     pub fn fixed_melds(&self) -> &[Meld] {
@@ -192,6 +201,7 @@ pub fn analyze_completed_hand(
     Ok(CompletedHandAnalysis {
         concealed_tiles: concealed_tiles.to_vec(),
         fixed_melds: fixed_melds.to_vec(),
+        tile_type_counts: visible,
         decompositions: decompositions(&concealed, fixed_meld_count),
     })
 }

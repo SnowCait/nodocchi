@@ -1,6 +1,8 @@
 pub mod acceptance;
 pub mod bonus_han;
 pub mod completed_hand;
+#[cfg(test)]
+mod completed_hand_corpus;
 mod count_hasher;
 pub mod discard;
 pub mod fu;
