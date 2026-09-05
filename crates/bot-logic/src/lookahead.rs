@@ -97,8 +97,9 @@
 //! 打牌前の手牌・副露済み面子数・見え牌だけで決まる。したがって、この3つが一致する探索 node は
 //! 同じ base 評価になり、1回の探索の間だけ結果を共有する。共有するのは3つとも一致する場合
 //! だけで、1手目に切った牌が違えば見え牌も違うため別の評価になる。物理牌・ドラ・赤5・場風 /
-//! 自風は base 評価の入力ではなく、node ごとに [`decorate_evaluations`] が反映するため、共有
-//! しても枝ごとの文脈は失われない。探索する枝も比較も集計も変わらない。
+//! 自風は base 評価の入力ではなく、node ごとに [`discard_decoration`] が反映するため、共有
+//! しても枝ごとの文脈は失われない。共有した base 評価そのものは書き換えず、node 固有の値は
+//! 借用 view ([`DiscardEvaluationView`]) に載せる。探索する枝も比較も集計も変わらない。
 //!
 //! # 探索 node 間の打牌後の受け入れ
 //!
@@ -163,14 +164,15 @@ use crate::acceptance::{
 };
 use crate::count_hasher::CountHasherBuilder;
 use crate::discard::{
-    CandidateSeen, DecorationContext, DiscardAcceptance, DiscardEvaluation, ShapePenaltyMode,
-    decorate_evaluations, evaluate_discards_with_seen_and_acceptance, split_discarded_tile,
+    CandidateSeen, DecorationContext, DiscardAcceptance, DiscardEvaluation, DiscardEvaluationView,
+    ShapePenaltyMode, discard_decoration, evaluate_discards_with_seen_and_acceptance,
+    split_discarded_tile, split_discarded_tile_of,
 };
 use crate::furiten::TENPAI_SHANTEN;
 use crate::iishanten::IishantenShape;
 use crate::selection::{
     ForwardMetricAccumulator, ForwardMetrics, TenpaiWaitMetric, WeightedForwardMetric,
-    best_discard_selection_index_with_forward_metrics, forward_target_mask,
+    best_discard_selection_index_with_forward_metrics_for_views, forward_target_mask,
     requires_forward_metrics,
 };
 use crate::self_tsumo::{SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue};
@@ -179,6 +181,7 @@ use crate::tile::{PhysicalTileVariant, TileId, TileType, physical_tile_variants,
 use crate::tile_counts::TileCounts;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// same-shanten の枝をテンパイまで追う対象の向聴数。
 const IISHANTEN_SHANTEN: i8 = TENPAI_SHANTEN + 1;
@@ -554,10 +557,14 @@ pub struct LookaheadInputs<'a> {
 ///
 /// 打牌候補の列挙・向聴・受け入れ・一向聴形分類・形ペナルティはこの3つだけで決まるため、同じ
 /// 入力の探索 node は同じ base 評価になる。物理牌・ドラ・場風 / 自風は入力に含まれず、node
-/// ごとに [`decorate_evaluations`] が反映する。
+/// ごとに [`discard_decoration`] が反映する。
 type BaseEvaluationKey = (TileCounts, FixedMeldCount, CandidateSeen);
 
-type BaseEvaluationMemo = HashMap<BaseEvaluationKey, Vec<DiscardEvaluation>, CountHasherBuilder>;
+// 共有する base 評価は変更しない値として持つ。node ごとの文脈反映は [`DiscardDecoration`] が
+// 担い、cache の値そのものを書き換えない。
+type SharedBaseEvaluations = Rc<[DiscardEvaluation]>;
+
+type BaseEvaluationMemo = HashMap<BaseEvaluationKey, SharedBaseEvaluations, CountHasherBuilder>;
 
 /// 打牌候補1件分の受け入れ計算 ([`calculate_acceptance_with_fixed_melds_and_seen`]) の入力その
 /// もの。
@@ -706,31 +713,28 @@ impl<'a> LookaheadInputs<'a> {
     // 既存打牌評価は counts・副露済み面子数・見え牌だけで決まるため、探索中に同じ入力の node が
     // 現れたらこの探索の間だけ結果を共有する。共有するのは3つとも一致する場合だけで、見え牌や
     // 副露済み面子数が違う node は別の評価になる。物理牌・ドラ・赤5の違いは呼び出し側が node
-    // ごとに [`decorate_evaluations`] で反映する。
+    // ごとに [`discard_decoration`] で反映する。共有した値そのものは書き換えない。
     //
     // 3つが一致しない node でも打牌候補1件分の受け入れは一致し得るので、その単位の共有は
     // [`SearchedAcceptances`] が担う。
-    fn base_evaluations(
-        &self,
-        counts: &TileCounts,
-        seen: &CandidateSeen,
-    ) -> Vec<DiscardEvaluation> {
+    fn base_evaluations(&self, counts: &TileCounts, seen: &CandidateSeen) -> SharedBaseEvaluations {
         let key = (*counts, self.fixed_meld_count, *seen);
         if let Some(cached) = self.base_evaluations.borrow().get(&key) {
-            return cached.clone();
+            return Rc::clone(cached);
         }
 
-        let evaluations = evaluate_discards_with_seen_and_acceptance(
+        let evaluations: SharedBaseEvaluations = evaluate_discards_with_seen_and_acceptance(
             counts,
             self.fixed_meld_count,
             seen,
             &SearchedAcceptances {
                 searched: &self.after_discard_acceptances,
             },
-        );
+        )
+        .into();
         self.base_evaluations
             .borrow_mut()
-            .insert(key, evaluations.clone());
+            .insert(key, Rc::clone(&evaluations));
         evaluations
     }
 }
@@ -1738,44 +1742,51 @@ fn drawable(tile: &EffectiveAcceptanceTile) -> DrawableTile {
 // 決まっているため、赤5も通常打牌評価と同じ経路で反映できる。テンパイへ進む候補には将来打点を
 // 付け、比較の打点軸へ渡す。
 fn next_discard(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
-    let mut evaluations = inputs.base_evaluations(&state.counts, &state.seen);
-    decorate_evaluations(
-        &mut evaluations,
-        &state.counts,
-        &DecorationContext {
-            tiles: &state.tiles,
-            dora_indicators: inputs.dora_indicators,
+    let base = inputs.base_evaluations(&state.counts, &state.seen);
+    let context = DecorationContext {
+        tiles: &state.tiles,
+        dora_indicators: inputs.dora_indicators,
+        round_wind: inputs.round_wind,
+        seat_wind: inputs.seat_wind,
+        shape_penalty: ShapePenaltyMode::WithContext {
             round_wind: inputs.round_wind,
             seat_wind: inputs.seat_wind,
-            shape_penalty: ShapePenaltyMode::WithContext {
-                round_wind: inputs.round_wind,
-                seat_wind: inputs.seat_wind,
-                fixed_meld_count: inputs.fixed_meld_count,
-            },
-            unresolved_red_tile: None,
+            fixed_meld_count: inputs.fixed_meld_count,
         },
-    );
+        unresolved_red_tile: None,
+    };
+    // node 間で共有している base 評価は複製せず、この node の decoration だけを載せた借用 view
+    // で比較する。共有している値そのものは書き換えない。
+    let evaluations: Vec<_> = base
+        .iter()
+        .map(|evaluation| {
+            let view = evaluation.view();
+            view.decorated(discard_decoration(&view, &state.counts, &context))
+        })
+        .collect();
 
     let values: Vec<_> = evaluations
         .iter()
-        .map(|evaluation| prospective_value(inputs, state, evaluation))
+        .map(|&evaluation| prospective_value(inputs, state, evaluation))
         .collect();
     let metrics: Vec<_> = values
         .iter()
         .map(|&value| ForwardMetrics::from_prospective_value(value))
         .collect();
 
-    let Some(index) = best_discard_selection_index_with_forward_metrics(&evaluations, &metrics)
+    let Some(index) =
+        best_discard_selection_index_with_forward_metrics_for_views(&evaluations, &metrics)
     else {
         return NextDiscard::default();
     };
-    let evaluation = evaluations.swap_remove(index);
+    let evaluation = evaluations[index];
     NextDiscard {
         // ツモ continuation は選ばれた1件だけ求める。2手目の打牌比較は既存の打点軸のままで、
         // 候補ごとにツモ点数計算を走らせない。
-        tsumo_continuation: tenpai_tsumo_value(inputs, state, &evaluation),
+        tsumo_continuation: tenpai_tsumo_value(inputs, state, evaluation),
         prospective_value: values[index],
-        evaluation: Some(evaluation),
+        // 受け入れを複製するのは、選んだ1件を診断へ載せるここだけ。
+        evaluation: Some(evaluation.to_evaluation()),
     }
 }
 
@@ -1794,7 +1805,7 @@ struct NextDiscard {
 fn prospective_value(
     inputs: &LookaheadInputs,
     state: &HandState,
-    evaluation: &DiscardEvaluation,
+    evaluation: DiscardEvaluationView<'_>,
 ) -> Option<u64> {
     let valuator = inputs.valuator?;
     with_prospective_tenpai(state, evaluation, |tenpai| valuator.tenpai_value(tenpai))
@@ -1807,7 +1818,7 @@ fn prospective_value(
 fn tenpai_tsumo_value(
     inputs: &LookaheadInputs,
     state: &HandState,
-    evaluation: &DiscardEvaluation,
+    evaluation: DiscardEvaluationView<'_>,
 ) -> Option<TenpaiTsumoValue> {
     // 残り自摸機会が分からない局面では continuation を集計できないので、点数計算も行わない。
     inputs.self_tsumo_facts()?;
@@ -1823,19 +1834,23 @@ fn tenpai_tsumo_value(
 // フリテン基盤へそのまま渡す。フリテン判定はこの module が持たない。
 fn with_prospective_tenpai<T>(
     state: &HandState,
-    evaluation: &DiscardEvaluation,
+    evaluation: DiscardEvaluationView<'_>,
     evaluate: impl FnOnce(&ProspectiveTenpai<'_>) -> Option<T>,
 ) -> Option<T> {
     if evaluation.min_shanten_after_discard() != TENPAI_SHANTEN {
         return None;
     }
 
-    let (discarded, concealed_tiles) = split_discarded_tile(state.tiles.clone(), evaluation)?;
+    let (discarded, concealed_tiles) = split_discarded_tile_of(
+        state.tiles.clone(),
+        evaluation.discard,
+        evaluation.discards_red_five,
+    )?;
     let discarded_tiles: Vec<_> = state.discarded.iter().copied().chain([discarded]).collect();
 
     evaluate(&ProspectiveTenpai {
         concealed_tiles: &concealed_tiles,
-        acceptance: &evaluation.acceptance_after_discard,
+        acceptance: evaluation.acceptance_after_discard,
         discarded_tiles: &discarded_tiles,
     })
 }
@@ -1897,6 +1912,7 @@ mod tests {
         evaluate_discards_with_seen, select_best_discard_from_tiles_with_context,
         select_best_discard_from_tiles_with_visible_tiles,
     };
+    use crate::selection::best_discard_selection_index_with_forward_metrics;
     use crate::tile::count_indicated_dora;
     use std::sync::LazyLock;
 
@@ -5062,8 +5078,8 @@ mod tests {
         assert!(!shared.is_empty());
         for ((counts, fixed_meld_count, seen), evaluations) in shared.iter() {
             assert_eq!(
-                &evaluate_discards_with_seen(counts, *fixed_meld_count, seen),
-                evaluations,
+                evaluate_discards_with_seen(counts, *fixed_meld_count, seen).as_slice(),
+                &evaluations[..],
             );
         }
 
@@ -5259,7 +5275,7 @@ mod tests {
             .base_evaluations
             .borrow()
             .values()
-            .map(Vec::len)
+            .map(|evaluations| evaluations.len())
             .sum();
         (requested, inputs.after_discard_acceptances.borrow().len())
     }

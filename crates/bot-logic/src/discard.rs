@@ -56,6 +56,86 @@ impl DiscardEvaluation {
     pub fn acceptance_total_remaining(&self) -> u8 {
         self.acceptance_after_discard.total_remaining()
     }
+
+    /// 比較へ渡すための借用 view。値はこの評価そのもので、受け入れだけ借用になる。
+    pub(crate) fn view(&self) -> DiscardEvaluationView<'_> {
+        DiscardEvaluationView {
+            discard: self.discard,
+            count_before_discard: self.count_before_discard,
+            shanten_after_discard: self.shanten_after_discard,
+            acceptance_after_discard: &self.acceptance_after_discard,
+            shape_penalty: self.shape_penalty,
+            floating_tile_value: self.floating_tile_value,
+            discarded_dora_count: self.discarded_dora_count,
+            discarded_value_honor_count: self.discarded_value_honor_count,
+            discards_red_five: self.discards_red_five,
+            discards_isolated_tile: self.discards_isolated_tile,
+            standard_iishanten_shape_after_discard: self.standard_iishanten_shape_after_discard,
+        }
+    }
+}
+
+/// 打牌候補1件分の比較入力。受け入れだけ借用で持ち、他は [`DiscardEvaluation`] と同じ値。
+///
+/// 打牌候補の列挙・向聴・受け入れ・一向聴形分類・形ペナルティは counts・副露済み面子数・見え牌
+/// だけで決まるため、探索 node の間で同じ base 評価を共有できる。共有した base を複製せずに
+/// node ごとの [`DiscardDecoration`] だけを差し替えて比較へ渡すための型で、比較順そのものは
+/// [`DiscardEvaluation`] 経路と共有する。この型のために別の比較規則を持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiscardEvaluationView<'a> {
+    pub discard: TileType,
+    pub count_before_discard: u8,
+    pub shanten_after_discard: EffectiveShanten,
+    pub acceptance_after_discard: &'a EffectiveAcceptance,
+    pub shape_penalty: i16,
+    pub floating_tile_value: i16,
+    pub discarded_dora_count: u8,
+    pub discarded_value_honor_count: u8,
+    pub discards_red_five: bool,
+    pub discards_isolated_tile: bool,
+    pub standard_iishanten_shape_after_discard: IishantenShape,
+}
+
+impl DiscardEvaluationView<'_> {
+    pub fn min_shanten_after_discard(&self) -> i8 {
+        self.shanten_after_discard.min()
+    }
+
+    pub fn acceptance_type_count(&self) -> usize {
+        self.acceptance_after_discard.tiles.len()
+    }
+
+    pub fn acceptance_total_remaining(&self) -> u8 {
+        self.acceptance_after_discard.total_remaining()
+    }
+
+    /// node 固有 decoration を反映した view。共有している base 評価そのものは変更しない。
+    pub(crate) fn decorated(self, decoration: DiscardDecoration) -> Self {
+        Self {
+            shape_penalty: decoration.shape_penalty,
+            discarded_dora_count: decoration.discarded_dora_count,
+            discarded_value_honor_count: decoration.discarded_value_honor_count,
+            discards_red_five: decoration.discards_red_five,
+            ..self
+        }
+    }
+
+    /// view から打牌候補評価を作る。受け入れの複製はここでだけ行う。
+    pub(crate) fn to_evaluation(self) -> DiscardEvaluation {
+        DiscardEvaluation {
+            discard: self.discard,
+            count_before_discard: self.count_before_discard,
+            shanten_after_discard: self.shanten_after_discard,
+            acceptance_after_discard: self.acceptance_after_discard.clone(),
+            shape_penalty: self.shape_penalty,
+            floating_tile_value: self.floating_tile_value,
+            discarded_dora_count: self.discarded_dora_count,
+            discarded_value_honor_count: self.discarded_value_honor_count,
+            discards_red_five: self.discards_red_five,
+            discards_isolated_tile: self.discards_isolated_tile,
+            standard_iishanten_shape_after_discard: self.standard_iishanten_shape_after_discard,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -769,15 +849,17 @@ pub fn compare_discard_evaluations(
     candidate: &DiscardEvaluation,
     current_best: &DiscardEvaluation,
 ) -> DiscardComparison {
-    compare_discard_before_acceptance(candidate, current_best)
-        .unwrap_or_else(|| compare_discard_from_acceptance(candidate, current_best))
+    let candidate = candidate.view();
+    let current_best = current_best.view();
+    compare_discard_before_acceptance(&candidate, &current_best)
+        .unwrap_or_else(|| compare_discard_from_acceptance(&candidate, &current_best))
 }
 
 // 比較順のうち、向聴数と多向聴限定の孤立牌比較まで。決着しなければ `None` を返す。
 // `None` を返した時点で両候補の最小向聴数は等しい。
 pub(crate) fn compare_discard_before_acceptance(
-    candidate: &DiscardEvaluation,
-    current_best: &DiscardEvaluation,
+    candidate: &DiscardEvaluationView<'_>,
+    current_best: &DiscardEvaluationView<'_>,
 ) -> Option<DiscardComparison> {
     let candidate_shanten = candidate.min_shanten_after_discard();
     let best_shanten = current_best.min_shanten_after_discard();
@@ -797,8 +879,8 @@ pub(crate) fn compare_discard_before_acceptance(
 
 // 比較順のうち、受け入れ以降。最後は StableOrder になるので必ず決着する。
 pub(crate) fn compare_discard_from_acceptance(
-    candidate: &DiscardEvaluation,
-    current_best: &DiscardEvaluation,
+    candidate: &DiscardEvaluationView<'_>,
+    current_best: &DiscardEvaluationView<'_>,
 ) -> DiscardComparison {
     let candidate_remaining = candidate.acceptance_total_remaining();
     let best_remaining = current_best.acceptance_total_remaining();
@@ -875,7 +957,7 @@ pub(crate) fn compare_discard_from_acceptance(
 // ValueHonor 比較へ委ねる。
 //
 // 比較相手に依存しない候補固有の値なので、辞書順比較の推移律を壊さない。
-fn isolated_tile_priority_eligible(evaluation: &DiscardEvaluation) -> bool {
+fn isolated_tile_priority_eligible(evaluation: &DiscardEvaluationView<'_>) -> bool {
     evaluation.discards_isolated_tile
         && evaluation.discarded_dora_count == 0
         && !evaluation.discards_red_five
@@ -892,8 +974,8 @@ fn isolated_tile_priority_eligible(evaluation: &DiscardEvaluation) -> bool {
 // 各候補単独で通常孤立牌かどうかを判定する。孤立ドラ・孤立役牌・孤立赤5は優先対象外。
 // 比較相手に依存する条件を持たず、辞書順比較の推移律を維持する。
 fn compare_isolated_tile_discard(
-    candidate: &DiscardEvaluation,
-    current_best: &DiscardEvaluation,
+    candidate: &DiscardEvaluationView<'_>,
+    current_best: &DiscardEvaluationView<'_>,
 ) -> Option<DiscardComparison> {
     let candidate_shanten = candidate.min_shanten_after_discard();
     let best_shanten = current_best.min_shanten_after_discard();
@@ -929,8 +1011,8 @@ fn compare_isolated_tile_discard(
 // 対象外となり、既存のドラ保護を維持する。両方字牌・両方数牌の場合はこの軸で決着させない。
 // 比較相手に依存する条件を持たず、辞書順比較の推移律を維持する。
 fn compare_isolated_honor_discard(
-    candidate: &DiscardEvaluation,
-    current_best: &DiscardEvaluation,
+    candidate: &DiscardEvaluationView<'_>,
+    current_best: &DiscardEvaluationView<'_>,
 ) -> Option<DiscardComparison> {
     let candidate_shanten = candidate.min_shanten_after_discard();
     let best_shanten = current_best.min_shanten_after_discard();
@@ -975,7 +1057,7 @@ fn chiitoitsu_wait_quality_rank(wait: TileType) -> u8 {
 // 副露形は七対子の対象外なので `Concealed` に限る。通常形と七対子が同時にテンパイしている
 // 場合に受け入れ全体を七対子待ちと誤認しないよう、七対子が和了になる (`chiitoitsu == -1`)
 // 受け入れ牌だけを対象にし、一意に定まらない場合は `None` を返して tie-break しない。
-fn chiitoitsu_tenpai_wait(evaluation: &DiscardEvaluation) -> Option<TileType> {
+fn chiitoitsu_tenpai_wait(evaluation: &DiscardEvaluationView<'_>) -> Option<TileType> {
     if evaluation.min_shanten_after_discard() != 0 {
         return None;
     }
@@ -1001,8 +1083,8 @@ fn chiitoitsu_tenpai_wait(evaluation: &DiscardEvaluation) -> Option<TileType> {
 // 限定的な tie-break。受け入れ残枚数・種類数の比較より後に置き、同値のときだけ使う。
 // 同順位・非対象は None を返して後続の既存比較へ委ねる。
 fn compare_chiitoitsu_wait_quality(
-    candidate: &DiscardEvaluation,
-    current_best: &DiscardEvaluation,
+    candidate: &DiscardEvaluationView<'_>,
+    current_best: &DiscardEvaluationView<'_>,
 ) -> Option<DiscardComparison> {
     let candidate_rank = chiitoitsu_wait_quality_rank(chiitoitsu_tenpai_wait(candidate)?);
     let best_rank = chiitoitsu_wait_quality_rank(chiitoitsu_tenpai_wait(current_best)?);
@@ -1020,8 +1102,8 @@ fn compare_chiitoitsu_wait_quality(
 // かつ全体最小向聴も一向聴で、片方だけが完全一向聴のときだけ完全一向聴を優先する。
 // 完全一向聴同士・非完全一向聴同士には順位を付けず、後続の shape_penalty 以下へ委ねる。
 fn compare_standard_iishanten_shape(
-    candidate: &DiscardEvaluation,
-    current_best: &DiscardEvaluation,
+    candidate: &DiscardEvaluationView<'_>,
+    current_best: &DiscardEvaluationView<'_>,
 ) -> Option<DiscardComparison> {
     // 全体テンパイ（七対子・国士など）を含む候補には適用しない。両候補とも全体最小向聴が一向聴。
     if candidate.min_shanten_after_discard() != 1 || current_best.min_shanten_after_discard() != 1 {
@@ -1692,55 +1774,101 @@ pub(crate) struct DecorationContext<'a> {
     pub unresolved_red_tile: Option<TileType>,
 }
 
+/// base 打牌評価へ後付けする、node ごとに変わる値。
+///
+/// 物理牌 (赤5)・ドラ・場風 / 自風で変わるのはこの4項目だけで、それ以外は counts・副露済み
+/// 面子数・見え牌だけで決まる base 評価のまま node 間で共有できる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiscardDecoration {
+    pub shape_penalty: i16,
+    pub discarded_dora_count: u8,
+    pub discarded_value_honor_count: u8,
+    pub discards_red_five: bool,
+}
+
+/// 打牌候補1件分の decoration を求める唯一の経路。
+///
+/// [`decorate_evaluations`] と、base 評価を共有したまま比較する探索経路が同じ規則を通るための
+/// helper。文脈反映の規則をこの関数の外へ複製しないこと。
+pub(crate) fn discard_decoration(
+    evaluation: &DiscardEvaluationView<'_>,
+    counts: &TileCounts,
+    context: &DecorationContext,
+) -> DiscardDecoration {
+    // 赤5かどうかが解決できない牌種では赤扱いにしない。手牌に黒の同種牌があれば通常打牌
+    // 評価も黒を選ぶため結果は一致し、赤1枚しか無い場合はその赤が手牌に見えている以上
+    // 仮想ツモは黒に確定する。同種牌が1枚も無い場合だけ赤かどうかが未解決のまま残る。
+    let resolves_red_five = context.unresolved_red_tile != Some(evaluation.discard);
+    let discarded_tile = discarded_tile_id_for_type(evaluation.discard, context.tiles, None);
+    let discards_red_five =
+        resolves_red_five && discarded_tile.map(TileId::is_red).unwrap_or(false);
+
+    DiscardDecoration {
+        shape_penalty: decorated_shape_penalty(evaluation, counts, context),
+        // 通常ドラは牌種だけで決まるため、物理牌が分からなくても必ず反映する。
+        discarded_dora_count: count_indicated_dora(evaluation.discard, context.dora_indicators)
+            + u8::from(discards_red_five),
+        discarded_value_honor_count: value_honor_count(
+            evaluation.discard,
+            context.round_wind,
+            context.seat_wind,
+        ),
+        discards_red_five,
+    }
+}
+
+// 文脈を反映した形ペナルティ。文脈なしのまま変わらない候補では base 評価の値をそのまま返す。
+fn decorated_shape_penalty(
+    evaluation: &DiscardEvaluationView<'_>,
+    counts: &TileCounts,
+    context: &DecorationContext,
+) -> i16 {
+    let ShapePenaltyMode::WithContext {
+        round_wind,
+        seat_wind,
+        fixed_meld_count,
+    } = context.shape_penalty
+    else {
+        return evaluation.shape_penalty;
+    };
+
+    // 役牌暗刻を崩さない候補では文脈なしの値と一致するため、同じ手牌の形評価を
+    // 打牌候補ごとに求め直さない。
+    if breaks_value_honor_triplet(counts, evaluation.discard, round_wind, seat_wind) {
+        return shape_penalty_for_discard_with_fixed_melds_and_context(
+            counts,
+            evaluation.discard,
+            fixed_meld_count,
+            round_wind,
+            seat_wind,
+        );
+    }
+
+    debug_assert_eq!(
+        evaluation.shape_penalty,
+        shape_penalty_for_discard_with_fixed_melds_and_context(
+            counts,
+            evaluation.discard,
+            fixed_meld_count,
+            round_wind,
+            seat_wind,
+        ),
+        "文脈なしの形ペナルティを持つ打牌候補だけを WithContext へ渡すこと"
+    );
+    evaluation.shape_penalty
+}
+
 pub(crate) fn decorate_evaluations(
     evaluations: &mut [DiscardEvaluation],
     counts: &TileCounts,
     context: &DecorationContext,
 ) {
     for evaluation in evaluations {
-        // 赤5かどうかが解決できない牌種では赤扱いにしない。手牌に黒の同種牌があれば通常打牌
-        // 評価も黒を選ぶため結果は一致し、赤1枚しか無い場合はその赤が手牌に見えている以上
-        // 仮想ツモは黒に確定する。同種牌が1枚も無い場合だけ赤かどうかが未解決のまま残る。
-        let resolves_red_five = context.unresolved_red_tile != Some(evaluation.discard);
-        let discarded_tile = discarded_tile_id_for_type(evaluation.discard, context.tiles, None);
-        evaluation.discards_red_five =
-            resolves_red_five && discarded_tile.map(TileId::is_red).unwrap_or(false);
-        // 通常ドラは牌種だけで決まるため、物理牌が分からなくても必ず反映する。
-        evaluation.discarded_dora_count =
-            count_indicated_dora(evaluation.discard, context.dora_indicators)
-                + u8::from(evaluation.discards_red_five);
-        evaluation.discarded_value_honor_count =
-            value_honor_count(evaluation.discard, context.round_wind, context.seat_wind);
-        if let ShapePenaltyMode::WithContext {
-            round_wind,
-            seat_wind,
-            fixed_meld_count,
-        } = context.shape_penalty
-        {
-            // 役牌暗刻を崩さない候補では文脈なしの値と一致するため、同じ手牌の形評価を
-            // 打牌候補ごとに求め直さない。
-            if breaks_value_honor_triplet(counts, evaluation.discard, round_wind, seat_wind) {
-                evaluation.shape_penalty = shape_penalty_for_discard_with_fixed_melds_and_context(
-                    counts,
-                    evaluation.discard,
-                    fixed_meld_count,
-                    round_wind,
-                    seat_wind,
-                );
-            } else {
-                debug_assert_eq!(
-                    evaluation.shape_penalty,
-                    shape_penalty_for_discard_with_fixed_melds_and_context(
-                        counts,
-                        evaluation.discard,
-                        fixed_meld_count,
-                        round_wind,
-                        seat_wind,
-                    ),
-                    "文脈なしの形ペナルティを持つ打牌候補だけを WithContext へ渡すこと"
-                );
-            }
-        }
+        let decoration = discard_decoration(&evaluation.view(), counts, context);
+        evaluation.shape_penalty = decoration.shape_penalty;
+        evaluation.discarded_dora_count = decoration.discarded_dora_count;
+        evaluation.discarded_value_honor_count = decoration.discarded_value_honor_count;
+        evaluation.discards_red_five = decoration.discards_red_five;
     }
 }
 
@@ -1753,12 +1881,23 @@ pub(crate) fn decorate_evaluations(
 /// 打牌後の手牌を必要とする経路 (2手先評価の仮想局面・押し引きの打点 proxy・ダマ打点) はこの
 /// 1本を共有し、同じ組み立てを複製しない。除去は1枚だけで、残りの牌の並びには意味を持たせない。
 pub fn split_discarded_tile(
-    mut tiles: Vec<TileId>,
+    tiles: Vec<TileId>,
     evaluation: &DiscardEvaluation,
 ) -> Option<(TileId, Vec<TileId>)> {
-    let discarded = tiles.iter().position(|tile| {
-        tile.tile_type() == evaluation.discard && tile.is_red() == evaluation.discards_red_five
-    })?;
+    split_discarded_tile_of(tiles, evaluation.discard, evaluation.discards_red_five)
+}
+
+/// 切り離す牌種と赤フラグを直接受け取る [`split_discarded_tile`] の本体。
+///
+/// 打牌候補評価を実体化せずに借用 view のまま扱う探索経路と、同じ1枚の選び方を共有する。
+pub(crate) fn split_discarded_tile_of(
+    mut tiles: Vec<TileId>,
+    discard: TileType,
+    discards_red_five: bool,
+) -> Option<(TileId, Vec<TileId>)> {
+    let discarded = tiles
+        .iter()
+        .position(|tile| tile.tile_type() == discard && tile.is_red() == discards_red_five)?;
     Some((tiles.remove(discarded), tiles))
 }
 
@@ -5745,7 +5884,7 @@ mod tests {
         let comparison = compare_discard_evaluations(&isolated, &taatsu);
         assert!(!comparison.candidate_is_better);
         assert_eq!(comparison.reason, DiscardComparisonReason::StableOrder);
-        assert!(compare_isolated_tile_discard(&isolated, &taatsu).is_none());
+        assert!(compare_isolated_tile_discard(&isolated.view(), &taatsu.view()).is_none());
     }
 
     #[test]
@@ -5753,7 +5892,7 @@ mod tests {
         // 両候補とも孤立牌なら孤立牌軸では決着せず、受け入れ以下の既存比較へ進む。
         let more = isolated_evaluation(3, 40, 5, true);
         let less = isolated_evaluation(3, 10, 1, true);
-        assert!(compare_isolated_tile_discard(&more, &less).is_none());
+        assert!(compare_isolated_tile_discard(&more.view(), &less.view()).is_none());
         let comparison = compare_discard_evaluations(&more, &less);
         assert_eq!(
             comparison.reason,
@@ -5766,7 +5905,7 @@ mod tests {
         // 両候補とも非孤立牌なら孤立牌軸では決着しない。
         let more = isolated_evaluation(3, 40, 5, false);
         let less = isolated_evaluation(3, 10, 1, false);
-        assert!(compare_isolated_tile_discard(&more, &less).is_none());
+        assert!(compare_isolated_tile_discard(&more.view(), &less.view()).is_none());
     }
 
     #[test]
@@ -5776,7 +5915,7 @@ mod tests {
         let mut isolated_dora = isolated_dora;
         isolated_dora.discarded_dora_count = 1;
         let taatsu = isolated_evaluation(3, 40, 5, false);
-        assert!(compare_isolated_tile_discard(&isolated_dora, &taatsu).is_none());
+        assert!(compare_isolated_tile_discard(&isolated_dora.view(), &taatsu.view()).is_none());
         let comparison = compare_discard_evaluations(&isolated_dora, &taatsu);
         assert_ne!(comparison.reason, DiscardComparisonReason::IsolatedTile);
     }
@@ -5787,7 +5926,8 @@ mod tests {
         let mut isolated_honor = isolated_evaluation(3, 10, 1, true);
         isolated_honor.discarded_value_honor_count = 1;
         let taatsu = isolated_evaluation(3, 40, 5, false);
-        let comparison = compare_isolated_tile_discard(&isolated_honor, &taatsu).unwrap();
+        let comparison =
+            compare_isolated_tile_discard(&isolated_honor.view(), &taatsu.view()).unwrap();
         assert!(comparison.candidate_is_better);
         assert_eq!(comparison.reason, DiscardComparisonReason::IsolatedTile);
     }
@@ -5798,7 +5938,7 @@ mod tests {
         let mut isolated_red = isolated_evaluation(3, 10, 1, true);
         isolated_red.discards_red_five = true;
         let taatsu = isolated_evaluation(3, 40, 5, false);
-        assert!(compare_isolated_tile_discard(&isolated_red, &taatsu).is_none());
+        assert!(compare_isolated_tile_discard(&isolated_red.view(), &taatsu.view()).is_none());
         let comparison = compare_discard_evaluations(&isolated_red, &taatsu);
         assert_ne!(comparison.reason, DiscardComparisonReason::IsolatedTile);
     }
@@ -5900,30 +6040,30 @@ mod tests {
     #[test]
     fn isolated_priority_eligibility_is_candidate_intrinsic() {
         // 非ドラの孤立牌は役牌でも eligible。孤立ドラ・孤立赤5・非孤立牌は eligible=false。
-        assert!(isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, true, 0, 0, false
-        )));
-        assert!(!isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, true, 1, 0, false
-        )));
+        assert!(isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, true, 0, 0, false).view()
+        ));
+        assert!(!isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, true, 1, 0, false).view()
+        ));
         // 非ドラの孤立役牌（value_honor=1）は eligible。
-        assert!(isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, true, 0, 1, false
-        )));
+        assert!(isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, true, 0, 1, false).view()
+        ));
         // 連風牌相当（value_honor=2）も eligible。
-        assert!(isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, true, 0, 2, false
-        )));
+        assert!(isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, true, 0, 2, false).view()
+        ));
         // ドラ役牌は eligible=false。
-        assert!(!isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, true, 1, 1, false
-        )));
-        assert!(!isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, true, 0, 0, true
-        )));
-        assert!(!isolated_tile_priority_eligible(&priority_candidate(
-            0, 10, false, 0, 0, false
-        )));
+        assert!(!isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, true, 1, 1, false).view()
+        ));
+        assert!(!isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, true, 0, 0, true).view()
+        ));
+        assert!(!isolated_tile_priority_eligible(
+            &priority_candidate(0, 10, false, 0, 0, false).view()
+        ));
     }
 
     #[test]
@@ -6009,7 +6149,9 @@ mod tests {
         // 孤立ドラと通常非孤立牌は共に非eligible。他軸同値なら Dora 比較で非孤立牌が勝つ。
         let isolated_dora = priority_candidate(0, 10, true, 1, 0, false);
         let non_isolated = priority_candidate(1, 10, false, 0, 0, false);
-        assert!(compare_isolated_tile_discard(&non_isolated, &isolated_dora).is_none());
+        assert!(
+            compare_isolated_tile_discard(&non_isolated.view(), &isolated_dora.view()).is_none()
+        );
         let comparison = compare_discard_evaluations(&non_isolated, &isolated_dora);
         assert!(comparison.candidate_is_better);
         assert_eq!(comparison.reason, DiscardComparisonReason::Dora);
@@ -6029,7 +6171,9 @@ mod tests {
     fn isolated_red_five_is_protected_by_red_five_axis_when_else_equal() {
         let isolated_red = priority_candidate(0, 10, true, 0, 0, true);
         let non_isolated = priority_candidate(1, 10, false, 0, 0, false);
-        assert!(compare_isolated_tile_discard(&non_isolated, &isolated_red).is_none());
+        assert!(
+            compare_isolated_tile_discard(&non_isolated.view(), &isolated_red.view()).is_none()
+        );
         let comparison = compare_discard_evaluations(&non_isolated, &isolated_red);
         assert!(comparison.candidate_is_better);
         assert_eq!(comparison.reason, DiscardComparisonReason::RedFive);
@@ -6045,8 +6189,8 @@ mod tests {
         let candidates = [&non_isolated, &isolated_dora, &isolated_red];
         for (i, x) in candidates.iter().enumerate() {
             for y in candidates.iter().skip(i + 1) {
-                assert!(compare_isolated_tile_discard(x, y).is_none());
-                assert!(compare_isolated_tile_discard(y, x).is_none());
+                assert!(compare_isolated_tile_discard(&x.view(), &y.view()).is_none());
+                assert!(compare_isolated_tile_discard(&y.view(), &x.view()).is_none());
             }
         }
     }
@@ -6127,7 +6271,7 @@ mod tests {
         // 受け入れ・牌種を揃えると後段の ValueHonor で客風側が切られる。
         let guest_wind = isolated_axis_candidate(27, 3, 10, true, 0, 0, false);
         let dragon = isolated_axis_candidate(33, 3, 10, true, 0, 1, false);
-        assert!(compare_isolated_honor_discard(&guest_wind, &dragon).is_none());
+        assert!(compare_isolated_honor_discard(&guest_wind.view(), &dragon.view()).is_none());
         let comparison = compare_discard_evaluations(&guest_wind, &dragon);
         assert!(comparison.candidate_is_better);
         assert_eq!(comparison.reason, DiscardComparisonReason::ValueHonor);
@@ -6138,7 +6282,7 @@ mod tests {
         // 孤立役牌(白, value_honor=1)と孤立連風牌(E, value_honor=2)。両方字牌なので新軸では決着しない。
         let yakuhai = isolated_axis_candidate(31, 3, 10, true, 0, 1, false);
         let double_wind = isolated_axis_candidate(27, 3, 10, true, 0, 2, false);
-        assert!(compare_isolated_honor_discard(&yakuhai, &double_wind).is_none());
+        assert!(compare_isolated_honor_discard(&yakuhai.view(), &double_wind.view()).is_none());
     }
 
     #[test]
@@ -6146,7 +6290,7 @@ mod tests {
         // 両方数牌(1m と 5m)なら新軸では決着させない。
         let terminal = isolated_axis_candidate(0, 3, 10, true, 0, 0, false);
         let middle = isolated_axis_candidate(4, 3, 10, true, 0, 0, false);
-        assert!(compare_isolated_honor_discard(&terminal, &middle).is_none());
+        assert!(compare_isolated_honor_discard(&terminal.view(), &middle.view()).is_none());
     }
 
     #[test]
@@ -6154,7 +6298,7 @@ mod tests {
         // 孤立ドラ字牌は eligible でないため新軸の対象外。孤立数牌を切る。
         let dora_honor = isolated_axis_candidate(33, 3, 10, true, 1, 1, false);
         let number = isolated_axis_candidate(0, 3, 40, true, 0, 0, false);
-        assert!(compare_isolated_honor_discard(&dora_honor, &number).is_none());
+        assert!(compare_isolated_honor_discard(&dora_honor.view(), &number.view()).is_none());
         // 数牌が eligible、ドラ字牌は非eligible → IsolatedTile 軸で数牌切りが優先。
         let comparison = compare_discard_evaluations(&number, &dora_honor);
         assert!(comparison.candidate_is_better);
@@ -6179,7 +6323,7 @@ mod tests {
         let comparison = compare_discard_evaluations(&number, &honor);
         assert!(comparison.candidate_is_better);
         assert_eq!(comparison.reason, DiscardComparisonReason::Shanten);
-        assert!(compare_isolated_honor_discard(&honor, &number).is_none());
+        assert!(compare_isolated_honor_discard(&honor.view(), &number.view()).is_none());
     }
 
     #[test]
@@ -6187,7 +6331,7 @@ mod tests {
         // 一向聴では新軸を適用しない。
         let honor = isolated_axis_candidate(33, 1, 10, true, 0, 1, false);
         let number = isolated_axis_candidate(0, 1, 40, true, 0, 0, false);
-        assert!(compare_isolated_honor_discard(&honor, &number).is_none());
+        assert!(compare_isolated_honor_discard(&honor.view(), &number.view()).is_none());
     }
 
     #[test]
@@ -6195,7 +6339,7 @@ mod tests {
         // テンパイでは新軸を適用しない。
         let honor = isolated_axis_candidate(33, 0, 10, true, 0, 1, false);
         let number = isolated_axis_candidate(0, 0, 40, true, 0, 0, false);
-        assert!(compare_isolated_honor_discard(&honor, &number).is_none());
+        assert!(compare_isolated_honor_discard(&honor.view(), &number.view()).is_none());
     }
 
     #[test]
@@ -6706,6 +6850,92 @@ mod tests {
             two_pin.block_context,
             discard_block_context_with_fixed_melds(&hand, tile("2p"), fixed(3))
         );
+    }
+
+    #[test]
+    fn a_decorated_view_matches_decorating_the_evaluation_itself() {
+        // 借用 view へ載せる node 固有 decoration が、打牌候補評価へ直接反映した値と完全に
+        // 一致する。探索はこの分離で base 評価を共有するので、両経路がずれないことを確認する。
+        let concealed = ids_of(&[
+            "1m", "1m", "2m", "5m", "8m", "2p", "3p", "4p", "7p", "8p", "9p", "1s", "3s", "9s",
+        ]);
+        let mut with_red = ids_of(&[
+            "1m", "2m", "3m", "4m", "6m", "2p", "3p", "4p", "7p", "8p", "9p", "E", "C",
+        ]);
+        with_red.extend(ids(&[16]));
+        let melded = ids_of(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "5s", "5s", "N",
+        ]);
+
+        let mut decorated_candidates = 0;
+        for (tiles, fixed_meld_count) in [
+            (&concealed, FixedMeldCount::NONE),
+            (&with_red, FixedMeldCount::NONE),
+            (&melded, fixed(1)),
+        ] {
+            let counts = TileCounts::from_tiles(tiles.iter().copied());
+            let base = evaluate_discards_with_fixed_melds(&counts, fixed_meld_count);
+            let dora_indicators = ids_of(&["4m", "4s"]);
+
+            for context in [
+                DecorationContext {
+                    tiles,
+                    dora_indicators: &[],
+                    round_wind: None,
+                    seat_wind: None,
+                    shape_penalty: ShapePenaltyMode::ContextFree,
+                    unresolved_red_tile: None,
+                },
+                DecorationContext {
+                    tiles,
+                    dora_indicators: &dora_indicators,
+                    round_wind: Some(tile("E")),
+                    seat_wind: Some(tile("S")),
+                    shape_penalty: ShapePenaltyMode::WithContext {
+                        round_wind: Some(tile("E")),
+                        seat_wind: Some(tile("S")),
+                        fixed_meld_count,
+                    },
+                    unresolved_red_tile: None,
+                },
+                DecorationContext {
+                    tiles,
+                    dora_indicators: &dora_indicators,
+                    round_wind: Some(tile("E")),
+                    seat_wind: Some(tile("E")),
+                    shape_penalty: ShapePenaltyMode::WithContext {
+                        round_wind: Some(tile("E")),
+                        seat_wind: Some(tile("E")),
+                        fixed_meld_count,
+                    },
+                    unresolved_red_tile: Some(tile("5m")),
+                },
+            ] {
+                let mut decorated = base.clone();
+                decorate_evaluations(&mut decorated, &counts, &context);
+
+                for (evaluation, expected) in base.iter().zip(&decorated) {
+                    let view = evaluation.view();
+                    let view = view.decorated(discard_decoration(&view, &counts, &context));
+                    assert_eq!(&view.to_evaluation(), expected);
+                    decorated_candidates += usize::from(expected != evaluation);
+                    // 受け入れは複製せず base 評価のものを借りたまま。
+                    assert!(std::ptr::eq(
+                        view.acceptance_after_discard,
+                        &evaluation.acceptance_after_discard,
+                    ));
+                }
+            }
+
+            // decoration を何度載せても、共有する base 評価そのものは変わらない。
+            assert_eq!(
+                base,
+                evaluate_discards_with_fixed_melds(&counts, fixed_meld_count)
+            );
+        }
+
+        // 文脈で実際に値が変わる候補を含んだ corpus であることを確認する。
+        assert!(decorated_candidates > 0);
     }
 
     #[test]
