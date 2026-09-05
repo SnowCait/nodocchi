@@ -131,67 +131,13 @@ pub fn shape_breakdown_for_discard(counts: &TileCounts, discard: TileType) -> Sh
 
     breakdown.breaks_kanchan = has(d - 2) || has(d + 2);
 
-    breakdown.preserves_sequence_after_discard = preserves_sequence_after_discard(counts, discard);
-    breakdown.preserves_ryanmen_after_discard = preserves_ryanmen_after_discard(counts, discard);
+    // 同種牌が2枚以上あれば1枚切っても同種牌が残るため、周辺牌の有無は打牌前と変わらない。
+    // 打牌後の順子・両面の有無は打牌前の判定そのものになる。
+    let leaves_same_type = same_type_count >= 2;
+    breakdown.preserves_sequence_after_discard = leaves_same_type && breakdown.breaks_sequence;
+    breakdown.preserves_ryanmen_after_discard = leaves_same_type && breakdown.breaks_ryanmen;
 
     breakdown
-}
-
-fn preserves_sequence_after_discard(counts: &TileCounts, discard: TileType) -> bool {
-    if counts.count(discard) < 2 {
-        return false;
-    }
-    let Some(number) = discard.number() else {
-        return false;
-    };
-
-    let mut after = *counts;
-    if after.remove(discard).is_err() {
-        return false;
-    }
-
-    let base = discard.raw() - (number - 1);
-    let has = |n: i8| -> bool {
-        if !(1..=9).contains(&n) {
-            return false;
-        }
-        let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
-        after.count(tile) > 0
-    };
-
-    let d = number as i8;
-    (has(d - 2) && has(d - 1)) || (has(d - 1) && has(d + 1)) || (has(d + 1) && has(d + 2))
-}
-
-fn preserves_ryanmen_after_discard(counts: &TileCounts, discard: TileType) -> bool {
-    if counts.count(discard) < 2 {
-        return false;
-    }
-    let Some(number) = discard.number() else {
-        return false;
-    };
-
-    let mut after = *counts;
-    if after.remove(discard).is_err() {
-        return false;
-    }
-
-    let base = discard.raw() - (number - 1);
-    let has = |n: i8| -> bool {
-        if !(1..=9).contains(&n) {
-            return false;
-        }
-        let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
-        after.count(tile) > 0
-    };
-
-    let d = number as i8;
-    for a in [d - 1, d] {
-        if has(a) && has(a + 1) && a != 1 && a + 1 != 9 {
-            return true;
-        }
-    }
-    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -203,21 +149,26 @@ pub struct PairContext {
 }
 
 pub fn pair_context_for_discard(counts: &TileCounts, discard: TileType) -> PairContext {
+    let mut pair_like_type_count = 0u8;
+    for tile in TileType::all() {
+        if counts.count(tile) >= 2 {
+            pair_like_type_count += 1;
+        }
+    }
+    pair_context_from_pair_like_type_count(counts, discard, pair_like_type_count)
+}
+
+fn pair_context_from_pair_like_type_count(
+    counts: &TileCounts,
+    discard: TileType,
+    pair_like_type_count: u8,
+) -> PairContext {
     let count_before_discard = counts.count(discard);
     if count_before_discard == 0 {
         return PairContext::default();
     }
 
-    let mut pair_like_type_count = 0u8;
-    let mut other_pair_like_type_count = 0u8;
-    for tile in TileType::all() {
-        if counts.count(tile) >= 2 {
-            pair_like_type_count += 1;
-            if tile != discard {
-                other_pair_like_type_count += 1;
-            }
-        }
-    }
+    let other_pair_like_type_count = pair_like_type_count - u8::from(count_before_discard >= 2);
 
     PairContext {
         pair_like_type_count,
@@ -239,90 +190,172 @@ pub struct HandShapeSummary {
     pub estimated_block_count: u8,
 }
 
-fn is_isolated_tile(counts: &TileCounts, tile: TileType) -> bool {
-    let same_type_count = counts.count(tile);
-    if same_type_count == 0 || same_type_count >= 2 {
-        return false;
+impl HandShapeSummary {
+    fn add(&mut self, other: &HandShapeSummary) {
+        self.sequence_count += other.sequence_count;
+        self.triplet_count += other.triplet_count;
+        self.pair_like_type_count += other.pair_like_type_count;
+        self.ryanmen_taatsu_count += other.ryanmen_taatsu_count;
+        self.kanchan_taatsu_count += other.kanchan_taatsu_count;
+        self.penchan_taatsu_count += other.penchan_taatsu_count;
+        self.isolated_tile_type_count += other.isolated_tile_type_count;
+        self.estimated_block_count += other.estimated_block_count;
     }
 
-    let Some(number) = tile.number() else {
-        return true;
-    };
+    fn set_estimated_block_count(&mut self) {
+        self.estimated_block_count = self.sequence_count
+            + self.triplet_count
+            + self.pair_like_type_count
+            + self.ryanmen_taatsu_count
+            + self.kanchan_taatsu_count
+            + self.penchan_taatsu_count;
+    }
+}
 
-    let base = tile.raw() - (number - 1);
-    let has = |n: i8| -> bool {
-        if !(1..=9).contains(&n) {
-            return false;
+// 形集計の単位。順子・搭子も孤立牌判定も同じ色の中だけで閉じているため、数牌3色と字牌の
+// 4群それぞれの集計を足し合わせたものが手牌全体の HandShapeSummary になる。
+const SHAPE_GROUP_COUNT: usize = 4;
+const HONOR_SHAPE_GROUP: usize = 3;
+
+fn shape_group_index(tile: TileType) -> usize {
+    if tile.is_honor() {
+        HONOR_SHAPE_GROUP
+    } else {
+        tile.index() / 9
+    }
+}
+
+fn suit_counts(counts: &TileCounts, group: usize) -> [u8; 9] {
+    let base = (group * 9) as u8;
+    let mut suit = [0u8; 9];
+    for (offset, slot) in suit.iter_mut().enumerate() {
+        let tile = TileType::new(base + offset as u8).expect("same-suit tile is valid");
+        *slot = counts.count(tile);
+    }
+    suit
+}
+
+fn honor_counts(counts: &TileCounts) -> [u8; 7] {
+    let mut honors = [0u8; 7];
+    for (offset, slot) in honors.iter_mut().enumerate() {
+        let tile = TileType::new(27 + offset as u8).expect("honor tile is valid");
+        *slot = counts.count(tile);
+    }
+    honors
+}
+
+fn suit_shape_summary(suit: &[u8; 9]) -> HandShapeSummary {
+    const SUIT_MASK: u16 = 0b1_1111_1111;
+
+    let mut summary = HandShapeSummary::default();
+    let mut present = 0u16;
+    let mut single = 0u16;
+    for (offset, &count) in suit.iter().enumerate() {
+        if count == 0 {
+            continue;
         }
-        let neighbor = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
-        counts.count(neighbor) > 0
-    };
-
-    let d = number as i8;
-    for delta in [-2i8, -1, 1, 2] {
-        if has(d + delta) {
-            return false;
+        present |= 1 << offset;
+        if count == 1 {
+            single |= 1 << offset;
+        }
+        if count >= 2 {
+            summary.pair_like_type_count += 1;
+        }
+        if count >= 3 {
+            summary.triplet_count += 1;
         }
     }
-    true
+
+    // 前後2枚以内に牌があるかどうかを bit で持つ。孤立牌は1枚だけ持つ牌のうち周辺が空のもの。
+    let neighbors = ((present << 1) | (present << 2) | (present >> 1) | (present >> 2)) & SUIT_MASK;
+    summary.isolated_tile_type_count = (single & !neighbors & SUIT_MASK).count_ones() as u8;
+
+    summary.sequence_count = (present & (present >> 1) & (present >> 2)).count_ones() as u8;
+    let adjacent = present & (present >> 1);
+    summary.penchan_taatsu_count = (adjacent & 0b1000_0001).count_ones() as u8;
+    summary.ryanmen_taatsu_count = (adjacent & 0b0111_1110).count_ones() as u8;
+    summary.kanchan_taatsu_count = (present & (present >> 2)).count_ones() as u8;
+
+    summary.set_estimated_block_count();
+    summary
+}
+
+fn honor_shape_summary(honors: &[u8; 7]) -> HandShapeSummary {
+    let mut summary = HandShapeSummary::default();
+    for &count in honors {
+        if count == 1 {
+            summary.isolated_tile_type_count += 1;
+        }
+        if count >= 2 {
+            summary.pair_like_type_count += 1;
+        }
+        if count >= 3 {
+            summary.triplet_count += 1;
+        }
+    }
+    summary.set_estimated_block_count();
+    summary
+}
+
+/// 手牌1つ分の形の事前集計。
+///
+/// 値の定義は [`hand_shape_summary`] のままで、打牌候補ごとに変わらない打牌前の集計を一度だけ
+/// 求めて候補間で共有する。打牌後の集計は切った牌の群だけを求め直して他の群を再利用する。
+#[derive(Debug, Clone, Copy)]
+struct HandShapeFacts {
+    groups: [HandShapeSummary; SHAPE_GROUP_COUNT],
+    summary: HandShapeSummary,
+}
+
+impl HandShapeFacts {
+    fn new(counts: &TileCounts) -> Self {
+        let groups = [
+            suit_shape_summary(&suit_counts(counts, 0)),
+            suit_shape_summary(&suit_counts(counts, 1)),
+            suit_shape_summary(&suit_counts(counts, 2)),
+            honor_shape_summary(&honor_counts(counts)),
+        ];
+        let mut summary = HandShapeSummary::default();
+        for group in &groups {
+            summary.add(group);
+        }
+        Self { groups, summary }
+    }
+
+    fn summary(&self) -> HandShapeSummary {
+        self.summary
+    }
+
+    fn summary_after_discard(&self, counts: &TileCounts, discard: TileType) -> HandShapeSummary {
+        let group = shape_group_index(discard);
+        let after_group = if group == HONOR_SHAPE_GROUP {
+            let mut honors = honor_counts(counts);
+            honors[discard.index() - 27] -= 1;
+            honor_shape_summary(&honors)
+        } else {
+            let mut suit = suit_counts(counts, group);
+            suit[discard.index() % 9] -= 1;
+            suit_shape_summary(&suit)
+        };
+
+        let mut summary = HandShapeSummary::default();
+        for (index, group_summary) in self.groups.iter().enumerate() {
+            if index == group {
+                summary.add(&after_group);
+            } else {
+                summary.add(group_summary);
+            }
+        }
+        summary
+    }
+
+    fn pair_context(&self, counts: &TileCounts, discard: TileType) -> PairContext {
+        pair_context_from_pair_like_type_count(counts, discard, self.summary.pair_like_type_count)
+    }
 }
 
 pub fn hand_shape_summary(counts: &TileCounts) -> HandShapeSummary {
-    let mut summary = HandShapeSummary::default();
-
-    for tile in TileType::all() {
-        let same_type_count = counts.count(tile);
-        if same_type_count == 0 {
-            continue;
-        }
-        if same_type_count >= 3 {
-            summary.triplet_count += 1;
-        }
-        if same_type_count >= 2 {
-            summary.pair_like_type_count += 1;
-        }
-        if is_isolated_tile(counts, tile) {
-            summary.isolated_tile_type_count += 1;
-        }
-    }
-
-    for suit_base in [0u8, 9, 18] {
-        let has = |n: i8| -> bool {
-            if !(1..=9).contains(&n) {
-                return false;
-            }
-            let tile = TileType::new(suit_base + (n as u8 - 1)).expect("same-suit tile is valid");
-            counts.count(tile) > 0
-        };
-
-        for n in 1..=9i8 {
-            if !has(n) {
-                continue;
-            }
-            if has(n + 1) && has(n + 2) {
-                summary.sequence_count += 1;
-            }
-            if has(n + 1) {
-                if n == 1 || n + 1 == 9 {
-                    summary.penchan_taatsu_count += 1;
-                } else {
-                    summary.ryanmen_taatsu_count += 1;
-                }
-            }
-            if has(n + 2) {
-                summary.kanchan_taatsu_count += 1;
-            }
-        }
-    }
-
-    summary.estimated_block_count = summary.sequence_count
-        + summary.triplet_count
-        + summary.pair_like_type_count
-        + summary.ryanmen_taatsu_count
-        + summary.kanchan_taatsu_count
-        + summary.penchan_taatsu_count;
-
-    summary
+    HandShapeFacts::new(counts).summary()
 }
 
 /// 打牌前後のブロック数の内訳。
@@ -354,17 +387,26 @@ pub fn discard_block_context_with_fixed_melds(
     discard: TileType,
     fixed_meld_count: FixedMeldCount,
 ) -> DiscardBlockContext {
+    discard_block_context_with_facts(
+        counts,
+        discard,
+        fixed_meld_count,
+        &HandShapeFacts::new(counts),
+    )
+}
+
+fn discard_block_context_with_facts(
+    counts: &TileCounts,
+    discard: TileType,
+    fixed_meld_count: FixedMeldCount,
+    facts: &HandShapeFacts,
+) -> DiscardBlockContext {
     if counts.count(discard) == 0 {
         return DiscardBlockContext::default();
     }
 
-    let before = hand_shape_summary(counts);
-
-    let mut after_counts = *counts;
-    if after_counts.remove(discard).is_err() {
-        return DiscardBlockContext::default();
-    }
-    let after = hand_shape_summary(&after_counts);
+    let before = facts.summary();
+    let after = facts.summary_after_discard(counts, discard);
 
     let effective_block_count_after = after
         .estimated_block_count
@@ -394,8 +436,32 @@ pub fn shape_penalty_for_discard_with_fixed_melds(
     discard: TileType,
     fixed_meld_count: FixedMeldCount,
 ) -> i16 {
+    shape_penalty_with_facts(
+        counts,
+        discard,
+        fixed_meld_count,
+        false,
+        &HandShapeFacts::new(counts),
+    )
+}
+
+// 形の事前集計を共有して形ペナルティを求める。打牌候補ごとに同じ手牌の集計を作り直さない経路。
+fn shape_penalty_with_facts(
+    counts: &TileCounts,
+    discard: TileType,
+    fixed_meld_count: FixedMeldCount,
+    breaks_value_honor_triplet: bool,
+    facts: &HandShapeFacts,
+) -> i16 {
     let breakdown = shape_breakdown_for_discard(counts, discard);
-    shape_penalty_for_discard_impl(counts, discard, &breakdown, false, fixed_meld_count)
+    shape_penalty_for_discard_impl(
+        counts,
+        discard,
+        &breakdown,
+        breaks_value_honor_triplet,
+        fixed_meld_count,
+        facts,
+    )
 }
 
 pub fn shape_penalty_for_discard_with_context(
@@ -424,16 +490,23 @@ pub fn shape_penalty_for_discard_with_fixed_melds_and_context(
     round_wind: Option<TileType>,
     seat_wind: Option<TileType>,
 ) -> i16 {
-    let breakdown = shape_breakdown_for_discard(counts, discard);
-    let breaks_value_honor_triplet =
-        breakdown.breaks_triplet && discard.is_value_honor(round_wind, seat_wind);
-    shape_penalty_for_discard_impl(
+    shape_penalty_with_facts(
         counts,
         discard,
-        &breakdown,
-        breaks_value_honor_triplet,
         fixed_meld_count,
+        breaks_value_honor_triplet(counts, discard, round_wind, seat_wind),
+        &HandShapeFacts::new(counts),
     )
+}
+
+// 役牌の暗刻を崩す打牌かどうか。[`ShapeBreakdown::breaks_triplet`] と同じく同種3枚以上が条件。
+fn breaks_value_honor_triplet(
+    counts: &TileCounts,
+    discard: TileType,
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> bool {
+    counts.count(discard) >= 3 && discard.is_value_honor(round_wind, seat_wind)
 }
 
 fn shape_penalty_for_discard_impl(
@@ -442,6 +515,7 @@ fn shape_penalty_for_discard_impl(
     breakdown: &ShapeBreakdown,
     breaks_value_honor_triplet: bool,
     fixed_meld_count: FixedMeldCount,
+    facts: &HandShapeFacts,
 ) -> i16 {
     let mut penalty = 0i16;
     if breakdown.breaks_sequence {
@@ -486,7 +560,7 @@ fn shape_penalty_for_discard_impl(
         penalty -= 8;
     }
 
-    let pair_context = pair_context_for_discard(counts, discard);
+    let pair_context = facts.pair_context(counts, discard);
     if pair_context.is_only_pair_candidate
         && !pair_context.leaves_pair_after_discard
         && !preserves_shape
@@ -500,7 +574,7 @@ fn shape_penalty_for_discard_impl(
         penalty -= 4;
     }
 
-    let block_context = discard_block_context_with_fixed_melds(counts, discard, fixed_meld_count);
+    let block_context = discard_block_context_with_facts(counts, discard, fixed_meld_count, facts);
     if block_context.reduces_estimated_block_count {
         if block_context.leaves_under_five_blocks {
             penalty += 10;
@@ -1344,6 +1418,8 @@ pub(crate) fn evaluate_discards_with_seen_and_acceptance(
     acceptance: &dyn DiscardAcceptance,
 ) -> Vec<DiscardEvaluation> {
     let mut evaluations = Vec::new();
+    // 形の事前集計は手牌1つ分で共通なので、打牌候補ごとに作り直さず一度だけ求めて共有する。
+    let shape_facts = HandShapeFacts::new(counts);
 
     for tile in TileType::all() {
         let count_before_discard = counts.count(tile);
@@ -1373,10 +1449,12 @@ pub(crate) fn evaluate_discards_with_seen_and_acceptance(
             count_before_discard,
             shanten_after_discard,
             acceptance_after_discard,
-            shape_penalty: shape_penalty_for_discard_with_fixed_melds(
+            shape_penalty: shape_penalty_with_facts(
                 counts,
                 tile,
                 fixed_meld_count,
+                false,
+                &shape_facts,
             ),
             floating_tile_value: floating.value,
             discarded_dora_count: 0,
@@ -1583,6 +1661,11 @@ pub fn evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles(
 
 pub(crate) enum ShapePenaltyMode {
     ContextFree,
+    /// 場風・自風を反映した形ペナルティへ差し替える。
+    ///
+    /// 渡す打牌候補は、同じ `counts` と同じ副露済み面子数で求めた文脈なしの形ペナルティを
+    /// 持っていること。文脈で変わるのは役牌暗刻を崩す打牌の加点だけなので、それ以外の候補は
+    /// すでに持っている値がそのまま文脈ありの値になる。
     WithContext {
         round_wind: Option<TileType>,
         seat_wind: Option<TileType>,
@@ -1634,13 +1717,29 @@ pub(crate) fn decorate_evaluations(
             fixed_meld_count,
         } = context.shape_penalty
         {
-            evaluation.shape_penalty = shape_penalty_for_discard_with_fixed_melds_and_context(
-                counts,
-                evaluation.discard,
-                fixed_meld_count,
-                round_wind,
-                seat_wind,
-            );
+            // 役牌暗刻を崩さない候補では文脈なしの値と一致するため、同じ手牌の形評価を
+            // 打牌候補ごとに求め直さない。
+            if breaks_value_honor_triplet(counts, evaluation.discard, round_wind, seat_wind) {
+                evaluation.shape_penalty = shape_penalty_for_discard_with_fixed_melds_and_context(
+                    counts,
+                    evaluation.discard,
+                    fixed_meld_count,
+                    round_wind,
+                    seat_wind,
+                );
+            } else {
+                debug_assert_eq!(
+                    evaluation.shape_penalty,
+                    shape_penalty_for_discard_with_fixed_melds_and_context(
+                        counts,
+                        evaluation.discard,
+                        fixed_meld_count,
+                        round_wind,
+                        seat_wind,
+                    ),
+                    "文脈なしの形ペナルティを持つ打牌候補だけを WithContext へ渡すこと"
+                );
+            }
         }
     }
 }
@@ -1690,6 +1789,661 @@ pub(crate) fn discarded_tile_id_for_type(
         return red.or(black);
     }
     black.or(red)
+}
+
+// 高速化前の形評価をそのまま残した比較用の実装。新旧が完全一致することを differential test で
+// 確認するためだけに使う。
+#[cfg(test)]
+mod shape_reference {
+    use super::{
+        DiscardBlockContext, HandShapeSummary, PairContext, ShapeBreakdown,
+        VALUE_HONOR_TRIPLET_PENALTY,
+    };
+    use crate::shanten::FixedMeldCount;
+    use crate::tile::TileType;
+    use crate::tile_counts::TileCounts;
+
+    pub(super) fn shape_breakdown_for_discard(
+        counts: &TileCounts,
+        discard: TileType,
+    ) -> ShapeBreakdown {
+        let same_type_count = counts.count(discard);
+        if same_type_count == 0 {
+            return ShapeBreakdown::default();
+        }
+
+        let mut breakdown = ShapeBreakdown {
+            same_type_count,
+            ..ShapeBreakdown::default()
+        };
+        if same_type_count >= 2 {
+            breakdown.breaks_pair = true;
+        }
+        if same_type_count >= 3 {
+            breakdown.breaks_triplet = true;
+            if discard.is_honor() {
+                breakdown.breaks_honor_triplet = true;
+            }
+        }
+        breakdown.preserves_pair_after_discard = same_type_count >= 3;
+
+        let Some(number) = discard.number() else {
+            return breakdown;
+        };
+
+        let base = discard.raw() - (number - 1);
+        let has = |n: i8| -> bool {
+            if !(1..=9).contains(&n) {
+                return false;
+            }
+            let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+            counts.count(tile) > 0
+        };
+
+        let d = number as i8;
+
+        for delta in [-2i8, -1, 1, 2] {
+            if has(d + delta) {
+                breakdown.adjacent_count += 1;
+            }
+        }
+
+        breakdown.breaks_sequence =
+            (has(d - 2) && has(d - 1)) || (has(d - 1) && has(d + 1)) || (has(d + 1) && has(d + 2));
+
+        for a in [d - 1, d] {
+            if has(a) && has(a + 1) {
+                if a == 1 || a + 1 == 9 {
+                    breakdown.breaks_penchan = true;
+                } else {
+                    breakdown.breaks_ryanmen = true;
+                }
+            }
+        }
+
+        breakdown.breaks_kanchan = has(d - 2) || has(d + 2);
+
+        breakdown.preserves_sequence_after_discard =
+            preserves_sequence_after_discard(counts, discard);
+        breakdown.preserves_ryanmen_after_discard =
+            preserves_ryanmen_after_discard(counts, discard);
+
+        breakdown
+    }
+
+    fn preserves_sequence_after_discard(counts: &TileCounts, discard: TileType) -> bool {
+        if counts.count(discard) < 2 {
+            return false;
+        }
+        let Some(number) = discard.number() else {
+            return false;
+        };
+
+        let mut after = *counts;
+        if after.remove(discard).is_err() {
+            return false;
+        }
+
+        let base = discard.raw() - (number - 1);
+        let has = |n: i8| -> bool {
+            if !(1..=9).contains(&n) {
+                return false;
+            }
+            let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+            after.count(tile) > 0
+        };
+
+        let d = number as i8;
+        (has(d - 2) && has(d - 1)) || (has(d - 1) && has(d + 1)) || (has(d + 1) && has(d + 2))
+    }
+
+    fn preserves_ryanmen_after_discard(counts: &TileCounts, discard: TileType) -> bool {
+        if counts.count(discard) < 2 {
+            return false;
+        }
+        let Some(number) = discard.number() else {
+            return false;
+        };
+
+        let mut after = *counts;
+        if after.remove(discard).is_err() {
+            return false;
+        }
+
+        let base = discard.raw() - (number - 1);
+        let has = |n: i8| -> bool {
+            if !(1..=9).contains(&n) {
+                return false;
+            }
+            let tile = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+            after.count(tile) > 0
+        };
+
+        let d = number as i8;
+        for a in [d - 1, d] {
+            if has(a) && has(a + 1) && a != 1 && a + 1 != 9 {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(super) fn pair_context_for_discard(counts: &TileCounts, discard: TileType) -> PairContext {
+        let count_before_discard = counts.count(discard);
+        if count_before_discard == 0 {
+            return PairContext::default();
+        }
+
+        let mut pair_like_type_count = 0u8;
+        let mut other_pair_like_type_count = 0u8;
+        for tile in TileType::all() {
+            if counts.count(tile) >= 2 {
+                pair_like_type_count += 1;
+                if tile != discard {
+                    other_pair_like_type_count += 1;
+                }
+            }
+        }
+
+        PairContext {
+            pair_like_type_count,
+            other_pair_like_type_count,
+            is_only_pair_candidate: count_before_discard >= 2 && other_pair_like_type_count == 0,
+            leaves_pair_after_discard: count_before_discard >= 3,
+        }
+    }
+
+    fn is_isolated_tile(counts: &TileCounts, tile: TileType) -> bool {
+        let same_type_count = counts.count(tile);
+        if same_type_count == 0 || same_type_count >= 2 {
+            return false;
+        }
+
+        let Some(number) = tile.number() else {
+            return true;
+        };
+
+        let base = tile.raw() - (number - 1);
+        let has = |n: i8| -> bool {
+            if !(1..=9).contains(&n) {
+                return false;
+            }
+            let neighbor = TileType::new(base + (n as u8 - 1)).expect("same-suit tile is valid");
+            counts.count(neighbor) > 0
+        };
+
+        let d = number as i8;
+        for delta in [-2i8, -1, 1, 2] {
+            if has(d + delta) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(super) fn hand_shape_summary(counts: &TileCounts) -> HandShapeSummary {
+        let mut summary = HandShapeSummary::default();
+
+        for tile in TileType::all() {
+            let same_type_count = counts.count(tile);
+            if same_type_count == 0 {
+                continue;
+            }
+            if same_type_count >= 3 {
+                summary.triplet_count += 1;
+            }
+            if same_type_count >= 2 {
+                summary.pair_like_type_count += 1;
+            }
+            if is_isolated_tile(counts, tile) {
+                summary.isolated_tile_type_count += 1;
+            }
+        }
+
+        for suit_base in [0u8, 9, 18] {
+            let has = |n: i8| -> bool {
+                if !(1..=9).contains(&n) {
+                    return false;
+                }
+                let tile =
+                    TileType::new(suit_base + (n as u8 - 1)).expect("same-suit tile is valid");
+                counts.count(tile) > 0
+            };
+
+            for n in 1..=9i8 {
+                if !has(n) {
+                    continue;
+                }
+                if has(n + 1) && has(n + 2) {
+                    summary.sequence_count += 1;
+                }
+                if has(n + 1) {
+                    if n == 1 || n + 1 == 9 {
+                        summary.penchan_taatsu_count += 1;
+                    } else {
+                        summary.ryanmen_taatsu_count += 1;
+                    }
+                }
+                if has(n + 2) {
+                    summary.kanchan_taatsu_count += 1;
+                }
+            }
+        }
+
+        summary.estimated_block_count = summary.sequence_count
+            + summary.triplet_count
+            + summary.pair_like_type_count
+            + summary.ryanmen_taatsu_count
+            + summary.kanchan_taatsu_count
+            + summary.penchan_taatsu_count;
+
+        summary
+    }
+
+    pub(super) fn discard_block_context_with_fixed_melds(
+        counts: &TileCounts,
+        discard: TileType,
+        fixed_meld_count: FixedMeldCount,
+    ) -> DiscardBlockContext {
+        if counts.count(discard) == 0 {
+            return DiscardBlockContext::default();
+        }
+
+        let before = hand_shape_summary(counts);
+
+        let mut after_counts = *counts;
+        if after_counts.remove(discard).is_err() {
+            return DiscardBlockContext::default();
+        }
+        let after = hand_shape_summary(&after_counts);
+
+        let effective_block_count_after = after
+            .estimated_block_count
+            .saturating_add(fixed_meld_count.get());
+
+        DiscardBlockContext {
+            before,
+            after,
+            reduces_estimated_block_count: after.estimated_block_count
+                < before.estimated_block_count,
+            leaves_under_five_blocks: effective_block_count_after < 5,
+        }
+    }
+
+    pub(super) fn shape_penalty_for_discard_with_fixed_melds_and_context(
+        counts: &TileCounts,
+        discard: TileType,
+        fixed_meld_count: FixedMeldCount,
+        round_wind: Option<TileType>,
+        seat_wind: Option<TileType>,
+    ) -> i16 {
+        let breakdown = shape_breakdown_for_discard(counts, discard);
+        let breaks_value_honor_triplet =
+            breakdown.breaks_triplet && discard.is_value_honor(round_wind, seat_wind);
+
+        let mut penalty = 0i16;
+        if breakdown.breaks_sequence {
+            penalty += 40;
+        }
+        if breakdown.breaks_ryanmen {
+            penalty += 30;
+        }
+        if breakdown.breaks_pair {
+            penalty += 20;
+        }
+        if breakdown.breaks_kanchan {
+            penalty += 12;
+        }
+        if breakdown.breaks_penchan {
+            penalty += 8;
+        }
+        penalty += i16::from(breakdown.adjacent_count) * 3;
+        if breakdown.same_type_count >= 3 {
+            penalty += 10;
+        }
+        if breakdown.breaks_triplet {
+            penalty += 35;
+        }
+        if breakdown.breaks_honor_triplet {
+            penalty += 20;
+        }
+
+        if breakdown.preserves_sequence_after_discard {
+            penalty -= 15;
+        }
+        if breakdown.preserves_ryanmen_after_discard {
+            penalty -= 15;
+        }
+        let preserves_shape =
+            breakdown.preserves_sequence_after_discard || breakdown.preserves_ryanmen_after_discard;
+        if breakdown.preserves_pair_after_discard {
+            if !breakdown.breaks_honor_triplet {
+                penalty -= 12;
+            }
+        } else if breakdown.same_type_count == 2 && preserves_shape {
+            penalty -= 8;
+        }
+
+        let pair_context = pair_context_for_discard(counts, discard);
+        if pair_context.is_only_pair_candidate
+            && !pair_context.leaves_pair_after_discard
+            && !preserves_shape
+        {
+            penalty += 8;
+        }
+        if breakdown.same_type_count == 2 && pair_context.other_pair_like_type_count >= 1 {
+            penalty -= 6;
+        }
+        if breakdown.same_type_count == 2 && pair_context.pair_like_type_count >= 3 {
+            penalty -= 4;
+        }
+
+        let block_context =
+            discard_block_context_with_fixed_melds(counts, discard, fixed_meld_count);
+        if block_context.reduces_estimated_block_count {
+            if block_context.leaves_under_five_blocks {
+                penalty += 10;
+            } else {
+                penalty += 4;
+            }
+        }
+
+        if breaks_value_honor_triplet {
+            penalty += VALUE_HONOR_TRIPLET_PENALTY;
+        }
+
+        penalty.max(0)
+    }
+}
+
+#[cfg(test)]
+mod shape_differential_tests {
+    use super::shape_reference;
+    use super::*;
+    use crate::tile::TileId;
+
+    fn tile(s: &str) -> TileType {
+        TileType::from_mjai_type_str(s).unwrap()
+    }
+
+    fn counts(strings: &[&str]) -> TileCounts {
+        TileCounts::from_tile_types(strings.iter().map(|s| tile(s)))
+    }
+
+    fn fixed_meld_counts() -> Vec<FixedMeldCount> {
+        (0..=4)
+            .map(|value| FixedMeldCount::new(value).unwrap())
+            .collect()
+    }
+
+    fn winds() -> Vec<(Option<TileType>, Option<TileType>)> {
+        vec![
+            (None, None),
+            (Some(tile("E")), Some(tile("S"))),
+            (Some(tile("S")), Some(tile("S"))),
+            (Some(tile("W")), Some(tile("N"))),
+        ]
+    }
+
+    // 手牌1つ分の形評価がすべて新旧一致することを確認する。
+    fn assert_matches_reference(hand: &TileCounts) {
+        assert_eq!(
+            hand_shape_summary(hand),
+            shape_reference::hand_shape_summary(hand),
+            "hand_shape_summary が一致しない: {hand:?}"
+        );
+
+        for discard in TileType::all() {
+            assert_eq!(
+                shape_breakdown_for_discard(hand, discard),
+                shape_reference::shape_breakdown_for_discard(hand, discard),
+                "ShapeBreakdown が一致しない: {hand:?} / {discard:?}"
+            );
+            assert_eq!(
+                pair_context_for_discard(hand, discard),
+                shape_reference::pair_context_for_discard(hand, discard),
+                "PairContext が一致しない: {hand:?} / {discard:?}"
+            );
+
+            for fixed_meld_count in fixed_meld_counts() {
+                assert_eq!(
+                    discard_block_context_with_fixed_melds(hand, discard, fixed_meld_count),
+                    shape_reference::discard_block_context_with_fixed_melds(
+                        hand,
+                        discard,
+                        fixed_meld_count
+                    ),
+                    "DiscardBlockContext が一致しない: {hand:?} / {discard:?}"
+                );
+
+                for (round_wind, seat_wind) in winds() {
+                    assert_eq!(
+                        shape_penalty_for_discard_with_fixed_melds_and_context(
+                            hand,
+                            discard,
+                            fixed_meld_count,
+                            round_wind,
+                            seat_wind,
+                        ),
+                        shape_reference::shape_penalty_for_discard_with_fixed_melds_and_context(
+                            hand,
+                            discard,
+                            fixed_meld_count,
+                            round_wind,
+                            seat_wind,
+                        ),
+                        "shape_penalty が一致しない: {hand:?} / {discard:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn representative_hands() -> Vec<(&'static str, TileCounts)> {
+        vec![
+            (
+                "honors",
+                counts(&[
+                    "E", "E", "S", "S", "S", "W", "N", "P", "F", "C", "C", "C", "E",
+                ]),
+            ),
+            (
+                "terminals",
+                counts(&[
+                    "1m", "1m", "9m", "1p", "9p", "9p", "1s", "1s", "9s", "E", "N", "P", "C",
+                ]),
+            ),
+            (
+                "duplicated suited tiles",
+                counts(&[
+                    "3m", "3m", "3m", "4m", "4m", "5m", "5m", "5m", "6m", "6m", "7m", "7m", "8m",
+                ]),
+            ),
+            (
+                "pair triplet quad",
+                counts(&[
+                    "2p", "2p", "5p", "5p", "5p", "8p", "8p", "8p", "8p", "E", "E", "S", "S",
+                ]),
+            ),
+            (
+                "overlapping sequences",
+                counts(&[
+                    "2s", "3s", "4s", "3s", "4s", "5s", "4s", "5s", "6s", "7s", "8s", "9s", "1s",
+                ]),
+            ),
+            (
+                "overlapping taatsu",
+                counts(&[
+                    "1m", "2m", "4m", "5m", "7m", "8m", "1p", "3p", "5p", "7p", "9p", "2s", "4s",
+                ]),
+            ),
+            (
+                "ryanmen kanchan penchan",
+                counts(&[
+                    "1m", "2m", "4m", "6m", "8m", "9m", "2p", "3p", "5p", "7p", "3s", "4s", "6s",
+                ]),
+            ),
+            (
+                "isolated tiles",
+                counts(&[
+                    "1m", "5m", "9m", "2p", "6p", "9p", "3s", "7s", "E", "S", "W", "N", "P",
+                ]),
+            ),
+            ("empty", TileCounts::new()),
+            ("single tile", counts(&["5m"])),
+            (
+                "full suit",
+                counts(&[
+                    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1m", "5m", "9m", "5m",
+                ]),
+            ),
+            (
+                "benchmark hand",
+                counts(&[
+                    "1m", "1m", "2m", "5m", "8m", "2p", "3p", "4p", "7p", "8p", "9p", "1s", "3s",
+                ]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn representative_hands_match_reference() {
+        for (name, hand) in representative_hands() {
+            assert!(hand.total() <= 14, "{name}");
+            assert_matches_reference(&hand);
+        }
+    }
+
+    // 13枚・14枚どちらでも一致することを確認する。
+    #[test]
+    fn thirteen_and_fourteen_tile_hands_match_reference() {
+        for (_, hand) in representative_hands() {
+            assert_matches_reference(&hand);
+
+            for draw in TileType::all() {
+                let mut drawn = hand;
+                if drawn.try_add(draw).is_err() {
+                    continue;
+                }
+                assert_matches_reference(&drawn);
+            }
+        }
+    }
+
+    // 2手先探索が通る中間局面 (打牌後13枚・ツモ後14枚) でも一致することを確認する。
+    #[test]
+    fn lookahead_intermediate_states_match_reference() {
+        let hand = counts(&[
+            "1m", "1m", "2m", "5m", "8m", "2p", "3p", "4p", "7p", "8p", "9p", "1s", "3s", "9s",
+        ]);
+        assert_matches_reference(&hand);
+
+        for discard in TileType::all() {
+            let mut after_discard = hand;
+            if after_discard.remove(discard).is_err() {
+                continue;
+            }
+            assert_matches_reference(&after_discard);
+
+            for draw in TileType::all() {
+                let mut after_draw = after_discard;
+                if after_draw.try_add(draw).is_err() {
+                    continue;
+                }
+                assert_matches_reference(&after_draw);
+
+                for next_discard in TileType::all() {
+                    let mut next = after_draw;
+                    if next.remove(next_discard).is_err() {
+                        continue;
+                    }
+                    assert_eq!(
+                        shape_penalty_for_discard(&after_draw, next_discard),
+                        shape_reference::shape_penalty_for_discard_with_fixed_melds_and_context(
+                            &after_draw,
+                            next_discard,
+                            FixedMeldCount::NONE,
+                            None,
+                            None,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // 赤5を含む物理牌の手牌でも、打牌評価が持つ形ペナルティが比較用実装と一致する。
+    #[test]
+    fn red_five_physical_hand_matches_reference() {
+        let red_five = TileId::copies(tile("5m")).find(|id| id.is_red()).unwrap();
+        let mut tiles: Vec<TileId> = vec![red_five];
+        for name in [
+            "1m", "1m", "2m", "8m", "2p", "3p", "4p", "7p", "8p", "9p", "1s", "3s", "9s",
+        ] {
+            let tile_type = tile(name);
+            let used = tiles
+                .iter()
+                .filter(|id| id.tile_type() == tile_type)
+                .count();
+            tiles.push(TileId::copies(tile_type).nth(used).unwrap());
+        }
+
+        let hand = TileCounts::from_tiles(tiles.iter().copied());
+        for fixed_meld_count in fixed_meld_counts() {
+            for (round_wind, seat_wind) in winds() {
+                let evaluations = evaluate_discards_from_tiles_with_fixed_melds_and_context(
+                    &tiles,
+                    fixed_meld_count,
+                    &[],
+                    round_wind,
+                    seat_wind,
+                );
+                assert!(evaluations.iter().any(|entry| entry.discards_red_five));
+                for evaluation in &evaluations {
+                    assert_eq!(
+                        evaluation.shape_penalty,
+                        shape_reference::shape_penalty_for_discard_with_fixed_melds_and_context(
+                            &hand,
+                            evaluation.discard,
+                            fixed_meld_count,
+                            round_wind,
+                            seat_wind,
+                        ),
+                        "打牌評価の shape_penalty が一致しない: {:?}",
+                        evaluation.discard
+                    );
+                }
+            }
+        }
+    }
+
+    // 固定 seed の疑似乱数で作った手牌でも一致することを確認する。
+    #[test]
+    fn randomized_hands_match_reference() {
+        let mut state = 0x2026_0904_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+
+        for round in 0..200 {
+            let tile_count = 1 + (round % 14);
+            let mut hand = TileCounts::new();
+            let mut placed = 0;
+            let mut attempts = 0;
+            while placed < tile_count && attempts < 200 {
+                attempts += 1;
+                let index = (next() % TileType::COUNT as u32) as u8;
+                let candidate = TileType::new(index).expect("tile index is valid");
+                if hand.try_add(candidate).is_ok() {
+                    placed += 1;
+                }
+            }
+            assert_matches_reference(&hand);
+        }
+    }
 }
 
 #[cfg(test)]
