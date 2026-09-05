@@ -67,7 +67,7 @@ pub fn init(log_file: Option<&Path>) -> Result<Option<LoggingGuard>, LoggingErro
     let (writer, file_guard) = tracing_appender::non_blocking(open_log_file(path)?);
     let slow_log_path = slow_log_path(path);
     let (slow_writer, slow_file_guard) =
-        tracing_appender::non_blocking(open_log_file(&slow_log_path)?);
+        tracing_appender::non_blocking(LazySlowLogFile::new(slow_log_path.clone()));
     let slow_request_count = Arc::new(AtomicUsize::new(0));
     subscriber
         .with(
@@ -144,6 +144,57 @@ where
     fn on_event(&self, _event: &tracing::Event<'_>, _context: Context<'_, S>) {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+enum LazySlowLogFile {
+    Unopened(PathBuf),
+    Opened(File),
+    Failed,
+}
+
+impl LazySlowLogFile {
+    fn new(path: PathBuf) -> Self {
+        Self::Unopened(path)
+    }
+
+    fn opened(&mut self, reporter: &mut impl Write) -> Option<&mut File> {
+        if let Self::Unopened(path) = self {
+            *self = match open_log_file(path) {
+                Ok(file) => Self::Opened(file),
+                Err(error) => {
+                    let _ = write_slow_log_open_failure_warning(reporter, &error);
+                    Self::Failed
+                }
+            };
+        }
+        match self {
+            Self::Opened(file) => Some(file),
+            Self::Unopened(_) | Self::Failed => None,
+        }
+    }
+}
+
+impl Write for LazySlowLogFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.opened(&mut io::stderr().lock()) {
+            Some(file) => file.write(buf),
+            None => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Opened(file) => file.flush(),
+            Self::Unopened(_) | Self::Failed => Ok(()),
+        }
+    }
+}
+
+fn write_slow_log_open_failure_warning(
+    writer: &mut impl Write,
+    error: &LoggingError,
+) -> io::Result<()> {
+    writeln!(writer, "WARN slow request logging disabled: {error}")
 }
 
 fn write_slow_request_completion_warning(
@@ -316,6 +367,101 @@ mod tests {
         }
         assert!(!contents.contains("unrelated warn excluded"), "{contents}");
         assert!(!contents.contains("unrelated info excluded"), "{contents}");
+    }
+
+    fn record_slow_log(path: &Path, f: impl FnOnce()) {
+        let (writer, guard) =
+            tracing_appender::non_blocking(LazySlowLogFile::new(path.to_path_buf()));
+        let subscriber = tracing_subscriber::registry()
+            .with(file_layer(writer).with_filter(slow_request_filter()));
+        tracing::subscriber::with_default(subscriber, f);
+        drop(guard);
+    }
+
+    fn slow_event(request_id: u64) {
+        tracing::warn!(
+            target: SLOW_REQUEST_TARGET,
+            request_id,
+            "slow request_action response"
+        );
+    }
+
+    #[test]
+    fn slow_log_is_not_created_without_slow_requests() {
+        let path = temp_log_path("lazy-slow-none");
+        let _ = std::fs::remove_file(&path);
+
+        record_slow_log(&path, || {
+            tracing::info!(target: "unrelated", "unrelated info");
+            tracing::warn!(target: "unrelated", "unrelated warn");
+        });
+
+        assert!(!path.exists(), "{}", path.display());
+    }
+
+    #[test]
+    fn slow_log_is_created_by_the_first_slow_request() {
+        let path = temp_log_path("lazy-slow-first");
+        let _ = std::fs::remove_file(&path);
+
+        record_slow_log(&path, || {
+            tracing::info!(target: "unrelated", "unrelated info");
+            slow_event(1);
+        });
+
+        let contents = std::fs::read_to_string(&path).expect("slow log file should exist");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(contents.contains("request_id=1"), "{contents}");
+        assert!(!contents.contains("unrelated info"), "{contents}");
+    }
+
+    #[test]
+    fn slow_log_appends_every_slow_request() {
+        let path = temp_log_path("lazy-slow-append");
+        let _ = std::fs::remove_file(&path);
+
+        record_slow_log(&path, || {
+            slow_event(1);
+            slow_event(2);
+        });
+        record_slow_log(&path, || slow_event(3));
+
+        let contents = std::fs::read_to_string(&path).expect("slow log file should exist");
+        let _ = std::fs::remove_file(&path);
+
+        for included in ["request_id=1", "request_id=2", "request_id=3"] {
+            assert!(contents.contains(included), "{included}: {contents}");
+        }
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| line.contains("slow request_action response"))
+                .count(),
+            3,
+            "{contents}"
+        );
+    }
+
+    #[test]
+    fn slow_log_open_failure_is_reported_once_and_stops_recording() {
+        let path = temp_log_path("lazy-slow-open-failure").join("nested.log");
+        let mut file = LazySlowLogFile::new(path.clone());
+        let mut report = Vec::new();
+
+        assert!(file.opened(&mut report).is_none());
+        assert!(file.opened(&mut report).is_none());
+        assert_eq!(file.write(b"slow\n").unwrap(), 5);
+        file.flush().unwrap();
+
+        let report = String::from_utf8(report).unwrap();
+        assert_eq!(report.lines().count(), 1, "{report}");
+        assert!(
+            report.starts_with("WARN slow request logging disabled: failed to open log file"),
+            "{report}"
+        );
+        assert!(report.contains(&path.display().to_string()), "{report}");
+        assert!(!path.exists(), "{}", path.display());
     }
 
     #[test]
