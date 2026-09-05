@@ -46,9 +46,9 @@ pub use completed_hand::{
 };
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
-    DiscardDecisionDiagnostic, DiscardEvaluation, FloatingTileValue, HandShapeSummary, PairContext,
-    ShapeBreakdown, compare_discard_evaluations, diagnose_discard_evaluations,
-    diagnose_discard_evaluations_with_fixed_melds,
+    DiscardDecisionDiagnostic, DiscardEvaluation, DiscardEvaluationView, FloatingTileValue,
+    HandShapeSummary, PairContext, ShapeBreakdown, compare_discard_evaluations,
+    diagnose_discard_evaluations, diagnose_discard_evaluations_with_fixed_melds,
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
     diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait,
     diagnose_discard_evaluations_with_metrics, discard_block_context,
