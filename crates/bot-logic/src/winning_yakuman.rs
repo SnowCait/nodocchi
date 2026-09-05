@@ -42,9 +42,26 @@ pub fn evaluate_winning_yakuman(
     context: WinningContext,
     winning_tile: TileType,
 ) -> Vec<WinningYakumanEvaluation<'_>> {
+    winning_yakuman_evaluations(
+        analysis,
+        context,
+        &interpret_winning_tile(analysis, winning_tile),
+    )
+}
+
+/// 和了牌の解釈を求めてある場合の [`evaluate_winning_yakuman`]。
+///
+/// 役判定と同じ解釈 ([`interpret_winning_tile`]) をそのまま受け取るための入口で、役満の
+/// 付け方は [`evaluate_winning_yakuman`] と同じ。
+pub(crate) fn winning_yakuman_evaluations<'a>(
+    analysis: &'a CompletedHandAnalysis,
+    context: WinningContext,
+    interpretations: &[WinningTileInterpretation<'a>],
+) -> Vec<WinningYakumanEvaluation<'a>> {
     let evaluations = evaluate_yakuman(analysis);
-    interpret_winning_tile(analysis, winning_tile)
-        .into_iter()
+    interpretations
+        .iter()
+        .copied()
         .map(|interpretation| {
             let mut yakuman = evaluations
                 .iter()

@@ -5,8 +5,8 @@ use crate::payment::{Payment, PaymentError, evaluate_payment};
 use crate::tile::TileType;
 use crate::tile_counts::TileCounts;
 use crate::winning_context::WinningContext;
-use crate::winning_tile::{WaitType, WinningTileInterpretation};
-use crate::winning_yakuman::{WinningYakumanEvaluation, evaluate_winning_yakuman};
+use crate::winning_tile::{WaitType, WinningTileInterpretation, interpret_winning_tile};
+use crate::winning_yakuman::{WinningYakumanEvaluation, winning_yakuman_evaluations};
 use crate::yakuman::Yakuman;
 
 const DEALER_SEAT_INDEX: u8 = 0;
@@ -88,12 +88,28 @@ pub fn evaluate_yakuman_scoring<'a>(
     context: WinningContext,
     winning_tile: TileType,
 ) -> Result<Vec<YakumanScoringCandidate<'a>>, YakumanScoringError> {
+    yakuman_scoring_candidates(
+        analysis,
+        context,
+        &interpret_winning_tile(analysis, winning_tile),
+    )
+}
+
+/// 和了牌の解釈を求めてある場合の [`evaluate_yakuman_scoring`]。
+///
+/// 和了牌の解釈は役判定と共通なので、両方を求める呼び出し側が同じ列挙を2回走らせないための
+/// 入口。役満の求め方も点数の求め方も [`evaluate_yakuman_scoring`] と同じ。
+pub(crate) fn yakuman_scoring_candidates<'a>(
+    analysis: &'a CompletedHandAnalysis,
+    context: WinningContext,
+    interpretations: &[WinningTileInterpretation<'a>],
+) -> Result<Vec<YakumanScoringCandidate<'a>>, YakumanScoringError> {
     let Some(seat_wind) = context.seat_wind() else {
         return Err(YakumanScoringError::MissingSeatWind);
     };
     let is_dealer = TileType::wind_from_seat_index(DEALER_SEAT_INDEX) == Some(seat_wind);
 
-    evaluate_winning_yakuman(analysis, context, winning_tile)
+    winning_yakuman_evaluations(analysis, context, interpretations)
         .into_iter()
         .filter(|evaluation| !evaluation.is_empty())
         .map(|evaluation| candidate(analysis, &evaluation, context, is_dealer))

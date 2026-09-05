@@ -2,13 +2,14 @@ use thiserror::Error;
 
 use crate::bonus_han::{BonusHanBreakdown, evaluate_bonus_han};
 use crate::completed_hand::{CompletedHandAnalysis, CompletedHandDecomposition};
-use crate::fu::{FuBreakdown, WinningFuEvaluation, evaluate_winning_fu};
-use crate::han::{WinningYakuHanEvaluation, YakuHan, evaluate_winning_yaku_han};
+use crate::fu::{FuBreakdown, WinningFuEvaluation, winning_fu_evaluations};
+use crate::han::{WinningYakuHanEvaluation, YakuHan, winning_yaku_han_evaluations};
 use crate::normal_score::{NormalScoreBase, NormalScoreError, evaluate_normal_score_base};
 use crate::payment::{Payment, PaymentError, evaluate_payment};
 use crate::tile::{TileId, TileType};
 use crate::winning_context::{WinMethod, WinningContext};
-use crate::winning_tile::WinningTileInterpretation;
+use crate::winning_tile::{WinningTileInterpretation, interpret_winning_tile};
+use crate::winning_yaku::winning_yaku_evaluations;
 
 const DEALER_SEAT_INDEX: u8 = 0;
 
@@ -130,13 +131,35 @@ pub fn evaluate_normal_hand_scoring<'a>(
     dora_indicators: &[TileId],
     ura_dora_indicators: Option<&[TileId]>,
 ) -> Result<Vec<NormalScoringCandidate<'a>>, NormalScoringError> {
+    normal_scoring_candidates(
+        analysis,
+        context,
+        dora_indicators,
+        ura_dora_indicators,
+        &interpret_winning_tile(analysis, winning_tile),
+    )
+}
+
+/// 和了牌の解釈を求めてある場合の [`evaluate_normal_hand_scoring`]。
+///
+/// 和了牌の解釈は役満判定と共通なので、両方を求める呼び出し側が同じ列挙を2回走らせない
+/// ための入口。役・符・翻・点数の求め方は [`evaluate_normal_hand_scoring`] と同じ。
+pub(crate) fn normal_scoring_candidates<'a>(
+    analysis: &'a CompletedHandAnalysis,
+    context: WinningContext,
+    dora_indicators: &[TileId],
+    ura_dora_indicators: Option<&[TileId]>,
+    interpretations: &[WinningTileInterpretation<'a>],
+) -> Result<Vec<NormalScoringCandidate<'a>>, NormalScoringError> {
     let seat_wind = exact_scoring_context(context)?;
     let is_dealer = TileType::wind_from_seat_index(DEALER_SEAT_INDEX) == Some(seat_wind);
 
     let bonus_han = evaluate_bonus_han(analysis, context, dora_indicators, ura_dora_indicators);
-    let fu_evaluations = evaluate_winning_fu(analysis, context, winning_tile);
+    // 符も翻も同じ役評価から導くので、同じ完成手・同じ和了牌の役判定は1回だけ走らせる。
+    let yaku_evaluations = winning_yaku_evaluations(analysis, context, interpretations);
+    let fu_evaluations = winning_fu_evaluations(&yaku_evaluations, analysis.fixed_melds(), context);
 
-    evaluate_winning_yaku_han(analysis, context, winning_tile)
+    winning_yaku_han_evaluations(&yaku_evaluations, analysis.fixed_melds())
         .into_iter()
         .filter(|evaluation| !evaluation.is_empty())
         .filter_map(|evaluation| {
@@ -254,6 +277,7 @@ mod tests {
     use crate::bonus_han::UraDoraHan;
     use crate::completed_hand::analyze_completed_hand;
     use crate::fu::{FuKind, evaluate_winning_fu};
+    use crate::han::evaluate_winning_yaku_han;
     use crate::meld::{Meld, MeldKind};
     use crate::normal_score::LimitClass;
     use crate::payment::PaymentBreakdown;
@@ -438,6 +462,153 @@ mod tests {
     const NO_YAKU_OPEN_REST: [&str; 11] = [
         "4p", "5p", "6p", "2s", "3s", "4s", "7s", "8s", "9s", "5s", "5s",
     ];
+    const SUUANKOU_HAND: [&str; 14] = [
+        "2m", "2m", "2m", "3m", "3m", "3m", "4p", "4p", "4p", "5s", "5s", "5s", "6p", "6p",
+    ];
+    const VALUE_HONOR_HAND: [&str; 14] = [
+        "P", "P", "P", "2m", "3m", "4m", "6p", "7p", "8p", "2s", "3s", "4s", "9m", "9m",
+    ];
+    const OPEN_HONITSU_REST: [&str; 11] = [
+        "1p", "1p", "2p", "3p", "4p", "6p", "7p", "8p", "7p", "8p", "9p",
+    ];
+
+    // 差分検証の完成手。門前 / 副露・赤5 / 黒5・複数解釈・七対子・通常形・名前の付いた役満・
+    // 役なし・役牌・平和 / 非平和を含む。
+    // 差分検証の完成手1件。(門前の牌, 固定面子, 和了牌)。
+    type DifferentialHand = (
+        &'static [&'static str],
+        &'static [(MeldKind, &'static [&'static str])],
+        &'static str,
+    );
+
+    const DIFFERENTIAL_HANDS: &[DifferentialHand] = &[
+        (&PINFU_TANYAO_HAND, &[], "2m"),
+        (&PINFU_TANYAO_AKA_HAND, &[], "2m"),
+        (&PENCHAN_WAIT_HAND, &[], "1m"),
+        (&PENCHAN_AND_RYANMEN, &[], "3m"),
+        (&CHIITOITSU_HAND, &[], "E"),
+        (&RYANPEIKOU_CHIITOITSU, &[], "2p"),
+        (&KOKUSHI_HAND, &[], "9s"),
+        (&SUUANKOU_HAND, &[], "6p"),
+        (&VALUE_HONOR_HAND, &[], "9m"),
+        (
+            &NO_YAKU_OPEN_REST,
+            &[(MeldKind::Chi, &["1m", "2m", "3m"])],
+            "5s",
+        ),
+        (
+            &OPEN_HONITSU_REST,
+            &[(MeldKind::Pon, &["P", "P", "P"])],
+            "9p",
+        ),
+    ];
+
+    // 差分検証のドラ表示牌と裏ドラ表示牌。裏ドラ未確定 (`None`) と裏ドラ 0 枚も含む。
+    const DIFFERENTIAL_DORA: &[(&[&str], Option<&[&str]>)] = &[
+        (&[], None),
+        (&["1m"], None),
+        (&["1m"], Some(&[])),
+        (&["1m"], Some(&["4p"])),
+    ];
+
+    // 差分検証の和了状況。ロン / ツモ・リーチ / ダマ・親 / 子・点数計算の入力不足を含む。
+    fn differential_contexts() -> Vec<WinningContext> {
+        vec![
+            ron(),
+            tsumo(),
+            riichi_ron(),
+            tsumo()
+                .with_riichi(RiichiStatus::Riichi)
+                .with_ippatsu(Some(false)),
+            dealer_ron(),
+            dealer_tsumo(),
+            ron().with_round_wind(None),
+            ron().with_seat_wind(None),
+        ]
+    }
+
+    // 変更前の合成順。既存 public 入口 ([`evaluate_winning_fu`] / [`evaluate_winning_yaku_han`])
+    // をそれぞれ独立に呼び、同じ完成手・同じ和了牌の役判定を2回走らせる。点数計算の規則は
+    // ここで書き直さず、実装と同じ既存 helper をそのまま使う。
+    fn reference_candidates<'a>(
+        analysis: &'a CompletedHandAnalysis,
+        context: WinningContext,
+        winning_tile: TileType,
+        dora_indicators: &[TileId],
+        ura_dora_indicators: Option<&[TileId]>,
+    ) -> Result<Vec<NormalScoringCandidate<'a>>, NormalScoringError> {
+        let seat_wind = exact_scoring_context(context)?;
+        let is_dealer = TileType::wind_from_seat_index(DEALER_SEAT_INDEX) == Some(seat_wind);
+
+        let bonus_han = evaluate_bonus_han(analysis, context, dora_indicators, ura_dora_indicators);
+        let fu_evaluations = evaluate_winning_fu(analysis, context, winning_tile);
+
+        evaluate_winning_yaku_han(analysis, context, winning_tile)
+            .into_iter()
+            .filter(|evaluation| !evaluation.is_empty())
+            .filter_map(|evaluation| {
+                let fu = fu_breakdown(&fu_evaluations, evaluation.interpretation())?;
+                Some(candidate(
+                    &evaluation,
+                    fu.clone(),
+                    bonus_han,
+                    context,
+                    is_dealer,
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_shared_yaku_evaluation_matches_evaluating_the_yaku_twice() {
+        // 符と翻で役判定を共有する現在の実装と、役判定を2回走らせる変更前の合成順は、同じ
+        // 完成手・同じ和了牌・同じ和了状況・同じドラに対して同じ結論になる。
+        let mut known = 0;
+        let mut no_candidate = 0;
+        let mut unknown_bonus_han = 0;
+        let mut incomplete_context = 0;
+
+        for (concealed, fixed, winning_tile) in DIFFERENTIAL_HANDS {
+            for (dora, ura) in DIFFERENTIAL_DORA {
+                let setup = Setup::new(concealed, fixed, dora, *ura);
+                for context in differential_contexts() {
+                    let candidates = setup.try_candidates(context, winning_tile);
+                    assert_eq!(
+                        candidates,
+                        reference_candidates(
+                            &setup.analysis,
+                            context,
+                            tile_type(winning_tile),
+                            &setup.dora_indicators,
+                            setup.ura_dora_indicators.as_deref(),
+                        ),
+                        "{concealed:?} {fixed:?} {winning_tile} {context:?} {dora:?} {ura:?}"
+                    );
+
+                    match &candidates {
+                        Err(NormalScoringError::IncompleteContext(_)) => incomplete_context += 1,
+                        Err(_) => {}
+                        Ok(candidates) if candidates.is_empty() => no_candidate += 1,
+                        Ok(candidates) => {
+                            for candidate in candidates {
+                                match candidate.state() {
+                                    NormalScoringState::Known { .. } => known += 1,
+                                    NormalScoringState::UnknownBonusHan => unknown_bonus_han += 1,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 一致だけの空振りにせず、確定した点数・役なし・裏ドラ未確定・入力不足がどれも
+        // 検証対象に含まれていることを確かめる。
+        assert!(known > 0);
+        assert!(no_candidate > 0);
+        assert!(unknown_bonus_han > 0);
+        assert!(incomplete_context > 0);
+    }
 
     #[test]
     fn a_simple_hand_reaches_its_payment_through_the_existing_layers() {

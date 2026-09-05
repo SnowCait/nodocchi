@@ -40,9 +40,27 @@ pub fn evaluate_winning_yaku(
     context: WinningContext,
     winning_tile: TileType,
 ) -> Vec<WinningYakuEvaluation<'_>> {
+    winning_yaku_evaluations(
+        analysis,
+        context,
+        &interpret_winning_tile(analysis, winning_tile),
+    )
+}
+
+/// 和了牌の解釈を求めてある場合の [`evaluate_winning_yaku`]。
+///
+/// 和了牌の解釈 ([`interpret_winning_tile`]) は和了状況にもドラにも依らないので、同じ完成手・
+/// 同じ和了牌なら役判定と役満判定で1回求めれば足りる。解釈を持っている呼び出し側が同じ列挙を
+/// もう一度走らせないための入口で、役の付け方は [`evaluate_winning_yaku`] と同じ。
+pub(crate) fn winning_yaku_evaluations<'a>(
+    analysis: &'a CompletedHandAnalysis,
+    context: WinningContext,
+    interpretations: &[WinningTileInterpretation<'a>],
+) -> Vec<WinningYakuEvaluation<'a>> {
     let evaluations = evaluate_yaku(analysis, context);
-    interpret_winning_tile(analysis, winning_tile)
-        .into_iter()
+    interpretations
+        .iter()
+        .copied()
         .map(|interpretation| {
             let mut yaku = evaluations
                 .iter()

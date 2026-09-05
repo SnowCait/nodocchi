@@ -1,5 +1,5 @@
 use crate::completed_hand::{CompletedHandAnalysis, CompletedHandDecomposition};
-use crate::meld::is_menzen;
+use crate::meld::{Meld, is_menzen};
 use crate::tile::TileType;
 use crate::winning_context::WinningContext;
 use crate::winning_tile::WinningTileInterpretation;
@@ -62,8 +62,23 @@ pub fn evaluate_winning_yaku_han(
     context: WinningContext,
     winning_tile: TileType,
 ) -> Vec<WinningYakuHanEvaluation<'_>> {
-    let menzen = is_menzen(analysis.fixed_melds());
-    evaluate_winning_yaku(analysis, context, winning_tile)
+    winning_yaku_han_evaluations(
+        &evaluate_winning_yaku(analysis, context, winning_tile),
+        analysis.fixed_melds(),
+    )
+}
+
+/// 評価済みの待ちごとの役に翻を付ける。
+///
+/// 役判定は既存の役評価そのもので、ここでは食い下がりを含む翻を付けるだけ。役評価を持って
+/// いる呼び出し側が同じ判定をもう一度走らせないための入口で、結果は
+/// [`evaluate_winning_yaku_han`] と同じ。
+pub(crate) fn winning_yaku_han_evaluations<'a>(
+    yaku_evaluations: &[WinningYakuEvaluation<'a>],
+    fixed_melds: &[Meld],
+) -> Vec<WinningYakuHanEvaluation<'a>> {
+    let menzen = is_menzen(fixed_melds);
+    yaku_evaluations
         .iter()
         .map(|evaluation| winning_yaku_han(evaluation, menzen))
         .collect()
