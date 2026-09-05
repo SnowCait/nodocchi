@@ -228,7 +228,7 @@ impl ForwardMetrics {
 /// 「計算した結果すべての待ちが死んでいた」候補を区別するため、意味の無い 0 で埋めない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscardSelectionCandidate<'a> {
-    pub evaluation: DiscardEvaluationView<'a>,
+    pub evaluation: &'a DiscardEvaluation,
     pub tenpai_wait: Option<TenpaiWaitMetric>,
     pub next_acceptance: Option<NextAcceptanceMetric>,
     /// 打点込みの前方集計値。
@@ -259,7 +259,7 @@ pub struct DiscardSelectionCandidate<'a> {
 
 impl<'a> DiscardSelectionCandidate<'a> {
     /// 前方評価を持たない候補。既存の1手比較と同じ結果になる。
-    pub fn without_tenpai_wait(evaluation: DiscardEvaluationView<'a>) -> Self {
+    pub fn without_tenpai_wait(evaluation: &'a DiscardEvaluation) -> Self {
         Self {
             evaluation,
             tenpai_wait: None,
@@ -271,6 +271,39 @@ impl<'a> DiscardSelectionCandidate<'a> {
             current_tenpai_continuation_self_tsumo_value: None,
         }
     }
+
+    // 比較本体へ渡すための借用 view。集計値はそのままで、1手評価だけ view になる。
+    fn view(&self) -> DiscardSelectionCandidateView<'a> {
+        DiscardSelectionCandidateView {
+            evaluation: self.evaluation.view(),
+            tenpai_wait: self.tenpai_wait,
+            next_acceptance: self.next_acceptance,
+            prospective_value: self.prospective_value,
+            expected_self_tsumo_value: self.expected_self_tsumo_value,
+            current_tenpai_offense_weighted_total: self.current_tenpai_offense_weighted_total,
+            current_tenpai_expected_self_tsumo_value: self.current_tenpai_expected_self_tsumo_value,
+            current_tenpai_continuation_self_tsumo_value: self
+                .current_tenpai_continuation_self_tsumo_value,
+        }
+    }
+}
+
+/// 打牌選択1候補分の比較入力。1手評価を借用 view で持つ以外は
+/// [`DiscardSelectionCandidate`] と同じ値。
+///
+/// 探索は base 打牌評価を複製せずに比較するためこちらを直接組み立て、public API 経由の呼び出し
+/// は [`DiscardSelectionCandidate::view`] でこの型へ変換する。比較規則はどちらの経路も
+/// [`compare_discard_selection_candidate_views`] だけを通り、2系統に複製しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiscardSelectionCandidateView<'a> {
+    pub evaluation: DiscardEvaluationView<'a>,
+    pub tenpai_wait: Option<TenpaiWaitMetric>,
+    pub next_acceptance: Option<NextAcceptanceMetric>,
+    pub prospective_value: Option<u64>,
+    pub expected_self_tsumo_value: Option<u64>,
+    pub current_tenpai_offense_weighted_total: Option<u64>,
+    pub current_tenpai_expected_self_tsumo_value: Option<u64>,
+    pub current_tenpai_continuation_self_tsumo_value: Option<u64>,
 }
 
 /// 前方集計値を含めて打牌候補を比較する。
@@ -293,6 +326,16 @@ impl<'a> DiscardSelectionCandidate<'a> {
 pub fn compare_discard_selection_candidates(
     candidate: &DiscardSelectionCandidate,
     current_best: &DiscardSelectionCandidate,
+) -> DiscardComparison {
+    compare_discard_selection_candidate_views(&candidate.view(), &current_best.view())
+}
+
+/// 借用 view のまま [`compare_discard_selection_candidates`] を求める比較本体。
+///
+/// 比較順はここだけが持ち、public API 経路も探索経路もこの1本を通る。
+pub(crate) fn compare_discard_selection_candidate_views(
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> DiscardComparison {
     if let Some(comparison) =
         compare_discard_before_acceptance(&candidate.evaluation, &current_best.evaluation)
@@ -466,7 +509,7 @@ fn best_discard_selection_index_with_metrics_for_views(
     let current_tenpai_metrics =
         resolve_current_tenpai_value_axis_for_views(evaluations, current_tenpai_metrics);
     let metrics_at = |index: usize| resolved.get(index).copied().unwrap_or_default();
-    let candidate_at = |index: usize| DiscardSelectionCandidate {
+    let candidate_at = |index: usize| DiscardSelectionCandidateView {
         evaluation: evaluations[index],
         tenpai_wait: metrics_at(index).tenpai_wait,
         next_acceptance: metrics_at(index).next_acceptance,
@@ -487,7 +530,7 @@ fn best_discard_selection_index_with_metrics_for_views(
     for index in 0..evaluations.len() {
         match best {
             Some(best_index)
-                if !compare_discard_selection_candidates(
+                if !compare_discard_selection_candidate_views(
                     &candidate_at(index),
                     &candidate_at(best_index),
                 )
@@ -691,8 +734,8 @@ pub fn current_tenpai_continuation_targets(
 // いる ([`resolve_prospective_value_axis`]) ため、ここでの `None` は「この cohort では
 // self-tsumo 軸を使わない」を意味する。
 fn compare_expected_self_tsumo_value(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     if candidate.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
         || current_best.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
@@ -714,8 +757,8 @@ fn compare_expected_self_tsumo_value(
 // ため、ここでの `None` は「この cohort では打点軸を使わない」を意味する。確定しない値を 0 点
 // として順位付けしない。
 fn compare_weighted_prospective_value(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     let candidate_value = candidate.prospective_value?;
     let best_value = current_best.prospective_value?;
@@ -730,8 +773,8 @@ fn compare_weighted_prospective_value(
 // 呼び出し時点で両候補の最小向聴数は等しいが、対象を1向聴に限定するため向聴数も明示的に確認
 // する。前方集計値が片方しか無い状態では順位を付けず、比較の推移律を保つ。
 fn compare_weighted_tenpai_wait(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     if candidate.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
         || current_best.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
@@ -760,8 +803,8 @@ fn compare_weighted_tenpai_wait(
 }
 
 fn compare_weighted_next_acceptance(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     let shanten = candidate.evaluation.min_shanten_after_discard();
     if shanten < 2 || current_best.evaluation.min_shanten_after_discard() != shanten {
@@ -791,8 +834,8 @@ fn compare_weighted_next_acceptance(
 // 和了牌の残枚数を含む weighted total そのものを使う。軸の有無は呼び出し前に cohort 単位で
 // 解決済みなので、ここでの `None` は後続の既存 Acceptance 比較へ委ねることを意味する。
 fn compare_current_tenpai_offense_value(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     if candidate.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
         || current_best.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
@@ -812,8 +855,8 @@ fn compare_current_tenpai_offense_value(
 // 恒常フリテンが全候補で確定し、上位層が全候補の timing を確定できた cohort でだけ値が残る。
 // 同じ cohort で current wait の self-tsumo 軸と併用しないので、決着させるのはどちらか一方だけ。
 fn compare_current_tenpai_continuation_self_tsumo_value(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     if candidate.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
         || current_best.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
@@ -832,8 +875,8 @@ fn compare_current_tenpai_continuation_self_tsumo_value(
 // 現在打牌後が聴牌になる候補だけの self-tsumo expected payment 比較。恒常フリテンを含む
 // known cohort でだけ値が残るため、Ron の生値とは混ぜず全候補に共通する尺度として使う。
 fn compare_current_tenpai_expected_self_tsumo_value(
-    candidate: &DiscardSelectionCandidate,
-    current_best: &DiscardSelectionCandidate,
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
 ) -> Option<DiscardComparison> {
     if candidate.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
         || current_best.evaluation.min_shanten_after_discard() != CURRENT_TENPAI_SHANTEN
@@ -974,7 +1017,7 @@ mod tests {
         tenpai_wait: Option<TenpaiWaitMetric>,
     ) -> DiscardSelectionCandidate<'a> {
         DiscardSelectionCandidate {
-            evaluation: evaluation.view(),
+            evaluation,
             tenpai_wait,
             next_acceptance: None,
             prospective_value: None,
@@ -991,7 +1034,7 @@ mod tests {
         prospective_value: Option<u64>,
     ) -> DiscardSelectionCandidate<'a> {
         DiscardSelectionCandidate {
-            evaluation: evaluation.view(),
+            evaluation,
             tenpai_wait,
             next_acceptance: None,
             prospective_value,
@@ -1007,7 +1050,7 @@ mod tests {
         next_acceptance: Option<NextAcceptanceMetric>,
     ) -> DiscardSelectionCandidate<'a> {
         DiscardSelectionCandidate {
-            evaluation: evaluation.view(),
+            evaluation,
             tenpai_wait: None,
             next_acceptance,
             prospective_value: None,
@@ -1023,7 +1066,7 @@ mod tests {
         weighted_total: Option<u64>,
     ) -> DiscardSelectionCandidate<'a> {
         DiscardSelectionCandidate {
-            evaluation: evaluation.view(),
+            evaluation,
             tenpai_wait: None,
             next_acceptance: None,
             prospective_value: None,
@@ -1039,7 +1082,7 @@ mod tests {
         expected_self_tsumo_value: Option<u64>,
     ) -> DiscardSelectionCandidate<'a> {
         DiscardSelectionCandidate {
-            evaluation: evaluation.view(),
+            evaluation,
             tenpai_wait: None,
             next_acceptance: None,
             prospective_value: None,
@@ -1927,10 +1970,47 @@ mod tests {
 
         assert_eq!(
             compare_discard_selection_candidates(
-                &DiscardSelectionCandidate::without_tenpai_wait(narrow.view()),
-                &DiscardSelectionCandidate::without_tenpai_wait(wide.view()),
+                &DiscardSelectionCandidate::without_tenpai_wait(&narrow),
+                &DiscardSelectionCandidate::without_tenpai_wait(&wide),
             ),
             compare_discard_evaluations(&narrow, &wide),
+        );
+    }
+
+    #[test]
+    fn the_search_view_candidate_compares_like_the_public_candidate() {
+        // 探索が組み立てる借用 view 候補と、public API の候補が同じ比較結果・同じ選択になる。
+        // 比較規則は1本を共有しているが、両経路の組み立てがずれないことをここで固定する。
+        let (evaluations, metrics) = cycle_case();
+        let public_candidates = candidates_of(&evaluations, &metrics);
+        let view_candidates: Vec<_> = evaluations
+            .iter()
+            .zip(&metrics)
+            .map(|(evaluation, metric)| DiscardSelectionCandidateView {
+                evaluation: evaluation.view(),
+                tenpai_wait: metric.tenpai_wait,
+                next_acceptance: metric.next_acceptance,
+                prospective_value: metric.prospective_value,
+                expected_self_tsumo_value: metric.expected_self_tsumo_value,
+                current_tenpai_offense_weighted_total: None,
+                current_tenpai_expected_self_tsumo_value: None,
+                current_tenpai_continuation_self_tsumo_value: None,
+            })
+            .collect();
+
+        for (left, left_view) in public_candidates.iter().zip(&view_candidates) {
+            for (right, right_view) in public_candidates.iter().zip(&view_candidates) {
+                assert_eq!(
+                    compare_discard_selection_candidates(left, right),
+                    compare_discard_selection_candidate_views(left_view, right_view),
+                );
+            }
+        }
+
+        let views: Vec<_> = evaluations.iter().map(DiscardEvaluation::view).collect();
+        assert_eq!(
+            best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
+            best_discard_selection_index_with_forward_metrics_for_views(&views, &metrics),
         );
     }
 
@@ -1982,10 +2062,7 @@ mod tests {
             for right in &candidates {
                 let forward = compare_discard_selection_candidates(left, right);
                 let backward = compare_discard_selection_candidates(right, left);
-                if std::ptr::eq(
-                    left.evaluation.acceptance_after_discard,
-                    right.evaluation.acceptance_after_discard,
-                ) {
+                if std::ptr::eq(left.evaluation, right.evaluation) {
                     assert!(!forward.candidate_is_better);
                     continue;
                 }
@@ -2054,7 +2131,7 @@ mod tests {
             .iter()
             .zip(metrics)
             .map(|(evaluation, metric)| DiscardSelectionCandidate {
-                evaluation: evaluation.view(),
+                evaluation,
                 tenpai_wait: metric.tenpai_wait,
                 next_acceptance: metric.next_acceptance,
                 prospective_value: metric.prospective_value,
@@ -2079,10 +2156,7 @@ mod tests {
             for right in candidates {
                 let forward = compare_discard_selection_candidates(left, right);
                 let backward = compare_discard_selection_candidates(right, left);
-                if std::ptr::eq(
-                    left.evaluation.acceptance_after_discard,
-                    right.evaluation.acceptance_after_discard,
-                ) {
+                if std::ptr::eq(left.evaluation, right.evaluation) {
                     assert!(!forward.candidate_is_better);
                     continue;
                 }

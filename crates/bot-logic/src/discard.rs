@@ -58,7 +58,7 @@ impl DiscardEvaluation {
     }
 
     /// 比較へ渡すための借用 view。値はこの評価そのもので、受け入れだけ借用になる。
-    pub fn view(&self) -> DiscardEvaluationView<'_> {
+    pub(crate) fn view(&self) -> DiscardEvaluationView<'_> {
         DiscardEvaluationView {
             discard: self.discard,
             count_before_discard: self.count_before_discard,
@@ -82,7 +82,7 @@ impl DiscardEvaluation {
 /// node ごとの [`DiscardDecoration`] だけを差し替えて比較へ渡すための型で、比較順そのものは
 /// [`DiscardEvaluation`] 経路と共有する。この型のために別の比較規則を持たない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DiscardEvaluationView<'a> {
+pub(crate) struct DiscardEvaluationView<'a> {
     pub discard: TileType,
     pub count_before_discard: u8,
     pub shanten_after_discard: EffectiveShanten,
@@ -1246,7 +1246,7 @@ pub fn diagnose_discard_evaluations_with_metrics(
     let current_tenpai_metrics =
         resolve_current_tenpai_value_axis(evaluations, current_tenpai_metrics);
     let candidate_at = |index: usize| DiscardSelectionCandidate {
-        evaluation: evaluations[index].view(),
+        evaluation: &evaluations[index],
         tenpai_wait: forward_metrics
             .get(index)
             .and_then(|metric| metric.tenpai_wait),
