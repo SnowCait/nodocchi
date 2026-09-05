@@ -161,6 +161,7 @@ use crate::acceptance::{
     calculate_acceptance_with_fixed_melds_and_seen, same_shanten_draws_with_fixed_melds_and_seen,
     unknown_tile_count,
 };
+use crate::count_hasher::CountHasherBuilder;
 use crate::discard::{
     CandidateSeen, DecorationContext, DiscardAcceptance, DiscardEvaluation, ShapePenaltyMode,
     decorate_evaluations, evaluate_discards_with_seen_and_acceptance, split_discarded_tile,
@@ -543,9 +544,9 @@ pub struct LookaheadInputs<'a> {
     // 1手目の打牌前の手牌。深い枝の状態と同じ型で持ち、段ごとに別の組み立てをしない。
     root: HandState,
     // この探索で評価済みの base 打牌評価。
-    base_evaluations: RefCell<HashMap<BaseEvaluationKey, Vec<DiscardEvaluation>>>,
+    base_evaluations: RefCell<BaseEvaluationMemo>,
     // この探索で求めた打牌候補1件分の受け入れ。
-    after_discard_acceptances: RefCell<HashMap<AfterDiscardAcceptanceKey, EffectiveAcceptance>>,
+    after_discard_acceptances: RefCell<AfterDiscardAcceptanceMemo>,
 }
 
 /// base 打牌評価 ([`evaluate_discards_with_seen`](crate::discard::evaluate_discards_with_seen)) の
@@ -556,6 +557,8 @@ pub struct LookaheadInputs<'a> {
 /// ごとに [`decorate_evaluations`] が反映する。
 type BaseEvaluationKey = (TileCounts, FixedMeldCount, CandidateSeen);
 
+type BaseEvaluationMemo = HashMap<BaseEvaluationKey, Vec<DiscardEvaluation>, CountHasherBuilder>;
+
 /// 打牌候補1件分の受け入れ計算 ([`calculate_acceptance_with_fixed_melds_and_seen`]) の入力その
 /// もの。
 ///
@@ -563,13 +566,16 @@ type BaseEvaluationKey = (TileCounts, FixedMeldCount, CandidateSeen);
 /// 既存 seen semantics のまま同じ入力だけが一致する。
 type AfterDiscardAcceptanceKey = (TileCounts, FixedMeldCount, [u8; TileType::COUNT]);
 
+type AfterDiscardAcceptanceMemo =
+    HashMap<AfterDiscardAcceptanceKey, EffectiveAcceptance, CountHasherBuilder>;
+
 // 1回の探索の間だけ、同じ入力の受け入れ計算の結果を共有する経路。
 //
 // 受け入れ ([`EffectiveAcceptance`]) は入力だけで決まる値なので、同じ入力なら計算し直しても
 // 同じ値になる。共有するのは3つとも一致する場合だけで、打牌後の手牌・副露済み面子数・見え牌の
 // どれかが違えば従来どおり別々に計算する。
 struct SearchedAcceptances<'a> {
-    searched: &'a RefCell<HashMap<AfterDiscardAcceptanceKey, EffectiveAcceptance>>,
+    searched: &'a RefCell<AfterDiscardAcceptanceMemo>,
 }
 
 impl DiscardAcceptance for SearchedAcceptances<'_> {
@@ -618,8 +624,8 @@ impl<'a> LookaheadInputs<'a> {
                 red_five_seen: seen_red_fives(tiles.iter().copied()),
                 discarded: Vec::new(),
             },
-            base_evaluations: RefCell::new(HashMap::new()),
-            after_discard_acceptances: RefCell::new(HashMap::new()),
+            base_evaluations: RefCell::new(BaseEvaluationMemo::default()),
+            after_discard_acceptances: RefCell::new(AfterDiscardAcceptanceMemo::default()),
         }
     }
 
@@ -5332,7 +5338,7 @@ mod tests {
     #[test]
     fn an_acceptance_is_shared_only_between_the_same_hand_melds_and_seen() {
         // 打牌後の手牌・副露済み面子数・見え牌のどれかが違えば、同じ受け入れとして扱わない。
-        let searched = RefCell::new(HashMap::new());
+        let searched = RefCell::new(AfterDiscardAcceptanceMemo::default());
         let acceptances = SearchedAcceptances {
             searched: &searched,
         };
