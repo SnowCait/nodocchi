@@ -3,8 +3,14 @@ use crate::completed_hand::{
 };
 use crate::meld::{Meld, MeldShape, is_menzen};
 use crate::shanten::FixedMeldCount;
-use crate::tile::{Dragon, Suit, TileType};
+use crate::tile::{Dragon, Suit, TileType, TileTypeSet};
+use crate::tile_counts::TileCounts;
 use crate::winning_context::{RiichiStatus, WinMethod, WinningContext};
+
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+pub(crate) mod reference;
 
 // 通常形の面子数。門前の面子と固定面子の合計で、[`FixedMeldCount::MAX`] と同じ値。
 const STANDARD_MELD_COUNT: usize = FixedMeldCount::MAX as usize;
@@ -75,14 +81,14 @@ impl<'a> YakuEvaluation<'a> {
 }
 
 pub fn evaluate_structural_yaku(analysis: &CompletedHandAnalysis) -> Vec<YakuEvaluation<'_>> {
-    let tiles = hand_tile_types(analysis);
+    let counts = analysis.tile_type_counts();
     let menzen = is_menzen(analysis.fixed_melds());
     analysis
         .decompositions()
         .iter()
         .map(|decomposition| YakuEvaluation {
             decomposition,
-            yaku: decomposition_yaku(decomposition, analysis.fixed_melds(), &tiles, menzen),
+            yaku: decomposition_yaku(decomposition, analysis.fixed_melds(), counts, menzen),
         })
         .collect()
 }
@@ -230,14 +236,14 @@ fn last_live_tile_yaku(context: WinningContext) -> Option<Yaku> {
 fn decomposition_yaku(
     decomposition: &CompletedHandDecomposition,
     fixed_melds: &[Meld],
-    tiles: &[TileType],
+    counts: &TileCounts,
     menzen: bool,
 ) -> Vec<Yaku> {
     let mut yaku = match decomposition {
         CompletedHandDecomposition::Standard(standard) => {
-            standard_yaku(standard, fixed_melds, tiles, menzen)
+            standard_yaku(standard, fixed_melds, counts, menzen)
         }
-        CompletedHandDecomposition::Chiitoitsu(_) => chiitoitsu_yaku(tiles),
+        CompletedHandDecomposition::Chiitoitsu(_) => chiitoitsu_yaku(counts),
         CompletedHandDecomposition::Kokushi(_) => Vec::new(),
     };
     yaku.sort_unstable();
@@ -245,16 +251,16 @@ fn decomposition_yaku(
     yaku
 }
 
-fn chiitoitsu_yaku(tiles: &[TileType]) -> Vec<Yaku> {
+fn chiitoitsu_yaku(counts: &TileCounts) -> Vec<Yaku> {
     let mut yaku = vec![Yaku::Chiitoitsu];
-    yaku.extend(tile_composition_yaku(tiles));
+    yaku.extend(tile_composition_yaku(counts));
     yaku
 }
 
 fn standard_yaku(
     standard: &StandardDecomposition,
     fixed_melds: &[Meld],
-    tiles: &[TileType],
+    counts: &TileCounts,
     menzen: bool,
 ) -> Vec<Yaku> {
     let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
@@ -265,7 +271,7 @@ fn standard_yaku(
     let sequences = suit_number_grid(melds.iter().filter_map(|meld| meld.sequence_start()));
     let triplets = suit_number_grid(melds.iter().filter_map(|meld| meld.triplet_tile_type()));
 
-    let mut yaku = tile_composition_yaku(tiles);
+    let mut yaku = tile_composition_yaku(counts);
 
     if melds.iter().all(|meld| meld.is_triplet_like()) {
         yaku.push(Yaku::Toitoi);
@@ -299,20 +305,20 @@ fn standard_yaku(
     yaku
 }
 
-fn tile_composition_yaku(tiles: &[TileType]) -> Vec<Yaku> {
+fn tile_composition_yaku(counts: &TileCounts) -> Vec<Yaku> {
     let mut yaku = Vec::new();
-    if tiles.is_empty() {
+    if counts.total() == 0 {
         return yaku;
     }
 
-    if tiles.iter().all(|tile| !tile.is_yaochu()) {
+    if hand_tile_types(counts).all(|tile| !tile.is_yaochu()) {
         yaku.push(Yaku::Tanyao);
     }
-    if tiles.iter().all(|tile| tile.is_yaochu()) {
+    if hand_tile_types(counts).all(|tile| tile.is_yaochu()) {
         yaku.push(Yaku::Honroutou);
     }
-    if single_suit(tiles).is_some() {
-        if tiles.iter().any(|tile| tile.is_honor()) {
+    if single_suit(counts).is_some() {
+        if hand_tile_types(counts).any(|tile| tile.is_honor()) {
             yaku.push(Yaku::Honitsu);
         } else {
             yaku.push(Yaku::Chinitsu);
@@ -391,14 +397,23 @@ fn is_shousangen(pair: TileType, melds: &[MeldShape]) -> bool {
         return false;
     }
 
-    let mut dragons: Vec<TileType> = melds
+    let dragons = triplet_tile_types(melds, TileType::is_dragon);
+    dragons.len() == SHOUSANGEN_DRAGON_SET_COUNT && !dragons.contains(pair)
+}
+
+/// 面子の刻子・槓子のうち条件に合う牌種の集合。
+///
+/// 面子は最大でも [`STANDARD_MELD_COUNT`] 個で、見るのは重複を除いた数と所属だけなので、
+/// 確保し直す `Vec` を並べ替えて重複を消す代わりに [`TileTypeSet`] へ入れる。
+pub(crate) fn triplet_tile_types(
+    melds: &[MeldShape],
+    predicate: fn(TileType) -> bool,
+) -> TileTypeSet {
+    melds
         .iter()
         .filter_map(|meld| meld.triplet_tile_type())
-        .filter(|tile| tile.is_dragon())
-        .collect();
-    dragons.sort_unstable();
-    dragons.dedup();
-    dragons.len() == SHOUSANGEN_DRAGON_SET_COUNT && !dragons.contains(&pair)
+        .filter(|tile| predicate(*tile))
+        .collect()
 }
 
 fn contains_yaochu(meld: MeldShape) -> bool {
@@ -406,9 +421,9 @@ fn contains_yaochu(meld: MeldShape) -> bool {
         .is_some_and(|tiles| tiles.iter().any(|tile| tile.is_yaochu()))
 }
 
-fn single_suit(tiles: &[TileType]) -> Option<Suit> {
+fn single_suit(counts: &TileCounts) -> Option<Suit> {
     let mut found = None;
-    for suit in tiles.iter().filter_map(|tile| tile.suit()) {
+    for suit in hand_tile_types(counts).filter_map(|tile| tile.suit()) {
         match found {
             None => found = Some(suit),
             Some(existing) if existing == suit => {}
@@ -418,13 +433,14 @@ fn single_suit(tiles: &[TileType]) -> Option<Suit> {
     found
 }
 
-pub(crate) fn hand_tile_types(analysis: &CompletedHandAnalysis) -> Vec<TileType> {
-    analysis
-        .concealed_tiles()
+/// 手牌に含まれる牌種。
+///
+/// 牌種ごとの枚数は [`TileCounts`] が持っているので、牌種単位の条件はここを1牌種ずつ見れば
+/// 足りる。枚数そのものが要る九蓮宝燈などは [`TileCounts`] を直接読む。
+pub(crate) fn hand_tile_types(counts: &TileCounts) -> impl Iterator<Item = TileType> + '_ {
+    counts
         .iter()
-        .chain(analysis.fixed_melds().iter().flat_map(|meld| meld.tiles()))
-        .map(|tile| tile.tile_type())
-        .collect()
+        .filter_map(|(tile, count)| (count > 0).then_some(tile))
 }
 
 fn suit_number_grid(tiles: impl Iterator<Item = TileType>) -> [[bool; NUMBER_COUNT]; SUIT_COUNT] {

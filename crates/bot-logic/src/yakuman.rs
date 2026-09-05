@@ -2,9 +2,14 @@ use crate::completed_hand::{
     CompletedHandAnalysis, CompletedHandDecomposition, StandardDecomposition,
 };
 use crate::meld::{Meld, MeldShape};
-use crate::tile::{Dragon, Suit, TileType};
+use crate::tile::{Dragon, Suit, TileType, TileTypeSet};
 use crate::tile_counts::TileCounts;
-use crate::yaku::{hand_tile_types, standard_meld_shapes};
+use crate::yaku::{hand_tile_types, standard_meld_shapes, triplet_tile_types};
+
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod reference;
 
 const NUMBER_COUNT: usize = 9;
 const CHUUREN_TILE_COUNT: u8 = 14;
@@ -54,13 +59,13 @@ impl<'a> YakumanEvaluation<'a> {
 }
 
 pub fn evaluate_yakuman(analysis: &CompletedHandAnalysis) -> Vec<YakumanEvaluation<'_>> {
-    let tiles = hand_tile_types(analysis);
+    let counts = analysis.tile_type_counts();
     analysis
         .decompositions()
         .iter()
         .map(|decomposition| YakumanEvaluation {
             decomposition,
-            yakuman: decomposition_yakuman(decomposition, analysis.fixed_melds(), &tiles),
+            yakuman: decomposition_yakuman(decomposition, analysis.fixed_melds(), counts),
         })
         .collect()
 }
@@ -68,13 +73,13 @@ pub fn evaluate_yakuman(analysis: &CompletedHandAnalysis) -> Vec<YakumanEvaluati
 fn decomposition_yakuman(
     decomposition: &CompletedHandDecomposition,
     fixed_melds: &[Meld],
-    tiles: &[TileType],
+    counts: &TileCounts,
 ) -> Vec<Yakuman> {
     let mut yakuman = match decomposition {
         CompletedHandDecomposition::Standard(standard) => {
-            standard_yakuman(standard, fixed_melds, tiles)
+            standard_yakuman(standard, fixed_melds, counts)
         }
-        CompletedHandDecomposition::Chiitoitsu(_) => tile_composition_yakuman(tiles, fixed_melds),
+        CompletedHandDecomposition::Chiitoitsu(_) => tile_composition_yakuman(counts, fixed_melds),
         CompletedHandDecomposition::Kokushi(_) => vec![Yakuman::KokushiMusou],
     };
     yakuman.sort_unstable();
@@ -85,13 +90,13 @@ fn decomposition_yakuman(
 fn standard_yakuman(
     standard: &StandardDecomposition,
     fixed_melds: &[Meld],
-    tiles: &[TileType],
+    counts: &TileCounts,
 ) -> Vec<Yakuman> {
     let Some(melds) = standard_meld_shapes(standard, fixed_melds) else {
         return Vec::new();
     };
 
-    let mut yakuman = tile_composition_yakuman(tiles, fixed_melds);
+    let mut yakuman = tile_composition_yakuman(counts, fixed_melds);
     if melds.iter().filter(|meld| meld.is_kan()).count() == SUUKANTSU_KAN_COUNT {
         yakuman.push(Yakuman::Suukantsu);
     }
@@ -108,61 +113,43 @@ fn wind_yakuman(pair: TileType, melds: &[MeldShape]) -> Option<Yakuman> {
         return Some(Yakuman::Daisuushii);
     }
     let shousuushii =
-        winds.len() == SHOUSUUSHII_WIND_SET_COUNT && pair.is_wind() && !winds.contains(&pair);
+        winds.len() == SHOUSUUSHII_WIND_SET_COUNT && pair.is_wind() && !winds.contains(pair);
     shousuushii.then_some(Yakuman::Shousuushii)
 }
 
-fn dragon_set_tiles(melds: &[MeldShape]) -> Vec<TileType> {
-    set_tiles(melds, TileType::is_dragon)
+fn dragon_set_tiles(melds: &[MeldShape]) -> TileTypeSet {
+    triplet_tile_types(melds, TileType::is_dragon)
 }
 
-fn wind_set_tiles(melds: &[MeldShape]) -> Vec<TileType> {
-    set_tiles(melds, TileType::is_wind)
+fn wind_set_tiles(melds: &[MeldShape]) -> TileTypeSet {
+    triplet_tile_types(melds, TileType::is_wind)
 }
 
-fn set_tiles(melds: &[MeldShape], predicate: fn(TileType) -> bool) -> Vec<TileType> {
-    let mut tiles: Vec<TileType> = melds
-        .iter()
-        .filter_map(|meld| meld.triplet_tile_type())
-        .filter(|tile| predicate(*tile))
-        .collect();
-    tiles.sort_unstable();
-    tiles.dedup();
-    tiles
-}
-
-fn tile_composition_yakuman(tiles: &[TileType], fixed_melds: &[Meld]) -> Vec<Yakuman> {
+fn tile_composition_yakuman(counts: &TileCounts, fixed_melds: &[Meld]) -> Vec<Yakuman> {
     let mut yakuman = Vec::new();
-    if tiles.is_empty() {
+    if counts.total() == 0 {
         return yakuman;
     }
 
-    if is_chuuren_poutou(tiles, fixed_melds) {
+    if is_chuuren_poutou(counts, fixed_melds) {
         yakuman.push(Yakuman::ChuurenPoutou);
     }
-    if tiles.iter().all(|tile| is_green(*tile)) {
+    if hand_tile_types(counts).all(is_green) {
         yakuman.push(Yakuman::Ryuuiisou);
     }
-    if tiles.iter().all(|tile| tile.is_terminal()) {
+    if hand_tile_types(counts).all(|tile| tile.is_terminal()) {
         yakuman.push(Yakuman::Chinroutou);
     }
-    if tiles.iter().all(|tile| tile.is_honor()) {
+    if hand_tile_types(counts).all(|tile| tile.is_honor()) {
         yakuman.push(Yakuman::Tsuuiisou);
     }
 
     yakuman
 }
 
-fn is_chuuren_poutou(tiles: &[TileType], fixed_melds: &[Meld]) -> bool {
+fn is_chuuren_poutou(counts: &TileCounts, fixed_melds: &[Meld]) -> bool {
     if !fixed_melds.is_empty() {
         return false;
-    }
-
-    let mut counts = TileCounts::new();
-    for tile in tiles {
-        if counts.try_add(*tile).is_err() {
-            return false;
-        }
     }
     if counts.total() != CHUUREN_TILE_COUNT {
         return false;

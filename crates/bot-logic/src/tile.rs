@@ -196,6 +196,46 @@ impl TileType {
     }
 }
 
+/// 牌種の集合。
+///
+/// 牌種は [`TileType::COUNT`] 種類しかないので、牌種 index の bit で持てば確保なしで済む。
+/// 同じ牌種を入れても1つに畳まれるため、重複を除いた数と所属だけを見る用途に使う。枚数が要る
+/// 判定には [`crate::tile_counts::TileCounts`] を使う。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct TileTypeSet(u64);
+
+impl TileTypeSet {
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    pub fn insert(&mut self, tile: TileType) {
+        self.0 |= 1 << tile.index();
+    }
+
+    pub fn contains(self, tile: TileType) -> bool {
+        self.0 & (1 << tile.index()) != 0
+    }
+
+    pub fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl FromIterator<TileType> for TileTypeSet {
+    fn from_iter<I: IntoIterator<Item = TileType>>(tiles: I) -> Self {
+        let mut set = Self::new();
+        for tile in tiles {
+            set.insert(tile);
+        }
+        set
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TileId(u8);
 
