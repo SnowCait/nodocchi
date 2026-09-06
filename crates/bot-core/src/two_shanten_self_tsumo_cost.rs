@@ -10,12 +10,13 @@
 use std::time::{Duration, Instant};
 
 use bot_logic::{
-    DiscardEvaluation, TileType, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver,
-    TwoShantenSelfTsumoScope, diagnose_two_shanten_self_tsumo_instrumented,
+    DiscardEvaluation, TileType, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
+    diagnose_two_shanten_self_tsumo_instrumented,
 };
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
+use crate::decision_timing::TwoShantenSelfTsumoTimer;
 use crate::discard_selection::{
     LookaheadDiagnosticScope, legal_discard_evaluations, lookahead_inputs,
 };
@@ -55,7 +56,7 @@ pub fn measure_two_shanten_self_tsumo(
         LookaheadDiagnosticScope::TWO_SHANTEN_SELF_TSUMO,
     );
 
-    let mut timer = CandidateTimer::default();
+    let mut timer = TwoShantenSelfTsumoTimer::started();
     let started = Instant::now();
     let diagnostic = diagnose_two_shanten_self_tsumo_instrumented(
         &inputs,
@@ -69,7 +70,11 @@ pub fn measure_two_shanten_self_tsumo(
         diagnostic,
         two_shanten_candidates: two_shanten_candidate_count(&legal.evaluations),
         total,
-        candidates: timer.finish(),
+        candidates: timer
+            .finish()
+            .into_iter()
+            .map(|candidate| (candidate.discard, candidate.elapsed))
+            .collect(),
     }
 }
 
@@ -78,32 +83,4 @@ fn two_shanten_candidate_count(evaluations: &[DiscardEvaluation]) -> usize {
         .iter()
         .filter(|evaluation| evaluation.min_shanten_after_discard() == RYANSHANTEN_SHANTEN)
         .count()
-}
-
-// 候補の区切りをそのまま実測へ変える。区切りを1つも受け取らなければ何も記録しない。
-#[derive(Debug, Default)]
-struct CandidateTimer {
-    current: Option<(TileType, Instant)>,
-    elapsed: Vec<(TileType, Duration)>,
-}
-
-impl CandidateTimer {
-    // 最後の候補の区切りを閉じて結果を返す。
-    fn finish(mut self) -> Vec<(TileType, Duration)> {
-        self.flush();
-        self.elapsed
-    }
-
-    fn flush(&mut self) {
-        if let Some((discard, since)) = self.current.take() {
-            self.elapsed.push((discard, since.elapsed()));
-        }
-    }
-}
-
-impl TwoShantenSelfTsumoObserver for CandidateTimer {
-    fn enter_candidate(&mut self, discard: TileType) {
-        self.flush();
-        self.current = Some((discard, Instant::now()));
-    }
 }
