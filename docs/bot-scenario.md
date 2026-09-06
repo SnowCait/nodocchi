@@ -40,13 +40,14 @@ reached = 全員 false
 discards = 全員空
 history_furiten.same_turn = false
 history_furiten.riichi_missed_win = false
+remaining_tiles = player_id / oya または明示 seat_wind と draw の状態から初巡相当値を導出
 ```
 
 明示した CLI option は baseline より優先されます。`--round-wind`、`--seat-wind`、`--player-id`、`--oya` を指定した場合はその値を使用します。自風は既存の局面解決規則に従い、`player_id` と `oya` が揃えば導出され、両者からの導出値と明示 `--seat-wind` が矛盾する場合は error です。
 
 `--no-history-furiten` は baseline と結果上は同じですが、「現在は同巡内フリテンではなく、かつリーチ後見逃しフリテンでもない」と明示する shorthand です。いずれかが `true` の局面や、履歴フリテンを unknown のまま扱う局面は JSON scenario で指定します。
 
-`--remaining-tiles` は JSON scenario の `remaining_tiles` と同じ意味で、山に残っているツモ可能な牌の枚数です。自分のツモを終えた後の枚数を渡します。self-tsumo continuation は残り自摸機会をこの枚数からだけ求め、巡目や河の枚数から推測しません。省略した局面では unknown のままで、その軸を使いません。
+`--remaining-tiles` は JSON scenario の `remaining_tiles` と同じ意味で、山に残っているツモ可能な牌の枚数です。inline `--hand` で省略した場合は、player / dealer、または両者が揃わなければ明示した自風と、`--draw` の有無から初巡相当の枚数を補完します。明示した値はこの baseline より常に優先されます。JSON scenario の省略 field は従来どおり unknown です。
 
 `--extra-visible-tiles` は JSON scenario の `extra_visible_tiles` と同じ意味で、手牌・ツモ牌・ドラ表示牌以外に見えている牌を加えます。加えた牌は受け入れ残枚数や待ちの残枚数へ反映されます。JSON scenario、RiichiLab capture、benchmark とは他の inline option と同じく併用できません。
 
@@ -59,7 +60,7 @@ cargo run -p bot-scenario -- \
 
 `--lookahead` は2手先概要に加えて、現在打牌後が聴牌になる候補の `Tenpai continuation` (現在聴牌 → 非和了ツモ → 最善打牌 → 再び聴牌) も表示します。待ちが変わる枝とツモ切りで元の待ちを維持する枝の両方を含みます。現時点では diagnostics 専用で打牌選択には接続しておらず、既にリーチしている局面と自分の席が分からない局面では表示しません。詳細は [打牌選択](ai/discard-selection.md#現在聴牌のダマ継続-diagnostics-only) を参照してください。
 
-候補ごとの `self-tsumo comparison` (「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べた比較) は、残り自摸機会が確定する局面でだけ値になります。`--remaining-tiles` で山の残枚数を渡さない局面では、自摸機会を推測せず `unknown` のままにします。
+候補ごとの `self-tsumo comparison` (「今すぐリーチ」と「ダマで1巡継続」を同じ期待ツモ支払いで並べた比較) は、残り自摸機会が確定する局面でだけ値になります。inline `--hand` では上記 baseline、JSON scenario では明示した `remaining_tiles` を使います。
 
 ```bash
 cargo run -p bot-scenario -- \
@@ -68,7 +69,7 @@ cargo run -p bot-scenario -- \
   --lookahead --verbose
 ```
 
-`--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に `Two-shanten expected self-tsumo value` を追加します。1向聴の `ExpectedSelfTsumoValue` と同じ尺度で2向聴候補を並べます。production は pre-acceptance まで同順位の2向聴 cohort にこの値を使い、option はそれ以外を含む全候補の診断を追加します。探索は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` まで進むため重くなります。残り自摸機会が要るので `--remaining-tiles` と併用してください。詳細は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
+`--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に `Two-shanten expected self-tsumo value` を追加します。1向聴の `ExpectedSelfTsumoValue` と同じ尺度で2向聴候補を並べます。production は pre-acceptance まで同順位の2向聴 cohort にこの値を使い、option はそれ以外を含む全候補の診断を追加します。探索は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` まで進むため重くなります。inline `--hand` では残り自摸機会に baseline 値を使い、必要なら `--remaining-tiles` で上書きできます。詳細は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
 
 `--lookahead --verbose` が追う1向聴候補の same-shanten downstream とは対象も枝も別なので、互いに含みません。`--two-shanten-self-tsumo` 単独では downstream 探索は走らず、両方必要な場合は `--two-shanten-self-tsumo --verbose` を指定します。
 
@@ -76,7 +77,6 @@ cargo run -p bot-scenario -- \
 cargo run -p bot-scenario -- \
   --hand "11258m234789p13s" \
   --draw "9s" \
-  --remaining-tiles 66 \
   --two-shanten-self-tsumo
 ```
 
