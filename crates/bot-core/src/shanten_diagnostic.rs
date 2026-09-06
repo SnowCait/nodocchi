@@ -210,8 +210,9 @@ impl ShantenDecisionDiagnostic {
 
 /// 診断で追加構築する解析情報の指定。
 ///
-/// 追加情報の有無は選択結果を変えない。既定 ([`DiagnosticOptions::default`]) では、既存診断だけを
-/// 構築して重い追加探索を行わない。
+/// 追加情報の有無は選択結果を変えない。既定 ([`DiagnosticOptions::default`]) では、通常打牌の
+/// option-driven な追加探索を行わない。2向聴から鳴いて1向聴になる Call / Pass 観測は Call
+/// diagnostics の一部として、diagnostics が有効な場合だけ構築する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiagnosticOptions {
     /// 通常打牌候補の2手先診断 ([`ShantenDecisionDiagnostic::normal_discard_lookahead`]) を
@@ -241,7 +242,7 @@ pub struct DiagnosticOptions {
 }
 
 impl DiagnosticOptions {
-    /// 既存診断のみ。2手先診断は構築しない。
+    /// 2手先診断など、通常打牌の追加診断は構築しない。
     pub const NONE: Self = Self {
         lookahead: false,
         same_shanten_downstream: false,
