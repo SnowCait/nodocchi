@@ -726,15 +726,10 @@ mod tests {
     }
 
     #[test]
-    fn the_self_tsumo_comparison_needs_the_remaining_tiles() {
-        // 山の残枚数を渡した局面だけ「今すぐリーチ」と「1巡 defer」を同じ尺度で比べられる。
-        // 渡さない局面では推測せず unknown のままにする。
-        let hand = ["--hand", "340678m789p34789s", "--lookahead"];
-        let unknown = run_args(&hand).unwrap();
-        let known = run_args(&[hand.as_slice(), &["--remaining-tiles", "70"]].concat()).unwrap();
+    fn the_inline_baseline_supplies_remaining_tiles_to_the_self_tsumo_comparison() {
+        let output = run_args(&["--hand", "340678m789p34789s", "--lookahead"]).unwrap();
 
-        assert!(unknown.contains("      defer one draw"), "{unknown}");
-        assert!(known.contains("      defer one draw"), "{known}");
+        assert!(output.contains("      defer one draw"), "{output}");
         for label in [
             "      reach now: ",
             "        production policy: ",
@@ -742,16 +737,33 @@ mod tests {
             "        forced Damaten: ",
             "        immediate Damaten tsumo: ",
         ] {
+            assert!(output.contains(label), "{label}\n{output}");
             assert!(
-                unknown.contains(&format!("{label}unknown")),
-                "{label}\n{unknown}"
-            );
-            assert!(known.contains(label), "{label}\n{known}");
-            assert!(
-                !known.contains(&format!("{label}unknown")),
-                "{label}\n{known}"
+                !output.contains(&format!("{label}unknown")),
+                "{label}\n{output}"
             );
         }
+    }
+
+    #[test]
+    fn inline_baseline_enables_two_shanten_self_tsumo_selection() {
+        let output = run_args(&[
+            "--hand",
+            "11258m234789p13s",
+            "--draw",
+            "9s",
+            "--summary-only",
+        ])
+        .unwrap();
+
+        assert!(
+            output.starts_with("Summary\n  choice 1: 8m\n  choice 1 source: NormalDiscard"),
+            "{output}"
+        );
+        assert!(
+            output.contains("choice 2 lost by: TwoShantenExpectedSelfTsumoValue"),
+            "{output}"
+        );
     }
 
     #[test]

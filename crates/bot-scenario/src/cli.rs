@@ -18,7 +18,8 @@ pub const USAGE: &str = "usage:
 
   --dora is a backward-compatible alias of --dora-indicator
   --extra-visible-tiles adds visible tiles that no other option expresses
-  --remaining-tiles is the live wall count, which the self-tsumo continuation needs
+  --remaining-tiles overrides the inline initial live wall count derived from player,
+  dealer, and draw state
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
@@ -377,6 +378,26 @@ fn apply_inline_baseline(spec: &mut ScenarioSpec) {
         same_turn: Some(false),
         riichi_missed_win: Some(false),
     });
+    if spec.remaining_tiles.is_none() {
+        spec.remaining_tiles = inline_initial_remaining_tiles(spec);
+    }
+}
+
+// 配牌13枚 x 4人と王牌14枚を除いた70枚から、親から自席までに済んだ初巡のツモと、
+// 現在のツモ牌があればその1枚を引く。席が確定しない場合や範囲外の場合は推測しない。
+fn inline_initial_remaining_tiles(spec: &ScenarioSpec) -> Option<u32> {
+    const PLAYER_COUNT: u8 = 4;
+    const INITIAL_LIVE_TILES: u32 = 70;
+
+    let player_id = spec.player_id?;
+    let oya = spec.oya?;
+    if player_id >= PLAYER_COUNT || oya >= PLAYER_COUNT {
+        return None;
+    }
+
+    let turns_after_dealer = u32::from((player_id + PLAYER_COUNT - oya) % PLAYER_COUNT);
+    let current_draw = u32::from(spec.draw.is_some());
+    INITIAL_LIVE_TILES.checked_sub(turns_after_dealer + current_draw)
 }
 
 fn two_shanten_self_tsumo_cost_scope(value: &str) -> Result<TwoShantenSelfTsumoScope, CliError> {
@@ -501,6 +522,7 @@ mod tests {
         assert_eq!(spec.round_wind, Some("E".to_string()));
         assert_eq!(spec.player_id, Some(0));
         assert_eq!(spec.oya, Some(1));
+        assert_eq!(spec.remaining_tiles, Some(67));
         assert_eq!(
             spec.history_furiten,
             Some(HistoryFuritenSpec {
@@ -578,16 +600,60 @@ mod tests {
     }
 
     #[test]
-    fn parses_remaining_tiles() {
-        // self-tsumo continuation は山の残枚数から残り自摸機会を求めるので、簡易 CLI からも
-        // 渡せるようにする。省略した局面では unknown のまま推測しない。
-        let spec = inline_spec(&["--hand", "123m", "--remaining-tiles", "70"]);
-        assert_eq!(spec.remaining_tiles, Some(70));
+    fn explicit_remaining_tiles_override_the_inline_baseline() {
+        let spec = inline_spec(&[
+            "--hand",
+            "123m",
+            "--draw",
+            "9s",
+            "--player-id",
+            "0",
+            "--oya",
+            "1",
+            "--remaining-tiles",
+            "42",
+        ]);
+        assert_eq!(spec.remaining_tiles, Some(42));
         assert_eq!(
             Scenario::resolve(&spec).unwrap().context.remaining_tiles(),
-            Some(70)
+            Some(42)
         );
-        assert_eq!(inline_spec(&["--hand", "123m"]).remaining_tiles, None);
+    }
+
+    #[test]
+    fn inline_remaining_tiles_follow_the_first_turn_order_and_draw_state() {
+        for oya in 0..4u8 {
+            for player_id in 0..4u8 {
+                for has_draw in [false, true] {
+                    let player_id_arg = player_id.to_string();
+                    let oya_arg = oya.to_string();
+                    let mut args = vec![
+                        "--hand",
+                        "123m",
+                        "--player-id",
+                        &player_id_arg,
+                        "--oya",
+                        &oya_arg,
+                    ];
+                    if has_draw {
+                        args.extend(["--draw", "9s"]);
+                    }
+
+                    let turns_after_dealer = u32::from((player_id + 4 - oya) % 4);
+                    let expected = 70 - turns_after_dealer - u32::from(has_draw);
+                    assert_eq!(
+                        inline_spec(&args).remaining_tiles,
+                        Some(expected),
+                        "player {player_id}, dealer {oya}, draw {has_draw}",
+                    );
+                }
+            }
+        }
+
+        let baseline = inline_spec(&["--hand", "11258m234789p13s", "--draw", "9s"]);
+        assert_eq!(baseline.player_id, Some(0));
+        assert_eq!(baseline.oya, Some(1));
+        assert_eq!(baseline.remaining_tiles, Some(66));
     }
 
     #[test]
