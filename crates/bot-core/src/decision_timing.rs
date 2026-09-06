@@ -1,7 +1,9 @@
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
-use bot_logic::{ForwardMetricsObserver, ForwardMetricsPhase};
+use bot_logic::{
+    ForwardMetricsObserver, ForwardMetricsPhase, TileType, TwoShantenSelfTsumoObserver,
+};
 
 use crate::action::LegalAction;
 
@@ -9,7 +11,7 @@ use crate::action::LegalAction;
 ///
 /// phase は production path の判断順にそのまま対応する。早期 return した局面では、
 /// 到達しなかった phase は `Duration::ZERO` のままになる。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionPhaseDurations {
     /// Hora / Ryukyoku / 鳴きなど、通常打牌選択より前。
     pub early: Duration,
@@ -31,7 +33,7 @@ impl DecisionPhaseDurations {
 /// 通常打牌選択1回を内部処理別に分けた実測時間。
 ///
 /// 合計は `DecisionPhaseDurations::normal_discard` を超えない。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NormalDiscardPhaseDurations {
     /// 合法打牌候補の生成と、向聴 / 受け入れなどの基本評価。
     pub base_evaluation: Duration,
@@ -40,13 +42,21 @@ pub struct NormalDiscardPhaseDurations {
     /// `forward_metrics` の内訳。前方集計値を計算しなかった局面では、すべて `Duration::ZERO` の
     /// ままになる。
     pub forward_metrics_phases: ForwardMetricsPhaseDurations,
+    /// production comparator が追加で評価する2向聴 ExpectedSelfTsumoValue。
+    /// 対象外の局面では `Duration::ZERO` のままになる。
+    pub two_shanten_self_tsumo: Duration,
+    /// 実際に評価した `ForwardTargets` 候補ごとの2向聴 ExpectedSelfTsumoValue 実測。
+    pub two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     /// 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定。
     pub selection_finalize: Duration,
 }
 
 impl NormalDiscardPhaseDurations {
     pub fn total(&self) -> Duration {
-        self.base_evaluation + self.forward_metrics + self.selection_finalize
+        self.base_evaluation
+            + self.forward_metrics
+            + self.two_shanten_self_tsumo
+            + self.selection_finalize
     }
 }
 
@@ -57,7 +67,7 @@ impl NormalDiscardPhaseDurations {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ForwardMetricsPhaseDurations {
     /// 仮想ツモ枝の探索。ツモ後の次打牌評価と、その枝が使う将来打点の scoring を含む。
-    pub candidate_search: Duration,
+    pub lookahead_search: Duration,
     /// 探索済みの枝からの重み付き集計 (weighted tenpai wait / weighted next acceptance)。
     pub weighted_aggregation: Duration,
     /// 探索済みの枝からの self-tsumo continuation の集計。
@@ -66,8 +76,15 @@ pub struct ForwardMetricsPhaseDurations {
 
 impl ForwardMetricsPhaseDurations {
     pub fn total(&self) -> Duration {
-        self.candidate_search + self.weighted_aggregation + self.self_tsumo_continuation
+        self.lookahead_search + self.weighted_aggregation + self.self_tsumo_continuation
     }
+}
+
+/// production comparator が実際に評価した2向聴 ExpectedSelfTsumoValue 候補1件の実測。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwoShantenSelfTsumoCandidateDuration {
+    pub discard: TileType,
+    pub elapsed: Duration,
 }
 
 /// 計測付きで実行した意思決定の最終 action と phase 別実測時間。
@@ -88,6 +105,7 @@ pub(crate) enum DecisionPhase {
 pub(crate) enum NormalDiscardPhase {
     BaseEvaluation,
     ForwardMetrics,
+    TwoShantenSelfTsumo,
     SelectionFinalize,
 }
 
@@ -118,11 +136,11 @@ impl PhaseDurations for DecisionPhaseDurations {
 impl PhaseDurations for ForwardMetricsPhaseDurations {
     type Phase = ForwardMetricsPhase;
 
-    const FIRST: Self::Phase = ForwardMetricsPhase::CandidateSearch;
+    const FIRST: Self::Phase = ForwardMetricsPhase::LookaheadSearch;
 
     fn accumulate(&mut self, phase: Self::Phase, elapsed: Duration) {
         match phase {
-            ForwardMetricsPhase::CandidateSearch => self.candidate_search += elapsed,
+            ForwardMetricsPhase::LookaheadSearch => self.lookahead_search += elapsed,
             ForwardMetricsPhase::WeightedAggregation => self.weighted_aggregation += elapsed,
             ForwardMetricsPhase::SelfTsumoContinuation => self.self_tsumo_continuation += elapsed,
         }
@@ -138,6 +156,7 @@ impl PhaseDurations for NormalDiscardPhaseDurations {
         match phase {
             NormalDiscardPhase::BaseEvaluation => self.base_evaluation += elapsed,
             NormalDiscardPhase::ForwardMetrics => self.forward_metrics += elapsed,
+            NormalDiscardPhase::TwoShantenSelfTsumo => self.two_shanten_self_tsumo += elapsed,
             NormalDiscardPhase::SelectionFinalize => self.selection_finalize += elapsed,
         }
     }
@@ -155,6 +174,20 @@ pub(crate) struct PhaseTimer<D: PhaseDurations> {
 pub(crate) type DecisionPhaseTimer = PhaseTimer<DecisionPhaseDurations>;
 pub(crate) type NormalDiscardPhaseTimer = PhaseTimer<NormalDiscardPhaseDurations>;
 pub(crate) type ForwardMetricsPhaseTimer = PhaseTimer<ForwardMetricsPhaseDurations>;
+
+/// 2向聴 ExpectedSelfTsumoValue の候補別 optional 計測器。
+///
+/// 無効時は observer の通知を受けても `Instant` を取得しない。
+#[derive(Debug)]
+pub(crate) struct TwoShantenSelfTsumoTimer {
+    state: Option<TwoShantenSelfTsumoTimerState>,
+}
+
+#[derive(Debug, Default)]
+struct TwoShantenSelfTsumoTimerState {
+    current: Option<(TileType, Instant)>,
+    elapsed: Vec<TwoShantenSelfTsumoCandidateDuration>,
+}
 
 #[derive(Debug)]
 struct TimerState<D: PhaseDurations> {
@@ -251,12 +284,70 @@ impl NormalDiscardPhaseTimer {
             state.durations.forward_metrics_phases = durations;
         }
     }
+
+    /// 2向聴 ExpectedSelfTsumoValue の候補別計測器。外側が有効な場合だけ時計を有効にする。
+    pub(crate) fn two_shanten_self_tsumo_timer(&self) -> TwoShantenSelfTsumoTimer {
+        match self.state {
+            Some(_) => TwoShantenSelfTsumoTimer::started(),
+            None => TwoShantenSelfTsumoTimer::disabled(),
+        }
+    }
+
+    /// 実際に評価した2向聴 ExpectedSelfTsumoValue 候補の内訳を計上する。
+    pub(crate) fn record_two_shanten_self_tsumo_candidates(
+        &mut self,
+        candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.durations.two_shanten_self_tsumo_candidates = candidates;
+        }
+    }
 }
 
 /// 前方集計値の区切りをそのまま実測へ変える。計測が無効な場合は `Instant` を取得しない。
 impl ForwardMetricsObserver for ForwardMetricsPhaseTimer {
     fn enter_phase(&mut self, phase: ForwardMetricsPhase) {
         self.enter(phase);
+    }
+}
+
+impl TwoShantenSelfTsumoTimer {
+    pub(crate) fn disabled() -> Self {
+        Self { state: None }
+    }
+
+    pub(crate) fn started() -> Self {
+        Self {
+            state: Some(TwoShantenSelfTsumoTimerState::default()),
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> Vec<TwoShantenSelfTsumoCandidateDuration> {
+        if let Some(state) = self.state.as_mut() {
+            state.flush_at(Instant::now());
+        }
+        self.state.map_or_else(Vec::new, |state| state.elapsed)
+    }
+}
+
+impl TwoShantenSelfTsumoObserver for TwoShantenSelfTsumoTimer {
+    fn enter_candidate(&mut self, discard: TileType) {
+        if let Some(state) = self.state.as_mut() {
+            let now = Instant::now();
+            state.flush_at(now);
+            state.current = Some((discard, now));
+        }
+    }
+}
+
+impl TwoShantenSelfTsumoTimerState {
+    fn flush_at(&mut self, now: Instant) {
+        if let Some((discard, since)) = self.current.take() {
+            self.elapsed.push(TwoShantenSelfTsumoCandidateDuration {
+                discard,
+                elapsed: now.duration_since(since),
+            });
+        }
     }
 }
 
@@ -349,7 +440,7 @@ mod tests {
         timer.enter(ForwardMetricsPhase::WeightedAggregation);
         let durations = timer.finish();
 
-        assert_eq!(durations.candidate_search, Duration::ZERO);
+        assert_eq!(durations.lookahead_search, Duration::ZERO);
         assert_eq!(durations.self_tsumo_continuation, Duration::ZERO);
         assert_eq!(durations.total(), durations.weighted_aggregation);
     }
@@ -358,7 +449,7 @@ mod tests {
     fn a_disabled_timer_hands_out_a_disabled_forward_metrics_timer() {
         let timer = NormalDiscardPhaseTimer::disabled();
         let mut forward_metrics = timer.forward_metrics_timer();
-        forward_metrics.enter_phase(ForwardMetricsPhase::CandidateSearch);
+        forward_metrics.enter_phase(ForwardMetricsPhase::LookaheadSearch);
         forward_metrics.enter_phase(ForwardMetricsPhase::WeightedAggregation);
 
         assert_eq!(
@@ -368,10 +459,40 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_timer_hands_out_a_disabled_two_shanten_timer() {
+        let timer = NormalDiscardPhaseTimer::disabled();
+        let mut two_shanten = timer.two_shanten_self_tsumo_timer();
+        two_shanten.enter_candidate(TileType::from_mjai_type_str("1m").unwrap());
+
+        assert!(two_shanten.finish().is_empty());
+    }
+
+    #[test]
+    fn two_shanten_candidate_boundaries_are_recorded_in_order() {
+        let mut timer = NormalDiscardPhaseTimer::started();
+        let mut two_shanten = timer.two_shanten_self_tsumo_timer();
+        let one_man = TileType::from_mjai_type_str("1m").unwrap();
+        let two_man = TileType::from_mjai_type_str("2m").unwrap();
+        two_shanten.enter_candidate(one_man);
+        two_shanten.enter_candidate(two_man);
+        let candidates = two_shanten.finish();
+        timer.record_two_shanten_self_tsumo_candidates(candidates.clone());
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.discard)
+                .collect::<Vec<_>>(),
+            vec![one_man, two_man]
+        );
+        assert_eq!(timer.finish().two_shanten_self_tsumo_candidates, candidates);
+    }
+
+    #[test]
     fn a_disabled_timer_keeps_the_recorded_forward_metrics_phases_at_zero() {
         let mut timer = NormalDiscardPhaseTimer::disabled();
         timer.record_forward_metrics_phases(ForwardMetricsPhaseDurations {
-            candidate_search: Duration::from_millis(1),
+            lookahead_search: Duration::from_millis(1),
             weighted_aggregation: Duration::from_millis(2),
             self_tsumo_continuation: Duration::from_millis(3),
         });
@@ -383,7 +504,7 @@ mod tests {
     fn the_recorded_forward_metrics_phases_are_kept_as_the_breakdown() {
         let mut timer = NormalDiscardPhaseTimer::started();
         let mut forward_metrics = timer.forward_metrics_timer();
-        forward_metrics.enter_phase(ForwardMetricsPhase::CandidateSearch);
+        forward_metrics.enter_phase(ForwardMetricsPhase::LookaheadSearch);
         let breakdown = forward_metrics.finish();
         timer.record_forward_metrics_phases(breakdown);
         let durations = timer.finish();
@@ -401,7 +522,7 @@ mod tests {
         let mut normal_discard = timer.normal_discard_timer();
         normal_discard.enter(NormalDiscardPhase::ForwardMetrics);
         let breakdown = normal_discard.finish();
-        timer.record_normal_discard_phases(breakdown);
+        timer.record_normal_discard_phases(breakdown.clone());
         let durations = timer.finish();
 
         assert_eq!(durations.normal_discard_phases, breakdown);

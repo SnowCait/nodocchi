@@ -792,7 +792,7 @@ pub fn diagnose_lookahead_candidate(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardMetricsPhase {
     /// 仮想ツモ枝の探索。ツモ後の次打牌評価と、その枝が使う将来打点の scoring を含む。
-    CandidateSearch,
+    LookaheadSearch,
     /// 探索済みの枝からの重み付き集計 (weighted tenpai wait / weighted next acceptance)。
     WeightedAggregation,
     /// 探索済みの枝からの self-tsumo continuation の集計。
@@ -850,7 +850,7 @@ pub fn forward_metrics_instrumented(
             if !target {
                 return ForwardMetrics::default();
             }
-            observer.enter_phase(ForwardMetricsPhase::CandidateSearch);
+            observer.enter_phase(ForwardMetricsPhase::LookaheadSearch);
             let candidate =
                 search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
             forward_metrics_from_candidate(inputs, evaluation, &candidate, best_shanten, observer)
@@ -2716,7 +2716,7 @@ mod tests {
             observed.0,
             std::iter::repeat_n(
                 [
-                    ForwardMetricsPhase::CandidateSearch,
+                    ForwardMetricsPhase::LookaheadSearch,
                     ForwardMetricsPhase::WeightedAggregation,
                     ForwardMetricsPhase::SelfTsumoContinuation,
                 ],

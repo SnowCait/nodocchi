@@ -5,9 +5,9 @@ use crate::current_tenpai_continuation::{
     diagnose_current_tenpai_continuation,
 };
 use crate::damaten_value::tenpai_completed_hands_after_discard;
-use crate::decision_timing::{
-    ForwardMetricsPhaseTimer, NormalDiscardPhase, NormalDiscardPhaseTimer,
-};
+#[cfg(test)]
+use crate::decision_timing::ForwardMetricsPhaseTimer;
+use crate::decision_timing::{NormalDiscardPhase, NormalDiscardPhaseTimer};
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
     evaluate_tenpai_offense_with_hands,
@@ -34,7 +34,8 @@ use bot_logic::{
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_two_shanten_metrics, current_tenpai_continuation_targets,
     diagnose_discard_evaluations_with_two_shanten_metrics, diagnose_discard_furiten,
-    diagnose_lookahead, diagnose_two_shanten_self_tsumo, discard_tenpai_wait_availability,
+    diagnose_lookahead, diagnose_two_shanten_self_tsumo,
+    diagnose_two_shanten_self_tsumo_instrumented, discard_tenpai_wait_availability,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
@@ -291,14 +292,12 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
     let legal = legal_discard_evaluations(context, legal_actions);
 
     timing.enter(NormalDiscardPhase::ForwardMetrics);
-    let mut forward_timing = timing.forward_metrics_timer();
     let metrics = production_selection_metrics_instrumented(
         context,
         &legal.tiles,
         &legal.evaluations,
-        &mut forward_timing,
+        timing,
     );
-    timing.record_forward_metrics_phases(forward_timing.finish());
 
     timing.enter(NormalDiscardPhase::SelectionFinalize);
     let current_tenpai = current_tenpai_candidate_evaluations(
@@ -900,19 +899,28 @@ fn production_selection_metrics_instrumented(
     context: &GameContext,
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
-    timing: &mut ForwardMetricsPhaseTimer,
+    timing: &mut NormalDiscardPhaseTimer,
 ) -> ProductionSelectionMetrics {
     let valuator = ProductionProspectiveValuator::new(context);
     let inputs = lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None);
-    let forward = forward_metrics_instrumented(&inputs, evaluations, timing);
-    if has_competing_two_shanten_targets(evaluations, &forward) {
-        bot_logic::ForwardMetricsObserver::enter_phase(
-            timing,
-            bot_logic::ForwardMetricsPhase::CandidateSearch,
+    let mut forward_timing = timing.forward_metrics_timer();
+    let forward = forward_metrics_instrumented(&inputs, evaluations, &mut forward_timing);
+    timing.record_forward_metrics_phases(forward_timing.finish());
+
+    let two_shanten_diagnostic = if has_competing_two_shanten_targets(evaluations, &forward) {
+        timing.enter(NormalDiscardPhase::TwoShantenSelfTsumo);
+        let mut two_shanten_timing = timing.two_shanten_self_tsumo_timer();
+        let diagnostic = diagnose_two_shanten_self_tsumo_instrumented(
+            &inputs,
+            evaluations,
+            TwoShantenSelfTsumoScope::ForwardTargets,
+            &mut two_shanten_timing,
         );
-    }
-    let two_shanten_diagnostic =
-        two_shanten_diagnostic_for_selection(&inputs, evaluations, &forward, false);
+        timing.record_two_shanten_self_tsumo_candidates(two_shanten_timing.finish());
+        diagnostic
+    } else {
+        TwoShantenSelfTsumoDiagnostic::default()
+    };
     let two_shanten = two_shanten_metrics_from_diagnostic(evaluations, &two_shanten_diagnostic);
     ProductionSelectionMetrics {
         forward,
@@ -931,7 +939,7 @@ fn production_selection_metrics(
         context,
         tiles,
         evaluations,
-        &mut ForwardMetricsPhaseTimer::disabled(),
+        &mut NormalDiscardPhaseTimer::disabled(),
     )
 }
 
@@ -1570,6 +1578,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::context::TableStateFacts;
     use crate::decision_timing::ForwardMetricsPhaseDurations;
@@ -1651,6 +1661,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_production_two_shanten_ev_is_instrumented_without_a_second_search() {
+        let production_metrics = include_str!("discard_selection.rs")
+            .split("fn production_selection_metrics_instrumented(")
+            .nth(1)
+            .unwrap()
+            .split("fn production_selection_metrics(")
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            production_metrics
+                .matches("diagnose_two_shanten_self_tsumo_instrumented(")
+                .count(),
+            1,
+            "{production_metrics}"
+        );
+        assert_eq!(
+            production_metrics
+                .matches("forward_metrics_instrumented(")
+                .count(),
+            1,
+            "{production_metrics}"
+        );
+    }
+
+    #[test]
     fn the_forward_metrics_subphase_timing_does_not_change_the_selection() {
         // 前方集計値を実際に通る1向聴局面で、計測の有無が選択を変えないことを固定する。
         let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
@@ -1685,6 +1721,8 @@ pub(crate) mod tests {
             phases.forward_metrics_phases,
             ForwardMetricsPhaseDurations::default()
         );
+        assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
+        assert!(phases.two_shanten_self_tsumo_candidates.is_empty());
     }
 
     #[test]
@@ -4928,7 +4966,16 @@ pub(crate) mod tests {
     fn the_two_shanten_expected_self_tsumo_value_changes_five_man_to_eight_man() {
         let (context, actions) = two_shanten_ev_regression_context();
         let legal = legal_discard_evaluations(&context, &actions);
-        let metrics = production_selection_metrics(&context, &legal.tiles, &legal.evaluations);
+        let mut timing = NormalDiscardPhaseTimer::started();
+        timing.enter(NormalDiscardPhase::ForwardMetrics);
+        let metrics = production_selection_metrics_instrumented(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &mut timing,
+        );
+        timing.enter(NormalDiscardPhase::SelectionFinalize);
+        let phases = timing.finish();
         assert_eq!(metrics.two_shanten_diagnostic.candidates.len(), 3);
         let value = |discard: &str| {
             metrics
@@ -4999,6 +5046,28 @@ pub(crate) mod tests {
             five_man.comparison_reason,
             bot_logic::DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
         );
+        assert_eq!(
+            phases
+                .two_shanten_self_tsumo_candidates
+                .iter()
+                .map(|candidate| candidate.discard.to_mjai_string())
+                .collect::<Vec<_>>(),
+            ["5m", "8m", "9s"]
+        );
+        assert_eq!(
+            phases.two_shanten_self_tsumo_candidates.len(),
+            metrics.two_shanten_diagnostic.candidates.len()
+        );
+        assert!(
+            phases
+                .two_shanten_self_tsumo_candidates
+                .iter()
+                .map(|candidate| candidate.elapsed)
+                .sum::<Duration>()
+                <= phases.two_shanten_self_tsumo,
+            "{phases:?}"
+        );
+        assert!(phases.forward_metrics_phases.total() <= phases.forward_metrics);
     }
 
     #[test]
