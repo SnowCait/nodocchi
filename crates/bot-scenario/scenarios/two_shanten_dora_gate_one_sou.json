@@ -1,0 +1,19 @@
+{
+  "hand": "40m 13678p 12379s C",
+  "draw": "1s",
+  "dora_indicators": "F",
+  "round_wind": "E",
+  "seat_wind": "E",
+  "player_id": 0,
+  "oya": 0,
+  "discards": [
+    "P 2m",
+    "N S",
+    "1m F",
+    "S 8m"
+  ],
+  "remaining_tiles": 61,
+  "honba": 1,
+  "kyotaku_points": 3000,
+  "scores": [25000, 25000, 22000, 25000]
+}

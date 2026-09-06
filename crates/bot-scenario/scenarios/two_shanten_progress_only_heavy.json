@@ -1,0 +1,31 @@
+{
+  "hand": "40m 136789p 12367s",
+  "draw": "4p",
+  "dora_indicators": "F",
+  "round_wind": "E",
+  "seat_wind": "E",
+  "player_id": 0,
+  "oya": 0,
+  "discards": [
+    "P 2m 1s 9s 2m C",
+    "N S W E 6p 6s",
+    "1m F E 2s S 6p",
+    "S 8m 9s 7s P 9p"
+  ],
+  "melds": [
+    [],
+    [],
+    [
+      {
+        "kind": "pon",
+        "tiles": "W W W",
+        "called_tile": "W"
+      }
+    ],
+    []
+  ],
+  "remaining_tiles": 46,
+  "honba": 1,
+  "kyotaku_points": 3000,
+  "scores": [25000, 25000, 22000, 25000]
+}

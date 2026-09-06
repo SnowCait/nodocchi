@@ -69,7 +69,10 @@ Final decision
 
 その打牌でテンパイになる候補には `permanent furiten` / `history furiten after discard` / `ron` を表示します。`ron` は両者を合わせた総合ロン可否で、全候補が選択候補と同じ評価時点 (その打牌を切り終えた後) の facts を使います。
 
-候補ごとの `expected self-tsumo value` は、打牌選択が実際に比較へ使った self-tsumo continuation の期待支払い [点] です。表示用に探索も点数計算もやり直しません。軸を使えない局面と、確定できない候補は `unknown` です。
+候補ごとの `expected self-tsumo value` は1向聴、`two-shanten progress self-tsumo value` は
+2向聴 production の第1段、`two-shanten full self-tsumo value` はドラ差 gate 対象 pair の
+再比較に実際に使った期待支払い [点] です。Progress と Full は別 field で、表示用に
+探索も点数計算もやり直しません。軸を使えない局面と、確定できない候補は `unknown` です。
 
 `--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。2手先の概要は仮想ツモ牌を向聴数が下がるもの (`draws`) と維持するもの (`same-shanten`) に分けて種類数と残枚数を表示し、`--verbose` の牌ごとの詳細では `transition` にその分類を表示します。`--lookahead --verbose` では、1向聴候補の向聴数を維持する枝だけをテンパイまでもう1段追い、`downstream value` と候補ごとの `same-shanten downstream value` を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
 
@@ -79,7 +82,7 @@ Final decision
 
 `--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に、候補ごとの ExpectedSelfTsumoValue [点] を表示します。節の先頭には `Lookahead` と同じ `self-tsumo continuation` (`unknown tiles` / `current future own draws`) を出し、材料が揃わない局面では `not evaluated`、値を確定できない候補は `unknown` です。
 
-枝は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` で、確率も打点も1向聴の `expected self-tsumo value` と同じ尺度です。production は pre-acceptance まで同順位の2向聴 cohort で全候補の値が確定した場合だけ比較に使います。起点の向聴数が違うため1向聴の値と同じ field には混ぜません。読み方は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
+枝は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` で、確率も打点も1向聴の `expected self-tsumo value` と同じ尺度です。この section は解析用の Full 全候補診断です。production は ForwardTargets cohort 全体を Progress-only で順位付け、上位2候補の Progress-only 値が strict に異なり、かつ `discarded_dora_count` が異なる場合だけ Full で pairwise 再比較します。Progress と Full を同じ全候補配列に混ぜません。起点の向聴数が違うため1向聴の値と同じ field にも混ぜません。読み方は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
 
 `--lookahead --verbose` の same-shanten downstream とは独立した診断で、互いに含みません。`--two-shanten-self-tsumo` 単独では downstream 探索は走らず、両方出す場合は `--two-shanten-self-tsumo --verbose` を指定します。
 

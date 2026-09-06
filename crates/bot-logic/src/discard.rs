@@ -800,9 +800,11 @@ pub enum DiscardComparisonReason {
     /// 向聴数を下げる枝と1回だけ手変わりする枝を同じ尺度で比べる軸で、自分のツモ和了だけを
     /// 含む。ロン和了・他家の和了・放銃は含まない。
     ExpectedSelfTsumoValue,
-    /// 2向聴限定。Progress と1回だけの SameShanten から1向聴 continuation へ
-    /// 接続した、self-tsumo-only の期待支払い。
+    /// 2向聴限定。ドラ差 gate を通った provisional 上位2候補を、Progress と
+    /// 1回だけの SameShanten から1向聴 continuation へ接続した Full 値で再比較。
     TwoShantenExpectedSelfTsumoValue,
+    /// 2向聴限定。ForwardTargets cohort 全候補を最初の Progress 枝だけで比較。
+    TwoShantenProgressSelfTsumoValue,
     /// 打点込みの前方評価。Σ(残枚数 × そのテンパイの Σ(和了牌残枚数 × 支払い合計))。
     ///
     /// 現在打牌の比較では1手目の物理牌 variant 残枚数で重み付けし、2手目の打牌候補の比較では
@@ -1169,13 +1171,17 @@ pub struct DiscardCandidateDiagnostic {
     /// 診断のために再計算せず、選択で使った値をそのまま保持する。候補集合単位で軸を無効化した
     /// 場合と確定しなかった場合はどちらも `None`。
     pub expected_self_tsumo_value: Option<u64>,
-    /// 打牌選択に使った2向聴起点の self-tsumo continuation の期待支払い
+    /// 2向聴ドラ差 gate で上位2候補の再比較に使った Full self-tsumo 期待支払い
     /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
     ///
-    /// 1向聴限定の [`Self::expected_self_tsumo_value`] とは別の supplemental metric として、
-    /// selection が計算した値を再計算せずに保持する。候補集合単位で軸を無効化した場合と
-    /// 確定しなかった場合はどちらも `None`。
+    /// 1向聴限定の [`Self::expected_self_tsumo_value`] とも、第1段の
+    /// [`Self::two_shanten_progress_self_tsumo_value`] とも別 field に保持する。gate 対象外は `None`。
     pub two_shanten_expected_self_tsumo_value: Option<u64>,
+    /// production の第1段で使った2向聴 Progress-only self-tsumo 寄与。
+    ///
+    /// Full 値とは別 field に保持し、同一尺度の値のように表示・比較しない。
+    /// production 以外の汎用診断で評価していない場合は `None`。
+    pub two_shanten_progress_self_tsumo_value: Option<u64>,
     /// 打牌選択に使った現在聴牌の offense weighted total。
     /// cohort に unknown が混ざって軸を無効化した場合も `None`。
     pub current_tenpai_offense_weighted_total: Option<u64>,
@@ -1260,8 +1266,8 @@ pub fn diagnose_discard_evaluations_with_metrics(
     )
 }
 
-/// production selection が計算した2向聴 ExpectedSelfTsumoValue も含めて診断を構築する。
-/// 同じ supplemental metric を候補診断と比較理由の両方へ反映する。
+/// 同一尺度の2向聴 supplemental metric も含めて診断を構築する。
+/// 呼び出し側は Progress-only と Full を別々の比較に渡し、同じ配列に混ぜない。
 pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
@@ -1365,6 +1371,7 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
                 two_shanten_expected_self_tsumo_value: two_shanten_metrics
                     .get(index)
                     .and_then(|metric| metric.expected_self_tsumo_value),
+                two_shanten_progress_self_tsumo_value: None,
                 current_tenpai_offense_weighted_total: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.offense_weighted_total),

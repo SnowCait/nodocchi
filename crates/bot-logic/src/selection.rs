@@ -45,10 +45,13 @@
 //! 係数も threshold も持たない。確定しない値を持ち得る点も同じなので、軸の有効・無効は打点込みの
 //! 軸と同じ cohort 単位の解決を通す。
 //!
-//! 2向聴では、Progress と1回だけの SameShanten から1向聴 continuation へ接続した
-//! [`TwoShantenMetrics::expected_self_tsumo_value`] を同じ pre-acceptance cohort 単位で
-//! 解決し、weighted next acceptance より先に比較する。起点の異なる1向聴の値とは別 field で
-//! 保持し、1向聴や3向聴以上の候補には適用しない。
+//! 2向聴では、production はまず Progress 枝だけの
+//! [`TwoShantenMetrics::expected_self_tsumo_value`] で ForwardTargets cohort 全体を順位付ける。
+//! provisional 上位2候補の値が異なり、かつ捨てる通常ドラ枚数が異なる場合だけ、
+//! その2候補を Progress + 1回だけの SameShanten の Full 値で pairwise 再比較する。
+//! Progress と Full は同じ候補配列に混ぜず、どちらもそれぞれ同一尺度の集合として
+//! この comparator を通る。起点の異なる1向聴の値とは別 field で保持し、1向聴や
+//! 3向聴以上の候補には適用しない。
 //!
 //! 現在聴牌では、全候補が非フリテンの cohort は既存 Ron offense weighted total を維持する。
 //! `PermanentFuriten::Yes` を含み、全候補の恒常フリテンと self-tsumo value が確定した cohort
@@ -185,6 +188,8 @@ pub struct ForwardMetrics {
 ///
 /// [`ForwardMetrics::expected_self_tsumo_value`] は1向聴限定の意味を保ち、起点の異なる値を
 /// 同じ field に混ぜない。値は [`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`] の固定小数点。
+/// 1回の比較に渡す集合は Progress-only または Full のどちらか同一尺度に限り、
+/// 異なる尺度を同じ候補集合に混ぜない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TwoShantenMetrics {
     pub expected_self_tsumo_value: Option<u64>,
@@ -329,7 +334,7 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
 /// ```text
 /// Shanten → IsolatedTile → IsolatedHonor
 ///   → [1向聴のみ] ExpectedSelfTsumoValue
-///   → [2向聴のみ] TwoShantenExpectedSelfTsumoValue
+///   → [2向聴のみ] TwoShantenExpectedSelfTsumoValue (同一尺度の1比較)
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount

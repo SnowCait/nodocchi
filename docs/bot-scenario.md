@@ -69,7 +69,7 @@ cargo run -p bot-scenario -- \
   --lookahead --verbose
 ```
 
-`--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に `Two-shanten expected self-tsumo value` を追加します。1向聴の `ExpectedSelfTsumoValue` と同じ尺度で2向聴候補を並べます。production は pre-acceptance まで同順位の2向聴 cohort にこの値を使い、option はそれ以外を含む全候補の診断を追加します。探索は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` まで進むため重くなります。inline `--hand` では残り自摸機会に baseline 値を使い、必要なら `--remaining-tiles` で上書きできます。詳細は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
+`--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に `Two-shanten expected self-tsumo value` を追加します。1向聴の `ExpectedSelfTsumoValue` と同じ尺度で2向聴候補の Full 値を並べる解析用 option です。production selection 自体は ForwardTargets 全候補を Progress-only で順位付け、上位2候補が strict に非同値かつ `discarded_dora_count` が異なる場合だけ Full で pairwise 再比較します。この option は選択用と別に全候補 Full 診断を構築します。探索は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` まで進むため重くなります。inline `--hand` では残り自摸機会に baseline 値を使い、必要なら `--remaining-tiles` で上書きできます。詳細は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
 
 `--lookahead --verbose` が追う1向聴候補の same-shanten downstream とは対象も枝も別なので、互いに含みません。`--two-shanten-self-tsumo` 単独では downstream 探索は走らず、両方必要な場合は `--two-shanten-self-tsumo --verbose` を指定します。
 
@@ -392,12 +392,12 @@ Hora などで早期 return した request は、到達しなかった phase が
 | --- | --- |
 | `base` | 合法打牌候補の生成と、向聴 / 受け入れなどの基本評価 |
 | `forward` | 通常の forward lookahead と、その探索済み枝からの集計 |
-| `two_shanten_self_tsumo` | production comparator が `ForwardTargets` に追加実行する2向聴 ExpectedSelfTsumoValue。total と評価候補数、候補別時間を表示する |
+| `two_shanten_self_tsumo` | production comparator の2向聴 Progress-first 評価と、ドラ差 gate 対象 pair の Full 追加評価。total と実際の評価区切りごとの時間を表示する |
 | `finalize` | 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定 |
 
 4つの合計は同じ request の `normal_discard` を超えません。2向聴 EV を実行しない request では `two_shanten_self_tsumo` は 0、候補 timing は空のままです。通常打牌選択を通らなかった request では全 subphase が 0 のままです。`early` / `post_discard` の内部は細分化していません。
 
-`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の候補別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として読み取れます。候補の内部型は bot-core の public API へ公開しません。
+`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。候補の内部型は bot-core の public API へ公開しません。
 
 `forward` はさらに前方集計値の内部処理別へ分けます。こちらも既存の処理境界そのままで、探索する枝も scoring も集計も変えません。
 

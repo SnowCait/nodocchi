@@ -216,8 +216,15 @@ B. 2向聴 → SameShanten → 最良打牌 → 2向聴 → Progress → 最良�
 探索範囲外で、確定しない値ではなく寄与 0 として扱います。
 
 production の通常打牌では、現在打牌後が2向聴で、Shanten / IsolatedTile /
-IsolatedHonor まで同順位の cohort 候補にこの軸を使います。cohort 全候補の値を
-確定できた場合だけ有効にし、1件でも `unknown` なら cohort 全体で無効にして
+IsolatedHonor まで同順位の ForwardTargets cohort 全候補をまず A の Progress-only 値で
+順位付けます。provisional 1位と2位の Progress-only 値が strict に異なり、かつ既存の
+`discarded_dora_count` が異なる場合だけ、その2候補に B を追加した Full 値で pairwise
+再比較します。Progress-only が同値の場合は B を計算せず、後続 comparator と stable
+order に委ねます。赤5だけで gate は広げません。
+
+Progress-only の cohort 配列と Full の2候補 pair は別々に既存 comparator へ渡します。
+Full 値を上位2候補だけに入れた配列で全候補を比較することはありません。
+cohort 全候補の Progress-only 値を確定できない場合はその軸を無効にし、
 [WeightedNextAcceptance](#2向聴以上-weightednextacceptance) 以下へ戻ります。
 起点の向聴数が違うため、1向聴の `ExpectedSelfTsumoValue` とは別 field で保持し、
 1向聴候補と2向聴候補の間で比較しません。3向聴以上、押し引き、リーチ判断にも使いません。
@@ -227,9 +234,10 @@ IsolatedHonor まで同順位の cohort 候補にこの軸を使います。coho
 
 ### 実行コストの計測
 
-この軸は探索が最も深いため、production は Shanten / IsolatedTile / IsolatedHonor
-までで決着させず前方評価まで残した候補だけを評価します。その範囲へ絞った場合の実行コストは
-`bot-scenario --two-shanten-self-tsumo-cost` で計測できます。
+Full 軸は探索が最も深いため、production は上記の gate 対象 pair 以外では
+SameShanten 枝を評価しません。ForwardTargets 全候補 Full の実行コストは
+`bot-scenario --two-shanten-self-tsumo-cost` で、Progress-only は
+`--two-shanten-progress-self-tsumo-cost` で分けて計測できます。
 
 ```bash
 cargo run --release -p bot-scenario -- \
