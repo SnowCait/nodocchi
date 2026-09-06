@@ -45,6 +45,11 @@
 //! 係数も threshold も持たない。確定しない値を持ち得る点も同じなので、軸の有効・無効は打点込みの
 //! 軸と同じ cohort 単位の解決を通す。
 //!
+//! 2向聴では、Progress と1回だけの SameShanten から1向聴 continuation へ接続した
+//! [`TwoShantenMetrics::expected_self_tsumo_value`] を同じ pre-acceptance cohort 単位で
+//! 解決し、weighted next acceptance より先に比較する。起点の異なる1向聴の値とは別 field で
+//! 保持し、1向聴や3向聴以上の候補には適用しない。
+//!
 //! 現在聴牌では、全候補が非フリテンの cohort は既存 Ron offense weighted total を維持する。
 //! `PermanentFuriten::Yes` を含み、全候補の恒常フリテンと self-tsumo value が確定した cohort
 //! だけ、Ron を含まない共通尺度として current-tenpai self-tsumo expected payment を使う。
@@ -176,6 +181,15 @@ pub struct ForwardMetrics {
     pub expected_self_tsumo_value: Option<u64>,
 }
 
+/// 2向聴起点の self-tsumo continuation を選択に渡す supplemental metric。
+///
+/// [`ForwardMetrics::expected_self_tsumo_value`] は1向聴限定の意味を保ち、起点の異なる値を
+/// 同じ field に混ぜない。値は [`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`] の固定小数点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TwoShantenMetrics {
+    pub expected_self_tsumo_value: Option<u64>,
+}
+
 /// 現在打牌の直後に成立する聴牌を比較するための supplemental metric。
 ///
 /// 点数計算や Reach / Damaten policy は上位層の責務で、bot-logic は確定済みの
@@ -280,6 +294,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             next_acceptance: self.next_acceptance,
             prospective_value: self.prospective_value,
             expected_self_tsumo_value: self.expected_self_tsumo_value,
+            two_shanten_expected_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: self.current_tenpai_offense_weighted_total,
             current_tenpai_expected_self_tsumo_value: self.current_tenpai_expected_self_tsumo_value,
             current_tenpai_continuation_self_tsumo_value: self
@@ -301,6 +316,7 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
     pub next_acceptance: Option<NextAcceptanceMetric>,
     pub prospective_value: Option<u64>,
     pub expected_self_tsumo_value: Option<u64>,
+    pub two_shanten_expected_self_tsumo_value: Option<u64>,
     pub current_tenpai_offense_weighted_total: Option<u64>,
     pub current_tenpai_expected_self_tsumo_value: Option<u64>,
     pub current_tenpai_continuation_self_tsumo_value: Option<u64>,
@@ -313,6 +329,7 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
 /// ```text
 /// Shanten → IsolatedTile → IsolatedHonor
 ///   → [1向聴のみ] ExpectedSelfTsumoValue
+///   → [2向聴のみ] TwoShantenExpectedSelfTsumoValue
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
@@ -344,6 +361,11 @@ pub(crate) fn compare_discard_selection_candidate_views(
     }
 
     if let Some(comparison) = compare_expected_self_tsumo_value(candidate, current_best) {
+        return comparison;
+    }
+
+    if let Some(comparison) = compare_two_shanten_expected_self_tsumo_value(candidate, current_best)
+    {
         return comparison;
     }
 
@@ -400,15 +422,14 @@ pub fn best_discard_selection_index(
 
 /// 確定しない値を持ち得る軸を、候補集合単位で有効化した前方集計値を返す。
 ///
-/// 対象は self-tsumo continuation ([`ForwardMetrics::expected_self_tsumo_value`]) と打点込みの
-/// 集計値 ([`ForwardMetrics::prospective_value`]) の2つで、どちらも同じ規則で解決する。これらの
+/// 対象は1向聴の self-tsumo continuation と打点込みの集計値で、同じ規則で解決する。これらの
 /// 軸が使われるのは pre-acceptance 軸 (Shanten → IsolatedTile → IsolatedHonor) まで同順位になる
 /// 候補同士の比較だけなので、その cohort 単位で軸の有無を揃える。cohort の全候補でその軸が確定
 /// している場合だけ軸を残し、1件でも確定しない場合は cohort 全体でその軸を無効化する。
 ///
 /// 比較ごとに軸の有無が変わると順序が循環し、候補の列挙順で選択結果が変わってしまう。cohort が
 /// 違う候補同士は pre-acceptance 軸で先に決着するため、cohort をまたいで軸の有無が違っても
-/// 順序は壊れない。2つの軸は互いに独立に解決するので、片方が無効でももう片方は残る。
+/// 順序は壊れない。2つの軸は互いに独立に解決するので、1つが無効でも他の軸は残る。
 ///
 /// 戻り値は `evaluations` と同じ順序・同じ件数。`forward_metrics` の範囲外は前方評価なしとして
 /// 扱う。この2軸以外の集計値は変更しない。
@@ -440,6 +461,37 @@ pub(crate) fn resolve_prospective_value_axis_for_views(
                 .prospective_value
                 .filter(|_| cohort_is_known(index, |metrics| metrics.prospective_value)),
             ..metrics_at(index)
+        })
+        .collect()
+}
+
+/// 2向聴 ExpectedSelfTsumoValue を pre-acceptance cohort 単位で有効化する。
+///
+/// cohort の全候補で値が確定している場合だけ値を残す。1件でも `None` があれば、その cohort
+/// 全体を `None` にする。cohort の定義と optional axis の解決規則は
+/// [`resolve_prospective_value_axis`] と同じ共通 helper を使う。
+pub fn resolve_two_shanten_expected_self_tsumo_value_axis(
+    evaluations: &[DiscardEvaluation],
+    metrics: &[TwoShantenMetrics],
+) -> Vec<TwoShantenMetrics> {
+    resolve_two_shanten_expected_self_tsumo_value_axis_for_views(
+        &evaluation_views(evaluations),
+        metrics,
+    )
+}
+
+fn resolve_two_shanten_expected_self_tsumo_value_axis_for_views(
+    evaluations: &[DiscardEvaluationView<'_>],
+    metrics: &[TwoShantenMetrics],
+) -> Vec<TwoShantenMetrics> {
+    let metrics_at = |index: usize| metrics.get(index).copied().unwrap_or_default();
+    (0..evaluations.len())
+        .map(|index| TwoShantenMetrics {
+            expected_self_tsumo_value: metrics_at(index).expected_self_tsumo_value.filter(|_| {
+                cohort_axis_is_known(evaluations, index, |other| {
+                    metrics_at(other).expected_self_tsumo_value.is_some()
+                })
+            }),
         })
         .collect()
 }
@@ -482,7 +534,7 @@ pub(crate) fn best_discard_selection_index_with_forward_metrics_for_views(
     evaluations: &[DiscardEvaluationView<'_>],
     forward_metrics: &[ForwardMetrics],
 ) -> Option<usize> {
-    best_discard_selection_index_with_metrics_for_views(evaluations, forward_metrics, &[])
+    best_discard_selection_index_with_metrics_for_views(evaluations, forward_metrics, &[], &[])
 }
 
 /// 前方集計値と現在聴牌の supplemental metric を含む比較順で最善候補の index を返す。
@@ -496,6 +548,22 @@ pub fn best_discard_selection_index_with_metrics(
         &evaluation_views(evaluations),
         forward_metrics,
         current_tenpai_metrics,
+        &[],
+    )
+}
+
+/// 前方集計値、現在聴牌、2向聴の supplemental metric を含む比較順で最善候補を返す。
+pub fn best_discard_selection_index_with_two_shanten_metrics(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+) -> Option<usize> {
+    best_discard_selection_index_with_metrics_for_views(
+        &evaluation_views(evaluations),
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
     )
 }
 
@@ -504,8 +572,13 @@ fn best_discard_selection_index_with_metrics_for_views(
     evaluations: &[DiscardEvaluationView<'_>],
     forward_metrics: &[ForwardMetrics],
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
 ) -> Option<usize> {
     let resolved = resolve_prospective_value_axis_for_views(evaluations, forward_metrics);
+    let two_shanten_metrics = resolve_two_shanten_expected_self_tsumo_value_axis_for_views(
+        evaluations,
+        two_shanten_metrics,
+    );
     let current_tenpai_metrics =
         resolve_current_tenpai_value_axis_for_views(evaluations, current_tenpai_metrics);
     let metrics_at = |index: usize| resolved.get(index).copied().unwrap_or_default();
@@ -515,6 +588,9 @@ fn best_discard_selection_index_with_metrics_for_views(
         next_acceptance: metrics_at(index).next_acceptance,
         prospective_value: metrics_at(index).prospective_value,
         expected_self_tsumo_value: metrics_at(index).expected_self_tsumo_value,
+        two_shanten_expected_self_tsumo_value: two_shanten_metrics
+            .get(index)
+            .and_then(|metric| metric.expected_self_tsumo_value),
         current_tenpai_offense_weighted_total: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.offense_weighted_total),
@@ -748,6 +824,29 @@ fn compare_expected_self_tsumo_value(
     (candidate_value != best_value).then_some(DiscardComparison {
         candidate_is_better: candidate_value > best_value,
         reason: DiscardComparisonReason::ExpectedSelfTsumoValue,
+    })
+}
+
+// 2向聴起点の self-tsumo continuation による比較。決着しなければ後続の既存比較へ委ねる。
+//
+// 対象は現在打牌後が2向聴の候補だけ。軸の有無は呼び出し前に pre-acceptance
+// cohort 単位で解決済みなので、pairwise に unknown を飛ばして順序を循環させない。
+fn compare_two_shanten_expected_self_tsumo_value(
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
+) -> Option<DiscardComparison> {
+    const RYANSHANTEN_SHANTEN: i8 = 2;
+    if candidate.evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.two_shanten_expected_self_tsumo_value?;
+    let best_value = current_best.two_shanten_expected_self_tsumo_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue,
     })
 }
 
@@ -1992,6 +2091,7 @@ mod tests {
                 next_acceptance: metric.next_acceptance,
                 prospective_value: metric.prospective_value,
                 expected_self_tsumo_value: metric.expected_self_tsumo_value,
+                two_shanten_expected_self_tsumo_value: None,
                 current_tenpai_offense_weighted_total: None,
                 current_tenpai_expected_self_tsumo_value: None,
                 current_tenpai_continuation_self_tsumo_value: None,
@@ -2508,7 +2608,7 @@ mod tests {
 
     #[test]
     fn the_self_tsumo_axis_does_not_decide_a_two_shanten_comparison() {
-        // 2向聴以上では新しい軸を使わず、既存の weighted next acceptance へ委ねる。
+        // 1向聴用の値は2向聴の軸へ混ぜず、既存の weighted next acceptance へ委ねる。
         let evaluations = vec![
             evaluation("1m", 2, &[("3m", 4)]),
             evaluation("9p", 2, &[("3p", 4)]),
@@ -2539,6 +2639,152 @@ mod tests {
         assert_eq!(
             best_discard_selection_index_with_forward_metrics(&evaluations, &metrics),
             Some(1)
+        );
+    }
+
+    fn two_shanten_metrics(value: Option<u64>) -> TwoShantenMetrics {
+        TwoShantenMetrics {
+            expected_self_tsumo_value: value,
+        }
+    }
+
+    fn two_shanten_candidate<'a>(
+        evaluation: &'a DiscardEvaluation,
+        value: Option<u64>,
+    ) -> DiscardSelectionCandidateView<'a> {
+        let mut candidate = DiscardSelectionCandidate::without_tenpai_wait(evaluation).view();
+        candidate.two_shanten_expected_self_tsumo_value = value;
+        candidate
+    }
+
+    #[test]
+    fn a_known_two_shanten_cohort_uses_the_expected_self_tsumo_axis() {
+        // 受け入れの狭い2向聴候補でも、cohort 全員の EV が確定していれば EV で決着する。
+        let evaluations = vec![
+            evaluation("1m", 2, &[("3m", 1)]),
+            evaluation("9p", 2, &[("3p", 4), ("6p", 4)]),
+        ];
+        let metrics = vec![
+            two_shanten_metrics(Some(200)),
+            two_shanten_metrics(Some(100)),
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_two_shanten_metrics(&evaluations, &[], &[], &metrics,),
+            Some(0)
+        );
+        let resolved = resolve_two_shanten_expected_self_tsumo_value_axis(&evaluations, &metrics);
+        let comparison = compare_discard_selection_candidate_views(
+            &two_shanten_candidate(&evaluations[0], resolved[0].expected_self_tsumo_value),
+            &two_shanten_candidate(&evaluations[1], resolved[1].expected_self_tsumo_value),
+        );
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn an_unknown_two_shanten_value_disables_the_axis_for_the_whole_cohort() {
+        // 1件でも unknown なら既存 Acceptance へ戻り、高 EV が局所的にだけ勝つ順序を作らない。
+        let evaluations = vec![
+            evaluation("1m", 2, &[("3m", 1)]),
+            evaluation("9p", 2, &[("3p", 4), ("6p", 4)]),
+        ];
+        let metrics = vec![two_shanten_metrics(Some(200)), two_shanten_metrics(None)];
+        let resolved = resolve_two_shanten_expected_self_tsumo_value_axis(&evaluations, &metrics);
+
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.expected_self_tsumo_value.is_none())
+        );
+        assert_eq!(
+            best_discard_selection_index_with_two_shanten_metrics(&evaluations, &[], &[], &metrics,),
+            Some(1)
+        );
+        assert_eq!(
+            compare_discard_selection_candidate_views(
+                &two_shanten_candidate(&evaluations[1], resolved[1].expected_self_tsumo_value),
+                &two_shanten_candidate(&evaluations[0], resolved[0].expected_self_tsumo_value),
+            )
+            .reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn equal_two_shanten_values_fall_through_to_acceptance() {
+        let evaluations = vec![
+            evaluation("1m", 2, &[("3m", 1)]),
+            evaluation("9p", 2, &[("3p", 4), ("6p", 4)]),
+        ];
+        let metrics = vec![two_shanten_metrics(Some(100)); 2];
+        let resolved = resolve_two_shanten_expected_self_tsumo_value_axis(&evaluations, &metrics);
+
+        let comparison = compare_discard_selection_candidate_views(
+            &two_shanten_candidate(&evaluations[1], resolved[1].expected_self_tsumo_value),
+            &two_shanten_candidate(&evaluations[0], resolved[0].expected_self_tsumo_value),
+        );
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_axis_does_not_apply_to_one_or_three_shanten() {
+        for shanten in [1, 3] {
+            let evaluations = vec![
+                evaluation("1m", shanten, &[("3m", 1)]),
+                evaluation("9p", shanten, &[("3p", 4), ("6p", 4)]),
+            ];
+            let metrics = vec![
+                two_shanten_metrics(Some(200)),
+                two_shanten_metrics(Some(100)),
+            ];
+            let resolved =
+                resolve_two_shanten_expected_self_tsumo_value_axis(&evaluations, &metrics);
+            let comparison = compare_discard_selection_candidate_views(
+                &two_shanten_candidate(&evaluations[1], resolved[1].expected_self_tsumo_value),
+                &two_shanten_candidate(&evaluations[0], resolved[0].expected_self_tsumo_value),
+            );
+
+            assert!(comparison.candidate_is_better, "shanten={shanten}");
+            assert_eq!(
+                comparison.reason,
+                DiscardComparisonReason::AcceptanceRemaining,
+                "shanten={shanten}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_shanten_axis_does_not_cross_pre_acceptance_cohorts() {
+        // 孤立牌を切る候補は pre-acceptance で優先済み。別 cohort の高い EV で逆転しない。
+        let mut isolated = evaluation("1m", 2, &[("3m", 1)]);
+        isolated.discards_isolated_tile = true;
+        let connected = evaluation("9p", 2, &[("3p", 4), ("6p", 4)]);
+        let evaluations = vec![isolated, connected];
+        let metrics = vec![
+            two_shanten_metrics(Some(1)),
+            two_shanten_metrics(Some(999_999)),
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_two_shanten_metrics(&evaluations, &[], &[], &metrics,),
+            Some(0)
+        );
+        let resolved = resolve_two_shanten_expected_self_tsumo_value_axis(&evaluations, &metrics);
+        assert_eq!(
+            compare_discard_selection_candidate_views(
+                &two_shanten_candidate(&evaluations[0], resolved[0].expected_self_tsumo_value),
+                &two_shanten_candidate(&evaluations[1], resolved[1].expected_self_tsumo_value),
+            )
+            .reason,
+            DiscardComparisonReason::IsolatedTile
         );
     }
 }

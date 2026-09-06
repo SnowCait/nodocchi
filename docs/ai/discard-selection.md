@@ -193,7 +193,7 @@ weighted next acceptance
 
 仮想ツモが赤5 / 黒5に分かれる牌種では、物理牌ごとに次打牌を評価し、それぞれの残枚数で集約します。この指標に打点は含めないため、赤 / 黒で変わるのは残枚数の内訳だけです。1向聴の `weighted prospective value` はここでは使いません。
 
-## 2向聴: ExpectedSelfTsumoValue (diagnostics only)
+## 2向聴: ExpectedSelfTsumoValue
 
 2向聴の候補も、1向聴と同じ self-tsumo 尺度へ揃えて観測できます。
 
@@ -215,19 +215,20 @@ B. 2向聴 → SameShanten → 最良打牌 → 2向聴 → Progress → 最良�
 軸のために係数も threshold も pruning も追加しません。2回目の SameShanten はこの評価モデルの
 探索範囲外で、確定しない値ではなく寄与 0 として扱います。
 
-**この軸は diagnostics 専用です。** 2向聴以上の production 比較は従来どおり
-[WeightedNextAcceptance](#2向聴以上-weightednextacceptance) のままで、この値は打牌選択にも
-押し引きにもリーチ判断にも接続していません。起点の向聴数が違うため、1向聴の
-`ExpectedSelfTsumoValue` と同じ軸として混ぜることもしません。
+production の通常打牌では、現在打牌後が2向聴で、Shanten / IsolatedTile /
+IsolatedHonor まで同順位の cohort 候補にこの軸を使います。cohort 全候補の値を
+確定できた場合だけ有効にし、1件でも `unknown` なら cohort 全体で無効にして
+[WeightedNextAcceptance](#2向聴以上-weightednextacceptance) 以下へ戻ります。
+起点の向聴数が違うため、1向聴の `ExpectedSelfTsumoValue` とは別 field で保持し、
+1向聴候補と2向聴候補の間で比較しません。3向聴以上、押し引き、リーチ判断にも使いません。
 
 材料 (ツモ打点と残り自摸機会) が揃わない局面と、到達したテンパイのツモ打点を1つでも確定できない
 候補は、0点で補完せず値を持ちません。`bot-scenario --two-shanten-self-tsumo` で表示できます。
 
 ### 実行コストの計測
 
-この軸は探索が最も深く、全2向聴候補について求めると1局面で数十秒かかります。将来 production
-比較へ接続する場合に評価が必要になるのは、production の打牌比較が Shanten / IsolatedTile /
-IsolatedHonor までで決着させず前方評価まで残した候補だけです。その範囲へ絞った場合の実行コストは
+この軸は探索が最も深いため、production は Shanten / IsolatedTile / IsolatedHonor
+までで決着させず前方評価まで残した候補だけを評価します。その範囲へ絞った場合の実行コストは
 `bot-scenario --two-shanten-self-tsumo-cost` で計測できます。
 
 ```bash
@@ -240,8 +241,7 @@ cargo run --release -p bot-scenario -- \
 
 `--two-shanten-self-tsumo-cost all` は全2向聴候補、`forward-targets` は production の比較対象
 だけを評価し、候補ごとの期待値と実測時間を表示します。範囲の絞り込みは打牌選択が使う前方評価の
-絞り込みそのもので、残った候補の値は全候補で求めた場合と一致します。計測は打牌選択を通らない
-解析専用の入口で、選ぶ action も他の診断も変えません。
+絞り込みそのもので、残った候補の値は全候補で求めた場合と一致します。計測用の入口も同じ探索を使います。
 
 計測より前に深い探索を走らせると向聴・受け入れの memo が温まり、後続の計測が本来より速く
 見えてしまいます。そのため `--lookahead` / `--verbose` / `--two-shanten-self-tsumo` /

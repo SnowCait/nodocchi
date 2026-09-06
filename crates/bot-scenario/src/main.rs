@@ -55,6 +55,14 @@ where
         ScenarioSource::RiichilabCaptureBenchmark(spec) => return run_capture_benchmark(spec),
     };
 
+    // cost 計測は production selection が同じ2向聴探索を走らせる前に取り、baseline と同じ
+    // cold memo 条件を保つ。表示順は従来どおり診断の後にする。
+    let two_shanten_self_tsumo_cost = args.two_shanten_self_tsumo_cost.map(|scope| {
+        (
+            scope,
+            measure_two_shanten_self_tsumo(&scenario.context, &scenario.legal_actions, scope),
+        )
+    });
     let diagnostic = ShantenAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
@@ -67,10 +75,8 @@ where
         format_diagnostic(&scenario, &diagnostic, args.verbose)
     };
     // 計測は他の診断とは別の section として後ろに足すだけで、その手前の判断も表示も変えない。
-    let output = match args.two_shanten_self_tsumo_cost {
-        Some(scope) => {
-            let cost =
-                measure_two_shanten_self_tsumo(&scenario.context, &scenario.legal_actions, scope);
+    let output = match two_shanten_self_tsumo_cost {
+        Some((scope, cost)) => {
             let section = format_two_shanten_self_tsumo_cost(
                 scope,
                 &cost,

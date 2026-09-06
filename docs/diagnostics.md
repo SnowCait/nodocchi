@@ -79,7 +79,7 @@ Final decision
 
 `--two-shanten-self-tsumo` は、打牌候補集合の最善向聴数が2向聴の場合に、候補ごとの ExpectedSelfTsumoValue [点] を表示します。節の先頭には `Lookahead` と同じ `self-tsumo continuation` (`unknown tiles` / `current future own draws`) を出し、材料が揃わない局面では `not evaluated`、値を確定できない候補は `unknown` です。
 
-枝は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` で、確率も打点も1向聴の `expected self-tsumo value` と同じ尺度です。diagnostics 専用で打牌選択には接続しておらず、起点の向聴数が違うため1向聴の値と同じ軸としては比較できません。読み方は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue-diagnostics-only) を参照してください。
+枝は `2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation` で、確率も打点も1向聴の `expected self-tsumo value` と同じ尺度です。production は pre-acceptance まで同順位の2向聴 cohort で全候補の値が確定した場合だけ比較に使います。起点の向聴数が違うため1向聴の値と同じ field には混ぜません。読み方は [打牌選択](ai/discard-selection.md#2向聴-expectedselftsumovalue) を参照してください。
 
 `--lookahead --verbose` の same-shanten downstream とは独立した診断で、互いに含みません。`--two-shanten-self-tsumo` 単独では downstream 探索は走らず、両方出す場合は `--two-shanten-self-tsumo --verbose` を指定します。
 
