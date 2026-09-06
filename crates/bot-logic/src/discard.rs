@@ -3,10 +3,10 @@ use crate::acceptance::{
 };
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::selection::{
-    CurrentTenpaiMetrics, DiscardSelectionCandidate, ForwardMetrics, NextAcceptanceMetric,
-    TenpaiWaitMetric, best_discard_selection_index_with_metrics,
-    compare_discard_selection_candidates, resolve_current_tenpai_value_axis,
-    resolve_prospective_value_axis,
+    CurrentTenpaiMetrics, DiscardSelectionCandidateView, ForwardMetrics, NextAcceptanceMetric,
+    TenpaiWaitMetric, TwoShantenMetrics, best_discard_selection_index_with_two_shanten_metrics,
+    compare_discard_selection_candidate_views, resolve_current_tenpai_value_axis,
+    resolve_prospective_value_axis, resolve_two_shanten_expected_self_tsumo_value_axis,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
@@ -800,6 +800,9 @@ pub enum DiscardComparisonReason {
     /// 向聴数を下げる枝と1回だけ手変わりする枝を同じ尺度で比べる軸で、自分のツモ和了だけを
     /// 含む。ロン和了・他家の和了・放銃は含まない。
     ExpectedSelfTsumoValue,
+    /// 2向聴限定。Progress と1回だけの SameShanten から1向聴 continuation へ
+    /// 接続した、self-tsumo-only の期待支払い。
+    TwoShantenExpectedSelfTsumoValue,
     /// 打点込みの前方評価。Σ(残枚数 × そのテンパイの Σ(和了牌残枚数 × 支払い合計))。
     ///
     /// 現在打牌の比較では1手目の物理牌 variant 残枚数で重み付けし、2手目の打牌候補の比較では
@@ -1240,13 +1243,35 @@ pub fn diagnose_discard_evaluations_with_metrics(
     forward_metrics: &[ForwardMetrics],
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
 ) -> DiscardDecisionDiagnostic {
+    diagnose_discard_evaluations_with_two_shanten_metrics(
+        counts,
+        fixed_meld_count,
+        evaluations,
+        forward_metrics,
+        current_tenpai_metrics,
+        &[],
+    )
+}
+
+/// production selection が計算した2向聴 ExpectedSelfTsumoValue も含めて診断を構築する。
+/// 数値本体は専用の2向聴診断が保持し、ここでは同じ supplemental metric を比較理由へ反映する。
+pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+) -> DiscardDecisionDiagnostic {
     // 打点込みの軸は候補集合単位で決まる。診断が報告する比較理由を本番選択と一致させるため、
     // 診断側でも同じ解決を通した集計値を使う。
     let forward_metrics = resolve_prospective_value_axis(evaluations, forward_metrics);
     let current_tenpai_metrics =
         resolve_current_tenpai_value_axis(evaluations, current_tenpai_metrics);
-    let candidate_at = |index: usize| DiscardSelectionCandidate {
-        evaluation: &evaluations[index],
+    let two_shanten_metrics =
+        resolve_two_shanten_expected_self_tsumo_value_axis(evaluations, two_shanten_metrics);
+    let candidate_at = |index: usize| DiscardSelectionCandidateView {
+        evaluation: evaluations[index].view(),
         tenpai_wait: forward_metrics
             .get(index)
             .and_then(|metric| metric.tenpai_wait),
@@ -1257,6 +1282,9 @@ pub fn diagnose_discard_evaluations_with_metrics(
             .get(index)
             .and_then(|metric| metric.prospective_value),
         expected_self_tsumo_value: forward_metrics
+            .get(index)
+            .and_then(|metric| metric.expected_self_tsumo_value),
+        two_shanten_expected_self_tsumo_value: two_shanten_metrics
             .get(index)
             .and_then(|metric| metric.expected_self_tsumo_value),
         current_tenpai_offense_weighted_total: current_tenpai_metrics
@@ -1270,10 +1298,11 @@ pub fn diagnose_discard_evaluations_with_metrics(
             .and_then(|metric| metric.continuation_self_tsumo_value),
     };
 
-    let best_index = best_discard_selection_index_with_metrics(
+    let best_index = best_discard_selection_index_with_two_shanten_metrics(
         evaluations,
         &forward_metrics,
         &current_tenpai_metrics,
+        &two_shanten_metrics,
     );
     let selected = best_index.map(|index| evaluations[index].clone());
 
@@ -1287,7 +1316,7 @@ pub fn diagnose_discard_evaluations_with_metrics(
             } else {
                 let best_index = best_index
                     .expect("non-selected candidate implies a selected evaluation exists");
-                let comparison = compare_discard_selection_candidates(
+                let comparison = compare_discard_selection_candidate_views(
                     &candidate_at(best_index),
                     &candidate_at(index),
                 );

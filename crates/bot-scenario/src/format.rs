@@ -2985,6 +2985,7 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
             format_self_tsumo_value(Some(winner.expected_self_tsumo_value?)),
             format_self_tsumo_value(Some(loser.expected_self_tsumo_value?)),
         ),
+        DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue => return None,
         DiscardComparisonReason::WeightedProspectiveValue => (
             winner.prospective_value?.to_string(),
             loser.prospective_value?.to_string(),

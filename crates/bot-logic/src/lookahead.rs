@@ -154,8 +154,8 @@
 //!
 //! 深さの違う枝を1つの尺度へ揃えるのは1向聴と同じ「その経路を引く確率 × テンパイ到達後の
 //! 期待ツモ支払い」で、この module は係数も threshold も固定 horizon も持たない。1向聴の
-//! ExpectedSelfTsumoValue とは起点の向聴数が違うため、同じ軸として混ぜない。現在の打牌選択は
-//! この値を使わない。
+//! ExpectedSelfTsumoValue とは起点の向聴数が違うため、同じ軸として混ぜない。production の
+//! 通常打牌選択は、pre-acceptance まで同順位の2向聴候補に限ってこの値を使う。
 
 use crate::acceptance::{
     DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
@@ -507,7 +507,8 @@ impl LookaheadDiagnostic {
 /// `candidates` は打牌候補集合の最善向聴数が2向聴の場合の、その2向聴候補だけ。向聴数が違う
 /// 候補は同じ尺度で比較できないため、値を推測せず候補そのものを持たない。
 ///
-/// 打牌選択・押し引き・リーチ判断のどれにも使わない解析専用の情報。
+/// production selection は比較対象 cohort の値をこの診断から補助 metric へ転記する。
+/// 全候補の枝内訳を保持する用途では解析診断として使う。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TwoShantenSelfTsumoDiagnostic {
     pub candidates: Vec<TwoShantenSelfTsumoCandidate>,
@@ -1054,8 +1055,8 @@ impl TwoShantenSelfTsumoObserver for () {
 ///
 /// `scope` は対象候補の範囲だけを決める。範囲を狭めても残った候補の値は変わらない。
 ///
-/// 探索は既存の2手先診断よりさらに深いため、必要な経路だけが明示的に呼ぶ。打牌選択には使わない
-/// 解析専用の情報で、構築の有無で選択結果は変わらない。
+/// 探索は既存の2手先診断よりさらに深いため、production は `ForwardTargets` だけを呼ぶ。
+/// 解析用に全候補を構築する場合も、1候補あたりの値と探索 semantics は同じ。
 pub fn diagnose_two_shanten_self_tsumo(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
