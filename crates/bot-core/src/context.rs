@@ -388,6 +388,28 @@ impl GameContext {
         fixed_meld_count(self.own_melds()?)
     }
 
+    /// 自分の concealed hand と副露だけを指定した仮想状態へ差し替える。
+    ///
+    /// 卓上の公開情報・脅威・履歴は元の context のまま維持し、Chi / Pon 後の打牌を既存の
+    /// 通常打牌・押し引き評価へ渡すために使う。自分の席を特定できない場合は、別の席を推測して
+    /// 書き換えず `None` を返す。
+    pub(crate) fn with_own_hand_state(
+        &self,
+        hand_tiles: Vec<TileId>,
+        own_melds: Vec<Meld>,
+    ) -> Option<Self> {
+        let own_seat = usize::from(self.player_id?);
+        if own_seat >= self.melds.len() {
+            return None;
+        }
+
+        let mut context = self.clone();
+        context.drawn_tile = None;
+        context.hand_tiles = hand_tiles;
+        context.melds[own_seat] = own_melds;
+        Some(context)
+    }
+
     pub fn reached(&self) -> &[bool; 4] {
         &self.reached
     }

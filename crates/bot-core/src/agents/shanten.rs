@@ -591,8 +591,8 @@ mod tests {
     use super::*;
 
     use crate::call_decision::{
-        CALL_MIN_LIVE_WAIT_REMAINING, CallCandidateDiagnostic, CallDecisionReason, CallKind,
-        CallWaitYaku,
+        CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN, CallCandidateDiagnostic,
+        CallDecisionReason, CallKind, CallWaitYaku,
     };
     use crate::combined_defense::{
         ThreatDefenseTarget, combined_threat_defense_targets_from_context,
@@ -1980,6 +1980,7 @@ mod tests {
         extra_visible: Vec<u8>,
         own_discards: Vec<u8>,
         own_melds: Vec<crate::meld::Meld>,
+        opponent_melds: Vec<crate::meld::Meld>,
         drawn_tile: Option<u8>,
         player_id: Option<u8>,
         history_furiten: bot_logic::HistoryFuritenFacts,
@@ -2006,6 +2007,7 @@ mod tests {
                 extra_visible: Vec::new(),
                 own_discards: Vec::new(),
                 own_melds: Vec::new(),
+                opponent_melds: Vec::new(),
                 drawn_tile: None,
                 player_id: Some(0),
                 // 実際の client が局開始で確定させる値。unknown を既定にすると全ての鳴きが
@@ -2037,6 +2039,11 @@ mod tests {
 
         fn with_own_melds(mut self, own_melds: Vec<crate::meld::Meld>) -> Self {
             self.own_melds = own_melds;
+            self
+        }
+
+        fn with_opponent_melds(mut self, opponent_melds: Vec<crate::meld::Meld>) -> Self {
+            self.opponent_melds = opponent_melds;
             self
         }
 
@@ -2076,10 +2083,16 @@ mod tests {
             visible.push(tile(self.target));
             visible.extend(own_discards);
             visible.extend(self.own_melds.iter().flat_map(|meld| meld.tiles().to_vec()));
+            visible.extend(
+                self.opponent_melds
+                    .iter()
+                    .flat_map(|meld| meld.tiles().to_vec()),
+            );
             visible.extend(self.extra_visible.iter().map(|&value| tile(value)));
 
             let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
             melds[0] = self.own_melds.clone();
+            melds[1] = self.opponent_melds.clone();
 
             GameContext::from_parts_with_melds(
                 self.drawn_tile.map(tile),
@@ -2144,6 +2157,10 @@ mod tests {
             vec![tile(first), tile(first + 1), tile(first + 2)],
             Some(tile(first)),
         )
+    }
+
+    fn high_open_hand_melds() -> Vec<crate::meld::Meld> {
+        [108, 112, 116].map(honor_pon_meld).to_vec()
     }
 
     // 123456m 55p 78s N PP。P(白) の対子を持つ一向聴で、PP を Pon して N を切るとテンパイ。
@@ -2258,6 +2275,30 @@ mod tests {
     }
 
     #[test]
+    fn declines_a_call_when_its_post_call_tenpai_folds_against_a_high_open_hand() {
+        // Call 単体では白 Pon → 北切りの役あり8枚待ちテンパイだが、3副露の相手に対しては
+        // 既存 Push/Pull policy が弱いテンパイとして Fold にするため、Pon 自体を採用しない。
+        let reaction = dragon_pon_reaction().with_opponent_melds(high_open_hand_melds());
+        let candidate = assert_single_call_candidate(
+            &reaction,
+            &LegalAction::None,
+            CallDecisionReason::PostCallNotPush,
+        );
+
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_TENPAI_SHANTEN));
+        assert_eq!(candidate.live_wait_remaining(), Some(8));
+        assert_eq!(candidate.can_ron(), Some(true));
+        assert_eq!(candidate.live_waits_have_yaku(), Some(true));
+        assert_eq!(
+            candidate.post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::WeakTenpaiAgainstHighOpenHand,
+            })
+        );
+    }
+
+    #[test]
     fn call_source_is_reported_for_the_selected_call() {
         let reaction = dragon_pon_reaction();
         let ctx = reaction.context();
@@ -2268,7 +2309,8 @@ mod tests {
 
         let decision = ShantenAgent.decide(&ctx, &actions);
         assert_eq!(decision.source, AgentActionSource::Call);
-        // 鳴きは通常打牌・押し引き・防御より前で確定するので、それらは評価していない。
+        // 鳴き後候補の Push/Pull は call 診断内に保持する。現在局面の通常打牌・Push/Pull・防御は
+        // 鳴きの採用後には進まないため、AgentDecision の各フィールドには持たない。
         assert_eq!(decision.push_pull, None);
         assert_eq!(decision.push_pull_inputs, None);
         assert_eq!(decision.normal_discard, None);
@@ -2411,6 +2453,27 @@ mod tests {
         assert_eq!(candidate.live_wait_remaining(), Some(7));
         assert_eq!(candidate.can_ron(), Some(true));
         assert_eq!(candidate.live_waits_have_yaku(), Some(true));
+    }
+
+    #[test]
+    fn keeps_a_call_when_its_post_call_tenpai_pushes_against_a_high_open_hand() {
+        let reaction = honitsu_chi_reaction().with_opponent_melds(high_open_hand_melds());
+        let candidate = assert_single_call_candidate(
+            &reaction,
+            &reaction.call(),
+            CallDecisionReason::EligibleTenpai,
+        );
+
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_TENPAI_SHANTEN));
+        assert_eq!(candidate.can_ron(), Some(true));
+        assert_eq!(candidate.live_waits_have_yaku(), Some(true));
+        assert_eq!(
+            candidate.post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::StrongTenpaiAgainstHighOpenHand,
+            })
+        );
     }
 
     #[test]
