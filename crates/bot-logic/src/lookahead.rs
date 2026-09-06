@@ -531,6 +531,29 @@ pub struct TwoShantenSelfTsumoCandidate {
     pub expected_self_tsumo_value: Option<u64>,
 }
 
+/// 2向聴の打牌候補1件分の Progress 枝の寄与。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwoShantenProgressSelfTsumoCandidate {
+    pub discard: TileType,
+    /// [`awaiting_draw_two_shanten_progress_self_tsumo_value`] と同じ枝と集計の値
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。確定できない場合は `None`。
+    pub progress_self_tsumo_value: Option<u64>,
+}
+
+/// 2向聴の打牌候補ごとに、最初のツモで1向聴へ進む枝だけを並べた観測値。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TwoShantenProgressSelfTsumoDiagnostic {
+    pub candidates: Vec<TwoShantenProgressSelfTsumoCandidate>,
+}
+
+impl TwoShantenProgressSelfTsumoDiagnostic {
+    pub fn candidate(&self, discard: TileType) -> Option<&TwoShantenProgressSelfTsumoCandidate> {
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.discard == discard)
+    }
+}
+
 /// 2手先評価の入力。通常打牌評価が使う値と同じものだけを持ち、上位層の局面型には依存しない。
 ///
 /// `tiles` は打牌前の全手牌 (物理牌)、`fixed_meld_count` / `dora_indicators` / `round_wind` /
@@ -1020,6 +1043,29 @@ pub fn two_shanten_expected_self_tsumo_value_for_candidate(
     two_shanten_self_tsumo_value(inputs, &branch, &evaluation.acceptance_after_discard, facts)
 }
 
+/// 現在打牌後が2向聴の打牌候補1件について、最初のツモで1向聴へ進む枝だけの
+/// self-tsumo 寄与 [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]を返す。
+///
+/// 値は [`awaiting_draw_two_shanten_progress_self_tsumo_value`] と同じ
+/// [`two_shanten_progress_self_tsumo_value`] を通る。打牌後の受け入れは打牌評価が持つ値を
+/// そのまま使い、SameShanten 枝は評価しない。
+pub fn two_shanten_progress_self_tsumo_value_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
+    two_shanten_progress_self_tsumo_value(
+        inputs,
+        &branch,
+        &evaluation.acceptance_after_discard,
+        facts,
+    )
+}
+
 /// 2向聴候補の ExpectedSelfTsumoValue を求める対象の範囲。
 ///
 /// どちらを選んでも1候補あたりの枝も確率も集計も同じで、対象候補の数だけが変わる。
@@ -1076,28 +1122,76 @@ pub fn diagnose_two_shanten_self_tsumo_instrumented(
     scope: TwoShantenSelfTsumoScope,
     observer: &mut impl TwoShantenSelfTsumoObserver,
 ) -> TwoShantenSelfTsumoDiagnostic {
+    TwoShantenSelfTsumoDiagnostic {
+        candidates: diagnose_two_shanten_values_instrumented(
+            inputs,
+            evaluations,
+            scope,
+            observer,
+            two_shanten_expected_self_tsumo_value_for_candidate,
+        )
+        .into_iter()
+        .map(
+            |(discard, expected_self_tsumo_value)| TwoShantenSelfTsumoCandidate {
+                discard,
+                expected_self_tsumo_value,
+            },
+        )
+        .collect(),
+    }
+}
+
+/// [`awaiting_draw_two_shanten_progress_self_tsumo_value`] と同じ Progress 枝の寄与を、
+/// 2向聴の打牌候補ごとに並べる観測用入口。
+///
+/// 対象候補と候補ごとの区切りは Full EV の診断と同じ経路を共有する。
+pub fn diagnose_two_shanten_progress_self_tsumo_instrumented(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+    scope: TwoShantenSelfTsumoScope,
+    observer: &mut impl TwoShantenSelfTsumoObserver,
+) -> TwoShantenProgressSelfTsumoDiagnostic {
+    TwoShantenProgressSelfTsumoDiagnostic {
+        candidates: diagnose_two_shanten_values_instrumented(
+            inputs,
+            evaluations,
+            scope,
+            observer,
+            two_shanten_progress_self_tsumo_value_for_candidate,
+        )
+        .into_iter()
+        .map(
+            |(discard, progress_self_tsumo_value)| TwoShantenProgressSelfTsumoCandidate {
+                discard,
+                progress_self_tsumo_value,
+            },
+        )
+        .collect(),
+    }
+}
+
+fn diagnose_two_shanten_values_instrumented(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+    scope: TwoShantenSelfTsumoScope,
+    observer: &mut impl TwoShantenSelfTsumoObserver,
+    value_for_candidate: fn(&LookaheadInputs, &DiscardEvaluation) -> Option<u64>,
+) -> Vec<(TileType, Option<u64>)> {
     if best_shanten(evaluations) != RYANSHANTEN_SHANTEN {
-        return TwoShantenSelfTsumoDiagnostic::default();
+        return Vec::new();
     }
 
-    TwoShantenSelfTsumoDiagnostic {
-        candidates: evaluations
-            .iter()
-            .zip(two_shanten_self_tsumo_target_mask(evaluations, scope))
-            .filter(|(evaluation, target)| {
-                *target && evaluation.min_shanten_after_discard() == RYANSHANTEN_SHANTEN
-            })
-            .map(|(evaluation, _)| {
-                observer.enter_candidate(evaluation.discard);
-                TwoShantenSelfTsumoCandidate {
-                    discard: evaluation.discard,
-                    expected_self_tsumo_value: two_shanten_expected_self_tsumo_value_for_candidate(
-                        inputs, evaluation,
-                    ),
-                }
-            })
-            .collect(),
-    }
+    evaluations
+        .iter()
+        .zip(two_shanten_self_tsumo_target_mask(evaluations, scope))
+        .filter(|(evaluation, target)| {
+            *target && evaluation.min_shanten_after_discard() == RYANSHANTEN_SHANTEN
+        })
+        .map(|(evaluation, _)| {
+            observer.enter_candidate(evaluation.discard);
+            (evaluation.discard, value_for_candidate(inputs, evaluation))
+        })
+        .collect()
 }
 
 // 2向聴 ExpectedSelfTsumoValue を求める候補の mask。production 比較対象へ絞る場合の判定は
@@ -4907,7 +5001,7 @@ mod tests {
     }
 
     #[test]
-    fn a_two_shanten_discard_candidate_has_the_same_value_as_its_awaiting_draw_state() {
+    fn two_shanten_discard_candidate_values_match_their_awaiting_draw_helpers() {
         // 打牌候補の入口は、その打牌後の state を「次の自摸を待つ2向聴 state」として渡した場合と
         // 同じ枝集合・同じ集計になる。
         let tiles = two_shanten_candidate_hand();
@@ -4921,7 +5015,10 @@ mod tests {
         assert_eq!(evaluation.min_shanten_after_discard(), RYANSHANTEN_SHANTEN);
         let value = two_shanten_expected_self_tsumo_value_for_candidate(&inputs, evaluation)
             .expect("ツモ打点を確定できる");
+        let progress = two_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation)
+            .expect("ツモ打点を確定できる");
         assert!(value > 0);
+        assert!(progress > 0);
 
         let (discarded, concealed) =
             split_discarded_tile(situation.tiles.clone(), evaluation).expect("打牌を確定できる");
@@ -4932,12 +5029,14 @@ mod tests {
             .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
             .with_own_future_draws(facts.own_future_draws);
 
+        let acceptance = awaiting_draw_acceptance(&concealed, fixed(3), &visible);
         assert_eq!(
-            awaiting_draw_two_shanten_expected_self_tsumo_value(
-                &awaiting,
-                &awaiting_draw_acceptance(&concealed, fixed(3), &visible),
-            ),
+            awaiting_draw_two_shanten_expected_self_tsumo_value(&awaiting, &acceptance,),
             Some(value)
+        );
+        assert_eq!(
+            awaiting_draw_two_shanten_progress_self_tsumo_value(&awaiting, &acceptance),
+            Some(progress)
         );
     }
 

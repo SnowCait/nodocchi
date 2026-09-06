@@ -10,9 +10,11 @@ pub const USAGE: &str = "usage:
                [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
                [--no-history-furiten] [--allow-hora]
                [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
-               [--two-shanten-self-tsumo-cost <SCOPE>] [--summary-only]
+               [--two-shanten-self-tsumo-cost <SCOPE>]
+               [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--two-shanten-self-tsumo] [--verbose]
-               [--two-shanten-self-tsumo-cost <SCOPE>] [--summary-only]
+               [--two-shanten-self-tsumo-cost <SCOPE>]
+               [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
                [--two-shanten-self-tsumo] [--verbose] [--summary-only]
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
@@ -30,6 +32,8 @@ pub const USAGE: &str = "usage:
   <SCOPE> all for every two-shanten candidate and forward-targets for the production
   comparison cohort only; it cannot be combined with any other diagnostic option, so that
   no deeper search warms the shanten and acceptance memos before the measurement
+  --two-shanten-progress-self-tsumo-cost measures only the first Progress branch through
+  the existing progress helper, with the same <SCOPE> and isolation as the full cost option
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -83,8 +87,14 @@ pub enum CliError {
     #[error("--two-shanten-self-tsumo-cost must be all or forward-targets, but is {0:?}")]
     InvalidTwoShantenSelfTsumoCostScope(String),
 
+    #[error("--two-shanten-progress-self-tsumo-cost must be all or forward-targets, but is {0:?}")]
+    InvalidTwoShantenProgressSelfTsumoCostScope(String),
+
     #[error("--two-shanten-self-tsumo-cost cannot be combined with {0}")]
     ConflictingTwoShantenSelfTsumoCost(String),
+
+    #[error("--two-shanten-progress-self-tsumo-cost cannot be combined with {0}")]
+    ConflictingTwoShantenProgressSelfTsumoCost(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +126,8 @@ pub struct CliArgs {
     /// 2向聴候補の ExpectedSelfTsumoValue の実行コストを計測する対象の範囲。計測する場合だけ
     /// `Some`。表示するのは実測時間と値だけで、打牌選択も他の診断も変わらない。
     pub two_shanten_self_tsumo_cost: Option<TwoShantenSelfTsumoScope>,
+    /// Progress 枝だけの実行コストを計測する対象の範囲。
+    pub two_shanten_progress_self_tsumo_cost: Option<TwoShantenSelfTsumoScope>,
     /// Summary だけを表示するかどうか。判断は同じで、表示する section だけが変わる。
     pub summary_only: bool,
 }
@@ -134,6 +146,7 @@ impl CliArgs {
         let mut lookahead = false;
         let mut two_shanten_self_tsumo = false;
         let mut two_shanten_self_tsumo_cost = None;
+        let mut two_shanten_progress_self_tsumo_cost = None;
         let mut summary_only = false;
         let mut capture: Option<String> = None;
         let mut request_id: Option<u64> = None;
@@ -227,6 +240,13 @@ impl CliArgs {
                     let value = value_of(&mut args, "--two-shanten-self-tsumo-cost")?;
                     two_shanten_self_tsumo_cost = Some(two_shanten_self_tsumo_cost_scope(&value)?);
                 }
+                "--two-shanten-progress-self-tsumo-cost" => {
+                    let value = value_of(&mut args, "--two-shanten-progress-self-tsumo-cost")?;
+                    two_shanten_progress_self_tsumo_cost =
+                        Some(two_shanten_self_tsumo_cost_scope(&value).map_err(|_| {
+                            CliError::InvalidTwoShantenProgressSelfTsumoCostScope(value)
+                        })?);
+                }
                 "--verbose" => verbose = true,
                 "--summary-only" => summary_only = true,
                 other if other.starts_with('-') => {
@@ -259,6 +279,8 @@ impl CliArgs {
                 Some("--two-shanten-self-tsumo".to_string())
             } else if two_shanten_self_tsumo_cost.is_some() {
                 Some("--two-shanten-self-tsumo-cost".to_string())
+            } else if two_shanten_progress_self_tsumo_cost.is_some() {
+                Some("--two-shanten-progress-self-tsumo-cost".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -279,6 +301,7 @@ impl CliArgs {
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
+                two_shanten_progress_self_tsumo_cost: None,
                 summary_only: false,
             });
         }
@@ -306,6 +329,25 @@ impl CliArgs {
             }
         }
 
+        if two_shanten_progress_self_tsumo_cost.is_some() {
+            let conflict = if two_shanten_self_tsumo_cost.is_some() {
+                Some("--two-shanten-self-tsumo-cost")
+            } else if two_shanten_self_tsumo {
+                Some("--two-shanten-self-tsumo")
+            } else if lookahead {
+                Some("--lookahead")
+            } else if verbose {
+                Some("--verbose")
+            } else {
+                None
+            };
+            if let Some(conflict) = conflict {
+                return Err(CliError::ConflictingTwoShantenProgressSelfTsumoCost(
+                    conflict.to_string(),
+                ));
+            }
+        }
+
         if summary_only {
             if lookahead {
                 return Err(CliError::ConflictingSummaryOnly("--lookahead".to_string()));
@@ -318,6 +360,11 @@ impl CliArgs {
             if two_shanten_self_tsumo_cost.is_some() {
                 return Err(CliError::ConflictingSummaryOnly(
                     "--two-shanten-self-tsumo-cost".to_string(),
+                ));
+            }
+            if two_shanten_progress_self_tsumo_cost.is_some() {
+                return Err(CliError::ConflictingSummaryOnly(
+                    "--two-shanten-progress-self-tsumo-cost".to_string(),
                 ));
             }
             if verbose {
@@ -357,6 +404,7 @@ impl CliArgs {
             lookahead: lookahead || two_shanten_self_tsumo,
             two_shanten_self_tsumo,
             two_shanten_self_tsumo_cost,
+            two_shanten_progress_self_tsumo_cost,
             summary_only,
         })
     }
@@ -945,6 +993,7 @@ mod tests {
         // 計測は既定では行わない。範囲は明示指定した値がそのまま入り、他の診断は変わらない。
         let default = parse(&["--hand", "123m"]).unwrap();
         assert_eq!(default.two_shanten_self_tsumo_cost, None);
+        assert_eq!(default.two_shanten_progress_self_tsumo_cost, None);
 
         let all = parse(&["--hand", "123m", "--two-shanten-self-tsumo-cost", "all"]).unwrap();
         assert_eq!(
@@ -953,6 +1002,7 @@ mod tests {
         );
         assert!(!all.two_shanten_self_tsumo);
         assert!(!all.lookahead);
+        assert_eq!(all.two_shanten_progress_self_tsumo_cost, None);
 
         assert_eq!(
             parse(&[
@@ -976,6 +1026,32 @@ mod tests {
             parse(&["--hand", "123m", "--two-shanten-self-tsumo-cost"]),
             Err(CliError::MissingValue(
                 "--two-shanten-self-tsumo-cost".to_string()
+            ))
+        );
+
+        let progress = parse(&[
+            "--hand",
+            "123m",
+            "--two-shanten-progress-self-tsumo-cost",
+            "forward-targets",
+        ])
+        .unwrap();
+        assert_eq!(
+            progress.two_shanten_progress_self_tsumo_cost,
+            Some(TwoShantenSelfTsumoScope::ForwardTargets)
+        );
+        assert_eq!(progress.two_shanten_self_tsumo_cost, None);
+        assert!(!progress.two_shanten_self_tsumo);
+        assert!(!progress.lookahead);
+        assert_eq!(
+            parse(&[
+                "--hand",
+                "123m",
+                "--two-shanten-progress-self-tsumo-cost",
+                "cohort",
+            ]),
+            Err(CliError::InvalidTwoShantenProgressSelfTsumoCostScope(
+                "cohort".to_string()
             ))
         );
     }
@@ -1023,6 +1099,20 @@ mod tests {
             assert!(!args.verbose);
             assert!(!args.summary_only);
         }
+
+        assert_eq!(
+            parse(&[
+                "--hand",
+                "123m",
+                "--two-shanten-progress-self-tsumo-cost",
+                "forward-targets",
+                "--two-shanten-self-tsumo-cost",
+                "forward-targets",
+            ]),
+            Err(CliError::ConflictingTwoShantenProgressSelfTsumoCost(
+                "--two-shanten-self-tsumo-cost".to_string()
+            ))
+        );
     }
 
     #[test]

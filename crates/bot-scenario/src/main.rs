@@ -15,12 +15,18 @@ mod tiles;
 
 use std::process::ExitCode;
 
-use bot_core::{DiagnosticOptions, ShantenAgent, measure_two_shanten_self_tsumo};
+use bot_core::{
+    DiagnosticOptions, ShantenAgent, measure_two_shanten_progress_self_tsumo,
+    measure_two_shanten_self_tsumo,
+};
 
 use crate::benchmark::run_capture_benchmark;
 use crate::cli::{CliArgs, ScenarioSource, USAGE};
 use crate::error::ScenarioError;
-use crate::format::{format_diagnostic, format_summary, format_two_shanten_self_tsumo_cost};
+use crate::format::{
+    format_diagnostic, format_summary, format_two_shanten_progress_self_tsumo_cost,
+    format_two_shanten_self_tsumo_cost,
+};
 use crate::replay::load_captured_scenario;
 use crate::scenario::{Scenario, ScenarioSpec};
 
@@ -63,6 +69,17 @@ where
             measure_two_shanten_self_tsumo(&scenario.context, &scenario.legal_actions, scope),
         )
     });
+    let two_shanten_progress_self_tsumo_cost =
+        args.two_shanten_progress_self_tsumo_cost.map(|scope| {
+            (
+                scope,
+                measure_two_shanten_progress_self_tsumo(
+                    &scenario.context,
+                    &scenario.legal_actions,
+                    scope,
+                ),
+            )
+        });
     let diagnostic = ShantenAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
@@ -78,6 +95,17 @@ where
     let output = match two_shanten_self_tsumo_cost {
         Some((scope, cost)) => {
             let section = format_two_shanten_self_tsumo_cost(
+                scope,
+                &cost,
+                diagnostic.normal_discard_self_tsumo_facts,
+            );
+            format!("{output}\n\n{section}")
+        }
+        None => output,
+    };
+    let output = match two_shanten_progress_self_tsumo_cost {
+        Some((scope, cost)) => {
+            let section = format_two_shanten_progress_self_tsumo_cost(
                 scope,
                 &cost,
                 diagnostic.normal_discard_self_tsumo_facts,

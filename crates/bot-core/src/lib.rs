@@ -166,4 +166,7 @@ pub use threat::{
     fixed_meld_value_facts, has_reached_dealer, meld_threat_facts, player_threat_facts,
     player_threat_facts_from_context, player_threat_inputs, reached_opponent_count,
 };
-pub use two_shanten_self_tsumo_cost::{TwoShantenSelfTsumoCost, measure_two_shanten_self_tsumo};
+pub use two_shanten_self_tsumo_cost::{
+    TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
+    measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
+};

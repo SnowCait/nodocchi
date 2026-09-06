@@ -243,6 +243,11 @@ cargo run --release -p bot-scenario -- \
 だけを評価し、候補ごとの期待値と実測時間を表示します。範囲の絞り込みは打牌選択が使う前方評価の
 絞り込みそのもので、残った候補の値は全候補で求めた場合と一致します。計測用の入口も同じ探索を使います。
 
+`--two-shanten-progress-self-tsumo-cost forward-targets` は同じ cohort について、
+A の Progress 枝だけの値と実測時間を表示します。候補ごとの値は既存の
+`awaiting_draw_two_shanten_progress_self_tsumo_value()` と同じ枝と集計を通ります。
+この option は計測専用で、production comparator と打牌選択は変更しません。
+
 計測より前に深い探索を走らせると向聴・受け入れの memo が温まり、後続の計測が本来より速く
 見えてしまいます。そのため `--lookahead` / `--verbose` / `--two-shanten-self-tsumo` /
 `--summary-only` とは同時に指定できません。

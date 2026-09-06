@@ -10,7 +10,9 @@
 use std::time::{Duration, Instant};
 
 use bot_logic::{
-    DiscardEvaluation, TileType, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
+    DiscardEvaluation, TileType, TwoShantenProgressSelfTsumoDiagnostic,
+    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
+    diagnose_two_shanten_progress_self_tsumo_instrumented,
     diagnose_two_shanten_self_tsumo_instrumented,
 };
 
@@ -30,6 +32,19 @@ const RYANSHANTEN_SHANTEN: i8 = 2;
 pub struct TwoShantenSelfTsumoCost {
     /// 求めた ExpectedSelfTsumoValue。`scope` の対象候補だけを持つ。
     pub diagnostic: TwoShantenSelfTsumoDiagnostic,
+    /// 打牌後が2向聴の全候補数。`scope` によらず同じ値になる。
+    pub two_shanten_candidates: usize,
+    /// 対象候補の評価の合計。診断の入力を組み立てる時間は含まない。
+    pub total: Duration,
+    /// 対象候補ごとの実測。`diagnostic` と同じ候補・同じ順序。
+    pub candidates: Vec<(TileType, Duration)>,
+}
+
+/// 2向聴 Progress-only self-tsumo 寄与の1回分の実測。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwoShantenProgressSelfTsumoCost {
+    /// 既存の Progress helper と同じ値。`scope` の対象候補だけを持つ。
+    pub diagnostic: TwoShantenProgressSelfTsumoDiagnostic,
     /// 打牌後が2向聴の全候補数。`scope` によらず同じ値になる。
     pub two_shanten_candidates: usize,
     /// 対象候補の評価の合計。診断の入力を組み立てる時間は含まない。
@@ -67,6 +82,46 @@ pub fn measure_two_shanten_self_tsumo(
     let total = started.elapsed();
 
     TwoShantenSelfTsumoCost {
+        diagnostic,
+        two_shanten_candidates: two_shanten_candidate_count(&legal.evaluations),
+        total,
+        candidates: timer
+            .finish()
+            .into_iter()
+            .map(|candidate| (candidate.discard, candidate.elapsed))
+            .collect(),
+    }
+}
+
+/// 通常打牌選択と同じ入力で2向聴の Progress 枝だけを1回求め、実測時間を返す。
+///
+/// 候補の絞り込みと計測境界は Full EV の計測と同じ。候補値は
+/// [`bot_logic::awaiting_draw_two_shanten_progress_self_tsumo_value`] と同じ枝と集計を通る。
+pub fn measure_two_shanten_progress_self_tsumo(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    scope: TwoShantenSelfTsumoScope,
+) -> TwoShantenProgressSelfTsumoCost {
+    let legal = legal_discard_evaluations(context, legal_actions);
+    let valuator = ProductionProspectiveValuator::new(context);
+    let inputs = lookahead_inputs(
+        context,
+        &legal.tiles,
+        &valuator,
+        LookaheadDiagnosticScope::TWO_SHANTEN_SELF_TSUMO,
+    );
+
+    let mut timer = TwoShantenSelfTsumoTimer::started();
+    let started = Instant::now();
+    let diagnostic = diagnose_two_shanten_progress_self_tsumo_instrumented(
+        &inputs,
+        &legal.evaluations,
+        scope,
+        &mut timer,
+    );
+    let total = started.elapsed();
+
+    TwoShantenProgressSelfTsumoCost {
         diagnostic,
         two_shanten_candidates: two_shanten_candidate_count(&legal.evaluations),
         total,
