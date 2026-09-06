@@ -31,6 +31,7 @@
 //! | 待ちと残枚数 | [`DiscardEvaluation::acceptance_after_discard`] / [`TenpaiWaitAvailability`] |
 //! | ロン可否 | [`TenpaiWaitAvailability::can_ron`] |
 //! | 役の有無 | [`evaluate_tenpai_hand_value`] |
+//! | threat に対する押し引き | [`decide_push_pull`] |
 //!
 //! 向聴・受け入れ・待ち・フリテン・役・点数をこの層で計算し直さない。
 //!
@@ -50,6 +51,7 @@
 //! AND can_ron == Some(true)
 //! AND 生きた待ちの残枚数合計 >= CALL_MIN_LIVE_WAIT_REMAINING
 //! AND 残枚数 > 0 の全ての和了牌 variant に役がある
+//! AND 鳴き後の最良打牌を既存 Push/Pull policy が Push と判定する
 //! ```
 //!
 //! 即テンパイ候補は従来どおり最優先する。それが無い場合だけ Call 後1向聴の ExpectedSelfTsumoValue
@@ -107,6 +109,9 @@ use crate::discard_selection::{
 };
 use crate::kuikae::forbidden_discards_after_call;
 use crate::prospective_value::ProductionProspectiveValuator;
+use crate::push_pull::{
+    PushPullDecision, PushPullMode, decide_push_pull, push_pull_inputs_from_selected_tenpai,
+};
 
 /// 鳴きを検討する現在の向聴数。
 pub const CALL_CURRENT_SHANTEN: i8 = 1;
@@ -184,6 +189,10 @@ pub enum CallDecisionReason {
     YakuMissing,
     /// 残枚数 > 0 の和了牌 variant に、役の有無を確定できないものがある。
     HandValueUnknown,
+    /// 鳴き後の最良打牌を既存 Push/Pull policy が Push と判定しない。
+    PostCallNotPush,
+    /// 鳴き後の仮想局面を既存 Push/Pull policy へ渡せない。
+    PostCallPushPullUnavailable,
 }
 
 /// `Call -> 打牌 -> 1向聴` と Pass の self-tsumo continuation 比較結果。
@@ -322,6 +331,8 @@ pub struct CallCandidateDiagnostic {
     pub post_call_wait: Option<TenpaiWaitAvailability>,
     /// 鳴き後テンパイの和了牌の物理牌ごとの役診断。役を評価しなかった場合は `None`。
     pub post_call_wait_yaku: Option<Vec<CallWaitYakuDiagnostic>>,
+    /// 既存 Push/Pull policy による鳴き後の最良打牌の判定。そこまで評価しなかった場合は `None`。
+    pub post_call_push_pull: Option<PushPullDecision>,
     /// 鳴いても1向聴のままの候補についてだけ求める観測用の受け入れ比較。対象外の候補と、
     /// そこまで評価が進まなかった候補では `None`。
     pub iishanten_acceptance: Option<CallIishantenAcceptanceDiagnostic>,
@@ -503,6 +514,7 @@ fn evaluate_call_candidate(
         post_call_discard: None,
         post_call_wait: None,
         post_call_wait_yaku: None,
+        post_call_push_pull: None,
         iishanten_acceptance: None,
         iishanten_self_tsumo: None,
         two_shanten_self_tsumo: None,
@@ -643,9 +655,45 @@ fn evaluate_call_conditions(
 
     let reason =
         evaluate_post_call_conditions(ctx, &meld, &post_call_tiles, &evaluation, &wait, candidate);
+    let reason = if reason == CallDecisionReason::EligibleTenpai {
+        match post_call_push_pull_decision(ctx, &meld, &post_call_tiles, &evaluation, &wait) {
+            Some(decision) => {
+                candidate.post_call_push_pull = Some(decision);
+                if decision.mode == PushPullMode::Push {
+                    CallDecisionReason::EligibleTenpai
+                } else {
+                    CallDecisionReason::PostCallNotPush
+                }
+            }
+            None => CallDecisionReason::PostCallPushPullUnavailable,
+        }
+    } else {
+        reason
+    };
     candidate.post_call_discard = Some(evaluation);
     candidate.post_call_wait = Some(wait);
     reason
+}
+
+// 鳴き後の仮想 hand state と予定打牌を既存 Push/Pull 入力へ接続する。threat classification・
+// offense state・threshold は push_pull 側の source of truth をそのまま使う。
+fn post_call_push_pull_decision(
+    ctx: &GameContext,
+    meld: &Meld,
+    post_call_tiles: &[TileId],
+    evaluation: &DiscardEvaluation,
+    wait: &TenpaiWaitAvailability,
+) -> Option<PushPullDecision> {
+    let (discarded_tile, _) = split_discarded_tile(post_call_tiles.to_vec(), evaluation)?;
+    let mut post_call_melds = ctx.own_melds()?.to_vec();
+    post_call_melds.push(meld.clone());
+    let post_call_context = ctx.with_own_hand_state(post_call_tiles.to_vec(), post_call_melds)?;
+    let legal_actions = [LegalAction::Dahai {
+        tile: discarded_tile,
+    }];
+    let inputs =
+        push_pull_inputs_from_selected_tenpai(&post_call_context, evaluation, wait, &legal_actions);
+    Some(decide_push_pull(&inputs))
 }
 
 // 現在2向聴から Chi / Pon 後の最良打牌で1向聴になる候補だけを、既存の post-call
