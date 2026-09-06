@@ -791,7 +791,7 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.contains("choice 2 lost by: TwoShantenExpectedSelfTsumoValue"),
+            output.contains("choice 2 lost by: TwoShantenProgressSelfTsumoValue"),
             "{output}"
         );
     }

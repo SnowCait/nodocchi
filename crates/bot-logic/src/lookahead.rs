@@ -1043,6 +1043,27 @@ pub fn two_shanten_expected_self_tsumo_value_for_candidate(
     two_shanten_self_tsumo_value(inputs, &branch, &evaluation.acceptance_after_discard, facts)
 }
 
+/// 現在打牌後が2向聴の打牌候補1件について、計算済みの Progress 寄与に
+/// SameShanten 枝の寄与だけを足した Full ExpectedSelfTsumoValue を返す。
+///
+/// `progress_self_tsumo_value` は同じ `inputs` / `evaluation` を
+/// [`two_shanten_progress_self_tsumo_value_for_candidate`] で評価した値を渡す。この入口は
+/// Progress 枝を再計算せず、Full 値が必要になった候補だけを深掘りするためのもの。
+///
+/// 2向聴以外、または追加する SameShanten 枝を確定できない場合は `None`。
+pub fn two_shanten_expected_self_tsumo_value_for_candidate_from_progress(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    progress_self_tsumo_value: u64,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
+    two_shanten_self_tsumo_value_from_progress(inputs, &branch, facts, progress_self_tsumo_value)
+}
+
 /// 現在打牌後が2向聴の打牌候補1件について、最初のツモで1向聴へ進む枝だけの
 /// self-tsumo 寄与 [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]を返す。
 ///
@@ -1080,10 +1101,11 @@ pub enum TwoShantenSelfTsumoScope {
     ForwardTargets,
 }
 
-/// 2向聴 ExpectedSelfTsumoValue の候補ごとの区切りを受け取る観測器。
+/// 2向聴 self-tsumo 評価の候補ごとの区切りを受け取る観測器。
 ///
 /// bot-logic は時計を持たないため、実測は上位層が行う。観測器は区切りを受け取るだけで、
-/// 対象候補も枝の探索も集計もその有無で変わらない。
+/// Progress / Full のどちらでも、対象候補も枝の探索も集計もその有無で
+/// 変わらない。
 pub trait TwoShantenSelfTsumoObserver {
     /// この打牌候補の評価に入る。最後の候補の区切りは呼び出し側が閉じる。
     fn enter_candidate(&mut self, discard: TileType);
@@ -1215,6 +1237,17 @@ fn two_shanten_self_tsumo_value(
     facts: SelfTsumoFacts,
 ) -> Option<u64> {
     let progress = two_shanten_progress_self_tsumo_value(inputs, branch, acceptance, facts)?;
+    two_shanten_self_tsumo_value_from_progress(inputs, branch, facts, progress)
+}
+
+// Full 値の組み立ては、Progress もここで求める既存経路と、production が
+// 計算済み Progress を渡す経路で共有する。
+fn two_shanten_self_tsumo_value_from_progress(
+    inputs: &LookaheadInputs,
+    branch: &CandidateBranch,
+    facts: SelfTsumoFacts,
+    progress: u64,
+) -> Option<u64> {
     let same_shanten = two_shanten_same_shanten_self_tsumo_value(inputs, branch, facts)?;
     Some(progress.saturating_add(same_shanten))
 }
@@ -5019,6 +5052,12 @@ mod tests {
             .expect("ツモ打点を確定できる");
         assert!(value > 0);
         assert!(progress > 0);
+        assert_eq!(
+            two_shanten_expected_self_tsumo_value_for_candidate_from_progress(
+                &inputs, evaluation, progress,
+            ),
+            Some(value)
+        );
 
         let (discarded, concealed) =
             split_discarded_tile(situation.tiles.clone(), evaluation).expect("打牌を確定できる");

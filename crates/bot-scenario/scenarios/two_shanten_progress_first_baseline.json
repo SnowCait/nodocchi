@@ -1,0 +1,14 @@
+{
+  "hand": "11258m 234789p 13s",
+  "draw": "9s",
+  "dora_indicators": "",
+  "round_wind": "E",
+  "seat_wind": "N",
+  "player_id": 0,
+  "oya": 1,
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  },
+  "remaining_tiles": 66
+}

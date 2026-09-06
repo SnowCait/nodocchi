@@ -42,7 +42,8 @@ pub struct NormalDiscardPhaseDurations {
     /// `forward_metrics` の内訳。前方集計値を計算しなかった局面では、すべて `Duration::ZERO` の
     /// ままになる。
     pub forward_metrics_phases: ForwardMetricsPhaseDurations,
-    /// production comparator が追加で評価する2向聴 ExpectedSelfTsumoValue。
+    /// production comparator が評価する2向聴 Progress-first と、ドラ差 gate の
+    /// Full 追加評価。
     /// 対象外の局面では `Duration::ZERO` のままになる。
     pub two_shanten_self_tsumo: Duration,
     /// 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定。
@@ -78,7 +79,7 @@ impl ForwardMetricsPhaseDurations {
     }
 }
 
-/// production comparator が実際に評価した2向聴 ExpectedSelfTsumoValue 候補1件の実測。
+/// production comparator が実際に評価した2向聴 Progress / Full 候補1件の実測。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TwoShantenSelfTsumoCandidateDuration {
     pub discard: TileType,
@@ -94,7 +95,8 @@ pub struct TimedAgentAction {
 }
 
 impl TimedAgentAction {
-    /// 同じ production execution で実際に評価した `ForwardTargets` の打牌と実測時間。
+    /// 同じ production execution で実際に評価した `ForwardTargets` の Progress と、
+    /// gate 対象 pair の Full 追加評価の打牌・実測時間。Full 対象は同じ牌種が2回現れる。
     /// 対象外の request では空。内部の計測用 representation は公開しない。
     pub fn two_shanten_self_tsumo_candidates(
         &self,

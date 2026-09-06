@@ -591,7 +591,15 @@ fn format_normal_discard_candidate(
         format_self_tsumo_value(candidate.expected_self_tsumo_value)
     ));
     lines.push(format!(
-        "  two-shanten expected self-tsumo value: {}",
+        "  two-shanten progress self-tsumo value: {}",
+        if evaluation.min_shanten_after_discard() == 2 {
+            format_self_tsumo_value(candidate.two_shanten_progress_self_tsumo_value)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
+    lines.push(format!(
+        "  two-shanten full self-tsumo value: {}",
         if evaluation.min_shanten_after_discard() == 2 {
             format_self_tsumo_value(candidate.two_shanten_expected_self_tsumo_value)
         } else {
@@ -3041,6 +3049,10 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
             format_self_tsumo_value(Some(winner.two_shanten_expected_self_tsumo_value?)),
             format_self_tsumo_value(Some(loser.two_shanten_expected_self_tsumo_value?)),
         ),
+        DiscardComparisonReason::TwoShantenProgressSelfTsumoValue => (
+            format_self_tsumo_value(Some(winner.two_shanten_progress_self_tsumo_value?)),
+            format_self_tsumo_value(Some(loser.two_shanten_progress_self_tsumo_value?)),
+        ),
         DiscardComparisonReason::WeightedProspectiveValue => (
             winner.prospective_value?.to_string(),
             loser.prospective_value?.to_string(),
@@ -3927,20 +3939,21 @@ mod tests {
     }
 
     #[test]
-    fn two_shanten_ev_selection_values_are_visible_in_candidates_and_summary() {
+    fn two_shanten_progress_selection_values_are_visible_in_candidates_and_summary() {
         let (_, diagnostic, output) = rendered(TWO_SHANTEN_EV_SELECTION_SCENARIO, false);
         assert_eq!(action_label(&diagnostic.selected_action), "8m");
 
         for (discard, expected, formatted) in [
-            ("8m", 133_548_126, "133.548"),
-            ("9s", 131_729_152, "131.729"),
-            ("5m", 125_188_545, "125.188"),
+            ("8m", 69_721_739, "69.721"),
+            ("9s", 67_098_900, "67.098"),
+            ("5m", 65_576_785, "65.576"),
         ] {
             let candidate = cohort_candidate(&diagnostic, discard);
             assert_eq!(
-                candidate.two_shanten_expected_self_tsumo_value,
+                candidate.two_shanten_progress_self_tsumo_value,
                 Some(expected)
             );
+            assert_eq!(candidate.two_shanten_expected_self_tsumo_value, None);
             assert_eq!(candidate.expected_self_tsumo_value, None);
 
             let block = candidate_block(&output, "Normal discard candidates", discard);
@@ -3950,7 +3963,7 @@ mod tests {
             );
             assert!(
                 block.contains(&format!(
-                    "  two-shanten expected self-tsumo value: {formatted}"
+                    "  two-shanten progress self-tsumo value: {formatted}"
                 )),
                 "{block}"
             );
@@ -3959,7 +3972,7 @@ mod tests {
         for discard in ["9s", "5m"] {
             assert_eq!(
                 cohort_candidate(&diagnostic, discard).comparison_reason,
-                DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
+                DiscardComparisonReason::TwoShantenProgressSelfTsumoValue
             );
         }
 
@@ -3967,13 +3980,13 @@ mod tests {
         assert!(summary.contains("  choice 1: 8m"), "{summary}");
         assert!(
             summary.contains(
-                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenExpectedSelfTsumoValue\n  choice 2 comparison: choice 1 133.548 > choice 2 131.729"
+                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 69.721 > choice 2 67.098"
             ),
             "{summary}"
         );
         assert!(
             summary.contains(
-                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenExpectedSelfTsumoValue\n  choice 3 comparison: choice 2 131.729 > choice 3 125.188"
+                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 67.098 > choice 3 65.576"
             ),
             "{summary}"
         );
@@ -7102,6 +7115,101 @@ mod tests {
 
     // ---- Two-shanten expected self-tsumo value 表示 ----
 
+    const TWO_SHANTEN_PROGRESS_FIRST_BASELINE: &str =
+        include_str!("../scenarios/two_shanten_progress_first_baseline.json");
+    const TWO_SHANTEN_DORA_GATE_ONE_SOU: &str =
+        include_str!("../scenarios/two_shanten_dora_gate_one_sou.json");
+    const TWO_SHANTEN_DORA_GATE_CHUN: &str =
+        include_str!("../scenarios/two_shanten_dora_gate_chun.json");
+    const TWO_SHANTEN_PROGRESS_ONLY_HEAVY: &str =
+        include_str!("../scenarios/two_shanten_progress_only_heavy.json");
+
+    fn selected_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
+        diagnostic
+            .normal_discard
+            .as_ref()
+            .and_then(|normal| normal.selected.as_ref())
+            .expect("normal discard selected")
+            .discard
+            .to_mjai_string()
+    }
+
+    #[test]
+    fn production_two_shanten_selection_is_progress_first_with_the_dora_pair_gate() {
+        let baseline = diagnose(&scenario_from_json(TWO_SHANTEN_PROGRESS_FIRST_BASELINE));
+        assert_eq!(selected_normal_discard(&baseline), "8m");
+        assert!(
+            cohort_candidate(&baseline, "8m")
+                .two_shanten_expected_self_tsumo_value
+                .is_none()
+        );
+
+        let one_sou = diagnose(&scenario_from_json(TWO_SHANTEN_DORA_GATE_ONE_SOU));
+        assert_eq!(selected_normal_discard(&one_sou), "1s");
+        let one_sou_candidate = cohort_candidate(&one_sou, "1s");
+        let chun_candidate = cohort_candidate(&one_sou, "C");
+        assert!(
+            chun_candidate.two_shanten_progress_self_tsumo_value
+                > one_sou_candidate.two_shanten_progress_self_tsumo_value
+        );
+        assert!(
+            one_sou_candidate.two_shanten_expected_self_tsumo_value
+                > chun_candidate.two_shanten_expected_self_tsumo_value
+        );
+        assert_ne!(
+            one_sou_candidate.evaluation.discarded_dora_count,
+            chun_candidate.evaluation.discarded_dora_count
+        );
+        assert_eq!(
+            chun_candidate.comparison_reason,
+            DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
+        );
+
+        let chun = diagnose(&scenario_from_json(TWO_SHANTEN_DORA_GATE_CHUN));
+        assert_eq!(selected_normal_discard(&chun), "C");
+        let nine_pin_candidate = cohort_candidate(&chun, "9p");
+        let chun_candidate = cohort_candidate(&chun, "C");
+        assert!(
+            nine_pin_candidate.two_shanten_progress_self_tsumo_value
+                > chun_candidate.two_shanten_progress_self_tsumo_value
+        );
+        assert!(
+            chun_candidate.two_shanten_expected_self_tsumo_value
+                > nine_pin_candidate.two_shanten_expected_self_tsumo_value
+        );
+        assert_ne!(
+            nine_pin_candidate.evaluation.discarded_dora_count,
+            chun_candidate.evaluation.discarded_dora_count
+        );
+        assert_eq!(
+            nine_pin_candidate.comparison_reason,
+            DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
+        );
+
+        let heavy = diagnose(&scenario_from_json(TWO_SHANTEN_PROGRESS_ONLY_HEAVY));
+        assert_eq!(selected_normal_discard(&heavy), "9p");
+        let nine_pin_candidate = cohort_candidate(&heavy, "9p");
+        let one_pin_candidate = cohort_candidate(&heavy, "1p");
+        assert!(
+            nine_pin_candidate.two_shanten_progress_self_tsumo_value
+                > one_pin_candidate.two_shanten_progress_self_tsumo_value
+        );
+        assert_eq!(nine_pin_candidate.evaluation.discarded_dora_count, 0);
+        assert_eq!(one_pin_candidate.evaluation.discarded_dora_count, 0);
+        assert_eq!(
+            nine_pin_candidate.two_shanten_expected_self_tsumo_value,
+            None
+        );
+        assert_eq!(
+            one_pin_candidate.two_shanten_expected_self_tsumo_value,
+            None
+        );
+        assert_eq!(
+            one_pin_candidate.comparison_reason,
+            DiscardComparisonReason::TwoShantenProgressSelfTsumoValue
+        );
+    }
+
     // 3副露済みの concealed 5枚 1m 5p 9s 白 發。どの牌を切っても2向聴のままになる小さい局面で、
     // 節の構造だけを確認する。山の残枚数を渡していないので、値は unknown になる。
     const TWO_SHANTEN_SCENARIO: &str = r#"{
@@ -7157,8 +7265,12 @@ mod tests {
             let candidate = candidate_block(&output, "Normal discard candidates", tile);
             assert!(
                 candidate.contains(&format!(
-                    "  two-shanten expected self-tsumo value: {UNKNOWN}"
+                    "  two-shanten progress self-tsumo value: {UNKNOWN}"
                 )),
+                "{candidate}"
+            );
+            assert!(
+                candidate.contains(&format!("  two-shanten full self-tsumo value: {UNKNOWN}")),
                 "{candidate}"
             );
         }
@@ -8737,7 +8849,11 @@ mod tests {
             &discard_label(&selected.evaluation),
         );
         assert!(
-            selected_block.contains("  two-shanten expected self-tsumo value: -"),
+            selected_block.contains("  two-shanten progress self-tsumo value: -"),
+            "{selected_block}"
+        );
+        assert!(
+            selected_block.contains("  two-shanten full self-tsumo value: -"),
             "{selected_block}"
         );
     }
