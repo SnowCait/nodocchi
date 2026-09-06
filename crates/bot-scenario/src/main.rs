@@ -746,12 +746,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_baseline_enables_two_shanten_self_tsumo_selection() {
+    fn explicit_north_seat_wind_enables_two_shanten_self_tsumo_selection() {
         let output = run_args(&[
             "--hand",
             "11258m234789p13s",
             "--draw",
             "9s",
+            "--seat-wind",
+            "N",
             "--summary-only",
         ])
         .unwrap();

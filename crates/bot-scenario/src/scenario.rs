@@ -354,7 +354,7 @@ fn resolve_seat_wind(
     player_id: Option<u8>,
     oya: Option<u8>,
 ) -> Result<Option<TileType>, ScenarioError> {
-    let explicit = parse_wind("seat_wind", seat_wind)?;
+    let explicit = parse_seat_wind(seat_wind)?;
     let derived = derive_seat_wind(player_id, oya);
 
     if let (Some(explicit), Some(derived), Some(player_id), Some(oya)) =
@@ -370,6 +370,10 @@ fn resolve_seat_wind(
     }
 
     Ok(explicit.or(derived))
+}
+
+pub(crate) fn parse_seat_wind(input: Option<&str>) -> Result<Option<TileType>, ScenarioError> {
+    parse_wind("seat_wind", input)
 }
 
 // 席順からの自風導出は bot-core の pure helper を再利用し、同じ計算を持たない。

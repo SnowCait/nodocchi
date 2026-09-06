@@ -40,14 +40,14 @@ reached = 全員 false
 discards = 全員空
 history_furiten.same_turn = false
 history_furiten.riichi_missed_win = false
-remaining_tiles = player_id / oya / draw の状態から初巡相当値を導出
+remaining_tiles = player_id / oya または明示 seat_wind と draw の状態から初巡相当値を導出
 ```
 
 明示した CLI option は baseline より優先されます。`--round-wind`、`--seat-wind`、`--player-id`、`--oya` を指定した場合はその値を使用します。自風は既存の局面解決規則に従い、`player_id` と `oya` が揃えば導出され、両者からの導出値と明示 `--seat-wind` が矛盾する場合は error です。
 
 `--no-history-furiten` は baseline と結果上は同じですが、「現在は同巡内フリテンではなく、かつリーチ後見逃しフリテンでもない」と明示する shorthand です。いずれかが `true` の局面や、履歴フリテンを unknown のまま扱う局面は JSON scenario で指定します。
 
-`--remaining-tiles` は JSON scenario の `remaining_tiles` と同じ意味で、山に残っているツモ可能な牌の枚数です。inline `--hand` で省略した場合は、player / dealer と `--draw` の有無から初巡相当の枚数を補完します。明示した値はこの baseline より常に優先されます。JSON scenario の省略 field は従来どおり unknown です。
+`--remaining-tiles` は JSON scenario の `remaining_tiles` と同じ意味で、山に残っているツモ可能な牌の枚数です。inline `--hand` で省略した場合は、player / dealer、または両者が揃わなければ明示した自風と、`--draw` の有無から初巡相当の枚数を補完します。明示した値はこの baseline より常に優先されます。JSON scenario の省略 field は従来どおり unknown です。
 
 `--extra-visible-tiles` は JSON scenario の `extra_visible_tiles` と同じ意味で、手牌・ツモ牌・ドラ表示牌以外に見えている牌を加えます。加えた牌は受け入れ残枚数や待ちの残枚数へ反映されます。JSON scenario、RiichiLab capture、benchmark とは他の inline option と同じく併用できません。
 
