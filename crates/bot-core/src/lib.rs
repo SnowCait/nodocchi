@@ -39,7 +39,8 @@ pub use call_decision::{
     CALL_CURRENT_SHANTEN, CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN,
     CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
-    CallKind, CallWaitYaku, CallWaitYakuDiagnostic,
+    CallKind, CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallWaitYaku,
+    CallWaitYakuDiagnostic,
 };
 pub use combined_defense::{
     CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, CombinedDefenseDiagnostic,

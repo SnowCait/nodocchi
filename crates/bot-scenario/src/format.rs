@@ -3,7 +3,8 @@ use std::time::Duration;
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
-    CallWaitYaku, CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
+    CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallWaitYaku,
+    CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
     CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
     DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
@@ -397,6 +398,9 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     lines.extend(format_call_iishanten_self_tsumo(
         candidate.iishanten_self_tsumo.as_ref(),
     ));
+    lines.extend(format_call_two_shanten_self_tsumo(
+        candidate.two_shanten_self_tsumo.as_ref(),
+    ));
 
     if verbose {
         lines.push("    acceptance tiles:".to_string());
@@ -460,6 +464,38 @@ fn call_iishanten_comparison_label(comparison: CallIishantenComparison) -> &'sta
         CallIishantenComparison::CallHigher => "call higher",
         CallIishantenComparison::PassNotLower => "pass not lower",
         CallIishantenComparison::Unknown => UNKNOWN,
+    }
+}
+
+fn format_call_two_shanten_self_tsumo(
+    comparison: Option<&CallTwoShantenSelfTsumoDiagnostic>,
+) -> Vec<String> {
+    let Some(comparison) = comparison else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "    two-shanten self-tsumo: pass {} {} / call {}",
+            call_two_shanten_pass_evaluation_label(comparison.pass_evaluation),
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+        ),
+        format!(
+            "    two-shanten comparison: {}",
+            call_iishanten_comparison_label(comparison.comparison)
+        ),
+        format!(
+            "    reaction source player: {}",
+            format_seat(comparison.reaction_source_player)
+        ),
+    ]
+}
+
+fn call_two_shanten_pass_evaluation_label(
+    evaluation: CallTwoShantenPassEvaluation,
+) -> &'static str {
+    match evaluation {
+        CallTwoShantenPassEvaluation::Full => "full",
     }
 }
 
@@ -2869,15 +2905,34 @@ fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
         .iter()
         .find(|candidate| candidate.selected)
         .or_else(|| {
-            call.candidates
-                .iter()
-                .find(|candidate| candidate.iishanten_self_tsumo.is_some())
+            call.candidates.iter().find(|candidate| {
+                candidate.iishanten_self_tsumo.is_some()
+                    || candidate.two_shanten_self_tsumo.is_some()
+            })
         });
     if let Some(candidate) = compared_candidate
         && let Some(compared) = candidate.iishanten_self_tsumo.as_ref()
     {
         lines.push(format!(
             "  call self-tsumo: pass {} / call {} ({})",
+            format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(compared.call_expected_self_tsumo_value),
+            call_iishanten_comparison_label(compared.comparison),
+        ));
+        lines.push(format!(
+            "  call post-call discard: {}",
+            candidate
+                .post_call_discard
+                .as_ref()
+                .map(discard_label)
+                .unwrap_or_else(|| UNKNOWN.to_string())
+        ));
+    } else if let Some(candidate) = compared_candidate
+        && let Some(compared) = candidate.two_shanten_self_tsumo.as_ref()
+    {
+        lines.push(format!(
+            "  call two-shanten self-tsumo: pass {} {} / call {} ({})",
+            call_two_shanten_pass_evaluation_label(compared.pass_evaluation),
             format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
             format_self_tsumo_value(compared.call_expected_self_tsumo_value),
             call_iishanten_comparison_label(compared.comparison),
@@ -4440,6 +4495,85 @@ mod tests {
         "legal_pon": [{ "from_player": 1, "tile": "F", "consumed": "F F" }],
         "allow_none": true
     }"#;
+
+    // 既存2副露 + CC 55p E S W の2向聴。C を Pon した後、最良打牌で1向聴になる。
+    const TWO_SHANTEN_PON_OBSERVATION_SCENARIO: &str = r#"{
+        "hand": "55p12377z",
+        "round_wind": "E",
+        "seat_wind": "E",
+        "player_id": 0,
+        "oya": 0,
+        "discards": ["", "P F C", "", ""],
+        "melds": [
+            [
+                { "kind": "pon", "tiles": "P P P", "called_tile": "P" },
+                { "kind": "pon", "tiles": "F F F", "called_tile": "F" }
+            ],
+            [],
+            [],
+            []
+        ],
+        "remaining_tiles": 32,
+        "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+        "legal_dahai": "",
+        "legal_pon": [{ "from_player": 1, "tile": "C", "consumed": "C C" }],
+        "allow_none": true
+    }"#;
+
+    #[test]
+    fn two_shanten_call_pass_observation_is_visible_without_changing_the_action() {
+        let (scenario, diagnostic, output) = rendered(TWO_SHANTEN_PON_OBSERVATION_SCENARIO, false);
+        let mut agent = ShantenAgent;
+        let acted = agent.act(&scenario.context, &scenario.legal_actions);
+        let call = diagnostic.call.as_ref().expect("call diagnostic");
+        let candidate = &call.candidates[0];
+        let comparison = candidate
+            .two_shanten_self_tsumo
+            .expect("2向聴 Call / Pass observation");
+
+        assert_eq!(acted, LegalAction::None);
+        assert_eq!(diagnostic.selected_action, acted);
+        assert_eq!(call.selected, None);
+        assert_eq!(candidate.kind, bot_core::CallKind::Pon);
+        assert!(matches!(
+            &candidate.action,
+            LegalAction::Pon { consumed, .. } if consumed.len() == 2
+        ));
+        assert_eq!(candidate.post_call_shanten(), Some(1));
+        assert!(comparison.call_expected_self_tsumo_value.is_some());
+        assert!(comparison.pass_expected_self_tsumo_value.is_some());
+        assert_eq!(
+            comparison.pass_evaluation,
+            CallTwoShantenPassEvaluation::Full
+        );
+        assert_eq!(comparison.comparison, CallIishantenComparison::CallHigher);
+
+        let call_output = section(&output, "Call\n");
+        assert!(call_output.contains("Pon C <- C C"), "{call_output}");
+        assert!(call_output.contains("    kind: Pon"), "{call_output}");
+        assert!(call_output.contains("    best discard: "), "{call_output}");
+        assert!(
+            call_output.contains("    shanten after discard: 1"),
+            "{call_output}"
+        );
+        assert!(
+            call_output.contains("    two-shanten self-tsumo: pass full ")
+                && call_output.contains(" / call "),
+            "{call_output}"
+        );
+        assert!(
+            call_output.contains("    two-shanten comparison: call higher"),
+            "{call_output}"
+        );
+        let summary = summary_section(&output);
+        assert!(
+            summary.contains("  call two-shanten self-tsumo: pass full ")
+                && summary.contains(" / call ")
+                && summary.contains("(call higher)"),
+            "{summary}"
+        );
+        assert!(summary.contains("  call post-call discard: "), "{summary}");
+    }
 
     #[test]
     fn an_iishanten_call_candidate_shows_the_pass_and_post_call_acceptance() {

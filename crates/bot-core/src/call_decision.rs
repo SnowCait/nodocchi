@@ -27,6 +27,7 @@
 //! | 鳴き後の打牌候補 | [`post_call_discard_evaluations`] |
 //! | 1向聴の打牌比較 | [`select_best_iishanten_post_call_discard`] |
 //! | Pass の継続評価 | [`awaiting_draw_expected_self_tsumo_value`] |
+//! | 2向聴 Pass の継続評価 | [`awaiting_draw_two_shanten_expected_self_tsumo_value`] |
 //! | 待ちと残枚数 | [`DiscardEvaluation::acceptance_after_discard`] / [`TenpaiWaitAvailability`] |
 //! | ロン可否 | [`TenpaiWaitAvailability::can_ron`] |
 //! | 役の有無 | [`evaluate_tenpai_hand_value`] |
@@ -75,16 +76,25 @@
 //! policy は読まない。diagnostics の有無で action は変わらず、production が使った self-tsumo 値を
 //! [`CallIishantenSelfTsumoDiagnostic`] へそのまま保持する。
 //!
-//! 2向聴から鳴いて1向聴になる候補は対象にしない。鳴かない側と鳴いた側で探索の深さが揃わず、
-//! 受け入れ枚数をそのまま比べられないため。
+//! # 2向聴から1向聴になる鳴きの観測
+//!
+//! diagnostics では、現在2向聴から Chi / Pon 後の最良打牌で1向聴になる候補だけ、Call と Pass
+//! の self-tsumo value を観測する。Call は既存の1向聴 post-call selector が返した値、Pass は
+//! 次の自摸を待つ2向聴 state の Full 値を使う。Progress-only は2向聴を維持する枝を含まず、
+//! Call 側の完全な1向聴 continuation と比較すると Call に有利なため、この比較には使わない。
+//! Pass は対象候補が1件以上ある場合に1回だけ評価し、打牌候補ごとの Full 探索は行わない。
+//!
+//! この比較は observation-only で、candidate の `eligible` / `reason` と production の action
+//! selection には接続しない。diagnostics を無効にした通常の `act()` では追加探索もしない。
 
 use bot_logic::{
     DiscardEvaluation, FixedMeldCount, HandValueError, HandValueOutcome, Meld, MeldKind,
     OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    awaiting_draw_expected_self_tsumo_value, best_discard_selection_index,
-    calculate_acceptance_with_fixed_melds_and_visible_tiles, calculate_shanten_with_fixed_melds,
-    discard_tenpai_wait_availability, evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku,
-    split_discarded_tile, tenpai_completed_hands,
+    awaiting_draw_expected_self_tsumo_value, awaiting_draw_two_shanten_expected_self_tsumo_value,
+    best_discard_selection_index, calculate_acceptance_with_fixed_melds_and_visible_tiles,
+    calculate_shanten_with_fixed_melds, discard_tenpai_wait_availability,
+    evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku, split_discarded_tile,
+    tenpai_completed_hands,
 };
 
 use crate::action::LegalAction;
@@ -109,6 +119,9 @@ pub const CALL_MIN_LIVE_WAIT_REMAINING: u8 = 3;
 
 // Chi / Pon の consumed 枚数。
 const CALL_CONSUMED_TILE_COUNT: usize = 2;
+
+// observation-only の2向聴 Call / Pass 比較が対象にする現在の向聴数。
+const CALL_TWO_SHANTEN_OBSERVATION_SHANTEN: i8 = 2;
 
 /// 評価対象の鳴き種別。今回の対象は Chi と Pon だけで、Kan は含まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +198,23 @@ pub enum CallIishantenComparison {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallIishantenSelfTsumoDiagnostic {
     pub reaction_source_player: Option<u8>,
+    pub pass_expected_self_tsumo_value: Option<u64>,
+    pub call_expected_self_tsumo_value: Option<u64>,
+    pub comparison: CallIishantenComparison,
+}
+
+/// 2向聴 Pass 側で使った既存 self-tsumo 評価。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallTwoShantenPassEvaluation {
+    /// Progress と、一度だけの SameShanten → Progress を含む Full 値。
+    Full,
+}
+
+/// observation-only の `現在2向聴 → Call → 打牌 → 1向聴` と Pass の比較。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallTwoShantenSelfTsumoDiagnostic {
+    pub reaction_source_player: Option<u8>,
+    pub pass_evaluation: CallTwoShantenPassEvaluation,
     pub pass_expected_self_tsumo_value: Option<u64>,
     pub call_expected_self_tsumo_value: Option<u64>,
     pub comparison: CallIishantenComparison,
@@ -271,8 +301,8 @@ impl CallIishantenAcceptanceDiagnostic {
 /// 合法な `LegalAction::Chi` / `LegalAction::Pon` 1件ごとの判断内訳。
 ///
 /// 各フィールドは判定が実際にそこまで進んだ場合だけ `Some` になり、進まなかった判定は推測せず
-/// `None` のままにする。値はすべて本番の selector が使った結果そのもので、診断のために向聴・
-/// 待ち・役を計算し直さない。
+/// `None` のままにする。production が使う値も observation-only の値も既存 selector / helper の
+/// 結果そのもので、診断専用の向聴・受け入れ・待ち・役・点数計算は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallCandidateDiagnostic {
     pub action: LegalAction,
@@ -283,7 +313,8 @@ pub struct CallCandidateDiagnostic {
     pub post_call_fixed_meld_count: Option<FixedMeldCount>,
     /// 鳴いた直後に切れない牌種。打牌候補を評価しなかった場合は `None`。
     ///
-    /// production の打牌選択が実際に除外に使った値そのもので、診断のために求め直さない。
+    /// production または2向聴 observation の打牌選択が実際に除外に使った値そのもので、
+    /// 診断表示のために求め直さない。
     pub post_call_forbidden_discards: Option<Vec<TileType>>,
     /// 喰い替え禁止牌を除いた合法な打牌候補の中の最良打牌評価。
     pub post_call_discard: Option<DiscardEvaluation>,
@@ -296,6 +327,9 @@ pub struct CallCandidateDiagnostic {
     pub iishanten_acceptance: Option<CallIishantenAcceptanceDiagnostic>,
     /// 鳴き後も1向聴の候補に対して production が実際に使った Call / Pass 比較。
     pub iishanten_self_tsumo: Option<CallIishantenSelfTsumoDiagnostic>,
+    /// 現在2向聴から鳴き後の最良打牌で1向聴になる候補の Call / Pass 観測値。
+    /// production の鳴き判断には使わない。
+    pub two_shanten_self_tsumo: Option<CallTwoShantenSelfTsumoDiagnostic>,
     pub eligible: bool,
     pub selected: bool,
     pub reason: CallDecisionReason,
@@ -362,25 +396,18 @@ pub struct CallDecisionDiagnostic {
 // 合法な Chi / Pon が1件も無ければ検討自体を行わず None。1件以上ある場合は候補ごとに独立して
 // 条件を評価し、成立した候補の中から1件を選ぶ。
 //
-// `collect_iishanten_acceptance` は解析専用の [`CallIishantenAcceptanceDiagnostic`] を集めるか
-// どうかだけを切り替える。判断に使う fact の評価と候補の選択は切り替えの影響を受けない。
+// `collect_observations` は解析専用の受け入れ比較と2向聴 Call / Pass 比較を集めるかどうかだけを
+// 切り替える。判断に使う fact の評価と候補の選択は切り替えの影響を受けない。
 pub(crate) fn evaluate_call_decision(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
-    collect_iishanten_acceptance: bool,
+    collect_observations: bool,
 ) -> Option<CallDecisionDiagnostic> {
     let mut candidates: Vec<CallCandidateDiagnostic> = legal_actions
         .iter()
         .filter_map(|action| {
             normalize_call(action).map(|(kind, tile, consumed)| {
-                evaluate_call_candidate(
-                    ctx,
-                    action,
-                    kind,
-                    tile,
-                    consumed,
-                    collect_iishanten_acceptance,
-                )
+                evaluate_call_candidate(ctx, action, kind, tile, consumed, collect_observations)
             })
         })
         .collect();
@@ -390,6 +417,7 @@ pub(crate) fn evaluate_call_decision(
     }
 
     apply_iishanten_self_tsumo_policy(ctx, &mut candidates);
+    apply_two_shanten_self_tsumo_observation(ctx, &mut candidates);
 
     let selected_index = select_eligible_candidate(&candidates);
     if let Some(index) = selected_index {
@@ -463,7 +491,7 @@ fn evaluate_call_candidate(
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
-    collect_iishanten_acceptance: bool,
+    collect_observations: bool,
 ) -> CallCandidateDiagnostic {
     let mut candidate = CallCandidateDiagnostic {
         action: action.clone(),
@@ -477,6 +505,7 @@ fn evaluate_call_candidate(
         post_call_wait_yaku: None,
         iishanten_acceptance: None,
         iishanten_self_tsumo: None,
+        two_shanten_self_tsumo: None,
         eligible: false,
         selected: false,
         reason: CallDecisionReason::EligibleTenpai,
@@ -487,7 +516,7 @@ fn evaluate_call_candidate(
         kind,
         tile,
         consumed,
-        collect_iishanten_acceptance,
+        collect_observations,
         &mut candidate,
     );
     candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
@@ -498,14 +527,14 @@ fn evaluate_call_candidate(
 // 鳴き成立条件を順に評価し、最初に落ちた条件を理由として返す。評価が進んだ範囲の値だけを
 // candidate へ書き込み、評価しなかった項目は None のままにする。
 //
-// 判断に使う fact は `collect_iishanten_acceptance` にかかわらず常に同じ順序で評価する。この
-// flag が切り替えるのは、判断に使わない観測値を最後に足すかどうかだけ。
+// 判断に使う fact は `collect_observations` にかかわらず常に同じ順序で評価する。この flag が
+// 切り替えるのは、判断に使わない観測値を足すかどうかだけ。
 fn evaluate_call_conditions(
     ctx: &GameContext,
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
-    collect_iishanten_acceptance: bool,
+    collect_observations: bool,
     candidate: &mut CallCandidateDiagnostic,
 ) -> CallDecisionReason {
     if ctx.any_opponent_reached() {
@@ -542,6 +571,15 @@ fn evaluate_call_conditions(
         calculate_shanten_with_fixed_melds(&counts, current_fixed_meld_count).min();
     candidate.current_shanten = Some(current_shanten);
     if current_shanten != CALL_CURRENT_SHANTEN {
+        if collect_observations && current_shanten == CALL_TWO_SHANTEN_OBSERVATION_SHANTEN {
+            observe_two_shanten_call_to_iishanten(
+                ctx,
+                &meld,
+                &post_call_tiles,
+                post_call_fixed_meld_count,
+                candidate,
+            );
+        }
         return CallDecisionReason::CurrentShantenNotOne;
     }
 
@@ -578,7 +616,7 @@ fn evaluate_call_conditions(
         }
 
         // production が選んだ打牌評価を診断にもそのまま載せる。
-        if collect_iishanten_acceptance {
+        if collect_observations {
             candidate.iishanten_acceptance = iishanten_acceptance_diagnostic(
                 ctx,
                 &counts,
@@ -610,6 +648,47 @@ fn evaluate_call_conditions(
     reason
 }
 
+// 現在2向聴から Chi / Pon 後の最良打牌で1向聴になる候補だけを、既存の post-call
+// selector へ通す。候補生成・喰い替え・向聴・acceptance・打牌比較・Call 側 value は
+// すべて既存経路の結果をそのまま使う。
+fn observe_two_shanten_call_to_iishanten(
+    ctx: &GameContext,
+    meld: &Meld,
+    post_call_tiles: &[TileId],
+    post_call_fixed_meld_count: FixedMeldCount,
+    candidate: &mut CallCandidateDiagnostic,
+) {
+    let forbidden_discards = forbidden_discards_after_call(meld);
+    let evaluations = post_call_discard_evaluations(
+        ctx,
+        post_call_tiles,
+        post_call_fixed_meld_count,
+        &forbidden_discards,
+    );
+    candidate.post_call_forbidden_discards = Some(forbidden_discards);
+
+    let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+    melds.push(meld.clone());
+    let Some((evaluation, call_value)) =
+        select_best_iishanten_post_call_discard(ctx, post_call_tiles, &melds, &evaluations)
+    else {
+        return;
+    };
+    let post_call_shanten = evaluation.min_shanten_after_discard();
+    candidate.post_call_discard = Some(evaluation);
+    if post_call_shanten != CALL_CURRENT_SHANTEN {
+        return;
+    }
+
+    candidate.two_shanten_self_tsumo = Some(CallTwoShantenSelfTsumoDiagnostic {
+        reaction_source_player: ctx.reaction_source_player(),
+        pass_evaluation: CallTwoShantenPassEvaluation::Full,
+        pass_expected_self_tsumo_value: None,
+        call_expected_self_tsumo_value: call_value,
+        comparison: CallIishantenComparison::Unknown,
+    });
+}
+
 // 1向聴のままの Call 候補がある場合だけ Pass を1回評価し、全候補へ同じ値を配る。
 fn apply_iishanten_self_tsumo_policy(
     ctx: &GameContext,
@@ -632,7 +711,7 @@ fn apply_iishanten_self_tsumo_policy(
             continue;
         };
         diagnostic.pass_expected_self_tsumo_value = pass_value;
-        let (comparison, reason) = compare_iishanten_self_tsumo_values(
+        let (comparison, reason) = compare_call_pass_self_tsumo_values(
             reaction_source_known,
             diagnostic.call_expected_self_tsumo_value,
             diagnostic.pass_expected_self_tsumo_value,
@@ -644,7 +723,40 @@ fn apply_iishanten_self_tsumo_policy(
     }
 }
 
-fn compare_iishanten_self_tsumo_values(
+// 観測対象がある場合だけ Pass の2向聴 Full 値を1回求め、全候補へ共有する。比較結果は
+// candidate の production reason / eligible へ接続しない。
+fn apply_two_shanten_self_tsumo_observation(
+    ctx: &GameContext,
+    candidates: &mut [CallCandidateDiagnostic],
+) {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate.two_shanten_self_tsumo.is_some())
+    {
+        return;
+    }
+
+    let reaction_source_known = reaction_draw_distance(ctx).is_some();
+    let pass_value = reaction_source_known
+        .then(|| pass_two_shanten_expected_self_tsumo_value(ctx))
+        .flatten();
+
+    for candidate in candidates {
+        let Some(mut diagnostic) = candidate.two_shanten_self_tsumo else {
+            continue;
+        };
+        diagnostic.pass_expected_self_tsumo_value = pass_value;
+        diagnostic.comparison = compare_call_pass_self_tsumo_values(
+            reaction_source_known,
+            diagnostic.call_expected_self_tsumo_value,
+            diagnostic.pass_expected_self_tsumo_value,
+        )
+        .0;
+        candidate.two_shanten_self_tsumo = Some(diagnostic);
+    }
+}
+
+fn compare_call_pass_self_tsumo_values(
     reaction_source_known: bool,
     call: Option<u64>,
     pass: Option<u64>,
@@ -696,7 +808,14 @@ fn pass_own_future_draws(ctx: &GameContext) -> Option<u32> {
 
 // 架空の現在打牌を作らず、現在の13枚を「action 済みで次の自摸を待つ state」として既存
 // lookahead へ渡す。
-fn pass_iishanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
+fn pass_expected_self_tsumo_value(
+    ctx: &GameContext,
+    expected_shanten: i8,
+    evaluate: impl FnOnce(
+        &bot_logic::LookaheadInputs<'_>,
+        &bot_logic::EffectiveAcceptance,
+    ) -> Option<u64>,
+) -> Option<u64> {
     let fixed_meld_count = ctx.own_fixed_meld_count()?;
     let counts = TileCounts::from_tiles(ctx.hand_tiles().iter().copied());
     let acceptance = calculate_acceptance_with_fixed_melds_and_visible_tiles(
@@ -704,7 +823,7 @@ fn pass_iishanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
         fixed_meld_count,
         ctx.visible_tiles(),
     );
-    if acceptance.current_min_shanten() != CALL_CURRENT_SHANTEN {
+    if acceptance.current_min_shanten() != expected_shanten {
         return None;
     }
 
@@ -716,7 +835,23 @@ fn pass_iishanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
         LookaheadDiagnosticScope::None,
         Some(pass_own_future_draws(ctx)?),
     );
-    awaiting_draw_expected_self_tsumo_value(&inputs, &acceptance)
+    evaluate(&inputs, &acceptance)
+}
+
+fn pass_iishanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
+    pass_expected_self_tsumo_value(
+        ctx,
+        CALL_CURRENT_SHANTEN,
+        awaiting_draw_expected_self_tsumo_value,
+    )
+}
+
+fn pass_two_shanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
+    pass_expected_self_tsumo_value(
+        ctx,
+        CALL_TWO_SHANTEN_OBSERVATION_SHANTEN,
+        awaiting_draw_two_shanten_expected_self_tsumo_value,
+    )
 }
 
 // 鳴いても1向聴のままの候補について、鳴かない場合と鳴いた場合の受け入れを並べる。
@@ -957,6 +1092,47 @@ mod tests {
             })
     }
 
+    // 既存2副露を持つ小さい局面。残る concealed hand を小さくして、2向聴 Full の focused
+    // test が不要に大きな探索にならないようにする。
+    fn valued_two_shanten_reaction_context(
+        hand: &[u8],
+        target: u8,
+        source: Option<u8>,
+        remaining_tiles: Option<u32>,
+    ) -> GameContext {
+        let hand_tiles = tiles(hand);
+        let melds = vec![
+            Meld::new(MeldKind::Pon, tiles(&[124, 125, 126]), Some(tile(124))),
+            Meld::new(MeldKind::Pon, tiles(&[128, 129, 130]), Some(tile(128))),
+        ];
+        let mut visible = hand_tiles.clone();
+        visible.push(tile(target));
+        visible.extend(melds.iter().flat_map(|meld| meld.tiles().iter().copied()));
+
+        GameContext::from_parts_with_melds(
+            None,
+            hand_tiles,
+            vec![],
+            TileType::new(EAST),
+            TileType::new(EAST),
+            visible,
+            Some(0),
+            Some(0),
+            [vec![], vec![tile(target)], vec![], vec![]],
+            [false; 4],
+            [melds, vec![], vec![], vec![]],
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        })
+        .with_reaction_source_player(source)
+        .with_table_state_facts(crate::context::TableStateFacts {
+            remaining_tiles,
+            ..Default::default()
+        })
+    }
+
     #[test]
     fn an_iishanten_call_with_a_higher_expected_self_tsumo_value_is_selected() {
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
@@ -1055,7 +1231,7 @@ mod tests {
     #[test]
     fn equal_and_unknown_iishanten_values_keep_the_pass() {
         assert_eq!(
-            compare_iishanten_self_tsumo_values(true, Some(100), Some(100)),
+            compare_call_pass_self_tsumo_values(true, Some(100), Some(100)),
             (
                 CallIishantenComparison::PassNotLower,
                 CallDecisionReason::PassSelfTsumoNotLower
@@ -1063,7 +1239,7 @@ mod tests {
         );
         for values in [(None, Some(100)), (Some(100), None), (None, None)] {
             assert_eq!(
-                compare_iishanten_self_tsumo_values(true, values.0, values.1),
+                compare_call_pass_self_tsumo_values(true, values.0, values.1),
                 (
                     CallIishantenComparison::Unknown,
                     CallDecisionReason::IishantenSelfTsumoUnknown
@@ -1079,7 +1255,7 @@ mod tests {
             None
         );
         assert_eq!(
-            compare_iishanten_self_tsumo_values(false, Some(200), Some(100)),
+            compare_call_pass_self_tsumo_values(false, Some(200), Some(100)),
             (
                 CallIishantenComparison::Unknown,
                 CallDecisionReason::ReactionSourceUnknown
@@ -1117,12 +1293,12 @@ mod tests {
     fn single_candidate(
         ctx: &GameContext,
         action: &LegalAction,
-        collect_iishanten_acceptance: bool,
+        collect_observations: bool,
     ) -> (CallDecisionDiagnostic, CallCandidateDiagnostic) {
         let decision = evaluate_call_decision(
             ctx,
             &[action.clone(), LegalAction::None],
-            collect_iishanten_acceptance,
+            collect_observations,
         )
         .expect("evaluated");
         assert_eq!(decision.candidates.len(), 1);
@@ -1150,6 +1326,149 @@ mod tests {
 
     // 234m 68m 68p 24s E C FF の二向聴。
     const RYANSHANTEN_PON_HAND: [u8; 13] = [4, 8, 12, 20, 28, 56, 64, 76, 84, 108, 132, 128, 129];
+
+    // 既存2副露 + CC 55p E S W の2向聴。C を Pon した後、最良打牌で1向聴になる。
+    const TWO_SHANTEN_CALL_PON_HAND: [u8; 7] = [132, 133, 52, 53, 108, 112, 116];
+    const TWO_SHANTEN_CALL_PON_TARGET: u8 = 134;
+    const TWO_SHANTEN_CALL_PON_CONSUMED: [u8; 2] = [132, 133];
+
+    // 既存2副露 + 68m 55p E S W の2向聴。6m8m で7mを Chi した後、Pon と同じ
+    // post-call concealed hand になり、共通の評価 path で1向聴になる。
+    const TWO_SHANTEN_CALL_CHI_HAND: [u8; 7] = [20, 28, 52, 53, 108, 112, 116];
+    const TWO_SHANTEN_CALL_CHI_TARGET: u8 = 24;
+    const TWO_SHANTEN_CALL_CHI_CONSUMED: [u8; 2] = [20, 28];
+
+    #[test]
+    fn two_shanten_chi_and_pon_observe_the_same_call_pass_value_path() {
+        let cases = [
+            (
+                CallKind::Pon,
+                &TWO_SHANTEN_CALL_PON_HAND[..],
+                pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED),
+                TWO_SHANTEN_CALL_PON_TARGET,
+                1,
+            ),
+            (
+                CallKind::Chi,
+                &TWO_SHANTEN_CALL_CHI_HAND[..],
+                chi_action(TWO_SHANTEN_CALL_CHI_TARGET, &TWO_SHANTEN_CALL_CHI_CONSUMED),
+                TWO_SHANTEN_CALL_CHI_TARGET,
+                3,
+            ),
+        ];
+
+        for (kind, hand, action, target, source) in cases {
+            let ctx = valued_two_shanten_reaction_context(hand, target, Some(source), Some(32));
+            let (decision, candidate) = single_candidate(&ctx, &action, true);
+            let comparison = candidate
+                .two_shanten_self_tsumo
+                .expect("2向聴 Call / Pass 観測対象");
+
+            assert_eq!(candidate.action, action);
+            assert_eq!(candidate.kind, kind);
+            assert_eq!(candidate.current_shanten, Some(2));
+            assert_eq!(candidate.post_call_shanten(), Some(1));
+            assert_eq!(candidate.reason, CallDecisionReason::CurrentShantenNotOne);
+            assert!(!candidate.eligible);
+            assert_eq!(decision.selected, None);
+            assert_eq!(comparison.reaction_source_player, Some(source));
+            assert_eq!(
+                comparison.pass_evaluation,
+                CallTwoShantenPassEvaluation::Full
+            );
+            assert!(comparison.pass_expected_self_tsumo_value.is_some());
+            assert!(comparison.call_expected_self_tsumo_value.is_some());
+            assert_eq!(comparison.comparison, CallIishantenComparison::CallHigher);
+
+            // 喰い替え禁止牌を除いた既存候補だけが comparator に渡される。
+            let forbidden = candidate
+                .post_call_forbidden_discards
+                .as_ref()
+                .expect("喰い替え制約を評価済み");
+            assert!(!forbidden.is_empty());
+            assert!(!forbidden.contains(&candidate.post_call_discard.as_ref().unwrap().discard));
+            let (_, called_tile, consumed) = normalize_call(&action).expect("Chi / Pon");
+            let (_, post_call_tiles) =
+                call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, called_tile, consumed)
+                    .expect("合法な鳴き");
+            let evaluations = post_call_discard_evaluations(
+                &ctx,
+                &post_call_tiles,
+                candidate.post_call_fixed_meld_count.unwrap(),
+                forbidden,
+            );
+            assert!(
+                evaluations
+                    .iter()
+                    .all(|evaluation| !forbidden.contains(&evaluation.discard))
+            );
+        }
+    }
+
+    #[test]
+    fn two_shanten_call_pass_observation_keeps_all_three_comparison_outcomes() {
+        for (call, pass, expected) in [
+            (Some(101), Some(100), CallIishantenComparison::CallHigher),
+            (Some(100), Some(100), CallIishantenComparison::PassNotLower),
+            (None, Some(100), CallIishantenComparison::Unknown),
+        ] {
+            assert_eq!(
+                compare_call_pass_self_tsumo_values(true, call, pass).0,
+                expected
+            );
+        }
+
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            None,
+            Some(32),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
+        let comparison = candidate.two_shanten_self_tsumo.expect("観測対象");
+        assert!(comparison.call_expected_self_tsumo_value.is_some());
+        assert_eq!(comparison.pass_expected_self_tsumo_value, None);
+        assert_eq!(comparison.comparison, CallIishantenComparison::Unknown);
+
+        let zero_draws = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(0),
+        );
+        let (_, candidate) = single_candidate(&zero_draws, &action, true);
+        let comparison = candidate.two_shanten_self_tsumo.expect("観測対象");
+        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(0));
+        assert_eq!(comparison.call_expected_self_tsumo_value, Some(0));
+        assert_eq!(comparison.comparison, CallIishantenComparison::PassNotLower);
+    }
+
+    #[test]
+    fn two_shanten_call_pass_observation_does_not_change_the_selected_action() {
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(32),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+
+        let (production, production_candidate) = single_candidate(&ctx, &action, false);
+        let (observed, observed_candidate) = single_candidate(&ctx, &action, true);
+        assert_eq!(production.selected, observed.selected);
+        assert_eq!(production_candidate.two_shanten_self_tsumo, None);
+        assert!(observed_candidate.two_shanten_self_tsumo.is_some());
+        assert_eq!(
+            CallCandidateDiagnostic {
+                post_call_forbidden_discards: None,
+                post_call_discard: None,
+                two_shanten_self_tsumo: None,
+                ..observed_candidate
+            },
+            production_candidate
+        );
+    }
 
     #[test]
     fn an_iishanten_call_that_stays_iishanten_compares_the_pass_and_post_call_acceptance() {
@@ -1286,14 +1605,16 @@ mod tests {
     }
 
     #[test]
-    fn two_shanten_is_not_part_of_the_iishanten_acceptance_diagnostic() {
+    fn two_shanten_call_that_stays_two_shanten_is_not_observed() {
         let ctx = reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
         let (decision, candidate) = single_candidate(&ctx, &action, true);
 
         assert_eq!(candidate.reason, CallDecisionReason::CurrentShantenNotOne);
         assert_eq!(candidate.current_shanten, Some(2));
+        assert_eq!(candidate.post_call_shanten(), Some(2));
         assert_eq!(candidate.iishanten_acceptance, None);
+        assert_eq!(candidate.two_shanten_self_tsumo, None);
         assert_eq!(decision.selected, None);
     }
 
