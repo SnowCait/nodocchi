@@ -2626,8 +2626,9 @@ mod tests {
             CallDecisionReason::CurrentShantenNotOne,
         );
         assert_eq!(candidate.current_shanten, Some(2));
-        // 1向聴判定で落ちるので、鳴き後の打牌評価は行わない。
-        assert_eq!(candidate.post_call_discard, None);
+        // production では鳴かないが、diagnostics では鳴き後1向聴を観測する。
+        assert_eq!(candidate.post_call_shanten(), Some(1));
+        assert!(candidate.two_shanten_self_tsumo.is_some());
     }
 
     #[test]
