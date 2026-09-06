@@ -4974,6 +4974,22 @@ pub(crate) mod tests {
             &[],
             &metrics.two_shanten,
         );
+        for (discard, expected) in [
+            ("8m", 133_548_126),
+            ("9s", 131_729_152),
+            ("5m", 125_188_545),
+        ] {
+            let candidate = diagnostic
+                .candidates
+                .iter()
+                .find(|candidate| candidate.evaluation.discard.to_mjai_string() == discard)
+                .unwrap_or_else(|| panic!("{discard} 候補がある"));
+            assert_eq!(
+                candidate.two_shanten_expected_self_tsumo_value,
+                Some(expected)
+            );
+            assert_eq!(candidate.expected_self_tsumo_value, None);
+        }
         let five_man = diagnostic
             .candidates
             .iter()

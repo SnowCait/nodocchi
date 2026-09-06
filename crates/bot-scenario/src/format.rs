@@ -591,6 +591,14 @@ fn format_normal_discard_candidate(
         format_self_tsumo_value(candidate.expected_self_tsumo_value)
     ));
     lines.push(format!(
+        "  two-shanten expected self-tsumo value: {}",
+        if evaluation.min_shanten_after_discard() == 2 {
+            format_self_tsumo_value(candidate.two_shanten_expected_self_tsumo_value)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
+    lines.push(format!(
         "  current tenpai offense weighted total: {}",
         if evaluation.min_shanten_after_discard() == 0 {
             format_optional_value(candidate.current_tenpai_offense_weighted_total)
@@ -2985,7 +2993,10 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
             format_self_tsumo_value(Some(winner.expected_self_tsumo_value?)),
             format_self_tsumo_value(Some(loser.expected_self_tsumo_value?)),
         ),
-        DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue => return None,
+        DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue => (
+            format_self_tsumo_value(Some(winner.two_shanten_expected_self_tsumo_value?)),
+            format_self_tsumo_value(Some(loser.two_shanten_expected_self_tsumo_value?)),
+        ),
         DiscardComparisonReason::WeightedProspectiveValue => (
             winner.prospective_value?.to_string(),
             loser.prospective_value?.to_string(),
@@ -3656,6 +3667,19 @@ mod tests {
         include_str!("../scenarios/current_tenpai_self_tsumo.json");
     const RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO: &str =
         include_str!("../scenarios/ryanshanten_next_acceptance.json");
+    const TWO_SHANTEN_EV_SELECTION_SCENARIO: &str = r#"{
+        "hand": "11258m234789p13s",
+        "draw": "9s",
+        "remaining_tiles": 66,
+        "round_wind": "E",
+        "seat_wind": "N",
+        "player_id": 0,
+        "oya": 1,
+        "history_furiten": {
+            "same_turn": false,
+            "riichi_missed_win": false
+        }
+    }"#;
 
     #[test]
     fn current_tenpai_offense_scenario_selects_the_higher_weighted_total() {
@@ -3855,6 +3879,59 @@ mod tests {
             LegalAction::Dahai {
                 tile: TileId::new(60).unwrap()
             }
+        );
+    }
+
+    #[test]
+    fn two_shanten_ev_selection_values_are_visible_in_candidates_and_summary() {
+        let (_, diagnostic, output) = rendered(TWO_SHANTEN_EV_SELECTION_SCENARIO, false);
+        assert_eq!(action_label(&diagnostic.selected_action), "8m");
+
+        for (discard, expected, formatted) in [
+            ("8m", 133_548_126, "133.548"),
+            ("9s", 131_729_152, "131.729"),
+            ("5m", 125_188_545, "125.188"),
+        ] {
+            let candidate = cohort_candidate(&diagnostic, discard);
+            assert_eq!(
+                candidate.two_shanten_expected_self_tsumo_value,
+                Some(expected)
+            );
+            assert_eq!(candidate.expected_self_tsumo_value, None);
+
+            let block = candidate_block(&output, "Normal discard candidates", discard);
+            assert!(
+                block.contains("  expected self-tsumo value: unknown"),
+                "{block}"
+            );
+            assert!(
+                block.contains(&format!(
+                    "  two-shanten expected self-tsumo value: {formatted}"
+                )),
+                "{block}"
+            );
+        }
+
+        for discard in ["9s", "5m"] {
+            assert_eq!(
+                cohort_candidate(&diagnostic, discard).comparison_reason,
+                DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
+            );
+        }
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  choice 1: 8m"), "{summary}");
+        assert!(
+            summary.contains(
+                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenExpectedSelfTsumoValue\n  choice 2 comparison: choice 1 133.548 > choice 2 131.729"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(
+                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenExpectedSelfTsumoValue\n  choice 3 comparison: choice 2 131.729 > choice 3 125.188"
+            ),
+            "{summary}"
         );
     }
 
@@ -7033,6 +7110,13 @@ mod tests {
                 two_shanten.contains(&format!("\n  {tile}: {UNKNOWN}")),
                 "{two_shanten}"
             );
+            let candidate = candidate_block(&output, "Normal discard candidates", tile);
+            assert!(
+                candidate.contains(&format!(
+                    "  two-shanten expected self-tsumo value: {UNKNOWN}"
+                )),
+                "{candidate}"
+            );
         }
         assert!(
             two_shanten.contains(&format!("  self-tsumo continuation: {NOT_EVALUATED}")),
@@ -8602,6 +8686,15 @@ mod tests {
                 format_self_tsumo_value(Some(value))
             )),
             "{output}"
+        );
+        let selected_block = candidate_block(
+            &output,
+            "Normal discard candidates",
+            &discard_label(&selected.evaluation),
+        );
+        assert!(
+            selected_block.contains("  two-shanten expected self-tsumo value: -"),
+            "{selected_block}"
         );
     }
 

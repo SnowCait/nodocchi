@@ -1169,6 +1169,13 @@ pub struct DiscardCandidateDiagnostic {
     /// 診断のために再計算せず、選択で使った値をそのまま保持する。候補集合単位で軸を無効化した
     /// 場合と確定しなかった場合はどちらも `None`。
     pub expected_self_tsumo_value: Option<u64>,
+    /// 打牌選択に使った2向聴起点の self-tsumo continuation の期待支払い
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// 1向聴限定の [`Self::expected_self_tsumo_value`] とは別の supplemental metric として、
+    /// selection が計算した値を再計算せずに保持する。候補集合単位で軸を無効化した場合と
+    /// 確定しなかった場合はどちらも `None`。
+    pub two_shanten_expected_self_tsumo_value: Option<u64>,
     /// 打牌選択に使った現在聴牌の offense weighted total。
     /// cohort に unknown が混ざって軸を無効化した場合も `None`。
     pub current_tenpai_offense_weighted_total: Option<u64>,
@@ -1254,7 +1261,7 @@ pub fn diagnose_discard_evaluations_with_metrics(
 }
 
 /// production selection が計算した2向聴 ExpectedSelfTsumoValue も含めて診断を構築する。
-/// 数値本体は専用の2向聴診断が保持し、ここでは同じ supplemental metric を比較理由へ反映する。
+/// 同じ supplemental metric を候補診断と比較理由の両方へ反映する。
 pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
@@ -1353,6 +1360,9 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
                     .get(index)
                     .and_then(|metric| metric.prospective_value),
                 expected_self_tsumo_value: forward_metrics
+                    .get(index)
+                    .and_then(|metric| metric.expected_self_tsumo_value),
+                two_shanten_expected_self_tsumo_value: two_shanten_metrics
                     .get(index)
                     .and_then(|metric| metric.expected_self_tsumo_value),
                 current_tenpai_offense_weighted_total: current_tenpai_metrics
@@ -5660,6 +5670,48 @@ mod tests {
         assert_eq!(
             report.candidates[0].comparison_reason,
             DiscardComparisonReason::StableOrder
+        );
+    }
+
+    #[test]
+    fn diagnose_keeps_the_two_shanten_selection_values_separate() {
+        let mut winner = evaluation(2, 10, 2, 0, false);
+        winner.discard = tile("1m");
+        let mut loser = winner.clone();
+        loser.discard = tile("2m");
+        let evaluations = [winner, loser];
+        let metrics = [
+            TwoShantenMetrics {
+                expected_self_tsumo_value: Some(200),
+            },
+            TwoShantenMetrics {
+                expected_self_tsumo_value: Some(100),
+            },
+        ];
+
+        let report = diagnose_discard_evaluations_with_two_shanten_metrics(
+            &TileCounts::new(),
+            FixedMeldCount::NONE,
+            &evaluations,
+            &[],
+            &[],
+            &metrics,
+        );
+
+        assert!(report.candidates[0].selected);
+        assert_eq!(
+            report.candidates[0].two_shanten_expected_self_tsumo_value,
+            Some(200)
+        );
+        assert_eq!(
+            report.candidates[1].two_shanten_expected_self_tsumo_value,
+            Some(100)
+        );
+        assert_eq!(report.candidates[0].expected_self_tsumo_value, None);
+        assert_eq!(report.candidates[1].expected_self_tsumo_value, None);
+        assert_eq!(
+            report.candidates[1].comparison_reason,
+            DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
         );
     }
 
