@@ -397,6 +397,8 @@ Hora などで早期 return した request は、到達しなかった phase が
 
 4つの合計は同じ request の `normal_discard` を超えません。2向聴 EV を実行しない request では `two_shanten_self_tsumo` は 0、候補 timing は空のままです。通常打牌選択を通らなかった request では全 subphase が 0 のままです。`early` / `post_discard` の内部は細分化していません。
 
+`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の候補別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として読み取れます。候補の内部型は bot-core の public API へ公開しません。
+
 `forward` はさらに前方集計値の内部処理別へ分けます。こちらも既存の処理境界そのままで、探索する枝も scoring も集計も変えません。
 
 | subphase | 内容 |

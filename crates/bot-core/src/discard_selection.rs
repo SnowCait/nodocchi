@@ -1694,12 +1694,14 @@ pub(crate) mod tests {
         let mut timing = NormalDiscardPhaseTimer::started();
         let timed =
             select_discard_action_with_evaluation_instrumented(&context, &actions, &mut timing);
+        assert!(timing.take_two_shanten_self_tsumo_candidates().is_empty());
         let phases = timing.finish();
 
         assert_eq!(
             timed,
             select_discard_action_with_evaluation(&context, &actions)
         );
+        assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
         // 内訳は前方集計値の実測を分けたものなので、その合計は外側の phase を超えない。
         assert!(
             phases.forward_metrics_phases.total() <= phases.forward_metrics,
@@ -1715,6 +1717,7 @@ pub(crate) mod tests {
 
         let mut timing = NormalDiscardPhaseTimer::started();
         select_discard_action_with_evaluation_instrumented(&context, &legal_actions, &mut timing);
+        assert!(timing.take_two_shanten_self_tsumo_candidates().is_empty());
         let phases = timing.finish();
 
         assert_eq!(
@@ -1722,7 +1725,6 @@ pub(crate) mod tests {
             ForwardMetricsPhaseDurations::default()
         );
         assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
-        assert!(phases.two_shanten_self_tsumo_candidates.is_empty());
     }
 
     #[test]
@@ -4963,6 +4965,106 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn two_shanten_phase_timing_preserves_values_and_the_timed_action_breakdown() {
+        // 3副露の小さい2向聴局面。比較用に計測あり・なしを実行するが、各 production 実行は
+        // それぞれ1回だけ探索する。cohort 外の候補を含む門前局面は下の EV regression で確認する。
+        let tiles = [0, 53, 104, 124, 128].map(tile);
+        let melds = [108, 112, 116].map(|base| {
+            Meld::new(
+                MeldKind::Pon,
+                (base..base + 3).map(tile).collect(),
+                Some(tile(base)),
+            )
+        });
+        let visible = tiles
+            .iter()
+            .copied()
+            .chain(melds.iter().flat_map(|meld| meld.tiles().iter().copied()))
+            .collect();
+        let context = GameContext::from_parts_with_melds(
+            Some(tiles[4]),
+            tiles[..4].to_vec(),
+            vec![],
+            TileType::from_mjai_type_str("E").ok(),
+            TileType::from_mjai_type_str("N").ok(),
+            visible,
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false; 4],
+            [melds.to_vec(), vec![], vec![], vec![]],
+        )
+        .with_table_state_facts(bot_core_table_state(66));
+        let actions = tiles.map(|tile| LegalAction::Dahai { tile });
+        let legal = legal_discard_evaluations(&context, &actions);
+        let mut timing = NormalDiscardPhaseTimer::started();
+        timing.enter(NormalDiscardPhase::ForwardMetrics);
+        let timed = production_selection_metrics_instrumented(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &mut timing,
+        );
+        timing.enter(NormalDiscardPhase::SelectionFinalize);
+        let candidates = timing.take_two_shanten_self_tsumo_candidates();
+        let phases = timing.finish();
+        let untimed = production_selection_metrics(&context, &legal.tiles, &legal.evaluations);
+        assert_eq!(timed.forward, untimed.forward);
+        assert_eq!(timed.two_shanten, untimed.two_shanten);
+        assert_eq!(timed.two_shanten_diagnostic, untimed.two_shanten_diagnostic);
+        assert!(!candidates.is_empty());
+        assert!(
+            timed
+                .two_shanten_diagnostic
+                .candidates
+                .iter()
+                .all(|candidate| candidate.expected_self_tsumo_value.is_some())
+        );
+        let targets = timed
+            .two_shanten_diagnostic
+            .candidates
+            .iter()
+            .map(|candidate| candidate.discard)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.discard)
+                .collect::<Vec<_>>(),
+            targets
+        );
+        assert!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.elapsed)
+                .sum::<Duration>()
+                <= phases.two_shanten_self_tsumo
+        );
+
+        // 実際の公開入口まで候補が伝わることも確認する。判断は通常 act() と同じ。
+        use crate::{Agent, ShantenAgent};
+        let timed_action = ShantenAgent.act_with_phase_timing(&context, &actions);
+        assert_eq!(timed_action.action, ShantenAgent.act(&context, &actions));
+        assert_eq!(
+            timed_action
+                .two_shanten_self_tsumo_candidates()
+                .map(|(discard, _)| discard)
+                .collect::<Vec<_>>(),
+            targets
+        );
+        assert!(
+            timed_action
+                .two_shanten_self_tsumo_candidates()
+                .map(|(_, elapsed)| elapsed)
+                .sum::<Duration>()
+                <= timed_action
+                    .phases
+                    .normal_discard_phases
+                    .two_shanten_self_tsumo
+        );
+    }
+
+    #[test]
     fn the_two_shanten_expected_self_tsumo_value_changes_five_man_to_eight_man() {
         let (context, actions) = two_shanten_ev_regression_context();
         let legal = legal_discard_evaluations(&context, &actions);
@@ -4975,6 +5077,7 @@ pub(crate) mod tests {
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
+        let candidates = timing.take_two_shanten_self_tsumo_candidates();
         let phases = timing.finish();
         assert_eq!(metrics.two_shanten_diagnostic.candidates.len(), 3);
         let value = |discard: &str| {
@@ -5047,20 +5150,18 @@ pub(crate) mod tests {
             bot_logic::DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue
         );
         assert_eq!(
-            phases
-                .two_shanten_self_tsumo_candidates
+            candidates
                 .iter()
                 .map(|candidate| candidate.discard.to_mjai_string())
                 .collect::<Vec<_>>(),
             ["5m", "8m", "9s"]
         );
         assert_eq!(
-            phases.two_shanten_self_tsumo_candidates.len(),
+            candidates.len(),
             metrics.two_shanten_diagnostic.candidates.len()
         );
         assert!(
-            phases
-                .two_shanten_self_tsumo_candidates
+            candidates
                 .iter()
                 .map(|candidate| candidate.elapsed)
                 .sum::<Duration>()

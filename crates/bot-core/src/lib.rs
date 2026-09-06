@@ -65,7 +65,7 @@ pub use damaten_value::{
 };
 pub use decision_timing::{
     DecisionPhaseDurations, ForwardMetricsPhaseDurations, NormalDiscardPhaseDurations,
-    TimedAgentAction, TwoShantenSelfTsumoCandidateDuration,
+    TimedAgentAction,
 };
 pub use defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseCandidateDiagnostic,

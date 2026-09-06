@@ -11,7 +11,7 @@ use crate::action::LegalAction;
 ///
 /// phase は production path の判断順にそのまま対応する。早期 return した局面では、
 /// 到達しなかった phase は `Duration::ZERO` のままになる。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecisionPhaseDurations {
     /// Hora / Ryukyoku / 鳴きなど、通常打牌選択より前。
     pub early: Duration,
@@ -33,7 +33,7 @@ impl DecisionPhaseDurations {
 /// 通常打牌選択1回を内部処理別に分けた実測時間。
 ///
 /// 合計は `DecisionPhaseDurations::normal_discard` を超えない。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NormalDiscardPhaseDurations {
     /// 合法打牌候補の生成と、向聴 / 受け入れなどの基本評価。
     pub base_evaluation: Duration,
@@ -45,8 +45,6 @@ pub struct NormalDiscardPhaseDurations {
     /// production comparator が追加で評価する2向聴 ExpectedSelfTsumoValue。
     /// 対象外の局面では `Duration::ZERO` のままになる。
     pub two_shanten_self_tsumo: Duration,
-    /// 実際に評価した `ForwardTargets` 候補ごとの2向聴 ExpectedSelfTsumoValue 実測。
-    pub two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     /// 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定。
     pub selection_finalize: Duration,
 }
@@ -82,7 +80,7 @@ impl ForwardMetricsPhaseDurations {
 
 /// production comparator が実際に評価した2向聴 ExpectedSelfTsumoValue 候補1件の実測。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TwoShantenSelfTsumoCandidateDuration {
+pub(crate) struct TwoShantenSelfTsumoCandidateDuration {
     pub discard: TileType,
     pub elapsed: Duration,
 }
@@ -92,6 +90,19 @@ pub struct TwoShantenSelfTsumoCandidateDuration {
 pub struct TimedAgentAction {
     pub action: LegalAction,
     pub phases: DecisionPhaseDurations,
+    pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+}
+
+impl TimedAgentAction {
+    /// 同じ production execution で実際に評価した `ForwardTargets` の打牌と実測時間。
+    /// 対象外の request では空。内部の計測用 representation は公開しない。
+    pub fn two_shanten_self_tsumo_candidates(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (TileType, Duration)> + '_ {
+        self.two_shanten_self_tsumo_candidates
+            .iter()
+            .map(|candidate| (candidate.discard, candidate.elapsed))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,12 +178,16 @@ impl PhaseDurations for NormalDiscardPhaseDurations {
 /// 無効時は `Instant` を一切取得せず、判断内容にも影響しない。判断を再実行することは
 /// なく、通った経路の経過時間をその場で計上するだけ。
 #[derive(Debug)]
-pub(crate) struct PhaseTimer<D: PhaseDurations> {
+pub(crate) struct PhaseTimer<D: PhaseDurations, B: Default = ()> {
     state: Option<TimerState<D>>,
+    // 可変長の内訳は duration DTO から分離する。forward 専用 timer は `()` のまま。
+    breakdown: B,
 }
 
-pub(crate) type DecisionPhaseTimer = PhaseTimer<DecisionPhaseDurations>;
-pub(crate) type NormalDiscardPhaseTimer = PhaseTimer<NormalDiscardPhaseDurations>;
+pub(crate) type DecisionPhaseTimer =
+    PhaseTimer<DecisionPhaseDurations, Vec<TwoShantenSelfTsumoCandidateDuration>>;
+pub(crate) type NormalDiscardPhaseTimer =
+    PhaseTimer<NormalDiscardPhaseDurations, Vec<TwoShantenSelfTsumoCandidateDuration>>;
 pub(crate) type ForwardMetricsPhaseTimer = PhaseTimer<ForwardMetricsPhaseDurations>;
 
 /// 2向聴 ExpectedSelfTsumoValue の候補別 optional 計測器。
@@ -198,9 +213,12 @@ struct TimerState<D: PhaseDurations> {
     durations: D,
 }
 
-impl<D: PhaseDurations> PhaseTimer<D> {
+impl<D: PhaseDurations, B: Default> PhaseTimer<D, B> {
     pub(crate) fn disabled() -> Self {
-        Self { state: None }
+        Self {
+            state: None,
+            breakdown: B::default(),
+        }
     }
 
     pub(crate) fn started() -> Self {
@@ -210,6 +228,7 @@ impl<D: PhaseDurations> PhaseTimer<D> {
                 since: Instant::now(),
                 durations: D::default(),
             }),
+            breakdown: B::default(),
         }
     }
 
@@ -222,6 +241,7 @@ impl<D: PhaseDurations> PhaseTimer<D> {
                 since: Instant::now(),
                 durations: D::default(),
             }),
+            breakdown: B::default(),
         }
     }
 
@@ -292,15 +312,23 @@ impl NormalDiscardPhaseTimer {
             None => TwoShantenSelfTsumoTimer::disabled(),
         }
     }
+}
 
-    /// 実際に評価した2向聴 ExpectedSelfTsumoValue 候補の内訳を計上する。
+impl<D: PhaseDurations> PhaseTimer<D, Vec<TwoShantenSelfTsumoCandidateDuration>> {
+    /// 可変長の内訳は scalar duration DTO とは別に保持する。
     pub(crate) fn record_two_shanten_self_tsumo_candidates(
         &mut self,
         candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     ) {
-        if let Some(state) = self.state.as_mut() {
-            state.durations.two_shanten_self_tsumo_candidates = candidates;
+        if self.state.is_some() {
+            self.breakdown = candidates;
         }
+    }
+
+    pub(crate) fn take_two_shanten_self_tsumo_candidates(
+        &mut self,
+    ) -> Vec<TwoShantenSelfTsumoCandidateDuration> {
+        std::mem::take(&mut self.breakdown)
     }
 }
 
@@ -365,6 +393,54 @@ impl<D: PhaseDurations> TimerState<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_duration_dtos_remain_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<DecisionPhaseDurations>();
+        assert_copy::<NormalDiscardPhaseDurations>();
+    }
+
+    #[test]
+    fn candidate_breakdown_is_separate_from_scalar_phases() {
+        let mut decision = DecisionPhaseTimer::started();
+        let mut normal = decision.normal_discard_timer();
+        let mut candidates = normal.two_shanten_self_tsumo_timer();
+        let discard = TileType::from_mjai_type_str("5m").unwrap();
+        candidates.enter_candidate(discard);
+        normal.record_two_shanten_self_tsumo_candidates(candidates.finish());
+        decision.record_two_shanten_self_tsumo_candidates(
+            normal.take_two_shanten_self_tsumo_candidates(),
+        );
+        decision.record_normal_discard_phases(normal.finish());
+        let two_shanten_self_tsumo_candidates = decision.take_two_shanten_self_tsumo_candidates();
+        let timed = TimedAgentAction {
+            action: LegalAction::None,
+            phases: decision.finish(),
+            two_shanten_self_tsumo_candidates,
+        };
+        let phases = timed.phases;
+        assert_eq!(phases, timed.phases);
+        assert_eq!(timed.two_shanten_self_tsumo_candidates().len(), 1);
+        assert_eq!(
+            timed.two_shanten_self_tsumo_candidates().next().unwrap().0,
+            discard
+        );
+    }
+
+    #[test]
+    fn disabled_timers_do_not_keep_candidate_breakdowns() {
+        let candidate = TwoShantenSelfTsumoCandidateDuration {
+            discard: TileType::from_mjai_type_str("5m").unwrap(),
+            elapsed: Duration::ZERO,
+        };
+        let mut normal = NormalDiscardPhaseTimer::disabled();
+        normal.record_two_shanten_self_tsumo_candidates(vec![candidate]);
+        assert!(normal.take_two_shanten_self_tsumo_candidates().is_empty());
+        let mut decision = DecisionPhaseTimer::disabled();
+        decision.record_two_shanten_self_tsumo_candidates(vec![candidate]);
+        assert!(decision.take_two_shanten_self_tsumo_candidates().is_empty());
+    }
 
     #[test]
     fn a_disabled_timer_measures_nothing() {
@@ -485,7 +561,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![one_man, two_man]
         );
-        assert_eq!(timer.finish().two_shanten_self_tsumo_candidates, candidates);
+        assert_eq!(timer.take_two_shanten_self_tsumo_candidates(), candidates);
+        assert!(timer.take_two_shanten_self_tsumo_candidates().is_empty());
     }
 
     #[test]
@@ -522,7 +599,7 @@ mod tests {
         let mut normal_discard = timer.normal_discard_timer();
         normal_discard.enter(NormalDiscardPhase::ForwardMetrics);
         let breakdown = normal_discard.finish();
-        timer.record_normal_discard_phases(breakdown.clone());
+        timer.record_normal_discard_phases(breakdown);
         let durations = timer.finish();
 
         assert_eq!(durations.normal_discard_phases, breakdown);

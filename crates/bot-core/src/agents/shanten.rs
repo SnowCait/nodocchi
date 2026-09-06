@@ -161,11 +161,13 @@ impl ShantenAgent {
             &mut DecisionDiagnostics::disabled(),
             &mut timing,
         );
+        let two_shanten_self_tsumo_candidates = timing.take_two_shanten_self_tsumo_candidates();
         let phases = timing.finish();
         log_agent_decision(&decision);
         TimedAgentAction {
             action: decision.action,
             phases,
+            two_shanten_self_tsumo_candidates,
         }
     }
 
@@ -355,6 +357,9 @@ impl ShantenAgent {
                 ctx,
                 legal_actions,
                 &mut normal_discard_timing,
+            );
+            timing.record_two_shanten_self_tsumo_candidates(
+                normal_discard_timing.take_two_shanten_self_tsumo_candidates(),
             );
             timing.record_normal_discard_phases(normal_discard_timing.finish());
             return selection;
@@ -711,6 +716,7 @@ mod tests {
             hora.phases.normal_discard_phases,
             NormalDiscardPhaseDurations::default()
         );
+        assert_eq!(hora.two_shanten_self_tsumo_candidates().len(), 0);
 
         let ryukyoku = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Ryukyoku]);
         assert_eq!(ryukyoku.action, LegalAction::Ryukyoku);
@@ -718,6 +724,7 @@ mod tests {
             ryukyoku.phases.normal_discard_phases,
             NormalDiscardPhaseDurations::default()
         );
+        assert_eq!(ryukyoku.two_shanten_self_tsumo_candidates().len(), 0);
     }
 
     #[test]

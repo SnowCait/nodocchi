@@ -4,6 +4,7 @@ use bot_core::{
     DecisionPhaseDurations, ForwardMetricsPhaseDurations, LegalAction, NormalDiscardPhaseDurations,
     ShantenAgent,
 };
+use bot_logic::TileType;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::CaptureBenchmarkSpec;
@@ -25,6 +26,7 @@ pub struct RequestMeasurement {
     pub actor: Option<u8>,
     pub elapsed: Duration,
     pub phases: DecisionPhaseDurations,
+    pub two_shanten_self_tsumo_candidates: Vec<(TileType, Duration)>,
     pub selected_action: LegalAction,
 }
 
@@ -98,6 +100,7 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
         actor: captured.actor,
         elapsed,
         phases: timed.phases,
+        two_shanten_self_tsumo_candidates: timed.two_shanten_self_tsumo_candidates().collect(),
         selected_action: timed.action,
     }
 }
@@ -186,7 +189,10 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
             measurement.request_id,
             format_duration(measurement.phases.early),
             format_duration(measurement.phases.normal_discard),
-            format_normal_discard_phases(&measurement.phases.normal_discard_phases),
+            format_normal_discard_phases(
+                &measurement.phases.normal_discard_phases,
+                &measurement.two_shanten_self_tsumo_candidates,
+            ),
             format_duration(measurement.phases.post_discard),
             action_label(&measurement.selected_action),
         ));
@@ -200,21 +206,23 @@ fn format_duration(duration: Duration) -> String {
 }
 
 // normal discard の内訳は同じ request の normal_discard に括弧で添える。phase 別の集計は出さない。
-fn format_normal_discard_phases(phases: &NormalDiscardPhaseDurations) -> String {
+fn format_normal_discard_phases(
+    phases: &NormalDiscardPhaseDurations,
+    candidates: &[(TileType, Duration)],
+) -> String {
     format!(
         "base={} forward={} [{}] two_shanten_self_tsumo={} candidates={} [{}] finalize={}",
         format_duration(phases.base_evaluation),
         format_duration(phases.forward_metrics),
         format_forward_metrics_phases(&phases.forward_metrics_phases),
         format_duration(phases.two_shanten_self_tsumo),
-        phases.two_shanten_self_tsumo_candidates.len(),
-        phases
-            .two_shanten_self_tsumo_candidates
+        candidates.len(),
+        candidates
             .iter()
-            .map(|candidate| format!(
+            .map(|(discard, elapsed)| format!(
                 "{}={}",
-                candidate.discard.to_mjai_string(),
-                format_duration(candidate.elapsed)
+                discard.to_mjai_string(),
+                format_duration(*elapsed)
             ))
             .collect::<Vec<_>>()
             .join(" "),
@@ -345,19 +353,17 @@ impl BenchmarkJson {
                             .two_shanten_self_tsumo,
                     ),
                     two_shanten_self_tsumo_candidate_count: measurement
-                        .phases
-                        .normal_discard_phases
                         .two_shanten_self_tsumo_candidates
                         .len(),
                     two_shanten_self_tsumo_candidates: measurement
-                        .phases
-                        .normal_discard_phases
                         .two_shanten_self_tsumo_candidates
                         .iter()
-                        .map(|candidate| BenchmarkTwoShantenSelfTsumoCandidateJson {
-                            discard: candidate.discard.to_mjai_string(),
-                            elapsed_ns: nanos(candidate.elapsed),
-                        })
+                        .map(
+                            |(discard, elapsed)| BenchmarkTwoShantenSelfTsumoCandidateJson {
+                                discard: discard.to_mjai_string(),
+                                elapsed_ns: nanos(*elapsed),
+                            },
+                        )
                         .collect(),
                     normal_discard_finalize_ns: nanos(
                         measurement.phases.normal_discard_phases.selection_finalize,
@@ -393,7 +399,7 @@ fn write_benchmark_json(path: &str, run: &BenchmarkRun) -> Result<(), ScenarioEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::{Agent, TwoShantenSelfTsumoCandidateDuration};
+    use bot_core::Agent;
     use bot_logic::TileId;
     use riichilab_client::observation::{fixture_base64, game_context_from_decoded_observation};
     use riichilab_client::{
@@ -546,24 +552,24 @@ mod tests {
     }
 
     fn with_two_shanten_breakdown(
-        phases: DecisionPhaseDurations,
+        mut measurement: RequestMeasurement,
         total: u64,
         candidates: &[(&str, u64)],
-    ) -> DecisionPhaseDurations {
-        DecisionPhaseDurations {
-            normal_discard_phases: NormalDiscardPhaseDurations {
-                two_shanten_self_tsumo: Duration::from_millis(total),
-                two_shanten_self_tsumo_candidates: candidates
-                    .iter()
-                    .map(|(discard, elapsed)| TwoShantenSelfTsumoCandidateDuration {
-                        discard: bot_logic::TileType::from_mjai_type_str(discard).unwrap(),
-                        elapsed: Duration::from_millis(*elapsed),
-                    })
-                    .collect(),
-                ..phases.normal_discard_phases
-            },
-            ..phases
-        }
+    ) -> RequestMeasurement {
+        measurement
+            .phases
+            .normal_discard_phases
+            .two_shanten_self_tsumo = Duration::from_millis(total);
+        measurement.two_shanten_self_tsumo_candidates = candidates
+            .iter()
+            .map(|(discard, elapsed)| {
+                (
+                    TileType::from_mjai_type_str(discard).unwrap(),
+                    Duration::from_millis(*elapsed),
+                )
+            })
+            .collect();
+        measurement
     }
 
     fn measurement(capture: &str, request_id: u64, millis: u64) -> RequestMeasurement {
@@ -587,6 +593,7 @@ mod tests {
             actor: Some(0),
             elapsed: Duration::from_millis(millis),
             phases,
+            two_shanten_self_tsumo_candidates: Vec::new(),
             selected_action: LegalAction::Dahai {
                 tile: TileId::new(0).unwrap(),
             },
@@ -806,20 +813,20 @@ mod tests {
     fn report_shows_the_statistics_and_the_slowest_requests() {
         let run = synthetic_run(vec![
             measurement("game-001.jsonl", 1, 10),
-            measurement_with_phases(
-                "game-002.jsonl",
-                2,
-                2470,
-                with_two_shanten_breakdown(
+            with_two_shanten_breakdown(
+                measurement_with_phases(
+                    "game-002.jsonl",
+                    2,
+                    2470,
                     with_forward_breakdown(
                         phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2000, 20),
                         1950,
                         30,
                         20,
                     ),
-                    350,
-                    &[("5m", 180), ("8m", 160)],
                 ),
+                350,
+                &[("5m", 180), ("8m", 160)],
             ),
         ]);
         let report = format_benchmark(&run);
@@ -863,20 +870,20 @@ mod tests {
     fn benchmark_json_keeps_the_summary_and_every_request() {
         let run = synthetic_run(vec![
             measurement("game-001.jsonl", 1, 10),
-            measurement_with_phases(
-                "game-002.jsonl",
-                2,
-                2470,
-                with_two_shanten_breakdown(
+            with_two_shanten_breakdown(
+                measurement_with_phases(
+                    "game-002.jsonl",
+                    2,
+                    2470,
                     with_forward_breakdown(
                         phases_with_normal_discard_breakdown(1, 2400, 69, 30, 2000, 20),
                         1950,
                         30,
                         20,
                     ),
-                    350,
-                    &[("5m", 180), ("8m", 160)],
                 ),
+                350,
+                &[("5m", 180), ("8m", 160)],
             ),
         ]);
         let json = BenchmarkJson::from_run(&run);
@@ -1045,11 +1052,11 @@ mod tests {
         );
         assert_eq!(
             request.two_shanten_self_tsumo_candidate_count,
-            phases.two_shanten_self_tsumo_candidates.len()
+            run.requests[0].two_shanten_self_tsumo_candidates.len()
         );
         assert_eq!(
             request.two_shanten_self_tsumo_candidates.len(),
-            phases.two_shanten_self_tsumo_candidates.len()
+            run.requests[0].two_shanten_self_tsumo_candidates.len()
         );
         assert_eq!(
             request.normal_discard_finalize_ns,
