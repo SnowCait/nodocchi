@@ -1922,9 +1922,11 @@ pub(crate) mod tests {
             .next()
             .unwrap();
 
+        // Progress 全候補と、必要な場合だけの top-2 Full deepening はこの1回の
+        // production selection が所有する。内側の helper 名はここでは固定しない。
         assert_eq!(
             production_metrics
-                .matches("diagnose_two_shanten_self_tsumo_instrumented(")
+                .matches("production_two_shanten_selection(")
                 .count(),
             1,
             "{production_metrics}"
