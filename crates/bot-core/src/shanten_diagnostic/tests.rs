@@ -20,7 +20,9 @@ use crate::shanten_test_support::{
     weak_tenpai_under_reach_context,
 };
 use crate::threat::diagnose_player_threats;
-use crate::two_shanten_self_tsumo_cost::measure_two_shanten_self_tsumo;
+use crate::two_shanten_self_tsumo_cost::{
+    measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
+};
 use bot_logic::{
     DiscardComparisonReason, DiscardFuritenDiagnostic, DrawTransition, FixedMeldCount,
     PermanentFuriten, TenpaiWaitAvailability, TileId, TileType, TwoShantenSelfTsumoScope,
@@ -1658,6 +1660,11 @@ fn the_forward_target_scope_evaluates_only_the_production_comparison_cohort() {
         measure_two_shanten_self_tsumo(&ctx, &actions, TwoShantenSelfTsumoScope::AllCandidates);
     let targets =
         measure_two_shanten_self_tsumo(&ctx, &actions, TwoShantenSelfTsumoScope::ForwardTargets);
+    let progress = measure_two_shanten_progress_self_tsumo(
+        &ctx,
+        &actions,
+        TwoShantenSelfTsumoScope::ForwardTargets,
+    );
 
     // 打牌後が2向聴の候補数は範囲によらず同じで、比較対象はその真部分集合になる。
     assert_eq!(
@@ -1679,6 +1686,22 @@ fn the_forward_target_scope_evaluates_only_the_production_comparison_cohort() {
         compared
     );
     assert_eq!(
+        progress
+            .diagnostic
+            .candidates
+            .iter()
+            .map(|candidate| candidate.discard)
+            .collect::<Vec<_>>(),
+        compared
+    );
+    assert!(
+        progress
+            .diagnostic
+            .candidates
+            .iter()
+            .all(|candidate| candidate.progress_self_tsumo_value.is_some())
+    );
+    assert_eq!(
         targets
             .candidates
             .iter()
@@ -1693,7 +1716,7 @@ fn the_forward_target_scope_evaluates_only_the_production_comparison_cohort() {
 }
 
 #[test]
-fn the_two_shanten_self_tsumo_cost_measurement_does_not_change_the_selected_action() {
+fn two_shanten_cost_measurements_do_not_change_the_selected_action() {
     // 計測は打牌選択を通らない別の入口で、計測の前後でも範囲を変えても選ぶ action は同じ。
     let ctx = two_shanten_context(Some(66));
     let actions = two_shanten_actions();
@@ -1707,6 +1730,12 @@ fn the_two_shanten_self_tsumo_cost_measurement_does_not_change_the_selected_acti
         measure_two_shanten_self_tsumo(&ctx, &actions, scope);
         assert_eq!(agent.act(&ctx, &actions), expected);
     }
+    measure_two_shanten_progress_self_tsumo(
+        &ctx,
+        &actions,
+        TwoShantenSelfTsumoScope::ForwardTargets,
+    );
+    assert_eq!(agent.act(&ctx, &actions), expected);
 }
 
 // production の打牌比較が Shanten / IsolatedTile / IsolatedHonor で決着させず、前方評価まで

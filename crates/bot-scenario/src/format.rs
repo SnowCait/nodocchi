@@ -19,7 +19,7 @@ use bot_core::{
     ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
     TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
     TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
-    TwoShantenSelfTsumoCost,
+    TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -816,7 +816,39 @@ pub fn format_two_shanten_self_tsumo_cost(
         lines.push(format!(
             "  {}: {} ({})",
             discard.to_mjai_string(),
-            format_self_tsumo_value(candidate.expected_self_tsumo_value),
+            format_self_tsumo_value_precise(candidate.expected_self_tsumo_value),
+            format_elapsed(*elapsed),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// 2向聴 Progress-only 寄与の実行コストと候補値を表示する。
+pub fn format_two_shanten_progress_self_tsumo_cost(
+    scope: TwoShantenSelfTsumoScope,
+    cost: &TwoShantenProgressSelfTsumoCost,
+    facts: Option<SelfTsumoFacts>,
+) -> String {
+    let mut lines = vec!["Two-shanten progress-only self-tsumo cost".to_string()];
+    lines.push(format!(
+        "  scope: {}",
+        two_shanten_self_tsumo_scope_label(scope)
+    ));
+    lines.push(format!(
+        "  two-shanten candidates: {}",
+        cost.two_shanten_candidates
+    ));
+    lines.push(format!(
+        "  evaluated candidates: {}",
+        cost.diagnostic.candidates.len()
+    ));
+    lines.push(format!("  total: {}", format_elapsed(cost.total)));
+    lines.extend(format_self_tsumo_facts(facts));
+    for (candidate, (discard, elapsed)) in cost.diagnostic.candidates.iter().zip(&cost.candidates) {
+        lines.push(format!(
+            "  {}: {} ({})",
+            discard.to_mjai_string(),
+            format_self_tsumo_value_precise(candidate.progress_self_tsumo_value),
             format_elapsed(*elapsed),
         ));
     }
@@ -832,6 +864,18 @@ fn two_shanten_self_tsumo_scope_label(scope: TwoShantenSelfTsumoScope) -> &'stat
 
 fn format_elapsed(elapsed: Duration) -> String {
     format!("{:.3} s", elapsed.as_secs_f64())
+}
+
+// cost 計測は比較対象の差を後から再計算できるよう、固定小数点の全桁を表示する。
+fn format_self_tsumo_value_precise(scaled: Option<u64>) -> String {
+    let Some(scaled) = scaled else {
+        return UNKNOWN.to_string();
+    };
+    format!(
+        "{}.{:06}",
+        scaled / SELF_TSUMO_VALUE_SCALE,
+        scaled % SELF_TSUMO_VALUE_SCALE
+    )
 }
 
 // 2手先診断 (lookahead) の表示。通常表示は現在の打牌候補ごとの概要だけにして出力を短く保ち、
