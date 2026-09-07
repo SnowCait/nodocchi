@@ -275,6 +275,17 @@ A の Progress 枝だけの値と実測時間を表示します。候補ごと�
 見えてしまいます。そのため `--lookahead` / `--verbose` / `--two-shanten-self-tsumo` /
 `--summary-only` とは同時に指定できません。
 
+## 3向聴 Progress self-tsumo value (diagnostics-only)
+
+`bot-scenario --three-shanten-progress-self-tsumo` で全合法3向聴候補を一段深く評価できます。
+3向聴と2向聴では Progress のみを辿り、最良打牌後に1向聴へ到達したら既存の
+`ExpectedSelfTsumoValue` (Progress + SameShanten) へ接続します。
+2向聴 Progress continuation、次打牌比較、確率・残り自摸機会、terminal scoring、
+Reach/Damaten は既存 helper を共有し、unknown な枝があれば値は unknown です。
+production comparator には未接続で、WeightedNextAcceptance と ShapePenalty の既存比較順、
+2向聴 Full / Progress の仕様は変わりません。実行例と計測条件は
+[bot-scenario](../bot-scenario.md#3向聴-progress-only-診断) を参照してください。
+
 ## lookahead
 
 `bot-scenario --lookahead` は通常打牌候補ごとの2手先概要を追加します。`--verbose` と併用すると仮想ツモ牌ごとの詳細も表示します。

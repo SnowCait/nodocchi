@@ -17,6 +17,10 @@ pub const USAGE: &str = "usage:
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
                [--two-shanten-self-tsumo] [--verbose] [--summary-only]
+  bot-scenario --hand <TILES> [scenario options] --three-shanten-progress-self-tsumo
+  bot-scenario <SCENARIO_JSON> --three-shanten-progress-self-tsumo
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
+               --three-shanten-progress-self-tsumo
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
 
   --dora is a backward-compatible alias of --dora-indicator
@@ -26,8 +30,10 @@ pub const USAGE: &str = "usage:
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
+  --three-shanten-progress-self-tsumo evaluates all three-shanten candidates and reports
+  values and elapsed time; cannot be combined with other diagnostic options
   --two-shanten-self-tsumo adds the expected self-tsumo value of the two-shanten discard
-  candidates; it implies --lookahead and searches deeper than any other diagnostic
+  candidates; it implies --lookahead and searches deeper than the standard lookahead
   --two-shanten-self-tsumo-cost measures that same search instead of rendering it, with
   <SCOPE> all for every two-shanten candidate and forward-targets for the production
   comparison cohort only; it cannot be combined with any other diagnostic option, so that
@@ -42,6 +48,8 @@ pub const USAGE: &str = "usage:
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CliError {
+    #[error("--three-shanten-progress-self-tsumo cannot be combined with {0}")]
+    ConflictingThreeShantenProgressSelfTsumo(String),
     #[error("unknown option: {0}")]
     UnknownOption(String),
 
@@ -116,6 +124,8 @@ pub struct CaptureBenchmarkSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliArgs {
+    /// 全3向聴候補の Progress-only 値と時間を表示する専用診断。
+    pub three_shanten_progress_self_tsumo: bool,
     pub source: ScenarioSource,
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
@@ -138,6 +148,7 @@ impl CliArgs {
         I: IntoIterator<Item = String>,
     {
         let mut args = args.into_iter();
+        let mut three_shanten_progress_self_tsumo = false;
         let mut path: Option<String> = None;
         let mut spec = ScenarioSpec::default();
         let mut hand: Option<String> = None;
@@ -235,6 +246,7 @@ impl CliArgs {
                     );
                 }
                 "--lookahead" => lookahead = true,
+                "--three-shanten-progress-self-tsumo" => three_shanten_progress_self_tsumo = true,
                 "--two-shanten-self-tsumo" => two_shanten_self_tsumo = true,
                 "--two-shanten-self-tsumo-cost" => {
                     let value = value_of(&mut args, "--two-shanten-self-tsumo-cost")?;
@@ -281,6 +293,8 @@ impl CliArgs {
                 Some("--two-shanten-self-tsumo-cost".to_string())
             } else if two_shanten_progress_self_tsumo_cost.is_some() {
                 Some("--two-shanten-progress-self-tsumo-cost".to_string())
+            } else if three_shanten_progress_self_tsumo {
+                Some("--three-shanten-progress-self-tsumo".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -298,6 +312,7 @@ impl CliArgs {
                     json_path: benchmark_json,
                 }),
                 verbose: false,
+                three_shanten_progress_self_tsumo: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -308,6 +323,29 @@ impl CliArgs {
 
         if benchmark_json.is_some() {
             return Err(CliError::BenchmarkJsonWithoutBenchmark);
+        }
+
+        if three_shanten_progress_self_tsumo {
+            for (enabled, option) in [
+                (lookahead, "--lookahead"),
+                (verbose, "--verbose"),
+                (summary_only, "--summary-only"),
+                (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                (
+                    two_shanten_self_tsumo_cost.is_some(),
+                    "--two-shanten-self-tsumo-cost",
+                ),
+                (
+                    two_shanten_progress_self_tsumo_cost.is_some(),
+                    "--two-shanten-progress-self-tsumo-cost",
+                ),
+            ] {
+                if enabled {
+                    return Err(CliError::ConflictingThreeShantenProgressSelfTsumo(
+                        option.to_string(),
+                    ));
+                }
+            }
         }
 
         // 計測は cost measurement より前に追加の深い探索を走らせない。先行する探索は向聴・
@@ -399,6 +437,7 @@ impl CliArgs {
 
         Ok(Self {
             source,
+            three_shanten_progress_self_tsumo,
             verbose,
             // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
             lookahead: lookahead || two_shanten_self_tsumo,

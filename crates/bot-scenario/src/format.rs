@@ -910,6 +910,32 @@ fn format_elapsed(elapsed: Duration) -> String {
     format!("{:.3} s", elapsed.as_secs_f64())
 }
 
+pub fn format_three_shanten_progress_self_tsumo_cost(
+    cost: &bot_core::ThreeShantenProgressSelfTsumoCost,
+    facts: Option<SelfTsumoFacts>,
+) -> String {
+    let mut lines = vec![
+        "Three-shanten progress self-tsumo value".to_string(),
+        "  diagnostics only, not connected to discard selection".to_string(),
+        "  3/2-shanten: Progress only; 1-shanten: existing Progress + SameShanten".to_string(),
+        format!("  evaluated candidates: {}", cost.candidates.len()),
+        format!(
+            "  total elapsed: {:.3} ms",
+            cost.total.as_secs_f64() * 1000.0
+        ),
+    ];
+    lines.extend(format_self_tsumo_facts(facts));
+    for (discard, value, elapsed) in &cost.candidates {
+        lines.push(format!(
+            "  {}: {}, elapsed: {:.3} ms",
+            discard.to_mjai_string(),
+            format_self_tsumo_value_precise(*value),
+            elapsed.as_secs_f64() * 1000.0
+        ));
+    }
+    lines.join("\n")
+}
+
 // cost 計測は比較対象の差を後から再計算できるよう、固定小数点の全桁を表示する。
 fn format_self_tsumo_value_precise(scaled: Option<u64>) -> String {
     let Some(scaled) = scaled else {
@@ -3302,6 +3328,35 @@ fn format_optional_yes_no(value: Option<bool>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn three_shanten_progress_formats_known_and_unknown_values() {
+        let cost = bot_core::ThreeShantenProgressSelfTsumoCost {
+            candidates: vec![
+                (
+                    bot_logic::TileType::new(21).unwrap(),
+                    Some(1_234_567),
+                    std::time::Duration::from_millis(2),
+                ),
+                (
+                    bot_logic::TileType::new(19).unwrap(),
+                    None,
+                    std::time::Duration::from_millis(3),
+                ),
+            ],
+            total: std::time::Duration::from_millis(5),
+        };
+        let output = super::format_three_shanten_progress_self_tsumo_cost(&cost, None);
+        assert!(
+            output.contains("4s: 1.234567, elapsed: 2.000 ms"),
+            "{output}"
+        );
+        assert!(
+            output.contains("2s: unknown, elapsed: 3.000 ms"),
+            "{output}"
+        );
+        assert!(output.contains("total elapsed: 5.000 ms"));
+        assert!(output.contains("diagnostics only, not connected to discard selection"));
+    }
     use super::*;
     use crate::scenario::ScenarioSpec;
     use bot_core::{

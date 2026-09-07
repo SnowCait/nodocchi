@@ -28,6 +28,7 @@ pub(crate) mod shanten_test_support;
 pub mod tenpai_continuation;
 pub mod tenpai_scoring;
 pub mod threat;
+pub mod three_shanten_self_tsumo_cost;
 pub mod two_shanten_self_tsumo_cost;
 
 pub use action::LegalAction;
@@ -166,6 +167,9 @@ pub use threat::{
     diagnose_player_threat_with_facts, diagnose_player_threats, diagnose_player_threats_with_facts,
     fixed_meld_value_facts, has_reached_dealer, meld_threat_facts, player_threat_facts,
     player_threat_facts_from_context, player_threat_inputs, reached_opponent_count,
+};
+pub use three_shanten_self_tsumo_cost::{
+    ThreeShantenProgressSelfTsumoCost, measure_three_shanten_progress_self_tsumo,
 };
 pub use two_shanten_self_tsumo_cost::{
     TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,

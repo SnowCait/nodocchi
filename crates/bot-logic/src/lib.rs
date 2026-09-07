@@ -99,7 +99,8 @@ pub use lookahead::{
     diagnose_two_shanten_self_tsumo, diagnose_two_shanten_self_tsumo_instrumented, forward_metrics,
     forward_metrics_for_candidate, forward_metrics_from_lookahead, forward_metrics_instrumented,
     same_shanten_downstream_value_for_candidate, same_shanten_forward_metric_for_candidate,
-    tenpai_wait_metrics_from_lookahead, two_shanten_expected_self_tsumo_value_for_candidate,
+    tenpai_wait_metrics_from_lookahead, three_shanten_progress_self_tsumo_value_for_candidate,
+    two_shanten_expected_self_tsumo_value_for_candidate,
     two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
     two_shanten_progress_self_tsumo_value_for_candidate,
 };

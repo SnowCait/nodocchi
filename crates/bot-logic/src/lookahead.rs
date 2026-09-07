@@ -1087,6 +1087,33 @@ pub fn two_shanten_progress_self_tsumo_value_for_candidate(
     )
 }
 
+/// 3向聴候補の Progress-only self-tsumo 寄与
+/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。diagnostics 専用。
+///
+/// 3→2、2→1 は Progress のみ。1向聴では既存 ExpectedSelfTsumoValue
+/// (Progress + SameShanten) を使う。次打牌、確率、打点、horizon は2向聴と共通。
+/// 3向聴以外、必要な fact や continuation が unknown の場合は `None`。
+pub fn three_shanten_progress_self_tsumo_value_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != 3 {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
+    let mut total = 0u64;
+    for accepted in &evaluation.acceptance_after_discard.tiles {
+        let drawable = drawable(accepted);
+        for variant in branch.variants_of(&drawable) {
+            total = total.saturating_add(two_shanten_progress_after_draw(
+                inputs, &branch, &drawable, variant, facts,
+            )?);
+        }
+    }
+    Some(total)
+}
+
 /// 2向聴候補の ExpectedSelfTsumoValue を求める対象の範囲。
 ///
 /// どちらを選んでも1候補あたりの枝も確率も集計も同じで、対象候補の数だけが変わる。
@@ -1282,20 +1309,18 @@ fn two_shanten_same_shanten_self_tsumo_value(
     let mut total = 0u64;
     for drawable in branch.same_shanten_drawables(inputs) {
         for variant in branch.variants_of(&drawable) {
-            let value = two_shanten_progress_after_same_shanten_draw(
-                inputs, branch, &drawable, variant, facts,
-            )?;
+            let value = two_shanten_progress_after_draw(inputs, branch, &drawable, variant, facts)?;
             total = total.saturating_add(value);
         }
     }
     Some(total)
 }
 
-// 2向聴を維持するツモ1枚分の continuation。ツモ後の最良打牌がまだ2向聴の枝だけ、その打牌後の
+// 3→2 Progress または2向聴 SameShanten のツモ1枚分。最良打牌後が2向聴の枝だけ、その打牌後の
 // state を起点にした Progress 枝へつなぐ。
 //
 // 打牌候補が無い枝は寄与 0 で、接続先の値を確定できない場合だけ `None` になる。
-fn two_shanten_progress_after_same_shanten_draw(
+fn two_shanten_progress_after_draw(
     inputs: &LookaheadInputs,
     branch: &CandidateBranch,
     drawable: &DrawableTile,
@@ -4507,6 +4532,83 @@ mod tests {
 
     // ---- 2向聴から1向聴へ進む枝 ----
 
+    #[test]
+    fn three_shanten_progress_connects_to_existing_two_shanten_progress() {
+        // 2副露、concealed 8枚。全 Progress 枝を独立に waiting state へ組み直して照合する。
+        let tiles = ids(&[0, 4, 12, 24, 36, 48, 60, 108]);
+        let situation = visible_situation(&tiles, fixed(2), Vec::new(), None, None, tiles.clone());
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+        let evaluation = situation
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == TileType::new(27).unwrap())
+            .unwrap();
+        assert_eq!(evaluation.min_shanten_after_discard(), 3);
+        let branch = CandidateBranch::new(&inputs.root, evaluation).unwrap();
+        let facts = inputs.self_tsumo_facts().unwrap();
+        let mut expected = 0u64;
+        assert!(!branch.same_shanten_drawables(&inputs).is_empty());
+        for accepted in &evaluation.acceptance_after_discard.tiles {
+            let draw = drawable(accepted);
+            for variant in branch.variants_of(&draw) {
+                let state = branch.state_after_draw(draw.tile, variant.tile).unwrap();
+                let next = next_discard(&inputs, &state).evaluation.unwrap();
+                assert_eq!(next.min_shanten_after_discard(), 2);
+                let (_, concealed) = split_discarded_tile(state.tiles.clone(), &next).unwrap();
+                let mut visible = tiles.clone();
+                visible.push(variant.tile);
+                let path =
+                    SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles).unwrap();
+                let waiting = LookaheadInputs::new(&concealed, fixed(2), &[], None, None)
+                    .with_visible_tiles(&visible)
+                    .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+                    .with_own_future_draws(path.terminal_own_future_draws(facts));
+                assert_eq!(
+                    waiting.self_tsumo_facts().unwrap().unknown_tiles,
+                    path.terminal_unknown_tiles(facts)
+                );
+                let value = awaiting_draw_two_shanten_progress_self_tsumo_value(
+                    &waiting,
+                    &awaiting_draw_acceptance(&concealed, fixed(2), &visible),
+                )
+                .unwrap();
+                expected += path.weighted_continuation(value);
+            }
+        }
+        assert!(expected > 0);
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation),
+            Some(expected)
+        );
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(
+                &self_tsumo_inputs(&situation, &UnknownTsumoValuator),
+                evaluation,
+            ),
+            None
+        );
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(
+                &super::LookaheadInputs::new(&tiles, fixed(2), &[], None, None),
+                evaluation,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn three_shanten_progress_rejects_two_shanten_candidates() {
+        let tiles = two_shanten_candidate_hand();
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(
+                &self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR),
+                &situation.evaluations[0],
+            ),
+            None
+        );
+    }
+
     // どのテンパイのツモ打点も確定できない検証用の評価器。
     struct UnknownTsumoValuator;
 
@@ -4920,14 +5022,9 @@ mod tests {
             .next()
             .expect("物理牌 variant がある");
 
-        let actual = two_shanten_progress_after_same_shanten_draw(
-            &state.inputs,
-            &branch,
-            drawable,
-            variant,
-            facts,
-        )
-        .expect("ツモ打点を確定できる");
+        let actual =
+            two_shanten_progress_after_draw(&state.inputs, &branch, drawable, variant, facts)
+                .expect("ツモ打点を確定できる");
 
         let after = after_same_shanten_draw(&state.inputs, &branch, drawable, variant, facts);
         let inputs = after.inputs();
