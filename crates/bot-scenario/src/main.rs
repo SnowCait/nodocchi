@@ -63,6 +63,12 @@ where
 
     // cost 計測は production selection が同じ2向聴探索を走らせる前に取り、baseline と同じ
     // cold memo 条件を保つ。表示順は従来どおり診断の後にする。
+    let three_shanten_cost = args.three_shanten_progress_self_tsumo.then(|| {
+        bot_core::measure_three_shanten_progress_self_tsumo(
+            &scenario.context,
+            &scenario.legal_actions,
+        )
+    });
     let two_shanten_self_tsumo_cost = args.two_shanten_self_tsumo_cost.map(|scope| {
         (
             scope,
@@ -112,6 +118,16 @@ where
             );
             format!("{output}\n\n{section}")
         }
+        None => output,
+    };
+    let output = match three_shanten_cost {
+        Some(cost) => format!(
+            "{output}\n\n{}",
+            format::format_three_shanten_progress_self_tsumo_cost(
+                &cost,
+                diagnostic.normal_discard_self_tsumo_facts,
+            )
+        ),
         None => output,
     };
     Ok(match header {
@@ -186,6 +202,54 @@ mod tests {
         assert!(output.starts_with("Scenario\n"), "{output}");
         assert!(output.contains("\n\nFinal decision\n"), "{output}");
         assert!(output.contains("\n\nNormal discard candidates"), "{output}");
+    }
+
+    #[test]
+    fn three_shanten_progress_is_opt_in_and_preserves_selection() {
+        let args = [
+            "--hand",
+            "45m46899p1124579s",
+            "--dora-indicator",
+            "E",
+            "--round-wind",
+            "E",
+            "--seat-wind",
+            "N",
+            "--player-id",
+            "0",
+            "--oya",
+            "1",
+            "--remaining-tiles",
+            "66",
+        ];
+        let normal = run_args(&args).unwrap();
+        assert!(!normal.contains("Three-shanten progress"));
+        let mut enabled = args.to_vec();
+        enabled.push("--three-shanten-progress-self-tsumo");
+        let measured = run_args(&enabled).unwrap();
+        assert!(measured.starts_with(&normal));
+        assert!(measured.contains("evaluated candidates: 12"));
+        let section = measured
+            .split("Three-shanten progress self-tsumo value")
+            .nth(1)
+            .unwrap();
+        for discard in ["2s", "4s"] {
+            let line = section
+                .lines()
+                .find(|line| line.starts_with(&format!("  {discard}:")))
+                .unwrap();
+            assert!(!line.contains("unknown"), "{line}");
+        }
+        for option in [
+            "--lookahead",
+            "--verbose",
+            "--summary-only",
+            "--two-shanten-self-tsumo",
+        ] {
+            let mut conflicting = enabled.clone();
+            conflicting.push(option);
+            assert!(run_args(&conflicting).is_err());
+        }
     }
 
     // 追加オプション無しの何切る CLI でも、打 W のテンパイからリーチが生成されて選ばれる。

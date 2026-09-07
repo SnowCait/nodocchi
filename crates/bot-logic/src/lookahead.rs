@@ -558,6 +558,7 @@ impl TwoShantenProgressSelfTsumoDiagnostic {
 ///
 /// `tiles` は打牌前の全手牌 (物理牌)、`fixed_meld_count` / `dora_indicators` / `round_wind` /
 /// `seat_wind` は現在の打牌評価に使ったものと同じ値を渡す。
+#[derive(Clone)]
 pub struct LookaheadInputs<'a> {
     fixed_meld_count: FixedMeldCount,
     dora_indicators: &'a [TileId],
@@ -571,9 +572,30 @@ pub struct LookaheadInputs<'a> {
     // 1手目の打牌前の手牌。深い枝の状態と同じ型で持ち、段ごとに別の組み立てをしない。
     root: HandState,
     // この探索で評価済みの base 打牌評価。
-    base_evaluations: RefCell<BaseEvaluationMemo>,
+    base_evaluations: Rc<RefCell<BaseEvaluationMemo>>,
     // この探索で求めた打牌候補1件分の受け入れ。
-    after_discard_acceptances: RefCell<AfterDiscardAcceptanceMemo>,
+    after_discard_acceptances: Rc<RefCell<AfterDiscardAcceptanceMemo>>,
+    // 3向聴診断でだけ有効化する。同じ物理牌集合・見え牌・河だけ共有し、枝は削らない。
+    progress_memo: Option<Rc<RefCell<ProgressMemo>>>,
+}
+
+#[derive(Default)]
+struct ProgressMemo {
+    two_shanten: HashMap<(CandidateBranch, u32, u32), Option<u64>>,
+    iishanten: HashMap<(CandidateBranch, u32, u32), Option<u64>>,
+    next_discard: HashMap<HandState, NextDiscard>,
+    stats: ProgressMemoStats,
+}
+
+/// 3向聴診断の同一 state cache の利用数。miss は実際に再評価した件数。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProgressMemoStats {
+    pub two_shanten_hits: u64,
+    pub two_shanten_misses: u64,
+    pub iishanten_hits: u64,
+    pub iishanten_misses: u64,
+    pub next_discard_hits: u64,
+    pub next_discard_misses: u64,
 }
 
 /// base 打牌評価 ([`evaluate_discards_with_seen`](crate::discard::evaluate_discards_with_seen)) の
@@ -655,9 +677,23 @@ impl<'a> LookaheadInputs<'a> {
                 red_five_seen: seen_red_fives(tiles.iter().copied()),
                 discarded: Vec::new(),
             },
-            base_evaluations: RefCell::new(BaseEvaluationMemo::default()),
-            after_discard_acceptances: RefCell::new(AfterDiscardAcceptanceMemo::default()),
+            base_evaluations: Rc::new(RefCell::new(BaseEvaluationMemo::default())),
+            after_discard_acceptances: Rc::new(RefCell::new(AfterDiscardAcceptanceMemo::default())),
+            progress_memo: None,
         }
+    }
+
+    /// 3向聴診断の同一 state / continuation を探索内で共有する。既存2向聴 production は無効のまま。
+    pub fn with_three_shanten_progress_memo(mut self) -> Self {
+        self.progress_memo = Some(Rc::new(RefCell::new(ProgressMemo::default())));
+        self
+    }
+
+    pub fn three_shanten_progress_memo_stats(&self) -> ProgressMemoStats {
+        self.progress_memo
+            .as_ref()
+            .map(|memo| memo.borrow().stats)
+            .unwrap_or_default()
     }
 
     /// 手牌以外に見えている牌も反映する。
@@ -667,6 +703,7 @@ impl<'a> LookaheadInputs<'a> {
     /// visible tiles は自分の手牌を含むため、既存の残枚数計算と同じ手牌差し引きで二重計上を
     /// 防ぐ。仮想ツモ牌を赤 / 黒へ分ける判定にも同じ見え牌を使う。
     pub fn with_visible_tiles(mut self, visible_tiles: &[TileId]) -> Self {
+        self.progress_memo = None;
         if visible_tiles.is_empty() {
             return self;
         }
@@ -683,6 +720,7 @@ impl<'a> LookaheadInputs<'a> {
         mut self,
         valuator: &'a dyn ProspectiveTenpaiValuator,
     ) -> Self {
+        self.progress_memo = None;
         self.valuator = Some(valuator);
         self
     }
@@ -693,6 +731,7 @@ impl<'a> LookaheadInputs<'a> {
     /// self-tsumo continuation ([`DiscardLookaheadDiagnostic::expected_self_tsumo_value`]) を
     /// 集計する。片方でも欠ける局面では新しい軸を持たず、既存の集計値だけになる。
     pub fn with_tsumo_valuator(mut self, valuator: &'a dyn ProspectiveTsumoValuator) -> Self {
+        self.progress_memo = None;
         self.tsumo_valuator = Some(valuator);
         self
     }
@@ -702,6 +741,7 @@ impl<'a> LookaheadInputs<'a> {
     /// 山の残枚数から導いた exact な fact だけを渡す。推測した巡目や河の枚数から作った近似値を
     /// 渡さないこと。
     pub fn with_own_future_draws(mut self, own_future_draws: u32) -> Self {
+        self.progress_memo = None;
         self.own_future_draws = Some(own_future_draws);
         self
     }
@@ -1087,6 +1127,100 @@ pub fn two_shanten_progress_self_tsumo_value_for_candidate(
     )
 }
 
+/// 3向聴候補の Progress-only self-tsumo 寄与
+/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。diagnostics 専用。
+///
+/// 3→2、2→1 は Progress のみ。1向聴では既存 ExpectedSelfTsumoValue
+/// (Progress + SameShanten) を使う。3→2後は全打牌の2向聴 Progress value を評価し、
+/// production と共通の2向聴 comparator で最良打牌を選ぶ (Full gate は使わない)。
+/// 確率、打点、horizon は既存 helper と共通。
+/// 3向聴以外、必要な fact や continuation が unknown の場合は `None`。
+pub fn three_shanten_progress_self_tsumo_value_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != 3 {
+        return None;
+    }
+    let facts = inputs.self_tsumo_facts()?;
+    let branch = CandidateBranch::new(&inputs.root, evaluation)?;
+    let mut total = 0u64;
+    for accepted in &evaluation.acceptance_after_discard.tiles {
+        let drawable = drawable(accepted);
+        for variant in branch.variants_of(&drawable) {
+            let state = branch.state_after_draw(drawable.tile, variant.tile)?;
+            let path = SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles)?;
+            let mut next = inputs.clone();
+            next.root = state;
+            next.own_future_draws = Some(path.terminal_own_future_draws(facts));
+            let (_, value) = best_two_shanten_progress_discard(&next)?;
+            total = total.saturating_add(path.weighted_continuation(value));
+        }
+    }
+    Some(total)
+}
+
+// 3→2の到達先では全合法打牌を列挙し、既存 production の2向聴 metric comparator を使う。
+// Full gate は呼ばず、Progress の値だけを比較する。unknown cohort の値は確定しない。
+fn best_two_shanten_progress_discard(inputs: &LookaheadInputs) -> Option<(DiscardEvaluation, u64)> {
+    let state = &inputs.root;
+    let base = inputs.base_evaluations(&state.counts, &state.seen);
+    let evaluations: Vec<_> = base
+        .iter()
+        .map(|evaluation| decorated_evaluation(inputs, state, evaluation).to_evaluation())
+        .collect();
+    let metrics: Vec<_> = evaluations
+        .iter()
+        .map(|evaluation| crate::selection::TwoShantenMetrics {
+            expected_self_tsumo_value: cached_two_shanten_progress(inputs, evaluation),
+        })
+        .collect();
+    let metrics = crate::selection::resolve_two_shanten_expected_self_tsumo_value_axis(
+        &evaluations,
+        &metrics,
+    );
+    let forward = forward_metrics(inputs, &evaluations);
+    let selected = crate::selection::best_discard_selection_index_with_two_shanten_metrics(
+        &evaluations,
+        &forward,
+        &[],
+        &metrics,
+    )?;
+    Some((
+        evaluations[selected].clone(),
+        metrics[selected].expected_self_tsumo_value?,
+    ))
+}
+
+fn cached_two_shanten_progress(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN {
+        return None;
+    }
+    let Some(memo) = &inputs.progress_memo else {
+        return two_shanten_progress_self_tsumo_value_for_candidate(inputs, evaluation);
+    };
+    let facts = inputs.self_tsumo_facts()?;
+    let key = (
+        CandidateBranch::new(&inputs.root, evaluation)?.memo_key(),
+        facts.unknown_tiles,
+        facts.own_future_draws,
+    );
+    {
+        let mut memo = memo.borrow_mut();
+        if let Some(value) = memo.two_shanten.get(&key).copied() {
+            memo.stats.two_shanten_hits += 1;
+            return value;
+        }
+        memo.stats.two_shanten_misses += 1;
+    }
+    let value = two_shanten_progress_self_tsumo_value_for_candidate(inputs, evaluation);
+    memo.borrow_mut().two_shanten.insert(key, value);
+    value
+}
+
 /// 2向聴候補の ExpectedSelfTsumoValue を求める対象の範囲。
 ///
 /// どちらを選んでも1候補あたりの枝も確率も集計も同じで、対象候補の数だけが変わる。
@@ -1291,7 +1425,7 @@ fn two_shanten_same_shanten_self_tsumo_value(
     Some(total)
 }
 
-// 2向聴を維持するツモ1枚分の continuation。ツモ後の最良打牌がまだ2向聴の枝だけ、その打牌後の
+// 2向聴を維持するツモ1枚分の continuation。最良打牌後が2向聴の枝だけ、その打牌後の
 // state を起点にした Progress 枝へつなぐ。
 //
 // 打牌候補が無い枝は寄与 0 で、接続先の値を確定できない場合だけ `None` になる。
@@ -1358,8 +1492,29 @@ fn iishanten_continuation_after_progress_draw(
         unknown_tiles: path.terminal_unknown_tiles(facts),
         own_future_draws: path.terminal_own_future_draws(facts),
     };
-    let draws = search(inputs, &state, &evaluation, IISHANTEN_CONTINUATION)?;
-    Some(path.weighted_continuation(expected_self_tsumo_value_from_draws(&draws, continuation)?))
+    let key = if inputs.progress_memo.is_some() {
+        Some((
+            CandidateBranch::new(&state, &evaluation)?.memo_key(),
+            continuation.unknown_tiles,
+            continuation.own_future_draws,
+        ))
+    } else {
+        None
+    };
+    if let Some(memo) = &inputs.progress_memo {
+        let mut memo = memo.borrow_mut();
+        if let Some(value) = memo.iishanten.get(key.as_ref().unwrap()).copied() {
+            memo.stats.iishanten_hits += 1;
+            return value.map(|value| path.weighted_continuation(value));
+        }
+        memo.stats.iishanten_misses += 1;
+    }
+    let value = search(inputs, &state, &evaluation, IISHANTEN_CONTINUATION)
+        .and_then(|draws| expected_self_tsumo_value_from_draws(&draws, continuation));
+    if let Some(memo) = &inputs.progress_memo {
+        memo.borrow_mut().iishanten.insert(key.unwrap(), value);
+    }
+    value.map(|value| path.weighted_continuation(value))
 }
 
 /// 打牌候補1件について、same-shanten 手変わりの前方集計値を求める。
@@ -1665,7 +1820,7 @@ fn search_waiting_state(
 //
 // `seen` は手牌以外に見えている牌なので、手牌に加えた仮想ツモ牌は含まない。`discarded` は
 // ここまでに切った物理牌で、将来テンパイ時点の自分の河として既存フリテン基盤へ渡される。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HandState {
     counts: TileCounts,
     // 物理牌一覧。切る牌の赤 / 黒とドラ枚数を確定するために持つ。
@@ -1675,8 +1830,20 @@ struct HandState {
     discarded: Vec<TileId>,
 }
 
+impl HandState {
+    // 牌の格納順・仮想打牌の順序は手牌評価や恒常フリテンの集合判定に影響しない。
+    // 物理牌IDは保持するため、赤/黒、見え牌、河の異なる state は混ぜない。
+    fn memo_key(&self) -> Self {
+        let mut key = self.clone();
+        key.tiles.sort_unstable_by_key(|tile| tile.index());
+        key.discarded.sort_unstable_by_key(|tile| tile.index());
+        key
+    }
+}
+
 // 打牌候補1件について、その打牌後の牌を仮想ツモした次段の評価に必要な状態。
 // 仮想ツモ牌ごとに作り直さず、詳細診断と選択用集計で共有する。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CandidateBranch {
     after_discard: TileCounts,
     next_tiles: Vec<TileId>,
@@ -1690,6 +1857,11 @@ struct CandidateBranch {
 }
 
 impl CandidateBranch {
+    fn memo_key(mut self) -> Self {
+        self.next_tiles.sort_unstable_by_key(|tile| tile.index());
+        self.discarded.sort_unstable_by_key(|tile| tile.index());
+        self
+    }
     // 打牌候補の牌種を手牌から除けない場合だけ `None`。
     fn new(state: &HandState, evaluation: &DiscardEvaluation) -> Option<Self> {
         let mut after_discard = state.counts;
@@ -1870,27 +2042,30 @@ fn drawable(tile: &EffectiveAcceptanceTile) -> DrawableTile {
 // 決まっているため、赤5も通常打牌評価と同じ経路で反映できる。テンパイへ進む候補には将来打点を
 // 付け、比較の打点軸へ渡す。
 fn next_discard(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
+    let key = inputs.progress_memo.as_ref().map(|_| state.memo_key());
+    if let Some(memo) = &inputs.progress_memo {
+        let mut memo = memo.borrow_mut();
+        if let Some(value) = memo.next_discard.get(key.as_ref().unwrap()).cloned() {
+            memo.stats.next_discard_hits += 1;
+            return value;
+        }
+        memo.stats.next_discard_misses += 1;
+    }
+    let value = next_discard_uncached(inputs, state);
+    if let Some(memo) = &inputs.progress_memo {
+        memo.borrow_mut()
+            .next_discard
+            .insert(key.unwrap(), value.clone());
+    }
+    value
+}
+
+fn next_discard_uncached(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
     let base = inputs.base_evaluations(&state.counts, &state.seen);
-    let context = DecorationContext {
-        tiles: &state.tiles,
-        dora_indicators: inputs.dora_indicators,
-        round_wind: inputs.round_wind,
-        seat_wind: inputs.seat_wind,
-        shape_penalty: ShapePenaltyMode::WithContext {
-            round_wind: inputs.round_wind,
-            seat_wind: inputs.seat_wind,
-            fixed_meld_count: inputs.fixed_meld_count,
-        },
-        unresolved_red_tile: None,
-    };
-    // node 間で共有している base 評価は複製せず、この node の decoration だけを載せた借用 view
-    // で比較する。共有している値そのものは書き換えない。
+    // base 評価と node 固有の decoration は深い Progress 比較とも共有する。
     let evaluations: Vec<_> = base
         .iter()
-        .map(|evaluation| {
-            let view = evaluation.view();
-            view.decorated(discard_decoration(&view, &state.counts, &context))
-        })
+        .map(|evaluation| decorated_evaluation(inputs, state, evaluation))
         .collect();
 
     let values: Vec<_> = evaluations
@@ -1909,17 +2084,35 @@ fn next_discard(inputs: &LookaheadInputs, state: &HandState) -> NextDiscard {
     };
     let evaluation = evaluations[index];
     NextDiscard {
-        // ツモ continuation は選ばれた1件だけ求める。2手目の打牌比較は既存の打点軸のままで、
-        // 候補ごとにツモ点数計算を走らせない。
         tsumo_continuation: tenpai_tsumo_value(inputs, state, evaluation),
         prospective_value: values[index],
-        // 受け入れを複製するのは、選んだ1件を診断へ載せるここだけ。
         evaluation: Some(evaluation.to_evaluation()),
     }
 }
 
+fn decorated_evaluation<'a>(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    evaluation: &'a DiscardEvaluation,
+) -> DiscardEvaluationView<'a> {
+    let context = DecorationContext {
+        tiles: &state.tiles,
+        dora_indicators: inputs.dora_indicators,
+        round_wind: inputs.round_wind,
+        seat_wind: inputs.seat_wind,
+        shape_penalty: ShapePenaltyMode::WithContext {
+            round_wind: inputs.round_wind,
+            seat_wind: inputs.seat_wind,
+            fixed_meld_count: inputs.fixed_meld_count,
+        },
+        unresolved_red_tile: None,
+    };
+    let view = evaluation.view();
+    view.decorated(discard_decoration(&view, &state.counts, &context))
+}
+
 // 仮想手牌1つ分の最良打牌と、その打牌後のテンパイの将来打点。
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct NextDiscard {
     evaluation: Option<DiscardEvaluation>,
     prospective_value: Option<u64>,
@@ -4506,6 +4699,200 @@ mod tests {
     }
 
     // ---- 2向聴から1向聴へ進む枝 ----
+
+    #[test]
+    fn three_shanten_progress_connects_to_existing_two_shanten_progress() {
+        // 2副露、concealed 8枚。全 Progress 枝を独立に waiting state へ組み直して照合する。
+        let tiles = ids(&[0, 4, 12, 24, 36, 48, 60, 108]);
+        let situation = visible_situation(&tiles, fixed(2), Vec::new(), None, None, tiles.clone());
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+        let evaluation = situation
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == TileType::new(27).unwrap())
+            .unwrap();
+        assert_eq!(evaluation.min_shanten_after_discard(), 3);
+        let branch = CandidateBranch::new(&inputs.root, evaluation).unwrap();
+        let facts = inputs.self_tsumo_facts().unwrap();
+        let mut expected = 0u64;
+        let mut differs_from_shallow = false;
+        assert!(!branch.same_shanten_drawables(&inputs).is_empty());
+        for accepted in &evaluation.acceptance_after_discard.tiles {
+            let draw = drawable(accepted);
+            for variant in branch.variants_of(&draw) {
+                let state = branch.state_after_draw(draw.tile, variant.tile).unwrap();
+                let mut visible = tiles.clone();
+                visible.push(variant.tile);
+                let path =
+                    SelfTsumoPath::immediate(variant.remaining, facts.unknown_tiles).unwrap();
+                let reached = LookaheadInputs::new(&state.tiles, fixed(2), &[], None, None)
+                    .with_visible_tiles(&visible)
+                    .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+                    .with_own_future_draws(path.terminal_own_future_draws(facts));
+                let base = reached.base_evaluations(&reached.root.counts, &reached.root.seen);
+                let evaluations: Vec<_> = base
+                    .iter()
+                    .map(|evaluation| {
+                        decorated_evaluation(&reached, &reached.root, evaluation).to_evaluation()
+                    })
+                    .collect();
+                let metrics: Vec<_> = evaluations
+                    .iter()
+                    .map(|evaluation| crate::selection::TwoShantenMetrics {
+                        expected_self_tsumo_value:
+                            two_shanten_progress_self_tsumo_value_for_candidate(
+                                &reached, evaluation,
+                            ),
+                    })
+                    .collect();
+                let selected =
+                    crate::selection::best_discard_selection_index_with_two_shanten_metrics(
+                        &evaluations,
+                        &forward_metrics(&reached, &evaluations),
+                        &[],
+                        &metrics,
+                    )
+                    .unwrap();
+                let next = &evaluations[selected];
+                let (actual, selected_value) = best_two_shanten_progress_discard(&reached).unwrap();
+                assert_eq!(&actual, next);
+                assert_eq!(
+                    Some(selected_value),
+                    metrics[selected].expected_self_tsumo_value
+                );
+                let shallow = next_discard(&reached, &reached.root).evaluation.unwrap();
+                differs_from_shallow |= shallow.discard != next.discard
+                    && two_shanten_progress_self_tsumo_value_for_candidate(&reached, &shallow)
+                        .unwrap()
+                        < selected_value;
+                assert_eq!(next.min_shanten_after_discard(), 2);
+                let (_, concealed) = split_discarded_tile(state.tiles.clone(), next).unwrap();
+                let waiting = LookaheadInputs::new(&concealed, fixed(2), &[], None, None)
+                    .with_visible_tiles(&visible)
+                    .with_tsumo_valuator(&FIXED_TSUMO_VALUATOR)
+                    .with_own_future_draws(path.terminal_own_future_draws(facts));
+                assert_eq!(
+                    waiting.self_tsumo_facts().unwrap().unknown_tiles,
+                    path.terminal_unknown_tiles(facts)
+                );
+                let value = awaiting_draw_two_shanten_progress_self_tsumo_value(
+                    &waiting,
+                    &awaiting_draw_acceptance(&concealed, fixed(2), &visible),
+                )
+                .unwrap();
+                expected += path.weighted_continuation(value);
+            }
+        }
+        assert!(expected > 0);
+        assert!(
+            differs_from_shallow,
+            "Progress value must override the shallow choice in this fixture"
+        );
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation),
+            Some(expected)
+        );
+        let cached = inputs.clone().with_three_shanten_progress_memo();
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(&cached, evaluation),
+            Some(expected)
+        );
+        let before = cached.three_shanten_progress_memo_stats();
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(&cached, evaluation),
+            Some(expected)
+        );
+        let after = cached.three_shanten_progress_memo_stats();
+        assert!(after.two_shanten_hits > before.two_shanten_hits);
+        assert_eq!(after.two_shanten_misses, before.two_shanten_misses);
+        let unknown =
+            self_tsumo_inputs(&situation, &UnknownTsumoValuator).with_three_shanten_progress_memo();
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(&unknown, evaluation),
+            None
+        );
+        let before = unknown.three_shanten_progress_memo_stats();
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(&unknown, evaluation),
+            None
+        );
+        assert!(
+            unknown.three_shanten_progress_memo_stats().two_shanten_hits > before.two_shanten_hits
+        );
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(
+                &self_tsumo_inputs(&situation, &UnknownTsumoValuator),
+                evaluation,
+            ),
+            None
+        );
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(
+                &super::LookaheadInputs::new(&tiles, fixed(2), &[], None, None),
+                evaluation,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn three_shanten_progress_rejects_two_shanten_candidates() {
+        let tiles = two_shanten_candidate_hand();
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        assert_eq!(
+            three_shanten_progress_self_tsumo_value_for_candidate(
+                &self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR),
+                &situation.evaluations[0],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn three_shanten_memo_preserves_physical_tiles_seen_discards_and_horizon() {
+        let tiles = two_shanten_candidate_hand();
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        let inputs =
+            self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR).with_three_shanten_progress_memo();
+        let evaluation = &situation.evaluations[0];
+        let value = cached_two_shanten_progress(&inputs, evaluation);
+        assert!(value.is_some());
+        let mut reordered = inputs.clone();
+        reordered.root.tiles.reverse();
+        assert_eq!(cached_two_shanten_progress(&reordered, evaluation), value);
+        assert_eq!(
+            inputs.three_shanten_progress_memo_stats().two_shanten_hits,
+            1
+        );
+
+        let mut shorter = inputs.clone();
+        shorter.own_future_draws = Some(0);
+        assert_eq!(cached_two_shanten_progress(&shorter, evaluation), Some(0));
+        assert_eq!(
+            inputs
+                .three_shanten_progress_memo_stats()
+                .two_shanten_misses,
+            2
+        );
+
+        let key = inputs.root.memo_key();
+        let mut other = inputs.root.clone();
+        other.seen = other.seen.after_discard(evaluation.discard);
+        assert_ne!(key, other.memo_key());
+        let mut other = inputs.root.clone();
+        other.discarded.push(tiles[0]);
+        assert_ne!(key, other.memo_key());
+        let mut other = inputs.root.clone();
+        other.red_five_seen[4] = !other.red_five_seen[4];
+        assert_ne!(key, other.memo_key());
+        let mut other = inputs.root.clone();
+        other.tiles[1] = TileId::new(52).unwrap(); // 黒5pと赤5pを混ぜない
+        assert_ne!(key, other.memo_key());
+        // scorerの設定変更時は以前のscalar cacheを引き継がない。
+        let changed = inputs.with_tsumo_valuator(&UnknownTsumoValuator);
+        assert!(changed.progress_memo.is_none());
+        assert_eq!(cached_two_shanten_progress(&changed, evaluation), None);
+    }
 
     // どのテンパイのツモ打点も確定できない検証用の評価器。
     struct UnknownTsumoValuator;
