@@ -85,7 +85,7 @@ cargo run -p bot-scenario -- \
 
 `--three-shanten-progress-self-tsumo` は diagnostics-only です。3→2、2→1 は Progress のみを追い、1向聴に到達した後は既存 ExpectedSelfTsumoValue (Progress + SameShanten) を再利用します。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。production の WeightedNextAcceptance や ShapePenalty の比較順は変わりません。
 
-3→2ツモ後の次打牌は、全合法候補の2向聴 Progress self-tsumo valueを計算して、production と共通の2向聴 comparatorで選びます。Shanten / isolated等の先行軸と同値時の後続軸も既存どおりですが、2向聴 Full gateは呼びません。比較cohortの値が未確定なら、その枝の値もunknownです。
+3→2ツモ後の次打牌は、production と共通の2向聴 comparatorで選びます。先行軸で敗退が確定した候補のProgress valueと、Progressで単独勝者が確定した場合の後続forward metricは遅延評価で省略します。同値/unknown時はcohort全体の後続軸を評価するため、全候補を先に評価した場合と値・選択は一致します。Shanten / isolated等の先行軸も既存どおりで、2向聴 Full gateは呼びません。比較cohortの値が未確定なら、その枝の値もunknownです。
 
 ```sh
 cargo run --release -p bot-scenario -- \

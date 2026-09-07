@@ -1161,6 +1161,7 @@ pub fn three_shanten_progress_self_tsumo_value_for_candidate(
 }
 
 // 3→2の到達先では全合法打牌を列挙し、既存 production の2向聴 metric comparator を使う。
+// 先行軸で敗退が確定した候補だけを外し、Progressで決着すれば後続metricを作らない。
 // Full gate は呼ばず、Progress の値だけを比較する。unknown cohort の値は確定しない。
 fn best_two_shanten_progress_discard(inputs: &LookaheadInputs) -> Option<(DiscardEvaluation, u64)> {
     let state = &inputs.root;
@@ -1168,6 +1169,12 @@ fn best_two_shanten_progress_discard(inputs: &LookaheadInputs) -> Option<(Discar
     let evaluations: Vec<_> = base
         .iter()
         .map(|evaluation| decorated_evaluation(inputs, state, evaluation).to_evaluation())
+        .collect();
+    let targets = forward_target_mask(&evaluations);
+    let evaluations: Vec<_> = evaluations
+        .into_iter()
+        .zip(targets)
+        .filter_map(|(evaluation, target)| target.then_some(evaluation))
         .collect();
     let metrics: Vec<_> = evaluations
         .iter()
@@ -1179,13 +1186,23 @@ fn best_two_shanten_progress_discard(inputs: &LookaheadInputs) -> Option<(Discar
         &evaluations,
         &metrics,
     );
-    let forward = forward_metrics(inputs, &evaluations);
-    let selected = crate::selection::best_discard_selection_index_with_two_shanten_metrics(
+    let selected = match crate::selection::two_shanten_winner_without_forward_metrics(
         &evaluations,
-        &forward,
-        &[],
         &metrics,
-    )?;
+    ) {
+        Some(selected) => selected,
+        None => {
+            // 同値/unknown時はcohort全体の後続metricを構築する。Progress下位の候補も
+            // prospective value軸のcohort単位unknown解決に必要なので、ここでは落とさない。
+            let forward = forward_metrics(inputs, &evaluations);
+            crate::selection::best_discard_selection_index_with_two_shanten_metrics(
+                &evaluations,
+                &forward,
+                &[],
+                &metrics,
+            )?
+        }
+    };
     Some((
         evaluations[selected].clone(),
         metrics[selected].expected_self_tsumo_value?,
