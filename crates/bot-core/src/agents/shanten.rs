@@ -1976,6 +1976,7 @@ mod tests {
         consumed: Vec<u8>,
         round_wind: Option<u8>,
         seat_wind: Option<u8>,
+        dora_indicators: Vec<u8>,
         reached: [bool; 4],
         extra_visible: Vec<u8>,
         own_discards: Vec<u8>,
@@ -2003,6 +2004,7 @@ mod tests {
                 consumed: consumed.to_vec(),
                 round_wind: Some(27),
                 seat_wind: Some(27),
+                dora_indicators: Vec::new(),
                 reached: [false; 4],
                 extra_visible: Vec::new(),
                 own_discards: Vec::new(),
@@ -2019,6 +2021,11 @@ mod tests {
         fn with_winds(mut self, round_wind: Option<u8>, seat_wind: Option<u8>) -> Self {
             self.round_wind = round_wind;
             self.seat_wind = seat_wind;
+            self
+        }
+
+        fn with_dora_indicators(mut self, dora_indicators: &[u8]) -> Self {
+            self.dora_indicators = dora_indicators.to_vec();
             self
         }
 
@@ -2081,6 +2088,7 @@ mod tests {
             let mut visible = hand.clone();
             visible.extend(self.drawn_tile.map(tile));
             visible.push(tile(self.target));
+            visible.extend(self.dora_indicators.iter().map(|&value| tile(value)));
             visible.extend(own_discards);
             visible.extend(self.own_melds.iter().flat_map(|meld| meld.tiles().to_vec()));
             visible.extend(
@@ -2097,7 +2105,10 @@ mod tests {
             GameContext::from_parts_with_melds(
                 self.drawn_tile.map(tile),
                 hand,
-                vec![],
+                self.dora_indicators
+                    .iter()
+                    .map(|&value| tile(value))
+                    .collect(),
                 self.round_wind.and_then(TileType::new),
                 self.seat_wind.and_then(TileType::new),
                 visible,
@@ -2140,6 +2151,28 @@ mod tests {
                 remaining.remove(position);
             }
             remaining
+        }
+
+        fn post_call_meld(&self) -> crate::meld::Meld {
+            let mut tiles = vec![tile(self.target)];
+            tiles.extend(self.consumed.iter().map(|&value| tile(value)));
+            crate::meld::Meld::new(self.kind.meld_kind(), tiles, Some(tile(self.target)))
+        }
+
+        fn post_call_context(&self) -> GameContext {
+            let ctx = self.context();
+            let mut melds = ctx.own_melds().unwrap().to_vec();
+            melds.push(self.post_call_meld());
+            ctx.with_own_hand_state(self.post_call_tiles(), melds)
+                .expect("鳴き後 context")
+        }
+
+        fn post_call_actions(&self, forbidden_discards: &[TileType]) -> Vec<LegalAction> {
+            self.post_call_tiles()
+                .into_iter()
+                .filter(|tile| !forbidden_discards.contains(&tile.tile_type()))
+                .map(|tile| LegalAction::Dahai { tile })
+                .collect()
         }
     }
 
@@ -2323,28 +2356,22 @@ mod tests {
     }
 
     #[test]
-    fn post_call_evaluation_matches_the_shared_discard_helper() {
-        // 診断が持つ鳴き後の打牌評価は、本番の打牌評価 helper の結果そのものである。
+    fn post_call_evaluation_matches_the_production_discard_selector() {
+        // 診断が持つ鳴き後の打牌評価は、鳴き後 context と合法 Dahai を通常の production
+        // selector へ渡した結果そのものである。
         let reaction = dragon_pon_reaction();
-        let ctx = reaction.context();
         let candidate = assert_single_call_candidate(
             &reaction,
             &reaction.call(),
             CallDecisionReason::EligibleTenpai,
         );
 
-        let post_call_tiles: Vec<TileId> = PON_HAND
-            .iter()
-            .filter(|value| !PON_CONSUMED.contains(value))
-            .map(|&value| tile(value))
-            .collect();
-        let expected =
-            crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count(
-                &ctx,
-                &post_call_tiles,
-                FixedMeldCount::new(1).unwrap(),
-                candidate.post_call_forbidden_discards.as_deref().unwrap(),
-            );
+        let forbidden = candidate.post_call_forbidden_discards.as_deref().unwrap();
+        let expected = select_discard_action_with_evaluation(
+            &reaction.post_call_context(),
+            &reaction.post_call_actions(forbidden),
+        )
+        .evaluation;
 
         assert_eq!(candidate.post_call_discard, expected);
         assert!(expected.is_some());
@@ -2467,6 +2494,99 @@ mod tests {
         assert_eq!(candidate.post_call_shanten(), Some(CALL_TENPAI_SHANTEN));
         assert_eq!(candidate.can_ron(), Some(true));
         assert_eq!(candidate.live_waits_have_yaku(), Some(true));
+        assert_eq!(
+            candidate.post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::StrongTenpaiAgainstHighOpenHand,
+            })
+        );
+    }
+
+    #[test]
+    fn post_call_plan_uses_the_same_current_tenpai_selection_as_production() {
+        // 白 Pon 済みの 34m 99m 235p 345s。5m を Chi すると、打2p / 打5p のどちらでも
+        // テンパイになる。1手比較は8枚待ちの打5pを選ぶが、ドラ5pを残して三色になる打2pを
+        // current-tenpai offense込みの production比較が選ぶ局面。
+        let reaction = CallReaction::chi(&[8, 12, 32, 33, 40, 44, 53, 80, 84, 89], 17, &[8, 12])
+            .with_dora_indicators(&[48])
+            .with_own_melds(vec![honor_pon_meld(124)])
+            .with_opponent_melds(high_open_hand_melds());
+        let candidate = assert_single_call_candidate(
+            &reaction,
+            &reaction.call(),
+            CallDecisionReason::EligibleTenpai,
+        );
+
+        let ctx = reaction.context();
+        let post_call_tiles = reaction.post_call_tiles();
+        let forbidden = candidate
+            .post_call_forbidden_discards
+            .as_deref()
+            .expect("喰い替え禁止牌を評価済み");
+        let one_step =
+            crate::discard_selection::select_best_one_step_discard_evaluation_with_fixed_meld_count(
+                &ctx,
+                &post_call_tiles,
+                candidate.post_call_fixed_meld_count.unwrap(),
+                forbidden,
+            )
+            .expect("1手比較の best");
+
+        let production = select_discard_action_with_evaluation(
+            &reaction.post_call_context(),
+            &reaction.post_call_actions(forbidden),
+        );
+
+        assert_eq!(one_step.discard.to_mjai_string(), "5p");
+        assert_eq!(one_step.min_shanten_after_discard(), CALL_TENPAI_SHANTEN);
+        assert_eq!(production.action, Some(dahai(40)));
+        assert_eq!(
+            production
+                .evaluation
+                .as_ref()
+                .unwrap()
+                .min_shanten_after_discard(),
+            CALL_TENPAI_SHANTEN
+        );
+        assert_ne!(
+            one_step.discard,
+            production.evaluation.as_ref().unwrap().discard
+        );
+        assert!(production.tenpai_wait.is_some());
+        assert!(production.tenpai_offense_value.is_some());
+        assert_eq!(
+            candidate.post_call_discard.as_ref(),
+            production.evaluation.as_ref()
+        );
+        assert_eq!(
+            candidate.post_call_discard.as_ref().unwrap().discard,
+            tile(40).tile_type()
+        );
+
+        // one-step best の打5pを Push/Pull へ渡すと弱いテンパイとして Fold になる。Call 診断が
+        // StrongTenpai / Push なのは production best の打2pを評価した結果である。
+        let post_call_context = reaction.post_call_context();
+        let post_call_actions = reaction.post_call_actions(forbidden);
+        let one_step_wait = crate::discard_selection::selected_discard_tenpai_wait_availability(
+            &post_call_context,
+            &one_step,
+        )
+        .expect("one-step best の待ち");
+        let one_step_inputs = crate::push_pull::push_pull_inputs_from_selected_tenpai(
+            &post_call_context,
+            &one_step,
+            &one_step_wait,
+            None,
+            &post_call_actions,
+        );
+        assert_eq!(
+            decide_push_pull(&one_step_inputs),
+            PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::WeakTenpaiAgainstHighOpenHand,
+            }
+        );
         assert_eq!(
             candidate.post_call_push_pull,
             Some(PushPullDecision {
