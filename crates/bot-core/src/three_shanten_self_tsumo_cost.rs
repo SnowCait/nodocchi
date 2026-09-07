@@ -14,6 +14,7 @@ use crate::prospective_value::ProductionProspectiveValuator;
 /// 全合法3向聴候補の値と実測時間。unknown は `None` のまま保持する。
 #[derive(Debug, Clone)]
 pub struct ThreeShantenProgressSelfTsumoCost {
+    pub memo: bot_logic::ProgressMemoStats,
     pub candidates: Vec<(TileType, Option<u64>, Duration)>,
     /// 入力構築を除く全候補の評価時間。候補間では既存 memo を共有する。
     pub total: Duration,
@@ -31,7 +32,8 @@ pub fn measure_three_shanten_progress_self_tsumo(
         &legal.tiles,
         &valuator,
         LookaheadDiagnosticScope::TWO_SHANTEN_SELF_TSUMO,
-    );
+    )
+    .with_three_shanten_progress_memo();
     let started = Instant::now();
     let candidates = legal
         .evaluations
@@ -44,6 +46,7 @@ pub fn measure_three_shanten_progress_self_tsumo(
         })
         .collect();
     ThreeShantenProgressSelfTsumoCost {
+        memo: inputs.three_shanten_progress_memo_stats(),
         candidates,
         total: started.elapsed(),
     }

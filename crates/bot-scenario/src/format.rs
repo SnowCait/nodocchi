@@ -918,12 +918,23 @@ pub fn format_three_shanten_progress_self_tsumo_cost(
         "Three-shanten progress self-tsumo value".to_string(),
         "  diagnostics only, not connected to discard selection".to_string(),
         "  3/2-shanten: Progress only; 1-shanten: existing Progress + SameShanten".to_string(),
+        "  2-shanten discard selection: Progress self-tsumo value (existing comparator)"
+            .to_string(),
         format!("  evaluated candidates: {}", cost.candidates.len()),
         format!(
             "  total elapsed: {:.3} ms",
             cost.total.as_secs_f64() * 1000.0
         ),
     ];
+    lines.push(format!(
+        "  memo hits / misses: two-shanten {} / {}, iishanten {} / {}, next-discard {} / {}",
+        cost.memo.two_shanten_hits,
+        cost.memo.two_shanten_misses,
+        cost.memo.iishanten_hits,
+        cost.memo.iishanten_misses,
+        cost.memo.next_discard_hits,
+        cost.memo.next_discard_misses
+    ));
     lines.extend(format_self_tsumo_facts(facts));
     for (discard, value, elapsed) in &cost.candidates {
         lines.push(format!(
@@ -3331,6 +3342,7 @@ mod tests {
     #[test]
     fn three_shanten_progress_formats_known_and_unknown_values() {
         let cost = bot_core::ThreeShantenProgressSelfTsumoCost {
+            memo: Default::default(),
             candidates: vec![
                 (
                     bot_logic::TileType::new(21).unwrap(),
