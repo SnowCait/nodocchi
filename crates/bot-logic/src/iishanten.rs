@@ -53,19 +53,54 @@ pub(crate) fn classify_standard_iishanten_shape_with_standard_shanten(
         return IishantenShape::Unknown;
     }
 
-    classify_standard_iishanten_shape_exact(counts)
+    if let Some(shape) = SHAPE_MEMO.with_borrow(|memo| memo.get(counts).copied()) {
+        return shape;
+    }
+    let shape = SHARED_DECOMPOSITIONS.with_borrow_mut(|memo| {
+        if memo.len() >= SHAPE_MEMO_CAPACITY {
+            memo.clear();
+        }
+        classify_standard_iishanten_shape_with_memo(counts, memo)
+    });
+    SHAPE_MEMO.with_borrow_mut(|memo| {
+        if memo.len() >= SHAPE_MEMO_CAPACITY {
+            memo.clear();
+        }
+        memo.insert(*counts, shape);
+    });
+    shape
+}
+
+// 13枚かつ通常形1向聴のguardを通った後の分解結果はTileCountsだけで決まる。
+// seen・物理牌ID・副露は分類器の入力ではない。副露手の除外は既存の呼び出し側が行う。
+// 上限は保存量だけを制限し、eviction後も同じexact分解で再計算する。
+const SHAPE_MEMO_CAPACITY: usize = 1 << 17;
+thread_local! {
+    static SHAPE_MEMO: std::cell::RefCell<HashMap<TileCounts, IishantenShape, CountHasherBuilder>> =
+        std::cell::RefCell::new(HashMap::default());
+    // 部分手牌と残りの分解目標(Target)だけで決まる既存can_decomposeの結果も共有する。
+    static SHARED_DECOMPOSITIONS: std::cell::RefCell<DecomposeMemo> =
+        std::cell::RefCell::new(DecomposeMemo::default());
 }
 
 /// 13枚かつ通常形一向聴であることが確定した手牌を、正確な牌分解で形分類する。
 ///
 /// 複数の分解が可能な場合は `Complete > Headless > Kuttsuki` の優先順位で一つに決定する。
+#[cfg(test)]
 fn classify_standard_iishanten_shape_exact(counts: &TileCounts) -> IishantenShape {
     let mut memo = DecomposeMemo::default();
-    if can_decompose(*counts, Target::COMPLETE, &mut memo) {
+    classify_standard_iishanten_shape_with_memo(counts, &mut memo)
+}
+
+fn classify_standard_iishanten_shape_with_memo(
+    counts: &TileCounts,
+    memo: &mut DecomposeMemo,
+) -> IishantenShape {
+    if can_decompose(*counts, Target::COMPLETE, memo) {
         IishantenShape::Complete
-    } else if can_decompose(*counts, Target::HEADLESS, &mut memo) {
+    } else if can_decompose(*counts, Target::HEADLESS, memo) {
         IishantenShape::Headless
-    } else if can_decompose(*counts, Target::KUTTSUKI, &mut memo) {
+    } else if can_decompose(*counts, Target::KUTTSUKI, memo) {
         IishantenShape::Kuttsuki
     } else {
         IishantenShape::Weak
@@ -490,6 +525,49 @@ mod tests {
         assert_eq!(
             classify_standard_iishanten_shape_with_standard_shanten(&hand, 0),
             IishantenShape::Unknown
+        );
+    }
+
+    #[test]
+    fn structural_shape_memo_matches_exact_and_keeps_eligibility_guards() {
+        let hand = counts(&[
+            "1m", "2m", "3m", "4m", "5m", "6m", "E", "E", "2p", "3p", "5s", "6s", "C",
+        ]);
+        SHAPE_MEMO.with_borrow_mut(|memo| memo.clear());
+        SHARED_DECOMPOSITIONS.with_borrow_mut(|memo| memo.clear());
+        let expected = classify_standard_iishanten_shape_exact(&hand);
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 1),
+            expected
+        );
+        assert_eq!(
+            SHAPE_MEMO.with_borrow(|memo| memo.get(&hand).copied()),
+            Some(expected)
+        );
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 1),
+            expected
+        );
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 0),
+            IishantenShape::Unknown
+        );
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 2),
+            IishantenShape::Unknown
+        );
+        // 保存された結果がなくても同じexact分解で復元される。
+        SHAPE_MEMO.with_borrow_mut(|memo| memo.clear());
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 1),
+            expected
+        );
+        assert!(!SHARED_DECOMPOSITIONS.with_borrow(|memo| memo.is_empty()));
+        SHAPE_MEMO.with_borrow_mut(|memo| memo.clear());
+        SHARED_DECOMPOSITIONS.with_borrow_mut(|memo| memo.clear());
+        assert_eq!(
+            classify_standard_iishanten_shape_with_standard_shanten(&hand, 1),
+            expected
         );
     }
 

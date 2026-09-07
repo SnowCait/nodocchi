@@ -122,11 +122,18 @@ impl DiscardEvaluationView<'_> {
 
     /// view から打牌候補評価を作る。受け入れの複製はここでだけ行う。
     pub(crate) fn to_evaluation(self) -> DiscardEvaluation {
+        self.to_evaluation_with_acceptance(self.acceptance_after_discard.clone())
+    }
+
+    fn to_evaluation_with_acceptance(
+        self,
+        acceptance_after_discard: EffectiveAcceptance,
+    ) -> DiscardEvaluation {
         DiscardEvaluation {
             discard: self.discard,
             count_before_discard: self.count_before_discard,
             shanten_after_discard: self.shanten_after_discard,
-            acceptance_after_discard: self.acceptance_after_discard.clone(),
+            acceptance_after_discard,
             shape_penalty: self.shape_penalty,
             floating_tile_value: self.floating_tile_value,
             discarded_dora_count: self.discarded_dora_count,
@@ -1445,6 +1452,17 @@ pub(crate) struct CandidateSeen {
 }
 
 impl CandidateSeen {
+    /// base評価の全候補の受け入れに影響しないseenだけを除く。候補打牌を数える契約は保持する。
+    pub(crate) fn for_acceptance_types(self, relevant: &[bool; TileType::COUNT]) -> Self {
+        let mut projected = self;
+        for (count, relevant) in projected.base.iter_mut().zip(relevant) {
+            if !relevant {
+                *count = 0;
+            }
+        }
+        projected
+    }
+
     pub(crate) const fn hand_only() -> Self {
         Self {
             base: [0u8; TileType::COUNT],
@@ -1490,9 +1508,20 @@ impl CandidateSeen {
 // 打牌候補1件分の受け入れを求める経路。
 //
 // 既定は既存の受け入れ計算そのもの ([`CalculatedAcceptance`]) で、2手先評価だけが1回の探索の
-// 間に同じ入力の結果を共有する実装を渡す。受け入れの求め方そのものはどちらの経路でも
-// [`calculate_acceptance_with_fixed_melds_and_seen`] 1本で、打牌評価本体は共有する。
+// 間に同じ入力の結果を共有する実装を渡す。構造が既知ならその受け入れへ既存の残枚数計算だけを
+// 適用できる。受け入れ牌種・向聴数の判定と打牌評価本体は既存生成経路を共有する。
 pub(crate) trait DiscardAcceptance {
+    /// 構造が既知の候補。既定経路も通常のacceptanceと同じ値を返す。
+    fn acceptance_from_structure(
+        &self,
+        after_discard: &TileCounts,
+        fixed_meld_count: FixedMeldCount,
+        additional_seen: &[u8; TileType::COUNT],
+        _structural: &EffectiveAcceptance,
+    ) -> EffectiveAcceptance {
+        self.acceptance(after_discard, fixed_meld_count, additional_seen)
+    }
+
     fn acceptance(
         &self,
         after_discard: &TileCounts,
@@ -1594,6 +1623,35 @@ pub(crate) fn evaluate_discards_with_seen_and_acceptance(
     }
 
     evaluations
+}
+
+/// 同じcountsとfixed meld countに対する、追加seenなしのbase評価を再利用する。
+/// seenが影響するのはacceptanceのremainingだけ。構造・形判定・候補順は既存生成結果を保つ。
+pub(crate) fn evaluate_discards_from_structure(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    seen: &CandidateSeen,
+    structure: &[DiscardEvaluation],
+    acceptance: &dyn DiscardAcceptance,
+) -> Vec<DiscardEvaluation> {
+    structure
+        .iter()
+        .map(|evaluation| {
+            let mut after_discard = *counts;
+            after_discard
+                .remove(evaluation.discard)
+                .expect("structural candidate belongs to counts");
+            let acceptance_after_discard = acceptance.acceptance_from_structure(
+                &after_discard,
+                fixed_meld_count,
+                &seen.additional_seen(evaluation.discard),
+                &evaluation.acceptance_after_discard,
+            );
+            evaluation
+                .view()
+                .to_evaluation_with_acceptance(acceptance_after_discard)
+        })
+        .collect()
 }
 
 // 打牌後の通常形一向聴の形分類。分類器は門前13枚専用なので、副露済み面子がある手牌は
