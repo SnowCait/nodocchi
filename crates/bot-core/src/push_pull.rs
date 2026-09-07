@@ -600,6 +600,30 @@ pub(crate) fn push_pull_inputs_from_context_with_evaluation(
     )
 }
 
+/// 仮想局面で選択済みのテンパイ打牌と待ちを利用して押し引き入力を構築する。
+///
+/// Chi / Pon 後の候補評価のように、通常打牌 selection の結果を既存 Push/Pull policy へ接続する
+/// 入口。向聴・受け入れは `evaluation`、待ちとフリテンは `selected_tenpai_wait`、通常打牌選択が
+/// 計算済みなら攻撃打点は `selected_tenpai_offense_value` をそのまま使う。threat classification と
+/// 選択打牌の safety は通常の入力構築と同じ経路へ委ねる。
+pub(crate) fn push_pull_inputs_from_selected_tenpai(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+    selected_tenpai_wait: &TenpaiWaitAvailability,
+    selected_tenpai_offense_value: Option<TenpaiOffenseValue>,
+    legal_actions: &[LegalAction],
+) -> PushPullInputs {
+    push_pull_inputs_from_threat_facts(
+        context,
+        player_threat_facts_from_context(context),
+        Some(evaluation),
+        None,
+        Some(selected_tenpai_wait),
+        selected_tenpai_offense_value,
+        legal_actions,
+    )
+}
+
 /// 構築済みの脅威 facts と `DiscardEvaluation` から押し引き入力を構築する crate-private helper。
 ///
 /// リーチ者数と親リーチ判定は `player_threats` だけを source of truth にする

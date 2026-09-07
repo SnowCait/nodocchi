@@ -24,21 +24,22 @@
 //! | 面子の形の検証 | [`Meld::shape`] |
 //! | 喰い替え禁止牌 | [`forbidden_discards_after_call`] |
 //! | 副露込みの向聴数 | [`calculate_shanten_with_fixed_melds`] |
-//! | 鳴き後の打牌候補 | [`post_call_discard_evaluations`] |
-//! | 1向聴の打牌比較 | [`select_best_iishanten_post_call_discard`] |
+//! | 鳴き後の打牌選択 | [`select_discard_action_with_evaluation`] |
+//! | 2向聴 Call observation の打牌候補 | [`post_call_discard_evaluations`] |
 //! | Pass の継続評価 | [`awaiting_draw_expected_self_tsumo_value`] |
 //! | 2向聴 Pass の継続評価 | [`awaiting_draw_two_shanten_expected_self_tsumo_value`] |
 //! | 待ちと残枚数 | [`DiscardEvaluation::acceptance_after_discard`] / [`TenpaiWaitAvailability`] |
 //! | ロン可否 | [`TenpaiWaitAvailability::can_ron`] |
 //! | 役の有無 | [`evaluate_tenpai_hand_value`] |
+//! | threat に対する押し引き | [`decide_push_pull`] |
 //!
 //! 向聴・受け入れ・待ち・フリテン・役・点数をこの層で計算し直さない。
 //!
 //! # 鳴き後の打牌
 //!
-//! 鳴いた直後に切れない牌 (喰い替え) は戦術ではなく合法手の制約なので、鳴き後の打牌候補から
-//! 先に取り除いてから既存の打牌比較へ渡す。したがって「喰い替え禁止牌を切ればテンパイする」を
-//! 理由に鳴くことはない。鳴き専用の比較順は持たない。
+//! 鳴いた直後に切れない牌 (喰い替え) は戦術ではなく合法手の制約なので、鳴き後の仮想合法
+//! `Dahai` から先に取り除き、残った候補を通常打牌の production selector へ渡す。したがって
+//! 「喰い替え禁止牌を切ればテンパイする」を理由に鳴くことはなく、鳴き専用の比較順も持たない。
 //!
 //! # 成立条件
 //!
@@ -50,6 +51,7 @@
 //! AND can_ron == Some(true)
 //! AND 生きた待ちの残枚数合計 >= CALL_MIN_LIVE_WAIT_REMAINING
 //! AND 残枚数 > 0 の全ての和了牌 variant に役がある
+//! AND 鳴き後の最良打牌を既存 Push/Pull policy が Push と判定する
 //! ```
 //!
 //! 即テンパイ候補は従来どおり最優先する。それが無い場合だけ Call 後1向聴の ExpectedSelfTsumoValue
@@ -101,12 +103,15 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::damaten_value::damaten_baseline_context;
 use crate::discard_selection::{
-    LookaheadDiagnosticScope, lookahead_inputs_with_own_future_draws,
+    DiscardActionSelection, LookaheadDiagnosticScope, lookahead_inputs_with_own_future_draws,
     post_call_discard_evaluations, select_best_iishanten_post_call_discard,
-    select_best_one_step_evaluation,
+    select_discard_action_with_evaluation,
 };
 use crate::kuikae::forbidden_discards_after_call;
 use crate::prospective_value::ProductionProspectiveValuator;
+use crate::push_pull::{
+    PushPullDecision, PushPullMode, decide_push_pull, push_pull_inputs_from_selected_tenpai,
+};
 
 /// 鳴きを検討する現在の向聴数。
 pub const CALL_CURRENT_SHANTEN: i8 = 1;
@@ -184,6 +189,10 @@ pub enum CallDecisionReason {
     YakuMissing,
     /// 残枚数 > 0 の和了牌 variant に、役の有無を確定できないものがある。
     HandValueUnknown,
+    /// 鳴き後の最良打牌を既存 Push/Pull policy が Push と判定しない。
+    PostCallNotPush,
+    /// 鳴き後の仮想局面を既存の通常打牌・Push/Pull policy へ渡せない。
+    PostCallEvaluationUnavailable,
 }
 
 /// `Call -> 打牌 -> 1向聴` と Pass の self-tsumo continuation 比較結果。
@@ -322,6 +331,8 @@ pub struct CallCandidateDiagnostic {
     pub post_call_wait: Option<TenpaiWaitAvailability>,
     /// 鳴き後テンパイの和了牌の物理牌ごとの役診断。役を評価しなかった場合は `None`。
     pub post_call_wait_yaku: Option<Vec<CallWaitYakuDiagnostic>>,
+    /// 既存 Push/Pull policy による鳴き後の最良打牌の判定。そこまで評価しなかった場合は `None`。
+    pub post_call_push_pull: Option<PushPullDecision>,
     /// 鳴いても1向聴のままの候補についてだけ求める観測用の受け入れ比較。対象外の候補と、
     /// そこまで評価が進まなかった候補では `None`。
     pub iishanten_acceptance: Option<CallIishantenAcceptanceDiagnostic>,
@@ -503,6 +514,7 @@ fn evaluate_call_candidate(
         post_call_discard: None,
         post_call_wait: None,
         post_call_wait_yaku: None,
+        post_call_push_pull: None,
         iishanten_acceptance: None,
         iishanten_self_tsumo: None,
         two_shanten_self_tsumo: None,
@@ -583,36 +595,32 @@ fn evaluate_call_conditions(
         return CallDecisionReason::CurrentShantenNotOne;
     }
 
-    // 喰い替え禁止牌は合法手の制約なので、打牌候補を比較する前に取り除く。
+    // 喰い替え禁止牌は鳴き直後だけの合法手制約なので、仮想 legal actions から先に除く。
+    // 残った合法 Dahai は実際の通常打牌と同じ production selector へ渡す。
     let forbidden_discards = forbidden_discards_after_call(&meld);
-    let evaluations = post_call_discard_evaluations(
-        ctx,
-        &post_call_tiles,
-        post_call_fixed_meld_count,
-        &forbidden_discards,
-    );
+    let legal_actions = post_call_legal_dahai_actions(&post_call_tiles, &forbidden_discards);
     candidate.post_call_forbidden_discards = Some(forbidden_discards);
-
-    let Some(one_step_evaluation) = select_best_one_step_evaluation(&evaluations).cloned() else {
+    let mut post_call_melds = ctx.own_melds().unwrap_or_default().to_vec();
+    post_call_melds.push(meld.clone());
+    let Some(post_call_context) = ctx.with_own_hand_state(post_call_tiles.clone(), post_call_melds)
+    else {
+        return CallDecisionReason::PostCallEvaluationUnavailable;
+    };
+    let selection = select_discard_action_with_evaluation(&post_call_context, &legal_actions);
+    let Some(evaluation) = selection.evaluation.as_ref() else {
         return CallDecisionReason::NoPostCallDiscard;
     };
 
-    if one_step_evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
-        let mut evaluation = one_step_evaluation;
+    if evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
         if evaluation.min_shanten_after_discard() == CALL_CURRENT_SHANTEN {
-            let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
-            melds.push(meld.clone());
-            if let Some((selected, call_value)) =
-                select_best_iishanten_post_call_discard(ctx, &post_call_tiles, &melds, &evaluations)
-            {
-                evaluation = selected;
-                candidate.iishanten_self_tsumo = Some(CallIishantenSelfTsumoDiagnostic {
-                    reaction_source_player: ctx.reaction_source_player(),
-                    pass_expected_self_tsumo_value: None,
-                    call_expected_self_tsumo_value: call_value,
-                    comparison: CallIishantenComparison::Unknown,
-                });
-            }
+            candidate.iishanten_self_tsumo = Some(CallIishantenSelfTsumoDiagnostic {
+                reaction_source_player: ctx.reaction_source_player(),
+                pass_expected_self_tsumo_value: None,
+                call_expected_self_tsumo_value: selection
+                    .iishanten_forward_metrics
+                    .and_then(|metrics| metrics.expected_self_tsumo_value),
+                comparison: CallIishantenComparison::Unknown,
+            });
         }
 
         // production が選んだ打牌評価を診断にもそのまま載せる。
@@ -622,30 +630,79 @@ fn evaluate_call_conditions(
                 &counts,
                 current_fixed_meld_count,
                 &meld,
-                &evaluation,
+                evaluation,
             );
         }
-        candidate.post_call_discard = Some(evaluation);
+        candidate.post_call_discard = Some(evaluation.clone());
         return CallDecisionReason::PostCallNotTenpai;
     }
-    let evaluation = one_step_evaluation;
 
-    let Some(wait) = discard_tenpai_wait_availability(
-        &TileCounts::from_tiles(post_call_tiles.iter().copied()),
-        post_call_fixed_meld_count,
-        &evaluation,
-        &OwnDiscards::from_optional_river(ctx.own_discards()),
-        ctx.history_furiten_after_own_discard(),
-    ) else {
-        candidate.post_call_discard = Some(evaluation);
+    let Some(wait) = selection.tenpai_wait.clone().or_else(|| {
+        discard_tenpai_wait_availability(
+            &TileCounts::from_tiles(post_call_tiles.iter().copied()),
+            post_call_fixed_meld_count,
+            evaluation,
+            &OwnDiscards::from_optional_river(ctx.own_discards()),
+            ctx.history_furiten_after_own_discard(),
+        )
+    }) else {
+        candidate.post_call_discard = Some(evaluation.clone());
         return CallDecisionReason::PostCallNotTenpai;
     };
 
     let reason =
-        evaluate_post_call_conditions(ctx, &meld, &post_call_tiles, &evaluation, &wait, candidate);
-    candidate.post_call_discard = Some(evaluation);
+        evaluate_post_call_conditions(ctx, &meld, &post_call_tiles, evaluation, &wait, candidate);
+    let reason = if reason == CallDecisionReason::EligibleTenpai {
+        let decision =
+            post_call_push_pull_decision(&post_call_context, &selection, &wait, &legal_actions);
+        candidate.post_call_push_pull = Some(decision);
+        if decision.mode == PushPullMode::Push {
+            CallDecisionReason::EligibleTenpai
+        } else {
+            CallDecisionReason::PostCallNotPush
+        }
+    } else {
+        reason
+    };
+    candidate.post_call_discard = Some(evaluation.clone());
     candidate.post_call_wait = Some(wait);
     reason
+}
+
+// 鳴き後に切れる全物理牌を、喰い替え禁止牌だけ除いて仮想 legal actions にする。牌種の比較と
+// 同牌種内の赤黒 preference は通常打牌 selector に委ねる。
+fn post_call_legal_dahai_actions(
+    post_call_tiles: &[TileId],
+    forbidden_discards: &[TileType],
+) -> Vec<LegalAction> {
+    post_call_tiles
+        .iter()
+        .copied()
+        .filter(|tile| !forbidden_discards.contains(&tile.tile_type()))
+        .map(|tile| LegalAction::Dahai { tile })
+        .collect()
+}
+
+// production selector が選んだ evaluation / wait / offense と同じ仮想 legal actions を既存
+// Push/Pull 入力へ接続する。threat classification と threshold は push_pull 側に委ねる。
+fn post_call_push_pull_decision(
+    post_call_context: &GameContext,
+    selection: &DiscardActionSelection,
+    wait: &TenpaiWaitAvailability,
+    legal_actions: &[LegalAction],
+) -> PushPullDecision {
+    let evaluation = selection
+        .evaluation
+        .as_ref()
+        .expect("production selector が選んだ評価を渡す");
+    let inputs = push_pull_inputs_from_selected_tenpai(
+        post_call_context,
+        evaluation,
+        wait,
+        selection.tenpai_offense_value,
+        legal_actions,
+    );
+    decide_push_pull(&inputs)
 }
 
 // 現在2向聴から Chi / Pon 後の最良打牌で1向聴になる候補だけを、既存の post-call

@@ -25,13 +25,15 @@ use crate::tenpai_continuation::{
     diagnose_tenpai_continuation, tenpai_candidate_self_tsumo_comparison,
 };
 use crate::tenpai_scoring::{NamedYakumanTsumo, evaluate_tenpai_tsumo, tenpai_tsumo_named_yakuman};
+#[cfg(test)]
+use bot_logic::best_discard_selection_index;
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType, TwoShantenMetrics,
     TwoShantenProgressSelfTsumoDiagnostic, TwoShantenSelfTsumoDiagnostic,
-    TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope, best_discard_selection_index,
+    TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_two_shanten_metrics, current_tenpai_continuation_targets,
     diagnose_discard_evaluations_with_two_shanten_metrics, diagnose_discard_furiten,
@@ -1551,6 +1553,7 @@ fn evaluation_for_legal_dahai(
 // 前方集計値を渡さないため、1向聴限定の weighted tenpai wait は適用しない。通常打牌選択が使う
 // 比較は selection_from_legal_evaluations() /
 // select_best_normal_discard_evaluation() 側にあり、こちらは意図的に1手比較だけを行う。
+#[cfg(test)]
 pub(crate) fn select_best_one_step_evaluation(
     evaluations: &[DiscardEvaluation],
 ) -> Option<&DiscardEvaluation> {
@@ -1586,12 +1589,12 @@ pub(crate) fn select_best_normal_discard_evaluation(
     .map(|index| evaluations[index].clone())
 }
 
-/// 副露済み面子数と切れない牌種を明示した1手評価だけの best 評価。
+/// 副露済み面子数と切れない牌種を明示した、テスト用の1手評価 best。
 ///
 /// 候補評価そのものは通常経路と同じ helper を共有するが、比較は既存の
 /// [`bot_logic::compare_discard_evaluations`] 相当の1手比較だけで、1向聴限定の weighted tenpai
-/// wait は**意図的に使わない**。鳴き判断の「鳴いた後に生きた待ちのテンパイになるか」という
-/// シミュレーション用の入口であり、通常打牌 selection の semantics とは切り離す。
+/// wait や現在聴牌の offense 比較は**意図的に使わない**。production の鳴き判断は通常打牌
+/// selector を直接使い、この helper は両者の差を固定する regression test だけに使う。
 ///
 /// `forbidden_discards` は鳴いた直後に切れない牌種
 /// ([`forbidden_discards_after_call`](crate::kuikae::forbidden_discards_after_call))。合法手の
