@@ -280,8 +280,10 @@ A の Progress 枝だけの値と実測時間を表示します。候補ごと�
 `bot-scenario --three-shanten-progress-self-tsumo` で全合法3向聴候補を一段深く評価できます。
 3向聴と2向聴では Progress のみを辿り、最良打牌後に1向聴へ到達したら既存の
 `ExpectedSelfTsumoValue` (Progress + SameShanten) へ接続します。
-3→2後は全合法打牌候補の2向聴 Progress valueを計算し、既存の2向聴 comparatorで
-最良打牌を選びます。先行するcategorical軸・同値時の後続軸も共有し、Full gateは呼びません。
+3→2後は全合法打牌候補を既存の2向聴 comparatorで比較します。先行categorical軸で
+敗退が確定した候補のProgress valueは計算せず、Progressで単独勝者が確定すれば
+後続forward metricも省略します。同値/unknown時はcohort全体の後続軸を評価し、
+cohort単位のunknown判定を保ちます。eager評価と選択・値は同じで、Full gateは呼びません。
 同じ物理牌集合・見え牌・仮想河とhorizonのcontinuationをmemoで共有しますが、
 浅い順位による候補除外は行いません。最適化後も全候補評価に秒単位を要するためdiagnostics-onlyです。
 2向聴 Progress continuation、次打牌比較、確率・残り自摸機会、terminal scoring、

@@ -572,6 +572,43 @@ pub fn best_discard_selection_index_with_two_shanten_metrics(
     )
 }
 
+/// 2向聴候補だけの比較で、後続のforward metricによらず勝者が確定する場合だけ返す。
+/// cohortのunknown解決と各比較軸は通常のcomparatorと共有する。
+pub(crate) fn two_shanten_winner_without_forward_metrics(
+    evaluations: &[DiscardEvaluation],
+    metrics: &[TwoShantenMetrics],
+) -> Option<usize> {
+    if evaluations
+        .iter()
+        .any(|evaluation| evaluation.min_shanten_after_discard() != 2)
+    {
+        return None;
+    }
+    let metrics = resolve_two_shanten_expected_self_tsumo_value_axis(evaluations, metrics);
+    let selected =
+        best_discard_selection_index_with_two_shanten_metrics(evaluations, &[], &[], &metrics)?;
+    let candidate_at = |index: usize| {
+        let mut candidate =
+            DiscardSelectionCandidate::without_tenpai_wait(&evaluations[index]).view();
+        candidate.two_shanten_expected_self_tsumo_value = metrics[index].expected_self_tsumo_value;
+        candidate
+    };
+    let winner = candidate_at(selected);
+    evaluations
+        .iter()
+        .enumerate()
+        .all(|(index, _)| {
+            if index == selected {
+                return true;
+            }
+            let other = candidate_at(index);
+            compare_discard_before_acceptance(&winner.evaluation, &other.evaluation)
+                .or_else(|| compare_two_shanten_expected_self_tsumo_value(&winner, &other))
+                .is_some_and(|comparison| comparison.candidate_is_better)
+        })
+        .then_some(selected)
+}
+
 /// 借用 view のまま [`best_discard_selection_index_with_metrics`] を求める。比較順は共通。
 fn best_discard_selection_index_with_metrics_for_views(
     evaluations: &[DiscardEvaluationView<'_>],
@@ -2651,6 +2688,69 @@ mod tests {
         TwoShantenMetrics {
             expected_self_tsumo_value: value,
         }
+    }
+
+    #[test]
+    fn lazy_two_shanten_winner_matches_eager_for_known_tied_and_unknown_metrics() {
+        let evaluations = vec![
+            evaluation("1m", 2, &[("3m", 1)]),
+            evaluation("9p", 2, &[("3p", 4)]),
+            evaluation("9s", 2, &[("3s", 3)]),
+        ];
+        for first in [None, Some(0), Some(10), Some(20)] {
+            for second in [None, Some(0), Some(10), Some(20)] {
+                for third in [None, Some(0), Some(10), Some(20)] {
+                    let values = [first, second, third];
+                    let metrics = values.map(two_shanten_metrics);
+                    let lazy = two_shanten_winner_without_forward_metrics(&evaluations, &metrics);
+                    let unique_max = values.iter().all(Option::is_some)
+                        && values
+                            .iter()
+                            .filter(|value| **value == *values.iter().max().unwrap())
+                            .count()
+                            == 1;
+                    assert_eq!(lazy.is_some(), unique_max);
+                    // 後続打点軸の既知/unknownと順位を変えても、確定勝者は変わらない。
+                    for forward_values in
+                        [[Some(900), Some(2), Some(1)], [None, Some(1), Some(900)]]
+                    {
+                        let forward = forward_values.map(ForwardMetrics::from_prospective_value);
+                        let eager = best_discard_selection_index_with_two_shanten_metrics(
+                            &evaluations,
+                            &forward,
+                            &[],
+                            &metrics,
+                        );
+                        if let Some(selected) = lazy {
+                            assert_eq!(Some(selected), eager);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_two_shanten_winner_keeps_categorical_priority_and_single_candidate() {
+        let mut isolated = evaluation("1m", 2, &[("3m", 1)]);
+        isolated.discards_isolated_tile = true;
+        let connected = evaluation("9p", 2, &[("3p", 4)]);
+        for loser in [None, Some(u64::MAX)] {
+            let evaluations = [isolated.clone(), connected.clone()];
+            assert_eq!(forward_target_mask(&evaluations), vec![true, false]);
+            assert_eq!(
+                two_shanten_winner_without_forward_metrics(
+                    &evaluations,
+                    &[two_shanten_metrics(None), two_shanten_metrics(loser)]
+                ),
+                Some(0)
+            );
+        }
+        assert_eq!(
+            two_shanten_winner_without_forward_metrics(&[connected], &[two_shanten_metrics(None)]),
+            Some(0)
+        );
+        assert_eq!(two_shanten_winner_without_forward_metrics(&[], &[]), None);
     }
 
     fn two_shanten_candidate<'a>(
