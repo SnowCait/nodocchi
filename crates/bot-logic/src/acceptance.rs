@@ -142,6 +142,29 @@ pub(crate) fn calculate_acceptance_with_fixed_melds_and_seen(
     }
 }
 
+/// 同じcounts / fixed meld countで、追加見え牌なしの受け入れへseenだけを反映する。
+/// 構造上の受け入れ牌種・向聴数はそのままで、残枚数0の牌種は既存どおり除く。
+pub(crate) fn acceptance_with_seen(
+    counts: &TileCounts,
+    structural: &EffectiveAcceptance,
+    additional_seen: &[u8; TileType::COUNT],
+) -> EffectiveAcceptance {
+    Acceptance {
+        current: structural.current,
+        tiles: structural
+            .tiles
+            .iter()
+            .filter_map(|accepted| {
+                let remaining = remaining_copies(counts, additional_seen, accepted.tile);
+                (remaining > 0).then_some(AcceptanceTile {
+                    remaining,
+                    ..*accepted
+                })
+            })
+            .collect(),
+    }
+}
+
 /// 手牌以外に見えている枚数を visible tiles と手牌から求める。
 ///
 /// visible tiles は自分の手牌を含むため、手牌分を差し引いて二重計上を防ぐ。打牌候補評価のように
@@ -399,6 +422,29 @@ mod tests {
         counts(&[
             "1m", "3m", "6m", "8m", "4p", "5p", "6p", "7p", "8p", "9p", "5s", "E", "E",
         ])
+    }
+
+    #[test]
+    fn structural_projection_matches_calculator_with_exhausted_and_red_visible_tiles() {
+        for hand in [
+            same_shanten_counts(),
+            TileCounts::from_tiles(ids(&[0, 53, 104, 116])),
+        ] {
+            for melds in [FixedMeldCount::NONE, FixedMeldCount::new(3).unwrap()] {
+                let structural = calculate_acceptance_with_fixed_melds(&hand, melds);
+                for seen in [
+                    [0; TileType::COUNT],
+                    [1; TileType::COUNT],
+                    [4; TileType::COUNT],
+                    additional_seen(&hand, &ids(&[52, 53, 54, 55])),
+                ] {
+                    assert_eq!(
+                        acceptance_with_seen(&hand, &structural, &seen),
+                        calculate_acceptance_with_fixed_melds_and_seen(&hand, melds, &seen)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
