@@ -114,17 +114,24 @@ impl BlockProfile {
     /// 手牌全体の取り出し方から向聴数を求める。副露済み面子数は面子として数える。
     fn shanten(&self, fixed_melds: u8) -> i8 {
         let mut value = 0i8;
-        for (melds, by_pair) in self.max_partials.iter().enumerate() {
-            let total = (usize::from(fixed_melds) + melds).min(MAX_BLOCKS) as i8;
-            for (pair, &partials) in by_pair.iter().enumerate() {
-                if partials < 0 {
-                    continue;
-                }
-                let candidate = 2 * total + partials.min(MAX_BLOCKS as i8 - total) + pair as i8;
-                if candidate > value {
-                    value = candidate;
-                }
-            }
+        let fixed = usize::from(fixed_melds);
+        for melds in 0..=MAX_BLOCKS {
+            let total = (fixed + melds).min(MAX_BLOCKS) as i8;
+            let melds_value = 2 * total;
+            let partials_cap = MAX_BLOCKS as i8 - total;
+            let by_pair = self.max_partials[melds];
+            // 取り出せない組み合わせ ([`INFEASIBLE`]) は候補にしない。
+            let without_pair = if by_pair[0] < 0 {
+                i8::MIN
+            } else {
+                melds_value + by_pair[0].min(partials_cap)
+            };
+            let with_pair = if by_pair[1] < 0 {
+                i8::MIN
+            } else {
+                melds_value + by_pair[1].min(partials_cap) + 1
+            };
+            value = value.max(without_pair).max(with_pair);
         }
 
         8 - value
@@ -194,15 +201,23 @@ impl ProfileTables {
     }
 
     fn profile(&mut self, counts: &[u8], suited: bool) -> BlockProfile {
+        // 5枚以上持つ牌姿は表の添字に収まらないので、その場でだけ計算する。
+        let Some(index) = pattern_index(counts) else {
+            return compute_profile(counts, suited);
+        };
+
+        self.profile_at(index, counts, suited)
+    }
+
+    /// 添字が分かっている牌姿の要約。牌姿と添字は必ず対応していなければならない。
+    ///
+    /// 1牌だけ加えた牌姿の添字は元の添字から加算だけで求まるので、牌姿から5進表現を組み直さず
+    /// この経路で引く。表の中身も計算する要約も [`Self::profile`] と同じ。
+    fn profile_at(&mut self, index: usize, counts: &[u8], suited: bool) -> BlockProfile {
         let table = if suited {
             &mut self.suit
         } else {
             &mut self.honor
-        };
-
-        // 5枚以上持つ牌姿は表の添字に収まらないので、その場でだけ計算する。
-        let Some(index) = pattern_index(counts) else {
-            return compute_profile(counts, suited);
         };
 
         let cached = table[index];
@@ -230,6 +245,17 @@ fn pattern_index(counts: &[u8]) -> Option<usize> {
     }
     Some(index)
 }
+
+/// 5進表現の桁の重み。牌1枚を加えた牌姿の添字は元の添字にこれを足したもの。
+const PATTERN_PLACE: [usize; SUIT_TILES] = {
+    let mut place = [1usize; SUIT_TILES];
+    let mut i = 1;
+    while i < SUIT_TILES {
+        place[i] = place[i - 1] * 5;
+        i += 1;
+    }
+    place
+};
 
 pub(super) fn standard_shanten(counts: &[u8; TileType::COUNT], fixed_melds: u8) -> i8 {
     PROFILE_TABLES.with_borrow_mut(|tables| {
@@ -274,6 +300,9 @@ pub(super) fn standard_shanten_with_after_draws(
             let others = prefix[group].merge(&suffix[group + 1]);
             let width = end - start;
             working[..width].copy_from_slice(&counts[start..end]);
+            // 群の牌姿は打牌前後どちらも4枚以内なので添字に収まる。収まらない牌姿だけ牌姿から
+            // 引き直す。
+            let base_index = pattern_index(&working[..width]);
 
             for offset in 0..width {
                 let tile = start + offset;
@@ -283,7 +312,14 @@ pub(super) fn standard_shanten_with_after_draws(
                 }
 
                 working[offset] += 1;
-                let drawn = tables.profile(&working[..width], suited);
+                let drawn = match base_index {
+                    Some(base_index) => tables.profile_at(
+                        base_index + PATTERN_PLACE[offset],
+                        &working[..width],
+                        suited,
+                    ),
+                    None => tables.profile(&working[..width], suited),
+                };
                 working[offset] -= 1;
 
                 after_draw[tile] = Some(others.merge(&drawn).shanten(fixed_melds));

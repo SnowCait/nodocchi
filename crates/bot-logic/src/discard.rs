@@ -1,5 +1,6 @@
 use crate::acceptance::{
-    EffectiveAcceptance, additional_seen, calculate_acceptance_with_fixed_melds_and_seen,
+    EffectiveAcceptance, acceptance_with_seen, additional_seen,
+    calculate_acceptance_with_fixed_melds_and_seen,
 };
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::selection::{
@@ -1505,49 +1506,6 @@ impl CandidateSeen {
     }
 }
 
-// 打牌候補1件分の受け入れを求める経路。
-//
-// 既定は既存の受け入れ計算そのもの ([`CalculatedAcceptance`]) で、2手先評価だけが1回の探索の
-// 間に同じ入力の結果を共有する実装を渡す。構造が既知ならその受け入れへ既存の残枚数計算だけを
-// 適用できる。受け入れ牌種・向聴数の判定と打牌評価本体は既存生成経路を共有する。
-pub(crate) trait DiscardAcceptance {
-    /// 構造が既知の候補。既定経路も通常のacceptanceと同じ値を返す。
-    fn acceptance_from_structure(
-        &self,
-        after_discard: &TileCounts,
-        fixed_meld_count: FixedMeldCount,
-        additional_seen: &[u8; TileType::COUNT],
-        _structural: &EffectiveAcceptance,
-    ) -> EffectiveAcceptance {
-        self.acceptance(after_discard, fixed_meld_count, additional_seen)
-    }
-
-    fn acceptance(
-        &self,
-        after_discard: &TileCounts,
-        fixed_meld_count: FixedMeldCount,
-        additional_seen: &[u8; TileType::COUNT],
-    ) -> EffectiveAcceptance;
-}
-
-// 打牌候補ごとに受け入れをそのまま計算する既定の経路。
-pub(crate) struct CalculatedAcceptance;
-
-impl DiscardAcceptance for CalculatedAcceptance {
-    fn acceptance(
-        &self,
-        after_discard: &TileCounts,
-        fixed_meld_count: FixedMeldCount,
-        additional_seen: &[u8; TileType::COUNT],
-    ) -> EffectiveAcceptance {
-        calculate_acceptance_with_fixed_melds_and_seen(
-            after_discard,
-            fixed_meld_count,
-            additional_seen,
-        )
-    }
-}
-
 // 打牌候補評価の本体。門前・副露と visible tiles の有無で共有する唯一の生成経路。
 //
 // 副露済み面子数は受け入れ計算 (PR #108 の fixed meld 対応 API)・一向聴形分類・形ペナルティの
@@ -1556,23 +1514,6 @@ pub(crate) fn evaluate_discards_with_seen(
     counts: &TileCounts,
     fixed_meld_count: FixedMeldCount,
     seen: &CandidateSeen,
-) -> Vec<DiscardEvaluation> {
-    evaluate_discards_with_seen_and_acceptance(
-        counts,
-        fixed_meld_count,
-        seen,
-        &CalculatedAcceptance,
-    )
-}
-
-// 受け入れを求める経路だけを差し替えられる打牌候補評価。候補の列挙・一向聴形分類・形ペナルティ・
-// 孤立牌判定は [`evaluate_discards_with_seen`] と同じものを通り、`acceptance` が返す受け入れも
-// 同じ入力に対して同じ値でなければならない。
-pub(crate) fn evaluate_discards_with_seen_and_acceptance(
-    counts: &TileCounts,
-    fixed_meld_count: FixedMeldCount,
-    seen: &CandidateSeen,
-    acceptance: &dyn DiscardAcceptance,
 ) -> Vec<DiscardEvaluation> {
     let mut evaluations = Vec::new();
     // 形の事前集計は手牌1つ分で共通なので、打牌候補ごとに作り直さず一度だけ求めて共有する。
@@ -1589,7 +1530,7 @@ pub(crate) fn evaluate_discards_with_seen_and_acceptance(
             continue;
         }
 
-        let acceptance_after_discard = acceptance.acceptance(
+        let acceptance_after_discard = calculate_acceptance_with_fixed_melds_and_seen(
             &after_discard,
             fixed_meld_count,
             &seen.additional_seen(tile),
@@ -1627,12 +1568,13 @@ pub(crate) fn evaluate_discards_with_seen_and_acceptance(
 
 /// 同じcountsとfixed meld countに対する、追加seenなしのbase評価を再利用する。
 /// seenが影響するのはacceptanceのremainingだけ。構造・形判定・候補順は既存生成結果を保つ。
+///
+/// 受け入れは構造上の受け入れへ既存の残枚数計算を適用するだけ ([`acceptance_with_seen`]) で、
+/// 向聴数探索も受け入れ牌種の判定もやり直さない。
 pub(crate) fn evaluate_discards_from_structure(
     counts: &TileCounts,
-    fixed_meld_count: FixedMeldCount,
     seen: &CandidateSeen,
     structure: &[DiscardEvaluation],
-    acceptance: &dyn DiscardAcceptance,
 ) -> Vec<DiscardEvaluation> {
     structure
         .iter()
@@ -1641,11 +1583,10 @@ pub(crate) fn evaluate_discards_from_structure(
             after_discard
                 .remove(evaluation.discard)
                 .expect("structural candidate belongs to counts");
-            let acceptance_after_discard = acceptance.acceptance_from_structure(
+            let acceptance_after_discard = acceptance_with_seen(
                 &after_discard,
-                fixed_meld_count,
-                &seen.additional_seen(evaluation.discard),
                 &evaluation.acceptance_after_discard,
+                &seen.additional_seen(evaluation.discard),
             );
             evaluation
                 .view()

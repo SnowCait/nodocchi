@@ -159,14 +159,12 @@
 
 use crate::acceptance::{
     DrawableTile, EffectiveAcceptance, EffectiveAcceptanceTile,
-    calculate_acceptance_with_fixed_melds_and_seen, same_shanten_draws_with_fixed_melds_and_seen,
-    unknown_tile_count,
+    same_shanten_draws_with_fixed_melds_and_seen, unknown_tile_count,
 };
 use crate::count_hasher::CountHasherBuilder;
 use crate::discard::{
-    CandidateSeen, DecorationContext, DiscardAcceptance, DiscardEvaluation, DiscardEvaluationView,
-    ShapePenaltyMode, discard_decoration, evaluate_discards_with_seen_and_acceptance,
-    split_discarded_tile, split_discarded_tile_of,
+    CandidateSeen, DecorationContext, DiscardEvaluation, DiscardEvaluationView, ShapePenaltyMode,
+    discard_decoration, evaluate_discards_with_seen, split_discarded_tile, split_discarded_tile_of,
 };
 use crate::furiten::TENPAI_SHANTEN;
 use crate::iishanten::IishantenShape;
@@ -575,8 +573,6 @@ pub struct LookaheadInputs<'a> {
     base_evaluations: Rc<RefCell<BaseEvaluationMemo>>,
     // seenに依存しない候補順・向聴数・形判定・形ペナルティと構造上の受け入れ。
     structural_evaluations: Rc<RefCell<StructuralEvaluationMemo>>,
-    // この探索で求めた打牌候補1件分の受け入れ。
-    after_discard_acceptances: Rc<RefCell<AfterDiscardAcceptanceMemo>>,
     // 3向聴診断でだけ有効化する。同じ物理牌集合・見え牌・河だけ共有し、枝は削らない。
     progress_memo: Option<Rc<RefCell<ProgressMemo>>>,
 }
@@ -620,79 +616,6 @@ type StructuralEvaluationMemo = HashMap<
     CountHasherBuilder,
 >;
 
-/// 打牌候補1件分の受け入れ計算 ([`calculate_acceptance_with_fixed_melds_and_seen`]) の入力その
-/// もの。
-///
-/// 見え牌は候補打牌を数える既存semanticsを反映済み。構造が既知なら受け入れ以外の牌種のseenを
-/// 0に正規化できる。これらのseenは結果に影響しないため、同じkeyは同じ受け入れを表す。
-type AfterDiscardAcceptanceKey = (TileCounts, FixedMeldCount, [u8; TileType::COUNT]);
-
-type AfterDiscardAcceptanceMemo =
-    HashMap<AfterDiscardAcceptanceKey, EffectiveAcceptance, CountHasherBuilder>;
-
-// 1回の探索の間だけ、同じ入力の受け入れ計算の結果を共有する経路。
-//
-// 受け入れ ([`EffectiveAcceptance`]) は入力だけで決まる値なので、同じ入力なら計算し直しても
-// 同じ値になる。構造が既知なら受け入れに関係するseenだけをkeyへ載せる。手牌・副露済み
-// 面子数・受け入れ牌種のseenが違えば別々に計算する。
-struct SearchedAcceptances<'a> {
-    searched: &'a RefCell<AfterDiscardAcceptanceMemo>,
-}
-
-impl DiscardAcceptance for SearchedAcceptances<'_> {
-    fn acceptance_from_structure(
-        &self,
-        after_discard: &TileCounts,
-        fixed_meld_count: FixedMeldCount,
-        additional_seen: &[u8; TileType::COUNT],
-        structural: &EffectiveAcceptance,
-    ) -> EffectiveAcceptance {
-        // この手牌の受け入れに含まれない牌種のseenは、受け入れの値に影響しない。
-        // structuralはseenなしの全受け入れなので、残枚数0へ落ちる牌種もkeyに残る。
-        let mut relevant_seen = [0; TileType::COUNT];
-        for accepted in &structural.tiles {
-            relevant_seen[accepted.tile.index()] = additional_seen[accepted.tile.index()];
-        }
-        self.get_or_calculate(after_discard, fixed_meld_count, &relevant_seen, || {
-            crate::acceptance::acceptance_with_seen(after_discard, structural, additional_seen)
-        })
-    }
-
-    fn acceptance(
-        &self,
-        after_discard: &TileCounts,
-        fixed_meld_count: FixedMeldCount,
-        additional_seen: &[u8; TileType::COUNT],
-    ) -> EffectiveAcceptance {
-        self.get_or_calculate(after_discard, fixed_meld_count, additional_seen, || {
-            calculate_acceptance_with_fixed_melds_and_seen(
-                after_discard,
-                fixed_meld_count,
-                additional_seen,
-            )
-        })
-    }
-}
-
-impl SearchedAcceptances<'_> {
-    fn get_or_calculate(
-        &self,
-        after_discard: &TileCounts,
-        fixed_meld_count: FixedMeldCount,
-        additional_seen: &[u8; TileType::COUNT],
-        calculate: impl FnOnce() -> EffectiveAcceptance,
-    ) -> EffectiveAcceptance {
-        let key = (*after_discard, fixed_meld_count, *additional_seen);
-        if let Some(searched) = self.searched.borrow().get(&key) {
-            return searched.clone();
-        }
-
-        let acceptance = calculate();
-        self.searched.borrow_mut().insert(key, acceptance.clone());
-        acceptance
-    }
-}
-
 impl<'a> LookaheadInputs<'a> {
     pub fn new(
         tiles: &'a [TileId],
@@ -719,7 +642,6 @@ impl<'a> LookaheadInputs<'a> {
             },
             base_evaluations: Rc::new(RefCell::new(BaseEvaluationMemo::default())),
             structural_evaluations: Rc::new(RefCell::new(HashMap::default())),
-            after_discard_acceptances: Rc::new(RefCell::new(AfterDiscardAcceptanceMemo::default())),
             progress_memo: None,
         }
     }
@@ -819,9 +741,6 @@ impl<'a> LookaheadInputs<'a> {
     // 現れたらこの探索の間だけ結果を共有する。seenは全候補の受け入れに関係する牌種だけを
     // 保持し、副露済み面子数も区別する。物理牌・ドラ・赤5の違いは呼び出し側が node
     // ごとに [`discard_decoration`] で反映する。共有した値そのものは書き換えない。
-    //
-    // 3つが一致しない node でも打牌候補1件分の受け入れは一致し得るので、その単位の共有は
-    // [`SearchedAcceptances`] が担う。
     fn base_evaluations(&self, counts: &TileCounts, seen: &CandidateSeen) -> SharedBaseEvaluations {
         let structural_key = (*counts, self.fixed_meld_count);
         let cached = self
@@ -832,11 +751,10 @@ impl<'a> LookaheadInputs<'a> {
         let (structure, relevant) = match cached {
             Some(cached) => cached,
             None => {
-                let structure: SharedBaseEvaluations = evaluate_discards_with_seen_and_acceptance(
+                let structure: SharedBaseEvaluations = evaluate_discards_with_seen(
                     counts,
                     self.fixed_meld_count,
                     &CandidateSeen::hand_only(),
-                    &crate::discard::CalculatedAcceptance,
                 )
                 .into();
                 let mut relevant = [false; TileType::COUNT];
@@ -859,16 +777,8 @@ impl<'a> LookaheadInputs<'a> {
         if let Some(cached) = self.base_evaluations.borrow().get(&key) {
             return Rc::clone(cached);
         }
-        let evaluations: SharedBaseEvaluations = crate::discard::evaluate_discards_from_structure(
-            counts,
-            self.fixed_meld_count,
-            seen,
-            &structure,
-            &SearchedAcceptances {
-                searched: &self.after_discard_acceptances,
-            },
-        )
-        .into();
+        let evaluations: SharedBaseEvaluations =
+            crate::discard::evaluate_discards_from_structure(counts, seen, &structure).into();
         self.base_evaluations
             .borrow_mut()
             .insert(key, Rc::clone(&evaluations));
@@ -2315,7 +2225,10 @@ fn same_shanten_self_tsumo_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acceptance::calculate_acceptance_with_fixed_melds_and_visible_tiles;
+    use crate::acceptance::{
+        calculate_acceptance_with_fixed_melds_and_seen,
+        calculate_acceptance_with_fixed_melds_and_visible_tiles,
+    };
     use crate::discard::{
         DiscardComparisonReason, diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
         evaluate_discards_from_tiles_with_fixed_melds_and_context,
@@ -5719,12 +5632,7 @@ mod tests {
             let mut inputs = inputs.clone();
             inputs.fixed_meld_count = fixed_meld_count;
             for seen in &seen_states {
-                let expected = evaluate_discards_with_seen_and_acceptance(
-                    &counts,
-                    fixed_meld_count,
-                    seen,
-                    &crate::discard::CalculatedAcceptance,
-                );
+                let expected = evaluate_discards_with_seen(&counts, fixed_meld_count, seen);
                 let actual = inputs.base_evaluations(&counts, seen);
                 assert_eq!(actual.as_ref(), expected.as_slice());
                 assert!(Rc::ptr_eq(&actual, &inputs.base_evaluations(&counts, seen)));
@@ -5923,10 +5831,11 @@ mod tests {
 
     // ---- 探索 node 間の打牌後の受け入れ ----
 
-    // 探索が打牌後の受け入れを要求した回数と、実際に計算した入力の数。
+    // 探索が打牌後の受け入れを要求した回数と、向聴数探索から求め直した入力の数。
     //
     // base 打牌評価は miss のときだけ全打牌候補分の受け入れを求めるので、要求回数は共有済みの
-    // base 評価が持つ打牌候補の合計になる。
+    // base 評価が持つ打牌候補の合計になる。見え牌が違うだけの node は構造上の受け入れへ残枚数を
+    // 反映するだけなので、向聴数探索を通るのは構造 cache の打牌候補だけになる。
     fn searched_acceptances(inputs: &LookaheadInputs) -> (usize, usize) {
         let requested = inputs
             .base_evaluations
@@ -5934,27 +5843,41 @@ mod tests {
             .values()
             .map(|evaluations| evaluations.len())
             .sum();
-        (requested, inputs.after_discard_acceptances.borrow().len())
+        let calculated = inputs
+            .structural_evaluations
+            .borrow()
+            .values()
+            .map(|(structure, _)| structure.len())
+            .sum();
+        (requested, calculated)
     }
 
     // 共有した受け入れが、その入力から求め直した受け入れと一致することを確認する。
     fn assert_searched_acceptances_match_a_fresh_calculation(inputs: &LookaheadInputs) {
-        let searched = inputs.after_discard_acceptances.borrow();
-        assert!(!searched.is_empty());
-        for ((after_discard, fixed_meld_count, additional_seen), acceptance) in searched.iter() {
-            assert_eq!(
-                &calculate_acceptance_with_fixed_melds_and_seen(
-                    after_discard,
-                    *fixed_meld_count,
-                    additional_seen,
-                ),
-                acceptance,
-            );
+        let shared = inputs.base_evaluations.borrow();
+        assert!(!shared.is_empty());
+        for ((counts, fixed_meld_count, seen), evaluations) in shared.iter() {
+            for evaluation in evaluations.iter() {
+                let mut after_discard = *counts;
+                after_discard
+                    .remove(evaluation.discard)
+                    .expect("打牌候補は手牌にある");
+                assert_eq!(
+                    calculate_acceptance_with_fixed_melds_and_seen(
+                        &after_discard,
+                        *fixed_meld_count,
+                        &seen.additional_seen(evaluation.discard),
+                    ),
+                    evaluation.acceptance_after_discard,
+                );
+            }
         }
     }
 
     #[test]
-    fn structural_acceptance_memo_shares_only_equivalent_seen() {
+    fn a_structural_projection_matches_a_fresh_acceptance_for_every_seen() {
+        // 構造上の受け入れへ見え牌を反映した結果は、その見え牌で求め直した受け入れと一致する。
+        // 受け入れに含まれない牌種の見え牌は結果を変えず、含まれる牌種の見え牌だけが効く。
         let tiles = two_shanten_awaiting_draw_hand();
         let counts = TileCounts::from_tiles(tiles.iter().copied());
         let structural = calculate_acceptance_with_fixed_melds_and_seen(
@@ -5962,12 +5885,13 @@ mod tests {
             fixed(3),
             &[0; TileType::COUNT],
         );
-        let searched = RefCell::new(AfterDiscardAcceptanceMemo::default());
-        let acceptances = SearchedAcceptances {
-            searched: &searched,
-        };
         let mut seen = [0; TileType::COUNT];
-        let actual = acceptances.acceptance_from_structure(&counts, fixed(3), &seen, &structural);
+        let actual = crate::acceptance::acceptance_with_seen(&counts, &structural, &seen);
+        assert_eq!(
+            actual,
+            calculate_acceptance_with_fixed_melds_and_seen(&counts, fixed(3), &seen)
+        );
+
         let irrelevant = TileType::all()
             .find(|tile| {
                 !structural
@@ -5978,36 +5902,36 @@ mod tests {
             .unwrap();
         seen[irrelevant.index()] = 4;
         assert_eq!(
-            acceptances.acceptance_from_structure(&counts, fixed(3), &seen, &structural),
+            crate::acceptance::acceptance_with_seen(&counts, &structural, &seen),
             actual
         );
-        assert_eq!(searched.borrow().len(), 1);
+
         let relevant = structural.tiles[0].tile;
         seen[relevant.index()] = 4;
-        let exhausted =
-            acceptances.acceptance_from_structure(&counts, fixed(3), &seen, &structural);
+        let exhausted = crate::acceptance::acceptance_with_seen(&counts, &structural, &seen);
         assert_ne!(exhausted, actual);
         assert_eq!(
             exhausted,
             calculate_acceptance_with_fixed_melds_and_seen(&counts, fixed(3), &seen)
         );
-        assert_eq!(searched.borrow().len(), 2);
         assert!(
             !exhausted
                 .tiles
                 .iter()
                 .any(|accepted| accepted.tile == relevant)
         );
+
+        // 副露済み面子数が違えば構造上の受け入れも別で、その構造からの反映も別になる。
         let other = calculate_acceptance_with_fixed_melds_and_seen(
             &counts,
             fixed(2),
             &[0; TileType::COUNT],
         );
+        assert_ne!(other, structural);
         assert_eq!(
-            acceptances.acceptance_from_structure(&counts, fixed(2), &seen, &other),
+            crate::acceptance::acceptance_with_seen(&counts, &other, &seen),
             calculate_acceptance_with_fixed_melds_and_seen(&counts, fixed(2), &seen)
         );
-        assert_eq!(searched.borrow().len(), 3);
     }
 
     #[test]
@@ -6066,12 +5990,8 @@ mod tests {
     }
 
     #[test]
-    fn an_acceptance_is_shared_only_between_the_same_hand_melds_and_seen() {
-        // 打牌後の手牌・副露済み面子数・見え牌のどれかが違えば、同じ受け入れとして扱わない。
-        let searched = RefCell::new(AfterDiscardAcceptanceMemo::default());
-        let acceptances = SearchedAcceptances {
-            searched: &searched,
-        };
+    fn an_acceptance_differs_between_hands_melds_and_seen() {
+        // 打牌後の手牌・副露済み面子数・見え牌のどれかが違えば、受け入れも違う値になる。
 
         // 門前14枚 112233m 456p 789p EE。打 E の後は E の単騎待ちで、残枚数が見え牌で変わる。
         let tiles = ids(&[0, 1, 4, 5, 8, 9, 48, 53, 57, 60, 64, 68, 108, 109]);
@@ -6089,7 +6009,7 @@ mod tests {
         let another_east_visible = CandidateSeen::from_visible_tiles(&counts, &with_public_east);
 
         let of = |seen: &CandidateSeen| {
-            acceptances.acceptance(
+            calculate_acceptance_with_fixed_melds_and_seen(
                 &after_discard,
                 FixedMeldCount::NONE,
                 &seen.additional_seen(tile("E")),
@@ -6099,18 +6019,7 @@ mod tests {
         assert_ne!(of(&hand_only), counted_candidate);
         assert_ne!(of(&another_east_visible), counted_candidate);
 
-        // 同じ入力は共有し、その値は求め直した受け入れと一致する。
-        assert_eq!(of(&own_hand_visible), counted_candidate);
-        assert_eq!(
-            counted_candidate,
-            calculate_acceptance_with_fixed_melds_and_seen(
-                &after_discard,
-                FixedMeldCount::NONE,
-                &own_hand_visible.additional_seen(tile("E")),
-            ),
-        );
-
-        // 副露済み面子数だけが違う入力も共有しない。
+        // 副露済み面子数だけが違っても別の受け入れになる。
         let melded = TileCounts::from_tiles(melded_hand().iter().copied());
         let melded_seen = CandidateSeen::from_visible_tiles(&melded, &melded_hand());
         let mut after_melded_discard = melded;
@@ -6118,15 +6027,12 @@ mod tests {
             .remove(tile("9p"))
             .expect("9p を切れる");
         let melded_of = |fixed_meld_count| {
-            acceptances.acceptance(
+            calculate_acceptance_with_fixed_melds_and_seen(
                 &after_melded_discard,
                 fixed_meld_count,
                 &melded_seen.additional_seen(tile("9p")),
             )
         };
         assert_ne!(melded_of(fixed(2)), melded_of(fixed(3)));
-
-        // 違う入力は別々に持つ。
-        assert_eq!(searched.borrow().len(), 5);
     }
 }
