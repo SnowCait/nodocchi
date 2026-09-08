@@ -643,6 +643,14 @@ fn format_normal_discard_candidate(
         }
     ));
     lines.push(format!(
+        "  three-shanten progress self-tsumo value: {}",
+        if evaluation.min_shanten_after_discard() == 3 {
+            format_self_tsumo_value(candidate.three_shanten_progress_self_tsumo_value)
+        } else {
+            ABSENT.to_string()
+        }
+    ));
+    lines.push(format!(
         "  current tenpai offense weighted total: {}",
         if evaluation.min_shanten_after_discard() == 0 {
             format_optional_value(candidate.current_tenpai_offense_weighted_total)
@@ -916,7 +924,7 @@ pub fn format_three_shanten_progress_self_tsumo_cost(
 ) -> String {
     let mut lines = vec![
         "Three-shanten progress self-tsumo value".to_string(),
-        "  diagnostics only, not connected to discard selection".to_string(),
+        "  same evaluator as the production three-shanten discard comparison".to_string(),
         "  3/2-shanten: Progress only; 1-shanten: existing Progress + SameShanten".to_string(),
         "  2-shanten discard selection: Progress self-tsumo value (existing comparator)"
             .to_string(),
@@ -3145,6 +3153,10 @@ fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, St
             format_self_tsumo_value(Some(winner.two_shanten_progress_self_tsumo_value?)),
             format_self_tsumo_value(Some(loser.two_shanten_progress_self_tsumo_value?)),
         ),
+        DiscardComparisonReason::ThreeShantenProgressSelfTsumoValue => (
+            format_self_tsumo_value(Some(winner.three_shanten_progress_self_tsumo_value?)),
+            format_self_tsumo_value(Some(loser.three_shanten_progress_self_tsumo_value?)),
+        ),
         DiscardComparisonReason::WeightedProspectiveValue => (
             winner.prospective_value?.to_string(),
             loser.prospective_value?.to_string(),
@@ -3367,7 +3379,9 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("total elapsed: 5.000 ms"));
-        assert!(output.contains("diagnostics only, not connected to discard selection"));
+        assert!(
+            output.contains("same evaluator as the production three-shanten discard comparison")
+        );
     }
     use super::*;
     use crate::scenario::ScenarioSpec;

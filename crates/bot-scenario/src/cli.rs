@@ -30,8 +30,9 @@ pub const USAGE: &str = "usage:
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
-  --three-shanten-progress-self-tsumo evaluates all three-shanten candidates and reports
-  values and elapsed time; cannot be combined with other diagnostic options
+  --three-shanten-progress-self-tsumo evaluates all three-shanten candidates with the same
+  evaluator the production discard comparison uses and reports values and elapsed time;
+  cannot be combined with other diagnostic options
   --two-shanten-self-tsumo adds the expected self-tsumo value of the two-shanten discard
   candidates; it implies --lookahead and searches deeper than the standard lookahead
   --two-shanten-self-tsumo-cost measures that same search instead of rendering it, with

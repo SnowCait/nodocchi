@@ -53,6 +53,11 @@
 //! この comparator を通る。起点の異なる1向聴の値とは別 field で保持し、1向聴や
 //! 3向聴以上の候補には適用しない。
 //!
+//! 3向聴では、Progress 枝だけの
+//! [`ThreeShantenMetrics::progress_self_tsumo_value`] を1つの軸として比較する。SameShanten の
+//! 再比較段は持たず、同値または cohort 単位で軸が無効な場合はそのまま既存の後続軸へ落ちる。
+//! 2向聴とも1向聴とも起点が違うため別 field で保持し、3向聴以外の候補には適用しない。
+//!
 //! 現在聴牌では、全候補が非フリテンの cohort は既存 Ron offense weighted total を維持する。
 //! `PermanentFuriten::Yes` を含み、全候補の恒常フリテンと self-tsumo value が確定した cohort
 //! だけ、Ron を含まない共通尺度として current-tenpai self-tsumo expected payment を使う。
@@ -195,6 +200,17 @@ pub struct TwoShantenMetrics {
     pub expected_self_tsumo_value: Option<u64>,
 }
 
+/// 3向聴起点の Progress-only self-tsumo continuation を選択に渡す supplemental metric。
+///
+/// 1向聴の [`ForwardMetrics::expected_self_tsumo_value`] とも2向聴の
+/// [`TwoShantenMetrics::expected_self_tsumo_value`] とも起点が違うため、同じ field に混ぜない。
+/// 値は [`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`] の固定小数点で、尺度は Progress-only の
+/// 1種類だけ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ThreeShantenMetrics {
+    pub progress_self_tsumo_value: Option<u64>,
+}
+
 /// 現在打牌の直後に成立する聴牌を比較するための supplemental metric。
 ///
 /// 点数計算や Reach / Damaten policy は上位層の責務で、bot-logic は確定済みの
@@ -300,6 +316,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             prospective_value: self.prospective_value,
             expected_self_tsumo_value: self.expected_self_tsumo_value,
             two_shanten_expected_self_tsumo_value: None,
+            three_shanten_progress_self_tsumo_value: None,
             current_tenpai_offense_weighted_total: self.current_tenpai_offense_weighted_total,
             current_tenpai_expected_self_tsumo_value: self.current_tenpai_expected_self_tsumo_value,
             current_tenpai_continuation_self_tsumo_value: self
@@ -322,6 +339,7 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
     pub prospective_value: Option<u64>,
     pub expected_self_tsumo_value: Option<u64>,
     pub two_shanten_expected_self_tsumo_value: Option<u64>,
+    pub three_shanten_progress_self_tsumo_value: Option<u64>,
     pub current_tenpai_offense_weighted_total: Option<u64>,
     pub current_tenpai_expected_self_tsumo_value: Option<u64>,
     pub current_tenpai_continuation_self_tsumo_value: Option<u64>,
@@ -335,6 +353,7 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
 /// Shanten → IsolatedTile → IsolatedHonor
 ///   → [1向聴のみ] ExpectedSelfTsumoValue
 ///   → [2向聴のみ] TwoShantenExpectedSelfTsumoValue (同一尺度の1比較)
+///   → [3向聴のみ] ThreeShantenProgressSelfTsumoValue
 ///   → WeightedProspectiveValue
 ///   → [1向聴のみ] WeightedTenpaiWaitRemaining → WeightedTenpaiWaitTypeCount
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
@@ -370,6 +389,12 @@ pub(crate) fn compare_discard_selection_candidate_views(
     }
 
     if let Some(comparison) = compare_two_shanten_expected_self_tsumo_value(candidate, current_best)
+    {
+        return comparison;
+    }
+
+    if let Some(comparison) =
+        compare_three_shanten_progress_self_tsumo_value(candidate, current_best)
     {
         return comparison;
     }
@@ -501,6 +526,37 @@ fn resolve_two_shanten_expected_self_tsumo_value_axis_for_views(
         .collect()
 }
 
+/// 3向聴 Progress-only self-tsumo value を pre-acceptance cohort 単位で有効化する。
+///
+/// cohort の全候補で値が確定している場合だけ値を残す。1件でも `None` があれば、その cohort
+/// 全体を `None` にする。cohort の定義と optional axis の解決規則は
+/// [`resolve_prospective_value_axis`] と同じ共通 helper を使う。
+pub fn resolve_three_shanten_progress_self_tsumo_value_axis(
+    evaluations: &[DiscardEvaluation],
+    metrics: &[ThreeShantenMetrics],
+) -> Vec<ThreeShantenMetrics> {
+    resolve_three_shanten_progress_self_tsumo_value_axis_for_views(
+        &evaluation_views(evaluations),
+        metrics,
+    )
+}
+
+fn resolve_three_shanten_progress_self_tsumo_value_axis_for_views(
+    evaluations: &[DiscardEvaluationView<'_>],
+    metrics: &[ThreeShantenMetrics],
+) -> Vec<ThreeShantenMetrics> {
+    let metrics_at = |index: usize| metrics.get(index).copied().unwrap_or_default();
+    (0..evaluations.len())
+        .map(|index| ThreeShantenMetrics {
+            progress_self_tsumo_value: metrics_at(index).progress_self_tsumo_value.filter(|_| {
+                cohort_axis_is_known(evaluations, index, |other| {
+                    metrics_at(other).progress_self_tsumo_value.is_some()
+                })
+            }),
+        })
+        .collect()
+}
+
 // pre-acceptance 軸まで同順位になる cohort の候補 index。
 //
 // prospective / self-tsumo / current tenpai の各軸と恒常フリテン分類が、同じ cohort 定義を
@@ -539,7 +595,7 @@ pub(crate) fn best_discard_selection_index_with_forward_metrics_for_views(
     evaluations: &[DiscardEvaluationView<'_>],
     forward_metrics: &[ForwardMetrics],
 ) -> Option<usize> {
-    best_discard_selection_index_with_metrics_for_views(evaluations, forward_metrics, &[], &[])
+    best_discard_selection_index_with_metrics_for_views(evaluations, forward_metrics, &[], &[], &[])
 }
 
 /// 前方集計値と現在聴牌の supplemental metric を含む比較順で最善候補の index を返す。
@@ -554,6 +610,7 @@ pub fn best_discard_selection_index_with_metrics(
         forward_metrics,
         current_tenpai_metrics,
         &[],
+        &[],
     )
 }
 
@@ -564,11 +621,33 @@ pub fn best_discard_selection_index_with_two_shanten_metrics(
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
     two_shanten_metrics: &[TwoShantenMetrics],
 ) -> Option<usize> {
+    best_discard_selection_index_with_three_shanten_metrics(
+        evaluations,
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        &[],
+    )
+}
+
+/// 前方集計値、現在聴牌、2向聴、3向聴の supplemental metric を含む比較順で最善候補を返す。
+///
+/// 向聴数ごとの supplemental metric は互いに別の尺度なので、それぞれ別の配列で受け取る。
+/// 空スライスを渡した軸は使わず、比較順そのものは
+/// [`compare_discard_selection_candidates`] と同じ1本を通る。
+pub fn best_discard_selection_index_with_three_shanten_metrics(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
+) -> Option<usize> {
     best_discard_selection_index_with_metrics_for_views(
         &evaluation_views(evaluations),
         forward_metrics,
         current_tenpai_metrics,
         two_shanten_metrics,
+        three_shanten_metrics,
     )
 }
 
@@ -615,11 +694,16 @@ fn best_discard_selection_index_with_metrics_for_views(
     forward_metrics: &[ForwardMetrics],
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
     two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
 ) -> Option<usize> {
     let resolved = resolve_prospective_value_axis_for_views(evaluations, forward_metrics);
     let two_shanten_metrics = resolve_two_shanten_expected_self_tsumo_value_axis_for_views(
         evaluations,
         two_shanten_metrics,
+    );
+    let three_shanten_metrics = resolve_three_shanten_progress_self_tsumo_value_axis_for_views(
+        evaluations,
+        three_shanten_metrics,
     );
     let current_tenpai_metrics =
         resolve_current_tenpai_value_axis_for_views(evaluations, current_tenpai_metrics);
@@ -633,6 +717,9 @@ fn best_discard_selection_index_with_metrics_for_views(
         two_shanten_expected_self_tsumo_value: two_shanten_metrics
             .get(index)
             .and_then(|metric| metric.expected_self_tsumo_value),
+        three_shanten_progress_self_tsumo_value: three_shanten_metrics
+            .get(index)
+            .and_then(|metric| metric.progress_self_tsumo_value),
         current_tenpai_offense_weighted_total: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.offense_weighted_total),
@@ -889,6 +976,31 @@ fn compare_two_shanten_expected_self_tsumo_value(
     (candidate_value != best_value).then_some(DiscardComparison {
         candidate_is_better: candidate_value > best_value,
         reason: DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue,
+    })
+}
+
+// 3向聴限定の Progress-only self-tsumo continuation による比較。決着しなければ `None` を返して
+// 既存比較へ委ねる。
+//
+// 軸を使うかどうかは呼び出し前に候補集合単位で決まっている
+// ([`resolve_three_shanten_progress_self_tsumo_value_axis`]) ため、ここでの `None` は
+// 「この cohort ではこの軸を使わない」を意味する。確定しない値を 0 として順位付けしない。
+fn compare_three_shanten_progress_self_tsumo_value(
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
+) -> Option<DiscardComparison> {
+    const SANSHANTEN_SHANTEN: i8 = 3;
+    if candidate.evaluation.min_shanten_after_discard() != SANSHANTEN_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != SANSHANTEN_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.three_shanten_progress_self_tsumo_value?;
+    let best_value = current_best.three_shanten_progress_self_tsumo_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::ThreeShantenProgressSelfTsumoValue,
     })
 }
 
@@ -2134,6 +2246,7 @@ mod tests {
                 prospective_value: metric.prospective_value,
                 expected_self_tsumo_value: metric.expected_self_tsumo_value,
                 two_shanten_expected_self_tsumo_value: None,
+                three_shanten_progress_self_tsumo_value: None,
                 current_tenpai_offense_weighted_total: None,
                 current_tenpai_expected_self_tsumo_value: None,
                 current_tenpai_continuation_self_tsumo_value: None,
@@ -2864,6 +2977,213 @@ mod tests {
                 "shanten={shanten}"
             );
         }
+    }
+
+    fn three_shanten_metrics(value: Option<u64>) -> ThreeShantenMetrics {
+        ThreeShantenMetrics {
+            progress_self_tsumo_value: value,
+        }
+    }
+
+    fn three_shanten_candidate<'a>(
+        evaluation: &'a DiscardEvaluation,
+        value: Option<u64>,
+    ) -> DiscardSelectionCandidateView<'a> {
+        let mut candidate = DiscardSelectionCandidate::without_tenpai_wait(evaluation).view();
+        candidate.three_shanten_progress_self_tsumo_value = value;
+        candidate
+    }
+
+    #[test]
+    fn a_known_three_shanten_cohort_uses_the_progress_self_tsumo_axis() {
+        // 受け入れの狭い3向聴候補でも、cohort 全員の Progress 値が確定していれば値で決着する。
+        let evaluations = vec![
+            evaluation("1m", 3, &[("3m", 1)]),
+            evaluation("9p", 3, &[("3p", 4), ("6p", 4)]),
+        ];
+        let metrics = vec![
+            three_shanten_metrics(Some(200)),
+            three_shanten_metrics(Some(100)),
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_three_shanten_metrics(
+                &evaluations,
+                &[],
+                &[],
+                &[],
+                &metrics,
+            ),
+            Some(0)
+        );
+        let resolved = resolve_three_shanten_progress_self_tsumo_value_axis(&evaluations, &metrics);
+        let comparison = compare_discard_selection_candidate_views(
+            &three_shanten_candidate(&evaluations[0], resolved[0].progress_self_tsumo_value),
+            &three_shanten_candidate(&evaluations[1], resolved[1].progress_self_tsumo_value),
+        );
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::ThreeShantenProgressSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn equal_three_shanten_values_fall_through_to_the_existing_axes() {
+        let evaluations = vec![
+            evaluation("1m", 3, &[("3m", 1)]),
+            evaluation("9p", 3, &[("3p", 4), ("6p", 4)]),
+        ];
+        let metrics = vec![three_shanten_metrics(Some(100)); 2];
+        let resolved = resolve_three_shanten_progress_self_tsumo_value_axis(&evaluations, &metrics);
+
+        let comparison = compare_discard_selection_candidate_views(
+            &three_shanten_candidate(&evaluations[1], resolved[1].progress_self_tsumo_value),
+            &three_shanten_candidate(&evaluations[0], resolved[0].progress_self_tsumo_value),
+        );
+        assert!(comparison.candidate_is_better);
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn an_unknown_three_shanten_value_disables_the_axis_for_the_whole_cohort() {
+        // 1件でも unknown なら 0 として順位付けせず、cohort 全体で既存の後続軸へ戻る。
+        let evaluations = vec![
+            evaluation("1m", 3, &[("3m", 1)]),
+            evaluation("9p", 3, &[("3p", 4), ("6p", 4)]),
+        ];
+        let metrics = vec![
+            three_shanten_metrics(Some(200)),
+            three_shanten_metrics(None),
+        ];
+        let resolved = resolve_three_shanten_progress_self_tsumo_value_axis(&evaluations, &metrics);
+
+        assert!(
+            resolved
+                .iter()
+                .all(|metric| metric.progress_self_tsumo_value.is_none())
+        );
+        assert_eq!(
+            best_discard_selection_index_with_three_shanten_metrics(
+                &evaluations,
+                &[],
+                &[],
+                &[],
+                &metrics,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            compare_discard_selection_candidate_views(
+                &three_shanten_candidate(&evaluations[1], resolved[1].progress_self_tsumo_value),
+                &three_shanten_candidate(&evaluations[0], resolved[0].progress_self_tsumo_value),
+            )
+            .reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+    }
+
+    #[test]
+    fn the_three_shanten_axis_does_not_apply_to_other_shanten() {
+        for shanten in [0, 1, 2, 4] {
+            let evaluations = vec![
+                evaluation("1m", shanten, &[("3m", 1)]),
+                evaluation("9p", shanten, &[("3p", 4), ("6p", 4)]),
+            ];
+            let metrics = vec![
+                three_shanten_metrics(Some(200)),
+                three_shanten_metrics(Some(100)),
+            ];
+            let resolved =
+                resolve_three_shanten_progress_self_tsumo_value_axis(&evaluations, &metrics);
+            let comparison = compare_discard_selection_candidate_views(
+                &three_shanten_candidate(&evaluations[1], resolved[1].progress_self_tsumo_value),
+                &three_shanten_candidate(&evaluations[0], resolved[0].progress_self_tsumo_value),
+            );
+
+            assert!(comparison.candidate_is_better, "shanten={shanten}");
+            assert_eq!(
+                comparison.reason,
+                DiscardComparisonReason::AcceptanceRemaining,
+                "shanten={shanten}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_shanten_axis_does_not_cross_pre_acceptance_cohorts() {
+        // 孤立牌を切る候補は pre-acceptance で優先済み。別 cohort の高い値で逆転しない。
+        let mut isolated = evaluation("1m", 3, &[("3m", 1)]);
+        isolated.discards_isolated_tile = true;
+        let connected = evaluation("9p", 3, &[("3p", 4), ("6p", 4)]);
+        let evaluations = vec![isolated, connected];
+        let metrics = vec![
+            three_shanten_metrics(Some(1)),
+            three_shanten_metrics(Some(999_999)),
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_three_shanten_metrics(
+                &evaluations,
+                &[],
+                &[],
+                &[],
+                &metrics,
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_three_shanten_axis_comes_before_the_prospective_value_axis() {
+        // 3向聴の Progress 値で決着する cohort では、打点込みの後続軸まで進まない。
+        let evaluations = vec![
+            evaluation("1m", 3, &[("3m", 4)]),
+            evaluation("9p", 3, &[("3p", 4)]),
+        ];
+        let forward_metrics = vec![
+            ForwardMetrics {
+                tenpai_wait: None,
+                next_acceptance: metric(1, 1),
+                prospective_value: Some(100),
+                expected_self_tsumo_value: None,
+            },
+            ForwardMetrics {
+                tenpai_wait: None,
+                next_acceptance: metric(3, 1),
+                prospective_value: Some(900),
+                expected_self_tsumo_value: None,
+            },
+        ];
+        let metrics = vec![
+            three_shanten_metrics(Some(200)),
+            three_shanten_metrics(Some(100)),
+        ];
+
+        assert_eq!(
+            best_discard_selection_index_with_three_shanten_metrics(
+                &evaluations,
+                &forward_metrics,
+                &[],
+                &[],
+                &metrics,
+            ),
+            Some(0)
+        );
+        // 軸を渡さない場合は既存の後続軸だけで決まる。
+        assert_eq!(
+            best_discard_selection_index_with_three_shanten_metrics(
+                &evaluations,
+                &forward_metrics,
+                &[],
+                &[],
+                &[],
+            ),
+            Some(1)
+        );
     }
 
     #[test]

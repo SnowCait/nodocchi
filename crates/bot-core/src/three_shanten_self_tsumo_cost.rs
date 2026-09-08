@@ -1,4 +1,7 @@
-//! 3向聴 Progress-only self-tsumo の diagnostics 専用計測。
+//! 3向聴 Progress-only self-tsumo の診断用計測。
+//!
+//! 値は production の3向聴打牌比較と同じ evaluator から求め、計測のために別の評価器も別の
+//! 探索も持たない。この module 自体は打牌選択を呼ばず、計測結果を選択へ返すこともない。
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +23,7 @@ pub struct ThreeShantenProgressSelfTsumoCost {
     pub total: Duration,
 }
 
-/// 通常打牌と同じ入力・valuator で3向聴候補を評価する。production selection は呼ばない。
+/// 通常打牌と同じ入力・valuator で全3向聴候補を評価する。production selection は呼ばない。
 pub fn measure_three_shanten_progress_self_tsumo(
     context: &GameContext,
     legal_actions: &[LegalAction],

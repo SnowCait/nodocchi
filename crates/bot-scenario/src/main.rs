@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn three_shanten_progress_is_opt_in_and_preserves_selection() {
+    fn three_shanten_progress_drives_the_production_discard_and_stays_opt_in() {
         let args = [
             "--hand",
             "45m46899p1124579s",
@@ -224,6 +224,15 @@ mod tests {
         ];
         let normal = run_args(&args).unwrap();
         assert!(!normal.contains("Three-shanten progress"));
+        // production の通常打牌は3向聴 Progress 軸で決まる。
+        assert!(
+            normal.contains("\nFinal decision\n  action: 2s\n"),
+            "{normal}"
+        );
+        assert!(
+            normal.contains("  choice 2 lost by: ThreeShantenProgressSelfTsumoValue"),
+            "{normal}"
+        );
         let mut enabled = args.to_vec();
         enabled.push("--three-shanten-progress-self-tsumo");
         let measured = run_args(&enabled).unwrap();
@@ -233,12 +242,26 @@ mod tests {
             .split("Three-shanten progress self-tsumo value")
             .nth(1)
             .unwrap();
+        // 診断が表示する値は production 打牌比較が使った値そのもの。
         for discard in ["2s", "4s"] {
             let line = section
                 .lines()
                 .find(|line| line.starts_with(&format!("  {discard}:")))
                 .unwrap();
             assert!(!line.contains("unknown"), "{line}");
+            let value = line
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .trim_end_matches(',');
+            let (integer, fraction) = value.split_once('.').unwrap();
+            assert!(
+                normal.contains(&format!(
+                    "  three-shanten progress self-tsumo value: {integer}.{}",
+                    &fraction[..3]
+                )),
+                "{discard}: {value}"
+            );
         }
         for option in [
             "--lookahead",

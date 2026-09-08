@@ -5,9 +5,11 @@ use crate::acceptance::{
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::selection::{
     CurrentTenpaiMetrics, DiscardSelectionCandidateView, ForwardMetrics, NextAcceptanceMetric,
-    TenpaiWaitMetric, TwoShantenMetrics, best_discard_selection_index_with_two_shanten_metrics,
+    TenpaiWaitMetric, ThreeShantenMetrics, TwoShantenMetrics,
+    best_discard_selection_index_with_three_shanten_metrics,
     compare_discard_selection_candidate_views, resolve_current_tenpai_value_axis,
-    resolve_prospective_value_axis, resolve_two_shanten_expected_self_tsumo_value_axis,
+    resolve_prospective_value_axis, resolve_three_shanten_progress_self_tsumo_value_axis,
+    resolve_two_shanten_expected_self_tsumo_value_axis,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
@@ -813,6 +815,8 @@ pub enum DiscardComparisonReason {
     TwoShantenExpectedSelfTsumoValue,
     /// 2向聴限定。ForwardTargets cohort 全候補を最初の Progress 枝だけで比較。
     TwoShantenProgressSelfTsumoValue,
+    /// 3向聴限定。ForwardTargets cohort 全候補を Progress 枝だけの self-tsumo 寄与で比較。
+    ThreeShantenProgressSelfTsumoValue,
     /// 打点込みの前方評価。Σ(残枚数 × そのテンパイの Σ(和了牌残枚数 × 支払い合計))。
     ///
     /// 現在打牌の比較では1手目の物理牌 variant 残枚数で重み付けし、2手目の打牌候補の比較では
@@ -1190,6 +1194,12 @@ pub struct DiscardCandidateDiagnostic {
     /// Full 値とは別 field に保持し、同一尺度の値のように表示・比較しない。
     /// production 以外の汎用診断で評価していない場合は `None`。
     pub two_shanten_progress_self_tsumo_value: Option<u64>,
+    /// 打牌選択に使った3向聴 Progress-only self-tsumo 寄与
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// 起点の違う1向聴・2向聴の値とは別 field に保持する。cohort 単位で軸を無効化した場合と
+    /// 確定しなかった場合はどちらも `None`。
+    pub three_shanten_progress_self_tsumo_value: Option<u64>,
     /// 打牌選択に使った現在聴牌の offense weighted total。
     /// cohort に unknown が混ざって軸を無効化した場合も `None`。
     pub current_tenpai_offense_weighted_total: Option<u64>,
@@ -1284,6 +1294,28 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
     two_shanten_metrics: &[TwoShantenMetrics],
 ) -> DiscardDecisionDiagnostic {
+    diagnose_discard_evaluations_with_three_shanten_metrics(
+        counts,
+        fixed_meld_count,
+        evaluations,
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        &[],
+    )
+}
+
+/// 3向聴 Progress-only の supplemental metric も含めて診断を構築する。
+/// 向聴数ごとの metric は別の尺度なので、それぞれ別の配列で受け取る。
+pub fn diagnose_discard_evaluations_with_three_shanten_metrics(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
+) -> DiscardDecisionDiagnostic {
     // 打点込みの軸は候補集合単位で決まる。診断が報告する比較理由を本番選択と一致させるため、
     // 診断側でも同じ解決を通した集計値を使う。
     let forward_metrics = resolve_prospective_value_axis(evaluations, forward_metrics);
@@ -1291,6 +1323,8 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
         resolve_current_tenpai_value_axis(evaluations, current_tenpai_metrics);
     let two_shanten_metrics =
         resolve_two_shanten_expected_self_tsumo_value_axis(evaluations, two_shanten_metrics);
+    let three_shanten_metrics =
+        resolve_three_shanten_progress_self_tsumo_value_axis(evaluations, three_shanten_metrics);
     let candidate_at = |index: usize| DiscardSelectionCandidateView {
         evaluation: evaluations[index].view(),
         tenpai_wait: forward_metrics
@@ -1308,6 +1342,9 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
         two_shanten_expected_self_tsumo_value: two_shanten_metrics
             .get(index)
             .and_then(|metric| metric.expected_self_tsumo_value),
+        three_shanten_progress_self_tsumo_value: three_shanten_metrics
+            .get(index)
+            .and_then(|metric| metric.progress_self_tsumo_value),
         current_tenpai_offense_weighted_total: current_tenpai_metrics
             .get(index)
             .and_then(|metric| metric.offense_weighted_total),
@@ -1319,11 +1356,12 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
             .and_then(|metric| metric.continuation_self_tsumo_value),
     };
 
-    let best_index = best_discard_selection_index_with_two_shanten_metrics(
+    let best_index = best_discard_selection_index_with_three_shanten_metrics(
         evaluations,
         &forward_metrics,
         &current_tenpai_metrics,
         &two_shanten_metrics,
+        &three_shanten_metrics,
     );
     let selected = best_index.map(|index| evaluations[index].clone());
 
@@ -1380,6 +1418,9 @@ pub fn diagnose_discard_evaluations_with_two_shanten_metrics(
                     .get(index)
                     .and_then(|metric| metric.expected_self_tsumo_value),
                 two_shanten_progress_self_tsumo_value: None,
+                three_shanten_progress_self_tsumo_value: three_shanten_metrics
+                    .get(index)
+                    .and_then(|metric| metric.progress_self_tsumo_value),
                 current_tenpai_offense_weighted_total: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.offense_weighted_total),

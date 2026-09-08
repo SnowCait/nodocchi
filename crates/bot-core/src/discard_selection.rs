@@ -31,20 +31,21 @@ use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
-    TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId, TileType, TwoShantenMetrics,
-    TwoShantenProgressSelfTsumoDiagnostic, TwoShantenSelfTsumoDiagnostic,
-    TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
+    TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics, TileCounts, TileId,
+    TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
+    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
+    best_discard_selection_index_with_three_shanten_metrics,
     best_discard_selection_index_with_two_shanten_metrics, current_tenpai_continuation_targets,
-    diagnose_discard_evaluations_with_two_shanten_metrics, diagnose_discard_furiten,
+    diagnose_discard_evaluations_with_three_shanten_metrics, diagnose_discard_furiten,
     diagnose_lookahead, diagnose_two_shanten_progress_self_tsumo_instrumented,
     diagnose_two_shanten_self_tsumo, discard_tenpai_wait_availability,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
     forward_metrics_instrumented, resolve_two_shanten_expected_self_tsumo_value_axis,
-    split_discarded_tile, tsumo_hit_probability,
-    two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
+    split_discarded_tile, three_shanten_progress_self_tsumo_value_for_candidate,
+    tsumo_hit_probability, two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -53,6 +54,8 @@ const LOG_TARGET: &str = "bot_core::discard_selection";
 const IISHANTEN_SHANTEN: i8 = 1;
 /// 現在聴牌の offense value 比較を適用する向聴数。
 const TENPAI_SHANTEN: i8 = 0;
+/// Progress-only self-tsumo value の比較を適用する現在打牌後の向聴数。
+const SANSHANTEN_SHANTEN: i8 = 3;
 
 /// 通常打牌選択の内部結果。
 ///
@@ -224,6 +227,8 @@ type SelectionForwardMetrics = Vec<ForwardMetrics>;
 struct ProductionSelectionMetrics {
     forward: SelectionForwardMetrics,
     two_shanten: TwoShantenProductionSelection,
+    /// production の3向聴 Progress-only 軸。対象外の局面では空。
+    three_shanten: Vec<ThreeShantenMetrics>,
 }
 
 /// production の2向聴二段階 selection。Progress の cohort 全体と Full の pair を
@@ -337,6 +342,7 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
                 &metrics.forward,
                 &current_tenpai,
                 &metrics.two_shanten,
+                &metrics.three_shanten,
             ),
         );
     }
@@ -347,6 +353,7 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
         &metrics.forward,
         &current_tenpai,
         &metrics.two_shanten,
+        &metrics.three_shanten,
         legal_actions,
     )
 }
@@ -371,7 +378,8 @@ pub(crate) fn select_discard_action_with_diagnostic(
     // 2手先診断を構築する場合は、その枝評価から選択用の前方集計値も求める。同じ
     // 「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しない。
     let valuator = ProductionProspectiveValuator::new(context);
-    let inputs = lookahead_inputs(context, &legal.tiles, &valuator, scope);
+    let inputs =
+        production_lookahead_inputs(context, &legal.tiles, &valuator, scope, &legal.evaluations);
     let lookahead = scope
         .builds_lookahead()
         .then(|| diagnose_lookahead(&inputs, &legal.evaluations));
@@ -383,6 +391,8 @@ pub(crate) fn select_discard_action_with_diagnostic(
     // opt-in の Full 全候補診断は選択と別の観測値として後から構築する。
     let two_shanten_selection =
         production_two_shanten_selection(&inputs, &legal.evaluations, &tenpai_wait, &mut ());
+    let three_shanten_selection =
+        production_three_shanten_progress_metrics(&inputs, &legal.evaluations, &tenpai_wait);
     let two_shanten_diagnostic = scope.builds_two_shanten_self_tsumo().then(|| {
         diagnose_two_shanten_self_tsumo(
             &inputs,
@@ -434,6 +444,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         &tenpai_wait,
         &current_tenpai,
         &two_shanten_selection,
+        &three_shanten_selection,
     );
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
@@ -459,6 +470,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
             &tenpai_wait,
             &current_tenpai,
             &two_shanten_selection,
+            &three_shanten_selection,
             legal_actions,
         ),
         diagnostic,
@@ -503,6 +515,7 @@ fn selection_from_legal_evaluations(
     tenpai_wait: &[ForwardMetrics],
     current_tenpai: &[CurrentTenpaiCandidateEvaluation],
     two_shanten: &TwoShantenProductionSelection,
+    three_shanten: &[ThreeShantenMetrics],
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
     let current_tenpai_metrics = current_tenpai_metrics(current_tenpai);
@@ -511,6 +524,7 @@ fn selection_from_legal_evaluations(
         tenpai_wait,
         &current_tenpai_metrics,
         two_shanten,
+        three_shanten,
     );
     let evaluation = selected.map(|index| legal.evaluations[index].clone());
     let action = evaluation
@@ -548,13 +562,15 @@ fn production_selection_index(
     forward_metrics: &[ForwardMetrics],
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
     two_shanten: &TwoShantenProductionSelection,
+    three_shanten: &[ThreeShantenMetrics],
 ) -> Option<usize> {
     two_shanten.selected.or_else(|| {
-        best_discard_selection_index_with_two_shanten_metrics(
+        best_discard_selection_index_with_three_shanten_metrics(
             evaluations,
             forward_metrics,
             current_tenpai_metrics,
             &two_shanten.progress,
+            three_shanten,
         )
     })
 }
@@ -940,7 +956,13 @@ fn production_selection_metrics_instrumented(
     timing: &mut NormalDiscardPhaseTimer,
 ) -> ProductionSelectionMetrics {
     let valuator = ProductionProspectiveValuator::new(context);
-    let inputs = lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None);
+    let inputs = production_lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+        evaluations,
+    );
     let mut forward_timing = timing.forward_metrics_timer();
     let forward = forward_metrics_instrumented(&inputs, evaluations, &mut forward_timing);
     timing.record_forward_metrics_phases(forward_timing.finish());
@@ -959,9 +981,11 @@ fn production_selection_metrics_instrumented(
     } else {
         TwoShantenProductionSelection::default()
     };
+    let three_shanten = production_three_shanten_progress_metrics(&inputs, evaluations, &forward);
     ProductionSelectionMetrics {
         forward,
         two_shanten,
+        three_shanten,
     }
 }
 
@@ -1050,6 +1074,52 @@ fn production_two_shanten_selection(
         #[cfg(test)]
         progress_diagnostic,
     }
+}
+
+/// production の3向聴 Progress-only 軸。ForwardTargets cohort の候補だけを評価する。
+///
+/// 値は診断と同じ [`three_shanten_progress_self_tsumo_value_for_candidate`] そのもので、
+/// production 用の別評価も別探索も持たない。候補ごとに探索基盤を作らず、forward metrics と
+/// 同じ base 評価 memo を共有した1本の `LookaheadInputs` と1つの progress memo を全候補で
+/// 使い回す。比較そのものは既存 comparator が行うため、ここでは順位も threshold も持たない。
+fn production_three_shanten_progress_metrics(
+    inputs: &LookaheadInputs<'_>,
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+) -> Vec<ThreeShantenMetrics> {
+    if !has_competing_three_shanten_targets(evaluations, forward_metrics) {
+        return Vec::new();
+    }
+
+    evaluations
+        .iter()
+        .enumerate()
+        .map(|(index, evaluation)| ThreeShantenMetrics {
+            progress_self_tsumo_value: forward_metrics
+                .get(index)
+                .is_some_and(|metric| metric.next_acceptance.is_some())
+                .then(|| three_shanten_progress_self_tsumo_value_for_candidate(inputs, evaluation))
+                .flatten(),
+        })
+        .collect()
+}
+
+// 3向聴 Progress 軸の対象局面かどうか。最善向聴数が3向聴で、前方評価の対象候補が複数ある場合
+// だけ評価する。候補が1件なら先行の categorical 軸で決着するため、深い探索を走らせない。
+fn has_competing_three_shanten_targets(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+) -> bool {
+    evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min()
+        == Some(SANSHANTEN_SHANTEN)
+        && forward_metrics
+            .iter()
+            .filter(|metric| metric.next_acceptance.is_some())
+            .count()
+            > 1
 }
 
 fn two_shanten_full_gate(
@@ -1151,6 +1221,31 @@ pub(crate) fn lookahead_inputs<'a>(
     )
 }
 
+/// 通常打牌選択が使う lookahead 入力。
+///
+/// 最善向聴数が3向聴の局面だけ、3向聴 Progress 評価の同一 state / continuation を共有する
+/// memo を持たせる。それ以外の局面の入力は [`lookahead_inputs`] と同じで、既存 selection の
+/// 探索も値も変わらない。
+fn production_lookahead_inputs<'a>(
+    context: &'a GameContext,
+    tiles: &'a [TileId],
+    valuator: &'a ProductionProspectiveValuator<'a>,
+    scope: LookaheadDiagnosticScope,
+    evaluations: &[DiscardEvaluation],
+) -> LookaheadInputs<'a> {
+    let inputs = lookahead_inputs(context, tiles, valuator, scope);
+    if evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min()
+        == Some(SANSHANTEN_SHANTEN)
+    {
+        inputs.with_three_shanten_progress_memo()
+    } else {
+        inputs
+    }
+}
+
 /// 通常打牌とは開始地点が異なる経路向けに、残り自摸機会を明示して同じ lookahead 入力を作る。
 /// その他の局面 fact と scoring evaluator は [`lookahead_inputs`] と共有する。
 pub(crate) fn lookahead_inputs_with_own_future_draws<'a>(
@@ -1201,17 +1296,19 @@ fn diagnose_legal_evaluations(
     tenpai_wait: &[ForwardMetrics],
     current_tenpai: &[CurrentTenpaiCandidateEvaluation],
     two_shanten: &TwoShantenProductionSelection,
+    three_shanten: &[ThreeShantenMetrics],
 ) -> DiscardDecisionDiagnostic {
     let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
     let fixed_meld_count = evaluation_fixed_meld_count(context);
     let current_tenpai_metrics = current_tenpai_metrics(current_tenpai);
-    let mut diagnostic = diagnose_discard_evaluations_with_two_shanten_metrics(
+    let mut diagnostic = diagnose_discard_evaluations_with_three_shanten_metrics(
         &counts,
         fixed_meld_count,
         &legal.evaluations,
         tenpai_wait,
         &current_tenpai_metrics,
         &two_shanten.progress,
+        three_shanten,
     );
 
     // 汎用診断は TwoShantenMetrics を Full として表示する。production がそこへ
@@ -1310,13 +1407,14 @@ fn diagnose_two_shanten_pair(
             .copied()
             .unwrap_or_default()
     });
-    let diagnostic = diagnose_discard_evaluations_with_two_shanten_metrics(
+    let diagnostic = diagnose_discard_evaluations_with_three_shanten_metrics(
         counts,
         fixed_meld_count,
         &pair_evaluations,
         &pair_forward_metrics,
         &pair_current_tenpai_metrics,
         &two_shanten_metrics,
+        &[],
     );
     diagnostic.candidates[1].clone()
 }
@@ -1585,6 +1683,7 @@ pub(crate) fn select_best_normal_discard_evaluation(
         &metrics.forward,
         &current_tenpai_metrics(&current_tenpai),
         &metrics.two_shanten,
+        &metrics.three_shanten,
     )
     .map(|index| evaluations[index].clone())
 }
@@ -3221,6 +3320,7 @@ pub(crate) mod tests {
             &tenpai_wait,
             &current_tenpai,
             &two_shanten,
+            &[],
         );
         let selection = selection_from_legal_evaluations(
             context,
@@ -3228,6 +3328,7 @@ pub(crate) mod tests {
             &tenpai_wait,
             &current_tenpai,
             &two_shanten,
+            &[],
             actions,
         );
 
@@ -5227,6 +5328,141 @@ pub(crate) mod tests {
         (context, actions)
     }
 
+    // 3向聴 Progress 軸の production 接続 regression 局面。
+    // hand 45m46899p1124579s / dora indicator E / 東場北家 / player 0 / oya 1 / 残り66枚。
+    fn three_shanten_progress_regression_context() -> (GameContext, Vec<LegalAction>) {
+        const HAND: [&str; 14] = [
+            "4m", "5m", "4p", "6p", "8p", "9p", "9p", "1s", "1s", "2s", "4s", "5s", "7s", "9s",
+        ];
+        let mut used = Vec::new();
+        let mut take = |mjai: &str| {
+            let tile_type = TileType::from_mjai_type_str(mjai).expect("牌種として読める");
+            let tile = TileId::copies(tile_type)
+                .find(|tile| !tile.is_red() && !used.contains(tile))
+                .expect("未使用の物理牌がある");
+            used.push(tile);
+            tile
+        };
+        let tiles: Vec<_> = HAND.iter().map(|tile| take(tile)).collect();
+        let dora_indicator = take("E");
+        let visible: Vec<_> = tiles.iter().copied().chain([dora_indicator]).collect();
+        let context = GameContext::from_parts_with_table_state(
+            None,
+            tiles.clone(),
+            vec![dora_indicator],
+            Some(TileType::from_mjai_type_str("E").unwrap()),
+            Some(TileType::from_mjai_type_str("N").unwrap()),
+            visible,
+            Some(0),
+            Some(1),
+            Default::default(),
+            [false; 4],
+        )
+        .with_table_state_facts(bot_core_table_state(66))
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+        let actions = tiles
+            .iter()
+            .map(|&tile| LegalAction::Dahai { tile })
+            .collect();
+        (context, actions)
+    }
+
+    #[test]
+    fn the_three_shanten_progress_value_changes_four_sou_to_two_sou() {
+        // production の3向聴打牌比較が Progress self-tsumo value を使い、値の高い 2s が
+        // 既存の後続軸で勝っていた 4s を上回る。深い値そのものは診断と同じ evaluator から
+        // 来ることだけを確認し、全候補の値は固定しない。
+        let (context, actions) = three_shanten_progress_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let metrics = production_selection_metrics(&context, &legal.tiles, &legal.evaluations);
+        let index_of = |discard: &str| {
+            legal
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard.to_mjai_string() == discard)
+                .unwrap_or_else(|| panic!("{discard} 候補がある"))
+        };
+        let value = |discard: &str| {
+            metrics.three_shanten[index_of(discard)]
+                .progress_self_tsumo_value
+                .expect("3向聴 Progress 寄与を確定できる")
+        };
+
+        assert_eq!(legal.evaluations.len(), 12);
+        assert!(value("2s") > value("4s"));
+
+        // 3向聴 memo を持たせた入力でも既存の前方集計値は変わらない。
+        assert_eq!(
+            metrics.forward,
+            selection_forward_metrics(&context, &legal.tiles, &legal.evaluations)
+        );
+
+        // 既存の後続軸だけなら 4s、3向聴 Progress 軸を渡すと 2s。
+        let empty_current_tenpai =
+            vec![CurrentTenpaiCandidateEvaluation::default(); metrics.forward.len()];
+        let selected = |three_shanten: &[ThreeShantenMetrics]| {
+            production_selection_index(
+                &legal.evaluations,
+                &metrics.forward,
+                &current_tenpai_metrics(&empty_current_tenpai),
+                &metrics.two_shanten,
+                three_shanten,
+            )
+            .map(|index| legal.evaluations[index].discard.to_mjai_string())
+        };
+        assert_eq!(selected(&[]).as_deref(), Some("4s"));
+        assert_eq!(selected(&metrics.three_shanten).as_deref(), Some("2s"));
+
+        // 通常打牌の公開入口も同じ打牌を選び、診断の比較理由も同じ軸になる。
+        assert_eq!(selected_discard(&context, &actions), "2s");
+        let diagnostic = diagnose_legal_evaluations(
+            &context,
+            &legal,
+            &metrics.forward,
+            &empty_current_tenpai,
+            &metrics.two_shanten,
+            &metrics.three_shanten,
+        );
+        let candidate = |discard: &str| &diagnostic.candidates[index_of(discard)];
+        assert!(candidate("2s").selected);
+        assert_eq!(
+            candidate("4s").comparison_reason,
+            bot_logic::DiscardComparisonReason::ThreeShantenProgressSelfTsumoValue
+        );
+        assert_eq!(
+            candidate("2s").three_shanten_progress_self_tsumo_value,
+            Some(value("2s"))
+        );
+    }
+
+    #[test]
+    fn the_three_shanten_diagnostics_measure_the_production_values() {
+        // 診断 CLI の値は production 接続後も同じ evaluator から来る。
+        let (context, actions) = three_shanten_progress_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let metrics = production_selection_metrics(&context, &legal.tiles, &legal.evaluations);
+        let measured =
+            crate::three_shanten_self_tsumo_cost::measure_three_shanten_progress_self_tsumo(
+                &context, &actions,
+            );
+
+        assert_eq!(measured.candidates.len(), legal.evaluations.len());
+        for (discard, value, _) in &measured.candidates {
+            let index = legal
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard == *discard)
+                .expect("診断候補は production 候補と同じ");
+            assert_eq!(
+                metrics.three_shanten[index].progress_self_tsumo_value, *value,
+                "{discard:?}"
+            );
+        }
+    }
+
     #[test]
     fn two_shanten_phase_timing_preserves_values_and_the_timed_action_breakdown() {
         // 3副露の小さい2向聴局面。比較用に計測あり・なしを実行するが、各 production 実行は
@@ -5369,6 +5605,7 @@ pub(crate) mod tests {
             &metrics.forward,
             &empty_current_tenpai,
             &no_two_shanten,
+            &[],
             &actions,
         );
         let after = selection_from_legal_evaluations(
@@ -5377,6 +5614,7 @@ pub(crate) mod tests {
             &metrics.forward,
             &empty_current_tenpai,
             &metrics.two_shanten,
+            &[],
             &actions,
         );
         assert_eq!(before.evaluation.unwrap().discard.to_mjai_string(), "5m");
@@ -5388,6 +5626,7 @@ pub(crate) mod tests {
             &metrics.forward,
             &empty_current_tenpai,
             &metrics.two_shanten,
+            &[],
         );
         for (discard, expected) in [("8m", 69_721_739), ("9s", 67_098_900), ("5m", 65_576_785)] {
             let candidate = diagnostic
