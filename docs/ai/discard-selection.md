@@ -275,21 +275,42 @@ A の Progress 枝だけの値と実測時間を表示します。候補ごと�
 見えてしまいます。そのため `--lookahead` / `--verbose` / `--two-shanten-self-tsumo` /
 `--summary-only` とは同時に指定できません。
 
-## 3向聴 Progress self-tsumo value (diagnostics-only)
+## 3向聴 Progress self-tsumo value
 
-`bot-scenario --three-shanten-progress-self-tsumo` で全合法3向聴候補を一段深く評価できます。
-3向聴と2向聴では Progress のみを辿り、最良打牌後に1向聴へ到達したら既存の
-`ExpectedSelfTsumoValue` (Progress + SameShanten) へ接続します。
-3→2後は全合法打牌候補を既存の2向聴 comparatorで比較します。先行categorical軸で
-敗退が確定した候補のProgress valueは計算せず、Progressで単独勝者が確定すれば
-後続forward metricも省略します。同値/unknown時はcohort全体の後続軸を評価し、
-cohort単位のunknown判定を保ちます。eager評価と選択・値は同じで、Full gateは呼びません。
-同じ物理牌集合・見え牌・仮想河とhorizonのcontinuationをmemoで共有しますが、
-浅い順位による候補除外は行いません。最適化後も全候補評価に秒単位を要するためdiagnostics-onlyです。
+現在打牌後が3向聴の候補は、Progress 枝だけを辿った self-tsumo continuation で比較します。
+
+```text
+3向聴 → Progress → 最良打牌 → 2向聴 → Progress → 最良打牌 → 1向聴
+      → 1向聴の ExpectedSelfTsumoValue (Progress + SameShanten)
+```
+
+3向聴と2向聴では Progress のみを辿り、SameShanten は追いません。3→2後は全合法打牌候補を
+既存の2向聴 comparatorで比較します。先行categorical軸で敗退が確定した候補のProgress valueは
+計算せず、Progressで単独勝者が確定すれば後続forward metricも省略します。同値/unknown時は
+cohort全体の後続軸を評価し、cohort単位のunknown判定を保ちます。eager評価と選択・値は同じで、
+2向聴 Full gateは呼びません。同じ物理牌集合・見え牌・仮想河とhorizonのcontinuationをmemoで
+共有しますが、浅い順位による候補除外は行いません。
 2向聴 Progress continuation、次打牌比較、確率・残り自摸機会、terminal scoring、
 Reach/Damaten は既存 helper を共有し、unknown な枝があれば値は unknown です。
-production comparator には未接続で、WeightedNextAcceptance と ShapePenalty の既存比較順、
-2向聴 Full / Progress の仕様は変わりません。実行例と計測条件は
+
+production の通常打牌では、最善向聴数が3向聴で前方評価の対象候補が複数ある場合だけ、
+Shanten / IsolatedTile / IsolatedHonor まで同順位の ForwardTargets cohort 全候補について
+この値を求め、既存 comparator の1つの軸として比較します。位置は
+`ExpectedSelfTsumoValue` / 2向聴の軸と同じ段で、
+[WeightedProspectiveValue](#1向聴-weightedprospectivevalue) より前です。値が同値の候補同士は
+この軸で決着せず、cohort 全候補の値を確定できない場合はその軸を無効にして、どちらも
+[WeightedNextAcceptance](#2向聴以上-weightednextacceptance) 以下の既存軸へ戻ります。
+確定しない値を0点として順位付けすることはありません。
+起点の向聴数が違うため、1向聴の `ExpectedSelfTsumoValue` とも2向聴の値とも別 field で
+保持し、向聴数の違う候補の間では比較しません。押し引き、リーチ判断にも使いません。
+3向聴以外の候補比較と、2向聴 Full / Progress の二段階 selection は変わりません。
+
+全候補評価には秒単位のコストが残ります。追加の近似・pruning・探索削減は入れずに、
+このレイテンシを許容して接続しています。
+
+`bot-scenario --three-shanten-progress-self-tsumo` は、production が使うこの値を全合法3向聴
+候補について表示・計測する診断 option です。production と同じ evaluator を共有し、診断側に
+別実装は持ちません。実行例と計測条件は
 [bot-scenario](../bot-scenario.md#3向聴-progress-only-診断) を参照してください。
 
 ## lookahead

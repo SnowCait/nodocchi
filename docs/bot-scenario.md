@@ -28,7 +28,7 @@ cargo run -p bot-scenario -- \
 | `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
-| `--three-shanten-progress-self-tsumo` | 任意 | 全合法3向聴候補の Progress-only self-tsumo 値・候補別時間・合計時間を追加。他の診断 option と併用不可 |
+| `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -83,7 +83,7 @@ cargo run -p bot-scenario -- \
 
 ### 3向聴 Progress-only 診断
 
-`--three-shanten-progress-self-tsumo` は diagnostics-only です。3→2、2→1 は Progress のみを追い、1向聴に到達した後は既存 ExpectedSelfTsumoValue (Progress + SameShanten) を再利用します。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。production の WeightedNextAcceptance や ShapePenalty の比較順は変わりません。
+`--three-shanten-progress-self-tsumo` は、production の3向聴打牌比較が使う値をそのまま全候補分表示する診断 option です。値の evaluator は production と共通で、診断専用の実装は持ちません。3→2、2→1 は Progress のみを追い、1向聴に到達した後は既存 ExpectedSelfTsumoValue (Progress + SameShanten) を再利用します。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。
 
 3→2ツモ後の次打牌は、production と共通の2向聴 comparatorで選びます。先行軸で敗退が確定した候補のProgress valueと、Progressで単独勝者が確定した場合の後続forward metricは遅延評価で省略します。同値/unknown時はcohort全体の後続軸を評価するため、全候補を先に評価した場合と値・選択は一致します。Shanten / isolated等の先行軸も既存どおりで、2向聴 Full gateは呼びません。比較cohortの値が未確定なら、その枝の値もunknownです。
 
@@ -96,7 +96,9 @@ cargo run --release -p bot-scenario -- \
 
 値は既存 self-tsumo value と同じ点数単位で小数6桁まで表示します。計測は通常診断の前に行い、入力構築を除く探索時間を表示します。候補間では既存 memo を共有するため、候補別時間には評価順の影響があります。cold 条件の比較には毎回新しいプロセスを使ってください。探索の枝を省略する近似はありません。
 
-3向聴診断では同じ物理牌集合・見え牌・仮想河の2向聴 value、1向聴 continuation、次打牌評価も共有し、memo hit / miss数を表示します。continuationは未確認牌数と残り自摸機会も区別します。候補を浅い評価順で除外するpruningはありません。全候補で秒単位のコストが残るため、productionには未接続です。
+3向聴診断では同じ物理牌集合・見え牌・仮想河の2向聴 value、1向聴 continuation、次打牌評価も共有し、memo hit / miss数を表示します。continuationは未確認牌数と残り自摸機会も区別します。候補を浅い評価順で除外するpruningはありません。全候補で秒単位のコストが残りますが、そのレイテンシを許容して production の通常打牌へ接続しています。
+
+production 側の比較規則は [打牌選択](ai/discard-selection.md#3向聴-progress-self-tsumo-value) を参照してください。`Normal discard candidates` の `three-shanten progress self-tsumo value` は打牌選択が実際に使った値そのもので、この軸で決着した場合の `lost by` は `ThreeShantenProgressSelfTsumoValue` です。
 
 ### --allow-ryukyoku
 

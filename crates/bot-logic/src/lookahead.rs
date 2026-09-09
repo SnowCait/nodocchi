@@ -646,7 +646,7 @@ impl<'a> LookaheadInputs<'a> {
         }
     }
 
-    /// 3向聴診断の同一 state / continuation を探索内で共有する。既存2向聴 production は無効のまま。
+    /// 3向聴評価の同一 state / continuation を探索内で共有する。既存2向聴 production は無効のまま。
     pub fn with_three_shanten_progress_memo(mut self) -> Self {
         self.progress_memo = Some(Rc::new(RefCell::new(ProgressMemo::default())));
         self
@@ -1111,7 +1111,9 @@ pub fn two_shanten_progress_self_tsumo_value_for_candidate(
 }
 
 /// 3向聴候補の Progress-only self-tsumo 寄与
-/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。diagnostics 専用。
+/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+///
+/// production の3向聴打牌比較と診断表示はどちらもこの入口を共有する。
 ///
 /// 3→2、2→1 は Progress のみ。1向聴では既存 ExpectedSelfTsumoValue
 /// (Progress + SameShanten) を使う。3→2後は全打牌の2向聴 Progress value を評価し、
