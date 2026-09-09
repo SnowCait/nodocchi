@@ -121,6 +121,8 @@ cargo run --release -p bot-scenario -- \
 
 出力は方式ごとの候補別の値と時間、`Search size A -> B` の枝数・state 数・`next_discard` 呼び出し数・terminal scoring 数、そして両方式が選ぶ打牌です。A と B の値は起点が同じ3向聴でも枝集合が違うため、同じ量として比較しないでください。
 
+向聴・受け入れ・一向聴形の memo は thread ごとに持つため、方式ごとの実測は必ず新しい thread で行います。同じ thread で続けて評価すると後から走った方式が暖まった memo を使ってしまうためで、この隔離により A → B / B → A のどちらの順でも実測が偏りません。thread を分けても探索する枝・評価値・選択は変わりません。
+
 capture 全体で同じ比較を行う場合は `--compare-three-shanten-continuation` を使います。3向聴軸が発火した request だけを対象に、打牌選択1回の実測時間と3向聴 phase の実測時間 (total / min / p50 / p90 / max / speedup)、選択一致率、差分 request の上位候補を出します。
 
 ```sh

@@ -5,6 +5,13 @@
 //! terminal scoring も、確率・残り自摸機会・unknown 伝播も両方式で同じ primitive を共有する。
 //!
 //! この module は比較のための計測だけを行い、production の打牌選択には接続しない。
+//!
+//! # 計測条件
+//!
+//! 向聴・受け入れ・一向聴形の memo は thread ごとに持つため、同じ thread で A → B と続けて
+//! 評価すると後から走った方式が暖まった memo を使ってしまう。方式ごとの実測は必ず新しい
+//! thread で行い ([`measured_on_a_fresh_thread`])、どちらの方式も同じ cold な thread-local
+//! から始める。探索する枝も評価値も選択も、計測 thread の違いでは変わらない。
 
 use std::cmp::Reverse;
 use std::time::{Duration, Instant};
@@ -74,18 +81,43 @@ impl ThreeShantenContinuationDecision {
         }
     }
 
-    /// 値の高い順に並べた3向聴候補。unknown は末尾へ回す。
+    /// 値の高い順に並べた3向聴候補。unknown は値の順へ混ぜず末尾へ回す。
+    ///
+    /// `Option` の既定の順序では `None` が `Some` より小さく、降順に並べると unknown が先頭へ
+    /// 来てしまうため、確定しているかどうかを先に見る。
     pub fn ranked_candidates(&self) -> Vec<(TileType, Option<u64>)> {
         let mut ranked = self.candidates.clone();
-        ranked.sort_by_key(|(_, value)| Reverse(*value));
+        ranked.sort_by_key(|(_, value)| (value.is_none(), Reverse(*value)));
         ranked
     }
 }
 
+// 計測を新しい thread で行う。向聴・受け入れ・一向聴形の memo は thread-local なので、
+// thread を分ければ先に走った方式が後の方式の memo を暖めることがない。探索する枝も評価値も
+// 選択もこの thread の違いでは変わらない。
+fn measured_on_a_fresh_thread<T: Send>(measure: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(measure)
+            .join()
+            .expect("計測 thread は panic しない")
+    })
+}
+
 /// 指定した方式で通常打牌選択を1回行い、選ばれた action と実測時間を返す。
 ///
-/// 3向聴軸の evaluator 以外は production の打牌選択と同じ経路を1回ずつ通る。
+/// 3向聴軸の evaluator 以外は production の打牌選択と同じ経路を1回ずつ通る。計測は
+/// [`measured_on_a_fresh_thread`] の中で行うため、同じ局面を続けて評価しても前の方式の
+/// thread-local memo は引き継がない。
 pub fn decide_with_three_shanten_continuation_scope(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    scope: ThreeShantenContinuationScope,
+) -> ThreeShantenContinuationDecision {
+    measured_on_a_fresh_thread(|| decide_on_the_measuring_thread(context, legal_actions, scope))
+}
+
+fn decide_on_the_measuring_thread(
     context: &GameContext,
     legal_actions: &[LegalAction],
     scope: ThreeShantenContinuationScope,
@@ -130,7 +162,8 @@ impl ThreeShantenContinuationComparison {
 
 /// 同じ局面について A / B の打牌選択を1回ずつ行う。
 ///
-/// 評価順は A → B の固定で、どちらの実行も自分の memo だけを使う。
+/// 評価順は A → B の固定だが、どちらも自分専用の thread で計るため、先に走った方式が後の
+/// 方式の thread-local memo を暖めることはない。値も選択も評価順に依らない。
 pub fn compare_three_shanten_continuation_scopes(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -163,8 +196,18 @@ pub struct ThreeShantenContinuationProfile {
 
 /// 通常打牌と同じ入力・valuator で全3向聴候補を1方式で評価し、探索規模も計上する。
 ///
-/// production selection は呼ばない。計上の有無で値も枝も変わらない。
+/// production selection は呼ばない。計上の有無で値も枝も変わらない。計測は
+/// [`measured_on_a_fresh_thread`] の中で行うため、方式ごとに同じ cold な thread-local から
+/// 始める。
 pub fn profile_three_shanten_continuation_scope(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    scope: ThreeShantenContinuationScope,
+) -> ThreeShantenContinuationProfile {
+    measured_on_a_fresh_thread(|| profile_on_the_measuring_thread(context, legal_actions, scope))
+}
+
+fn profile_on_the_measuring_thread(
     context: &GameContext,
     legal_actions: &[LegalAction],
     scope: ThreeShantenContinuationScope,
@@ -367,6 +410,74 @@ mod tests {
         assert_eq!(
             comparison.current.ranked_candidates().first().map(|c| c.0),
             comparison.current.selected_discard()
+        );
+    }
+
+    #[test]
+    fn each_measurement_runs_on_its_own_fresh_thread() {
+        // 方式ごとに新しい thread で計るので、向聴 / 受け入れ / 一向聴形の thread-local memo は
+        // 先に走った方式から引き継がない。
+        let caller = std::thread::current().id();
+        let first = measured_on_a_fresh_thread(|| std::thread::current().id());
+        let second = measured_on_a_fresh_thread(|| std::thread::current().id());
+
+        assert_ne!(first, caller);
+        assert_ne!(second, caller);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn the_comparison_values_and_selection_do_not_depend_on_the_evaluation_order() {
+        // A → B の比較で得た値・打牌は、B → A の順に単独評価したものと一致する。
+        let (context, actions) = open_three_shanten_context();
+        let forward = compare_three_shanten_continuation_scopes(&context, &actions);
+        let progress_only = decide_with_three_shanten_continuation_scope(
+            &context,
+            &actions,
+            ThreeShantenContinuationScope::ProgressOnly,
+        );
+        let current = decide_with_three_shanten_continuation_scope(
+            &context,
+            &actions,
+            ThreeShantenContinuationScope::Current,
+        );
+
+        assert_eq!(forward.current.candidates, current.candidates);
+        assert_eq!(forward.current.selected, current.selected);
+        assert_eq!(forward.current.fired, current.fired);
+        assert_eq!(forward.progress_only.candidates, progress_only.candidates);
+        assert_eq!(forward.progress_only.selected, progress_only.selected);
+        assert_eq!(forward.progress_only.fired, progress_only.fired);
+    }
+
+    #[test]
+    fn the_ranking_puts_unknown_candidates_last() {
+        let discard = |mjai: &str| TileType::from_mjai_type_str(mjai).expect("牌種として読める");
+        let decision = ThreeShantenContinuationDecision {
+            scope: ThreeShantenContinuationScope::Current,
+            fired: true,
+            selected: None,
+            elapsed: Duration::ZERO,
+            phases: NormalDiscardPhaseDurations::default(),
+            candidates: vec![
+                (discard("1m"), None),
+                (discard("2m"), Some(10)),
+                (discard("3m"), None),
+                (discard("4m"), Some(30)),
+                (discard("5m"), Some(20)),
+            ],
+        };
+
+        assert_eq!(
+            decision.ranked_candidates(),
+            vec![
+                (discard("4m"), Some(30)),
+                (discard("5m"), Some(20)),
+                (discard("2m"), Some(10)),
+                // unknown は値の順へ混ぜず、元の順序のまま末尾へ回る。
+                (discard("1m"), None),
+                (discard("3m"), None),
+            ]
         );
     }
 

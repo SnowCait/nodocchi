@@ -24,7 +24,8 @@ use crate::scenario::Scenario;
 pub fn format_scenario_comparison(scenario: &Scenario) -> String {
     let context = &scenario.context;
     let actions = scenario.legal_actions.as_slice();
-    // profile は打牌選択より先に取り、どちらの方式も同じ cold memo 条件で計る。
+    // 方式ごとの評価は bot-core 側でそれぞれ新しい thread へ入るため、どちらも同じ cold な
+    // thread-local memo から始まる。ここでの呼び出し順は結果を変えない。
     let current = profile_three_shanten_continuation_scope(
         context,
         actions,
@@ -43,6 +44,7 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
         "  B progress-only: 3->2 Progress, 2->1 Progress, 1->0 Progress only".to_string(),
         "  terminal scoring, acceptance, comparator, probability and horizon are shared"
             .to_string(),
+        "  each scope is measured on its own fresh thread, so neither warms the other".to_string(),
         "  production discard selection is unchanged and always uses A".to_string(),
         String::new(),
     ];
@@ -220,6 +222,7 @@ fn format_capture_comparison(paths: &[String], requests: &[ComparedRequest]) -> 
         format!("  captures: {}", paths.len()),
         "  A current: 1-shanten Progress + SameShanten (production)".to_string(),
         "  B progress-only: 1-shanten Progress only (experimental)".to_string(),
+        "  each scope is measured on its own fresh thread, so neither warms the other".to_string(),
         format!(
             "  requests with the three-shanten axis fired: {}",
             requests.len()
