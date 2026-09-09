@@ -46,6 +46,9 @@ pub struct NormalDiscardPhaseDurations {
     /// Full 追加評価。
     /// 対象外の局面では `Duration::ZERO` のままになる。
     pub two_shanten_self_tsumo: Duration,
+    /// production comparator が評価する3向聴 Progress-only self-tsumo value。
+    /// 対象外の局面では `Duration::ZERO` のままになる。
+    pub three_shanten_self_tsumo: Duration,
     /// 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定。
     pub selection_finalize: Duration,
 }
@@ -55,6 +58,7 @@ impl NormalDiscardPhaseDurations {
         self.base_evaluation
             + self.forward_metrics
             + self.two_shanten_self_tsumo
+            + self.three_shanten_self_tsumo
             + self.selection_finalize
     }
 }
@@ -119,6 +123,7 @@ pub(crate) enum NormalDiscardPhase {
     BaseEvaluation,
     ForwardMetrics,
     TwoShantenSelfTsumo,
+    ThreeShantenSelfTsumo,
     SelectionFinalize,
 }
 
@@ -170,6 +175,7 @@ impl PhaseDurations for NormalDiscardPhaseDurations {
             NormalDiscardPhase::BaseEvaluation => self.base_evaluation += elapsed,
             NormalDiscardPhase::ForwardMetrics => self.forward_metrics += elapsed,
             NormalDiscardPhase::TwoShantenSelfTsumo => self.two_shanten_self_tsumo += elapsed,
+            NormalDiscardPhase::ThreeShantenSelfTsumo => self.three_shanten_self_tsumo += elapsed,
             NormalDiscardPhase::SelectionFinalize => self.selection_finalize += elapsed,
         }
     }
