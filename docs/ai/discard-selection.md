@@ -281,10 +281,13 @@ A の Progress 枝だけの値と実測時間を表示します。候補ごと�
 
 ```text
 3向聴 → Progress → 最良打牌 → 2向聴 → Progress → 最良打牌 → 1向聴
-      → 1向聴の ExpectedSelfTsumoValue (Progress + SameShanten)
+      → Progress → 聴牌
 ```
 
-3向聴と2向聴では Progress のみを辿り、SameShanten は追いません。3→2後は全合法打牌候補を
+3向聴起点の探索では 3→2、2→1、1→0 のいずれも Progress のみを辿り、SameShanten は追いません。
+1向聴を直接評価する通常の [ExpectedSelfTsumoValue](#1向聴-expectedselftsumovalue) は変わらず
+Progress と SameShanten の両方を辿ります。3向聴起点の1向聴 continuation だけが Progress-only
+です。3→2後は全合法打牌候補を
 既存の2向聴 comparatorで比較します。先行categorical軸で敗退が確定した候補のProgress valueは
 計算せず、Progressで単独勝者が確定すれば後続forward metricも省略します。同値/unknown時は
 cohort全体の後続軸を評価し、cohort単位のunknown判定を保ちます。eager評価と選択・値は同じで、
@@ -305,8 +308,13 @@ Shanten / IsolatedTile / IsolatedHonor まで同順位の ForwardTargets cohort 
 保持し、向聴数の違う候補の間では比較しません。押し引き、リーチ判断にも使いません。
 3向聴以外の候補比較と、2向聴 Full / Progress の二段階 selection は変わりません。
 
-全候補評価には秒単位のコストが残ります。追加の近似・pruning・探索削減は入れずに、
-このレイテンシを許容して接続しています。
+1向聴到達後も SameShanten を追っていた頃は、全候補評価が秒単位になる局面が残っていました。
+3向聴起点の continuation を Progress-only にしたのはこのためで、近似も pruning も入れずに
+評価する枝を減らしています。1向聴を直接評価する `ExpectedSelfTsumoValue` は引き続き
+SameShanten を扱います。
+
+3向聴起点の1向聴 continuation を Progress + SameShanten にした値は、bot-scenario の A/B 比較
+option でだけ求められます。枝集合が違うため production の値と同じ量として混ぜません。
 
 `bot-scenario --three-shanten-progress-self-tsumo` は、production が使うこの値を全合法3向聴
 候補について表示・計測する診断 option です。production と同じ evaluator を共有し、診断側に

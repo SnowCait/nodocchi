@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use bot_logic::{TileType, three_shanten_progress_self_tsumo_value_for_candidate};
+use bot_logic::{TileType, three_shanten_progress_only_self_tsumo_value_for_candidate};
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
@@ -44,7 +44,8 @@ pub fn measure_three_shanten_progress_self_tsumo(
         .filter(|evaluation| evaluation.min_shanten_after_discard() == 3)
         .map(|evaluation| {
             let started = Instant::now();
-            let value = three_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation);
+            let value =
+                three_shanten_progress_only_self_tsumo_value_for_candidate(&inputs, evaluation);
             (evaluation.discard, value, started.elapsed())
         })
         .collect();

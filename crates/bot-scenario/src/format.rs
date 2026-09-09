@@ -925,7 +925,7 @@ pub fn format_three_shanten_progress_self_tsumo_cost(
     let mut lines = vec![
         "Three-shanten progress self-tsumo value".to_string(),
         "  same evaluator as the production three-shanten discard comparison".to_string(),
-        "  3/2-shanten: Progress only; 1-shanten: existing Progress + SameShanten".to_string(),
+        "  3->2, 2->1 and 1->0: Progress only".to_string(),
         "  2-shanten discard selection: Progress self-tsumo value (existing comparator)"
             .to_string(),
         format!("  evaluated candidates: {}", cost.candidates.len()),

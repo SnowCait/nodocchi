@@ -168,14 +168,17 @@
 //! だけを追う。最後の1向聴 continuation でどこまで枝を追うかは
 //! [`IishantenContinuationScope`] だけが決め、
 //!
-//! - production の [`three_shanten_progress_self_tsumo_value_for_candidate`] は
-//!   [`IishantenContinuationScope::ProgressAndSameShanten`]
-//! - 比較実験の [`three_shanten_progress_only_self_tsumo_value_for_candidate`] は
+//! - production の [`three_shanten_progress_only_self_tsumo_value_for_candidate`] は
 //!   [`IishantenContinuationScope::ProgressOnly`]
+//! - 比較用の [`three_shanten_progress_self_tsumo_value_for_candidate`] は
+//!   [`IishantenContinuationScope::ProgressAndSameShanten`]
 //!
-//! の2つの入口になる。3→2・2→1 の探索、ツモ牌の列挙、残枚数、物理牌 variant、ツモ後の最良
-//! 打牌の比較、terminal scoring、確率、残り自摸機会、unknown 伝播はどちらも同じ primitive を
-//! 通り、違うのは1向聴 state で [`DrawTransition::SameShanten`] を追うかどうかだけ。起点の
+//! の2つの入口になる。3向聴起点の探索だけがこの範囲を選び、1向聴を直接評価する通常の
+//! `ExpectedSelfTsumoValue` は従来どおり Progress と SameShanten の両方を追う。
+//!
+//! 3→2・2→1 の探索、ツモ牌の列挙、残枚数、物理牌 variant、ツモ後の最良打牌の比較、
+//! terminal scoring、確率、残り自摸機会、unknown 伝播はどちらも同じ primitive を通り、
+//! 違うのは1向聴 state で [`DrawTransition::SameShanten`] を追うかどうかだけ。起点の
 //! 向聴数は同じでも枝集合が違うため、2つの値を同じ量として混ぜない。
 
 use crate::acceptance::{
@@ -596,7 +599,8 @@ pub struct LookaheadInputs<'a> {
     structural_evaluations: Rc<RefCell<StructuralEvaluationMemo>>,
     // 3向聴診断でだけ有効化する。同じ物理牌集合・見え牌・河だけ共有し、枝は削らない。
     progress_memo: Option<Rc<RefCell<ProgressMemo>>>,
-    // 1向聴 state の continuation が追う枝。既定は現行 production の Progress + SameShanten。
+    // 1向聴 state の continuation が追う枝。既定は Progress + SameShanten で、3向聴起点の
+    // production 評価だけが ProgressOnly を選ぶ。
     iishanten_continuation: IishantenContinuationScope,
     // 探索規模の計上先。要求された経路だけが持ち、値も枝も変わらない。
     search_stats: Option<Rc<RefCell<ThreeShantenSearchStats>>>,
@@ -630,10 +634,10 @@ pub struct ProgressMemoStats {
 /// scoring・確率・horizon・unknown 伝播はどちらでも同じ primitive を通る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IishantenContinuationScope {
-    /// 現行 production。1向聴到達後も Progress と SameShanten の両方を追う。
+    /// 1向聴到達後も Progress と SameShanten の両方を追う。3向聴起点では比較用。
     #[default]
     ProgressAndSameShanten,
-    /// 比較実験。1向聴到達後は Progress だけを追い、SameShanten 枝は列挙しない。
+    /// 1向聴到達後は Progress だけを追い、SameShanten 枝は列挙しない。3向聴起点の production。
     ProgressOnly,
 }
 
@@ -1214,16 +1218,18 @@ pub fn two_shanten_progress_self_tsumo_value_for_candidate(
     )
 }
 
-/// 3向聴候補の Progress-only self-tsumo 寄与
+/// 3向聴候補の、1向聴到達後も SameShanten を追う比較用の self-tsumo 寄与
 /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
-///
-/// production の3向聴打牌比較と診断表示はどちらもこの入口を共有する。
 ///
 /// 3→2、2→1 は Progress のみ。1向聴では既存 ExpectedSelfTsumoValue
 /// (Progress + SameShanten) を使う。3→2後は全打牌の2向聴 Progress value を評価し、
 /// production と共通の2向聴 comparator で最良打牌を選ぶ (Full gate は使わない)。
 /// 確率、打点、horizon は既存 helper と共通。
 /// 3向聴以外、必要な fact や continuation が unknown の場合は `None`。
+///
+/// 起点は同じ3向聴でも枝集合が違うため、
+/// [`three_shanten_progress_only_self_tsumo_value_for_candidate`] の値と同じ量として混ぜない
+/// こと。production の打牌選択はこの入口を使わない。
 pub fn three_shanten_progress_self_tsumo_value_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
@@ -1235,16 +1241,17 @@ pub fn three_shanten_progress_self_tsumo_value_for_candidate(
     )
 }
 
-/// 3向聴候補の、1向聴到達後も Progress だけを追う比較実験用の self-tsumo 寄与
+/// 3向聴候補の、1向聴到達後も Progress だけを追う self-tsumo 寄与
 /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+///
+/// production の3向聴打牌比較と診断表示はどちらもこの入口を共有する。
 ///
 /// [`three_shanten_progress_self_tsumo_value_for_candidate`] との違いは、1向聴 state から
 /// [`DrawTransition::SameShanten`] のツモを追わないことだけ。3→2、2→1 の探索も、ツモ後の
 /// 最良打牌の比較も、テンパイ到達後の terminal scoring も、残枚数・物理牌 variant・確率・
-/// 残り自摸機会・unknown 伝播も現行方式と同じ primitive をそのまま通る。
+/// 残り自摸機会・unknown 伝播も同じ primitive をそのまま通る。
 ///
-/// 起点は同じ3向聴でも枝集合が違うため、現行方式の値と同じ量として混ぜないこと。
-/// production の打牌選択はこの入口を使わない。
+/// 1向聴を直接評価する通常の `ExpectedSelfTsumoValue` は変わらず SameShanten も追う。
 pub fn three_shanten_progress_only_self_tsumo_value_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
@@ -5033,6 +5040,32 @@ mod tests {
     }
 
     // ---- 1向聴 continuation の枝の範囲 ----
+
+    #[test]
+    fn the_default_continuation_stays_progress_and_same_shanten() {
+        // ProgressOnly を選ぶのは3向聴起点の探索だけで、既定の入力は1向聴を直接評価する
+        // 通常経路と同じ Progress + SameShanten のまま。
+        let tiles = iishanten_awaiting_draw_hand();
+        let inputs = awaiting_draw_inputs(
+            &tiles,
+            fixed(3),
+            &FIXED_TSUMO_VALUATOR,
+            TEST_OWN_FUTURE_DRAWS,
+        );
+
+        assert_eq!(
+            IishantenContinuationScope::default(),
+            IishantenContinuationScope::ProgressAndSameShanten
+        );
+        assert_eq!(
+            inputs.iishanten_continuation,
+            IishantenContinuationScope::ProgressAndSameShanten
+        );
+        assert_eq!(
+            inputs.iishanten_continuation.scopes(),
+            IISHANTEN_CONTINUATION
+        );
+    }
 
     #[test]
     fn the_progress_only_scope_keeps_the_progress_branches_and_drops_the_same_shanten_branches() {
