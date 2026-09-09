@@ -318,7 +318,7 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
     select_discard_action_with_continuation_scope_instrumented(
         context,
         legal_actions,
-        IishantenContinuationScope::ProgressAndSameShanten,
+        PRODUCTION_THREE_SHANTEN_CONTINUATION,
         timing,
     )
     .selection
@@ -326,9 +326,9 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
 
 /// 3向聴 Progress 軸を指定した1向聴 continuation scope で評価した打牌選択。
 ///
-/// `ProgressAndSameShanten` は production の打牌選択そのもので、`ProgressOnly` は比較実験
-/// 専用。3向聴軸の evaluator 以外は候補生成も前方集計値も他の軸も比較も production と同じ
-/// 経路を1回ずつ通る。
+/// `ProgressOnly` は production の打牌選択そのもので、`ProgressAndSameShanten` は比較用。
+/// 3向聴軸の evaluator 以外は候補生成も前方集計値も他の軸も比較も production と同じ経路を
+/// 1回ずつ通る。
 pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -1048,7 +1048,7 @@ fn production_selection_metrics(
         context,
         tiles,
         evaluations,
-        IishantenContinuationScope::ProgressAndSameShanten,
+        PRODUCTION_THREE_SHANTEN_CONTINUATION,
         &mut NormalDiscardPhaseTimer::disabled(),
     )
 }
@@ -1127,9 +1127,17 @@ fn production_two_shanten_selection(
     }
 }
 
+/// production の3向聴軸が使う1向聴 continuation。3向聴起点では 3→2 / 2→1 と同じく
+/// Progress だけを追う。
+///
+/// 1向聴を直接評価する `ExpectedSelfTsumoValue` と2向聴の評価はこの定数を通らず、
+/// 従来どおり SameShanten も追う。
+const PRODUCTION_THREE_SHANTEN_CONTINUATION: IishantenContinuationScope =
+    IishantenContinuationScope::ProgressOnly;
+
 /// production の3向聴 Progress-only 軸。ForwardTargets cohort の候補だけを評価する。
 ///
-/// 値は診断と同じ [`three_shanten_progress_self_tsumo_value_for_candidate`] そのもので、
+/// 値は診断と同じ [`three_shanten_progress_only_self_tsumo_value_for_candidate`] そのもので、
 /// production 用の別評価も別探索も持たない。候補ごとに探索基盤を作らず、forward metrics と
 /// 同じ base 評価 memo を共有した1本の `LookaheadInputs` と1つの progress memo を全候補で
 /// 使い回す。比較そのものは既存 comparator が行うため、ここでは順位も threshold も持たない。
@@ -1142,14 +1150,14 @@ fn production_three_shanten_progress_metrics(
         inputs,
         evaluations,
         forward_metrics,
-        IishantenContinuationScope::ProgressAndSameShanten,
+        PRODUCTION_THREE_SHANTEN_CONTINUATION,
     )
 }
 
 /// 3向聴 Progress 軸を、指定した1向聴 continuation scope の evaluator で評価する。
 ///
 /// 対象候補の絞り込みも比較も production と同じで、変わるのは1向聴到達後に追う枝だけ。
-/// `ProgressAndSameShanten` は production と同じ値になり、`ProgressOnly` は比較実験専用。
+/// `ProgressOnly` は production と同じ値になり、`ProgressAndSameShanten` は比較用。
 fn three_shanten_progress_metrics_with_continuation_scope(
     inputs: &LookaheadInputs<'_>,
     evaluations: &[DiscardEvaluation],
@@ -5481,6 +5489,33 @@ pub(crate) mod tests {
             candidate("2s").three_shanten_progress_self_tsumo_value,
             Some(value("2s"))
         );
+    }
+
+    #[test]
+    fn the_production_three_shanten_axis_uses_the_progress_only_continuation() {
+        // production の3向聴軸は、比較 CLI の B (ProgressOnly) と同じ evaluator を共有する。
+        let (context, actions) = three_shanten_progress_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let metrics = production_selection_metrics(&context, &legal.tiles, &legal.evaluations);
+        let progress_only = crate::three_shanten_continuation_comparison::profile_three_shanten_continuation_scope(
+            &context,
+            &actions,
+            crate::three_shanten_continuation_comparison::ThreeShantenContinuationScope::ProgressOnly,
+        );
+
+        assert_eq!(progress_only.candidates.len(), legal.evaluations.len());
+        for (discard, value, _) in &progress_only.candidates {
+            let index = legal
+                .evaluations
+                .iter()
+                .position(|evaluation| evaluation.discard == *discard)
+                .expect("比較 CLI の候補は production 候補と同じ");
+            assert_eq!(
+                metrics.three_shanten[index].progress_self_tsumo_value, *value,
+                "{discard:?}"
+            );
+        }
+        assert_eq!(selected_discard(&context, &actions), "2s");
     }
 
     #[test]

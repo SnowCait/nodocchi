@@ -228,19 +228,22 @@ mod tests {
         compared.push("--three-shanten-continuation-comparison");
         let output = run_args(&compared).unwrap();
         assert!(output.starts_with("Three-shanten continuation scope comparison"));
-        assert!(output.contains("A current values"), "{output}");
+        assert!(
+            output.contains("A progress+same-shanten values"),
+            "{output}"
+        );
         assert!(output.contains("B progress-only values"), "{output}");
         assert!(output.contains("Search size A -> B"), "{output}");
         assert!(!output.contains("Final decision"), "{output}");
 
-        // production の打牌は比較の A と同じ。
+        // production の打牌は比較の B と同じ。
         let selected = normal
             .split("\nFinal decision\n  action: ")
             .nth(1)
             .and_then(|rest| rest.lines().next())
             .expect("最終 action がある");
         assert!(
-            output.contains(&format!("  A current: {selected} (discard selection")),
+            output.contains(&format!("  B progress-only: {selected} (discard selection")),
             "{selected}: {output}"
         );
     }

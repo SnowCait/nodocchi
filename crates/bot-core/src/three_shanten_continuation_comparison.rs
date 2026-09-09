@@ -1,10 +1,12 @@
 //! 3向聴 Progress self-tsumo 評価の1向聴 continuation scope A/B 比較。
 //!
-//! A (current) と B (experimental) の違いは1向聴到達後に [`bot_logic::DrawTransition::SameShanten`]
-//! のツモを追うかどうかだけで、3→2 / 2→1 の探索も、ツモ後の最良打牌の比較も、テンパイ到達後の
-//! terminal scoring も、確率・残り自摸機会・unknown 伝播も両方式で同じ primitive を共有する。
+//! A (progress+same-shanten) と B (progress-only) の違いは1向聴到達後に
+//! [`bot_logic::DrawTransition::SameShanten`] のツモを追うかどうかだけで、3→2 / 2→1 の探索も、
+//! ツモ後の最良打牌の比較も、テンパイ到達後の terminal scoring も、確率・残り自摸機会・unknown
+//! 伝播も両方式で同じ primitive を共有する。
 //!
-//! この module は比較のための計測だけを行い、production の打牌選択には接続しない。
+//! production の3向聴軸は B と同じ ProgressOnly で、A は比較用の全枝方式。この module 自体は
+//! 比較のための計測だけを行い、production の打牌選択経路を差し替えることはない。
 //!
 //! # 計測条件
 //!
@@ -30,25 +32,27 @@ use crate::prospective_value::ProductionProspectiveValuator;
 /// 比較する2方式。値の意味が違うため、どちらの scope で評価した値かを必ず添える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreeShantenContinuationScope {
-    /// A: 現行 production。1向聴到達後も Progress + SameShanten を追う。
-    Current,
-    /// B: 比較実験。1向聴到達後は Progress だけを追う。
+    /// A: 比較用の全枝方式。1向聴到達後も Progress + SameShanten を追う。
+    ProgressAndSameShanten,
+    /// B: production の3向聴軸。1向聴到達後は Progress だけを追う。
     ProgressOnly,
 }
 
 impl ThreeShantenContinuationScope {
-    pub const BOTH: [Self; 2] = [Self::Current, Self::ProgressOnly];
+    pub const BOTH: [Self; 2] = [Self::ProgressAndSameShanten, Self::ProgressOnly];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Current => "current (1-shanten: Progress + SameShanten)",
+            Self::ProgressAndSameShanten => {
+                "progress+same-shanten (1-shanten: Progress + SameShanten)"
+            }
             Self::ProgressOnly => "progress-only (1-shanten: Progress only)",
         }
     }
 
     fn continuation(self) -> IishantenContinuationScope {
         match self {
-            Self::Current => IishantenContinuationScope::ProgressAndSameShanten,
+            Self::ProgressAndSameShanten => IishantenContinuationScope::ProgressAndSameShanten,
             Self::ProgressOnly => IishantenContinuationScope::ProgressOnly,
         }
     }
@@ -144,19 +148,19 @@ fn decide_on_the_measuring_thread(
 /// 同じ局面を A / B の順で評価した比較結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreeShantenContinuationComparison {
-    pub current: ThreeShantenContinuationDecision,
+    pub progress_and_same_shanten: ThreeShantenContinuationDecision,
     pub progress_only: ThreeShantenContinuationDecision,
 }
 
 impl ThreeShantenContinuationComparison {
     /// 3向聴軸がどちらの方式でも発火したか。発火条件は評価器に依らないため必ず一致する。
     pub fn fired(&self) -> bool {
-        self.current.fired && self.progress_only.fired
+        self.progress_and_same_shanten.fired && self.progress_only.fired
     }
 
     /// A / B が同じ打牌を選んだか。
     pub fn selects_the_same_discard(&self) -> bool {
-        self.current.selected == self.progress_only.selected
+        self.progress_and_same_shanten.selected == self.progress_only.selected
     }
 }
 
@@ -169,10 +173,10 @@ pub fn compare_three_shanten_continuation_scopes(
     legal_actions: &[LegalAction],
 ) -> ThreeShantenContinuationComparison {
     ThreeShantenContinuationComparison {
-        current: decide_with_three_shanten_continuation_scope(
+        progress_and_same_shanten: decide_with_three_shanten_continuation_scope(
             context,
             legal_actions,
-            ThreeShantenContinuationScope::Current,
+            ThreeShantenContinuationScope::ProgressAndSameShanten,
         ),
         progress_only: decide_with_three_shanten_continuation_scope(
             context,
@@ -310,10 +314,10 @@ mod tests {
     fn the_progress_only_scope_only_drops_the_one_shanten_same_shanten_branches() {
         // 3→2 の枝数は両方式で同じで、1向聴の SameShanten 枝とその先だけが消える。
         let (context, actions) = open_three_shanten_context();
-        let current = profile_three_shanten_continuation_scope(
+        let progress_and_same_shanten = profile_three_shanten_continuation_scope(
             &context,
             &actions,
-            ThreeShantenContinuationScope::Current,
+            ThreeShantenContinuationScope::ProgressAndSameShanten,
         );
         let progress_only = profile_three_shanten_continuation_scope(
             &context,
@@ -328,28 +332,57 @@ mod tests {
                 .map(|(discard, _, _)| *discard)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(discards(&current), discards(&progress_only));
-        assert!(current.candidates.len() > 1);
+        assert_eq!(
+            discards(&progress_and_same_shanten),
+            discards(&progress_only)
+        );
+        assert!(progress_and_same_shanten.candidates.len() > 1);
 
-        for ((discard, full, _), (_, progress, _)) in
-            current.candidates.iter().zip(&progress_only.candidates)
+        for ((discard, full, _), (_, progress, _)) in progress_and_same_shanten
+            .candidates
+            .iter()
+            .zip(&progress_only.candidates)
         {
-            let full = full.expect("現行方式の値を確定できる");
+            let full = full.expect("全枝方式の値を確定できる");
             let progress = progress.expect("Progress-only の値を確定できる");
             assert!(progress < full, "{discard:?}: {progress} < {full}");
         }
 
+        let full_search = progress_and_same_shanten.search;
         assert_eq!(
-            current.search.three_to_two_variants,
+            full_search.three_to_two_variants,
             progress_only.search.three_to_two_variants
         );
-        assert!(current.search.iishanten_same_shanten_variants > 0);
-        assert!(current.search.iishanten_downstream_variants > 0);
+        assert!(full_search.iishanten_same_shanten_variants > 0);
+        assert!(full_search.iishanten_downstream_variants > 0);
         assert_eq!(progress_only.search.iishanten_same_shanten_variants, 0);
         assert_eq!(progress_only.search.iishanten_downstream_variants, 0);
-        assert!(progress_only.search.draw_variants < current.search.draw_variants);
-        assert!(progress_only.search.terminal_scorings < current.search.terminal_scorings);
-        assert!(progress_only.search.base_evaluation_calls < current.search.base_evaluation_calls);
+        assert!(progress_only.search.draw_variants < full_search.draw_variants);
+        assert!(progress_only.search.terminal_scorings < full_search.terminal_scorings);
+        assert!(progress_only.search.base_evaluation_calls < full_search.base_evaluation_calls);
+
+        // production の3向聴軸は B と同じ値で、A の値とは違う。
+        let production =
+            crate::three_shanten_self_tsumo_cost::measure_three_shanten_progress_self_tsumo(
+                &context, &actions,
+            );
+        let profile_values = |profile: &ThreeShantenContinuationProfile| {
+            profile
+                .candidates
+                .iter()
+                .map(|(discard, value, _)| (*discard, *value))
+                .collect::<Vec<_>>()
+        };
+        let production_values: Vec<_> = production
+            .candidates
+            .iter()
+            .map(|(discard, value, _)| (*discard, *value))
+            .collect();
+        assert_eq!(production_values, profile_values(&progress_only));
+        assert_ne!(
+            production_values,
+            profile_values(&progress_and_same_shanten)
+        );
 
         // 同じ方式を2回評価しても値は変わらない。
         let repeated = profile_three_shanten_continuation_scope(
@@ -368,25 +401,25 @@ mod tests {
     }
 
     #[test]
-    fn the_current_scope_decision_is_the_production_discard() {
-        // A の打牌選択は production の打牌選択そのもの。
+    fn the_progress_only_scope_decision_is_the_production_discard() {
+        // B の打牌選択は production の打牌選択そのもの。
         let (context, actions) = open_three_shanten_context();
         let comparison = compare_three_shanten_continuation_scopes(&context, &actions);
 
         assert!(comparison.fired());
         assert_eq!(
-            comparison.current.selected,
+            comparison.progress_only.selected,
             crate::discard_selection::select_discard_action(&context, &actions)
         );
         assert_eq!(
-            comparison.current.scope,
-            ThreeShantenContinuationScope::Current
+            comparison.progress_and_same_shanten.scope,
+            ThreeShantenContinuationScope::ProgressAndSameShanten
         );
         assert_eq!(
             comparison.progress_only.scope,
             ThreeShantenContinuationScope::ProgressOnly
         );
-        assert!(comparison.current.three_shanten_elapsed() > Duration::ZERO);
+        assert!(comparison.progress_and_same_shanten.three_shanten_elapsed() > Duration::ZERO);
         assert!(comparison.progress_only.three_shanten_elapsed() > Duration::ZERO);
 
         // 3向聴軸の値は方式ごとに違い、候補の並びは同じ。
@@ -398,18 +431,22 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            discards(&comparison.current),
+            discards(&comparison.progress_and_same_shanten),
             discards(&comparison.progress_only)
         );
         assert_ne!(
-            comparison.current.candidates,
+            comparison.progress_and_same_shanten.candidates,
             comparison.progress_only.candidates
         );
         assert!(comparison.selects_the_same_discard());
-        assert!(comparison.current.selected_discard().is_some());
+        assert!(comparison.progress_only.selected_discard().is_some());
         assert_eq!(
-            comparison.current.ranked_candidates().first().map(|c| c.0),
-            comparison.current.selected_discard()
+            comparison
+                .progress_only
+                .ranked_candidates()
+                .first()
+                .map(|candidate| candidate.0),
+            comparison.progress_only.selected_discard()
         );
     }
 
@@ -436,15 +473,24 @@ mod tests {
             &actions,
             ThreeShantenContinuationScope::ProgressOnly,
         );
-        let current = decide_with_three_shanten_continuation_scope(
+        let progress_and_same_shanten = decide_with_three_shanten_continuation_scope(
             &context,
             &actions,
-            ThreeShantenContinuationScope::Current,
+            ThreeShantenContinuationScope::ProgressAndSameShanten,
         );
 
-        assert_eq!(forward.current.candidates, current.candidates);
-        assert_eq!(forward.current.selected, current.selected);
-        assert_eq!(forward.current.fired, current.fired);
+        assert_eq!(
+            forward.progress_and_same_shanten.candidates,
+            progress_and_same_shanten.candidates
+        );
+        assert_eq!(
+            forward.progress_and_same_shanten.selected,
+            progress_and_same_shanten.selected
+        );
+        assert_eq!(
+            forward.progress_and_same_shanten.fired,
+            progress_and_same_shanten.fired
+        );
         assert_eq!(forward.progress_only.candidates, progress_only.candidates);
         assert_eq!(forward.progress_only.selected, progress_only.selected);
         assert_eq!(forward.progress_only.fired, progress_only.fired);
@@ -454,7 +500,7 @@ mod tests {
     fn the_ranking_puts_unknown_candidates_last() {
         let discard = |mjai: &str| TileType::from_mjai_type_str(mjai).expect("牌種として読める");
         let decision = ThreeShantenContinuationDecision {
-            scope: ThreeShantenContinuationScope::Current,
+            scope: ThreeShantenContinuationScope::ProgressAndSameShanten,
             fired: true,
             selected: None,
             elapsed: Duration::ZERO,
@@ -489,13 +535,16 @@ mod tests {
         let comparison = compare_three_shanten_continuation_scopes(&context, &actions);
 
         assert!(!comparison.fired());
-        assert!(comparison.current.candidates.is_empty());
+        assert!(comparison.progress_and_same_shanten.candidates.is_empty());
         assert!(comparison.progress_only.candidates.is_empty());
         assert!(comparison.selects_the_same_discard());
         assert_eq!(
-            comparison.current.selected,
+            comparison.progress_only.selected,
             crate::discard_selection::select_discard_action(&context, &actions)
         );
-        assert_eq!(comparison.current.three_shanten_elapsed(), Duration::ZERO);
+        assert_eq!(
+            comparison.progress_only.three_shanten_elapsed(),
+            Duration::ZERO
+        );
     }
 }

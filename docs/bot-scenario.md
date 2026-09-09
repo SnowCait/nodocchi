@@ -29,7 +29,7 @@ cargo run -p bot-scenario -- \
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
-| `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
+| `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ、B が production) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -84,7 +84,7 @@ cargo run -p bot-scenario -- \
 
 ### 3向聴 Progress-only 診断
 
-`--three-shanten-progress-self-tsumo` は、production の3向聴打牌比較が使う値をそのまま全候補分表示する診断 option です。値の evaluator は production と共通で、診断専用の実装は持ちません。3→2、2→1 は Progress のみを追い、1向聴に到達した後は既存 ExpectedSelfTsumoValue (Progress + SameShanten) を再利用します。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。
+`--three-shanten-progress-self-tsumo` は、production の3向聴打牌比較が使う値をそのまま全候補分表示する診断 option です。値の evaluator は production と共通で、診断専用の実装は持ちません。3→2、2→1、1→0 のいずれも Progress のみを追います。1向聴を直接評価する通常の ExpectedSelfTsumoValue は変わらず SameShanten も追いますが、3向聴起点の continuation では追いません。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。
 
 3→2ツモ後の次打牌は、production と共通の2向聴 comparatorで選びます。先行軸で敗退が確定した候補のProgress valueと、Progressで単独勝者が確定した場合の後続forward metricは遅延評価で省略します。同値/unknown時はcohort全体の後続軸を評価するため、全候補を先に評価した場合と値・選択は一致します。Shanten / isolated等の先行軸も既存どおりで、2向聴 Full gateは呼びません。比較cohortの値が未確定なら、その枝の値もunknownです。
 
@@ -106,11 +106,11 @@ production 側の比較規則は [打牌選択](ai/discard-selection.md#3向聴-
 `--three-shanten-continuation-comparison` は、3向聴 Progress self-tsumo 評価が1向聴に到達した後どこまで枝を追うかだけを変えた2方式を、同じ局面で比較する診断 option です。
 
 ```text
-A current         3→2 Progress / 2→1 Progress / 1→0 Progress + SameShanten
-B progress-only   3→2 Progress / 2→1 Progress / 1→0 Progress のみ
+A progress+same-shanten   3→2 Progress / 2→1 Progress / 1→0 Progress + SameShanten
+B progress-only           3→2 Progress / 2→1 Progress / 1→0 Progress のみ
 ```
 
-違いは1向聴 state で `DrawTransition::SameShanten` のツモを追うかどうかだけです。受け入れの列挙、残枚数、物理牌 variant、ツモ後の最良打牌の比較、テンパイ到達後の terminal scoring、Reach / Damaten、確率、残り自摸機会、unknown 伝播はすべて共通の primitive を通ります。production の打牌選択は常に A を使い、この option では変わりません。
+違いは1向聴 state で `DrawTransition::SameShanten` のツモを追うかどうかだけです。受け入れの列挙、残枚数、物理牌 variant、ツモ後の最良打牌の比較、テンパイ到達後の terminal scoring、Reach / Damaten、確率、残り自摸機会、unknown 伝播はすべて共通の primitive を通ります。production の3向聴軸は B と同じ Progress-only で、A は比較用に残している全枝方式です。1向聴を直接評価する通常経路はどちらの方式でも変わらず SameShanten を扱います。
 
 ```sh
 cargo run --release -p bot-scenario -- \
