@@ -97,7 +97,7 @@ cargo run --release -p bot-scenario -- \
 
 値は既存 self-tsumo value と同じ点数単位で小数6桁まで表示します。計測は通常診断の前に行い、入力構築を除く探索時間を表示します。候補間では既存 memo を共有するため、候補別時間には評価順の影響があります。cold 条件の比較には毎回新しいプロセスを使ってください。探索の枝を省略する近似はありません。
 
-3向聴診断では同じ物理牌集合・見え牌・仮想河の2向聴 value、1向聴 continuation、次打牌評価も共有し、memo hit / miss数を表示します。continuationは未確認牌数と残り自摸機会も区別します。候補を浅い評価順で除外するpruningはありません。全候補で秒単位のコストが残りますが、そのレイテンシを許容して production の通常打牌へ接続しています。
+3向聴診断では同じ物理牌集合・見え牌・仮想河の2向聴 value、1向聴 continuation、次打牌評価も共有し、memo hit / miss数を表示します。continuationは未確認牌数と残り自摸機会も区別します。候補を浅い評価順で除外するpruningはありません。1向聴到達後も SameShanten を追っていた頃は全候補で秒単位のコストが残っていましたが、3向聴起点の continuation を Progress-only にしたことで軽くなっています。
 
 production 側の比較規則は [打牌選択](ai/discard-selection.md#3向聴-progress-self-tsumo-value) を参照してください。`Normal discard candidates` の `three-shanten progress self-tsumo value` は打牌選択が実際に使った値そのもので、この軸で決着した場合の `lost by` は `ThreeShantenProgressSelfTsumoValue` です。
 

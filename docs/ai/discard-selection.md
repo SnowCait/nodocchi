@@ -308,8 +308,10 @@ Shanten / IsolatedTile / IsolatedHonor まで同順位の ForwardTargets cohort 
 保持し、向聴数の違う候補の間では比較しません。押し引き、リーチ判断にも使いません。
 3向聴以外の候補比較と、2向聴 Full / Progress の二段階 selection は変わりません。
 
-全候補評価には秒単位のコストが残ります。追加の近似・pruning・探索削減は入れずに、
-このレイテンシを許容して接続しています。
+1向聴到達後も SameShanten を追っていた頃は、全候補評価が秒単位になる局面が残っていました。
+3向聴起点の continuation を Progress-only にしたのはこのためで、近似も pruning も入れずに
+評価する枝を減らしています。1向聴を直接評価する `ExpectedSelfTsumoValue` は引き続き
+SameShanten を扱います。
 
 3向聴起点の1向聴 continuation を Progress + SameShanten にした値は、bot-scenario の A/B 比較
 option でだけ求められます。枝集合が違うため production の値と同じ量として混ぜません。
