@@ -119,6 +119,26 @@ impl SelfTsumoPath {
         })
     }
 
+    /// 1回目と2回目に手変わりの物理牌 variant を、3回目に向聴数を下げる物理牌 variant を引く
+    /// 経路。
+    ///
+    /// 各回の残枚数はそこまでのツモを手牌へ加えた後の値で、分母は `U0 × (U0 - 1) × (U0 - 2)`。
+    /// 手変わりを2回まで許す診断専用の追加深度だけが使う。
+    pub fn via_same_shanten_twice(
+        first: u8,
+        second: u8,
+        third: u8,
+        unknown_tiles: u32,
+    ) -> Option<Self> {
+        (unknown_tiles >= 3).then_some(Self {
+            numerator: u64::from(first) * u64::from(second) * u64::from(third),
+            denominator: u64::from(unknown_tiles)
+                * u64::from(unknown_tiles - 1)
+                * u64::from(unknown_tiles - 2),
+            own_draws: 3,
+        })
+    }
+
     /// この経路を実際に引く確率 [[`TSUMO_PROBABILITY_SCALE`]]。診断表示用。
     pub fn probability(self) -> u64 {
         let scaled = u128::from(TSUMO_PROBABILITY_SCALE) * u128::from(self.numerator)

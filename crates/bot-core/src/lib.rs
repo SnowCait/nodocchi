@@ -10,6 +10,7 @@ pub mod decision_timing;
 pub mod defense;
 pub mod discard_selection;
 mod fold_defense;
+pub mod iishanten_continuation_depth_comparison;
 pub mod kuikae;
 pub mod meld;
 pub mod offense_value;
@@ -99,6 +100,11 @@ pub use defense::{
     tanki_remaining_candidates_for_player, visible_count_of, wall_rank, wall_tile_types_by_rank,
 };
 pub use discard_selection::select_discard_action;
+pub use iishanten_continuation_depth_comparison::{
+    CandidateBreakdown, FirstDrawContribution, IishantenContinuationDepth,
+    IishantenContinuationDepthComparison, IishantenContinuationDepthProfile,
+    compare_iishanten_continuation_depths, profile_iishanten_continuation_depth,
+};
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{

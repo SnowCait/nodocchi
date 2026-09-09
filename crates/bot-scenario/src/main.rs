@@ -4,6 +4,7 @@ mod cli;
 mod combined_defense;
 mod error;
 mod format;
+mod iishanten_continuation_depth;
 mod input;
 #[cfg(test)]
 mod open_hand_defense;
@@ -64,6 +65,15 @@ where
             return three_shanten_continuation::run_capture_comparison(spec);
         }
     };
+
+    // 1向聴 continuation の深度 A/B も同じく他の診断を走らせず、cold memo 条件で計る。
+    if args.iishanten_continuation_depth_comparison {
+        let output = iishanten_continuation_depth::format_scenario_comparison(&scenario);
+        return Ok(match header {
+            Some(header) => format!("{header}\n\n{output}"),
+            None => output,
+        });
+    }
 
     // A/B 比較は他の診断を一切走らせず、どちらの方式も同じ cold memo 条件で計る。
     if args.three_shanten_continuation_comparison {
