@@ -1333,7 +1333,7 @@ fn production_lookahead_inputs<'a>(
         .min()
         == Some(SANSHANTEN_SHANTEN)
     {
-        inputs.with_three_shanten_progress_memo()
+        inputs.with_search_state_memo()
     } else {
         inputs
     }

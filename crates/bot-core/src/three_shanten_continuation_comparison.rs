@@ -18,7 +18,9 @@
 use std::cmp::Reverse;
 use std::time::{Duration, Instant};
 
-use bot_logic::{IishantenContinuationScope, ProgressMemoStats, ThreeShantenSearchStats, TileType};
+use bot_logic::{
+    IishantenContinuationScope, SearchStateMemoStats, ThreeShantenSearchStats, TileType,
+};
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
@@ -190,7 +192,7 @@ pub fn compare_three_shanten_continuation_scopes(
 #[derive(Debug, Clone)]
 pub struct ThreeShantenContinuationProfile {
     pub scope: ThreeShantenContinuationScope,
-    pub memo: ProgressMemoStats,
+    pub memo: SearchStateMemoStats,
     pub search: ThreeShantenSearchStats,
     /// unknown は `None` のまま保持する。
     pub candidates: Vec<(TileType, Option<u64>, Duration)>,
@@ -224,7 +226,7 @@ fn profile_on_the_measuring_thread(
         &valuator,
         LookaheadDiagnosticScope::TWO_SHANTEN_SELF_TSUMO,
     )
-    .with_three_shanten_progress_memo()
+    .with_search_state_memo()
     .with_three_shanten_search_stats();
     let value_for_candidate = three_shanten_value_for_candidate(scope.continuation());
     let started = Instant::now();
@@ -240,7 +242,7 @@ fn profile_on_the_measuring_thread(
         .collect();
     ThreeShantenContinuationProfile {
         scope,
-        memo: inputs.three_shanten_progress_memo_stats(),
+        memo: inputs.search_state_memo_stats(),
         search: inputs.three_shanten_search_stats(),
         candidates,
         total: started.elapsed(),

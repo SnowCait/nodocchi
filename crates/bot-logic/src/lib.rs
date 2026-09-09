@@ -89,9 +89,9 @@ pub use iishanten::{
 pub use lookahead::{
     DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
     DrawVariantLookaheadDiagnostic, ForwardMetricsObserver, ForwardMetricsPhase,
-    IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, ProgressMemoStats,
-    ProspectiveTenpai, ProspectiveTenpaiValuator, ProspectiveTsumoValuator,
-    SameShantenContinuationDepth, SameShantenDownstreamDiagnostic, ThreeShantenSearchStats,
+    IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, ProspectiveTenpai,
+    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, SameShantenContinuationDepth,
+    SameShantenDownstreamDiagnostic, SearchStateMemoStats, SharedDraws, ThreeShantenSearchStats,
     TwoShantenProgressSelfTsumoCandidate, TwoShantenProgressSelfTsumoDiagnostic,
     TwoShantenSelfTsumoCandidate, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver,
     TwoShantenSelfTsumoScope, awaiting_draw_expected_self_tsumo_value,

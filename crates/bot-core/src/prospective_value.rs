@@ -1935,7 +1935,7 @@ mod tests {
                         continue;
                     };
 
-                    for downstream_draw in &downstream.draws {
+                    for downstream_draw in downstream.draws.iter() {
                         for downstream_variant in &downstream_draw.variants {
                             let Some(third) = downstream_variant.next_discard.as_ref() else {
                                 continue;
