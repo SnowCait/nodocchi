@@ -211,7 +211,7 @@ fn format_normal_discard_phases(
     candidates: &[(TileType, Duration)],
 ) -> String {
     format!(
-        "base={} forward={} [{}] two_shanten_self_tsumo={} candidates={} [{}] finalize={}",
+        "base={} forward={} [{}] two_shanten_self_tsumo={} candidates={} [{}] three_shanten_self_tsumo={} finalize={}",
         format_duration(phases.base_evaluation),
         format_duration(phases.forward_metrics),
         format_forward_metrics_phases(&phases.forward_metrics_phases),
@@ -226,6 +226,7 @@ fn format_normal_discard_phases(
             ))
             .collect::<Vec<_>>()
             .join(" "),
+        format_duration(phases.three_shanten_self_tsumo),
         format_duration(phases.selection_finalize),
     )
 }
@@ -279,6 +280,7 @@ pub struct BenchmarkRequestJson {
     pub two_shanten_self_tsumo_ns: u64,
     pub two_shanten_self_tsumo_candidate_count: usize,
     pub two_shanten_self_tsumo_candidates: Vec<BenchmarkTwoShantenSelfTsumoCandidateJson>,
+    pub three_shanten_self_tsumo_ns: u64,
     pub normal_discard_finalize_ns: u64,
     pub post_discard_ns: u64,
     pub selected: String,
@@ -365,6 +367,12 @@ impl BenchmarkJson {
                             },
                         )
                         .collect(),
+                    three_shanten_self_tsumo_ns: nanos(
+                        measurement
+                            .phases
+                            .normal_discard_phases
+                            .three_shanten_self_tsumo,
+                    ),
                     normal_discard_finalize_ns: nanos(
                         measurement.phases.normal_discard_phases.selection_finalize,
                     ),
@@ -569,6 +577,17 @@ mod tests {
                 )
             })
             .collect();
+        measurement
+    }
+
+    fn with_three_shanten_breakdown(
+        mut measurement: RequestMeasurement,
+        total: u64,
+    ) -> RequestMeasurement {
+        measurement
+            .phases
+            .normal_discard_phases
+            .three_shanten_self_tsumo = Duration::from_millis(total);
         measurement
     }
 
@@ -849,7 +868,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -864,6 +883,36 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
 
         assert_eq!(slowest.lines().count(), SLOWEST_REQUEST_COUNT);
+    }
+
+    #[test]
+    fn report_and_json_keep_the_three_shanten_self_tsumo_phase() {
+        let run = synthetic_run(vec![with_three_shanten_breakdown(
+            measurement_with_phases(
+                "game-003.jsonl",
+                3,
+                1900,
+                phases_with_normal_discard_breakdown(1, 1880, 19, 30, 50, 20),
+            ),
+            1780,
+        )]);
+        let report = format_benchmark(&run);
+        let json = BenchmarkJson::from_run(&run);
+
+        assert!(
+            report.contains("three_shanten_self_tsumo=1780.000 ms"),
+            "{report}"
+        );
+        assert_eq!(json.requests[0].three_shanten_self_tsumo_ns, 1_780_000_000);
+        assert_eq!(json.requests[0].two_shanten_self_tsumo_ns, 0);
+        assert_eq!(
+            run.requests[0].phases.normal_discard_phases.total(),
+            run.requests[0].phases.normal_discard
+        );
+
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(text.contains("\"three_shanten_self_tsumo_ns\""), "{text}");
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
     }
 
     #[test]
@@ -917,6 +966,7 @@ mod tests {
                     two_shanten_self_tsumo_ns: 0,
                     two_shanten_self_tsumo_candidate_count: 0,
                     two_shanten_self_tsumo_candidates: vec![],
+                    three_shanten_self_tsumo_ns: 0,
                     normal_discard_finalize_ns: 0,
                     post_discard_ns: 0,
                     selected: "1m".to_string(),
@@ -945,6 +995,7 @@ mod tests {
                             elapsed_ns: 160_000_000,
                         },
                     ],
+                    three_shanten_self_tsumo_ns: 0,
                     normal_discard_finalize_ns: 20_000_000,
                     post_discard_ns: 69_000_000,
                     selected: "1m".to_string(),
@@ -1059,6 +1110,10 @@ mod tests {
             run.requests[0].two_shanten_self_tsumo_candidates.len()
         );
         assert_eq!(
+            request.three_shanten_self_tsumo_ns,
+            nanos(phases.three_shanten_self_tsumo)
+        );
+        assert_eq!(
             request.normal_discard_finalize_ns,
             nanos(phases.selection_finalize)
         );
@@ -1074,6 +1129,7 @@ mod tests {
             text.contains("\"two_shanten_self_tsumo_candidates\""),
             "{text}"
         );
+        assert!(text.contains("\"three_shanten_self_tsumo_ns\""), "{text}");
         assert!(text.contains("\"normal_discard_finalize_ns\""), "{text}");
         assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
     }

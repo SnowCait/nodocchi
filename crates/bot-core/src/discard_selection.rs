@@ -981,7 +981,13 @@ fn production_selection_metrics_instrumented(
     } else {
         TwoShantenProductionSelection::default()
     };
-    let three_shanten = production_three_shanten_progress_metrics(&inputs, evaluations, &forward);
+    // 対象局面だけ phase を開くため、3向聴対象外では専用 phase が 0 のままになる。
+    let three_shanten = if has_competing_three_shanten_targets(evaluations, &forward) {
+        timing.enter(NormalDiscardPhase::ThreeShantenSelfTsumo);
+        production_three_shanten_progress_metrics(&inputs, evaluations, &forward)
+    } else {
+        Vec::new()
+    };
     ProductionSelectionMetrics {
         forward,
         two_shanten,
@@ -5461,6 +5467,58 @@ pub(crate) mod tests {
                 "{discard:?}"
             );
         }
+    }
+
+    #[test]
+    fn three_shanten_phase_timing_measures_only_the_three_shanten_progress_evaluation() {
+        // 深い3向聴局面は1回の評価が重いため、計測あり・なしの production 実行は公開入口の
+        // 2回だけにする。
+        use crate::{Agent, ShantenAgent};
+        let (context, actions) = three_shanten_progress_regression_context();
+        let timed = ShantenAgent.act_with_phase_timing(&context, &actions);
+        let untimed = ShantenAgent.act(&context, &actions);
+        let phases = timed.phases.normal_discard_phases;
+
+        assert_eq!(timed.action, untimed);
+        assert!(
+            matches!(untimed, LegalAction::Dahai { tile } if tile.tile_type().to_mjai_string() == "2s"),
+            "{untimed:?}"
+        );
+        assert!(phases.three_shanten_self_tsumo > Duration::ZERO);
+        assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
+        assert_eq!(timed.two_shanten_self_tsumo_candidates().len(), 0);
+        assert!(phases.total() <= timed.phases.normal_discard);
+    }
+
+    #[test]
+    fn the_three_shanten_phase_stays_zero_outside_the_three_shanten_cohort() {
+        let (context, actions) = two_shanten_ev_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        let mut timing = NormalDiscardPhaseTimer::started();
+        timing.enter(NormalDiscardPhase::ForwardMetrics);
+        let metrics = production_selection_metrics_instrumented(
+            &context,
+            &legal.tiles,
+            &legal.evaluations,
+            &mut timing,
+        );
+        timing.enter(NormalDiscardPhase::SelectionFinalize);
+        let phases = timing.finish();
+
+        assert!(metrics.three_shanten.is_empty());
+        assert_eq!(phases.three_shanten_self_tsumo, Duration::ZERO);
+        assert!(phases.two_shanten_self_tsumo > Duration::ZERO);
+
+        use crate::{Agent, ShantenAgent};
+        let timed_action = ShantenAgent.act_with_phase_timing(&context, &actions);
+        assert_eq!(timed_action.action, ShantenAgent.act(&context, &actions));
+        assert_eq!(
+            timed_action
+                .phases
+                .normal_discard_phases
+                .three_shanten_self_tsumo,
+            Duration::ZERO
+        );
     }
 
     #[test]
