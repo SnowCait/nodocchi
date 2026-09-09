@@ -9,7 +9,11 @@
 //! ツモ牌の列挙・残枚数・物理牌 variant・ツモ後の最良打牌の比較・テンパイ到達後の terminal
 //! scoring・Reach / Damaten・確率・残り自摸機会・unknown 伝播はどちらも同じ primitive を通る。
 //!
-//! production の打牌選択は A のままで、この module は比較のための計測だけを行う。
+//! production の打牌選択は A のままで、この module は比較のための計測だけを行う。表示する順位は
+//! ExpectedSelfTsumoValue 単独の ranking で、production の最終打牌選択ではない。production は
+//! `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存 comparator を
+//! 通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その cohort に unknown が
+//! 1件でもあれば軸ごと落とす。この module はその comparator を複製しない。
 //!
 //! # 計測条件
 //!
@@ -115,7 +119,12 @@ impl IishantenContinuationDepthProfile {
             .map(|&(_, value, _)| value)
     }
 
-    /// 値の高い順に並べた候補。unknown は値の順へ混ぜず末尾へ回す。
+    /// ExpectedSelfTsumoValue の高い順に並べた候補。unknown は値の順へ混ぜず末尾へ回す。
+    ///
+    /// これはこの軸単独の ranking で、production の最終打牌選択ではない。production は
+    /// `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存
+    /// comparator を通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その
+    /// cohort に unknown が1件でもあれば軸ごと落とす。この診断はその絞り込みも軸解決も持たない。
     pub fn ranked(&self) -> Vec<(TileType, Option<u64>)> {
         let mut ranked: Vec<_> = self
             .candidates
@@ -126,8 +135,12 @@ impl IishantenContinuationDepthProfile {
         ranked
     }
 
-    /// 値が確定している候補のうち最善のもの。この診断は production selection を呼ばない。
-    pub fn best(&self) -> Option<(TileType, u64)> {
+    /// [`Self::ranked`] の1位、つまり ExpectedSelfTsumoValue 単独で最も高い候補。
+    ///
+    /// production が選ぶ打牌ではない。この診断は production selection を呼ばず、
+    /// [`Self::ranked`] が説明する pre-acceptance cohort の絞り込みも unknown の軸解決も
+    /// 持たない。
+    pub fn top_expected_self_tsumo_value_candidate(&self) -> Option<(TileType, u64)> {
         self.ranked()
             .into_iter()
             .find_map(|(discard, value)| value.map(|value| (discard, value)))
@@ -237,9 +250,17 @@ pub struct IishantenContinuationDepthComparison {
 }
 
 impl IishantenContinuationDepthComparison {
-    /// A / B が同じ候補を最善にするか。値が1つも確定しない場合は比較そのものが `None`。
-    pub fn selects_the_same_discard(&self) -> Option<bool> {
-        Some(self.once.best()?.0 == self.twice.best()?.0)
+    /// A / B の ExpectedSelfTsumoValue ranking の1位が同じ候補か。値が1つも確定しない場合は
+    /// 比較そのものが `None`。
+    ///
+    /// production が同じ打牌を選ぶかどうかではない。比べているのは
+    /// [`IishantenContinuationDepthProfile::top_expected_self_tsumo_value_candidate`] 同士で、
+    /// production の既存 comparator は通していない。
+    pub fn shares_the_top_expected_self_tsumo_value_candidate(&self) -> Option<bool> {
+        Some(
+            self.once.top_expected_self_tsumo_value_candidate()?.0
+                == self.twice.top_expected_self_tsumo_value_candidate()?.0,
+        )
     }
 }
 
@@ -270,9 +291,11 @@ mod tests {
     use super::*;
     use crate::context::{GameContext, TableStateFacts};
     use crate::shanten_test_support::{dahai, tile};
-    use bot_logic::{TileId, forward_metrics_for_candidate};
+    use bot_logic::{HistoryFuritenFacts, TileId, forward_metrics_for_candidate};
 
-    // 調査対象の1向聴局面 34567899m5799p34s。赤5を持たない物理牌を選ぶ。
+    // 調査対象の1向聴局面 34567899m5799p34s。ドラ表示 3m / 場風 E / 自風 N / player 0 / oya 1 /
+    // remaining 66 / 履歴フリテンなしで、bot-scenario の inline baseline と同じ facts になる。
+    // 赤5を持たない物理牌を選ぶ。
     const HAND: [u8; 14] = [8, 12, 17, 20, 24, 28, 32, 33, 53, 60, 68, 69, 80, 84];
     const DORA_INDICATOR: u8 = 9;
 
@@ -295,6 +318,10 @@ mod tests {
         .with_table_state_facts(TableStateFacts {
             remaining_tiles: Some(66),
             ..Default::default()
+        })
+        .with_history_furiten_facts(HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
         });
         // 合法打牌を絞ると評価する候補だけが減り、候補1件あたりの探索も値も変わらない。
         // 追加深度の探索は重いので、比較対象の 5p / 9p だけを残す。
@@ -363,6 +390,30 @@ mod tests {
             added_anywhere |= twice > once;
         }
         assert!(added_anywhere);
+
+        // 表示する順位は ExpectedSelfTsumoValue 単独の ranking の1位で、production の打牌選択では
+        // ない。5p / 9p はどちらも同じ pre-acceptance cohort にあり値も確定しているため、この
+        // 局面に限れば深度で1位が入れ替わることがそのまま観測できる。
+        let top = |profile: &IishantenContinuationDepthProfile| {
+            let (discard, value) = profile
+                .top_expected_self_tsumo_value_candidate()
+                .expect("値を確定できる候補がある");
+            assert_eq!(
+                profile.ranked().first().copied(),
+                Some((discard, Some(value)))
+            );
+            (discard, value)
+        };
+        // A は production の打牌選択が実際に使う値そのもの。
+        assert_eq!(top(&comparison.once), (tile(68).tile_type(), 697_475_278));
+        assert_eq!(
+            top(&comparison.twice),
+            (tile(53).tile_type(), 1_031_805_837)
+        );
+        assert_eq!(
+            comparison.shares_the_top_expected_self_tsumo_value_candidate(),
+            Some(false),
+        );
 
         assert!(comparison.twice.search.draw_variants > comparison.once.search.draw_variants);
         assert!(

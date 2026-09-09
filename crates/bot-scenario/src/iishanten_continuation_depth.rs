@@ -4,6 +4,11 @@
 //! `SameShanten -> Progress` まで、B (same-shanten twice) は
 //! `SameShanten -> SameShanten -> Progress` をもう1段だけ許した診断専用の追加深度。段数が違えば
 //! 経路確率も違うため、どちらの深度の値かを必ず添えて表示する。
+//!
+//! 表示する順位は ExpectedSelfTsumoValue 単独の ranking で、production の最終打牌選択ではない。
+//! production は既存 comparator の pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、
+//! その cohort に unknown が1件でもあれば軸ごと落とす。この module はその comparator を複製せず、
+//! 値の高い順に並べるだけになっている。
 
 use std::time::Duration;
 
@@ -94,18 +99,24 @@ fn format_delta(comparison: &IishantenContinuationDepthComparison) -> Vec<String
         ));
     }
     lines.push(String::new());
-    lines.push("Best candidate".to_string());
+    lines.push("Top ExpectedSelfTsumoValue candidate".to_string());
+    lines.push(
+        "  this axis alone, not the production discard selection: production compares it only \
+         inside a cohort tied through the pre-acceptance axes and drops the axis when that cohort \
+         holds an unknown"
+            .to_string(),
+    );
     for profile in [&comparison.once, &comparison.twice] {
         lines.push(format!(
             "  {}: {}",
             profile.depth.label(),
-            format_best(profile.best()),
+            format_top_candidate(profile.top_expected_self_tsumo_value_candidate()),
         ));
     }
     lines.push(format!(
-        "  same discard: {}",
+        "  same top ExpectedSelfTsumoValue candidate: {}",
         comparison
-            .selects_the_same_discard()
+            .shares_the_top_expected_self_tsumo_value_candidate()
             .map(|same| same.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
     ));
@@ -161,8 +172,9 @@ fn transition_label(transition: DrawTransition) -> &'static str {
     }
 }
 
-fn format_best(best: Option<(TileType, u64)>) -> String {
-    match best {
+// ExpectedSelfTsumoValue ranking の1位。production が選ぶ打牌ではない。
+fn format_top_candidate(top: Option<(TileType, u64)>) -> String {
+    match top {
         Some((discard, value)) => {
             format!(
                 "{} ({})",

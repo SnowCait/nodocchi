@@ -151,7 +151,9 @@ cargo run --release -p bot-scenario -- \
   --iishanten-continuation-depth-comparison
 ```
 
-出力は方式ごとの候補別の値・順位・時間、`Value A -> B` の候補別増分、`First-draw contribution A -> B` の最初のツモ1牌種単位の内訳、`Best candidate`、`Search size A -> B` の枝数・state 数・terminal scoring 数です。A の値は production の打牌選択が実際に使う ExpectedSelfTsumoValue そのもので、B は経路の段数が違うため同じ量として比較しないでください。**production の打牌選択は A のままで、この option は選択に接続しません。**
+出力は方式ごとの候補別の値・順位・時間、`Value A -> B` の候補別増分、`Top ExpectedSelfTsumoValue candidate`、`First-draw contribution A -> B` の最初のツモ1牌種単位の内訳、`Search size A -> B` の枝数・state 数・terminal scoring 数です。A の値は production の打牌選択が実際に使う ExpectedSelfTsumoValue そのもので、B は経路の段数が違うため同じ量として比較しないでください。**production の打牌選択は A のままで、この option は選択に接続しません。**
+
+`Top ExpectedSelfTsumoValue candidate` と `same top ExpectedSelfTsumoValue candidate` は、**この軸単独の ranking の1位**であって production が選ぶ打牌ではありません。production は `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存 comparator を通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その cohort に `unknown` が1件でもあれば軸ごと落とします ([打牌選択](ai/discard-selection.md#1向聴-expectedselftsumovalue) 参照)。この診断はその絞り込みも軸解決も持たず、全1向聴候補を値の高い順に並べるだけです。
 
 方式ごとの実測は3向聴の A/B 比較と同じく新しい thread で行い、どちらも同じ cold な thread-local memo から始めます。この option は他の診断 option とは併用できません。
 
