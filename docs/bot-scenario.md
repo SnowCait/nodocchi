@@ -30,6 +30,7 @@ cargo run -p bot-scenario -- \
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
 | `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ、B が production) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
+| `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = production / B: 2回まで) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -131,6 +132,30 @@ cargo run --release -p bot-scenario -- \
 ```
 
 この option は他の scenario / 診断 option とは併用できません。
+
+### 1向聴 continuation 深度の A/B 比較
+
+`--iishanten-continuation-depth-comparison` は、1向聴 ExpectedSelfTsumoValue が手変わりのツモを何回まで許すかだけを変えた2方式を、同じ局面で比較する診断 option です。
+
+```text
+A same-shanten once    Progress / SameShanten → Progress (production)
+B same-shanten twice   A に SameShanten → SameShanten → Progress を追加
+```
+
+違いは1向聴 state で `DrawTransition::SameShanten` を2回まで許すかどうかだけです。受け入れの列挙、残枚数、物理牌 variant、ツモ後の最良打牌の比較、テンパイ到達後の terminal scoring、Reach / Damaten、確率、残り自摸機会、unknown 伝播はどちらも共通の primitive を通ります。段数は2回で閉じていて、任意深度の再帰へは一般化しません。手変わりの枝の次打牌はその方式が集計する continuation で選ぶため、B では次打牌そのものが A と変わり得ます。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --hand '34567899m5799p34s' --dora-indicator 3m \
+  --round-wind E --seat-wind N --player-id 0 --oya 1 --remaining-tiles 66 \
+  --iishanten-continuation-depth-comparison
+```
+
+出力は方式ごとの候補別の値・順位・時間、`Value A -> B` の候補別増分、`Top ExpectedSelfTsumoValue candidate`、`First-draw contribution A -> B` の最初のツモ1牌種単位の内訳、`Search size A -> B` の枝数・state 数・terminal scoring 数です。A の値は production の打牌選択が実際に使う ExpectedSelfTsumoValue そのもので、B は経路の段数が違うため同じ量として比較しないでください。**production の打牌選択は A のままで、この option は選択に接続しません。**
+
+`Top ExpectedSelfTsumoValue candidate` と `same top ExpectedSelfTsumoValue candidate` は、**この軸単独の ranking の1位**であって production が選ぶ打牌ではありません。production は `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存 comparator を通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その cohort に `unknown` が1件でもあれば軸ごと落とします ([打牌選択](ai/discard-selection.md#1向聴-expectedselftsumovalue) 参照)。この診断はその絞り込みも軸解決も持たず、全1向聴候補を値の高い順に並べるだけです。
+
+方式ごとの実測は3向聴の A/B 比較と同じく新しい thread で行い、どちらも同じ cold な thread-local memo から始めます。この option は他の診断 option とは併用できません。
 
 ### --allow-ryukyoku
 

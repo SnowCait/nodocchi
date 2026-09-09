@@ -95,7 +95,7 @@
 //!
 //! same-shanten のツモ後は2手目を切ってもまだ同じ向聴数なので、2手目の打牌候補はどれも将来
 //! 打点を持たず、既存の浅い比較 (受け入れ・形) だけでは「この枝が集計するテンパイまでの価値」
-//! を見ていない。そこで、その枝の先を進める局面 ([`DrawScope::continues_downstream`]) では、
+//! を見ていない。そこで、その枝の先を進める局面 ([`DrawScope::downstream_scopes`]) では、
 //! pre-acceptance 軸まで同順位の候補ごとに
 //!
 //! ```text
@@ -423,6 +423,15 @@ pub struct DrawLookaheadDiagnostic {
 }
 
 impl DrawLookaheadDiagnostic {
+    /// この仮想ツモ牌1牌種分の self-tsumo continuation の寄与。
+    ///
+    /// [`DiscardLookaheadDiagnostic::expected_self_tsumo_value`] の内訳そのもので、全枝分を
+    /// 足すとその値と一致する。集計本体を共有するため、内訳のために探索も点数計算もやり直さず、
+    /// 確定しない値を 0 点として扱うこともない。
+    pub fn self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
+        expected_self_tsumo_value_from_draws(std::slice::from_ref(self), facts)
+    }
+
     pub fn variant(&self, drawn_tile: TileId) -> Option<&DrawVariantLookaheadDiagnostic> {
         self.variants
             .iter()
@@ -623,6 +632,9 @@ pub struct LookaheadInputs<'a> {
     // 1向聴 state の continuation が追う枝。既定は Progress + SameShanten で、3向聴起点の
     // production 評価だけが ProgressOnly を選ぶ。
     iishanten_continuation: IishantenContinuationScope,
+    // 1向聴 state の continuation が手変わりを何回まで許すか。既定は production の1回で、
+    // 診断専用の A/B だけがもう1段を選ぶ。
+    same_shanten_continuation_depth: SameShantenContinuationDepth,
     // 探索規模の計上先。要求された経路だけが持ち、値も枝も変わらない。
     search_stats: Option<Rc<RefCell<ThreeShantenSearchStats>>>,
 }
@@ -668,6 +680,42 @@ impl IishantenContinuationScope {
         match self {
             Self::ProgressAndSameShanten => IISHANTEN_CONTINUATION,
             Self::ProgressOnly => PROGRESS_ONLY,
+        }
+    }
+}
+
+/// 1向聴 state の self-tsumo continuation が、向聴数を維持するツモを何回まで許すか。
+///
+/// production は [`Self::Once`] で、`Progress` と `SameShanten -> Progress` までを追う。
+/// [`Self::Twice`] は `SameShanten -> SameShanten -> Progress` をもう1段だけ許す診断専用の
+/// 追加深度で、任意深度の再帰へは一般化しない。
+///
+/// 変わるのは追う枝の範囲だけで、ツモ牌の列挙・残枚数・物理牌 variant・ツモ後の最良打牌の
+/// 比較・terminal scoring・Reach / Damaten・確率・残り自摸機会・unknown 伝播はどちらも同じ
+/// primitive を通る。段数が違えば経路確率も違うため、2つの値を同じ量として混ぜない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SameShantenContinuationDepth {
+    /// production。手変わりは1回まで。
+    #[default]
+    Once,
+    /// 診断専用。手変わりを2回まで許す。
+    Twice,
+}
+
+impl SameShantenContinuationDepth {
+    // 1向聴 state が進める枝。この対応だけが2方式の違いになる。
+    fn scopes(self) -> &'static [DrawScope] {
+        match self {
+            Self::Once => IISHANTEN_CONTINUATION,
+            Self::Twice => IISHANTEN_CONTINUATION_TWICE,
+        }
+    }
+
+    // 手変わりの枝の2手目打牌後から進める枝。
+    fn downstream(self) -> DownstreamScope {
+        match self {
+            Self::Once => DownstreamScope::Progress,
+            Self::Twice => DownstreamScope::ProgressAndSameShanten,
         }
     }
 }
@@ -748,8 +796,21 @@ impl<'a> LookaheadInputs<'a> {
             structural_evaluations: Rc::new(RefCell::new(HashMap::default())),
             progress_memo: None,
             iishanten_continuation: IishantenContinuationScope::default(),
+            same_shanten_continuation_depth: SameShantenContinuationDepth::default(),
             search_stats: None,
         }
+    }
+
+    /// 1向聴 state の continuation が手変わりを何回まで許すかを指定する。
+    ///
+    /// 既定は production と同じ [`SameShantenContinuationDepth::Once`]。追加深度は診断専用の
+    /// A/B のためだけにあり、production selection はこの指定を使わない。
+    pub fn with_same_shanten_continuation_depth(
+        mut self,
+        depth: SameShantenContinuationDepth,
+    ) -> Self {
+        self.same_shanten_continuation_depth = depth;
+        self
     }
 
     /// 3向聴 Progress 評価の探索規模を計上する。値も枝も選択も変わらない。
@@ -1856,11 +1917,16 @@ fn diagnostic_scopes(
     evaluation: &DiscardEvaluation,
     self_tsumo_target: bool,
 ) -> [DrawScope; 2] {
+    let downstream =
+        (inputs.same_shanten_downstream && explores_downstream(evaluation)) || self_tsumo_target;
     [
         DrawScope::Progress,
         DrawScope::SameShanten {
-            downstream: (inputs.same_shanten_downstream && explores_downstream(evaluation))
-                || self_tsumo_target,
+            downstream: if downstream {
+                inputs.same_shanten_continuation_depth.downstream()
+            } else {
+                DownstreamScope::None
+            },
         },
     ]
 }
@@ -1870,10 +1936,7 @@ fn diagnostic_scopes(
 // 求める。
 fn selection_scopes(inputs: &LookaheadInputs, evaluation: &DiscardEvaluation) -> Vec<DrawScope> {
     if self_tsumo_target(inputs, evaluation) {
-        return vec![
-            DrawScope::Progress,
-            DrawScope::SameShanten { downstream: true },
-        ];
+        return inputs.same_shanten_continuation_depth.scopes().to_vec();
     }
     PROGRESS_ONLY.to_vec()
 }
@@ -1944,9 +2007,9 @@ fn accumulate_draws<'a>(
 enum DrawScope {
     /// 向聴数を下げる枝。対象牌・残枚数・ツモ後向聴数は打牌評価が持つ受け入れそのもの。
     Progress,
-    /// 向聴数を維持する枝。`downstream` を指定した枝だけ、2手目の打牌後の状態から
-    /// [`DrawScope::Progress`] をもう1段進める。
-    SameShanten { downstream: bool },
+    /// 向聴数を維持する枝。`downstream` が進める枝を持つ場合だけ、2手目の打牌後の状態から
+    /// その枝をもう1段進める。
+    SameShanten { downstream: DownstreamScope },
 }
 
 impl DrawScope {
@@ -1958,9 +2021,38 @@ impl DrawScope {
         }
     }
 
-    // この指定の枝を、2手目の打牌後からさらに1段進めるか。
-    fn continues_downstream(self) -> bool {
-        matches!(self, Self::SameShanten { downstream: true })
+    // 2手目の打牌後から進める枝。進めない指定では `None`。
+    fn downstream_scopes(self) -> Option<&'static [DrawScope]> {
+        match self {
+            Self::Progress
+            | Self::SameShanten {
+                downstream: DownstreamScope::None,
+            } => None,
+            Self::SameShanten { downstream } => downstream.scopes(),
+        }
+    }
+}
+
+/// 向聴数を維持する枝の2手目打牌後から、さらに進める枝の指定。
+///
+/// 段数はこの enum が持つ3値で閉じていて、任意深度の再帰へは一般化しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownstreamScope {
+    /// 先の段を進めない。
+    None,
+    /// production の1向聴 continuation。向聴数を下げる枝だけをテンパイまで進める。
+    Progress,
+    /// 診断専用の追加深度。向聴数を維持する枝をもう1回だけ許し、その先は Progress だけ。
+    ProgressAndSameShanten,
+}
+
+impl DownstreamScope {
+    fn scopes(self) -> Option<&'static [DrawScope]> {
+        match self {
+            Self::None => None,
+            Self::Progress => Some(PROGRESS_ONLY),
+            Self::ProgressAndSameShanten => Some(IISHANTEN_CONTINUATION),
+        }
     }
 }
 
@@ -1968,16 +2060,31 @@ impl DrawScope {
 const PROGRESS_ONLY: &[DrawScope] = &[DrawScope::Progress];
 
 // 向聴数を維持する枝だけを1段進める指定。
-const SAME_SHANTEN_ONLY: &[DrawScope] = &[DrawScope::SameShanten { downstream: false }];
+const SAME_SHANTEN_ONLY: &[DrawScope] = &[DrawScope::SameShanten {
+    downstream: DownstreamScope::None,
+}];
 
 // 向聴数を維持する枝を、その先のテンパイまで進める指定。
-const SAME_SHANTEN_DOWNSTREAM: &[DrawScope] = &[DrawScope::SameShanten { downstream: true }];
+const SAME_SHANTEN_DOWNSTREAM: &[DrawScope] = &[DrawScope::SameShanten {
+    downstream: DownstreamScope::Progress,
+}];
 
 // 1向聴 state の self-tsumo continuation が進める枝。すぐテンパイする枝と、一度手変わりして
 // からテンパイする枝を1回の探索で両方進める。
 const IISHANTEN_CONTINUATION: &[DrawScope] = &[
     DrawScope::Progress,
-    DrawScope::SameShanten { downstream: true },
+    DrawScope::SameShanten {
+        downstream: DownstreamScope::Progress,
+    },
+];
+
+// 診断専用の追加深度で1向聴 state が進める枝。手変わりをもう1回だけ許した
+// `SameShanten -> SameShanten -> Progress` まで含む。
+const IISHANTEN_CONTINUATION_TWICE: &[DrawScope] = &[
+    DrawScope::Progress,
+    DrawScope::SameShanten {
+        downstream: DownstreamScope::ProgressAndSameShanten,
+    },
 ];
 
 // 現在の打牌候補1件を、指定した枝だけ探索する。詳細診断も選択専用の集計も same-shanten の
@@ -2236,10 +2343,10 @@ impl CandidateBranch {
 
         // 1枚ツモを消費した後の horizon。先の段の確率も残り自摸機会もここから続く。
         let continuation = facts.map(after_draw);
-        let selected = scope
-            .continues_downstream()
-            .then(|| {
-                continuation.and_then(|facts| same_shanten_next_discard(inputs, &state, facts))
+        let downstream_scopes = scope.downstream_scopes();
+        let selected = downstream_scopes
+            .and_then(|scopes| {
+                continuation.map(|facts| same_shanten_next_discard(inputs, &state, facts, scopes))
             })
             .flatten();
         let (next, downstream) = match selected {
@@ -2253,13 +2360,11 @@ impl CandidateBranch {
             // 選んだ場合は、その選択で探索済みの枝をそのまま使い、同じ枝を2回探索しない。
             downstream: downstream
                 .or_else(|| {
-                    scope
-                        .continues_downstream()
-                        .then_some(next.evaluation.as_ref())
-                        .flatten()
-                        .and_then(|evaluation| {
-                            search(inputs, &state, evaluation, PROGRESS_ONLY, continuation)
-                        })
+                    downstream_scopes.zip(next.evaluation.as_ref()).and_then(
+                        |(scopes, evaluation)| {
+                            search(inputs, &state, evaluation, scopes, continuation)
+                        },
+                    )
                 })
                 .map(|draws| SameShantenDownstreamDiagnostic { draws }),
             next_discard: next.evaluation,
@@ -2326,6 +2431,7 @@ fn same_shanten_next_discard(
     inputs: &LookaheadInputs,
     state: &HandState,
     facts: SelfTsumoFacts,
+    scopes: &[DrawScope],
 ) -> Option<(NextDiscard, Option<Vec<DrawLookaheadDiagnostic>>)> {
     let base = inputs.base_evaluations(&state.counts, &state.seen);
     let evaluations: Vec<_> = base
@@ -2345,7 +2451,7 @@ fn same_shanten_next_discard(
         .enumerate()
         .map(|(index, evaluation)| {
             let continuation = targets[index]
-                .then(|| search_view(inputs, state, evaluation, PROGRESS_ONLY, Some(facts)))
+                .then(|| search_view(inputs, state, evaluation, scopes, Some(facts)))
                 .flatten()
                 .and_then(|draws| {
                     let value = expected_self_tsumo_value_from_draws(&draws, facts);
@@ -2529,10 +2635,12 @@ fn terminal_self_tsumo_value(
     Some(path()?.expected_payment(facts, terminal))
 }
 
-// 手変わりの枝1つ分の期待支払い。2手目の打牌後の1向聴からもう1段進めたテンパイだけを集計する。
+// 手変わりの枝1つ分の期待支払い。2手目の打牌後の1向聴からもう1段進めたテンパイを集計する。
 //
-// 2回続けて向聴数を維持する枝はこの探索が持たないため、寄与 0 になる。先の枝を探索していない
-// 場合は「この経路を評価していない」ので、寄与 0 ではなく確定しない値として扱う。
+// 2回続けて向聴数を維持する枝は production の探索範囲外で、その場合は寄与 0 になる (未確定では
+// ない)。診断専用の追加深度 ([`SameShantenContinuationDepth::Twice`]) を指定した探索だけが、その
+// 枝をもう1段だけ進めて集計する。先の枝を探索していない場合は「この経路を評価していない」ので、
+// 寄与 0 ではなく確定しない値として扱う。
 fn same_shanten_self_tsumo_value(
     variant: &DrawVariantLookaheadDiagnostic,
     facts: SelfTsumoFacts,
@@ -2544,10 +2652,46 @@ fn same_shanten_self_tsumo_value(
     let mut total = 0u64;
     for draw in &variant.downstream.as_ref()?.draws {
         for second in &draw.variants {
-            let value = terminal_self_tsumo_value(second, facts, || {
-                SelfTsumoPath::via_same_shanten(
+            let value = match draw.transition {
+                DrawTransition::Progress => terminal_self_tsumo_value(second, facts, || {
+                    SelfTsumoPath::via_same_shanten(
+                        variant.remaining,
+                        second.remaining,
+                        facts.unknown_tiles,
+                    )
+                })?,
+                DrawTransition::SameShanten => {
+                    second_same_shanten_self_tsumo_value(variant.remaining, second, facts)?
+                }
+            };
+            total = total.saturating_add(value);
+        }
+    }
+    Some(total)
+}
+
+// 2回続けて向聴数を維持した枝1つ分の期待支払い。3手目の打牌後の1向聴から向聴数を下げるツモで
+// 到達したテンパイだけを集計する。
+//
+// この段の先で3回目の手変わりは追わないため、そこは寄与 0 になる。段数はここで閉じていて、
+// 任意深度の再帰へは一般化しない。
+fn second_same_shanten_self_tsumo_value(
+    first_remaining: u8,
+    variant: &DrawVariantLookaheadDiagnostic,
+    facts: SelfTsumoFacts,
+) -> Option<u64> {
+    if variant.next_discard.is_none() {
+        return Some(0);
+    }
+
+    let mut total = 0u64;
+    for draw in &variant.downstream.as_ref()?.draws {
+        for third in &draw.variants {
+            let value = terminal_self_tsumo_value(third, facts, || {
+                SelfTsumoPath::via_same_shanten_twice(
+                    first_remaining,
                     variant.remaining,
-                    second.remaining,
+                    third.remaining,
                     facts.unknown_tiles,
                 )
             })?;
@@ -4811,7 +4955,9 @@ mod tests {
             evaluation,
             &[
                 DrawScope::Progress,
-                DrawScope::SameShanten { downstream: true },
+                DrawScope::SameShanten {
+                    downstream: DownstreamScope::Progress,
+                },
             ],
         );
 
@@ -4820,6 +4966,149 @@ mod tests {
             .expect("ツモ打点を確定できる");
         assert_eq!(Some(value), expected_paths_value(&candidate, facts));
         assert!(value > 0);
+    }
+
+    // 手変わりの回数別に、構築済みの枝から期待支払いを足し直す。追加深度が足す経路がどれかを
+    // 枝そのもので確認するためのもの。
+    fn hand_change_value(
+        candidate: &DiscardLookaheadDiagnostic,
+        facts: SelfTsumoFacts,
+        changes: u8,
+    ) -> u64 {
+        let mut total = 0u64;
+        for draw in candidate.draws_with(DrawTransition::SameShanten) {
+            for first in &draw.variants {
+                let Some(downstream) = first.downstream.as_ref() else {
+                    continue;
+                };
+                for second_draw in downstream.draws.iter() {
+                    for second in &second_draw.variants {
+                        match second_draw.transition {
+                            DrawTransition::Progress if changes == 1 => {
+                                let path = SelfTsumoPath::via_same_shanten(
+                                    first.remaining,
+                                    second.remaining,
+                                    facts.unknown_tiles,
+                                );
+                                total +=
+                                    terminal_self_tsumo_value(second, facts, || path).unwrap_or(0);
+                            }
+                            DrawTransition::SameShanten if changes == 2 => {
+                                let Some(deeper) = second.downstream.as_ref() else {
+                                    continue;
+                                };
+                                for third_draw in &deeper.draws {
+                                    for third in &third_draw.variants {
+                                        let path = SelfTsumoPath::via_same_shanten_twice(
+                                            first.remaining,
+                                            second.remaining,
+                                            third.remaining,
+                                            facts.unknown_tiles,
+                                        );
+                                        total += terminal_self_tsumo_value(third, facts, || path)
+                                            .unwrap_or(0);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    fn candidate_at_depth<'a>(
+        case: &'a Case,
+        inputs: &LookaheadInputs<'a>,
+        discard: TileType,
+    ) -> DiscardLookaheadDiagnostic {
+        let evaluation = evaluation_of(case, discard);
+        search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation))
+    }
+
+    #[test]
+    fn the_default_continuation_depth_is_the_production_one() {
+        // 既定は production と同じ「手変わり1回まで」で、明示指定と一致する。
+        let case = &*SAME_SHANTEN_CASE;
+        let default = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let once = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR)
+            .with_same_shanten_continuation_depth(SameShantenContinuationDepth::Once);
+        let facts = default.self_tsumo_facts().expect("材料が揃っている");
+
+        let discard = tile("9s");
+        assert_eq!(
+            candidate_at_depth(case, &default, discard).expected_self_tsumo_value(facts),
+            candidate_at_depth(case, &once, discard).expected_self_tsumo_value(facts),
+        );
+    }
+
+    #[test]
+    fn the_extra_depth_adds_the_second_hand_change_paths() {
+        // 追加深度が足すのは「手変わり2回 → 向聴数を下げるツモ」の経路で、production の深度では
+        // その経路の寄与が 0 になる。Progress 枝はどちらの深度でも同じ。
+        let case = &*SAME_SHANTEN_CASE;
+        let once = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR)
+            .with_same_shanten_continuation_depth(SameShantenContinuationDepth::Once);
+        let twice = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR)
+            .with_same_shanten_continuation_depth(SameShantenContinuationDepth::Twice);
+        let facts = once.self_tsumo_facts().expect("材料が揃っている");
+
+        let discard = tile("9s");
+        let shallow = candidate_at_depth(case, &once, discard);
+        let deep = candidate_at_depth(case, &twice, discard);
+        let shallow_value = shallow
+            .expected_self_tsumo_value(facts)
+            .expect("ツモ打点を確定できる");
+        let deep_value = deep
+            .expected_self_tsumo_value(facts)
+            .expect("ツモ打点を確定できる");
+
+        assert_eq!(hand_change_value(&shallow, facts, 2), 0);
+        let added = hand_change_value(&deep, facts, 2);
+        assert!(added > 0, "追加深度の経路がある");
+        assert!(deep_value > shallow_value);
+
+        // 追加深度の値は「Progress + 手変わり1回 + 手変わり2回」の3つに分かれる。手変わり1回の
+        // 寄与は、その枝の2手目打牌を深い continuation で選び直す分だけ production と変わり得る。
+        assert_eq!(
+            deep_value,
+            progress_value(&deep, facts) + hand_change_value(&deep, facts, 1) + added,
+        );
+        assert_eq!(
+            shallow_value,
+            progress_value(&shallow, facts) + hand_change_value(&shallow, facts, 1),
+        );
+        // Progress 枝の寄与は深度で変わらない。
+        assert_eq!(
+            progress_value(&shallow, facts),
+            progress_value(&deep, facts),
+        );
+    }
+
+    // Progress 枝だけの寄与。
+    fn progress_value(candidate: &DiscardLookaheadDiagnostic, facts: SelfTsumoFacts) -> u64 {
+        candidate
+            .draws_with(DrawTransition::Progress)
+            .map(|draw| draw.self_tsumo_value(facts).unwrap_or(0))
+            .sum()
+    }
+
+    #[test]
+    fn the_first_draw_contributions_sum_to_the_candidate_value() {
+        // 内訳は候補全体の値の分解そのもので、足すと一致する。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let candidate = candidate_at_depth(case, &inputs, tile("9s"));
+
+        let total: u64 = candidate
+            .draws
+            .iter()
+            .map(|draw| draw.self_tsumo_value(facts).expect("ツモ打点を確定できる"))
+            .sum();
+        assert_eq!(Some(total), candidate.expected_self_tsumo_value(facts));
     }
 
     #[test]
@@ -4883,7 +5172,9 @@ mod tests {
             evaluation,
             &[
                 DrawScope::Progress,
-                DrawScope::SameShanten { downstream: true },
+                DrawScope::SameShanten {
+                    downstream: DownstreamScope::Progress,
+                },
             ],
         )
         .expected_self_tsumo_value(facts)
@@ -4907,7 +5198,9 @@ mod tests {
             evaluation,
             &[
                 DrawScope::Progress,
-                DrawScope::SameShanten { downstream: false },
+                DrawScope::SameShanten {
+                    downstream: DownstreamScope::None,
+                },
             ],
         );
 
@@ -4928,7 +5221,9 @@ mod tests {
             evaluation,
             &[
                 DrawScope::Progress,
-                DrawScope::SameShanten { downstream: true },
+                DrawScope::SameShanten {
+                    downstream: DownstreamScope::Progress,
+                },
             ],
         );
 

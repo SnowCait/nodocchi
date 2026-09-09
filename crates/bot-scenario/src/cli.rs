@@ -27,6 +27,10 @@ pub const USAGE: &str = "usage:
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
                --three-shanten-continuation-comparison
   bot-scenario --compare-three-shanten-continuation <CAPTURE_JSONL>...
+  bot-scenario --hand <TILES> [scenario options] --iishanten-continuation-depth-comparison
+  bot-scenario <SCENARIO_JSON> --iishanten-continuation-depth-comparison
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
+               --iishanten-continuation-depth-comparison
 
   --dora is a backward-compatible alias of --dora-indicator
   --extra-visible-tiles adds visible tiles that no other option expresses
@@ -56,6 +60,11 @@ pub const USAGE: &str = "usage:
   Progress-only one-shanten continuation, and reports both sets of values, the search size
   and the discard each one selects; production discard selection is unchanged and cannot be
   combined with other diagnostic options
+  --iishanten-continuation-depth-comparison evaluates every one-shanten candidate twice,
+  once with the production continuation (Progress and SameShanten -> Progress) and once
+  with one extra hand-change step (SameShanten -> SameShanten -> Progress), and reports
+  both sets of values, the ranking, the search size and the elapsed time; production
+  discard selection is unchanged and it cannot be combined with other diagnostic options
   --compare-three-shanten-continuation replays every captured request_action, runs the same
   A/B comparison on the requests where the three-shanten axis fires, and reports latency,
   search size and selection differences; it takes all following capture paths and cannot be
@@ -109,6 +118,8 @@ pub enum CliError {
 
     #[error("--three-shanten-continuation-comparison cannot be combined with {0}")]
     ConflictingThreeShantenContinuationComparison(String),
+    #[error("--iishanten-continuation-depth-comparison cannot be combined with {0}")]
+    ConflictingIishantenContinuationDepthComparison(String),
 
     #[error("--compare-three-shanten-continuation cannot be combined with {0}")]
     ConflictingCaptureComparisonInput(String),
@@ -156,6 +167,9 @@ pub struct CliArgs {
     pub three_shanten_progress_self_tsumo: bool,
     /// 1向聴 continuation scope の A/B 比較を表示する専用診断。production 選択は変えない。
     pub three_shanten_continuation_comparison: bool,
+    /// 1向聴 ExpectedSelfTsumoValue の手変わり深度 A/B 比較を表示する専用診断。
+    /// production 選択は変えない。
+    pub iishanten_continuation_depth_comparison: bool,
     pub source: ScenarioSource,
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
@@ -180,6 +194,7 @@ impl CliArgs {
         let mut args = args.into_iter();
         let mut three_shanten_progress_self_tsumo = false;
         let mut three_shanten_continuation_comparison = false;
+        let mut iishanten_continuation_depth_comparison = false;
         let mut comparison_captures: Vec<String> = Vec::new();
         let mut path: Option<String> = None;
         let mut spec = ScenarioSpec::default();
@@ -282,6 +297,9 @@ impl CliArgs {
                 "--three-shanten-continuation-comparison" => {
                     three_shanten_continuation_comparison = true;
                 }
+                "--iishanten-continuation-depth-comparison" => {
+                    iishanten_continuation_depth_comparison = true;
+                }
                 "--compare-three-shanten-continuation" => {
                     comparison_captures
                         .push(value_of(&mut args, "--compare-three-shanten-continuation")?);
@@ -339,6 +357,8 @@ impl CliArgs {
                 Some("--three-shanten-progress-self-tsumo".to_string())
             } else if three_shanten_continuation_comparison {
                 Some("--three-shanten-continuation-comparison".to_string())
+            } else if iishanten_continuation_depth_comparison {
+                Some("--iishanten-continuation-depth-comparison".to_string())
             } else if !comparison_captures.is_empty() {
                 Some("--compare-three-shanten-continuation".to_string())
             } else if verbose {
@@ -360,6 +380,7 @@ impl CliArgs {
                 verbose: false,
                 three_shanten_progress_self_tsumo: false,
                 three_shanten_continuation_comparison: false,
+                iishanten_continuation_depth_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -391,6 +412,8 @@ impl CliArgs {
                 Some("--three-shanten-progress-self-tsumo".to_string())
             } else if three_shanten_continuation_comparison {
                 Some("--three-shanten-continuation-comparison".to_string())
+            } else if iishanten_continuation_depth_comparison {
+                Some("--iishanten-continuation-depth-comparison".to_string())
             } else if benchmark_json.is_some() {
                 Some("--benchmark-json".to_string())
             } else if verbose {
@@ -411,6 +434,7 @@ impl CliArgs {
                 verbose: false,
                 three_shanten_progress_self_tsumo: false,
                 three_shanten_continuation_comparison: false,
+                iishanten_continuation_depth_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -444,6 +468,37 @@ impl CliArgs {
             ] {
                 if enabled {
                     return Err(CliError::ConflictingThreeShantenContinuationComparison(
+                        option.to_string(),
+                    ));
+                }
+            }
+        }
+
+        if iishanten_continuation_depth_comparison {
+            for (enabled, option) in [
+                (lookahead, "--lookahead"),
+                (verbose, "--verbose"),
+                (summary_only, "--summary-only"),
+                (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                (
+                    two_shanten_self_tsumo_cost.is_some(),
+                    "--two-shanten-self-tsumo-cost",
+                ),
+                (
+                    two_shanten_progress_self_tsumo_cost.is_some(),
+                    "--two-shanten-progress-self-tsumo-cost",
+                ),
+                (
+                    three_shanten_progress_self_tsumo,
+                    "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    three_shanten_continuation_comparison,
+                    "--three-shanten-continuation-comparison",
+                ),
+            ] {
+                if enabled {
+                    return Err(CliError::ConflictingIishantenContinuationDepthComparison(
                         option.to_string(),
                     ));
                 }
@@ -564,6 +619,7 @@ impl CliArgs {
             source,
             three_shanten_progress_self_tsumo,
             three_shanten_continuation_comparison,
+            iishanten_continuation_depth_comparison,
             verbose,
             // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
             lookahead: lookahead || two_shanten_self_tsumo,
@@ -690,6 +746,46 @@ mod tests {
             .expect("discard candidate")
             .evaluation
             .acceptance_total_remaining()
+    }
+
+    #[test]
+    fn parses_the_iishanten_continuation_depth_comparison_option() {
+        let args = parse(&[
+            "--hand",
+            "34567899m5799p34s",
+            "--iishanten-continuation-depth-comparison",
+        ])
+        .unwrap();
+        assert!(args.iishanten_continuation_depth_comparison);
+        assert!(!args.three_shanten_continuation_comparison);
+        assert!(!args.lookahead);
+    }
+
+    #[test]
+    fn the_iishanten_continuation_depth_comparison_cannot_be_combined_with_another_diagnostic() {
+        for option in [
+            "--lookahead",
+            "--verbose",
+            "--summary-only",
+            "--two-shanten-self-tsumo",
+            "--three-shanten-progress-self-tsumo",
+            "--three-shanten-continuation-comparison",
+        ] {
+            assert!(
+                matches!(
+                    parse(&[
+                        "--hand",
+                        "34567899m5799p34s",
+                        option,
+                        "--iishanten-continuation-depth-comparison",
+                    ]),
+                    Err(CliError::ConflictingIishantenContinuationDepthComparison(
+                        conflicting
+                    )) if conflicting == option
+                ),
+                "{option}",
+            );
+        }
     }
 
     #[test]
