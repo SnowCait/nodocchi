@@ -5384,6 +5384,60 @@ pub(crate) mod tests {
             .to_mjai_string()
     }
 
+    // 手変わりの枝で次打牌が分かれる1向聴局面。34567899m 5799p 34s は 1m / 2m のどちらを
+    // ツモっても1向聴のままで、引いた牌を残す打牌と切り返す打牌のどちらも1向聴を保つ。
+    fn same_shanten_next_discard_regression_context() -> (GameContext, Vec<LegalAction>) {
+        const HAND: [&str; 14] = [
+            "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "5p", "7p", "9p", "9p", "3s", "4s",
+        ];
+        self_tsumo_context(&HAND, "3m", 66)
+    }
+
+    #[test]
+    fn the_hand_change_branch_keeps_the_drawn_tile_when_its_continuation_is_higher() {
+        // 手変わりのツモ後の次打牌を、その打牌後の1向聴 continuation で選ぶ。ツモ牌をそのまま
+        // 切り返す打牌と残す打牌のどちらも1向聴を保つ枝で、continuation の高い方を選ぶ。
+        let (context, actions) = same_shanten_next_discard_regression_context();
+        let selection = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::LOOKAHEAD,
+        );
+        let lookahead = selection.lookahead.as_ref().expect("2手先診断がある");
+        let tile = |mjai: &str| TileType::from_mjai_type_str(mjai).expect("牌種として読める");
+        let candidate = lookahead.candidate(tile("5p")).expect("5p 候補がある");
+        let next_discard_after = |drawn: &str| {
+            candidate
+                .draw(tile(drawn))
+                .expect("手変わり枝がある")
+                .variants
+                .first()
+                .expect("物理牌 variant がある")
+                .next_discard_tile()
+                .expect("次打牌がある")
+        };
+
+        // 到達順が違うだけの 1m / 2m の手変わりは、同じ打牌で同じ1向聴へ進む。引いた牌を
+        // そのまま切り返して手変わり前へ戻ることはない。
+        assert_eq!(next_discard_after("1m"), next_discard_after("2m"));
+        assert_ne!(next_discard_after("1m"), tile("1m"));
+        assert_ne!(next_discard_after("2m"), tile("2m"));
+
+        // 1向聴 self-tsumo 軸は 5p / 9p のどちらも確定でき、選択は 9p のまま。
+        let value_of = |discard: &str| {
+            selection
+                .diagnostic
+                .candidates
+                .iter()
+                .find(|candidate| candidate.evaluation.discard == tile(discard))
+                .expect("候補がある")
+                .expected_self_tsumo_value
+                .expect("self-tsumo continuation を確定できる")
+        };
+        assert!(value_of("9p") >= value_of("5p"));
+        assert_eq!(selected_discard(&context, &actions), "9p");
+    }
+
     fn two_shanten_ev_regression_context() -> (GameContext, Vec<LegalAction>) {
         const HAND: [&str; 14] = [
             "1m", "1m", "2m", "5m", "8m", "2p", "3p", "4p", "7p", "8p", "9p", "1s", "3s", "9s",
@@ -5725,9 +5779,9 @@ pub(crate) mod tests {
         };
 
         // 全 ForwardTargets を同じ Progress-only 尺度で順位付けする。
-        assert_eq!(value("5m"), 65_576_785);
-        assert_eq!(value("8m"), 69_721_739);
-        assert_eq!(value("9s"), 67_098_900);
+        assert_eq!(value("5m"), 66_307_421);
+        assert_eq!(value("8m"), 70_251_801);
+        assert_eq!(value("9s"), 67_676_242);
         assert!(value("8m") > value("9s") && value("9s") > value("5m"));
         assert_eq!(metrics.two_shanten.full_pair, None);
 
@@ -5763,7 +5817,7 @@ pub(crate) mod tests {
             &metrics.two_shanten,
             &[],
         );
-        for (discard, expected) in [("8m", 69_721_739), ("9s", 67_098_900), ("5m", 65_576_785)] {
+        for (discard, expected) in [("8m", 70_251_801), ("9s", 67_676_242), ("5m", 66_307_421)] {
             let candidate = diagnostic
                 .candidates
                 .iter()
