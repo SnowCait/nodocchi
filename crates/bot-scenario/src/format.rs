@@ -4080,9 +4080,9 @@ mod tests {
         assert_eq!(action_label(&diagnostic.selected_action), "8m");
 
         for (discard, expected, formatted) in [
-            ("8m", 69_721_739, "69.721"),
-            ("9s", 67_098_900, "67.098"),
-            ("5m", 65_576_785, "65.576"),
+            ("8m", 70_251_801, "70.251"),
+            ("9s", 67_676_242, "67.676"),
+            ("5m", 66_307_421, "66.307"),
         ] {
             let candidate = cohort_candidate(&diagnostic, discard);
             assert_eq!(
@@ -4116,13 +4116,13 @@ mod tests {
         assert!(summary.contains("  choice 1: 8m"), "{summary}");
         assert!(
             summary.contains(
-                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 69.721 > choice 2 67.098"
+                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 70.251 > choice 2 67.676"
             ),
             "{summary}"
         );
         assert!(
             summary.contains(
-                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 67.098 > choice 3 65.576"
+                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 67.676 > choice 3 66.307"
             ),
             "{summary}"
         );
@@ -4722,7 +4722,7 @@ mod tests {
     fn summary_only_reports_the_production_iishanten_call_comparison() {
         let json = IISHANTEN_PON_REACTION_SCENARIO.replace(
             "\"allow_none\": true",
-            "\"remaining_tiles\": 60, \"allow_none\": true",
+            "\"remaining_tiles\": 20, \"allow_none\": true",
         );
         let (scenario, diagnostic, output) = rendered(&json, false);
         let mut agent = ShantenAgent;

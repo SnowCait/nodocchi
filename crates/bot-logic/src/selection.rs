@@ -184,8 +184,11 @@ pub struct ForwardMetrics {
     /// 1向聴限定の self-tsumo continuation 期待支払い
     /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
     ///
-    /// Σ(経路確率 × テンパイ到達後の期待ツモ支払い) で、Progress と SameShanten を同じ尺度へ
-    /// 揃えた値。材料が揃わない局面・確定できない枝がある候補・1向聴以外は `None`。
+    /// Σ(経路確率 × テンパイ到達後の期待ツモ支払い)。現在打牌の比較では Progress と
+    /// SameShanten を同じ尺度へ揃えた値を持ち、手変わりのツモ後の2手目打牌の比較では、その
+    /// 打牌後の1向聴から Progress 枝だけを進めた値を持つ。どちらも起点が1向聴の同じ尺度だが、
+    /// 1回の比較に渡す候補集合はどちらか一方の枝集合だけで、混ぜない。材料が揃わない局面・
+    /// 確定できない枝がある候補・1向聴以外は `None`。
     pub expected_self_tsumo_value: Option<u64>,
 }
 
@@ -1175,15 +1178,19 @@ fn requires_tenpai_wait(evaluations: &[DiscardEvaluation]) -> bool {
 
 /// この打牌候補が前方評価の対象かどうか。
 pub(crate) fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool> {
+    forward_target_mask_for_views(&evaluation_views(evaluations))
+}
+
+/// 借用 view のまま [`forward_target_mask`] を求める。絞り込み規則は共通。
+pub(crate) fn forward_target_mask_for_views(
+    evaluations: &[DiscardEvaluationView<'_>],
+) -> Vec<bool> {
     let Some(mut best_index) = (!evaluations.is_empty()).then_some(0) else {
         return Vec::new();
     };
     for index in 1..evaluations.len() {
-        if compare_discard_before_acceptance(
-            &evaluations[index].view(),
-            &evaluations[best_index].view(),
-        )
-        .is_some_and(|comparison| comparison.candidate_is_better)
+        if compare_discard_before_acceptance(&evaluations[index], &evaluations[best_index])
+            .is_some_and(|comparison| comparison.candidate_is_better)
         {
             best_index = index;
         }
@@ -1194,8 +1201,7 @@ pub(crate) fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool
     evaluations
         .iter()
         .map(|evaluation| {
-            compare_discard_before_acceptance(&evaluation.view(), &evaluations[best_index].view())
-                .is_none()
+            compare_discard_before_acceptance(evaluation, &evaluations[best_index]).is_none()
         })
         .collect()
 }

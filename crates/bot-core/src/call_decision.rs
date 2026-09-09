@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn an_iishanten_call_with_a_higher_expected_self_tsumo_value_is_selected() {
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 60);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 20);
         let (decision, candidate) = single_candidate(&ctx, &action, true);
         let comparison = candidate.iishanten_self_tsumo.expect("comparison");
 
@@ -1204,8 +1204,8 @@ mod tests {
         assert!(candidate.eligible);
         assert_eq!(decision.selected, Some(action));
         assert_eq!(comparison.comparison, CallIishantenComparison::CallHigher);
-        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(163_704_412));
-        assert_eq!(comparison.call_expected_self_tsumo_value, Some(164_352_823));
+        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(48_730_952));
+        assert_eq!(comparison.call_expected_self_tsumo_value, Some(48_877_415));
         assert!(
             comparison.call_expected_self_tsumo_value > comparison.pass_expected_self_tsumo_value
         );
@@ -1704,7 +1704,7 @@ mod tests {
 
     #[test]
     fn the_iishanten_acceptance_diagnostic_does_not_change_the_selected_action() {
-        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 60);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 20);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
         let actions = [action.clone(), LegalAction::None];
 

@@ -91,6 +91,27 @@
 //! 選択専用経路と詳細診断がどちらも同じ枝集合を進めるため、詳細診断の有無で打牌選択の結果は
 //! 変わらない。
 //!
+//! # same-shanten の枝の2手目打牌
+//!
+//! same-shanten のツモ後は2手目を切ってもまだ同じ向聴数なので、2手目の打牌候補はどれも将来
+//! 打点を持たず、既存の浅い比較 (受け入れ・形) だけでは「この枝が集計するテンパイまでの価値」
+//! を見ていない。そこで、その枝の先を進める局面 ([`DrawScope::continues_downstream`]) では、
+//! pre-acceptance 軸まで同順位の候補ごとに
+//!
+//! ```text
+//! その打牌後の1向聴 → 向聴数を下げるツモ → 3手目の最良打牌 → テンパイ
+//! ```
+//!
+//! だけを進めた期待支払いを求め、既存 comparator の1向聴 self-tsumo 軸
+//! ([`ForwardMetrics::expected_self_tsumo_value`]) へそのまま渡して2手目を選ぶ。集計する枝
+//! そのものを選択に使うため、選んだ枝と集計する枝は一致する。手変わりの先でもう一度手変わり
+//! する枝は追わないので、探索の深さも枝集合も変わらない。
+//!
+//! 確率も打点も terminal scoring も1段目と同じ helper を通り、この選択のための係数も threshold
+//! も持たない。cohort に確定できない値が1件でもあれば軸ごと落ちて既存の浅い比較へ戻り、確定
+//! しない値を 0 点として順位付けすることはない。ツモ打点と残り自摸機会が揃わない局面では先の
+//! 段そのものを集計しないため、2手目の選択も既存の浅い比較のままになる。
+//!
 //! # 探索 node 間の base 打牌評価
 //!
 //! 既存打牌評価 ([`evaluate_discards_with_seen`](crate::discard::evaluate_discards_with_seen)) は
@@ -188,14 +209,14 @@ use crate::acceptance::{
 use crate::count_hasher::CountHasherBuilder;
 use crate::discard::{
     CandidateSeen, DecorationContext, DiscardEvaluation, DiscardEvaluationView, ShapePenaltyMode,
-    discard_decoration, evaluate_discards_with_seen, split_discarded_tile, split_discarded_tile_of,
+    discard_decoration, evaluate_discards_with_seen, split_discarded_tile_of,
 };
 use crate::furiten::TENPAI_SHANTEN;
 use crate::iishanten::IishantenShape;
 use crate::selection::{
     ForwardMetricAccumulator, ForwardMetrics, TenpaiWaitMetric, WeightedForwardMetric,
     best_discard_selection_index_with_forward_metrics_for_views, forward_target_mask,
-    requires_forward_metrics,
+    forward_target_mask_for_views, requires_forward_metrics,
 };
 use crate::self_tsumo::{SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
@@ -1079,7 +1100,7 @@ pub fn awaiting_draw_expected_self_tsumo_value(
         return None;
     }
     let facts = inputs.self_tsumo_facts()?;
-    let draws = search_waiting_state(inputs, acceptance, IISHANTEN_CONTINUATION);
+    let draws = search_waiting_state(inputs, acceptance, IISHANTEN_CONTINUATION, Some(facts));
     expected_self_tsumo_value_from_draws(&draws, facts)
 }
 
@@ -1693,6 +1714,7 @@ fn iishanten_continuation_after_progress_draw(
         &state,
         &evaluation,
         inputs.iishanten_continuation.scopes(),
+        Some(continuation),
     )
     .inspect(|draws| count_iishanten_continuation_draws(inputs, draws))
     .and_then(|draws| expected_self_tsumo_value_from_draws(&draws, continuation));
@@ -1964,7 +1986,14 @@ fn search_candidate(
 ) -> DiscardLookaheadDiagnostic {
     DiscardLookaheadDiagnostic {
         discard: evaluation.discard,
-        draws: search(inputs, &inputs.root, evaluation, scopes).unwrap_or_default(),
+        draws: search(
+            inputs,
+            &inputs.root,
+            evaluation,
+            scopes,
+            inputs.self_tsumo_facts(),
+        )
+        .unwrap_or_default(),
     }
 }
 
@@ -1976,12 +2005,27 @@ fn search(
     state: &HandState,
     evaluation: &DiscardEvaluation,
     scopes: &[DrawScope],
+    facts: Option<SelfTsumoFacts>,
 ) -> Option<Vec<DrawLookaheadDiagnostic>> {
-    let branch = CandidateBranch::new(state, evaluation)?;
+    search_view(inputs, state, &evaluation.view(), scopes, facts)
+}
+
+// 借用 view のまま探索する [`search`] の本体。base 打牌評価を実体化しない経路と共有する。
+fn search_view(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    evaluation: &DiscardEvaluationView<'_>,
+    scopes: &[DrawScope],
+    facts: Option<SelfTsumoFacts>,
+) -> Option<Vec<DrawLookaheadDiagnostic>> {
+    let branch =
+        CandidateBranch::for_discard(state, evaluation.discard, evaluation.discards_red_five)?;
     Some(
         scopes
             .iter()
-            .flat_map(|&scope| branch.draws(inputs, &evaluation.acceptance_after_discard, scope))
+            .flat_map(|&scope| {
+                branch.draws(inputs, evaluation.acceptance_after_discard, scope, facts)
+            })
             .collect(),
     )
 }
@@ -1992,11 +2036,12 @@ fn search_waiting_state(
     inputs: &LookaheadInputs,
     acceptance: &EffectiveAcceptance,
     scopes: &[DrawScope],
+    facts: Option<SelfTsumoFacts>,
 ) -> Vec<DrawLookaheadDiagnostic> {
     let branch = CandidateBranch::from_waiting_state(&inputs.root);
     scopes
         .iter()
-        .flat_map(|&scope| branch.draws(inputs, acceptance, scope))
+        .flat_map(|&scope| branch.draws(inputs, acceptance, scope, facts))
         .collect()
 }
 
@@ -2049,22 +2094,28 @@ impl CandidateBranch {
     }
     // 打牌候補の牌種を手牌から除けない場合だけ `None`。
     fn new(state: &HandState, evaluation: &DiscardEvaluation) -> Option<Self> {
+        Self::for_discard(state, evaluation.discard, evaluation.discards_red_five)
+    }
+
+    // 切る牌種と赤フラグを直接受け取る組み立て本体。借用 view のまま探索する経路と共有する。
+    fn for_discard(state: &HandState, discard: TileType, discards_red_five: bool) -> Option<Self> {
         let mut after_discard = state.counts;
-        after_discard.remove(evaluation.discard).ok()?;
+        after_discard.remove(discard).ok()?;
 
         // 実際に切られる物理牌を次段の物理牌一覧から外す。赤5と黒5の両方を持ち片方だけが合法な
         // 局面でも、打牌評価が確定した物理牌をそのまま引き継ぐ。
-        let (discarded, next_tiles) = match split_discarded_tile(state.tiles.clone(), evaluation) {
-            Some((discarded, remaining)) => (Some(discarded), remaining),
-            None => (None, state.tiles.clone()),
-        };
+        let (discarded, next_tiles) =
+            match split_discarded_tile_of(state.tiles.clone(), discard, discards_red_five) {
+                Some((discarded, remaining)) => (Some(discarded), remaining),
+                None => (None, state.tiles.clone()),
+            };
 
         Some(Self {
             after_discard,
             next_tiles,
             // 切った牌は次段では見え牌になる。
-            seen: state.seen.after_discard(evaluation.discard),
-            draw_seen: state.seen.additional_seen(evaluation.discard),
+            seen: state.seen.after_discard(discard),
+            draw_seen: state.seen.additional_seen(discard),
             red_five_seen: state.red_five_seen,
             discarded: state.discarded.iter().copied().chain(discarded).collect(),
         })
@@ -2095,17 +2146,18 @@ impl CandidateBranch {
         inputs: &LookaheadInputs,
         acceptance: &EffectiveAcceptance,
         scope: DrawScope,
+        facts: Option<SelfTsumoFacts>,
     ) -> Vec<DrawLookaheadDiagnostic> {
         match scope {
             DrawScope::Progress => acceptance
                 .tiles
                 .iter()
-                .map(|tile| self.draw(inputs, drawable(tile), scope))
+                .map(|tile| self.draw(inputs, drawable(tile), scope, facts))
                 .collect(),
             DrawScope::SameShanten { .. } => self
                 .same_shanten_drawables(inputs)
                 .into_iter()
-                .map(|drawable| self.draw(inputs, drawable, scope))
+                .map(|drawable| self.draw(inputs, drawable, scope, facts))
                 .collect(),
         }
     }
@@ -2140,10 +2192,11 @@ impl CandidateBranch {
         inputs: &LookaheadInputs,
         drawable: DrawableTile,
         scope: DrawScope,
+        facts: Option<SelfTsumoFacts>,
     ) -> DrawLookaheadDiagnostic {
         let variants = self
             .variants_of(&drawable)
-            .map(|variant| self.draw_variant(inputs, drawable.tile, variant, scope))
+            .map(|variant| self.draw_variant(inputs, drawable.tile, variant, scope, facts))
             .collect();
 
         DrawLookaheadDiagnostic {
@@ -2163,6 +2216,7 @@ impl CandidateBranch {
         draw: TileType,
         variant: PhysicalTileVariant,
         scope: DrawScope,
+        facts: Option<SelfTsumoFacts>,
     ) -> DrawVariantLookaheadDiagnostic {
         inputs.count(|stats| stats.draw_variants += 1);
         let Some(state) = self.state_after_draw(draw, variant.tile) else {
@@ -2176,16 +2230,33 @@ impl CandidateBranch {
             };
         };
 
-        let next = next_discard(inputs, &state);
+        // 1枚ツモを消費した後の horizon。先の段の確率も残り自摸機会もここから続く。
+        let continuation = facts.map(after_draw);
+        let selected = scope
+            .continues_downstream()
+            .then(|| {
+                continuation.and_then(|facts| same_shanten_next_discard(inputs, &state, facts))
+            })
+            .flatten();
+        let (next, downstream) = match selected {
+            Some(selected) => selected,
+            None => (next_discard(inputs, &state), None),
+        };
         DrawVariantLookaheadDiagnostic {
             drawn_tile: variant.tile,
             remaining: variant.remaining,
-            // 先の段も同じ探索 primitive を、対象の枝を変えて呼ぶだけ。
-            downstream: scope
-                .continues_downstream()
-                .then_some(next.evaluation.as_ref())
-                .flatten()
-                .and_then(|evaluation| search(inputs, &state, evaluation, PROGRESS_ONLY))
+            // 先の段も同じ探索 primitive を、対象の枝を変えて呼ぶだけ。次打牌を先の段の値で
+            // 選んだ場合は、その選択で探索済みの枝をそのまま使い、同じ枝を2回探索しない。
+            downstream: downstream
+                .or_else(|| {
+                    scope
+                        .continues_downstream()
+                        .then_some(next.evaluation.as_ref())
+                        .flatten()
+                        .and_then(|evaluation| {
+                            search(inputs, &state, evaluation, PROGRESS_ONLY, continuation)
+                        })
+                })
                 .map(|draws| SameShantenDownstreamDiagnostic { draws }),
             next_discard: next.evaluation,
             prospective_value: next.prospective_value,
@@ -2223,6 +2294,78 @@ fn drawable(tile: &EffectiveAcceptanceTile) -> DrawableTile {
         remaining: tile.remaining,
         shanten_after_draw: tile.shanten_after_draw,
     }
+}
+
+// 仮想ツモを1回消費した後の horizon。未確認牌も残り自摸機会も既存の経路と同じだけ進む。
+fn after_draw(facts: SelfTsumoFacts) -> SelfTsumoFacts {
+    SelfTsumoFacts {
+        unknown_tiles: facts.unknown_tiles.saturating_sub(1),
+        own_future_draws: facts.own_future_draws.saturating_sub(1),
+    }
+}
+
+// 手変わりのツモ後 (打牌してもまだ同じ向聴数) の最良打牌を、その打牌後の1向聴 continuation で
+// 選ぶ。
+//
+// 比較に使う値は「その打牌後の state を起点に、既存の1向聴 continuation を Progress 枝だけ
+// 進めた期待支払い」で、この枝から集計する経路そのもの。手変わりの枝の先ではもう一度手変わり
+// する枝を追わないため、選択に使う枝集合と集計する枝集合が一致する。
+//
+// 値は既存 comparator の1向聴 self-tsumo 軸 ([`ForwardMetrics::expected_self_tsumo_value`]) へ
+// そのまま渡すので、比較順も cohort 単位の unknown 解決も既存のものを共有する。確定しない値を
+// 0 点として順位付けすることはなく、cohort に1件でも確定しない候補があれば軸ごと落ちて既存の
+// 浅い比較になる。
+//
+// 探索した Progress 枝は選ばれた打牌の先の段としてそのまま返し、同じ枝を2回探索しない。
+// 打牌候補が1件も無い場合だけ `None` で、呼び出し側が既存の選択へ戻る。
+fn same_shanten_next_discard(
+    inputs: &LookaheadInputs,
+    state: &HandState,
+    facts: SelfTsumoFacts,
+) -> Option<(NextDiscard, Option<Vec<DrawLookaheadDiagnostic>>)> {
+    let base = inputs.base_evaluations(&state.counts, &state.seen);
+    let evaluations: Vec<_> = base
+        .iter()
+        .map(|evaluation| decorated_evaluation(inputs, state, evaluation))
+        .collect();
+    // 先の段まで進めるのは、既存の絞り込みで比較対象になる候補だけ。pre-acceptance 軸で敗退が
+    // 確定する候補は continuation を求めても比較へ入らない。
+    let targets = forward_target_mask_for_views(&evaluations);
+    let mut downstream: Vec<Option<Vec<DrawLookaheadDiagnostic>>> = vec![None; evaluations.len()];
+    let values: Vec<_> = evaluations
+        .iter()
+        .map(|&evaluation| prospective_value(inputs, state, evaluation))
+        .collect();
+    let metrics: Vec<_> = evaluations
+        .iter()
+        .enumerate()
+        .map(|(index, evaluation)| {
+            let continuation = targets[index]
+                .then(|| search_view(inputs, state, evaluation, PROGRESS_ONLY, Some(facts)))
+                .flatten()
+                .and_then(|draws| {
+                    let value = expected_self_tsumo_value_from_draws(&draws, facts);
+                    downstream[index] = Some(draws);
+                    value
+                });
+            ForwardMetrics {
+                expected_self_tsumo_value: continuation,
+                ..ForwardMetrics::from_prospective_value(values[index])
+            }
+        })
+        .collect();
+
+    let index =
+        best_discard_selection_index_with_forward_metrics_for_views(&evaluations, &metrics)?;
+    let evaluation = evaluations[index];
+    Some((
+        NextDiscard {
+            tsumo_continuation: tenpai_tsumo_value(inputs, state, evaluation),
+            prospective_value: values[index],
+            evaluation: Some(evaluation.to_evaluation()),
+        },
+        downstream[index].take(),
+    ))
 }
 
 // 仮想手牌1つ分の最良打牌を既存打牌評価・既存文脈反映・既存比較順で求める。仮想ツモ牌の物理牌が
@@ -2422,7 +2565,7 @@ mod tests {
         evaluate_discards_from_tiles_with_fixed_melds_and_context,
         evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles,
         evaluate_discards_with_seen, select_best_discard_from_tiles_with_context,
-        select_best_discard_from_tiles_with_visible_tiles,
+        select_best_discard_from_tiles_with_visible_tiles, split_discarded_tile,
     };
     use crate::selection::best_discard_selection_index_with_forward_metrics;
     use crate::tile::count_indicated_dora;
@@ -4843,6 +4986,79 @@ mod tests {
     }
 
     #[test]
+    fn the_hand_change_branch_picks_the_next_discard_by_its_continuation() {
+        // 手変わりのツモ後の次打牌は、その打牌後の1向聴 continuation が最大の候補になる。
+        // 既存の浅い比較が別の牌を選ぶ枝がこの局面にあり、そこでは continuation が実際に
+        // 上回っている。
+        let case = &*SAME_SHANTEN_CASE;
+        let inputs = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
+        let facts = inputs.self_tsumo_facts().expect("材料が揃っている");
+        let continuation = after_draw(facts);
+        let lookahead = diagnose_lookahead(&inputs, &case.situation.evaluations);
+
+        let mut checked = 0;
+        let mut differs_from_shallow = false;
+        for (discard, draw, variant) in variants(&lookahead) {
+            let Some(downstream) = variant.downstream.as_ref() else {
+                continue;
+            };
+            assert_eq!(draw.transition, DrawTransition::SameShanten);
+            let branch = CandidateBranch::new(&inputs.root, evaluation_of(case, discard)).unwrap();
+            let state = branch
+                .state_after_draw(draw.draw, variant.drawn_tile)
+                .unwrap();
+            let value_of = |evaluation: &DiscardEvaluation| {
+                search(
+                    &inputs,
+                    &state,
+                    evaluation,
+                    PROGRESS_ONLY,
+                    Some(continuation),
+                )
+                .and_then(|draws| expected_self_tsumo_value_from_draws(&draws, continuation))
+            };
+
+            let next = variant.next_discard.as_ref().expect("次打牌がある");
+            let selected = value_of(next).expect("continuation を確定できる");
+            // 先の段の枝は、選ばれた打牌をそのまま探索したものと一致する。
+            assert_eq!(
+                downstream.draws,
+                search(&inputs, &state, next, PROGRESS_ONLY, Some(continuation)).unwrap()
+            );
+
+            let base = inputs.base_evaluations(&state.counts, &state.seen);
+            let evaluations: Vec<_> = base
+                .iter()
+                .map(|evaluation| decorated_evaluation(&inputs, &state, evaluation).to_evaluation())
+                .collect();
+            for (evaluation, target) in evaluations.iter().zip(forward_target_mask(&evaluations)) {
+                if !target {
+                    continue;
+                }
+                assert!(
+                    value_of(evaluation).expect("continuation を確定できる") <= selected,
+                    "{:?} -> {:?}",
+                    draw.draw,
+                    evaluation.discard
+                );
+            }
+
+            let shallow = next_discard(&inputs, &state)
+                .evaluation
+                .expect("次打牌がある");
+            differs_from_shallow |= shallow.discard != next.discard
+                && value_of(&shallow).expect("continuation を確定できる") < selected;
+            checked += 1;
+        }
+
+        assert!(checked > 0);
+        assert!(
+            differs_from_shallow,
+            "continuation must override the shallow choice in this fixture"
+        );
+    }
+
+    #[test]
     fn only_the_comparison_targets_search_the_hand_change_branch() {
         // 比較対象にならない候補まで手変わりの枝を深く探索しない。
         let case = &*SAME_SHANTEN_CASE;
@@ -5093,8 +5309,9 @@ mod tests {
             PROGRESS_ONLY
         );
 
-        let current = search_waiting_state(&inputs, &acceptance, IISHANTEN_CONTINUATION);
-        let progress_only = search_waiting_state(&inputs, &acceptance, PROGRESS_ONLY);
+        let current =
+            search_waiting_state(&inputs, &acceptance, IISHANTEN_CONTINUATION, Some(facts));
+        let progress_only = search_waiting_state(&inputs, &acceptance, PROGRESS_ONLY, Some(facts));
 
         let current_progress: Vec<_> = current
             .iter()
