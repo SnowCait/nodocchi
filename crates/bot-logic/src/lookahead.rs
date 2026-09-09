@@ -851,8 +851,12 @@ impl<'a> LookaheadInputs<'a> {
     /// ([`DrawVariantLookaheadDiagnostic::downstream`]) を構築する。
     ///
     /// 対象は現在打牌後が1向聴の候補の same-shanten の枝だけ。2手目までの評価より探索が
-    /// 深くなるため、詳細診断が必要な経路だけで指定する。この探索の結果は打牌選択にも2手目
-    /// `next_discard` の選択にも使わないため、指定しても選択結果は変わらない。
+    /// 深くなるため、詳細診断が必要な経路だけで指定する。
+    ///
+    /// self-tsumo continuation の材料が揃う production 対象の枝では、この指定が無くても同じ
+    /// 先の段を進め、2手目の `next_discard` 自体をその continuation で選ぶ
+    /// ([`ForwardMetrics::expected_self_tsumo_value`] の軸)。この指定が変えるのは詳細診断を
+    /// 保持する枝の範囲だけで、production の選択 semantics も選択結果も変わらない。
     ///
     /// 選択済みの1候補について集計値だけが必要な場合は詳細診断を構築せず、
     /// [`same_shanten_downstream_value_for_candidate`] を使う。
