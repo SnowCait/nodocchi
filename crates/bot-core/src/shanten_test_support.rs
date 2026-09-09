@@ -1,7 +1,7 @@
 use crate::action::LegalAction;
-use crate::context::GameContext;
+use crate::context::{GameContext, TableStateFacts};
 use crate::meld::{Meld, MeldKind};
-use bot_logic::TileId;
+use bot_logic::{HistoryFuritenFacts, TileId, TileType};
 
 pub(crate) fn tile(value: u8) -> TileId {
     TileId::new(value).unwrap()
@@ -222,4 +222,49 @@ pub(crate) fn opponent_meld_actions() -> Vec<LegalAction> {
         .map(|&value| dahai(value))
         .chain([dahai(OPPONENT_MELD_DRAW)])
         .collect()
+}
+
+/// 3向聴 Progress 軸の production 接続 regression 局面。
+/// hand 45m46899p1124579s / dora indicator E / 東場北家 / player 0 / oya 1 / 残り66枚。
+pub(crate) fn three_shanten_progress_regression_context() -> (GameContext, Vec<LegalAction>) {
+    const HAND: [&str; 14] = [
+        "4m", "5m", "4p", "6p", "8p", "9p", "9p", "1s", "1s", "2s", "4s", "5s", "7s", "9s",
+    ];
+    let mut used = Vec::new();
+    let mut take = |mjai: &str| {
+        let tile_type = TileType::from_mjai_type_str(mjai).expect("牌種として読める");
+        let tile = TileId::copies(tile_type)
+            .find(|tile| !tile.is_red() && !used.contains(tile))
+            .expect("未使用の物理牌がある");
+        used.push(tile);
+        tile
+    };
+    let tiles: Vec<_> = HAND.iter().map(|tile| take(tile)).collect();
+    let dora_indicator = take("E");
+    let visible: Vec<_> = tiles.iter().copied().chain([dora_indicator]).collect();
+    let context = GameContext::from_parts_with_table_state(
+        None,
+        tiles.clone(),
+        vec![dora_indicator],
+        Some(TileType::from_mjai_type_str("E").unwrap()),
+        Some(TileType::from_mjai_type_str("N").unwrap()),
+        visible,
+        Some(0),
+        Some(1),
+        Default::default(),
+        [false; 4],
+    )
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles: Some(66),
+        ..Default::default()
+    })
+    .with_history_furiten_facts(HistoryFuritenFacts {
+        same_turn: Some(false),
+        riichi_missed_win: Some(false),
+    });
+    let actions = tiles
+        .iter()
+        .map(|&tile| LegalAction::Dahai { tile })
+        .collect();
+    (context, actions)
 }

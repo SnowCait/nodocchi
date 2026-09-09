@@ -11,6 +11,7 @@ mod open_hand_defense;
 mod open_hand_threat;
 mod replay;
 mod scenario;
+mod three_shanten_continuation;
 mod tiles;
 
 use std::process::ExitCode;
@@ -59,7 +60,19 @@ where
             (Some(captured.header()), captured.scenario)
         }
         ScenarioSource::RiichilabCaptureBenchmark(spec) => return run_capture_benchmark(spec),
+        ScenarioSource::RiichilabCaptureComparison(spec) => {
+            return three_shanten_continuation::run_capture_comparison(spec);
+        }
     };
+
+    // A/B 比較は他の診断を一切走らせず、どちらの方式も同じ cold memo 条件で計る。
+    if args.three_shanten_continuation_comparison {
+        let output = three_shanten_continuation::format_scenario_comparison(&scenario);
+        return Ok(match header {
+            Some(header) => format!("{header}\n\n{output}"),
+            None => output,
+        });
+    }
 
     // cost 計測は production selection が同じ2向聴探索を走らせる前に取り、baseline と同じ
     // cold memo 条件を保つ。表示順は従来どおり診断の後にする。
@@ -202,6 +215,34 @@ mod tests {
         assert!(output.starts_with("Scenario\n"), "{output}");
         assert!(output.contains("\n\nFinal decision\n"), "{output}");
         assert!(output.contains("\n\nNormal discard candidates"), "{output}");
+    }
+
+    #[test]
+    fn the_three_shanten_continuation_comparison_is_a_separate_report() {
+        // 比較専用の出力で、production の打牌診断は一切出さない。
+        let args = ["--hand", "3479m478p237s1223z", "--dora-indicator", "1p"];
+        let normal = run_args(&args).unwrap();
+        assert!(!normal.contains("Three-shanten continuation scope comparison"));
+
+        let mut compared = args.to_vec();
+        compared.push("--three-shanten-continuation-comparison");
+        let output = run_args(&compared).unwrap();
+        assert!(output.starts_with("Three-shanten continuation scope comparison"));
+        assert!(output.contains("A current values"), "{output}");
+        assert!(output.contains("B progress-only values"), "{output}");
+        assert!(output.contains("Search size A -> B"), "{output}");
+        assert!(!output.contains("Final decision"), "{output}");
+
+        // production の打牌は比較の A と同じ。
+        let selected = normal
+            .split("\nFinal decision\n  action: ")
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .expect("最終 action がある");
+        assert!(
+            output.contains(&format!("  A current: {selected} (discard selection")),
+            "{selected}: {output}"
+        );
     }
 
     #[test]
