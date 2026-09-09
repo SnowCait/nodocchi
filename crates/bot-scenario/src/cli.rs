@@ -22,6 +22,11 @@ pub const USAGE: &str = "usage:
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
                --three-shanten-progress-self-tsumo
   bot-scenario --benchmark-riichilab-capture <CAPTURE_JSONL>... [--benchmark-json <PATH>]
+  bot-scenario --hand <TILES> [scenario options] --three-shanten-continuation-comparison
+  bot-scenario <SCENARIO_JSON> --three-shanten-continuation-comparison
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
+               --three-shanten-continuation-comparison
+  bot-scenario --compare-three-shanten-continuation <CAPTURE_JSONL>...
 
   --dora is a backward-compatible alias of --dora-indicator
   --extra-visible-tiles adds visible tiles that no other option expresses
@@ -45,6 +50,15 @@ pub const USAGE: &str = "usage:
   --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
   production agent decision only; it takes all following capture paths and cannot be
+  combined with the other scenario or diagnostic options
+  --three-shanten-continuation-comparison evaluates the three-shanten candidates twice, once
+  with the production one-shanten continuation (Progress + SameShanten) and once with a
+  Progress-only one-shanten continuation, and reports both sets of values, the search size
+  and the discard each one selects; production discard selection is unchanged and cannot be
+  combined with other diagnostic options
+  --compare-three-shanten-continuation replays every captured request_action, runs the same
+  A/B comparison on the requests where the three-shanten axis fires, and reports latency,
+  search size and selection differences; it takes all following capture paths and cannot be
   combined with the other scenario or diagnostic options";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -93,6 +107,12 @@ pub enum CliError {
     #[error("--benchmark-json requires --benchmark-riichilab-capture")]
     BenchmarkJsonWithoutBenchmark,
 
+    #[error("--three-shanten-continuation-comparison cannot be combined with {0}")]
+    ConflictingThreeShantenContinuationComparison(String),
+
+    #[error("--compare-three-shanten-continuation cannot be combined with {0}")]
+    ConflictingCaptureComparisonInput(String),
+
     #[error("--two-shanten-self-tsumo-cost must be all or forward-targets, but is {0:?}")]
     InvalidTwoShantenSelfTsumoCostScope(String),
 
@@ -115,6 +135,13 @@ pub enum ScenarioSource {
         request_id: Option<u64>,
     },
     RiichilabCaptureBenchmark(CaptureBenchmarkSpec),
+    RiichilabCaptureComparison(CaptureComparisonSpec),
+}
+
+/// A/B 比較を行う capture の指定。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureComparisonSpec {
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -127,6 +154,8 @@ pub struct CaptureBenchmarkSpec {
 pub struct CliArgs {
     /// 全3向聴候補の Progress-only 値と時間を表示する専用診断。
     pub three_shanten_progress_self_tsumo: bool,
+    /// 1向聴 continuation scope の A/B 比較を表示する専用診断。production 選択は変えない。
+    pub three_shanten_continuation_comparison: bool,
     pub source: ScenarioSource,
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
@@ -150,6 +179,8 @@ impl CliArgs {
     {
         let mut args = args.into_iter();
         let mut three_shanten_progress_self_tsumo = false;
+        let mut three_shanten_continuation_comparison = false;
+        let mut comparison_captures: Vec<String> = Vec::new();
         let mut path: Option<String> = None;
         let mut spec = ScenarioSpec::default();
         let mut hand: Option<String> = None;
@@ -248,6 +279,13 @@ impl CliArgs {
                 }
                 "--lookahead" => lookahead = true,
                 "--three-shanten-progress-self-tsumo" => three_shanten_progress_self_tsumo = true,
+                "--three-shanten-continuation-comparison" => {
+                    three_shanten_continuation_comparison = true;
+                }
+                "--compare-three-shanten-continuation" => {
+                    comparison_captures
+                        .push(value_of(&mut args, "--compare-three-shanten-continuation")?);
+                }
                 "--two-shanten-self-tsumo" => two_shanten_self_tsumo = true,
                 "--two-shanten-self-tsumo-cost" => {
                     let value = value_of(&mut args, "--two-shanten-self-tsumo-cost")?;
@@ -267,6 +305,9 @@ impl CliArgs {
                 }
                 other if !benchmark_captures.is_empty() => {
                     benchmark_captures.push(other.to_string());
+                }
+                other if !comparison_captures.is_empty() => {
+                    comparison_captures.push(other.to_string());
                 }
                 other => match path {
                     Some(_) => return Err(CliError::MultipleScenarioFiles(other.to_string())),
@@ -296,6 +337,10 @@ impl CliArgs {
                 Some("--two-shanten-progress-self-tsumo-cost".to_string())
             } else if three_shanten_progress_self_tsumo {
                 Some("--three-shanten-progress-self-tsumo".to_string())
+            } else if three_shanten_continuation_comparison {
+                Some("--three-shanten-continuation-comparison".to_string())
+            } else if !comparison_captures.is_empty() {
+                Some("--compare-three-shanten-continuation".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -314,6 +359,58 @@ impl CliArgs {
                 }),
                 verbose: false,
                 three_shanten_progress_self_tsumo: false,
+                three_shanten_continuation_comparison: false,
+                lookahead: false,
+                two_shanten_self_tsumo: false,
+                two_shanten_self_tsumo_cost: None,
+                two_shanten_progress_self_tsumo_cost: None,
+                summary_only: false,
+            });
+        }
+
+        if !comparison_captures.is_empty() {
+            let conflict = if capture.is_some() {
+                Some("--riichilab-capture".to_string())
+            } else if let Some(path) = path.as_deref() {
+                Some(format!("{path:?}"))
+            } else if hand.is_some() {
+                Some("--hand".to_string())
+            } else if inline_options {
+                Some("scenario options".to_string())
+            } else if request_id.is_some() {
+                Some("--request-id".to_string())
+            } else if lookahead {
+                Some("--lookahead".to_string())
+            } else if two_shanten_self_tsumo {
+                Some("--two-shanten-self-tsumo".to_string())
+            } else if two_shanten_self_tsumo_cost.is_some() {
+                Some("--two-shanten-self-tsumo-cost".to_string())
+            } else if two_shanten_progress_self_tsumo_cost.is_some() {
+                Some("--two-shanten-progress-self-tsumo-cost".to_string())
+            } else if three_shanten_progress_self_tsumo {
+                Some("--three-shanten-progress-self-tsumo".to_string())
+            } else if three_shanten_continuation_comparison {
+                Some("--three-shanten-continuation-comparison".to_string())
+            } else if benchmark_json.is_some() {
+                Some("--benchmark-json".to_string())
+            } else if verbose {
+                Some("--verbose".to_string())
+            } else if summary_only {
+                Some("--summary-only".to_string())
+            } else {
+                None
+            };
+            if let Some(conflict) = conflict {
+                return Err(CliError::ConflictingCaptureComparisonInput(conflict));
+            }
+
+            return Ok(Self {
+                source: ScenarioSource::RiichilabCaptureComparison(CaptureComparisonSpec {
+                    paths: comparison_captures,
+                }),
+                verbose: false,
+                three_shanten_progress_self_tsumo: false,
+                three_shanten_continuation_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -324,6 +421,33 @@ impl CliArgs {
 
         if benchmark_json.is_some() {
             return Err(CliError::BenchmarkJsonWithoutBenchmark);
+        }
+
+        if three_shanten_continuation_comparison {
+            for (enabled, option) in [
+                (lookahead, "--lookahead"),
+                (verbose, "--verbose"),
+                (summary_only, "--summary-only"),
+                (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                (
+                    two_shanten_self_tsumo_cost.is_some(),
+                    "--two-shanten-self-tsumo-cost",
+                ),
+                (
+                    two_shanten_progress_self_tsumo_cost.is_some(),
+                    "--two-shanten-progress-self-tsumo-cost",
+                ),
+                (
+                    three_shanten_progress_self_tsumo,
+                    "--three-shanten-progress-self-tsumo",
+                ),
+            ] {
+                if enabled {
+                    return Err(CliError::ConflictingThreeShantenContinuationComparison(
+                        option.to_string(),
+                    ));
+                }
+            }
         }
 
         if three_shanten_progress_self_tsumo {
@@ -439,6 +563,7 @@ impl CliArgs {
         Ok(Self {
             source,
             three_shanten_progress_self_tsumo,
+            three_shanten_continuation_comparison,
             verbose,
             // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
             lookahead: lookahead || two_shanten_self_tsumo,
@@ -565,6 +690,86 @@ mod tests {
             .expect("discard candidate")
             .evaluation
             .acceptance_total_remaining()
+    }
+
+    #[test]
+    fn parses_the_three_shanten_continuation_comparison_option() {
+        let args = parse(&[
+            "--hand",
+            "234m455p789s1123z",
+            "--three-shanten-continuation-comparison",
+        ])
+        .unwrap();
+        assert!(args.three_shanten_continuation_comparison);
+        assert!(!args.three_shanten_progress_self_tsumo);
+        assert!(!args.lookahead);
+    }
+
+    #[test]
+    fn the_three_shanten_continuation_comparison_cannot_be_combined_with_another_diagnostic() {
+        for option in [
+            "--lookahead",
+            "--verbose",
+            "--summary-only",
+            "--two-shanten-self-tsumo",
+            "--three-shanten-progress-self-tsumo",
+        ] {
+            assert_eq!(
+                parse(&[
+                    "--hand",
+                    "234m455p789s1123z",
+                    "--three-shanten-continuation-comparison",
+                    option,
+                ]),
+                Err(CliError::ConflictingThreeShantenContinuationComparison(
+                    option.to_string()
+                )),
+                "{option}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_the_capture_comparison_paths() {
+        let args = parse(&[
+            "--compare-three-shanten-continuation",
+            "first.jsonl",
+            "second.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::RiichilabCaptureComparison(CaptureComparisonSpec {
+                paths: vec!["first.jsonl".to_string(), "second.jsonl".to_string()],
+            })
+        );
+        assert!(!args.three_shanten_continuation_comparison);
+    }
+
+    #[test]
+    fn the_capture_comparison_cannot_be_combined_with_the_scenario_options() {
+        assert_eq!(
+            parse(&[
+                "--compare-three-shanten-continuation",
+                "capture.jsonl",
+                "--hand",
+                "234m455p789s1123z",
+            ]),
+            Err(CliError::ConflictingCaptureComparisonInput(
+                "--hand".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&[
+                "--compare-three-shanten-continuation",
+                "capture.jsonl",
+                "--benchmark-json",
+                "out.json",
+            ]),
+            Err(CliError::ConflictingCaptureComparisonInput(
+                "--benchmark-json".to_string()
+            ))
+        );
     }
 
     #[test]

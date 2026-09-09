@@ -30,9 +30,9 @@ use bot_logic::best_discard_selection_index;
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    ForwardMetrics, LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SelfTsumoFacts,
-    TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics, TileCounts, TileId,
-    TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
+    ForwardMetrics, IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, Meld,
+    OwnDiscards, SelfTsumoFacts, TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics,
+    TileCounts, TileId, TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
@@ -44,8 +44,9 @@ use bot_logic::{
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
     forward_metrics_instrumented, resolve_two_shanten_expected_self_tsumo_value_axis,
-    split_discarded_tile, three_shanten_progress_self_tsumo_value_for_candidate,
-    tsumo_hit_probability, two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
+    split_discarded_tile, three_shanten_progress_only_self_tsumo_value_for_candidate,
+    three_shanten_progress_self_tsumo_value_for_candidate, tsumo_hit_probability,
+    two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
 };
 
 const LOG_TARGET: &str = "bot_core::discard_selection";
@@ -314,6 +315,26 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
     legal_actions: &[LegalAction],
     timing: &mut NormalDiscardPhaseTimer,
 ) -> DiscardActionSelection {
+    select_discard_action_with_continuation_scope_instrumented(
+        context,
+        legal_actions,
+        IishantenContinuationScope::ProgressAndSameShanten,
+        timing,
+    )
+    .selection
+}
+
+/// 3向聴 Progress 軸を指定した1向聴 continuation scope で評価した打牌選択。
+///
+/// `ProgressAndSameShanten` は production の打牌選択そのもので、`ProgressOnly` は比較実験
+/// 専用。3向聴軸の evaluator 以外は候補生成も前方集計値も他の軸も比較も production と同じ
+/// 経路を1回ずつ通る。
+pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    scope: IishantenContinuationScope,
+    timing: &mut NormalDiscardPhaseTimer,
+) -> ContinuationScopeDiscardSelection {
     let legal = legal_discard_evaluations(context, legal_actions);
 
     timing.enter(NormalDiscardPhase::ForwardMetrics);
@@ -321,6 +342,7 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
         context,
         &legal.tiles,
         &legal.evaluations,
+        scope,
         timing,
     );
 
@@ -347,15 +369,31 @@ pub(crate) fn select_discard_action_with_evaluation_instrumented(
         );
     }
 
-    selection_from_legal_evaluations(
-        context,
-        &legal,
-        &metrics.forward,
-        &current_tenpai,
-        &metrics.two_shanten,
-        &metrics.three_shanten,
-        legal_actions,
-    )
+    ContinuationScopeDiscardSelection {
+        three_shanten: legal
+            .evaluations
+            .iter()
+            .zip(&metrics.three_shanten)
+            .map(|(evaluation, metric)| (evaluation.discard, metric.progress_self_tsumo_value))
+            .collect(),
+        selection: selection_from_legal_evaluations(
+            context,
+            &legal,
+            &metrics.forward,
+            &current_tenpai,
+            &metrics.two_shanten,
+            &metrics.three_shanten,
+            legal_actions,
+        ),
+    }
+}
+
+/// 指定した continuation scope で行った打牌選択と、その3向聴 Progress 軸の値。
+///
+/// `three_shanten` は3向聴軸を評価した候補だけで、軸が発火しなかった局面では空になる。
+pub(crate) struct ContinuationScopeDiscardSelection {
+    pub(crate) selection: DiscardActionSelection,
+    pub(crate) three_shanten: Vec<(TileType, Option<u64>)>,
 }
 
 /// `select_discard_action_with_evaluation()` と同じ選択結果に、全合法候補の構造化診断を添えて返す。
@@ -953,6 +991,7 @@ fn production_selection_metrics_instrumented(
     context: &GameContext,
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
+    scope: IishantenContinuationScope,
     timing: &mut NormalDiscardPhaseTimer,
 ) -> ProductionSelectionMetrics {
     let valuator = ProductionProspectiveValuator::new(context);
@@ -984,7 +1023,12 @@ fn production_selection_metrics_instrumented(
     // 対象局面だけ phase を開くため、3向聴対象外では専用 phase が 0 のままになる。
     let three_shanten = if has_competing_three_shanten_targets(evaluations, &forward) {
         timing.enter(NormalDiscardPhase::ThreeShantenSelfTsumo);
-        production_three_shanten_progress_metrics(&inputs, evaluations, &forward)
+        three_shanten_progress_metrics_with_continuation_scope(
+            &inputs,
+            evaluations,
+            &forward,
+            scope,
+        )
     } else {
         Vec::new()
     };
@@ -1004,6 +1048,7 @@ fn production_selection_metrics(
         context,
         tiles,
         evaluations,
+        IishantenContinuationScope::ProgressAndSameShanten,
         &mut NormalDiscardPhaseTimer::disabled(),
     )
 }
@@ -1093,10 +1138,29 @@ fn production_three_shanten_progress_metrics(
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
 ) -> Vec<ThreeShantenMetrics> {
+    three_shanten_progress_metrics_with_continuation_scope(
+        inputs,
+        evaluations,
+        forward_metrics,
+        IishantenContinuationScope::ProgressAndSameShanten,
+    )
+}
+
+/// 3向聴 Progress 軸を、指定した1向聴 continuation scope の evaluator で評価する。
+///
+/// 対象候補の絞り込みも比較も production と同じで、変わるのは1向聴到達後に追う枝だけ。
+/// `ProgressAndSameShanten` は production と同じ値になり、`ProgressOnly` は比較実験専用。
+fn three_shanten_progress_metrics_with_continuation_scope(
+    inputs: &LookaheadInputs<'_>,
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    scope: IishantenContinuationScope,
+) -> Vec<ThreeShantenMetrics> {
     if !has_competing_three_shanten_targets(evaluations, forward_metrics) {
         return Vec::new();
     }
 
+    let value_for_candidate = three_shanten_value_for_candidate(scope);
     evaluations
         .iter()
         .enumerate()
@@ -1104,10 +1168,25 @@ fn production_three_shanten_progress_metrics(
             progress_self_tsumo_value: forward_metrics
                 .get(index)
                 .is_some_and(|metric| metric.next_acceptance.is_some())
-                .then(|| three_shanten_progress_self_tsumo_value_for_candidate(inputs, evaluation))
+                .then(|| value_for_candidate(inputs, evaluation))
                 .flatten(),
         })
         .collect()
+}
+
+/// 指定した1向聴 continuation scope の3向聴 evaluator。値の意味が違うため、同じ入口へ
+/// まとめず scope ごとに別の evaluator を返す。
+pub(crate) fn three_shanten_value_for_candidate(
+    scope: IishantenContinuationScope,
+) -> fn(&LookaheadInputs<'_>, &DiscardEvaluation) -> Option<u64> {
+    match scope {
+        IishantenContinuationScope::ProgressAndSameShanten => {
+            three_shanten_progress_self_tsumo_value_for_candidate
+        }
+        IishantenContinuationScope::ProgressOnly => {
+            three_shanten_progress_only_self_tsumo_value_for_candidate
+        }
+    }
 }
 
 // 3向聴 Progress 軸の対象局面かどうか。最善向聴数が3向聴で、前方評価の対象候補が複数ある場合
@@ -1937,7 +2016,9 @@ pub(crate) mod tests {
     use crate::decision_timing::ForwardMetricsPhaseDurations;
     use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
-    use crate::shanten_test_support::{tenpai_actions, tenpai_context};
+    use crate::shanten_test_support::{
+        tenpai_actions, tenpai_context, three_shanten_progress_regression_context,
+    };
     use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
@@ -5334,48 +5415,6 @@ pub(crate) mod tests {
         (context, actions)
     }
 
-    // 3向聴 Progress 軸の production 接続 regression 局面。
-    // hand 45m46899p1124579s / dora indicator E / 東場北家 / player 0 / oya 1 / 残り66枚。
-    fn three_shanten_progress_regression_context() -> (GameContext, Vec<LegalAction>) {
-        const HAND: [&str; 14] = [
-            "4m", "5m", "4p", "6p", "8p", "9p", "9p", "1s", "1s", "2s", "4s", "5s", "7s", "9s",
-        ];
-        let mut used = Vec::new();
-        let mut take = |mjai: &str| {
-            let tile_type = TileType::from_mjai_type_str(mjai).expect("牌種として読める");
-            let tile = TileId::copies(tile_type)
-                .find(|tile| !tile.is_red() && !used.contains(tile))
-                .expect("未使用の物理牌がある");
-            used.push(tile);
-            tile
-        };
-        let tiles: Vec<_> = HAND.iter().map(|tile| take(tile)).collect();
-        let dora_indicator = take("E");
-        let visible: Vec<_> = tiles.iter().copied().chain([dora_indicator]).collect();
-        let context = GameContext::from_parts_with_table_state(
-            None,
-            tiles.clone(),
-            vec![dora_indicator],
-            Some(TileType::from_mjai_type_str("E").unwrap()),
-            Some(TileType::from_mjai_type_str("N").unwrap()),
-            visible,
-            Some(0),
-            Some(1),
-            Default::default(),
-            [false; 4],
-        )
-        .with_table_state_facts(bot_core_table_state(66))
-        .with_history_furiten_facts(HistoryFuritenFacts {
-            same_turn: Some(false),
-            riichi_missed_win: Some(false),
-        });
-        let actions = tiles
-            .iter()
-            .map(|&tile| LegalAction::Dahai { tile })
-            .collect();
-        (context, actions)
-    }
-
     #[test]
     fn the_three_shanten_progress_value_changes_four_sou_to_two_sou() {
         // production の3向聴打牌比較が Progress self-tsumo value を使い、値の高い 2s が
@@ -5500,6 +5539,7 @@ pub(crate) mod tests {
             &context,
             &legal.tiles,
             &legal.evaluations,
+            IishantenContinuationScope::ProgressAndSameShanten,
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -5560,6 +5600,7 @@ pub(crate) mod tests {
             &context,
             &legal.tiles,
             &legal.evaluations,
+            IishantenContinuationScope::ProgressAndSameShanten,
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -5632,6 +5673,7 @@ pub(crate) mod tests {
             &context,
             &legal.tiles,
             &legal.evaluations,
+            IishantenContinuationScope::ProgressAndSameShanten,
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);

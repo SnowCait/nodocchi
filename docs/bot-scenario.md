@@ -29,6 +29,7 @@ cargo run -p bot-scenario -- \
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
+| `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -99,6 +100,35 @@ cargo run --release -p bot-scenario -- \
 3向聴診断では同じ物理牌集合・見え牌・仮想河の2向聴 value、1向聴 continuation、次打牌評価も共有し、memo hit / miss数を表示します。continuationは未確認牌数と残り自摸機会も区別します。候補を浅い評価順で除外するpruningはありません。全候補で秒単位のコストが残りますが、そのレイテンシを許容して production の通常打牌へ接続しています。
 
 production 側の比較規則は [打牌選択](ai/discard-selection.md#3向聴-progress-self-tsumo-value) を参照してください。`Normal discard candidates` の `three-shanten progress self-tsumo value` は打牌選択が実際に使った値そのもので、この軸で決着した場合の `lost by` は `ThreeShantenProgressSelfTsumoValue` です。
+
+### 3向聴 continuation scope の A/B 比較
+
+`--three-shanten-continuation-comparison` は、3向聴 Progress self-tsumo 評価が1向聴に到達した後どこまで枝を追うかだけを変えた2方式を、同じ局面で比較する診断 option です。
+
+```text
+A current         3→2 Progress / 2→1 Progress / 1→0 Progress + SameShanten
+B progress-only   3→2 Progress / 2→1 Progress / 1→0 Progress のみ
+```
+
+違いは1向聴 state で `DrawTransition::SameShanten` のツモを追うかどうかだけです。受け入れの列挙、残枚数、物理牌 variant、ツモ後の最良打牌の比較、テンパイ到達後の terminal scoring、Reach / Damaten、確率、残り自摸機会、unknown 伝播はすべて共通の primitive を通ります。production の打牌選択は常に A を使い、この option では変わりません。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --hand '45m46899p1124579s' --dora-indicator E \
+  --round-wind E --seat-wind N --player-id 0 --oya 1 --remaining-tiles 66 \
+  --three-shanten-continuation-comparison
+```
+
+出力は方式ごとの候補別の値と時間、`Search size A -> B` の枝数・state 数・`next_discard` 呼び出し数・terminal scoring 数、そして両方式が選ぶ打牌です。A と B の値は起点が同じ3向聴でも枝集合が違うため、同じ量として比較しないでください。
+
+capture 全体で同じ比較を行う場合は `--compare-three-shanten-continuation` を使います。3向聴軸が発火した request だけを対象に、打牌選択1回の実測時間と3向聴 phase の実測時間 (total / min / p50 / p90 / max / speedup)、選択一致率、差分 request の上位候補を出します。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --compare-three-shanten-continuation logs/20260909/ranked-capture-20260909-092911.jsonl
+```
+
+この option は他の scenario / 診断 option とは併用できません。
 
 ### --allow-ryukyoku
 
