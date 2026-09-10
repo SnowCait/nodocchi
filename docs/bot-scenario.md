@@ -31,6 +31,8 @@ cargo run -p bot-scenario -- \
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
 | `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ、B が production) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
 | `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = production / B: 2回まで) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
+| `--iishanten-selection-depth-comparison` | 任意 | 同じ深度 A/B を production comparator を通した最終打牌選択として比較。A は production depth、B は SameShanten 2回まで + exact same-state memo。production policy は変更しない。他の診断 option と併用不可 |
+| `--iishanten-selection-parallel-comparison` | 任意 | 同じ B depth を逐次 / 候補単位並列で比較 (S / P2 / P4 / `available_parallelism`)。候補の絞り込み・軸解決・comparator・選択打牌は既存 production selection をそのまま使う。並列方式も production には接続しない。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -156,6 +158,50 @@ cargo run --release -p bot-scenario -- \
 `Top ExpectedSelfTsumoValue candidate` と `same top ExpectedSelfTsumoValue candidate` は、**この軸単独の ranking の1位**であって production が選ぶ打牌ではありません。production は `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存 comparator を通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その cohort に `unknown` が1件でもあれば軸ごと落とします ([打牌選択](ai/discard-selection.md#1向聴-expectedselftsumovalue) 参照)。この診断はその絞り込みも軸解決も持たず、全1向聴候補を値の高い順に並べるだけです。
 
 方式ごとの実測は3向聴の A/B 比較と同じく新しい thread で行い、どちらも同じ cold な thread-local memo から始めます。この option は他の診断 option とは併用できません。
+
+### 1向聴 selection 深度の A/B 比較
+
+`--iishanten-selection-depth-comparison` は、同じ深度 A/B を **production の打牌 comparator を通した最終打牌選択として** 比較する診断 option です。
+
+```text
+A production depth      Progress / SameShanten → Progress (production)
+B same-shanten twice    A に SameShanten → SameShanten → Progress を追加し、exact same-state memo を有効化
+```
+
+`--iishanten-continuation-depth-comparison` が全1向聴候補の値を単独 ranking として並べるのに対し、この option は候補の絞り込み・unknown の軸解決・比較順・安定順序・最終選択まで既存 production selection の経路をそのまま通します。深く評価されるのは pre-acceptance 軸 (`Shanten → IsolatedTile → IsolatedHonor`) まで同順位の cohort だけなので、深度を上げたときの実際の selection cost はこちらでしか分かりません。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --hand '34567899m5799p34s' --dora-indicator 3m \
+  --round-wind E --seat-wind N --player-id 0 --oya 1 --remaining-tiles 66 \
+  --iishanten-selection-depth-comparison
+```
+
+出力は方式ごとの選択打牌・cohort・候補別の値と比較理由・時間・探索規模・memo 利用数と、`Selection A -> B` / `ExpectedSelfTsumoValue A -> B` / `Cost A -> B` の差分です。方式ごとに run を2本取り、`elapsed` は探索規模の計上も phase timer も持たない計測 run から、cohort・値・stats は観測 run から取ります。どちらの run も新しい thread で行うため、先に走った run が後の run の thread-local memo を暖めません。
+
+B は追加深度と exact same-state memo を一緒に有効にするため、A → B の elapsed 差は深度だけの差ではありません。同じ memo 条件へ揃えた深度だけの比較は `--iishanten-continuation-depth-comparison` が持ちます。**production の打牌選択は A のままで、この option は B を選択に接続しません。** 他の診断 option とは併用できません。
+
+### 1向聴 selection の候補単位並列比較
+
+`--iishanten-selection-parallel-comparison` は、上記 B depth の中で **深く評価する候補をどう分けるか** だけを変えた方式を比較する診断 option です。深度も comparator も値も枝も scoring semantics も変わりません。
+
+```text
+S   逐次 (現行 B)
+P2  候補単位の並列、最大2 worker
+P4  候補単位の並列、最大4 worker
+PA  候補単位の並列、available_parallelism を上限
+```
+
+並列にするのは、production の候補絞り込みが deep 評価対象として残した候補1件分の前方評価だけです。候補1件の前方集計値はその候補の打牌評価と探索設定だけで決まる純関数で、探索内の memo は同じ入力に同じ値を返す cache でしかありません。結果は候補 index へ書き戻すため thread の終了順にも worker 数にも依らず、cohort・候補ごとの `ExpectedSelfTsumoValue`・unknown 軸の解決・比較理由・選択打牌は全方式で bit-exact に一致します (`bit-exact with the sequential mode`)。worker 数は深く評価する候補数を超えません。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --hand '34567899m5799p34s' --dora-indicator 3m \
+  --round-wind E --seat-wind N --player-id 0 --oya 1 --remaining-tiles 66 \
+  --iishanten-selection-parallel-comparison
+```
+
+worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた base 評価 memo・同一 state memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増え得るので、出力には方式ごとの `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。これは wall-clock を比べるための診断で、**production の打牌選択は従来どおり深度 A の逐次評価のまま** です。他の診断 option とは併用できません。
 
 ### --allow-ryukyoku
 

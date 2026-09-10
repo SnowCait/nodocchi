@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
@@ -7,7 +9,6 @@ use crate::current_tenpai_continuation::{
     diagnose_current_tenpai_continuation,
 };
 use crate::damaten_value::tenpai_completed_hands_after_discard;
-#[cfg(test)]
 use crate::decision_timing::ForwardMetricsPhaseTimer;
 use crate::decision_timing::{
     NormalDiscardPhase, NormalDiscardPhaseDurations, NormalDiscardPhaseTimer,
@@ -240,6 +241,8 @@ struct ProductionSelectionMetrics {
     search: ThreeShantenSearchStats,
     /// 探索内の同一 state memo の利用数。memo を持たない経路では既定値のまま。
     memo: SearchStateMemoStats,
+    /// 深い候補評価に実際に使った thread 数。production の逐次評価では 1。
+    forward_workers: usize,
 }
 
 /// production の2向聴二段階 selection。Progress の cohort 全体と Full の pair を
@@ -451,6 +454,13 @@ pub(crate) struct IishantenContinuationSettings {
     pub(crate) search_state_memo: bool,
     /// 探索規模を計上するか。値も枝も選択も変わらない。
     pub(crate) search_stats: bool,
+    /// 深く評価する候補を何 thread まで並行に評価するか。`None` では production と同じ逐次評価。
+    ///
+    /// 候補ごとの前方評価は互いに独立した純関数なので、分けても値も枝も cohort も選択も
+    /// 変わらない。変わるのは探索基盤 (base 評価 memo・同一 state memo・thread-local の
+    /// 向聴 / 受け入れ memo) を候補間で共有できる範囲だけで、共有を失った分は総仕事量として
+    /// 増える。診断専用の指定で、production は使わない。
+    pub(crate) forward_workers: Option<NonZeroUsize>,
 }
 
 impl IishantenContinuationSettings {
@@ -459,6 +469,7 @@ impl IishantenContinuationSettings {
         depth: SameShantenContinuationDepth::Once,
         search_state_memo: false,
         search_stats: false,
+        forward_workers: None,
     };
 }
 
@@ -475,6 +486,8 @@ pub(crate) struct IishantenContinuationSelection {
     pub(crate) forward: Vec<ForwardMetrics>,
     pub(crate) search: ThreeShantenSearchStats,
     pub(crate) memo: SearchStateMemoStats,
+    /// 深い候補評価に実際に使った thread 数。逐次評価では 1。
+    pub(crate) forward_workers: usize,
     /// 診断の構築を含まない、打牌選択1回の実測時間。
     pub(crate) elapsed: Duration,
     pub(crate) phases: NormalDiscardPhaseDurations,
@@ -519,6 +532,7 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
         forward: run.metrics.forward,
         search: run.metrics.search,
         memo: run.metrics.memo,
+        forward_workers: run.metrics.forward_workers,
         elapsed,
         phases,
         selection: run.selection,
@@ -1148,8 +1162,29 @@ fn production_selection_metrics_instrumented(
         continuation,
     );
     let mut forward_timing = timing.forward_metrics_timer();
-    let forward = forward_metrics_instrumented(&inputs, evaluations, &mut forward_timing);
+    let forward = match continuation.forward_workers {
+        None => ParallelForwardMetrics::sequential(forward_metrics_instrumented(
+            &inputs,
+            evaluations,
+            &mut forward_timing,
+        )),
+        Some(workers) => parallel_forward_metrics(
+            context,
+            tiles,
+            evaluations,
+            continuation,
+            workers,
+            &inputs,
+            &mut forward_timing,
+        ),
+    };
     timing.record_forward_metrics_phases(forward_timing.finish());
+    let ParallelForwardMetrics {
+        metrics: forward,
+        search: forward_search,
+        memo: forward_memo,
+        workers: forward_workers,
+    } = forward;
 
     let two_shanten = if has_competing_two_shanten_targets(evaluations, &forward) {
         timing.enter(NormalDiscardPhase::TwoShantenSelfTsumo);
@@ -1177,12 +1212,15 @@ fn production_selection_metrics_instrumented(
     } else {
         Vec::new()
     };
+    // 逐次評価では worker 側の計上が既定値、並列評価では前方評価分が `inputs` に載らないため、
+    // どちらの経路でも同じ足し合わせで探索規模と memo 利用数が揃う。
     ProductionSelectionMetrics {
         forward,
         two_shanten,
         three_shanten,
-        search: inputs.three_shanten_search_stats(),
-        memo: inputs.search_state_memo_stats(),
+        search: merged_search_stats(inputs.three_shanten_search_stats(), forward_search),
+        memo: merged_memo_stats(inputs.search_state_memo_stats(), forward_memo),
+        forward_workers,
     }
 }
 
@@ -1199,6 +1237,194 @@ fn production_selection_metrics(
         IishantenContinuationSettings::PRODUCTION,
         &mut NormalDiscardPhaseTimer::disabled(),
     )
+}
+
+/// 深く評価する候補を候補単位で分けて評価した結果。
+///
+/// 候補ごとの前方評価は互いに独立した純関数なので、どの候補をどの thread が評価しても
+/// `metrics` は逐次評価と同じ値・同じ順序になる。`search` / `memo` だけが、探索基盤を候補間で
+/// 共有できなくなった分を映す。
+struct ParallelForwardMetrics {
+    metrics: SelectionForwardMetrics,
+    search: ThreeShantenSearchStats,
+    memo: SearchStateMemoStats,
+    workers: usize,
+}
+
+impl ParallelForwardMetrics {
+    // 逐次評価の結果。探索基盤は呼び出し側の `inputs` そのものなので、計上はそちらが持つ。
+    fn sequential(metrics: SelectionForwardMetrics) -> Self {
+        Self {
+            metrics,
+            search: ThreeShantenSearchStats::default(),
+            memo: SearchStateMemoStats::default(),
+            workers: 1,
+        }
+    }
+}
+
+/// 深い前方評価の対象になった候補を、候補単位で複数 thread に分けて評価する。
+///
+/// 分けるのは「どの候補をどの thread が評価するか」だけで、対象候補の絞り込み
+/// ([`forward_target_mask`]) も候補1件の評価 ([`forward_metrics_for_candidate`]) も
+/// production と同じ helper をそのまま通る。候補1件の前方集計値はその候補の打牌評価と探索設定
+/// だけで決まる純関数なので、評価の順も、どの thread が評価したかも値を変えない。結果は候補
+/// index へ書き戻すため、thread の終了順にも依らない。
+///
+/// worker はそれぞれ自分の評価器と探索基盤を持つ。`LookaheadInputs` の memo は `Rc<RefCell<_>>`
+/// で thread をまたげず、向聴・受け入れ・一向聴形の memo も thread ごとなので、候補間で暖まって
+/// いた memo は worker の数だけ作り直しになる。値は変わらず、総仕事量だけが増える。
+///
+/// 深く評価する候補が1件以下の局面では分けずに、呼び出し側の `sequential` でそのまま評価する。
+/// 前方評価そのものが不要な候補集合の判断を、この入口で作り直さないため。
+fn parallel_forward_metrics(
+    context: &GameContext,
+    tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+    continuation: IishantenContinuationSettings,
+    workers: NonZeroUsize,
+    sequential: &LookaheadInputs<'_>,
+    timing: &mut ForwardMetricsPhaseTimer,
+) -> ParallelForwardMetrics {
+    let targets: Vec<usize> = forward_target_mask(evaluations)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, target)| target.then_some(index))
+        .collect();
+    if targets.len() < 2 {
+        return ParallelForwardMetrics::sequential(forward_metrics_instrumented(
+            sequential,
+            evaluations,
+            timing,
+        ));
+    }
+
+    // 空回りする worker を作らないよう、thread 数は深く評価する候補数を超えない。
+    let worker_count = workers.get().min(targets.len());
+    // 候補ごとに評価コストが大きく違うため、静的に分けず、空いた worker が次の候補を取る。
+    let next = AtomicUsize::new(0);
+    let evaluated: Vec<WorkerForwardMetrics> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..worker_count)
+            .map(|_| {
+                let next = &next;
+                let targets = targets.as_slice();
+                scope.spawn(move || {
+                    let valuator = ProductionProspectiveValuator::new(context);
+                    let inputs = production_lookahead_inputs(
+                        context,
+                        tiles,
+                        &valuator,
+                        LookaheadDiagnosticScope::None,
+                        evaluations,
+                        continuation,
+                    );
+                    let mut metrics = Vec::new();
+                    while let Some(&index) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        metrics.push((
+                            index,
+                            forward_metrics_for_candidate(&inputs, &evaluations[index]),
+                        ));
+                    }
+                    WorkerForwardMetrics {
+                        metrics,
+                        search: inputs.three_shanten_search_stats(),
+                        memo: inputs.search_state_memo_stats(),
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("候補評価 thread は panic しない"))
+            .collect()
+    });
+
+    let mut collected = ParallelForwardMetrics {
+        metrics: vec![ForwardMetrics::default(); evaluations.len()],
+        search: ThreeShantenSearchStats::default(),
+        memo: SearchStateMemoStats::default(),
+        workers: worker_count,
+    };
+    for worker in evaluated {
+        for (index, metrics) in worker.metrics {
+            collected.metrics[index] = metrics;
+        }
+        collected.search = merged_search_stats(collected.search, worker.search);
+        collected.memo = merged_memo_stats(collected.memo, worker.memo);
+    }
+    collected
+}
+
+// worker 1つ分の結果。候補 index を持ったまま返し、書き戻す側が既存の候補順へ戻す。
+struct WorkerForwardMetrics {
+    metrics: Vec<(usize, ForwardMetrics)>,
+    search: ThreeShantenSearchStats,
+    memo: SearchStateMemoStats,
+}
+
+// 探索規模の足し合わせ。field を分解して受けるため、計上が増えたら足し忘れが compile error になる。
+fn merged_search_stats(
+    left: ThreeShantenSearchStats,
+    right: ThreeShantenSearchStats,
+) -> ThreeShantenSearchStats {
+    let ThreeShantenSearchStats {
+        three_to_two_variants,
+        two_to_one_variants,
+        iishanten_progress_variants,
+        iishanten_same_shanten_variants,
+        iishanten_downstream_variants,
+        draw_variants,
+        base_evaluation_calls,
+        base_evaluation_misses,
+        structural_evaluation_misses,
+        same_shanten_enumerations,
+        terminal_scorings,
+    } = right;
+    ThreeShantenSearchStats {
+        three_to_two_variants: left.three_to_two_variants + three_to_two_variants,
+        two_to_one_variants: left.two_to_one_variants + two_to_one_variants,
+        iishanten_progress_variants: left.iishanten_progress_variants + iishanten_progress_variants,
+        iishanten_same_shanten_variants: left.iishanten_same_shanten_variants
+            + iishanten_same_shanten_variants,
+        iishanten_downstream_variants: left.iishanten_downstream_variants
+            + iishanten_downstream_variants,
+        draw_variants: left.draw_variants + draw_variants,
+        base_evaluation_calls: left.base_evaluation_calls + base_evaluation_calls,
+        base_evaluation_misses: left.base_evaluation_misses + base_evaluation_misses,
+        structural_evaluation_misses: left.structural_evaluation_misses
+            + structural_evaluation_misses,
+        same_shanten_enumerations: left.same_shanten_enumerations + same_shanten_enumerations,
+        terminal_scorings: left.terminal_scorings + terminal_scorings,
+    }
+}
+
+// 同一 state memo の利用数の足し合わせ。分解して受ける理由は探索規模と同じ。
+fn merged_memo_stats(
+    left: SearchStateMemoStats,
+    right: SearchStateMemoStats,
+) -> SearchStateMemoStats {
+    let SearchStateMemoStats {
+        two_shanten_hits,
+        two_shanten_misses,
+        iishanten_hits,
+        iishanten_misses,
+        next_discard_hits,
+        next_discard_misses,
+        same_shanten_next_discard_hits,
+        same_shanten_next_discard_misses,
+    } = right;
+    SearchStateMemoStats {
+        two_shanten_hits: left.two_shanten_hits + two_shanten_hits,
+        two_shanten_misses: left.two_shanten_misses + two_shanten_misses,
+        iishanten_hits: left.iishanten_hits + iishanten_hits,
+        iishanten_misses: left.iishanten_misses + iishanten_misses,
+        next_discard_hits: left.next_discard_hits + next_discard_hits,
+        next_discard_misses: left.next_discard_misses + next_discard_misses,
+        same_shanten_next_discard_hits: left.same_shanten_next_discard_hits
+            + same_shanten_next_discard_hits,
+        same_shanten_next_discard_misses: left.same_shanten_next_discard_misses
+            + same_shanten_next_discard_misses,
+    }
 }
 
 fn production_two_shanten_selection(
@@ -2314,6 +2540,73 @@ pub(crate) mod tests {
             phases.forward_metrics_phases.total() <= phases.forward_metrics,
             "{phases:?}"
         );
+    }
+
+    #[test]
+    fn splitting_the_deep_candidates_across_threads_keeps_the_forward_metrics() {
+        // 候補評価を thread へ分けても、深く評価する候補も候補ごとの前方集計値も逐次評価と
+        // 同じになる。分けて増えるのは、候補間で共有していた探索基盤を作り直す仕事量だけ。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let legal = legal_discard_evaluations(&context, &actions);
+        let deep = forward_target_mask(&legal.evaluations)
+            .into_iter()
+            .filter(|&target| target)
+            .count();
+        assert!(deep > 1);
+
+        let metrics = |forward_workers| {
+            production_selection_metrics_instrumented(
+                &context,
+                &legal.tiles,
+                &legal.evaluations,
+                PRODUCTION_THREE_SHANTEN_CONTINUATION,
+                IishantenContinuationSettings {
+                    search_stats: true,
+                    forward_workers,
+                    ..IishantenContinuationSettings::PRODUCTION
+                },
+                &mut NormalDiscardPhaseTimer::disabled(),
+            )
+        };
+
+        let sequential = metrics(None);
+        assert_eq!(sequential.forward_workers, 1);
+        for workers in [2, 4] {
+            let parallel = metrics(NonZeroUsize::new(workers));
+            assert_eq!(parallel.forward, sequential.forward, "{workers}");
+            assert_eq!(parallel.forward_workers, workers.min(deep), "{workers}");
+            assert!(
+                parallel.search.base_evaluation_misses >= sequential.search.base_evaluation_misses,
+                "{workers}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_without_deep_candidates_stays_on_the_sequential_evaluation() {
+        // 深く評価する候補が1件以下の局面では分ける対象が無い。worker を要求されても逐次評価を
+        // そのまま通り、前方集計値も逐次評価と同じになる。
+        let context = tenpai_context(&[]);
+        let legal_actions = tenpai_actions();
+        let legal = legal_discard_evaluations(&context, &legal_actions);
+
+        let metrics = |forward_workers| {
+            production_selection_metrics_instrumented(
+                &context,
+                &legal.tiles,
+                &legal.evaluations,
+                PRODUCTION_THREE_SHANTEN_CONTINUATION,
+                IishantenContinuationSettings {
+                    forward_workers,
+                    ..IishantenContinuationSettings::PRODUCTION
+                },
+                &mut NormalDiscardPhaseTimer::disabled(),
+            )
+        };
+
+        let parallel = metrics(NonZeroUsize::new(4));
+        assert_eq!(parallel.forward, metrics(None).forward);
+        assert_eq!(parallel.forward_workers, 1);
     }
 
     #[test]

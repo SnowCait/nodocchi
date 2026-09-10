@@ -6,6 +6,7 @@ mod error;
 mod format;
 mod iishanten_continuation_depth;
 mod iishanten_selection_depth;
+mod iishanten_selection_parallel;
 mod input;
 #[cfg(test)]
 mod open_hand_defense;
@@ -66,6 +67,15 @@ where
             return three_shanten_continuation::run_capture_comparison(spec);
         }
     };
+
+    // 候補並列の計測も同じく他の診断を走らせず、cold memo 条件で計る。
+    if args.iishanten_selection_parallel_comparison {
+        let output = iishanten_selection_parallel::format_scenario_comparison(&scenario);
+        return Ok(match header {
+            Some(header) => format!("{header}\n\n{output}"),
+            None => output,
+        });
+    }
 
     // production comparator を通した深度 A/B も同じく他の診断を走らせず、cold memo 条件で計る。
     if args.iishanten_selection_depth_comparison {
