@@ -11,6 +11,7 @@ pub mod defense;
 pub mod discard_selection;
 mod fold_defense;
 pub mod iishanten_continuation_depth_comparison;
+pub mod iishanten_selection_depth_comparison;
 pub mod kuikae;
 pub mod meld;
 pub mod offense_value;
@@ -104,6 +105,11 @@ pub use iishanten_continuation_depth_comparison::{
     CandidateBreakdown, FirstDrawContribution, IishantenContinuationDepth,
     IishantenContinuationDepthComparison, IishantenContinuationDepthProfile,
     compare_iishanten_continuation_depths, profile_iishanten_continuation_depth,
+};
+pub use iishanten_selection_depth_comparison::{
+    IishantenSelectionDepth, IishantenSelectionDepthCandidate, IishantenSelectionDepthComparison,
+    IishantenSelectionDepthDecision, IishantenSelectionDepthRun,
+    compare_iishanten_selection_depths, decide_with_iishanten_selection_depth,
 };
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
