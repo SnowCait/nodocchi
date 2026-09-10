@@ -81,7 +81,7 @@ impl IishantenSelectionDepth {
     // 探索そのものの設定。差し替えるのは深度と、それに必要な memo だけで、候補の絞り込みも
     // 比較順も最終選択も production と同じ経路をそのまま通る。計測 run と観測 run はこの同じ
     // 設定から作るので、探索する枝は2本の run で同じになる。
-    fn continuation(self) -> IishantenContinuationSettings {
+    pub(crate) fn continuation(self) -> IishantenContinuationSettings {
         match self {
             Self::Production => IishantenContinuationSettings::PRODUCTION,
             Self::TwiceWithExactMemo => IishantenContinuationSettings {
@@ -143,6 +143,8 @@ pub struct IishantenSelectionDepthRun {
     pub search: ThreeShantenSearchStats,
     /// 探索内の同一 state memo の利用数。memo を持たない方式では 0 のまま。
     pub memo: SearchStateMemoStats,
+    /// 深い候補評価に実際に使った thread 数。逐次評価では 1。
+    pub forward_workers: usize,
 }
 
 impl IishantenSelectionDepthRun {
@@ -241,7 +243,7 @@ impl IishantenSelectionDepthDecision {
 // 計測を新しい thread で行う。向聴・受け入れ・一向聴形の memo は thread-local なので、thread を
 // 分ければ先に走った run が後の run の memo を暖めることがない。探索する枝も評価値も選択も、この
 // thread の違いでは変わらない。
-fn measured_on_a_fresh_thread<T: Send>(measure: impl FnOnce() -> T + Send) -> T {
+pub(crate) fn measured_on_a_fresh_thread<T: Send>(measure: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| {
         scope
             .spawn(measure)
@@ -291,7 +293,7 @@ pub fn decide_with_iishanten_selection_depth(
     }
 }
 
-fn run_on_the_measuring_thread(
+pub(crate) fn run_on_the_measuring_thread(
     context: &GameContext,
     legal_actions: &[LegalAction],
     continuation: IishantenContinuationSettings,
@@ -310,12 +312,13 @@ fn run_on_the_measuring_thread(
         phases: observed.phases,
         search: observed.search,
         memo: observed.memo,
+        forward_workers: observed.forward_workers,
     }
 }
 
 // 候補の値も比較理由も選択が使ったものそのままで、表示のために比較をやり直さない。構築は選択が
 // 終わってからなので、run の実測時間には入らない。
-fn candidates_from_observation(
+pub(crate) fn candidates_from_observation(
     observed: &IishantenContinuationSelection,
 ) -> Vec<IishantenSelectionDepthCandidate> {
     observed
@@ -397,20 +400,21 @@ pub fn compare_iishanten_selection_depths(
     }
 }
 
+/// 調査対象の1向聴局面。深度 A/B と候補並列の診断はどちらも同じ fixture を使う。
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use crate::context::{GameContext, TableStateFacts};
     use crate::shanten_test_support::{dahai, tile};
     use bot_logic::{HistoryFuritenFacts, TileId};
 
-    // 調査対象の1向聴局面 34567899m5799p34s。ドラ表示 3m / 場風 E / 自風 N / player 0 / oya 1 /
+    // 1向聴局面 34567899m5799p34s。ドラ表示 3m / 場風 E / 自風 N / player 0 / oya 1 /
     // remaining 66 / 履歴フリテンなしで、bot-scenario の inline baseline と同じ facts になる。
     // 赤5を持たない物理牌を選ぶ。
     const HAND: [u8; 14] = [8, 12, 17, 20, 24, 28, 32, 33, 53, 60, 68, 69, 80, 84];
     const DORA_INDICATOR: u8 = 9;
 
-    fn iishanten_context() -> (GameContext, Vec<LegalAction>) {
+    pub(crate) fn iishanten_context() -> (GameContext, Vec<LegalAction>) {
         let hand: Vec<TileId> = HAND.iter().map(|&value| tile(value)).collect();
         let dora_indicator = tile(DORA_INDICATOR);
         let visible: Vec<_> = hand.iter().copied().chain([dora_indicator]).collect();
@@ -439,6 +443,13 @@ mod tests {
         let actions = HAND.iter().map(|&value| dahai(value)).collect();
         (context, actions)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::iishanten_selection_depth_comparison::test_support::iishanten_context;
+    use crate::shanten_test_support::tile;
 
     #[test]
     fn the_production_comparator_narrows_the_fixture_to_its_pre_acceptance_cohort() {
