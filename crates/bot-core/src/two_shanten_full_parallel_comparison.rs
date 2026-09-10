@@ -22,9 +22,11 @@
 //! # 増える総仕事量
 //!
 //! 逐次評価では Progress 段で暖まった1本の探索基盤を Full の2候補が共有できる。2候補を thread
-//! へ分けると worker ごとに基盤を作り直すため、wall-clock が縮む一方で base 評価・構造評価・
-//! terminal scoring・same-shanten 列挙は増える。速くなったかだけでなく、共有を失って総仕事量が
-//! どれだけ増えたかも併せて観測する。
+//! へ分けると worker ごとに基盤を作り直すため、base / structural evaluation memo の共有を失い、
+//! base evaluation misses や shanten / acceptance rebuilds が増える。一方、増えるのはその
+//! 再構築分だけで、代表 fixture では leaf draw states・same-shanten 列挙・terminal scoring は
+//! 増えていない。速くなったかだけでなく、共有を失って総仕事量がどれだけ増えたかも併せて
+//! 観測する。
 //!
 //! # 計測条件
 //!

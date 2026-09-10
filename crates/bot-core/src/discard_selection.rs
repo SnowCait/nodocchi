@@ -609,14 +609,13 @@ impl IishantenContinuationSettings {
 /// 2向聴のドラ差 gate を通った Full 追加評価も同じ runtime の並列度から解決する。対象は常に
 /// provisional 上位2候補だけなので、必要な worker も 2 を超えない。
 pub(crate) fn production_iishanten_continuation_settings() -> IishantenContinuationSettings {
+    // 並列度は呼ぶたびに求め直される値なので、この設定を作る間は1回だけ取得して使い回す。
+    let available = available_parallelism();
     IishantenContinuationSettings {
         // 並列度 1 の環境では分ける相手がいないので、逐次評価をそのまま通す。
-        forward_workers: NonZeroUsize::new(available_parallelism())
+        forward_workers: NonZeroUsize::new(available).filter(|workers| workers.get() > 1),
+        two_shanten_full_workers: NonZeroUsize::new(available.min(TWO_SHANTEN_FULL_PAIR_LEN))
             .filter(|workers| workers.get() > 1),
-        two_shanten_full_workers: NonZeroUsize::new(
-            available_parallelism().min(TWO_SHANTEN_FULL_PAIR_LEN),
-        )
-        .filter(|workers| workers.get() > 1),
         ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
     }
 }
