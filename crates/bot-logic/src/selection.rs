@@ -1177,7 +1177,11 @@ fn requires_tenpai_wait(evaluations: &[DiscardEvaluation]) -> bool {
 }
 
 /// この打牌候補が前方評価の対象かどうか。
-pub(crate) fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool> {
+///
+/// pre-acceptance 軸 (Shanten → IsolatedTile → IsolatedHonor) まで最善候補と同順位の候補だけが
+/// `true` になる。打牌選択が深い前方評価を行う候補そのもので、観測する経路もこの1本を通り、
+/// 同じ条件を別実装しない。
+pub fn forward_target_mask(evaluations: &[DiscardEvaluation]) -> Vec<bool> {
     forward_target_mask_for_views(&evaluation_views(evaluations))
 }
 

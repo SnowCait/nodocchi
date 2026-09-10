@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::context::GameContext;
 use crate::current_tenpai_continuation::{
@@ -7,7 +9,9 @@ use crate::current_tenpai_continuation::{
 use crate::damaten_value::tenpai_completed_hands_after_discard;
 #[cfg(test)]
 use crate::decision_timing::ForwardMetricsPhaseTimer;
-use crate::decision_timing::{NormalDiscardPhase, NormalDiscardPhaseTimer};
+use crate::decision_timing::{
+    NormalDiscardPhase, NormalDiscardPhaseDurations, NormalDiscardPhaseTimer,
+};
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
     evaluate_tenpai_offense_with_hands,
@@ -31,7 +35,8 @@ use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, Meld,
-    OwnDiscards, SelfTsumoFacts, TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics,
+    OwnDiscards, SameShantenContinuationDepth, SearchStateMemoStats, SelfTsumoFacts,
+    TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics, ThreeShantenSearchStats,
     TileCounts, TileId, TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
@@ -43,8 +48,9 @@ use bot_logic::{
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
-    forward_metrics_instrumented, resolve_two_shanten_expected_self_tsumo_value_axis,
-    split_discarded_tile, three_shanten_progress_only_self_tsumo_value_for_candidate,
+    forward_metrics_instrumented, forward_target_mask,
+    resolve_two_shanten_expected_self_tsumo_value_axis, split_discarded_tile,
+    three_shanten_progress_only_self_tsumo_value_for_candidate,
     three_shanten_progress_self_tsumo_value_for_candidate, tsumo_hit_probability,
     two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
 };
@@ -230,6 +236,10 @@ struct ProductionSelectionMetrics {
     two_shanten: TwoShantenProductionSelection,
     /// production の3向聴 Progress-only 軸。対象外の局面では空。
     three_shanten: Vec<ThreeShantenMetrics>,
+    /// 探索規模。計上を要求しなかった経路では既定値のまま。
+    search: ThreeShantenSearchStats,
+    /// 探索内の同一 state memo の利用数。memo を持たない経路では既定値のまま。
+    memo: SearchStateMemoStats,
 }
 
 /// production の2向聴二段階 selection。Progress の cohort 全体と Full の pair を
@@ -335,6 +345,46 @@ pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
     scope: IishantenContinuationScope,
     timing: &mut NormalDiscardPhaseTimer,
 ) -> ContinuationScopeDiscardSelection {
+    let run = run_production_selection(
+        context,
+        legal_actions,
+        scope,
+        IishantenContinuationSettings::PRODUCTION,
+        timing,
+    );
+
+    ContinuationScopeDiscardSelection {
+        three_shanten: run
+            .legal
+            .evaluations
+            .iter()
+            .zip(&run.metrics.three_shanten)
+            .map(|(evaluation, metric)| (evaluation.discard, metric.progress_self_tsumo_value))
+            .collect(),
+        selection: run.selection,
+    }
+}
+
+/// 通常打牌選択1回が使った候補集合・集計値・選択結果。
+///
+/// 診断はこの1組から後で構築する。選択そのものはこの struct を作る過程で1回だけ行う。
+struct ProductionSelectionRun {
+    legal: LegalDiscardEvaluations,
+    metrics: ProductionSelectionMetrics,
+    current_tenpai: CurrentTenpaiCandidateEvaluations,
+    selection: DiscardActionSelection,
+}
+
+// 通常打牌選択1回。候補生成・前方集計値・向聴数別の軸・現在聴牌の補助評価・最終比較まで、
+// production と同じ helper を同じ順で1回ずつ通る。`continuation` は診断専用の差し替えで、
+// production 経路は必ず `IishantenContinuationSettings::PRODUCTION` を渡す。
+fn run_production_selection(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    scope: IishantenContinuationScope,
+    continuation: IishantenContinuationSettings,
+    timing: &mut NormalDiscardPhaseTimer,
+) -> ProductionSelectionRun {
     let legal = legal_discard_evaluations(context, legal_actions);
 
     timing.enter(NormalDiscardPhase::ForwardMetrics);
@@ -343,6 +393,7 @@ pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
         &legal.tiles,
         &legal.evaluations,
         scope,
+        continuation,
         timing,
     );
 
@@ -369,22 +420,103 @@ pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
         );
     }
 
-    ContinuationScopeDiscardSelection {
-        three_shanten: legal
-            .evaluations
-            .iter()
-            .zip(&metrics.three_shanten)
-            .map(|(evaluation, metric)| (evaluation.discard, metric.progress_self_tsumo_value))
-            .collect(),
-        selection: selection_from_legal_evaluations(
+    let selection = selection_from_legal_evaluations(
+        context,
+        &legal,
+        &metrics.forward,
+        &current_tenpai,
+        &metrics.two_shanten,
+        &metrics.three_shanten,
+        legal_actions,
+    );
+
+    ProductionSelectionRun {
+        legal,
+        metrics,
+        current_tenpai,
+        selection,
+    }
+}
+
+/// 1向聴 continuation の探索設定。production は [`Self::PRODUCTION`] だけを使う。
+///
+/// 差し替えられるのは手変わりの深度と、それに必要な探索内 memo / 探索規模の計上だけで、候補の
+/// 絞り込みも軸の解決も比較順も最終選択も production と同じ経路をそのまま通る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IishantenContinuationSettings {
+    /// 1向聴 state の continuation が手変わりを何回まで許すか。
+    pub(crate) depth: SameShantenContinuationDepth,
+    /// 探索内の同一 state memo を局面に依らず有効にするか。`false` では production の判断
+    /// ([`production_lookahead_inputs`]) のまま。
+    pub(crate) search_state_memo: bool,
+    /// 探索規模を計上するか。値も枝も選択も変わらない。
+    pub(crate) search_stats: bool,
+}
+
+impl IishantenContinuationSettings {
+    /// production の打牌選択が使う設定。
+    pub(crate) const PRODUCTION: Self = Self {
+        depth: SameShantenContinuationDepth::Once,
+        search_state_memo: false,
+        search_stats: false,
+    };
+}
+
+/// 1向聴 continuation の探索設定を差し替えて行った打牌選択と、その観測値。
+///
+/// 選択は production と同じ経路を1回通ったもので、診断のために比較も候補絞り込みも作り直さない。
+pub(crate) struct IishantenContinuationSelection {
+    pub(crate) selection: DiscardActionSelection,
+    /// 選択が使った値をそのまま載せた全合法候補の構造化診断。
+    pub(crate) diagnostic: DiscardDecisionDiagnostic,
+    /// 深い前方評価の対象になった候補。`diagnostic.candidates` と同じ順序。
+    pub(crate) forward_targets: Vec<bool>,
+    /// 前方集計値そのもの。cohort 単位の軸解決を通す前の値で、`diagnostic` が持つのは解決後。
+    pub(crate) forward: Vec<ForwardMetrics>,
+    pub(crate) search: ThreeShantenSearchStats,
+    pub(crate) memo: SearchStateMemoStats,
+    /// 診断の構築を含まない、打牌選択1回の実測時間。
+    pub(crate) elapsed: Duration,
+    pub(crate) phases: NormalDiscardPhaseDurations,
+}
+
+/// 1向聴 continuation の探索設定を差し替えて通常打牌選択を1回行い、選択と観測値を返す。
+///
+/// 3向聴軸の scope は production のまま。診断は選択が終わってから、選択が使った集計値だけで
+/// 構築するので、`elapsed` にも `phases` にも入らない。
+pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
+    context: &GameContext,
+    legal_actions: &[LegalAction],
+    continuation: IishantenContinuationSettings,
+) -> IishantenContinuationSelection {
+    let mut timing = NormalDiscardPhaseTimer::started();
+    let started = Instant::now();
+    let run = run_production_selection(
+        context,
+        legal_actions,
+        PRODUCTION_THREE_SHANTEN_CONTINUATION,
+        continuation,
+        &mut timing,
+    );
+    let elapsed = started.elapsed();
+    let phases = timing.finish();
+
+    IishantenContinuationSelection {
+        diagnostic: diagnose_legal_evaluations(
             context,
-            &legal,
-            &metrics.forward,
-            &current_tenpai,
-            &metrics.two_shanten,
-            &metrics.three_shanten,
-            legal_actions,
+            &run.legal,
+            &run.metrics.forward,
+            &run.current_tenpai,
+            &run.metrics.two_shanten,
+            &run.metrics.three_shanten,
         ),
+        forward_targets: forward_target_mask(&run.legal.evaluations),
+        forward: run.metrics.forward,
+        search: run.metrics.search,
+        memo: run.metrics.memo,
+        elapsed,
+        phases,
+        selection: run.selection,
     }
 }
 
@@ -416,8 +548,14 @@ pub(crate) fn select_discard_action_with_diagnostic(
     // 2手先診断を構築する場合は、その枝評価から選択用の前方集計値も求める。同じ
     // 「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しない。
     let valuator = ProductionProspectiveValuator::new(context);
-    let inputs =
-        production_lookahead_inputs(context, &legal.tiles, &valuator, scope, &legal.evaluations);
+    let inputs = production_lookahead_inputs(
+        context,
+        &legal.tiles,
+        &valuator,
+        scope,
+        &legal.evaluations,
+        IishantenContinuationSettings::PRODUCTION,
+    );
     let lookahead = scope
         .builds_lookahead()
         .then(|| diagnose_lookahead(&inputs, &legal.evaluations));
@@ -992,6 +1130,7 @@ fn production_selection_metrics_instrumented(
     tiles: &[TileId],
     evaluations: &[DiscardEvaluation],
     scope: IishantenContinuationScope,
+    continuation: IishantenContinuationSettings,
     timing: &mut NormalDiscardPhaseTimer,
 ) -> ProductionSelectionMetrics {
     let valuator = ProductionProspectiveValuator::new(context);
@@ -1001,6 +1140,7 @@ fn production_selection_metrics_instrumented(
         &valuator,
         LookaheadDiagnosticScope::None,
         evaluations,
+        continuation,
     );
     let mut forward_timing = timing.forward_metrics_timer();
     let forward = forward_metrics_instrumented(&inputs, evaluations, &mut forward_timing);
@@ -1036,6 +1176,8 @@ fn production_selection_metrics_instrumented(
         forward,
         two_shanten,
         three_shanten,
+        search: inputs.three_shanten_search_stats(),
+        memo: inputs.search_state_memo_stats(),
     }
 }
 
@@ -1049,6 +1191,7 @@ fn production_selection_metrics(
         tiles,
         evaluations,
         PRODUCTION_THREE_SHANTEN_CONTINUATION,
+        IishantenContinuationSettings::PRODUCTION,
         &mut NormalDiscardPhaseTimer::disabled(),
     )
 }
@@ -1325,13 +1468,21 @@ fn production_lookahead_inputs<'a>(
     valuator: &'a ProductionProspectiveValuator<'a>,
     scope: LookaheadDiagnosticScope,
     evaluations: &[DiscardEvaluation],
+    continuation: IishantenContinuationSettings,
 ) -> LookaheadInputs<'a> {
-    let inputs = lookahead_inputs(context, tiles, valuator, scope);
-    if evaluations
-        .iter()
-        .map(DiscardEvaluation::min_shanten_after_discard)
-        .min()
-        == Some(SANSHANTEN_SHANTEN)
+    let inputs = lookahead_inputs(context, tiles, valuator, scope)
+        .with_same_shanten_continuation_depth(continuation.depth);
+    let inputs = if continuation.search_stats {
+        inputs.with_three_shanten_search_stats()
+    } else {
+        inputs
+    };
+    if continuation.search_state_memo
+        || evaluations
+            .iter()
+            .map(DiscardEvaluation::min_shanten_after_discard)
+            .min()
+            == Some(SANSHANTEN_SHANTEN)
     {
         inputs.with_search_state_memo()
     } else {
@@ -5629,6 +5780,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
+            IishantenContinuationSettings::PRODUCTION,
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -5690,6 +5842,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
+            IishantenContinuationSettings::PRODUCTION,
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -5763,6 +5916,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
+            IishantenContinuationSettings::PRODUCTION,
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);

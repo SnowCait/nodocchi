@@ -124,7 +124,7 @@ pub use selection::{
     best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
     best_discard_selection_index_with_two_shanten_metrics, classify_current_tenpai_furiten_cohort,
-    compare_discard_selection_candidates, current_tenpai_continuation_targets,
+    compare_discard_selection_candidates, current_tenpai_continuation_targets, forward_target_mask,
     resolve_current_tenpai_value_axis, resolve_prospective_value_axis,
     resolve_three_shanten_progress_self_tsumo_value_axis,
     resolve_two_shanten_expected_self_tsumo_value_axis,
