@@ -1356,8 +1356,59 @@ fn enabling_diagnostics_does_not_change_decision() {
         let production = agent.decide(&ctx, &actions);
         let with_diagnostics =
             agent.decide_with_diagnostics(&ctx, &actions, &mut DecisionDiagnostics::enabled());
-        assert_eq!(production, with_diagnostics);
+
+        // 判断そのものは診断の有無で変わらない。
+        assert_eq!(production.action, with_diagnostics.action);
+        assert_eq!(production.source, with_diagnostics.source);
+        assert_eq!(production.push_pull, with_diagnostics.push_pull);
+        assert_eq!(production.reach, with_diagnostics.reach);
+        assert_eq!(production.call, with_diagnostics.call);
+        assert_eq!(production.ryukyoku, with_diagnostics.ryukyoku);
+
+        // 通常打牌選択を通った局面では、そこで得た通常打牌と攻撃評価まで一致する。二向聴以上の
+        // 確定 Fold で production だけが通常打牌選択を省略する差は
+        // `diagnostics_keep_the_normal_discard_that_the_early_fold_skips` が固定する。
+        if production.normal_discard.is_some() {
+            assert_eq!(production, with_diagnostics);
+        }
     }
+}
+
+#[test]
+fn diagnostics_keep_the_normal_discard_that_the_early_fold_skips() {
+    // 明確な threat に対する二向聴以上の確定 Fold。production は最終 action に使わない通常打牌
+    // 選択を省略し、診断経路だけが通常打牌と攻撃評価を持つ。選ばれる action と押し引きは同じ。
+    let (ctx, actions) = (fold_under_reach_context(), fold_actions());
+    let agent = ShantenAgent;
+    let production = agent.decide(&ctx, &actions);
+    let with_diagnostics =
+        agent.decide_with_diagnostics(&ctx, &actions, &mut DecisionDiagnostics::enabled());
+
+    assert_eq!(production.action, with_diagnostics.action);
+    assert_eq!(production.source, with_diagnostics.source);
+    assert_eq!(
+        production.push_pull,
+        Some(PushPullDecision {
+            mode: PushPullMode::Fold,
+            reason: PushPullReason::TwoOrMoreShantenAgainstReach,
+        })
+    );
+    assert_eq!(production.push_pull, with_diagnostics.push_pull);
+
+    assert_eq!(production.normal_discard, None);
+    assert_eq!(
+        production
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense),
+        None
+    );
+    assert!(with_diagnostics.normal_discard.is_some());
+    assert!(
+        with_diagnostics
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense)
+            .is_some()
+    );
 }
 
 // ---- 2向聴の ExpectedSelfTsumoValue (DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO) テスト ----
@@ -1426,6 +1477,32 @@ fn two_shanten_melded_context(
 
 fn two_shanten_actions() -> Vec<LegalAction> {
     [0u8, 53, 104, 124, 128].iter().map(|&v| dahai(v)).collect()
+}
+
+#[test]
+fn no_threat_two_shanten_keeps_the_normal_discard_selection() {
+    // 明確な threat がいない二向聴。early Fold の向聴条件だけを満たすが threat がいないので、
+    // 通常打牌選択をそのまま通し、その結果を最終 action にする。
+    let ctx = two_shanten_context(Some(66));
+    let actions = two_shanten_actions();
+    let decision = ShantenAgent.decide(&ctx, &actions);
+
+    assert_eq!(
+        decision.push_pull,
+        Some(PushPullDecision {
+            mode: PushPullMode::Push,
+            reason: PushPullReason::NoThreat,
+        })
+    );
+    assert_eq!(decision.source, AgentActionSource::NormalDiscard);
+    assert_eq!(decision.normal_discard, Some(decision.action.clone()));
+    assert_eq!(
+        decision
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense)
+            .map(|offense| offense.min_shanten_after_discard),
+        Some(2)
+    );
 }
 
 // 同じ3副露で concealed 5枚 1m 2m 5p 9s 白。どの牌を切っても1向聴のままで、2向聴診断は空に

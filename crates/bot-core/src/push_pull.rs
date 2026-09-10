@@ -381,7 +381,8 @@ fn concealed_value_proxy_after_discard(
 /// - `opponent_reach_count`: 自分を除くリーチ者数。
 /// - `dealer_reacher`: 他家リーチ者に親が含まれるか。親情報がない場合は false。
 /// - `self_dealer`: 自分が親か。`player_id` または `oya` が不明なら false。
-/// - `offense`: 攻撃評価を構築できない場合は `None`。
+/// - `offense`: 攻撃評価を構築できない場合と、通常打牌選択より前に Fold が確定して攻撃評価を
+///   構築しなかった場合は `None`。
 /// - `player_threats`: 全4席分の軽量な脅威 facts。
 /// - `open_hand_threats`: `player_threats` から導出した全4席分の OpenHandThreat classification。
 /// - `selected_normal_discard_hard_safe_for_all_high_open_hand_targets`: 通常打牌として選択した
@@ -507,6 +508,9 @@ pub struct PushPullDecision {
 
 // テンパイ相当とみなす打牌後の向聴数。和了形 (-1) も含めるため以下で比較する。
 const TENPAI_SHANTEN: i8 = 0;
+
+// 明確な threat に対して、テンパイと一向聴の押し例外をどちらも適用しない打牌後の向聴数。
+const TWO_OR_MORE_SHANTEN: i8 = 2;
 
 // 明確な threat に対して押せる「強いテンパイ」の暫定 threshold。実戦の regression test に基づき
 // 将来調整する。リーチするかどうかを決める REACH_MIN_REMAINING とは別物で、こちらは threat に
@@ -835,6 +839,47 @@ fn threat_kind(inputs: &PushPullInputs) -> Option<ThreatKind> {
     }
 }
 
+/// 明確な threat がいる局面か。
+///
+/// 分類は [`threat_kind`] と共有し、Reach / High OpenHandThreat / Combined の条件を押し引きの
+/// 外側で書き直さないための入口。攻撃評価を持たない入力でも判定できる。
+pub(crate) fn has_clear_threat(inputs: &PushPullInputs) -> bool {
+    threat_kind(inputs).is_some()
+}
+
+/// 明確な threat に対して打牌後が二向聴以上のときの Fold 判断。
+///
+/// 向聴数と threat の種類だけで決まり、2向聴 ExpectedSelfTsumoValue も受け入れも見ない。
+/// `TwoOrMoreShantenAgainst*` reason の対応はここが唯一の source of truth。
+fn two_or_more_shanten_fold_decision(threat: ThreatKind) -> PushPullDecision {
+    PushPullDecision {
+        mode: PushPullMode::Fold,
+        reason: threat.reasons().two_or_more_shanten,
+    }
+}
+
+/// 通常打牌選択より前に、明確な threat と合法打牌候補の最善向聴だけで確定できる Fold 判断。
+///
+/// [`decide_push_pull`] の二向聴以上の段と同じ policy・同じ threat 分類・同じ reason を
+/// [`two_or_more_shanten_fold_decision`] で共有する。押し引き policy を呼び出し側へ写さない
+/// ための入口で、ここでも threat の分類はやり直さない。
+///
+/// `best_shanten_after_discard` は合法打牌候補の `min_shanten_after_discard` の最小値。実際に
+/// 選ばれる打牌の向聴数はこれ以上になるので、この値が二向聴以上なら選択結果によらず同じ
+/// 判断になる。
+///
+/// 明確な threat がいない場合と、一向聴以下の候補がある場合は `None`。テンパイの強いテンパイ
+/// 例外と一向聴の ExpectedSelfTsumoValue 例外は従来どおり [`decide_push_pull`] が判断する。
+pub(crate) fn two_or_more_shanten_fold(
+    inputs: &PushPullInputs,
+    best_shanten_after_discard: i8,
+) -> Option<PushPullDecision> {
+    if best_shanten_after_discard < TWO_OR_MORE_SHANTEN {
+        return None;
+    }
+    Some(two_or_more_shanten_fold_decision(threat_kind(inputs)?))
+}
+
 /// 明確な threat に対して押せる「強いテンパイ」の条件。
 ///
 /// 待ち枚数と恒常フリテンは、選択済み打牌の既存 [`TenpaiWaitAvailability`] から転記した事実を
@@ -921,6 +966,10 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
 /// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
+///
+/// 二向聴以上の段は [`two_or_more_shanten_fold`] と同じ helper を通る。`ShantenAgent` は
+/// 通常打牌選択より前にその helper だけで Fold を確定できる局面を判定するが、判定に使う
+/// threat 分類も reason もこの module が source of truth のまま変わらない。
 pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     // 1. 明確な threat が無ければ従来どおり押す。
     let Some(threat) = threat_kind(inputs) else {
@@ -974,11 +1023,8 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         return PushPullDecision { mode, reason };
     }
 
-    // 5. 二向聴以上。
-    PushPullDecision {
-        mode: PushPullMode::Fold,
-        reason: reasons.two_or_more_shanten,
-    }
+    // 5. 二向聴以上。通常打牌選択より前の early 判定と同じ helper で決める。
+    two_or_more_shanten_fold_decision(threat)
 }
 
 /// 押し引き判断1回につき DEBUG イベントを1件出す opt-in ログ。
@@ -986,10 +1032,16 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
 /// `RUST_LOG=bot_core::push_pull=debug` で有効化する。debug が無効な通常時は
 /// ログ用の文字列変換などを一切行わない。全打牌候補は
 /// `bot_core::discard_selection=trace` に任せ、ここでは重複出力しない。
+///
+/// `early_fold_best_shanten_after_discard` は、通常打牌選択より前に
+/// [`two_or_more_shanten_fold`] で Fold を確定した場合にその根拠として使った合法打牌候補の
+/// 最善向聴。通常経路では `None` で、その局面では `offense` 側が向聴数を持つ。判断が実際に
+/// 使った値だけを記録し、ログのために攻撃評価を追加で構築しない。
 pub(crate) fn log_push_pull_decision(
     decision: &PushPullDecision,
     inputs: &PushPullInputs,
     normal_discard: Option<&LegalAction>,
+    early_fold_best_shanten_after_discard: Option<i8>,
 ) {
     if !tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         return;
@@ -1032,6 +1084,7 @@ pub(crate) fn log_push_pull_decision(
         offense_iishanten_weighted_tenpai_wait_type_count = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_type_count),
         offense_iishanten_expected_self_tsumo_value = ?inputs.offense.and_then(|offense| offense.iishanten_expected_self_tsumo_value()),
         offense_iishanten_push_expected_self_tsumo_min = iishanten_push_expected_self_tsumo_min(inputs.dealer_reacher),
+        early_fold_best_shanten_after_discard = ?early_fold_best_shanten_after_discard,
         normal_discard = ?normal_discard,
         "push-pull decision",
     );

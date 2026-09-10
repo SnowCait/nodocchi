@@ -1,0 +1,24 @@
+{
+  "hand": "40m 36789p 2367s 22z",
+  "draw": "4p",
+
+  "dora_indicators": "F",
+
+  "round_wind": "E",
+  "seat_wind": "E",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "reached": [false, true, false, false],
+
+  "discards": [
+    "P 2m 1s 9s 2m C",
+    "N S W E 1m 2m",
+    "1m F E 2s 5s 6p",
+    "S 8m 9s 7s P 9p"
+  ],
+
+  "remaining_tiles": 46,
+  "scores": [25000, 25000, 25000, 25000]
+}

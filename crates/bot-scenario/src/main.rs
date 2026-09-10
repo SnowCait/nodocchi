@@ -16,6 +16,8 @@ mod replay;
 mod scenario;
 mod three_shanten_continuation;
 mod tiles;
+#[cfg(test)]
+mod two_shanten_early_fold;
 
 use std::process::ExitCode;
 
