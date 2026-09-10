@@ -462,6 +462,9 @@ pub(crate) struct IishantenContinuationSettings {
     /// 変わらない。変わるのは探索基盤 (base 評価 memo・同一 state memo・thread-local の
     /// 向聴 / 受け入れ memo) を候補間で共有できる範囲だけで、共有を失った分は総仕事量として
     /// 増える。
+    ///
+    /// 指定しても実際に分けるのは最善向聴数が1向聴の局面だけ
+    /// ([`parallel_forward_workers`])。2向聴・3向聴の前方集計値は逐次評価のまま。
     pub(crate) forward_workers: Option<NonZeroUsize>,
 }
 
@@ -495,6 +498,9 @@ impl IishantenContinuationSettings {
 /// [`std::thread::available_parallelism`] に依るのでここで解決する。実際に使う worker 数は
 /// `min(available_parallelism, 深く評価する候補数)` で、その頭打ちは
 /// [`parallel_forward_metrics`] が行う。
+///
+/// 候補単位の並列評価が実際に発火するのは最善向聴数が1向聴の局面だけで、その判断は候補集合を
+/// 見る [`parallel_forward_workers`] が行う。
 pub(crate) fn production_iishanten_continuation_settings() -> IishantenContinuationSettings {
     IishantenContinuationSettings {
         // 並列度 1 の環境では分ける相手がいないので、逐次評価をそのまま通す。
@@ -502,6 +508,27 @@ pub(crate) fn production_iishanten_continuation_settings() -> IishantenContinuat
             .filter(|workers| workers.get() > 1),
         ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
     }
+}
+
+/// この候補集合で深い候補評価を分ける worker 上限。分けない場合は `None`。
+///
+/// 候補を thread へ分けるのは1向聴の追加深度を実用速度にするためなので、最善向聴数が1向聴の
+/// 局面だけを対象にする。2向聴・3向聴の前方集計値は従来どおり1本の探索基盤を候補間で共有した
+/// まま逐次で求め、memo の共有範囲も総仕事量も latency もこの接続では変わらない。
+///
+/// 最善向聴数の判断は既存の1手評価 ([`DiscardEvaluation::min_shanten_after_discard`]) の最小値
+/// そのままで、深く評価する候補の絞り込み ([`forward_target_mask`]) も候補数の頭打ちも
+/// [`parallel_forward_metrics`] が持つ既存の1本を通る。
+fn parallel_forward_workers(
+    evaluations: &[DiscardEvaluation],
+    continuation: IishantenContinuationSettings,
+) -> Option<NonZeroUsize> {
+    let workers = continuation.forward_workers?;
+    let best_shanten = evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min();
+    (best_shanten == Some(IISHANTEN_SHANTEN)).then_some(workers)
 }
 
 /// この runtime で使える並列度。取得できない環境では 1 として扱い、逐次評価相当へ落ちる。
@@ -513,13 +540,13 @@ pub(crate) fn available_parallelism() -> usize {
 
 /// production の1向聴 continuation の深度と exact same-state memo を lookahead 入力へ適用する。
 ///
-/// 打牌候補集合を持たない経路 (鳴かない場合の継続評価など) が、打牌後の1向聴 continuation と
-/// 同じ尺度で値を求めるための入口。深い候補評価の分け方は候補集合を持つ経路だけの話なので、
-/// ここでは扱わない。
+/// 打牌候補集合を丸ごと持たない経路 (鳴かない場合の継続評価、選んだ1候補だけの後追い評価、
+/// 鳴いた後の1向聴候補比較) が、production の打牌選択と同じ尺度で値を求めるための入口。深い
+/// 候補評価の分け方は production selection の候補集合だけの話なので、ここでは扱わない。
 pub(crate) fn with_production_iishanten_continuation(
     inputs: LookaheadInputs<'_>,
 ) -> LookaheadInputs<'_> {
-    let settings = production_iishanten_continuation_settings();
+    let settings = IishantenContinuationSettings::PRODUCTION_SEQUENTIAL;
     let inputs = inputs.with_same_shanten_continuation_depth(settings.depth);
     if settings.search_state_memo {
         inputs.with_search_state_memo()
@@ -1127,8 +1154,15 @@ fn selected_iishanten_forward_metrics(
     }
 
     let valuator = ProductionProspectiveValuator::new(context);
+    // 前方比較が発火した経路と同じ1向聴 continuation の設定で評価する。選択が前方評価を必要と
+    // したかどうかで、押し引きへ渡る値の意味が変わらないようにする。
     Some(forward_metrics_for_candidate(
-        &lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None),
+        &with_production_iishanten_continuation(lookahead_inputs(
+            context,
+            tiles,
+            &valuator,
+            LookaheadDiagnosticScope::None,
+        )),
         evaluation,
     ))
 }
@@ -1217,7 +1251,7 @@ fn production_selection_metrics_instrumented(
         continuation,
     );
     let mut forward_timing = timing.forward_metrics_timer();
-    let forward = match continuation.forward_workers {
+    let forward = match parallel_forward_workers(evaluations, continuation) {
         None => ParallelForwardMetrics::sequential(forward_metrics_instrumented(
             &inputs,
             evaluations,
@@ -1319,6 +1353,9 @@ impl ParallelForwardMetrics {
 }
 
 /// 深い前方評価の対象になった候補を、候補単位で複数 thread に分けて評価する。
+///
+/// この入口へ来るのは最善向聴数が1向聴の局面だけで、その判断は [`parallel_forward_workers`]
+/// が持つ。
 ///
 /// 分けるのは「どの候補をどの thread が評価するか」だけで、対象候補の絞り込み
 /// ([`forward_target_mask`]) も候補1件の評価 ([`forward_metrics_for_candidate`]) も
@@ -2267,7 +2304,14 @@ pub(crate) fn select_best_iishanten_post_call_discard(
     evaluations: &[DiscardEvaluation],
 ) -> Option<(DiscardEvaluation, Option<u64>)> {
     let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds));
-    let inputs = lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None);
+    // 鳴いた後の1向聴候補も、通常打牌と同じ1向聴 continuation の設定で比べる。Pass 側と同じ
+    // 尺度に揃えるためで、候補の絞り込みも comparator も既存のまま。
+    let inputs = with_production_iishanten_continuation(lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+    ));
     let metrics: Vec<_> = evaluations
         .iter()
         .map(|evaluation| {
@@ -2635,6 +2679,94 @@ pub(crate) mod tests {
                 "{workers}",
             );
         }
+    }
+
+    #[test]
+    fn only_a_one_shanten_selection_splits_the_deep_candidates_across_threads() {
+        // 候補を thread へ分けるのは1向聴の追加深度のためなので、最善向聴数が2向聴・3向聴の
+        // 局面では worker を要求されても逐次評価のまま。前方集計値もどちらの経路でも同じ。
+        let metrics = |context: &GameContext, legal: &LegalDiscardEvaluations, forward_workers| {
+            production_selection_metrics_instrumented(
+                context,
+                &legal.tiles,
+                &legal.evaluations,
+                PRODUCTION_THREE_SHANTEN_CONTINUATION,
+                IishantenContinuationSettings {
+                    forward_workers,
+                    ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
+                },
+                &mut NormalDiscardPhaseTimer::disabled(),
+            )
+        };
+        let best_shanten = |legal: &LegalDiscardEvaluations| {
+            legal
+                .evaluations
+                .iter()
+                .map(DiscardEvaluation::min_shanten_after_discard)
+                .min()
+        };
+
+        // 1向聴では分ける。深く評価する候補が複数あるので worker は 1 を超えられる。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(best_shanten(&legal), Some(1));
+        let parallel = metrics(&context, &legal, NonZeroUsize::new(4));
+        assert!(parallel.forward_workers > 1, "{}", parallel.forward_workers);
+
+        // 2向聴・3向聴は従来どおり逐次評価。
+        for (context, actions, shanten) in [
+            {
+                let (context, actions) = two_shanten_ev_regression_context();
+                (context, actions, 2)
+            },
+            {
+                let (context, actions) = three_shanten_progress_regression_context();
+                (context, actions, 3)
+            },
+        ] {
+            let legal = legal_discard_evaluations(&context, &actions);
+            assert_eq!(best_shanten(&legal), Some(shanten), "{shanten}");
+            let deep = forward_target_mask(&legal.evaluations)
+                .into_iter()
+                .filter(|&target| target)
+                .count();
+            // 分ける対象そのものは存在するので、逐次のままなのは向聴数の判断による。
+            assert!(deep > 1, "{shanten}");
+
+            let parallel = metrics(&context, &legal, NonZeroUsize::new(4));
+            let sequential = metrics(&context, &legal, None);
+            assert_eq!(parallel.forward_workers, 1, "{shanten}");
+            assert_eq!(sequential.forward_workers, 1, "{shanten}");
+            assert_eq!(parallel.forward, sequential.forward, "{shanten}");
+        }
+    }
+
+    #[test]
+    fn the_push_pull_fallback_evaluates_the_selected_candidate_at_the_production_depth() {
+        // 前方比較が発火した経路と、選択済み1候補だけを後から評価する fallback で、同じ1向聴
+        // state の ExpectedSelfTsumoValue が一致する。選択が前方評価を必要としたかどうかで
+        // 押し引きへ渡る値の意味が変わらない。
+        let (context, actions) = same_shanten_next_discard_regression_context();
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        let evaluation = selection.evaluation.as_ref().expect("打牌候補がある");
+        assert_eq!(evaluation.min_shanten_after_discard(), IISHANTEN_SHANTEN);
+        assert_eq!(evaluation.discard.to_mjai_string(), "5p");
+
+        // 選択が前方比較を通った経路の値。深度 B で確定した production の値そのもの。
+        let selected = selection
+            .iishanten_forward_metrics
+            .expect("1向聴の前方集計値がある");
+        assert_eq!(selected.expected_self_tsumo_value, Some(1_031_805_837));
+
+        // 同じ候補を fallback (選択の値を持たない入口) で評価した値。この入口は選択の値を
+        // 渡さないため、必ず後追いの1候補評価を通る。
+        let fallback = selected_iishanten_forward_metrics_from_context(&context, evaluation)
+            .expect("fallback でも1向聴の前方集計値を求められる");
+
+        assert_eq!(
+            fallback.expected_self_tsumo_value,
+            selected.expected_self_tsumo_value,
+        );
     }
 
     #[test]

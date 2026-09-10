@@ -205,7 +205,7 @@ cargo run --release -p bot-scenario -- \
 
 worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた base 評価 memo・同一 state memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増え得るので、出力には方式ごとの `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。
 
-**production の打牌選択は PA と同じ方式です。** 実際に使う worker 数は `min(available_parallelism, 深く評価する候補数)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。S / P2 / P4 は PA を比べるための baseline として残ります。他の診断 option とは併用できません。
+**production の打牌選択は PA と同じ方式です。** 実際に使う worker 数は `min(available_parallelism, 深く評価する候補数)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。候補を分けるのは最善向聴数が1向聴の局面だけで、2向聴・3向聴の前方集計値は従来どおり逐次評価のままです。S / P2 / P4 は PA を比べるための baseline として残ります。他の診断 option とは併用できません。
 
 ### --allow-ryukyoku
 

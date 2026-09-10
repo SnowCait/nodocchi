@@ -168,6 +168,8 @@ cohort に値を確定できない候補が1件でもある場合はこの軸を
 
 追加深度に合わせて、探索内の同一 state memo (`SearchStateMemo`) を1向聴 continuation でも常に有効にし、深い前方評価の対象になった候補 (pre-acceptance 軸まで同順位の cohort) を候補単位で複数 worker に分けて評価します。worker の上限は `std::thread::available_parallelism()` で、実際に使う数は `min(available_parallelism, 深く評価する候補数)` です。`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。固定 worker 数は持ちません。
 
+候補を分けるのは**最善向聴数が1向聴の局面だけ**です。2向聴・3向聴の前方集計値は従来どおり1本の探索基盤を候補間で共有したまま逐次で求め、memo の共有範囲も総仕事量も latency も変えていません。
+
 分けるのは「どの候補をどの worker が評価するか」だけです。候補1件の前方集計値はその候補の打牌評価と探索設定だけで決まる純関数で、探索内 memo は同じ入力に同じ値を返す cache でしかありません。結果は候補 index へ書き戻すため、worker 数にも thread の終了順にも依りません。したがって候補ごとの `ExpectedSelfTsumoValue`・cohort 単位の unknown 軸解決・比較理由・選ばれた打牌は、逐次評価と bit-exact に一致します。
 
 worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増えます。この分け方は `bot-core` の orchestration 側だけが持ち、`bot-logic` の純粋な評価は platform threading を前提にしません。timeout・cutoff・shallow fallback・pruning・top-N・threshold といった近似は入れていません。
@@ -184,7 +186,7 @@ Pass は架空の現在打牌を作らず、「action 済みで次の自摸を�
 から Pass 後の最初の自摸位置を求めて揃えます。reaction 元または残り山が unknown なら値も
 unknown のままです。
 
-Call 側と Pass 側は同じ1向聴 continuation の設定 (手変わり2回まで + exact same-state memo) で求めます。Call 側は鳴いた後の production 打牌選択が、Pass 側は同じ設定を適用した継続評価が求めるので、片側だけ深い評価になって比較が尺度の違いを拾うことはありません。
+Call 側と Pass 側は同じ1向聴 continuation の設定 (手変わり2回まで + exact same-state memo) で求めます。Call 側は鳴いた後の候補比較へ、Pass 側は次の自摸を待つ state の継続評価へ、どちらも同じ設定を明示的に適用します。片側だけ深い評価になって比較が尺度の違いを拾うことはありません。
 
 Call が Pass より厳密に高い場合だけ鳴き、同値・どちらか unknown では鳴きません。倍率、固定点、
 受け入れ threshold、Chi / Pon 別補正はありません。既存の「Call → 即テンパイ」policy は先に
