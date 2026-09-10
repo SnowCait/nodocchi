@@ -253,7 +253,7 @@ pub fn checked_legal_action_to_mjai_action(
             })
         }),
         // 副露 response は actor / pai / consumed のみで target を含まない
-        // (RiichiEnv v0.4.8 Action::to_mjai() と同じ)。選択した LegalAction と
+        // (RiichiEnv の Action::to_mjai() と同じ)。選択した LegalAction と
         // pai + consumed が一致する possible action の元文字列を再利用して構築する。
         LegalAction::Chi { tile, consumed } => possible_actions.iter().find_map(|a| {
             let MjaiPossibleAction::Chi {

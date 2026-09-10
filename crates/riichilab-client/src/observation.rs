@@ -47,7 +47,7 @@ impl ObservationPayload {
         let observation = Observation::deserialize_from_base64(&self.base64)
             .map_err(|e| ObservationError::Decode(e.to_string()))?;
 
-        // RiichiEnv (riichienv-core 0.4.8) の Observation.hands はツモ牌込みであり、
+        // RiichiEnv の Observation.hands はツモ牌込みであり、
         // 同じ物理牌 ID が drawn_tile にも保持される。raw 物理牌 ID のまま取得し、
         // hand_tiles 用と visible_tiles 用で別々に扱う。
         let raw_hand: Vec<u32> = observation

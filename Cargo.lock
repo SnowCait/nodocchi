@@ -1339,9 +1339,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "riichienv-core"
-version = "0.4.8"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "011ec981734fed2576e84b676050d2505459b1110a2d7f930c92e2c9b2f32c9c"
+checksum = "02e75331a82f9ee0a3c1401f5fe75f210e905063b095d0748fd13e41ce3cd56d"
 dependencies = [
  "base64",
  "derive_more",
