@@ -11,7 +11,7 @@ use bot_core::{
     ThreeShantenContinuationProfile, ThreeShantenContinuationScope,
     compare_three_shanten_continuation_scopes, profile_three_shanten_continuation_scope,
 };
-use bot_logic::{ProgressMemoStats, SELF_TSUMO_VALUE_SCALE, ThreeShantenSearchStats};
+use bot_logic::{SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats};
 
 use crate::benchmark::LatencyStatistics;
 use crate::cli::CaptureComparisonSpec;
@@ -90,7 +90,7 @@ fn format_profile(profile: &ThreeShantenContinuationProfile) -> Vec<String> {
 
 // 表示する数え上げ1件。label と、その値を取り出す関数の組。
 type SearchCounter = (&'static str, fn(&ThreeShantenSearchStats) -> u64);
-type MemoCounter = (&'static str, fn(&ProgressMemoStats) -> u64);
+type MemoCounter = (&'static str, fn(&SearchStateMemoStats) -> u64);
 
 fn format_profile_delta(
     progress_and_same_shanten: &ThreeShantenContinuationProfile,

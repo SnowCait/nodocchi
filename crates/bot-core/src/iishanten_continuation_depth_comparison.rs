@@ -21,12 +21,18 @@
 //! 評価すると後から走った方式が暖まった memo を使ってしまう。方式ごとの実測は必ず新しい thread
 //! で行い、どちらの方式も同じ cold な thread-local から始める。探索する枝も評価値も、計測
 //! thread の違いでは変わらない。
+//!
+//! 探索内の同一 state memo ([`bot_logic::LookaheadInputs::with_search_state_memo`]) は A / B の
+//! どちらにも同じように有効化する。共有するのは同じ入力なら必ず同じ値になる純関数の結果だけ
+//! なので値は変わらず、A → B の差が深度そのものの差だけになる。production の1向聴打牌選択は
+//! この memo を有効にしないため、A の実測は production の latency そのものではない。
 
 use std::time::{Duration, Instant};
 
 use bot_logic::{
     DiscardEvaluation, DrawTransition, LookaheadInputs, SameShantenContinuationDepth,
-    ThreeShantenSearchStats, TileType, diagnose_lookahead_candidate, forward_metrics_for_candidate,
+    SearchStateMemoStats, ThreeShantenSearchStats, TileType, diagnose_lookahead_candidate,
+    forward_metrics_for_candidate,
 };
 
 use crate::action::LegalAction;
@@ -97,6 +103,8 @@ impl CandidateBreakdown {
 pub struct IishantenContinuationDepthProfile {
     pub depth: IishantenContinuationDepth,
     pub search: ThreeShantenSearchStats,
+    /// 同一 state memo の利用数。どちらの深度も同じ memo を有効にして評価する。
+    pub memo: SearchStateMemoStats,
     /// unknown は `None` のまま保持する。
     pub candidates: Vec<(TileType, Option<u64>, Duration)>,
     /// 候補ごとの最初のツモ1牌種単位の内訳。計測後に別途構築する。
@@ -184,6 +192,7 @@ fn profile_on_the_measuring_thread(
         LookaheadDiagnosticScope::None,
     )
     .with_same_shanten_continuation_depth(depth.depth())
+    .with_search_state_memo()
     .with_three_shanten_search_stats();
     let started = Instant::now();
     let targets: Vec<_> = legal
@@ -198,6 +207,7 @@ fn profile_on_the_measuring_thread(
     // 計測は値だけの経路で終える。内訳はこの後に構築するので、時間にも探索規模にも入らない。
     let total = started.elapsed();
     let search = inputs.three_shanten_search_stats();
+    let memo = inputs.search_state_memo_stats();
     let breakdown = targets
         .iter()
         .map(|evaluation| candidate_breakdown(&inputs, evaluation))
@@ -205,6 +215,7 @@ fn profile_on_the_measuring_thread(
     IishantenContinuationDepthProfile {
         depth,
         search,
+        memo,
         candidates,
         breakdown,
         total,

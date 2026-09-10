@@ -16,7 +16,9 @@ use bot_core::{
     IishantenContinuationDepthComparison, IishantenContinuationDepthProfile,
     compare_iishanten_continuation_depths,
 };
-use bot_logic::{DrawTransition, SELF_TSUMO_VALUE_SCALE, ThreeShantenSearchStats, TileType};
+use bot_logic::{
+    DrawTransition, SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats, TileType,
+};
 
 use crate::scenario::Scenario;
 
@@ -33,6 +35,8 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
          are shared"
             .to_string(),
         "  each depth is measured on its own fresh thread, so neither warms the other".to_string(),
+        "  both depths run with the same exact same-state memo, so A -> B is the depth alone"
+            .to_string(),
         "  production discard selection uses A; B is a diagnostics-only experiment".to_string(),
         String::new(),
     ];
@@ -70,6 +74,7 @@ fn format_profile(profile: &IishantenContinuationDepthProfile) -> Vec<String> {
 
 // 表示する数え上げ1件。label と、その値を取り出す関数の組。
 type SearchCounter = (&'static str, fn(&ThreeShantenSearchStats) -> u64);
+type MemoCounter = (&'static str, fn(&SearchStateMemoStats) -> u64);
 
 fn format_delta(comparison: &IishantenContinuationDepthComparison) -> Vec<String> {
     let search: [SearchCounter; 6] = [
@@ -85,6 +90,18 @@ fn format_delta(comparison: &IishantenContinuationDepthComparison) -> Vec<String
             stats.same_shanten_enumerations
         }),
         ("terminal scorings", |stats| stats.terminal_scorings),
+    ];
+    let memo: [MemoCounter; 4] = [
+        ("next_discard calls", |memo| {
+            memo.next_discard_hits + memo.next_discard_misses
+        }),
+        ("next_discard misses", |memo| memo.next_discard_misses),
+        ("same-shanten next_discard calls", |memo| {
+            memo.same_shanten_next_discard_hits + memo.same_shanten_next_discard_misses
+        }),
+        ("same-shanten next_discard misses", |memo| {
+            memo.same_shanten_next_discard_misses
+        }),
     ];
 
     let mut lines = vec!["Value A -> B".to_string()];
@@ -135,6 +152,11 @@ fn format_delta(comparison: &IishantenContinuationDepthComparison) -> Vec<String
     for (label, value) in search {
         let a = value(&comparison.once.search);
         let b = value(&comparison.twice.search);
+        lines.push(format!("  {label}: {a} -> {b} ({})", format_ratio(a, b)));
+    }
+    for (label, value) in memo {
+        let a = value(&comparison.once.memo);
+        let b = value(&comparison.twice.memo);
         lines.push(format!("  {label}: {a} -> {b} ({})", format_ratio(a, b)));
     }
     lines

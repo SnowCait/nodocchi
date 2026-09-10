@@ -1335,7 +1335,7 @@ fn format_lookahead_downstream(
     if downstream.draws.is_empty() {
         lines.push(format!("{:indent$}{NONE}", ""));
     }
-    for draw in &downstream.draws {
+    for draw in downstream.draws.iter() {
         lines.extend(format_lookahead_draw(draw, None, indent, step));
     }
     lines
