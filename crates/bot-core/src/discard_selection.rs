@@ -241,7 +241,7 @@ struct ProductionSelectionMetrics {
     search: ThreeShantenSearchStats,
     /// 探索内の同一 state memo の利用数。memo を持たない経路では既定値のまま。
     memo: SearchStateMemoStats,
-    /// 深い候補評価に実際に使った thread 数。production の逐次評価では 1。
+    /// 深い候補評価に実際に使った thread 数。逐次評価へ落ちた場合は 1。
     forward_workers: usize,
 }
 
@@ -352,7 +352,7 @@ pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
         context,
         legal_actions,
         scope,
-        IishantenContinuationSettings::PRODUCTION,
+        production_iishanten_continuation_settings(),
         timing,
     );
 
@@ -380,7 +380,7 @@ struct ProductionSelectionRun {
 
 // 通常打牌選択1回。候補生成・前方集計値・向聴数別の軸・現在聴牌の補助評価・最終比較まで、
 // production と同じ helper を同じ順で1回ずつ通る。`continuation` は診断専用の差し替えで、
-// production 経路は必ず `IishantenContinuationSettings::PRODUCTION` を渡す。
+// production 経路は必ず `production_iishanten_continuation_settings()` を渡す。
 fn run_production_selection(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -441,10 +441,12 @@ fn run_production_selection(
     }
 }
 
-/// 1向聴 continuation の探索設定。production は [`Self::PRODUCTION`] だけを使う。
+/// 1向聴 continuation の探索設定。production は
+/// [`production_iishanten_continuation_settings`] が返すものだけを使う。
 ///
-/// 差し替えられるのは手変わりの深度と、それに必要な探索内 memo / 探索規模の計上だけで、候補の
-/// 絞り込みも軸の解決も比較順も最終選択も production と同じ経路をそのまま通る。
+/// 差し替えられるのは手変わりの深度と、それに必要な探索内 memo / 探索規模の計上と、深い候補
+/// 評価の分け方だけで、候補の絞り込みも軸の解決も比較順も最終選択も production と同じ経路を
+/// そのまま通る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IishantenContinuationSettings {
     /// 1向聴 state の continuation が手変わりを何回まで許すか。
@@ -454,23 +456,76 @@ pub(crate) struct IishantenContinuationSettings {
     pub(crate) search_state_memo: bool,
     /// 探索規模を計上するか。値も枝も選択も変わらない。
     pub(crate) search_stats: bool,
-    /// 深く評価する候補を何 thread まで並行に評価するか。`None` では production と同じ逐次評価。
+    /// 深く評価する候補を何 thread まで並行に評価するか。`None` では逐次評価。
     ///
     /// 候補ごとの前方評価は互いに独立した純関数なので、分けても値も枝も cohort も選択も
     /// 変わらない。変わるのは探索基盤 (base 評価 memo・同一 state memo・thread-local の
     /// 向聴 / 受け入れ memo) を候補間で共有できる範囲だけで、共有を失った分は総仕事量として
-    /// 増える。診断専用の指定で、production は使わない。
+    /// 増える。
     pub(crate) forward_workers: Option<NonZeroUsize>,
 }
 
 impl IishantenContinuationSettings {
-    /// production の打牌選択が使う設定。
-    pub(crate) const PRODUCTION: Self = Self {
+    /// production の depth / memo を逐次評価で使う設定。
+    ///
+    /// production の worker 上限は runtime の [`available_parallelism`] に依るため const へは
+    /// 畳み込めない。実際の production 設定は
+    /// [`production_iishanten_continuation_settings`] が実行時に解決する。同じ入力に同じ値を
+    /// 返す純関数を候補単位で分けるだけなので、この逐次設定と production の並列設定は候補の
+    /// 値も軸解決も比較理由も選択も bit-exact に一致する。
+    pub(crate) const PRODUCTION_SEQUENTIAL: Self = Self {
+        depth: SameShantenContinuationDepth::Twice,
+        search_state_memo: true,
+        search_stats: false,
+        forward_workers: None,
+    };
+
+    /// production へ追加深度を接続する前の旧設定。診断の比較 baseline としてだけ残る。
+    pub(crate) const LEGACY_SHALLOW: Self = Self {
         depth: SameShantenContinuationDepth::Once,
         search_state_memo: false,
         search_stats: false,
         forward_workers: None,
     };
+}
+
+/// production の1向聴 continuation 設定。
+///
+/// 深度と exact same-state memo は const だが、深い候補評価の worker 上限は runtime の
+/// [`std::thread::available_parallelism`] に依るのでここで解決する。実際に使う worker 数は
+/// `min(available_parallelism, 深く評価する候補数)` で、その頭打ちは
+/// [`parallel_forward_metrics`] が行う。
+pub(crate) fn production_iishanten_continuation_settings() -> IishantenContinuationSettings {
+    IishantenContinuationSettings {
+        // 並列度 1 の環境では分ける相手がいないので、逐次評価をそのまま通す。
+        forward_workers: NonZeroUsize::new(available_parallelism())
+            .filter(|workers| workers.get() > 1),
+        ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
+    }
+}
+
+/// この runtime で使える並列度。取得できない環境では 1 として扱い、逐次評価相当へ落ちる。
+pub(crate) fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
+/// production の1向聴 continuation の深度と exact same-state memo を lookahead 入力へ適用する。
+///
+/// 打牌候補集合を持たない経路 (鳴かない場合の継続評価など) が、打牌後の1向聴 continuation と
+/// 同じ尺度で値を求めるための入口。深い候補評価の分け方は候補集合を持つ経路だけの話なので、
+/// ここでは扱わない。
+pub(crate) fn with_production_iishanten_continuation(
+    inputs: LookaheadInputs<'_>,
+) -> LookaheadInputs<'_> {
+    let settings = production_iishanten_continuation_settings();
+    let inputs = inputs.with_same_shanten_continuation_depth(settings.depth);
+    if settings.search_state_memo {
+        inputs.with_search_state_memo()
+    } else {
+        inputs
+    }
 }
 
 /// 1向聴 continuation の探索設定を差し替えて行った打牌選択と、その観測値。
@@ -573,7 +628,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         &valuator,
         scope,
         &legal.evaluations,
-        IishantenContinuationSettings::PRODUCTION,
+        production_iishanten_continuation_settings(),
     );
     let lookahead = scope
         .builds_lookahead()
@@ -1234,7 +1289,7 @@ fn production_selection_metrics(
         tiles,
         evaluations,
         PRODUCTION_THREE_SHANTEN_CONTINUATION,
-        IishantenContinuationSettings::PRODUCTION,
+        production_iishanten_continuation_settings(),
         &mut NormalDiscardPhaseTimer::disabled(),
     )
 }
@@ -2563,7 +2618,7 @@ pub(crate) mod tests {
                 IishantenContinuationSettings {
                     search_stats: true,
                     forward_workers,
-                    ..IishantenContinuationSettings::PRODUCTION
+                    ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
                 },
                 &mut NormalDiscardPhaseTimer::disabled(),
             )
@@ -2598,7 +2653,7 @@ pub(crate) mod tests {
                 PRODUCTION_THREE_SHANTEN_CONTINUATION,
                 IishantenContinuationSettings {
                     forward_workers,
-                    ..IishantenContinuationSettings::PRODUCTION
+                    ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
                 },
                 &mut NormalDiscardPhaseTimer::disabled(),
             )
@@ -5872,7 +5927,9 @@ pub(crate) mod tests {
         assert_ne!(next_discard_after("1m"), tile("1m"));
         assert_ne!(next_discard_after("2m"), tile("2m"));
 
-        // 1向聴 self-tsumo 軸は 5p / 9p のどちらも確定でき、選択は 9p のまま。
+        // 1向聴 self-tsumo 軸は 5p / 9p のどちらも確定でき、production の追加深度では 5p が
+        // 9p を上回る。手変わり1回までの旧設定では 9p が選ばれていた候補で、深度を上げた
+        // 効果がそのまま最終打牌に出る。
         let value_of = |discard: &str| {
             selection
                 .diagnostic
@@ -5883,8 +5940,10 @@ pub(crate) mod tests {
                 .expected_self_tsumo_value
                 .expect("self-tsumo continuation を確定できる")
         };
-        assert!(value_of("9p") >= value_of("5p"));
-        assert_eq!(selected_discard(&context, &actions), "9p");
+        assert_eq!(value_of("5p"), 1_031_805_837);
+        assert_eq!(value_of("9p"), 989_272_961);
+        assert!(value_of("5p") > value_of("9p"));
+        assert_eq!(selected_discard(&context, &actions), "5p");
     }
 
     fn two_shanten_ev_regression_context() -> (GameContext, Vec<LegalAction>) {
@@ -6078,7 +6137,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
-            IishantenContinuationSettings::PRODUCTION,
+            production_iishanten_continuation_settings(),
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -6140,7 +6199,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
-            IishantenContinuationSettings::PRODUCTION,
+            production_iishanten_continuation_settings(),
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -6214,7 +6273,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
-            IishantenContinuationSettings::PRODUCTION,
+            production_iishanten_continuation_settings(),
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);

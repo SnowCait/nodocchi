@@ -1,8 +1,9 @@
 //! 1向聴の手変わり深度 A/B を、production の打牌 comparator を通した最終選択として表示する。
 //!
-//! A は現行 production の打牌選択そのもの (手変わり1回まで)、B は
-//! `SameShanten -> SameShanten -> Progress` をもう1段だけ許した診断専用の追加深度。段数が違えば
-//! 経路確率も違うため、どちらの深度の値かを必ず添えて表示する。
+//! A は production へ追加深度を接続する前の旧設定 (手変わり1回まで) で、比較 baseline として
+//! だけ残る。B は現在の production depth で、`SameShanten -> SameShanten -> Progress` をもう1段
+//! だけ許し、exact same-state memo を有効にする。段数が違えば経路確率も違うため、どちらの深度の
+//! 値かを必ず添えて表示する。
 //!
 //! 表示するのは ExpectedSelfTsumoValue 単独の ranking ではなく、既存 comparator を通した最終
 //! 打牌。深く評価される候補も、unknown の軸解決も、比較理由も production selection が使った
@@ -16,6 +17,10 @@
 //! B は追加深度と exact same-state memo を一緒に有効にするため、A -> B の elapsed 差は深度だけ
 //! の差ではない。同じ memo 条件へ揃えた純粋な深度比較は
 //! `--iishanten-continuation-depth-comparison` が全候補評価として持っている。
+//!
+//! どちらの方式も深い候補評価は逐次で行う。production が使う候補単位の並列評価は同じ B depth
+//! の中で `--iishanten-selection-parallel-comparison` が比べる。並列評価は値を変えないので、
+//! ここに出る B の値も選択も production のものと一致する。
 
 use std::time::Duration;
 
@@ -35,8 +40,10 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
 
     let mut lines = vec![
         "Iishanten selection depth comparison".to_string(),
-        "  A production depth: same-shanten once (Progress, SameShanten -> Progress)".to_string(),
-        "  B same-shanten twice: A plus SameShanten -> SameShanten -> Progress, with the exact \
+        "  A legacy shallow depth: same-shanten once (Progress, SameShanten -> Progress), the \
+         settings production used before the extra depth"
+            .to_string(),
+        "  B production depth: A plus SameShanten -> SameShanten -> Progress, with the exact \
          same-state memo"
             .to_string(),
         "  both depths run the production discard selection: the same candidate gating, unknown \
@@ -57,12 +64,17 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
          the depth alone; the same-memo depth-only comparison is \
          --iishanten-continuation-depth-comparison"
             .to_string(),
-        "  production discard selection uses A; B is a diagnostics-only experiment".to_string(),
+        "  production discard selection uses B; A stays only as the comparison baseline"
+            .to_string(),
+        "  both depths evaluate the deep candidates sequentially; production splits exactly those \
+         candidates across workers, which changes neither the values nor the selection, and \
+         --iishanten-selection-parallel-comparison compares that split inside the same B depth"
+            .to_string(),
         String::new(),
     ];
-    lines.extend(format_decision(&comparison.production));
+    lines.extend(format_decision(&comparison.legacy));
     lines.push(String::new());
-    lines.extend(format_decision(&comparison.twice));
+    lines.extend(format_decision(&comparison.production));
     lines.push(String::new());
     lines.extend(format_delta(&comparison));
     lines.join("\n")
@@ -195,19 +207,19 @@ fn format_delta(comparison: &IishantenSelectionDepthComparison) -> Vec<String> {
         "Selection A -> B".to_string(),
         format!(
             "  selected discard: {} -> {}",
+            format_selected(&comparison.legacy),
             format_selected(&comparison.production),
-            format_selected(&comparison.twice),
         ),
         format!("  same discard: {}", comparison.selects_the_same_discard()),
         format!(
             "  deep evaluation candidates: {} -> {} (same cohort: {})",
             comparison
-                .production
+                .legacy
                 .observation
                 .deep_evaluated_candidates()
                 .len(),
             comparison
-                .twice
+                .production
                 .observation
                 .deep_evaluated_candidates()
                 .len(),
@@ -220,9 +232,9 @@ fn format_delta(comparison: &IishantenSelectionDepthComparison) -> Vec<String> {
         String::new(),
         "ExpectedSelfTsumoValue A -> B".to_string(),
     ];
-    for candidate in &comparison.production.observation.candidates {
-        let twice = comparison
-            .twice
+    for candidate in &comparison.legacy.observation.candidates {
+        let production = comparison
+            .production
             .observation
             .candidate(candidate.discard)
             .and_then(|candidate| candidate.evaluated_expected_self_tsumo_value);
@@ -230,7 +242,7 @@ fn format_delta(comparison: &IishantenSelectionDepthComparison) -> Vec<String> {
             "  {}: {} -> {}",
             candidate.discard.to_mjai_string(),
             format_value(candidate.evaluated_expected_self_tsumo_value),
-            format_value(twice),
+            format_value(production),
         ));
     }
 
@@ -238,18 +250,18 @@ fn format_delta(comparison: &IishantenSelectionDepthComparison) -> Vec<String> {
     lines.push("Cost A -> B".to_string());
     lines.push(format!(
         "  total selection elapsed (timing runs): {} -> {} ({})",
+        format_duration(comparison.legacy.elapsed()),
         format_duration(comparison.production.elapsed()),
-        format_duration(comparison.twice.elapsed()),
         format_slowdown(comparison.slowdown()),
     ));
     for (label, value) in SEARCH_COUNTERS {
-        let a = value(&comparison.production.observation.search);
-        let b = value(&comparison.twice.observation.search);
+        let a = value(&comparison.legacy.observation.search);
+        let b = value(&comparison.production.observation.search);
         lines.push(format!("  {label}: {a} -> {b} ({})", format_ratio(a, b)));
     }
     for (label, value) in MEMO_COUNTERS {
-        let a = value(&comparison.production.observation.memo);
-        let b = value(&comparison.twice.observation.memo);
+        let a = value(&comparison.legacy.observation.memo);
+        let b = value(&comparison.production.observation.memo);
         lines.push(format!("  {label}: {a} -> {b} ({})", format_ratio(a, b)));
     }
     lines
@@ -285,11 +297,11 @@ fn format_slowdown(slowdown: Option<f64>) -> String {
     }
 }
 
-fn format_ratio(production: u64, twice: u64) -> String {
-    if production == 0 {
+fn format_ratio(legacy: u64, production: u64) -> String {
+    if legacy == 0 {
         return "n/a".to_string();
     }
-    format!("{:.1}%", twice as f64 / production as f64 * 100.0)
+    format!("{:.1}%", production as f64 / legacy as f64 * 100.0)
 }
 
 fn format_value(scaled: Option<u64>) -> String {

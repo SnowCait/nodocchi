@@ -1,9 +1,9 @@
 //! 1向聴 ExpectedSelfTsumoValue の手変わり深度 A/B 比較の表示。
 //!
-//! A (same-shanten once) は production の continuation で `Progress` と
-//! `SameShanten -> Progress` まで、B (same-shanten twice) は
-//! `SameShanten -> SameShanten -> Progress` をもう1段だけ許した診断専用の追加深度。段数が違えば
-//! 経路確率も違うため、どちらの深度の値かを必ず添えて表示する。
+//! A (same-shanten once) は production 接続前の旧 continuation で `Progress` と
+//! `SameShanten -> Progress` まで、B (same-shanten twice) は現在の production depth で
+//! `SameShanten -> SameShanten -> Progress` をもう1段だけ許す。段数が違えば経路確率も違うため、
+//! どちらの深度の値かを必ず添えて表示する。
 //!
 //! 表示する順位は ExpectedSelfTsumoValue 単独の ranking で、production の最終打牌選択ではない。
 //! production は既存 comparator の pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、

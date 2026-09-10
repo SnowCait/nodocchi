@@ -116,12 +116,15 @@ expected self-tsumo value
 = Σ(その経路を引く確率 × テンパイ到達後の期待ツモ支払い)
 ```
 
-対象の経路は次の2種類です。すぐ向聴数を下げてテンパイする枝と、一度だけ手変わりしてから次のツモでテンパイする枝を、同じ尺度で比べるための指標です。
+対象の経路は次の3種類です。すぐ向聴数を下げてテンパイする枝と、手変わりしてから次のツモでテンパイする枝を、同じ尺度で比べるための指標です。手変わりは2回まで許します。
 
 ```text
 A. 1回目のツモが向聴数を下げる → 次打牌 → テンパイ
 B. 1回目のツモが向聴数を維持する → 次打牌 → 1向聴
    → 2回目のツモが向聴数を下げる → 次打牌 → テンパイ
+C. 1回目のツモが向聴数を維持する → 次打牌 → 1向聴
+   → 2回目のツモも向聴数を維持する → 次打牌 → 1向聴
+   → 3回目のツモが向聴数を下げる → 次打牌 → テンパイ
 ```
 
 ### 手変わり後の次打牌
@@ -134,7 +137,7 @@ pre-acceptance 軸 (Shanten / IsolatedTile / IsolatedHonor) まで同順位の�
 その打牌後の1向聴 → 向聴数を下げるツモ → 次打牌 → テンパイ
 ```
 
-だけを進めた期待支払いを求め、既存 comparator の `ExpectedSelfTsumoValue` 軸へそのまま渡します。B が集計する枝そのものを選択にも使うので、選ぶ枝と集計する枝は一致します。手変わりの先でもう一度手変わりする枝は追わないため、探索の深さは変わりません。値の確率も打点も terminal scoring も既存 continuation と同じ helper を通り、この選択のための係数も threshold も持ちません。
+だけを進めた期待支払いを求め、既存 comparator の `ExpectedSelfTsumoValue` 軸へそのまま渡します。B / C が集計する枝そのものを選択にも使うので、選ぶ枝と集計する枝は一致します。値の確率も打点も terminal scoring も既存 continuation と同じ helper を通り、この選択のための係数も threshold も持ちません。
 
 cohort に値を確定できない候補が1件でもある場合はこの軸を落とし、既存の浅い比較へ戻ります (0点として順位付けしません)。材料 (ツモ打点と残り自摸機会) が無い局面では B の枝そのものを集計しないため、この選択も行いません。
 
@@ -153,11 +156,21 @@ cohort に値を確定できない候補が1件でもある場合はこの軸を
 - ダマのまま進めた場合の手変わり
 - 本場 / 供託 / 点棒状況
 
-手変わりは1回までで、2回続けて向聴数が下がらない枝はこの評価モデルの探索範囲外です (確定しない値ではなく、寄与 0 として扱います)。手変わりをもう1回だけ許した `SameShanten → SameShanten → Progress` は、bot-scenario の [1向聴 continuation 深度の A/B 比較](../bot-scenario.md#1向聴-continuation-深度の-ab-比較) で観測できる診断専用の実験で、production の打牌選択には接続していません。その診断が表示する順位もこの軸単独の ranking で、下の cohort 単位の軸解決を含む最終打牌選択ではありません。
+手変わりは2回までで、3回続けて向聴数が下がらない枝はこの評価モデルの探索範囲外です (確定しない値ではなく、寄与 0 として扱います)。段数は2回で閉じていて、任意深度の再帰へは一般化しません。
+
+追加深度を接続する前の production は手変わり1回まで (`SameShanten → Progress`) でした。その旧設定は bot-scenario の [1向聴 continuation 深度の A/B 比較](../bot-scenario.md#1向聴-continuation-深度の-ab-比較) と [1向聴 selection 深度の A/B 比較](../bot-scenario.md#1向聴-selection-深度の-ab-比較) に legacy shallow depth (A) として比較 baseline のまま残っています。前者が表示する順位はこの軸単独の ranking で、下の cohort 単位の軸解決を含む最終打牌選択ではありません。
 
 この軸は「現在打牌後に自分へ残っている自摸機会」が exact に分かる局面でだけ使います。山の残りツモ可能枚数を `floor(remaining_tiles / 4)` で自分の自摸回数へ直すだけで、巡目や河の枚数からの推測はしません。材料が揃わない局面では軸そのものを持たず、下の `weighted prospective value` 以降へ落とします。テンパイのツモ打点を確定できない枝が1つでもある候補も、0点にせず値を持ちません。
 
 軸を使うかどうかは打点軸と同じく cohort 単位で決めます。
+
+### 深い候補評価の並列化
+
+追加深度に合わせて、探索内の同一 state memo (`SearchStateMemo`) を1向聴 continuation でも常に有効にし、深い前方評価の対象になった候補 (pre-acceptance 軸まで同順位の cohort) を候補単位で複数 worker に分けて評価します。worker の上限は `std::thread::available_parallelism()` で、実際に使う数は `min(available_parallelism, 深く評価する候補数)` です。`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。固定 worker 数は持ちません。
+
+分けるのは「どの候補をどの worker が評価するか」だけです。候補1件の前方集計値はその候補の打牌評価と探索設定だけで決まる純関数で、探索内 memo は同じ入力に同じ値を返す cache でしかありません。結果は候補 index へ書き戻すため、worker 数にも thread の終了順にも依りません。したがって候補ごとの `ExpectedSelfTsumoValue`・cohort 単位の unknown 軸解決・比較理由・選ばれた打牌は、逐次評価と bit-exact に一致します。
+
+worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増えます。この分け方は `bot-core` の orchestration 側だけが持ち、`bot-logic` の純粋な評価は platform threading を前提にしません。timeout・cutoff・shallow fallback・pruning・top-N・threshold といった近似は入れていません。
 
 ### 鳴き後も1向聴になる Call
 
@@ -170,6 +183,8 @@ Pass は架空の現在打牌を作らず、「action 済みで次の自摸を�
 同じ Progress / SameShanten 探索へ入ります。流局までの horizon は観測済みの reaction 元 player
 から Pass 後の最初の自摸位置を求めて揃えます。reaction 元または残り山が unknown なら値も
 unknown のままです。
+
+Call 側と Pass 側は同じ1向聴 continuation の設定 (手変わり2回まで + exact same-state memo) で求めます。Call 側は鳴いた後の production 打牌選択が、Pass 側は同じ設定を適用した継続評価が求めるので、片側だけ深い評価になって比較が尺度の違いを拾うことはありません。
 
 Call が Pass より厳密に高い場合だけ鳴き、同値・どちらか unknown では鳴きません。倍率、固定点、
 受け入れ threshold、Chi / Pon 別補正はありません。既存の「Call → 即テンパイ」policy は先に
@@ -332,7 +347,8 @@ Shanten / IsolatedTile / IsolatedHonor まで同順位の ForwardTargets cohort 
 SameShanten を扱います。
 
 3向聴起点の1向聴 continuation を Progress + SameShanten にした値は、bot-scenario の A/B 比較
-option でだけ求められます。枝集合が違うため production の値と同じ量として混ぜません。
+option でだけ求められます。枝集合が違うため production の値と同じ量として混ぜません。3向聴起点の
+continuation は1向聴 `ExpectedSelfTsumoValue` の追加深度の対象外で、Progress-only のままです。
 
 `bot-scenario --three-shanten-progress-self-tsumo` は、production が使うこの値を全合法3向聴
 候補について表示・計測する診断 option です。production と同じ evaluator を共有し、診断側に

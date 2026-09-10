@@ -1,21 +1,27 @@
-//! 1向聴の追加深度 B を、深く評価する候補ごとに並行評価した場合の wall-clock を観測する。
+//! production の1向聴 depth B を、深く評価する候補ごとに並行評価した場合の wall-clock を観測
+//! する。
 //!
-//! 比べるのは同じ深度 B
-//! ([`crate::iishanten_selection_depth_comparison::IishantenSelectionDepth::TwiceWithExactMemo`])
+//! 比べるのは同じ production depth
+//! ([`crate::iishanten_selection_depth_comparison::IishantenSelectionDepth::Production`])
 //! の中での評価の分け方だけで、深度も比較器も値も枝も scoring semantics も一切変えない。
 //!
 //! ```text
-//! S:  候補1 → 候補2 → ... → 候補N        (現行 B)
+//! S:  候補1 → 候補2 → ... → 候補N        (production と同じ B depth を逐次評価)
 //! P:  候補1 ─┐
 //!     候補2 ─┤
 //!     ...    ├→ 候補 index へ書き戻し → 既存の軸解決 / comparator
 //!     候補N ─┘
 //! ```
 //!
+//! PA ([`IishantenSelectionParallelism::AvailableParallelism`]) が現在の production と同じ
+//! 並列方式で、`std::thread::available_parallelism` を worker 上限に取り、実際に使う数は深く
+//! 評価する候補数で頭打ちになる。S / P2 / P4 はその PA を比べるための baseline。
+//!
 //! 並行にするのは、深い前方評価の対象になった候補 ([`bot_logic::forward_target_mask`]) 1件分の
 //! [`bot_logic::forward_metrics_for_candidate`] だけ。候補の絞り込みも、候補1件の評価も、
 //! cohort 単位の unknown 軸解決も、比較順も、安定順序も、最終選択も production selection の
-//! 経路そのままで、この module はそれらを複製しない。
+//! 経路そのままで、この module はそれらを複製しない。並列評価そのものも production の
+//! orchestration ([`crate::discard_selection`]) をそのまま使い、診断のために作り直さない。
 //!
 //! # exact である理由
 //!
@@ -40,9 +46,8 @@
 //! 観測 run のもの。どちらの run も新しい thread で行うため、先に走った方式が後の方式の
 //! thread-local memo を暖めない。
 //!
-//! production の打牌選択は A のままで、この module は B も並列評価も production へ接続しない。
-//! threading はこの診断層だけが持ち、bot-logic の純粋な評価は platform threading を前提に
-//! しない。
+//! threading は production でもこの診断層でも `bot-core` の orchestration 側だけが持ち、
+//! bot-logic の純粋な評価は platform threading を前提にしない。
 
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -52,7 +57,7 @@ use bot_logic::{SearchStateMemoStats, ThreeShantenSearchStats, TileType};
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::decision_timing::NormalDiscardPhaseTimer;
-use crate::discard_selection::IishantenContinuationSettings;
+use crate::discard_selection::{IishantenContinuationSettings, available_parallelism};
 use crate::iishanten_selection_depth_comparison::{
     IishantenSelectionDepth, IishantenSelectionDepthRun, measured_on_a_fresh_thread,
     run_on_the_measuring_thread,
@@ -61,16 +66,16 @@ use crate::iishanten_selection_depth_comparison::{
 /// 深く評価する候補の分け方。深度も比較器も変わらず、変わるのはこの1点だけ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IishantenSelectionParallelism {
-    /// S: 現行 B。候補を1本の探索基盤で順に評価する。
+    /// S: production と同じ B depth を、候補を1本の探索基盤で順に評価する baseline。
     Sequential,
     /// P<N>: 候補を最大 N thread で並行に評価する。
     Workers(NonZeroUsize),
-    /// PA: [`std::thread::available_parallelism`] を上限にする。
+    /// PA: [`std::thread::available_parallelism`] を上限にする。現在の production と同じ方式。
     AvailableParallelism,
 }
 
 impl IishantenSelectionParallelism {
-    /// 比較する方式。S を基準に、worker 数を増やした方式を並べる。
+    /// 比較する方式。S を基準に、worker 数を増やした方式を並べ、最後が production と同じ PA。
     pub const ALL: [Self; 4] = [
         Self::Sequential,
         Self::Workers(NonZeroUsize::new(2).expect("2 は 0 でない")),
@@ -80,12 +85,13 @@ impl IishantenSelectionParallelism {
 
     pub fn label(self) -> String {
         match self {
-            Self::Sequential => "S sequential (current B)".to_string(),
+            Self::Sequential => "S sequential (production B depth, sequential)".to_string(),
             Self::Workers(workers) => {
                 format!("P{workers} candidate-level parallel B (up to {workers} workers)")
             }
             Self::AvailableParallelism => format!(
-                "PA candidate-level parallel B (up to available_parallelism = {})",
+                "PA candidate-level parallel B (up to available_parallelism = {}, the current \
+                 production configuration)",
                 available_parallelism(),
             ),
         }
@@ -100,9 +106,10 @@ impl IishantenSelectionParallelism {
         }
     }
 
-    // 探索そのものの設定。深度も memo も B のままで、候補評価の分け方だけを差し替える。
+    // 探索そのものの設定。深度も memo も production の B のままで、候補評価の分け方だけを
+    // 差し替える。
     fn continuation(self) -> IishantenContinuationSettings {
-        let depth = IishantenSelectionDepth::TwiceWithExactMemo.continuation();
+        let depth = IishantenSelectionDepth::Production.continuation();
         match self {
             Self::Sequential => depth,
             Self::Workers(_) | Self::AvailableParallelism => IishantenContinuationSettings {
@@ -125,12 +132,6 @@ impl IishantenSelectionParallelism {
             ..self.continuation()
         }
     }
-}
-
-fn available_parallelism() -> usize {
-    std::thread::available_parallelism()
-        .map(NonZeroUsize::get)
-        .unwrap_or(1)
 }
 
 /// 1方式の計測結果。計測 run と観測 run の組は深度 A/B の観測と同じ。
@@ -218,7 +219,7 @@ impl IishantenSelectionParallelComparison {
     }
 }
 
-/// 同じ局面について、深度 B を S / P2 / P4 / PA で1回ずつ選択する。
+/// 同じ局面について、production の B depth を S / P2 / P4 / PA で1回ずつ選択する。
 ///
 /// 評価順は固定だが、どの方式も自分専用の thread で計るため、先に走った方式が後の方式の
 /// thread-local memo を暖めることはない。値も選択も評価順に依らない。
@@ -238,7 +239,7 @@ pub fn compare_iishanten_selection_parallelism(
     }
 }
 
-/// 指定した分け方で深度 B の打牌選択を計測 run と観測 run の2回行う。
+/// 指定した分け方で production の B depth の打牌選択を計測 run と観測 run の2回行う。
 ///
 /// どちらの run も新しい thread の中で行うため、先に走った run が後の run の thread-local memo
 /// を暖めない。観測 run を先に走らせるのも深度 A/B と同じで、`elapsed` は process が暖まった
@@ -286,6 +287,11 @@ mod tests {
         // 選ばれた打牌・cohort・候補ごとの値・軸解決・比較理由まで S と一致する。
         assert!(comparison.every_mode_matches_sequential());
         assert_eq!(comparison.sequential.workers(), 1);
+
+        // どの方式も production の打牌選択と同じ打牌になる。production は PA と同じ設定で、
+        // S はその逐次版。
+        let production = crate::discard_selection::select_discard_action(&context, &actions);
+        assert_eq!(comparison.sequential.selected().cloned(), production);
 
         let cohort = comparison
             .sequential
