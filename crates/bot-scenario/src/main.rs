@@ -18,6 +18,9 @@ mod three_shanten_continuation;
 mod tiles;
 #[cfg(test)]
 mod two_shanten_early_fold;
+mod two_shanten_full_parallel;
+#[cfg(test)]
+mod two_shanten_full_parallel_regression;
 
 use std::process::ExitCode;
 
@@ -69,6 +72,15 @@ where
             return three_shanten_continuation::run_capture_comparison(spec);
         }
     };
+
+    // 2向聴 Full pair の分け方の計測も同じく他の診断を走らせず、cold memo 条件で計る。
+    if args.two_shanten_full_parallel_comparison {
+        let output = two_shanten_full_parallel::format_scenario_comparison(&scenario);
+        return Ok(match header {
+            Some(header) => format!("{header}\n\n{output}"),
+            None => output,
+        });
+    }
 
     // 候補並列の計測も同じく他の診断を走らせず、cold memo 条件で計る。
     if args.iishanten_selection_parallel_comparison {

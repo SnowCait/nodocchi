@@ -39,6 +39,10 @@ pub const USAGE: &str = "usage:
   bot-scenario <SCENARIO_JSON> --iishanten-selection-parallel-comparison
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
                --iishanten-selection-parallel-comparison
+  bot-scenario --hand <TILES> [scenario options] --two-shanten-full-parallel-comparison
+  bot-scenario <SCENARIO_JSON> --two-shanten-full-parallel-comparison
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
+               --two-shanten-full-parallel-comparison
 
   --dora is a backward-compatible alias of --dora-indicator
   --extra-visible-tiles adds visible tiles that no other option expresses
@@ -95,6 +99,17 @@ pub const USAGE: &str = "usage:
   comparison reasons and the selected discard stay bit-exact; PA is the configuration
   production itself uses, S, P2 and P4 stay as the comparison baselines, and it cannot be
   combined with other diagnostic options
+  --two-shanten-full-parallel-comparison runs the production discard selection on a
+  two-shanten position twice, once with the dora-gated provisional top-2 evaluated in order
+  (S) and once with those same two candidates evaluated on up to min(2,
+  available_parallelism) workers (P2, the current production configuration), and reports the
+  elapsed time, the speedup, the search size and the memo hit and miss counts of each one;
+  only the execution of those two Full evaluations differs, so the Progress cohort, the
+  top-2 selection, the gate, the comparison reasons, the Full values and the selected
+  discard stay bit-exact; each mode runs twice, a timing run with no instrumentation the
+  elapsed time comes from and an observation run with the search-size counters and the phase
+  timer the values and stats come from, and it cannot be combined with other diagnostic
+  options
   --compare-three-shanten-continuation replays every captured request_action, runs the same
   A/B comparison on the requests where the three-shanten axis fires, and reports latency,
   search size and selection differences; it takes all following capture paths and cannot be
@@ -150,6 +165,9 @@ pub enum CliError {
     ConflictingThreeShantenContinuationComparison(String),
     #[error("--iishanten-continuation-depth-comparison cannot be combined with {0}")]
     ConflictingIishantenContinuationDepthComparison(String),
+    #[error("--two-shanten-full-parallel-comparison cannot be combined with {0}")]
+    ConflictingTwoShantenFullParallelComparison(String),
+
     #[error("--iishanten-selection-parallel-comparison cannot be combined with {0}")]
     ConflictingIishantenSelectionParallelComparison(String),
 
@@ -211,6 +229,9 @@ pub struct CliArgs {
     /// production と同じ B depth の中で、深い候補評価の分け方 (S / P2 / P4 / PA) を比べる
     /// 専用診断。PA が現行 production と同じ方式。
     pub iishanten_selection_parallel_comparison: bool,
+    /// 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価の分け方 (S / P2) を
+    /// 比べる専用診断。P2 が現行 production と同じ方式。
+    pub two_shanten_full_parallel_comparison: bool,
     pub source: ScenarioSource,
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
@@ -238,6 +259,7 @@ impl CliArgs {
         let mut iishanten_continuation_depth_comparison = false;
         let mut iishanten_selection_depth_comparison = false;
         let mut iishanten_selection_parallel_comparison = false;
+        let mut two_shanten_full_parallel_comparison = false;
         let mut comparison_captures: Vec<String> = Vec::new();
         let mut path: Option<String> = None;
         let mut spec = ScenarioSpec::default();
@@ -349,6 +371,9 @@ impl CliArgs {
                 "--iishanten-selection-parallel-comparison" => {
                     iishanten_selection_parallel_comparison = true;
                 }
+                "--two-shanten-full-parallel-comparison" => {
+                    two_shanten_full_parallel_comparison = true;
+                }
                 "--compare-three-shanten-continuation" => {
                     comparison_captures
                         .push(value_of(&mut args, "--compare-three-shanten-continuation")?);
@@ -412,6 +437,8 @@ impl CliArgs {
                 Some("--iishanten-selection-depth-comparison".to_string())
             } else if iishanten_selection_parallel_comparison {
                 Some("--iishanten-selection-parallel-comparison".to_string())
+            } else if two_shanten_full_parallel_comparison {
+                Some("--two-shanten-full-parallel-comparison".to_string())
             } else if !comparison_captures.is_empty() {
                 Some("--compare-three-shanten-continuation".to_string())
             } else if verbose {
@@ -436,6 +463,7 @@ impl CliArgs {
                 iishanten_continuation_depth_comparison: false,
                 iishanten_selection_depth_comparison: false,
                 iishanten_selection_parallel_comparison: false,
+                two_shanten_full_parallel_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -473,6 +501,8 @@ impl CliArgs {
                 Some("--iishanten-selection-depth-comparison".to_string())
             } else if iishanten_selection_parallel_comparison {
                 Some("--iishanten-selection-parallel-comparison".to_string())
+            } else if two_shanten_full_parallel_comparison {
+                Some("--two-shanten-full-parallel-comparison".to_string())
             } else if benchmark_json.is_some() {
                 Some("--benchmark-json".to_string())
             } else if verbose {
@@ -496,6 +526,7 @@ impl CliArgs {
                 iishanten_continuation_depth_comparison: false,
                 iishanten_selection_depth_comparison: false,
                 iishanten_selection_parallel_comparison: false,
+                two_shanten_full_parallel_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -565,6 +596,10 @@ impl CliArgs {
                     iishanten_selection_parallel_comparison,
                     "--iishanten-selection-parallel-comparison",
                 ),
+                (
+                    two_shanten_full_parallel_comparison,
+                    "--two-shanten-full-parallel-comparison",
+                ),
             ] {
                 if enabled {
                     return Err(CliError::ConflictingIishantenContinuationDepthComparison(
@@ -605,6 +640,10 @@ impl CliArgs {
                 (
                     iishanten_selection_parallel_comparison,
                     "--iishanten-selection-parallel-comparison",
+                ),
+                (
+                    two_shanten_full_parallel_comparison,
+                    "--two-shanten-full-parallel-comparison",
                 ),
             ] {
                 if enabled {
@@ -647,9 +686,58 @@ impl CliArgs {
                     iishanten_selection_depth_comparison,
                     "--iishanten-selection-depth-comparison",
                 ),
+                (
+                    two_shanten_full_parallel_comparison,
+                    "--two-shanten-full-parallel-comparison",
+                ),
             ] {
                 if enabled {
                     return Err(CliError::ConflictingIishantenSelectionParallelComparison(
+                        option.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // 2向聴 Full の分け方の計測も同じく他の診断を走らせない。先行する深い探索は向聴・
+        // 受け入れの memo を温めるため、後続の方式が本来より速く見えてしまう。
+        if two_shanten_full_parallel_comparison {
+            for (enabled, option) in [
+                (lookahead, "--lookahead"),
+                (verbose, "--verbose"),
+                (summary_only, "--summary-only"),
+                (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                (
+                    two_shanten_self_tsumo_cost.is_some(),
+                    "--two-shanten-self-tsumo-cost",
+                ),
+                (
+                    two_shanten_progress_self_tsumo_cost.is_some(),
+                    "--two-shanten-progress-self-tsumo-cost",
+                ),
+                (
+                    three_shanten_progress_self_tsumo,
+                    "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    three_shanten_continuation_comparison,
+                    "--three-shanten-continuation-comparison",
+                ),
+                (
+                    iishanten_continuation_depth_comparison,
+                    "--iishanten-continuation-depth-comparison",
+                ),
+                (
+                    iishanten_selection_depth_comparison,
+                    "--iishanten-selection-depth-comparison",
+                ),
+                (
+                    iishanten_selection_parallel_comparison,
+                    "--iishanten-selection-parallel-comparison",
+                ),
+            ] {
+                if enabled {
+                    return Err(CliError::ConflictingTwoShantenFullParallelComparison(
                         option.to_string(),
                     ));
                 }
@@ -773,6 +861,7 @@ impl CliArgs {
             iishanten_continuation_depth_comparison,
             iishanten_selection_depth_comparison,
             iishanten_selection_parallel_comparison,
+            two_shanten_full_parallel_comparison,
             verbose,
             // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
             lookahead: lookahead || two_shanten_self_tsumo,
@@ -976,6 +1065,49 @@ mod tests {
                         "--iishanten-selection-parallel-comparison",
                     ]),
                     Err(CliError::ConflictingIishantenSelectionParallelComparison(
+                        conflicting
+                    )) if conflicting == option
+                ),
+                "{option}",
+            );
+        }
+    }
+
+    #[test]
+    fn parses_the_two_shanten_full_parallel_comparison_option() {
+        let args = parse(&[
+            "--hand",
+            "34567899m5799p34s",
+            "--two-shanten-full-parallel-comparison",
+        ])
+        .unwrap();
+        assert!(args.two_shanten_full_parallel_comparison);
+        assert!(!args.iishanten_selection_parallel_comparison);
+        assert!(!args.iishanten_selection_depth_comparison);
+        assert!(!args.iishanten_continuation_depth_comparison);
+        assert!(!args.three_shanten_continuation_comparison);
+        assert!(!args.lookahead);
+    }
+
+    #[test]
+    fn the_two_shanten_full_parallel_comparison_cannot_be_combined_with_another_diagnostic() {
+        for option in [
+            "--lookahead",
+            "--verbose",
+            "--summary-only",
+            "--two-shanten-self-tsumo",
+            "--three-shanten-progress-self-tsumo",
+            "--three-shanten-continuation-comparison",
+        ] {
+            assert!(
+                matches!(
+                    parse(&[
+                        "--hand",
+                        "34567899m5799p34s",
+                        option,
+                        "--two-shanten-full-parallel-comparison",
+                    ]),
+                    Err(CliError::ConflictingTwoShantenFullParallelComparison(
                         conflicting
                     )) if conflicting == option
                 ),

@@ -12,6 +12,7 @@ use crate::damaten_value::tenpai_completed_hands_after_discard;
 use crate::decision_timing::ForwardMetricsPhaseTimer;
 use crate::decision_timing::{
     NormalDiscardPhase, NormalDiscardPhaseDurations, NormalDiscardPhaseTimer,
+    TwoShantenFullSelfTsumoObserver, TwoShantenSelfTsumoCandidateDuration,
 };
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
@@ -39,7 +40,7 @@ use bot_logic::{
     OwnDiscards, SameShantenContinuationDepth, SearchStateMemoStats, SelfTsumoFacts,
     TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics, ThreeShantenSearchStats,
     TileCounts, TileId, TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
-    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
+    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
     best_discard_selection_index_with_two_shanten_metrics, current_tenpai_continuation_targets,
@@ -274,6 +275,8 @@ struct ProductionSelectionMetrics {
     memo: SearchStateMemoStats,
     /// 深い候補評価に実際に使った thread 数。逐次評価へ落ちた場合は 1。
     forward_workers: usize,
+    /// 2向聴 Full 追加評価に実際に使った thread 数。逐次評価と gate 不発では 1。
+    two_shanten_full_workers: usize,
 }
 
 /// production の2向聴二段階 selection。Progress の cohort 全体と Full の pair を
@@ -291,6 +294,67 @@ struct TwoShantenProductionSelection {
 struct TwoShantenFullPair {
     indices: [usize; 2],
     metrics: [TwoShantenMetrics; 2],
+}
+
+/// production の2向聴 selection 1回と、Full 追加評価を分けたことで増えた探索基盤の計上。
+///
+/// 選択そのものは [`TwoShantenProductionSelection`] のままで、分け方では変わらない。
+struct TwoShantenProductionRun {
+    selection: TwoShantenProductionSelection,
+    /// 並行評価の worker が作り直した探索基盤の計上。逐次評価では呼び出し側の `inputs` が
+    /// すべて持つため既定値のまま。
+    search: ThreeShantenSearchStats,
+    memo: SearchStateMemoStats,
+    /// Full 追加評価に実際に使った thread 数。逐次評価と gate 不発では 1。
+    workers: usize,
+}
+
+impl TwoShantenProductionRun {
+    fn sequential(selection: TwoShantenProductionSelection) -> Self {
+        Self {
+            selection,
+            search: ThreeShantenSearchStats::default(),
+            memo: SearchStateMemoStats::default(),
+            workers: 1,
+        }
+    }
+}
+
+/// ドラ差 gate を通った pair の Full 値と、その評価で作り直した探索基盤の計上。
+///
+/// `metrics` は pair index 順で、どの thread がどちらを評価しても逐次評価と同じ値・同じ順序に
+/// なる。`search` / `memo` だけが、探索基盤を2候補間で共有できなくなった分を映す。
+struct TwoShantenFullPairMetrics {
+    metrics: [TwoShantenMetrics; TWO_SHANTEN_FULL_PAIR_LEN],
+    search: ThreeShantenSearchStats,
+    memo: SearchStateMemoStats,
+    workers: usize,
+}
+
+impl Default for TwoShantenFullPairMetrics {
+    fn default() -> Self {
+        Self {
+            metrics: [TwoShantenMetrics::default(); TWO_SHANTEN_FULL_PAIR_LEN],
+            search: ThreeShantenSearchStats::default(),
+            memo: SearchStateMemoStats::default(),
+            workers: 1,
+        }
+    }
+}
+
+// worker 1つ分の結果。候補 index を持ったまま返し、書き戻す側が pair index へ戻す。
+struct WorkerTwoShantenFullMetrics {
+    metrics: Vec<TwoShantenFullCandidateMetrics>,
+    search: ThreeShantenSearchStats,
+    memo: SearchStateMemoStats,
+}
+
+// 並行評価した候補1件。実測は worker が自分で計り、join 後に候補 index 順で観測器へ渡す。
+// 計測しない run では `Instant` を取らないため `elapsed` も持たない。
+struct TwoShantenFullCandidateMetrics {
+    evaluation_index: usize,
+    value: Option<u64>,
+    elapsed: Option<Duration>,
 }
 
 /// 現在聴牌候補1件について、selection のために一度だけ求めた既存 wait / offense evaluation。
@@ -497,6 +561,13 @@ pub(crate) struct IishantenContinuationSettings {
     /// 指定しても実際に分けるのは最善向聴数が1向聴の局面だけ
     /// ([`parallel_forward_workers`])。2向聴・3向聴の前方集計値は逐次評価のまま。
     pub(crate) forward_workers: Option<NonZeroUsize>,
+    /// 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価を、何 thread まで
+    /// 並行に評価するか。`None` では逐次評価。
+    ///
+    /// 対象は常にこの2候補だけで、Progress の cohort も gate も上位2候補の選び方も変わらない。
+    /// 候補1件の Full 値はその候補の打牌評価と探索設定と、渡す Progress 寄与だけで決まる純関数
+    /// なので、分けても値は変わらない。変わるのは探索基盤を2候補間で共有できる範囲だけ。
+    pub(crate) two_shanten_full_workers: Option<NonZeroUsize>,
 }
 
 impl IishantenContinuationSettings {
@@ -512,6 +583,7 @@ impl IishantenContinuationSettings {
         search_state_memo: true,
         search_stats: false,
         forward_workers: None,
+        two_shanten_full_workers: None,
     };
 
     /// production へ追加深度を接続する前の旧設定。診断の比較 baseline としてだけ残る。
@@ -520,6 +592,7 @@ impl IishantenContinuationSettings {
         search_state_memo: false,
         search_stats: false,
         forward_workers: None,
+        two_shanten_full_workers: None,
     };
 }
 
@@ -532,14 +605,25 @@ impl IishantenContinuationSettings {
 ///
 /// 候補単位の並列評価が実際に発火するのは最善向聴数が1向聴の局面だけで、その判断は候補集合を
 /// 見る [`parallel_forward_workers`] が行う。
+///
+/// 2向聴のドラ差 gate を通った Full 追加評価も同じ runtime の並列度から解決する。対象は常に
+/// provisional 上位2候補だけなので、必要な worker も 2 を超えない。
 pub(crate) fn production_iishanten_continuation_settings() -> IishantenContinuationSettings {
     IishantenContinuationSettings {
         // 並列度 1 の環境では分ける相手がいないので、逐次評価をそのまま通す。
         forward_workers: NonZeroUsize::new(available_parallelism())
             .filter(|workers| workers.get() > 1),
+        two_shanten_full_workers: NonZeroUsize::new(
+            available_parallelism().min(TWO_SHANTEN_FULL_PAIR_LEN),
+        )
+        .filter(|workers| workers.get() > 1),
         ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
     }
 }
+
+/// Full 追加評価の対象になる provisional 候補数。ドラ差 gate を通った上位2候補だけで、
+/// この数はこの接続では変えない。必要な worker 数の上限もこれと同じ。
+const TWO_SHANTEN_FULL_PAIR_LEN: usize = 2;
 
 /// この候補集合で深い候補評価を分ける worker 上限。分けない場合は `None`。
 ///
@@ -605,6 +689,10 @@ pub(crate) struct IishantenContinuationSelection {
     pub(crate) memo: SearchStateMemoStats,
     /// 深い候補評価に実際に使った thread 数。逐次評価では 1。
     pub(crate) forward_workers: usize,
+    /// 2向聴 Full 追加評価に実際に使った thread 数。逐次評価とドラ差 gate 不発では 1。
+    pub(crate) two_shanten_full_workers: usize,
+    /// production comparator が実際に評価した2向聴候補ごとの実測。計測しない run では空。
+    pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     /// 診断の構築を含まない、打牌選択1回の実測時間。
     pub(crate) elapsed: Duration,
     pub(crate) phases: NormalDiscardPhaseDurations,
@@ -634,6 +722,7 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
         &mut timing,
     );
     let elapsed = started.elapsed();
+    let two_shanten_self_tsumo_candidates = timing.take_two_shanten_self_tsumo_candidates();
     let phases = timing.finish();
 
     IishantenContinuationSelection {
@@ -650,6 +739,8 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
         search: run.metrics.search,
         memo: run.metrics.memo,
         forward_workers: run.metrics.forward_workers,
+        two_shanten_full_workers: run.metrics.two_shanten_full_workers,
+        two_shanten_self_tsumo_candidates,
         elapsed,
         phases,
         selection: run.selection,
@@ -684,13 +775,14 @@ pub(crate) fn select_discard_action_with_diagnostic(
     // 2手先診断を構築する場合は、その枝評価から選択用の前方集計値も求める。同じ
     // 「現在打牌 × 受け入れ牌 × 次打牌評価」を2回計算しない。
     let valuator = ProductionProspectiveValuator::new(context);
+    let continuation = production_iishanten_continuation_settings();
     let inputs = production_lookahead_inputs(
         context,
         &legal.tiles,
         &valuator,
         scope,
         &legal.evaluations,
-        production_iishanten_continuation_settings(),
+        continuation,
     );
     let lookahead = scope
         .builds_lookahead()
@@ -701,8 +793,16 @@ pub(crate) fn select_discard_action_with_diagnostic(
     };
     // production selection は診断 option に依らず常に Progress-first + ドラ差 gate。
     // opt-in の Full 全候補診断は選択と別の観測値として後から構築する。
-    let two_shanten_selection =
-        production_two_shanten_selection(&inputs, &legal.evaluations, &tenpai_wait, &mut ());
+    let two_shanten_selection = production_two_shanten_selection(
+        context,
+        &legal.tiles,
+        &inputs,
+        &legal.evaluations,
+        &tenpai_wait,
+        continuation,
+        &mut (),
+    )
+    .selection;
     let three_shanten_selection =
         production_three_shanten_progress_metrics(&inputs, &legal.evaluations, &tenpai_wait);
     let two_shanten_diagnostic = scope.builds_two_shanten_self_tsumo().then(|| {
@@ -1313,16 +1413,19 @@ fn production_selection_metrics_instrumented(
     let two_shanten = if has_competing_two_shanten_targets(evaluations, &forward) {
         timing.enter(NormalDiscardPhase::TwoShantenSelfTsumo);
         let mut two_shanten_timing = timing.two_shanten_self_tsumo_timer();
-        let selection = production_two_shanten_selection(
+        let run = production_two_shanten_selection(
+            context,
+            tiles,
             &inputs,
             evaluations,
             &forward,
+            continuation,
             &mut two_shanten_timing,
         );
         timing.record_two_shanten_self_tsumo_candidates(two_shanten_timing.finish());
-        selection
+        run
     } else {
-        TwoShantenProductionSelection::default()
+        TwoShantenProductionRun::sequential(TwoShantenProductionSelection::default())
     };
     // 対象局面だけ phase を開くため、3向聴対象外では専用 phase が 0 のままになる。
     let three_shanten = if has_competing_three_shanten_targets(evaluations, &forward) {
@@ -1340,11 +1443,18 @@ fn production_selection_metrics_instrumented(
     // どちらの経路でも同じ足し合わせで探索規模と memo 利用数が揃う。
     ProductionSelectionMetrics {
         forward,
-        two_shanten,
         three_shanten,
-        search: merged_search_stats(inputs.three_shanten_search_stats(), forward_search),
-        memo: merged_memo_stats(inputs.search_state_memo_stats(), forward_memo),
+        search: merged_search_stats(
+            merged_search_stats(inputs.three_shanten_search_stats(), forward_search),
+            two_shanten.search,
+        ),
+        memo: merged_memo_stats(
+            merged_memo_stats(inputs.search_state_memo_stats(), forward_memo),
+            two_shanten.memo,
+        ),
         forward_workers,
+        two_shanten_full_workers: two_shanten.workers,
+        two_shanten: two_shanten.selection,
     }
 }
 
@@ -1555,13 +1665,16 @@ fn merged_memo_stats(
 }
 
 fn production_two_shanten_selection(
+    context: &GameContext,
+    tiles: &[TileId],
     inputs: &LookaheadInputs<'_>,
     evaluations: &[DiscardEvaluation],
     forward_metrics: &[ForwardMetrics],
-    observer: &mut impl TwoShantenSelfTsumoObserver,
-) -> TwoShantenProductionSelection {
+    continuation: IishantenContinuationSettings,
+    observer: &mut impl TwoShantenFullSelfTsumoObserver,
+) -> TwoShantenProductionRun {
     if !has_competing_two_shanten_targets(evaluations, forward_metrics) {
-        return TwoShantenProductionSelection::default();
+        return TwoShantenProductionRun::sequential(TwoShantenProductionSelection::default());
     }
 
     let progress_diagnostic = diagnose_two_shanten_progress_self_tsumo_instrumented(
@@ -1575,33 +1688,30 @@ fn production_two_shanten_selection(
         &two_shanten_metrics_from_progress_diagnostic(evaluations, &progress_diagnostic),
     );
     let Some(indices) = progress_top_two(evaluations, forward_metrics, &progress) else {
-        return TwoShantenProductionSelection {
+        return TwoShantenProductionRun::sequential(TwoShantenProductionSelection {
             progress,
             #[cfg(test)]
             progress_diagnostic,
             ..TwoShantenProductionSelection::default()
-        };
+        });
     };
 
     let mut selected = indices[0];
     let progress_values = indices.map(|index| progress[index].expected_self_tsumo_value);
     let discarded_dora_counts = indices.map(|index| evaluations[index].discarded_dora_count);
-    let full_pair = if two_shanten_full_gate(progress_values, discarded_dora_counts) {
+    let (full_pair, full) = if two_shanten_full_gate(progress_values, discarded_dora_counts) {
         let [Some(first), Some(second)] = progress_values else {
             unreachable!("the full gate requires two known progress values")
         };
-        let mut metrics = [TwoShantenMetrics::default(); 2];
-        for (pair_index, (evaluation_index, progress_value)) in
-            indices.into_iter().zip([first, second]).enumerate()
-        {
-            observer.enter_candidate(evaluations[evaluation_index].discard);
-            metrics[pair_index].expected_self_tsumo_value =
-                two_shanten_expected_self_tsumo_value_for_candidate_from_progress(
-                    inputs,
-                    &evaluations[evaluation_index],
-                    progress_value,
-                );
-        }
+        let full = two_shanten_full_pair_metrics(
+            context,
+            tiles,
+            inputs,
+            evaluations,
+            continuation,
+            [(indices[0], first), (indices[1], second)],
+            observer,
+        );
 
         let pair_evaluations = indices.map(|index| evaluations[index].clone());
         let pair_forward_metrics =
@@ -1610,22 +1720,152 @@ fn production_two_shanten_selection(
             &pair_evaluations,
             &pair_forward_metrics,
             &[],
-            &metrics,
+            &full.metrics,
         ) {
             selected = indices[pair_selected];
         }
-        Some(TwoShantenFullPair { indices, metrics })
+        (
+            Some(TwoShantenFullPair {
+                indices,
+                metrics: full.metrics,
+            }),
+            full,
+        )
     } else {
-        None
+        (None, TwoShantenFullPairMetrics::default())
     };
 
-    TwoShantenProductionSelection {
-        progress,
-        full_pair,
-        selected: Some(selected),
-        #[cfg(test)]
-        progress_diagnostic,
+    TwoShantenProductionRun {
+        selection: TwoShantenProductionSelection {
+            progress,
+            full_pair,
+            selected: Some(selected),
+            #[cfg(test)]
+            progress_diagnostic,
+        },
+        search: full.search,
+        memo: full.memo,
+        workers: full.workers,
     }
+}
+
+/// ドラ差 gate を通った provisional 上位2候補の Full 追加評価。
+///
+/// 分けるのは「どちらの候補をどの thread が評価するか」だけで、対象の2候補も、候補1件の評価
+/// ([`two_shanten_expected_self_tsumo_value_for_candidate_from_progress`]) も、渡す Progress
+/// 寄与も production と同じ helper をそのまま通る。候補1件の Full 値はその候補の打牌評価と探索
+/// 設定と Progress 寄与だけで決まる純関数なので、評価の順も、どの thread が評価したかも値を
+/// 変えない。結果は pair index へ書き戻すため、thread の終了順にも依らない。
+fn two_shanten_full_pair_metrics(
+    context: &GameContext,
+    tiles: &[TileId],
+    sequential: &LookaheadInputs<'_>,
+    evaluations: &[DiscardEvaluation],
+    continuation: IishantenContinuationSettings,
+    pair: [(usize, u64); TWO_SHANTEN_FULL_PAIR_LEN],
+    observer: &mut impl TwoShantenFullSelfTsumoObserver,
+) -> TwoShantenFullPairMetrics {
+    let Some(workers) = continuation
+        .two_shanten_full_workers
+        .filter(|workers| workers.get() > 1)
+    else {
+        let mut metrics = [TwoShantenMetrics::default(); TWO_SHANTEN_FULL_PAIR_LEN];
+        for (pair_index, (evaluation_index, progress_value)) in pair.into_iter().enumerate() {
+            observer.enter_candidate(evaluations[evaluation_index].discard);
+            metrics[pair_index].expected_self_tsumo_value =
+                two_shanten_expected_self_tsumo_value_for_candidate_from_progress(
+                    sequential,
+                    &evaluations[evaluation_index],
+                    progress_value,
+                );
+        }
+        return TwoShantenFullPairMetrics {
+            metrics,
+            ..TwoShantenFullPairMetrics::default()
+        };
+    };
+
+    // 対象は常にこの2候補だけなので、thread も2を超えない。
+    let worker_count = workers.get().min(pair.len());
+    // 計測しない run は worker 側でも `Instant` を取らない。
+    let measures = observer.measures_candidates();
+    // Progress の最後の候補の区切りは、worker を起こす前にここで閉じる。
+    observer.close_candidate();
+    let next = AtomicUsize::new(0);
+    let evaluated: Vec<WorkerTwoShantenFullMetrics> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..worker_count)
+            .map(|_| {
+                let next = &next;
+                let pair = pair.as_slice();
+                scope.spawn(move || {
+                    let valuator = ProductionProspectiveValuator::new(context);
+                    let inputs = production_lookahead_inputs(
+                        context,
+                        tiles,
+                        &valuator,
+                        LookaheadDiagnosticScope::None,
+                        evaluations,
+                        continuation,
+                    );
+                    let mut metrics = Vec::new();
+                    while let Some(&(evaluation_index, progress_value)) =
+                        pair.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        let started = measures.then(Instant::now);
+                        let value =
+                            two_shanten_expected_self_tsumo_value_for_candidate_from_progress(
+                                &inputs,
+                                &evaluations[evaluation_index],
+                                progress_value,
+                            );
+                        metrics.push(TwoShantenFullCandidateMetrics {
+                            evaluation_index,
+                            value,
+                            elapsed: started.map(|started| started.elapsed()),
+                        });
+                    }
+                    WorkerTwoShantenFullMetrics {
+                        metrics,
+                        search: inputs.three_shanten_search_stats(),
+                        memo: inputs.search_state_memo_stats(),
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .expect("2向聴 Full 評価 thread は panic しない")
+            })
+            .collect()
+    });
+
+    let mut collected = TwoShantenFullPairMetrics {
+        workers: worker_count,
+        ..TwoShantenFullPairMetrics::default()
+    };
+    let mut elapsed = [None; TWO_SHANTEN_FULL_PAIR_LEN];
+    for worker in evaluated {
+        for candidate in worker.metrics {
+            let pair_index = pair
+                .iter()
+                .position(|&(evaluation_index, _)| evaluation_index == candidate.evaluation_index)
+                .expect("worker は pair の候補だけを評価する");
+            collected.metrics[pair_index].expected_self_tsumo_value = candidate.value;
+            elapsed[pair_index] = candidate.elapsed;
+        }
+        collected.search = merged_search_stats(collected.search, worker.search);
+        collected.memo = merged_memo_stats(collected.memo, worker.memo);
+    }
+    // 実測は thread の終了順ではなく、逐次評価と同じ候補 index 順で反映する。
+    for (pair_index, elapsed) in elapsed.into_iter().enumerate() {
+        if let Some(elapsed) = elapsed {
+            observer.record_candidate(evaluations[pair[pair_index].0].discard, elapsed);
+        }
+    }
+    collected
 }
 
 /// production の3向聴軸が使う1向聴 continuation。3向聴起点では 3→2 / 2→1 と同じく
