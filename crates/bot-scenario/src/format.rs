@@ -4720,9 +4720,11 @@ mod tests {
 
     #[test]
     fn summary_only_reports_the_production_iishanten_call_comparison() {
+        // 門前のまま進めた方が手変わりの経路を多く持つため、Call が上回るのは残り自摸機会が
+        // 少ない局面。
         let json = IISHANTEN_PON_REACTION_SCENARIO.replace(
             "\"allow_none\": true",
-            "\"remaining_tiles\": 20, \"allow_none\": true",
+            "\"remaining_tiles\": 12, \"allow_none\": true",
         );
         let (scenario, diagnostic, output) = rendered(&json, false);
         let mut agent = ShantenAgent;

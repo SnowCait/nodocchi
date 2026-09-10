@@ -31,8 +31,8 @@ cargo run -p bot-scenario -- \
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
 | `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ、B が production) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
 | `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = production / B: 2回まで) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
-| `--iishanten-selection-depth-comparison` | 任意 | 同じ深度 A/B を production comparator を通した最終打牌選択として比較。A は production depth、B は SameShanten 2回まで + exact same-state memo。production policy は変更しない。他の診断 option と併用不可 |
-| `--iishanten-selection-parallel-comparison` | 任意 | 同じ B depth を逐次 / 候補単位並列で比較 (S / P2 / P4 / `available_parallelism`)。候補の絞り込み・軸解決・comparator・選択打牌は既存 production selection をそのまま使う。並列方式も production には接続しない。他の診断 option と併用不可 |
+| `--iishanten-selection-depth-comparison` | 任意 | 同じ深度 A/B を production comparator を通した最終打牌選択として比較。A は legacy shallow depth (旧 production)、B は現行 production depth (SameShanten 2回まで + exact same-state memo)。他の診断 option と併用不可 |
+| `--iishanten-selection-parallel-comparison` | 任意 | 同じ production B depth を逐次 / 候補単位並列で比較 (S / P2 / P4 / PA = `available_parallelism`)。候補の絞り込み・軸解決・comparator・選択打牌は既存 production selection をそのまま使う。PA が現行 production と同じ方式。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -140,8 +140,8 @@ cargo run --release -p bot-scenario -- \
 `--iishanten-continuation-depth-comparison` は、1向聴 ExpectedSelfTsumoValue が手変わりのツモを何回まで許すかだけを変えた2方式を、同じ局面で比較する診断 option です。
 
 ```text
-A same-shanten once    Progress / SameShanten → Progress (production)
-B same-shanten twice   A に SameShanten → SameShanten → Progress を追加
+A legacy shallow depth   Progress / SameShanten → Progress (production 接続前の旧設定)
+B production depth       A に SameShanten → SameShanten → Progress を追加 (現行 production)
 ```
 
 違いは1向聴 state で `DrawTransition::SameShanten` を2回まで許すかどうかだけです。受け入れの列挙、残枚数、物理牌 variant、ツモ後の最良打牌の比較、テンパイ到達後の terminal scoring、Reach / Damaten、確率、残り自摸機会、unknown 伝播はどちらも共通の primitive を通ります。段数は2回で閉じていて、任意深度の再帰へは一般化しません。手変わりの枝の次打牌はその方式が集計する continuation で選ぶため、B では次打牌そのものが A と変わり得ます。
@@ -153,7 +153,7 @@ cargo run --release -p bot-scenario -- \
   --iishanten-continuation-depth-comparison
 ```
 
-出力は方式ごとの候補別の値・順位・時間、`Value A -> B` の候補別増分、`Top ExpectedSelfTsumoValue candidate`、`First-draw contribution A -> B` の最初のツモ1牌種単位の内訳、`Search size A -> B` の枝数・state 数・terminal scoring 数です。A の値は production の打牌選択が実際に使う ExpectedSelfTsumoValue そのもので、B は経路の段数が違うため同じ量として比較しないでください。**production の打牌選択は A のままで、この option は選択に接続しません。**
+出力は方式ごとの候補別の値・順位・時間、`Value A -> B` の候補別増分、`Top ExpectedSelfTsumoValue candidate`、`First-draw contribution A -> B` の最初のツモ1牌種単位の内訳、`Search size A -> B` の枝数・state 数・terminal scoring 数です。B の深度が現行 production の打牌選択が使う深度で、A は production 接続前の旧設定を比較 baseline として残したものです。経路の段数が違うため、A と B の値を同じ量として比較しないでください。この option は全1向聴候補を単独評価するだけで、production の cohort 絞り込みを通しません。
 
 `Top ExpectedSelfTsumoValue candidate` と `same top ExpectedSelfTsumoValue candidate` は、**この軸単独の ranking の1位**であって production が選ぶ打牌ではありません。production は `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存 comparator を通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その cohort に `unknown` が1件でもあれば軸ごと落とします ([打牌選択](ai/discard-selection.md#1向聴-expectedselftsumovalue) 参照)。この診断はその絞り込みも軸解決も持たず、全1向聴候補を値の高い順に並べるだけです。
 
@@ -164,8 +164,8 @@ cargo run --release -p bot-scenario -- \
 `--iishanten-selection-depth-comparison` は、同じ深度 A/B を **production の打牌 comparator を通した最終打牌選択として** 比較する診断 option です。
 
 ```text
-A production depth      Progress / SameShanten → Progress (production)
-B same-shanten twice    A に SameShanten → SameShanten → Progress を追加し、exact same-state memo を有効化
+A legacy shallow depth   Progress / SameShanten → Progress (production 接続前の旧設定)
+B production depth       A に SameShanten → SameShanten → Progress を追加し、exact same-state memo を有効化 (現行 production)
 ```
 
 `--iishanten-continuation-depth-comparison` が全1向聴候補の値を単独 ranking として並べるのに対し、この option は候補の絞り込み・unknown の軸解決・比較順・安定順序・最終選択まで既存 production selection の経路をそのまま通します。深く評価されるのは pre-acceptance 軸 (`Shanten → IsolatedTile → IsolatedHonor`) まで同順位の cohort だけなので、深度を上げたときの実際の selection cost はこちらでしか分かりません。
@@ -179,17 +179,19 @@ cargo run --release -p bot-scenario -- \
 
 出力は方式ごとの選択打牌・cohort・候補別の値と比較理由・時間・探索規模・memo 利用数と、`Selection A -> B` / `ExpectedSelfTsumoValue A -> B` / `Cost A -> B` の差分です。方式ごとに run を2本取り、`elapsed` は探索規模の計上も phase timer も持たない計測 run から、cohort・値・stats は観測 run から取ります。どちらの run も新しい thread で行うため、先に走った run が後の run の thread-local memo を暖めません。
 
-B は追加深度と exact same-state memo を一緒に有効にするため、A → B の elapsed 差は深度だけの差ではありません。同じ memo 条件へ揃えた深度だけの比較は `--iishanten-continuation-depth-comparison` が持ちます。**production の打牌選択は A のままで、この option は B を選択に接続しません。** 他の診断 option とは併用できません。
+B は追加深度と exact same-state memo を一緒に有効にするため、A → B の elapsed 差は深度だけの差ではありません。同じ memo 条件へ揃えた深度だけの比較は `--iishanten-continuation-depth-comparison` が持ちます。
+
+**production の打牌選択は B です。A は接続前の旧設定を比較 baseline として残しているだけです。** この option はどちらの深度も深い候補評価を逐次で行うので、`elapsed` は production の並列評価の latency ではありません。production が使う候補単位の並列評価は、同じ B depth の中で `--iishanten-selection-parallel-comparison` が比べます。並列評価は値を変えないため、ここに出る B の選択も候補別の値も production のものと一致します。他の診断 option とは併用できません。
 
 ### 1向聴 selection の候補単位並列比較
 
-`--iishanten-selection-parallel-comparison` は、上記 B depth の中で **深く評価する候補をどう分けるか** だけを変えた方式を比較する診断 option です。深度も comparator も値も枝も scoring semantics も変わりません。
+`--iishanten-selection-parallel-comparison` は、上記 production B depth の中で **深く評価する候補をどう分けるか** だけを変えた方式を比較する診断 option です。深度も comparator も値も枝も scoring semantics も変わりません。
 
 ```text
-S   逐次 (現行 B)
+S   production と同じ B depth を逐次評価
 P2  候補単位の並列、最大2 worker
 P4  候補単位の並列、最大4 worker
-PA  候補単位の並列、available_parallelism を上限
+PA  候補単位の並列、available_parallelism を上限 (現行 production と同じ方式)
 ```
 
 並列にするのは、production の候補絞り込みが deep 評価対象として残した候補1件分の前方評価だけです。候補1件の前方集計値はその候補の打牌評価と探索設定だけで決まる純関数で、探索内の memo は同じ入力に同じ値を返す cache でしかありません。結果は候補 index へ書き戻すため thread の終了順にも worker 数にも依らず、cohort・候補ごとの `ExpectedSelfTsumoValue`・unknown 軸の解決・比較理由・選択打牌は全方式で bit-exact に一致します (`bit-exact with the sequential mode`)。worker 数は深く評価する候補数を超えません。
@@ -201,7 +203,9 @@ cargo run --release -p bot-scenario -- \
   --iishanten-selection-parallel-comparison
 ```
 
-worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた base 評価 memo・同一 state memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増え得るので、出力には方式ごとの `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。これは wall-clock を比べるための診断で、**production の打牌選択は従来どおり深度 A の逐次評価のまま** です。他の診断 option とは併用できません。
+worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた base 評価 memo・同一 state memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増え得るので、出力には方式ごとの `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。
+
+**production の打牌選択は PA と同じ方式です。** 実際に使う worker 数は `min(available_parallelism, 深く評価する候補数)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。候補を分けるのは最善向聴数が1向聴の局面だけで、2向聴・3向聴の前方集計値は従来どおり逐次評価のままです。S / P2 / P4 は PA を比べるための baseline として残ります。他の診断 option とは併用できません。
 
 ### --allow-ryukyoku
 

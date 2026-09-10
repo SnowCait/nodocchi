@@ -1935,7 +1935,13 @@ mod tests {
                         continue;
                     };
 
-                    for downstream_draw in downstream.draws.iter() {
+                    // production の追加深度では先の段にも手変わりの枝が並ぶ。ここで組み立てる
+                    // のはテンパイした枝だけなので、向聴数を下げるツモに限る。
+                    let downstream_draws = downstream
+                        .draws
+                        .iter()
+                        .filter(|draw| draw.transition == DrawTransition::Progress);
+                    for downstream_draw in downstream_draws {
                         for downstream_variant in &downstream_draw.variants {
                             let Some(third) = downstream_variant.next_discard.as_ref() else {
                                 continue;

@@ -640,8 +640,8 @@ pub struct LookaheadInputs<'a> {
     // 1向聴 state の continuation が追う枝。既定は Progress + SameShanten で、3向聴起点の
     // production 評価だけが ProgressOnly を選ぶ。
     iishanten_continuation: IishantenContinuationScope,
-    // 1向聴 state の continuation が手変わりを何回まで許すか。既定は production の1回で、
-    // 診断専用の A/B だけがもう1段を選ぶ。
+    // 1向聴 state の continuation が手変わりを何回まで許すか。既定は1回で、呼び出し側が
+    // もう1段を選べる。
     same_shanten_continuation_depth: SameShantenContinuationDepth,
     // 探索規模の計上先。要求された経路だけが持ち、値も枝も変わらない。
     search_stats: Option<Rc<RefCell<ThreeShantenSearchStats>>>,
@@ -706,19 +706,19 @@ impl IishantenContinuationScope {
 
 /// 1向聴 state の self-tsumo continuation が、向聴数を維持するツモを何回まで許すか。
 ///
-/// production は [`Self::Once`] で、`Progress` と `SameShanten -> Progress` までを追う。
-/// [`Self::Twice`] は `SameShanten -> SameShanten -> Progress` をもう1段だけ許す診断専用の
-/// 追加深度で、任意深度の再帰へは一般化しない。
+/// [`Self::Once`] は `Progress` と `SameShanten -> Progress` までを追う。[`Self::Twice`] は
+/// `SameShanten -> SameShanten -> Progress` をもう1段だけ許す。段数は2回で閉じていて、任意深度の
+/// 再帰へは一般化しない。どちらを使うかは呼び出し側 (bot-core の打牌選択設定) が決める。
 ///
 /// 変わるのは追う枝の範囲だけで、ツモ牌の列挙・残枚数・物理牌 variant・ツモ後の最良打牌の
 /// 比較・terminal scoring・Reach / Damaten・確率・残り自摸機会・unknown 伝播はどちらも同じ
 /// primitive を通る。段数が違えば経路確率も違うため、2つの値を同じ量として混ぜない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SameShantenContinuationDepth {
-    /// production。手変わりは1回まで。
+    /// 手変わりは1回まで。
     #[default]
     Once,
-    /// 診断専用。手変わりを2回まで許す。
+    /// 手変わりを2回まで許す。
     Twice,
 }
 
@@ -829,8 +829,8 @@ impl<'a> LookaheadInputs<'a> {
 
     /// 1向聴 state の continuation が手変わりを何回まで許すかを指定する。
     ///
-    /// 既定は production と同じ [`SameShantenContinuationDepth::Once`]。追加深度は診断専用の
-    /// A/B のためだけにあり、production selection はこの指定を使わない。
+    /// 既定は [`SameShantenContinuationDepth::Once`]。どちらの深度を使うかは呼び出し側が
+    /// 決める。
     pub fn with_same_shanten_continuation_depth(
         mut self,
         depth: SameShantenContinuationDepth,
@@ -1187,6 +1187,9 @@ pub fn forward_metrics_for_candidate(
 /// 通常の lookahead の「現在打牌後」と同じ Progress / SameShanten 探索、打牌比較、terminal
 /// scoring、確率集計を使う。架空の現在打牌は作らず、`acceptance` はこの state に対して既存
 /// acceptance calculator が返した値をそのまま渡す。
+///
+/// 手変わりの深度も「現在打牌後」と同じく `inputs` の指定に従う。この値は打牌後の1向聴
+/// continuation と同じ尺度で比べるためのものなので、片側だけ違う深度で評価しない。
 pub fn awaiting_draw_expected_self_tsumo_value(
     inputs: &LookaheadInputs,
     acceptance: &EffectiveAcceptance,
@@ -1195,7 +1198,12 @@ pub fn awaiting_draw_expected_self_tsumo_value(
         return None;
     }
     let facts = inputs.self_tsumo_facts()?;
-    let draws = search_waiting_state(inputs, acceptance, IISHANTEN_CONTINUATION, Some(facts));
+    let draws = search_waiting_state(
+        inputs,
+        acceptance,
+        inputs.same_shanten_continuation_depth.scopes(),
+        Some(facts),
+    );
     expected_self_tsumo_value_from_draws(&draws, facts)
 }
 
@@ -2072,9 +2080,9 @@ impl DrawScope {
 enum DownstreamScope {
     /// 先の段を進めない。
     None,
-    /// production の1向聴 continuation。向聴数を下げる枝だけをテンパイまで進める。
+    /// 向聴数を下げる枝だけをテンパイまで進める。
     Progress,
-    /// 診断専用の追加深度。向聴数を維持する枝をもう1回だけ許し、その先は Progress だけ。
+    /// 追加深度。向聴数を維持する枝をもう1回だけ許し、その先は Progress だけ。
     ProgressAndSameShanten,
 }
 
@@ -2110,7 +2118,7 @@ const IISHANTEN_CONTINUATION: &[DrawScope] = &[
     },
 ];
 
-// 診断専用の追加深度で1向聴 state が進める枝。手変わりをもう1回だけ許した
+// 追加深度で1向聴 state が進める枝。手変わりをもう1回だけ許した
 // `SameShanten -> SameShanten -> Progress` まで含む。
 const IISHANTEN_CONTINUATION_TWICE: &[DrawScope] = &[
     DrawScope::Progress,
@@ -2717,9 +2725,9 @@ fn terminal_self_tsumo_value(
 
 // 手変わりの枝1つ分の期待支払い。2手目の打牌後の1向聴からもう1段進めたテンパイを集計する。
 //
-// 2回続けて向聴数を維持する枝は production の探索範囲外で、その場合は寄与 0 になる (未確定では
-// ない)。診断専用の追加深度 ([`SameShantenContinuationDepth::Twice`]) を指定した探索だけが、その
-// 枝をもう1段だけ進めて集計する。先の枝を探索していない場合は「この経路を評価していない」ので、
+// 2回続けて向聴数を維持する枝は [`SameShantenContinuationDepth::Once`] の探索範囲外で、その場合は
+// 寄与 0 になる (未確定ではない)。追加深度 ([`SameShantenContinuationDepth::Twice`]) を指定した
+// 探索だけが、その枝をもう1段だけ進めて集計する。先の枝を探索していない場合は「この経路を評価していない」ので、
 // 寄与 0 ではなく確定しない値として扱う。
 fn same_shanten_self_tsumo_value(
     variant: &DrawVariantLookaheadDiagnostic,
@@ -5109,8 +5117,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_continuation_depth_is_the_production_one() {
-        // 既定は production と同じ「手変わり1回まで」で、明示指定と一致する。
+    fn the_default_continuation_depth_is_the_shallow_one() {
+        // 既定は「手変わり1回まで」で、明示指定と一致する。
         let case = &*SAME_SHANTEN_CASE;
         let default = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR);
         let once = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR)
@@ -5126,8 +5134,8 @@ mod tests {
 
     #[test]
     fn the_extra_depth_adds_the_second_hand_change_paths() {
-        // 追加深度が足すのは「手変わり2回 → 向聴数を下げるツモ」の経路で、production の深度では
-        // その経路の寄与が 0 になる。Progress 枝はどちらの深度でも同じ。
+        // 追加深度が足すのは「手変わり2回 → 向聴数を下げるツモ」の経路で、Once ではその経路の
+        // 寄与が 0 になる。Progress 枝はどちらの深度でも同じ。
         let case = &*SAME_SHANTEN_CASE;
         let once = self_tsumo_inputs(&case.situation, &FIXED_TSUMO_VALUATOR)
             .with_same_shanten_continuation_depth(SameShantenContinuationDepth::Once);

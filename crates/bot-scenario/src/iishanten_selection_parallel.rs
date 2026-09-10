@@ -1,7 +1,9 @@
-//! 1向聴の追加深度 B を、深く評価する候補ごとに並行評価した場合の wall-clock を表示する。
+//! production の1向聴 depth B を、深く評価する候補ごとに並行評価した場合の wall-clock を表示
+//! する。
 //!
 //! 比べるのは同じ深度 B の中での候補評価の分け方だけで、深度も comparator も値も枝も scoring
-//! semantics も変えない。S が現行の逐次評価、P<N> が候補単位の並行評価。
+//! semantics も変えない。S が同じ B depth の逐次評価、P<N> が候補単位の並行評価。PA が
+//! `available_parallelism` を上限にする現在の production と同じ方式。
 //!
 //! 表示するのは ExpectedSelfTsumoValue 単独の ranking ではなく、既存 comparator を通した最終
 //! 打牌。深く評価される候補も、unknown の軸解決も、比較理由も production selection が使った
@@ -15,7 +17,8 @@
 //! thread-local の向聴 / 受け入れ memo) を worker ごとに作り直す。速くなったかだけでなく、その
 //! 共有を失って総仕事量がどれだけ増えたかも併せて表示する。
 //!
-//! production の打牌選択は A のままで、この表示は B も並列評価も production へ接続しない。
+//! production の打牌選択は B depth を PA と同じ方式で通す。この表示はその production 経路を
+//! そのまま計測するだけで、並列評価を別実装しない。
 
 use std::time::Duration;
 
@@ -37,7 +40,8 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
 
     let mut lines = vec![
         "Iishanten selection candidate parallelism comparison".to_string(),
-        "  every mode runs the same B depth: same-shanten twice plus the exact same-state memo"
+        "  every mode runs the same production B depth: same-shanten twice plus the exact \
+         same-state memo"
             .to_string(),
         "  every mode runs the production discard selection: the same candidate gating, unknown \
          axis resolution, comparison order, stable order and final selection"
@@ -61,8 +65,9 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
          same-state and thread-local memos are rebuilt per worker: the wall clock drops while the \
          total work grows"
             .to_string(),
-        "  production discard selection uses A and stays sequential; both B and the parallel \
-         evaluation are diagnostics-only experiments"
+        "  production discard selection runs this same B depth with the PA mode: up to \
+         available_parallelism workers, capped by the deep evaluated candidates; S, P2 and P4 \
+         stay as the comparison baselines"
             .to_string(),
         String::new(),
     ];

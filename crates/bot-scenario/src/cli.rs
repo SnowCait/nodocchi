@@ -69,28 +69,32 @@ pub const USAGE: &str = "usage:
   and the discard each one selects; production discard selection is unchanged and cannot be
   combined with other diagnostic options
   --iishanten-continuation-depth-comparison evaluates every one-shanten candidate twice,
-  once with the production continuation (Progress and SameShanten -> Progress) and once
-  with one extra hand-change step (SameShanten -> SameShanten -> Progress), and reports
-  both sets of values, the ranking, the search size and the elapsed time; production
-  discard selection is unchanged and it cannot be combined with other diagnostic options
+  once with the legacy shallow continuation (Progress and SameShanten -> Progress) and once
+  with the production depth that allows one extra hand-change step (SameShanten ->
+  SameShanten -> Progress), and reports both sets of values, the ranking, the search size
+  and the elapsed time; it ranks the axis alone instead of running the production
+  comparator and it cannot be combined with other diagnostic options
   --iishanten-selection-depth-comparison runs the production discard selection with the
-  production continuation depth and with one extra hand-change step plus the exact
-  same-state memo, and reports the discard each one selects, the candidates the existing
-  gating evaluates deeply, the comparison reasons, the search size and the elapsed time;
-  each depth runs twice, a timing run with no instrumentation the elapsed time comes from
-  and an observation run with the search-size counters and the phase timer the cohort,
-  values and stats come from; unlike --iishanten-continuation-depth-comparison it measures
-  the whole comparator instead of ranking the axis alone, so the A -> B elapsed difference
-  is not the depth alone; production discard selection is unchanged and it cannot be
+  legacy shallow depth (A) and with the production depth (B, one extra hand-change step
+  plus the exact same-state memo), and reports the discard each one selects, the candidates
+  the existing gating evaluates deeply, the comparison reasons, the search size and the
+  elapsed time; each depth runs twice, a timing run with no instrumentation the elapsed
+  time comes from and an observation run with the search-size counters and the phase timer
+  the cohort, values and stats come from; unlike
+  --iishanten-continuation-depth-comparison it measures the whole comparator instead of
+  ranking the axis alone, so the A -> B elapsed difference is not the depth alone;
+  production selects with B, A stays only as the comparison baseline, both depths here
+  evaluate the deep candidates sequentially, and it cannot be combined with other
+  diagnostic options
+  --iishanten-selection-parallel-comparison runs that same production depth four times,
+  once sequentially (S) and once for each candidate-level parallel mode (P2 up to 2
+  workers, P4 up to 4 workers and PA up to available_parallelism), and reports the elapsed
+  time, the speedup, the search size and the memo hit and miss counts of each one; the
+  parallel modes split only the deeply evaluated candidates across threads and write every
+  result back to its candidate index, so the cohort, the values, the axis resolution, the
+  comparison reasons and the selected discard stay bit-exact; PA is the configuration
+  production itself uses, S, P2 and P4 stay as the comparison baselines, and it cannot be
   combined with other diagnostic options
-  --iishanten-selection-parallel-comparison runs that same extra depth four times, once
-  sequentially and once for each candidate-level parallel mode (up to 2 workers, up to 4
-  workers and up to available_parallelism), and reports the elapsed time, the speedup, the
-  search size and the memo hit and miss counts of each one; the parallel modes split only
-  the deeply evaluated candidates across threads and write every result back to its
-  candidate index, so the cohort, the values, the axis resolution, the comparison reasons
-  and the selected discard stay bit-exact; production discard selection is unchanged and it
-  cannot be combined with other diagnostic options
   --compare-three-shanten-continuation replays every captured request_action, runs the same
   A/B comparison on the requests where the three-shanten axis fires, and reports latency,
   search size and selection differences; it takes all following capture paths and cannot be
@@ -199,11 +203,13 @@ pub struct CliArgs {
     /// 1向聴 continuation scope の A/B 比較を表示する専用診断。production 選択は変えない。
     pub three_shanten_continuation_comparison: bool,
     /// 1向聴 ExpectedSelfTsumoValue の手変わり深度 A/B 比較を表示する専用診断。
-    /// production 選択は変えない。
+    /// A は旧設定、B は現行 production depth。
     pub iishanten_continuation_depth_comparison: bool,
     /// 1向聴の手変わり深度 A/B を production comparator を通した最終打牌選択として表示する
-    /// 専用診断。production 選択は変えない。
+    /// 専用診断。A は旧設定、B は現行 production depth。
     pub iishanten_selection_depth_comparison: bool,
+    /// production と同じ B depth の中で、深い候補評価の分け方 (S / P2 / P4 / PA) を比べる
+    /// 専用診断。PA が現行 production と同じ方式。
     pub iishanten_selection_parallel_comparison: bool,
     pub source: ScenarioSource,
     pub verbose: bool,

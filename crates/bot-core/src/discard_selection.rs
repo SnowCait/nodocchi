@@ -241,7 +241,7 @@ struct ProductionSelectionMetrics {
     search: ThreeShantenSearchStats,
     /// 探索内の同一 state memo の利用数。memo を持たない経路では既定値のまま。
     memo: SearchStateMemoStats,
-    /// 深い候補評価に実際に使った thread 数。production の逐次評価では 1。
+    /// 深い候補評価に実際に使った thread 数。逐次評価へ落ちた場合は 1。
     forward_workers: usize,
 }
 
@@ -352,7 +352,7 @@ pub(crate) fn select_discard_action_with_continuation_scope_instrumented(
         context,
         legal_actions,
         scope,
-        IishantenContinuationSettings::PRODUCTION,
+        production_iishanten_continuation_settings(),
         timing,
     );
 
@@ -380,7 +380,7 @@ struct ProductionSelectionRun {
 
 // 通常打牌選択1回。候補生成・前方集計値・向聴数別の軸・現在聴牌の補助評価・最終比較まで、
 // production と同じ helper を同じ順で1回ずつ通る。`continuation` は診断専用の差し替えで、
-// production 経路は必ず `IishantenContinuationSettings::PRODUCTION` を渡す。
+// production 経路は必ず `production_iishanten_continuation_settings()` を渡す。
 fn run_production_selection(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -441,36 +441,122 @@ fn run_production_selection(
     }
 }
 
-/// 1向聴 continuation の探索設定。production は [`Self::PRODUCTION`] だけを使う。
+/// 1向聴 continuation の探索設定。production は
+/// [`production_iishanten_continuation_settings`] が返すものだけを使う。
 ///
-/// 差し替えられるのは手変わりの深度と、それに必要な探索内 memo / 探索規模の計上だけで、候補の
-/// 絞り込みも軸の解決も比較順も最終選択も production と同じ経路をそのまま通る。
+/// 差し替えられるのは手変わりの深度と、それに必要な探索内 memo / 探索規模の計上と、深い候補
+/// 評価の分け方だけで、候補の絞り込みも軸の解決も比較順も最終選択も production と同じ経路を
+/// そのまま通る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IishantenContinuationSettings {
     /// 1向聴 state の continuation が手変わりを何回まで許すか。
     pub(crate) depth: SameShantenContinuationDepth,
-    /// 探索内の同一 state memo を局面に依らず有効にするか。`false` では production の判断
-    /// ([`production_lookahead_inputs`]) のまま。
+    /// 1向聴の局面で探索内の同一 state memo を有効にするか。`false` では既存の判断
+    /// ([`production_lookahead_inputs`]) のまま。2向聴・3向聴の memo 条件はこの指定に依らない。
     pub(crate) search_state_memo: bool,
     /// 探索規模を計上するか。値も枝も選択も変わらない。
     pub(crate) search_stats: bool,
-    /// 深く評価する候補を何 thread まで並行に評価するか。`None` では production と同じ逐次評価。
+    /// 深く評価する候補を何 thread まで並行に評価するか。`None` では逐次評価。
     ///
     /// 候補ごとの前方評価は互いに独立した純関数なので、分けても値も枝も cohort も選択も
     /// 変わらない。変わるのは探索基盤 (base 評価 memo・同一 state memo・thread-local の
     /// 向聴 / 受け入れ memo) を候補間で共有できる範囲だけで、共有を失った分は総仕事量として
-    /// 増える。診断専用の指定で、production は使わない。
+    /// 増える。
+    ///
+    /// 指定しても実際に分けるのは最善向聴数が1向聴の局面だけ
+    /// ([`parallel_forward_workers`])。2向聴・3向聴の前方集計値は逐次評価のまま。
     pub(crate) forward_workers: Option<NonZeroUsize>,
 }
 
 impl IishantenContinuationSettings {
-    /// production の打牌選択が使う設定。
-    pub(crate) const PRODUCTION: Self = Self {
+    /// production の depth / memo を逐次評価で使う設定。
+    ///
+    /// production の worker 上限は runtime の [`available_parallelism`] に依るため const へは
+    /// 畳み込めない。実際の production 設定は
+    /// [`production_iishanten_continuation_settings`] が実行時に解決する。同じ入力に同じ値を
+    /// 返す純関数を候補単位で分けるだけなので、この逐次設定と production の並列設定は候補の
+    /// 値も軸解決も比較理由も選択も bit-exact に一致する。
+    pub(crate) const PRODUCTION_SEQUENTIAL: Self = Self {
+        depth: SameShantenContinuationDepth::Twice,
+        search_state_memo: true,
+        search_stats: false,
+        forward_workers: None,
+    };
+
+    /// production へ追加深度を接続する前の旧設定。診断の比較 baseline としてだけ残る。
+    pub(crate) const LEGACY_SHALLOW: Self = Self {
         depth: SameShantenContinuationDepth::Once,
         search_state_memo: false,
         search_stats: false,
         forward_workers: None,
     };
+}
+
+/// production の1向聴 continuation 設定。
+///
+/// 深度と exact same-state memo は const だが、深い候補評価の worker 上限は runtime の
+/// [`std::thread::available_parallelism`] に依るのでここで解決する。実際に使う worker 数は
+/// `min(available_parallelism, 深く評価する候補数)` で、その頭打ちは
+/// [`parallel_forward_metrics`] が行う。
+///
+/// 候補単位の並列評価が実際に発火するのは最善向聴数が1向聴の局面だけで、その判断は候補集合を
+/// 見る [`parallel_forward_workers`] が行う。
+pub(crate) fn production_iishanten_continuation_settings() -> IishantenContinuationSettings {
+    IishantenContinuationSettings {
+        // 並列度 1 の環境では分ける相手がいないので、逐次評価をそのまま通す。
+        forward_workers: NonZeroUsize::new(available_parallelism())
+            .filter(|workers| workers.get() > 1),
+        ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
+    }
+}
+
+/// この候補集合で深い候補評価を分ける worker 上限。分けない場合は `None`。
+///
+/// 候補を thread へ分けるのは1向聴の追加深度を実用速度にするためなので、最善向聴数が1向聴の
+/// 局面だけを対象にする。2向聴・3向聴の前方集計値は従来どおり1本の探索基盤を候補間で共有した
+/// まま逐次で求め、memo の共有範囲も総仕事量も latency もこの接続では変わらない。
+///
+/// 最善向聴数の判断は既存の1手評価 ([`DiscardEvaluation::min_shanten_after_discard`]) の最小値
+/// そのままで、深く評価する候補の絞り込み ([`forward_target_mask`]) も候補数の頭打ちも
+/// [`parallel_forward_metrics`] が持つ既存の1本を通る。
+fn parallel_forward_workers(
+    evaluations: &[DiscardEvaluation],
+    continuation: IishantenContinuationSettings,
+) -> Option<NonZeroUsize> {
+    let workers = continuation.forward_workers?;
+    (best_shanten_after_discard(evaluations) == Some(IISHANTEN_SHANTEN)).then_some(workers)
+}
+
+/// 候補集合の最善向聴数。既存の1手評価が持つ値の最小値そのままで、ここで数え直さない。
+fn best_shanten_after_discard(evaluations: &[DiscardEvaluation]) -> Option<i8> {
+    evaluations
+        .iter()
+        .map(DiscardEvaluation::min_shanten_after_discard)
+        .min()
+}
+
+/// この runtime で使える並列度。取得できない環境では 1 として扱い、逐次評価相当へ落ちる。
+pub(crate) fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
+/// production の1向聴 continuation の深度と exact same-state memo を lookahead 入力へ適用する。
+///
+/// 打牌候補集合を丸ごと持たない経路 (鳴かない場合の継続評価、選んだ1候補だけの後追い評価、
+/// 鳴いた後の1向聴候補比較) が、production の打牌選択と同じ尺度で値を求めるための入口。深い
+/// 候補評価の分け方は production selection の候補集合だけの話なので、ここでは扱わない。
+pub(crate) fn with_production_iishanten_continuation(
+    inputs: LookaheadInputs<'_>,
+) -> LookaheadInputs<'_> {
+    let settings = IishantenContinuationSettings::PRODUCTION_SEQUENTIAL;
+    let inputs = inputs.with_same_shanten_continuation_depth(settings.depth);
+    if settings.search_state_memo {
+        inputs.with_search_state_memo()
+    } else {
+        inputs
+    }
 }
 
 /// 1向聴 continuation の探索設定を差し替えて行った打牌選択と、その観測値。
@@ -573,7 +659,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         &valuator,
         scope,
         &legal.evaluations,
-        IishantenContinuationSettings::PRODUCTION,
+        production_iishanten_continuation_settings(),
     );
     let lookahead = scope
         .builds_lookahead()
@@ -1072,8 +1158,15 @@ fn selected_iishanten_forward_metrics(
     }
 
     let valuator = ProductionProspectiveValuator::new(context);
+    // 前方比較が発火した経路と同じ1向聴 continuation の設定で評価する。選択が前方評価を必要と
+    // したかどうかで、押し引きへ渡る値の意味が変わらないようにする。
     Some(forward_metrics_for_candidate(
-        &lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None),
+        &with_production_iishanten_continuation(lookahead_inputs(
+            context,
+            tiles,
+            &valuator,
+            LookaheadDiagnosticScope::None,
+        )),
         evaluation,
     ))
 }
@@ -1162,7 +1255,7 @@ fn production_selection_metrics_instrumented(
         continuation,
     );
     let mut forward_timing = timing.forward_metrics_timer();
-    let forward = match continuation.forward_workers {
+    let forward = match parallel_forward_workers(evaluations, continuation) {
         None => ParallelForwardMetrics::sequential(forward_metrics_instrumented(
             &inputs,
             evaluations,
@@ -1234,7 +1327,7 @@ fn production_selection_metrics(
         tiles,
         evaluations,
         PRODUCTION_THREE_SHANTEN_CONTINUATION,
-        IishantenContinuationSettings::PRODUCTION,
+        production_iishanten_continuation_settings(),
         &mut NormalDiscardPhaseTimer::disabled(),
     )
 }
@@ -1264,6 +1357,9 @@ impl ParallelForwardMetrics {
 }
 
 /// 深い前方評価の対象になった候補を、候補単位で複数 thread に分けて評価する。
+///
+/// この入口へ来るのは最善向聴数が1向聴の局面だけで、その判断は [`parallel_forward_workers`]
+/// が持つ。
 ///
 /// 分けるのは「どの候補をどの thread が評価するか」だけで、対象候補の絞り込み
 /// ([`forward_target_mask`]) も候補1件の評価 ([`forward_metrics_for_candidate`]) も
@@ -1690,9 +1786,12 @@ pub(crate) fn lookahead_inputs<'a>(
 
 /// 通常打牌選択が使う lookahead 入力。
 ///
-/// 最善向聴数が3向聴の局面だけ、3向聴 Progress 評価の同一 state / continuation を共有する
-/// memo を持たせる。それ以外の局面の入力は [`lookahead_inputs`] と同じで、既存 selection の
-/// 探索も値も変わらない。
+/// 探索内の同一 state memo を持たせるのは、最善向聴数が3向聴の局面 (3向聴 Progress 評価の
+/// 同一 state / continuation を共有する既存条件) と、1向聴で `continuation` が exact memo を
+/// 要求した局面 (追加深度 B の production 設定) だけ。2向聴の入力は [`lookahead_inputs`] と
+/// 同じままで、探索も値も memo の共有範囲も変わらない。
+///
+/// memo が共有するのは同じ入力に必ず同じ値を返す純関数の結果だけなので、有無で値は変わらない。
 fn production_lookahead_inputs<'a>(
     context: &'a GameContext,
     tiles: &'a [TileId],
@@ -1708,13 +1807,11 @@ fn production_lookahead_inputs<'a>(
     } else {
         inputs
     };
-    if continuation.search_state_memo
-        || evaluations
-            .iter()
-            .map(DiscardEvaluation::min_shanten_after_discard)
-            .min()
-            == Some(SANSHANTEN_SHANTEN)
-    {
+    let best_shanten = best_shanten_after_discard(evaluations);
+    let use_search_state_memo = (best_shanten == Some(IISHANTEN_SHANTEN)
+        && continuation.search_state_memo)
+        || best_shanten == Some(SANSHANTEN_SHANTEN);
+    if use_search_state_memo {
         inputs.with_search_state_memo()
     } else {
         inputs
@@ -2212,7 +2309,14 @@ pub(crate) fn select_best_iishanten_post_call_discard(
     evaluations: &[DiscardEvaluation],
 ) -> Option<(DiscardEvaluation, Option<u64>)> {
     let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds));
-    let inputs = lookahead_inputs(context, tiles, &valuator, LookaheadDiagnosticScope::None);
+    // 鳴いた後の1向聴候補も、通常打牌と同じ1向聴 continuation の設定で比べる。Pass 側と同じ
+    // 尺度に揃えるためで、候補の絞り込みも comparator も既存のまま。
+    let inputs = with_production_iishanten_continuation(lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+    ));
     let metrics: Vec<_> = evaluations
         .iter()
         .map(|evaluation| {
@@ -2563,7 +2667,7 @@ pub(crate) mod tests {
                 IishantenContinuationSettings {
                     search_stats: true,
                     forward_workers,
-                    ..IishantenContinuationSettings::PRODUCTION
+                    ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
                 },
                 &mut NormalDiscardPhaseTimer::disabled(),
             )
@@ -2583,6 +2687,166 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_production_exact_memo_reaches_the_one_shanten_selection_only() {
+        // 追加深度 B が要求する exact same-state memo は1向聴の局面だけに入る。3向聴は既存条件で
+        // memo を持ち、2向聴は従来どおり memo を作らない。
+        let metrics = |context: &GameContext, legal: &LegalDiscardEvaluations| {
+            production_selection_metrics_instrumented(
+                context,
+                &legal.tiles,
+                &legal.evaluations,
+                PRODUCTION_THREE_SHANTEN_CONTINUATION,
+                IishantenContinuationSettings {
+                    search_stats: true,
+                    ..production_iishanten_continuation_settings()
+                },
+                &mut NormalDiscardPhaseTimer::disabled(),
+            )
+        };
+
+        // 1向聴: production の設定が exact memo を要求するので、利用数が観測できる。
+        let (context, actions) = same_shanten_next_discard_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(
+            best_shanten_after_discard(&legal.evaluations),
+            Some(IISHANTEN_SHANTEN),
+        );
+        let iishanten = metrics(&context, &legal);
+        assert!(memo_use_count(&iishanten.memo) > 0);
+        assert!(iishanten.memo.next_discard_misses > 0);
+
+        // 2向聴: memo を作らない。2向聴から1向聴へ進む枝は実際に評価しているので、memo が
+        // あれば利用数が立つ。既定値のままなのは memo 自体が無いことを意味する。
+        let (context, actions) = two_shanten_ev_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(best_shanten_after_discard(&legal.evaluations), Some(2));
+        let two_shanten = metrics(&context, &legal);
+        assert!(two_shanten.search.two_to_one_variants > 0);
+        assert_eq!(memo_use_count(&two_shanten.memo), 0);
+
+        // 3向聴: 既存条件のまま memo を持つ。
+        let (context, actions) = three_shanten_progress_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(
+            best_shanten_after_discard(&legal.evaluations),
+            Some(SANSHANTEN_SHANTEN),
+        );
+        let three_shanten = metrics(&context, &legal);
+        assert!(memo_use_count(&three_shanten.memo) > 0);
+    }
+
+    // 同一 state memo の利用数の合計。memo を持たない入力では 0 のままになる。field を分解して
+    // 受けるため、計上が増えたら足し忘れが compile error になる。
+    fn memo_use_count(memo: &SearchStateMemoStats) -> u64 {
+        let SearchStateMemoStats {
+            two_shanten_hits,
+            two_shanten_misses,
+            iishanten_hits,
+            iishanten_misses,
+            next_discard_hits,
+            next_discard_misses,
+            same_shanten_next_discard_hits,
+            same_shanten_next_discard_misses,
+        } = *memo;
+        two_shanten_hits
+            + two_shanten_misses
+            + iishanten_hits
+            + iishanten_misses
+            + next_discard_hits
+            + next_discard_misses
+            + same_shanten_next_discard_hits
+            + same_shanten_next_discard_misses
+    }
+
+    #[test]
+    fn only_a_one_shanten_selection_splits_the_deep_candidates_across_threads() {
+        // 候補を thread へ分けるのは1向聴の追加深度のためなので、最善向聴数が2向聴・3向聴の
+        // 局面では worker を要求されても逐次評価のまま。前方集計値もどちらの経路でも同じ。
+        let metrics = |context: &GameContext, legal: &LegalDiscardEvaluations, forward_workers| {
+            production_selection_metrics_instrumented(
+                context,
+                &legal.tiles,
+                &legal.evaluations,
+                PRODUCTION_THREE_SHANTEN_CONTINUATION,
+                IishantenContinuationSettings {
+                    forward_workers,
+                    ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
+                },
+                &mut NormalDiscardPhaseTimer::disabled(),
+            )
+        };
+        let best_shanten = |legal: &LegalDiscardEvaluations| {
+            legal
+                .evaluations
+                .iter()
+                .map(DiscardEvaluation::min_shanten_after_discard)
+                .min()
+        };
+
+        // 1向聴では分ける。深く評価する候補が複数あるので worker は 1 を超えられる。
+        let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(best_shanten(&legal), Some(1));
+        let parallel = metrics(&context, &legal, NonZeroUsize::new(4));
+        assert!(parallel.forward_workers > 1, "{}", parallel.forward_workers);
+
+        // 2向聴・3向聴は従来どおり逐次評価。
+        for (context, actions, shanten) in [
+            {
+                let (context, actions) = two_shanten_ev_regression_context();
+                (context, actions, 2)
+            },
+            {
+                let (context, actions) = three_shanten_progress_regression_context();
+                (context, actions, 3)
+            },
+        ] {
+            let legal = legal_discard_evaluations(&context, &actions);
+            assert_eq!(best_shanten(&legal), Some(shanten), "{shanten}");
+            let deep = forward_target_mask(&legal.evaluations)
+                .into_iter()
+                .filter(|&target| target)
+                .count();
+            // 分ける対象そのものは存在するので、逐次のままなのは向聴数の判断による。
+            assert!(deep > 1, "{shanten}");
+
+            let parallel = metrics(&context, &legal, NonZeroUsize::new(4));
+            let sequential = metrics(&context, &legal, None);
+            assert_eq!(parallel.forward_workers, 1, "{shanten}");
+            assert_eq!(sequential.forward_workers, 1, "{shanten}");
+            assert_eq!(parallel.forward, sequential.forward, "{shanten}");
+        }
+    }
+
+    #[test]
+    fn the_push_pull_fallback_evaluates_the_selected_candidate_at_the_production_depth() {
+        // 前方比較が発火した経路と、選択済み1候補だけを後から評価する fallback で、同じ1向聴
+        // state の ExpectedSelfTsumoValue が一致する。選択が前方評価を必要としたかどうかで
+        // 押し引きへ渡る値の意味が変わらない。
+        let (context, actions) = same_shanten_next_discard_regression_context();
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        let evaluation = selection.evaluation.as_ref().expect("打牌候補がある");
+        assert_eq!(evaluation.min_shanten_after_discard(), IISHANTEN_SHANTEN);
+        assert_eq!(evaluation.discard.to_mjai_string(), "5p");
+
+        // 選択が前方比較を通った経路の値。深度 B で確定した production の値そのもの。
+        let selected = selection
+            .iishanten_forward_metrics
+            .expect("1向聴の前方集計値がある");
+        assert_eq!(selected.expected_self_tsumo_value, Some(1_031_805_837));
+
+        // 同じ候補を fallback (選択の値を持たない入口) で評価した値。この入口は選択の値を
+        // 渡さないため、必ず後追いの1候補評価を通る。
+        let fallback = selected_iishanten_forward_metrics_from_context(&context, evaluation)
+            .expect("fallback でも1向聴の前方集計値を求められる");
+
+        assert_eq!(
+            fallback.expected_self_tsumo_value,
+            selected.expected_self_tsumo_value,
+        );
+    }
+
+    #[test]
     fn a_selection_without_deep_candidates_stays_on_the_sequential_evaluation() {
         // 深く評価する候補が1件以下の局面では分ける対象が無い。worker を要求されても逐次評価を
         // そのまま通り、前方集計値も逐次評価と同じになる。
@@ -2598,7 +2862,7 @@ pub(crate) mod tests {
                 PRODUCTION_THREE_SHANTEN_CONTINUATION,
                 IishantenContinuationSettings {
                     forward_workers,
-                    ..IishantenContinuationSettings::PRODUCTION
+                    ..IishantenContinuationSettings::PRODUCTION_SEQUENTIAL
                 },
                 &mut NormalDiscardPhaseTimer::disabled(),
             )
@@ -5872,7 +6136,9 @@ pub(crate) mod tests {
         assert_ne!(next_discard_after("1m"), tile("1m"));
         assert_ne!(next_discard_after("2m"), tile("2m"));
 
-        // 1向聴 self-tsumo 軸は 5p / 9p のどちらも確定でき、選択は 9p のまま。
+        // 1向聴 self-tsumo 軸は 5p / 9p のどちらも確定でき、production の追加深度では 5p が
+        // 9p を上回る。手変わり1回までの旧設定では 9p が選ばれていた候補で、深度を上げた
+        // 効果がそのまま最終打牌に出る。
         let value_of = |discard: &str| {
             selection
                 .diagnostic
@@ -5883,8 +6149,10 @@ pub(crate) mod tests {
                 .expected_self_tsumo_value
                 .expect("self-tsumo continuation を確定できる")
         };
-        assert!(value_of("9p") >= value_of("5p"));
-        assert_eq!(selected_discard(&context, &actions), "9p");
+        assert_eq!(value_of("5p"), 1_031_805_837);
+        assert_eq!(value_of("9p"), 989_272_961);
+        assert!(value_of("5p") > value_of("9p"));
+        assert_eq!(selected_discard(&context, &actions), "5p");
     }
 
     fn two_shanten_ev_regression_context() -> (GameContext, Vec<LegalAction>) {
@@ -6078,7 +6346,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
-            IishantenContinuationSettings::PRODUCTION,
+            production_iishanten_continuation_settings(),
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -6140,7 +6408,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
-            IishantenContinuationSettings::PRODUCTION,
+            production_iishanten_continuation_settings(),
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);
@@ -6214,7 +6482,7 @@ pub(crate) mod tests {
             &legal.tiles,
             &legal.evaluations,
             IishantenContinuationScope::ProgressAndSameShanten,
-            IishantenContinuationSettings::PRODUCTION,
+            production_iishanten_continuation_settings(),
             &mut timing,
         );
         timing.enter(NormalDiscardPhase::SelectionFinalize);

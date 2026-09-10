@@ -58,6 +58,12 @@
 //! と Pass を同じ流局 horizon で比較し、Call が厳密に高い場合だけ鳴く。同値・unknown は鳴かない。
 //! 他家にリーチ者がいる局面の鳴きは押し引きへ通さず、打点による例外も持たない。
 //!
+//! 比較する2つの値は同じ1向聴 continuation の設定で求める。Call 側は鳴いた後の打牌候補比較
+//! ([`select_discard_action_with_evaluation`] / [`select_best_iishanten_post_call_discard`]) が、
+//! Pass 側は継続評価が、どちらも [`with_production_iishanten_continuation`] と同じ production の
+//! 深度・探索内 memo を通る。片側だけ深い評価にして、比較が尺度の違いを拾うことがないように
+//! する。
+//!
 //! # 片和了
 //!
 //! 役の有無は牌種単位ではなく、和了牌の物理牌 (赤5 / 黒5) ごとの variant 単位で見る。残枚数が
@@ -105,7 +111,7 @@ use crate::damaten_value::damaten_baseline_context;
 use crate::discard_selection::{
     DiscardActionSelection, LookaheadDiagnosticScope, lookahead_inputs_with_own_future_draws,
     post_call_discard_evaluations, select_best_iishanten_post_call_discard,
-    select_discard_action_with_evaluation,
+    select_discard_action_with_evaluation, with_production_iishanten_continuation,
 };
 use crate::kuikae::forbidden_discards_after_call;
 use crate::prospective_value::ProductionProspectiveValuator;
@@ -885,13 +891,15 @@ fn pass_expected_self_tsumo_value(
     }
 
     let valuator = ProductionProspectiveValuator::new_with_hand_state(ctx, ctx.own_melds());
-    let inputs = lookahead_inputs_with_own_future_draws(
+    // Call 側は鳴いた後の production 打牌選択が求めるので、Pass 側も同じ1向聴 continuation の
+    // 設定で評価する。片側だけ深度が違うと、比較そのものが尺度の違いを拾ってしまう。
+    let inputs = with_production_iishanten_continuation(lookahead_inputs_with_own_future_draws(
         ctx,
         ctx.hand_tiles(),
         &valuator,
         LookaheadDiagnosticScope::None,
         Some(pass_own_future_draws(ctx)?),
-    );
+    ));
     evaluate(&inputs, &acceptance)
 }
 
@@ -1192,8 +1200,10 @@ mod tests {
 
     #[test]
     fn an_iishanten_call_with_a_higher_expected_self_tsumo_value_is_selected() {
+        // 門前のまま進めた方が手変わりの経路を多く持つため、Call が上回るのは残り自摸機会が
+        // 少ない局面。1向聴 continuation の深度はどちらの側も production のものを使う。
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 20);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 12);
         let (decision, candidate) = single_candidate(&ctx, &action, true);
         let comparison = candidate.iishanten_self_tsumo.expect("comparison");
 
@@ -1204,8 +1214,8 @@ mod tests {
         assert!(candidate.eligible);
         assert_eq!(decision.selected, Some(action));
         assert_eq!(comparison.comparison, CallIishantenComparison::CallHigher);
-        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(48_730_952));
-        assert_eq!(comparison.call_expected_self_tsumo_value, Some(48_877_415));
+        assert_eq!(comparison.pass_expected_self_tsumo_value, Some(20_956_462));
+        assert_eq!(comparison.call_expected_self_tsumo_value, Some(21_531_497));
         assert!(
             comparison.call_expected_self_tsumo_value > comparison.pass_expected_self_tsumo_value
         );
@@ -1250,6 +1260,28 @@ mod tests {
         assert_eq!(comparison.comparison, CallIishantenComparison::PassNotLower);
         assert!(
             comparison.pass_expected_self_tsumo_value > comparison.call_expected_self_tsumo_value
+        );
+    }
+
+    #[test]
+    fn the_call_and_pass_values_both_use_the_production_iishanten_continuation_depth() {
+        // Call 側は鳴いた後の production 打牌選択、Pass 側は同じ設定を適用した継続評価が求める。
+        // どちらも production の手変わり深度で、片側だけ旧 shallow へ戻ると値が動く局面を使う
+        // (手変わり1回までの旧設定では pass 176.885897 / call 165.908530 になる)。
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
+        let comparison = candidate.iishanten_self_tsumo.expect("comparison");
+
+        assert_eq!(
+            comparison.pass_expected_self_tsumo_value,
+            Some(284_875_812),
+            "pass",
+        );
+        assert_eq!(
+            comparison.call_expected_self_tsumo_value,
+            Some(239_138_199),
+            "call",
         );
     }
 
@@ -1502,6 +1534,33 @@ mod tests {
     }
 
     #[test]
+    fn the_two_shanten_post_call_iishanten_value_uses_the_production_continuation_depth() {
+        // 2向聴からの鳴きを観測する経路も、鳴いた後の1向聴候補比較は production の手変わり深度を
+        // 通る。手変わり1回までの旧設定では call 2239.229406 になる局面を使う。Pass 側は次の
+        // 自摸を待つ2向聴 state の既存 Full evaluation そのままで、深度には依らない。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(32),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let (_, candidate) = single_candidate(&ctx, &action, true);
+        let comparison = candidate.two_shanten_self_tsumo.expect("観測対象");
+
+        assert_eq!(
+            comparison.call_expected_self_tsumo_value,
+            Some(4_103_395_595),
+            "call",
+        );
+        assert_eq!(
+            comparison.pass_expected_self_tsumo_value,
+            Some(189_935_840),
+            "pass",
+        );
+    }
+
+    #[test]
     fn two_shanten_call_pass_observation_does_not_change_the_selected_action() {
         let ctx = valued_two_shanten_reaction_context(
             &TWO_SHANTEN_CALL_PON_HAND,
@@ -1704,7 +1763,7 @@ mod tests {
 
     #[test]
     fn the_iishanten_acceptance_diagnostic_does_not_change_the_selected_action() {
-        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 20);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 12);
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
         let actions = [action.clone(), LegalAction::None];
 

@@ -1,8 +1,9 @@
-//! 1向聴の手変わり深度 A/B を、production の打牌 comparator を通した最終選択として観測する。
+//! 1向聴の手変わり深度を、production の打牌 comparator を通した最終選択として比較する。
 //!
-//! A は現行 production の打牌選択そのもので、手変わりは1回まで
-//! (`Progress` と `SameShanten -> Progress`)。B は `SameShanten -> SameShanten -> Progress` を
-//! もう1段だけ許した診断専用の追加深度で、任意深度の再帰へは一般化しない。
+//! A は production へ追加深度を接続する前の旧設定 (legacy shallow depth) で、手変わりは1回まで
+//! (`Progress` と `SameShanten -> Progress`)。B は現在の production depth で、
+//! `SameShanten -> SameShanten -> Progress` をもう1段だけ許し、追加深度に必要な exact
+//! same-state memo を有効にする。段数は2回で閉じていて、任意深度の再帰へは一般化しない。
 //!
 //! [`crate::iishanten_continuation_depth_comparison`] が全1向聴候補の
 //! ExpectedSelfTsumoValue を単独 ranking として並べるのに対し、この module は
@@ -17,8 +18,8 @@
 //!
 //! # 計測条件
 //!
-//! 方式ごとに run を2本に分ける。B を production で常用できる latency か判断するための診断
-//! なので、時間は production selection に無い観測コストを一切含まない run から取る。
+//! 方式ごとに run を2本に分ける。時間は production selection に無い観測コストを一切含まない
+//! run から取る。
 //!
 //! - 観測 run ([`IishantenSelectionDepthDecision::observation`]): 探索規模の計上と phase timer
 //!   を有効にする。cohort・ExpectedSelfTsumoValue・search / memo / phase の stats はこの run
@@ -30,7 +31,6 @@
 //! 2本の run は同じ入力に対する同じ純粋な探索なので、選んだ打牌も cohort も値も一致する
 //! ([`IishantenSelectionDepthDecision::runs_agree`])。
 //!
-//! A は current production configuration、B は proposed depth + exact memo configuration。
 //! B は追加深度と一緒に探索内の同一 state memo
 //! ([`bot_logic::LookaheadInputs::with_search_state_memo`]) も有効にするため、A → B の elapsed
 //! 差は深度だけの差ではない。同じ memo 条件へ揃えた純粋な深度比較は
@@ -38,18 +38,17 @@
 //! 重複して持たない。
 //!
 //! 向聴・受け入れ・一向聴形の memo は thread ごとに持つため、同じ thread で続けて評価すると後
-//! から走った run が暖まった memo を使ってしまう。方式ごとの計測 run と観測 run は既存 A/B 計測
-//! と同じくそれぞれ新しい thread で行い、どの run も同じ cold な thread-local から始める。探索
-//! する枝も評価値も選択も、計測 thread の違いでは変わらない。
+//! から走った run が暖まった memo を使ってしまう。方式ごとの計測 run と観測 run はそれぞれ新しい
+//! thread で行い、どの run も同じ cold な thread-local から始める。探索する枝も評価値も選択も、
+//! 計測 thread の違いでは変わらない。
 //!
-//! production の打牌選択は A のままで、この module は B を production selection へ接続しない。
+//! どちらの方式も深い候補評価は逐次で行う。この module が比べるのは深度だけで、production が
+//! 使う候補単位の並列評価は [`crate::iishanten_selection_parallel_comparison`] が同じ B depth
+//! の中だけで比べる。並列評価は値を変えないので、B の値も選択も production のものと一致する。
 
 use std::time::Duration;
 
-use bot_logic::{
-    DiscardComparisonReason, SameShantenContinuationDepth, SearchStateMemoStats,
-    ThreeShantenSearchStats, TileType,
-};
+use bot_logic::{DiscardComparisonReason, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
@@ -62,33 +61,34 @@ use crate::discard_selection::{
 /// 比較する2方式。段数が違えば経路確率も違うため、どちらの深度で選んだ打牌かを必ず添える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IishantenSelectionDepth {
-    /// A: 現行 production。手変わりは1回まで、探索内 memo も production の判断のまま。
+    /// A: production 接続前の旧設定。手変わりは1回まで、探索内 memo も旧 production の判断の
+    /// まま。比較 baseline としてだけ残る。
+    LegacyShallow,
+    /// B: 現行 production の深度。手変わりを2回まで許し、追加深度に必要な exact same-state
+    /// memo を有効にする。
     Production,
-    /// B: 診断専用。手変わりを2回まで許し、追加深度に必要な exact memo を有効にする。
-    TwiceWithExactMemo,
 }
 
 impl IishantenSelectionDepth {
-    pub const BOTH: [Self; 2] = [Self::Production, Self::TwiceWithExactMemo];
+    pub const BOTH: [Self; 2] = [Self::LegacyShallow, Self::Production];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Production => "A production depth (same-shanten once)",
-            Self::TwiceWithExactMemo => "B same-shanten twice + exact same-state memo",
+            Self::LegacyShallow => "A legacy shallow depth (same-shanten once, pre-production)",
+            Self::Production => "B production depth (same-shanten twice + exact same-state memo)",
         }
     }
 
     // 探索そのものの設定。差し替えるのは深度と、それに必要な memo だけで、候補の絞り込みも
     // 比較順も最終選択も production と同じ経路をそのまま通る。計測 run と観測 run はこの同じ
     // 設定から作るので、探索する枝は2本の run で同じになる。
+    //
+    // B は production の深度と memo をそのまま持つが、深い候補評価は逐次で行う。並列評価は値を
+    // 変えないので、選択も候補の値も production と一致する。
     pub(crate) fn continuation(self) -> IishantenContinuationSettings {
         match self {
-            Self::Production => IishantenContinuationSettings::PRODUCTION,
-            Self::TwiceWithExactMemo => IishantenContinuationSettings {
-                depth: SameShantenContinuationDepth::Twice,
-                search_state_memo: true,
-                ..IishantenContinuationSettings::PRODUCTION
-            },
+            Self::LegacyShallow => IishantenContinuationSettings::LEGACY_SHALLOW,
+            Self::Production => IishantenContinuationSettings::PRODUCTION_SEQUENTIAL,
         }
     }
 
@@ -349,32 +349,34 @@ pub(crate) fn candidates_from_observation(
 /// 同じ局面を A / B で1回ずつ選択した比較結果。
 #[derive(Debug, Clone)]
 pub struct IishantenSelectionDepthComparison {
+    /// A: production 接続前の旧設定。比較 baseline。
+    pub legacy: IishantenSelectionDepthDecision,
+    /// B: 現行 production の深度。
     pub production: IishantenSelectionDepthDecision,
-    pub twice: IishantenSelectionDepthDecision,
 }
 
 impl IishantenSelectionDepthComparison {
     /// A / B が同じ打牌を選んだか。
     pub fn selects_the_same_discard(&self) -> bool {
-        self.production.selected() == self.twice.selected()
+        self.legacy.selected() == self.production.selected()
     }
 
     /// 深い前方評価の対象になった候補が A / B で同じか。候補の絞り込みは深度に依らないため、
     /// 同じ局面では必ず一致する。
     pub fn shares_the_deep_evaluated_candidates(&self) -> bool {
-        self.production.observation.deep_evaluated_candidates()
-            == self.twice.observation.deep_evaluated_candidates()
+        self.legacy.observation.deep_evaluated_candidates()
+            == self.production.observation.deep_evaluated_candidates()
     }
 
     /// A / B のどちらも計測 run と観測 run で同じ選択になったか。
     pub fn runs_agree(&self) -> bool {
-        self.production.runs_agree() && self.twice.runs_agree()
+        self.legacy.runs_agree() && self.production.runs_agree()
     }
 
     /// B / A の比。A が 0 の場合は比を作れない。
     pub fn slowdown(&self) -> Option<f64> {
-        let production = self.production.elapsed().as_secs_f64();
-        (production > 0.0).then(|| self.twice.elapsed().as_secs_f64() / production)
+        let legacy = self.legacy.elapsed().as_secs_f64();
+        (legacy > 0.0).then(|| self.production.elapsed().as_secs_f64() / legacy)
     }
 }
 
@@ -387,15 +389,15 @@ pub fn compare_iishanten_selection_depths(
     legal_actions: &[LegalAction],
 ) -> IishantenSelectionDepthComparison {
     IishantenSelectionDepthComparison {
+        legacy: decide_with_iishanten_selection_depth(
+            context,
+            legal_actions,
+            IishantenSelectionDepth::LegacyShallow,
+        ),
         production: decide_with_iishanten_selection_depth(
             context,
             legal_actions,
             IishantenSelectionDepth::Production,
-        ),
-        twice: decide_with_iishanten_selection_depth(
-            context,
-            legal_actions,
-            IishantenSelectionDepth::TwiceWithExactMemo,
         ),
     }
 }
@@ -459,7 +461,7 @@ mod tests {
         let comparison = compare_iishanten_selection_depths(&context, &actions);
 
         let cohort = ["3m", "6m", "9m", "5p", "7p", "9p", "3s", "4s"];
-        for decision in [&comparison.production, &comparison.twice] {
+        for decision in [&comparison.legacy, &comparison.production] {
             // 計測 run と観測 run のどちらも同じ cohort を残す。
             for run in [&decision.timing, &decision.observation] {
                 let deep: Vec<_> = run
@@ -493,12 +495,12 @@ mod tests {
 
         let five_pin = tile(53).tile_type();
         let nine_pin = tile(68).tile_type();
+        assert_eq!(comparison.legacy.selected_discard(), Some(nine_pin), "A");
         assert_eq!(
             comparison.production.selected_discard(),
-            Some(nine_pin),
-            "A",
+            Some(five_pin),
+            "B"
         );
-        assert_eq!(comparison.twice.selected_discard(), Some(five_pin), "B");
         assert!(!comparison.selects_the_same_discard());
 
         let value = |decision: &IishantenSelectionDepthDecision, discard| {
@@ -508,28 +510,28 @@ mod tests {
                 .expect("候補がある")
                 .evaluated_expected_self_tsumo_value
         };
-        assert_eq!(value(&comparison.production, five_pin), Some(697_451_162));
-        assert_eq!(value(&comparison.production, nine_pin), Some(697_475_278));
-        assert_eq!(value(&comparison.twice, five_pin), Some(1_031_805_837));
-        assert_eq!(value(&comparison.twice, nine_pin), Some(989_272_961));
+        assert_eq!(value(&comparison.legacy, five_pin), Some(697_451_162));
+        assert_eq!(value(&comparison.legacy, nine_pin), Some(697_475_278));
+        assert_eq!(value(&comparison.production, five_pin), Some(1_031_805_837));
+        assert_eq!(value(&comparison.production, nine_pin), Some(989_272_961));
 
         assert_eq!(
             comparison
-                .production
+                .legacy
                 .observation
                 .selected_expected_self_tsumo_value(),
             Some(697_475_278),
         );
         assert_eq!(
             comparison
-                .twice
+                .production
                 .observation
                 .selected_expected_self_tsumo_value(),
             Some(1_031_805_837),
         );
 
         // 選ばれた候補が cohort の他候補を上回った理由は、どちらの深度でも同じ軸。
-        for decision in [&comparison.production, &comparison.twice] {
+        for decision in [&comparison.legacy, &comparison.production] {
             for (discard, reason) in decision.observation.comparison_reasons() {
                 let candidate = decision.observation.candidate(discard).expect("候補がある");
                 let expected = if candidate.deep_evaluated {
@@ -546,23 +548,23 @@ mod tests {
     #[test]
     fn the_extra_depth_searches_more_and_only_it_uses_the_exact_memo() {
         // B は A の枝を残したまま手変わり2回の経路を足すので探索規模は増える。exact memo は B
-        // だけの設定で、A は production のまま memo を持たない。
+        // だけの設定で、旧設定の A は memo を持たない。
         let (context, actions) = iishanten_context();
         let comparison = compare_iishanten_selection_depths(&context, &actions);
 
+        let legacy = &comparison.legacy.observation;
         let production = &comparison.production.observation;
-        let twice = &comparison.twice.observation;
-        assert!(twice.search.draw_variants > production.search.draw_variants);
-        assert!(twice.search.terminal_scorings > production.search.terminal_scorings);
+        assert!(production.search.draw_variants > legacy.search.draw_variants);
+        assert!(production.search.terminal_scorings > legacy.search.terminal_scorings);
 
-        assert_eq!(production.memo.next_discard_hits, 0);
-        assert_eq!(production.memo.next_discard_misses, 0);
-        assert!(twice.memo.next_discard_hits > 0);
-        assert!(twice.memo.same_shanten_next_discard_hits > 0);
+        assert_eq!(legacy.memo.next_discard_hits, 0);
+        assert_eq!(legacy.memo.next_discard_misses, 0);
+        assert!(production.memo.next_discard_hits > 0);
+        assert!(production.memo.same_shanten_next_discard_hits > 0);
 
         // 計測 run は探索規模を計上しない。memo の利用数は memo 自体が持つ値なので、memo を
         // 有効にした方式では計測 run にも残る。
-        for decision in [&comparison.production, &comparison.twice] {
+        for decision in [&comparison.legacy, &comparison.production] {
             assert_eq!(
                 decision.timing.search,
                 ThreeShantenSearchStats::default(),
@@ -587,7 +589,7 @@ mod tests {
         let comparison = compare_iishanten_selection_depths(&context, &actions);
 
         assert!(comparison.runs_agree());
-        for decision in [&comparison.production, &comparison.twice] {
+        for decision in [&comparison.legacy, &comparison.production] {
             let label = decision.depth.label();
             assert!(decision.runs_agree(), "{label}");
             assert_eq!(
@@ -609,15 +611,55 @@ mod tests {
 
     #[test]
     fn the_production_depth_selects_what_the_production_discard_selection_selects() {
-        // A は現行 production selection そのもの。既存の打牌選択と同じ action を返す。
+        // B は現行 production selection そのもの。production は同じ深度を候補単位の並列評価で
+        // 通すが、並列評価は値を変えないので、逐次で通した B と選択も候補ごとの値も比較理由も
+        // bit-exact に一致する。
         let (context, actions) = iishanten_context();
-        let decision = decide_with_iishanten_selection_depth(
+        let sequential = decide_with_iishanten_selection_depth(
             &context,
             &actions,
             IishantenSelectionDepth::Production,
         );
         let production = crate::discard_selection::select_discard_action(&context, &actions);
-        assert_eq!(decision.timing.selected, production);
-        assert_eq!(decision.observation.selected, production);
+        assert_eq!(sequential.timing.selected, production);
+        assert_eq!(sequential.observation.selected, production);
+
+        let parallel = measured_on_a_fresh_thread(|| {
+            run_on_the_measuring_thread(
+                &context,
+                &actions,
+                crate::discard_selection::production_iishanten_continuation_settings(),
+                NormalDiscardPhaseTimer::disabled(),
+            )
+        });
+        assert_eq!(parallel.selected, production);
+        assert_eq!(parallel.candidates, sequential.timing.candidates);
+
+        // 実 worker 数は深く評価する候補数も runtime の並列度も超えない。
+        let cohort = sequential.observation.deep_evaluated_candidates().len();
+        assert!(parallel.forward_workers >= 1);
+        assert!(
+            parallel.forward_workers <= cohort,
+            "{}",
+            parallel.forward_workers
+        );
+        assert!(
+            parallel.forward_workers <= crate::discard_selection::available_parallelism(),
+            "{}",
+            parallel.forward_workers,
+        );
+
+        // 対象 fixture の production 打牌は 5p で、cohort の値は B のもの。
+        let five_pin = tile(53).tile_type();
+        let nine_pin = tile(68).tile_type();
+        assert_eq!(parallel.selected_discard(), Some(five_pin));
+        let value = |discard| {
+            parallel
+                .candidate(discard)
+                .expect("候補がある")
+                .evaluated_expected_self_tsumo_value
+        };
+        assert_eq!(value(five_pin), Some(1_031_805_837));
+        assert_eq!(value(nine_pin), Some(989_272_961));
     }
 }

@@ -1,16 +1,16 @@
 //! 1向聴 ExpectedSelfTsumoValue の手変わり深度 A/B 比較。
 //!
-//! A (same-shanten once) は production の1向聴 continuation で、`Progress` と
-//! `SameShanten -> Progress` までを追う。B (same-shanten twice) は
-//! `SameShanten -> SameShanten -> Progress` をもう1段だけ許した診断専用の追加深度で、任意深度の
-//! 再帰へは一般化しない。
+//! A (same-shanten once) は production へ追加深度を接続する前の1向聴 continuation で、
+//! `Progress` と `SameShanten -> Progress` までを追う。B (same-shanten twice) は現在の
+//! production depth で、`SameShanten -> SameShanten -> Progress` をもう1段だけ許す。段数は2回で
+//! 閉じていて、任意深度の再帰へは一般化しない。
 //!
 //! 違いは1向聴 state で [`bot_logic::DrawTransition::SameShanten`] を2回まで許すかどうかだけで、
 //! ツモ牌の列挙・残枚数・物理牌 variant・ツモ後の最良打牌の比較・テンパイ到達後の terminal
 //! scoring・Reach / Damaten・確率・残り自摸機会・unknown 伝播はどちらも同じ primitive を通る。
 //!
-//! production の打牌選択は A のままで、この module は比較のための計測だけを行う。表示する順位は
-//! ExpectedSelfTsumoValue 単独の ranking で、production の最終打牌選択ではない。production は
+//! この module は比較のための計測だけを行う。表示する順位は ExpectedSelfTsumoValue 単独の
+//! ranking で、production の最終打牌選択ではない。production は
 //! `Shanten → IsolatedTile → IsolatedHonor → ExpectedSelfTsumoValue` の順に既存 comparator を
 //! 通し、pre-acceptance 軸まで同順位の cohort の中だけでこの値を比べ、その cohort に unknown が
 //! 1件でもあれば軸ごと落とす。この module はその comparator を複製しない。
@@ -24,8 +24,11 @@
 //!
 //! 探索内の同一 state memo ([`bot_logic::LookaheadInputs::with_search_state_memo`]) は A / B の
 //! どちらにも同じように有効化する。共有するのは同じ入力なら必ず同じ値になる純関数の結果だけ
-//! なので値は変わらず、A → B の差が深度そのものの差だけになる。production の1向聴打牌選択は
-//! この memo を有効にしないため、A の実測は production の latency そのものではない。
+//! なので値は変わらず、A → B の差が深度そのものの差だけになる。旧 production の1向聴打牌選択は
+//! この memo を有効にしていなかったため、A の実測は旧 production の latency そのものではない。
+//! B も全1向聴候補を単独で評価するので、production の cohort 絞り込みを通した実測は
+//! [`crate::iishanten_selection_depth_comparison`] と
+//! [`crate::iishanten_selection_parallel_comparison`] が持つ。
 
 use std::time::{Duration, Instant};
 
@@ -47,9 +50,10 @@ const IISHANTEN_SHANTEN: i8 = 1;
 /// 比較する2方式。段数が違えば経路確率も違うため、どちらの深度で評価した値かを必ず添える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IishantenContinuationDepth {
-    /// A: production。手変わりは1回まで (`SameShanten -> Progress`)。
+    /// A: production 接続前の旧深度。手変わりは1回まで (`SameShanten -> Progress`)。
     Once,
-    /// B: 診断専用の追加深度。手変わりを2回まで (`SameShanten -> SameShanten -> Progress`)。
+    /// B: 現行 production の深度。手変わりを2回まで
+    /// (`SameShanten -> SameShanten -> Progress`)。
     Twice,
 }
 
@@ -58,8 +62,8 @@ impl IishantenContinuationDepth {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Once => "A same-shanten once (Progress, SameShanten -> Progress)",
-            Self::Twice => "B same-shanten twice (+ SameShanten -> SameShanten -> Progress)",
+            Self::Once => "A legacy shallow depth (Progress, SameShanten -> Progress)",
+            Self::Twice => "B production depth (+ SameShanten -> SameShanten -> Progress)",
         }
     }
 
