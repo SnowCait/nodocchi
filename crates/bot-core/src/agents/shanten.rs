@@ -6,14 +6,14 @@ use crate::context::GameContext;
 use crate::decision_timing::{DecisionPhase, DecisionPhaseTimer, TimedAgentAction};
 use crate::defense::{DefenseFallbackKind, log_defense_fallback_evaluation};
 use crate::discard_selection::{
-    DiscardActionSelection, select_discard_action_with_diagnostic,
+    DiscardActionSelection, legal_discard_evaluations, select_discard_action_with_diagnostic,
     select_discard_action_with_evaluation_instrumented,
 };
 use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
 use crate::open_hand_defense::OpenHandDefenseCategory;
 use crate::push_pull::{
-    PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, log_push_pull_decision,
-    push_pull_inputs_from_threat_facts,
+    PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, has_clear_threat,
+    log_push_pull_decision, push_pull_inputs_from_threat_facts, two_or_more_shanten_fold,
 };
 use crate::reach_decision::{ReachDecision, ReachDecisionDiagnostic, decide_reach};
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
@@ -21,7 +21,7 @@ use crate::shanten_diagnostic::{
     DecisionDiagnostics, DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,
     diagnose_shanten_decision_with_options,
 };
-use crate::threat::player_threat_facts_from_context;
+use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
@@ -97,7 +97,9 @@ impl AgentActionSource {
 /// ログや diagnostics assembly のために判断ロジックを再実行しないよう、action 選択の過程で
 /// 得た情報を保持する。
 /// `push_pull` / `push_pull_inputs` / `normal_discard` は Hora / Ryukyoku / 鳴きの早期 return では
-/// `None`。`call` は合法な Chi / Pon が1件も無い局面では `None`。`reach` はリーチを検討する Push
+/// `None`。`normal_discard` は、通常打牌選択より前に確定 Fold で決着した局面でも `None` で、
+/// その局面では `push_pull_inputs` の `offense` も `None` になる。`call` は合法な Chi / Pon が
+/// 1件も無い局面では `None`。`reach` はリーチを検討する Push
 /// mode 以外では `None`。`ryukyoku` は `LegalAction::Ryukyoku` が合法だった局面だけ `Some` で、
 /// Hora で早期終了した場合は検討自体を行わないので `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +112,18 @@ pub(crate) struct AgentDecision {
     pub(crate) reach: Option<ReachDecisionDiagnostic>,
     pub(crate) call: Option<CallDecisionDiagnostic>,
     pub(crate) ryukyoku: Option<RyukyokuDecisionDiagnostic>,
+}
+
+/// 通常打牌選択より前に確定した Fold の判断結果。
+///
+/// 深い通常打牌選択を通っていないので通常打牌は持たない。`action` は既存の Fold action
+/// 優先順位が防御 fallback から選んだものそのもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EarlyFoldDecision {
+    action: LegalAction,
+    source: AgentActionSource,
+    push_pull_inputs: PushPullInputs,
+    push_pull: PushPullDecision,
 }
 
 #[derive(Debug, Default)]
@@ -256,19 +270,37 @@ impl ShantenAgent {
             };
         }
 
+        // 脅威 facts はここで一度だけ構築し、early 判定と押し引き入力へそのまま渡す。meld ごとの
+        // Vec を作らない軽量 facts なので、通常 act() で allocation は増えない。構造化診断は
+        // この facts を再利用して full diagnostic を組み立てる。
+        let player_threats = player_threat_facts_from_context(ctx);
+
+        // 明確な threat に対して確定 Fold になる局面では、深い通常打牌選択の結果を最終 action に
+        // 使わない。防御 fallback だけで action を決められると確認できた場合に限り省略する。
+        if let Some(early) =
+            self.try_early_fold(ctx, legal_actions, player_threats, diagnostics, timing)
+        {
+            return AgentDecision {
+                action: early.action,
+                source: early.source,
+                push_pull_inputs: Some(early.push_pull_inputs),
+                push_pull: Some(early.push_pull),
+                normal_discard: None,
+                reach: None,
+                call,
+                ryukyoku,
+            };
+        }
+
         // 通常打牌の evaluation と action を一度だけ取得し、その evaluation を
         // 押し引き入力にも共有して二重計算を避ける。
-        //
-        // 脅威 facts もここで一度だけ構築し、押し引き入力へそのまま渡す。meld ごとの Vec を
-        // 作らない軽量 facts なので、通常 act() で allocation は増えない。構造化診断は
-        // この facts を再利用して full diagnostic を組み立てる。
         timing.enter(DecisionPhase::NormalDiscard);
         let discard_selection = self.select_normal_discard(ctx, legal_actions, diagnostics, timing);
         timing.enter(DecisionPhase::PostDiscard);
 
         let inputs = push_pull_inputs_from_threat_facts(
             ctx,
-            player_threat_facts_from_context(ctx),
+            player_threats,
             discard_selection.evaluation.as_ref(),
             discard_selection.iishanten_forward_metrics,
             discard_selection.tenpai_wait.as_ref(),
@@ -276,7 +308,7 @@ impl ShantenAgent {
             legal_actions,
         );
         let push_pull = decide_push_pull(&inputs);
-        log_push_pull_decision(&push_pull, &inputs, discard_selection.action.as_ref());
+        log_push_pull_decision(&push_pull, &inputs, discard_selection.action.as_ref(), None);
 
         let normal_discard = discard_selection.action.clone();
         let mut reach = None;
@@ -336,6 +368,86 @@ impl ShantenAgent {
             call,
             ryukyoku,
         }
+    }
+
+    // 明確な threat に対する確定 Fold だけで最終 action を決められるかを、深い通常打牌選択より
+    // 前に確かめる。決められた場合、その action は通常打牌選択の結果に依存しない。
+    //
+    // 押し引き policy はここへ写さない。threat の分類も `TwoOrMoreShantenAgainst*` reason も
+    // [`two_or_more_shanten_fold`] が source of truth のまま判定し、Fold の action 優先順位
+    // (防御 fallback → 通常打牌) も [`Self::select_action_for_push_pull_mode`] をそのまま通す。
+    // 通常打牌が必要な局面ではその helper が `None` を返すので、防御 fallback が action を
+    // 選べなかった場合は従来の通常打牌選択へ戻る。
+    //
+    // 向聴数は合法打牌候補の既存 shallow evaluation の最小値だけを使い、2向聴
+    // ExpectedSelfTsumoValue も前方探索も打点計算も行わない。合法 Dahai の絞り込み・赤5/黒5・
+    // kuikae・物理牌補正は [`legal_discard_evaluations`] をそのまま共有する。
+    //
+    // 構造化診断が有効な経路では省略しない。診断は通常打牌候補と choice 1/2/3 を表示するため、
+    // 通常打牌選択そのものを必要とする。
+    fn try_early_fold(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        player_threats: [PlayerThreatFacts; 4],
+        diagnostics: &mut DecisionDiagnostics,
+        timing: &mut DecisionPhaseTimer,
+    ) -> Option<EarlyFoldDecision> {
+        if diagnostics.is_enabled() {
+            return None;
+        }
+
+        // 攻撃評価を伴わない押し引き入力。threat の分類も防御 fallback の routing も、通常経路が
+        // 使うものと同じ facts から作る。
+        let inputs = push_pull_inputs_from_threat_facts(
+            ctx,
+            player_threats,
+            None,
+            None,
+            None,
+            None,
+            legal_actions,
+        );
+        // 明確な threat がいない局面では候補評価そのものを行わず、従来経路へ戻る。
+        if !has_clear_threat(&inputs) {
+            return None;
+        }
+
+        // 候補生成と基本評価は通常打牌選択の内訳と同じ区分で計上する。判定できずに戻る場合は
+        // 計上せず、続く通常打牌選択が自分の内訳をそのまま記録する。
+        timing.enter(DecisionPhase::NormalDiscard);
+        let normal_discard_timing = timing.normal_discard_timer();
+        let legal = legal_discard_evaluations(ctx, legal_actions);
+        let best_shanten_after_discard = legal.best_shanten_after_discard()?;
+        let push_pull = two_or_more_shanten_fold(&inputs, best_shanten_after_discard)?;
+        timing.record_normal_discard_phases(normal_discard_timing.finish());
+
+        timing.enter(DecisionPhase::PostDiscard);
+        // Fold なのでリーチは検討しない。既存 helper と signature を合わせるためだけの受け皿。
+        let mut reach = None;
+        let Some((action, source)) = self.select_action_for_push_pull_mode(
+            push_pull.mode,
+            ctx,
+            legal_actions,
+            &inputs,
+            &DiscardActionSelection::not_selected(),
+            &mut reach,
+            diagnostics,
+        ) else {
+            // 防御 fallback が action を選べなかったので、従来どおり通常打牌選択から判断し直す。
+            // 押し引きログもこの試行では出さず、通常経路の1件だけにする。
+            timing.enter(DecisionPhase::NormalDiscard);
+            return None;
+        };
+
+        log_push_pull_decision(&push_pull, &inputs, None, Some(best_shanten_after_discard));
+
+        Some(EarlyFoldDecision {
+            action,
+            source,
+            push_pull_inputs: inputs,
+            push_pull,
+        })
     }
 
     // 通常打牌選択。production selection は診断の有無にかかわらず、既存 forward_metrics の
@@ -1778,8 +1890,9 @@ mod tests {
             AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
         );
         assert_eq!(decision.action, defense);
-        assert_eq!(decision.normal_discard, Some(normal.clone()));
-        assert_ne!(decision.normal_discard, Some(decision.action.clone()));
+        // 二向聴以上の確定 Fold なので通常打牌選択そのものを行わない。選ばれた防御牌が通常打牌
+        // とは別の牌であることは、選択を通した参照値と比べて確認する。
+        assert_eq!(decision.normal_discard, None);
         assert_ne!(normal, defense);
         assert_eq!(decision.push_pull.map(|d| d.mode), Some(PushPullMode::Fold));
         assert_eq!(
@@ -1874,8 +1987,116 @@ mod tests {
             decision.source,
             AgentActionSource::DefenseFallback(DefenseFallbackKind::ExactRonRisk)
         );
-        assert_eq!(decision.normal_discard, Some(dahai(0)));
-        assert_ne!(decision.normal_discard, Some(decision.action.clone()));
+        // 二向聴以上の確定 Fold なので通常打牌選択は行わない。通常打牌 1m とは別の牌を選ぶ
+        // ことは、選択を通した参照値と比べて確認する。
+        assert_eq!(decision.normal_discard, None);
+        assert_eq!(select_discard_action(&ctx, &actions), Some(dahai(0)));
+    }
+
+    // ---- 通常打牌選択より前の確定 Fold ----
+
+    #[test]
+    fn early_fold_against_a_reach_skips_the_normal_discard_selection() {
+        let agent = ShantenAgent;
+        // 明確な threat に対する二向聴以上。防御 fallback が現物を選べるので、最終 action に
+        // 使わない通常打牌選択そのものを行わない。
+        let ctx = fold_under_reach_context();
+        let actions = fold_actions();
+        assert!(
+            legal_discard_evaluations(&ctx, &actions)
+                .best_shanten_after_discard()
+                .is_some_and(|shanten| shanten >= 2)
+        );
+
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::TwoOrMoreShantenAgainstReach,
+            })
+        );
+        assert_eq!(
+            decision.source,
+            AgentActionSource::DefenseFallback(DefenseFallbackKind::Genbutsu)
+        );
+        // 通常打牌も、2向聴 EV を含む攻撃評価も構築しない。
+        assert_eq!(decision.normal_discard, None);
+        assert_eq!(
+            decision.push_pull_inputs.and_then(|inputs| inputs.offense),
+            None
+        );
+        // 省略しても最終 action は既存の Fold 優先順位が選ぶ防御牌のまま。
+        assert_eq!(
+            Some(&decision.action),
+            select_defense_fallback_action(&ctx, &actions)
+        );
+    }
+
+    #[test]
+    fn iishanten_against_a_reach_keeps_the_expected_self_tsumo_value_policy() {
+        let agent = ShantenAgent;
+        // 単独の子リーチに対する一向聴。early Fold は適用せず、通常打牌選択が求めた
+        // ExpectedSelfTsumoValue で押し引きを決める既存 policy をそのまま通す。
+        let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
+        let ctx = opponent_reach_context(Some(116), &hand_values).with_table_state_facts(
+            crate::context::TableStateFacts {
+                remaining_tiles: Some(66),
+                ..Default::default()
+            },
+        );
+        let actions: Vec<LegalAction> = hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(116), dahai(16)])
+            .collect();
+
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::IishantenAgainstReach,
+            })
+        );
+        assert!(decision.normal_discard.is_some());
+        let offense = decision
+            .push_pull_inputs
+            .and_then(|inputs| inputs.offense)
+            .expect("攻撃評価を構築している");
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        // 一向聴の前方集計値まで通常打牌選択が求めている。この最小局面では打点が unknown なので
+        // ExpectedSelfTsumoValue 自体は確認できず、押さない既存 policy がそのまま適用される。
+        assert!(offense.iishanten_forward_metrics.is_some());
+        assert_eq!(offense.iishanten_expected_self_tsumo_value(), None);
+    }
+
+    #[test]
+    fn tenpai_against_a_reach_keeps_the_strong_tenpai_policy() {
+        let agent = ShantenAgent;
+        // 親リーチに対する強いテンパイ。early Fold は適用せず、通常打牌選択と強いテンパイ判定を
+        // 通してリーチを選ぶ。
+        let ctx = tenpai_under_reach_context(Some(1), [false, true, false, false]);
+        let actions = tenpai_actions();
+
+        let decision = agent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::StrongTenpaiAgainstReach,
+            })
+        );
+        assert_eq!(decision.action, LegalAction::Reach);
+        assert_eq!(decision.source, AgentActionSource::Reach);
+        assert!(decision.normal_discard.is_some());
+        assert_eq!(
+            decision
+                .push_pull_inputs
+                .and_then(|inputs| inputs.offense)
+                .map(|offense| offense.min_shanten_after_discard),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1888,6 +2109,14 @@ mod tests {
         assert_eq!(
             decide_push_pull(&push_pull_inputs_from_context(&ctx, &actions)).mode,
             PushPullMode::Fold
+        );
+        // 明確な threat と二向聴以上という early Fold の条件は満たすが、防御 fallback が action を
+        // 選べないので通常打牌選択を省略できない。
+        assert!(select_defense_fallback_action(&ctx, &actions).is_none());
+        assert!(
+            legal_discard_evaluations(&ctx, &actions)
+                .best_shanten_after_discard()
+                .is_some_and(|shanten| shanten >= 2)
         );
         let normal = select_discard_action(&ctx, &actions).unwrap();
         let decision = agent.decide(&ctx, &actions);

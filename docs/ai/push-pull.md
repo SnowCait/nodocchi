@@ -138,3 +138,26 @@ fixed meld のドラ・赤ドラ・役牌の判定は threat 側と同じ `meld_
 - `Fold`: 対応する防御 fallback → 通常打牌
 
 防御 fallback の target と safety は [防御](defense.md) を参照してください。
+
+## 通常打牌選択より前の確定 Fold
+
+`Fold` は防御 fallback を通常打牌より優先するので、防御 fallback が action を選べる限り、最終 action は通常打牌選択の結果に依存しません。二向聴以上の `Fold` は 2向聴 ExpectedSelfTsumoValue も受け入れも見ないため、通常打牌選択を先に行っても最終 action には使いません。
+
+そこで production の `act()` は、次の3つを通常打牌選択より前に確認できた場合だけ、通常打牌選択そのものを省略します。
+
+1. 明確な threat がいる
+2. 合法打牌候補の最善向聴が二向聴以上
+3. その threat 構成に対応する防御 fallback が action を選べる
+
+向聴数は合法打牌候補の既存の1手評価 (`min_shanten_after_discard`) の最小値だけを使います。選ばれる打牌の向聴数は必ずこの値以上になるので、この値が二向聴以上なら選択結果によらず判断は同じです。2向聴 ExpectedSelfTsumoValue も前方探索も打点計算も行いません。
+
+判定は押し引き側の同じ helper を通り、threat の分類も `TwoOrMoreShantenAgainst*` reason も変わりません。省略しても mode・reason・最終 action・防御 fallback の種別は従来と同じです。
+
+次の局面では省略せず、従来どおり通常打牌選択から判断します。
+
+- 明確な threat がいない
+- 最善向聴が一向聴以下 (テンパイの強いテンパイ例外と一向聴の ExpectedSelfTsumoValue 例外があるため)
+- 防御 fallback が action を選べない
+- 構造化診断を構築する経路 (`diagnose()` は通常打牌候補と choice 1/2/3 を表示するため、通常打牌選択そのものを必要とする)
+
+`diagnose()` は従来どおり通常打牌選択まで通すので、`diagnose(...).selected_action == act(...)` は変わりません。省略した局面では `PushPullInputs::offense` を構築しないため、押し引きの opt-in ログは `offense_*` を `None` にし、判断に使った合法打牌候補の最善向聴を `early_fold_best_shanten_after_discard` に出します。ログのために攻撃評価を追加で構築することはありません。

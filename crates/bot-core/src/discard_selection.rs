@@ -99,6 +99,26 @@ pub(crate) struct DiscardActionSelection {
     pub tenpai_reach_timing: Option<ReachTimingDiagnostic>,
 }
 
+impl DiscardActionSelection {
+    /// 通常打牌をまだ選んでいない状態。
+    ///
+    /// 明確な threat に対する確定 Fold を通常打牌選択より前に判定する経路が、既存の Fold
+    /// action 優先順位 (防御 fallback → 通常打牌) へ「通常打牌なしで決まるか」を問い合わせる
+    /// ために使う。通常打牌が必要な局面では選択結果が `None` になり、呼び出し側は従来どおり
+    /// 通常打牌選択へ戻る。
+    pub(crate) fn not_selected() -> Self {
+        Self {
+            evaluation: None,
+            action: None,
+            iishanten_forward_metrics: None,
+            tenpai_wait: None,
+            tenpai_offense_value: None,
+            damaten_value: None,
+            tenpai_reach_timing: None,
+        }
+    }
+}
+
 /// 2手先診断をどこまで構築するか。
 ///
 /// どの指定でも打牌選択の結果は変わらない。追加の深い探索ほど重くなるため、必要な経路が明示的に
@@ -225,6 +245,17 @@ pub(crate) struct DiscardActionSelectionWithDiagnostic {
 pub(crate) struct LegalDiscardEvaluations {
     pub(crate) tiles: Vec<TileId>,
     pub(crate) evaluations: Vec<DiscardEvaluation>,
+}
+
+impl LegalDiscardEvaluations {
+    /// 合法打牌候補の最善向聴数。合法候補が無ければ `None`。
+    ///
+    /// 既存の1手評価が持つ値の最小値そのままで、ここで数え直さない。production selection は
+    /// この集合から1件を選ぶので、選ばれる打牌の `min_shanten_after_discard` は必ずこの値以上に
+    /// なる。
+    pub(crate) fn best_shanten_after_discard(&self) -> Option<i8> {
+        best_shanten_after_discard(&self.evaluations)
+    }
 }
 
 // 打牌選択に使う前方集計値。`evaluations` と同じ順序・同じ件数で、前方評価を
