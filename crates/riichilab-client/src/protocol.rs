@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(json, r#"{"type":"hora","actor":0}"#);
     }
 
-    // RiichiEnv v0.4.10 の Action::to_mjai() は type / actor / pai / consumed のみを出力し、
+    // RiichiEnv の Action::to_mjai() は type / actor / pai / consumed のみを出力し、
     // Bot-to-Server action JSON に target を含めない。
     #[test]
     fn chi_serializes_without_target() {
