@@ -451,8 +451,8 @@ fn run_production_selection(
 pub(crate) struct IishantenContinuationSettings {
     /// 1向聴 state の continuation が手変わりを何回まで許すか。
     pub(crate) depth: SameShantenContinuationDepth,
-    /// 探索内の同一 state memo を局面に依らず有効にするか。`false` では production の判断
-    /// ([`production_lookahead_inputs`]) のまま。
+    /// 1向聴の局面で探索内の同一 state memo を有効にするか。`false` では既存の判断
+    /// ([`production_lookahead_inputs`]) のまま。2向聴・3向聴の memo 条件はこの指定に依らない。
     pub(crate) search_state_memo: bool,
     /// 探索規模を計上するか。値も枝も選択も変わらない。
     pub(crate) search_stats: bool,
@@ -524,11 +524,15 @@ fn parallel_forward_workers(
     continuation: IishantenContinuationSettings,
 ) -> Option<NonZeroUsize> {
     let workers = continuation.forward_workers?;
-    let best_shanten = evaluations
+    (best_shanten_after_discard(evaluations) == Some(IISHANTEN_SHANTEN)).then_some(workers)
+}
+
+/// 候補集合の最善向聴数。既存の1手評価が持つ値の最小値そのままで、ここで数え直さない。
+fn best_shanten_after_discard(evaluations: &[DiscardEvaluation]) -> Option<i8> {
+    evaluations
         .iter()
         .map(DiscardEvaluation::min_shanten_after_discard)
-        .min();
-    (best_shanten == Some(IISHANTEN_SHANTEN)).then_some(workers)
+        .min()
 }
 
 /// この runtime で使える並列度。取得できない環境では 1 として扱い、逐次評価相当へ落ちる。
@@ -1782,9 +1786,12 @@ pub(crate) fn lookahead_inputs<'a>(
 
 /// 通常打牌選択が使う lookahead 入力。
 ///
-/// 最善向聴数が3向聴の局面だけ、3向聴 Progress 評価の同一 state / continuation を共有する
-/// memo を持たせる。それ以外の局面の入力は [`lookahead_inputs`] と同じで、既存 selection の
-/// 探索も値も変わらない。
+/// 探索内の同一 state memo を持たせるのは、最善向聴数が3向聴の局面 (3向聴 Progress 評価の
+/// 同一 state / continuation を共有する既存条件) と、1向聴で `continuation` が exact memo を
+/// 要求した局面 (追加深度 B の production 設定) だけ。2向聴の入力は [`lookahead_inputs`] と
+/// 同じままで、探索も値も memo の共有範囲も変わらない。
+///
+/// memo が共有するのは同じ入力に必ず同じ値を返す純関数の結果だけなので、有無で値は変わらない。
 fn production_lookahead_inputs<'a>(
     context: &'a GameContext,
     tiles: &'a [TileId],
@@ -1800,13 +1807,11 @@ fn production_lookahead_inputs<'a>(
     } else {
         inputs
     };
-    if continuation.search_state_memo
-        || evaluations
-            .iter()
-            .map(DiscardEvaluation::min_shanten_after_discard)
-            .min()
-            == Some(SANSHANTEN_SHANTEN)
-    {
+    let best_shanten = best_shanten_after_discard(evaluations);
+    let use_search_state_memo = (best_shanten == Some(IISHANTEN_SHANTEN)
+        && continuation.search_state_memo)
+        || best_shanten == Some(SANSHANTEN_SHANTEN);
+    if use_search_state_memo {
         inputs.with_search_state_memo()
     } else {
         inputs
@@ -2679,6 +2684,78 @@ pub(crate) mod tests {
                 "{workers}",
             );
         }
+    }
+
+    #[test]
+    fn the_production_exact_memo_reaches_the_one_shanten_selection_only() {
+        // 追加深度 B が要求する exact same-state memo は1向聴の局面だけに入る。3向聴は既存条件で
+        // memo を持ち、2向聴は従来どおり memo を作らない。
+        let metrics = |context: &GameContext, legal: &LegalDiscardEvaluations| {
+            production_selection_metrics_instrumented(
+                context,
+                &legal.tiles,
+                &legal.evaluations,
+                PRODUCTION_THREE_SHANTEN_CONTINUATION,
+                IishantenContinuationSettings {
+                    search_stats: true,
+                    ..production_iishanten_continuation_settings()
+                },
+                &mut NormalDiscardPhaseTimer::disabled(),
+            )
+        };
+
+        // 1向聴: production の設定が exact memo を要求するので、利用数が観測できる。
+        let (context, actions) = same_shanten_next_discard_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(
+            best_shanten_after_discard(&legal.evaluations),
+            Some(IISHANTEN_SHANTEN),
+        );
+        let iishanten = metrics(&context, &legal);
+        assert!(memo_use_count(&iishanten.memo) > 0);
+        assert!(iishanten.memo.next_discard_misses > 0);
+
+        // 2向聴: memo を作らない。2向聴から1向聴へ進む枝は実際に評価しているので、memo が
+        // あれば利用数が立つ。既定値のままなのは memo 自体が無いことを意味する。
+        let (context, actions) = two_shanten_ev_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(best_shanten_after_discard(&legal.evaluations), Some(2));
+        let two_shanten = metrics(&context, &legal);
+        assert!(two_shanten.search.two_to_one_variants > 0);
+        assert_eq!(memo_use_count(&two_shanten.memo), 0);
+
+        // 3向聴: 既存条件のまま memo を持つ。
+        let (context, actions) = three_shanten_progress_regression_context();
+        let legal = legal_discard_evaluations(&context, &actions);
+        assert_eq!(
+            best_shanten_after_discard(&legal.evaluations),
+            Some(SANSHANTEN_SHANTEN),
+        );
+        let three_shanten = metrics(&context, &legal);
+        assert!(memo_use_count(&three_shanten.memo) > 0);
+    }
+
+    // 同一 state memo の利用数の合計。memo を持たない入力では 0 のままになる。field を分解して
+    // 受けるため、計上が増えたら足し忘れが compile error になる。
+    fn memo_use_count(memo: &SearchStateMemoStats) -> u64 {
+        let SearchStateMemoStats {
+            two_shanten_hits,
+            two_shanten_misses,
+            iishanten_hits,
+            iishanten_misses,
+            next_discard_hits,
+            next_discard_misses,
+            same_shanten_next_discard_hits,
+            same_shanten_next_discard_misses,
+        } = *memo;
+        two_shanten_hits
+            + two_shanten_misses
+            + iishanten_hits
+            + iishanten_misses
+            + next_discard_hits
+            + next_discard_misses
+            + same_shanten_next_discard_hits
+            + same_shanten_next_discard_misses
     }
 
     #[test]
