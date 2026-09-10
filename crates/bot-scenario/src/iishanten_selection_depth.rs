@@ -8,6 +8,11 @@
 //! 打牌。深く評価される候補も、unknown の軸解決も、比較理由も production selection が使った
 //! ものそのままで、表示のために比較をやり直さない。
 //!
+//! 方式ごとに run を2本取る。`elapsed` は instrumentation を持たない計測 run のもので、
+//! production selection に無い観測コスト (探索規模の RefCell counter 更新と phase timer) を
+//! 含まない。cohort・ExpectedSelfTsumoValue・search / memo / phase の stats は、それらを有効に
+//! した観測 run のもの。2本の run は同じ純粋な探索なので選択も cohort も値も一致する。
+//!
 //! B は追加深度と exact same-state memo を一緒に有効にするため、A -> B の elapsed 差は深度だけ
 //! の差ではない。同じ memo 条件へ揃えた純粋な深度比較は
 //! `--iishanten-continuation-depth-comparison` が全候補評価として持っている。
@@ -16,7 +21,8 @@ use std::time::Duration;
 
 use bot_core::{
     IishantenSelectionDepthCandidate, IishantenSelectionDepthComparison,
-    IishantenSelectionDepthDecision, compare_iishanten_selection_depths,
+    IishantenSelectionDepthDecision, IishantenSelectionDepthRun,
+    compare_iishanten_selection_depths,
 };
 use bot_logic::{SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
 
@@ -39,7 +45,14 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
         "  only candidates tied through the pre-acceptance axes (Shanten -> IsolatedTile -> \
          IsolatedHonor) are evaluated deeply"
             .to_string(),
-        "  each depth is measured on its own fresh thread, so neither warms the other".to_string(),
+        "  each depth runs twice, each run on its own fresh thread so that none warms another's \
+         thread-local memos: an observation run with the search-size counters and the phase timer \
+         enabled, then a timing run with no instrumentation at all"
+            .to_string(),
+        "  elapsed comes from the timing run only, taken after the observation run so that the \
+         process is warm the way it is during a match; the cohort, the values and the search / \
+         memo / phase stats come from the observation run"
+            .to_string(),
         "  B changes the depth and the exact same-state memo together, so A -> B elapsed is not \
          the depth alone; the same-memo depth-only comparison is \
          --iishanten-continuation-depth-comparison"
@@ -56,47 +69,57 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
 }
 
 fn format_decision(decision: &IishantenSelectionDepthDecision) -> Vec<String> {
-    let deep = decision.deep_evaluated_candidates();
+    let observation: &IishantenSelectionDepthRun = &decision.observation;
+    let deep = observation.deep_evaluated_candidates();
     let mut lines = vec![
         decision.depth.label().to_string(),
         format!("  selected discard: {}", format_selected(decision)),
         format!(
             "  selected ExpectedSelfTsumoValue: {}",
-            format_value(decision.selected_expected_self_tsumo_value()),
+            format_value(observation.selected_expected_self_tsumo_value()),
         ),
         format!(
             "  deep evaluation candidates: {} of {} ({})",
             deep.len(),
-            decision.candidates.len(),
+            observation.candidates.len(),
             format_tiles(&deep),
         ),
         format!(
             "  ExpectedSelfTsumoValue determined: {}, compared by the selection: {}",
-            decision.evaluated_expected_self_tsumo_value_count(),
-            decision.compared_expected_self_tsumo_value_count(),
+            observation.evaluated_expected_self_tsumo_value_count(),
+            observation.compared_expected_self_tsumo_value_count(),
         ),
         format!(
-            "  total selection elapsed: {}",
-            format_duration(decision.elapsed),
+            "  total selection elapsed (timing run, no instrumentation): {}",
+            format_duration(decision.elapsed()),
         ),
         format!(
-            "  phases: base evaluation {}, forward metrics {}, selection finalize {}",
-            format_duration(decision.phases.base_evaluation),
-            format_duration(decision.phases.forward_metrics),
-            format_duration(decision.phases.selection_finalize),
+            "  observation run elapsed (search-size counters and phase timer enabled): {}",
+            format_duration(observation.elapsed),
         ),
-        "  candidates".to_string(),
+        format!(
+            "  timing run and observation run agree on the selection: {}",
+            decision.runs_agree(),
+        ),
+        format!(
+            "  observation run phases: base evaluation {}, forward metrics {}, selection \
+             finalize {}",
+            format_duration(observation.phases.base_evaluation),
+            format_duration(observation.phases.forward_metrics),
+            format_duration(observation.phases.selection_finalize),
+        ),
+        "  candidates (observation run)".to_string(),
     ];
-    for candidate in &decision.candidates {
+    for candidate in &observation.candidates {
         lines.push(format!("    {}", format_candidate(candidate)));
     }
-    lines.push("  search size".to_string());
+    lines.push("  search size (observation run)".to_string());
     for (label, value) in SEARCH_COUNTERS {
-        lines.push(format!("    {label}: {}", value(&decision.search)));
+        lines.push(format!("    {label}: {}", value(&observation.search)));
     }
-    lines.push("  same-state memo".to_string());
+    lines.push("  same-state memo (observation run)".to_string());
     for (label, value) in MEMO_COUNTERS {
-        lines.push(format!("    {label}: {}", value(&decision.memo)));
+        lines.push(format!("    {label}: {}", value(&observation.memo)));
     }
     lines
 }
@@ -178,16 +201,29 @@ fn format_delta(comparison: &IishantenSelectionDepthComparison) -> Vec<String> {
         format!("  same discard: {}", comparison.selects_the_same_discard()),
         format!(
             "  deep evaluation candidates: {} -> {} (same cohort: {})",
-            comparison.production.deep_evaluated_candidates().len(),
-            comparison.twice.deep_evaluated_candidates().len(),
+            comparison
+                .production
+                .observation
+                .deep_evaluated_candidates()
+                .len(),
+            comparison
+                .twice
+                .observation
+                .deep_evaluated_candidates()
+                .len(),
             comparison.shares_the_deep_evaluated_candidates(),
+        ),
+        format!(
+            "  every timing run and observation run agrees: {}",
+            comparison.runs_agree(),
         ),
         String::new(),
         "ExpectedSelfTsumoValue A -> B".to_string(),
     ];
-    for candidate in &comparison.production.candidates {
+    for candidate in &comparison.production.observation.candidates {
         let twice = comparison
             .twice
+            .observation
             .candidate(candidate.discard)
             .and_then(|candidate| candidate.evaluated_expected_self_tsumo_value);
         lines.push(format!(
@@ -201,19 +237,19 @@ fn format_delta(comparison: &IishantenSelectionDepthComparison) -> Vec<String> {
     lines.push(String::new());
     lines.push("Cost A -> B".to_string());
     lines.push(format!(
-        "  total selection elapsed: {} -> {} ({})",
-        format_duration(comparison.production.elapsed),
-        format_duration(comparison.twice.elapsed),
-        format_slowdown(comparison.production.elapsed, comparison.twice.elapsed),
+        "  total selection elapsed (timing runs): {} -> {} ({})",
+        format_duration(comparison.production.elapsed()),
+        format_duration(comparison.twice.elapsed()),
+        format_slowdown(comparison.slowdown()),
     ));
     for (label, value) in SEARCH_COUNTERS {
-        let a = value(&comparison.production.search);
-        let b = value(&comparison.twice.search);
+        let a = value(&comparison.production.observation.search);
+        let b = value(&comparison.twice.observation.search);
         lines.push(format!("  {label}: {a} -> {b} ({})", format_ratio(a, b)));
     }
     for (label, value) in MEMO_COUNTERS {
-        let a = value(&comparison.production.memo);
-        let b = value(&comparison.twice.memo);
+        let a = value(&comparison.production.observation.memo);
+        let b = value(&comparison.twice.observation.memo);
         lines.push(format!("  {label}: {a} -> {b} ({})", format_ratio(a, b)));
     }
     lines
@@ -242,14 +278,11 @@ fn format_duration(duration: Duration) -> String {
 }
 
 // A / B の比。A が 0 の場合は比を作れないので出さない。
-fn format_slowdown(production: Duration, twice: Duration) -> String {
-    if production.is_zero() {
-        return "slowdown n/a".to_string();
+fn format_slowdown(slowdown: Option<f64>) -> String {
+    match slowdown {
+        Some(slowdown) => format!("slowdown {slowdown:.3}x"),
+        None => "slowdown n/a".to_string(),
     }
-    format!(
-        "slowdown {:.3}x",
-        twice.as_secs_f64() / production.as_secs_f64()
-    )
 }
 
 fn format_ratio(production: u64, twice: u64) -> String {

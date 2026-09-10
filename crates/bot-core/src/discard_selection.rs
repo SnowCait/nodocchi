@@ -484,12 +484,17 @@ pub(crate) struct IishantenContinuationSelection {
 ///
 /// 3向聴軸の scope は production のまま。診断は選択が終わってから、選択が使った集計値だけで
 /// 構築するので、`elapsed` にも `phases` にも入らない。
+///
+/// `timing` は呼び出し側が選ぶ。`NormalDiscardPhaseTimer::disabled()` を渡した run は
+/// `Instant` を一切取らないため、`elapsed` は production selection が実際に払うコストだけに
+/// なる。`IishantenContinuationSettings::search_stats` も同じく `false` のままにすると、
+/// 探索規模の計上も `elapsed` に入らない。
 pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
     context: &GameContext,
     legal_actions: &[LegalAction],
     continuation: IishantenContinuationSettings,
+    mut timing: NormalDiscardPhaseTimer,
 ) -> IishantenContinuationSelection {
-    let mut timing = NormalDiscardPhaseTimer::started();
     let started = Instant::now();
     let run = run_production_selection(
         context,

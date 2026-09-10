@@ -69,14 +69,16 @@ pub const USAGE: &str = "usage:
   with one extra hand-change step (SameShanten -> SameShanten -> Progress), and reports
   both sets of values, the ranking, the search size and the elapsed time; production
   discard selection is unchanged and it cannot be combined with other diagnostic options
-  --iishanten-selection-depth-comparison runs the production discard selection twice, once
-  with the production continuation depth and once with one extra hand-change step plus the
-  exact same-state memo, and reports the discard each one selects, the candidates the
-  existing gating evaluates deeply, the comparison reasons, the search size and the elapsed
-  time; unlike --iishanten-continuation-depth-comparison it measures the whole comparator
-  instead of ranking the axis alone, so the A -> B elapsed difference is not the depth
-  alone; production discard selection is unchanged and it cannot be combined with other
-  diagnostic options
+  --iishanten-selection-depth-comparison runs the production discard selection with the
+  production continuation depth and with one extra hand-change step plus the exact
+  same-state memo, and reports the discard each one selects, the candidates the existing
+  gating evaluates deeply, the comparison reasons, the search size and the elapsed time;
+  each depth runs twice, a timing run with no instrumentation the elapsed time comes from
+  and an observation run with the search-size counters and the phase timer the cohort,
+  values and stats come from; unlike --iishanten-continuation-depth-comparison it measures
+  the whole comparator instead of ranking the axis alone, so the A -> B elapsed difference
+  is not the depth alone; production discard selection is unchanged and it cannot be
+  combined with other diagnostic options
   --compare-three-shanten-continuation replays every captured request_action, runs the same
   A/B comparison on the requests where the three-shanten axis fires, and reports latency,
   search size and selection differences; it takes all following capture paths and cannot be

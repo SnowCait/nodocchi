@@ -108,8 +108,8 @@ pub use iishanten_continuation_depth_comparison::{
 };
 pub use iishanten_selection_depth_comparison::{
     IishantenSelectionDepth, IishantenSelectionDepthCandidate, IishantenSelectionDepthComparison,
-    IishantenSelectionDepthDecision, compare_iishanten_selection_depths,
-    decide_with_iishanten_selection_depth,
+    IishantenSelectionDepthDecision, IishantenSelectionDepthRun,
+    compare_iishanten_selection_depths, decide_with_iishanten_selection_depth,
 };
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
