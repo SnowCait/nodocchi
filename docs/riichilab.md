@@ -46,6 +46,12 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 
 ## Logging
 
+起動時の INFO log に、実行 binary を後から特定するための `version` (`CARGO_PKG_VERSION`) と `git_revision` (build 時の Git commit SHA) を記録します。Git repository でない環境や `git` が利用できない環境で build した場合は `git_revision=unknown` になります。
+
+```text
+starting riichilab-client version=0.1.0 git_revision=896a6ef94a00b45f4e14af6064f42439af150559
+```
+
 `RUST_LOG` を指定せずに起動した場合、console は従来どおり `info` だけを表示します。`--log-file <PATH>` を指定すると、console を静かに保ったまま file 側へ判断調査用 preset を自動適用します。
 
 | 出力先 | `RUST_LOG` 未指定時の filter |

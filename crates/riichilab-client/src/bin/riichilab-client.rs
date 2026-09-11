@@ -27,6 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    info!(
+        version = %env!("CARGO_PKG_VERSION"),
+        git_revision = %env!("GIT_REVISION"),
+        "starting riichilab-client"
+    );
+
     let (capture, _capture_guard) = match capture::init(args.capture_file.as_deref()) {
         Ok(capture) => capture.unzip(),
         Err(error) => {
