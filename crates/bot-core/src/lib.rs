@@ -33,6 +33,7 @@ pub mod tenpai_scoring;
 pub mod threat;
 pub mod three_shanten_continuation_comparison;
 pub mod three_shanten_self_tsumo_cost;
+pub mod two_shanten_full_parallel_comparison;
 pub mod two_shanten_self_tsumo_cost;
 
 pub use action::LegalAction;
@@ -117,6 +118,13 @@ pub use iishanten_selection_parallel_comparison::{
     IishantenSelectionParallelRun, IishantenSelectionParallelism,
     compare_iishanten_selection_parallelism, decide_with_iishanten_selection_parallelism,
 };
+pub use two_shanten_full_parallel_comparison::{
+    TwoShantenFullParallelCandidate, TwoShantenFullParallelComparison,
+    TwoShantenFullParallelDecision, TwoShantenFullParallelRun, TwoShantenFullParallelism,
+    compare_two_shanten_full_parallelism, decide_with_two_shanten_full_parallelism,
+    select_with_two_shanten_full_parallelism, two_shanten_full_parallelism_is_available,
+};
+
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{

@@ -376,6 +376,55 @@ impl TwoShantenSelfTsumoObserver for TwoShantenSelfTsumoTimer {
     }
 }
 
+/// 逐次の候補境界では表せない、既に計測済みの候補1件分の実測を受け取る観測器。
+///
+/// bot-logic の [`TwoShantenSelfTsumoObserver`] は「次の候補へ入った」という境界だけを受け取る
+/// ため、同時に評価した候補の内訳を表せない。並行に評価する側は worker ごとに elapsed を独立
+/// して計り、join したあとに候補 index 順でこの入口から反映する。bot-logic 側の純粋な評価は
+/// この trait を知らず、thread 前提にもならない。
+pub(crate) trait TwoShantenFullSelfTsumoObserver: TwoShantenSelfTsumoObserver {
+    /// 候補ごとの実測を受け取るか。`false` の観測器へ渡す run は `Instant` を一切取らない。
+    fn measures_candidates(&self) -> bool;
+
+    /// 直前に入った候補の区切りを、いま閉じる。並行評価へ入る前に呼び、worker の待ち時間が
+    /// 直前の候補の実測へ入らないようにする。
+    fn close_candidate(&mut self);
+
+    /// 別 thread で計り終えた候補1件分の実測を反映する。呼ぶ順が候補 index 順。
+    fn record_candidate(&mut self, discard: TileType, elapsed: Duration);
+}
+
+/// 計測しない経路。境界と同じく何も持たない。
+impl TwoShantenFullSelfTsumoObserver for () {
+    fn measures_candidates(&self) -> bool {
+        false
+    }
+
+    fn close_candidate(&mut self) {}
+
+    fn record_candidate(&mut self, _discard: TileType, _elapsed: Duration) {}
+}
+
+impl TwoShantenFullSelfTsumoObserver for TwoShantenSelfTsumoTimer {
+    fn measures_candidates(&self) -> bool {
+        self.state.is_some()
+    }
+
+    fn close_candidate(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.flush_at(Instant::now());
+        }
+    }
+
+    fn record_candidate(&mut self, discard: TileType, elapsed: Duration) {
+        if let Some(state) = self.state.as_mut() {
+            state
+                .elapsed
+                .push(TwoShantenSelfTsumoCandidateDuration { discard, elapsed });
+        }
+    }
+}
+
 impl TwoShantenSelfTsumoTimerState {
     fn flush_at(&mut self, now: Instant) {
         if let Some((discard, since)) = self.current.take() {

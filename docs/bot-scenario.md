@@ -33,6 +33,7 @@ cargo run -p bot-scenario -- \
 | `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = production / B: 2回まで) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
 | `--iishanten-selection-depth-comparison` | 任意 | 同じ深度 A/B を production comparator を通した最終打牌選択として比較。A は legacy shallow depth (旧 production)、B は現行 production depth (SameShanten 2回まで + exact same-state memo)。他の診断 option と併用不可 |
 | `--iishanten-selection-parallel-comparison` | 任意 | 同じ production B depth を逐次 / 候補単位並列で比較 (S / P2 / P4 / PA = `available_parallelism`)。候補の絞り込み・軸解決・comparator・選択打牌は既存 production selection をそのまま使う。PA が現行 production と同じ方式。他の診断 option と併用不可 |
+| `--two-shanten-full-parallel-comparison` | 任意 | 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価を逐次 / 2並列で比較 (S / P2)。Progress cohort・上位2候補の選び方・gate・comparator・選択打牌は既存 production selection をそのまま使う。P2 が現行 production と同じ方式。他の診断 option と併用不可 |
 | `--verbose` | 任意 | 通常打牌候補の詳細を追加 |
 
 簡易 `--hand` CLI は、すぐに「何切る」を確認できるよう、option 未指定時に次の deterministic baseline を使用します。
@@ -206,6 +207,27 @@ cargo run --release -p bot-scenario -- \
 worker はそれぞれ自分の探索基盤を持つため、逐次評価では候補間で共有できていた base 評価 memo・同一 state memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増え得るので、出力には方式ごとの `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。
 
 **production の打牌選択は PA と同じ方式です。** 実際に使う worker 数は `min(available_parallelism, 深く評価する候補数)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。候補を分けるのは最善向聴数が1向聴の局面だけで、2向聴・3向聴の前方集計値は従来どおり逐次評価のままです。S / P2 / P4 は PA を比べるための baseline として残ります。他の診断 option とは併用できません。
+
+### 2向聴 Full pair の並列比較
+
+`--two-shanten-full-parallel-comparison` は、2向聴の production selection で **ドラ差 gate を通った provisional 上位2候補の Full 追加評価をどう実行するか** だけを変えた方式を比較する診断 option です。Progress-first も ForwardTargets cohort も上位2候補の選び方も Full gate も comparator も Full 値の意味も変わりません。
+
+```text
+S   gate を通った2候補を1本の LookaheadInputs で逐次評価
+P2  その2候補を min(2, available_parallelism) worker で並列評価 (現行 production と同じ方式)
+```
+
+並列にするのは gate を通った2候補の Full 追加評価だけです。候補1件の Full 値はその候補の打牌評価と探索設定と、Progress 段で確定済みの寄与だけで決まる純関数で、探索内の memo は同じ入力に同じ値を返す cache でしかありません。結果は pair index へ書き戻すため thread の終了順にも worker 数にも依らず、2候補の Full `ExpectedSelfTsumoValue`・最終 selected index・選択打牌・比較理由は S / P2 で bit-exact に一致します (`bit-exact with the sequential mode`)。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  crates/bot-scenario/scenarios/two_shanten_dora_gate_chun.json \
+  --two-shanten-full-parallel-comparison
+```
+
+worker はそれぞれ自分の探索基盤を持つため、逐次評価では Progress 段で暖まっていた base 評価 memo・構造評価 memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増えるので、出力には `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。
+
+**production の打牌選択は P2 と同じ方式です。** Full 追加評価の対象は常に provisional 上位2候補だけなので、要求する worker 数の上限も `min(2, available_parallelism)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。ドラ差 gate が発火しない局面では Full 追加評価そのものが走らないので、thread も分けません。Progress cohort の評価は従来どおり逐次のままです。S は P2 を比べるための baseline として残ります。他の診断 option とは併用できません。
 
 ### --allow-ryukyoku
 
@@ -522,13 +544,13 @@ Hora などで早期 return した request は、到達しなかった phase が
 | --- | --- |
 | `base` | 合法打牌候補の生成と、向聴 / 受け入れなどの基本評価 |
 | `forward` | 通常の forward lookahead と、その探索済み枝からの集計 |
-| `two_shanten_self_tsumo` | production comparator の2向聴 Progress-first 評価と、ドラ差 gate 対象 pair の Full 追加評価。total と実際の評価区切りごとの時間を表示する |
+| `two_shanten_self_tsumo` | production comparator の2向聴 Progress-first 評価と、ドラ差 gate 対象 pair の Full 追加評価。total と実際の評価区切りごとの時間を表示する。gate 対象 pair の Full 追加評価は並列に走るため、候補別時間の合計は total を超え得る |
 | `three_shanten_self_tsumo` | production comparator の3向聴 Progress-only self-tsumo 評価 |
 | `finalize` | 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定 |
 
 5つの合計は同じ request の `normal_discard` を超えません。2向聴 EV を実行しない request では `two_shanten_self_tsumo` は 0、候補 timing は空のままです。3向聴 Progress 評価を実行しない request では `three_shanten_self_tsumo` は 0 のままです。通常打牌選択を通らなかった request では全 subphase が 0 のままです。`early` / `post_discard` の内部は細分化していません。
 
-`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。候補の内部型は bot-core の public API へ公開しません。
+`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。Full 追加評価の2件は並列に走るため、それぞれの elapsed は worker が独立に計った実測で、候補 timing の合計は `two_shanten_self_tsumo` phase を超え得ます。候補の内部型は bot-core の public API へ公開しません。
 
 `forward` はさらに前方集計値の内部処理別へ分けます。こちらも既存の処理境界そのままで、探索する枝も scoring も集計も変えません。
 
@@ -567,7 +589,7 @@ Slowest requests
 
 percentile は nearest-rank です。昇順に並べた `n` 件について順位 `ceil(p / 100 * n)` の値をそのまま採用し、補間しません。threshold の件数は閾値を厳密に超えた request だけを数えます。`selected` は計測した production decision そのものです。
 
-`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳で、`normal_discard` の括弧内はその内訳、`forward` の角括弧内はさらにその内訳です。2向聴 EV は total の後に、実際に評価した `ForwardTargets` の候補数と `discard=elapsed` を表示し、その後に3向聴 Progress 評価の total を表示します。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
+`Slowest requests` は elapsed 降順に最大20件表示します。`early` / `normal_discard` / `post_discard` は同じ request の phase 別内訳で、`normal_discard` の括弧内はその内訳、`forward` の角括弧内はさらにその内訳です。2向聴 EV は total の後に、実際に評価した `ForwardTargets` の候補数と `discard=elapsed` を表示し、その後に3向聴 Progress 評価の total を表示します。`candidates` の件数と `discard=elapsed` には、ドラ差 gate を通った上位2候補の Full 追加評価が Progress の区切りとは別に並びます。この2件は並列に走る独立した実測なので、`candidates` の合計は `two_shanten_self_tsumo` を超え得ます。同じ局面は `--riichilab-capture` と `--request-id` で再調査できます。
 
 ```bash
 ./target/release/bot-scenario \

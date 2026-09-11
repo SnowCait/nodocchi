@@ -168,7 +168,7 @@ cohort に値を確定できない候補が1件でもある場合はこの軸を
 
 追加深度に合わせて、探索内の同一 state memo (`SearchStateMemo`) を1向聴 continuation でも常に有効にし、深い前方評価の対象になった候補 (pre-acceptance 軸まで同順位の cohort) を候補単位で複数 worker に分けて評価します。worker の上限は `std::thread::available_parallelism()` で、実際に使う数は `min(available_parallelism, 深く評価する候補数)` です。`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。固定 worker 数は持ちません。
 
-候補を分けるのは**最善向聴数が1向聴の局面だけ**です。2向聴・3向聴の前方集計値は従来どおり1本の探索基盤を候補間で共有したまま逐次で求め、memo の共有範囲も総仕事量も latency も変えていません。
+候補を分けるのは**最善向聴数が1向聴の局面だけ**です。2向聴・3向聴の前方集計値は従来どおり1本の探索基盤を候補間で共有したまま逐次で求め、memo の共有範囲も総仕事量も latency も変えていません。2向聴の Full 追加評価だけは別の入口で分けます ([gate 対象 pair の Full 追加評価の並列化](#gate-対象-pair-の-full-追加評価の並列化))。
 
 分けるのは「どの候補をどの worker が評価するか」だけです。候補1件の前方集計値はその候補の打牌評価と探索設定だけで決まる純関数で、探索内 memo は同じ入力に同じ値を返す cache でしかありません。結果は候補 index へ書き戻すため、worker 数にも thread の終了順にも依りません。したがって候補ごとの `ExpectedSelfTsumoValue`・cohort 単位の unknown 軸解決・比較理由・選ばれた打牌は、逐次評価と bit-exact に一致します。
 
@@ -286,6 +286,34 @@ cohort 全候補の Progress-only 値を確定できない場合はその軸を�
 `act()` は通常打牌選択そのものを行わないため、この軸も評価しません。条件は
 [押し引き](push-pull.md#通常打牌選択より前の確定-fold) を参照してください。`diagnose()` は従来どおり
 通常打牌選択まで通します。
+
+### gate 対象 pair の Full 追加評価の並列化
+
+ドラ差 gate を通った provisional 上位2候補の Full 追加評価は、この2候補だけを worker へ分けて
+並列に評価します。worker の上限は `min(2, available_parallelism)` で、Full 対象が常に2候補
+なので2を超えません。`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ
+落ちます。固定 worker 数は持ちません。gate が発火しない局面では Full 追加評価そのものが走らない
+ので、thread も分けません。
+
+分けるのは「どちらの候補をどの worker が評価するか」だけです。ForwardTargets cohort の
+Progress-only 評価は従来どおり1本の探索基盤で逐次に行い、上位2候補の選び方も gate も comparator
+も変わりません。候補1件の Full 値はその候補の打牌評価と探索設定と、Progress 段で確定済みの寄与
+だけで決まる純関数で、探索内 memo は同じ入力に同じ値を返す cache でしかありません。結果は pair
+index へ書き戻すため、worker 数にも thread の終了順にも依りません。したがって2候補の Full
+`ExpectedSelfTsumoValue`・最終 selected index・選ばれた打牌・比較理由は、逐次評価と bit-exact に
+一致します。
+
+worker はそれぞれ自分の探索基盤を持つため、逐次評価では Progress 段で暖まっていた base 評価
+memo・構造評価 memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。
+wall-clock は縮む一方で総仕事量は増えます。S / P2 の実測と総仕事量の差は bot-scenario の
+[2向聴 Full pair の並列比較](../bot-scenario.md#2向聴-full-pair-の並列比較) で観測できます。この
+分け方は `bot-core` の orchestration 側だけが持ち、`bot-logic` の純粋な評価は platform threading
+を前提にしません。timeout・cutoff・shallow fallback・pruning・top-N・threshold といった近似は
+入れていません。
+
+計測についても、並列に走る2候補は worker がそれぞれ独立に elapsed を計り、join 後に候補 index 順
+で既存の候補別 timing へ反映します。この2件は同時に走るため、候補別 timing の合計は
+`two_shanten_self_tsumo` phase を超え得ます。
 
 ### 実行コストの計測
 
