@@ -106,6 +106,11 @@
 //! しないよう3つとも key に残す。共有するのは同じ入力に必ず同じ値を返す純関数の結果だけなので、
 //! 枝も探索規模も選択も memo の有無で変わらない。
 //!
+//! 探索 node ごとに引く key なので、3つの入力は固定長の枠へそのまま載せて heap を使わない。
+//! 引くだけの枝でも確保が起きず、entry 1件あたりの footprint も枠の分で収まる。枠に収まらない
+//! 入力は key にできないので memo へ載せず、その枝はこれまでどおりその場で評価する。載せるか
+//! どうかは値を変えない。
+//!
 //! memo は評価器と同じ寿命で、評価対象の手牌状態が違えば評価器そのものが別になる。
 //!
 //! # 仮想ツモ牌の赤5
@@ -123,11 +128,11 @@
 
 use bot_logic::{
     CountHasherBuilder, DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
-    DrawVariantLookaheadDiagnostic, EffectiveAcceptance, FixedMeldCount, HistoryFuritenFacts,
-    LookaheadDiagnostic, Meld, OwnDiscards, ProspectiveTenpai, ProspectiveTenpaiValuator,
-    ProspectiveTsumoValuator, TenpaiCompletedHands, TenpaiHandValueProfile, TenpaiTsumoValue,
-    TenpaiWaitAvailability, TileCounts, TileId, TileType, WinningContext,
-    evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
+    DrawVariantLookaheadDiagnostic, EffectiveAcceptance, EffectiveAcceptanceTile, EffectiveShanten,
+    FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, ProspectiveTenpai,
+    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
+    TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
+    WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
     structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
     tenpai_wait_availability,
 };
@@ -565,12 +570,12 @@ impl<'a> ProductionProspectiveValuator<'a> {
 impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
         let key = ProspectiveTenpaiKey::new(tenpai);
-        if let Some(cached) = self
-            .values
-            .borrow()
-            .get(&key)
-            .and_then(|values| values.selection)
-        {
+        if let Some(cached) = key.and_then(|key| {
+            self.values
+                .borrow()
+                .get(&key)
+                .and_then(|values| values.selection)
+        }) {
             #[cfg(test)]
             tenpai_value_memo_counter::hit();
             return cached;
@@ -579,7 +584,9 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
         tenpai_value_memo_counter::miss();
         let value =
             self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode));
-        self.values.borrow_mut().entry(key).or_default().selection = Some(value);
+        if let Some(key) = key {
+            self.values.borrow_mut().entry(key).or_default().selection = Some(value);
+        }
         value
     }
 }
@@ -587,12 +594,12 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
 impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
         let key = ProspectiveTenpaiKey::new(tenpai);
-        if let Some(cached) = self
-            .values
-            .borrow()
-            .get(&key)
-            .and_then(|values| values.tsumo)
-        {
+        if let Some(cached) = key.and_then(|key| {
+            self.values
+                .borrow()
+                .get(&key)
+                .and_then(|values| values.tsumo)
+        }) {
             #[cfg(test)]
             tenpai_value_memo_counter::hit();
             return cached;
@@ -602,7 +609,9 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
             self.tsumo_value_with_mode(facts, mode)
         });
-        self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
+        if let Some(key) = key {
+            self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
+        }
         value
     }
 }
@@ -614,21 +623,49 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
 /// も攻撃モード ([`ProductionProspectiveValuator::offense_mode`]) も打点もこの3つと、構築時に
 /// 確定して以後変わらない評価器の局面 fact しか読まないため、key が一致する枝は必ず同じ値に
 /// なる。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// 探索 node ごとに引く key なので、3つの入力を固定長の枠へそのまま載せて heap を使わない。
+/// 余った枠は `None` で埋まるので、同じ入力は必ず同じ表現になり、要素数が違えば別 key になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ProspectiveTenpaiKey {
-    concealed_tiles: Vec<TileId>,
-    acceptance: EffectiveAcceptance,
-    discarded_tiles: Vec<TileId>,
+    concealed_tiles: [Option<TileId>; MEMO_KEY_CONCEALED_TILES],
+    acceptance_current: EffectiveShanten,
+    acceptance_tiles: [Option<EffectiveAcceptanceTile>; MEMO_KEY_ACCEPTANCE_TILES],
+    discarded_tiles: [Option<TileId>; MEMO_KEY_DISCARDED_TILES],
 }
 
 impl ProspectiveTenpaiKey {
-    fn new(tenpai: &ProspectiveTenpai<'_>) -> Self {
-        Self {
-            concealed_tiles: tenpai.concealed_tiles.to_vec(),
-            acceptance: tenpai.acceptance.clone(),
-            discarded_tiles: tenpai.discarded_tiles.to_vec(),
-        }
+    /// 枠に収まらない入力は key にできない。その枝は memo へ載せず、これまでどおりその場で
+    /// 評価する。共有しないだけで値は変わらない。
+    fn new(tenpai: &ProspectiveTenpai<'_>) -> Option<Self> {
+        Some(Self {
+            concealed_tiles: inline_slice(tenpai.concealed_tiles)?,
+            acceptance_current: tenpai.acceptance.current,
+            acceptance_tiles: inline_slice(&tenpai.acceptance.tiles)?,
+            discarded_tiles: inline_slice(tenpai.discarded_tiles)?,
+        })
     }
+}
+
+/// テンパイの concealed 手牌の枠。副露が無い13枚が最大で、1枚分の余裕を持たせる。
+const MEMO_KEY_CONCEALED_TILES: usize = 14;
+
+/// テンパイの受け入れ牌種の枠。国士無双13面待ちでも収まる。
+const MEMO_KEY_ACCEPTANCE_TILES: usize = 16;
+
+/// その枝でここまでに切った牌の枠。production の continuation depth では4枚を超えない。
+const MEMO_KEY_DISCARDED_TILES: usize = 8;
+
+// 枠に収まる場合だけ、要素をそのまま載せた固定長の配列を返す。
+fn inline_slice<T: Copy, const N: usize>(values: &[T]) -> Option<[Option<T>; N]> {
+    if values.len() > N {
+        return None;
+    }
+    let mut inlined = [None; N];
+    for (slot, value) in inlined.iter_mut().zip(values) {
+        *slot = Some(*value);
+    }
+    Some(inlined)
 }
 
 /// 未来テンパイ1件について、この評価器が既に求めた値。
@@ -2225,6 +2262,7 @@ mod tests {
             .expect("入力が3つとも違う枝がある局面が必要");
 
         let key = ProspectiveTenpaiKey::new(&branch.tenpai());
+        assert!(key.is_some(), "production の枝は key の枠に収まる");
         assert_eq!(key, ProspectiveTenpaiKey::new(&branch.tenpai()));
         assert_ne!(
             key,
@@ -2249,6 +2287,48 @@ mod tests {
                 acceptance: &branch.acceptance,
                 discarded_tiles: &other.discarded,
             })
+        );
+    }
+
+    #[test]
+    fn an_input_that_does_not_fit_the_key_is_still_evaluated() {
+        // key の枠に収まらない入力は memo へ載せないだけで、値はそのまま求まる。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let branches = downstream_branches(case);
+        let branch = branches.first().expect("枝がある");
+
+        // その枝でここまでに切った牌を枠より多くした入力。production の continuation depth では
+        // 起きないが、載せられない入力でも値が変わらないことを確認する。
+        let mut discarded = branch.discarded.clone();
+        while discarded.len() <= MEMO_KEY_DISCARDED_TILES {
+            discarded.extend_from_slice(&branch.discarded);
+        }
+        let oversized = ProspectiveTenpai {
+            concealed_tiles: &branch.concealed,
+            acceptance: &branch.acceptance,
+            discarded_tiles: &discarded,
+        };
+        assert_eq!(ProspectiveTenpaiKey::new(&oversized), None);
+
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        let first = (
+            valuator.tenpai_value(&oversized),
+            valuator.tenpai_tsumo_value(&oversized),
+        );
+        assert_eq!(
+            first,
+            (
+                ProductionProspectiveValuator::new(&case.ctx).tenpai_value(&oversized),
+                ProductionProspectiveValuator::new(&case.ctx).tenpai_tsumo_value(&oversized),
+            ),
+        );
+        // memo へ載せていないので、同じ入力をもう一度渡しても値は変わらない。
+        assert_eq!(
+            (
+                valuator.tenpai_value(&oversized),
+                valuator.tenpai_tsumo_value(&oversized),
+            ),
+            first,
         );
     }
 
