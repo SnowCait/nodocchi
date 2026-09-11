@@ -228,12 +228,15 @@ fn format_call_phases(
     )
 }
 
+// semantic に同一な先行候補の結果を再利用した候補は、実測 0 が「速かった」と読めてしまうので
+// reused を明示する。候補そのものは合法 action の列挙順で残す。
 fn format_call_candidate(candidate: &CallCandidateDuration) -> String {
     format!(
-        "{}={} post_call_discard={}",
+        "{}={} post_call_discard={}{}",
         call_candidate_label(candidate),
         format_duration(candidate.elapsed),
         format_duration(candidate.post_call_discard_selection),
+        if candidate.reused { " reused" } else { "" },
     )
 }
 
@@ -351,6 +354,8 @@ pub struct BenchmarkCallCandidateJson {
     pub consumed: Vec<String>,
     pub elapsed_ns: u64,
     pub post_call_discard_selection_ns: u64,
+    #[serde(default)]
+    pub reused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +414,7 @@ impl BenchmarkJson {
                             post_call_discard_selection_ns: nanos(
                                 candidate.post_call_discard_selection,
                             ),
+                            reused: candidate.reused,
                         })
                         .collect(),
                     normal_discard_ns: nanos(measurement.phases.normal_discard),
@@ -633,6 +639,7 @@ mod tests {
                         .collect(),
                     elapsed: Duration::from_millis(*elapsed),
                     post_call_discard_selection: Duration::from_millis(*post_call),
+                    reused: false,
                 },
             )
             .collect();
@@ -1088,9 +1095,10 @@ mod tests {
                 consumed: vec!["2m".to_string(), "4m".to_string()],
                 elapsed_ns: 847_000_000,
                 post_call_discard_selection_ns: 840_000_000,
+                reused: false,
             }
         );
-        // 重複候補は dedup せず、合法 action の順にそのまま2件並ぶ。
+        // 同じ表示になる候補も行をまとめず、合法 action の順にそのまま2件並ぶ。
         assert_eq!(
             request.call_candidates[1].tile,
             request.call_candidates[0].tile

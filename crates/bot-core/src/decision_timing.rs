@@ -42,7 +42,8 @@ impl DecisionPhaseDurations {
 pub struct CallDecisionDurations {
     /// 鳴き判断全体。最初の候補評価から最終候補の選択まで。
     pub total: Duration,
-    /// 鳴き候補ごとの評価の合計。
+    /// 実際に評価した鳴き候補の合計。semantic に同一で結果を再利用した候補は評価を行わない
+    /// ので含まない。
     pub candidates: Duration,
     /// 1向聴 Call / Pass 比較のために1回だけ評価する Pass 側の ExpectedSelfTsumoValue。
     /// 比較が発火しなかった局面では `Duration::ZERO` のままになる。
@@ -57,20 +58,23 @@ impl CallDecisionDurations {
     }
 }
 
-/// production が実際に評価した鳴き候補1件の実測。
+/// production が並べた鳴き候補1件の実測。
 ///
-/// `kind` / `tile` / `consumed` は評価した合法 action そのもので、同じ牌の重複候補も
+/// `kind` / `tile` / `consumed` は候補になった合法 action そのもので、同じ牌の重複候補も
 /// 合法 action の列挙順でそれぞれ1件ずつ並ぶ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallCandidateDuration {
     pub kind: CallKind,
     pub tile: TileId,
     pub consumed: Vec<TileId>,
-    /// 候補1件の評価全体。
+    /// 候補1件の評価全体。`reused` の候補では評価を行わないため `Duration::ZERO`。
     pub elapsed: Duration,
-    /// そのうち鳴き後の打牌選択 (前方評価を含む)。そこまで進まなかった候補では
-    /// `Duration::ZERO` のままになる。
+    /// そのうち鳴き後の打牌選択 (前方評価を含む)。そこまで進まなかった候補と `reused` の候補
+    /// では `Duration::ZERO` のままになる。
     pub post_call_discard_selection: Duration,
+    /// 先に評価した semantic に同一な候補の結果をそのまま使ったか。`true` の候補では鳴き後の
+    /// 打牌評価を実行していないので、実測も 0 になる。
+    pub reused: bool,
 }
 
 /// 通常打牌選択1回を内部処理別に分けた実測時間。
@@ -445,6 +449,31 @@ impl CallDecisionTimer {
                 consumed: consumed.to_vec(),
                 elapsed: elapsed.total,
                 post_call_discard_selection: elapsed.post_call_discard_selection,
+                reused: false,
+            });
+        }
+    }
+
+    /// 先に評価した semantic に同一な候補の結果を再利用した候補を計上する。
+    ///
+    /// 候補そのものは合法 action の列挙順で残すが、鳴き後の打牌評価は実行していないので実測は
+    /// 0 で、`candidates` の合計にも足さない。結果を複製するだけの時間は鳴き判断全体との差分
+    /// (`CallDecisionDurations::remaining()`) に残る。
+    pub(crate) fn record_reused_candidate(
+        &mut self,
+        kind: CallKind,
+        tile: TileId,
+        consumed: &[TileId],
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.since.get_or_insert_with(Instant::now);
+            state.candidates.push(CallCandidateDuration {
+                kind,
+                tile,
+                consumed: consumed.to_vec(),
+                elapsed: Duration::ZERO,
+                post_call_discard_selection: Duration::ZERO,
+                reused: true,
             });
         }
     }
@@ -792,17 +821,44 @@ mod tests {
         let recorded = timer.take_call_candidates();
         let phases = timer.finish();
 
-        // 重複候補も dedup せず、記録した順にそのまま2件並ぶ。
+        // 重複候補も行をまとめず、記録した順にそのまま2件並ぶ。
         assert_eq!(recorded.len(), 2);
         assert!(recorded.iter().all(
             |candidate| candidate.kind == CallKind::Chi && candidate.consumed == tiles.to_vec()
         ));
+        assert!(recorded.iter().all(|candidate| !candidate.reused));
         assert_eq!(phases.call.candidates, durations.candidates);
         assert_eq!(phases.call.pass_iishanten_self_tsumo, Duration::ZERO);
         assert_eq!(
             phases.call.remaining(),
             phases.call.total - durations.candidates
         );
+    }
+
+    #[test]
+    fn a_reused_call_candidate_is_recorded_without_any_evaluation_time() {
+        let mut timer = DecisionPhaseTimer::started();
+        let mut call = timer.call_timer();
+        let tiles = [TileId::new(4).unwrap(), TileId::new(8).unwrap()];
+        let candidate = call.candidate_timer();
+        call.record_candidate(
+            CallKind::Chi,
+            TileId::new(0).unwrap(),
+            &tiles,
+            candidate.finish(),
+        );
+        call.record_reused_candidate(CallKind::Chi, TileId::new(0).unwrap(), &tiles);
+        let (durations, candidates) = call.finish();
+        timer.record_call(durations, candidates);
+        let recorded = timer.take_call_candidates();
+
+        // 候補そのものは残すが、評価していないので実測は 0 で合計にも入らない。
+        assert_eq!(recorded.len(), 2);
+        assert!(!recorded[0].reused);
+        assert!(recorded[1].reused);
+        assert_eq!(recorded[1].elapsed, Duration::ZERO);
+        assert_eq!(recorded[1].post_call_discard_selection, Duration::ZERO);
+        assert_eq!(durations.candidates, recorded[0].elapsed);
     }
 
     #[test]
@@ -816,6 +872,7 @@ mod tests {
                 consumed: vec![TileId::new(1).unwrap(), TileId::new(2).unwrap()],
                 elapsed: Duration::from_millis(1),
                 post_call_discard_selection: Duration::from_millis(1),
+                reused: false,
             }],
         );
 
