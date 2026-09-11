@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use bot_core::{
-    DecisionPhaseDurations, ForwardMetricsPhaseDurations, LegalAction, NormalDiscardPhaseDurations,
-    ShantenAgent,
+    CallCandidateDuration, CallDecisionDurations, DecisionPhaseDurations,
+    ForwardMetricsPhaseDurations, LegalAction, NormalDiscardPhaseDurations, ShantenAgent,
 };
 use bot_logic::TileType;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ pub struct RequestMeasurement {
     pub elapsed: Duration,
     pub phases: DecisionPhaseDurations,
     pub two_shanten_self_tsumo_candidates: Vec<(TileType, Duration)>,
+    pub call_candidates: Vec<CallCandidateDuration>,
     pub selected_action: LegalAction,
 }
 
@@ -101,6 +102,7 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
         elapsed,
         phases: timed.phases,
         two_shanten_self_tsumo_candidates: timed.two_shanten_self_tsumo_candidates().collect(),
+        call_candidates: timed.call_candidates().to_vec(),
         selected_action: timed.action,
     }
 }
@@ -183,11 +185,12 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
 
     for measurement in slowest_requests(run, SLOWEST_REQUEST_COUNT) {
         lines.push(format!(
-            "  {}  {}  request_id={}  early={}  normal_discard={} ({})  post_discard={}  selected={}",
+            "  {}  {}  request_id={}  early={} ({})  normal_discard={} ({})  post_discard={}  selected={}",
             format_duration(measurement.elapsed),
             measurement.capture,
             measurement.request_id,
             format_duration(measurement.phases.early),
+            format_call_phases(&measurement.phases.call, &measurement.call_candidates),
             format_duration(measurement.phases.normal_discard),
             format_normal_discard_phases(
                 &measurement.phases.normal_discard_phases,
@@ -203,6 +206,49 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
 
 fn format_duration(duration: Duration) -> String {
     format!("{:.3} ms", duration.as_secs_f64() * 1_000.0)
+}
+
+// 鳴き判断の内訳は同じ request の early に括弧で添える。鳴き候補が無い request では 0 が並ぶ。
+fn format_call_phases(
+    durations: &CallDecisionDurations,
+    candidates: &[CallCandidateDuration],
+) -> String {
+    format!(
+        "call={} call_candidates={} count={} [{}] call_pass={} call_remaining={}",
+        format_duration(durations.total),
+        format_duration(durations.candidates),
+        candidates.len(),
+        candidates
+            .iter()
+            .map(format_call_candidate)
+            .collect::<Vec<_>>()
+            .join(" "),
+        format_duration(durations.pass_iishanten_self_tsumo),
+        format_duration(durations.remaining()),
+    )
+}
+
+fn format_call_candidate(candidate: &CallCandidateDuration) -> String {
+    format!(
+        "{}={} post_call_discard={}",
+        call_candidate_label(candidate),
+        format_duration(candidate.elapsed),
+        format_duration(candidate.post_call_discard_selection),
+    )
+}
+
+fn call_candidate_label(candidate: &CallCandidateDuration) -> String {
+    format!(
+        "{:?}({}<-{})",
+        candidate.kind,
+        candidate.tile.to_mjai_string(),
+        candidate
+            .consumed
+            .iter()
+            .map(|tile| tile.to_mjai_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
 }
 
 // normal discard の内訳は同じ request の normal_discard に括弧で添える。phase 別の集計は出さない。
@@ -271,6 +317,18 @@ pub struct BenchmarkRequestJson {
     pub actor: Option<u8>,
     pub elapsed_ns: u64,
     pub early_ns: u64,
+    #[serde(default)]
+    pub call_ns: u64,
+    #[serde(default)]
+    pub call_candidates_ns: u64,
+    #[serde(default)]
+    pub call_pass_iishanten_self_tsumo_ns: u64,
+    #[serde(default)]
+    pub call_remaining_ns: u64,
+    #[serde(default)]
+    pub call_candidate_count: usize,
+    #[serde(default)]
+    pub call_candidates: Vec<BenchmarkCallCandidateJson>,
     pub normal_discard_ns: u64,
     pub normal_discard_base_ns: u64,
     pub normal_discard_forward_ns: u64,
@@ -284,6 +342,15 @@ pub struct BenchmarkRequestJson {
     pub normal_discard_finalize_ns: u64,
     pub post_discard_ns: u64,
     pub selected: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BenchmarkCallCandidateJson {
+    pub kind: String,
+    pub tile: String,
+    pub consumed: Vec<String>,
+    pub elapsed_ns: u64,
+    pub post_call_discard_selection_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +387,30 @@ impl BenchmarkJson {
                     actor: measurement.actor,
                     elapsed_ns: nanos(measurement.elapsed),
                     early_ns: nanos(measurement.phases.early),
+                    call_ns: nanos(measurement.phases.call.total),
+                    call_candidates_ns: nanos(measurement.phases.call.candidates),
+                    call_pass_iishanten_self_tsumo_ns: nanos(
+                        measurement.phases.call.pass_iishanten_self_tsumo,
+                    ),
+                    call_remaining_ns: nanos(measurement.phases.call.remaining()),
+                    call_candidate_count: measurement.call_candidates.len(),
+                    call_candidates: measurement
+                        .call_candidates
+                        .iter()
+                        .map(|candidate| BenchmarkCallCandidateJson {
+                            kind: format!("{:?}", candidate.kind),
+                            tile: candidate.tile.to_mjai_string(),
+                            consumed: candidate
+                                .consumed
+                                .iter()
+                                .map(|tile| tile.to_mjai_string())
+                                .collect(),
+                            elapsed_ns: nanos(candidate.elapsed),
+                            post_call_discard_selection_ns: nanos(
+                                candidate.post_call_discard_selection,
+                            ),
+                        })
+                        .collect(),
                     normal_discard_ns: nanos(measurement.phases.normal_discard),
                     normal_discard_base_ns: nanos(
                         measurement.phases.normal_discard_phases.base_evaluation,
@@ -407,9 +498,11 @@ fn write_benchmark_json(path: &str, run: &BenchmarkRun) -> Result<(), ScenarioEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::Agent;
+    use bot_core::{Agent, CallKind};
     use bot_logic::TileId;
-    use riichilab_client::observation::{fixture_base64, game_context_from_decoded_observation};
+    use riichilab_client::observation::{
+        fixture_base64, fixture_base64_with_discards, game_context_from_decoded_observation,
+    };
     use riichilab_client::{
         CaptureDirection, MjaiPossibleAction, ObservationPayload, possible_actions_to_legal_actions,
     };
@@ -518,7 +611,41 @@ mod tests {
             normal_discard: Duration::from_millis(normal_discard),
             normal_discard_phases: NormalDiscardPhaseDurations::default(),
             post_discard: Duration::from_millis(post_discard),
+            call: CallDecisionDurations::default(),
         }
+    }
+
+    fn with_call_breakdown(
+        mut measurement: RequestMeasurement,
+        total: u64,
+        pass: u64,
+        candidates: &[(CallKind, u8, [u8; 2], u64, u64)],
+    ) -> RequestMeasurement {
+        measurement.call_candidates = candidates
+            .iter()
+            .map(
+                |(kind, tile, consumed, elapsed, post_call)| CallCandidateDuration {
+                    kind: *kind,
+                    tile: TileId::new(*tile).unwrap(),
+                    consumed: consumed
+                        .iter()
+                        .map(|value| TileId::new(*value).unwrap())
+                        .collect(),
+                    elapsed: Duration::from_millis(*elapsed),
+                    post_call_discard_selection: Duration::from_millis(*post_call),
+                },
+            )
+            .collect();
+        measurement.phases.call = CallDecisionDurations {
+            total: Duration::from_millis(total),
+            candidates: measurement
+                .call_candidates
+                .iter()
+                .map(|candidate| candidate.elapsed)
+                .sum(),
+            pass_iishanten_self_tsumo: Duration::from_millis(pass),
+        };
+        measurement
     }
 
     fn phases_with_normal_discard_breakdown(
@@ -613,6 +740,7 @@ mod tests {
             elapsed: Duration::from_millis(millis),
             phases,
             two_shanten_self_tsumo_candidates: Vec::new(),
+            call_candidates: Vec::new(),
             selected_action: LegalAction::Dahai {
                 tile: TileId::new(0).unwrap(),
             },
@@ -868,8 +996,139 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
+    }
+
+    // 1向聴から FF を Pon できる reaction request。直前の dahai record が reaction 元を確定させ、
+    // production の1向聴 Call / Pass 比較まで進む。
+    fn iishanten_pon_request_action_line(request_id: u64) -> String {
+        let mut discards: [Vec<u8>; 4] = Default::default();
+        discards[1] = vec![112, 113, 114, 115, 116, 117, 118, 119, 120, 130];
+        let observation = fixture_base64_with_discards(
+            0,
+            None,
+            vec![4, 8, 12, 17, 20, 24, 56, 64, 76, 84, 108, 128, 129],
+            vec![],
+            discards,
+        );
+        server_record_line(&format!(
+            r#"{{"type":"request_action","request_id":{request_id},"actor":0,"possible_actions":[{{"type":"pon","pai":"F","consumed":["F","F"]}},{{"type":"none"}}],"observation":"{observation}"}}"#
+        ))
+    }
+
+    #[test]
+    fn a_captured_reaction_request_measures_the_call_subphases() {
+        let path = write_capture(
+            "iishanten-call",
+            &[
+                server_record_line(r#"{"type":"dahai","actor":1,"pai":"F"}"#),
+                iishanten_pon_request_action_line(425),
+            ],
+        );
+        let run = measure_captures(std::slice::from_ref(&path)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let measurement = &run.requests[0];
+        let call = measurement.phases.call;
+
+        assert!(call.total > Duration::ZERO);
+        assert!(call.candidates > Duration::ZERO);
+        assert!(call.pass_iishanten_self_tsumo > Duration::ZERO);
+        assert!(call.total <= measurement.phases.early);
+        assert_eq!(measurement.call_candidates.len(), 1);
+
+        let candidate = &measurement.call_candidates[0];
+        assert_eq!(candidate.kind, CallKind::Pon);
+        assert_eq!(candidate.tile.to_mjai_string(), "F");
+        assert!(candidate.post_call_discard_selection > Duration::ZERO);
+        assert!(candidate.post_call_discard_selection <= candidate.elapsed);
+        assert!(format_benchmark(&run).contains("Pon(F<-F,F)="));
+    }
+
+    #[test]
+    fn report_and_json_show_the_call_subphases_of_a_slow_reaction_request() {
+        let run = synthetic_run(vec![with_call_breakdown(
+            measurement_with_phases("game-004.jsonl", 279, 1146, phases(1145, 0, 0)),
+            1140,
+            262,
+            &[
+                (CallKind::Chi, 8, [4, 12], 847, 840),
+                (CallKind::Chi, 8, [4, 12], 846, 839),
+                (CallKind::Pon, 20, [21, 22], 25, 20),
+            ],
+        )]);
+        let report = format_benchmark(&run);
+        let json = BenchmarkJson::from_run(&run);
+        let request = &json.requests[0];
+
+        assert!(
+            report.contains("early=1145.000 ms (call=1140.000 ms"),
+            "{report}"
+        );
+        assert!(report.contains("call_candidates=1718.000 ms"), "{report}");
+        assert!(report.contains("call_pass=262.000 ms"), "{report}");
+        assert!(
+            report.contains("Chi(3m<-2m,4m)=847.000 ms post_call_discard=840.000 ms"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Pon(6m<-6m,6m)=25.000 ms post_call_discard=20.000 ms"),
+            "{report}"
+        );
+
+        assert_eq!(request.call_ns, 1_140_000_000);
+        assert_eq!(request.call_candidates_ns, 1_718_000_000);
+        assert_eq!(request.call_pass_iishanten_self_tsumo_ns, 262_000_000);
+        assert_eq!(request.call_candidate_count, 3);
+        assert_eq!(
+            request.call_candidates[0],
+            BenchmarkCallCandidateJson {
+                kind: "Chi".to_string(),
+                tile: "3m".to_string(),
+                consumed: vec!["2m".to_string(), "4m".to_string()],
+                elapsed_ns: 847_000_000,
+                post_call_discard_selection_ns: 840_000_000,
+            }
+        );
+        // 重複候補は dedup せず、合法 action の順にそのまま2件並ぶ。
+        assert_eq!(
+            request.call_candidates[1].tile,
+            request.call_candidates[0].tile
+        );
+        assert_eq!(
+            request.call_candidates[1].consumed,
+            request.call_candidates[0].consumed
+        );
+
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(text.contains("\"call_candidates_ns\""), "{text}");
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn the_call_fields_of_an_earlier_benchmark_json_default_to_zero() {
+        // 既存 consumer が書いた call field の無い JSON も読めるままにする。
+        let text = r#"{
+            "summary": {
+                "captures": 1, "requests": 1, "total_ns": 1, "mean_ns": 1, "p50_ns": 1,
+                "p90_ns": 1, "p95_ns": 1, "p99_ns": 1, "max_ns": 1,
+                "over_500ms": 0, "over_1s": 0, "over_2s": 0, "over_3s": 0
+            },
+            "requests": [{
+                "capture": "game-001.jsonl", "request_id": 1, "actor": 0, "elapsed_ns": 1,
+                "early_ns": 0, "normal_discard_ns": 0, "normal_discard_base_ns": 0,
+                "normal_discard_forward_ns": 0, "forward_lookahead_search_ns": 0,
+                "forward_weighted_aggregation_ns": 0, "forward_self_tsumo_ns": 0,
+                "two_shanten_self_tsumo_ns": 0, "two_shanten_self_tsumo_candidate_count": 0,
+                "two_shanten_self_tsumo_candidates": [], "three_shanten_self_tsumo_ns": 0,
+                "normal_discard_finalize_ns": 0, "post_discard_ns": 0, "selected": "1m"
+            }]
+        }"#;
+        let json: BenchmarkJson = serde_json::from_str(text).unwrap();
+
+        assert_eq!(json.requests[0].call_ns, 0);
+        assert_eq!(json.requests[0].call_candidate_count, 0);
+        assert!(json.requests[0].call_candidates.is_empty());
     }
 
     #[test]
@@ -957,6 +1216,12 @@ mod tests {
                     actor: Some(0),
                     elapsed_ns: 10_000_000,
                     early_ns: 0,
+                    call_ns: 0,
+                    call_candidates_ns: 0,
+                    call_pass_iishanten_self_tsumo_ns: 0,
+                    call_remaining_ns: 0,
+                    call_candidate_count: 0,
+                    call_candidates: vec![],
                     normal_discard_ns: 0,
                     normal_discard_base_ns: 0,
                     normal_discard_forward_ns: 0,
@@ -977,6 +1242,12 @@ mod tests {
                     actor: Some(0),
                     elapsed_ns: 2_470_000_000,
                     early_ns: 1_000_000,
+                    call_ns: 0,
+                    call_candidates_ns: 0,
+                    call_pass_iishanten_self_tsumo_ns: 0,
+                    call_remaining_ns: 0,
+                    call_candidate_count: 0,
+                    call_candidates: vec![],
                     normal_discard_ns: 2_400_000_000,
                     normal_discard_base_ns: 30_000_000,
                     normal_discard_forward_ns: 2_000_000_000,
