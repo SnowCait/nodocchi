@@ -92,6 +92,22 @@
 //! できると確定していない限り確定打点を持たない。将来フリテンによる価値補正や EV 補正は
 //! 追加しない。
 //!
+//! # 同じ未来テンパイの共有
+//!
+//! 1向聴 continuation の探索は、打牌候補・ツモ牌・手変わりの順序が違うだけの枝から同じ未来
+//! テンパイへ何度も合流する。評価材料 ([`ProspectiveFacts`]) も攻撃モードも打点も
+//! [`ProspectiveTenpai`] の入力3つ (concealed 手牌・受け入れ・その枝でここまでに切った牌) と、
+//! 構築時に確定して以後変わらない評価器の局面 fact しか読まないため、この3つが一致する枝は
+//! 必ず同じ値になる。したがって評価器1つの探索の間だけ、求めた値を
+//! [`ProspectiveTenpaiKey`] で共有する。
+//!
+//! key はこれまで直前の1件だけを使い回していた条件 ([`EvaluatedTenpai::is_for`]) と同じ3つを
+//! そのまま比較する。受け入れは他の2つから導けることがあるが、判定を緩めて別 state を同一視
+//! しないよう3つとも key に残す。共有するのは同じ入力に必ず同じ値を返す純関数の結果だけなので、
+//! 枝も探索規模も選択も memo の有無で変わらない。
+//!
+//! memo は評価器と同じ寿命で、評価対象の手牌状態が違えば評価器そのものが別になる。
+//!
 //! # 仮想ツモ牌の赤5
 //!
 //! 受け入れは34種の牌種単位だが、2手先評価が赤5 / 黒5の物理牌 variant へ分けた枝を返すため、
@@ -106,7 +122,7 @@
 //! 表示専用で、threshold 判定にも選択にも使わない。
 
 use bot_logic::{
-    DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
+    CountHasherBuilder, DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
     DrawVariantLookaheadDiagnostic, EffectiveAcceptance, FixedMeldCount, HistoryFuritenFacts,
     LookaheadDiagnostic, Meld, OwnDiscards, ProspectiveTenpai, ProspectiveTenpaiValuator,
     ProspectiveTsumoValuator, TenpaiCompletedHands, TenpaiHandValueProfile, TenpaiTsumoValue,
@@ -128,7 +144,8 @@ use crate::tenpai_scoring::{
     TenpaiVariantValue, TsumoVariantOutcomes, tenpai_tsumo_value_from_hands,
     tenpai_tsumo_variant_outcomes, tenpai_variant_value,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
@@ -339,6 +356,8 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     history_furiten: HistoryFuritenFacts,
     // 直近に評価した未来テンパイ1件分の評価材料。
     evaluated: Cell<Option<Box<EvaluatedTenpai>>>,
+    // この評価器が既に求めた未来テンパイごとの値。
+    values: RefCell<EvaluatedTenpaiValueMemo>,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -373,6 +392,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
                 .history_furiten()
                 .after_discard(FUTURE_AFTER_OWN_DRAW),
             evaluated: Cell::new(None),
+            values: RefCell::new(EvaluatedTenpaiValueMemo::default()),
         }
     }
 
@@ -544,17 +564,85 @@ impl<'a> ProductionProspectiveValuator<'a> {
 
 impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
-        self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode))
+        let key = ProspectiveTenpaiKey::new(tenpai);
+        if let Some(cached) = self
+            .values
+            .borrow()
+            .get(&key)
+            .and_then(|values| values.selection)
+        {
+            #[cfg(test)]
+            tenpai_value_memo_counter::hit();
+            return cached;
+        }
+        #[cfg(test)]
+        tenpai_value_memo_counter::miss();
+        let value =
+            self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode));
+        self.values.borrow_mut().entry(key).or_default().selection = Some(value);
+        value
     }
 }
 
 impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
     fn tenpai_tsumo_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<TenpaiTsumoValue> {
-        self.with_evaluated_tenpai(tenpai, |facts, mode| {
+        let key = ProspectiveTenpaiKey::new(tenpai);
+        if let Some(cached) = self
+            .values
+            .borrow()
+            .get(&key)
+            .and_then(|values| values.tsumo)
+        {
+            #[cfg(test)]
+            tenpai_value_memo_counter::hit();
+            return cached;
+        }
+        #[cfg(test)]
+        tenpai_value_memo_counter::miss();
+        let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
             self.tsumo_value_with_mode(facts, mode)
-        })
+        });
+        self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
+        value
     }
 }
+
+/// 未来テンパイ1件を指す key。
+///
+/// [`ProspectiveTenpai`] が持つ入力そのもので、[`EvaluatedTenpai::is_for`] が同じ枝だと判断する
+/// 条件と同じ3つを比較する。評価材料の組み立て ([`ProductionProspectiveValuator::tenpai_facts`])
+/// も攻撃モード ([`ProductionProspectiveValuator::offense_mode`]) も打点もこの3つと、構築時に
+/// 確定して以後変わらない評価器の局面 fact しか読まないため、key が一致する枝は必ず同じ値に
+/// なる。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProspectiveTenpaiKey {
+    concealed_tiles: Vec<TileId>,
+    acceptance: EffectiveAcceptance,
+    discarded_tiles: Vec<TileId>,
+}
+
+impl ProspectiveTenpaiKey {
+    fn new(tenpai: &ProspectiveTenpai<'_>) -> Self {
+        Self {
+            concealed_tiles: tenpai.concealed_tiles.to_vec(),
+            acceptance: tenpai.acceptance.clone(),
+            discarded_tiles: tenpai.discarded_tiles.to_vec(),
+        }
+    }
+}
+
+/// 未来テンパイ1件について、この評価器が既に求めた値。
+///
+/// 求めていない値と「求めた結果 `None` だった値」は別物なので潰さない。
+#[derive(Debug, Clone, Copy, Default)]
+struct EvaluatedTenpaiValues {
+    selection: Option<Option<u64>>,
+    tsumo: Option<Option<TenpaiTsumoValue>>,
+}
+
+// 探索 node ごとに引く memo なので、探索基盤が使っているものと同じ安価な hasher を共有する。
+type EvaluatedTenpaiValueMemo =
+    HashMap<ProspectiveTenpaiKey, EvaluatedTenpaiValues, CountHasherBuilder>;
 
 /// 直近に評価した未来テンパイ1件分の評価材料。
 ///
@@ -913,6 +1001,38 @@ fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<ProspectiveWaitValue
                 .collect(),
         })
         .collect()
+}
+
+/// 未来テンパイの値 memo の利用数。同じ未来テンパイを2回評価しないことを test から観測する
+/// ためだけの counter で、production build には残らない。
+#[cfg(test)]
+mod tenpai_value_memo_counter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static HITS: Cell<u64> = const { Cell::new(0) };
+        static MISSES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn hit() {
+        HITS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn miss() {
+        MISSES.with(|count| count.set(count.get() + 1));
+    }
+
+    /// `body` の実行と、その間の memo hit / miss。
+    pub(super) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64, u64) {
+        let hits = HITS.with(Cell::get);
+        let misses = MISSES.with(Cell::get);
+        let value = body();
+        (
+            value,
+            HITS.with(Cell::get) - hits,
+            MISSES.with(Cell::get) - misses,
+        )
+    }
 }
 
 /// ダマ打点を評価した回数。合法 Reach が無い枝で評価しないことを test から観測するためだけの
@@ -2086,6 +2206,116 @@ mod tests {
             acceptance: &branch.acceptance,
             discarded_tiles: &other.discarded,
         }));
+    }
+
+    #[test]
+    fn a_value_memo_key_separates_the_same_three_inputs() {
+        // 値 memo の key は評価材料を使い回す条件 ([`EvaluatedTenpai::is_for`]) と同じ3つを
+        // 見る。どれか1つでも違えば別 key になり、違う state を同一視しない。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let branches = downstream_branches(case);
+        let branch = branches.first().expect("枝がある");
+        let other = branches
+            .iter()
+            .find(|other| {
+                other.concealed != branch.concealed
+                    && other.acceptance != branch.acceptance
+                    && other.discarded != branch.discarded
+            })
+            .expect("入力が3つとも違う枝がある局面が必要");
+
+        let key = ProspectiveTenpaiKey::new(&branch.tenpai());
+        assert_eq!(key, ProspectiveTenpaiKey::new(&branch.tenpai()));
+        assert_ne!(
+            key,
+            ProspectiveTenpaiKey::new(&ProspectiveTenpai {
+                concealed_tiles: &other.concealed,
+                acceptance: &branch.acceptance,
+                discarded_tiles: &branch.discarded,
+            })
+        );
+        assert_ne!(
+            key,
+            ProspectiveTenpaiKey::new(&ProspectiveTenpai {
+                concealed_tiles: &branch.concealed,
+                acceptance: &other.acceptance,
+                discarded_tiles: &branch.discarded,
+            })
+        );
+        assert_ne!(
+            key,
+            ProspectiveTenpaiKey::new(&ProspectiveTenpai {
+                concealed_tiles: &branch.concealed,
+                acceptance: &branch.acceptance,
+                discarded_tiles: &other.discarded,
+            })
+        );
+    }
+
+    #[test]
+    fn a_revisited_tenpai_is_evaluated_once() {
+        // 同じ未来テンパイを何度たどっても値は変わらず、2周目は評価し直さない。探索が同じ
+        // テンパイへ何度も合流しても、評価は入力1件につき1回で足りる。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let branches = downstream_branches(case);
+        assert!(branches.len() > 1, "枝が複数ある局面が必要");
+
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        let (first, _, first_misses) = tenpai_value_memo_counter::count_during(|| {
+            branches
+                .iter()
+                .map(|branch| {
+                    let tenpai = branch.tenpai();
+                    (
+                        valuator.tenpai_value(&tenpai),
+                        valuator.tenpai_tsumo_value(&tenpai),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert!(first_misses > 0, "1周目は実際に評価する");
+
+        let (second, second_hits, second_misses) = tenpai_value_memo_counter::count_during(|| {
+            branches
+                .iter()
+                .map(|branch| {
+                    let tenpai = branch.tenpai();
+                    (
+                        valuator.tenpai_value(&tenpai),
+                        valuator.tenpai_tsumo_value(&tenpai),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(second, first);
+        assert_eq!(second_misses, 0);
+        assert_eq!(second_hits, 2 * branches.len() as u64);
+    }
+
+    #[test]
+    fn a_memoized_value_matches_a_fresh_valuator() {
+        // memo が返す値は、その枝だけを新しい評価器へ渡した値と一致する。memo の有無で値は
+        // 変わらない。
+        let case = &*LOW_DAMATEN_DOWNSTREAM;
+        let branches = downstream_branches(case);
+        assert!(branches.len() > 1, "枝が複数ある局面が必要");
+
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        for branch in &branches {
+            let tenpai = branch.tenpai();
+            let _ = valuator.tenpai_value(&tenpai);
+            let _ = valuator.tenpai_tsumo_value(&tenpai);
+        }
+        for branch in &branches {
+            let tenpai = branch.tenpai();
+            assert_eq!(
+                (
+                    valuator.tenpai_value(&tenpai),
+                    valuator.tenpai_tsumo_value(&tenpai)
+                ),
+                fresh_values(case, &tenpai),
+            );
+        }
     }
 
     #[test]

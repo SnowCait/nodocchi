@@ -9,7 +9,7 @@ mod differential;
 #[cfg(test)]
 mod reference;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Shanten {
     pub standard: i8,
     pub chiitoitsu: i8,
@@ -42,7 +42,7 @@ impl FixedMeldCount {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EffectiveShanten {
     Concealed(Shanten),
     Melded { standard: i8 },
