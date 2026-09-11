@@ -35,6 +35,13 @@
 //!
 //! 向聴・受け入れ・待ち・フリテン・役・点数をこの層で計算し直さない。
 //!
+//! # 同じ鳴きになる合法 action
+//!
+//! 同じ牌種の物理牌を複数持つ手牌では、消費する物理牌の組み合わせだけが違う Chi / Pon が複数の
+//! 合法 action として並ぶ。鳴き後の判断が読むのは [`CallEvaluationKey`] が示す物理牌 semantics
+//! だけなので、key が一致する候補は高コストな鳴き後の打牌評価を1回だけ行い、結果を各 action へ
+//! 配る。候補の件数・順序・`action` と、同値時に先頭の合法 action を採る tie-break は変えない。
+//!
 //! # 鳴き後の打牌
 //!
 //! 鳴いた直後に切れない牌 (喰い替え) は戦術ではなく合法手の制約なので、鳴き後の仮想合法
@@ -423,12 +430,30 @@ pub(crate) fn evaluate_call_decision(
     timing: &mut CallDecisionTimer,
 ) -> Option<CallDecisionDiagnostic> {
     let mut candidates: Vec<CallCandidateDiagnostic> = Vec::new();
+    // 既に評価した semantic key と、その結果を持つ candidate の index。合法な Chi / Pon は
+    // 1局面あたり数件なので線形探索で足りる。
+    let mut evaluated: Vec<(CallEvaluationKey, usize)> = Vec::new();
     for action in legal_actions {
         let Some((kind, tile, consumed)) = normalize_call(action) else {
             continue;
         };
+
+        let key = call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, tile, consumed)
+            .map(|(meld, post_call_tiles)| CallEvaluationKey::new(&meld, &post_call_tiles));
+        if let Some(key) = key.as_ref()
+            && let Some(&(_, source)) = evaluated.iter().find(|(known, _)| known == key)
+        {
+            // 同じ post-call state を作る候補なので、評価結果をそのまま複製して action だけ
+            // 元の合法 action に戻す。高コスト評価は行わない。
+            let mut candidate = candidates[source].clone();
+            candidate.action = action.clone();
+            candidates.push(candidate);
+            timing.record_reused_candidate(kind, tile, consumed);
+            continue;
+        }
+
         let mut candidate_timing = timing.candidate_timer();
-        candidates.push(evaluate_call_candidate(
+        let candidate = evaluate_call_candidate(
             ctx,
             action,
             kind,
@@ -436,8 +461,12 @@ pub(crate) fn evaluate_call_decision(
             consumed,
             collect_observations,
             &mut candidate_timing,
-        ));
+        );
         timing.record_candidate(kind, tile, consumed, candidate_timing.finish());
+        if let Some(key) = key {
+            evaluated.push((key, candidates.len()));
+        }
+        candidates.push(candidate);
     }
 
     if candidates.is_empty() {
@@ -460,6 +489,70 @@ pub(crate) fn evaluate_call_decision(
         reason,
         candidates,
     })
+}
+
+// 評価に効く物理牌の属性だけを取り出した表現。
+//
+// `TileId` は同じ牌種の4枚を別 ID で持つが、向聴・受け入れ・喰い替え・打点のどれも
+// `TileId::tile_type()` と `TileId::is_red()` しか読まない (`TileId::copy_index()` は評価経路の
+// どこにも現れない)。したがって牌種と赤5かどうかが一致する物理牌は評価上は交換可能で、赤5と
+// 黒5は別物として残る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhysicalTile {
+    tile_type: TileType,
+    red: bool,
+}
+
+impl PhysicalTile {
+    fn new(tile: TileId) -> Self {
+        Self {
+            tile_type: tile.tile_type(),
+            red: tile.is_red(),
+        }
+    }
+
+    fn sequence(tiles: &[TileId]) -> Vec<Self> {
+        tiles.iter().copied().map(Self::new).collect()
+    }
+}
+
+/// 鳴き候補1件の評価入力を physical tile semantics へ落とした key。
+///
+/// `evaluate_call_conditions()` は `call_meld_and_concealed_tiles()` を通した後、判断に使う入力
+/// として `GameContext` (全候補で共通) と `meld` / `post_call_tiles` しか読まない。鳴いた牌と
+/// consumed もこの2つを組み立てるためだけに使う。したがってこの2つが物理牌 semantics まで一致
+/// すれば、
+///
+/// ```text
+/// 鳴き後の concealed hand / Meld / 喰い替え禁止牌 / 鳴き後の副露一覧 / 鳴き後の GameContext
+/// / 鳴き後の合法 Dahai / 本番の打牌評価 / 候補の判断結果
+/// ```
+///
+/// はすべて同じになる。
+///
+/// - 喰い替え禁止牌は [`forbidden_discards_after_call`] が `meld` の種別と牌種だけから決める
+/// - 鳴き後の合法 Dahai は concealed hand の物理牌から禁止牌種を除いたもの
+/// - 打牌評価と打点は牌種と赤5かどうかだけを読む ([`PhysicalTile`])
+///
+/// 並び順も含めて比較するため、手牌の並びが違えば別候補として個別に評価する。表示上の
+/// `tile` / `consumed` が同じでも、赤5 / 黒5が違えば `red` で別 key になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallEvaluationKey {
+    meld_kind: MeldKind,
+    meld_called_tile: Option<PhysicalTile>,
+    meld_tiles: Vec<PhysicalTile>,
+    post_call_concealed: Vec<PhysicalTile>,
+}
+
+impl CallEvaluationKey {
+    fn new(meld: &Meld, post_call_tiles: &[TileId]) -> Self {
+        Self {
+            meld_kind: meld.kind(),
+            meld_called_tile: meld.called_tile().map(PhysicalTile::new),
+            meld_tiles: PhysicalTile::sequence(meld.tiles()),
+            post_call_concealed: PhysicalTile::sequence(post_call_tiles),
+        }
+    }
 }
 
 // 合法 action を Chi / Pon の共通表現へ正規化する。それ以外の action は対象外。
@@ -1760,7 +1853,8 @@ mod tests {
 
     #[test]
     fn every_call_candidate_is_measured_in_the_legal_action_order() {
-        // 同じ tile / consumed の重複候補も dedup せず、合法 action の順にそれぞれ計る。
+        // 重複候補も行をまとめず、合法 action の順にそれぞれ1件ずつ並ぶ。semantic に同一な
+        // 2件目は評価を再利用するので、実測は 0 で reused になる。
         let chi = chi_action(IISHANTEN_CHI_TARGET, &IISHANTEN_CHI_CONSUMED);
         let ctx = valued_reaction_context(&IISHANTEN_CHI_HAND, IISHANTEN_CHI_TARGET, 1, 12);
         let legal_actions = [chi.clone(), chi.clone(), LegalAction::None];
@@ -1772,10 +1866,14 @@ mod tests {
             assert_eq!(candidate.kind, CallKind::Chi);
             assert_eq!(candidate.tile, tile(IISHANTEN_CHI_TARGET));
             assert_eq!(candidate.consumed, tiles(&IISHANTEN_CHI_CONSUMED));
-            assert!(candidate.elapsed > Duration::ZERO);
-            assert!(candidate.post_call_discard_selection > Duration::ZERO);
-            assert!(candidate.post_call_discard_selection <= candidate.elapsed);
         }
+        assert!(!candidates[0].reused);
+        assert!(candidates[0].elapsed > Duration::ZERO);
+        assert!(candidates[0].post_call_discard_selection > Duration::ZERO);
+        assert!(candidates[0].post_call_discard_selection <= candidates[0].elapsed);
+        assert!(candidates[1].reused);
+        assert_eq!(candidates[1].elapsed, Duration::ZERO);
+        assert_eq!(candidates[1].post_call_discard_selection, Duration::ZERO);
         assert_eq!(
             durations.candidates,
             candidates
@@ -2050,6 +2148,164 @@ mod tests {
                 wait(100, 1, CallWaitYaku::Unknown),
             ]),
             CallDecisionReason::HandValueUnknown
+        );
+    }
+
+    // 3m を 4m5m で Chi できる 4m が2枚ある一向聴。456m 78s ではなく 678m 234s を使う形で、
+    // 消費する物理牌だけが違う同じ Chi が2件並ぶ。鳴いた後は余った 4m を切ると 3p / 7s の
+    // シャンポン待ちテンパイになり、全て中張牌なので役もある。
+    const DUPLICATE_CHI_HAND: [u8; 13] = [12, 13, 17, 20, 24, 28, 44, 45, 76, 80, 84, 96, 97];
+    const DUPLICATE_CHI_TARGET: u8 = 8;
+    const DUPLICATE_CHI_CONSUMED: [[u8; 2]; 2] = [[12, 17], [13, 17]];
+
+    // 同じ形で 4m を1枚にし、5m を赤5と黒5の2枚にしたもの。2件の Chi は consumed の赤5と、
+    // 鳴き後に手牌へ残る5の赤5が入れ替わる。
+    const RED_FIVE_CHI_HAND: [u8; 13] = [12, 16, 17, 20, 24, 28, 44, 45, 76, 80, 84, 96, 97];
+    const RED_FIVE_CHI_CONSUMED: [[u8; 2]; 2] = [[12, 16], [12, 17]];
+
+    fn duplicate_chi_actions(consumed: &[[u8; 2]; 2]) -> Vec<LegalAction> {
+        consumed
+            .iter()
+            .map(|consumed| chi_action(DUPLICATE_CHI_TARGET, consumed))
+            .collect()
+    }
+
+    // 候補1件を単独で評価した結果。dedup で複製した候補が、独立に評価した場合と同じ内容かを
+    // 比べるための基準にする。`selected` は候補集合で決まるので比較対象から外す。
+    fn independently_evaluated_candidate(
+        ctx: &GameContext,
+        action: &LegalAction,
+        collect_observations: bool,
+    ) -> CallCandidateDiagnostic {
+        let (_, mut candidate) = single_candidate(ctx, action, collect_observations);
+        candidate.selected = false;
+        candidate
+    }
+
+    #[test]
+    fn semantically_equal_calls_evaluate_the_post_call_discard_once() {
+        let ctx = valued_reaction_context(&DUPLICATE_CHI_HAND, DUPLICATE_CHI_TARGET, 1, 12);
+        let actions = duplicate_chi_actions(&DUPLICATE_CHI_CONSUMED);
+        let mut legal_actions = actions.clone();
+        legal_actions.push(LegalAction::None);
+        let (decision, durations, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+        let decision = decision.expect("evaluated");
+
+        // 件数・順序・action は元の合法 action のまま。
+        assert_eq!(decision.candidates.len(), actions.len());
+        for (candidate, action) in decision.candidates.iter().zip(&actions) {
+            assert_eq!(&candidate.action, action);
+        }
+
+        // 高コストな鳴き後の打牌評価は1回だけ。
+        assert_eq!(candidates.len(), actions.len());
+        assert!(!candidates[0].reused);
+        assert!(candidates[0].post_call_discard_selection > Duration::ZERO);
+        assert!(candidates[1].reused);
+        assert_eq!(candidates[1].elapsed, Duration::ZERO);
+        assert_eq!(candidates[1].post_call_discard_selection, Duration::ZERO);
+        assert_eq!(durations.candidates, candidates[0].elapsed);
+
+        // 再利用した候補は consumed の物理牌だけが違い、判断内容は独立評価と一致する。
+        assert_eq!(candidates[1].consumed, tiles(&DUPLICATE_CHI_CONSUMED[1]));
+        for (candidate, action) in decision.candidates.iter().zip(&actions) {
+            let mut expected = independently_evaluated_candidate(&ctx, action, false);
+            expected.selected = candidate.selected;
+            assert_eq!(candidate, &expected);
+        }
+    }
+
+    #[test]
+    fn semantically_equal_calls_keep_the_first_legal_action_as_the_selected_call() {
+        let ctx = valued_reaction_context(&DUPLICATE_CHI_HAND, DUPLICATE_CHI_TARGET, 1, 12);
+        let actions = duplicate_chi_actions(&DUPLICATE_CHI_CONSUMED);
+        let mut legal_actions = actions.clone();
+        legal_actions.push(LegalAction::None);
+        let decision = evaluate_call_decision(
+            &ctx,
+            &legal_actions,
+            false,
+            &mut CallDecisionTimer::disabled(),
+        )
+        .expect("evaluated");
+
+        // 完全同値の候補なので、既存 tie-break どおり先頭の合法 action を採る。
+        assert_eq!(decision.reason, CallDecisionReason::EligibleTenpai);
+        assert_eq!(decision.selected.as_ref(), Some(&actions[0]));
+        assert!(decision.candidates[0].selected);
+        assert!(!decision.candidates[1].selected);
+
+        // 候補が1件だけの場合と同じ action を選ぶ。
+        let (single, _) = single_candidate(&ctx, &actions[0], false);
+        assert_eq!(single.selected, decision.selected);
+    }
+
+    #[test]
+    fn calls_that_differ_only_in_the_red_five_are_evaluated_separately() {
+        let ctx = valued_reaction_context(&RED_FIVE_CHI_HAND, DUPLICATE_CHI_TARGET, 1, 12);
+        let actions = duplicate_chi_actions(&RED_FIVE_CHI_CONSUMED);
+        let mut legal_actions = actions.clone();
+        legal_actions.push(LegalAction::None);
+        let (decision, _, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+        let decision = decision.expect("evaluated");
+
+        assert_eq!(decision.candidates.len(), actions.len());
+        for (candidate, action) in decision.candidates.iter().zip(&actions) {
+            assert_eq!(&candidate.action, action);
+        }
+        // 表示上は同じ 3m<-4m,5m でも赤5の位置が違うので、どちらも実際に評価する。
+        assert_eq!(candidates.len(), actions.len());
+        for candidate in &candidates {
+            assert!(!candidate.reused);
+            assert!(candidate.post_call_discard_selection > Duration::ZERO);
+        }
+    }
+
+    fn evaluation_key(hand: &[u8], target: u8, consumed: &[u8]) -> CallEvaluationKey {
+        let (meld, post_call_tiles) = call_meld_and_concealed_tiles(
+            &tiles(hand),
+            CallKind::Chi,
+            tile(target),
+            &tiles(consumed),
+        )
+        .expect("valid chi");
+        CallEvaluationKey::new(&meld, &post_call_tiles)
+    }
+
+    #[test]
+    fn the_semantic_key_only_ignores_the_physical_copy_of_the_same_tile() {
+        // 同じ牌種・同じ赤黒の別コピーを消費する Chi は同じ key。
+        assert_eq!(
+            evaluation_key(
+                &DUPLICATE_CHI_HAND,
+                DUPLICATE_CHI_TARGET,
+                &DUPLICATE_CHI_CONSUMED[0]
+            ),
+            evaluation_key(
+                &DUPLICATE_CHI_HAND,
+                DUPLICATE_CHI_TARGET,
+                &DUPLICATE_CHI_CONSUMED[1]
+            )
+        );
+
+        // 赤5と黒5のどちらを鳴くかは別 key。
+        assert_ne!(
+            evaluation_key(
+                &RED_FIVE_CHI_HAND,
+                DUPLICATE_CHI_TARGET,
+                &RED_FIVE_CHI_CONSUMED[0]
+            ),
+            evaluation_key(
+                &RED_FIVE_CHI_HAND,
+                DUPLICATE_CHI_TARGET,
+                &RED_FIVE_CHI_CONSUMED[1]
+            )
+        );
+
+        // 喰い替え禁止牌が変わる鳴き方も別 key。
+        assert_ne!(
+            evaluation_key(&DUPLICATE_CHI_HAND, 20, &[12, 17]),
+            evaluation_key(&DUPLICATE_CHI_HAND, DUPLICATE_CHI_TARGET, &[12, 17])
         );
     }
 
