@@ -108,6 +108,7 @@ use bot_logic::{
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::damaten_value::damaten_baseline_context;
+use crate::decision_timing::{CallCandidateTimer, CallDecisionTimer};
 use crate::discard_selection::{
     DiscardActionSelection, LookaheadDiagnosticScope, lookahead_inputs_with_own_future_draws,
     post_call_discard_evaluations, select_best_iishanten_post_call_discard,
@@ -419,21 +420,31 @@ pub(crate) fn evaluate_call_decision(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
     collect_observations: bool,
+    timing: &mut CallDecisionTimer,
 ) -> Option<CallDecisionDiagnostic> {
-    let mut candidates: Vec<CallCandidateDiagnostic> = legal_actions
-        .iter()
-        .filter_map(|action| {
-            normalize_call(action).map(|(kind, tile, consumed)| {
-                evaluate_call_candidate(ctx, action, kind, tile, consumed, collect_observations)
-            })
-        })
-        .collect();
+    let mut candidates: Vec<CallCandidateDiagnostic> = Vec::new();
+    for action in legal_actions {
+        let Some((kind, tile, consumed)) = normalize_call(action) else {
+            continue;
+        };
+        let mut candidate_timing = timing.candidate_timer();
+        candidates.push(evaluate_call_candidate(
+            ctx,
+            action,
+            kind,
+            tile,
+            consumed,
+            collect_observations,
+            &mut candidate_timing,
+        ));
+        timing.record_candidate(kind, tile, consumed, candidate_timing.finish());
+    }
 
     if candidates.is_empty() {
         return None;
     }
 
-    apply_iishanten_self_tsumo_policy(ctx, &mut candidates);
+    apply_iishanten_self_tsumo_policy(ctx, &mut candidates, timing);
     apply_two_shanten_self_tsumo_observation(ctx, &mut candidates);
 
     let selected_index = select_eligible_candidate(&candidates);
@@ -509,6 +520,7 @@ fn evaluate_call_candidate(
     tile: TileId,
     consumed: &[TileId],
     collect_observations: bool,
+    timing: &mut CallCandidateTimer,
 ) -> CallCandidateDiagnostic {
     let mut candidate = CallCandidateDiagnostic {
         action: action.clone(),
@@ -536,6 +548,7 @@ fn evaluate_call_candidate(
         consumed,
         collect_observations,
         &mut candidate,
+        timing,
     );
     candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
     candidate.reason = reason;
@@ -554,6 +567,7 @@ fn evaluate_call_conditions(
     consumed: &[TileId],
     collect_observations: bool,
     candidate: &mut CallCandidateDiagnostic,
+    timing: &mut CallCandidateTimer,
 ) -> CallDecisionReason {
     if ctx.any_opponent_reached() {
         return CallDecisionReason::OpponentReached;
@@ -612,7 +626,9 @@ fn evaluate_call_conditions(
     else {
         return CallDecisionReason::PostCallEvaluationUnavailable;
     };
-    let selection = select_discard_action_with_evaluation(&post_call_context, &legal_actions);
+    let selection = timing.measure_post_call_discard_selection(|| {
+        select_discard_action_with_evaluation(&post_call_context, &legal_actions)
+    });
     let Some(evaluation) = selection.evaluation.as_ref() else {
         return CallDecisionReason::NoPostCallDiscard;
     };
@@ -756,6 +772,7 @@ fn observe_two_shanten_call_to_iishanten(
 fn apply_iishanten_self_tsumo_policy(
     ctx: &GameContext,
     candidates: &mut [CallCandidateDiagnostic],
+    timing: &mut CallDecisionTimer,
 ) {
     if !candidates
         .iter()
@@ -766,7 +783,10 @@ fn apply_iishanten_self_tsumo_policy(
 
     let reaction_source_known = reaction_draw_distance(ctx).is_some();
     let pass_value = reaction_source_known
-        .then(|| pass_iishanten_expected_self_tsumo_value(ctx))
+        .then(|| {
+            timing
+                .measure_pass_iishanten_self_tsumo(|| pass_iishanten_expected_self_tsumo_value(ctx))
+        })
         .flatten();
 
     for candidate in candidates {
@@ -1098,7 +1118,11 @@ fn call_meld_and_concealed_tiles(
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
     use bot_logic::MeldShape;
+
+    use crate::decision_timing::{CallCandidateDuration, CallDecisionDurations};
 
     fn tile(value: u8) -> TileId {
         TileId::new(value).unwrap()
@@ -1388,6 +1412,7 @@ mod tests {
             ctx,
             &[action.clone(), LegalAction::None],
             collect_observations,
+            &mut CallDecisionTimer::disabled(),
         )
         .expect("evaluated");
         assert_eq!(decision.candidates.len(), 1);
@@ -1699,6 +1724,116 @@ mod tests {
             fixed_melds_guarantee_yaku(&melds, damaten_baseline_context(&ctx))
         );
         assert!(!acceptance.fixed_melds_guarantee_yaku);
+    }
+
+    fn measured_call_decision(
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        collect_observations: bool,
+    ) -> (
+        Option<CallDecisionDiagnostic>,
+        CallDecisionDurations,
+        Vec<CallCandidateDuration>,
+    ) {
+        let mut timing = CallDecisionTimer::armed();
+        let decision =
+            evaluate_call_decision(ctx, legal_actions, collect_observations, &mut timing);
+        let (durations, candidates) = timing.finish();
+        (decision, durations, candidates)
+    }
+
+    #[test]
+    fn a_request_without_a_legal_call_measures_nothing() {
+        let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
+        let legal_actions = [
+            LegalAction::Dahai {
+                tile: tile(IISHANTEN_PON_HAND[0]),
+            },
+            LegalAction::None,
+        ];
+        let (decision, durations, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+
+        assert_eq!(decision, None);
+        assert_eq!(durations, CallDecisionDurations::default());
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn every_call_candidate_is_measured_in_the_legal_action_order() {
+        // 同じ tile / consumed の重複候補も dedup せず、合法 action の順にそれぞれ計る。
+        let chi = chi_action(IISHANTEN_CHI_TARGET, &IISHANTEN_CHI_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_CHI_HAND, IISHANTEN_CHI_TARGET, 1, 12);
+        let legal_actions = [chi.clone(), chi.clone(), LegalAction::None];
+        let (decision, durations, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+
+        assert_eq!(decision.expect("evaluated").candidates.len(), 2);
+        assert_eq!(candidates.len(), 2);
+        for candidate in &candidates {
+            assert_eq!(candidate.kind, CallKind::Chi);
+            assert_eq!(candidate.tile, tile(IISHANTEN_CHI_TARGET));
+            assert_eq!(candidate.consumed, tiles(&IISHANTEN_CHI_CONSUMED));
+            assert!(candidate.elapsed > Duration::ZERO);
+            assert!(candidate.post_call_discard_selection > Duration::ZERO);
+            assert!(candidate.post_call_discard_selection <= candidate.elapsed);
+        }
+        assert_eq!(
+            durations.candidates,
+            candidates
+                .iter()
+                .map(|candidate| candidate.elapsed)
+                .sum::<Duration>()
+        );
+        assert!(durations.total >= durations.candidates);
+    }
+
+    #[test]
+    fn the_shared_iishanten_pass_comparison_is_measured_once() {
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 12);
+        let legal_actions = [action, LegalAction::None];
+        let (decision, durations, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+        let candidate = &decision.expect("evaluated").candidates[0];
+
+        assert!(candidate.iishanten_self_tsumo.is_some());
+        assert!(durations.pass_iishanten_self_tsumo > Duration::ZERO);
+        assert!(durations.total >= durations.candidates + durations.pass_iishanten_self_tsumo);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn a_call_without_the_iishanten_comparison_does_not_measure_the_pass() {
+        // 即テンパイ候補は Call / Pass 比較へ入らないので、Pass の計測も 0 のままになる。
+        let ctx = reaction_context(&TENPAI_PON_HAND, TENPAI_PON_TARGET);
+        let action = pon_action(TENPAI_PON_TARGET, &TENPAI_PON_CONSUMED);
+        let legal_actions = [action.clone(), LegalAction::None];
+        let (decision, durations, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+        let decision = decision.expect("evaluated");
+
+        assert_eq!(decision.selected, Some(action));
+        assert_eq!(decision.candidates[0].iishanten_self_tsumo, None);
+        assert_eq!(durations.pass_iishanten_self_tsumo, Duration::ZERO);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].elapsed > Duration::ZERO);
+    }
+
+    #[test]
+    fn the_call_decision_is_the_same_with_and_without_the_timing_and_the_diagnostics() {
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 12);
+        let legal_actions = [action.clone(), LegalAction::None];
+        let untimed = evaluate_call_decision(
+            &ctx,
+            &legal_actions,
+            false,
+            &mut CallDecisionTimer::disabled(),
+        )
+        .expect("evaluated");
+        let (timed, _, _) = measured_call_decision(&ctx, &legal_actions, false);
+        let (diagnosed, _, _) = measured_call_decision(&ctx, &legal_actions, true);
+
+        assert_eq!(untimed.selected, Some(action));
+        assert_eq!(timed.expect("evaluated").selected, untimed.selected);
+        assert_eq!(diagnosed.expect("evaluated").selected, untimed.selected);
     }
 
     #[test]

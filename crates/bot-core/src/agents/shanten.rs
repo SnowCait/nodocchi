@@ -176,12 +176,14 @@ impl ShantenAgent {
             &mut timing,
         );
         let two_shanten_self_tsumo_candidates = timing.take_two_shanten_self_tsumo_candidates();
+        let call_candidates = timing.take_call_candidates();
         let phases = timing.finish();
         log_agent_decision(&decision);
         TimedAgentAction {
             action: decision.action,
             phases,
             two_shanten_self_tsumo_candidates,
+            call_candidates,
         }
     }
 
@@ -256,7 +258,15 @@ impl ShantenAgent {
         }
 
         // 鳴き。和了・流局より後、通常打牌 / 押し引き / 防御より前に検討する。
-        let call = evaluate_call_decision(ctx, legal_actions, diagnostics.is_enabled());
+        let mut call_timing = timing.call_timer();
+        let call = evaluate_call_decision(
+            ctx,
+            legal_actions,
+            diagnostics.is_enabled(),
+            &mut call_timing,
+        );
+        let (call_durations, call_candidates) = call_timing.finish();
+        timing.record_call(call_durations, call_candidates);
         if let Some(action) = call.as_ref().and_then(|call| call.selected.clone()) {
             return AgentDecision {
                 action,

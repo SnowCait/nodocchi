@@ -2,10 +2,11 @@ use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
 use bot_logic::{
-    ForwardMetricsObserver, ForwardMetricsPhase, TileType, TwoShantenSelfTsumoObserver,
+    ForwardMetricsObserver, ForwardMetricsPhase, TileId, TileType, TwoShantenSelfTsumoObserver,
 };
 
 use crate::action::LegalAction;
+use crate::call_decision::CallKind;
 
 /// 意思決定1回を phase 別に分けた実測時間。
 ///
@@ -22,12 +23,54 @@ pub struct DecisionPhaseDurations {
     pub normal_discard_phases: NormalDiscardPhaseDurations,
     /// 通常打牌選択より後の押し引き / Reach / 防御 / 最終 action 選択。
     pub post_discard: Duration,
+    /// `early` の内訳のうち鳴き判断。合法な Chi / Pon が無い局面では、すべて
+    /// `Duration::ZERO` のままになる。
+    pub call: CallDecisionDurations,
 }
 
 impl DecisionPhaseDurations {
     pub fn total(&self) -> Duration {
         self.early + self.normal_discard + self.post_discard
     }
+}
+
+/// 鳴き判断1回を内部処理別に分けた実測時間。
+///
+/// 合計は `DecisionPhaseDurations::early` を超えない。合法な Chi / Pon が1件も無く候補評価を
+/// 通らなかった局面では、すべて `Duration::ZERO` のままになる。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallDecisionDurations {
+    /// 鳴き判断全体。最初の候補評価から最終候補の選択まで。
+    pub total: Duration,
+    /// 鳴き候補ごとの評価の合計。
+    pub candidates: Duration,
+    /// 1向聴 Call / Pass 比較のために1回だけ評価する Pass 側の ExpectedSelfTsumoValue。
+    /// 比較が発火しなかった局面では `Duration::ZERO` のままになる。
+    pub pass_iishanten_self_tsumo: Duration,
+}
+
+impl CallDecisionDurations {
+    /// 候補評価と Pass 評価を除いた残りの鳴き policy 処理。
+    pub fn remaining(&self) -> Duration {
+        self.total
+            .saturating_sub(self.candidates + self.pass_iishanten_self_tsumo)
+    }
+}
+
+/// production が実際に評価した鳴き候補1件の実測。
+///
+/// `kind` / `tile` / `consumed` は評価した合法 action そのもので、同じ牌の重複候補も
+/// 合法 action の列挙順でそれぞれ1件ずつ並ぶ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallCandidateDuration {
+    pub kind: CallKind,
+    pub tile: TileId,
+    pub consumed: Vec<TileId>,
+    /// 候補1件の評価全体。
+    pub elapsed: Duration,
+    /// そのうち鳴き後の打牌選択 (前方評価を含む)。そこまで進まなかった候補では
+    /// `Duration::ZERO` のままになる。
+    pub post_call_discard_selection: Duration,
 }
 
 /// 通常打牌選択1回を内部処理別に分けた実測時間。
@@ -96,6 +139,7 @@ pub struct TimedAgentAction {
     pub action: LegalAction,
     pub phases: DecisionPhaseDurations,
     pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    pub(crate) call_candidates: Vec<CallCandidateDuration>,
 }
 
 impl TimedAgentAction {
@@ -108,6 +152,12 @@ impl TimedAgentAction {
         self.two_shanten_self_tsumo_candidates
             .iter()
             .map(|candidate| (candidate.discard, candidate.elapsed))
+    }
+
+    /// 同じ production execution で実際に評価した鳴き候補の実測。合法な Chi / Pon が無い
+    /// request では空。
+    pub fn call_candidates(&self) -> &[CallCandidateDuration] {
+        &self.call_candidates
     }
 }
 
@@ -192,8 +242,14 @@ pub(crate) struct PhaseTimer<D: PhaseDurations, B: Default = ()> {
     breakdown: B,
 }
 
-pub(crate) type DecisionPhaseTimer =
-    PhaseTimer<DecisionPhaseDurations, Vec<TwoShantenSelfTsumoCandidateDuration>>;
+/// 意思決定1回の可変長の内訳。scalar な duration DTO と分けて持つ。
+#[derive(Debug, Default)]
+pub(crate) struct DecisionBreakdown {
+    two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    call_candidates: Vec<CallCandidateDuration>,
+}
+
+pub(crate) type DecisionPhaseTimer = PhaseTimer<DecisionPhaseDurations, DecisionBreakdown>;
 pub(crate) type NormalDiscardPhaseTimer =
     PhaseTimer<NormalDiscardPhaseDurations, Vec<TwoShantenSelfTsumoCandidateDuration>>;
 pub(crate) type ForwardMetricsPhaseTimer = PhaseTimer<ForwardMetricsPhaseDurations>;
@@ -288,6 +344,192 @@ impl DecisionPhaseTimer {
     pub(crate) fn record_normal_discard_phases(&mut self, durations: NormalDiscardPhaseDurations) {
         if let Some(state) = self.state.as_mut() {
             state.durations.normal_discard_phases = durations;
+        }
+    }
+
+    /// 鳴き判断の内訳を計る子計測器。外側の計測が有効な場合だけ有効にする。
+    ///
+    /// 合法な Chi / Pon が1件も無い局面では候補の区切りを1つも通らないため、内訳は 0 の
+    /// ままになる。
+    pub(crate) fn call_timer(&self) -> CallDecisionTimer {
+        match self.state {
+            Some(_) => CallDecisionTimer::armed(),
+            None => CallDecisionTimer::disabled(),
+        }
+    }
+
+    /// 鳴き判断の内訳を計上する。
+    pub(crate) fn record_call(
+        &mut self,
+        durations: CallDecisionDurations,
+        candidates: Vec<CallCandidateDuration>,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.durations.call = durations;
+            self.breakdown.call_candidates = candidates;
+        }
+    }
+
+    pub(crate) fn take_call_candidates(&mut self) -> Vec<CallCandidateDuration> {
+        std::mem::take(&mut self.breakdown.call_candidates)
+    }
+
+    /// 可変長の内訳は scalar duration DTO とは別に保持する。
+    pub(crate) fn record_two_shanten_self_tsumo_candidates(
+        &mut self,
+        candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    ) {
+        if self.state.is_some() {
+            self.breakdown.two_shanten_self_tsumo_candidates = candidates;
+        }
+    }
+
+    pub(crate) fn take_two_shanten_self_tsumo_candidates(
+        &mut self,
+    ) -> Vec<TwoShantenSelfTsumoCandidateDuration> {
+        std::mem::take(&mut self.breakdown.two_shanten_self_tsumo_candidates)
+    }
+}
+
+/// 鳴き判断へ差し込む optional な計測器。
+///
+/// 無効時は `Instant` を一切取得せず、判断内容にも影響しない。最初の候補評価まで全体の計測も
+/// 始めないため、鳴き候補が無い局面ではすべて 0 のままになる。
+#[derive(Debug)]
+pub(crate) struct CallDecisionTimer {
+    state: Option<CallDecisionTimerState>,
+}
+
+#[derive(Debug, Default)]
+struct CallDecisionTimerState {
+    since: Option<Instant>,
+    durations: CallDecisionDurations,
+    candidates: Vec<CallCandidateDuration>,
+}
+
+impl CallDecisionTimer {
+    pub(crate) fn disabled() -> Self {
+        Self { state: None }
+    }
+
+    pub(crate) fn armed() -> Self {
+        Self {
+            state: Some(CallDecisionTimerState::default()),
+        }
+    }
+
+    /// 候補1件を計る子計測器。最初の候補で鳴き判断全体の計測も始める。
+    pub(crate) fn candidate_timer(&mut self) -> CallCandidateTimer {
+        match self.state.as_mut() {
+            Some(state) => {
+                state.since.get_or_insert_with(Instant::now);
+                CallCandidateTimer::started()
+            }
+            None => CallCandidateTimer::disabled(),
+        }
+    }
+
+    /// 候補1件の実測を、評価した合法 action と対応付けて計上する。
+    pub(crate) fn record_candidate(
+        &mut self,
+        kind: CallKind,
+        tile: TileId,
+        consumed: &[TileId],
+        elapsed: CallCandidateElapsed,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.durations.candidates += elapsed.total;
+            state.candidates.push(CallCandidateDuration {
+                kind,
+                tile,
+                consumed: consumed.to_vec(),
+                elapsed: elapsed.total,
+                post_call_discard_selection: elapsed.post_call_discard_selection,
+            });
+        }
+    }
+
+    /// Pass 側の1向聴 ExpectedSelfTsumoValue の評価を計る。無効時は `Instant` を取得しない。
+    pub(crate) fn measure_pass_iishanten_self_tsumo<T>(
+        &mut self,
+        evaluate: impl FnOnce() -> T,
+    ) -> T {
+        let Some(state) = self.state.as_mut() else {
+            return evaluate();
+        };
+        let since = Instant::now();
+        let value = evaluate();
+        state.durations.pass_iishanten_self_tsumo += since.elapsed();
+        value
+    }
+
+    pub(crate) fn finish(self) -> (CallDecisionDurations, Vec<CallCandidateDuration>) {
+        match self.state {
+            Some(mut state) => {
+                if let Some(since) = state.since {
+                    state.durations.total = since.elapsed();
+                }
+                (state.durations, state.candidates)
+            }
+            None => (CallDecisionDurations::default(), Vec::new()),
+        }
+    }
+}
+
+/// 鳴き候補1件の実測。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CallCandidateElapsed {
+    total: Duration,
+    post_call_discard_selection: Duration,
+}
+
+/// 鳴き候補1件へ差し込む optional な計測器。
+#[derive(Debug)]
+pub(crate) struct CallCandidateTimer {
+    state: Option<CallCandidateTimerState>,
+}
+
+#[derive(Debug)]
+struct CallCandidateTimerState {
+    since: Instant,
+    post_call_discard_selection: Duration,
+}
+
+impl CallCandidateTimer {
+    pub(crate) fn disabled() -> Self {
+        Self { state: None }
+    }
+
+    pub(crate) fn started() -> Self {
+        Self {
+            state: Some(CallCandidateTimerState {
+                since: Instant::now(),
+                post_call_discard_selection: Duration::ZERO,
+            }),
+        }
+    }
+
+    /// 鳴き後の打牌選択を計る。無効時は `Instant` を取得しない。
+    pub(crate) fn measure_post_call_discard_selection<T>(
+        &mut self,
+        select: impl FnOnce() -> T,
+    ) -> T {
+        let Some(state) = self.state.as_mut() else {
+            return select();
+        };
+        let since = Instant::now();
+        let selection = select();
+        state.post_call_discard_selection += since.elapsed();
+        selection
+    }
+
+    pub(crate) fn finish(self) -> CallCandidateElapsed {
+        match self.state {
+            Some(state) => CallCandidateElapsed {
+                total: state.since.elapsed(),
+                post_call_discard_selection: state.post_call_discard_selection,
+            },
+            None => CallCandidateElapsed::default(),
         }
     }
 }
@@ -475,6 +717,7 @@ mod tests {
             action: LegalAction::None,
             phases: decision.finish(),
             two_shanten_self_tsumo_candidates,
+            call_candidates: Vec::new(),
         };
         let phases = timed.phases;
         assert_eq!(phases, timed.phases);
@@ -497,6 +740,87 @@ mod tests {
         let mut decision = DecisionPhaseTimer::disabled();
         decision.record_two_shanten_self_tsumo_candidates(vec![candidate]);
         assert!(decision.take_two_shanten_self_tsumo_candidates().is_empty());
+    }
+
+    #[test]
+    fn an_armed_call_timer_without_candidates_measures_nothing() {
+        // 合法な Chi / Pon が無い request では候補の区切りを1つも通らない。
+        let (durations, candidates) = CallDecisionTimer::armed().finish();
+
+        assert_eq!(durations, CallDecisionDurations::default());
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_timer_hands_out_a_disabled_call_timer() {
+        let timer = DecisionPhaseTimer::disabled();
+        let mut call = timer.call_timer();
+        let mut candidate = call.candidate_timer();
+        let measured = candidate.measure_post_call_discard_selection(|| 1);
+        call.record_candidate(
+            CallKind::Pon,
+            TileId::new(0).unwrap(),
+            &[TileId::new(1).unwrap(), TileId::new(2).unwrap()],
+            candidate.finish(),
+        );
+        let pass = call.measure_pass_iishanten_self_tsumo(|| 2);
+        let (durations, candidates) = call.finish();
+
+        // 計測が無効でも評価そのものは同じように通す。
+        assert_eq!(measured, 1);
+        assert_eq!(pass, 2);
+        assert_eq!(durations, CallDecisionDurations::default());
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn the_recorded_call_candidates_are_kept_as_the_breakdown() {
+        let mut timer = DecisionPhaseTimer::started();
+        let mut call = timer.call_timer();
+        let tiles = [TileId::new(4).unwrap(), TileId::new(8).unwrap()];
+        for _ in 0..2 {
+            let candidate = call.candidate_timer();
+            call.record_candidate(
+                CallKind::Chi,
+                TileId::new(0).unwrap(),
+                &tiles,
+                candidate.finish(),
+            );
+        }
+        let (durations, candidates) = call.finish();
+        timer.record_call(durations, candidates);
+        let recorded = timer.take_call_candidates();
+        let phases = timer.finish();
+
+        // 重複候補も dedup せず、記録した順にそのまま2件並ぶ。
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded.iter().all(
+            |candidate| candidate.kind == CallKind::Chi && candidate.consumed == tiles.to_vec()
+        ));
+        assert_eq!(phases.call.candidates, durations.candidates);
+        assert_eq!(phases.call.pass_iishanten_self_tsumo, Duration::ZERO);
+        assert_eq!(
+            phases.call.remaining(),
+            phases.call.total - durations.candidates
+        );
+    }
+
+    #[test]
+    fn the_call_breakdown_is_taken_only_once() {
+        let mut timer = DecisionPhaseTimer::started();
+        timer.record_call(
+            CallDecisionDurations::default(),
+            vec![CallCandidateDuration {
+                kind: CallKind::Pon,
+                tile: TileId::new(0).unwrap(),
+                consumed: vec![TileId::new(1).unwrap(), TileId::new(2).unwrap()],
+                elapsed: Duration::from_millis(1),
+                post_call_discard_selection: Duration::from_millis(1),
+            }],
+        );
+
+        assert_eq!(timer.take_call_candidates().len(), 1);
+        assert!(timer.take_call_candidates().is_empty());
     }
 
     #[test]
