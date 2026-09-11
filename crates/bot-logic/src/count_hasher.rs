@@ -12,7 +12,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 const MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
 
 #[derive(Default)]
-pub(crate) struct CountHasher {
+pub struct CountHasher {
     hash: u64,
 }
 
@@ -54,4 +54,4 @@ impl Hasher for CountHasher {
     }
 }
 
-pub(crate) type CountHasherBuilder = BuildHasherDefault<CountHasher>;
+pub type CountHasherBuilder = BuildHasherDefault<CountHasher>;

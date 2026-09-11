@@ -10,14 +10,14 @@ use std::collections::HashMap;
 #[cfg(test)]
 mod differential;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AcceptanceTile<S = Shanten> {
     pub tile: TileType,
     pub remaining: u8,
     pub shanten_after_draw: S,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Acceptance<S = Shanten> {
     pub current: S,
     pub tiles: Vec<AcceptanceTile<S>>,

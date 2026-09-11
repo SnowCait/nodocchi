@@ -3,7 +3,7 @@ pub mod bonus_han;
 pub mod completed_hand;
 #[cfg(test)]
 mod completed_hand_corpus;
-mod count_hasher;
+pub mod count_hasher;
 pub mod discard;
 pub mod fu;
 pub mod furiten;
@@ -44,6 +44,7 @@ pub use completed_hand::{
     ConcealedMeld, KokushiDecomposition, StandardDecomposition, analyze_completed_hand,
     is_standard_hand_complete, standard_completion_intersects,
 };
+pub use count_hasher::{CountHasher, CountHasherBuilder};
 pub use discard::{
     DiscardBlockContext, DiscardCandidateDiagnostic, DiscardComparison, DiscardComparisonReason,
     DiscardDecisionDiagnostic, DiscardEvaluation, FloatingTileValue, HandShapeSummary, PairContext,
