@@ -277,6 +277,27 @@ pub(crate) fn log_meld_applied(actor: u8, target: u8, pai: &str, consumed: &[Str
     info!(actor, target, pai = ?pai, consumed = ?consumed, "meld applied");
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EndGameLogFields {
+    pub placement: u8,
+    pub score: i32,
+}
+
+pub(crate) fn end_game_log_fields(scores: &[i32], seat_id: Option<u8>) -> Option<EndGameLogFields> {
+    if scores.len() != 4 {
+        return None;
+    }
+    let seat = usize::from(seat_id?);
+    let score = *scores.get(seat)?;
+    let better = scores
+        .iter()
+        .enumerate()
+        .filter(|&(index, &other)| other > score || (other == score && index < seat))
+        .count();
+    let placement = u8::try_from(better + 1).ok()?;
+    Some(EndGameLogFields { placement, score })
+}
+
 pub async fn run_riichilab_client<A, P>(
     config: ClientConfig,
     agent: &mut A,
@@ -595,7 +616,19 @@ where
                         }
                     },
                     MjaiEvent::EndGame { scores } => {
-                        info!(scores = ?scores, "end_game");
+                        match end_game_log_fields(&scores, state.seat_id()) {
+                            Some(fields) => info!(
+                                placement = fields.placement,
+                                score = fields.score,
+                                scores = ?scores,
+                                "end_game"
+                            ),
+                            None => info!(
+                                seat_id = ?state.seat_id(),
+                                scores = ?scores,
+                                "end_game"
+                            ),
+                        }
                     }
                     MjaiEvent::ValidationResult { passed, reason } => {
                         if passed {
@@ -1055,6 +1088,69 @@ mod tests {
                 tsumogiri: Some(true),
                 request_id: Some(92),
             })
+        );
+    }
+
+    #[test]
+    fn end_game_log_fields_uses_score_descending_placement() {
+        let scores = vec![31200, 27400, 21800, 19600];
+        assert_eq!(
+            end_game_log_fields(&scores, Some(2)),
+            Some(EndGameLogFields {
+                placement: 3,
+                score: 21800,
+            })
+        );
+        assert_eq!(
+            end_game_log_fields(&scores, Some(0)),
+            Some(EndGameLogFields {
+                placement: 1,
+                score: 31200,
+            })
+        );
+        assert_eq!(
+            end_game_log_fields(&scores, Some(3)),
+            Some(EndGameLogFields {
+                placement: 4,
+                score: 19600,
+            })
+        );
+    }
+
+    #[test]
+    fn end_game_log_fields_breaks_ties_by_player_index() {
+        let scores = vec![25000, 30000, 25000, 20000];
+        assert_eq!(
+            end_game_log_fields(&scores, Some(0)),
+            Some(EndGameLogFields {
+                placement: 2,
+                score: 25000,
+            })
+        );
+        assert_eq!(
+            end_game_log_fields(&scores, Some(2)),
+            Some(EndGameLogFields {
+                placement: 3,
+                score: 25000,
+            })
+        );
+    }
+
+    #[test]
+    fn end_game_log_fields_is_none_for_unknown_seat_or_missing_scores() {
+        let scores = vec![31200, 27400, 21800, 19600];
+        assert_eq!(end_game_log_fields(&scores, None), None);
+        assert_eq!(end_game_log_fields(&[], Some(0)), None);
+        assert_eq!(end_game_log_fields(&scores, Some(4)), None);
+    }
+
+    #[test]
+    fn end_game_log_fields_is_none_unless_scores_has_four_players() {
+        assert_eq!(end_game_log_fields(&[], Some(0)), None);
+        assert_eq!(end_game_log_fields(&[31200, 27400, 21800], Some(0)), None);
+        assert_eq!(
+            end_game_log_fields(&[31200, 27400, 21800, 19600, 19600], Some(0)),
+            None
         );
     }
 
