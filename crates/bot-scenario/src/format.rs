@@ -3907,8 +3907,10 @@ mod tests {
         );
     }
 
+    // 混フリテンの current-tenpai 比較は自摸打点の探索が重いので、軸とツモ和了確率の表示を
+    // 1回の探索結果からまとめて確認する。
     #[test]
-    fn mixed_furiten_current_tenpai_scenario_reports_the_self_tsumo_axis() {
+    fn mixed_furiten_current_tenpai_scenario_reports_the_self_tsumo_axis_and_hit_probability() {
         let (_, diagnostic, output) = rendered(CURRENT_TENPAI_SELF_TSUMO_SCENARIO, false);
         let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
         let two_p = candidates
@@ -3919,6 +3921,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5p")
             .unwrap();
+        let summary = summary_section(&output);
 
         assert!(two_p.selected);
         assert!(two_p.current_tenpai_expected_self_tsumo_value.is_some());
@@ -3937,28 +3940,12 @@ mod tests {
             output.contains("  lost by: CurrentTenpaiExpectedSelfTsumoValue"),
             "{output}"
         );
-        let summary = summary_section(&output);
         assert!(
             summary.contains("  choice 2 lost by: CurrentTenpaiExpectedSelfTsumoValue"),
             "{summary}"
         );
-    }
-
-    #[test]
-    fn current_tenpai_scenario_reports_the_self_tsumo_hit_probability() {
-        let (_, diagnostic, output) = rendered(CURRENT_TENPAI_SELF_TSUMO_SCENARIO, false);
-        let candidates = &diagnostic.normal_discard.as_ref().unwrap().candidates;
-        let two_p = candidates
-            .iter()
-            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "2p")
-            .unwrap();
-        let five_p = candidates
-            .iter()
-            .find(|candidate| candidate.evaluation.discard.to_mjai_string() == "5p")
-            .unwrap();
 
         // 打点で勝った 2p の方がツモ和了確率は低い。診断はその差をそのまま表示する。
-        assert!(two_p.selected);
         assert!(
             two_p.current_tenpai_expected_self_tsumo_value
                 > five_p.current_tenpai_expected_self_tsumo_value
@@ -3974,8 +3961,6 @@ mod tests {
             )),
             "{output}"
         );
-
-        let summary = summary_section(&output);
         assert!(
             summary.contains(&format!(
                 "  choice 2 self-tsumo hit probability: choice 1 {} / choice 2 {}",
@@ -5915,9 +5900,11 @@ mod tests {
             .expect("selected candidate")
     }
 
+    // current-tenpai の比較は自摸打点の探索が重いので、Summary の表示と choices が lookahead を
+    // 構築しないことを1回の探索結果からまとめて確認する。
     #[test]
-    fn summary_shows_the_current_tenpai_offense_comparison() {
-        let (_, diagnostic, output) =
+    fn summary_shows_the_current_tenpai_offense_comparison_without_building_lookahead() {
+        let (scenario, diagnostic, output) =
             rendered(CURRENT_TENPAI_OFFENSE_WITHOUT_REACH_SCENARIO, false);
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
 
@@ -5951,6 +5938,17 @@ mod tests {
 
         assert!(summary.contains("  choice 3 lost by: Shanten"), "{summary}");
         assert!(!summary.contains("  choice 3 comparison:"), "{summary}");
+
+        let choices = diagnose_choices(&scenario, &diagnostic, 3);
+        assert_eq!(choices.len(), 3);
+        assert!(
+            choices.iter().all(|choice| {
+                choice.normal_discard_lookahead.is_none()
+                    && choice.normal_discard_lookahead_value.is_none()
+                    && choice.normal_discard_tenpai_continuation.is_none()
+            }),
+            "summary must not enable lookahead"
+        );
     }
 
     #[test]
@@ -6066,23 +6064,6 @@ mod tests {
             "{summary}"
         );
         assert!(!summary.contains("comparison:"), "{summary}");
-    }
-
-    #[test]
-    fn summary_comparison_does_not_build_lookahead() {
-        let (scenario, diagnostic, _) =
-            rendered(CURRENT_TENPAI_OFFENSE_WITHOUT_REACH_SCENARIO, false);
-        let choices = diagnose_choices(&scenario, &diagnostic, 3);
-
-        assert_eq!(choices.len(), 3);
-        assert!(
-            choices.iter().all(|choice| {
-                choice.normal_discard_lookahead.is_none()
-                    && choice.normal_discard_lookahead_value.is_none()
-                    && choice.normal_discard_tenpai_continuation.is_none()
-            }),
-            "summary must not enable lookahead"
-        );
     }
 
     #[test]
@@ -6696,16 +6677,6 @@ mod tests {
         "history_furiten": { "same_turn": false, "riichi_missed_win": false }
     }"#;
 
-    // 恒常フリテンの timing 評価は選択済み1候補の継続枝を辿るため、同じ局面を使うテストで
-    // 構築結果を共有する。
-    static DEFERRED_REACH: LazyLock<RenderedDiagnostic> = LazyLock::new(|| {
-        let (_, diagnostic, rendered) = rendered(DEFERRED_REACH_SCENARIO, false);
-        RenderedDiagnostic {
-            rendered,
-            diagnostic,
-        }
-    });
-
     static NON_FURITEN_BAD_WAIT_DEFERRED_REACH: LazyLock<RenderedDiagnostic> =
         LazyLock::new(|| {
             let (_, diagnostic, rendered) =
@@ -6716,11 +6687,14 @@ mod tests {
             }
         });
 
+    // 恒常フリテンの timing 評価は選択済み1候補の継続枝を辿るため重い。Reach 節と Summary の
+    // 両方をこの1回の探索結果から確認する。
     #[test]
-    fn reach_section_reports_the_deferred_timing() {
-        let reach = section(&DEFERRED_REACH.rendered, "Reach");
-        let timing = DEFERRED_REACH
-            .diagnostic
+    fn a_deferred_reach_reports_its_timing_in_the_reach_section_and_the_summary() {
+        let (_, diagnostic, output) = rendered(DEFERRED_REACH_SCENARIO, false);
+        let reach = section(&output, "Reach");
+        let summary = summary_section(&output);
+        let timing = diagnostic
             .reach
             .as_ref()
             .and_then(|reach| reach.timing)
@@ -6746,20 +6720,12 @@ mod tests {
             )),
             "{reach}"
         );
-    }
-
-    #[test]
-    fn summary_reports_a_deferred_reach_with_its_timing_reason() {
-        let summary = summary_section(&DEFERRED_REACH.rendered);
 
         assert!(matches!(
-            DEFERRED_REACH.diagnostic.selected_action,
+            diagnostic.selected_action,
             LegalAction::Dahai { .. }
         ));
-        assert_eq!(
-            DEFERRED_REACH.diagnostic.selected_source,
-            AgentActionSource::NormalDiscard
-        );
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
         assert!(summary.contains("  reach: deferred"), "{summary}");
         assert!(
             summary.contains("  reach base reason: Eligible"),
@@ -8989,15 +8955,15 @@ mod tests {
         "history_furiten": {"same_turn": false, "riichi_missed_win": false}
     }"#;
 
-    // 2手先探索は重いので、同じ表示を確認する複数のテストで構築結果を共有する。
-    static SELF_TSUMO_VERBOSE: LazyLock<String> =
-        LazyLock::new(|| rendered_with_lookahead(SELF_TSUMO_SCENARIO, true));
-
+    // 2手先探索は重いので、局面共通の facts と枝の詳細を1回の探索結果からまとめて確認する。
     #[test]
-    fn the_lookahead_section_shows_the_shared_self_tsumo_facts() {
-        // 局面共通の未確認牌と残り自摸機会を節の先頭に1回だけ出す。
-        let lookahead = section(&SELF_TSUMO_VERBOSE, "Lookahead");
+    fn the_verbose_lookahead_shows_the_self_tsumo_facts_and_a_tenpai_branch_continuation() {
+        let lookahead = section(
+            &rendered_with_lookahead(SELF_TSUMO_SCENARIO, true),
+            "Lookahead",
+        );
 
+        // 局面共通の未確認牌と残り自摸機会を節の先頭に1回だけ出す。
         // 手牌14枚 + ドラ表示牌1枚が見えているので未確認は 121枚。残り山 60枚を4人で分ける。
         let facts = [
             "  self-tsumo continuation",
@@ -9006,13 +8972,8 @@ mod tests {
         ]
         .join("\n");
         assert!(lookahead.contains(&facts), "{lookahead}");
-    }
 
-    #[test]
-    fn the_verbose_lookahead_shows_the_tsumo_continuation_of_a_tenpai_branch() {
         // テンパイへ到達した枝は、経路確率と閉形式の材料・結果まで追える。
-        let lookahead = section(&SELF_TSUMO_VERBOSE, "Lookahead");
-
         let branch = [
             "        tsumo continuation",
             "          path probability: 0.033057",
