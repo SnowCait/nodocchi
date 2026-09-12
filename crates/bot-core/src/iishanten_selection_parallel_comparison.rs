@@ -347,35 +347,66 @@ mod tests {
             );
 
             for candidate in &decision.observation.iishanten_forward_candidates {
+                let discard = candidate.discard.to_mjai_string();
                 // 内訳は候補1件の実測を分けたものなので、その合計を超えない。
                 assert!(
                     candidate.phases.total() <= candidate.elapsed,
-                    "{label} {}",
-                    candidate.discard.to_mjai_string(),
+                    "{label} {discard}",
+                );
+                assert!(
+                    candidate.phases.lookahead_search > Duration::ZERO,
+                    "{label} {discard}",
+                );
+                // 仕事量も候補単位で取れる。未来テンパイの値 memo の計上は逐次評価では計測
+                // thread、並列評価では候補を評価した worker がそれぞれ自分の区間で行う。
+                assert!(
+                    candidate.tenpai_value_memo_hits + candidate.tenpai_value_memo_misses > 0,
+                    "{label} {discard}",
+                );
+                let memo = &candidate.search_state_memo;
+                assert!(
+                    memo.two_shanten_misses
+                        + memo.iishanten_misses
+                        + memo.next_discard_misses
+                        + memo.same_shanten_next_discard_misses
+                        > 0,
+                    "{label} {discard} {memo:?}",
                 );
             }
 
-            // phase 別の内訳は候補の内訳の足し合わせそのもの。並列評価でも 0 のままにならない。
+            // phase 別の内訳の semantics は変えない。計測 thread が区切りを通る逐次評価では
+            // 従来どおり `forward_metrics` の内訳で、候補を worker へ分ける並列評価では計測
+            // thread が区切りを通らないため従来どおり 0 のまま。候補の内訳を足し込まない。
             let phases = decision.observation.phases.forward_metrics_phases;
-            let summed = decision
-                .observation
-                .iishanten_forward_candidates
-                .iter()
-                .fold(
-                    ForwardMetricsPhaseDurations::default(),
-                    |mut total, candidate| {
-                        total.lookahead_search += candidate.phases.lookahead_search;
-                        total.weighted_aggregation += candidate.phases.weighted_aggregation;
-                        total.self_tsumo_continuation += candidate.phases.self_tsumo_continuation;
-                        total
-                    },
-                );
-            assert_eq!(phases, summed, "{label}");
-            assert!(phases.lookahead_search > Duration::ZERO, "{label}");
+            assert!(
+                phases.total() <= decision.observation.phases.forward_metrics,
+                "{label} {phases:?}",
+            );
+            if decision.workers() > 1 {
+                assert_eq!(phases, ForwardMetricsPhaseDurations::default(), "{label}");
+            }
 
             // 計測を有効にした run と持たない run で、選ばれた打牌も候補ごとの
             // ExpectedSelfTsumoValue も比較理由も一致する。
             assert!(decision.runs_agree(), "{label}");
+        }
+
+        // 候補の実測は worker ごとに独立して計るので、合計が phase の壁時計を超えるのは正常。
+        // S と PA のどちらでも、候補が持つ仕事量は1件分だけで、他候補の分を巻き込まない。
+        let parallel = comparison
+            .parallel
+            .last()
+            .expect("PA は必ずある (production と同じ方式)");
+        assert!(parallel.workers() > 1, "{}", parallel.parallelism.label());
+        let per_candidate_lookups: Vec<u64> = parallel
+            .observation
+            .iishanten_forward_candidates
+            .iter()
+            .map(|candidate| candidate.tenpai_value_memo_hits + candidate.tenpai_value_memo_misses)
+            .collect();
+        let total_lookups: u64 = per_candidate_lookups.iter().sum();
+        for lookups in &per_candidate_lookups {
+            assert!(*lookups < total_lookups, "{per_candidate_lookups:?}");
         }
 
         // 計測の有無に依らず、全方式が S と bit-exact に一致したまま。

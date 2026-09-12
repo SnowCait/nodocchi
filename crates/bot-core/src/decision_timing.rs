@@ -123,6 +123,10 @@ impl NormalDiscardPhaseDurations {
 ///
 /// 合計は `NormalDiscardPhaseDurations::forward_metrics` を超えない。前方集計値の入力を
 /// 組み立てる時間はどの内訳にも入らない。
+///
+/// 計測 thread が通った区切りだけを計上する。候補単位で並行に評価する局面では計測 thread が
+/// 区切りを1つも通らないため、3つとも `Duration::ZERO` のままになる。その局面の内訳は
+/// `TimedAgentAction::iishanten_forward_candidates()` が候補単位で持つ。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ForwardMetricsPhaseDurations {
     /// 仮想ツモ枝の探索。ツモ後の次打牌評価と、その枝が使う将来打点の scoring を含む。
@@ -156,6 +160,10 @@ pub(crate) struct TwoShantenSelfTsumoCandidateDuration {
 /// する production では、候補の `elapsed` の合計が
 /// [`NormalDiscardPhaseDurations::forward_metrics`] の壁時計を超える。これは既存の2向聴 Full
 /// 候補や Call / Pass の重なりと同じ semantics で、重ねた分だけ壁時計が内訳より短くなる。
+///
+/// `phases` もこの候補の中での実時間で、[`NormalDiscardPhaseDurations::forward_metrics_phases`]
+/// とは別物。あちらは従来どおり計測 thread が通った区切りの実測で、並行評価では区切りを通らず
+/// 0 のままになる。候補の内訳をそちらへ足し込んで意味を変えていない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IishantenForwardCandidateDuration {
     pub discard: TileType,
@@ -788,16 +796,15 @@ impl ForwardMetricsPhaseTimer {
 
     /// 逐次の区切りでは表せない、別 thread で計り終えた候補1件分の実測を反映する。
     ///
-    /// 呼ぶ順が候補順。phase の内訳はそのまま `phases` へも足し合わせるので、候補単位で並行に
-    /// 評価した局面でも内訳が 0 のままにならない。
+    /// 呼ぶ順が候補順。候補の実測は候補列にだけ載せ、phase 別の内訳 (`phases`) へは足し込ま
+    /// ない。phase は従来どおりこの thread が通った区切りの実測のままで、並行に評価した候補の
+    /// 実測を足し合わせた値へ意味を変えない。並行評価では区切りを1つも通らないため、phase の
+    /// 内訳は従来と同じく 0 のままになる。
     pub(crate) fn record_candidate(&mut self, candidate: IishantenForwardCandidateDuration) {
-        if let Some(state) = self.state.as_mut() {
-            state.phases.lookahead_search += candidate.phases.lookahead_search;
-            state.phases.weighted_aggregation += candidate.phases.weighted_aggregation;
-            state.phases.self_tsumo_continuation += candidate.phases.self_tsumo_continuation;
-            if state.measures_candidates {
-                state.candidates.push(candidate);
-            }
+        if let Some(state) = self.state.as_mut()
+            && state.measures_candidates
+        {
+            state.candidates.push(candidate);
         }
     }
 
@@ -1082,6 +1089,8 @@ mod tests {
         assert_eq!(forward_candidate.discard, forward_discard);
         // 候補の内訳は、その候補を評価していた実時間を超えない。
         assert!(forward_candidate.phases.total() <= forward_candidate.elapsed);
+        // 逐次評価では計測 thread が候補の中で区切りを通るため、phase 別の内訳は従来どおり
+        // その実測を持つ。
         assert_eq!(
             phases.normal_discard_phases.forward_metrics_phases,
             forward_candidate.phases
@@ -1130,9 +1139,10 @@ mod tests {
     }
 
     #[test]
-    fn the_parallel_candidate_measurements_add_up_to_the_forward_phases() {
-        // 並列評価では worker 側で計り終えた内訳をそのまま足し合わせる。候補の実測の合計が
-        // phase の壁時計を超えても、内訳は候補ごとの実時間のまま書き換えない。
+    fn the_parallel_candidate_measurements_stay_out_of_the_forward_phases() {
+        // worker 側で計り終えた内訳は候補列にだけ載せる。phase 別の内訳は計測 thread が通った
+        // 区切りの実測のままで、並行に評価した候補の合計へ意味を変えない。並行評価では区切りを
+        // 1つも通らないので 0 のままになる。
         let normal = NormalDiscardPhaseTimer::started();
         let mut forward = normal.forward_metrics_timer().measuring_candidates(true);
         let candidates = ["1m", "2m"].map(|discard| IishantenForwardCandidateDuration {
@@ -1152,9 +1162,7 @@ mod tests {
         }
 
         assert_eq!(forward.take_candidates(), candidates.to_vec());
-        let phases = forward.finish();
-        assert_eq!(phases.lookahead_search, Duration::from_millis(18));
-        assert_eq!(phases.weighted_aggregation, Duration::from_millis(2));
+        assert_eq!(forward.finish(), ForwardMetricsPhaseDurations::default());
     }
 
     #[test]

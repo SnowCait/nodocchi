@@ -1226,18 +1226,14 @@ mod tests {
     #[test]
     fn report_and_json_show_the_iishanten_forward_candidates_of_a_slow_normal_discard() {
         // 候補単位で並行に評価するため、候補の実測の合計は forward の壁時計を超える。合計を
-        // 壁時計として見せず、候補の内訳をそのまま並べる。
+        // 壁時計として見せず、候補の内訳をそのまま並べる。並行評価では計測 thread が phase の
+        // 区切りを通らないので、既存の forward subphase は従来どおり 0 のまま。
         let run = synthetic_run(vec![with_iishanten_forward_breakdown(
             measurement_with_phases(
                 "game-005.jsonl",
                 731,
                 2_050,
-                with_forward_breakdown(
-                    phases_with_normal_discard_breakdown(0, 2_040, 10, 30, 1_980, 30),
-                    3_150,
-                    120,
-                    90,
-                ),
+                phases_with_normal_discard_breakdown(0, 2_040, 10, 30, 1_980, 30),
             ),
             &[("3m", 1_800, 1_700, 60, 40), ("6m", 1_560, 1_450, 60, 50)],
         )]);
@@ -1276,6 +1272,13 @@ mod tests {
             .map(|candidate| candidate.elapsed_ns)
             .sum();
         assert!(summed > request.normal_discard_forward_ns);
+
+        // 既存 scalar field の semantics は変えない。候補の内訳をここへ足し込まないので、
+        // 並行評価した request では従来どおり 0 のまま。
+        assert_eq!(request.normal_discard_forward_ns, 1_980_000_000);
+        assert_eq!(request.forward_lookahead_search_ns, 0);
+        assert_eq!(request.forward_weighted_aggregation_ns, 0);
+        assert_eq!(request.forward_self_tsumo_ns, 0);
 
         let text = serde_json::to_string(&json).unwrap();
         assert!(text.contains("\"iishanten_forward_candidates\""), "{text}");

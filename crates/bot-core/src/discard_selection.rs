@@ -1395,6 +1395,12 @@ fn production_selection_metrics_instrumented(
     let mut forward_timing = timing
         .forward_metrics_timer()
         .measuring_candidates(best_shanten_after_discard(evaluations) == Some(IISHANTEN_SHANTEN));
+    // 未来テンパイの値 memo の計上は、候補単位の実測を残す区間だけ有効にする。通常の
+    // production evaluation はこの guard を取らないので、memo を引くたびの計上は走らない。
+    // 並行評価では worker がそれぞれ自分の区間を有効にするため、この guard は逐次評価の分。
+    let counted = forward_timing
+        .measures_candidates()
+        .then(tenpai_value_memo_counter::counted);
     let forward = match parallel_forward_workers(evaluations, continuation) {
         None => ParallelForwardMetrics::sequential(forward_metrics_instrumented(
             &inputs,
@@ -1411,6 +1417,7 @@ fn production_selection_metrics_instrumented(
             &mut forward_timing,
         ),
     };
+    drop(counted);
     timing.record_iishanten_forward_candidates(forward_timing.take_candidates());
     timing.record_forward_metrics_phases(forward_timing.finish());
     let ParallelForwardMetrics {
@@ -1567,6 +1574,9 @@ fn parallel_forward_metrics(
                         evaluations,
                         continuation,
                     );
+                    // worker の計上は自分の thread だけで有効になるため、候補の counter は
+                    // 他の worker と混ざらない。
+                    let _counted = measures.then(tenpai_value_memo_counter::counted);
                     let mut metrics = Vec::new();
                     let mut elapsed = Vec::new();
                     while let Some(&index) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
@@ -2961,10 +2971,13 @@ pub(crate) mod tests {
         let candidates = timing.take_iishanten_forward_candidates();
         let phases = timing.finish();
 
-        assert_eq!(
-            timed,
-            select_discard_action_with_evaluation(&context, &actions)
-        );
+        // 通常の production evaluation は計測区間を開かないので、未来テンパイの値 memo の計上
+        // そのものが走らない。選択と値は計測の有無で変わらない。
+        let before = tenpai_value_memo_counter::counts();
+        let untimed = select_discard_action_with_evaluation(&context, &actions);
+        assert_eq!(tenpai_value_memo_counter::counts(), before);
+
+        assert_eq!(timed, untimed);
         assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
 
         // 深く評価した候補だけが、production の候補順そのままで並ぶ。
@@ -2983,25 +2996,26 @@ pub(crate) mod tests {
             deep,
         );
 
-        // 内訳は候補1件ごとの実測を分けたものなので、候補の中では実測を超えない。候補単位で
-        // 並行に評価する局面では内訳の合計が外側の phase の壁時計を超えるため、phase 側では
-        // その不等式を置かない。
+        // 候補の内訳はその候補1件の実測を分けたもので、仕事量も1件分だけ。
         for candidate in &candidates {
             assert!(
                 candidate.phases.total() <= candidate.elapsed,
                 "{candidate:?}"
             );
+            // 逐次評価では評価器を候補間で共有するので、先の候補が暖めた分だけ hit になる。
+            // 候補1件が memo を引いた回数そのものは 0 にならない。
+            assert!(
+                candidate.tenpai_value_memo_hits + candidate.tenpai_value_memo_misses > 0,
+                "{candidate:?}",
+            );
         }
-        let summed = candidates.iter().fold(
-            ForwardMetricsPhaseDurations::default(),
-            |mut total, candidate| {
-                total.lookahead_search += candidate.phases.lookahead_search;
-                total.weighted_aggregation += candidate.phases.weighted_aggregation;
-                total.self_tsumo_continuation += candidate.phases.self_tsumo_continuation;
-                total
-            },
+
+        // phase 別の内訳は従来どおり前方集計値の実測を分けたもので、その合計は外側の phase を
+        // 超えない。候補の内訳をここへ足し込んでいない。
+        assert!(
+            phases.forward_metrics_phases.total() <= phases.forward_metrics,
+            "{phases:?}"
         );
-        assert_eq!(phases.forward_metrics_phases, summed, "{phases:?}");
     }
 
     #[test]
