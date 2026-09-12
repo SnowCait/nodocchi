@@ -2,11 +2,13 @@ use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
 use bot_logic::{
-    ForwardMetricsObserver, ForwardMetricsPhase, TileId, TileType, TwoShantenSelfTsumoObserver,
+    ForwardMetricsObserver, ForwardMetricsPhase, SearchStateMemoStats, TileId, TileType,
+    TwoShantenSelfTsumoObserver,
 };
 
 use crate::action::LegalAction;
 use crate::call_decision::CallKind;
+use crate::prospective_value::tenpai_value_memo_counter;
 
 /// 意思決定1回を phase 別に分けた実測時間。
 ///
@@ -144,12 +146,37 @@ pub(crate) struct TwoShantenSelfTsumoCandidateDuration {
     pub elapsed: Duration,
 }
 
+/// production が1向聴の深い前方評価を実際に行った候補1件の実測と仕事量。
+///
+/// 並ぶのは深い前方評価の対象になった候補 ([`bot_logic::forward_target_mask`]) だけで、
+/// 対象外の候補は前方評価そのものを通らないため1件も入らない。順序は production の候補順
+/// (合法打牌の評価順) そのままで、並行に評価した局面でも thread の終了順には依らない。
+///
+/// `elapsed` はその候補を評価していた実時間で、phase の壁時計ではない。候補単位で並行に評価
+/// する production では、候補の `elapsed` の合計が
+/// [`NormalDiscardPhaseDurations::forward_metrics`] の壁時計を超える。これは既存の2向聴 Full
+/// 候補や Call / Pass の重なりと同じ semantics で、重ねた分だけ壁時計が内訳より短くなる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IishantenForwardCandidateDuration {
+    pub discard: TileType,
+    /// 候補1件の前方評価全体。
+    pub elapsed: Duration,
+    /// そのうちの内部処理別の内訳。合計は `elapsed` を超えない。
+    pub phases: ForwardMetricsPhaseDurations,
+    /// 候補1件の評価が使った探索内の同一 state memo の利用数。memo を持たない局面では 0。
+    pub search_state_memo: SearchStateMemoStats,
+    /// 候補1件の評価が引いた未来テンパイの値 memo の利用数。miss は実際に打点を評価した件数。
+    pub tenpai_value_memo_hits: u64,
+    pub tenpai_value_memo_misses: u64,
+}
+
 /// 計測付きで実行した意思決定の最終 action と phase 別実測時間。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedAgentAction {
     pub action: LegalAction,
     pub phases: DecisionPhaseDurations,
     pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    pub(crate) iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
     pub(crate) call_candidates: Vec<CallCandidateDuration>,
 }
 
@@ -163,6 +190,12 @@ impl TimedAgentAction {
         self.two_shanten_self_tsumo_candidates
             .iter()
             .map(|candidate| (candidate.discard, candidate.elapsed))
+    }
+
+    /// 同じ production execution で1向聴の深い前方評価を実際に行った候補の実測。最善向聴数が
+    /// 1向聴でない request と、前方評価を通らなかった request では空。
+    pub fn iishanten_forward_candidates(&self) -> &[IishantenForwardCandidateDuration] {
+        &self.iishanten_forward_candidates
     }
 
     /// 同じ production execution で実際に評価した鳴き候補の実測。合法な Chi / Pon が無い
@@ -256,14 +289,57 @@ pub(crate) struct PhaseTimer<D: PhaseDurations, B: Default = ()> {
 /// 意思決定1回の可変長の内訳。scalar な duration DTO と分けて持つ。
 #[derive(Debug, Default)]
 pub(crate) struct DecisionBreakdown {
-    two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    normal_discard: NormalDiscardBreakdown,
     call_candidates: Vec<CallCandidateDuration>,
+}
+
+/// 通常打牌選択1回の可変長の内訳。候補単位の実測は向聴数別にそれぞれ別の列で持つ。
+#[derive(Debug, Default)]
+pub(crate) struct NormalDiscardBreakdown {
+    two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
 }
 
 pub(crate) type DecisionPhaseTimer = PhaseTimer<DecisionPhaseDurations, DecisionBreakdown>;
 pub(crate) type NormalDiscardPhaseTimer =
-    PhaseTimer<NormalDiscardPhaseDurations, Vec<TwoShantenSelfTsumoCandidateDuration>>;
-pub(crate) type ForwardMetricsPhaseTimer = PhaseTimer<ForwardMetricsPhaseDurations>;
+    PhaseTimer<NormalDiscardPhaseDurations, NormalDiscardBreakdown>;
+
+/// 1向聴の深い前方評価を、phase 別と候補別に計る optional な計測器。
+///
+/// 無効時は区切りの通知を受けても `Instant` を取得しない。有効な場合も通った区切りの経過時間を
+/// その場で計上するだけで、対象候補も枝の探索も集計も計測の有無で変わらない。
+///
+/// `phases` は通った区切りの合計で、候補単位で並行に評価した局面では候補の内訳の足し合わせに
+/// なる。その場合は前方集計 phase の壁時計を超え得る。
+#[derive(Debug)]
+pub(crate) struct ForwardMetricsPhaseTimer {
+    state: Option<ForwardMetricsTimerState>,
+}
+
+#[derive(Debug)]
+struct ForwardMetricsTimerState {
+    phases: ForwardMetricsPhaseDurations,
+    candidates: Vec<IishantenForwardCandidateDuration>,
+    /// 候補単位の実測を残すか。最善向聴数が1向聴でない局面では `false` で、候補の区切りを
+    /// 受けても列へ積まない。
+    measures_candidates: bool,
+    /// 区切りを開いたままの候補。閉じた時点で1件として `candidates` へ積む。
+    current: Option<OpenForwardCandidate>,
+    /// 直前の区切りからの起点。
+    since: Instant,
+    /// 計上先の phase。最初の区切りを待っている間は `None`。
+    phase: Option<ForwardMetricsPhase>,
+}
+
+#[derive(Debug)]
+struct OpenForwardCandidate {
+    discard: TileType,
+    started: Instant,
+    phases: ForwardMetricsPhaseDurations,
+    /// 候補へ入った時点の累計。候補1件分の利用数は閉じる時点との差になる。
+    search_state_memo: SearchStateMemoStats,
+    tenpai_value_memo: (u64, u64),
+}
 
 /// 2向聴 ExpectedSelfTsumoValue の候補別 optional 計測器。
 ///
@@ -300,19 +376,6 @@ impl<D: PhaseDurations, B: Default> PhaseTimer<D, B> {
         Self {
             state: Some(TimerState {
                 phase: Some(D::FIRST),
-                since: Instant::now(),
-                durations: D::default(),
-            }),
-            breakdown: B::default(),
-        }
-    }
-
-    /// 最初の `enter()` まで計上を始めない計測器。区切りを通らなかった経路では、どの phase も
-    /// `Duration::ZERO` のままになる。
-    pub(crate) fn armed() -> Self {
-        Self {
-            state: Some(TimerState {
-                phase: None,
                 since: Instant::now(),
                 durations: D::default(),
             }),
@@ -386,19 +449,27 @@ impl DecisionPhaseTimer {
     }
 
     /// 可変長の内訳は scalar duration DTO とは別に保持する。
-    pub(crate) fn record_two_shanten_self_tsumo_candidates(
-        &mut self,
-        candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
-    ) {
+    pub(crate) fn record_normal_discard_breakdown(&mut self, breakdown: NormalDiscardBreakdown) {
         if self.state.is_some() {
-            self.breakdown.two_shanten_self_tsumo_candidates = candidates;
+            self.breakdown.normal_discard = breakdown;
         }
     }
 
     pub(crate) fn take_two_shanten_self_tsumo_candidates(
         &mut self,
     ) -> Vec<TwoShantenSelfTsumoCandidateDuration> {
-        std::mem::take(&mut self.breakdown.two_shanten_self_tsumo_candidates)
+        std::mem::take(
+            &mut self
+                .breakdown
+                .normal_discard
+                .two_shanten_self_tsumo_candidates,
+        )
+    }
+
+    pub(crate) fn take_iishanten_forward_candidates(
+        &mut self,
+    ) -> Vec<IishantenForwardCandidateDuration> {
+        std::mem::take(&mut self.breakdown.normal_discard.iishanten_forward_candidates)
     }
 }
 
@@ -641,28 +712,220 @@ impl NormalDiscardPhaseTimer {
     }
 }
 
-impl<D: PhaseDurations> PhaseTimer<D, Vec<TwoShantenSelfTsumoCandidateDuration>> {
+impl<D: PhaseDurations> PhaseTimer<D, NormalDiscardBreakdown> {
     /// 可変長の内訳は scalar duration DTO とは別に保持する。
     pub(crate) fn record_two_shanten_self_tsumo_candidates(
         &mut self,
         candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     ) {
         if self.state.is_some() {
-            self.breakdown = candidates;
+            self.breakdown.two_shanten_self_tsumo_candidates = candidates;
+        }
+    }
+
+    /// 1向聴の深い前方評価を実際に行った候補の実測。production の候補順そのままで受け取る。
+    pub(crate) fn record_iishanten_forward_candidates(
+        &mut self,
+        candidates: Vec<IishantenForwardCandidateDuration>,
+    ) {
+        if self.state.is_some() {
+            self.breakdown.iishanten_forward_candidates = candidates;
         }
     }
 
     pub(crate) fn take_two_shanten_self_tsumo_candidates(
         &mut self,
     ) -> Vec<TwoShantenSelfTsumoCandidateDuration> {
+        std::mem::take(&mut self.breakdown.two_shanten_self_tsumo_candidates)
+    }
+
+    pub(crate) fn take_iishanten_forward_candidates(
+        &mut self,
+    ) -> Vec<IishantenForwardCandidateDuration> {
+        std::mem::take(&mut self.breakdown.iishanten_forward_candidates)
+    }
+
+    /// 可変長の内訳をまとめて外側の計測器へ渡す。
+    pub(crate) fn take_breakdown(&mut self) -> NormalDiscardBreakdown {
         std::mem::take(&mut self.breakdown)
+    }
+}
+
+impl ForwardMetricsPhaseTimer {
+    pub(crate) fn disabled() -> Self {
+        Self { state: None }
+    }
+
+    /// 最初の区切りまで計上を始めない計測器。区切りを1つも通らなかった経路では、どの phase も
+    /// `Duration::ZERO` のままになる。
+    pub(crate) fn armed() -> Self {
+        Self {
+            state: Some(ForwardMetricsTimerState {
+                phases: ForwardMetricsPhaseDurations::default(),
+                candidates: Vec::new(),
+                measures_candidates: false,
+                current: None,
+                since: Instant::now(),
+                phase: None,
+            }),
+        }
+    }
+
+    /// 候補単位の実測を残すかを決める。1向聴の深い前方評価だけを対象にするための入口。
+    pub(crate) fn measuring_candidates(mut self, measures: bool) -> Self {
+        if let Some(state) = self.state.as_mut() {
+            state.measures_candidates = measures;
+        }
+        self
+    }
+
+    /// 候補1件分の実測を残すか。`false` の計測器へ渡す run は候補単位の `Instant` を取らない。
+    pub(crate) fn measures_candidates(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.measures_candidates)
+    }
+
+    /// 逐次の区切りでは表せない、別 thread で計り終えた候補1件分の実測を反映する。
+    ///
+    /// 呼ぶ順が候補順。phase の内訳はそのまま `phases` へも足し合わせるので、候補単位で並行に
+    /// 評価した局面でも内訳が 0 のままにならない。
+    pub(crate) fn record_candidate(&mut self, candidate: IishantenForwardCandidateDuration) {
+        if let Some(state) = self.state.as_mut() {
+            state.phases.lookahead_search += candidate.phases.lookahead_search;
+            state.phases.weighted_aggregation += candidate.phases.weighted_aggregation;
+            state.phases.self_tsumo_continuation += candidate.phases.self_tsumo_continuation;
+            if state.measures_candidates {
+                state.candidates.push(candidate);
+            }
+        }
+    }
+
+    pub(crate) fn take_candidates(&mut self) -> Vec<IishantenForwardCandidateDuration> {
+        self.state
+            .as_mut()
+            .map_or_else(Vec::new, |state| std::mem::take(&mut state.candidates))
+    }
+
+    pub(crate) fn finish(mut self) -> ForwardMetricsPhaseDurations {
+        match self.state.take() {
+            Some(mut state) => {
+                state.close(Instant::now());
+                state.phases
+            }
+            None => ForwardMetricsPhaseDurations::default(),
+        }
     }
 }
 
 /// 前方集計値の区切りをそのまま実測へ変える。計測が無効な場合は `Instant` を取得しない。
 impl ForwardMetricsObserver for ForwardMetricsPhaseTimer {
     fn enter_phase(&mut self, phase: ForwardMetricsPhase) {
-        self.enter(phase);
+        if let Some(state) = self.state.as_mut() {
+            state.flush(Instant::now());
+            state.phase = Some(phase);
+        }
+    }
+
+    fn enter_candidate(&mut self, discard: TileType, memo: SearchStateMemoStats) {
+        if let Some(state) = self.state.as_mut() {
+            let now = Instant::now();
+            // 直前の候補はこの区切りで閉じる。候補1件分の利用数は、その候補へ入った時点の
+            // 累計との差になる。
+            state.close_with_memo(now, memo);
+            state.phase = None;
+            if state.measures_candidates {
+                state.current = Some(OpenForwardCandidate {
+                    discard,
+                    started: now,
+                    phases: ForwardMetricsPhaseDurations::default(),
+                    search_state_memo: memo,
+                    tenpai_value_memo: tenpai_value_memo_counter::counts(),
+                });
+            }
+        }
+    }
+
+    fn exit_candidates(&mut self, memo: SearchStateMemoStats) {
+        if let Some(state) = self.state.as_mut() {
+            state.close_with_memo(Instant::now(), memo);
+            state.phase = None;
+        }
+    }
+}
+
+impl ForwardMetricsTimerState {
+    // 直前の区切りからの経過時間を、その phase と開いている候補の両方へ計上する。
+    fn flush(&mut self, now: Instant) {
+        let elapsed = now.duration_since(self.since);
+        self.since = now;
+        let Some(phase) = self.phase else {
+            return;
+        };
+        self.phases.accumulate(phase, elapsed);
+        if let Some(current) = self.current.as_mut() {
+            current.phases.accumulate(phase, elapsed);
+        }
+    }
+
+    fn close(&mut self, now: Instant) {
+        let memo = self
+            .current
+            .as_ref()
+            .map(|current| current.search_state_memo)
+            .unwrap_or_default();
+        self.close_with_memo(now, memo);
+    }
+
+    // 開いている候補を閉じる。仕事量は候補へ入った時点との差で、累計そのものは載せない。
+    fn close_with_memo(&mut self, now: Instant, memo: SearchStateMemoStats) {
+        self.flush(now);
+        let Some(current) = self.current.take() else {
+            return;
+        };
+        let (hits, misses) = tenpai_value_memo_counter::counts();
+        self.candidates.push(IishantenForwardCandidateDuration {
+            discard: current.discard,
+            elapsed: now.duration_since(current.started),
+            phases: current.phases,
+            search_state_memo: memo_stats_delta(memo, current.search_state_memo),
+            tenpai_value_memo_hits: hits.saturating_sub(current.tenpai_value_memo.0),
+            tenpai_value_memo_misses: misses.saturating_sub(current.tenpai_value_memo.1),
+        });
+    }
+}
+
+// 同一 state memo の利用数の差分。field を分解して受けるため、計上が増えたら引き忘れが
+// compile error になる。
+pub(crate) fn memo_stats_delta(
+    after: SearchStateMemoStats,
+    before: SearchStateMemoStats,
+) -> SearchStateMemoStats {
+    let SearchStateMemoStats {
+        two_shanten_hits,
+        two_shanten_misses,
+        iishanten_hits,
+        iishanten_misses,
+        next_discard_hits,
+        next_discard_misses,
+        same_shanten_next_discard_hits,
+        same_shanten_next_discard_misses,
+    } = before;
+    SearchStateMemoStats {
+        two_shanten_hits: after.two_shanten_hits.saturating_sub(two_shanten_hits),
+        two_shanten_misses: after.two_shanten_misses.saturating_sub(two_shanten_misses),
+        iishanten_hits: after.iishanten_hits.saturating_sub(iishanten_hits),
+        iishanten_misses: after.iishanten_misses.saturating_sub(iishanten_misses),
+        next_discard_hits: after.next_discard_hits.saturating_sub(next_discard_hits),
+        next_discard_misses: after
+            .next_discard_misses
+            .saturating_sub(next_discard_misses),
+        same_shanten_next_discard_hits: after
+            .same_shanten_next_discard_hits
+            .saturating_sub(same_shanten_next_discard_hits),
+        same_shanten_next_discard_misses: after
+            .same_shanten_next_discard_misses
+            .saturating_sub(same_shanten_next_discard_misses),
     }
 }
 
@@ -785,15 +1048,25 @@ mod tests {
         let discard = TileType::from_mjai_type_str("5m").unwrap();
         candidates.enter_candidate(discard);
         normal.record_two_shanten_self_tsumo_candidates(candidates.finish());
-        decision.record_two_shanten_self_tsumo_candidates(
-            normal.take_two_shanten_self_tsumo_candidates(),
-        );
+
+        // 1向聴の深い前方評価は、逐次評価では候補の区切りをそのまま実測へ変える。
+        let forward_discard = TileType::from_mjai_type_str("3p").unwrap();
+        let mut forward = normal.forward_metrics_timer().measuring_candidates(true);
+        forward.enter_candidate(forward_discard, SearchStateMemoStats::default());
+        forward.enter_phase(ForwardMetricsPhase::LookaheadSearch);
+        forward.exit_candidates(SearchStateMemoStats::default());
+        normal.record_iishanten_forward_candidates(forward.take_candidates());
+        normal.record_forward_metrics_phases(forward.finish());
+
+        decision.record_normal_discard_breakdown(normal.take_breakdown());
         decision.record_normal_discard_phases(normal.finish());
         let two_shanten_self_tsumo_candidates = decision.take_two_shanten_self_tsumo_candidates();
+        let iishanten_forward_candidates = decision.take_iishanten_forward_candidates();
         let timed = TimedAgentAction {
             action: LegalAction::None,
             phases: decision.finish(),
             two_shanten_self_tsumo_candidates,
+            iishanten_forward_candidates,
             call_candidates: Vec::new(),
         };
         let phases = timed.phases;
@@ -803,6 +1076,85 @@ mod tests {
             timed.two_shanten_self_tsumo_candidates().next().unwrap().0,
             discard
         );
+        // 向聴数別の候補列は混ざらず、それぞれの区切りだけを持つ。
+        assert_eq!(timed.iishanten_forward_candidates().len(), 1);
+        let forward_candidate = &timed.iishanten_forward_candidates()[0];
+        assert_eq!(forward_candidate.discard, forward_discard);
+        // 候補の内訳は、その候補を評価していた実時間を超えない。
+        assert!(forward_candidate.phases.total() <= forward_candidate.elapsed);
+        assert_eq!(
+            phases.normal_discard_phases.forward_metrics_phases,
+            forward_candidate.phases
+        );
+    }
+
+    #[test]
+    fn a_forward_timer_without_candidate_measurement_keeps_only_the_phases() {
+        // 最善向聴数が1向聴でない局面では候補の区切りを受けても列へ積まない。phase 別の内訳は
+        // 従来どおり計上する。
+        let normal = NormalDiscardPhaseTimer::started();
+        let mut forward = normal.forward_metrics_timer();
+        assert!(!forward.measures_candidates());
+        forward.enter_candidate(
+            TileType::from_mjai_type_str("1m").unwrap(),
+            SearchStateMemoStats::default(),
+        );
+        forward.enter_phase(ForwardMetricsPhase::WeightedAggregation);
+        forward.exit_candidates(SearchStateMemoStats::default());
+
+        assert!(forward.take_candidates().is_empty());
+        let phases = forward.finish();
+        assert!(phases.weighted_aggregation > Duration::ZERO);
+        assert_eq!(phases.lookahead_search, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_disabled_forward_timer_keeps_the_parallel_candidate_measurements_out() {
+        // 計測しない run へ worker 側の実測を渡しても何も残さない。
+        let mut forward = ForwardMetricsPhaseTimer::disabled();
+        assert!(!forward.measures_candidates());
+        forward.record_candidate(IishantenForwardCandidateDuration {
+            discard: TileType::from_mjai_type_str("1m").unwrap(),
+            elapsed: Duration::from_millis(1),
+            phases: ForwardMetricsPhaseDurations {
+                lookahead_search: Duration::from_millis(1),
+                ..ForwardMetricsPhaseDurations::default()
+            },
+            search_state_memo: SearchStateMemoStats::default(),
+            tenpai_value_memo_hits: 0,
+            tenpai_value_memo_misses: 0,
+        });
+
+        assert!(forward.take_candidates().is_empty());
+        assert_eq!(forward.finish(), ForwardMetricsPhaseDurations::default());
+    }
+
+    #[test]
+    fn the_parallel_candidate_measurements_add_up_to_the_forward_phases() {
+        // 並列評価では worker 側で計り終えた内訳をそのまま足し合わせる。候補の実測の合計が
+        // phase の壁時計を超えても、内訳は候補ごとの実時間のまま書き換えない。
+        let normal = NormalDiscardPhaseTimer::started();
+        let mut forward = normal.forward_metrics_timer().measuring_candidates(true);
+        let candidates = ["1m", "2m"].map(|discard| IishantenForwardCandidateDuration {
+            discard: TileType::from_mjai_type_str(discard).unwrap(),
+            elapsed: Duration::from_millis(10),
+            phases: ForwardMetricsPhaseDurations {
+                lookahead_search: Duration::from_millis(9),
+                weighted_aggregation: Duration::from_millis(1),
+                self_tsumo_continuation: Duration::ZERO,
+            },
+            search_state_memo: SearchStateMemoStats::default(),
+            tenpai_value_memo_hits: 3,
+            tenpai_value_memo_misses: 1,
+        });
+        for candidate in candidates {
+            forward.record_candidate(candidate);
+        }
+
+        assert_eq!(forward.take_candidates(), candidates.to_vec());
+        let phases = forward.finish();
+        assert_eq!(phases.lookahead_search, Duration::from_millis(18));
+        assert_eq!(phases.weighted_aggregation, Duration::from_millis(2));
     }
 
     #[test]
@@ -815,7 +1167,10 @@ mod tests {
         normal.record_two_shanten_self_tsumo_candidates(vec![candidate]);
         assert!(normal.take_two_shanten_self_tsumo_candidates().is_empty());
         let mut decision = DecisionPhaseTimer::disabled();
-        decision.record_two_shanten_self_tsumo_candidates(vec![candidate]);
+        decision.record_normal_discard_breakdown(NormalDiscardBreakdown {
+            two_shanten_self_tsumo_candidates: vec![candidate],
+            iishanten_forward_candidates: Vec::new(),
+        });
         assert!(decision.take_two_shanten_self_tsumo_candidates().is_empty());
     }
 
@@ -999,7 +1354,7 @@ mod tests {
     #[test]
     fn an_armed_timer_accounts_only_from_the_first_phase() {
         let mut timer = ForwardMetricsPhaseTimer::armed();
-        timer.enter(ForwardMetricsPhase::WeightedAggregation);
+        timer.enter_phase(ForwardMetricsPhase::WeightedAggregation);
         let durations = timer.finish();
 
         assert_eq!(durations.lookahead_search, Duration::ZERO);

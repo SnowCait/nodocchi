@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use bot_core::{
     CallCandidateDuration, CallDecisionDurations, DecisionPhaseDurations,
-    ForwardMetricsPhaseDurations, LegalAction, NormalDiscardPhaseDurations, ShantenAgent,
+    ForwardMetricsPhaseDurations, IishantenForwardCandidateDuration, LegalAction,
+    NormalDiscardPhaseDurations, ShantenAgent,
 };
 use bot_logic::TileType;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ pub struct RequestMeasurement {
     pub elapsed: Duration,
     pub phases: DecisionPhaseDurations,
     pub two_shanten_self_tsumo_candidates: Vec<(TileType, Duration)>,
+    pub iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
     pub call_candidates: Vec<CallCandidateDuration>,
     pub selected_action: LegalAction,
 }
@@ -102,6 +104,7 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
         elapsed,
         phases: timed.phases,
         two_shanten_self_tsumo_candidates: timed.two_shanten_self_tsumo_candidates().collect(),
+        iishanten_forward_candidates: timed.iishanten_forward_candidates().to_vec(),
         call_candidates: timed.call_candidates().to_vec(),
         selected_action: timed.action,
     }
@@ -195,6 +198,7 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
             format_normal_discard_phases(
                 &measurement.phases.normal_discard_phases,
                 &measurement.two_shanten_self_tsumo_candidates,
+                &measurement.iishanten_forward_candidates,
             ),
             format_duration(measurement.phases.post_discard),
             action_label(&measurement.selected_action),
@@ -258,12 +262,19 @@ fn call_candidate_label(candidate: &CallCandidateDuration) -> String {
 fn format_normal_discard_phases(
     phases: &NormalDiscardPhaseDurations,
     candidates: &[(TileType, Duration)],
+    forward_candidates: &[IishantenForwardCandidateDuration],
 ) -> String {
     format!(
-        "base={} forward={} [{}] two_shanten_self_tsumo={} candidates={} [{}] three_shanten_self_tsumo={} finalize={}",
+        "base={} forward={} [{}] forward_candidates={} [{}] two_shanten_self_tsumo={} candidates={} [{}] three_shanten_self_tsumo={} finalize={}",
         format_duration(phases.base_evaluation),
         format_duration(phases.forward_metrics),
         format_forward_metrics_phases(&phases.forward_metrics_phases),
+        forward_candidates.len(),
+        forward_candidates
+            .iter()
+            .map(format_iishanten_forward_candidate)
+            .collect::<Vec<_>>()
+            .join(" "),
         format_duration(phases.two_shanten_self_tsumo),
         candidates.len(),
         candidates
@@ -277,6 +288,19 @@ fn format_normal_discard_phases(
             .join(" "),
         format_duration(phases.three_shanten_self_tsumo),
         format_duration(phases.selection_finalize),
+    )
+}
+
+// 1向聴の深い前方評価を実際に行った候補は、production の候補順そのままで並べる。候補単位で
+// 並行に評価するため、`elapsed` の合計は forward の壁時計を超え得る。
+fn format_iishanten_forward_candidate(candidate: &IishantenForwardCandidateDuration) -> String {
+    format!(
+        "{}={} [lookahead_search={} weighted_aggregation={} self_tsumo_continuation={}]",
+        candidate.discard.to_mjai_string(),
+        format_duration(candidate.elapsed),
+        format_duration(candidate.phases.lookahead_search),
+        format_duration(candidate.phases.weighted_aggregation),
+        format_duration(candidate.phases.self_tsumo_continuation),
     )
 }
 
@@ -338,6 +362,10 @@ pub struct BenchmarkRequestJson {
     pub forward_lookahead_search_ns: u64,
     pub forward_weighted_aggregation_ns: u64,
     pub forward_self_tsumo_ns: u64,
+    #[serde(default)]
+    pub iishanten_forward_candidate_count: usize,
+    #[serde(default)]
+    pub iishanten_forward_candidates: Vec<BenchmarkIishantenForwardCandidateJson>,
     pub two_shanten_self_tsumo_ns: u64,
     pub two_shanten_self_tsumo_candidate_count: usize,
     pub two_shanten_self_tsumo_candidates: Vec<BenchmarkTwoShantenSelfTsumoCandidateJson>,
@@ -362,6 +390,26 @@ pub struct BenchmarkCallCandidateJson {
 pub struct BenchmarkTwoShantenSelfTsumoCandidateJson {
     pub discard: String,
     pub elapsed_ns: u64,
+}
+
+/// production が1向聴の深い前方評価を実際に行った候補1件。
+///
+/// 並ぶのは深い前方評価の対象になった候補だけで、順序は production の候補順そのまま。
+/// `elapsed_ns` はその候補を評価していた実時間で、候補単位で並行に評価するため、合計は
+/// `normal_discard_forward_ns` の壁時計を超え得る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BenchmarkIishantenForwardCandidateJson {
+    pub discard: String,
+    pub elapsed_ns: u64,
+    pub lookahead_search_ns: u64,
+    pub weighted_aggregation_ns: u64,
+    pub self_tsumo_continuation_ns: u64,
+    /// 候補1件の評価が使った探索内の同一 state memo の利用数。
+    pub search_state_memo_hits: u64,
+    pub search_state_memo_misses: u64,
+    /// 候補1件の評価が引いた未来テンパイの値 memo の利用数。miss が実際に打点を評価した件数。
+    pub tenpai_value_memo_hits: u64,
+    pub tenpai_value_memo_misses: u64,
 }
 
 impl BenchmarkJson {
@@ -445,6 +493,14 @@ impl BenchmarkJson {
                             .forward_metrics_phases
                             .self_tsumo_continuation,
                     ),
+                    iishanten_forward_candidate_count: measurement
+                        .iishanten_forward_candidates
+                        .len(),
+                    iishanten_forward_candidates: measurement
+                        .iishanten_forward_candidates
+                        .iter()
+                        .map(iishanten_forward_candidate_json)
+                        .collect(),
                     two_shanten_self_tsumo_ns: nanos(
                         measurement
                             .phases
@@ -481,6 +537,31 @@ impl BenchmarkJson {
     }
 }
 
+// 同一 state memo の利用数は、候補単位では hit / miss の合計だけを持つ。memo の種類別の内訳は
+// 既存の探索診断が request 単位で持っているので、候補ごとに並べ直さない。
+fn iishanten_forward_candidate_json(
+    candidate: &IishantenForwardCandidateDuration,
+) -> BenchmarkIishantenForwardCandidateJson {
+    let memo = &candidate.search_state_memo;
+    BenchmarkIishantenForwardCandidateJson {
+        discard: candidate.discard.to_mjai_string(),
+        elapsed_ns: nanos(candidate.elapsed),
+        lookahead_search_ns: nanos(candidate.phases.lookahead_search),
+        weighted_aggregation_ns: nanos(candidate.phases.weighted_aggregation),
+        self_tsumo_continuation_ns: nanos(candidate.phases.self_tsumo_continuation),
+        search_state_memo_hits: memo.two_shanten_hits
+            + memo.iishanten_hits
+            + memo.next_discard_hits
+            + memo.same_shanten_next_discard_hits,
+        search_state_memo_misses: memo.two_shanten_misses
+            + memo.iishanten_misses
+            + memo.next_discard_misses
+            + memo.same_shanten_next_discard_misses,
+        tenpai_value_memo_hits: candidate.tenpai_value_memo_hits,
+        tenpai_value_memo_misses: candidate.tenpai_value_memo_misses,
+    }
+}
+
 fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
@@ -505,7 +586,7 @@ fn write_benchmark_json(path: &str, run: &BenchmarkRun) -> Result<(), ScenarioEr
 mod tests {
     use super::*;
     use bot_core::{Agent, CallKind};
-    use bot_logic::TileId;
+    use bot_logic::{SearchStateMemoStats, TileId};
     use riichilab_client::observation::{
         fixture_base64, fixture_base64_with_discards, game_context_from_decoded_observation,
     };
@@ -714,6 +795,34 @@ mod tests {
         measurement
     }
 
+    fn with_iishanten_forward_breakdown(
+        mut measurement: RequestMeasurement,
+        candidates: &[(&str, u64, u64, u64, u64)],
+    ) -> RequestMeasurement {
+        measurement.iishanten_forward_candidates = candidates
+            .iter()
+            .map(|(discard, elapsed, search, aggregate, self_tsumo)| {
+                IishantenForwardCandidateDuration {
+                    discard: TileType::from_mjai_type_str(discard).unwrap(),
+                    elapsed: Duration::from_millis(*elapsed),
+                    phases: ForwardMetricsPhaseDurations {
+                        lookahead_search: Duration::from_millis(*search),
+                        weighted_aggregation: Duration::from_millis(*aggregate),
+                        self_tsumo_continuation: Duration::from_millis(*self_tsumo),
+                    },
+                    search_state_memo: SearchStateMemoStats {
+                        iishanten_hits: 7,
+                        iishanten_misses: 3,
+                        ..SearchStateMemoStats::default()
+                    },
+                    tenpai_value_memo_hits: 11,
+                    tenpai_value_memo_misses: 5,
+                }
+            })
+            .collect();
+        measurement
+    }
+
     fn with_three_shanten_breakdown(
         mut measurement: RequestMeasurement,
         total: u64,
@@ -747,6 +856,7 @@ mod tests {
             elapsed: Duration::from_millis(millis),
             phases,
             two_shanten_self_tsumo_candidates: Vec::new(),
+            iishanten_forward_candidates: Vec::new(),
             call_candidates: Vec::new(),
             selected_action: LegalAction::Dahai {
                 tile: TileId::new(0).unwrap(),
@@ -1003,7 +1113,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -1114,6 +1224,65 @@ mod tests {
     }
 
     #[test]
+    fn report_and_json_show_the_iishanten_forward_candidates_of_a_slow_normal_discard() {
+        // 候補単位で並行に評価するため、候補の実測の合計は forward の壁時計を超える。合計を
+        // 壁時計として見せず、候補の内訳をそのまま並べる。
+        let run = synthetic_run(vec![with_iishanten_forward_breakdown(
+            measurement_with_phases(
+                "game-005.jsonl",
+                731,
+                2_050,
+                with_forward_breakdown(
+                    phases_with_normal_discard_breakdown(0, 2_040, 10, 30, 1_980, 30),
+                    3_150,
+                    120,
+                    90,
+                ),
+            ),
+            &[("3m", 1_800, 1_700, 60, 40), ("6m", 1_560, 1_450, 60, 50)],
+        )]);
+        let report = format_benchmark(&run);
+        let json = BenchmarkJson::from_run(&run);
+        let request = &json.requests[0];
+
+        assert!(report.contains("forward_candidates=2 ["), "{report}");
+        assert!(
+            report.contains(
+                "3m=1800.000 ms [lookahead_search=1700.000 ms weighted_aggregation=60.000 ms \
+                 self_tsumo_continuation=40.000 ms]"
+            ),
+            "{report}"
+        );
+
+        assert_eq!(request.iishanten_forward_candidate_count, 2);
+        assert_eq!(
+            request.iishanten_forward_candidates[0],
+            BenchmarkIishantenForwardCandidateJson {
+                discard: "3m".to_string(),
+                elapsed_ns: 1_800_000_000,
+                lookahead_search_ns: 1_700_000_000,
+                weighted_aggregation_ns: 60_000_000,
+                self_tsumo_continuation_ns: 40_000_000,
+                search_state_memo_hits: 7,
+                search_state_memo_misses: 3,
+                tenpai_value_memo_hits: 11,
+                tenpai_value_memo_misses: 5,
+            }
+        );
+        // 候補の実測の合計は forward phase の壁時計を超えたままで、どちらも書き換えない。
+        let summed: u64 = request
+            .iishanten_forward_candidates
+            .iter()
+            .map(|candidate| candidate.elapsed_ns)
+            .sum();
+        assert!(summed > request.normal_discard_forward_ns);
+
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(text.contains("\"iishanten_forward_candidates\""), "{text}");
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
     fn the_call_fields_of_an_earlier_benchmark_json_default_to_zero() {
         // 既存 consumer が書いた call field の無い JSON も読めるままにする。
         let text = r#"{
@@ -1137,6 +1306,8 @@ mod tests {
         assert_eq!(json.requests[0].call_ns, 0);
         assert_eq!(json.requests[0].call_candidate_count, 0);
         assert!(json.requests[0].call_candidates.is_empty());
+        assert_eq!(json.requests[0].iishanten_forward_candidate_count, 0);
+        assert!(json.requests[0].iishanten_forward_candidates.is_empty());
     }
 
     #[test]
@@ -1236,6 +1407,8 @@ mod tests {
                     forward_lookahead_search_ns: 0,
                     forward_weighted_aggregation_ns: 0,
                     forward_self_tsumo_ns: 0,
+                    iishanten_forward_candidate_count: 0,
+                    iishanten_forward_candidates: vec![],
                     two_shanten_self_tsumo_ns: 0,
                     two_shanten_self_tsumo_candidate_count: 0,
                     two_shanten_self_tsumo_candidates: vec![],
@@ -1262,6 +1435,8 @@ mod tests {
                     forward_lookahead_search_ns: 1_950_000_000,
                     forward_weighted_aggregation_ns: 30_000_000,
                     forward_self_tsumo_ns: 20_000_000,
+                    iishanten_forward_candidate_count: 0,
+                    iishanten_forward_candidates: vec![],
                     two_shanten_self_tsumo_ns: 350_000_000,
                     two_shanten_self_tsumo_candidate_count: 2,
                     two_shanten_self_tsumo_candidates: vec![

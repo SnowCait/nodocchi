@@ -72,7 +72,8 @@ pub use damaten_value::{
 };
 pub use decision_timing::{
     CallCandidateDuration, CallDecisionDurations, DecisionPhaseDurations,
-    ForwardMetricsPhaseDurations, NormalDiscardPhaseDurations, TimedAgentAction,
+    ForwardMetricsPhaseDurations, IishantenForwardCandidateDuration, NormalDiscardPhaseDurations,
+    TimedAgentAction,
 };
 pub use defense::{
     CompressedHiddenHandStateMetrics, CompressedHiddenHandStates, DefenseCandidateDiagnostic,

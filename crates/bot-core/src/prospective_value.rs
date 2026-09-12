@@ -576,11 +576,9 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
                 .get(&key)
                 .and_then(|values| values.selection)
         }) {
-            #[cfg(test)]
             tenpai_value_memo_counter::hit();
             return cached;
         }
-        #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value =
             self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode));
@@ -600,11 +598,9 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
                 .get(&key)
                 .and_then(|values| values.tsumo)
         }) {
-            #[cfg(test)]
             tenpai_value_memo_counter::hit();
             return cached;
         }
-        #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
             self.tsumo_value_with_mode(facts, mode)
@@ -1040,10 +1036,12 @@ fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<ProspectiveWaitValue
         .collect()
 }
 
-/// 未来テンパイの値 memo の利用数。同じ未来テンパイを2回評価しないことを test から観測する
-/// ためだけの counter で、production build には残らない。
-#[cfg(test)]
-mod tenpai_value_memo_counter {
+/// 未来テンパイの値 memo の利用数。
+///
+/// 数えるのは評価器がこの memo を引いた回数だけで、miss は実際に打点を評価した件数。
+/// 値も枝も選択もこの計上で変わらない。counter は thread ごとに持ち、区間の利用数は
+/// [`tenpai_value_memo_counter::counts`] の差で取る。
+pub(crate) mod tenpai_value_memo_counter {
     use std::cell::Cell;
 
     thread_local! {
@@ -1059,16 +1057,18 @@ mod tenpai_value_memo_counter {
         MISSES.with(|count| count.set(count.get() + 1));
     }
 
+    /// この thread のこれまでの memo hit / miss の累計。
+    pub(crate) fn counts() -> (u64, u64) {
+        (HITS.with(Cell::get), MISSES.with(Cell::get))
+    }
+
     /// `body` の実行と、その間の memo hit / miss。
+    #[cfg(test)]
     pub(super) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64, u64) {
-        let hits = HITS.with(Cell::get);
-        let misses = MISSES.with(Cell::get);
+        let (hits, misses) = counts();
         let value = body();
-        (
-            value,
-            HITS.with(Cell::get) - hits,
-            MISSES.with(Cell::get) - misses,
-        )
+        let (after_hits, after_misses) = counts();
+        (value, after_hits - hits, after_misses - misses)
     }
 }
 

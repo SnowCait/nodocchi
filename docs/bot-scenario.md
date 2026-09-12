@@ -561,7 +561,7 @@ Hora などで早期 return した request は、到達しなかった phase が
 
 1向聴 Call / Pass 比較が発火する request では、Call 側の候補評価 group と Pass 側の継続評価を別 thread で重ねます。どちらの elapsed もその評価が実際に走っていた時間なので、`call_candidates` / `call_pass` / `call_remaining` の合計は壁時計である `call` を超え得ます (その場合 `call_remaining` は 0 になります)。重ねなかった request では従来どおり合計が `call` に一致します。`call` は同じ request の `early` を超えません。合法な Chi / Pon が無い request では全て 0、候補 timing は空のままです。1向聴 Call / Pass 比較が発火しない request では `call_pass` は 0 のままです。同じ `tile` / `consumed` の重複候補も除かず、合法 action の順にそれぞれ1件ずつ並びます。`early` の残りと `post_discard` の内部は細分化していません。
 
-`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として、鳴き候補別 timing は `call_candidates()` で `CallCandidateDuration` の slice として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。Full 追加評価の2件は並列に走るため、それぞれの elapsed は worker が独立に計った実測で、候補 timing の合計は `two_shanten_self_tsumo` phase を超え得ます。候補の内部型は bot-core の public API へ公開しません。
+`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として、1向聴の深い前方評価の候補別 timing は `iishanten_forward_candidates()` で `IishantenForwardCandidateDuration` の slice として、鳴き候補別 timing は `call_candidates()` で `CallCandidateDuration` の slice として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。Full 追加評価の2件は並列に走るため、それぞれの elapsed は worker が独立に計った実測で、候補 timing の合計は `two_shanten_self_tsumo` phase を超え得ます。候補の内部型は bot-core の public API へ公開しません。
 
 `forward` はさらに前方集計値の内部処理別へ分けます。こちらも既存の処理境界そのままで、探索する枝も scoring も集計も変えません。
 
@@ -571,9 +571,23 @@ Hora などで早期 return した request は、到達しなかった phase が
 | `weighted_aggregation` | 探索済みの枝からの重み付き集計 (WeightedNextAcceptance / weighted tenpai wait) |
 | `self_tsumo_continuation` | 探索済みの通常 lookahead 枝からの1向聴 self-tsumo continuation 集計 |
 
-3つの合計は同じ request の `forward` を超えません。前方集計値の入力を組み立てる時間はどの内訳にも入りません。前方集計値を計算しない局面 (テンパイ、最善向聴を維持する候補が1件など) では 0 のままです。`self_tsumo_continuation` は2向聴 EV ではありません。
+3つはそれぞれの処理が実際に走っていた時間の合計です。逐次評価の request では合計が同じ request の `forward` を超えません。production が1向聴候補を候補単位で並行に評価した request では、3つの合計は候補ごとの内訳の足し合わせになるため、壁時計である `forward` を超え得ます。前方集計値の入力を組み立てる時間はどの内訳にも入りません。前方集計値を計算しない局面 (テンパイ、最善向聴を維持する候補が1件など) では 0 のままです。`self_tsumo_continuation` は2向聴 EV ではありません。
 
-この計測は benchmark でだけ有効にします。通常の RiichiLab client は計測しません。
+`forward` はさらに、production が深い前方評価を実際に行った1向聴候補ごとの実測 (`forward_candidates`) も持ちます。
+
+| 項目 | 内容 |
+| --- | --- |
+| `discard` | その候補の打牌 |
+| `elapsed` | その候補を評価していた実時間 |
+| `lookahead_search` / `weighted_aggregation` / `self_tsumo_continuation` | `elapsed` の内訳。`forward` の subphase と同じ区切り |
+| `search_state_memo_hits` / `search_state_memo_misses` | その候補の評価が使った探索内の同一 state memo の利用数 |
+| `tenpai_value_memo_hits` / `tenpai_value_memo_misses` | その候補の評価が引いた未来テンパイの値 memo の利用数。miss が実際に打点を評価した件数 |
+
+並ぶのは production が実際に深く評価した候補 (既存の候補絞り込み `forward_target_mask` が残した cohort) だけです。深い評価の対象にならなかった候補は前方評価そのものを通らないため、1件も混ざりません。順序は production の候補順 (合法打牌の評価順) そのままで、並行に評価した request でも thread の終了順には依らず、同じ index の候補へ書き戻した結果と一致します。最善向聴数が1向聴でない request と、前方集計値を計算しない request では空のままです。
+
+production の1向聴候補は候補単位で並行に評価するため、候補の `elapsed` の合計は壁時計である `forward` を超え得ます。これは2向聴 Full 追加評価や Call / Pass の重なりと同じ semantics です。`forward` は phase の壁時計、候補の `elapsed` は各 worker がその候補を評価していた実時間で、合計を壁時計として読まないでください。
+
+この計測は benchmark でだけ有効にします。通常の RiichiLab client は計測しません。探索の枝数や base 評価回数のような探索規模の counter は計上そのものが探索の hot path を遅くするため benchmark では無効のままで、必要な場合は `--iishanten-selection-parallel-comparison` の観測 run から読みます。
 
 ### 出力
 
@@ -594,9 +608,9 @@ RiichiLab production latency benchmark
   > 3 s: 0
 
 Slowest requests
-  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2401.000 ms (base=30.000 ms forward=951.000 ms [lookahead_search=900.000 ms weighted_aggregation=31.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=1400.000 ms candidates=2 [5m=720.000 ms 8m=670.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=68.988 ms  selected=9s
-  1146.000 ms  logs/game-011.jsonl  request_id=279  early=1144.933 ms (call=1140.000 ms call_candidates=877.000 ms count=2 [Chi(3m<-2m,4m)=440.000 ms post_call_discard=438.000 ms Chi(3m<-2m,4m)=437.000 ms post_call_discard=435.000 ms] call_pass=262.000 ms call_remaining=1.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=None
-  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2200.000 ms (base=28.000 ms forward=2152.000 ms [lookahead_search=2100.000 ms weighted_aggregation=32.000 ms self_tsumo_continuation=20.000 ms] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=109.990 ms  selected=5p
+  2470.000 ms  logs/game-003.jsonl  request_id=425  early=0.012 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2401.000 ms (base=30.000 ms forward=951.000 ms [lookahead_search=1162.000 ms weighted_aggregation=35.000 ms self_tsumo_continuation=24.000 ms] forward_candidates=2 [3m=620.000 ms [lookahead_search=590.000 ms weighted_aggregation=18.000 ms self_tsumo_continuation=12.000 ms] 9s=601.000 ms [lookahead_search=572.000 ms weighted_aggregation=17.000 ms self_tsumo_continuation=12.000 ms]] two_shanten_self_tsumo=1400.000 ms candidates=2 [5m=720.000 ms 8m=670.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=68.988 ms  selected=9s
+  1146.000 ms  logs/game-011.jsonl  request_id=279  early=1144.933 ms (call=1140.000 ms call_candidates=877.000 ms count=2 [Chi(3m<-2m,4m)=440.000 ms post_call_discard=438.000 ms Chi(3m<-2m,4m)=437.000 ms post_call_discard=435.000 ms] call_pass=262.000 ms call_remaining=1.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=None
+  2310.000 ms  logs/game-008.jsonl  request_id=317  early=0.010 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2200.000 ms (base=28.000 ms forward=2152.000 ms [lookahead_search=2100.000 ms weighted_aggregation=32.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=109.990 ms  selected=5p
 ```
 
 percentile は nearest-rank です。昇順に並べた `n` 件について順位 `ceil(p / 100 * n)` の値をそのまま採用し、補間しません。threshold の件数は閾値を厳密に超えた request だけを数えます。`selected` は計測した production decision そのものです。
@@ -649,6 +663,31 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
       "forward_lookahead_search_ns": 900000000,
       "forward_weighted_aggregation_ns": 31000000,
       "forward_self_tsumo_ns": 20000000,
+      "iishanten_forward_candidate_count": 2,
+      "iishanten_forward_candidates": [
+        {
+          "discard": "3m",
+          "elapsed_ns": 620000000,
+          "lookahead_search_ns": 590000000,
+          "weighted_aggregation_ns": 18000000,
+          "self_tsumo_continuation_ns": 12000000,
+          "search_state_memo_hits": 41230,
+          "search_state_memo_misses": 18774,
+          "tenpai_value_memo_hits": 90412,
+          "tenpai_value_memo_misses": 3188
+        },
+        {
+          "discard": "9s",
+          "elapsed_ns": 601000000,
+          "lookahead_search_ns": 572000000,
+          "weighted_aggregation_ns": 17000000,
+          "self_tsumo_continuation_ns": 12000000,
+          "search_state_memo_hits": 39980,
+          "search_state_memo_misses": 18102,
+          "tenpai_value_memo_hits": 88317,
+          "tenpai_value_memo_misses": 3074
+        }
+      ],
       "two_shanten_self_tsumo_ns": 1400000000,
       "two_shanten_self_tsumo_candidate_count": 2,
       "two_shanten_self_tsumo_candidates": [
@@ -664,7 +703,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の内訳で、合計は `normal_discard_forward_ns` を超えません。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の内訳です。逐次評価の request では合計が `normal_discard_forward_ns` を超えませんが、production が1向聴候補を候補単位で並行に評価した request では候補ごとの内訳の足し合わせになるため、壁時計である `normal_discard_forward_ns` を超え得ます。`iishanten_forward_candidates` は production が深い前方評価を実際に行った1向聴候補だけを production の候補順そのままで持ち、その件数を `iishanten_forward_candidate_count` にも出します。深く評価されなかった候補は1件も混ざりません。候補ごとに `discard` / `elapsed_ns` と、その内訳の `lookahead_search_ns` / `weighted_aggregation_ns` / `self_tsumo_continuation_ns`、仕事量の `search_state_memo_hits` / `search_state_memo_misses` / `tenpai_value_memo_hits` / `tenpai_value_memo_misses` を持ちます。候補単位で並行に評価するため、候補の `elapsed_ns` の合計は phase の wall-clock である `normal_discard_forward_ns` を超え得ます。合計を wall-clock として読まないでください。最善向聴数が1向聴でない request では 0 と空 array のままです。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

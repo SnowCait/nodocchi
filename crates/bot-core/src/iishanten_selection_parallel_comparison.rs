@@ -275,6 +275,7 @@ pub fn decide_with_iishanten_selection_parallelism(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decision_timing::ForwardMetricsPhaseDurations;
     use crate::iishanten_selection_depth_comparison::test_support::iishanten_context;
 
     // 対象 fixture の1件で全方式を1回ずつ通す。B の探索は重いので、exact であることも worker 数
@@ -313,5 +314,71 @@ mod tests {
                 "{label}",
             );
         }
+    }
+
+    // 候補単位の実測が、production が実際に深く評価した候補だけを、production の候補順そのまま
+    // で持つ。S は逐次評価、PA は現在の production と同じ並列評価で、どちらも同じ1本の
+    // instrumentation を通る。
+    #[test]
+    fn the_candidate_timing_covers_the_deep_evaluated_candidates_in_the_production_order() {
+        let (context, actions) = iishanten_context();
+        let comparison = compare_iishanten_selection_parallelism(&context, &actions);
+
+        for decision in comparison.decisions() {
+            let label = decision.parallelism.label();
+            // 計測しない run は候補の `Instant` を一切取らない。
+            assert!(
+                decision.timing.iishanten_forward_candidates.is_empty(),
+                "{label}",
+            );
+
+            // 深い前方評価の対象になった候補だけが、その cohort と同じ順序で並ぶ。対象外の
+            // 候補は前方評価そのものを通らないので1件も混ざらない。
+            let measured: Vec<TileType> = decision
+                .observation
+                .iishanten_forward_candidates
+                .iter()
+                .map(|candidate| candidate.discard)
+                .collect();
+            assert_eq!(
+                measured,
+                decision.observation.deep_evaluated_candidates(),
+                "{label}",
+            );
+
+            for candidate in &decision.observation.iishanten_forward_candidates {
+                // 内訳は候補1件の実測を分けたものなので、その合計を超えない。
+                assert!(
+                    candidate.phases.total() <= candidate.elapsed,
+                    "{label} {}",
+                    candidate.discard.to_mjai_string(),
+                );
+            }
+
+            // phase 別の内訳は候補の内訳の足し合わせそのもの。並列評価でも 0 のままにならない。
+            let phases = decision.observation.phases.forward_metrics_phases;
+            let summed = decision
+                .observation
+                .iishanten_forward_candidates
+                .iter()
+                .fold(
+                    ForwardMetricsPhaseDurations::default(),
+                    |mut total, candidate| {
+                        total.lookahead_search += candidate.phases.lookahead_search;
+                        total.weighted_aggregation += candidate.phases.weighted_aggregation;
+                        total.self_tsumo_continuation += candidate.phases.self_tsumo_continuation;
+                        total
+                    },
+                );
+            assert_eq!(phases, summed, "{label}");
+            assert!(phases.lookahead_search > Duration::ZERO, "{label}");
+
+            // 計測を有効にした run と持たない run で、選ばれた打牌も候補ごとの
+            // ExpectedSelfTsumoValue も比較理由も一致する。
+            assert!(decision.runs_agree(), "{label}");
+        }
+
+        // 計測の有無に依らず、全方式が S と bit-exact に一致したまま。
+        assert!(comparison.every_mode_matches_sequential());
     }
 }
