@@ -284,6 +284,9 @@ pub(crate) struct EndGameLogFields {
 }
 
 pub(crate) fn end_game_log_fields(scores: &[i32], seat_id: Option<u8>) -> Option<EndGameLogFields> {
+    if scores.len() != 4 {
+        return None;
+    }
     let seat = usize::from(seat_id?);
     let score = *scores.get(seat)?;
     let better = scores
@@ -1139,6 +1142,16 @@ mod tests {
         assert_eq!(end_game_log_fields(&scores, None), None);
         assert_eq!(end_game_log_fields(&[], Some(0)), None);
         assert_eq!(end_game_log_fields(&scores, Some(4)), None);
+    }
+
+    #[test]
+    fn end_game_log_fields_is_none_unless_scores_has_four_players() {
+        assert_eq!(end_game_log_fields(&[], Some(0)), None);
+        assert_eq!(end_game_log_fields(&[31200, 27400, 21800], Some(0)), None);
+        assert_eq!(
+            end_game_log_fields(&[31200, 27400, 21800, 19600, 19600], Some(0)),
+            None
+        );
     }
 
     #[test]
