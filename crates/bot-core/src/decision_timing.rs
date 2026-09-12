@@ -310,8 +310,16 @@ pub(crate) type NormalDiscardPhaseTimer =
 /// 無効時は区切りの通知を受けても `Instant` を取得しない。有効な場合も通った区切りの経過時間を
 /// その場で計上するだけで、対象候補も枝の探索も集計も計測の有無で変わらない。
 ///
-/// `phases` は通った区切りの合計で、候補単位で並行に評価した局面では候補の内訳の足し合わせに
-/// なる。その場合は前方集計 phase の壁時計を超え得る。
+/// 2つの計測は互いに独立している。
+///
+/// - `phases` ([`ForwardMetricsPhaseDurations`]) は、この計測 thread が通った区切りの実測。
+///   逐次評価では従来どおり前方集計 phase の内訳で、その合計は phase の壁時計を超えない。
+///   候補を worker へ分ける並行評価では計測 thread が区切りを1つも通らないため、従来どおり
+///   すべて `Duration::ZERO` のままになる。
+/// - `candidates` ([`IishantenForwardCandidateDuration`]) は候補1件ごとの実測。並行評価では
+///   worker が自分の候補を計り、[`ForwardMetricsPhaseTimer::record_candidate`] が候補列へだけ
+///   積む。`phases` へは足し込まないので、候補の実測の合計が phase の壁時計を超えても
+///   `phases` の意味は変わらない。
 #[derive(Debug)]
 pub(crate) struct ForwardMetricsPhaseTimer {
     state: Option<ForwardMetricsTimerState>,

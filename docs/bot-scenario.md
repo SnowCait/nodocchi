@@ -561,7 +561,9 @@ Hora などで早期 return した request は、到達しなかった phase が
 
 1向聴 Call / Pass 比較が発火する request では、Call 側の候補評価 group と Pass 側の継続評価を別 thread で重ねます。どちらの elapsed もその評価が実際に走っていた時間なので、`call_candidates` / `call_pass` / `call_remaining` の合計は壁時計である `call` を超え得ます (その場合 `call_remaining` は 0 になります)。重ねなかった request では従来どおり合計が `call` に一致します。`call` は同じ request の `early` を超えません。合法な Chi / Pon が無い request では全て 0、候補 timing は空のままです。1向聴 Call / Pass 比較が発火しない request では `call_pass` は 0 のままです。同じ `tile` / `consumed` の重複候補も除かず、合法 action の順にそれぞれ1件ずつ並びます。`early` の残りと `post_discard` の内部は細分化していません。
 
-`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として、1向聴の深い前方評価の候補別 timing は `iishanten_forward_candidates()` で `IishantenForwardCandidateDuration` の slice として、鳴き候補別 timing は `call_candidates()` で `CallCandidateDuration` の slice として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。Full 追加評価の2件は並列に走るため、それぞれの elapsed は worker が独立に計った実測で、候補 timing の合計は `two_shanten_self_tsumo` phase を超え得ます。候補の内部型は bot-core の public API へ公開しません。
+`DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として、1向聴の深い前方評価の候補別 timing は `iishanten_forward_candidates()` で `IishantenForwardCandidateDuration` の slice として、鳴き候補別 timing は `call_candidates()` で `CallCandidateDuration` の slice として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。Full 追加評価の2件は並列に走るため、それぞれの elapsed は worker が独立に計った実測で、候補 timing の合計は `two_shanten_self_tsumo` phase を超え得ます。
+
+候補ごとに複数の値を持つ `IishantenForwardCandidateDuration` と `CallCandidateDuration` は bot-core の public API です。打牌と実測だけの2向聴候補は `(TileType, Duration)` として読めれば足りるので、その内部型は公開しません。
 
 `forward` はさらに前方集計値の内部処理別へ分けます。こちらも既存の処理境界そのままで、探索する枝も scoring も集計も変えません。
 
