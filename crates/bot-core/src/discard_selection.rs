@@ -19,7 +19,7 @@ use crate::offense_value::{
     evaluate_tenpai_offense_with_hands,
 };
 use crate::prospective_value::{
-    ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
+    ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic, SharedProspectiveValueCache,
     evaluate_prospective_lookahead_value,
 };
 use crate::reach_policy::{
@@ -38,9 +38,9 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, Meld,
     OwnDiscards, SameShantenContinuationDepth, SearchStateMemoStats, SelfTsumoFacts,
-    TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics, ThreeShantenSearchStats,
-    TileCounts, TileId, TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
-    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
+    SharedLookaheadCache, TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics,
+    ThreeShantenSearchStats, TileCounts, TileId, TileType, TwoShantenMetrics,
+    TwoShantenProgressSelfTsumoDiagnostic, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
     best_discard_selection_index_with_two_shanten_metrics, current_tenpai_continuation_targets,
@@ -277,6 +277,8 @@ struct ProductionSelectionMetrics {
     forward_workers: usize,
     /// 2向聴 Full 追加評価に実際に使った thread 数。逐次評価と gate 不発では 1。
     two_shanten_full_workers: usize,
+    /// worker をまたいで共有した exact entry 数。共有 cache を持たない run では 0 のまま。
+    shared_cache: SharedSelectionCacheEntries,
 }
 
 /// production の2向聴二段階 selection。Progress の cohort 全体と Full の pair を
@@ -307,6 +309,8 @@ struct TwoShantenProductionRun {
     memo: SearchStateMemoStats,
     /// Full 追加評価に実際に使った thread 数。逐次評価と gate 不発では 1。
     workers: usize,
+    /// worker をまたいで共有した exact entry 数。共有しない run では 0 のまま。
+    shared_cache: SharedSelectionCacheEntries,
 }
 
 impl TwoShantenProductionRun {
@@ -316,6 +320,7 @@ impl TwoShantenProductionRun {
             search: ThreeShantenSearchStats::default(),
             memo: SearchStateMemoStats::default(),
             workers: 1,
+            shared_cache: SharedSelectionCacheEntries::default(),
         }
     }
 }
@@ -329,6 +334,8 @@ struct TwoShantenFullPairMetrics {
     search: ThreeShantenSearchStats,
     memo: SearchStateMemoStats,
     workers: usize,
+    /// worker をまたいで共有した exact entry 数。共有しない評価では 0 のまま。
+    shared_cache: SharedSelectionCacheEntries,
 }
 
 impl Default for TwoShantenFullPairMetrics {
@@ -338,6 +345,7 @@ impl Default for TwoShantenFullPairMetrics {
             search: ThreeShantenSearchStats::default(),
             memo: SearchStateMemoStats::default(),
             workers: 1,
+            shared_cache: SharedSelectionCacheEntries::default(),
         }
     }
 }
@@ -568,6 +576,13 @@ pub(crate) struct IishantenContinuationSettings {
     /// 候補1件の Full 値はその候補の打牌評価と探索設定と、渡す Progress 寄与だけで決まる純関数
     /// なので、分けても値は変わらない。変わるのは探索基盤を2候補間で共有できる範囲だけ。
     pub(crate) two_shanten_full_workers: Option<NonZeroUsize>,
+    /// Full 追加評価を分ける場合に、base 評価・構造評価・未来テンパイ値の exact cache を
+    /// worker 間で共有するか。`false` では worker ごとに閉じた探索基盤になる。
+    ///
+    /// 共有するのはどれも「同じ key なら必ず同じ値になる純関数の結果」だけで、key には局面
+    /// state をそのまま含める。したがって値も枝も選択もこの指定で変わらず、変わるのは同じ
+    /// exact input を何回評価し直すかだけ ([`SharedSelectionCache`])。
+    pub(crate) two_shanten_full_shared_cache: bool,
 }
 
 impl IishantenContinuationSettings {
@@ -584,6 +599,7 @@ impl IishantenContinuationSettings {
         search_stats: false,
         forward_workers: None,
         two_shanten_full_workers: None,
+        two_shanten_full_shared_cache: true,
     };
 
     /// production へ追加深度を接続する前の旧設定。診断の比較 baseline としてだけ残る。
@@ -593,6 +609,7 @@ impl IishantenContinuationSettings {
         search_stats: false,
         forward_workers: None,
         two_shanten_full_workers: None,
+        two_shanten_full_shared_cache: true,
     };
 }
 
@@ -690,6 +707,8 @@ pub(crate) struct IishantenContinuationSelection {
     pub(crate) forward_workers: usize,
     /// 2向聴 Full 追加評価に実際に使った thread 数。逐次評価とドラ差 gate 不発では 1。
     pub(crate) two_shanten_full_workers: usize,
+    /// worker をまたいで共有した exact entry 数。共有 cache を持たない run では 0 のまま。
+    pub(crate) shared_cache: SharedSelectionCacheEntries,
     /// production comparator が実際に評価した2向聴候補ごとの実測。計測しない run では空。
     pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     /// 診断の構築を含まない、打牌選択1回の実測時間。
@@ -739,6 +758,7 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
         memo: run.metrics.memo,
         forward_workers: run.metrics.forward_workers,
         two_shanten_full_workers: run.metrics.two_shanten_full_workers,
+        shared_cache: run.metrics.shared_cache,
         two_shanten_self_tsumo_candidates,
         elapsed,
         phases,
@@ -782,6 +802,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         scope,
         &legal.evaluations,
         continuation,
+        None,
     );
     let lookahead = scope
         .builds_lookahead()
@@ -1383,6 +1404,7 @@ fn production_selection_metrics_instrumented(
         LookaheadDiagnosticScope::None,
         evaluations,
         continuation,
+        None,
     );
     let mut forward_timing = timing.forward_metrics_timer();
     let forward = match parallel_forward_workers(evaluations, continuation) {
@@ -1453,6 +1475,7 @@ fn production_selection_metrics_instrumented(
         ),
         forward_workers,
         two_shanten_full_workers: two_shanten.workers,
+        shared_cache: two_shanten.shared_cache,
         two_shanten: two_shanten.selection,
     }
 }
@@ -1553,6 +1576,7 @@ fn parallel_forward_metrics(
                         LookaheadDiagnosticScope::None,
                         evaluations,
                         continuation,
+                        None,
                     );
                     let mut metrics = Vec::new();
                     while let Some(&index) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
@@ -1745,6 +1769,7 @@ fn production_two_shanten_selection(
         search: full.search,
         memo: full.memo,
         workers: full.workers,
+        shared_cache: full.shared_cache,
     }
 }
 
@@ -1786,6 +1811,16 @@ fn two_shanten_full_pair_metrics(
 
     // 対象は常にこの2候補だけなので、thread も2を超えない。
     let worker_count = workers.get().min(pair.len());
+    // 探索基盤の exact cache を worker 間で共有するのは、実際に2 worker 以上へ分ける場合だけ。
+    // 生存期間はこの評価1回で、局面をまたいで持ち越さない。
+    let shared = (continuation.two_shanten_full_shared_cache && worker_count > 1)
+        .then(SharedSelectionCache::default);
+    let shared = shared.as_ref();
+    if let Some(shared) = shared {
+        // Progress 段で既に求まっている base / 構造評価を、worker を起こす前にそのまま移す。
+        // 同じ局面の同じ純関数の結果なので、worker はこれを read-only の出発点として引ける。
+        sequential.seed_shared_cache(&shared.lookahead);
+    }
     // 計測しない run は worker 側でも `Instant` を取らない。
     let measures = observer.measures_candidates();
     // Progress の最後の候補の区切りは、worker を起こす前にここで閉じる。
@@ -1797,7 +1832,7 @@ fn two_shanten_full_pair_metrics(
                 let next = &next;
                 let pair = pair.as_slice();
                 scope.spawn(move || {
-                    let valuator = ProductionProspectiveValuator::new(context);
+                    let valuator = production_valuator(context, shared);
                     let inputs = production_lookahead_inputs(
                         context,
                         tiles,
@@ -1805,6 +1840,7 @@ fn two_shanten_full_pair_metrics(
                         LookaheadDiagnosticScope::None,
                         evaluations,
                         continuation,
+                        SharedSelectionCache::lookahead(shared),
                     );
                     let mut metrics = Vec::new();
                     while let Some(&(evaluation_index, progress_value)) =
@@ -1843,6 +1879,7 @@ fn two_shanten_full_pair_metrics(
 
     let mut collected = TwoShantenFullPairMetrics {
         workers: worker_count,
+        shared_cache: SharedSelectionCache::entries(shared),
         ..TwoShantenFullPairMetrics::default()
     };
     let mut elapsed = [None; TWO_SHANTEN_FULL_PAIR_LEN];
@@ -2054,6 +2091,75 @@ pub(crate) fn lookahead_inputs<'a>(
     )
 }
 
+/// Full top-2 を評価する worker どうしが引く exact cache。
+///
+/// 載せるのはどれも「同じ key なら必ず同じ値になる純関数の結果」だけで、entry を捨てない。
+/// key には局面 state をそのまま含め、異なる state の値を同じ entry にしない。したがって、
+/// どの worker が先に値を入れても、worker 数や thread の終了順が変わっても、返る値は
+/// 共有しなかった場合とまったく同じになる。
+///
+/// 共有 cache を引くのは worker ごとの memo が外した lookup だけで、hot path は従来どおり
+/// 同期を持たない評価器 local の memo が受ける。
+///
+/// 生存期間は Full pair の評価1回だけ ([`two_shanten_full_pair_metrics`]) で、局面をまたいで
+/// 持ち越さない。作るのも実際に2 worker 以上へ分ける場合だけなので、逐次評価へ落ちる設定でも
+/// ドラ差 gate が不発の局面でも、この cache は存在しない。
+///
+/// 未来テンパイ値まで共有してよいのは、worker の評価器がどれも同じ `GameContext` と同じ副露
+/// 状態から作られ、値に効く局面 fact が構築時にすべて一致するため
+/// ([`SharedProspectiveValueCache`])。
+#[derive(Default)]
+struct SharedSelectionCache {
+    lookahead: SharedLookaheadCache,
+    values: SharedProspectiveValueCache,
+}
+
+impl SharedSelectionCache {
+    fn lookahead(shared: Option<&Self>) -> Option<&SharedLookaheadCache> {
+        shared.map(|shared| &shared.lookahead)
+    }
+
+    /// 共有した entry 数。memory footprint の観測用で、値も選択も変えない。
+    fn entries(shared: Option<&Self>) -> SharedSelectionCacheEntries {
+        let Some(shared) = shared else {
+            return SharedSelectionCacheEntries::default();
+        };
+        let lookahead = shared.lookahead.entries();
+        let (tenpai_selection_values, tenpai_tsumo_values) = shared.values.entries();
+        SharedSelectionCacheEntries {
+            base_evaluations: lookahead.base_evaluations,
+            structural_evaluations: lookahead.structural_evaluations,
+            tenpai_selection_values,
+            tenpai_tsumo_values,
+        }
+    }
+}
+
+/// worker をまたいで共有した exact entry の数。共有しない run では 0 のまま。
+///
+/// 観測値そのもので、値も枝も選択も変えない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SharedSelectionCacheEntries {
+    pub base_evaluations: usize,
+    pub structural_evaluations: usize,
+    pub tenpai_selection_values: usize,
+    pub tenpai_tsumo_values: usize,
+}
+
+/// 共有 cache を持つ場合だけ未来テンパイ値も共有した production 評価器。
+///
+/// 局面 fact は `context` のままで、変わるのは既に求めた値をどこまで共有するかだけ。
+fn production_valuator<'a>(
+    context: &'a GameContext,
+    shared: Option<&'a SharedSelectionCache>,
+) -> ProductionProspectiveValuator<'a> {
+    let valuator = ProductionProspectiveValuator::new(context);
+    match shared {
+        Some(shared) => valuator.with_shared_values(&shared.values),
+        None => valuator,
+    }
+}
+
 /// 通常打牌選択が使う lookahead 入力。
 ///
 /// 探索内の同一 state memo を持たせるのは、最善向聴数が3向聴の局面 (3向聴 Progress 評価の
@@ -2069,9 +2175,14 @@ fn production_lookahead_inputs<'a>(
     scope: LookaheadDiagnosticScope,
     evaluations: &[DiscardEvaluation],
     continuation: IishantenContinuationSettings,
+    shared: Option<&'a SharedLookaheadCache>,
 ) -> LookaheadInputs<'a> {
     let inputs = lookahead_inputs(context, tiles, valuator, scope)
         .with_same_shanten_continuation_depth(continuation.depth);
+    let inputs = match shared {
+        Some(shared) => inputs.with_shared_cache(shared),
+        None => inputs,
+    };
     let inputs = if continuation.search_stats {
         inputs.with_three_shanten_search_stats()
     } else {

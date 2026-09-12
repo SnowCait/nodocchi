@@ -303,13 +303,43 @@ index へ書き戻すため、worker 数にも thread の終了順にも依り�
 `ExpectedSelfTsumoValue`・最終 selected index・選ばれた打牌・比較理由は、逐次評価と bit-exact に
 一致します。
 
-worker はそれぞれ自分の探索基盤を持つため、逐次評価では Progress 段で暖まっていた base 評価
-memo・構造評価 memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。
-wall-clock は縮む一方で総仕事量は増えます。S / P2 の実測と総仕事量の差は bot-scenario の
-[2向聴 Full pair の並列比較](../bot-scenario.md#2向聴-full-pair-の並列比較) で観測できます。この
-分け方は `bot-core` の orchestration 側だけが持ち、`bot-logic` の純粋な評価は platform threading
-を前提にしません。timeout・cutoff・shallow fallback・pruning・top-N・threshold といった近似は
-入れていません。
+#### worker 間の exact cache 共有
+
+2候補の探索は同じ手牌から1枚だけ違う打牌で始まるため、その先の探索 state は大きく重なります。
+worker ごとに閉じた探索基盤では、その重なりぶんを両 worker が独立に評価し直していました。実測
+では base 評価 memo の key の 75%、構造評価 memo の key の 78% が、もう一方の worker も評価した
+key でした。
+
+そこで、Full 追加評価を実際に2 worker 以上へ分ける場合だけ、次の3つを worker 間で共有します。
+
+- base 打牌評価 (`(打牌前 counts, 副露済み面子数, 受け入れに関係する見え牌)`)
+- 構造評価 (`(打牌前 counts, 副露済み面子数)`)
+- 未来テンパイ1件分の選択値とツモ値 (`ProspectiveTenpai` の3入力)
+
+worker を起こす前に、Progress 段で既に求まっている base 評価と構造評価をそのまま共有 cache へ
+移します。worker はそれを read-only の出発点として引き、自分が新しく求めた値もそこへ足します。
+
+共有するのはどれも「同じ key なら必ず同じ値になる純関数の結果」だけで、key には局面 state を
+そのまま含め、entry を捨てません。未来テンパイ値に効く局面 fact (副露・ドラ表示牌・場風 / 自風・
+持ち点・既リーチ・自分の河・履歴依存フリテン・見え牌) は評価器の構築時に確定し、どの worker も
+同じ `GameContext` と同じ副露状態から評価器を作るため、値の意味は変わりません。したがってどの
+worker が先に entry を埋めても、worker 数や thread の終了順が変わっても、返る値は共有しなかった
+場合と exact に一致します。`unsafe impl Send/Sync` は持ちません。
+
+hot path は従来どおり同期を持たない評価器 local の memo が受け、共有 cache を引くのはその memo
+が外した lookup だけです。共有 cache 自体も shard ごとの lock を持ち、1つの lock へ全 lookup を
+集めません。共有 cache の生存期間は Full pair の評価1回で、局面をまたいで持ち越しません。逐次
+評価へ落ちる設定でも、ドラ差 gate が不発の局面でも、この cache は作られず追加コストもありません。
+
+両 worker が同時に同じ key を外した場合は両方が評価するため、base evaluation misses と
+shanten / acceptance rebuilds は run ごとに数件ぶれます。ぶれるのはこの counter だけで、値も枝も
+選択もぶれません。S / P2 / P2S の実測と総仕事量の差、共有 cache が保持した entry 数は
+bot-scenario の [2向聴 Full pair の並列比較](../bot-scenario.md#2向聴-full-pair-の並列比較) で
+観測できます。
+
+この分け方も共有も `bot-core` の orchestration 側だけが持ち、`bot-logic` の純粋な評価は platform
+threading を前提にしません。timeout・cutoff・shallow fallback・pruning・top-N・threshold と
+いった近似は入れていません。
 
 計測についても、並列に走る2候補は worker がそれぞれ独立に elapsed を計り、join 後に候補 index 順
 で既存の候補別 timing へ反映します。この2件は同時に走るため、候補別 timing の合計は

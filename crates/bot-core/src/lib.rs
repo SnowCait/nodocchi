@@ -102,6 +102,7 @@ pub use defense::{
     suji_safety_rank_for_players, tanki_remaining_candidates,
     tanki_remaining_candidates_for_player, visible_count_of, wall_rank, wall_tile_types_by_rank,
 };
+pub use discard_selection::SharedSelectionCacheEntries;
 pub use discard_selection::select_discard_action;
 pub use iishanten_continuation_depth_comparison::{
     CandidateBreakdown, FirstDrawContribution, IishantenContinuationDepth,

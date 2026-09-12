@@ -21,6 +21,7 @@ pub mod scoring_selection;
 pub mod selection;
 pub mod self_tsumo;
 pub mod shanten;
+pub mod shared_memo;
 pub mod tenpai_hand_value;
 pub mod tile;
 pub mod tile_counts;
@@ -92,11 +93,11 @@ pub use lookahead::{
     DrawVariantLookaheadDiagnostic, ForwardMetricsObserver, ForwardMetricsPhase,
     IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, ProspectiveTenpai,
     ProspectiveTenpaiValuator, ProspectiveTsumoValuator, SameShantenContinuationDepth,
-    SameShantenDownstreamDiagnostic, SearchStateMemoStats, SharedDraws, ThreeShantenSearchStats,
-    TwoShantenProgressSelfTsumoCandidate, TwoShantenProgressSelfTsumoDiagnostic,
-    TwoShantenSelfTsumoCandidate, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver,
-    TwoShantenSelfTsumoScope, awaiting_draw_expected_self_tsumo_value,
-    awaiting_draw_two_shanten_expected_self_tsumo_value,
+    SameShantenDownstreamDiagnostic, SearchStateMemoStats, SharedDraws, SharedLookaheadCache,
+    SharedLookaheadCacheEntries, ThreeShantenSearchStats, TwoShantenProgressSelfTsumoCandidate,
+    TwoShantenProgressSelfTsumoDiagnostic, TwoShantenSelfTsumoCandidate,
+    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver, TwoShantenSelfTsumoScope,
+    awaiting_draw_expected_self_tsumo_value, awaiting_draw_two_shanten_expected_self_tsumo_value,
     awaiting_draw_two_shanten_progress_self_tsumo_value, diagnose_lookahead,
     diagnose_lookahead_candidate, diagnose_two_shanten_progress_self_tsumo_instrumented,
     diagnose_two_shanten_self_tsumo, diagnose_two_shanten_self_tsumo_instrumented, forward_metrics,
@@ -139,6 +140,7 @@ pub use shanten::{
     calculate_shanten_with_fixed_melds, chiitoitsu_shanten, kokushi_shanten, standard_shanten,
     standard_shanten_with_fixed_melds,
 };
+pub use shared_memo::SharedMemo;
 pub use tenpai_hand_value::{
     TenpaiCompletedHands, TenpaiHandValueError, TenpaiHandValueProfile, TenpaiWaitCompletedHand,
     TenpaiWaitHandValue, WinningTileCompletedHand, WinningTileHandValue,

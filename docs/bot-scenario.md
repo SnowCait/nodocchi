@@ -213,11 +213,13 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では�
 `--two-shanten-full-parallel-comparison` は、2向聴の production selection で **ドラ差 gate を通った provisional 上位2候補の Full 追加評価をどう実行するか** だけを変えた方式を比較する診断 option です。Progress-first も ForwardTargets cohort も上位2候補の選び方も Full gate も comparator も Full 値の意味も変わりません。
 
 ```text
-S   gate を通った2候補を1本の LookaheadInputs で逐次評価
-P2  その2候補を min(2, available_parallelism) worker で並列評価 (現行 production と同じ方式)
+S    gate を通った2候補を1本の LookaheadInputs で逐次評価
+P2   その2候補を min(2, available_parallelism) worker で並列評価。探索基盤は worker ごとに閉じる
+P2S  同じく並列評価し、base 評価・構造評価・未来テンパイ値の exact cache を worker 間で共有
+     (現行 production と同じ方式)
 ```
 
-並列にするのは gate を通った2候補の Full 追加評価だけです。候補1件の Full 値はその候補の打牌評価と探索設定と、Progress 段で確定済みの寄与だけで決まる純関数で、探索内の memo は同じ入力に同じ値を返す cache でしかありません。結果は pair index へ書き戻すため thread の終了順にも worker 数にも依らず、2候補の Full `ExpectedSelfTsumoValue`・最終 selected index・選択打牌・比較理由は S / P2 で bit-exact に一致します (`bit-exact with the sequential mode`)。
+並列にするのは gate を通った2候補の Full 追加評価だけです。候補1件の Full 値はその候補の打牌評価と探索設定と、Progress 段で確定済みの寄与だけで決まる純関数で、探索内の memo は同じ入力に同じ値を返す cache でしかありません。共有 cache も key に局面 state をそのまま含め、entry を捨てないため、どの worker が先に entry を埋めても同じ値が返ります。結果は pair index へ書き戻すため thread の終了順にも worker 数にも依らず、2候補の Full `ExpectedSelfTsumoValue`・最終 selected index・選択打牌・比較理由は S / P2 / P2S で bit-exact に一致します (`bit-exact with the sequential mode`)。
 
 ```sh
 cargo run --release -p bot-scenario -- \
@@ -225,9 +227,11 @@ cargo run --release -p bot-scenario -- \
   --two-shanten-full-parallel-comparison
 ```
 
-worker はそれぞれ自分の探索基盤を持つため、逐次評価では Progress 段で暖まっていた base 評価 memo・構造評価 memo・thread-local の向聴 / 受け入れ memo を worker ごとに作り直します。wall-clock は縮む一方で総仕事量は増えるので、出力には `elapsed` と speedup に加えて `Total work` として探索規模と memo hit / miss の増減も並べます。
+P2 は worker ごとに探索基盤を作り直すため、逐次評価では Progress 段で暖まっていた base 評価 memo・構造評価 memo・thread-local の向聴 / 受け入れ memo を両 worker が独立に作り直し、wall-clock は縮む一方で総仕事量が増えます。P2S は base 評価・構造評価・未来テンパイ値の exact entry を worker 間で共有し (worker を起こす前に Progress 段の分を移してから始めます)、その再評価を落とします。出力には `elapsed` と speedup に加えて `Total work` として3方式の探索規模と memo hit / miss、`Shared cache footprint` として共有 cache が保持した entry 数を並べます。S の misses は exact shared cache が理想的に効いた場合の総仕事量そのものになるので、P2 / P2S をそこと比べられます。
 
-**production の打牌選択は P2 と同じ方式です。** Full 追加評価の対象は常に provisional 上位2候補だけなので、要求する worker 数の上限も `min(2, available_parallelism)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。ドラ差 gate が発火しない局面では Full 追加評価そのものが走らないので、thread も分けません。Progress cohort の評価は従来どおり逐次のままです。S は P2 を比べるための baseline として残ります。他の診断 option とは併用できません。
+両 worker が同時に同じ key を外した場合は両方が評価するため、P2S の base evaluation misses と shanten / acceptance rebuilds は run ごとに数件ぶれます。ぶれるのはこの counter だけで、値も選択もぶれません。
+
+**production の打牌選択は P2S と同じ方式です。** Full 追加評価の対象は常に provisional 上位2候補だけなので、要求する worker 数の上限も `min(2, available_parallelism)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。ドラ差 gate が発火しない局面では Full 追加評価そのものが走らないので、thread も分けず、共有 cache も作りません。Progress cohort の評価は従来どおり逐次のままです。S と P2 は P2S を比べるための baseline として残ります。他の診断 option とは併用できません。
 
 ### --allow-ryukyoku
 

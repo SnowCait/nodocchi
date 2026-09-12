@@ -100,16 +100,17 @@ pub const USAGE: &str = "usage:
   production itself uses, S, P2 and P4 stay as the comparison baselines, and it cannot be
   combined with other diagnostic options
   --two-shanten-full-parallel-comparison runs the production discard selection on a
-  two-shanten position twice, once with the dora-gated provisional top-2 evaluated in order
-  (S) and once with those same two candidates evaluated on up to min(2,
-  available_parallelism) workers (P2, the current production configuration), and reports the
-  elapsed time, the speedup, the search size and the memo hit and miss counts of each one;
-  only the execution of those two Full evaluations differs, so the Progress cohort, the
-  top-2 selection, the gate, the comparison reasons, the Full values and the selected
-  discard stay bit-exact; each mode runs twice, a timing run with no instrumentation the
-  elapsed time comes from and an observation run with the search-size counters and the phase
-  timer the values and stats come from, and it cannot be combined with other diagnostic
-  options
+  two-shanten position three times: with the dora-gated provisional top-2 evaluated in order
+  (S), with those same two candidates evaluated on up to min(2, available_parallelism)
+  workers each holding its own search state (P2), and with the same split sharing the exact
+  base evaluation, structural evaluation and future-tenpai value entries across the workers
+  (P2S, the current production configuration); it reports the elapsed time, the speedups,
+  the search size, the memo hit and miss counts and the shared-cache footprint; only the
+  execution of those two Full evaluations differs, so the Progress cohort, the top-2
+  selection, the gate, the comparison reasons, the Full values and the selected discard stay
+  bit-exact; each mode runs twice, a timing run with no instrumentation the elapsed time
+  comes from and an observation run with the search-size counters and the phase timer the
+  values and stats come from, and it cannot be combined with other diagnostic options
   --compare-three-shanten-continuation replays every captured request_action, runs the same
   A/B comparison on the requests where the three-shanten axis fires, and reports latency,
   search size and selection differences; it takes all following capture paths and cannot be
@@ -229,8 +230,8 @@ pub struct CliArgs {
     /// production と同じ B depth の中で、深い候補評価の分け方 (S / P2 / P4 / PA) を比べる
     /// 専用診断。PA が現行 production と同じ方式。
     pub iishanten_selection_parallel_comparison: bool,
-    /// 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価の分け方 (S / P2) を
-    /// 比べる専用診断。P2 が現行 production と同じ方式。
+    /// 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価の分け方
+    /// (S / P2 / P2S) を比べる専用診断。P2S が現行 production と同じ方式。
     pub two_shanten_full_parallel_comparison: bool,
     pub source: ScenarioSource,
     pub verbose: bool,

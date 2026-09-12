@@ -130,7 +130,7 @@ use bot_logic::{
     CountHasherBuilder, DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
     DrawVariantLookaheadDiagnostic, EffectiveAcceptance, EffectiveAcceptanceTile, EffectiveShanten,
     FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, ProspectiveTenpai,
-    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
+    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, SharedMemo, TenpaiCompletedHands,
     TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
     structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
@@ -363,6 +363,31 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     evaluated: Cell<Option<Box<EvaluatedTenpai>>>,
     // この評価器が既に求めた未来テンパイごとの値。
     values: RefCell<EvaluatedTenpaiValueMemo>,
+    // 上の memo が外した lookup だけを引く、thread をまたいだ共有 cache。指定しない経路では
+    // `None` で、未来テンパイの値はこれまでどおり評価器ごとに閉じる。
+    shared: Option<&'a SharedProspectiveValueCache>,
+}
+
+/// 未来テンパイ1件分の値を thread をまたいで共有する exact cache。
+///
+/// 値は [`ProspectiveTenpaiKey`] の3入力と、評価器が構築時に確定して以後変わらない局面 fact
+/// (副露・ドラ表示牌・場風 / 自風・持ち点・既リーチ・自分の河・履歴依存フリテン・見え牌) だけで
+/// 決まる。この cache を渡してよいのは、それらがすべて同じ、つまり同じ `GameContext` と同じ
+/// 副露状態から作った評価器どうしに限る。key の意味はそのままで、緩めていない。
+///
+/// entry を捨てないため、どの thread が先に値を入れても、何 thread から引いても同じ値が返る。
+#[derive(Default)]
+pub(crate) struct SharedProspectiveValueCache {
+    selection: SharedMemo<ProspectiveTenpaiKey, Option<u64>>,
+    tsumo: SharedMemo<ProspectiveTenpaiKey, Option<TenpaiTsumoValue>>,
+}
+
+impl SharedProspectiveValueCache {
+    /// 共有している未来テンパイ値の entry 数 (選択値, ツモ値)。memory footprint の観測用で、
+    /// 値も選択も変えない。
+    pub(crate) fn entries(&self) -> (usize, usize) {
+        (self.selection.len(), self.tsumo.len())
+    }
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -398,7 +423,15 @@ impl<'a> ProductionProspectiveValuator<'a> {
                 .after_discard(FUTURE_AFTER_OWN_DRAW),
             evaluated: Cell::new(None),
             values: RefCell::new(EvaluatedTenpaiValueMemo::default()),
+            shared: None,
         }
+    }
+
+    /// 未来テンパイの値を、同じ `GameContext` と同じ副露状態から作った別 thread の評価器と
+    /// 共有する。共有する値の意味も key も変わらない。
+    pub(crate) fn with_shared_values(mut self, shared: &'a SharedProspectiveValueCache) -> Self {
+        self.shared = Some(shared);
+        self
     }
 
     /// 評価対象の副露済み面子数。2手先評価へ渡す値もここから取り、評価器と食い違わせない。
@@ -580,12 +613,25 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
             tenpai_value_memo_counter::hit();
             return cached;
         }
+        // 評価器 local の memo が外した lookup だけが共有 cache へ来る。
+        if let Some((key, cached)) = key
+            .zip(self.shared)
+            .and_then(|(key, shared)| shared.selection.get(&key).map(|value| (key, value)))
+        {
+            #[cfg(test)]
+            tenpai_value_memo_counter::hit();
+            self.values.borrow_mut().entry(key).or_default().selection = Some(cached);
+            return cached;
+        }
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value =
             self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode));
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().selection = Some(value);
+            if let Some(shared) = self.shared {
+                shared.selection.insert(key, value);
+            }
         }
         value
     }
@@ -604,6 +650,16 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
             tenpai_value_memo_counter::hit();
             return cached;
         }
+        // 評価器 local の memo が外した lookup だけが共有 cache へ来る。
+        if let Some((key, cached)) = key
+            .zip(self.shared)
+            .and_then(|(key, shared)| shared.tsumo.get(&key).map(|value| (key, value)))
+        {
+            #[cfg(test)]
+            tenpai_value_memo_counter::hit();
+            self.values.borrow_mut().entry(key).or_default().tsumo = Some(cached);
+            return cached;
+        }
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
@@ -611,6 +667,9 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         });
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
+            if let Some(shared) = self.shared {
+                shared.tsumo.insert(key, value);
+            }
         }
         value
     }

@@ -220,6 +220,7 @@ use crate::selection::{
 };
 use crate::self_tsumo::{SelfTsumoFacts, SelfTsumoPath, TenpaiTsumoValue};
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
+use crate::shared_memo::SharedMemo;
 use crate::tile::{PhysicalTileVariant, TileId, TileType, physical_tile_variants, seen_red_fives};
 use crate::tile_counts::TileCounts;
 use std::cell::RefCell;
@@ -635,6 +636,9 @@ pub struct LookaheadInputs<'a> {
     base_evaluations: Rc<RefCell<BaseEvaluationMemo>>,
     // seenに依存しない候補順・向聴数・形判定・形ペナルティと構造上の受け入れ。
     structural_evaluations: Rc<RefCell<StructuralEvaluationMemo>>,
+    // 上2つの memo が外した lookup だけを引く、thread をまたいだ共有 cache。指定しない経路では
+    // `None` で、探索基盤はこれまでどおり評価器ごとに閉じる。
+    shared: Option<&'a SharedLookaheadCache>,
     // 深い探索でだけ有効化する。同じ物理牌集合・見え牌・河だけ共有し、枝は削らない。
     search_state_memo: Option<Rc<RefCell<SearchStateMemo>>>,
     // 1向聴 state の continuation が追う枝。既定は Progress + SameShanten で、3向聴起点の
@@ -776,17 +780,57 @@ pub struct ThreeShantenSearchStats {
 /// ごとに [`discard_decoration`] が反映する。
 type BaseEvaluationKey = (TileCounts, FixedMeldCount, CandidateSeen);
 
+// 構造評価1件分の共有単位。base 評価の骨格と、その骨格の全候補の受け入れに関係する牌種。
+type StructuralEvaluation = (SharedBaseEvaluations, [bool; TileType::COUNT]);
+
+type StructuralEvaluationKey = (TileCounts, FixedMeldCount);
+
 // 共有する base 評価は変更しない値として持つ。node ごとの文脈反映は [`DiscardDecoration`] が
-// 担い、cache の値そのものを書き換えない。
-type SharedBaseEvaluations = Rc<[DiscardEvaluation]>;
+// 担い、cache の値そのものを書き換えない。thread をまたぐ共有 memo
+// ([`SharedLookaheadCache`]) にも同じ値をそのまま載せるため、参照カウントは [`Arc`] で持つ。
+type SharedBaseEvaluations = Arc<[DiscardEvaluation]>;
 
 type BaseEvaluationMemo = HashMap<BaseEvaluationKey, SharedBaseEvaluations, CountHasherBuilder>;
 
-type StructuralEvaluationMemo = HashMap<
-    (TileCounts, FixedMeldCount),
-    (SharedBaseEvaluations, [bool; TileType::COUNT]),
-    CountHasherBuilder,
->;
+type StructuralEvaluationMemo =
+    HashMap<StructuralEvaluationKey, StructuralEvaluation, CountHasherBuilder>;
+
+/// 探索基盤の base / 構造評価を thread をまたいで共有する exact cache。
+///
+/// 載せるのは key が同じなら必ず同じ値になる純関数の結果だけで、entry を捨てない。構造評価は
+/// (打牌前 counts, 副露済み面子数) だけ、base 評価はそれに受け入れに関係する見え牌を足した
+/// ものだけで決まり、探索の深さにも追う枝の範囲にも、どの候補の評価から来たかにも依らない。
+/// したがって、どの thread が先に値を入れても結果は同じで、共有の有無で値も枝も選択も
+/// 変わらない。
+///
+/// これは worker ごとの memo ([`LookaheadInputs`] が持つ hot path 側) が外した lookup だけが
+/// 来る第2段で、hot path をそのまま lock へ流すためのものではない。
+#[derive(Default)]
+pub struct SharedLookaheadCache {
+    base_evaluations: SharedMemo<BaseEvaluationKey, SharedBaseEvaluations>,
+    structural_evaluations: SharedMemo<StructuralEvaluationKey, StructuralEvaluation>,
+}
+
+impl SharedLookaheadCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 共有している entry 数。memory footprint の観測用で、値も選択も変えない。
+    pub fn entries(&self) -> SharedLookaheadCacheEntries {
+        SharedLookaheadCacheEntries {
+            base_evaluations: self.base_evaluations.len(),
+            structural_evaluations: self.structural_evaluations.len(),
+        }
+    }
+}
+
+/// 共有 cache が保持している entry 数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SharedLookaheadCacheEntries {
+    pub base_evaluations: usize,
+    pub structural_evaluations: usize,
+}
 
 impl<'a> LookaheadInputs<'a> {
     pub fn new(
@@ -820,6 +864,7 @@ impl<'a> LookaheadInputs<'a> {
             },
             base_evaluations: Rc::new(RefCell::new(BaseEvaluationMemo::default())),
             structural_evaluations: Rc::new(RefCell::new(HashMap::default())),
+            shared: None,
             search_state_memo: None,
             iishanten_continuation: IishantenContinuationScope::default(),
             same_shanten_continuation_depth: SameShantenContinuationDepth::default(),
@@ -867,6 +912,38 @@ impl<'a> LookaheadInputs<'a> {
     pub fn with_search_state_memo(mut self) -> Self {
         self.search_state_memo = Some(Rc::new(RefCell::new(SearchStateMemo::default())));
         self
+    }
+
+    /// base / 構造評価の memo を、同じ局面を評価する別 thread と共有する。
+    ///
+    /// 共有するのはどちらも (打牌前 counts, 副露済み面子数, 受け入れに関係する見え牌) だけで
+    /// 決まる純関数の結果で、entry を捨てない [`SharedLookaheadCache`] に載せる。どの thread が
+    /// 先に値を入れても同じ値になるため、共有の有無でも worker 数でも thread の終了順でも
+    /// 値・枝・選択は変わらない。
+    ///
+    /// 渡す cache は、同じ `fixed_meld_count` の評価だけが使うこと。異なる局面 state の値を
+    /// 同じ entry にしないよう、key には counts と副露済み面子数と見え牌をそのまま含めている。
+    pub fn with_shared_cache(mut self, shared: &'a SharedLookaheadCache) -> Self {
+        self.shared = Some(shared);
+        self
+    }
+
+    /// この評価器が既に求めた base / 構造評価を、まだ誰も使っていない共有 cache へそのまま移す。
+    ///
+    /// 移すのは key と値の組そのもので、値も key の意味も変わらない。探索を先に進めた評価器の
+    /// 結果を、後から始まる別 thread の評価器が read-only の出発点として引けるようにするための
+    /// 入口で、この評価器自身の memo はそのまま残る。
+    ///
+    /// 渡す cache は、この評価器と同じ `fixed_meld_count` の評価だけが使うこと。
+    pub fn seed_shared_cache(&self, shared: &SharedLookaheadCache) {
+        for (key, entry) in self.structural_evaluations.borrow().iter() {
+            shared.structural_evaluations.insert(*key, entry.clone());
+        }
+        for (key, evaluations) in self.base_evaluations.borrow().iter() {
+            shared
+                .base_evaluations
+                .insert(*key, Arc::clone(evaluations));
+        }
     }
 
     pub fn search_state_memo_stats(&self) -> SearchStateMemoStats {
@@ -973,23 +1050,35 @@ impl<'a> LookaheadInputs<'a> {
         let (structure, relevant) = match cached {
             Some(cached) => cached,
             None => {
-                self.count(|stats| stats.structural_evaluation_misses += 1);
-                let structure: SharedBaseEvaluations = evaluate_discards_with_seen(
-                    counts,
-                    self.fixed_meld_count,
-                    &CandidateSeen::hand_only(),
-                )
-                .into();
-                let mut relevant = [false; TileType::COUNT];
-                for evaluation in structure.iter() {
-                    for accepted in &evaluation.acceptance_after_discard.tiles {
-                        relevant[accepted.tile.index()] = true;
-                    }
-                }
+                let entry = self
+                    .shared
+                    .and_then(|shared| shared.structural_evaluations.get(&structural_key))
+                    .unwrap_or_else(|| {
+                        self.count(|stats| stats.structural_evaluation_misses += 1);
+                        let structure: SharedBaseEvaluations = evaluate_discards_with_seen(
+                            counts,
+                            self.fixed_meld_count,
+                            &CandidateSeen::hand_only(),
+                        )
+                        .into();
+                        let mut relevant = [false; TileType::COUNT];
+                        for evaluation in structure.iter() {
+                            for accepted in &evaluation.acceptance_after_discard.tiles {
+                                relevant[accepted.tile.index()] = true;
+                            }
+                        }
+                        let entry = (structure, relevant);
+                        if let Some(shared) = self.shared {
+                            shared
+                                .structural_evaluations
+                                .insert(structural_key, entry.clone());
+                        }
+                        entry
+                    });
                 self.structural_evaluations
                     .borrow_mut()
-                    .insert(structural_key, (Rc::clone(&structure), relevant));
-                (structure, relevant)
+                    .insert(structural_key, entry.clone());
+                entry
             }
         };
         let key = (
@@ -998,14 +1087,26 @@ impl<'a> LookaheadInputs<'a> {
             seen.for_acceptance_types(&relevant),
         );
         if let Some(cached) = self.base_evaluations.borrow().get(&key) {
-            return Rc::clone(cached);
+            return Arc::clone(cached);
         }
-        self.count(|stats| stats.base_evaluation_misses += 1);
-        let evaluations: SharedBaseEvaluations =
-            crate::discard::evaluate_discards_from_structure(counts, seen, &structure).into();
+        let evaluations = self
+            .shared
+            .and_then(|shared| shared.base_evaluations.get(&key))
+            .unwrap_or_else(|| {
+                self.count(|stats| stats.base_evaluation_misses += 1);
+                let evaluations: SharedBaseEvaluations =
+                    crate::discard::evaluate_discards_from_structure(counts, seen, &structure)
+                        .into();
+                if let Some(shared) = self.shared {
+                    shared
+                        .base_evaluations
+                        .insert(key, Arc::clone(&evaluations));
+                }
+                evaluations
+            });
         self.base_evaluations
             .borrow_mut()
-            .insert(key, Rc::clone(&evaluations));
+            .insert(key, Arc::clone(&evaluations));
         evaluations
     }
 }
@@ -6638,7 +6739,10 @@ mod tests {
                 let expected = evaluate_discards_with_seen(&counts, fixed_meld_count, seen);
                 let actual = inputs.base_evaluations(&counts, seen);
                 assert_eq!(actual.as_ref(), expected.as_slice());
-                assert!(Rc::ptr_eq(&actual, &inputs.base_evaluations(&counts, seen)));
+                assert!(Arc::ptr_eq(
+                    &actual,
+                    &inputs.base_evaluations(&counts, seen)
+                ));
             }
         }
         assert_eq!(inputs.structural_evaluations.borrow().len(), 2);
@@ -6646,13 +6750,64 @@ mod tests {
         let mut irrelevant_visible = tiles.clone();
         irrelevant_visible.extend(ids(&[108, 109, 110, 111]));
         let irrelevant_seen = CandidateSeen::from_visible_tiles(&counts, &irrelevant_visible);
-        assert!(Rc::ptr_eq(
+        assert!(Arc::ptr_eq(
             &inputs.base_evaluations(&counts, &seen_states[1]),
             &inputs.base_evaluations(&counts, &irrelevant_seen)
         ));
         let unseen = inputs.base_evaluations(&counts, &seen_states[0]);
         let visible = inputs.base_evaluations(&counts, &seen_states[2]);
         assert_ne!(unseen.as_ref(), visible.as_ref());
+    }
+
+    // 共有 cache から返る base / 構造評価は、共有しないでその場で評価した値と exact に一致する。
+    // 先に値を入れた側が誰かで結果は変わらず、key の意味も緩めない。
+    #[test]
+    fn the_shared_cache_returns_the_same_base_evaluations_as_an_unshared_one() {
+        let tiles = two_shanten_candidate_hand();
+        let counts = TileCounts::from_tiles(tiles.iter().copied());
+        let mut visible = tiles.clone();
+        visible.extend(ids(&[4, 5, 6, 7, 52]));
+        let seen_states = [
+            CandidateSeen::hand_only(),
+            CandidateSeen::from_visible_tiles(&counts, &tiles),
+            CandidateSeen::from_visible_tiles(&counts, &visible),
+        ];
+        let shared = SharedLookaheadCache::new();
+
+        for fixed_meld_count in [fixed(3), fixed(2)] {
+            // 1本目が共有 cache を暖め、2本目は local memo が空のままそこから受け取る。
+            let mut warming =
+                LookaheadInputs::new(&tiles, fixed(3), &[], None, None).with_shared_cache(&shared);
+            warming.fixed_meld_count = fixed_meld_count;
+            let mut reusing =
+                LookaheadInputs::new(&tiles, fixed(3), &[], None, None).with_shared_cache(&shared);
+            reusing.fixed_meld_count = fixed_meld_count;
+            let mut unshared = LookaheadInputs::new(&tiles, fixed(3), &[], None, None);
+            unshared.fixed_meld_count = fixed_meld_count;
+
+            for seen in &seen_states {
+                let expected = evaluate_discards_with_seen(&counts, fixed_meld_count, seen);
+                assert_eq!(
+                    warming.base_evaluations(&counts, seen).as_ref(),
+                    expected.as_slice()
+                );
+                assert_eq!(
+                    reusing.base_evaluations(&counts, seen).as_ref(),
+                    expected.as_slice()
+                );
+                assert_eq!(
+                    unshared.base_evaluations(&counts, seen).as_ref(),
+                    expected.as_slice(),
+                );
+            }
+            // 2本目は自分では評価せず、共有済みの entry をそのまま受け取っている。
+            assert_eq!(reusing.base_evaluations.borrow().len(), seen_states.len());
+        }
+
+        // 副露済み面子数は key に入るので、異なる副露状態の値が同じ entry にならない。
+        let entries = shared.entries();
+        assert_eq!(entries.structural_evaluations, 2);
+        assert_eq!(entries.base_evaluations, 2 * seen_states.len());
     }
 
     #[test]

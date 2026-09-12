@@ -4,7 +4,8 @@
 //! 比べるのはこの2候補の実行 orchestration だけで、Progress-first も ForwardTargets cohort も
 //! 上位2候補の選び方も Full gate も comparator も値の意味も変えない。S がその2候補を1本の
 //! `LookaheadInputs` で順に評価する baseline、P2 が `min(2, available_parallelism)` を上限に
-//! 分けて評価する現在の production の方式。
+//! 分けて評価し探索基盤を worker ごとに閉じる方式、P2S が同じく分けたうえで base 評価・構造
+//! 評価・未来テンパイ値の exact cache を worker 間で共有する現在の production の方式。
 //!
 //! 表示するのは Full 値単独の ranking ではなく、既存 comparator を通した最終打牌。Progress
 //! cohort も gate を通った pair も比較理由も production selection が使ったものそのままで、
@@ -15,8 +16,10 @@
 //! 先に走った方式が後の方式の thread-local memo を暖めない。
 //!
 //! 2候補を thread へ分けると、Progress 段で暖まっていた探索基盤 (base 評価 memo・構造評価
-//! memo・thread-local の向聴 / 受け入れ memo) を worker ごとに作り直す。速くなったかだけでなく、
-//! その共有を失って総仕事量がどれだけ増えたかも併せて表示する。
+//! memo・未来テンパイ値 memo・thread-local の向聴 / 受け入れ memo) を worker ごとに作り直す。
+//! P2S はそのうち base 評価・構造評価・未来テンパイ値を worker 間で共有して同じ exact input の
+//! 再評価を落とす。速くなったかだけでなく、方式ごとに総仕事量がどう動いたかと、共有 cache が
+//! 保持した entry 数も併せて表示する。
 
 use std::time::Duration;
 
@@ -54,9 +57,17 @@ pub fn format_scenario_comparison(scenario: &Scenario) -> String {
         "  elapsed comes from the timing run only; the values and the search / memo / phase stats \
          come from the observation run"
             .to_string(),
-        "  the parallel mode gives every worker its own search state, so the base evaluation and \
-         structural memos warmed by the Progress cohort are rebuilt per worker: the wall clock \
-         drops while the total work grows"
+        "  P2 gives every worker its own search state, so the base evaluation and structural \
+         memos warmed by the Progress cohort are rebuilt per worker: the wall clock drops while \
+         the total work grows"
+            .to_string(),
+        "  P2S splits the same pair but shares the exact base evaluation, structural evaluation \
+         and future-tenpai value entries across the workers, seeded from what the Progress cohort \
+         already evaluated: the same values from fewer evaluations"
+            .to_string(),
+        "  the shared entries are keyed by the position state itself and never evicted, so which \
+         worker fills an entry first changes neither the values nor the selection; only the miss \
+         counters move by a few entries between runs"
             .to_string(),
         format!(
             "  production discard selection runs the P2 mode; this runtime splits the pair: {}",
@@ -202,9 +213,9 @@ const MEMO_COUNTERS: [MemoCounter; 4] = [
 fn format_delta(comparison: &TwoShantenFullParallelComparison) -> Vec<String> {
     let sequential = &comparison.sequential;
     let mut lines = vec![
-        "Selection S -> P2".to_string(),
+        "Selection".to_string(),
         format!(
-            "  P2 is bit-exact with the sequential mode: {}",
+            "  every mode is bit-exact with the sequential mode: {}",
             comparison.parallel_matches_sequential(),
         ),
         format!("  selected discard: {}", format_selected(sequential)),
@@ -217,31 +228,57 @@ fn format_delta(comparison: &TwoShantenFullParallelComparison) -> Vec<String> {
     ];
     for decision in comparison.decisions() {
         lines.push(format!(
-            "  {}: {} ({} workers, {})",
+            "  {}: {} ({} workers)",
             mode_name(decision),
             format_duration(decision.elapsed()),
             decision.full_workers(),
-            format_speedup(comparison.speedup()),
         ));
     }
+    lines.push(format!(
+        "  S -> P2S: {}",
+        format_speedup(comparison.speedup()),
+    ));
+    lines.push(format!(
+        "  P2 -> P2S: {}",
+        format_speedup(comparison.shared_speedup()),
+    ));
 
     lines.push(String::new());
-    lines.push("Total work (observation runs, S -> P2)".to_string());
+    lines.push("Total work (observation runs, S -> P2 -> P2S)".to_string());
     for (label, value) in SEARCH_COUNTERS {
         let base = value(&sequential.observation.search);
-        let mode = value(&comparison.parallel.observation.search);
+        let isolated = value(&comparison.isolated.observation.search);
+        let shared = value(&comparison.shared.observation.search);
         lines.push(format!(
-            "  {label}: {base} -> {mode} ({})",
-            format_ratio(base, mode),
+            "  {label}: {base} -> {isolated} ({}) -> {shared} ({})",
+            format_ratio(base, isolated),
+            format_ratio(base, shared),
         ));
     }
     for (label, value) in MEMO_COUNTERS {
         let base = value(&sequential.observation.memo);
-        let mode = value(&comparison.parallel.observation.memo);
+        let isolated = value(&comparison.isolated.observation.memo);
+        let shared = value(&comparison.shared.observation.memo);
         lines.push(format!(
-            "  {label}: {base} -> {mode} ({})",
-            format_ratio(base, mode),
+            "  {label}: {base} -> {isolated} ({}) -> {shared} ({})",
+            format_ratio(base, isolated),
+            format_ratio(base, shared),
         ));
+    }
+
+    lines.push(String::new());
+    lines.push("Shared cache footprint (P2S observation run)".to_string());
+    let shared = comparison.shared.shared_cache();
+    for (label, entries) in [
+        ("base evaluations", shared.base_evaluations),
+        ("structural evaluations", shared.structural_evaluations),
+        (
+            "future-tenpai selection values",
+            shared.tenpai_selection_values,
+        ),
+        ("future-tenpai tsumo values", shared.tenpai_tsumo_values),
+    ] {
+        lines.push(format!("  {label}: {entries} entries"));
     }
     lines
 }

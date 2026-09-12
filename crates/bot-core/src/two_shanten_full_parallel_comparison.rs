@@ -5,28 +5,37 @@
 //! 上位2候補の選び方も Full gate も comparator も値の意味も一切変えない。
 //!
 //! ```text
-//! S:  Progress cohort → gate → 候補1 → 候補2   (1本の LookaheadInputs で逐次評価)
-//! P2: Progress cohort → gate → 候補1 ─┐
-//!                                候補2 ─┴→ pair index へ書き戻し → 既存 comparator
+//! S:   Progress cohort → gate → 候補1 → 候補2   (1本の LookaheadInputs で逐次評価)
+//! P2:  Progress cohort → gate → 候補1 ─┐        (worker ごとに閉じた探索基盤)
+//!                                 候補2 ─┴→ pair index へ書き戻し → 既存 comparator
+//! P2S: Progress cohort → gate → Progress の base / 構造評価を共有 cache へ移す
+//!                             → 候補1 ─┐        (worker 間で exact cache を共有)
+//!                                 候補2 ─┴→ pair index へ書き戻し → 既存 comparator
 //! ```
 //!
 //! # exact である理由
 //!
 //! 候補1件の Full `ExpectedSelfTsumoValue` は、その候補の打牌評価と探索設定と、Progress 段で
 //! 確定済みの寄与だけで決まる純関数の値で、もう一方の候補の評価を入力にしない。探索基盤
-//! (base 評価 memo・構造評価 memo・thread-local の向聴 / 受け入れ memo) は同じ入力に同じ値を
-//! 返す cache でしかないため、どこまで共有できたかは値を変えない。結果は pair index へ書き戻す
-//! ので、thread の終了順にも worker の数にも依らない。したがって2候補の Full 値・最終 selected
-//! index・selected discard・比較理由は S と P2 で bit-exact に一致する。
+//! (base 評価 memo・構造評価 memo・未来テンパイ値 memo・thread-local の向聴 / 受け入れ memo) は
+//! 同じ入力に同じ値を返す cache でしかないため、どこまで共有できたかは値を変えない。共有 cache
+//! も key に局面 state をそのまま含め、entry を捨てないので、どの worker が先に値を入れても
+//! 同じ値が返る。結果は pair index へ書き戻すので、thread の終了順にも worker の数にも依らない。
+//! したがって2候補の Full 値・最終 selected index・selected discard・比較理由は S / P2 / P2S で
+//! bit-exact に一致する。
 //!
-//! # 増える総仕事量
+//! # 総仕事量
 //!
-//! 逐次評価では Progress 段で暖まった1本の探索基盤を Full の2候補が共有できる。2候補を thread
-//! へ分けると worker ごとに基盤を作り直すため、base / structural evaluation memo の共有を失い、
-//! base evaluation misses や shanten / acceptance rebuilds が増える。一方、増えるのはその
-//! 再構築分だけで、代表 fixture では leaf draw states・same-shanten 列挙・terminal scoring は
-//! 増えていない。速くなったかだけでなく、共有を失って総仕事量がどれだけ増えたかも併せて
-//! 観測する。
+//! 逐次評価では Progress 段で暖まった1本の探索基盤を Full の2候補が共有できるので、S の
+//! misses は「exact shared cache が理想的に効いた場合」の総仕事量そのものになる。2候補を
+//! thread へ分けて基盤を worker ごとに閉じる (P2) と、同じ exact input を両 worker が評価し
+//! 直すため base evaluation misses も shanten / acceptance rebuilds も増える。P2S はその
+//! duplicate を共有 cache で落とすので、misses は S 側へ戻る。増えるのは共有 cache の
+//! lookup / insert と、両 worker が同時に同じ key を外した分の再評価だけで、leaf draw states・
+//! same-shanten 列挙・terminal scoring はどの方式でも変わらない。
+//!
+//! 共有 cache を持つ run の misses は、どちらの worker が先に key を外したかで数件ぶれる。
+//! 値も枝も選択もぶれないが、この counter だけは run ごとに完全一致しない。
 //!
 //! # 計測条件
 //!
@@ -46,8 +55,8 @@ use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::decision_timing::{NormalDiscardPhaseDurations, NormalDiscardPhaseTimer};
 use crate::discard_selection::{
-    IishantenContinuationSelection, IishantenContinuationSettings, available_parallelism,
-    production_iishanten_continuation_settings,
+    IishantenContinuationSelection, IishantenContinuationSettings, SharedSelectionCacheEntries,
+    available_parallelism, production_iishanten_continuation_settings,
     select_discard_action_with_iishanten_continuation_settings,
 };
 use crate::iishanten_selection_depth_comparison::measured_on_a_fresh_thread;
@@ -58,24 +67,36 @@ const FULL_PAIR_LEN: usize = 2;
 /// gate を通った上位2候補の Full 追加評価の分け方。他は production のまま。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TwoShantenFullParallelism {
-    /// S: 2候補を1本の探索基盤で順に評価する baseline。
+    /// S: 2候補を1本の探索基盤で順に評価する baseline。探索基盤は Progress 段から通しで
+    /// 暖まったまま1本で、exact shared cache が理想的に効いた場合の総仕事量そのものになる。
     Sequential,
-    /// P2: 2候補を最大2 thread で並行に評価する。現在の production と同じ方式。
-    Parallel,
+    /// P2: 2候補を最大2 thread で並行に評価し、探索基盤は worker ごとに閉じる。共有 cache を
+    /// 入れる前の production の方式。
+    Isolated,
+    /// P2S: 2候補を最大2 thread で並行に評価し、base 評価・構造評価・未来テンパイ値の exact
+    /// cache だけを worker 間で共有する。現在の production と同じ方式。
+    Shared,
 }
 
 impl TwoShantenFullParallelism {
-    /// 比較する方式。S が baseline、P2 が production の方式。
-    pub const ALL: [Self; 2] = [Self::Sequential, Self::Parallel];
+    /// 比較する方式。S が baseline、P2 が共有前、P2S が production の方式。
+    pub const ALL: [Self; 3] = [Self::Sequential, Self::Isolated, Self::Shared];
 
     pub fn label(self) -> String {
         match self {
             Self::Sequential => {
-                "S sequential (production selection, the gated top-2 evaluated in order)"
+                "S sequential (production selection, the gated top-2 evaluated in order on one \
+                 search state)"
                     .to_string()
             }
-            Self::Parallel => format!(
-                "P2 pair-level parallel (up to min(2, available_parallelism = {}) workers, the \
+            Self::Isolated => format!(
+                "P2 pair-level parallel, isolated per-worker search states (up to min(2, \
+                 available_parallelism = {}) workers)",
+                available_parallelism(),
+            ),
+            Self::Shared => format!(
+                "P2S pair-level parallel, the exact base / structural / future-tenpai entries \
+                 shared across the workers (up to min(2, available_parallelism = {}) workers, the \
                  current production configuration)",
                 available_parallelism(),
             ),
@@ -87,7 +108,7 @@ impl TwoShantenFullParallelism {
     pub fn requested_workers(self) -> usize {
         match self {
             Self::Sequential => 1,
-            Self::Parallel => available_parallelism().min(FULL_PAIR_LEN),
+            Self::Isolated | Self::Shared => available_parallelism().min(FULL_PAIR_LEN),
         }
     }
 
@@ -99,7 +120,11 @@ impl TwoShantenFullParallelism {
                 two_shanten_full_workers: None,
                 ..production
             },
-            Self::Parallel => production,
+            Self::Isolated => IishantenContinuationSettings {
+                two_shanten_full_shared_cache: false,
+                ..production
+            },
+            Self::Shared => production,
         }
     }
 
@@ -150,6 +175,8 @@ pub struct TwoShantenFullParallelRun {
     pub memo: SearchStateMemoStats,
     /// Full 追加評価に実際に使った thread 数。逐次評価と gate 不発では 1。
     pub full_workers: usize,
+    /// worker 間で共有した exact entry 数。共有しない run では 0 のまま。
+    pub shared_cache: SharedSelectionCacheEntries,
 }
 
 impl TwoShantenFullParallelRun {
@@ -219,39 +246,66 @@ impl TwoShantenFullParallelDecision {
     pub fn memo(&self) -> &SearchStateMemoStats {
         &self.observation.memo
     }
+
+    /// worker 間で共有した exact entry 数。
+    pub fn shared_cache(&self) -> &SharedSelectionCacheEntries {
+        &self.observation.shared_cache
+    }
 }
 
-/// 同じ局面を S / P2 で1回ずつ選択した比較結果。
+/// 同じ局面を S / P2 / P2S で1回ずつ選択した比較結果。
 #[derive(Debug, Clone)]
 pub struct TwoShantenFullParallelComparison {
     pub sequential: TwoShantenFullParallelDecision,
-    pub parallel: TwoShantenFullParallelDecision,
+    /// 共有 cache を入れる前の並列評価。
+    pub isolated: TwoShantenFullParallelDecision,
+    /// 共有 cache を入れた現在の production の並列評価。
+    pub shared: TwoShantenFullParallelDecision,
 }
 
 impl TwoShantenFullParallelComparison {
     pub fn decisions(&self) -> impl Iterator<Item = &TwoShantenFullParallelDecision> {
-        [&self.sequential, &self.parallel].into_iter()
+        [&self.sequential, &self.isolated, &self.shared].into_iter()
     }
 
-    /// P2 が S と bit-exact に一致したか。
+    /// どの方式も S と bit-exact に一致したか。
     ///
     /// 比べるのは2候補の Full 値・selected discard・比較理由・全候補の値で、どれも選択が実際に
     /// 使ったもの。
     pub fn parallel_matches_sequential(&self) -> bool {
-        self.parallel.timing.selected == self.sequential.timing.selected
-            && self.parallel.timing.candidates == self.sequential.timing.candidates
-            && self.parallel.observation.selected == self.sequential.observation.selected
-            && self.parallel.observation.candidates == self.sequential.observation.candidates
+        self.decisions()
+            .all(|decision| self.matches_sequential(decision))
     }
 
-    /// S / P2 の比。P2 が S の何倍速いか。
+    /// 1方式が S と bit-exact に一致したか。
+    pub fn matches_sequential(&self, decision: &TwoShantenFullParallelDecision) -> bool {
+        decision.timing.selected == self.sequential.timing.selected
+            && decision.timing.candidates == self.sequential.timing.candidates
+            && decision.observation.selected == self.sequential.observation.selected
+            && decision.observation.candidates == self.sequential.observation.candidates
+    }
+
+    /// S / P2S の比。production の方式が S の何倍速いか。
     pub fn speedup(&self) -> Option<f64> {
-        let elapsed = self.parallel.elapsed().as_secs_f64();
-        (elapsed > 0.0).then(|| self.sequential.elapsed().as_secs_f64() / elapsed)
+        self.speedup_over(&self.sequential, &self.shared)
+    }
+
+    /// P2 / P2S の比。共有 cache で何倍速くなったか。
+    pub fn shared_speedup(&self) -> Option<f64> {
+        self.speedup_over(&self.isolated, &self.shared)
+    }
+
+    fn speedup_over(
+        &self,
+        baseline: &TwoShantenFullParallelDecision,
+        decision: &TwoShantenFullParallelDecision,
+    ) -> Option<f64> {
+        let elapsed = decision.elapsed().as_secs_f64();
+        (elapsed > 0.0).then(|| baseline.elapsed().as_secs_f64() / elapsed)
     }
 }
 
-/// 同じ局面について、production の2向聴 selection を S / P2 で1回ずつ行う。
+/// 同じ局面について、production の2向聴 selection を S / P2 / P2S で1回ずつ行う。
 ///
 /// 評価順は固定だが、どの方式も自分専用の thread で計るため、先に走った方式が後の方式の
 /// thread-local memo を暖めることはない。値も選択も評価順に依らない。
@@ -265,10 +319,15 @@ pub fn compare_two_shanten_full_parallelism(
             legal_actions,
             TwoShantenFullParallelism::Sequential,
         ),
-        parallel: decide_with_two_shanten_full_parallelism(
+        isolated: decide_with_two_shanten_full_parallelism(
             context,
             legal_actions,
-            TwoShantenFullParallelism::Parallel,
+            TwoShantenFullParallelism::Isolated,
+        ),
+        shared: decide_with_two_shanten_full_parallelism(
+            context,
+            legal_actions,
+            TwoShantenFullParallelism::Shared,
         ),
     }
 }
@@ -346,6 +405,7 @@ fn run(
         search: observed.search,
         memo: observed.memo,
         full_workers: observed.two_shanten_full_workers,
+        shared_cache: observed.shared_cache,
     }
 }
 
@@ -395,16 +455,42 @@ mod tests {
                 .two_shanten_full_workers,
             None,
         );
-        assert_eq!(
-            TwoShantenFullParallelism::Parallel
-                .continuation()
-                .two_shanten_full_workers,
-            workers,
-        );
-        assert!(TwoShantenFullParallelism::Parallel.requested_workers() <= FULL_PAIR_LEN);
+        for parallelism in [
+            TwoShantenFullParallelism::Isolated,
+            TwoShantenFullParallelism::Shared,
+        ] {
+            let label = parallelism.label();
+            assert_eq!(
+                parallelism.continuation().two_shanten_full_workers,
+                workers,
+                "{label}",
+            );
+            assert!(parallelism.requested_workers() <= FULL_PAIR_LEN, "{label}");
+        }
         assert_eq!(
             two_shanten_full_parallelism_is_available(),
             workers.is_some(),
+        );
+    }
+
+    // 共有 cache の有無だけが P2 と P2S の違いで、worker の上限も探索設定も production のまま。
+    #[test]
+    fn only_the_shared_cache_separates_the_two_parallel_modes() {
+        let production = production_iishanten_continuation_settings();
+
+        assert!(production.two_shanten_full_shared_cache);
+        assert_eq!(TwoShantenFullParallelism::Shared.continuation(), production);
+        assert_eq!(
+            TwoShantenFullParallelism::Isolated.continuation(),
+            IishantenContinuationSettings {
+                two_shanten_full_shared_cache: false,
+                ..production
+            },
+        );
+        assert!(
+            !TwoShantenFullParallelism::Isolated
+                .continuation()
+                .two_shanten_full_shared_cache,
         );
     }
 }
