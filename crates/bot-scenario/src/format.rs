@@ -4578,7 +4578,7 @@ mod tests {
     }"#;
 
     // 既存2副露 + CC 55p E S W の2向聴。C を Pon した後、最良打牌で1向聴になる。
-    const TWO_SHANTEN_PON_OBSERVATION_SCENARIO: &str = r#"{
+    const TWO_SHANTEN_PON_CALL_SCENARIO: &str = r#"{
         "hand": "55p12377z",
         "round_wind": "E",
         "seat_wind": "E",
@@ -4602,19 +4602,24 @@ mod tests {
     }"#;
 
     #[test]
-    fn two_shanten_call_pass_observation_is_visible_without_changing_the_action() {
-        let (scenario, diagnostic, output) = rendered(TWO_SHANTEN_PON_OBSERVATION_SCENARIO, false);
+    fn a_two_shanten_call_with_a_higher_value_is_selected_and_visible() {
+        let (scenario, diagnostic, output) = rendered(TWO_SHANTEN_PON_CALL_SCENARIO, false);
         let mut agent = ShantenAgent;
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
         let call = diagnostic.call.as_ref().expect("call diagnostic");
         let candidate = &call.candidates[0];
         let comparison = candidate
             .two_shanten_self_tsumo
-            .expect("2向聴 Call / Pass observation");
+            .expect("2向聴 Call / Pass 比較");
 
-        assert_eq!(acted, LegalAction::None);
+        assert_eq!(acted, candidate.action);
         assert_eq!(diagnostic.selected_action, acted);
-        assert_eq!(call.selected, None);
+        assert_eq!(call.selected.as_ref(), Some(&candidate.action));
+        assert!(candidate.eligible);
+        assert_eq!(
+            candidate.reason,
+            bot_core::CallDecisionReason::EligibleTwoShantenSelfTsumo
+        );
         assert_eq!(candidate.kind, bot_core::CallKind::Pon);
         assert!(matches!(
             &candidate.action,

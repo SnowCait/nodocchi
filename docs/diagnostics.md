@@ -54,11 +54,11 @@ Final decision
 より厳密に高い場合だけ鳴き、同値では Pass を維持します。`iishanten acceptance` は引き続き観測用で
 policy には使いません。`Summary` にも同じ値、比較結果、鳴き後の採用打牌を表示します。
 
-現在2向聴から Chi / Pon 後の最良打牌で1向聴になる候補には、observation-only の
+現在2向聴から Chi / Pon 後の最良打牌で1向聴になる候補には、production が比較した
 `two-shanten self-tsumo` を表示します。Call は鳴き後の1向聴 continuation、Pass は次の自摸を待つ
 2向聴 state の Full value です。`two-shanten comparison` は `call higher` / `pass not lower` /
-`unknown` を区別します。この値は production の `eligible` / reason / selected action に接続しません。
-対象候補が無い場合と通常の action selection では、重い Pass Full 探索を実行しません。
+`unknown` を区別し、`call higher` の場合だけ鳴きます。同値・`unknown`・反応元不明は Pass です。
+鳴き後も2向聴のままの候補は対象外で、対象候補が無い局面では重い Pass Full 探索を実行しません。
 
 ```text
 Final decision

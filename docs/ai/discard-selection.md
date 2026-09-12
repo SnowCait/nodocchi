@@ -192,20 +192,21 @@ Call が Pass より厳密に高い場合だけ鳴き、同値・どちらか un
 受け入れ threshold、Chi / Pon 別補正はありません。既存の「Call → 即テンパイ」policy は先に
 評価され、成立した候補を従来どおり優先します。
 
-### 2向聴から1向聴になる Call の観測
+### 2向聴から1向聴になる Call
 
-現在2向聴から Chi / Pon と合法打牌を経て1向聴になる候補は、diagnostics だけで Call / Pass の
-self-tsumo value を観測します。Call 側は上記と同じ鳴き後候補生成・喰い替え制約・forward metric・
-既存 comparator を通り、最良打牌後の1向聴 continuation へ接続します。Pass 側は reaction 元から
+現在2向聴から Chi / Pon と合法打牌を経て1向聴になる候補も、同じ Call / Pass の self-tsumo
+value で比較します。Call 側は上記と同じ鳴き後候補生成・喰い替え制約・forward metric・既存
+comparator を通り、最良打牌後の1向聴 continuation へ接続します。Pass 側は reaction 元から
 求めた同じ流局 horizon で、次の自摸を待つ2向聴 state の既存 Full evaluation を使います。
 
 Progress-only は2向聴を維持する SameShanten 枝を含まず、完全な1向聴 continuation である Call
-側との比較では Call に有利になるため、この観測には使いません。Full は対象候補が存在する場合に
+側との比較では Call に有利になるため、この比較には使いません。Full は対象候補が存在する場合に
 Pass state 1件だけを評価して全候補で共有し、通常打牌候補の Full 全探索は行いません。
 
-この比較は observation-only です。`CallHigher` でも production の `eligible` / reason / action
-selection は変えず、diagnostics を無効にした通常の action では追加探索も行いません。鳴き後の
-最良打牌が2向聴のままの候補、Kan、他家リーチなど既存 policy 境界で評価を打ち切る候補は対象外です。
+判断は1向聴からの鳴きと同じで、Call が Pass より厳密に高い場合だけ鳴きます。同値、どちらかが
+unknown、reaction 元不明はすべて Pass です。成立した候補が複数ある場合は、比較に使った Call 側の
+値が最大の候補を選びます。鳴き後の最良打牌が2向聴のままの候補、Kan、他家リーチなど既存 policy
+境界で評価を打ち切る候補は対象外で、順位条件や守備力による例外もありません。
 
 ## 1向聴: WeightedProspectiveValue
 
