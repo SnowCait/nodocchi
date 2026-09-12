@@ -1075,6 +1075,12 @@ pub enum ForwardMetricsPhase {
 /// 対象候補も枝の探索も集計もその有無で変わらない。
 pub trait ForwardMetricsObserver {
     fn enter_phase(&mut self, phase: ForwardMetricsPhase);
+
+    /// 前方集計値を実際に計算する候補へ入る区切り。絞り込みで対象から外れた候補では通らない。
+    fn enter_candidate(&mut self, _discard: TileType) {}
+
+    /// 対象候補をすべて評価し終えた区切り。最後の候補の区切りはここで閉じる。
+    fn exit_candidates(&mut self) {}
 }
 
 /// 区切りを受け取らない観測器。計測しない経路はこれを通る。
@@ -1113,19 +1119,22 @@ pub fn forward_metrics_instrumented(
 
     let best_shanten = best_shanten(evaluations);
     let targets = forward_target_mask(evaluations);
-    evaluations
+    let metrics = evaluations
         .iter()
         .zip(targets)
         .map(|(evaluation, target)| {
             if !target {
                 return ForwardMetrics::default();
             }
+            observer.enter_candidate(evaluation.discard);
             observer.enter_phase(ForwardMetricsPhase::LookaheadSearch);
             let candidate =
                 search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
             forward_metrics_from_candidate(inputs, evaluation, &candidate, best_shanten, observer)
         })
-        .collect()
+        .collect();
+    observer.exit_candidates();
+    metrics
 }
 
 /// 構築済みの2手先診断から打牌選択用の前方集計値を求める。
@@ -1172,13 +1181,28 @@ pub fn forward_metrics_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> ForwardMetrics {
+    forward_metrics_for_candidate_instrumented(inputs, evaluation, &mut ())
+}
+
+/// [`forward_metrics_for_candidate`] と同じ集計を、内部処理の区切りの通知付きで行う。
+///
+/// 通知するのは通った区切りだけで、枝の探索も集計も [`forward_metrics_for_candidate`] と同じ
+/// ものを1回ずつ通る。`observer` の有無で戻り値は変わらない。候補の区切り
+/// ([`ForwardMetricsObserver::enter_candidate`]) は、候補1件を評価する側が対象を既に選んで
+/// いるため通知しない。
+pub fn forward_metrics_for_candidate_instrumented(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    observer: &mut impl ForwardMetricsObserver,
+) -> ForwardMetrics {
+    observer.enter_phase(ForwardMetricsPhase::LookaheadSearch);
     let candidate = search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
     forward_metrics_from_candidate(
         inputs,
         evaluation,
         &candidate,
         evaluation.min_shanten_after_discard(),
-        &mut (),
+        observer,
     )
 }
 

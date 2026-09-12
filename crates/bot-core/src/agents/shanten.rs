@@ -176,6 +176,7 @@ impl ShantenAgent {
             &mut timing,
         );
         let two_shanten_self_tsumo_candidates = timing.take_two_shanten_self_tsumo_candidates();
+        let iishanten_forward_candidates = timing.take_iishanten_forward_candidates();
         let call_candidates = timing.take_call_candidates();
         let phases = timing.finish();
         log_agent_decision(&decision);
@@ -183,6 +184,7 @@ impl ShantenAgent {
             action: decision.action,
             phases,
             two_shanten_self_tsumo_candidates,
+            iishanten_forward_candidates,
             call_candidates,
         }
     }
@@ -480,9 +482,7 @@ impl ShantenAgent {
                 legal_actions,
                 &mut normal_discard_timing,
             );
-            timing.record_two_shanten_self_tsumo_candidates(
-                normal_discard_timing.take_two_shanten_self_tsumo_candidates(),
-            );
+            timing.record_normal_discard_breakdown(normal_discard_timing.take_breakdown());
             timing.record_normal_discard_phases(normal_discard_timing.finish());
             return selection;
         }

@@ -11,8 +11,8 @@ use crate::current_tenpai_continuation::{
 use crate::damaten_value::tenpai_completed_hands_after_discard;
 use crate::decision_timing::ForwardMetricsPhaseTimer;
 use crate::decision_timing::{
-    NormalDiscardPhase, NormalDiscardPhaseDurations, NormalDiscardPhaseTimer,
-    TwoShantenFullSelfTsumoObserver, TwoShantenSelfTsumoCandidateDuration,
+    IishantenForwardCandidateDuration, NormalDiscardPhase, NormalDiscardPhaseDurations,
+    NormalDiscardPhaseTimer, TwoShantenFullSelfTsumoObserver, TwoShantenSelfTsumoCandidateDuration,
 };
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
@@ -49,8 +49,8 @@ use bot_logic::{
     diagnose_two_shanten_self_tsumo, discard_tenpai_wait_availability,
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
-    forward_metrics, forward_metrics_for_candidate, forward_metrics_from_lookahead,
-    forward_metrics_instrumented, forward_target_mask,
+    forward_metrics, forward_metrics_for_candidate, forward_metrics_for_candidate_instrumented,
+    forward_metrics_from_lookahead, forward_metrics_instrumented, forward_target_mask,
     resolve_two_shanten_expected_self_tsumo_value_axis, split_discarded_tile,
     three_shanten_progress_only_self_tsumo_value_for_candidate,
     three_shanten_progress_self_tsumo_value_for_candidate, tsumo_hit_probability,
@@ -692,6 +692,9 @@ pub(crate) struct IishantenContinuationSelection {
     pub(crate) two_shanten_full_workers: usize,
     /// production comparator が実際に評価した2向聴候補ごとの実測。計測しない run では空。
     pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
+    /// production が深い前方評価を実際に行った1向聴候補ごとの実測。計測しない run と、最善
+    /// 向聴数が1向聴でない局面では空。
+    pub(crate) iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
     /// 診断の構築を含まない、打牌選択1回の実測時間。
     pub(crate) elapsed: Duration,
     pub(crate) phases: NormalDiscardPhaseDurations,
@@ -722,6 +725,7 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
     );
     let elapsed = started.elapsed();
     let two_shanten_self_tsumo_candidates = timing.take_two_shanten_self_tsumo_candidates();
+    let iishanten_forward_candidates = timing.take_iishanten_forward_candidates();
     let phases = timing.finish();
 
     IishantenContinuationSelection {
@@ -740,6 +744,7 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
         forward_workers: run.metrics.forward_workers,
         two_shanten_full_workers: run.metrics.two_shanten_full_workers,
         two_shanten_self_tsumo_candidates,
+        iishanten_forward_candidates,
         elapsed,
         phases,
         selection: run.selection,
@@ -1384,7 +1389,11 @@ fn production_selection_metrics_instrumented(
         evaluations,
         continuation,
     );
-    let mut forward_timing = timing.forward_metrics_timer();
+    // 候補単位の実測を残すのは production が深い1向聴評価を行う局面だけ。判断は既存の1手評価が
+    // 持つ最善向聴数そのままで、候補の絞り込みも評価の分け方もここでは作り直さない。
+    let mut forward_timing = timing
+        .forward_metrics_timer()
+        .measuring_candidates(best_shanten_after_discard(evaluations) == Some(IISHANTEN_SHANTEN));
     let forward = match parallel_forward_workers(evaluations, continuation) {
         None => ParallelForwardMetrics::sequential(forward_metrics_instrumented(
             &inputs,
@@ -1401,6 +1410,7 @@ fn production_selection_metrics_instrumented(
             &mut forward_timing,
         ),
     };
+    timing.record_iishanten_forward_candidates(forward_timing.take_candidates());
     timing.record_forward_metrics_phases(forward_timing.finish());
     let ParallelForwardMetrics {
         metrics: forward,
@@ -1537,6 +1547,8 @@ fn parallel_forward_metrics(
 
     // 空回りする worker を作らないよう、thread 数は深く評価する候補数を超えない。
     let worker_count = workers.get().min(targets.len());
+    // 計測しない run は worker 側でも `Instant` を取らない。
+    let measures = timing.measures_candidates();
     // 候補ごとに評価コストが大きく違うため、静的に分けず、空いた worker が次の候補を取る。
     let next = AtomicUsize::new(0);
     let evaluated: Vec<WorkerForwardMetrics> = std::thread::scope(|scope| {
@@ -1555,14 +1567,44 @@ fn parallel_forward_metrics(
                         continuation,
                     );
                     let mut metrics = Vec::new();
+                    let mut elapsed = Vec::new();
                     while let Some(&index) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        // 計測しない run は production の候補評価をそのまま通す。時計も候補の
+                        // 計測器も観測器も作らないので、通常の打牌選択は計測を入れる前と同じ
+                        // helper を同じだけ通る。
+                        if !measures {
+                            metrics.push((
+                                index,
+                                forward_metrics_for_candidate(&inputs, &evaluations[index]),
+                            ));
+                            continue;
+                        }
+
+                        // 候補1件の実測は、その候補を評価していた worker がその場で計る。
+                        let started = Instant::now();
+                        let mut candidate_timing = ForwardMetricsPhaseTimer::armed();
                         metrics.push((
                             index,
-                            forward_metrics_for_candidate(&inputs, &evaluations[index]),
+                            forward_metrics_for_candidate_instrumented(
+                                &inputs,
+                                &evaluations[index],
+                                &mut candidate_timing,
+                            ),
+                        ));
+                        // 内訳を閉じてから候補全体を閉じる。逆順では内訳が候補の実測を超え得る。
+                        let phases = candidate_timing.finish();
+                        elapsed.push((
+                            index,
+                            IishantenForwardCandidateDuration {
+                                discard: evaluations[index].discard,
+                                elapsed: started.elapsed(),
+                                phases,
+                            },
                         ));
                     }
                     WorkerForwardMetrics {
                         metrics,
+                        elapsed,
                         search: inputs.three_shanten_search_stats(),
                         memo: inputs.search_state_memo_stats(),
                     }
@@ -1581,12 +1623,19 @@ fn parallel_forward_metrics(
         memo: SearchStateMemoStats::default(),
         workers: worker_count,
     };
+    let mut elapsed = Vec::new();
     for worker in evaluated {
         for (index, metrics) in worker.metrics {
             collected.metrics[index] = metrics;
         }
+        elapsed.extend(worker.elapsed);
         collected.search = merged_search_stats(collected.search, worker.search);
         collected.memo = merged_memo_stats(collected.memo, worker.memo);
+    }
+    // 実測は thread の終了順ではなく、逐次評価と同じ候補 index 順で反映する。
+    elapsed.sort_by_key(|&(index, _)| index);
+    for (_, candidate) in elapsed {
+        timing.record_candidate(candidate);
     }
     collected
 }
@@ -1594,6 +1643,8 @@ fn parallel_forward_metrics(
 // worker 1つ分の結果。候補 index を持ったまま返し、書き戻す側が既存の候補順へ戻す。
 struct WorkerForwardMetrics {
     metrics: Vec<(usize, ForwardMetrics)>,
+    /// この worker が評価した候補の実測。計測しない run では空。
+    elapsed: Vec<(usize, IishantenForwardCandidateDuration)>,
     search: ThreeShantenSearchStats,
     memo: SearchStateMemoStats,
 }
@@ -2894,6 +2945,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_uninstrumented_parallel_worker_keeps_the_production_candidate_evaluation() {
+        // 計測しない run の worker は、計測を入れる前と同じ候補評価 helper をそのまま通る。
+        // 時計も候補の計測器も観測器も作らないので、通常の打牌選択に計測のコストが残らない。
+        let worker = include_str!("discard_selection.rs")
+            .split("fn parallel_forward_metrics(")
+            .nth(1)
+            .unwrap()
+            .split("struct WorkerForwardMetrics {")
+            .next()
+            .unwrap();
+        let uninstrumented = worker
+            .split("if !measures {")
+            .nth(1)
+            .expect("計測しない run は候補 loop の先頭で分かれる")
+            .split("continue;")
+            .next()
+            .expect("計測しない run はその候補をそこで終える");
+
+        // 分岐した先は既存の候補評価 helper を1回呼ぶだけ。
+        assert!(
+            uninstrumented.contains("forward_metrics_for_candidate(&inputs, &evaluations[index])"),
+            "{uninstrumented}"
+        );
+        for instrumentation in [
+            "Instant::now()",
+            "ForwardMetricsPhaseTimer::",
+            "forward_metrics_for_candidate_instrumented(",
+            "IishantenForwardCandidateDuration {",
+        ] {
+            assert!(
+                !uninstrumented.contains(instrumentation),
+                "{instrumentation}: {uninstrumented}"
+            );
+            // 計測する run の枝にだけ1回ずつ現れる。
+            assert_eq!(worker.matches(instrumentation).count(), 1, "{worker}");
+        }
+    }
+
+    #[test]
     fn the_forward_metrics_subphase_timing_does_not_change_the_selection() {
         // 前方集計値を実際に通る1向聴局面で、計測の有無が選択を変えないことを固定する。
         let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
@@ -2902,14 +2992,42 @@ pub(crate) mod tests {
         let timed =
             select_discard_action_with_evaluation_instrumented(&context, &actions, &mut timing);
         assert!(timing.take_two_shanten_self_tsumo_candidates().is_empty());
+        let candidates = timing.take_iishanten_forward_candidates();
         let phases = timing.finish();
 
+        // 選択と値は計測の有無で変わらない。
         assert_eq!(
             timed,
             select_discard_action_with_evaluation(&context, &actions)
         );
         assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
-        // 内訳は前方集計値の実測を分けたものなので、その合計は外側の phase を超えない。
+
+        // 深く評価した候補だけが、production の候補順そのままで並ぶ。
+        let legal = legal_discard_evaluations(&context, &actions);
+        let deep: Vec<TileType> = legal
+            .evaluations
+            .iter()
+            .zip(forward_target_mask(&legal.evaluations))
+            .filter_map(|(evaluation, target)| target.then_some(evaluation.discard))
+            .collect();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.discard)
+                .collect::<Vec<_>>(),
+            deep,
+        );
+
+        // 候補の内訳はその候補1件の実測を分けたものなので、その実測を超えない。
+        for candidate in &candidates {
+            assert!(
+                candidate.phases.total() <= candidate.elapsed,
+                "{candidate:?}"
+            );
+        }
+
+        // phase 別の内訳は従来どおり前方集計値の実測を分けたもので、その合計は外側の phase を
+        // 超えない。候補の内訳をここへ足し込んでいない。
         assert!(
             phases.forward_metrics_phases.total() <= phases.forward_metrics,
             "{phases:?}"

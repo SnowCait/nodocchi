@@ -52,7 +52,9 @@ use bot_logic::{DiscardComparisonReason, SearchStateMemoStats, ThreeShantenSearc
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use crate::decision_timing::{NormalDiscardPhaseDurations, NormalDiscardPhaseTimer};
+use crate::decision_timing::{
+    IishantenForwardCandidateDuration, NormalDiscardPhaseDurations, NormalDiscardPhaseTimer,
+};
 use crate::discard_selection::{
     IishantenContinuationSelection, IishantenContinuationSettings,
     select_discard_action_with_iishanten_continuation_settings,
@@ -139,6 +141,10 @@ pub struct IishantenSelectionDepthRun {
     pub elapsed: Duration,
     /// phase 別の内訳。phase timer を持たない計測 run では 0 のまま。
     pub phases: NormalDiscardPhaseDurations,
+    /// 深い前方評価を実際に行った1向聴候補ごとの実測。phase timer を持たない計測 run と、
+    /// 最善向聴数が1向聴でない局面では空。並行に評価した run では、候補の `elapsed` の合計が
+    /// `phases.forward_metrics` の壁時計を超える。
+    pub iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
     /// 探索規模。計上しない計測 run では 0 のまま。
     pub search: ThreeShantenSearchStats,
     /// 探索内の同一 state memo の利用数。memo を持たない方式では 0 のまま。
@@ -310,6 +316,7 @@ pub(crate) fn run_on_the_measuring_thread(
         candidates: candidates_from_observation(&observed),
         elapsed: observed.elapsed,
         phases: observed.phases,
+        iishanten_forward_candidates: observed.iishanten_forward_candidates.clone(),
         search: observed.search,
         memo: observed.memo,
         forward_workers: observed.forward_workers,
