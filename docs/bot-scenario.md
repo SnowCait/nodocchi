@@ -445,9 +445,9 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/history_furiten_same_
 
 `remaining_tiles` は `Call -> 打牌 -> 1向聴` における Pass / Call の
 `ExpectedSelfTsumoValue` 比較で、流局までの残り自摸回数を求めるためにも使用します。現在1向聴の
-production 比較に加え、現在2向聴から鳴いて1向聴になる候補の observation-only 比較にも使います。
-後者は Pass の2向聴 Full value と、Call 後の1向聴 value・比較結果・最良打牌を `Call` section と
-`Summary` に表示しますが、selected action は変更しません。各値は `Table state` diagnostics でも
+比較に加え、現在2向聴から鳴いて1向聴になる候補の比較にも使います。後者は Pass の2向聴 Full
+value と、Call 後の1向聴 value・比較結果・最良打牌を `Call` section と `Summary` に表示し、
+`call higher` の場合は selected action も Call になります。各値は `Table state` diagnostics でも
 確認できます。
 
 ## RiichiLab capture の再生

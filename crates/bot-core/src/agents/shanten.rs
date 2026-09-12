@@ -714,7 +714,7 @@ mod tests {
 
     use crate::call_decision::{
         CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN, CallCandidateDiagnostic,
-        CallDecisionReason, CallKind, CallWaitYaku,
+        CallDecisionReason, CallIishantenComparison, CallKind, CallWaitYaku,
     };
     use crate::combined_defense::{
         ThreatDefenseTarget, combined_threat_defense_targets_from_context,
@@ -2466,7 +2466,9 @@ mod tests {
             candidate.eligible,
             matches!(
                 expected_reason,
-                CallDecisionReason::EligibleTenpai | CallDecisionReason::EligibleIishantenSelfTsumo
+                CallDecisionReason::EligibleTenpai
+                    | CallDecisionReason::EligibleIishantenSelfTsumo
+                    | CallDecisionReason::EligibleTwoShantenSelfTsumo
             )
         );
         assert_eq!(candidate.selected, candidate.eligible);
@@ -3034,8 +3036,9 @@ mod tests {
     }
 
     #[test]
-    fn does_not_call_from_two_shanten() {
-        // 123456m 55p 1s 9s N PP。役牌の対子でも2向聴からは鳴かない。
+    fn does_not_call_from_two_shanten_without_a_known_reaction_source() {
+        // 123456m 55p 1s 9s N PP。2向聴から鳴き後1向聴になる候補でも、Pass の horizon を
+        // 確定できない局面では比較そのものが成立しないので鳴かない。
         let reaction = CallReaction::pon(
             &[0, 4, 8, 12, 17, 20, 53, 54, 72, 104, 120, 124, 125],
             PON_TARGET,
@@ -3045,12 +3048,15 @@ mod tests {
         let candidate = assert_single_call_candidate(
             &reaction,
             &LegalAction::None,
-            CallDecisionReason::CurrentShantenNotOne,
+            CallDecisionReason::ReactionSourceUnknown,
         );
         assert_eq!(candidate.current_shanten, Some(2));
-        // production では鳴かないが、diagnostics では鳴き後1向聴を観測する。
         assert_eq!(candidate.post_call_shanten(), Some(1));
-        assert!(candidate.two_shanten_self_tsumo.is_some());
+        let comparison = candidate
+            .two_shanten_self_tsumo
+            .expect("2向聴 → 鳴き後1向聴 の比較対象");
+        assert_eq!(comparison.comparison, CallIishantenComparison::Unknown);
+        assert_eq!(comparison.pass_expected_self_tsumo_value, None);
     }
 
     #[test]
@@ -3065,7 +3071,7 @@ mod tests {
         let candidate = assert_single_call_candidate(
             &reaction,
             &LegalAction::None,
-            CallDecisionReason::CurrentShantenNotOne,
+            CallDecisionReason::CurrentShantenNotCallable,
         );
         assert_eq!(candidate.current_shanten, Some(0));
     }

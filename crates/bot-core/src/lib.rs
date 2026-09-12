@@ -43,7 +43,7 @@ pub use agents::{
 };
 pub use call_decision::{
     CALL_CURRENT_SHANTEN, CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN,
-    CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason,
+    CALL_TWO_SHANTEN_SHANTEN, CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
     CallKind, CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallWaitYaku,
     CallWaitYakuDiagnostic,
