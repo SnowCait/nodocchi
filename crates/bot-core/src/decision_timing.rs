@@ -38,20 +38,27 @@ impl DecisionPhaseDurations {
 ///
 /// 合計は `DecisionPhaseDurations::early` を超えない。合法な Chi / Pon が1件も無く候補評価を
 /// 通らなかった局面では、すべて `Duration::ZERO` のままになる。
+///
+/// `total` は壁時計で、内訳はそれぞれの処理が実際に走っていた時間。Call 側の候補評価と Pass
+/// 側の継続評価を別 thread で重ねた局面では、内訳の合計が `total` を超える。これは既存の
+/// 候補単位の並列評価と同じ semantics で、重ねた分だけ壁時計が内訳より短くなる。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CallDecisionDurations {
-    /// 鳴き判断全体。最初の候補評価から最終候補の選択まで。
+    /// 鳴き判断全体の壁時計。最初の候補評価から最終候補の選択まで。
     pub total: Duration,
     /// 実際に評価した鳴き候補の合計。semantic に同一で結果を再利用した候補は評価を行わない
     /// ので含まない。
     pub candidates: Duration,
     /// 1向聴 Call / Pass 比較のために1回だけ評価する Pass 側の ExpectedSelfTsumoValue。
-    /// 比較が発火しなかった局面では `Duration::ZERO` のままになる。
+    /// 比較が発火しなかった局面では `Duration::ZERO` のままになる。Call 側と重ねて評価した
+    /// 局面でも、この値は Pass 側の評価そのものにかかった時間で、待ち時間を含まない。
     pub pass_iishanten_self_tsumo: Duration,
 }
 
 impl CallDecisionDurations {
     /// 候補評価と Pass 評価を除いた残りの鳴き policy 処理。
+    ///
+    /// Call / Pass を重ねた局面では内訳の合計が壁時計を超えるため、`Duration::ZERO` になる。
     pub fn remaining(&self) -> Duration {
         self.total
             .saturating_sub(self.candidates + self.pass_iishanten_self_tsumo)
@@ -478,6 +485,32 @@ impl CallDecisionTimer {
         }
     }
 
+    /// 計測が有効か。別 thread で行う評価の実測を取るかどうかの判断に使う。
+    ///
+    /// 無効な run では実測を取らないので、そちらの `Instant` も取得しない。
+    pub(crate) fn is_armed(&self) -> bool {
+        self.state.is_some()
+    }
+
+    /// 鳴き判断全体の計測を始める。既に始まっている場合は何もしない。
+    ///
+    /// 候補評価の手前に安価な事前判定を置く経路が、その分を全体の壁時計へ含めるための入口。
+    pub(crate) fn start(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// 別 thread で評価した Pass 側の実測を計上する。
+    ///
+    /// Call 側と重ねて評価した場合に使う。計上するのは Pass の評価そのものにかかった時間で、
+    /// join を待った時間は含まない。
+    pub(crate) fn record_pass_iishanten_self_tsumo(&mut self, elapsed: Duration) {
+        if let Some(state) = self.state.as_mut() {
+            state.durations.pass_iishanten_self_tsumo += elapsed;
+        }
+    }
+
     /// Pass 側の1向聴 ExpectedSelfTsumoValue の評価を計る。無効時は `Instant` を取得しない。
     pub(crate) fn measure_pass_iishanten_self_tsumo<T>(
         &mut self,
@@ -510,6 +543,21 @@ impl CallDecisionTimer {
 pub(crate) struct CallCandidateElapsed {
     total: Duration,
     post_call_discard_selection: Duration,
+}
+
+impl CallCandidateElapsed {
+    /// 同じ候補を複数回に分けて計った実測を足し合わせる。
+    ///
+    /// 候補1件の評価を安価な事前判定と高コストな鳴き後打牌選択に分けて行う経路が、その候補が
+    /// 実際に払った時間を1件分としてまとめるための入口。間に挟まる他候補の評価や待ち時間は
+    /// どちらの区間にも入らない。
+    pub(crate) fn merged(self, other: Self) -> Self {
+        Self {
+            total: self.total + other.total,
+            post_call_discard_selection: self.post_call_discard_selection
+                + other.post_call_discard_selection,
+        }
+    }
 }
 
 /// 鳴き候補1件へ差し込む optional な計測器。

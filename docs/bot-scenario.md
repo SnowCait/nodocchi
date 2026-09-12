@@ -554,12 +554,12 @@ Hora などで早期 return した request は、到達しなかった phase が
 
 | subphase | 内容 |
 | --- | --- |
-| `call` | 鳴き判断全体。最初の候補評価から最終候補の選択まで |
+| `call` | 鳴き判断全体の壁時計。最初の候補評価から最終候補の選択まで |
 | `call_candidates` | 鳴き候補ごとの評価の合計。候補別に kind / 鳴いた牌 / consumed / elapsed と、そのうちの鳴き後の打牌選択 (`post_call_discard`) を表示する |
 | `call_pass` | 1向聴 Call / Pass 比較のために1回だけ評価する Pass 側 ExpectedSelfTsumoValue |
 | `call_remaining` | 候補評価と Pass 評価を除いた残りの鳴き policy 処理 (比較・採用候補の選択など) |
 
-`call_candidates` / `call_pass` / `call_remaining` の合計は `call` に一致し、`call` は同じ request の `early` を超えません。合法な Chi / Pon が無い request では全て 0、候補 timing は空のままです。1向聴 Call / Pass 比較が発火しない request では `call_pass` は 0 のままです。同じ `tile` / `consumed` の重複候補も除かず、合法 action の順にそれぞれ1件ずつ並びます。`early` の残りと `post_discard` の内部は細分化していません。
+1向聴 Call / Pass 比較が発火する request では、Call 側の候補評価 group と Pass 側の継続評価を別 thread で重ねます。どちらの elapsed もその評価が実際に走っていた時間なので、`call_candidates` / `call_pass` / `call_remaining` の合計は壁時計である `call` を超え得ます (その場合 `call_remaining` は 0 になります)。重ねなかった request では従来どおり合計が `call` に一致します。`call` は同じ request の `early` を超えません。合法な Chi / Pon が無い request では全て 0、候補 timing は空のままです。1向聴 Call / Pass 比較が発火しない request では `call_pass` は 0 のままです。同じ `tile` / `consumed` の重複候補も除かず、合法 action の順にそれぞれ1件ずつ並びます。`early` の残りと `post_discard` の内部は細分化していません。
 
 `DecisionPhaseDurations` / `NormalDiscardPhaseDurations` は scalar のみの `Copy` な DTO です。可変長の評価区切り別 timing は別に保持し、`act_with_phase_timing()` の結果から `two_shanten_self_tsumo_candidates()` で `(TileType, Duration)` の iterator として、鳴き候補別 timing は `call_candidates()` で `CallCandidateDuration` の slice として読み取れます。ドラ差 gate を通った上位2候補は Progress と Full 追加評価の区切りが別々記録されるため、同じ牌種が2回現れます。Full 追加評価の2件は並列に走るため、それぞれの elapsed は worker が独立に計った実測で、候補 timing の合計は `two_shanten_self_tsumo` phase を超え得ます。候補の内部型は bot-core の public API へ公開しません。
 
@@ -664,7 +664,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の内訳で、合計は `normal_discard_forward_ns` を超えません。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳で、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_remaining_ns` の合計は `call_ns` に一致します。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の内訳で、合計は `normal_discard_forward_ns` を超えません。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

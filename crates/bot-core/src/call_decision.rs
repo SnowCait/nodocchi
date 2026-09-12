@@ -101,6 +101,39 @@
 //!
 //! この比較は observation-only で、candidate の `eligible` / `reason` と production の action
 //! selection には接続しない。diagnostics を無効にした通常の `act()` では追加探索もしない。
+//!
+//! # Call と Pass の重ね合わせ
+//!
+//! Call 側の鳴き後打牌選択と Pass 側の継続評価は、入力も探索基盤も共有しない。Call 側は
+//! `FixedMeldCount` が1つ増えた鳴き後の手牌 state を評価し、Pass 側は現在の13枚 state を
+//! 評価するので、base 評価 memo も探索内 state memo も terminal tenpai memo も key が重ならない。
+//! したがって両者はどちらが先でも値が変わらず、別 thread で重ねても結果は bit-exact に
+//! 一致する。
+//!
+//! ```text
+//! 安価な事前判定 (向聴・喰い替え・鳴き後の最小向聴数)
+//! ↓
+//! 鳴いた後も1向聴の候補があり、反応元の席も分かる
+//! ↓
+//! Call 候補の deep 評価 group ─┐
+//!                             ├─ 別 thread
+//! Pass の継続評価            ─┘
+//! ↓
+//! join → 既存の Call > Pass 比較
+//! ```
+//!
+//! 重ねるのは「Pass を1回評価する」という既存条件が安価な事前判定だけで確定する局面に限る。
+//! 即テンパイだけの局面や Call policy の前段で落ちる局面や鳴き後1向聴の候補が無い局面へ、
+//! 高コストな Pass 継続評価を足すことはない。判定材料は既存の1手評価
+//! ([`post_call_discard_evaluations`]) が持つ鳴き後の最小向聴数で、比較順の先頭が向聴数
+//! なので本番の鳴き後打牌選択が選ぶ候補の向聴数もこの値になる。
+//!
+//! 並列度の解決は既存の [`available_parallelism`] をそのまま使い、この層で新しい parallelism
+//! policy を持たない。並列度 1 の runtime では必ず従来の逐次経路へ落ちる。Call 側の候補単位
+//! 並列評価 ([`crate::discard_selection`]) はそのままで、その外側に足すのは Pass の1 thread
+//! だけになる。
+
+use std::time::{Duration, Instant};
 
 use bot_logic::{
     DiscardEvaluation, FixedMeldCount, HandValueError, HandValueOutcome, Meld, MeldKind,
@@ -115,11 +148,12 @@ use bot_logic::{
 use crate::action::LegalAction;
 use crate::context::GameContext;
 use crate::damaten_value::damaten_baseline_context;
-use crate::decision_timing::{CallCandidateTimer, CallDecisionTimer};
+use crate::decision_timing::{CallCandidateElapsed, CallCandidateTimer, CallDecisionTimer};
 use crate::discard_selection::{
-    DiscardActionSelection, LookaheadDiagnosticScope, lookahead_inputs_with_own_future_draws,
-    post_call_discard_evaluations, select_best_iishanten_post_call_discard,
-    select_discard_action_with_evaluation, with_production_iishanten_continuation,
+    DiscardActionSelection, LookaheadDiagnosticScope, available_parallelism,
+    lookahead_inputs_with_own_future_draws, post_call_discard_evaluations,
+    select_best_iishanten_post_call_discard, select_discard_action_with_evaluation,
+    with_production_iishanten_continuation,
 };
 use crate::kuikae::forbidden_discards_after_call;
 use crate::prospective_value::ProductionProspectiveValuator;
@@ -429,51 +463,66 @@ pub(crate) fn evaluate_call_decision(
     collect_observations: bool,
     timing: &mut CallDecisionTimer,
 ) -> Option<CallDecisionDiagnostic> {
-    let mut candidates: Vec<CallCandidateDiagnostic> = Vec::new();
-    // 既に評価した semantic key と、その結果を持つ candidate の index。合法な Chi / Pon は
-    // 1局面あたり数件なので線形探索で足りる。
-    let mut evaluated: Vec<(CallEvaluationKey, usize)> = Vec::new();
-    for action in legal_actions {
-        let Some((kind, tile, consumed)) = normalize_call(action) else {
-            continue;
-        };
+    evaluate_call_decision_with_order(
+        ctx,
+        legal_actions,
+        collect_observations,
+        CallPassEvaluationOrder::PRODUCTION,
+        timing,
+    )
+}
 
-        let key = call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, tile, consumed)
-            .map(|(meld, post_call_tiles)| CallEvaluationKey::new(&meld, &post_call_tiles));
-        if let Some(key) = key.as_ref()
-            && let Some(&(_, source)) = evaluated.iter().find(|(known, _)| known == key)
-        {
-            // 同じ post-call state を作る候補なので、評価結果をそのまま複製して action だけ
-            // 元の合法 action に戻す。高コスト評価は行わない。
-            let mut candidate = candidates[source].clone();
-            candidate.action = action.clone();
-            candidates.push(candidate);
-            timing.record_reused_candidate(kind, tile, consumed);
-            continue;
-        }
+/// Call 側の候補評価と Pass 側の継続評価を並べる順。
+///
+/// 変わるのは2つの独立した評価を重ねるかどうかだけで、探索の深度も探索内 memo も comparator も
+/// 候補の順も tie-break も変わらない。`Sequential` は重ねる前の production そのもので、比較の
+/// baseline として残す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallPassEvaluationOrder {
+    /// Call 側の候補評価をすべて終えてから Pass 側を評価する。
+    Sequential,
+    /// Pass 側が必要なことが安価な事前判定で分かる局面では、Call 側と別 thread で重ねる。
+    Overlapped,
+}
 
-        let mut candidate_timing = timing.candidate_timer();
-        let candidate = evaluate_call_candidate(
-            ctx,
-            action,
-            kind,
-            tile,
-            consumed,
-            collect_observations,
-            &mut candidate_timing,
-        );
-        timing.record_candidate(kind, tile, consumed, candidate_timing.finish());
-        if let Some(key) = key {
-            evaluated.push((key, candidates.len()));
-        }
-        candidates.push(candidate);
-    }
+impl CallPassEvaluationOrder {
+    /// production の順。
+    pub(crate) const PRODUCTION: Self = Self::Overlapped;
+}
 
-    if candidates.is_empty() {
+// 評価順を指定した鳴き判断。production は必ず [`CallPassEvaluationOrder::PRODUCTION`] を通る。
+fn evaluate_call_decision_with_order(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+    collect_observations: bool,
+    order: CallPassEvaluationOrder,
+    timing: &mut CallDecisionTimer,
+) -> Option<CallDecisionDiagnostic> {
+    let mut slots = prepare_call_candidates(ctx, legal_actions, collect_observations, timing);
+    if slots.is_empty() {
         return None;
     }
 
-    apply_iishanten_self_tsumo_policy(ctx, &mut candidates, timing);
+    let pass =
+        evaluate_prepared_call_candidates(ctx, &mut slots, collect_observations, order, timing);
+
+    record_call_candidate_timings(&slots, timing);
+    let mut candidates: Vec<CallCandidateDiagnostic> = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let candidate = match slot.preparation {
+            // 同じ post-call state を作る候補なので、評価結果をそのまま複製して action だけ
+            // 元の合法 action に戻す。高コスト評価は行わない。
+            CallCandidatePreparation::Reused(source) => {
+                let mut candidate = candidates[source].clone();
+                candidate.action = slot.candidate.action;
+                candidate
+            }
+            _ => slot.candidate,
+        };
+        candidates.push(candidate);
+    }
+
+    apply_iishanten_self_tsumo_policy(ctx, &mut candidates, pass, timing);
     apply_two_shanten_self_tsumo_observation(ctx, &mut candidates);
 
     let selected_index = select_eligible_candidate(&candidates);
@@ -489,6 +538,225 @@ pub(crate) fn evaluate_call_decision(
         reason,
         candidates,
     })
+}
+
+/// 鳴き候補1件の評価を、安価な事前判定と高コストな評価に分けて持つ作業単位。
+///
+/// 高コストな評価へ進む候補が分かってから deep 評価を始めるため、Call 側の deep 評価 group と
+/// Pass 側の継続評価を重ねられる。候補の並びも `action` も合法 action の列挙順のままで、
+/// 分け方は候補の semantics も選択も変えない。
+struct CallCandidateSlot {
+    candidate: CallCandidateDiagnostic,
+    preparation: CallCandidatePreparation,
+    /// この候補が実際に払った実測。事前判定と deep 評価を足し合わせたもので、間に挟まる他候補
+    /// の評価も Pass の join 待ちも含まない。
+    elapsed: CallCandidateElapsed,
+}
+
+/// 安価な事前判定が確定させた、候補1件の次の一手。
+enum CallCandidatePreparation {
+    /// 高コストな鳴き後打牌選択へ進む候補。
+    PostCall(Box<PostCallInputs>),
+    /// 現在2向聴から1向聴になる鳴きの観測だけを行う候補。diagnostics 有効時だけ現れる。
+    TwoShantenObservation(Box<TwoShantenObservationInputs>),
+    /// 安価な条件だけで理由が確定した候補。高コストな評価は行わない。
+    Settled,
+    /// semantic に同一な先行候補 (index) の結果をそのまま複製する候補。
+    Reused(usize),
+}
+
+impl CallCandidatePreparation {
+    /// 鳴いた後の最良打牌でも1向聴のままになる候補か。
+    ///
+    /// 判断材料は既存の1手評価が持つ鳴き後の最小向聴数だけで、深い前方評価は通らない。
+    fn stays_iishanten_after_call(&self) -> bool {
+        match self {
+            Self::PostCall(inputs) => inputs.post_call_min_shanten == Some(CALL_CURRENT_SHANTEN),
+            _ => false,
+        }
+    }
+}
+
+/// 別 thread で評価した Pass 側の継続評価。
+struct PassSelfTsumoContinuation {
+    value: Option<u64>,
+    /// 評価そのものの実測。計測しない run では `Duration::ZERO`。
+    elapsed: Duration,
+}
+
+// 合法 action を候補の作業単位へ落とし、高コストな評価の手前まで進める。
+//
+// semantic に同一な候補の判定も合法 action の列挙順もここで確定し、deep 評価はまだ行わない。
+fn prepare_call_candidates(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+    collect_observations: bool,
+    timing: &mut CallDecisionTimer,
+) -> Vec<CallCandidateSlot> {
+    let mut slots: Vec<CallCandidateSlot> = Vec::new();
+    // 既に評価した semantic key と、その結果を持つ candidate の index。合法な Chi / Pon は
+    // 1局面あたり数件なので線形探索で足りる。
+    let mut evaluated: Vec<(CallEvaluationKey, usize)> = Vec::new();
+    for action in legal_actions {
+        let Some((kind, tile, consumed)) = normalize_call(action) else {
+            continue;
+        };
+        timing.start();
+
+        let key = call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, tile, consumed)
+            .map(|(meld, post_call_tiles)| CallEvaluationKey::new(&meld, &post_call_tiles));
+        if let Some(key) = key.as_ref()
+            && let Some(&(_, source)) = evaluated.iter().find(|(known, _)| known == key)
+        {
+            slots.push(CallCandidateSlot {
+                candidate: new_call_candidate(action, kind),
+                preparation: CallCandidatePreparation::Reused(source),
+                elapsed: CallCandidateElapsed::default(),
+            });
+            continue;
+        }
+
+        let mut candidate = new_call_candidate(action, kind);
+        let candidate_timing = timing.candidate_timer();
+        let preparation = prepare_call_candidate(
+            ctx,
+            kind,
+            tile,
+            consumed,
+            collect_observations,
+            &mut candidate,
+        );
+        if let Some(key) = key {
+            evaluated.push((key, slots.len()));
+        }
+        slots.push(CallCandidateSlot {
+            candidate,
+            preparation,
+            elapsed: candidate_timing.finish(),
+        });
+    }
+    slots
+}
+
+// 準備できた候補の高コストな評価をまとめて行い、必要なら Pass 側の継続評価を重ねる。
+//
+// Pass 側を評価するのは、鳴いた後の最良打牌でも1向聴のままの候補が1件以上あり、かつ反応元の
+// 席が分かっている局面だけ。どちらも安価な事前判定だけで確定するので、即テンパイ Call だけの
+// 局面や Call policy の前段で落ちる局面へ Pass の継続評価を足すことはない。
+//
+// 重ねられない runtime (並列度 1) では従来どおり Call → Pass の逐次経路へ落とす。
+fn evaluate_prepared_call_candidates(
+    ctx: &GameContext,
+    slots: &mut [CallCandidateSlot],
+    collect_observations: bool,
+    order: CallPassEvaluationOrder,
+    timing: &mut CallDecisionTimer,
+) -> Option<PassSelfTsumoContinuation> {
+    if order == CallPassEvaluationOrder::Sequential
+        || !pass_continuation_is_required(ctx, slots)
+        || !call_pass_overlap_is_available()
+    {
+        evaluate_call_candidate_group(ctx, slots, collect_observations, timing);
+        return None;
+    }
+
+    let measured = timing.is_armed();
+    let pass = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            let since = measured.then(Instant::now);
+            let value = pass_iishanten_expected_self_tsumo_value(ctx);
+            PassSelfTsumoContinuation {
+                value,
+                elapsed: since.map(|since| since.elapsed()).unwrap_or_default(),
+            }
+        });
+        evaluate_call_candidate_group(ctx, slots, collect_observations, timing);
+        worker
+            .join()
+            .expect("Pass の継続評価 thread は panic しない")
+    });
+    timing.record_pass_iishanten_self_tsumo(pass.elapsed);
+    Some(pass)
+}
+
+// Call 側の deep 評価 group。候補は合法 action の列挙順で順に評価する。
+fn evaluate_call_candidate_group(
+    ctx: &GameContext,
+    slots: &mut [CallCandidateSlot],
+    collect_observations: bool,
+    timing: &mut CallDecisionTimer,
+) {
+    for slot in slots {
+        let mut candidate_timing = timing.candidate_timer();
+        let reason = evaluate_prepared_call_candidate(
+            ctx,
+            &slot.preparation,
+            collect_observations,
+            &mut slot.candidate,
+            &mut candidate_timing,
+        );
+        let Some(reason) = reason else {
+            continue;
+        };
+        slot.elapsed = slot.elapsed.merged(candidate_timing.finish());
+        slot.candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
+        slot.candidate.reason = reason;
+    }
+}
+
+// 候補1件ずつの実測を、合法 action の列挙順で計上する。
+fn record_call_candidate_timings(slots: &[CallCandidateSlot], timing: &mut CallDecisionTimer) {
+    for slot in slots {
+        let Some((kind, tile, consumed)) = normalize_call(&slot.candidate.action) else {
+            continue;
+        };
+        if matches!(slot.preparation, CallCandidatePreparation::Reused(_)) {
+            timing.record_reused_candidate(kind, tile, consumed);
+        } else {
+            timing.record_candidate(kind, tile, consumed, slot.elapsed);
+        }
+    }
+}
+
+/// Pass 側の継続評価がこの局面で必要か。
+///
+/// 判断材料は反応元の席が分かるかどうかと、鳴き後の最良打牌でも1向聴のままの候補があるか
+/// どうかだけで、どちらも [`apply_iishanten_self_tsumo_policy`] が Pass を評価する条件そのもの。
+/// 前者は既存の [`reaction_draw_distance`]、後者は既存の1手評価が持つ鳴き後の最小向聴数を読む。
+fn pass_continuation_is_required(ctx: &GameContext, slots: &[CallCandidateSlot]) -> bool {
+    reaction_draw_distance(ctx).is_some()
+        && slots
+            .iter()
+            .any(|slot| slot.preparation.stays_iishanten_after_call())
+}
+
+/// Call 側の deep 評価と Pass 側の継続評価を別 thread へ重ねられる runtime か。
+///
+/// 並列度の判断は既存の [`available_parallelism`] をそのまま使い、鳴き判断側で新しい
+/// parallelism policy を持たない。分ける相手がいない並列度 1 の環境では従来の逐次経路へ落ちる。
+fn call_pass_overlap_is_available() -> bool {
+    available_parallelism() > 1
+}
+
+fn new_call_candidate(action: &LegalAction, kind: CallKind) -> CallCandidateDiagnostic {
+    CallCandidateDiagnostic {
+        action: action.clone(),
+        kind,
+        current_fixed_meld_count: None,
+        current_shanten: None,
+        post_call_fixed_meld_count: None,
+        post_call_forbidden_discards: None,
+        post_call_discard: None,
+        post_call_wait: None,
+        post_call_wait_yaku: None,
+        post_call_push_pull: None,
+        iishanten_acceptance: None,
+        iishanten_self_tsumo: None,
+        two_shanten_self_tsumo: None,
+        eligible: false,
+        selected: false,
+        reason: CallDecisionReason::EligibleTenpai,
+    }
 }
 
 // 評価に効く物理牌の属性だけを取り出した表現。
@@ -606,88 +874,80 @@ fn select_eligible_candidate(candidates: &[CallCandidateDiagnostic]) -> Option<u
     best.map(|(index, _)| index)
 }
 
-fn evaluate_call_candidate(
-    ctx: &GameContext,
-    action: &LegalAction,
-    kind: CallKind,
-    tile: TileId,
-    consumed: &[TileId],
-    collect_observations: bool,
-    timing: &mut CallCandidateTimer,
-) -> CallCandidateDiagnostic {
-    let mut candidate = CallCandidateDiagnostic {
-        action: action.clone(),
-        kind,
-        current_fixed_meld_count: None,
-        current_shanten: None,
-        post_call_fixed_meld_count: None,
-        post_call_forbidden_discards: None,
-        post_call_discard: None,
-        post_call_wait: None,
-        post_call_wait_yaku: None,
-        post_call_push_pull: None,
-        iishanten_acceptance: None,
-        iishanten_self_tsumo: None,
-        two_shanten_self_tsumo: None,
-        eligible: false,
-        selected: false,
-        reason: CallDecisionReason::EligibleTenpai,
-    };
-
-    let reason = evaluate_call_conditions(
-        ctx,
-        kind,
-        tile,
-        consumed,
-        collect_observations,
-        &mut candidate,
-        timing,
-    );
-    candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
-    candidate.reason = reason;
-    candidate
+/// 安価な事前判定が組み立てた、鳴き後打牌選択の入力。
+///
+/// `evaluate_call_conditions()` の後半 ([`evaluate_post_call_discard`]) はこの struct と
+/// `GameContext` しか読まない。鳴いた牌と consumed もここを組み立てるためだけに使う。
+struct PostCallInputs {
+    meld: Meld,
+    post_call_tiles: Vec<TileId>,
+    counts: TileCounts,
+    current_fixed_meld_count: FixedMeldCount,
+    post_call_fixed_meld_count: FixedMeldCount,
+    legal_actions: Vec<LegalAction>,
+    post_call_context: GameContext,
+    /// 鳴き後の合法打牌候補の最小向聴数。既存の1手評価
+    /// ([`post_call_discard_evaluations`]) が持つ値の最小値そのままで、ここで数え直さない。
+    ///
+    /// 比較順の先頭が向聴数なので、本番の鳴き後打牌選択が選ぶ候補の向聴数もこの値になる。
+    /// 高コストな前方評価の前に「鳴いても1向聴のまま」を判定できるのはそのため。
+    post_call_min_shanten: Option<i8>,
 }
 
-// 鳴き成立条件を順に評価し、最初に落ちた条件を理由として返す。評価が進んだ範囲の値だけを
-// candidate へ書き込み、評価しなかった項目は None のままにする。
+/// 現在2向聴から1向聴になる鳴きの観測だけを行う候補の入力。
+struct TwoShantenObservationInputs {
+    meld: Meld,
+    post_call_tiles: Vec<TileId>,
+    post_call_fixed_meld_count: FixedMeldCount,
+}
+
+// 鳴き成立条件のうち、高コストな鳴き後打牌選択より手前を評価する。
+//
+// 最初に落ちた条件を理由として candidate へ書き込み、`Settled` を返す。残りの条件を評価できる
+// 候補は、鳴き後打牌選択の入力を組み立てて返す。
 //
 // 判断に使う fact は `collect_observations` にかかわらず常に同じ順序で評価する。この flag が
 // 切り替えるのは、判断に使わない観測値を足すかどうかだけ。
-fn evaluate_call_conditions(
+fn prepare_call_candidate(
     ctx: &GameContext,
     kind: CallKind,
     tile: TileId,
     consumed: &[TileId],
     collect_observations: bool,
     candidate: &mut CallCandidateDiagnostic,
-    timing: &mut CallCandidateTimer,
-) -> CallDecisionReason {
+) -> CallCandidatePreparation {
+    let settled = |candidate: &mut CallCandidateDiagnostic, reason| {
+        candidate.eligible = reason == CallDecisionReason::EligibleTenpai;
+        candidate.reason = reason;
+        CallCandidatePreparation::Settled
+    };
+
     if ctx.any_opponent_reached() {
-        return CallDecisionReason::OpponentReached;
+        return settled(candidate, CallDecisionReason::OpponentReached);
     }
 
     // Chi / Pon は他家捨て牌への reaction なので、既存 client の reaction context に drawn_tile は
     // 無い。drawn_tile がある不整合な context では、それを混ぜても無視しても正しい局面を復元
     // できないため鳴きを検討しない。
     if ctx.drawn_tile().is_some() {
-        return CallDecisionReason::UnexpectedDrawnTile;
+        return settled(candidate, CallDecisionReason::UnexpectedDrawnTile);
     }
 
     let hand_tiles = ctx.hand_tiles();
     let Some((meld, post_call_tiles)) =
         call_meld_and_concealed_tiles(hand_tiles, kind, tile, consumed)
     else {
-        return CallDecisionReason::InvalidConsumed;
+        return settled(candidate, CallDecisionReason::InvalidConsumed);
     };
 
     let Some(current_fixed_meld_count) = ctx.own_fixed_meld_count() else {
-        return CallDecisionReason::FixedMeldCountUnknown;
+        return settled(candidate, CallDecisionReason::FixedMeldCountUnknown);
     };
     candidate.current_fixed_meld_count = Some(current_fixed_meld_count);
 
     let Some(post_call_fixed_meld_count) = FixedMeldCount::new(current_fixed_meld_count.get() + 1)
     else {
-        return CallDecisionReason::FixedMeldCountOverflow;
+        return settled(candidate, CallDecisionReason::FixedMeldCountOverflow);
     };
     candidate.post_call_fixed_meld_count = Some(post_call_fixed_meld_count);
 
@@ -697,30 +957,96 @@ fn evaluate_call_conditions(
     candidate.current_shanten = Some(current_shanten);
     if current_shanten != CALL_CURRENT_SHANTEN {
         if collect_observations && current_shanten == CALL_TWO_SHANTEN_OBSERVATION_SHANTEN {
-            observe_two_shanten_call_to_iishanten(
-                ctx,
-                &meld,
-                &post_call_tiles,
-                post_call_fixed_meld_count,
-                candidate,
-            );
+            return CallCandidatePreparation::TwoShantenObservation(Box::new(
+                TwoShantenObservationInputs {
+                    meld,
+                    post_call_tiles,
+                    post_call_fixed_meld_count,
+                },
+            ));
         }
-        return CallDecisionReason::CurrentShantenNotOne;
+        return settled(candidate, CallDecisionReason::CurrentShantenNotOne);
     }
 
     // 喰い替え禁止牌は鳴き直後だけの合法手制約なので、仮想 legal actions から先に除く。
     // 残った合法 Dahai は実際の通常打牌と同じ production selector へ渡す。
     let forbidden_discards = forbidden_discards_after_call(&meld);
     let legal_actions = post_call_legal_dahai_actions(&post_call_tiles, &forbidden_discards);
-    candidate.post_call_forbidden_discards = Some(forbidden_discards);
     let mut post_call_melds = ctx.own_melds().unwrap_or_default().to_vec();
     post_call_melds.push(meld.clone());
-    let Some(post_call_context) = ctx.with_own_hand_state(post_call_tiles.clone(), post_call_melds)
-    else {
-        return CallDecisionReason::PostCallEvaluationUnavailable;
+    let post_call_context = ctx.with_own_hand_state(post_call_tiles.clone(), post_call_melds);
+    candidate.post_call_forbidden_discards = Some(forbidden_discards.clone());
+    let Some(post_call_context) = post_call_context else {
+        return settled(candidate, CallDecisionReason::PostCallEvaluationUnavailable);
     };
+
+    // 鳴き後の1手評価だけを先に通し、最小向聴数を確定させる。前方評価も打点も通らない安価な
+    // 評価で、本番の鳴き後打牌選択はこの後そのまま自分で候補を作り直す。
+    let post_call_min_shanten = post_call_discard_evaluations(
+        &post_call_context,
+        &post_call_tiles,
+        post_call_fixed_meld_count,
+        &forbidden_discards,
+    )
+    .iter()
+    .map(DiscardEvaluation::min_shanten_after_discard)
+    .min();
+
+    CallCandidatePreparation::PostCall(Box::new(PostCallInputs {
+        meld,
+        post_call_tiles,
+        counts,
+        current_fixed_meld_count,
+        post_call_fixed_meld_count,
+        legal_actions,
+        post_call_context,
+        post_call_min_shanten,
+    }))
+}
+
+// 事前判定が準備した候補の高コストな評価。
+//
+// 安価な事前判定で理由が確定した候補と、先行候補の結果を複製する候補では何もせず `None`。
+fn evaluate_prepared_call_candidate(
+    ctx: &GameContext,
+    preparation: &CallCandidatePreparation,
+    collect_observations: bool,
+    candidate: &mut CallCandidateDiagnostic,
+    timing: &mut CallCandidateTimer,
+) -> Option<CallDecisionReason> {
+    match preparation {
+        CallCandidatePreparation::PostCall(inputs) => Some(evaluate_post_call_discard(
+            ctx,
+            inputs,
+            collect_observations,
+            candidate,
+            timing,
+        )),
+        CallCandidatePreparation::TwoShantenObservation(inputs) => {
+            observe_two_shanten_call_to_iishanten(
+                ctx,
+                &inputs.meld,
+                &inputs.post_call_tiles,
+                inputs.post_call_fixed_meld_count,
+                candidate,
+            );
+            Some(CallDecisionReason::CurrentShantenNotOne)
+        }
+        CallCandidatePreparation::Settled | CallCandidatePreparation::Reused(_) => None,
+    }
+}
+
+// 鳴き成立条件のうち、鳴き後の打牌選択から先を評価する。評価が進んだ範囲の値だけを candidate
+// へ書き込み、評価しなかった項目は None のままにする。
+fn evaluate_post_call_discard(
+    ctx: &GameContext,
+    inputs: &PostCallInputs,
+    collect_observations: bool,
+    candidate: &mut CallCandidateDiagnostic,
+    timing: &mut CallCandidateTimer,
+) -> CallDecisionReason {
     let selection = timing.measure_post_call_discard_selection(|| {
-        select_discard_action_with_evaluation(&post_call_context, &legal_actions)
+        select_discard_action_with_evaluation(&inputs.post_call_context, &inputs.legal_actions)
     });
     let Some(evaluation) = selection.evaluation.as_ref() else {
         return CallDecisionReason::NoPostCallDiscard;
@@ -742,9 +1068,9 @@ fn evaluate_call_conditions(
         if collect_observations {
             candidate.iishanten_acceptance = iishanten_acceptance_diagnostic(
                 ctx,
-                &counts,
-                current_fixed_meld_count,
-                &meld,
+                &inputs.counts,
+                inputs.current_fixed_meld_count,
+                &inputs.meld,
                 evaluation,
             );
         }
@@ -754,8 +1080,8 @@ fn evaluate_call_conditions(
 
     let Some(wait) = selection.tenpai_wait.clone().or_else(|| {
         discard_tenpai_wait_availability(
-            &TileCounts::from_tiles(post_call_tiles.iter().copied()),
-            post_call_fixed_meld_count,
+            &TileCounts::from_tiles(inputs.post_call_tiles.iter().copied()),
+            inputs.post_call_fixed_meld_count,
             evaluation,
             &OwnDiscards::from_optional_river(ctx.own_discards()),
             ctx.history_furiten_after_own_discard(),
@@ -765,11 +1091,21 @@ fn evaluate_call_conditions(
         return CallDecisionReason::PostCallNotTenpai;
     };
 
-    let reason =
-        evaluate_post_call_conditions(ctx, &meld, &post_call_tiles, evaluation, &wait, candidate);
+    let reason = evaluate_post_call_conditions(
+        ctx,
+        &inputs.meld,
+        &inputs.post_call_tiles,
+        evaluation,
+        &wait,
+        candidate,
+    );
     let reason = if reason == CallDecisionReason::EligibleTenpai {
-        let decision =
-            post_call_push_pull_decision(&post_call_context, &selection, &wait, &legal_actions);
+        let decision = post_call_push_pull_decision(
+            &inputs.post_call_context,
+            &selection,
+            &wait,
+            &inputs.legal_actions,
+        );
         candidate.post_call_push_pull = Some(decision);
         if decision.mode == PushPullMode::Push {
             CallDecisionReason::EligibleTenpai
@@ -862,9 +1198,13 @@ fn observe_two_shanten_call_to_iishanten(
 }
 
 // 1向聴のままの Call 候補がある場合だけ Pass を1回評価し、全候補へ同じ値を配る。
+//
+// `pass` は Call 側の deep 評価と重ねて先に評価した結果。重ねなかった局面ではここで評価する。
+// どちらの経路でも Pass を評価するのは1回だけで、値も比較も同じ。
 fn apply_iishanten_self_tsumo_policy(
     ctx: &GameContext,
     candidates: &mut [CallCandidateDiagnostic],
+    pass: Option<PassSelfTsumoContinuation>,
     timing: &mut CallDecisionTimer,
 ) {
     if !candidates
@@ -875,12 +1215,16 @@ fn apply_iishanten_self_tsumo_policy(
     }
 
     let reaction_source_known = reaction_draw_distance(ctx).is_some();
-    let pass_value = reaction_source_known
-        .then(|| {
-            timing
-                .measure_pass_iishanten_self_tsumo(|| pass_iishanten_expected_self_tsumo_value(ctx))
-        })
-        .flatten();
+    let pass_value = match pass {
+        Some(pass) => pass.value,
+        None => reaction_source_known
+            .then(|| {
+                timing.measure_pass_iishanten_self_tsumo(|| {
+                    pass_iishanten_expected_self_tsumo_value(ctx)
+                })
+            })
+            .flatten(),
+    };
 
     for candidate in candidates {
         let Some(mut diagnostic) = candidate.iishanten_self_tsumo else {
@@ -1236,6 +1580,11 @@ mod tests {
     // 他家 (player 1) の打牌へ反応する局面。東場東家・リーチ者なし・副露なし・ツモ牌なしで、
     // 鳴き判断が読む fact だけを組み立てる。
     fn reaction_context(hand: &[u8], target: u8) -> GameContext {
+        reaction_context_with_reach(hand, target, [false; 4])
+    }
+
+    // 同じ reaction 局面で、リーチ者だけを差し替える。
+    fn reaction_context_with_reach(hand: &[u8], target: u8, reached: [bool; 4]) -> GameContext {
         let hand_tiles = tiles(hand);
         let mut visible = hand_tiles.clone();
         visible.push(tile(target));
@@ -1250,7 +1599,7 @@ mod tests {
             Some(0),
             Some(0),
             [vec![], vec![tile(target)], vec![], vec![]],
-            [false; 4],
+            reached,
             Default::default(),
         )
         // 実際の client が局開始で確定させる値。unknown だと全ての鳴きがロン可否不明で落ちる。
@@ -1520,6 +1869,20 @@ mod tests {
     const IISHANTEN_PON_HAND: [u8; 13] = [4, 8, 12, 17, 20, 24, 56, 64, 76, 84, 108, 128, 129];
     const IISHANTEN_PON_TARGET: u8 = 130;
     const IISHANTEN_PON_CONSUMED: [u8; 2] = [128, 129];
+
+    // IISHANTEN_PON_HAND と同じ手牌で 5m を Chi する局面。3m4m / 4m6m / 6m7m の3通りが
+    // semantic に別の鳴きになるので、1局面で複数の unique な Call 候補を並べられる。
+    const IISHANTEN_CHI_GROUP_HAND: [u8; 13] = IISHANTEN_PON_HAND;
+    const IISHANTEN_CHI_GROUP_TARGET: u8 = 18;
+    const IISHANTEN_CHI_GROUP_CONSUMED: [[u8; 2]; 3] = [[8, 12], [12, 20], [20, 24]];
+
+    fn iishanten_chi_group_actions() -> Vec<LegalAction> {
+        IISHANTEN_CHI_GROUP_CONSUMED
+            .iter()
+            .map(|consumed| chi_action(IISHANTEN_CHI_GROUP_TARGET, consumed))
+            .chain(std::iter::once(LegalAction::None))
+            .collect()
+    }
 
     // 345m 789m 68p 24s E FF の一向聴。4m5m で 3m を Chi して E を切っても一向聴のまま。
     const IISHANTEN_CHI_HAND: [u8; 13] = [8, 12, 17, 24, 28, 32, 56, 64, 76, 84, 108, 128, 129];
@@ -1835,6 +2198,380 @@ mod tests {
         (decision, durations, candidates)
     }
 
+    // Call / Pass の評価順を比べる focused fixture。
+    //
+    // - 単独の Call 候補 + Pass
+    // - unique な Call 候補が複数 + Pass
+    // - semantic に同一な重複候補を含む + Pass
+    // - Pass の継続評価が不要な局面 (即テンパイ / 2向聴 / リーチ者あり / 反応元不明)
+    fn call_pass_order_fixtures() -> Vec<(&'static str, GameContext, Vec<LegalAction>, bool)> {
+        vec![
+            (
+                "single call candidate",
+                valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+                true,
+            ),
+            (
+                "multiple unique call candidates",
+                valued_reaction_context(
+                    &IISHANTEN_CHI_GROUP_HAND,
+                    IISHANTEN_CHI_GROUP_TARGET,
+                    1,
+                    63,
+                ),
+                iishanten_chi_group_actions(),
+                true,
+            ),
+            (
+                "duplicate call candidates",
+                valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+                true,
+            ),
+            (
+                "immediate tenpai call",
+                valued_reaction_context(&TENPAI_PON_HAND, TENPAI_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(TENPAI_PON_TARGET, &TENPAI_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+                false,
+            ),
+            (
+                "two-shanten call",
+                valued_reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+                false,
+            ),
+            (
+                "an opponent has reached",
+                reaction_context_with_reach(
+                    &IISHANTEN_PON_HAND,
+                    IISHANTEN_PON_TARGET,
+                    [false, false, true, false],
+                )
+                .with_reaction_source_player(Some(1)),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+                false,
+            ),
+            (
+                "the reaction source is unknown",
+                reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_multiple_candidate_fixture_evaluates_three_unique_calls_against_one_pass() {
+        // request 279 型の「複数の unique な Call 評価の group と Pass を重ねる」形を、
+        // focused fixture が実際に再現していることを固定する。3件とも semantic に別の鳴きな
+        // ので鳴き後の打牌選択を1件ずつ通り、そのうち1向聴のまま残る候補が Pass と比較される。
+        let ctx =
+            valued_reaction_context(&IISHANTEN_CHI_GROUP_HAND, IISHANTEN_CHI_GROUP_TARGET, 1, 63);
+        let legal_actions = iishanten_chi_group_actions();
+        let (decision, _, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+        let decision = decision.expect("evaluated");
+
+        assert_eq!(
+            decision.candidates.len(),
+            IISHANTEN_CHI_GROUP_CONSUMED.len()
+        );
+        assert!(candidates.iter().all(|candidate| !candidate.reused));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.post_call_discard_selection > Duration::ZERO)
+        );
+        assert!(
+            decision
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.iishanten_self_tsumo.is_some())
+                .count()
+                > 1
+        );
+    }
+
+    #[test]
+    fn the_duplicate_candidate_fixture_reuses_the_post_call_evaluation() {
+        // 重複候補の再利用 (#311) は評価順を変えても従来どおり1回だけ評価する。
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let legal_actions = [action.clone(), action, LegalAction::None];
+        let (decision, _, candidates) = measured_call_decision(&ctx, &legal_actions, false);
+        let decision = decision.expect("evaluated");
+
+        assert_eq!(decision.candidates.len(), 2);
+        assert_eq!(
+            decision.candidates[0].iishanten_self_tsumo,
+            decision.candidates[1].iishanten_self_tsumo
+        );
+        assert!(!candidates[0].reused);
+        assert!(candidates[1].reused);
+        assert_eq!(candidates[1].post_call_discard_selection, Duration::ZERO);
+    }
+
+    #[test]
+    fn the_overlapped_call_pass_evaluation_is_bit_exact_with_the_sequential_one() {
+        // 比べるのは判断そのもの。採用 action・理由・候補ごとの Call / Pass
+        // ExpectedSelfTsumoValue・比較結果・鳴き後の選択打牌・診断がすべて一致する。
+        for (label, ctx, legal_actions, _) in call_pass_order_fixtures() {
+            for collect_observations in [false, true] {
+                let sequential = evaluate_call_decision_with_order(
+                    &ctx,
+                    &legal_actions,
+                    collect_observations,
+                    CallPassEvaluationOrder::Sequential,
+                    &mut CallDecisionTimer::disabled(),
+                );
+                let overlapped = evaluate_call_decision_with_order(
+                    &ctx,
+                    &legal_actions,
+                    collect_observations,
+                    CallPassEvaluationOrder::Overlapped,
+                    &mut CallDecisionTimer::disabled(),
+                );
+
+                assert_eq!(sequential, overlapped, "{label} ({collect_observations})");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cheap_gate_matches_the_candidates_that_compare_the_call_and_the_pass() {
+        // 重ねるかどうかを決める安価な事前判定は、Pass を1回評価する既存条件 (1向聴のままの
+        // Call 候補があり、反応元の席が分かる) と一致する。推測で speculative に走らせない。
+        for (label, ctx, legal_actions, expected) in call_pass_order_fixtures() {
+            for collect_observations in [false, true] {
+                let slots = prepare_call_candidates(
+                    &ctx,
+                    &legal_actions,
+                    collect_observations,
+                    &mut CallDecisionTimer::disabled(),
+                );
+                let required = pass_continuation_is_required(&ctx, &slots);
+
+                let decision = evaluate_call_decision(
+                    &ctx,
+                    &legal_actions,
+                    collect_observations,
+                    &mut CallDecisionTimer::disabled(),
+                )
+                .expect("evaluated");
+                let compares_the_pass = reaction_draw_distance(&ctx).is_some()
+                    && decision
+                        .candidates
+                        .iter()
+                        .any(|candidate| candidate.iishanten_self_tsumo.is_some());
+
+                assert_eq!(
+                    required, compares_the_pass,
+                    "{label} ({collect_observations})"
+                );
+                assert_eq!(required, expected, "{label} ({collect_observations})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_position_without_the_comparison_does_not_evaluate_the_pass() {
+        // Pass が不要な局面へ高コストな継続評価を足さない。計測は実際に走った時間だけを持つ。
+        for (label, ctx, legal_actions, expected) in call_pass_order_fixtures() {
+            if expected {
+                continue;
+            }
+            let (_, durations, _) = measured_call_decision(&ctx, &legal_actions, false);
+
+            assert_eq!(
+                durations.pass_iishanten_self_tsumo,
+                Duration::ZERO,
+                "{label}"
+            );
+        }
+    }
+
+    // 同じ局面を S / P で交互に測り、方式ごとの中央値を並べる。
+    //
+    // ```text
+    // cargo test --release -p bot-core --lib benchmark_call_pass_evaluation_order \
+    //     -- --ignored --nocapture
+    // ```
+    #[test]
+    #[ignore]
+    fn benchmark_call_pass_evaluation_order() {
+        let cases: [(&str, GameContext, Vec<LegalAction>); 4] = [
+            (
+                "single call candidate + pass",
+                valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+            ),
+            (
+                "multiple unique call candidates + pass",
+                valued_reaction_context(
+                    &IISHANTEN_CHI_GROUP_HAND,
+                    IISHANTEN_CHI_GROUP_TARGET,
+                    1,
+                    63,
+                ),
+                iishanten_chi_group_actions(),
+            ),
+            (
+                "duplicate call candidate + pass",
+                valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+            ),
+            (
+                "immediate tenpai call, no pass",
+                valued_reaction_context(&TENPAI_PON_HAND, TENPAI_PON_TARGET, 1, 63),
+                vec![
+                    pon_action(TENPAI_PON_TARGET, &TENPAI_PON_CONSUMED),
+                    LegalAction::None,
+                ],
+            ),
+        ];
+
+        println!("available_parallelism: {}", available_parallelism());
+        for (label, ctx, legal_actions) in &cases {
+            let mut measured: Vec<(CallPassEvaluationOrder, CallDecisionDurations)> = Vec::new();
+            let mut decisions: Vec<(CallPassEvaluationOrder, Option<CallDecisionDiagnostic>)> =
+                Vec::new();
+            for _ in 0..BENCHMARK_ROUNDS {
+                for order in [
+                    CallPassEvaluationOrder::Sequential,
+                    CallPassEvaluationOrder::Overlapped,
+                ] {
+                    let mut timing = CallDecisionTimer::armed();
+                    let decision = evaluate_call_decision_with_order(
+                        ctx,
+                        legal_actions,
+                        false,
+                        order,
+                        &mut timing,
+                    );
+                    let (durations, _) = timing.finish();
+                    measured.push((order, durations));
+                    decisions.push((order, decision));
+                }
+            }
+
+            println!("\n{label}");
+            let sequential = decisions
+                .iter()
+                .filter(|(order, _)| *order == CallPassEvaluationOrder::Sequential)
+                .map(|(_, decision)| decision);
+            let overlapped = decisions
+                .iter()
+                .filter(|(order, _)| *order == CallPassEvaluationOrder::Overlapped)
+                .map(|(_, decision)| decision);
+            let bit_exact = sequential
+                .zip(overlapped)
+                .all(|(sequential, overlapped)| sequential == overlapped);
+            println!("  bit-exact decision: {bit_exact}");
+            for order in [
+                CallPassEvaluationOrder::Sequential,
+                CallPassEvaluationOrder::Overlapped,
+            ] {
+                let runs: Vec<_> = measured
+                    .iter()
+                    .filter(|(measured_order, _)| *measured_order == order)
+                    .map(|(_, durations)| *durations)
+                    .collect();
+                println!(
+                    "  {order:?}: total {:?}, call candidates {:?}, pass {:?}",
+                    median(runs.iter().map(|durations| durations.total)),
+                    median(runs.iter().map(|durations| durations.candidates)),
+                    median(
+                        runs.iter()
+                            .map(|durations| durations.pass_iishanten_self_tsumo)
+                    ),
+                );
+            }
+        }
+    }
+
+    // Call を評価した thread で続けて Pass を評価した場合と、まっさらな thread で Pass を
+    // 評価した場合を、CPU 競合の無い状態で比べる。差は thread 分離で失う thread-local memo
+    // (向聴 / 受け入れなど) の分で、重ねることで増える総仕事量そのものになる。
+    //
+    // ```text
+    // cargo test --release -p bot-core --lib benchmark_pass_continuation_thread_locality \
+    //     -- --ignored --nocapture
+    // ```
+    #[test]
+    #[ignore]
+    fn benchmark_pass_continuation_thread_locality() {
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63);
+        let legal_actions = [
+            pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+            LegalAction::None,
+        ];
+        for _ in 0..5 {
+            let warm = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let _ = evaluate_call_decision_with_order(
+                            &ctx,
+                            &legal_actions,
+                            false,
+                            CallPassEvaluationOrder::Sequential,
+                            &mut CallDecisionTimer::disabled(),
+                        );
+                        let since = Instant::now();
+                        let value = pass_iishanten_expected_self_tsumo_value(&ctx);
+                        (value, since.elapsed())
+                    })
+                    .join()
+                    .expect("warm")
+            });
+            let cold = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let since = Instant::now();
+                        let value = pass_iishanten_expected_self_tsumo_value(&ctx);
+                        (value, since.elapsed())
+                    })
+                    .join()
+                    .expect("cold")
+            });
+            assert_eq!(warm.0, cold.0);
+            println!("warm thread {:?}  cold thread {:?}", warm.1, cold.1);
+        }
+    }
+
+    const BENCHMARK_ROUNDS: usize = 7;
+
+    fn median(durations: impl Iterator<Item = Duration>) -> Duration {
+        let mut durations: Vec<_> = durations.collect();
+        durations.sort();
+        durations[durations.len() / 2]
+    }
+
     #[test]
     fn a_request_without_a_legal_call_measures_nothing() {
         let ctx = reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET);
@@ -1894,8 +2631,32 @@ mod tests {
 
         assert!(candidate.iishanten_self_tsumo.is_some());
         assert!(durations.pass_iishanten_self_tsumo > Duration::ZERO);
-        assert!(durations.total >= durations.candidates + durations.pass_iishanten_self_tsumo);
+        // total は壁時計なので、Call 側と Pass 側を重ねた分だけ内訳の合計より短くなり得る。
+        // 内訳のどちらか一方を下回ることはない。
+        assert!(durations.total >= durations.candidates);
+        assert!(durations.total >= durations.pass_iishanten_self_tsumo);
         assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn the_pass_continuation_overlaps_the_call_candidate_group() {
+        // 重ねられる runtime では、Call 側の候補評価と Pass 側の継続評価の合計が鳴き判断全体の
+        // 壁時計を超える。どちらも実際に走った時間で、待ち時間は含まない。
+        if !call_pass_overlap_is_available() {
+            return;
+        }
+
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63);
+        let legal_actions = [action, LegalAction::None];
+        let (decision, durations, _) = measured_call_decision(&ctx, &legal_actions, false);
+        let candidate = &decision.expect("evaluated").candidates[0];
+
+        assert!(candidate.iishanten_self_tsumo.is_some());
+        assert!(durations.candidates > Duration::ZERO);
+        assert!(durations.pass_iishanten_self_tsumo > Duration::ZERO);
+        assert!(durations.total < durations.candidates + durations.pass_iishanten_self_tsumo);
+        assert_eq!(durations.remaining(), Duration::ZERO);
     }
 
     #[test]
