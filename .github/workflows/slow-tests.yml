@@ -1,6 +1,7 @@
 name: Slow tests
 
 on:
+  pull_request:
   push:
     branches:
       - main
@@ -10,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.sha }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test-bot-scenario-slow:
