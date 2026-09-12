@@ -404,12 +404,6 @@ pub struct BenchmarkIishantenForwardCandidateJson {
     pub lookahead_search_ns: u64,
     pub weighted_aggregation_ns: u64,
     pub self_tsumo_continuation_ns: u64,
-    /// 候補1件の評価が使った探索内の同一 state memo の利用数。
-    pub search_state_memo_hits: u64,
-    pub search_state_memo_misses: u64,
-    /// 候補1件の評価が引いた未来テンパイの値 memo の利用数。miss が実際に打点を評価した件数。
-    pub tenpai_value_memo_hits: u64,
-    pub tenpai_value_memo_misses: u64,
 }
 
 impl BenchmarkJson {
@@ -537,28 +531,15 @@ impl BenchmarkJson {
     }
 }
 
-// 同一 state memo の利用数は、候補単位では hit / miss の合計だけを持つ。memo の種類別の内訳は
-// 既存の探索診断が request 単位で持っているので、候補ごとに並べ直さない。
 fn iishanten_forward_candidate_json(
     candidate: &IishantenForwardCandidateDuration,
 ) -> BenchmarkIishantenForwardCandidateJson {
-    let memo = &candidate.search_state_memo;
     BenchmarkIishantenForwardCandidateJson {
         discard: candidate.discard.to_mjai_string(),
         elapsed_ns: nanos(candidate.elapsed),
         lookahead_search_ns: nanos(candidate.phases.lookahead_search),
         weighted_aggregation_ns: nanos(candidate.phases.weighted_aggregation),
         self_tsumo_continuation_ns: nanos(candidate.phases.self_tsumo_continuation),
-        search_state_memo_hits: memo.two_shanten_hits
-            + memo.iishanten_hits
-            + memo.next_discard_hits
-            + memo.same_shanten_next_discard_hits,
-        search_state_memo_misses: memo.two_shanten_misses
-            + memo.iishanten_misses
-            + memo.next_discard_misses
-            + memo.same_shanten_next_discard_misses,
-        tenpai_value_memo_hits: candidate.tenpai_value_memo_hits,
-        tenpai_value_memo_misses: candidate.tenpai_value_memo_misses,
     }
 }
 
@@ -586,7 +567,7 @@ fn write_benchmark_json(path: &str, run: &BenchmarkRun) -> Result<(), ScenarioEr
 mod tests {
     use super::*;
     use bot_core::{Agent, CallKind};
-    use bot_logic::{SearchStateMemoStats, TileId};
+    use bot_logic::TileId;
     use riichilab_client::observation::{
         fixture_base64, fixture_base64_with_discards, game_context_from_decoded_observation,
     };
@@ -810,13 +791,6 @@ mod tests {
                         weighted_aggregation: Duration::from_millis(*aggregate),
                         self_tsumo_continuation: Duration::from_millis(*self_tsumo),
                     },
-                    search_state_memo: SearchStateMemoStats {
-                        iishanten_hits: 7,
-                        iishanten_misses: 3,
-                        ..SearchStateMemoStats::default()
-                    },
-                    tenpai_value_memo_hits: 11,
-                    tenpai_value_memo_misses: 5,
                 }
             })
             .collect();
@@ -1259,10 +1233,6 @@ mod tests {
                 lookahead_search_ns: 1_700_000_000,
                 weighted_aggregation_ns: 60_000_000,
                 self_tsumo_continuation_ns: 40_000_000,
-                search_state_memo_hits: 7,
-                search_state_memo_misses: 3,
-                tenpai_value_memo_hits: 11,
-                tenpai_value_memo_misses: 5,
             }
         );
         // 候補の実測の合計は forward phase の壁時計を超えたままで、どちらも書き換えない。

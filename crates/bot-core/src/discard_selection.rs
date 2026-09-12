@@ -13,7 +13,6 @@ use crate::decision_timing::ForwardMetricsPhaseTimer;
 use crate::decision_timing::{
     IishantenForwardCandidateDuration, NormalDiscardPhase, NormalDiscardPhaseDurations,
     NormalDiscardPhaseTimer, TwoShantenFullSelfTsumoObserver, TwoShantenSelfTsumoCandidateDuration,
-    memo_stats_delta,
 };
 use crate::offense_value::{
     TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
@@ -21,7 +20,7 @@ use crate::offense_value::{
 };
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
-    evaluate_prospective_lookahead_value, tenpai_value_memo_counter,
+    evaluate_prospective_lookahead_value,
 };
 use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_named_yakuman_damaten,
@@ -1395,12 +1394,6 @@ fn production_selection_metrics_instrumented(
     let mut forward_timing = timing
         .forward_metrics_timer()
         .measuring_candidates(best_shanten_after_discard(evaluations) == Some(IISHANTEN_SHANTEN));
-    // 未来テンパイの値 memo の計上は、候補単位の実測を残す区間だけ有効にする。通常の
-    // production evaluation はこの guard を取らないので、memo を引くたびの計上は走らない。
-    // 並行評価では worker がそれぞれ自分の区間を有効にするため、この guard は逐次評価の分。
-    let counted = forward_timing
-        .measures_candidates()
-        .then(tenpai_value_memo_counter::counted);
     let forward = match parallel_forward_workers(evaluations, continuation) {
         None => ParallelForwardMetrics::sequential(forward_metrics_instrumented(
             &inputs,
@@ -1417,7 +1410,6 @@ fn production_selection_metrics_instrumented(
             &mut forward_timing,
         ),
     };
-    drop(counted);
     timing.record_iishanten_forward_candidates(forward_timing.take_candidates());
     timing.record_forward_metrics_phases(forward_timing.finish());
     let ParallelForwardMetrics {
@@ -1574,21 +1566,23 @@ fn parallel_forward_metrics(
                         evaluations,
                         continuation,
                     );
-                    // worker の計上は自分の thread だけで有効になるため、候補の counter は
-                    // 他の worker と混ざらない。
-                    let _counted = measures.then(tenpai_value_memo_counter::counted);
                     let mut metrics = Vec::new();
                     let mut elapsed = Vec::new();
                     while let Some(&index) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        // 候補1件の実測は、その候補を評価していた worker がその場で計る。探索
-                        // 基盤も未来テンパイの値 memo も worker ごとなので、仕事量は worker の
-                        // 中の連続する区切りの差そのままになる。
-                        let memo_before = inputs.search_state_memo_stats();
-                        let tenpai_value_memo_before = tenpai_value_memo_counter::counts();
-                        let started = measures.then(Instant::now);
-                        let mut candidate_timing = measures
-                            .then(ForwardMetricsPhaseTimer::armed)
-                            .unwrap_or_else(ForwardMetricsPhaseTimer::disabled);
+                        // 計測しない run は production の候補評価をそのまま通す。時計も候補の
+                        // 計測器も観測器も作らないので、通常の打牌選択は計測を入れる前と同じ
+                        // helper を同じだけ通る。
+                        if !measures {
+                            metrics.push((
+                                index,
+                                forward_metrics_for_candidate(&inputs, &evaluations[index]),
+                            ));
+                            continue;
+                        }
+
+                        // 候補1件の実測は、その候補を評価していた worker がその場で計る。
+                        let started = Instant::now();
+                        let mut candidate_timing = ForwardMetricsPhaseTimer::armed();
                         metrics.push((
                             index,
                             forward_metrics_for_candidate_instrumented(
@@ -1599,23 +1593,14 @@ fn parallel_forward_metrics(
                         ));
                         // 内訳を閉じてから候補全体を閉じる。逆順では内訳が候補の実測を超え得る。
                         let phases = candidate_timing.finish();
-                        if let Some(started) = started {
-                            let (hits, misses) = tenpai_value_memo_counter::counts();
-                            elapsed.push((
-                                index,
-                                IishantenForwardCandidateDuration {
-                                    discard: evaluations[index].discard,
-                                    elapsed: started.elapsed(),
-                                    phases,
-                                    search_state_memo: memo_stats_delta(
-                                        inputs.search_state_memo_stats(),
-                                        memo_before,
-                                    ),
-                                    tenpai_value_memo_hits: hits - tenpai_value_memo_before.0,
-                                    tenpai_value_memo_misses: misses - tenpai_value_memo_before.1,
-                                },
-                            ));
-                        }
+                        elapsed.push((
+                            index,
+                            IishantenForwardCandidateDuration {
+                                discard: evaluations[index].discard,
+                                elapsed: started.elapsed(),
+                                phases,
+                            },
+                        ));
                     }
                     WorkerForwardMetrics {
                         metrics,
@@ -2960,6 +2945,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_uninstrumented_parallel_worker_keeps_the_production_candidate_evaluation() {
+        // 計測しない run の worker は、計測を入れる前と同じ候補評価 helper をそのまま通る。
+        // 時計も候補の計測器も観測器も作らないので、通常の打牌選択に計測のコストが残らない。
+        let worker = include_str!("discard_selection.rs")
+            .split("fn parallel_forward_metrics(")
+            .nth(1)
+            .unwrap()
+            .split("struct WorkerForwardMetrics {")
+            .next()
+            .unwrap();
+        let uninstrumented = worker
+            .split("if !measures {")
+            .nth(1)
+            .expect("計測しない run は候補 loop の先頭で分かれる")
+            .split("continue;")
+            .next()
+            .expect("計測しない run はその候補をそこで終える");
+
+        // 分岐した先は既存の候補評価 helper を1回呼ぶだけ。
+        assert!(
+            uninstrumented.contains("forward_metrics_for_candidate(&inputs, &evaluations[index])"),
+            "{uninstrumented}"
+        );
+        for instrumentation in [
+            "Instant::now()",
+            "ForwardMetricsPhaseTimer::",
+            "forward_metrics_for_candidate_instrumented(",
+            "IishantenForwardCandidateDuration {",
+        ] {
+            assert!(
+                !uninstrumented.contains(instrumentation),
+                "{instrumentation}: {uninstrumented}"
+            );
+            // 計測する run の枝にだけ1回ずつ現れる。
+            assert_eq!(worker.matches(instrumentation).count(), 1, "{worker}");
+        }
+    }
+
+    #[test]
     fn the_forward_metrics_subphase_timing_does_not_change_the_selection() {
         // 前方集計値を実際に通る1向聴局面で、計測の有無が選択を変えないことを固定する。
         let (context, actions) = value_context(&VALUE_OVER_WAIT_HAND, "4p");
@@ -2971,13 +2995,11 @@ pub(crate) mod tests {
         let candidates = timing.take_iishanten_forward_candidates();
         let phases = timing.finish();
 
-        // 通常の production evaluation は計測区間を開かないので、未来テンパイの値 memo の計上
-        // そのものが走らない。選択と値は計測の有無で変わらない。
-        let before = tenpai_value_memo_counter::counts();
-        let untimed = select_discard_action_with_evaluation(&context, &actions);
-        assert_eq!(tenpai_value_memo_counter::counts(), before);
-
-        assert_eq!(timed, untimed);
+        // 選択と値は計測の有無で変わらない。
+        assert_eq!(
+            timed,
+            select_discard_action_with_evaluation(&context, &actions)
+        );
         assert_eq!(phases.two_shanten_self_tsumo, Duration::ZERO);
 
         // 深く評価した候補だけが、production の候補順そのままで並ぶ。
@@ -2996,17 +3018,11 @@ pub(crate) mod tests {
             deep,
         );
 
-        // 候補の内訳はその候補1件の実測を分けたもので、仕事量も1件分だけ。
+        // 候補の内訳はその候補1件の実測を分けたものなので、その実測を超えない。
         for candidate in &candidates {
             assert!(
                 candidate.phases.total() <= candidate.elapsed,
                 "{candidate:?}"
-            );
-            // 逐次評価では評価器を候補間で共有するので、先の候補が暖めた分だけ hit になる。
-            // 候補1件が memo を引いた回数そのものは 0 にならない。
-            assert!(
-                candidate.tenpai_value_memo_hits + candidate.tenpai_value_memo_misses > 0,
-                "{candidate:?}",
             );
         }
 

@@ -2,13 +2,11 @@ use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
 use bot_logic::{
-    ForwardMetricsObserver, ForwardMetricsPhase, SearchStateMemoStats, TileId, TileType,
-    TwoShantenSelfTsumoObserver,
+    ForwardMetricsObserver, ForwardMetricsPhase, TileId, TileType, TwoShantenSelfTsumoObserver,
 };
 
 use crate::action::LegalAction;
 use crate::call_decision::CallKind;
-use crate::prospective_value::tenpai_value_memo_counter;
 
 /// 意思決定1回を phase 別に分けた実測時間。
 ///
@@ -171,11 +169,6 @@ pub struct IishantenForwardCandidateDuration {
     pub elapsed: Duration,
     /// そのうちの内部処理別の内訳。合計は `elapsed` を超えない。
     pub phases: ForwardMetricsPhaseDurations,
-    /// 候補1件の評価が使った探索内の同一 state memo の利用数。memo を持たない局面では 0。
-    pub search_state_memo: SearchStateMemoStats,
-    /// 候補1件の評価が引いた未来テンパイの値 memo の利用数。miss は実際に打点を評価した件数。
-    pub tenpai_value_memo_hits: u64,
-    pub tenpai_value_memo_misses: u64,
 }
 
 /// 計測付きで実行した意思決定の最終 action と phase 別実測時間。
@@ -344,9 +337,6 @@ struct OpenForwardCandidate {
     discard: TileType,
     started: Instant,
     phases: ForwardMetricsPhaseDurations,
-    /// 候補へ入った時点の累計。候補1件分の利用数は閉じる時点との差になる。
-    search_state_memo: SearchStateMemoStats,
-    tenpai_value_memo: (u64, u64),
 }
 
 /// 2向聴 ExpectedSelfTsumoValue の候補別 optional 計測器。
@@ -834,28 +824,25 @@ impl ForwardMetricsObserver for ForwardMetricsPhaseTimer {
         }
     }
 
-    fn enter_candidate(&mut self, discard: TileType, memo: SearchStateMemoStats) {
+    fn enter_candidate(&mut self, discard: TileType) {
         if let Some(state) = self.state.as_mut() {
             let now = Instant::now();
-            // 直前の候補はこの区切りで閉じる。候補1件分の利用数は、その候補へ入った時点の
-            // 累計との差になる。
-            state.close_with_memo(now, memo);
+            // 直前の候補はこの区切りで閉じる。
+            state.close(now);
             state.phase = None;
             if state.measures_candidates {
                 state.current = Some(OpenForwardCandidate {
                     discard,
                     started: now,
                     phases: ForwardMetricsPhaseDurations::default(),
-                    search_state_memo: memo,
-                    tenpai_value_memo: tenpai_value_memo_counter::counts(),
                 });
             }
         }
     }
 
-    fn exit_candidates(&mut self, memo: SearchStateMemoStats) {
+    fn exit_candidates(&mut self) {
         if let Some(state) = self.state.as_mut() {
-            state.close_with_memo(Instant::now(), memo);
+            state.close(Instant::now());
             state.phase = None;
         }
     }
@@ -875,64 +862,17 @@ impl ForwardMetricsTimerState {
         }
     }
 
+    // 開いている候補を閉じる。
     fn close(&mut self, now: Instant) {
-        let memo = self
-            .current
-            .as_ref()
-            .map(|current| current.search_state_memo)
-            .unwrap_or_default();
-        self.close_with_memo(now, memo);
-    }
-
-    // 開いている候補を閉じる。仕事量は候補へ入った時点との差で、累計そのものは載せない。
-    fn close_with_memo(&mut self, now: Instant, memo: SearchStateMemoStats) {
         self.flush(now);
         let Some(current) = self.current.take() else {
             return;
         };
-        let (hits, misses) = tenpai_value_memo_counter::counts();
         self.candidates.push(IishantenForwardCandidateDuration {
             discard: current.discard,
             elapsed: now.duration_since(current.started),
             phases: current.phases,
-            search_state_memo: memo_stats_delta(memo, current.search_state_memo),
-            tenpai_value_memo_hits: hits.saturating_sub(current.tenpai_value_memo.0),
-            tenpai_value_memo_misses: misses.saturating_sub(current.tenpai_value_memo.1),
         });
-    }
-}
-
-// 同一 state memo の利用数の差分。field を分解して受けるため、計上が増えたら引き忘れが
-// compile error になる。
-pub(crate) fn memo_stats_delta(
-    after: SearchStateMemoStats,
-    before: SearchStateMemoStats,
-) -> SearchStateMemoStats {
-    let SearchStateMemoStats {
-        two_shanten_hits,
-        two_shanten_misses,
-        iishanten_hits,
-        iishanten_misses,
-        next_discard_hits,
-        next_discard_misses,
-        same_shanten_next_discard_hits,
-        same_shanten_next_discard_misses,
-    } = before;
-    SearchStateMemoStats {
-        two_shanten_hits: after.two_shanten_hits.saturating_sub(two_shanten_hits),
-        two_shanten_misses: after.two_shanten_misses.saturating_sub(two_shanten_misses),
-        iishanten_hits: after.iishanten_hits.saturating_sub(iishanten_hits),
-        iishanten_misses: after.iishanten_misses.saturating_sub(iishanten_misses),
-        next_discard_hits: after.next_discard_hits.saturating_sub(next_discard_hits),
-        next_discard_misses: after
-            .next_discard_misses
-            .saturating_sub(next_discard_misses),
-        same_shanten_next_discard_hits: after
-            .same_shanten_next_discard_hits
-            .saturating_sub(same_shanten_next_discard_hits),
-        same_shanten_next_discard_misses: after
-            .same_shanten_next_discard_misses
-            .saturating_sub(same_shanten_next_discard_misses),
     }
 }
 
@@ -1059,9 +999,9 @@ mod tests {
         // 1向聴の深い前方評価は、逐次評価では候補の区切りをそのまま実測へ変える。
         let forward_discard = TileType::from_mjai_type_str("3p").unwrap();
         let mut forward = normal.forward_metrics_timer().measuring_candidates(true);
-        forward.enter_candidate(forward_discard, SearchStateMemoStats::default());
+        forward.enter_candidate(forward_discard);
         forward.enter_phase(ForwardMetricsPhase::LookaheadSearch);
-        forward.exit_candidates(SearchStateMemoStats::default());
+        forward.exit_candidates();
         normal.record_iishanten_forward_candidates(forward.take_candidates());
         normal.record_forward_metrics_phases(forward.finish());
 
@@ -1104,12 +1044,9 @@ mod tests {
         let normal = NormalDiscardPhaseTimer::started();
         let mut forward = normal.forward_metrics_timer();
         assert!(!forward.measures_candidates());
-        forward.enter_candidate(
-            TileType::from_mjai_type_str("1m").unwrap(),
-            SearchStateMemoStats::default(),
-        );
+        forward.enter_candidate(TileType::from_mjai_type_str("1m").unwrap());
         forward.enter_phase(ForwardMetricsPhase::WeightedAggregation);
-        forward.exit_candidates(SearchStateMemoStats::default());
+        forward.exit_candidates();
 
         assert!(forward.take_candidates().is_empty());
         let phases = forward.finish();
@@ -1129,9 +1066,6 @@ mod tests {
                 lookahead_search: Duration::from_millis(1),
                 ..ForwardMetricsPhaseDurations::default()
             },
-            search_state_memo: SearchStateMemoStats::default(),
-            tenpai_value_memo_hits: 0,
-            tenpai_value_memo_misses: 0,
         });
 
         assert!(forward.take_candidates().is_empty());
@@ -1153,9 +1087,6 @@ mod tests {
                 weighted_aggregation: Duration::from_millis(1),
                 self_tsumo_continuation: Duration::ZERO,
             },
-            search_state_memo: SearchStateMemoStats::default(),
-            tenpai_value_memo_hits: 3,
-            tenpai_value_memo_misses: 1,
         });
         for candidate in candidates {
             forward.record_candidate(candidate);

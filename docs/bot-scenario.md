@@ -575,15 +575,13 @@ Hora などで早期 return した request は、到達しなかった phase が
 
 production が1向聴候補を候補単位で並行に評価した request では、計測 thread が phase の区切りを1つも通らないため、3つとも従来どおり 0 のままです。その request の内訳は下の `forward_candidates` から読みます。候補の内訳をこの3つへ足し込んで、wall-clock phase の内訳から「並行に評価した候補の実時間の合計」へ意味を変えることはしていません。
 
-`forward` はさらに、production が深い前方評価を実際に行った1向聴候補ごとの実測 (`forward_candidates`) も持ちます。
+`forward` はさらに、production が深い前方評価を実際に行った1向聴候補ごとの実測 (`forward_candidates`) も持ちます。取るのは時間だけで、探索規模や memo の利用数は持ちません。
 
 | 項目 | 内容 |
 | --- | --- |
 | `discard` | その候補の打牌 |
 | `elapsed` | その候補を評価していた実時間 |
 | `lookahead_search` / `weighted_aggregation` / `self_tsumo_continuation` | `elapsed` の内訳。`forward` の subphase と同じ区切り |
-| `search_state_memo_hits` / `search_state_memo_misses` | その候補の評価が使った探索内の同一 state memo の利用数 |
-| `tenpai_value_memo_hits` / `tenpai_value_memo_misses` | その候補の評価が引いた未来テンパイの値 memo の利用数。miss が実際に打点を評価した件数 |
 
 並ぶのは production が実際に深く評価した候補 (既存の候補絞り込み `forward_target_mask` が残した cohort) だけです。深い評価の対象にならなかった候補は前方評価そのものを通らないため、1件も混ざりません。順序は production の候補順 (合法打牌の評価順) そのままで、並行に評価した request でも thread の終了順には依らず、同じ index の候補へ書き戻した結果と一致します。最善向聴数が1向聴でない request と、前方集計値を計算しない request では空のままです。
 
@@ -597,7 +595,7 @@ production が1向聴候補を候補単位で並行に評価した request で�
 
 合計を壁時計として読まないでください。逆に、phase 側の `lookahead_search` / `weighted_aggregation` / `self_tsumo_continuation` は従来の wall-clock 内訳のままで、候補側の値とは別物です。
 
-この計測は benchmark でだけ有効にします。通常の RiichiLab client は候補単位の計測を有効にしないため、候補 timing も未来テンパイの値 memo の counter も動きません。値 memo の計上は候補単位の計測が有効な区間だけ行い、通常の production evaluation では counter の更新そのものが実行されません。探索の枝数や base 評価回数のような探索規模の counter は計上そのものが探索の hot path を遅くするため benchmark では無効のままで、必要な場合は `--iishanten-selection-parallel-comparison` の観測 run から読みます。
+この計測は benchmark でだけ有効にします。通常の RiichiLab client は候補単位の計測を有効にしないため、候補評価は計測を入れる前と同じ helper をそのまま通り、時計も候補の計測器も作りません。探索規模の counter はこの計測では扱いません。必要な場合は `--iishanten-selection-parallel-comparison` の観測 run から読みます。
 
 ### 出力
 
@@ -680,22 +678,14 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
           "elapsed_ns": 620000000,
           "lookahead_search_ns": 590000000,
           "weighted_aggregation_ns": 18000000,
-          "self_tsumo_continuation_ns": 12000000,
-          "search_state_memo_hits": 41230,
-          "search_state_memo_misses": 18774,
-          "tenpai_value_memo_hits": 90412,
-          "tenpai_value_memo_misses": 3188
+          "self_tsumo_continuation_ns": 12000000
         },
         {
           "discard": "9s",
           "elapsed_ns": 601000000,
           "lookahead_search_ns": 572000000,
           "weighted_aggregation_ns": 17000000,
-          "self_tsumo_continuation_ns": 12000000,
-          "search_state_memo_hits": 39980,
-          "search_state_memo_misses": 18102,
-          "tenpai_value_memo_hits": 88317,
-          "tenpai_value_memo_misses": 3074
+          "self_tsumo_continuation_ns": 12000000
         }
       ],
       "two_shanten_self_tsumo_ns": 1400000000,
@@ -713,7 +703,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の wall-clock の内訳で、合計は `normal_discard_forward_ns` を超えません。この意味は従来から変わりません。production が1向聴候補を候補単位で並行に評価した request では、計測 thread が phase の区切りを通らないため従来どおり 0 のままで、その request の内訳は `iishanten_forward_candidates` から読みます。`iishanten_forward_candidates` は production が深い前方評価を実際に行った1向聴候補だけを production の候補順そのままで持ち、その件数を `iishanten_forward_candidate_count` にも出します。深く評価されなかった候補は1件も混ざりません。候補ごとに `discard` / `elapsed_ns` と、その内訳の `lookahead_search_ns` / `weighted_aggregation_ns` / `self_tsumo_continuation_ns`、仕事量の `search_state_memo_hits` / `search_state_memo_misses` / `tenpai_value_memo_hits` / `tenpai_value_memo_misses` を持ちます。候補単位で並行に評価するため、候補の `elapsed_ns` の合計も、候補の `lookahead_search_ns` などの合計も、phase の wall-clock である `normal_discard_forward_ns` を超え得ます。合計を wall-clock として読まないでください。候補側の `lookahead_search_ns` などはその候補の中での実時間で、request 単位の `forward_lookahead_search_ns` とは別物です。最善向聴数が1向聴でない request では 0 と空 array のままです。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の wall-clock の内訳で、合計は `normal_discard_forward_ns` を超えません。この意味は従来から変わりません。production が1向聴候補を候補単位で並行に評価した request では、計測 thread が phase の区切りを通らないため従来どおり 0 のままで、その request の内訳は `iishanten_forward_candidates` から読みます。`iishanten_forward_candidates` は production が深い前方評価を実際に行った1向聴候補だけを production の候補順そのままで持ち、その件数を `iishanten_forward_candidate_count` にも出します。深く評価されなかった候補は1件も混ざりません。候補ごとに `discard` / `elapsed_ns` と、その内訳の `lookahead_search_ns` / `weighted_aggregation_ns` / `self_tsumo_continuation_ns` を持ちます。候補単位で並行に評価するため、候補の `elapsed_ns` の合計も、候補の `lookahead_search_ns` などの合計も、phase の wall-clock である `normal_discard_forward_ns` を超え得ます。合計を wall-clock として読まないでください。候補側の `lookahead_search_ns` などはその候補の中での実時間で、request 単位の `forward_lookahead_search_ns` とは別物です。最善向聴数が1向聴でない request では 0 と空 array のままです。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

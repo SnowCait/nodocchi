@@ -576,9 +576,11 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
                 .get(&key)
                 .and_then(|values| values.selection)
         }) {
+            #[cfg(test)]
             tenpai_value_memo_counter::hit();
             return cached;
         }
+        #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value =
             self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode));
@@ -598,9 +600,11 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
                 .get(&key)
                 .and_then(|values| values.tsumo)
         }) {
+            #[cfg(test)]
             tenpai_value_memo_counter::hit();
             return cached;
         }
+        #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
             self.tsumo_value_with_mode(facts, mode)
@@ -1036,71 +1040,35 @@ fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<ProspectiveWaitValue
         .collect()
 }
 
-/// 未来テンパイの値 memo の利用数。
-///
-/// 数えるのは評価器がこの memo を引いた回数だけで、miss は実際に打点を評価した件数。値も枝も
-/// 選択もこの計上で変わらない。
-///
-/// 計上は既定で無効で、[`tenpai_value_memo_counter::counted`] が返す guard を持っている間だけ
-/// 有効になる。通常の production evaluation では memo を引くたびに残るのは、この thread が計測
-/// 区間にいるかの真偽値1つを読む分岐だけで、counter の更新そのものは実行されない。
-///
-/// 状態も counter も thread ごとに持つ。候補単位で並行に評価する経路では worker がそれぞれ
-/// 自分の区間を有効にするため、worker の counter は互いに混ざらない。区間の利用数は
-/// [`tenpai_value_memo_counter::counts`] の差で取る。
-pub(crate) mod tenpai_value_memo_counter {
+/// 未来テンパイの値 memo の利用数。同じ未来テンパイを2回評価しないことを test から観測する
+/// ためだけの counter で、production build には残らない。
+#[cfg(test)]
+mod tenpai_value_memo_counter {
     use std::cell::Cell;
 
     thread_local! {
-        static COUNTED: Cell<bool> = const { Cell::new(false) };
         static HITS: Cell<u64> = const { Cell::new(0) };
         static MISSES: Cell<u64> = const { Cell::new(0) };
     }
 
-    /// 計上を有効にしている間だけ生きる guard。drop でこの thread を元の状態へ戻す。
-    #[derive(Debug)]
-    pub(crate) struct CountedSection {
-        restore: bool,
-    }
-
-    impl Drop for CountedSection {
-        fn drop(&mut self) {
-            COUNTED.with(|counted| counted.set(self.restore));
-        }
-    }
-
-    /// この thread の計上を、返した guard が生きている間だけ有効にする。
-    pub(crate) fn counted() -> CountedSection {
-        CountedSection {
-            restore: COUNTED.with(|counted| counted.replace(true)),
-        }
-    }
-
     pub(super) fn hit() {
-        if COUNTED.with(Cell::get) {
-            HITS.with(|count| count.set(count.get() + 1));
-        }
+        HITS.with(|count| count.set(count.get() + 1));
     }
 
     pub(super) fn miss() {
-        if COUNTED.with(Cell::get) {
-            MISSES.with(|count| count.set(count.get() + 1));
-        }
+        MISSES.with(|count| count.set(count.get() + 1));
     }
 
-    /// この thread のこれまでの memo hit / miss の累計。計上が無効な間は増えない。
-    pub(crate) fn counts() -> (u64, u64) {
-        (HITS.with(Cell::get), MISSES.with(Cell::get))
-    }
-
-    /// `body` の実行と、その間の memo hit / miss。計上はこの区間だけ有効になる。
-    #[cfg(test)]
-    pub(crate) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64, u64) {
-        let _counted = counted();
-        let (hits, misses) = counts();
+    /// `body` の実行と、その間の memo hit / miss。
+    pub(super) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64, u64) {
+        let hits = HITS.with(Cell::get);
+        let misses = MISSES.with(Cell::get);
         let value = body();
-        let (after_hits, after_misses) = counts();
-        (value, after_hits - hits, after_misses - misses)
+        (
+            value,
+            HITS.with(Cell::get) - hits,
+            MISSES.with(Cell::get) - misses,
+        )
     }
 }
 
@@ -2402,75 +2370,6 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(second_misses, 0);
         assert_eq!(second_hits, 2 * branches.len() as u64);
-    }
-
-    #[test]
-    fn the_value_memo_is_not_counted_outside_a_measured_section() {
-        // 通常の production evaluation は計測区間を開かないので、memo を引いても counter は
-        // 動かない。計測区間だけが計上する。
-        let case = &*LOW_DAMATEN_DOWNSTREAM;
-        let branches = downstream_branches(case);
-        let valuator = ProductionProspectiveValuator::new(&case.ctx);
-
-        let before = tenpai_value_memo_counter::counts();
-        let uncounted: Vec<_> = branches
-            .iter()
-            .map(|branch| valuator.tenpai_value(&branch.tenpai()))
-            .collect();
-        assert_eq!(tenpai_value_memo_counter::counts(), before);
-
-        // 計上の有無で値は変わらない。
-        let counted = ProductionProspectiveValuator::new(&case.ctx);
-        let (values, _, misses) = tenpai_value_memo_counter::count_during(|| {
-            branches
-                .iter()
-                .map(|branch| counted.tenpai_value(&branch.tenpai()))
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(values, uncounted);
-        assert!(misses > 0);
-
-        // 区間を抜けたら元に戻る。
-        let after = tenpai_value_memo_counter::counts();
-        let _ = branches
-            .iter()
-            .map(|branch| counted.tenpai_value(&branch.tenpai()))
-            .collect::<Vec<_>>();
-        assert_eq!(tenpai_value_memo_counter::counts(), after);
-    }
-
-    #[test]
-    fn every_thread_counts_only_its_own_value_memo_lookups() {
-        // counter は thread ごとに持つため、候補を worker へ分けても他の worker の計上が
-        // 混ざらない。
-        let case = &*LOW_DAMATEN_DOWNSTREAM;
-        let branches = downstream_branches(case);
-        assert!(branches.len() > 1, "枝が複数ある局面が必要");
-
-        let counted_on_a_worker = |lookups: usize| {
-            let valuator = ProductionProspectiveValuator::new(&case.ctx);
-            let (_, hits, misses) = tenpai_value_memo_counter::count_during(|| {
-                for branch in branches.iter().take(lookups) {
-                    valuator.tenpai_value(&branch.tenpai());
-                }
-            });
-            (hits, misses)
-        };
-
-        let before = tenpai_value_memo_counter::counts();
-        let (first, second) = std::thread::scope(|scope| {
-            let first = scope.spawn(|| counted_on_a_worker(1));
-            let second = scope.spawn(|| counted_on_a_worker(branches.len()));
-            (
-                first.join().expect("計測 thread は panic しない"),
-                second.join().expect("計測 thread は panic しない"),
-            )
-        });
-
-        assert_eq!(first, (0, 1));
-        assert_eq!(second, (0, branches.len() as u64));
-        // worker の計上はこの thread の counter を動かさない。
-        assert_eq!(tenpai_value_memo_counter::counts(), before);
     }
 
     #[test]

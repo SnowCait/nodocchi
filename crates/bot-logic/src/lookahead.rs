@@ -669,7 +669,7 @@ type ContinuationMemoKey = (CandidateBranch, u32, u32, IishantenContinuationScop
 type SameShantenNextDiscardKey = (HandState, u32, u32, DownstreamScope);
 
 /// 同一 state memo の利用数。miss は実際に再評価した件数。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SearchStateMemoStats {
     pub two_shanten_hits: u64,
     pub two_shanten_misses: u64,
@@ -1077,12 +1077,10 @@ pub trait ForwardMetricsObserver {
     fn enter_phase(&mut self, phase: ForwardMetricsPhase);
 
     /// 前方集計値を実際に計算する候補へ入る区切り。絞り込みで対象から外れた候補では通らない。
-    ///
-    /// `memo` はその時点の探索内 memo の累計で、候補1件分の利用数は連続する区切りの差になる。
-    fn enter_candidate(&mut self, _discard: TileType, _memo: SearchStateMemoStats) {}
+    fn enter_candidate(&mut self, _discard: TileType) {}
 
     /// 対象候補をすべて評価し終えた区切り。最後の候補の区切りはここで閉じる。
-    fn exit_candidates(&mut self, _memo: SearchStateMemoStats) {}
+    fn exit_candidates(&mut self) {}
 }
 
 /// 区切りを受け取らない観測器。計測しない経路はこれを通る。
@@ -1128,14 +1126,14 @@ pub fn forward_metrics_instrumented(
             if !target {
                 return ForwardMetrics::default();
             }
-            observer.enter_candidate(evaluation.discard, inputs.search_state_memo_stats());
+            observer.enter_candidate(evaluation.discard);
             observer.enter_phase(ForwardMetricsPhase::LookaheadSearch);
             let candidate =
                 search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
             forward_metrics_from_candidate(inputs, evaluation, &candidate, best_shanten, observer)
         })
         .collect();
-    observer.exit_candidates(inputs.search_state_memo_stats());
+    observer.exit_candidates();
     metrics
 }
 

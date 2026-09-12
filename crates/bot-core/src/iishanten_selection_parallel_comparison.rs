@@ -357,21 +357,6 @@ mod tests {
                     candidate.phases.lookahead_search > Duration::ZERO,
                     "{label} {discard}",
                 );
-                // 仕事量も候補単位で取れる。未来テンパイの値 memo の計上は逐次評価では計測
-                // thread、並列評価では候補を評価した worker がそれぞれ自分の区間で行う。
-                assert!(
-                    candidate.tenpai_value_memo_hits + candidate.tenpai_value_memo_misses > 0,
-                    "{label} {discard}",
-                );
-                let memo = &candidate.search_state_memo;
-                assert!(
-                    memo.two_shanten_misses
-                        + memo.iishanten_misses
-                        + memo.next_discard_misses
-                        + memo.same_shanten_next_discard_misses
-                        > 0,
-                    "{label} {discard} {memo:?}",
-                );
             }
 
             // phase 別の内訳の semantics は変えない。計測 thread が区切りを通る逐次評価では
@@ -392,22 +377,19 @@ mod tests {
         }
 
         // 候補の実測は worker ごとに独立して計るので、合計が phase の壁時計を超えるのは正常。
-        // S と PA のどちらでも、候補が持つ仕事量は1件分だけで、他候補の分を巻き込まない。
+        // 合計を壁時計として見せず、候補の実測をそのまま並べる。
         let parallel = comparison
             .parallel
             .last()
             .expect("PA は必ずある (production と同じ方式)");
         assert!(parallel.workers() > 1, "{}", parallel.parallelism.label());
-        let per_candidate_lookups: Vec<u64> = parallel
+        let summed: Duration = parallel
             .observation
             .iishanten_forward_candidates
             .iter()
-            .map(|candidate| candidate.tenpai_value_memo_hits + candidate.tenpai_value_memo_misses)
-            .collect();
-        let total_lookups: u64 = per_candidate_lookups.iter().sum();
-        for lookups in &per_candidate_lookups {
-            assert!(*lookups < total_lookups, "{per_candidate_lookups:?}");
-        }
+            .map(|candidate| candidate.elapsed)
+            .sum();
+        assert!(summed > parallel.observation.phases.forward_metrics);
 
         // 計測の有無に依らず、全方式が S と bit-exact に一致したまま。
         assert!(comparison.every_mode_matches_sequential());
