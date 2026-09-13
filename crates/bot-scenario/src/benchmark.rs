@@ -219,7 +219,7 @@ fn format_call_phases(
 ) -> String {
     format!(
         "call={} call_candidates={} count={} [{}] call_pass={} call_two_shanten_pass={} \
-         call_remaining={}",
+         call_three_shanten_pass={} call_remaining={}",
         format_duration(durations.total),
         format_duration(durations.candidates),
         candidates.len(),
@@ -230,6 +230,7 @@ fn format_call_phases(
             .join(" "),
         format_duration(durations.pass_iishanten_self_tsumo),
         format_duration(durations.pass_two_shanten_self_tsumo),
+        format_duration(durations.pass_three_shanten_self_tsumo),
         format_duration(durations.remaining()),
     )
 }
@@ -355,6 +356,8 @@ pub struct BenchmarkRequestJson {
     #[serde(default)]
     pub call_pass_two_shanten_self_tsumo_ns: u64,
     #[serde(default)]
+    pub call_pass_three_shanten_self_tsumo_ns: u64,
+    #[serde(default)]
     pub call_remaining_ns: u64,
     #[serde(default)]
     pub call_candidate_count: usize,
@@ -445,6 +448,9 @@ impl BenchmarkJson {
                     ),
                     call_pass_two_shanten_self_tsumo_ns: nanos(
                         measurement.phases.call.pass_two_shanten_self_tsumo,
+                    ),
+                    call_pass_three_shanten_self_tsumo_ns: nanos(
+                        measurement.phases.call.pass_three_shanten_self_tsumo,
                     ),
                     call_remaining_ns: nanos(measurement.phases.call.remaining()),
                     call_candidate_count: measurement.call_candidates.len(),
@@ -721,6 +727,7 @@ mod tests {
                 .sum(),
             pass_iishanten_self_tsumo: Duration::from_millis(pass),
             pass_two_shanten_self_tsumo: Duration::ZERO,
+            pass_three_shanten_self_tsumo: Duration::ZERO,
         };
         measurement
     }
@@ -1095,7 +1102,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -1384,6 +1391,7 @@ mod tests {
                     call_candidates_ns: 0,
                     call_pass_iishanten_self_tsumo_ns: 0,
                     call_pass_two_shanten_self_tsumo_ns: 0,
+                    call_pass_three_shanten_self_tsumo_ns: 0,
                     call_remaining_ns: 0,
                     call_candidate_count: 0,
                     call_candidates: vec![],
@@ -1413,6 +1421,7 @@ mod tests {
                     call_candidates_ns: 0,
                     call_pass_iishanten_self_tsumo_ns: 0,
                     call_pass_two_shanten_self_tsumo_ns: 0,
+                    call_pass_three_shanten_self_tsumo_ns: 0,
                     call_remaining_ns: 0,
                     call_candidate_count: 0,
                     call_candidates: vec![],

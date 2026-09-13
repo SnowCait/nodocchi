@@ -43,11 +43,14 @@ pub use agents::{
 };
 pub use call_decision::{
     CALL_CURRENT_SHANTEN, CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN,
-    CALL_TWO_SHANTEN_SHANTEN, CALL_TWO_SHANTEN_SPEED_MIN_DRAWS, CALL_TWO_SHANTEN_SPEED_MIN_HAN,
-    CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason,
-    CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
-    CallKind, CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic,
-    CallTwoShantenSpeedDiagnostic, CallWaitYaku, CallWaitYakuDiagnostic,
+    CALL_THREE_SHANTEN_SHANTEN, CALL_THREE_SHANTEN_SPEED_MIN_DRAWS,
+    CALL_THREE_SHANTEN_SPEED_MIN_HAN, CALL_TWO_SHANTEN_SHANTEN, CALL_TWO_SHANTEN_SPEED_MIN_DRAWS,
+    CALL_TWO_SHANTEN_SPEED_MIN_HAN, CallCandidateDiagnostic, CallDecisionDiagnostic,
+    CallDecisionReason, CallIishantenAcceptanceDiagnostic, CallIishantenComparison,
+    CallIishantenSelfTsumoDiagnostic, CallKind, CallThreeShantenPassEvaluation,
+    CallThreeShantenSelfTsumoDiagnostic, CallThreeShantenSpeedDiagnostic,
+    CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallTwoShantenSpeedDiagnostic,
+    CallWaitYaku, CallWaitYakuDiagnostic,
 };
 pub use combined_defense::{
     CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, CombinedDefenseDiagnostic,

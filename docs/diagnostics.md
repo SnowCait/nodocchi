@@ -72,6 +72,22 @@ policy には使いません。`Summary` にも同じ値、比較結果、鳴き
 変えたことを表し、`call reason` は `EligibleTwoShantenSpeed` になります。他家リーチ時の鳴きは
 この policy でも上書きしません。
 
+現在3向聴から Chi / Pon 後の最良打牌で2向聴になる候補には、production が比較した
+`three-shanten self-tsumo` を表示します。Call は鳴き後2向聴の Progress-only value、Pass は次の
+自摸を待つ3向聴 state の Progress-only value で、どちらも `3向聴 → Progress → 2向聴 → Progress
+→ 1向聴 → Progress → テンパイ` と同じ範囲を見ます (`pass progress-only` の表示がその scope)。
+`three-shanten comparison` の読み方は `two-shanten comparison` と同じで、`call higher` の場合だけ
+鳴きます。鳴き後も3向聴のままの候補は対象外で、対象候補が無い局面では Pass 側の評価も
+実行しません。
+
+同じ候補には速度優先 policy の判断材料 `three-shanten speed` も表示します。読み方は
+`two-shanten speed` と同じで、閾値だけが「残り自摸12回以上」「確定4翻以上」になります。`han` は
+**鳴き後2向聴の Progress-only 評価が実際に terminal scoring を通したテンパイ全体**の確定翻数が
+4翻以上かで、`at least` / `below` / `unknown` を区別します。判定はその評価が行った terminal
+scoring からそのまま回収するので、判定のための追加探索も点数計算もありません (判定のためだけに
+SameShanten の枝を追加探索することもありません)。`overrides pass` が立った候補の `call reason` は
+`EligibleThreeShantenSpeed` になります。他家リーチ時の鳴きはこの policy でも上書きしません。
+
 ```text
 Final decision
   action: 5m
