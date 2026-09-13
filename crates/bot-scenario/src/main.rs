@@ -500,6 +500,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy CLI display E2E; run by the slow-tests workflow with --run-ignored=only"]
     fn dora_indicator_fills_the_scenario_dora_indicators() {
         let output = run_args(&[
             "--hand",
@@ -930,6 +931,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy diagnostics E2E; run by the slow-tests workflow with --run-ignored=only"]
     fn the_inline_baseline_supplies_remaining_tiles_to_the_self_tsumo_comparison() {
         let output = run_args(&["--hand", "340678m789p34789s", "--lookahead"]).unwrap();
 
