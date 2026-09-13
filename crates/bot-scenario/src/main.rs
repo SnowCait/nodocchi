@@ -899,6 +899,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy diagnostics E2E; run by the slow-tests workflow with --run-ignored=only"]
     fn the_reach_damaten_comparison_stays_out_of_the_summary() {
         // 統合表示は detailed diagnostics の section で、Summary には足さない。
         let hand = ["--hand", "340678m789p34789s", "--remaining-tiles", "70"];
