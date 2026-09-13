@@ -128,15 +128,19 @@
 //!
 //! # 翻数の下限
 //!
-//! 打点そのものとは別に、打牌候補1件の枝の先にある将来テンパイ全体について「確定翻数が要求翻数
-//! 以上か」も同じ集約規則で畳む ([`prospective_tenpai_han_verdict`])。翻数は既存 scoring が
-//! 確定させた値 ([`TenpaiVariantValue`]) そのままで、この層で数え直さない。
+//! 打点そのものとは別に、未来テンパイ1件の確定打点の下限 ([`ProspectiveHanFloor`]) も持つ。翻数は
+//! 既存 scoring が確定させた値 ([`TenpaiVariantHan`]) そのままで、この層では数え直さず、生きた
+//! 和了牌 variant すべてで畳むだけである。下限は選択値を求める点数計算と同じ profile から同時に
+//! 畳み、評価器の memo へ選択値と一緒に載せる。したがって下限を読む側が同じテンパイを評価し直す
+//! ことはない。
 //!
-//! 対象はテンパイへ到達する枝 ([`DrawTransition::Progress`]) だけで、向聴数を維持する手変わりの
-//! 枝はこの horizon の先でテンパイになるため既存 prospective scoring が打点を持たず、判定材料に
-//! できない。残枚数0の枝と variant は到達しないので寄与させず、評価できない枝・役なし・翻数を
-//! 確定できない variant はどれも「要求翻数以上」と推測しない。読む打点は production のリーチ判断
-//! が選んだ baseline のものだけで、選ばなかった baseline の翻を足さない。
+//! その下限を打牌候補1件分へ畳んだものが [`direct_progress_han_verdict`] で、対象は
+//! **向聴数を進める枝 ([`DrawTransition::Progress`]) の先にある直接到達テンパイだけ** に限定する。
+//! SameShanten 手変わりの枝やその先の continuation は含まない。判定のために SameShanten
+//! downstream を追加探索しないための、意図した限定である。限定した範囲の中では、残枚数0の枝と
+//! variant を寄与させず、評価できない枝・役なし・翻数を確定できない variant をどれも「要求翻数
+//! 以上」と推測しない。読む打点は production のリーチ判断が選んだ baseline のものだけで、選ば
+//! なかった baseline の翻を足さない。
 
 use bot_logic::{
     CountHasherBuilder, DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
@@ -144,9 +148,9 @@ use bot_logic::{
     EffectiveShanten, FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards,
     ProspectiveTenpai, ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
     TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
-    structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
-    tenpai_wait_availability,
+    WinningContext, evaluate_tenpai_hand_value, is_menzen, prospective_tenpai_branch_tiles,
+    split_discarded_tile, structural_acceptance_tile_types_with_fixed_melds,
+    tenpai_completed_hands, tenpai_wait_availability,
 };
 
 use crate::context::GameContext;
@@ -158,7 +162,7 @@ use crate::offense_value::{
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 use crate::tenpai_scoring::{
-    TenpaiVariantValue, TsumoVariantOutcomes, tenpai_tsumo_value_from_hands,
+    TenpaiVariantHan, TenpaiVariantValue, TsumoVariantOutcomes, tenpai_tsumo_value_from_hands,
     tenpai_tsumo_variant_outcomes, tenpai_variant_value,
 };
 use std::cell::{Cell, RefCell};
@@ -347,12 +351,51 @@ impl ProspectiveLookaheadDiagnostic {
     }
 }
 
-/// 打牌候補1件の将来到達テンパイ全体について、確定打点が要求翻数を満たすかの結論。
+/// 未来テンパイ1件の生きた和了牌 variant すべてで確定した打点の下限。
 ///
-/// 集約は既存の将来打点集約と同じ conservative な規則で、確定しない枝を都合よく除外しない。
+/// 要求翻数との比較は読む側の policy が行い、この層は既存 scoring が確定させた翻数
+/// ([`TenpaiVariantHan`]) を畳むだけ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProspectiveHanFloor {
+    /// 生きた和了牌 variant すべてで翻数が確定し、その最小値 [翻]。役なしは0翻。
+    ///
+    /// 名前の付いた役満は翻数を持たないので下限には現れず、他の variant の翻数が下限になる。
+    Han(u8),
+    /// 生きた variant すべてが名前の付いた役満として確定した。
+    Yakuman,
+    /// 翻数を確定できない variant がある。生きた variant が1つも無い場合と、production 探索が
+    /// この未来テンパイの打点を確定できなかった場合も含む。
+    Unknown,
+}
+
+impl ProspectiveHanFloor {
+    /// 要求翻数以上が確定しているか。確定できない場合は `None`。
+    pub fn is_at_least(self, required_han: u8) -> Option<bool> {
+        match self {
+            Self::Han(han) => Some(han >= required_han),
+            Self::Yakuman => Some(true),
+            Self::Unknown => None,
+        }
+    }
+
+    // variant 1つ分の翻数を下限へ畳む。確定できない variant は下限を確定させない。
+    fn with(self, han: TenpaiVariantHan) -> Self {
+        match (self, han) {
+            (Self::Unknown, _) | (_, TenpaiVariantHan::Unknown) => Self::Unknown,
+            (Self::Yakuman, TenpaiVariantHan::Yakuman) => Self::Yakuman,
+            (Self::Yakuman, TenpaiVariantHan::Han(han)) => Self::Han(han),
+            (Self::Han(floor), TenpaiVariantHan::Yakuman) => Self::Han(floor),
+            (Self::Han(floor), TenpaiVariantHan::Han(han)) => Self::Han(floor.min(han)),
+        }
+    }
+}
+
+/// 打牌候補1件から次の Progress ツモで直接到達するテンパイについての、確定打点の判定。
+///
+/// この horizon の先 (SameShanten 手変わりの枝や、さらに深い continuation) のテンパイは含まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProspectiveHanVerdict {
-    /// テンパイへ到達する全ての枝の、生きた和了牌 variant すべてで要求翻数以上が確定した。
+    /// 直接到達する枝の、生きた和了牌 variant すべてで要求翻数以上が確定した。
     AtLeast,
     /// 要求翻数未満が確定した和了牌 variant がある。
     Below,
@@ -372,43 +415,47 @@ impl ProspectiveHanVerdict {
     }
 }
 
-/// 打牌候補1件の枝の先にある将来テンパイすべてについて、確定打点が要求翻数を満たすかを畳む。
+/// 打牌候補1件から次の Progress ツモで直接到達するテンパイについて、確定打点が要求翻数を満たす
+/// かを畳む。
 ///
-/// 判定材料は構築済みの2手先評価 (`candidate`) と、その枝を既存 prospective scoring で評価した
-/// 結果 (`value`) だけで、向聴・受け入れ・待ち・役・点数計算をここで求め直さない。
+/// 読むのは production の前方評価が既に探索した枝 (`candidate`) と、その探索中に評価器が求めた
+/// 打点だけ ([`ProductionProspectiveValuator::memoized_han_floor`])。判定のために枝を探索し直さず、
+/// 同じテンパイの点数計算もやり直さない。向聴・受け入れ・待ち・役・ドラもここで求めない。
 ///
-/// 対象は向聴数を進める枝 ([`DrawTransition::Progress`]) だけで、そこだけがこの horizon で
-/// テンパイへ到達する。向聴数を維持する手変わりの枝はこの horizon の先でテンパイになるため、
-/// 既存 prospective scoring が打点を持たず、判定材料にできない。
+/// # 対象の限定
 ///
-/// 集約は既存の将来打点集約と同じで、
+/// 対象は向聴数を進める枝 ([`DrawTransition::Progress`]) の先にある「直接到達するテンパイ」だけ
+/// で、SameShanten 手変わりの枝やその先の continuation は含まない。この判定のためだけに
+/// SameShanten downstream を追加探索すると探索コストが大きくなるため、意図して限定した
+/// heuristic である。したがって `AtLeast` は「この1向聴から次の Progress ツモで直接テンパイに
+/// なる全ての枝で要求翻数以上が確定した」であり、「全 continuation の到達テンパイで要求翻数以上」
+/// ではない。
+///
+/// 限定した範囲の中では conservative に畳み、判定できた枝だけを見て `AtLeast` と結論しない。
 ///
 /// - 残枚数 0 の枝・和了牌 variant は到達しないので寄与させない
-/// - テンパイを評価できない枝は [`ProspectiveHanVerdict::Unknown`]
-/// - production のリーチ判断が選んだ baseline の打点だけを読み、別 baseline の翻を足さない
-/// - 生きた和了牌 variant が1つも無いテンパイは [`ProspectiveHanVerdict::Unknown`]
-///
-/// とし、判定できた枝だけを見て「要求翻数以上」と結論しない。
-pub(crate) fn prospective_tenpai_han_verdict(
+/// - テンパイを組み立てられない枝・production 探索が打点を確定できなかった枝は `Unknown`
+/// - 生きた和了牌 variant が1つも無いテンパイは `Unknown`
+/// - 直接到達する枝が1つも無い候補は `Unknown`
+pub(crate) fn direct_progress_han_verdict(
+    valuator: &ProductionProspectiveValuator,
+    tiles: &[TileId],
+    evaluation: &DiscardEvaluation,
     candidate: &DiscardLookaheadDiagnostic,
-    value: &ProspectiveDiscardValue,
     required_han: u8,
 ) -> ProspectiveHanVerdict {
+    if candidate.discard != evaluation.discard {
+        return ProspectiveHanVerdict::Unknown;
+    }
+
     let mut verdict: Option<ProspectiveHanVerdict> = None;
     for draw in candidate.draws_with(DrawTransition::Progress) {
-        let Some(draw_value) = value.draw(draw.draw) else {
-            return ProspectiveHanVerdict::Unknown;
-        };
-        for variant in &draw_value.variants {
+        for variant in &draw.variants {
             if variant.remaining == 0 {
                 continue;
             }
-            let branch = variant
-                .outcome
-                .evaluated()
-                .map_or(ProspectiveHanVerdict::Unknown, |tenpai| {
-                    tenpai_han_verdict(tenpai, required_han)
-                });
+            let branch =
+                direct_progress_variant_verdict(valuator, tiles, evaluation, variant, required_han);
             verdict = Some(match verdict {
                 Some(current) => current.weaker(branch),
                 None => branch,
@@ -418,34 +465,42 @@ pub(crate) fn prospective_tenpai_han_verdict(
     verdict.unwrap_or(ProspectiveHanVerdict::Unknown)
 }
 
-// 将来テンパイ1件の確定打点が要求翻数を満たすか。
+// 直接到達する枝1件分の判定。
 //
-// 読むのは production のリーチ判断が選んだ baseline の打点だけで、選ばなかった baseline の翻を
-// 足さない。副露のある手は将来リーチが合法にならないため必ずダマ baseline になり、リーチ1翻も
-// 門前清自摸和も含まない。攻撃モードを確定できない局面では翻数も確定させない。
-fn tenpai_han_verdict(tenpai: &ProspectiveTenpaiValue, required_han: u8) -> ProspectiveHanVerdict {
-    let baseline = match tenpai.mode {
-        TenpaiOffenseMode::Damaten => &tenpai.damaten,
-        TenpaiOffenseMode::Reach => &tenpai.reach,
-        TenpaiOffenseMode::Unknown => return ProspectiveHanVerdict::Unknown,
+// 未来テンパイの物理牌は探索と同じ正規形を作る既存 helper ([`prospective_tenpai_branch_tiles`])
+// から受け取り、打点は探索中に評価器が求めた下限をそのまま読む。この枝のために探索も点数計算も
+// やり直さない。
+fn direct_progress_variant_verdict(
+    valuator: &ProductionProspectiveValuator,
+    tiles: &[TileId],
+    evaluation: &DiscardEvaluation,
+    variant: &DrawVariantLookaheadDiagnostic,
+    required_han: u8,
+) -> ProspectiveHanVerdict {
+    let Some(next) = variant.next_discard.as_ref() else {
+        return ProspectiveHanVerdict::Unknown;
     };
-
-    let mut verdict: Option<ProspectiveHanVerdict> = None;
-    for variant in baseline.winning_tile_values() {
-        if variant.remaining == 0 {
-            continue;
-        }
-        let value = match variant.value.is_at_least_han(required_han) {
-            Some(true) => ProspectiveHanVerdict::AtLeast,
-            Some(false) => ProspectiveHanVerdict::Below,
-            None => ProspectiveHanVerdict::Unknown,
-        };
-        verdict = Some(match verdict {
-            Some(current) => current.weaker(value),
-            None => value,
-        });
+    if next.min_shanten_after_discard() != TENPAI_SHANTEN {
+        return ProspectiveHanVerdict::Unknown;
     }
-    verdict.unwrap_or(ProspectiveHanVerdict::Unknown)
+    let Some((concealed_tiles, discarded_tiles)) =
+        prospective_tenpai_branch_tiles(tiles, evaluation, variant.drawn_tile, next)
+    else {
+        return ProspectiveHanVerdict::Unknown;
+    };
+    let tenpai = ProspectiveTenpai {
+        concealed_tiles: &concealed_tiles,
+        acceptance: &next.acceptance_after_discard,
+        discarded_tiles: &discarded_tiles,
+    };
+    match valuator
+        .memoized_han_floor(&tenpai)
+        .is_at_least(required_han)
+    {
+        Some(true) => ProspectiveHanVerdict::AtLeast,
+        Some(false) => ProspectiveHanVerdict::Below,
+        None => ProspectiveHanVerdict::Unknown,
+    }
 }
 
 /// 2手先評価が選んだ2手目の打牌後のテンパイを、production のリーチ判断と同じ policy で評価する
@@ -667,17 +722,64 @@ impl<'a> ProductionProspectiveValuator<'a> {
         value
     }
 
-    // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計)。確定できない場合は `None`。
-    fn selection_value(&self, facts: &ProspectiveFacts, mode: TenpaiOffenseMode) -> Option<u64> {
-        let (baseline, ura_dora) = self.scoring_inputs(mode, facts.can_ron())?;
+    // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計) と、同じ profile から畳んだ確定打点の
+    // 下限。確定できない場合はそれぞれ `None` / `Unknown`。
+    //
+    // 点数計算は1回だけ通す。下限は選択値の副産物として同じ profile から畳むので、後から読む側が
+    // 同じテンパイを評価し直す必要がない。
+    fn selection_value(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> (Option<u64>, ProspectiveHanFloor) {
+        let Some((baseline, ura_dora)) = self.scoring_inputs(mode, facts.can_ron()) else {
+            return (None, ProspectiveHanFloor::Unknown);
+        };
         let profile = evaluate_tenpai_hand_value(
             &facts.hands,
             baseline,
             self.context.dora_indicators(),
             ura_dora,
         );
-        weighted_total(&profile)
+        (weighted_total(&profile), han_floor(&profile))
     }
+
+    /// production の探索が既に求めた、この未来テンパイの確定打点の下限。
+    ///
+    /// 引くのは探索中に memo へ載せた値だけで、載っていない未来テンパイは探索も点数計算もやり
+    /// 直さず [`ProspectiveHanFloor::Unknown`] にする。高打点の判定のために同じテンパイを2回
+    /// 評価しないための入口。
+    pub(crate) fn memoized_han_floor(&self, tenpai: &ProspectiveTenpai<'_>) -> ProspectiveHanFloor {
+        ProspectiveTenpaiKey::new(tenpai)
+            .and_then(|key| {
+                self.values
+                    .borrow()
+                    .get(&key)
+                    .and_then(|values| values.han_floor)
+            })
+            .unwrap_or(ProspectiveHanFloor::Unknown)
+    }
+}
+
+// テンパイ1件の待ちごとの手牌価値を、生きた和了牌 variant の確定打点の下限へ畳む。
+//
+// 翻数は既存 scoring の結論 ([`TenpaiVariantValue::han`]) そのままで、残枚数0の variant は到達
+// しないので寄与させない。生きた variant が1つも無い場合は下限を確定させない。
+fn han_floor(profile: &TenpaiHandValueProfile<'_>) -> ProspectiveHanFloor {
+    let mut floor: Option<ProspectiveHanFloor> = None;
+    for wait in profile.waits() {
+        for winning_tile in wait.winning_tiles() {
+            if winning_tile.remaining() == 0 {
+                continue;
+            }
+            let han = tenpai_variant_value(winning_tile.outcome()).han();
+            floor = Some(match floor {
+                Some(floor) => floor.with(han),
+                None => ProspectiveHanFloor::Yakuman.with(han),
+            });
+        }
+    }
+    floor.unwrap_or(ProspectiveHanFloor::Unknown)
 }
 
 impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
@@ -695,10 +797,17 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
         }
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
-        let value =
-            self.with_evaluated_tenpai(tenpai, |facts, mode| self.selection_value(facts, mode));
+        // 評価材料を組み立てられない枝では打点も下限も確定しない。
+        let (value, floor) = self
+            .with_evaluated_tenpai(tenpai, |facts, mode| {
+                Some(self.selection_value(facts, mode))
+            })
+            .unwrap_or((None, ProspectiveHanFloor::Unknown));
         if let Some(key) = key {
-            self.values.borrow_mut().entry(key).or_default().selection = Some(value);
+            let mut values = self.values.borrow_mut();
+            let entry = values.entry(key).or_default();
+            entry.selection = Some(value);
+            entry.han_floor = Some(floor);
         }
         value
     }
@@ -788,6 +897,10 @@ fn inline_slice<T: Copy, const N: usize>(values: &[T]) -> Option<[Option<T>; N]>
 struct EvaluatedTenpaiValues {
     selection: Option<Option<u64>>,
     tsumo: Option<Option<TenpaiTsumoValue>>,
+    /// 選択値を求めた点数計算と同じ profile から畳んだ確定打点の下限。
+    ///
+    /// 選択値と一緒に1回だけ求めるので、下限を読むために点数計算をやり直さない。
+    han_floor: Option<ProspectiveHanFloor>,
 }
 
 // 探索 node ごとに引く memo なので、探索基盤が使っているものと同じ安価な hasher を共有する。
@@ -1228,6 +1341,53 @@ mod tests {
     };
     use crate::meld::MeldKind;
     use crate::tenpai_scoring::{TenpaiVariantUnknownReason, tsumo_scoring_inputs};
+
+    #[test]
+    fn the_han_floor_is_only_read_from_the_evaluated_value() {
+        // 下限は選択値を求めた点数計算の副産物として memo に載る。読む側は memo を引くだけで、
+        // 載っていないテンパイのために評価し直さない。
+        let case = &*RED_FIVE;
+        let evaluation = evaluations(&case.lookahead, &case.ctx)
+            .into_iter()
+            .find(|evaluation| evaluation.discard == tile("1p"))
+            .expect("打牌候補がある");
+        let tiles = hand_tiles(&case.ctx);
+        let variant = case
+            .lookahead
+            .candidates
+            .iter()
+            .find(|candidate| candidate.discard == tile("1p"))
+            .expect("打牌候補の枝がある")
+            .draw(tile("5s"))
+            .expect("受け入れ牌の枝がある")
+            .variants
+            .iter()
+            .find(|variant| !variant.drawn_tile.is_red())
+            .expect("黒5の枝がある");
+        let next = variant.next_discard.as_ref().expect("2手目の打牌がある");
+        let (concealed_tiles, discarded_tiles) =
+            prospective_tenpai_branch_tiles(&tiles, &evaluation, variant.drawn_tile, next)
+                .expect("枝の物理牌を組み立てられる");
+        let tenpai = ProspectiveTenpai {
+            concealed_tiles: &concealed_tiles,
+            acceptance: &next.acceptance_after_discard,
+            discarded_tiles: &discarded_tiles,
+        };
+
+        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        // まだ評価していないテンパイは、下限のために評価せず確定しないままにする。
+        let (floor, hits, misses) =
+            tenpai_value_memo_counter::count_during(|| valuator.memoized_han_floor(&tenpai));
+        assert_eq!(floor, ProspectiveHanFloor::Unknown);
+        assert_eq!((hits, misses), (0, 0));
+
+        // production の選択値を求めると、同じ点数計算から下限も載る。
+        assert!(valuator.tenpai_value(&tenpai).is_some());
+        let (floor, hits, misses) =
+            tenpai_value_memo_counter::count_during(|| valuator.memoized_han_floor(&tenpai));
+        assert_ne!(floor, ProspectiveHanFloor::Unknown);
+        assert_eq!((hits, misses), (0, 0));
+    }
 
     #[test]
     fn the_han_verdict_keeps_the_weakest_branch() {

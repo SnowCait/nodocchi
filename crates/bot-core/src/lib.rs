@@ -154,9 +154,9 @@ pub use open_hand_threat::{
 };
 pub use prospective_value::{
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
-    ProspectiveDrawVariantValue, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
-    ProspectiveOutcome, ProspectiveTenpaiValue, ProspectiveUnavailable, ProspectiveWaitValue,
-    ProspectiveWinningTileValue,
+    ProspectiveDrawVariantValue, ProspectiveHanFloor, ProspectiveHanVerdict,
+    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveTenpaiValue,
+    ProspectiveUnavailable, ProspectiveWaitValue, ProspectiveWinningTileValue,
 };
 pub use push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState, PushPullReason,
@@ -188,7 +188,7 @@ pub use tenpai_continuation::{
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
     TenpaiSelfTsumoComparison,
 };
-pub use tenpai_scoring::{TenpaiVariantUnknownReason, TenpaiVariantValue};
+pub use tenpai_scoring::{TenpaiVariantHan, TenpaiVariantUnknownReason, TenpaiVariantValue};
 pub use threat::{
     FixedMeldValueFacts, MeldKindCounts, MeldThreatDiagnostic, MeldThreatFacts,
     PlayerThreatDiagnostic, PlayerThreatFacts, PlayerThreatInputs, ValueHonorMeldCounts,

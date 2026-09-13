@@ -78,7 +78,8 @@
 //! ```text
 //! 現在の effective shanten == 2
 //! AND 鳴き後の最良打牌で effective shanten == 1
-//! AND 鳴き後の将来到達テンパイの確定翻数が CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
+//! AND 鳴き後1向聴から次の Progress ツモで直接到達するテンパイの確定翻数が
+//!     CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
 //! AND Call 後の自分の残り自摸機会 >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS
 //! AND 値比較の結論が Pass (`PassSelfTsumoNotLower`)
 //! ```
@@ -136,7 +137,7 @@
 //! `現在2向聴 → 鳴き後1向聴` の候補に限り、値比較が Pass と結論した場合でも
 //!
 //! ```text
-//! 鳴き後の将来到達テンパイの確定翻数 >= CALL_TWO_SHANTEN_SPEED_MIN_HAN
+//! 鳴き後1向聴から直接到達するテンパイの確定翻数 >= CALL_TWO_SHANTEN_SPEED_MIN_HAN
 //! AND Call 後の自分の残り自摸機会 >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS
 //! ```
 //!
@@ -148,22 +149,41 @@
 //! | 材料 | source of truth |
 //! | --- | --- |
 //! | Call 後の残り自摸機会 | [`own_future_draws`] |
-//! | 将来到達テンパイの確定翻数 | [`prospective_tenpai_han_verdict`] |
+//! | 直接到達テンパイの確定翻数 | [`direct_progress_han_verdict`] |
 //!
 //! 残り自摸機会は巡目や河の枚数から推測せず、鳴き後の打牌選択と self-tsumo continuation が使う
 //! 既存の計算をそのまま読む。確定できない局面ではこの policy を適用せず、従来の Call / Pass
 //! 比較へ戻す。
 //!
+//! ## 打点条件が見る範囲
+//!
 //! 翻数は現在手牌のドラ枚数から推測せず、鳴き後の実際の手牌 state から到達するテンパイを既存
 //! prospective scoring で評価した結果だけを読む。ドラ・赤ドラは既存 scoring のとおり含み、鳴いた
 //! ことで消えるリーチ・門前清自摸和は production のリーチ判断が選んだ baseline がダマになるので
-//! 加算されない。複数の将来到達テンパイの畳み方は既存 prospective scoring の集約
-//! ([`prospective_tenpai_han_verdict`]) が持ち、テンパイへ到達する枝のうち1つでも翻数が足りない
-//! / 確定できないものがあれば policy を適用しない。向聴・役・ドラ・点数計算をこの層で持たない。
+//! 加算されない。向聴・役・ドラ・点数計算をこの層で持たない。
 //!
-//! 将来打点の評価は安価な残り自摸機会の条件を満たす候補だけで行い、満たさない局面へ高コストな
-//! 評価を足すことはない。`Reused` 候補は先行候補の結果をそのまま複製するので、同じ鳴き後 state
-//! を2回評価しない。
+//! 見るのは **鳴き後1向聴から次の Progress ツモで直接テンパイになる枝だけ** で、SameShanten 手
+//! 変わりを経由する枝やその先の continuation は含まない。つまりこの条件は
+//!
+//! ```text
+//! 直接到達する全ての枝・全ての生きた和了牌 variant で CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
+//! ```
+//!
+//! であって、「1向聴 continuation の全ての到達テンパイで3翻以上」ではない。この policy のためだけ
+//! に SameShanten downstream を追加探索すると探索コストが大きくなるため、意図して範囲を限定した
+//! heuristic である。限定した範囲の中では conservative に畳み、1つでも翻数が足りない / 確定でき
+//! ない枝があれば policy を適用しない。畳み方は既存 prospective scoring の集約
+//! ([`direct_progress_han_verdict`]) が持つ。
+//!
+//! ## 判定にかかるコスト
+//!
+//! 翻数の判定は鳴き後1向聴の打牌選択が既に行った前方評価から回収する。枝は
+//! [`select_best_iishanten_post_call_discard`] が選択に使った探索結果そのもので、各テンパイの
+//! 確定打点も探索中の terminal scoring が求めた値をそのまま読むので、判定のために候補を探索し
+//! 直すことも同じテンパイを点数計算し直すこともない。
+//!
+//! 判定を要求するのは安価な残り自摸機会の条件を満たす局面だけで、満たさない局面では何も足さない。
+//! `Reused` 候補は先行候補の結果をそのまま複製するので、同じ鳴き後 state を2回評価しない。
 //!
 //! # Call と Pass の重ね合わせ
 //!
@@ -206,9 +226,9 @@ use bot_logic::{
     OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     awaiting_draw_expected_self_tsumo_value, awaiting_draw_two_shanten_expected_self_tsumo_value,
     best_discard_selection_index, calculate_acceptance_with_fixed_melds_and_visible_tiles,
-    calculate_shanten_with_fixed_melds, diagnose_lookahead_candidate,
-    discard_tenpai_wait_availability, evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku,
-    split_discarded_tile, tenpai_completed_hands,
+    calculate_shanten_with_fixed_melds, discard_tenpai_wait_availability,
+    evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku, split_discarded_tile,
+    tenpai_completed_hands,
 };
 
 use crate::action::LegalAction;
@@ -216,16 +236,13 @@ use crate::context::GameContext;
 use crate::damaten_value::damaten_baseline_context;
 use crate::decision_timing::{CallCandidateElapsed, CallCandidateTimer, CallDecisionTimer};
 use crate::discard_selection::{
-    DiscardActionSelection, LookaheadDiagnosticScope, available_parallelism, lookahead_inputs,
+    DiscardActionSelection, LookaheadDiagnosticScope, available_parallelism,
     lookahead_inputs_with_own_future_draws, own_future_draws, post_call_discard_evaluations,
     select_best_iishanten_post_call_discard, select_discard_action_with_evaluation,
     with_production_iishanten_continuation,
 };
 use crate::kuikae::forbidden_discards_after_call;
-use crate::prospective_value::{
-    ProductionProspectiveValuator, ProspectiveHanVerdict, evaluate_prospective_candidate_value,
-    prospective_tenpai_han_verdict,
-};
+use crate::prospective_value::{ProductionProspectiveValuator, ProspectiveHanVerdict};
 use crate::push_pull::{
     PushPullDecision, PushPullMode, decide_push_pull, push_pull_inputs_from_selected_tenpai,
 };
@@ -245,8 +262,8 @@ const CALL_CONSUMED_TILE_COUNT: usize = 2;
 /// 鳴き後1向聴の比較だけで判断する、もう1つの現在向聴数。
 pub const CALL_TWO_SHANTEN_SHANTEN: i8 = 2;
 
-/// `現在2向聴 → Call → 打牌 → 1向聴` を速度優先で鳴くために必要な、鳴き後の将来到達テンパイの
-/// 確定翻数 [翻]。inclusive。
+/// `現在2向聴 → Call → 打牌 → 1向聴` を速度優先で鳴くために必要な、鳴き後1向聴から直接到達する
+/// テンパイの確定翻数 [翻]。inclusive。
 pub const CALL_TWO_SHANTEN_SPEED_MIN_HAN: u8 = 3;
 
 /// 同じ速度優先 policy が必要とする、Call 後に自分へ残っている自摸機会 [回]。inclusive。
@@ -282,8 +299,8 @@ pub enum CallDecisionReason {
     EligibleIishantenSelfTsumo,
     /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue が Pass より厳密に高い。
     EligibleTwoShantenSelfTsumo,
-    /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue は Pass 以下だが、鳴き後の将来
-    /// 到達テンパイの確定打点と残り自摸機会が速度優先 policy を満たす。
+    /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue は Pass 以下だが、鳴き後1向聴から
+    /// 直接到達するテンパイの確定打点と残り自摸機会が速度優先 policy を満たす。
     EligibleTwoShantenSpeed,
     /// 他家にリーチ者がいる。今回の鳴きは押し引きへ通さない。
     OpponentReached,
@@ -353,16 +370,16 @@ pub enum CallTwoShantenPassEvaluation {
 /// production が使用した `現在2向聴 → Call → 打牌 → 1向聴` の速度優先 policy の判断材料。
 ///
 /// 値はどちらも既存 layer の結果そのままで、残り自摸機会は打牌選択と同じ
-/// [`own_future_draws`]、翻数は既存 prospective scoring の集約
-/// ([`prospective_tenpai_han_verdict`]) を使う。
+/// [`own_future_draws`]、翻数は鳴き後1向聴の打牌選択が使った前方評価から回収した
+/// [`direct_progress_han_verdict`] の結論を使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallTwoShantenSpeedDiagnostic {
     /// Call 後に自分へ残っている自摸機会 [回]。山の残枚数が unknown な局面では `None`。
     pub own_future_draws: Option<u32>,
-    /// 鳴き後の最良打牌から到達する将来テンパイの確定翻数が
-    /// [`CALL_TWO_SHANTEN_SPEED_MIN_HAN`] 以上か。
+    /// 鳴き後の最良打牌から次の Progress ツモで直接到達するテンパイの確定翻数が
+    /// [`CALL_TWO_SHANTEN_SPEED_MIN_HAN`] 以上か。SameShanten を経由する枝は含まない。
     ///
-    /// 残り自摸機会の条件で先に落ちた候補では高コストな将来打点を評価しないので `None`。
+    /// 残り自摸機会の条件で先に落ちた候補では判定を要求しないので `None`。
     pub han: Option<ProspectiveHanVerdict>,
     /// 通常の Call / Pass 比較では Pass になる候補を、この policy が Call へ変えたか。
     pub overrides_pass: bool,
@@ -1387,89 +1404,50 @@ fn evaluate_two_shanten_call_to_iishanten(
 ) -> CallDecisionReason {
     let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
     melds.push(inputs.meld.clone());
-    let Some((evaluation, call_value)) = select_best_iishanten_post_call_discard(
+    // 残り自摸機会の条件を満たす局面だけ、同じ前方評価から速度優先 policy の翻数判定も回収する。
+    let own_future_draws = own_future_draws(ctx);
+    let required_han = speed_required_han(own_future_draws);
+    let Some(selection) = select_best_iishanten_post_call_discard(
         ctx,
         &inputs.post_call_tiles,
         &melds,
         &inputs.post_call_discards,
+        required_han,
     ) else {
         return CallDecisionReason::NoPostCallDiscard;
     };
-    let post_call_shanten = evaluation.min_shanten_after_discard();
+    let post_call_shanten = selection.evaluation.min_shanten_after_discard();
     if post_call_shanten != CALL_CURRENT_SHANTEN {
-        candidate.post_call_discard = Some(evaluation);
+        candidate.post_call_discard = Some(selection.evaluation);
         return CallDecisionReason::PostCallNotIishanten;
     }
 
-    let speed = two_shanten_speed_facts(ctx, &inputs.post_call_tiles, &melds, &evaluation);
-    candidate.post_call_discard = Some(evaluation);
+    candidate.post_call_discard = Some(selection.evaluation);
     candidate.two_shanten_self_tsumo = Some(CallTwoShantenSelfTsumoDiagnostic {
         reaction_source_player: ctx.reaction_source_player(),
         pass_evaluation: CallTwoShantenPassEvaluation::Full,
         pass_expected_self_tsumo_value: None,
-        call_expected_self_tsumo_value: call_value,
+        call_expected_self_tsumo_value: selection.expected_self_tsumo_value,
         comparison: CallIishantenComparison::Unknown,
-        speed,
+        speed: CallTwoShantenSpeedDiagnostic {
+            own_future_draws,
+            han: selection.direct_progress_han,
+            overrides_pass: false,
+        },
     });
     // Pass の評価はここでは行わないので、比較が終わるまでは未確定の理由を置く。
     CallDecisionReason::IishantenSelfTsumoUnknown
 }
 
-// 速度優先 policy の判断材料。安価な残り自摸機会を先に見て、満たす候補だけ将来打点を評価する。
+// 速度優先 policy が求める翻数。安価な残り自摸機会の条件を満たす局面だけ判定を要求する。
 //
 // 残り自摸機会は巡目や河の枚数から推測せず、鳴き後の打牌選択と self-tsumo continuation が使う
-// 既存の [`own_future_draws`] をそのまま読む。確定できない局面では将来打点も評価せず、policy を
-// 適用しない材料としてそのまま残す。
-fn two_shanten_speed_facts(
-    ctx: &GameContext,
-    post_call_tiles: &[TileId],
-    melds: &[Meld],
-    evaluation: &DiscardEvaluation,
-) -> CallTwoShantenSpeedDiagnostic {
-    let draws = own_future_draws(ctx);
-    let han = draws
+// 既存の [`own_future_draws`] をそのまま読む。確定できない局面と閾値未満の局面では判定を要求せず、
+// policy も適用しない。
+fn speed_required_han(own_future_draws: Option<u32>) -> Option<u8> {
+    own_future_draws
         .is_some_and(|draws| draws >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS)
-        .then(|| {
-            post_call_prospective_han_verdict(
-                ctx,
-                post_call_tiles,
-                melds,
-                evaluation,
-                CALL_TWO_SHANTEN_SPEED_MIN_HAN,
-            )
-        });
-    CallTwoShantenSpeedDiagnostic {
-        own_future_draws: draws,
-        han,
-        overrides_pass: false,
-    }
-}
-
-// 鳴き後の実際の手牌 state から到達する将来テンパイの確定翻数を、既存 prospective scoring で
-// 判定する。
-//
-// 評価対象は鳴き後の副露・concealed hand と、鳴き後の打牌比較が選んだ打牌そのもの。枝の展開も
-// 打点も既存の2手先評価と将来打点評価に委ね、向聴・役・ドラ・点数計算をこの層で持たない。
-// 複数の将来テンパイの畳み方も既存 prospective scoring の集約
-// ([`prospective_tenpai_han_verdict`]) が source of truth で、確定しない枝を除外しない。
-fn post_call_prospective_han_verdict(
-    ctx: &GameContext,
-    post_call_tiles: &[TileId],
-    melds: &[Meld],
-    evaluation: &DiscardEvaluation,
-    required_han: u8,
-) -> ProspectiveHanVerdict {
-    let valuator = ProductionProspectiveValuator::new_with_hand_state(ctx, Some(melds));
-    let inputs = lookahead_inputs(
-        ctx,
-        post_call_tiles,
-        &valuator,
-        LookaheadDiagnosticScope::None,
-    );
-    let candidate = diagnose_lookahead_candidate(&inputs, evaluation);
-    let value =
-        evaluate_prospective_candidate_value(&valuator, post_call_tiles, evaluation, &candidate);
-    prospective_tenpai_han_verdict(&candidate, &value, required_han)
+        .then_some(CALL_TWO_SHANTEN_SPEED_MIN_HAN)
 }
 
 // 1向聴のままの Call 候補がある場合だけ Pass を1回評価し、全候補へ同じ値を配る。
@@ -2446,8 +2424,9 @@ mod tests {
 
     #[test]
     fn a_high_value_two_shanten_call_is_taken_even_when_the_pass_value_is_not_lower() {
-        // 3翻以上確定 + 残り自摸10回以上の 2向聴 → 1向聴 は、Call の ExpectedSelfTsumoValue が
-        // Pass 以下でも速度優先で鳴く。同値と Call 側が低い場合の両方を含む。
+        // 直接到達テンパイが3翻以上確定 + 残り自摸10回以上の 2向聴 → 1向聴 は、Call の
+        // ExpectedSelfTsumoValue が Pass 以下でも速度優先で鳴く。同値と Call 側が低い場合の
+        // 両方を含む。
         let ctx = valued_two_shanten_reaction_context(
             &TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,
@@ -2605,12 +2584,70 @@ mod tests {
     }
 
     #[test]
+    fn the_two_shanten_speed_verdict_does_not_change_the_post_call_selection() {
+        // 翻数の判定は鳴き後1向聴の打牌選択が使った前方評価から回収するだけ。要求の有無で選ぶ
+        // 打牌も Call 側 ExpectedSelfTsumoValue も変わらない。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let (kind, called_tile, consumed) = normalize_call(&action).expect("Chi / Pon");
+        let (meld, post_call_tiles) =
+            call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, called_tile, consumed)
+                .expect("合法な鳴き");
+        let forbidden = forbidden_discards_after_call(&meld);
+        let post_call_fixed_meld_count =
+            FixedMeldCount::new(ctx.own_fixed_meld_count().expect("副露数").get() + 1)
+                .expect("上限内");
+        let evaluations = post_call_discard_evaluations(
+            &ctx,
+            &post_call_tiles,
+            post_call_fixed_meld_count,
+            &forbidden,
+        );
+        let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+        melds.push(meld);
+
+        let without = select_best_iishanten_post_call_discard(
+            &ctx,
+            &post_call_tiles,
+            &melds,
+            &evaluations,
+            None,
+        )
+        .expect("鳴き後の打牌を選べる");
+        let with = select_best_iishanten_post_call_discard(
+            &ctx,
+            &post_call_tiles,
+            &melds,
+            &evaluations,
+            Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN),
+        )
+        .expect("鳴き後の打牌を選べる");
+
+        assert_eq!(with.evaluation, without.evaluation);
+        assert_eq!(
+            with.expected_self_tsumo_value,
+            without.expected_self_tsumo_value
+        );
+        assert_eq!(without.direct_progress_han, None);
+        assert_eq!(
+            with.direct_progress_han,
+            Some(ProspectiveHanVerdict::AtLeast)
+        );
+    }
+
+    #[test]
     fn the_two_shanten_speed_facts_come_from_the_existing_layers() {
         // 残り自摸機会は既存の own_future_draws、翻数は鳴き後の手牌 state を既存 prospective
         // scoring で評価した結果。どちらも診断専用の計算を持たない。
         let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
 
-        // 白 Pon + 發 Pon の後に 中 を Pon すると大三元。どの将来テンパイでも3翻以上が確定する。
+        // 白 Pon + 發 Pon の後に 中 を Pon すると大三元。直接到達するどのテンパイでも3翻以上が
+        // 確定する。
         let ctx = valued_two_shanten_reaction_context(
             &TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,
@@ -2627,8 +2664,8 @@ mod tests {
         assert_eq!(speed.han, Some(ProspectiveHanVerdict::AtLeast));
         assert!(speed.is_satisfied());
 
-        // 役牌2翻だけの手は要求翻数に届かない。赤5p を引き当てる枝だけは3翻になるが、確定
-        // 翻数が足りない枝があれば候補全体が届かない扱いになる。
+        // 役牌2翻だけの手は要求翻数に届かない。赤5p を引き当てる枝だけは3翻になるが、直接
+        // 到達する枝に確定翻数が足りないものがあれば候補全体が届かない扱いになる。
         let low_value = low_value_two_shanten_reaction_context(
             &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,

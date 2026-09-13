@@ -99,20 +99,31 @@ impl TenpaiVariantValue {
         )
     }
 
-    /// 要求翻数以上が確定しているか。確定できない場合は `None`。
-    ///
-    /// 名前の付いた役満は翻数を持たないが、既存 scoring が役満として確定させているので必ず
-    /// 満たす。役なしは満たさず、翻数を確定できない variant は満たすと推測しない。
-    pub fn is_at_least_han(self, required: u8) -> Option<bool> {
+    /// この variant の確定翻数。要求翻数との比較は読む側の policy が行う。
+    pub fn han(self) -> TenpaiVariantHan {
         match self {
             Self::Known {
                 is_yakuman: true, ..
-            } => Some(true),
-            Self::Known { han: Some(han), .. } => Some(han >= required),
-            Self::Known { han: None, .. } | Self::Unknown(_) => None,
-            Self::NoYaku => Some(false),
+            } => TenpaiVariantHan::Yakuman,
+            Self::Known { han: Some(han), .. } => TenpaiVariantHan::Han(han),
+            Self::Known { han: None, .. } | Self::Unknown(_) => TenpaiVariantHan::Unknown,
+            // 役が無い variant は「翻数を確定できない」ではなく0翻として確定している。
+            Self::NoYaku => TenpaiVariantHan::Han(0),
         }
     }
+}
+
+/// 和了牌の物理牌1つ分の確定翻数。
+///
+/// 名前の付いた役満は翻数を持たないため、翻数と別の結論として保持する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TenpaiVariantHan {
+    /// 既存 scoring が確定させた合計翻数 [翻]。役・ドラ・赤ドラを含み、役なしは0翻。
+    Han(u8),
+    /// 名前の付いた役満として確定した。
+    Yakuman,
+    /// 翻数を確定できない。要求翻数を満たすとも満たさないとも結論しない。
+    Unknown,
 }
 
 /// 打点を確定できない理由。
@@ -403,10 +414,9 @@ mod tests {
     use bot_logic::{FixedMeldCount, Meld, MeldKind, TileCounts, TileType, tenpai_completed_hands};
 
     #[test]
-    fn the_required_han_is_only_met_by_a_confirmed_han_count() {
-        // 翻数は既存 scoring が確定させた値だけで判定する。役なしは満たさず、翻数を確定できない
-        // variant は満たすとも満たさないとも結論しない。名前の付いた役満は翻数を持たないが、
-        // 役満として確定しているので必ず満たす。
+    fn the_variant_han_comes_from_the_existing_scoring() {
+        // 翻数は既存 scoring が確定させた値そのまま。役なしは0翻として確定し、翻数を確定できない
+        // variant は推測しない。名前の付いた役満は翻数を持たないので別の結論として保持する。
         let payment = bot_logic::evaluate_payment(1280, false, WinMethod::Ron).expect("子のロン");
         let known = |han: Option<u8>, is_yakuman: bool| TenpaiVariantValue::Known {
             payment,
@@ -414,16 +424,14 @@ mod tests {
             han,
         };
 
-        assert_eq!(known(Some(3), false).is_at_least_han(3), Some(true));
-        assert_eq!(known(Some(4), false).is_at_least_han(3), Some(true));
-        assert_eq!(known(Some(2), false).is_at_least_han(3), Some(false));
-        assert_eq!(known(None, true).is_at_least_han(3), Some(true));
-        assert_eq!(known(None, false).is_at_least_han(3), None);
-        assert_eq!(TenpaiVariantValue::NoYaku.is_at_least_han(3), Some(false));
+        assert_eq!(known(Some(3), false).han(), TenpaiVariantHan::Han(3));
+        assert_eq!(known(Some(2), false).han(), TenpaiVariantHan::Han(2));
+        assert_eq!(known(None, true).han(), TenpaiVariantHan::Yakuman);
+        assert_eq!(known(None, false).han(), TenpaiVariantHan::Unknown);
+        assert_eq!(TenpaiVariantValue::NoYaku.han(), TenpaiVariantHan::Han(0));
         assert_eq!(
-            TenpaiVariantValue::Unknown(TenpaiVariantUnknownReason::IndeterminateBonusHan)
-                .is_at_least_han(3),
-            None
+            TenpaiVariantValue::Unknown(TenpaiVariantUnknownReason::IndeterminateBonusHan).han(),
+            TenpaiVariantHan::Unknown
         );
     }
 

@@ -19,8 +19,8 @@ use crate::offense_value::{
     evaluate_tenpai_offense_with_hands,
 };
 use crate::prospective_value::{
-    ProductionProspectiveValuator, ProspectiveLookaheadDiagnostic,
-    evaluate_prospective_lookahead_value,
+    ProductionProspectiveValuator, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
+    direct_progress_han_verdict, evaluate_prospective_lookahead_value,
 };
 use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_named_yakuman_damaten,
@@ -50,7 +50,8 @@ use bot_logic::{
     evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_for_candidate_instrumented,
-    forward_metrics_from_lookahead, forward_metrics_instrumented, forward_target_mask,
+    forward_metrics_from_lookahead, forward_metrics_instrumented,
+    forward_metrics_with_lookahead_for_candidate, forward_target_mask,
     resolve_two_shanten_expected_self_tsumo_value_axis, split_discarded_tile,
     three_shanten_progress_only_self_tsumo_value_for_candidate,
     three_shanten_progress_self_tsumo_value_for_candidate, tsumo_hit_probability,
@@ -2618,17 +2619,34 @@ pub(crate) fn post_call_discard_evaluations(
     evaluations
 }
 
+/// 鳴き後も1向聴の打牌候補の選択結果。
+///
+/// `expected_self_tsumo_value` は選択に使った metric そのもので、診断表示のために探索し直さない。
+pub(crate) struct PostCallIishantenSelection {
+    pub evaluation: DiscardEvaluation,
+    pub expected_self_tsumo_value: Option<u64>,
+    /// 要求翻数を渡した場合だけ求める、選んだ打牌から直接到達するテンパイの確定打点の判定。
+    ///
+    /// 判定は選択に使った探索そのものから回収するので、候補を2回探索しない。要求しなかった場合は
+    /// `None`。
+    pub direct_progress_han: Option<ProspectiveHanVerdict>,
+}
+
 /// 鳴き後も1向聴の打牌候補を、通常打牌と同じ forward/self-tsumo semantics で選ぶ。
 ///
 /// `melds` は今回の鳴きを含む評価対象副露で、打牌評価の fixed meld count と terminal scoring /
-/// future Reach legality の両方を同じ state から導出する。返す self-tsumo value は選択に使った
-/// metric そのもので、診断表示のために探索し直さない。
+/// future Reach legality の両方を同じ state から導出する。
+///
+/// `required_han` を渡すと、選択に使った前方評価の探索結果からそのまま
+/// [`direct_progress_han_verdict`] を求める。探索も terminal scoring も候補1件につき1回だけで、
+/// 判定のための追加探索は行わない。
 pub(crate) fn select_best_iishanten_post_call_discard(
     context: &GameContext,
     tiles: &[TileId],
     melds: &[Meld],
     evaluations: &[DiscardEvaluation],
-) -> Option<(DiscardEvaluation, Option<u64>)> {
+    required_han: Option<u8>,
+) -> Option<PostCallIishantenSelection> {
     let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds));
     // 鳴いた後の1向聴候補も、通常打牌と同じ1向聴 continuation の設定で比べる。Pass 側と同じ
     // 尺度に揃えるためで、候補の絞り込みも comparator も既存のまま。
@@ -2638,21 +2656,28 @@ pub(crate) fn select_best_iishanten_post_call_discard(
         &valuator,
         LookaheadDiagnosticScope::None,
     ));
-    let metrics: Vec<_> = evaluations
-        .iter()
-        .map(|evaluation| {
-            if evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN {
-                forward_metrics_for_candidate(&inputs, evaluation)
-            } else {
-                ForwardMetrics::default()
-            }
-        })
-        .collect();
+    let mut metrics: Vec<ForwardMetrics> = Vec::with_capacity(evaluations.len());
+    let mut verdicts: Vec<Option<ProspectiveHanVerdict>> = Vec::with_capacity(evaluations.len());
+    for evaluation in evaluations {
+        if evaluation.min_shanten_after_discard() != IISHANTEN_SHANTEN {
+            metrics.push(ForwardMetrics::default());
+            verdicts.push(None);
+            continue;
+        }
+        // 集計値と枝を同じ探索から受け取る。翻数を要求されない場合も探索は1回で同じ値になる。
+        let (candidate_metrics, lookahead) =
+            forward_metrics_with_lookahead_for_candidate(&inputs, evaluation);
+        verdicts.push(required_han.map(|required_han| {
+            direct_progress_han_verdict(&valuator, tiles, evaluation, &lookahead, required_han)
+        }));
+        metrics.push(candidate_metrics);
+    }
     let index = best_discard_selection_index_with_forward_metrics(evaluations, &metrics)?;
-    Some((
-        evaluations[index].clone(),
-        metrics[index].expected_self_tsumo_value,
-    ))
+    Some(PostCallIishantenSelection {
+        evaluation: evaluations[index].clone(),
+        expected_self_tsumo_value: metrics[index].expected_self_tsumo_value,
+        direct_progress_han: verdicts[index],
+    })
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
