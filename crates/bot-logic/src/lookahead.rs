@@ -102,10 +102,11 @@
 //! その打牌後の1向聴 → 向聴数を下げるツモ → 3手目の最良打牌 → テンパイ
 //! ```
 //!
-//! だけを進めた期待支払いを求め、既存 comparator の1向聴 self-tsumo 軸
+//! と、指定された深度 ([`SameShantenContinuationDepth`]) で手変わりがまだ残っていればその先の
+//! 段も進めた期待支払いを求め、既存 comparator の1向聴 self-tsumo 軸
 //! ([`ForwardMetrics::expected_self_tsumo_value`]) へそのまま渡して2手目を選ぶ。集計する枝
-//! そのものを選択に使うため、選んだ枝と集計する枝は一致する。手変わりの先でもう一度手変わり
-//! する枝は追わないので、探索の深さも枝集合も変わらない。
+//! そのものを選択に使うため、選んだ枝と集計する枝はどちらの深度でも一致する。深度を使い切った
+//! 先の手変わりは追わないので、探索の深さも枝集合も深度の指定だけで決まる。
 //!
 //! 確率も打点も terminal scoring も1段目と同じ helper を通り、この選択のための係数も threshold
 //! も持たない。cohort に確定できない値が1件でもあれば軸ごと落ちて既存の浅い比較へ戻り、確定
@@ -342,21 +343,22 @@ impl DiscardLookaheadDiagnostic {
 
     /// 構築済みの枝から self-tsumo continuation の期待支払いを集計する。
     ///
-    /// 対象は
+    /// 対象は、この枝を構築した探索の深度 ([`SameShantenContinuationDepth`]) が許す経路。
     ///
     /// ```text
     /// A. 1回目のツモが向聴数を下げる → 2手目の最良打牌 → テンパイ
     /// B. 1回目のツモが向聴数を維持する → 2手目の最良打牌 → 1向聴
     ///    → 2回目のツモが向聴数を下げる → 3手目の最良打牌 → テンパイ
+    /// C. 手変わりを2回続けた先のテンパイ。深度 `Twice` の探索だけが持つ
     /// ```
     ///
-    /// の2種類で、値は Σ(その経路を引く確率 × テンパイ到達後の期待ツモ支払い)
+    /// 値は Σ(その経路を引く確率 × テンパイ到達後の期待ツモ支払い)
     /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。確率も期待支払いも
     /// [`crate::self_tsumo`] の閉形式そのままで、固定 horizon も係数も持たない。
     ///
-    /// 2回続けて向聴数を維持する枝は今回の探索範囲外で、寄与 0 になる (未確定ではない)。
-    /// テンパイへ到達した枝のツモ打点を1つでも確定できない場合と、手変わりの枝の先を探索して
-    /// いない場合は 0 点へ潰さず `None`。
+    /// 深度を超える手変わりの枝 (`Once` の C、`Twice` の3回続けた手変わり) は探索範囲外で、
+    /// 寄与 0 になる (未確定ではない)。テンパイへ到達した枝のツモ打点を1つでも確定できない場合と、
+    /// 手変わりの枝の先を探索していない場合は 0 点へ潰さず `None`。
     pub fn expected_self_tsumo_value(&self, facts: SelfTsumoFacts) -> Option<u64> {
         expected_self_tsumo_value_from_draws(&self.draws, facts)
     }
@@ -708,7 +710,8 @@ impl IishantenContinuationScope {
 ///
 /// [`Self::Once`] は `Progress` と `SameShanten -> Progress` までを追う。[`Self::Twice`] は
 /// `SameShanten -> SameShanten -> Progress` をもう1段だけ許す。段数は2回で閉じていて、任意深度の
-/// 再帰へは一般化しない。どちらを使うかは呼び出し側 (bot-core の打牌選択設定) が決める。
+/// 再帰へは一般化しない。どちらを使うかは呼び出し側 (bot-core の打牌選択設定) が決め、現行
+/// production の1向聴 continuation は [`Self::Twice`] を指定する。
 ///
 /// 変わるのは追う枝の範囲だけで、ツモ牌の列挙・残枚数・物理牌 variant・ツモ後の最良打牌の
 /// 比較・terminal scoring・Reach / Damaten・確率・残り自摸機会・unknown 伝播はどちらも同じ
@@ -2555,16 +2558,17 @@ fn after_draw(facts: SelfTsumoFacts) -> SelfTsumoFacts {
 // 手変わりのツモ後 (打牌してもまだ同じ向聴数) の最良打牌を、その打牌後の1向聴 continuation で
 // 選ぶ。
 //
-// 比較に使う値は「その打牌後の state を起点に、既存の1向聴 continuation を Progress 枝だけ
-// 進めた期待支払い」で、この枝から集計する経路そのもの。手変わりの枝の先ではもう一度手変わり
-// する枝を追わないため、選択に使う枝集合と集計する枝集合が一致する。
+// 比較に使う値は「その打牌後の state を起点に、既存の1向聴 continuation を残りの深度
+// ([`DownstreamScope`]) が許す枝だけ進めた期待支払い」で、この枝から集計する経路そのもの。進める
+// 枝の範囲は呼び出し元の深度指定だけで決まり、選択に使う枝集合と集計する枝集合はどちらの深度でも
+// 一致する。
 //
 // 値は既存 comparator の1向聴 self-tsumo 軸 ([`ForwardMetrics::expected_self_tsumo_value`]) へ
 // そのまま渡すので、比較順も cohort 単位の unknown 解決も既存のものを共有する。確定しない値を
 // 0 点として順位付けすることはなく、cohort に1件でも確定しない候補があれば軸ごと落ちて既存の
 // 浅い比較になる。
 //
-// 探索した Progress 枝は選ばれた打牌の先の段としてそのまま返し、同じ枝を2回探索しない。
+// 探索した枝は選ばれた打牌の先の段としてそのまま返し、同じ枝を2回探索しない。
 // 打牌候補が1件も無い場合だけ `None` で、呼び出し側が既存の選択へ戻る。
 //
 // 選ぶ打牌もその先の枝も state・horizon・追う枝の範囲だけで決まる純関数なので、memo を持つ
@@ -2860,8 +2864,8 @@ fn same_shanten_self_tsumo_value(
 // 2回続けて向聴数を維持した枝1つ分の期待支払い。3手目の打牌後の1向聴から向聴数を下げるツモで
 // 到達したテンパイだけを集計する。
 //
-// この段の先で3回目の手変わりは追わないため、そこは寄与 0 になる。段数はここで閉じていて、
-// 任意深度の再帰へは一般化しない。
+// 3回目の手変わりは最大深度 ([`SameShantenContinuationDepth::Twice`]) の外なので追わず、そこは
+// 寄与 0 になる。段数はこの2回で閉じていて、任意深度の再帰へは一般化しない。
 fn second_same_shanten_self_tsumo_value(
     first_remaining: u8,
     variant: &DrawVariantLookaheadDiagnostic,

@@ -30,7 +30,7 @@ cargo run -p bot-scenario -- \
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
 | `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ、B が production) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
-| `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = production / B: 2回まで) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
+| `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = legacy shallow depth / B: 2回まで = 現行 production) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
 | `--iishanten-selection-depth-comparison` | 任意 | 同じ深度 A/B を production comparator を通した最終打牌選択として比較。A は legacy shallow depth (旧 production)、B は現行 production depth (SameShanten 2回まで + exact same-state memo)。他の診断 option と併用不可 |
 | `--iishanten-selection-parallel-comparison` | 任意 | 同じ production B depth を逐次 / 候補単位並列で比較 (S / P2 / P4 / PA = `available_parallelism`)。候補の絞り込み・軸解決・comparator・選択打牌は既存 production selection をそのまま使う。PA が現行 production と同じ方式。他の診断 option と併用不可 |
 | `--two-shanten-full-parallel-comparison` | 任意 | 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価を逐次 / 2並列で比較 (S / P2)。Progress cohort・上位2候補の選び方・gate・comparator・選択打牌は既存 production selection をそのまま使う。P2 が現行 production と同じ方式。他の診断 option と併用不可 |
