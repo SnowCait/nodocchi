@@ -128,11 +128,16 @@
 //!
 //! # 翻数の下限
 //!
-//! 打点そのものとは別に、未来テンパイ1件の確定打点の下限 ([`ProspectiveHanFloor`]) も持つ。翻数は
-//! 既存 scoring が確定させた値 ([`TenpaiVariantHan`]) そのままで、この層では数え直さず、生きた
-//! 和了牌 variant すべてで畳むだけである。下限は選択値を求める点数計算と同じ profile から同時に
-//! 畳み、評価器の memo へ選択値と一緒に載せる。したがって下限を読む側が同じテンパイを評価し直す
-//! ことはない。
+//! 打点そのものとは別に、未来テンパイ1件の確定打点の下限 ([`ProspectiveHanFloor`]) も求められる。
+//! 翻数は既存 scoring が確定させた値 ([`TenpaiVariantHan`]) そのままで、この層では数え直さず、
+//! 生きた和了牌 variant すべてで畳むだけである。下限は選択値を求める点数計算と同じ profile から
+//! 同時に畳み、評価器の memo へ選択値と一緒に載せる。したがって下限を読む側が同じテンパイを評価し
+//! 直すことはない。
+//!
+//! 畳むのは下限を要求した評価器
+//! ([`ProductionProspectiveValuator::collecting_han_floor`]) だけである。既定では畳まないので、
+//! 下限を読まない通常打牌・通常の鳴き判断・その他の prospective evaluation へ集約コストを載せない。
+//! 要求の有無で選択値も探索も変わらない。
 //!
 //! その下限を打牌候補1件分へ畳んだものが [`direct_progress_han_verdict`] で、対象は
 //! **向聴数を進める枝 ([`DrawTransition::Progress`]) の先にある直接到達テンパイだけ** に限定する。
@@ -531,6 +536,11 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     evaluated: Cell<Option<Box<EvaluatedTenpai>>>,
     // この評価器が既に求めた未来テンパイごとの値。
     values: RefCell<EvaluatedTenpaiValueMemo>,
+    // 選択値を求めるついでに確定打点の下限も畳んで memo へ載せるか。
+    //
+    // 下限を読む経路 ([`Self::memoized_han_floor`]) だけが要求する観測値なので、要求しない
+    // 評価器では畳まない。既定は畳まないで、選択値も探索も有無で変わらない。
+    collects_han_floor: bool,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -566,7 +576,19 @@ impl<'a> ProductionProspectiveValuator<'a> {
                 .after_discard(FUTURE_AFTER_OWN_DRAW),
             evaluated: Cell::new(None),
             values: RefCell::new(EvaluatedTenpaiValueMemo::default()),
+            collects_han_floor: false,
         }
+    }
+
+    /// 選択値を求める点数計算のついでに、確定打点の下限 ([`ProspectiveHanFloor`]) も畳んで memo へ
+    /// 載せる評価器にする。
+    ///
+    /// 下限は [`Self::memoized_han_floor`] を読む経路だけが要求する観測値なので、要求しない
+    /// 評価器 (既定) では畳まない。有効にしても点数計算は選択値と同じ1回のままで、枝の探索も
+    /// 選択値も変わらない。
+    pub(crate) fn collecting_han_floor(mut self, collects: bool) -> Self {
+        self.collects_han_floor = collects;
+        self
     }
 
     /// 評価対象の副露済み面子数。2手先評価へ渡す値もここから取り、評価器と食い違わせない。
@@ -722,18 +744,19 @@ impl<'a> ProductionProspectiveValuator<'a> {
         value
     }
 
-    // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計) と、同じ profile から畳んだ確定打点の
-    // 下限。確定できない場合はそれぞれ `None` / `Unknown`。
+    // 選択に使う Σ(和了牌 variant 残枚数 × 支払い合計) と、要求された場合だけ同じ profile から
+    // 畳んだ確定打点の下限。選択値を確定できない場合は `None` で、下限を要求されていない場合も
+    // `None` を返す。
     //
     // 点数計算は1回だけ通す。下限は選択値の副産物として同じ profile から畳むので、後から読む側が
-    // 同じテンパイを評価し直す必要がない。
+    // 同じテンパイを評価し直す必要がない。下限を要求しない評価器では畳む処理そのものを通らない。
     fn selection_value(
         &self,
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
-    ) -> (Option<u64>, ProspectiveHanFloor) {
+    ) -> (Option<u64>, Option<ProspectiveHanFloor>) {
         let Some((baseline, ura_dora)) = self.scoring_inputs(mode, facts.can_ron()) else {
-            return (None, ProspectiveHanFloor::Unknown);
+            return (None, self.unknown_han_floor());
         };
         let profile = evaluate_tenpai_hand_value(
             &facts.hands,
@@ -741,7 +764,16 @@ impl<'a> ProductionProspectiveValuator<'a> {
             self.context.dora_indicators(),
             ura_dora,
         );
-        (weighted_total(&profile), han_floor(&profile))
+        (
+            weighted_total(&profile),
+            self.collects_han_floor.then(|| han_floor(&profile)),
+        )
+    }
+
+    // 点数計算を通せなかった場合に載せる下限。要求されていない評価器では何も載せない。
+    fn unknown_han_floor(&self) -> Option<ProspectiveHanFloor> {
+        self.collects_han_floor
+            .then_some(ProspectiveHanFloor::Unknown)
     }
 
     /// production の探索が既に求めた、この未来テンパイの確定打点の下限。
@@ -749,6 +781,9 @@ impl<'a> ProductionProspectiveValuator<'a> {
     /// 引くのは探索中に memo へ載せた値だけで、載っていない未来テンパイは探索も点数計算もやり
     /// 直さず [`ProspectiveHanFloor::Unknown`] にする。高打点の判定のために同じテンパイを2回
     /// 評価しないための入口。
+    ///
+    /// 下限を載せるのは [`Self::collecting_han_floor`] を有効にした評価器だけなので、要求して
+    /// いない評価器ではすべて `Unknown` になる。
     pub(crate) fn memoized_han_floor(&self, tenpai: &ProspectiveTenpai<'_>) -> ProspectiveHanFloor {
         ProspectiveTenpaiKey::new(tenpai)
             .and_then(|key| {
@@ -766,6 +801,9 @@ impl<'a> ProductionProspectiveValuator<'a> {
 // 翻数は既存 scoring の結論 ([`TenpaiVariantValue::han`]) そのままで、残枚数0の variant は到達
 // しないので寄与させない。生きた variant が1つも無い場合は下限を確定させない。
 fn han_floor(profile: &TenpaiHandValueProfile<'_>) -> ProspectiveHanFloor {
+    #[cfg(test)]
+    han_floor_counter::bump();
+
     let mut floor: Option<ProspectiveHanFloor> = None;
     for wait in profile.waits() {
         for winning_tile in wait.winning_tiles() {
@@ -802,12 +840,15 @@ impl ProspectiveTenpaiValuator for ProductionProspectiveValuator<'_> {
             .with_evaluated_tenpai(tenpai, |facts, mode| {
                 Some(self.selection_value(facts, mode))
             })
-            .unwrap_or((None, ProspectiveHanFloor::Unknown));
+            .unwrap_or_else(|| (None, self.unknown_han_floor()));
         if let Some(key) = key {
             let mut values = self.values.borrow_mut();
             let entry = values.entry(key).or_default();
             entry.selection = Some(value);
-            entry.han_floor = Some(floor);
+            // 下限を畳まなかった評価器では載せない。読む側は未記録を `Unknown` として扱う。
+            if floor.is_some() {
+                entry.han_floor = floor;
+            }
         }
         value
     }
@@ -899,7 +940,8 @@ struct EvaluatedTenpaiValues {
     tsumo: Option<Option<TenpaiTsumoValue>>,
     /// 選択値を求めた点数計算と同じ profile から畳んだ確定打点の下限。
     ///
-    /// 選択値と一緒に1回だけ求めるので、下限を読むために点数計算をやり直さない。
+    /// 選択値と一緒に1回だけ求めるので、下限を読むために点数計算をやり直さない。下限を要求して
+    /// いない評価器では畳まないので `None` のままになる。
     han_floor: Option<ProspectiveHanFloor>,
 }
 
@@ -1298,6 +1340,28 @@ mod tenpai_value_memo_counter {
     }
 }
 
+/// 確定打点の下限を畳んだ回数。下限を要求しない評価器では畳まないことを test から観測するため
+/// だけの counter で、production build には残らない。
+#[cfg(test)]
+pub(crate) mod han_floor_counter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn bump() {
+        COUNT.with(|count| count.set(count.get() + 1));
+    }
+
+    /// `body` の実行と、その間に下限を畳んだ未来テンパイの件数。
+    pub(crate) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64) {
+        let before = COUNT.with(Cell::get);
+        let value = body();
+        (value, COUNT.with(Cell::get) - before)
+    }
+}
+
 /// ダマ打点を評価した回数。合法 Reach が無い枝で評価しないことを test から観測するためだけの
 /// counter で、production build には残らない。
 #[cfg(test)]
@@ -1344,8 +1408,8 @@ mod tests {
 
     #[test]
     fn the_han_floor_is_only_read_from_the_evaluated_value() {
-        // 下限は選択値を求めた点数計算の副産物として memo に載る。読む側は memo を引くだけで、
-        // 載っていないテンパイのために評価し直さない。
+        // 下限は、要求した評価器だけが選択値を求めた点数計算の副産物として memo へ載せる。読む側は
+        // memo を引くだけで、載っていないテンパイのために評価し直さない。
         let case = &*RED_FIVE;
         let evaluation = evaluations(&case.lookahead, &case.ctx)
             .into_iter()
@@ -1374,15 +1438,29 @@ mod tests {
             discarded_tiles: &discarded_tiles,
         };
 
-        let valuator = ProductionProspectiveValuator::new(&case.ctx);
+        // 下限を要求していない既定の評価器は、選択値を求めても下限を畳まない。
+        let default_valuator = ProductionProspectiveValuator::new(&case.ctx);
+        let (value, folds) =
+            han_floor_counter::count_during(|| default_valuator.tenpai_value(&tenpai));
+        assert!(value.is_some());
+        assert_eq!(folds, 0);
+        assert_eq!(
+            default_valuator.memoized_han_floor(&tenpai),
+            ProspectiveHanFloor::Unknown
+        );
+
+        let valuator = ProductionProspectiveValuator::new(&case.ctx).collecting_han_floor(true);
         // まだ評価していないテンパイは、下限のために評価せず確定しないままにする。
         let (floor, hits, misses) =
             tenpai_value_memo_counter::count_during(|| valuator.memoized_han_floor(&tenpai));
         assert_eq!(floor, ProspectiveHanFloor::Unknown);
         assert_eq!((hits, misses), (0, 0));
 
-        // production の選択値を求めると、同じ点数計算から下限も載る。
-        assert!(valuator.tenpai_value(&tenpai).is_some());
+        // 選択値を求めると、同じ点数計算から下限も1回だけ畳まれて載る。選択値は要求の有無で
+        // 変わらない。
+        let (collected, folds) = han_floor_counter::count_during(|| valuator.tenpai_value(&tenpai));
+        assert_eq!(collected, value);
+        assert_eq!(folds, 1);
         let (floor, hits, misses) =
             tenpai_value_memo_counter::count_during(|| valuator.memoized_han_floor(&tenpai));
         assert_ne!(floor, ProspectiveHanFloor::Unknown);

@@ -2639,7 +2639,8 @@ pub(crate) struct PostCallIishantenSelection {
 ///
 /// `required_han` を渡すと、選択に使った前方評価の探索結果からそのまま
 /// [`direct_progress_han_verdict`] を求める。探索も terminal scoring も候補1件につき1回だけで、
-/// 判定のための追加探索は行わない。
+/// 判定のための追加探索は行わない。確定打点の下限を集める評価器にするのもこの場合だけで、
+/// 判定を要求しない呼び出しは既定の評価器のまま通る。
 pub(crate) fn select_best_iishanten_post_call_discard(
     context: &GameContext,
     tiles: &[TileId],
@@ -2647,7 +2648,8 @@ pub(crate) fn select_best_iishanten_post_call_discard(
     evaluations: &[DiscardEvaluation],
     required_han: Option<u8>,
 ) -> Option<PostCallIishantenSelection> {
-    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds));
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds))
+        .collecting_han_floor(required_han.is_some());
     // 鳴いた後の1向聴候補も、通常打牌と同じ1向聴 continuation の設定で比べる。Pass 側と同じ
     // 尺度に揃えるためで、候補の絞り込みも comparator も既存のまま。
     let inputs = with_production_iishanten_continuation(lookahead_inputs(

@@ -183,7 +183,10 @@
 //! 直すことも同じテンパイを点数計算し直すこともない。
 //!
 //! 判定を要求するのは安価な残り自摸機会の条件を満たす局面だけで、満たさない局面では何も足さない。
-//! `Reused` 候補は先行候補の結果をそのまま複製するので、同じ鳴き後 state を2回評価しない。
+//! 要求した場合だけ確定打点の下限を集める評価器になる
+//! ([`ProductionProspectiveValuator::collecting_han_floor`]) ので、この policy が発動しない局面と
+//! 通常打牌には下限の集約コストも載らない。`Reused` 候補は先行候補の結果をそのまま複製するので、
+//! 同じ鳴き後 state を2回評価しない。
 //!
 //! # Call と Pass の重ね合わせ
 //!
@@ -1842,6 +1845,8 @@ mod tests {
 
     use bot_logic::MeldShape;
 
+    use crate::prospective_value::han_floor_counter;
+
     use crate::decision_timing::{CallCandidateDuration, CallDecisionDurations};
 
     fn tile(value: u8) -> TileId {
@@ -2586,7 +2591,8 @@ mod tests {
     #[test]
     fn the_two_shanten_speed_verdict_does_not_change_the_post_call_selection() {
         // 翻数の判定は鳴き後1向聴の打牌選択が使った前方評価から回収するだけ。要求の有無で選ぶ
-        // 打牌も Call 側 ExpectedSelfTsumoValue も変わらない。
+        // 打牌も Call 側 ExpectedSelfTsumoValue も変わらず、要求しない場合は確定打点の下限を
+        // 畳む処理そのものを通らない。
         let ctx = valued_two_shanten_reaction_context(
             &TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,
@@ -2611,22 +2617,26 @@ mod tests {
         let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
         melds.push(meld);
 
-        let without = select_best_iishanten_post_call_discard(
-            &ctx,
-            &post_call_tiles,
-            &melds,
-            &evaluations,
-            None,
-        )
-        .expect("鳴き後の打牌を選べる");
-        let with = select_best_iishanten_post_call_discard(
-            &ctx,
-            &post_call_tiles,
-            &melds,
-            &evaluations,
-            Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN),
-        )
-        .expect("鳴き後の打牌を選べる");
+        let (without, without_folds) = han_floor_counter::count_during(|| {
+            select_best_iishanten_post_call_discard(
+                &ctx,
+                &post_call_tiles,
+                &melds,
+                &evaluations,
+                None,
+            )
+            .expect("鳴き後の打牌を選べる")
+        });
+        let (with, with_folds) = han_floor_counter::count_during(|| {
+            select_best_iishanten_post_call_discard(
+                &ctx,
+                &post_call_tiles,
+                &melds,
+                &evaluations,
+                Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN),
+            )
+            .expect("鳴き後の打牌を選べる")
+        });
 
         assert_eq!(with.evaluation, without.evaluation);
         assert_eq!(
@@ -2638,6 +2648,11 @@ mod tests {
             with.direct_progress_han,
             Some(ProspectiveHanVerdict::AtLeast)
         );
+
+        // 要求しない呼び出しは下限を1件も畳まない。要求した場合だけ、探索が評価した未来テンパイ
+        // について畳む。
+        assert_eq!(without_folds, 0);
+        assert!(with_folds > 0);
     }
 
     #[test]
@@ -2701,6 +2716,50 @@ mod tests {
         assert_eq!(speed.own_future_draws, None);
         assert_eq!(speed.han, None);
         assert!(!speed.is_satisfied());
+    }
+
+    #[test]
+    fn the_han_floor_is_only_collected_when_the_speed_policy_needs_it() {
+        // 判定を要求しない局面へ下限の集約コストを載せない。残り自摸9回以下・残り自摸数 unknown・
+        // 鳴き後も2向聴のままの候補はどれも判定を要求しないので、鳴き判断1回で1件も畳まない。
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let policy_off = [Some(39), Some(0), None];
+        for remaining in policy_off {
+            let ctx = valued_two_shanten_reaction_context(
+                &TWO_SHANTEN_CALL_PON_HAND,
+                TWO_SHANTEN_CALL_PON_TARGET,
+                Some(1),
+                remaining,
+            );
+            let ((_, candidate), folds) =
+                han_floor_counter::count_during(|| single_candidate(&ctx, &action, false));
+            let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+            assert_eq!(speed.han, None, "{remaining:?}");
+            assert_eq!(folds, 0, "{remaining:?}");
+        }
+
+        // 鳴いても2向聴のままの候補も判定を要求しない。
+        let stays_two_shanten =
+            valued_reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 40);
+        let stays_action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ((_, candidate), folds) = han_floor_counter::count_during(|| {
+            single_candidate(&stays_two_shanten, &stays_action, false)
+        });
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotIishanten);
+        assert_eq!(folds, 0);
+
+        // 残り自摸10回以上で鳴き後1向聴になる候補だけ、探索が評価した未来テンパイについて畳む。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+        let ((_, candidate), folds) =
+            han_floor_counter::count_during(|| single_candidate(&ctx, &action, false));
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.han, Some(ProspectiveHanVerdict::AtLeast));
+        assert!(folds > 0);
     }
 
     #[test]
