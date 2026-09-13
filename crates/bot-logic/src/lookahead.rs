@@ -1198,20 +1198,18 @@ pub fn forward_metrics_for_candidate_instrumented(
     forward_metrics_with_lookahead_instrumented(inputs, evaluation, observer).0
 }
 
-/// 構築済みの枝1件について、探索が将来打点の評価器へ渡したのと同じ未来テンパイの物理牌。
+/// 構築済みの枝を辿る起点。現在打牌を切った直後の物理牌。
 ///
-/// 返すのは `(テンパイ時点の concealed 手牌, その枝でここまでに切った牌)` で、どちらも探索の
-/// state と同じ正規形 (物理牌 ID の昇順、[`HandState`]) になる。集計後に枝だけを受け取った
-/// 呼び出し側が、探索が評価したのと同じ未来テンパイを指せるようにするための入口で、組み立ては
-/// 探索と同じ helper を共有する。
+/// 返すのは `(打牌後の concealed 手牌, その枝でここまでに切った牌)` で、どちらも探索の state と
+/// 同じ正規形 (物理牌 ID の昇順、[`HandState`]) になる。集計後に枝だけを受け取った呼び出し側が、
+/// 探索が評価したのと同じ未来テンパイを指せるようにするための入口で、組み立ては探索と同じ
+/// helper を共有する。
 ///
-/// `tiles` は現在打牌の前の全物理牌、`discard` は現在打牌の評価、`drawn_tile` はその枝の仮想ツモ
-/// 牌、`next_discard` はツモ後に選ばれた2手目の打牌評価。物理牌を取り除けない枝は `None`。
-pub fn prospective_tenpai_branch_tiles(
+/// `tiles` は現在打牌の前の全物理牌、`discard` は現在打牌の評価。物理牌を取り除けない場合は
+/// `None`。
+pub fn prospective_branch_root_tiles(
     tiles: &[TileId],
     discard: &DiscardEvaluation,
-    drawn_tile: TileId,
-    next_discard: &DiscardEvaluation,
 ) -> Option<(Vec<TileId>, Vec<TileId>)> {
     // 探索の起点と同じ正規形へ揃える。
     let mut root_tiles = tiles.to_vec();
@@ -1219,10 +1217,27 @@ pub fn prospective_tenpai_branch_tiles(
 
     let (discarded, after_discard) =
         split_discarded_tile_of(root_tiles, discard.discard, discard.discards_red_five)?;
-    let mut discarded_tiles = Vec::with_capacity(2);
+    // production の continuation depth では、河はこの打牌を含めて4枚を超えない。
+    let mut discarded_tiles = Vec::with_capacity(4);
     HandState::insert_tile(&mut discarded_tiles, discarded);
 
-    let mut after_draw = after_discard;
+    Some((after_discard, discarded_tiles))
+}
+
+/// 構築済みの枝を、仮想ツモとその後の打牌の1段分だけ進めた物理牌。
+///
+/// 入力も出力も [`prospective_branch_root_tiles`] と同じ `(concealed 手牌, ここまでに切った牌)`
+/// で、段を重ねれば探索が何段先で評価した未来テンパイでも同じ正規形で指せる。
+///
+/// `drawn_tile` はその枝の仮想ツモ牌、`next_discard` はツモ後に選ばれた打牌評価。物理牌を
+/// 取り除けない枝は `None`。
+pub fn prospective_branch_tiles_after_draw(
+    concealed_tiles: &[TileId],
+    discarded_tiles: &[TileId],
+    drawn_tile: TileId,
+    next_discard: &DiscardEvaluation,
+) -> Option<(Vec<TileId>, Vec<TileId>)> {
+    let mut after_draw = concealed_tiles.to_vec();
     HandState::insert_tile(&mut after_draw, drawn_tile);
 
     let (next_discarded, concealed_tiles) = split_discarded_tile_of(
@@ -1230,6 +1245,7 @@ pub fn prospective_tenpai_branch_tiles(
         next_discard.discard,
         next_discard.discards_red_five,
     )?;
+    let mut discarded_tiles = discarded_tiles.to_vec();
     HandState::insert_tile(&mut discarded_tiles, next_discarded);
 
     Some((concealed_tiles, discarded_tiles))

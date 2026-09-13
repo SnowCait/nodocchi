@@ -78,7 +78,7 @@
 //! ```text
 //! 現在の effective shanten == 2
 //! AND 鳴き後の最良打牌で effective shanten == 1
-//! AND 鳴き後1向聴から次の Progress ツモで直接到達するテンパイの確定翻数が
+//! AND 鳴き後1向聴の continuation が評価した全テンパイの確定翻数が
 //!     CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
 //! AND Call 後の自分の残り自摸機会 >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS
 //! AND 値比較の結論が Pass (`PassSelfTsumoNotLower`)
@@ -137,7 +137,7 @@
 //! `現在2向聴 → 鳴き後1向聴` の候補に限り、値比較が Pass と結論した場合でも
 //!
 //! ```text
-//! 鳴き後1向聴から直接到達するテンパイの確定翻数 >= CALL_TWO_SHANTEN_SPEED_MIN_HAN
+//! 鳴き後1向聴の continuation が評価した全テンパイの確定翻数 >= CALL_TWO_SHANTEN_SPEED_MIN_HAN
 //! AND Call 後の自分の残り自摸機会 >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS
 //! ```
 //!
@@ -149,7 +149,7 @@
 //! | 材料 | source of truth |
 //! | --- | --- |
 //! | Call 後の残り自摸機会 | [`own_future_draws`] |
-//! | 直接到達テンパイの確定翻数 | [`direct_progress_han_verdict`] |
+//! | continuation が評価したテンパイの確定翻数 | [`continuation_han_verdict`] |
 //!
 //! 残り自摸機会は巡目や河の枚数から推測せず、鳴き後の打牌選択と self-tsumo continuation が使う
 //! 既存の計算をそのまま読む。確定できない局面ではこの policy を適用せず、従来の Call / Pass
@@ -162,18 +162,20 @@
 //! ことで消えるリーチ・門前清自摸和は production のリーチ判断が選んだ baseline がダマになるので
 //! 加算されない。向聴・役・ドラ・点数計算をこの層で持たない。
 //!
-//! 見るのは **鳴き後1向聴から次の Progress ツモで直接テンパイになる枝だけ** で、SameShanten 手
-//! 変わりを経由する枝やその先の continuation は含まない。つまりこの条件は
+//! 見る範囲は **Call 側 ExpectedSelfTsumoValue がその候補について評価した terminal テンパイ
+//! 全体** で、次の Progress ツモで直接テンパイになる枝だけでなく、SameShanten 手変わりを経由して
+//! から到達するテンパイも production の continuation depth に収まる範囲はすべて含む。つまりこの
+//! 条件は
 //!
 //! ```text
-//! 直接到達する全ての枝・全ての生きた和了牌 variant で CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
+//! Call EV が評価した全ての terminal・全ての生きた和了牌 variant で
+//! CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
 //! ```
 //!
-//! であって、「1向聴 continuation の全ての到達テンパイで3翻以上」ではない。この policy のためだけ
-//! に SameShanten downstream を追加探索すると探索コストが大きくなるため、意図して範囲を限定した
-//! heuristic である。限定した範囲の中では conservative に畳み、1つでも翻数が足りない / 確定でき
-//! ない枝があれば policy を適用しない。畳み方は既存 prospective scoring の集約
-//! ([`direct_progress_han_verdict`]) が持つ。
+//! であり、値比較に使う Call EV と判定の対象範囲が一致する。判定のためだけに SameShanten
+//! downstream を追加探索することはなく、production が探索していない枝は対象にならない。範囲の
+//! 中では conservative に畳み、1つでも翻数が足りない / 確定できない terminal があれば policy を
+//! 適用しない。畳み方は既存 prospective scoring の集約 ([`continuation_han_verdict`]) が持つ。
 //!
 //! ## 判定にかかるコスト
 //!
@@ -265,8 +267,8 @@ const CALL_CONSUMED_TILE_COUNT: usize = 2;
 /// 鳴き後1向聴の比較だけで判断する、もう1つの現在向聴数。
 pub const CALL_TWO_SHANTEN_SHANTEN: i8 = 2;
 
-/// `現在2向聴 → Call → 打牌 → 1向聴` を速度優先で鳴くために必要な、鳴き後1向聴から直接到達する
-/// テンパイの確定翻数 [翻]。inclusive。
+/// `現在2向聴 → Call → 打牌 → 1向聴` を速度優先で鳴くために必要な、鳴き後1向聴の continuation が
+/// 評価したテンパイの確定翻数 [翻]。inclusive。
 pub const CALL_TWO_SHANTEN_SPEED_MIN_HAN: u8 = 3;
 
 /// 同じ速度優先 policy が必要とする、Call 後に自分へ残っている自摸機会 [回]。inclusive。
@@ -302,8 +304,8 @@ pub enum CallDecisionReason {
     EligibleIishantenSelfTsumo,
     /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue が Pass より厳密に高い。
     EligibleTwoShantenSelfTsumo,
-    /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue は Pass 以下だが、鳴き後1向聴から
-    /// 直接到達するテンパイの確定打点と残り自摸機会が速度優先 policy を満たす。
+    /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue は Pass 以下だが、鳴き後1向聴の
+    /// continuation が評価したテンパイの確定打点と残り自摸機会が速度優先 policy を満たす。
     EligibleTwoShantenSpeed,
     /// 他家にリーチ者がいる。今回の鳴きは押し引きへ通さない。
     OpponentReached,
@@ -374,13 +376,14 @@ pub enum CallTwoShantenPassEvaluation {
 ///
 /// 値はどちらも既存 layer の結果そのままで、残り自摸機会は打牌選択と同じ
 /// [`own_future_draws`]、翻数は鳴き後1向聴の打牌選択が使った前方評価から回収した
-/// [`direct_progress_han_verdict`] の結論を使う。
+/// [`continuation_han_verdict`] の結論を使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallTwoShantenSpeedDiagnostic {
     /// Call 後に自分へ残っている自摸機会 [回]。山の残枚数が unknown な局面では `None`。
     pub own_future_draws: Option<u32>,
-    /// 鳴き後の最良打牌から次の Progress ツモで直接到達するテンパイの確定翻数が
-    /// [`CALL_TWO_SHANTEN_SPEED_MIN_HAN`] 以上か。SameShanten を経由する枝は含まない。
+    /// 鳴き後の最良打牌の continuation が評価した全テンパイの確定翻数が
+    /// [`CALL_TWO_SHANTEN_SPEED_MIN_HAN`] 以上か。SameShanten を経由してから到達するテンパイも
+    /// 含み、対象は Call 側 ExpectedSelfTsumoValue が集計した terminal 集合と一致する。
     ///
     /// 残り自摸機会の条件で先に落ちた候補では判定を要求しないので `None`。
     pub han: Option<ProspectiveHanVerdict>,
@@ -1434,7 +1437,7 @@ fn evaluate_two_shanten_call_to_iishanten(
         comparison: CallIishantenComparison::Unknown,
         speed: CallTwoShantenSpeedDiagnostic {
             own_future_draws,
-            han: selection.direct_progress_han,
+            han: selection.continuation_han,
             overrides_pass: false,
         },
     });
@@ -1843,9 +1846,15 @@ mod tests {
 
     use std::time::Duration;
 
-    use bot_logic::MeldShape;
+    use bot_logic::{
+        DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition, EffectiveAcceptance,
+        MeldShape, ProspectiveTenpai, ProspectiveTenpaiValuator,
+        forward_metrics_with_lookahead_for_candidate, prospective_branch_root_tiles,
+        prospective_branch_tiles_after_draw,
+    };
 
-    use crate::prospective_value::han_floor_counter;
+    use crate::discard_selection::{PostCallIishantenSelection, lookahead_inputs};
+    use crate::prospective_value::{continuation_han_verdict, han_floor_counter};
 
     use crate::decision_timing::{CallCandidateDuration, CallDecisionDurations};
 
@@ -2429,7 +2438,7 @@ mod tests {
 
     #[test]
     fn a_high_value_two_shanten_call_is_taken_even_when_the_pass_value_is_not_lower() {
-        // 直接到達テンパイが3翻以上確定 + 残り自摸10回以上の 2向聴 → 1向聴 は、Call の
+        // continuation の全テンパイが3翻以上確定 + 残り自摸10回以上の 2向聴 → 1向聴 は、Call の
         // ExpectedSelfTsumoValue が Pass 以下でも速度優先で鳴く。同値と Call 側が低い場合の
         // 両方を含む。
         let ctx = valued_two_shanten_reaction_context(
@@ -2588,6 +2597,320 @@ mod tests {
         );
     }
 
+    // 白 Pon + 1m Pon の2副露。中 を Pon すると副露がすべて刻子になるので、鳴き後1向聴から次の
+    // Progress ツモで直接到達するテンパイはどれも対々和 + 役牌2つで要求翻数以上になる。一方、
+    // 手変わりを経由して順子の形へ組み替えた先のテンパイでは対々和が消えて役牌2翻だけになる。
+    fn toitoi_two_shanten_reaction_context(
+        hand: &[u8],
+        target: u8,
+        remaining_tiles: Option<u32>,
+    ) -> GameContext {
+        let melds = vec![
+            Meld::new(MeldKind::Pon, tiles(&[124, 125, 126]), Some(tile(124))),
+            Meld::new(MeldKind::Pon, tiles(&[0, 1, 2]), Some(tile(0))),
+        ];
+        two_shanten_reaction_context_with_melds(hand, melds, target, Some(1), remaining_tiles)
+    }
+
+    // 鳴き後1向聴の打牌選択を production と同じ入力で組み立て直すための材料。
+    struct PostCallIishantenCase {
+        ctx: GameContext,
+        melds: Vec<Meld>,
+        tiles: Vec<TileId>,
+        evaluations: Vec<DiscardEvaluation>,
+    }
+
+    fn post_call_iishanten_case(ctx: GameContext, action: &LegalAction) -> PostCallIishantenCase {
+        let (kind, called_tile, consumed) = normalize_call(action).expect("Chi / Pon");
+        let (meld, tiles) =
+            call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, called_tile, consumed)
+                .expect("合法な鳴き");
+        let forbidden = forbidden_discards_after_call(&meld);
+        let fixed_meld_count =
+            FixedMeldCount::new(ctx.own_fixed_meld_count().expect("副露数").get() + 1)
+                .expect("上限内");
+        let evaluations = post_call_discard_evaluations(&ctx, &tiles, fixed_meld_count, &forbidden);
+        let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+        melds.push(meld);
+        PostCallIishantenCase {
+            ctx,
+            melds,
+            tiles,
+            evaluations,
+        }
+    }
+
+    impl PostCallIishantenCase {
+        fn selection(&self, required_han: Option<u8>) -> PostCallIishantenSelection {
+            select_best_iishanten_post_call_discard(
+                &self.ctx,
+                &self.tiles,
+                &self.melds,
+                &self.evaluations,
+                required_han,
+            )
+            .expect("鳴き後の打牌を選べる")
+        }
+
+        fn valuator(&self) -> ProductionProspectiveValuator<'_> {
+            ProductionProspectiveValuator::new_with_hand_state(&self.ctx, Some(&self.melds))
+                .collecting_han_floor(true)
+        }
+    }
+
+    // production の鳴き後打牌選択が使うのと同じ入力で、選んだ候補の枝を組み立て直す。評価器の
+    // memo には production の探索と同じ terminal の打点が載る。
+    fn production_post_call_lookahead<'a>(
+        ctx: &'a GameContext,
+        tiles: &'a [TileId],
+        valuator: &'a ProductionProspectiveValuator<'a>,
+        evaluation: &DiscardEvaluation,
+    ) -> DiscardLookaheadDiagnostic {
+        let inputs = with_production_iishanten_continuation(lookahead_inputs(
+            ctx,
+            tiles,
+            valuator,
+            LookaheadDiagnosticScope::None,
+        ));
+        forward_metrics_with_lookahead_for_candidate(&inputs, evaluation).1
+    }
+
+    // 探索済みの枝から、次の Progress ツモで直接到達するテンパイだけを取り出す。scope を広げる
+    // 前の速度優先 policy が見ていた範囲そのもので、広げた差を test から観測するために使う。
+    fn direct_progress_terminals<'a>(
+        tiles: &[TileId],
+        evaluation: &DiscardEvaluation,
+        candidate: &'a DiscardLookaheadDiagnostic,
+    ) -> Vec<(Vec<TileId>, Vec<TileId>, &'a EffectiveAcceptance)> {
+        let (concealed_tiles, discarded_tiles) = prospective_branch_root_tiles(tiles, evaluation)
+            .expect("打牌後の物理牌を組み立てられる");
+        candidate
+            .draws_with(DrawTransition::Progress)
+            .flat_map(|draw| draw.variants.iter())
+            .filter(|variant| variant.remaining > 0)
+            .filter_map(|variant| {
+                let next = variant.next_discard.as_ref()?;
+                let (concealed, discarded) = prospective_branch_tiles_after_draw(
+                    &concealed_tiles,
+                    &discarded_tiles,
+                    variant.drawn_tile,
+                    next,
+                )?;
+                Some((concealed, discarded, &next.acceptance_after_discard))
+            })
+            .collect()
+    }
+
+    // 手変わりを経由してから到達する terminal の件数。判定が直接到達分だけを見ていないことを
+    // 確かめるために数える。
+    fn same_shanten_terminal_count(candidate: &DiscardLookaheadDiagnostic) -> usize {
+        fn count(draws: &[DrawLookaheadDiagnostic]) -> usize {
+            draws
+                .iter()
+                .flat_map(|draw| {
+                    draw.variants
+                        .iter()
+                        .map(move |variant| match draw.transition {
+                            DrawTransition::Progress => usize::from(variant.next_discard.is_some()),
+                            DrawTransition::SameShanten => variant
+                                .downstream
+                                .as_ref()
+                                .map_or(0, |downstream| count(&downstream.draws)),
+                        })
+                })
+                .sum()
+        }
+
+        candidate
+            .draws_with(DrawTransition::SameShanten)
+            .flat_map(|draw| draw.variants.iter())
+            .map(|variant| {
+                variant
+                    .downstream
+                    .as_ref()
+                    .map_or(0, |downstream| count(&downstream.draws))
+            })
+            .sum()
+    }
+
+    #[test]
+    fn the_two_shanten_speed_han_covers_the_whole_call_continuation() {
+        // 3翻判定の対象は、Call 側 ExpectedSelfTsumoValue が評価した terminal 全体。直接到達
+        // するテンパイがすべて要求翻数以上でも、production が既に評価している手変わり先の
+        // terminal に届かないものがあれば高打点確定として扱わない。
+        let ctx = toitoi_two_shanten_reaction_context(
+            &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let case = post_call_iishanten_case(ctx, &action);
+        let selection = case.selection(Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN));
+
+        let valuator = case.valuator();
+        let lookahead = production_post_call_lookahead(
+            &case.ctx,
+            &case.tiles,
+            &valuator,
+            &selection.evaluation,
+        );
+
+        // 直接到達するテンパイはどれも対々和が付いて要求翻数以上。
+        let direct = direct_progress_terminals(&case.tiles, &selection.evaluation, &lookahead);
+        assert!(!direct.is_empty());
+        for (concealed_tiles, discarded_tiles, acceptance) in &direct {
+            let tenpai = ProspectiveTenpai {
+                concealed_tiles,
+                acceptance,
+                discarded_tiles,
+            };
+            assert_eq!(
+                valuator
+                    .memoized_han_floor(&tenpai)
+                    .is_at_least(CALL_TWO_SHANTEN_SPEED_MIN_HAN),
+                Some(true)
+            );
+        }
+
+        // 手変わり先まで含めると届かない terminal があるので、候補全体では確定しない。
+        assert!(same_shanten_terminal_count(&lookahead) > 0);
+        assert_eq!(
+            selection.continuation_han,
+            Some(ProspectiveHanVerdict::Below)
+        );
+
+        // したがって速度優先 policy も適用しない。
+        let (_, candidate) = single_candidate(&case.ctx, &action, false);
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.han, Some(ProspectiveHanVerdict::Below));
+        assert!(!speed.is_satisfied());
+    }
+
+    #[test]
+    fn the_two_shanten_speed_han_accepts_a_high_value_continuation() {
+        // 手変わりを経由した先の terminal まで含めてすべて要求翻数以上なら、これまでどおり
+        // 速度優先 policy を適用できる。役牌2翻 + 赤5p が鳴き後のどの経路でも残る手。
+        let ctx = low_value_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let case = post_call_iishanten_case(ctx, &action);
+        let selection = case.selection(Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN));
+
+        let valuator = case.valuator();
+        let lookahead = production_post_call_lookahead(
+            &case.ctx,
+            &case.tiles,
+            &valuator,
+            &selection.evaluation,
+        );
+
+        // 判定の対象に手変わり先の terminal が実際に含まれる。
+        assert!(same_shanten_terminal_count(&lookahead) > 0);
+        assert_eq!(
+            selection.continuation_han,
+            Some(ProspectiveHanVerdict::AtLeast)
+        );
+
+        let (_, candidate) = single_candidate(&case.ctx, &action, false);
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.han, Some(ProspectiveHanVerdict::AtLeast));
+        assert!(speed.is_satisfied());
+    }
+
+    #[test]
+    fn an_unscored_continuation_terminal_keeps_the_two_shanten_speed_han_unknown() {
+        // 判定が読むのは探索が memo へ載せた下限だけ。手変わり先の terminal の翻数を確定でき
+        // ない評価器では、その terminal のために点数計算をやり直さず Unknown のままにする。
+        let ctx = low_value_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let case = post_call_iishanten_case(ctx, &action);
+        let selection = case.selection(Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN));
+        // 探索が全 terminal を評価した場合はこの手で policy を適用できる。
+        assert_eq!(
+            selection.continuation_han,
+            Some(ProspectiveHanVerdict::AtLeast)
+        );
+
+        let searched = case.valuator();
+        let lookahead = production_post_call_lookahead(
+            &case.ctx,
+            &case.tiles,
+            &searched,
+            &selection.evaluation,
+        );
+
+        // 直接到達するテンパイの打点だけを持つ評価器を作る。
+        let partial = case.valuator();
+        for (concealed_tiles, discarded_tiles, acceptance) in
+            direct_progress_terminals(&case.tiles, &selection.evaluation, &lookahead)
+        {
+            partial.tenpai_value(&ProspectiveTenpai {
+                concealed_tiles: &concealed_tiles,
+                acceptance,
+                discarded_tiles: &discarded_tiles,
+            });
+        }
+
+        let (verdict, folds) = han_floor_counter::count_during(|| {
+            continuation_han_verdict(
+                &partial,
+                &case.tiles,
+                &selection.evaluation,
+                &lookahead,
+                CALL_TWO_SHANTEN_SPEED_MIN_HAN,
+            )
+        });
+        assert_eq!(verdict, ProspectiveHanVerdict::Unknown);
+        // 判定のために点数計算をやり直さない。
+        assert_eq!(folds, 0);
+    }
+
+    #[test]
+    fn the_two_shanten_speed_han_verdict_adds_no_search_and_no_scoring() {
+        // 判定は探索済みの枝と memo を読むだけ。探索 node も枝も terminal scoring も増やさない。
+        let ctx = low_value_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let case = post_call_iishanten_case(ctx, &action);
+        let selection = case.selection(Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN));
+
+        let valuator = case.valuator();
+        let inputs = with_production_iishanten_continuation(lookahead_inputs(
+            &case.ctx,
+            &case.tiles,
+            &valuator,
+            LookaheadDiagnosticScope::None,
+        ))
+        .with_three_shanten_search_stats();
+        let (_, lookahead) =
+            forward_metrics_with_lookahead_for_candidate(&inputs, &selection.evaluation);
+        let searched = inputs.three_shanten_search_stats();
+
+        let (verdict, folds) = han_floor_counter::count_during(|| {
+            continuation_han_verdict(
+                &valuator,
+                &case.tiles,
+                &selection.evaluation,
+                &lookahead,
+                CALL_TWO_SHANTEN_SPEED_MIN_HAN,
+            )
+        });
+
+        assert_eq!(verdict, ProspectiveHanVerdict::AtLeast);
+        assert_eq!(inputs.three_shanten_search_stats(), searched);
+        assert_eq!(folds, 0);
+    }
+
     #[test]
     fn the_two_shanten_speed_verdict_does_not_change_the_post_call_selection() {
         // 翻数の判定は鳴き後1向聴の打牌選択が使った前方評価から回収するだけ。要求の有無で選ぶ
@@ -2643,11 +2966,8 @@ mod tests {
             with.expected_self_tsumo_value,
             without.expected_self_tsumo_value
         );
-        assert_eq!(without.direct_progress_han, None);
-        assert_eq!(
-            with.direct_progress_han,
-            Some(ProspectiveHanVerdict::AtLeast)
-        );
+        assert_eq!(without.continuation_han, None);
+        assert_eq!(with.continuation_han, Some(ProspectiveHanVerdict::AtLeast));
 
         // 要求しない呼び出しは下限を1件も畳まない。要求した場合だけ、探索が評価した未来テンパイ
         // について畳む。
@@ -2661,8 +2981,8 @@ mod tests {
         // scoring で評価した結果。どちらも診断専用の計算を持たない。
         let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
 
-        // 白 Pon + 發 Pon の後に 中 を Pon すると大三元。直接到達するどのテンパイでも3翻以上が
-        // 確定する。
+        // 白 Pon + 發 Pon の後に 中 を Pon すると大三元。continuation が評価するどのテンパイでも
+        // 3翻以上が確定する。
         let ctx = valued_two_shanten_reaction_context(
             &TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,
