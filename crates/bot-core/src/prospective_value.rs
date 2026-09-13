@@ -139,7 +139,8 @@
 //! 下限を読まない通常打牌・通常の鳴き判断・その他の prospective evaluation へ集約コストを載せない。
 //! 要求の有無で選択値も探索も変わらない。
 //!
-//! 同じ要求のもとで、terminal scoring を通したテンパイの下限は評価器の中でも1つへ畳まれる
+//! 同じ要求のもとで、候補の Progress 評価前に集約をリセットし、その評価が通した
+//! terminal scoring の下限を1つへ畳んで保存する
 //! ([`ProductionProspectiveValuator::scored_han_floor`])。畳むのは memo に載った下限を読むだけ
 //! なので、点数計算も探索も増えない。探索結果を後から辿れない評価が判定を読むための入口で、
 //! その判定が [`scored_han_verdict`] になる。
@@ -487,23 +488,9 @@ pub(crate) fn continuation_han_verdict(
     )
 }
 
-/// 1つの評価器が terminal scoring を通したテンパイ全体について、確定打点が要求翻数を満たすかを
-/// 畳む。
-///
-/// 読むのは探索中に評価器が畳んだ下限 ([`ProductionProspectiveValuator::scored_han_floor`]) だけ
-/// で、判定のために枝を探索し直さず、同じテンパイの点数計算もやり直さない。
-///
-/// # 対象の範囲
-///
-/// 対象は、その評価器で行った terminal scoring 全体である。探索結果を後から辿れる経路は
-/// 候補1件へ絞れる [`continuation_han_verdict`] を使い、値だけを返す評価 (2向聴 Progress-only
-/// 評価) がこちらを使う。したがって1つの評価器で複数の打牌候補を比較した場合、対象はその全候補
-/// が到達した terminal の和集合になる。範囲が広い分だけ conservative で、要求翻数以上だと推測
-/// する方向へは働かない。
-///
-/// 対象の中の畳み方は [`continuation_han_verdict`] と同じで、残枚数0の variant を寄与させず、
-/// 打点を確定できない terminal を要求翻数以上と推測しない。terminal scoring を1件も通して
-/// いない評価器は `Unknown`。
+/// 直近のリセット以降に Progress 評価が回収した下限を判定する。
+/// 候補ごとにリセットして保存することで、未選択候補の terminal を混ぜない。
+/// 探索・点数計算は行わず、terminal がない場合は `Unknown`。
 pub(crate) fn scored_han_verdict(
     valuator: &ProductionProspectiveValuator,
     required_han: u8,
@@ -657,7 +644,7 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     // 観測値なので、要求しない評価器では畳まない。既定は畳まないで、選択値も探索も有無で
     // 変わらない。
     collects_han_floor: bool,
-    // この評価器が terminal scoring を通したテンパイすべての確定打点の下限。
+    // 直近のリセット以降に terminal scoring を通したテンパイの確定打点の下限。
     //
     // 1件も通していない場合は `None`。terminal scoring 1件ごとに memo 済みの下限を読んで畳む
     // だけなので、点数計算も探索も増えない。
@@ -910,16 +897,21 @@ impl<'a> ProductionProspectiveValuator<'a> {
         self.memoized_han_floor_of(ProspectiveTenpaiKey::new(tenpai).as_ref())
     }
 
-    /// この評価器が terminal scoring を通したテンパイ全体の確定打点の下限。
+    /// 直近のリセット以降に terminal scoring を通したテンパイ全体の確定打点の下限。
     ///
     /// terminal scoring を1件も通していない場合は `None`。読むのは探索中に畳んだ値だけで、
     /// 同じテンパイを評価し直さない。
     ///
     /// 枝を辿って候補1件分へ畳む [`continuation_han_verdict`] と違い、こちらは探索結果を後から
-    /// 辿れない評価 (値だけを返す2向聴 Progress-only 評価) のための入口で、対象はこの評価器で
-    /// 行った terminal scoring 全体になる。
+    /// 辿れない評価 (値だけを返す2向聴 Progress-only 評価) のための入口で、対象は直近のリセット以降の
+    /// terminal scoring 全体になる。
     pub(crate) fn scored_han_floor(&self) -> Option<ProspectiveHanFloor> {
         self.scored_han_floor.get()
+    }
+
+    /// 次の候補の観測を開始する。terminal の scoring memo は保持する。
+    pub(crate) fn reset_scored_han_floor(&self) {
+        self.scored_han_floor.set(None);
     }
 
     // memo に載っている下限。載っていないテンパイは探索も点数計算もやり直さず `Unknown`。

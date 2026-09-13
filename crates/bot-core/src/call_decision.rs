@@ -264,13 +264,10 @@
 //! ## 打点条件が見る範囲
 //!
 //! 翻数は現在手牌のドラ枚数から推測せず、鳴き後の実際の手牌 state を既存 prospective scoring で
-//! 評価した結果だけを読む。見る範囲は **Call 側の Progress-only 評価が実際に terminal scoring を
-//! 通したテンパイ全体** で、その評価器が評価した terminal をすべて含む。2向聴の policy と違い
-//! Progress-only 評価は探索結果を値としてしか返さないので、候補1件分の枝を辿る
-//! [`continuation_han_verdict`](crate::prospective_value::continuation_han_verdict) ではなく、
-//! 評価器が畳んだ下限を読む
-//! [`scored_han_verdict`](crate::prospective_value::scored_han_verdict) を使う。範囲が比較する
-//! 候補全体になる分だけ conservative で、要求翻数以上だと推測する方向へは働かない。
+//! 評価した結果だけを読む。見る範囲は **最終的に選択された鳴き後打牌の2向聴
+//! Progress-only continuation が実際に評価した terminal 全体** である。
+//! 候補の Progress 評価ごとに下限を回収し、既存 comparator が選んだ候補の verdict を返す。
+//! 未選択候補や後続 metric の terminal は含めない。
 //!
 //! ## 判定にかかるコスト
 //!
@@ -2219,8 +2216,8 @@ mod tests {
     use bot_logic::{
         DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition, EffectiveAcceptance,
         MeldShape, ProspectiveTenpai, ProspectiveTenpaiValuator, ThreeShantenSearchStats,
-        best_two_shanten_progress_discard_among, forward_metrics_with_lookahead_for_candidate,
-        prospective_branch_root_tiles, prospective_branch_tiles_after_draw,
+        forward_metrics_with_lookahead_for_candidate, prospective_branch_root_tiles,
+        prospective_branch_tiles_after_draw,
     };
 
     use crate::discard_selection::{
@@ -3731,6 +3728,7 @@ mod tests {
             Option<u64>,
             Option<ProspectiveHanVerdict>,
             ThreeShantenSearchStats,
+            Vec<Option<ProspectiveHanVerdict>>,
         ) {
             let valuator =
                 ProductionProspectiveValuator::new_with_hand_state(&self.ctx, Some(&self.melds))
@@ -3742,12 +3740,156 @@ mod tests {
                 LookaheadDiagnosticScope::None,
             ))
             .with_three_shanten_search_stats();
-            let (_, value) = best_two_shanten_progress_discard_among(&inputs, &self.evaluations)
-                .expect("鳴き後の打牌を選べる");
-            let verdict =
-                required_han.map(|required_han| scored_han_verdict(&valuator, required_han));
-            (value, verdict, inputs.three_shanten_search_stats())
+            let mut candidate_verdicts = Vec::new();
+            let (_, value, verdict) = bot_logic::best_two_shanten_progress_discard_among_observed(
+                &inputs,
+                &self.evaluations,
+                || valuator.reset_scored_han_floor(),
+                || {
+                    let verdict = required_han.map(|han| scored_han_verdict(&valuator, han));
+                    candidate_verdicts.push(verdict);
+                    verdict
+                },
+            )
+            .expect("鳴き後の打牌を選べる");
+            (
+                value,
+                verdict,
+                inputs.three_shanten_search_stats(),
+                candidate_verdicts,
+            )
         }
+    }
+
+    fn three_shanten_han_regression_case(all_man_seen: bool) -> PostCallTwoShantenCase {
+        let mut hand = THREE_SHANTEN_CALL_CHI_HAND;
+        hand[2] = 36; // 1p
+        hand[3] = 0; // 1m
+        let ctx = valued_two_shanten_reaction_context(
+            &hand,
+            THREE_SHANTEN_CALL_CHI_TARGET,
+            Some(1),
+            Some(48),
+        );
+        let ctx = if all_man_seen {
+            let mut visible = ctx.visible_tiles().to_vec();
+            // 萬子をすべて見え牌にし、1mを残した continuation の受け入れを減らす。
+            for value in 0..36 {
+                let tile = tile(value);
+                if !visible.contains(&tile) {
+                    visible.push(tile);
+                }
+            }
+            GameContext::from_parts_with_melds(
+                None,
+                ctx.hand_tiles().to_vec(),
+                vec![],
+                TileType::new(EAST),
+                TileType::new(EAST),
+                visible,
+                Some(0),
+                Some(0),
+                [
+                    vec![],
+                    vec![tile(THREE_SHANTEN_CALL_CHI_TARGET)],
+                    vec![],
+                    vec![],
+                ],
+                [false; 4],
+                ctx.melds().clone(),
+            )
+            .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            })
+            .with_reaction_source_player(Some(1))
+            .with_table_state_facts(crate::context::TableStateFacts {
+                remaining_tiles: Some(48),
+                ..Default::default()
+            })
+        } else {
+            ctx
+        };
+        let action = chi_action(
+            THREE_SHANTEN_CALL_CHI_TARGET,
+            &THREE_SHANTEN_CALL_CHI_CONSUMED,
+        );
+        let mut case = post_call_two_shanten_case(ctx, &action);
+        case.evaluations
+            .retain(|e| e.discard == tile(36).tile_type() || e.discard == tile(0).tile_type());
+        case
+    }
+
+    // 白・發 Pon + 678m Chi の鳴き後に 1p 1m S W N が残る。
+    // 1p 切りの continuation は混一色等で全 terminal 4翻以上。
+    // 1m 切りの continuation は筒子の完成形に3翻以下を含む。
+    fn assert_selected_three_shanten_han_verdict(
+        all_man_seen: bool,
+        selected_discard: u8,
+        expected: ProspectiveHanVerdict,
+    ) {
+        let mut case = three_shanten_han_regression_case(all_man_seen);
+        assert_eq!(case.evaluations.len(), 2);
+        for evaluation in &case.evaluations {
+            let single = select_best_two_shanten_post_call_discard(
+                &case.ctx,
+                &case.tiles,
+                &case.melds,
+                std::slice::from_ref(evaluation),
+                Some(4),
+            )
+            .unwrap();
+            assert_eq!(
+                single.scored_han,
+                Some(if evaluation.discard == tile(36).tile_type() {
+                    ProspectiveHanVerdict::AtLeast
+                } else {
+                    ProspectiveHanVerdict::Below
+                })
+            );
+        }
+        // 入力順を反転しても、最後の候補ではなく選択候補の verdict が返る。
+        for _ in 0..2 {
+            let plain = case.selection(None);
+            let observed = case.selection(Some(4));
+            assert_eq!(
+                observed.evaluation.discard,
+                tile(selected_discard).tile_type()
+            );
+            assert_eq!(observed.evaluation, plain.evaluation);
+            assert_eq!(
+                observed.expected_self_tsumo_value,
+                plain.expected_self_tsumo_value
+            );
+            assert_eq!(observed.scored_han, Some(expected));
+            let (plain_value, plain_verdict, plain_stats, _) = case.measured_selection(None);
+            let (value, verdict, stats, candidate_verdicts) = case.measured_selection(Some(4));
+            // 未選択候補も Progress 評価され、異なる判定が実際に得られている。
+            assert_eq!(candidate_verdicts.len(), 2);
+            assert!(candidate_verdicts.contains(&Some(ProspectiveHanVerdict::AtLeast)));
+            assert!(candidate_verdicts.contains(&Some(ProspectiveHanVerdict::Below)));
+            assert_eq!(plain_verdict, None);
+            assert_eq!(verdict, Some(expected));
+            assert_eq!(value, plain_value);
+            assert_eq!(value, observed.expected_self_tsumo_value);
+            assert!(stats.terminal_scorings > 0);
+            assert_eq!(stats, plain_stats);
+            assert_eq!(stats.iishanten_same_shanten_variants, 0);
+            assert_eq!(stats.iishanten_downstream_variants, 0);
+            case.evaluations.reverse();
+        }
+    }
+
+    #[test]
+    fn selected_four_han_continuation_excludes_unselected_below_four_han_terminals() {
+        // 1m が3枚残る局面では、1p切りが選ばれる。
+        assert_selected_three_shanten_han_verdict(false, 36, ProspectiveHanVerdict::AtLeast);
+    }
+
+    #[test]
+    fn selected_below_four_han_continuation_excludes_unselected_four_han_terminals() {
+        // 萬子がすべて見えている局面では、1m切りが選ばれる。
+        assert_selected_three_shanten_han_verdict(true, 0, ProspectiveHanVerdict::Below);
     }
 
     #[test]
@@ -3783,8 +3925,8 @@ mod tests {
         assert_eq!(without_folds, 0);
         assert!(with_folds > 0);
 
-        let (plain_value, plain_verdict, plain_stats) = case.measured_selection(None);
-        let (verdict_value, verdict, verdict_stats) =
+        let (plain_value, plain_verdict, plain_stats, _) = case.measured_selection(None);
+        let (verdict_value, verdict, verdict_stats, _) =
             case.measured_selection(Some(CALL_THREE_SHANTEN_SPEED_MIN_HAN));
         assert_eq!(plain_verdict, None);
         assert_eq!(verdict, Some(ProspectiveHanVerdict::AtLeast));

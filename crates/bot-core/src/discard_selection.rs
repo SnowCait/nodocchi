@@ -43,11 +43,12 @@ use bot_logic::{
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
-    best_discard_selection_index_with_two_shanten_metrics, best_two_shanten_progress_discard_among,
-    current_tenpai_continuation_targets, diagnose_discard_evaluations_with_three_shanten_metrics,
-    diagnose_discard_furiten, diagnose_lookahead,
-    diagnose_two_shanten_progress_self_tsumo_instrumented, diagnose_two_shanten_self_tsumo,
-    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    best_discard_selection_index_with_two_shanten_metrics,
+    best_two_shanten_progress_discard_among_observed, current_tenpai_continuation_targets,
+    diagnose_discard_evaluations_with_three_shanten_metrics, diagnose_discard_furiten,
+    diagnose_lookahead, diagnose_two_shanten_progress_self_tsumo_instrumented,
+    diagnose_two_shanten_self_tsumo, discard_tenpai_wait_availability,
+    evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_for_candidate_instrumented,
     forward_metrics_from_lookahead, forward_metrics_instrumented,
@@ -2721,10 +2722,10 @@ pub(crate) struct PostCallTwoShantenSelection {
 /// future Reach legality の両方を同じ state から導出する。
 ///
 /// 候補ごとの値は既存の [`two_shanten_progress_self_tsumo_value_for_candidate`]、最良打牌の
-/// 決定は既存の [`best_two_shanten_progress_discard_among`] で、2向聴 Full gate は通らない。
+/// 決定は既存の [`best_two_shanten_progress_discard_among_observed`] で、2向聴 Full gate は通らない。
 /// 向聴・受け入れ・確率・打点・ドラ・役判定をこの層で持たない。
 ///
-/// `required_han` を渡すと、選択に使った前方評価の terminal scoring からそのまま
+/// `required_han` を渡すと、選択された候補の Progress-only 評価の terminal scoring からそのまま
 /// [`scored_han_verdict`] を求める。判定のための追加探索も追加の点数計算も行わず、確定打点の
 /// 下限を集める評価器にするのもこの場合だけになる。
 pub(crate) fn select_best_two_shanten_post_call_discard(
@@ -2744,12 +2745,17 @@ pub(crate) fn select_best_two_shanten_post_call_discard(
         &valuator,
         LookaheadDiagnosticScope::None,
     ));
-    let (index, expected_self_tsumo_value) =
-        best_two_shanten_progress_discard_among(&inputs, evaluations)?;
+    let (index, expected_self_tsumo_value, scored_han) =
+        best_two_shanten_progress_discard_among_observed(
+            &inputs,
+            evaluations,
+            || valuator.reset_scored_han_floor(),
+            || required_han.map(|han| scored_han_verdict(&valuator, han)),
+        )?;
     Some(PostCallTwoShantenSelection {
         evaluation: evaluations[index].clone(),
         expected_self_tsumo_value,
-        scored_han: required_han.map(|required_han| scored_han_verdict(&valuator, required_han)),
+        scored_han,
     })
 }
 

@@ -1646,6 +1646,19 @@ pub fn best_two_shanten_progress_discard_among(
     inputs: &LookaheadInputs,
     evaluations: &[DiscardEvaluation],
 ) -> Option<(usize, Option<u64>)> {
+    let (index, value, ()) =
+        best_two_shanten_progress_discard_among_observed(inputs, evaluations, || {}, || ())?;
+    Some((index, value))
+}
+
+/// 各候補の Progress 評価の直前・直後に観測し、選択候補の観測結果だけを返す。
+/// 後続 metric の探索は観測範囲に含めない。観測は探索・値・比較を変更しないこと。
+pub fn best_two_shanten_progress_discard_among_observed<T>(
+    inputs: &LookaheadInputs,
+    evaluations: &[DiscardEvaluation],
+    mut begin: impl FnMut(),
+    mut finish: impl FnMut() -> T,
+) -> Option<(usize, Option<u64>, T)> {
     let indices: Vec<usize> = forward_target_mask(evaluations)
         .into_iter()
         .enumerate()
@@ -1655,10 +1668,16 @@ pub fn best_two_shanten_progress_discard_among(
         .iter()
         .map(|&index| evaluations[index].clone())
         .collect();
+    let mut observations = Vec::with_capacity(evaluations.len());
     let metrics: Vec<_> = evaluations
         .iter()
-        .map(|evaluation| crate::selection::TwoShantenMetrics {
-            expected_self_tsumo_value: cached_two_shanten_progress(inputs, evaluation),
+        .map(|evaluation| {
+            begin();
+            let value = cached_two_shanten_progress(inputs, evaluation);
+            observations.push(finish());
+            crate::selection::TwoShantenMetrics {
+                expected_self_tsumo_value: value,
+            }
         })
         .collect();
     let metrics = crate::selection::resolve_two_shanten_expected_self_tsumo_value_axis(
@@ -1685,6 +1704,7 @@ pub fn best_two_shanten_progress_discard_among(
     Some((
         indices[selected],
         metrics[selected].expected_self_tsumo_value,
+        observations.swap_remove(selected),
     ))
 }
 
