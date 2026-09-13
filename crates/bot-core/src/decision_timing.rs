@@ -55,9 +55,12 @@ pub struct CallDecisionDurations {
     pub pass_iishanten_self_tsumo: Duration,
     /// 2向聴 Call / Pass 比較のために1回だけ評価する Pass 側の2向聴 Full
     /// ExpectedSelfTsumoValue。読み方は `pass_iishanten_self_tsumo` と同じ。現在の向聴数が
-    /// どちらを評価するかを決めるので、1回の鳴き判断で両方が `Duration::ZERO` を超えることは
+    /// どれを評価するかを決めるので、1回の鳴き判断で複数が `Duration::ZERO` を超えることは
     /// ない。
     pub pass_two_shanten_self_tsumo: Duration,
+    /// 3向聴 Call / Pass 比較のために1回だけ評価する Pass 側の3向聴 Progress-only
+    /// ExpectedSelfTsumoValue。読み方は `pass_iishanten_self_tsumo` と同じ。
+    pub pass_three_shanten_self_tsumo: Duration,
 }
 
 impl CallDecisionDurations {
@@ -66,7 +69,10 @@ impl CallDecisionDurations {
     /// Call / Pass を重ねた局面では内訳の合計が壁時計を超えるため、`Duration::ZERO` になる。
     pub fn remaining(&self) -> Duration {
         self.total.saturating_sub(
-            self.candidates + self.pass_iishanten_self_tsumo + self.pass_two_shanten_self_tsumo,
+            self.candidates
+                + self.pass_iishanten_self_tsumo
+                + self.pass_two_shanten_self_tsumo
+                + self.pass_three_shanten_self_tsumo,
         )
     }
 }
@@ -628,6 +634,29 @@ impl CallDecisionTimer {
         let since = Instant::now();
         let value = evaluate();
         state.durations.pass_two_shanten_self_tsumo += since.elapsed();
+        value
+    }
+
+    /// 別 thread で評価した Pass 側の3向聴 Progress-only の実測を計上する。読み方は
+    /// [`Self::record_pass_iishanten_self_tsumo`] と同じ。
+    pub(crate) fn record_pass_three_shanten_self_tsumo(&mut self, elapsed: Duration) {
+        if let Some(state) = self.state.as_mut() {
+            state.durations.pass_three_shanten_self_tsumo += elapsed;
+        }
+    }
+
+    /// Pass 側の3向聴 Progress-only ExpectedSelfTsumoValue の評価を計る。無効時は `Instant` を
+    /// 取得しない。
+    pub(crate) fn measure_pass_three_shanten_self_tsumo<T>(
+        &mut self,
+        evaluate: impl FnOnce() -> T,
+    ) -> T {
+        let Some(state) = self.state.as_mut() else {
+            return evaluate();
+        };
+        let since = Instant::now();
+        let value = evaluate();
+        state.durations.pass_three_shanten_self_tsumo += since.elapsed();
         value
     }
 

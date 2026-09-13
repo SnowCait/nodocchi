@@ -139,6 +139,11 @@
 //! 下限を読まない通常打牌・通常の鳴き判断・その他の prospective evaluation へ集約コストを載せない。
 //! 要求の有無で選択値も探索も変わらない。
 //!
+//! 同じ要求のもとで、terminal scoring を通したテンパイの下限は評価器の中でも1つへ畳まれる
+//! ([`ProductionProspectiveValuator::scored_han_floor`])。畳むのは memo に載った下限を読むだけ
+//! なので、点数計算も探索も増えない。探索結果を後から辿れない評価が判定を読むための入口で、
+//! その判定が [`scored_han_verdict`] になる。
+//!
 //! その下限を打牌候補1件分へ畳んだものが [`continuation_han_verdict`] で、対象は
 //! **その候補について production の探索が既に評価した terminal テンパイすべて** である。向聴数を
 //! 進める枝 ([`DrawTransition::Progress`]) の先の直接到達テンパイだけでなく、SameShanten 手変わり
@@ -385,6 +390,16 @@ impl ProspectiveHanFloor {
         }
     }
 
+    // 下限2つを畳む。どちらかが確定できなければ下限も確定しない。
+    fn folded(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Yakuman, Self::Yakuman) => Self::Yakuman,
+            (Self::Yakuman, Self::Han(han)) | (Self::Han(han), Self::Yakuman) => Self::Han(han),
+            (Self::Han(floor), Self::Han(han)) => Self::Han(floor.min(han)),
+        }
+    }
+
     // variant 1つ分の翻数を下限へ畳む。確定できない variant は下限を確定させない。
     fn with(self, han: TenpaiVariantHan) -> Self {
         match (self, han) {
@@ -470,6 +485,37 @@ pub(crate) fn continuation_han_verdict(
         &candidate.draws,
         required_han,
     )
+}
+
+/// 1つの評価器が terminal scoring を通したテンパイ全体について、確定打点が要求翻数を満たすかを
+/// 畳む。
+///
+/// 読むのは探索中に評価器が畳んだ下限 ([`ProductionProspectiveValuator::scored_han_floor`]) だけ
+/// で、判定のために枝を探索し直さず、同じテンパイの点数計算もやり直さない。
+///
+/// # 対象の範囲
+///
+/// 対象は、その評価器で行った terminal scoring 全体である。探索結果を後から辿れる経路は
+/// 候補1件へ絞れる [`continuation_han_verdict`] を使い、値だけを返す評価 (2向聴 Progress-only
+/// 評価) がこちらを使う。したがって1つの評価器で複数の打牌候補を比較した場合、対象はその全候補
+/// が到達した terminal の和集合になる。範囲が広い分だけ conservative で、要求翻数以上だと推測
+/// する方向へは働かない。
+///
+/// 対象の中の畳み方は [`continuation_han_verdict`] と同じで、残枚数0の variant を寄与させず、
+/// 打点を確定できない terminal を要求翻数以上と推測しない。terminal scoring を1件も通して
+/// いない評価器は `Unknown`。
+pub(crate) fn scored_han_verdict(
+    valuator: &ProductionProspectiveValuator,
+    required_han: u8,
+) -> ProspectiveHanVerdict {
+    match valuator
+        .scored_han_floor()
+        .map(|floor| floor.is_at_least(required_han))
+    {
+        Some(Some(true)) => ProspectiveHanVerdict::AtLeast,
+        Some(Some(false)) => ProspectiveHanVerdict::Below,
+        Some(None) | None => ProspectiveHanVerdict::Unknown,
+    }
 }
 
 // 探索1段分の枝をまとめて畳む。1段目も SameShanten の先の段も同じ入口を通る。
@@ -607,9 +653,15 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     values: RefCell<EvaluatedTenpaiValueMemo>,
     // 選択値を求めるついでに確定打点の下限も畳んで memo へ載せるか。
     //
-    // 下限を読む経路 ([`Self::memoized_han_floor`]) だけが要求する観測値なので、要求しない
-    // 評価器では畳まない。既定は畳まないで、選択値も探索も有無で変わらない。
+    // 下限を読む経路 ([`Self::memoized_han_floor`] / [`Self::scored_han_floor`]) だけが要求する
+    // 観測値なので、要求しない評価器では畳まない。既定は畳まないで、選択値も探索も有無で
+    // 変わらない。
     collects_han_floor: bool,
+    // この評価器が terminal scoring を通したテンパイすべての確定打点の下限。
+    //
+    // 1件も通していない場合は `None`。terminal scoring 1件ごとに memo 済みの下限を読んで畳む
+    // だけなので、点数計算も探索も増えない。
+    scored_han_floor: Cell<Option<ProspectiveHanFloor>>,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -646,6 +698,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
             evaluated: Cell::new(None),
             values: RefCell::new(EvaluatedTenpaiValueMemo::default()),
             collects_han_floor: false,
+            scored_han_floor: Cell::new(None),
         }
     }
 
@@ -854,14 +907,46 @@ impl<'a> ProductionProspectiveValuator<'a> {
     /// 下限を載せるのは [`Self::collecting_han_floor`] を有効にした評価器だけなので、要求して
     /// いない評価器ではすべて `Unknown` になる。
     pub(crate) fn memoized_han_floor(&self, tenpai: &ProspectiveTenpai<'_>) -> ProspectiveHanFloor {
-        ProspectiveTenpaiKey::new(tenpai)
-            .and_then(|key| {
-                self.values
-                    .borrow()
-                    .get(&key)
-                    .and_then(|values| values.han_floor)
-            })
-            .unwrap_or(ProspectiveHanFloor::Unknown)
+        self.memoized_han_floor_of(ProspectiveTenpaiKey::new(tenpai).as_ref())
+    }
+
+    /// この評価器が terminal scoring を通したテンパイ全体の確定打点の下限。
+    ///
+    /// terminal scoring を1件も通していない場合は `None`。読むのは探索中に畳んだ値だけで、
+    /// 同じテンパイを評価し直さない。
+    ///
+    /// 枝を辿って候補1件分へ畳む [`continuation_han_verdict`] と違い、こちらは探索結果を後から
+    /// 辿れない評価 (値だけを返す2向聴 Progress-only 評価) のための入口で、対象はこの評価器で
+    /// 行った terminal scoring 全体になる。
+    pub(crate) fn scored_han_floor(&self) -> Option<ProspectiveHanFloor> {
+        self.scored_han_floor.get()
+    }
+
+    // memo に載っている下限。載っていないテンパイは探索も点数計算もやり直さず `Unknown`。
+    fn memoized_han_floor_of(&self, key: Option<&ProspectiveTenpaiKey>) -> ProspectiveHanFloor {
+        key.and_then(|key| {
+            self.values
+                .borrow()
+                .get(key)
+                .and_then(|values| values.han_floor)
+        })
+        .unwrap_or(ProspectiveHanFloor::Unknown)
+    }
+
+    // terminal scoring 1件分の下限を [`Self::scored_han_floor`] へ畳む。
+    //
+    // 読むのは選択値を求めたときに memo へ載せた下限だけなので、点数計算も探索も増えない。
+    // 下限を要求していない評価器では何もしない。
+    fn collect_scored_han_floor(&self, key: Option<&ProspectiveTenpaiKey>) {
+        if !self.collects_han_floor {
+            return;
+        }
+        let floor = self.memoized_han_floor_of(key);
+        let folded = match self.scored_han_floor.get() {
+            Some(collected) => collected.folded(floor),
+            None => floor,
+        };
+        self.scored_han_floor.set(Some(folded));
     }
 }
 
@@ -934,6 +1019,7 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         }) {
             #[cfg(test)]
             tenpai_value_memo_counter::hit();
+            self.collect_scored_han_floor(key.as_ref());
             return cached;
         }
         #[cfg(test)]
@@ -944,6 +1030,9 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
         }
+        // terminal scoring はこの入口だけを通る。同じテンパイの選択値は先に求まっているので、
+        // 畳むのは memo に載った下限を読むだけになる。
+        self.collect_scored_han_floor(key.as_ref());
         value
     }
 }

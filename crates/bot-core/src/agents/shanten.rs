@@ -2470,6 +2470,8 @@ mod tests {
                     | CallDecisionReason::EligibleIishantenSelfTsumo
                     | CallDecisionReason::EligibleTwoShantenSelfTsumo
                     | CallDecisionReason::EligibleTwoShantenSpeed
+                    | CallDecisionReason::EligibleThreeShantenSelfTsumo
+                    | CallDecisionReason::EligibleThreeShantenSpeed
             )
         );
         assert_eq!(candidate.selected, candidate.eligible);

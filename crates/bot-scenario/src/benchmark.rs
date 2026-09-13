@@ -219,7 +219,7 @@ fn format_call_phases(
 ) -> String {
     format!(
         "call={} call_candidates={} count={} [{}] call_pass={} call_two_shanten_pass={} \
-         call_remaining={}",
+         call_three_shanten_pass={} call_remaining={}",
         format_duration(durations.total),
         format_duration(durations.candidates),
         candidates.len(),
@@ -230,6 +230,7 @@ fn format_call_phases(
             .join(" "),
         format_duration(durations.pass_iishanten_self_tsumo),
         format_duration(durations.pass_two_shanten_self_tsumo),
+        format_duration(durations.pass_three_shanten_self_tsumo),
         format_duration(durations.remaining()),
     )
 }
@@ -355,6 +356,8 @@ pub struct BenchmarkRequestJson {
     #[serde(default)]
     pub call_pass_two_shanten_self_tsumo_ns: u64,
     #[serde(default)]
+    pub call_pass_three_shanten_self_tsumo_ns: u64,
+    #[serde(default)]
     pub call_remaining_ns: u64,
     #[serde(default)]
     pub call_candidate_count: usize,
@@ -445,6 +448,9 @@ impl BenchmarkJson {
                     ),
                     call_pass_two_shanten_self_tsumo_ns: nanos(
                         measurement.phases.call.pass_two_shanten_self_tsumo,
+                    ),
+                    call_pass_three_shanten_self_tsumo_ns: nanos(
+                        measurement.phases.call.pass_three_shanten_self_tsumo,
                     ),
                     call_remaining_ns: nanos(measurement.phases.call.remaining()),
                     call_candidate_count: measurement.call_candidates.len(),
@@ -721,6 +727,7 @@ mod tests {
                 .sum(),
             pass_iishanten_self_tsumo: Duration::from_millis(pass),
             pass_two_shanten_self_tsumo: Duration::ZERO,
+            pass_three_shanten_self_tsumo: Duration::ZERO,
         };
         measurement
     }
@@ -1384,6 +1391,7 @@ mod tests {
                     call_candidates_ns: 0,
                     call_pass_iishanten_self_tsumo_ns: 0,
                     call_pass_two_shanten_self_tsumo_ns: 0,
+                    call_pass_three_shanten_self_tsumo_ns: 0,
                     call_remaining_ns: 0,
                     call_candidate_count: 0,
                     call_candidates: vec![],
@@ -1413,6 +1421,7 @@ mod tests {
                     call_candidates_ns: 0,
                     call_pass_iishanten_self_tsumo_ns: 0,
                     call_pass_two_shanten_self_tsumo_ns: 0,
+                    call_pass_three_shanten_self_tsumo_ns: 0,
                     call_remaining_ns: 0,
                     call_candidate_count: 0,
                     call_candidates: vec![],

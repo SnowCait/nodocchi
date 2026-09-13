@@ -3,6 +3,7 @@ use std::time::Duration;
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
+    CallThreeShantenPassEvaluation, CallThreeShantenSelfTsumoDiagnostic,
     CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallWaitYaku,
     CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
     CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
@@ -403,6 +404,9 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     lines.extend(format_call_two_shanten_self_tsumo(
         candidate.two_shanten_self_tsumo.as_ref(),
     ));
+    lines.extend(format_call_three_shanten_self_tsumo(
+        candidate.three_shanten_self_tsumo.as_ref(),
+    ));
 
     if verbose {
         lines.push("    acceptance tiles:".to_string());
@@ -519,6 +523,48 @@ fn call_two_shanten_pass_evaluation_label(
 ) -> &'static str {
     match evaluation {
         CallTwoShantenPassEvaluation::Full => "full",
+    }
+}
+
+fn format_call_three_shanten_self_tsumo(
+    comparison: Option<&CallThreeShantenSelfTsumoDiagnostic>,
+) -> Vec<String> {
+    let Some(comparison) = comparison else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "    three-shanten self-tsumo: pass {} {} / call {}",
+            call_three_shanten_pass_evaluation_label(comparison.pass_evaluation),
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+        ),
+        format!(
+            "    three-shanten comparison: {}",
+            call_iishanten_comparison_label(comparison.comparison)
+        ),
+        format!(
+            "    three-shanten speed: draws {} / han {} -> {}",
+            format_optional_count(comparison.speed.own_future_draws),
+            call_two_shanten_speed_han_label(comparison.speed.han),
+            if comparison.speed.overrides_pass {
+                "overrides pass"
+            } else {
+                NOT_APPLIED
+            },
+        ),
+        format!(
+            "    reaction source player: {}",
+            format_seat(comparison.reaction_source_player)
+        ),
+    ]
+}
+
+fn call_three_shanten_pass_evaluation_label(
+    evaluation: CallThreeShantenPassEvaluation,
+) -> &'static str {
+    match evaluation {
+        CallThreeShantenPassEvaluation::ProgressOnly => "progress-only",
     }
 }
 
@@ -2977,6 +3023,7 @@ fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
             call.candidates.iter().find(|candidate| {
                 candidate.iishanten_self_tsumo.is_some()
                     || candidate.two_shanten_self_tsumo.is_some()
+                    || candidate.three_shanten_self_tsumo.is_some()
             })
         });
     if let Some(candidate) = compared_candidate
@@ -3002,6 +3049,24 @@ fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
         lines.push(format!(
             "  call two-shanten self-tsumo: pass {} {} / call {} ({})",
             call_two_shanten_pass_evaluation_label(compared.pass_evaluation),
+            format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(compared.call_expected_self_tsumo_value),
+            call_iishanten_comparison_label(compared.comparison),
+        ));
+        lines.push(format!(
+            "  call post-call discard: {}",
+            candidate
+                .post_call_discard
+                .as_ref()
+                .map(discard_label)
+                .unwrap_or_else(|| UNKNOWN.to_string())
+        ));
+    } else if let Some(candidate) = compared_candidate
+        && let Some(compared) = candidate.three_shanten_self_tsumo.as_ref()
+    {
+        lines.push(format!(
+            "  call three-shanten self-tsumo: pass {} {} / call {} ({})",
+            call_three_shanten_pass_evaluation_label(compared.pass_evaluation),
             format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
             format_self_tsumo_value(compared.call_expected_self_tsumo_value),
             call_iishanten_comparison_label(compared.comparison),

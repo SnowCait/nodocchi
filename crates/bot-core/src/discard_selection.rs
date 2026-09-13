@@ -20,7 +20,7 @@ use crate::offense_value::{
 };
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
-    continuation_han_verdict, evaluate_prospective_lookahead_value,
+    continuation_han_verdict, evaluate_prospective_lookahead_value, scored_han_verdict,
 };
 use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_named_yakuman_damaten,
@@ -43,11 +43,11 @@ use bot_logic::{
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
-    best_discard_selection_index_with_two_shanten_metrics, current_tenpai_continuation_targets,
-    diagnose_discard_evaluations_with_three_shanten_metrics, diagnose_discard_furiten,
-    diagnose_lookahead, diagnose_two_shanten_progress_self_tsumo_instrumented,
-    diagnose_two_shanten_self_tsumo, discard_tenpai_wait_availability,
-    evaluate_discards_from_tiles_with_fixed_melds_and_context,
+    best_discard_selection_index_with_two_shanten_metrics, best_two_shanten_progress_discard_among,
+    current_tenpai_continuation_targets, diagnose_discard_evaluations_with_three_shanten_metrics,
+    diagnose_discard_furiten, diagnose_lookahead,
+    diagnose_two_shanten_progress_self_tsumo_instrumented, diagnose_two_shanten_self_tsumo,
+    discard_tenpai_wait_availability, evaluate_discards_from_tiles_with_fixed_melds_and_context,
     evaluate_discards_from_tiles_with_fixed_melds_and_visible_tiles, fixed_meld_count,
     forward_metrics, forward_metrics_for_candidate, forward_metrics_for_candidate_instrumented,
     forward_metrics_from_lookahead, forward_metrics_instrumented,
@@ -672,6 +672,22 @@ pub(crate) fn with_production_iishanten_continuation(
     } else {
         inputs
     }
+}
+
+/// production の3向聴軸と同じ Progress-only の1向聴 continuation を lookahead 入力へ適用する。
+///
+/// 3向聴起点の評価は1向聴到達後も Progress だけを追う
+/// ([`PRODUCTION_THREE_SHANTEN_CONTINUATION`])。3向聴の打牌候補集合を丸ごと持たない経路
+/// (鳴き後の2向聴候補比較) が、その到達先と同じ尺度で値を求めるための入口。
+///
+/// 深度と探索内 memo は [`with_production_iishanten_continuation`] と同じで、変えるのは1向聴
+/// 到達後に追う枝の範囲だけ。探索内 memo の key はこの範囲を含むので、別 scope の結果と
+/// 混ざらない。
+pub(crate) fn with_production_three_shanten_continuation(
+    inputs: LookaheadInputs<'_>,
+) -> LookaheadInputs<'_> {
+    with_production_iishanten_continuation(inputs)
+        .with_iishanten_continuation(PRODUCTION_THREE_SHANTEN_CONTINUATION)
 }
 
 /// 1向聴 continuation の探索設定を差し替えて行った打牌選択と、その観測値。
@@ -2680,6 +2696,60 @@ pub(crate) fn select_best_iishanten_post_call_discard(
         evaluation: evaluations[index].clone(),
         expected_self_tsumo_value: metrics[index].expected_self_tsumo_value,
         continuation_han: verdicts[index],
+    })
+}
+
+/// 鳴き後も2向聴の打牌候補の選択結果。
+///
+/// `expected_self_tsumo_value` は選択に使った Progress-only の metric そのもので、診断表示の
+/// ために探索し直さない。
+pub(crate) struct PostCallTwoShantenSelection {
+    pub evaluation: DiscardEvaluation,
+    pub expected_self_tsumo_value: Option<u64>,
+    /// 要求翻数を渡した場合だけ求める、この鳴き後 state の評価が scoring したテンパイの確定
+    /// 打点の判定。
+    ///
+    /// 判定は選択に使った探索そのものから回収するので、候補を2回探索しない。要求しなかった
+    /// 場合は `None`。
+    pub scored_han: Option<ProspectiveHanVerdict>,
+}
+
+/// 鳴き後も2向聴の打牌候補を、3向聴 production の3→2到達先と同じ Progress-only semantics で
+/// 選ぶ。
+///
+/// `melds` は今回の鳴きを含む評価対象副露で、打牌評価の fixed meld count と terminal scoring /
+/// future Reach legality の両方を同じ state から導出する。
+///
+/// 候補ごとの値は既存の [`two_shanten_progress_self_tsumo_value_for_candidate`]、最良打牌の
+/// 決定は既存の [`best_two_shanten_progress_discard_among`] で、2向聴 Full gate は通らない。
+/// 向聴・受け入れ・確率・打点・ドラ・役判定をこの層で持たない。
+///
+/// `required_han` を渡すと、選択に使った前方評価の terminal scoring からそのまま
+/// [`scored_han_verdict`] を求める。判定のための追加探索も追加の点数計算も行わず、確定打点の
+/// 下限を集める評価器にするのもこの場合だけになる。
+pub(crate) fn select_best_two_shanten_post_call_discard(
+    context: &GameContext,
+    tiles: &[TileId],
+    melds: &[Meld],
+    evaluations: &[DiscardEvaluation],
+    required_han: Option<u8>,
+) -> Option<PostCallTwoShantenSelection> {
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds))
+        .collecting_han_floor(required_han.is_some());
+    // 鳴いた後の2向聴候補も、3向聴起点の production が3→2の到達先で使うのと同じ continuation
+    // で比べる。Pass 側と同じ尺度に揃えるためで、候補の絞り込みも comparator も既存のまま。
+    let inputs = with_production_three_shanten_continuation(lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+    ));
+    let (index, expected_self_tsumo_value) =
+        best_two_shanten_progress_discard_among(&inputs, evaluations)?;
+    Some(PostCallTwoShantenSelection {
+        evaluation: evaluations[index].clone(),
+        expected_self_tsumo_value,
+        scored_han: required_han.map(|required_han| scored_han_verdict(&valuator, required_han)),
     })
 }
 
