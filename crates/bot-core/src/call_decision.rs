@@ -73,10 +73,22 @@
 //! AND Call 後1向聴の ExpectedSelfTsumoValue > Pass の2向聴 ExpectedSelfTsumoValue
 //! ```
 //!
+//! 現在2向聴の候補だけ、値比較で Pass になる結論を速度優先 policy が上書きする。
+//!
+//! ```text
+//! 現在の effective shanten == 2
+//! AND 鳴き後の最良打牌で effective shanten == 1
+//! AND 鳴き後1向聴から次の Progress ツモで直接到達するテンパイの確定翻数が
+//!     CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
+//! AND Call 後の自分の残り自摸機会 >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS
+//! AND 値比較の結論が Pass (`PassSelfTsumoNotLower`)
+//! ```
+//!
 //! 即テンパイ候補は従来どおり最優先する。それが無い場合だけ Call 後1向聴の ExpectedSelfTsumoValue
 //! と Pass を同じ流局 horizon で比較し、Call が厳密に高い場合だけ鳴く。同値・unknown は鳴かない。
-//! 現在2向聴から1向聴になる鳴きも同じ比較に従う。他家にリーチ者がいる局面の鳴きは押し引きへ
-//! 通さず、打点による例外も持たない。
+//! 現在2向聴から1向聴になる鳴きも同じ比較に従い、上の速度優先 policy を満たす場合だけ同値・
+//! Call が低い結論を上書きする。他家にリーチ者がいる局面の鳴きは押し引きへ通さず、リーチ者が
+//! いる局面をこの速度優先 policy で上書きすることもない。
 //!
 //! 比較する2つの値は同じ1向聴 continuation の設定で求める。Call 側は鳴いた後の打牌候補比較
 //! ([`select_discard_action_with_evaluation`] / [`select_best_iishanten_post_call_discard`]) が、
@@ -118,6 +130,63 @@
 //! Pass の2向聴 Full 評価は、鳴き後1向聴になる候補が1件以上ある場合に1回だけ行う。鳴き後も
 //! 2向聴のままの候補しかない局面や、そもそも Chi / Pon の合法手が無い局面では評価しない。
 //! diagnostics の有無で評価する値も選ぶ action も変わらない。
+//!
+//! # 速度優先で鳴く高打点の2向聴
+//!
+//! 序盤で既に打点が確定している手では、門前維持より向聴数を進めたい。そのため
+//! `現在2向聴 → 鳴き後1向聴` の候補に限り、値比較が Pass と結論した場合でも
+//!
+//! ```text
+//! 鳴き後1向聴から直接到達するテンパイの確定翻数 >= CALL_TWO_SHANTEN_SPEED_MIN_HAN
+//! AND Call 後の自分の残り自摸機会 >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS
+//! ```
+//!
+//! を満たせば Call する。ExpectedSelfTsumoValue へ係数を掛けるのではなく、この2条件を満たす
+//! かどうかだけの明示的な policy にする。上書きするのは値比較の結論
+//! ([`CallDecisionReason::PassSelfTsumoNotLower`]) だけで、他家リーチ・喰い替え・向聴数・
+//! 反応元不明・値 unknown といった既存の rejection 条件はそのまま残す。
+//!
+//! | 材料 | source of truth |
+//! | --- | --- |
+//! | Call 後の残り自摸機会 | [`own_future_draws`] |
+//! | 直接到達テンパイの確定翻数 | [`direct_progress_han_verdict`] |
+//!
+//! 残り自摸機会は巡目や河の枚数から推測せず、鳴き後の打牌選択と self-tsumo continuation が使う
+//! 既存の計算をそのまま読む。確定できない局面ではこの policy を適用せず、従来の Call / Pass
+//! 比較へ戻す。
+//!
+//! ## 打点条件が見る範囲
+//!
+//! 翻数は現在手牌のドラ枚数から推測せず、鳴き後の実際の手牌 state から到達するテンパイを既存
+//! prospective scoring で評価した結果だけを読む。ドラ・赤ドラは既存 scoring のとおり含み、鳴いた
+//! ことで消えるリーチ・門前清自摸和は production のリーチ判断が選んだ baseline がダマになるので
+//! 加算されない。向聴・役・ドラ・点数計算をこの層で持たない。
+//!
+//! 見るのは **鳴き後1向聴から次の Progress ツモで直接テンパイになる枝だけ** で、SameShanten 手
+//! 変わりを経由する枝やその先の continuation は含まない。つまりこの条件は
+//!
+//! ```text
+//! 直接到達する全ての枝・全ての生きた和了牌 variant で CALL_TWO_SHANTEN_SPEED_MIN_HAN 以上
+//! ```
+//!
+//! であって、「1向聴 continuation の全ての到達テンパイで3翻以上」ではない。この policy のためだけ
+//! に SameShanten downstream を追加探索すると探索コストが大きくなるため、意図して範囲を限定した
+//! heuristic である。限定した範囲の中では conservative に畳み、1つでも翻数が足りない / 確定でき
+//! ない枝があれば policy を適用しない。畳み方は既存 prospective scoring の集約
+//! ([`direct_progress_han_verdict`]) が持つ。
+//!
+//! ## 判定にかかるコスト
+//!
+//! 翻数の判定は鳴き後1向聴の打牌選択が既に行った前方評価から回収する。枝は
+//! [`select_best_iishanten_post_call_discard`] が選択に使った探索結果そのもので、各テンパイの
+//! 確定打点も探索中の terminal scoring が求めた値をそのまま読むので、判定のために候補を探索し
+//! 直すことも同じテンパイを点数計算し直すこともない。
+//!
+//! 判定を要求するのは安価な残り自摸機会の条件を満たす局面だけで、満たさない局面では何も足さない。
+//! 要求した場合だけ確定打点の下限を集める評価器になる
+//! ([`ProductionProspectiveValuator::collecting_han_floor`]) ので、この policy が発動しない局面と
+//! 通常打牌には下限の集約コストも載らない。`Reused` 候補は先行候補の結果をそのまま複製するので、
+//! 同じ鳴き後 state を2回評価しない。
 //!
 //! # Call と Pass の重ね合わせ
 //!
@@ -171,12 +240,12 @@ use crate::damaten_value::damaten_baseline_context;
 use crate::decision_timing::{CallCandidateElapsed, CallCandidateTimer, CallDecisionTimer};
 use crate::discard_selection::{
     DiscardActionSelection, LookaheadDiagnosticScope, available_parallelism,
-    lookahead_inputs_with_own_future_draws, post_call_discard_evaluations,
+    lookahead_inputs_with_own_future_draws, own_future_draws, post_call_discard_evaluations,
     select_best_iishanten_post_call_discard, select_discard_action_with_evaluation,
     with_production_iishanten_continuation,
 };
 use crate::kuikae::forbidden_discards_after_call;
-use crate::prospective_value::ProductionProspectiveValuator;
+use crate::prospective_value::{ProductionProspectiveValuator, ProspectiveHanVerdict};
 use crate::push_pull::{
     PushPullDecision, PushPullMode, decide_push_pull, push_pull_inputs_from_selected_tenpai,
 };
@@ -195,6 +264,13 @@ const CALL_CONSUMED_TILE_COUNT: usize = 2;
 
 /// 鳴き後1向聴の比較だけで判断する、もう1つの現在向聴数。
 pub const CALL_TWO_SHANTEN_SHANTEN: i8 = 2;
+
+/// `現在2向聴 → Call → 打牌 → 1向聴` を速度優先で鳴くために必要な、鳴き後1向聴から直接到達する
+/// テンパイの確定翻数 [翻]。inclusive。
+pub const CALL_TWO_SHANTEN_SPEED_MIN_HAN: u8 = 3;
+
+/// 同じ速度優先 policy が必要とする、Call 後に自分へ残っている自摸機会 [回]。inclusive。
+pub const CALL_TWO_SHANTEN_SPEED_MIN_DRAWS: u32 = 10;
 
 /// 評価対象の鳴き種別。今回の対象は Chi と Pon だけで、Kan は含まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +302,9 @@ pub enum CallDecisionReason {
     EligibleIishantenSelfTsumo,
     /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue が Pass より厳密に高い。
     EligibleTwoShantenSelfTsumo,
+    /// 現在2向聴から鳴き後1向聴になり、ExpectedSelfTsumoValue は Pass 以下だが、鳴き後1向聴から
+    /// 直接到達するテンパイの確定打点と残り自摸機会が速度優先 policy を満たす。
+    EligibleTwoShantenSpeed,
     /// 他家にリーチ者がいる。今回の鳴きは押し引きへ通さない。
     OpponentReached,
     /// reaction context に `drawn_tile` があり局面として不整合。14枚扱いで判断しない。
@@ -291,6 +370,35 @@ pub enum CallTwoShantenPassEvaluation {
     Full,
 }
 
+/// production が使用した `現在2向聴 → Call → 打牌 → 1向聴` の速度優先 policy の判断材料。
+///
+/// 値はどちらも既存 layer の結果そのままで、残り自摸機会は打牌選択と同じ
+/// [`own_future_draws`]、翻数は鳴き後1向聴の打牌選択が使った前方評価から回収した
+/// [`direct_progress_han_verdict`] の結論を使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallTwoShantenSpeedDiagnostic {
+    /// Call 後に自分へ残っている自摸機会 [回]。山の残枚数が unknown な局面では `None`。
+    pub own_future_draws: Option<u32>,
+    /// 鳴き後の最良打牌から次の Progress ツモで直接到達するテンパイの確定翻数が
+    /// [`CALL_TWO_SHANTEN_SPEED_MIN_HAN`] 以上か。SameShanten を経由する枝は含まない。
+    ///
+    /// 残り自摸機会の条件で先に落ちた候補では判定を要求しないので `None`。
+    pub han: Option<ProspectiveHanVerdict>,
+    /// 通常の Call / Pass 比較では Pass になる候補を、この policy が Call へ変えたか。
+    pub overrides_pass: bool,
+}
+
+impl CallTwoShantenSpeedDiagnostic {
+    /// 速度優先 policy の条件をすべて満たすか。
+    ///
+    /// 残り自摸機会を確定できない局面と、翻数を確定できない候補はどちらも満たさない。
+    pub fn is_satisfied(&self) -> bool {
+        self.own_future_draws
+            .is_some_and(|draws| draws >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS)
+            && self.han == Some(ProspectiveHanVerdict::AtLeast)
+    }
+}
+
 /// production が使用した `現在2向聴 → Call → 打牌 → 1向聴` と Pass の比較。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallTwoShantenSelfTsumoDiagnostic {
@@ -299,6 +407,9 @@ pub struct CallTwoShantenSelfTsumoDiagnostic {
     pub pass_expected_self_tsumo_value: Option<u64>,
     pub call_expected_self_tsumo_value: Option<u64>,
     pub comparison: CallIishantenComparison,
+    /// 同じ候補の速度優先 policy の判断材料。`comparison` が `PassNotLower` の候補だけ、この
+    /// policy が成立すれば Call へ変わる。
+    pub speed: CallTwoShantenSpeedDiagnostic,
 }
 
 /// 和了牌の物理牌1つ分の役の有無。
@@ -952,6 +1063,19 @@ fn select_eligible_candidate(candidates: &[CallCandidateDiagnostic]) -> Option<u
             },
         )
     })
+    // 値比較で成立した候補が無い場合だけ、速度優先 policy で成立した候補を同じ tie-break で
+    // 選ぶ。値比較で成立する候補があればそちらを優先し、従来の選択を変えない。
+    .or_else(|| {
+        best_self_tsumo_candidate(
+            candidates,
+            CallDecisionReason::EligibleTwoShantenSpeed,
+            |candidate| {
+                candidate
+                    .two_shanten_self_tsumo
+                    .and_then(|diagnostic| diagnostic.call_expected_self_tsumo_value)
+            },
+        )
+    })
 }
 
 // 成立した Call 候補のうち、Call 側 ExpectedSelfTsumoValue が最大のもの。値は候補の比較に
@@ -1283,29 +1407,50 @@ fn evaluate_two_shanten_call_to_iishanten(
 ) -> CallDecisionReason {
     let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
     melds.push(inputs.meld.clone());
-    let Some((evaluation, call_value)) = select_best_iishanten_post_call_discard(
+    // 残り自摸機会の条件を満たす局面だけ、同じ前方評価から速度優先 policy の翻数判定も回収する。
+    let own_future_draws = own_future_draws(ctx);
+    let required_han = speed_required_han(own_future_draws);
+    let Some(selection) = select_best_iishanten_post_call_discard(
         ctx,
         &inputs.post_call_tiles,
         &melds,
         &inputs.post_call_discards,
+        required_han,
     ) else {
         return CallDecisionReason::NoPostCallDiscard;
     };
-    let post_call_shanten = evaluation.min_shanten_after_discard();
-    candidate.post_call_discard = Some(evaluation);
+    let post_call_shanten = selection.evaluation.min_shanten_after_discard();
     if post_call_shanten != CALL_CURRENT_SHANTEN {
+        candidate.post_call_discard = Some(selection.evaluation);
         return CallDecisionReason::PostCallNotIishanten;
     }
 
+    candidate.post_call_discard = Some(selection.evaluation);
     candidate.two_shanten_self_tsumo = Some(CallTwoShantenSelfTsumoDiagnostic {
         reaction_source_player: ctx.reaction_source_player(),
         pass_evaluation: CallTwoShantenPassEvaluation::Full,
         pass_expected_self_tsumo_value: None,
-        call_expected_self_tsumo_value: call_value,
+        call_expected_self_tsumo_value: selection.expected_self_tsumo_value,
         comparison: CallIishantenComparison::Unknown,
+        speed: CallTwoShantenSpeedDiagnostic {
+            own_future_draws,
+            han: selection.direct_progress_han,
+            overrides_pass: false,
+        },
     });
     // Pass の評価はここでは行わないので、比較が終わるまでは未確定の理由を置く。
     CallDecisionReason::IishantenSelfTsumoUnknown
+}
+
+// 速度優先 policy が求める翻数。安価な残り自摸機会の条件を満たす局面だけ判定を要求する。
+//
+// 残り自摸機会は巡目や河の枚数から推測せず、鳴き後の打牌選択と self-tsumo continuation が使う
+// 既存の [`own_future_draws`] をそのまま読む。確定できない局面と閾値未満の局面では判定を要求せず、
+// policy も適用しない。
+fn speed_required_han(own_future_draws: Option<u32>) -> Option<u8> {
+    own_future_draws
+        .is_some_and(|draws| draws >= CALL_TWO_SHANTEN_SPEED_MIN_DRAWS)
+        .then_some(CALL_TWO_SHANTEN_SPEED_MIN_HAN)
 }
 
 // 1向聴のままの Call 候補がある場合だけ Pass を1回評価し、全候補へ同じ値を配る。
@@ -1397,8 +1542,22 @@ fn apply_two_shanten_self_tsumo_policy(
             CallDecisionReason::EligibleTwoShantenSelfTsumo,
         );
         diagnostic.comparison = comparison;
+        // 速度優先 policy が上書きするのは Call / Pass の値比較で Pass になる結論だけ。他の
+        // rejection 条件はそのまま残し、打点による例外を持たせない。
+        let reason = if reason == CallDecisionReason::PassSelfTsumoNotLower
+            && diagnostic.speed.is_satisfied()
+        {
+            diagnostic.speed.overrides_pass = true;
+            CallDecisionReason::EligibleTwoShantenSpeed
+        } else {
+            reason
+        };
         candidate.two_shanten_self_tsumo = Some(diagnostic);
-        candidate.eligible = reason == CallDecisionReason::EligibleTwoShantenSelfTsumo;
+        candidate.eligible = matches!(
+            reason,
+            CallDecisionReason::EligibleTwoShantenSelfTsumo
+                | CallDecisionReason::EligibleTwoShantenSpeed
+        );
         candidate.reason = reason;
     }
 }
@@ -1686,6 +1845,8 @@ mod tests {
 
     use bot_logic::MeldShape;
 
+    use crate::prospective_value::han_floor_counter;
+
     use crate::decision_timing::{CallCandidateDuration, CallDecisionDurations};
 
     fn tile(value: u8) -> TileId {
@@ -1694,6 +1855,15 @@ mod tests {
 
     fn tiles(values: &[u8]) -> Vec<TileId> {
         values.iter().map(|&value| tile(value)).collect()
+    }
+
+    // 速度優先 policy を評価しなかった候補の判断材料。
+    fn not_applied_speed() -> CallTwoShantenSpeedDiagnostic {
+        CallTwoShantenSpeedDiagnostic {
+            own_future_draws: None,
+            han: None,
+            overrides_pass: false,
+        }
     }
 
     fn wait(winning_tile: u8, remaining: u8, yaku: CallWaitYaku) -> CallWaitYakuDiagnostic {
@@ -2136,6 +2306,503 @@ mod tests {
         }
     }
 
+    // 既存2副露 + CC 55p E S W の2向聴。TWO_SHANTEN_CALL_PON_HAND と同じ形だが、赤5p を
+    // 黒5p に置き換えて赤ドラ1翻が乗らないようにしたもの。
+    const LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND: [u8; 7] = [132, 133, 53, 54, 108, 112, 116];
+
+    // 白 Pon + 234m Chi の2副露。白 と 中 の役牌2翻だけで、速度優先 policy の要求翻数に
+    // 届かない。向聴数は副露済み面子数だけで決まるので、手牌側の評価は大三元の fixture と同じ。
+    fn low_value_two_shanten_reaction_context(
+        hand: &[u8],
+        target: u8,
+        remaining_tiles: Option<u32>,
+    ) -> GameContext {
+        let melds = vec![
+            Meld::new(MeldKind::Pon, tiles(&[124, 125, 126]), Some(tile(124))),
+            Meld::new(MeldKind::Chi, tiles(&[4, 8, 12]), Some(tile(4))),
+        ];
+        two_shanten_reaction_context_with_melds(hand, melds, target, Some(1), remaining_tiles)
+    }
+
+    // 同じ2向聴 reaction 局面で、reaction 元の他家だけがリーチしている場合。
+    fn reached_two_shanten_reaction_context(
+        hand: &[u8],
+        target: u8,
+        remaining_tiles: Option<u32>,
+    ) -> GameContext {
+        let melds = vec![
+            Meld::new(MeldKind::Pon, tiles(&[124, 125, 126]), Some(tile(124))),
+            Meld::new(MeldKind::Pon, tiles(&[128, 129, 130]), Some(tile(128))),
+        ];
+        let hand_tiles = tiles(hand);
+        let mut visible = hand_tiles.clone();
+        visible.push(tile(target));
+        visible.extend(melds.iter().flat_map(|meld| meld.tiles().iter().copied()));
+
+        GameContext::from_parts_with_melds(
+            None,
+            hand_tiles,
+            vec![],
+            TileType::new(EAST),
+            TileType::new(EAST),
+            visible,
+            Some(0),
+            Some(0),
+            [vec![], vec![tile(target)], vec![], vec![]],
+            [false, true, false, false],
+            [melds, vec![], vec![], vec![]],
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        })
+        .with_reaction_source_player(Some(1))
+        .with_table_state_facts(crate::context::TableStateFacts {
+            remaining_tiles,
+            ..Default::default()
+        })
+    }
+
+    fn speed_facts(
+        own_future_draws: Option<u32>,
+        han: Option<ProspectiveHanVerdict>,
+    ) -> CallTwoShantenSpeedDiagnostic {
+        CallTwoShantenSpeedDiagnostic {
+            own_future_draws,
+            han,
+            overrides_pass: false,
+        }
+    }
+
+    // 速度優先 policy の条件をすべて満たす判断材料。
+    fn satisfied_speed_facts() -> CallTwoShantenSpeedDiagnostic {
+        speed_facts(
+            Some(CALL_TWO_SHANTEN_SPEED_MIN_DRAWS),
+            Some(ProspectiveHanVerdict::AtLeast),
+        )
+    }
+
+    // 鳴き後1向聴まで評価が進んだ2向聴候補。Call / Pass の値と速度優先 policy の材料だけを
+    // 差し替えて、比較と上書きの semantics だけを見る。
+    fn two_shanten_speed_candidate(
+        call_value: Option<u64>,
+        speed: CallTwoShantenSpeedDiagnostic,
+    ) -> CallCandidateDiagnostic {
+        CallCandidateDiagnostic {
+            current_shanten: Some(CALL_TWO_SHANTEN_SHANTEN),
+            two_shanten_self_tsumo: Some(CallTwoShantenSelfTsumoDiagnostic {
+                reaction_source_player: Some(1),
+                pass_evaluation: CallTwoShantenPassEvaluation::Full,
+                pass_expected_self_tsumo_value: None,
+                call_expected_self_tsumo_value: call_value,
+                comparison: CallIishantenComparison::Unknown,
+                speed,
+            }),
+            reason: CallDecisionReason::IishantenSelfTsumoUnknown,
+            ..new_call_candidate(
+                &pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED),
+                CallKind::Pon,
+            )
+        }
+    }
+
+    // 重ねて評価済みの Pass 値を渡して policy を1回適用する。Pass の再評価は行わない。
+    fn applied_two_shanten_policy(
+        ctx: &GameContext,
+        call_value: Option<u64>,
+        pass_value: Option<u64>,
+        speed: CallTwoShantenSpeedDiagnostic,
+    ) -> CallCandidateDiagnostic {
+        let mut candidates = vec![two_shanten_speed_candidate(call_value, speed)];
+        apply_two_shanten_self_tsumo_policy(
+            ctx,
+            &mut candidates,
+            Some(PassSelfTsumoContinuation {
+                kind: PassSelfTsumoContinuationKind::TwoShanten,
+                value: pass_value,
+                elapsed: Duration::ZERO,
+            }),
+            &mut CallDecisionTimer::disabled(),
+        );
+        candidates.remove(0)
+    }
+
+    #[test]
+    fn a_high_value_two_shanten_call_is_taken_even_when_the_pass_value_is_not_lower() {
+        // 直接到達テンパイが3翻以上確定 + 残り自摸10回以上の 2向聴 → 1向聴 は、Call の
+        // ExpectedSelfTsumoValue が Pass 以下でも速度優先で鳴く。同値と Call 側が低い場合の
+        // 両方を含む。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+
+        for call in [Some(100), Some(99)] {
+            let candidate =
+                applied_two_shanten_policy(&ctx, call, Some(100), satisfied_speed_facts());
+            let comparison = candidate.two_shanten_self_tsumo.expect("比較対象");
+
+            assert_eq!(
+                candidate.reason,
+                CallDecisionReason::EligibleTwoShantenSpeed
+            );
+            assert!(candidate.eligible);
+            // 上書きするのは理由だけで、値比較そのものは Pass のまま診断へ残す。
+            assert_eq!(comparison.comparison, CallIishantenComparison::PassNotLower);
+            assert!(comparison.speed.overrides_pass);
+            assert!(comparison.speed.is_satisfied());
+            assert_eq!(
+                select_eligible_candidate(std::slice::from_ref(&candidate)),
+                Some(0),
+                "{candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_shanten_call_below_the_required_han_keeps_the_value_comparison() {
+        // 2翻以下・翻数 unknown・翻数を評価していない候補はどれも従来どおり Pass。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+
+        for han in [
+            Some(ProspectiveHanVerdict::Below),
+            Some(ProspectiveHanVerdict::Unknown),
+            None,
+        ] {
+            let speed = speed_facts(Some(CALL_TWO_SHANTEN_SPEED_MIN_DRAWS), han);
+            let candidate = applied_two_shanten_policy(&ctx, Some(100), Some(100), speed);
+            let comparison = candidate.two_shanten_self_tsumo.expect("比較対象");
+
+            assert_eq!(
+                candidate.reason,
+                CallDecisionReason::PassSelfTsumoNotLower,
+                "{han:?}"
+            );
+            assert!(!candidate.eligible, "{han:?}");
+            assert_eq!(comparison.comparison, CallIishantenComparison::PassNotLower);
+            assert!(!comparison.speed.overrides_pass, "{han:?}");
+            assert!(!comparison.speed.is_satisfied(), "{han:?}");
+            assert_eq!(
+                select_eligible_candidate(std::slice::from_ref(&candidate)),
+                None,
+                "{han:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_shanten_call_with_too_few_remaining_draws_keeps_the_value_comparison() {
+        // 残り自摸9回以下と、残り自摸数を確定できない局面はどちらも速度優先 policy を適用せず
+        // 従来の比較へ戻す。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+
+        for draws in [Some(CALL_TWO_SHANTEN_SPEED_MIN_DRAWS - 1), Some(0), None] {
+            let speed = speed_facts(draws, Some(ProspectiveHanVerdict::AtLeast));
+            let candidate = applied_two_shanten_policy(&ctx, Some(100), Some(100), speed);
+            let comparison = candidate.two_shanten_self_tsumo.expect("比較対象");
+
+            assert_eq!(
+                candidate.reason,
+                CallDecisionReason::PassSelfTsumoNotLower,
+                "{draws:?}"
+            );
+            assert!(!candidate.eligible, "{draws:?}");
+            assert!(!comparison.speed.overrides_pass, "{draws:?}");
+            assert!(!comparison.speed.is_satisfied(), "{draws:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_shanten_speed_policy_overrides_only_the_value_comparison() {
+        // 上書きするのは値比較が Pass と結論した場合だけ。Call が既に高い場合は従来の理由の
+        // まま、値 unknown と反応元不明は速度優先 policy でも鳴かない。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+
+        let call_higher =
+            applied_two_shanten_policy(&ctx, Some(101), Some(100), satisfied_speed_facts());
+        assert_eq!(
+            call_higher.reason,
+            CallDecisionReason::EligibleTwoShantenSelfTsumo
+        );
+        assert!(call_higher.eligible);
+        assert!(
+            !call_higher
+                .two_shanten_self_tsumo
+                .expect("比較対象")
+                .speed
+                .overrides_pass
+        );
+
+        let unknown_value =
+            applied_two_shanten_policy(&ctx, None, Some(100), satisfied_speed_facts());
+        assert_eq!(
+            unknown_value.reason,
+            CallDecisionReason::IishantenSelfTsumoUnknown
+        );
+        assert!(!unknown_value.eligible);
+        assert!(
+            !unknown_value
+                .two_shanten_self_tsumo
+                .expect("比較対象")
+                .speed
+                .overrides_pass
+        );
+
+        let unknown_source = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            None,
+            Some(40),
+        );
+        let candidate = applied_two_shanten_policy(
+            &unknown_source,
+            Some(100),
+            Some(100),
+            satisfied_speed_facts(),
+        );
+        assert_eq!(candidate.reason, CallDecisionReason::ReactionSourceUnknown);
+        assert!(!candidate.eligible);
+        assert!(
+            !candidate
+                .two_shanten_self_tsumo
+                .expect("比較対象")
+                .speed
+                .overrides_pass
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_speed_verdict_does_not_change_the_post_call_selection() {
+        // 翻数の判定は鳴き後1向聴の打牌選択が使った前方評価から回収するだけ。要求の有無で選ぶ
+        // 打牌も Call 側 ExpectedSelfTsumoValue も変わらず、要求しない場合は確定打点の下限を
+        // 畳む処理そのものを通らない。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let (kind, called_tile, consumed) = normalize_call(&action).expect("Chi / Pon");
+        let (meld, post_call_tiles) =
+            call_meld_and_concealed_tiles(ctx.hand_tiles(), kind, called_tile, consumed)
+                .expect("合法な鳴き");
+        let forbidden = forbidden_discards_after_call(&meld);
+        let post_call_fixed_meld_count =
+            FixedMeldCount::new(ctx.own_fixed_meld_count().expect("副露数").get() + 1)
+                .expect("上限内");
+        let evaluations = post_call_discard_evaluations(
+            &ctx,
+            &post_call_tiles,
+            post_call_fixed_meld_count,
+            &forbidden,
+        );
+        let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+        melds.push(meld);
+
+        let (without, without_folds) = han_floor_counter::count_during(|| {
+            select_best_iishanten_post_call_discard(
+                &ctx,
+                &post_call_tiles,
+                &melds,
+                &evaluations,
+                None,
+            )
+            .expect("鳴き後の打牌を選べる")
+        });
+        let (with, with_folds) = han_floor_counter::count_during(|| {
+            select_best_iishanten_post_call_discard(
+                &ctx,
+                &post_call_tiles,
+                &melds,
+                &evaluations,
+                Some(CALL_TWO_SHANTEN_SPEED_MIN_HAN),
+            )
+            .expect("鳴き後の打牌を選べる")
+        });
+
+        assert_eq!(with.evaluation, without.evaluation);
+        assert_eq!(
+            with.expected_self_tsumo_value,
+            without.expected_self_tsumo_value
+        );
+        assert_eq!(without.direct_progress_han, None);
+        assert_eq!(
+            with.direct_progress_han,
+            Some(ProspectiveHanVerdict::AtLeast)
+        );
+
+        // 要求しない呼び出しは下限を1件も畳まない。要求した場合だけ、探索が評価した未来テンパイ
+        // について畳む。
+        assert_eq!(without_folds, 0);
+        assert!(with_folds > 0);
+    }
+
+    #[test]
+    fn the_two_shanten_speed_facts_come_from_the_existing_layers() {
+        // 残り自摸機会は既存の own_future_draws、翻数は鳴き後の手牌 state を既存 prospective
+        // scoring で評価した結果。どちらも診断専用の計算を持たない。
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+
+        // 白 Pon + 發 Pon の後に 中 を Pon すると大三元。直接到達するどのテンパイでも3翻以上が
+        // 確定する。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+        let (_, candidate) = single_candidate(&ctx, &action, false);
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.own_future_draws, own_future_draws(&ctx));
+        assert_eq!(
+            speed.own_future_draws,
+            Some(CALL_TWO_SHANTEN_SPEED_MIN_DRAWS)
+        );
+        assert_eq!(speed.han, Some(ProspectiveHanVerdict::AtLeast));
+        assert!(speed.is_satisfied());
+
+        // 役牌2翻だけの手は要求翻数に届かない。赤5p を引き当てる枝だけは3翻になるが、直接
+        // 到達する枝に確定翻数が足りないものがあれば候補全体が届かない扱いになる。
+        let low_value = low_value_two_shanten_reaction_context(
+            &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(40),
+        );
+        let (_, candidate) = single_candidate(&low_value, &action, false);
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.han, Some(ProspectiveHanVerdict::Below));
+        assert!(!speed.is_satisfied());
+
+        // 残り自摸9回以下の局面では高コストな将来打点を評価しない。
+        let late = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(39),
+        );
+        let (_, candidate) = single_candidate(&late, &action, false);
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.own_future_draws, Some(9));
+        assert_eq!(speed.han, None);
+        assert!(!speed.is_satisfied());
+
+        // 山の残枚数が unknown な局面も同じく評価しない。
+        let unknown_wall = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            None,
+        );
+        let (_, candidate) = single_candidate(&unknown_wall, &action, false);
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.own_future_draws, None);
+        assert_eq!(speed.han, None);
+        assert!(!speed.is_satisfied());
+    }
+
+    #[test]
+    fn the_han_floor_is_only_collected_when_the_speed_policy_needs_it() {
+        // 判定を要求しない局面へ下限の集約コストを載せない。残り自摸9回以下・残り自摸数 unknown・
+        // 鳴き後も2向聴のままの候補はどれも判定を要求しないので、鳴き判断1回で1件も畳まない。
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let policy_off = [Some(39), Some(0), None];
+        for remaining in policy_off {
+            let ctx = valued_two_shanten_reaction_context(
+                &TWO_SHANTEN_CALL_PON_HAND,
+                TWO_SHANTEN_CALL_PON_TARGET,
+                Some(1),
+                remaining,
+            );
+            let ((_, candidate), folds) =
+                han_floor_counter::count_during(|| single_candidate(&ctx, &action, false));
+            let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+            assert_eq!(speed.han, None, "{remaining:?}");
+            assert_eq!(folds, 0, "{remaining:?}");
+        }
+
+        // 鳴いても2向聴のままの候補も判定を要求しない。
+        let stays_two_shanten =
+            valued_reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 40);
+        let stays_action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let ((_, candidate), folds) = han_floor_counter::count_during(|| {
+            single_candidate(&stays_two_shanten, &stays_action, false)
+        });
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotIishanten);
+        assert_eq!(folds, 0);
+
+        // 残り自摸10回以上で鳴き後1向聴になる候補だけ、探索が評価した未来テンパイについて畳む。
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(40),
+        );
+        let ((_, candidate), folds) =
+            han_floor_counter::count_during(|| single_candidate(&ctx, &action, false));
+        let speed = candidate.two_shanten_self_tsumo.expect("比較対象").speed;
+        assert_eq!(speed.han, Some(ProspectiveHanVerdict::AtLeast));
+        assert!(folds > 0);
+    }
+
+    #[test]
+    fn the_two_shanten_speed_policy_does_not_override_an_opponent_reach() {
+        // 他家リーチ時は速度優先 policy でも鳴かない。判定は従来どおり OpponentReached で、
+        // 高打点・残り自摸の材料も評価しない。
+        let ctx = reached_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(40),
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+
+        assert_eq!(candidate.reason, CallDecisionReason::OpponentReached);
+        assert!(!candidate.eligible);
+        assert_eq!(candidate.two_shanten_self_tsumo, None);
+        assert_eq!(decision.selected, None);
+    }
+
+    #[test]
+    fn the_two_shanten_speed_policy_is_not_applied_outside_two_shanten_to_iishanten() {
+        // 鳴いても2向聴のままの候補と、1向聴のまま鳴く候補はどちらも対象外。速度優先 policy の
+        // 材料を持つ診断そのものが付かない。
+        let stays_two_shanten =
+            valued_reaction_context(&RYANSHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 40);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&stays_two_shanten, &action, false);
+        assert_eq!(candidate.current_shanten, Some(CALL_TWO_SHANTEN_SHANTEN));
+        assert_eq!(candidate.reason, CallDecisionReason::PostCallNotIishanten);
+        assert_eq!(candidate.two_shanten_self_tsumo, None);
+        assert_eq!(decision.selected, None);
+
+        let stays_iishanten =
+            valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 40);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (_, candidate) = single_candidate(&stays_iishanten, &action, false);
+        assert_eq!(candidate.current_shanten, Some(CALL_CURRENT_SHANTEN));
+        assert_eq!(candidate.post_call_shanten(), Some(CALL_CURRENT_SHANTEN));
+        assert!(candidate.iishanten_self_tsumo.is_some());
+        assert_eq!(candidate.two_shanten_self_tsumo, None);
+    }
+
     #[test]
     fn two_shanten_call_pass_comparison_keeps_all_three_outcomes() {
         // 2向聴からの鳴きも1向聴からの鳴きと同じ比較 semantics を使う。厳密に高い場合だけ
@@ -2292,6 +2959,7 @@ mod tests {
                 } else {
                     CallIishantenComparison::PassNotLower
                 },
+                speed: not_applied_speed(),
             }),
             eligible: reason == CallDecisionReason::EligibleTwoShantenSelfTsumo,
             reason,

@@ -11,16 +11,16 @@ use bot_core::{
     MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
     OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
-    ProspectiveDrawVariantValue, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
-    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
-    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
-    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
-    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
-    RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenAgent,
-    ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiContinuationBranch,
-    TenpaiContinuationCandidate, TenpaiContinuationDiagnostic, TenpaiOffenseValue,
-    TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
-    TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
+    ProspectiveDrawVariantValue, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
+    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision,
+    PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
+    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
+    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
+    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
+    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
+    TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
+    ThreatDefenseTarget, TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
@@ -38,6 +38,8 @@ const NONE: &str = "none";
 const ABSENT: &str = "-";
 const UNKNOWN: &str = "unknown";
 const NOT_EVALUATED: &str = "not evaluated";
+// 条件を満たさず policy が適用されなかったこと。評価しなかったこととは区別する。
+const NOT_APPLIED: &str = "not applied";
 // 評価していない値。0 点と混同しないよう、確定した打点とは別の表記にする。
 const UNAVAILABLE: &str = "unavailable";
 
@@ -485,10 +487,31 @@ fn format_call_two_shanten_self_tsumo(
             call_iishanten_comparison_label(comparison.comparison)
         ),
         format!(
+            "    two-shanten speed: draws {} / han {} -> {}",
+            format_optional_count(comparison.speed.own_future_draws),
+            call_two_shanten_speed_han_label(comparison.speed.han),
+            if comparison.speed.overrides_pass {
+                "overrides pass"
+            } else {
+                NOT_APPLIED
+            },
+        ),
+        format!(
             "    reaction source player: {}",
             format_seat(comparison.reaction_source_player)
         ),
     ]
+}
+
+// 残り自摸機会の条件で先に落ちた候補は将来打点を評価しないので、評価しなかったことと
+// 「翻数を確定できない」を区別する。
+fn call_two_shanten_speed_han_label(han: Option<ProspectiveHanVerdict>) -> &'static str {
+    match han {
+        None => ABSENT,
+        Some(ProspectiveHanVerdict::AtLeast) => "at least",
+        Some(ProspectiveHanVerdict::Below) => "below",
+        Some(ProspectiveHanVerdict::Unknown) => UNKNOWN,
+    }
 }
 
 fn call_two_shanten_pass_evaluation_label(
@@ -1623,6 +1646,7 @@ fn prospective_value_label(value: TenpaiVariantValue) -> String {
         TenpaiVariantValue::Known {
             payment,
             is_yakuman: true,
+            ..
         } => format!("{} yakuman", payment.total()),
         TenpaiVariantValue::Known { payment, .. } => payment.total().to_string(),
         TenpaiVariantValue::NoYaku => "no yaku".to_string(),
@@ -4634,6 +4658,11 @@ mod tests {
         );
         assert!(
             call_output.contains("    two-shanten comparison: call higher"),
+            "{call_output}"
+        );
+        // 残り自摸機会が速度優先 policy の閾値未満なので翻数は評価せず、policy も適用されない。
+        assert!(
+            call_output.contains("    two-shanten speed: draws 8 / han - -> not applied"),
             "{call_output}"
         );
         let summary = summary_section(&output);
@@ -7695,6 +7724,7 @@ mod tests {
                 payment: bot_logic::evaluate_payment(1920, false, bot_logic::WinMethod::Ron)
                     .expect("子のロン"),
                 is_yakuman: false,
+                han: Some(4),
             }),
             "7700"
         );

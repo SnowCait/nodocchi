@@ -65,6 +65,10 @@ pub enum TenpaiVariantValue {
         payment: Payment,
         /// 名前の付いた役満として確定したか。
         is_yakuman: bool,
+        /// 既存 scoring が確定させた合計翻数。役・ドラ・赤ドラを含む。
+        ///
+        /// 名前の付いた役満は翻数を持たないので `None` になり、`is_yakuman` と併せて読む。
+        han: Option<u8>,
     },
     /// 役が無い ([`HandValueOutcome::NoCandidate`])。0点ではない。
     NoYaku,
@@ -94,6 +98,32 @@ impl TenpaiVariantValue {
             }
         )
     }
+
+    /// この variant の確定翻数。要求翻数との比較は読む側の policy が行う。
+    pub fn han(self) -> TenpaiVariantHan {
+        match self {
+            Self::Known {
+                is_yakuman: true, ..
+            } => TenpaiVariantHan::Yakuman,
+            Self::Known { han: Some(han), .. } => TenpaiVariantHan::Han(han),
+            Self::Known { han: None, .. } | Self::Unknown(_) => TenpaiVariantHan::Unknown,
+            // 役が無い variant は「翻数を確定できない」ではなく0翻として確定している。
+            Self::NoYaku => TenpaiVariantHan::Han(0),
+        }
+    }
+}
+
+/// 和了牌の物理牌1つ分の確定翻数。
+///
+/// 名前の付いた役満は翻数を持たないため、翻数と別の結論として保持する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TenpaiVariantHan {
+    /// 既存 scoring が確定させた合計翻数 [翻]。役・ドラ・赤ドラを含み、役なしは0翻。
+    Han(u8),
+    /// 名前の付いた役満として確定した。
+    Yakuman,
+    /// 翻数を確定できない。要求翻数を満たすとも満たさないとも結論しない。
+    Unknown,
 }
 
 /// 打点を確定できない理由。
@@ -117,6 +147,9 @@ pub(crate) fn tenpai_variant_value(
             Some(payment) => TenpaiVariantValue::Known {
                 payment,
                 is_yakuman: hand_value.is_yakuman(),
+                han: hand_value
+                    .normal()
+                    .and_then(|candidate| candidate.total_han()),
             },
             None => TenpaiVariantValue::Unknown(TenpaiVariantUnknownReason::MissingPayment),
         },
@@ -379,6 +412,28 @@ mod tests {
     use super::*;
 
     use bot_logic::{FixedMeldCount, Meld, MeldKind, TileCounts, TileType, tenpai_completed_hands};
+
+    #[test]
+    fn the_variant_han_comes_from_the_existing_scoring() {
+        // 翻数は既存 scoring が確定させた値そのまま。役なしは0翻として確定し、翻数を確定できない
+        // variant は推測しない。名前の付いた役満は翻数を持たないので別の結論として保持する。
+        let payment = bot_logic::evaluate_payment(1280, false, WinMethod::Ron).expect("子のロン");
+        let known = |han: Option<u8>, is_yakuman: bool| TenpaiVariantValue::Known {
+            payment,
+            is_yakuman,
+            han,
+        };
+
+        assert_eq!(known(Some(3), false).han(), TenpaiVariantHan::Han(3));
+        assert_eq!(known(Some(2), false).han(), TenpaiVariantHan::Han(2));
+        assert_eq!(known(None, true).han(), TenpaiVariantHan::Yakuman);
+        assert_eq!(known(None, false).han(), TenpaiVariantHan::Unknown);
+        assert_eq!(TenpaiVariantValue::NoYaku.han(), TenpaiVariantHan::Han(0));
+        assert_eq!(
+            TenpaiVariantValue::Unknown(TenpaiVariantUnknownReason::IndeterminateBonusHan).han(),
+            TenpaiVariantHan::Unknown
+        );
+    }
 
     struct TileIdSource {
         used: [bool; TileId::COUNT],

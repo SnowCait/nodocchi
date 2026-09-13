@@ -1195,15 +1195,74 @@ pub fn forward_metrics_for_candidate_instrumented(
     evaluation: &DiscardEvaluation,
     observer: &mut impl ForwardMetricsObserver,
 ) -> ForwardMetrics {
+    forward_metrics_with_lookahead_instrumented(inputs, evaluation, observer).0
+}
+
+/// 構築済みの枝1件について、探索が将来打点の評価器へ渡したのと同じ未来テンパイの物理牌。
+///
+/// 返すのは `(テンパイ時点の concealed 手牌, その枝でここまでに切った牌)` で、どちらも探索の
+/// state と同じ正規形 (物理牌 ID の昇順、[`HandState`]) になる。集計後に枝だけを受け取った
+/// 呼び出し側が、探索が評価したのと同じ未来テンパイを指せるようにするための入口で、組み立ては
+/// 探索と同じ helper を共有する。
+///
+/// `tiles` は現在打牌の前の全物理牌、`discard` は現在打牌の評価、`drawn_tile` はその枝の仮想ツモ
+/// 牌、`next_discard` はツモ後に選ばれた2手目の打牌評価。物理牌を取り除けない枝は `None`。
+pub fn prospective_tenpai_branch_tiles(
+    tiles: &[TileId],
+    discard: &DiscardEvaluation,
+    drawn_tile: TileId,
+    next_discard: &DiscardEvaluation,
+) -> Option<(Vec<TileId>, Vec<TileId>)> {
+    // 探索の起点と同じ正規形へ揃える。
+    let mut root_tiles = tiles.to_vec();
+    root_tiles.sort_unstable();
+
+    let (discarded, after_discard) =
+        split_discarded_tile_of(root_tiles, discard.discard, discard.discards_red_five)?;
+    let mut discarded_tiles = Vec::with_capacity(2);
+    HandState::insert_tile(&mut discarded_tiles, discarded);
+
+    let mut after_draw = after_discard;
+    HandState::insert_tile(&mut after_draw, drawn_tile);
+
+    let (next_discarded, concealed_tiles) = split_discarded_tile_of(
+        after_draw,
+        next_discard.discard,
+        next_discard.discards_red_five,
+    )?;
+    HandState::insert_tile(&mut discarded_tiles, next_discarded);
+
+    Some((concealed_tiles, discarded_tiles))
+}
+
+/// [`forward_metrics_for_candidate`] の集計値と、その集計に使った探索結果そのもの。
+///
+/// 探索も集計も [`forward_metrics_for_candidate`] と同じものを1回ずつ通り、これまで集計後に
+/// 捨てていた [`DiscardLookaheadDiagnostic`] をそのまま返すだけ。集計値は同じ入力に対して必ず
+/// 一致する。集計値に加えて枝そのものが必要な経路が、同じ候補を2回探索しないための入口。
+pub fn forward_metrics_with_lookahead_for_candidate(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+) -> (ForwardMetrics, DiscardLookaheadDiagnostic) {
+    forward_metrics_with_lookahead_instrumented(inputs, evaluation, &mut ())
+}
+
+// 候補1件の探索と集計。集計値だけが必要な経路と枝も必要な経路がこの1本を共有する。
+fn forward_metrics_with_lookahead_instrumented(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    observer: &mut impl ForwardMetricsObserver,
+) -> (ForwardMetrics, DiscardLookaheadDiagnostic) {
     observer.enter_phase(ForwardMetricsPhase::LookaheadSearch);
     let candidate = search_candidate(inputs, evaluation, &selection_scopes(inputs, evaluation));
-    forward_metrics_from_candidate(
+    let metrics = forward_metrics_from_candidate(
         inputs,
         evaluation,
         &candidate,
         evaluation.min_shanten_after_discard(),
         observer,
-    )
+    );
+    (metrics, candidate)
 }
 
 /// 既に action が終わり、次の自摸を待っている1向聴 state の self-tsumo continuation。
