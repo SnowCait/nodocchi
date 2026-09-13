@@ -60,6 +60,13 @@ policy には使いません。`Summary` にも同じ値、比較結果、鳴き
 `unknown` を区別し、`call higher` の場合だけ鳴きます。同値・`unknown`・反応元不明は Pass です。
 鳴き後も2向聴のままの候補は対象外で、対象候補が無い局面では重い Pass Full 探索を実行しません。
 
+同じ候補には速度優先 policy の判断材料 `two-shanten speed` も表示します。`draws` は Call 後に
+自分へ残っている自摸機会、`han` は鳴き後の実際の手牌 state から到達する将来テンパイの確定翻数が
+3翻以上かで、`at least` / `below` / `unknown` を区別します。残り自摸機会の条件で先に落ちた候補は
+将来打点を評価しないので `han` は `-` です。`overrides pass` は、通常なら `pass not lower` で Pass
+になる候補をこの policy が Call へ変えたことを表し、`call reason` は
+`EligibleTwoShantenSpeed` になります。他家リーチ時の鳴きはこの policy でも上書きしません。
+
 ```text
 Final decision
   action: 5m

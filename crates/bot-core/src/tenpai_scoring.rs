@@ -65,6 +65,10 @@ pub enum TenpaiVariantValue {
         payment: Payment,
         /// 名前の付いた役満として確定したか。
         is_yakuman: bool,
+        /// 既存 scoring が確定させた合計翻数。役・ドラ・赤ドラを含む。
+        ///
+        /// 名前の付いた役満は翻数を持たないので `None` になり、`is_yakuman` と併せて読む。
+        han: Option<u8>,
     },
     /// 役が無い ([`HandValueOutcome::NoCandidate`])。0点ではない。
     NoYaku,
@@ -94,6 +98,21 @@ impl TenpaiVariantValue {
             }
         )
     }
+
+    /// 要求翻数以上が確定しているか。確定できない場合は `None`。
+    ///
+    /// 名前の付いた役満は翻数を持たないが、既存 scoring が役満として確定させているので必ず
+    /// 満たす。役なしは満たさず、翻数を確定できない variant は満たすと推測しない。
+    pub fn is_at_least_han(self, required: u8) -> Option<bool> {
+        match self {
+            Self::Known {
+                is_yakuman: true, ..
+            } => Some(true),
+            Self::Known { han: Some(han), .. } => Some(han >= required),
+            Self::Known { han: None, .. } | Self::Unknown(_) => None,
+            Self::NoYaku => Some(false),
+        }
+    }
 }
 
 /// 打点を確定できない理由。
@@ -117,6 +136,9 @@ pub(crate) fn tenpai_variant_value(
             Some(payment) => TenpaiVariantValue::Known {
                 payment,
                 is_yakuman: hand_value.is_yakuman(),
+                han: hand_value
+                    .normal()
+                    .and_then(|candidate| candidate.total_han()),
             },
             None => TenpaiVariantValue::Unknown(TenpaiVariantUnknownReason::MissingPayment),
         },
@@ -379,6 +401,31 @@ mod tests {
     use super::*;
 
     use bot_logic::{FixedMeldCount, Meld, MeldKind, TileCounts, TileType, tenpai_completed_hands};
+
+    #[test]
+    fn the_required_han_is_only_met_by_a_confirmed_han_count() {
+        // 翻数は既存 scoring が確定させた値だけで判定する。役なしは満たさず、翻数を確定できない
+        // variant は満たすとも満たさないとも結論しない。名前の付いた役満は翻数を持たないが、
+        // 役満として確定しているので必ず満たす。
+        let payment = bot_logic::evaluate_payment(1280, false, WinMethod::Ron).expect("子のロン");
+        let known = |han: Option<u8>, is_yakuman: bool| TenpaiVariantValue::Known {
+            payment,
+            is_yakuman,
+            han,
+        };
+
+        assert_eq!(known(Some(3), false).is_at_least_han(3), Some(true));
+        assert_eq!(known(Some(4), false).is_at_least_han(3), Some(true));
+        assert_eq!(known(Some(2), false).is_at_least_han(3), Some(false));
+        assert_eq!(known(None, true).is_at_least_han(3), Some(true));
+        assert_eq!(known(None, false).is_at_least_han(3), None);
+        assert_eq!(TenpaiVariantValue::NoYaku.is_at_least_han(3), Some(false));
+        assert_eq!(
+            TenpaiVariantValue::Unknown(TenpaiVariantUnknownReason::IndeterminateBonusHan)
+                .is_at_least_han(3),
+            None
+        );
+    }
 
     struct TileIdSource {
         used: [bool; TileId::COUNT],

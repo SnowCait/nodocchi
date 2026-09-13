@@ -2469,6 +2469,7 @@ mod tests {
                 CallDecisionReason::EligibleTenpai
                     | CallDecisionReason::EligibleIishantenSelfTsumo
                     | CallDecisionReason::EligibleTwoShantenSelfTsumo
+                    | CallDecisionReason::EligibleTwoShantenSpeed
             )
         );
         assert_eq!(candidate.selected, candidate.eligible);

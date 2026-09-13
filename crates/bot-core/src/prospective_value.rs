@@ -125,12 +125,24 @@
 //! 役なし・裏ドラ未確定・点数計算の入力不足を0点として平均へ入れない。残枚数0の variant は
 //! 生きていないので平均へ寄与させない。ダマとリーチは別々に集約する。整数除算した平均値は
 //! 表示専用で、threshold 判定にも選択にも使わない。
+//!
+//! # 翻数の下限
+//!
+//! 打点そのものとは別に、打牌候補1件の枝の先にある将来テンパイ全体について「確定翻数が要求翻数
+//! 以上か」も同じ集約規則で畳む ([`prospective_tenpai_han_verdict`])。翻数は既存 scoring が
+//! 確定させた値 ([`TenpaiVariantValue`]) そのままで、この層で数え直さない。
+//!
+//! 対象はテンパイへ到達する枝 ([`DrawTransition::Progress`]) だけで、向聴数を維持する手変わりの
+//! 枝はこの horizon の先でテンパイになるため既存 prospective scoring が打点を持たず、判定材料に
+//! できない。残枚数0の枝と variant は到達しないので寄与させず、評価できない枝・役なし・翻数を
+//! 確定できない variant はどれも「要求翻数以上」と推測しない。読む打点は production のリーチ判断
+//! が選んだ baseline のものだけで、選ばなかった baseline の翻を足さない。
 
 use bot_logic::{
     CountHasherBuilder, DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
-    DrawVariantLookaheadDiagnostic, EffectiveAcceptance, EffectiveAcceptanceTile, EffectiveShanten,
-    FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards, ProspectiveTenpai,
-    ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
+    DrawTransition, DrawVariantLookaheadDiagnostic, EffectiveAcceptance, EffectiveAcceptanceTile,
+    EffectiveShanten, FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards,
+    ProspectiveTenpai, ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
     TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     WinningContext, evaluate_tenpai_hand_value, is_menzen, split_discarded_tile,
     structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
@@ -333,6 +345,107 @@ impl ProspectiveLookaheadDiagnostic {
             .iter()
             .find(|candidate| candidate.discard == discard)
     }
+}
+
+/// 打牌候補1件の将来到達テンパイ全体について、確定打点が要求翻数を満たすかの結論。
+///
+/// 集約は既存の将来打点集約と同じ conservative な規則で、確定しない枝を都合よく除外しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProspectiveHanVerdict {
+    /// テンパイへ到達する全ての枝の、生きた和了牌 variant すべてで要求翻数以上が確定した。
+    AtLeast,
+    /// 要求翻数未満が確定した和了牌 variant がある。
+    Below,
+    /// 翻数を確定できない枝・variant がある。要求翻数以上だと推測しない。
+    Unknown,
+}
+
+impl ProspectiveHanVerdict {
+    // 2つの結論のうち弱い方。`Below` は「確定して足りない」なので `Unknown` より強い結論として
+    // 残し、1つでも足りない枝があれば候補全体を `Below` にする。
+    fn weaker(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Below, _) | (_, Self::Below) => Self::Below,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::AtLeast, Self::AtLeast) => Self::AtLeast,
+        }
+    }
+}
+
+/// 打牌候補1件の枝の先にある将来テンパイすべてについて、確定打点が要求翻数を満たすかを畳む。
+///
+/// 判定材料は構築済みの2手先評価 (`candidate`) と、その枝を既存 prospective scoring で評価した
+/// 結果 (`value`) だけで、向聴・受け入れ・待ち・役・点数計算をここで求め直さない。
+///
+/// 対象は向聴数を進める枝 ([`DrawTransition::Progress`]) だけで、そこだけがこの horizon で
+/// テンパイへ到達する。向聴数を維持する手変わりの枝はこの horizon の先でテンパイになるため、
+/// 既存 prospective scoring が打点を持たず、判定材料にできない。
+///
+/// 集約は既存の将来打点集約と同じで、
+///
+/// - 残枚数 0 の枝・和了牌 variant は到達しないので寄与させない
+/// - テンパイを評価できない枝は [`ProspectiveHanVerdict::Unknown`]
+/// - production のリーチ判断が選んだ baseline の打点だけを読み、別 baseline の翻を足さない
+/// - 生きた和了牌 variant が1つも無いテンパイは [`ProspectiveHanVerdict::Unknown`]
+///
+/// とし、判定できた枝だけを見て「要求翻数以上」と結論しない。
+pub(crate) fn prospective_tenpai_han_verdict(
+    candidate: &DiscardLookaheadDiagnostic,
+    value: &ProspectiveDiscardValue,
+    required_han: u8,
+) -> ProspectiveHanVerdict {
+    let mut verdict: Option<ProspectiveHanVerdict> = None;
+    for draw in candidate.draws_with(DrawTransition::Progress) {
+        let Some(draw_value) = value.draw(draw.draw) else {
+            return ProspectiveHanVerdict::Unknown;
+        };
+        for variant in &draw_value.variants {
+            if variant.remaining == 0 {
+                continue;
+            }
+            let branch = variant
+                .outcome
+                .evaluated()
+                .map_or(ProspectiveHanVerdict::Unknown, |tenpai| {
+                    tenpai_han_verdict(tenpai, required_han)
+                });
+            verdict = Some(match verdict {
+                Some(current) => current.weaker(branch),
+                None => branch,
+            });
+        }
+    }
+    verdict.unwrap_or(ProspectiveHanVerdict::Unknown)
+}
+
+// 将来テンパイ1件の確定打点が要求翻数を満たすか。
+//
+// 読むのは production のリーチ判断が選んだ baseline の打点だけで、選ばなかった baseline の翻を
+// 足さない。副露のある手は将来リーチが合法にならないため必ずダマ baseline になり、リーチ1翻も
+// 門前清自摸和も含まない。攻撃モードを確定できない局面では翻数も確定させない。
+fn tenpai_han_verdict(tenpai: &ProspectiveTenpaiValue, required_han: u8) -> ProspectiveHanVerdict {
+    let baseline = match tenpai.mode {
+        TenpaiOffenseMode::Damaten => &tenpai.damaten,
+        TenpaiOffenseMode::Reach => &tenpai.reach,
+        TenpaiOffenseMode::Unknown => return ProspectiveHanVerdict::Unknown,
+    };
+
+    let mut verdict: Option<ProspectiveHanVerdict> = None;
+    for variant in baseline.winning_tile_values() {
+        if variant.remaining == 0 {
+            continue;
+        }
+        let value = match variant.value.is_at_least_han(required_han) {
+            Some(true) => ProspectiveHanVerdict::AtLeast,
+            Some(false) => ProspectiveHanVerdict::Below,
+            None => ProspectiveHanVerdict::Unknown,
+        };
+        verdict = Some(match verdict {
+            Some(current) => current.weaker(value),
+            None => value,
+        });
+    }
+    verdict.unwrap_or(ProspectiveHanVerdict::Unknown)
 }
 
 /// 2手先評価が選んだ2手目の打牌後のテンパイを、production のリーチ判断と同じ policy で評価する
@@ -1116,6 +1229,27 @@ mod tests {
     use crate::meld::MeldKind;
     use crate::tenpai_scoring::{TenpaiVariantUnknownReason, tsumo_scoring_inputs};
 
+    #[test]
+    fn the_han_verdict_keeps_the_weakest_branch() {
+        // 確定して足りない枝が1つでもあれば候補全体が `Below`、確定できない枝があれば
+        // `Unknown`。満たした枝だけを見て `AtLeast` と結論しない。
+        use ProspectiveHanVerdict::{AtLeast, Below, Unknown};
+
+        for (left, right, expected) in [
+            (AtLeast, AtLeast, AtLeast),
+            (AtLeast, Unknown, Unknown),
+            (Unknown, AtLeast, Unknown),
+            (Unknown, Unknown, Unknown),
+            (AtLeast, Below, Below),
+            (Below, AtLeast, Below),
+            (Unknown, Below, Below),
+            (Below, Unknown, Below),
+            (Below, Below, Below),
+        ] {
+            assert_eq!(left.weaker(right), expected, "{left:?} {right:?}");
+        }
+    }
+
     struct TileIdSource {
         used: [bool; TileId::COUNT],
     }
@@ -1344,6 +1478,7 @@ mod tests {
         TenpaiVariantValue::Known {
             payment: evaluate_payment(total / 4, false, WinMethod::Ron).expect("子のロン"),
             is_yakuman: false,
+            han: Some(4),
         }
     }
 
