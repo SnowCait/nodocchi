@@ -139,13 +139,14 @@
 //! 下限を読まない通常打牌・通常の鳴き判断・その他の prospective evaluation へ集約コストを載せない。
 //! 要求の有無で選択値も探索も変わらない。
 //!
-//! その下限を打牌候補1件分へ畳んだものが [`direct_progress_han_verdict`] で、対象は
-//! **向聴数を進める枝 ([`DrawTransition::Progress`]) の先にある直接到達テンパイだけ** に限定する。
-//! SameShanten 手変わりの枝やその先の continuation は含まない。判定のために SameShanten
-//! downstream を追加探索しないための、意図した限定である。限定した範囲の中では、残枚数0の枝と
-//! variant を寄与させず、評価できない枝・役なし・翻数を確定できない variant をどれも「要求翻数
-//! 以上」と推測しない。読む打点は production のリーチ判断が選んだ baseline のものだけで、選ば
-//! なかった baseline の翻を足さない。
+//! その下限を打牌候補1件分へ畳んだものが [`continuation_han_verdict`] で、対象は
+//! **その候補について production の探索が既に評価した terminal テンパイすべて** である。向聴数を
+//! 進める枝 ([`DrawTransition::Progress`]) の先の直接到達テンパイだけでなく、SameShanten 手変わり
+//! を経由してから到達するテンパイも、production の continuation depth に収まる範囲はすべて含む。
+//! 畳むのは探索が構築した枝を辿って読むだけなので、判定のために新しい枝を探索することはなく、
+//! 探索していない枝は対象にならない。対象の中では、残枚数0の枝と variant を寄与させず、評価でき
+//! ない枝・役なし・翻数を確定できない variant をどれも「要求翻数以上」と推測しない。読む打点は
+//! production のリーチ判断が選んだ baseline のものだけで、選ばなかった baseline の翻を足さない。
 
 use bot_logic::{
     CountHasherBuilder, DiscardEvaluation, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic,
@@ -153,9 +154,10 @@ use bot_logic::{
     EffectiveShanten, FixedMeldCount, HistoryFuritenFacts, LookaheadDiagnostic, Meld, OwnDiscards,
     ProspectiveTenpai, ProspectiveTenpaiValuator, ProspectiveTsumoValuator, TenpaiCompletedHands,
     TenpaiHandValueProfile, TenpaiTsumoValue, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    WinningContext, evaluate_tenpai_hand_value, is_menzen, prospective_tenpai_branch_tiles,
-    split_discarded_tile, structural_acceptance_tile_types_with_fixed_melds,
-    tenpai_completed_hands, tenpai_wait_availability,
+    WinningContext, evaluate_tenpai_hand_value, is_menzen, prospective_branch_root_tiles,
+    prospective_branch_tiles_after_draw, split_discarded_tile,
+    structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
+    tenpai_wait_availability,
 };
 
 use crate::context::GameContext;
@@ -395,12 +397,13 @@ impl ProspectiveHanFloor {
     }
 }
 
-/// 打牌候補1件から次の Progress ツモで直接到達するテンパイについての、確定打点の判定。
+/// 打牌候補1件の continuation が評価したテンパイについての、確定打点の判定。
 ///
-/// この horizon の先 (SameShanten 手変わりの枝や、さらに深い continuation) のテンパイは含まない。
+/// 対象は production の探索が実際に評価した terminal テンパイ全体で、Progress で直接到達する
+/// テンパイも、SameShanten 手変わりを経由してから到達するテンパイも含む。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProspectiveHanVerdict {
-    /// 直接到達する枝の、生きた和了牌 variant すべてで要求翻数以上が確定した。
+    /// 評価した terminal すべての、生きた和了牌 variant すべてで要求翻数以上が確定した。
     AtLeast,
     /// 要求翻数未満が確定した和了牌 variant がある。
     Below,
@@ -410,7 +413,7 @@ pub enum ProspectiveHanVerdict {
 
 impl ProspectiveHanVerdict {
     // 2つの結論のうち弱い方。`Below` は「確定して足りない」なので `Unknown` より強い結論として
-    // 残し、1つでも足りない枝があれば候補全体を `Below` にする。
+    // 残し、1つでも足りない terminal があれば候補全体を `Below` にする。
     fn weaker(self, other: Self) -> Self {
         match (self, other) {
             (Self::Below, _) | (_, Self::Below) => Self::Below,
@@ -420,29 +423,33 @@ impl ProspectiveHanVerdict {
     }
 }
 
-/// 打牌候補1件から次の Progress ツモで直接到達するテンパイについて、確定打点が要求翻数を満たす
-/// かを畳む。
+/// 打牌候補1件の continuation が評価した全テンパイについて、確定打点が要求翻数を満たすかを畳む。
 ///
 /// 読むのは production の前方評価が既に探索した枝 (`candidate`) と、その探索中に評価器が求めた
 /// 打点だけ ([`ProductionProspectiveValuator::memoized_han_floor`])。判定のために枝を探索し直さず、
 /// 同じテンパイの点数計算もやり直さない。向聴・受け入れ・待ち・役・ドラもここで求めない。
 ///
-/// # 対象の限定
+/// # 対象の範囲
 ///
-/// 対象は向聴数を進める枝 ([`DrawTransition::Progress`]) の先にある「直接到達するテンパイ」だけ
-/// で、SameShanten 手変わりの枝やその先の continuation は含まない。この判定のためだけに
-/// SameShanten downstream を追加探索すると探索コストが大きくなるため、意図して限定した
-/// heuristic である。したがって `AtLeast` は「この1向聴から次の Progress ツモで直接テンパイに
-/// なる全ての枝で要求翻数以上が確定した」であり、「全 continuation の到達テンパイで要求翻数以上」
-/// ではない。
+/// 対象は、その候補の ExpectedSelfTsumoValue が集計したのと同じ terminal 集合である。
 ///
-/// 限定した範囲の中では conservative に畳み、判定できた枝だけを見て `AtLeast` と結論しない。
+/// ```text
+/// Progress -> terminal
+/// SameShanten -> Progress -> terminal
+/// production の continuation depth に収まるさらに深い SameShanten -> terminal
+/// ```
+///
+/// 辿るのは探索が構築した枝 (`candidate`) そのものなので、判定のために SameShanten downstream を
+/// 追加探索することはなく、production が探索していない枝は対象にならない。
+///
+/// 対象の中では conservative に畳み、判定できた terminal だけを見て `AtLeast` と結論しない。
 ///
 /// - 残枚数 0 の枝・和了牌 variant は到達しないので寄与させない
 /// - テンパイを組み立てられない枝・production 探索が打点を確定できなかった枝は `Unknown`
+/// - 先の段を探索していない SameShanten の枝は `Unknown`
 /// - 生きた和了牌 variant が1つも無いテンパイは `Unknown`
-/// - 直接到達する枝が1つも無い候補は `Unknown`
-pub(crate) fn direct_progress_han_verdict(
+/// - 評価した枝が1つも無い候補は `Unknown`
+pub(crate) fn continuation_han_verdict(
     valuator: &ProductionProspectiveValuator,
     tiles: &[TileId],
     evaluation: &DiscardEvaluation,
@@ -452,15 +459,41 @@ pub(crate) fn direct_progress_han_verdict(
     if candidate.discard != evaluation.discard {
         return ProspectiveHanVerdict::Unknown;
     }
+    let Some((concealed_tiles, discarded_tiles)) = prospective_branch_root_tiles(tiles, evaluation)
+    else {
+        return ProspectiveHanVerdict::Unknown;
+    };
+    draws_han_verdict(
+        valuator,
+        &concealed_tiles,
+        &discarded_tiles,
+        &candidate.draws,
+        required_han,
+    )
+}
 
+// 探索1段分の枝をまとめて畳む。1段目も SameShanten の先の段も同じ入口を通る。
+fn draws_han_verdict(
+    valuator: &ProductionProspectiveValuator,
+    concealed_tiles: &[TileId],
+    discarded_tiles: &[TileId],
+    draws: &[DrawLookaheadDiagnostic],
+    required_han: u8,
+) -> ProspectiveHanVerdict {
     let mut verdict: Option<ProspectiveHanVerdict> = None;
-    for draw in candidate.draws_with(DrawTransition::Progress) {
+    for draw in draws {
         for variant in &draw.variants {
             if variant.remaining == 0 {
                 continue;
             }
-            let branch =
-                direct_progress_variant_verdict(valuator, tiles, evaluation, variant, required_han);
+            let branch = branch_han_verdict(
+                valuator,
+                concealed_tiles,
+                discarded_tiles,
+                draw.transition,
+                variant,
+                required_han,
+            );
             verdict = Some(match verdict {
                 Some(current) => current.weaker(branch),
                 None => branch,
@@ -470,33 +503,69 @@ pub(crate) fn direct_progress_han_verdict(
     verdict.unwrap_or(ProspectiveHanVerdict::Unknown)
 }
 
-// 直接到達する枝1件分の判定。
+// 枝1件分の判定。Progress の枝は打牌後の terminal テンパイを読み、SameShanten の枝は探索済みの
+// 先の段をそのまま畳む。
 //
-// 未来テンパイの物理牌は探索と同じ正規形を作る既存 helper ([`prospective_tenpai_branch_tiles`])
-// から受け取り、打点は探索中に評価器が求めた下限をそのまま読む。この枝のために探索も点数計算も
+// 未来の物理牌は探索と同じ正規形を作る既存 helper ([`prospective_branch_tiles_after_draw`]) で
+// 1段ずつ進め、打点は探索中に評価器が求めた下限をそのまま読む。この枝のために探索も点数計算も
 // やり直さない。
-fn direct_progress_variant_verdict(
+fn branch_han_verdict(
     valuator: &ProductionProspectiveValuator,
-    tiles: &[TileId],
-    evaluation: &DiscardEvaluation,
+    concealed_tiles: &[TileId],
+    discarded_tiles: &[TileId],
+    transition: DrawTransition,
     variant: &DrawVariantLookaheadDiagnostic,
     required_han: u8,
 ) -> ProspectiveHanVerdict {
     let Some(next) = variant.next_discard.as_ref() else {
         return ProspectiveHanVerdict::Unknown;
     };
-    if next.min_shanten_after_discard() != TENPAI_SHANTEN {
-        return ProspectiveHanVerdict::Unknown;
-    }
-    let Some((concealed_tiles, discarded_tiles)) =
-        prospective_tenpai_branch_tiles(tiles, evaluation, variant.drawn_tile, next)
-    else {
+    let Some((concealed_tiles, discarded_tiles)) = prospective_branch_tiles_after_draw(
+        concealed_tiles,
+        discarded_tiles,
+        variant.drawn_tile,
+        next,
+    ) else {
         return ProspectiveHanVerdict::Unknown;
     };
+    match transition {
+        DrawTransition::Progress => {
+            if next.min_shanten_after_discard() != TENPAI_SHANTEN {
+                return ProspectiveHanVerdict::Unknown;
+            }
+            terminal_han_verdict(
+                valuator,
+                &concealed_tiles,
+                &discarded_tiles,
+                next,
+                required_han,
+            )
+        }
+        DrawTransition::SameShanten => match variant.downstream.as_ref() {
+            Some(downstream) => draws_han_verdict(
+                valuator,
+                &concealed_tiles,
+                &discarded_tiles,
+                &downstream.draws,
+                required_han,
+            ),
+            None => ProspectiveHanVerdict::Unknown,
+        },
+    }
+}
+
+// terminal テンパイ1件分の判定。探索中に評価器が memo へ載せた下限を読むだけ。
+fn terminal_han_verdict(
+    valuator: &ProductionProspectiveValuator,
+    concealed_tiles: &[TileId],
+    discarded_tiles: &[TileId],
+    next_discard: &DiscardEvaluation,
+    required_han: u8,
+) -> ProspectiveHanVerdict {
     let tenpai = ProspectiveTenpai {
-        concealed_tiles: &concealed_tiles,
-        acceptance: &next.acceptance_after_discard,
-        discarded_tiles: &discarded_tiles,
+        concealed_tiles,
+        acceptance: &next_discard.acceptance_after_discard,
+        discarded_tiles,
     };
     match valuator
         .memoized_han_floor(&tenpai)
@@ -1429,9 +1498,15 @@ mod tests {
             .find(|variant| !variant.drawn_tile.is_red())
             .expect("黒5の枝がある");
         let next = variant.next_discard.as_ref().expect("2手目の打牌がある");
-        let (concealed_tiles, discarded_tiles) =
-            prospective_tenpai_branch_tiles(&tiles, &evaluation, variant.drawn_tile, next)
-                .expect("枝の物理牌を組み立てられる");
+        let (concealed_tiles, discarded_tiles) = prospective_branch_root_tiles(&tiles, &evaluation)
+            .expect("打牌後の物理牌を組み立てられる");
+        let (concealed_tiles, discarded_tiles) = prospective_branch_tiles_after_draw(
+            &concealed_tiles,
+            &discarded_tiles,
+            variant.drawn_tile,
+            next,
+        )
+        .expect("枝の物理牌を組み立てられる");
         let tenpai = ProspectiveTenpai {
             concealed_tiles: &concealed_tiles,
             acceptance: &next.acceptance_after_discard,

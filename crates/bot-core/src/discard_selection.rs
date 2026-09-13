@@ -20,7 +20,7 @@ use crate::offense_value::{
 };
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
-    direct_progress_han_verdict, evaluate_prospective_lookahead_value,
+    continuation_han_verdict, evaluate_prospective_lookahead_value,
 };
 use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_named_yakuman_damaten,
@@ -2625,11 +2625,12 @@ pub(crate) fn post_call_discard_evaluations(
 pub(crate) struct PostCallIishantenSelection {
     pub evaluation: DiscardEvaluation,
     pub expected_self_tsumo_value: Option<u64>,
-    /// 要求翻数を渡した場合だけ求める、選んだ打牌から直接到達するテンパイの確定打点の判定。
+    /// 要求翻数を渡した場合だけ求める、選んだ打牌の continuation が評価したテンパイの確定打点の
+    /// 判定。
     ///
     /// 判定は選択に使った探索そのものから回収するので、候補を2回探索しない。要求しなかった場合は
     /// `None`。
-    pub direct_progress_han: Option<ProspectiveHanVerdict>,
+    pub continuation_han: Option<ProspectiveHanVerdict>,
 }
 
 /// 鳴き後も1向聴の打牌候補を、通常打牌と同じ forward/self-tsumo semantics で選ぶ。
@@ -2638,7 +2639,7 @@ pub(crate) struct PostCallIishantenSelection {
 /// future Reach legality の両方を同じ state から導出する。
 ///
 /// `required_han` を渡すと、選択に使った前方評価の探索結果からそのまま
-/// [`direct_progress_han_verdict`] を求める。探索も terminal scoring も候補1件につき1回だけで、
+/// [`continuation_han_verdict`] を求める。探索も terminal scoring も候補1件につき1回だけで、
 /// 判定のための追加探索は行わない。確定打点の下限を集める評価器にするのもこの場合だけで、
 /// 判定を要求しない呼び出しは既定の評価器のまま通る。
 pub(crate) fn select_best_iishanten_post_call_discard(
@@ -2670,7 +2671,7 @@ pub(crate) fn select_best_iishanten_post_call_discard(
         let (candidate_metrics, lookahead) =
             forward_metrics_with_lookahead_for_candidate(&inputs, evaluation);
         verdicts.push(required_han.map(|required_han| {
-            direct_progress_han_verdict(&valuator, tiles, evaluation, &lookahead, required_han)
+            continuation_han_verdict(&valuator, tiles, evaluation, &lookahead, required_han)
         }));
         metrics.push(candidate_metrics);
     }
@@ -2678,7 +2679,7 @@ pub(crate) fn select_best_iishanten_post_call_discard(
     Some(PostCallIishantenSelection {
         evaluation: evaluations[index].clone(),
         expected_self_tsumo_value: metrics[index].expected_self_tsumo_value,
-        direct_progress_han: verdicts[index],
+        continuation_han: verdicts[index],
     })
 }
 

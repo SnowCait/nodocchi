@@ -137,7 +137,7 @@ pre-acceptance 軸 (Shanten / IsolatedTile / IsolatedHonor) まで同順位の�
 その打牌後の1向聴 → 向聴数を下げるツモ → 次打牌 → テンパイ
 ```
 
-だけを進めた期待支払いを求め、既存 comparator の `ExpectedSelfTsumoValue` 軸へそのまま渡します。B / C が集計する枝そのものを選択にも使うので、選ぶ枝と集計する枝は一致します。値の確率も打点も terminal scoring も既存 continuation と同じ helper を通り、この選択のための係数も threshold も持ちません。
+と、探索深度に手変わりが残っていればその先の段まで進めた期待支払いを求め、既存 comparator の `ExpectedSelfTsumoValue` 軸へそのまま渡します。進める枝の範囲は下で述べる手変わりの深度 (現行 production は2回まで) がそのまま決めます。B / C が集計する枝そのものを選択にも使うので、選ぶ枝と集計する枝はどちらの深度でも一致します。値の確率も打点も terminal scoring も既存 continuation と同じ helper を通り、この選択のための係数も threshold も持ちません。
 
 cohort に値を確定できない候補が1件でもある場合はこの軸を落とし、既存の浅い比較へ戻ります (0点として順位付けしません)。材料 (ツモ打点と残り自摸機会) が無い局面では B の枝そのものを集計しないため、この選択も行いません。
 
