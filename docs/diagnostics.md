@@ -88,6 +88,12 @@ scoring からそのまま回収するので、判定のための追加探索も
 SameShanten の枝を追加探索することもありません)。`overrides pass` が立った候補の `call reason` は
 `EligibleThreeShantenSpeed` になります。他家リーチ時の鳴きはこの policy でも上書きしません。
 
+`Summary` の鳴き行は、候補固有の値を必ず同じ候補から取ります。Call を採用しなかった場合の
+`call reason` は最初の候補が落ちた理由なので `(first candidate)` を添え、self-tsumo 比較を表示する
+候補がその候補と異なる場合は
+`call compared candidate: <候補> (<その候補の reason>)` を先に出します。続く
+`call ... self-tsumo` と `call post-call discard` はどちらもこの候補の値です。
+
 ```text
 Final decision
   action: 5m
