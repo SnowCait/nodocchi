@@ -57,6 +57,9 @@ pub const USAGE: &str = "usage:
   the first discard; without INDEX the seat stays reached with an unknown declaration tile
   relative seats resolve from player_id: shimocha is (player_id + 1) % 4, toimen is
   (player_id + 2) % 4 and kamicha is (player_id + 3) % 4
+  a scenario that uses any of them is not a first turn, so the inline remaining-tiles
+  baseline is not applied and the wall count stays unknown unless --remaining-tiles says
+  otherwise; it is never derived from the given rivers
   --extra-visible-tiles adds visible tiles that no other option expresses
   --remaining-tiles overrides the inline initial live wall count derived from player and
   dealer, or explicit seat wind, plus draw state
@@ -889,7 +892,9 @@ impl CliArgs {
             (None, Some(path), _) => return Err(CliError::ConflictingInput(path)),
             (None, None, Some(hand)) => {
                 spec.hand = hand;
-                apply_inline_baseline(&mut spec);
+                let relative_seats = relative_discards.iter().any(Option::is_some)
+                    || relative_riichi.iter().any(Option::is_some);
+                apply_inline_baseline(&mut spec, relative_seats);
                 apply_relative_seats(&mut spec, &relative_discards, &relative_riichi)?;
                 ScenarioSource::Inline(Box::new(spec))
             }
@@ -1010,7 +1015,10 @@ where
 // 簡易「何切る」用の deterministic baseline。ScenarioSpec 一般の default にはせず、inline
 // `--hand` source の構築時だけ未指定 field を補う。明示 CLI option は `get_or_insert*` により
 // 必ず優先される。
-fn apply_inline_baseline(spec: &mut ScenarioSpec) {
+//
+// `relative_seats` は相対席 option (`--discards-*` / `--riichi-*`) を使ったかどうか。使った
+// 局面は初巡ではないので、初巡相当の残枚数を既知の事実として渡さない。
+fn apply_inline_baseline(spec: &mut ScenarioSpec, relative_seats: bool) {
     spec.round_wind.get_or_insert_with(|| "E".to_string());
     if spec.seat_wind.is_none() {
         spec.player_id.get_or_insert(0);
@@ -1024,7 +1032,9 @@ fn apply_inline_baseline(spec: &mut ScenarioSpec) {
         same_turn: Some(false),
         riichi_missed_win: Some(false),
     });
-    if spec.remaining_tiles.is_none() {
+    // 相対席 option を使った局面では初巡 baseline を当てない。簡易 CLI は自分の河などを
+    // 指定できず正確な山枚数を復元できないので、河の枚数から推測もせず unknown に保つ。
+    if spec.remaining_tiles.is_none() && !relative_seats {
         spec.remaining_tiles = inline_initial_remaining_tiles(spec);
     }
 }
@@ -1324,6 +1334,44 @@ mod tests {
                 "--riichi-shimocha".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn relative_seat_discards_leave_the_remaining_tiles_unknown() {
+        // 河を指定した局面は初巡ではないので、初巡相当の残枚数を既知の事実にしない。
+        let context = inline_scenario(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+        ])
+        .context;
+
+        assert_eq!(context.remaining_tiles(), None);
+    }
+
+    #[test]
+    fn a_riichi_option_alone_leaves_the_remaining_tiles_unknown() {
+        let context = inline_scenario(&["--hand", RELATIVE_SEAT_HAND, "--riichi-shimocha"]).context;
+
+        assert_eq!(context.remaining_tiles(), None);
+    }
+
+    #[test]
+    fn an_explicit_remaining_tiles_survives_the_relative_seat_options() {
+        let context = inline_scenario(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+            "--remaining-tiles",
+            "42",
+        ])
+        .context;
+
+        assert_eq!(context.remaining_tiles(), Some(42));
     }
 
     #[test]
