@@ -3003,9 +3003,14 @@ fn summary_damaten_values(damaten: &DamatenValueDiagnostic) -> String {
 }
 
 fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    let Some(call) = diagnostic.call.as_ref() else {
-        return Vec::new();
-    };
+    diagnostic
+        .call
+        .as_ref()
+        .map(summary_call_lines)
+        .unwrap_or_default()
+}
+
+fn summary_call_lines(call: &CallDecisionDiagnostic) -> Vec<String> {
     let mut lines = vec![
         format!(
             "  call: {}",
@@ -3013,74 +3018,90 @@ fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
                 .as_ref()
                 .map_or_else(|| "no".to_string(), action_label)
         ),
-        format!("  call reason: {:?}", call.reason),
+        format!("  call reason: {}", summary_call_reason(call)),
     ];
-    let compared_candidate = call
-        .candidates
-        .iter()
-        .find(|candidate| candidate.selected)
-        .or_else(|| {
-            call.candidates.iter().find(|candidate| {
-                candidate.iishanten_self_tsumo.is_some()
-                    || candidate.two_shanten_self_tsumo.is_some()
-                    || candidate.three_shanten_self_tsumo.is_some()
-            })
-        });
-    if let Some(candidate) = compared_candidate
-        && let Some(compared) = candidate.iishanten_self_tsumo.as_ref()
-    {
+    let Some(index) = summary_call_compared_candidate(call) else {
+        return lines;
+    };
+    let candidate = &call.candidates[index];
+    let Some(comparison) = summary_call_self_tsumo_comparison(candidate) else {
+        return lines;
+    };
+
+    if Some(index) != summary_call_reason_source(call) {
         lines.push(format!(
+            "  call compared candidate: {} ({:?})",
+            action_label(&candidate.action),
+            candidate.reason
+        ));
+    }
+    lines.push(comparison);
+    lines.push(format!(
+        "  call post-call discard: {}",
+        candidate
+            .post_call_discard
+            .as_ref()
+            .map(discard_label)
+            .unwrap_or_else(|| UNKNOWN.to_string())
+    ));
+    lines
+}
+
+fn summary_call_reason(call: &CallDecisionDiagnostic) -> String {
+    if call.selected.is_some() {
+        return format!("{:?}", call.reason);
+    }
+    format!("{:?} (first candidate)", call.reason)
+}
+
+fn summary_call_reason_source(call: &CallDecisionDiagnostic) -> Option<usize> {
+    summary_call_selected_candidate(call).or_else(|| (!call.candidates.is_empty()).then_some(0))
+}
+
+fn summary_call_compared_candidate(call: &CallDecisionDiagnostic) -> Option<usize> {
+    summary_call_selected_candidate(call).or_else(|| {
+        call.candidates.iter().position(|candidate| {
+            candidate.iishanten_self_tsumo.is_some()
+                || candidate.two_shanten_self_tsumo.is_some()
+                || candidate.three_shanten_self_tsumo.is_some()
+        })
+    })
+}
+
+fn summary_call_selected_candidate(call: &CallDecisionDiagnostic) -> Option<usize> {
+    call.candidates
+        .iter()
+        .position(|candidate| candidate.selected)
+}
+
+fn summary_call_self_tsumo_comparison(candidate: &CallCandidateDiagnostic) -> Option<String> {
+    if let Some(compared) = candidate.iishanten_self_tsumo.as_ref() {
+        return Some(format!(
             "  call self-tsumo: pass {} / call {} ({})",
             format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
             format_self_tsumo_value(compared.call_expected_self_tsumo_value),
             call_iishanten_comparison_label(compared.comparison),
         ));
-        lines.push(format!(
-            "  call post-call discard: {}",
-            candidate
-                .post_call_discard
-                .as_ref()
-                .map(discard_label)
-                .unwrap_or_else(|| UNKNOWN.to_string())
-        ));
-    } else if let Some(candidate) = compared_candidate
-        && let Some(compared) = candidate.two_shanten_self_tsumo.as_ref()
-    {
-        lines.push(format!(
+    }
+    if let Some(compared) = candidate.two_shanten_self_tsumo.as_ref() {
+        return Some(format!(
             "  call two-shanten self-tsumo: pass {} {} / call {} ({})",
             call_two_shanten_pass_evaluation_label(compared.pass_evaluation),
             format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
             format_self_tsumo_value(compared.call_expected_self_tsumo_value),
             call_iishanten_comparison_label(compared.comparison),
         ));
-        lines.push(format!(
-            "  call post-call discard: {}",
-            candidate
-                .post_call_discard
-                .as_ref()
-                .map(discard_label)
-                .unwrap_or_else(|| UNKNOWN.to_string())
-        ));
-    } else if let Some(candidate) = compared_candidate
-        && let Some(compared) = candidate.three_shanten_self_tsumo.as_ref()
-    {
-        lines.push(format!(
+    }
+    if let Some(compared) = candidate.three_shanten_self_tsumo.as_ref() {
+        return Some(format!(
             "  call three-shanten self-tsumo: pass {} {} / call {} ({})",
             call_three_shanten_pass_evaluation_label(compared.pass_evaluation),
             format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
             format_self_tsumo_value(compared.call_expected_self_tsumo_value),
             call_iishanten_comparison_label(compared.comparison),
         ));
-        lines.push(format!(
-            "  call post-call discard: {}",
-            candidate
-                .post_call_discard
-                .as_ref()
-                .map(discard_label)
-                .unwrap_or_else(|| UNKNOWN.to_string())
-        ));
     }
-    lines
+    None
 }
 
 fn summary_defense(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
@@ -3475,12 +3496,14 @@ mod tests {
     use super::*;
     use crate::scenario::ScenarioSpec;
     use bot_core::{
-        Agent, CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
+        Agent, CallDecisionReason, CallKind, CallTwoShantenSpeedDiagnostic,
+        CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
         OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
         RonRiskEvidence, TenpaiOffenseMode,
     };
     use bot_logic::{
         TileCounts, TwoShantenSelfTsumoCandidate, calculate_acceptance_with_visible_tiles,
+        select_best_discard,
     };
     use std::sync::LazyLock;
 
@@ -4828,6 +4851,87 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("  call post-call discard: E"), "{summary}");
+    }
+
+    #[test]
+    fn summary_attributes_call_candidate_values_to_the_same_candidate() {
+        let scenario = scenario_from_json(LOOKAHEAD_SCENARIO);
+        let counts = TileCounts::from_tiles(
+            scenario
+                .context
+                .hand_tiles()
+                .iter()
+                .copied()
+                .chain(scenario.context.drawn_tile()),
+        );
+        let post_call_discard = select_best_discard(&counts).unwrap();
+
+        let first = CallCandidateDiagnostic {
+            action: LegalAction::Pon {
+                tile: TileId::new(0).unwrap(),
+                consumed: vec![TileId::new(1).unwrap(), TileId::new(2).unwrap()],
+            },
+            kind: CallKind::Pon,
+            current_fixed_meld_count: None,
+            current_shanten: None,
+            post_call_fixed_meld_count: None,
+            post_call_forbidden_discards: None,
+            post_call_discard: None,
+            post_call_wait: None,
+            post_call_wait_yaku: None,
+            post_call_push_pull: None,
+            iishanten_acceptance: None,
+            iishanten_self_tsumo: None,
+            two_shanten_self_tsumo: None,
+            three_shanten_self_tsumo: None,
+            eligible: false,
+            selected: false,
+            reason: CallDecisionReason::PostCallNotIishanten,
+        };
+        let second = CallCandidateDiagnostic {
+            action: LegalAction::Pon {
+                tile: TileId::new(16).unwrap(),
+                consumed: vec![TileId::new(17).unwrap(), TileId::new(18).unwrap()],
+            },
+            post_call_discard: Some(post_call_discard.clone()),
+            two_shanten_self_tsumo: Some(CallTwoShantenSelfTsumoDiagnostic {
+                reaction_source_player: Some(2),
+                pass_evaluation: CallTwoShantenPassEvaluation::Full,
+                pass_expected_self_tsumo_value: Some(378_060_000),
+                call_expected_self_tsumo_value: Some(41_069_000),
+                comparison: CallIishantenComparison::PassNotLower,
+                speed: CallTwoShantenSpeedDiagnostic {
+                    own_future_draws: Some(8),
+                    han: None,
+                    overrides_pass: false,
+                },
+            }),
+            reason: CallDecisionReason::PassSelfTsumoNotLower,
+            ..first.clone()
+        };
+        let call = CallDecisionDiagnostic {
+            selected: None,
+            reason: first.reason,
+            candidates: vec![first, second.clone()],
+        };
+
+        assert_eq!(
+            summary_call_lines(&call),
+            [
+                "  call: no".to_string(),
+                "  call reason: PostCallNotIishanten (first candidate)".to_string(),
+                format!(
+                    "  call compared candidate: {} (PassSelfTsumoNotLower)",
+                    action_label(&second.action)
+                ),
+                "  call two-shanten self-tsumo: pass full 378.060 / call 41.069 (pass not lower)"
+                    .to_string(),
+                format!(
+                    "  call post-call discard: {}",
+                    discard_label(&post_call_discard)
+                ),
+            ]
+        );
     }
 
     #[test]
