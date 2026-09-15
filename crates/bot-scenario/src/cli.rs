@@ -1,3 +1,5 @@
+use std::iter::Peekable;
+
 use bot_core::seat_wind_for_player;
 use bot_logic::{TileType, TwoShantenSelfTsumoScope};
 use thiserror::Error;
@@ -7,6 +9,9 @@ use crate::scenario::{HistoryFuritenSpec, ScenarioSpec, parse_seat_wind};
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
                [--seat-wind <WIND>] [--player-id <0..3>] [--oya <0..3>]
+               [--discards-shimocha <TILES>] [--discards-toimen <TILES>]
+               [--discards-kamicha <TILES>] [--riichi-shimocha [INDEX]]
+               [--riichi-toimen [INDEX]] [--riichi-kamicha [INDEX]]
                [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
                [--no-history-furiten] [--allow-hora]
                [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
@@ -45,6 +50,13 @@ pub const USAGE: &str = "usage:
                --two-shanten-full-parallel-comparison
 
   --dora is a backward-compatible alias of --dora-indicator
+  --discards-shimocha, --discards-toimen and --discards-kamicha set the whole river of that
+  relative seat, with the same semantics as the JSON scenario discards field
+  --riichi-shimocha, --riichi-toimen and --riichi-kamicha mark that relative seat as reached
+  and take the optional 1-based INDEX of the reach declaration tile in its river, where 1 is
+  the first discard; without INDEX the seat stays reached with an unknown declaration tile
+  relative seats resolve from player_id: shimocha is (player_id + 1) % 4, toimen is
+  (player_id + 2) % 4 and kamicha is (player_id + 3) % 4
   --extra-visible-tiles adds visible tiles that no other option expresses
   --remaining-tiles overrides the inline initial live wall count derived from player and
   dealer, or explicit seat wind, plus draw state
@@ -152,6 +164,9 @@ pub enum CliError {
     #[error("--dora-indicator cannot be combined with its alias --dora")]
     ConflictingDoraIndicator,
 
+    #[error("{0} needs a player_id to resolve the relative seat")]
+    RelativeSeatWithoutPlayerId(String),
+
     #[error("--summary-only cannot be combined with {0}")]
     ConflictingSummaryOnly(String),
 
@@ -253,7 +268,7 @@ impl CliArgs {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut args = args.into_iter();
+        let mut args = args.into_iter().peekable();
         let mut three_shanten_progress_self_tsumo = false;
         let mut three_shanten_continuation_comparison = false;
         let mut iishanten_continuation_depth_comparison = false;
@@ -277,6 +292,8 @@ impl CliArgs {
         let mut benchmark_json: Option<String> = None;
         let mut dora_indicator = false;
         let mut dora_alias = false;
+        let mut relative_discards: [Option<String>; RELATIVE_SEAT_COUNT] = Default::default();
+        let mut relative_riichi: [Option<Option<u32>>; RELATIVE_SEAT_COUNT] = Default::default();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -319,6 +336,30 @@ impl CliArgs {
                 }
                 "--oya" => {
                     spec.oya = Some(seat_value_of(&mut args, "--oya")?);
+                    inline_options = true;
+                }
+                "--discards-shimocha" => {
+                    relative_discards[SHIMOCHA] = Some(value_of(&mut args, "--discards-shimocha")?);
+                    inline_options = true;
+                }
+                "--discards-toimen" => {
+                    relative_discards[TOIMEN] = Some(value_of(&mut args, "--discards-toimen")?);
+                    inline_options = true;
+                }
+                "--discards-kamicha" => {
+                    relative_discards[KAMICHA] = Some(value_of(&mut args, "--discards-kamicha")?);
+                    inline_options = true;
+                }
+                "--riichi-shimocha" => {
+                    relative_riichi[SHIMOCHA] = Some(optional_index_of(&mut args));
+                    inline_options = true;
+                }
+                "--riichi-toimen" => {
+                    relative_riichi[TOIMEN] = Some(optional_index_of(&mut args));
+                    inline_options = true;
+                }
+                "--riichi-kamicha" => {
+                    relative_riichi[KAMICHA] = Some(optional_index_of(&mut args));
                     inline_options = true;
                 }
                 "--remaining-tiles" => {
@@ -849,6 +890,7 @@ impl CliArgs {
             (None, None, Some(hand)) => {
                 spec.hand = hand;
                 apply_inline_baseline(&mut spec);
+                apply_relative_seats(&mut spec, &relative_discards, &relative_riichi)?;
                 ScenarioSource::Inline(Box::new(spec))
             }
             (None, None, None) => return Err(CliError::MissingHand),
@@ -871,6 +913,98 @@ impl CliArgs {
             summary_only,
         })
     }
+}
+
+const SEAT_COUNT: usize = 4;
+
+// 相対席の option。席差は player_id 基準で shimocha = +1、toimen = +2、kamicha = +3。
+const RELATIVE_SEAT_COUNT: usize = 3;
+const SHIMOCHA: usize = 0;
+const TOIMEN: usize = 1;
+const KAMICHA: usize = 2;
+const RELATIVE_SEAT_OPTIONS: [(&str, u8); RELATIVE_SEAT_COUNT] =
+    [("shimocha", 1), ("toimen", 2), ("kamicha", 3)];
+
+// 相対席の指定を player_id 基準の席 index へ展開する。CLI の INDEX は 1-based のまま
+// `ScenarioSpec` へ渡し、河の枚数や `reached` との整合は JSON scenario と同じ
+// `Scenario::resolve()` の canonical path で検証する。
+fn apply_relative_seats(
+    spec: &mut ScenarioSpec,
+    discards: &[Option<String>; RELATIVE_SEAT_COUNT],
+    riichi: &[Option<Option<u32>>; RELATIVE_SEAT_COUNT],
+) -> Result<(), CliError> {
+    let Some(first_option) = first_relative_seat_option(discards, riichi) else {
+        return Ok(());
+    };
+    let Some(player_id) = spec.player_id else {
+        return Err(CliError::RelativeSeatWithoutPlayerId(first_option));
+    };
+
+    let used_discards = discards.iter().any(Option::is_some);
+    let used_riichi = riichi.iter().any(Option::is_some);
+
+    let mut spec_discards = spec
+        .discards
+        .clone()
+        .unwrap_or_else(|| vec![String::new(); SEAT_COUNT]);
+    let mut spec_reached = spec
+        .reached
+        .clone()
+        .unwrap_or_else(|| vec![false; SEAT_COUNT]);
+    let mut spec_reach_discard_indices = spec
+        .reach_discard_indices
+        .clone()
+        .unwrap_or_else(|| vec![None; SEAT_COUNT]);
+
+    for (relative, (_, offset)) in RELATIVE_SEAT_OPTIONS.iter().enumerate() {
+        let seat = (usize::from(player_id) + usize::from(*offset)) % SEAT_COUNT;
+        if let Some(tiles) = &discards[relative] {
+            spec_discards[seat] = tiles.clone();
+        }
+        if let Some(index) = riichi[relative] {
+            spec_reached[seat] = true;
+            spec_reach_discard_indices[seat] = index;
+        }
+    }
+
+    if used_discards {
+        spec.discards = Some(spec_discards);
+    }
+    if used_riichi {
+        spec.reached = Some(spec_reached);
+        spec.reach_discard_indices = Some(spec_reach_discard_indices);
+    }
+    Ok(())
+}
+
+// 指定された相対席 option のうち最初の1つの名前。どれも指定されていない場合は `None`。
+fn first_relative_seat_option(
+    discards: &[Option<String>; RELATIVE_SEAT_COUNT],
+    riichi: &[Option<Option<u32>>; RELATIVE_SEAT_COUNT],
+) -> Option<String> {
+    RELATIVE_SEAT_OPTIONS
+        .iter()
+        .enumerate()
+        .find_map(|(seat, (name, _))| {
+            if discards[seat].is_some() {
+                Some(format!("--discards-{name}"))
+            } else if riichi[seat].is_some() {
+                Some(format!("--riichi-{name}"))
+            } else {
+                None
+            }
+        })
+}
+
+// INDEX を省略できる option の値。次の token が符号なし整数の場合だけ INDEX として消費し、
+// 別の option や末尾なら省略とみなして `None` を返す。
+fn optional_index_of<I>(args: &mut Peekable<I>) -> Option<u32>
+where
+    I: Iterator<Item = String>,
+{
+    let index = args.peek()?.parse::<u32>().ok()?;
+    args.next();
+    Some(index)
 }
 
 // 簡易「何切る」用の deterministic baseline。ScenarioSpec 一般の default にはせず、inline
@@ -988,6 +1122,217 @@ mod tests {
             .expect("discard candidate")
             .evaluation
             .acceptance_total_remaining()
+    }
+
+    const RELATIVE_SEAT_HAND: &str = "234m455p789s1123z";
+
+    #[test]
+    fn parses_the_relative_seat_discards() {
+        let spec = inline_spec(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p",
+            "--discards-toimen",
+            "4s",
+            "--discards-kamicha",
+            "E",
+        ]);
+
+        assert_eq!(
+            spec.discards,
+            Some(vec![
+                String::new(),
+                "1m 7p".to_string(),
+                "4s".to_string(),
+                "E".to_string(),
+            ])
+        );
+        // 河だけの指定は リーチ状態を変えない。
+        assert_eq!(spec.reached, None);
+        assert_eq!(spec.reach_discard_indices, None);
+    }
+
+    #[test]
+    fn relative_seat_discards_become_the_river_of_that_seat() {
+        let context = inline_scenario(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+        ])
+        .context;
+
+        assert_eq!(
+            context
+                .discards_of(1)
+                .unwrap()
+                .iter()
+                .map(|tile| tile.to_mjai_string())
+                .collect::<Vec<_>>(),
+            ["1m", "7p", "4s", "7p", "E"]
+        );
+        assert!(context.discards_of(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_riichi_option_without_an_index_leaves_the_declaration_tile_unknown() {
+        let context = inline_scenario(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+        ])
+        .context;
+
+        assert_eq!(context.reached(), &[false, true, false, false]);
+        assert_eq!(context.reach_discard_indices(), &[None; 4]);
+    }
+
+    #[test]
+    fn a_riichi_option_without_an_index_works_without_discards() {
+        let context = inline_scenario(&["--hand", RELATIVE_SEAT_HAND, "--riichi-toimen"]).context;
+
+        assert_eq!(context.reached(), &[false, false, true, false]);
+        assert_eq!(context.reach_discard_indices(), &[None; 4]);
+    }
+
+    #[test]
+    fn a_one_based_riichi_index_becomes_a_zero_based_context_index() {
+        let context = inline_scenario(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+        ])
+        .context;
+
+        assert_eq!(context.reached(), &[false, true, false, false]);
+        assert_eq!(
+            context.reach_discard_indices(),
+            &[None, Some(3), None, None]
+        );
+        assert_eq!(
+            context
+                .reach_discard_tile_of(1)
+                .map(|tile| tile.to_mjai_string()),
+            Some("7p".to_string())
+        );
+    }
+
+    #[test]
+    fn relative_seats_follow_the_player_id() {
+        for player_id in 0..4u8 {
+            let context = inline_scenario(&[
+                "--hand",
+                RELATIVE_SEAT_HAND,
+                "--player-id",
+                &player_id.to_string(),
+                "--oya",
+                "0",
+                "--discards-shimocha",
+                "1m 7p",
+                "--discards-toimen",
+                "4s 5s",
+                "--discards-kamicha",
+                "E S",
+                "--riichi-shimocha",
+                "2",
+                "--riichi-toimen",
+                "--riichi-kamicha",
+                "1",
+            ])
+            .context;
+
+            let shimocha = usize::from((player_id + 1) % 4);
+            let toimen = usize::from((player_id + 2) % 4);
+            let kamicha = usize::from((player_id + 3) % 4);
+
+            assert_eq!(context.reach_discard_index_of(shimocha), Some(1));
+            assert_eq!(context.reach_discard_index_of(toimen), None);
+            assert_eq!(context.reach_discard_index_of(kamicha), Some(0));
+            assert!(context.is_reached(shimocha));
+            assert!(context.is_reached(toimen));
+            assert!(context.is_reached(kamicha));
+            assert!(!context.is_reached(usize::from(player_id)));
+            assert!(
+                context
+                    .discards_of(usize::from(player_id))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(context.discards_of(shimocha).unwrap().len(), 2);
+            assert_eq!(context.discards_of(toimen).unwrap().len(), 2);
+            assert_eq!(context.discards_of(kamicha).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_riichi_index_beyond_the_river_is_rejected() {
+        let spec = inline_spec(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--discards-shimocha",
+            "1m 7p",
+            "--riichi-shimocha",
+            "3",
+        ]);
+
+        assert_eq!(
+            Scenario::resolve(&spec),
+            Err(crate::error::ScenarioError::ReachDiscardIndexOutOfRange {
+                player: 1,
+                index: 3,
+                discard_count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_riichi_option_does_not_consume_the_next_option_as_an_index() {
+        let spec = inline_spec(&[
+            "--hand",
+            RELATIVE_SEAT_HAND,
+            "--riichi-shimocha",
+            "--dora-indicator",
+            "3p",
+        ]);
+
+        assert_eq!(spec.dora_indicators, Some("3p".to_string()));
+        assert_eq!(spec.reached, Some(vec![false, true, false, false]));
+        assert_eq!(spec.reach_discard_indices, Some(vec![None; 4]));
+    }
+
+    #[test]
+    fn a_relative_seat_without_a_resolvable_player_id_is_rejected() {
+        // 明示 seat_wind と oya だけを指定すると player_id は unknown のままなので、相対席を
+        // 席番号へ展開できない。
+        assert_eq!(
+            parse(&[
+                "--hand",
+                RELATIVE_SEAT_HAND,
+                "--seat-wind",
+                "E",
+                "--oya",
+                "1",
+                "--riichi-shimocha",
+            ]),
+            Err(CliError::RelativeSeatWithoutPlayerId(
+                "--riichi-shimocha".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn inline_scenarios_without_relative_seat_options_are_unchanged() {
+        let spec = inline_spec(&["--hand", RELATIVE_SEAT_HAND]);
+
+        assert_eq!(spec.discards, None);
+        assert_eq!(spec.reached, None);
+        assert_eq!(spec.reach_discard_indices, None);
     }
 
     #[test]

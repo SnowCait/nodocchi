@@ -40,6 +40,10 @@ pub struct ScenarioSpec {
     pub reached: Option<Vec<bool>>,
     #[serde(default)]
     pub discards: Option<Vec<String>>,
+    /// 各 player のリーチ宣言牌が河の何枚目か。人間向けに 1-based で指定し、`GameContext` へ
+    /// 渡すときに 0-based へ変換する。宣言牌位置が unknown な player は `null`。
+    #[serde(default)]
+    pub reach_discard_indices: Option<Vec<Option<u32>>>,
     #[serde(default)]
     pub post_reach_passed: Option<Vec<String>>,
     #[serde(default)]
@@ -179,6 +183,11 @@ impl Scenario {
             spec.dora_indicators.as_deref().unwrap_or_default(),
         )?;
         let discards = allocate_discards(&mut allocator, &discard_inputs)?;
+        let reach_discard_indices = resolve_reach_discard_indices(
+            spec.reach_discard_indices.as_deref(),
+            &reached,
+            &discards,
+        )?;
         let melds = allocate_melds(&mut allocator, &meld_inputs, &discards)?;
         let extra_visible_tiles = allocate_field(
             &mut allocator,
@@ -211,6 +220,7 @@ impl Scenario {
             melds,
         )
         .with_reaction_source_player(reaction_source_player)
+        .with_reach_discard_indices(reach_discard_indices)
         .with_post_reach_passed_tiles(post_reach_passed_tiles)
         .with_temporary_passed_tiles(temporary_passed_tiles)
         .with_table_state_facts(table_state)
@@ -273,6 +283,47 @@ fn resolve_reached(reached: Option<&[bool]>) -> Result<[bool; 4], ScenarioError>
     values.try_into().map_err(|_| ScenarioError::ReachedLength {
         count: values.len(),
     })
+}
+
+// 入力は人間向けの 1-based で、`GameContext` が持つ 0-based へ変換する。省略した player は
+// unknown のままにし、河の末尾などから推測しない。
+fn resolve_reach_discard_indices(
+    reach_discard_indices: Option<&[Option<u32>]>,
+    reached: &[bool; 4],
+    discards: &[Vec<TileId>; 4],
+) -> Result<[Option<usize>; 4], ScenarioError> {
+    let Some(values) = reach_discard_indices else {
+        return Ok([None; 4]);
+    };
+    if values.len() != 4 {
+        return Err(ScenarioError::ReachDiscardIndicesLength {
+            count: values.len(),
+        });
+    }
+
+    let mut resolved = [None; 4];
+    for (player, slot) in resolved.iter_mut().enumerate() {
+        let Some(index) = values[player] else {
+            continue;
+        };
+        if !reached[player] {
+            return Err(ScenarioError::ReachDiscardIndexWithoutReach { player });
+        }
+        let discard_count = discards[player].len();
+        let zero_based = index
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|&index| index < discard_count);
+        let Some(zero_based) = zero_based else {
+            return Err(ScenarioError::ReachDiscardIndexOutOfRange {
+                player,
+                index,
+                discard_count,
+            });
+        };
+        *slot = Some(zero_based);
+    }
+    Ok(resolved)
 }
 
 fn resolve_discard_inputs(discards: Option<&[String]>) -> Result<[String; 4], ScenarioError> {
@@ -1019,6 +1070,7 @@ mod tests {
         assert_eq!(spec.oya, None);
         assert_eq!(spec.reached, None);
         assert_eq!(spec.discards, None);
+        assert_eq!(spec.reach_discard_indices, None);
         assert_eq!(spec.post_reach_passed, None);
         assert_eq!(spec.extra_visible_tiles, None);
         assert_eq!(spec.history_furiten, None);
@@ -1039,6 +1091,7 @@ mod tests {
         assert_eq!(context.history_furiten().same_turn, None);
         assert_eq!(context.history_furiten().riichi_missed_win, None);
         assert_eq!(context.reached(), &[false; 4]);
+        assert_eq!(context.reach_discard_indices(), &[None; 4]);
         assert!(
             context
                 .discards()
@@ -1099,6 +1152,138 @@ mod tests {
             ["1m", "4m", "7p", "E"]
         );
         assert!(context.discards_of(0).unwrap().is_empty());
+    }
+
+    fn reach_discard_index_spec(
+        reached: Vec<bool>,
+        discards: Vec<&str>,
+        reach_discard_indices: Vec<Option<u32>>,
+    ) -> ScenarioSpec {
+        ScenarioSpec {
+            hand: "234m455p789s1123z".to_string(),
+            reached: Some(reached),
+            discards: Some(discards.into_iter().map(str::to_string).collect()),
+            reach_discard_indices: Some(reach_discard_indices),
+            ..ScenarioSpec::default()
+        }
+    }
+
+    #[test]
+    fn json_reach_discard_index_is_converted_to_zero_based() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "234m455p789s1123z",
+                "reached": [false, true, false, false],
+                "discards": ["", "1m 7p 4s 7p E", "", ""],
+                "reach_discard_indices": [null, 4, null, null]
+            }"#,
+        );
+        let context = resolve(&spec).context;
+
+        assert_eq!(
+            context.reach_discard_indices(),
+            &[None, Some(3), None, None]
+        );
+        // 同じ 7p が河に2枚あっても、index が宣言牌を一意に決める。
+        assert_eq!(
+            context
+                .reach_discard_tile_of(1)
+                .map(|tile| tile.to_mjai_string()),
+            Some("7p".to_string())
+        );
+        assert_eq!(
+            context.reach_discard_tile_of(1),
+            context.discards_of(1).unwrap().get(3).copied()
+        );
+    }
+
+    #[test]
+    fn json_reach_discard_index_accepts_the_first_and_the_last_discard() {
+        for (index, expected) in [(1, 0), (5, 4)] {
+            let spec = reach_discard_index_spec(
+                vec![false, true, false, false],
+                vec!["", "1m 7p 4s 7p E", "", ""],
+                vec![None, Some(index), None, None],
+            );
+            assert_eq!(
+                resolve(&spec).context.reach_discard_index_of(1),
+                Some(expected),
+                "index {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_reach_discard_index_stays_unknown_while_reached() {
+        let spec = reach_discard_index_spec(
+            vec![false, true, false, false],
+            vec!["", "1m 7p 4s 7p E", "", ""],
+            vec![None; 4],
+        );
+        let context = resolve(&spec).context;
+
+        assert!(context.is_reached(1));
+        assert_eq!(context.reach_discard_index_of(1), None);
+    }
+
+    #[test]
+    fn rejects_wrong_reach_discard_indices_length() {
+        let spec = ScenarioSpec {
+            hand: "123m".to_string(),
+            reach_discard_indices: Some(vec![None, Some(1)]),
+            ..ScenarioSpec::default()
+        };
+        assert_eq!(
+            Scenario::resolve(&spec),
+            Err(ScenarioError::ReachDiscardIndicesLength { count: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_reach_discard_index_beyond_the_discards() {
+        let spec = reach_discard_index_spec(
+            vec![false, true, false, false],
+            vec!["", "1m 7p 4s 7p E", "", ""],
+            vec![None, Some(6), None, None],
+        );
+        assert_eq!(
+            Scenario::resolve(&spec),
+            Err(ScenarioError::ReachDiscardIndexOutOfRange {
+                player: 1,
+                index: 6,
+                discard_count: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_zero_reach_discard_index() {
+        let spec = reach_discard_index_spec(
+            vec![false, true, false, false],
+            vec!["", "1m 7p 4s 7p E", "", ""],
+            vec![None, Some(0), None, None],
+        );
+        assert_eq!(
+            Scenario::resolve(&spec),
+            Err(ScenarioError::ReachDiscardIndexOutOfRange {
+                player: 1,
+                index: 0,
+                discard_count: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_reach_discard_index_of_a_player_who_has_not_reached() {
+        let spec = reach_discard_index_spec(
+            vec![false; 4],
+            vec!["", "1m 7p 4s 7p E", "", ""],
+            vec![None, Some(4), None, None],
+        );
+        assert_eq!(
+            Scenario::resolve(&spec),
+            Err(ScenarioError::ReachDiscardIndexWithoutReach { player: 1 })
+        );
     }
 
     #[test]

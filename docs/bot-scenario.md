@@ -21,6 +21,12 @@ cargo run -p bot-scenario -- \
 | `--seat-wind` | 任意 | 自風。`E` / `S` / `W` / `N` |
 | `--player-id <0..3>` | 任意 | 自分の席 |
 | `--oya <0..3>` | 任意 | 親の席 |
+| `--discards-shimocha <TILES>` | 任意 | 下家の河。指定した牌列がその player の河そのもの |
+| `--discards-toimen <TILES>` | 任意 | 対面の河 |
+| `--discards-kamicha <TILES>` | 任意 | 上家の河 |
+| `--riichi-shimocha [INDEX]` | 任意 | 下家をリーチ済みにする。`INDEX` は宣言牌が河の何枚目かで 1-based。省略時は宣言牌位置 unknown |
+| `--riichi-toimen [INDEX]` | 任意 | 対面をリーチ済みにする |
+| `--riichi-kamicha [INDEX]` | 任意 | 上家をリーチ済みにする |
 | `--extra-visible-tiles` | 任意 | 他の option で表現していない見え牌 |
 | `--remaining-tiles` | 任意 | 山の残りツモ可能枚数 |
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
@@ -54,6 +60,39 @@ remaining_tiles = player_id / oya または明示 seat_wind と draw の状態�
 `--no-history-furiten` は baseline と結果上は同じですが、「現在は同巡内フリテンではなく、かつリーチ後見逃しフリテンでもない」と明示する shorthand です。いずれかが `true` の局面や、履歴フリテンを unknown のまま扱う局面は JSON scenario で指定します。
 
 `--remaining-tiles` は JSON scenario の `remaining_tiles` と同じ意味で、山に残っているツモ可能な牌の枚数です。inline `--hand` で省略した場合は、player / dealer、または両者が揃わなければ明示した自風と、`--draw` の有無から初巡相当の枚数を補完します。明示した値はこの baseline より常に優先されます。JSON scenario の省略 field は従来どおり unknown です。
+
+### 相手の河とリーチ
+
+`--discards-shimocha` / `--discards-toimen` / `--discards-kamicha` は JSON scenario の `discards` と同じ意味で、指定した牌列がその player の河そのものです。「一部だけ観測できていて残りは unknown」という semantics は持ちません。自分の河を指定する option はありません。
+
+`--riichi-shimocha` / `--riichi-toimen` / `--riichi-kamicha` はその席をリーチ済み (`reached = true`) にします。`INDEX` はリーチ宣言牌が河の何枚目かで、**河の1枚目を `1`** とする 1-based です。`GameContext` へ渡すときに 0-based へ変換します。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "234m455p789s1123z" --draw "N" \
+  --discards-shimocha "1m 7p 4s 7p E" \
+  --riichi-shimocha 4
+```
+
+この例では下家の河の4枚目の `7p` がリーチ宣言牌です。河に同じ牌種が複数あっても、index が宣言牌を一意に決めます。
+
+`INDEX` を省略した `--riichi-shimocha` は「リーチ済みだが宣言牌位置は unknown」を意味します。宣言牌位置は河の末尾などから推測しません。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "234m455p789s1123z" \
+  --riichi-toimen
+```
+
+相対席は `player_id` 基準です。
+
+```text
+shimocha = (player_id + 1) % 4
+toimen   = (player_id + 2) % 4
+kamicha  = (player_id + 3) % 4
+```
+
+`player_id` は inline baseline で補われるため通常は指定不要ですが、明示 `seat_wind` と `oya` だけを指定して `player_id` が unknown になる場合は相対席を解決できず error です。河の枚数を超える `INDEX`、`0`、リーチしていない席への `INDEX` も error です。
 
 `--extra-visible-tiles` は JSON scenario の `extra_visible_tiles` と同じ意味で、手牌・ツモ牌・ドラ表示牌以外に見えている牌を加えます。加えた牌は受け入れ残枚数や待ちの残枚数へ反映されます。JSON scenario、RiichiLab capture、benchmark とは他の inline option と同じく併用できません。
 
@@ -273,7 +312,7 @@ Summary
 
 条件は [麻雀 AI の概要](ai/overview.md#九種九牌-ryukyoku)、出力の読み方は [Structured diagnostics](diagnostics.md#ryukyoku-九種九牌) を参照してください。
 
-`reached` と `discards` は簡易 CLI からは指定できません。防御を含む局面や正確な実戦局面は JSON scenario または RiichiLab capture を使用してください。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。
+自分の河、`melds`、`post_reach_passed` などは簡易 CLI からは指定できません。より正確な実戦局面は JSON scenario または RiichiLab capture を使用してください。牌効率指標の意味は [打牌選択](ai/discard-selection.md) を参照してください。
 
 ### 入力モードごとの fact
 
@@ -345,7 +384,8 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
   "player_id": 0,
   "oya": 3,
   "reached": [false, true, false, false],
-  "discards": ["", "1m 4m 7p E", "", ""],
+  "discards": ["", "1m 7p 4s 7p E", "", ""],
+  "reach_discard_indices": [null, 4, null, null],
   "post_reach_passed": ["", "", "", ""],
   "history_furiten": {
     "same_turn": false,
@@ -367,6 +407,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `player_id` / `oya` | 自分の席 / 親の席。`0`..`3` |
 | `reached` | 各 player のリーチ状態。要素数4 |
 | `discards` | 各 player の河。入力順のまま扱う。要素数4 |
+| `reach_discard_indices` | 各 player のリーチ宣言牌が河の何枚目か。河の1枚目を `1` とする 1-based で、要素数4。省略時と `null` は宣言牌位置 unknown |
 | `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数4 |
 | `temporary_passed` | 各 player の最後の手牌変化後に他家から切られて通った牌。要素数4。省略時 unknown |
 | `history_furiten` | `same_turn` / `riichi_missed_win`。各値は省略時 unknown |
@@ -390,6 +431,22 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `called_tile` | 鳴いた牌。`ankan` では指定しない |
 
 副露牌は見え牌へ加わります。`extra_visible_tiles` は副露以外など、他の field で表現されない見え牌に使用します。`seat_wind` は `player_id` と `oya` があれば導出され、矛盾する明示値は error です。
+
+### reach_discard_indices
+
+`reach_discard_indices` は各 player のリーチ宣言牌が河の何枚目かを指定します。上の例では player 1 の河の4枚目の `7p` が宣言牌です。河に同じ牌種が複数あっても index が宣言牌を一意に決めます。
+
+内部の `GameContext` は 0-based で保持し、変換は scenario の解決時に行います。`reached` の意味は変えないので、リーチ済みでも宣言牌位置が unknown な状態 (`null` や field 省略) を表現できます。unknown を河の末尾などから推測することはありません。
+
+次の入力は error です。
+
+- 要素数が4でない
+- `0` や河の枚数を超える index
+- `reached` が `false` の player への index
+
+field ごと省略できるので、既存の JSON scenario はそのまま動作します。
+
+RiichiLab capture の再生では、observation の `riichi_sutehais` (リーチ宣言時に切った物理牌 ID) と河を照合して同じ index を復元します。宣言牌が河に見つからないなど入力が矛盾する場合は推測せず unknown です。
 
 ### post_reach_passed
 

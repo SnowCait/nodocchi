@@ -67,6 +67,9 @@ impl ObservationPayload {
         let dora_indicators = decode_observation_tiles(&observation.dora_indicators);
         // discards は防御・現物判定用の player ごとの河、visible_tiles は枚数補正用。用途を分ける。
         let discards = decode_discards(&observation);
+        // 宣言牌の照合は raw 物理牌 ID のまま行う。TileId へ正規化した後では同じ牌種の別個体を
+        // 区別できず、河に同じ牌種が複数ある場合に位置を誤る。
+        let reach_discard_indices = decode_reach_discard_indices(&observation);
         let melds = decode_melds(&observation);
 
         // visible_tiles には自分から見えている現在の手牌全体をツモ牌込みで 1 回だけ含める。
@@ -106,6 +109,7 @@ impl ObservationPayload {
             oya: observation.oya,
             discards,
             reached: observation.riichi_declared,
+            reach_discard_indices,
             melds,
             table_state,
         })
@@ -217,6 +221,27 @@ fn decode_discards(observation: &Observation) -> [Vec<TileId>; 4] {
     discards
 }
 
+/// 各 player のリーチ宣言牌が河の何枚目か (0-based) を `riichi_sutehais` から求める。
+///
+/// upstream は宣言牌を raw 物理牌 ID で持ち、河 (`Observation.discards`) も同じ raw ID なので、
+/// TileId へ正規化する前に照合する。同じ牌種が河に複数あっても物理牌 ID で一意に決まる。
+///
+/// 宣言牌 ID が河に無い、リーチ宣言していない席に宣言牌がある、といった矛盾した入力では河の
+/// 末尾などから推測せず `None` にする。decode 自体は失敗させない。
+fn decode_reach_discard_indices(observation: &Observation) -> [Option<usize>; PLAYER_COUNT] {
+    std::array::from_fn(|player| {
+        if !observation.riichi_declared.get(player).copied()? {
+            return None;
+        }
+        let reach_discard = u32::from((*observation.riichi_sutehais.get(player)?)?);
+        observation
+            .discards
+            .get(player)?
+            .iter()
+            .position(|&tile| tile == reach_discard)
+    })
+}
+
 fn decode_melds(observation: &Observation) -> [Vec<Meld>; 4] {
     let mut melds: [Vec<Meld>; 4] = Default::default();
     for (player, player_melds) in observation.melds.iter().enumerate() {
@@ -289,6 +314,8 @@ pub struct DecodedObservation {
     pub oya: u8,
     pub discards: [Vec<TileId>; 4],
     pub reached: [bool; 4],
+    /// 各 player のリーチ宣言牌が河の何枚目か。0-based index で、特定できない場合は `None`。
+    pub reach_discard_indices: [Option<usize>; 4],
     pub melds: [Vec<Meld>; 4],
     pub table_state: TableStateFacts,
 }
@@ -307,6 +334,7 @@ pub fn game_context_from_decoded_observation(decoded: &DecodedObservation) -> Ga
         decoded.reached,
         decoded.melds.clone(),
     )
+    .with_reach_discard_indices(decoded.reach_discard_indices)
     .with_table_state_facts(decoded.table_state)
 }
 
@@ -472,6 +500,44 @@ pub fn fixture_base64_with_table_state_facts(
         [None; 4],
         None,
         drawn_tile,
+    );
+    observation.serialize_to_base64().unwrap()
+}
+
+/// リーチ宣言牌を持つ `Observation` fixture。
+///
+/// `riichi_sutehais` は raw 物理牌 ID で、河 (`discards`) と同じ ID 体系を使う。
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_base64_with_reach_discards(
+    player_id: u8,
+    hand: Vec<u8>,
+    discards: [Vec<u8>; 4],
+    riichi_declared: [bool; 4],
+    riichi_sutehais: [Option<u8>; 4],
+) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
+    let observation = Observation::new(
+        player_id,
+        hands,
+        Default::default(),
+        discards,
+        vec![],
+        [25000; 4],
+        riichi_declared,
+        vec![],
+        vec![],
+        0,
+        0,
+        0,
+        0,
+        0,
+        vec![],
+        false,
+        riichi_sutehais,
+        [None; 4],
+        None,
+        None,
     );
     observation.serialize_to_base64().unwrap()
 }
@@ -1316,6 +1382,112 @@ mod tests {
         );
     }
 
+    // 同じ牌種 7p を2枚含む河。raw 物理牌 ID 60 と 62 はどちらも 7p で、TileId へ正規化した
+    // 後では区別できない。
+    const REACH_DISCARDS: [u32; 5] = [0, 60, 80, 62, 108];
+
+    fn reach_discard_payload(
+        riichi_declared: [bool; 4],
+        riichi_sutehais: [Option<u8>; 4],
+    ) -> ObservationPayload {
+        let discards = [
+            vec![],
+            REACH_DISCARDS.iter().map(|&tile| tile as u8).collect(),
+            vec![],
+            vec![],
+        ];
+        ObservationPayload::new(fixture_base64_with_reach_discards(
+            0,
+            vec![],
+            discards,
+            riichi_declared,
+            riichi_sutehais,
+        ))
+    }
+
+    #[test]
+    fn decode_4p_returns_reach_discard_index_from_riichi_sutehais() {
+        let decoded =
+            reach_discard_payload([false, true, false, false], [None, Some(80), None, None])
+                .decode_4p()
+                .unwrap();
+        assert_eq!(decoded.reach_discard_indices, [None, Some(2), None, None]);
+    }
+
+    #[test]
+    fn decode_4p_reach_discard_index_distinguishes_the_same_tile_type() {
+        for (riichi_sutehai, expected) in [(60, 1), (62, 3)] {
+            let decoded = reach_discard_payload(
+                [false, true, false, false],
+                [None, Some(riichi_sutehai), None, None],
+            )
+            .decode_4p()
+            .unwrap();
+            assert_eq!(
+                decoded.reach_discard_indices[1],
+                Some(expected),
+                "riichi_sutehai {riichi_sutehai}"
+            );
+            // 正規化後の河は同じ牌種が2枚並ぶので、index だけが宣言牌を一意に決める。
+            assert_eq!(decoded.discards[1][1], decoded.discards[1][3]);
+        }
+    }
+
+    #[test]
+    fn decode_4p_reach_discard_index_is_none_when_the_sutehai_is_not_in_the_discards() {
+        let decoded =
+            reach_discard_payload([false, true, false, false], [None, Some(61), None, None])
+                .decode_4p()
+                .unwrap();
+        assert_eq!(decoded.reach_discard_indices[1], None);
+        assert!(decoded.reached[1]);
+    }
+
+    #[test]
+    fn decode_4p_reach_discard_index_is_none_without_a_riichi_sutehai() {
+        let decoded = reach_discard_payload([false, true, false, false], [None; 4])
+            .decode_4p()
+            .unwrap();
+        assert_eq!(decoded.reach_discard_indices, [None; 4]);
+        assert!(decoded.reached[1]);
+    }
+
+    #[test]
+    fn decode_4p_reach_discard_index_is_none_for_a_player_who_has_not_reached() {
+        let decoded = reach_discard_payload([false; 4], [None, Some(80), None, None])
+            .decode_4p()
+            .unwrap();
+        assert_eq!(decoded.reach_discard_indices, [None; 4]);
+    }
+
+    #[test]
+    fn game_context_holds_the_reach_discard_index() {
+        let decoded =
+            reach_discard_payload([false, true, false, false], [None, Some(62), None, None])
+                .decode_4p()
+                .unwrap();
+        let context = game_context_from_decoded_observation(&decoded);
+        assert_eq!(context.reach_discard_index_of(1), Some(3));
+        assert_eq!(
+            context.reach_discard_tile_of(1),
+            Some(TileId::new(60).unwrap())
+        );
+    }
+
+    #[test]
+    fn game_context_without_reach_has_no_reach_discard_index() {
+        let payload = ObservationPayload::new(fixture_base64_with_discards(
+            0,
+            None,
+            vec![],
+            vec![],
+            [vec![], vec![0, 16], vec![], vec![]],
+        ));
+        let decoded = payload.decode_4p().unwrap();
+        let context = game_context_from_decoded_observation(&decoded);
+        assert_eq!(context.reach_discard_indices(), &[None; 4]);
+    }
+
     // 位置引数の取り違えを検出するため、field ごとに異なる値を持つ fixture を使う。
     const TABLE_STATE_SCORES: [i32; 4] = [12300, 28700, 40100, 18900];
     const TABLE_STATE_HONBA: u8 = 2;
@@ -1677,6 +1849,7 @@ mod tests {
                 oya: 0,
                 discards: Default::default(),
                 reached: [false; 4],
+                reach_discard_indices: [None; 4],
                 melds: Default::default(),
                 table_state: TableStateFacts::default(),
             }
