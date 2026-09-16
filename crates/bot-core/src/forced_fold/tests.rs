@@ -2,8 +2,10 @@ use super::*;
 
 use crate::agent::Agent;
 use crate::agents::ShantenAgent;
+use crate::context::TableStateFacts;
 use crate::defense::{
-    HonorSafetyRank, PlayerRonRiskEvidence, RonRiskEvidence, select_genbutsu_fallback_action,
+    HonorSafetyRank, PlayerRonRiskEvidence, RonRiskEvidence,
+    open_hand_targets_dahai_actions_by_ron_risk, select_genbutsu_fallback_action,
 };
 use crate::meld::{Meld, MeldKind};
 use crate::push_pull::{PushPullMode, decide_push_pull, push_pull_inputs_from_context};
@@ -11,7 +13,7 @@ use crate::shanten_test_support::{
     dahai, fold_actions, fold_under_reach_context, suited_reach_context_with_reached,
     tenpai_actions, tenpai_under_reach_context, tile,
 };
-use bot_logic::TileId;
+use bot_logic::{TileId, TileType};
 
 const OPEN_HAND_FOLD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 44, 53, 60];
 const OPEN_HAND_FOLD_DRAWN: u8 = 120;
@@ -427,19 +429,18 @@ fn shares_the_candidate_evidence_between_the_ranking_and_the_diagnostics() {
 }
 
 #[test]
-fn keeps_the_exact_evidence_unavailable_where_the_evaluation_did_not_build_it() {
-    // OpenHand 防御が hard-safe で決着した局面では production evaluation が exact model を
-    // 構築しない。ranking はその evaluation の evidence をそのまま使い、順位のために exact
-    // model を別に走らせない。
+fn does_not_invent_evidence_where_the_exact_model_is_truly_unavailable() {
+    // 局面情報が足りず exact model 自体を構築できない局面。診断用の追加収集を試しても
+    // unavailable なので、percentage を捏造せず heuristic のまま順位を付ける。
     let context = open_hand_context([false; 4]);
     let actions = open_hand_actions();
-    let inputs = push_pull_inputs_from_context(&context, &actions);
-    let FoldDefenseEvaluation::OpenHand(evaluation) =
-        evaluate_fold_defense(&context, &actions, &inputs, true)
-    else {
-        panic!("OpenHand 向け防御へ routing される");
-    };
-    assert!(evaluation.ron_risk_vectors.is_none());
+    let targets = high_open_hand_threat_players(
+        &push_pull_inputs_from_context(&context, &actions).open_hand_threats,
+    );
+    assert!(
+        open_hand_targets_dahai_actions_by_ron_risk(&context, &actions, &targets).is_none(),
+        "exact model 自体が利用できない局面"
+    );
 
     let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
     assert!(
@@ -448,10 +449,22 @@ fn keeps_the_exact_evidence_unavailable_where_the_evaluation_did_not_build_it() 
             .iter()
             .all(|candidate| candidate.player_ron_risk_evidence.is_none())
     );
+    assert!(
+        forced
+            .ranked_candidates
+            .iter()
+            .all(|candidate| !candidate.has_exact_zero_ron_risk())
+    );
     // hard-safe は exact evidence なしでも確定 fact として 0-risk。
     let selected = forced.ranked_candidates.first().expect("候補がある");
     assert!(selected.is_hard_safe());
     assert!(selected.is_zero_risk());
+    // exact が無い候補は既存 heuristic の根拠で並ぶ。
+    assert!(
+        forced.ranked_candidates[1..]
+            .iter()
+            .all(|candidate| candidate.heuristic_evidence().is_some())
+    );
 }
 
 #[test]
@@ -603,4 +616,310 @@ fn keeps_a_three_visible_honor_out_of_zero_risk_without_an_exact_zero() {
         ..heuristic.clone()
     };
     assert!(!exact.is_zero_risk());
+}
+
+// ---- OpenHand / 複合 threat の hard-safe 決着後の candidate evidence ----
+
+const EXACT_OPEN_HAND_TARGET: usize = 2;
+
+fn exact_tile_type(mjai: &str) -> TileType {
+    TileType::from_mjai_type_str(mjai).expect("牌種として読める")
+}
+
+fn exact_tile_types(mjai: &str) -> Vec<TileType> {
+    mjai.split_whitespace().map(exact_tile_type).collect()
+}
+
+fn exact_chi(mjai: &str) -> Meld {
+    let tiles: Vec<_> = exact_tile_types(mjai)
+        .into_iter()
+        .map(|tile| TileId::copies(tile).next().expect("物理牌がある"))
+        .collect();
+    Meld::new(MeldKind::Chi, tiles.clone(), Some(tiles[0]))
+}
+
+// 白の Pon。風情報が無くても確定役牌で、High OpenHandThreat の条件を満たす。
+fn exact_value_pon() -> Meld {
+    let tiles: Vec<_> = TileId::copies(exact_tile_type("P")).take(3).collect();
+    Meld::new(MeldKind::Pon, tiles.clone(), Some(tiles[0]))
+}
+
+/// exact hidden-hand model が使える High OpenHandThreat 局面。
+///
+/// target は4副露で隠れ手牌が1枚だけなので、見え牌を絞ると単騎候補を数え切れる。`unseen` は
+/// 「target がまだ持ち得る牌種と残り枚数」で、これが exact model の `T` になる。`unseen` に無い
+/// 牌種は4枚見えなので `R == 0` だが、target 自身の河ではないので hard-safe ではない。
+fn exact_open_hand_context(
+    unseen: &[(&str, u8)],
+    target_discards: &str,
+    same_hand_passed: &str,
+) -> GameContext {
+    let mut melds: [Vec<Meld>; 4] = Default::default();
+    melds[EXACT_OPEN_HAND_TARGET] = vec![
+        exact_value_pon(),
+        exact_chi("1p 2p 3p"),
+        exact_chi("4p 5p 6p"),
+        exact_chi("7p 8p 9p"),
+    ];
+
+    let mut remaining = [0u8; TileType::COUNT];
+    for &(mjai, copies) in unseen {
+        remaining[exact_tile_type(mjai).index()] = copies;
+    }
+    let visible: Vec<TileId> = TileType::all()
+        .flat_map(|tile| TileId::copies(tile).take(usize::from(4 - remaining[tile.index()])))
+        .collect();
+
+    let mut discards: [Vec<TileId>; 4] = Default::default();
+    discards[EXACT_OPEN_HAND_TARGET] = exact_tile_types(target_discards)
+        .into_iter()
+        .map(|tile| TileId::copies(tile).next().expect("物理牌がある"))
+        .collect();
+
+    let mut passed: [Vec<TileType>; 4] = Default::default();
+    passed[EXACT_OPEN_HAND_TARGET] = exact_tile_types(same_hand_passed);
+
+    GameContext::from_parts_with_melds(
+        None,
+        vec![],
+        vec![],
+        Some(exact_tile_type("E")),
+        None,
+        visible,
+        Some(0),
+        Some(1),
+        discards,
+        [false; 4],
+        melds,
+    )
+    .with_temporary_passed_tiles(Some(Default::default()))
+    .with_same_hand_passed_tiles(Some(passed))
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles: Some(1),
+        ..Default::default()
+    })
+}
+
+// 同じ局面の production evaluation が OpenHand へ routing され、exact 比較より前の段で決着して
+// exact model を走らせていないことを確認する。
+fn assert_open_hand_settles_without_exact_vectors(
+    context: &GameContext,
+    actions: &[LegalAction],
+    expected: OpenHandDefenseCategory,
+) {
+    let inputs = push_pull_inputs_from_context(context, actions);
+    let FoldDefenseEvaluation::OpenHand(production) =
+        evaluate_fold_defense(context, actions, &inputs, true)
+    else {
+        panic!("OpenHand 向け防御へ routing される");
+    };
+    let (_, category) = production.selected.expect("防御打牌を選ぶ");
+    assert_eq!(category, expected);
+    assert!(production.ron_risk_vectors.is_none());
+}
+
+#[test]
+fn collects_the_open_hand_candidate_evidence_after_a_hard_safe_selection() {
+    // 3m が target の河にあるので hard-safe で決着する。4m は4枚見えで `R == 0` だが hard-safe
+    // ではなく、1m / 2m は `R > 0`。
+    let context = exact_open_hand_context(&[("1m", 1), ("2m", 2), ("3m", 1)], "3m", "");
+    let actions = vec![dahai(8), dahai(12), dahai(0), dahai(4)];
+
+    assert_open_hand_settles_without_exact_vectors(
+        &context,
+        &actions,
+        OpenHandDefenseCategory::SafeAgainstAllTargets,
+    );
+
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+    // selection は変わらない。
+    assert_eq!(forced.selected_action, dahai(8));
+    assert_eq!(
+        forced.defense_kind,
+        ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::SafeAgainstAllTargets)
+    );
+
+    // hard-safe が先頭のまま、その下の候補は exact evidence で並ぶ。
+    assert_eq!(
+        forced
+            .ranked_candidates
+            .iter()
+            .map(|candidate| (
+                candidate.action.clone(),
+                candidate.defense_kind,
+                candidate
+                    .ron_risk_evidence()
+                    .map(|evidence| evidence.ron_capable_weight)
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                dahai(8),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::SafeAgainstAllTargets),
+                Some(0),
+            ),
+            (
+                dahai(12),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::ExactRonRisk),
+                Some(0),
+            ),
+            (
+                dahai(0),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::ExactRonRisk),
+                Some(1),
+            ),
+            (
+                dahai(4),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::ExactRonRisk),
+                Some(2),
+            ),
+        ]
+    );
+
+    // hard-safe と exact `R == 0` は別の根拠として残る。
+    let hard_safe = &forced.ranked_candidates[0];
+    assert!(hard_safe.is_hard_safe());
+    assert!(hard_safe.is_zero_risk());
+    let exact_zero = &forced.ranked_candidates[1];
+    assert!(!exact_zero.is_hard_safe());
+    assert!(exact_zero.has_exact_zero_ron_risk());
+    assert!(exact_zero.is_zero_risk());
+}
+
+#[test]
+fn collects_the_open_hand_candidate_evidence_after_a_same_hand_passed_selection() {
+    // target の河に該当牌が無いので hard-safe は無く、same-hand passed の 1m で決着する。
+    let context = exact_open_hand_context(&[("1m", 1), ("2m", 2), ("3m", 1)], "", "1m");
+    let actions = vec![dahai(0), dahai(12), dahai(4)];
+
+    assert_open_hand_settles_without_exact_vectors(
+        &context,
+        &actions,
+        OpenHandDefenseCategory::SameHandPassed,
+    );
+
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+    assert_eq!(forced.selected_action, dahai(0));
+    assert_eq!(
+        forced.defense_kind,
+        ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::SameHandPassed)
+    );
+
+    // same-hand passed が先頭のまま、その下は exact evidence で並ぶ。
+    assert_eq!(
+        forced
+            .ranked_candidates
+            .iter()
+            .map(|candidate| (
+                candidate.rank,
+                candidate.action.clone(),
+                candidate.defense_kind
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                1,
+                dahai(0),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::SameHandPassed),
+            ),
+            (
+                2,
+                dahai(12),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::ExactRonRisk),
+            ),
+            (
+                3,
+                dahai(4),
+                ForcedFoldDefenseKind::OpenHand(OpenHandDefenseCategory::ExactRonRisk),
+            ),
+        ]
+    );
+
+    // same-hand passed は hard-safe ではないので、`R > 0` なら 0-risk にしない。
+    let same_hand_passed = &forced.ranked_candidates[0];
+    assert!(!same_hand_passed.is_hard_safe());
+    assert_eq!(
+        same_hand_passed
+            .ron_risk_evidence()
+            .expect("exact evidence を持つ")
+            .ron_capable_weight,
+        1
+    );
+    assert!(!same_hand_passed.is_zero_risk());
+    // 4m は4枚見えで `R == 0` なので 0-risk。
+    assert!(forced.ranked_candidates[1].has_exact_zero_ron_risk());
+}
+
+#[test]
+fn keeps_a_zero_risk_candidate_below_the_hard_safe_ranks() {
+    // 3m / 7m / 8m が target の河にあるので上位3件は hard-safe。4m は4枚見えで `R == 0` だが
+    // hard-safe ではないので rank 4 に並ぶ。
+    let context = exact_open_hand_context(&[("1m", 1), ("2m", 2), ("3m", 1)], "3m 7m 8m", "");
+    let actions = vec![
+        dahai(24),
+        dahai(28),
+        dahai(8),
+        dahai(12),
+        dahai(0),
+        dahai(4),
+    ];
+
+    assert_open_hand_settles_without_exact_vectors(
+        &context,
+        &actions,
+        OpenHandDefenseCategory::SafeAgainstAllTargets,
+    );
+
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+    assert_eq!(forced.selected_action, dahai(24));
+
+    // 0-risk candidate の順位を付け替えない。
+    let zero_risk: Vec<_> = forced
+        .ranked_candidates
+        .iter()
+        .filter(|candidate| candidate.is_zero_risk())
+        .map(|candidate| (candidate.rank, candidate.action.clone()))
+        .collect();
+    assert_eq!(
+        zero_risk,
+        vec![
+            (1, dahai(24)),
+            (2, dahai(28)),
+            (3, dahai(8)),
+            (4, dahai(12)),
+        ]
+    );
+    assert!(forced.ranked_candidates[3].has_exact_zero_ron_risk());
+    assert!(!forced.ranked_candidates[3].is_hard_safe());
+    assert!(!forced.ranked_candidates[4].is_zero_risk());
+}
+
+#[test]
+fn does_not_recollect_the_evidence_when_the_exact_comparison_already_ran() {
+    // hard-safe も same-hand passed も無いので production が exact 比較まで進む。診断のために
+    // 追加収集せず、selection が構築した vector をそのまま使う。
+    let context = exact_open_hand_context(&[("1m", 1), ("2m", 2), ("3m", 1)], "", "");
+    let actions = vec![dahai(0), dahai(4), dahai(8)];
+    let inputs = push_pull_inputs_from_context(&context, &actions);
+    let FoldDefenseEvaluation::OpenHand(production) =
+        evaluate_fold_defense(&context, &actions, &inputs, true)
+    else {
+        panic!("OpenHand 向け防御へ routing される");
+    };
+    let (_, category) = production.selected.expect("防御打牌を選ぶ");
+    assert_eq!(category, OpenHandDefenseCategory::ExactRonRisk);
+    let vectors = production
+        .ron_risk_vectors
+        .as_deref()
+        .expect("selection が exact vector を構築する");
+
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+    for candidate in &forced.ranked_candidates {
+        assert_eq!(
+            candidate.player_ron_risk_evidence.as_deref(),
+            player_ron_risk_evidence_for_action(Some(vectors), &candidate.action)
+        );
+    }
 }

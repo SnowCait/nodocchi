@@ -370,6 +370,8 @@ player 別の行は player id 順に並べた表示で、comparator の優先順
 
 `--force-fold --summary-only` でも同じ Summary と同じ ranked candidates を出します。`--summary-only` は計算を省く option ではなく、Summary 以外の詳細 section を省くだけです。
 
+forced-fold の診断では、production selection が共通現物 / hard-safe / same-hand passed で決着した場合も candidate exact evidence を収集します。production selector と早期 return はそのままで、`act()` / `diagnose*()` の挙動は変わりません。
+
 `rank` 付きの表示では、hard-safe (ルール上ロンされないと確定) と exact model 上の `R == 0` を別の根拠として区別します。3枚以上見えた字牌は heuristic safety なので、それだけでは 0-risk になりません。`R/T` と percentage は実放銃率ではなく、exact model が使えない候補について percentage を推測することもありません。定義は [0-risk candidate の根拠](ai/defense.md#0-risk-candidate-の根拠) を参照してください。
 
 ## OpenHand defense

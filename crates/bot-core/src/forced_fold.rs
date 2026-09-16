@@ -14,7 +14,8 @@ mod ranking;
 
 use crate::action::LegalAction;
 use crate::combined_defense::{
-    CombinedDefenseCategory, CombinedDefenseDiagnostic, combined_threat_defense_targets,
+    CombinedDefenseCategory, CombinedDefenseDiagnostic,
+    collect_combined_candidate_ron_risk_evidence, combined_threat_defense_targets,
     ordered_combined_defense_candidates,
 };
 use crate::context::GameContext;
@@ -24,7 +25,8 @@ use crate::defense::{
 };
 use crate::fold_defense::{FoldDefenseEvaluation, FoldDefenseKind, evaluate_fold_defense};
 use crate::open_hand_defense::{
-    OpenHandDefenseCategory, OpenHandDefenseDiagnostic, high_open_hand_threat_players,
+    OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
+    collect_open_hand_candidate_ron_risk_evidence, high_open_hand_threat_players,
     ordered_open_hand_defense_candidates,
 };
 use crate::push_pull::{has_clear_threat, push_pull_inputs_from_threat_facts};
@@ -79,6 +81,11 @@ pub struct ForcedFoldDiagnostic {
 ///
 /// 評価は1回だけで、`ranked_candidates` と詳細診断は同じ evaluation の candidate evidence を
 /// 共有する。exact model を ranking 用に二重計算しない。
+///
+/// OpenHand / 複合 threat 防御が hard-safe / same-hand passed で決着した局面では、既存
+/// evaluator が exact model を走らせないまま早期 return する。その場合だけ、選択を変えずに
+/// 診断用の candidate exact evidence を追加収集する。Reach 防御が共通現物で決着した後も exact
+/// candidate evidence を収集するのと同じ考え方で、production selection は変わらない。
 pub fn evaluate_forced_fold(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -97,7 +104,7 @@ pub fn evaluate_forced_fold(
         return Err(ForcedFoldUnavailable::NoClearThreat);
     }
 
-    let evaluation = evaluate_fold_defense(context, legal_actions, &inputs, true);
+    let mut evaluation = evaluate_fold_defense(context, legal_actions, &inputs, true);
     let selection = evaluation
         .selected()
         .ok_or(ForcedFoldUnavailable::NoDefenseSelection)?;
@@ -117,7 +124,7 @@ pub fn evaluate_forced_fold(
         combined_defense: None,
     };
 
-    match &evaluation {
+    match &mut evaluation {
         FoldDefenseEvaluation::Reach(evaluation) => {
             let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
             diagnostic.ranked_candidates = ranked_candidates(
@@ -133,6 +140,14 @@ pub fn evaluate_forced_fold(
         }
         FoldDefenseEvaluation::OpenHand(evaluation) => {
             let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+            // hard-safe / same-hand passed で selection が確定して exact model が走っていない
+            // 場合だけ、診断用の candidate evidence を追加収集する。選択は変わらない。
+            collect_open_hand_candidate_ron_risk_evidence(
+                context,
+                legal_actions,
+                &targets,
+                evaluation,
+            );
             let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
             diagnostic.ranked_candidates = ranked_candidates(
                 ordered_open_hand_defense_candidates(
@@ -154,6 +169,12 @@ pub fn evaluate_forced_fold(
         FoldDefenseEvaluation::Combined(evaluation) => {
             let targets =
                 combined_threat_defense_targets(&inputs.player_threats, &inputs.open_hand_threats);
+            collect_combined_candidate_ron_risk_evidence(
+                context,
+                legal_actions,
+                &targets,
+                evaluation,
+            );
             let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
             diagnostic.ranked_candidates = ranked_candidates(
                 ordered_combined_defense_candidates(

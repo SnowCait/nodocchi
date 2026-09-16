@@ -453,24 +453,7 @@ pub(crate) fn evaluate_combined_threat_defense_fallback_action_with_kind<'a>(
         };
     }
 
-    // Target kind remains owned by this module. The ron-risk layer only receives the two player
-    // lists and reuses the corresponding existing evaluator for each list.
-    let riichi_targets: Vec<_> = targets
-        .iter()
-        .filter(|target| target.kind == ThreatDefenseTargetKind::Riichi)
-        .map(|target| target.player)
-        .collect();
-    let open_hand_targets: Vec<_> = targets
-        .iter()
-        .filter(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand)
-        .map(|target| target.player)
-        .collect();
-    let ron_risk_vectors = combined_targets_dahai_actions_by_ron_risk(
-        context,
-        legal_actions,
-        &riichi_targets,
-        &open_hand_targets,
-    );
+    let ron_risk_vectors = combined_targets_ron_risk_vectors(context, legal_actions, targets);
     if let Some(vectors) = ron_risk_vectors.as_ref() {
         match select_lexicographic_minimax_action(vectors) {
             Ok(Some(chosen)) => {
@@ -502,6 +485,68 @@ pub(crate) fn evaluate_combined_threat_defense_fallback_action_with_kind<'a>(
         ),
         ron_risk_vectors,
     }
+}
+
+// target kind の分類はこの module の責務。ron-risk 層へは席一覧だけを渡し、その一覧ごとに
+// 対応する既存 evaluator を使う。production selection と診断用の追加収集がこの1実装を共有する。
+fn combined_targets_ron_risk_vectors<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+) -> Option<Vec<DahaiRonRiskVector<'a>>> {
+    let riichi_targets: Vec<_> = targets
+        .iter()
+        .filter(|target| target.kind == ThreatDefenseTargetKind::Riichi)
+        .map(|target| target.player)
+        .collect();
+    let open_hand_targets: Vec<_> = targets
+        .iter()
+        .filter(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand)
+        .map(|target| target.player)
+        .collect();
+    combined_targets_dahai_actions_by_ron_risk(
+        context,
+        legal_actions,
+        &riichi_targets,
+        &open_hand_targets,
+    )
+}
+
+/// production selection を変えずに、診断用の candidate exact evidence まで揃える。
+///
+/// [`evaluate_combined_threat_defense_fallback_action_with_kind`] は hard-safe / same-hand passed
+/// で selection が確定すると exact model を走らせず `ron_risk_vectors` を `None` のまま早期
+/// return する。その場合だけ、選択後に同じ exact model を診断用として追加収集する。選択打牌・
+/// category precedence・段の順序・早期 return の性能特性はいずれも変えない。
+///
+/// exact 比較まで進んだ局面では再収集しない。production が exact を試して unavailable だった
+/// ことと、hard-safe で早期 return して exact を試していないことを混同しない。
+pub(crate) fn collect_combined_candidate_ron_risk_evidence<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+    evaluation: &mut CombinedDefenseEvaluation<'a>,
+) {
+    if !settled_before_the_exact_comparison(evaluation.selected) {
+        return;
+    }
+    evaluation.ron_risk_vectors =
+        combined_targets_ron_risk_vectors(context, legal_actions, targets);
+}
+
+// exact 比較より前の段で selection が確定したか。この場合だけ既存 evaluator は exact model を
+// 走らせていない。
+fn settled_before_the_exact_comparison(
+    selected: Option<(&LegalAction, CombinedDefenseCategory)>,
+) -> bool {
+    matches!(
+        selected,
+        Some((
+            _,
+            CombinedDefenseCategory::SafeAgainstAllThreats
+                | CombinedDefenseCategory::SameHandPassed
+        ))
+    )
 }
 
 // 順序は ranking と共有する extend_with_legacy_combined_defense_candidates で作り、そこから
@@ -1191,6 +1236,136 @@ mod tests {
         assert_eq!(fallback(&no_safety, &legal_actions), None);
         assert_eq!(ordered(&no_safety, &legal_actions).len(), 2);
         assert_ordering_leads_with_the_selection(&no_safety, &legal_actions);
+    }
+
+    // 診断用の追加収集を通した evaluation。production selection は変わらない。
+    fn evaluation_with_candidate_evidence<'a>(
+        context: &GameContext,
+        legal_actions: &'a [LegalAction],
+    ) -> CombinedDefenseEvaluation<'a> {
+        let targets = targets(context);
+        let mut evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            context,
+            legal_actions,
+            &targets,
+        );
+        collect_combined_candidate_ron_risk_evidence(
+            context,
+            legal_actions,
+            &targets,
+            &mut evaluation,
+        );
+        evaluation
+    }
+
+    #[test]
+    fn the_candidate_evidence_is_collected_after_a_hard_safe_selection() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "2m")
+            .discards_of(OPEN_HAND_TARGET, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+
+        // production API は従来どおり hard-safe で早期 return し、exact model を走らせない。
+        let production = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+        assert_eq!(
+            production.selected,
+            Some((
+                &legal_actions[1],
+                CombinedDefenseCategory::SafeAgainstAllThreats
+            ))
+        );
+        assert!(production.ron_risk_vectors.is_none());
+
+        // 診断用の追加収集では、選択を変えずに全 target の candidate exact evidence が揃う。
+        let evaluation = evaluation_with_candidate_evidence(&context, &legal_actions);
+        assert_eq!(evaluation.selected, production.selected);
+        let vectors = evaluation
+            .ron_risk_vectors
+            .as_deref()
+            .expect("診断用に exact evidence を収集する");
+        assert!(vectors.iter().all(|vector| {
+            vector
+                .player_evidence
+                .iter()
+                .map(|evidence| evidence.player)
+                .eq([RIICHI_TARGET, OPEN_HAND_TARGET])
+        }));
+
+        // hard-safe の優先順位は変えず、その下の候補だけが exact evidence で並ぶ。
+        assert_eq!(
+            ordered_combined_defense_candidates(
+                &context,
+                &legal_actions,
+                &targets(&context),
+                evaluation.ron_risk_vectors.as_deref(),
+            ),
+            vec![
+                (
+                    &legal_actions[1],
+                    CombinedDefenseCategory::SafeAgainstAllThreats
+                ),
+                (&legal_actions[0], CombinedDefenseCategory::ExactRonRisk),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_candidate_evidence_is_collected_after_a_same_hand_passed_selection() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "2m")
+            .same_hand_passed(OPEN_HAND_TARGET, "2m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+
+        let production = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+        assert_eq!(
+            production.selected,
+            Some((&legal_actions[1], CombinedDefenseCategory::SameHandPassed))
+        );
+        assert!(production.ron_risk_vectors.is_none());
+
+        let evaluation = evaluation_with_candidate_evidence(&context, &legal_actions);
+        assert_eq!(evaluation.selected, production.selected);
+        assert!(evaluation.ron_risk_vectors.is_some());
+    }
+
+    #[test]
+    fn the_candidate_evidence_is_not_recollected_after_an_exact_comparison() {
+        // exact 比較まで進んだ局面では追加収集しない。試して unavailable だった場合も同じ。
+        let exact = exact_combined_context(&[("1m", 1), ("2m", 2)]).build();
+        let legal_actions = vec![dahai("1m"), dahai("2m")];
+        let production = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &exact,
+            &legal_actions,
+            &targets(&exact),
+        );
+        let evaluation = evaluation_with_candidate_evidence(&exact, &legal_actions);
+        assert_eq!(evaluation.selected, production.selected);
+        assert_eq!(evaluation.ron_risk_vectors, production.ron_risk_vectors);
+
+        let legacy = suited_safety_context();
+        let legal_actions = vec![dahai("4m"), dahai("1s")];
+        let production = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &legacy,
+            &legal_actions,
+            &targets(&legacy),
+        );
+        assert!(matches!(
+            production.selected,
+            Some((_, CombinedDefenseCategory::SuitedSafety(_)))
+        ));
+        let evaluation = evaluation_with_candidate_evidence(&legacy, &legal_actions);
+        assert_eq!(evaluation.selected, production.selected);
+        assert_eq!(evaluation.ron_risk_vectors, production.ron_risk_vectors);
     }
 
     #[test]

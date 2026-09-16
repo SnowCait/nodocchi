@@ -411,7 +411,7 @@ exact model が利用できない候補には存在しない percentage を作�
 
 `--force-fold --summary-only` は `--force-fold` と**同じ防御評価・同じ ranked candidates・同じ Summary**を出します。違いは表示量だけで、`--summary-only` は `Scenario` / `Table state` / `Forced fold` / `Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense` といった Summary 以外の詳細 section を省きます。
 
-`--summary-only` は計算を省く option ではありません。exact `R == 0` の候補を全件検出するために必要な candidate risk evaluation も、共通現物で決着した場合の exact ron-risk evidence の収集も、`--summary-only` でも行います。
+`--summary-only` は計算を省く option ではありません。exact `R == 0` の候補を全件検出するために必要な candidate risk evaluation も、共通現物 / hard-safe / same-hand passed で selection が決着した場合の exact ron-risk evidence の収集も、`--summary-only` でも行います ([防御候補の ordering](ai/defense.md#防御候補の-ordering))。
 
 通常出力でも `--summary-only` でも exact model は1回しか走りません。ranking・Summary・詳細 diagnostics は同じ forced fold evaluation から得た candidate evidence を共有します。
 

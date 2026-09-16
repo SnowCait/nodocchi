@@ -258,4 +258,11 @@ ordering を観察する入口は [`--force-fold`](../bot-scenario.md#--force-fo
 
 3枚以上見えている字牌 (`HonorSafetyRank::ThreeOrMoreVisible`) は [HonorSafety](#honorsafety) の heuristic safety です。exact model が利用可能で実際に `R == 0` なら 0-risk、`R > 0` なら通常候補で、exact model が使えない場合は heuristic のまま安全確定とは推測しません。
 
-exact evidence が利用できるかどうかは production evaluation に従います。Riichi Defense は共通現物で決着した局面でも診断向けに exact candidate evidence を収集しますが、OpenHand / Combined Defense が hard-safe や same-hand passed で決着した局面では production evaluation が exact model を構築しないので、その局面の候補は exact unavailable として扱い、存在しない percentage を作りません ([exact model が使えない場合](#exact-model-が使えない場合))。
+診断では、production selection が exact 比較より前の段で決着した場合も candidate exact evidence を収集します。
+
+- Riichi Defense: 全リーチ者共通の [Genbutsu](#genbutsu) で決着した後も収集します。
+- OpenHand / Combined Defense: `SafeAgainstAllTargets` / `SafeAgainstAllThreats` / `SameHandPassed` で決着した後も収集します。
+
+production selector は変わりません。既存 evaluator はこれらの段で決着すると exact model を走らせず早期 return し、`act()` と `diagnose*()` はその早期 return をそのまま使います。診断向けの追加収集は選択後に行うので、選択打牌・category precedence・段の順序・早期 return の性能特性はいずれも変わりません。exact 比較まで進んだ局面では selection が構築した evidence をそのまま使い、再収集しません。
+
+局面情報が足りず exact model 自体を構築できない場合は従来どおり exact unavailable として扱い、存在しない percentage を作りません ([exact model が使えない場合](#exact-model-が使えない場合))。「hard-safe で早期 return したため exact を試していない」ことと「exact model を構築しようとして unavailable だった」ことは区別します。
