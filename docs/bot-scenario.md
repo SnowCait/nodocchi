@@ -32,6 +32,7 @@ cargo run -p bot-scenario -- \
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
+| `--force-fold` | 任意 | 通常の押し引き判断とは無関係に、ベタ降りを仮定した場合の最善防御打牌を表示する。他の診断 option と併用不可 (`--summary-only` / `--verbose` は併用可) |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
@@ -271,6 +272,83 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では 
 
 **production の打牌選択は P2 と同じ方式です。** Full 追加評価の対象は常に provisional 上位2候補だけなので、要求する worker 数の上限も `min(2, available_parallelism)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。ドラ差 gate が発火しない局面では Full 追加評価そのものが走らないので、thread も分けません。Progress cohort の評価は従来どおり逐次のままです。S は P2 を比べるための baseline として残ります。他の診断 option とは併用できません。
 
+### --force-fold
+
+`--force-fold` は、通常の押し引き判断とは無関係に「この局面でベタ降りすると仮定した場合の最善防御打牌」を確認する option です。
+
+production bot の判断は変わりません。`ShantenAgent::act()` も `diagnose()` も `--force-fold` の有無で結果が変わらず、この option が `PushPullMode::Fold` を production decision へ注入することもありません。通常診断とは独立した hypothetical evaluation として、既存 Fold defense evaluator を直接実行します。
+
+そのため通常打牌の選択・2手先探索・押し引き判定・Reach / Damaten 判断は走りません。防御 evaluator 自体が必要とする threat facts と exact defense facts は通常どおり使用します。
+
+防御打牌の選択も routing も production の Fold defense と同じもので、`--force-fold` 用の防御ロジックは持ちません。
+
+| 相手の threat | 使用する防御 | `choice 1 source` |
+| --- | --- | --- |
+| リーチ者のみ | リーチ者向け防御 fallback (共通現物 / exact ron-risk model / 字牌・壁・スジ等) | `DefenseFallback` |
+| High OpenHandThreat の副露相手のみ | OpenHand 防御 fallback | `OpenHandDefenseFallback` |
+| リーチ者と High OpenHandThreat の相手が同時 | 複合 threat 防御 fallback | `CombinedThreatDefenseFallback` |
+
+threat の分類も既存 classification と同じ source of truth を使い、High 条件などをここで書き直しません。
+
+[相対席 option](#相手の河とリーチ) と組み合わせて使えます。
+
+```bash
+cargo run -p bot-scenario -- \
+  --hand "234m455p789s1123z" \
+  --draw "N" \
+  --discards-shimocha "1m 7p 4s 7p E" \
+  --riichi-shimocha 4 \
+  --remaining-tiles 42 \
+  --force-fold \
+  --summary-only
+```
+
+```text
+Summary
+  mode: ForcedFold
+  choice 1: E
+  choice 1 source: DefenseFallback
+  defense kind: Genbutsu
+```
+
+OpenHand / 複合 threat では、その family の既存 category をそのまま出します。
+
+```text
+Summary
+  mode: ForcedFold
+  choice 1: 5m
+  choice 1 source: OpenHandDefenseFallback
+  defense category: SafeAgainstAllTargets
+```
+
+`--summary-only` を付けない通常出力では、既存の `Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense` section をそのまま表示するので、候補ごとの safety も確認できます。
+
+#### unavailable になる場合
+
+リーチ者も High OpenHandThreat の相手もいない局面では、防御対象がないので `unavailable` になります。通常打牌を「ベタ降り最善打牌」として返すことはありません。
+
+```text
+Summary
+  mode: ForcedFold
+  forced fold unavailable: no clear threat
+```
+
+合法な Dahai がなく防御打牌を選べない場合も同じく `unavailable` (`no defense discard`) です。
+
+#### exact defense model に必要な fact
+
+防御の exact hidden-hand model は `remaining_tiles` などの局面 fact を実際の評価材料に使います。[相対席 option](#相手の河とリーチ) を使った局面では `remaining_tiles` は明示しない限り unknown のままで、指定した河の枚数から山枚数を推測することはありません。exact model を使いたい場合は `--remaining-tiles` に正しい値を指定してください。必要な fact が足りない場合は、既存 evaluator の fallback semantics (字牌 / 壁 / スジ等) に従います。
+
+自分の河や `melds`、`post_reach_passed` を含む正確な局面は JSON scenario または RiichiLab capture で指定します。`--force-fold` は通常の JSON scenario、inline scenario、RiichiLab capture のいずれでも使えます。
+
+```bash
+cargo run -p bot-scenario -- \
+  scenarios/combined_threat_defense.json \
+  --force-fold
+```
+
+benchmark / comparison 系の専用 mode や、通常打牌の追加診断を要求する option (`--lookahead`、`--two-shanten-self-tsumo`、各 cost 計測、各 A/B 比較) とは併用できません。
+
 ### --allow-ryukyoku
 
 `--allow-ryukyoku` は九種九牌を**合法手として与える** option です。入力した手牌が九種九牌の成立条件 (么九牌9種以上) を満たすかどうかは判定しません。実対局と同じく、九種九牌が合法かどうかは入力側が source of truth で、nodocchi は成立条件を再判定しません。
@@ -331,6 +409,8 @@ inline baseline は `bot-scenario` の入力補助であり、AI 本体が未知
 ## Summary
 
 `--summary-only` は Summary section だけを表示します。Summary は「何を選んだか」と「次点がなぜ負けたか」を短く確認するためのもので、候補ごとの metric 一覧は持ちません。
+
+[`--force-fold`](#--force-fold) を指定した場合の Summary は通常判断の Summary ではないので、先頭に `mode: ForcedFold` を置き、choice 2 / 3 の比較も持ちません。
 
 choice 2 / 3 が数値 comparator で負けた場合だけ、`lost by` の下へ比較値を1行追加します。
 
