@@ -10,6 +10,7 @@ pub mod decision_timing;
 pub mod defense;
 pub mod discard_selection;
 mod fold_defense;
+pub mod forced_fold;
 pub mod iishanten_continuation_depth_comparison;
 pub mod iishanten_selection_depth_comparison;
 pub mod iishanten_selection_parallel_comparison;
@@ -108,6 +109,9 @@ pub use defense::{
     tanki_remaining_candidates_for_player, visible_count_of, wall_rank, wall_tile_types_by_rank,
 };
 pub use discard_selection::select_discard_action;
+pub use forced_fold::{
+    ForcedFoldDefenseKind, ForcedFoldDiagnostic, ForcedFoldUnavailable, evaluate_forced_fold,
+};
 pub use iishanten_continuation_depth_comparison::{
     CandidateBreakdown, FirstDrawContribution, IishantenContinuationDepth,
     IishantenContinuationDepthComparison, IishantenContinuationDepthProfile,

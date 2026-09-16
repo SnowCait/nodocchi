@@ -13,15 +13,15 @@ pub const USAGE: &str = "usage:
                [--discards-kamicha <TILES>] [--riichi-shimocha [INDEX]]
                [--riichi-toimen [INDEX]] [--riichi-kamicha [INDEX]]
                [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
-               [--no-history-furiten] [--allow-hora]
+               [--no-history-furiten] [--allow-hora] [--force-fold]
                [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
                [--two-shanten-self-tsumo-cost <SCOPE>]
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--two-shanten-self-tsumo] [--verbose]
-               [--two-shanten-self-tsumo-cost <SCOPE>]
+               [--two-shanten-self-tsumo-cost <SCOPE>] [--force-fold]
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
-               [--two-shanten-self-tsumo] [--verbose] [--summary-only]
+               [--two-shanten-self-tsumo] [--verbose] [--force-fold] [--summary-only]
   bot-scenario --hand <TILES> [scenario options] --three-shanten-progress-self-tsumo
   bot-scenario <SCENARIO_JSON> --three-shanten-progress-self-tsumo
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
@@ -77,6 +77,10 @@ pub const USAGE: &str = "usage:
   no deeper search warms the shanten and acceptance memos before the measurement
   --two-shanten-progress-self-tsumo-cost measures only the first Progress branch through
   the existing progress helper, with the same <SCOPE> and isolation as the full cost option
+  --force-fold reports the best defensive discard assuming a fold, independently of the
+  normal push/pull decision; it evaluates the existing fold defense directly instead of
+  running the normal discard selection, it never changes what the production bot decides,
+  and it is unavailable when there is no clear threat or no legal Dahai to choose from
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -206,6 +210,9 @@ pub enum CliError {
 
     #[error("--two-shanten-progress-self-tsumo-cost cannot be combined with {0}")]
     ConflictingTwoShantenProgressSelfTsumoCost(String),
+
+    #[error("--force-fold cannot be combined with {0}")]
+    ConflictingForceFold(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +271,9 @@ pub struct CliArgs {
     pub two_shanten_progress_self_tsumo_cost: Option<TwoShantenSelfTsumoScope>,
     /// Summary だけを表示するかどうか。判断は同じで、表示する section だけが変わる。
     pub summary_only: bool,
+    /// 通常の押し引き判断とは無関係に、ベタ降りを仮定した場合の防御打牌を表示するかどうか。
+    /// production の判断は変えず、通常打牌の診断も構築しない。
+    pub force_fold: bool,
 }
 
 impl CliArgs {
@@ -289,6 +299,7 @@ impl CliArgs {
         let mut two_shanten_self_tsumo_cost = None;
         let mut two_shanten_progress_self_tsumo_cost = None;
         let mut summary_only = false;
+        let mut force_fold = false;
         let mut capture: Option<String> = None;
         let mut request_id: Option<u64> = None;
         let mut benchmark_captures: Vec<String> = Vec::new();
@@ -436,6 +447,7 @@ impl CliArgs {
                 }
                 "--verbose" => verbose = true,
                 "--summary-only" => summary_only = true,
+                "--force-fold" => force_fold = true,
                 other if other.starts_with('-') => {
                     return Err(CliError::UnknownOption(other.to_string()));
                 }
@@ -485,6 +497,8 @@ impl CliArgs {
                 Some("--two-shanten-full-parallel-comparison".to_string())
             } else if !comparison_captures.is_empty() {
                 Some("--compare-three-shanten-continuation".to_string())
+            } else if force_fold {
+                Some("--force-fold".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -513,6 +527,7 @@ impl CliArgs {
                 two_shanten_self_tsumo_cost: None,
                 two_shanten_progress_self_tsumo_cost: None,
                 summary_only: false,
+                force_fold: false,
             });
         }
 
@@ -549,6 +564,8 @@ impl CliArgs {
                 Some("--two-shanten-full-parallel-comparison".to_string())
             } else if benchmark_json.is_some() {
                 Some("--benchmark-json".to_string())
+            } else if force_fold {
+                Some("--force-fold".to_string())
             } else if verbose {
                 Some("--verbose".to_string())
             } else if summary_only {
@@ -576,11 +593,57 @@ impl CliArgs {
                 two_shanten_self_tsumo_cost: None,
                 two_shanten_progress_self_tsumo_cost: None,
                 summary_only: false,
+                force_fold: false,
             });
         }
 
         if benchmark_json.is_some() {
             return Err(CliError::BenchmarkJsonWithoutBenchmark);
+        }
+
+        // forced fold は通常打牌の選択も追加診断も走らせないので、それらを要求する option とは
+        // 併用しない。比較・計測専用 mode も同じく単独で実行する。
+        if force_fold {
+            for (enabled, option) in [
+                (lookahead, "--lookahead"),
+                (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                (
+                    two_shanten_self_tsumo_cost.is_some(),
+                    "--two-shanten-self-tsumo-cost",
+                ),
+                (
+                    two_shanten_progress_self_tsumo_cost.is_some(),
+                    "--two-shanten-progress-self-tsumo-cost",
+                ),
+                (
+                    three_shanten_progress_self_tsumo,
+                    "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    three_shanten_continuation_comparison,
+                    "--three-shanten-continuation-comparison",
+                ),
+                (
+                    iishanten_continuation_depth_comparison,
+                    "--iishanten-continuation-depth-comparison",
+                ),
+                (
+                    iishanten_selection_depth_comparison,
+                    "--iishanten-selection-depth-comparison",
+                ),
+                (
+                    iishanten_selection_parallel_comparison,
+                    "--iishanten-selection-parallel-comparison",
+                ),
+                (
+                    two_shanten_full_parallel_comparison,
+                    "--two-shanten-full-parallel-comparison",
+                ),
+            ] {
+                if enabled {
+                    return Err(CliError::ConflictingForceFold(option.to_string()));
+                }
+            }
         }
 
         if three_shanten_continuation_comparison {
@@ -916,6 +979,7 @@ impl CliArgs {
             two_shanten_self_tsumo_cost,
             two_shanten_progress_self_tsumo_cost,
             summary_only,
+            force_fold,
         })
     }
 }
@@ -2592,6 +2656,86 @@ mod tests {
         assert_eq!(
             parse(&["first.json", "second.json"]),
             Err(CliError::MultipleScenarioFiles("second.json".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_force_fold_for_every_scenario_input() {
+        assert!(
+            parse(&["--hand", "123m", "--force-fold"])
+                .unwrap()
+                .force_fold
+        );
+        assert!(
+            parse(&["scenario.json", "--force-fold"])
+                .unwrap()
+                .force_fold
+        );
+        assert!(
+            parse(&["--riichilab-capture", "capture.jsonl", "--force-fold"])
+                .unwrap()
+                .force_fold
+        );
+        assert!(
+            parse(&["--hand", "123m", "--force-fold", "--summary-only"])
+                .unwrap()
+                .force_fold
+        );
+        assert!(!parse(&["--hand", "123m"]).unwrap().force_fold);
+    }
+
+    #[test]
+    fn rejects_force_fold_with_the_normal_discard_diagnostics() {
+        for option in [
+            "--lookahead",
+            "--two-shanten-self-tsumo",
+            "--three-shanten-progress-self-tsumo",
+            "--three-shanten-continuation-comparison",
+            "--iishanten-continuation-depth-comparison",
+            "--iishanten-selection-depth-comparison",
+            "--iishanten-selection-parallel-comparison",
+            "--two-shanten-full-parallel-comparison",
+        ] {
+            assert_eq!(
+                parse(&["--hand", "123m", "--force-fold", option]),
+                Err(CliError::ConflictingForceFold(option.to_string())),
+                "{option}"
+            );
+        }
+
+        for option in [
+            "--two-shanten-self-tsumo-cost",
+            "--two-shanten-progress-self-tsumo-cost",
+        ] {
+            assert_eq!(
+                parse(&["--hand", "123m", "--force-fold", option, "all"]),
+                Err(CliError::ConflictingForceFold(option.to_string())),
+                "{option}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_force_fold_with_the_capture_only_modes() {
+        assert_eq!(
+            parse(&[
+                "--benchmark-riichilab-capture",
+                "capture.jsonl",
+                "--force-fold",
+            ]),
+            Err(CliError::ConflictingBenchmarkInput(
+                "--force-fold".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&[
+                "--compare-three-shanten-continuation",
+                "capture.jsonl",
+                "--force-fold",
+            ]),
+            Err(CliError::ConflictingCaptureComparisonInput(
+                "--force-fold".to_string()
+            ))
         );
     }
 }
