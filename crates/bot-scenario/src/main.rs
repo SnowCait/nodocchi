@@ -3,6 +3,7 @@ mod cli;
 #[cfg(test)]
 mod combined_defense;
 mod error;
+mod forced_fold;
 mod format;
 mod iishanten_continuation_depth;
 mod iishanten_selection_depth;
@@ -25,13 +26,14 @@ mod two_shanten_full_parallel_regression;
 use std::process::ExitCode;
 
 use bot_core::{
-    DiagnosticOptions, ShantenAgent, measure_two_shanten_progress_self_tsumo,
-    measure_two_shanten_self_tsumo,
+    DiagnosticOptions, ForcedFoldDiagnosticScope, ShantenAgent, evaluate_forced_fold,
+    measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
 };
 
 use crate::benchmark::run_capture_benchmark;
 use crate::cli::{CliArgs, ScenarioSource, USAGE};
 use crate::error::ScenarioError;
+use crate::forced_fold::{format_forced_fold, format_forced_fold_summary};
 use crate::format::{
     format_diagnostic, format_summary, format_two_shanten_progress_self_tsumo_cost,
     format_two_shanten_self_tsumo_cost,
@@ -72,6 +74,29 @@ where
             return three_shanten_continuation::run_capture_comparison(spec);
         }
     };
+
+    // ベタ降り仮定の評価は通常打牌選択・押し引き・リーチ判断を一切走らせず、既存 Fold
+    // defense をそのまま実行する。production の判断は変わらない。
+    //
+    // 候補評価を表示しない --summary-only では、選択に不要な候補診断も、現物で決着した場合の
+    // exact ron-risk evidence も収集しない。選択打牌と defense family はどちらでも同じ。
+    if args.force_fold {
+        let scope = if args.summary_only {
+            ForcedFoldDiagnosticScope::SelectionOnly
+        } else {
+            ForcedFoldDiagnosticScope::Detailed
+        };
+        let result = evaluate_forced_fold(&scenario.context, &scenario.legal_actions, scope);
+        let output = if args.summary_only {
+            format_forced_fold_summary(&result)
+        } else {
+            format_forced_fold(&scenario, &result, args.verbose)
+        };
+        return Ok(match header {
+            Some(header) => format!("{header}\n\n{output}"),
+            None => output,
+        });
+    }
 
     // 2向聴 Full pair の分け方の計測も同じく他の診断を走らせず、cold memo 条件で計る。
     if args.two_shanten_full_parallel_comparison {
@@ -997,5 +1022,189 @@ mod tests {
         let verbose =
             run_args(&["--hand", "234m455p789s1123z", "--draw", "N", "--verbose"]).unwrap();
         assert!(verbose.len() > default.len());
+    }
+
+    fn scenario_path(name: &str) -> String {
+        format!("{}/scenarios/{name}.json", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn run_scenario(name: &str, args: &[&str]) -> String {
+        let mut all = vec![scenario_path(name)];
+        all.extend(args.iter().map(|arg| arg.to_string()));
+        run(all).unwrap()
+    }
+
+    #[test]
+    fn force_fold_uses_the_relative_seat_river_and_reach_for_the_defense() {
+        let output = run_args(&[
+            "--hand",
+            "234m455p789s1123z",
+            "--draw",
+            "N",
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+            "--remaining-tiles",
+            "42",
+            "--force-fold",
+            "--summary-only",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            output,
+            "Summary\n  mode: ForcedFold\n  choice 1: E\n  choice 1 source: DefenseFallback\n  defense kind: Genbutsu"
+        );
+    }
+
+    #[test]
+    fn force_fold_reports_the_open_hand_and_combined_defense_family() {
+        let open_hand = run_scenario("open_hand_defense", &["--force-fold", "--summary-only"]);
+        assert!(
+            open_hand.contains("  choice 1 source: OpenHandDefenseFallback"),
+            "{open_hand}"
+        );
+        assert!(
+            open_hand.contains("  defense category: SafeAgainstAllTargets"),
+            "{open_hand}"
+        );
+
+        let combined = run_scenario(
+            "combined_threat_defense",
+            &["--force-fold", "--summary-only"],
+        );
+        assert!(
+            combined.contains("  choice 1 source: CombinedThreatDefenseFallback"),
+            "{combined}"
+        );
+        assert!(
+            combined.contains("  defense category: SafeAgainstAllThreats"),
+            "{combined}"
+        );
+    }
+
+    #[test]
+    fn force_fold_returns_a_defense_discard_where_the_normal_decision_pushes() {
+        let normal = run_scenario("request_407_safe_tenpai", &["--summary-only"]);
+        assert!(normal.contains("  push/pull: Push"), "{normal}");
+        assert!(normal.contains("  choice 1 source: Reach"), "{normal}");
+
+        let forced = run_scenario(
+            "request_407_safe_tenpai",
+            &["--force-fold", "--summary-only"],
+        );
+        assert_eq!(
+            forced,
+            "Summary\n  mode: ForcedFold\n  choice 1: 5m\n  choice 1 source: OpenHandDefenseFallback\n  defense category: SafeAgainstAllTargets"
+        );
+
+        // 押し引き・リーチ判断は forced fold の出力に出てこない。
+        assert!(!forced.contains("push/pull"), "{forced}");
+        assert!(!forced.contains("reach"), "{forced}");
+    }
+
+    #[test]
+    fn force_fold_is_unavailable_without_a_clear_threat() {
+        let output = run_args(&[
+            "--hand",
+            "234m455p789s1123z",
+            "--draw",
+            "N",
+            "--force-fold",
+            "--summary-only",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            output,
+            "Summary\n  mode: ForcedFold\n  forced fold unavailable: no clear threat"
+        );
+    }
+
+    #[test]
+    fn force_fold_shows_the_existing_defense_candidates_in_the_full_output() {
+        let output = run_args(&[
+            "--hand",
+            "234m455p789s1123z",
+            "--draw",
+            "N",
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+            "--force-fold",
+        ])
+        .unwrap();
+
+        assert!(output.starts_with("Scenario\n"), "{output}");
+        assert!(
+            output.contains("\n\nForced fold\n  mode: ForcedFold\n"),
+            "{output}"
+        );
+        assert!(output.contains("\n\nDefense\n  evaluated\n"), "{output}");
+        assert!(output.contains("\n\nDefense candidates\n"), "{output}");
+        // 通常打牌の診断は構築しない。
+        assert!(!output.contains("Normal discard"), "{output}");
+        assert!(
+            output.ends_with(
+                "Summary\n  mode: ForcedFold\n  choice 1: E\n  choice 1 source: DefenseFallback\n  defense kind: Genbutsu"
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn force_fold_selects_the_same_discard_with_and_without_summary_only() {
+        // --summary-only は候補診断も現物決着後の exact evidence も収集しないが、選択打牌と
+        // defense family / kind は full output と同じ。
+        let reach = [
+            "--hand",
+            "234m455p789s1123z",
+            "--draw",
+            "N",
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+            "--force-fold",
+        ];
+        let mut summary_args = reach.to_vec();
+        summary_args.push("--summary-only");
+        let summary = run_args(&summary_args).unwrap();
+        assert!(run_args(&reach).unwrap().ends_with(&summary), "{summary}");
+
+        for name in [
+            "defense",
+            "open_hand_defense",
+            "combined_threat_defense",
+            "request_407_safe_tenpai",
+        ] {
+            let summary = run_scenario(name, &["--force-fold", "--summary-only"]);
+            let full = run_scenario(name, &["--force-fold"]);
+            assert!(full.ends_with(&summary), "{name}: {full}");
+        }
+    }
+
+    #[test]
+    fn force_fold_does_not_change_the_production_decision() {
+        let args = [
+            "--hand",
+            "234m455p789s1123z",
+            "--draw",
+            "N",
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+        ];
+
+        let before = run_args(&args).unwrap();
+        let mut forced_args = args.to_vec();
+        forced_args.push("--force-fold");
+        let _ = run_args(&forced_args).unwrap();
+        let after = run_args(&args).unwrap();
+
+        assert_eq!(before, after);
     }
 }

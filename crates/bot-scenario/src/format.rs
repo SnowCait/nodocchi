@@ -154,7 +154,7 @@ fn format_history_furiten_after_discard(tenpai: &TenpaiWaitAvailability) -> Stri
     )
 }
 
-fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
+pub(crate) fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
     let context = &scenario.context;
     let mut lines = vec!["Scenario".to_string()];
 
@@ -251,7 +251,7 @@ fn format_scenario(scenario: &Scenario, verbose: bool) -> String {
 }
 
 // 現時点では AI policy の入力ではなく、局面調査のための観測事実として表示するだけ。
-fn format_table_state(context: &GameContext) -> String {
+pub(crate) fn format_table_state(context: &GameContext) -> String {
     let table_state = context.table_state();
     [
         "Table state".to_string(),
@@ -2254,7 +2254,7 @@ fn damaten_value_label(value: DamatenValue) -> String {
     }
 }
 
-fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
+pub(crate) fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
     let mut lines = vec!["Defense".to_string()];
 
     let Some(defense) = defense else {
@@ -2332,7 +2332,9 @@ fn format_defense(defense: Option<&DefenseDecisionDiagnostic>) -> String {
     lines.join("\n")
 }
 
-fn format_defense_candidates(defense: Option<&DefenseDecisionDiagnostic>) -> Option<String> {
+pub(crate) fn format_defense_candidates(
+    defense: Option<&DefenseDecisionDiagnostic>,
+) -> Option<String> {
     let defense = defense?;
     if defense.candidates.is_empty() {
         return None;
@@ -2406,7 +2408,7 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
 // High OpenHandThreat 相手に対する防御 safety。診断が持つ pure helper の結果をそのまま出し、
 // 表示用に安全度を計算し直さない。target がいない局面は候補を出さず、target なしと分かる表示に
 // する。`selected` は production selector が選んだ結果そのもので、表示側で選び直さない。
-fn format_open_hand_defense(open_hand_defense: &OpenHandDefenseDiagnostic) -> String {
+pub(crate) fn format_open_hand_defense(open_hand_defense: &OpenHandDefenseDiagnostic) -> String {
     let mut header = vec![
         "OpenHand defense".to_string(),
         format!("  targets: {}", format_targets(&open_hand_defense.targets)),
@@ -2523,7 +2525,7 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
 // リーチ者と High OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety。診断が持つ
 // pure helper の結果をそのまま出し、表示用に安全度を計算し直さない。複合 threat でない局面は
 // target を持たないので候補も出さない。`selected` は production selector が選んだ結果そのもの。
-fn format_combined_defense(combined_defense: &CombinedDefenseDiagnostic) -> String {
+pub(crate) fn format_combined_defense(combined_defense: &CombinedDefenseDiagnostic) -> String {
     let mut header = vec![
         "Combined defense".to_string(),
         format!(
