@@ -16,7 +16,7 @@
 //! 時だけ legacy safety の順で選び、[`CombinedDefenseDiagnostic`] は同じ evaluation の結果と
 //! evidence を写すだけにする。
 
-use crate::action::{LegalAction, prefer_black_five_for_action};
+use crate::action::{DahaiCandidateOrdering, LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use crate::defense::{
     DahaiRonRiskVector, HonorSafetyRank, OpponentHonorValue, PlayerRonRiskEvidence,
@@ -24,8 +24,8 @@ use crate::defense::{
     combined_targets_dahai_actions_by_ron_risk, honor_dahai_actions_by_safety_with,
     honor_safety_rank, is_genbutsu_for, opponent_honor_value_for_players,
     player_ron_risk_evidence_for_action, select_lexicographic_minimax_action,
-    suited_dahai_actions_by_safety_with, suited_safety_evidence_for_players, suji_safety_rank_for,
-    suji_safety_rank_for_players,
+    sort_by_lexicographic_minimax, suited_dahai_actions_by_safety_with,
+    suited_safety_evidence_for_players, suji_safety_rank_for, suji_safety_rank_for_players,
 };
 use crate::open_hand_defense::{high_open_hand_threat_players, is_ron_safe_for_open_hand_target};
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
@@ -504,30 +504,93 @@ pub(crate) fn evaluate_combined_threat_defense_fallback_action_with_kind<'a>(
     }
 }
 
+// 順序は ranking と共有する extend_with_legacy_combined_defense_candidates で作り、そこから
+// 既存 selector が採用し得る先頭候補を取る。
 fn select_legacy_combined_threat_defense_fallback_action_with_kind<'a>(
     context: &GameContext,
     legal_actions: &'a [LegalAction],
     targets: &[ThreatDefenseTarget],
 ) -> Option<(&'a LegalAction, CombinedDefenseCategory)> {
-    if let Some((action, rank)) =
-        combined_honor_dahai_actions_by_safety(legal_actions, targets, context)
-            .into_iter()
-            .next()
-    {
-        let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, CombinedDefenseCategory::HonorSafety(rank)));
+    let mut ordering = DahaiCandidateOrdering::new(legal_actions);
+    extend_with_legacy_combined_defense_candidates(&mut ordering, context, legal_actions, targets);
+    ordering
+        .into_ordered()
+        .into_iter()
+        .find(|&(_, category)| is_selectable_combined_defense_category(category))
+}
+
+// exact model が unavailable な場合の従来 heuristic 順序。既存 selector と同じく字牌を数牌より
+// 先に置き、各列の並べ方も既存 helper そのままにする。NoSafety の数牌は既存 selector の対象外
+// なので、順位だけ与えて末尾へ置く。
+fn extend_with_legacy_combined_defense_candidates<'a>(
+    ordering: &mut DahaiCandidateOrdering<'a, CombinedDefenseCategory>,
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+) {
+    for (action, rank) in combined_honor_dahai_actions_by_safety(legal_actions, targets, context) {
+        ordering.push(action, CombinedDefenseCategory::HonorSafety(rank));
     }
 
-    if let Some((action, rank)) =
-        combined_suited_dahai_actions_by_safety(legal_actions, targets, context)
-            .into_iter()
-            .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety)
+    let suited = combined_suited_dahai_actions_by_safety(legal_actions, targets, context);
+    for &(action, rank) in suited
+        .iter()
+        .filter(|&&(_, rank)| rank != SuitedSafetyRank::NoSafety)
     {
-        let action = prefer_black_five_for_action(legal_actions, action);
-        return Some((action, CombinedDefenseCategory::SuitedSafety(rank)));
+        ordering.push(action, CombinedDefenseCategory::SuitedSafety(rank));
+    }
+    for (action, rank) in suited {
+        ordering.push(action, CombinedDefenseCategory::SuitedSafety(rank));
+    }
+}
+
+/// production selector が防御 fallback として採用し得る大分類か。
+///
+/// 既存 selector は数牌 safety の [`SuitedSafetyRank::NoSafety`] を採用しないので、ranking では
+/// 末尾の候補として残したうえで選択対象から外す。
+fn is_selectable_combined_defense_category(category: CombinedDefenseCategory) -> bool {
+    category != CombinedDefenseCategory::SuitedSafety(SuitedSafetyRank::NoSafety)
+}
+
+/// 複合 threat 防御候補を production の優先順位どおりに並べる。
+///
+/// 段の順序と各段の並べ方は [`evaluate_combined_threat_defense_fallback_action_with_kind`] と同じ
+/// 既存 helper を使い、forced fold 用の comparator を持たない。`ron_risk_vectors` には production
+/// evaluation が実際に構築した exact evidence をそのまま渡す。`None` の場合、または exact 比較が
+/// 1件でも不能な場合は production と同じく従来 heuristic の順序へ落ちる。
+pub(crate) fn ordered_combined_defense_candidates<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    targets: &[ThreatDefenseTarget],
+    ron_risk_vectors: Option<&[DahaiRonRiskVector<'a>]>,
+) -> Vec<(&'a LegalAction, CombinedDefenseCategory)> {
+    let mut ordering = DahaiCandidateOrdering::new(legal_actions);
+    if targets.is_empty() {
+        return ordering.into_ordered();
     }
 
-    None
+    for action in safe_against_all_threats_dahai_actions(legal_actions, targets, context) {
+        ordering.push(action, CombinedDefenseCategory::SafeAgainstAllThreats);
+    }
+    for action in same_hand_passed_combined_dahai_actions(legal_actions, targets, context) {
+        ordering.push(action, CombinedDefenseCategory::SameHandPassed);
+    }
+
+    match ron_risk_vectors.map(sort_by_lexicographic_minimax) {
+        Some(Ok(sorted)) => {
+            for vector in sorted {
+                ordering.push(vector.action, CombinedDefenseCategory::ExactRonRisk);
+            }
+        }
+        Some(Err(())) | None => extend_with_legacy_combined_defense_candidates(
+            &mut ordering,
+            context,
+            legal_actions,
+            targets,
+        ),
+    }
+
+    ordering.into_ordered()
 }
 
 /// 防御 fallback の action だけを返す薄い wrapper。
@@ -1069,6 +1132,130 @@ mod tests {
             &targets(context),
         )
         .map(|(action, category)| (action.clone(), category))
+    }
+
+    // production evaluation が実際に構築する exact evidence と同じものを ordering へ渡す。
+    fn ordered<'a>(
+        context: &GameContext,
+        legal_actions: &'a [LegalAction],
+    ) -> Vec<(&'a LegalAction, CombinedDefenseCategory)> {
+        let targets = targets(context);
+        let vectors = evaluate_combined_threat_defense_fallback_action_with_kind(
+            context,
+            legal_actions,
+            &targets,
+        )
+        .ron_risk_vectors;
+        ordered_combined_defense_candidates(context, legal_actions, &targets, vectors.as_deref())
+    }
+
+    // ordering の先頭が既存 selector の選択と一致することを確認する。ranking は rank 1 だけを
+    // 別扱いせず、ordering 全体が production selector と同じ並びになっている。
+    fn assert_ordering_leads_with_the_selection(
+        context: &GameContext,
+        legal_actions: &[LegalAction],
+    ) {
+        let ordered = ordered(context, legal_actions);
+        let selectable = ordered
+            .iter()
+            .find(|&&(_, category)| is_selectable_combined_defense_category(category))
+            .map(|&(action, category)| (action.clone(), category));
+
+        assert_eq!(selectable, fallback(context, legal_actions));
+    }
+
+    #[test]
+    fn the_ordering_leads_with_the_production_selection() {
+        // hard-safe / same-hand passed / exact / legacy のどの段で決まる局面でも一致する。
+        let hard_safe = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "2m")
+            .discards_of(OPEN_HAND_TARGET, "2m")
+            .build();
+        let same_hand_passed = exact_combined_context(&[("1m", 1), ("2m", 2)])
+            .discards_of(RIICHI_TARGET, "2m")
+            .same_hand_passed(OPEN_HAND_TARGET, "2m")
+            .build();
+        let exact = exact_combined_context(&[("1m", 1), ("2m", 2)]).build();
+        for context in [hard_safe, same_hand_passed, exact] {
+            assert_ordering_leads_with_the_selection(&context, &[dahai("1m"), dahai("2m")]);
+        }
+
+        assert_ordering_leads_with_the_selection(
+            &suited_safety_context(),
+            &[dahai("4m"), dahai("1s")],
+        );
+
+        // NoSafety しか無い局面では既存 selector が None を返し、ranking では順位を持つ。
+        let no_safety = ContextSpec::combined().build();
+        let legal_actions = vec![dahai("4m"), dahai("5p")];
+        assert_eq!(fallback(&no_safety, &legal_actions), None);
+        assert_eq!(ordered(&no_safety, &legal_actions).len(), 2);
+        assert_ordering_leads_with_the_selection(&no_safety, &legal_actions);
+    }
+
+    #[test]
+    fn the_exact_tier_orders_multiple_targets_by_the_lexicographic_minimax() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2), ("3m", 3)]).build();
+        let legal_actions = vec![dahai("3m"), dahai("1m"), dahai("2m")];
+        let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
+            &context,
+            &legal_actions,
+            &targets(&context),
+        );
+        let vectors = evaluation
+            .ron_risk_vectors
+            .as_deref()
+            .expect("全 target の exact model が使える");
+        assert!(
+            vectors
+                .iter()
+                .all(|vector| vector.player_evidence.len() == 2)
+        );
+
+        let mut expected: Vec<_> = vectors.iter().collect();
+        expected.sort_by(|left, right| {
+            compare_lexicographic_minimax_ron_risk(&left.player_evidence, &right.player_evidence)
+                .expect("exact 比較できる")
+        });
+
+        // 複数 target でも既存の worst-first lexicographic minimax の順序そのまま。
+        assert_eq!(
+            ordered(&context, &legal_actions)
+                .into_iter()
+                .map(|(action, _)| action)
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|vector| vector.action)
+                .collect::<Vec<_>>()
+        );
+        assert_ordering_leads_with_the_selection(&context, &legal_actions);
+    }
+
+    #[test]
+    fn the_ordering_places_hard_safe_before_same_hand_passed_and_exact() {
+        let context = exact_combined_context(&[("1m", 1), ("2m", 2), ("3m", 3)])
+            .discards_of(RIICHI_TARGET, "2m 3m")
+            .discards_of(OPEN_HAND_TARGET, "2m")
+            .same_hand_passed(OPEN_HAND_TARGET, "3m")
+            .build();
+        let legal_actions = vec![dahai("1m"), dahai("2m"), dahai("3m")];
+
+        assert_eq!(
+            ordered(&context, &legal_actions)
+                .into_iter()
+                .map(|(action, category)| (action.clone(), category))
+                .collect::<Vec<_>>(),
+            vec![
+                (dahai("2m"), CombinedDefenseCategory::SafeAgainstAllThreats),
+                (dahai("3m"), CombinedDefenseCategory::SameHandPassed),
+                (
+                    dahai("1m"),
+                    CombinedDefenseCategory::SuitedSafety(SuitedSafetyRank::NoSafety)
+                ),
+            ]
+        );
+        assert_ordering_leads_with_the_selection(&context, &legal_actions);
     }
 
     // ---- target の決定 ----

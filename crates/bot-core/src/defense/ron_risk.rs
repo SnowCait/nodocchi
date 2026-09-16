@@ -223,8 +223,8 @@ pub fn compare_lexicographic_minimax_ron_risk(
         return None;
     }
 
-    let left = worst_first(left)?;
-    let right = worst_first(right)?;
+    let left = worst_first_ron_risk_evidence(left)?;
+    let right = worst_first_ron_risk_evidence(right)?;
     for (left, right) in left.into_iter().zip(right) {
         let ordering = left.evidence.compare_ratio(&right.evidence)?;
         if ordering != Ordering::Equal {
@@ -249,7 +249,13 @@ fn player_mask(evidence: &[PlayerRonRiskEvidence]) -> Option<u8> {
     Some(mask)
 }
 
-fn worst_first(evidence: &[PlayerRonRiskEvidence]) -> Option<Vec<&PlayerRonRiskEvidence>> {
+/// player 別 evidence を production comparator と同じ worst-first 順へ並べ替える。
+///
+/// [`compare_lexicographic_minimax_ron_risk`] が辞書順比較の前に使う並べ替えそのもので、
+/// 診断表示もこの順序を共有する。1件でも比較不能なら `None`。
+pub fn worst_first_ron_risk_evidence(
+    evidence: &[PlayerRonRiskEvidence],
+) -> Option<Vec<&PlayerRonRiskEvidence>> {
     let mut sorted: Vec<_> = evidence.iter().collect();
     for candidate in &sorted {
         if candidate.evidence.compare_ratio(&candidate.evidence) != Some(Ordering::Equal) {

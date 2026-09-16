@@ -238,3 +238,24 @@ exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、�
 ## fallback と source of truth
 
 selection は production selector が source of truth です。diagnostics は同じ selector の結果を `selected` として表示し、`act()` と `diagnose()` で別の防御ロジックを持ちません。リーチ者ごとの exact evidence も、選択に使ったものと同じ evaluation を表示します。`Push` では通常打牌の優先順を変えず、`Fold` のときだけ該当 threat 用 fallback を先に試します。
+
+## 防御候補の ordering
+
+選択だけでなく、**全合法 Dahai を production の優先順位どおりに並べた ordering** も同じ selector の実装から作ります。Riichi / OpenHand / Combined のいずれも、段の順序 (category precedence)・exact `R/T` comparator・複数 target の worst-first lexicographic minimax・exact unavailable 時の heuristic 順序・tie-break・合法 action 順を既存 selector と共有し、ordering 用の comparator を別に持ちません。production selection はこの ordering の先頭 (既存 selector が採用し得る最初の候補) と一致します。
+
+赤5 / 黒5 は別順位に並べず、既存 selection と同じ黒5優先の正規化で牌種ごとに1候補として扱います。数牌 safety の `NoSafety` は既存 selector が採用しないので、ordering では末尾に順位だけ持たせて選択対象から外します。
+
+ordering を観察する入口は [`--force-fold`](../bot-scenario.md#--force-fold) の diagnostic で、production の防御判断は変わりません。
+
+### 0-risk candidate の根拠
+
+「ロンされない」と言える候補は、表示上の percentage ではなく既存の確定 fact / integer evidence で決めます。根拠は2種類あり、混ぜません。
+
+- **hard-safe**: 既存 policy 上、全 defense target からロンされないと確定している候補。Riichi Defense の全リーチ者共通 [Genbutsu](#genbutsu)、OpenHand Defense の `SafeAgainstAllTargets`、Combined Defense の `SafeAgainstAllThreats`。
+- **exact model の `R == 0`**: hard-safe ではないが、exact evidence が利用可能で対象となる全 target について `ron_capable_weight == 0` の候補。単独 target ではその player の `R == 0`、複数 target では全 player の `R == 0` だけが該当し、一部 target だけ `R == 0` の候補は 0-risk ではありません。
+
+判定は必ず integer evidence の `R == 0` で行います。`R = 1` / `T = 50000` のように表示が `0.00%` でも `R > 0` なので 0-risk ではありません。
+
+3枚以上見えている字牌 (`HonorSafetyRank::ThreeOrMoreVisible`) は [HonorSafety](#honorsafety) の heuristic safety です。exact model が利用可能で実際に `R == 0` なら 0-risk、`R > 0` なら通常候補で、exact model が使えない場合は heuristic のまま安全確定とは推測しません。
+
+exact evidence が利用できるかどうかは production evaluation に従います。Riichi Defense は共通現物で決着した局面でも診断向けに exact candidate evidence を収集しますが、OpenHand / Combined Defense が hard-safe や same-hand passed で決着した局面では production evaluation が exact model を構築しないので、その局面の候補は exact unavailable として扱い、存在しない percentage を作りません ([exact model が使えない場合](#exact-model-が使えない場合))。

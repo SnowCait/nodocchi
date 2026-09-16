@@ -107,10 +107,11 @@ pub use defense::{
     suji_safety_rank_for_all_reached, suji_safety_rank_for_any_reached,
     suji_safety_rank_for_players, tanki_remaining_candidates,
     tanki_remaining_candidates_for_player, visible_count_of, wall_rank, wall_tile_types_by_rank,
+    worst_first_ron_risk_evidence,
 };
 pub use discard_selection::select_discard_action;
 pub use forced_fold::{
-    ForcedFoldDefenseKind, ForcedFoldDiagnostic, ForcedFoldDiagnosticScope, ForcedFoldUnavailable,
+    ForcedFoldDefenseKind, ForcedFoldDiagnostic, ForcedFoldRankedCandidate, ForcedFoldUnavailable,
     evaluate_forced_fold,
 };
 pub use iishanten_continuation_depth_comparison::{

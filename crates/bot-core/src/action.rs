@@ -58,6 +58,56 @@ pub(crate) fn prefer_black_five_for_action<'a>(
     preferred_dahai_action_for_type(legal_actions, tile.tile_type()).unwrap_or(chosen)
 }
 
+/// 合法 Dahai を牌種ごとに1件だけ残して順序付きに積む collector。
+///
+/// 防御 selector は牌種を決めたあと [`prefer_black_five_for_action`] で物理牌を黒牌へ正規化する。
+/// 同じ規則で牌種順の ordering を作るために、押した action を黒牌へ正規化し、既に積んだ牌種は
+/// 捨てる。赤5 / 黒5 を別順位に並べない。
+#[derive(Debug)]
+pub(crate) struct DahaiCandidateOrdering<'a, K> {
+    legal_actions: &'a [LegalAction],
+    ordered: Vec<(&'a LegalAction, K)>,
+    pushed: [bool; TileType::COUNT],
+}
+
+impl<'a, K> DahaiCandidateOrdering<'a, K> {
+    pub(crate) fn new(legal_actions: &'a [LegalAction]) -> Self {
+        Self {
+            legal_actions,
+            ordered: Vec::new(),
+            pushed: [false; TileType::COUNT],
+        }
+    }
+
+    /// まだ積んでいない牌種の Dahai なら、黒牌へ正規化して末尾へ積む。
+    pub(crate) fn push(&mut self, action: &'a LegalAction, kind: K) {
+        let LegalAction::Dahai { tile } = action else {
+            return;
+        };
+        let index = tile.tile_type().index();
+        if self.pushed[index] {
+            return;
+        }
+        self.pushed[index] = true;
+        self.ordered.push((
+            prefer_black_five_for_action(self.legal_actions, action),
+            kind,
+        ));
+    }
+
+    /// `action` の牌種を既に積んでいるか。
+    pub(crate) fn contains_tile_type_of(&self, action: &LegalAction) -> bool {
+        let LegalAction::Dahai { tile } = action else {
+            return false;
+        };
+        self.pushed[tile.tile_type().index()]
+    }
+
+    pub(crate) fn into_ordered(self) -> Vec<(&'a LegalAction, K)> {
+        self.ordered
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

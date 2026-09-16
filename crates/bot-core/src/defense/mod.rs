@@ -12,7 +12,7 @@ mod wall;
 #[cfg(test)]
 mod tests;
 
-use crate::action::{LegalAction, prefer_black_five_for_action};
+use crate::action::{DahaiCandidateOrdering, LegalAction, prefer_black_five_for_action};
 use crate::context::GameContext;
 use bot_logic::TileType;
 
@@ -46,7 +46,9 @@ pub(crate) use ron_risk::{
     open_hand_targets_dahai_actions_by_ron_risk, player_ron_risk_evidence_for_action,
     reached_opponents_dahai_actions_by_ron_risk,
 };
-pub use ron_risk::{PlayerRonRiskEvidence, compare_lexicographic_minimax_ron_risk};
+pub use ron_risk::{
+    PlayerRonRiskEvidence, compare_lexicographic_minimax_ron_risk, worst_first_ron_risk_evidence,
+};
 pub use suited::{
     SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,
     suited_dahai_actions_by_safety, suited_dahai_actions_by_safety_with,
@@ -163,60 +165,159 @@ pub(crate) fn evaluate_defense_fallback_action_with_kind<'a>(
 pub(crate) fn select_lexicographic_minimax_action<'a>(
     vectors: &[DahaiRonRiskVector<'a>],
 ) -> Result<Option<&'a LegalAction>, ()> {
-    let Some(mut chosen) = vectors.first() else {
-        return Ok(None);
-    };
-    for candidate in &vectors[1..] {
-        match compare_lexicographic_minimax_ron_risk(
-            &candidate.player_evidence,
-            &chosen.player_evidence,
-        ) {
-            Some(std::cmp::Ordering::Less) => chosen = candidate,
-            Some(_) => {}
-            None => return Err(()),
+    Ok(sort_by_lexicographic_minimax(vectors)?
+        .first()
+        .map(|vector| vector.action))
+}
+
+/// risk vector 全件を worst-first lexicographic minimax の安全な順に並べる。
+///
+/// 比較は [`compare_lexicographic_minimax_ron_risk`] だけを使い、同値は元順序を保つ。1件でも
+/// 比較不能なら `Err(())` で、選択と ranking を同じ comparator で揃えるためどちらも exact を
+/// 使わない判断へ倒す。
+pub(crate) fn sort_by_lexicographic_minimax<'b, 'a>(
+    vectors: &'b [DahaiRonRiskVector<'a>],
+) -> Result<Vec<&'b DahaiRonRiskVector<'a>>, ()> {
+    let mut sorted: Vec<_> = vectors.iter().collect();
+    // 合法 Dahai は最大14件で、比較不能を潰さずに伝播させたいので fallible な挿入 sort にする。
+    for index in 1..sorted.len() {
+        let mut current = index;
+        while current > 0 {
+            let ordering = compare_lexicographic_minimax_ron_risk(
+                &sorted[current].player_evidence,
+                &sorted[current - 1].player_evidence,
+            )
+            .ok_or(())?;
+            if ordering != std::cmp::Ordering::Less {
+                break;
+            }
+            sorted.swap(current, current - 1);
+            current -= 1;
         }
     }
-    Ok(Some(chosen.action))
+    Ok(sorted)
+}
+
+/// リーチ者向け防御候補を production の優先順位どおりに並べる。
+///
+/// 段の順序と各段の並べ方は [`evaluate_defense_fallback_action_with_kind`] と同じ既存 helper を
+/// 使い、forced fold 用の comparator を持たない。`ron_risk_vectors` には production evaluation が
+/// 実際に構築した exact evidence をそのまま渡す。`None` の場合、または exact 比較が1件でも
+/// 不能な場合は production と同じく従来 heuristic の順序へ落ちる。
+///
+/// 選択対象にならない [`SuitedSafetyRank::NoSafety`] の数牌も、順位を持つ候補として末尾に残す。
+pub(crate) fn ordered_defense_fallback_candidates<'a>(
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+    ron_risk_vectors: Option<&[DahaiRonRiskVector<'a>]>,
+) -> Vec<(&'a LegalAction, DefenseFallbackKind)> {
+    let mut ordering = DahaiCandidateOrdering::new(legal_actions);
+    for action in genbutsu_dahai_actions_for_all_reached(legal_actions, context) {
+        ordering.push(action, DefenseFallbackKind::Genbutsu);
+    }
+
+    match ron_risk_vectors.map(sort_by_lexicographic_minimax) {
+        Some(Ok(sorted)) => {
+            for vector in sorted {
+                ordering.push(vector.action, DefenseFallbackKind::ExactRonRisk);
+            }
+        }
+        Some(Err(())) | None => {
+            extend_with_legacy_defense_fallback_candidates(&mut ordering, context, legal_actions);
+        }
+    }
+
+    ordering.into_ordered()
+}
+
+/// production selector が防御 fallback として採用し得る種別か。
+///
+/// 既存 selector は数牌 safety の [`SuitedSafetyRank::NoSafety`] を採用しないので、ranking では
+/// 末尾の候補として残したうえで選択対象から外す。
+fn is_selectable_defense_fallback_kind(kind: DefenseFallbackKind) -> bool {
+    kind != DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::NoSafety)
 }
 
 // 1人でも exact model が unavailable な場合の従来 selection。
+//
+// 順序は ranking と共有する extend_with_legacy_defense_fallback_candidates で作り、そこから
+// 既存 selector が採用し得る先頭候補を取る。
 fn select_legacy_defense_fallback_action_with_kind<'a>(
     context: &GameContext,
     legal_actions: &'a [LegalAction],
 ) -> Option<(&'a LegalAction, DefenseFallbackKind)> {
-    if context.any_opponent_reached() {
-        let honor = honor_dahai_actions_by_safety(legal_actions, context)
-            .into_iter()
-            .next();
-        let suited = suited_dahai_actions_by_safety(legal_actions, context)
-            .into_iter()
-            .find(|(_, rank)| *rank != SuitedSafetyRank::NoSafety);
+    let mut ordering = DahaiCandidateOrdering::new(legal_actions);
+    extend_with_legacy_defense_fallback_candidates(&mut ordering, context, legal_actions);
+    ordering
+        .into_ordered()
+        .into_iter()
+        .find(|&(_, kind)| is_selectable_defense_fallback_kind(kind))
+}
 
-        if let (Some((honor_action, honor_rank)), Some((suited_action, suited_rank))) =
-            (honor, suited)
-            && let LegalAction::Dahai { tile: honor_tile } = honor_action
-            && suited_safety_outweighs_honor(
-                honor_rank,
-                opponent_honor_value_for_reached(honor_tile.tile_type(), context),
-                suited_rank,
-            )
-        {
-            let action = prefer_black_five_for_action(legal_actions, suited_action);
-            return Some((action, DefenseFallbackKind::SuitedSafety(suited_rank)));
-        }
+// exact model が unavailable な場合の従来 heuristic 順序。
+//
+// 字牌順は honor_dahai_actions_by_safety、数牌順は suited_dahai_actions_by_safety そのままで、
+// 両者の横断比較も既存の suited_safety_outweighs_honor だけを使う。両列の先頭同士に同じ限定的
+// 比較を繰り返し適用するので、先頭候補は既存 selection と一致する。NoSafety の数牌は既存
+// selector の対象外なので、順位だけ与えて末尾へ置く。
+fn extend_with_legacy_defense_fallback_candidates<'a>(
+    ordering: &mut DahaiCandidateOrdering<'a, DefenseFallbackKind>,
+    context: &GameContext,
+    legal_actions: &'a [LegalAction],
+) {
+    if !context.any_opponent_reached() {
+        return;
+    }
 
-        if let Some((action, rank)) = honor {
-            let action = prefer_black_five_for_action(legal_actions, action);
-            return Some((action, DefenseFallbackKind::HonorSafety(rank)));
-        }
+    let mut honor = honor_dahai_actions_by_safety(legal_actions, context)
+        .into_iter()
+        .filter(|&(action, _)| !ordering.contains_tile_type_of(action))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .peekable();
+    let suited: Vec<_> = suited_dahai_actions_by_safety(legal_actions, context)
+        .into_iter()
+        .filter(|&(action, _)| !ordering.contains_tile_type_of(action))
+        .collect();
+    let mut safe_suited = suited
+        .iter()
+        .copied()
+        .filter(|&(_, rank)| rank != SuitedSafetyRank::NoSafety)
+        .peekable();
 
-        if let Some((action, rank)) = suited {
-            let action = prefer_black_five_for_action(legal_actions, action);
-            return Some((action, DefenseFallbackKind::SuitedSafety(rank)));
+    loop {
+        let outweighed = match (honor.peek(), safe_suited.peek()) {
+            (Some(&(honor_action, honor_rank)), Some(&(_, suited_rank))) => {
+                let LegalAction::Dahai { tile: honor_tile } = honor_action else {
+                    unreachable!("字牌候補は Dahai だけ")
+                };
+                suited_safety_outweighs_honor(
+                    honor_rank,
+                    opponent_honor_value_for_reached(honor_tile.tile_type(), context),
+                    suited_rank,
+                )
+            }
+            _ => false,
+        };
+
+        if outweighed || honor.peek().is_none() {
+            match safe_suited.next() {
+                Some((action, rank)) => {
+                    ordering.push(action, DefenseFallbackKind::SuitedSafety(rank))
+                }
+                None => break,
+            }
+        } else {
+            let Some((action, rank)) = honor.next() else {
+                break;
+            };
+            ordering.push(action, DefenseFallbackKind::HonorSafety(rank));
         }
     }
 
-    None
+    for (action, rank) in suited {
+        ordering.push(action, DefenseFallbackKind::SuitedSafety(rank));
+    }
 }
 
 // 防御 fallback の action だけを返す薄い wrapper。
