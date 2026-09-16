@@ -2,6 +2,7 @@ use super::*;
 
 use crate::agent::Agent;
 use crate::agents::ShantenAgent;
+use crate::defense::select_genbutsu_fallback_action;
 use crate::meld::{Meld, MeldKind};
 use crate::open_hand_defense::high_open_hand_threat_players;
 use crate::push_pull::{PushPullMode, decide_push_pull, push_pull_inputs_from_context};
@@ -94,21 +95,41 @@ fn open_hand_actions() -> Vec<LegalAction> {
 }
 
 // forced fold の選択が、同じ局面で既存 evaluate_fold_defense() が選ぶものと一致することを
-// 確認する共通 helper。
+// 確認する共通 helper。どちらの scope でも同じ選択になることも合わせて確認する。
 fn assert_matches_fold_defense(context: &GameContext, actions: &[LegalAction]) {
     let inputs = push_pull_inputs_from_context(context, actions);
     let expected = evaluate_fold_defense(context, actions, &inputs, false);
     let expected = expected.selected().expect("既存 Fold defense が打牌を選ぶ");
-
-    let forced = evaluate_forced_fold(context, actions).expect("forced fold が打牌を選ぶ");
-
-    assert_eq!(&forced.selected_action, expected.action);
     let expected_kind = match expected.kind {
         FoldDefenseKind::Reach(kind) => ForcedFoldDefenseKind::Reach(kind),
         FoldDefenseKind::OpenHand(category) => ForcedFoldDefenseKind::OpenHand(category),
         FoldDefenseKind::Combined(category) => ForcedFoldDefenseKind::Combined(category),
     };
-    assert_eq!(forced.defense_kind, expected_kind);
+
+    for scope in [
+        ForcedFoldDiagnosticScope::SelectionOnly,
+        ForcedFoldDiagnosticScope::Detailed,
+    ] {
+        let forced =
+            evaluate_forced_fold(context, actions, scope).expect("forced fold が打牌を選ぶ");
+
+        assert_eq!(&forced.selected_action, expected.action, "{scope:?}");
+        assert_eq!(forced.defense_kind, expected_kind, "{scope:?}");
+    }
+}
+
+fn detailed(
+    context: &GameContext,
+    actions: &[LegalAction],
+) -> Result<ForcedFoldDiagnostic, ForcedFoldUnavailable> {
+    evaluate_forced_fold(context, actions, ForcedFoldDiagnosticScope::Detailed)
+}
+
+fn selection_only(
+    context: &GameContext,
+    actions: &[LegalAction],
+) -> Result<ForcedFoldDiagnostic, ForcedFoldUnavailable> {
+    evaluate_forced_fold(context, actions, ForcedFoldDiagnosticScope::SelectionOnly)
 }
 
 #[test]
@@ -116,7 +137,7 @@ fn routes_a_reached_opponent_to_reach_defense() {
     let context = fold_under_reach_context();
     let actions = fold_actions();
 
-    let forced = evaluate_forced_fold(&context, &actions).expect("リーチ者向け防御が選ばれる");
+    let forced = detailed(&context, &actions).expect("リーチ者向け防御が選ばれる");
 
     assert_eq!(forced.selected_action, dahai(89));
     assert_eq!(
@@ -140,7 +161,7 @@ fn routes_a_high_open_hand_to_open_hand_defense() {
         vec![2]
     );
 
-    let forced = evaluate_forced_fold(&context, &actions).expect("OpenHand 向け防御が選ばれる");
+    let forced = detailed(&context, &actions).expect("OpenHand 向け防御が選ばれる");
 
     assert_eq!(forced.selected_action, dahai(32));
     assert_eq!(
@@ -158,7 +179,7 @@ fn routes_combined_threats_to_combined_defense() {
     let context = open_hand_context([false, true, false, false]);
     let actions = open_hand_actions();
 
-    let forced = evaluate_forced_fold(&context, &actions).expect("複合 threat 向け防御が選ばれる");
+    let forced = detailed(&context, &actions).expect("複合 threat 向け防御が選ばれる");
 
     assert_eq!(forced.selected_action, dahai(32));
     assert_eq!(
@@ -181,7 +202,11 @@ fn is_unavailable_without_a_clear_threat() {
     assert!(!has_clear_threat(&inputs));
 
     assert_eq!(
-        evaluate_forced_fold(&context, &actions),
+        detailed(&context, &actions),
+        Err(ForcedFoldUnavailable::NoClearThreat)
+    );
+    assert_eq!(
+        selection_only(&context, &actions),
         Err(ForcedFoldUnavailable::NoClearThreat)
     );
 }
@@ -195,7 +220,7 @@ fn is_unavailable_without_a_defense_selection() {
     assert!(has_clear_threat(&inputs));
 
     assert_eq!(
-        evaluate_forced_fold(&context, &actions),
+        detailed(&context, &actions),
         Err(ForcedFoldUnavailable::NoDefenseSelection)
     );
 }
@@ -207,7 +232,7 @@ fn is_unavailable_when_the_routed_defense_cannot_select_a_tile() {
     let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
 
     assert_eq!(
-        evaluate_forced_fold(&context, &actions),
+        detailed(&context, &actions),
         Err(ForcedFoldUnavailable::NoDefenseSelection)
     );
 }
@@ -231,7 +256,13 @@ fn does_not_change_the_production_decision() {
     let before = agent.act(&context, &actions);
     let before_diagnostic = ShantenAgent::diagnose(&context, &actions);
 
-    let forced = evaluate_forced_fold(&context, &actions).expect("forced fold が打牌を選ぶ");
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+    let forced_selection_only =
+        selection_only(&context, &actions).expect("forced fold が打牌を選ぶ");
+    assert_eq!(
+        forced.selected_action,
+        forced_selection_only.selected_action
+    );
 
     let after = agent.act(&context, &actions);
     let after_diagnostic = ShantenAgent::diagnose(&context, &actions);
@@ -240,4 +271,70 @@ fn does_not_change_the_production_decision() {
     assert_eq!(before_diagnostic, after_diagnostic);
     assert_eq!(after_diagnostic.selected_action, after);
     assert_ne!(after_diagnostic.selected_action, forced.selected_action);
+}
+
+#[test]
+fn both_scopes_select_the_same_discard_and_kind() {
+    // Reach / OpenHand / 複合 threat のどの routing でも、scope は選択結果を変えない。
+    for (context, actions) in [
+        (fold_under_reach_context(), fold_actions()),
+        (open_hand_context([false; 4]), open_hand_actions()),
+        (
+            open_hand_context([false, true, false, false]),
+            open_hand_actions(),
+        ),
+    ] {
+        let detailed = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+        let selection_only = selection_only(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+        assert_eq!(detailed.selected_action, selection_only.selected_action);
+        assert_eq!(detailed.defense_kind, selection_only.defense_kind);
+    }
+}
+
+#[test]
+fn the_selection_only_scope_skips_the_candidate_diagnostics() {
+    for (context, actions) in [
+        (fold_under_reach_context(), fold_actions()),
+        (open_hand_context([false; 4]), open_hand_actions()),
+        (
+            open_hand_context([false, true, false, false]),
+            open_hand_actions(),
+        ),
+    ] {
+        let selection_only = selection_only(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+        assert!(selection_only.defense.is_none());
+        assert!(selection_only.open_hand_defense.is_none());
+        assert!(selection_only.combined_defense.is_none());
+    }
+}
+
+#[test]
+fn the_selection_only_scope_does_not_request_exact_evidence_after_a_genbutsu() {
+    let context = fold_under_reach_context();
+    let actions = fold_actions();
+    let inputs = push_pull_inputs_from_context(&context, &actions);
+
+    // 共通現物があるので、既存 evaluator は exact model を走らせず即 return できる局面。
+    assert!(select_genbutsu_fallback_action(&context, &actions).is_some());
+    let FoldDefenseEvaluation::Reach(evaluation) =
+        evaluate_fold_defense(&context, &actions, &inputs, false)
+    else {
+        panic!("リーチ者向け防御へ routing される");
+    };
+    assert!(evaluation.ron_risk_vectors.is_none());
+
+    let selection_only = selection_only(&context, &actions).expect("forced fold が打牌を選ぶ");
+    assert!(selection_only.defense.is_none());
+
+    // 詳細診断を要求した場合だけ、現物で決着した後も exact candidate evidence を収集する。
+    let detailed = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+    let defense = detailed.defense.expect("防御診断を構築する");
+    let selected = defense.selected.expect("選択した打牌の診断を持つ");
+    assert!(selected.selected_ron_risk_evidence().is_some());
+    assert!(!defense.candidates.is_empty());
+
+    assert_eq!(detailed.selected_action, selection_only.selected_action);
+    assert_eq!(detailed.defense_kind, selection_only.defense_kind);
 }

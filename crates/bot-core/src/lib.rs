@@ -110,7 +110,8 @@ pub use defense::{
 };
 pub use discard_selection::select_discard_action;
 pub use forced_fold::{
-    ForcedFoldDefenseKind, ForcedFoldDiagnostic, ForcedFoldUnavailable, evaluate_forced_fold,
+    ForcedFoldDefenseKind, ForcedFoldDiagnostic, ForcedFoldDiagnosticScope, ForcedFoldUnavailable,
+    evaluate_forced_fold,
 };
 pub use iishanten_continuation_depth_comparison::{
     CandidateBreakdown, FirstDrawContribution, IishantenContinuationDepth,

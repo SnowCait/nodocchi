@@ -323,6 +323,8 @@ Summary
 
 `--summary-only` を付けない通常出力では、既存の `Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense` section をそのまま表示するので、候補ごとの safety も確認できます。
 
+`--summary-only` は選択打牌と defense family しか表示しないため、候補ごとの診断を構築せず、共通現物で決着した場合の exact ron-risk の候補材料も収集しません。選択打牌と defense kind / category は通常出力と同じです。
+
 #### unavailable になる場合
 
 リーチ者も High OpenHandThreat の相手もいない局面では、防御対象がないので `unavailable` になります。通常打牌を「ベタ降り最善打牌」として返すことはありません。

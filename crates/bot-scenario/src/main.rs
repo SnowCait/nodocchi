@@ -26,8 +26,8 @@ mod two_shanten_full_parallel_regression;
 use std::process::ExitCode;
 
 use bot_core::{
-    DiagnosticOptions, ShantenAgent, evaluate_forced_fold, measure_two_shanten_progress_self_tsumo,
-    measure_two_shanten_self_tsumo,
+    DiagnosticOptions, ForcedFoldDiagnosticScope, ShantenAgent, evaluate_forced_fold,
+    measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
 };
 
 use crate::benchmark::run_capture_benchmark;
@@ -77,8 +77,16 @@ where
 
     // ベタ降り仮定の評価は通常打牌選択・押し引き・リーチ判断を一切走らせず、既存 Fold
     // defense をそのまま実行する。production の判断は変わらない。
+    //
+    // 候補評価を表示しない --summary-only では、選択に不要な候補診断も、現物で決着した場合の
+    // exact ron-risk evidence も収集しない。選択打牌と defense family はどちらでも同じ。
     if args.force_fold {
-        let result = evaluate_forced_fold(&scenario.context, &scenario.legal_actions);
+        let scope = if args.summary_only {
+            ForcedFoldDiagnosticScope::SelectionOnly
+        } else {
+            ForcedFoldDiagnosticScope::Detailed
+        };
+        let result = evaluate_forced_fold(&scenario.context, &scenario.legal_actions, scope);
         let output = if args.summary_only {
             format_forced_fold_summary(&result)
         } else {
@@ -1144,6 +1152,38 @@ mod tests {
             ),
             "{output}"
         );
+    }
+
+    #[test]
+    fn force_fold_selects_the_same_discard_with_and_without_summary_only() {
+        // --summary-only は候補診断も現物決着後の exact evidence も収集しないが、選択打牌と
+        // defense family / kind は full output と同じ。
+        let reach = [
+            "--hand",
+            "234m455p789s1123z",
+            "--draw",
+            "N",
+            "--discards-shimocha",
+            "1m 7p 4s 7p E",
+            "--riichi-shimocha",
+            "4",
+            "--force-fold",
+        ];
+        let mut summary_args = reach.to_vec();
+        summary_args.push("--summary-only");
+        let summary = run_args(&summary_args).unwrap();
+        assert!(run_args(&reach).unwrap().ends_with(&summary), "{summary}");
+
+        for name in [
+            "defense",
+            "open_hand_defense",
+            "combined_threat_defense",
+            "request_407_safe_tenpai",
+        ] {
+            let summary = run_scenario(name, &["--force-fold", "--summary-only"]);
+            let full = run_scenario(name, &["--force-fold"]);
+            assert!(full.ends_with(&summary), "{name}: {full}");
+        }
     }
 
     #[test]
