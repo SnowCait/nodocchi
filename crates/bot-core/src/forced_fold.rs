@@ -6,15 +6,33 @@
 //! routing も防御選択も既存 [`evaluate_fold_defense`] をそのまま source of truth にし、threat の
 //! 有無も既存 [`has_clear_threat`] と同じ classification を使う。forced fold のために防御ロジックも
 //! High 条件も書き直さない。
+//!
+//! 候補 ranking も既存 production defense policy の ordering をそのまま使い、選択・ranking・
+//! 詳細診断は1回の evaluation から得た同じ candidate evidence を共有する。
+
+mod ranking;
 
 use crate::action::LegalAction;
-use crate::combined_defense::{CombinedDefenseCategory, CombinedDefenseDiagnostic};
+use crate::combined_defense::{
+    CombinedDefenseCategory, CombinedDefenseDiagnostic,
+    collect_combined_candidate_ron_risk_evidence, combined_threat_defense_targets,
+    ordered_combined_defense_candidates,
+};
 use crate::context::GameContext;
-use crate::defense::{DefenseDecisionDiagnostic, DefenseFallbackKind};
+use crate::defense::{
+    DahaiRonRiskVector, DefenseDecisionDiagnostic, DefenseFallbackKind,
+    ordered_defense_fallback_candidates, player_ron_risk_evidence_for_action,
+};
 use crate::fold_defense::{FoldDefenseEvaluation, FoldDefenseKind, evaluate_fold_defense};
-use crate::open_hand_defense::{OpenHandDefenseCategory, OpenHandDefenseDiagnostic};
+use crate::open_hand_defense::{
+    OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
+    collect_open_hand_candidate_ron_risk_evidence, high_open_hand_threat_players,
+    ordered_open_hand_defense_candidates,
+};
 use crate::push_pull::{has_clear_threat, push_pull_inputs_from_threat_facts};
 use crate::threat::player_threat_facts_from_context;
+
+pub use ranking::ForcedFoldRankedCandidate;
 
 /// forced fold が選んだ defense family と、その family 内の選択種別。
 ///
@@ -37,35 +55,20 @@ pub enum ForcedFoldUnavailable {
     NoDefenseSelection,
 }
 
-/// forced fold evaluation で追加構築する解析情報の指定。
-///
-/// 選択結果 (`selected_action` / `defense_kind`) と routing はどちらでも同じで、追加で収集する
-/// 解析情報だけが変わる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForcedFoldDiagnosticScope {
-    /// 選択に必要な評価だけを行う。
-    ///
-    /// 候補診断を構築せず、Reach 防御が共通現物で決着した場合は exact ron-risk の candidate
-    /// evidence も収集しない。既存 evaluator の現物早期 return をそのまま使うだけで、選択の
-    /// semantics は変わらない。
-    SelectionOnly,
-    /// 候補評価まで含む防御診断を構築する。
-    ///
-    /// 共通現物で決着した場合も exact model の candidate evidence を追加収集する。これは既存
-    /// diagnostics 有効時と同じ挙動で、選択結果は変わらない。
-    Detailed,
-}
-
 /// forced fold の評価結果。
 ///
-/// `selected_action` と `defense_kind` は既存 Fold defense evaluator の選択そのもので、候補評価は
-/// 選択に使った同じ evaluation から構築する。診断は
-/// [`ForcedFoldDiagnosticScope::Detailed`] を指定した場合だけ構築し、そのときも防御 family に
+/// `selected_action` と `defense_kind` は既存 Fold defense evaluator の選択そのもので、
+/// `ranked_candidates` と防御診断は選択に使った同じ evaluation から構築する。診断は防御 family に
 /// 対応するものだけが `Some` になる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForcedFoldDiagnostic {
     pub selected_action: LegalAction,
     pub defense_kind: ForcedFoldDefenseKind,
+    /// 全合法 Dahai を production ordering どおりに並べた防御候補。
+    ///
+    /// 先頭が `selected_action` と一致するのは ranking 全体が既存 production selector と同じ
+    /// ordering だからで、rank 1 用の特別処理は持たない。
+    pub ranked_candidates: Vec<ForcedFoldRankedCandidate>,
     pub defense: Option<DefenseDecisionDiagnostic>,
     pub open_hand_defense: Option<OpenHandDefenseDiagnostic>,
     pub combined_defense: Option<CombinedDefenseDiagnostic>,
@@ -76,12 +79,16 @@ pub struct ForcedFoldDiagnostic {
 /// 通常打牌選択・2手先探索・Reach / Damaten・押し引き判定はどれも走らせない。threat facts は
 /// 押し引きが使うものと同じ構築経路から攻撃評価なしで作り、classification を別実装しない。
 ///
-/// `scope` は追加で収集する解析情報だけを決める。選択打牌・defense family・family 内の選択種別は
-/// `scope` によらず同じで、routing も既存 [`evaluate_fold_defense`] のまま変わらない。
+/// 評価は1回だけで、`ranked_candidates` と詳細診断は同じ evaluation の candidate evidence を
+/// 共有する。exact model を ranking 用に二重計算しない。
+///
+/// OpenHand / 複合 threat 防御が hard-safe / same-hand passed で決着した局面では、既存
+/// evaluator が exact model を走らせないまま早期 return する。その場合だけ、選択を変えずに
+/// 診断用の candidate exact evidence を追加収集する。Reach 防御が共通現物で決着した後も exact
+/// candidate evidence を収集するのと同じ考え方で、production selection は変わらない。
 pub fn evaluate_forced_fold(
     context: &GameContext,
     legal_actions: &[LegalAction],
-    scope: ForcedFoldDiagnosticScope,
 ) -> Result<ForcedFoldDiagnostic, ForcedFoldUnavailable> {
     let inputs = push_pull_inputs_from_threat_facts(
         context,
@@ -97,8 +104,7 @@ pub fn evaluate_forced_fold(
         return Err(ForcedFoldUnavailable::NoClearThreat);
     }
 
-    let detailed = scope == ForcedFoldDiagnosticScope::Detailed;
-    let evaluation = evaluate_fold_defense(context, legal_actions, &inputs, detailed);
+    let mut evaluation = evaluate_fold_defense(context, legal_actions, &inputs, true);
     let selection = evaluation
         .selected()
         .ok_or(ForcedFoldUnavailable::NoDefenseSelection)?;
@@ -112,17 +118,20 @@ pub fn evaluate_forced_fold(
     let mut diagnostic = ForcedFoldDiagnostic {
         selected_action: selection.action.clone(),
         defense_kind,
+        ranked_candidates: Vec::new(),
         defense: None,
         open_hand_defense: None,
         combined_defense: None,
     };
 
-    if !detailed {
-        return Ok(diagnostic);
-    }
-
-    match &evaluation {
+    match &mut evaluation {
         FoldDefenseEvaluation::Reach(evaluation) => {
+            let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
+            diagnostic.ranked_candidates = ranked_candidates(
+                ordered_defense_fallback_candidates(context, legal_actions, ron_risk_vectors),
+                ron_risk_vectors,
+                ForcedFoldDefenseKind::Reach,
+            );
             diagnostic.defense = Some(DefenseDecisionDiagnostic::from_evaluation(
                 context,
                 legal_actions,
@@ -130,6 +139,26 @@ pub fn evaluate_forced_fold(
             ));
         }
         FoldDefenseEvaluation::OpenHand(evaluation) => {
+            let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+            // hard-safe / same-hand passed で selection が確定して exact model が走っていない
+            // 場合だけ、診断用の candidate evidence を追加収集する。選択は変わらない。
+            collect_open_hand_candidate_ron_risk_evidence(
+                context,
+                legal_actions,
+                &targets,
+                evaluation,
+            );
+            let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
+            diagnostic.ranked_candidates = ranked_candidates(
+                ordered_open_hand_defense_candidates(
+                    context,
+                    legal_actions,
+                    &targets,
+                    ron_risk_vectors,
+                ),
+                ron_risk_vectors,
+                ForcedFoldDefenseKind::OpenHand,
+            );
             diagnostic.open_hand_defense = Some(OpenHandDefenseDiagnostic::from_evaluation(
                 context,
                 legal_actions,
@@ -138,6 +167,25 @@ pub fn evaluate_forced_fold(
             ));
         }
         FoldDefenseEvaluation::Combined(evaluation) => {
+            let targets =
+                combined_threat_defense_targets(&inputs.player_threats, &inputs.open_hand_threats);
+            collect_combined_candidate_ron_risk_evidence(
+                context,
+                legal_actions,
+                &targets,
+                evaluation,
+            );
+            let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
+            diagnostic.ranked_candidates = ranked_candidates(
+                ordered_combined_defense_candidates(
+                    context,
+                    legal_actions,
+                    &targets,
+                    ron_risk_vectors,
+                ),
+                ron_risk_vectors,
+                ForcedFoldDefenseKind::Combined,
+            );
             diagnostic.combined_defense = Some(CombinedDefenseDiagnostic::from_evaluation(
                 context,
                 legal_actions,
@@ -149,6 +197,26 @@ pub fn evaluate_forced_fold(
     }
 
     Ok(diagnostic)
+}
+
+// production ordering の並びと、同じ evaluation が構築した exact evidence を ranked candidate へ
+// 写す。順序も evidence もここでは作り直さない。
+fn ranked_candidates<K: Copy>(
+    ordered: Vec<(&LegalAction, K)>,
+    ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
+    defense_kind: impl Fn(K) -> ForcedFoldDefenseKind,
+) -> Vec<ForcedFoldRankedCandidate> {
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, (action, kind))| ForcedFoldRankedCandidate {
+            action: action.clone(),
+            rank: index + 1,
+            defense_kind: defense_kind(kind),
+            player_ron_risk_evidence: player_ron_risk_evidence_for_action(ron_risk_vectors, action)
+                .map(<[_]>::to_vec),
+        })
+        .collect()
 }
 
 #[cfg(test)]

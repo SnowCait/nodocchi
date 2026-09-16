@@ -4,6 +4,7 @@ mod diagnostic;
 mod hard_safety;
 mod hidden_hand_states;
 mod honor;
+mod ordering;
 mod selection;
 mod suited;
 mod suji;

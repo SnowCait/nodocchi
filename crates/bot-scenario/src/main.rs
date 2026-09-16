@@ -26,8 +26,8 @@ mod two_shanten_full_parallel_regression;
 use std::process::ExitCode;
 
 use bot_core::{
-    DiagnosticOptions, ForcedFoldDiagnosticScope, ShantenAgent, evaluate_forced_fold,
-    measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
+    DiagnosticOptions, ShantenAgent, evaluate_forced_fold, measure_two_shanten_progress_self_tsumo,
+    measure_two_shanten_self_tsumo,
 };
 
 use crate::benchmark::run_capture_benchmark;
@@ -78,15 +78,10 @@ where
     // ベタ降り仮定の評価は通常打牌選択・押し引き・リーチ判断を一切走らせず、既存 Fold
     // defense をそのまま実行する。production の判断は変わらない。
     //
-    // 候補評価を表示しない --summary-only では、選択に不要な候補診断も、現物で決着した場合の
-    // exact ron-risk evidence も収集しない。選択打牌と defense family はどちらでも同じ。
+    // --summary-only でも同じ評価を行い、Summary の内容と ranked candidates も通常出力と同じ。
+    // 違いは Summary 以外の詳細 section を省くことだけで、候補の risk evaluation は省略しない。
     if args.force_fold {
-        let scope = if args.summary_only {
-            ForcedFoldDiagnosticScope::SelectionOnly
-        } else {
-            ForcedFoldDiagnosticScope::Detailed
-        };
-        let result = evaluate_forced_fold(&scenario.context, &scenario.legal_actions, scope);
+        let result = evaluate_forced_fold(&scenario.context, &scenario.legal_actions);
         let output = if args.summary_only {
             format_forced_fold_summary(&result)
         } else {
@@ -1054,7 +1049,14 @@ mod tests {
 
         assert_eq!(
             output,
-            "Summary\n  mode: ForcedFold\n  choice 1: E\n  choice 1 source: DefenseFallback\n  defense kind: Genbutsu"
+            concat!(
+                "Summary\n  mode: ForcedFold\n  source: DefenseFallback\n",
+                "\n  rank 1: E\n    ron safe: yes\n    reason: Genbutsu\n",
+                "\n  rank 2: S\n    ron safe: no\n    model risk: 1.68%\n",
+                "    evidence: 95487355974 / 5679785375284\n",
+                "\n  rank 3: W\n    ron safe: no\n    model risk: 1.68%\n",
+                "    evidence: 95487355974 / 5679785375284",
+            )
         );
     }
 
@@ -1062,11 +1064,12 @@ mod tests {
     fn force_fold_reports_the_open_hand_and_combined_defense_family() {
         let open_hand = run_scenario("open_hand_defense", &["--force-fold", "--summary-only"]);
         assert!(
-            open_hand.contains("  choice 1 source: OpenHandDefenseFallback"),
+            open_hand.contains("  source: OpenHandDefenseFallback"),
             "{open_hand}"
         );
         assert!(
-            open_hand.contains("  defense category: SafeAgainstAllTargets"),
+            open_hand
+                .contains("  rank 1: 5m\n    ron safe: yes\n    reason: SafeAgainstAllTargets"),
             "{open_hand}"
         );
 
@@ -1075,11 +1078,11 @@ mod tests {
             &["--force-fold", "--summary-only"],
         );
         assert!(
-            combined.contains("  choice 1 source: CombinedThreatDefenseFallback"),
+            combined.contains("  source: CombinedThreatDefenseFallback"),
             "{combined}"
         );
         assert!(
-            combined.contains("  defense category: SafeAgainstAllThreats"),
+            combined.contains("  rank 1: 5m\n    ron safe: yes\n    reason: SafeAgainstAllThreats"),
             "{combined}"
         );
     }
@@ -1096,7 +1099,14 @@ mod tests {
         );
         assert_eq!(
             forced,
-            "Summary\n  mode: ForcedFold\n  choice 1: 5m\n  choice 1 source: OpenHandDefenseFallback\n  defense category: SafeAgainstAllTargets"
+            concat!(
+                "Summary\n  mode: ForcedFold\n  source: OpenHandDefenseFallback\n",
+                "\n  rank 1: 5m\n    ron safe: yes\n    reason: SafeAgainstAllTargets\n",
+                "\n  rank 2: 2m\n    ron safe: no\n    model risk: unavailable\n",
+                "    heuristic: SuitedSafety(Suji)\n",
+                "\n  rank 3: 6m\n    ron safe: no\n    model risk: unavailable\n",
+                "    heuristic: SuitedSafety(HalfSuji)",
+            )
         );
 
         // 押し引き・リーチ判断は forced fold の出力に出てこない。
@@ -1147,17 +1157,22 @@ mod tests {
         // 通常打牌の診断は構築しない。
         assert!(!output.contains("Normal discard"), "{output}");
         assert!(
-            output.ends_with(
-                "Summary\n  mode: ForcedFold\n  choice 1: E\n  choice 1 source: DefenseFallback\n  defense kind: Genbutsu"
-            ),
+            output.ends_with(concat!(
+                "Summary\n  mode: ForcedFold\n  source: DefenseFallback\n",
+                "\n  rank 1: E\n    ron safe: yes\n    reason: Genbutsu\n",
+                "\n  rank 2: S\n    ron safe: no\n    model risk: 1.68%\n",
+                "    evidence: 95487355974 / 5679785375284\n",
+                "\n  rank 3: W\n    ron safe: no\n    model risk: 1.68%\n",
+                "    evidence: 95487355974 / 5679785375284",
+            )),
             "{output}"
         );
     }
 
     #[test]
-    fn force_fold_selects_the_same_discard_with_and_without_summary_only() {
-        // --summary-only は候補診断も現物決着後の exact evidence も収集しないが、選択打牌と
-        // defense family / kind は full output と同じ。
+    fn force_fold_shows_the_same_summary_with_and_without_summary_only() {
+        // --summary-only は Summary 以外の詳細 section を省くだけで、Summary の内容と
+        // ranked candidates は full output と同じ。候補の risk evaluation も省略しない。
         let reach = [
             "--hand",
             "234m455p789s1123z",
@@ -1176,6 +1191,7 @@ mod tests {
 
         for name in [
             "defense",
+            "defense_multi_riichi_double_wind",
             "open_hand_defense",
             "combined_threat_defense",
             "request_407_safe_tenpai",
@@ -1183,6 +1199,59 @@ mod tests {
             let summary = run_scenario(name, &["--force-fold", "--summary-only"]);
             let full = run_scenario(name, &["--force-fold"]);
             assert!(full.ends_with(&summary), "{name}: {full}");
+
+            // 詳細 section だけが summary-only で消える。
+            assert!(summary.starts_with("Summary\n"), "{name}: {summary}");
+            for section in [
+                "\n\nScenario\n",
+                "\n\nForced fold\n",
+                "\n\nDefense\n",
+                "\n\nDefense candidates\n",
+                "\n\nOpenHand defense\n",
+                "\n\nCombined defense\n",
+            ] {
+                assert!(!summary.contains(section), "{name}: {summary}");
+            }
+        }
+    }
+
+    #[test]
+    fn force_fold_ranks_every_candidate_through_the_same_summary_shape() {
+        for name in [
+            "defense",
+            "defense_multi_riichi_double_wind",
+            "open_hand_defense",
+            "combined_threat_defense",
+            "request_407_safe_tenpai",
+        ] {
+            let summary = run_scenario(name, &["--force-fold", "--summary-only"]);
+            let ranks: Vec<_> = summary
+                .lines()
+                .filter(|line| line.starts_with("  rank "))
+                .collect();
+            assert!(!ranks.is_empty(), "{name}: {summary}");
+
+            // 全候補が同じ表示経路を通る。rank 1 だけの別表記を持たない。
+            for rank in &ranks {
+                let (_, action) = rank.split_once(": ").expect("rank 行に action がある");
+                assert!(!action.is_empty(), "{name}: {summary}");
+            }
+            assert_eq!(
+                summary
+                    .lines()
+                    .filter(|line| line.starts_with("    ron safe: "))
+                    .count(),
+                ranks.len(),
+                "{name}: {summary}"
+            );
+
+            // rank 1 は詳細出力の selected action と一致する。
+            let full = run_scenario(name, &["--force-fold"]);
+            let selected = full
+                .lines()
+                .find_map(|line| line.strip_prefix("  selected action: "))
+                .expect("Forced fold section が選択打牌を出す");
+            assert_eq!(ranks[0], format!("  rank 1: {selected}"), "{name}: {full}");
         }
     }
 

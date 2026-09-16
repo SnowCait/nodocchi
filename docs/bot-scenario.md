@@ -32,7 +32,7 @@ cargo run -p bot-scenario -- \
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
-| `--force-fold` | 任意 | 通常の押し引き判断とは無関係に、ベタ降りを仮定した場合の最善防御打牌を表示する。他の診断 option と併用不可 (`--summary-only` / `--verbose` は併用可) |
+| `--force-fold` | 任意 | 通常の押し引き判断とは無関係に、ベタ降りを仮定した場合の防御打牌を production ordering の上位3候補 + 0-risk candidate 全件として表示する。他の診断 option と併用不可 (`--summary-only` / `--verbose` は併用可) |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
@@ -274,15 +274,15 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では 
 
 ### --force-fold
 
-`--force-fold` は、通常の押し引き判断とは無関係に「この局面でベタ降りすると仮定した場合の最善防御打牌」を確認する option です。
+`--force-fold` は、通常の押し引き判断とは無関係に「この局面でベタ降りすると仮定した場合の防御打牌」を確認する option です。防御候補を production と同じ順序でランキングし、上位候補と model risk を並べます。
 
 production bot の判断は変わりません。`ShantenAgent::act()` も `diagnose()` も `--force-fold` の有無で結果が変わらず、この option が `PushPullMode::Fold` を production decision へ注入することもありません。通常診断とは独立した hypothetical evaluation として、既存 Fold defense evaluator を直接実行します。
 
 そのため通常打牌の選択・2手先探索・押し引き判定・Reach / Damaten 判断は走りません。防御 evaluator 自体が必要とする threat facts と exact defense facts は通常どおり使用します。
 
-防御打牌の選択も routing も production の Fold defense と同じもので、`--force-fold` 用の防御ロジックは持ちません。
+防御打牌の選択も routing も candidate ranking も production の Fold defense と同じもので、`--force-fold` 用の防御ロジックや comparator は持ちません。
 
-| 相手の threat | 使用する防御 | `choice 1 source` |
+| 相手の threat | 使用する防御 | `source` |
 | --- | --- | --- |
 | リーチ者のみ | リーチ者向け防御 fallback (共通現物 / exact ron-risk model / 字牌・壁・スジ等) | `DefenseFallback` |
 | High OpenHandThreat の副露相手のみ | OpenHand 防御 fallback | `OpenHandDefenseFallback` |
@@ -306,9 +306,21 @@ cargo run -p bot-scenario -- \
 ```text
 Summary
   mode: ForcedFold
-  choice 1: E
-  choice 1 source: DefenseFallback
-  defense kind: Genbutsu
+  source: DefenseFallback
+
+  rank 1: E
+    ron safe: yes
+    reason: Genbutsu
+
+  rank 2: S
+    ron safe: no
+    model risk: 1.68%
+    evidence: 95487355974 / 5679785375284
+
+  rank 3: W
+    ron safe: no
+    model risk: 1.68%
+    evidence: 95487355974 / 5679785375284
 ```
 
 OpenHand / 複合 threat では、その family の既存 category をそのまま出します。
@@ -316,14 +328,92 @@ OpenHand / 複合 threat では、その family の既存 category をそのま�
 ```text
 Summary
   mode: ForcedFold
-  choice 1: 5m
-  choice 1 source: OpenHandDefenseFallback
-  defense category: SafeAgainstAllTargets
+  source: OpenHandDefenseFallback
+
+  rank 1: 5m
+    ron safe: yes
+    reason: SafeAgainstAllTargets
 ```
 
 `--summary-only` を付けない通常出力では、既存の `Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense` section をそのまま表示するので、候補ごとの safety も確認できます。
 
-`--summary-only` は選択打牌と defense family しか表示しないため、候補ごとの診断を構築せず、共通現物で決着した場合の exact ron-risk の候補材料も収集しません。選択打牌と defense kind / category は通常出力と同じです。
+#### Summary の防御候補 ranking
+
+Summary には production ordering の**上位3候補**と、そこに含まれない **0-risk candidate 全件**を表示します。候補が3件未満なら存在する候補だけ、0-risk candidate が4件以上ある場合は3件を超えてもすべて表示します。
+
+順位は production ordering 上の順位そのままで、0-risk candidate を追加表示するために付け替えません。production ordering が
+
+```text
+1. E
+2. N
+3. 1m
+4. 9p
+5. 7s  <- 0-risk
+```
+
+なら Summary でも `7s` は `rank 5` として出ます。
+
+ranking は既存 production defense policy が source of truth です。Reach / OpenHand / Combined のいずれも category precedence・exact `R/T` comparator・複数 target の worst-first lexicographic minimax・heuristic fallback 順序・tie-break・合法 action 順を既存 selector と共有し、表示側で独自の ranking や risk score を作りません。`rank 1` は `Forced fold` section の `selected action` と一致しますが、これは rank 1 用の特別処理ではなく、ranking 全体が既存 selector と同じ並びであることの現れです。詳しくは [防御候補の ordering](ai/defense.md#防御候補の-ordering) を参照してください。
+
+全候補が同じ表示経路を通ります。
+
+- `ron safe`: 既存 policy 上、全 defense target からロンされないと確定している候補 (hard-safe) だけ `yes`。その場合は `reason` にその根拠 (`Genbutsu` / `SafeAgainstAllTargets` / `SafeAgainstAllThreats`) を出します。
+- `model risk` / `evidence`: hard-safe ではない候補について、exact model が利用可能な場合の `R / T`。単独 target では1行、複数 target では player ごとに出します。
+- `heuristic`: exact model が利用できない候補について、順位を決めた既存 heuristic の根拠。
+
+hard-safe と exact `R == 0` は別の根拠なので、表示で潰しません。
+
+```text
+Summary
+  mode: ForcedFold
+
+  rank 1: E
+    ron safe: yes
+    reason: Genbutsu
+
+  rank 2: N
+    ron safe: no
+    model risk: 0.00%
+    evidence: 0 / 3812
+
+  rank 3: 1m
+    ron safe: no
+    model risk: 2.74%
+    evidence: 104 / 3791
+```
+
+`E` はルール上 hard-safe で、`N` は hard-safe ではないが exact hidden-hand model 上で `R == 0` です。0-risk かどうかは表示上の percentage ではなく integer evidence の `R == 0` で判定するので、`R = 1` / `T = 50000` のように表示が `0.00%` になる候補は 0-risk として扱いません。3枚以上見えた字牌も、それだけでは 0-risk になりません ([0-risk candidate の根拠](ai/defense.md#0-risk-candidate-の根拠))。
+
+複数 target では player ごとの evidence を worst-first で出します。
+
+```text
+  rank 3: 9s
+    ron safe: no
+    model risk:
+      player 1: 8.21% (123 / 1498)
+      player 3: 2.34% (41 / 1750)
+```
+
+percentage は表示専用です。selection / ranking / 0-risk 判定はどれも既存の integer evidence の比較だけを使い、浮動小数点や percentage を comparator に使いません。合計・平均・加重平均・max だけの比較・`1 - Π(1-p)` のような独自 risk score も作りません。
+
+`R/T` は実際の放銃率ではなく、公開情報と整合する structural tenpai hidden-hand states のうちその牌で現在ロン可能な state の比率です ([`R/T` が表すもの](ai/defense.md#rt-が表すもの))。
+
+exact model が利用できない候補には存在しない percentage を作らず、順位を決めた既存 heuristic をそのまま出します。
+
+```text
+  rank 2: N
+    ron safe: no
+    model risk: unavailable
+    heuristic: HonorSafety(ThreeOrMoreVisible)
+```
+
+#### `--summary-only` との関係
+
+`--force-fold --summary-only` は `--force-fold` と**同じ防御評価・同じ ranked candidates・同じ Summary**を出します。違いは表示量だけで、`--summary-only` は `Scenario` / `Table state` / `Forced fold` / `Defense` / `Defense candidates` / `OpenHand defense` / `Combined defense` といった Summary 以外の詳細 section を省きます。
+
+`--summary-only` は計算を省く option ではありません。exact `R == 0` の候補を全件検出するために必要な candidate risk evaluation も、共通現物 / hard-safe / same-hand passed で selection が決着した場合の exact ron-risk evidence の収集も、`--summary-only` でも行います ([防御候補の ordering](ai/defense.md#防御候補の-ordering))。
+
+通常出力でも `--summary-only` でも exact model は1回しか走りません。ranking・Summary・詳細 diagnostics は同じ forced fold evaluation から得た candidate evidence を共有します。
 
 #### unavailable になる場合
 
@@ -412,7 +502,7 @@ inline baseline は `bot-scenario` の入力補助であり、AI 本体が未知
 
 `--summary-only` は Summary section だけを表示します。Summary は「何を選んだか」と「次点がなぜ負けたか」を短く確認するためのもので、候補ごとの metric 一覧は持ちません。
 
-[`--force-fold`](#--force-fold) を指定した場合の Summary は通常判断の Summary ではないので、先頭に `mode: ForcedFold` を置き、choice 2 / 3 の比較も持ちません。
+[`--force-fold`](#--force-fold) を指定した場合の Summary は通常判断の Summary ではないので、先頭に `mode: ForcedFold` を置き、choice 1 / 2 / 3 の比較も持ちません。代わりに production defense ordering の `rank` 付き候補を並べます ([Summary の防御候補 ranking](#summary-の防御候補-ranking))。
 
 choice 2 / 3 が数値 comparator で負けた場合だけ、`lost by` の下へ比較値を1行追加します。
 
