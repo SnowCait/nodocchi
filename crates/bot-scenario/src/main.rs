@@ -1054,8 +1054,47 @@ mod tests {
                 "\n  rank 1: E\n    ron safe: yes\n    reason: Genbutsu\n",
                 "\n  rank 2: S\n    ron safe: no\n    model risk: 1.68%\n",
                 "    evidence: 95487355974 / 5679785375284\n",
+                "    copies: 1\n    fold risk: 1.68%\n",
                 "\n  rank 3: W\n    ron safe: no\n    model risk: 1.68%\n",
-                "    evidence: 95487355974 / 5679785375284",
+                "    evidence: 95487355974 / 5679785375284\n",
+                "    copies: 1\n    fold risk: 1.68%",
+            )
+        );
+    }
+
+    #[test]
+    fn force_fold_ranks_a_duplicated_tile_by_its_fold_risk() {
+        // 手牌に3枚ある 8p は、1枚切る model risk が 5m より高くても、ベタ降りで3巡ぶんしのげる
+        // ぶんだけ fold risk が低いので上位になる。model risk 自体は補正しない。
+        let output = run_args(&[
+            "--hand",
+            "3567m46888p12457s",
+            "--draw",
+            "",
+            "--discards-shimocha",
+            "2z 1p 2m 7z 3s 6s 5p 8m",
+            "--riichi-shimocha",
+            "5",
+            "--remaining-tiles",
+            "42",
+            "--force-fold",
+            "--summary-only",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            output,
+            concat!(
+                "Summary\n  mode: ForcedFold\n  source: DefenseFallback\n",
+                "\n  rank 1: 8p\n    ron safe: no\n    model risk: 2.62%\n",
+                "    evidence: 64230213477 / 2452679059162\n",
+                "    copies: 3\n    fold risk: 0.88%\n",
+                "\n  rank 2: 5m\n    ron safe: no\n    model risk: 2.35%\n",
+                "    evidence: 57655088883 / 2452679059162\n",
+                "    copies: 1\n    fold risk: 2.35%\n",
+                "\n  rank 3: 1s\n    ron safe: no\n    model risk: 2.81%\n",
+                "    evidence: 68849401266 / 2452679059162\n",
+                "    copies: 1\n    fold risk: 2.81%",
             )
         );
     }
@@ -1162,8 +1201,10 @@ mod tests {
                 "\n  rank 1: E\n    ron safe: yes\n    reason: Genbutsu\n",
                 "\n  rank 2: S\n    ron safe: no\n    model risk: 1.68%\n",
                 "    evidence: 95487355974 / 5679785375284\n",
+                "    copies: 1\n    fold risk: 1.68%\n",
                 "\n  rank 3: W\n    ron safe: no\n    model risk: 1.68%\n",
-                "    evidence: 95487355974 / 5679785375284",
+                "    evidence: 95487355974 / 5679785375284\n",
+                "    copies: 1\n    fold risk: 1.68%",
             )),
             "{output}"
         );

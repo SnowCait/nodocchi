@@ -296,8 +296,8 @@ fn ranks_every_legal_dahai_tile_type_once() {
 }
 
 #[test]
-fn ranks_candidates_in_the_production_defense_ordering() {
-    // ranking は既存 selector の ordering helper そのもので、family ごとに比較する。
+fn ranks_candidates_from_the_production_defense_ordering() {
+    // ranking の土台は既存 selector の ordering helper そのもので、family ごとに比較する。
     let reach_context = fold_under_reach_context();
     let reach_actions = fold_actions();
     let reach_inputs = push_pull_inputs_from_context(&reach_context, &reach_actions);
@@ -360,6 +360,9 @@ fn ranks_candidates_in_the_production_defense_ordering() {
     assert_ranking_matches(&combined_context, &combined_actions, &expected);
 }
 
+// forced fold ranking は production ordering を土台に、exact 段の中だけを effective fold risk で
+// 並べ替えたもの。段の構成も段外候補の位置も production ordering のままで、手牌に同じ牌種を
+// 1枚ずつしか持たない局面では並び全体が production ordering と一致する。
 fn assert_ranking_matches(
     context: &GameContext,
     actions: &[LegalAction],
@@ -371,7 +374,60 @@ fn assert_ranking_matches(
         .iter()
         .map(|candidate| (candidate.action.clone(), candidate.defense_kind))
         .collect();
-    assert_eq!(actual, expected);
+
+    if forced
+        .ranked_candidates
+        .iter()
+        .all(|candidate| candidate.copies == 1)
+    {
+        assert_eq!(actual, expected);
+        return;
+    }
+
+    // 段の構成と候補の集合は production ordering と同じ。
+    assert_eq!(
+        actual.iter().map(|&(_, kind)| kind).collect::<Vec<_>>(),
+        expected.iter().map(|&(_, kind)| kind).collect::<Vec<_>>()
+    );
+    assert_eq!(sorted_dahai_tiles(&actual), sorted_dahai_tiles(expected));
+
+    // exact 段の外は production ordering のままの位置に残る。
+    for (candidate, (action, _)) in forced.ranked_candidates.iter().zip(expected) {
+        if candidate.is_hard_safe() || candidate.heuristic_evidence().is_some() {
+            assert_eq!(&candidate.action, action);
+        }
+    }
+
+    // exact 段の中は worst-first の effective fold risk 昇順。
+    let fold_risks: Vec<Vec<f64>> = forced
+        .ranked_candidates
+        .iter()
+        .filter(|candidate| !candidate.is_hard_safe() && candidate.heuristic_evidence().is_none())
+        .map(|candidate| {
+            candidate
+                .worst_first_effective_fold_risks()
+                .expect("exact 段の候補は fold risk を持つ")
+                .into_iter()
+                .map(|(_, fold_risk)| fold_risk)
+                .collect()
+        })
+        .collect();
+    assert!(
+        fold_risks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{fold_risks:?}"
+    );
+}
+
+fn sorted_dahai_tiles(candidates: &[(LegalAction, ForcedFoldDefenseKind)]) -> Vec<u8> {
+    let mut tiles: Vec<_> = candidates
+        .iter()
+        .filter_map(|(action, _)| match action {
+            LegalAction::Dahai { tile } => Some(tile.raw()),
+            _ => None,
+        })
+        .collect();
+    tiles.sort_unstable();
+    tiles
 }
 
 #[test]
@@ -515,6 +571,7 @@ fn does_not_treat_a_rounded_zero_percent_as_zero_risk() {
                 tenpai_weight: 50_000,
             },
         }]),
+        copies: 1,
     };
 
     assert!(!candidate.has_exact_zero_ron_risk());
@@ -543,6 +600,7 @@ fn requires_every_target_to_be_exactly_zero() {
                 },
             },
         ]),
+        copies: 1,
     };
     assert!(!partial.has_exact_zero_ron_risk());
     assert!(partial.ron_risk_evidence().is_none());
@@ -591,6 +649,7 @@ fn keeps_a_three_visible_honor_out_of_zero_risk_without_an_exact_zero() {
             HonorSafetyRank::ThreeOrMoreVisible,
         )),
         player_ron_risk_evidence: None,
+        copies: 1,
     };
 
     // exact model が unavailable な3枚見え字牌は heuristic safety のままで、0-risk にしない。
@@ -921,5 +980,177 @@ fn does_not_recollect_the_evidence_when_the_exact_comparison_already_ran() {
             candidate.player_ron_risk_evidence.as_deref(),
             player_ron_risk_evidence_for_action(Some(vectors), &candidate.action)
         );
+    }
+}
+
+// ---- 手牌内の同一牌枚数を織り込んだ forced fold ranking ----
+
+fn ranked_candidate<'a>(
+    forced: &'a ForcedFoldDiagnostic,
+    mjai: &str,
+) -> &'a ForcedFoldRankedCandidate {
+    let tile_type = exact_tile_type(mjai);
+    forced
+        .ranked_candidates
+        .iter()
+        .find(|candidate| {
+            matches!(candidate.action, LegalAction::Dahai { tile } if tile.tile_type() == tile_type)
+        })
+        .expect("その牌種の候補がある")
+}
+
+fn model_risk(candidate: &ForcedFoldRankedCandidate) -> f64 {
+    let evidence = candidate
+        .ron_risk_evidence()
+        .expect("exact evidence を持つ");
+    evidence.ron_capable_weight as f64 / evidence.tenpai_weight as f64
+}
+
+#[test]
+fn effective_fold_risk_keeps_a_single_copy_unchanged() {
+    assert_eq!(effective_fold_risk(0.0235, 1), 0.0235);
+    assert_eq!(effective_fold_risk(0.0235, 0), 0.0235);
+}
+
+#[test]
+fn effective_fold_risk_spreads_a_duplicated_tile_over_its_copies() {
+    let fold_risk = effective_fold_risk(0.0262, 3);
+    assert!((fold_risk - 0.0088).abs() < 0.0001, "{fold_risk}");
+
+    // 枚数が多いほど1巡あたりの等価 risk は下がる。
+    assert!(effective_fold_risk(0.0262, 2) > fold_risk);
+    assert!(effective_fold_risk(0.0262, 4) < fold_risk);
+
+    // copies 巡ぶん重ねると元の model risk に戻る、という heuristic の定義どおりになる。
+    let covered = 1.0 - (1.0 - fold_risk).powi(3);
+    assert!((covered - 0.0262).abs() < 1e-12, "{covered}");
+}
+
+#[test]
+fn counts_a_red_five_and_a_black_five_as_the_same_tile_kind() {
+    // FOLD_HAND の黒5m と自摸の赤5m は待ち判定上同じ牌種なので、copies 2 として数える。
+    let context = fold_under_reach_context();
+    let actions = fold_actions();
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+    let five_man = ranked_candidate(&forced, "5m");
+    assert_eq!(five_man.copies, 2);
+    for candidate in &forced.ranked_candidates {
+        if candidate.action != five_man.action {
+            assert_eq!(candidate.copies, 1);
+        }
+    }
+}
+
+#[test]
+fn ranks_a_duplicated_tile_above_a_lower_model_risk_single_copy() {
+    let context = fold_under_reach_context();
+    let actions = fold_actions();
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+    let five_man = ranked_candidate(&forced, "5m");
+    let one_man = ranked_candidate(&forced, "1m");
+    assert_eq!(five_man.copies, 2);
+    assert_eq!(one_man.copies, 1);
+
+    // 1枚切る model risk は 5m のほうが高い。model risk 自体は補正しない。
+    assert!(model_risk(five_man) > model_risk(one_man));
+
+    // 手牌に2枚ある 5m は fold risk が低く、forced fold では上位になる。
+    let five_man_fold_risk = five_man.effective_fold_risk().expect("fold risk を持つ");
+    let one_man_fold_risk = one_man.effective_fold_risk().expect("fold risk を持つ");
+    assert!(five_man_fold_risk < one_man_fold_risk);
+    assert_eq!(one_man_fold_risk, model_risk(one_man));
+    assert!(five_man.rank < one_man.rank);
+}
+
+#[test]
+fn does_not_change_the_production_defense_ordering() {
+    // forced fold 側の並べ替えは production defense policy の ordering を書き換えない。
+    let context = fold_under_reach_context();
+    let actions = fold_actions();
+    let inputs = push_pull_inputs_from_context(&context, &actions);
+
+    let production = |label: &str| {
+        let FoldDefenseEvaluation::Reach(evaluation) =
+            evaluate_fold_defense(&context, &actions, &inputs, true)
+        else {
+            panic!("リーチ者向け防御へ routing される: {label}");
+        };
+        ordered_defense_fallback_candidates(
+            &context,
+            &actions,
+            evaluation.ron_risk_vectors.as_deref(),
+        )
+        .into_iter()
+        .map(|(action, _)| action.clone())
+        .collect::<Vec<_>>()
+    };
+
+    let before = production("before");
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+    assert_eq!(production("after"), before);
+
+    let index = |ordered: &[LegalAction], mjai: &str| {
+        let tile_type = exact_tile_type(mjai);
+        ordered
+            .iter()
+            .position(
+                |action| matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == tile_type),
+            )
+            .expect("その牌種の候補がある")
+    };
+
+    // production ordering は model risk 順のままで、forced fold だけが 5m を上位へ動かす。
+    assert!(index(&before, "1m") < index(&before, "5m"));
+    assert!(ranked_candidate(&forced, "5m").rank < ranked_candidate(&forced, "1m").rank);
+}
+
+#[test]
+fn keeps_the_ranking_when_every_tile_kind_is_a_single_copy() {
+    let context = open_hand_context([false; 4]);
+    let actions = open_hand_actions();
+    let inputs = push_pull_inputs_from_context(&context, &actions);
+    let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+    let FoldDefenseEvaluation::OpenHand(evaluation) =
+        evaluate_fold_defense(&context, &actions, &inputs, true)
+    else {
+        panic!("OpenHand 向け防御へ routing される");
+    };
+    let expected: Vec<_> = ordered_open_hand_defense_candidates(
+        &context,
+        &actions,
+        &targets,
+        evaluation.ron_risk_vectors.as_deref(),
+    )
+    .into_iter()
+    .map(|(action, _)| action.clone())
+    .collect();
+
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+    // copies == 1 だけの局面では順位も選択も production ordering と同じ。
+    assert!(
+        forced
+            .ranked_candidates
+            .iter()
+            .all(|candidate| candidate.copies == 1)
+    );
+    assert_eq!(
+        forced
+            .ranked_candidates
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(&forced.selected_action, &expected[0]);
+
+    // copies == 1 では fold risk は model risk そのもの。
+    for candidate in &forced.ranked_candidates {
+        let Some(fold_risk) = candidate.effective_fold_risk() else {
+            continue;
+        };
+        assert_eq!(fold_risk, model_risk(candidate));
     }
 }

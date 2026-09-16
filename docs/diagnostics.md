@@ -366,7 +366,7 @@ player 別の行は player id 順に並べた表示で、comparator の優先順
 
 ### 防御候補 ranking
 
-`Defense candidates` / `OpenHand defense` / `Combined defense` の候補は合法 Dahai の元順序で並びます。production の優先順位そのままの順位を確認したい場合は [`--force-fold`](bot-scenario.md#--force-fold) を使ってください。production ordering の上位3候補と、そこに含まれない 0-risk candidate 全件を `rank` 付きで Summary に出します。
+`Defense candidates` / `OpenHand defense` / `Combined defense` の候補は合法 Dahai の元順序で並びます。production の優先順位をもとにした順位を確認したい場合は [`--force-fold`](bot-scenario.md#--force-fold) を使ってください。ForcedFold ranking の上位3候補と、そこに含まれない 0-risk candidate 全件を `rank` 付きで Summary に出します。
 
 `--force-fold --summary-only` でも同じ Summary と同じ ranked candidates を出します。`--summary-only` は計算を省く option ではなく、Summary 以外の詳細 section を省くだけです。
 

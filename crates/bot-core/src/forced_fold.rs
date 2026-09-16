@@ -7,8 +7,11 @@
 //! 有無も既存 [`has_clear_threat`] と同じ classification を使う。forced fold のために防御ロジックも
 //! High 条件も書き直さない。
 //!
-//! 候補 ranking も既存 production defense policy の ordering をそのまま使い、選択・ranking・
-//! 詳細診断は1回の evaluation から得た同じ candidate evidence を共有する。
+//! 候補 ranking の基礎も既存 production defense policy の ordering をそのまま使い、選択・
+//! ranking・詳細診断は1回の evaluation から得た同じ candidate evidence を共有する。そのうえで
+//! forced fold だけは、手牌内の同一牌枚数を織り込んだ
+//! [`effective_fold_risk`] で exact 段を並べ替える。production defense policy 側の ordering は
+//! 書き換えないので、ベタ降り以外の判断には影響しない。
 
 mod ranking;
 
@@ -31,8 +34,11 @@ use crate::open_hand_defense::{
 };
 use crate::push_pull::{has_clear_threat, push_pull_inputs_from_threat_facts};
 use crate::threat::player_threat_facts_from_context;
+use bot_logic::TileType;
 
-pub use ranking::ForcedFoldRankedCandidate;
+use ranking::rerank_by_effective_fold_risk;
+
+pub use ranking::{ForcedFoldRankedCandidate, effective_fold_risk};
 
 /// forced fold が選んだ defense family と、その family 内の選択種別。
 ///
@@ -57,17 +63,18 @@ pub enum ForcedFoldUnavailable {
 
 /// forced fold の評価結果。
 ///
-/// `selected_action` と `defense_kind` は既存 Fold defense evaluator の選択そのもので、
-/// `ranked_candidates` と防御診断は選択に使った同じ evaluation から構築する。診断は防御 family に
-/// 対応するものだけが `Some` になる。
+/// `defense_kind` は既存 Fold defense evaluator の routing 結果そのもので、`ranked_candidates` と
+/// 防御診断は選択に使った同じ evaluation から構築する。`selected_action` は forced fold ranking の
+/// 先頭で、exact 段が [`effective_fold_risk`] で並ぶぶんだけ production selection と異なり得る。
+/// 診断は防御 family に対応するものだけが `Some` になる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForcedFoldDiagnostic {
     pub selected_action: LegalAction,
     pub defense_kind: ForcedFoldDefenseKind,
-    /// 全合法 Dahai を production ordering どおりに並べた防御候補。
+    /// 全合法 Dahai を forced fold ordering どおりに並べた防御候補。
     ///
-    /// 先頭が `selected_action` と一致するのは ranking 全体が既存 production selector と同じ
-    /// ordering だからで、rank 1 用の特別処理は持たない。
+    /// 先頭が `selected_action` と一致するのは forced fold の選択がこの ranking の先頭そのもの
+    /// だからで、rank 1 用の特別処理は持たない。
     pub ranked_candidates: Vec<ForcedFoldRankedCandidate>,
     pub defense: Option<DefenseDecisionDiagnostic>,
     pub open_hand_defense: Option<OpenHandDefenseDiagnostic>,
@@ -86,6 +93,10 @@ pub struct ForcedFoldDiagnostic {
 /// evaluator が exact model を走らせないまま早期 return する。その場合だけ、選択を変えずに
 /// 診断用の candidate exact evidence を追加収集する。Reach 防御が共通現物で決着した後も exact
 /// candidate evidence を収集するのと同じ考え方で、production selection は変わらない。
+///
+/// `selected_action` は forced fold ranking の先頭にする。exact 段だけは手牌内の同一牌枚数を
+/// 織り込んだ [`effective_fold_risk`] で並ぶので、同じ牌を複数枚持つ局面では production
+/// selection と異なる牌になり得る。production defense policy 側の選択は書き換えない。
 pub fn evaluate_forced_fold(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -128,6 +139,7 @@ pub fn evaluate_forced_fold(
         FoldDefenseEvaluation::Reach(evaluation) => {
             let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
             diagnostic.ranked_candidates = ranked_candidates(
+                context,
                 ordered_defense_fallback_candidates(context, legal_actions, ron_risk_vectors),
                 ron_risk_vectors,
                 ForcedFoldDefenseKind::Reach,
@@ -150,6 +162,7 @@ pub fn evaluate_forced_fold(
             );
             let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
             diagnostic.ranked_candidates = ranked_candidates(
+                context,
                 ordered_open_hand_defense_candidates(
                     context,
                     legal_actions,
@@ -177,6 +190,7 @@ pub fn evaluate_forced_fold(
             );
             let ron_risk_vectors = evaluation.ron_risk_vectors.as_deref();
             diagnostic.ranked_candidates = ranked_candidates(
+                context,
                 ordered_combined_defense_candidates(
                     context,
                     legal_actions,
@@ -196,17 +210,26 @@ pub fn evaluate_forced_fold(
         }
     }
 
+    // forced fold の答えは ranking の先頭そのもの。rank 1 用の特別処理を持たないために、
+    // 並べ替え後の先頭を選択へ書き戻す。
+    if let Some(first) = diagnostic.ranked_candidates.first() {
+        diagnostic.selected_action = first.action.clone();
+    }
+
     Ok(diagnostic)
 }
 
 // production ordering の並びと、同じ evaluation が構築した exact evidence を ranked candidate へ
-// 写す。順序も evidence もここでは作り直さない。
+// 写したうえで、forced fold 用に effective fold risk で並べ替える。evidence 自体はここで作り
+// 直さず、production ordering も書き換えない。
 fn ranked_candidates<K: Copy>(
+    context: &GameContext,
     ordered: Vec<(&LegalAction, K)>,
     ron_risk_vectors: Option<&[DahaiRonRiskVector<'_>]>,
     defense_kind: impl Fn(K) -> ForcedFoldDefenseKind,
 ) -> Vec<ForcedFoldRankedCandidate> {
-    ordered
+    let copies = hand_tile_type_counts(context);
+    let mut candidates: Vec<_> = ordered
         .into_iter()
         .enumerate()
         .map(|(index, (action, kind))| ForcedFoldRankedCandidate {
@@ -215,8 +238,34 @@ fn ranked_candidates<K: Copy>(
             defense_kind: defense_kind(kind),
             player_ron_risk_evidence: player_ron_risk_evidence_for_action(ron_risk_vectors, action)
                 .map(<[_]>::to_vec),
+            copies: action_copies(&copies, action),
         })
-        .collect()
+        .collect();
+    rerank_by_effective_fold_risk(&mut candidates);
+    candidates
+}
+
+// 手牌 (自摸牌を含む) の牌種別枚数。`TileId::tile_type` は赤5と黒5を同じ牌種へ写すので、
+// 待ち判定上同一の牌種として合算される。
+fn hand_tile_type_counts(context: &GameContext) -> [usize; TileType::COUNT] {
+    let mut counts = [0; TileType::COUNT];
+    for tile in context
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(context.drawn_tile())
+    {
+        counts[tile.tile_type().index()] += 1;
+    }
+    counts
+}
+
+// 候補牌と同じ牌種を手牌に持っている枚数。手牌にない牌 (Dahai 以外の action) では 1 とする。
+fn action_copies(counts: &[usize; TileType::COUNT], action: &LegalAction) -> usize {
+    let LegalAction::Dahai { tile } = action else {
+        return 1;
+    };
+    counts[tile.tile_type().index()].max(1)
 }
 
 #[cfg(test)]

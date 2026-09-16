@@ -2,7 +2,7 @@
 //! `ShantenDecisionDiagnostic` を組み立てず専用の formatter を持つ。
 //!
 //! Summary の候補は `ForcedFoldDiagnostic::ranked_candidates` をそのまま表示する。順位付けは
-//! 既存 production defense policy が source of truth で、ここで並べ替えや risk score を作らない。
+//! bot-core の forced fold ranking が source of truth で、ここで並べ替えや risk score を作らない。
 //! `--summary-only` は Summary 以外の詳細 section を省くだけで、Summary の内容も候補評価も通常
 //! 出力と同じ。
 
@@ -19,7 +19,7 @@ use crate::scenario::Scenario;
 
 const MODE: &str = "ForcedFold";
 
-// Summary に常に表示する production ordering 上位の件数。0-risk candidate はこれを超えても全件
+// Summary に常に表示する forced fold ordering 上位の件数。0-risk candidate はこれを超えても全件
 // 表示する。
 const SUMMARY_TOP_RANKS: usize = 3;
 
@@ -53,7 +53,7 @@ pub fn format_forced_fold(scenario: &Scenario, result: &ForcedFoldResult, verbos
 
 /// forced fold の Summary。`--summary-only` でも通常出力でも同じ内容を返す。
 ///
-/// 表示するのは production ordering の上位 [`SUMMARY_TOP_RANKS`] 件と、そこに含まれない 0-risk
+/// 表示するのは forced fold ordering の上位 [`SUMMARY_TOP_RANKS`] 件と、そこに含まれない 0-risk
 /// candidate 全件。0-risk candidate を追加表示するために順位を付け替えない。
 pub fn format_forced_fold_summary(result: &ForcedFoldResult) -> String {
     let mut lines = vec!["Summary".to_string(), format!("  mode: {MODE}")];
@@ -73,8 +73,8 @@ pub fn format_forced_fold_summary(result: &ForcedFoldResult) -> String {
     lines.join("\n")
 }
 
-// production ordering の上位 SUMMARY_TOP_RANKS 件と、上位に入らなかった 0-risk candidate 全件を
-// production rank 順のまま返す。候補が SUMMARY_TOP_RANKS 件未満なら存在する候補だけ。
+// forced fold ordering の上位 SUMMARY_TOP_RANKS 件と、上位に入らなかった 0-risk candidate 全件を
+// rank 順のまま返す。候補が SUMMARY_TOP_RANKS 件未満なら存在する候補だけ。
 fn summary_candidates(
     ranked_candidates: &[ForcedFoldRankedCandidate],
 ) -> impl Iterator<Item = &ForcedFoldRankedCandidate> {
@@ -119,10 +119,12 @@ fn ranked_candidate_lines(candidate: &ForcedFoldRankedCandidate) -> Vec<String> 
                 "    evidence: {} / {}",
                 evidence.evidence.ron_capable_weight, evidence.evidence.tenpai_weight
             ));
+            lines.extend(fold_risk_lines(candidate));
         }
         Some(evidence) => {
             lines.push("    model risk:".to_string());
             lines.extend(evidence.iter().map(|evidence| player_risk_line(evidence)));
+            lines.extend(fold_risk_lines(candidate));
         }
         // exact model が使えない候補には存在しない percentage を作らず、順位を決めた既存
         // heuristic の根拠だけを出す。
@@ -135,6 +137,26 @@ fn ranked_candidate_lines(candidate: &ForcedFoldRankedCandidate) -> Vec<String> 
         }
     }
 
+    lines
+}
+
+// 順位を決めた ForcedFold 用 score と、その材料になる手牌内の同一牌枚数。model risk 行とは
+// 別に出し、`fold risk` が「今1枚切ったときの放銃率」ではないことを名前で区別する。
+fn fold_risk_lines(candidate: &ForcedFoldRankedCandidate) -> Vec<String> {
+    let Some(fold_risks) = candidate.worst_first_effective_fold_risks() else {
+        return Vec::new();
+    };
+
+    let mut lines = vec![format!("    copies: {}", candidate.copies)];
+    match fold_risks.as_slice() {
+        [(_, fold_risk)] => lines.push(format!("    fold risk: {}", risk_label(*fold_risk))),
+        fold_risks => {
+            lines.push("    fold risk:".to_string());
+            lines.extend(fold_risks.iter().map(|&(player, fold_risk)| {
+                format!("      player {}: {}", player, risk_label(fold_risk))
+            }));
+        }
+    }
     lines
 }
 
@@ -155,6 +177,10 @@ fn player_risk_line(evidence: &PlayerRonRiskEvidence) -> String {
 // その牌で現在ロン可能な state の比率なので、表示も model risk と呼ぶ。
 fn model_risk_label(evidence: RonRiskEvidence) -> String {
     let ratio = evidence.ron_capable_weight as f64 / evidence.tenpai_weight as f64;
+    risk_label(ratio)
+}
+
+fn risk_label(ratio: f64) -> String {
     format!("{:.2}%", ratio * 100.0)
 }
 

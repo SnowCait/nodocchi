@@ -245,7 +245,7 @@ selection は production selector が source of truth です。diagnostics は�
 
 赤5 / 黒5 は別順位に並べず、既存 selection と同じ黒5優先の正規化で牌種ごとに1候補として扱います。数牌 safety の `NoSafety` は既存 selector が採用しないので、ordering では末尾に順位だけ持たせて選択対象から外します。
 
-ordering を観察する入口は [`--force-fold`](../bot-scenario.md#--force-fold) の diagnostic で、production の防御判断は変わりません。
+ordering を観察する入口は [`--force-fold`](../bot-scenario.md#--force-fold) の diagnostic で、production の防御判断は変わりません。`--force-fold` の表示順は、この ordering を土台に exact `R/T` の段だけをベタ降り固有の [fold risk](../bot-scenario.md#手牌内の同一牌枚数と-fold-risk) で並べ替えたものです。ここで作る ordering 自体はその影響を受けません。
 
 ### 0-risk candidate の根拠
 
