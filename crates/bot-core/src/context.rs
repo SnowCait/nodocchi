@@ -55,6 +55,8 @@ pub struct GameContext {
     oya: Option<u8>,
     discards: [Vec<TileId>; 4],
     reached: [bool; 4],
+    // 各 player のリーチ宣言牌が河の何枚目か。0-based index で、unknown は None。
+    reach_discard_indices: [Option<usize>; 4],
     melds: [Vec<Meld>; 4],
     post_reach_passed_tiles: [Vec<TileType>; 4],
     temporary_passed_tiles: Option<[Vec<TileType>; 4]>,
@@ -195,6 +197,16 @@ impl GameContext {
             melds,
             ..Self::default()
         }
+    }
+
+    /// 各 player のリーチ宣言牌が河の何枚目かを設定する。
+    ///
+    /// index は 0-based で、`None` は「リーチ宣言牌の位置を特定できない」を表す。`reached` の
+    /// 意味は変えないので、リーチ済みでも位置が unknown な状態を許す。観測できない入力経路では
+    /// 河の末尾などから推測せず `None` のままにする。
+    pub fn with_reach_discard_indices(mut self, reach_discard_indices: [Option<usize>; 4]) -> Self {
+        self.reach_discard_indices = reach_discard_indices;
+        self
     }
 
     pub fn with_post_reach_passed_tiles(
@@ -426,6 +438,23 @@ impl GameContext {
     /// 表す。
     pub fn own_reached(&self) -> Option<bool> {
         self.reached.get(usize::from(self.player_id?)).copied()
+    }
+
+    /// 各 player のリーチ宣言牌が河の何枚目か。0-based index で、unknown は `None`。
+    pub fn reach_discard_indices(&self) -> &[Option<usize>; 4] {
+        &self.reach_discard_indices
+    }
+
+    /// 指定 player のリーチ宣言牌が河の何枚目か。0-based index で、位置が unknown な場合と
+    /// 範囲外の `player` はどちらも `None`。`is_reached` が `true` でも `None` になり得る。
+    pub fn reach_discard_index_of(&self, player: usize) -> Option<usize> {
+        *self.reach_discard_indices.get(player)?
+    }
+
+    /// 指定 player のリーチ宣言牌。宣言牌位置が unknown な場合は河から推測せず `None`。
+    pub fn reach_discard_tile_of(&self, player: usize) -> Option<TileId> {
+        let index = self.reach_discard_index_of(player)?;
+        self.discards_of(player)?.get(index).copied()
     }
 
     pub fn any_opponent_reached(&self) -> bool {
@@ -1048,6 +1077,64 @@ mod tests {
         let discards = [vec![tile(0)], vec![], vec![], vec![]];
         let context = table_state_context(None, None, discards, [false; 4]);
         assert_eq!(context.own_discards(), None);
+    }
+
+    #[test]
+    fn default_has_no_reach_discard_indices() {
+        let context = GameContext::default();
+        assert_eq!(context.reach_discard_indices(), &[None; 4]);
+        assert_eq!(context.reach_discard_index_of(1), None);
+    }
+
+    #[test]
+    fn with_reach_discard_indices_holds_zero_based_index() {
+        let context = table_state_context(
+            Some(0),
+            Some(1),
+            [vec![], vec![tile(0), tile(16)], vec![], vec![]],
+            [false, true, false, false],
+        )
+        .with_reach_discard_indices([None, Some(1), None, None]);
+
+        assert_eq!(
+            context.reach_discard_indices(),
+            &[None, Some(1), None, None]
+        );
+        assert_eq!(context.reach_discard_index_of(1), Some(1));
+        assert_eq!(context.reach_discard_tile_of(1), Some(tile(16)));
+    }
+
+    #[test]
+    fn reach_discard_index_of_out_of_range_player_is_none() {
+        let context = GameContext::default().with_reach_discard_indices([Some(0); 4]);
+        assert_eq!(context.reach_discard_index_of(4), None);
+    }
+
+    #[test]
+    fn reached_without_reach_discard_index_stays_unknown() {
+        let context = table_state_context(
+            Some(0),
+            Some(1),
+            [vec![], vec![tile(0)], vec![], vec![]],
+            [false, true, false, false],
+        );
+
+        assert!(context.is_reached(1));
+        assert_eq!(context.reach_discard_index_of(1), None);
+        assert_eq!(context.reach_discard_tile_of(1), None);
+    }
+
+    #[test]
+    fn reach_discard_tile_of_is_none_when_index_exceeds_discards() {
+        let context = table_state_context(
+            Some(0),
+            Some(1),
+            [vec![], vec![tile(0)], vec![], vec![]],
+            [false, true, false, false],
+        )
+        .with_reach_discard_indices([None, Some(3), None, None]);
+
+        assert_eq!(context.reach_discard_tile_of(1), None);
     }
 
     #[test]

@@ -99,6 +99,19 @@ pub enum ScenarioError {
     #[error("discards must have 4 elements, but has {count}")]
     DiscardsLength { count: usize },
 
+    #[error("reach_discard_indices must have 4 elements, but has {count}")]
+    ReachDiscardIndicesLength { count: usize },
+
+    #[error("reach_discard_indices[{player}] must be 1..={discard_count}, but is {index}")]
+    ReachDiscardIndexOutOfRange {
+        player: usize,
+        index: u32,
+        discard_count: usize,
+    },
+
+    #[error("reach_discard_indices[{player}] needs reached[{player}] to be true")]
+    ReachDiscardIndexWithoutReach { player: usize },
+
     #[error("post_reach_passed must have 4 elements, but has {count}")]
     PostReachPassedLength { count: usize },
 
