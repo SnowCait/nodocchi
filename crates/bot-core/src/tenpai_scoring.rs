@@ -21,12 +21,15 @@
 //! なので、baseline の組み立ても集約規則もこの module 1本だけが持つ。
 //!
 //! 「いつリーチを宣言するか」「将来テンパイでリーチが合法か」「フリテンかどうか」「lookahead の
-//! 枝をどう集約するか」はこの層の責務ではない。[`TenpaiOffenseMode`] はリーチ宣言の有無だけを
-//! 表す入力で、その mode を決めるのは呼び出し側の既存 policy になる。
+//! 枝をどう集約するか」はこの層の責務ではない。[`TenpaiScoringMode`] はリーチ宣言の有無と、
+//! リーチの場合に通常立直 / ダブル立直のどちらとして点数計算するかを表す入力で、その mode を
+//! 決めるのは呼び出し側の既存 policy になる。現在の手のリーチか lookahead の先の仮想リーチかも
+//! 呼び出し側が [`TenpaiScoringMode::current`] / [`TenpaiScoringMode::prospective`] で区別
+//! する。
 //!
 //! # ツモ baseline
 //!
-//! ロン baseline ([`crate::offense_value::reach_baseline_context`] /
+//! ロン baseline ([`crate::offense_value::current_reach_baseline_context`] /
 //! [`crate::damaten_value::damaten_baseline_context`]) を流用せず、[`WinMethod::Tsumo`] として
 //! 組み立てる。門前ツモの1翻は既存の役判定が付けるので、この層で翻を足さない。一発・海底・
 //! 嶺上開花・槍槓のような未来の偶発要素は既存 baseline と同じ思想で加えず、リーチの裏ドラも
@@ -52,7 +55,7 @@ use crate::context::GameContext;
 use crate::damaten_value::BASELINE_REMAINING_LIVE_TILES;
 use crate::offense_value::{
     BASELINE_CHANKAN, BASELINE_IPPATSU, BASELINE_RINSHAN, BASELINE_URA_DORA_INDICATORS,
-    TenpaiOffenseMode,
+    TenpaiScoringMode,
 };
 
 /// 和了牌の物理牌1つ分の打点。
@@ -203,16 +206,18 @@ impl TsumoVariantOutcomes {
 
 /// ツモ和了だけを評価する hypothetical baseline と裏ドラ表示牌。
 ///
-/// [`TenpaiOffenseMode`] はリーチ宣言の有無だけを表し、どちらの mode も [`WinMethod::Tsumo`] と
-/// して組み立てる。攻撃モードを確定できない場合は baseline も作らない。
+/// [`TenpaiScoringMode`] はリーチ宣言の有無と、リーチの場合のリーチ種別だけを表し、どちらの
+/// mode も [`WinMethod::Tsumo`] として組み立てる。通常立直かダブル立直かは呼び出し側が
+/// [`TenpaiScoringMode`] を組み立てる時点で確定済みで、この層では決め直さない。攻撃モードを
+/// 確定できない場合は baseline も作らない。
 pub(crate) fn tsumo_scoring_inputs(
     context: &GameContext,
-    mode: TenpaiOffenseMode,
+    mode: TenpaiScoringMode,
 ) -> Option<(WinningContext, Option<&'static [TileId]>)> {
     let riichi = match mode {
-        TenpaiOffenseMode::Reach => RiichiStatus::Riichi,
-        TenpaiOffenseMode::Damaten => RiichiStatus::NotDeclared,
-        TenpaiOffenseMode::Unknown => return None,
+        TenpaiScoringMode::Reach(riichi) => riichi,
+        TenpaiScoringMode::Damaten => RiichiStatus::NotDeclared,
+        TenpaiScoringMode::Unknown => return None,
     };
     let baseline = WinningContext::new(WinMethod::Tsumo)
         .with_round_wind(context.round_wind())
@@ -222,18 +227,19 @@ pub(crate) fn tsumo_scoring_inputs(
         .with_chankan(Some(BASELINE_CHANKAN))
         .with_rinshan(Some(BASELINE_RINSHAN))
         .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES));
-    let ura_dora = matches!(mode, TenpaiOffenseMode::Reach).then_some(BASELINE_URA_DORA_INDICATORS);
+    let ura_dora =
+        matches!(mode, TenpaiScoringMode::Reach(_)).then_some(BASELINE_URA_DORA_INDICATORS);
     Some((baseline, ura_dora))
 }
 
-/// 組み立て済みの完成手を、指定した攻撃モードの Tsumo baseline で評価した待ちごとの手牌価値。
+/// 組み立て済みの完成手を、指定した scoring mode の Tsumo baseline で評価した待ちごとの手牌価値。
 ///
 /// この module の入口はすべてこの1本を通り、baseline の組み立ても点数計算の呼び出しも複製
 /// しない。mode から baseline を作れない場合は `None`。
 fn tenpai_tsumo_profile<'a>(
     context: &GameContext,
     hands: &'a TenpaiCompletedHands,
-    mode: TenpaiOffenseMode,
+    mode: TenpaiScoringMode,
 ) -> Option<TenpaiHandValueProfile<'a>> {
     let (baseline, ura_dora) = tsumo_scoring_inputs(context, mode)?;
     Some(evaluate_tenpai_hand_value(
@@ -259,15 +265,16 @@ pub(crate) struct TenpaiTsumoEvaluation {
     pub named_yakuman: NamedYakumanTsumo,
 }
 
-/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で1回評価する。
+/// 組み立て済みの完成手を、指定した scoring mode の Tsumo baseline で1回評価する。
 ///
 /// prospective tenpai と現在打牌後の tenpai が同じ baseline・点数計算・physical variant 集約を
 /// 共用するための入口。Reach / Damaten はリーチ宣言の有無だけを表し、どちらも Tsumo として
 /// 評価する。Reach timing も Reach / Damaten policy もこの層の責務外で、返すのは事実だけ。
+/// 通常立直 / ダブル立直の区別も呼び出し側が確定させた [`TenpaiScoringMode`] のとおりにする。
 pub(crate) fn evaluate_tenpai_tsumo(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
-    mode: TenpaiOffenseMode,
+    mode: TenpaiScoringMode,
 ) -> TenpaiTsumoEvaluation {
     tenpai_tsumo_profile(context, hands, mode).map_or(
         TenpaiTsumoEvaluation {
@@ -281,13 +288,13 @@ pub(crate) fn evaluate_tenpai_tsumo(
     )
 }
 
-/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価する。
+/// 組み立て済みの完成手を、指定した scoring mode の Tsumo baseline で評価する。
 ///
 /// 打点だけが必要な経路のための [`evaluate_tenpai_tsumo`] の薄い入口。
 pub(crate) fn tenpai_tsumo_value_from_hands(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
-    mode: TenpaiOffenseMode,
+    mode: TenpaiScoringMode,
 ) -> Option<TenpaiTsumoValue> {
     evaluate_tenpai_tsumo(context, hands, mode).value
 }
@@ -319,7 +326,7 @@ impl NamedYakumanTsumo {
     }
 }
 
-/// 組み立て済みの完成手を、指定した production offense mode の Tsumo baseline で評価し、生きた
+/// 組み立て済みの完成手を、指定した scoring mode の Tsumo baseline で評価し、生きた
 /// 和了牌の物理牌 variant がすべて named 役満になるかを求める。
 ///
 /// 役満判定が必要な経路のための [`evaluate_tenpai_tsumo`] の薄い入口。baseline も点数計算も
@@ -330,12 +337,12 @@ impl NamedYakumanTsumo {
 pub(crate) fn tenpai_tsumo_named_yakuman(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
-    mode: TenpaiOffenseMode,
+    mode: TenpaiScoringMode,
 ) -> NamedYakumanTsumo {
     evaluate_tenpai_tsumo(context, hands, mode).named_yakuman
 }
 
-/// 組み立て済みの完成手を、指定した攻撃モードの Tsumo baseline で評価し、和了牌の物理牌
+/// 組み立て済みの完成手を、指定した scoring mode の Tsumo baseline で評価し、和了牌の物理牌
 /// variant ごとにツモ和了できるかを求める。
 ///
 /// 集計値 ([`tenpai_tsumo_value_from_hands`]) と同じ profile を同じ判定で読み、variant 単位の
@@ -344,7 +351,7 @@ pub(crate) fn tenpai_tsumo_named_yakuman(
 pub(crate) fn tenpai_tsumo_variant_outcomes(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
-    mode: TenpaiOffenseMode,
+    mode: TenpaiScoringMode,
 ) -> TsumoVariantOutcomes {
     let Some(profile) = tenpai_tsumo_profile(context, hands, mode) else {
         return TsumoVariantOutcomes::default();
@@ -468,7 +475,7 @@ mod tests {
     //
     // 333m を pon した 234m 567p 55s 78s のテンパイ。6s なら全て中張牌で断幺が付くが、9s は
     // 么九牌が入るため副露手では役が無い。
-    fn open_tenpai_tsumo_value(mode: TenpaiOffenseMode) -> Option<TenpaiTsumoValue> {
+    fn open_tenpai_tsumo_value(mode: TenpaiScoringMode) -> Option<TenpaiTsumoValue> {
         let mut source = TileIdSource::new();
         let melded = source.tiles(&["3m", "3m", "3m"]);
         let concealed = source.tiles(&["2m", "3m", "4m", "5p", "6p", "7p", "5s", "5s", "7s", "8s"]);
@@ -519,7 +526,7 @@ mod tests {
         known_winds: bool,
     ) -> NamedYakumanTsumo {
         let (ctx, hands) = tenpai_case(hand, dora_indicators, extra_visible, known_winds);
-        tenpai_tsumo_named_yakuman(&ctx, &hands, TenpaiOffenseMode::Damaten)
+        tenpai_tsumo_named_yakuman(&ctx, &hands, TenpaiScoringMode::Damaten)
     }
 
     // 門前テンパイ1件の局面と完成手。待ちも残枚数も既存の受け入れそのもので、`extra_visible` は
@@ -570,9 +577,10 @@ mod tests {
         for (hand, dora_indicators) in cases {
             let (ctx, hands) = tenpai_case(hand, dora_indicators, &[], true);
             for mode in [
-                TenpaiOffenseMode::Reach,
-                TenpaiOffenseMode::Damaten,
-                TenpaiOffenseMode::Unknown,
+                TenpaiScoringMode::Reach(RiichiStatus::Riichi),
+                TenpaiScoringMode::Reach(RiichiStatus::DoubleRiichi),
+                TenpaiScoringMode::Damaten,
+                TenpaiScoringMode::Unknown,
             ] {
                 let evaluation = evaluate_tenpai_tsumo(&ctx, &hands, mode);
 
@@ -591,7 +599,7 @@ mod tests {
 
         // 両方の事実が実際に確定する組み合わせがあることも確かめ、一致だけの空振りにしない。
         let (ctx, hands) = tenpai_case(&KOKUSHI_TENPAI_HAND, &[], &[], true);
-        let evaluation = evaluate_tenpai_tsumo(&ctx, &hands, TenpaiOffenseMode::Damaten);
+        let evaluation = evaluate_tenpai_tsumo(&ctx, &hands, TenpaiScoringMode::Damaten);
 
         assert!(
             evaluation
@@ -661,7 +669,7 @@ mod tests {
     fn a_no_yaku_tsumo_variant_is_not_a_winning_draw() {
         // ツモ baseline で役が無い待ちは、0点の和了として加算せず success wait から外す。
         let value =
-            open_tenpai_tsumo_value(TenpaiOffenseMode::Damaten).expect("ツモ打点を確定できる");
+            open_tenpai_tsumo_value(TenpaiScoringMode::Damaten).expect("ツモ打点を確定できる");
 
         // 待ちは 6s / 9s の各4枚だが、断幺が付くのは 6s だけ。
         assert_eq!(value.winning_remaining, 4);

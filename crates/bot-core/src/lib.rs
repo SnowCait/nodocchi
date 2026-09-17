@@ -67,7 +67,7 @@ pub use combined_defense::{
     suited_safety_evidence_for_combined_threats, suited_safety_rank_for_combined_threats,
     suji_safety_rank_for_combined_threats,
 };
-pub use context::{GameContext, TableStateFacts, seat_wind_for_player};
+pub use context::{DoubleRiichiFacts, GameContext, TableStateFacts, seat_wind_for_player};
 pub use current_tenpai_continuation::{
     CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic,
 };
@@ -140,7 +140,8 @@ pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{
     OffenseValue, ReachRonBaselineDiagnostic, ReachRonWaitValue, ReachRonWinningTileValue,
-    TenpaiOffenseMode, TenpaiOffenseValue, reach_baseline_context,
+    TenpaiOffenseMode, TenpaiOffenseValue, current_reach_baseline_context,
+    current_reach_riichi_status, prospective_reach_baseline_context,
 };
 pub use open_hand_defense::{
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandDefenseDiagnostic,

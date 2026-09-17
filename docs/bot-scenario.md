@@ -666,6 +666,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数4 |
 | `temporary_passed` | 各 player の最後の手牌変化後に他家から切られて通った牌。要素数4。省略時 unknown |
 | `history_furiten` | `same_turn` / `riichi_missed_win`。各値は省略時 unknown |
+| `double_riichi` | `eligible` / `declared`。各値は省略時 unknown |
 | `melds` | 各 player の副露・暗槓。要素数4 |
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌と候補順 |
@@ -730,6 +731,14 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.j
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/history_furiten_same_turn.json
 ```
+
+### double_riichi
+
+`double_riichi.eligible` は「現在未リーチで、この局面で `Reach` を選ぶとダブル立直が確定するか」、`double_riichi.declared` は「宣言済みの自分のリーチがダブル立直だったか」です。各値は `true` / `false` / 省略による unknown を区別します。
+
+未リーチの局面では `eligible` だけを、`reached[player_id]` が `true` の局面では `declared` だけを読みます。どちらもダブル立直と確定した場合だけダブル立直2翻で打点を評価し、確定できない場合は最低保証として通常立直1翻で評価します。`reached` だけからダブル立直は推測しません。
+
+単一 observation からは復元できない履歴事実なので、JSON scenario では明示してください。RiichiLab の capture replay では `reach` event と宣言牌 `dahai` の時系列から自動的に復元します。
 
 ### table state
 

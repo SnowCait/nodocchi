@@ -1,8 +1,61 @@
+use bot_core::DoubleRiichiFacts;
 use bot_logic::{HistoryFuritenFacts, TileType};
 
 use crate::protocol::MjaiEvent;
 
 const PLAYER_COUNT: usize = 4;
+
+/// 第一巡の履歴。ダブル立直が成立し得る区間そのもの。
+///
+/// MJAI の `reach` event には通常立直とダブル立直の区別が無いので、宣言が第一巡の自分の第一打
+/// だったかを event 履歴から判定する。この enum がその唯一の source of truth で、他の層で
+/// 第一巡を判定し直さない。
+///
+/// `start_kyoku` を観測して初めて追跡を開始する。観測していない履歴では「第一巡ではない」とも
+/// 推測せず [`FirstTurn::Unknown`] のままにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FirstTurn {
+    /// 局の開始を観測していないため、第一巡かどうかを判別できない。
+    #[default]
+    Unknown,
+    /// 第一巡の途中。`discarded` は各 player が第一打を終えたか。
+    Active { discarded: [bool; PLAYER_COUNT] },
+    /// 第一巡は終了した。以降のリーチはダブル立直にならない。
+    Ended,
+}
+
+impl FirstTurn {
+    /// 指定 player が今この時点でリーチを宣言した場合、ダブル立直になるか。
+    ///
+    /// 第一巡の途中で、その player がまだ第一打を切っていない場合だけ `Some(true)`。履歴が
+    /// 不足している場合は `false` と推測せず `None`。
+    fn declares_double_riichi(self, player: usize) -> Option<bool> {
+        match self {
+            Self::Unknown => None,
+            Self::Ended => Some(false),
+            Self::Active { discarded } => Some(!discarded.get(player).copied().unwrap_or(true)),
+        }
+    }
+
+    /// 打牌を1つ反映する。4人全員の第一打が終わった時点で第一巡は終了する。
+    fn on_dahai(&mut self, actor: u8) {
+        let Self::Active { discarded } = self else {
+            return;
+        };
+        if let Some(done) = discarded.get_mut(usize::from(actor)) {
+            *done = true;
+        }
+        if discarded.iter().all(|done| *done) {
+            *self = Self::Ended;
+        }
+    }
+
+    /// 鳴き・槓を反映する。第一巡中かどうかを判別できない履歴でも、鳴き・槓を観測した以上は
+    /// 以降ダブル立直にならないと確定できる。
+    fn on_call(&mut self) {
+        *self = Self::Ended;
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationState {
@@ -10,6 +63,9 @@ pub struct ValidationState {
     last_tsumo: Option<String>,
     pending_reach: [bool; PLAYER_COUNT],
     active_reach: [bool; PLAYER_COUNT],
+    // 宣言済みリーチがダブル立直だったか。未リーチと判別不能はどちらも None。
+    declared_double_riichi: [Option<bool>; PLAYER_COUNT],
+    first_turn: FirstTurn,
     post_reach_passed_tiles: [Vec<TileType>; PLAYER_COUNT],
     temporary_passed_tiles: Option<[Vec<TileType>; PLAYER_COUNT]>,
     same_hand_passed_tiles: Option<[Vec<TileType>; PLAYER_COUNT]>,
@@ -37,6 +93,36 @@ impl ValidationState {
 
     pub fn is_reach_active(&self, player: usize) -> bool {
         self.active_reach.get(player).copied().unwrap_or(false)
+    }
+
+    /// 指定 player が今この時点でリーチを宣言した場合、ダブル立直になるか。
+    ///
+    /// 第一巡の履歴が不足していて判別できない場合は `false` と推測せず `None`。
+    pub fn double_riichi_eligible(&self, player: usize) -> Option<bool> {
+        self.first_turn.declares_double_riichi(player)
+    }
+
+    /// 指定 player の宣言済みリーチがダブル立直だったか。
+    ///
+    /// 宣言時点の第一巡状態から確定させた値をそのまま保持するので、第一巡が終わっても失われ
+    /// ない。まだリーチしていない場合と、宣言を観測できず判別できない場合はどちらも `None`。
+    pub fn declared_double_riichi(&self, player: usize) -> Option<bool> {
+        self.declared_double_riichi.get(player).copied().flatten()
+    }
+
+    /// 自分のダブル立直に関する観測事実。
+    ///
+    /// 自席を特定できない場合は player 0 などを推測せず、どちらの事実も unknown にする。
+    /// observation の `reached` にはダブル立直かどうかの情報が無いので、この event 履歴だけを
+    /// source of truth にする。
+    pub fn own_double_riichi_facts(&self) -> DoubleRiichiFacts {
+        let Some(player) = self.seat_id.map(usize::from) else {
+            return DoubleRiichiFacts::default();
+        };
+        DoubleRiichiFacts {
+            eligible: self.double_riichi_eligible(player),
+            declared: self.declared_double_riichi(player),
+        }
     }
 
     pub fn post_reach_passed_tiles(&self) -> &[Vec<TileType>; PLAYER_COUNT] {
@@ -81,7 +167,7 @@ impl ValidationState {
             MjaiEvent::Chi { actor, .. }
             | MjaiEvent::Pon { actor, .. }
             | MjaiEvent::Daiminkan { actor, .. }
-            | MjaiEvent::Ankan { actor, .. } => self.on_hand_change(*actor),
+            | MjaiEvent::Ankan { actor, .. } => self.on_call(*actor),
             MjaiEvent::Kakan { actor, pai, .. } => self.on_kakan(*actor, pai),
             MjaiEvent::Reach { actor } => self.on_reach(*actor),
             MjaiEvent::Hora { .. } => self.on_hora(),
@@ -98,6 +184,8 @@ impl ValidationState {
         self.seat_id = Some(id);
         self.last_tsumo = None;
         self.reset_reach_tracking();
+        // 局の開始はまだ観測していないので、第一巡かどうかは判別できない。
+        self.first_turn = FirstTurn::Unknown;
         self.history_furiten = HistoryFuritenFacts::default();
         self.own_tsumo_pending_discard = false;
     }
@@ -105,6 +193,9 @@ impl ValidationState {
     pub fn on_start_kyoku(&mut self) {
         self.reset_reach_tracking();
         self.start_passed_tracking();
+        self.first_turn = FirstTurn::Active {
+            discarded: [false; PLAYER_COUNT],
+        };
         self.last_tsumo = None;
         self.history_furiten = HistoryFuritenFacts {
             same_turn: Some(false),
@@ -150,13 +241,25 @@ impl ValidationState {
             self.clear_same_hand_passed_tiles(actor);
         }
         self.record_post_reach_passed_tile(actor, pai);
+        // 宣言牌を切る前の第一巡状態でダブル立直かを確定させてから、この打牌を第一巡へ反映する。
         self.establish_pending_reach(actor);
+        self.first_turn.on_dahai(actor);
         self.set_pending_passed_tile(actor, pai);
+    }
+
+    /// 鳴き・槓を反映する。手牌変化に加えて第一巡を終了させる。
+    ///
+    /// 暗槓も第一巡を終了させるので、加槓・大明槓・チー・ポンと同じ扱いにする。
+    pub fn on_call(&mut self, actor: u8) {
+        self.on_hand_change(actor);
+        self.first_turn.on_call();
     }
 
     /// 鳴き・槓による手牌変化。直前のロン機会は見逃されて局が継続したと確定してから、
     /// actor の旧手牌に対する一時安全情報を消す。
-    pub fn on_hand_change(&mut self, actor: u8) {
+    ///
+    /// 第一巡の終了も伴うので、入口は [`Self::on_call`] / [`Self::on_kakan`] だけにする。
+    fn on_hand_change(&mut self, actor: u8) {
         self.confirm_pending_passed_tile();
         self.clear_temporary_passed_tiles(actor);
         self.clear_same_hand_passed_tiles(actor);
@@ -167,7 +270,7 @@ impl ValidationState {
         if usize::from(actor) >= PLAYER_COUNT {
             return;
         }
-        self.on_hand_change(actor);
+        self.on_call(actor);
         self.set_pending_passed_tile(actor, pai);
     }
 
@@ -207,6 +310,7 @@ impl ValidationState {
     fn reset_reach_tracking(&mut self) {
         self.pending_reach = [false; PLAYER_COUNT];
         self.active_reach = [false; PLAYER_COUNT];
+        self.declared_double_riichi = [None; PLAYER_COUNT];
         self.post_reach_passed_tiles = Default::default();
         self.temporary_passed_tiles = None;
         self.same_hand_passed_tiles = None;
@@ -278,11 +382,16 @@ impl ValidationState {
         }
     }
 
+    /// 宣言牌の打牌でリーチを成立させ、そのリーチがダブル立直だったかも同時に確定させる。
+    ///
+    /// 判定に使うのは宣言牌を切る前の第一巡状態で、`reach` event と宣言牌 `dahai` の時系列
+    /// だけを見る。確定させた結論は第一巡が終わっても保持する。
     fn establish_pending_reach(&mut self, actor: u8) {
         let player = usize::from(actor);
         if self.is_reach_pending(player) {
             self.pending_reach[player] = false;
             self.active_reach[player] = true;
+            self.declared_double_riichi[player] = self.first_turn.declares_double_riichi(player);
         }
     }
 }
@@ -805,7 +914,7 @@ mod tests {
             for actor in 0..4 {
                 let mut state = started();
                 state.on_dahai((actor + 1) % 4, "9m");
-                state.on_hand_change(actor);
+                state.on_call(actor);
                 assert!(!is_passed(&state, usize::from(actor), "9m"));
             }
         }
@@ -942,7 +1051,7 @@ mod tests {
                 let mut state = started();
                 confirm_nine_man_against(&mut state, actor);
 
-                state.on_hand_change(actor);
+                state.on_call(actor);
 
                 assert!(!is_same_hand_passed(&state, usize::from(actor), "9m"));
             }
@@ -953,7 +1062,7 @@ mod tests {
             let mut state = started();
             confirm_nine_man_against(&mut state, 2);
 
-            state.on_hand_change(3);
+            state.on_call(3);
             state.on_dahai_with_tsumogiri(3, "1p", Some(false));
 
             assert!(is_same_hand_passed(&state, 2, "9m"));
@@ -964,6 +1073,183 @@ mod tests {
             let mut state = ValidationState::new();
             state.on_start_game(0);
             assert_eq!(state.same_hand_passed_tiles(), None);
+        }
+    }
+
+    mod double_riichi {
+        use super::*;
+
+        fn started(seat: u8) -> ValidationState {
+            let mut state = ValidationState::new();
+            state.on_start_game(seat);
+            state.on_start_kyoku();
+            state
+        }
+
+        // 親から順に第一打を切る。宣言者の手前までを進める helper。
+        fn first_discards(state: &mut ValidationState, actors: &[u8]) {
+            for &actor in actors {
+                state.on_tsumo(actor, "?".to_string());
+                state.on_dahai(actor, "1m");
+            }
+        }
+
+        #[test]
+        fn is_unknown_until_a_kyoku_start_is_observed() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+
+            assert_eq!(state.double_riichi_eligible(0), None);
+            assert_eq!(
+                state.own_double_riichi_facts(),
+                DoubleRiichiFacts {
+                    eligible: None,
+                    declared: None,
+                }
+            );
+        }
+
+        #[test]
+        fn the_seat_is_not_guessed_without_a_start_game() {
+            let mut state = ValidationState::new();
+            state.on_start_kyoku();
+
+            assert_eq!(state.double_riichi_eligible(0), Some(true));
+            assert_eq!(
+                state.own_double_riichi_facts(),
+                DoubleRiichiFacts::default()
+            );
+        }
+
+        #[test]
+        fn the_first_discard_of_the_last_player_still_declares_a_double_riichi() {
+            // 他家3人の第一打が終わっていても、自分の第一打はまだ第一巡。
+            let mut state = started(3);
+            first_discards(&mut state, &[0, 1, 2]);
+
+            assert_eq!(state.double_riichi_eligible(3), Some(true));
+            assert_eq!(
+                state.own_double_riichi_facts(),
+                DoubleRiichiFacts {
+                    eligible: Some(true),
+                    declared: None,
+                }
+            );
+
+            state.on_tsumo(3, "?".to_string());
+            state.on_reach(3);
+            state.on_dahai(3, "1m");
+
+            assert!(state.is_reach_active(3));
+            assert_eq!(state.declared_double_riichi(3), Some(true));
+        }
+
+        #[test]
+        fn a_declared_double_riichi_survives_the_end_of_the_first_turn() {
+            let mut state = started(0);
+            state.on_tsumo(0, "?".to_string());
+            state.on_reach(0);
+            state.on_dahai(0, "1m");
+            first_discards(&mut state, &[1, 2, 3]);
+
+            // 第一巡は終わっているので新しい宣言はダブル立直にならないが、成立済みの結論は残る。
+            assert_eq!(state.double_riichi_eligible(0), Some(false));
+            assert_eq!(
+                state.own_double_riichi_facts(),
+                DoubleRiichiFacts {
+                    eligible: Some(false),
+                    declared: Some(true),
+                }
+            );
+        }
+
+        #[test]
+        fn a_reach_after_the_first_turn_is_not_a_double_riichi() {
+            let mut state = started(0);
+            first_discards(&mut state, &[0, 1, 2, 3]);
+
+            assert_eq!(state.double_riichi_eligible(0), Some(false));
+
+            state.on_tsumo(0, "?".to_string());
+            state.on_reach(0);
+            state.on_dahai(0, "2m");
+
+            assert_eq!(state.declared_double_riichi(0), Some(false));
+        }
+
+        #[test]
+        fn own_first_discard_ends_the_own_eligibility_before_the_others() {
+            let mut state = started(0);
+            state.on_tsumo(0, "?".to_string());
+            state.on_dahai(0, "1m");
+
+            assert_eq!(state.double_riichi_eligible(0), Some(false));
+            assert_eq!(state.double_riichi_eligible(1), Some(true));
+        }
+
+        #[test]
+        fn a_call_before_the_declaration_ends_the_first_turn() {
+            // チー・ポン・大明槓・暗槓・加槓のどれでも第一巡は終わる。暗槓も同じ扱い。
+            for call in [
+                MjaiEvent::Chi {
+                    actor: 1,
+                    target: 0,
+                    pai: "1m".to_string(),
+                    consumed: vec!["2m".to_string(), "3m".to_string()],
+                },
+                MjaiEvent::Pon {
+                    actor: 1,
+                    target: 0,
+                    pai: "1m".to_string(),
+                    consumed: vec!["1m".to_string(), "1m".to_string()],
+                },
+                MjaiEvent::Daiminkan {
+                    actor: 1,
+                    target: 0,
+                    pai: "1m".to_string(),
+                    consumed: vec!["1m".to_string(), "1m".to_string(), "1m".to_string()],
+                },
+                MjaiEvent::Ankan {
+                    actor: 1,
+                    consumed: vec![
+                        "9s".to_string(),
+                        "9s".to_string(),
+                        "9s".to_string(),
+                        "9s".to_string(),
+                    ],
+                },
+                MjaiEvent::Kakan {
+                    actor: 1,
+                    pai: "1m".to_string(),
+                    consumed: vec!["1m".to_string(), "1m".to_string(), "1m".to_string()],
+                },
+            ] {
+                let mut state = started(2);
+                first_discards(&mut state, &[0]);
+                state.on_event(&call);
+
+                assert_eq!(state.double_riichi_eligible(2), Some(false), "{call:?}");
+
+                state.on_tsumo(2, "?".to_string());
+                state.on_reach(2);
+                state.on_dahai(2, "1m");
+
+                assert_eq!(state.declared_double_riichi(2), Some(false), "{call:?}");
+            }
+        }
+
+        #[test]
+        fn a_new_kyoku_resets_the_declared_double_riichi() {
+            let mut state = started(0);
+            state.on_tsumo(0, "?".to_string());
+            state.on_reach(0);
+            state.on_dahai(0, "1m");
+            assert_eq!(state.declared_double_riichi(0), Some(true));
+
+            state.on_start_kyoku();
+
+            assert_eq!(state.declared_double_riichi(0), None);
+            assert_eq!(state.double_riichi_eligible(0), Some(true));
         }
     }
 }
