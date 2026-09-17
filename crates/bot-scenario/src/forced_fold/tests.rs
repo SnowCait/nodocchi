@@ -31,6 +31,7 @@ fn genbutsu(mjai: &str, rank: usize) -> ForcedFoldRankedCandidate {
         rank,
         defense_kind: ForcedFoldDefenseKind::Reach(DefenseFallbackKind::Genbutsu),
         player_ron_risk_evidence: Some(vec![evidence(1, 0, 3_812)]),
+        copies: 1,
     }
 }
 
@@ -40,6 +41,7 @@ fn exact(mjai: &str, rank: usize, ron_capable_weight: u128) -> ForcedFoldRankedC
         rank,
         defense_kind: ForcedFoldDefenseKind::Reach(DefenseFallbackKind::ExactRonRisk),
         player_ron_risk_evidence: Some(vec![evidence(1, ron_capable_weight, 3_791)]),
+        copies: 1,
     }
 }
 
@@ -49,6 +51,7 @@ fn heuristic(mjai: &str, rank: usize, kind: DefenseFallbackKind) -> ForcedFoldRa
         rank,
         defense_kind: ForcedFoldDefenseKind::Reach(kind),
         player_ron_risk_evidence: None,
+        copies: 1,
     }
 }
 
@@ -101,7 +104,9 @@ fn summary_shows_the_production_top_three_candidates() {
         "Summary\n  mode: ForcedFold\n  source: DefenseFallback\
          \n\n  rank 1: E\n    ron safe: yes\n    reason: Genbutsu\
          \n\n  rank 2: N\n    ron safe: no\n    model risk: 0.00%\n    evidence: 0 / 3791\
-         \n\n  rank 3: 1m\n    ron safe: no\n    model risk: 2.74%\n    evidence: 104 / 3791"
+         \n    copies: 1\n    fold risk: 0.00%\
+         \n\n  rank 3: 1m\n    ron safe: no\n    model risk: 2.74%\n    evidence: 104 / 3791\
+         \n    copies: 1\n    fold risk: 2.74%"
     );
 }
 
@@ -203,6 +208,7 @@ fn summary_does_not_treat_a_rounded_zero_percent_as_zero_risk() {
             rank: 5,
             defense_kind: ForcedFoldDefenseKind::Reach(DefenseFallbackKind::ExactRonRisk),
             player_ron_risk_evidence: Some(vec![evidence(1, 1, 50_000)]),
+            copies: 1,
         },
     ]));
 
@@ -282,6 +288,7 @@ fn summary_lists_every_target_risk_worst_first_for_multiple_targets() {
                     evidence(1, 123, 1_498),
                     evidence(3, 41, 1_750),
                 ]),
+                copies: 1,
             },
             ForcedFoldRankedCandidate {
                 action: dahai("1m"),
@@ -293,6 +300,7 @@ fn summary_lists_every_target_risk_worst_first_for_multiple_targets() {
                     evidence(1, 0, 1_498),
                     evidence(3, 200, 1_750),
                 ]),
+                copies: 1,
             },
         ],
     ));
@@ -334,6 +342,7 @@ fn summary_names_the_defense_family_of_each_routing() {
                 OpenHandDefenseCategory::SafeAgainstAllTargets,
             ),
             player_ron_risk_evidence: None,
+            copies: 1,
         }],
     ));
     assert!(
@@ -354,6 +363,7 @@ fn summary_names_the_defense_family_of_each_routing() {
                 CombinedDefenseCategory::SafeAgainstAllThreats,
             ),
             player_ron_risk_evidence: None,
+            copies: 1,
         }],
     ));
     assert!(
@@ -364,4 +374,68 @@ fn summary_names_the_defense_family_of_each_routing() {
         combined.contains("  rank 1: 5m\n    ron safe: yes\n    reason: SafeAgainstAllThreats"),
         "{combined}"
     );
+}
+
+#[test]
+fn summary_shows_the_copies_and_the_fold_risk_next_to_the_model_risk() {
+    let mut duplicated = exact("8p", 1, 99);
+    duplicated.copies = 3;
+    let summary =
+        format_forced_fold_summary(&reach_diagnostic(vec![duplicated, exact("1m", 2, 104)]));
+
+    // model risk は1枚切ったときの値のまま残し、順位を決めた score は fold risk として別に出す。
+    assert!(
+        summary.contains(concat!(
+            "  rank 1: 8p\n    ron safe: no\n    model risk: 2.61%\n",
+            "    evidence: 99 / 3791\n    copies: 3\n    fold risk: 0.88%"
+        )),
+        "{summary}"
+    );
+    // copies が1枚なら fold risk は model risk と同じ値になる。
+    assert!(
+        summary.contains(concat!(
+            "  rank 2: 1m\n    ron safe: no\n    model risk: 2.74%\n",
+            "    evidence: 104 / 3791\n    copies: 1\n    fold risk: 2.74%"
+        )),
+        "{summary}"
+    );
+}
+
+#[test]
+fn summary_lists_the_fold_risk_of_every_target_worst_first() {
+    let summary = format_forced_fold_summary(&diagnostic(
+        ForcedFoldDefenseKind::Combined(CombinedDefenseCategory::ExactRonRisk),
+        vec![ForcedFoldRankedCandidate {
+            action: dahai("9s"),
+            rank: 1,
+            defense_kind: ForcedFoldDefenseKind::Combined(CombinedDefenseCategory::ExactRonRisk),
+            player_ron_risk_evidence: Some(vec![evidence(1, 123, 1_498), evidence(3, 41, 1_750)]),
+            copies: 2,
+        }],
+    ));
+
+    // target 別の fold risk も model risk と同じ worst-first 順で並べる。
+    assert!(
+        summary.contains(concat!(
+            "    copies: 2\n    fold risk:\n",
+            "      player 1: 4.19%\n      player 3: 1.18%"
+        )),
+        "{summary}"
+    );
+}
+
+#[test]
+fn summary_omits_the_fold_risk_without_an_exact_model_risk() {
+    let summary = format_forced_fold_summary(&reach_diagnostic(vec![
+        genbutsu("E", 1),
+        heuristic(
+            "N",
+            2,
+            DefenseFallbackKind::HonorSafety(HonorSafetyRank::ThreeOrMoreVisible),
+        ),
+    ]));
+
+    // exact model が使えない候補には存在しない score を作らない。
+    assert!(!summary.contains("fold risk"), "{summary}");
+    assert!(!summary.contains("copies"), "{summary}");
 }
