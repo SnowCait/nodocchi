@@ -285,7 +285,7 @@ production bot の判断は変わりません。`ShantenAgent::act()` も `diagn
 | 相手の threat | 使用する防御 | `source` |
 | --- | --- | --- |
 | リーチ者のみ | リーチ者向け防御 fallback (共通現物 / exact ron-risk model / 字牌・壁・スジ等) | `DefenseFallback` |
-| High OpenHandThreat の副露相手のみ | OpenHand 防御 fallback | `OpenHandDefenseFallback` |
+| High OpenHandThreat の相手のみ | OpenHand 防御 fallback | `OpenHandDefenseFallback` |
 | リーチ者と High OpenHandThreat の相手が同時 | 複合 threat 防御 fallback | `CombinedThreatDefenseFallback` |
 
 threat の分類も既存 classification と同じ source of truth を使い、High 条件などをここで書き直しません。
@@ -432,7 +432,7 @@ fold_risk = 1 - (1 - model_risk) ^ (1 / copies)
 この近似は、通過が次巡以降へどれだけ残るかを target 種別ごとに区別していません。実際の safety evidence の寿命は違います ([passed tile の区別](ai/defense.md#passed-tile-の区別))。
 
 - **Reach**: 通れば `post_reach_passed` としてそのリーチ者への現物になります。リーチ者の手牌は変化しないので、この safety は局中継続します。
-- **OpenHand**: 非リーチ副露相手の通過情報は、Reach と同じ永続的な hard-safe ではありません。`same_hand_passed` は「target の concealed hand が最後に変化して以降に通った」ことを前提とする safety evidence で、手出し・ツモ切りか判別できない打牌・鳴き・槓で失効します。production もこれを hard-safe とは扱わず、exact model の `R == 0` とも扱いません。
+- **OpenHand**: 非リーチ相手の通過情報は、Reach と同じ永続的な hard-safe ではありません。`same_hand_passed` は「target の concealed hand が最後に変化して以降に通った」ことを前提とする safety evidence で、手出し・ツモ切りか判別できない打牌・鳴き・槓で失効します。production もこれを hard-safe とは扱わず、exact model の `R == 0` とも扱いません。
 
 `fold risk` はこの違いを厳密にモデル化した値ではなく、あくまで ForcedFold ranking 用の heuristic です。通過後の防御状態そのものを評価する continuation value / lookahead は [issue #329](https://github.com/SnowCait/nodocchi/issues/329) で別途検討します。
 
@@ -707,7 +707,7 @@ RiichiLab capture の再生では、observation の `riichi_sutehais` (リーチ
 
 現物は対象リーチ者自身の河と、そのリーチ成立後に他家から切られて通った牌です。後者は河だけから逆算できないため `post_reach_passed` で指定します。牌種だけを保持し、見え牌や河には影響しません。赤5は黒5と同じ牌種です。
 
-これはリーチ者専用の事実です。非リーチ副露相手の防御には使いません。詳しくは [防御におけるロン安全根拠](ai/defense.md#target-ごとのロン安全根拠) を参照してください。
+これはリーチ者専用の事実です。非リーチ相手の防御には使いません。詳しくは [防御におけるロン安全根拠](ai/defense.md#target-ごとのロン安全根拠) を参照してください。
 
 ```bash
 cargo run -p bot-scenario -- crates/bot-scenario/scenarios/post_reach_genbutsu.json

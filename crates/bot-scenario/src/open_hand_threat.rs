@@ -1,11 +1,11 @@
-//! 非リーチ副露相手の観測事実を段階的に比較するための scenario corpus と、その回帰テスト。
+//! 非リーチ相手の観測事実を段階的に比較するための scenario corpus と、その回帰テスト。
 //!
-//! 各 fixture は同じ自分の攻撃状態に対して相手の副露だけを変えたもので、現行の
+//! 各 fixture は同じ自分の攻撃状態に対して相手の副露・暗槓だけを変えたもので、現行の
 //! `PlayerThreatFacts` / `OpenHandThreat` / 押し引き / 通常打牌 selected を並べて比較するための
 //! 固定局面。corpus 側で threat score や副露評価を再実装せず、production が構築した facts と
 //! classification をそのまま確認する。
 //!
-//! `decide_push_pull()` は `High` の副露相手だけを threat として扱うため、`None` / `Present` の
+//! `decide_push_pull()` は `High` の相手だけを threat として扱うため、`None` / `Present` の
 //! fixture は従来どおり `NoThreat` → `Push`、`High` の fixture は自分の攻撃状態で分かれる。
 //! 強いテンパイの自分なら `StrongTenpaiAgainstHighOpenHand` → `Push`、一向聴の自分なら受け入れの
 //! 強さにかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の自分なら

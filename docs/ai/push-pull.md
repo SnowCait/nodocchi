@@ -7,14 +7,14 @@
 | threat | 条件 | reason 系列 |
 | --- | --- | --- |
 | Riichi threat | 他家リーチが1人以上 | `*AgainstReach` |
-| High OpenHandThreat | 他家リーチがなく、High の非リーチ副露相手が1人以上 | `*AgainstHighOpenHand` |
+| High OpenHandThreat | 他家リーチがなく、High の非リーチ相手が1人以上 | `*AgainstHighOpenHand` |
 | Combined threat | 他家リーチと High OpenHandThreat が同時に存在 | `*AgainstCombinedThreat` |
 
-`Present` の副露相手は明確な threat に数えません。
+`Present` の相手は明確な threat に数えません。
 
 ## OpenHandThreat
 
-非リーチ副露相手を観測 facts だけから `None` / `Present` / `High` に分類する暫定 heuristic です。テンパイ確率、放銃率、正確な打点ではありません。
+非リーチ相手を観測 facts だけから `None` / `Present` / `High` に分類する暫定 heuristic です。テンパイ確率、放銃率、正確な打点ではありません。
 
 完成面子の数は暗槓を含む fixed meld 全体 (`meld_count`) で数えます。暗槓は公開副露ではありませんが完成済みの面子なので、手の進行度には個数ぶん反映します。大明槓・加槓は公開副露なので `meld_count` と `open_meld_count` の両方に1面子として入り、暗槓として二重には数えません。
 

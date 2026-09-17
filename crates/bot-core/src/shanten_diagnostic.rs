@@ -172,7 +172,7 @@ pub struct ShantenDecisionDiagnostic {
     /// target は `player_threats` が持つ classification をそのまま source of truth にして選ぶ。
     /// `High` の相手がいない局面では `targets` も `candidates` も空になる。
     ///
-    /// 防御 fallback ([`Self::defense`]) がリーチ者向けなのに対し、こちらは非リーチ副露相手
+    /// 防御 fallback ([`Self::defense`]) がリーチ者向けなのに対し、こちらは非リーチ相手
     /// 向けで、現物相当の根拠に `post_reach_passed_tiles` を使わない。`selected` は `act()` が
     /// 実際に採用した OpenHand 防御 fallback で、診断側で選び直さない。採用しなかった局面では
     /// `None` になり、候補評価だけが解析用に残る。
@@ -196,7 +196,7 @@ impl ShantenDecisionDiagnostic {
         self.selected_source.defense_kind()
     }
 
-    /// 最終 action が非リーチ副露相手向けの防御 fallback 由来の場合のその大分類。
+    /// 最終 action が非リーチ相手向けの防御 fallback 由来の場合のその大分類。
     /// 他の経路では `None`。
     pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
         self.selected_source.open_hand_defense_category()

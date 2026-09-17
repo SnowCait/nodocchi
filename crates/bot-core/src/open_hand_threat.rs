@@ -1,14 +1,14 @@
-//! 非リーチ副露相手の暫定 threat classification。
+//! 非リーチ相手 (副露・暗槓を持つ席) の暫定 threat classification。
 //!
 //! 観測 facts ([`PlayerThreatFacts`]) だけを入力にした pure な判定で、`GameContext` を
 //! 解析し直さない。押し引き・防御の policy はここには持たない。
 
 use crate::threat::PlayerThreatFacts;
 
-/// 非リーチ副露相手の暫定的な危険度。
+/// 非リーチ相手の暫定的な危険度。
 ///
-/// 正確なテンパイ確率・放銃率・推定打点ではなく、観測できた副露・ドラ・役牌・局進行だけから
-/// 決める暫定 heuristic。
+/// 正確なテンパイ確率・放銃率・推定打点ではなく、観測できた副露・暗槓・ドラ・役牌・局進行だけ
+/// から決める暫定 heuristic。公開副露が無くても暗槓だけで `Present` / `High` になり得る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenHandThreatLevel {
     /// fixed meld が無い。Ankan も完成面子なので、暗槓だけの相手はここには入らない。
@@ -138,7 +138,7 @@ const MID_ROUND_DISCARD_COUNT: usize = 9;
 // 1面子でも強く警戒し始める河の枚数。
 const LATE_ROUND_DISCARD_COUNT: usize = 12;
 
-/// 観測 facts から非リーチ副露相手の暫定 threat を分類する pure helper。
+/// 観測 facts から非リーチ相手の暫定 threat を分類する pure helper。
 ///
 /// これは暫定 heuristic であり、正確なテンパイ確率・放銃率・推定打点を表さない。暗槓も完成済みの
 /// 面子なので、進行度の軸には公開副露と同じく1面子として数え、その中のドラ・赤ドラ・確定役牌も

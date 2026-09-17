@@ -279,7 +279,7 @@ pub struct PlayerThreatDiagnostic {
     pub facts: PlayerThreatFacts,
     /// fixed meld ごとの観測事実。`melds` の順序は `GameContext` の順序そのまま。
     pub melds: Vec<MeldThreatDiagnostic>,
-    /// `facts` だけから求めた非リーチ副露相手の暫定 classification
+    /// `facts` だけから求めた非リーチ相手の暫定 classification
     /// ([`classify_open_hand_threat`])。observed facts とは分けて持ち、`GameContext` を
     /// 解析し直さない。押し引き・防御にはまだ使わない診断専用の情報。
     pub open_hand_threat: OpenHandThreatAssessment,

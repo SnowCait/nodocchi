@@ -160,7 +160,7 @@ exact model が利用できない場合の従来 selection です。全リーチ
 
 ## OpenHand Defense
 
-`open hand threat: High` の非リーチ副露相手だけを target にします。classification は [OpenHandThreat](push-pull.md#openhandthreat) を共有し、Defense 側で High 条件を再実装しません。classification は暗槓も完成面子として数えるため、公開副露が無くても暗槓だけで `High` になった相手は target になります。`Present` / `None`、自分、リーチ済み、player id 不明の席は target 外です。
+`open hand threat: High` の非リーチ相手だけを target にします。classification は [OpenHandThreat](push-pull.md#openhandthreat) を共有し、Defense 側で High 条件を再実装しません。classification は暗槓も完成面子として数えるため、公開副露が無くても暗槓だけで `High` になった相手は target になります。`Present` / `None`、自分、リーチ済み、player id 不明の席は target 外です。
 
 候補の大分類は次の順です。
 
@@ -205,7 +205,7 @@ Combined Defense には exact hidden-hand model を接続せず、従来の heur
 | `Riichi` | 本人の河 + `post_reach_passed` |
 | `HighOpenHand` | 本人の河 + 現在有効な `temporary_passed` |
 
-`post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実で、リーチ者の手牌が変化しないため局中継続します。`temporary_passed` は非リーチを含む各 player について「一時フリテンで現在ロンできない」事実で、対象 player の次のツモ、chi / pon / daiminkan / ankan / kakan で消えます。両者は寿命が異なる別 state で、前者を非リーチ副露相手へ流用しません。
+`post_reach_passed` は「リーチ成立後に通った」というリーチ固有の事実で、リーチ者の手牌が変化しないため局中継続します。`temporary_passed` は非リーチを含む各 player について「一時フリテンで現在ロンできない」事実で、対象 player の次のツモ、chi / pon / daiminkan / ankan / kakan で消えます。両者は寿命が異なる別 state で、前者を非リーチ相手へ流用しません。
 
 hard-safe ではない `same_hand_passed` はこの表に入りません。区別は [passed tile の区別](#passed-tile-の区別) を参照してください。
 
@@ -225,7 +225,7 @@ exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、�
 
 `same_hand_passed` は、対象 player の concealed hand が最後に変化して以降に実際に通った牌です。一時フリテンはすでに解けている可能性があるので hard-safe ではありません。ただし「同じ手牌のままその牌を見逃した」という観測事実なので、Wall / OneChance / Suji のような見え牌・河由来の heuristic より強い safety evidence として扱い、hard-safe の次に置きます。ツモ切りは concealed hand を変えないので維持し、手出し、ツモ切りかどうか判別できない打牌、chi / pon / daiminkan / ankan / kakan では失効します。判別できない打牌を手牌不変とは推測しません。
 
-`post_reach_passed` はリーチ固有の hard-safe (現物) で、リーチ者の手牌が変化しないため局中継続します。`same_hand_passed` は非リーチ副露相手 (`HighOpenHand`) の evidence で、`Riichi` の target には使いません。3つは互いに流用しない別 state です。
+`post_reach_passed` はリーチ固有の hard-safe (現物) で、リーチ者の手牌が変化しないため局中継続します。`same_hand_passed` は非リーチ相手 (`HighOpenHand`) の evidence で、`Riichi` の target には使いません。3つは互いに流用しない別 state です。
 
 入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。`same_hand_passed` は RiichiLab live client が MJAI event の `tsumogiri` から積み上げる履歴で、bot-scenario の入力 field はありません。
 

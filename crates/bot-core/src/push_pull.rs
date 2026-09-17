@@ -406,7 +406,7 @@ pub struct PushPullInputs {
     /// リーチ情報の source of truth であり、副露由来の危険度は `open_hand_threats` が持つ
     /// classification が source of truth。
     pub player_threats: [PlayerThreatFacts; 4],
-    /// 全4席分の非リーチ副露相手の classification。`player_threats` から
+    /// 全4席分の非リーチ相手の classification。`player_threats` から
     /// [`classify_open_hand_threats`] で一度だけ導出する。
     ///
     /// 押し引きと OpenHand 防御はこの同じ classification を参照し、High 条件をそれぞれで
@@ -639,7 +639,7 @@ pub(crate) fn push_pull_inputs_from_selected_tenpai(
 /// 数え直さない。`player_id` が不明な場合の扱いも `GameContext::reached_opponents()` と同じで、
 /// リーチフラグが立っている全席を他家リーチとして数える。
 ///
-/// 非リーチ副露相手の classification は既存 [`classify_open_hand_threats`] を同じ facts から
+/// 非リーチ相手の classification は既存 [`classify_open_hand_threats`] を同じ facts から
 /// 一度だけ導出する。押し引き側で High 条件を分類し直さない。
 ///
 /// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
@@ -828,7 +828,7 @@ impl ThreatKind {
     }
 }
 
-/// 明確な threat の有無と種類。`Present` の副露相手は threat に数えない。
+/// 明確な threat の有無と種類。`Present` の相手は threat に数えない。
 ///
 /// リーチ情報も High 条件も既存の source of truth をそのまま使い、ここで分類し直さない。
 fn threat_kind(inputs: &PushPullInputs) -> Option<ThreatKind> {
@@ -940,7 +940,7 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
 /// 選択打牌の hard-safe と終盤1面子 High の例外は High OpenHandThreat 単独に限り、Riichi /
 /// Combined には適用しない。hard-safe 判定は OpenHand 防御の既存 helper を入力構築時に共有し、
-/// 手牌内の別候補は見ない。`Present` の副露相手は threat に数えない。
+/// 手牌内の別候補は見ない。`Present` の相手は threat に数えない。
 ///
 /// 情報不足 (攻撃評価なし / テンパイなのに待ちを構築できない / 恒常フリテンが判定不能) の場合は
 /// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1面子 High だけを相手にしたテンパイの

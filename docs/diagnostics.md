@@ -439,7 +439,7 @@ Combined defense
   selected category: SafeAgainstAllThreats
 ```
 
-`ron safe[n kind]` は target ごとの根拠でロン安全か、`safe against all threats` は全 target に安全かを示します。リーチ者と副露相手では根拠が異なります。
+`ron safe[n kind]` は target ごとの根拠でロン安全か、`safe against all threats` は全 target に安全かを示します。リーチ者と非リーチ相手では根拠が異なります。
 
 `same hand passed[n kind]` と `same hand passed for all threats` は OpenHand defense と同じ evidence で、成立時だけ出ます。same-hand passed を根拠にできるのは `HighOpenHand` の target だけなので、`Riichi` の target にはこの行が出ません。`selected category` は `SafeAgainstAllThreats` / `SameHandPassed` / `HonorSafety` / `SuitedSafety` です。
 

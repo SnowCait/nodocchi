@@ -1,4 +1,4 @@
-//! `High` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の非リーチ副露相手に対する防御 safety の source of truth。
+//! `High` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の非リーチ相手に対する防御 safety の source of truth。
 //!
 //! 判定は既存 Defense の pure helper をそのまま共有し、字牌の見え枚数・壁・スジ・役牌価値を
 //! 別実装しない。リーチ者向けの `*_for_all_reached` と違うのは対象 player 集合の決め方と、
@@ -56,7 +56,7 @@ pub fn high_open_hand_threat_players_from_context(context: &GameContext) -> Vec<
     high_open_hand_threat_players_from_facts(&player_threat_facts_from_context(context))
 }
 
-/// 非リーチ副露 target にこの牌でロンされないと言えるか判定する source of truth。
+/// 非リーチ target にこの牌でロンされないと言えるか判定する source of truth。
 pub fn is_ron_safe_for_open_hand_target(
     tile: TileType,
     player: usize,
@@ -1291,7 +1291,7 @@ mod tests {
 
     #[test]
     fn a_post_reach_passed_tile_is_not_river_safe_for_an_open_hand_target() {
-        // post_reach_passed_tiles はリーチ固有の情報で、非リーチ副露相手には流用しない。
+        // post_reach_passed_tiles はリーチ固有の情報で、非リーチ相手には流用しない。
         let context = ContextSpec::new()
             .melds_of(3, open_melds(3))
             .post_reach_passed(3, "4s")
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn a_post_reach_passed_tile_does_not_exclude_a_target_from_the_aggregate() {
-        // post_reach_passed_tiles は非リーチ副露相手の除外根拠にしない。player 2 は 5m を
+        // post_reach_passed_tiles は非リーチ相手の除外根拠にしない。player 2 は 5m を
         // 河に切っていないので、その無スジも役牌価値もそのまま集約へ入る。
         let context = ContextSpec::new()
             .melds_of(2, open_melds(3))
