@@ -209,7 +209,7 @@ Push/Pull
 
 `mode` は最終 action の優先順に影響し、`reason` は offense state と threat 種類を示します。詳しい境界は [押し引きと threat](ai/push-pull.md) を参照してください。
 
-`SafeTenpaiAgainstReach` / `SafeTenpaiAgainstHighOpenHand` / `SafeTenpaiAgainstCombinedThreat` は、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが現在の全 threat target に hard-safe だったため strong-tenpai threshold 未満でも押した、という reason です。threat の種類ごとに分かれるので、リーチ者に対して safe だったのか、`High` の副露相手に対して safe だったのか、複合 threat の全 target に対して safe だったのかが reason だけで分かります。hard-safe の根拠は target の種類ごとに防御の source of truth と同じで、リーチ者はそのリーチ者への現物、`High` の副露相手は本人の河または現在有効な一時通過牌です。スジ・ワンチャンス・exact model risk の低さは根拠になりません。意味は [選択打牌の hard-safe 例外](ai/push-pull.md#選択打牌の-hard-safe-例外) を参照してください。
+`SafeTenpaiAgainstReach` / `SafeTenpaiAgainstHighOpenHand` / `SafeTenpaiAgainstCombinedThreat` は、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが現在の全 threat target に hard-safe だったため strong-tenpai threshold 未満でも押した、という reason です。threat の種類ごとに分かれるので、リーチ者に対して safe だったのか、`High` の非リーチ相手に対して safe だったのか、複合 threat の全 target に対して safe だったのかが reason だけで分かります。hard-safe の根拠は target の種類ごとに防御の source of truth と同じで、リーチ者はそのリーチ者への現物、`High` の非リーチ相手は本人の河または現在有効な一時通過牌です。スジ・ワンチャンス・exact model risk の低さは根拠になりません。意味は [選択打牌の hard-safe 例外](ai/push-pull.md#選択打牌の-hard-safe-例外) を参照してください。
 
 `tenpai offense value` は打牌後テンパイを攻撃継続した場合の確定打点です。`offense mode` は既リーチ / これからリーチする手 (`Reach`) かダマにする手 (`Damaten`) か (自分が既リーチかを判断できない場合は `Unknown`)、`weighted average` は生きた待ちの支払点を残枚数で加重平均した打点、`weighted total` は割り算する前の残枚数加重合計です。確定できない場合はどちらも `unknown` になります。`strong tenpai requirement` は押すために要求する条件で、打点を確定できた非フリテンでは `weighted total >= 15600` (他家リーチ者に親が含まれる場合は `23400`)、確定できない場合と恒常フリテンでは `live wait >= 6` / `live wait >= 8` になります。打牌後がテンパイでなければどちらも評価しません。意味は [攻撃継続時の確定打点](ai/push-pull.md#攻撃継続時の確定打点) を参照してください。
 

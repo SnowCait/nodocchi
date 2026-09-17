@@ -86,9 +86,11 @@ target 集合も target ごとの hard-safe 判定も [防御](defense.md) の�
 | target | hard-safe の根拠 |
 | --- | --- |
 | リーチ者 | そのリーチ者への現物 (本人の河、または `post_reach_passed`) |
-| `High` の副露相手 | 本人の河、または現在有効な一時通過牌 |
+| `High` の非リーチ相手 (`High OpenHandThreat` target) | 本人の河、または現在有効な一時通過牌 |
 
-Combined threat では、全リーチ者と全 `High` 副露相手の双方についてこの条件を満たす必要があります。1 target でも満たさなければ例外は成立しません。
+`High` の target は [OpenHandThreat](#openhandthreat) の classification が source of truth なので、公開副露がある相手に限らず、暗槓だけで `High` になった相手も含みます。
+
+Combined threat では、全リーチ者と全 `High` 非リーチ相手の双方についてこの条件を満たす必要があります。1 target でも満たさなければ例外は成立しません。
 
 reason は threat の種類ごとに分かれるので、diagnostics からどの threat に対して safe だったかが分かります。
 

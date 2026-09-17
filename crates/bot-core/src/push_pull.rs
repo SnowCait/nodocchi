@@ -415,7 +415,7 @@ pub struct PushPullInputs {
     ///
     /// target 集合と target ごとの hard-safe 判定は Combined 防御の source of truth
     /// ([`threat_defense_targets`] / [`is_safe_against_all_threats`]) を共有する。したがって
-    /// リーチ者はそのリーチ者への現物、`High` の副露相手は OpenHand 防御と同じ hard-safe で
+    /// リーチ者はそのリーチ者への現物、`High` の非リーチ相手は OpenHand 防御と同じ hard-safe で
     /// 判定し、threat の種類ごとに safety rule を書き直さない。
     ///
     /// 手牌内の別の safe tile はこの fact に含めない。threat target がいない場合や通常打牌評価が
@@ -749,8 +749,9 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
 /// target 抽出も target ごとの hard-safe 判定も Combined 防御の helper
 /// ([`threat_defense_targets`] / [`is_safe_against_all_threats`]) を共有し、threat の種類ごとに
 /// safety rule を書き直さない。リーチ者はそのリーチ者への現物 (本人の河と
-/// `post_reach_passed_tiles`)、`High` の副露相手は OpenHand 防御と同じ hard-safe (本人の河と
-/// 現在有効な一時通過牌) が根拠になる。
+/// `post_reach_passed_tiles`)、`High` の非リーチ相手は OpenHand 防御と同じ hard-safe (本人の河と
+/// 現在有効な一時通過牌) が根拠になる。`High` の target は classification が source of truth
+/// なので、公開副露がある相手に限らず暗槓だけで `High` になった相手も含む。
 ///
 /// 選択打牌がない場合とその牌種に一致する合法 Dahai がない場合、threat target がいない場合は
 /// `false`。public [`push_pull_inputs_from_context`] が全手牌候補から global best を渡す場合でも、
@@ -959,7 +960,7 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
 /// 選択打牌の hard-safe 例外は3種類すべてに適用し、reason は threat の種類ごとに
 /// `SafeTenpaiAgainst*` で分かれる。target ごとの hard-safe 判定は Combined 防御の既存 helper を
-/// 入力構築時に共有するので、リーチ者にはそのリーチ者への現物、`High` の副露相手には OpenHand
+/// 入力構築時に共有するので、リーチ者にはそのリーチ者への現物、`High` の非リーチ相手には OpenHand
 /// 防御と同じ hard-safe が根拠になり、複合ではその両方を全 target について要求する。スジ・
 /// ワンチャンス・model risk の低さは根拠にせず、手牌内の別候補も見ない。終盤1面子 High の例外は
 /// 従来どおり High OpenHandThreat 単独に限る。`Present` の相手は threat に数えない。
@@ -4468,7 +4469,7 @@ mod tests {
     fn combined_threat_targets_need_hard_safe_for_reach_and_high_open_hand() {
         let five_man = TileType::new(4).unwrap();
 
-        // リーチ者にだけ現物。High の副露相手には通っていない。
+        // リーチ者にだけ現物。High の非リーチ相手には通っていない。
         let reach_only = threat_target_context(
             [false, true, false, false],
             [vec![], vec![tile(16)], vec![], vec![]],
@@ -4476,7 +4477,7 @@ mod tests {
         );
         assert!(!hard_safe_fact(&reach_only, five_man, tile(17)));
 
-        // High の副露相手にだけ hard-safe。リーチ者には通っていない。
+        // High の非リーチ相手にだけ hard-safe。リーチ者には通っていない。
         let high_only = threat_target_context(
             [false, true, false, false],
             [vec![], vec![], vec![tile(16)], vec![]],

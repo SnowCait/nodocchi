@@ -94,12 +94,13 @@ pub fn combined_threat_defense_targets(
 
 /// 現在の threat target を種類付きで席順に集める pure helper。
 ///
-/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`High` の副露相手は渡された
+/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`High` の非リーチ相手は渡された
 /// classification ([`high_open_hand_threat_players`]) をそのまま source of truth にする。どちらも
-/// ここで分類し直さない。リーチ済みの席は OpenHandThreat の対象外なので、1つの席が両方の target
-/// になることはない。
+/// ここで分類し直さない。したがって [`ThreatDefenseTargetKind::HighOpenHand`] の target は公開副露
+/// がある相手に限らず、暗槓だけで `High` になった相手も含む。リーチ済みの席は OpenHandThreat の
+/// 対象外なので、1つの席が両方の target になることはない。
 ///
-/// [`combined_threat_defense_targets`] と違い、リーチ者だけ・`High` の副露相手だけの局面でも
+/// [`combined_threat_defense_targets`] と違い、リーチ者だけ・`High` の非リーチ相手だけの局面でも
 /// その target を返す。target ごとの hard-safe 判定 ([`is_ron_safe_for_target`] /
 /// [`is_safe_against_all_threats`]) を threat 構成によらず1つの概念として共有したい呼び出し元の
 /// ための入口で、防御 fallback の action 選択そのものは従来どおり threat 構成ごとの入口が担当する。
@@ -1560,7 +1561,7 @@ mod tests {
     #[test]
     fn the_shared_threat_targets_cover_each_threat_alone() {
         // 複合 threat 用の target は従来どおり両方いる局面だけだが、共有 helper は
-        // リーチだけ・High の副露相手だけの局面でもその target を返す。
+        // リーチだけ・High の非リーチ相手だけの局面でもその target を返す。
         let facts_of = |context: &GameContext| player_threat_facts_from_context(context);
 
         let reach_only = ContextSpec::new().reached(RIICHI_TARGET).build();
