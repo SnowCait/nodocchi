@@ -441,8 +441,9 @@ impl PushPullInputs {
 
     /// High OpenHandThreat の対象がすべて「完成面子1つかつ河12枚以上」だけで High になった相手か。
     ///
-    /// 面子数は classification と同じく暗槓を含む `meld_count` で数える。暗槓を持つ相手は完成
-    /// 面子が2つ以上ある側の条件で High になるので、ここでも終盤1面子だけの target とは扱わない。
+    /// 面子数は classification と同じく暗槓を含む `meld_count` で数える。したがって公開副露1つ
+    /// だけの相手と暗槓1つだけの相手はどちらも対象で、公開副露と暗槓を1つずつ持つような完成
+    /// 面子2つの相手は対象外になる。
     ///
     /// High target の特定には分類済みの `open_hand_threats` を使い、その target の意味は対応する
     /// `player_threats` の観測 facts で確認する。diagnostic reason には依存せず、High 条件そのものも
@@ -486,7 +487,7 @@ pub enum PushPullReason {
     StrongTenpaiAgainstHighOpenHand,
     /// 通常打牌として選択したテンパイ打牌が全 High OpenHand target に hard-safe なので押す。
     SafeTenpaiAgainstHighOpenHand,
-    /// 終盤の1副露だけが High target の局面で、通常打牌後がテンパイなので押す。
+    /// 終盤の完成面子1つだけが High target の局面で、通常打牌後がテンパイなので押す。
     TenpaiAgainstLateOneMeldHighOpenHand,
     WeakTenpaiAgainstHighOpenHand,
     /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
@@ -924,25 +925,25 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 明確な threat が無ければ従来どおり通常の攻撃判断 (`Push`) を続ける。明確な threat がある
 /// 場合は、打牌後が強いテンパイのときと、一向聴で十分な攻撃価値を確認できたときだけ押し、
 /// それ以外は降りる。ただし他家リーチがなく、通常打牌として選んだテンパイ打牌そのものが全
-/// High target に hard-safe な場合、または High target がすべて1副露かつ河12枚以上なら、
+/// High target に hard-safe な場合、または High target がすべて完成面子1つかつ河12枚以上なら、
 /// テンパイの強さを問わず押す。
 ///
 /// | 自分の状態 | mode |
 /// | --- | --- |
 /// | 攻撃評価を作れない | `Fold` |
 /// | 強いテンパイ | `Push` |
-/// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 High target に hard-safe、または終盤1副露 High だけなら `Push`) |
+/// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 High target に hard-safe、または終盤1面子 High だけなら `Push`) |
 /// | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
 /// | それ以外の一向聴 | `Fold` |
 /// | 二向聴以上 | `Fold` |
 ///
 /// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
-/// 選択打牌の hard-safe と終盤1副露 High の例外は High OpenHandThreat 単独に限り、Riichi /
+/// 選択打牌の hard-safe と終盤1面子 High の例外は High OpenHandThreat 単独に限り、Riichi /
 /// Combined には適用しない。hard-safe 判定は OpenHand 防御の既存 helper を入力構築時に共有し、
 /// 手牌内の別候補は見ない。`Present` の副露相手は threat に数えない。
 ///
 /// 情報不足 (攻撃評価なし / テンパイなのに待ちを構築できない / 恒常フリテンが判定不能) の場合は
-/// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1副露 High だけを相手にしたテンパイの
+/// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1面子 High だけを相手にしたテンパイの
 /// 例外では、`min_shanten_after_discard <= 0` を根拠に押すため、待ち情報や恒常フリテンから強い
 /// テンパイと確認できなくても `Push` になり得る。原則の局面で `Neutral` にすると通常打牌が防御
 /// fallback より優先され、実質的に押してしまうため。
@@ -992,7 +993,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     };
 
     // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、選択打牌が全 High target に hard-safe、
-    // または終盤1副露 High だけなら押す。
+    // または終盤1面子 High だけなら押す。
     if offense.min_shanten_after_discard <= TENPAI_SHANTEN {
         let (mode, reason) = if is_strong_tenpai(&offense, inputs.dealer_reacher) {
             (PushPullMode::Push, reasons.strong_tenpai)
@@ -1098,6 +1099,10 @@ mod tests {
     use super::*;
     use crate::meld::{Meld, MeldKind};
     use crate::offense_value::{OffenseValue, TenpaiOffenseMode};
+    use crate::open_hand_threat::{
+        OpenHandThreatDecision, OpenHandThreatLevel, OpenHandThreatReason,
+        classify_open_hand_threat,
+    };
     use bot_logic::{TenpaiWaitMetric, TileId, TileType};
 
     fn tile(value: u8) -> TileId {
@@ -3974,6 +3979,15 @@ mod tests {
         )
     }
 
+    // ドラも役牌も含まない暗槓。
+    fn ankan_meld() -> crate::meld::Meld {
+        crate::meld::Meld::new(
+            crate::meld::MeldKind::Ankan,
+            vec![tile(12), tile(13), tile(14), tile(15)],
+            None,
+        )
+    }
+
     // 指定席が Chi を `count` 個持つ4席分の facts。自分は player 0 で親も player 0。
     fn open_meld_facts_of(
         player: usize,
@@ -3981,8 +3995,23 @@ mod tests {
         reached: [bool; 4],
         player_id: Option<u8>,
     ) -> [PlayerThreatFacts; 4] {
+        meld_facts_of(
+            player,
+            (0..count).map(|_| chi_meld()).collect(),
+            reached,
+            player_id,
+        )
+    }
+
+    // 指定席が `player_melds` を持つ4席分の facts。自分は player 0 で親も player 0。
+    fn meld_facts_of(
+        player: usize,
+        player_melds: Vec<crate::meld::Meld>,
+        reached: [bool; 4],
+        player_id: Option<u8>,
+    ) -> [PlayerThreatFacts; 4] {
         let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
-        melds[player] = (0..count).map(|_| chi_meld()).collect();
+        melds[player] = player_melds;
 
         let context = GameContext::from_parts_with_melds(
             None,
@@ -4005,7 +4034,7 @@ mod tests {
         open_meld_facts_of(1, 3, [false; 4], Some(0))
     }
 
-    // player 1 が1副露かつ河12枚で High になる facts。
+    // player 1 が公開副露1つかつ河12枚で High になる facts。
     fn late_one_meld_high_facts() -> [PlayerThreatFacts; 4] {
         let mut facts = open_meld_facts_of(1, 1, [false; 4], Some(0));
         facts[1].discard_count = 12;
@@ -4014,6 +4043,13 @@ mod tests {
 
     fn late_one_meld_high_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
         inputs_with_threats(0, false, false, offense, late_one_meld_high_facts())
+    }
+
+    // player 1 が暗槓1つかつ河12枚で High になる facts。公開副露は持たない。
+    fn late_single_ankan_high_facts() -> [PlayerThreatFacts; 4] {
+        let mut facts = meld_facts_of(1, vec![ankan_meld()], [false; 4], Some(0));
+        facts[1].discard_count = 12;
+        facts
     }
 
     // High の副露相手だけがいる局面の押し引き入力。
@@ -4252,8 +4288,41 @@ mod tests {
     }
 
     #[test]
+    fn tenpai_against_a_late_single_ankan_high_open_hand_pushes() {
+        // 公開副露が無く暗槓1つだけでも、完成面子1つかつ河12枚以上で High になった相手は
+        // 終盤1面子の例外の対象になる。
+        let facts = late_single_ankan_high_facts();
+
+        assert_eq!(facts[1].meld_count, 1);
+        assert_eq!(facts[1].open_meld_count, 0);
+        assert_eq!(facts[1].discard_count, 12);
+        assert_eq!(
+            classify_open_hand_threat(facts[1]),
+            OpenHandThreatAssessment::Classified(OpenHandThreatDecision {
+                level: OpenHandThreatLevel::High,
+                reason: OpenHandThreatReason::FixedMeldFromTwelveDiscards,
+            })
+        );
+
+        let inputs = inputs_with_threats(
+            0,
+            false,
+            false,
+            Some(tenpai_offense(3, PermanentFuriten::No)),
+            facts,
+        );
+
+        assert!(inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Push,
+            PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+        );
+    }
+
+    #[test]
     fn the_late_one_meld_exception_does_not_depend_on_the_offense_value() {
-        // 打点を確定しても確定しなくても、終盤1副露 High だけならテンパイで押す例外は変わらない。
+        // 打点を確定しても確定しなくても、終盤1面子 High だけならテンパイで押す例外は変わらない。
         for offense in [
             weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1),
             unknown_value_tenpai_offense(2, PermanentFuriten::No),
