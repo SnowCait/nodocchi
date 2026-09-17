@@ -41,6 +41,24 @@ impl TableStateFacts {
     }
 }
 
+/// 自分のダブル立直に関する観測事実。
+///
+/// 「まだリーチしておらず、今この局面で Reach を選べばダブル立直が確定する」(`eligible`) と
+/// 「宣言済みの自分のリーチがダブル立直だった」(`declared`) は別の事実として持つ。第一巡が
+/// 終われば前者は失われるが、後者は局が終わるまで残るので、成立したダブル立直を第一巡終了で
+/// 失わない。
+///
+/// どちらも履歴から確定できない場合は `None` で、`false` と区別する。observation の `reached`
+/// にはダブル立直かどうかの情報が無いので、リーチ済みという事実だけからダブル立直を推測
+/// しない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DoubleRiichiFacts {
+    /// 現在未リーチで、この局面で Reach を選ぶとダブル立直が確定するか。
+    pub eligible: Option<bool>,
+    /// 宣言済みの自分のリーチがダブル立直だったか。未リーチの場合も `None`。
+    pub declared: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GameContext {
     drawn_tile: Option<TileId>,
@@ -63,6 +81,7 @@ pub struct GameContext {
     same_hand_passed_tiles: Option<[Vec<TileType>; 4]>,
     table_state: TableStateFacts,
     history_furiten: HistoryFuritenFacts,
+    double_riichi: DoubleRiichiFacts,
 }
 
 impl GameContext {
@@ -257,6 +276,14 @@ impl GameContext {
         self
     }
 
+    /// 自分のダブル立直に関する観測事実を設定する。
+    ///
+    /// 履歴を追えない入力経路では既定の unknown のままにし、第一巡ではないと推測しない。
+    pub fn with_double_riichi_facts(mut self, double_riichi: DoubleRiichiFacts) -> Self {
+        self.double_riichi = double_riichi;
+        self
+    }
+
     pub fn drawn_tile(&self) -> Option<TileId> {
         self.drawn_tile
     }
@@ -280,6 +307,11 @@ impl GameContext {
     /// [`history_furiten_after_own_discard`](Self::history_furiten_after_own_discard) を使う。
     pub fn history_furiten(&self) -> HistoryFuritenFacts {
         self.history_furiten
+    }
+
+    /// 自分のダブル立直に関する観測事実。
+    pub fn double_riichi(&self) -> DoubleRiichiFacts {
+        self.double_riichi
     }
 
     /// 今回の打牌を1枚切り終えた時点の履歴依存フリテン。

@@ -478,6 +478,13 @@ defer → forced Damaten
 継続後の未来テンパイ → 既存の将来テンパイ Reach 判定
 ```
 
+リーチ種別 (通常立直 / ダブル立直) も評価時点で分かれます。`reach now` は今この打牌で宣言するリーチなので、ダブル立直と確定していればその2翻を含みます。`defer → forced Reach` と継続枝の terminal tenpai は1巡後以降に初めて宣言するリーチなので、現在のダブル立直 eligibility を引き継がず常に通常立直1翻で評価します。
+
+```text
+reach now            → 現在の手のリーチ (Riichi / DoubleRiichi)
+defer → forced Reach → 将来宣言する仮想リーチ (常に Riichi)
+```
+
 従来 `damaten continuation` と表示していた値は、**将来も強制ダマにする値ではありません**。「今はリーチせず1巡待つ」ものの、terminal tenpai の mode は既存 `decide_reach_reason()` が選ぶ production policy でした。この production continuation は意味を変えず `defer → production` として残し、今回 `defer → forced Reach` と `defer → forced Damaten` を counterfactual として分離しました。
 
 3つの defer は、最初のツモ、非和了牌の物理 variant、既存 selector が選んだ `next discard`、`SelfTsumoPath::immediate()` をすべて共有します。切り替えるのは同じ terminal tenpai に適用する Reach / Damaten Tsumo baseline だけです。`defer → forced Reach` は既存の将来 Reach legality が合法とした枝だけを Reach baseline で評価し、違法な枝は 0 点ではなく unavailable にします。`defer → forced Damaten` は Ron の役有無ではなく既存 Damaten Tsumo baseline を使い、副露手で Tsumo が役なしになる physical variant は既存 semantics どおり成功待ちに含めません。
@@ -685,7 +692,7 @@ nodocchi はまだ「他家がその牌を切る確率」の模型を持たな�
 
 ### Ron baseline
 
-- `reach baseline` は今リーチしてその待ちでロン和了した場合の最低保証打点です。既存のリーチ baseline (`reach_baseline_context()`) をそのまま使うので、リーチ1翻を含み、一発・裏ドラ・河底のような上振れは加算しません (裏ドラは未観測ではなく「0枚と確定」として扱います)。集約も押し引きの攻撃打点と同じ残枚数加重で、赤5 / 黒5は別 variant のまま残します。実際にリーチできる局面 (合法手に `LegalAction::Reach` がある) かつ既存 Ron availability (`TenpaiWaitAvailability::can_ron()`) が `Some(true)` の場合だけ評価し、フリテンとロン可否 unknown では `unavailable` にします。
+- `reach baseline` は今リーチしてその待ちでロン和了した場合の最低保証打点です。既存のリーチ baseline (`current_reach_baseline_context()`) をそのまま使うので、リーチ1翻 (ダブル立直と確定していれば2翻) を含み、一発・裏ドラ・河底のような上振れは加算しません (裏ドラは未観測ではなく「0枚と確定」として扱います)。集約も押し引きの攻撃打点と同じ残枚数加重で、赤5 / 黒5は別 variant のまま残します。実際にリーチできる局面 (合法手に `LegalAction::Reach` がある) かつ既存 Ron availability (`TenpaiWaitAvailability::can_ron()`) が `Some(true)` の場合だけ評価し、フリテンとロン可否 unknown では `unavailable` にします。
 - `damaten baseline` はダマのままロン和了した場合の打点で、既存のリーチ / ダマ判断が評価したダマ打点診断そのものです ([手牌価値](hand-value.md) を参照)。ダマでロンできない場合とロン可否が unknown の場合は既存 semantics どおり評価せず `unavailable` にします。**0 点としては扱いません。**
 
 `reach baseline` の評価は**診断経路だけ**で行います。通常の `act()` はこの層を通らないので、完成手 (`TenpaiCompletedHands`) の組み立ても hand-value evaluation も production には入りません。完成手は待ちごとの解析を丸ごと所有する重い値なので、診断のために production の打牌選択へ持ち回らせません。リーチ判断がダマ打点のために組み立てた集合があればその所有権をそのまま受け取り、無い経路でだけ選んだ打牌1件について既存 helper で1回組み立てます (待ちは既存の受け入れから求めるので、向聴も受け入れも計算し直しません)。

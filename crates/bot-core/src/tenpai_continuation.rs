@@ -29,7 +29,7 @@
 //!
 //! 構造上は和了形になる牌でも、副露手では役が無くてツモ和了できないことがある。その牌は実際に
 //! は和了できず、引いた後に打牌してテンパイを続けられるので継続枝として扱う。役の有無は既存の
-//! Damaten Tsumo scoring ([`ProductionProspectiveValuator::tsumo_variant_outcomes`]) の結論
+//! Damaten Tsumo scoring ([`ProductionProspectiveValuator::current_tsumo_variant_outcomes`]) の結論
 //! そのままで、この層が役や翻数を判定し直すことはない。門前手のツモ和了には必ず門前清自摸和が
 //! 付くため、この振り分けで継続枝が増えるのは副露手だけになる。
 //!
@@ -527,7 +527,7 @@ fn candidate_continuation(
     let outcomes = current.as_ref().map(|facts| {
         inputs
             .valuator
-            .tsumo_variant_outcomes(facts, TenpaiOffenseMode::Damaten)
+            .current_tsumo_variant_outcomes(facts, TenpaiOffenseMode::Damaten)
     });
     let branches = candidate_branches(candidate, value, outcomes.as_ref());
 
@@ -684,7 +684,7 @@ fn candidate_self_tsumo(
         return TenpaiSelfTsumoComparison::default();
     };
     let expected_payment = |mode, own_draws| {
-        baseline_expected_payment(inputs.valuator, current?, mode, own_draws, facts)
+        current_tenpai_expected_payment(inputs.valuator, current?, mode, own_draws, facts)
     };
     let branch_values = branches.expected_self_tsumo_values(facts);
 
@@ -702,7 +702,12 @@ fn candidate_self_tsumo(
 
 // 現在打牌後の聴牌を、指定した攻撃モードの Tsumo baseline で `own_draws` 回以内に自摸和了する
 // 期待支払いへ畳む。baseline も点数計算も集約も既存 Tsumo scoring helper が持つ。
-fn baseline_expected_payment(
+//
+// 評価するのは今この request の時点の現在聴牌なので、Reach は今この打牌で宣言するリーチ
+// ([`ProductionProspectiveValuator::current_tsumo_value`]) として点数計算する。ダブル立直と
+// 確定していればその2翻が入る。1巡 defer した後の継続枝 (`defer_*`) は将来宣言するリーチ
+// なので、この入口を通らず既存2手先評価の prospective baseline のままになる。
+fn current_tenpai_expected_payment(
     valuator: &ProductionProspectiveValuator,
     current: &ProspectiveFacts,
     mode: TenpaiOffenseMode,
@@ -711,7 +716,7 @@ fn baseline_expected_payment(
 ) -> Option<u64> {
     Some(
         valuator
-            .tsumo_value_with_mode(current, mode)?
+            .current_tsumo_value(current, mode)?
             .expected_payment(facts.unknown_tiles, own_draws),
     )
 }
@@ -743,15 +748,16 @@ mod tests {
 
     use std::sync::LazyLock;
 
-    use bot_logic::HistoryFuritenFacts;
+    use bot_logic::{HistoryFuritenFacts, RiichiStatus};
 
     use crate::action::LegalAction;
-    use crate::context::TableStateFacts;
+    use crate::context::{DoubleRiichiFacts, TableStateFacts};
     use crate::discard_selection::{
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
         select_discard_action_with_diagnostic,
     };
     use crate::meld::{Meld, MeldKind};
+    use crate::offense_value::current_reach_riichi_status;
     use crate::reach_policy::{ReachLegalityFacts, is_reach_legal};
 
     // 123m 456m 789m 123p 東 の門前13枚に南をツモった単騎テンパイ。打 E で南単騎、打 S で東単騎
@@ -829,6 +835,8 @@ mod tests {
         scores: Option<[i32; 4]>,
         /// 合法手にリーチを含めるか。現在局面のリーチ可否はこの合法手だけが source of truth。
         legal_reach: bool,
+        /// 自分のダブル立直に関する観測事実。既定は unknown。
+        double_riichi: DoubleRiichiFacts,
         scope: LookaheadDiagnosticScope,
     }
 
@@ -845,6 +853,7 @@ mod tests {
                 remaining_tiles: None,
                 scores: None,
                 legal_reach: false,
+                double_riichi: DoubleRiichiFacts::default(),
                 scope: LookaheadDiagnosticScope::LOOKAHEAD,
             }
         }
@@ -927,7 +936,8 @@ mod tests {
             .with_history_furiten_facts(HistoryFuritenFacts {
                 same_turn: Some(false),
                 riichi_missed_win: Some(false),
-            });
+            })
+            .with_double_riichi_facts(self.double_riichi);
 
             CaseContext {
                 context,
@@ -986,6 +996,20 @@ mod tests {
         LazyLock::new(|| real_spec().build());
     static OPEN_CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
         LazyLock::new(|| open_spec().build());
+
+    // 今この打牌でリーチを宣言すればダブル立直が確定する局面。他の材料は SELF_TSUMO_CASE と同じ。
+    fn double_riichi_spec() -> CaseSpec<'static> {
+        CaseSpec {
+            double_riichi: DoubleRiichiFacts {
+                eligible: Some(true),
+                declared: None,
+            },
+            ..self_tsumo_spec()
+        }
+    }
+
+    static DOUBLE_RIICHI_CASE: LazyLock<DiscardActionSelectionWithDiagnostic> =
+        LazyLock::new(|| double_riichi_spec().build());
 
     fn continuation(
         selection: &DiscardActionSelectionWithDiagnostic,
@@ -1062,7 +1086,7 @@ mod tests {
         let facts = current_tenpai_facts(&valuator, &case.tiles, evaluation_of(selection, discard))
             .expect("現在聴牌を組み立てられる");
         valuator
-            .tsumo_value_with_mode(&facts, mode)
+            .current_tsumo_value(&facts, mode)
             .expect("ツモ打点を確定できる")
     }
 
@@ -1110,7 +1134,7 @@ mod tests {
         let valuator = ProductionProspectiveValuator::new(&case.context);
         let facts = current_tenpai_facts(&valuator, &case.tiles, evaluation_of(selection, discard))
             .expect("現在聴牌を組み立てられる");
-        valuator.tsumo_variant_outcomes(&facts, TenpaiOffenseMode::Damaten)
+        valuator.current_tsumo_variant_outcomes(&facts, TenpaiOffenseMode::Damaten)
     }
 
     // 指定した牌種の黒牌1枚。物理牌 variant 単位の分類を引くために使う。
@@ -1422,6 +1446,118 @@ mod tests {
     }
 
     #[test]
+    fn reach_now_uses_the_double_riichi_baseline_when_it_is_established() {
+        let selection = &*DOUBLE_RIICHI_CASE;
+        let case = double_riichi_spec().context();
+        let facts = self_tsumo_facts(selection);
+
+        assert_eq!(
+            current_reach_riichi_status(&case.context),
+            RiichiStatus::DoubleRiichi
+        );
+
+        // reach_now は今この打牌で宣言するリーチなので、ダブル立直2翻の baseline で評価する。
+        let reach = current_tsumo_value(&case, selection, "E", TenpaiOffenseMode::Reach);
+        assert_eq!(
+            discard_east(selection).self_tsumo.reach_now,
+            Some(reach.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+        );
+
+        // 同じ手牌・同じ待ち・同じ確率模型の通常立直より、ダブル立直1翻分だけ高い。
+        let plain_case = self_tsumo_spec().context();
+        let plain_reach =
+            current_tsumo_value(&plain_case, &SELF_TSUMO_CASE, "E", TenpaiOffenseMode::Reach);
+        assert_eq!(
+            current_reach_riichi_status(&plain_case.context),
+            RiichiStatus::Riichi
+        );
+        assert_eq!(reach.winning_remaining, plain_reach.winning_remaining);
+        assert!(reach.weighted_total > plain_reach.weighted_total);
+        assert!(
+            discard_east(selection).self_tsumo.reach_now
+                > discard_east(&SELF_TSUMO_CASE).self_tsumo.reach_now
+        );
+    }
+
+    #[test]
+    fn a_double_riichi_eligibility_does_not_change_the_deferred_branches() {
+        // 1巡 defer した後や継続枝の先で初めて宣言するリーチは将来の宣言なので、現在の
+        // eligibility を引き継がず通常立直のまま評価する。
+        let double = discard_east(&DOUBLE_RIICHI_CASE).self_tsumo;
+        let plain = discard_east(&SELF_TSUMO_CASE).self_tsumo;
+
+        assert_eq!(double.defer_forced_reach(), plain.defer_forced_reach());
+        assert_eq!(
+            double.defer_forced_reach_branches,
+            plain.defer_forced_reach_branches
+        );
+        // ダマ側の baseline はリーチ種別に依らないので、こちらも変わらない。
+        assert_eq!(
+            double.damaten_immediate_tsumo,
+            plain.damaten_immediate_tsumo
+        );
+        assert_eq!(
+            double.damaten_continuation_branches,
+            plain.damaten_continuation_branches
+        );
+        assert_eq!(
+            double.defer_forced_damaten_branches,
+            plain.defer_forced_damaten_branches
+        );
+        // 変わるのは reach_now だけ。
+        assert_ne!(double.reach_now, plain.reach_now);
+    }
+
+    #[test]
+    fn without_a_double_riichi_eligibility_the_comparison_is_unchanged() {
+        // eligible が unknown でも false でも、最低保証の通常立直で評価した既存値のまま。
+        let ineligible = CaseSpec {
+            double_riichi: DoubleRiichiFacts {
+                eligible: Some(false),
+                declared: None,
+            },
+            ..self_tsumo_spec()
+        }
+        .build();
+
+        assert_eq!(
+            discard_east(&ineligible).self_tsumo,
+            discard_east(&SELF_TSUMO_CASE).self_tsumo
+        );
+    }
+
+    #[test]
+    fn the_selected_candidate_reach_now_carries_the_double_riichi_baseline() {
+        // production の Reach timing が読む入口も同じ結論になる。timing 比較の reach_now 側へ
+        // 通常立直の値が入らないことを固定する。
+        let spec = CaseSpec {
+            double_riichi: DoubleRiichiFacts {
+                eligible: Some(true),
+                declared: None,
+            },
+            ..real_spec()
+        };
+        let case = spec.context();
+        let built = spec.build();
+        let evaluation = built.selection.evaluation.expect("打牌を選べる");
+        let comparison = selected_tenpai_self_tsumo_comparison(&case.context, &evaluation, true)
+            .expect("現在打牌後がテンパイ");
+
+        let plain_spec = real_spec();
+        let plain_case = plain_spec.context();
+        let plain_built = plain_spec.build();
+        let plain_evaluation = plain_built.selection.evaluation.expect("打牌を選べる");
+        let plain =
+            selected_tenpai_self_tsumo_comparison(&plain_case.context, &plain_evaluation, true)
+                .expect("現在打牌後がテンパイ");
+
+        assert_eq!(evaluation.discard, plain_evaluation.discard);
+        assert!(comparison.reach_now > plain.reach_now);
+        // 1巡 defer 側は通常立直のままなので、timing 比較の両辺が同じ分だけ動くことはない。
+        assert_eq!(comparison.defer_forced_reach(), plain.defer_forced_reach());
+    }
+
+    #[test]
     fn reach_now_evaluates_every_remaining_own_draw() {
         let selection = &*SELF_TSUMO_CASE;
         let case = self_tsumo_spec().context();
@@ -1650,7 +1786,7 @@ mod tests {
             assert_eq!(branch.tsumo_continuation, variant.tsumo_continuation);
             assert_eq!(
                 branch.tsumo_continuation,
-                valuator.tsumo_value_with_mode(&facts, mode)
+                valuator.prospective_tsumo_value(&facts, mode)
             );
 
             // モードを取り違えれば別の baseline になり、値も変わる。
@@ -1660,7 +1796,7 @@ mod tests {
             };
             assert_ne!(
                 branch.tsumo_continuation,
-                valuator.tsumo_value_with_mode(&facts, other)
+                valuator.prospective_tsumo_value(&facts, other)
             );
         }
     }

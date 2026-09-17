@@ -336,7 +336,7 @@ mod tests {
         honor_safety_rank, is_genbutsu_for, suited_safety_evidence_for_players, visible_count_of,
     };
     use crate::meld::{Meld, MeldKind};
-    use crate::offense_value::{TenpaiOffenseMode, reach_baseline_context};
+    use crate::offense_value::{TenpaiOffenseMode, current_reach_baseline_context};
     use crate::open_hand_defense::high_open_hand_threat_players_from_context;
     use crate::reach_policy::ReachDecisionReason;
     use crate::tenpai_continuation::TenpaiContinuationCandidate;
@@ -762,7 +762,10 @@ mod tests {
             .as_ref()
             .expect("リーチ Ron baseline を評価している");
 
-        assert_eq!(baseline.baseline, reach_baseline_context(&case.context));
+        assert_eq!(
+            baseline.baseline,
+            current_reach_baseline_context(&case.context)
+        );
         assert_eq!(baseline.baseline.win_method(), WinMethod::Ron);
         assert_eq!(baseline.baseline.riichi(), RiichiStatus::Riichi);
         assert_eq!(baseline.baseline.ippatsu(), Some(false));

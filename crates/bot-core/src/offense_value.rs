@@ -24,7 +24,7 @@
 //!
 //! ```text
 //! WinMethod              = Ron
-//! RiichiStatus           = Riichi (リーチ済み / リーチ予定の手)
+//! RiichiStatus           = Riichi / DoubleRiichi (リーチ済み / リーチ予定の手)
 //! ippatsu                = false
 //! chankan                = false
 //! remaining_live_tiles   = 河底にならない固定値
@@ -32,6 +32,11 @@
 //! 表ドラ / Kanドラ       = 現在の既知 indicator
 //! 裏ドラ表示牌           = 空 (裏0)
 //! ```
+//!
+//! リーチ1翻とダブル立直2翻のどちらとして評価するかは
+//! [`current_reach_riichi_status`] だけが決める。ロン baseline とツモ baseline
+//! ([`crate::tenpai_scoring`]) が同じ結論を共有するので、片方だけ通常立直のまま残ることがない。
+//! ダブル立直だと確定しない場合は推測せず、最低保証として通常のリーチ1翻で評価する。
 //!
 //! 裏ドラは未来情報なので期待値を推測しない。ただし裏ドラ表示牌を未観測 (`None`) にして
 //! [`HandValueOutcome::IndeterminateBonusHan`](bot_logic::HandValueOutcome::IndeterminateBonusHan)
@@ -159,21 +164,100 @@ pub(crate) struct TenpaiOffenseEvaluation {
     pub damaten_value: Option<DamatenValueDiagnostic>,
 }
 
-/// リーチ打点比較用の hypothetical baseline を組み立てる。
+/// 現在の手のリーチを、点数計算上どのリーチとして評価するか。
 ///
-/// 既にリーチしている手とこれからリーチする手のどちらにも使う。どちらもリーチ1翻が付く点は
-/// 同じで、一発・裏ドラのような上振れを含めない最低保証打点になる。
+/// 「既にリーチ済みの手」と「この局面で宣言するリーチ」のどちらもこの1本が決める。ロン
+/// baseline ([`current_reach_baseline_context`]) とツモ baseline
+/// ([`TenpaiScoringMode::current`]) は同じ結論を共有するので、片方だけ通常立直のまま残る
+/// ことがない。
+///
+/// ダブル立直と確定した場合だけ [`RiichiStatus::DoubleRiichi`] にする。判別できない場合は
+/// ダブル立直だと推測せず、最低保証として [`RiichiStatus::Riichi`] を使う。自分がリーチ済みか
+/// は [`GameContext::own_reached`] が source of truth で、リーチ済みなら宣言済み事実
+/// (`declared`) を、未リーチなら宣言可能事実 (`eligible`) を読む。自席を特定できない場合は
+/// どちらの事実も読まない。
+pub fn current_reach_riichi_status(context: &GameContext) -> RiichiStatus {
+    let facts = context.double_riichi();
+    let double_riichi = match context.own_reached() {
+        Some(true) => facts.declared,
+        Some(false) => facts.eligible,
+        None => None,
+    };
+    if double_riichi == Some(true) {
+        RiichiStatus::DoubleRiichi
+    } else {
+        RiichiStatus::Riichi
+    }
+}
+
+/// 現在の手のリーチ打点比較用の hypothetical baseline を組み立てる。
+///
+/// 既にリーチしている手と、この局面でこれからリーチする手のどちらにも使う。リーチの種別だけ
+/// [`current_reach_riichi_status`] が決め、一発・裏ドラのような上振れを含めない最低保証打点に
+/// する点はどちらも同じ。
 ///
 /// 未来の事実を実際の事実として推測しないため、和了方法・一発・槍槓・残り山は policy が決めた
 /// baseline の値にする。場風・自風だけを `context` の既知 fact から取り、不明なら不明のまま渡す。
-pub fn reach_baseline_context(context: &GameContext) -> WinningContext {
+pub fn current_reach_baseline_context(context: &GameContext) -> WinningContext {
+    reach_baseline_context_with(context, current_reach_riichi_status(context))
+}
+
+/// lookahead の先で初めてテンパイして宣言する仮想リーチ用の hypothetical baseline。
+///
+/// 1手先・2手先のテンパイは第一巡を過ぎてから宣言するリーチなので、現在の局面がダブル立直を
+/// 宣言できる状態でも常に通常立直として評価する。現在の宣言可能事実をそのまま将来の枝へ
+/// 流用しない。
+pub fn prospective_reach_baseline_context(context: &GameContext) -> WinningContext {
+    reach_baseline_context_with(context, RiichiStatus::Riichi)
+}
+
+fn reach_baseline_context_with(context: &GameContext, riichi: RiichiStatus) -> WinningContext {
     WinningContext::new(WinMethod::Ron)
         .with_round_wind(context.round_wind())
         .with_seat_wind(context.seat_wind())
-        .with_riichi(RiichiStatus::Riichi)
+        .with_riichi(riichi)
         .with_ippatsu(Some(BASELINE_IPPATSU))
         .with_chankan(Some(BASELINE_CHANKAN))
         .with_remaining_live_tiles(Some(BASELINE_REMAINING_LIVE_TILES))
+}
+
+/// 点数計算 baseline を組み立てるための攻撃モード。
+///
+/// policy が決めた [`TenpaiOffenseMode`] に、Reach の場合だけ「どのリーチとして点数計算するか」
+/// ([`RiichiStatus`]) を確定させて添えたもの。[`TenpaiOffenseMode`] 自体へ通常立直 / ダブル
+/// 立直を押し込まず、リーチ種別は scoring へ渡す値として明示する。
+///
+/// 現在の手のリーチ ([`Self::current`]) と lookahead の先の仮想リーチ
+/// ([`Self::prospective`]) を型の上で区別し、現在のダブル立直 eligibility が将来の枝へ
+/// 紛れ込まないようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TenpaiScoringMode {
+    /// リーチ手として評価する。[`RiichiStatus::Riichi`] か [`RiichiStatus::DoubleRiichi`]。
+    Reach(RiichiStatus),
+    /// ダマ手として評価する。
+    Damaten,
+    /// 攻撃モードを確定できないので baseline も組み立てない。
+    Unknown,
+}
+
+impl TenpaiScoringMode {
+    /// 現在の手のリーチ (既にリーチ済み、またはこの局面で宣言する) として評価する。
+    pub(crate) fn current(context: &GameContext, mode: TenpaiOffenseMode) -> Self {
+        Self::from_mode(mode, || current_reach_riichi_status(context))
+    }
+
+    /// lookahead の先で初めて宣言する仮想リーチとして評価する。
+    pub(crate) fn prospective(mode: TenpaiOffenseMode) -> Self {
+        Self::from_mode(mode, || RiichiStatus::Riichi)
+    }
+
+    fn from_mode(mode: TenpaiOffenseMode, riichi: impl FnOnce() -> RiichiStatus) -> Self {
+        match mode {
+            TenpaiOffenseMode::Reach => Self::Reach(riichi()),
+            TenpaiOffenseMode::Damaten => Self::Damaten,
+            TenpaiOffenseMode::Unknown => Self::Unknown,
+        }
+    }
 }
 
 /// 和了牌の物理牌1つ分の forced Reach Ron baseline 打点。
@@ -226,7 +310,7 @@ impl ReachRonBaselineDiagnostic {
 
 /// 組み立て済みの完成手を、リーチの hypothetical baseline で評価して待ちごとのロン打点へ畳む。
 ///
-/// baseline も裏ドラの扱いも押し引きのリーチ打点と同じ [`reach_baseline_context`] /
+/// baseline も裏ドラの扱いも押し引きのリーチ打点と同じ [`current_reach_baseline_context`] /
 /// [`BASELINE_URA_DORA_INDICATORS`] で、一発・裏ドラ・河底のような上振れを含めない最低保証
 /// 打点になる。完成手はダマ打点が評価したものと同じ集合を受け取り、待ちも受け入れも完成手も
 /// ここで組み立て直さない。
@@ -238,7 +322,7 @@ pub(crate) fn reach_ron_baseline_from_hands(
     context: &GameContext,
     hands: &TenpaiCompletedHands,
 ) -> ReachRonBaselineDiagnostic {
-    let baseline = reach_baseline_context(context);
+    let baseline = current_reach_baseline_context(context);
     let profile = evaluate_tenpai_hand_value(
         hands,
         baseline,
@@ -394,7 +478,7 @@ fn scoring_inputs(
 ) -> Option<(WinningContext, Option<&'static [TileId]>)> {
     match mode {
         TenpaiOffenseMode::Reach => Some((
-            reach_baseline_context(context),
+            current_reach_baseline_context(context),
             Some(BASELINE_URA_DORA_INDICATORS),
         )),
         TenpaiOffenseMode::Damaten => can_ron.then(|| (damaten_baseline_context(context), None)),
@@ -533,7 +617,7 @@ mod tests {
 
     #[test]
     fn the_reach_baseline_fixes_the_future_facts() {
-        let baseline = reach_baseline_context(&GameContext::default());
+        let baseline = current_reach_baseline_context(&GameContext::default());
 
         assert_eq!(baseline.win_method(), WinMethod::Ron);
         assert_eq!(baseline.riichi(), RiichiStatus::Riichi);
@@ -548,6 +632,123 @@ mod tests {
         // 場風・自風が不明な局面では推測せず不明のまま渡す。
         assert_eq!(baseline.round_wind(), None);
         assert_eq!(baseline.seat_wind(), None);
+    }
+
+    // 自席と既リーチ状態、ダブル立直事実だけを指定した最小 context。
+    fn double_riichi_context(
+        reached: bool,
+        facts: crate::context::DoubleRiichiFacts,
+    ) -> GameContext {
+        let mut reached_seats = [false; 4];
+        reached_seats[0] = reached;
+        GameContext::from_parts_with_table_state(
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Some(0),
+            None,
+            Default::default(),
+            reached_seats,
+        )
+        .with_double_riichi_facts(facts)
+    }
+
+    fn facts(eligible: Option<bool>, declared: Option<bool>) -> crate::context::DoubleRiichiFacts {
+        crate::context::DoubleRiichiFacts { eligible, declared }
+    }
+
+    #[test]
+    fn an_established_double_riichi_eligibility_raises_the_current_reach_baseline() {
+        // 未リーチの手は「今リーチを選んだらダブル立直になるか」で決まる。
+        let context = double_riichi_context(false, facts(Some(true), None));
+
+        assert_eq!(
+            current_reach_riichi_status(&context),
+            RiichiStatus::DoubleRiichi
+        );
+        assert_eq!(
+            current_reach_baseline_context(&context).riichi(),
+            RiichiStatus::DoubleRiichi
+        );
+    }
+
+    #[test]
+    fn a_declared_double_riichi_keeps_the_current_reach_baseline_after_the_first_turn() {
+        // リーチ済みの手は宣言済み事実を読む。第一巡が終わって eligibility を失っても維持する。
+        let context = double_riichi_context(true, facts(Some(false), Some(true)));
+
+        assert_eq!(
+            current_reach_riichi_status(&context),
+            RiichiStatus::DoubleRiichi
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_normal_reach_falls_back_to_the_plain_riichi_baseline() {
+        // ダブル立直だと確定しない場合は推測せず、最低保証の通常立直で評価する。
+        for (reached, facts) in [
+            (false, facts(None, None)),
+            (false, facts(Some(false), None)),
+            (true, facts(None, None)),
+            (true, facts(Some(true), Some(false))),
+            // リーチ済みの手は eligibility ではなく宣言済み事実だけを読む。
+            (true, facts(Some(true), None)),
+            // 未リーチの手は宣言済み事実を読まない。
+            (false, facts(None, Some(true))),
+        ] {
+            let context = double_riichi_context(reached, facts);
+            assert_eq!(
+                current_reach_riichi_status(&context),
+                RiichiStatus::Riichi,
+                "{reached} {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_seat_does_not_read_any_double_riichi_fact() {
+        // 自席を特定できない局面では、どちらの事実も読まずに最低保証へ落とす。
+        let context =
+            GameContext::default().with_double_riichi_facts(facts(Some(true), Some(true)));
+
+        assert_eq!(context.own_reached(), None);
+        assert_eq!(current_reach_riichi_status(&context), RiichiStatus::Riichi);
+    }
+
+    #[test]
+    fn the_prospective_reach_baseline_is_never_a_double_riichi() {
+        // 将来テンパイで初めて宣言するリーチは、現在の eligibility に関わらず通常立直。
+        let context = double_riichi_context(false, facts(Some(true), None));
+
+        assert_eq!(
+            prospective_reach_baseline_context(&context).riichi(),
+            RiichiStatus::Riichi
+        );
+        // リーチ種別以外は現在の手の baseline と同じ。
+        assert_eq!(
+            prospective_reach_baseline_context(&context),
+            current_reach_baseline_context(&context).with_riichi(RiichiStatus::Riichi)
+        );
+    }
+
+    #[test]
+    fn the_ron_and_tsumo_baselines_share_the_same_riichi_status() {
+        // 片方だけ通常立直のまま残らないよう、どちらも同じ判定を読む。
+        for facts in [facts(Some(true), None), facts(None, None)] {
+            let context = double_riichi_context(false, facts);
+            let expected = current_reach_riichi_status(&context);
+            let (tsumo, _) = crate::tenpai_scoring::tsumo_scoring_inputs(
+                &context,
+                TenpaiScoringMode::current(&context, TenpaiOffenseMode::Reach),
+            )
+            .expect("baseline を作れる");
+
+            assert_eq!(current_reach_baseline_context(&context).riichi(), expected);
+            assert_eq!(tsumo.riichi(), expected);
+        }
     }
 
     #[test]
@@ -758,7 +959,7 @@ mod tests {
             .expect("打牌後がテンパイである");
         let hands = tenpai_completed_hands_after_discard(&case.ctx, &evaluation, &wait)
             .expect("打牌後の完成手を組み立てられる");
-        let baseline = reach_baseline_context(&case.ctx);
+        let baseline = current_reach_baseline_context(&case.ctx);
 
         let indeterminate =
             evaluate_tenpai_hand_value(&hands, baseline, case.ctx.dora_indicators(), None);
@@ -922,6 +1123,63 @@ mod tests {
         let value = case.value_with_actions(&case.actions_without_reach());
         assert_eq!(value.mode, TenpaiOffenseMode::Reach);
         assert_eq!(value.value.average_total(), Some(7700));
+    }
+
+    #[test]
+    fn a_double_riichi_eligible_tenpai_is_valued_with_the_double_riichi_han() {
+        // 第一巡の第一打でリーチする手はダブル立直2翻。通常立直1翻として評価しない。
+        let case = offense_case(&NO_YAKU_HAND, "N", &[]);
+        let eligible = OffenseCase {
+            ctx: case
+                .ctx
+                .clone()
+                .with_double_riichi_facts(facts(Some(true), None)),
+            actions: case.actions.clone(),
+        };
+
+        // リーチのみ 40符1翻 = 1300 点。
+        assert_eq!(case.value().value.average_total(), Some(1300));
+
+        let value = eligible.value();
+        assert_eq!(value.mode, TenpaiOffenseMode::Reach);
+        // ダブル立直のみ 40符2翻 = 2600 点。
+        assert_eq!(value.value.average_total(), Some(2600));
+    }
+
+    #[test]
+    fn an_already_reached_tenpai_keeps_the_declared_double_riichi_han() {
+        // 既にリーチ済みの手も、履歴上ダブル立直と確定していれば2翻のまま評価する。第一巡が
+        // 終わって eligibility を失っても落とさない。
+        let case = offense_case_inner(
+            &PINFU_TANYAO_HAND,
+            "N",
+            &["1m"],
+            &PINFU_TANYAO_SINGLE_WAIT_VISIBLE,
+            HistoryFuritenFacts {
+                same_turn: Some(false),
+                riichi_missed_win: Some(false),
+            },
+            true,
+        );
+        let declared = OffenseCase {
+            ctx: case
+                .ctx
+                .clone()
+                .with_double_riichi_facts(facts(Some(false), Some(true))),
+            actions: case.actions.clone(),
+        };
+        let actions = case.actions_without_reach();
+
+        // 平和 + 断幺 + ドラ1 + リーチ の 30符4翻 = 7700 点。
+        assert_eq!(
+            case.value_with_actions(&actions).value.average_total(),
+            Some(7700)
+        );
+
+        let value = declared.value_with_actions(&actions);
+        assert_eq!(value.mode, TenpaiOffenseMode::Reach);
+        // ダブル立直2翻になって 5翻の満貫 8000 点。
+        assert_eq!(value.value.average_total(), Some(8000));
     }
 
     #[test]

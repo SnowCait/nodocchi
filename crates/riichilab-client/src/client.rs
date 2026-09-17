@@ -176,6 +176,7 @@ pub(crate) fn context_for_request(
         .with_temporary_passed_tiles(state.temporary_passed_tiles().cloned())
         .with_same_hand_passed_tiles(state.same_hand_passed_tiles().cloned())
         .with_history_furiten_facts(state.history_furiten())
+        .with_double_riichi_facts(state.own_double_riichi_facts())
 }
 
 /// 送信 action から `action sent` INFO ログ用のフィールドを抽出する pure helper。
@@ -854,6 +855,40 @@ mod tests {
         state.on_tsumo(3, "?".to_string());
         let context = context_for_request(&observation, &state, 7);
         assert_eq!(context.reaction_source_player(), None);
+    }
+
+    #[test]
+    fn context_for_request_carries_the_double_riichi_facts_from_the_event_stream() {
+        // observation にはダブル立直かどうかの情報が無いので、event 履歴の結論をそのまま渡す。
+        let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![]));
+        let mut state = ValidationState::new();
+        state.on_start_game(0);
+
+        // 局の開始を観測するまでは第一巡かどうかを判別できない。
+        assert_eq!(
+            context_for_request(&observation, &state, 9).double_riichi(),
+            bot_core::DoubleRiichiFacts::default()
+        );
+
+        state.on_start_kyoku();
+        state.on_tsumo(0, "6p".to_string());
+        assert_eq!(
+            context_for_request(&observation, &state, 10).double_riichi(),
+            bot_core::DoubleRiichiFacts {
+                eligible: Some(true),
+                declared: None,
+            }
+        );
+
+        state.on_reach(0);
+        state.on_dahai(0, "1m");
+        assert_eq!(
+            context_for_request(&observation, &state, 11).double_riichi(),
+            bot_core::DoubleRiichiFacts {
+                eligible: Some(false),
+                declared: Some(true),
+            }
+        );
     }
 
     fn state_after_two_reaches() -> ValidationState {

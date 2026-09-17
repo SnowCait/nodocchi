@@ -19,7 +19,7 @@ use crate::damaten_value::{
     tenpai_completed_hands_after_discard,
 };
 use crate::discard_selection::{DiscardActionSelection, selected_discard_tenpai_wait_availability};
-use crate::offense_value::TenpaiOffenseMode;
+use crate::offense_value::TenpaiScoringMode;
 use crate::open_hand_defense::high_open_hand_threat_players;
 use crate::open_hand_threat::OpenHandThreatAssessment;
 use crate::reach_policy::{
@@ -316,7 +316,7 @@ fn tsumo_named_yakuman(
 
     tenpai_completed_hands_after_discard(ctx, evaluation, tenpai_wait)
         .map_or(NamedYakumanTsumo::NotEstablished, |hands| {
-            tenpai_tsumo_named_yakuman(ctx, &hands, TenpaiOffenseMode::Damaten)
+            tenpai_tsumo_named_yakuman(ctx, &hands, TenpaiScoringMode::Damaten)
         })
 }
 

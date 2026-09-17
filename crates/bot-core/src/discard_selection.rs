@@ -15,7 +15,7 @@ use crate::decision_timing::{
     NormalDiscardPhaseTimer, TwoShantenFullSelfTsumoObserver, TwoShantenSelfTsumoCandidateDuration,
 };
 use crate::offense_value::{
-    TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue,
+    TenpaiOffenseEvaluation, TenpaiOffenseMode, TenpaiOffenseValue, TenpaiScoringMode,
     evaluate_tenpai_offense_with_hands,
 };
 use crate::prospective_value::{
@@ -1107,8 +1107,12 @@ fn base_current_tenpai_candidate_evaluations(
                 .zip(self_tsumo_facts)
                 .and_then(|(offense, facts)| {
                     let hands = hands.as_ref()?;
-                    let terminal =
-                        evaluate_tenpai_tsumo(context, hands, offense.offense.mode).value?;
+                    let terminal = evaluate_tenpai_tsumo(
+                        context,
+                        hands,
+                        TenpaiScoringMode::current(context, offense.offense.mode),
+                    )
+                    .value?;
                     Some((
                         terminal.expected_payment(facts.unknown_tiles, facts.own_future_draws),
                         tsumo_hit_probability(
@@ -1240,7 +1244,7 @@ fn base_policy_selects_reach(
         evaluates_named_yakuman_damaten(wait.permanent_furiten(), wait.tsumo_remaining)
             .then(|| {
                 hands.map(|hands| {
-                    tenpai_tsumo_named_yakuman(context, hands, TenpaiOffenseMode::Damaten)
+                    tenpai_tsumo_named_yakuman(context, hands, TenpaiScoringMode::Damaten)
                 })
             })
             .flatten()
@@ -4245,8 +4249,12 @@ pub(crate) mod tests {
         .expect("self-tsumo facts");
         let hands = tenpai_completed_hands_after_discard(&context, evaluation, wait)
             .expect("completed hands");
-        let terminal =
-            tenpai_tsumo_value_from_hands(&context, &hands, mode).expect("tsumo scoring");
+        let terminal = tenpai_tsumo_value_from_hands(
+            &context,
+            &hands,
+            crate::offense_value::TenpaiScoringMode::current(&context, mode),
+        )
+        .expect("tsumo scoring");
 
         assert_eq!(
             candidate.expected_self_tsumo_value,
@@ -4376,8 +4384,12 @@ pub(crate) mod tests {
         let hands = tenpai_completed_hands_after_discard(&context, evaluation, wait)
             .expect("completed hands");
         let expected = |mode| {
-            tenpai_tsumo_value_from_hands(&context, &hands, mode)
-                .map(|value| value.expected_payment(facts.unknown_tiles, facts.own_future_draws))
+            tenpai_tsumo_value_from_hands(
+                &context,
+                &hands,
+                crate::offense_value::TenpaiScoringMode::current(&context, mode),
+            )
+            .map(|value| value.expected_payment(facts.unknown_tiles, facts.own_future_draws))
         };
 
         assert_eq!(candidate.expected_self_tsumo_value, expected(mode));

@@ -1,3 +1,4 @@
+use bot_core::DoubleRiichiFacts;
 use riichilab_client::{CaptureRecord, CapturedRequestAction, ValidationState};
 
 use crate::error::ScenarioError;
@@ -16,6 +17,7 @@ pub struct CapturedScenario {
 struct ReplayRequest {
     request_action: CapturedRequestAction,
     reaction_source_player: Option<u8>,
+    double_riichi: DoubleRiichiFacts,
 }
 
 impl CapturedScenario {
@@ -85,7 +87,8 @@ fn read_capture_file(path: &str) -> Result<String, ScenarioError> {
 }
 
 // session capture を順に読み、server event は live client と同じ ValidationState へ反映する。
-// replay 対象は server の request_action だけだが、その時点の reaction source も一緒に保持する。
+// replay 対象は server の request_action だけだが、その時点の reaction source と、event 履歴から
+// しか分からないダブル立直の状態も一緒に保持する。
 // client record と未知・不完全な server event から source を推測しない。envelope 自体が壊れて
 // いる行は従来どおり error。
 fn parse_records(path: &str, text: &str) -> Result<Vec<ReplayRequest>, ScenarioError> {
@@ -105,6 +108,7 @@ fn parse_records(path: &str, text: &str) -> Result<Vec<ReplayRequest>, ScenarioE
             records.push(ReplayRequest {
                 request_action,
                 reaction_source_player: state.reaction_source_player(),
+                double_riichi: state.own_double_riichi_facts(),
             });
         } else if record.server_event().is_some() {
             match record.mjai_event().map_err(capture_error)? {
@@ -152,7 +156,8 @@ fn captured_scenario(path: &str, record: ReplayRequest) -> Result<CapturedScenar
             request_id: request_action.request_id,
             message: error.to_string(),
         })?
-        .with_reaction_source_player(record.reaction_source_player);
+        .with_reaction_source_player(record.reaction_source_player)
+        .with_double_riichi_facts(record.double_riichi);
 
     Ok(CapturedScenario {
         path: path.to_string(),
@@ -172,7 +177,8 @@ mod tests {
     use crate::scenario::ScenarioSpec;
     use bot_core::{
         Agent, CallDecisionReason, CallIishantenComparison, LegalAction, MeldKind, PushPullMode,
-        PushPullReason, ShantenAgent, player_threat_facts_from_context,
+        PushPullReason, ShantenAgent, current_reach_riichi_status,
+        player_threat_facts_from_context,
     };
     use bot_logic::{TileId, TileType};
     use riichilab_client::capture::{self, CaptureDirection};
@@ -268,6 +274,129 @@ mod tests {
         let mut text = lines.join("\n");
         text.push('\n');
         captured_scenario_from_text(CAPTURE_SOURCE, &text, request_id)
+    }
+
+    const START_KYOKU: &str = r#"{"type":"start_kyoku","bakaze":"E","kyoku":1,"honba":0,"oya":0}"#;
+
+    // 親から順に第一打を切る server event。宣言者の手前までを進める。
+    fn first_discard_lines(actors: &[u8]) -> Vec<String> {
+        actors
+            .iter()
+            .flat_map(|actor| {
+                [
+                    server_line(&format!(r#"{{"type":"tsumo","actor":{actor},"pai":"?"}}"#)),
+                    server_line(&format!(r#"{{"type":"dahai","actor":{actor},"pai":"1m"}}"#)),
+                ]
+            })
+            .collect()
+    }
+
+    fn double_riichi_capture(
+        seat: u8,
+        before_request: Vec<String>,
+        request_id: u64,
+    ) -> CapturedScenario {
+        let observation = fixture_base64(seat, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec());
+        let mut lines = vec![
+            server_line(&format!(r#"{{"type":"start_game","id":{seat}}}"#)),
+            server_line(START_KYOKU),
+        ];
+        lines.extend(before_request);
+        lines.push(request_action_line(request_id, &observation));
+        replay_capture(&lines, None).unwrap()
+    }
+
+    #[test]
+    fn replay_keeps_the_last_first_discard_eligible_for_a_double_riichi() {
+        // 他家3人の第一打が終わっていても、自分の第一打はまだ第一巡。
+        let mut before = first_discard_lines(&[0, 1, 2]);
+        before.push(server_line(r#"{"type":"tsumo","actor":3,"pai":"6p"}"#));
+        let captured = double_riichi_capture(3, before, 600);
+
+        assert_eq!(
+            captured.scenario.context.double_riichi(),
+            bot_core::DoubleRiichiFacts {
+                eligible: Some(true),
+                declared: None,
+            }
+        );
+        assert_eq!(
+            current_reach_riichi_status(&captured.scenario.context),
+            bot_logic::RiichiStatus::DoubleRiichi
+        );
+    }
+
+    #[test]
+    fn replay_keeps_a_declared_double_riichi_after_the_first_turn() {
+        // 第一巡の第一打で宣言したリーチは、第一巡が終わってもダブル立直のまま残る。
+        let mut before = vec![
+            server_line(r#"{"type":"tsumo","actor":0,"pai":"6p"}"#),
+            server_line(r#"{"type":"reach","actor":0}"#),
+            server_line(r#"{"type":"dahai","actor":0,"pai":"1m"}"#),
+        ];
+        before.extend(first_discard_lines(&[1, 2, 3]));
+        before.push(server_line(r#"{"type":"tsumo","actor":0,"pai":"6p"}"#));
+        let captured = double_riichi_capture(0, before, 601);
+
+        assert_eq!(
+            captured.scenario.context.double_riichi(),
+            bot_core::DoubleRiichiFacts {
+                eligible: Some(false),
+                declared: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn replay_treats_a_reach_after_a_call_as_a_plain_riichi() {
+        // 第一巡中でも先に鳴き・槓があればダブル立直にならない。暗槓も第一巡を終わらせる。
+        for call in [
+            r#"{"type":"pon","actor":1,"target":0,"pai":"1m","consumed":["1m","1m"]}"#,
+            r#"{"type":"ankan","actor":1,"consumed":["9s","9s","9s","9s"]}"#,
+        ] {
+            let mut before = first_discard_lines(&[0]);
+            before.push(server_line(call));
+            before.push(server_line(r#"{"type":"dahai","actor":1,"pai":"2m"}"#));
+            before.push(server_line(r#"{"type":"tsumo","actor":2,"pai":"6p"}"#));
+            let captured = double_riichi_capture(2, before, 602);
+
+            assert_eq!(
+                captured.scenario.context.double_riichi(),
+                bot_core::DoubleRiichiFacts {
+                    eligible: Some(false),
+                    declared: None,
+                },
+                "{call}"
+            );
+            assert_eq!(
+                current_reach_riichi_status(&captured.scenario.context),
+                bot_logic::RiichiStatus::Riichi,
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_without_a_kyoku_start_keeps_the_double_riichi_unknown() {
+        // start_kyoku を観測していない履歴では、第一巡ではないと推測しない。
+        let observation = fixture_base64(0, Some(CAPTURED_DRAWN_TILE), CAPTURED_HAND.to_vec());
+        let captured = replay_capture(
+            &[
+                server_line(r#"{"type":"start_game","id":0}"#),
+                request_action_line(603, &observation),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            captured.scenario.context.double_riichi(),
+            bot_core::DoubleRiichiFacts::default()
+        );
+        assert_eq!(
+            current_reach_riichi_status(&captured.scenario.context),
+            bot_logic::RiichiStatus::Riichi
+        );
     }
 
     #[test]

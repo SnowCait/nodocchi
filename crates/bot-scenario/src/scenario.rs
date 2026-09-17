@@ -1,6 +1,6 @@
 use bot_core::{
-    GameContext, LegalAction, Meld, MeldKind, ReachLegalityFacts, TableStateFacts, is_reach_legal,
-    seat_wind_for_player,
+    DoubleRiichiFacts, GameContext, LegalAction, Meld, MeldKind, ReachLegalityFacts,
+    TableStateFacts, is_reach_legal, seat_wind_for_player,
 };
 use bot_logic::{
     FixedMeldCount, HistoryFuritenFacts, TileCounts, TileId, TileType,
@@ -65,6 +65,8 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub history_furiten: Option<HistoryFuritenSpec>,
     #[serde(default)]
+    pub double_riichi: Option<DoubleRiichiSpec>,
+    #[serde(default)]
     pub legal_dahai: Option<String>,
     #[serde(default)]
     pub legal_pon: Option<Vec<PonActionSpec>>,
@@ -83,6 +85,20 @@ pub struct HistoryFuritenSpec {
     pub same_turn: Option<bool>,
     #[serde(default)]
     pub riichi_missed_win: Option<bool>,
+}
+
+/// 自分のダブル立直に関する観測事実の指定。
+///
+/// 省略した field は unknown のままにし、第一巡ではないと推測しない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoubleRiichiSpec {
+    /// 現在未リーチで、この局面で Reach を選ぶとダブル立直が確定するか。
+    #[serde(default)]
+    pub eligible: Option<bool>,
+    /// 宣言済みの自分のリーチがダブル立直だったか。
+    #[serde(default)]
+    pub declared: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -224,7 +240,8 @@ impl Scenario {
         .with_post_reach_passed_tiles(post_reach_passed_tiles)
         .with_temporary_passed_tiles(temporary_passed_tiles)
         .with_table_state_facts(table_state)
-        .with_history_furiten_facts(resolve_history_furiten_facts(spec));
+        .with_history_furiten_facts(resolve_history_furiten_facts(spec))
+        .with_double_riichi_facts(resolve_double_riichi_facts(spec));
 
         let legal_actions = build_legal_actions(spec, &context)?;
 
@@ -240,6 +257,14 @@ fn resolve_history_furiten_facts(spec: &ScenarioSpec) -> HistoryFuritenFacts {
         .map_or_else(HistoryFuritenFacts::default, |facts| HistoryFuritenFacts {
             same_turn: facts.same_turn,
             riichi_missed_win: facts.riichi_missed_win,
+        })
+}
+
+fn resolve_double_riichi_facts(spec: &ScenarioSpec) -> DoubleRiichiFacts {
+    spec.double_riichi
+        .map_or_else(DoubleRiichiFacts::default, |facts| DoubleRiichiFacts {
+            eligible: facts.eligible,
+            declared: facts.declared,
         })
 }
 
@@ -3075,6 +3100,51 @@ mod tests {
         assert!(
             serde_json::from_str::<ScenarioSpec>(
                 r#"{"hand":"123m","history_furiten":{"temporary":true}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn double_riichi_json_distinguishes_true_false_and_unknown() {
+        let omitted = resolve(&spec_from_json(r#"{"hand":"123m"}"#));
+        assert_eq!(
+            omitted.context.double_riichi(),
+            bot_core::DoubleRiichiFacts::default()
+        );
+
+        let explicit = resolve(&spec_from_json(
+            r#"{"hand":"123m","double_riichi":{"eligible":true,"declared":false}}"#,
+        ));
+        assert_eq!(
+            explicit.context.double_riichi(),
+            bot_core::DoubleRiichiFacts {
+                eligible: Some(true),
+                declared: Some(false),
+            }
+        );
+
+        // 片方だけの指定はもう片方を unknown のまま残す。
+        let partial = resolve(&spec_from_json(
+            r#"{"hand":"123m","double_riichi":{"declared":true}}"#,
+        ));
+        assert_eq!(
+            partial.context.double_riichi(),
+            bot_core::DoubleRiichiFacts {
+                eligible: None,
+                declared: Some(true),
+            }
+        );
+
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand":"123m","double_riichi":{"eligible":"yes"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand":"123m","double_riichi":{"first_turn":true}}"#
             )
             .is_err()
         );

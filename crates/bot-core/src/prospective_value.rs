@@ -170,8 +170,8 @@ use crate::context::GameContext;
 use crate::damaten_value::{damaten_baseline_context, damaten_value_from_hands};
 use crate::discard_selection::evaluation_fixed_meld_count_of;
 use crate::offense_value::{
-    BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode, reach_baseline_context,
-    variant_total, weighted_average,
+    BASELINE_URA_DORA_INDICATORS, OffenseValue, TenpaiOffenseMode, TenpaiScoringMode,
+    prospective_reach_baseline_context, variant_total, weighted_average,
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 use crate::tenpai_scoring::{
@@ -675,7 +675,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
             melds,
             fixed_meld_count: evaluation_fixed_meld_count_of(melds),
             damaten: damaten_baseline_context(context),
-            reach: reach_baseline_context(context),
+            reach: prospective_reach_baseline_context(context),
             reach_legal: future_reach_legal(context, melds.map(is_menzen)),
             own_reached: context.own_reached(),
             own_discards: OwnDiscards::from_optional_river(context.own_discards()),
@@ -799,28 +799,57 @@ impl<'a> ProductionProspectiveValuator<'a> {
         }
     }
 
-    /// 未来テンパイの評価材料を、指定した攻撃モードの共通 Tsumo scoring
+    /// 現在打牌後のテンパイを、現在の手のリーチとして共通 Tsumo scoring
     /// ([`tenpai_tsumo_value_from_hands`]) へ渡す。
     ///
-    /// production のリーチ判断が決めたモードで評価する [`ProspectiveTsumoValuator`] と、現在
-    /// 聴牌を forced Reach / forced Damaten で評価する診断が同じ scoring 経路を共有するための
-    /// 入口。baseline の組み立ても集約規則もこの層は持たない。
-    pub(crate) fn tsumo_value_with_mode(
+    /// この評価器は lookahead の枝と現在打牌後のテンパイの両方の材料を組み立てるので、どちらの
+    /// 時点として点数計算するかは入口で分ける。こちらは「今この request で宣言するリーチ」
+    /// ([`TenpaiScoringMode::current`]) なので、ダブル立直と確定していればその2翻で評価する。
+    ///
+    /// baseline の組み立ても集約規則もこの層は持たない。
+    pub(crate) fn current_tsumo_value(
         &self,
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
     ) -> Option<TenpaiTsumoValue> {
+        self.tsumo_value(facts, TenpaiScoringMode::current(self.context, mode))
+    }
+
+    /// 未来テンパイの評価材料を、将来宣言する仮想リーチとして共通 Tsumo scoring
+    /// ([`tenpai_tsumo_value_from_hands`]) へ渡す。
+    ///
+    /// production のリーチ判断が決めたモードで評価する [`ProspectiveTsumoValuator`] と、
+    /// 将来テンパイを forced Reach / forced Damaten で評価する診断が共有する入口。1手先以降で
+    /// 初めて宣言するリーチ ([`TenpaiScoringMode::prospective`]) なので、現在の局面のダブル
+    /// 立直 eligibility を将来の枝へ引き継がない。
+    pub(crate) fn prospective_tsumo_value(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> Option<TenpaiTsumoValue> {
+        self.tsumo_value(facts, TenpaiScoringMode::prospective(mode))
+    }
+
+    fn tsumo_value(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiScoringMode,
+    ) -> Option<TenpaiTsumoValue> {
         tenpai_tsumo_value_from_hands(self.context, &facts.hands, mode)
     }
 
-    /// 未来テンパイの評価材料を、指定した攻撃モードの共通 Tsumo scoring
+    /// 現在打牌後のテンパイを、現在の手のリーチとして共通 Tsumo scoring
     /// ([`tenpai_tsumo_variant_outcomes`]) へ渡し、和了牌の物理牌 variant ごとの結論を得る。
-    pub(crate) fn tsumo_variant_outcomes(
+    pub(crate) fn current_tsumo_variant_outcomes(
         &self,
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
     ) -> TsumoVariantOutcomes {
-        tenpai_tsumo_variant_outcomes(self.context, &facts.hands, mode)
+        tenpai_tsumo_variant_outcomes(
+            self.context,
+            &facts.hands,
+            TenpaiScoringMode::current(self.context, mode),
+        )
     }
 
     // 未来テンパイ1件分の評価材料と攻撃モードを1組だけ組み立てて、そこから値を1つ求める。
@@ -1017,7 +1046,7 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
-            self.tsumo_value_with_mode(facts, mode)
+            self.prospective_tsumo_value(facts, mode)
         });
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
@@ -1411,7 +1440,7 @@ fn terminal_tsumo_value_with_mode(
     if production_mode == mode {
         Some(production_value)
     } else {
-        valuator.tsumo_value_with_mode(facts, mode)
+        valuator.prospective_tsumo_value(facts, mode)
     }
 }
 
@@ -1548,12 +1577,13 @@ mod tests {
     };
 
     use crate::action::LegalAction;
-    use crate::context::TableStateFacts;
+    use crate::context::{DoubleRiichiFacts, TableStateFacts};
     use crate::damaten_value::DAMATEN_MIN_TOTAL;
     use crate::discard_selection::{
         LookaheadDiagnosticScope, lookahead_inputs, select_discard_action_with_diagnostic,
     };
     use crate::meld::MeldKind;
+    use crate::offense_value::current_reach_riichi_status;
     use crate::tenpai_scoring::{TenpaiVariantUnknownReason, tsumo_scoring_inputs};
 
     #[test]
@@ -1752,6 +1782,8 @@ mod tests {
         own_river: &'a [&'a str],
         history_furiten: HistoryFuritenFacts,
         table_state: TableStateFacts,
+        /// 現在局面のダブル立直事実。将来テンパイへ流用しないことの確認に使う。
+        double_riichi: DoubleRiichiFacts,
         /// same-shanten の枝をテンパイまで追うか。
         downstream: bool,
     }
@@ -1774,6 +1806,7 @@ mod tests {
                 own_river: &[],
                 history_furiten: known_history_furiten(),
                 table_state: TableStateFacts::default(),
+                double_riichi: DoubleRiichiFacts::default(),
                 downstream: false,
             }
         }
@@ -1814,7 +1847,8 @@ mod tests {
                 [false; 4],
             )
             .with_table_state_facts(self.table_state)
-            .with_history_furiten_facts(self.history_furiten);
+            .with_history_furiten_facts(self.history_furiten)
+            .with_double_riichi_facts(self.double_riichi);
 
             let scope = if self.downstream {
                 LookaheadDiagnosticScope::SAME_SHANTEN_DOWNSTREAM
@@ -1867,6 +1901,17 @@ mod tests {
     static RED_FIVE_SEEN: LazyLock<Case> =
         LazyLock::new(|| case_of(&RED_FIVE_HAND, &["5sr"], true));
     static UNKNOWN_WINDS: LazyLock<Case> = LazyLock::new(|| case_of(&RED_FIVE_HAND, &[], false));
+    // 現在この瞬間にリーチすればダブル立直になる局面。将来テンパイの枝は同じ手牌で比較する。
+    static DOUBLE_RIICHI_ELIGIBLE: LazyLock<Case> = LazyLock::new(|| {
+        CaseSpec {
+            double_riichi: DoubleRiichiFacts {
+                eligible: Some(true),
+                declared: None,
+            },
+            ..CaseSpec::new(&RED_FIVE_HAND, "1m")
+        }
+        .build()
+    });
 
     fn known(total: u32) -> TenpaiVariantValue {
         TenpaiVariantValue::Known {
@@ -1934,11 +1979,42 @@ mod tests {
     }
 
     #[test]
+    fn a_current_double_riichi_eligibility_never_reaches_the_prospective_branches() {
+        // 現在この瞬間にリーチすればダブル立直になる局面でも、1手先で初めてテンパイする枝の
+        // リーチは将来の宣言なので通常立直のまま評価する。
+        let case = &*DOUBLE_RIICHI_ELIGIBLE;
+        assert_eq!(case.ctx.double_riichi().eligible, Some(true));
+        assert_eq!(
+            current_reach_riichi_status(&case.ctx),
+            RiichiStatus::DoubleRiichi
+        );
+
+        let tenpai = case.evaluated("1p", "3m");
+        assert_eq!(tenpai.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(tenpai.reach.baseline.riichi(), RiichiStatus::Riichi);
+
+        let (tsumo, _) = tsumo_scoring_inputs(
+            &case.ctx,
+            TenpaiScoringMode::prospective(TenpaiOffenseMode::Reach),
+        )
+        .expect("baseline を作れる");
+        assert_eq!(tsumo.riichi(), RiichiStatus::Riichi);
+
+        // 将来打点そのものも eligibility の有無で変わらない。
+        let plain = RED_FIVE.evaluated("1p", "3m");
+        assert_eq!(tenpai.reach, plain.reach);
+        assert_eq!(tenpai.forced_reach_tsumo, plain.forced_reach_tsumo);
+    }
+
+    #[test]
     fn the_reach_baseline_is_the_existing_one() {
         // リーチ baseline は PR #173 で導入した既存 policy そのもの。
         let reach = &RED_FIVE.evaluated("1p", "3m").reach;
 
-        assert_eq!(reach.baseline, reach_baseline_context(&RED_FIVE.ctx));
+        assert_eq!(
+            reach.baseline,
+            prospective_reach_baseline_context(&RED_FIVE.ctx)
+        );
         assert_eq!(reach.baseline.riichi(), RiichiStatus::Riichi);
         assert_eq!(reach.baseline.ippatsu(), Some(false));
         assert_eq!(reach.baseline.chankan(), Some(false));
@@ -3078,7 +3154,8 @@ mod tests {
         // 攻撃モードは既存 production policy の結論そのままで、ここで別の判断を作らない。
         let mode = TSUMO_RED_FIVE.evaluated("1p", "3m").mode;
         let (baseline, ura_dora) =
-            tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, mode).expect("baseline を作れる");
+            tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiScoringMode::prospective(mode))
+                .expect("baseline を作れる");
 
         assert_eq!(mode, TenpaiOffenseMode::Reach);
         assert!(baseline.win_method().is_tsumo());
@@ -3120,7 +3197,7 @@ mod tests {
     #[test]
     fn a_damaten_tsumo_baseline_has_no_riichi_han() {
         let (baseline, ura_dora) =
-            tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiOffenseMode::Damaten)
+            tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiScoringMode::Damaten)
                 .expect("baseline を作れる");
 
         assert!(baseline.win_method().is_tsumo());
@@ -3130,7 +3207,7 @@ mod tests {
 
     #[test]
     fn an_unknown_offense_mode_has_no_tsumo_baseline() {
-        assert!(tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiOffenseMode::Unknown).is_none());
+        assert!(tsumo_scoring_inputs(&TSUMO_RED_FIVE.ctx, TenpaiScoringMode::Unknown).is_none());
     }
 
     #[test]
