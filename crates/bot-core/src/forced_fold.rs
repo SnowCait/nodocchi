@@ -9,9 +9,10 @@
 //!
 //! 候補 ranking の基礎も既存 production defense policy の ordering をそのまま使い、選択・
 //! ranking・詳細診断は1回の evaluation から得た同じ candidate evidence を共有する。そのうえで
-//! forced fold だけは、手牌内の同一牌枚数を織り込んだ
-//! [`effective_fold_risk`] で exact 段を並べ替える。production defense policy 側の ordering は
-//! 書き換えないので、ベタ降り以外の判断には影響しない。
+//! forced fold だけは、手牌内の同一牌枚数を織り込んだ [`effective_fold_risk`] で exact 段を
+//! 並べ替える。1枚目が通った後の同一牌の継続価値を近似する ranking 用 heuristic で、Reach /
+//! OpenHand / Combined のどの exact 段にも同じように適用する。production defense policy 側の
+//! ordering は書き換えないので、ベタ降り以外の判断には影響しない。
 
 mod ranking;
 
@@ -97,6 +98,8 @@ pub struct ForcedFoldDiagnostic {
 /// `selected_action` は forced fold ranking の先頭にする。exact 段だけは手牌内の同一牌枚数を
 /// 織り込んだ [`effective_fold_risk`] で並ぶので、同じ牌を複数枚持つ局面では production
 /// selection と異なる牌になり得る。production defense policy 側の選択は書き換えない。
+/// [`effective_fold_risk`] は ranking 用の heuristic で、実際の放銃確率でも、通過後の safety の
+/// 寿命を target 種別ごとに厳密にモデル化した値でもない。
 pub fn evaluate_forced_fold(
     context: &GameContext,
     legal_actions: &[LegalAction],

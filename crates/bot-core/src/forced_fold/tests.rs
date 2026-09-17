@@ -713,6 +713,19 @@ fn exact_open_hand_context(
     target_discards: &str,
     same_hand_passed: &str,
 ) -> GameContext {
+    exact_open_hand_context_with_hand(unseen, target_discards, same_hand_passed, "")
+}
+
+/// [`exact_open_hand_context`] に自分の手牌を持たせた版。
+///
+/// `hand` は牌種の並びで、同じ牌種を並べればその枚数ぶん持つ。手牌は見え牌なので、`unseen` に
+/// 残していない牌種 (4枚見え) から取り、`unseen` の枚数を動かさない。
+fn exact_open_hand_context_with_hand(
+    unseen: &[(&str, u8)],
+    target_discards: &str,
+    same_hand_passed: &str,
+    hand: &str,
+) -> GameContext {
     let mut melds: [Vec<Meld>; 4] = Default::default();
     melds[EXACT_OPEN_HAND_TARGET] = vec![
         exact_value_pon(),
@@ -738,9 +751,24 @@ fn exact_open_hand_context(
     let mut passed: [Vec<TileType>; 4] = Default::default();
     passed[EXACT_OPEN_HAND_TARGET] = exact_tile_types(same_hand_passed);
 
+    let mut taken = [0usize; TileType::COUNT];
+    let hand_tiles: Vec<TileId> = exact_tile_types(hand)
+        .into_iter()
+        .map(|tile| {
+            let index = taken[tile.index()];
+            taken[tile.index()] += 1;
+            let physical = TileId::copies(tile).nth(index).expect("物理牌がある");
+            assert!(
+                visible.contains(&physical),
+                "手牌は見え牌から取る: {tile:?}"
+            );
+            physical
+        })
+        .collect();
+
     GameContext::from_parts_with_melds(
         None,
-        vec![],
+        hand_tiles,
         vec![],
         Some(exact_tile_type("E")),
         None,
@@ -1153,4 +1181,69 @@ fn keeps_the_ranking_when_every_tile_kind_is_a_single_copy() {
         };
         assert_eq!(fold_risk, model_risk(candidate));
     }
+}
+
+#[test]
+fn applies_the_copies_heuristic_to_the_open_hand_exact_risk_tier() {
+    // target の隠れ手牌は1枚で、単騎候補は 1m 1枚・2m 2枚・3m 1枚。model risk は 1m と 3m が
+    // 1/4 で同じ、2m が 2/4。自分の手牌は 3m だけ2枚持つ。
+    let context = exact_open_hand_context_with_hand(
+        &[("1m", 1), ("2m", 2), ("3m", 1)],
+        "",
+        "",
+        "1m 2m 3m 3m",
+    );
+    let actions = vec![dahai(0), dahai(4), dahai(8), dahai(9)];
+    let inputs = push_pull_inputs_from_context(&context, &actions);
+    let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+    let FoldDefenseEvaluation::OpenHand(evaluation) =
+        evaluate_fold_defense(&context, &actions, &inputs, true)
+    else {
+        panic!("OpenHand 向け防御へ routing される");
+    };
+    let production: Vec<_> = ordered_open_hand_defense_candidates(
+        &context,
+        &actions,
+        &targets,
+        evaluation.ron_risk_vectors.as_deref(),
+    )
+    .into_iter()
+    .map(|(action, category)| (action.clone(), category))
+    .collect();
+
+    // production は exact `R/T` 順で、同率の 1m と 3m は合法 action 順のまま。
+    assert!(
+        production
+            .iter()
+            .all(|&(_, category)| category == OpenHandDefenseCategory::ExactRonRisk)
+    );
+    assert_eq!(
+        production
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>(),
+        vec![dahai(0), dahai(8), dahai(4)]
+    );
+
+    let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
+
+    // 複数枚 heuristic は Reach 以外の exact 段にも同じように効く。
+    let three_man = ranked_candidate(&forced, "3m");
+    let one_man = ranked_candidate(&forced, "1m");
+    assert_eq!(three_man.copies, 2);
+    assert_eq!(one_man.copies, 1);
+    assert_eq!(model_risk(three_man), model_risk(one_man));
+    assert!(
+        three_man.effective_fold_risk().expect("fold risk を持つ")
+            < one_man.effective_fold_risk().expect("fold risk を持つ")
+    );
+    assert_eq!(
+        forced
+            .ranked_candidates
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>(),
+        vec![dahai(8), dahai(0), dahai(4)]
+    );
+    assert_eq!(forced.selected_action, dahai(8));
 }

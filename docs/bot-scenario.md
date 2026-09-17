@@ -413,7 +413,7 @@ Summary
 
 #### 手牌内の同一牌枚数と fold risk
 
-ベタ降りは1巡で終わらないので、同じ牌を複数枚持っている価値が順位に出ないと困ります。`8p` を3枚持っていれば、1枚目の `8p` が通った後の巡も同じリーチ者に対しては同じ牌でしのげます。
+ベタ降りは1巡で終わらないので、同じ牌を複数枚持っている価値が順位に出ないと困ります。同一牌を複数枚持つ場合、その1枚目が通ったという事実によって、次巡以降に残りの同一牌を切るときの安全性が高まるからです。
 
 そこで ForcedFold の順位付けだけは、手牌内の同一牌枚数 `copies` を織り込んだ `fold risk` を使います。
 
@@ -421,11 +421,20 @@ Summary
 fold_risk = 1 - (1 - model_risk) ^ (1 / copies)
 ```
 
-「`copies` 巡ぶんを1回の `model_risk` でカバーできる」とみなして1巡あたりの等価 risk へ直す heuristic で、**実際に1枚切ったときの放銃率ではありません**。`copies == 1` では `model_risk` そのものなので、同じ牌を1枚ずつしか持たない局面の順位は従来どおりです。
+「`copies` 巡ぶんを1回の `model_risk` でカバーできる」とみなして、この continuation value を簡易的に近似する heuristic です。**実際の放銃確率ではありません**。`copies == 1` では `model_risk` そのものなので、同じ牌を1枚ずつしか持たない局面の順位は従来どおりです。
 
 `copies` は待ち判定上同一になる牌種単位で数えます。ロン牌としては赤5も黒5も同じ牌種なので、`0m` と `5m` を持っていれば `copies` は 2 です。自摸牌も手牌の一部として数えます。複数 target では target ごとに `fold risk` を出し、比較は `model risk` と同じ worst-first の辞書順で行います。
 
-並べ替えるのは exact `R/T` で順位が決まった段の中だけです。hard-safe (`Genbutsu` / `SafeAgainstAllTargets` / `SafeAgainstAllThreats`)・同巡内通過・exact model が使えない heuristic の段は production ordering 上の位置のまま残るので、段の順序と段間の precedence は変わりません。
+並べ替えるのは exact `R/T` で順位が決まった段の中だけです。hard-safe (`Genbutsu` / `SafeAgainstAllTargets` / `SafeAgainstAllThreats`)・同巡内通過・exact model が使えない heuristic の段は production ordering 上の位置のまま残るので、段の順序と段間の precedence は変わりません。適用先は Reach / OpenHand / Combined のどの exact 段でも同じで、防御 family で分けません。
+
+##### 通過後の safety は target 種別で寿命が違う
+
+この近似は、通過が次巡以降へどれだけ残るかを target 種別ごとに区別していません。実際の safety evidence の寿命は違います ([passed tile の区別](ai/defense.md#passed-tile-の区別))。
+
+- **Reach**: 通れば `post_reach_passed` としてそのリーチ者への現物になります。リーチ者の手牌は変化しないので、この safety は局中継続します。
+- **OpenHand**: 非リーチ副露相手の通過情報は、Reach と同じ永続的な hard-safe ではありません。`same_hand_passed` は「target の concealed hand が最後に変化して以降に通った」ことを前提とする safety evidence で、手出し・ツモ切りか判別できない打牌・鳴き・槓で失効します。production もこれを hard-safe とは扱わず、exact model の `R == 0` とも扱いません。
+
+`fold risk` はこの違いを厳密にモデル化した値ではなく、あくまで ForcedFold ranking 用の heuristic です。通過後の防御状態そのものを評価する continuation value / lookahead は [issue #329](https://github.com/SnowCait/nodocchi/issues/329) で別途検討します。
 
 `model risk` の意味も値も変えません。`fold risk` は ForcedFold の順位付け専用の score で、production の防御判断・押し引き判断・他の診断の ranking には一切使いません。`Forced fold` section の `selected action` は ForcedFold ranking の先頭なので、同じ牌を複数枚持つ局面では `Defense` section が出す production の `selected action` と別の牌になることがあります。
 
@@ -467,7 +476,7 @@ Summary
     fold risk: 2.81%
 ```
 
-1枚だけ切る `model risk` は `5m` のほうが低いままですが、手牌に3枚ある `8p` は3巡ぶんをその risk でしのげるので `fold risk` が低く、ベタ降りの打牌としては上位になります。
+1枚だけ切る `model risk` は `5m` のほうが低いままですが、手牌に3枚ある `8p` は1枚目が通れば次巡以降の `8p` の安全性が上がるぶんを `fold risk` が織り込むので、ベタ降りの打牌としては上位になります。
 
 exact model が利用できない候補には存在しない percentage を作らず、順位を決めた既存 heuristic をそのまま出します。
 

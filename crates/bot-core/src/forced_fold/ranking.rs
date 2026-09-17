@@ -6,9 +6,11 @@
 //! `ordered_*_candidates` helper が決める。
 //!
 //! そのうえで forced fold だけは、手牌内の同一牌枚数を織り込んだ
-//! [`effective_fold_risk`] で exact 段を並べ替える。ベタ降りは複数巡しのぐ想定なので、同じ牌を
-//! 複数枚持っていれば1枚目が通った後の巡も同じ牌でしのげる、という ForcedFold 固有の観点を
-//! 順位へ反映するもの。production defense policy の ordering も exact `R/T` 自体も書き換えない。
+//! [`effective_fold_risk`] で exact 段を並べ替える。同一牌を複数枚持つ場合、1枚目が通った事実に
+//! よって次巡以降の同一牌の安全性が高まる continuation value を簡易的に近似する heuristic で、
+//! defense target ごとの safety evidence の寿命を厳密にモデル化したものではない
+//! ([`effective_fold_risk`] に前提を書く)。production defense policy の ordering も
+//! exact `R/T` 自体も書き換えない。
 //!
 //! 全合法 Dahai を同じ ranked candidate として扱い、rank 1 だけを別扱いしない。
 //! `ranked_candidates[0].action == selected_action` が成り立つのは、forced fold の選択が
@@ -127,8 +129,8 @@ impl ForcedFoldRankedCandidate {
 
     /// target が1人の場合の ForcedFold 用 ranking score。
     ///
-    /// exact `R/T` を [`effective_fold_risk`] で1巡あたりの等価 risk へ写した値で、実際の
-    /// 放銃率ではない。複数 target では `None` で、target 別の値は
+    /// exact `R/T` を [`effective_fold_risk`] で写した順位付け用の値で、実際の放銃確率では
+    /// ない。複数 target では `None` で、target 別の値は
     /// [`worst_first_effective_fold_risks`](Self::worst_first_effective_fold_risks) から取る。
     pub fn effective_fold_risk(&self) -> Option<f64> {
         let evidence = self.ron_risk_evidence()?;
@@ -163,11 +165,25 @@ impl ForcedFoldRankedCandidate {
     }
 }
 
-/// ForcedFold の順位付け用 score。「実際に1枚切ったときの放銃率」ではない。
+/// ForcedFold の順位付け用 score。実際の放銃確率ではない。
 ///
-/// `model_risk` はその牌を今1枚切った場合の model risk (`R/T`)。ベタ降りは複数巡しのぐので、
-/// 同じ牌を `copies` 枚持っていれば `copies` 巡をその1回分の risk でカバーできるとみなし、
-/// 1巡あたりの等価 risk へ変換する heuristic。`copies <= 1` では `model_risk` のまま。
+/// `model_risk` はその牌を今1枚切った場合の model risk (`R/T`) で、その意味も値もここでは
+/// 変えない。同一牌を `copies` 枚持つ場合、1枚目が通った事実によって次巡以降の同一牌の安全性が
+/// 高まる continuation value を、「`copies` 巡ぶんを1回の `model_risk` でカバーできる」とみなす
+/// ことで簡易的に近似する heuristic。`copies <= 1` では `model_risk` のまま。
+///
+/// この近似は、通過が次巡以降へどれだけ残るかを defense target ごとに区別しない。実際の
+/// safety evidence の寿命は target の種別で違う。
+///
+/// - Reach: 通れば `post_reach_passed` としてそのリーチ者への現物になる。リーチ者の手牌は
+///   変化しないので、この safety は局中継続する。
+/// - OpenHand: 非リーチ副露相手の通過情報は Reach と同じ永続的な hard-safe ではない。
+///   `same_hand_passed` は「target の concealed hand が最後に変化して以降に通った」ことを前提と
+///   する safety evidence で、手出し・判別できない打牌・鳴き・槓で失効する。production も
+///   これを hard-safe とは扱わず、exact model の `R == 0` とも扱わない。
+///
+/// つまりこの score は ForcedFold ranking 用の heuristic で、上の違いを厳密にモデル化した値では
+/// ない。継続価値そのものの評価方式は別途検討する (issue #329)。
 pub fn effective_fold_risk(model_risk: f64, copies: usize) -> f64 {
     if copies <= 1 {
         return model_risk;
@@ -193,6 +209,9 @@ fn model_risk_ratio(evidence: RonRiskEvidence) -> Option<f64> {
 /// 段内の比較は worst-first の [`effective_fold_risk`] 辞書順で、全候補が `copies == 1` なら
 /// [`effective_fold_risk`] は `R/T` そのものなので production ordering と同じ並びになる。
 /// 比較が引き分けた場合は stable sort が production ordering を保つ。
+///
+/// 対象は Reach / OpenHand / Combined いずれの exact 段でも同じで、family で分けない。target
+/// 種別ごとの safety evidence の違いは [`effective_fold_risk`] の前提として扱う。
 pub(super) fn rerank_by_effective_fold_risk(candidates: &mut [ForcedFoldRankedCandidate]) {
     let positions: Vec<usize> = candidates
         .iter()

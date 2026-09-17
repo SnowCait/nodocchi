@@ -141,7 +141,8 @@ fn ranked_candidate_lines(candidate: &ForcedFoldRankedCandidate) -> Vec<String> 
 }
 
 // 順位を決めた ForcedFold 用 score と、その材料になる手牌内の同一牌枚数。model risk 行とは
-// 別に出し、`fold risk` が「今1枚切ったときの放銃率」ではないことを名前で区別する。
+// 別に出し、`fold risk` が実際の放銃確率ではなく、1枚目が通った後の同一牌の継続価値を近似する
+// ranking 用 heuristic であることを名前で区別する。
 fn fold_risk_lines(candidate: &ForcedFoldRankedCandidate) -> Vec<String> {
     let Some(fold_risks) = candidate.worst_first_effective_fold_risks() else {
         return Vec::new();
