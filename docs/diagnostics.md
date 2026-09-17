@@ -184,6 +184,8 @@ player 1
   meld kinds: Chi 1, Pon 1
   meld dora: 2
   meld red dora: 1
+  confirmed value honor: 1
+  fixed meld visible han proxy: 3
   open meld dora: 2
   open meld red dora: 1
   open confirmed value honor: 1
@@ -192,9 +194,9 @@ player 1
   open hand threat reason: TwoOrMoreWithVisibleHan
 ```
 
-`meld dora` などは暗槓を含む fixed meld 全体、`open meld dora` などの `open` 値は公開副露だけです。`open visible han proxy` は production helper から表示します。classification の意味と条件は [押し引きと threat](ai/push-pull.md#openhandthreat) を source document とします。
+`meld dora` や `fixed meld visible han proxy` などは暗槓を含む fixed meld 全体、`open meld dora` などの `open` 値は公開副露だけです。どちらの proxy も production helper から表示します。classification の意味と条件は [押し引きと threat](ai/push-pull.md#openhandthreat) を source document とします。
 
-`player_id` などが不明な値は推測せず `unknown` / `None` と表示します。暗槓は `melds` と `kans` には入り、`open melds` には入りません。
+`player_id` などが不明な値は推測せず `unknown` / `None` と表示します。暗槓は `melds` と `kans` には入り、`open melds` には入りません。classification は `melds` 側 (暗槓を含む完成面子) を進行度の軸にするため、暗槓込みで成立した条件の `open hand threat reason` は `FixedMeld` 系になります。
 
 ## Push/Pull
 

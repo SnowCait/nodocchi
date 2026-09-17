@@ -141,6 +141,14 @@ fn present() -> OpenHandThreatDecision {
     }
 }
 
+// 暗槓だけの相手。完成面子はあるので Present だが、公開副露の reason とは区別する。
+fn fixed_meld_present() -> OpenHandThreatDecision {
+    OpenHandThreatDecision {
+        level: OpenHandThreatLevel::Present,
+        reason: OpenHandThreatReason::FixedMeldPresent,
+    }
+}
+
 fn high(reason: OpenHandThreatReason) -> OpenHandThreatDecision {
     OpenHandThreatDecision {
         level: OpenHandThreatLevel::High,
@@ -398,7 +406,8 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                threat: no_open_meld(),
+                // 暗槓も完成面子なので、序盤でも None ではなく Present になる。
+                threat: fixed_meld_present(),
             }),
         },
         CorpusScenario {
@@ -1095,10 +1104,12 @@ fn assert_the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld(evaluated: &Ev
         facts.open_value_honor_melds,
         ValueHonorMeldCounts::default()
     );
-    // 暗槓だけの相手は open hand の威圧材料を持たない。
+    // 暗槓だけの相手は公開副露の打点材料を持たないが、完成面子1つぶんの進行度はある。
+    assert_eq!(facts.open_visible_han_proxy(), 0);
+    assert_eq!(facts.fixed_meld_visible_han_proxy(), 0);
     assert_eq!(
         classify_open_hand_threat(facts),
-        OpenHandThreatAssessment::Classified(no_open_meld())
+        OpenHandThreatAssessment::Classified(fixed_meld_present())
     );
 }
 

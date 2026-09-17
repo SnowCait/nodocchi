@@ -304,7 +304,7 @@ fn offense_value_proxy_after_discard(
 ///
 /// ドラ・赤ドラ・役牌の判定は既存 [`fixed_meld_value_facts`] に一本化し、押し引き側で `MeldKind` や
 /// 場風・自風を判定し直さない。Ankan は公開副露ではないが自分の手牌価値の一部なので、相手の
-/// OpenHandThreat とは違い全 fixed meld を対象にする。
+/// OpenHandThreat の `fixed_meld_visible_han_proxy` と同じく全 fixed meld を対象にする。
 ///
 /// `player_id` が不明で自分の fixed meld を特定できない場合は、player 0 を自分と仮定するような補完を
 /// せず、確認できない fixed meld の打点を加算しない。
@@ -439,7 +439,10 @@ impl PushPullInputs {
         self.opponent_reach_count >= 1 && self.has_high_open_hand_threat()
     }
 
-    /// High OpenHandThreat の対象がすべて「1副露かつ河12枚以上」だけで High になった相手か。
+    /// High OpenHandThreat の対象がすべて「完成面子1つかつ河12枚以上」だけで High になった相手か。
+    ///
+    /// 面子数は classification と同じく暗槓を含む `meld_count` で数える。暗槓を持つ相手は完成
+    /// 面子が2つ以上ある側の条件で High になるので、ここでも終盤1面子だけの target とは扱わない。
     ///
     /// High target の特定には分類済みの `open_hand_threats` を使い、その target の意味は対応する
     /// `player_threats` の観測 facts で確認する。diagnostic reason には依存せず、High 条件そのものも
@@ -453,7 +456,7 @@ impl PushPullInputs {
             }
 
             has_high_target = true;
-            if facts.open_meld_count != 1 || facts.discard_count < 12 {
+            if facts.meld_count != 1 || facts.discard_count < 12 {
                 return false;
             }
         }

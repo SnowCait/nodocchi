@@ -1213,14 +1213,14 @@ mod tests {
 
     #[test]
     fn an_ankan_only_player_is_not_a_target() {
-        // 暗槓は open meld ではないので OpenHandThreat が None になり、target にならない。
+        // 暗槓1つだけの序盤の相手は OpenHandThreat が Present に留まるので target にならない。
         let context = ContextSpec::new().melds_of(3, vec![ankan()]).build();
 
         assert_eq!(
             assessments(&context)[3],
             OpenHandThreatAssessment::Classified(OpenHandThreatDecision {
-                level: OpenHandThreatLevel::None,
-                reason: crate::open_hand_threat::OpenHandThreatReason::NoOpenMeld,
+                level: OpenHandThreatLevel::Present,
+                reason: crate::open_hand_threat::OpenHandThreatReason::FixedMeldPresent,
             })
         );
         assert!(targets(&context).is_empty());

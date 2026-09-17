@@ -237,6 +237,16 @@ impl PlayerThreatFacts {
         self.open_value_honor_melds.confirmed_han() + usize::from(self.open_meld_dora_count)
     }
 
+    /// 暗槓を含む全 fixed meld から確定して確認できる翻数の下限 proxy。
+    ///
+    /// 確定役牌翻と `meld_dora_count` を合計する。[`Self::open_visible_han_proxy`] と同じ
+    /// 組み立てで、対象 meld が公開副露だけか全 fixed meld かだけが違う。暗槓が複数あっても
+    /// 各 meld の facts の合計なので自然に累積する。一般役の推定は行わず、unknown wind は
+    /// 推測して加算しない。
+    pub fn fixed_meld_visible_han_proxy(&self) -> usize {
+        self.value_honor_melds.confirmed_han() + usize::from(self.meld_dora_count)
+    }
+
     /// 他家の席か。`player_id` が不明なら推測せず `None` (unknown)。
     pub fn is_opponent(&self) -> Option<bool> {
         self.is_self.map(|is_self| !is_self)

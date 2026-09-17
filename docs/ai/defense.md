@@ -160,7 +160,7 @@ exact model が利用できない場合の従来 selection です。全リーチ
 
 ## OpenHand Defense
 
-`open hand threat: High` の非リーチ副露相手だけを target にします。classification は [OpenHandThreat](push-pull.md#openhandthreat) を共有し、Defense 側で High 条件を再実装しません。`Present` / `None`、自分、リーチ済み、player id 不明の席は target 外です。
+`open hand threat: High` の非リーチ副露相手だけを target にします。classification は [OpenHandThreat](push-pull.md#openhandthreat) を共有し、Defense 側で High 条件を再実装しません。classification は暗槓も完成面子として数えるため、公開副露が無くても暗槓だけで `High` になった相手は target になります。`Present` / `None`、自分、リーチ済み、player id 不明の席は target 外です。
 
 候補の大分類は次の順です。
 
