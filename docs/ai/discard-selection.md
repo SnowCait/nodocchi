@@ -478,6 +478,13 @@ defer → forced Damaten
 継続後の未来テンパイ → 既存の将来テンパイ Reach 判定
 ```
 
+リーチ種別 (通常立直 / ダブル立直) も評価時点で分かれます。`reach now` は今この打牌で宣言するリーチなので、ダブル立直と確定していればその2翻を含みます。`defer → forced Reach` と継続枝の terminal tenpai は1巡後以降に初めて宣言するリーチなので、現在のダブル立直 eligibility を引き継がず常に通常立直1翻で評価します。
+
+```text
+reach now            → 現在の手のリーチ (Riichi / DoubleRiichi)
+defer → forced Reach → 将来宣言する仮想リーチ (常に Riichi)
+```
+
 従来 `damaten continuation` と表示していた値は、**将来も強制ダマにする値ではありません**。「今はリーチせず1巡待つ」ものの、terminal tenpai の mode は既存 `decide_reach_reason()` が選ぶ production policy でした。この production continuation は意味を変えず `defer → production` として残し、今回 `defer → forced Reach` と `defer → forced Damaten` を counterfactual として分離しました。
 
 3つの defer は、最初のツモ、非和了牌の物理 variant、既存 selector が選んだ `next discard`、`SelfTsumoPath::immediate()` をすべて共有します。切り替えるのは同じ terminal tenpai に適用する Reach / Damaten Tsumo baseline だけです。`defer → forced Reach` は既存の将来 Reach legality が合法とした枝だけを Reach baseline で評価し、違法な枝は 0 点ではなく unavailable にします。`defer → forced Damaten` は Ron の役有無ではなく既存 Damaten Tsumo baseline を使い、副露手で Tsumo が役なしになる physical variant は既存 semantics どおり成功待ちに含めません。

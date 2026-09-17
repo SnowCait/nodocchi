@@ -799,31 +799,48 @@ impl<'a> ProductionProspectiveValuator<'a> {
         }
     }
 
-    /// 未来テンパイの評価材料を、指定した攻撃モードの共通 Tsumo scoring
+    /// 現在打牌後のテンパイを、現在の手のリーチとして共通 Tsumo scoring
     /// ([`tenpai_tsumo_value_from_hands`]) へ渡す。
     ///
-    /// production のリーチ判断が決めたモードで評価する [`ProspectiveTsumoValuator`] と、
-    /// 将来テンパイを forced Reach / forced Damaten で評価する診断が同じ scoring 経路を共有する
-    /// ための入口。baseline の組み立ても集約規則もこの層は持たない。
+    /// この評価器は lookahead の枝と現在打牌後のテンパイの両方の材料を組み立てるので、どちらの
+    /// 時点として点数計算するかは入口で分ける。こちらは「今この request で宣言するリーチ」
+    /// ([`TenpaiScoringMode::current`]) なので、ダブル立直と確定していればその2翻で評価する。
     ///
-    /// この層が評価するのは lookahead の先のテンパイだけなので、Reach は常に将来宣言する仮想
-    /// リーチ ([`TenpaiScoringMode::prospective`]) として渡す。現在の局面のダブル立直
-    /// eligibility を将来の枝へ流用しない。
-    pub(crate) fn tsumo_value_with_mode(
+    /// baseline の組み立ても集約規則もこの層は持たない。
+    pub(crate) fn current_tsumo_value(
         &self,
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
     ) -> Option<TenpaiTsumoValue> {
-        tenpai_tsumo_value_from_hands(
-            self.context,
-            &facts.hands,
-            TenpaiScoringMode::prospective(mode),
-        )
+        self.tsumo_value(facts, TenpaiScoringMode::current(self.context, mode))
     }
 
-    /// 未来テンパイの評価材料を、指定した攻撃モードの共通 Tsumo scoring
+    /// 未来テンパイの評価材料を、将来宣言する仮想リーチとして共通 Tsumo scoring
+    /// ([`tenpai_tsumo_value_from_hands`]) へ渡す。
+    ///
+    /// production のリーチ判断が決めたモードで評価する [`ProspectiveTsumoValuator`] と、
+    /// 将来テンパイを forced Reach / forced Damaten で評価する診断が共有する入口。1手先以降で
+    /// 初めて宣言するリーチ ([`TenpaiScoringMode::prospective`]) なので、現在の局面のダブル
+    /// 立直 eligibility を将来の枝へ引き継がない。
+    pub(crate) fn prospective_tsumo_value(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiOffenseMode,
+    ) -> Option<TenpaiTsumoValue> {
+        self.tsumo_value(facts, TenpaiScoringMode::prospective(mode))
+    }
+
+    fn tsumo_value(
+        &self,
+        facts: &ProspectiveFacts,
+        mode: TenpaiScoringMode,
+    ) -> Option<TenpaiTsumoValue> {
+        tenpai_tsumo_value_from_hands(self.context, &facts.hands, mode)
+    }
+
+    /// 現在打牌後のテンパイを、現在の手のリーチとして共通 Tsumo scoring
     /// ([`tenpai_tsumo_variant_outcomes`]) へ渡し、和了牌の物理牌 variant ごとの結論を得る。
-    pub(crate) fn tsumo_variant_outcomes(
+    pub(crate) fn current_tsumo_variant_outcomes(
         &self,
         facts: &ProspectiveFacts,
         mode: TenpaiOffenseMode,
@@ -831,7 +848,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
         tenpai_tsumo_variant_outcomes(
             self.context,
             &facts.hands,
-            TenpaiScoringMode::prospective(mode),
+            TenpaiScoringMode::current(self.context, mode),
         )
     }
 
@@ -1029,7 +1046,7 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
         let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
-            self.tsumo_value_with_mode(facts, mode)
+            self.prospective_tsumo_value(facts, mode)
         });
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
@@ -1423,7 +1440,7 @@ fn terminal_tsumo_value_with_mode(
     if production_mode == mode {
         Some(production_value)
     } else {
-        valuator.tsumo_value_with_mode(facts, mode)
+        valuator.prospective_tsumo_value(facts, mode)
     }
 }
 
