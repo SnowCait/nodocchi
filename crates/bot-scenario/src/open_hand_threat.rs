@@ -1,11 +1,11 @@
-//! 非リーチ副露相手の観測事実を段階的に比較するための scenario corpus と、その回帰テスト。
+//! 非リーチ相手の観測事実を段階的に比較するための scenario corpus と、その回帰テスト。
 //!
-//! 各 fixture は同じ自分の攻撃状態に対して相手の副露だけを変えたもので、現行の
+//! 各 fixture は同じ自分の攻撃状態に対して相手の副露・暗槓だけを変えたもので、現行の
 //! `PlayerThreatFacts` / `OpenHandThreat` / 押し引き / 通常打牌 selected を並べて比較するための
 //! 固定局面。corpus 側で threat score や副露評価を再実装せず、production が構築した facts と
 //! classification をそのまま確認する。
 //!
-//! `decide_push_pull()` は `High` の副露相手だけを threat として扱うため、`None` / `Present` の
+//! `decide_push_pull()` は `High` の相手だけを threat として扱うため、`None` / `Present` の
 //! fixture は従来どおり `NoThreat` → `Push`、`High` の fixture は自分の攻撃状態で分かれる。
 //! 強いテンパイの自分なら `StrongTenpaiAgainstHighOpenHand` → `Push`、一向聴の自分なら受け入れの
 //! 強さにかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の自分なら
@@ -138,6 +138,14 @@ fn present() -> OpenHandThreatDecision {
     OpenHandThreatDecision {
         level: OpenHandThreatLevel::Present,
         reason: OpenHandThreatReason::OpenMeldPresent,
+    }
+}
+
+// 暗槓だけの相手。完成面子はあるので Present だが、公開副露の reason とは区別する。
+fn fixed_meld_present() -> OpenHandThreatDecision {
+    OpenHandThreatDecision {
+        level: OpenHandThreatLevel::Present,
+        reason: OpenHandThreatReason::FixedMeldPresent,
     }
 }
 
@@ -398,7 +406,8 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                threat: no_open_meld(),
+                // 暗槓も完成面子なので、序盤でも None ではなく Present になる。
+                threat: fixed_meld_present(),
             }),
         },
         CorpusScenario {
@@ -1095,10 +1104,12 @@ fn assert_the_ankan_scenario_is_a_fixed_meld_but_not_an_open_meld(evaluated: &Ev
         facts.open_value_honor_melds,
         ValueHonorMeldCounts::default()
     );
-    // 暗槓だけの相手は open hand の威圧材料を持たない。
+    // 暗槓だけの相手は公開副露の打点材料を持たないが、完成面子1つぶんの進行度はある。
+    assert_eq!(facts.open_visible_han_proxy(), 0);
+    assert_eq!(facts.fixed_meld_visible_han_proxy(), 0);
     assert_eq!(
         classify_open_hand_threat(facts),
-        OpenHandThreatAssessment::Classified(no_open_meld())
+        OpenHandThreatAssessment::Classified(fixed_meld_present())
     );
 }
 

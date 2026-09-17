@@ -7,36 +7,38 @@
 | threat | 条件 | reason 系列 |
 | --- | --- | --- |
 | Riichi threat | 他家リーチが1人以上 | `*AgainstReach` |
-| High OpenHandThreat | 他家リーチがなく、High の非リーチ副露相手が1人以上 | `*AgainstHighOpenHand` |
+| High OpenHandThreat | 他家リーチがなく、High の非リーチ相手が1人以上 | `*AgainstHighOpenHand` |
 | Combined threat | 他家リーチと High OpenHandThreat が同時に存在 | `*AgainstCombinedThreat` |
 
-`Present` の副露相手は明確な threat に数えません。
+`Present` の相手は明確な threat に数えません。
 
 ## OpenHandThreat
 
-非リーチ副露相手を観測 facts だけから `None` / `Present` / `High` に分類する暫定 heuristic です。テンパイ確率、放銃率、正確な打点ではありません。
+非リーチ相手を観測 facts だけから `None` / `Present` / `High` に分類する暫定 heuristic です。テンパイ確率、放銃率、正確な打点ではありません。
+
+完成面子の数は暗槓を含む fixed meld 全体 (`meld_count`) で数えます。暗槓は公開副露ではありませんが完成済みの面子なので、手の進行度には個数ぶん反映します。大明槓・加槓は公開副露なので `meld_count` と `open_meld_count` の両方に1面子として入り、暗槓として二重には数えません。
 
 | level | 意味 |
 | --- | --- |
-| `None` | open meld が0。暗槓だけの相手も含む |
-| `Present` | open meld はあるが High 条件を満たさない |
+| `None` | 完成面子が0 |
+| `Present` | 完成面子はあるが High 条件を満たさない。暗槓だけの相手もここ |
 | `High` | 現在の警戒条件のいずれかを満たす |
 
 現在の High 条件:
 
-- open meld が3つ以上
-- open meld が2つ以上かつ `open visible han proxy >= 2`
-- 親が open meld を2つ以上持つ
-- open meld が2つ以上かつ河が9枚以上
-- open meld が1つ以上かつ河が12枚以上
+- 完成面子が3つ以上
+- 完成面子が2つ以上かつ `fixed meld visible han proxy >= 2`
+- 親が完成面子を2つ以上持つ
+- 完成面子が2つ以上かつ河が9枚以上
+- 完成面子が1つ以上かつ河が12枚以上
 
-`open visible han proxy` は公開副露から確定する役牌翻と既存 `open_meld_dora_count` の合計です。役牌翻は `dragon + round_wind + seat_wind` なのでダブ風は2翻、通常役牌は1翻です。unknown wind は推測せず、暗槓と一般役も含めません。
+`fixed meld visible han proxy` は暗槓を含む全 fixed meld から確定する役牌翻と `meld_dora_count` の合計です。暗槓内のドラ・赤ドラ・確定役牌も観測済みの打点要素として数え、暗槓が複数あればそのぶん累積します。`open visible han proxy` は同じ組み立てを公開副露だけに限ったもので、自分の打点 proxy との比較などに残しています。どちらも役牌翻は `dragon + round_wind + seat_wind` なのでダブ風は2翻、通常役牌は1翻です。unknown wind は推測せず、一般役も含めません。
 
-複数条件に一致した場合、diagnostic reason は production code の固定優先順で1つだけ表示します。自分、リーチ済み、player id が不明な席は classification 対象外です。
+複数条件に一致した場合、diagnostic reason は production code の固定優先順で1つだけ表示します。同じ条件が公開副露だけで成立するなら `ThreeOrMoreOpenMelds` などの `OpenMeld` 系、暗槓を含めて初めて成立するなら `ThreeOrMoreFixedMelds` などの `FixedMeld` 系になります。公開副露だけの相手の level と reason は従来のままです。自分、リーチ済み、player id が不明な席は classification 対象外です。
 
-この classification 自体は Push/Pull policy とは分離されています。したがって、1副露かつ河12枚以上の相手は引き続き `High` です。そのうえで、他家リーチがなく、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが全 `High` target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します。hard-safe は OpenHand 防御と同じ「本人の河または現在有効な一時通過牌」で判定し、手牌内の別の安全牌は根拠にしません。
+この classification 自体は Push/Pull policy とは分離されています。したがって、完成面子1つかつ河12枚以上の相手は引き続き `High` です。そのうえで、他家リーチがなく、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが全 `High` target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します。hard-safe は OpenHand 防御と同じ「本人の河または現在有効な一時通過牌」で判定し、手牌内の別の安全牌は根拠にしません。
 
-また、他家リーチがなく、`High` target がすべて「1副露かつ河12枚以上」の場合も、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。どちらの例外も複数の `High` target がいる場合は全 target が条件を満たす必要があります。Riichi threat と Combined threat には適用しません。
+また、他家リーチがなく、`High` target がすべて「完成面子1つかつ河12枚以上」の場合も、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。どちらの例外も複数の `High` target がいる場合は全 target が条件を満たす必要があります。Riichi threat と Combined threat には適用しません。
 
 ## offense state と mode
 
@@ -47,7 +49,7 @@
 | 強いテンパイ | `Push` | `StrongTenpaiAgainst*` |
 | 選択したテンパイ打牌が全 High target に hard-safe | `Push` | `SafeTenpaiAgainstHighOpenHand` |
 | 強いと確認できないテンパイ | `Fold` | `WeakTenpaiAgainst*` |
-| 終盤1副露だけが High target のテンパイ | `Push` | `TenpaiAgainstLateOneMeldHighOpenHand` |
+| 終盤の完成面子1つだけが High target のテンパイ | `Push` | `TenpaiAgainstLateOneMeldHighOpenHand` |
 | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainst*` |
 | それ以外の一向聴 | `Fold` | `IishantenAgainst*` |
 | 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainst*` |
@@ -73,7 +75,7 @@
 
 自分が親かどうかでは threshold を変えません。一向聴の受け入れや簡易打点 proxy は diagnostics に残しますが、現在の Push/Pull 判定には使いません。
 
-選択打牌の hard-safe 例外と終盤1副露 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。終盤1副露の例外は High target に2副露以上の相手が1人でも含まれる場合は使いません。Riichi threat、Combined threat ではどちらの例外も使わず、従来の strong-tenpai threshold を維持します。
+選択打牌の hard-safe 例外と終盤1面子 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。終盤1面子の例外は High target に完成面子2つ以上の相手が1人でも含まれる場合は使いません。面子数は classification と同じく暗槓を含めて数えるので、公開副露1つだけの相手と暗槓1つだけの相手はどちらもこの例外の対象で、公開副露と暗槓を1つずつ持つような完成面子2つの相手は対象外です。Riichi threat、Combined threat ではどちらの例外も使わず、従来の strong-tenpai threshold を維持します。
 
 ## 一向聴の攻撃価値
 
@@ -125,7 +127,7 @@ ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値
 
 fixed meld のドラ・赤ドラ・役牌の判定は threat 側と同じ `meld_threat_facts()` / `fixed_meld_value_facts()` を使い、押し引き側で数え直しません。Chi / Pon / Daiminkan / Ankan / Kakan をすべて対象にし、Kan は物理牌4枚を数えます。Chi は字牌を含まないので役牌翻を持ちませんが、ドラ・赤ドラは通常どおり数えます。役牌翻は `dragon + round_wind + seat_wind` なので、東場の東家の東ポンのようなダブ風は2翻です。場風・自風が不明な軸は推測して加算しません。
 
-暗槓は公開副露ではありませんが自分の手牌価値の一部なので、この proxy には含めます。相手の [OpenHandThreat](#openhandthreat) の `open visible han proxy` が暗槓を含まないのは公開情報だけを見る別の semantics で、意図的な違いです。`player_id` が不明で自分の fixed meld を特定できない場合は、確認できない fixed meld の打点を推測して加算しません。
+暗槓は公開副露ではありませんが自分の手牌価値の一部なので、この proxy には含めます。相手の [OpenHandThreat](#openhandthreat) も暗槓を含む `fixed meld visible han proxy` を使うので、自分と相手で同じ数え方になります。公開副露だけを見る `open visible han proxy` はそれとは別の semantics として残しています。`player_id` が不明で自分の fixed meld を特定できない場合は、確認できない fixed meld の打点を推測して加算しません。
 
 `simple value proxy` は `dora after discard + value honor han proxy after discard` です。`red dora after discard` は `dora after discard` の内数なので加算しません。
 

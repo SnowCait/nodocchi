@@ -177,7 +177,7 @@ impl ForcedFoldRankedCandidate {
 ///
 /// - Reach: 通れば `post_reach_passed` としてそのリーチ者への現物になる。リーチ者の手牌は
 ///   変化しないので、この safety は局中継続する。
-/// - OpenHand: 非リーチ副露相手の通過情報は Reach と同じ永続的な hard-safe ではない。
+/// - OpenHand: 非リーチ相手の通過情報は Reach と同じ永続的な hard-safe ではない。
 ///   `same_hand_passed` は「target の concealed hand が最後に変化して以降に通った」ことを前提と
 ///   する safety evidence で、手出し・判別できない打牌・鳴き・槓で失効する。production も
 ///   これを hard-safe とは扱わず、exact model の `R == 0` とも扱わない。

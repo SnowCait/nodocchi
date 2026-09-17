@@ -1,19 +1,19 @@
-//! 非リーチ副露相手の暫定 threat classification。
+//! 非リーチ相手 (副露・暗槓を持つ席) の暫定 threat classification。
 //!
 //! 観測 facts ([`PlayerThreatFacts`]) だけを入力にした pure な判定で、`GameContext` を
 //! 解析し直さない。押し引き・防御の policy はここには持たない。
 
 use crate::threat::PlayerThreatFacts;
 
-/// 非リーチ副露相手の暫定的な危険度。
+/// 非リーチ相手の暫定的な危険度。
 ///
-/// 正確なテンパイ確率・放銃率・推定打点ではなく、観測できた副露・ドラ・役牌・局進行だけから
-/// 決める暫定 heuristic。
+/// 正確なテンパイ確率・放銃率・推定打点ではなく、観測できた副露・暗槓・ドラ・役牌・局進行だけ
+/// から決める暫定 heuristic。公開副露が無くても暗槓だけで `Present` / `High` になり得る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenHandThreatLevel {
-    /// open meld が無い。Ankan だけの場合もここ。
+    /// fixed meld が無い。Ankan も完成面子なので、暗槓だけの相手はここには入らない。
     None,
-    /// open meld はあるが、`High` の条件は満たさない。
+    /// fixed meld はあるが、`High` の条件は満たさない。
     Present,
     /// 暫定 heuristic の警戒条件を満たす。
     High,
@@ -24,22 +24,38 @@ pub enum OpenHandThreatLevel {
 /// 複数の `High` 条件を同時に満たす場合は、[`classify_open_hand_threat`] が固定の優先順位で
 /// 1つだけ選ぶ。level 自体はどの条件を満たしても `High` なので、この順位は診断表示のためだけの
 /// ものになる。
+///
+/// 各条件には `OpenMeld` 系と `FixedMeld` 系の2つの reason があり、同じ条件が公開副露だけで
+/// 成立するなら `OpenMeld` 系、暗槓を含めて初めて成立するなら `FixedMeld` 系になる。暗槓込みで
+/// 成立した条件を公開副露だけで成立したかのように表示しないための区別で、level は変わらない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenHandThreatReason {
-    /// open meld が無い。
+    /// fixed meld が無い。
     NoOpenMeld,
     /// open meld はあるが `High` 条件をどれも満たさない。
     OpenMeldPresent,
-    /// 3副露以上。
+    /// 暗槓だけがあり `High` 条件をどれも満たさない。
+    FixedMeldPresent,
+    /// 公開副露が3つ以上。
     ThreeOrMoreOpenMelds,
-    /// 2副露以上かつ公開副露から確定する役牌翻・ドラ翻の proxy が2以上。
+    /// 暗槓を含む完成面子が3つ以上。
+    ThreeOrMoreFixedMelds,
+    /// 公開副露が2つ以上かつ公開副露から確定する役牌翻・ドラ翻の proxy が2以上。
     TwoOrMoreWithVisibleHan,
-    /// 親が2副露以上。
+    /// 暗槓を含む完成面子が2つ以上かつ、暗槓を含めて確定する役牌翻・ドラ翻の proxy が2以上。
+    TwoOrMoreFixedMeldsWithVisibleHan,
+    /// 親が公開副露を2つ以上。
     DealerWithTwoOrMoreOpenMelds,
-    /// 2副露以上かつ河が9枚以上。
+    /// 親が暗槓を含む完成面子を2つ以上。
+    DealerWithTwoOrMoreFixedMelds,
+    /// 公開副露が2つ以上かつ河が9枚以上。
     TwoOrMoreOpenMeldsFromNineDiscards,
-    /// 1副露以上かつ河が12枚以上。
+    /// 暗槓を含む完成面子が2つ以上かつ河が9枚以上。
+    TwoOrMoreFixedMeldsFromNineDiscards,
+    /// 公開副露が1つ以上かつ河が12枚以上。
     OpenMeldFromTwelveDiscards,
+    /// 暗槓を含む完成面子が1つ以上かつ河が12枚以上。
+    FixedMeldFromTwelveDiscards,
 }
 
 /// 非リーチ他家として分類した結果。
@@ -109,33 +125,37 @@ impl OpenHandThreatAssessment {
     }
 }
 
-// 局進行・打点に関係なく High とする open meld 数。
-const THREE_OPEN_MELDS: usize = 3;
-// 役牌・ドラ・親・中盤後半の各条件で High とする open meld 数。
-const TWO_OPEN_MELDS: usize = 2;
-// Present とみなす最小の open meld 数。局進行条件でも同じ最小値を使う。
-const ONE_OPEN_MELD: usize = 1;
-// 2副露以上と組み合わせて High とする公開副露の確定翻数 proxy。
-const HIGH_OPEN_VISIBLE_HAN_PROXY: usize = 2;
-// 2副露以上を強く警戒し始める河の枚数。
+// 局進行・打点に関係なく High とする完成面子の数。
+const THREE_MELDS: usize = 3;
+// 役牌・ドラ・親・中盤後半の各条件で High とする完成面子の数。
+const TWO_MELDS: usize = 2;
+// Present とみなす最小の完成面子の数。局進行条件でも同じ最小値を使う。
+const ONE_MELD: usize = 1;
+// 2面子以上と組み合わせて High とする確定翻数 proxy。
+const HIGH_VISIBLE_HAN_PROXY: usize = 2;
+// 2面子以上を強く警戒し始める河の枚数。
 const MID_ROUND_DISCARD_COUNT: usize = 9;
-// 1副露でも強く警戒し始める河の枚数。
+// 1面子でも強く警戒し始める河の枚数。
 const LATE_ROUND_DISCARD_COUNT: usize = 12;
 
-/// 観測 facts から非リーチ副露相手の暫定 threat を分類する pure helper。
+/// 観測 facts から非リーチ相手の暫定 threat を分類する pure helper。
 ///
-/// これは暫定 heuristic であり、正確なテンパイ確率・放銃率・推定打点を表さない。以下のいずれかを
-/// 満たすと [`OpenHandThreatLevel::High`] になる。
+/// これは暫定 heuristic であり、正確なテンパイ確率・放銃率・推定打点を表さない。暗槓も完成済みの
+/// 面子なので、進行度の軸には公開副露と同じく1面子として数え、その中のドラ・赤ドラ・確定役牌も
+/// 観測済みの打点として数える。以下のいずれかを満たすと [`OpenHandThreatLevel::High`] になる。
 ///
-/// - `open_meld_count >= 3`
-/// - `open_meld_count >= 2` かつ `open_visible_han_proxy() >= 2`
-/// - `is_dealer == Some(true)` かつ `open_meld_count >= 2`
-/// - `open_meld_count >= 2` かつ `discard_count >= 9`
-/// - `open_meld_count >= 1` かつ `discard_count >= 12`
+/// - `meld_count >= 3`
+/// - `meld_count >= 2` かつ `fixed_meld_visible_han_proxy() >= 2`
+/// - `is_dealer == Some(true)` かつ `meld_count >= 2`
+/// - `meld_count >= 2` かつ `discard_count >= 9`
+/// - `meld_count >= 1` かつ `discard_count >= 12`
 ///
-/// どれも満たさず `open_meld_count >= 1` なら [`OpenHandThreatLevel::Present`]、
-/// `open_meld_count == 0` なら [`OpenHandThreatLevel::None`]。Ankan は `open_meld_count` にも
-/// open meld 限定のドラ・役牌 facts にも入らないため、暗槓だけの相手は `None` になる。
+/// どれも満たさず `meld_count >= 1` なら [`OpenHandThreatLevel::Present`]、`meld_count == 0` なら
+/// [`OpenHandThreatLevel::None`]。Daiminkan / Kakan は公開副露なので `meld_count` に1面子として
+/// 入るだけで、暗槓として二重には数えない。unknown wind は推測して翻に加算しない。
+///
+/// 診断 reason は、同じ条件が公開副露だけで成立するなら `OpenMeld` 系、暗槓を含めて初めて成立
+/// するなら `FixedMeld` 系になる。公開副露だけの相手の level と reason は従来のままになる。
 ///
 /// 自分の席・リーチ済みの席・`player_id` 不明の席は対象外
 /// ([`OpenHandThreatAssessment::NotApplicable`]) で、危険度なしとは区別する。
@@ -149,9 +169,9 @@ pub fn classify_open_hand_threat(facts: PlayerThreatFacts) -> OpenHandThreatAsse
             level: OpenHandThreatLevel::High,
             reason,
         },
-        None if facts.open_meld_count >= ONE_OPEN_MELD => OpenHandThreatDecision {
+        None if facts.meld_count >= ONE_MELD => OpenHandThreatDecision {
             level: OpenHandThreatLevel::Present,
-            reason: OpenHandThreatReason::OpenMeldPresent,
+            reason: present_reason(facts),
         },
         None => OpenHandThreatDecision {
             level: OpenHandThreatLevel::None,
@@ -189,39 +209,102 @@ fn exclusion_of(facts: PlayerThreatFacts) -> Option<OpenHandThreatExclusion> {
     None
 }
 
-// 満たした High 条件のうち、優先順位が最も高いものの reason。
-fn high_reason(facts: PlayerThreatFacts) -> Option<OpenHandThreatReason> {
-    high_conditions(facts)
-        .into_iter()
-        .find_map(|(matched, reason)| matched.then_some(reason))
+// High 条件の数。level の判定と reason の選択で同じ並びを共有する。
+const HIGH_CONDITION_COUNT: usize = 5;
+
+// High 条件ごとの診断 reason。左が公開副露だけで成立した場合、右が暗槓を含めて成立した場合。
+const HIGH_REASONS: [(OpenHandThreatReason, OpenHandThreatReason); HIGH_CONDITION_COUNT] = [
+    (
+        OpenHandThreatReason::ThreeOrMoreOpenMelds,
+        OpenHandThreatReason::ThreeOrMoreFixedMelds,
+    ),
+    (
+        OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+        OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
+    ),
+    (
+        OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds,
+        OpenHandThreatReason::DealerWithTwoOrMoreFixedMelds,
+    ),
+    (
+        OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
+        OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards,
+    ),
+    (
+        OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+        OpenHandThreatReason::FixedMeldFromTwelveDiscards,
+    ),
+];
+
+// High 条件が見る完成面子の進行度と、そこから確認できる打点 proxy の組。
+//
+// 同じ条件を「暗槓を含む全 fixed meld」と「公開副露だけ」の2つの軸で評価するための型で、条件の
+// 閾値そのものは軸によらず共通になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MeldProgress {
+    melds: usize,
+    visible_han: usize,
 }
 
-// High 条件と診断 reason の対応。並びは reason の優先順位で、どの条件も level は High なので、
-// 並び順は level の判定を変えない。
-fn high_conditions(facts: PlayerThreatFacts) -> [(bool, OpenHandThreatReason); 5] {
-    let open_melds = facts.open_meld_count;
+impl MeldProgress {
+    // 暗槓を含む全 fixed meld の軸。level の判定はこちらを使う。
+    fn fixed(facts: PlayerThreatFacts) -> Self {
+        Self {
+            melds: facts.meld_count,
+            visible_han: facts.fixed_meld_visible_han_proxy(),
+        }
+    }
+
+    // 公開副露だけの軸。同じ条件が公開情報だけで成立するかを見て reason を選ぶために使う。
+    fn open(facts: PlayerThreatFacts) -> Self {
+        Self {
+            melds: facts.open_meld_count,
+            visible_han: facts.open_visible_han_proxy(),
+        }
+    }
+}
+
+// High 条件を満たさない相手の reason。公開副露が1つも無い場合だけ FixedMeldPresent になる。
+fn present_reason(facts: PlayerThreatFacts) -> OpenHandThreatReason {
+    if facts.open_meld_count >= ONE_MELD {
+        OpenHandThreatReason::OpenMeldPresent
+    } else {
+        OpenHandThreatReason::FixedMeldPresent
+    }
+}
+
+// 満たした High 条件のうち、優先順位が最も高いものの reason。
+//
+// level の判定は暗槓を含む軸だけで決まる。公開副露だけの軸は、その条件が公開情報だけでも成立
+// するかを見て reason を選ぶためにだけ使う。
+fn high_reason(facts: PlayerThreatFacts) -> Option<OpenHandThreatReason> {
+    let fixed = high_conditions(facts, MeldProgress::fixed(facts));
+    let open = high_conditions(facts, MeldProgress::open(facts));
+
+    (0..HIGH_CONDITION_COUNT)
+        .find(|&index| fixed[index])
+        .map(|index| {
+            let (open_reason, fixed_reason) = HIGH_REASONS[index];
+            if open[index] {
+                open_reason
+            } else {
+                fixed_reason
+            }
+        })
+}
+
+// High 条件の成否。並びは [`HIGH_REASONS`] と同じ reason の優先順位で、どの条件も level は High
+// なので、並び順は level の判定を変えない。
+fn high_conditions(
+    facts: PlayerThreatFacts,
+    progress: MeldProgress,
+) -> [bool; HIGH_CONDITION_COUNT] {
     [
-        (
-            open_melds >= THREE_OPEN_MELDS,
-            OpenHandThreatReason::ThreeOrMoreOpenMelds,
-        ),
-        (
-            open_melds >= TWO_OPEN_MELDS
-                && facts.open_visible_han_proxy() >= HIGH_OPEN_VISIBLE_HAN_PROXY,
-            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
-        ),
-        (
-            facts.is_dealer == Some(true) && open_melds >= TWO_OPEN_MELDS,
-            OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds,
-        ),
-        (
-            open_melds >= TWO_OPEN_MELDS && facts.discard_count >= MID_ROUND_DISCARD_COUNT,
-            OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
-        ),
-        (
-            open_melds >= ONE_OPEN_MELD && facts.discard_count >= LATE_ROUND_DISCARD_COUNT,
-            OpenHandThreatReason::OpenMeldFromTwelveDiscards,
-        ),
+        progress.melds >= THREE_MELDS,
+        progress.melds >= TWO_MELDS && progress.visible_han >= HIGH_VISIBLE_HAN_PROXY,
+        facts.is_dealer == Some(true) && progress.melds >= TWO_MELDS,
+        progress.melds >= TWO_MELDS && facts.discard_count >= MID_ROUND_DISCARD_COUNT,
+        progress.melds >= ONE_MELD && facts.discard_count >= LATE_ROUND_DISCARD_COUNT,
     ]
 }
 
@@ -276,6 +359,54 @@ mod tests {
                 ..MeldKindCounts::default()
             },
             ..opponent_facts()
+        }
+    }
+
+    // Ankan だけを `count` 個持つ他家の facts。ドラも役牌も含まない。
+    fn concealed_kans(count: usize) -> PlayerThreatFacts {
+        PlayerThreatFacts {
+            meld_count: count,
+            open_meld_count: 0,
+            kan_count: count,
+            meld_kinds: MeldKindCounts {
+                ankan: count,
+                ..MeldKindCounts::default()
+            },
+            ..opponent_facts()
+        }
+    }
+
+    // 公開副露1つと Ankan 1つを持つ他家の facts。完成面子は2つだが open meld は1つ。
+    fn one_open_meld_and_one_concealed_kan() -> PlayerThreatFacts {
+        PlayerThreatFacts {
+            meld_count: 2,
+            open_meld_count: 1,
+            kan_count: 1,
+            meld_kinds: MeldKindCounts {
+                chi: 1,
+                ankan: 1,
+                ..MeldKindCounts::default()
+            },
+            ..opponent_facts()
+        }
+    }
+
+    // 暗槓内のドラを足す。公開副露限定の facts には入れない。
+    fn with_concealed_dora(facts: PlayerThreatFacts, dora: u8) -> PlayerThreatFacts {
+        PlayerThreatFacts {
+            meld_dora_count: facts.meld_dora_count + dora,
+            ..facts
+        }
+    }
+
+    // 暗槓の確定役牌 (三元牌) を1つ足す。公開副露限定の facts には入れない。
+    fn with_concealed_value_honor(facts: PlayerThreatFacts) -> PlayerThreatFacts {
+        let mut counts = facts.value_honor_melds;
+        counts.dragon += 1;
+        counts.confirmed += 1;
+        PlayerThreatFacts {
+            value_honor_melds: counts,
+            ..facts
         }
     }
 
@@ -671,6 +802,152 @@ mod tests {
         }
     }
 
+    // ---- Ankan (完成面子としての進行度と確認済み打点) ----
+
+    #[test]
+    fn a_single_concealed_kan_before_the_late_round_is_present() {
+        // 暗槓は公開副露ではないが完成面子なので、None ではなく Present から始まる。
+        for discard_count in [0, 1, 8, 11] {
+            assert_classified(
+                with_discards(concealed_kans(1), discard_count),
+                OpenHandThreatLevel::Present,
+                OpenHandThreatReason::FixedMeldPresent,
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_concealed_kan_at_twelve_discards_is_high() {
+        assert_classified(
+            with_discards(concealed_kans(1), 12),
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::FixedMeldFromTwelveDiscards,
+        );
+    }
+
+    #[test]
+    fn two_concealed_kans_of_a_child_are_present_before_the_mid_round() {
+        // 子・打点条件なし・河8枚以下なら、完成面子2つでも Present のまま。
+        for discard_count in [0, 8] {
+            assert_classified(
+                with_discards(concealed_kans(2), discard_count),
+                OpenHandThreatLevel::Present,
+                OpenHandThreatReason::FixedMeldPresent,
+            );
+        }
+    }
+
+    #[test]
+    fn two_concealed_kans_at_nine_discards_are_high() {
+        assert_classified(
+            with_discards(concealed_kans(2), 9),
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards,
+        );
+    }
+
+    #[test]
+    fn a_dealer_with_two_concealed_kans_is_high() {
+        assert_classified(
+            as_dealer(concealed_kans(2)),
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::DealerWithTwoOrMoreFixedMelds,
+        );
+    }
+
+    #[test]
+    fn three_concealed_kans_are_high() {
+        for count in [3, 4] {
+            assert_classified(
+                concealed_kans(count),
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::ThreeOrMoreFixedMelds,
+            );
+        }
+    }
+
+    #[test]
+    fn one_open_meld_and_one_concealed_kan_at_nine_discards_are_high() {
+        assert_classified(
+            with_discards(one_open_meld_and_one_concealed_kan(), 9),
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards,
+        );
+    }
+
+    #[test]
+    fn a_concealed_kan_dora_counts_toward_the_visible_han_proxy() {
+        // 暗槓のドラ2枚だけで打点 proxy が2に届く。公開副露だけの proxy は0のまま。
+        let facts = with_concealed_dora(one_open_meld_and_one_concealed_kan(), 2);
+
+        assert_eq!(facts.open_visible_han_proxy(), 0);
+        assert_eq!(facts.fixed_meld_visible_han_proxy(), 2);
+        assert_classified(
+            facts,
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
+        );
+    }
+
+    #[test]
+    fn a_concealed_value_honor_kan_counts_toward_the_visible_han_proxy() {
+        // 暗槓の確定役牌1翻と公開副露のドラ1翻を合わせて proxy が2になる。
+        let facts =
+            with_concealed_value_honor(with_open_dora(one_open_meld_and_one_concealed_kan(), 1));
+
+        assert_eq!(facts.open_visible_han_proxy(), 1);
+        assert_eq!(facts.fixed_meld_visible_han_proxy(), 2);
+        assert_classified(
+            facts,
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
+        );
+    }
+
+    #[test]
+    fn multiple_concealed_kans_accumulate_in_the_visible_han_proxy() {
+        // 暗槓が複数あってもドラ・確定役牌はそれぞれ加算される。
+        let facts = with_concealed_value_honor(with_concealed_value_honor(with_concealed_dora(
+            concealed_kans(2),
+            1,
+        )));
+
+        assert_eq!(facts.value_honor_melds.confirmed, 2);
+        assert_eq!(facts.fixed_meld_visible_han_proxy(), 3);
+        assert_classified(
+            facts,
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
+        );
+    }
+
+    #[test]
+    fn an_open_meld_condition_keeps_its_open_reason_even_with_a_concealed_kan() {
+        // 公開副露だけで既に成立している条件は、暗槓があっても従来の reason のまま。
+        let facts = PlayerThreatFacts {
+            meld_count: 4,
+            open_meld_count: 3,
+            kan_count: 1,
+            meld_kinds: MeldKindCounts {
+                chi: 3,
+                ankan: 1,
+                ..MeldKindCounts::default()
+            },
+            ..opponent_facts()
+        };
+
+        assert_classified(
+            facts,
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::ThreeOrMoreOpenMelds,
+        );
+        assert_classified(
+            with_discards(facts, 12),
+            OpenHandThreatLevel::High,
+            OpenHandThreatReason::ThreeOrMoreOpenMelds,
+        );
+    }
+
     // ---- 対象外 ----
 
     #[test]
@@ -787,6 +1064,24 @@ mod tests {
         )
     }
 
+    // 3m の大明槓。公開副露なので open meld にも入る。
+    fn daiminkan() -> Meld {
+        Meld::new(
+            MeldKind::Daiminkan,
+            (8..12).map(tile).collect(),
+            Some(tile(8)),
+        )
+    }
+
+    // 7m の加槓。公開副露なので open meld にも入る。
+    fn kakan() -> Meld {
+        Meld::new(
+            MeldKind::Kakan,
+            (24..28).map(tile).collect(),
+            Some(tile(27)),
+        )
+    }
+
     // 白の暗槓。確定役牌。
     fn value_honor_ankan() -> Meld {
         Meld::new(
@@ -836,58 +1131,109 @@ mod tests {
     }
 
     #[test]
-    fn an_ankan_is_not_an_open_meld() {
+    fn an_ankan_is_a_fixed_meld_but_not_an_open_meld() {
         let context = context_with(vec![value_honor_ankan()], vec![], 0);
         let facts = player_threat_facts_from_context(&context)[3];
 
         assert_eq!(facts.meld_count, 1);
         assert_eq!(facts.open_meld_count, 0);
         assert_eq!(facts.open_visible_han_proxy(), 0);
+        // 完成面子はあるので None ではなく Present。公開副露の reason とは区別する。
         assert_eq!(
             assess(&context, 3),
-            classified(OpenHandThreatLevel::None, OpenHandThreatReason::NoOpenMeld)
+            classified(
+                OpenHandThreatLevel::Present,
+                OpenHandThreatReason::FixedMeldPresent
+            )
         );
     }
 
     #[test]
-    fn an_ankan_with_dora_is_still_none() {
+    fn an_ankan_dora_is_counted_as_confirmed_value() {
         let context = context_with(vec![dora_ankan()], vec![tile(12)], 0);
         let facts = player_threat_facts_from_context(&context)[3];
 
         assert!(facts.meld_dora_count >= 2);
         assert_eq!(facts.open_meld_dora_count, 0);
         assert_eq!(facts.open_visible_han_proxy(), 0);
+        assert!(facts.fixed_meld_visible_han_proxy() >= 2);
+        // 打点は確認できても完成面子は1つなので、序盤は Present のまま。
         assert_eq!(
             assess(&context, 3),
-            classified(OpenHandThreatLevel::None, OpenHandThreatReason::NoOpenMeld)
+            classified(
+                OpenHandThreatLevel::Present,
+                OpenHandThreatReason::FixedMeldPresent
+            )
         );
     }
 
     #[test]
-    fn a_value_honor_ankan_is_still_none() {
+    fn a_value_honor_ankan_is_counted_as_confirmed_value() {
         let context = context_with(vec![value_honor_ankan()], vec![], 0);
         let facts = player_threat_facts_from_context(&context)[3];
 
         assert_eq!(facts.value_honor_melds.confirmed, 1);
         assert_eq!(facts.open_value_honor_melds.confirmed, 0);
         assert_eq!(facts.open_visible_han_proxy(), 0);
+        assert_eq!(facts.fixed_meld_visible_han_proxy(), 1);
+    }
+
+    #[test]
+    fn a_single_ankan_at_twelve_discards_is_high_from_the_context() {
+        let context = context_with(vec![value_honor_ankan()], vec![], 12);
+
         assert_eq!(
             assess(&context, 3),
-            classified(OpenHandThreatLevel::None, OpenHandThreatReason::NoOpenMeld)
+            classified(
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::FixedMeldFromTwelveDiscards
+            )
         );
     }
 
     #[test]
-    fn an_ankan_with_a_chi_is_one_open_meld_before_the_late_round() {
+    fn an_ankan_with_a_chi_and_confirmed_value_is_high_in_the_mid_round() {
+        // regression: 1公開副露 + 暗槓の中盤の相手を、単なる1副露として扱わない。
         let context = context_with(vec![dora_ankan(), chi()], vec![tile(12)], 11);
         let facts = player_threat_facts_from_context(&context)[3];
 
         assert_eq!(facts.meld_count, 2);
         assert_eq!(facts.open_meld_count, 1);
         assert_eq!(facts.discard_count, 11);
-        // Ankan のドラを数えていれば「2副露 + ドラ2」で High になってしまう組み合わせ。
         assert!(facts.meld_dora_count >= 2);
         assert_eq!(facts.open_meld_dora_count, 0);
+        // 完成面子2つと暗槓のドラで、公開副露だけでは届かない High 条件を満たす。
+        assert_eq!(
+            assess(&context, 3),
+            classified(
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan
+            )
+        );
+    }
+
+    #[test]
+    fn an_ankan_with_a_chi_at_nine_discards_is_high() {
+        let context = context_with(vec![value_honor_ankan(), chi()], vec![], 9);
+        let facts = player_threat_facts_from_context(&context)[3];
+
+        assert_eq!(facts.meld_count, 2);
+        assert_eq!(facts.open_meld_count, 1);
+        // 確定役牌1翻だけでは打点条件に届かず、河9枚の進行条件で High になる。
+        assert_eq!(facts.fixed_meld_visible_han_proxy(), 1);
+        assert_eq!(
+            assess(&context, 3),
+            classified(
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards
+            )
+        );
+    }
+
+    #[test]
+    fn an_ankan_with_a_chi_before_the_mid_round_is_present() {
+        let context = context_with(vec![value_honor_ankan(), chi()], vec![], 8);
+
         assert_eq!(
             assess(&context, 3),
             classified(
@@ -898,24 +1244,8 @@ mod tests {
     }
 
     #[test]
-    fn an_ankan_with_a_chi_at_twelve_discards_is_high_only_from_the_late_round() {
-        let context = context_with(vec![value_honor_ankan(), chi()], vec![], 12);
-        let facts = player_threat_facts_from_context(&context)[3];
-
-        assert_eq!(facts.open_meld_count, 1);
-        assert_eq!(facts.open_value_honor_melds.confirmed, 0);
-        assert_eq!(
-            assess(&context, 3),
-            classified(
-                OpenHandThreatLevel::High,
-                OpenHandThreatReason::OpenMeldFromTwelveDiscards
-            )
-        );
-    }
-
-    #[test]
-    fn the_open_meld_count_drives_the_classification_from_the_context() {
-        // 同じ2副露でも、片方が Ankan なら open meld は1つ分しか数えない。
+    fn the_fixed_meld_count_drives_the_classification_from_the_context() {
+        // 同じ2面子でも、公開副露だけで成立した条件は従来の reason のまま表示する。
         let two_open = context_with(vec![chi(), chi()], vec![], 9);
         let one_open = context_with(vec![value_honor_ankan(), chi()], vec![], 9);
 
@@ -929,8 +1259,44 @@ mod tests {
         assert_eq!(
             assess(&one_open, 3),
             classified(
-                OpenHandThreatLevel::Present,
-                OpenHandThreatReason::OpenMeldPresent
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards
+            )
+        );
+    }
+
+    #[test]
+    fn a_daiminkan_and_a_kakan_are_counted_once_each() {
+        // 公開された槓は open meld でもあるので、暗槓として二重には数えない。
+        let context = context_with(vec![daiminkan(), kakan()], vec![], 9);
+        let facts = player_threat_facts_from_context(&context)[3];
+
+        assert_eq!(facts.meld_count, 2);
+        assert_eq!(facts.open_meld_count, 2);
+        assert_eq!(facts.kan_count, 2);
+        assert_eq!(facts.meld_kinds.ankan, 0);
+        assert_eq!(
+            assess(&context, 3),
+            classified(
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards
+            )
+        );
+    }
+
+    #[test]
+    fn a_daiminkan_and_a_kakan_with_an_ankan_are_three_fixed_melds() {
+        let context = context_with(vec![daiminkan(), kakan(), value_honor_ankan()], vec![], 0);
+        let facts = player_threat_facts_from_context(&context)[3];
+
+        assert_eq!(facts.meld_count, 3);
+        assert_eq!(facts.open_meld_count, 2);
+        assert_eq!(facts.kan_count, 3);
+        assert_eq!(
+            assess(&context, 3),
+            classified(
+                OpenHandThreatLevel::High,
+                OpenHandThreatReason::ThreeOrMoreFixedMelds
             )
         );
     }

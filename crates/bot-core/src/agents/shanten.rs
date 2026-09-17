@@ -29,7 +29,7 @@ const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 ///
 /// `ShantenAgent::act()` が実際に通った経路そのものであり、診断用の別判断ロジックではない。
 ///
-/// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`]、非リーチ副露相手向けの
+/// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`]、非リーチ相手向けの
 /// [`Self::OpenHandDefenseFallback`]、両者が同時にいる複合 threat 向けの
 /// [`Self::CombinedThreatDefenseFallback`] を別の経路として区別する。リーチ者向けの現物
 /// ([`DefenseFallbackKind::Genbutsu`])、全 OpenHand target へのロン安全
@@ -74,7 +74,7 @@ impl AgentActionSource {
         }
     }
 
-    /// 非リーチ副露相手向けの防御 fallback 経路で選ばれた場合のその大分類。
+    /// 非リーチ相手向けの防御 fallback 経路で選ばれた場合のその大分類。
     /// 他の経路では `None`。
     pub fn open_hand_defense_category(&self) -> Option<OpenHandDefenseCategory> {
         match self {

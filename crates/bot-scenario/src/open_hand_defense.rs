@@ -1,4 +1,4 @@
-//! 非リーチ副露相手 (High OpenHandThreat) に対する防御 safety の scenario 回帰テスト。
+//! 非リーチ相手 (High OpenHandThreat) に対する防御 safety の scenario 回帰テスト。
 //!
 //! `scenarios/open_hand_defense.json` は、High の副露相手が2人・Present の副露相手が1人いる
 //! 局面で、合法 Dahai ごとに「本人の河」「字牌 safety」「壁」「スジ」がどう出るかを1つの
@@ -314,7 +314,7 @@ fn a_target_with_the_tile_in_its_river_is_excluded_from_the_aggregated_suji() {
 
 #[test]
 fn a_post_reach_passed_tile_is_not_river_safe_for_a_non_reach_target() {
-    // post_reach_passed はリーチ者専用の情報で、非リーチ副露相手には流用しない。
+    // post_reach_passed はリーチ者専用の情報で、非リーチ相手には流用しない。
     let mut spec = spec();
     spec.post_reach_passed = Some(vec![
         String::new(),

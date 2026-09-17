@@ -59,7 +59,7 @@ pub(super) fn dahai_ron_risk_evidence_for_player(
     })
 }
 
-/// 指定した非リーチ副露 target について、全合法 Dahai を exact `R/T` evidence へ変換する。
+/// 指定した非リーチ target について、全合法 Dahai を exact `R/T` evidence へ変換する。
 fn open_hand_dahai_ron_risk_evidence_for_player(
     player: usize,
     context: &GameContext,

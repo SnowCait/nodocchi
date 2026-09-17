@@ -2673,6 +2673,14 @@ fn format_player_threat(threat: &PlayerThreatDiagnostic) -> String {
     ));
     lines.push(format!("  meld dora: {}", facts.meld_dora_count));
     lines.push(format!("  meld red dora: {}", facts.meld_red_dora_count));
+    lines.push(format!(
+        "  confirmed value honor: {}",
+        facts.value_honor_melds.confirmed
+    ));
+    lines.push(format!(
+        "  fixed meld visible han proxy: {}",
+        facts.fixed_meld_visible_han_proxy()
+    ));
     lines.push(format!("  open meld dora: {}", facts.open_meld_dora_count));
     lines.push(format!(
         "  open meld red dora: {}",
@@ -7992,6 +8000,8 @@ mod tests {
              meld kinds: Chi 1, Pon 1\n  \
              meld dora: 2\n  \
              meld red dora: 1\n  \
+             confirmed value honor: 1\n  \
+             fixed meld visible han proxy: 3\n  \
              open meld dora: 2\n  \
              open meld red dora: 1\n  \
              open confirmed value honor: 1\n  \
@@ -8024,12 +8034,19 @@ mod tests {
         assert!(block.contains("  kans: 1"), "{block}");
         assert!(block.contains("  meld kinds: Ankan 1"), "{block}");
         // 暗槓の自風は fixed meld 全体では役牌でも、open meld 限定では数えない。
+        assert!(block.contains("  confirmed value honor: 1"), "{block}");
+        assert!(
+            block.contains("  fixed meld visible han proxy: 1"),
+            "{block}"
+        );
         assert!(block.contains("  open meld dora: 0"), "{block}");
         assert!(block.contains("  open meld red dora: 0"), "{block}");
         assert!(block.contains("  open confirmed value honor: 0"), "{block}");
-        assert!(block.contains("  open hand threat: None"), "{block}");
+        assert!(block.contains("  open visible han proxy: 0"), "{block}");
+        // 完成面子1つぶんの進行度はあるので、序盤でも None ではなく Present。
+        assert!(block.contains("  open hand threat: Present"), "{block}");
         assert!(
-            block.contains("  open hand threat reason: NoOpenMeld"),
+            block.contains("  open hand threat reason: FixedMeldPresent"),
             "{block}"
         );
         assert!(

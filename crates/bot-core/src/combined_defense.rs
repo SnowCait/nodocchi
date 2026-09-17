@@ -1,5 +1,5 @@
 //! リーチ者と `High` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の
-//! 非リーチ副露相手が同時にいる複合 threat 局面の防御 safety の source of truth。
+//! 非リーチ相手が同時にいる複合 threat 局面の防御 safety の source of truth。
 //!
 //! 判定は既存 Defense / OpenHand Defense の pure helper をそのまま共有し、字牌の見え枚数・壁・
 //! スジ・役牌価値を別実装しない。違うのは target 集合の作り方と、「その player にロンされない」
@@ -37,7 +37,7 @@ use bot_logic::TileType;
 pub enum ThreatDefenseTargetKind {
     /// 他家リーチ者。現物 ([`is_genbutsu_for`]) がロン安全の根拠。
     Riichi,
-    /// `High` の非リーチ副露相手。本人の河または現在有効な一時通過牌がロン安全の根拠。
+    /// `High` の非リーチ相手。本人の河または現在有効な一時通過牌がロン安全の根拠。
     HighOpenHand,
 }
 

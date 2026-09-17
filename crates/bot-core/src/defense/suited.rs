@@ -132,7 +132,7 @@ pub fn suited_safety_rank_for_all_reached(
 /// 数牌の安全度の求め方だけを呼び出し側から差し替えられるようにしてある。同安全度は元の順序を
 /// 保つ。並べ替えはここが唯一の実装で、対象 player 集合ごとにコピーしない。
 ///
-/// リーチ者向けの入口は [`suited_dahai_actions_by_safety`]。非リーチ副露相手向けの入口は
+/// リーチ者向けの入口は [`suited_dahai_actions_by_safety`]。非リーチ相手向けの入口は
 /// [`open_hand_suited_dahai_actions_by_safety`](crate::open_hand_defense::open_hand_suited_dahai_actions_by_safety)。
 pub fn suited_dahai_actions_by_safety_with<'a>(
     legal_actions: &'a [LegalAction],

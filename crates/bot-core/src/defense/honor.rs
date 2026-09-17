@@ -125,7 +125,7 @@ pub(super) fn sort_group_by_opponent_honor_value(group: &mut [RankedHonorCandida
 /// (`GuestWind` → `SingleValueHonor` → `DoubleWind`) に並べる sorting はここが唯一の実装で、
 /// 対象 player 集合ごとにコピーしない。unknown の役牌価値は推測せず、その位置の元の順序を保つ。
 ///
-/// リーチ者向けの入口は [`honor_dahai_actions_by_safety`]。非リーチ副露相手向けの入口は
+/// リーチ者向けの入口は [`honor_dahai_actions_by_safety`]。非リーチ相手向けの入口は
 /// [`open_hand_honor_dahai_actions_by_safety`](crate::open_hand_defense::open_hand_honor_dahai_actions_by_safety)。
 pub fn honor_dahai_actions_by_safety_with<'a>(
     legal_actions: &'a [LegalAction],
