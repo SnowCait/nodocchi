@@ -4133,7 +4133,7 @@ mod tests {
             inputs.open_hand_threats[1].reason(),
             Some(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards)
         );
-        assert!(inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets);
+        assert!(inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
         let offense = inputs.offense.expect("offense がある");
         let wait = offense
@@ -4215,7 +4215,7 @@ mod tests {
             legal_selection.evaluation.as_ref(),
             &restricted_actions,
         );
-        assert!(!legal_inputs.selected_normal_discard_hard_safe_for_all_high_open_hand_targets);
+        assert!(!legal_inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
         let restricted_public = push_pull_inputs_from_context(&ctx, &restricted_actions);
         assert_eq!(
@@ -4225,9 +4225,7 @@ mod tests {
                 .min_shanten_after_discard,
             0
         );
-        assert!(
-            !restricted_public.selected_normal_discard_hard_safe_for_all_high_open_hand_targets
-        );
+        assert!(!restricted_public.selected_normal_discard_hard_safe_for_all_threat_targets);
         assert_eq!(
             decide_push_pull(&restricted_public),
             crate::push_pull::PushPullDecision {
@@ -4238,13 +4236,130 @@ mod tests {
 
         // 同じ public 入口でも global best の 5m が合法なら、all-target hard-safe fact は true。
         let unrestricted_public = push_pull_inputs_from_context(&ctx, &actions);
-        assert!(
-            unrestricted_public.selected_normal_discard_hard_safe_for_all_high_open_hand_targets
-        );
+        assert!(unrestricted_public.selected_normal_discard_hard_safe_for_all_threat_targets);
         assert_eq!(
             decide_push_pull(&unrestricted_public).reason,
             PushPullReason::SafeTenpaiAgainstHighOpenHand
         );
+    }
+
+    // 実戦ログで見つかった Riichi 局面相当。player 0 の 14 枚は 11m 222p 345p 123s 56s + ツモ 9m。
+    // 通常打牌 selector はテンパイを維持する 9m を選び、その 9m は唯一のリーチ者の河にある。
+    // 手牌の 1m もそのリーチ者への現物だが、切るとテンパイが崩れる。
+    //
+    // `reacher_discarded_the_tenpai_tile` が false の局面は、テンパイ維持打牌が現物でない対照。
+    fn genbutsu_tenpai_against_reach_context_and_actions(
+        reacher_discarded_the_tenpai_tile: bool,
+    ) -> (GameContext, Vec<LegalAction>) {
+        let hand = [0, 1, 40, 41, 42, 44, 48, 53, 72, 76, 80, 89, 92];
+        let drawn = 32;
+        let mut opponent_discards = vec![2, 125, 128];
+        if reacher_discarded_the_tenpai_tile {
+            opponent_discards.insert(0, 33);
+        }
+        let discards: [Vec<TileId>; 4] = [
+            vec![],
+            opponent_discards.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            vec![],
+        ];
+        let dora_indicator = tile(124);
+        let mut visible: Vec<TileId> = hand.iter().map(|&value| tile(value)).collect();
+        visible.push(tile(drawn));
+        visible.push(dora_indicator);
+        visible.extend(discards.iter().flatten().copied());
+        let ctx = GameContext::from_parts_with_melds(
+            Some(tile(drawn)),
+            hand.iter().map(|&value| tile(value)).collect(),
+            vec![dora_indicator],
+            TileType::new(27),
+            TileType::new(29),
+            visible,
+            Some(0),
+            Some(2),
+            discards,
+            [false, true, false, false],
+            Default::default(),
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        });
+        let actions: Vec<LegalAction> = hand
+            .iter()
+            .chain([&drawn])
+            .map(|&value| dahai(value))
+            .chain([LegalAction::Reach])
+            .collect();
+
+        (ctx, actions)
+    }
+
+    #[test]
+    fn a_genbutsu_tenpai_discard_pushes_against_a_reach() {
+        use crate::offense_value::TenpaiOffenseMode;
+
+        let (ctx, actions) = genbutsu_tenpai_against_reach_context_and_actions(true);
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        // 通常打牌 selector はテンパイを維持する 9m を選ぶ。
+        assert_eq!(diagnostic.normal_discard_action, Some(dahai(32)));
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+        assert_eq!(inputs.opponent_reach_count, 1);
+        assert!(!inputs.dealer_reacher);
+        assert!(!inputs.has_high_open_hand_threat());
+        assert!(inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+
+        // strong-tenpai threshold は満たさない。
+        let offense = inputs.offense.expect("offense がある");
+        assert_eq!(offense.min_shanten_after_discard, 0);
+        let tenpai_value = offense
+            .tenpai_offense_value_after_discard
+            .expect("現在聴牌 offense value がある");
+        assert_eq!(tenpai_value.mode, TenpaiOffenseMode::Reach);
+        assert_eq!(offense.tenpai_offense_weighted_total(), Some(10_400));
+        assert!(offense.tenpai_offense_weighted_total().unwrap() < 15_600);
+
+        assert_eq!(
+            diagnostic.push_pull_decision,
+            Some(crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::SafeTenpaiAgainstReach,
+            })
+        );
+
+        // 最終 action はテンパイ維持打牌のまま。
+        assert_eq!(diagnostic.selected_action, LegalAction::Reach);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+        assert_eq!(
+            diagnostic
+                .reach
+                .as_ref()
+                .and_then(|reach| reach.selected_discard.clone()),
+            Some(dahai(32))
+        );
+    }
+
+    #[test]
+    fn a_tenpai_discard_that_is_not_genbutsu_still_folds_against_a_reach() {
+        // 変更前の挙動。テンパイ維持打牌が現物でなければ従来どおり降り、防御 fallback が
+        // 別の現物 (1m) を切ってテンパイを崩す。
+        let (ctx, actions) = genbutsu_tenpai_against_reach_context_and_actions(false);
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+
+        assert_eq!(diagnostic.normal_discard_action, Some(dahai(32)));
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+        assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+        assert_eq!(
+            diagnostic.push_pull_decision,
+            Some(crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::WeakTenpaiAgainstReach,
+            })
+        );
+
+        assert_eq!(diagnostic.selected_action, dahai(0));
+        assert_ne!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
     }
 
     #[test]

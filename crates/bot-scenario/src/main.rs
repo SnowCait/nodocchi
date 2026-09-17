@@ -477,6 +477,51 @@ mod tests {
     }
 
     #[test]
+    fn a_genbutsu_tenpai_discard_pushes_against_a_reach_in_the_summary() {
+        // 実戦ログ相当の regression。通常打牌 selector が選ぶ 9m はテンパイを維持し、
+        // かつ唯一のリーチ者への現物。従来はここで Fold して防御 fallback の 1m を切り、
+        // テンパイを崩していた。
+        let path = format!(
+            "{}/scenarios/safe_tenpai_against_reach.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let output = run([path, "--summary-only".to_string()]).unwrap();
+
+        assert!(
+            output.starts_with(
+                "Summary\n  choice 1: Reach\n  choice 1 discard: 9m\n  choice 1 source: Reach"
+            ),
+            "{output}"
+        );
+        assert!(output.contains("  push/pull: Push"), "{output}");
+        assert!(
+            output.contains("  push/pull reason: SafeTenpaiAgainstReach"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  offense live wait: 8 remaining / 2 types"),
+            "{output}"
+        );
+        assert!(output.contains("  offense furiten: no"), "{output}");
+        assert!(
+            output.contains("  offense value: Reach 1300 / total: 10400"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  strong tenpai requirement: weighted total >= 15600"),
+            "{output}"
+        );
+
+        // 従来 Fold で選ばれていた防御 fallback は、テンパイを崩す別の現物 1m。
+        assert!(
+            output.contains(
+                "  choice 3: 1m\n  choice 3 source: DefenseFallback\n  choice 3 detail: Genbutsu"
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn explicit_inline_baseline_facts_select_the_same_current_tenpai_value() {
         let args = [
             "--hand",

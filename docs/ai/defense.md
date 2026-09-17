@@ -209,6 +209,8 @@ Combined Defense には exact hidden-hand model を接続せず、従来の heur
 
 hard-safe ではない `same_hand_passed` はこの表に入りません。区別は [passed tile の区別](#passed-tile-の区別) を参照してください。
 
+この表の target 種類と hard-safe 判定は、防御 fallback の選択だけでなく [押し引き](push-pull.md#選択打牌の-hard-safe-例外) の例外判定からも共有します。そちらは複合 threat に限らずリーチ単独・`High` の副露相手単独の局面でも同じ target 種類ごとの判定を使うため、target の収集には threat 構成を問わない共有 helper を通ります。防御 fallback の action 選択そのものは従来どおり threat 構成ごとの入口が担当します。
+
 exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、リーチ者本人の河と `post_reach_passed` です。
 
 ### passed tile の区別

@@ -78,20 +78,46 @@ pub fn combined_threat_defense_targets(
     player_threats: &[PlayerThreatFacts; 4],
     assessments: &[OpenHandThreatAssessment; 4],
 ) -> Vec<ThreatDefenseTarget> {
-    let reached: Vec<usize> = player_threats
+    let targets = threat_defense_targets(player_threats, assessments);
+    let has_riichi = targets
+        .iter()
+        .any(|target| target.kind == ThreatDefenseTargetKind::Riichi);
+    let has_high = targets
+        .iter()
+        .any(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand);
+    if has_riichi && has_high {
+        targets
+    } else {
+        Vec::new()
+    }
+}
+
+/// 現在の threat target を種類付きで席順に集める pure helper。
+///
+/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`High` の副露相手は渡された
+/// classification ([`high_open_hand_threat_players`]) をそのまま source of truth にする。どちらも
+/// ここで分類し直さない。リーチ済みの席は OpenHandThreat の対象外なので、1つの席が両方の target
+/// になることはない。
+///
+/// [`combined_threat_defense_targets`] と違い、リーチ者だけ・`High` の副露相手だけの局面でも
+/// その target を返す。target ごとの hard-safe 判定 ([`is_ron_safe_for_target`] /
+/// [`is_safe_against_all_threats`]) を threat 構成によらず1つの概念として共有したい呼び出し元の
+/// ための入口で、防御 fallback の action 選択そのものは従来どおり threat 構成ごとの入口が担当する。
+///
+/// 明確な threat がいない局面では空になる。
+pub fn threat_defense_targets(
+    player_threats: &[PlayerThreatFacts; 4],
+    assessments: &[OpenHandThreatAssessment; 4],
+) -> Vec<ThreatDefenseTarget> {
+    let mut targets: Vec<ThreatDefenseTarget> = player_threats
         .iter()
         .filter(|facts| facts.is_reached_opponent())
-        .map(|facts| facts.player)
-        .collect();
-    let high = high_open_hand_threat_players(assessments);
-    if reached.is_empty() || high.is_empty() {
-        return Vec::new();
-    }
-
-    let mut targets: Vec<ThreatDefenseTarget> = reached
-        .into_iter()
-        .map(ThreatDefenseTarget::riichi)
-        .chain(high.into_iter().map(ThreatDefenseTarget::high_open_hand))
+        .map(|facts| ThreatDefenseTarget::riichi(facts.player))
+        .chain(
+            high_open_hand_threat_players(assessments)
+                .into_iter()
+                .map(ThreatDefenseTarget::high_open_hand),
+        )
         .collect();
     targets.sort_by_key(|target| target.player);
     targets
@@ -1529,6 +1555,45 @@ mod tests {
             combined_threat_defense_targets_from_facts(&facts),
             targets(&context)
         );
+    }
+
+    #[test]
+    fn the_shared_threat_targets_cover_each_threat_alone() {
+        // 複合 threat 用の target は従来どおり両方いる局面だけだが、共有 helper は
+        // リーチだけ・High の副露相手だけの局面でもその target を返す。
+        let facts_of = |context: &GameContext| player_threat_facts_from_context(context);
+
+        let reach_only = ContextSpec::new().reached(RIICHI_TARGET).build();
+        let facts = facts_of(&reach_only);
+        assert!(combined_threat_defense_targets_from_facts(&facts).is_empty());
+        assert_eq!(
+            threat_defense_targets(&facts, &classify_open_hand_threats(&facts)),
+            vec![ThreatDefenseTarget::riichi(RIICHI_TARGET)]
+        );
+
+        let high_only = ContextSpec::new()
+            .melds_of(OPEN_HAND_TARGET, open_melds(3))
+            .build();
+        let facts = facts_of(&high_only);
+        assert!(combined_threat_defense_targets_from_facts(&facts).is_empty());
+        assert_eq!(
+            threat_defense_targets(&facts, &classify_open_hand_threats(&facts)),
+            vec![ThreatDefenseTarget::high_open_hand(OPEN_HAND_TARGET)]
+        );
+
+        // 複合 threat では従来の target と同じものを返す。
+        let combined = ContextSpec::combined().build();
+        let facts = facts_of(&combined);
+        assert_eq!(
+            threat_defense_targets(&facts, &classify_open_hand_threats(&facts)),
+            combined_threat_defense_targets_from_facts(&facts)
+        );
+        assert!(!combined_threat_defense_targets_from_facts(&facts).is_empty());
+
+        // threat がいなければ空。
+        let no_threat = ContextSpec::new().build();
+        let facts = facts_of(&no_threat);
+        assert!(threat_defense_targets(&facts, &classify_open_hand_threats(&facts)).is_empty());
     }
 
     // ---- target ごとのロン安全の根拠 ----

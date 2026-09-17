@@ -1,0 +1,23 @@
+{
+  "hand": "11m 222p 345p 123s 56s",
+  "draw": "9m",
+
+  "dora_indicators": "F",
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 2,
+  "scores": [25000, 25000, 25000, 25000],
+
+  "reached": [false, true, false, false],
+  "discards": [
+    "1p 9p",
+    "9m 1m 5z 2z 3z",
+    "",
+    ""
+  ],
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  }
+}

@@ -36,9 +36,9 @@
 
 複数条件に一致した場合、diagnostic reason は production code の固定優先順で1つだけ表示します。同じ条件が公開副露だけで成立するなら `ThreeOrMoreOpenMelds` などの `OpenMeld` 系、暗槓を含めて初めて成立するなら `ThreeOrMoreFixedMelds` などの `FixedMeld` 系になります。公開副露だけの相手の level と reason は従来のままです。自分、リーチ済み、player id が不明な席は classification 対象外です。
 
-この classification 自体は Push/Pull policy とは分離されています。したがって、完成面子1つかつ河12枚以上の相手は引き続き `High` です。そのうえで、他家リーチがなく、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが全 `High` target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します。hard-safe は OpenHand 防御と同じ「本人の河または現在有効な一時通過牌」で判定し、手牌内の別の安全牌は根拠にしません。
+この classification 自体は Push/Pull policy とは分離されています。したがって、完成面子1つかつ河12枚以上の相手は引き続き `High` です。そのうえで、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが現在の全 threat target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します ([選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外))。
 
-また、他家リーチがなく、`High` target がすべて「完成面子1つかつ河12枚以上」の場合も、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。どちらの例外も複数の `High` target がいる場合は全 target が条件を満たす必要があります。Riichi threat と Combined threat には適用しません。
+また、他家リーチがなく、`High` target がすべて「完成面子1つかつ河12枚以上」の場合も、通常打牌後がテンパイなら strong-tenpai threshold を満たさなくても `Push` します。複数の `High` target がいる場合は全 target が条件を満たす必要があります。この終盤1面子の例外は High OpenHandThreat 単独に限り、Riichi threat と Combined threat には適用しません。
 
 ## offense state と mode
 
@@ -47,7 +47,7 @@
 | 明確な threat なし | `Push` | `NoThreat` |
 | offense evaluation なし | `Fold` | `MissingOffenseAgainst*` |
 | 強いテンパイ | `Push` | `StrongTenpaiAgainst*` |
-| 選択したテンパイ打牌が全 High target に hard-safe | `Push` | `SafeTenpaiAgainstHighOpenHand` |
+| 選択したテンパイ打牌が全 threat target に hard-safe | `Push` | `SafeTenpaiAgainst*` |
 | 強いと確認できないテンパイ | `Fold` | `WeakTenpaiAgainst*` |
 | 終盤の完成面子1つだけが High target のテンパイ | `Push` | `TenpaiAgainstLateOneMeldHighOpenHand` |
 | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainst*` |
@@ -75,7 +75,35 @@
 
 自分が親かどうかでは threshold を変えません。一向聴の受け入れや簡易打点 proxy は diagnostics に残しますが、現在の Push/Pull 判定には使いません。
 
-選択打牌の hard-safe 例外と終盤1面子 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。終盤1面子の例外は High target に完成面子2つ以上の相手が1人でも含まれる場合は使いません。面子数は classification と同じく暗槓を含めて数えるので、公開副露1つだけの相手と暗槓1つだけの相手はどちらもこの例外の対象で、公開副露と暗槓を1つずつ持つような完成面子2つの相手は対象外です。Riichi threat、Combined threat ではどちらの例外も使わず、従来の strong-tenpai threshold を維持します。
+選択打牌の hard-safe 例外と終盤1面子 High の例外はテンパイだけが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値)、二向聴以上は従来どおり `Fold` です。終盤1面子の例外は High target に完成面子2つ以上の相手が1人でも含まれる場合は使いません。面子数は classification と同じく暗槓を含めて数えるので、公開副露1つだけの相手と暗槓1つだけの相手はどちらもこの例外の対象で、公開副露と暗槓を1つずつ持つような完成面子2つの相手は対象外です。終盤1面子の例外は Riichi threat、Combined threat では使わず、従来の strong-tenpai threshold を維持します。
+
+## 選択打牌の hard-safe 例外
+
+通常打牌 selector が選んだ打牌後がテンパイで、かつ**選んだ打牌そのもの**が現在の全 threat target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します。threat の種類は問わず、Riichi threat・High OpenHandThreat・Combined threat のすべてに適用します。
+
+target 集合も target ごとの hard-safe 判定も [防御](defense.md) の既存 source of truth をそのまま共有し、押し引き側で safety rule を書き直しません。
+
+| target | hard-safe の根拠 |
+| --- | --- |
+| リーチ者 | そのリーチ者への現物 (本人の河、または `post_reach_passed`) |
+| `High` の副露相手 | 本人の河、または現在有効な一時通過牌 |
+
+Combined threat では、全リーチ者と全 `High` 副露相手の双方についてこの条件を満たす必要があります。1 target でも満たさなければ例外は成立しません。
+
+reason は threat の種類ごとに分かれるので、diagnostics からどの threat に対して safe だったかが分かります。
+
+| threat | reason |
+| --- | --- |
+| Riichi threat | `SafeTenpaiAgainstReach` |
+| High OpenHandThreat | `SafeTenpaiAgainstHighOpenHand` |
+| Combined threat | `SafeTenpaiAgainstCombinedThreat` |
+
+適用条件は厳密です。
+
+- 手牌内に安全牌があるだけでは適用しません。通常打牌 selector が実際に選んだ打牌そのものが hard-safe である必要があります。テンパイ維持打牌以外の別候補を探索して `Push` にすることもありません。
+- hard-safe ではないスジ・ハーフスジ・ワンチャンス・exact model risk の低さは根拠にしません。
+- 打牌後がテンパイの場合だけです。一向聴・二向聴以上には広げません。
+- `post_reach_passed` や一時通過牌の扱いは、各 threat の防御が既に hard-safe としている semantics をそのまま使います。
 
 ## 一向聴の攻撃価値
 

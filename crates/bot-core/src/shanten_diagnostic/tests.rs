@@ -927,7 +927,7 @@ fn a_high_open_hand_threat_folds_from_a_weak_tenpai() {
         !melded
             .push_pull_inputs
             .expect("押し引き入力がある")
-            .selected_normal_discard_hard_safe_for_all_high_open_hand_targets
+            .selected_normal_discard_hard_safe_for_all_threat_targets
     );
     assert_eq!(melded_decision.mode, PushPullMode::Fold);
     assert_eq!(
