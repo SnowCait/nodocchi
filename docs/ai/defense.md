@@ -221,7 +221,7 @@ expected loss = loss_weighted_sum / (tenpai_weight * ura_arrangement_weight)
 
 compressed hidden-hand model は打点に必要な特徴量 (どの牌種を何枚持つか) を潰した class へ畳み込んでいるため、class の代表打点を weight に掛けることはできません。そこで期待損失は enumerating model ([`ReachedHiddenHandStates`](../../crates/bot-core/src/defense/hidden_hand_states.rs)) の `R` の数え上げをそのまま観測し、加算された state を1件ずつ scoring へ通す diagnostics-only の reference enumeration にしています。候補生成・weight・重複排除・フリテン判定はどれも観測の有無で変わらず、数え直した `R` が production の `R` と食い違う場合は値を返しません。
 
-production の高速 `R/T` path と comparator には手を入れていません。一方で state を1件ずつ点数計算するため、実局面では数百万 state 規模の評価になります。production の `act()` からは呼ばず、診断経路で明示的に要求した場合だけ計算します。
+production の高速 `R/T` path と comparator には手を入れていません。一方で state を1件ずつ点数計算するため、実局面では数百万 state 規模の評価になります (門前リーチ者1人・ドラ表示牌1枚の中盤局面で約263万 state・約1.5億回の scoring 評価、release build で約60秒)。production の `act()` からは呼ばず、診断経路で明示的に要求した場合だけ計算します。
 
 ### legacy safety fallback
 

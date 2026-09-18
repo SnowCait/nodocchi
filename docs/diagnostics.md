@@ -422,7 +422,7 @@ JSON scenario では [`riichi_situation`](bot-scenario.md#riichi_situation)、�
 
 #### 計算コスト
 
-既存 `R/T` と同じ hidden-hand state を1件ずつ列挙し、state ごとに既存 scoring layer を通すため、追加診断の中で最も重い経路です。実局面では数百万 state 規模の評価になります。production の `act()` には持ち込まないので、既定では構築せず、明示的に要求した場合だけ計算します。
+既存 `R/T` と同じ hidden-hand state を1件ずつ列挙し、state ごとに既存 scoring layer を通すため、追加診断の中で最も重い経路です。門前リーチ者1人・ドラ表示牌1枚の中盤局面では、約263万 state に対して約1.5億回の scoring 評価になり、release build で約60秒かかりました (`enumerated states` 行がその局面の実測値です)。production の `act()` には持ち込まないので、既定では構築せず、明示的に要求した場合だけ計算します。
 
 ### 防御候補 ranking
 
