@@ -4,7 +4,7 @@ use bot_core::seat_wind_for_player;
 use bot_logic::{TileType, TwoShantenSelfTsumoScope};
 use thiserror::Error;
 
-use crate::scenario::{HistoryFuritenSpec, ScenarioSpec, parse_seat_wind};
+use crate::scenario::{HistoryFuritenSpec, RiichiSituationSpec, ScenarioSpec, parse_seat_wind};
 
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
@@ -12,12 +12,14 @@ pub const USAGE: &str = "usage:
                [--discards-shimocha <TILES>] [--discards-toimen <TILES>]
                [--discards-kamicha <TILES>] [--riichi-shimocha [INDEX]]
                [--riichi-toimen [INDEX]] [--riichi-kamicha [INDEX]]
-               [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>]
+               [--extra-visible-tiles <TILES>] [--remaining-tiles <COUNT>] [--honba <COUNT>]
                [--no-history-furiten] [--allow-hora] [--force-fold]
+               [--reacher-riichi-facts <SPEC>] [--structural-expected-deal-in-loss]
                [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
                [--two-shanten-self-tsumo-cost <SCOPE>]
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--two-shanten-self-tsumo] [--verbose]
+               [--structural-expected-deal-in-loss]
                [--two-shanten-self-tsumo-cost <SCOPE>] [--force-fold]
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
@@ -63,6 +65,8 @@ pub const USAGE: &str = "usage:
   --extra-visible-tiles adds visible tiles that no other option expresses
   --remaining-tiles overrides the inline initial live wall count derived from player and
   dealer, or explicit seat wind, plus draw state
+  --honba sets the honba count; without it the honba stays unknown, so any value that needs
+  it stays unavailable instead of being settled as zero
   inline --hand defaults to round wind E, player 0, dealer 1, and no history furiten;
   explicit inline options override these defaults
   --no-history-furiten explicitly declares both same-turn and post-riichi missed-win furiten false
@@ -81,6 +85,15 @@ pub const USAGE: &str = "usage:
   normal push/pull decision; it evaluates the existing fold defense directly instead of
   running the normal discard selection, it never changes what the production bot decides,
   and it is unavailable when there is no clear threat or no legal Dahai to choose from
+  --reacher-riichi-facts declares the riichi situational facts of every reached seat, with
+  <SPEC> a comma separated list of double and ippatsu, or none for a plain riichi with no
+  ippatsu; without it both facts stay unknown, which leaves the structural expected deal-in
+  loss unavailable instead of guessing a plain riichi
+  --structural-expected-deal-in-loss adds the structural expected deal-in loss of the discard
+  the normal discard selector chose, against a single reached opponent; it enumerates the same
+  exact hidden-hand states the existing R/T counts and scores every one of them, so it is the
+  heaviest diagnostic here, it is unavailable unless exactly one opponent has reached, and it
+  never changes what the production bot decides
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -213,6 +226,11 @@ pub enum CliError {
 
     #[error("--force-fold cannot be combined with {0}")]
     ConflictingForceFold(String),
+
+    #[error(
+        "--reacher-riichi-facts must be none or a comma separated list of double and ippatsu, but is {0:?}"
+    )]
+    InvalidReacherRiichiFacts(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +292,9 @@ pub struct CliArgs {
     /// 通常の押し引き判断とは無関係に、ベタ降りを仮定した場合の防御打牌を表示するかどうか。
     /// production の判断は変えず、通常打牌の診断も構築しない。
     pub force_fold: bool,
+    /// 単独リーチ相手への structural expected deal-in loss を構築して表示するかどうか。
+    /// 既存 `R/T` と同じ隠れ手牌状態を1件ずつ点数計算するので、既定では行わない。
+    pub structural_expected_deal_in_loss: bool,
 }
 
 impl CliArgs {
@@ -300,6 +321,8 @@ impl CliArgs {
         let mut two_shanten_progress_self_tsumo_cost = None;
         let mut summary_only = false;
         let mut force_fold = false;
+        let mut structural_expected_deal_in_loss = false;
+        let mut reacher_riichi_facts: Option<ReacherRiichiFacts> = None;
         let mut capture: Option<String> = None;
         let mut request_id: Option<u64> = None;
         let mut benchmark_captures: Vec<String> = Vec::new();
@@ -380,6 +403,10 @@ impl CliArgs {
                     spec.remaining_tiles = Some(count_value_of(&mut args, "--remaining-tiles")?);
                     inline_options = true;
                 }
+                "--honba" => {
+                    spec.honba = Some(count_value_of(&mut args, "--honba")?);
+                    inline_options = true;
+                }
                 "--no-history-furiten" => {
                     spec.history_furiten = Some(HistoryFuritenSpec {
                         same_turn: Some(false),
@@ -446,6 +473,12 @@ impl CliArgs {
                         })?);
                 }
                 "--verbose" => verbose = true,
+                "--structural-expected-deal-in-loss" => structural_expected_deal_in_loss = true,
+                "--reacher-riichi-facts" => {
+                    let value = value_of(&mut args, "--reacher-riichi-facts")?;
+                    reacher_riichi_facts = Some(parse_reacher_riichi_facts(&value)?);
+                    inline_options = true;
+                }
                 "--summary-only" => summary_only = true,
                 "--force-fold" => force_fold = true,
                 other if other.starts_with('-') => {
@@ -528,6 +561,7 @@ impl CliArgs {
                 two_shanten_progress_self_tsumo_cost: None,
                 summary_only: false,
                 force_fold: false,
+                structural_expected_deal_in_loss: false,
             });
         }
 
@@ -594,6 +628,7 @@ impl CliArgs {
                 two_shanten_progress_self_tsumo_cost: None,
                 summary_only: false,
                 force_fold: false,
+                structural_expected_deal_in_loss: false,
             });
         }
 
@@ -618,6 +653,10 @@ impl CliArgs {
                 (
                     three_shanten_progress_self_tsumo,
                     "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
                 ),
                 (
                     three_shanten_continuation_comparison,
@@ -664,6 +703,10 @@ impl CliArgs {
                     three_shanten_progress_self_tsumo,
                     "--three-shanten-progress-self-tsumo",
                 ),
+                (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
+                ),
             ] {
                 if enabled {
                     return Err(CliError::ConflictingThreeShantenContinuationComparison(
@@ -690,6 +733,10 @@ impl CliArgs {
                 (
                     three_shanten_progress_self_tsumo,
                     "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
                 ),
                 (
                     three_shanten_continuation_comparison,
@@ -737,6 +784,10 @@ impl CliArgs {
                     "--three-shanten-progress-self-tsumo",
                 ),
                 (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
+                ),
+                (
                     three_shanten_continuation_comparison,
                     "--three-shanten-continuation-comparison",
                 ),
@@ -782,6 +833,10 @@ impl CliArgs {
                     "--three-shanten-progress-self-tsumo",
                 ),
                 (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
+                ),
+                (
                     three_shanten_continuation_comparison,
                     "--three-shanten-continuation-comparison",
                 ),
@@ -825,6 +880,10 @@ impl CliArgs {
                 (
                     three_shanten_progress_self_tsumo,
                     "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
                 ),
                 (
                     three_shanten_continuation_comparison,
@@ -934,6 +993,11 @@ impl CliArgs {
             if verbose {
                 return Err(CliError::ConflictingSummaryOnly("--verbose".to_string()));
             }
+            if structural_expected_deal_in_loss {
+                return Err(CliError::ConflictingSummaryOnly(
+                    "--structural-expected-deal-in-loss".to_string(),
+                ));
+            }
         }
 
         let source = match (capture, path, hand) {
@@ -959,6 +1023,7 @@ impl CliArgs {
                     || relative_riichi.iter().any(Option::is_some);
                 apply_inline_baseline(&mut spec, relative_seats);
                 apply_relative_seats(&mut spec, &relative_discards, &relative_riichi)?;
+                apply_reacher_riichi_facts(&mut spec, reacher_riichi_facts);
                 ScenarioSource::Inline(Box::new(spec))
             }
             (None, None, None) => return Err(CliError::MissingHand),
@@ -980,8 +1045,56 @@ impl CliArgs {
             two_shanten_progress_self_tsumo_cost,
             summary_only,
             force_fold,
+            structural_expected_deal_in_loss,
         })
     }
+}
+
+// リーチ済みの席へ一括で与えるリーチ状況依存役の事実。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReacherRiichiFacts {
+    double_riichi: bool,
+    ippatsu: bool,
+}
+
+// 列挙しなかった事実は `false` として明示的に宣言し、unknown のままにはしない。
+fn parse_reacher_riichi_facts(value: &str) -> Result<ReacherRiichiFacts, CliError> {
+    let mut facts = ReacherRiichiFacts {
+        double_riichi: false,
+        ippatsu: false,
+    };
+    if value != "none" {
+        for fact in value.split(',') {
+            match fact {
+                "double" => facts.double_riichi = true,
+                "ippatsu" => facts.ippatsu = true,
+                _ => return Err(CliError::InvalidReacherRiichiFacts(value.to_string())),
+            }
+        }
+    }
+    Ok(facts)
+}
+
+// 与えた事実はリーチ済みの席だけへ入れる。未リーチの席は unknown のままにし、JSON scenario と
+// 同じ「未リーチの席に状況依存役の事実を置かない」制約へ揃える。
+fn apply_reacher_riichi_facts(spec: &mut ScenarioSpec, facts: Option<ReacherRiichiFacts>) {
+    let Some(facts) = facts else {
+        return;
+    };
+    let reached = spec
+        .reached
+        .clone()
+        .unwrap_or_else(|| vec![false; SEAT_COUNT]);
+    let fact_for = |value: bool| -> Vec<Option<bool>> {
+        reached
+            .iter()
+            .map(|reached| reached.then_some(value))
+            .collect()
+    };
+    spec.riichi_situation = Some(RiichiSituationSpec {
+        declared_double_riichi: Some(fact_for(facts.double_riichi)),
+        ippatsu: Some(fact_for(facts.ippatsu)),
+    });
 }
 
 const SEAT_COUNT: usize = 4;
@@ -2032,6 +2145,105 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn structural_expected_deal_in_loss_is_opt_in() {
+        assert!(
+            !parse(&["--hand", "123m"])
+                .unwrap()
+                .structural_expected_deal_in_loss
+        );
+        assert!(
+            parse(&["--hand", "123m", "--structural-expected-deal-in-loss"])
+                .unwrap()
+                .structural_expected_deal_in_loss
+        );
+    }
+
+    #[test]
+    fn rejects_structural_expected_deal_in_loss_with_summary_only_or_force_fold() {
+        assert_eq!(
+            parse(&[
+                "--hand",
+                "123m",
+                "--structural-expected-deal-in-loss",
+                "--summary-only",
+            ]),
+            Err(CliError::ConflictingSummaryOnly(
+                "--structural-expected-deal-in-loss".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&[
+                "--hand",
+                "123m",
+                "--structural-expected-deal-in-loss",
+                "--force-fold",
+            ]),
+            Err(CliError::ConflictingForceFold(
+                "--structural-expected-deal-in-loss".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn honba_stays_unknown_without_the_option() {
+        assert_eq!(inline_spec(&["--hand", "123m"]).honba, None);
+        assert_eq!(
+            inline_spec(&["--hand", "123m", "--honba", "2"]).honba,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reacher_riichi_facts_stay_unknown_without_the_option() {
+        assert_eq!(
+            inline_spec(&["--hand", "123m", "--player-id", "0", "--riichi-shimocha"])
+                .riichi_situation,
+            None
+        );
+    }
+
+    #[test]
+    fn reacher_riichi_facts_are_declared_for_the_reached_seats_only() {
+        for (spec, double_riichi, ippatsu) in [
+            ("none", false, false),
+            ("double", true, false),
+            ("ippatsu", false, true),
+            ("double,ippatsu", true, true),
+        ] {
+            let facts = inline_spec(&[
+                "--hand",
+                "123m",
+                "--player-id",
+                "0",
+                "--riichi-shimocha",
+                "--reacher-riichi-facts",
+                spec,
+            ])
+            .riichi_situation
+            .expect("the facts are declared");
+
+            assert_eq!(
+                facts.declared_double_riichi,
+                Some(vec![None, Some(double_riichi), None, None]),
+                "spec: {spec}"
+            );
+            assert_eq!(
+                facts.ippatsu,
+                Some(vec![None, Some(ippatsu), None, None]),
+                "spec: {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_unknown_reacher_riichi_fact() {
+        assert_eq!(
+            parse(&["--hand", "123m", "--reacher-riichi-facts", "tenhou"]),
+            Err(CliError::InvalidReacherRiichiFacts("tenhou".to_string()))
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@ use crate::action::LegalAction;
 use crate::agent::Agent;
 use crate::agents::{AgentActionSource, ShantenAgent};
 use crate::context::{GameContext, TableStateFacts};
-use crate::defense::{DefenseFallbackKind, HonorSafetyRank};
+use crate::defense::{
+    DefenseFallbackKind, HonorSafetyRank, RonRiskEvidence, StructuralExpectedDealInLossUnavailable,
+};
 use crate::discard_selection::{select_discard_action, select_discard_action_with_evaluation};
 use crate::meld::{Meld, MeldKind};
 use crate::push_pull::{
@@ -1685,6 +1687,143 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_change_the_selected_action() {
         },
         without
     );
+}
+
+#[test]
+fn the_structural_expected_deal_in_loss_diagnostic_is_opt_in() {
+    // 明示的に要求した場合だけ構築する。他の追加診断だけでは持たない。
+    let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+    let actions = tenpai_dahai_actions();
+
+    for options in [
+        DiagnosticOptions::NONE,
+        DiagnosticOptions::WITH_LOOKAHEAD,
+        DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
+    ] {
+        assert!(
+            ShantenAgent::diagnose_with_options(&ctx, &actions, options)
+                .normal_discard_structural_expected_deal_in_loss
+                .is_none()
+        );
+    }
+    assert!(
+        ShantenAgent::diagnose_with_options(
+            &ctx,
+            &actions,
+            DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+        )
+        .normal_discard_structural_expected_deal_in_loss
+        .is_some()
+    );
+}
+
+#[test]
+fn the_structural_expected_deal_in_loss_diagnostic_does_not_change_any_decision() {
+    // 打牌選択・押し引き・リーチ判断・防御選択はどれも診断の有無で変わらない。
+    let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+    let actions = tenpai_dahai_actions();
+
+    let mut agent = ShantenAgent;
+    let expected = agent.act(&ctx, &actions);
+    let without = ShantenAgent::diagnose(&ctx, &actions);
+    let with = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+    );
+
+    assert_eq!(with.selected_action, expected);
+    assert_eq!(with.selected_source, without.selected_source);
+    assert_eq!(with.normal_discard_action, without.normal_discard_action);
+    assert_eq!(with.push_pull_decision, without.push_pull_decision);
+    assert_eq!(with.reach, without.reach);
+    assert_eq!(with.defense, without.defense);
+
+    // 追加した診断以外はすべて既定の診断と一致する。
+    assert_eq!(
+        ShantenDecisionDiagnostic {
+            normal_discard_structural_expected_deal_in_loss: None,
+            ..with
+        },
+        without
+    );
+}
+
+#[test]
+fn the_structural_expected_deal_in_loss_diagnostic_targets_the_selected_normal_discard() {
+    // 評価するのは通常打牌 selector が選んだ打牌そのもので、診断側で選び直さない。既存 `R/T`
+    // evidence も同じ牌のものになる。
+    let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+    let actions = tenpai_dahai_actions();
+
+    let diagnostic = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+    );
+    let expected_loss = diagnostic
+        .normal_discard_structural_expected_deal_in_loss
+        .as_ref()
+        .expect("単独リーチなので構築されている");
+    let LegalAction::Dahai { tile } = diagnostic
+        .normal_discard_action
+        .as_ref()
+        .expect("通常打牌を評価している")
+    else {
+        panic!("通常打牌は Dahai");
+    };
+
+    assert_eq!(expected_loss.discard, *tile);
+    assert_eq!(expected_loss.player, 1);
+    let risk = expected_loss.ron_risk.expect("exact model が使える");
+    assert_eq!(
+        Some(risk),
+        crate::defense::compressed_ron_capable_hidden_hand_weight(tile.tile_type(), 1, &ctx)
+            .ok()
+            .map(|ron_capable| RonRiskEvidence {
+                ron_capable_weight: ron_capable.weight,
+                tenpai_weight: risk.tenpai_weight,
+            })
+    );
+}
+
+#[test]
+fn a_multiple_reach_position_has_no_structural_expected_deal_in_loss_diagnostic() {
+    // 複数リーチの合成は scope 外なので、単独リーチ以外では構築しない。
+    let ctx = tenpai_under_reach_context(None, [false, true, true, false]);
+    let actions = tenpai_dahai_actions();
+
+    assert!(
+        ShantenAgent::diagnose_with_options(
+            &ctx,
+            &actions,
+            DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+        )
+        .normal_discard_structural_expected_deal_in_loss
+        .is_none()
+    );
+}
+
+#[test]
+fn an_unknown_scoring_fact_leaves_the_structural_expected_deal_in_loss_unavailable() {
+    // 場風も本場も分からない局面では、期待損失を推測せず理由を保持する。既存 `R/T` は変わらず
+    // 読める。
+    let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
+    let actions = tenpai_dahai_actions();
+
+    let diagnostic = ShantenAgent::diagnose_with_options(
+        &ctx,
+        &actions,
+        DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+    )
+    .normal_discard_structural_expected_deal_in_loss
+    .expect("単独リーチなので構築されている");
+
+    assert_eq!(
+        diagnostic.expected_loss,
+        Err(StructuralExpectedDealInLossUnavailable::UnknownRoundWind)
+    );
+    assert!(diagnostic.ron_risk.is_some());
 }
 
 #[test]

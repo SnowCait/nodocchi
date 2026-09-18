@@ -1,6 +1,6 @@
 # 手牌評価
 
-将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。そのうえで、通常役とは別型の `Yakuman` として named 役満の成立事実だけを同じ単位で判定します。成立した通常役は、成立判定と分離した pure な layer で WRC Rules 2025 の翻数へ変換し、`decomposition` × `interpretation` 単位で通常役由来の翻数を集計します。符も同じ単位で、内訳・丸め前・丸め後を保持したまま計算します。役ではないドラは bonus 翻として分離し、完成手の物理牌とドラ表示牌から手全体で1つの内訳を求めます。確定した翻数と符からは、通常手の基本点と満貫などの limit を求めます。確定した基本点からは、親 / 子とロン / ツモに応じた支払点を payer ごとに求めます。本場・供託・責任払い (包) はまだ扱いません。
+将来の翻数・符・点数計算の共通基盤として、完成済みの手牌がどの和了形へ分解できるかを pure logic で列挙し、その分解ごとに成立する役を判定します。牌構成だけで確定する役に加え、和了時の観測事実を表す `WinningContext` を受け取り、役牌と状況依存役も分解ごとに判定します。さらに、判明している和了牌がどの雀頭 / 面子を完成させたのかを分解ごとに解釈し、その解釈まで含めた `decomposition` × `interpretation` 単位で和了牌依存の役を判定します。そのうえで、通常役とは別型の `Yakuman` として named 役満の成立事実だけを同じ単位で判定します。成立した通常役は、成立判定と分離した pure な layer で WRC Rules 2025 の翻数へ変換し、`decomposition` × `interpretation` 単位で通常役由来の翻数を集計します。符も同じ単位で、内訳・丸め前・丸め後を保持したまま計算します。役ではないドラは bonus 翻として分離し、完成手の物理牌とドラ表示牌から手全体で1つの内訳を求めます。確定した翻数と符からは、通常手の基本点と満貫などの limit を求めます。確定した基本点からは、親 / 子とロン / ツモに応じた支払点を payer ごとに求めます。本場と供託は base payment と分けた決着 layer が加算し、責任払い (包) はまだ扱いません。
 
 ## 実装済みと未実装
 
@@ -69,6 +69,8 @@
 - 支払点を第一比較軸とする candidate の比較
 - 裏ドラが未観測で最良候補を確定できない状態
 - 完成手からの確定した `HandValue` (`evaluate_hand_value()`)
+- 本場 / 供託を含む決着 (`evaluate_hand_settlement()`)
+- ロン放銃者が失う点数 (`evaluate_ron_deal_in_payment()`)
 
 未実装:
 
@@ -76,7 +78,6 @@
 - 天和 / 地和
 - 人和の特殊 scoring
 - 責任払い (包)
-- 本場 / 供託
 
 役の定義は [World Riichi Championship Rules](https://www.worldriichi.org/wrc-rules) ([WRC Rules 2025 PDF](https://static1.squarespace.com/static/634a7884c297a25f06589b79/t/6834d67360e19c1da6c0d12c/1748293243651/WRC+Rules+2025.pdf) の `11.5 Yaku list`) と [EMA Riichi Competition Rules](https://mahjong-europe.org/portal/index.php?Itemid=166&id=30&option=com_content&view=article) を一次情報とします。
 
@@ -1117,9 +1118,23 @@ base payment の合計
 
 数え役満の基本点8000も通常の基本点と同じ倍率と丸めで扱います。この layer は limit の種類を見ず基本点だけを見るため、named 役満の基本点にも同じ計算をそのまま使います。
 
+### 本場と供託
+
+`evaluate_hand_settlement()` は確定した `HandValue` と本場・供託から、支払い内訳と和了者の受取総額を求めます。本場はロンで放銃者が1本あたり +300点、ツモで payer ごとに +100点です。供託は和了者の受取総額にだけ加算し、payer の支払いには足しません。どちらも unknown を `0` で補完せず、確定した事実として受け取ります。
+
+### 放銃者が失う点数
+
+ロン和了で**放銃者が追加で失う点数**は、base payment に本場を足した値です (`evaluate_ron_deal_in_payment()`)。本場は1本ごとに放銃者が +300点を払うので、この1本の計算も [本場と供託](#本場と供託) と同じ layer を共有します。
+
+供託は含みません。供託は和了者が受け取る点であって放銃者が追加で払う点ではないため、放銃側の損失に足すと二重計上になります。供託を含めた和了者の受取総額は `HandSettlement::total_received` が別に持ちます。
+
+ツモ和了の `HandValue` には放銃者がいないので、0点ではなく「支払いが確定しない」として扱います。本場が unknown な場合も `0` と推測しません。
+
+この値は [単独リーチへの structural expected deal-in loss](defense.md#単独リーチへの-structural-expected-deal-in-loss-diagnostics-only) が使う唯一の打点入力です。期待損失側で役・翻・符・親子・ロン支払点・本場を別実装しません。
+
 ### まだ扱わない範囲
 
-本場、供託、責任払い (包) は含みません。合計は他家から直接支払われる base payment だけを表し、本場の +300 / +100 も供託の受け取りも足しません。RiichiEnv は同じ関数で本場まで加算しますが、nodocchi では base payment と分けて後続 layer が加算します。責任払いで payer が変わる処理も持ちません。
+責任払い (包) は含みません。base payment そのものは他家から直接支払われる点だけを表し、本場の +300 / +100 も供託の受け取りも足しません。RiichiEnv は同じ関数で本場まで加算しますが、nodocchi では base payment と分けて後続 layer が加算します。責任払いで payer が変わる処理も持ちません。
 
 表現できない点数を silent に飽和させず、正しい支払いを求められない入力に対して点数を返しません。
 

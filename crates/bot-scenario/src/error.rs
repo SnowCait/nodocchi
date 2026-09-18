@@ -112,6 +112,12 @@ pub enum ScenarioError {
     #[error("reach_discard_indices[{player}] needs reached[{player}] to be true")]
     ReachDiscardIndexWithoutReach { player: usize },
 
+    #[error("riichi_situation.{field} must have 4 elements, but has {count}")]
+    RiichiSituationLength { field: &'static str, count: usize },
+
+    #[error("riichi_situation.{field}[{player}] needs reached[{player}] to be true")]
+    RiichiSituationWithoutReach { field: &'static str, player: usize },
+
     #[error("post_reach_passed must have 4 elements, but has {count}")]
     PostReachPassedLength { count: usize },
 

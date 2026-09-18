@@ -109,6 +109,37 @@ impl HandSettlement {
     }
 }
 
+/// ロン和了で放銃者が追加で失う点数を求める。
+///
+/// 基本の放銃支払いに本場を加えた値で、供託は含まない。供託はこの打牌によって追加で失う点では
+/// なく、和了者の受取総額
+/// ([`HandSettlement::total_received`]) 側の要素だからである。ツモ和了の `HandValue` には放銃者が
+/// いないので [`HandSettlementError::UnknownPayment`] を返し、本場が unknown な場合も `0` と
+/// 推測せず [`HandSettlementError::IncompleteTableState`] を返す。
+pub fn evaluate_ron_deal_in_payment(
+    hand_value: &HandValue<'_>,
+    honba: Option<u32>,
+) -> Result<u32, HandSettlementError> {
+    let base = hand_value
+        .payment()
+        .ok_or(HandSettlementError::UnknownPayment)?;
+    let pay_ron = base
+        .breakdown()
+        .pay_ron()
+        .ok_or(HandSettlementError::UnknownPayment)?;
+    let honba = honba.ok_or(HandSettlementError::IncompleteTableState(
+        MissingSettlementFact::Honba,
+    ))?;
+    let overflow = || HandSettlementError::Overflow {
+        honba,
+        kyotaku_points: 0,
+    };
+    let honba_payment = honba_payments(base.breakdown(), honba)
+        .and_then(HonbaPayments::pay_ron)
+        .ok_or_else(overflow)?;
+    pay_ron.checked_add(honba_payment).ok_or_else(overflow)
+}
+
 pub fn evaluate_hand_settlement(
     hand_value: &HandValue<'_>,
     honba: Option<u32>,
@@ -635,6 +666,97 @@ mod tests {
             Err(HandSettlementError::Overflow {
                 honba: 1,
                 kyotaku_points: u32::MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn a_ron_deal_in_payment_is_the_base_payment_plus_the_honba() {
+        let setup = Setup::new(&SANANKOU_AND_IIPEIKOU);
+        let hand_value = setup.hand_value(non_dealer(WinMethod::Ron), "1m");
+
+        for (honba, expected) in [(0, 3200), (1, 3500), (2, 3800), (5, 4700)] {
+            assert_eq!(
+                evaluate_ron_deal_in_payment(&hand_value, Some(honba)),
+                Ok(expected),
+                "honba: {honba}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ron_deal_in_payment_never_adds_the_kyotaku_points() {
+        let setup = Setup::new(&SANANKOU_AND_IIPEIKOU);
+        let hand_value = setup.hand_value(non_dealer(WinMethod::Ron), "1m");
+        let deal_in = evaluate_ron_deal_in_payment(&hand_value, Some(2)).unwrap();
+
+        for kyotaku_points in [0, 1000, 3000] {
+            let result = settlement(&hand_value, 2, kyotaku_points);
+
+            assert_eq!(result.settled_pay_ron(), Some(deal_in));
+            assert_eq!(result.total_received(), deal_in + kyotaku_points);
+        }
+    }
+
+    #[test]
+    fn a_dealer_ron_deal_in_payment_uses_the_dealer_base_payment() {
+        let setup = Setup::new(&SANANKOU_AND_IIPEIKOU);
+        let hand_value = setup.hand_value(dealer(WinMethod::Ron), "1m");
+
+        assert_eq!(evaluate_ron_deal_in_payment(&hand_value, Some(2)), Ok(5400));
+    }
+
+    #[test]
+    fn a_tsumo_hand_value_has_no_ron_deal_in_payment() {
+        let setup = Setup::new(&SANANKOU_AND_IIPEIKOU);
+        let hand_value = setup.hand_value(non_dealer(WinMethod::Tsumo), "1m");
+
+        assert_eq!(
+            evaluate_ron_deal_in_payment(&hand_value, Some(1)),
+            Err(HandSettlementError::UnknownPayment)
+        );
+    }
+
+    #[test]
+    fn an_unknown_honba_leaves_the_ron_deal_in_payment_unavailable() {
+        let setup = Setup::new(&SANANKOU_AND_IIPEIKOU);
+        let hand_value = setup.hand_value(non_dealer(WinMethod::Ron), "1m");
+
+        assert_eq!(
+            evaluate_ron_deal_in_payment(&hand_value, None),
+            Err(HandSettlementError::IncompleteTableState(
+                MissingSettlementFact::Honba
+            ))
+        );
+    }
+
+    #[test]
+    fn a_hand_value_without_an_exact_payment_has_no_ron_deal_in_payment() {
+        let setup = Setup::new(&PINFU_TANYAO_HAND);
+        let context = non_dealer(WinMethod::Ron)
+            .with_riichi(RiichiStatus::Riichi)
+            .with_ippatsu(Some(false));
+        let candidates =
+            evaluate_normal_hand_scoring(&setup.analysis, context, tile_type("2m"), &[], None)
+                .unwrap();
+        let hand_value = HandValue::Normal(candidates[0].clone());
+
+        assert_eq!(
+            evaluate_ron_deal_in_payment(&hand_value, Some(0)),
+            Err(HandSettlementError::UnknownPayment)
+        );
+    }
+
+    #[test]
+    fn rejects_a_honba_that_overflows_the_ron_deal_in_payment() {
+        let setup = Setup::new(&SANANKOU_AND_IIPEIKOU);
+        let hand_value = setup.hand_value(non_dealer(WinMethod::Ron), "1m");
+
+        assert_eq!(
+            evaluate_ron_deal_in_payment(&hand_value, Some(u32::MAX)),
+            Err(HandSettlementError::Overflow {
+                honba: u32::MAX,
+                kyotaku_points: 0,
             })
         );
     }

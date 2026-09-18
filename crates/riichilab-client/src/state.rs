@@ -1,4 +1,4 @@
-use bot_core::DoubleRiichiFacts;
+use bot_core::{DoubleRiichiFacts, RiichiSituationFacts};
 use bot_logic::{HistoryFuritenFacts, TileType};
 
 use crate::protocol::MjaiEvent;
@@ -65,6 +65,8 @@ pub struct ValidationState {
     active_reach: [bool; PLAYER_COUNT],
     // 宣言済みリーチがダブル立直だったか。未リーチと判別不能はどちらも None。
     declared_double_riichi: [Option<bool>; PLAYER_COUNT],
+    // 今この打牌でロンされた場合に一発が成立するか。判別不能は None。
+    ippatsu: [Option<bool>; PLAYER_COUNT],
     first_turn: FirstTurn,
     post_reach_passed_tiles: [Vec<TileType>; PLAYER_COUNT],
     temporary_passed_tiles: Option<[Vec<TileType>; PLAYER_COUNT]>,
@@ -108,6 +110,25 @@ impl ValidationState {
     /// ない。まだリーチしていない場合と、宣言を観測できず判別できない場合はどちらも `None`。
     pub fn declared_double_riichi(&self, player: usize) -> Option<bool> {
         self.declared_double_riichi.get(player).copied().flatten()
+    }
+
+    /// 指定 player が今この打牌でロンした場合、一発が成立するか。
+    ///
+    /// リーチ宣言打を観測した時点で `Some(true)` になり、鳴き・槓か本人の次のツモで
+    /// `Some(false)` へ落ちる。宣言を観測していない履歴では `false` と推測せず `None`。
+    pub fn ippatsu(&self, player: usize) -> Option<bool> {
+        self.ippatsu.get(player).copied().flatten()
+    }
+
+    /// 各 player のリーチ状況依存役に関する観測事実。
+    ///
+    /// ダブル立直と一発はどちらも MJAI の `reach` event だけでは分からないので、この event
+    /// 履歴を唯一の source of truth にする。
+    pub fn riichi_situation_facts(&self) -> RiichiSituationFacts {
+        RiichiSituationFacts {
+            declared_double_riichi: self.declared_double_riichi,
+            ippatsu: self.ippatsu,
+        }
     }
 
     /// 自分のダブル立直に関する観測事実。
@@ -196,6 +217,8 @@ impl ValidationState {
         self.first_turn = FirstTurn::Active {
             discarded: [false; PLAYER_COUNT],
         };
+        // 局の開始を観測できたので、まだ誰もリーチしていない事実から一発なしが確定する。
+        self.ippatsu = [Some(false); PLAYER_COUNT];
         self.last_tsumo = None;
         self.history_furiten = HistoryFuritenFacts {
             same_turn: Some(false),
@@ -207,6 +230,10 @@ impl ValidationState {
     pub fn on_tsumo(&mut self, actor: u8, pai: String) {
         self.confirm_pending_passed_tile();
         self.clear_temporary_passed_tiles(actor);
+        // 本人の次のツモで一発の区間は終わる。未リーチの player も同じく一発にならない。
+        if let Some(ippatsu) = self.ippatsu.get_mut(usize::from(actor)) {
+            *ippatsu = Some(false);
+        }
         if Some(actor) == self.seat_id {
             self.own_tsumo_pending_discard = true;
             if pai != "?" {
@@ -253,6 +280,9 @@ impl ValidationState {
     pub fn on_call(&mut self, actor: u8) {
         self.on_hand_change(actor);
         self.first_turn.on_call();
+        // 鳴き・槓が入れば、誰の一発も成立しなくなる。観測できた以上は unknown ではなく
+        // 「一発なし」が確定する。
+        self.ippatsu = [Some(false); PLAYER_COUNT];
     }
 
     /// 鳴き・槓による手牌変化。直前のロン機会は見逃されて局が継続したと確定してから、
@@ -311,6 +341,7 @@ impl ValidationState {
         self.pending_reach = [false; PLAYER_COUNT];
         self.active_reach = [false; PLAYER_COUNT];
         self.declared_double_riichi = [None; PLAYER_COUNT];
+        self.ippatsu = [None; PLAYER_COUNT];
         self.post_reach_passed_tiles = Default::default();
         self.temporary_passed_tiles = None;
         self.same_hand_passed_tiles = None;
@@ -392,6 +423,8 @@ impl ValidationState {
             self.pending_reach[player] = false;
             self.active_reach[player] = true;
             self.declared_double_riichi[player] = self.first_turn.declares_double_riichi(player);
+            // 宣言打を観測したので、ここから本人の次のツモまでは一発の区間になる。
+            self.ippatsu[player] = Some(true);
         }
     }
 }
@@ -1250,6 +1283,144 @@ mod tests {
 
             assert_eq!(state.declared_double_riichi(0), None);
             assert_eq!(state.double_riichi_eligible(0), Some(true));
+        }
+    }
+
+    mod ippatsu {
+        use super::*;
+
+        fn started(seat: u8) -> ValidationState {
+            let mut state = ValidationState::new();
+            state.on_start_game(seat);
+            state.on_start_kyoku();
+            state
+        }
+
+        #[test]
+        fn is_unknown_until_a_kyoku_start_is_observed() {
+            let mut state = ValidationState::new();
+            state.on_start_game(0);
+
+            for player in 0..4 {
+                assert_eq!(state.ippatsu(player), None);
+            }
+        }
+
+        #[test]
+        fn a_fresh_kyoku_has_no_ippatsu() {
+            let state = started(0);
+
+            for player in 0..4 {
+                assert_eq!(state.ippatsu(player), Some(false));
+            }
+        }
+
+        #[test]
+        fn the_reach_declaration_discard_opens_the_ippatsu_window() {
+            let mut state = started(0);
+            state.on_tsumo(1, "?".to_string());
+            state.on_reach(1);
+
+            // 宣言牌を切るまでは一発の区間に入らない。
+            assert_eq!(state.ippatsu(1), Some(false));
+
+            state.on_dahai(1, "1m");
+
+            assert_eq!(state.ippatsu(1), Some(true));
+            assert_eq!(state.ippatsu(0), Some(false));
+        }
+
+        #[test]
+        fn another_players_discard_keeps_the_ippatsu_window() {
+            let mut state = started(0);
+            state.on_tsumo(1, "?".to_string());
+            state.on_reach(1);
+            state.on_dahai(1, "1m");
+            state.on_tsumo(2, "?".to_string());
+            state.on_dahai(2, "9p");
+
+            assert_eq!(state.ippatsu(1), Some(true));
+        }
+
+        #[test]
+        fn the_next_own_draw_closes_the_ippatsu_window() {
+            let mut state = started(0);
+            state.on_tsumo(1, "?".to_string());
+            state.on_reach(1);
+            state.on_dahai(1, "1m");
+            state.on_tsumo(1, "?".to_string());
+
+            assert_eq!(state.ippatsu(1), Some(false));
+        }
+
+        #[test]
+        fn any_call_closes_every_ippatsu_window() {
+            for call in [
+                MjaiEvent::Chi {
+                    actor: 2,
+                    target: 1,
+                    pai: "1m".to_string(),
+                    consumed: vec!["2m".to_string(), "3m".to_string()],
+                },
+                MjaiEvent::Pon {
+                    actor: 2,
+                    target: 1,
+                    pai: "1m".to_string(),
+                    consumed: vec!["1m".to_string(), "1m".to_string()],
+                },
+                MjaiEvent::Ankan {
+                    actor: 2,
+                    consumed: vec![
+                        "9s".to_string(),
+                        "9s".to_string(),
+                        "9s".to_string(),
+                        "9s".to_string(),
+                    ],
+                },
+                MjaiEvent::Kakan {
+                    actor: 2,
+                    pai: "9p".to_string(),
+                    consumed: vec!["9p".to_string(), "9p".to_string(), "9p".to_string()],
+                },
+            ] {
+                let mut state = started(0);
+                state.on_tsumo(1, "?".to_string());
+                state.on_reach(1);
+                state.on_dahai(1, "1m");
+                assert_eq!(state.ippatsu(1), Some(true), "{call:?}");
+
+                state.on_event(&call);
+
+                assert_eq!(state.ippatsu(1), Some(false), "{call:?}");
+            }
+        }
+
+        #[test]
+        fn a_new_kyoku_makes_the_ippatsu_unknown_again_until_it_is_observed() {
+            let mut state = started(0);
+            state.on_tsumo(1, "?".to_string());
+            state.on_reach(1);
+            state.on_dahai(1, "1m");
+            assert_eq!(state.ippatsu(1), Some(true));
+
+            state.on_start_kyoku();
+
+            assert_eq!(state.ippatsu(1), Some(false));
+        }
+
+        #[test]
+        fn the_riichi_situation_facts_carry_both_seat_facts() {
+            let mut state = started(0);
+            state.on_tsumo(1, "?".to_string());
+            state.on_reach(1);
+            state.on_dahai(1, "1m");
+
+            let facts = state.riichi_situation_facts();
+
+            assert_eq!(facts.declared_double_riichi[1], Some(true));
+            assert_eq!(facts.ippatsu[1], Some(true));
+            assert_eq!(facts.declared_double_riichi[0], None);
+            assert_eq!(facts.ippatsu[0], Some(false));
         }
     }
 }

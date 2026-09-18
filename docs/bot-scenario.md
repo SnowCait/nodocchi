@@ -29,12 +29,15 @@ cargo run -p bot-scenario -- \
 | `--riichi-kamicha [INDEX]` | 任意 | 上家をリーチ済みにする |
 | `--extra-visible-tiles` | 任意 | 他の option で表現していない見え牌 |
 | `--remaining-tiles` | 任意 | 山の残りツモ可能枚数 |
+| `--honba <COUNT>` | 任意 | 本場。省略時は unknown で、本場が必要な値は `0` 本と補完せず unavailable |
+| `--reacher-riichi-facts <SPEC>` | 任意 | リーチ済みの席のリーチ状況依存役を明示する。`SPEC` は `double` / `ippatsu` の comma 区切り、または通常立直・一発なしの `none`。省略時はどちらも unknown |
 | `--no-history-furiten` | 任意 | 同巡内フリテンでもリーチ後見逃しフリテンでもないことを明示 |
 | `--allow-hora` | 任意 | 和了を合法手に加える |
 | `--allow-ryukyoku` | 任意 | 九種九牌 (`LegalAction::Ryukyoku`) を合法手に加える |
 | `--force-fold` | 任意 | 通常の押し引き判断とは無関係に、ベタ降りを仮定した場合の防御打牌を ForcedFold ranking の上位3候補 + 0-risk candidate 全件として表示する。他の診断 option と併用不可 (`--summary-only` / `--verbose` は併用可) |
 | `--lookahead` | 任意 | 打牌候補ごとの2手先概要と、現在聴牌候補のダマ継続概要を追加。`--verbose` 併用時は受け入れ牌ごと・継続枝ごとの詳細も表示 |
 | `--two-shanten-self-tsumo` | 任意 | 2向聴候補の ExpectedSelfTsumoValue を追加 (`--lookahead` を含む) |
+| `--structural-expected-deal-in-loss` | 任意 | 通常打牌 selector が選んだ打牌について、単独リーチ相手への structural expected deal-in loss を追加。他家リーチがちょうど1人の局面だけが対象で、`--summary-only` / `--force-fold` と併用不可 |
 | `--three-shanten-progress-self-tsumo` | 任意 | production が3向聴打牌比較に使う Progress-only self-tsumo 値を全合法3向聴候補について表示し、候補別時間・合計時間を追加。他の診断 option と併用不可 |
 | `--three-shanten-continuation-comparison` | 任意 | 1向聴 continuation の枝を変えた2方式 (A: Progress + SameShanten / B: Progress のみ、B が production) で3向聴候補を評価し、値・時間・探索規模・選択打牌を比較。他の診断 option と併用不可 |
 | `--iishanten-continuation-depth-comparison` | 任意 | 1向聴 continuation の手変わり回数を変えた2方式 (A: 1回まで = legacy shallow depth / B: 2回まで = 現行 production) で全1向聴候補の ExpectedSelfTsumoValue を評価し、値・順位・最初のツモ単位の内訳・時間・探索規模を比較。他の診断 option と併用不可 |
@@ -667,6 +670,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `temporary_passed` | 各 player の最後の手牌変化後に他家から切られて通った牌。要素数4。省略時 unknown |
 | `history_furiten` | `same_turn` / `riichi_missed_win`。各値は省略時 unknown |
 | `double_riichi` | `eligible` / `declared`。各値は省略時 unknown |
+| `riichi_situation` | 各 player の `declared_double_riichi` / `ippatsu`。要素数4で、省略時と `null` は unknown |
 | `melds` | 各 player の副露・暗槓。要素数4 |
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌と候補順 |
@@ -739,6 +743,26 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/history_furiten_same_
 未リーチの局面では `eligible` だけを、`reached[player_id]` が `true` の局面では `declared` だけを読みます。どちらもダブル立直と確定した場合だけダブル立直2翻で打点を評価し、確定できない場合は最低保証として通常立直1翻で評価します。`reached` だけからダブル立直は推測しません。
 
 単一 observation からは復元できない履歴事実なので、JSON scenario では明示してください。RiichiLab の capture replay では `reach` event と宣言牌 `dahai` の時系列から自動的に復元します。
+
+### riichi_situation
+
+`riichi_situation.declared_double_riichi[player]` は「その player の宣言済みリーチがダブル立直だったか」、`riichi_situation.ippatsu[player]` は「今この打牌でその player にロンされた場合に一発が成立するか」です。どちらも player id 順の4要素で、`true` / `false` / `null` (と省略) による unknown を区別します。
+
+```json
+{
+  "hand": "123456789m1235p",
+  "draw": "9s",
+  "reached": [false, true, false, false],
+  "riichi_situation": {
+    "declared_double_riichi": [null, false, null, null],
+    "ippatsu": [null, false, null, null]
+  }
+}
+```
+
+未リーチの席に事実を置くことはできません (`reached[player]` が `false` の席へ `true` / `false` を指定すると error)。`reached` だけからは復元できない履歴事実なので、JSON scenario では明示してください。RiichiLab の capture replay では `reach` event・宣言牌 `dahai`・鳴き・ツモの時系列から自動的に復元します。
+
+[単独リーチへの structural expected deal-in loss](diagnostics.md#単独リーチへの-structural-expected-deal-in-loss) はこの2つの事実を必要とし、確定できない場合は通常立直・一発なしと決め打たずに `unavailable` を出します。
 
 ### table state
 

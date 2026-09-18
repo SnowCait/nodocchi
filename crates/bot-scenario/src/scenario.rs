@@ -1,6 +1,6 @@
 use bot_core::{
     DoubleRiichiFacts, GameContext, LegalAction, Meld, MeldKind, ReachLegalityFacts,
-    TableStateFacts, is_reach_legal, seat_wind_for_player,
+    RiichiSituationFacts, TableStateFacts, is_reach_legal, seat_wind_for_player,
 };
 use bot_logic::{
     FixedMeldCount, HistoryFuritenFacts, TileCounts, TileId, TileType,
@@ -67,6 +67,8 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub double_riichi: Option<DoubleRiichiSpec>,
     #[serde(default)]
+    pub riichi_situation: Option<RiichiSituationSpec>,
+    #[serde(default)]
     pub legal_dahai: Option<String>,
     #[serde(default)]
     pub legal_pon: Option<Vec<PonActionSpec>>,
@@ -99,6 +101,21 @@ pub struct DoubleRiichiSpec {
     /// 宣言済みの自分のリーチがダブル立直だったか。
     #[serde(default)]
     pub declared: Option<bool>,
+}
+
+/// 各 player のリーチ状況依存役に関する観測事実の指定。
+///
+/// どちらも player id 順の4要素で、`null` は「履歴から判別できない」を表す。省略した field は
+/// 4席とも unknown のままにし、通常立直や一発なしと推測しない。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiichiSituationSpec {
+    /// 宣言済みリーチがダブル立直だったか。
+    #[serde(default)]
+    pub declared_double_riichi: Option<Vec<Option<bool>>>,
+    /// 今この打牌でその player にロンされた場合、一発が成立するか。
+    #[serde(default)]
+    pub ippatsu: Option<Vec<Option<bool>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -241,7 +258,8 @@ impl Scenario {
         .with_temporary_passed_tiles(temporary_passed_tiles)
         .with_table_state_facts(table_state)
         .with_history_furiten_facts(resolve_history_furiten_facts(spec))
-        .with_double_riichi_facts(resolve_double_riichi_facts(spec));
+        .with_double_riichi_facts(resolve_double_riichi_facts(spec))
+        .with_riichi_situation_facts(resolve_riichi_situation_facts(spec, &reached)?);
 
         let legal_actions = build_legal_actions(spec, &context)?;
 
@@ -258,6 +276,47 @@ fn resolve_history_furiten_facts(spec: &ScenarioSpec) -> HistoryFuritenFacts {
             same_turn: facts.same_turn,
             riichi_missed_win: facts.riichi_missed_win,
         })
+}
+
+// 未リーチの席にリーチ状況依存役の事実を置かせない。省略した席は unknown のままにする。
+fn resolve_riichi_situation_facts(
+    spec: &ScenarioSpec,
+    reached: &[bool; 4],
+) -> Result<RiichiSituationFacts, ScenarioError> {
+    let Some(spec) = spec.riichi_situation.as_ref() else {
+        return Ok(RiichiSituationFacts::default());
+    };
+    Ok(RiichiSituationFacts {
+        declared_double_riichi: resolve_riichi_situation_field(
+            "declared_double_riichi",
+            spec.declared_double_riichi.as_deref(),
+            reached,
+        )?,
+        ippatsu: resolve_riichi_situation_field("ippatsu", spec.ippatsu.as_deref(), reached)?,
+    })
+}
+
+fn resolve_riichi_situation_field(
+    field: &'static str,
+    values: Option<&[Option<bool>]>,
+    reached: &[bool; 4],
+) -> Result<[Option<bool>; 4], ScenarioError> {
+    let Some(values) = values else {
+        return Ok([None; 4]);
+    };
+    let facts: [Option<bool>; 4] =
+        values
+            .try_into()
+            .map_err(|_| ScenarioError::RiichiSituationLength {
+                field,
+                count: values.len(),
+            })?;
+    for (player, fact) in facts.iter().enumerate() {
+        if fact.is_some() && !reached[player] {
+            return Err(ScenarioError::RiichiSituationWithoutReach { field, player });
+        }
+    }
+    Ok(facts)
 }
 
 fn resolve_double_riichi_facts(spec: &ScenarioSpec) -> DoubleRiichiFacts {
@@ -3102,6 +3161,79 @@ mod tests {
                 r#"{"hand":"123m","history_furiten":{"temporary":true}}"#
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn riichi_situation_json_distinguishes_true_false_and_unknown() {
+        let omitted = resolve(&spec_from_json(r#"{"hand":"123m"}"#));
+        assert_eq!(
+            omitted.context.riichi_situation(),
+            bot_core::RiichiSituationFacts::default()
+        );
+
+        let explicit = resolve(&spec_from_json(
+            r#"{
+                "hand":"123m",
+                "reached":[false,true,false,false],
+                "riichi_situation":{
+                    "declared_double_riichi":[null,true,null,null],
+                    "ippatsu":[null,false,null,null]
+                }
+            }"#,
+        ));
+        assert_eq!(explicit.context.declared_double_riichi_of(1), Some(true));
+        assert_eq!(explicit.context.ippatsu_of(1), Some(false));
+        assert_eq!(explicit.context.declared_double_riichi_of(0), None);
+        assert_eq!(explicit.context.ippatsu_of(0), None);
+
+        // 片方だけの指定はもう片方を unknown のまま残す。
+        let partial = resolve(&spec_from_json(
+            r#"{
+                "hand":"123m",
+                "reached":[false,true,false,false],
+                "riichi_situation":{"ippatsu":[null,true,null,null]}
+            }"#,
+        ));
+        assert_eq!(partial.context.declared_double_riichi_of(1), None);
+        assert_eq!(partial.context.ippatsu_of(1), Some(true));
+
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand":"123m","riichi_situation":{"ippatsu":true}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ScenarioSpec>(
+                r#"{"hand":"123m","riichi_situation":{"houtei":[null,null,null,null]}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_riichi_situation_facts_that_do_not_match_the_seats() {
+        assert_eq!(
+            Scenario::resolve(&spec_from_json(
+                r#"{"hand":"123m","riichi_situation":{"ippatsu":[null,null]}}"#
+            )),
+            Err(ScenarioError::RiichiSituationLength {
+                field: "ippatsu",
+                count: 2,
+            })
+        );
+        assert_eq!(
+            Scenario::resolve(&spec_from_json(
+                r#"{
+                    "hand":"123m",
+                    "riichi_situation":{"declared_double_riichi":[null,false,null,null]}
+                }"#
+            )),
+            Err(ScenarioError::RiichiSituationWithoutReach {
+                field: "declared_double_riichi",
+                player: 1,
+            })
         );
     }
 

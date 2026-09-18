@@ -19,6 +19,7 @@
 | `Reach / Damaten comparison` | Reach / Damaten の判断材料をまとめた統合観測 (diagnostics only) |
 | `Defense` | リーチ者向け防御候補のうち採用したもの |
 | `Defense candidates` | 全合法 Dahai の防御評価 |
+| `Selected discard structural deal-in risk` | 通常打牌の structural expected deal-in loss (diagnostics only、opt-in) |
 | `OpenHand defense` | High OpenHandThreat 向け防御候補 |
 | `Combined defense` | リーチと High OpenHandThreat が同時にいる場合の候補 |
 | `Summary` | 最終選択と次点を末尾で要約 |
@@ -367,6 +368,61 @@ player 別の行は player id 順に並べた表示で、comparator の優先順
 リーチ者の1人でも exact model が使えない局面は、partial exact と partial legacy を混在させず局面全体が legacy fallback になります。この場合は `ron capable weight` / `tenpai weight` がどちらも `-` になり、player 別の行も出ません。部分的な exact evidence を selection の根拠として読まないでください。
 
 `genbutsu` / `honor safety` / `opponent honor value` / `wall` / `suji` / `suji safety` / `suited safety` は、`ExactRonRisk` で選んだ候補にも表示されます。これらは従来の safety evidence を観察するための診断情報で、`ExactRonRisk` minimax の第2 key や tie-break ではありません。
+
+### 単独リーチへの structural expected deal-in loss
+
+`--structural-expected-deal-in-loss` を付けると、**通常打牌 selector が選んだ打牌**について、単独リーチ相手への期待放銃損失を既存 `R/T` と並べて表示します。他家リーチがちょうど1人の局面だけが対象です。
+
+```text
+Selected discard structural deal-in risk
+  discard: 9s
+  player 1:
+    ron capable weight: 3045
+    tenpai weight: 154457
+    structural ron risk: 1.97%
+    loss weighted sum: 6318825000
+    ura arrangement weight: 102
+    structural expected deal-in loss: 401.0
+    enumerated states: 75 (scoring evaluations: 2712, elapsed: 0.056 s)
+```
+
+| 行 | 意味 |
+| --- | --- |
+| `discard` | 評価した物理牌。赤5かどうかもそのまま打点へ反映する |
+| `ron capable weight` / `tenpai weight` | 既存 `R(p, x)` / `T(p)` そのもの |
+| `structural ron risk` | `R/T` を表示用に百分率へ直した値 |
+| `loss weighted sum` | `Σ_H Σ_U w(H) * w(U) * ロン支払点` の整数分子 [点 × weight] |
+| `ura arrangement weight` | 裏ドラ表示牌 slot の全配置の weight 総和。裏ドラ slot が無い局面では `1` |
+| `structural expected deal-in loss` | `loss weighted sum / (tenpai weight * ura arrangement weight)` [点] |
+| `enumerated states` | 数え上げた `R` の state 数と、既存 scoring layer を呼んだ回数・実測時間 |
+
+**これは empirical な放銃損失ではありません。** 実際の放銃率でも実際の期待失点でもなく、既存 `R/T` と同じ combinatorial hidden-hand state の上で「その牌でロンされたときに自分が失う点数」を physical combination weight で平均した値です。牌譜統計・相手の打牌傾向・経験的な放銃率や打点分布は使いません。
+
+含めるのは相手のリーチ / ダブル立直 / 一発、場風・相手の自風、通常ドラ・赤ドラ・裏ドラ、ロン和了時の役と符、そして本場による追加支払いです。供託は「この打牌で追加で失う点」ではないので含めません。定義は [単独リーチへの structural expected deal-in loss](ai/defense.md#単独リーチへの-structural-expected-deal-in-loss-diagnostics-only) を参照してください。
+
+`structural ron risk` と `structural expected deal-in loss` は**表示専用の派生値**です。比較・集計の source of truth は `loss weighted sum` / `tenpai weight` / `ura arrangement weight` の整数 evidence で、どちらも整数から固定小数点で作っています。
+
+#### まだ policy には接続していない
+
+この値は **diagnostics 専用**です。Push/Pull・Reach 判断・Defense selection・打牌選択のどれにも接続しておらず、option の有無で `Final decision` も `Normal discard` も `Push/Pull` も `Defense` も変わりません。攻撃期待値との直接比較も行いません。
+
+#### unavailable になる場合
+
+リーチが通常立直かダブル立直か、その和了が一発になるかは `reached` からは分かりません。確定できない場合は推測せず `unavailable` を出します。
+
+```text
+    loss weighted sum: -
+    ura arrangement weight: -
+    structural expected deal-in loss: unavailable (UnknownDoubleRiichi)
+```
+
+括弧内は確定できなかった理由です。場風 (`UnknownRoundWind`)、相手の自風 (`UnknownSeatWind`)、山の残枚数 (`UnknownRemainingTiles`)、リーチの種別 (`UnknownDoubleRiichi`)、一発 (`UnknownIppatsu`)、本場 (`Settlement(...)`) などを区別します。`unavailable` は「期待損失が0」とは別の結論で、0点や最低打点で埋めません。ロン可能 state が無い現物は scoring 事実に依らず `0.0` になります。
+
+JSON scenario では [`riichi_situation`](bot-scenario.md#riichi_situation)、簡易 CLI では `--reacher-riichi-facts` で事実を明示します。RiichiLab の capture replay では event 履歴から自動的に復元します。
+
+#### 計算コスト
+
+既存 `R/T` と同じ hidden-hand state を1件ずつ列挙し、state ごとに既存 scoring layer を通すため、追加診断の中で最も重い経路です。実局面では数百万 state 規模の評価になります。production の `act()` には持ち込まないので、既定では構築せず、明示的に要求した場合だけ計算します。
 
 ### 防御候補 ranking
 

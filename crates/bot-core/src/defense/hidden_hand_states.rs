@@ -184,6 +184,36 @@ struct RonQualification {
     guaranteed_yaku: bool,
 }
 
+// ロン可能と判定した隠れ手牌状態1件を受け取る観測。牌種ごとの枚数とその physical weight。
+type RonCapableStateObserver<'o> = &'o mut dyn FnMut(&HandCounts, u128);
+
+// ロン可能と判定した隠れ手牌状態を数えながら、必要なら1状態ずつ観測へ渡す accumulator。
+//
+// `observer` を使うのは diagnostics-only の評価だけで、候補生成・weight・重複排除・フリテン
+// 判定はどれも `observer` の有無で変わらない。観測が受け取る `(hand, weight)` は、この counting
+// が `total` へ加算したものそのものである。
+struct CompletionAccumulator<'o> {
+    total: RonCapableStateWeight,
+    observer: Option<RonCapableStateObserver<'o>>,
+}
+
+impl CompletionAccumulator<'_> {
+    fn counting() -> Self {
+        Self {
+            total: RonCapableStateWeight::default(),
+            observer: None,
+        }
+    }
+
+    fn accumulate(&mut self, hand: &HandCounts, weight: u128) {
+        self.total.weight += weight;
+        self.total.states += 1;
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer(hand, weight);
+        }
+    }
+}
+
 // 牌種ごとの残枚数 (最大4枚) から k 枚を選ぶ組み合わせ数。
 const BINOMIAL: [[u128; 5]; 5] = [
     [1, 0, 0, 0, 0],
@@ -566,11 +596,23 @@ impl<'a> ReachedHiddenHandStates<'a> {
         target: TileType,
         qualification: Option<RonQualification>,
     ) -> RonCapableStateWeight {
+        self.accumulate_completion_state_weight(
+            target,
+            qualification,
+            &mut CompletionAccumulator::counting(),
+        )
+    }
+
+    fn accumulate_completion_state_weight(
+        &mut self,
+        target: TileType,
+        qualification: Option<RonQualification>,
+        total: &mut CompletionAccumulator<'_>,
+    ) -> RonCapableStateWeight {
         let total_start = Instant::now();
-        let mut total = RonCapableStateWeight::default();
         if self.is_unron_capable_tile(target) {
             self.metrics.total_r_evaluation += total_start.elapsed();
-            return total;
+            return total.total;
         }
 
         if self.evaluated.len() >= EVALUATED_STATE_CAPACITY {
@@ -581,17 +623,38 @@ impl<'a> ReachedHiddenHandStates<'a> {
 
         let before = self.judgement_elapsed();
         let mut hand = [0u8; TileType::COUNT];
-        self.collect_standard(&mut hand, target, qualification, &mut total);
+        self.collect_standard(&mut hand, target, qualification, total);
         if !self.fixed_meld_count.has_melds() {
-            self.collect_chiitoitsu(&mut hand, target, qualification, &mut total);
-            self.collect_kokushi(&mut hand, target, qualification, &mut total);
+            self.collect_chiitoitsu(&mut hand, target, qualification, total);
+            self.collect_kokushi(&mut hand, target, qualification, total);
         }
         let total_elapsed = total_start.elapsed();
         self.metrics.candidate_generation +=
             total_elapsed.saturating_sub(self.judgement_elapsed() - before);
         self.metrics.total_r_evaluation += total_elapsed;
 
-        total
+        total.total
+    }
+
+    /// 対象牌でロン可能な隠れ手牌状態を1件ずつ観測しながら、同じ weight を数える。
+    ///
+    /// 数える対象・weight・重複排除・フリテン semantics は
+    /// [`ron_capable_state_weight`](Self::ron_capable_state_weight) と同一で、加算した状態を
+    /// `(hand, weight)` として観測へ渡す点だけが違う。`hand` は牌種ごとの枚数、`weight` はその
+    /// 状態の physical combination weight で、同じ状態が2回渡ることはない。
+    ///
+    /// production selection は使わない diagnostics-only の経路で、`R/T` の state space と weight を
+    /// そのまま source of truth にするために counting 本体を共有する。
+    pub fn visit_ron_capable_states(
+        &mut self,
+        target: TileType,
+        observer: RonCapableStateObserver<'_>,
+    ) -> RonCapableStateWeight {
+        let mut accumulator = CompletionAccumulator {
+            total: RonCapableStateWeight::default(),
+            observer: Some(observer),
+        };
+        self.accumulate_completion_state_weight(target, None, &mut accumulator)
     }
 
     fn judgement_elapsed(&self) -> Duration {
@@ -606,7 +669,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         hand: &mut HandCounts,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
     ) {
         let concealed_melds = 4 - self.fixed_meld_count.get();
 
@@ -648,7 +711,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         start: usize,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
     ) {
         if melds_left == 0 {
             self.record(hand, target, qualification, total);
@@ -675,7 +738,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         hand: &mut HandCounts,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
     ) {
         if !self.try_add(hand, &[target]) {
             return;
@@ -691,7 +754,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         start: usize,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
     ) {
         if pairs_left == 0 {
             self.record(hand, target, qualification, total);
@@ -721,7 +784,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         hand: &mut HandCounts,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
     ) {
         if !target.is_yaochu() {
             return;
@@ -763,7 +826,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         hand: &HandCounts,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
     ) {
         let timing_sample = candidate_timing_sample(
             self.metrics.record_calls,
@@ -795,7 +858,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         hand: &HandCounts,
         target: TileType,
         qualification: Option<RonQualification>,
-        total: &mut RonCapableStateWeight,
+        total: &mut CompletionAccumulator<'_>,
         timing_sample: CandidateTimingSample,
     ) {
         let generation = self.generation;
@@ -981,8 +1044,7 @@ impl<'a> ReachedHiddenHandStates<'a> {
         let result_accumulation_start =
             (timing_sample == CandidateTimingSample::ResultAccumulation).then(Instant::now);
         self.metrics.result_accumulations += 1;
-        total.weight += weight;
-        total.states += 1;
+        total.accumulate(hand, weight);
         self.metrics.ron_capable_weight += weight;
         self.metrics.ron_capable_states += 1;
         if let Some(result_accumulation_start) = result_accumulation_start {
