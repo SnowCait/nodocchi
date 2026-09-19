@@ -6,6 +6,7 @@ mod hidden_hand_states;
 mod honor;
 mod ordering;
 mod selection;
+mod structural_expected_deal_in_loss;
 mod suited;
 mod suji;
 mod wait_candidates;

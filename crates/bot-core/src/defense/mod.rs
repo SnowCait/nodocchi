@@ -4,6 +4,7 @@ mod hard_safety;
 mod hidden_hand_states;
 mod honor;
 mod ron_risk;
+mod structural_expected_deal_in_loss;
 mod suited;
 mod suji;
 mod wait_candidates;
@@ -48,6 +49,12 @@ pub(crate) use ron_risk::{
 };
 pub use ron_risk::{
     PlayerRonRiskEvidence, compare_lexicographic_minimax_ron_risk, worst_first_ron_risk_evidence,
+};
+pub use structural_expected_deal_in_loss::{
+    StructuralExpectedDealInLossDiagnostic, StructuralExpectedDealInLossEvidence,
+    StructuralExpectedDealInLossMetrics, StructuralExpectedDealInLossUnavailable,
+    diagnose_structural_expected_deal_in_loss, structural_expected_deal_in_loss,
+    structural_expected_deal_in_loss_with_metrics,
 };
 pub use suited::{
     SuitedSafetyEvidence, SuitedSafetyRank, select_suited_safety_fallback_action,

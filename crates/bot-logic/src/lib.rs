@@ -80,7 +80,7 @@ pub use han::{WinningYakuHanEvaluation, YakuHan, evaluate_winning_yaku_han};
 pub use hand::{Hand, HandError};
 pub use hand_settlement::{
     HandSettlement, HandSettlementError, HonbaPayments, MissingSettlementFact,
-    evaluate_hand_settlement,
+    evaluate_hand_settlement, evaluate_ron_deal_in_payment,
 };
 pub use hand_value::{HandValue, HandValueError, HandValueOutcome, evaluate_hand_value};
 pub use iishanten::{

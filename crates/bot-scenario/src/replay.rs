@@ -1,4 +1,4 @@
-use bot_core::DoubleRiichiFacts;
+use bot_core::{DoubleRiichiFacts, RiichiSituationFacts};
 use riichilab_client::{CaptureRecord, CapturedRequestAction, ValidationState};
 
 use crate::error::ScenarioError;
@@ -18,6 +18,7 @@ struct ReplayRequest {
     request_action: CapturedRequestAction,
     reaction_source_player: Option<u8>,
     double_riichi: DoubleRiichiFacts,
+    riichi_situation: RiichiSituationFacts,
 }
 
 impl CapturedScenario {
@@ -109,6 +110,7 @@ fn parse_records(path: &str, text: &str) -> Result<Vec<ReplayRequest>, ScenarioE
                 request_action,
                 reaction_source_player: state.reaction_source_player(),
                 double_riichi: state.own_double_riichi_facts(),
+                riichi_situation: state.riichi_situation_facts(),
             });
         } else if record.server_event().is_some() {
             match record.mjai_event().map_err(capture_error)? {
@@ -157,7 +159,8 @@ fn captured_scenario(path: &str, record: ReplayRequest) -> Result<CapturedScenar
             message: error.to_string(),
         })?
         .with_reaction_source_player(record.reaction_source_player)
-        .with_double_riichi_facts(record.double_riichi);
+        .with_double_riichi_facts(record.double_riichi)
+        .with_riichi_situation_facts(record.riichi_situation);
 
     Ok(CapturedScenario {
         path: path.to_string(),

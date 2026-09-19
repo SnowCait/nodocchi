@@ -222,6 +222,7 @@ fn diagnostic_options(args: &CliArgs) -> DiagnosticOptions {
         lookahead: args.lookahead,
         same_shanten_downstream: args.lookahead && args.verbose,
         two_shanten_self_tsumo: args.two_shanten_self_tsumo,
+        structural_expected_deal_in_loss: args.structural_expected_deal_in_loss,
     }
 }
 

@@ -136,6 +136,93 @@ exact path を使うのは、**全リーチ者**の exact model が利用可能�
 
 になった場合は、推測で補完せず、partial exact と partial legacy を混在させもせず、**局面全体**を [legacy safety fallback](#legacy-safety-fallback) へ落とします。通常のリーチ局面では exact path を使います。
 
+### 単独リーチへの structural expected deal-in loss (diagnostics only)
+
+`R/T` は「その牌でロンされ得る hidden-hand state の割合」だけを表し、**ロンされた場合にいくら払うか**を含みません。同じ `R/T` でも、ロン可能 state の打点分布が違えば失う点数の期待値は違います。そこで `R/T` と同じ state space・同じ weight の上で、打点まで含めた期待放銃損失を求めます。
+
+対象は**他家リーチがちょうど1人**の局面の通常打牌1候補だけで、現時点では **diagnostics 専用**です。Push/Pull・Defense selection・打牌選択のどれにも接続しておらず、構築の有無で production の判断は変わりません。
+
+```text
+T(p)
+= 公開情報と整合する
+  全 structural tenpai hidden-hand states の physical weight
+
+ExpectedDealInLoss(p, x)
+= Σ_H [ w(H) * I(H が x で現在ロン可能) * Loss(H, x) ] / T(p)
+```
+
+`H` は `R/T` と同じ hidden-hand state、`w(H)` は同じ physical combination weight、`I(...)` はフリテン等を含めて実際に `x` でロンできるかどうかです。`Loss(H, x)` はその状態で `x` にロンされたときに**自分が追加で失う点数**です。
+
+#### empirical な放銃損失ではない
+
+これは実際の放銃率でも実際の期待失点でもありません。牌譜統計・相手の打牌傾向・経験的な放銃率や打点分布は一切使わず、確率測度は既存 `R/T` と同じ「公開情報と矛盾しない物理牌配置の組合せ重み」だけです。期待損失のために別の hidden-hand prior も probability model も作りません。
+
+#### `Loss(H, x)` に含めるもの
+
+打点は既存の hand-value / payment / settlement layer だけで求めます ([手牌評価](hand-value.md))。役・翻・符・親子・ロン支払点をこの layer で別実装しません。
+
+| 含める | 含めない |
+| --- | --- |
+| 相手のリーチ / ダブル立直 / 一発 | 供託 (この打牌で追加で失う点ではない) |
+| 場風・相手の自風 | 牌譜統計・相手の打牌傾向 |
+| 通常ドラ・赤ドラ・裏ドラ | 経験的な放銃率・打点分布 |
+| ロン和了時の役・符・支払点 | ツモ和了・横移動・順位 |
+| 本場による自分から相手への追加支払い | 平均裏ドラ翻数のような固定係数 |
+
+嶺上開花と槍槓は「通常の打牌でロンされる」評価そのものから `false` が確定するので、観測事実として渡します。河底は `remaining_tiles` から決まります。
+
+#### 赤5の物理配置
+
+`R/T` の state は牌種ごとの枚数 (`TileCounts`) なので、赤5と黒5を区別しません。一方で打点は変わるため、期待損失では state の physical weight を赤5の有無へ分解します。
+
+赤5がまだ見えていない牌種では、残枚数のうち1枚が赤5なので
+
+```text
+C(remaining, count)
+= C(remaining - 1, count - 1)   赤5を含む物理配置
++ C(remaining - 1, count)       黒5だけの物理配置
+```
+
+へ正しい組合せ weight で分かれます。赤5が既に見えている牌種は黒5だけの配置になります。分解した weight の合計は元の weight と一致しなければならず、一致しない場合は値を返しません。切る牌そのものが赤5の場合も、実際の物理牌 (`TileId`) をそのまま scoring へ渡します。
+
+#### 裏ドラ
+
+「平均裏ドラ○翻」のような統計値や固定係数は使いません。リーチ者の hidden hand `H` を仮定したあとに残る unseen physical tile pool から、現在のドラ表示牌数と同じ数の裏ドラ表示牌 slot の配置をすべて数え上げ、physical combination weight で平均します。
+
+```text
+Loss(H, x) = E_U[ ron payment(H, x, ura indicators U) ]
+```
+
+裏ドラ判定は既存 scoring の ura-dora 判定そのものです。未知の裏ドラを0翻に固定することも、確率で近似することもしません。`H` を除いた未知牌の枚数は state に依らず一定なので、裏ドラ配置の総 weight も局面ごとに一定です。
+
+#### リーチ状況依存役と unavailable
+
+リーチが通常立直かダブル立直か、その和了が一発になるかは `reached` からは分かりません。どちらも event 履歴から復元できる事実として player ごとに保持し ([`RiichiSituationFacts`](../../crates/bot-core/src/context.rs))、確定できない場合は**そのケースの期待損失を `unavailable`** にします。通常立直と決め打つ、一発を `false` と決め打つ、といった補完はしません。
+
+`unavailable` になるのは、場風・相手の自風・山の残枚数・リーチの種別・一発・本場のいずれかが unknown な場合と、scoring layer が打点を確定できない場合です。これは「期待損失が0」とは別の結論です。ロン可能 state が存在しない現物では、scoring 事実に依らず期待損失は exact に0になります。
+
+#### 整数 evidence
+
+浮動小数点は production truth にしません。保持するのは「点数 × physical weight」の整数分子と整数分母です。
+
+```text
+StructuralExpectedDealInLossEvidence {
+    loss_weighted_sum: u128,        // Σ_H Σ_U w(H) * w(U) * ロン支払点
+    tenpai_weight: u128,            // T(p)。既存 R/T の分母そのもの
+    ura_arrangement_weight: u128,   // 裏ドラ配置の総 weight
+}
+
+expected loss = loss_weighted_sum / (tenpai_weight * ura_arrangement_weight)
+```
+
+点数への変換と百分率は表示専用です。比較・集計の source of truth は整数 evidence で、比較も cross multiplication で exact に行います。overflow は checked arithmetic で扱い、計算不能を clamp / saturate してもっともらしい値にしません。
+
+#### 実装は既存 `R` の数え上げを共有する
+
+compressed hidden-hand model は打点に必要な特徴量 (どの牌種を何枚持つか) を潰した class へ畳み込んでいるため、class の代表打点を weight に掛けることはできません。そこで期待損失は enumerating model ([`ReachedHiddenHandStates`](../../crates/bot-core/src/defense/hidden_hand_states.rs)) の `R` の数え上げをそのまま観測し、加算された state を1件ずつ scoring へ通す diagnostics-only の reference enumeration にしています。候補生成・weight・重複排除・フリテン判定はどれも観測の有無で変わらず、数え直した `R` が production の `R` と食い違う場合は値を返しません。
+
+production の高速 `R/T` path と comparator には手を入れていません。一方で state を1件ずつ点数計算するため、実局面では数百万 state 規模の評価になります (門前リーチ者1人・ドラ表示牌1枚の中盤局面で約263万 state・約1.5億回の scoring 評価、release build で約60秒)。production の `act()` からは呼ばず、診断経路で明示的に要求した場合だけ計算します。
+
 ### legacy safety fallback
 
 exact model が利用できない場合の従来 selection です。全リーチ者の exact model が揃わない限り、単独リーチでも複数リーチでも局面全体がこの経路になります。現物の次は次の safety で比較します。

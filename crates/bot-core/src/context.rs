@@ -59,6 +59,38 @@ pub struct DoubleRiichiFacts {
     pub declared: Option<bool>,
 }
 
+/// 各 player のリーチ状況依存役に関する観測事実。
+///
+/// リーチ者の和了点を確定させるには、リーチが通常立直かダブル立直か、そしてその和了が一発に
+/// なるかを知る必要がある。どちらも `reached` からは分からないので、event 履歴から確定できた
+/// 事実だけをここへ持つ。index は player id で席順に並ぶ。
+///
+/// `None` は「履歴から判別できない」を表し、`Some(false)` と区別する。判別できない場合に通常
+/// 立直や一発なしへ倒すと、そのぶん打点を過小評価した推測値になるため補完しない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RiichiSituationFacts {
+    /// 宣言済みリーチがダブル立直だったか。未リーチと判別不能はどちらも `None`。
+    pub declared_double_riichi: [Option<bool>; 4],
+    /// 今この打牌でその player にロンされた場合、一発が成立するか。
+    ///
+    /// リーチ宣言打から次の自摸までの区間で、かつ間に鳴き・槓が入っていない場合だけ `true`。
+    /// 未リーチの player も一発にはならないので、履歴を追えている間は `Some(false)` になる。
+    /// 履歴を追えない場合は `false` と推測せず `None`。
+    pub ippatsu: [Option<bool>; 4],
+}
+
+impl RiichiSituationFacts {
+    /// 指定 player の宣言済みリーチがダブル立直だったか。範囲外の `player` は `None`。
+    pub fn declared_double_riichi_of(&self, player: usize) -> Option<bool> {
+        *self.declared_double_riichi.get(player)?
+    }
+
+    /// 指定 player が今この打牌でロンした場合に一発が成立するか。範囲外の `player` は `None`。
+    pub fn ippatsu_of(&self, player: usize) -> Option<bool> {
+        *self.ippatsu.get(player)?
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GameContext {
     drawn_tile: Option<TileId>,
@@ -82,6 +114,7 @@ pub struct GameContext {
     table_state: TableStateFacts,
     history_furiten: HistoryFuritenFacts,
     double_riichi: DoubleRiichiFacts,
+    riichi_situation: RiichiSituationFacts,
 }
 
 impl GameContext {
@@ -284,6 +317,14 @@ impl GameContext {
         self
     }
 
+    /// 各 player のリーチ状況依存役に関する観測事実を設定する。
+    ///
+    /// 履歴を追えない入力経路では既定の unknown のままにし、通常立直や一発なしと推測しない。
+    pub fn with_riichi_situation_facts(mut self, riichi_situation: RiichiSituationFacts) -> Self {
+        self.riichi_situation = riichi_situation;
+        self
+    }
+
     pub fn drawn_tile(&self) -> Option<TileId> {
         self.drawn_tile
     }
@@ -312,6 +353,21 @@ impl GameContext {
     /// 自分のダブル立直に関する観測事実。
     pub fn double_riichi(&self) -> DoubleRiichiFacts {
         self.double_riichi
+    }
+
+    /// 各 player のリーチ状況依存役に関する観測事実。
+    pub fn riichi_situation(&self) -> RiichiSituationFacts {
+        self.riichi_situation
+    }
+
+    /// 指定 player の宣言済みリーチがダブル立直だったか。判別できない場合は `None`。
+    pub fn declared_double_riichi_of(&self, player: usize) -> Option<bool> {
+        self.riichi_situation.declared_double_riichi_of(player)
+    }
+
+    /// 指定 player が今この打牌でロンした場合に一発が成立するか。判別できない場合は `None`。
+    pub fn ippatsu_of(&self, player: usize) -> Option<bool> {
+        self.riichi_situation.ippatsu_of(player)
     }
 
     /// 今回の打牌を1枚切り終えた時点の履歴依存フリテン。
@@ -1809,6 +1865,38 @@ mod tests {
         let context = meld_context(Some(0), [melds, vec![], vec![], vec![]]);
         assert_eq!(context.own_melds().map(<[Meld]>::len), Some(5));
         assert_eq!(context.own_fixed_meld_count(), None);
+    }
+
+    #[test]
+    fn riichi_situation_facts_default_to_unknown_for_every_seat() {
+        let context = GameContext::default();
+
+        assert_eq!(context.riichi_situation(), RiichiSituationFacts::default());
+        for player in 0..4 {
+            assert_eq!(context.declared_double_riichi_of(player), None);
+            assert_eq!(context.ippatsu_of(player), None);
+        }
+    }
+
+    #[test]
+    fn riichi_situation_facts_keep_each_seat_fact_and_distinguish_false_from_unknown() {
+        let facts = RiichiSituationFacts {
+            declared_double_riichi: [None, Some(true), Some(false), None],
+            ippatsu: [Some(false), Some(true), None, None],
+        };
+        let context = GameContext::default().with_riichi_situation_facts(facts);
+
+        assert_eq!(context.riichi_situation(), facts);
+        assert_eq!(context.declared_double_riichi_of(1), Some(true));
+        assert_eq!(context.declared_double_riichi_of(2), Some(false));
+        assert_eq!(context.declared_double_riichi_of(3), None);
+        assert_eq!(context.ippatsu_of(0), Some(false));
+        assert_eq!(context.ippatsu_of(1), Some(true));
+        assert_eq!(context.ippatsu_of(2), None);
+
+        // 範囲外の席は 0 番などへ倒さない。
+        assert_eq!(context.declared_double_riichi_of(4), None);
+        assert_eq!(context.ippatsu_of(4), None);
     }
 
     #[test]

@@ -6,7 +6,10 @@ use crate::call_decision::CallDecisionDiagnostic;
 use crate::combined_defense::{CombinedDefenseCategory, CombinedDefenseDiagnostic};
 use crate::context::GameContext;
 use crate::current_tenpai_continuation::CurrentTenpaiContinuationDiagnostic;
-use crate::defense::{DefenseDecisionDiagnostic, DefenseFallbackEvaluation, DefenseFallbackKind};
+use crate::defense::{
+    DefenseDecisionDiagnostic, DefenseFallbackEvaluation, DefenseFallbackKind,
+    StructuralExpectedDealInLossDiagnostic, diagnose_structural_expected_deal_in_loss,
+};
 use crate::discard_selection::{
     DiscardActionSelection, DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
 };
@@ -126,6 +129,19 @@ pub struct ShantenDecisionDiagnostic {
     /// 選択が実際に使った値そのもので、診断のために求め直さない。詳細な2手先診断を構築した
     /// 場合だけ持つ。
     pub normal_discard_self_tsumo_facts: Option<SelfTsumoFacts>,
+    /// 通常打牌 selector が選んだ打牌について、単独リーチ相手への structural expected deal-in
+    /// loss。他家リーチがちょうど1人で、かつこの診断を要求した場合だけ持つ。
+    ///
+    /// 既存 `R/T` と同じ hidden-hand state space・同じ physical combination weight の上で、
+    /// 「その打牌でロンされたときに自分が失う点数」の期待値を取ったものである。牌譜統計・
+    /// 相手の打牌傾向・経験的な放銃率や打点分布は使わない。実際の放銃率でも実際の期待失点でも
+    /// ない。
+    ///
+    /// 現時点では diagnostics 専用で、Push/Pull・Defense selection・打牌選択のどれにも接続して
+    /// いない。構築の有無は選択結果を変えない。完成手を1状態ずつ評価するため他の追加診断よりも
+    /// 重く、既定では構築しない。
+    pub normal_discard_structural_expected_deal_in_loss:
+        Option<StructuralExpectedDealInLossDiagnostic>,
     /// 押し引き判定に使った入力。`push_pull_inputs_from_context_with_evaluation()` の実結果。
     pub push_pull_inputs: Option<PushPullInputs>,
     /// 押し引き判定の結果。`decide_push_pull()` の実結果。
@@ -239,6 +255,15 @@ pub struct DiagnosticOptions {
     /// `same_shanten_downstream` とは対象も枝も別なので、互いに含まない。片方だけを要求した
     /// 場合、もう片方の探索は走らない。
     pub two_shanten_self_tsumo: bool,
+    /// 通常打牌 selector が選んだ打牌の structural expected deal-in loss
+    /// ([`ShantenDecisionDiagnostic::normal_discard_structural_expected_deal_in_loss`]) を
+    /// 構築するかどうか。
+    ///
+    /// 既存 `R/T` と同じ hidden-hand state space を1状態ずつ列挙し、状態ごとに既存 scoring layer
+    /// を通すため、実局面では追加診断の中でも特に重い。対象は他家リーチがちょうど1人の局面
+    /// だけで、他の追加探索とは独立に要求できる。打牌選択にも押し引きにも使わない観測値なので、
+    /// 有効にしても選択結果は変わらない。
+    pub structural_expected_deal_in_loss: bool,
 }
 
 impl DiagnosticOptions {
@@ -247,18 +272,21 @@ impl DiagnosticOptions {
         lookahead: false,
         same_shanten_downstream: false,
         two_shanten_self_tsumo: false,
+        structural_expected_deal_in_loss: false,
     };
     /// 2手先診断まで構築する。
     pub const WITH_LOOKAHEAD: Self = Self {
         lookahead: true,
         same_shanten_downstream: false,
         two_shanten_self_tsumo: false,
+        structural_expected_deal_in_loss: false,
     };
     /// 2手先診断に加えて、same-shanten の枝をテンパイまで追う。
     pub const WITH_SAME_SHANTEN_DOWNSTREAM: Self = Self {
         lookahead: true,
         same_shanten_downstream: true,
         two_shanten_self_tsumo: false,
+        structural_expected_deal_in_loss: false,
     };
     /// 2手先診断に加えて、2向聴候補の ExpectedSelfTsumoValue を求める。
     ///
@@ -268,12 +296,21 @@ impl DiagnosticOptions {
         lookahead: true,
         same_shanten_downstream: false,
         two_shanten_self_tsumo: true,
+        structural_expected_deal_in_loss: false,
     };
     /// 追加探索を両方とも構築する。
     pub const WITH_SAME_SHANTEN_DOWNSTREAM_AND_TWO_SHANTEN_SELF_TSUMO: Self = Self {
         lookahead: true,
         same_shanten_downstream: true,
         two_shanten_self_tsumo: true,
+        structural_expected_deal_in_loss: false,
+    };
+    /// 単独リーチ相手への structural expected deal-in loss だけを追加で構築する。
+    pub const WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS: Self = Self {
+        lookahead: false,
+        same_shanten_downstream: false,
+        two_shanten_self_tsumo: false,
+        structural_expected_deal_in_loss: true,
     };
 
     pub(crate) fn lookahead_scope(self) -> LookaheadDiagnosticScope {
@@ -500,6 +537,15 @@ impl DecisionDiagnostics {
             )
         });
 
+        // 期待放銃損失は通常打牌 selector が選んだ打牌そのものについて求める。診断側で打牌を
+        // 選び直さないので、通常打牌選択を通っていない局面では構築しない。
+        let normal_discard_structural_expected_deal_in_loss = self
+            .options
+            .structural_expected_deal_in_loss
+            .then_some(decision.normal_discard.as_ref())
+            .flatten()
+            .and_then(|action| diagnose_structural_expected_deal_in_loss(context, action));
+
         ShantenDecisionDiagnostic {
             selected_action: decision.action,
             selected_source: decision.source,
@@ -514,6 +560,7 @@ impl DecisionDiagnostics {
                 .normal_discard_current_tenpai_continuation,
             normal_discard_two_shanten_self_tsumo: self.normal_discard_two_shanten_self_tsumo,
             normal_discard_self_tsumo_facts: self.normal_discard_self_tsumo_facts,
+            normal_discard_structural_expected_deal_in_loss,
             push_pull_inputs: decision.push_pull_inputs,
             push_pull_decision: decision.push_pull,
             reach: decision.reach,

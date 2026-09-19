@@ -177,6 +177,7 @@ pub(crate) fn context_for_request(
         .with_same_hand_passed_tiles(state.same_hand_passed_tiles().cloned())
         .with_history_furiten_facts(state.history_furiten())
         .with_double_riichi_facts(state.own_double_riichi_facts())
+        .with_riichi_situation_facts(state.riichi_situation_facts())
 }
 
 /// 送信 action から `action sent` INFO ログ用のフィールドを抽出する pure helper。

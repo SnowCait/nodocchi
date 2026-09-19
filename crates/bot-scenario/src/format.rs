@@ -19,6 +19,7 @@ use bot_core::{
     ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
     RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
     RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
+    StructuralExpectedDealInLossDiagnostic, StructuralExpectedDealInLossEvidence,
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
     TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
     ThreatDefenseTarget, TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
@@ -112,6 +113,14 @@ pub fn format_diagnostic(
     sections.push(format_defense(diagnostic.defense.as_ref()));
 
     if let Some(section) = format_defense_candidates(diagnostic.defense.as_ref()) {
+        sections.push(section);
+    }
+
+    if let Some(section) = format_structural_expected_deal_in_loss(
+        diagnostic
+            .normal_discard_structural_expected_deal_in_loss
+            .as_ref(),
+    ) {
         sections.push(section);
     }
 
@@ -2405,6 +2414,108 @@ fn format_defense_candidate(candidate: &DefenseCandidateDiagnostic) -> String {
     lines.join("\n")
 }
 
+// 通常打牌 selector が選んだ打牌について、単独リーチ相手への structural expected deal-in loss。
+//
+// 既存 `R/T` と同じ行にまとめて、比率と期待損失を並べて読めるようにする。表示の百分率と小数は
+// どちらも整数 evidence から作る派生値で、比較・集計の source of truth は整数のままである。
+// 期待損失を確定できない場合は理由をそのまま出し、0 点や最低打点で埋めない。
+fn format_structural_expected_deal_in_loss(
+    diagnostic: Option<&StructuralExpectedDealInLossDiagnostic>,
+) -> Option<String> {
+    let diagnostic = diagnostic?;
+    let mut lines = vec![
+        "Selected discard structural deal-in risk".to_string(),
+        format!("  discard: {}", diagnostic.discard.to_mjai_string()),
+        format!("  player {}:", diagnostic.player),
+    ];
+
+    match diagnostic.ron_risk {
+        Some(risk) => {
+            lines.push(format!(
+                "    ron capable weight: {}",
+                risk.ron_capable_weight
+            ));
+            lines.push(format!("    tenpai weight: {}", risk.tenpai_weight));
+            lines.push(format!(
+                "    structural ron risk: {}",
+                format_ratio_percent(risk.ron_capable_weight, risk.tenpai_weight)
+            ));
+        }
+        None => {
+            lines.push(format!("    ron capable weight: {ABSENT}"));
+            lines.push(format!("    tenpai weight: {ABSENT}"));
+            lines.push(format!("    structural ron risk: {ABSENT}"));
+        }
+    }
+
+    match &diagnostic.expected_loss {
+        Ok(evidence) => {
+            lines.push(format!(
+                "    loss weighted sum: {}",
+                evidence.loss_weighted_sum
+            ));
+            lines.push(format!(
+                "    ura arrangement weight: {}",
+                evidence.ura_arrangement_weight
+            ));
+            lines.push(format!(
+                "    structural expected deal-in loss: {}",
+                format_expected_loss(evidence)
+            ));
+        }
+        Err(unavailable) => {
+            lines.push(format!("    loss weighted sum: {ABSENT}"));
+            lines.push(format!("    ura arrangement weight: {ABSENT}"));
+            lines.push(format!(
+                "    structural expected deal-in loss: {UNAVAILABLE} ({unavailable:?})"
+            ));
+        }
+    }
+    lines.push(format!(
+        "    enumerated states: {} (scoring evaluations: {}, elapsed: {})",
+        diagnostic.metrics.ron_capable_states,
+        diagnostic.metrics.scoring_evaluations,
+        format_elapsed(diagnostic.metrics.elapsed)
+    ));
+
+    Some(lines.join("\n"))
+}
+
+// 表示専用の期待損失 [点]。整数分子と整数分母から小数第1位まで作る。
+fn format_expected_loss(evidence: &StructuralExpectedDealInLossEvidence) -> String {
+    match evidence.weight_denominator() {
+        Some(denominator) => format_fixed_point(evidence.loss_weighted_sum, denominator, 1),
+        None => UNAVAILABLE.to_string(),
+    }
+}
+
+// 表示専用の百分率。分母が 0 の場合は比率を推測しない。
+fn format_ratio_percent(numerator: u128, denominator: u128) -> String {
+    match numerator.checked_mul(100) {
+        Some(numerator) => format!("{}%", format_fixed_point(numerator, denominator, 2)),
+        None => UNAVAILABLE.to_string(),
+    }
+}
+
+// 整数の分子・分母から固定小数点の表示文字列を作る。浮動小数点を経由しない。
+//
+// 分母が 0、または桁合わせが `u128` に収まらない場合は、値を推測せず unavailable にする。
+fn format_fixed_point(numerator: u128, denominator: u128, decimals: u32) -> String {
+    let scale = 10u128.pow(decimals);
+    let Some(scaled) = numerator
+        .checked_mul(scale)
+        .and_then(|scaled| scaled.checked_div(denominator))
+    else {
+        return UNAVAILABLE.to_string();
+    };
+    format!(
+        "{}.{:0width$}",
+        scaled / scale,
+        scaled % scale,
+        width = decimals as usize
+    )
+}
+
 // High OpenHandThreat 相手に対する防御 safety。診断が持つ pure helper の結果をそのまま出し、
 // 表示用に安全度を計算し直さない。target がいない局面は候補を出さず、target なしと分かる表示に
 // する。`selected` は production selector が選んだ結果そのもので、表示側で選び直さない。
@@ -3531,6 +3642,50 @@ mod tests {
         let diagnostic = diagnose(&scenario);
         let output = format_diagnostic(&scenario, &diagnostic, verbose);
         (scenario, diagnostic, output)
+    }
+
+    // 単独リーチ相手への期待放銃損失は隠れ手牌状態を1件ずつ点数計算するので、表示の確認には
+    // 暗槓3つでリーチ者の隠れ手牌が4枚に固定された小さい局面だけを使う。
+    const STRUCTURAL_EXPECTED_DEAL_IN_LOSS_SCENARIO: &str = r#"{
+        "hand": "123456789m1235p",
+        "draw": "9s",
+        "dora_indicators": "9m",
+        "round_wind": "E",
+        "player_id": 0,
+        "oya": 0,
+        "reached": [false, true, false, false],
+        "discards": ["", "123z", "", ""],
+        "reach_discard_indices": [null, 1, null, null],
+        "melds": [
+            [],
+            [
+                {"kind": "ankan", "tiles": "8888s"},
+                {"kind": "ankan", "tiles": "6666z"},
+                {"kind": "ankan", "tiles": "7777z"}
+            ],
+            [],
+            []
+        ],
+        "remaining_tiles": 40,
+        "honba": 1,
+        "kyotaku_points": 1000,
+        "riichi_situation": {
+            "declared_double_riichi": [null, false, null, null],
+            "ippatsu": [null, false, null, null]
+        }
+    }"#;
+
+    fn rendered_with_structural_expected_deal_in_loss(json: &str) -> RenderedDiagnostic {
+        let scenario = scenario_from_json(json);
+        let diagnostic = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+        );
+        RenderedDiagnostic {
+            rendered: format_diagnostic(&scenario, &diagnostic, false),
+            diagnostic,
+        }
     }
 
     // 2手先診断は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり重いため、表示の確認には
@@ -9291,5 +9446,143 @@ mod tests {
         assert_eq!(format_probability(TSUMO_PROBABILITY_SCALE / 4), "0.250000");
         assert_eq!(format_optional_probability(Some(0)), "0.000000");
         assert_eq!(format_optional_probability(None), "unknown");
+    }
+
+    #[test]
+    fn the_structural_expected_deal_in_loss_section_is_opt_in() {
+        let (_, _, output) = rendered(STRUCTURAL_EXPECTED_DEAL_IN_LOSS_SCENARIO, false);
+
+        assert!(
+            !output.contains("Selected discard structural deal-in risk"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn the_structural_expected_deal_in_loss_section_shows_the_ron_risk_and_the_expected_loss() {
+        let rendered = rendered_with_structural_expected_deal_in_loss(
+            STRUCTURAL_EXPECTED_DEAL_IN_LOSS_SCENARIO,
+        );
+        let section = section(
+            &rendered.rendered,
+            "Selected discard structural deal-in risk",
+        );
+        let diagnostic = rendered
+            .diagnostic
+            .normal_discard_structural_expected_deal_in_loss
+            .as_ref()
+            .expect("単独リーチなので構築されている");
+        let risk = diagnostic.ron_risk.expect("exact model が使える");
+        let evidence = diagnostic
+            .expected_loss
+            .as_ref()
+            .expect("scoring 事実が揃っている");
+
+        // 表示するのは診断が持つ整数 evidence そのもので、表示のために数え直さない。
+        assert!(
+            section.contains(&format!(
+                "    ron capable weight: {}",
+                risk.ron_capable_weight
+            )),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!("    tenpai weight: {}", risk.tenpai_weight)),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!(
+                "    loss weighted sum: {}",
+                evidence.loss_weighted_sum
+            )),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!(
+                "    ura arrangement weight: {}",
+                evidence.ura_arrangement_weight
+            )),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!("  player {}:", diagnostic.player)),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!(
+                "  discard: {}",
+                diagnostic.discard.to_mjai_string()
+            )),
+            "{section}"
+        );
+
+        // 百分率と小数は整数 evidence から作る表示専用の派生値。
+        assert!(
+            section.contains(&format!(
+                "    structural ron risk: {}",
+                format_ratio_percent(risk.ron_capable_weight, risk.tenpai_weight)
+            )),
+            "{section}"
+        );
+        assert!(
+            section.contains(&format!(
+                "    structural expected deal-in loss: {}",
+                format_expected_loss(evidence)
+            )),
+            "{section}"
+        );
+        assert!(evidence.loss_weighted_sum > 0, "{evidence:?}");
+    }
+
+    #[test]
+    fn an_unknown_riichi_kind_renders_the_expected_loss_as_unavailable() {
+        // リーチ状況依存役を確定できない局面では、0 点や最低打点で埋めず理由を出す。既存 `R/T`
+        // はそのまま読める。
+        let json = STRUCTURAL_EXPECTED_DEAL_IN_LOSS_SCENARIO
+            .replace(r#""riichi_situation": {"#, r#""x_riichi_situation": {"#);
+        let json = json.replace(
+            r#""x_riichi_situation": {
+            "declared_double_riichi": [null, false, null, null],
+            "ippatsu": [null, false, null, null]
+        }"#,
+            r#""kyoku": 1"#,
+        );
+        let rendered = rendered_with_structural_expected_deal_in_loss(&json);
+        let section = section(
+            &rendered.rendered,
+            "Selected discard structural deal-in risk",
+        );
+
+        assert!(
+            section.contains("structural expected deal-in loss: unavailable (UnknownDoubleRiichi)"),
+            "{section}"
+        );
+        assert!(section.contains("    loss weighted sum: -"), "{section}");
+        assert!(section.contains("    ron capable weight: "), "{section}");
+    }
+
+    #[test]
+    fn the_structural_expected_deal_in_loss_section_does_not_change_the_other_sections() {
+        let scenario = scenario_from_json(STRUCTURAL_EXPECTED_DEAL_IN_LOSS_SCENARIO);
+        let without = diagnose(&scenario);
+        let with = ShantenAgent::diagnose_with_options(
+            &scenario.context,
+            &scenario.legal_actions,
+            DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
+        );
+
+        assert_eq!(with.selected_action, without.selected_action);
+        assert_eq!(with.normal_discard_action, without.normal_discard_action);
+        assert_eq!(with.push_pull_decision, without.push_pull_decision);
+        assert_eq!(with.reach, without.reach);
+        assert_eq!(with.defense, without.defense);
+
+        let with_output = format_diagnostic(&scenario, &with, false);
+        let without_output = format_diagnostic(&scenario, &without, false);
+        let stripped: Vec<_> = with_output
+            .split("\n\n")
+            .filter(|block| !block.starts_with("Selected discard structural deal-in risk"))
+            .collect();
+        assert_eq!(stripped.join("\n\n"), without_output);
     }
 }
