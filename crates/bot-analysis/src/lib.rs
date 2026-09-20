@@ -16,4 +16,4 @@ pub use crate::scenario::{
     DoubleRiichiSpec, HistoryFuritenSpec, MeldKindSpec, MeldSpec, PonActionSpec,
     RiichiSituationSpec, Scenario, ScenarioSpec, parse_seat_wind,
 };
-pub use crate::tiles::{TileAllocationError, TileAllocator, validate_unique_physical_tiles};
+pub use crate::tiles::TileAllocationError;
