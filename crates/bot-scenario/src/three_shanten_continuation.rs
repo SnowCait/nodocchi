@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use bot_analysis::Scenario;
 use bot_core::{
     ThreeShantenContinuationComparison, ThreeShantenContinuationDecision,
     ThreeShantenContinuationProfile, ThreeShantenContinuationScope,
@@ -18,7 +19,6 @@ use crate::cli::CaptureComparisonSpec;
 use crate::error::ScenarioError;
 use crate::format::action_label;
 use crate::replay::load_captured_scenarios;
-use crate::scenario::Scenario;
 
 /// 1局面の A/B 比較。値と探索規模は profile、打牌は production 比較そのものから取る。
 pub fn format_scenario_comparison(scenario: &Scenario) -> String {
@@ -437,7 +437,7 @@ fn format_value(scaled: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::Scenario;
+    use bot_analysis::Scenario;
     use riichilab_client::capture::{self, CaptureDirection};
     use riichilab_client::observation::fixture_base64_with_dora;
     use tempfile::TempDir;

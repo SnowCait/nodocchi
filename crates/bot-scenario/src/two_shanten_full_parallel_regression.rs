@@ -11,12 +11,11 @@
 //! で、Progress-first も ForwardTargets も上位2候補の選び方も gate も comparator も
 //! この module では変えない。
 
+use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     TwoShantenFullParallelRun, TwoShantenFullParallelism, select_with_two_shanten_full_parallelism,
     two_shanten_full_parallelism_is_available,
 };
-
-use crate::scenario::{Scenario, ScenarioSpec};
 
 const PROGRESS_FIRST_BASELINE: &str =
     include_str!("../scenarios/two_shanten_progress_first_baseline.json");

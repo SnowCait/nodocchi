@@ -9,6 +9,7 @@
 //! この局面は自分が二向聴なので、複合 threat では `Fold` になり、通常打牌より複合 threat 用の
 //! 防御 fallback が優先されることも合わせて固定する。
 
+use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, DiagnosticOptions,
     HonorSafetyRank, LegalAction, OpenHandDefenseCategory, OpenHandThreatReason,
@@ -22,8 +23,6 @@ use bot_core::{
     suji_safety_rank_for_combined_threats, wall_rank,
 };
 use bot_logic::TileType;
-
-use crate::scenario::{Scenario, ScenarioSpec};
 
 const COMBINED_THREAT_DEFENSE: &str = include_str!("../scenarios/combined_threat_defense.json");
 const REQUEST_131_TEMPORARY_PASSED: &str =

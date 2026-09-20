@@ -8,15 +8,14 @@ mod format;
 mod iishanten_continuation_depth;
 mod iishanten_selection_depth;
 mod iishanten_selection_parallel;
-mod input;
 #[cfg(test)]
 mod open_hand_defense;
 #[cfg(test)]
 mod open_hand_threat;
 mod replay;
-mod scenario;
+#[cfg(test)]
+mod scenario_regression;
 mod three_shanten_continuation;
-mod tiles;
 #[cfg(test)]
 mod two_shanten_early_fold;
 mod two_shanten_full_parallel;
@@ -25,6 +24,7 @@ mod two_shanten_full_parallel_regression;
 
 use std::process::ExitCode;
 
+use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     DiagnosticOptions, ShantenAgent, evaluate_forced_fold, measure_two_shanten_progress_self_tsumo,
     measure_two_shanten_self_tsumo,
@@ -39,7 +39,6 @@ use crate::format::{
     format_two_shanten_self_tsumo_cost,
 };
 use crate::replay::load_captured_scenario;
-use crate::scenario::{Scenario, ScenarioSpec};
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1)) {

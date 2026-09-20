@@ -8,6 +8,7 @@
 //! この局面は自分が二向聴なので、High の相手がいると `Fold` になり、通常打牌より OpenHand 防御
 //! fallback が優先されることも合わせて固定する。
 
+use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, DiagnosticOptions, HonorSafetyRank, LegalAction, OpenHandDefenseCandidateDiagnostic,
     OpenHandDefenseCategory, OpenHandThreatLevel, OpenHandThreatReason, OpponentHonorValue,
@@ -18,8 +19,6 @@ use bot_core::{
     suji_safety_rank_for, suji_safety_rank_for_open_hand_threats, wall_rank,
 };
 use bot_logic::TileType;
-
-use crate::scenario::{Scenario, ScenarioSpec};
 
 const OPEN_HAND_DEFENSE: &str = include_str!("../scenarios/open_hand_defense.json");
 

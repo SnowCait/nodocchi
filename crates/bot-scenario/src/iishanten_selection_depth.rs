@@ -24,14 +24,13 @@
 
 use std::time::Duration;
 
+use bot_analysis::Scenario;
 use bot_core::{
     IishantenSelectionDepthCandidate, IishantenSelectionDepthComparison,
     IishantenSelectionDepthDecision, IishantenSelectionDepthRun,
     compare_iishanten_selection_depths,
 };
 use bot_logic::{SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
-
-use crate::scenario::Scenario;
 
 /// 1局面の A/B 比較。選択も値も実測も decision そのもので、表示のために選択し直さない。
 pub fn format_scenario_comparison(scenario: &Scenario) -> String {

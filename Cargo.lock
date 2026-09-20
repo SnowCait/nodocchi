@@ -206,6 +206,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bot-analysis"
+version = "0.1.0"
+dependencies = [
+ "bot-core",
+ "bot-logic",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "bot-core"
 version = "0.1.0"
 dependencies = [
@@ -224,6 +235,7 @@ dependencies = [
 name = "bot-scenario"
 version = "0.1.0"
 dependencies = [
+ "bot-analysis",
  "bot-core",
  "bot-logic",
  "riichilab-client",

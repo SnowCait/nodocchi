@@ -1,10 +1,9 @@
 use std::iter::Peekable;
 
+use bot_analysis::{HistoryFuritenSpec, RiichiSituationSpec, ScenarioSpec, parse_seat_wind};
 use bot_core::seat_wind_for_player;
 use bot_logic::{TileType, TwoShantenSelfTsumoScope};
 use thiserror::Error;
-
-use crate::scenario::{HistoryFuritenSpec, RiichiSituationSpec, ScenarioSpec, parse_seat_wind};
 
 pub const USAGE: &str = "usage:
   bot-scenario --hand <TILES> [--draw <TILE>] [--dora-indicator <TILES>] [--round-wind <WIND>]
@@ -1281,7 +1280,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::Scenario;
+    use bot_analysis::{Scenario, ScenarioBuildError};
     use bot_core::ShantenAgent;
 
     fn parse(args: &[&str]) -> Result<CliArgs, CliError> {
@@ -1470,7 +1469,7 @@ mod tests {
 
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(crate::error::ScenarioError::ReachDiscardIndexOutOfRange {
+            Err(ScenarioBuildError::ReachDiscardIndexOutOfRange {
                 player: 1,
                 index: 3,
                 discard_count: 2,
@@ -2139,7 +2138,7 @@ mod tests {
             let spec = inline_spec(&["--hand", "123m", option, "4"]);
             assert_eq!(
                 Scenario::resolve(&spec),
-                Err(crate::error::ScenarioError::SeatOutOfRange {
+                Err(ScenarioBuildError::SeatOutOfRange {
                     field: field.to_string(),
                     value: 4,
                 })

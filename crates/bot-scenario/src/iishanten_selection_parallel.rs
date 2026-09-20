@@ -22,14 +22,13 @@
 
 use std::time::Duration;
 
+use bot_analysis::Scenario;
 use bot_core::{
     IishantenSelectionDepthCandidate, IishantenSelectionParallelComparison,
     IishantenSelectionParallelDecision, IishantenSelectionParallelRun,
     compare_iishanten_selection_parallelism,
 };
 use bot_logic::{SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
-
-use crate::scenario::Scenario;
 
 /// 1局面の S / P 比較。選択も値も実測も decision そのもので、表示のために選択し直さない。
 pub fn format_scenario_comparison(scenario: &Scenario) -> String {
