@@ -54,10 +54,20 @@ pub struct RankedChoiceComparison {
     pub current_tenpai_self_tsumo_hit_probability: Option<RankedChoiceHitProbability>,
 }
 
-/// 比較軸ごとに意味の違う winner / loser の値。尺度の違う値を同じ数値として混ぜない。
+/// 比較軸ごとに意味の違う winner / loser の値。
+///
+/// どの値も `u64` だが尺度も単位も違うので、variant 名だけで意味が読めるように軸ごとに分ける。
+/// どの軸だったかの source of truth は [`RankedChoiceComparison::reason`] のままで、この enum は
+/// その値をどう読むかだけを表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RankedChoiceComparisonValues {
-    /// 残枚数・種類数・打点込みの前方集計値のような、そのまま読める集計値。
+    /// 現在聴牌の Σ(生きた和了牌 physical variant 残枚数 × 支払い合計)。枚数でも打点でもない。
+    CurrentTenpaiOffenseWeightedTotal { winner: u64, loser: u64 },
+    /// 将来テンパイの確定打点を枝の残枚数で重み付けした打点込みの前方集計値。
+    WeightedProspectiveValue { winner: u64, loser: u64 },
+    /// 枝の残枚数で重み付けした枚数・種類数。重み付けの分だけ実際の枚数より大きくなる。
+    WeightedCount { winner: u64, loser: u64 },
+    /// 重み付けのない受け入れ枚数・種類数。
     Count { winner: u64, loser: u64 },
     /// [`bot_logic::SELF_TSUMO_VALUE_SCALE`] でスケールした self-tsumo 期待支払い。
     SelfTsumoValue { winner: u64, loser: u64 },
@@ -220,7 +230,7 @@ fn comparison_values(comparison: &ChoiceComparison) -> Option<RankedChoiceCompar
     let ChoiceComparison { winner, loser } = comparison;
     let values = match loser.comparison_reason {
         DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal => {
-            RankedChoiceComparisonValues::Count {
+            RankedChoiceComparisonValues::CurrentTenpaiOffenseWeightedTotal {
                 winner: winner.current_tenpai_offense_weighted_total?,
                 loser: loser.current_tenpai_offense_weighted_total?,
             }
@@ -261,30 +271,32 @@ fn comparison_values(comparison: &ChoiceComparison) -> Option<RankedChoiceCompar
                 loser: loser.three_shanten_progress_self_tsumo_value?,
             }
         }
-        DiscardComparisonReason::WeightedProspectiveValue => RankedChoiceComparisonValues::Count {
-            winner: winner.prospective_value?,
-            loser: loser.prospective_value?,
-        },
+        DiscardComparisonReason::WeightedProspectiveValue => {
+            RankedChoiceComparisonValues::WeightedProspectiveValue {
+                winner: winner.prospective_value?,
+                loser: loser.prospective_value?,
+            }
+        }
         DiscardComparisonReason::WeightedTenpaiWaitRemaining => {
-            RankedChoiceComparisonValues::Count {
+            RankedChoiceComparisonValues::WeightedCount {
                 winner: winner.tenpai_wait?.weighted_remaining.into(),
                 loser: loser.tenpai_wait?.weighted_remaining.into(),
             }
         }
         DiscardComparisonReason::WeightedTenpaiWaitTypeCount => {
-            RankedChoiceComparisonValues::Count {
+            RankedChoiceComparisonValues::WeightedCount {
                 winner: winner.tenpai_wait?.weighted_type_count.into(),
                 loser: loser.tenpai_wait?.weighted_type_count.into(),
             }
         }
         DiscardComparisonReason::WeightedNextAcceptanceRemaining => {
-            RankedChoiceComparisonValues::Count {
+            RankedChoiceComparisonValues::WeightedCount {
                 winner: winner.next_acceptance?.weighted_remaining.into(),
                 loser: loser.next_acceptance?.weighted_remaining.into(),
             }
         }
         DiscardComparisonReason::WeightedNextAcceptanceTypeCount => {
-            RankedChoiceComparisonValues::Count {
+            RankedChoiceComparisonValues::WeightedCount {
                 winner: winner.next_acceptance?.weighted_type_count.into(),
                 loser: loser.next_acceptance?.weighted_type_count.into(),
             }
@@ -350,6 +362,34 @@ mod tests {
     const NEXT_ACCEPTANCE_SCENARIO: &str = r#"{
         "hand": "78m4467p446s3666z",
         "draw": "3z"
+    }"#;
+
+    // 1向聴で、打牌候補が重み付けのない受け入れ残枚数で決着する局面。
+    const ACCEPTANCE_SCENARIO: &str = r#"{
+        "hand": "234567m234p13s5s",
+        "draw": "9p",
+        "remaining_tiles": 66,
+        "player_id": 0,
+        "oya": 1,
+        "history_furiten": {
+            "same_turn": false,
+            "riichi_missed_win": false
+        }
+    }"#;
+
+    // 2向聴で、打牌候補が Progress 枝の self-tsumo 期待支払いで決着する局面。
+    const TWO_SHANTEN_SELF_TSUMO_SCENARIO: &str = r#"{
+        "hand": "11258m234789p13s",
+        "draw": "9s",
+        "remaining_tiles": 66,
+        "round_wind": "E",
+        "seat_wind": "N",
+        "player_id": 0,
+        "oya": 1,
+        "history_furiten": {
+            "same_turn": false,
+            "riichi_missed_win": false
+        }
     }"#;
 
     fn scenario_from_json(json: &str) -> Scenario {
@@ -474,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_the_comparison_values_of_the_deciding_axis() {
+    fn keeps_a_weighted_count_as_a_weighted_count() {
         let (_, diagnostic, choices) = ranked(NEXT_ACCEPTANCE_SCENARIO, 3);
         assert_eq!(choices.len(), 3);
 
@@ -487,7 +527,7 @@ mod tests {
         );
         assert_eq!(
             comparison.values,
-            Some(RankedChoiceComparisonValues::Count {
+            Some(RankedChoiceComparisonValues::WeightedCount {
                 winner: winner
                     .next_acceptance
                     .expect("winner next acceptance")
@@ -506,18 +546,62 @@ mod tests {
         // choice 3 は choice 1 ではなく choice 2 と比べる。choice 2 が負けた値が choice 3 の
         // winner 値になる。
         let lower = choices[2].comparison.expect("choice 3 comparison");
-        let RankedChoiceComparisonValues::Count {
+        let Some(RankedChoiceComparisonValues::WeightedCount {
             winner: lower_winner,
             ..
-        } = lower.values.expect("choice 3 comparison values")
+        }) = lower.values
         else {
-            panic!("weighted next acceptance is a plain count");
+            panic!("weighted next acceptance is a weighted count");
         };
         assert_eq!(
             Some(lower_winner),
             loser
                 .next_acceptance
                 .map(|acceptance| acceptance.weighted_remaining.into())
+        );
+    }
+
+    #[test]
+    fn keeps_a_plain_acceptance_count_as_a_count() {
+        let (_, diagnostic, choices) = ranked(ACCEPTANCE_SCENARIO, 3);
+
+        let winner = selected_candidate(&diagnostic);
+        let loser = candidate_for(&diagnostic, &choices[1].selected_action);
+        let comparison = choices[1].comparison.expect("choice 2 comparison");
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::AcceptanceRemaining
+        );
+        assert_eq!(
+            comparison.values,
+            Some(RankedChoiceComparisonValues::Count {
+                winner: winner.evaluation.acceptance_total_remaining().into(),
+                loser: loser.evaluation.acceptance_total_remaining().into(),
+            })
+        );
+    }
+
+    #[test]
+    fn keeps_a_self_tsumo_comparison_as_a_self_tsumo_value() {
+        let (_, diagnostic, choices) = ranked(TWO_SHANTEN_SELF_TSUMO_SCENARIO, 3);
+
+        let winner = selected_candidate(&diagnostic);
+        let loser = candidate_for(&diagnostic, &choices[1].selected_action);
+        let comparison = choices[1].comparison.expect("choice 2 comparison");
+        assert_eq!(
+            comparison.reason,
+            DiscardComparisonReason::TwoShantenProgressSelfTsumoValue
+        );
+        assert_eq!(
+            comparison.values,
+            Some(RankedChoiceComparisonValues::SelfTsumoValue {
+                winner: winner
+                    .two_shanten_progress_self_tsumo_value
+                    .expect("winner progress self-tsumo value"),
+                loser: loser
+                    .two_shanten_progress_self_tsumo_value
+                    .expect("loser progress self-tsumo value"),
+            })
         );
     }
 

@@ -2987,11 +2987,14 @@ fn opponent_honor_value_label(value: RankedChoiceHonorValue) -> String {
     }
 }
 
-// 比較値の尺度は軸ごとに違う。self-tsumo 期待支払いだけスケールを戻し、そのまま読める集計値は
-// 数値のまま出す。
+// 比較値の尺度は軸ごとに違う。self-tsumo 期待支払いだけスケールを戻し、他の軸は選択が使った値を
+// そのまま出す。ここで値を組み立て直さない。
 fn choice_comparison_value_labels(values: RankedChoiceComparisonValues) -> (String, String) {
     match values {
-        RankedChoiceComparisonValues::Count { winner, loser } => {
+        RankedChoiceComparisonValues::CurrentTenpaiOffenseWeightedTotal { winner, loser }
+        | RankedChoiceComparisonValues::WeightedProspectiveValue { winner, loser }
+        | RankedChoiceComparisonValues::WeightedCount { winner, loser }
+        | RankedChoiceComparisonValues::Count { winner, loser } => {
             (winner.to_string(), loser.to_string())
         }
         RankedChoiceComparisonValues::SelfTsumoValue { winner, loser } => (
