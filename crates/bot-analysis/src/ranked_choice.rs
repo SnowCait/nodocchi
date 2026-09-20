@@ -27,14 +27,16 @@ pub struct RankedChoice {
     /// 複合 threat 向け防御 fallback 由来の場合のその大分類。
     pub combined_defense_category: Option<CombinedDefenseCategory>,
     /// HonorSafety の防御 fallback を選んだ場合の、相手にとっての役牌価値。
-    pub opponent_honor_value: Option<RankedChoiceHonorValue>,
+    pub opponent_honor_value: Option<AnalysisOpponentHonorValue>,
     /// 直前 choice との比較。choice 1 と、比較を取れない組み合わせでは `None`。
     pub comparison: Option<RankedChoiceComparison>,
 }
 
 /// 相手にとっての役牌価値。場風や親が不明で確定できない場合も、値なしとして区別して保持する。
+///
+/// choice と防御 section のどちらも同じ意味で使うので、1つの型を共有する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RankedChoiceHonorValue {
+pub enum AnalysisOpponentHonorValue {
     Known(OpponentHonorValue),
     Unknown,
 }
@@ -133,7 +135,7 @@ fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&Leg
 
 fn honor_safety_opponent_honor_value(
     diagnostic: &ShantenDecisionDiagnostic,
-) -> Option<RankedChoiceHonorValue> {
+) -> Option<AnalysisOpponentHonorValue> {
     if !matches!(
         diagnostic.defense_fallback_kind(),
         Some(DefenseFallbackKind::HonorSafety(_))
@@ -142,8 +144,8 @@ fn honor_safety_opponent_honor_value(
     }
     let selected = diagnostic.defense.as_ref()?.selected.as_ref()?;
     Some(match selected.selected_opponent_honor_value {
-        Some(value) => RankedChoiceHonorValue::Known(value),
-        None => RankedChoiceHonorValue::Unknown,
+        Some(value) => AnalysisOpponentHonorValue::Known(value),
+        None => AnalysisOpponentHonorValue::Unknown,
     })
 }
 
