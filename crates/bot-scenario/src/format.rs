@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use bot_analysis::Scenario;
+use bot_analysis::{
+    RankedChoice, RankedChoiceComparisonValues, RankedChoiceHonorValue, Scenario, rank_choices,
+};
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
@@ -19,19 +21,18 @@ use bot_core::{
     ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
     ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
     RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenAgent, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
+    RyukyokuVerdict, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
     StructuralExpectedDealInLossDiagnostic, StructuralExpectedDealInLossEvidence,
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
     TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
     ThreatDefenseTarget, TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
 };
 use bot_logic::{
-    DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardDecisionDiagnostic,
-    DiscardEvaluation, DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic,
-    DrawLookaheadDiagnostic, DrawTransition, DrawVariantLookaheadDiagnostic,
-    EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount, LookaheadDiagnostic,
-    PermanentFuriten, SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath, Shanten,
-    TSUMO_PROBABILITY_SCALE, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
+    DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
+    DiscardFuritenDiagnostic, DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition,
+    DrawVariantLookaheadDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
+    LookaheadDiagnostic, PermanentFuriten, SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath,
+    Shanten, TSUMO_PROBABILITY_SCALE, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
 };
 
@@ -46,6 +47,11 @@ const UNAVAILABLE: &str = "unavailable";
 
 // テンパイの向聴数。
 const TENPAI_SHANTEN: i8 = 0;
+
+// Summary へ並べる choice の上限。
+const SUMMARY_CHOICE_LIMIT: usize = 3;
+// 最上位 choice の順位。防御情報と比較は専用の節が出すので、この順位では繰り返さない。
+const FIRST_SUMMARY_CHOICE_RANK: usize = 1;
 
 pub fn format_diagnostic(
     scenario: &Scenario,
@@ -320,6 +326,13 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
         lines.push(format!("  combined defense category: {category:?}"));
     }
     lines.join("\n")
+}
+
+fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&LegalAction> {
+    if !matches!(diagnostic.selected_action, LegalAction::Reach) {
+        return None;
+    }
+    diagnostic.reach.as_ref()?.selected_discard.as_ref()
 }
 
 fn format_call(call: Option<&CallDecisionDiagnostic>, verbose: bool) -> String {
@@ -2880,12 +2893,12 @@ fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
 
 /// 選択結果とその主な理由だけを1画面へ集めた要約。
 ///
-/// 各 choice は同じ production 診断を、上位 choice を合法手から順に除外して得る。個々の値は
-/// diagnostic が持つものをそのまま読み、表示専用の評価や comparator は持たない。
+/// choice の算出と choice 間の比較は `bot-analysis` の [`rank_choices`] が行う。ここは
+/// 受け取った構造化結果を表示するだけで、表示専用の評価や comparator は持たない。
 pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
-    let choices = diagnose_choices(scenario, diagnostic, 3);
+    let choices = rank_choices(scenario, diagnostic, SUMMARY_CHOICE_LIMIT);
     let mut groups = vec![
-        summary_choice(1, &choices[0], None),
+        summary_choice(1, &choices[0]),
         summary_ryukyoku(diagnostic),
         summary_push_pull(diagnostic),
         summary_reach(diagnostic),
@@ -2897,7 +2910,7 @@ pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnosti
             .iter()
             .enumerate()
             .skip(1)
-            .map(|(index, choice)| summary_choice(index + 1, choice, Some(&choices[index - 1]))),
+            .map(|(index, choice)| summary_choice(index + 1, choice)),
     );
 
     let body = groups
@@ -2910,61 +2923,85 @@ pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnosti
     format!("Summary\n{body}")
 }
 
-fn summary_choice(
-    rank: usize,
-    diagnostic: &ShantenDecisionDiagnostic,
-    previous: Option<&ShantenDecisionDiagnostic>,
-) -> Vec<String> {
+fn summary_choice(rank: usize, choice: &RankedChoice) -> Vec<String> {
     let prefix = format!("choice {rank}");
     let mut lines = vec![format!(
         "  {prefix}: {}",
-        action_label(&diagnostic.selected_action)
+        action_label(&choice.selected_action)
     )];
-    if let Some(discard) = selected_reach_discard(diagnostic) {
+    if let Some(discard) = choice.selected_discard.as_ref() {
         lines.push(format!("  {prefix} discard: {}", action_label(discard)));
     }
     lines.push(format!(
         "  {prefix} source: {}",
-        source_label(diagnostic.selected_source)
+        source_label(choice.selected_source)
     ));
 
-    // choice 1 の防御情報は既存の defense group が表示する。再診断した下位 choice はその
-    // diagnostic だけが持つ情報なので、同じ既存 accessor から順位名付きで表示する。
-    let Some(previous) = previous else {
+    // choice 1 の防御情報と比較は既存の defense group とこの節の残りが表示する。下位 choice だけ
+    // 順位名付きで出す。
+    if rank == FIRST_SUMMARY_CHOICE_RANK {
         return lines;
-    };
-    if let Some(kind) = diagnostic.defense_fallback_kind() {
+    }
+    if let Some(kind) = choice.defense_fallback_kind {
         lines.push(format!("  {prefix} detail: {kind:?}"));
     }
-    if let Some(category) = diagnostic.open_hand_defense_category() {
+    if let Some(category) = choice.open_hand_defense_category {
         lines.push(format!("  {prefix} detail: {category:?}"));
     }
-    if let Some(category) = diagnostic.combined_defense_category() {
+    if let Some(category) = choice.combined_defense_category {
         lines.push(format!("  {prefix} detail: {category:?}"));
     }
-    if let Some(value) = honor_safety_opponent_honor_value(diagnostic) {
-        lines.push(format!("  {prefix} opponent honor value: {value}"));
+    if let Some(value) = choice.opponent_honor_value {
+        lines.push(format!(
+            "  {prefix} opponent honor value: {}",
+            opponent_honor_value_label(value)
+        ));
     }
-    if let Some(comparison) = choice_comparison(previous, diagnostic) {
-        let reason = comparison.loser.comparison_reason;
+    if let Some(comparison) = choice.comparison.as_ref() {
+        let reason = comparison.reason;
         lines.push(format!("  {prefix} lost by: {reason:?}"));
-        if let Some((winner_value, loser_value)) = choice_comparison_values(&comparison) {
+        if let Some(values) = comparison.values {
+            let (winner_value, loser_value) = choice_comparison_value_labels(values);
             lines.push(format!(
                 "  {prefix} comparison: choice {} {winner_value} > choice {rank} {loser_value}",
                 rank - 1
             ));
         }
-        if let Some((winner_value, loser_value)) =
-            choice_current_tenpai_hit_probabilities(&comparison)
-        {
+        if let Some(probability) = comparison.current_tenpai_self_tsumo_hit_probability {
             lines.push(format!(
-                "  {prefix} self-tsumo hit probability: choice {} {winner_value} / choice {rank} {loser_value}",
-                rank - 1
+                "  {prefix} self-tsumo hit probability: choice {} {} / choice {rank} {}",
+                rank - 1,
+                format_optional_probability(probability.winner),
+                format_optional_probability(probability.loser),
             ));
         }
     }
 
     lines
+}
+
+fn opponent_honor_value_label(value: RankedChoiceHonorValue) -> String {
+    match value {
+        RankedChoiceHonorValue::Known(value) => format!("{value:?}"),
+        RankedChoiceHonorValue::Unknown => ABSENT.to_string(),
+    }
+}
+
+// 比較値の尺度は軸ごとに違う。self-tsumo 期待支払いだけスケールを戻し、他の軸は選択が使った値を
+// そのまま出す。ここで値を組み立て直さない。
+fn choice_comparison_value_labels(values: RankedChoiceComparisonValues) -> (String, String) {
+    match values {
+        RankedChoiceComparisonValues::CurrentTenpaiOffenseWeightedTotal { winner, loser }
+        | RankedChoiceComparisonValues::WeightedProspectiveValue { winner, loser }
+        | RankedChoiceComparisonValues::WeightedCount { winner, loser }
+        | RankedChoiceComparisonValues::Count { winner, loser } => {
+            (winner.to_string(), loser.to_string())
+        }
+        RankedChoiceComparisonValues::SelfTsumoValue { winner, loser } => (
+            format_self_tsumo_value(Some(winner)),
+            format_self_tsumo_value(Some(loser)),
+        ),
+    }
 }
 
 // 九種九牌が合法だった局面だけ、宣言 / 続行の結論と判断に使った3種類の向聴数を出す。
@@ -3259,184 +3296,6 @@ fn summary_defense(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     Vec::new()
 }
 
-fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&LegalAction> {
-    if !matches!(diagnostic.selected_action, LegalAction::Reach) {
-        return None;
-    }
-    diagnostic.reach.as_ref()?.selected_discard.as_ref()
-}
-
-fn honor_safety_opponent_honor_value(diagnostic: &ShantenDecisionDiagnostic) -> Option<String> {
-    if !matches!(
-        diagnostic.defense_fallback_kind(),
-        Some(DefenseFallbackKind::HonorSafety(_))
-    ) {
-        return None;
-    }
-    let selected = diagnostic.defense.as_ref()?.selected.as_ref()?;
-    Some(optional(selected.selected_opponent_honor_value))
-}
-
-fn diagnose_choices(
-    scenario: &Scenario,
-    diagnostic: &ShantenDecisionDiagnostic,
-    limit: usize,
-) -> Vec<ShantenDecisionDiagnostic> {
-    if limit == 0 {
-        return Vec::new();
-    }
-
-    let mut choices = vec![diagnostic.clone()];
-    let mut remaining_actions = scenario.legal_actions.clone();
-    while choices.len() < limit {
-        let selected = &choices.last().unwrap().selected_action;
-        if *selected == LegalAction::None {
-            break;
-        }
-
-        let next_actions = legal_actions_without_selected(&remaining_actions, selected);
-        if next_actions.is_empty() || next_actions.len() == remaining_actions.len() {
-            break;
-        }
-
-        let next = ShantenAgent::diagnose(&scenario.context, &next_actions);
-        if next.selected_action == LegalAction::None {
-            break;
-        }
-        remaining_actions = next_actions;
-        choices.push(next);
-    }
-
-    choices
-}
-
-fn legal_actions_without_selected(
-    legal_actions: &[LegalAction],
-    selected: &LegalAction,
-) -> Vec<LegalAction> {
-    let mut excluded = false;
-    legal_actions
-        .iter()
-        .filter(|action| {
-            if !excluded && *action == selected {
-                excluded = true;
-                return false;
-            }
-            true
-        })
-        .cloned()
-        .collect()
-}
-
-struct ChoiceComparison<'a> {
-    winner: &'a DiscardCandidateDiagnostic,
-    loser: &'a DiscardCandidateDiagnostic,
-}
-
-fn choice_comparison<'a>(
-    diagnostic: &'a ShantenDecisionDiagnostic,
-    choice: &ShantenDecisionDiagnostic,
-) -> Option<ChoiceComparison<'a>> {
-    if diagnostic.selected_source != AgentActionSource::NormalDiscard
-        || choice.selected_source != AgentActionSource::NormalDiscard
-    {
-        return None;
-    }
-
-    let LegalAction::Dahai { tile } = &choice.selected_action else {
-        return None;
-    };
-
-    let candidates = &diagnostic.normal_discard.as_ref()?.candidates;
-    let loser = candidates.iter().find(|candidate| {
-        candidate.evaluation.discard == tile.tile_type()
-            && candidate.evaluation.discards_red_five == tile.is_red()
-    })?;
-    let winner = candidates.iter().find(|candidate| candidate.selected)?;
-    Some(ChoiceComparison { winner, loser })
-}
-
-fn choice_comparison_values(comparison: &ChoiceComparison) -> Option<(String, String)> {
-    let ChoiceComparison { winner, loser } = comparison;
-    let pair = match loser.comparison_reason {
-        DiscardComparisonReason::CurrentTenpaiOffenseWeightedTotal => (
-            winner.current_tenpai_offense_weighted_total?.to_string(),
-            loser.current_tenpai_offense_weighted_total?.to_string(),
-        ),
-        DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue => (
-            format_self_tsumo_value(Some(winner.current_tenpai_expected_self_tsumo_value?)),
-            format_self_tsumo_value(Some(loser.current_tenpai_expected_self_tsumo_value?)),
-        ),
-        DiscardComparisonReason::CurrentTenpaiContinuationSelfTsumoValue => (
-            format_self_tsumo_value(Some(winner.current_tenpai_continuation_self_tsumo_value?)),
-            format_self_tsumo_value(Some(loser.current_tenpai_continuation_self_tsumo_value?)),
-        ),
-        DiscardComparisonReason::ExpectedSelfTsumoValue => (
-            format_self_tsumo_value(Some(winner.expected_self_tsumo_value?)),
-            format_self_tsumo_value(Some(loser.expected_self_tsumo_value?)),
-        ),
-        DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue => (
-            format_self_tsumo_value(Some(winner.two_shanten_expected_self_tsumo_value?)),
-            format_self_tsumo_value(Some(loser.two_shanten_expected_self_tsumo_value?)),
-        ),
-        DiscardComparisonReason::TwoShantenProgressSelfTsumoValue => (
-            format_self_tsumo_value(Some(winner.two_shanten_progress_self_tsumo_value?)),
-            format_self_tsumo_value(Some(loser.two_shanten_progress_self_tsumo_value?)),
-        ),
-        DiscardComparisonReason::ThreeShantenProgressSelfTsumoValue => (
-            format_self_tsumo_value(Some(winner.three_shanten_progress_self_tsumo_value?)),
-            format_self_tsumo_value(Some(loser.three_shanten_progress_self_tsumo_value?)),
-        ),
-        DiscardComparisonReason::WeightedProspectiveValue => (
-            winner.prospective_value?.to_string(),
-            loser.prospective_value?.to_string(),
-        ),
-        DiscardComparisonReason::WeightedTenpaiWaitRemaining => (
-            winner.tenpai_wait?.weighted_remaining.to_string(),
-            loser.tenpai_wait?.weighted_remaining.to_string(),
-        ),
-        DiscardComparisonReason::WeightedTenpaiWaitTypeCount => (
-            winner.tenpai_wait?.weighted_type_count.to_string(),
-            loser.tenpai_wait?.weighted_type_count.to_string(),
-        ),
-        DiscardComparisonReason::WeightedNextAcceptanceRemaining => (
-            winner.next_acceptance?.weighted_remaining.to_string(),
-            loser.next_acceptance?.weighted_remaining.to_string(),
-        ),
-        DiscardComparisonReason::WeightedNextAcceptanceTypeCount => (
-            winner.next_acceptance?.weighted_type_count.to_string(),
-            loser.next_acceptance?.weighted_type_count.to_string(),
-        ),
-        DiscardComparisonReason::AcceptanceRemaining => (
-            winner.evaluation.acceptance_total_remaining().to_string(),
-            loser.evaluation.acceptance_total_remaining().to_string(),
-        ),
-        DiscardComparisonReason::AcceptanceTypeCount => (
-            winner.evaluation.acceptance_type_count().to_string(),
-            loser.evaluation.acceptance_type_count().to_string(),
-        ),
-        _ => return None,
-    };
-    Some(pair)
-}
-
-// selected / runner-up の現在聴牌ツモ和了確率。打点を取る代わりにどれだけ和了確率を落として
-// いるかを見るための観測値で、比較にも選択にも使わない。どちらも確定しなければ行を出さない。
-fn choice_current_tenpai_hit_probabilities(
-    comparison: &ChoiceComparison,
-) -> Option<(String, String)> {
-    let ChoiceComparison { winner, loser } = comparison;
-    let winner_probability = winner.current_tenpai_self_tsumo_hit_probability;
-    let loser_probability = loser.current_tenpai_self_tsumo_hit_probability;
-    if winner_probability.is_none() && loser_probability.is_none() {
-        return None;
-    }
-    Some((
-        format_optional_probability(winner_probability),
-        format_optional_probability(loser_probability),
-    ))
-}
-
 fn discard_label(evaluation: &DiscardEvaluation) -> String {
     let mut label = evaluation.discard.to_mjai_string();
     if evaluation.discards_red_five {
@@ -3619,11 +3478,11 @@ mod tests {
         Agent, CallDecisionReason, CallKind, CallTwoShantenSpeedDiagnostic,
         CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
         OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
-        RonRiskEvidence, TenpaiOffenseMode,
+        RonRiskEvidence, ShantenAgent, TenpaiOffenseMode,
     };
     use bot_logic::{
-        TileCounts, TwoShantenSelfTsumoCandidate, calculate_acceptance_with_visible_tiles,
-        select_best_discard,
+        DiscardComparisonReason, TileCounts, TwoShantenSelfTsumoCandidate,
+        calculate_acceptance_with_visible_tiles, select_best_discard,
     };
     use std::sync::LazyLock;
 
@@ -6263,11 +6122,11 @@ mod tests {
             .expect("selected candidate")
     }
 
-    // current-tenpai の比較は自摸打点の探索が重いので、Summary の表示と choices が lookahead を
-    // 構築しないことを1回の探索結果からまとめて確認する。
+    // current-tenpai の比較は自摸打点の探索が重いので、Summary の表示だけを1回の探索結果から
+    // 確認する。choice の算出そのものは bot-analysis 側で検証する。
     #[test]
-    fn summary_shows_the_current_tenpai_offense_comparison_without_building_lookahead() {
-        let (scenario, diagnostic, output) =
+    fn summary_shows_the_current_tenpai_offense_comparison() {
+        let (_, diagnostic, output) =
             rendered(CURRENT_TENPAI_OFFENSE_WITHOUT_REACH_SCENARIO, false);
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
 
@@ -6301,17 +6160,6 @@ mod tests {
 
         assert!(summary.contains("  choice 3 lost by: Shanten"), "{summary}");
         assert!(!summary.contains("  choice 3 comparison:"), "{summary}");
-
-        let choices = diagnose_choices(&scenario, &diagnostic, 3);
-        assert_eq!(choices.len(), 3);
-        assert!(
-            choices.iter().all(|choice| {
-                choice.normal_discard_lookahead.is_none()
-                    && choice.normal_discard_lookahead_value.is_none()
-                    && choice.normal_discard_tenpai_continuation.is_none()
-            }),
-            "summary must not enable lookahead"
-        );
     }
 
     #[test]
@@ -6596,24 +6444,7 @@ mod tests {
     }
 
     #[test]
-    fn excluding_selected_keeps_remaining_action_order() {
-        let scenario = scenario_from_json(
-            r#"{
-                "hand": "234m455p789s1123z",
-                "draw": "N",
-                "legal_dahai": "4p 7s 9s"
-            }"#,
-        );
-        let selected = scenario.legal_actions[1].clone();
-        let remaining = legal_actions_without_selected(&scenario.legal_actions, &selected);
-        assert_eq!(
-            remaining.iter().map(action_label).collect::<Vec<_>>(),
-            ["4p", "9s"]
-        );
-    }
-
-    #[test]
-    fn excluding_selected_keeps_the_other_five() {
+    fn summary_shows_the_other_five_as_the_lower_choice() {
         let (scenario, diagnostic, output) = rendered(RED_FIVE_SCENARIO, false);
         assert_eq!(
             scenario
@@ -6624,13 +6455,6 @@ mod tests {
             ["5m", "5mr"]
         );
         assert_eq!(action_label(&diagnostic.selected_action), "5m");
-
-        let remaining =
-            legal_actions_without_selected(&scenario.legal_actions, &diagnostic.selected_action);
-        assert_eq!(
-            remaining.iter().map(action_label).collect::<Vec<_>>(),
-            ["5mr"]
-        );
 
         let summary = summary_section(&output);
         assert!(summary.contains("  choice 1: 5m\n"), "{summary}");
