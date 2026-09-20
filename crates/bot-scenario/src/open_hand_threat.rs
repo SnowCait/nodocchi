@@ -11,6 +11,7 @@
 //! 強さにかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の自分なら
 //! `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
 
+use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
     OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel, OpenHandThreatReason,
@@ -22,8 +23,6 @@ use bot_core::{
     suji_safety_rank_for_open_hand_threats, wall_rank,
 };
 use bot_logic::{TileId, TileType};
-
-use crate::scenario::{Scenario, ScenarioSpec};
 
 const BASELINE: &str = include_str!("../scenarios/open_hand_baseline.json");
 const CHI: &str = include_str!("../scenarios/open_hand_chi.json");

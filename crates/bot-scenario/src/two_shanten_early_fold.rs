@@ -13,12 +13,11 @@
 
 use std::time::Duration;
 
+use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, AgentActionSource, DefenseFallbackKind, DiagnosticOptions, LegalAction, PushPullMode,
     PushPullReason, ShantenAgent,
 };
-
-use crate::scenario::{Scenario, ScenarioSpec};
 
 const REACH_GENBUTSU: &str = include_str!("../scenarios/two_shanten_fold_reach_genbutsu.json");
 const REACH_GENBUTSU_HEAVY: &str =

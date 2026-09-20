@@ -2,6 +2,8 @@
 
 `bot-scenario` は、手牌・局面を入力して `ShantenAgent` の判断と根拠をオフラインで確認する CLI です。実対局や WebSocket 接続は行いません。出力の読み方は [Structured diagnostics](diagnostics.md)、判断仕様は [麻雀 AI の概要](ai/overview.md) を参照してください。
 
+牌文字列の parse、physical tile の割り当て、scenario の validation、`GameContext` と `LegalAction` の構築は、platform 非依存の library crate [`bot-analysis`](../crates/bot-analysis/) にあります。`bot-scenario` は CLI 引数の解析・file I/O・RiichiLab capture の再生・出力の整形を担当し、局面構築は `bot-analysis` の `ScenarioSpec` → `Scenario::resolve()` → `Scenario` をそのまま使用します。
+
 ## 簡易 CLI
 
 牌効率をすぐ確認する用途です。
@@ -1067,4 +1069,4 @@ capture は実戦局面を見つけて調べる入口、JSON scenario は恒久�
 4. diagnostics から判断経路を確認する
 5. 原因が分かったら局面を JSON scenario に落として回帰 fixture にする
 
-既存 fixture は [`crates/bot-scenario/scenarios/`](../crates/bot-scenario/scenarios/) にあります。副露 threat の段階比較には `open_hand_*.json`、複合 threat には `combined_threat_defense.json` などを使用します。`open_hand_value_pon_and_chi.json` は現在、通常役牌1翻だけの2副露なので `Present` です。正確な境界条件は production tests を source of truth としてください。
+既存 fixture は [`crates/bot-scenario/scenarios/`](../crates/bot-scenario/scenarios/) にあります。副露 threat の段階比較には `open_hand_*.json`、複合 threat には `combined_threat_defense.json` などを使用します。`open_hand_value_pon_and_chi.json` は現在、通常役牌1翻だけの2副露なので `Present` です。正確な境界条件は production tests を source of truth としてください。 局面構築そのものの回帰 fixture は [`crates/bot-analysis/scenarios/`](../crates/bot-analysis/scenarios/) にあります。

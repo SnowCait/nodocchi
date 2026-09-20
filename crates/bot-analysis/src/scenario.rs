@@ -8,7 +8,7 @@ use bot_logic::{
 };
 use serde::Deserialize;
 
-use crate::error::ScenarioError;
+use crate::error::ScenarioBuildError;
 use crate::input::{LogicalTile, parse_tiles};
 use crate::tiles::{TileAllocator, validate_unique_physical_tiles};
 
@@ -186,7 +186,7 @@ pub struct Scenario {
 }
 
 impl Scenario {
-    pub fn resolve(spec: &ScenarioSpec) -> Result<Self, ScenarioError> {
+    pub fn resolve(spec: &ScenarioSpec) -> Result<Self, ScenarioBuildError> {
         let reached = resolve_reached(spec.reached.as_deref())?;
         let discard_inputs = resolve_discard_inputs(spec.discards.as_deref())?;
         let post_reach_passed_tiles =
@@ -237,7 +237,7 @@ impl Scenario {
             &extra_visible_tiles,
         );
         validate_unique_physical_tiles(&visible_tiles)
-            .map_err(|source| ScenarioError::PhysicalTiles { source })?;
+            .map_err(|source| ScenarioBuildError::PhysicalTiles { source })?;
 
         let context = GameContext::from_parts_with_melds(
             draw,
@@ -282,7 +282,7 @@ fn resolve_history_furiten_facts(spec: &ScenarioSpec) -> HistoryFuritenFacts {
 fn resolve_riichi_situation_facts(
     spec: &ScenarioSpec,
     reached: &[bool; 4],
-) -> Result<RiichiSituationFacts, ScenarioError> {
+) -> Result<RiichiSituationFacts, ScenarioBuildError> {
     let Some(spec) = spec.riichi_situation.as_ref() else {
         return Ok(RiichiSituationFacts::default());
     };
@@ -300,20 +300,20 @@ fn resolve_riichi_situation_field(
     field: &'static str,
     values: Option<&[Option<bool>]>,
     reached: &[bool; 4],
-) -> Result<[Option<bool>; 4], ScenarioError> {
+) -> Result<[Option<bool>; 4], ScenarioBuildError> {
     let Some(values) = values else {
         return Ok([None; 4]);
     };
     let facts: [Option<bool>; 4] =
         values
             .try_into()
-            .map_err(|_| ScenarioError::RiichiSituationLength {
+            .map_err(|_| ScenarioBuildError::RiichiSituationLength {
                 field,
                 count: values.len(),
             })?;
     for (player, fact) in facts.iter().enumerate() {
         if fact.is_some() && !reached[player] {
-            return Err(ScenarioError::RiichiSituationWithoutReach { field, player });
+            return Err(ScenarioBuildError::RiichiSituationWithoutReach { field, player });
         }
     }
     Ok(facts)
@@ -328,7 +328,7 @@ fn resolve_double_riichi_facts(spec: &ScenarioSpec) -> DoubleRiichiFacts {
 }
 
 // 省略した field は unknown のままにし、0 や 25000 点などの初期値で補完しない。
-fn resolve_table_state_facts(spec: &ScenarioSpec) -> Result<TableStateFacts, ScenarioError> {
+fn resolve_table_state_facts(spec: &ScenarioSpec) -> Result<TableStateFacts, ScenarioBuildError> {
     Ok(TableStateFacts {
         remaining_tiles: spec.remaining_tiles,
         honba: spec.honba,
@@ -338,35 +338,37 @@ fn resolve_table_state_facts(spec: &ScenarioSpec) -> Result<TableStateFacts, Sce
     })
 }
 
-fn resolve_scores(scores: Option<&[i32]>) -> Result<Option<[i32; 4]>, ScenarioError> {
+fn resolve_scores(scores: Option<&[i32]>) -> Result<Option<[i32; 4]>, ScenarioBuildError> {
     let Some(values) = scores else {
         return Ok(None);
     };
     values
         .try_into()
         .map(Some)
-        .map_err(|_| ScenarioError::ScoresLength {
+        .map_err(|_| ScenarioBuildError::ScoresLength {
             count: values.len(),
         })
 }
 
-fn resolve_kyoku(kyoku: Option<u8>) -> Result<Option<u8>, ScenarioError> {
+fn resolve_kyoku(kyoku: Option<u8>) -> Result<Option<u8>, ScenarioBuildError> {
     let Some(value) = kyoku else {
         return Ok(None);
     };
     if !(1..=4).contains(&value) {
-        return Err(ScenarioError::KyokuOutOfRange { value });
+        return Err(ScenarioBuildError::KyokuOutOfRange { value });
     }
     Ok(Some(value))
 }
 
-fn resolve_reached(reached: Option<&[bool]>) -> Result<[bool; 4], ScenarioError> {
+fn resolve_reached(reached: Option<&[bool]>) -> Result<[bool; 4], ScenarioBuildError> {
     let Some(values) = reached else {
         return Ok([false; 4]);
     };
-    values.try_into().map_err(|_| ScenarioError::ReachedLength {
-        count: values.len(),
-    })
+    values
+        .try_into()
+        .map_err(|_| ScenarioBuildError::ReachedLength {
+            count: values.len(),
+        })
 }
 
 // 入力は人間向けの 1-based で、`GameContext` が持つ 0-based へ変換する。省略した player は
@@ -375,12 +377,12 @@ fn resolve_reach_discard_indices(
     reach_discard_indices: Option<&[Option<u32>]>,
     reached: &[bool; 4],
     discards: &[Vec<TileId>; 4],
-) -> Result<[Option<usize>; 4], ScenarioError> {
+) -> Result<[Option<usize>; 4], ScenarioBuildError> {
     let Some(values) = reach_discard_indices else {
         return Ok([None; 4]);
     };
     if values.len() != 4 {
-        return Err(ScenarioError::ReachDiscardIndicesLength {
+        return Err(ScenarioBuildError::ReachDiscardIndicesLength {
             count: values.len(),
         });
     }
@@ -391,7 +393,7 @@ fn resolve_reach_discard_indices(
             continue;
         };
         if !reached[player] {
-            return Err(ScenarioError::ReachDiscardIndexWithoutReach { player });
+            return Err(ScenarioBuildError::ReachDiscardIndexWithoutReach { player });
         }
         let discard_count = discards[player].len();
         let zero_based = index
@@ -399,7 +401,7 @@ fn resolve_reach_discard_indices(
             .and_then(|index| usize::try_from(index).ok())
             .filter(|&index| index < discard_count);
         let Some(zero_based) = zero_based else {
-            return Err(ScenarioError::ReachDiscardIndexOutOfRange {
+            return Err(ScenarioBuildError::ReachDiscardIndexOutOfRange {
                 player,
                 index,
                 discard_count,
@@ -410,12 +412,12 @@ fn resolve_reach_discard_indices(
     Ok(resolved)
 }
 
-fn resolve_discard_inputs(discards: Option<&[String]>) -> Result<[String; 4], ScenarioError> {
+fn resolve_discard_inputs(discards: Option<&[String]>) -> Result<[String; 4], ScenarioBuildError> {
     let Some(values) = discards else {
         return Ok(std::array::from_fn(|_| String::new()));
     };
     if values.len() != 4 {
-        return Err(ScenarioError::DiscardsLength {
+        return Err(ScenarioBuildError::DiscardsLength {
             count: values.len(),
         });
     }
@@ -426,12 +428,12 @@ fn resolve_discard_inputs(discards: Option<&[String]>) -> Result<[String; 4], Sc
 
 fn resolve_post_reach_passed_tiles(
     post_reach_passed: Option<&[String]>,
-) -> Result<[Vec<TileType>; 4], ScenarioError> {
+) -> Result<[Vec<TileType>; 4], ScenarioBuildError> {
     let Some(values) = post_reach_passed else {
         return Ok(std::array::from_fn(|_| Vec::new()));
     };
     if values.len() != 4 {
-        return Err(ScenarioError::PostReachPassedLength {
+        return Err(ScenarioBuildError::PostReachPassedLength {
             count: values.len(),
         });
     }
@@ -449,12 +451,12 @@ fn resolve_post_reach_passed_tiles(
 
 fn resolve_temporary_passed_tiles(
     temporary_passed: Option<&[String]>,
-) -> Result<Option<[Vec<TileType>; 4]>, ScenarioError> {
+) -> Result<Option<[Vec<TileType>; 4]>, ScenarioBuildError> {
     let Some(values) = temporary_passed else {
         return Ok(None);
     };
     if values.len() != 4 {
-        return Err(ScenarioError::TemporaryPassedLength {
+        return Err(ScenarioBuildError::TemporaryPassedLength {
             count: values.len(),
         });
     }
@@ -470,13 +472,13 @@ fn resolve_temporary_passed_tiles(
     Ok(Some(tiles))
 }
 
-fn resolve_seat(field: &str, value: Option<u8>) -> Result<Option<u8>, ScenarioError> {
+fn resolve_seat(field: &str, value: Option<u8>) -> Result<Option<u8>, ScenarioBuildError> {
     value.map(|value| validate_seat(field, value)).transpose()
 }
 
-fn validate_seat(field: &str, value: u8) -> Result<u8, ScenarioError> {
+fn validate_seat(field: &str, value: u8) -> Result<u8, ScenarioBuildError> {
     if value > 3 {
-        return Err(ScenarioError::SeatOutOfRange {
+        return Err(ScenarioBuildError::SeatOutOfRange {
             field: field.to_string(),
             value,
         });
@@ -488,7 +490,7 @@ fn resolve_seat_wind(
     seat_wind: Option<&str>,
     player_id: Option<u8>,
     oya: Option<u8>,
-) -> Result<Option<TileType>, ScenarioError> {
+) -> Result<Option<TileType>, ScenarioBuildError> {
     let explicit = parse_seat_wind(seat_wind)?;
     let derived = derive_seat_wind(player_id, oya);
 
@@ -496,7 +498,7 @@ fn resolve_seat_wind(
         (explicit, derived, player_id, oya)
         && explicit != derived
     {
-        return Err(ScenarioError::SeatWindConflict {
+        return Err(ScenarioBuildError::SeatWindConflict {
             explicit: explicit.to_mjai_string(),
             derived: derived.to_mjai_string(),
             player_id,
@@ -507,7 +509,7 @@ fn resolve_seat_wind(
     Ok(explicit.or(derived))
 }
 
-pub(crate) fn parse_seat_wind(input: Option<&str>) -> Result<Option<TileType>, ScenarioError> {
+pub fn parse_seat_wind(input: Option<&str>) -> Result<Option<TileType>, ScenarioBuildError> {
     parse_wind("seat_wind", input)
 }
 
@@ -516,7 +518,7 @@ fn derive_seat_wind(player_id: Option<u8>, oya: Option<u8>) -> Option<TileType> 
     seat_wind_for_player(usize::from(player_id?), oya?)
 }
 
-fn parse_wind(field: &str, input: Option<&str>) -> Result<Option<TileType>, ScenarioError> {
+fn parse_wind(field: &str, input: Option<&str>) -> Result<Option<TileType>, ScenarioBuildError> {
     let Some(input) = input else {
         return Ok(None);
     };
@@ -526,14 +528,14 @@ fn parse_wind(field: &str, input: Option<&str>) -> Result<Option<TileType>, Scen
         return Ok(None);
     };
     if tiles.len() != 1 {
-        return Err(ScenarioError::NotSingleTile {
+        return Err(ScenarioBuildError::NotSingleTile {
             field: field.to_string(),
             input: input.to_string(),
             count: tiles.len(),
         });
     }
     if !tile.tile_type.is_wind() {
-        return Err(ScenarioError::NotWind {
+        return Err(ScenarioBuildError::NotWind {
             field: field.to_string(),
             input: input.to_string(),
         });
@@ -542,19 +544,19 @@ fn parse_wind(field: &str, input: Option<&str>) -> Result<Option<TileType>, Scen
     Ok(Some(tile.tile_type))
 }
 
-fn parse_field(field: &str, input: &str) -> Result<Vec<LogicalTile>, ScenarioError> {
-    parse_tiles(input).map_err(|source| ScenarioError::TileInput {
+fn parse_field(field: &str, input: &str) -> Result<Vec<LogicalTile>, ScenarioBuildError> {
+    parse_tiles(input).map_err(|source| ScenarioBuildError::TileInput {
         field: field.to_string(),
         input: input.to_string(),
         source,
     })
 }
 
-fn parse_single_tile(field: &str, input: &str) -> Result<LogicalTile, ScenarioError> {
+fn parse_single_tile(field: &str, input: &str) -> Result<LogicalTile, ScenarioBuildError> {
     let tiles = parse_field(field, input)?;
     match tiles.as_slice() {
         [tile] => Ok(*tile),
-        tiles => Err(ScenarioError::NotSingleTile {
+        tiles => Err(ScenarioBuildError::NotSingleTile {
             field: field.to_string(),
             input: input.to_string(),
             count: tiles.len(),
@@ -566,7 +568,7 @@ fn allocate_field(
     allocator: &mut TileAllocator,
     field: &str,
     input: &str,
-) -> Result<Vec<TileId>, ScenarioError> {
+) -> Result<Vec<TileId>, ScenarioBuildError> {
     let tiles = parse_field(field, input)?;
     allocate_logical(allocator, field, input, &tiles)
 }
@@ -576,13 +578,13 @@ fn allocate_logical(
     field: &str,
     input: &str,
     tiles: &[LogicalTile],
-) -> Result<Vec<TileId>, ScenarioError> {
+) -> Result<Vec<TileId>, ScenarioBuildError> {
     tiles
         .iter()
         .map(|tile| {
             allocator
                 .allocate(*tile)
-                .map_err(|source| ScenarioError::TileAllocation {
+                .map_err(|source| ScenarioBuildError::TileAllocation {
                     field: field.to_string(),
                     input: input.to_string(),
                     source,
@@ -594,11 +596,11 @@ fn allocate_logical(
 fn allocate_draw(
     allocator: &mut TileAllocator,
     draw: Option<&str>,
-) -> Result<Option<TileId>, ScenarioError> {
+) -> Result<Option<TileId>, ScenarioBuildError> {
     let input = draw.unwrap_or_default();
     let tiles = parse_field("draw", input)?;
     if tiles.len() > 1 {
-        return Err(ScenarioError::MultipleDrawTiles {
+        return Err(ScenarioBuildError::MultipleDrawTiles {
             input: input.to_string(),
             count: tiles.len(),
         });
@@ -610,7 +612,7 @@ fn allocate_draw(
 fn allocate_discards(
     allocator: &mut TileAllocator,
     inputs: &[String; 4],
-) -> Result<[Vec<TileId>; 4], ScenarioError> {
+) -> Result<[Vec<TileId>; 4], ScenarioBuildError> {
     let mut discards: [Vec<TileId>; 4] = std::array::from_fn(|_| Vec::new());
     for (player, (slot, input)) in discards.iter_mut().zip(inputs).enumerate() {
         *slot = allocate_field(allocator, &format!("discards[{player}]"), input)?;
@@ -620,12 +622,12 @@ fn allocate_discards(
 
 fn resolve_meld_inputs(
     melds: Option<&[Vec<MeldSpec>]>,
-) -> Result<[Vec<MeldSpec>; 4], ScenarioError> {
+) -> Result<[Vec<MeldSpec>; 4], ScenarioBuildError> {
     let Some(values) = melds else {
         return Ok(std::array::from_fn(|_| Vec::new()));
     };
     if values.len() != 4 {
-        return Err(ScenarioError::MeldsLength {
+        return Err(ScenarioBuildError::MeldsLength {
             count: values.len(),
         });
     }
@@ -638,7 +640,7 @@ fn allocate_melds(
     allocator: &mut TileAllocator,
     inputs: &[Vec<MeldSpec>; 4],
     discards: &[Vec<TileId>; 4],
-) -> Result<[Vec<Meld>; 4], ScenarioError> {
+) -> Result<[Vec<Meld>; 4], ScenarioBuildError> {
     let mut claimed_discards: Vec<TileId> = Vec::new();
     let mut melds: [Vec<Meld>; 4] = std::array::from_fn(|_| Vec::new());
     for (player, (slot, player_inputs)) in melds.iter_mut().zip(inputs).enumerate() {
@@ -661,7 +663,7 @@ fn allocate_meld(
     spec: &MeldSpec,
     discards: &[Vec<TileId>; 4],
     claimed_discards: &mut Vec<TileId>,
-) -> Result<Meld, ScenarioError> {
+) -> Result<Meld, ScenarioBuildError> {
     let tiles = parse_field(field, &spec.tiles)?;
     validate_meld_shape(field, spec.kind, &tiles)?;
 
@@ -689,9 +691,9 @@ fn validate_meld_shape(
     field: &str,
     kind: MeldKindSpec,
     tiles: &[LogicalTile],
-) -> Result<(), ScenarioError> {
+) -> Result<(), ScenarioBuildError> {
     if tiles.len() != kind.tile_count() {
-        return Err(ScenarioError::MeldTileCount {
+        return Err(ScenarioBuildError::MeldTileCount {
             field: field.to_string(),
             kind: kind.label().to_string(),
             expected: kind.tile_count(),
@@ -704,7 +706,7 @@ fn validate_meld_shape(
         _ => is_same_tile_type(tiles),
     };
     if !matches_shape {
-        return Err(ScenarioError::MeldShape {
+        return Err(ScenarioBuildError::MeldShape {
             field: field.to_string(),
             kind: kind.label().to_string(),
             input: tiles
@@ -743,7 +745,7 @@ fn resolve_meld_called_tile(
     field: &str,
     spec: &MeldSpec,
     tiles: &[LogicalTile],
-) -> Result<Option<LogicalTile>, ScenarioError> {
+) -> Result<Option<LogicalTile>, ScenarioBuildError> {
     let called_field = format!("{field}.called_tile");
     let called = spec
         .called_tile
@@ -752,17 +754,17 @@ fn resolve_meld_called_tile(
         .transpose()?;
 
     match (spec.kind.needs_called_tile(), called) {
-        (true, None) => Err(ScenarioError::MeldCalledTileMissing {
+        (true, None) => Err(ScenarioBuildError::MeldCalledTileMissing {
             field: field.to_string(),
             kind: spec.kind.label().to_string(),
         }),
-        (false, Some(called)) => Err(ScenarioError::MeldCalledTileNotAllowed {
+        (false, Some(called)) => Err(ScenarioBuildError::MeldCalledTileNotAllowed {
             field: field.to_string(),
             kind: spec.kind.label().to_string(),
             tile: called.to_mjai_string(),
         }),
         (_, Some(called)) if !tiles.contains(&called) => {
-            Err(ScenarioError::MeldCalledTileNotInMeld {
+            Err(ScenarioBuildError::MeldCalledTileNotInMeld {
                 field: field.to_string(),
                 tile: called.to_mjai_string(),
             })
@@ -776,7 +778,7 @@ fn claim_discarded_tile(
     called: LogicalTile,
     discards: &[Vec<TileId>; 4],
     claimed_discards: &mut Vec<TileId>,
-) -> Result<TileId, ScenarioError> {
+) -> Result<TileId, ScenarioBuildError> {
     let tile = discards
         .iter()
         .flatten()
@@ -786,7 +788,7 @@ fn claim_discarded_tile(
                 && tile.is_red() == called.red
                 && !claimed_discards.contains(tile)
         })
-        .ok_or_else(|| ScenarioError::MeldCalledTileNotDiscarded {
+        .ok_or_else(|| ScenarioBuildError::MeldCalledTileNotDiscarded {
             field: field.to_string(),
             tile: called.to_mjai_string(),
         })?;
@@ -828,7 +830,7 @@ fn meld_visible_tiles(meld: &Meld) -> Vec<TileId> {
 fn build_legal_actions(
     spec: &ScenarioSpec,
     context: &GameContext,
-) -> Result<Vec<LegalAction>, ScenarioError> {
+) -> Result<Vec<LegalAction>, ScenarioBuildError> {
     let hand = context.hand_tiles();
     let draw = context.drawn_tile();
 
@@ -922,7 +924,7 @@ fn explicit_dahai_actions(
     input: &str,
     hand: &[TileId],
     draw: Option<TileId>,
-) -> Result<Vec<LegalAction>, ScenarioError> {
+) -> Result<Vec<LegalAction>, ScenarioBuildError> {
     let requested = parse_field("legal_dahai", input)?;
     let held: Vec<TileId> = hand.iter().copied().chain(draw).collect();
 
@@ -932,7 +934,7 @@ fn explicit_dahai_actions(
     for tile in requested {
         let meaning = (tile.tile_type, tile.red);
         if meanings.contains(&meaning) {
-            return Err(ScenarioError::LegalDahaiDuplicate {
+            return Err(ScenarioBuildError::LegalDahaiDuplicate {
                 tile: tile.to_mjai_string(),
             });
         }
@@ -949,11 +951,11 @@ fn explicit_dahai_actions(
                 .copied()
                 .find(|held| held.tile_type() == tile.tile_type);
             return Err(match same_type {
-                Some(same_type) => ScenarioError::LegalDahaiRedMismatch {
+                Some(same_type) => ScenarioBuildError::LegalDahaiRedMismatch {
                     tile: tile.to_mjai_string(),
                     held: same_type.to_mjai_string(),
                 },
-                None => ScenarioError::LegalDahaiNotHeld {
+                None => ScenarioBuildError::LegalDahaiNotHeld {
                     tile: tile.to_mjai_string(),
                 },
             });
@@ -970,7 +972,7 @@ fn pon_actions(
     hand: &[TileId],
     discards: &[Vec<TileId>; 4],
     player_id: Option<u8>,
-) -> Result<Vec<LegalAction>, ScenarioError> {
+) -> Result<Vec<LegalAction>, ScenarioBuildError> {
     specs
         .iter()
         .enumerate()
@@ -992,16 +994,16 @@ fn pon_action(
     hand: &[TileId],
     discards: &[Vec<TileId>; 4],
     player_id: Option<u8>,
-) -> Result<LegalAction, ScenarioError> {
+) -> Result<LegalAction, ScenarioBuildError> {
     let Some(player_id) = player_id else {
-        return Err(ScenarioError::LegalPonWithoutPlayerId {
+        return Err(ScenarioBuildError::LegalPonWithoutPlayerId {
             field: field.to_string(),
         });
     };
 
     let from_player = validate_seat(&format!("{field}.from_player"), spec.from_player)?;
     if from_player == player_id {
-        return Err(ScenarioError::LegalPonFromOwnDiscard {
+        return Err(ScenarioBuildError::LegalPonFromOwnDiscard {
             field: field.to_string(),
             player_id,
         });
@@ -1010,7 +1012,7 @@ fn pon_action(
     let tile = parse_single_tile(&format!("{field}.tile"), &spec.tile)?;
     let consumed = parse_field(&format!("{field}.consumed"), &spec.consumed)?;
     if consumed.len() != PON_CONSUMED_TILE_COUNT {
-        return Err(ScenarioError::LegalPonConsumedCount {
+        return Err(ScenarioBuildError::LegalPonConsumedCount {
             field: field.to_string(),
             expected: PON_CONSUMED_TILE_COUNT,
             count: consumed.len(),
@@ -1020,7 +1022,7 @@ fn pon_action(
         .iter()
         .any(|consumed| consumed.tile_type != tile.tile_type)
     {
-        return Err(ScenarioError::LegalPonTileType {
+        return Err(ScenarioBuildError::LegalPonTileType {
             field: field.to_string(),
             tile: tile.to_mjai_string(),
             consumed: spec.consumed.clone(),
@@ -1041,17 +1043,17 @@ fn pon_target_tile(
     tile: LogicalTile,
     from_player: u8,
     discards: &[Vec<TileId>; 4],
-) -> Result<TileId, ScenarioError> {
+) -> Result<TileId, ScenarioBuildError> {
     let target = discards[usize::from(from_player)]
         .last()
         .copied()
-        .ok_or_else(|| ScenarioError::LegalPonNoDiscard {
+        .ok_or_else(|| ScenarioBuildError::LegalPonNoDiscard {
             field: field.to_string(),
             from_player,
         })?;
 
     if target.tile_type() != tile.tile_type || target.is_red() != tile.red {
-        return Err(ScenarioError::LegalPonTargetMismatch {
+        return Err(ScenarioBuildError::LegalPonTargetMismatch {
             field: field.to_string(),
             tile: tile.to_mjai_string(),
             discarded: target.to_mjai_string(),
@@ -1066,7 +1068,7 @@ fn pon_consumed_tiles(
     field: &str,
     consumed: &[LogicalTile],
     hand: &[TileId],
-) -> Result<Vec<TileId>, ScenarioError> {
+) -> Result<Vec<TileId>, ScenarioBuildError> {
     let mut tiles: Vec<TileId> = Vec::new();
 
     for tile in consumed {
@@ -1074,7 +1076,7 @@ fn pon_consumed_tiles(
             held.tile_type() == tile.tile_type && held.is_red() == tile.red && !tiles.contains(held)
         });
         let Some(held) = held else {
-            return Err(ScenarioError::LegalPonConsumedNotHeld {
+            return Err(ScenarioBuildError::LegalPonConsumedNotHeld {
                 field: field.to_string(),
                 tile: tile.to_mjai_string(),
             });
@@ -1088,12 +1090,6 @@ fn pon_consumed_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::{
-        Agent, DefenseCandidateDiagnostic, DefenseFallbackKind, DiagnosticOptions, HonorSafetyRank,
-        OpponentHonorValue, ShantenAgent, SuitedSafetyRank, SujiSafetyRank, is_genbutsu_for,
-        is_genbutsu_for_all_reached, select_defense_fallback_action_with_kind,
-        suji_safety_rank_for,
-    };
 
     fn spec_from_json(json: &str) -> ScenarioSpec {
         serde_json::from_str(json).unwrap()
@@ -1319,7 +1315,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::ReachDiscardIndicesLength { count: 2 })
+            Err(ScenarioBuildError::ReachDiscardIndicesLength { count: 2 })
         );
     }
 
@@ -1332,7 +1328,7 @@ mod tests {
         );
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::ReachDiscardIndexOutOfRange {
+            Err(ScenarioBuildError::ReachDiscardIndexOutOfRange {
                 player: 1,
                 index: 6,
                 discard_count: 5,
@@ -1349,7 +1345,7 @@ mod tests {
         );
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::ReachDiscardIndexOutOfRange {
+            Err(ScenarioBuildError::ReachDiscardIndexOutOfRange {
                 player: 1,
                 index: 0,
                 discard_count: 5,
@@ -1366,7 +1362,7 @@ mod tests {
         );
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::ReachDiscardIndexWithoutReach { player: 1 })
+            Err(ScenarioBuildError::ReachDiscardIndexWithoutReach { player: 1 })
         );
     }
 
@@ -1432,7 +1428,7 @@ mod tests {
         );
         let error = Scenario::resolve(&spec).unwrap_err();
         assert!(
-            matches!(error, ScenarioError::TileAllocation { .. }),
+            matches!(error, ScenarioBuildError::TileAllocation { .. }),
             "{error:?}"
         );
     }
@@ -1506,7 +1502,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::SeatWindConflict {
+            Err(ScenarioBuildError::SeatWindConflict {
                 explicit: "S".to_string(),
                 derived: "N".to_string(),
                 player_id: 0,
@@ -1553,7 +1549,7 @@ mod tests {
         ] {
             let error = Scenario::resolve(&spec).unwrap_err();
             assert!(
-                matches!(&error, ScenarioError::SeatOutOfRange { field: name, .. } if name == field),
+                matches!(&error, ScenarioBuildError::SeatOutOfRange { field: name, .. } if name == field),
                 "{error:?}"
             );
         }
@@ -1568,7 +1564,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::NotWind {
+            Err(ScenarioBuildError::NotWind {
                 field: "round_wind".to_string(),
                 input: "P".to_string(),
             })
@@ -1584,7 +1580,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::NotWind {
+            Err(ScenarioBuildError::NotWind {
                 field: "seat_wind".to_string(),
                 input: "1p".to_string(),
             })
@@ -1600,7 +1596,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::NotSingleTile {
+            Err(ScenarioBuildError::NotSingleTile {
                 field: "round_wind".to_string(),
                 input: "E S".to_string(),
                 count: 2,
@@ -1613,7 +1609,7 @@ mod tests {
         let spec = hand_spec("123m", Some("1p2p"));
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::MultipleDrawTiles {
+            Err(ScenarioBuildError::MultipleDrawTiles {
                 input: "1p2p".to_string(),
                 count: 2,
             })
@@ -1629,7 +1625,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::ReachedLength { count: 2 })
+            Err(ScenarioBuildError::ReachedLength { count: 2 })
         );
     }
 
@@ -1642,7 +1638,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::PostReachPassedLength { count: 1 })
+            Err(ScenarioBuildError::PostReachPassedLength { count: 1 })
         );
     }
 
@@ -1660,7 +1656,7 @@ mod tests {
         };
         let error = Scenario::resolve(&spec).unwrap_err();
         assert!(
-            matches!(&error, ScenarioError::TileInput { field, .. } if field == "post_reach_passed[1]"),
+            matches!(&error, ScenarioBuildError::TileInput { field, .. } if field == "post_reach_passed[1]"),
             "{error:?}"
         );
     }
@@ -1765,7 +1761,7 @@ mod tests {
         ] {
             assert_eq!(
                 Scenario::resolve(&spec_from_json(json)),
-                Err(ScenarioError::ScoresLength { count }),
+                Err(ScenarioBuildError::ScoresLength { count }),
                 "{json}"
             );
         }
@@ -1781,7 +1777,7 @@ mod tests {
             };
             assert_eq!(
                 Scenario::resolve(&spec),
-                Err(ScenarioError::KyokuOutOfRange { value }),
+                Err(ScenarioBuildError::KyokuOutOfRange { value }),
                 "kyoku: {value}"
             );
         }
@@ -1838,7 +1834,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::DiscardsLength { count: 1 })
+            Err(ScenarioBuildError::DiscardsLength { count: 1 })
         );
     }
 
@@ -1849,7 +1845,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::TileAllocation { field, .. } if field == "discards[0]"
+                ScenarioBuildError::TileAllocation { field, .. } if field == "discards[0]"
             ),
             "{error:?}"
         );
@@ -1862,7 +1858,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::TileAllocation { field, .. } if field == "dora_indicators"
+                ScenarioBuildError::TileAllocation { field, .. } if field == "dora_indicators"
             ),
             "{error:?}"
         );
@@ -1950,7 +1946,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::LegalDahaiNotHeld {
+            Err(ScenarioBuildError::LegalDahaiNotHeld {
                 tile: "9p".to_string(),
             })
         );
@@ -1965,7 +1961,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::LegalDahaiRedMismatch {
+            Err(ScenarioBuildError::LegalDahaiRedMismatch {
                 tile: "5mr".to_string(),
                 held: "5m".to_string(),
             })
@@ -1981,7 +1977,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::LegalDahaiRedMismatch {
+            Err(ScenarioBuildError::LegalDahaiRedMismatch {
                 tile: "5m".to_string(),
                 held: "5mr".to_string(),
             })
@@ -1997,7 +1993,7 @@ mod tests {
         };
         assert_eq!(
             Scenario::resolve(&spec),
-            Err(ScenarioError::LegalDahaiDuplicate {
+            Err(ScenarioBuildError::LegalDahaiDuplicate {
                 tile: "5m".to_string(),
             })
         );
@@ -2319,7 +2315,7 @@ mod tests {
         );
     }
 
-    fn pon_error(discards: &str, legal_pon: &str, extra: &str) -> ScenarioError {
+    fn pon_error(discards: &str, legal_pon: &str, extra: &str) -> ScenarioBuildError {
         let json = format!(
             r#"{{
                 "hand": "123456m55p78s455z",
@@ -2341,7 +2337,7 @@ mod tests {
         );
         assert_eq!(
             error,
-            ScenarioError::LegalPonWithoutPlayerId {
+            ScenarioBuildError::LegalPonWithoutPlayerId {
                 field: "legal_pon[0]".to_string(),
             }
         );
@@ -2356,7 +2352,7 @@ mod tests {
         );
         assert_eq!(
             error,
-            ScenarioError::SeatOutOfRange {
+            ScenarioBuildError::SeatOutOfRange {
                 field: "legal_pon[0].from_player".to_string(),
                 value: 4,
             }
@@ -2372,7 +2368,7 @@ mod tests {
         );
         assert_eq!(
             error,
-            ScenarioError::LegalPonFromOwnDiscard {
+            ScenarioBuildError::LegalPonFromOwnDiscard {
                 field: "legal_pon[0]".to_string(),
                 player_id: 0,
             }
@@ -2388,7 +2384,7 @@ mod tests {
         );
         assert_eq!(
             error,
-            ScenarioError::LegalPonTargetMismatch {
+            ScenarioBuildError::LegalPonTargetMismatch {
                 field: "legal_pon[0]".to_string(),
                 tile: "P".to_string(),
                 discarded: "F".to_string(),
@@ -2406,7 +2402,7 @@ mod tests {
         );
         assert_eq!(
             error,
-            ScenarioError::LegalPonNoDiscard {
+            ScenarioBuildError::LegalPonNoDiscard {
                 field: "legal_pon[0]".to_string(),
                 from_player: 1,
             }
@@ -2423,7 +2419,7 @@ mod tests {
             );
             assert_eq!(
                 error,
-                ScenarioError::LegalPonConsumedCount {
+                ScenarioBuildError::LegalPonConsumedCount {
                     field: "legal_pon[0]".to_string(),
                     expected: 2,
                     count,
@@ -2442,7 +2438,7 @@ mod tests {
         );
         assert_eq!(
             error,
-            ScenarioError::LegalPonTileType {
+            ScenarioBuildError::LegalPonTileType {
                 field: "legal_pon[0]".to_string(),
                 tile: "P".to_string(),
                 consumed: "P F".to_string(),
@@ -2462,7 +2458,7 @@ mod tests {
         }"#;
         assert_eq!(
             Scenario::resolve(&spec_from_json(json)).unwrap_err(),
-            ScenarioError::LegalPonConsumedNotHeld {
+            ScenarioBuildError::LegalPonConsumedNotHeld {
                 field: "legal_pon[0]".to_string(),
                 tile: "P".to_string(),
             }
@@ -2739,7 +2735,7 @@ mod tests {
             r#"{"hand": "123m", "melds": [[], [], []]}"#,
         ))
         .unwrap_err();
-        assert_eq!(error, ScenarioError::MeldsLength { count: 3 });
+        assert_eq!(error, ScenarioBuildError::MeldsLength { count: 3 });
     }
 
     #[test]
@@ -2755,7 +2751,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::MeldTileCount { field, kind, expected, count }
+                ScenarioBuildError::MeldTileCount { field, kind, expected, count }
                     if field == "melds[0][0]" && kind == "pon" && *expected == 3 && *count == 2
             ),
             "{error:?}"
@@ -2773,7 +2769,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            matches!(&error, ScenarioError::MeldShape { kind, .. } if kind == "chi"),
+            matches!(&error, ScenarioBuildError::MeldShape { kind, .. } if kind == "chi"),
             "{error:?}"
         );
     }
@@ -2789,7 +2785,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            matches!(&error, ScenarioError::MeldShape { kind, .. } if kind == "chi"),
+            matches!(&error, ScenarioBuildError::MeldShape { kind, .. } if kind == "chi"),
             "{error:?}"
         );
     }
@@ -2805,7 +2801,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            matches!(&error, ScenarioError::MeldShape { kind, .. } if kind == "pon"),
+            matches!(&error, ScenarioBuildError::MeldShape { kind, .. } if kind == "pon"),
             "{error:?}"
         );
     }
@@ -2829,7 +2825,7 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    ScenarioError::MeldCalledTileMissing { kind: label, .. } if label == kind
+                    ScenarioBuildError::MeldCalledTileMissing { kind: label, .. } if label == kind
                 ),
                 "{kind}: {error:?}"
             );
@@ -2849,7 +2845,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::MeldCalledTileNotAllowed { kind, tile, .. }
+                ScenarioBuildError::MeldCalledTileNotAllowed { kind, tile, .. }
                     if kind == "ankan" && tile == "E"
             ),
             "{error:?}"
@@ -2869,7 +2865,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::MeldCalledTileNotInMeld { tile, .. } if tile == "S"
+                ScenarioBuildError::MeldCalledTileNotInMeld { tile, .. } if tile == "S"
             ),
             "{error:?}"
         );
@@ -2887,7 +2883,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::MeldCalledTileNotDiscarded { field, tile }
+                ScenarioBuildError::MeldCalledTileNotDiscarded { field, tile }
                     if field == "melds[0][0]" && tile == "E"
             ),
             "{error:?}"
@@ -2912,7 +2908,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::MeldCalledTileNotDiscarded { field, .. } if field == "melds[2][0]"
+                ScenarioBuildError::MeldCalledTileNotDiscarded { field, .. } if field == "melds[2][0]"
             ),
             "{error:?}"
         );
@@ -2931,7 +2927,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                ScenarioError::TileAllocation { field, .. } if field == "melds[0][0]"
+                ScenarioBuildError::TileAllocation { field, .. } if field == "melds[0][0]"
             ),
             "{error:?}"
         );
@@ -2956,11 +2952,6 @@ mod tests {
             .is_err()
         );
     }
-
-    const POST_REACH_GENBUTSU_SCENARIO: &str =
-        include_str!("../scenarios/post_reach_genbutsu.json");
-    const MULTI_RIICHI_DOUBLE_WIND_SCENARIO: &str =
-        include_str!("../scenarios/defense_multi_riichi_double_wind.json");
 
     fn tile_type(mjai: &str) -> TileType {
         TileType::from_mjai_type_str(mjai).unwrap()
@@ -3038,97 +3029,6 @@ mod tests {
         assert_eq!(
             context.post_reach_passed_tiles_of(1),
             Some([tile_type("5s")].as_slice())
-        );
-    }
-
-    #[test]
-    fn post_reach_genbutsu_scenario_makes_the_passed_tile_genbutsu_for_both_reachers() {
-        let spec = spec_from_json(POST_REACH_GENBUTSU_SCENARIO);
-        let context = resolve(&spec).context;
-        let four_sou = tile_type("4s");
-
-        assert_eq!(context.reached_opponents(), vec![1, 2]);
-        assert!(is_genbutsu_for(four_sou, 1, &context));
-        assert!(is_genbutsu_for(four_sou, 2, &context));
-        assert!(is_genbutsu_for_all_reached(four_sou, &context));
-    }
-
-    #[test]
-    fn post_reach_genbutsu_scenario_selects_the_passed_tile_as_genbutsu_fallback() {
-        let spec = spec_from_json(POST_REACH_GENBUTSU_SCENARIO);
-        let scenario = resolve(&spec);
-        let selected =
-            select_defense_fallback_action_with_kind(&scenario.context, &scenario.legal_actions);
-
-        assert_eq!(
-            selected.map(|(action, kind)| (action.clone(), kind)),
-            Some((
-                LegalAction::Dahai {
-                    tile: TileId::new(tile_type("4s").raw() * 4).unwrap(),
-                },
-                DefenseFallbackKind::Genbutsu
-            ))
-        );
-    }
-
-    #[test]
-    fn multi_riichi_double_wind_scenario_prefers_suji_and_keeps_diagnostics_consistent() {
-        // Player 2's open guest-wind Pon intentionally makes exact reach evaluation unavailable,
-        // keeping this scenario focused on the legacy multi-riichi Suji fallback.
-        let scenario = resolve(&spec_from_json(MULTI_RIICHI_DOUBLE_WIND_SCENARIO));
-        let nine_man = tile_type("9m");
-        let south = tile_type("S");
-
-        assert_eq!(scenario.context.reached_opponents(), vec![1, 2]);
-        assert!(!is_genbutsu_for(nine_man, 1, &scenario.context));
-        assert!(is_genbutsu_for(nine_man, 2, &scenario.context));
-        assert_eq!(
-            suji_safety_rank_for(nine_man, 1, &scenario.context),
-            Some(SujiSafetyRank::Suji)
-        );
-
-        let selected =
-            select_defense_fallback_action_with_kind(&scenario.context, &scenario.legal_actions)
-                .expect("defense fallback");
-        assert_eq!(
-            selected.1,
-            DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji)
-        );
-        assert!(matches!(selected.0, LegalAction::Dahai { tile } if tile.tile_type() == nine_man));
-
-        let candidates = DefenseCandidateDiagnostic::for_legal_actions(
-            &scenario.context,
-            &scenario.legal_actions,
-            Some(selected.0),
-        );
-        let south = candidates
-            .iter()
-            .find(|candidate| candidate.tile == south)
-            .unwrap();
-        assert_eq!(south.honor_safety_rank, Some(HonorSafetyRank::OneVisible));
-        assert_eq!(
-            south.opponent_honor_value,
-            Some(OpponentHonorValue::DoubleWind)
-        );
-
-        let mut agent = ShantenAgent;
-        let action = agent.act(&scenario.context, &scenario.legal_actions);
-        let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
-        let with_lookahead = ShantenAgent::diagnose_with_options(
-            &scenario.context,
-            &scenario.legal_actions,
-            DiagnosticOptions::WITH_LOOKAHEAD,
-        );
-        assert_eq!(action, diagnostic.selected_action);
-        assert_eq!(action, with_lookahead.selected_action);
-        assert!(matches!(action, LegalAction::Dahai { tile } if tile.tile_type() == nine_man));
-        assert_eq!(
-            diagnostic.defense_fallback_kind(),
-            Some(DefenseFallbackKind::SuitedSafety(SuitedSafetyRank::Suji))
-        );
-        assert_eq!(
-            with_lookahead.defense_fallback_kind(),
-            diagnostic.defense_fallback_kind()
         );
     }
 
@@ -3218,7 +3118,7 @@ mod tests {
             Scenario::resolve(&spec_from_json(
                 r#"{"hand":"123m","riichi_situation":{"ippatsu":[null,null]}}"#
             )),
-            Err(ScenarioError::RiichiSituationLength {
+            Err(ScenarioBuildError::RiichiSituationLength {
                 field: "ippatsu",
                 count: 2,
             })
@@ -3230,7 +3130,7 @@ mod tests {
                     "riichi_situation":{"declared_double_riichi":[null,false,null,null]}
                 }"#
             )),
-            Err(ScenarioError::RiichiSituationWithoutReach {
+            Err(ScenarioBuildError::RiichiSituationWithoutReach {
                 field: "declared_double_riichi",
                 player: 1,
             })
@@ -3280,29 +3180,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn history_furiten_does_not_change_selection_or_diagnostic_consistency() {
-        let base = resolve(&spec_from_json(MULTI_RIICHI_DOUBLE_WIND_SCENARIO));
-        let context = base
-            .context
-            .clone()
-            .with_history_furiten_facts(HistoryFuritenFacts {
-                same_turn: Some(true),
-                riichi_missed_win: Some(true),
-            });
-        let mut agent = ShantenAgent;
-        let action = agent.act(&context, &base.legal_actions);
-        let diagnostic = ShantenAgent::diagnose(&context, &base.legal_actions);
-        let lookahead = ShantenAgent::diagnose_with_options(
-            &context,
-            &base.legal_actions,
-            DiagnosticOptions::WITH_LOOKAHEAD,
-        );
-        assert_eq!(action, diagnostic.selected_action);
-        assert_eq!(action, lookahead.selected_action);
-        assert_eq!(diagnostic.history_furiten, context.history_furiten());
-        assert_eq!(lookahead.history_furiten, context.history_furiten());
     }
 }

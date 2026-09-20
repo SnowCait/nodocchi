@@ -20,14 +20,13 @@
 
 use std::time::Duration;
 
+use bot_analysis::Scenario;
 use bot_core::{
     TwoShantenFullParallelCandidate, TwoShantenFullParallelComparison,
     TwoShantenFullParallelDecision, TwoShantenFullParallelRun,
     compare_two_shanten_full_parallelism, two_shanten_full_parallelism_is_available,
 };
 use bot_logic::{SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
-
-use crate::scenario::Scenario;
 
 /// 1局面の S / P2 比較。選択も値も実測も decision そのもので、表示のために選択し直さない。
 pub fn format_scenario_comparison(scenario: &Scenario) -> String {

@@ -12,6 +12,7 @@
 
 use std::time::Duration;
 
+use bot_analysis::Scenario;
 use bot_core::{
     IishantenContinuationDepthComparison, IishantenContinuationDepthProfile,
     compare_iishanten_continuation_depths,
@@ -19,8 +20,6 @@ use bot_core::{
 use bot_logic::{
     DrawTransition, SELF_TSUMO_VALUE_SCALE, SearchStateMemoStats, ThreeShantenSearchStats, TileType,
 };
-
-use crate::scenario::Scenario;
 
 /// 1局面の A/B 比較。値も探索規模も profile そのもので、表示のために評価し直さない。
 pub fn format_scenario_comparison(scenario: &Scenario) -> String {

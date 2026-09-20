@@ -6,6 +6,7 @@
 //! `--summary-only` は Summary 以外の詳細 section を省くだけで、Summary の内容も候補評価も通常
 //! 出力と同じ。
 
+use bot_analysis::Scenario;
 use bot_core::{
     ForcedFoldDefenseKind, ForcedFoldDiagnostic, ForcedFoldRankedCandidate, ForcedFoldUnavailable,
     PlayerRonRiskEvidence, RonRiskEvidence,
@@ -15,7 +16,6 @@ use crate::format::{
     action_label, format_combined_defense, format_defense, format_defense_candidates,
     format_open_hand_defense, format_scenario, format_table_state,
 };
-use crate::scenario::Scenario;
 
 const MODE: &str = "ForcedFold";
 

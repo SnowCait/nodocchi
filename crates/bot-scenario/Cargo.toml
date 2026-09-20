@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+bot-analysis = { path = "../bot-analysis" }
 bot-core = { path = "../bot-core" }
 bot-logic = { path = "../bot-logic" }
 riichilab-client = { path = "../riichilab-client" }

@@ -1,8 +1,8 @@
+use bot_analysis::Scenario;
 use bot_core::{DoubleRiichiFacts, RiichiSituationFacts};
 use riichilab_client::{CaptureRecord, CapturedRequestAction, ValidationState};
 
 use crate::error::ScenarioError;
-use crate::scenario::Scenario;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedScenario {
@@ -177,7 +177,7 @@ fn captured_scenario(path: &str, record: ReplayRequest) -> Result<CapturedScenar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::ScenarioSpec;
+    use bot_analysis::ScenarioSpec;
     use bot_core::{
         Agent, CallDecisionReason, CallIishantenComparison, LegalAction, MeldKind, PushPullMode,
         PushPullReason, ShantenAgent, current_reach_riichi_status,

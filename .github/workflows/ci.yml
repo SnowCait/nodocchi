@@ -76,6 +76,10 @@ jobs:
             args: -p bot-logic
             cache: bot-logic-opt2
             opt-level: 2
+          - name: bot-analysis
+            args: -p bot-analysis
+            cache: bot-analysis
+            opt-level: 0
           - name: clients
             args: -p chiihou-client -p riichilab-client
             cache: clients

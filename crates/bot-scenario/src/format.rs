@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bot_analysis::Scenario;
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
@@ -33,8 +34,6 @@ use bot_logic::{
     TSUMO_PROBABILITY_SCALE, TenpaiWaitAvailability, TenpaiWaitMetric, TileId, TileType,
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
 };
-
-use crate::scenario::Scenario;
 
 const NONE: &str = "none";
 const ABSENT: &str = "-";
@@ -3615,7 +3614,7 @@ mod tests {
         );
     }
     use super::*;
-    use crate::scenario::ScenarioSpec;
+    use bot_analysis::ScenarioSpec;
     use bot_core::{
         Agent, CallDecisionReason, CallKind, CallTwoShantenSpeedDiagnostic,
         CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
@@ -4741,7 +4740,8 @@ mod tests {
         );
     }
 
-    const PON_REACTION_SCENARIO: &str = include_str!("../scenarios/pon_reaction.json");
+    const PON_REACTION_SCENARIO: &str =
+        include_str!("../../bot-analysis/scenarios/pon_reaction.json");
 
     #[test]
     fn scenario_section_shows_pon_legal_action() {
