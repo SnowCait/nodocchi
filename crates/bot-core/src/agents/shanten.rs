@@ -10,6 +10,7 @@ use crate::discard_selection::{
     select_discard_action_with_evaluation_instrumented,
 };
 use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
+use crate::kan_decision::{KanDecisionDiagnostic, evaluate_kan_decision};
 use crate::open_hand_defense::OpenHandDefenseCategory;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, has_clear_threat,
@@ -41,6 +42,7 @@ pub enum AgentActionSource {
     Ryukyoku,
     Call,
     Reach,
+    Kan,
     NormalDiscard,
     DefenseFallback(DefenseFallbackKind),
     OpenHandDefenseFallback(OpenHandDefenseCategory),
@@ -57,6 +59,7 @@ impl AgentActionSource {
             AgentActionSource::Ryukyoku => "Ryukyoku",
             AgentActionSource::Call => "Call",
             AgentActionSource::Reach => "Reach",
+            AgentActionSource::Kan => "Kan",
             AgentActionSource::NormalDiscard => "NormalDiscard",
             AgentActionSource::DefenseFallback(_) => "DefenseFallback",
             AgentActionSource::OpenHandDefenseFallback(_) => "OpenHandDefenseFallback",
@@ -101,7 +104,9 @@ impl AgentActionSource {
 /// その局面では `push_pull_inputs` の `offense` も `None` になる。`call` は合法な Chi / Pon が
 /// 1件も無い局面では `None`。`reach` はリーチを検討する Push
 /// mode 以外では `None`。`ryukyoku` は `LegalAction::Ryukyoku` が合法だった局面だけ `Some` で、
-/// Hora で早期終了した場合は検討自体を行わないので `None`。
+/// Hora で早期終了した場合は検討自体を行わないので `None`。`kan` は合法なカンが1件も無い局面と、
+/// カン判断まで進まなかった局面 (Hora / 九種九牌 / 鳴きでの早期終了、Push mode でリーチを採用
+/// した局面) では `None`。押し引きが Fold / Neutral の局面でもカン判断自体は通る。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentDecision {
     pub(crate) action: LegalAction,
@@ -111,6 +116,7 @@ pub(crate) struct AgentDecision {
     pub(crate) normal_discard: Option<LegalAction>,
     pub(crate) reach: Option<ReachDecisionDiagnostic>,
     pub(crate) call: Option<CallDecisionDiagnostic>,
+    pub(crate) kan: Option<KanDecisionDiagnostic>,
     pub(crate) ryukyoku: Option<RyukyokuDecisionDiagnostic>,
 }
 
@@ -124,6 +130,7 @@ struct EarlyFoldDecision {
     source: AgentActionSource,
     push_pull_inputs: PushPullInputs,
     push_pull: PushPullDecision,
+    kan: Option<KanDecisionDiagnostic>,
 }
 
 #[derive(Debug, Default)]
@@ -232,6 +239,7 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call: None,
+                kan: None,
                 ryukyoku: None,
             };
         }
@@ -255,6 +263,7 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call: None,
+                kan: None,
                 ryukyoku,
             };
         }
@@ -278,6 +287,7 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call,
+                kan: None,
                 ryukyoku,
             };
         }
@@ -300,6 +310,7 @@ impl ShantenAgent {
                 normal_discard: None,
                 reach: None,
                 call,
+                kan: early.kan,
                 ryukyoku,
             };
         }
@@ -324,6 +335,7 @@ impl ShantenAgent {
 
         let normal_discard = discard_selection.action.clone();
         let mut reach = None;
+        let mut kan = None;
 
         if let Some((action, source)) = self.select_action_for_push_pull_mode(
             push_pull.mode,
@@ -332,6 +344,7 @@ impl ShantenAgent {
             &inputs,
             &discard_selection,
             &mut reach,
+            &mut kan,
             diagnostics,
         ) {
             return AgentDecision {
@@ -342,6 +355,7 @@ impl ShantenAgent {
                 normal_discard,
                 reach,
                 call,
+                kan,
                 ryukyoku,
             };
         }
@@ -361,6 +375,7 @@ impl ShantenAgent {
                 normal_discard,
                 reach,
                 call,
+                kan,
                 ryukyoku,
             };
         }
@@ -378,6 +393,7 @@ impl ShantenAgent {
             normal_discard,
             reach,
             call,
+            kan,
             ryukyoku,
         }
     }
@@ -436,7 +452,9 @@ impl ShantenAgent {
 
         timing.enter(DecisionPhase::PostDiscard);
         // Fold なのでリーチは検討しない。既存 helper と signature を合わせるためだけの受け皿。
+        // カンは Fold でも検討するので、判断内訳はそのまま持ち帰る。
         let mut reach = None;
+        let mut kan = None;
         let Some((action, source)) = self.select_action_for_push_pull_mode(
             push_pull.mode,
             ctx,
@@ -444,6 +462,7 @@ impl ShantenAgent {
             &inputs,
             &DiscardActionSelection::not_selected(),
             &mut reach,
+            &mut kan,
             diagnostics,
         ) else {
             // 防御 fallback が action を選べなかったので、従来どおり通常打牌選択から判断し直す。
@@ -459,6 +478,7 @@ impl ShantenAgent {
             source,
             push_pull_inputs: inputs,
             push_pull,
+            kan,
         })
     }
 
@@ -498,9 +518,9 @@ impl ShantenAgent {
     // 押し引きモードに応じた action 選択。候補は必要になった時点でのみ計算する。
     // 選ばれた action とともに、その選択経路を表す source を返す。
     //
-    // - Push:    Reach → 通常打牌 → 防御 fallback
-    // - Neutral: 通常打牌 → 防御 fallback(Reach は検討しない)
-    // - Fold:    防御 fallback → 通常打牌(Reach は検討しない)
+    // - Push:    Reach → Kan → 通常打牌 → 防御 fallback
+    // - Neutral: Kan → 通常打牌 → 防御 fallback(Reach は検討しない)
+    // - Fold:    Kan → 防御 fallback → 通常打牌(Reach は検討しない)
     //
     // 現在の押し引き policy は Neutral を返さないが、action 順序としては維持している。
     // Push の順序は threat の種類で変えない。安全牌を通常打牌より優先するのは Fold の場合だけ。
@@ -508,6 +528,13 @@ impl ShantenAgent {
     // リーチ判断と通常打牌・押し引きは同じ `discard_selection` を参照する。リーチのために打牌を
     // 選び直したり、待ちを別経路で計算し直したりしない。検討した場合の判断内訳は `reach` へ
     // 書き込み、検討しなかった Neutral / Fold では `None` のままにする。
+    //
+    // カンはどの mode でも検討する。自己リーチ後は降りようがないので、押し引きが Fold と判断
+    // した局面でもカンを選べる必要があるためである。押し引きを見るのは自己リーチ前の暗槓だけ
+    // で、その gate は [`evaluate_kan_decision`] が持つ。Push では既存の Reach 優先順位を変え
+    // ないよう、リーチを採用しなかった後にだけ検討する。暗槓しない場合の比較基準にも同じ
+    // `discard_selection` の評価をそのまま渡し、カン判断のために打牌を選び直さない。判断内訳は
+    // `kan` へ書き込み、合法なカンが1件も無い局面では `None` のままにする。
     #[allow(clippy::too_many_arguments)]
     fn select_action_for_push_pull_mode(
         &self,
@@ -517,6 +544,7 @@ impl ShantenAgent {
         inputs: &PushPullInputs,
         discard_selection: &DiscardActionSelection,
         reach: &mut Option<ReachDecisionDiagnostic>,
+        kan: &mut Option<KanDecisionDiagnostic>,
         diagnostics: &mut DecisionDiagnostics,
     ) -> Option<(LegalAction, AgentActionSource)> {
         let normal_discard = discard_selection.action.as_ref();
@@ -543,18 +571,37 @@ impl ShantenAgent {
                 if let Some(action) = decision.selected.clone() {
                     return Some((action, AgentActionSource::Reach));
                 }
+
+                if let Some(selected) =
+                    self.select_kan(ctx, legal_actions, mode, discard_selection, kan)
+                {
+                    return Some(selected);
+                }
+
                 if let Some(action) = normal_discard {
                     return Some((action.clone(), AgentActionSource::NormalDiscard));
                 }
                 self.select_defense_fallback(ctx, legal_actions, diagnostics)
             }
             PushPullMode::Neutral => {
+                if let Some(selected) =
+                    self.select_kan(ctx, legal_actions, mode, discard_selection, kan)
+                {
+                    return Some(selected);
+                }
+
                 if let Some(action) = normal_discard {
                     return Some((action.clone(), AgentActionSource::NormalDiscard));
                 }
                 self.select_defense_fallback(ctx, legal_actions, diagnostics)
             }
             PushPullMode::Fold => {
+                if let Some(selected) =
+                    self.select_kan(ctx, legal_actions, mode, discard_selection, kan)
+                {
+                    return Some(selected);
+                }
+
                 let evaluation =
                     evaluate_fold_defense(ctx, legal_actions, inputs, diagnostics.is_enabled());
                 diagnostics.collect_fold_defense(ctx, legal_actions, inputs, &evaluation);
@@ -575,6 +622,31 @@ impl ShantenAgent {
                     .map(|action| (action, AgentActionSource::NormalDiscard))
             }
         }
+    }
+
+    // カン判断を1回だけ行い、採用するカンがあればその action と source を返す。
+    //
+    // 判断内訳は採用の有無にかかわらず `kan` へ書き込む。押し引きも自己リーチの前後も
+    // [`evaluate_kan_decision`] が source of truth で、呼び出し側は結論を受け取るだけにする。
+    fn select_kan(
+        &self,
+        ctx: &GameContext,
+        legal_actions: &[LegalAction],
+        mode: PushPullMode,
+        discard_selection: &DiscardActionSelection,
+        kan: &mut Option<KanDecisionDiagnostic>,
+    ) -> Option<(LegalAction, AgentActionSource)> {
+        let decision = evaluate_kan_decision(
+            ctx,
+            legal_actions,
+            mode,
+            discard_selection.evaluation.as_ref(),
+        );
+        let selected = decision
+            .as_ref()
+            .and_then(|decision| decision.selected.clone());
+        *kan = decision;
+        selected.map(|action| (action, AgentActionSource::Kan))
     }
 
     // 防御 fallback を採用する場合に、その理由を診断ログへ出しつつ action と種別を返す。
@@ -605,6 +677,10 @@ fn agent_action_label(action: &LegalAction) -> String {
     match action {
         LegalAction::Dahai { tile } => tile.to_mjai_string(),
         LegalAction::Pon { tile, .. } => format!("Pon {}", tile.to_mjai_string()),
+        LegalAction::Ankan { consumed } => match consumed.first() {
+            Some(tile) => format!("Ankan {}", tile.to_mjai_string()),
+            None => "Ankan".to_string(),
+        },
         LegalAction::Reach => "Reach".to_string(),
         LegalAction::Hora => "Hora".to_string(),
         LegalAction::Ryukyoku => "Ryukyoku".to_string(),
@@ -652,6 +728,10 @@ pub(crate) fn log_agent_decision(decision: &AgentDecision) {
         Some(call) => format!("{:?}", call.reason),
         None => "None".to_string(),
     };
+    let kan_reason = match &decision.kan {
+        Some(kan) => format!("{:?}", kan.reason),
+        None => "None".to_string(),
+    };
     let ryukyoku_verdict = match &decision.ryukyoku {
         Some(ryukyoku) => format!("{:?}", ryukyoku.verdict),
         None => "None".to_string(),
@@ -695,6 +775,7 @@ pub(crate) fn log_agent_decision(decision: &AgentDecision) {
         open_hand_defense_category = %open_hand_defense_category,
         combined_defense_category = %combined_defense_category,
         call_reason = %call_reason,
+        kan_reason = %kan_reason,
         ryukyoku_verdict = %ryukyoku_verdict,
         "agent decision",
     );
@@ -730,6 +811,7 @@ mod tests {
         select_best_normal_discard_evaluation, select_discard_action,
         select_discard_action_with_evaluation,
     };
+    use crate::kan_decision::{KanDecisionReason, KanKind};
     use crate::push_pull::{
         PushPullReason, push_pull_inputs_from_context,
         push_pull_inputs_from_context_with_evaluation,
@@ -741,7 +823,11 @@ mod tests {
         STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
     };
     use crate::shanten_test_support::{
-        OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, TENPAI_DRAWN, dahai, fold_actions,
+        ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND, ANKAN_IISHANTEN_CONSUMED,
+        ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED, ANKAN_REACH_DRAWN,
+        ANKAN_REACH_HAND, ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND,
+        OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, TENPAI_DRAWN, ankan_action, ankan_context,
+        ankan_context_with_visible, ankan_dahai_actions, dahai, fold_actions,
         fold_under_reach_context, opponent_meld_actions, opponent_reach_context,
         opponent_reach_context_with_visible, pon_meld, suited_reach_context,
         suited_reach_context_with_reached, tenpai_actions, tenpai_context, tenpai_dahai_actions,
@@ -1001,7 +1087,8 @@ mod tests {
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 
-    // Chi と各種カン。カンは鳴き判断の対象外なので、積極的に選ばない。
+    // Chi と各種カン。Chi / Kakan / Daiminkan はこの局面で選ばない。Ankan も暗槓判断の
+    // 成立条件 (自摸番・副露数が分かる・consumed が手牌にある) を満たさないので選ばない。
     fn chi_and_kan_actions() -> Vec<LegalAction> {
         vec![
             LegalAction::Chi {
@@ -1031,6 +1118,360 @@ mod tests {
             .chain([LegalAction::None])
             .collect();
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
+    }
+
+    // 暗槓判断を production へ接続した後も、Kakan / Daiminkan は選択肢に入れない。
+    #[test]
+    fn never_claims_kakan_or_daiminkan() {
+        let ctx = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        // 合法な暗槓は置かず、加槓・大明槓だけを合法にする。
+        let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_FREE_HAND, ANKAN_FREE_DRAWN)
+            .into_iter()
+            .chain([
+                LegalAction::Kakan {
+                    tile: tile(124),
+                    consumed: vec![tile(125), tile(126), tile(127)],
+                },
+                LegalAction::Daiminkan {
+                    tile: tile(104),
+                    consumed: vec![tile(105), tile(106), tile(107)],
+                },
+            ])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        let action = agent.act(&ctx, &actions);
+        assert!(
+            matches!(action, LegalAction::Dahai { .. }),
+            "action: {action:?}"
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_ne!(diagnostic.selected_source, AgentActionSource::Kan);
+        let kan = diagnostic.kan.expect("カン候補が並ぶ");
+        assert_eq!(kan.selected, None);
+        assert_eq!(
+            kan.candidates
+                .iter()
+                .map(|candidate| (candidate.kind, candidate.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (KanKind::Kakan, KanDecisionReason::KakanNotConnected),
+                (KanKind::Daiminkan, KanDecisionReason::DaiminkanNotConnected),
+            ]
+        );
+    }
+
+    // 暗槓しても向聴・受け入れが変わらない局面では暗槓する。
+    #[test]
+    fn selects_ankan_when_the_hand_does_not_regress() {
+        let ctx = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_FREE_HAND, ANKAN_FREE_DRAWN)
+            .into_iter()
+            .chain([ankan_action(&ANKAN_FREE_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&ctx, &actions),
+            ankan_action(&ANKAN_FREE_CONSUMED)
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+        let kan = diagnostic.kan.expect("暗槓候補");
+        assert_eq!(kan.selected, Some(ankan_action(&ANKAN_FREE_CONSUMED)));
+        assert_eq!(kan.reason, KanDecisionReason::EligibleAnkanNoRegression);
+    }
+
+    // 暗槓が合法でも、判断条件を満たさなければ従来どおり通常打牌を選ぶ。
+    #[test]
+    fn does_not_select_ankan_that_regresses_the_hand() {
+        let ctx = ankan_context(
+            &ANKAN_REGRESSING_HAND,
+            ANKAN_REGRESSING_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let actions: Vec<LegalAction> =
+            ankan_dahai_actions(&ANKAN_REGRESSING_HAND, ANKAN_REGRESSING_DRAWN)
+                .into_iter()
+                .chain([ankan_action(&ANKAN_REGRESSING_CONSUMED)])
+                .collect();
+
+        let mut agent = ShantenAgent;
+        let action = agent.act(&ctx, &actions);
+        assert!(
+            matches!(action, LegalAction::Dahai { .. }),
+            "action: {action:?}"
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        let kan = diagnostic.kan.expect("暗槓候補");
+        assert_eq!(kan.selected, None);
+        assert_eq!(kan.reason, KanDecisionReason::ShantenRegresses);
+    }
+
+    // 暗槓が合法でも、合法な Ankan が無い局面と同じ通常打牌を選ぶ (従来挙動を変えない)。
+    #[test]
+    fn a_rejected_ankan_keeps_the_previous_discard() {
+        let ctx = ankan_context(
+            &ANKAN_REGRESSING_HAND,
+            ANKAN_REGRESSING_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let without_kan = ankan_dahai_actions(&ANKAN_REGRESSING_HAND, ANKAN_REGRESSING_DRAWN);
+        let with_kan: Vec<LegalAction> = without_kan
+            .iter()
+            .cloned()
+            .chain([ankan_action(&ANKAN_REGRESSING_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&ctx, &with_kan),
+            agent.act(&ctx, &without_kan),
+            "暗槓を選ばない局面では合法手にカンが増えても打牌は変わらない"
+        );
+    }
+
+    // Reach を採用する局面では暗槓を選ばない。既存の Reach 優先順位を変えない。
+    #[test]
+    fn reach_keeps_priority_over_ankan() {
+        let ctx = ankan_context(
+            &ANKAN_REACH_HAND,
+            ANKAN_REACH_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_REACH_HAND, ANKAN_REACH_DRAWN)
+            .into_iter()
+            .chain([ankan_action(&ANKAN_REACH_CONSUMED), LegalAction::Reach])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
+        // リーチを採用した局面ではカン判断そのものを行わない。
+        assert_eq!(diagnostic.kan, None);
+
+        // 同じ手牌でも、持ち点が足りずリーチが合法でない局面では暗槓を選ぶ。リーチが先に
+        // 採用されるのは action の優先順位によるもので、暗槓の成立条件が変わるからではない。
+        // 持ち点は暗槓前後で変わらないので、両側のリーチ合法性も同じ結論になる。
+        let poor = ctx
+            .clone()
+            .with_table_state_facts(crate::context::TableStateFacts {
+                scores: Some([900, 25_000, 25_000, 25_000]),
+                ..Default::default()
+            });
+        let without_reach: Vec<LegalAction> = actions
+            .iter()
+            .filter(|action| !matches!(action, LegalAction::Reach))
+            .cloned()
+            .collect();
+        assert_eq!(
+            agent.act(&poor, &without_reach),
+            ankan_action(&ANKAN_REACH_CONSUMED)
+        );
+    }
+
+    // テンパイ以外は暗槓前後の打点を既存評価で比較できないので、速度が悪化しなくても暗槓せず
+    // 通常打牌を維持する。
+    #[test]
+    fn does_not_select_an_ankan_whose_value_cannot_be_compared() {
+        let ctx = ankan_context(
+            &ANKAN_IISHANTEN_HAND,
+            ANKAN_IISHANTEN_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let without_kan = ankan_dahai_actions(&ANKAN_IISHANTEN_HAND, ANKAN_IISHANTEN_DRAWN);
+        let with_kan: Vec<LegalAction> = without_kan
+            .iter()
+            .cloned()
+            .chain([ankan_action(&ANKAN_IISHANTEN_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&ctx, &with_kan),
+            agent.act(&ctx, &without_kan),
+            "打点を比較できない暗槓では通常打牌を維持する"
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &with_kan);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        let kan = diagnostic.kan.expect("暗槓候補");
+        assert_eq!(kan.selected, None);
+        assert_eq!(kan.reason, KanDecisionReason::ValueNotEvaluable);
+    }
+
+    // Hora は暗槓より優先する。
+    #[test]
+    fn hora_keeps_priority_over_ankan() {
+        let ctx = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let actions = vec![
+            ankan_action(&ANKAN_FREE_CONSUMED),
+            LegalAction::Hora,
+            LegalAction::None,
+        ];
+
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
+        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).kan, None);
+    }
+
+    // 自分のリーチ後でも、合法性は legal_actions が source of truth のまま扱う。bot-core 側で
+    // 待ちが変わるかどうかを判定し直さない。
+    #[test]
+    fn ankan_after_own_reach_follows_the_legal_actions() {
+        let ctx = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [true, false, false, false],
+            Default::default(),
+            Some(0),
+        );
+        // リーチ後なのでツモ切りだけが合法。Reach も合法手に無い。
+        let tsumogiri = dahai(ANKAN_FREE_DRAWN);
+        let without_kan = vec![tsumogiri.clone()];
+        let with_kan = vec![tsumogiri.clone(), ankan_action(&ANKAN_FREE_CONSUMED)];
+
+        let mut agent = ShantenAgent;
+        // 合法手に Ankan が無ければ従来どおりツモ切り。
+        assert_eq!(agent.act(&ctx, &without_kan), tsumogiri);
+        // 提示された Ankan は待ちを変えない前提で、そのまま暗槓できる。
+        assert_eq!(
+            agent.act(&ctx, &with_kan),
+            ankan_action(&ANKAN_FREE_CONSUMED)
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &with_kan);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+        assert_eq!(diagnostic.reach.map(|reach| reach.selected), Some(None));
+        assert_eq!(
+            diagnostic.kan.map(|kan| kan.reason),
+            Some(KanDecisionReason::EligibleAnkanAfterOwnReach)
+        );
+        assert_eq!(ShantenAgent::diagnose(&ctx, &without_kan).kan, None);
+    }
+
+    // 自己リーチ後は降りようがないので、他家リーチで押し引きが Fold になっても暗槓する。
+    #[test]
+    fn ankan_after_own_reach_survives_a_fold_verdict() {
+        // 1p (36) 単騎の待ちを 37 / 38 / 39 で枯らし、他家リーチに対する弱いテンパイにする。
+        let ctx = ankan_context_with_visible(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [true, true, false, false],
+            Default::default(),
+            Some(0),
+            &[37, 38, 39],
+        );
+        let tsumogiri = dahai(ANKAN_FREE_DRAWN);
+        let actions = vec![tsumogiri.clone(), ankan_action(&ANKAN_FREE_CONSUMED)];
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&ctx, &actions),
+            ankan_action(&ANKAN_FREE_CONSUMED)
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(
+            diagnostic.push_pull_decision.map(|decision| decision.mode),
+            Some(PushPullMode::Fold)
+        );
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+        // 同じ他家リーチでも、自己リーチ前なら従来どおり暗槓しない。
+        let before_reach = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [false, true, false, false],
+            Default::default(),
+            Some(0),
+        );
+        let before_reach_actions: Vec<LegalAction> =
+            ankan_dahai_actions(&ANKAN_FREE_HAND, ANKAN_FREE_DRAWN)
+                .into_iter()
+                .chain([ankan_action(&ANKAN_FREE_CONSUMED)])
+                .collect();
+        let before = ShantenAgent::diagnose(&before_reach, &before_reach_actions);
+        assert_ne!(before.selected_source, AgentActionSource::Kan);
+        assert_eq!(
+            before.kan.map(|kan| kan.reason),
+            Some(KanDecisionReason::OpponentReached)
+        );
+    }
+
+    // 和了できる局面では暗槓より和了を優先する。
+    #[test]
+    fn hora_keeps_priority_over_an_ankan_after_own_reach() {
+        let ctx = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [true, false, false, false],
+            Default::default(),
+            Some(0),
+        );
+        let actions = vec![
+            ankan_action(&ANKAN_FREE_CONSUMED),
+            LegalAction::Hora,
+            dahai(ANKAN_FREE_DRAWN),
+        ];
+
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
+        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).kan, None);
+    }
+
+    // 他家リーチ中は暗槓しない。新ドラがリーチ者の打点へ与える影響を既存評価で測れない。
+    #[test]
+    fn does_not_select_ankan_under_opponent_reach() {
+        let ctx = ankan_context(
+            &ANKAN_FREE_HAND,
+            ANKAN_FREE_DRAWN,
+            [false, true, false, false],
+            Default::default(),
+            Some(0),
+        );
+        let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_FREE_HAND, ANKAN_FREE_DRAWN)
+            .into_iter()
+            .chain([ankan_action(&ANKAN_FREE_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        let action = agent.act(&ctx, &actions);
+        assert!(
+            matches!(action, LegalAction::Dahai { .. }),
+            "action: {action:?}"
+        );
     }
 
     #[test]
@@ -1865,6 +2306,7 @@ mod tests {
         let normal = selection.action.clone().expect("通常打牌を選べる");
         let inputs = push_pull_inputs_from_context(&ctx, &actions);
         let mut reach = None;
+        let mut kan = None;
         let mut diagnostics = DecisionDiagnostics::disabled();
 
         let (action, source) = ShantenAgent
@@ -1875,6 +2317,7 @@ mod tests {
                 &inputs,
                 &selection,
                 &mut reach,
+                &mut kan,
                 &mut diagnostics,
             )
             .expect("action を選べる");
@@ -1882,6 +2325,7 @@ mod tests {
         assert_eq!(action, normal);
         assert_eq!(source, AgentActionSource::NormalDiscard);
         assert_eq!(reach, None);
+        assert_eq!(kan, None);
     }
 
     #[test]

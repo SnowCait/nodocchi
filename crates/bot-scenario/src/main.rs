@@ -605,6 +605,7 @@ mod tests {
             "Normal discard",
             "Push/Pull",
             "Reach",
+            "Kan",
             "Defense",
             "Player threats",
         ] {

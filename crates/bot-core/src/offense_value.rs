@@ -399,6 +399,26 @@ pub(crate) fn evaluate_tenpai_offense_with_hands(
     legal_actions: &[LegalAction],
     hands: Option<&TenpaiCompletedHands>,
 ) -> TenpaiOffenseEvaluation {
+    evaluate_tenpai_offense_with_reach_legality(
+        context,
+        wait_availability,
+        reach_is_legal_action(legal_actions),
+        hands,
+    )
+}
+
+/// リーチの合法性を明示して [`evaluate_tenpai_offense_with_hands`] と同じ evaluation を行う。
+///
+/// 現在局面の `legal_actions` をそのまま使えない仮想局面 (暗槓後の手牌など) 向けの入口で、
+/// 呼び出し側が共有条件 ([`is_reach_legal`](crate::reach_policy::is_reach_legal)) からその局面の
+/// 合法性を求めて渡す。攻撃モードの決め方も打点の集約もこの先は完全に共通で、違うのは
+/// 「リーチが合法か」をどこから取るかだけになる。
+pub(crate) fn evaluate_tenpai_offense_with_reach_legality(
+    context: &GameContext,
+    wait_availability: &TenpaiWaitAvailability,
+    reach_legal: bool,
+    hands: Option<&TenpaiCompletedHands>,
+) -> TenpaiOffenseEvaluation {
     // ロン可否は既存のフリテン診断が source of truth。恒常フリテン・同巡内フリテン・リーチ後
     // 見逃しを統合した結論で、押し引き側でフリテンを判定し直さない。
     let can_ron = wait_availability.can_ron() == Some(true);
@@ -409,7 +429,7 @@ pub(crate) fn evaluate_tenpai_offense_with_hands(
     let mode = offense_mode(
         context,
         wait_availability,
-        legal_actions,
+        reach_legal,
         damaten_value.as_ref().map(|value| value.verdict),
     );
 
@@ -428,6 +448,13 @@ pub(crate) fn evaluate_tenpai_offense_with_hands(
     }
 }
 
+// 現在局面で Reach action が合法か。合法手の有無だけを読む pure helper。
+fn reach_is_legal_action(legal_actions: &[LegalAction]) -> bool {
+    legal_actions
+        .iter()
+        .any(|action| matches!(action, LegalAction::Reach))
+}
+
 /// 攻撃を継続した場合の攻撃モード。
 ///
 /// 自分が既にリーチしていれば、そのテンパイはリーチ手として確定している。合法 action に Reach が
@@ -440,17 +467,13 @@ pub(crate) fn evaluate_tenpai_offense_with_hands(
 fn offense_mode(
     context: &GameContext,
     wait_availability: &TenpaiWaitAvailability,
-    legal_actions: &[LegalAction],
+    reach_legal: bool,
     damaten_verdict: Option<crate::damaten_value::DamatenValueVerdict>,
 ) -> TenpaiOffenseMode {
     match context.own_reached() {
         None => TenpaiOffenseMode::Unknown,
         Some(true) => TenpaiOffenseMode::Reach,
         Some(false) => {
-            let reach_legal = legal_actions
-                .iter()
-                .any(|action| matches!(action, LegalAction::Reach));
-
             let reason = decide_reach_reason(
                 reach_legal,
                 damaten_verdict,

@@ -14,14 +14,15 @@ use bot_core::{
     CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
     CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
     DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext,
-    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
-    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
-    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
-    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveHanVerdict,
-    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
-    ProspectiveWaitValue, PushPullDecision, PushPullInputs, PushPullOffenseState,
-    ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic, ReachPublicSafetyEvidence,
-    ReachRonBaselineDiagnostic, ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    KanCandidateDiagnostic, KanDecisionDiagnostic, KanHandDiagnostic, LegalAction, Meld, MeldKind,
+    MeldKindCounts, MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
+    OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
+    ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
+    ProspectiveDrawVariantValue, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
+    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision,
+    PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
+    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
+    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
     RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuVerdict,
     ShantenDecisionDiagnostic, StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
     StructuralExpectedDealInLossEvidence, TenpaiContinuationBranch, TenpaiContinuationCandidate,
@@ -114,6 +115,7 @@ pub fn format_diagnostic(
         diagnostic.push_pull_decision.as_ref(),
     ));
     sections.push(format_reach(diagnostic.reach.as_ref()));
+    sections.push(format_kan(diagnostic.kan.as_ref()));
     sections.push(format_reach_damaten_comparison(
         diagnostic.reach_damaten_comparison.as_ref(),
     ));
@@ -358,6 +360,98 @@ fn format_call(call: Option<&CallDecisionDiagnostic>, verbose: bool) -> String {
     }
 
     lines.join("\n")
+}
+
+// カン判断の section。合法なカンが並ばなかった局面と、カン判断まで進まなかった局面では
+// `not evaluated` を出し、評価していないことと「カンしない」を混同しないようにする。
+fn format_kan(kan: Option<&KanDecisionDiagnostic>) -> String {
+    let mut lines = vec!["Kan".to_string()];
+
+    let Some(kan) = kan else {
+        lines.push(format!("  {NOT_EVALUATED}"));
+        return lines.join("\n");
+    };
+
+    lines.push("  evaluated".to_string());
+    match kan.selected.as_ref() {
+        Some(action) => lines.push(format!("  selected: {}", action_label(action))),
+        None => lines.push(format!("  selected: {NONE}")),
+    }
+    lines.push(format!("  reason: {:?}", kan.reason));
+    lines.push(format!("  candidates: {}", kan.candidates.len()));
+
+    for candidate in &kan.candidates {
+        lines.extend(format_kan_candidate(candidate));
+    }
+
+    lines.join("\n")
+}
+
+fn format_kan_candidate(candidate: &KanCandidateDiagnostic) -> Vec<String> {
+    let mut lines = vec![format!("  {}", action_label(&candidate.action))];
+
+    lines.push(format!("    selected: {}", yes_no(candidate.selected)));
+    lines.push(format!("    eligible: {}", yes_no(candidate.eligible)));
+    lines.push(format!("    reason: {:?}", candidate.reason));
+    lines.push(format!("    kind: {:?}", candidate.kind));
+    lines.push(format!(
+        "    tile: {}",
+        candidate
+            .tile
+            .map(|tile| tile.to_mjai_string())
+            .unwrap_or_else(|| ABSENT.to_string())
+    ));
+    lines.push(format!(
+        "    current fixed meld count: {}",
+        format_fixed_meld_count(candidate.current_fixed_meld_count)
+    ));
+    lines.push(format!(
+        "    post-kan fixed meld count: {}",
+        format_fixed_meld_count(candidate.post_kan_fixed_meld_count)
+    ));
+    lines.push(format!(
+        "    baseline discard: {}",
+        candidate
+            .baseline_discard
+            .map(|tile| tile.to_mjai_string())
+            .unwrap_or_else(|| ABSENT.to_string())
+    ));
+    lines.push(format!(
+        "    baseline: {}",
+        format_kan_hand(candidate.baseline)
+    ));
+    lines.push(format!(
+        "    post-kan: {}",
+        format_kan_hand(candidate.post_kan)
+    ));
+
+    lines
+}
+
+// 比較に使った13枚相当 state 1つ分。評価しなかった側は `-` で、0 と混同しない。
+//
+// 受け入れは `shanten` が同じ state 同士でしか同じ意味を持たないので、向聴数を必ず並べて出す。
+// 打点はテンパイの場合だけ攻撃モードと残枚数加重合計を出し、テンパイでない state は
+// `not evaluated` にする。
+fn format_kan_hand(hand: Option<KanHandDiagnostic>) -> String {
+    match hand {
+        None => ABSENT.to_string(),
+        Some(hand) => format!(
+            "shanten {} / acceptance {} / {} types / {}",
+            hand.shanten,
+            hand.acceptance_remaining,
+            hand.acceptance_type_count,
+            format_kan_offense(hand.offense)
+        ),
+    }
+}
+
+// テンパイ1件分の攻撃モードと攻撃打点。押し引きが threshold 判定に使うのと同じ残枚数加重合計。
+fn format_kan_offense(offense: Option<TenpaiOffenseValue>) -> String {
+    match offense {
+        None => NOT_EVALUATED.to_string(),
+        Some(offense) => format!("{:?} {}", offense.mode, weighted_total_label(offense.value)),
+    }
 }
 
 fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> Vec<String> {
@@ -3293,6 +3387,17 @@ pub fn action_label(action: &LegalAction) -> String {
             tile.to_mjai_string(),
             format_tiles(consumed)
         ),
+        LegalAction::Ankan { consumed } => format!("Ankan {}", format_tiles(consumed)),
+        LegalAction::Kakan { tile, consumed } => format!(
+            "Kakan {} <- {}",
+            tile.to_mjai_string(),
+            format_tiles(consumed)
+        ),
+        LegalAction::Daiminkan { tile, consumed } => format!(
+            "Daiminkan {} <- {}",
+            tile.to_mjai_string(),
+            format_tiles(consumed)
+        ),
         LegalAction::Reach => "Reach".to_string(),
         LegalAction::Hora => "Hora".to_string(),
         LegalAction::Ryukyoku => "Ryukyoku".to_string(),
@@ -3457,9 +3562,9 @@ mod tests {
     use bot_analysis::{AnalysisCallCandidate, AnalysisCallSelfTsumoComparison, ScenarioSpec};
     use bot_core::{
         Agent, CallDecisionReason, CombinedDefenseSelectionDiagnostic, DefenseFallbackKind,
-        DiagnosticOptions, MenzenAgent, OpenHandDefenseCategory,
+        DiagnosticOptions, KanDecisionReason, KanKind, MenzenAgent, OpenHandDefenseCategory,
         OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence, RonRiskEvidence, ShantenAgent,
-        TenpaiOffenseMode,
+        TenpaiOffenseMode, TenpaiOffenseValue,
     };
     use bot_logic::{
         DiscardComparisonReason, TileCounts, TwoShantenSelfTsumoCandidate,
@@ -4856,6 +4961,177 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("  call post-call discard: E"), "{summary}");
+    }
+
+    #[test]
+    fn kan_section_is_not_evaluated_without_a_legal_kan() {
+        assert_eq!(format_kan(None), "Kan\n  not evaluated");
+    }
+
+    // 自己リーチ前の暗槓。scenario から section まで通しで、暗槓前後の比較値を確認する。
+    #[test]
+    fn kan_section_reports_the_production_ankan_of_a_scenario() {
+        let scenario = scenario_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "oya": 0,
+                "round_wind": "E",
+                "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+                "legal_ankan": ["E E E E"]
+            }"#,
+        );
+        let diagnostic = diagnose(&scenario);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+
+        let output = format_diagnostic(&scenario, &diagnostic, false);
+        assert!(
+            output.contains("Final decision\n  action: Ankan E E E E\n  source: Kan"),
+            "{output}"
+        );
+        let kan = section(&output, "Kan\n");
+        assert!(kan.contains("  selected: Ankan E E E E"), "{kan}");
+        assert!(kan.contains("  reason: EligibleAnkanNoRegression"), "{kan}");
+        // 暗槓前後の既存評価をそのまま並べる。向聴・受け入れだけでなく攻撃打点も出す。
+        assert!(
+            kan.contains("    baseline: shanten 0 / acceptance 3 / 1 types / Damaten "),
+            "{kan}"
+        );
+        assert!(
+            kan.contains("    post-kan: shanten 0 / acceptance 3 / 1 types / Damaten "),
+            "{kan}"
+        );
+    }
+
+    // 自己リーチ後の暫定 policy。比較を行わないので、両 side の値は `-` のままになる。
+    #[test]
+    fn kan_section_reports_the_provisional_ankan_after_own_reach() {
+        let scenario = scenario_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "oya": 0,
+                "round_wind": "E",
+                "reached": [true, false, false, false],
+                "legal_dahai": "E",
+                "legal_ankan": ["E E E E"]
+            }"#,
+        );
+        let diagnostic = diagnose(&scenario);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+
+        let output = format_diagnostic(&scenario, &diagnostic, false);
+        let kan = section(&output, "Kan\n");
+        assert!(kan.contains("  selected: Ankan E E E E"), "{kan}");
+        assert!(
+            kan.contains("  reason: EligibleAnkanAfterOwnReach"),
+            "{kan}"
+        );
+        assert!(kan.contains("    baseline discard: -"), "{kan}");
+        assert!(kan.contains("    baseline: -"), "{kan}");
+        assert!(kan.contains("    post-kan: -"), "{kan}");
+    }
+
+    #[test]
+    fn kan_section_shows_the_compared_hands_of_every_candidate() {
+        let ankan = LegalAction::Ankan {
+            consumed: (108..112)
+                .map(|value| TileId::new(value).unwrap())
+                .collect(),
+        };
+        let kakan = LegalAction::Kakan {
+            tile: TileId::new(132).unwrap(),
+            consumed: (133..136)
+                .map(|value| TileId::new(value).unwrap())
+                .collect(),
+        };
+        let kan = KanDecisionDiagnostic {
+            selected: Some(ankan.clone()),
+            reason: KanDecisionReason::EligibleAnkanNoRegression,
+            candidates: vec![
+                KanCandidateDiagnostic {
+                    action: kakan,
+                    kind: KanKind::Kakan,
+                    tile: TileType::from_mjai_type_str("C").ok(),
+                    current_fixed_meld_count: None,
+                    post_kan_fixed_meld_count: None,
+                    baseline_discard: None,
+                    baseline: None,
+                    post_kan: None,
+                    eligible: false,
+                    selected: false,
+                    reason: KanDecisionReason::KakanNotConnected,
+                },
+                KanCandidateDiagnostic {
+                    action: ankan,
+                    kind: KanKind::Ankan,
+                    tile: TileType::from_mjai_type_str("E").ok(),
+                    current_fixed_meld_count: FixedMeldCount::new(0),
+                    post_kan_fixed_meld_count: FixedMeldCount::new(1),
+                    baseline_discard: TileType::from_mjai_type_str("E").ok(),
+                    baseline: Some(KanHandDiagnostic {
+                        shanten: 0,
+                        acceptance_remaining: 3,
+                        acceptance_type_count: 1,
+                        offense: Some(TenpaiOffenseValue {
+                            mode: TenpaiOffenseMode::Damaten,
+                            value: OffenseValue::Known {
+                                weighted_total: 11_700,
+                                total_remaining: 3,
+                            },
+                        }),
+                    }),
+                    post_kan: Some(KanHandDiagnostic {
+                        shanten: 0,
+                        acceptance_remaining: 3,
+                        acceptance_type_count: 1,
+                        offense: Some(TenpaiOffenseValue {
+                            mode: TenpaiOffenseMode::Damaten,
+                            value: OffenseValue::Known {
+                                weighted_total: 24_000,
+                                total_remaining: 3,
+                            },
+                        }),
+                    }),
+                    eligible: true,
+                    selected: true,
+                    reason: KanDecisionReason::EligibleAnkanNoRegression,
+                },
+            ],
+        };
+
+        assert_eq!(
+            format_kan(Some(&kan)),
+            "Kan\n  \
+             evaluated\n  \
+             selected: Ankan E E E E\n  \
+             reason: EligibleAnkanNoRegression\n  \
+             candidates: 2\n  \
+             Kakan C <- C C C\n    \
+             selected: no\n    \
+             eligible: no\n    \
+             reason: KakanNotConnected\n    \
+             kind: Kakan\n    \
+             tile: C\n    \
+             current fixed meld count: None\n    \
+             post-kan fixed meld count: None\n    \
+             baseline discard: -\n    \
+             baseline: -\n    \
+             post-kan: -\n  \
+             Ankan E E E E\n    \
+             selected: yes\n    \
+             eligible: yes\n    \
+             reason: EligibleAnkanNoRegression\n    \
+             kind: Ankan\n    \
+             tile: E\n    \
+             current fixed meld count: 0\n    \
+             post-kan fixed meld count: 1\n    \
+             baseline discard: E\n    \
+             baseline: shanten 0 / acceptance 3 / 1 types / Damaten 11700\n    \
+             post-kan: shanten 0 / acceptance 3 / 1 types / Damaten 24000"
+        );
     }
 
     #[test]

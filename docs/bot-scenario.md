@@ -680,11 +680,33 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `melds` | 各 player の副露・暗槓。要素数4 |
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌と候補順 |
+| `legal_ankan` | 合法な暗槓 |
 | `remaining_tiles` / `honba` / `kyotaku_points` / `scores` / `kyoku` | table state |
 
 ### legal_dahai
 
 `legal_dahai` は打牌可能な牌とその順序を明示します。リーチ後のツモ切りだけの局面や候補順に依存する判断の再現に利用できます。省略時は手牌とツモ牌から自動生成します。手牌に無い牌、赤5と黒5が一致しない指定、意味が重複する指定は error です。
+
+### legal_ankan
+
+`legal_ankan` は合法な暗槓を明示します。各要素は手牌とツモ牌から取る同じ牌種4枚で、`"E E E E"` のように書きます。
+
+```json
+{
+  "hand": "123456789m1p111z",
+  "draw": "E",
+  "player_id": 0,
+  "reached": [true, false, false, false],
+  "legal_dahai": "E",
+  "legal_ankan": ["E E E E"]
+}
+```
+
+上の例は自己リーチ後の局面です。リーチ後は合法な打牌が現在のツモ牌1枚に限られるので `legal_dahai` も併せて指定します。
+
+**暗槓が合法かどうかは入力側が source of truth** です。リーチ後に待ちが変わらないかどうかも含めて、ここへ書いた暗槓はそのまま合法手として渡します。局面そのもの (手牌・見え牌・副露) は変わりません。4枚でない指定、同じ牌種でない指定、手牌とツモ牌に無い指定は error です。
+
+判断内訳は [Structured diagnostics](diagnostics.md#kan) の `Kan` section に出ます。
 
 ### melds
 

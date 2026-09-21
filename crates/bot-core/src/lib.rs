@@ -14,6 +14,7 @@ pub mod forced_fold;
 pub mod iishanten_continuation_depth_comparison;
 pub mod iishanten_selection_depth_comparison;
 pub mod iishanten_selection_parallel_comparison;
+pub mod kan_decision;
 pub mod kuikae;
 pub mod meld;
 pub mod offense_value;
@@ -141,6 +142,9 @@ pub use two_shanten_full_parallel_comparison::{
     select_with_two_shanten_full_parallelism, two_shanten_full_parallelism_is_available,
 };
 
+pub use kan_decision::{
+    KanCandidateDiagnostic, KanDecisionDiagnostic, KanDecisionReason, KanHandDiagnostic, KanKind,
+};
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
 pub use offense_value::{

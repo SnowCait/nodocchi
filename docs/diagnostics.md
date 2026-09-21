@@ -16,6 +16,7 @@
 | `Player threats` | player ごとの reach / meld facts と OpenHandThreat classification |
 | `Push/Pull` | threat と offense を組み合わせた押し引き |
 | `Reach` | 通常打牌後のテンパイに対するリーチ判断 |
+| `Kan` | 合法なカン候補ごとの判断内訳 |
 | `Reach / Damaten comparison` | Reach / Damaten の判断材料をまとめた統合観測 (diagnostics only) |
 | `Defense` | リーチ者向け防御候補のうち採用したもの |
 | `Defense candidates` | 全合法 Dahai の防御評価 |
@@ -45,6 +46,7 @@ Final decision
 | `OpenHandDefenseFallback` | High OpenHandThreat 向け fallback |
 | `CombinedThreatDefenseFallback` | 複合 threat 向け fallback |
 | `Call` | 鳴き判断で選んだ Chi / Pon |
+| `Kan` | カン判断で選んだ暗槓 |
 | `LegalDahaiFallback` / `None` | 上位判断で選べない場合の fallback |
 
 防御 source では category や kind も表示されます。
@@ -101,6 +103,102 @@ Final decision
   source: OpenHandDefenseFallback
   open hand defense category: SafeAgainstAllTargets
 ```
+
+## Kan
+
+`Kan` は合法なカン候補ごとの判断内訳です。合法なカンが1件も無い局面と、カン判断まで進まなかった
+局面 (和了・九種九牌・鳴きでの早期終了、`Push` でリーチを採用した局面) では `not evaluated`
+です。`not evaluated` と「カンしない」を混同しないでください。
+
+カン判断自体は押し引きの結論にかかわらず通ります。自己リーチ後は降りようがないので、押し引きが
+`Fold` の局面でもカンを検討するためです。
+
+候補ごとに `kind` (`Ankan` / `Kakan` / `Daiminkan`)、`tile` (対象牌種)、`selected` / `eligible` と
+`reason` を出します。`reason` は最初に落ちた条件1つだけで、判定がそこまで進まなかった項目は `-`
+のままにします。
+
+production で選べるのは**暗槓だけ**です。加槓と大明槓は候補として並びますが、`reason` は必ず
+`KakanNotConnected` / `DaiminkanNotConnected` になります。
+
+```text
+Kan
+  evaluated
+  selected: Ankan E E E E
+  reason: EligibleAnkanNoRegression
+  candidates: 1
+  Ankan E E E E
+    selected: yes
+    eligible: yes
+    reason: EligibleAnkanNoRegression
+    kind: Ankan
+    tile: E
+    current fixed meld count: 0
+    post-kan fixed meld count: 1
+    baseline discard: E
+    baseline: shanten 0 / acceptance 3 / 1 types / Damaten 36000
+    post-kan: shanten 0 / acceptance 3 / 1 types / Damaten 36000
+```
+
+`baseline` は暗槓しない場合に採用する通常打牌 (`baseline discard`) を切った後の13枚、`post-kan` は
+暗槓後の `10枚 + 副露1組` で、どちらも `13 - 3 × 副露数` 枚の同じ大きさの手牌です。各行は
+`shanten` / 受け入れ (残枚数・牌種数) / 攻撃モードと攻撃打点を並べます。打点は押し引きが
+threshold 判定に使うのと同じ残枚数加重合計で、テンパイでない state では `not evaluated` です。
+
+この比較を行うのは**自己リーチ前の暗槓だけ**です。自己リーチ後は暗槓しなければ現在のツモ牌を
+強制ツモ切りするしかなく、その比較を既存評価で同じ尺度に載せられないため、合法性と structural
+validation だけで採用します。したがって `reason: EligibleAnkanAfterOwnReach` の候補では
+`baseline discard` / `baseline` / `post-kan` はどれも `-` になります。
+
+```text
+  Ankan E E E E
+    selected: yes
+    eligible: yes
+    reason: EligibleAnkanAfterOwnReach
+    kind: Ankan
+    tile: E
+    current fixed meld count: 0
+    post-kan fixed meld count: 1
+    baseline discard: -
+    baseline: -
+    post-kan: -
+```
+
+### reason の読み方
+
+| reason | 意味 |
+| --- | --- |
+| `EligibleAnkanNoRegression` | 自己リーチ前で、向聴・受け入れ・攻撃打点のどれも悪化しない |
+| `EligibleAnkanAfterOwnReach` | 自己リーチ後の暫定 policy。合法性と structural validation だけで採用する |
+| `OwnReachUnknown` | 自席を特定できず、リーチ済みかどうかを判断できない |
+| `ShantenRegresses` | 暗槓後の向聴が通常打牌後より悪い |
+| `ShantenImprovedNotComparable` | 暗槓後の向聴が進む。向聴段階が違うので受け入れも打点も比較しない |
+| `AcceptanceRegresses` | 同じ向聴段階で受け入れが減る |
+| `ValueNotEvaluable` | 暗槓前後の攻撃打点を同じ尺度で確定できない |
+| `ValueRegresses` | 攻撃打点が下がる |
+| `MultipleEligibleCandidates` | 成立した暗槓候補が2件以上ある |
+
+`acceptance` は「その牌を1枚加えると**現在の向聴数**が下がる牌」なので、`shanten` が違う行同士の
+受け入れ枚数は同じ意味の値ではありません。1向聴の受け入れ8枚とテンパイの待ち4枚を `4 < 8` として
+比べないため、向聴が進む候補は受け入れの劣化ではなく `ShantenImprovedNotComparable` になります。
+
+`ValueNotEvaluable` はどちらかの side がテンパイでない、攻撃モードが `Unknown` かリーチ手とダマ手で
+食い違う、攻撃打点が `unknown` (役なし・ロン不可・点数計算の入力不足) のいずれかです。速度が悪化
+しないことだけを根拠に暗槓しないので、この理由では通常打牌をそのまま維持します。
+
+モードが食い違う代表例は山の終盤です。暗槓後は嶺上牌を1枚引くので、その時点の残りツモ可能枚数は
+現在より1枚少なくなります。残りちょうど `REACH_MIN_REMAINING_TILES` 枚の局面では、暗槓しない側は
+まだリーチできる一方で暗槓後はリーチできず、`baseline` が `Reach`、`post-kan` が `Damaten` に
+なります。2つの行の攻撃モードを見比べれば、この食い違いが理由だと分かります。
+
+`OpponentReached` と `NotPush` は自己リーチ前の暗槓だけの理由です。自己リーチ後は降りようが
+ないので、他家リーチも押し引きの `Fold` も暗槓を落とす理由にしません。
+
+`MultipleEligibleCandidates` では `selected: none` になり、候補側は `eligible: yes` のまま
+`selected: no` で残ります。合法 action の列挙順を tie-break にしないためです。自己リーチの前後
+どちらでも同じ扱いです。
+
+新ドラ・嶺上牌は評価に含めていないので、どの行にも現れません。条件と今回含めていないものは
+[麻雀 AI の概要](ai/overview.md#カン-kan) を参照してください。
 
 ## Normal discard と candidates
 
