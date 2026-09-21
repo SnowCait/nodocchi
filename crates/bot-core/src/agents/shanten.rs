@@ -794,14 +794,15 @@ mod tests {
         STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
     };
     use crate::shanten_test_support::{
-        ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND, ANKAN_REGRESSING_CONSUMED,
-        ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND, OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND,
-        TENPAI_DRAWN, ankan_action, ankan_context, ankan_dahai_actions, dahai, fold_actions,
-        fold_under_reach_context, opponent_meld_actions, opponent_reach_context,
-        opponent_reach_context_with_visible, pon_meld, suited_reach_context,
-        suited_reach_context_with_reached, tenpai_actions, tenpai_context, tenpai_dahai_actions,
-        tenpai_under_reach_context, tile, unavailable_reach_meld, weak_tenpai_actions,
-        weak_tenpai_under_reach_context, weak_tenpai_under_reach_context_with,
+        ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND, ANKAN_IISHANTEN_CONSUMED,
+        ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED, ANKAN_REACH_DRAWN,
+        ANKAN_REACH_HAND, ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND,
+        OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, TENPAI_DRAWN, ankan_action, ankan_context,
+        ankan_dahai_actions, dahai, fold_actions, fold_under_reach_context, opponent_meld_actions,
+        opponent_reach_context, opponent_reach_context_with_visible, pon_meld,
+        suited_reach_context, suited_reach_context_with_reached, tenpai_actions, tenpai_context,
+        tenpai_dahai_actions, tenpai_under_reach_context, tile, unavailable_reach_meld,
+        weak_tenpai_actions, weak_tenpai_under_reach_context, weak_tenpai_under_reach_context_with,
     };
     use bot_logic::{
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
@@ -1224,15 +1225,15 @@ mod tests {
     #[test]
     fn reach_keeps_priority_over_ankan() {
         let ctx = ankan_context(
-            &ANKAN_FREE_HAND,
-            ANKAN_FREE_DRAWN,
+            &ANKAN_REACH_HAND,
+            ANKAN_REACH_DRAWN,
             [false; 4],
             Default::default(),
             Some(0),
         );
-        let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_FREE_HAND, ANKAN_FREE_DRAWN)
+        let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_REACH_HAND, ANKAN_REACH_DRAWN)
             .into_iter()
-            .chain([ankan_action(&ANKAN_FREE_CONSUMED), LegalAction::Reach])
+            .chain([ankan_action(&ANKAN_REACH_CONSUMED), LegalAction::Reach])
             .collect();
 
         let mut agent = ShantenAgent;
@@ -1242,6 +1243,50 @@ mod tests {
         assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
         // リーチを採用した局面ではカン判断そのものを行わない。
         assert_eq!(diagnostic.kan, None);
+
+        // 同じ局面でリーチが合法でなければ暗槓を選ぶ。リーチが先に採用されるのは action の
+        // 優先順位によるもので、暗槓の成立条件が変わるからではない。
+        let without_reach: Vec<LegalAction> = actions
+            .iter()
+            .filter(|action| !matches!(action, LegalAction::Reach))
+            .cloned()
+            .collect();
+        assert_eq!(
+            agent.act(&ctx, &without_reach),
+            ankan_action(&ANKAN_REACH_CONSUMED)
+        );
+    }
+
+    // テンパイ以外は暗槓前後の打点を既存評価で比較できないので、速度が悪化しなくても暗槓せず
+    // 通常打牌を維持する。
+    #[test]
+    fn does_not_select_an_ankan_whose_value_cannot_be_compared() {
+        let ctx = ankan_context(
+            &ANKAN_IISHANTEN_HAND,
+            ANKAN_IISHANTEN_DRAWN,
+            [false; 4],
+            Default::default(),
+            Some(0),
+        );
+        let without_kan = ankan_dahai_actions(&ANKAN_IISHANTEN_HAND, ANKAN_IISHANTEN_DRAWN);
+        let with_kan: Vec<LegalAction> = without_kan
+            .iter()
+            .cloned()
+            .chain([ankan_action(&ANKAN_IISHANTEN_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&ctx, &with_kan),
+            agent.act(&ctx, &without_kan),
+            "打点を比較できない暗槓では通常打牌を維持する"
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &with_kan);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        let kan = diagnostic.kan.expect("暗槓候補");
+        assert_eq!(kan.selected, None);
+        assert_eq!(kan.reason, KanDecisionReason::ValueNotEvaluable);
     }
 
     // Hora は暗槓より優先する。

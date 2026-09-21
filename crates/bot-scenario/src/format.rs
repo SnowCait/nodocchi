@@ -429,13 +429,28 @@ fn format_kan_candidate(candidate: &KanCandidateDiagnostic) -> Vec<String> {
 }
 
 // 比較に使った13枚相当 state 1つ分。評価しなかった側は `-` で、0 と混同しない。
+//
+// 受け入れは `shanten` が同じ state 同士でしか同じ意味を持たないので、向聴数を必ず並べて出す。
+// 打点はテンパイの場合だけ攻撃モードと残枚数加重合計を出し、テンパイでない state は
+// `not evaluated` にする。
 fn format_kan_hand(hand: Option<KanHandDiagnostic>) -> String {
     match hand {
         None => ABSENT.to_string(),
         Some(hand) => format!(
-            "shanten {} / acceptance {} / {} types",
-            hand.shanten, hand.acceptance_remaining, hand.acceptance_type_count
+            "shanten {} / acceptance {} / {} types / {}",
+            hand.shanten,
+            hand.acceptance_remaining,
+            hand.acceptance_type_count,
+            format_kan_offense(hand.offense)
         ),
+    }
+}
+
+// テンパイ1件分の攻撃モードと攻撃打点。押し引きが threshold 判定に使うのと同じ残枚数加重合計。
+fn format_kan_offense(offense: Option<TenpaiOffenseValue>) -> String {
+    match offense {
+        None => NOT_EVALUATED.to_string(),
+        Some(offense) => format!("{:?} {}", offense.mode, weighted_total_label(offense.value)),
     }
 }
 
@@ -3549,7 +3564,7 @@ mod tests {
         Agent, CallDecisionReason, CombinedDefenseSelectionDiagnostic, DefenseFallbackKind,
         DiagnosticOptions, KanDecisionReason, KanKind, MenzenAgent, OpenHandDefenseCategory,
         OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence, RonRiskEvidence, ShantenAgent,
-        TenpaiOffenseMode,
+        TenpaiOffenseMode, TenpaiOffenseValue,
     };
     use bot_logic::{
         DiscardComparisonReason, TileCounts, TwoShantenSelfTsumoCandidate,
@@ -4980,9 +4995,15 @@ mod tests {
         let kan = section(&output, "Kan\n");
         assert!(kan.contains("  selected: Ankan E E E E"), "{kan}");
         assert!(kan.contains("  reason: EligibleAnkanNoRegression"), "{kan}");
-        // 暗槓前後の既存評価をそのまま並べる。
-        assert!(kan.contains("    baseline: shanten 0 /"), "{kan}");
-        assert!(kan.contains("    post-kan: shanten 0 /"), "{kan}");
+        // 暗槓前後の既存評価をそのまま並べる。向聴・受け入れだけでなく攻撃打点も出す。
+        assert!(
+            kan.contains("    baseline: shanten 0 / acceptance 3 / 1 types / Reach "),
+            "{kan}"
+        );
+        assert!(
+            kan.contains("    post-kan: shanten 0 / acceptance 3 / 1 types / Reach "),
+            "{kan}"
+        );
     }
 
     #[test]
@@ -5026,11 +5047,25 @@ mod tests {
                         shanten: 0,
                         acceptance_remaining: 3,
                         acceptance_type_count: 1,
+                        offense: Some(TenpaiOffenseValue {
+                            mode: TenpaiOffenseMode::Damaten,
+                            value: OffenseValue::Known {
+                                weighted_total: 11_700,
+                                total_remaining: 3,
+                            },
+                        }),
                     }),
                     post_kan: Some(KanHandDiagnostic {
                         shanten: 0,
                         acceptance_remaining: 3,
                         acceptance_type_count: 1,
+                        offense: Some(TenpaiOffenseValue {
+                            mode: TenpaiOffenseMode::Damaten,
+                            value: OffenseValue::Known {
+                                weighted_total: 24_000,
+                                total_remaining: 3,
+                            },
+                        }),
                     }),
                     eligible: true,
                     selected: true,
@@ -5066,8 +5101,8 @@ mod tests {
              current fixed meld count: 0\n    \
              post-kan fixed meld count: 1\n    \
              baseline discard: E\n    \
-             baseline: shanten 0 / acceptance 3 / 1 types\n    \
-             post-kan: shanten 0 / acceptance 3 / 1 types"
+             baseline: shanten 0 / acceptance 3 / 1 types / Damaten 11700\n    \
+             post-kan: shanten 0 / acceptance 3 / 1 types / Damaten 24000"
         );
     }
 

@@ -132,17 +132,40 @@ Kan
     current fixed meld count: 0
     post-kan fixed meld count: 1
     baseline discard: E
-    baseline: shanten 0 / acceptance 3 / 1 types
-    post-kan: shanten 0 / acceptance 3 / 1 types
+    baseline: shanten 0 / acceptance 3 / 1 types / Reach 36000
+    post-kan: shanten 0 / acceptance 3 / 1 types / Reach 36000
 ```
 
 `baseline` は暗槓しない場合に採用する通常打牌 (`baseline discard`) を切った後の13枚、`post-kan` は
-暗槓後の `10枚 + 副露1組` で、どちらも `13 - 3 × 副露数` 枚の同じ大きさの手牌です。向聴が悪化せず
-受け入れも減らない場合だけ暗槓します (`EligibleAnkanNoRegression`)。悪化した場合の `reason` は
-`ShantenRegresses` / `AcceptanceRegresses` で、どの値で落ちたかは両方の行を見比べれば分かります。
+暗槓後の `10枚 + 副露1組` で、どちらも `13 - 3 × 副露数` 枚の同じ大きさの手牌です。各行は
+`shanten` / 受け入れ (残枚数・牌種数) / 攻撃モードと攻撃打点を並べます。打点は押し引きが
+threshold 判定に使うのと同じ残枚数加重合計で、テンパイでない state では `not evaluated` です。
 
-新ドラ・嶺上牌・暗槓で増える符は評価に含めていないので、この2行には現れません。条件と今回
-含めていないものは [麻雀 AI の概要](ai/overview.md#カン-kan) を参照してください。
+### reason の読み方
+
+| reason | 意味 |
+| --- | --- |
+| `EligibleAnkanNoRegression` | 向聴・受け入れ・攻撃打点のどれも悪化しない |
+| `ShantenRegresses` | 暗槓後の向聴が通常打牌後より悪い |
+| `ShantenImprovedNotComparable` | 暗槓後の向聴が進む。向聴段階が違うので受け入れも打点も比較しない |
+| `AcceptanceRegresses` | 同じ向聴段階で受け入れが減る |
+| `ValueNotEvaluable` | 暗槓前後の攻撃打点を同じ尺度で確定できない |
+| `ValueRegresses` | 攻撃打点が下がる |
+| `MultipleEligibleCandidates` | 成立した暗槓候補が2件以上ある |
+
+`acceptance` は「その牌を1枚加えると**現在の向聴数**が下がる牌」なので、`shanten` が違う行同士の
+受け入れ枚数は同じ意味の値ではありません。1向聴の受け入れ8枚とテンパイの待ち4枚を `4 < 8` として
+比べないため、向聴が進む候補は受け入れの劣化ではなく `ShantenImprovedNotComparable` になります。
+
+`ValueNotEvaluable` はどちらかの side がテンパイでない、攻撃モードが `Unknown` かリーチ手とダマ手で
+食い違う、攻撃打点が `unknown` (役なし・ロン不可・点数計算の入力不足) のいずれかです。速度が悪化
+しないことだけを根拠に暗槓しないので、この理由では通常打牌をそのまま維持します。
+
+`MultipleEligibleCandidates` では `selected: none` になり、候補側は `eligible: yes` のまま
+`selected: no` で残ります。合法 action の列挙順を tie-break にしないためです。
+
+新ドラ・嶺上牌は評価に含めていないので、どの行にも現れません。条件と今回含めていないものは
+[麻雀 AI の概要](ai/overview.md#カン-kan) を参照してください。
 
 ## Normal discard と candidates
 

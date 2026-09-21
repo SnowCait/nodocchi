@@ -271,7 +271,8 @@ pub(crate) fn three_shanten_progress_regression_context() -> (GameContext, Vec<L
 
 /// 暗槓判断用の東場東家局面。ツモ牌と副露・リーチ状況だけを差し替える。
 ///
-/// 見え牌は自分の手牌とツモ牌だけで、カンの対象牌が4枚とも見えている状態になる。
+/// 見え牌は自分の手牌とツモ牌だけで、カンの対象牌が4枚とも見えている状態になる。履歴依存
+/// フリテンは非フリテンで確定させ、打点比較がロン可否 unknown で落ちないようにする。
 pub(crate) fn ankan_context(
     hand: &[u8],
     drawn: u8,
@@ -296,6 +297,10 @@ pub(crate) fn ankan_context(
         reached,
         melds,
     )
+    .with_history_furiten_facts(HistoryFuritenFacts {
+        same_turn: Some(false),
+        riichi_missed_win: Some(false),
+    })
 }
 
 pub(crate) fn ankan_action(consumed: &[u8]) -> LegalAction {
@@ -325,3 +330,30 @@ pub(crate) const ANKAN_REGRESSING_HAND: [u8; 13] =
     [0, 1, 2, 3, 4, 48, 53, 56, 96, 100, 104, 36, 37];
 pub(crate) const ANKAN_REGRESSING_DRAWN: u8 = 68;
 pub(crate) const ANKAN_REGRESSING_CONSUMED: [u8; 4] = [0, 1, 2, 3];
+
+/// 2m (4..7) の暗刻で 5p / 8p 待ちテンパイし、4枚目の 2m (7) をツモった局面。
+///
+/// 断么九だけの安い手なのでダマ打点が足りず、リーチ判断がリーチを選ぶ。暗槓しても待ちは
+/// 5p / 8p のまま変わらず打点も下がらないので、リーチが合法でなければ暗槓の成立条件を満たす。
+pub(crate) const ANKAN_REACH_HAND: [u8; 13] = [4, 5, 6, 44, 48, 53, 92, 96, 100, 84, 85, 56, 60];
+pub(crate) const ANKAN_REACH_DRAWN: u8 = 7;
+pub(crate) const ANKAN_REACH_CONSUMED: [u8; 4] = [4, 5, 6, 7];
+
+/// 2m (4..7) 4枚と 3m (8) 4m (12) を持ち、4枚目の 2m (7) をツモった局面。
+///
+/// 暗槓しなければ 2m2m2m + 2m3m4m の2面子として使えて 6s / 9s の2種待ちになるが、暗槓すると
+/// その使い分けが消えて 5m の1種待ちへ狭まる。テンパイのままなので、同じ向聴段階での受け入れ
+/// 劣化として弾く局面になる。
+pub(crate) const ANKAN_ACCEPTANCE_REGRESSING_HAND: [u8; 13] =
+    [4, 5, 6, 8, 12, 48, 53, 56, 96, 100, 104, 36, 37];
+pub(crate) const ANKAN_ACCEPTANCE_REGRESSING_DRAWN: u8 = 7;
+pub(crate) const ANKAN_ACCEPTANCE_REGRESSING_CONSUMED: [u8; 4] = [4, 5, 6, 7];
+
+/// 東 (108..111) の暗刻を持つ1向聴の局面。4枚目の東 (111) をツモった状態。
+///
+/// 東を切っても暗槓しても1向聴のままで受け入れも変わらないが、テンパイではないので既存の
+/// 攻撃打点で暗槓前後を比較できない。
+pub(crate) const ANKAN_IISHANTEN_HAND: [u8; 13] =
+    [108, 109, 110, 0, 4, 8, 12, 17, 20, 24, 28, 36, 40];
+pub(crate) const ANKAN_IISHANTEN_DRAWN: u8 = 111;
+pub(crate) const ANKAN_IISHANTEN_CONSUMED: [u8; 4] = [108, 109, 110, 111];
