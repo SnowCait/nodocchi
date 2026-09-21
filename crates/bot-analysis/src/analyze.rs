@@ -10,7 +10,7 @@ use crate::analysis_result::AnalysisResult;
 ///
 /// primary 診断は production 既定の [`ShantenAgent::diagnose`] でここで1回だけ取り、追加
 /// 調査用の診断は構築しない。診断そのものは返さず、[`AnalysisResult`] へ投影した結果だけを
-/// 渡す。既に primary 診断を持っている consumer は、再診断せずに
+/// 渡す。同じ `context` / 合法手に対する primary 診断を既に持っている consumer は、再診断せずに
 /// [`AnalysisResult::from_decision`] を直接呼ぶ。
 ///
 /// `choice_limit` は [`AnalysisResult::choices`] に並べる件数の上限で、consumer が決める。
@@ -128,48 +128,36 @@ mod tests {
         );
     }
 
-    // 既に primary 診断を持つ consumer の経路では、渡された診断をそのまま choice 1 に使い、
-    // production 診断を取り直さない。
+    // 既に primary 診断を持つ consumer の経路では、その診断をそのまま choice 1 に使う。
+    // `bot-scenario` の詳細診断経路と同じく、同じ context / 合法手から得た診断を渡す。
     #[test]
-    fn projects_the_given_primary_diagnostic_without_rerunning_it() {
+    fn keeps_the_selection_of_a_detailed_primary_diagnostic() {
         let scenario = scenario_from_json(NORMAL_SCENARIO);
-        let production = diagnose(&scenario);
-
-        // 合法手を狭めて、production が全合法手から選ぶ action とは別の action を選ぶ診断を作る。
-        let narrowed_actions: Vec<_> = scenario
-            .legal_actions
-            .iter()
-            .filter(|action| **action != production.selected_action)
-            .cloned()
-            .collect();
-        let narrowed = ShantenAgent::diagnose(&scenario.context, &narrowed_actions);
-        assert_ne!(narrowed.selected_action, production.selected_action);
-
-        // 全合法手を渡しても choice 1 は再診断されず、渡した診断の選択のままになる。
-        let result = AnalysisResult::from_decision(
-            &scenario.context,
-            &scenario.legal_actions,
-            &narrowed,
-            CHOICE_LIMIT,
-        );
-        assert_eq!(result.choices[0].selected_action, narrowed.selected_action);
-
-        // 詳細診断を渡す経路でも同じく、その診断が choice 1 になる。
         let detailed = ShantenAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
         );
+        // 追加調査を持つ診断でも、選択そのものは production 既定の診断と同じになる。
         assert!(detailed.normal_discard_lookahead.is_some());
-        let detailed_result = AnalysisResult::from_decision(
+        assert_eq!(
+            detailed.selected_action,
+            diagnose(&scenario).selected_action
+        );
+
+        let result = AnalysisResult::from_decision(
             &scenario.context,
             &scenario.legal_actions,
             &detailed,
             CHOICE_LIMIT,
         );
+        assert_eq!(result.choices[0].selected_action, detailed.selected_action);
+        assert_eq!(result.choices[0].selected_source, detailed.selected_source);
+
+        // 追加調査の範囲が違うだけなので、共通入口を通した結果と一致する。
         assert_eq!(
-            detailed_result.choices[0].selected_action,
-            detailed.selected_action
+            result,
+            analyze(&scenario.context, &scenario.legal_actions, CHOICE_LIMIT)
         );
     }
 }

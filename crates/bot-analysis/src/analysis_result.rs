@@ -43,8 +43,21 @@ pub struct AnalysisResult {
 impl AnalysisResult {
     /// 局面と primary 診断から解析結果を投影する。
     ///
+    /// `diagnostic` は、ここへ渡す `context` と `legal_actions` そのものに対して得た primary
+    /// 診断でなければならない。primary 診断はここで取り直さず、渡されたものをそのまま
+    /// choice 1 として使う一方、choice 2 以降は同じ `context` / `legal_actions` から
+    /// production の再診断で求めるので、別の合法手集合から得た診断を渡すと choice 1 と
+    /// choice 2 以降が違う前提の ranking になる。
+    ///
+    /// 追加診断の範囲は違っていてよい。[`DiagnosticOptions`](bot_core::DiagnosticOptions) は
+    /// 選択する action を変えないので、同じ `context` / `legal_actions` から
+    /// [`ShantenAgent::diagnose_with_options()`](bot_core::ShantenAgent::diagnose_with_options)
+    /// で得た詳細診断も同じ decision point の primary 診断として渡せる。
+    ///
+    /// この前提は runtime では検証しない。`context` / `legal_actions` と `diagnostic` の対応は
+    /// 呼び出し側が保つ。
+    ///
     /// `choice_limit` は [`choices`](Self::choices) に並べる件数の上限で、consumer が決める。
-    /// primary 診断はここで取り直さず、渡されたものをそのまま choice 1 として使う。
     pub fn from_decision(
         context: &GameContext,
         legal_actions: &[LegalAction],

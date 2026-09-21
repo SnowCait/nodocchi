@@ -83,9 +83,18 @@ pub struct RankedChoiceHitProbability {
 
 /// primary 診断を choice 1 として、上位 choice の action を除外しながら `limit` 件まで順位付けする。
 ///
-/// choice 1 は渡された `diagnostic` そのもので、別の診断範囲で取り直さない。choice 2 以降だけ
-/// production の [`ShantenAgent::diagnose`] を再実行する。action を除外できない場合と、合法手が
-/// 無くなった場合、再診断が action を選べなかった場合はそこで打ち切る。
+/// `diagnostic` は、ここへ渡す `context` と `legal_actions` そのものに対して得た primary 診断で
+/// なければならない。choice 1 は渡された `diagnostic` そのもので、別の診断範囲で取り直さない。
+/// choice 2 以降だけ、その同じ `legal_actions` から上位 choice が選んだ action を1件ずつ除外して
+/// production の [`ShantenAgent::diagnose`] を再実行する。したがって別の合法手集合から得た診断を
+/// 渡すと、choice 1 と choice 2 以降が違う前提の並びになる。
+///
+/// 追加診断の範囲は違っていてよい。[`DiagnosticOptions`](bot_core::DiagnosticOptions) は選択する
+/// action を変えないので、同じ `context` / `legal_actions` から得た詳細診断も primary 診断として
+/// 渡せる。この前提は runtime では検証しない。
+///
+/// action を除外できない場合と、合法手が無くなった場合、再診断が action を選べなかった場合は
+/// そこで打ち切る。
 pub fn rank_choices(
     context: &GameContext,
     legal_actions: &[LegalAction],
