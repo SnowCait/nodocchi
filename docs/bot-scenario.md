@@ -4,6 +4,8 @@
 
 牌文字列の parse、physical tile の割り当て、scenario の validation、`GameContext` と `LegalAction` の構築は、platform 非依存の library crate [`bot-analysis`](../crates/bot-analysis/) にあります。`bot-scenario` は CLI 引数の解析・file I/O・RiichiLab capture の再生・出力の整形を担当し、局面構築は `bot-analysis` の `ScenarioSpec` → `Scenario::resolve()` → `Scenario` をそのまま使用します。
 
+[Summary](#summary) が表示する値も `bot-analysis` が決めます。`Scenario` と production の `ShantenDecisionDiagnostic` から `AnalysisResult::from_decision()` が薄い構造化結果を作り、CLI はそれを文字列化するだけです。どの候補を比較対象にするか、どの防御 source を出すかといった選択は `bot-analysis` 側にあり、CLI は持ちません。
+
 ## 簡易 CLI
 
 牌効率をすぐ確認する用途です。
@@ -586,6 +588,8 @@ inline baseline は `bot-scenario` の入力補助であり、AI 本体が未知
 ## Summary
 
 `--summary-only` は Summary section だけを表示します。Summary は「何を選んだか」と「次点がなぜ負けたか」を短く確認するためのもので、候補ごとの metric 一覧は持ちません。
+
+Summary の各行は `bot-analysis` の `AnalysisResult` が持つ値そのものです。CLI は enum を label へ、固定小数点を表示用の数値へ直すだけで、診断からの値の選択・判定のやり直しは行いません。`-` / `unknown` / `not evaluated` / `none` の使い分けも `AnalysisResult` が区別した状態をそのまま出したものです。
 
 [`--force-fold`](#--force-fold) を指定した場合の Summary は通常判断の Summary ではないので、先頭に `mode: ForcedFold` を置き、choice 1 / 2 / 3 の比較も持ちません。代わりに production defense ordering の `rank` 付き候補を並べます ([Summary の防御候補 ranking](#summary-の防御候補-ranking))。
 

@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use bot_analysis::{
-    RankedChoice, RankedChoiceComparisonValues, RankedChoiceHonorValue, Scenario, rank_choices,
+    AnalysisCall, AnalysisCallReasonSource, AnalysisCallSelfTsumo, AnalysisDamaten,
+    AnalysisDefense, AnalysisDiscardTile, AnalysisOpponentHonorValue, AnalysisPushPull,
+    AnalysisReach, AnalysisReachVerdict, AnalysisResult, AnalysisRyukyoku, RankedChoice,
+    RankedChoiceComparisonValues, Scenario,
 };
 use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
@@ -10,22 +13,21 @@ use bot_core::{
     CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallWaitYaku,
     CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
     CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
-    DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic,
-    DefenseFallbackKind, GameContext, LegalAction, Meld, MeldKind, MeldKindCounts,
-    MeldThreatDiagnostic, OffenseValue, OpenHandDefenseCandidateDiagnostic,
-    OpenHandDefenseDiagnostic, OpenHandThreatAssessment, PlayerThreatDiagnostic,
-    ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,
-    ProspectiveDrawVariantValue, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
-    ProspectiveOutcome, ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision,
-    PushPullInputs, PushPullOffenseState, ReachDamatenComparisonDiagnostic,
-    ReachDecisionDiagnostic, ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic,
-    ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
-    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenDecisionDiagnostic, StrongTenpaiRequirement,
-    StructuralExpectedDealInLossDiagnostic, StructuralExpectedDealInLossEvidence,
-    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
-    TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
-    ThreatDefenseTarget, TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
+    DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext,
+    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
+    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
+    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
+    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveHanVerdict,
+    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
+    ProspectiveWaitValue, PushPullDecision, PushPullInputs, PushPullOffenseState,
+    ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic, ReachPublicSafetyEvidence,
+    ReachRonBaselineDiagnostic, ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuVerdict,
+    ShantenDecisionDiagnostic, StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
+    StructuralExpectedDealInLossEvidence, TenpaiContinuationBranch, TenpaiContinuationCandidate,
+    TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
+    TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
+    TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
@@ -2893,20 +2895,29 @@ fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
 
 /// 選択結果とその主な理由だけを1画面へ集めた要約。
 ///
-/// choice の算出と choice 間の比較は `bot-analysis` の [`rank_choices`] が行う。ここは
-/// 受け取った構造化結果を表示するだけで、表示専用の評価や comparator は持たない。
+/// 表示する値の選択は `bot-analysis` の [`AnalysisResult`] が済ませている。ここは受け取った
+/// 構造化結果を文字列化するだけで、診断を読み直すことも、表示専用の評価や comparator を持つ
+/// こともしない。
 pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
-    let choices = rank_choices(scenario, diagnostic, SUMMARY_CHOICE_LIMIT);
+    format_analysis_summary(&AnalysisResult::from_decision(
+        scenario,
+        diagnostic,
+        SUMMARY_CHOICE_LIMIT,
+    ))
+}
+
+fn format_analysis_summary(result: &AnalysisResult) -> String {
     let mut groups = vec![
-        summary_choice(1, &choices[0]),
-        summary_ryukyoku(diagnostic),
-        summary_push_pull(diagnostic),
-        summary_reach(diagnostic),
-        summary_call(diagnostic),
-        summary_defense(diagnostic),
+        summary_choice(1, &result.choices[0]),
+        summary_ryukyoku(result.ryukyoku.as_ref()),
+        summary_push_pull(result.push_pull.as_ref()),
+        summary_reach(&result.reach),
+        summary_call(result.call.as_ref()),
+        summary_defense(result.defense.as_ref()),
     ];
     groups.extend(
-        choices
+        result
+            .choices
             .iter()
             .enumerate()
             .skip(1)
@@ -2980,10 +2991,10 @@ fn summary_choice(rank: usize, choice: &RankedChoice) -> Vec<String> {
     lines
 }
 
-fn opponent_honor_value_label(value: RankedChoiceHonorValue) -> String {
+fn opponent_honor_value_label(value: AnalysisOpponentHonorValue) -> String {
     match value {
-        RankedChoiceHonorValue::Known(value) => format!("{value:?}"),
-        RankedChoiceHonorValue::Unknown => ABSENT.to_string(),
+        AnalysisOpponentHonorValue::Known(value) => format!("{value:?}"),
+        AnalysisOpponentHonorValue::Unknown => ABSENT.to_string(),
     }
 }
 
@@ -3006,8 +3017,8 @@ fn choice_comparison_value_labels(values: RankedChoiceComparisonValues) -> (Stri
 
 // 九種九牌が合法だった局面だけ、宣言 / 続行の結論と判断に使った3種類の向聴数を出す。
 // 通常局面では行を追加しない。
-fn summary_ryukyoku(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    let Some(ryukyoku) = diagnostic.ryukyoku.as_ref() else {
+fn summary_ryukyoku(ryukyoku: Option<&AnalysisRyukyoku>) -> Vec<String> {
+    let Some(ryukyoku) = ryukyoku else {
         return Vec::new();
     };
     vec![
@@ -3024,62 +3035,56 @@ fn ryukyoku_verdict_label(verdict: RyukyokuVerdict) -> &'static str {
 }
 
 // 手牌を評価できなかった場合は 0 や適当な向聴数で埋めず unknown のまま出す。
-fn summary_ryukyoku_shanten(ryukyoku: &RyukyokuDecisionDiagnostic) -> String {
+fn summary_ryukyoku_shanten(ryukyoku: &AnalysisRyukyoku) -> String {
     format!(
         "standard {} / chiitoitsu {} / kokushi {}",
-        format_optional_count(ryukyoku.standard_shanten()),
-        format_optional_count(ryukyoku.chiitoitsu_shanten()),
-        format_optional_count(ryukyoku.kokushi_shanten())
+        format_optional_count(ryukyoku.standard_shanten),
+        format_optional_count(ryukyoku.chiitoitsu_shanten),
+        format_optional_count(ryukyoku.kokushi_shanten)
     )
 }
 
-fn summary_push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    let Some(decision) = diagnostic.push_pull_decision.as_ref() else {
+fn summary_push_pull(push_pull: Option<&AnalysisPushPull>) -> Vec<String> {
+    let Some(push_pull) = push_pull else {
         return Vec::new();
     };
     let mut lines = vec![
-        format!("  push/pull: {:?}", decision.mode),
-        format!("  push/pull reason: {:?}", decision.reason),
+        format!("  push/pull: {:?}", push_pull.mode),
+        format!("  push/pull reason: {:?}", push_pull.reason),
     ];
 
     // 打牌後がテンパイの局面だけ、押し引きが見た待ち・フリテン・攻撃打点と適用 threshold を
     // 添える。テンパイでなければ判断材料にならないので行そのものを出さない。
-    let Some(inputs) = diagnostic.push_pull_inputs.as_ref() else {
-        return lines;
-    };
-    let Some(offense) = inputs.offense else {
-        return lines;
-    };
-    let Some(wait) = offense.tenpai_wait_after_discard else {
+    let Some(offense) = push_pull.tenpai_offense.as_ref() else {
         return lines;
     };
 
     lines.push(format!(
         "  offense live wait: {} remaining / {} types",
-        wait.tsumo_remaining, wait.tsumo_type_count
+        offense.live_wait_remaining, offense.live_wait_type_count
     ));
     lines.push(format!(
         "  offense furiten: {}",
-        permanent_furiten_label(wait.permanent_furiten)
+        permanent_furiten_label(offense.permanent_furiten)
     ));
     lines.push(format!(
         "  offense ron: {}",
-        format_optional_yes_no(wait.can_ron)
+        format_optional_yes_no(offense.can_ron)
     ));
     lines.push(format!(
         "  offense value: {}",
-        summary_offense_value(&offense)
+        summary_offense_value(offense.value)
     ));
     lines.push(format!(
         "  strong tenpai requirement: {}",
-        strong_tenpai_requirement_label(offense.strong_tenpai_requirement(inputs.dealer_reacher))
+        strong_tenpai_requirement_label(offense.strong_tenpai_requirement)
     ));
     lines
 }
 
 // 攻撃モード・残枚数加重平均打点・残枚数加重合計を1行にまとめる。評価していない場合はその旨だけ出す。
-fn summary_offense_value(offense: &PushPullOffenseState) -> String {
-    match offense.tenpai_offense_value_after_discard {
+fn summary_offense_value(offense_value: Option<TenpaiOffenseValue>) -> String {
+    match offense_value {
         None => NOT_EVALUATED.to_string(),
         Some(TenpaiOffenseValue { mode, value }) => format!(
             "{mode:?} {} / total: {}",
@@ -3089,39 +3094,33 @@ fn summary_offense_value(offense: &PushPullOffenseState) -> String {
     }
 }
 
-fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    let Some(reach) = diagnostic.reach.as_ref() else {
-        return match diagnostic.push_pull_decision {
-            Some(_) => vec![format!("  reach: {NOT_EVALUATED}")],
-            None => Vec::new(),
-        };
+fn summary_reach(reach: &AnalysisReach) -> Vec<String> {
+    let decision = match reach {
+        AnalysisReach::Absent => return Vec::new(),
+        AnalysisReach::NotEvaluated => return vec![format!("  reach: {NOT_EVALUATED}")],
+        AnalysisReach::Evaluated(decision) => decision,
     };
 
     let mut lines = vec![
-        format!("  reach: {}", summary_reach_decision(reach)),
-        format!("  reach base reason: {:?}", reach.reason),
+        format!("  reach: {}", reach_verdict_label(decision.verdict)),
+        format!("  reach base reason: {:?}", decision.base_reason),
     ];
 
     // timing で今回の宣言を見送った場合だけ、その理由を判別できるようにする。重い枝の内訳は
     // Summary に入れず、`Reach` 節が持つ。
-    if reach.defers_reach()
-        && let Some(timing) = reach.timing.as_ref()
-    {
-        lines.push(format!("  reach timing reason: {:?}", timing.reason));
+    if let Some(reason) = decision.timing_reason {
+        lines.push(format!("  reach timing reason: {reason:?}"));
     }
 
-    if let Some(tenpai) = reach.tenpai_wait.as_ref() {
+    if let Some(tenpai) = decision.tenpai_wait {
         lines.push(format!(
             "  live wait: {} remaining / {} types",
-            tenpai.tsumo_remaining, tenpai.tsumo_type_count
+            tenpai.live_wait_remaining, tenpai.live_wait_type_count
         ));
-        lines.push(format!(
-            "  ron: {}",
-            format_optional_yes_no(tenpai.can_ron())
-        ));
+        lines.push(format!("  ron: {}", format_optional_yes_no(tenpai.can_ron)));
     }
 
-    if let Some(damaten) = reach.damaten_value.as_ref() {
+    if let Some(damaten) = decision.damaten.as_ref() {
         lines.push(format!("  damaten verdict: {:?}", damaten.verdict));
         lines.push(format!(
             "  damaten values: {}",
@@ -3132,18 +3131,20 @@ fn summary_reach(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
     lines
 }
 
-// リーチの採否。base policy がリーチを選んだうえで timing が今回の宣言を見送った局面は、
-// base policy がダマを選んだ局面と区別する。
-fn summary_reach_decision(reach: &ReachDecisionDiagnostic) -> &'static str {
-    if reach.defers_reach() {
-        return "deferred";
+// リーチの採否。宣言しない理由は verdict では区別せず、base policy がリーチを選んだうえで
+// timing が今回の宣言を見送った局面だけを別表示にする。
+fn reach_verdict_label(verdict: AnalysisReachVerdict) -> &'static str {
+    match verdict {
+        AnalysisReachVerdict::Reach => "yes",
+        AnalysisReachVerdict::NoReach => "no",
+        AnalysisReachVerdict::Deferred => "deferred",
     }
-    yes_no(reach.should_reach())
 }
 
-fn summary_damaten_values(damaten: &DamatenValueDiagnostic) -> String {
+fn summary_damaten_values(damaten: &AnalysisDamaten) -> String {
     let values: Vec<_> = damaten
-        .winning_tile_values()
+        .winning_tiles
+        .iter()
         .map(|winning_tile| {
             format!(
                 "{}={}",
@@ -3159,15 +3160,11 @@ fn summary_damaten_values(damaten: &DamatenValueDiagnostic) -> String {
     values.join(", ")
 }
 
-fn summary_call(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    diagnostic
-        .call
-        .as_ref()
-        .map(summary_call_lines)
-        .unwrap_or_default()
+fn summary_call(call: Option<&AnalysisCall>) -> Vec<String> {
+    call.map(summary_call_lines).unwrap_or_default()
 }
 
-fn summary_call_lines(call: &CallDecisionDiagnostic) -> Vec<String> {
+fn summary_call_lines(call: &AnalysisCall) -> Vec<String> {
     let mut lines = vec![
         format!(
             "  call: {}",
@@ -3177,123 +3174,106 @@ fn summary_call_lines(call: &CallDecisionDiagnostic) -> Vec<String> {
         ),
         format!("  call reason: {}", summary_call_reason(call)),
     ];
-    let Some(index) = summary_call_compared_candidate(call) else {
-        return lines;
-    };
-    let candidate = &call.candidates[index];
-    let Some(comparison) = summary_call_self_tsumo_comparison(candidate) else {
+    let Some(candidate) = call.compared_candidate.as_ref() else {
         return lines;
     };
 
-    if Some(index) != summary_call_reason_source(call) {
+    if !candidate.is_reason_source {
         lines.push(format!(
             "  call compared candidate: {} ({:?})",
             action_label(&candidate.action),
             candidate.reason
         ));
     }
-    lines.push(comparison);
+    lines.push(summary_call_self_tsumo_comparison(candidate.self_tsumo));
     lines.push(format!(
         "  call post-call discard: {}",
         candidate
             .post_call_discard
-            .as_ref()
-            .map(discard_label)
+            .map(discard_tile_label)
             .unwrap_or_else(|| UNKNOWN.to_string())
     ));
     lines
 }
 
-fn summary_call_reason(call: &CallDecisionDiagnostic) -> String {
-    if call.selected.is_some() {
-        return format!("{:?}", call.reason);
+// 採用が無い局面の理由は最初の候補が落ちた理由。どの候補由来かは analysis result が決める。
+fn summary_call_reason(call: &AnalysisCall) -> String {
+    match call.reason_source {
+        AnalysisCallReasonSource::SelectedCandidate => format!("{:?}", call.reason),
+        AnalysisCallReasonSource::FirstCandidate | AnalysisCallReasonSource::NoCandidate => {
+            format!("{:?} (first candidate)", call.reason)
+        }
     }
-    format!("{:?} (first candidate)", call.reason)
 }
 
-fn summary_call_reason_source(call: &CallDecisionDiagnostic) -> Option<usize> {
-    summary_call_selected_candidate(call).or_else(|| (!call.candidates.is_empty()).then_some(0))
-}
-
-fn summary_call_compared_candidate(call: &CallDecisionDiagnostic) -> Option<usize> {
-    summary_call_selected_candidate(call).or_else(|| {
-        call.candidates.iter().position(|candidate| {
-            candidate.iishanten_self_tsumo.is_some()
-                || candidate.two_shanten_self_tsumo.is_some()
-                || candidate.three_shanten_self_tsumo.is_some()
-        })
-    })
-}
-
-fn summary_call_selected_candidate(call: &CallDecisionDiagnostic) -> Option<usize> {
-    call.candidates
-        .iter()
-        .position(|candidate| candidate.selected)
-}
-
-fn summary_call_self_tsumo_comparison(candidate: &CallCandidateDiagnostic) -> Option<String> {
-    if let Some(compared) = candidate.iishanten_self_tsumo.as_ref() {
-        return Some(format!(
+fn summary_call_self_tsumo_comparison(self_tsumo: AnalysisCallSelfTsumo) -> String {
+    match self_tsumo {
+        AnalysisCallSelfTsumo::Iishanten(compared) => format!(
             "  call self-tsumo: pass {} / call {} ({})",
             format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
             format_self_tsumo_value(compared.call_expected_self_tsumo_value),
-            call_iishanten_comparison_label(compared.comparison),
-        ));
-    }
-    if let Some(compared) = candidate.two_shanten_self_tsumo.as_ref() {
-        return Some(format!(
+            call_iishanten_comparison_label(compared.verdict),
+        ),
+        AnalysisCallSelfTsumo::TwoShanten {
+            pass_evaluation,
+            comparison,
+        } => format!(
             "  call two-shanten self-tsumo: pass {} {} / call {} ({})",
-            call_two_shanten_pass_evaluation_label(compared.pass_evaluation),
-            format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
-            format_self_tsumo_value(compared.call_expected_self_tsumo_value),
-            call_iishanten_comparison_label(compared.comparison),
-        ));
-    }
-    if let Some(compared) = candidate.three_shanten_self_tsumo.as_ref() {
-        return Some(format!(
+            call_two_shanten_pass_evaluation_label(pass_evaluation),
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+            call_iishanten_comparison_label(comparison.verdict),
+        ),
+        AnalysisCallSelfTsumo::ThreeShanten {
+            pass_evaluation,
+            comparison,
+        } => format!(
             "  call three-shanten self-tsumo: pass {} {} / call {} ({})",
-            call_three_shanten_pass_evaluation_label(compared.pass_evaluation),
-            format_self_tsumo_value(compared.pass_expected_self_tsumo_value),
-            format_self_tsumo_value(compared.call_expected_self_tsumo_value),
-            call_iishanten_comparison_label(compared.comparison),
-        ));
+            call_three_shanten_pass_evaluation_label(pass_evaluation),
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+            call_iishanten_comparison_label(comparison.verdict),
+        ),
     }
-    None
 }
 
-fn summary_defense(diagnostic: &ShantenDecisionDiagnostic) -> Vec<String> {
-    if let Some(defense) = diagnostic.defense.as_ref() {
-        let Some(selected) = defense.selected.as_ref() else {
-            return vec![format!("  defense: {NONE}")];
-        };
-        let mut lines = vec![
-            format!("  defense: {}", selected.selected_action),
-            format!("  defense detail: {:?}", selected.selected_kind),
-        ];
-        if matches!(selected.selected_kind, DefenseFallbackKind::HonorSafety(_)) {
-            lines.push(format!(
-                "  defense opponent honor value: {}",
-                optional(selected.selected_opponent_honor_value)
-            ));
+fn summary_defense(defense: Option<&AnalysisDefense>) -> Vec<String> {
+    let Some(defense) = defense else {
+        return Vec::new();
+    };
+
+    match defense {
+        AnalysisDefense::ReachThreatWithoutSelection => vec![format!("  defense: {NONE}")],
+        AnalysisDefense::ReachThreat(selected) => {
+            let mut lines = vec![
+                format!("  defense: {}", action_label(&selected.action)),
+                format!("  defense detail: {:?}", selected.kind),
+            ];
+            if let Some(value) = selected.opponent_honor_value {
+                lines.push(format!(
+                    "  defense opponent honor value: {}",
+                    opponent_honor_value_label(value)
+                ));
+            }
+            lines
         }
-        return lines;
+        AnalysisDefense::CombinedThreat { action, category } => vec![
+            format!("  defense: {}", action_label(action)),
+            format!("  defense detail: {category:?}"),
+        ],
+        AnalysisDefense::OpenHand { action, category } => vec![
+            format!("  defense: {}", action_label(action)),
+            format!("  defense detail: {category:?}"),
+        ],
     }
+}
 
-    if let Some(selected) = diagnostic.combined_defense.selected.as_ref() {
-        return vec![
-            format!("  defense: {}", action_label(&selected.selected_action)),
-            format!("  defense detail: {:?}", selected.selected_category),
-        ];
+fn discard_tile_label(discard: AnalysisDiscardTile) -> String {
+    let mut label = discard.tile.to_mjai_string();
+    if discard.red_five {
+        label.push('r');
     }
-
-    if let Some(selected) = diagnostic.open_hand_defense.selected.as_ref() {
-        return vec![
-            format!("  defense: {}", action_label(&selected.selected_action)),
-            format!("  defense detail: {:?}", selected.selected_category),
-        ];
-    }
-
-    Vec::new()
+    label
 }
 
 fn discard_label(evaluation: &DiscardEvaluation) -> String {
@@ -3473,16 +3453,16 @@ mod tests {
         );
     }
     use super::*;
-    use bot_analysis::ScenarioSpec;
+    use bot_analysis::{AnalysisCallCandidate, AnalysisCallSelfTsumoComparison, ScenarioSpec};
     use bot_core::{
-        Agent, CallDecisionReason, CallKind, CallTwoShantenSpeedDiagnostic,
-        CombinedDefenseSelectionDiagnostic, DiagnosticOptions, MenzenAgent,
-        OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
-        RonRiskEvidence, ShantenAgent, TenpaiOffenseMode,
+        Agent, CallDecisionReason, CombinedDefenseSelectionDiagnostic, DefenseFallbackKind,
+        DiagnosticOptions, MenzenAgent, OpenHandDefenseCategory,
+        OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence, RonRiskEvidence, ShantenAgent,
+        TenpaiOffenseMode,
     };
     use bot_logic::{
         DiscardComparisonReason, TileCounts, TwoShantenSelfTsumoCandidate,
-        calculate_acceptance_with_visible_tiles, select_best_discard,
+        calculate_acceptance_with_visible_tiles,
     };
     use std::sync::LazyLock;
 
@@ -4878,65 +4858,33 @@ mod tests {
     }
 
     #[test]
-    fn summary_attributes_call_candidate_values_to_the_same_candidate() {
-        let scenario = scenario_from_json(LOOKAHEAD_SCENARIO);
-        let counts = TileCounts::from_tiles(
-            scenario
-                .context
-                .hand_tiles()
-                .iter()
-                .copied()
-                .chain(scenario.context.drawn_tile()),
-        );
-        let post_call_discard = select_best_discard(&counts).unwrap();
-
-        let first = CallCandidateDiagnostic {
-            action: LegalAction::Pon {
-                tile: TileId::new(0).unwrap(),
-                consumed: vec![TileId::new(1).unwrap(), TileId::new(2).unwrap()],
-            },
-            kind: CallKind::Pon,
-            current_fixed_meld_count: None,
-            current_shanten: None,
-            post_call_fixed_meld_count: None,
-            post_call_forbidden_discards: None,
-            post_call_discard: None,
-            post_call_wait: None,
-            post_call_wait_yaku: None,
-            post_call_push_pull: None,
-            iishanten_acceptance: None,
-            iishanten_self_tsumo: None,
-            two_shanten_self_tsumo: None,
-            three_shanten_self_tsumo: None,
-            eligible: false,
-            selected: false,
-            reason: CallDecisionReason::PostCallNotIishanten,
+    fn summary_shows_the_compared_call_candidate_of_the_analysis_result() {
+        // 比較対象の候補を選ぶのは bot-analysis で、formatter はその候補の値を並べるだけ。
+        let action = LegalAction::Pon {
+            tile: TileId::new(16).unwrap(),
+            consumed: vec![TileId::new(17).unwrap(), TileId::new(18).unwrap()],
         };
-        let second = CallCandidateDiagnostic {
-            action: LegalAction::Pon {
-                tile: TileId::new(16).unwrap(),
-                consumed: vec![TileId::new(17).unwrap(), TileId::new(18).unwrap()],
-            },
-            post_call_discard: Some(post_call_discard.clone()),
-            two_shanten_self_tsumo: Some(CallTwoShantenSelfTsumoDiagnostic {
-                reaction_source_player: Some(2),
-                pass_evaluation: CallTwoShantenPassEvaluation::Full,
-                pass_expected_self_tsumo_value: Some(378_060_000),
-                call_expected_self_tsumo_value: Some(41_069_000),
-                comparison: CallIishantenComparison::PassNotLower,
-                speed: CallTwoShantenSpeedDiagnostic {
-                    own_future_draws: Some(8),
-                    han: None,
-                    overrides_pass: false,
+        let call = AnalysisCall {
+            selected: None,
+            reason: CallDecisionReason::PostCallNotIishanten,
+            reason_source: AnalysisCallReasonSource::FirstCandidate,
+            compared_candidate: Some(AnalysisCallCandidate {
+                action: action.clone(),
+                reason: CallDecisionReason::PassSelfTsumoNotLower,
+                is_reason_source: false,
+                post_call_discard: Some(AnalysisDiscardTile {
+                    tile: TileType::new(4).unwrap(),
+                    red_five: true,
+                }),
+                self_tsumo: AnalysisCallSelfTsumo::TwoShanten {
+                    pass_evaluation: CallTwoShantenPassEvaluation::Full,
+                    comparison: AnalysisCallSelfTsumoComparison {
+                        pass_expected_self_tsumo_value: Some(378_060_000),
+                        call_expected_self_tsumo_value: Some(41_069_000),
+                        verdict: CallIishantenComparison::PassNotLower,
+                    },
                 },
             }),
-            reason: CallDecisionReason::PassSelfTsumoNotLower,
-            ..first.clone()
-        };
-        let call = CallDecisionDiagnostic {
-            selected: None,
-            reason: first.reason,
-            candidates: vec![first, second.clone()],
         };
 
         assert_eq!(
@@ -4946,14 +4894,11 @@ mod tests {
                 "  call reason: PostCallNotIishanten (first candidate)".to_string(),
                 format!(
                     "  call compared candidate: {} (PassSelfTsumoNotLower)",
-                    action_label(&second.action)
+                    action_label(&action)
                 ),
                 "  call two-shanten self-tsumo: pass full 378.060 / call 41.069 (pass not lower)"
                     .to_string(),
-                format!(
-                    "  call post-call discard: {}",
-                    discard_label(&post_call_discard)
-                ),
+                "  call post-call discard: 5mr".to_string(),
             ]
         );
     }
