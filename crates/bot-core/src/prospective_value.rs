@@ -676,7 +676,9 @@ impl<'a> ProductionProspectiveValuator<'a> {
             fixed_meld_count: evaluation_fixed_meld_count_of(melds),
             damaten: damaten_baseline_context(context),
             reach: prospective_reach_baseline_context(context),
-            reach_legal: future_reach_legal(context, melds.map(is_menzen)),
+            // 2手先の枝は何巡先のテンパイかが枝ごとに違い、その時点の山残枚数を確定できない。
+            // 現在の枚数で代用せず unknown のまま共有条件の unknown 規則へ委ねる。
+            reach_legal: future_reach_legal(context, melds.map(is_menzen), None),
             own_reached: context.own_reached(),
             own_discards: OwnDiscards::from_optional_river(context.own_discards()),
             history_furiten: context
@@ -1223,20 +1225,27 @@ impl ProspectiveFacts {
 ///
 /// 現在局面の `legal_actions` を未来へ流用せず、共有条件 ([`is_reach_legal`]) を将来テンパイの
 /// 材料で評価する。既リーチ・持ち点は自分のツモと打牌では変わらないので現在の既知 fact を
-/// そのまま使い、打牌後テンパイは枝の構成上必ず満たす。未来時点の山残枚数だけは確定できないので
-/// 現在の枚数で代用せず unknown として渡し、共有条件の unknown 規則へ委ねる。
+/// そのまま使い、打牌後テンパイは枝の構成上必ず満たす。
 ///
 /// `menzen` は評価対象の副露状態から求めた値を渡す。`context` の副露から取り直さないので、
 /// 仮想的な鳴きを含む evaluation hand state ではその副露がそのままリーチ合法性へ効く。
 ///
+/// `remaining_tiles` はその未来時点の山の残りツモ可能枚数。何回ツモを挟んだ後の state かは
+/// caller ごとに違うので、この helper では現在の枚数から導出せず caller が渡す。確定できない
+/// caller は `None` を渡し、共有条件の unknown 規則へ委ねる。
+///
 /// 2手先評価の枝だけでなく、暗槓後の手牌のように現在局面の `legal_actions` をそのまま使えない
 /// 仮想局面もこの1本を共有する。
-pub(crate) fn future_reach_legal(context: &GameContext, menzen: Option<bool>) -> bool {
+pub(crate) fn future_reach_legal(
+    context: &GameContext,
+    menzen: Option<bool>,
+    remaining_tiles: Option<u32>,
+) -> bool {
     is_reach_legal(ReachLegalityFacts {
         menzen,
         already_reached: context.own_reached(),
         score: context.own_score(),
-        remaining_tiles: None,
+        remaining_tiles,
         tenpai_after_discard: true,
     })
 }

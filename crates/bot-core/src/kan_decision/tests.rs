@@ -2,15 +2,17 @@ use super::*;
 
 use bot_logic::{AcceptanceTile, EffectiveShanten, TileType};
 
+use crate::context::TableStateFacts;
 use crate::discard_selection::select_best_normal_discard_evaluation;
 use crate::meld::{Meld, MeldKind};
 use crate::offense_value::OffenseValue;
+use crate::reach_policy::REACH_MIN_REMAINING_TILES;
 use crate::shanten_test_support::{
     ANKAN_ACCEPTANCE_REGRESSING_CONSUMED, ANKAN_ACCEPTANCE_REGRESSING_DRAWN,
     ANKAN_ACCEPTANCE_REGRESSING_HAND, ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND,
-    ANKAN_IISHANTEN_CONSUMED, ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND,
-    ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND, ankan_action,
-    ankan_context, ankan_dahai_actions, dahai, tile,
+    ANKAN_IISHANTEN_CONSUMED, ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED,
+    ANKAN_REACH_DRAWN, ANKAN_REACH_HAND, ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN,
+    ANKAN_REGRESSING_HAND, ankan_action, ankan_context, ankan_dahai_actions, dahai, tile,
 };
 
 fn tiles(values: &[u8]) -> Vec<TileId> {
@@ -378,6 +380,128 @@ fn ankan_is_rejected_without_a_confirmed_own_draw() {
 
 // 自席を特定できない局面では、リーチ済みだともしていないとも推測せずどちらの policy へも
 // 進まない。
+// ---- 暗槓後の山の残りツモ可能枚数とリーチ合法性 ----
+
+// リーチ前の安手テンパイ局面。Reach を合法手に含めるので、暗槓しない側の攻撃モードは Reach。
+fn reach_mode_context(remaining_tiles: Option<u32>) -> GameContext {
+    context(
+        &ANKAN_REACH_HAND,
+        ANKAN_REACH_DRAWN,
+        [false; 4],
+        Default::default(),
+    )
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles,
+        ..Default::default()
+    })
+}
+
+fn reach_mode_actions() -> Vec<LegalAction> {
+    ankan_dahai_actions(&ANKAN_REACH_HAND, ANKAN_REACH_DRAWN)
+        .into_iter()
+        .chain([LegalAction::Reach, ankan_action(&ANKAN_REACH_CONSUMED)])
+        .collect()
+}
+
+// 暗槓後は嶺上牌を1枚引くので、その時点の残りツモ可能枚数は現在より1枚少ない。
+#[test]
+fn post_kan_remaining_tiles_reflects_the_replacement_draw() {
+    let remaining = |tiles: Option<u32>| post_kan_remaining_tiles(&reach_mode_context(tiles));
+
+    assert_eq!(
+        remaining(Some(REACH_MIN_REMAINING_TILES + 1)),
+        Some(REACH_MIN_REMAINING_TILES)
+    );
+    assert_eq!(
+        remaining(Some(REACH_MIN_REMAINING_TILES)),
+        Some(REACH_MIN_REMAINING_TILES - 1)
+    );
+    // 残り0枚からは引けない。unknown へ倒すとリーチ可能側になるので、0のまま残す。
+    assert_eq!(remaining(Some(0)), Some(0));
+    // 現在の枚数が分からない局面では推測しない。
+    assert_eq!(remaining(None), None);
+}
+
+// 暗槓後のリーチ合法性は共有条件をそのまま通す。remaining tiles だけが境界を決める。
+#[test]
+fn post_kan_reach_legality_follows_the_shared_condition() {
+    let legal = |tiles: Option<u32>| {
+        let ctx = reach_mode_context(tiles);
+        future_reach_legal(&ctx, Some(true), post_kan_remaining_tiles(&ctx))
+    };
+
+    assert!(legal(Some(REACH_MIN_REMAINING_TILES + 1)));
+    assert!(!legal(Some(REACH_MIN_REMAINING_TILES)));
+    assert!(!legal(Some(0)));
+    // unknown は共有条件の unknown 規則のまま。
+    assert!(legal(None));
+}
+
+// 残りちょうど REACH_MIN_REMAINING_TILES 枚では、暗槓後にリーチできない。暗槓しない側を Reach
+// 手、暗槓後をダマ手として別尺度で比べることになるので、打点を比較せず暗槓しない。
+#[test]
+fn an_ankan_at_the_reach_wall_boundary_is_not_compared_as_a_reach_hand() {
+    let ctx = reach_mode_context(Some(REACH_MIN_REMAINING_TILES));
+    let actions = reach_mode_actions();
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    assert_eq!(decision.selected, None);
+    assert_eq!(decision.reason, KanDecisionReason::ValueNotEvaluable);
+
+    let candidate = decision.candidates.first().expect("候補");
+    assert_eq!(
+        candidate.baseline.and_then(|hand| hand.offense_mode()),
+        Some(TenpaiOffenseMode::Reach)
+    );
+    assert_eq!(
+        candidate.post_kan.and_then(|hand| hand.offense_mode()),
+        Some(TenpaiOffenseMode::Damaten)
+    );
+    // 速度は悪化していない。落ちたのは攻撃モードが食い違うため。
+    assert_eq!(candidate.shanten_delta(), Some(0));
+    assert_eq!(candidate.acceptance_remaining_delta(), Some(0));
+}
+
+// 1枚多ければ暗槓後も remaining tiles 条件を満たすので、remaining tiles を理由にモードが
+// 食い違うことはない。
+#[test]
+fn an_ankan_one_tile_above_the_reach_wall_boundary_keeps_the_reach_mode() {
+    let ctx = reach_mode_context(Some(REACH_MIN_REMAINING_TILES + 1));
+    let actions = reach_mode_actions();
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    let candidate = decision.candidates.first().expect("候補");
+    assert_eq!(
+        candidate.baseline.and_then(|hand| hand.offense_mode()),
+        Some(TenpaiOffenseMode::Reach)
+    );
+    assert_eq!(
+        candidate.post_kan.and_then(|hand| hand.offense_mode()),
+        Some(TenpaiOffenseMode::Reach)
+    );
+    assert_ne!(decision.reason, KanDecisionReason::ValueNotEvaluable);
+    assert_eq!(decision.selected, Some(ankan_action(&ANKAN_REACH_CONSUMED)));
+}
+
+// 山の残枚数が分からない局面では具体値を推測せず、既存の unknown semantics のままにする。
+#[test]
+fn an_unknown_wall_keeps_the_existing_unknown_semantics() {
+    let ctx = reach_mode_context(None);
+    let actions = reach_mode_actions();
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    let candidate = decision.candidates.first().expect("候補");
+    assert_eq!(
+        candidate.baseline.and_then(|hand| hand.offense_mode()),
+        Some(TenpaiOffenseMode::Reach)
+    );
+    assert_eq!(
+        candidate.post_kan.and_then(|hand| hand.offense_mode()),
+        Some(TenpaiOffenseMode::Reach)
+    );
+    assert_eq!(decision.selected, Some(ankan_action(&ANKAN_REACH_CONSUMED)));
+}
+
 // ---- 自己リーチ後の暫定 policy ----
 
 // 自己リーチ後は、server が合法とした暗槓をそのまま採用する。
@@ -569,6 +693,33 @@ fn several_eligible_ankan_after_own_reach_are_not_broken_by_the_legal_action_ord
         decision.reason,
         KanDecisionReason::MultipleEligibleCandidates
     );
+}
+
+// 自己リーチ後の暫定 policy は山の残枚数を見ない。境界の枚数でも結論は変わらない。
+#[test]
+fn an_ankan_after_own_reach_ignores_the_reach_wall_boundary() {
+    let ctx = context(
+        &ANKAN_FREE_HAND,
+        ANKAN_FREE_DRAWN,
+        [true, false, false, false],
+        Default::default(),
+    )
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles: Some(REACH_MIN_REMAINING_TILES),
+        ..Default::default()
+    });
+    let actions = vec![dahai(ANKAN_FREE_DRAWN), ankan_action(&ANKAN_FREE_CONSUMED)];
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    assert_eq!(decision.selected, Some(ankan_action(&ANKAN_FREE_CONSUMED)));
+    assert_eq!(
+        decision.reason,
+        KanDecisionReason::EligibleAnkanAfterOwnReach
+    );
+    // 打点の比較そのものを行わないので、両 side の値は埋めない。
+    let candidate = decision.candidates.first().expect("候補");
+    assert_eq!(candidate.baseline, None);
+    assert_eq!(candidate.post_kan, None);
 }
 
 #[test]

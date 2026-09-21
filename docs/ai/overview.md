@@ -154,9 +154,26 @@ AND 成立した暗槓候補がちょうど1件
 | 側 | 手牌 | 打点 |
 | --- | --- | --- |
 | 暗槓しない | 通常打牌後 13 枚 + 既存副露 | `evaluate_tenpai_offense_value` |
-| 暗槓する | 暗槓後 10 枚 + 既存副露 + 今回の暗槓 | `evaluate_tenpai_offense_with_hands` |
+| 暗槓する | 暗槓後 10 枚 + 既存副露 + 今回の暗槓 | `evaluate_tenpai_offense_with_reach_legality` |
 
 どちらも同じ hypothetical baseline (リーチ手なら `current_reach_baseline_context`、ダマ手なら `damaten_baseline_context`) と同じ既知のドラ表示牌で評価し、生きた和了牌 variant の残枚数で加重した合計 (`OffenseValue::weighted_total`) を比べます。押し引きが threshold 判定に使うのと同じ値で、カン専用の打点評価も集約規則も持ちません。
+
+攻撃モードが違う 2 つの値は同じ尺度ではないので、モードが一致しない場合は比較しません。
+
+### 暗槓後のリーチ合法性
+
+暗槓後の攻撃モードを決める「リーチが合法か」は、現在局面の `legal_actions` を流用せず、共有条件 `is_reach_legal()` を暗槓後の手牌の事実 (門前・既リーチ・持ち点・山の残りツモ可能枚数・テンパイ) へ適用して求めます。
+
+リーチ宣言には `remaining_tiles >= REACH_MIN_REMAINING_TILES` が要ります。暗槓後は嶺上牌を 1 枚引くので、その時点でツモできる枚数は現在より 1 枚少なくなります。2 手先評価の枝のように「何巡先のテンパイか」が確定しない未来とは違い、暗槓後は現在の枚数さえ分かればこの 1 枚分を既知 fact として導けます。
+
+| 現在の `remaining_tiles` | 暗槓後 | remaining tiles 条件 |
+| --- | --- | --- |
+| `Some(5)` | `Some(4)` | 満たす |
+| `Some(4)` | `Some(3)` | 満たさない (暗槓後はリーチできない) |
+| `Some(0)` | `Some(0)` | 満たさない。unknown へ倒してリーチ可能側にしない |
+| `None` | `None` | 推測しない。共有条件の unknown 規則へ委ねる |
+
+例えば残り 4 枚の局面では、暗槓しない側はまだリーチできる一方、暗槓後はリーチできません。この 2 つを同じ尺度の打点として比べないよう、モードが食い違う組み合わせは `ValueNotEvaluable` になります。
 
 ### 評価不能として暗槓しない局面
 

@@ -179,8 +179,24 @@
 //!
 //! 攻撃モード (リーチ手かダマ手か) が違う2つの値は同じ尺度ではないので、モードが一致しない
 //! 場合は比較しない。暗槓後のモードを決める「リーチが合法か」は、現在局面の `legal_actions` を
-//! そのまま流用せず、共有条件を暗槓後の手牌の事実へ適用した [`future_reach_legal`] で求める。
-//! 未来時点の山残枚数は確定できないので unknown として渡し、共有条件の unknown 規則へ委ねる。
+//! そのまま流用せず、共有条件 ([`is_reach_legal`](crate::reach_policy::is_reach_legal)) を
+//! 暗槓後の手牌の事実へ適用した [`future_reach_legal`] で求める。
+//!
+//! ### 暗槓後の山の残りツモ可能枚数
+//!
+//! リーチ宣言には `remaining_tiles >= REACH_MIN_REMAINING_TILES` が要る。暗槓後は嶺上牌を1枚
+//! 引くので、その時点でツモできる枚数は現在より1枚少ない。2手先評価の枝のように「何巡先か」が
+//! 確定しない未来とは違い、暗槓後は現在の枚数さえ分かればこの1枚分を既知 fact として導ける。
+//!
+//! | 現在の `remaining_tiles` | 暗槓後 | remaining tiles 条件 |
+//! | --- | --- | --- |
+//! | `Some(5)` | `Some(4)` | 満たす |
+//! | `Some(4)` | `Some(3)` | 満たさない (暗槓後はリーチできない) |
+//! | `Some(0)` | `Some(0)` | 満たさない。unknown へ倒してリーチ可能側にしない |
+//! | `None` | `None` | 推測しない。共有条件の unknown 規則へ委ねる |
+//!
+//! 導出は [`post_kan_remaining_tiles`] だけが持ち、リーチ合法性の条件そのものは
+//! [`is_reach_legal`](crate::reach_policy::is_reach_legal) のままにする。
 //!
 //! ## 評価不能として暗槓しない局面
 //!
@@ -299,8 +315,15 @@ impl KanKind {
 
 /// カンを採用した / しなかった理由。
 ///
-/// [`Self::EligibleAnkanNoRegression`] 以外はすべて「今回はカンしない」理由であり、最初に落ちた
-/// 条件を1つだけ表す。判定順は [`KanCandidateDiagnostic`] のフィールドが埋まる順と一致する。
+/// カンを採用した理由は自己リーチ前後で1つずつあり、[`Self::is_eligible`] がその2つを表す。
+///
+/// | 採用した理由 | policy |
+/// | --- | --- |
+/// | [`Self::EligibleAnkanNoRegression`] | 自己リーチ前。暗槓前後を既存評価で比較して悪化しない |
+/// | [`Self::EligibleAnkanAfterOwnReach`] | 自己リーチ後の暫定 policy |
+///
+/// 残りはすべて「今回はカンしない」理由であり、最初に落ちた条件を1つだけ表す。判定順は
+/// [`KanCandidateDiagnostic`] のフィールドが埋まる順と一致する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KanDecisionReason {
     /// 自己リーチ前の暗槓で、既存評価で測れる向聴・受け入れ・攻撃打点のどれも悪化しない。
@@ -748,6 +771,21 @@ fn compare_offense_value(
     KanDecisionReason::EligibleAnkanNoRegression
 }
 
+/// 暗槓して嶺上牌を1枚引いた後の、山の残りツモ可能枚数 [枚]。
+///
+/// 嶺上牌は王牌から引くが、その分だけ王牌が山から補充されるので、暗槓後にツモできる枚数は
+/// 現在より1枚少なくなる
+/// ([`remaining_tiles`](crate::context::TableStateFacts::remaining_tiles) は live wall の残り
+/// ツモ可能枚数)。現在の枚数が分かっている局面ではこの既知 fact から導き、分からない局面だけ
+/// `None` にして推測しない。
+///
+/// 残り0枚からは引けないので `Some(0)` はそもそも暗槓が成立しない値だが、unknown へ倒すと
+/// [`is_reach_legal`](crate::reach_policy::is_reach_legal) の unknown 規則でリーチ可能側へ
+/// 倒れてしまう。飽和減算で `Some(0)` を維持し、リーチ不可のまま残す。
+fn post_kan_remaining_tiles(ctx: &GameContext) -> Option<u32> {
+    Some(ctx.remaining_tiles()?.saturating_sub(1))
+}
+
 // 暗槓で consumed 4枚を取り除いた後の副露と concealed hand。
 //
 // 手牌 + ツモ牌から consumed の物理牌をちょうど1枚ずつ取り除き、取り除いた4枚がカンの形に
@@ -834,7 +872,7 @@ fn evaluate_post_kan_hand(
 //
 // 攻撃モードを決める「リーチが合法か」は、現在局面の `legal_actions` を未来へ流用せず、共有
 // 条件を暗槓後の手牌の事実へ適用した [`future_reach_legal`] で求める。門前かどうかは暗槓を
-// 含む評価対象副露から取る。
+// 含む評価対象副露から、山の残りツモ可能枚数は [`post_kan_remaining_tiles`] から取る。
 //
 // 自分の河は暗槓で変わらない。履歴依存フリテンは、暗槓の前に自分のツモを経ている事実を
 // `ctx` 側の既存補正 ([`GameContext::history_furiten_after_own_discard`]) から取る。カンで
@@ -855,7 +893,8 @@ fn post_kan_tenpai_offense(
     )?;
     let hands =
         tenpai_completed_hands(tiles, melds, acceptance, Some(&wait), ctx.visible_tiles()).ok()?;
-    let reach_legal = future_reach_legal(ctx, Some(is_menzen(melds)));
+    let reach_legal =
+        future_reach_legal(ctx, Some(is_menzen(melds)), post_kan_remaining_tiles(ctx));
 
     Some(evaluate_tenpai_offense_with_reach_legality(ctx, &wait, reach_legal, Some(&hands)).offense)
 }
