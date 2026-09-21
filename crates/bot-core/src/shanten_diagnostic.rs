@@ -167,7 +167,12 @@ pub struct ShantenDecisionDiagnostic {
     /// 場合も候補ごとの理由を保持する。
     pub call: Option<CallDecisionDiagnostic>,
     /// カンを検討した場合の診断。合法なカンが1件も無い局面と、カン判断まで進まなかった局面
-    /// (Hora / 九種九牌 / 鳴きでの早期終了、Push 以外の押し引き、リーチ採用) では `None`。
+    /// (Hora / 九種九牌 / 鳴きでの早期終了、Push mode でリーチを採用した局面) では `None`。
+    ///
+    /// カン判断自体は押し引きの結論にかかわらず通る。自己リーチ後は降りようがないので、
+    /// 押し引きが Fold と判断した局面でもカンを検討する必要があるためである。押し引きを
+    /// 見るのは自己リーチ前の暗槓だけで、その gate は
+    /// [`kan_decision`](crate::kan_decision) が持つ。
     ///
     /// 採用しなかった場合も候補ごとの理由を保持する。Kakan / Daiminkan は今回 production へ
     /// 接続していないので、候補としては並ぶが必ず

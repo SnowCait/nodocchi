@@ -702,6 +702,8 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 }
 ```
 
+上の例は自己リーチ後の局面です。リーチ後は合法な打牌が現在のツモ牌1枚に限られるので `legal_dahai` も併せて指定します。
+
 **暗槓が合法かどうかは入力側が source of truth** です。リーチ後に待ちが変わらないかどうかも含めて、ここへ書いた暗槓はそのまま合法手として渡します。局面そのもの (手牌・見え牌・副露) は変わりません。4枚でない指定、同じ牌種でない指定、手牌とツモ牌に無い指定は error です。
 
 判断内訳は [Structured diagnostics](diagnostics.md#kan) の `Kan` section に出ます。

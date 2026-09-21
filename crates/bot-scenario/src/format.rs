@@ -4968,7 +4968,7 @@ mod tests {
         assert_eq!(format_kan(None), "Kan\n  not evaluated");
     }
 
-    // リーチ後に暗槓だけが追加で合法になる局面。scenario から section まで通しで確認する。
+    // 自己リーチ前の暗槓。scenario から section まで通しで、暗槓前後の比較値を確認する。
     #[test]
     fn kan_section_reports_the_production_ankan_of_a_scenario() {
         let scenario = scenario_from_json(
@@ -4978,9 +4978,7 @@ mod tests {
                 "player_id": 0,
                 "oya": 0,
                 "round_wind": "E",
-                "seat_wind": "E",
-                "reached": [true, false, false, false],
-                "legal_dahai": "E",
+                "history_furiten": { "same_turn": false, "riichi_missed_win": false },
                 "legal_ankan": ["E E E E"]
             }"#,
         );
@@ -4997,13 +4995,43 @@ mod tests {
         assert!(kan.contains("  reason: EligibleAnkanNoRegression"), "{kan}");
         // 暗槓前後の既存評価をそのまま並べる。向聴・受け入れだけでなく攻撃打点も出す。
         assert!(
-            kan.contains("    baseline: shanten 0 / acceptance 3 / 1 types / Reach "),
+            kan.contains("    baseline: shanten 0 / acceptance 3 / 1 types / Damaten "),
             "{kan}"
         );
         assert!(
-            kan.contains("    post-kan: shanten 0 / acceptance 3 / 1 types / Reach "),
+            kan.contains("    post-kan: shanten 0 / acceptance 3 / 1 types / Damaten "),
             "{kan}"
         );
+    }
+
+    // 自己リーチ後の暫定 policy。比較を行わないので、両 side の値は `-` のままになる。
+    #[test]
+    fn kan_section_reports_the_provisional_ankan_after_own_reach() {
+        let scenario = scenario_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "oya": 0,
+                "round_wind": "E",
+                "reached": [true, false, false, false],
+                "legal_dahai": "E",
+                "legal_ankan": ["E E E E"]
+            }"#,
+        );
+        let diagnostic = diagnose(&scenario);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+
+        let output = format_diagnostic(&scenario, &diagnostic, false);
+        let kan = section(&output, "Kan\n");
+        assert!(kan.contains("  selected: Ankan E E E E"), "{kan}");
+        assert!(
+            kan.contains("  reason: EligibleAnkanAfterOwnReach"),
+            "{kan}"
+        );
+        assert!(kan.contains("    baseline discard: -"), "{kan}");
+        assert!(kan.contains("    baseline: -"), "{kan}");
+        assert!(kan.contains("    post-kan: -"), "{kan}");
     }
 
     #[test]

@@ -20,21 +20,35 @@
 //! ([`KanDecisionReason::KakanNotConnected`] / [`KanDecisionReason::DaiminkanNotConnected`])
 //! を付けて必ず選ばない。
 //!
-//! さらに暗槓も、**暗槓前後の打点を既存評価で比較できた局面だけ**を production 対象にする。
-//! 速度 (向聴・受け入れ) が悪化しないことだけを根拠に暗槓することはない。
+//! # 自己リーチ前と自己リーチ後で policy を分ける
+//!
+//! 暗槓の判断は、自分が既にリーチしているかどうかで**別の policy** になる。分かれ目は
+//! [`GameContext::own_reached`] だけで、`reached` の index を推測しない。
+//!
+//! | `own_reached()` | policy |
+//! | --- | --- |
+//! | `Some(false)` | 暗槓前後を既存評価で比較し、悪化しないと確認できた場合だけ暗槓する |
+//! | `Some(true)` | 合法な暗槓を原則そのまま採用する暫定 policy |
+//! | `None` | 自席を特定できない。リーチ済みだともしていないとも推測せず [`KanDecisionReason::OwnReachUnknown`] |
+//!
+//! 分ける理由は、自己リーチ後には**比較対象が違う**ためである。リーチ後は合法な打牌が現在の
+//! ツモ牌1枚に限られるので、暗槓しない場合の選択肢は自由な通常打牌ではなく強制ツモ切りになる。
+//! したがって暗槓前の「通常打牌をどう選ぶか」という比較そのものが成り立たない。
 //!
 //! # source of truth
 //!
 //! | 材料 | source of truth |
 //! | --- | --- |
 //! | カンの合法性 | 入力の `legal_actions` (`possible_actions` 由来) |
+//! | 自分がリーチ済みか | [`GameContext::own_reached`] |
 //! | 面子の形の検証 | [`Meld::shape`] |
 //! | 副露済み面子数 | [`GameContext::own_fixed_meld_count`] / [`FixedMeldCount`] |
 //! | カン後の向聴数 | [`calculate_shanten_with_fixed_melds`] |
 //! | カン後の受け入れ | [`calculate_acceptance_with_fixed_melds`] / [`calculate_acceptance_with_fixed_melds_and_visible_tiles`] |
 //! | カン後テンパイの待ちとロン可否 | [`tenpai_wait_availability`] |
 //! | カン後テンパイの完成手 | [`tenpai_completed_hands`] |
-//! | テンパイの攻撃打点と攻撃モード | [`evaluate_tenpai_offense_value`] / [`evaluate_tenpai_offense_with_hands`] |
+//! | カン後のリーチ合法性 | [`future_reach_legal`] (= 共有条件 [`is_reach_legal`](crate::reach_policy::is_reach_legal)) |
+//! | テンパイの攻撃打点と攻撃モード | [`evaluate_tenpai_offense_value`] / [`evaluate_tenpai_offense_with_reach_legality`] |
 //! | 暗槓しない場合の打牌 | production の通常打牌選択が選んだ [`DiscardEvaluation`] |
 //! | 押し引き | [`decide_push_pull`](crate::push_pull::decide_push_pull) の結論 |
 //!
@@ -49,30 +63,60 @@
 //! `ShantenAgent` は
 //!
 //! ```text
-//! Hora → 九種九牌 → Chi / Pon → 押し引き → Reach → Kan → 通常打牌 → 防御 fallback
+//! Hora → 九種九牌 → Chi / Pon → 押し引き → (Push なら Reach) → Kan → 通常打牌 / 防御 fallback
 //! ```
 //!
-//! の順で action を決める。カンは Push mode でリーチを採用しなかった後にだけ検討するので、
-//! 既存の Hora / 九種九牌 / Reach の優先順位は変わらない。押し引きの gate 自体はこの層が持ち、
-//! 呼び出し側は結論 ([`PushPullMode`]) をそのまま渡す。
+//! の順で action を決める。和了できる局面では Hora が先に決まるので、カンが和了より先に選ばれる
+//! ことはない。Push mode ではリーチを採用しなかった後にだけカンを検討するので、既存の Reach
+//! 優先順位も変わらない。
 //!
-//! # 比較する2つの state
+//! カン判断そのものは押し引きの結論にかかわらず通る。自己リーチ後は降りようがないので、
+//! 押し引きが Fold と判断した局面でもカンを検討する必要があるためである。押し引きを見るのは
+//! 自己リーチ前の policy だけで、その gate はこの層が持つ ([`KanDecisionReason::NotPush`])。
 //!
-//! 暗槓する場合としない場合を、どちらも「13枚相当で次のツモを待つ state」に揃えて比べる。
+//! # 自己リーチ後の暫定 policy
 //!
 //! ```text
-//! 暗槓しない: 14枚 → 通常打牌 → 13枚 (副露 N)        → 次のツモを待つ
-//! 暗槓する  : 14枚 → 暗槓     → 10枚 (副露 N+1)      → 嶺上牌を待つ
+//! own_reached() == Some(true)
+//! AND legal_actions に Ankan がある
+//! AND consumed 4枚を手牌 + ツモ牌から取り除いてカンの形になる
+//! AND 自分の副露済み面子数が分かり、暗槓後も上限内
+//! → Ankan ([`KanDecisionReason::EligibleAnkanAfterOwnReach`])
 //! ```
 //!
-//! `10枚 + 副露 N+1` と `13枚 + 副露 N` はどちらも `13 - 3 * 副露数` 枚の同じ大きさの手牌なので、
-//! 既存の向聴・受け入れ・打点をそのまま同じ尺度で比べられる。比較の基準に使う打牌は production
-//! の通常打牌選択が実際に選んだ1件そのもので、この層で打牌を選び直さない。
-//!
-//! # 暗槓の成立条件
+//! 向聴・受け入れ・攻撃打点・押し引き・他家リーチはどれも採用条件にしない。リーチ後は暗槓
+//! しなければ現在のツモ牌を強制ツモ切りするしかないので、比較は
 //!
 //! ```text
-//! 合法な Ankan がある
+//! 暗槓 vs 現在のツモ牌の強制ツモ切り
+//! ```
+//!
+//! になる。どちらにも既存評価では同じ尺度に載らない損得があり、
+//!
+//! | 暗槓する側のリスク | 暗槓しない側のリスク |
+//! | --- | --- |
+//! | 新しい槓ドラで他家の打点が上がる | 強制ツモ切りした牌で放銃する |
+//! | 山とツモ順が変わる | 嶺上牌という追加のツモ機会を失う |
+//! | | 槓ドラ・槓裏による自分の打点上昇機会を失う |
+//!
+//! を1つの EV として比べる基盤が今の nodocchi には無い。中途半端な係数や heuristic を置かない
+//! ため、今回は「server が合法とした暗槓は原則行う」という暫定 policy にする。
+//!
+//! TODO: 自己リーチ後も「暗槓 vs 現在のツモ牌をそのまま切る」を比較できるようにする。少なくとも
+//! 次を同じ尺度で評価できるようになった時点で、この暫定 policy を見直す。
+//!
+//! - 強制ツモ切り牌の ron risk
+//! - 新しい槓ドラによる opponent threat / 打点変化
+//! - 嶺上牌という追加のツモ機会
+//! - 自分の槓ドラ / 槓裏による打点変化
+//! - 点棒 / 順位状況
+//! - 終盤・流局条件
+//!
+//! # 自己リーチ前の暗槓の成立条件
+//!
+//! ```text
+//! own_reached() == Some(false)
+//! AND 合法な Ankan がある
 //! AND 他家にリーチ者がいない
 //! AND 既存 Push/Pull policy が Push と判定している
 //! AND 自分のツモを経たと確認できる (drawn_tile がある)
@@ -86,6 +130,19 @@
 //! AND 暗槓後の攻撃打点 >= その通常打牌後の攻撃打点
 //! AND 成立した暗槓候補がちょうど1件
 //! ```
+//!
+//! ## 比較する2つの state
+//!
+//! 暗槓する場合としない場合を、どちらも「13枚相当で次のツモを待つ state」に揃えて比べる。
+//!
+//! ```text
+//! 暗槓しない: 14枚 → 通常打牌 → 13枚 (副露 N)        → 次のツモを待つ
+//! 暗槓する  : 14枚 → 暗槓     → 10枚 (副露 N+1)      → 嶺上牌を待つ
+//! ```
+//!
+//! `10枚 + 副露 N+1` と `13枚 + 副露 N` はどちらも `13 - 3 * 副露数` 枚の同じ大きさの手牌なので、
+//! 既存の向聴・受け入れ・打点をそのまま同じ尺度で比べられる。比較の基準に使う打牌は production
+//! の通常打牌選択が実際に選んだ1件そのもので、この層で打牌を選び直さない。
 //!
 //! ## 向聴の比較
 //!
@@ -112,15 +169,18 @@
 //! | 側 | 手牌 | 打点 |
 //! | --- | --- | --- |
 //! | 暗槓しない | 通常打牌後13枚 + 既存副露 | [`evaluate_tenpai_offense_value`] |
-//! | 暗槓する | 暗槓後10枚 + 既存副露 + 今回の暗槓 | [`evaluate_tenpai_offense_with_hands`] |
+//! | 暗槓する | 暗槓後10枚 + 既存副露 + 今回の暗槓 | [`evaluate_tenpai_offense_with_reach_legality`] |
 //!
 //! どちらも同じ hypothetical baseline (リーチ手なら [`current_reach_baseline_context`]、ダマ手
 //! なら [`damaten_baseline_context`]) と同じ既知のドラ表示牌で評価し、生きた和了牌 variant の
-//! 残枚数で加重した合計 ([`OffenseValue::weighted_total`](crate::offense_value::OffenseValue::weighted_total)) を比べる。押し引きが threshold 判定
-//! に使うのと同じ値で、カン専用の打点評価も集約規則も持たない。
+//! 残枚数で加重した合計 ([`OffenseValue::weighted_total`](crate::offense_value::OffenseValue::weighted_total))
+//! を比べる。押し引きが threshold 判定に使うのと同じ値で、カン専用の打点評価も集約規則も
+//! 持たない。
 //!
 //! 攻撃モード (リーチ手かダマ手か) が違う2つの値は同じ尺度ではないので、モードが一致しない
-//! 場合は比較しない。
+//! 場合は比較しない。暗槓後のモードを決める「リーチが合法か」は、現在局面の `legal_actions` を
+//! そのまま流用せず、共有条件を暗槓後の手牌の事実へ適用した [`future_reach_legal`] で求める。
+//! 未来時点の山残枚数は確定できないので unknown として渡し、共有条件の unknown 規則へ委ねる。
 //!
 //! ## 評価不能として暗槓しない局面
 //!
@@ -129,8 +189,9 @@
 //!
 //! - どちらかの side がテンパイでない (テンパイ以外の打点を既存 primitive で比較できない)
 //! - どちらかの side の攻撃モードが [`TenpaiOffenseMode::Unknown`]、またはモードが食い違う
-//! - どちらかの side の攻撃打点が [`OffenseValue::Unknown`](crate::offense_value::OffenseValue::Unknown) (役なし・ロン不可・点数計算の
-//!   入力不足・裏ドラ未確定)
+//! - どちらかの side の攻撃打点が
+//!   [`OffenseValue::Unknown`](crate::offense_value::OffenseValue::Unknown) (役なし・ロン不可・
+//!   点数計算の入力不足・裏ドラ未確定)
 //!
 //! テンパイ以外を対象外にするのは、1向聴以降の価値尺度が
 //! [`ExpectedSelfTsumoValue`](bot_logic::ForwardMetrics) 系になるためである。暗槓後の state は
@@ -157,20 +218,21 @@
 //! # 複数の暗槓候補
 //!
 //! 同じ局面で2件以上の暗槓が成立した場合、production では**どれも選ばない**
-//! ([`KanDecisionReason::MultipleEligibleCandidates`])。合法 action の列挙順は server が決める
-//! ものなので、AI の tie-break に使わない。候補間を妥当に比較できる既存 comparator がまだ無い
-//! ので、将来のためだけの独自 ranking も作らない。候補ごとの判断内訳は診断へそのまま残す。
+//! ([`KanDecisionReason::MultipleEligibleCandidates`])。自己リーチの前後どちらでも同じ扱いに
+//! する。合法 action の列挙順は server が決めるものなので、AI の tie-break に使わない。候補間を
+//! 妥当に比較できる既存 comparator がまだ無いので、将来のためだけの独自 ranking も作らない。
+//! 候補ごとの判断内訳は診断へそのまま残す。
 //!
 //! # 判断にかかるコスト
 //!
-//! 安価な事前判定 (種別・他家リーチ・押し引き・副露数・向聴・受け入れ) を通った候補だけが打点
-//! 比較へ進む。打点比較は押し引きが threat ありのテンパイで払うのと同じ1回分の evaluation を
-//! 両 side に対して行うもので、前方探索は通らない。合法なカンが1件も無い局面では候補の列挙で
-//! 終わり、他家リーチ中と Push 以外の押し引きでは手牌を組み立てる前に落ちるので、通常の打牌
-//! 局面へ載るコストは無い。
+//! 自己リーチ後は structural validation だけで結論が出るので、向聴も受け入れも打点も評価しない。
+//! 自己リーチ前は安価な事前判定 (種別・他家リーチ・押し引き・副露数・向聴・受け入れ) を通った
+//! 候補だけが打点比較へ進む。打点比較は押し引きが threat ありのテンパイで払うのと同じ1回分の
+//! evaluation を両 side に対して行うもので、前方探索は通らない。合法なカンが1件も無い局面では
+//! 候補の列挙で終わるので、通常の打牌局面へ載るコストは無い。
 //!
-//! TODO: 暗槓前後を ExpectedSelfTsumoValue で比較できるようにして、テンパイ以外の暗槓も
-//! production へ接続する。嶺上牌ぶんの追加ツモと山の残枚数の差をどう揃えるかが未解決。
+//! TODO: 暗槓前後を ExpectedSelfTsumoValue で比較できるようにして、自己リーチ前のテンパイ以外の
+//! 暗槓も production へ接続する。嶺上牌ぶんの追加ツモと山の残枚数の差をどう揃えるかが未解決。
 //!
 //! TODO: 複数の暗槓候補を既存評価で比較できるようにする。
 //!
@@ -183,7 +245,7 @@ use bot_logic::{
     DiscardEvaluation, EffectiveAcceptance, FixedMeldCount, Meld, MeldKind, OwnDiscards,
     TileCounts, TileId, TileType, calculate_acceptance_with_fixed_melds,
     calculate_acceptance_with_fixed_melds_and_visible_tiles, calculate_shanten_with_fixed_melds,
-    structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
+    is_menzen, structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
     tenpai_wait_availability,
 };
 
@@ -192,8 +254,9 @@ use crate::context::GameContext;
 use crate::discard_selection::selected_discard_tenpai_wait_availability;
 use crate::offense_value::{
     TenpaiOffenseMode, TenpaiOffenseValue, evaluate_tenpai_offense_value,
-    evaluate_tenpai_offense_with_hands,
+    evaluate_tenpai_offense_with_reach_legality,
 };
+use crate::prospective_value::future_reach_legal;
 use crate::push_pull::PushPullMode;
 
 /// 暗槓が消費する物理牌の枚数。
@@ -240,15 +303,28 @@ impl KanKind {
 /// 条件を1つだけ表す。判定順は [`KanCandidateDiagnostic`] のフィールドが埋まる順と一致する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KanDecisionReason {
-    /// 全条件を満たし、既存評価で測れる向聴・受け入れ・攻撃打点のどれも暗槓で悪化しない。
+    /// 自己リーチ前の暗槓で、既存評価で測れる向聴・受け入れ・攻撃打点のどれも悪化しない。
     EligibleAnkanNoRegression,
+    /// 自己リーチ後の暫定 policy で暗槓する。
+    ///
+    /// リーチ後は暗槓しなければ現在のツモ牌を強制ツモ切りするしかなく、その比較を既存評価で
+    /// 同じ尺度に載せられない。そのため合法性と structural validation だけを条件にする。
+    /// 向聴・受け入れ・攻撃打点・押し引き・他家リーチは採用条件にしない。
+    EligibleAnkanAfterOwnReach,
+    /// 自分の席を特定できず、リーチ済みかどうかを判断できない。
+    ///
+    /// リーチ済みだともしていないとも推測しないので、どちらの policy へも進めない。
+    OwnReachUnknown,
     /// 加槓はまだ production へ接続していない。搶槓リスクを評価できていない。
     KakanNotConnected,
     /// 大明槓はまだ production へ接続していない。reaction としての評価モデルが無い。
     DaiminkanNotConnected,
-    /// 他家にリーチ者がいる。新ドラがリーチ者の打点へ与える影響を既存評価で測れない。
+    /// 自己リーチ前で、他家にリーチ者がいる。新ドラがリーチ者の打点へ与える影響を既存評価で
+    /// 測れない。自己リーチ後の暫定 policy ではこの理由で落とさない。
     OpponentReached,
-    /// 既存 Push/Pull policy が Push と判定していない。
+    /// 自己リーチ前で、既存 Push/Pull policy が Push と判定していない。
+    ///
+    /// 自己リーチ後は降りようがないので、この理由で落とさない。
     NotPush,
     /// 自分のツモを経たと確認できない。暗槓はツモ番の action なので、この局面では判断しない。
     NotAfterOwnDraw,
@@ -288,7 +364,10 @@ pub enum KanDecisionReason {
 impl KanDecisionReason {
     /// カンを採用した理由か。
     pub fn is_eligible(self) -> bool {
-        matches!(self, Self::EligibleAnkanNoRegression)
+        matches!(
+            self,
+            Self::EligibleAnkanNoRegression | Self::EligibleAnkanAfterOwnReach
+        )
     }
 }
 
@@ -498,8 +577,8 @@ fn new_kan_candidate(
 // 候補1件の条件を上から順に評価し、最初に落ちた理由を返す。評価が進んだ範囲の値だけを
 // candidate へ書き込み、評価しなかった項目は None のままにする。
 //
-// 判定順は安価な fact (種別・他家リーチ・押し引き・副露数・カンの形) から始め、向聴と受け入れ
-// を通った候補だけが打点比較へ進む。
+// 自己リーチ済みかどうかで policy そのものが分かれる。自己リーチ後は structural validation
+// だけ、自己リーチ前は既存評価による暗槓前後の比較を通る。
 #[allow(clippy::too_many_arguments)]
 fn evaluate_kan_candidate(
     ctx: &GameContext,
@@ -514,6 +593,49 @@ fn evaluate_kan_candidate(
         return reason;
     }
 
+    match ctx.own_reached() {
+        // 自席を特定できない。リーチ済みだともしていないとも推測しない。
+        None => KanDecisionReason::OwnReachUnknown,
+        Some(true) => evaluate_ankan_after_own_reach(ctx, consumed, candidate),
+        Some(false) => evaluate_ankan_before_own_reach(
+            ctx,
+            legal_actions,
+            consumed,
+            mode,
+            normal_discard,
+            candidate,
+        ),
+    }
+}
+
+// 自己リーチ後の暫定 policy。server が合法とした暗槓を原則そのまま採用する。
+//
+// 合法性 (待ちが変わらないかを含む) は `legal_actions` が source of truth なので再判定しない。
+// 確かめるのは、その合法手を実際に手牌から組み立てられるかという structural validation だけで、
+// 向聴・受け入れ・攻撃打点・押し引き・他家リーチはどれも採用条件にしない。
+fn evaluate_ankan_after_own_reach(
+    ctx: &GameContext,
+    consumed: &[TileId],
+    candidate: &mut KanCandidateDiagnostic,
+) -> KanDecisionReason {
+    match validate_ankan_structure(ctx, consumed, candidate) {
+        Ok(_) => KanDecisionReason::EligibleAnkanAfterOwnReach,
+        Err(reason) => reason,
+    }
+}
+
+// 自己リーチ前の暗槓。暗槓前後を既存評価で比べ、悪化しないと確認できた場合だけ採用する。
+//
+// 判定順は安価な fact (他家リーチ・押し引き・副露数・カンの形) から始め、向聴と受け入れを
+// 通った候補だけが打点比較へ進む。
+fn evaluate_ankan_before_own_reach(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+    consumed: &[TileId],
+    mode: PushPullMode,
+    normal_discard: Option<&DiscardEvaluation>,
+    candidate: &mut KanCandidateDiagnostic,
+) -> KanDecisionReason {
     if ctx.any_opponent_reached() {
         return KanDecisionReason::OpponentReached;
     }
@@ -526,20 +648,11 @@ fn evaluate_kan_candidate(
         return KanDecisionReason::NotAfterOwnDraw;
     }
 
-    let Some(current_fixed_meld_count) = ctx.own_fixed_meld_count() else {
-        return KanDecisionReason::FixedMeldCountUnknown;
-    };
-    candidate.current_fixed_meld_count = Some(current_fixed_meld_count);
-
-    let Some(post_kan_fixed_meld_count) = FixedMeldCount::new(current_fixed_meld_count.get() + 1)
-    else {
-        return KanDecisionReason::FixedMeldCountOverflow;
-    };
-    candidate.post_kan_fixed_meld_count = Some(post_kan_fixed_meld_count);
-
-    let Some((meld, post_kan_tiles)) = ankan_meld_and_concealed_tiles(ctx, consumed) else {
-        return KanDecisionReason::InvalidConsumed;
-    };
+    let (meld, post_kan_tiles, post_kan_fixed_meld_count) =
+        match validate_ankan_structure(ctx, consumed, candidate) {
+            Ok(validated) => validated,
+            Err(reason) => return reason,
+        };
 
     let Some(normal_discard) = normal_discard else {
         return KanDecisionReason::NormalDiscardUnavailable;
@@ -552,7 +665,6 @@ fn evaluate_kan_candidate(
     post_kan_melds.push(meld);
     let post_kan = evaluate_post_kan_hand(
         ctx,
-        legal_actions,
         &post_kan_tiles,
         &post_kan_melds,
         post_kan_fixed_meld_count,
@@ -573,6 +685,33 @@ fn evaluate_kan_candidate(
     }
 
     compare_offense_value(baseline, post_kan)
+}
+
+// 暗槓の structural validation。自己リーチの前後で共有する。
+//
+// 合法性そのものは `legal_actions` が source of truth なので、ここで確かめるのは「その暗槓を
+// 実際に手牌から組み立てられるか」だけになる。副露済み面子数は診断へ書き込む。
+fn validate_ankan_structure(
+    ctx: &GameContext,
+    consumed: &[TileId],
+    candidate: &mut KanCandidateDiagnostic,
+) -> Result<(Meld, Vec<TileId>, FixedMeldCount), KanDecisionReason> {
+    let Some(current_fixed_meld_count) = ctx.own_fixed_meld_count() else {
+        return Err(KanDecisionReason::FixedMeldCountUnknown);
+    };
+    candidate.current_fixed_meld_count = Some(current_fixed_meld_count);
+
+    let Some(post_kan_fixed_meld_count) = FixedMeldCount::new(current_fixed_meld_count.get() + 1)
+    else {
+        return Err(KanDecisionReason::FixedMeldCountOverflow);
+    };
+    candidate.post_kan_fixed_meld_count = Some(post_kan_fixed_meld_count);
+
+    let Some((meld, post_kan_tiles)) = ankan_meld_and_concealed_tiles(ctx, consumed) else {
+        return Err(KanDecisionReason::InvalidConsumed);
+    };
+
+    Ok((meld, post_kan_tiles, post_kan_fixed_meld_count))
 }
 
 // 速度が悪化しない候補について、暗槓前後の攻撃打点を比べる。
@@ -660,7 +799,6 @@ fn evaluate_baseline_hand(
 // 暗槓後13枚相当 state の既存評価。見え牌の有無による経路分岐は通常打牌評価と揃える。
 fn evaluate_post_kan_hand(
     ctx: &GameContext,
-    legal_actions: &[LegalAction],
     tiles: &[TileId],
     melds: &[Meld],
     fixed_meld_count: FixedMeldCount,
@@ -676,15 +814,8 @@ fn evaluate_post_kan_hand(
             ctx.visible_tiles(),
         )
     };
-    let offense = post_kan_tenpai_offense(
-        ctx,
-        legal_actions,
-        tiles,
-        melds,
-        &counts,
-        fixed_meld_count,
-        &acceptance,
-    );
+    let offense =
+        post_kan_tenpai_offense(ctx, tiles, melds, &counts, fixed_meld_count, &acceptance);
 
     KanHandDiagnostic {
         shanten,
@@ -698,16 +829,18 @@ fn evaluate_post_kan_hand(
 // 組み立てられない場合は `None`。
 //
 // 待ちは既存のフリテン基盤、完成手は既存の [`tenpai_completed_hands`]、打点と攻撃モードは
-// 押し引き・リーチ判断が使う [`evaluate_tenpai_offense_with_hands`] をそのまま通す。暗槓は
-// 評価対象の副露として渡すので、符も役も既存 scoring が暗槓込みで求めた値になる。
+// 押し引き・リーチ判断が使う [`evaluate_tenpai_offense_with_reach_legality`] をそのまま通す。
+// 暗槓は評価対象の副露として渡すので、符も役も既存 scoring が暗槓込みで求めた値になる。
+//
+// 攻撃モードを決める「リーチが合法か」は、現在局面の `legal_actions` を未来へ流用せず、共有
+// 条件を暗槓後の手牌の事実へ適用した [`future_reach_legal`] で求める。門前かどうかは暗槓を
+// 含む評価対象副露から取る。
 //
 // 自分の河は暗槓で変わらない。履歴依存フリテンは、暗槓の前に自分のツモを経ている事実を
 // `ctx` 側の既存補正 ([`GameContext::history_furiten_after_own_discard`]) から取る。カンで
 // 増えるドラ表示牌は未知なので、`ctx` の既知のドラ表示牌だけで評価する。
-#[allow(clippy::too_many_arguments)]
 fn post_kan_tenpai_offense(
     ctx: &GameContext,
-    legal_actions: &[LegalAction],
     tiles: &[TileId],
     melds: &[Meld],
     counts: &TileCounts,
@@ -722,8 +855,9 @@ fn post_kan_tenpai_offense(
     )?;
     let hands =
         tenpai_completed_hands(tiles, melds, acceptance, Some(&wait), ctx.visible_tiles()).ok()?;
+    let reach_legal = future_reach_legal(ctx, Some(is_menzen(melds)));
 
-    Some(evaluate_tenpai_offense_with_hands(ctx, &wait, legal_actions, Some(&hands)).offense)
+    Some(evaluate_tenpai_offense_with_reach_legality(ctx, &wait, reach_legal, Some(&hands)).offense)
 }
 
 #[cfg(test)]

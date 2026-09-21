@@ -10,7 +10,7 @@ use crate::shanten_test_support::{
     ANKAN_ACCEPTANCE_REGRESSING_HAND, ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND,
     ANKAN_IISHANTEN_CONSUMED, ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND,
     ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND, ankan_action,
-    ankan_context, ankan_dahai_actions, tile,
+    ankan_context, ankan_dahai_actions, dahai, tile,
 };
 
 fn tiles(values: &[u8]) -> Vec<TileId> {
@@ -376,8 +376,203 @@ fn ankan_is_rejected_without_a_confirmed_own_draw() {
     assert_eq!(decision.reason, KanDecisionReason::NotAfterOwnDraw);
 }
 
+// 自席を特定できない局面では、リーチ済みだともしていないとも推測せずどちらの policy へも
+// 進まない。
+// ---- 自己リーチ後の暫定 policy ----
+
+// 自己リーチ後は、server が合法とした暗槓をそのまま採用する。
 #[test]
-fn ankan_is_rejected_when_the_fixed_meld_count_is_unknown() {
+fn a_legal_ankan_after_own_reach_is_selected() {
+    let ctx = context(
+        &ANKAN_FREE_HAND,
+        ANKAN_FREE_DRAWN,
+        [true, false, false, false],
+        Default::default(),
+    );
+    let actions = vec![dahai(ANKAN_FREE_DRAWN), ankan_action(&ANKAN_FREE_CONSUMED)];
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    assert_eq!(decision.selected, Some(ankan_action(&ANKAN_FREE_CONSUMED)));
+    assert_eq!(
+        decision.reason,
+        KanDecisionReason::EligibleAnkanAfterOwnReach
+    );
+
+    let candidate = decision.candidates.first().expect("候補");
+    assert!(candidate.selected);
+    assert!(candidate.eligible);
+    // structural validation だけを通す。向聴・受け入れ・打点の比較は行わないので埋めない。
+    assert_eq!(candidate.current_fixed_meld_count.map(|c| c.get()), Some(0));
+    assert_eq!(
+        candidate.post_kan_fixed_meld_count.map(|c| c.get()),
+        Some(1)
+    );
+    assert_eq!(candidate.baseline_discard, None);
+    assert_eq!(candidate.baseline, None);
+    assert_eq!(candidate.post_kan, None);
+}
+
+// 他家リーチも押し引きの Fold も、自己リーチ後の暗槓を落とす理由にしない。
+#[test]
+fn an_ankan_after_own_reach_ignores_the_opponent_reach_and_the_push_pull_verdict() {
+    let ctx = context(
+        &ANKAN_FREE_HAND,
+        ANKAN_FREE_DRAWN,
+        [true, true, false, false],
+        Default::default(),
+    );
+    let actions = vec![dahai(ANKAN_FREE_DRAWN), ankan_action(&ANKAN_FREE_CONSUMED)];
+    assert!(ctx.any_opponent_reached());
+
+    for mode in [
+        PushPullMode::Push,
+        PushPullMode::Neutral,
+        PushPullMode::Fold,
+    ] {
+        let decision = decide(&ctx, &actions, mode).expect("暗槓候補");
+        assert_eq!(
+            decision.selected,
+            Some(ankan_action(&ANKAN_FREE_CONSUMED)),
+            "mode: {mode:?}"
+        );
+        assert_eq!(
+            decision.reason,
+            KanDecisionReason::EligibleAnkanAfterOwnReach,
+            "mode: {mode:?}"
+        );
+    }
+}
+
+// 打点を比較できない手牌でも、自己リーチ後は暗槓する。打点比較は自己リーチ前だけの条件。
+#[test]
+fn an_ankan_after_own_reach_does_not_require_a_comparable_offense_value() {
+    let ctx = context(
+        &ANKAN_IISHANTEN_HAND,
+        ANKAN_IISHANTEN_DRAWN,
+        [true, false, false, false],
+        Default::default(),
+    );
+    let actions = vec![
+        dahai(ANKAN_IISHANTEN_DRAWN),
+        ankan_action(&ANKAN_IISHANTEN_CONSUMED),
+    ];
+
+    // 同じ手牌を自己リーチ前として評価すると、テンパイでないので打点を比較できない。
+    let before_reach = context(
+        &ANKAN_IISHANTEN_HAND,
+        ANKAN_IISHANTEN_DRAWN,
+        [false; 4],
+        Default::default(),
+    );
+    assert_eq!(
+        decide(&before_reach, &actions, PushPullMode::Push)
+            .expect("暗槓候補")
+            .reason,
+        KanDecisionReason::ValueNotEvaluable
+    );
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    assert_eq!(
+        decision.selected,
+        Some(ankan_action(&ANKAN_IISHANTEN_CONSUMED))
+    );
+    assert_eq!(
+        decision.reason,
+        KanDecisionReason::EligibleAnkanAfterOwnReach
+    );
+}
+
+// 自己リーチ後でも structural validation は通す。合法手として渡された暗槓を手牌から
+// 組み立てられない場合は選ばない。
+#[test]
+fn an_ankan_after_own_reach_still_needs_a_valid_meld() {
+    let ctx = context(
+        &ANKAN_FREE_HAND,
+        ANKAN_FREE_DRAWN,
+        [true, false, false, false],
+        Default::default(),
+    );
+
+    // 手牌に無い 南 (112..115) の暗槓。
+    let not_held = vec![ankan_action(&[112, 113, 114, 115]), LegalAction::None];
+    assert_eq!(
+        decide(&ctx, &not_held, PushPullMode::Push)
+            .expect("暗槓候補")
+            .reason,
+        KanDecisionReason::InvalidConsumed
+    );
+
+    // カンの形にならない3枚。
+    let malformed = vec![ankan_action(&[108, 109, 110]), LegalAction::None];
+    assert_eq!(
+        decide(&ctx, &malformed, PushPullMode::Push)
+            .expect("暗槓候補")
+            .reason,
+        KanDecisionReason::InvalidConsumed
+    );
+}
+
+// 自己リーチ後でも Kakan / Daiminkan は production へ接続しない。
+#[test]
+fn kakan_and_daiminkan_stay_unconnected_after_own_reach() {
+    let ctx = context(
+        &ANKAN_FREE_HAND,
+        ANKAN_FREE_DRAWN,
+        [true, false, false, false],
+        Default::default(),
+    );
+    let actions = vec![kakan(), daiminkan(), LegalAction::None];
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("カン候補");
+    assert_eq!(decision.selected, None);
+    assert_eq!(
+        decision
+            .candidates
+            .iter()
+            .map(|candidate| candidate.reason)
+            .collect::<Vec<_>>(),
+        vec![
+            KanDecisionReason::KakanNotConnected,
+            KanDecisionReason::DaiminkanNotConnected,
+        ]
+    );
+}
+
+// 自己リーチ後でも、成立した候補が2件以上あれば合法 action の列挙順で選ばない。
+//
+// RiichiLab (riichienv-core) の legal action 生成はリーチ後の暗槓をツモ牌の牌種1件だけに
+// 限定するので、実戦でこの局面は出ない。それでも順序依存を残さないため規則として固定する。
+#[test]
+fn several_eligible_ankan_after_own_reach_are_not_broken_by_the_legal_action_order() {
+    let ctx = context(
+        &ANKAN_FREE_HAND,
+        ANKAN_FREE_DRAWN,
+        [true, false, false, false],
+        Default::default(),
+    );
+    let actions = vec![
+        dahai(ANKAN_FREE_DRAWN),
+        ankan_action(&ANKAN_FREE_CONSUMED),
+        ankan_action(&[111, 110, 109, 108]),
+    ];
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
+    assert_eq!(decision.candidates.len(), 2);
+    assert!(
+        decision
+            .candidates
+            .iter()
+            .all(|candidate| candidate.eligible)
+    );
+    assert_eq!(decision.selected, None);
+    assert_eq!(
+        decision.reason,
+        KanDecisionReason::MultipleEligibleCandidates
+    );
+}
+
+#[test]
+fn ankan_is_rejected_when_own_reach_is_unknown() {
     let ctx = ankan_context(
         &ANKAN_FREE_HAND,
         ANKAN_FREE_DRAWN,
@@ -386,10 +581,16 @@ fn ankan_is_rejected_when_the_fixed_meld_count_is_unknown() {
         None,
     );
     let actions = ankan_free_actions();
+    assert_eq!(ctx.own_reached(), None);
 
     let decision = decide(&ctx, &actions, PushPullMode::Push).expect("暗槓候補");
     assert_eq!(decision.selected, None);
-    assert_eq!(decision.reason, KanDecisionReason::FixedMeldCountUnknown);
+    assert_eq!(decision.reason, KanDecisionReason::OwnReachUnknown);
+
+    // 自己リーチ後の暫定 policy へ進まないので、structural validation の値も埋めない。
+    let candidate = decision.candidates.first().expect("候補");
+    assert_eq!(candidate.current_fixed_meld_count, None);
+    assert_eq!(candidate.post_kan_fixed_meld_count, None);
 }
 
 #[test]
@@ -653,9 +854,11 @@ fn every_legal_kan_is_evaluated_independently() {
 #[test]
 fn eligible_reason_is_only_the_ankan_verdict() {
     assert!(KanDecisionReason::EligibleAnkanNoRegression.is_eligible());
+    assert!(KanDecisionReason::EligibleAnkanAfterOwnReach.is_eligible());
     for reason in [
         KanDecisionReason::KakanNotConnected,
         KanDecisionReason::DaiminkanNotConnected,
+        KanDecisionReason::OwnReachUnknown,
         KanDecisionReason::OpponentReached,
         KanDecisionReason::NotPush,
         KanDecisionReason::NotAfterOwnDraw,

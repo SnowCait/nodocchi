@@ -1228,7 +1228,10 @@ impl ProspectiveFacts {
 ///
 /// `menzen` は評価対象の副露状態から求めた値を渡す。`context` の副露から取り直さないので、
 /// 仮想的な鳴きを含む evaluation hand state ではその副露がそのままリーチ合法性へ効く。
-fn future_reach_legal(context: &GameContext, menzen: Option<bool>) -> bool {
+///
+/// 2手先評価の枝だけでなく、暗槓後の手牌のように現在局面の `legal_actions` をそのまま使えない
+/// 仮想局面もこの1本を共有する。
+pub(crate) fn future_reach_legal(context: &GameContext, menzen: Option<bool>) -> bool {
     is_reach_legal(ReachLegalityFacts {
         menzen,
         already_reached: context.own_reached(),

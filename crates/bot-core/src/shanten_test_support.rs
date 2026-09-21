@@ -280,9 +280,22 @@ pub(crate) fn ankan_context(
     melds: [Vec<Meld>; 4],
     player_id: Option<u8>,
 ) -> GameContext {
+    ankan_context_with_visible(hand, drawn, reached, melds, player_id, &[])
+}
+
+/// 見え牌を追加できる [`ankan_context`]。待ちを枯らした弱いテンパイを作るために使う。
+pub(crate) fn ankan_context_with_visible(
+    hand: &[u8],
+    drawn: u8,
+    reached: [bool; 4],
+    melds: [Vec<Meld>; 4],
+    player_id: Option<u8>,
+    extra_visible: &[u8],
+) -> GameContext {
     let hand_tiles: Vec<_> = hand.iter().map(|&value| tile(value)).collect();
     let mut visible = hand_tiles.clone();
     visible.push(tile(drawn));
+    visible.extend(extra_visible.iter().map(|&value| tile(value)));
 
     GameContext::from_parts_with_melds(
         Some(tile(drawn)),
