@@ -1,10 +1,8 @@
 use bot_core::{
-    AgentActionSource, CombinedDefenseCategory, DefenseFallbackKind, LegalAction,
+    AgentActionSource, CombinedDefenseCategory, DefenseFallbackKind, GameContext, LegalAction,
     OpenHandDefenseCategory, OpponentHonorValue, ShantenAgent, ShantenDecisionDiagnostic,
 };
 use bot_logic::{DiscardCandidateDiagnostic, DiscardComparisonReason};
-
-use crate::scenario::Scenario;
 
 /// 上位から順に並べた選択肢1件分の構造化結果。
 ///
@@ -89,11 +87,12 @@ pub struct RankedChoiceHitProbability {
 /// production の [`ShantenAgent::diagnose`] を再実行する。action を除外できない場合と、合法手が
 /// 無くなった場合、再診断が action を選べなかった場合はそこで打ち切る。
 pub fn rank_choices(
-    scenario: &Scenario,
+    context: &GameContext,
+    legal_actions: &[LegalAction],
     diagnostic: &ShantenDecisionDiagnostic,
     limit: usize,
 ) -> Vec<RankedChoice> {
-    let diagnostics = diagnose_choices(scenario, diagnostic, limit);
+    let diagnostics = diagnose_choices(context, legal_actions, diagnostic, limit);
     diagnostics
         .iter()
         .enumerate()
@@ -150,7 +149,8 @@ fn honor_safety_opponent_honor_value(
 }
 
 fn diagnose_choices(
-    scenario: &Scenario,
+    context: &GameContext,
+    legal_actions: &[LegalAction],
     diagnostic: &ShantenDecisionDiagnostic,
     limit: usize,
 ) -> Vec<ShantenDecisionDiagnostic> {
@@ -159,7 +159,7 @@ fn diagnose_choices(
     }
 
     let mut choices = vec![diagnostic.clone()];
-    let mut remaining_actions = scenario.legal_actions.clone();
+    let mut remaining_actions = legal_actions.to_vec();
     while choices.len() < limit {
         let selected = &choices.last().unwrap().selected_action;
         if *selected == LegalAction::None {
@@ -171,7 +171,7 @@ fn diagnose_choices(
             break;
         }
 
-        let next = ShantenAgent::diagnose(&scenario.context, &next_actions);
+        let next = ShantenAgent::diagnose(context, &next_actions);
         if next.selected_action == LegalAction::None {
             break;
         }
@@ -329,7 +329,7 @@ fn hit_probability(comparison: &ChoiceComparison) -> Option<RankedChoiceHitProba
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::ScenarioSpec;
+    use crate::scenario::{Scenario, ScenarioSpec};
     use bot_core::DiagnosticOptions;
 
     const NORMAL_SCENARIO: &str = r#"{
@@ -409,7 +409,12 @@ mod tests {
     ) -> (Scenario, ShantenDecisionDiagnostic, Vec<RankedChoice>) {
         let scenario = scenario_from_json(json);
         let diagnostic = diagnose(&scenario);
-        let choices = rank_choices(&scenario, &diagnostic, limit);
+        let choices = rank_choices(
+            &scenario.context,
+            &scenario.legal_actions,
+            &diagnostic,
+            limit,
+        );
         (scenario, diagnostic, choices)
     }
 
@@ -499,7 +504,9 @@ mod tests {
     fn ranks_nothing_for_a_zero_limit() {
         let scenario = scenario_from_json(NORMAL_SCENARIO);
         let diagnostic = diagnose(&scenario);
-        assert!(rank_choices(&scenario, &diagnostic, 0).is_empty());
+        assert!(
+            rank_choices(&scenario.context, &scenario.legal_actions, &diagnostic, 0).is_empty()
+        );
     }
 
     #[test]
@@ -618,7 +625,7 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_ne!(remaining[0], diagnostic.selected_action);
 
-        let choices = rank_choices(&scenario, &diagnostic, 3);
+        let choices = rank_choices(&scenario.context, &scenario.legal_actions, &diagnostic, 3);
         assert_eq!(choices.len(), 2);
         assert_eq!(choices[0].selected_action, diagnostic.selected_action);
         assert_eq!(choices[1].selected_action, remaining[0]);
@@ -655,7 +662,7 @@ mod tests {
         );
         assert!(diagnostic.normal_discard_lookahead.is_some());
 
-        let choices = diagnose_choices(&scenario, &diagnostic, 3);
+        let choices = diagnose_choices(&scenario.context, &scenario.legal_actions, &diagnostic, 3);
         assert_eq!(choices.len(), 3);
         assert_eq!(choices[0], diagnostic);
         // 下位 choice は production の既定範囲で再診断するだけで、追加探索を有効にしない。

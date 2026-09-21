@@ -2,18 +2,19 @@ use bot_core::{
     CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason, CallIishantenComparison,
     CallThreeShantenPassEvaluation, CallTwoShantenPassEvaluation, CombinedDefenseCategory,
     DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DefenseDecisionDiagnostic,
-    DefenseFallbackKind, LegalAction, OpenHandDefenseCategory, PushPullMode, PushPullReason,
-    ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiOffenseValue,
+    DefenseFallbackKind, GameContext, LegalAction, OpenHandDefenseCategory, PushPullMode,
+    PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason,
+    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
+    StrongTenpaiRequirement, TenpaiOffenseValue,
 };
 use bot_logic::{PermanentFuriten, TileId, TileType};
 
 use crate::ranked_choice::{AnalysisOpponentHonorValue, RankedChoice, rank_choices};
-use crate::scenario::Scenario;
 
 /// 1局面の production 判断を consumer 向けに投影した構造化結果。
 ///
-/// [`Scenario`] と、その局面で既に得ている primary [`ShantenDecisionDiagnostic`] から作る。
+/// `GameContext` と合法手、そしてその局面で既に得ている primary [`ShantenDecisionDiagnostic`]
+/// から作る。手入力 scenario か replay かといった局面の出所には依存しない。
 /// 診断そのものを公開せず、consumer が必要とする値だけを薄く写す。表示用の文字列は作らず、
 /// 既存の enum と数値をそのまま保持するので、CLI formatter と Web が同じ結果を読める。
 ///
@@ -45,12 +46,13 @@ impl AnalysisResult {
     /// `choice_limit` は [`choices`](Self::choices) に並べる件数の上限で、consumer が決める。
     /// primary 診断はここで取り直さず、渡されたものをそのまま choice 1 として使う。
     pub fn from_decision(
-        scenario: &Scenario,
+        context: &GameContext,
+        legal_actions: &[LegalAction],
         diagnostic: &ShantenDecisionDiagnostic,
         choice_limit: usize,
     ) -> Self {
         Self {
-            choices: rank_choices(scenario, diagnostic, choice_limit),
+            choices: rank_choices(context, legal_actions, diagnostic, choice_limit),
             ryukyoku: diagnostic.ryukyoku.as_ref().map(ryukyoku),
             push_pull: push_pull(diagnostic),
             reach: reach(diagnostic),
@@ -474,7 +476,7 @@ fn reach_threat_defense(defense: &DefenseDecisionDiagnostic) -> Option<AnalysisR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::ScenarioSpec;
+    use crate::scenario::{Scenario, ScenarioSpec};
     use bot_core::{
         CallKind, CallTwoShantenSelfTsumoDiagnostic, CallTwoShantenSpeedDiagnostic,
         CombinedDefenseCategory, OpenHandDefenseCategory, OpponentHonorValue, ShantenAgent,
@@ -700,7 +702,12 @@ mod tests {
     fn analyzed(json: &str) -> (Scenario, ShantenDecisionDiagnostic, AnalysisResult) {
         let scenario = scenario_from_json(json);
         let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
-        let result = AnalysisResult::from_decision(&scenario, &diagnostic, CHOICE_LIMIT);
+        let result = AnalysisResult::from_decision(
+            &scenario.context,
+            &scenario.legal_actions,
+            &diagnostic,
+            CHOICE_LIMIT,
+        );
         (scenario, diagnostic, result)
     }
 
@@ -723,7 +730,12 @@ mod tests {
         let (scenario, diagnostic, result) = analyzed(NORMAL_SCENARIO);
         assert_eq!(
             result.choices,
-            rank_choices(&scenario, &diagnostic, CHOICE_LIMIT)
+            rank_choices(
+                &scenario.context,
+                &scenario.legal_actions,
+                &diagnostic,
+                CHOICE_LIMIT
+            )
         );
         assert_eq!(
             result.choices[0].selected_action,
