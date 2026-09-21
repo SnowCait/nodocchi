@@ -3131,12 +3131,12 @@ fn summary_reach(reach: &AnalysisReach) -> Vec<String> {
     lines
 }
 
-// リーチの採否。base policy がリーチを選んだうえで timing が今回の宣言を見送った局面は、
-// base policy がダマを選んだ局面と区別する。
+// リーチの採否。宣言しない理由は verdict では区別せず、base policy がリーチを選んだうえで
+// timing が今回の宣言を見送った局面だけを別表示にする。
 fn reach_verdict_label(verdict: AnalysisReachVerdict) -> &'static str {
     match verdict {
         AnalysisReachVerdict::Reach => "yes",
-        AnalysisReachVerdict::Damaten => "no",
+        AnalysisReachVerdict::NoReach => "no",
         AnalysisReachVerdict::Deferred => "deferred",
     }
 }

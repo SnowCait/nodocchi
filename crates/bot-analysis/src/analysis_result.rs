@@ -127,16 +127,21 @@ pub struct AnalysisReachDecision {
     pub damaten: Option<AnalysisDamaten>,
 }
 
-/// リーチの採否。
+/// 今回リーチを宣言するかどうか。
 ///
-/// base policy がリーチを選んだうえで timing が今回の宣言を見送った局面は、base policy が
-/// ダマを選んだ局面と区別する。
+/// 表すのは採否だけで、宣言しない理由は持たない。リーチが合法でない・テンパイでない・base
+/// policy がダマを選んだのどれも [`NoReach`](Self::NoReach) で、その区別は
+/// [`AnalysisReachDecision::base_reason`] が source of truth。ダマ打点を評価したかどうかと
+/// その結論は [`AnalysisReachDecision::damaten`] が持つ。
+///
+/// base policy がリーチを選んだうえで timing が今回の宣言を見送った局面だけは、宣言しない
+/// 他の局面と区別して [`Deferred`](Self::Deferred) にする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisReachVerdict {
     /// 今回リーチを宣言する。
     Reach,
-    /// リーチしない。
-    Damaten,
+    /// 今回リーチを宣言しない。
+    NoReach,
     /// base policy はリーチを選んだが、timing が今回の宣言を見送った。
     Deferred,
 }
@@ -311,7 +316,7 @@ fn reach_decision(reach: &ReachDecisionDiagnostic) -> AnalysisReachDecision {
         verdict: match (deferred, reach.should_reach()) {
             (true, _) => AnalysisReachVerdict::Deferred,
             (false, true) => AnalysisReachVerdict::Reach,
-            (false, false) => AnalysisReachVerdict::Damaten,
+            (false, false) => AnalysisReachVerdict::NoReach,
         },
         base_reason: reach.reason,
         timing_reason: deferred
@@ -832,11 +837,15 @@ mod tests {
 
     #[test]
     fn a_high_value_damaten_is_not_a_reach() {
-        let (_, _, result) = analyzed(DAMATEN_HIGH_VALUE_SCENARIO);
+        let (_, diagnostic, result) = analyzed(DAMATEN_HIGH_VALUE_SCENARIO);
         let reach = evaluated_reach(&result);
         let damaten = reach.damaten.as_ref().expect("ダマ打点を評価している");
+        let diagnosed = diagnostic.reach.as_ref().expect("リーチを検討している");
 
-        assert_eq!(reach.verdict, AnalysisReachVerdict::Damaten);
+        // リーチしない理由は verdict ではなく base reason が持つ。
+        assert_eq!(reach.verdict, AnalysisReachVerdict::NoReach);
+        assert_eq!(reach.base_reason, diagnosed.reason);
+        assert_eq!(reach.base_reason, ReachDecisionReason::HighValueDamaten);
         assert_eq!(damaten.verdict, DamatenValueVerdict::AboveThreshold);
         assert!(!damaten.winning_tiles.is_empty());
         assert!(
@@ -845,6 +854,43 @@ mod tests {
                 .iter()
                 .all(|winning_tile| matches!(winning_tile.value, DamatenValue::Known { .. }))
         );
+    }
+
+    #[test]
+    fn a_hand_without_a_legal_reach_is_no_reach() {
+        // リーチが合法でない局面もリーチしない結果になるが、ダマを選んだわけではない。
+        let (_, diagnostic, result) = analyzed(NORMAL_SCENARIO);
+        let reach = evaluated_reach(&result);
+        let diagnosed = diagnostic.reach.as_ref().expect("リーチを検討している");
+
+        assert_eq!(reach.verdict, AnalysisReachVerdict::NoReach);
+        assert_eq!(reach.base_reason, diagnosed.reason);
+        assert_eq!(reach.base_reason, ReachDecisionReason::NoLegalReach);
+        assert_eq!(reach.damaten, None);
+    }
+
+    #[test]
+    fn the_verdict_does_not_name_the_reason_for_not_reaching() {
+        // リーチしない理由が何であっても verdict は NoReach で、理由は base reason だけが持つ。
+        for reason in [
+            ReachDecisionReason::NoLegalReach,
+            ReachDecisionReason::NoSelectedDiscard,
+            ReachDecisionReason::NotTenpai,
+            ReachDecisionReason::NoLiveWait,
+            ReachDecisionReason::InsufficientLiveWait,
+            ReachDecisionReason::HighValueDamaten,
+            ReachDecisionReason::NamedYakumanDamaten,
+        ] {
+            let projected = reach_decision(&not_reached_diagnostic(reason));
+
+            assert_eq!(
+                projected.verdict,
+                AnalysisReachVerdict::NoReach,
+                "{reason:?}"
+            );
+            assert_eq!(projected.base_reason, reason);
+            assert_eq!(projected.timing_reason, None);
+        }
     }
 
     #[test]
@@ -1083,6 +1129,18 @@ mod tests {
     fn a_normal_discard_has_no_defense_section() {
         let (_, _, result) = analyzed(NORMAL_SCENARIO);
         assert_eq!(result.defense, None);
+    }
+
+    fn not_reached_diagnostic(reason: ReachDecisionReason) -> ReachDecisionDiagnostic {
+        ReachDecisionDiagnostic {
+            selected_discard: None,
+            shanten_after_discard: None,
+            tenpai_wait: None,
+            damaten_value: None,
+            selected: None,
+            reason,
+            timing: None,
+        }
     }
 
     fn best_discard(json: &str) -> DiscardEvaluation {
