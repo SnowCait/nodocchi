@@ -1,0 +1,30 @@
+{
+  "hand": "123456789m 1p",
+  "draw": "E",
+
+  "dora_indicators": "9s",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "reached": [false, false, false, false],
+
+  "discards": ["", "E", "", ""],
+
+  "melds": [
+    [
+      {
+        "kind": "pon",
+        "tiles": "E E E",
+        "called_tile": "E"
+      }
+    ],
+    [],
+    [],
+    []
+  ],
+
+  "legal_kakan": ["E"]
+}

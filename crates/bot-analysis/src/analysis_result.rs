@@ -2,10 +2,10 @@ use bot_core::{
     CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason, CallIishantenComparison,
     CallThreeShantenPassEvaluation, CallTwoShantenPassEvaluation, CombinedDefenseCategory,
     DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DefenseDecisionDiagnostic,
-    DefenseFallbackKind, GameContext, LegalAction, OpenHandDefenseCategory, PushPullMode,
-    PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason,
-    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
-    StrongTenpaiRequirement, TenpaiOffenseValue,
+    DefenseFallbackKind, GameContext, KanCandidateDiagnostic, KanDecisionDiagnostic,
+    KanDecisionReason, KanKind, LegalAction, OpenHandDefenseCategory, PushPullMode, PushPullReason,
+    ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason, RyukyokuDecisionDiagnostic,
+    RyukyokuVerdict, ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiOffenseValue,
 };
 use bot_logic::{PermanentFuriten, TileId, TileType};
 
@@ -36,6 +36,8 @@ pub struct AnalysisResult {
     pub reach: AnalysisReach,
     /// 鳴きを検討した局面の判断。合法な Chi / Pon が無ければ `None`。
     pub call: Option<AnalysisCall>,
+    /// カンを検討した局面の判断。合法なカンが無ければ `None`。
+    pub kan: Option<AnalysisKan>,
     /// 採用経路まで含めた防御判断。どの防御も評価していない場合は `None`。
     pub defense: Option<AnalysisDefense>,
 }
@@ -70,6 +72,7 @@ impl AnalysisResult {
             push_pull: push_pull(diagnostic),
             reach: reach(diagnostic),
             call: diagnostic.call.as_ref().map(call),
+            kan: diagnostic.kan.as_ref().map(kan),
             defense: defense(diagnostic),
         }
     }
@@ -195,6 +198,33 @@ pub struct AnalysisCall {
     /// consumer へ見せる比較対象の候補。採用候補があればその候補、無ければ self-tsumo 比較を
     /// 持つ最初の候補で、どちらも比較を持たなければ `None`。
     pub compared_candidate: Option<AnalysisCallCandidate>,
+}
+
+/// カン判断の結論と候補ごとの内訳。
+///
+/// 判断そのものは production の [`kan_decision`](bot_core::kan_decision) が source of truth で、
+/// ここでは結論を写すだけにする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisKan {
+    /// 採用したカン。採用が無ければ `None`。
+    pub selected: Option<LegalAction>,
+    /// 採用が無い場合は最初の候補が落ちた理由。
+    pub reason: KanDecisionReason,
+    pub candidates: Vec<AnalysisKanCandidate>,
+}
+
+/// 合法なカン1件の結論。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisKanCandidate {
+    pub action: LegalAction,
+    pub kind: KanKind,
+    /// カンの対象牌種。Ankan は consumed の牌種、Kakan は追加する4枚目、Daiminkan は対象の打牌。
+    pub tile: Option<TileType>,
+    /// 加槓牌の搶槓 hard-safe 判定。加槓以外と、判定まで進まなかった候補では `None`。
+    pub chankan_hard_safe: Option<bool>,
+    pub reason: KanDecisionReason,
+    pub eligible: bool,
+    pub selected: bool,
 }
 
 /// [`AnalysisCall::reason`] の由来。
@@ -382,6 +412,26 @@ fn call(call: &CallDecisionDiagnostic) -> AnalysisCall {
         },
         compared_candidate: compared_index
             .and_then(|index| call_candidate(&call.candidates[index], reason_index == Some(index))),
+    }
+}
+
+fn kan(kan: &KanDecisionDiagnostic) -> AnalysisKan {
+    AnalysisKan {
+        selected: kan.selected.clone(),
+        reason: kan.reason,
+        candidates: kan.candidates.iter().map(kan_candidate).collect(),
+    }
+}
+
+fn kan_candidate(candidate: &KanCandidateDiagnostic) -> AnalysisKanCandidate {
+    AnalysisKanCandidate {
+        action: candidate.action.clone(),
+        kind: candidate.kind,
+        tile: candidate.tile,
+        chankan_hard_safe: candidate.chankan.as_ref().map(|chankan| chankan.hard_safe),
+        reason: candidate.reason,
+        eligible: candidate.eligible,
+        selected: candidate.selected,
     }
 }
 

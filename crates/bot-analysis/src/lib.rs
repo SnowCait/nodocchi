@@ -23,9 +23,9 @@ mod tiles;
 pub use crate::analysis_result::{
     AnalysisCall, AnalysisCallCandidate, AnalysisCallReasonSource, AnalysisCallSelfTsumo,
     AnalysisCallSelfTsumoComparison, AnalysisDamaten, AnalysisDamatenWinningTile, AnalysisDefense,
-    AnalysisDiscardTile, AnalysisPushPull, AnalysisReach, AnalysisReachDecision,
-    AnalysisReachTenpaiWait, AnalysisReachThreatDefense, AnalysisReachVerdict, AnalysisResult,
-    AnalysisRyukyoku, AnalysisTenpaiOffense,
+    AnalysisDiscardTile, AnalysisKan, AnalysisKanCandidate, AnalysisPushPull, AnalysisReach,
+    AnalysisReachDecision, AnalysisReachTenpaiWait, AnalysisReachThreatDefense,
+    AnalysisReachVerdict, AnalysisResult, AnalysisRyukyoku, AnalysisTenpaiOffense,
 };
 pub use crate::analyze::analyze;
 pub use crate::error::ScenarioBuildError;

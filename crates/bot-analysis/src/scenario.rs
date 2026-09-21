@@ -2,6 +2,7 @@ use bot_core::{
     DoubleRiichiFacts, GameContext, LegalAction, Meld, MeldKind, ReachLegalityFacts,
     RiichiSituationFacts, TableStateFacts, is_reach_legal, seat_wind_for_player,
 };
+use bot_logic::MeldShape;
 use bot_logic::{
     FixedMeldCount, HistoryFuritenFacts, TileCounts, TileId, TileType,
     calculate_shanten_with_fixed_melds, is_menzen,
@@ -79,6 +80,14 @@ pub struct ScenarioSpec {
     /// ここへ書いた暗槓はそのまま合法手として渡す。
     #[serde(default)]
     pub legal_ankan: Option<Vec<String>>,
+    /// 合法な加槓。各要素は既存 Pon へ追加する4枚目を `"5m"` / `"5mr"` のように1枚で書く。
+    ///
+    /// 加槓が消費する3枚は `melds` にある自分の Pon そのものなので、ここで物理牌を新しく
+    /// 割り当てず、その Pon の物理牌をそのまま `consumed` にする。加槓の合法性は暗槓と同じく
+    /// 入力側が source of truth で、対応する Pon が無い指定と手牌に無い追加牌だけを error に
+    /// する。
+    #[serde(default)]
+    pub legal_kakan: Option<Vec<String>>,
     #[serde(default)]
     pub allow_hora: bool,
     #[serde(default)]
@@ -859,6 +868,10 @@ fn build_legal_actions(
         actions.extend(ankan_actions(specs, hand, draw)?);
     }
 
+    if let Some(specs) = spec.legal_kakan.as_deref() {
+        actions.extend(kakan_actions(specs, hand, draw, context.own_melds())?);
+    }
+
     if is_reach_legal(reach_legality_facts(context, &actions)) {
         actions.push(LegalAction::Reach);
     }
@@ -1131,6 +1144,72 @@ fn ankan_action(
     }
 
     Ok(LegalAction::Ankan { consumed: tiles })
+}
+
+fn kakan_actions(
+    specs: &[String],
+    hand: &[TileId],
+    draw: Option<TileId>,
+    melds: Option<&[Meld]>,
+) -> Result<Vec<LegalAction>, ScenarioBuildError> {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            kakan_action(&format!("legal_kakan[{index}]"), spec, hand, draw, melds)
+        })
+        .collect()
+}
+
+// 加槓は既存 Pon の置換なので、consumed をその Pon の物理牌から導く。scenario builder で3枚を
+// 新しく割り当てると、同じ牌を Pon と加槓で二重に使うことになるためである。
+//
+// 入力に書くのは追加する4枚目1枚だけで、自分のツモ牌も含めた14枚から赤5と黒5を区別して取る。
+// 対応する Pon の特定は既存 [`Meld::shape`] に任せ、加槓が合法かどうかは入力側の責任のまま
+// 扱わない。
+fn kakan_action(
+    field: &str,
+    spec: &str,
+    hand: &[TileId],
+    draw: Option<TileId>,
+    melds: Option<&[Meld]>,
+) -> Result<LegalAction, ScenarioBuildError> {
+    let added = parse_single_tile(&format!("{field}.tile"), spec)?;
+    let Some(melds) = melds else {
+        return Err(ScenarioBuildError::LegalKakanWithoutPlayerId {
+            field: field.to_string(),
+            tile: added.to_mjai_string(),
+        });
+    };
+
+    let tile = hand
+        .iter()
+        .copied()
+        .chain(draw)
+        .find(|held| held.tile_type() == added.tile_type && held.is_red() == added.red)
+        .ok_or_else(|| ScenarioBuildError::LegalKakanTileNotHeld {
+            field: field.to_string(),
+            tile: added.to_mjai_string(),
+        })?;
+
+    let pon = melds
+        .iter()
+        .find(|meld| {
+            meld.kind() == MeldKind::Pon
+                && meld.shape()
+                    == Some(MeldShape::Triplet {
+                        tile: added.tile_type,
+                    })
+        })
+        .ok_or_else(|| ScenarioBuildError::LegalKakanWithoutPon {
+            field: field.to_string(),
+            tile: added.to_mjai_string(),
+        })?;
+
+    Ok(LegalAction::Kakan {
+        tile,
+        consumed: pon.tiles().to_vec(),
+    })
 }
 
 fn pon_consumed_tiles(
@@ -2457,6 +2536,152 @@ mod tests {
             Scenario::resolve(&spec).unwrap_err(),
             ScenarioBuildError::LegalAnkanConsumedNotHeld {
                 field: "legal_ankan[0]".to_string(),
+                tile: "E".to_string(),
+            }
+        );
+    }
+
+    // 加槓は既存 Pon の置換なので、consumed をその Pon の物理牌からそのまま導く。
+    #[test]
+    fn legal_kakan_reuses_the_physical_tiles_of_the_existing_pon() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "123456789m1p",
+                "draw": "E",
+                "player_id": 0,
+                "melds": [[{"kind": "pon", "tiles": "E E E", "called_tile": "E"}], [], [], []],
+                "discards": ["", "E", "", ""],
+                "legal_kakan": ["E"]
+            }"#,
+        ));
+
+        let kakan = scenario
+            .legal_actions
+            .iter()
+            .find(|action| matches!(action, LegalAction::Kakan { .. }))
+            .expect("加槓が合法手に並ぶ");
+        let LegalAction::Kakan { tile, consumed } = kakan else {
+            unreachable!();
+        };
+
+        // 追加牌はツモ牌そのもの。
+        assert_eq!(Some(*tile), scenario.context.drawn_tile());
+        // consumed は既存 Pon の物理牌そのもので、新しく割り当て直さない。
+        let pon = &scenario.context.own_melds().expect("自分の副露")[0];
+        assert_eq!(consumed.as_slice(), pon.tiles());
+        assert!(!consumed.contains(tile));
+        // 同じ物理牌を Pon と加槓で二重に使わない。
+        assert!(validate_unique_physical_tiles(scenario.context.visible_tiles()).is_ok());
+    }
+
+    // 加槓の指定は合法手を1件足すだけで、局面そのもの (手牌・見え牌・副露) を変えない。
+    #[test]
+    fn legal_kakan_does_not_add_visible_tiles_or_melds() {
+        let mut without = spec_from_json(
+            r#"{
+                "hand": "123456789m1p",
+                "draw": "E",
+                "player_id": 0,
+                "melds": [[{"kind": "pon", "tiles": "E E E", "called_tile": "E"}], [], [], []],
+                "discards": ["", "E", "", ""],
+                "legal_kakan": ["E"]
+            }"#,
+        );
+        let with = without.clone();
+        without.legal_kakan = None;
+
+        let with = resolve(&with);
+        let without = resolve(&without);
+        assert_eq!(with.context, without.context);
+        assert_eq!(with.legal_actions.len(), without.legal_actions.len() + 1);
+    }
+
+    // 赤5の加槓は赤5の物理牌を追加牌にする。黒5と取り違えない。
+    #[test]
+    fn legal_kakan_distinguishes_the_red_five() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "123456789m0p",
+                "draw": "1s",
+                "player_id": 0,
+                "melds": [[{"kind": "pon", "tiles": "5p 5p 5p", "called_tile": "5p"}], [], [], []],
+                "discards": ["", "5p", "", ""],
+                "legal_kakan": ["0p"]
+            }"#,
+        ));
+
+        let kakan = scenario
+            .legal_actions
+            .iter()
+            .find(|action| matches!(action, LegalAction::Kakan { .. }))
+            .expect("加槓が合法手に並ぶ");
+        let LegalAction::Kakan { tile, consumed } = kakan else {
+            unreachable!();
+        };
+        assert!(tile.is_red());
+        assert!(scenario.context.hand_tiles().contains(tile));
+        assert!(!consumed.iter().any(|tile| tile.is_red()));
+    }
+
+    #[test]
+    fn rejects_legal_kakan_without_a_matching_pon() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123456789m1p",
+                "draw": "E",
+                "player_id": 0,
+                "melds": [[{"kind": "pon", "tiles": "S S S", "called_tile": "S"}], [], [], []],
+                "discards": ["", "S", "", ""],
+                "legal_kakan": ["E"]
+            }"#,
+        );
+
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap_err(),
+            ScenarioBuildError::LegalKakanWithoutPon {
+                field: "legal_kakan[0]".to_string(),
+                tile: "E".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_kakan_whose_added_tile_is_not_held() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123456789m1p1s",
+                "player_id": 0,
+                "melds": [[{"kind": "pon", "tiles": "E E E", "called_tile": "E"}], [], [], []],
+                "discards": ["", "E", "", ""],
+                "legal_kakan": ["E"]
+            }"#,
+        );
+
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap_err(),
+            ScenarioBuildError::LegalKakanTileNotHeld {
+                field: "legal_kakan[0]".to_string(),
+                tile: "E".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_kakan_without_player_id() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123456789m1p",
+                "draw": "E",
+                "melds": [[{"kind": "pon", "tiles": "E E E", "called_tile": "E"}], [], [], []],
+                "discards": ["", "E", "", ""],
+                "legal_kakan": ["E"]
+            }"#,
+        );
+
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap_err(),
+            ScenarioBuildError::LegalKakanWithoutPlayerId {
+                field: "legal_kakan[0]".to_string(),
                 tile: "E".to_string(),
             }
         );

@@ -370,3 +370,115 @@ pub(crate) const ANKAN_IISHANTEN_HAND: [u8; 13] =
     [108, 109, 110, 0, 4, 8, 12, 17, 20, 24, 28, 36, 40];
 pub(crate) const ANKAN_IISHANTEN_DRAWN: u8 = 111;
 pub(crate) const ANKAN_IISHANTEN_CONSUMED: [u8; 4] = [108, 109, 110, 111];
+
+/// 加槓判断用の東場東家局面。[`ankan_context`] と同じ卓で、各家の河も指定できるようにしたもの。
+///
+/// 加槓牌の搶槓 hard-safe 判定は他家自身の河を読むので、河を持たない [`ankan_context`] では
+/// 判定を固定できない。見え牌は自分の手牌とツモ牌だけにし、河の牌を見え牌へ二重に数えない。
+pub(crate) fn kakan_context(
+    hand: &[u8],
+    drawn: u8,
+    reached: [bool; 4],
+    melds: [Vec<Meld>; 4],
+    player_id: Option<u8>,
+    discards: [Vec<u8>; 4],
+) -> GameContext {
+    let hand_tiles: Vec<_> = hand.iter().map(|&value| tile(value)).collect();
+    let mut visible = hand_tiles.clone();
+    visible.push(tile(drawn));
+
+    GameContext::from_parts_with_melds(
+        Some(tile(drawn)),
+        hand_tiles,
+        vec![],
+        TileType::from_mjai_type_str("E").ok(),
+        TileType::from_mjai_type_str("E").ok(),
+        visible,
+        player_id,
+        Some(0),
+        discards.map(|river| river.into_iter().map(tile).collect()),
+        reached,
+        melds,
+    )
+    .with_history_furiten_facts(HistoryFuritenFacts {
+        same_turn: Some(false),
+        riichi_missed_win: Some(false),
+    })
+}
+
+pub(crate) fn kakan_action(added: u8, consumed: &[u8]) -> LegalAction {
+    LegalAction::Kakan {
+        tile: tile(added),
+        consumed: consumed.iter().map(|&value| tile(value)).collect(),
+    }
+}
+
+/// 全他家の河へ同じ牌を置いた河。加槓牌の搶槓 hard-safe を満たす局面を作るために使う。
+///
+/// 同じ牌種は4枚しかなく、加槓は Pon の3枚と追加牌1枚で使い切るので、実際の局で3家すべての河に
+/// 加槓牌が並ぶことはない。v1 policy の判定そのものを固定するための合成局面として使う。
+pub(crate) fn rivers_with_tile_for_all_opponents(tiles: [u8; 3]) -> [Vec<u8>; 4] {
+    [vec![], vec![tiles[0]], vec![tiles[1]], vec![tiles[2]]]
+}
+
+/// 東 (108..110) の Pon を持ち、123456789m + 1p の 1p 単騎テンパイで4枚目の東 (111) をツモった局面。
+///
+/// 東を切っても加槓しても concealed hand は同じ10枚のままなので、向聴・受け入れ・待ちが変わら
+/// ない。加槓側は明槓ぶん符が増えるので打点も下がらない。
+pub(crate) const KAKAN_FREE_HAND: [u8; 10] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36];
+pub(crate) const KAKAN_FREE_DRAWN: u8 = 111;
+pub(crate) const KAKAN_FREE_CONSUMED: [u8; 3] = [108, 109, 110];
+
+/// 加槓が置換する東 (108..110) の Pon。
+pub(crate) fn east_pon_meld() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(108), tile(109), tile(110)],
+        Some(tile(108)),
+    )
+}
+
+/// 2m (4..6) の Pon と4枚目の 2m (7) を持ち、1m / 4m 待ちテンパイで 9p (68) をツモった局面。
+///
+/// 通常打牌はツモ切りでテンパイを維持できるが、4枚目の 2m を加槓すると 2m3m の搭子が崩れて
+/// 1向聴へ戻る。
+pub(crate) const KAKAN_SHANTEN_REGRESSING_HAND: [u8; 10] = [7, 8, 48, 53, 56, 96, 100, 104, 36, 37];
+pub(crate) const KAKAN_SHANTEN_REGRESSING_DRAWN: u8 = 68;
+pub(crate) const KAKAN_SHANTEN_REGRESSING_ADDED: u8 = 7;
+pub(crate) const KAKAN_SHANTEN_REGRESSING_CONSUMED: [u8; 3] = [4, 5, 6];
+
+/// 2m (4..6) の Pon。
+pub(crate) fn two_man_pon_meld() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(4), tile(5), tile(6)],
+        Some(tile(4)),
+    )
+}
+
+/// 東 (108..110) の Pon を持つ1向聴の局面。4枚目の東 (111) をツモった状態。
+///
+/// 東を切っても加槓しても1向聴のままだが、テンパイではないので既存の攻撃打点で加槓前後を
+/// 比較できない。
+pub(crate) const KAKAN_IISHANTEN_HAND: [u8; 10] = [0, 4, 8, 12, 17, 20, 24, 28, 40, 88];
+pub(crate) const KAKAN_IISHANTEN_DRAWN: u8 = 111;
+
+/// 3m (8..10) の Pon と4枚目の 3m (11) を持ち、3m4m5m6m + 3p4p5p + 3s4s + 7p7p で 7p (61) を
+/// ツモった局面。
+///
+/// 6m を切れば 3m4m5m が残って 5s 和了で三色が付く。4枚目の 3m を加槓すると 4m5m6m になって
+/// 三色が消える。待ちはどちらも 2s / 5s で受け入れも変わらないので、打点だけが下がる比較に
+/// なる。
+pub(crate) const KAKAN_VALUE_REGRESSING_HAND: [u8; 10] = [11, 12, 17, 20, 44, 48, 53, 80, 84, 60];
+pub(crate) const KAKAN_VALUE_REGRESSING_DRAWN: u8 = 61;
+pub(crate) const KAKAN_VALUE_REGRESSING_ADDED: u8 = 11;
+pub(crate) const KAKAN_VALUE_REGRESSING_CONSUMED: [u8; 3] = [8, 9, 10];
+
+/// 3m (8..10) の Pon。
+pub(crate) fn three_man_pon_meld() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(8), tile(9), tile(10)],
+        Some(tile(8)),
+    )
+}
