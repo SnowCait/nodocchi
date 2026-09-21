@@ -2900,7 +2900,8 @@ fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
 /// こともしない。
 pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
     format_analysis_summary(&AnalysisResult::from_decision(
-        scenario,
+        &scenario.context,
+        &scenario.legal_actions,
         diagnostic,
         SUMMARY_CHOICE_LIMIT,
     ))

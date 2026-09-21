@@ -2,18 +2,19 @@ use bot_core::{
     CallCandidateDiagnostic, CallDecisionDiagnostic, CallDecisionReason, CallIishantenComparison,
     CallThreeShantenPassEvaluation, CallTwoShantenPassEvaluation, CombinedDefenseCategory,
     DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DefenseDecisionDiagnostic,
-    DefenseFallbackKind, LegalAction, OpenHandDefenseCategory, PushPullMode, PushPullReason,
-    ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiOffenseValue,
+    DefenseFallbackKind, GameContext, LegalAction, OpenHandDefenseCategory, PushPullMode,
+    PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason,
+    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
+    StrongTenpaiRequirement, TenpaiOffenseValue,
 };
 use bot_logic::{PermanentFuriten, TileId, TileType};
 
 use crate::ranked_choice::{AnalysisOpponentHonorValue, RankedChoice, rank_choices};
-use crate::scenario::Scenario;
 
 /// 1局面の production 判断を consumer 向けに投影した構造化結果。
 ///
-/// [`Scenario`] と、その局面で既に得ている primary [`ShantenDecisionDiagnostic`] から作る。
+/// `GameContext` と合法手、そしてその局面で既に得ている primary [`ShantenDecisionDiagnostic`]
+/// から作る。手入力 scenario か replay かといった局面の出所には依存しない。
 /// 診断そのものを公開せず、consumer が必要とする値だけを薄く写す。表示用の文字列は作らず、
 /// 既存の enum と数値をそのまま保持するので、CLI formatter と Web が同じ結果を読める。
 ///
@@ -42,15 +43,29 @@ pub struct AnalysisResult {
 impl AnalysisResult {
     /// 局面と primary 診断から解析結果を投影する。
     ///
+    /// `diagnostic` は、ここへ渡す `context` と `legal_actions` そのものに対して得た primary
+    /// 診断でなければならない。primary 診断はここで取り直さず、渡されたものをそのまま
+    /// choice 1 として使う一方、choice 2 以降は同じ `context` / `legal_actions` から
+    /// production の再診断で求めるので、別の合法手集合から得た診断を渡すと choice 1 と
+    /// choice 2 以降が違う前提の ranking になる。
+    ///
+    /// 追加診断の範囲は違っていてよい。[`DiagnosticOptions`](bot_core::DiagnosticOptions) は
+    /// 選択する action を変えないので、同じ `context` / `legal_actions` から
+    /// [`ShantenAgent::diagnose_with_options()`](bot_core::ShantenAgent::diagnose_with_options)
+    /// で得た詳細診断も同じ decision point の primary 診断として渡せる。
+    ///
+    /// この前提は runtime では検証しない。`context` / `legal_actions` と `diagnostic` の対応は
+    /// 呼び出し側が保つ。
+    ///
     /// `choice_limit` は [`choices`](Self::choices) に並べる件数の上限で、consumer が決める。
-    /// primary 診断はここで取り直さず、渡されたものをそのまま choice 1 として使う。
     pub fn from_decision(
-        scenario: &Scenario,
+        context: &GameContext,
+        legal_actions: &[LegalAction],
         diagnostic: &ShantenDecisionDiagnostic,
         choice_limit: usize,
     ) -> Self {
         Self {
-            choices: rank_choices(scenario, diagnostic, choice_limit),
+            choices: rank_choices(context, legal_actions, diagnostic, choice_limit),
             ryukyoku: diagnostic.ryukyoku.as_ref().map(ryukyoku),
             push_pull: push_pull(diagnostic),
             reach: reach(diagnostic),
@@ -474,7 +489,7 @@ fn reach_threat_defense(defense: &DefenseDecisionDiagnostic) -> Option<AnalysisR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::ScenarioSpec;
+    use crate::scenario::{Scenario, ScenarioSpec};
     use bot_core::{
         CallKind, CallTwoShantenSelfTsumoDiagnostic, CallTwoShantenSpeedDiagnostic,
         CombinedDefenseCategory, OpenHandDefenseCategory, OpponentHonorValue, ShantenAgent,
@@ -700,7 +715,12 @@ mod tests {
     fn analyzed(json: &str) -> (Scenario, ShantenDecisionDiagnostic, AnalysisResult) {
         let scenario = scenario_from_json(json);
         let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
-        let result = AnalysisResult::from_decision(&scenario, &diagnostic, CHOICE_LIMIT);
+        let result = AnalysisResult::from_decision(
+            &scenario.context,
+            &scenario.legal_actions,
+            &diagnostic,
+            CHOICE_LIMIT,
+        );
         (scenario, diagnostic, result)
     }
 
@@ -723,7 +743,12 @@ mod tests {
         let (scenario, diagnostic, result) = analyzed(NORMAL_SCENARIO);
         assert_eq!(
             result.choices,
-            rank_choices(&scenario, &diagnostic, CHOICE_LIMIT)
+            rank_choices(
+                &scenario.context,
+                &scenario.legal_actions,
+                &diagnostic,
+                CHOICE_LIMIT
+            )
         );
         assert_eq!(
             result.choices[0].selected_action,
