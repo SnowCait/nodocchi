@@ -166,6 +166,19 @@ pub enum ScenarioBuildError {
 
     #[error("{field} consumed {tile} is not in hand")]
     LegalPonConsumedNotHeld { field: String, tile: String },
+
+    #[error("{field} consumed must have {expected} tiles, but has {count}")]
+    LegalAnkanConsumedCount {
+        field: String,
+        expected: usize,
+        count: usize,
+    },
+
+    #[error("{field} consumed ({consumed:?}) must be four tiles of the same tile type")]
+    LegalAnkanTileType { field: String, consumed: String },
+
+    #[error("{field} consumed {tile} is not in hand or the drawn tile")]
+    LegalAnkanConsumedNotHeld { field: String, tile: String },
 }
 
 #[cfg(test)]

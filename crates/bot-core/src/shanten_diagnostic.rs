@@ -14,6 +14,7 @@ use crate::discard_selection::{
     DiscardActionSelection, DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
 };
 use crate::fold_defense::FoldDefenseEvaluation;
+use crate::kan_decision::KanDecisionDiagnostic;
 use crate::open_hand_defense::{OpenHandDefenseCategory, OpenHandDefenseDiagnostic};
 use crate::open_hand_threat::OpenHandThreatAssessment;
 use crate::prospective_value::ProspectiveLookaheadDiagnostic;
@@ -165,6 +166,15 @@ pub struct ShantenDecisionDiagnostic {
     /// 鳴きを検討した場合の診断。合法な Chi / Pon が1件も無ければ `None`。採用しなかった
     /// 場合も候補ごとの理由を保持する。
     pub call: Option<CallDecisionDiagnostic>,
+    /// カンを検討した場合の診断。合法なカンが1件も無い局面と、カン判断まで進まなかった局面
+    /// (Hora / 九種九牌 / 鳴きでの早期終了、Push 以外の押し引き、リーチ採用) では `None`。
+    ///
+    /// 採用しなかった場合も候補ごとの理由を保持する。Kakan / Daiminkan は今回 production へ
+    /// 接続していないので、候補としては並ぶが必ず
+    /// [`KanDecisionReason::KakanNotConnected`](crate::kan_decision::KanDecisionReason::KakanNotConnected) /
+    /// [`KanDecisionReason::DaiminkanNotConnected`](crate::kan_decision::KanDecisionReason::DaiminkanNotConnected)
+    /// になる。`act()` と同じ helper の実結果で、診断用の別判断ロジックは持たない。
+    pub kan: Option<KanDecisionDiagnostic>,
     /// 九種九牌を検討した場合の診断。`LegalAction::Ryukyoku` が合法でない局面と、Hora で
     /// 早期終了した局面では `None`。
     ///
@@ -567,6 +577,7 @@ impl DecisionDiagnostics {
             reach_damaten_comparison: self.reach_damaten_comparison,
             defense: self.defense,
             call: decision.call,
+            kan: decision.kan,
             ryukyoku: decision.ryukyoku,
             own_fixed_meld_count: context.own_fixed_meld_count(),
             player_threats,

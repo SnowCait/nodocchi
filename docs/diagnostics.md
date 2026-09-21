@@ -16,6 +16,7 @@
 | `Player threats` | player ごとの reach / meld facts と OpenHandThreat classification |
 | `Push/Pull` | threat と offense を組み合わせた押し引き |
 | `Reach` | 通常打牌後のテンパイに対するリーチ判断 |
+| `Kan` | 合法なカン候補ごとの判断内訳 |
 | `Reach / Damaten comparison` | Reach / Damaten の判断材料をまとめた統合観測 (diagnostics only) |
 | `Defense` | リーチ者向け防御候補のうち採用したもの |
 | `Defense candidates` | 全合法 Dahai の防御評価 |
@@ -45,6 +46,7 @@ Final decision
 | `OpenHandDefenseFallback` | High OpenHandThreat 向け fallback |
 | `CombinedThreatDefenseFallback` | 複合 threat 向け fallback |
 | `Call` | 鳴き判断で選んだ Chi / Pon |
+| `Kan` | カン判断で選んだ暗槓 |
 | `LegalDahaiFallback` / `None` | 上位判断で選べない場合の fallback |
 
 防御 source では category や kind も表示されます。
@@ -101,6 +103,46 @@ Final decision
   source: OpenHandDefenseFallback
   open hand defense category: SafeAgainstAllTargets
 ```
+
+## Kan
+
+`Kan` は合法なカン候補ごとの判断内訳です。合法なカンが1件も無い局面と、カン判断まで進まなかった
+局面 (和了・九種九牌・鳴きでの早期終了、`Push` 以外の押し引き、リーチ採用) では `not evaluated`
+です。`not evaluated` と「カンしない」を混同しないでください。
+
+候補ごとに `kind` (`Ankan` / `Kakan` / `Daiminkan`)、`tile` (対象牌種)、`selected` / `eligible` と
+`reason` を出します。`reason` は最初に落ちた条件1つだけで、判定がそこまで進まなかった項目は `-`
+のままにします。
+
+production で選べるのは**暗槓だけ**です。加槓と大明槓は候補として並びますが、`reason` は必ず
+`KakanNotConnected` / `DaiminkanNotConnected` になります。
+
+```text
+Kan
+  evaluated
+  selected: Ankan E E E E
+  reason: EligibleAnkanNoRegression
+  candidates: 1
+  Ankan E E E E
+    selected: yes
+    eligible: yes
+    reason: EligibleAnkanNoRegression
+    kind: Ankan
+    tile: E
+    current fixed meld count: 0
+    post-kan fixed meld count: 1
+    baseline discard: E
+    baseline: shanten 0 / acceptance 3 / 1 types
+    post-kan: shanten 0 / acceptance 3 / 1 types
+```
+
+`baseline` は暗槓しない場合に採用する通常打牌 (`baseline discard`) を切った後の13枚、`post-kan` は
+暗槓後の `10枚 + 副露1組` で、どちらも `13 - 3 × 副露数` 枚の同じ大きさの手牌です。向聴が悪化せず
+受け入れも減らない場合だけ暗槓します (`EligibleAnkanNoRegression`)。悪化した場合の `reason` は
+`ShantenRegresses` / `AcceptanceRegresses` で、どの値で落ちたかは両方の行を見比べれば分かります。
+
+新ドラ・嶺上牌・暗槓で増える符は評価に含めていないので、この2行には現れません。条件と今回
+含めていないものは [麻雀 AI の概要](ai/overview.md#カン-kan) を参照してください。
 
 ## Normal discard と candidates
 

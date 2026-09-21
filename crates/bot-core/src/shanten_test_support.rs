@@ -268,3 +268,60 @@ pub(crate) fn three_shanten_progress_regression_context() -> (GameContext, Vec<L
         .collect();
     (context, actions)
 }
+
+/// 暗槓判断用の東場東家局面。ツモ牌と副露・リーチ状況だけを差し替える。
+///
+/// 見え牌は自分の手牌とツモ牌だけで、カンの対象牌が4枚とも見えている状態になる。
+pub(crate) fn ankan_context(
+    hand: &[u8],
+    drawn: u8,
+    reached: [bool; 4],
+    melds: [Vec<Meld>; 4],
+    player_id: Option<u8>,
+) -> GameContext {
+    let hand_tiles: Vec<_> = hand.iter().map(|&value| tile(value)).collect();
+    let mut visible = hand_tiles.clone();
+    visible.push(tile(drawn));
+
+    GameContext::from_parts_with_melds(
+        Some(tile(drawn)),
+        hand_tiles,
+        vec![],
+        TileType::from_mjai_type_str("E").ok(),
+        TileType::from_mjai_type_str("E").ok(),
+        visible,
+        player_id,
+        Some(0),
+        Default::default(),
+        reached,
+        melds,
+    )
+}
+
+pub(crate) fn ankan_action(consumed: &[u8]) -> LegalAction {
+    LegalAction::Ankan {
+        consumed: consumed.iter().map(|&value| tile(value)).collect(),
+    }
+}
+
+pub(crate) fn ankan_dahai_actions(hand: &[u8], drawn: u8) -> Vec<LegalAction> {
+    hand.iter()
+        .chain(std::iter::once(&drawn))
+        .map(|&value| dahai(value))
+        .collect()
+}
+
+/// 東 (108..111) の暗刻で 1p (36) 単騎テンパイし、4枚目の東 (111) をツモった局面。
+///
+/// 東を切っても暗槓しても待ちは 1p のままで、残枚数も 3 枚から変わらない。
+pub(crate) const ANKAN_FREE_HAND: [u8; 13] = [108, 109, 110, 0, 4, 8, 12, 17, 20, 24, 28, 32, 36];
+pub(crate) const ANKAN_FREE_DRAWN: u8 = 111;
+pub(crate) const ANKAN_FREE_CONSUMED: [u8; 4] = [108, 109, 110, 111];
+
+/// 1m (0..3) 4枚と 2m (4) で 1m1m1m + 1m2m の 3m 待ちテンパイになる局面。
+///
+/// 暗槓すると 2m が浮いてテンパイが崩れ、1向聴へ戻る。
+pub(crate) const ANKAN_REGRESSING_HAND: [u8; 13] =
+    [0, 1, 2, 3, 4, 48, 53, 56, 96, 100, 104, 36, 37];
+pub(crate) const ANKAN_REGRESSING_DRAWN: u8 = 68;
+pub(crate) const ANKAN_REGRESSING_CONSUMED: [u8; 4] = [0, 1, 2, 3];

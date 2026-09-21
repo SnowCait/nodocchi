@@ -16,6 +16,7 @@ const CHI_TILE_COUNT: usize = 3;
 const PON_TILE_COUNT: usize = 3;
 const KAN_TILE_COUNT: usize = 4;
 const PON_CONSUMED_TILE_COUNT: usize = 2;
+const ANKAN_CONSUMED_TILE_COUNT: usize = 4;
 
 // リーチを生成する打牌後の向聴数。
 const REACH_TENPAI_SHANTEN: i8 = 0;
@@ -72,6 +73,12 @@ pub struct ScenarioSpec {
     pub legal_dahai: Option<String>,
     #[serde(default)]
     pub legal_pon: Option<Vec<PonActionSpec>>,
+    /// 合法な暗槓。consumed は手牌とツモ牌から取る同じ牌種4枚で、`"E E E E"` のように書く。
+    ///
+    /// 暗槓の合法性 (リーチ後に待ちが変わらないかなど) は入力側が source of truth なので、
+    /// ここへ書いた暗槓はそのまま合法手として渡す。
+    #[serde(default)]
+    pub legal_ankan: Option<Vec<String>>,
     #[serde(default)]
     pub allow_hora: bool,
     #[serde(default)]
@@ -848,6 +855,10 @@ fn build_legal_actions(
         )?);
     }
 
+    if let Some(specs) = spec.legal_ankan.as_deref() {
+        actions.extend(ankan_actions(specs, hand, draw)?);
+    }
+
     if is_reach_legal(reach_legality_facts(context, &actions)) {
         actions.push(LegalAction::Reach);
     }
@@ -1064,6 +1075,64 @@ fn pon_target_tile(
     Ok(target)
 }
 
+fn ankan_actions(
+    specs: &[String],
+    hand: &[TileId],
+    draw: Option<TileId>,
+) -> Result<Vec<LegalAction>, ScenarioBuildError> {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| ankan_action(&format!("legal_ankan[{index}]"), spec, hand, draw))
+        .collect()
+}
+
+// 暗槓の consumed は自分のツモ牌も含めた14枚から取る。同じ牌種4枚であることだけを確かめ、
+// 待ちが変わるかどうかといった合法性は入力側の責任のまま扱わない。
+fn ankan_action(
+    field: &str,
+    spec: &str,
+    hand: &[TileId],
+    draw: Option<TileId>,
+) -> Result<LegalAction, ScenarioBuildError> {
+    let consumed = parse_field(&format!("{field}.consumed"), spec)?;
+    if consumed.len() != ANKAN_CONSUMED_TILE_COUNT {
+        return Err(ScenarioBuildError::LegalAnkanConsumedCount {
+            field: field.to_string(),
+            expected: ANKAN_CONSUMED_TILE_COUNT,
+            count: consumed.len(),
+        });
+    }
+    if consumed
+        .iter()
+        .any(|tile| tile.tile_type != consumed[0].tile_type)
+    {
+        return Err(ScenarioBuildError::LegalAnkanTileType {
+            field: field.to_string(),
+            consumed: spec.to_string(),
+        });
+    }
+
+    let held: Vec<TileId> = hand.iter().copied().chain(draw).collect();
+    let mut tiles: Vec<TileId> = Vec::new();
+    for tile in &consumed {
+        let found = held.iter().copied().find(|candidate| {
+            candidate.tile_type() == tile.tile_type
+                && candidate.is_red() == tile.red
+                && !tiles.contains(candidate)
+        });
+        let Some(found) = found else {
+            return Err(ScenarioBuildError::LegalAnkanConsumedNotHeld {
+                field: field.to_string(),
+                tile: tile.to_mjai_string(),
+            });
+        };
+        tiles.push(found);
+    }
+
+    Ok(LegalAction::Ankan { consumed: tiles })
+}
+
 fn pon_consumed_tiles(
     field: &str,
     consumed: &[LogicalTile],
@@ -1156,6 +1225,7 @@ mod tests {
         assert_eq!(spec.history_furiten, None);
         assert_eq!(spec.legal_dahai, None);
         assert_eq!(spec.legal_pon, None);
+        assert_eq!(spec.legal_ankan, None);
         assert!(!spec.allow_hora);
         assert!(!spec.allow_ryukyoku);
         assert!(!spec.allow_none);
@@ -2281,6 +2351,115 @@ mod tests {
                 .unwrap_or(bot_logic::FixedMeldCount::NONE),
         );
         assert_eq!(shanten.min(), 1);
+    }
+
+    #[test]
+    fn legal_ankan_builds_an_ankan_action_from_the_hand_and_draw() {
+        let scenario = resolve(&spec_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "legal_ankan": ["E E E E"]
+            }"#,
+        ));
+
+        let ankan = scenario
+            .legal_actions
+            .iter()
+            .find(|action| matches!(action, LegalAction::Ankan { .. }))
+            .expect("暗槓が合法手に並ぶ");
+        let LegalAction::Ankan { consumed } = ankan else {
+            unreachable!();
+        };
+        // 手牌の3枚とツモ牌の1枚を、別々の物理牌としてそのまま使う。
+        assert_eq!(consumed.len(), 4);
+        assert_eq!(labels(consumed), ["E", "E", "E", "E"]);
+        let mut unique = consumed.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 4);
+    }
+
+    #[test]
+    fn legal_ankan_does_not_add_visible_tiles_or_melds() {
+        // 暗槓は合法手として渡すだけで、局面そのもの (手牌・見え牌・副露) は変えない。
+        let mut without = spec_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "legal_ankan": ["E E E E"]
+            }"#,
+        );
+        let with = without.clone();
+        without.legal_ankan = None;
+
+        let with = resolve(&with);
+        let without = resolve(&without);
+        assert_eq!(with.context, without.context);
+        assert_eq!(with.legal_actions.len(), without.legal_actions.len() + 1);
+    }
+
+    #[test]
+    fn rejects_legal_ankan_that_is_not_four_of_a_kind() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "legal_ankan": ["E E E S"]
+            }"#,
+        );
+
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap_err(),
+            ScenarioBuildError::LegalAnkanTileType {
+                field: "legal_ankan[0]".to_string(),
+                consumed: "E E E S".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_ankan_with_the_wrong_tile_count() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123456789m1p111z",
+                "draw": "E",
+                "player_id": 0,
+                "legal_ankan": ["E E E"]
+            }"#,
+        );
+
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap_err(),
+            ScenarioBuildError::LegalAnkanConsumedCount {
+                field: "legal_ankan[0]".to_string(),
+                expected: 4,
+                count: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legal_ankan_that_is_not_held() {
+        let spec = spec_from_json(
+            r#"{
+                "hand": "123456789m1p112z",
+                "draw": "E",
+                "player_id": 0,
+                "legal_ankan": ["E E E E"]
+            }"#,
+        );
+
+        assert_eq!(
+            Scenario::resolve(&spec).unwrap_err(),
+            ScenarioBuildError::LegalAnkanConsumedNotHeld {
+                field: "legal_ankan[0]".to_string(),
+                tile: "E".to_string(),
+            }
+        );
     }
 
     #[test]
