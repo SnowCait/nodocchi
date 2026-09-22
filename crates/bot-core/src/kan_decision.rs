@@ -556,8 +556,10 @@ pub enum KanDecisionReason {
     InvalidKakanShape,
     /// 加槓牌について、全他家からの搶槓ロン不能を hard fact で確定できない。
     ///
-    /// v1 の根拠は「その player 自身の河に加槓牌と同じ牌種がある」ことだけで、搶槓 risk の推定は
-    /// 行わない。
+    /// 他家ごとの根拠は [`KakanChankanSafety::RiverFuriten`] (自身の河に加槓牌と同じ牌種がある)
+    /// と [`KakanChankanSafety::NoStructuralCompletion`] (structural hidden-hand model の
+    /// `target_completion_state_weight` が 0) の2つで、1人でもどちらも確定できなければこの理由に
+    /// なる。搶槓 risk の推定は行わない。
     KakanChankanNotHardSafe,
     /// 自己リーチ前で、他家にリーチ者がいる。新ドラがリーチ者の打点へ与える影響を既存評価で
     /// 測れない。自己リーチ後の暫定 policy ではこの理由で落とさない。
