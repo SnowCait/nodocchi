@@ -14,17 +14,18 @@ use bot_core::{
     CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
     CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
     DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext,
-    KakanChankanDiagnostic, KanCandidateDiagnostic, KanDecisionDiagnostic, KanHandDiagnostic,
-    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
-    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
-    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
-    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveHanVerdict,
-    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
-    ProspectiveWaitValue, PushPullDecision, PushPullInputs, PushPullOffenseState,
-    ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic, ReachPublicSafetyEvidence,
-    ReachRonBaselineDiagnostic, ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
-    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuVerdict,
-    ShantenDecisionDiagnostic, StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
+    KakanChankanDiagnostic, KakanChankanSafety, KanCandidateDiagnostic, KanDecisionDiagnostic,
+    KanHandDiagnostic, LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
+    OffenseValue, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic,
+    OpenHandThreatAssessment, PlayerThreatDiagnostic, ProspectiveBaselineValue,
+    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveDrawVariantValue,
+    ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
+    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
+    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
+    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
+    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
+    RonOpportunityWaitDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
+    StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
     StructuralExpectedDealInLossEvidence, TenpaiContinuationBranch, TenpaiContinuationCandidate,
     TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
     TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
@@ -439,8 +440,8 @@ fn format_kan_candidate(candidate: &KanCandidateDiagnostic) -> Vec<String> {
 
 // 加槓牌の搶槓 hard-safe 判定。加槓以外と、判定まで進まなかった候補では1行だけ出す。
 //
-// hard-safe の根拠は「その player 自身の河に加槓牌と同じ牌種がある」ことだけなので、3家ぶんの
-// 内訳をそのまま並べる。どの家で落ちたかが読めるようにするためである。
+// hard-safe の根拠は他家ごとに違うので、3家ぶんの内訳をそのまま並べる。どの家がどの根拠で
+// 安全なのか、どの家で落ちたのかが読めるようにするためである。
 fn format_kan_chankan(chankan: Option<&KakanChankanDiagnostic>) -> Vec<String> {
     let Some(chankan) = chankan else {
         return vec![format!("    chankan hard-safe: {ABSENT}")];
@@ -453,12 +454,27 @@ fn format_kan_chankan(chankan: Option<&KakanChankanDiagnostic>) -> Vec<String> {
     )];
     for opponent in &chankan.opponents {
         lines.push(format!(
-            "      player {}: discarded {}",
+            "      player {}: {} / river furiten {} / structural completion {}",
             opponent.player,
-            yes_no(opponent.discarded)
+            format_kan_chankan_safety(opponent.safety),
+            yes_no(opponent.river_furiten),
+            opponent
+                .structural_completion_weight
+                .map(|weight| weight.to_string())
+                .unwrap_or_else(|| NOT_EVALUATED.to_string())
         ));
     }
     lines
+}
+
+// 他家1人分の hard-safe 根拠。安全と判定できなかった理由も同じ軸で出す。
+fn format_kan_chankan_safety(safety: KakanChankanSafety) -> &'static str {
+    match safety {
+        KakanChankanSafety::RiverFuriten => "hard-safe RiverFuriten",
+        KakanChankanSafety::NoStructuralCompletion => "hard-safe NoStructuralCompletion",
+        KakanChankanSafety::StructuralCompletionPossible => "unsafe StructuralCompletionPossible",
+        KakanChankanSafety::StructuralModelUnavailable => "unknown StructuralModelUnavailable",
+    }
 }
 
 // 比較に使った13枚相当 state 1つ分。評価しなかった側は `-` で、0 と混同しない。
@@ -3632,9 +3648,10 @@ mod tests {
     use bot_analysis::{AnalysisCallCandidate, AnalysisCallSelfTsumoComparison, ScenarioSpec};
     use bot_core::{
         Agent, CallDecisionReason, CombinedDefenseSelectionDiagnostic, DefenseFallbackKind,
-        DiagnosticOptions, KakanChankanOpponent, KanDecisionReason, KanKind, MenzenAgent,
-        OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic, PlayerRonRiskEvidence,
-        RonRiskEvidence, ShantenAgent, TenpaiOffenseMode, TenpaiOffenseValue,
+        DiagnosticOptions, KakanChankanOpponent, KakanChankanSafety, KanDecisionReason, KanKind,
+        MenzenAgent, OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic,
+        PlayerRonRiskEvidence, RonRiskEvidence, ShantenAgent, TenpaiOffenseMode,
+        TenpaiOffenseValue,
     };
     use bot_logic::{
         DiscardComparisonReason, TileCounts, TwoShantenSelfTsumoCandidate,
@@ -3642,7 +3659,7 @@ mod tests {
     };
     use std::sync::LazyLock;
 
-    const KAKAN_CHANKAN_SCENARIO: &str = include_str!("../scenarios/kakan_chankan.json");
+    const KAKAN_HARD_SAFE_SCENARIO: &str = include_str!("../scenarios/kakan_hard_safe.json");
 
     fn scenario_from_json(json: &str) -> Scenario {
         let spec: ScenarioSpec = serde_json::from_str(json).unwrap();
@@ -5077,17 +5094,18 @@ mod tests {
     }
 
     // 加槓は合法手として渡した1件が候補に並び、搶槓 hard-safe の内訳を3家ぶん出す。
+    //
+    // 牌136枚の物理制約と矛盾しない局面で、3家とも hard-safe になり加槓を採用する。
     #[test]
     fn kan_section_reports_the_chankan_hard_safety_of_a_kakan_scenario() {
-        let scenario = scenario_from_json(KAKAN_CHANKAN_SCENARIO);
+        let scenario = scenario_from_json(KAKAN_HARD_SAFE_SCENARIO);
         let diagnostic = diagnose(&scenario);
-        // 搶槓ロン不能を確定できないので加槓せず、通常打牌をそのまま選ぶ。
-        assert_ne!(diagnostic.selected_source, AgentActionSource::Kan);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
 
         let output = format_diagnostic(&scenario, &diagnostic, false);
         let kan = section(&output, "Kan\n");
-        assert!(kan.contains("  selected: none"), "{kan}");
-        assert!(kan.contains("  reason: KakanChankanNotHardSafe"), "{kan}");
+        assert!(kan.contains("  selected: Kakan E <- E E E"), "{kan}");
+        assert!(kan.contains("  reason: EligibleKakanNoRegression"), "{kan}");
         assert!(kan.contains("    kind: Kakan"), "{kan}");
         // tile は追加する4枚目で、元 Pon はそのまま診断に残す。
         assert!(kan.contains("    tile: E"), "{kan}");
@@ -5098,22 +5116,34 @@ mod tests {
         // 加槓は Pon の置換なので副露済み面子数は変わらない。
         assert!(kan.contains("    current fixed meld count: 1"), "{kan}");
         assert!(kan.contains("    post-kan fixed meld count: 1"), "{kan}");
-        // 河に加槓牌があるのは Pon した player 1 だけ。
-        assert!(kan.contains("    chankan hard-safe: no (E)"), "{kan}");
-        assert!(kan.contains("      player 1: discarded yes"), "{kan}");
-        assert!(kan.contains("      player 2: discarded no"), "{kan}");
-        assert!(kan.contains("      player 3: discarded no"), "{kan}");
+        // player 1 は Pon の元になった東を捨てた本人、player 2 / 3 は公開副露者で東の
+        // structural completion が 0。根拠の違いが3家ぶん読める。
+        assert!(kan.contains("    chankan hard-safe: yes (E)"), "{kan}");
+        assert!(
+            kan.contains(
+                "      player 1: hard-safe RiverFuriten / river furiten yes / structural completion not evaluated"
+            ),
+            "{kan}"
+        );
+        for player in [2, 3] {
+            assert!(
+                kan.contains(&format!(
+                    "      player {player}: hard-safe NoStructuralCompletion / river furiten no / structural completion 0"
+                )),
+                "{kan}"
+            );
+        }
 
         // Summary からも候補の種別・対象牌・搶槓 hard-safe・理由・採否を読める。
         let summary = summary_section(&output);
-        assert!(summary.contains("  kan: no"), "{summary}");
+        assert!(summary.contains("  kan: Kakan E <- E E E"), "{summary}");
         assert!(
-            summary.contains("  kan reason: KakanChankanNotHardSafe"),
+            summary.contains("  kan reason: EligibleKakanNoRegression"),
             "{summary}"
         );
         assert!(
             summary.contains(
-                "  kan candidate: Kakan E / chankan hard-safe no / KakanChankanNotHardSafe / selected no"
+                "  kan candidate: Kakan E / chankan hard-safe yes / EligibleKakanNoRegression / selected yes"
             ),
             "{summary}"
         );
@@ -5182,15 +5212,21 @@ mod tests {
                         opponents: vec![
                             KakanChankanOpponent {
                                 player: 1,
-                                discarded: true,
+                                river_furiten: true,
+                                structural_completion_weight: None,
+                                safety: KakanChankanSafety::RiverFuriten,
                             },
                             KakanChankanOpponent {
                                 player: 2,
-                                discarded: false,
+                                river_furiten: false,
+                                structural_completion_weight: Some(12),
+                                safety: KakanChankanSafety::StructuralCompletionPossible,
                             },
                             KakanChankanOpponent {
                                 player: 3,
-                                discarded: true,
+                                river_furiten: false,
+                                structural_completion_weight: None,
+                                safety: KakanChankanSafety::StructuralModelUnavailable,
                             },
                         ],
                         hard_safe: false,
@@ -5259,9 +5295,9 @@ mod tests {
              tile: C\n    \
              matching pon: Pon C C C (called C)\n    \
              chankan hard-safe: no (C)\n      \
-             player 1: discarded yes\n      \
-             player 2: discarded no\n      \
-             player 3: discarded yes\n    \
+             player 1: hard-safe RiverFuriten / river furiten yes / structural completion not evaluated\n      \
+             player 2: unsafe StructuralCompletionPossible / river furiten no / structural completion 12\n      \
+             player 3: unknown StructuralModelUnavailable / river furiten no / structural completion not evaluated\n    \
              current fixed meld count: 1\n    \
              post-kan fixed meld count: 1\n    \
              baseline discard: -\n    \

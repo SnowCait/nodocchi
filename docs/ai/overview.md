@@ -201,7 +201,7 @@ AND 他家にリーチ者がいない
 AND 既存 Push/Pull policy が Push と判定している
 AND 加槓の形が成り立ち、対応する既存 Pon を特定できる
 AND Pon → Kakan の post-state を組み立てられる
-AND 加槓牌について全他家からの搶槓ロン不能を hard fact で確定できる
+AND 全他家について、自身の河に加槓牌があるか structural completion が 0 であることを確定できる
 AND 加槓後の向聴数 == 加槓しない場合の通常打牌後の向聴数
 AND 加槓後の受け入れ (残枚数・牌種数) >= 同じ通常打牌後の受け入れ
 AND 両側の攻撃打点を既存評価で確定でき、攻撃モードも一致する
@@ -256,13 +256,43 @@ v1 でもっとも重要な条件です。既存 hidden-hand model の通常ロ�
 
 という手を取りこぼします。そこで通常打牌用の exact ron-risk をそのまま流用せず、**搶槓 risk を推定しません**。
 
-他家リーチ中は加槓しないので残る3家は非リーチです。その全員について
+他家リーチ中は加槓しないので、ここで評価する相手は非リーチの3家です。その全員について、次のどちらかを確定できた場合だけ加槓します。
 
 ```text
-is_discarded_by_player(加槓牌, player, ctx) == true
+A. その player 自身の河に加槓牌がある
+   → 恒常フリテンでロンできない
+   → hard-safe (RiverFuriten)
+
+OR
+
+B. structural hidden-hand model で
+   target_completion_state_weight(加槓牌) == 0
+   → 公開情報と整合する hidden hand の中に、その牌で Standard の和了形を完成できる
+     state 自体が存在しない
+   → hard-safe (NoStructuralCompletion)
 ```
 
-を要求します。自身の河にその牌種がある player は恒常フリテンでロンできないので、搶槓も起こり得ないと確定できます。判定は既存 `is_discarded_by_player()` / `is_discarded_by_all_players()` が source of truth です。
+1人でもどちらも確定できなければ `KakanChankanNotHardSafe` で加槓しません。
+
+#### structural completion を使う理由
+
+`CompressedStructuralTenpaiHiddenHandStates::target_completion_state_weight()` は、通常ロンの「役があるか」を判定する `R` ではなく、**対象牌を加えたときに Standard の構造的和了形が完成する hidden state の重み**を exact に数えます。したがって
+
+```text
+target_completion_state_weight(加槓牌) == 0
+```
+
+なら、通常ロンで役が付くかにも、搶槓で Chankan が役として追加されるかにも関係なく、そもそもその牌で和了形になれないため搶槓ロン不能と確定できます。heuristic ではなく hard fact です。
+
+| model の結果 | v1 の扱い |
+| --- | --- |
+| `completion == 0` | hard-safe |
+| `completion > 0` | 搶槓されるとは断定しないが、hard-safe とも断定できないので reject |
+| model unavailable / unsupported | unknown として reject |
+
+`completion > 0` を確率へ変換したり、threshold を置いたりしません。
+
+判定順は A が先で、自身の河に加槓牌がある player には exact counting を行いません (`is_discarded_by_player()` が source of truth)。A で確定しない player についてだけ `CompressedStructuralTenpaiHiddenHandStates::new()` を試し、その成功・失敗をそのまま model の対応範囲とします。門前非リーチのように現行 model が対応しない相手は unknown として reject し、Kan 側で新しい hidden-hand model を足したり「副露があるように見えるから使えるはず」という条件を複製したりしません。
 
 次のものは hard-safe の根拠に**使いません**。
 
@@ -273,11 +303,23 @@ is_discarded_by_player(加槓牌, player, ctx) == true
 | スジ | 河由来の推測で、ロン不能を確定しない |
 | 壁 / OneChance | 見え枚数由来の推測で、ロン不能を確定しない |
 | 字牌の safety rank | 同上 |
-| 通常 Dahai 用 exact `R/T` | `chankan = false` 前提を含み、搶槓の役を評価していない |
+| 通常 Dahai 用 exact `R/T` (`ron_risk_evidence()` / `ron_capable_state_weight()`) | 役判定を含み、`chankan = false` 前提の経路がある |
 | 「Push だから大丈夫」 | 押し引きの結論は放銃可否の事実ではない |
 
-この条件はかなり保守的で、意図したものです。加槓は同じ牌種4枚のうち3枚を Pon、1枚を手牌に持つので、その牌種が他家の河にあり得るのは Pon の元になった打牌をした1人だけです。したがって v1 の production では、実際の局面で加槓が成立することはほとんどありません。搶槓の `R/T` を exact に評価できるようになるまでの暫定 policy として、成立しない側 (加槓しない) へ倒してあります。
+#### 成立する局面の例
 
+加槓は同じ牌種4枚のうち3枚を Pon、1枚を手牌に持つので、その牌種が他家の河にあり得るのは Pon の元になった打牌をした1人だけです。A だけでは実局面で3家そろわないため、残りは B で確定します。
+
+```text
+player 1: Pon の元になった牌を捨てた本人      → RiverFuriten
+player 2: 非リーチの公開副露者、completion 0  → NoStructuralCompletion
+player 3: 非リーチの公開副露者、completion 0  → NoStructuralCompletion
+→ chankan hard-safe
+```
+
+字牌の加槓のように、その牌種4枚すべてが自分の副露と手牌にある場合、他家は1枚も持てないので字牌待ち (単騎・シャンポン) が構造的に成立せず、公開副露の相手の completion は 0 になります。数牌の加槓では両面搭子などで和了牌にできる hidden state が残るため、多くの局面で `completion > 0` となり reject 側へ倒れます。
+
+### 他家リーチ中
 ### 他家リーチ中
 
 ```text
@@ -293,7 +335,7 @@ any_opponent_reached() == true
 
 ### 将来: 搶槓 exact model
 
-`WinningContext { chankan: true }` を使った opponent hidden-hand model を整備し、リーチ者・副露者・門前非リーチ者のすべてについて搶槓の `R/T` を評価できるようにするのは別タスクです。その時点で「全3家に hard-safe でなければ加槓しない」という v1 の制限を緩和します。TODO は `bot_core::kan_decision` に残しています。
+`WinningContext { chankan: true }` を使った opponent hidden-hand model を整備し、リーチ者・公開副露者・門前非リーチ者のすべてについて搶槓の `R/T` を評価できるようにするのは別タスクです。その時点で「structural completion が1つでもあれば加槓しない」「model を使えない player がいれば加槓しない」という v1 の保守的な制限を緩和します。TODO は `bot_core::kan_decision` に残しています。
 
 ## 複数のカン候補
 
@@ -307,7 +349,7 @@ any_opponent_reached() == true
 | --- | --- |
 | 新ドラ | 中身が未知なので、自分の打点にも他家の打点にも加算しない。カン側の打点を過小評価する方向なので、比較はカンに不利な側へ倒れる |
 | 嶺上牌 | 未知なので、特定の牌を引いた後の state として評価しない。追加ツモ 1 回分も加算しない |
-| 搶槓 risk | 推定しない。加槓は搶槓ロン不能を hard fact で確定できる場合だけに限る |
+| 搶槓 risk | 推定しない。加槓は搶槓ロン不能を hard fact で確定できる場合だけに限る。`completion > 0` を確率へ変換しない |
 
 暗刻が暗槓になることで増える符は、既存 scoring が暗槓を含む固定面子から求めた値がそのまま打点比較へ入ります。この層で符を数え直しません。
 

@@ -720,16 +720,18 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
   "player_id": 0,
   "oya": 0,
   "round_wind": "E",
-  "discards": ["", "E", "", ""],
+  "discards": ["", "E", "9s", "2m"],
   "melds": [
     [{ "kind": "pon", "tiles": "E E E", "called_tile": "E" }],
     [],
-    [],
-    []
+    [{ "kind": "pon", "tiles": "2m 2m 2m", "called_tile": "2m" }],
+    [{ "kind": "pon", "tiles": "9s 9s 9s", "called_tile": "9s" }]
   ],
   "legal_kakan": ["E"]
 }
 ```
+
+この例は `scenarios/kakan_hard_safe.json` と同じ局面です。player 1 は Pon の元になった東を捨てた本人、player 2 / player 3 は非リーチの公開副露者で、東4枚がすべて自分の副露と手牌にあるため東の structural completion が 0 になります。3家とも搶槓 hard-safe なので加槓を採用します。
 
 consumed は指定した牌種と同じ自分の Pon の物理牌をそのまま使うので、同じ牌を Pon と加槓で二重に割り当てません。追加牌は手牌とツモ牌から赤5と黒5を区別して取ります。
 
@@ -738,9 +740,9 @@ consumed は指定した牌種と同じ自分の Pon の物理牌をそのまま
 判断内訳は [Structured diagnostics](diagnostics.md#kan) の `Kan` section に出て、Summary には
 
 ```text
-  kan: no
-  kan reason: KakanChankanNotHardSafe
-  kan candidate: Kakan E / chankan hard-safe no / KakanChankanNotHardSafe / selected no
+  kan: Kakan E <- E E E
+  kan reason: EligibleKakanNoRegression
+  kan candidate: Kakan E / chankan hard-safe yes / EligibleKakanNoRegression / selected yes
 ```
 
 のように候補の種別・対象牌・搶槓 hard-safe・理由・採否が並びます。

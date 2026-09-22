@@ -143,8 +143,8 @@ pub use two_shanten_full_parallel_comparison::{
 };
 
 pub use kan_decision::{
-    KakanChankanDiagnostic, KakanChankanOpponent, KanCandidateDiagnostic, KanDecisionDiagnostic,
-    KanDecisionReason, KanHandDiagnostic, KanKind,
+    KakanChankanDiagnostic, KakanChankanOpponent, KakanChankanSafety, KanCandidateDiagnostic,
+    KanDecisionDiagnostic, KanDecisionReason, KanHandDiagnostic, KanKind,
 };
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};

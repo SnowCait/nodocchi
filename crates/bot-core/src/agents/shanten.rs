@@ -829,11 +829,12 @@ mod tests {
         KAKAN_FREE_CONSUMED, KAKAN_FREE_DRAWN, KAKAN_FREE_HAND, OPPONENT_MELD_DRAW,
         OPPONENT_MELD_HAND, TENPAI_DRAWN, ankan_action, ankan_context, ankan_context_with_visible,
         ankan_dahai_actions, dahai, east_pon_meld, fold_actions, fold_under_reach_context,
-        kakan_action, kakan_context, opponent_meld_actions, opponent_reach_context,
-        opponent_reach_context_with_visible, pon_meld, rivers_with_tile_for_all_opponents,
-        suited_reach_context, suited_reach_context_with_reached, tenpai_actions, tenpai_context,
-        tenpai_dahai_actions, tenpai_under_reach_context, tile, unavailable_reach_meld,
-        weak_tenpai_actions, weak_tenpai_under_reach_context, weak_tenpai_under_reach_context_with,
+        kakan_action, kakan_hard_safe_context, kakan_table_context, opponent_meld_actions,
+        opponent_nine_sou_pon, opponent_reach_context, opponent_reach_context_with_visible,
+        pon_meld, suited_reach_context, suited_reach_context_with_reached, tenpai_actions,
+        tenpai_context, tenpai_dahai_actions, tenpai_under_reach_context, tile,
+        unavailable_reach_meld, weak_tenpai_actions, weak_tenpai_under_reach_context,
+        weak_tenpai_under_reach_context_with,
     };
     use bot_logic::{
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
@@ -1327,17 +1328,11 @@ mod tests {
         assert_eq!(kan.reason, KanDecisionReason::ValueNotEvaluable);
     }
 
-    // 加槓牌が全他家の河にあり、向聴・受け入れ・打点のどれも悪化しない局面では加槓する。
+    // 搶槓ロン不能を全他家について確定でき、向聴・受け入れ・打点のどれも悪化しない局面では
+    // 加槓する。牌136枚の物理制約と矛盾しない局面。
     #[test]
     fn selects_a_hard_safe_kakan_when_the_hand_does_not_regress() {
-        let ctx = kakan_context(
-            &KAKAN_FREE_HAND,
-            KAKAN_FREE_DRAWN,
-            [false; 4],
-            [vec![east_pon_meld()], vec![], vec![], vec![]],
-            Some(0),
-            rivers_with_tile_for_all_opponents([108, 109, 110]),
-        );
+        let ctx = kakan_hard_safe_context();
         let actions: Vec<LegalAction> = KAKAN_FREE_HAND
             .iter()
             .chain(std::iter::once(&KAKAN_FREE_DRAWN))
@@ -1361,16 +1356,20 @@ mod tests {
         assert_eq!(kan.reason, KanDecisionReason::EligibleKakanNoRegression);
     }
 
-    // 加槓牌が全他家の河に無ければ、合法でも加槓せず通常打牌を選ぶ。
+    // 搶槓ロン不能を確定できない他家が1人でもいれば、合法でも加槓せず通常打牌を選ぶ。
     #[test]
     fn never_claims_a_kakan_that_is_not_chankan_hard_safe() {
-        let ctx = kakan_context(
+        // player 2 が門前非リーチで、structural hidden-hand model を構築できない局面。
+        let ctx = kakan_table_context(
             &KAKAN_FREE_HAND,
             KAKAN_FREE_DRAWN,
-            [false; 4],
-            [vec![east_pon_meld()], vec![], vec![], vec![]],
-            Some(0),
-            Default::default(),
+            [
+                vec![east_pon_meld()],
+                vec![],
+                vec![],
+                vec![opponent_nine_sou_pon()],
+            ],
+            [vec![], vec![108], vec![104], vec![]],
         );
         let actions: Vec<LegalAction> = KAKAN_FREE_HAND
             .iter()
@@ -1397,14 +1396,7 @@ mod tests {
     // Hora は加槓より優先する。
     #[test]
     fn hora_keeps_priority_over_kakan() {
-        let ctx = kakan_context(
-            &KAKAN_FREE_HAND,
-            KAKAN_FREE_DRAWN,
-            [false; 4],
-            [vec![east_pon_meld()], vec![], vec![], vec![]],
-            Some(0),
-            rivers_with_tile_for_all_opponents([108, 109, 110]),
-        );
+        let ctx = kakan_hard_safe_context();
         let actions = vec![
             kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED),
             LegalAction::Hora,

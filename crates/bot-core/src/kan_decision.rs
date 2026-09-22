@@ -52,7 +52,7 @@
 //! | 自分がリーチ済みか | [`GameContext::own_reached`] |
 //! | 面子の形の検証 | [`Meld::shape`] |
 //! | 加槓が置換する既存 Pon | 自分の副露 ([`GameContext::own_melds`]) の [`Meld::shape`] |
-//! | 加槓牌で搶槓ロンされないこと | [`is_discarded_by_player`] |
+//! | 加槓牌で搶槓ロンされないこと | [`is_discarded_by_player`] と [`CompressedStructuralTenpaiHiddenHandStates`] |
 //! | 副露済み面子数 | [`GameContext::own_fixed_meld_count`] / [`FixedMeldCount`] |
 //! | カン後の向聴数 | [`calculate_shanten_with_fixed_melds`] |
 //! | カン後の受け入れ | [`calculate_acceptance_with_fixed_melds`] / [`calculate_acceptance_with_fixed_melds_and_visible_tiles`] |
@@ -258,7 +258,7 @@
 //! AND 既存 Push/Pull policy が Push と判定している
 //! AND 加槓の形が成り立ち、対応する既存 Pon を特定できる
 //! AND Pon → Kakan の post-state を組み立てられる
-//! AND 加槓牌について全他家からの搶槓ロン不能を hard fact で確定できる
+//! AND 全他家について、自身の河に加槓牌があるか structural completion が0であることを確定できる
 //! AND 加槓しない場合に選ぶ通常打牌の評価がある
 //! AND 加槓後の向聴数 == その通常打牌後の向聴数
 //! AND 加槓後の受け入れ (残枚数・牌種数) が悪化しない
@@ -332,15 +332,50 @@
 //! という手を取りこぼす。そのため通常打牌用の exact ron-risk をそのまま流用しない。
 //!
 //! v1 では搶槓 risk を**推定しない**。他家リーチ中は加槓しないので残る3家は非リーチであり、
-//! その全員について
+//! その全員について次のどちらかを確定できた場合だけ加槓する。
 //!
 //! ```text
-//! is_discarded_by_player(加槓牌, player, ctx) == true
+//! A. その player 自身の河に加槓牌がある
+//!    → 恒常フリテンでロンできない
+//!    → hard-safe ([`KakanChankanSafety::RiverFuriten`])
+//!
+//! OR
+//!
+//! B. structural hidden-hand model で
+//!    target_completion_state_weight(加槓牌) == 0
+//!    → 公開情報と整合する hidden hand の中に、その牌で Standard の和了形を完成できる
+//!      state 自体が存在しない
+//!    → hard-safe ([`KakanChankanSafety::NoStructuralCompletion`])
 //! ```
 //!
-//! を要求する。自身の河にその牌種がある player は恒常フリテンでロンできないので、搶槓も
-//! 起こり得ないと確定する。判定は既存 [`is_discarded_by_player`] / [`is_discarded_by_all_players`]
-//! を source of truth にし、この層でフリテン規則を持たない。かなり保守的だが意図したものである。
+//! 1人でもどちらも確定できなければ [`KanDecisionReason::KakanChankanNotHardSafe`] で加槓しない。
+//!
+//! ### structural completion を使う理由
+//!
+//! [`CompressedStructuralTenpaiHiddenHandStates::target_completion_state_weight`] は、通常ロンの
+//! 「役があるか」を判定する `R` ではなく、**対象牌を加えたときに Standard の構造的和了形が完成
+//! する hidden state の重み**を exact に数える。したがって
+//!
+//! ```text
+//! target_completion_state_weight(加槓牌) == 0
+//! ```
+//!
+//! なら、通常ロンで役があるかにも、搶槓で Chankan が役として追加されるかにも関係なく、そもそも
+//! その牌で和了形になれないため搶槓ロン不能と確定できる。heuristic ではなく hard fact として
+//! 使える。
+//!
+//! | model の結果 | v1 の扱い |
+//! | --- | --- |
+//! | `completion == 0` | hard-safe |
+//! | `completion > 0` | 搶槓されるとは断定しないが hard-safe とも断定できないので reject |
+//! | model unavailable / unsupported | unknown として reject |
+//!
+//! `completion > 0` を確率へ変換したり threshold を置いたりしない。
+//!
+//! 判定順は A が先で、自身の河に加槓牌がある player には exact counting を行わない
+//! ([`is_discarded_by_player`] が source of truth)。A で確定しない player についてだけ
+//! [`CompressedStructuralTenpaiHiddenHandStates::new`] を試し、その成功・失敗をそのまま model の
+//! 対応範囲とする。「副露があるように見えるから使えるはず」といった条件をこの層で複製しない。
 //!
 //! ### hard-safe の根拠に使わないもの
 //!
@@ -351,7 +386,7 @@
 //! | Suji | 河由来の推測で、ロン不能を確定しない |
 //! | Wall / OneChance | 見え枚数由来の推測で、ロン不能を確定しない |
 //! | Honor safety rank | 同上 |
-//! | 通常 Dahai 用 exact `R/T` | `chankan = false` 前提を含み、搶槓の役を評価していない |
+//! | 通常 Dahai 用 exact `R/T` (`ron_risk_evidence` / `ron_capable_state_weight`) | 役判定を含み、`chankan = false` 前提の経路がある |
 //! | 「Push だから大丈夫」 | 押し引きの結論は放銃可否の事実ではない |
 //!
 //! 特に `temporary_passed_tiles` は通常ロンに対する安全 evidence としては有効でも、搶槓に
@@ -382,9 +417,10 @@
 //! ## TODO: 搶槓 exact model
 //!
 //! TODO: [`WinningContext`](bot_logic::WinningContext) の `chankan: true` を使った opponent
-//! hidden-hand model を整備し、リーチ者・副露者・門前非リーチ者のすべてについて搶槓の `R/T` を
-//! 評価できるようにする。その時点で「全3家に hard-safe でなければ加槓しない」という v1 の制限を
-//! 緩和する。今回この defense model 拡張は行わない。
+//! hidden-hand model を整備し、リーチ者・公開副露者・門前非リーチ者のすべてについて搶槓の
+//! `R/T` を評価できるようにする。その時点で「structural completion が1つでもあれば加槓しない」
+//! 「model を使えない player がいれば加槓しない」という v1 の保守的な制限を緩和する。今回この
+//! defense model 拡張は行わない。
 //!
 //! # 複数のカン候補
 //!
@@ -425,7 +461,7 @@ use bot_logic::{
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
-use crate::defense::{is_discarded_by_all_players, is_discarded_by_player};
+use crate::defense::{CompressedStructuralTenpaiHiddenHandStates, is_discarded_by_player};
 use crate::discard_selection::selected_discard_tenpai_wait_availability;
 use crate::offense_value::{
     TenpaiOffenseMode, TenpaiOffenseValue, evaluate_tenpai_offense_value,
@@ -608,8 +644,7 @@ impl KanHandDiagnostic {
 
 /// 加槓牌の搶槓 hard-safe 判定の内訳。
 ///
-/// v1 の根拠は「その player 自身の河に加槓牌と同じ牌種がある」ことだけで、判定は既存
-/// [`is_discarded_by_player`] を source of truth にする。`temporary_passed_tiles` /
+/// 他家1人ごとの根拠は [`KakanChankanSafety`] が表す。`temporary_passed_tiles` /
 /// `same_hand_passed_tiles` / Suji / Wall / OneChance / 通常 Dahai 用 exact `R/T` は根拠に
 /// 使わない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,8 +655,32 @@ pub struct KakanChankanDiagnostic {
     pub opponents: Vec<KakanChankanOpponent>,
     /// 全他家について搶槓ロン不能を確定できたか。
     ///
-    /// [`is_discarded_by_all_players`] の結論そのもので、この層で条件を持たない。
+    /// 3家すべてが個別に hard-safe の場合だけ `true`。production の判断はこの値をそのまま読み、
+    /// 集約規則を別に持たない。
     pub hard_safe: bool,
+}
+
+/// 他家1人分の搶槓 hard-safe の根拠、または確定できなかった理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KakanChankanSafety {
+    /// その player 自身の河に加槓牌と同じ牌種がある。恒常フリテンでロンできない。
+    RiverFuriten,
+    /// structural hidden-hand model で、加槓牌を加えて Standard の和了形が完成する hidden
+    /// state が1つも無い (`target_completion_state_weight == 0`)。
+    NoStructuralCompletion,
+    /// 加槓牌を加えると和了形になる hidden state が存在する。
+    ///
+    /// 実際に搶槓されると断定する意味ではないが、hard-safe とも確定できない。
+    StructuralCompletionPossible,
+    /// structural hidden-hand model を構築できない (門前非リーチなど)。hard-safe unknown。
+    StructuralModelUnavailable,
+}
+
+impl KakanChankanSafety {
+    /// 搶槓ロン不能を hard fact で確定できた根拠か。
+    pub fn is_hard_safe(self) -> bool {
+        matches!(self, Self::RiverFuriten | Self::NoStructuralCompletion)
+    }
 }
 
 /// 他家1人分の搶槓 hard-safe 判定。
@@ -629,7 +688,20 @@ pub struct KakanChankanDiagnostic {
 pub struct KakanChankanOpponent {
     pub player: usize,
     /// その player 自身の河に加槓牌と同じ牌種があるか ([`is_discarded_by_player`])。
-    pub discarded: bool,
+    pub river_furiten: bool,
+    /// structural hidden-hand model を評価した場合の target completion state weight [重み]。
+    ///
+    /// 河フリテンで確定した player と、model を構築できない player では評価しないので `None`。
+    pub structural_completion_weight: Option<u128>,
+    /// hard-safe の根拠、または確定できなかった理由。
+    pub safety: KakanChankanSafety,
+}
+
+impl KakanChankanOpponent {
+    /// この player について搶槓ロン不能を確定できたか。
+    pub fn hard_safe(&self) -> bool {
+        self.safety.is_hard_safe()
+    }
 }
 
 /// 合法な `LegalAction::Ankan` / `LegalAction::Kakan` / `LegalAction::Daiminkan` 1件ごとの判断内訳。
@@ -1164,27 +1236,77 @@ fn concealed_tiles_without_added_tile(
 
 // 加槓牌の搶槓 hard-safe 判定。自席を特定できない場合は player 0 などを推測せず `None`。
 //
-// 自分以外の3家それぞれについて、その player 自身の河に加槓牌と同じ牌種があるかを既存
-// [`is_discarded_by_player`] で見る。自身の河にある牌種は恒常フリテンでロンできないので、
-// 搶槓も起こり得ないと確定する。結論は [`is_discarded_by_all_players`] そのもので、この層で
-// フリテン規則も集約規則も持たない。
+// 自分以外の3家それぞれを独立に判定し、全員について搶槓ロン不能を確定できた場合だけ
+// hard-safe にする。production の判断と診断はこの1本を共有し、集約規則を別に持たない。
 fn chankan_hard_safety(ctx: &GameContext, tile: TileType) -> Option<KakanChankanDiagnostic> {
     let own_seat = usize::from(ctx.player_id()?);
-    let opponents: Vec<usize> = (0..ctx.discards().len())
+    let opponents: Vec<KakanChankanOpponent> = (0..ctx.discards().len())
         .filter(|&player| player != own_seat)
+        .map(|player| chankan_opponent_safety(ctx, tile, player))
         .collect();
 
     Some(KakanChankanDiagnostic {
         tile,
-        opponents: opponents
-            .iter()
-            .map(|&player| KakanChankanOpponent {
-                player,
-                discarded: is_discarded_by_player(tile, player, ctx),
-            })
-            .collect(),
-        hard_safe: is_discarded_by_all_players(tile, &opponents, ctx),
+        hard_safe: !opponents.is_empty() && opponents.iter().all(KakanChankanOpponent::hard_safe),
+        opponents,
     })
+}
+
+// 他家1人について、加槓牌で搶槓ロンされ得ないと確定できるか。
+//
+// 根拠は2つあり、どちらも公開情報から確定する hard fact である。確率や閾値は持たない。
+//
+// | 根拠 | 意味 |
+// | --- | --- |
+// | [`KakanChankanSafety::RiverFuriten`] | その player 自身の河に加槓牌がある。恒常フリテンでロンできない |
+// | [`KakanChankanSafety::NoStructuralCompletion`] | 公開情報と整合する hidden hand の中に、加槓牌で Standard の和了形が完成する state が1つも無い |
+//
+// structural completion は役を見ないので、通常ロンで役があるかにも搶槓で Chankan が付くかにも
+// 依存しない。「そもそもその牌で和了形にならない」という構造の事実なので、`chankan = true` の
+// 局面でもそのまま安全根拠に使える。通常 Dahai 用の exact `R/T`
+// ([`ron_risk_evidence`](CompressedStructuralTenpaiHiddenHandStates::ron_risk_evidence) /
+// [`ron_capable_state_weight`](CompressedStructuralTenpaiHiddenHandStates::ron_capable_state_weight))
+// は役判定を含み `chankan = false` 前提の経路があるので、ここでは使わない。
+//
+// completion が1つでもある場合は「搶槓される」と断定せず、hard-safe を証明できない候補として
+// 扱う。model を構築できない player (門前非リーチなど) も同じく unknown にし、Kan 側で hidden-hand
+// model の対応範囲を推測で広げない。
+//
+// 判定順は河フリテンが先で、確定した player には exact counting を行わない。
+fn chankan_opponent_safety(
+    ctx: &GameContext,
+    tile: TileType,
+    player: usize,
+) -> KakanChankanOpponent {
+    if is_discarded_by_player(tile, player, ctx) {
+        return KakanChankanOpponent {
+            player,
+            river_furiten: true,
+            structural_completion_weight: None,
+            safety: KakanChankanSafety::RiverFuriten,
+        };
+    }
+
+    let Ok(mut states) = CompressedStructuralTenpaiHiddenHandStates::new(player, ctx) else {
+        return KakanChankanOpponent {
+            player,
+            river_furiten: false,
+            structural_completion_weight: None,
+            safety: KakanChankanSafety::StructuralModelUnavailable,
+        };
+    };
+
+    let weight = states.target_completion_state_weight(tile).weight;
+    KakanChankanOpponent {
+        player,
+        river_furiten: false,
+        structural_completion_weight: Some(weight),
+        safety: if weight == 0 {
+            KakanChankanSafety::NoStructuralCompletion
+        } else {
+            KakanChankanSafety::StructuralCompletionPossible
+        },
+    }
 }
 
 /// カンして嶺上牌を1枚引いた後の、山の残りツモ可能枚数 [枚]。暗槓と加槓で共有する。

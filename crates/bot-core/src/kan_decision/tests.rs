@@ -3,6 +3,7 @@ use super::*;
 use bot_logic::{AcceptanceTile, EffectiveShanten, TileType};
 
 use crate::context::TableStateFacts;
+use crate::defense::CompressedStructuralTenpaiHiddenHandStates;
 use crate::discard_selection::select_best_normal_discard_evaluation;
 use crate::meld::{Meld, MeldKind};
 use crate::offense_value::OffenseValue;
@@ -15,10 +16,14 @@ use crate::shanten_test_support::{
     ANKAN_REGRESSING_HAND, KAKAN_FREE_CONSUMED, KAKAN_FREE_DRAWN, KAKAN_FREE_HAND,
     KAKAN_IISHANTEN_DRAWN, KAKAN_IISHANTEN_HAND, KAKAN_SHANTEN_REGRESSING_ADDED,
     KAKAN_SHANTEN_REGRESSING_CONSUMED, KAKAN_SHANTEN_REGRESSING_DRAWN,
-    KAKAN_SHANTEN_REGRESSING_HAND, KAKAN_VALUE_REGRESSING_ADDED, KAKAN_VALUE_REGRESSING_CONSUMED,
+    KAKAN_SHANTEN_REGRESSING_HAND, KAKAN_SUITED_ADDED, KAKAN_SUITED_CONSUMED, KAKAN_SUITED_DRAWN,
+    KAKAN_SUITED_HAND, KAKAN_VALUE_REGRESSING_ADDED, KAKAN_VALUE_REGRESSING_CONSUMED,
     KAKAN_VALUE_REGRESSING_DRAWN, KAKAN_VALUE_REGRESSING_HAND, ankan_action, ankan_context,
     ankan_dahai_actions, dahai, east_pon_meld, kakan_action, kakan_context,
-    rivers_with_tile_for_all_opponents, three_man_pon_meld, tile, two_man_pon_meld,
+    kakan_hard_safe_context, kakan_hard_safe_context_with, kakan_hard_safe_discards,
+    kakan_hard_safe_melds, kakan_suited_context, kakan_table_context, opponent_nine_sou_pon,
+    opponent_two_man_pon, rivers_with_tile_for_all_opponents, three_man_pon_meld, tile,
+    two_man_pon_meld,
 };
 
 fn tiles(values: &[u8]) -> Vec<TileId> {
@@ -1043,20 +1048,16 @@ fn eligible_reason_is_only_the_kan_verdict() {
 
 // ---- 加槓 (Kakan) ----
 
-fn kakan_free_context(discards: [Vec<u8>; 4]) -> GameContext {
-    kakan_context(
-        &KAKAN_FREE_HAND,
-        KAKAN_FREE_DRAWN,
-        [false; 4],
-        [vec![east_pon_meld()], vec![], vec![], vec![]],
-        Some(0),
-        discards,
-    )
+// 副露と河だけを差し替えた、実局面として成立する加槓局面。
+//
+// 自分 (player 0) は player 1 の捨てた東を Pon し、4枚目の東をツモった 1p 単騎テンパイ。
+fn kakan_table(melds: [Vec<Meld>; 4], discards: [Vec<u8>; 4]) -> GameContext {
+    kakan_table_context(&KAKAN_FREE_HAND, KAKAN_FREE_DRAWN, melds, discards)
 }
 
-// 加槓牌が全他家の河にある局面。搶槓 hard-safe を満たす。
+// 搶槓 hard-safe を満たす実局面。河フリテン1人 + structural completion 0 が2人。
 fn kakan_free_hard_safe_context() -> GameContext {
-    kakan_free_context(rivers_with_tile_for_all_opponents([108, 109, 110]))
+    kakan_hard_safe_context()
 }
 
 fn kakan_free_actions() -> Vec<LegalAction> {
@@ -1318,9 +1319,13 @@ fn a_malformed_kakan_is_not_built() {
 
 // ---- 搶槓 hard-safe ----
 
-// 加槓牌が全3家それぞれ自身の河にある場合だけ、搶槓されないと確定して加槓できる。
+// 実局面として成立する hard-safe な加槓。
+//
+// player 1 は Pon の元になった東を捨てた本人なので自身の河に東があり、player 2 / player 3 は
+// 非リーチの公開副露者で、東4枚がすべて自分の副露と手牌にあるため東の structural completion が
+// 0 になる。3家とも hard-safe なので、速度と打点の比較へ進んで加槓を採用する。
 #[test]
-fn a_kakan_is_selected_when_every_opponent_discarded_the_added_tile() {
+fn a_kakan_is_selected_when_every_opponent_is_hard_safe() {
     let ctx = kakan_free_hard_safe_context();
     let actions = kakan_free_actions();
 
@@ -1357,10 +1362,24 @@ fn a_kakan_is_selected_when_every_opponent_discarded_the_added_tile() {
         chankan
             .opponents
             .iter()
-            .map(|opponent| (opponent.player, opponent.discarded))
+            .map(|opponent| (opponent.player, opponent.safety))
             .collect::<Vec<_>>(),
-        vec![(1, true), (2, true), (3, true)]
+        vec![
+            (1, KakanChankanSafety::RiverFuriten),
+            (2, KakanChankanSafety::NoStructuralCompletion),
+            (3, KakanChankanSafety::NoStructuralCompletion),
+        ]
     );
+    // 河フリテンで確定した player には structural model を構築しない。
+    let river_furiten = &chankan.opponents[0];
+    assert!(river_furiten.river_furiten);
+    assert_eq!(river_furiten.structural_completion_weight, None);
+    // structural model を使った player は weight そのものを診断へ残す。
+    for opponent in &chankan.opponents[1..] {
+        assert!(!opponent.river_furiten);
+        assert_eq!(opponent.structural_completion_weight, Some(0));
+        assert!(opponent.hard_safe());
+    }
 
     // 速度は変わらず、打点は明槓ぶんの符で下がらない。
     assert_eq!(candidate.shanten_delta(), Some(0));
@@ -1374,117 +1393,195 @@ fn a_kakan_is_selected_when_every_opponent_discarded_the_added_tile() {
     );
 }
 
-// 1人でも自身の河に加槓牌が無ければ搶槓ロン不能を確定できないので加槓しない。
+// 加槓牌を加えると和了形になる hidden state が残る相手がいれば加槓しない。
+//
+// 加槓牌が数牌の局面では、その牌を1枚も持てない相手でも両面搭子などで和了牌にできるので、
+// structural completion は 0 にならない。搶槓されると断定はしないが hard-safe とも確定できない。
 #[test]
-fn a_kakan_is_rejected_when_one_opponent_has_not_discarded_the_added_tile() {
-    for missing in 1..=3 {
-        let mut discards = rivers_with_tile_for_all_opponents([108, 109, 110]);
-        discards[missing] = vec![];
-        let ctx = kakan_free_context(discards);
-        let actions = kakan_free_actions();
+fn a_kakan_is_rejected_when_a_structural_completion_remains() {
+    let ctx = kakan_suited_context();
+    let actions: Vec<LegalAction> = kakan_dahai_actions(&KAKAN_SUITED_HAND, KAKAN_SUITED_DRAWN)
+        .into_iter()
+        .chain([kakan_action(KAKAN_SUITED_ADDED, &KAKAN_SUITED_CONSUMED)])
+        .collect();
 
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
+    assert_eq!(decision.selected, None);
+    assert_eq!(decision.reason, KanDecisionReason::KakanChankanNotHardSafe);
+
+    let candidate = decision.candidates.first().expect("候補");
+    let chankan = candidate.chankan.as_ref().expect("搶槓判定");
+    assert!(!chankan.hard_safe);
+    // Pon の元になった牌を捨てた player だけが河フリテンで hard-safe。
+    assert_eq!(
+        chankan.opponents[0].safety,
+        KakanChankanSafety::RiverFuriten
+    );
+    for opponent in &chankan.opponents[1..] {
+        assert_eq!(
+            opponent.safety,
+            KakanChankanSafety::StructuralCompletionPossible
+        );
+        assert!(
+            opponent
+                .structural_completion_weight
+                .is_some_and(|weight| weight > 0)
+        );
+        assert!(!opponent.hard_safe());
+    }
+    // hard-safe で落ちた候補は、以降の判断材料を推測で埋めない。
+    assert_eq!(candidate.baseline, None);
+    assert_eq!(candidate.post_kan, None);
+}
+
+// structural hidden-hand model を構築できない相手がいれば hard-safe unknown として加槓しない。
+//
+// 門前非リーチの相手は現行 model の対象外なので、Kan 側で別の hidden-hand model を足さずに
+// reject する。
+#[test]
+fn a_kakan_is_rejected_when_the_structural_model_is_unavailable() {
+    // player 2 の公開副露を外して門前非リーチにする。河にも東が無い。
+    let ctx = kakan_table(
+        [
+            vec![east_pon_meld()],
+            vec![],
+            vec![],
+            vec![opponent_nine_sou_pon()],
+        ],
+        [vec![], vec![108], vec![104], vec![]],
+    );
+    let actions = kakan_free_actions();
+
+    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
+    assert_eq!(decision.selected, None);
+    assert_eq!(decision.reason, KanDecisionReason::KakanChankanNotHardSafe);
+
+    let candidate = decision.candidates.first().expect("候補");
+    let chankan = candidate.chankan.as_ref().expect("搶槓判定");
+    assert!(!chankan.hard_safe);
+    let unavailable = &chankan.opponents[1];
+    assert_eq!(unavailable.player, 2);
+    assert_eq!(
+        unavailable.safety,
+        KakanChankanSafety::StructuralModelUnavailable
+    );
+    assert_eq!(unavailable.structural_completion_weight, None);
+    assert!(!unavailable.hard_safe());
+}
+
+// 1人でも hard-safe を確定できなければ加槓しない。
+#[test]
+fn a_kakan_is_rejected_when_one_opponent_is_not_hard_safe() {
+    // player 1 の河から Pon の元になった東を外すと、門前非リーチとして model も使えない。
+    let without_river_furiten = kakan_table(
+        [
+            vec![east_pon_meld()],
+            vec![],
+            vec![opponent_two_man_pon()],
+            vec![opponent_nine_sou_pon()],
+        ],
+        [vec![], vec![], vec![104], vec![5]],
+    );
+    // player 3 の公開副露を外した局面。
+    let without_open_meld = kakan_table(
+        [
+            vec![east_pon_meld()],
+            vec![],
+            vec![opponent_two_man_pon()],
+            vec![],
+        ],
+        [vec![], vec![108], vec![104], vec![5]],
+    );
+    let actions = kakan_free_actions();
+
+    for (label, ctx) in [
+        ("player 1", without_river_furiten),
+        ("player 3", without_open_meld),
+    ] {
         let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
-        assert_eq!(decision.selected, None, "missing: {missing}");
+        assert_eq!(decision.selected, None, "{label}");
         assert_eq!(
             decision.reason,
             KanDecisionReason::KakanChankanNotHardSafe,
-            "missing: {missing}"
+            "{label}"
         );
-
-        let candidate = decision.candidates.first().expect("候補");
-        let chankan = candidate.chankan.as_ref().expect("搶槓判定");
-        assert!(!chankan.hard_safe);
-        assert_eq!(
-            chankan
-                .opponents
-                .iter()
-                .find(|opponent| opponent.player == missing)
-                .map(|opponent| opponent.discarded),
-            Some(false)
-        );
-        // hard-safe で落ちた候補は、以降の判断材料を推測で埋めない。
-        assert_eq!(candidate.baseline, None);
-        assert_eq!(candidate.post_kan, None);
     }
 }
 
 // 一時通過牌は「今はロンできない」だけで、搶槓で新しく役が付く手を排除できない。hard-safe の
 // 根拠に流用しない。
+//
+// この局面では一時通過牌によって通常打牌用の exact ron-capable weight が0になるが、structural
+// completion は残るので加槓しない。
 #[test]
 fn temporary_passed_tiles_alone_are_not_chankan_hard_safe() {
-    let east = TileType::from_mjai_type_str("E").expect("東");
-    let ctx = kakan_free_context(Default::default()).with_temporary_passed_tiles(Some([
-        vec![],
-        vec![east],
-        vec![east],
-        vec![east],
-    ]));
-    let actions = kakan_free_actions();
+    let three_man = TileType::from_mjai_type_str("3m").expect("3m");
+    let ctx = kakan_suited_context()
+        .with_temporary_passed_tiles(Some([
+            vec![],
+            vec![three_man],
+            vec![three_man],
+            vec![three_man],
+        ]))
+        // 通常打牌用の ron-capable model は山の残枚数も要る。
+        .with_table_state_facts(TableStateFacts {
+            remaining_tiles: Some(40),
+            ..Default::default()
+        });
+    let actions: Vec<LegalAction> = kakan_dahai_actions(&KAKAN_SUITED_HAND, KAKAN_SUITED_DRAWN)
+        .into_iter()
+        .chain([kakan_action(KAKAN_SUITED_ADDED, &KAKAN_SUITED_CONSUMED)])
+        .collect();
 
-    assert!(ctx.is_temporary_passed(east, 1));
+    assert!(ctx.is_temporary_passed(three_man, 2));
+    // 通常打牌用の exact ron-capable weight は一時通過牌で0になる。
+    let mut states =
+        CompressedStructuralTenpaiHiddenHandStates::new(2, &ctx).expect("公開副露の非リーチ相手");
+    assert_eq!(
+        states
+            .ron_capable_state_weight(three_man)
+            .expect("ron-capable model")
+            .weight,
+        0
+    );
+    // それでも structural completion は残るので hard-safe にしない。
+    assert!(states.target_completion_state_weight(three_man).weight > 0);
+
     let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
     assert_eq!(decision.selected, None);
     assert_eq!(decision.reason, KanDecisionReason::KakanChankanNotHardSafe);
+    let chankan = decision.candidates[0].chankan.as_ref().expect("搶槓判定");
+    assert_eq!(
+        chankan.opponents[1].safety,
+        KakanChankanSafety::StructuralCompletionPossible
+    );
 }
 
 // 同一手牌中の通過牌も観測事実であって hard fact ではないので、hard-safe の根拠にしない。
 #[test]
 fn same_hand_passed_tiles_alone_are_not_chankan_hard_safe() {
-    let east = TileType::from_mjai_type_str("E").expect("東");
-    let ctx = kakan_free_context(Default::default()).with_same_hand_passed_tiles(Some([
+    let three_man = TileType::from_mjai_type_str("3m").expect("3m");
+    let ctx = kakan_suited_context().with_same_hand_passed_tiles(Some([
         vec![],
-        vec![east],
-        vec![east],
-        vec![east],
+        vec![three_man],
+        vec![three_man],
+        vec![three_man],
     ]));
-    let actions = kakan_free_actions();
+    let actions: Vec<LegalAction> = kakan_dahai_actions(&KAKAN_SUITED_HAND, KAKAN_SUITED_DRAWN)
+        .into_iter()
+        .chain([kakan_action(KAKAN_SUITED_ADDED, &KAKAN_SUITED_CONSUMED)])
+        .collect();
 
-    assert!(ctx.is_same_hand_passed(east, 1));
+    assert!(ctx.is_same_hand_passed(three_man, 2));
     let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
     assert_eq!(decision.selected, None);
     assert_eq!(decision.reason, KanDecisionReason::KakanChankanNotHardSafe);
 }
 
-// 通常打牌なら誰にもロンされ得ない牌でも、自身の河という hard fact が無ければ加槓しない。
-//
-// この局面の東は Pon の3枚と手牌の1枚で4枚すべてが自分のもとにあり、他家は1枚も持てないので
-// 通常 Dahai の exact ron 評価は誰に対しても0になる。それでも v1 は通常打牌用の評価を搶槓へ
-// 流用せず、河の hard fact だけを根拠にする。
-#[test]
-fn a_tile_no_opponent_can_hold_is_not_chankan_hard_safe_without_the_river_fact() {
-    let ctx = kakan_free_context(Default::default());
-    let actions = kakan_free_actions();
-
-    // 東4枚は Pon 3枚 + 手牌1枚で、他家の手に入り得ない。
-    let east = TileType::from_mjai_type_str("E").expect("東");
-    assert_eq!(
-        east_pon_meld()
-            .tiles()
-            .iter()
-            .chain(std::iter::once(&tile(KAKAN_FREE_DRAWN)))
-            .filter(|tile| tile.tile_type() == east)
-            .count(),
-        4
-    );
-    assert!(!ctx.any_opponent_reached());
-    assert!((1..=3).all(|player| ctx.melds_of(player).is_some_and(|melds| melds.is_empty())));
-
-    let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
-    assert_eq!(decision.selected, None);
-    assert_eq!(decision.reason, KanDecisionReason::KakanChankanNotHardSafe);
-}
-
-// 他家リーチ中は加槓しない。新しい槓ドラ・一発消去・搶槓 risk・嶺上牌を同じ尺度で比べられない。
+// 他家リーチ中は加槓しない。新しい槓ドラ・一発消去・搶槓 risk・嶺上牌を同じ尺度で比較できない。
 #[test]
 fn a_kakan_is_rejected_under_opponent_reach() {
-    let ctx = kakan_context(
-        &KAKAN_FREE_HAND,
-        KAKAN_FREE_DRAWN,
-        [false, true, false, false],
-        [vec![east_pon_meld()], vec![], vec![], vec![]],
-        Some(0),
-        rivers_with_tile_for_all_opponents([108, 109, 110]),
-    );
+    let ctx = kakan_hard_safe_context_with([false, true, false, false], Some(0));
     let actions = kakan_free_actions();
 
     let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
@@ -1518,14 +1615,7 @@ fn a_kakan_is_rejected_outside_push() {
 // 自己リーチ後は加槓しない。server / context が矛盾していても自己リーチ状態を推測しない。
 #[test]
 fn a_kakan_is_rejected_after_own_reach() {
-    let ctx = kakan_context(
-        &KAKAN_FREE_HAND,
-        KAKAN_FREE_DRAWN,
-        [true, false, false, false],
-        [vec![east_pon_meld()], vec![], vec![], vec![]],
-        Some(0),
-        rivers_with_tile_for_all_opponents([108, 109, 110]),
-    );
+    let ctx = kakan_hard_safe_context_with([true, false, false, false], Some(0));
     let actions = kakan_free_actions();
 
     let decision = decide(&ctx, &actions, PushPullMode::Push).expect("加槓候補");
@@ -1536,14 +1626,7 @@ fn a_kakan_is_rejected_after_own_reach() {
 // 自席を特定できない局面では、リーチ済みかどうかを推測せず加槓しない。
 #[test]
 fn a_kakan_is_rejected_when_own_reach_is_unknown() {
-    let ctx = kakan_context(
-        &KAKAN_FREE_HAND,
-        KAKAN_FREE_DRAWN,
-        [false; 4],
-        [vec![east_pon_meld()], vec![], vec![], vec![]],
-        None,
-        rivers_with_tile_for_all_opponents([108, 109, 110]),
-    );
+    let ctx = kakan_hard_safe_context_with([false; 4], None);
     let actions = kakan_free_actions();
 
     assert_eq!(ctx.own_reached(), None);
@@ -1557,6 +1640,8 @@ fn a_kakan_is_rejected_when_own_reach_is_unknown() {
 // 4枚目を加槓すると搭子が崩れる局面では、搶槓 hard-safe でも加槓しない。
 #[test]
 fn a_kakan_is_rejected_when_shanten_regresses() {
+    // 数牌の加槓なので、搶槓 hard-safe を満たす実局面は作れない。ここで見るのは搶槓判定の先に
+    // ある速度の比較なので、3家の河に対象牌を置いた合成局面で hard-safe を通す。
     let ctx = kakan_context(
         &KAKAN_SHANTEN_REGRESSING_HAND,
         KAKAN_SHANTEN_REGRESSING_DRAWN,
@@ -1661,13 +1746,12 @@ fn a_kakan_is_rejected_when_acceptance_regresses_at_the_same_shanten() {
 // 加槓しない。
 #[test]
 fn a_kakan_is_rejected_when_the_value_is_not_evaluable() {
-    let ctx = kakan_context(
+    // 搶槓 hard-safe を満たす実局面のまま、手牌だけを1向聴へ差し替える。
+    let ctx = kakan_table_context(
         &KAKAN_IISHANTEN_HAND,
         KAKAN_IISHANTEN_DRAWN,
-        [false; 4],
-        [vec![east_pon_meld()], vec![], vec![], vec![]],
-        Some(0),
-        rivers_with_tile_for_all_opponents([108, 109, 110]),
+        kakan_hard_safe_melds(),
+        kakan_hard_safe_discards(),
     );
     let actions: Vec<LegalAction> =
         kakan_dahai_actions(&KAKAN_IISHANTEN_HAND, KAKAN_IISHANTEN_DRAWN)
@@ -1688,6 +1772,7 @@ fn a_kakan_is_rejected_when_the_value_is_not_evaluable() {
 // 速度が変わらなくても、加槓で三色が消えて打点が下がる局面では加槓しない。
 #[test]
 fn a_kakan_is_rejected_when_the_offense_value_regresses() {
+    // 速度の比較と同じく、搶槓判定の先にある打点の比較を見るための合成局面。
     let ctx = kakan_context(
         &KAKAN_VALUE_REGRESSING_HAND,
         KAKAN_VALUE_REGRESSING_DRAWN,

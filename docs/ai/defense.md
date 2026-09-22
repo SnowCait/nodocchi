@@ -316,7 +316,7 @@ exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、�
 
 `post_reach_passed` はリーチ固有の hard-safe (現物) で、リーチ者の手牌が変化しないため局中継続します。`same_hand_passed` は非リーチ相手 (`HighOpenHand`) の evidence で、`Riichi` の target には使いません。3つは互いに流用しない別 state です。
 
-どれも**加槓の搶槓 hard-safe には使いません**。3つとも通常のロン機会 (`chankan = false`) に対する evidence で、搶槓によって新しく役が付く手を排除できないためです。加槓が根拠にするのは「その player 自身の河に加槓牌と同じ牌種がある」(`is_discarded_by_player`) だけです。詳細は [麻雀 AI の概要](overview.md#搶槓-hard-safe) を参照してください。
+どれも**加槓の搶槓 hard-safe には使いません**。3つとも通常のロン機会 (`chankan = false`) に対する evidence で、搶槓によって新しく役が付く手を排除できないためです。加槓が根拠にするのは「その player 自身の河に加槓牌と同じ牌種がある」(`is_discarded_by_player`) か、「structural hidden-hand model の `target_completion_state_weight` が 0」のどちらかだけです。後者は役を判定しないので、搶槓でも安全根拠として使えます。詳細は [麻雀 AI の概要](overview.md#搶槓-hard-safe) を参照してください。
 
 入力方法は [bot-scenario の post_reach_passed](../bot-scenario.md#post_reach_passed) と [temporary_passed](../bot-scenario.md#temporary_passed)、出力の読み方は [Structured diagnostics](../diagnostics.md#combined-defense) を参照してください。`same_hand_passed` は RiichiLab live client が MJAI event の `tsumogiri` から積み上げる履歴で、bot-scenario の入力 field はありません。
 

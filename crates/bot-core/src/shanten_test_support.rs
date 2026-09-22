@@ -413,10 +413,12 @@ pub(crate) fn kakan_action(added: u8, consumed: &[u8]) -> LegalAction {
     }
 }
 
-/// 全他家の河へ同じ牌を置いた河。加槓牌の搶槓 hard-safe を満たす局面を作るために使う。
+/// 全他家の河へ同じ牌を置いた河。加槓牌が数牌でも搶槓 hard-safe を満たす局面を作るために使う。
 ///
 /// 同じ牌種は4枚しかなく、加槓は Pon の3枚と追加牌1枚で使い切るので、実際の局で3家すべての河に
-/// 加槓牌が並ぶことはない。v1 policy の判定そのものを固定するための合成局面として使う。
+/// 加槓牌が並ぶことはない。搶槓判定そのものではなく、その先の向聴・受け入れ・打点の比較を
+/// 固定したい合成局面でだけ使う。実局面として成立する hard-safe 局面は
+/// [`kakan_hard_safe_context`] が持つ。
 pub(crate) fn rivers_with_tile_for_all_opponents(tiles: [u8; 3]) -> [Vec<u8>; 4] {
     [vec![], vec![tiles[0]], vec![tiles[1]], vec![tiles[2]]]
 }
@@ -480,5 +482,162 @@ pub(crate) fn three_man_pon_meld() -> Meld {
         MeldKind::Pon,
         vec![tile(8), tile(9), tile(10)],
         Some(tile(8)),
+    )
+}
+
+/// 牌136枚の物理制約と矛盾しない加槓局面を組み立てる helper。
+///
+/// 副露牌・河・自分の手牌をすべて見え牌へ入れ、同じ物理牌を二重に数えない。鳴かれた牌は鳴いた
+/// 側の面子と鳴かれた側の河の両方に同じ物理牌として現れるので、見え牌では1枚として扱う。
+pub(crate) fn kakan_table_context(
+    hand: &[u8],
+    drawn: u8,
+    melds: [Vec<Meld>; 4],
+    discards: [Vec<u8>; 4],
+) -> GameContext {
+    kakan_table_context_with(hand, drawn, melds, discards, [false; 4], Some(0))
+}
+
+/// リーチ状況と自席を差し替えられる [`kakan_table_context`]。
+pub(crate) fn kakan_table_context_with(
+    hand: &[u8],
+    drawn: u8,
+    melds: [Vec<Meld>; 4],
+    discards: [Vec<u8>; 4],
+    reached: [bool; 4],
+    player_id: Option<u8>,
+) -> GameContext {
+    let hand_tiles: Vec<TileId> = hand.iter().map(|&value| tile(value)).collect();
+    let discard_tiles: [Vec<TileId>; 4] =
+        discards.map(|river| river.into_iter().map(tile).collect());
+
+    let mut visible: Vec<TileId> = hand_tiles.clone();
+    visible.push(tile(drawn));
+    for player_melds in &melds {
+        for meld in player_melds {
+            visible.extend(meld.tiles().iter().copied());
+        }
+    }
+    for river in &discard_tiles {
+        visible.extend(river.iter().copied());
+    }
+    visible.sort_unstable();
+    visible.dedup();
+
+    GameContext::from_parts_with_melds(
+        Some(tile(drawn)),
+        hand_tiles,
+        vec![],
+        TileType::from_mjai_type_str("E").ok(),
+        TileType::from_mjai_type_str("E").ok(),
+        visible,
+        player_id,
+        Some(0),
+        discard_tiles,
+        reached,
+        melds,
+    )
+    .with_history_furiten_facts(HistoryFuritenFacts {
+        same_turn: Some(false),
+        riichi_missed_win: Some(false),
+    })
+}
+
+/// 2m (5..7) の公開 Pon。player 3 の河の 2m (5) を鳴いた面子。
+pub(crate) fn opponent_two_man_pon() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(5), tile(6), tile(7)],
+        Some(tile(5)),
+    )
+}
+
+/// 9s (104..106) の公開 Pon。player 2 の河の 9s (104) を鳴いた面子。
+pub(crate) fn opponent_nine_sou_pon() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(104), tile(105), tile(106)],
+        Some(tile(104)),
+    )
+}
+
+/// 2s (76..78) の公開 Pon。player 2 の河の 2s (76) を鳴いた面子。
+pub(crate) fn opponent_two_sou_pon() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(76), tile(77), tile(78)],
+        Some(tile(76)),
+    )
+}
+
+/// 実際の局として成立する、搶槓 hard-safe な加槓局面。
+///
+/// 自分 (player 0) は player 1 が捨てた東 (108) を Pon し、4枚目の東 (111) をツモった 1p 単騎
+/// テンパイ。東4枚はすべて自分の副露と手牌にあるので、他家は1枚も持てない。
+///
+/// - player 1: Pon の元になった東を捨てた本人。自身の河に東がある → 河フリテン
+/// - player 2 / player 3: 非リーチの公開副露者。東の structural completion が0になる
+pub(crate) fn kakan_hard_safe_context() -> GameContext {
+    kakan_hard_safe_context_with([false; 4], Some(0))
+}
+
+/// リーチ状況と自席を差し替えられる [`kakan_hard_safe_context`]。
+pub(crate) fn kakan_hard_safe_context_with(
+    reached: [bool; 4],
+    player_id: Option<u8>,
+) -> GameContext {
+    kakan_table_context_with(
+        &KAKAN_FREE_HAND,
+        KAKAN_FREE_DRAWN,
+        kakan_hard_safe_melds(),
+        kakan_hard_safe_discards(),
+        reached,
+        player_id,
+    )
+}
+
+/// [`kakan_hard_safe_context`] の副露。player 0 の東 Pon と、player 2 / player 3 の公開 Pon。
+pub(crate) fn kakan_hard_safe_melds() -> [Vec<Meld>; 4] {
+    [
+        vec![east_pon_meld()],
+        vec![],
+        vec![opponent_two_man_pon()],
+        vec![opponent_nine_sou_pon()],
+    ]
+}
+
+/// [`kakan_hard_safe_context`] の河。鳴かれた牌は鳴かれた側の河に残る。
+pub(crate) fn kakan_hard_safe_discards() -> [Vec<u8>; 4] {
+    [vec![], vec![108], vec![104], vec![5]]
+}
+
+/// 加槓牌が数牌で、公開副露の他家に structural completion が残る局面。
+///
+/// 自分 (player 0) は player 1 が捨てた 3m (8) を Pon し、4枚目の 3m (11) を手牌に持つ。3m は
+/// 他家が1枚も持てないが、両面搭子などで 3m を和了牌にできる hidden state は残る。
+pub(crate) const KAKAN_SUITED_HAND: [u8; 10] = [11, 36, 40, 44, 48, 53, 56, 60, 64, 68];
+pub(crate) const KAKAN_SUITED_DRAWN: u8 = 72;
+pub(crate) const KAKAN_SUITED_ADDED: u8 = 11;
+pub(crate) const KAKAN_SUITED_CONSUMED: [u8; 3] = [8, 9, 10];
+
+pub(crate) fn three_man_open_pon_meld() -> Meld {
+    Meld::new(
+        MeldKind::Pon,
+        vec![tile(8), tile(9), tile(10)],
+        Some(tile(8)),
+    )
+}
+
+pub(crate) fn kakan_suited_context() -> GameContext {
+    kakan_table_context(
+        &KAKAN_SUITED_HAND,
+        KAKAN_SUITED_DRAWN,
+        [
+            vec![three_man_open_pon_meld()],
+            vec![],
+            vec![opponent_two_sou_pon()],
+            vec![opponent_nine_sou_pon()],
+        ],
+        [vec![], vec![8], vec![104], vec![76]],
     )
 }

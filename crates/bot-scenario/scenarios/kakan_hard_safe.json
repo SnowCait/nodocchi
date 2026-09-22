@@ -1,0 +1,47 @@
+{
+  "hand": "123456789m 1p",
+  "draw": "E",
+
+  "dora_indicators": "1s",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 0,
+
+  "reached": [false, false, false, false],
+
+  "history_furiten": {
+    "same_turn": false,
+    "riichi_missed_win": false
+  },
+
+  "discards": ["", "E", "9s", "2m"],
+
+  "melds": [
+    [
+      {
+        "kind": "pon",
+        "tiles": "E E E",
+        "called_tile": "E"
+      }
+    ],
+    [],
+    [
+      {
+        "kind": "pon",
+        "tiles": "2m 2m 2m",
+        "called_tile": "2m"
+      }
+    ],
+    [
+      {
+        "kind": "pon",
+        "tiles": "9s 9s 9s",
+        "called_tile": "9s"
+      }
+    ]
+  ],
+
+  "legal_kakan": ["E"]
+}
