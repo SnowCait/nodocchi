@@ -15,10 +15,13 @@
 //!
 //! # 今回 production へ接続する範囲
 //!
-//! production で選べるのは [`KanKind::Ankan`] だけである。[`KanKind::Kakan`] と
+//! production で選べるのは [`KanKind::Ankan`] と [`KanKind::Kakan`] である。
 //! [`KanKind::Daiminkan`] は候補として診断には並ぶが、理由
-//! ([`KanDecisionReason::KakanNotConnected`] / [`KanDecisionReason::DaiminkanNotConnected`])
-//! を付けて必ず選ばない。
+//! ([`KanDecisionReason::DaiminkanNotConnected`]) を付けて必ず選ばない。
+//!
+//! 加槓は暗槓と違って搶槓される可能性があるので、暗槓の成立条件に加えて「加槓牌で搶槓ロン
+//! されない」ことを hard fact で確定できる局面だけへ限定する。詳細は
+//! 「加槓 (Kakan) v1」の節に置く。
 //!
 //! # 自己リーチ前と自己リーチ後で policy を分ける
 //!
@@ -35,6 +38,12 @@
 //! ツモ牌1枚に限られるので、暗槓しない場合の選択肢は自由な通常打牌ではなく強制ツモ切りになる。
 //! したがって暗槓前の「通常打牌をどう選ぶか」という比較そのものが成り立たない。
 //!
+//! この分岐は暗槓だけのものである。加槓は元になる Pon があるので通常は自己リーチと両立しない
+//! が、server / context が矛盾した値を持っても推測で処理せず、`Some(true)` は
+//! [`KanDecisionReason::KakanAfterOwnReach`]、`None` は [`KanDecisionReason::OwnReachUnknown`]
+//! として加槓しない。server が加槓を提示していることだけを理由に自己リーチ状態を `false` と
+//! 推測しない。
+//!
 //! # source of truth
 //!
 //! | 材料 | source of truth |
@@ -42,6 +51,8 @@
 //! | カンの合法性 | 入力の `legal_actions` (`possible_actions` 由来) |
 //! | 自分がリーチ済みか | [`GameContext::own_reached`] |
 //! | 面子の形の検証 | [`Meld::shape`] |
+//! | 加槓が置換する既存 Pon | 自分の副露 ([`GameContext::own_melds`]) の [`Meld::shape`] |
+//! | 加槓牌で搶槓ロンされないこと | [`is_discarded_by_player`] と [`CompressedStructuralTenpaiHiddenHandStates`] |
 //! | 副露済み面子数 | [`GameContext::own_fixed_meld_count`] / [`FixedMeldCount`] |
 //! | カン後の向聴数 | [`calculate_shanten_with_fixed_melds`] |
 //! | カン後の受け入れ | [`calculate_acceptance_with_fixed_melds`] / [`calculate_acceptance_with_fixed_melds_and_visible_tiles`] |
@@ -231,13 +242,193 @@
 //! 暗刻が暗槓になることで増える符は、既存 scoring が暗槓を含む固定面子から求めた値がそのまま
 //! 打点比較へ入る。この層で符を数え直さない。
 //!
-//! # 複数の暗槓候補
+//! # 加槓 (Kakan) v1
 //!
-//! 同じ局面で2件以上の暗槓が成立した場合、production では**どれも選ばない**
-//! ([`KanDecisionReason::MultipleEligibleCandidates`])。自己リーチの前後どちらでも同じ扱いに
-//! する。合法 action の列挙順は server が決めるものなので、AI の tie-break に使わない。候補間を
-//! 妥当に比較できる既存 comparator がまだ無いので、将来のためだけの独自 ranking も作らない。
-//! 候補ごとの判断内訳は診断へそのまま残す。
+//! 加槓は暗槓と同じ自摸番の action だが、追加する4枚目を他家に**搶槓**される可能性がある点が
+//! 決定的に違う。v1 では搶槓リスクを推定せず、搶槓ロンが起こり得ないと hard fact で確定できる
+//! 局面だけへ限定する。
+//!
+//! ## 加槓の成立条件
+//!
+//! ```text
+//! legal_actions に Kakan がある
+//! AND own_reached() == Some(false)
+//! AND 自分のツモを経たと確認できる (drawn_tile がある)
+//! AND 他家にリーチ者がいない
+//! AND 既存 Push/Pull policy が Push と判定している
+//! AND 加槓の形が成り立ち、対応する既存 Pon を特定できる
+//! AND Pon → Kakan の post-state を組み立てられる
+//! AND 全他家について、自身の河に加槓牌があるか structural completion が0であることを確定できる
+//! AND 加槓しない場合に選ぶ通常打牌の評価がある
+//! AND 加槓後の向聴数 == その通常打牌後の向聴数
+//! AND 加槓後の受け入れ (残枚数・牌種数) が悪化しない
+//! AND 両側の攻撃打点を既存評価で確定でき、攻撃モードも一致する
+//! AND 加槓後の攻撃打点 >= その通常打牌後の攻撃打点
+//! AND 成立したカン候補がちょうど1件
+//! ```
+//!
+//! 1つでも満たせない場合は加槓しない。
+//!
+//! ## Pon → Kakan の post-state
+//!
+//! 加槓は固定面子の**追加**ではなく**置換**である。
+//!
+//! ```text
+//! 既存 Pon (3枚) + 追加牌1枚 → 同じ位置の Kakan (4枚)
+//! ```
+//!
+//! | 項目 | 加槓後 |
+//! | --- | --- |
+//! | 副露済み面子数 | 前後で変わらない |
+//! | 元の Pon | 副露 list から消える |
+//! | Kakan | 元の Pon と同じ位置を置き換える |
+//! | Kakan の tiles | 元 Pon の3枚 + 追加牌1枚 |
+//! | Kakan の `called_tile` | 元 Pon の `called_tile` をそのまま保持する |
+//! | concealed hand | 手牌 + ツモ牌から追加牌1枚だけを取り除く |
+//!
+//! [`LegalAction::Kakan`] の `tile` は追加する4枚目であって、Kakan 面子の `called_tile` では
+//! ない。`called_tile` は元の Pon で鳴いた牌のままで、符計算や公開情報の扱いが変わらないように
+//! 置換後も保持する。
+//!
+//! 比較する2つの state は暗槓と同じく「13枚相当で次のツモを待つ state」へ揃う。
+//!
+//! ```text
+//! 加槓しない: 14枚 → 通常打牌 → 13枚 (副露 N) → 次のツモを待つ
+//! 加槓する  : 14枚 → 加槓     → 13枚 (副露 N) → 嶺上牌を待つ
+//! ```
+//!
+//! 加槓は副露数を変えないので、concealed hand の枚数も `13 - 3 * 副露数` のまま変わらない。
+//!
+//! ## 物理牌 (TileId) の扱い
+//!
+//! RiichiLab の mjai → [`TileId`] 変換は黒牌の物理 copy ID を復元できず、同じ牌種の黒牌は
+//! すべて同じ代表 ID へ潰れる (`temporary_tile_id_from_mjai_pai`)。したがって `consumed` の
+//! [`TileId`] が既存 Pon の物理牌と完全一致することを validation 条件にしない。確かめるのは
+//! 牌種 semantics だけにする。
+//!
+//! ```text
+//! consumed.len() == 3
+//! consumed 3枚が同一 TileType
+//! 追加牌も同一 TileType
+//! 対応する既存 Pon が同一 TileType の Pon
+//! 追加牌が現在の concealed hand + ツモ牌に存在する
+//! ```
+//!
+//! 一方、追加牌を実際に手牌から取り除くときは赤5と黒5を区別する。牌種だけで一致させると赤5を
+//! 誤って槓へ持っていき、手牌に残る赤ドラを取り違えるためである。取り除く牌は牌種と赤牌かどうか
+//! の両方が一致する1枚に限る。
+//!
+//! ## 搶槓 hard-safe
+//!
+//! v1 でもっとも重要な条件である。加槓牌は他家から搶槓される可能性があり、しかも通常の打牌と
+//! 危険度が違う。既存の hidden-hand model が持つ通常ロン評価は `chankan = false` を前提にした
+//! 箇所があるので、
+//!
+//! ```text
+//! 通常の打牌では役なしでロンできない
+//! 加槓では搶槓 (Chankan) が役として付いてロンできる
+//! ```
+//!
+//! という手を取りこぼす。そのため通常打牌用の exact ron-risk をそのまま流用しない。
+//!
+//! v1 では搶槓 risk を**推定しない**。他家リーチ中は加槓しないので残る3家は非リーチであり、
+//! その全員について次のどちらかを確定できた場合だけ加槓する。
+//!
+//! ```text
+//! A. その player 自身の河に加槓牌がある
+//!    → 恒常フリテンでロンできない
+//!    → hard-safe ([`KakanChankanSafety::RiverFuriten`])
+//!
+//! OR
+//!
+//! B. structural hidden-hand model で
+//!    target_completion_state_weight(加槓牌) == 0
+//!    → 公開情報と整合する hidden hand の中に、その牌で Standard の和了形を完成できる
+//!      state 自体が存在しない
+//!    → hard-safe ([`KakanChankanSafety::NoStructuralCompletion`])
+//! ```
+//!
+//! 1人でもどちらも確定できなければ [`KanDecisionReason::KakanChankanNotHardSafe`] で加槓しない。
+//!
+//! ### structural completion を使う理由
+//!
+//! [`CompressedStructuralTenpaiHiddenHandStates::target_completion_state_weight`] は、通常ロンの
+//! 「役があるか」を判定する `R` ではなく、**対象牌を加えたときに Standard の構造的和了形が完成
+//! する hidden state の重み**を exact に数える。したがって
+//!
+//! ```text
+//! target_completion_state_weight(加槓牌) == 0
+//! ```
+//!
+//! なら、通常ロンで役があるかにも、搶槓で Chankan が役として追加されるかにも関係なく、そもそも
+//! その牌で和了形になれないため搶槓ロン不能と確定できる。heuristic ではなく hard fact として
+//! 使える。
+//!
+//! | model の結果 | v1 の扱い |
+//! | --- | --- |
+//! | `completion == 0` | hard-safe |
+//! | `completion > 0` | 搶槓されるとは断定しないが hard-safe とも断定できないので reject |
+//! | model unavailable / unsupported | unknown として reject |
+//!
+//! `completion > 0` を確率へ変換したり threshold を置いたりしない。
+//!
+//! 判定順は A が先で、自身の河に加槓牌がある player には exact counting を行わない
+//! ([`is_discarded_by_player`] が source of truth)。A で確定しない player についてだけ
+//! [`CompressedStructuralTenpaiHiddenHandStates::new`] を試し、その成功・失敗をそのまま model の
+//! 対応範囲とする。「副露があるように見えるから使えるはず」といった条件をこの層で複製しない。
+//!
+//! ### hard-safe の根拠に使わないもの
+//!
+//! | 使わない evidence | 理由 |
+//! | --- | --- |
+//! | `temporary_passed_tiles` | 「一時フリテンで今はロンできない」だけで、搶槓で新しく役が付く手を排除できない |
+//! | `same_hand_passed_tiles` | 手牌不変の見逃し観測であって hard fact ではない |
+//! | Suji | 河由来の推測で、ロン不能を確定しない |
+//! | Wall / OneChance | 見え枚数由来の推測で、ロン不能を確定しない |
+//! | Honor safety rank | 同上 |
+//! | 通常 Dahai 用 exact `R/T` (`ron_risk_evidence` / `ron_capable_state_weight`) | 役判定を含み、`chankan = false` 前提の経路がある |
+//! | 「Push だから大丈夫」 | 押し引きの結論は放銃可否の事実ではない |
+//!
+//! 特に `temporary_passed_tiles` は通常ロンに対する安全 evidence としては有効でも、搶槓に
+//! よって役が新しく付くケースを排除できないため、加槓の safety へ流用しない。
+//!
+//! ## 他家リーチ中
+//!
+//! ```text
+//! ctx.any_opponent_reached() == true
+//! → 加槓しない ([`KanDecisionReason::OpponentReached`])
+//! ```
+//!
+//! 加槓には一発を消す利点があるが、
+//!
+//! - 新しい槓ドラによる相手の打点上昇
+//! - 一発消去
+//! - 搶槓 risk
+//! - 嶺上牌
+//!
+//! を同じ尺度で比較できる基盤がまだ無い。今回はその比較モデルを作らない。
+//!
+//! ## 加槓後の攻撃打点
+//!
+//! 加槓後も手は開いたままである。元が Pon なので門前には戻らず、誤って門前手やリーチ手として
+//! 評価しない。門前かどうかは置換後の副露 list から既存 [`is_menzen`] で求める。新しい槓ドラの
+//! 中身は未知なので、加槓後の攻撃打点へ加算しない。嶺上牌も暗槓と同じく評価へ含めない。
+//!
+//! ## TODO: 搶槓 exact model
+//!
+//! TODO: [`WinningContext`](bot_logic::WinningContext) の `chankan: true` を使った opponent
+//! hidden-hand model を整備し、リーチ者・公開副露者・門前非リーチ者のすべてについて搶槓の
+//! `R/T` を評価できるようにする。その時点で「structural completion が1つでもあれば加槓しない」
+//! 「model を使えない player がいれば加槓しない」という v1 の保守的な制限を緩和する。今回この
+//! defense model 拡張は行わない。
+//!
+//! # 複数のカン候補
+//!
+//! 同じ局面で2件以上のカン (暗槓・加槓を問わない) が成立した場合、production では**どれも
+//! 選ばない** ([`KanDecisionReason::MultipleEligibleCandidates`])。自己リーチの前後どちらでも
+//! 同じ扱いにする。合法 action の列挙順は server が決めるものなので、AI の tie-break に使わない。
+//! 候補間を妥当に比較できる既存 comparator がまだ無いので、将来のためだけの独自 ranking も
+//! 作らない。候補ごとの判断内訳は診断へそのまま残す。
 //!
 //! # 判断にかかるコスト
 //!
@@ -250,15 +441,18 @@
 //! TODO: 暗槓前後を ExpectedSelfTsumoValue で比較できるようにして、自己リーチ前のテンパイ以外の
 //! 暗槓も production へ接続する。嶺上牌ぶんの追加ツモと山の残枚数の差をどう揃えるかが未解決。
 //!
-//! TODO: 複数の暗槓候補を既存評価で比較できるようにする。
+//! TODO: 複数のカン候補を既存評価で比較できるようにする。
 //!
-//! TODO: Kakan の搶槓リスクと Daiminkan の reaction モデルを評価できるようにしてから、
-//! [`KanKind`] の残り2種別を production へ接続する。
+//! TODO: 搶槓 exact model を整備して、加槓の hard-safe 制限を緩和する
+//! (「TODO: 搶槓 exact model」の節)。
+//!
+//! TODO: Daiminkan の reaction モデルを評価できるようにしてから、残り1種別を production へ
+//! 接続する。
 
 use std::cmp::Ordering;
 
 use bot_logic::{
-    DiscardEvaluation, EffectiveAcceptance, FixedMeldCount, Meld, MeldKind, OwnDiscards,
+    DiscardEvaluation, EffectiveAcceptance, FixedMeldCount, Meld, MeldKind, MeldShape, OwnDiscards,
     TileCounts, TileId, TileType, calculate_acceptance_with_fixed_melds,
     calculate_acceptance_with_fixed_melds_and_visible_tiles, calculate_shanten_with_fixed_melds,
     is_menzen, structural_acceptance_tile_types_with_fixed_melds, tenpai_completed_hands,
@@ -267,6 +461,7 @@ use bot_logic::{
 
 use crate::action::LegalAction;
 use crate::context::GameContext;
+use crate::defense::{CompressedStructuralTenpaiHiddenHandStates, is_discarded_by_player};
 use crate::discard_selection::selected_discard_tenpai_wait_availability;
 use crate::offense_value::{
     TenpaiOffenseMode, TenpaiOffenseValue, evaluate_tenpai_offense_value,
@@ -278,9 +473,13 @@ use crate::push_pull::PushPullMode;
 /// 暗槓が消費する物理牌の枚数。
 const ANKAN_CONSUMED_TILE_COUNT: usize = 4;
 
+/// 加槓が消費する物理牌の枚数。追加する4枚目は `consumed` ではなく `tile` が持つ。
+const KAKAN_CONSUMED_TILE_COUNT: usize = 3;
+
 /// 評価対象のカン種別。
 ///
-/// 今回 production で選べるのは [`Self::Ankan`] だけで、残り2種別は候補として診断に並ぶだけ。
+/// 今回 production で選べるのは [`Self::Ankan`] と [`Self::Kakan`] で、[`Self::Daiminkan`] は
+/// 候補として診断に並ぶだけ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KanKind {
     Ankan,
@@ -300,14 +499,13 @@ impl KanKind {
 
     /// 今回 production で選択できる種別か。
     pub fn is_production_connected(self) -> bool {
-        matches!(self, Self::Ankan)
+        matches!(self, Self::Ankan | Self::Kakan)
     }
 
     // 今回 production 接続していない種別の理由。
     fn not_connected_reason(self) -> Option<KanDecisionReason> {
         match self {
-            Self::Ankan => None,
-            Self::Kakan => Some(KanDecisionReason::KakanNotConnected),
+            Self::Ankan | Self::Kakan => None,
             Self::Daiminkan => Some(KanDecisionReason::DaiminkanNotConnected),
         }
     }
@@ -315,12 +513,13 @@ impl KanKind {
 
 /// カンを採用した / しなかった理由。
 ///
-/// カンを採用した理由は自己リーチ前後で1つずつあり、[`Self::is_eligible`] がその2つを表す。
+/// カンを採用した理由は3つあり、[`Self::is_eligible`] がその3つを表す。
 ///
 /// | 採用した理由 | policy |
 /// | --- | --- |
-/// | [`Self::EligibleAnkanNoRegression`] | 自己リーチ前。暗槓前後を既存評価で比較して悪化しない |
-/// | [`Self::EligibleAnkanAfterOwnReach`] | 自己リーチ後の暫定 policy |
+/// | [`Self::EligibleAnkanNoRegression`] | 自己リーチ前の暗槓。暗槓前後を既存評価で比較して悪化しない |
+/// | [`Self::EligibleAnkanAfterOwnReach`] | 自己リーチ後の暗槓の暫定 policy |
+/// | [`Self::EligibleKakanNoRegression`] | 自己リーチ前の加槓。搶槓 hard-safe で、加槓前後を既存評価で比較して悪化しない |
 ///
 /// 残りはすべて「今回はカンしない」理由であり、最初に落ちた条件を1つだけ表す。判定順は
 /// [`KanCandidateDiagnostic`] のフィールドが埋まる順と一致する。
@@ -334,14 +533,34 @@ pub enum KanDecisionReason {
     /// 同じ尺度に載せられない。そのため合法性と structural validation だけを条件にする。
     /// 向聴・受け入れ・攻撃打点・押し引き・他家リーチは採用条件にしない。
     EligibleAnkanAfterOwnReach,
+    /// 自己リーチ前の加槓で、加槓牌の搶槓ロン不能を hard fact で確定でき、既存評価で測れる
+    /// 向聴・受け入れ・攻撃打点のどれも悪化しない。
+    EligibleKakanNoRegression,
     /// 自分の席を特定できず、リーチ済みかどうかを判断できない。
     ///
     /// リーチ済みだともしていないとも推測しないので、どちらの policy へも進めない。
     OwnReachUnknown,
-    /// 加槓はまだ production へ接続していない。搶槓リスクを評価できていない。
-    KakanNotConnected,
     /// 大明槓はまだ production へ接続していない。reaction としての評価モデルが無い。
     DaiminkanNotConnected,
+    /// 自己リーチ後の加槓。
+    ///
+    /// 元になる Pon があるので通常は自己リーチと両立しないが、server / context が矛盾した値を
+    /// 持つ場合に自己リーチ状態を推測で `false` へ倒さず、加槓しない。
+    KakanAfterOwnReach,
+    /// 加槓が置換する既存 Pon を自分の副露から特定できない。
+    KakanWithoutMatchingPon,
+    /// 加槓の形が成り立たない。
+    ///
+    /// consumed が3枚でない、consumed と追加牌の牌種が揃わない、追加牌が手牌とツモ牌に無い、
+    /// 置換後の面子が槓の形にならないのいずれか。物理 [`TileId`] の完全一致は条件にしない。
+    InvalidKakanShape,
+    /// 加槓牌について、全他家からの搶槓ロン不能を hard fact で確定できない。
+    ///
+    /// 他家ごとの根拠は [`KakanChankanSafety::RiverFuriten`] (自身の河に加槓牌と同じ牌種がある)
+    /// と [`KakanChankanSafety::NoStructuralCompletion`] (structural hidden-hand model の
+    /// `target_completion_state_weight` が 0) の2つで、1人でもどちらも確定できなければこの理由に
+    /// なる。搶槓 risk の推定は行わない。
+    KakanChankanNotHardSafe,
     /// 自己リーチ前で、他家にリーチ者がいる。新ドラがリーチ者の打点へ与える影響を既存評価で
     /// 測れない。自己リーチ後の暫定 policy ではこの理由で落とさない。
     OpponentReached,
@@ -389,7 +608,9 @@ impl KanDecisionReason {
     pub fn is_eligible(self) -> bool {
         matches!(
             self,
-            Self::EligibleAnkanNoRegression | Self::EligibleAnkanAfterOwnReach
+            Self::EligibleAnkanNoRegression
+                | Self::EligibleAnkanAfterOwnReach
+                | Self::EligibleKakanNoRegression
         )
     }
 }
@@ -423,6 +644,68 @@ impl KanHandDiagnostic {
     }
 }
 
+/// 加槓牌の搶槓 hard-safe 判定の内訳。
+///
+/// 他家1人ごとの根拠は [`KakanChankanSafety`] が表す。`temporary_passed_tiles` /
+/// `same_hand_passed_tiles` / Suji / Wall / OneChance / 通常 Dahai 用 exact `R/T` は根拠に
+/// 使わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KakanChankanDiagnostic {
+    /// 加槓で追加する4枚目の牌種。
+    pub tile: TileType,
+    /// 自分以外の3家の判定内訳。player id の昇順。
+    pub opponents: Vec<KakanChankanOpponent>,
+    /// 全他家について搶槓ロン不能を確定できたか。
+    ///
+    /// 3家すべてが個別に hard-safe の場合だけ `true`。production の判断はこの値をそのまま読み、
+    /// 集約規則を別に持たない。
+    pub hard_safe: bool,
+}
+
+/// 他家1人分の搶槓 hard-safe の根拠、または確定できなかった理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KakanChankanSafety {
+    /// その player 自身の河に加槓牌と同じ牌種がある。恒常フリテンでロンできない。
+    RiverFuriten,
+    /// structural hidden-hand model で、加槓牌を加えて Standard の和了形が完成する hidden
+    /// state が1つも無い (`target_completion_state_weight == 0`)。
+    NoStructuralCompletion,
+    /// 加槓牌を加えると和了形になる hidden state が存在する。
+    ///
+    /// 実際に搶槓されると断定する意味ではないが、hard-safe とも確定できない。
+    StructuralCompletionPossible,
+    /// structural hidden-hand model を構築できない (門前非リーチなど)。hard-safe unknown。
+    StructuralModelUnavailable,
+}
+
+impl KakanChankanSafety {
+    /// 搶槓ロン不能を hard fact で確定できた根拠か。
+    pub fn is_hard_safe(self) -> bool {
+        matches!(self, Self::RiverFuriten | Self::NoStructuralCompletion)
+    }
+}
+
+/// 他家1人分の搶槓 hard-safe 判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KakanChankanOpponent {
+    pub player: usize,
+    /// その player 自身の河に加槓牌と同じ牌種があるか ([`is_discarded_by_player`])。
+    pub river_furiten: bool,
+    /// structural hidden-hand model を評価した場合の target completion state weight [重み]。
+    ///
+    /// 河フリテンで確定した player と、model を構築できない player では評価しないので `None`。
+    pub structural_completion_weight: Option<u128>,
+    /// hard-safe の根拠、または確定できなかった理由。
+    pub safety: KakanChankanSafety,
+}
+
+impl KakanChankanOpponent {
+    /// この player について搶槓ロン不能を確定できたか。
+    pub fn hard_safe(&self) -> bool {
+        self.safety.is_hard_safe()
+    }
+}
+
 /// 合法な `LegalAction::Ankan` / `LegalAction::Kakan` / `LegalAction::Daiminkan` 1件ごとの判断内訳。
 ///
 /// 各フィールドは判定が実際にそこまで進んだ場合だけ `Some` になり、進まなかった判定は推測せず
@@ -431,9 +714,14 @@ impl KanHandDiagnostic {
 pub struct KanCandidateDiagnostic {
     pub action: LegalAction,
     pub kind: KanKind,
-    /// カンの対象牌種。Ankan は consumed の牌種、Kakan / Daiminkan は対象の打牌 / 手出し牌。
+    /// カンの対象牌種。Ankan は consumed の牌種、Kakan は追加する4枚目、Daiminkan は対象の打牌。
     pub tile: Option<TileType>,
+    /// 加槓が置換する既存の Pon。加槓以外と、元 Pon を特定できなかった場合は `None`。
+    pub matching_pon: Option<Meld>,
+    /// 加槓牌の搶槓 hard-safe 判定。加槓以外と、判定まで進まなかった場合は `None`。
+    pub chankan: Option<KakanChankanDiagnostic>,
     pub current_fixed_meld_count: Option<FixedMeldCount>,
+    /// カン後の副露済み面子数。暗槓・大明槓は1増え、加槓は Pon の置換なので変わらない。
     pub post_kan_fixed_meld_count: Option<FixedMeldCount>,
     /// カンしない場合に採用する通常打牌と、その打牌後13枚の既存評価。
     ///
@@ -521,6 +809,7 @@ pub(crate) fn evaluate_kan_decision(
             ctx,
             legal_actions,
             kind,
+            called_tile,
             consumed,
             mode,
             normal_discard,
@@ -586,6 +875,8 @@ fn new_kan_candidate(
         tile: called_tile
             .or_else(|| consumed.first().copied())
             .map(TileId::tile_type),
+        matching_pon: None,
+        chankan: None,
         current_fixed_meld_count: None,
         post_kan_fixed_meld_count: None,
         baseline_discard: None,
@@ -600,13 +891,15 @@ fn new_kan_candidate(
 // 候補1件の条件を上から順に評価し、最初に落ちた理由を返す。評価が進んだ範囲の値だけを
 // candidate へ書き込み、評価しなかった項目は None のままにする。
 //
-// 自己リーチ済みかどうかで policy そのものが分かれる。自己リーチ後は structural validation
-// だけ、自己リーチ前は既存評価による暗槓前後の比較を通る。
+// 暗槓は自己リーチ済みかどうかで policy そのものが分かれる。自己リーチ後は structural
+// validation だけ、自己リーチ前は既存評価による暗槓前後の比較を通る。加槓は自己リーチ前だけを
+// 対象にし、自己リーチ状態が分からない場合も矛盾している場合も推測で処理しない。
 #[allow(clippy::too_many_arguments)]
 fn evaluate_kan_candidate(
     ctx: &GameContext,
     legal_actions: &[LegalAction],
     kind: KanKind,
+    called_tile: Option<TileId>,
     consumed: &[TileId],
     mode: PushPullMode,
     normal_discard: Option<&DiscardEvaluation>,
@@ -616,11 +909,11 @@ fn evaluate_kan_candidate(
         return reason;
     }
 
-    match ctx.own_reached() {
+    match (kind, ctx.own_reached()) {
         // 自席を特定できない。リーチ済みだともしていないとも推測しない。
-        None => KanDecisionReason::OwnReachUnknown,
-        Some(true) => evaluate_ankan_after_own_reach(ctx, consumed, candidate),
-        Some(false) => evaluate_ankan_before_own_reach(
+        (_, None) => KanDecisionReason::OwnReachUnknown,
+        (KanKind::Ankan, Some(true)) => evaluate_ankan_after_own_reach(ctx, consumed, candidate),
+        (KanKind::Ankan, Some(false)) => evaluate_ankan_before_own_reach(
             ctx,
             legal_actions,
             consumed,
@@ -628,6 +921,18 @@ fn evaluate_kan_candidate(
             normal_discard,
             candidate,
         ),
+        (KanKind::Kakan, Some(true)) => KanDecisionReason::KakanAfterOwnReach,
+        (KanKind::Kakan, Some(false)) => evaluate_kakan_before_own_reach(
+            ctx,
+            legal_actions,
+            called_tile,
+            consumed,
+            mode,
+            normal_discard,
+            candidate,
+        ),
+        // 接続していない種別はここへ来る前に落ちる。
+        (KanKind::Daiminkan, _) => KanDecisionReason::DaiminkanNotConnected,
     }
 }
 
@@ -694,20 +999,70 @@ fn evaluate_ankan_before_own_reach(
     );
     candidate.post_kan = Some(post_kan);
 
-    // 受け入れも打点も「現在の向聴数」に紐づく値なので、向聴段階が同じ場合だけ比較する。
-    match post_kan.shanten.cmp(&baseline.shanten) {
-        Ordering::Greater => return KanDecisionReason::ShantenRegresses,
-        Ordering::Less => return KanDecisionReason::ShantenImprovedNotComparable,
-        Ordering::Equal => {}
+    match compare_post_kan_hand(baseline, post_kan) {
+        Ok(()) => KanDecisionReason::EligibleAnkanNoRegression,
+        Err(reason) => reason,
+    }
+}
+
+// 自己リーチ前の加槓。搶槓ロン不能を hard fact で確定できた候補だけを、暗槓と同じ既存評価で
+// 比較する。
+//
+// 判定順は暗槓と揃え、安価な fact (他家リーチ・押し引き・自摸・加槓の形と元 Pon・搶槓
+// hard-safe) を通った候補だけが向聴・受け入れ・打点の比較へ進む。搶槓 hard-safe は打点比較より
+// 前に置く。v1 では搶槓 risk を推定しないので、hard-safe でない候補は速度や打点を比べる前に
+// 落ちる。
+#[allow(clippy::too_many_arguments)]
+fn evaluate_kakan_before_own_reach(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+    called_tile: Option<TileId>,
+    consumed: &[TileId],
+    mode: PushPullMode,
+    normal_discard: Option<&DiscardEvaluation>,
+    candidate: &mut KanCandidateDiagnostic,
+) -> KanDecisionReason {
+    if ctx.any_opponent_reached() {
+        return KanDecisionReason::OpponentReached;
     }
 
-    if post_kan.acceptance_remaining < baseline.acceptance_remaining
-        || post_kan.acceptance_type_count < baseline.acceptance_type_count
-    {
-        return KanDecisionReason::AcceptanceRegresses;
+    if mode != PushPullMode::Push {
+        return KanDecisionReason::NotPush;
     }
 
-    compare_offense_value(baseline, post_kan)
+    if !ctx.is_after_own_draw() {
+        return KanDecisionReason::NotAfterOwnDraw;
+    }
+
+    let (added_tile, post_kan_melds, post_kan_tiles, fixed_meld_count) =
+        match validate_kakan_structure(ctx, called_tile, consumed, candidate) {
+            Ok(validated) => validated,
+            Err(reason) => return reason,
+        };
+
+    let Some(chankan) = chankan_hard_safety(ctx, added_tile.tile_type()) else {
+        return KanDecisionReason::KakanChankanNotHardSafe;
+    };
+    let hard_safe = chankan.hard_safe;
+    candidate.chankan = Some(chankan);
+    if !hard_safe {
+        return KanDecisionReason::KakanChankanNotHardSafe;
+    }
+
+    let Some(normal_discard) = normal_discard else {
+        return KanDecisionReason::NormalDiscardUnavailable;
+    };
+    candidate.baseline_discard = Some(normal_discard.discard);
+    let baseline = evaluate_baseline_hand(ctx, legal_actions, normal_discard);
+    candidate.baseline = Some(baseline);
+
+    let post_kan = evaluate_post_kan_hand(ctx, &post_kan_tiles, &post_kan_melds, fixed_meld_count);
+    candidate.post_kan = Some(post_kan);
+
+    match compare_post_kan_hand(baseline, post_kan) {
+        Ok(()) => KanDecisionReason::EligibleKakanNoRegression,
+        Err(reason) => reason,
+    }
 }
 
 // 暗槓の structural validation。自己リーチの前後で共有する。
@@ -737,41 +1092,226 @@ fn validate_ankan_structure(
     Ok((meld, post_kan_tiles, post_kan_fixed_meld_count))
 }
 
-// 速度が悪化しない候補について、暗槓前後の攻撃打点を比べる。
+// カン後13枚相当 state を、カンしない場合の通常打牌後と比べる。悪化しなければ `Ok(())` で、
+// 採用理由は種別ごとに呼び出し側が決める。
+//
+// 向聴・受け入れ・打点の semantics は暗槓と加槓で同じものを共有し、種別ごとに規則を複製しない。
+// 受け入れも打点も「現在の向聴数」に紐づく値なので、向聴段階が同じ場合だけ比較する。
+fn compare_post_kan_hand(
+    baseline: KanHandDiagnostic,
+    post_kan: KanHandDiagnostic,
+) -> Result<(), KanDecisionReason> {
+    match post_kan.shanten.cmp(&baseline.shanten) {
+        Ordering::Greater => return Err(KanDecisionReason::ShantenRegresses),
+        Ordering::Less => return Err(KanDecisionReason::ShantenImprovedNotComparable),
+        Ordering::Equal => {}
+    }
+
+    if post_kan.acceptance_remaining < baseline.acceptance_remaining
+        || post_kan.acceptance_type_count < baseline.acceptance_type_count
+    {
+        return Err(KanDecisionReason::AcceptanceRegresses);
+    }
+
+    compare_offense_value(baseline, post_kan)
+}
+
+// 速度が悪化しない候補について、カン前後の攻撃打点を比べる。悪化しなければ `Ok(())` で、
+// 採用理由は種別ごとに呼び出し側が決める。
 //
 // 同じ尺度の値を確定できない組み合わせはすべて [`KanDecisionReason::ValueNotEvaluable`] にし、
-// 速度非劣化だけを根拠に暗槓へ倒さない。
+// 速度非劣化だけを根拠にカンへ倒さない。暗槓と加槓でこの規則を分けない。
 fn compare_offense_value(
     baseline: KanHandDiagnostic,
     post_kan: KanHandDiagnostic,
-) -> KanDecisionReason {
+) -> Result<(), KanDecisionReason> {
     let (Some(baseline_offense), Some(post_kan_offense)) = (baseline.offense, post_kan.offense)
     else {
-        return KanDecisionReason::ValueNotEvaluable;
+        return Err(KanDecisionReason::ValueNotEvaluable);
     };
 
     // リーチ手とダマ手の打点は別 baseline の値なので同じ尺度で比べない。
     if baseline_offense.mode != post_kan_offense.mode
         || baseline_offense.mode == TenpaiOffenseMode::Unknown
     {
-        return KanDecisionReason::ValueNotEvaluable;
+        return Err(KanDecisionReason::ValueNotEvaluable);
     }
 
     let (Some(baseline_total), Some(post_kan_total)) = (
         baseline_offense.value.weighted_total(),
         post_kan_offense.value.weighted_total(),
     ) else {
-        return KanDecisionReason::ValueNotEvaluable;
+        return Err(KanDecisionReason::ValueNotEvaluable);
     };
 
     if post_kan_total < baseline_total {
-        return KanDecisionReason::ValueRegresses;
+        return Err(KanDecisionReason::ValueRegresses);
     }
 
-    KanDecisionReason::EligibleAnkanNoRegression
+    Ok(())
 }
 
-/// 暗槓して嶺上牌を1枚引いた後の、山の残りツモ可能枚数 [枚]。
+// 加槓の structural validation と Pon → Kakan の post-state 構築。
+//
+// 合法性そのものは `legal_actions` が source of truth なので、ここで確かめるのは「その加槓を
+// 実際に自分の副露と手牌から組み立てられるか」だけになる。RiichiLab の mjai → TileId 変換は
+// 黒牌の物理 copy ID を復元できないため、consumed と既存 Pon の物理牌が完全一致することは
+// 要求せず、牌種 semantics だけを確かめる。
+//
+// 加槓は固定面子の追加ではなく置換なので、副露済み面子数は前後で変わらない。返す副露 list は
+// 元 Pon と同じ位置を Kakan で置き換えたもので、`called_tile` は元 Pon のものを保持する。
+fn validate_kakan_structure(
+    ctx: &GameContext,
+    called_tile: Option<TileId>,
+    consumed: &[TileId],
+    candidate: &mut KanCandidateDiagnostic,
+) -> Result<(TileId, Vec<Meld>, Vec<TileId>, FixedMeldCount), KanDecisionReason> {
+    let Some(added_tile) = called_tile else {
+        return Err(KanDecisionReason::InvalidKakanShape);
+    };
+    let tile_type = added_tile.tile_type();
+    if consumed.len() != KAKAN_CONSUMED_TILE_COUNT
+        || consumed.iter().any(|tile| tile.tile_type() != tile_type)
+    {
+        return Err(KanDecisionReason::InvalidKakanShape);
+    }
+
+    let (Some(fixed_meld_count), Some(melds)) = (ctx.own_fixed_meld_count(), ctx.own_melds())
+    else {
+        return Err(KanDecisionReason::FixedMeldCountUnknown);
+    };
+    candidate.current_fixed_meld_count = Some(fixed_meld_count);
+    // 加槓は Pon を置き換えるので、副露済み面子数は変わらない。
+    candidate.post_kan_fixed_meld_count = Some(fixed_meld_count);
+
+    let Some(index) = matching_pon_index(melds, tile_type) else {
+        return Err(KanDecisionReason::KakanWithoutMatchingPon);
+    };
+    let pon = &melds[index];
+    candidate.matching_pon = Some(pon.clone());
+
+    let Some(post_kan_tiles) = concealed_tiles_without_added_tile(ctx, added_tile) else {
+        return Err(KanDecisionReason::InvalidKakanShape);
+    };
+
+    let mut kakan_tiles = pon.tiles().to_vec();
+    kakan_tiles.push(added_tile);
+    let kakan = Meld::new(MeldKind::Kakan, kakan_tiles, pon.called_tile());
+    if kakan.shape().is_none() {
+        return Err(KanDecisionReason::InvalidKakanShape);
+    }
+
+    let mut post_kan_melds = melds.to_vec();
+    post_kan_melds[index] = kakan;
+
+    Ok((added_tile, post_kan_melds, post_kan_tiles, fixed_meld_count))
+}
+
+// 加槓が置換する既存 Pon の位置。面子の形は既存 [`Meld::shape`] が source of truth で、
+// 物理 [`TileId`] の一致は見ない。同じ牌種の Pon は1局面に1つしか存在しない。
+fn matching_pon_index(melds: &[Meld], tile_type: TileType) -> Option<usize> {
+    melds.iter().position(|meld| {
+        meld.kind() == MeldKind::Pon && meld.shape() == Some(MeldShape::Triplet { tile: tile_type })
+    })
+}
+
+// 加槓で追加する1枚だけを手牌 + ツモ牌から取り除いた concealed hand。
+//
+// 取り除く牌は牌種と赤牌かどうかの両方が一致する1枚に限る。牌種だけで一致させると赤5を誤って
+// 槓へ持っていき、手牌に残る赤ドラを取り違えるためである。
+fn concealed_tiles_without_added_tile(
+    ctx: &GameContext,
+    added_tile: TileId,
+) -> Option<Vec<TileId>> {
+    let mut remaining: Vec<TileId> = ctx
+        .hand_tiles()
+        .iter()
+        .copied()
+        .chain(ctx.drawn_tile())
+        .collect();
+    let position = remaining.iter().position(|held| {
+        held.tile_type() == added_tile.tile_type() && held.is_red() == added_tile.is_red()
+    })?;
+    remaining.remove(position);
+    Some(remaining)
+}
+
+// 加槓牌の搶槓 hard-safe 判定。自席を特定できない場合は player 0 などを推測せず `None`。
+//
+// 自分以外の3家それぞれを独立に判定し、全員について搶槓ロン不能を確定できた場合だけ
+// hard-safe にする。production の判断と診断はこの1本を共有し、集約規則を別に持たない。
+fn chankan_hard_safety(ctx: &GameContext, tile: TileType) -> Option<KakanChankanDiagnostic> {
+    let own_seat = usize::from(ctx.player_id()?);
+    let opponents: Vec<KakanChankanOpponent> = (0..ctx.discards().len())
+        .filter(|&player| player != own_seat)
+        .map(|player| chankan_opponent_safety(ctx, tile, player))
+        .collect();
+
+    Some(KakanChankanDiagnostic {
+        tile,
+        hard_safe: !opponents.is_empty() && opponents.iter().all(KakanChankanOpponent::hard_safe),
+        opponents,
+    })
+}
+
+// 他家1人について、加槓牌で搶槓ロンされ得ないと確定できるか。
+//
+// 根拠は2つあり、どちらも公開情報から確定する hard fact である。確率や閾値は持たない。
+//
+// | 根拠 | 意味 |
+// | --- | --- |
+// | [`KakanChankanSafety::RiverFuriten`] | その player 自身の河に加槓牌がある。恒常フリテンでロンできない |
+// | [`KakanChankanSafety::NoStructuralCompletion`] | 公開情報と整合する hidden hand の中に、加槓牌で Standard の和了形が完成する state が1つも無い |
+//
+// structural completion は役を見ないので、通常ロンで役があるかにも搶槓で Chankan が付くかにも
+// 依存しない。「そもそもその牌で和了形にならない」という構造の事実なので、`chankan = true` の
+// 局面でもそのまま安全根拠に使える。通常 Dahai 用の exact `R/T`
+// ([`ron_risk_evidence`](CompressedStructuralTenpaiHiddenHandStates::ron_risk_evidence) /
+// [`ron_capable_state_weight`](CompressedStructuralTenpaiHiddenHandStates::ron_capable_state_weight))
+// は役判定を含み `chankan = false` 前提の経路があるので、ここでは使わない。
+//
+// completion が1つでもある場合は「搶槓される」と断定せず、hard-safe を証明できない候補として
+// 扱う。model を構築できない player (門前非リーチなど) も同じく unknown にし、Kan 側で hidden-hand
+// model の対応範囲を推測で広げない。
+//
+// 判定順は河フリテンが先で、確定した player には exact counting を行わない。
+fn chankan_opponent_safety(
+    ctx: &GameContext,
+    tile: TileType,
+    player: usize,
+) -> KakanChankanOpponent {
+    if is_discarded_by_player(tile, player, ctx) {
+        return KakanChankanOpponent {
+            player,
+            river_furiten: true,
+            structural_completion_weight: None,
+            safety: KakanChankanSafety::RiverFuriten,
+        };
+    }
+
+    let Ok(mut states) = CompressedStructuralTenpaiHiddenHandStates::new(player, ctx) else {
+        return KakanChankanOpponent {
+            player,
+            river_furiten: false,
+            structural_completion_weight: None,
+            safety: KakanChankanSafety::StructuralModelUnavailable,
+        };
+    };
+
+    let weight = states.target_completion_state_weight(tile).weight;
+    KakanChankanOpponent {
+        player,
+        river_furiten: false,
+        structural_completion_weight: Some(weight),
+        safety: if weight == 0 {
+            KakanChankanSafety::NoStructuralCompletion
+        } else {
+            KakanChankanSafety::StructuralCompletionPossible
+        },
+    }
+}
+
+/// カンして嶺上牌を1枚引いた後の、山の残りツモ可能枚数 [枚]。暗槓と加槓で共有する。
 ///
 /// 嶺上牌は王牌から引くが、その分だけ王牌が山から補充されるので、暗槓後にツモできる枚数は
 /// 現在より1枚少なくなる
@@ -779,7 +1319,7 @@ fn compare_offense_value(
 /// ツモ可能枚数)。現在の枚数が分かっている局面ではこの既知 fact から導き、分からない局面だけ
 /// `None` にして推測しない。
 ///
-/// 残り0枚からは引けないので `Some(0)` はそもそも暗槓が成立しない値だが、unknown へ倒すと
+/// 残り0枚からは引けないので `Some(0)` はそもそもカンが成立しない値だが、unknown へ倒すと
 /// [`is_reach_legal`](crate::reach_policy::is_reach_legal) の unknown 規則でリーチ可能側へ
 /// 倒れてしまう。飽和減算で `Some(0)` を維持し、リーチ不可のまま残す。
 fn post_kan_remaining_tiles(ctx: &GameContext) -> Option<u32> {
@@ -814,7 +1354,7 @@ fn ankan_meld_and_concealed_tiles(
     Some((meld, remaining))
 }
 
-// 暗槓しない場合に採用する通常打牌の、打牌後13枚の既存評価。
+// カンしない場合に採用する通常打牌の、打牌後13枚相当の既存評価。暗槓と加槓で共有する。
 //
 // 向聴・受け入れは production の通常打牌選択が求めた [`DiscardEvaluation`] そのもので、打点も
 // 押し引き・リーチ判断と同じ helper を通す。この層で求め直す評価は持たない。
@@ -834,7 +1374,10 @@ fn evaluate_baseline_hand(
     }
 }
 
-// 暗槓後13枚相当 state の既存評価。見え牌の有無による経路分岐は通常打牌評価と揃える。
+// カン後13枚相当 state の既存評価。見え牌の有無による経路分岐は通常打牌評価と揃える。
+//
+// 暗槓は `10枚 + 副露 N+1`、加槓は `13枚 + 副露 N` で、どちらも `13 - 3 * 副露数` 枚の同じ
+// 大きさの手牌になる。評価そのものは種別で分けない。
 fn evaluate_post_kan_hand(
     ctx: &GameContext,
     tiles: &[TileId],
@@ -863,18 +1406,20 @@ fn evaluate_post_kan_hand(
     }
 }
 
-// 暗槓後13枚相当 state がテンパイの場合の攻撃打点。テンパイでない場合と、待ちや完成手を
+// カン後13枚相当 state がテンパイの場合の攻撃打点。テンパイでない場合と、待ちや完成手を
 // 組み立てられない場合は `None`。
 //
 // 待ちは既存のフリテン基盤、完成手は既存の [`tenpai_completed_hands`]、打点と攻撃モードは
 // 押し引き・リーチ判断が使う [`evaluate_tenpai_offense_with_reach_legality`] をそのまま通す。
-// 暗槓は評価対象の副露として渡すので、符も役も既存 scoring が暗槓込みで求めた値になる。
+// カンは評価対象の副露として渡すので、符も役も既存 scoring がカン込みで求めた値になる。
 //
 // 攻撃モードを決める「リーチが合法か」は、現在局面の `legal_actions` を未来へ流用せず、共有
-// 条件を暗槓後の手牌の事実へ適用した [`future_reach_legal`] で求める。門前かどうかは暗槓を
-// 含む評価対象副露から、山の残りツモ可能枚数は [`post_kan_remaining_tiles`] から取る。
+// 条件をカン後の手牌の事実へ適用した [`future_reach_legal`] で求める。門前かどうかはカンを
+// 含む評価対象副露から、山の残りツモ可能枚数は [`post_kan_remaining_tiles`] から取る。加槓後は
+// 元 Pon が Kakan になるだけなので門前へは戻らず、既存 [`is_menzen`] がそのまま開いた手と
+// 判定する。
 //
-// 自分の河は暗槓で変わらない。履歴依存フリテンは、暗槓の前に自分のツモを経ている事実を
+// 自分の河はカンで変わらない。履歴依存フリテンは、カンの前に自分のツモを経ている事実を
 // `ctx` 側の既存補正 ([`GameContext::history_furiten_after_own_discard`]) から取る。カンで
 // 増えるドラ表示牌は未知なので、`ctx` の既知のドラ表示牌だけで評価する。
 fn post_kan_tenpai_offense(

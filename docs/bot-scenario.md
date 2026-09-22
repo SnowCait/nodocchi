@@ -681,6 +681,7 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌と候補順 |
 | `legal_ankan` | 合法な暗槓 |
+| `legal_kakan` | 合法な加槓 |
 | `remaining_tiles` / `honba` / `kyotaku_points` / `scores` / `kyoku` | table state |
 
 ### legal_dahai
@@ -707,6 +708,44 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 **暗槓が合法かどうかは入力側が source of truth** です。リーチ後に待ちが変わらないかどうかも含めて、ここへ書いた暗槓はそのまま合法手として渡します。局面そのもの (手牌・見え牌・副露) は変わりません。4枚でない指定、同じ牌種でない指定、手牌とツモ牌に無い指定は error です。
 
 判断内訳は [Structured diagnostics](diagnostics.md#kan) の `Kan` section に出ます。
+
+### legal_kakan
+
+`legal_kakan` は合法な加槓を明示します。加槓が消費する3枚は `melds` にある自分の Pon そのものなので、各要素には**追加する4枚目1枚だけ**を `"E"` や `"0p"` のように書きます。
+
+```json
+{
+  "hand": "123456789m 1p",
+  "draw": "E",
+  "player_id": 0,
+  "oya": 0,
+  "round_wind": "E",
+  "discards": ["", "E", "9s", "2m"],
+  "melds": [
+    [{ "kind": "pon", "tiles": "E E E", "called_tile": "E" }],
+    [],
+    [{ "kind": "pon", "tiles": "2m 2m 2m", "called_tile": "2m" }],
+    [{ "kind": "pon", "tiles": "9s 9s 9s", "called_tile": "9s" }]
+  ],
+  "legal_kakan": ["E"]
+}
+```
+
+この例は `scenarios/kakan_hard_safe.json` と同じ局面です。player 1 は Pon の元になった東を捨てた本人、player 2 / player 3 は非リーチの公開副露者で、東4枚がすべて自分の副露と手牌にあるため東の structural completion が 0 になります。3家とも搶槓 hard-safe なので加槓を採用します。
+
+consumed は指定した牌種と同じ自分の Pon の物理牌をそのまま使うので、同じ牌を Pon と加槓で二重に割り当てません。追加牌は手牌とツモ牌から赤5と黒5を区別して取ります。
+
+**加槓が合法かどうかは入力側が source of truth** です。局面そのもの (手牌・見え牌・副露) は変わりません。対応する Pon が無い指定、手牌とツモ牌に追加牌が無い指定、`player_id` の無い指定は error です。
+
+判断内訳は [Structured diagnostics](diagnostics.md#kan) の `Kan` section に出て、Summary には
+
+```text
+  kan: Kakan E <- E E E
+  kan reason: EligibleKakanNoRegression
+  kan candidate: Kakan E / chankan hard-safe yes / EligibleKakanNoRegression / selected yes
+```
+
+のように候補の種別・対象牌・搶槓 hard-safe・理由・採否が並びます。
 
 ### melds
 

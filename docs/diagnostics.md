@@ -115,10 +115,10 @@ Final decision
 
 候補ごとに `kind` (`Ankan` / `Kakan` / `Daiminkan`)、`tile` (対象牌種)、`selected` / `eligible` と
 `reason` を出します。`reason` は最初に落ちた条件1つだけで、判定がそこまで進まなかった項目は `-`
-のままにします。
+のままにします。`tile` は暗槓が consumed の牌種、加槓が**追加する4枚目**、大明槓が対象の打牌です。
 
-production で選べるのは**暗槓だけ**です。加槓と大明槓は候補として並びますが、`reason` は必ず
-`KakanNotConnected` / `DaiminkanNotConnected` になります。
+production で選べるのは**暗槓と加槓**です。大明槓は候補として並びますが、`reason` は必ず
+`DaiminkanNotConnected` になります。
 
 ```text
 Kan
@@ -139,8 +139,9 @@ Kan
     post-kan: shanten 0 / acceptance 3 / 1 types / Damaten 36000
 ```
 
-`baseline` は暗槓しない場合に採用する通常打牌 (`baseline discard`) を切った後の13枚、`post-kan` は
-暗槓後の `10枚 + 副露1組` で、どちらも `13 - 3 × 副露数` 枚の同じ大きさの手牌です。各行は
+`baseline` はカンしない場合に採用する通常打牌 (`baseline discard`) を切った後の13枚相当、`post-kan` は
+カン後の手牌で、どちらも `13 - 3 × 副露数` 枚の同じ大きさです。暗槓は `10枚 + 副露1組`、加槓は
+`13枚 + 副露数そのまま` になります。各行は
 `shanten` / 受け入れ (残枚数・牌種数) / 攻撃モードと攻撃打点を並べます。打点は押し引きが
 threshold 判定に使うのと同じ残枚数加重合計で、テンパイでない state では `not evaluated` です。
 
@@ -163,11 +164,62 @@ validation だけで採用します。したがって `reason: EligibleAnkanAfte
     post-kan: -
 ```
 
+### 加槓の行
+
+加槓の候補には、元になる Pon と搶槓 hard-safe の内訳を足します。
+
+```text
+  Kakan E <- E E E
+    selected: yes
+    eligible: yes
+    reason: EligibleKakanNoRegression
+    kind: Kakan
+    tile: E
+    matching pon: Pon E E E (called E)
+    chankan hard-safe: yes (E)
+      player 1: hard-safe RiverFuriten / river furiten yes / structural completion not evaluated
+      player 2: hard-safe NoStructuralCompletion / river furiten no / structural completion 0
+      player 3: hard-safe NoStructuralCompletion / river furiten no / structural completion 0
+    current fixed meld count: 1
+    post-kan fixed meld count: 1
+    baseline discard: E
+    baseline: shanten 0 / acceptance 3 / 1 types / Damaten 17400
+    post-kan: shanten 0 / acceptance 3 / 1 types / Damaten 23100
+```
+
+`matching pon` は加槓が置き換える既存の Pon です。加槓は固定面子の追加ではなく置換なので、
+`current fixed meld count` と `post-kan fixed meld count` は同じ値になります。
+
+`chankan hard-safe` は加槓牌で搶槓ロンされないと確定できたかで、括弧内が加槓牌の牌種です。
+続く3行が他家ごとの内訳で、根拠 (または確定できなかった理由) と、判定に使った2つの事実を
+並べます。
+
+| 他家ごとの表示 | 意味 |
+| --- | --- |
+| `hard-safe RiverFuriten` | その player 自身の河に加槓牌がある。恒常フリテンでロンできない |
+| `hard-safe NoStructuralCompletion` | structural hidden-hand model の `target completion` が 0。その牌で和了形になる hidden state が無い |
+| `unsafe StructuralCompletionPossible` | 和了形になる hidden state が残る。搶槓されると断定はしないが hard-safe とも確定できない |
+| `unknown StructuralModelUnavailable` | 門前非リーチなど、structural hidden-hand model を構築できない |
+
+`river furiten` は `is_discarded_by_player` の結果、`structural completion` は
+`target_completion_state_weight` の weight です。河フリテンで確定した player には model を
+構築しないので `not evaluated` になります。3家すべてが `hard-safe` の場合だけ
+`chankan hard-safe: yes` になります。
+
+`temporary_passed` / `same_hand_passed` / スジ / 壁 / 通常打牌用の exact ロン評価は根拠に
+使わないので、これらが揃っていても判定は変わりません。
+
 ### reason の読み方
 
 | reason | 意味 |
 | --- | --- |
 | `EligibleAnkanNoRegression` | 自己リーチ前で、向聴・受け入れ・攻撃打点のどれも悪化しない |
+| `EligibleKakanNoRegression` | 搶槓 hard-safe な加槓で、向聴・受け入れ・攻撃打点のどれも悪化しない |
+| `KakanChankanNotHardSafe` | 加槓牌の搶槓ロン不能を全他家について確定できない (河フリテンでも structural completion 0 でもない、または model を使えない相手がいる) |
+| `KakanWithoutMatchingPon` | 加槓が置き換える既存 Pon を自分の副露から特定できない |
+| `InvalidKakanShape` | 加槓の形が成り立たない (consumed 3枚でない・牌種が揃わない・追加牌が手牌に無い) |
+| `KakanAfterOwnReach` | 自己リーチ後の加槓。自己リーチ状態を推測で `false` へ倒さない |
+| `DaiminkanNotConnected` | 大明槓は production へ接続していない |
 | `EligibleAnkanAfterOwnReach` | 自己リーチ後の暫定 policy。合法性と structural validation だけで採用する |
 | `OwnReachUnknown` | 自席を特定できず、リーチ済みかどうかを判断できない |
 | `ShantenRegresses` | 暗槓後の向聴が通常打牌後より悪い |
@@ -190,15 +242,22 @@ validation だけで採用します。したがって `reason: EligibleAnkanAfte
 まだリーチできる一方で暗槓後はリーチできず、`baseline` が `Reach`、`post-kan` が `Damaten` に
 なります。2つの行の攻撃モードを見比べれば、この食い違いが理由だと分かります。
 
-`OpponentReached` と `NotPush` は自己リーチ前の暗槓だけの理由です。自己リーチ後は降りようが
+`OpponentReached` と `NotPush` は自己リーチ前の暗槓と加槓の理由です。自己リーチ後の暗槓は降りようが
 ないので、他家リーチも押し引きの `Fold` も暗槓を落とす理由にしません。
+
+加槓の判定順は `他家リーチ → 押し引き → 自分のツモ → 加槓の形と元 Pon → 搶槓 hard-safe → 向聴 →
+受け入れ → 攻撃打点` です。搶槓 hard-safe で落ちた候補は `baseline` / `post-kan` を評価しないので
+`-` のままになります。
 
 `MultipleEligibleCandidates` では `selected: none` になり、候補側は `eligible: yes` のまま
 `selected: no` で残ります。合法 action の列挙順を tie-break にしないためです。自己リーチの前後
 どちらでも同じ扱いです。
 
-新ドラ・嶺上牌は評価に含めていないので、どの行にも現れません。条件と今回含めていないものは
-[麻雀 AI の概要](ai/overview.md#カン-kan) を参照してください。
+`MultipleEligibleCandidates` は暗槓・加槓を区別せず、成立した候補が2件以上あればこの理由に
+なります。
+
+新ドラ・嶺上牌・搶槓 risk の推定値は評価に含めていないので、どの行にも現れません。条件と今回
+含めていないものは [麻雀 AI の概要](ai/overview.md#カン-kan) を参照してください。
 
 ## Normal discard と candidates
 

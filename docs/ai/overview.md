@@ -57,9 +57,9 @@ OR kokushi shanten <= 3
 
 カンは鳴き (Chi / Pon) とは別の判断層 (`bot_core::kan_decision`) が持ちます。Ankan / Kakan は自摸番の action、Daiminkan は他家打牌への reaction で、どれも「カン → 未知の嶺上牌 → 打牌」になるため、Chi / Pon の `Call → 鳴き後打牌` 評価モデルをそのまま使えないからです。
 
-**カンが合法かどうかは入力側 (server / scenario) が source of truth** です。リーチ後に暗槓できるか (待ちが変わらないか) も含めて、bot-core 側で判定し直しません。`legal_actions` に `Ankan` が並んでいることだけを合法の根拠にします。
+**カンが合法かどうかは入力側 (server / scenario) が source of truth** です。リーチ後に暗槓できるか (待ちが変わらないか) も含めて、bot-core 側で判定し直しません。`legal_actions` に `Ankan` / `Kakan` が並んでいることだけを合法の根拠にします。
 
-現在 production で選べるのは**暗槓だけ**です。加槓と大明槓は候補として診断に並びますが、必ず `KakanNotConnected` / `DaiminkanNotConnected` の理由で選びません。
+現在 production で選べるのは**暗槓と加槓**です。大明槓は候補として診断に並びますが、必ず `DaiminkanNotConnected` の理由で選びません。加槓の条件は [加槓 (Kakan) v1](#加槓-kakan-v1) に分けて書きます。
 
 ### 自己リーチ前と自己リーチ後で policy を分ける
 
@@ -73,7 +73,9 @@ OR kokushi shanten <= 3
 
 分ける理由は、自己リーチ後には**比較対象が違う**ためです。リーチ後は合法な打牌が現在のツモ牌1枚に限られるので、暗槓しない場合の選択肢は自由な通常打牌ではなく強制ツモ切りになります。したがって「通常打牌をどう選ぶか」という比較そのものが成り立ちません。
 
-カン判断は押し引きの結論にかかわらず通ります。自己リーチ後は降りようがないので、押し引きが `Fold` と判断した局面でもカンを検討する必要があるためです。押し引きを見るのは自己リーチ前の暗槓だけです。
+この分岐は暗槓だけのものです。加槓は元になる Pon があるので通常は自己リーチと両立しませんが、server / context が矛盾した値を持っても自己リーチ状態を推測せず、`Some(true)` は `KakanAfterOwnReach`、`None` は `OwnReachUnknown` として加槓しません。
+
+カン判断は押し引きの結論にかかわらず通ります。自己リーチ後は降りようがないので、押し引きが `Fold` と判断した局面でもカンを検討する必要があるためです。押し引きを見るのは自己リーチ前の暗槓と加槓です。
 
 ## 自己リーチ後の暗槓 (暫定 policy)
 
@@ -185,22 +187,173 @@ AND 成立した暗槓候補がちょうど1件
 
 テンパイ以外を対象外にするのは、1 向聴以降の価値尺度が ExpectedSelfTsumoValue 系になるためです。暗槓後の state は嶺上牌ぶん 1 回多くツモれて、残り自摸機会の元になる山の残枚数も変わるので、暗槓しない側と同じ horizon の値になりません。差を埋める補正を推測で置かない限り比較にならないため、今回は接続していません。テンパイの攻撃打点はロン和了 1 回分の確定打点で、残り自摸機会に依存しないのでこの非対称性を持ちません。
 
-### 複数の暗槓候補
+## 加槓 (Kakan) v1
 
-同じ局面で 2 件以上の暗槓が成立した場合、production では**どれも選びません** (`MultipleEligibleCandidates`)。自己リーチの前後どちらでも同じ扱いです。合法 action の列挙順は server が決めるものなので、AI の tie-break に使いません。候補間を妥当に比較できる既存 comparator がまだ無いので、将来のためだけの独自 ranking も作りません。
+加槓は暗槓と同じ自摸番の action ですが、追加する4枚目を他家に**搶槓**される可能性がある点が決定的に違います。v1 では搶槓リスクを推定せず、搶槓ロンが起こり得ないと hard fact で確定できる局面だけへ限定します。
 
-### 今回評価に含めないもの
+### 加槓の成立条件
 
-次の要素は既存評価だけでは値を確定できないため、係数や推定値を置かずに評価へ含めていません。
+```text
+legal_actions に Kakan がある
+AND own_reached() == Some(false)
+AND 自分のツモを経たと確認できる
+AND 他家にリーチ者がいない
+AND 既存 Push/Pull policy が Push と判定している
+AND 加槓の形が成り立ち、対応する既存 Pon を特定できる
+AND Pon → Kakan の post-state を組み立てられる
+AND 全他家について、自身の河に加槓牌があるか structural completion が 0 であることを確定できる
+AND 加槓後の向聴数 == 加槓しない場合の通常打牌後の向聴数
+AND 加槓後の受け入れ (残枚数・牌種数) >= 同じ通常打牌後の受け入れ
+AND 両側の攻撃打点を既存評価で確定でき、攻撃モードも一致する
+AND 加槓後の攻撃打点 >= 同じ通常打牌後の攻撃打点
+AND 成立したカン候補がちょうど1件
+```
+
+1つでも満たせない場合は加槓しません。向聴・受け入れ・打点の比較規則と「向聴が改善しても採用しない」扱いは暗槓と同じものを共有し、加槓専用の comparator は作りません。
+
+### Pon → Kakan の post-state
+
+加槓は固定面子の**追加**ではなく**置換**です。
+
+| 項目 | 加槓後 |
+| --- | --- |
+| 副露済み面子数 | 前後で変わらない |
+| 元の Pon | 副露 list から消える |
+| Kakan | 元の Pon と同じ位置を置き換える |
+| Kakan の tiles | 元 Pon の3枚 + 追加牌1枚 |
+| Kakan の `called_tile` | 元 Pon の `called_tile` をそのまま保持する |
+| concealed hand | 手牌 + ツモ牌から追加牌1枚だけを取り除く |
+
+`LegalAction::Kakan` の `tile` は追加する4枚目であって、Kakan 面子の `called_tile` ではありません。
+
+```text
+加槓しない: 14枚 → 通常打牌 → 13枚 (副露 N) → 次のツモを待つ
+加槓する  : 14枚 → 加槓     → 13枚 (副露 N) → 嶺上牌を待つ
+```
+
+### 物理牌 (TileId) の扱い
+
+RiichiLab の mjai → `TileId` 変換は黒牌の物理 copy ID を復元できず、同じ牌種の黒牌はすべて同じ代表 ID へ潰れます。そのため `consumed` の `TileId` が既存 Pon の物理牌と完全一致することを validation 条件にせず、牌種 semantics だけを確かめます。
+
+```text
+consumed.len() == 3
+consumed 3枚が同一 TileType
+追加牌も同一 TileType
+対応する既存 Pon が同一 TileType
+追加牌が現在の concealed hand + ツモ牌に存在する
+```
+
+一方、追加牌を実際に手牌から取り除くときは赤5と黒5を区別します。牌種だけで一致させると赤5を誤って槓へ持っていき、手牌に残る赤ドラを取り違えるためです。
+
+### 搶槓 hard-safe
+
+v1 でもっとも重要な条件です。既存 hidden-hand model の通常ロン評価は `chankan = false` を前提にした箇所があるため、
+
+```text
+通常の打牌では役なしでロンできない
+加槓では搶槓 (Chankan) が役として付いてロンできる
+```
+
+という手を取りこぼします。そこで通常打牌用の exact ron-risk をそのまま流用せず、**搶槓 risk を推定しません**。
+
+他家リーチ中は加槓しないので、ここで評価する相手は非リーチの3家です。その全員について、次のどちらかを確定できた場合だけ加槓します。
+
+```text
+A. その player 自身の河に加槓牌がある
+   → 恒常フリテンでロンできない
+   → hard-safe (RiverFuriten)
+
+OR
+
+B. structural hidden-hand model で
+   target_completion_state_weight(加槓牌) == 0
+   → 公開情報と整合する hidden hand の中に、その牌で Standard の和了形を完成できる
+     state 自体が存在しない
+   → hard-safe (NoStructuralCompletion)
+```
+
+1人でもどちらも確定できなければ `KakanChankanNotHardSafe` で加槓しません。
+
+#### structural completion を使う理由
+
+`CompressedStructuralTenpaiHiddenHandStates::target_completion_state_weight()` は、通常ロンの「役があるか」を判定する `R` ではなく、**対象牌を加えたときに Standard の構造的和了形が完成する hidden state の重み**を exact に数えます。したがって
+
+```text
+target_completion_state_weight(加槓牌) == 0
+```
+
+なら、通常ロンで役が付くかにも、搶槓で Chankan が役として追加されるかにも関係なく、そもそもその牌で和了形になれないため搶槓ロン不能と確定できます。heuristic ではなく hard fact です。
+
+| model の結果 | v1 の扱い |
+| --- | --- |
+| `completion == 0` | hard-safe |
+| `completion > 0` | 搶槓されるとは断定しないが、hard-safe とも断定できないので reject |
+| model unavailable / unsupported | unknown として reject |
+
+`completion > 0` を確率へ変換したり、threshold を置いたりしません。
+
+判定順は A が先で、自身の河に加槓牌がある player には exact counting を行いません (`is_discarded_by_player()` が source of truth)。A で確定しない player についてだけ `CompressedStructuralTenpaiHiddenHandStates::new()` を試し、その成功・失敗をそのまま model の対応範囲とします。門前非リーチのように現行 model が対応しない相手は unknown として reject し、Kan 側で新しい hidden-hand model を足したり「副露があるように見えるから使えるはず」という条件を複製したりしません。
+
+次のものは hard-safe の根拠に**使いません**。
+
+| 使わない evidence | 理由 |
+| --- | --- |
+| `temporary_passed` | 「一時フリテンで今はロンできない」だけで、搶槓で新しく役が付く手を排除できない |
+| `same_hand_passed` | 手牌不変の見逃し観測であって hard fact ではない |
+| スジ | 河由来の推測で、ロン不能を確定しない |
+| 壁 / OneChance | 見え枚数由来の推測で、ロン不能を確定しない |
+| 字牌の safety rank | 同上 |
+| 通常 Dahai 用 exact `R/T` (`ron_risk_evidence()` / `ron_capable_state_weight()`) | 役判定を含み、`chankan = false` 前提の経路がある |
+| 「Push だから大丈夫」 | 押し引きの結論は放銃可否の事実ではない |
+
+#### 成立する局面の例
+
+加槓は同じ牌種4枚のうち3枚を Pon、1枚を手牌に持つので、その牌種が他家の河にあり得るのは Pon の元になった打牌をした1人だけです。A だけでは実局面で3家そろわないため、残りは B で確定します。
+
+```text
+player 1: Pon の元になった牌を捨てた本人      → RiverFuriten
+player 2: 非リーチの公開副露者、completion 0  → NoStructuralCompletion
+player 3: 非リーチの公開副露者、completion 0  → NoStructuralCompletion
+→ chankan hard-safe
+```
+
+字牌の加槓のように、その牌種4枚すべてが自分の副露と手牌にある場合、他家は1枚も持てないので字牌待ち (単騎・シャンポン) が構造的に成立せず、公開副露の相手の completion は 0 になります。数牌の加槓では両面搭子などで和了牌にできる hidden state が残るため、多くの局面で `completion > 0` となり reject 側へ倒れます。
+
+### 他家リーチ中
+### 他家リーチ中
+
+```text
+any_opponent_reached() == true
+→ 加槓しない (OpponentReached)
+```
+
+加槓には一発を消す利点がありますが、新しい槓ドラによる相手の打点上昇・一発消去・搶槓 risk・嶺上牌を同じ尺度で比較できる基盤がまだありません。今回はその比較モデルを作りません。
+
+### 加槓後の攻撃打点
+
+加槓後も手は開いたままです。元が Pon なので門前には戻らず、誤って門前手やリーチ手として評価しません。新しい槓ドラの中身は未知なので加槓後の攻撃打点へ加算せず、嶺上牌も暗槓と同じく評価へ含めません。
+
+### 将来: 搶槓 exact model
+
+`WinningContext { chankan: true }` を使った opponent hidden-hand model を整備し、リーチ者・公開副露者・門前非リーチ者のすべてについて搶槓の `R/T` を評価できるようにするのは別タスクです。その時点で「structural completion が1つでもあれば加槓しない」「model を使えない player がいれば加槓しない」という v1 の保守的な制限を緩和します。TODO は `bot_core::kan_decision` に残しています。
+
+## 複数のカン候補
+
+同じ局面で 2 件以上のカン (暗槓・加槓を問わない) が成立した場合、production では**どれも選びません** (`MultipleEligibleCandidates`)。自己リーチの前後どちらでも同じ扱いです。合法 action の列挙順は server が決めるものなので、AI の tie-break に使いません。候補間を妥当に比較できる既存 comparator がまだ無いので、将来のためだけの独自 ranking も作りません。
+
+## 今回評価に含めないもの
+
+次の要素は既存評価だけでは値を確定できないため、係数や推定値を置かずに評価へ含めていません。暗槓と加槓で共通です。
 
 | 要素 | 扱い |
 | --- | --- |
-| 新ドラ | 中身が未知なので、自分の打点にも他家の打点にも加算しない。暗槓側の打点を過小評価する方向なので、比較は暗槓に不利な側へ倒れる |
+| 新ドラ | 中身が未知なので、自分の打点にも他家の打点にも加算しない。カン側の打点を過小評価する方向なので、比較はカンに不利な側へ倒れる |
 | 嶺上牌 | 未知なので、特定の牌を引いた後の state として評価しない。追加ツモ 1 回分も加算しない |
+| 搶槓 risk | 推定しない。加槓は搶槓ロン不能を hard fact で確定できる場合だけに限る。`completion > 0` を確率へ変換しない |
 
 暗刻が暗槓になることで増える符は、既存 scoring が暗槓を含む固定面子から求めた値がそのまま打点比較へ入ります。この層で符を数え直しません。
 
-自己リーチ前に他家リーチ中の暗槓をしないのは、未知の新ドラがリーチ者の打点をどれだけ押し上げるかを既存評価で測れないためです。ExpectedSelfTsumoValue による暗槓前後の比較、複数候補の比較、自己リーチ後の「暗槓 vs 強制ツモ切り」比較、加槓の搶槓リスク、大明槓の reaction モデルは今後の課題として `bot_core::kan_decision` に TODO で残しています。
+自己リーチ前に他家リーチ中の暗槓をしないのは、未知の新ドラがリーチ者の打点をどれだけ押し上げるかを既存評価で測れないためです。ExpectedSelfTsumoValue によるカン前後の比較、複数候補の比較、自己リーチ後の「暗槓 vs 強制ツモ切り」比較、搶槓 exact model、大明槓の reaction モデルは今後の課題として `bot_core::kan_decision` に TODO で残しています。
 
 判断内訳は [Structured diagnostics](../diagnostics.md#kan) の `Kan` section に出ます。
 

@@ -826,13 +826,15 @@ mod tests {
         ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND, ANKAN_IISHANTEN_CONSUMED,
         ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED, ANKAN_REACH_DRAWN,
         ANKAN_REACH_HAND, ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND,
-        OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, TENPAI_DRAWN, ankan_action, ankan_context,
-        ankan_context_with_visible, ankan_dahai_actions, dahai, fold_actions,
-        fold_under_reach_context, opponent_meld_actions, opponent_reach_context,
-        opponent_reach_context_with_visible, pon_meld, suited_reach_context,
-        suited_reach_context_with_reached, tenpai_actions, tenpai_context, tenpai_dahai_actions,
-        tenpai_under_reach_context, tile, unavailable_reach_meld, weak_tenpai_actions,
-        weak_tenpai_under_reach_context, weak_tenpai_under_reach_context_with,
+        KAKAN_FREE_CONSUMED, KAKAN_FREE_DRAWN, KAKAN_FREE_HAND, OPPONENT_MELD_DRAW,
+        OPPONENT_MELD_HAND, TENPAI_DRAWN, ankan_action, ankan_context, ankan_context_with_visible,
+        ankan_dahai_actions, dahai, east_pon_meld, fold_actions, fold_under_reach_context,
+        kakan_action, kakan_hard_safe_context, kakan_table_context, opponent_meld_actions,
+        opponent_nine_sou_pon, opponent_reach_context, opponent_reach_context_with_visible,
+        pon_meld, suited_reach_context, suited_reach_context_with_reached, tenpai_actions,
+        tenpai_context, tenpai_dahai_actions, tenpai_under_reach_context, tile,
+        unavailable_reach_meld, weak_tenpai_actions, weak_tenpai_under_reach_context,
+        weak_tenpai_under_reach_context_with,
     };
     use bot_logic::{
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
@@ -1120,9 +1122,9 @@ mod tests {
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
     }
 
-    // 暗槓判断を production へ接続した後も、Kakan / Daiminkan は選択肢に入れない。
+    // 対応する Pon が無い加槓と、production 未接続の大明槓は選択肢に入れない。
     #[test]
-    fn never_claims_kakan_or_daiminkan() {
+    fn never_claims_an_unbacked_kakan_or_a_daiminkan() {
         let ctx = ankan_context(
             &ANKAN_FREE_HAND,
             ANKAN_FREE_DRAWN,
@@ -1130,7 +1132,7 @@ mod tests {
             Default::default(),
             Some(0),
         );
-        // 合法な暗槓は置かず、加槓・大明槓だけを合法にする。
+        // 合法な暗槓は置かず、対応する Pon が無い加槓と大明槓だけを合法にする。
         let actions: Vec<LegalAction> = ankan_dahai_actions(&ANKAN_FREE_HAND, ANKAN_FREE_DRAWN)
             .into_iter()
             .chain([
@@ -1162,7 +1164,7 @@ mod tests {
                 .map(|candidate| (candidate.kind, candidate.reason))
                 .collect::<Vec<_>>(),
             vec![
-                (KanKind::Kakan, KanDecisionReason::KakanNotConnected),
+                (KanKind::Kakan, KanDecisionReason::KakanWithoutMatchingPon),
                 (KanKind::Daiminkan, KanDecisionReason::DaiminkanNotConnected),
             ]
         );
@@ -1324,6 +1326,86 @@ mod tests {
         let kan = diagnostic.kan.expect("暗槓候補");
         assert_eq!(kan.selected, None);
         assert_eq!(kan.reason, KanDecisionReason::ValueNotEvaluable);
+    }
+
+    // 搶槓ロン不能を全他家について確定でき、向聴・受け入れ・打点のどれも悪化しない局面では
+    // 加槓する。牌136枚の物理制約と矛盾しない局面。
+    #[test]
+    fn selects_a_hard_safe_kakan_when_the_hand_does_not_regress() {
+        let ctx = kakan_hard_safe_context();
+        let actions: Vec<LegalAction> = KAKAN_FREE_HAND
+            .iter()
+            .chain(std::iter::once(&KAKAN_FREE_DRAWN))
+            .map(|&value| dahai(value))
+            .chain([kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        assert_eq!(
+            agent.act(&ctx, &actions),
+            kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED)
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
+        let kan = diagnostic.kan.expect("加槓候補");
+        assert_eq!(
+            kan.selected,
+            Some(kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED))
+        );
+        assert_eq!(kan.reason, KanDecisionReason::EligibleKakanNoRegression);
+    }
+
+    // 搶槓ロン不能を確定できない他家が1人でもいれば、合法でも加槓せず通常打牌を選ぶ。
+    #[test]
+    fn never_claims_a_kakan_that_is_not_chankan_hard_safe() {
+        // player 2 が門前非リーチで、structural hidden-hand model を構築できない局面。
+        let ctx = kakan_table_context(
+            &KAKAN_FREE_HAND,
+            KAKAN_FREE_DRAWN,
+            [
+                vec![east_pon_meld()],
+                vec![],
+                vec![],
+                vec![opponent_nine_sou_pon()],
+            ],
+            [vec![], vec![108], vec![104], vec![]],
+        );
+        let actions: Vec<LegalAction> = KAKAN_FREE_HAND
+            .iter()
+            .chain(std::iter::once(&KAKAN_FREE_DRAWN))
+            .map(|&value| dahai(value))
+            .chain([kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED)])
+            .collect();
+
+        let mut agent = ShantenAgent;
+        let action = agent.act(&ctx, &actions);
+        assert!(
+            matches!(action, LegalAction::Dahai { .. }),
+            "action: {action:?}"
+        );
+
+        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        assert_ne!(diagnostic.selected_source, AgentActionSource::Kan);
+        assert_eq!(
+            diagnostic.kan.map(|kan| kan.reason),
+            Some(KanDecisionReason::KakanChankanNotHardSafe)
+        );
+    }
+
+    // Hora は加槓より優先する。
+    #[test]
+    fn hora_keeps_priority_over_kakan() {
+        let ctx = kakan_hard_safe_context();
+        let actions = vec![
+            kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED),
+            LegalAction::Hora,
+            LegalAction::None,
+        ];
+
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
+        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).kan, None);
     }
 
     // Hora は暗槓より優先する。

@@ -179,6 +179,15 @@ pub enum ScenarioBuildError {
 
     #[error("{field} consumed {tile} is not in hand or the drawn tile")]
     LegalAnkanConsumedNotHeld { field: String, tile: String },
+
+    #[error("{field} ({tile}) needs player_id to read the own melds it upgrades")]
+    LegalKakanWithoutPlayerId { field: String, tile: String },
+
+    #[error("{field} added tile {tile} is not in hand or the drawn tile")]
+    LegalKakanTileNotHeld { field: String, tile: String },
+
+    #[error("{field} added tile {tile} has no matching pon in the own melds")]
+    LegalKakanWithoutPon { field: String, tile: String },
 }
 
 #[cfg(test)]
