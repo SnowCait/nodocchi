@@ -496,6 +496,9 @@ pub enum PushPullReason {
     WeakTenpaiAgainstHighOpenHand,
     /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
     ValuableIishantenAgainstHighOpenHand,
+    /// ExpectedSelfTsumoValue は threshold 未満だが、通常打牌として選択した一向聴打牌が
+    /// 全 High OpenHand target に hard-safe なので押す。High OpenHandThreat 単独に限る。
+    SafeIishantenAgainstHighOpenHand,
     IishantenAgainstHighOpenHand,
     TwoOrMoreShantenAgainstHighOpenHand,
     MissingOffenseAgainstCombinedThreat,
@@ -810,6 +813,9 @@ struct ThreatReasons {
     safe_tenpai: PushPullReason,
     weak_tenpai: PushPullReason,
     valuable_iishanten: PushPullReason,
+    /// 選択した通常打牌が全 threat target に hard-safe な一向聴で押すときの reason。
+    /// High OpenHandThreat 単独だけが持ち、Reach / Combined は `None` でこの例外を使わない。
+    safe_iishanten: Option<PushPullReason>,
     iishanten: PushPullReason,
     two_or_more_shanten: PushPullReason,
 }
@@ -823,6 +829,7 @@ impl ThreatKind {
                 safe_tenpai: PushPullReason::SafeTenpaiAgainstReach,
                 weak_tenpai: PushPullReason::WeakTenpaiAgainstReach,
                 valuable_iishanten: PushPullReason::ValuableIishantenAgainstReach,
+                safe_iishanten: None,
                 iishanten: PushPullReason::IishantenAgainstReach,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstReach,
             },
@@ -832,6 +839,7 @@ impl ThreatKind {
                 safe_tenpai: PushPullReason::SafeTenpaiAgainstHighOpenHand,
                 weak_tenpai: PushPullReason::WeakTenpaiAgainstHighOpenHand,
                 valuable_iishanten: PushPullReason::ValuableIishantenAgainstHighOpenHand,
+                safe_iishanten: Some(PushPullReason::SafeIishantenAgainstHighOpenHand),
                 iishanten: PushPullReason::IishantenAgainstHighOpenHand,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
             },
@@ -841,6 +849,7 @@ impl ThreatKind {
                 safe_tenpai: PushPullReason::SafeTenpaiAgainstCombinedThreat,
                 weak_tenpai: PushPullReason::WeakTenpaiAgainstCombinedThreat,
                 valuable_iishanten: PushPullReason::ValuableIishantenAgainstCombinedThreat,
+                safe_iishanten: None,
                 iishanten: PushPullReason::IishantenAgainstCombinedThreat,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
             },
@@ -946,7 +955,9 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 場合は、打牌後が強いテンパイのときと、一向聴で十分な攻撃価値を確認できたときだけ押し、
 /// それ以外は降りる。ただし通常打牌として選んだテンパイ打牌そのものが現在の全 threat target に
 /// hard-safe な場合、または他家リーチがなく High target がすべて完成面子1つかつ河12枚以上なら、
-/// テンパイの強さを問わず押す。
+/// テンパイの強さを問わず押す。また High OpenHandThreat 単独では、通常打牌として選んだ一向聴
+/// 打牌そのものが全 High target に hard-safe なら、ExpectedSelfTsumoValue が threshold 未満でも
+/// 押す。
 ///
 /// | 自分の状態 | mode |
 /// | --- | --- |
@@ -954,6 +965,7 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// | 強いテンパイ | `Push` |
 /// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 threat target に hard-safe、または終盤1面子 High だけなら `Push`) |
 /// | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
+/// | High OpenHandThreat 単独で、選択打牌が全 High target に hard-safe な一向聴 | `Push` |
 /// | それ以外の一向聴 | `Fold` |
 /// | 二向聴以上 | `Fold` |
 ///
@@ -964,6 +976,12 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 防御と同じ hard-safe が根拠になり、複合ではその両方を全 target について要求する。スジ・
 /// ワンチャンス・model risk の低さは根拠にせず、手牌内の別候補も見ない。終盤1面子 High の例外は
 /// 従来どおり High OpenHandThreat 単独に限る。`Present` の相手は threat に数えない。
+///
+/// 一向聴の選択打牌 hard-safe 例外は High OpenHandThreat 単独だけに適用し、reason は
+/// `SafeIishantenAgainstHighOpenHand` になる。ExpectedSelfTsumoValue の条件を先に評価するので、
+/// 両方を満たす場合は `ValuableIishantenAgainstHighOpenHand` のまま。Reach / Combined の一向聴には
+/// この例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断する。二向聴以上は従来どおり
+/// 降りる。
 ///
 /// 情報不足 (攻撃評価なし / テンパイなのに待ちを構築できない / 恒常フリテンが判定不能) の場合は
 /// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1面子 High だけを相手にしたテンパイの
@@ -976,9 +994,9 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 確定できる場合は、待ち枚数と打点の両方を含む残枚数加重合計だけで判定し、確定できない場合と
 /// 恒常フリテンでは従来の待ち枚数だけの policy を維持する。
 ///
-/// 一向聴の境界は通常打牌選択が既に求めた ExpectedSelfTsumoValue だけで決まる
-/// ([`iishanten_push_expected_self_tsumo_min`])。値を確認できない一向聴は押さず、受け入れや
-/// 一向聴形などへ fallback しない。二向聴以上ではこの値を使わない。
+/// 一向聴の攻撃価値の境界は通常打牌選択が既に求めた ExpectedSelfTsumoValue だけで決まる
+/// ([`iishanten_push_expected_self_tsumo_min`])。値を確認できない一向聴は攻撃価値では押さず、
+/// 受け入れや一向聴形などへ fallback しない。二向聴以上ではこの値を使わない。
 ///
 /// これは説明可能な暫定 policy であり、以下はまだ考慮していない。
 ///
@@ -1035,10 +1053,16 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         return PushPullDecision { mode, reason };
     }
 
-    // 4. 一向聴。攻撃価値を確認できた場合だけ押す。
+    // 4. 一向聴。攻撃価値を確認できた場合と、High OpenHandThreat 単独で選択打牌が全 High
+    // target に hard-safe な場合だけ押す。Reach / Combined は safe_iishanten を持たない。
     if offense.min_shanten_after_discard == 1 {
         let (mode, reason) = if is_valuable_iishanten(&offense, inputs.dealer_reacher) {
             (PushPullMode::Push, reasons.valuable_iishanten)
+        } else if let Some(safe_iishanten) = reasons
+            .safe_iishanten
+            .filter(|_| inputs.selected_normal_discard_hard_safe_for_all_threat_targets)
+        {
+            (PushPullMode::Push, safe_iishanten)
         } else {
             (PushPullMode::Fold, reasons.iishanten)
         };
@@ -4256,30 +4280,42 @@ mod tests {
     }
 
     #[test]
-    fn the_hard_safe_selected_discard_exception_is_not_used_outside_tenpai() {
-        // hard-safe でも打牌後が一向聴・二向聴ならこの例外では押さない。
-        for (shanten, reach_reason, high_reason) in [
-            (
-                1,
-                PushPullReason::IishantenAgainstReach,
-                PushPullReason::IishantenAgainstHighOpenHand,
-            ),
-            (
-                2,
-                PushPullReason::TwoOrMoreShantenAgainstReach,
-                PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
-            ),
+    fn the_hard_safe_selected_discard_exception_is_not_used_outside_tenpai_against_a_reach() {
+        // リーチ者に対しては hard-safe でも打牌後が一向聴・二向聴ならこの例外では押さない。
+        for (shanten, reason) in [
+            (1, PushPullReason::IishantenAgainstReach),
+            (2, PushPullReason::TwoOrMoreShantenAgainstReach),
         ] {
-            let offense = Some(offense(shanten, 20, 5));
             assert_decision(
-                &with_selected_normal_discard_hard_safe(inputs(1, false, offense)),
+                &with_selected_normal_discard_hard_safe(inputs(
+                    1,
+                    false,
+                    Some(offense(shanten, 20, 5)),
+                )),
                 PushPullMode::Fold,
-                reach_reason,
+                reason,
             );
+        }
+    }
+
+    #[test]
+    fn the_hard_safe_selected_discard_exception_is_not_used_at_two_or_more_shanten() {
+        // High OpenHandThreat 単独でも、二向聴以上は hard-safe な通常打牌で押さない。
+        for shanten in [2, 3] {
+            let inputs = with_selected_normal_discard_hard_safe(high_open_hand_inputs(Some(
+                offense(shanten, 20, 5),
+            )));
             assert_high_open_hand_decision(
-                &with_selected_normal_discard_hard_safe(high_open_hand_inputs(offense)),
+                &inputs,
                 PushPullMode::Fold,
-                high_reason,
+                PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            );
+            assert_eq!(
+                two_or_more_shanten_fold(&inputs, shanten),
+                Some(PushPullDecision {
+                    mode: PushPullMode::Fold,
+                    reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+                })
             );
         }
     }
@@ -4753,6 +4789,194 @@ mod tests {
                     reason,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_hard_safe_selected_iishanten_discard_against_a_high_open_hand_pushes() {
+        // ExpectedSelfTsumoValue が threshold 未満、または確認できなくても、選択打牌そのものが
+        // 全 High target に hard-safe なら一向聴を維持して押す。
+        for expected_self_tsumo_value in [Some(self_tsumo_points(999)), None] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(expected_self_tsumo_value);
+            assert!(!is_valuable_iishanten(&offense, false));
+
+            for self_dealer in [false, true] {
+                assert_high_open_hand_decision(
+                    &with_selected_normal_discard_hard_safe(high_open_hand_inputs_with_dealer(
+                        self_dealer,
+                        Some(offense),
+                    )),
+                    PushPullMode::Push,
+                    PushPullReason::SafeIishantenAgainstHighOpenHand,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_hard_safe_selected_iishanten_discard_against_a_high_open_hand_folds() {
+        let offense =
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(999)));
+        let inputs = high_open_hand_inputs(Some(offense));
+        assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_valuable_iishanten_keeps_its_reason_with_a_hard_safe_selected_discard() {
+        // ExpectedSelfTsumoValue の条件を先に評価するので、safe reason には変えない。
+        let offense =
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(1_000)));
+
+        for inputs in [
+            high_open_hand_inputs(Some(offense)),
+            with_selected_normal_discard_hard_safe(high_open_hand_inputs(Some(offense))),
+        ] {
+            assert_high_open_hand_decision(
+                &inputs,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            );
+        }
+    }
+
+    #[test]
+    fn a_hard_safe_selected_iishanten_discard_must_be_safe_for_every_high_open_hand_target() {
+        let mut facts = high_open_hand_facts();
+        let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
+        facts[2] = second[2];
+        let offense =
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(999)));
+
+        let all_safe = with_selected_normal_discard_hard_safe(inputs_with_threats(
+            0,
+            false,
+            false,
+            Some(offense),
+            facts,
+        ));
+        assert_high_open_hand_decision(
+            &all_safe,
+            PushPullMode::Push,
+            PushPullReason::SafeIishantenAgainstHighOpenHand,
+        );
+
+        let one_unsafe = PushPullInputs {
+            selected_normal_discard_hard_safe_for_all_threat_targets: false,
+            ..all_safe
+        };
+        assert_high_open_hand_decision(
+            &one_unsafe,
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_hard_safe_tile_elsewhere_in_the_hand_does_not_push_an_iishanten() {
+        // High target の河にある 5m が手牌内にあっても、選択打牌の 9m が hard-safe でなければ
+        // fact は false で、一向聴の safe-discard 例外は使わない。
+        let context = threat_target_context(
+            [false; 4],
+            [vec![], vec![], vec![tile(16)], vec![]],
+            high_open_hand_melds(),
+        );
+        let facts = player_threat_facts_from_context(&context);
+        assert!(hard_safe_fact(
+            &context,
+            TileType::new(4).unwrap(),
+            tile(17)
+        ));
+
+        let mut inputs = inputs_with_threats(
+            0,
+            false,
+            false,
+            Some(iishanten_offense_with_expected_self_tsumo_value(Some(
+                self_tsumo_points(999),
+            ))),
+            facts,
+        );
+        inputs.selected_normal_discard_hard_safe_for_all_threat_targets =
+            hard_safe_fact(&context, TileType::new(8).unwrap(), tile(33));
+        assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+
+        assert_high_open_hand_decision(
+            &inputs,
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_hard_safe_selected_iishanten_discard_against_a_reach_does_not_push() {
+        // Reach 単独の一向聴は ExpectedSelfTsumoValue の threshold だけで判断する。
+        for (dealer_reacher, points, mode, reason) in [
+            (
+                false,
+                999,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstReach,
+            ),
+            (
+                true,
+                1_499,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstReach,
+            ),
+            (
+                false,
+                1_000,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstReach,
+            ),
+        ] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
+            assert_decision(
+                &with_selected_normal_discard_hard_safe(inputs(1, dealer_reacher, Some(offense))),
+                mode,
+                reason,
+            );
+        }
+    }
+
+    #[test]
+    fn a_hard_safe_selected_iishanten_discard_against_combined_threats_does_not_push() {
+        // リーチ者と High target の全員に hard-safe でも、Combined の一向聴は緩和しない。
+        let mut facts = high_open_hand_facts();
+        facts[2].reached = true;
+
+        for (points, mode, reason) in [
+            (
+                999,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstCombinedThreat,
+            ),
+            (
+                1_000,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstCombinedThreat,
+            ),
+        ] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
+            let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
+                1,
+                false,
+                false,
+                Some(offense),
+                facts,
+            ));
+
+            assert!(inputs.has_combined_threat());
+            assert_decision(&inputs, mode, reason);
         }
     }
 
