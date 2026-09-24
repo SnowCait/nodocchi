@@ -164,7 +164,7 @@ High OpenHandThreat 単独 (他家リーチなし) で、通常打牌 selector �
 
 High OpenHandThreat に分類されていることは要求しますが、それ以上の相手条件 (親か子か、`fixed meld visible han proxy`、classification reason、副露数、河枚数) は加えません。親や visible han の高い High target でも、選択打牌が hard-safe なら押します。2向聴 ExpectedSelfTsumoValue・受け入れ枚数・巡目などの攻撃価値 threshold も加えません。
 
-この判断には選択打牌が必要なので、High OpenHandThreat 単独で最善向聴がちょうど二向聴の局面では [通常打牌選択より前の確定 Fold](#通常打牌選択より前の確定-fold) を行わず、通常打牌選択まで進めます。
+この判断には選択打牌が必要です。ただし最善向聴 cohort に hard-safe な候補が1件もなければ選ばれる打牌も hard-safe になり得ないので、その局面は [通常打牌選択より前の確定 Fold](#通常打牌選択より前の確定-fold) のまま降ります。通常打牌選択まで進むのは cohort に hard-safe な候補がある局面だけで、その場合も押すかどうかは実際に選ばれた打牌の hard-safe fact だけで決まります。
 
 ## 攻撃継続時の確定打点
 
@@ -235,23 +235,34 @@ fixed meld のドラ・赤ドラ・役牌の判定は threat 側と同じ `meld_
 
 ## 通常打牌選択より前の確定 Fold
 
-`Fold` は防御 fallback を通常打牌より優先するので、防御 fallback が action を選べる限り、最終 action は通常打牌選択の結果に依存しません。二向聴以上の `Fold` は 2向聴 ExpectedSelfTsumoValue も受け入れも見ないため、通常打牌選択を先に行っても最終 action には使いません。ただし High OpenHandThreat 単独のちょうど二向聴は、選択打牌が hard-safe かで `Push` / `Fold` が変わるので対象外です。
+`Fold` は防御 fallback を通常打牌より優先するので、防御 fallback が action を選べる限り、最終 action は通常打牌選択の結果に依存しません。二向聴以上の `Fold` は 2向聴 ExpectedSelfTsumoValue も受け入れも見ないため、通常打牌選択を先に行っても最終 action には使いません。ただし High OpenHandThreat 単独のちょうど二向聴は、選択打牌が hard-safe かで `Push` / `Fold` が変わるので、下の cheap gate で `Push` になり得ないと確定できた場合だけ対象にします。
 
 そこで production の `act()` は、次の3つを通常打牌選択より前に確認できた場合だけ、通常打牌選択そのものを省略します。
 
 1. 明確な threat がいる
-2. 合法打牌候補の最善向聴が二向聴以上 (High OpenHandThreat 単独では三向聴以上)
+2. 合法打牌候補の最善向聴が二向聴以上。ただし High OpenHandThreat 単独でちょうど二向聴なら、最善向聴 cohort に全 `High` target へ hard-safe な候補が1件もない
 3. その threat 構成に対応する防御 fallback が action を選べる
 
-向聴数は合法打牌候補の既存の1手評価 (`min_shanten_after_discard`) の最小値だけを使います。選ばれる打牌の向聴数は必ずこの値以上になるので、この値が二向聴以上なら (High OpenHandThreat 単独では三向聴以上なら) 選択結果によらず判断は同じです。2向聴 ExpectedSelfTsumoValue も前方探索も打点計算も行いません。
+向聴数は合法打牌候補の既存の1手評価 (`min_shanten_after_discard`) の最小値だけを使います。打牌比較は向聴数を最初に比べるので、選ばれる打牌は必ず最善向聴と同じ向聴数の候補 (最善向聴 cohort) のどれかです。したがって最善向聴が二向聴以上なら、選択打牌の hard-safe fact で判断が変わる局面を除いて選択結果によらず判断は同じです。
 
-判定は押し引き側の同じ helper を通り、threat の分類も `TwoOrMoreShantenAgainst*` reason も変わりません。二向聴の hard-safe 例外を early 判定で保留するかどうかも、最終判断と同じ helper が決めます。省略しても mode・reason・最終 action・防御 fallback の種別は従来と同じです。
+High OpenHandThreat 単独でちょうど二向聴の場合は、同じ1手評価から最善向聴 cohort の候補を取り出し、それぞれを選んだと仮定したときの hard-safe fact を通常打牌選択後と同じ helper (target 抽出と safety は [防御](defense.md) の source of truth) で確かめます。三向聴以上になる候補は選ばれ得ないので見ません。
+
+| 最善向聴 cohort | early 判定 | 最終判断 |
+| --- | --- | --- |
+| 全 `High` target に hard-safe な候補が1件もない | `Fold` に確定 (`TwoOrMoreShantenAgainstHighOpenHand`)。通常打牌選択を省略 | — |
+| hard-safe な候補が1件以上ある | 保留して通常打牌選択へ進む | 選ばれた打牌が hard-safe なら `Push` (`SafeTwoShantenAgainstHighOpenHand`)、そうでなければ `Fold` |
+
+cohort に hard-safe な候補があることは押す根拠ではありません。selector が別の hard-safe でない二向聴打牌を選べば `Fold` です。
+
+cheap gate も含めて、2向聴 ExpectedSelfTsumoValue も前方探索も打点計算も行いません。
+
+判定は押し引き側の同じ helper を通り、threat の分類も `TwoOrMoreShantenAgainst*` reason も変わりません。二向聴の hard-safe 例外で early 判定を保留するかどうかも、最終判断と同じ helper が決めます。省略しても mode・reason・最終 action・防御 fallback の種別は従来と同じです。
 
 次の局面では省略せず、従来どおり通常打牌選択から判断します。
 
 - 明確な threat がいない
 - 最善向聴が一向聴以下 (テンパイの強いテンパイ例外と一向聴の ExpectedSelfTsumoValue 例外があるため)
-- High OpenHandThreat 単独で最善向聴がちょうど二向聴 ([二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) の判定に選択打牌が必要なため)
+- High OpenHandThreat 単独で最善向聴がちょうど二向聴、かつ最善向聴 cohort に hard-safe な候補がある ([二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) の判定に選択打牌が必要なため)
 - 防御 fallback が action を選べない
 - 構造化診断を構築する経路 (`diagnose()` は通常打牌候補と choice 1/2/3 を表示するため、通常打牌選択そのものを必要とする)
 

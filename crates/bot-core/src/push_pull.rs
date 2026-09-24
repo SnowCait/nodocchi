@@ -2,7 +2,7 @@ use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::combined_defense::{is_safe_against_all_threats, threat_defense_targets};
 use crate::context::GameContext;
 use crate::discard_selection::{
-    concealed_tiles_after_discard, select_best_normal_discard_evaluation,
+    LegalDiscardEvaluations, concealed_tiles_after_discard, select_best_normal_discard_evaluation,
     selected_discard_tenpai_wait_availability, selected_iishanten_forward_metrics_from_context,
 };
 use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
@@ -924,7 +924,8 @@ fn two_or_more_shanten_decision(
 /// 打牌後の向聴数が二向聴以上のとき、選択打牌の hard-safe fact で押せる局面ならその reason。
 ///
 /// High OpenHandThreat 単独かつちょうど二向聴だけが `Some`。Reach / Combined と三向聴以上は
-/// `None` で、選択打牌が hard-safe でも判断は変わらない。
+/// `None` で、選択打牌が hard-safe でも判断は変わらない。`Some` は「選択打牌を見るまで判断
+/// できない」可能性があるというだけで、押す根拠ではない。
 fn safe_two_shanten_reason(
     threat: ThreatKind,
     shanten_after_discard: i8,
@@ -935,29 +936,67 @@ fn safe_two_shanten_reason(
         .filter(|_| shanten_after_discard == SAFE_TWO_SHANTEN)
 }
 
-/// 通常打牌選択より前に、明確な threat と合法打牌候補の最善向聴だけで確定できる Fold 判断。
+/// 通常打牌選択より前に、明確な threat と合法打牌候補の shallow な1手評価だけで確定できる
+/// Fold 判断。
 ///
 /// [`decide_push_pull`] の二向聴以上の段と同じ policy・同じ threat 分類・同じ reason を
 /// [`two_or_more_shanten_decision`] で共有する。押し引き policy を呼び出し側へ写さない
 /// ための入口で、ここでも threat の分類はやり直さない。
 ///
-/// `best_shanten_after_discard` は合法打牌候補の `min_shanten_after_discard` の最小値。実際に
-/// 選ばれる打牌の向聴数はこれ以上になるので、この値が二向聴以上なら選択結果によらず同じ
-/// 判断になる。ただし High OpenHandThreat 単独で最善向聴がちょうど二向聴の場合は、選択打牌が
-/// 全 High target に hard-safe かで `Push` / `Fold` が変わるので、ここでは確定しない。
-///
-/// 明確な threat がいない場合、一向聴以下の候補がある場合、High OpenHandThreat 単独で最善向聴が
-/// ちょうど二向聴の場合は `None`。これらは従来どおり通常打牌選択後に [`decide_push_pull`] が
-/// 判断する。
+/// `legal` は通常打牌選択と共有する合法打牌候補の1手評価。最善向聴と、最善向聴 cohort の各候補が
+/// 選ばれた場合の hard-safe fact だけを見て、前方評価・2向聴 ExpectedSelfTsumoValue・打点計算は
+/// 行わない。hard-safe fact は通常打牌選択後と同じ
+/// [`selected_normal_discard_hard_safe_for_all_threat_targets`] で求め、safety rule を
+/// 書き直さない。判断の分岐は [`early_two_or_more_shanten_fold`] を参照。
 pub(crate) fn two_or_more_shanten_fold(
+    context: &GameContext,
+    inputs: &PushPullInputs,
+    legal: &LegalDiscardEvaluations,
+    legal_actions: &[LegalAction],
+) -> Option<PushPullDecision> {
+    early_two_or_more_shanten_fold(inputs, legal.best_shanten_after_discard()?, || {
+        legal.best_shanten_cohort_discards().any(|discard| {
+            selected_normal_discard_hard_safe_for_all_threat_targets(
+                context,
+                &inputs.player_threats,
+                &inputs.open_hand_threats,
+                Some(discard),
+                legal_actions,
+            )
+        })
+    })
+}
+
+/// [`two_or_more_shanten_fold`] の pure な本体。
+///
+/// `best_shanten_after_discard` は合法打牌候補の `min_shanten_after_discard` の最小値。
+/// production comparator は向聴数を最初に比較するので、選ばれる打牌の向聴数はこの値に等しく、
+/// 選ばれる打牌は最善向聴 cohort のどれかになる。
+///
+/// - 明確な threat がいない、または一向聴以下の候補がある: `None`。通常打牌選択後に
+///   [`decide_push_pull`] が判断する。
+/// - 選択打牌の hard-safe fact で判断が変わらない局面 ([`safe_two_shanten_reason`] が `None`):
+///   選択結果によらず同じ Fold に確定する。
+/// - 選択打牌の hard-safe fact で判断が変わり得る局面 (High OpenHandThreat 単独でちょうど二向聴):
+///   `best_shanten_cohort_has_hard_safe_discard` で最善向聴 cohort に hard-safe な候補があるかを
+///   確かめる。1件もなければ選ばれる打牌も必ず hard-safe ではないので、その fact を `false` と
+///   して同じ Fold に確定する。1件以上あれば、実際に選ばれる打牌を見るまで判断できないので
+///   `None`。候補の存在は押す根拠にならず、押すかどうかは通常打牌選択後に選択打牌そのものの
+///   fact で決まる。
+///
+/// cohort の確認は判断が変わり得る局面でだけ呼ぶ。
+fn early_two_or_more_shanten_fold(
     inputs: &PushPullInputs,
     best_shanten_after_discard: i8,
+    best_shanten_cohort_has_hard_safe_discard: impl FnOnce() -> bool,
 ) -> Option<PushPullDecision> {
     if best_shanten_after_discard < TWO_OR_MORE_SHANTEN {
         return None;
     }
     let threat = threat_kind(inputs)?;
-    if safe_two_shanten_reason(threat, best_shanten_after_discard).is_some() {
+    if safe_two_shanten_reason(threat, best_shanten_after_discard).is_some()
+        && best_shanten_cohort_has_hard_safe_discard()
+    {
         return None;
     }
     Some(two_or_more_shanten_decision(
@@ -4499,30 +4538,71 @@ mod tests {
         );
     }
 
+    // 最善向聴 cohort の hard-safe 候補有無を見たかどうかも返す。
+    fn early_fold_with_cohort(
+        inputs: &PushPullInputs,
+        best_shanten_after_discard: i8,
+        best_shanten_cohort_has_hard_safe_discard: bool,
+    ) -> (Option<PushPullDecision>, bool) {
+        let mut checked = false;
+        let decision = early_two_or_more_shanten_fold(inputs, best_shanten_after_discard, || {
+            checked = true;
+            best_shanten_cohort_has_hard_safe_discard
+        });
+        (decision, checked)
+    }
+
     #[test]
-    fn the_early_fold_waits_for_the_selected_discard_at_two_shanten_against_a_high_open_hand() {
-        // 選択打牌の hard-safe fact で判断が変わるので、通常打牌選択より前には確定しない。
+    fn the_early_fold_waits_for_the_selected_discard_with_a_hard_safe_two_shanten_candidate() {
+        // High OpenHandThreat 単独の二向聴で、最善向聴 cohort に hard-safe な候補がある場合だけ
+        // 選択打牌を見るまで確定しない。
         for inputs in [
             high_open_hand_inputs(None),
             with_selected_normal_discard_hard_safe(high_open_hand_inputs(None)),
         ] {
-            assert_eq!(two_or_more_shanten_fold(&inputs, 2), None);
+            assert_eq!(early_fold_with_cohort(&inputs, 2, true), (None, true));
+        }
+    }
+
+    #[test]
+    fn the_early_fold_is_kept_without_a_hard_safe_two_shanten_candidate() {
+        // 最善向聴 cohort に hard-safe な候補が1件もなければ、選ばれる打牌も hard-safe ではないので
+        // 通常打牌選択より前に Fold を確定する。
+        for inputs in [
+            high_open_hand_inputs(None),
+            with_selected_normal_discard_hard_safe(high_open_hand_inputs(None)),
+        ] {
+            assert_eq!(
+                early_fold_with_cohort(&inputs, 2, false),
+                (
+                    Some(PushPullDecision {
+                        mode: PushPullMode::Fold,
+                        reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+                    }),
+                    true
+                )
+            );
         }
     }
 
     #[test]
     fn the_early_fold_is_kept_at_three_or_more_shanten_against_a_high_open_hand() {
+        // 三向聴以上は選択打牌の hard-safe fact で判断が変わらないので、cohort も見ない。
         for shanten in [3, 4] {
-            for inputs in [
-                high_open_hand_inputs(None),
-                with_selected_normal_discard_hard_safe(high_open_hand_inputs(None)),
-            ] {
+            for cohort_has_hard_safe in [false, true] {
                 assert_eq!(
-                    two_or_more_shanten_fold(&inputs, shanten),
-                    Some(PushPullDecision {
-                        mode: PushPullMode::Fold,
-                        reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
-                    })
+                    early_fold_with_cohort(
+                        &high_open_hand_inputs(None),
+                        shanten,
+                        cohort_has_hard_safe
+                    ),
+                    (
+                        Some(PushPullDecision {
+                            mode: PushPullMode::Fold,
+                            reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+                        }),
+                        false
+                    )
                 );
             }
         }
@@ -4543,14 +4623,17 @@ mod tests {
                 PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
             ),
         ] {
-            for inputs in [inputs, with_selected_normal_discard_hard_safe(inputs)] {
-                for shanten in [2, 3] {
+            for shanten in [2, 3] {
+                for cohort_has_hard_safe in [false, true] {
                     assert_eq!(
-                        two_or_more_shanten_fold(&inputs, shanten),
-                        Some(PushPullDecision {
-                            mode: PushPullMode::Fold,
-                            reason,
-                        })
+                        early_fold_with_cohort(&inputs, shanten, cohort_has_hard_safe),
+                        (
+                            Some(PushPullDecision {
+                                mode: PushPullMode::Fold,
+                                reason,
+                            }),
+                            false
+                        )
                     );
                 }
             }
@@ -4558,23 +4641,45 @@ mod tests {
     }
 
     #[test]
+    fn the_early_fold_does_not_apply_below_two_shanten() {
+        for shanten in [-1, 0, 1] {
+            for cohort_has_hard_safe in [false, true] {
+                assert_eq!(
+                    early_fold_with_cohort(
+                        &high_open_hand_inputs(None),
+                        shanten,
+                        cohort_has_hard_safe
+                    ),
+                    (None, false)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_early_fold_and_the_final_decision_share_the_two_or_more_shanten_policy() {
-        // early Fold が確定する局面では、通常打牌選択後の判断も選択打牌の hard-safe fact に
-        // よらず同じ Fold になる。
+        // early Fold が確定する局面では、通常打牌選択後の判断も同じ Fold になる。cohort に
+        // hard-safe 候補がない High OpenHandThreat 単独の二向聴では、選ばれる打牌も hard-safe
+        // ではない。
         let mut combined_facts = high_open_hand_facts();
         combined_facts[2].reached = true;
 
-        for (base, shanten) in [
-            (inputs(1, false, None), 2),
-            (inputs(1, false, None), 3),
+        for (base, shanten, cohort_has_hard_safe, selected_hard_safe) in [
+            (inputs(1, false, None), 2, true, vec![false, true]),
+            (inputs(1, false, None), 3, true, vec![false, true]),
             (
                 inputs_with_threats(1, false, false, None, combined_facts),
                 2,
+                true,
+                vec![false, true],
             ),
-            (high_open_hand_inputs(None), 3),
+            (high_open_hand_inputs(None), 3, true, vec![false, true]),
+            (high_open_hand_inputs(None), 2, false, vec![false]),
         ] {
-            let early = two_or_more_shanten_fold(&base, shanten).expect("early Fold が確定する");
-            for hard_safe in [false, true] {
+            let early = early_fold_with_cohort(&base, shanten, cohort_has_hard_safe)
+                .0
+                .expect("early Fold が確定する");
+            for hard_safe in selected_hard_safe {
                 let inputs = PushPullInputs {
                     offense: Some(offense(shanten, 20, 5)),
                     selected_normal_discard_hard_safe_for_all_threat_targets: hard_safe,
