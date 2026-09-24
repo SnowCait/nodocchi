@@ -53,7 +53,17 @@
 | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainst*` |
 | High OpenHandThreat 単独で、選択した一向聴打牌が全 High target に hard-safe | `Push` | `SafeIishantenAgainstHighOpenHand` |
 | それ以外の一向聴 | `Fold` | `IishantenAgainst*` |
-| 二向聴以上 | `Fold` | `TwoOrMoreShantenAgainst*` |
+| High OpenHandThreat 単独で、選択したちょうど二向聴の打牌が全 High target に hard-safe | `Push` | `SafeTwoShantenAgainstHighOpenHand` |
+| それ以外の二向聴以上 | `Fold` | `TwoOrMoreShantenAgainst*` |
+
+向聴数ごとの hard-safe 例外をまとめると次のとおりです。いずれも根拠は通常打牌 selector が選んだ打牌そのものの hard-safe fact で、相手の推定打点ではありません。
+
+| 打牌後 | 選択打牌が全 threat target に hard-safe なときの扱い |
+| --- | --- |
+| テンパイ | Riichi / High OpenHandThreat / Combined のすべてで `Push` ([選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外)) |
+| 一向聴 | High OpenHandThreat 単独だけ `Push` ([一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外)) |
+| 二向聴 | High OpenHandThreat 単独だけ `Push` ([二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外)) |
+| 三向聴以上 | `Fold` |
 
 `PushPullMode` には `Push` / `Neutral` / `Fold` がありますが、現在の暫定 policy は `Neutral` を返しません。一向聴では Reach できないため `Push` と `Neutral` の action 順序に実質的な違いがなく、一向聴の判定も `Push` / `Fold` の二値です。`Neutral` は action ordering と、攻撃価値と safety を同時に比較する将来の中間モードのために残っています。
 
@@ -76,7 +86,7 @@
 
 自分が親かどうかでは threshold を変えません。一向聴の受け入れや簡易打点 proxy は diagnostics に残しますが、現在の Push/Pull 判定には使いません。
 
-選択打牌の hard-safe 例外と終盤1面子 High の例外はテンパイが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値) と、High OpenHandThreat 単独に限った [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外)、二向聴以上は従来どおり `Fold` です。終盤1面子の例外は High target に完成面子2つ以上の相手が1人でも含まれる場合は使いません。面子数は classification と同じく暗槓を含めて数えるので、公開副露1つだけの相手と暗槓1つだけの相手はどちらもこの例外の対象で、公開副露と暗槓を1つずつ持つような完成面子2つの相手は対象外です。終盤1面子の例外は Riichi threat、Combined threat では使わず、従来の strong-tenpai threshold を維持します。
+選択打牌の hard-safe 例外と終盤1面子 High の例外はテンパイが対象です。一向聴は下の [一向聴の攻撃価値](#一向聴の攻撃価値) と、High OpenHandThreat 単独に限った [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外)、二向聴は High OpenHandThreat 単独に限った [二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) だけで、それ以外の二向聴以上は従来どおり `Fold` です。終盤1面子の例外は High target に完成面子2つ以上の相手が1人でも含まれる場合は使いません。面子数は classification と同じく暗槓を含めて数えるので、公開副露1つだけの相手と暗槓1つだけの相手はどちらもこの例外の対象で、公開副露と暗槓を1つずつ持つような完成面子2つの相手は対象外です。終盤1面子の例外は Riichi threat、Combined threat では使わず、従来の strong-tenpai threshold を維持します。
 
 ## 選択打牌の hard-safe 例外
 
@@ -105,7 +115,7 @@ reason は threat の種類ごとに分かれるので、diagnostics からど�
 
 - 手牌内に安全牌があるだけでは適用しません。通常打牌 selector が実際に選んだ打牌そのものが hard-safe である必要があります。テンパイ維持打牌以外の別候補を探索して `Push` にすることもありません。
 - hard-safe ではないスジ・ハーフスジ・ワンチャンス・exact model risk の低さは根拠にしません。
-- 打牌後がテンパイの場合が対象です。一向聴は High OpenHandThreat 単独だけ [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外) があり、二向聴以上には広げません。
+- 打牌後がテンパイの場合が対象です。一向聴と二向聴は High OpenHandThreat 単独だけ [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外) / [二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) があり、三向聴以上には広げません。
 - `post_reach_passed` や一時通過牌の扱いは、各 threat の防御が既に hard-safe としている semantics をそのまま使います。
 
 ## 一向聴の攻撃価値
@@ -123,7 +133,7 @@ ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値
 
 値を確認できない場合 (材料が揃わない局面、打点を確定できない枝がある候補) は `Fold` です。受け入れ枚数・一向聴形・weighted tenpai wait・weighted prospective value・簡易打点 proxy・ドラ枚数へは fallback しません。一向聴から押すのはリスクが高いので、十分な攻撃価値を確認できた場合だけ押す保守的な policy にしています。
 
-二向聴以上ではこの値を使わず、従来どおり `Fold` します。
+二向聴以上ではこの値を使いません。
 
 ## 一向聴の選択打牌 hard-safe 例外
 
@@ -137,7 +147,24 @@ High OpenHandThreat 単独 (他家リーチなし) の一向聴では、Expected
 
 ExpectedSelfTsumoValue の条件を先に評価するので、両方を満たす場合は `ValuableIishantenAgainstHighOpenHand` のままです。hard-safe の判定はテンパイの [選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外) と同じ fact をそのまま使い、手牌内の別の安全牌は根拠にしません。新しい threshold・倍率・受け入れ枚数・一向聴形の条件も加えません。
 
-Riichi threat と Combined threat の一向聴にはこの例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断します。二向聴以上も従来どおり `Fold` です。
+Riichi threat と Combined threat の一向聴にはこの例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断します。二向聴は下の [二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) を参照してください。
+
+## 二向聴の選択打牌 hard-safe 例外
+
+High OpenHandThreat 単独 (他家リーチなし) で、通常打牌 selector が選んだ打牌後がちょうど二向聴、かつその打牌そのものが全 `High` target に hard-safe なら `Push` します。reason は `SafeTwoShantenAgainstHighOpenHand` です。[一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外) を二向聴へ限定して広げたものです。
+
+| 条件 | mode | reason |
+| --- | --- | --- |
+| High OpenHandThreat 単独で、選択したちょうど二向聴の打牌が全 High target に hard-safe | `Push` | `SafeTwoShantenAgainstHighOpenHand` |
+| High OpenHandThreat 単独で、選択打牌が hard-safe でない二向聴 | `Fold` | `TwoOrMoreShantenAgainstHighOpenHand` |
+| High OpenHandThreat 単独の三向聴以上 (hard-safe でも) | `Fold` | `TwoOrMoreShantenAgainstHighOpenHand` |
+| Riichi threat / Combined threat の二向聴以上 (hard-safe でも) | `Fold` | `TwoOrMoreShantenAgainst*` |
+
+`Push` の根拠は相手の推定打点ではなく、「今この巡に production が切る牌では全 High target にロンされない」という hard-safe fact だけです。hard-safe の判定はテンパイの [選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外) と同じ fact をそのまま使い、手牌内の別の安全牌やスジ・ワンチャンス・exact model risk の低さは根拠にしません。High target が複数いる場合は全員に hard-safe である必要があります。
+
+High OpenHandThreat に分類されていることは要求しますが、それ以上の相手条件 (親か子か、`fixed meld visible han proxy`、classification reason、副露数、河枚数) は加えません。親や visible han の高い High target でも、選択打牌が hard-safe なら押します。2向聴 ExpectedSelfTsumoValue・受け入れ枚数・巡目などの攻撃価値 threshold も加えません。
+
+この判断には選択打牌が必要なので、High OpenHandThreat 単独で最善向聴がちょうど二向聴の局面では [通常打牌選択より前の確定 Fold](#通常打牌選択より前の確定-fold) を行わず、通常打牌選択まで進めます。
 
 ## 攻撃継続時の確定打点
 
@@ -208,22 +235,23 @@ fixed meld のドラ・赤ドラ・役牌の判定は threat 側と同じ `meld_
 
 ## 通常打牌選択より前の確定 Fold
 
-`Fold` は防御 fallback を通常打牌より優先するので、防御 fallback が action を選べる限り、最終 action は通常打牌選択の結果に依存しません。二向聴以上の `Fold` は 2向聴 ExpectedSelfTsumoValue も受け入れも見ないため、通常打牌選択を先に行っても最終 action には使いません。
+`Fold` は防御 fallback を通常打牌より優先するので、防御 fallback が action を選べる限り、最終 action は通常打牌選択の結果に依存しません。二向聴以上の `Fold` は 2向聴 ExpectedSelfTsumoValue も受け入れも見ないため、通常打牌選択を先に行っても最終 action には使いません。ただし High OpenHandThreat 単独のちょうど二向聴は、選択打牌が hard-safe かで `Push` / `Fold` が変わるので対象外です。
 
 そこで production の `act()` は、次の3つを通常打牌選択より前に確認できた場合だけ、通常打牌選択そのものを省略します。
 
 1. 明確な threat がいる
-2. 合法打牌候補の最善向聴が二向聴以上
+2. 合法打牌候補の最善向聴が二向聴以上 (High OpenHandThreat 単独では三向聴以上)
 3. その threat 構成に対応する防御 fallback が action を選べる
 
-向聴数は合法打牌候補の既存の1手評価 (`min_shanten_after_discard`) の最小値だけを使います。選ばれる打牌の向聴数は必ずこの値以上になるので、この値が二向聴以上なら選択結果によらず判断は同じです。2向聴 ExpectedSelfTsumoValue も前方探索も打点計算も行いません。
+向聴数は合法打牌候補の既存の1手評価 (`min_shanten_after_discard`) の最小値だけを使います。選ばれる打牌の向聴数は必ずこの値以上になるので、この値が二向聴以上なら (High OpenHandThreat 単独では三向聴以上なら) 選択結果によらず判断は同じです。2向聴 ExpectedSelfTsumoValue も前方探索も打点計算も行いません。
 
-判定は押し引き側の同じ helper を通り、threat の分類も `TwoOrMoreShantenAgainst*` reason も変わりません。省略しても mode・reason・最終 action・防御 fallback の種別は従来と同じです。
+判定は押し引き側の同じ helper を通り、threat の分類も `TwoOrMoreShantenAgainst*` reason も変わりません。二向聴の hard-safe 例外を early 判定で保留するかどうかも、最終判断と同じ helper が決めます。省略しても mode・reason・最終 action・防御 fallback の種別は従来と同じです。
 
 次の局面では省略せず、従来どおり通常打牌選択から判断します。
 
 - 明確な threat がいない
 - 最善向聴が一向聴以下 (テンパイの強いテンパイ例外と一向聴の ExpectedSelfTsumoValue 例外があるため)
+- High OpenHandThreat 単独で最善向聴がちょうど二向聴 ([二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) の判定に選択打牌が必要なため)
 - 防御 fallback が action を選べない
 - 構造化診断を構築する経路 (`diagnose()` は通常打牌候補と choice 1/2/3 を表示するため、通常打牌選択そのものを必要とする)
 
