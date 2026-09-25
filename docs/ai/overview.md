@@ -361,7 +361,7 @@ any_opponent_reached() == true
 
 - [打牌選択](discard-selection.md): shanten、Acceptance、1向聴・2向聴以上の牌効率指標、lookahead
 - [押し引きと threat](push-pull.md): reach threat、OpenHandThreat、combined threat、Push / Neutral / Fold
-- [防御](defense.md): リーチ、High OpenHandThreat、複合 threat に対する safety と fallback
+- [防御](defense.md): リーチ、actionable OpenHandThreat (`Caution` / `Danger`)、複合 threat に対する safety と fallback
 - [フリテン](furiten.md): 恒常フリテン、履歴依存フリテン、structural / live waits
 - [手牌評価](hand-value.md): 完成手の構造解析、役・役満の成立判定、通常役の翻数、符、ドラの bonus 翻、通常手の基本点と limit、ロン / ツモの支払点、確定した `HandValue`。本場・供託・責任払い (包) は未実装
 - [Structured diagnostics](../diagnostics.md): 上記判断が出力のどこに現れるか
