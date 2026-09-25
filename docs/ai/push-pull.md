@@ -46,7 +46,7 @@
 
 `Caution` と `Danger` はどちらも actionable OpenHandThreat です。判定は `OpenHandThreatAssessment::is_actionable()` (`level == Caution || level == Danger`) が唯一の source of truth で、押し引き・OpenHand Defense・Combined Defense・hard-safe target の収集はすべてこの predicate を共有します。`Present` / `None` と classification 対象外の席は actionable ではありません。
 
-`Caution` / `Danger` の分割は、Push/Pull pressure を段階化するための classification の整理です。分割前の `High` と同じ集合を `Caution` と `Danger` に分けたもので、production policy が両者を区別するのは Push/Pull のテンパイ判定だけです ([Caution-only のテンパイ](#caution-only-のテンパイ))。Defense fallback、Combined Defense target、hard-safe target、非テンパイ (一向聴以上) の Push/Pull、Reach / Combined threat の Push/Pull は `Caution` と `Danger` を区別しません。
+`Caution` / `Danger` の分割は、Push/Pull pressure を段階化するための classification の整理です。分割前の `High` と同じ集合を `Caution` と `Danger` に分けたもので、production policy が両者を区別するのは Push/Pull のテンパイ判定 ([Caution-only のテンパイ](#caution-only-のテンパイ)) と一向聴の ExpectedSelfTsumoValue threshold ([一向聴の攻撃価値](#一向聴の攻撃価値)) だけです。Defense fallback、Combined Defense target、hard-safe target、一向聴の hard-safe 例外、二向聴以上の Push/Pull、Reach / Combined threat の Push/Pull は `Caution` と `Danger` を区別しません。
 
 この classification 自体は Push/Pull policy とは分離されています。したがって、完成面子1つかつ河12枚以上の相手は `Caution` で、actionable OpenHandThreat として扱います。そのうえで、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが現在の全 threat target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します ([選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外))。
 
@@ -73,11 +73,11 @@ Caution-only で通常打牌後がテンパイ (`min_shanten_after_discard <= 0`
 
 | 局面 | テンパイの扱い | 非テンパイ (一向聴以上) の扱い |
 | --- | --- | --- |
-| Caution-only | `Push` | 現行 policy (`Caution` / `Danger` 共通) |
+| Caution-only | `Push` | 一向聴の ExpectedSelfTsumoValue threshold だけ 750 点。それ以外は現行 policy (`Caution` / `Danger` 共通) |
 | actionable target に `Danger` を含む | 現行の strong-tenpai / hard-safe policy | 現行 policy (`Caution` / `Danger` 共通) |
 | Riichi threat / Combined threat | 現行 policy (Caution-only の例外なし) | 現行 policy |
 
-この例外は actionable OpenHandThreat 単独に限り、Riichi threat と Combined threat には適用しません。リーチ者と `Caution` の相手が同時にいる局面は Combined threat の現行 policy のままです。一向聴・二向聴・三向聴以上も `Caution` だからという理由では押さず、下の表のとおり `Caution` / `Danger` 共通の policy を使います。
+この例外は actionable OpenHandThreat 単独に限り、Riichi threat と Combined threat には適用しません。リーチ者と `Caution` の相手が同時にいる局面は Combined threat の現行 policy のままです。一向聴は [一向聴の攻撃価値](#一向聴の攻撃価値) の threshold だけが Caution-only で緩くなり、hard-safe 例外や reason は `Caution` / `Danger` 共通です。二向聴・三向聴以上は `Caution` だからという理由では押さず、下の表のとおり `Caution` / `Danger` 共通の policy を使います。
 
 ## offense state と mode
 
@@ -161,12 +161,18 @@ reason は threat の種類ごとに分かれるので、diagnostics からど�
 
 明確な threat がある一向聴では、[打牌選択](discard-selection.md)が既に求めている `expected self-tsumo value` だけを見ます。押し引き側で前方探索も打点集計も受け入れ集計も行わず、選んだ打牌の集計値をそのまま比較します。
 
-| 他家リーチ者に親 | 押すために要求する ExpectedSelfTsumoValue |
+| threat | 押すために要求する ExpectedSelfTsumoValue |
 | --- | --- |
-| 含まれない | 1,000 点以上 |
-| 含まれる | 1,500 点以上 |
+| actionable OpenHandThreat 単独で Caution-only | 750 点以上 |
+| actionable OpenHandThreat 単独で `Danger` を含む | 1,000 点以上 |
+| Riichi threat / Combined threat (親リーチなし) | 1,000 点以上 |
+| 親リーチを含む Riichi threat / Combined threat | 1,500 点以上 |
 
 threshold は inclusive です。親リーチのときだけ、テンパイと同じく基本 threshold の 1.5 倍を要求します。リーチ者が複数いても、actionable OpenHandThreat との複合でも、親が含まれなければ 1,000 点のままです。自分が親かどうかでは変えません。
+
+他家リーチがなく actionable target がすべて `Caution` の局面 ([Caution-only](#caution-only-のテンパイ)) だけ、`Danger` より危険度が低いので 750 点に緩めます。Caution-only の判定は `has_only_caution_open_hand_threats()` を使い、面子数・河枚数・reason から組み立て直しません。`Reach + Caution` は Combined threat なので 750 点を使いません。reason は threshold に関係なく `ValuableIishantenAgainstHighOpenHand` で、threshold 未満のときの [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外) の優先順位も変わりません。
+
+threshold の選択は `iishanten_push_expected_self_tsumo_min()` の1か所にまとめ、押し引き判定と debug log の `offense_iishanten_push_expected_self_tsumo_min` は同じ値を使います。
 
 ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値系なので、同じ threshold で比較しません。
 

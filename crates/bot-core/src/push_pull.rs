@@ -207,12 +207,21 @@ fn tenpai_push_weighted_total_min(dealer_reacher: bool) -> u64 {
 /// [[`SELF_TSUMO_VALUE_SCALE`]]。inclusive。
 ///
 /// テンパイの [`tenpai_push_weighted_total_min`] とは別の数値系なので、残枚数加重合計とは
-/// 比較しない。他家リーチ者に親が含まれるかだけで決まり、リーチ者数や actionable OpenHandThreat
-/// との複合では変えない。`dealer_reacher` は [`PushPullInputs::dealer_reacher`] が source of
-/// truth で、ここで親リーチを判定し直さない。
-fn iishanten_push_expected_self_tsumo_min(dealer_reacher: bool) -> u64 {
-    if dealer_reacher {
+/// 比較しない。他家リーチ者に親が含まれれば親リーチの threshold、他家リーチがなく actionable
+/// target がすべて `Caution` なら Caution-only の threshold、それ以外は基本 threshold になる。
+/// リーチ者数や actionable OpenHandThreat との複合では変えないので、`Reach + Caution` の
+/// Combined は Caution-only の threshold を使わない。`dealer_reacher` は
+/// [`PushPullInputs::dealer_reacher`]、Caution 判定は
+/// [`PushPullInputs::has_only_caution_open_hand_threats`] が source of truth で、ここで判定し直さない。
+///
+/// 押し引き判定と debug log はどちらもこの関数だけで threshold を得る。
+fn iishanten_push_expected_self_tsumo_min(inputs: &PushPullInputs) -> u64 {
+    if inputs.dealer_reacher {
         DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
+    } else if threat_kind(inputs) == Some(ThreatKind::ActionableOpenHand)
+        && inputs.has_only_caution_open_hand_threats()
+    {
+        CAUTION_ONLY_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
     } else {
         IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
     }
@@ -547,6 +556,11 @@ const IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_000 * SELF_TSUMO_VALUE_SCA
 // リーチ者が複数いる場合や actionable OpenHandThreat との複合というだけでは倍率を増やさない。
 const DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_500 * SELF_TSUMO_VALUE_SCALE;
 
+// 他家リーチがなく actionable OpenHandThreat がすべて `Caution` の場合に一向聴から押すために要求する
+// ExpectedSelfTsumoValue [SELF_TSUMO_VALUE_SCALE]。inclusive。`Caution` は `Danger` より放銃時の
+// 失点・危険度が低いので、基本 threshold より緩める。
+const CAUTION_ONLY_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 750 * SELF_TSUMO_VALUE_SCALE;
+
 /// `GameContext` から押し引き判定の入力を構築する。
 ///
 /// リーチ情報は `GameContext` から構築した脅威 facts
@@ -785,9 +799,10 @@ fn should_evaluate_tenpai_offense_value(
         && wait.is_some_and(|wait| wait.permanent_furiten == PermanentFuriten::No)
 }
 
-/// 明確な threat の種類。reason の系列を選ぶためだけに使う。
+/// 明確な threat の種類。reason の系列を選ぶために使う。
 ///
-/// 判定境界は3種類とも同じで、種類によって押し引きの条件は変わらない。
+/// 判定境界は原則3種類とも同じ。例外は actionable OpenHandThreat 単独かつ target がすべて
+/// `Caution` の場合のテンパイ例外と一向聴 threshold だけ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThreatKind {
     /// 他家リーチだけがいる。
@@ -1021,10 +1036,10 @@ fn is_strong_tenpai(offense: &PushPullOffenseState, dealer_reacher: bool) -> boo
 ///
 /// 値を確認できない場合は保守的に押さない。受け入れ・一向聴形・weighted tenpai wait・
 /// weighted prospective value・簡易打点 proxy へ fallback しない。
-fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -> bool {
+fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs) -> bool {
     offense
         .iishanten_expected_self_tsumo_value()
-        .is_some_and(|value| value >= iishanten_push_expected_self_tsumo_min(dealer_reacher))
+        .is_some_and(|value| value >= iishanten_push_expected_self_tsumo_min(inputs))
 }
 
 /// 押し引きを判定する pure な暫定 helper。
@@ -1079,7 +1094,8 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 恒常フリテンでは従来の待ち枚数だけの policy を維持する。
 ///
 /// 一向聴の攻撃価値の境界は通常打牌選択が既に求めた ExpectedSelfTsumoValue だけで決まる
-/// ([`iishanten_push_expected_self_tsumo_min`])。値を確認できない一向聴は攻撃価値では押さず、
+/// ([`iishanten_push_expected_self_tsumo_min`])。他家リーチがなく actionable target がすべて
+/// `Caution` の場合だけ基本 threshold より緩い値を使う。値を確認できない一向聴は攻撃価値では押さず、
 /// 受け入れや一向聴形などへ fallback しない。二向聴以上ではこの値を使わない。
 ///
 /// これは説明可能な暫定 policy であり、以下はまだ考慮していない。
@@ -1140,7 +1156,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     // 4. 一向聴。攻撃価値を確認できた場合と、actionable OpenHandThreat 単独で選択打牌が全 actionable
     // target に hard-safe な場合だけ押す。Reach / Combined は safe_iishanten を持たない。
     if offense.min_shanten_after_discard == 1 {
-        let (mode, reason) = if is_valuable_iishanten(&offense, inputs.dealer_reacher) {
+        let (mode, reason) = if is_valuable_iishanten(&offense, inputs) {
             (PushPullMode::Push, reasons.valuable_iishanten)
         } else if let Some(safe_iishanten) = reasons
             .safe_iishanten
@@ -1218,7 +1234,7 @@ pub(crate) fn log_push_pull_decision(
         offense_iishanten_weighted_tenpai_wait_remaining = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_remaining),
         offense_iishanten_weighted_tenpai_wait_type_count = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_type_count),
         offense_iishanten_expected_self_tsumo_value = ?inputs.offense.and_then(|offense| offense.iishanten_expected_self_tsumo_value()),
-        offense_iishanten_push_expected_self_tsumo_min = iishanten_push_expected_self_tsumo_min(inputs.dealer_reacher),
+        offense_iishanten_push_expected_self_tsumo_min = iishanten_push_expected_self_tsumo_min(inputs),
         early_fold_best_shanten_after_discard = ?early_fold_best_shanten_after_discard,
         normal_discard = ?normal_discard,
         "push-pull decision",
@@ -4707,7 +4723,7 @@ mod tests {
     #[test]
     fn caution_and_danger_share_the_actionable_open_hand_policy() {
         let not_valuable_iishanten =
-            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(999)));
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(749)));
         let cases = [
             (
                 None,
@@ -5177,7 +5193,7 @@ mod tests {
     #[test]
     fn non_tenpai_against_only_caution_keeps_the_current_policy() {
         let not_valuable_iishanten =
-            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(999)));
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(749)));
         for (offense, hard_safe, mode, reason) in [
             (
                 not_valuable_iishanten,
@@ -5228,6 +5244,238 @@ mod tests {
             };
             assert!(inputs.has_only_caution_open_hand_threats());
             assert_actionable_open_hand_decision(&inputs, mode, reason);
+        }
+    }
+
+    fn iishanten_with_points(points: u64) -> PushPullOffenseState {
+        iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)))
+    }
+
+    #[test]
+    fn iishanten_against_only_caution_uses_the_lower_expected_self_tsumo_threshold() {
+        for (points, hard_safe, mode, reason) in [
+            (
+                749,
+                false,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            ),
+            (
+                749,
+                true,
+                PushPullMode::Push,
+                PushPullReason::SafeIishantenAgainstHighOpenHand,
+            ),
+            (
+                750,
+                false,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            ),
+            (
+                750,
+                true,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            ),
+            (
+                999,
+                false,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            ),
+            (
+                1_000,
+                false,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            ),
+        ] {
+            for (level, facts) in caution_and_danger_facts() {
+                if level != OpenHandThreatLevel::Caution {
+                    continue;
+                }
+                let inputs = PushPullInputs {
+                    selected_normal_discard_hard_safe_for_all_threat_targets: hard_safe,
+                    ..inputs_with_threats(
+                        0,
+                        false,
+                        false,
+                        Some(iishanten_with_points(points)),
+                        facts,
+                    )
+                };
+                assert!(inputs.has_only_caution_open_hand_threats(), "{facts:?}");
+                assert_actionable_open_hand_decision(&inputs, mode, reason);
+            }
+        }
+    }
+
+    #[test]
+    fn iishanten_against_a_danger_open_hand_keeps_the_base_expected_self_tsumo_threshold() {
+        let mut caution_and_danger = late_one_meld_caution_facts();
+        caution_and_danger[2] = open_meld_facts_of(2, 3, [false; 4], Some(0))[2];
+        let mut danger_facts: Vec<_> = caution_and_danger_facts()
+            .into_iter()
+            .filter(|(level, _)| *level == OpenHandThreatLevel::Danger)
+            .map(|(_, facts)| facts)
+            .collect();
+        danger_facts.push(caution_and_danger);
+
+        for (points, mode, reason) in [
+            (
+                750,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            ),
+            (
+                999,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            ),
+            (
+                1_000,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstHighOpenHand,
+            ),
+        ] {
+            for facts in danger_facts.iter().copied() {
+                let inputs = inputs_with_threats(
+                    0,
+                    false,
+                    false,
+                    Some(iishanten_with_points(points)),
+                    facts,
+                );
+                assert!(!inputs.has_only_caution_open_hand_threats(), "{facts:?}");
+                assert_actionable_open_hand_decision(&inputs, mode, reason);
+            }
+        }
+    }
+
+    #[test]
+    fn iishanten_against_a_reach_and_a_caution_keeps_the_combined_threshold() {
+        for (level, mut facts) in caution_and_danger_facts() {
+            if level != OpenHandThreatLevel::Caution {
+                continue;
+            }
+            facts[2].reached = true;
+            for (points, mode, reason) in [
+                (
+                    750,
+                    PushPullMode::Fold,
+                    PushPullReason::IishantenAgainstCombinedThreat,
+                ),
+                (
+                    999,
+                    PushPullMode::Fold,
+                    PushPullReason::IishantenAgainstCombinedThreat,
+                ),
+                (
+                    1_000,
+                    PushPullMode::Push,
+                    PushPullReason::ValuableIishantenAgainstCombinedThreat,
+                ),
+            ] {
+                let inputs = inputs_with_threats(
+                    1,
+                    false,
+                    false,
+                    Some(iishanten_with_points(points)),
+                    facts,
+                );
+                assert!(inputs.has_only_caution_open_hand_threats(), "{facts:?}");
+                assert_combined_threat_decision(&inputs, mode, reason);
+
+                // hard-safe でも Combined の一向聴には safe_iishanten の例外がない。
+                assert_combined_threat_decision(
+                    &with_selected_normal_discard_hard_safe(inputs),
+                    mode,
+                    reason,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn iishanten_against_a_dealer_reach_and_a_caution_keeps_the_dealer_threshold() {
+        let mut facts = late_one_meld_caution_facts();
+        facts[2].reached = true;
+        facts[2].is_dealer = Some(true);
+        for (points, mode, reason) in [
+            (
+                1_499,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstCombinedThreat,
+            ),
+            (
+                1_500,
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstCombinedThreat,
+            ),
+        ] {
+            let inputs =
+                inputs_with_threats(1, true, false, Some(iishanten_with_points(points)), facts);
+            assert!(inputs.has_only_caution_open_hand_threats());
+            assert_combined_threat_decision(&inputs, mode, reason);
+        }
+    }
+
+    #[test]
+    fn the_logged_iishanten_threshold_matches_the_decision_boundary() {
+        let mut reach_and_caution = late_one_meld_caution_facts();
+        reach_and_caution[2].reached = true;
+        let mut dealer_reach_and_caution = reach_and_caution;
+        dealer_reach_and_caution[2].is_dealer = Some(true);
+        let mut dealer_reach = no_threat_facts();
+        dealer_reach[2].reached = true;
+        dealer_reach[2].is_dealer = Some(true);
+        let mut reach = no_threat_facts();
+        reach[2].reached = true;
+
+        for (base, expected_min) in [
+            (
+                late_one_meld_caution_inputs(None),
+                CAUTION_ONLY_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            ),
+            (
+                danger_open_hand_inputs(None),
+                IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            ),
+            (
+                inputs_with_threats(1, false, false, None, reach_and_caution),
+                IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            ),
+            (
+                inputs_with_threats(1, false, false, None, reach),
+                IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            ),
+            (
+                inputs_with_threats(1, true, false, None, dealer_reach),
+                DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            ),
+            (
+                inputs_with_threats(1, true, false, None, dealer_reach_and_caution),
+                DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            ),
+        ] {
+            let logged_min = iishanten_push_expected_self_tsumo_min(&base);
+            assert_eq!(logged_min, expected_min, "{:?}", base.open_hand_threats);
+
+            let below = decide_push_pull(&PushPullInputs {
+                offense: Some(iishanten_offense_with_expected_self_tsumo_value(Some(
+                    logged_min - 1,
+                ))),
+                ..base
+            });
+            let at = decide_push_pull(&PushPullInputs {
+                offense: Some(iishanten_offense_with_expected_self_tsumo_value(Some(
+                    logged_min,
+                ))),
+                ..base
+            });
+            assert_eq!(below.mode, PushPullMode::Fold, "{below:?}");
+            assert_eq!(at.mode, PushPullMode::Push, "{at:?}");
         }
     }
 
@@ -5494,7 +5742,10 @@ mod tests {
         for expected_self_tsumo_value in [Some(self_tsumo_points(999)), None] {
             let offense =
                 iishanten_offense_with_expected_self_tsumo_value(expected_self_tsumo_value);
-            assert!(!is_valuable_iishanten(&offense, false));
+            assert!(!is_valuable_iishanten(
+                &offense,
+                &danger_open_hand_inputs(None)
+            ));
 
             for self_dealer in [false, true] {
                 assert_actionable_open_hand_decision(
