@@ -4883,6 +4883,184 @@ mod tests {
         (ctx, actions)
     }
 
+    // request_id=407 と同じ手牌で、player 1 の河から 5m を外し 2p を加えた局面。player 3 の 14 枚は
+    // 23566m 222p 123s 0s67s。player 1 は2副露かつ河9枚で、テンパイ維持の 5m は player 1 に
+    // hard-safe ではなく、テンパイを崩す 2p だけが hard-safe になる。`oya` で player 1 を親にすると
+    // 同じ副露と河のまま Danger になる。
+    fn caution_weak_tenpai_context(oya: u8) -> GameContext {
+        let hand = [4, 8, 17, 20, 21, 40, 41, 72, 76, 80, 88, 92, 96];
+        let drawn = 42;
+        let opponent_discards = [43, 0, 1, 12, 24, 28, 32, 36, 44];
+        let opponent_melds = vec![
+            crate::meld::Meld::new(
+                crate::meld::MeldKind::Chi,
+                vec![tile(48), tile(52), tile(56)],
+                Some(tile(48)),
+            ),
+            crate::meld::Meld::new(
+                crate::meld::MeldKind::Chi,
+                vec![tile(97), tile(100), tile(104)],
+                Some(tile(97)),
+            ),
+        ];
+        let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
+        melds[1] = opponent_melds.clone();
+        let discards: [Vec<TileId>; 4] = [
+            vec![],
+            opponent_discards.iter().map(|&value| tile(value)).collect(),
+            vec![],
+            vec![],
+        ];
+        let dora_indicator = tile(64);
+        let mut visible: Vec<TileId> = hand.iter().map(|&value| tile(value)).collect();
+        visible.push(tile(drawn));
+        visible.push(dora_indicator);
+        visible.extend(discards.iter().flatten().copied());
+        visible.extend(opponent_melds.iter().flat_map(|meld| meld.tiles().to_vec()));
+        GameContext::from_parts_with_melds(
+            Some(tile(drawn)),
+            hand.iter().map(|&value| tile(value)).collect(),
+            vec![dora_indicator],
+            TileType::new(27),
+            TileType::new(28),
+            visible,
+            Some(3),
+            Some(oya),
+            discards,
+            [false; 4],
+            melds,
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        })
+    }
+
+    #[test]
+    fn a_weak_non_hard_safe_tenpai_against_a_caution_keeps_attacking_instead_of_defending() {
+        use crate::open_hand_defense::select_open_hand_defense_fallback_action;
+        use crate::open_hand_threat::{OpenHandThreatLevel, OpenHandThreatReason};
+        use crate::push_pull::StrongTenpaiRequirement;
+
+        let ctx = caution_weak_tenpai_context(2);
+        let hand_actions: Vec<LegalAction> = ctx
+            .hand_tiles()
+            .iter()
+            .copied()
+            .chain(ctx.drawn_tile())
+            .map(|tile| LegalAction::Dahai { tile })
+            .collect();
+        let normal_discard = dahai(17);
+        let defense_fallback = dahai(40);
+
+        let diagnostic = diagnose_matching_act(&ctx, &hand_actions);
+        assert_eq!(
+            diagnostic.normal_discard_action,
+            Some(normal_discard.clone())
+        );
+        assert_eq!(
+            select_open_hand_defense_fallback_action(&ctx, &hand_actions, &[1]),
+            Some(&defense_fallback)
+        );
+        assert_ne!(normal_discard, defense_fallback);
+
+        let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
+        assert_eq!(inputs.opponent_reach_count, 0);
+        assert_eq!(inputs.player_threats[1].open_meld_count, 2);
+        assert_eq!(inputs.player_threats[1].discard_count, 9);
+        assert_eq!(
+            inputs.open_hand_threats[1].level(),
+            Some(OpenHandThreatLevel::Caution)
+        );
+        assert_eq!(
+            inputs.open_hand_threats[1].reason(),
+            Some(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards)
+        );
+        assert!(inputs.has_only_caution_open_hand_threats());
+        assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+
+        let offense = inputs.offense.expect("offense がある");
+        assert!(offense.min_shanten_after_discard <= 0);
+        // 役なしダマの打点は確定しないので、待ち枚数の fallback threshold に届かない弱いテンパイ。
+        assert_eq!(offense.tenpai_offense_weighted_total(), None);
+        assert_eq!(
+            offense.strong_tenpai_requirement(inputs.dealer_reacher),
+            Some(StrongTenpaiRequirement::LiveWait(6))
+        );
+        assert_eq!(
+            offense
+                .tenpai_wait_after_discard
+                .map(|wait| wait.tsumo_remaining),
+            Some(5)
+        );
+
+        assert_eq!(
+            diagnostic.push_pull_decision,
+            Some(crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::TenpaiAgainstCautionOpenHand,
+            })
+        );
+        assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
+        assert_eq!(diagnostic.selected_action, normal_discard);
+        assert_ne!(diagnostic.selected_action, defense_fallback);
+        let mut agent = ShantenAgent;
+        assert_eq!(agent.act(&ctx, &hand_actions), normal_discard);
+
+        // 合法 Reach がある場合も、Push によって攻撃継続側の既存 priority (Reach → 通常打牌) を使う。
+        let with_reach: Vec<LegalAction> = hand_actions
+            .iter()
+            .cloned()
+            .chain([LegalAction::Reach])
+            .collect();
+        let reach_diagnostic = diagnose_matching_act(&ctx, &with_reach);
+        let reach_inputs = reach_diagnostic
+            .push_pull_inputs
+            .expect("押し引き入力がある");
+        assert!(!reach_inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+        // リーチ時の打点は確定するが、残枚数加重合計は threshold に届かない。
+        assert!(reach_inputs.offense.is_some_and(|offense| {
+            offense.strong_tenpai_requirement(false)
+                == Some(StrongTenpaiRequirement::WeightedTotal(15_600))
+                && offense
+                    .tenpai_offense_weighted_total()
+                    .is_some_and(|total| total < 15_600)
+        }));
+        assert_eq!(
+            reach_diagnostic.push_pull_decision,
+            diagnostic.push_pull_decision
+        );
+        assert_eq!(reach_diagnostic.selected_source, AgentActionSource::Reach);
+        assert_eq!(reach_diagnostic.selected_action, LegalAction::Reach);
+        assert_eq!(
+            reach_diagnostic
+                .reach
+                .as_ref()
+                .and_then(|reach| reach.selected_discard.clone()),
+            Some(normal_discard.clone())
+        );
+
+        // 同じ副露と河でも相手が親で Danger なら、従来どおり降りてテンパイを崩す防御牌を選ぶ。
+        let danger_ctx = caution_weak_tenpai_context(1);
+        let danger = diagnose_matching_act(&danger_ctx, &hand_actions);
+        let danger_inputs = danger.push_pull_inputs.expect("押し引き入力がある");
+        assert_eq!(
+            danger_inputs.open_hand_threats[1].level(),
+            Some(OpenHandThreatLevel::Danger)
+        );
+        assert!(!danger_inputs.has_only_caution_open_hand_threats());
+        assert_eq!(danger.normal_discard_action, Some(normal_discard));
+        assert_eq!(
+            danger.push_pull_decision,
+            Some(crate::push_pull::PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::WeakTenpaiAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(danger.selected_action, defense_fallback);
+        assert_eq!(agent.act(&danger_ctx, &hand_actions), defense_fallback);
+    }
+
     #[test]
     fn request_407_safe_tenpai_discard_pushes_against_an_actionable_open_hand() {
         use crate::offense_value::TenpaiOffenseMode;

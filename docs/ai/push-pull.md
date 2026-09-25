@@ -46,7 +46,7 @@
 
 `Caution` と `Danger` はどちらも actionable OpenHandThreat です。判定は `OpenHandThreatAssessment::is_actionable()` (`level == Caution || level == Danger`) が唯一の source of truth で、押し引き・OpenHand Defense・Combined Defense・hard-safe target の収集はすべてこの predicate を共有します。`Present` / `None` と classification 対象外の席は actionable ではありません。
 
-`Caution` / `Danger` の分割は、Push/Pull pressure を段階化するための classification の整理です。分割前の `High` と同じ集合を `Caution` と `Danger` に分けたもので、production policy が両者を区別するのは Push/Pull のテンパイ判定だけです ([Caution-only のテンパイ](#caution-only-のテンパイ))。Defense fallback、Combined Defense target、hard-safe target、一向聴以下の Push/Pull、Reach / Combined threat の Push/Pull は `Caution` と `Danger` を区別しません。
+`Caution` / `Danger` の分割は、Push/Pull pressure を段階化するための classification の整理です。分割前の `High` と同じ集合を `Caution` と `Danger` に分けたもので、production policy が両者を区別するのは Push/Pull のテンパイ判定だけです ([Caution-only のテンパイ](#caution-only-のテンパイ))。Defense fallback、Combined Defense target、hard-safe target、非テンパイ (一向聴以上) の Push/Pull、Reach / Combined threat の Push/Pull は `Caution` と `Danger` を区別しません。
 
 この classification 自体は Push/Pull policy とは分離されています。したがって、完成面子1つかつ河12枚以上の相手は `Caution` で、actionable OpenHandThreat として扱います。そのうえで、通常打牌 selector が選んだ打牌後がテンパイで、その打牌そのものが現在の全 threat target に hard-safe なら、strong-tenpai threshold を満たさなくても `Push` します ([選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外))。
 
@@ -71,7 +71,7 @@ Caution-only で通常打牌後がテンパイ (`min_shanten_after_discard <= 0`
 3. `TenpaiAgainstCautionOpenHand`
 4. `WeakTenpaiAgainstHighOpenHand`
 
-| 局面 | テンパイの扱い | 一向聴以下の扱い |
+| 局面 | テンパイの扱い | 非テンパイ (一向聴以上) の扱い |
 | --- | --- | --- |
 | Caution-only | `Push` | 現行 policy (`Caution` / `Danger` 共通) |
 | actionable target に `Danger` を含む | 現行の strong-tenpai / hard-safe policy | 現行 policy (`Caution` / `Danger` 共通) |
