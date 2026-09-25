@@ -405,10 +405,12 @@ impl ShantenAgent {
     // [`two_or_more_shanten_fold`] が source of truth のまま判定し、Fold の action 優先順位
     // (防御 fallback → 通常打牌) も [`Self::select_action_for_push_pull_mode`] をそのまま通す。
     // 通常打牌が必要な局面ではその helper が `None` を返すので、防御 fallback が action を
-    // 選べなかった場合は従来の通常打牌選択へ戻る。
+    // 選べなかった場合は従来の通常打牌選択へ戻る。選択打牌の hard-safe fact で Push になり得る
+    // 局面 (最善向聴 cohort に hard-safe な候補がある場合) もその helper が `None` を返し、通常
+    // 打牌選択後に [`decide_push_pull`] が選択打牌そのものの fact で判断する。
     //
-    // 向聴数は合法打牌候補の既存 shallow evaluation の最小値だけを使い、2向聴
-    // ExpectedSelfTsumoValue も前方探索も打点計算も行わない。合法 Dahai の絞り込み・赤5/黒5・
+    // 向聴数と最善向聴 cohort の hard-safe 候補有無は合法打牌候補の既存 shallow evaluation だけを
+    // 使い、2向聴 ExpectedSelfTsumoValue も前方探索も打点計算も行わない。合法 Dahai の絞り込み・赤5/黒5・
     // kuikae・物理牌補正は [`legal_discard_evaluations`] をそのまま共有する。
     //
     // 構造化診断が有効な経路では省略しない。診断は通常打牌候補と choice 1/2/3 を表示するため、
@@ -447,7 +449,7 @@ impl ShantenAgent {
         let normal_discard_timing = timing.normal_discard_timer();
         let legal = legal_discard_evaluations(ctx, legal_actions);
         let best_shanten_after_discard = legal.best_shanten_after_discard()?;
-        let push_pull = two_or_more_shanten_fold(&inputs, best_shanten_after_discard)?;
+        let push_pull = two_or_more_shanten_fold(ctx, &inputs, &legal, legal_actions)?;
         timing.record_normal_discard_phases(normal_discard_timing.finish());
 
         timing.enter(DecisionPhase::PostDiscard);
@@ -2633,6 +2635,258 @@ mod tests {
                 .map(|offense| offense.min_shanten_after_discard),
             Some(0)
         );
+    }
+
+    // 123m 456p 57m 78s 1p 9p N + ツモ E。どの打牌でも二向聴以上で、最善はちょうど二向聴。
+    const TWO_SHANTEN_HAND: [u8; 13] = [0, 4, 8, 48, 52, 56, 16, 24, 96, 100, 36, 68, 120];
+    // 123m 456p 57m 7s 1p 9p S N + ツモ E。どの打牌でも三向聴以上。
+    const THREE_SHANTEN_HAND: [u8; 13] = [0, 4, 8, 48, 52, 56, 16, 24, 96, 112, 36, 68, 120];
+    const SHANTEN_FOLD_DRAWN: u8 = 108;
+
+    fn shanten_fold_actions(hand_values: &[u8; 13]) -> Vec<LegalAction> {
+        hand_values
+            .iter()
+            .map(|&value| dahai(value))
+            .chain([dahai(SHANTEN_FOLD_DRAWN)])
+            .collect()
+    }
+
+    // player 1 が3副露の High。`reached` の席はリーチ者。`discards` は各席の河。
+    fn shanten_fold_context(
+        hand_values: &[u8; 13],
+        discards: [&[u8]; 4],
+        reached: [bool; 4],
+    ) -> GameContext {
+        open_hand_context(
+            hand_values,
+            Some(SHANTEN_FOLD_DRAWN),
+            1,
+            discards,
+            reached,
+            &[],
+        )
+    }
+
+    fn assert_best_shanten_after_discard(ctx: &GameContext, actions: &[LegalAction], expected: i8) {
+        assert_eq!(
+            legal_discard_evaluations(ctx, actions).best_shanten_after_discard(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn a_hard_safe_selected_two_shanten_discard_against_a_high_open_hand_pushes() {
+        // High OpenHandThreat 単独で最善向聴がちょうど二向聴なので early Fold せず、通常打牌
+        // selector が選んだ E が player 1 の河にある hard-safe な打牌なので押す。
+        let ctx = shanten_fold_context(&TWO_SHANTEN_HAND, [&[], &[109], &[], &[]], [false; 4]);
+        let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
+        assert_best_shanten_after_discard(&ctx, &actions, 2);
+
+        let decision = ShantenAgent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::SafeTwoShantenAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(decision.normal_discard, Some(dahai(SHANTEN_FOLD_DRAWN)));
+        assert_eq!(decision.action, dahai(SHANTEN_FOLD_DRAWN));
+        assert_eq!(decision.source, AgentActionSource::NormalDiscard);
+        let inputs = decision.push_pull_inputs.expect("押し引き入力がある");
+        assert!(inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+        assert_eq!(
+            inputs
+                .offense
+                .map(|offense| offense.min_shanten_after_discard),
+            Some(2)
+        );
+    }
+
+    fn best_shanten_cohort(ctx: &GameContext, actions: &[LegalAction]) -> Vec<TileType> {
+        legal_discard_evaluations(ctx, actions)
+            .best_shanten_cohort_discards()
+            .collect()
+    }
+
+    #[test]
+    fn a_hard_safe_candidate_does_not_push_when_another_two_shanten_discard_is_selected() {
+        // 最善向聴 cohort の 1p は player 1 の河にあるので early Fold は保留して通常打牌選択へ
+        // 進むが、selector が選んだ E は hard-safe ではないので押さない。cohort に hard-safe 候補が
+        // あること自体は押す根拠にならない。
+        let ctx = shanten_fold_context(&TWO_SHANTEN_HAND, [&[], &[37], &[], &[]], [false; 4]);
+        let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
+        assert_best_shanten_after_discard(&ctx, &actions, 2);
+        assert!(best_shanten_cohort(&ctx, &actions).contains(&TileType::new(9).unwrap()));
+
+        let decision = ShantenAgent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(decision.normal_discard, Some(dahai(SHANTEN_FOLD_DRAWN)));
+        let inputs = decision.push_pull_inputs.expect("押し引き入力がある");
+        assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
+        assert_eq!(
+            inputs
+                .offense
+                .map(|offense| offense.min_shanten_after_discard),
+            Some(2)
+        );
+        assert_eq!(decision.action, dahai(36));
+        assert_eq!(
+            decision.source,
+            AgentActionSource::OpenHandDefenseFallback(
+                OpenHandDefenseCategory::SafeAgainstAllTargets
+            )
+        );
+
+        // 通常打牌選択へ進んだので、2向聴の production comparator も評価している。
+        let timed = ShantenAgent.act_with_phase_timing(&ctx, &actions);
+        assert_eq!(timed.action, decision.action);
+        assert!(timed.two_shanten_self_tsumo_candidates().len() > 0);
+    }
+
+    #[test]
+    fn early_fold_against_a_high_open_hand_is_kept_without_a_hard_safe_two_shanten_candidate() {
+        // player 1 の河が空で、最善向聴 cohort に hard-safe な候補が1件もない。選ばれる打牌も
+        // hard-safe になり得ないので、通常打牌選択より前に Fold を確定する。
+        let ctx = shanten_fold_context(&TWO_SHANTEN_HAND, [&[], &[], &[], &[]], [false; 4]);
+        let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
+        assert_best_shanten_after_discard(&ctx, &actions, 2);
+
+        let decision = ShantenAgent.decide(&ctx, &actions);
+        let fold = PushPullDecision {
+            mode: PushPullMode::Fold,
+            reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+        };
+        assert_eq!(decision.push_pull, Some(fold));
+        assert_eq!(decision.normal_discard, None);
+        assert_eq!(
+            decision.push_pull_inputs.and_then(|inputs| inputs.offense),
+            None
+        );
+
+        // 2向聴の production comparator (Progress / Full) を評価しない。
+        let timed = ShantenAgent.act_with_phase_timing(&ctx, &actions);
+        assert_eq!(timed.action, decision.action);
+        assert_eq!(timed.two_shanten_self_tsumo_candidates().len(), 0);
+        assert_eq!(
+            timed.phases.normal_discard_phases.two_shanten_self_tsumo,
+            Duration::ZERO
+        );
+        assert_eq!(
+            timed.phases.normal_discard_phases.forward_metrics,
+            Duration::ZERO
+        );
+
+        // 通常打牌選択まで通す経路と、mode・reason・最終 action・経路は同じ。その経路では
+        // 選ばれた E が hard-safe ではない。
+        let diagnostic = diagnose_matching_act(&ctx, &actions);
+        assert_eq!(diagnostic.push_pull_decision, Some(fold));
+        assert_eq!(
+            diagnostic.normal_discard_action,
+            Some(dahai(SHANTEN_FOLD_DRAWN))
+        );
+        assert!(
+            !diagnostic
+                .push_pull_inputs
+                .expect("押し引き入力がある")
+                .selected_normal_discard_hard_safe_for_all_threat_targets
+        );
+        assert_eq!(diagnostic.selected_action, decision.action);
+        assert_eq!(diagnostic.selected_source, decision.source);
+    }
+
+    #[test]
+    fn a_hard_safe_three_shanten_candidate_does_not_hold_the_early_fold() {
+        // 1m は player 1 の河にあるが、切ると三向聴になるので最善向聴 cohort に入らない。選ばれ
+        // 得ない候補の hard-safe を理由に通常打牌選択へは進まない。
+        let ctx = shanten_fold_context(&TWO_SHANTEN_HAND, [&[], &[1], &[], &[]], [false; 4]);
+        let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
+        assert_best_shanten_after_discard(&ctx, &actions, 2);
+        let evaluations = legal_discard_evaluations(&ctx, &actions);
+        let one_man = evaluations
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discard == TileType::new(0).unwrap())
+            .expect("1m の打牌候補がある");
+        assert_eq!(one_man.min_shanten_after_discard(), 3);
+        assert!(!best_shanten_cohort(&ctx, &actions).contains(&TileType::new(0).unwrap()));
+
+        let decision = ShantenAgent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(decision.normal_discard, None);
+        assert_eq!(decision.action, dahai(0));
+
+        let timed = ShantenAgent.act_with_phase_timing(&ctx, &actions);
+        assert_eq!(timed.two_shanten_self_tsumo_candidates().len(), 0);
+    }
+
+    #[test]
+    fn early_fold_against_a_high_open_hand_at_three_or_more_shanten_is_kept() {
+        // 最善向聴が三向聴以上なら、E が player 1 の河にあっても通常打牌選択より前に Fold を確定する。
+        let ctx = shanten_fold_context(&THREE_SHANTEN_HAND, [&[], &[109], &[], &[]], [false; 4]);
+        let actions = shanten_fold_actions(&THREE_SHANTEN_HAND);
+        assert_best_shanten_after_discard(&ctx, &actions, 3);
+
+        let decision = ShantenAgent.decide(&ctx, &actions);
+        assert_eq!(
+            decision.push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(decision.normal_discard, None);
+        assert_eq!(
+            decision.push_pull_inputs.and_then(|inputs| inputs.offense),
+            None
+        );
+    }
+
+    #[test]
+    fn early_fold_against_a_reach_or_combined_threat_at_two_shanten_is_kept() {
+        // E が全 threat target の河にあっても、Reach / Combined の二向聴は通常打牌選択より前に
+        // Fold を確定する。
+        for (melded, reason) in [
+            (3, PushPullReason::TwoOrMoreShantenAgainstReach),
+            (1, PushPullReason::TwoOrMoreShantenAgainstCombinedThreat),
+        ] {
+            let ctx = open_hand_context(
+                &TWO_SHANTEN_HAND,
+                Some(SHANTEN_FOLD_DRAWN),
+                melded,
+                [&[], &[109], &[], &[110]],
+                [false, false, false, true],
+                &[],
+            );
+            let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
+            assert_best_shanten_after_discard(&ctx, &actions, 2);
+
+            let decision = ShantenAgent.decide(&ctx, &actions);
+            assert_eq!(
+                decision.push_pull,
+                Some(PushPullDecision {
+                    mode: PushPullMode::Fold,
+                    reason,
+                })
+            );
+            assert_eq!(decision.normal_discard, None);
+            assert_eq!(
+                decision.push_pull_inputs.and_then(|inputs| inputs.offense),
+                None
+            );
+        }
     }
 
     #[test]

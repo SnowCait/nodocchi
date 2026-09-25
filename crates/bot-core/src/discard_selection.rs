@@ -259,6 +259,18 @@ impl LegalDiscardEvaluations {
     pub(crate) fn best_shanten_after_discard(&self) -> Option<i8> {
         best_shanten_after_discard(&self.evaluations)
     }
+
+    /// 打牌後の向聴数が最善向聴と等しい合法打牌候補の牌種。
+    ///
+    /// production comparator は向聴数を最初に比較するので、選ばれる打牌は必ずこの cohort に
+    /// 含まれる。既存の1手評価が持つ値をそのまま使い、ここで評価し直さない。
+    pub(crate) fn best_shanten_cohort_discards(&self) -> impl Iterator<Item = TileType> + '_ {
+        let best = self.best_shanten_after_discard();
+        self.evaluations
+            .iter()
+            .filter(move |evaluation| Some(evaluation.min_shanten_after_discard()) == best)
+            .map(|evaluation| evaluation.discard)
+    }
 }
 
 // 打牌選択に使う前方集計値。`evaluations` と同じ順序・同じ件数で、前方評価を
