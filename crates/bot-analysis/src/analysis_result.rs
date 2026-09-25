@@ -3,9 +3,10 @@ use bot_core::{
     CallThreeShantenPassEvaluation, CallTwoShantenPassEvaluation, CombinedDefenseCategory,
     DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, KanCandidateDiagnostic, KanDecisionDiagnostic,
-    KanDecisionReason, KanKind, LegalAction, OpenHandDefenseCategory, PushPullMode, PushPullReason,
-    ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason, RyukyokuDecisionDiagnostic,
-    RyukyokuVerdict, ShantenDecisionDiagnostic, StrongTenpaiRequirement, TenpaiOffenseValue,
+    KanDecisionReason, KanKind, LegalAction, OpenHandDefenseCategory, PushPullDecision,
+    PushPullMode, PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason,
+    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
+    StrongTenpaiRequirement, TenpaiOffenseValue,
 };
 use bot_logic::{PermanentFuriten, TileId, TileType};
 
@@ -250,6 +251,9 @@ pub struct AnalysisCallCandidate {
     pub post_call_discard: Option<AnalysisDiscardTile>,
     /// production が実際に使った Call / Pass の self-tsumo 比較。
     pub self_tsumo: AnalysisCallSelfTsumo,
+    /// Call / Pass 比較で成立した候補について、鳴き後の打牌を既存 Push/Pull が判定した結果。
+    /// 比較で成立しなかった候補では `None`。
+    pub post_call_push_pull: Option<PushPullDecision>,
 }
 
 /// 打牌の物理牌。赤5と黒5を潰さずに持つ。
@@ -456,6 +460,7 @@ fn call_candidate(
             }
         }),
         self_tsumo: call_self_tsumo(candidate)?,
+        post_call_push_pull: candidate.post_call_push_pull,
     })
 }
 

@@ -278,6 +278,19 @@ fixed meld のドラ・赤ドラ・役牌の判定は threat 側と同じ `meld_
 
 防御 fallback の target と safety は [防御](defense.md) を参照してください。
 
+## 鳴き判断からの入力
+
+非テンパイの Chi / Pon は、Call / Pass 比較で成立した後に鳴き後の打牌を同じ押し引きへ通します
+([鳴き後の押し引き](discard-selection.md#鳴き後の押し引き))。鳴き判断はこの module の policy を
+写さず、通常の打牌後と同じ入口 (`push_pull_inputs_from_threat_facts`) へ、鳴き後の打牌選択が既に
+求めた選択打牌・1向聴の前方集計値・鳴き後の合法打牌を渡すだけです。threat facts は鳴く前の局面から
+作ったものを共有し、threat の分類・選択打牌の hard-safe 判定・threshold・`Neutral` を返さないことを
+含む mode の決め方はここが source of truth のままです。
+
+選択の計算済み値を持たない呼び出し向けの入口 (`push_pull_inputs_from_context_with_evaluation`) は、
+1向聴の前方集計値を選んだ1候補について求め直します。鳴き判断はこの入口を使わないので、押し引きの
+ために同じ前方評価を2回行うことはありません。
+
 ## 通常打牌選択より前の確定 Fold
 
 `Fold` は防御 fallback を通常打牌より優先するので、防御 fallback が action を選べる限り、最終 action は通常打牌選択の結果に依存しません。二向聴以上の `Fold` は 2向聴 ExpectedSelfTsumoValue も受け入れも見ないため、通常打牌選択を先に行っても最終 action には使いません。ただし actionable OpenHandThreat 単独のちょうど二向聴は、選択打牌が hard-safe かで `Push` / `Fold` が変わるので、下の cheap gate で `Push` になり得ないと確定できた場合だけ対象にします。

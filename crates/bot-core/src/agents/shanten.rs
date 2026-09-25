@@ -3354,6 +3354,8 @@ mod tests {
                 reason: PushPullReason::WeakTenpaiAgainstHighOpenHand,
             })
         );
+        // 即テンパイ Call は Call / Pass 比較を通らない。
+        assert_eq!(candidate.call_pass_eligible_reason(), None);
     }
 
     #[test]

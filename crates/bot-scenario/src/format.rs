@@ -573,6 +573,7 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     lines.extend(format_call_three_shanten_self_tsumo(
         candidate.three_shanten_self_tsumo.as_ref(),
     ));
+    lines.extend(format_call_post_call_push_pull(candidate));
 
     if verbose {
         lines.push("    acceptance tiles:".to_string());
@@ -606,6 +607,27 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     }
 
     lines
+}
+
+// 鳴き後の既存 Push/Pull を評価した候補だけに出す。非テンパイ Call では Call / Pass 比較で
+// 成立した理由も並べ、比較では成立したが鳴き後 Push/Pull で落ちたことを追えるようにする。
+fn format_call_post_call_push_pull(candidate: &CallCandidateDiagnostic) -> Vec<String> {
+    let Some(decision) = candidate.post_call_push_pull else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if let Some(reason) = candidate.call_pass_eligible_reason() {
+        lines.push(format!("    call / pass eligible reason: {reason:?}"));
+    }
+    lines.push(format!(
+        "    post-call push/pull: {}",
+        push_pull_decision_label(decision)
+    ));
+    lines
+}
+
+fn push_pull_decision_label(decision: PushPullDecision) -> String {
+    format!("{:?} ({:?})", decision.mode, decision.reason)
 }
 
 fn format_call_iishanten_self_tsumo(
@@ -3374,6 +3396,12 @@ fn summary_call_lines(call: &AnalysisCall) -> Vec<String> {
             .map(discard_tile_label)
             .unwrap_or_else(|| UNKNOWN.to_string())
     ));
+    if let Some(decision) = candidate.post_call_push_pull {
+        lines.push(format!(
+            "  call post-call push/pull: {}",
+            push_pull_decision_label(decision)
+        ));
+    }
     lines
 }
 
@@ -4836,7 +4864,8 @@ mod tests {
              acceptance: 8 / 2 types\n    \
              live wait remaining: 8\n    \
              can ron: yes\n    \
-             live waits have yaku: yes"
+             live waits have yaku: yes\n    \
+             post-call push/pull: Push (NoThreat)"
         );
     }
 
@@ -4960,6 +4989,41 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("  call post-call discard: "), "{summary}");
+    }
+
+    #[test]
+    fn a_call_declined_by_the_post_call_push_pull_shows_both_decisions() {
+        // Call / Pass 比較では成立したが、鳴き後の既存 Push/Pull が Fold なので鳴かない。
+        let (_, _, output) = rendered(
+            include_str!("../scenarios/two_shanten_pon_post_call_fold.json"),
+            false,
+        );
+        let call = section(&output, "Call\n");
+        assert!(call.contains("    reason: PostCallNotPush"), "{call}");
+        assert!(
+            call.contains("    two-shanten comparison: call higher"),
+            "{call}"
+        );
+        assert!(
+            call.contains("    call / pass eligible reason: EligibleTwoShantenSelfTsumo"),
+            "{call}"
+        );
+        assert!(
+            call.contains("    post-call push/pull: Fold (IishantenAgainstHighOpenHand)"),
+            "{call}"
+        );
+
+        let summary = summary_section(&output);
+        assert!(summary.contains("  call: no"), "{summary}");
+        assert!(
+            summary.contains("  call reason: PostCallNotPush (first candidate)"),
+            "{summary}"
+        );
+        assert!(summary.contains("(call higher)"), "{summary}");
+        assert!(
+            summary.contains("  call post-call push/pull: Fold (IishantenAgainstHighOpenHand)"),
+            "{summary}"
+        );
     }
 
     #[test]
@@ -5346,6 +5410,7 @@ mod tests {
                         verdict: CallIishantenComparison::PassNotLower,
                     },
                 },
+                post_call_push_pull: None,
             }),
         };
 

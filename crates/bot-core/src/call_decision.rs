@@ -28,6 +28,7 @@
 //! | 副露込みの向聴数 | [`calculate_shanten_with_fixed_melds`] |
 //! | 鳴き後の打牌選択 | [`select_discard_action_with_evaluation`] |
 //! | 2向聴 / 3向聴 Call の打牌候補 | [`post_call_discard_evaluations`] |
+//! | 2向聴 Call の鳴き後打牌比較 | [`select_best_iishanten_post_call_discard`] |
 //! | 3向聴 Call の鳴き後打牌比較 | [`select_best_two_shanten_post_call_discard`] |
 //! | Pass の継続評価 | [`awaiting_draw_expected_self_tsumo_value`] |
 //! | 2向聴 Pass の継続評価 | [`awaiting_draw_two_shanten_expected_self_tsumo_value`] |
@@ -74,6 +75,7 @@
 //! AND 鳴いた後の最良打牌で effective shanten == 1
 //! AND 反応元の席が分かる
 //! AND Call 後1向聴の ExpectedSelfTsumoValue > Pass の2向聴 ExpectedSelfTsumoValue
+//! AND 鳴き後の選択打牌を既存 Push/Pull policy が Push と判定する
 //! ```
 //!
 //! 現在3向聴の候補は鳴き後2向聴の比較だけを条件にする。
@@ -85,7 +87,12 @@
 //! AND 鳴いた後の最良打牌で effective shanten == 2
 //! AND 反応元の席が分かる
 //! AND Call 後2向聴の Progress-only value > Pass の3向聴 Progress-only value
+//! AND 鳴き後の選択打牌を既存 Push/Pull policy が Push と判定する
 //! ```
+//!
+//! 鳴き後も1向聴のままの候補も、Call / Pass 比較の後に同じ Push/Pull 条件を持つ。どの候補でも
+//! Push/Pull は Call / Pass 比較 (速度優先 policy を含む) で成立した後にだけ判定する
+//! ([鳴き後の押し引き](#鳴き後の押し引き))。
 //!
 //! 現在2向聴の候補だけ、値比較で Pass になる結論を速度優先 policy が上書きする。
 //!
@@ -276,6 +283,35 @@
 //! ことも同じテンパイを点数計算し直すこともない。判定を要求するのは安価な残り自摸機会の条件を
 //! 満たす局面だけで、満たさない局面では確定打点の下限を畳む処理そのものを通らない。
 //!
+//! # 鳴き後の押し引き
+//!
+//! 非テンパイ Call (`1向聴 → 1向聴` / `2向聴 → 1向聴` / `3向聴 → 2向聴`) は、Call / Pass 比較で
+//! 成立した後に、鳴き後の打牌選択が選んだ打牌を既存 Push/Pull ([`decide_push_pull`]) へ通す。
+//! `Push` 以外なら [`CallDecisionReason::PostCallNotPush`] で鳴かない。鳴いた直後に同じ production
+//! の押し引きが降りる手を、攻撃価値の比較だけで鳴かないようにするためで、即テンパイ Call の
+//! 成立条件と同じ考え方になる。現在の Push/Pull は `Neutral` を返さない。
+//!
+//! 鳴き専用の threat 分類・守備 heuristic・safety 判定・threshold・offense 評価は持たない。鳴く
+//! 前後で他家の情報は増えないので threat facts は鳴く前の局面から1回だけ作って共有し、鳴いて
+//! 変わる自分側の材料だけを鳴き後 state から渡す。
+//!
+//! | 材料 | 出どころ |
+//! | --- | --- |
+//! | threat facts | 鳴く前の局面の [`player_threat_facts_from_context`] (他家の facts は鳴き後と同じ) |
+//! | 選択打牌と向聴数 | その候補の鳴き後打牌選択が選んだ [`DiscardEvaluation`] |
+//! | 1向聴の前方集計値 | 同じ選択が既に求めた [`ForwardMetrics`] (1→1 は [`select_discard_action_with_evaluation`]、2→1 は [`select_best_iishanten_post_call_discard`]) |
+//! | 選択打牌の hard-safe | 鳴き後の合法 Dahai を渡した既存入力構築 |
+//!
+//! 入力の構築は通常の `act()` が打牌選択の結果を押し引きへ渡すのと同じ
+//! [`push_pull_inputs_from_threat_facts`] を通す。選択の計算済み値を持たない呼び出し向けの入口
+//! (`push_pull_inputs_from_context_with_evaluation`) は使わないので、押し引きのために1向聴の前方
+//! 評価も terminal scoring もやり直さない。3向聴からの鳴きは鳴き後2向聴で、Push/Pull が読むのは
+//! 向聴数と選択打牌の hard-safe だけなので前方集計値を渡さない。
+//!
+//! Call / Pass 比較で落ちた候補には Push/Pull を評価せず、理由も上書きしない。比較で成立して
+//! いたことは [`CallCandidateDiagnostic::call_pass_eligible_reason`]、鳴き後の判定は
+//! [`CallCandidateDiagnostic::post_call_push_pull`] に残る。
+//!
 //! # Call と Pass の重ね合わせ
 //!
 //! Call 側の鳴き後打牌選択と Pass 側の継続評価は、入力も探索基盤も共有しない。Call 側は
@@ -313,8 +349,8 @@
 use std::time::{Duration, Instant};
 
 use bot_logic::{
-    DiscardEvaluation, FixedMeldCount, HandValueError, HandValueOutcome, Meld, MeldKind,
-    OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
+    DiscardEvaluation, FixedMeldCount, ForwardMetrics, HandValueError, HandValueOutcome, Meld,
+    MeldKind, OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     awaiting_draw_expected_self_tsumo_value,
     awaiting_draw_three_shanten_progress_only_self_tsumo_value,
     awaiting_draw_two_shanten_expected_self_tsumo_value, best_discard_selection_index,
@@ -337,7 +373,9 @@ use crate::kuikae::forbidden_discards_after_call;
 use crate::prospective_value::{ProductionProspectiveValuator, ProspectiveHanVerdict};
 use crate::push_pull::{
     PushPullDecision, PushPullMode, decide_push_pull, push_pull_inputs_from_selected_tenpai,
+    push_pull_inputs_from_threat_facts,
 };
+use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 
 /// 鳴きを検討する現在の向聴数。
 pub const CALL_CURRENT_SHANTEN: i8 = 1;
@@ -447,6 +485,10 @@ pub enum CallDecisionReason {
     /// 残枚数 > 0 の和了牌 variant に、役の有無を確定できないものがある。
     HandValueUnknown,
     /// 鳴き後の最良打牌を既存 Push/Pull policy が Push と判定しない。
+    ///
+    /// 即テンパイ Call では成立条件の最後に、非テンパイ Call では Call / Pass 比較で成立した後に
+    /// 判定する。後者で Call / Pass 比較が成立していたことは
+    /// [`CallCandidateDiagnostic::call_pass_eligible_reason`] で確認できる。
     PostCallNotPush,
     /// 鳴き後の仮想局面を既存の通常打牌・Push/Pull policy へ渡せない。
     PostCallEvaluationUnavailable,
@@ -671,6 +713,9 @@ pub struct CallCandidateDiagnostic {
     /// 鳴き後テンパイの和了牌の物理牌ごとの役診断。役を評価しなかった場合は `None`。
     pub post_call_wait_yaku: Option<Vec<CallWaitYakuDiagnostic>>,
     /// 既存 Push/Pull policy による鳴き後の最良打牌の判定。そこまで評価しなかった場合は `None`。
+    ///
+    /// 即テンパイ Call では成立条件を満たした候補、非テンパイ Call では Call / Pass 比較で成立
+    /// した候補だけが持つ。比較で落ちた候補は評価しないので `None`。
     pub post_call_push_pull: Option<PushPullDecision>,
     /// 鳴いても1向聴のままの候補についてだけ求める観測用の受け入れ比較。対象外の候補と、
     /// そこまで評価が進まなかった候補では `None`。
@@ -719,6 +764,36 @@ impl CallCandidateDiagnostic {
         self.post_call_wait
             .as_ref()
             .and_then(TenpaiWaitAvailability::can_ron)
+    }
+
+    /// 非テンパイ Call の Call / Pass 比較が成立させた理由。比較が成立しなかった候補と、
+    /// 比較の対象外の候補では `None`。
+    ///
+    /// production が使った比較結果 (`comparison` と速度優先 policy の `overrides_pass`) を読む
+    /// だけで、比較をやり直さない。鳴き後 Push/Pull で [`CallDecisionReason::PostCallNotPush`] に
+    /// なった候補でも、比較段階で成立していたことをここで確認できる。
+    pub fn call_pass_eligible_reason(&self) -> Option<CallDecisionReason> {
+        if let Some(diagnostic) = self.iishanten_self_tsumo {
+            return (diagnostic.comparison == CallIishantenComparison::CallHigher)
+                .then_some(CallDecisionReason::EligibleIishantenSelfTsumo);
+        }
+        if let Some(diagnostic) = self.two_shanten_self_tsumo {
+            return match (diagnostic.comparison, diagnostic.speed.overrides_pass) {
+                (CallIishantenComparison::CallHigher, _) => {
+                    Some(CallDecisionReason::EligibleTwoShantenSelfTsumo)
+                }
+                (_, true) => Some(CallDecisionReason::EligibleTwoShantenSpeed),
+                _ => None,
+            };
+        }
+        let diagnostic = self.three_shanten_self_tsumo?;
+        match (diagnostic.comparison, diagnostic.speed.overrides_pass) {
+            (CallIishantenComparison::CallHigher, _) => {
+                Some(CallDecisionReason::EligibleThreeShantenSelfTsumo)
+            }
+            (_, true) => Some(CallDecisionReason::EligibleThreeShantenSpeed),
+            _ => None,
+        }
     }
 
     /// 残枚数 > 0 の和了牌 variant すべてで役ありを確定できたか。役を評価しなかった場合は
@@ -801,20 +876,7 @@ fn evaluate_call_decision_with_order(
         evaluate_prepared_call_candidates(ctx, &mut slots, collect_observations, order, timing);
 
     record_call_candidate_timings(&slots, timing);
-    let mut candidates: Vec<CallCandidateDiagnostic> = Vec::with_capacity(slots.len());
-    for slot in slots {
-        let candidate = match slot.preparation {
-            // 同じ post-call state を作る候補なので、評価結果をそのまま複製して action だけ
-            // 元の合法 action に戻す。高コスト評価は行わない。
-            CallCandidatePreparation::Reused(source) => {
-                let mut candidate = candidates[source].clone();
-                candidate.action = slot.candidate.action;
-                candidate
-            }
-            _ => slot.candidate,
-        };
-        candidates.push(candidate);
-    }
+    let (mut candidates, post_call_states) = into_call_candidates(slots);
 
     // 重ねて評価した Pass は、その局面の現在向聴数に対応する policy だけが読む。
     let (iishanten_pass, two_shanten_pass, three_shanten_pass) = match pass {
@@ -828,6 +890,8 @@ fn evaluate_call_decision_with_order(
     apply_iishanten_self_tsumo_policy(ctx, &mut candidates, iishanten_pass, timing);
     apply_two_shanten_self_tsumo_policy(ctx, &mut candidates, two_shanten_pass, timing);
     apply_three_shanten_self_tsumo_policy(ctx, &mut candidates, three_shanten_pass, timing);
+    // Call / Pass 比較で成立した非テンパイ Call だけを、鳴き後の既存 Push/Pull で確かめる。
+    apply_post_call_push_pull_gate(ctx, &mut candidates, &post_call_states);
 
     let selected_index = select_eligible_candidate(&candidates);
     if let Some(index) = selected_index {
@@ -844,6 +908,35 @@ fn evaluate_call_decision_with_order(
     })
 }
 
+// 評価を終えた作業単位を、合法 action の列挙順の候補診断と鳴き後 state へ分ける。
+fn into_call_candidates(
+    slots: Vec<CallCandidateSlot>,
+) -> (Vec<CallCandidateDiagnostic>, Vec<PostCallState>) {
+    let mut candidates: Vec<CallCandidateDiagnostic> = Vec::with_capacity(slots.len());
+    let mut post_call_states: Vec<PostCallState> = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let (candidate, post_call_state) = match slot.preparation {
+            // 同じ post-call state を作る候補なので、評価結果をそのまま複製して action だけ
+            // 元の合法 action に戻す。高コスト評価は行わない。
+            CallCandidatePreparation::Reused(source) => {
+                let mut candidate = candidates[source].clone();
+                candidate.action = slot.candidate.action;
+                (candidate, PostCallState::Reused(source))
+            }
+            preparation => (
+                slot.candidate,
+                PostCallState::Evaluated {
+                    preparation,
+                    iishanten_forward_metrics: slot.post_call_iishanten_forward_metrics,
+                },
+            ),
+        };
+        candidates.push(candidate);
+        post_call_states.push(post_call_state);
+    }
+    (candidates, post_call_states)
+}
+
 /// 鳴き候補1件の評価を、安価な事前判定と高コストな評価に分けて持つ作業単位。
 ///
 /// 高コストな評価へ進む候補が分かってから deep 評価を始めるため、Call 側の deep 評価 group と
@@ -855,6 +948,24 @@ struct CallCandidateSlot {
     /// この候補が実際に払った実測。事前判定と deep 評価を足し合わせたもので、間に挟まる他候補
     /// の評価も Pass の join 待ちも含まない。
     elapsed: CallCandidateElapsed,
+    /// 鳴き後の打牌選択が選んだ1向聴打牌について、その選択が既に求めた前方集計値。
+    ///
+    /// 鳴き後の押し引き ([`apply_post_call_push_pull_gate`]) へそのまま渡し、同じ前方評価を
+    /// やり直さない。鳴き後の選択打牌が1向聴でない候補と、そこまで評価しなかった候補では `None`。
+    post_call_iishanten_forward_metrics: Option<ForwardMetrics>,
+}
+
+/// 候補1件について、鳴き後の押し引きに渡す材料をどこから読むか。
+///
+/// 高コストな評価を行った候補は、その評価の入力 (鳴き後の手牌 state と合法打牌の作り方) と、
+/// 選択が既に求めた1向聴の前方集計値を持つ。semantic に同一な候補は先行候補の結論をそのまま
+/// 使う。
+enum PostCallState {
+    Evaluated {
+        preparation: CallCandidatePreparation,
+        iishanten_forward_metrics: Option<ForwardMetrics>,
+    },
+    Reused(usize),
 }
 
 /// 安価な事前判定が確定させた、候補1件の次の一手。
@@ -958,6 +1069,7 @@ fn prepare_call_candidates(
                 candidate: new_call_candidate(action, kind),
                 preparation: CallCandidatePreparation::Reused(source),
                 elapsed: CallCandidateElapsed::default(),
+                post_call_iishanten_forward_metrics: None,
             });
             continue;
         }
@@ -972,6 +1084,7 @@ fn prepare_call_candidates(
             candidate,
             preparation,
             elapsed: candidate_timing.finish(),
+            post_call_iishanten_forward_metrics: None,
         });
     }
     slots
@@ -1051,6 +1164,7 @@ fn evaluate_call_candidate_group(
             &slot.preparation,
             collect_observations,
             &mut slot.candidate,
+            &mut slot.post_call_iishanten_forward_metrics,
             &mut candidate_timing,
         );
         let Some(reason) = reason else {
@@ -1491,11 +1605,13 @@ fn prepare_call_candidate(
 // 事前判定が準備した候補の高コストな評価。
 //
 // 安価な事前判定で理由が確定した候補と、先行候補の結果を複製する候補では何もせず `None`。
+// 鳴き後の選択打牌が1向聴なら、その選択が求めた前方集計値を `iishanten_forward_metrics` へ残す。
 fn evaluate_prepared_call_candidate(
     ctx: &GameContext,
     preparation: &CallCandidatePreparation,
     collect_observations: bool,
     candidate: &mut CallCandidateDiagnostic,
+    iishanten_forward_metrics: &mut Option<ForwardMetrics>,
     timing: &mut CallCandidateTimer,
 ) -> Option<CallDecisionReason> {
     match preparation {
@@ -1504,11 +1620,17 @@ fn evaluate_prepared_call_candidate(
             inputs,
             collect_observations,
             candidate,
+            iishanten_forward_metrics,
             timing,
         )),
-        CallCandidatePreparation::TwoShantenCall(inputs) => Some(
-            evaluate_two_shanten_call_to_iishanten(ctx, inputs, candidate),
-        ),
+        CallCandidatePreparation::TwoShantenCall(inputs) => {
+            Some(evaluate_two_shanten_call_to_iishanten(
+                ctx,
+                inputs,
+                candidate,
+                iishanten_forward_metrics,
+            ))
+        }
         CallCandidatePreparation::ThreeShantenCall(inputs) => Some(
             evaluate_three_shanten_call_to_two_shanten(ctx, inputs, candidate),
         ),
@@ -1523,6 +1645,7 @@ fn evaluate_post_call_discard(
     inputs: &PostCallInputs,
     collect_observations: bool,
     candidate: &mut CallCandidateDiagnostic,
+    iishanten_forward_metrics: &mut Option<ForwardMetrics>,
     timing: &mut CallCandidateTimer,
 ) -> CallDecisionReason {
     let selection = timing.measure_post_call_discard_selection(|| {
@@ -1534,6 +1657,7 @@ fn evaluate_post_call_discard(
 
     if evaluation.min_shanten_after_discard() != CALL_TENPAI_SHANTEN {
         if evaluation.min_shanten_after_discard() == CALL_CURRENT_SHANTEN {
+            *iishanten_forward_metrics = selection.iishanten_forward_metrics;
             candidate.iishanten_self_tsumo = Some(CallIishantenSelfTsumoDiagnostic {
                 reaction_source_player: ctx.reaction_source_player(),
                 pass_expected_self_tsumo_value: None,
@@ -1647,9 +1771,9 @@ fn evaluate_two_shanten_call_to_iishanten(
     ctx: &GameContext,
     inputs: &TwoShantenCallInputs,
     candidate: &mut CallCandidateDiagnostic,
+    iishanten_forward_metrics: &mut Option<ForwardMetrics>,
 ) -> CallDecisionReason {
-    let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
-    melds.push(inputs.meld.clone());
+    let melds = post_call_melds(ctx, &inputs.meld);
     // 残り自摸機会の条件を満たす局面だけ、同じ前方評価から速度優先 policy の翻数判定も回収する。
     let own_future_draws = own_future_draws(ctx);
     let required_han = speed_required_han(own_future_draws);
@@ -1669,11 +1793,12 @@ fn evaluate_two_shanten_call_to_iishanten(
     }
 
     candidate.post_call_discard = Some(selection.evaluation);
+    *iishanten_forward_metrics = Some(selection.forward_metrics);
     candidate.two_shanten_self_tsumo = Some(CallTwoShantenSelfTsumoDiagnostic {
         reaction_source_player: ctx.reaction_source_player(),
         pass_evaluation: CallTwoShantenPassEvaluation::Full,
         pass_expected_self_tsumo_value: None,
-        call_expected_self_tsumo_value: selection.expected_self_tsumo_value,
+        call_expected_self_tsumo_value: selection.forward_metrics.expected_self_tsumo_value,
         comparison: CallIishantenComparison::Unknown,
         speed: CallTwoShantenSpeedDiagnostic {
             own_future_draws,
@@ -1697,8 +1822,7 @@ fn evaluate_three_shanten_call_to_two_shanten(
     inputs: &ThreeShantenCallInputs,
     candidate: &mut CallCandidateDiagnostic,
 ) -> CallDecisionReason {
-    let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
-    melds.push(inputs.meld.clone());
+    let melds = post_call_melds(ctx, &inputs.meld);
     // 残り自摸機会の条件を満たす局面だけ、同じ前方評価から速度優先 policy の翻数判定も回収する。
     let own_future_draws = own_future_draws(ctx);
     let required_han = three_shanten_speed_required_han(own_future_draws);
@@ -1922,6 +2046,125 @@ fn apply_three_shanten_self_tsumo_policy(
         );
         candidate.reason = reason;
     }
+}
+
+// Call / Pass 比較で成立した非テンパイ Call を、鳴き後の既存 Push/Pull で確かめる。
+//
+// 対象は Call / Pass policy が成立させた候補 ([`is_call_pass_eligible_reason`]) だけで、比較で
+// 落ちた候補の理由は上書きしない。即テンパイ Call は成立条件の中で同じ判定を既に通っている。
+//
+// 入力は通常の `act()` が打牌選択の結果を押し引きへ渡すのと同じ
+// [`push_pull_inputs_from_threat_facts`] で、鳴き後の打牌選択が既に選んだ打牌評価・1向聴の
+// 前方集計値・鳴き後の合法打牌をそのまま渡す。押し引きのために前方評価も打点集計もやり直さず、
+// threat の分類・選択打牌の hard-safe 判定・threshold は push_pull 側が持つ。
+//
+// threat facts は鳴く前の局面から1回だけ作り、全候補で共有する。鳴いて変わるのは自分の手牌と
+// 副露だけで、押し引きが読む他家の facts は鳴く前と同じになる。
+//
+// 現在の [`decide_push_pull`] は `Neutral` を返さない。即テンパイ Call と同じく `Push` 以外は
+// 鳴き後に攻撃を継続できない結論として [`CallDecisionReason::PostCallNotPush`] にする。
+fn apply_post_call_push_pull_gate(
+    ctx: &GameContext,
+    candidates: &mut [CallCandidateDiagnostic],
+    post_call_states: &[PostCallState],
+) {
+    let mut player_threats: Option<[PlayerThreatFacts; 4]> = None;
+    for index in 0..candidates.len() {
+        if !is_call_pass_eligible_reason(candidates[index].reason) {
+            continue;
+        }
+        let decision = match &post_call_states[index] {
+            // 先行候補と同じ鳴き後 state なので、同じ結論をそのまま使う。
+            PostCallState::Reused(source) => candidates[*source].post_call_push_pull,
+            PostCallState::Evaluated {
+                preparation,
+                iishanten_forward_metrics,
+            } => {
+                let player_threats =
+                    *player_threats.get_or_insert_with(|| player_threat_facts_from_context(ctx));
+                post_call_non_tenpai_push_pull_decision(
+                    ctx,
+                    player_threats,
+                    preparation,
+                    &candidates[index],
+                    *iishanten_forward_metrics,
+                )
+            }
+        };
+
+        let candidate = &mut candidates[index];
+        candidate.post_call_push_pull = decision;
+        let reason = match decision {
+            Some(decision) if decision.mode == PushPullMode::Push => continue,
+            Some(_) => CallDecisionReason::PostCallNotPush,
+            None => CallDecisionReason::PostCallEvaluationUnavailable,
+        };
+        candidate.eligible = false;
+        candidate.reason = reason;
+    }
+}
+
+/// 非テンパイ Call の Call / Pass policy が成立させた理由か。
+fn is_call_pass_eligible_reason(reason: CallDecisionReason) -> bool {
+    matches!(
+        reason,
+        CallDecisionReason::EligibleIishantenSelfTsumo
+            | CallDecisionReason::EligibleTwoShantenSelfTsumo
+            | CallDecisionReason::EligibleTwoShantenSpeed
+            | CallDecisionReason::EligibleThreeShantenSelfTsumo
+            | CallDecisionReason::EligibleThreeShantenSpeed
+    )
+}
+
+// 鳴き後の打牌選択が既に選んだ非テンパイ打牌を、既存 Push/Pull 入力へ接続する。
+//
+// 鳴き後の手牌 state と合法打牌は、その候補の打牌選択が使ったものと同じ作り方をする。1向聴から
+// の鳴きは事前判定が組み立てた鳴き後 context と合法 Dahai をそのまま使い、2向聴・3向聴からの
+// 鳴きは同じ手牌・副露・喰い替え禁止牌から組み立てる。自分の席を特定できず鳴き後 context を
+// 作れない場合は `None`。
+fn post_call_non_tenpai_push_pull_decision(
+    ctx: &GameContext,
+    player_threats: [PlayerThreatFacts; 4],
+    preparation: &CallCandidatePreparation,
+    candidate: &CallCandidateDiagnostic,
+    iishanten_forward_metrics: Option<ForwardMetrics>,
+) -> Option<PushPullDecision> {
+    let evaluation = candidate.post_call_discard.as_ref()?;
+    let decide = |post_call_context: &GameContext, legal_actions: &[LegalAction]| {
+        decide_push_pull(&push_pull_inputs_from_threat_facts(
+            post_call_context,
+            player_threats,
+            Some(evaluation),
+            iishanten_forward_metrics,
+            None,
+            None,
+            legal_actions,
+        ))
+    };
+    let (meld, post_call_tiles) = match preparation {
+        CallCandidatePreparation::PostCall(inputs) => {
+            return Some(decide(&inputs.post_call_context, &inputs.legal_actions));
+        }
+        CallCandidatePreparation::TwoShantenCall(inputs) => (&inputs.meld, &inputs.post_call_tiles),
+        CallCandidatePreparation::ThreeShantenCall(inputs) => {
+            (&inputs.meld, &inputs.post_call_tiles)
+        }
+        CallCandidatePreparation::Settled | CallCandidatePreparation::Reused(_) => return None,
+    };
+    let post_call_context =
+        ctx.with_own_hand_state(post_call_tiles.clone(), post_call_melds(ctx, meld))?;
+    let legal_actions = post_call_legal_dahai_actions(
+        post_call_tiles,
+        candidate.post_call_forbidden_discards.as_deref()?,
+    );
+    Some(decide(&post_call_context, &legal_actions))
+}
+
+// 既存副露に今回の Chi / Pon を加えた、鳴き後の副露一覧。
+fn post_call_melds(ctx: &GameContext, meld: &Meld) -> Vec<Meld> {
+    let mut melds: Vec<Meld> = ctx.own_melds().unwrap_or_default().to_vec();
+    melds.push(meld.clone());
+    melds
 }
 
 // Call > Pass の比較そのもの。`eligible` は Call が厳密に高い場合の理由で、現在の向聴数によって
@@ -2225,8 +2468,9 @@ mod tests {
         with_production_three_shanten_continuation,
     };
     use crate::prospective_value::{
-        continuation_han_verdict, han_floor_counter, scored_han_verdict,
+        continuation_han_verdict, han_floor_counter, scored_han_verdict, tenpai_value_memo_counter,
     };
+    use crate::push_pull::PushPullReason;
 
     use crate::decision_timing::{CallCandidateDuration, CallDecisionDurations};
 
@@ -3335,8 +3579,8 @@ mod tests {
 
         assert_eq!(with.evaluation, without.evaluation);
         assert_eq!(
-            with.expected_self_tsumo_value,
-            without.expected_self_tsumo_value
+            with.forward_metrics.expected_self_tsumo_value,
+            without.forward_metrics.expected_self_tsumo_value
         );
         assert_eq!(without.continuation_han, None);
         assert_eq!(with.continuation_han, Some(ProspectiveHanVerdict::AtLeast));
@@ -5688,5 +5932,439 @@ mod tests {
             ]),
             CallDecisionReason::EligibleTenpai
         );
+    }
+
+    // ---- 鳴き後 Push/Pull gate ----
+
+    // 反応元でない player 2 の3副露。既存 OpenHandThreat の Danger になる。副露した牌は、どの
+    // 手牌の受け入れにも関わらない 1s / 9p / 9s。
+    fn danger_open_hand_melds() -> Vec<Meld> {
+        [72, 68, 104]
+            .map(|first| {
+                Meld::new(
+                    MeldKind::Pon,
+                    tiles(&[first, first + 1, first + 2]),
+                    Some(tile(first)),
+                )
+            })
+            .to_vec()
+    }
+
+    // player 2 に Danger の副露を置いた reaction 局面。副露した牌は見え牌にも加える。
+    fn threatened_reaction_context(
+        hand: &[u8],
+        own_melds: Vec<Meld>,
+        target: u8,
+        remaining_tiles: u32,
+    ) -> GameContext {
+        let hand_tiles = tiles(hand);
+        let opponent_melds = danger_open_hand_melds();
+        let mut visible = hand_tiles.clone();
+        visible.push(tile(target));
+        visible.extend(
+            own_melds
+                .iter()
+                .chain(&opponent_melds)
+                .flat_map(|meld| meld.tiles().iter().copied()),
+        );
+
+        GameContext::from_parts_with_melds(
+            None,
+            hand_tiles,
+            vec![],
+            TileType::new(EAST),
+            TileType::new(EAST),
+            visible,
+            Some(0),
+            Some(0),
+            [vec![], vec![tile(target)], vec![], vec![]],
+            [false; 4],
+            [own_melds, vec![], opponent_melds, vec![]],
+        )
+        .with_history_furiten_facts(bot_logic::HistoryFuritenFacts {
+            same_turn: Some(false),
+            riichi_missed_win: Some(false),
+        })
+        .with_reaction_source_player(Some(1))
+        .with_table_state_facts(crate::context::TableStateFacts {
+            remaining_tiles: Some(remaining_tiles),
+            ..Default::default()
+        })
+    }
+
+    // low_value_two_shanten_reaction_context と同じ 白 Pon + 234m Chi を持つ局面。役牌2翻の
+    // 手なので、鳴き後1向聴の ExpectedSelfTsumoValue は押し引きの threshold に届かない。
+    fn threatened_low_value_two_shanten_reaction_context(
+        hand: &[u8],
+        target: u8,
+        remaining_tiles: u32,
+    ) -> GameContext {
+        let melds = vec![
+            Meld::new(MeldKind::Pon, tiles(&[124, 125, 126]), Some(tile(124))),
+            Meld::new(MeldKind::Chi, tiles(&[4, 8, 12]), Some(tile(4))),
+        ];
+        threatened_reaction_context(hand, melds, target, remaining_tiles)
+    }
+
+    // valued_two_shanten_reaction_context と同じ 白 Pon + 發 Pon を持つ局面。
+    fn threatened_two_shanten_reaction_context(
+        hand: &[u8],
+        target: u8,
+        remaining_tiles: u32,
+    ) -> GameContext {
+        let melds = vec![
+            Meld::new(MeldKind::Pon, tiles(&[124, 125, 126]), Some(tile(124))),
+            Meld::new(MeldKind::Pon, tiles(&[128, 129, 130]), Some(tile(128))),
+        ];
+        threatened_reaction_context(hand, melds, target, remaining_tiles)
+    }
+
+    // 同じ局面で、鳴き後の選択打牌だけを Danger の相手に対する一時通過牌にする。見え牌も
+    // 手牌も変えないので、Call / Pass 比較と鳴き後の打牌選択は変わらない。
+    fn with_selected_discard_passed_by_the_threat(
+        ctx: &GameContext,
+        candidate: &CallCandidateDiagnostic,
+    ) -> GameContext {
+        let discard = candidate
+            .post_call_discard
+            .as_ref()
+            .expect("鳴き後打牌")
+            .discard;
+        let mut passed: [Vec<TileType>; 4] = Default::default();
+        passed[2] = vec![discard];
+        ctx.clone().with_temporary_passed_tiles(Some(passed))
+    }
+
+    // Call / Pass 比較で成立した候補が、鳴き後 Push/Pull の Fold で不成立になり、選択打牌が
+    // hard-safe な同じ局面では従来どおり成立することを確かめる。
+    fn assert_post_call_push_pull_gate(
+        ctx: &GameContext,
+        action: &LegalAction,
+        eligible: CallDecisionReason,
+        fold: PushPullReason,
+        safe: PushPullReason,
+    ) {
+        let (decision, folded) = single_candidate(ctx, action, false);
+        assert_eq!(folded.reason, CallDecisionReason::PostCallNotPush);
+        assert!(!folded.eligible);
+        assert_eq!(decision.selected, None);
+        assert_eq!(decision.reason, CallDecisionReason::PostCallNotPush);
+        assert_eq!(folded.call_pass_eligible_reason(), Some(eligible));
+        assert_eq!(
+            folded.post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: fold,
+            })
+        );
+
+        let safe_ctx = with_selected_discard_passed_by_the_threat(ctx, &folded);
+        let (decision, pushed) = single_candidate(&safe_ctx, action, false);
+        assert_eq!(pushed.reason, eligible);
+        assert!(pushed.eligible);
+        assert_eq!(decision.selected.as_ref(), Some(action));
+        assert_eq!(pushed.call_pass_eligible_reason(), Some(eligible));
+        assert_eq!(
+            pushed.post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: safe,
+            })
+        );
+        // gate は Call / Pass 比較にも鳴き後の打牌選択にも触れない。
+        assert_eq!(pushed.post_call_discard, folded.post_call_discard);
+        assert_eq!(pushed.iishanten_self_tsumo, folded.iishanten_self_tsumo);
+        assert_eq!(pushed.two_shanten_self_tsumo, folded.two_shanten_self_tsumo);
+        assert_eq!(
+            pushed.three_shanten_self_tsumo,
+            folded.three_shanten_self_tsumo
+        );
+    }
+
+    #[test]
+    fn an_iishanten_call_that_stays_iishanten_is_declined_when_the_post_call_push_pull_folds() {
+        let ctx =
+            threatened_reaction_context(&IISHANTEN_PON_HAND, vec![], IISHANTEN_PON_TARGET, 12);
+        assert_post_call_push_pull_gate(
+            &ctx,
+            &pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED),
+            CallDecisionReason::EligibleIishantenSelfTsumo,
+            PushPullReason::IishantenAgainstHighOpenHand,
+            PushPullReason::SafeIishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_two_shanten_call_to_iishanten_is_declined_when_the_post_call_push_pull_folds() {
+        let ctx = threatened_low_value_two_shanten_reaction_context(
+            &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            32,
+        );
+        assert_post_call_push_pull_gate(
+            &ctx,
+            &pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED),
+            CallDecisionReason::EligibleTwoShantenSelfTsumo,
+            PushPullReason::IishantenAgainstHighOpenHand,
+            PushPullReason::SafeIishantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_three_shanten_call_to_two_shanten_is_declined_when_the_post_call_push_pull_folds() {
+        let ctx = threatened_two_shanten_reaction_context(
+            &THREE_SHANTEN_CALL_PON_HAND,
+            THREE_SHANTEN_CALL_PON_TARGET,
+            THREE_SHANTEN_SPEED_REMAINING,
+        );
+        assert_post_call_push_pull_gate(
+            &ctx,
+            &pon_action(
+                THREE_SHANTEN_CALL_PON_TARGET,
+                &THREE_SHANTEN_CALL_PON_CONSUMED,
+            ),
+            CallDecisionReason::EligibleThreeShantenSelfTsumo,
+            PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            PushPullReason::SafeTwoShantenAgainstHighOpenHand,
+        );
+    }
+
+    #[test]
+    fn a_non_tenpai_call_without_a_clear_threat_keeps_the_call_pass_decision() {
+        // threat がいなければ既存 Push/Pull は NoThreat で押すので、Call / Pass 比較の結論が
+        // そのまま残る。
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 12);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+
+        assert_eq!(
+            candidate.reason,
+            CallDecisionReason::EligibleIishantenSelfTsumo
+        );
+        assert_eq!(decision.selected, Some(action));
+        assert_eq!(
+            candidate.post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Push,
+                reason: PushPullReason::NoThreat,
+            })
+        );
+    }
+
+    #[test]
+    fn a_call_rejected_by_the_call_pass_comparison_keeps_its_reason() {
+        // Call / Pass 比較で落ちた候補には鳴き後 Push/Pull を評価せず、理由を上書きしない。
+        let ctx =
+            threatened_reaction_context(&IISHANTEN_PON_HAND, vec![], IISHANTEN_PON_TARGET, 63);
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let (decision, candidate) = single_candidate(&ctx, &action, false);
+
+        assert_eq!(candidate.reason, CallDecisionReason::PassSelfTsumoNotLower);
+        assert_eq!(decision.selected, None);
+        assert_eq!(candidate.call_pass_eligible_reason(), None);
+        assert_eq!(candidate.post_call_push_pull, None);
+    }
+
+    // 高コストな評価まで済ませた候補と、その鳴き後 state。Call / Pass policy は適用しない。
+    fn evaluated_candidates(
+        ctx: &GameContext,
+        action: &LegalAction,
+    ) -> (Vec<CallCandidateDiagnostic>, Vec<PostCallState>) {
+        let mut timing = CallDecisionTimer::disabled();
+        let mut slots = prepare_call_candidates(ctx, std::slice::from_ref(action), &mut timing);
+        evaluate_call_candidate_group(ctx, &mut slots, false, &mut timing);
+        into_call_candidates(slots)
+    }
+
+    fn pass(kind: PassSelfTsumoContinuationKind, value: Option<u64>) -> PassSelfTsumoContinuation {
+        PassSelfTsumoContinuation {
+            kind,
+            value,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn the_post_call_push_pull_gate_also_applies_to_a_speed_override() {
+        // 値比較では Pass でも速度優先 policy が成立させた Call も、同じ gate を通る。Pass 値を
+        // Call と同値にして値比較の結論を Pass にし、速度優先の判断材料は成立した値に置く。
+        // 鳴き後の state・打牌選択・前方集計値は実際の評価のまま使う。
+        let two_shanten = threatened_low_value_two_shanten_reaction_context(
+            &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            40,
+        );
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let (mut candidates, post_call_states) = evaluated_candidates(&two_shanten, &action);
+        let comparison = candidates[0]
+            .two_shanten_self_tsumo
+            .as_mut()
+            .expect("2向聴 Call / Pass 比較対象");
+        comparison.speed = satisfied_speed_facts();
+        let call_value = comparison.call_expected_self_tsumo_value;
+        apply_two_shanten_self_tsumo_policy(
+            &two_shanten,
+            &mut candidates,
+            Some(pass(PassSelfTsumoContinuationKind::TwoShanten, call_value)),
+            &mut CallDecisionTimer::disabled(),
+        );
+        assert_eq!(
+            candidates[0].reason,
+            CallDecisionReason::EligibleTwoShantenSpeed
+        );
+        apply_post_call_push_pull_gate(&two_shanten, &mut candidates, &post_call_states);
+        assert_eq!(candidates[0].reason, CallDecisionReason::PostCallNotPush);
+        assert!(!candidates[0].eligible);
+        assert_eq!(
+            candidates[0].call_pass_eligible_reason(),
+            Some(CallDecisionReason::EligibleTwoShantenSpeed)
+        );
+        assert_eq!(
+            candidates[0].post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::IishantenAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(select_eligible_candidate(&candidates), None);
+
+        let three_shanten = threatened_two_shanten_reaction_context(
+            &THREE_SHANTEN_CALL_PON_HAND,
+            THREE_SHANTEN_CALL_PON_TARGET,
+            THREE_SHANTEN_SPEED_REMAINING,
+        );
+        let action = pon_action(
+            THREE_SHANTEN_CALL_PON_TARGET,
+            &THREE_SHANTEN_CALL_PON_CONSUMED,
+        );
+        let (mut candidates, post_call_states) = evaluated_candidates(&three_shanten, &action);
+        let comparison = candidates[0]
+            .three_shanten_self_tsumo
+            .as_mut()
+            .expect("3向聴 Call / Pass 比較対象");
+        comparison.speed = satisfied_three_shanten_speed_facts();
+        let call_value = comparison.call_expected_self_tsumo_value;
+        apply_three_shanten_self_tsumo_policy(
+            &three_shanten,
+            &mut candidates,
+            Some(pass(
+                PassSelfTsumoContinuationKind::ThreeShanten,
+                call_value,
+            )),
+            &mut CallDecisionTimer::disabled(),
+        );
+        assert_eq!(
+            candidates[0].reason,
+            CallDecisionReason::EligibleThreeShantenSpeed
+        );
+        apply_post_call_push_pull_gate(&three_shanten, &mut candidates, &post_call_states);
+        assert_eq!(candidates[0].reason, CallDecisionReason::PostCallNotPush);
+        assert_eq!(
+            candidates[0].call_pass_eligible_reason(),
+            Some(CallDecisionReason::EligibleThreeShantenSpeed)
+        );
+        assert_eq!(
+            candidates[0].post_call_push_pull,
+            Some(PushPullDecision {
+                mode: PushPullMode::Fold,
+                reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            })
+        );
+        assert_eq!(select_eligible_candidate(&candidates), None);
+    }
+
+    #[test]
+    fn the_post_call_push_pull_gate_reuses_the_selected_iishanten_forward_metrics() {
+        // gate は鳴き後の打牌選択が求めた前方集計値を転記するだけで、1向聴の前方評価も
+        // terminal scoring もやり直さない。
+        let iishanten =
+            threatened_reaction_context(&IISHANTEN_PON_HAND, vec![], IISHANTEN_PON_TARGET, 12);
+        let iishanten_action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let two_shanten = threatened_low_value_two_shanten_reaction_context(
+            &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            32,
+        );
+        let two_shanten_action =
+            pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+
+        for (ctx, action, kind) in [
+            (
+                &iishanten,
+                &iishanten_action,
+                PassSelfTsumoContinuationKind::Iishanten,
+            ),
+            (
+                &two_shanten,
+                &two_shanten_action,
+                PassSelfTsumoContinuationKind::TwoShanten,
+            ),
+        ] {
+            let (mut candidates, post_call_states) = evaluated_candidates(ctx, action);
+            let mut timing = CallDecisionTimer::disabled();
+            apply_iishanten_self_tsumo_policy(
+                ctx,
+                &mut candidates,
+                (kind == PassSelfTsumoContinuationKind::Iishanten).then(|| pass(kind, Some(0))),
+                &mut timing,
+            );
+            apply_two_shanten_self_tsumo_policy(
+                ctx,
+                &mut candidates,
+                (kind == PassSelfTsumoContinuationKind::TwoShanten).then(|| pass(kind, Some(0))),
+                &mut timing,
+            );
+            assert!(candidates[0].eligible, "{:?}", candidates[0].reason);
+
+            let PostCallState::Evaluated {
+                iishanten_forward_metrics,
+                ..
+            } = &post_call_states[0]
+            else {
+                panic!("高コストな評価を行った候補");
+            };
+            let selected_metrics = iishanten_forward_metrics.expect("選択が求めた前方集計値");
+            assert_eq!(
+                selected_metrics.expected_self_tsumo_value,
+                candidates[0]
+                    .iishanten_self_tsumo
+                    .map(|diagnostic| diagnostic.call_expected_self_tsumo_value)
+                    .or(candidates[0]
+                        .two_shanten_self_tsumo
+                        .map(|diagnostic| diagnostic.call_expected_self_tsumo_value))
+                    .expect("Call / Pass 比較対象")
+            );
+
+            let ((), hits, misses) = tenpai_value_memo_counter::count_during(|| {
+                apply_post_call_push_pull_gate(ctx, &mut candidates, &post_call_states)
+            });
+            assert_eq!((hits, misses), (0, 0));
+            assert_eq!(
+                candidates[0].post_call_push_pull,
+                Some(PushPullDecision {
+                    mode: PushPullMode::Fold,
+                    reason: PushPullReason::IishantenAgainstHighOpenHand,
+                })
+            );
+        }
+
+        // 選択の計算済み値を持たない入口は、同じ鳴き後 state の前方評価をやり直す。gate が
+        // この入口を通らないことの対照。
+        let (candidates, post_call_states) = evaluated_candidates(&iishanten, &iishanten_action);
+        let PostCallState::Evaluated {
+            preparation: CallCandidatePreparation::PostCall(inputs),
+            ..
+        } = &post_call_states[0]
+        else {
+            panic!("1向聴からの鳴き");
+        };
+        let (_, _, misses) = tenpai_value_memo_counter::count_during(|| {
+            crate::push_pull::push_pull_inputs_from_context_with_evaluation(
+                &inputs.post_call_context,
+                candidates[0].post_call_discard.as_ref(),
+                &inputs.legal_actions,
+            )
+        });
+        assert!(misses > 0);
     }
 }

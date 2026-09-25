@@ -1,0 +1,36 @@
+{
+  "hand": "234m 67m 34p 88p 79s",
+
+  "dora_indicators": "1p",
+
+  "round_wind": "E",
+
+  "player_id": 0,
+  "oya": 1,
+
+  "discards": [
+    "N 1m 9p W 7p",
+    "S 1s P 9m C 4s 2p",
+    "E 1p 8s 9m",
+    "N W 2s 1p 5s"
+  ],
+
+  "melds": [
+    [
+      { "kind": "pon", "tiles": "5s 5s 5s", "called_tile": "5s" }
+    ],
+    [],
+    [
+      { "kind": "pon", "tiles": "P P P", "called_tile": "P" },
+      { "kind": "chi", "tiles": "4s 5sr 6s", "called_tile": "4s" },
+      { "kind": "pon", "tiles": "7p 7p 7p", "called_tile": "7p" }
+    ],
+    []
+  ],
+
+  "remaining_tiles": 40,
+
+  "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+
+  "legal_dahai": "2m 3m 4m 6m 7m 3p 4p 8p 7s 9s"
+}

@@ -12,6 +12,8 @@ mod iishanten_selection_parallel;
 mod open_hand_defense;
 #[cfg(test)]
 mod open_hand_threat;
+#[cfg(test)]
+mod post_call_push_pull_regression;
 mod replay;
 #[cfg(test)]
 mod scenario_regression;
