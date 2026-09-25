@@ -5007,11 +5007,12 @@ mod tests {
             0
         );
         assert!(!restricted_public.selected_normal_discard_hard_safe_for_all_threat_targets);
+        assert!(restricted_public.has_only_caution_open_hand_threats());
         assert_eq!(
             decide_push_pull(&restricted_public),
             crate::push_pull::PushPullDecision {
-                mode: PushPullMode::Fold,
-                reason: PushPullReason::WeakTenpaiAgainstHighOpenHand,
+                mode: PushPullMode::Push,
+                reason: PushPullReason::TenpaiAgainstCautionOpenHand,
             }
         );
 
@@ -5144,7 +5145,7 @@ mod tests {
     }
 
     #[test]
-    fn weak_tenpai_push_against_a_late_one_meld_caution_matches_every_entry_point() {
+    fn weak_tenpai_push_against_a_caution_matches_every_entry_point() {
         let late_discards = [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107];
         let ctx = open_hand_context_with_meld_count(
             &OPPONENT_MELD_HAND,
@@ -5166,7 +5167,7 @@ mod tests {
         let offense = inputs.offense.expect("offense がある");
         assert_eq!(inputs.player_threats[1].open_meld_count, 1);
         assert_eq!(inputs.player_threats[1].discard_count, 12);
-        assert!(inputs.has_only_late_one_meld_actionable_open_hand_threats());
+        assert!(inputs.has_only_caution_open_hand_threats());
         assert_eq!(offense.min_shanten_after_discard, 0);
         assert!(
             offense
@@ -5177,7 +5178,7 @@ mod tests {
             diagnostic.push_pull_decision,
             Some(crate::push_pull::PushPullDecision {
                 mode: PushPullMode::Push,
-                reason: PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
+                reason: PushPullReason::TenpaiAgainstCautionOpenHand,
             })
         );
         assert_eq!(diagnostic.selected_action, acted);
