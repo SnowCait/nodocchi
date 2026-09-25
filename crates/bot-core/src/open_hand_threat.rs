@@ -11,8 +11,9 @@ use crate::threat::PlayerThreatFacts;
 /// から決める暫定 heuristic。公開副露が無くても暗槓だけで `Present` / `Caution` / `Danger` に
 /// なり得る。
 ///
-/// 現時点の production policy は `Caution` と `Danger` を区別せず、どちらも
-/// [`OpenHandThreatAssessment::is_actionable`] として同じように扱う。
+/// production policy は `Caution` と `Danger` をどちらも
+/// [`OpenHandThreatAssessment::is_actionable`] として扱う。押し引きのテンパイ判定だけは
+/// [`has_only_caution_open_hand_threats`] で `Caution` だけの局面を区別する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenHandThreatLevel {
     /// fixed meld が無い。Ankan も完成面子なので、暗槓だけの相手はここには入らない。
@@ -205,6 +206,19 @@ pub fn has_actionable_open_hand_threat(assessments: &[OpenHandThreatAssessment; 
     assessments
         .iter()
         .any(|assessment| assessment.is_actionable())
+}
+
+/// 分類済みの全4席のうち actionable な席が1つ以上あり、その全員が
+/// [`OpenHandThreatLevel::Caution`] か判定する pure helper。
+///
+/// `Danger` が1席でもあれば `false`。`Present` / `None` と対象外の席は actionable ではないので
+/// 判定に影響しない。分類し直さず、渡された level をそのまま source of truth にする。
+pub fn has_only_caution_open_hand_threats(assessments: &[OpenHandThreatAssessment; 4]) -> bool {
+    has_actionable_open_hand_threat(assessments)
+        && assessments
+            .iter()
+            .filter(|assessment| assessment.is_actionable())
+            .all(|assessment| assessment.level() == Some(OpenHandThreatLevel::Caution))
 }
 
 // 対象外の席とその理由。自分のリーチは自分の席として、席が不明なリーチ者はリーチ者として扱い、
@@ -1066,6 +1080,40 @@ mod tests {
         ]));
         assert!(has_actionable_open_hand_threat(&[
             self_seat, danger, present, none
+        ]));
+    }
+
+    #[test]
+    fn only_caution_requires_every_actionable_seat_to_be_caution() {
+        let none = classify_open_hand_threat(opponent_facts());
+        let present = classify_open_hand_threat(open_melds(1));
+        let caution = classify_open_hand_threat(with_discards(open_melds(2), 9));
+        let late_caution = classify_open_hand_threat(with_discards(open_melds(1), 12));
+        let danger = classify_open_hand_threat(as_dealer(open_melds(2)));
+        let self_seat = OpenHandThreatAssessment::NotApplicable(OpenHandThreatExclusion::SelfSeat);
+        let reached = OpenHandThreatAssessment::NotApplicable(OpenHandThreatExclusion::Reached);
+
+        assert_eq!(caution.level(), Some(OpenHandThreatLevel::Caution));
+        assert_eq!(late_caution.level(), Some(OpenHandThreatLevel::Caution));
+        assert_eq!(danger.level(), Some(OpenHandThreatLevel::Danger));
+
+        assert!(has_only_caution_open_hand_threats(&[
+            self_seat, caution, present, none
+        ]));
+        assert!(has_only_caution_open_hand_threats(&[
+            self_seat,
+            caution,
+            late_caution,
+            reached
+        ]));
+        assert!(!has_only_caution_open_hand_threats(&[
+            self_seat, caution, danger, none
+        ]));
+        assert!(!has_only_caution_open_hand_threats(&[
+            self_seat, danger, present, none
+        ]));
+        assert!(!has_only_caution_open_hand_threats(&[
+            self_seat, present, none, reached
         ]));
     }
 
