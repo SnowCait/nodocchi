@@ -15,7 +15,7 @@ use bot_core::defense::{
 };
 use bot_core::meld::{Meld, MeldKind};
 use bot_core::open_hand_defense::{
-    OpenHandDefenseCategory, high_open_hand_threat_players_from_context,
+    OpenHandDefenseCategory, actionable_open_hand_threat_players_from_context,
     select_open_hand_defense_fallback_action_with_kind,
 };
 use bot_core::{
@@ -984,13 +984,13 @@ fn measure_combined_exact_defense_fallback_selection() {
             .iter()
             .filter(|target| target.kind == ThreatDefenseTargetKind::Riichi)
             .count();
-        let high_open_hand_target_count = targets
+        let actionable_open_hand_target_count = targets
             .iter()
             .filter(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand)
             .count();
         assert_eq!(riichi_target_count, 1, "{}", case.name);
         assert_eq!(
-            high_open_hand_target_count,
+            actionable_open_hand_target_count,
             case.open_hands.len(),
             "{}",
             case.name
@@ -1044,7 +1044,7 @@ fn measure_combined_exact_defense_fallback_selection() {
         println!("  Riichi target count:              {riichi_target_count}");
         println!(
             "  High OpenHand target count:       {}",
-            high_open_hand_target_count
+            actionable_open_hand_target_count
         );
         println!(
             "  High OpenHand meld count(s):      {:?}",
@@ -1107,7 +1107,7 @@ fn measure_open_hand_exact_defense_fallback_selection() {
             .copied()
             .map(|tile| LegalAction::Dahai { tile })
             .collect();
-        let targets = high_open_hand_threat_players_from_context(&context);
+        let targets = actionable_open_hand_threat_players_from_context(&context);
         assert_eq!(targets, vec![1]);
 
         let mut tile_types = Vec::new();

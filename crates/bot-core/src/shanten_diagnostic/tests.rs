@@ -794,11 +794,11 @@ fn diagnose_classifies_the_open_hand_threat_from_the_same_facts() {
         );
     }
 
-    // 白 Pon + Chi の2副露で確定役牌があるので High。
+    // 白 Pon + Chi の2副露で確定役牌があるので Danger。
     assert_eq!(
         diagnostic.player_threats[1].open_hand_threat,
         OpenHandThreatAssessment::Classified(OpenHandThreatDecision {
-            level: OpenHandThreatLevel::High,
+            level: OpenHandThreatLevel::Danger,
             reason: OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         })
     );
@@ -813,7 +813,7 @@ fn diagnose_classifies_the_open_hand_threat_from_the_same_facts() {
 }
 
 #[test]
-fn diagnose_reports_the_open_hand_defense_of_the_high_threats() {
+fn diagnose_reports_the_open_hand_defense_of_the_actionable_threats() {
     use crate::open_hand_defense::OpenHandDefenseDiagnostic;
 
     let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
@@ -865,7 +865,7 @@ fn diagnose_reports_the_open_hand_defense_of_the_high_threats() {
 }
 
 #[test]
-fn diagnose_reports_no_open_hand_defense_target_without_a_high_threat() {
+fn diagnose_reports_no_open_hand_defense_target_without_an_actionable_threat() {
     use crate::open_hand_threat::OpenHandThreatLevel;
 
     // 役牌 Pon 1副露だけの相手は Present なので、防御 target にしない。
@@ -897,24 +897,24 @@ fn a_reached_player_is_not_an_open_hand_defense_target() {
 }
 
 #[test]
-fn a_high_open_hand_threat_folds_from_a_weak_tenpai() {
+fn a_danger_open_hand_threat_folds_from_a_weak_tenpai() {
     use crate::open_hand_threat::OpenHandThreatLevel;
 
     let actions = opponent_meld_actions();
-    let with_high = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
+    let with_danger = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
     let without_melds = opponent_meld_context(Some(0), vec![]);
 
-    let melded = diagnose_matching_act(&with_high, &actions);
+    let melded = diagnose_matching_act(&with_danger, &actions);
     let plain = diagnose_matching_act(&without_melds, &actions);
 
     assert_eq!(
         melded.player_threats[1].open_hand_threat.level(),
-        Some(OpenHandThreatLevel::High)
+        Some(OpenHandThreatLevel::Danger)
     );
     assert!(melded.open_hand_defense.has_target());
     assert!(!plain.open_hand_defense.has_target());
 
-    // 待ち 3 枚の弱いテンパイなので、High の副露相手がいれば降りる。
+    // 待ち 3 枚の弱いテンパイなので、Caution / Danger の副露相手がいれば降りる。
     let melded_decision = melded.push_pull_decision.expect("押し引きを判定している");
     let plain_decision = plain.push_pull_decision.expect("押し引きを判定している");
     assert_eq!(
@@ -967,7 +967,7 @@ fn diagnose_does_not_guess_the_self_seat_without_player_id() {
 
 #[test]
 fn opponent_melds_keep_the_same_offense_and_normal_discard() {
-    // 副露 facts から High OpenHandThreat になっても、通常打牌評価と offense は変わらない。
+    // 副露 facts から actionable OpenHandThreat になっても、通常打牌評価と offense は変わらない。
     // 変わるのは threat と、そこから決まる押し引き・選択経路だけ。
     let actions = opponent_meld_actions();
     let with_melds = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
@@ -994,10 +994,10 @@ fn opponent_melds_keep_the_same_offense_and_normal_discard() {
     assert_eq!(melded_inputs.self_dealer, plain_inputs.self_dealer);
     assert_eq!(melded_inputs.offense, plain_inputs.offense);
     assert_ne!(melded_inputs.player_threats, plain_inputs.player_threats);
-    assert!(melded_inputs.has_high_open_hand_threat());
-    assert!(!plain_inputs.has_high_open_hand_threat());
+    assert!(melded_inputs.has_actionable_open_hand_threat());
+    assert!(!plain_inputs.has_actionable_open_hand_threat());
 
-    // 待ち 3 枚の弱いテンパイなので、High の副露相手がいれば降りる。
+    // 待ち 3 枚の弱いテンパイなので、Caution / Danger の副露相手がいれば降りる。
     let decision = melded.push_pull_decision.expect("押し引きを判定している");
     assert_eq!(decision.mode, PushPullMode::Fold);
     assert_eq!(
@@ -1020,7 +1020,7 @@ fn opponent_melds_keep_the_same_offense_and_normal_discard() {
 
     assert_eq!(
         melded.player_threats[1].open_hand_threat.level(),
-        Some(crate::open_hand_threat::OpenHandThreatLevel::High)
+        Some(crate::open_hand_threat::OpenHandThreatLevel::Danger)
     );
 }
 

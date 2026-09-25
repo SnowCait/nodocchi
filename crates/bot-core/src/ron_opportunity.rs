@@ -10,7 +10,7 @@
 //!   if Reach             リーチ宣言が公開された場合の公開 safety evidence
 //!   if Damaten           テンパイ宣言が公開されないという事実だけ
 //! 局面全体
-//!   external threats     既存 classification が持つリーチ者と High OpenHand target
+//!   external threats     既存 classification が持つリーチ者と actionable OpenHand target
 //! ```
 //!
 //! # 確率ではない
@@ -94,7 +94,7 @@ use crate::defense::{
     HonorSafetyRank, SuitedSafetyEvidence, honor_safety_rank, is_genbutsu_for,
     suited_safety_evidence_for_players, visible_count_of,
 };
-use crate::open_hand_defense::high_open_hand_threat_players;
+use crate::open_hand_defense::actionable_open_hand_threat_players;
 use crate::open_hand_threat::OpenHandThreatAssessment;
 
 // リーチ宣言は他家へ公開される。ダマでは公開されない。どちらも局面に依らない構造上の事実。
@@ -179,8 +179,8 @@ pub struct HonorPublicSafetyEvidence {
 pub struct RonOpportunityExternalThreats {
     /// 他家リーチ者の席。[`GameContext::reached_opponents`] そのもの。
     pub reached_opponents: Vec<usize>,
-    /// High OpenHandThreat と分類された席。既存 classification そのもので、分類し直さない。
-    pub high_open_hand_targets: Vec<usize>,
+    /// actionable OpenHandThreat と分類された席。既存 classification そのもので、分類し直さない。
+    pub actionable_open_hand_targets: Vec<usize>,
 }
 
 impl RonOpportunityExternalThreats {
@@ -188,8 +188,8 @@ impl RonOpportunityExternalThreats {
         self.reached_opponents.len()
     }
 
-    pub fn high_open_hand_target_count(&self) -> usize {
-        self.high_open_hand_targets.len()
+    pub fn actionable_open_hand_target_count(&self) -> usize {
+        self.actionable_open_hand_targets.len()
     }
 }
 
@@ -254,7 +254,7 @@ pub(crate) fn diagnose_ron_opportunity(
         waits,
         external_threats: RonOpportunityExternalThreats {
             reached_opponents: context.reached_opponents(),
-            high_open_hand_targets: high_open_hand_threat_players(open_hand_threats),
+            actionable_open_hand_targets: actionable_open_hand_threat_players(open_hand_threats),
         },
     })
 }
@@ -331,7 +331,7 @@ mod tests {
 
     use crate::defense::{SujiSafetyRank, WallRank, suited_safety_rank_for_players, wall_rank};
     use crate::meld::{Meld, MeldKind};
-    use crate::open_hand_defense::high_open_hand_threat_players_from_context;
+    use crate::open_hand_defense::actionable_open_hand_threat_players_from_context;
     use crate::open_hand_threat::classify_open_hand_threats;
     use crate::threat::player_threat_facts_from_context;
 
@@ -389,7 +389,7 @@ mod tests {
         own_discards: &'a [&'a str],
         /// リーチしている他家の席。
         reached_opponents: &'a [usize],
-        /// 他家の副露。High OpenHandThreat の分類に使う。
+        /// 他家の副露。actionable OpenHandThreat の分類に使う。
         opponent_melds: &'a [(usize, &'a [&'a str])],
     }
 
@@ -867,13 +867,15 @@ mod tests {
             }],
             external_threats: RonOpportunityExternalThreats {
                 reached_opponents: Vec::new(),
-                high_open_hand_targets: Vec::new(),
+                actionable_open_hand_targets: Vec::new(),
             },
         };
 
         assert_eq!(opportunity.external_threats.reached_opponent_count(), 0);
         assert_eq!(
-            opportunity.external_threats.high_open_hand_target_count(),
+            opportunity
+                .external_threats
+                .actionable_open_hand_target_count(),
             0
         );
     }
@@ -895,8 +897,8 @@ mod tests {
     }
 
     #[test]
-    fn the_high_open_hand_targets_match_the_existing_classifier() {
-        // 3副露で High になる相手。分類は既存 classifier が source of truth。
+    fn the_actionable_open_hand_targets_match_the_existing_classifier() {
+        // 3副露で Danger になる相手。分類は既存 classifier が source of truth。
         let case = CaseSpec {
             opponent_melds: &[
                 (2, &["W", "W", "W"]),
@@ -909,11 +911,11 @@ mod tests {
         let threats = case.opportunity().external_threats;
 
         assert_eq!(
-            threats.high_open_hand_targets,
-            high_open_hand_threat_players_from_context(&case.context)
+            threats.actionable_open_hand_targets,
+            actionable_open_hand_threat_players_from_context(&case.context)
         );
-        assert_eq!(threats.high_open_hand_targets, vec![2]);
-        assert_eq!(threats.high_open_hand_target_count(), 1);
+        assert_eq!(threats.actionable_open_hand_targets, vec![2]);
+        assert_eq!(threats.actionable_open_hand_target_count(), 1);
         assert!(threats.reached_opponents.is_empty());
     }
 }

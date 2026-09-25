@@ -20,7 +20,7 @@ use crate::damaten_value::{
 };
 use crate::discard_selection::{DiscardActionSelection, selected_discard_tenpai_wait_availability};
 use crate::offense_value::TenpaiScoringMode;
-use crate::open_hand_defense::high_open_hand_threat_players;
+use crate::open_hand_defense::actionable_open_hand_threat_players;
 use crate::open_hand_threat::OpenHandThreatAssessment;
 use crate::reach_policy::{
     NonFuritenBadWaitTimingFacts, ReachDecisionReason, ReachTimingDiagnostic,
@@ -373,8 +373,8 @@ fn reach_timing(
     }
 
     let reached_opponents = ctx.reached_opponents();
-    let high_open_hand_targets = high_open_hand_threat_players(open_hand_threats);
-    if !reached_opponents.is_empty() || !high_open_hand_targets.is_empty() {
+    let actionable_open_hand_targets = actionable_open_hand_threat_players(open_hand_threats);
+    if !reached_opponents.is_empty() || !actionable_open_hand_targets.is_empty() {
         return ReachTimingDiagnostic::non_furiten_heuristic_not_evaluated();
     }
 
@@ -391,7 +391,7 @@ fn reach_timing(
         wall_rank: safety.and_then(|safety| safety.suited.map(|suited| suited.wall_rank)),
         suji_rank: safety.and_then(|safety| safety.suited.map(|suited| suited.suji_rank)),
         reached_opponent_count: reached_opponents.len(),
-        high_open_hand_target_count: high_open_hand_targets.len(),
+        actionable_open_hand_target_count: actionable_open_hand_targets.len(),
     };
     if !evaluates_non_furiten_bad_wait_reach_timing(facts) {
         return ReachTimingDiagnostic::non_furiten_heuristic_not_evaluated();

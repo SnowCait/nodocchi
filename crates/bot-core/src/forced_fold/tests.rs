@@ -160,13 +160,13 @@ fn routes_a_reached_opponent_to_reach_defense() {
 }
 
 #[test]
-fn routes_a_high_open_hand_to_open_hand_defense() {
+fn routes_an_actionable_open_hand_to_open_hand_defense() {
     let context = open_hand_context([false; 4]);
     let actions = open_hand_actions();
     let inputs = push_pull_inputs_from_context(&context, &actions);
     assert_eq!(inputs.opponent_reach_count, 0);
     assert_eq!(
-        high_open_hand_threat_players(&inputs.open_hand_threats),
+        actionable_open_hand_threat_players(&inputs.open_hand_threats),
         vec![2]
     );
 
@@ -203,7 +203,7 @@ fn routes_combined_threats_to_combined_defense() {
 
 #[test]
 fn is_unavailable_without_a_clear_threat() {
-    // リーチ者も High OpenHandThreat の相手もいない局面。通常打牌を「ベタ降り最善打牌」として
+    // リーチ者も actionable OpenHandThreat の相手もいない局面。通常打牌を「ベタ降り最善打牌」として
     // 返さない。
     let context = no_threat_context();
     let actions = open_hand_actions();
@@ -319,7 +319,7 @@ fn ranks_candidates_from_the_production_defense_ordering() {
     let open_hand = open_hand_context([false; 4]);
     let open_hand_dahai = open_hand_actions();
     let open_hand_inputs = push_pull_inputs_from_context(&open_hand, &open_hand_dahai);
-    let targets = high_open_hand_threat_players(&open_hand_inputs.open_hand_threats);
+    let targets = actionable_open_hand_threat_players(&open_hand_inputs.open_hand_threats);
     let FoldDefenseEvaluation::OpenHand(evaluation) =
         evaluate_fold_defense(&open_hand, &open_hand_dahai, &open_hand_inputs, true)
     else {
@@ -490,7 +490,7 @@ fn does_not_invent_evidence_where_the_exact_model_is_truly_unavailable() {
     // unavailable なので、percentage を捏造せず heuristic のまま順位を付ける。
     let context = open_hand_context([false; 4]);
     let actions = open_hand_actions();
-    let targets = high_open_hand_threat_players(
+    let targets = actionable_open_hand_threat_players(
         &push_pull_inputs_from_context(&context, &actions).open_hand_threats,
     );
     assert!(
@@ -697,13 +697,13 @@ fn exact_chi(mjai: &str) -> Meld {
     Meld::new(MeldKind::Chi, tiles.clone(), Some(tiles[0]))
 }
 
-// 白の Pon。風情報が無くても確定役牌で、High OpenHandThreat の条件を満たす。
+// 白の Pon。風情報が無くても確定役牌で、actionable OpenHandThreat の条件を満たす。
 fn exact_value_pon() -> Meld {
     let tiles: Vec<_> = TileId::copies(exact_tile_type("P")).take(3).collect();
     Meld::new(MeldKind::Pon, tiles.clone(), Some(tiles[0]))
 }
 
-/// exact hidden-hand model が使える High OpenHandThreat 局面。
+/// exact hidden-hand model が使える actionable OpenHandThreat 局面。
 ///
 /// target は4副露で隠れ手牌が1枚だけなので、見え牌を絞ると単騎候補を数え切れる。`unseen` は
 /// 「target がまだ持ち得る牌種と残り枚数」で、これが exact model の `T` になる。`unseen` に無い
@@ -1139,7 +1139,7 @@ fn keeps_the_ranking_when_every_tile_kind_is_a_single_copy() {
     let context = open_hand_context([false; 4]);
     let actions = open_hand_actions();
     let inputs = push_pull_inputs_from_context(&context, &actions);
-    let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+    let targets = actionable_open_hand_threat_players(&inputs.open_hand_threats);
     let FoldDefenseEvaluation::OpenHand(evaluation) =
         evaluate_fold_defense(&context, &actions, &inputs, true)
     else {
@@ -1195,7 +1195,7 @@ fn applies_the_copies_heuristic_to_the_open_hand_exact_risk_tier() {
     );
     let actions = vec![dahai(0), dahai(4), dahai(8), dahai(9)];
     let inputs = push_pull_inputs_from_context(&context, &actions);
-    let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+    let targets = actionable_open_hand_threat_players(&inputs.open_hand_threats);
     let FoldDefenseEvaluation::OpenHand(evaluation) =
         evaluate_fold_defense(&context, &actions, &inputs, true)
     else {

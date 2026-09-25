@@ -337,7 +337,7 @@ mod tests {
     };
     use crate::meld::{Meld, MeldKind};
     use crate::offense_value::{TenpaiOffenseMode, current_reach_baseline_context};
-    use crate::open_hand_defense::high_open_hand_threat_players_from_context;
+    use crate::open_hand_defense::actionable_open_hand_threat_players_from_context;
     use crate::reach_policy::ReachDecisionReason;
     use crate::tenpai_continuation::TenpaiContinuationCandidate;
 
@@ -1128,8 +1128,8 @@ mod tests {
 
             assert_eq!(threats.reached_opponents, case.context.reached_opponents());
             assert_eq!(
-                threats.high_open_hand_targets,
-                high_open_hand_threat_players_from_context(&case.context)
+                threats.actionable_open_hand_targets,
+                actionable_open_hand_threat_players_from_context(&case.context)
             );
         }
     }

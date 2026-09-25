@@ -8,22 +8,28 @@ use crate::threat::PlayerThreatFacts;
 /// 非リーチ相手の暫定的な危険度。
 ///
 /// 正確なテンパイ確率・放銃率・推定打点ではなく、観測できた副露・暗槓・ドラ・役牌・局進行だけ
-/// から決める暫定 heuristic。公開副露が無くても暗槓だけで `Present` / `High` になり得る。
+/// から決める暫定 heuristic。公開副露が無くても暗槓だけで `Present` / `Caution` / `Danger` に
+/// なり得る。
+///
+/// 現時点の production policy は `Caution` と `Danger` を区別せず、どちらも
+/// [`OpenHandThreatAssessment::is_actionable`] として同じように扱う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenHandThreatLevel {
     /// fixed meld が無い。Ankan も完成面子なので、暗槓だけの相手はここには入らない。
     None,
-    /// fixed meld はあるが、`High` の条件は満たさない。
+    /// fixed meld はあるが、`Caution` / `Danger` の条件は満たさない。
     Present,
-    /// 暫定 heuristic の警戒条件を満たす。
-    High,
+    /// 局進行だけを根拠にした警戒条件を満たし、`Danger` の条件は満たさない。
+    Caution,
+    /// 面子数・確定打点・親を根拠にした強い警戒条件を満たす。
+    Danger,
 }
 
 /// [`OpenHandThreatLevel`] をその値にした条件。
 ///
-/// 複数の `High` 条件を同時に満たす場合は、[`classify_open_hand_threat`] が固定の優先順位で
-/// 1つだけ選ぶ。level 自体はどの条件を満たしても `High` なので、この順位は診断表示のためだけの
-/// ものになる。
+/// 複数の警戒条件を同時に満たす場合は、[`classify_open_hand_threat`] が固定の優先順位で
+/// 1つだけ選ぶ。`Danger` の条件は `Caution` の条件より常に優先されるので、選ばれた reason は
+/// 常に level と一致する。
 ///
 /// 各条件には `OpenMeld` 系と `FixedMeld` 系の2つの reason があり、同じ条件が公開副露だけで
 /// 成立するなら `OpenMeld` 系、暗槓を含めて初めて成立するなら `FixedMeld` 系になる。暗槓込みで
@@ -32,29 +38,29 @@ pub enum OpenHandThreatLevel {
 pub enum OpenHandThreatReason {
     /// fixed meld が無い。
     NoOpenMeld,
-    /// open meld はあるが `High` 条件をどれも満たさない。
+    /// open meld はあるが警戒条件をどれも満たさない。
     OpenMeldPresent,
-    /// 暗槓だけがあり `High` 条件をどれも満たさない。
+    /// 暗槓だけがあり警戒条件をどれも満たさない。
     FixedMeldPresent,
-    /// 公開副露が3つ以上。
+    /// `Danger`: 公開副露が3つ以上。
     ThreeOrMoreOpenMelds,
-    /// 暗槓を含む完成面子が3つ以上。
+    /// `Danger`: 暗槓を含む完成面子が3つ以上。
     ThreeOrMoreFixedMelds,
-    /// 公開副露が2つ以上かつ公開副露から確定する役牌翻・ドラ翻の proxy が2以上。
+    /// `Danger`: 公開副露が2つ以上かつ公開副露から確定する役牌翻・ドラ翻の proxy が2以上。
     TwoOrMoreWithVisibleHan,
-    /// 暗槓を含む完成面子が2つ以上かつ、暗槓を含めて確定する役牌翻・ドラ翻の proxy が2以上。
+    /// `Danger`: 暗槓を含む完成面子が2つ以上かつ、暗槓を含めて確定する役牌翻・ドラ翻の proxy が2以上。
     TwoOrMoreFixedMeldsWithVisibleHan,
-    /// 親が公開副露を2つ以上。
+    /// `Danger`: 親が公開副露を2つ以上。
     DealerWithTwoOrMoreOpenMelds,
-    /// 親が暗槓を含む完成面子を2つ以上。
+    /// `Danger`: 親が暗槓を含む完成面子を2つ以上。
     DealerWithTwoOrMoreFixedMelds,
-    /// 公開副露が2つ以上かつ河が9枚以上。
+    /// `Caution`: 公開副露が2つ以上かつ河が9枚以上。
     TwoOrMoreOpenMeldsFromNineDiscards,
-    /// 暗槓を含む完成面子が2つ以上かつ河が9枚以上。
+    /// `Caution`: 暗槓を含む完成面子が2つ以上かつ河が9枚以上。
     TwoOrMoreFixedMeldsFromNineDiscards,
-    /// 公開副露が1つ以上かつ河が12枚以上。
+    /// `Caution`: 公開副露が1つ以上かつ河が12枚以上。
     OpenMeldFromTwelveDiscards,
-    /// 暗槓を含む完成面子が1つ以上かつ河が12枚以上。
+    /// `Caution`: 暗槓を含む完成面子が1つ以上かつ河が12枚以上。
     FixedMeldFromTwelveDiscards,
 }
 
@@ -116,23 +122,27 @@ impl OpenHandThreatAssessment {
         }
     }
 
-    /// [`OpenHandThreatLevel::High`] と分類された席か。
+    /// production policy が反応する OpenHand threat か。[`OpenHandThreatLevel::Caution`] と
+    /// [`OpenHandThreatLevel::Danger`] の両方を含む。
     ///
-    /// level を持たない対象外の席は `false`。押し引きと防御はこの判定を共有し、High 条件を
+    /// level を持たない対象外の席は `false`。押し引きと防御はこの判定を共有し、警戒条件を
     /// それぞれで書き直さない。
-    pub fn is_high(self) -> bool {
-        self.level() == Some(OpenHandThreatLevel::High)
+    pub fn is_actionable(self) -> bool {
+        matches!(
+            self.level(),
+            Some(OpenHandThreatLevel::Caution | OpenHandThreatLevel::Danger)
+        )
     }
 }
 
-// 局進行・打点に関係なく High とする完成面子の数。
+// 局進行・打点に関係なく Danger とする完成面子の数。
 const THREE_MELDS: usize = 3;
-// 役牌・ドラ・親・中盤後半の各条件で High とする完成面子の数。
+// 役牌・ドラ・親の各条件で Danger、中盤の局進行条件で Caution とする完成面子の数。
 const TWO_MELDS: usize = 2;
 // Present とみなす最小の完成面子の数。局進行条件でも同じ最小値を使う。
 const ONE_MELD: usize = 1;
-// 2面子以上と組み合わせて High とする確定翻数 proxy。
-const HIGH_VISIBLE_HAN_PROXY: usize = 2;
+// 2面子以上と組み合わせて Danger とする確定翻数 proxy。
+const DANGER_VISIBLE_HAN_PROXY: usize = 2;
 // 2面子以上を強く警戒し始める河の枚数。
 const MID_ROUND_DISCARD_COUNT: usize = 9;
 // 1面子でも強く警戒し始める河の枚数。
@@ -142,11 +152,14 @@ const LATE_ROUND_DISCARD_COUNT: usize = 12;
 ///
 /// これは暫定 heuristic であり、正確なテンパイ確率・放銃率・推定打点を表さない。暗槓も完成済みの
 /// 面子なので、進行度の軸には公開副露と同じく1面子として数え、その中のドラ・赤ドラ・確定役牌も
-/// 観測済みの打点として数える。以下のいずれかを満たすと [`OpenHandThreatLevel::High`] になる。
+/// 観測済みの打点として数える。以下のいずれかを満たすと [`OpenHandThreatLevel::Danger`] になる。
 ///
 /// - `meld_count >= 3`
 /// - `meld_count >= 2` かつ `fixed_meld_visible_han_proxy() >= 2`
 /// - `is_dealer == Some(true)` かつ `meld_count >= 2`
+///
+/// `Danger` の条件を満たさず、以下のいずれかを満たすと [`OpenHandThreatLevel::Caution`] になる。
+///
 /// - `meld_count >= 2` かつ `discard_count >= 9`
 /// - `meld_count >= 1` かつ `discard_count >= 12`
 ///
@@ -164,11 +177,8 @@ pub fn classify_open_hand_threat(facts: PlayerThreatFacts) -> OpenHandThreatAsse
         return OpenHandThreatAssessment::NotApplicable(exclusion);
     }
 
-    let decision = match high_reason(facts) {
-        Some(reason) => OpenHandThreatDecision {
-            level: OpenHandThreatLevel::High,
-            reason,
-        },
+    let decision = match alert_decision(facts) {
+        Some(decision) => decision,
         None if facts.meld_count >= ONE_MELD => OpenHandThreatDecision {
             level: OpenHandThreatLevel::Present,
             reason: present_reason(facts),
@@ -187,11 +197,14 @@ pub fn classify_open_hand_threats(facts: &[PlayerThreatFacts; 4]) -> [OpenHandTh
     std::array::from_fn(|player| classify_open_hand_threat(facts[player]))
 }
 
-/// 分類済みの全4席から [`OpenHandThreatLevel::High`] の席が1つ以上あるか判定する pure helper。
+/// 分類済みの全4席から [`OpenHandThreatAssessment::is_actionable`] の席
+/// (`Caution` / `Danger`) が1つ以上あるか判定する pure helper。
 ///
 /// 分類し直さず、渡された classification をそのまま source of truth にする。
-pub fn has_high_open_hand_threat(assessments: &[OpenHandThreatAssessment; 4]) -> bool {
-    assessments.iter().any(|assessment| assessment.is_high())
+pub fn has_actionable_open_hand_threat(assessments: &[OpenHandThreatAssessment; 4]) -> bool {
+    assessments
+        .iter()
+        .any(|assessment| assessment.is_actionable())
 }
 
 // 対象外の席とその理由。自分のリーチは自分の席として、席が不明なリーチ者はリーチ者として扱い、
@@ -209,11 +222,21 @@ fn exclusion_of(facts: PlayerThreatFacts) -> Option<OpenHandThreatExclusion> {
     None
 }
 
-// High 条件の数。level の判定と reason の選択で同じ並びを共有する。
-const HIGH_CONDITION_COUNT: usize = 5;
+// 警戒条件の数。level の判定と reason の選択で同じ並びを共有する。
+const ALERT_CONDITION_COUNT: usize = 5;
 
-// High 条件ごとの診断 reason。左が公開副露だけで成立した場合、右が暗槓を含めて成立した場合。
-const HIGH_REASONS: [(OpenHandThreatReason, OpenHandThreatReason); HIGH_CONDITION_COUNT] = [
+// 警戒条件ごとの level。Danger の条件を Caution の条件より前に並べ、先に成立した条件を採る
+// だけで強い level が優先されるようにする。
+const ALERT_LEVELS: [OpenHandThreatLevel; ALERT_CONDITION_COUNT] = [
+    OpenHandThreatLevel::Danger,
+    OpenHandThreatLevel::Danger,
+    OpenHandThreatLevel::Danger,
+    OpenHandThreatLevel::Caution,
+    OpenHandThreatLevel::Caution,
+];
+
+// 警戒条件ごとの診断 reason。左が公開副露だけで成立した場合、右が暗槓を含めて成立した場合。
+const ALERT_REASONS: [(OpenHandThreatReason, OpenHandThreatReason); ALERT_CONDITION_COUNT] = [
     (
         OpenHandThreatReason::ThreeOrMoreOpenMelds,
         OpenHandThreatReason::ThreeOrMoreFixedMelds,
@@ -236,7 +259,7 @@ const HIGH_REASONS: [(OpenHandThreatReason, OpenHandThreatReason); HIGH_CONDITIO
     ),
 ];
 
-// High 条件が見る完成面子の進行度と、そこから確認できる打点 proxy の組。
+// 警戒条件が見る完成面子の進行度と、そこから確認できる打点 proxy の組。
 //
 // 同じ条件を「暗槓を含む全 fixed meld」と「公開副露だけ」の2つの軸で評価するための型で、条件の
 // 閾値そのものは軸によらず共通になる。
@@ -264,7 +287,7 @@ impl MeldProgress {
     }
 }
 
-// High 条件を満たさない相手の reason。公開副露が1つも無い場合だけ FixedMeldPresent になる。
+// 警戒条件を満たさない相手の reason。公開副露が1つも無い場合だけ FixedMeldPresent になる。
 fn present_reason(facts: PlayerThreatFacts) -> OpenHandThreatReason {
     if facts.open_meld_count >= ONE_MELD {
         OpenHandThreatReason::OpenMeldPresent
@@ -273,35 +296,38 @@ fn present_reason(facts: PlayerThreatFacts) -> OpenHandThreatReason {
     }
 }
 
-// 満たした High 条件のうち、優先順位が最も高いものの reason。
+// 満たした警戒条件のうち、優先順位が最も高いものの level と reason。
 //
 // level の判定は暗槓を含む軸だけで決まる。公開副露だけの軸は、その条件が公開情報だけでも成立
 // するかを見て reason を選ぶためにだけ使う。
-fn high_reason(facts: PlayerThreatFacts) -> Option<OpenHandThreatReason> {
-    let fixed = high_conditions(facts, MeldProgress::fixed(facts));
-    let open = high_conditions(facts, MeldProgress::open(facts));
+fn alert_decision(facts: PlayerThreatFacts) -> Option<OpenHandThreatDecision> {
+    let fixed = alert_conditions(facts, MeldProgress::fixed(facts));
+    let open = alert_conditions(facts, MeldProgress::open(facts));
 
-    (0..HIGH_CONDITION_COUNT)
+    (0..ALERT_CONDITION_COUNT)
         .find(|&index| fixed[index])
         .map(|index| {
-            let (open_reason, fixed_reason) = HIGH_REASONS[index];
-            if open[index] {
-                open_reason
-            } else {
-                fixed_reason
+            let (open_reason, fixed_reason) = ALERT_REASONS[index];
+            OpenHandThreatDecision {
+                level: ALERT_LEVELS[index],
+                reason: if open[index] {
+                    open_reason
+                } else {
+                    fixed_reason
+                },
             }
         })
 }
 
-// High 条件の成否。並びは [`HIGH_REASONS`] と同じ reason の優先順位で、どの条件も level は High
-// なので、並び順は level の判定を変えない。
-fn high_conditions(
+// 警戒条件の成否。並びは [`ALERT_LEVELS`] / [`ALERT_REASONS`] と同じ優先順位で、Danger の条件が
+// 先に並ぶ。
+fn alert_conditions(
     facts: PlayerThreatFacts,
     progress: MeldProgress,
-) -> [bool; HIGH_CONDITION_COUNT] {
+) -> [bool; ALERT_CONDITION_COUNT] {
     [
         progress.melds >= THREE_MELDS,
-        progress.melds >= TWO_MELDS && progress.visible_han >= HIGH_VISIBLE_HAN_PROXY,
+        progress.melds >= TWO_MELDS && progress.visible_han >= DANGER_VISIBLE_HAN_PROXY,
         facts.is_dealer == Some(true) && progress.melds >= TWO_MELDS,
         progress.melds >= TWO_MELDS && facts.discard_count >= MID_ROUND_DISCARD_COUNT,
         progress.melds >= ONE_MELD && facts.discard_count >= LATE_ROUND_DISCARD_COUNT,
@@ -517,7 +543,7 @@ mod tests {
 
     #[test]
     fn single_value_honor_meld_is_present() {
-        // 役牌副露1つだけでは High にしない。
+        // 役牌副露1つだけでは Caution / Danger にしない。
         assert_classified(
             with_discards(with_value_honor(open_melds(1)), 11),
             OpenHandThreatLevel::Present,
@@ -544,14 +570,14 @@ mod tests {
         );
     }
 
-    // ---- High 条件 ----
+    // ---- Danger / Caution 条件 ----
 
     #[test]
-    fn three_open_melds_are_high() {
+    fn three_open_melds_are_danger() {
         for count in [3, 4] {
             assert_classified(
                 open_melds(count),
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Danger,
                 OpenHandThreatReason::ThreeOrMoreOpenMelds,
             );
         }
@@ -569,23 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn two_melds_with_one_value_honor_and_one_dora_are_high() {
+    fn two_melds_with_one_value_honor_and_one_dora_are_danger() {
         let facts = with_open_dora(with_value_honor(open_melds(2)), 1);
         assert_eq!(facts.open_visible_han_proxy(), 2);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         );
     }
 
     #[test]
-    fn two_value_honor_melds_are_high() {
+    fn two_value_honor_melds_are_danger() {
         let facts = with_two_value_honors(open_melds(2));
         assert_eq!(facts.open_visible_han_proxy(), 2);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         );
     }
@@ -598,14 +624,14 @@ mod tests {
         assert_eq!(facts.open_visible_han_proxy(), 2);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         );
     }
 
     #[test]
     fn two_melds_with_an_unconfirmed_wind_are_present() {
-        // 場風・自風が不明な風牌の副露は役牌と確定していないので High 条件を満たさない。
+        // 場風・自風が不明な風牌の副露は役牌と確定していないので Danger 条件を満たさない。
         let facts = open_melds(2);
         let counts = ValueHonorMeldCounts {
             unconfirmed_wind: 1,
@@ -626,12 +652,12 @@ mod tests {
     }
 
     #[test]
-    fn two_melds_with_two_open_dora_are_high() {
+    fn two_melds_with_two_open_dora_are_danger() {
         let facts = with_open_dora(open_melds(2), 2);
         assert_eq!(facts.open_visible_han_proxy(), 2);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreWithVisibleHan,
         );
     }
@@ -646,10 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn a_dealer_with_two_melds_is_high() {
+    fn a_dealer_with_two_melds_is_danger() {
         assert_classified(
             as_dealer(open_melds(2)),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds,
         );
     }
@@ -688,10 +714,10 @@ mod tests {
     }
 
     #[test]
-    fn two_melds_at_nine_discards_are_high() {
+    fn two_melds_at_nine_discards_are_caution() {
         assert_classified(
             with_discards(open_melds(2), 9),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Caution,
             OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
         );
     }
@@ -706,10 +732,10 @@ mod tests {
     }
 
     #[test]
-    fn one_meld_at_twelve_discards_is_high() {
+    fn one_meld_at_twelve_discards_is_caution() {
         assert_classified(
             with_discards(open_melds(1), 12),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Caution,
             OpenHandThreatReason::OpenMeldFromTwelveDiscards,
         );
     }
@@ -729,14 +755,15 @@ mod tests {
     fn two_melds_at_twelve_discards_report_the_nine_discard_reason() {
         assert_classified(
             with_discards(open_melds(2), 12),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Caution,
             OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
         );
     }
 
     #[test]
     fn the_highest_priority_reason_wins() {
-        // すべての High 条件を同時に満たす facts から、条件を1つずつ外して優先順位を固定する。
+        // すべての警戒条件を同時に満たす facts から、条件を1つずつ外して優先順位を固定する。
+        // Danger と Caution の条件を同時に満たす間は Danger の reason と level が優先される。
         let all = with_discards(
             as_dealer(with_open_dora(with_value_honor(open_melds(3)), 2)),
             12,
@@ -750,14 +777,14 @@ mod tests {
         ];
 
         let mut facts = all;
-        assert_classified(facts, OpenHandThreatLevel::High, expected[0]);
+        assert_classified(facts, OpenHandThreatLevel::Danger, expected[0]);
 
         facts = PlayerThreatFacts {
             meld_count: 2,
             open_meld_count: 2,
             ..facts
         };
-        assert_classified(facts, OpenHandThreatLevel::High, expected[1]);
+        assert_classified(facts, OpenHandThreatLevel::Danger, expected[1]);
 
         facts = with_open_dora(facts, 0);
         facts = PlayerThreatFacts {
@@ -765,41 +792,81 @@ mod tests {
             open_value_honor_melds: ValueHonorMeldCounts::default(),
             ..facts
         };
-        assert_classified(facts, OpenHandThreatLevel::High, expected[2]);
+        assert_classified(facts, OpenHandThreatLevel::Danger, expected[2]);
 
         facts = PlayerThreatFacts {
             is_dealer: Some(false),
             ..facts
         };
-        assert_classified(facts, OpenHandThreatLevel::High, expected[3]);
+        assert_classified(facts, OpenHandThreatLevel::Caution, expected[3]);
 
         facts = PlayerThreatFacts {
             meld_count: 1,
             open_meld_count: 1,
             ..facts
         };
-        assert_classified(facts, OpenHandThreatLevel::High, expected[4]);
+        assert_classified(facts, OpenHandThreatLevel::Caution, expected[4]);
     }
 
     #[test]
-    fn every_high_condition_alone_is_high() {
-        // level は満たした条件の優先順位に依らず High になる。
+    fn every_danger_condition_alone_is_danger() {
         let conditions = [
             open_melds(3),
             with_open_dora(with_value_honor(open_melds(2)), 1),
             with_open_dora(open_melds(2), 2),
             as_dealer(open_melds(2)),
-            with_discards(open_melds(2), 9),
-            with_discards(open_melds(1), 12),
         ];
 
         for facts in conditions {
             assert_eq!(
                 classify_open_hand_threat(facts).level(),
-                Some(OpenHandThreatLevel::High),
+                Some(OpenHandThreatLevel::Danger),
                 "{facts:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_caution_condition_alone_is_caution() {
+        let conditions = [
+            with_discards(open_melds(2), 9),
+            with_discards(open_melds(1), 12),
+            with_discards(concealed_kans(2), 9),
+            with_discards(concealed_kans(1), 12),
+        ];
+
+        for facts in conditions {
+            assert_eq!(
+                classify_open_hand_threat(facts).level(),
+                Some(OpenHandThreatLevel::Caution),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_danger_condition_outranks_the_discard_conditions() {
+        // 局進行の Caution 条件を同時に満たしても、Danger の level と reason を優先する。
+        assert_classified(
+            with_discards(open_melds(3), 12),
+            OpenHandThreatLevel::Danger,
+            OpenHandThreatReason::ThreeOrMoreOpenMelds,
+        );
+        assert_classified(
+            with_discards(with_open_dora(open_melds(2), 2), 9),
+            OpenHandThreatLevel::Danger,
+            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+        );
+        assert_classified(
+            with_discards(as_dealer(open_melds(2)), 12),
+            OpenHandThreatLevel::Danger,
+            OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds,
+        );
+        assert_classified(
+            with_discards(concealed_kans(3), 12),
+            OpenHandThreatLevel::Danger,
+            OpenHandThreatReason::ThreeOrMoreFixedMelds,
+        );
     }
 
     // ---- Ankan (完成面子としての進行度と確認済み打点) ----
@@ -817,10 +884,10 @@ mod tests {
     }
 
     #[test]
-    fn a_single_concealed_kan_at_twelve_discards_is_high() {
+    fn a_single_concealed_kan_at_twelve_discards_is_caution() {
         assert_classified(
             with_discards(concealed_kans(1), 12),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Caution,
             OpenHandThreatReason::FixedMeldFromTwelveDiscards,
         );
     }
@@ -838,39 +905,39 @@ mod tests {
     }
 
     #[test]
-    fn two_concealed_kans_at_nine_discards_are_high() {
+    fn two_concealed_kans_at_nine_discards_are_caution() {
         assert_classified(
             with_discards(concealed_kans(2), 9),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Caution,
             OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards,
         );
     }
 
     #[test]
-    fn a_dealer_with_two_concealed_kans_is_high() {
+    fn a_dealer_with_two_concealed_kans_is_danger() {
         assert_classified(
             as_dealer(concealed_kans(2)),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::DealerWithTwoOrMoreFixedMelds,
         );
     }
 
     #[test]
-    fn three_concealed_kans_are_high() {
+    fn three_concealed_kans_are_danger() {
         for count in [3, 4] {
             assert_classified(
                 concealed_kans(count),
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Danger,
                 OpenHandThreatReason::ThreeOrMoreFixedMelds,
             );
         }
     }
 
     #[test]
-    fn one_open_meld_and_one_concealed_kan_at_nine_discards_are_high() {
+    fn one_open_meld_and_one_concealed_kan_at_nine_discards_are_caution() {
         assert_classified(
             with_discards(one_open_meld_and_one_concealed_kan(), 9),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Caution,
             OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards,
         );
     }
@@ -884,7 +951,7 @@ mod tests {
         assert_eq!(facts.fixed_meld_visible_han_proxy(), 2);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
         );
     }
@@ -899,7 +966,7 @@ mod tests {
         assert_eq!(facts.fixed_meld_visible_han_proxy(), 2);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
         );
     }
@@ -916,7 +983,7 @@ mod tests {
         assert_eq!(facts.fixed_meld_visible_han_proxy(), 3);
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan,
         );
     }
@@ -938,14 +1005,68 @@ mod tests {
 
         assert_classified(
             facts,
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::ThreeOrMoreOpenMelds,
         );
         assert_classified(
             with_discards(facts, 12),
-            OpenHandThreatLevel::High,
+            OpenHandThreatLevel::Danger,
             OpenHandThreatReason::ThreeOrMoreOpenMelds,
         );
+    }
+
+    // ---- actionable predicate ----
+
+    #[test]
+    fn caution_and_danger_are_actionable() {
+        let caution = classify_open_hand_threat(with_discards(open_melds(1), 12));
+        let danger = classify_open_hand_threat(open_melds(3));
+
+        assert_eq!(caution.level(), Some(OpenHandThreatLevel::Caution));
+        assert!(caution.is_actionable());
+        assert_eq!(danger.level(), Some(OpenHandThreatLevel::Danger));
+        assert!(danger.is_actionable());
+    }
+
+    #[test]
+    fn present_and_none_are_not_actionable() {
+        let present = classify_open_hand_threat(open_melds(1));
+        let none = classify_open_hand_threat(opponent_facts());
+
+        assert_eq!(present.level(), Some(OpenHandThreatLevel::Present));
+        assert!(!present.is_actionable());
+        assert_eq!(none.level(), Some(OpenHandThreatLevel::None));
+        assert!(!none.is_actionable());
+    }
+
+    #[test]
+    fn a_not_applicable_seat_is_not_actionable() {
+        for exclusion in [
+            OpenHandThreatExclusion::SelfSeat,
+            OpenHandThreatExclusion::Reached,
+            OpenHandThreatExclusion::UnknownSeat,
+        ] {
+            assert!(!OpenHandThreatAssessment::NotApplicable(exclusion).is_actionable());
+        }
+    }
+
+    #[test]
+    fn any_caution_or_danger_seat_makes_the_table_actionable() {
+        let none = classify_open_hand_threat(opponent_facts());
+        let present = classify_open_hand_threat(open_melds(1));
+        let caution = classify_open_hand_threat(with_discards(open_melds(2), 9));
+        let danger = classify_open_hand_threat(as_dealer(open_melds(2)));
+        let self_seat = OpenHandThreatAssessment::NotApplicable(OpenHandThreatExclusion::SelfSeat);
+
+        assert!(!has_actionable_open_hand_threat(&[
+            self_seat, none, present, present
+        ]));
+        assert!(has_actionable_open_hand_threat(&[
+            self_seat, none, present, caution
+        ]));
+        assert!(has_actionable_open_hand_threat(&[
+            self_seat, danger, present, none
+        ]));
     }
 
     // ---- 対象外 ----
@@ -968,7 +1089,7 @@ mod tests {
 
     #[test]
     fn an_unknown_seat_stays_unknown() {
-        // player_id 不明の席を他家と推測して Present / High にしない。危険度なしにも確定させない。
+        // player_id 不明の席を他家と推測して Present / Caution / Danger にしない。危険度なしにも確定させない。
         for facts in [open_melds(0), open_melds(1), open_melds(3)] {
             let facts = PlayerThreatFacts {
                 is_self: None,
@@ -1179,20 +1300,20 @@ mod tests {
     }
 
     #[test]
-    fn a_single_ankan_at_twelve_discards_is_high_from_the_context() {
+    fn a_single_ankan_at_twelve_discards_is_caution_from_the_context() {
         let context = context_with(vec![value_honor_ankan()], vec![], 12);
 
         assert_eq!(
             assess(&context, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Caution,
                 OpenHandThreatReason::FixedMeldFromTwelveDiscards
             )
         );
     }
 
     #[test]
-    fn an_ankan_with_a_chi_and_confirmed_value_is_high_in_the_mid_round() {
+    fn an_ankan_with_a_chi_and_confirmed_value_is_danger_in_the_mid_round() {
         // regression: 1公開副露 + 暗槓の中盤の相手を、単なる1副露として扱わない。
         let context = context_with(vec![dora_ankan(), chi()], vec![tile(12)], 11);
         let facts = player_threat_facts_from_context(&context)[3];
@@ -1202,29 +1323,29 @@ mod tests {
         assert_eq!(facts.discard_count, 11);
         assert!(facts.meld_dora_count >= 2);
         assert_eq!(facts.open_meld_dora_count, 0);
-        // 完成面子2つと暗槓のドラで、公開副露だけでは届かない High 条件を満たす。
+        // 完成面子2つと暗槓のドラで、公開副露だけでは届かない Danger 条件を満たす。
         assert_eq!(
             assess(&context, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Danger,
                 OpenHandThreatReason::TwoOrMoreFixedMeldsWithVisibleHan
             )
         );
     }
 
     #[test]
-    fn an_ankan_with_a_chi_at_nine_discards_is_high() {
+    fn an_ankan_with_a_chi_at_nine_discards_is_caution() {
         let context = context_with(vec![value_honor_ankan(), chi()], vec![], 9);
         let facts = player_threat_facts_from_context(&context)[3];
 
         assert_eq!(facts.meld_count, 2);
         assert_eq!(facts.open_meld_count, 1);
-        // 確定役牌1翻だけでは打点条件に届かず、河9枚の進行条件で High になる。
+        // 確定役牌1翻だけでは打点条件に届かず、河9枚の進行条件で Caution になる。
         assert_eq!(facts.fixed_meld_visible_han_proxy(), 1);
         assert_eq!(
             assess(&context, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Caution,
                 OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards
             )
         );
@@ -1252,14 +1373,14 @@ mod tests {
         assert_eq!(
             assess(&two_open, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Caution,
                 OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards
             )
         );
         assert_eq!(
             assess(&one_open, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Caution,
                 OpenHandThreatReason::TwoOrMoreFixedMeldsFromNineDiscards
             )
         );
@@ -1278,7 +1399,7 @@ mod tests {
         assert_eq!(
             assess(&context, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Caution,
                 OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards
             )
         );
@@ -1295,7 +1416,7 @@ mod tests {
         assert_eq!(
             assess(&context, 3),
             classified(
-                OpenHandThreatLevel::High,
+                OpenHandThreatLevel::Danger,
                 OpenHandThreatReason::ThreeOrMoreFixedMelds
             )
         );
