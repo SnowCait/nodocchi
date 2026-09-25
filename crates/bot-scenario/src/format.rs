@@ -2339,7 +2339,7 @@ fn format_ron_opportunity_external_threats(threats: &RonOpportunityExternalThrea
         ),
         format!(
             "        high open-hand targets: {}",
-            format_threat_players(&threats.high_open_hand_targets)
+            format_threat_players(&threats.actionable_open_hand_targets)
         ),
     ]
 }
@@ -2673,7 +2673,7 @@ fn format_fixed_point(numerator: u128, denominator: u128, decimals: u32) -> Stri
     )
 }
 
-// High OpenHandThreat 相手に対する防御 safety。診断が持つ pure helper の結果をそのまま出し、
+// actionable OpenHandThreat 相手に対する防御 safety。診断が持つ pure helper の結果をそのまま出し、
 // 表示用に安全度を計算し直さない。target がいない局面は候補を出さず、target なしと分かる表示に
 // する。`selected` は production selector が選んだ結果そのもので、表示側で選び直さない。
 pub(crate) fn format_open_hand_defense(open_hand_defense: &OpenHandDefenseDiagnostic) -> String {
@@ -2790,7 +2790,7 @@ fn format_open_hand_defense_candidate(candidate: &OpenHandDefenseCandidateDiagno
     lines.join("\n")
 }
 
-// リーチ者と High OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety。診断が持つ
+// リーチ者と actionable OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety。診断が持つ
 // pure helper の結果をそのまま出し、表示用に安全度を計算し直さない。複合 threat でない局面は
 // target を持たないので候補も出さない。`selected` は production selector が選んだ結果そのもの。
 pub(crate) fn format_combined_defense(combined_defense: &CombinedDefenseDiagnostic) -> String {
@@ -2832,7 +2832,7 @@ pub(crate) fn format_combined_defense(combined_defense: &CombinedDefenseDiagnost
     blocks.join("\n\n")
 }
 
-// target は席だけでなく種類も出す。リーチ者と High の副露相手ではロン安全の根拠が違うため。
+// target は席だけでなく種類も出す。リーチ者と Caution / Danger の副露相手ではロン安全の根拠が違うため。
 fn format_threat_targets(targets: &[ThreatDefenseTarget]) -> String {
     if targets.is_empty() {
         return NONE.to_string();
@@ -8392,7 +8392,7 @@ mod tests {
              open meld red dora: 1\n  \
              open confirmed value honor: 1\n  \
              open visible han proxy: 3\n  \
-             open hand threat: High\n  \
+             open hand threat: Danger\n  \
              open hand threat reason: TwoOrMoreWithVisibleHan\n  \
              meld 1: Pon P P P\n    \
              open: yes\n    \
@@ -8477,7 +8477,7 @@ mod tests {
 
     #[test]
     fn player_threats_section_shows_the_late_round_open_hand_threat() {
-        // 1副露でも河が12枚に達した非リーチ相手は暫定 heuristic で High になる。
+        // 1副露でも河が12枚に達した非リーチ相手は暫定 heuristic で Caution になる。
         let (_, diagnostic, output) = rendered(
             r#"{
                 "hand": "234m 567m 88m 345p 67p",
@@ -8494,12 +8494,12 @@ mod tests {
         assert_eq!(diagnostic.player_threats[1].facts.discard_count, 12);
         assert!(block.contains("  discards: 12"), "{block}");
         assert!(block.contains("  open melds: 1"), "{block}");
-        assert!(block.contains("  open hand threat: High"), "{block}");
+        assert!(block.contains("  open hand threat: Caution"), "{block}");
         assert!(
             block.contains("  open hand threat reason: OpenMeldFromTwelveDiscards"),
             "{block}"
         );
-        // High の副露相手がいても、待ちが広い非フリテンのテンパイなら押す。
+        // Caution / Danger の副露相手がいても、待ちが広い非フリテンのテンパイなら押す。
         assert!(
             section(&output, "Push/Pull").contains(
                 "  mode: Push\n  reason: StrongTenpaiAgainstHighOpenHand\n  opponent reach count: 0"
@@ -8547,7 +8547,7 @@ mod tests {
     }
 
     #[test]
-    fn open_hand_defense_section_lists_the_high_targets_and_their_safety() {
+    fn open_hand_defense_section_lists_the_actionable_targets_and_their_safety() {
         let (_, diagnostic, output) = rendered(OPEN_HAND_DEFENSE_SCENARIO, false);
         let open_hand_defense = section(&output, "OpenHand defense");
 
@@ -8605,7 +8605,7 @@ mod tests {
     }
 
     #[test]
-    fn open_hand_defense_section_reports_no_target_without_a_high_threat() {
+    fn open_hand_defense_section_reports_no_target_without_an_actionable_threat() {
         // Present の副露相手しかいない局面は「target なし」と分かる表示にする。
         let (_, diagnostic, output) = rendered(
             r#"{

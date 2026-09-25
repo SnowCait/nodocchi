@@ -5,7 +5,7 @@
 //!
 //! routing も防御選択も既存 [`evaluate_fold_defense`] をそのまま source of truth にし、threat の
 //! 有無も既存 [`has_clear_threat`] と同じ classification を使う。forced fold のために防御ロジックも
-//! High 条件も書き直さない。
+//! Caution / Danger 条件も書き直さない。
 //!
 //! 候補 ranking の基礎も既存 production defense policy の ordering をそのまま使い、選択・
 //! ranking・詳細診断は1回の evaluation から得た同じ candidate evidence を共有する。そのうえで
@@ -29,9 +29,8 @@ use crate::defense::{
 };
 use crate::fold_defense::{FoldDefenseEvaluation, FoldDefenseKind, evaluate_fold_defense};
 use crate::open_hand_defense::{
-    OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
-    collect_open_hand_candidate_ron_risk_evidence, high_open_hand_threat_players,
-    ordered_open_hand_defense_candidates,
+    OpenHandDefenseCategory, OpenHandDefenseDiagnostic, actionable_open_hand_threat_players,
+    collect_open_hand_candidate_ron_risk_evidence, ordered_open_hand_defense_candidates,
 };
 use crate::push_pull::{has_clear_threat, push_pull_inputs_from_threat_facts};
 use crate::threat::player_threat_facts_from_context;
@@ -56,7 +55,7 @@ pub enum ForcedFoldDefenseKind {
 /// どちらの場合も通常打牌を「ベタ降り最善打牌」として返さない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForcedFoldUnavailable {
-    /// リーチ者も High OpenHandThreat の相手もいない。防御対象がないので評価しない。
+    /// リーチ者も actionable OpenHandThreat の相手もいない。防御対象がないので評価しない。
     NoClearThreat,
     /// 防御対象はいるが、既存 evaluator が防御打牌を選べなかった。合法 Dahai がない局面を含む。
     NoDefenseSelection,
@@ -154,7 +153,7 @@ pub fn evaluate_forced_fold(
             ));
         }
         FoldDefenseEvaluation::OpenHand(evaluation) => {
-            let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+            let targets = actionable_open_hand_threat_players(&inputs.open_hand_threats);
             // hard-safe / same-hand passed で selection が確定して exact model が走っていない
             // 場合だけ、診断用の candidate evidence を追加収集する。選択は変わらない。
             collect_open_hand_candidate_ron_risk_evidence(

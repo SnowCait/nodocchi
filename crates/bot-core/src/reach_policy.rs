@@ -341,7 +341,7 @@ pub struct NonFuritenBadWaitTimingFacts {
     pub wall_rank: Option<WallRank>,
     pub suji_rank: Option<SujiSafetyRank>,
     pub reached_opponent_count: usize,
-    pub high_open_hand_target_count: usize,
+    pub actionable_open_hand_target_count: usize,
 }
 
 /// 非フリテン悪形の暫定 heuristic が selected wait を評価対象にするか。
@@ -358,7 +358,7 @@ pub fn evaluates_non_furiten_bad_wait_reach_timing(facts: NonFuritenBadWaitTimin
         && facts.wall_rank == Some(WallRank::NoWall)
         && facts.suji_rank == Some(SujiSafetyRank::NoSuji)
         && facts.reached_opponent_count == 0
-        && facts.high_open_hand_target_count == 0
+        && facts.actionable_open_hand_target_count == 0
 }
 
 /// 恒常フリテン聴牌の self-tsumo 比較から timing を決める。
@@ -547,7 +547,7 @@ mod tests {
             wall_rank: Some(WallRank::NoWall),
             suji_rank: Some(SujiSafetyRank::NoSuji),
             reached_opponent_count: 0,
-            high_open_hand_target_count: 0,
+            actionable_open_hand_target_count: 0,
         }
     }
 
@@ -596,7 +596,7 @@ mod tests {
                 ..non_furiten_bad_wait_facts()
             },
             NonFuritenBadWaitTimingFacts {
-                high_open_hand_target_count: 1,
+                actionable_open_hand_target_count: 1,
                 ..non_furiten_bad_wait_facts()
             },
         ] {

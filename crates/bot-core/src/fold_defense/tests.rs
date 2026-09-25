@@ -82,13 +82,13 @@ fn routes_a_reached_opponent_to_reach_defense() {
 }
 
 #[test]
-fn routes_a_high_open_hand_to_open_hand_defense() {
+fn routes_an_actionable_open_hand_to_open_hand_defense() {
     let context = open_hand_context([false; 4]);
     let actions = open_hand_actions();
     let inputs = push_pull_inputs_from_context(&context, &actions);
     assert_eq!(inputs.opponent_reach_count, 0);
     assert_eq!(
-        high_open_hand_threat_players(&inputs.open_hand_threats),
+        actionable_open_hand_threat_players(&inputs.open_hand_threats),
         vec![2]
     );
 

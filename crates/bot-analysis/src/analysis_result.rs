@@ -712,7 +712,7 @@ mod tests {
         "allow_none": true
     }"#;
 
-    // player 3 が3副露の High。リーチ者はいないので OpenHand 防御が担当する。
+    // player 3 が3副露の Danger。リーチ者はいないので OpenHand 防御が担当する。
     const OPEN_HAND_DEFENSE_SCENARIO: &str = r#"{
         "hand": "19m19p1478s23467z",
         "draw": "4p",

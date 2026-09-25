@@ -1,11 +1,11 @@
-//! 非リーチ相手 (High OpenHandThreat) に対する防御 safety の scenario 回帰テスト。
+//! 非リーチ相手 (actionable OpenHandThreat) に対する防御 safety の scenario 回帰テスト。
 //!
-//! `scenarios/open_hand_defense.json` は、High の副露相手が2人・Present の副露相手が1人いる
+//! `scenarios/open_hand_defense.json` は、Caution / Danger の副露相手が2人・Present の副露相手が1人いる
 //! 局面で、合法 Dahai ごとに「本人の河」「字牌 safety」「壁」「スジ」がどう出るかを1つの
 //! fixture で見比べるためのもの。corpus 側で safety を計算し直さず、production の pure helper が
 //! 返した値をそのまま確認する。
 //!
-//! この局面は自分が二向聴なので、High の相手がいると `Fold` になり、通常打牌より OpenHand 防御
+//! この局面は自分が二向聴なので、Caution / Danger の相手がいると `Fold` になり、通常打牌より OpenHand 防御
 //! fallback が優先されることも合わせて固定する。
 
 use bot_analysis::{Scenario, ScenarioSpec};
@@ -22,7 +22,7 @@ use bot_logic::TileType;
 
 const OPEN_HAND_DEFENSE: &str = include_str!("../scenarios/open_hand_defense.json");
 
-// High の副露相手。player 1 は親の役牌入り2副露、player 3 は3副露。
+// Caution / Danger の副露相手。player 1 は親の役牌入り2副露、player 3 は3副露。
 const DEALER_TARGET: usize = 1;
 const CHILD_TARGET: usize = 3;
 // 1副露だけの Present な副露相手。防御 target にしない。
@@ -69,7 +69,7 @@ fn candidate(
 }
 
 #[test]
-fn only_the_high_open_hand_threats_are_defense_targets() {
+fn only_the_actionable_open_hand_threats_are_defense_targets() {
     let diagnostic = diagnose(&scenario());
 
     assert_eq!(
@@ -346,7 +346,7 @@ fn a_post_reach_passed_tile_is_not_river_safe_for_a_non_reach_target() {
 }
 
 #[test]
-fn the_high_threats_drive_the_fold_and_the_selected_action() {
+fn the_actionable_threats_drive_the_fold_and_the_selected_action() {
     let scenario = scenario();
     let mut agent = ShantenAgent;
     let acted = agent.act(&scenario.context, &scenario.legal_actions);

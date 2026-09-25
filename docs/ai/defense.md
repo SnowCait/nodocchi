@@ -247,7 +247,7 @@ exact model が利用できない場合の従来 selection です。全リーチ
 
 ## OpenHand Defense
 
-`open hand threat: High` の非リーチ相手だけを target にします。classification は [OpenHandThreat](push-pull.md#openhandthreat) を共有し、Defense 側で High 条件を再実装しません。classification は暗槓も完成面子として数えるため、公開副露が無くても暗槓だけで `High` になった相手は target になります。`Present` / `None`、自分、リーチ済み、player id 不明の席は target 外です。
+`open hand threat: Caution` または `open hand threat: Danger` の非リーチ相手 (actionable OpenHandThreat) を target にします。現時点では `Caution` と `Danger` を区別せず、どちらも分割前の `High` と同じ target として扱うので、target 集合と safety の計算・順位は分割前と変わりません。classification と target 判定は [OpenHandThreat](push-pull.md#actionable-openhandthreat) の `OpenHandThreatAssessment::is_actionable()` を共有し、Defense 側で `Caution` / `Danger` 条件を再実装しません。classification は暗槓も完成面子として数えるため、公開副露が無くても暗槓だけで `Caution` / `Danger` になった相手は target になります。`Present` / `None`、自分、リーチ済み、player id 不明の席は target 外です。
 
 候補の大分類は次の順です。
 
@@ -260,7 +260,7 @@ exact model が利用できない場合の従来 selection です。全リーチ
 
 `SameHandPassed` は、全 target が hard-safe または same-hand passed で覆われ、少なくとも1人は same-hand passed だけを根拠とする牌です。same-hand passed は hard-safe ではないので第一分類には入れず、字牌・数牌の heuristic より先に選びます。候補が複数ある場合は hard-safe な target 数が多いものを優先し、同数なら合法 Dahai の元順序を維持します。根拠の違いは [passed tile の区別](#passed-tile-の区別) を参照してください。
 
-上の2分類で決まらない場合は、各 High target の conditional-tenpai model から structural tenpai state の総 weight `T(p)` と、候補牌 `x` で役・current furiten を含めて現在ロン可能な state weight `R(p,x)` を exact に数えます。複数 target は Riichi Defense と同じく各 `R/T` を危険な順へ並べた lexicographic minimax で比較し、exact tie は合法 Dahai の元順序を維持します。same-hand passed は hard-safe ではなく `R=0` の条件にもなりません。
+上の2分類で決まらない場合は、各 actionable target の conditional-tenpai model から structural tenpai state の総 weight `T(p)` と、候補牌 `x` で役・current furiten を含めて現在ロン可能な state weight `R(p,x)` を exact に数えます。複数 target は Riichi Defense と同じく各 `R/T` を危険な順へ並べた lexicographic minimax で比較し、exact tie は合法 Dahai の元順序を維持します。same-hand passed は hard-safe ではなく `R=0` の条件にもなりません。
 
 target の1人でも exact model unavailable なら partial exact と heuristic を混在させず、局面全体を従来の heuristic fallback へ戻します。字牌・役牌価値・壁・スジは legacy Riichi Defense と同じ helper を共有します。複数 target の heuristic 集約では、その牌が hard-safe な target と same-hand passed のある target を除いた相手のうち、最も危険な評価を採ります。
 
@@ -268,7 +268,7 @@ target の1人でも exact model unavailable なら partial exact と heuristic 
 
 ## Combined Defense
 
-リーチ者と High OpenHandThreat が同時に存在する複合 threat で使います。target には種類 `Riichi` / `HighOpenHand` を保持し、全 target にロン安全なら `SafeAgainstAllThreats` とします。
+リーチ者と actionable OpenHandThreat (`Caution` / `Danger`) が同時に存在する複合 threat で使います。target には種類 `Riichi` / `HighOpenHand` を保持し、全 target にロン安全なら `SafeAgainstAllThreats` とします。target 種類の `HighOpenHand` は従来の名前のままで、`Caution` と `Danger` のどちらの非リーチ相手にも使います。
 
 候補の大分類は次の順です。
 
@@ -296,7 +296,7 @@ Combined Defense には exact hidden-hand model を接続せず、従来の heur
 
 hard-safe ではない `same_hand_passed` はこの表に入りません。区別は [passed tile の区別](#passed-tile-の区別) を参照してください。
 
-この表の target 種類と hard-safe 判定は、防御 fallback の選択だけでなく [押し引き](push-pull.md#選択打牌の-hard-safe-例外) の例外判定からも共有します。そちらは複合 threat に限らずリーチ単独・`High` の非リーチ相手単独の局面でも同じ target 種類ごとの判定を使うため、target の収集には threat 構成を問わない共有 helper を通ります。防御 fallback の action 選択そのものは従来どおり threat 構成ごとの入口が担当します。
+この表の target 種類と hard-safe 判定は、防御 fallback の選択だけでなく [押し引き](push-pull.md#選択打牌の-hard-safe-例外) の例外判定からも共有します。そちらは複合 threat に限らずリーチ単独・`Caution` / `Danger` の非リーチ相手単独の局面でも同じ target 種類ごとの判定を使うため、target の収集には threat 構成を問わない共有 helper を通ります。防御 fallback の action 選択そのものは従来どおり threat 構成ごとの入口が担当します。
 
 exact model が使うロン不能牌もこの `Riichi` の根拠と同じで、リーチ者本人の河と `post_reach_passed` です。
 

@@ -1,4 +1,5 @@
-//! `High` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の非リーチ相手に対する防御 safety の source of truth。
+//! `Caution` / `Danger` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の
+//! 非リーチ相手に対する防御 safety の source of truth。
 //!
 //! 判定は既存 Defense の pure helper をそのまま共有し、字牌の見え枚数・壁・スジ・役牌価値を
 //! 別実装しない。リーチ者向けの `*_for_all_reached` と違うのは対象 player 集合の決め方と、
@@ -29,7 +30,8 @@ use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threa
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 use bot_logic::TileType;
 
-/// [`OpenHandThreatLevel::High`](crate::open_hand_threat::OpenHandThreatLevel::High) と分類された席を防御の target として集める pure helper。
+/// [`OpenHandThreatAssessment::is_actionable`] な席 (`Caution` / `Danger`) を防御の target として
+/// 集める pure helper。
 ///
 /// 分類そのものは行わず、渡された classification をそのまま source of truth にする。配列の
 /// index が席番号で、戻り値は席順。[`OpenHandThreatLevel::Present`](crate::open_hand_threat::OpenHandThreatLevel::Present)
@@ -37,23 +39,27 @@ use bot_logic::TileType;
 ///
 /// 自分の席・リーチ済みの席・`player_id` 不明の席は
 /// [`OpenHandThreatAssessment::NotApplicable`] なので、level を持たず target にもならない。
-pub fn high_open_hand_threat_players(assessments: &[OpenHandThreatAssessment; 4]) -> Vec<usize> {
+pub fn actionable_open_hand_threat_players(
+    assessments: &[OpenHandThreatAssessment; 4],
+) -> Vec<usize> {
     assessments
         .iter()
         .enumerate()
-        .filter(|(_, assessment)| assessment.is_high())
+        .filter(|(_, assessment)| assessment.is_actionable())
         .map(|(player, _)| player)
         .collect()
 }
 
 /// 全4席分の facts から target を集める adapter。分類は [`classify_open_hand_threats`] が行う。
-pub fn high_open_hand_threat_players_from_facts(facts: &[PlayerThreatFacts; 4]) -> Vec<usize> {
-    high_open_hand_threat_players(&classify_open_hand_threats(facts))
+pub fn actionable_open_hand_threat_players_from_facts(
+    facts: &[PlayerThreatFacts; 4],
+) -> Vec<usize> {
+    actionable_open_hand_threat_players(&classify_open_hand_threats(facts))
 }
 
 /// `GameContext` から target を集める adapter。facts の構築も分類も既存経路を共有する。
-pub fn high_open_hand_threat_players_from_context(context: &GameContext) -> Vec<usize> {
-    high_open_hand_threat_players_from_facts(&player_threat_facts_from_context(context))
+pub fn actionable_open_hand_threat_players_from_context(context: &GameContext) -> Vec<usize> {
+    actionable_open_hand_threat_players_from_facts(&player_threat_facts_from_context(context))
 }
 
 /// 非リーチ target にこの牌でロンされないと言えるか判定する source of truth。
@@ -321,7 +327,7 @@ pub fn open_hand_suited_dahai_actions_by_safety<'a>(
     })
 }
 
-/// High OpenHandThreat 相手に対する防御 fallback を優先順位付きで選ぶ production selector。
+/// actionable OpenHandThreat 相手に対する防御 fallback を優先順位付きで選ぶ production selector。
 ///
 /// 全 target へのロン安全 → same-hand passed → exact `R/T` の順に評価する。exact model が
 /// target 1人でも unavailable の場合だけ、既存の字牌 safety → 数牌 safety へ局面全体を戻す。
@@ -581,7 +587,7 @@ pub struct OpenHandDefenseTargetSafety {
     pub suji_safety_rank: Option<SujiSafetyRank>,
 }
 
-/// 合法 Dahai 1件ごとの、High OpenHandThreat 相手に対する防御評価。
+/// 合法 Dahai 1件ごとの、actionable OpenHandThreat 相手に対する防御評価。
 ///
 /// production で使う pure な safety helper の結果をそのまま持つ解析用データで、表示のために
 /// safety を計算し直さない。これ自体が action 選択を行うこともない。選択の source of truth は
@@ -764,7 +770,7 @@ impl OpenHandDefenseSelectionDiagnostic {
     }
 }
 
-/// High OpenHandThreat 相手に対する防御 safety の構造化診断。
+/// actionable OpenHandThreat 相手に対する防御 safety の構造化診断。
 ///
 /// `targets` が空の局面は「OpenHand Defense target なし」で、候補評価も作らない。target がいない
 /// ことを safety の値で表さないための区別。
@@ -774,7 +780,7 @@ impl OpenHandDefenseSelectionDiagnostic {
 /// など)では `None` で、候補評価だけが残る。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenHandDefenseDiagnostic {
-    /// [`OpenHandThreatLevel::High`](crate::open_hand_threat::OpenHandThreatLevel::High) の target 席。席順。
+    /// `Caution` / `Danger` ([`OpenHandThreatAssessment::is_actionable`]) の target 席。席順。
     pub targets: Vec<usize>,
     /// 採用された OpenHand 防御 fallback。採用しなかった場合は `None`。
     pub selected: Option<OpenHandDefenseSelectionDiagnostic>,
@@ -794,7 +800,7 @@ impl OpenHandDefenseDiagnostic {
         assessments: &[OpenHandThreatAssessment; 4],
         selected: Option<(&LegalAction, OpenHandDefenseCategory)>,
     ) -> Self {
-        let targets = high_open_hand_threat_players(assessments);
+        let targets = actionable_open_hand_threat_players(assessments);
         let ron_risk_vectors =
             if matches!(selected, Some((_, OpenHandDefenseCategory::ExactRonRisk))) {
                 open_hand_targets_dahai_actions_by_ron_risk(context, legal_actions, &targets)
@@ -819,7 +825,7 @@ impl OpenHandDefenseDiagnostic {
         Self::from_parts(
             context,
             legal_actions,
-            high_open_hand_threat_players(assessments),
+            actionable_open_hand_threat_players(assessments),
             evaluation.selected,
             evaluation.ron_risk_vectors.as_deref(),
         )
@@ -872,7 +878,7 @@ impl OpenHandDefenseDiagnostic {
         )
     }
 
-    /// High OpenHandThreat の相手がいるか。
+    /// actionable OpenHandThreat の相手がいるか。
     pub fn has_target(&self) -> bool {
         !self.targets.is_empty()
     }
@@ -956,7 +962,7 @@ mod tests {
         )
     }
 
-    // 副露を count 個持つ席を作る。High 条件の「3副露以上」を満たすかどうかを count で決める。
+    // 副露を count 個持つ席を作る。Caution / Danger 条件の「3副露以上」を満たすかどうかを count で決める。
     fn open_melds(count: usize) -> Vec<Meld> {
         (0..count).map(|_| chi()).collect()
     }
@@ -1126,10 +1132,10 @@ mod tests {
     }
 
     fn targets(context: &GameContext) -> Vec<usize> {
-        high_open_hand_threat_players_from_context(context)
+        actionable_open_hand_threat_players_from_context(context)
     }
 
-    // 3副露の非リーチ他家を player 3 に持つ局面。player 3 だけが High target になる。
+    // 3副露の非リーチ他家を player 3 に持つ局面。player 3 だけが actionable target になる。
     fn single_target_context() -> GameContext {
         ContextSpec::new().melds_of(3, open_melds(3)).build()
     }
@@ -1144,14 +1150,52 @@ mod tests {
 
     // ---- target の決定 ----
 
+    // 河12枚。1副露と組み合わせると Caution になる。
+    const TWELVE_DISCARDS: &str = "1m 2m 3m 4m 5m 6m 7m 8m 9m 1p 2p 3p";
+    // 河9枚。2副露と組み合わせると Caution になる。
+    const NINE_DISCARDS: &str = "1m 2m 3m 4m 5m 6m 7m 8m 9m";
+
     #[test]
-    fn a_high_open_hand_threat_is_a_target() {
+    fn a_danger_open_hand_threat_is_a_target() {
         let context = single_target_context();
+        assert_eq!(
+            assessments(&context)[3].level(),
+            Some(OpenHandThreatLevel::Danger)
+        );
         assert_eq!(targets(&context), vec![3]);
         assert_eq!(
-            high_open_hand_threat_players(&assessments(&context)),
+            actionable_open_hand_threat_players(&assessments(&context)),
             vec![3]
         );
+    }
+
+    #[test]
+    fn a_caution_open_hand_threat_is_a_target() {
+        // 局進行だけで Caution になった相手も、従来の High と同じく防御 target にする。
+        for context in [
+            ContextSpec::new()
+                .melds_of(3, open_melds(1))
+                .discards_of(3, TWELVE_DISCARDS)
+                .build(),
+            ContextSpec::new()
+                .melds_of(3, open_melds(2))
+                .discards_of(3, NINE_DISCARDS)
+                .build(),
+            ContextSpec::new()
+                .melds_of(3, vec![ankan()])
+                .discards_of(3, TWELVE_DISCARDS)
+                .build(),
+        ] {
+            assert_eq!(
+                assessments(&context)[3].level(),
+                Some(OpenHandThreatLevel::Caution)
+            );
+            assert_eq!(targets(&context), vec![3]);
+            assert_eq!(
+                actionable_open_hand_threat_players(&assessments(&context)),
+                vec![3]
+            );
+        }
     }
 
     #[test]
@@ -1227,13 +1271,18 @@ mod tests {
     }
 
     #[test]
-    fn every_high_player_becomes_a_target_in_seat_order() {
+    fn every_actionable_player_becomes_a_target_in_seat_order() {
         let context = ContextSpec::new()
             .melds_of(1, open_melds(3))
             .melds_of(2, open_melds(1))
-            .melds_of(3, open_melds(3))
+            .melds_of(3, open_melds(1))
+            .discards_of(3, TWELVE_DISCARDS)
             .build();
+        let levels = assessments(&context).map(OpenHandThreatAssessment::level);
 
+        assert_eq!(levels[1], Some(OpenHandThreatLevel::Danger));
+        assert_eq!(levels[2], Some(OpenHandThreatLevel::Present));
+        assert_eq!(levels[3], Some(OpenHandThreatLevel::Caution));
         assert_eq!(targets(&context), vec![1, 3]);
     }
 
@@ -1244,11 +1293,11 @@ mod tests {
         let facts = player_threat_facts_from_context(&context);
 
         assert_eq!(
-            high_open_hand_threat_players_from_facts(&facts),
+            actionable_open_hand_threat_players_from_facts(&facts),
             targets(&context)
         );
         assert_eq!(
-            high_open_hand_threat_players(&classify_open_hand_threats(&facts)),
+            actionable_open_hand_threat_players(&classify_open_hand_threats(&facts)),
             targets(&context)
         );
     }
@@ -1810,7 +1859,7 @@ mod tests {
         OpenHandDefenseCandidateDiagnostic::for_dahai_action(
             context,
             &dahai(mjai),
-            &high_open_hand_threat_players_from_context(context),
+            &actionable_open_hand_threat_players_from_context(context),
             false,
         )
         .expect("Dahai の候補診断")
@@ -2006,7 +2055,7 @@ mod tests {
     #[test]
     fn one_value_honor_in_two_melds_is_not_a_target_from_the_classification() {
         // 通常役牌1翻だけの2副露は Present。Defense は classification を共有し、独自に
-        // 旧 High 条件を再実装しない。
+        // 旧 Caution / Danger 条件を再実装しない。
         let context = ContextSpec::new()
             .melds_of(3, vec![value_pon(), chi()])
             .build();

@@ -21,8 +21,8 @@
 | `Defense` | リーチ者向け防御候補のうち採用したもの |
 | `Defense candidates` | 全合法 Dahai の防御評価 |
 | `Selected discard structural deal-in risk` | 通常打牌の structural expected deal-in loss (diagnostics only、opt-in) |
-| `OpenHand defense` | High OpenHandThreat 向け防御候補 |
-| `Combined defense` | リーチと High OpenHandThreat が同時にいる場合の候補 |
+| `OpenHand defense` | actionable OpenHandThreat (`Caution` / `Danger`) 向け防御候補 |
+| `Combined defense` | リーチと actionable OpenHandThreat (`Caution` / `Danger`) が同時にいる場合の候補 |
 | `Summary` | 最終選択と次点を末尾で要約 |
 
 ## Final decision と AgentActionSource
@@ -43,7 +43,7 @@ Final decision
 | `Hora` / `Ryukyoku` / `Reach` | 和了、九種九牌、リーチ |
 | `NormalDiscard` | 通常打牌 selector |
 | `DefenseFallback` | リーチ者向け防御 fallback |
-| `OpenHandDefenseFallback` | High OpenHandThreat 向け fallback |
+| `OpenHandDefenseFallback` | actionable OpenHandThreat (`Caution` / `Danger`) 向け fallback |
 | `CombinedThreatDefenseFallback` | 複合 threat 向け fallback |
 | `Call` | 鳴き判断で選んだ Chi / Pon |
 | `Kan` | カン判断で選んだ暗槓 |
@@ -348,9 +348,11 @@ player 1
   open meld red dora: 1
   open confirmed value honor: 1
   open visible han proxy: 3
-  open hand threat: High
+  open hand threat: Danger
   open hand threat reason: TwoOrMoreWithVisibleHan
 ```
+
+`open hand threat` は `None` / `Present` / `Caution` / `Danger` のいずれか、または classification 対象外の `not applicable (...)` です。`Caution` は局進行だけを根拠にした警戒 (2面子かつ河9枚以上、1面子かつ河12枚以上)、`Danger` は面子数・確定打点・親を根拠にした強い警戒 (3面子以上、2面子かつ `fixed meld visible han proxy >= 2`、親の2面子) です。現時点の production policy は `Caution` と `Danger` を同じ actionable OpenHandThreat として扱うので、どちらでも Push/Pull reason・Defense target・selected action は同じ規則で決まります。
 
 `meld dora` や `fixed meld visible han proxy` などは暗槓を含む fixed meld 全体、`open meld dora` などの `open` 値は公開副露だけです。どちらの proxy も production helper から表示します。classification の意味と条件は [押し引きと threat](ai/push-pull.md#openhandthreat) を source document とします。
 
@@ -597,7 +599,7 @@ forced-fold の診断では、production selection が共通現物 / hard-safe /
 
 ## OpenHand defense
 
-High OpenHandThreat の target と候補ごとの safety を表示します。
+actionable OpenHandThreat (`Caution` / `Danger`) の target と候補ごとの safety を表示します。
 
 ```text
 OpenHand defense
@@ -610,7 +612,7 @@ OpenHand defense
 
 | 行 | 内容 |
 | --- | --- |
-| `targets` | High の相手。いなければ `none` |
+| `targets` | `Caution` / `Danger` の相手。いなければ `none` |
 | `discarded by target[n]` | target 自身の河に同じ牌種があるか |
 | `discarded by all targets` | 全 target 自身の河にあるか |
 | `ron safe[n]` | 本人の河または現在有効な一時通過牌により target にロンされないか (hard-safe) |
@@ -649,7 +651,7 @@ target 選択と `post_reach_passed` / `temporary_passed` / `same_hand_passed` �
 
 ## Combined defense
 
-リーチ者と High OpenHandThreat が同時にいる場合の target と候補を表示します。
+リーチ者と actionable OpenHandThreat (`Caution` / `Danger`) が同時にいる場合の target と候補を表示します。target 種類の `HighOpenHand` は従来の表示名のままで、`Caution` と `Danger` のどちらの相手にも使います。
 
 ```text
 Combined defense

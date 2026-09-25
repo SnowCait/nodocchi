@@ -2651,7 +2651,7 @@ mod tests {
             .collect()
     }
 
-    // player 1 が3副露の High。`reached` の席はリーチ者。`discards` は各席の河。
+    // player 1 が3副露の Danger。`reached` の席はリーチ者。`discards` は各席の河。
     fn shanten_fold_context(
         hand_values: &[u8; 13],
         discards: [&[u8]; 4],
@@ -2675,8 +2675,8 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_two_shanten_discard_against_a_high_open_hand_pushes() {
-        // High OpenHandThreat 単独で最善向聴がちょうど二向聴なので early Fold せず、通常打牌
+    fn a_hard_safe_selected_two_shanten_discard_against_an_actionable_open_hand_pushes() {
+        // actionable OpenHandThreat 単独で最善向聴がちょうど二向聴なので early Fold せず、通常打牌
         // selector が選んだ E が player 1 の河にある hard-safe な打牌なので押す。
         let ctx = shanten_fold_context(&TWO_SHANTEN_HAND, [&[], &[109], &[], &[]], [false; 4]);
         let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
@@ -2751,7 +2751,8 @@ mod tests {
     }
 
     #[test]
-    fn early_fold_against_a_high_open_hand_is_kept_without_a_hard_safe_two_shanten_candidate() {
+    fn early_fold_against_an_actionable_open_hand_is_kept_without_a_hard_safe_two_shanten_candidate()
+     {
         // player 1 の河が空で、最善向聴 cohort に hard-safe な候補が1件もない。選ばれる打牌も
         // hard-safe になり得ないので、通常打牌選択より前に Fold を確定する。
         let ctx = shanten_fold_context(&TWO_SHANTEN_HAND, [&[], &[], &[], &[]], [false; 4]);
@@ -2833,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    fn early_fold_against_a_high_open_hand_at_three_or_more_shanten_is_kept() {
+    fn early_fold_against_an_actionable_open_hand_at_three_or_more_shanten_is_kept() {
         // 最善向聴が三向聴以上なら、E が player 1 の河にあっても通常打牌選択より前に Fold を確定する。
         let ctx = shanten_fold_context(&THREE_SHANTEN_HAND, [&[], &[109], &[], &[]], [false; 4]);
         let actions = shanten_fold_actions(&THREE_SHANTEN_HAND);
@@ -3211,7 +3212,7 @@ mod tests {
         )
     }
 
-    fn high_open_hand_melds() -> Vec<crate::meld::Meld> {
+    fn actionable_open_hand_melds() -> Vec<crate::meld::Meld> {
         [108, 112, 116].map(honor_pon_meld).to_vec()
     }
 
@@ -3332,10 +3333,10 @@ mod tests {
     }
 
     #[test]
-    fn declines_a_call_when_its_post_call_tenpai_folds_against_a_high_open_hand() {
+    fn declines_a_call_when_its_post_call_tenpai_folds_against_an_actionable_open_hand() {
         // Call 単体では白 Pon → 北切りの役あり8枚待ちテンパイだが、3副露の相手に対しては
         // 既存 Push/Pull policy が弱いテンパイとして Fold にするため、Pon 自体を採用しない。
-        let reaction = dragon_pon_reaction().with_opponent_melds(high_open_hand_melds());
+        let reaction = dragon_pon_reaction().with_opponent_melds(actionable_open_hand_melds());
         let candidate = assert_single_call_candidate(
             &reaction,
             &LegalAction::None,
@@ -3507,8 +3508,8 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_call_when_its_post_call_tenpai_pushes_against_a_high_open_hand() {
-        let reaction = honitsu_chi_reaction().with_opponent_melds(high_open_hand_melds());
+    fn keeps_a_call_when_its_post_call_tenpai_pushes_against_an_actionable_open_hand() {
+        let reaction = honitsu_chi_reaction().with_opponent_melds(actionable_open_hand_melds());
         let candidate = assert_single_call_candidate(
             &reaction,
             &reaction.call(),
@@ -3535,7 +3536,7 @@ mod tests {
         let reaction = CallReaction::chi(&[8, 12, 32, 33, 40, 44, 53, 80, 84, 89], 17, &[8, 12])
             .with_dora_indicators(&[48])
             .with_own_melds(vec![honor_pon_meld(124)])
-            .with_opponent_melds(high_open_hand_melds());
+            .with_opponent_melds(actionable_open_hand_melds());
         let candidate = assert_single_call_candidate(
             &reaction,
             &reaction.call(),
@@ -4503,7 +4504,7 @@ mod tests {
         );
     }
 
-    // ---- High OpenHandThreat に対する action 選択 ----
+    // ---- actionable OpenHandThreat に対する action 選択 ----
 
     // 弱い一向聴 (受け入れ 7 枚 / 2 種類) になる自分の手牌。123m 456m 789m 1p 3p 5p 7p + ツモ 北。
     const OPEN_HAND_FOLD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 44, 53, 60];
@@ -4527,7 +4528,7 @@ mod tests {
         )
     }
 
-    // 自分は player 0、親は player 2。`melded` の席が3副露で High OpenHandThreat になる。
+    // 自分は player 0、親は player 2。`melded` の席が3副露で actionable OpenHandThreat になる。
     fn open_hand_context(
         hand_values: &[u8],
         drawn: Option<u8>,
@@ -4584,7 +4585,7 @@ mod tests {
         )
     }
 
-    // 弱い一向聴 + player 1 が High の副露相手。
+    // 弱い一向聴 + player 1 が Caution / Danger の副露相手。
     fn open_hand_fold_context(opponent_discards: &[u8], extra_visible: &[u8]) -> GameContext {
         let mut visible = OPEN_HAND_FOLD_DEAD.to_vec();
         visible.extend_from_slice(extra_visible);
@@ -4608,7 +4609,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_against_a_high_open_hand_prefers_a_tile_in_every_targets_river() {
+    fn fold_against_an_actionable_open_hand_prefers_a_tile_in_every_targets_river() {
         // player 1 の河に 9m があるので、通常打牌より本人の河の安全牌を優先する。
         let ctx = open_hand_fold_context(&[33], &[]);
         let actions = open_hand_fold_actions();
@@ -4663,7 +4664,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_against_a_high_open_hand_uses_the_honor_safety_without_a_river_safe_tile() {
+    fn fold_against_an_actionable_open_hand_uses_the_honor_safety_without_a_river_safe_tile() {
         // 本人の河に通る牌が無ければ字牌 safety。手牌の字牌は北だけ。
         let ctx = open_hand_fold_context(&[], &[]);
         let actions = open_hand_fold_actions();
@@ -4683,7 +4684,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_against_a_high_open_hand_uses_the_suited_safety_without_honors() {
+    fn fold_against_an_actionable_open_hand_uses_the_suited_safety_without_honors() {
         // 8m が4枚見えているので 9m は NoChance。無スジの 1m より優先する。
         let ctx = open_hand_fold_context(&[], &[29, 30, 31]);
         let actions = vec![dahai(0), dahai(32)];
@@ -4703,7 +4704,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_against_a_high_open_hand_falls_back_to_the_normal_discard() {
+    fn fold_against_an_actionable_open_hand_falls_back_to_the_normal_discard() {
         // 安全牌候補が1件も無い場合だけ通常打牌に戻る。
         let ctx = open_hand_fold_context(&[], &[]);
         let actions = vec![dahai(0), dahai(4)];
@@ -4729,8 +4730,8 @@ mod tests {
     }
 
     #[test]
-    fn fold_against_a_high_open_hand_with_a_strong_iishanten_prefers_the_defense_fallback() {
-        // 強い一向聴でも High の副露相手には降りる。player 1 の河に 1m があるので、通常打牌より
+    fn fold_against_an_actionable_open_hand_with_a_strong_iishanten_prefers_the_defense_fallback() {
+        // 強い一向聴でも Caution / Danger の副露相手には降りる。player 1 の河に 1m があるので、通常打牌より
         // 本人の河の安全牌を優先する。
         let ctx = open_hand_context(
             &OPEN_HAND_IISHANTEN_HAND,
@@ -4780,7 +4781,7 @@ mod tests {
     }
 
     #[test]
-    fn push_against_a_high_open_hand_keeps_the_reach_priority() {
+    fn push_against_an_actionable_open_hand_keeps_the_reach_priority() {
         // テンパイは Push。Reach → 通常打牌 の既存順序を変えない。
         let ctx = open_hand_context(
             &OPEN_HAND_TENPAI_HAND,
@@ -4824,7 +4825,7 @@ mod tests {
 
     fn request_407_context_and_actions() -> (GameContext, Vec<LegalAction>) {
         // Capture request_id=407 相当。player 3 の 14 枚は
-        // 23566m 222p 123s 0s67s。player 1 は2副露かつ河9枚で High になり、
+        // 23566m 222p 123s 0s67s。player 1 は2副露かつ河9枚で Caution になり、
         // 通常打牌 selector が選ぶ 5m はその河にある。
         let hand = [4, 8, 17, 20, 21, 40, 41, 72, 76, 80, 88, 92, 96];
         let drawn = 42;
@@ -4883,7 +4884,7 @@ mod tests {
     }
 
     #[test]
-    fn request_407_safe_tenpai_discard_pushes_against_a_high_open_hand() {
+    fn request_407_safe_tenpai_discard_pushes_against_an_actionable_open_hand() {
         use crate::offense_value::TenpaiOffenseMode;
         use crate::open_hand_threat::{OpenHandThreatLevel, OpenHandThreatReason};
 
@@ -4907,7 +4908,7 @@ mod tests {
         assert_eq!(inputs.player_threats[1].discard_count, 9);
         assert_eq!(
             inputs.open_hand_threats[1].level(),
-            Some(OpenHandThreatLevel::High)
+            Some(OpenHandThreatLevel::Caution)
         );
         assert_eq!(
             inputs.open_hand_threats[1].reason(),
@@ -5087,7 +5088,7 @@ mod tests {
         let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
         assert_eq!(inputs.opponent_reach_count, 1);
         assert!(!inputs.dealer_reacher);
-        assert!(!inputs.has_high_open_hand_threat());
+        assert!(!inputs.has_actionable_open_hand_threat());
         assert!(inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
         // strong-tenpai threshold は満たさない。
@@ -5143,7 +5144,7 @@ mod tests {
     }
 
     #[test]
-    fn weak_tenpai_push_against_a_late_one_meld_high_matches_every_entry_point() {
+    fn weak_tenpai_push_against_a_late_one_meld_caution_matches_every_entry_point() {
         let late_discards = [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107];
         let ctx = open_hand_context_with_meld_count(
             &OPPONENT_MELD_HAND,
@@ -5165,7 +5166,7 @@ mod tests {
         let offense = inputs.offense.expect("offense がある");
         assert_eq!(inputs.player_threats[1].open_meld_count, 1);
         assert_eq!(inputs.player_threats[1].discard_count, 12);
-        assert!(inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert!(inputs.has_only_late_one_meld_actionable_open_hand_threats());
         assert_eq!(offense.min_shanten_after_discard, 0);
         assert!(
             offense
@@ -5186,9 +5187,9 @@ mod tests {
         assert_eq!(diagnostic.open_hand_defense.selected, None);
     }
 
-    // ---- RiichiThreat + High OpenHandThreat の複合 threat に対する action 選択 ----
+    // ---- RiichiThreat + actionable OpenHandThreat の複合 threat に対する action 選択 ----
 
-    // 弱い一向聴 + player 1 がリーチ + player 2 が High の副露相手。
+    // 弱い一向聴 + player 1 がリーチ + player 2 が Caution / Danger の副露相手。
     fn combined_threat_fold_context(
         riichi_discards: &[u8],
         open_hand_discards: &[u8],
@@ -5293,7 +5294,7 @@ mod tests {
                 ThreatDefenseTarget::high_open_hand(2),
             ]
         );
-        // OpenHand 診断の target は High の相手だけで、既存 semantics のまま。
+        // OpenHand 診断の target は Caution / Danger の相手だけで、既存 semantics のまま。
         assert_eq!(diagnostic.open_hand_defense.targets, vec![2]);
     }
 

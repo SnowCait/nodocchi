@@ -292,10 +292,10 @@ production bot の判断は変わりません。`ShantenAgent::act()` も `diagn
 | 相手の threat | 使用する防御 | `source` |
 | --- | --- | --- |
 | リーチ者のみ | リーチ者向け防御 fallback (共通現物 / exact ron-risk model / 字牌・壁・スジ等) | `DefenseFallback` |
-| High OpenHandThreat の相手のみ | OpenHand 防御 fallback | `OpenHandDefenseFallback` |
-| リーチ者と High OpenHandThreat の相手が同時 | 複合 threat 防御 fallback | `CombinedThreatDefenseFallback` |
+| actionable OpenHandThreat (`Caution` / `Danger`) の相手のみ | OpenHand 防御 fallback | `OpenHandDefenseFallback` |
+| リーチ者と actionable OpenHandThreat の相手が同時 | 複合 threat 防御 fallback | `CombinedThreatDefenseFallback` |
 
-threat の分類も既存 classification と同じ source of truth を使い、High 条件などをここで書き直しません。
+threat の分類も既存 classification と同じ source of truth を使い、`Caution` / `Danger` 条件などをここで書き直しません。
 
 [相対席 option](#相手の河とリーチ) と組み合わせて使えます。
 
@@ -504,7 +504,7 @@ exact model が利用できない候補には存在しない percentage を作�
 
 #### unavailable になる場合
 
-リーチ者も High OpenHandThreat の相手もいない局面では、防御対象がないので `unavailable` になります。通常打牌を「ベタ降り最善打牌」として返すことはありません。
+リーチ者も actionable OpenHandThreat の相手もいない局面では、防御対象がないので `unavailable` になります。通常打牌を「ベタ降り最善打牌」として返すことはありません。
 
 ```text
 Summary

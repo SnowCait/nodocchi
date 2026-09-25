@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(facts.value_honor_melds.dragon, 1);
 
         // 通常役牌1翻だけの2副露は Present。consumer は classification を共有し、従来の
-        // High 向け Fold policy を適用しない。
+        // Caution / Danger 向け Fold policy を適用しない。
         assert_eq!(facts.open_visible_han_proxy(), 1);
         assert_eq!(
             diagnostic.player_threats[1].open_hand_threat.level(),

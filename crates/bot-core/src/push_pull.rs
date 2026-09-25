@@ -7,7 +7,7 @@ use crate::discard_selection::{
 };
 use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
 use crate::open_hand_threat::{
-    OpenHandThreatAssessment, classify_open_hand_threats, has_high_open_hand_threat,
+    OpenHandThreatAssessment, classify_open_hand_threats, has_actionable_open_hand_threat,
 };
 use crate::threat::{
     PlayerThreatFacts, fixed_meld_value_facts, has_reached_dealer,
@@ -206,7 +206,7 @@ fn tenpai_push_weighted_total_min(dealer_reacher: bool) -> u64 {
 /// [[`SELF_TSUMO_VALUE_SCALE`]]。inclusive。
 ///
 /// テンパイの [`tenpai_push_weighted_total_min`] とは別の数値系なので、残枚数加重合計とは
-/// 比較しない。他家リーチ者に親が含まれるかだけで決まり、リーチ者数や High OpenHandThreat
+/// 比較しない。他家リーチ者に親が含まれるかだけで決まり、リーチ者数や actionable OpenHandThreat
 /// との複合では変えない。`dealer_reacher` は [`PushPullInputs::dealer_reacher`] が source of
 /// truth で、ここで親リーチを判定し直さない。
 fn iishanten_push_expected_self_tsumo_min(dealer_reacher: bool) -> u64 {
@@ -407,7 +407,7 @@ pub struct PushPullInputs {
     /// 全4席分の非リーチ相手の classification。`player_threats` から
     /// [`classify_open_hand_threats`] で一度だけ導出する。
     ///
-    /// 押し引きと OpenHand 防御はこの同じ classification を参照し、High 条件をそれぞれで
+    /// 押し引きと OpenHand 防御はこの同じ classification を参照し、Caution / Danger 条件をそれぞれで
     /// 書き直さない。自分の席・リーチ済みの席・`player_id` 不明の席は level を持たない
     /// [`OpenHandThreatAssessment::NotApplicable`] になる。
     pub open_hand_threats: [OpenHandThreatAssessment; 4],
@@ -415,7 +415,7 @@ pub struct PushPullInputs {
     ///
     /// target 集合と target ごとの hard-safe 判定は Combined 防御の source of truth
     /// ([`threat_defense_targets`] / [`is_safe_against_all_threats`]) を共有する。したがって
-    /// リーチ者はそのリーチ者への現物、`High` の非リーチ相手は OpenHand 防御と同じ hard-safe で
+    /// リーチ者はそのリーチ者への現物、`Caution` / `Danger` の非リーチ相手は OpenHand 防御と同じ hard-safe で
     /// 判定し、threat の種類ごとに safety rule を書き直さない。
     ///
     /// 手牌内の別の safe tile はこの fact に含めない。threat target がいない場合や通常打牌評価が
@@ -424,47 +424,47 @@ pub struct PushPullInputs {
 }
 
 impl PushPullInputs {
-    /// High OpenHandThreat の相手が1人以上いるか。
+    /// actionable OpenHandThreat の相手が1人以上いるか。
     ///
-    /// 判定は [`has_high_open_hand_threat`] と共有し、押し引き側で High 条件を書き直さない。
-    pub fn has_high_open_hand_threat(&self) -> bool {
-        has_high_open_hand_threat(&self.open_hand_threats)
+    /// 判定は [`has_actionable_open_hand_threat`] と共有し、押し引き側で Caution / Danger 条件を書き直さない。
+    pub fn has_actionable_open_hand_threat(&self) -> bool {
+        has_actionable_open_hand_threat(&self.open_hand_threats)
     }
 
-    /// リーチ者と High OpenHandThreat の相手が同時にいる複合 threat の局面か。
+    /// リーチ者と actionable OpenHandThreat の相手が同時にいる複合 threat の局面か。
     ///
-    /// 条件は `opponent_reach_count >= 1` かつ [`Self::has_high_open_hand_threat`]。
+    /// 条件は `opponent_reach_count >= 1` かつ [`Self::has_actionable_open_hand_threat`]。
     /// [`OpenHandThreatLevel::Present`](crate::open_hand_threat::OpenHandThreatLevel::Present) の
-    /// 相手は複合 threat に含めない。High 条件は PR の classification が source of truth で、
+    /// 相手は複合 threat に含めない。Caution / Danger 条件は PR の classification が source of truth で、
     /// ここで書き直さない。
     pub fn has_combined_threat(&self) -> bool {
-        self.opponent_reach_count >= 1 && self.has_high_open_hand_threat()
+        self.opponent_reach_count >= 1 && self.has_actionable_open_hand_threat()
     }
 
-    /// High OpenHandThreat の対象がすべて「完成面子1つかつ河12枚以上」だけで High になった相手か。
+    /// actionable OpenHandThreat の対象がすべて「完成面子1つかつ河12枚以上」だけで Caution になった相手か。
     ///
     /// 面子数は classification と同じく暗槓を含む `meld_count` で数える。したがって公開副露1つ
     /// だけの相手と暗槓1つだけの相手はどちらも対象で、公開副露と暗槓を1つずつ持つような完成
     /// 面子2つの相手は対象外になる。
     ///
-    /// High target の特定には分類済みの `open_hand_threats` を使い、その target の意味は対応する
-    /// `player_threats` の観測 facts で確認する。diagnostic reason には依存せず、High 条件そのものも
-    /// ここでは分類し直さない。High target がいない場合は `false`。
-    pub fn has_only_late_one_meld_high_open_hand_threats(&self) -> bool {
-        let mut has_high_target = false;
+    /// actionable target の特定には分類済みの `open_hand_threats` を使い、その target の意味は対応する
+    /// `player_threats` の観測 facts で確認する。diagnostic reason には依存せず、Caution / Danger 条件そのものも
+    /// ここでは分類し直さない。actionable target がいない場合は `false`。
+    pub fn has_only_late_one_meld_actionable_open_hand_threats(&self) -> bool {
+        let mut has_actionable_target = false;
 
         for (facts, assessment) in self.player_threats.iter().zip(&self.open_hand_threats) {
-            if !assessment.is_high() {
+            if !assessment.is_actionable() {
                 continue;
             }
 
-            has_high_target = true;
+            has_actionable_target = true;
             if facts.meld_count != 1 || facts.discard_count < 12 {
                 return false;
             }
         }
 
-        has_high_target
+        has_actionable_target
     }
 }
 
@@ -476,7 +476,7 @@ impl PushPullInputs {
 /// できている。threat の種類が混ざることはない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullReason {
-    /// 他家リーチも High OpenHandThreat もいない。
+    /// 他家リーチも actionable OpenHandThreat もいない。
     NoThreat,
     MissingOffenseAgainstReach,
     StrongTenpaiAgainstReach,
@@ -489,24 +489,24 @@ pub enum PushPullReason {
     TwoOrMoreShantenAgainstReach,
     MissingOffenseAgainstHighOpenHand,
     StrongTenpaiAgainstHighOpenHand,
-    /// 通常打牌として選択したテンパイ打牌が全 High OpenHand target に hard-safe なので押す。
+    /// 通常打牌として選択したテンパイ打牌が全 actionable OpenHand target に hard-safe なので押す。
     SafeTenpaiAgainstHighOpenHand,
-    /// 終盤の完成面子1つだけが High target の局面で、通常打牌後がテンパイなので押す。
+    /// 終盤の完成面子1つだけが actionable target の局面で、通常打牌後がテンパイなので押す。
     TenpaiAgainstLateOneMeldHighOpenHand,
     WeakTenpaiAgainstHighOpenHand,
     /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
     ValuableIishantenAgainstHighOpenHand,
     /// ExpectedSelfTsumoValue は threshold 未満だが、通常打牌として選択した一向聴打牌が
-    /// 全 High OpenHand target に hard-safe なので押す。High OpenHandThreat 単独に限る。
+    /// 全 actionable OpenHand target に hard-safe なので押す。actionable OpenHandThreat 単独に限る。
     SafeIishantenAgainstHighOpenHand,
     IishantenAgainstHighOpenHand,
-    /// 通常打牌として選択した打牌後ちょうど二向聴の打牌が全 High OpenHand target に hard-safe
-    /// なので押す。High OpenHandThreat 単独に限る。
+    /// 通常打牌として選択した打牌後ちょうど二向聴の打牌が全 actionable OpenHand target に hard-safe
+    /// なので押す。actionable OpenHandThreat 単独に限る。
     SafeTwoShantenAgainstHighOpenHand,
     TwoOrMoreShantenAgainstHighOpenHand,
     MissingOffenseAgainstCombinedThreat,
     StrongTenpaiAgainstCombinedThreat,
-    /// 通常打牌として選択したテンパイ打牌が全リーチ者と全 High OpenHand target の双方に
+    /// 通常打牌として選択したテンパイ打牌が全リーチ者と全 actionable OpenHand target の双方に
     /// hard-safe なので押す。
     SafeTenpaiAgainstCombinedThreat,
     WeakTenpaiAgainstCombinedThreat,
@@ -530,7 +530,7 @@ const TENPAI_SHANTEN: i8 = 0;
 // 判断する打牌後の向聴数。
 const TWO_OR_MORE_SHANTEN: i8 = 2;
 
-// High OpenHandThreat 単独に対して、二向聴以上で選択打牌の hard-safe 例外を適用する唯一の
+// actionable OpenHandThreat 単独に対して、二向聴以上で選択打牌の hard-safe 例外を適用する唯一の
 // 打牌後向聴数。三向聴以上には hard-safe でも押す例外を広げない。
 const SAFE_TWO_SHANTEN: i8 = 2;
 
@@ -559,7 +559,7 @@ const IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_000 * SELF_TSUMO_VALUE_SCA
 
 // 他家リーチ者に親が含まれる場合に一向聴から押すために要求する ExpectedSelfTsumoValue
 // [SELF_TSUMO_VALUE_SCALE]。inclusive。テンパイと同じく基本 threshold の 1.5 倍を要求する。
-// リーチ者が複数いる場合や High OpenHandThreat との複合というだけでは倍率を増やさない。
+// リーチ者が複数いる場合や actionable OpenHandThreat との複合というだけでは倍率を増やさない。
 const DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_500 * SELF_TSUMO_VALUE_SCALE;
 
 /// `GameContext` から押し引き判定の入力を構築する。
@@ -658,7 +658,7 @@ pub(crate) fn push_pull_inputs_from_selected_tenpai(
 /// リーチフラグが立っている全席を他家リーチとして数える。
 ///
 /// 非リーチ相手の classification は既存 [`classify_open_hand_threats`] を同じ facts から
-/// 一度だけ導出する。押し引き側で High 条件を分類し直さない。
+/// 一度だけ導出する。押し引き側で Caution / Danger 条件を分類し直さない。
 ///
 /// offense は渡された evaluation から構築し、新しい向聴数・受け入れ計算は行わない。
 /// evaluation が `None` なら offense も `None`。
@@ -760,9 +760,9 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
 /// target 抽出も target ごとの hard-safe 判定も Combined 防御の helper
 /// ([`threat_defense_targets`] / [`is_safe_against_all_threats`]) を共有し、threat の種類ごとに
 /// safety rule を書き直さない。リーチ者はそのリーチ者への現物 (本人の河と
-/// `post_reach_passed_tiles`)、`High` の非リーチ相手は OpenHand 防御と同じ hard-safe (本人の河と
-/// 現在有効な一時通過牌) が根拠になる。`High` の target は classification が source of truth
-/// なので、公開副露がある相手に限らず暗槓だけで `High` になった相手も含む。
+/// `post_reach_passed_tiles`)、`Caution` / `Danger` の非リーチ相手は OpenHand 防御と同じ hard-safe (本人の河と
+/// 現在有効な一時通過牌) が根拠になる。`Caution` / `Danger` の target は classification が source of truth
+/// なので、公開副露がある相手に限らず暗槓だけで `Caution` / `Danger` になった相手も含む。
 ///
 /// 選択打牌がない場合とその牌種に一致する合法 Dahai がない場合、threat target がいない場合は
 /// `false`。public [`push_pull_inputs_from_context`] が全手牌候補から global best を渡す場合でも、
@@ -807,9 +807,9 @@ fn should_evaluate_tenpai_offense_value(
 enum ThreatKind {
     /// 他家リーチだけがいる。
     Reach,
-    /// 他家リーチが0人で、High OpenHandThreat の相手がいる。
-    HighOpenHand,
-    /// 他家リーチと High OpenHandThreat の相手が同時にいる。
+    /// 他家リーチが0人で、actionable OpenHandThreat の相手がいる。
+    ActionableOpenHand,
+    /// 他家リーチと actionable OpenHandThreat の相手が同時にいる。
     Combined,
 }
 
@@ -822,11 +822,11 @@ struct ThreatReasons {
     weak_tenpai: PushPullReason,
     valuable_iishanten: PushPullReason,
     /// 選択した通常打牌が全 threat target に hard-safe な一向聴で押すときの reason。
-    /// High OpenHandThreat 単独だけが持ち、Reach / Combined は `None` でこの例外を使わない。
+    /// actionable OpenHandThreat 単独だけが持ち、Reach / Combined は `None` でこの例外を使わない。
     safe_iishanten: Option<PushPullReason>,
     iishanten: PushPullReason,
     /// 選択した通常打牌が全 threat target に hard-safe な、打牌後ちょうど二向聴で押すときの
-    /// reason。High OpenHandThreat 単独だけが持ち、Reach / Combined は `None` でこの例外を使わない。
+    /// reason。actionable OpenHandThreat 単独だけが持ち、Reach / Combined は `None` でこの例外を使わない。
     safe_two_shanten: Option<PushPullReason>,
     two_or_more_shanten: PushPullReason,
 }
@@ -845,7 +845,7 @@ impl ThreatKind {
                 safe_two_shanten: None,
                 two_or_more_shanten: PushPullReason::TwoOrMoreShantenAgainstReach,
             },
-            ThreatKind::HighOpenHand => ThreatReasons {
+            ThreatKind::ActionableOpenHand => ThreatReasons {
                 missing_offense: PushPullReason::MissingOffenseAgainstHighOpenHand,
                 strong_tenpai: PushPullReason::StrongTenpaiAgainstHighOpenHand,
                 safe_tenpai: PushPullReason::SafeTenpaiAgainstHighOpenHand,
@@ -873,22 +873,22 @@ impl ThreatKind {
 
 /// 明確な threat の有無と種類。`Present` の相手は threat に数えない。
 ///
-/// リーチ情報も High 条件も既存の source of truth をそのまま使い、ここで分類し直さない。
+/// リーチ情報も Caution / Danger 条件も既存の source of truth をそのまま使い、ここで分類し直さない。
 fn threat_kind(inputs: &PushPullInputs) -> Option<ThreatKind> {
     match (
         inputs.opponent_reach_count >= 1,
-        inputs.has_high_open_hand_threat(),
+        inputs.has_actionable_open_hand_threat(),
     ) {
         (true, true) => Some(ThreatKind::Combined),
         (true, false) => Some(ThreatKind::Reach),
-        (false, true) => Some(ThreatKind::HighOpenHand),
+        (false, true) => Some(ThreatKind::ActionableOpenHand),
         (false, false) => None,
     }
 }
 
 /// 明確な threat がいる局面か。
 ///
-/// 分類は [`threat_kind`] と共有し、Reach / High OpenHandThreat / Combined の条件を押し引きの
+/// 分類は [`threat_kind`] と共有し、Reach / actionable OpenHandThreat / Combined の条件を押し引きの
 /// 外側で書き直さないための入口。攻撃評価を持たない入力でも判定できる。
 pub(crate) fn has_clear_threat(inputs: &PushPullInputs) -> bool {
     threat_kind(inputs).is_some()
@@ -897,8 +897,8 @@ pub(crate) fn has_clear_threat(inputs: &PushPullInputs) -> bool {
 /// 明確な threat に対して打牌後が二向聴以上のときの判断。
 ///
 /// 向聴数・threat の種類・選択打牌の hard-safe fact だけで決まり、2向聴 ExpectedSelfTsumoValue も
-/// 受け入れも相手の打点も見ない。High OpenHandThreat 単独で打牌後がちょうど二向聴なら、選択打牌が
-/// 全 High target に hard-safe なときだけ `SafeTwoShantenAgainstHighOpenHand` で押す。それ以外は
+/// 受け入れも相手の打点も見ない。actionable OpenHandThreat 単独で打牌後がちょうど二向聴なら、選択打牌が
+/// 全 actionable target に hard-safe なときだけ `SafeTwoShantenAgainstHighOpenHand` で押す。それ以外は
 /// `TwoOrMoreShantenAgainst*` で降りる。この対応はここが唯一の source of truth。
 ///
 /// 選択打牌が hard-safe かどうかで判断が変わるかは [`safe_two_shanten_reason`] と共有する。
@@ -923,7 +923,7 @@ fn two_or_more_shanten_decision(
 
 /// 打牌後の向聴数が二向聴以上のとき、選択打牌の hard-safe fact で押せる局面ならその reason。
 ///
-/// High OpenHandThreat 単独かつちょうど二向聴だけが `Some`。Reach / Combined と三向聴以上は
+/// actionable OpenHandThreat 単独かつちょうど二向聴だけが `Some`。Reach / Combined と三向聴以上は
 /// `None` で、選択打牌が hard-safe でも判断は変わらない。`Some` は「選択打牌を見るまで判断
 /// できない」可能性があるというだけで、押す根拠ではない。
 fn safe_two_shanten_reason(
@@ -977,7 +977,7 @@ pub(crate) fn two_or_more_shanten_fold(
 ///   [`decide_push_pull`] が判断する。
 /// - 選択打牌の hard-safe fact で判断が変わらない局面 ([`safe_two_shanten_reason`] が `None`):
 ///   選択結果によらず同じ Fold に確定する。
-/// - 選択打牌の hard-safe fact で判断が変わり得る局面 (High OpenHandThreat 単独でちょうど二向聴):
+/// - 選択打牌の hard-safe fact で判断が変わり得る局面 (actionable OpenHandThreat 単独でちょうど二向聴):
 ///   `best_shanten_cohort_has_hard_safe_discard` で最善向聴 cohort に hard-safe な候補があるかを
 ///   確かめる。1件もなければ選ばれる打牌も必ず hard-safe ではないので、その fact を `false` と
 ///   して同じ Fold に確定する。1件以上あれば、実際に選ばれる打牌を見るまで判断できないので
@@ -1047,42 +1047,42 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, dealer_reacher: bool) -
 /// 明確な threat が無ければ従来どおり通常の攻撃判断 (`Push`) を続ける。明確な threat がある
 /// 場合は、打牌後が強いテンパイのときと、一向聴で十分な攻撃価値を確認できたときだけ押し、
 /// それ以外は降りる。ただし通常打牌として選んだテンパイ打牌そのものが現在の全 threat target に
-/// hard-safe な場合、または他家リーチがなく High target がすべて完成面子1つかつ河12枚以上なら、
-/// テンパイの強さを問わず押す。また High OpenHandThreat 単独では、通常打牌として選んだ一向聴
-/// 打牌そのものが全 High target に hard-safe なら、ExpectedSelfTsumoValue が threshold 未満でも
-/// 押し、打牌後がちょうど二向聴でも選択打牌が全 High target に hard-safe なら押す。
+/// hard-safe な場合、または他家リーチがなく actionable target がすべて完成面子1つかつ河12枚以上なら、
+/// テンパイの強さを問わず押す。また actionable OpenHandThreat 単独では、通常打牌として選んだ一向聴
+/// 打牌そのものが全 actionable target に hard-safe なら、ExpectedSelfTsumoValue が threshold 未満でも
+/// 押し、打牌後がちょうど二向聴でも選択打牌が全 actionable target に hard-safe なら押す。
 ///
 /// | 自分の状態 | mode |
 /// | --- | --- |
 /// | 攻撃評価を作れない | `Fold` |
 /// | 強いテンパイ | `Push` |
-/// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 threat target に hard-safe、または終盤1面子 High だけなら `Push`) |
+/// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 threat target に hard-safe、または終盤1面子 Caution だけなら `Push`) |
 /// | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
-/// | High OpenHandThreat 単独で、選択打牌が全 High target に hard-safe な一向聴 | `Push` |
+/// | actionable OpenHandThreat 単独で、選択打牌が全 actionable target に hard-safe な一向聴 | `Push` |
 /// | それ以外の一向聴 | `Fold` |
-/// | High OpenHandThreat 単独で、選択打牌が全 High target に hard-safe なちょうど二向聴 | `Push` |
+/// | actionable OpenHandThreat 単独で、選択打牌が全 actionable target に hard-safe なちょうど二向聴 | `Push` |
 /// | それ以外の二向聴以上 | `Fold` |
 ///
-/// 明確な threat は「他家リーチが1人以上」「High OpenHandThreat が1人以上」「その複合」の3種類。
+/// 明確な threat は「他家リーチが1人以上」「actionable OpenHandThreat が1人以上」「その複合」の3種類。
 /// 選択打牌の hard-safe 例外は3種類すべてに適用し、reason は threat の種類ごとに
 /// `SafeTenpaiAgainst*` で分かれる。target ごとの hard-safe 判定は Combined 防御の既存 helper を
-/// 入力構築時に共有するので、リーチ者にはそのリーチ者への現物、`High` の非リーチ相手には OpenHand
+/// 入力構築時に共有するので、リーチ者にはそのリーチ者への現物、`Caution` / `Danger` の非リーチ相手には OpenHand
 /// 防御と同じ hard-safe が根拠になり、複合ではその両方を全 target について要求する。スジ・
-/// ワンチャンス・model risk の低さは根拠にせず、手牌内の別候補も見ない。終盤1面子 High の例外は
-/// 従来どおり High OpenHandThreat 単独に限る。`Present` の相手は threat に数えない。
+/// ワンチャンス・model risk の低さは根拠にせず、手牌内の別候補も見ない。終盤1面子 Caution の例外は
+/// 従来どおり actionable OpenHandThreat 単独に限る。`Present` の相手は threat に数えない。
 ///
-/// 一向聴の選択打牌 hard-safe 例外は High OpenHandThreat 単独だけに適用し、reason は
+/// 一向聴の選択打牌 hard-safe 例外は actionable OpenHandThreat 単独だけに適用し、reason は
 /// `SafeIishantenAgainstHighOpenHand` になる。ExpectedSelfTsumoValue の条件を先に評価するので、
 /// 両方を満たす場合は `ValuableIishantenAgainstHighOpenHand` のまま。Reach / Combined の一向聴には
 /// この例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断する。
 ///
-/// 二向聴でも同じ hard-safe fact だけを根拠に、High OpenHandThreat 単独かつ打牌後がちょうど
+/// 二向聴でも同じ hard-safe fact だけを根拠に、actionable OpenHandThreat 単独かつ打牌後がちょうど
 /// 二向聴なら `SafeTwoShantenAgainstHighOpenHand` で押す。相手の親子・visible han proxy・副露数・
 /// 河枚数は条件にせず、2向聴の攻撃価値 threshold も加えない。Reach / Combined の二向聴、
 /// hard-safe でない二向聴、三向聴以上は従来どおり降りる。
 ///
 /// 情報不足 (攻撃評価なし / テンパイなのに待ちを構築できない / 恒常フリテンが判定不能) の場合は
-/// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1面子 High だけを相手にしたテンパイの
+/// 原則として攻撃継続を推測せず `Fold` にする。ただし終盤1面子 Caution だけを相手にしたテンパイの
 /// 例外では、`min_shanten_after_discard <= 0` を根拠に押すため、待ち情報や恒常フリテンから強い
 /// テンパイと確認できなくても `Push` になり得る。原則の局面で `Neutral` にすると通常打牌が防御
 /// fallback より優先され、実質的に押してしまうため。
@@ -1132,14 +1132,14 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
     };
 
     // 3. テンパイ相当(向聴 <= 0)。強いテンパイ、選択打牌が全 threat target に hard-safe、
-    // または終盤1面子 High だけなら押す。
+    // または終盤1面子 Caution だけなら押す。
     if offense.min_shanten_after_discard <= TENPAI_SHANTEN {
         let (mode, reason) = if is_strong_tenpai(&offense, inputs.dealer_reacher) {
             (PushPullMode::Push, reasons.strong_tenpai)
         } else if inputs.selected_normal_discard_hard_safe_for_all_threat_targets {
             (PushPullMode::Push, reasons.safe_tenpai)
-        } else if threat == ThreatKind::HighOpenHand
-            && inputs.has_only_late_one_meld_high_open_hand_threats()
+        } else if threat == ThreatKind::ActionableOpenHand
+            && inputs.has_only_late_one_meld_actionable_open_hand_threats()
         {
             (
                 PushPullMode::Push,
@@ -1151,7 +1151,7 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         return PushPullDecision { mode, reason };
     }
 
-    // 4. 一向聴。攻撃価値を確認できた場合と、High OpenHandThreat 単独で選択打牌が全 High
+    // 4. 一向聴。攻撃価値を確認できた場合と、actionable OpenHandThreat 単独で選択打牌が全 actionable
     // target に hard-safe な場合だけ押す。Reach / Combined は safe_iishanten を持たない。
     if offense.min_shanten_after_discard == 1 {
         let (mode, reason) = if is_valuable_iishanten(&offense, inputs.dealer_reacher) {
@@ -1207,7 +1207,7 @@ pub(crate) fn log_push_pull_decision(
         opponent_reach_count = inputs.opponent_reach_count,
         dealer_reacher = inputs.dealer_reacher,
         self_dealer = inputs.self_dealer,
-        high_open_hand_threat = inputs.has_high_open_hand_threat(),
+        high_open_hand_threat = inputs.has_actionable_open_hand_threat(),
         combined_threat = inputs.has_combined_threat(),
         selected_normal_discard_hard_safe_for_all_threat_targets = inputs.selected_normal_discard_hard_safe_for_all_threat_targets,
         offense_min_shanten_after_discard = ?inputs.offense.map(|offense| offense.min_shanten_after_discard),
@@ -2188,11 +2188,11 @@ mod tests {
                 }
             }
 
-            let high_open_hand = decide_push_pull(&high_open_hand_inputs(Some(offense)));
+            let actionable_open_hand = decide_push_pull(&danger_open_hand_inputs(Some(offense)));
             assert_ne!(
-                high_open_hand.mode,
+                actionable_open_hand.mode,
                 PushPullMode::Neutral,
-                "{high_open_hand:?}"
+                "{actionable_open_hand:?}"
             );
 
             let combined = decide_push_pull(&inputs_with_threats(
@@ -4101,9 +4101,9 @@ mod tests {
     fn present_open_hands_still_push() {
         // Present に留まる副露相手は threat に数えない。従来どおり NoThreat → Push。
         let facts = opponent_meld_facts();
-        assert!(!has_high_open_hand_threat(&classify_open_hand_threats(
-            &facts
-        )));
+        assert!(!has_actionable_open_hand_threat(
+            &classify_open_hand_threats(&facts)
+        ));
 
         for offense in [None, Some(offense(2, 20, 4)), Some(weak_tenpai_offense())] {
             let decision = decide_push_pull(&inputs_with_threats(0, false, false, offense, facts));
@@ -4112,7 +4112,7 @@ mod tests {
         }
     }
 
-    // ---- High OpenHandThreat に対する押し引き ----
+    // ---- actionable OpenHandThreat に対する押し引き ----
 
     // ドラも役牌も含まない Chi。
     fn chi_meld() -> crate::meld::Meld {
@@ -4173,32 +4173,32 @@ mod tests {
         player_threat_facts_from_context(&context)
     }
 
-    // player 1 が3副露で High になる facts。リーチ者はいない。
-    fn high_open_hand_facts() -> [PlayerThreatFacts; 4] {
+    // player 1 が3副露で Danger になる facts。リーチ者はいない。
+    fn danger_open_hand_facts() -> [PlayerThreatFacts; 4] {
         open_meld_facts_of(1, 3, [false; 4], Some(0))
     }
 
-    // player 1 が公開副露1つかつ河12枚で High になる facts。
-    fn late_one_meld_high_facts() -> [PlayerThreatFacts; 4] {
+    // player 1 が公開副露1つかつ河12枚で Caution になる facts。
+    fn late_one_meld_caution_facts() -> [PlayerThreatFacts; 4] {
         let mut facts = open_meld_facts_of(1, 1, [false; 4], Some(0));
         facts[1].discard_count = 12;
         facts
     }
 
-    fn late_one_meld_high_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
-        inputs_with_threats(0, false, false, offense, late_one_meld_high_facts())
+    fn late_one_meld_caution_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
+        inputs_with_threats(0, false, false, offense, late_one_meld_caution_facts())
     }
 
-    // player 1 が暗槓1つかつ河12枚で High になる facts。公開副露は持たない。
-    fn late_single_ankan_high_facts() -> [PlayerThreatFacts; 4] {
+    // player 1 が暗槓1つかつ河12枚で Caution になる facts。公開副露は持たない。
+    fn late_single_ankan_caution_facts() -> [PlayerThreatFacts; 4] {
         let mut facts = meld_facts_of(1, vec![ankan_meld()], [false; 4], Some(0));
         facts[1].discard_count = 12;
         facts
     }
 
-    // High の副露相手だけがいる局面の押し引き入力。
-    fn high_open_hand_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
-        high_open_hand_inputs_with_dealer(false, offense)
+    // Danger の副露相手だけがいる局面の押し引き入力。
+    fn danger_open_hand_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
+        danger_open_hand_inputs_with_dealer(false, offense)
     }
 
     fn with_selected_normal_discard_hard_safe(mut inputs: PushPullInputs) -> PushPullInputs {
@@ -4206,26 +4206,26 @@ mod tests {
         inputs
     }
 
-    fn high_open_hand_inputs_with_dealer(
+    fn danger_open_hand_inputs_with_dealer(
         self_dealer: bool,
         offense: Option<PushPullOffenseState>,
     ) -> PushPullInputs {
-        inputs_with_threats(0, false, self_dealer, offense, high_open_hand_facts())
+        inputs_with_threats(0, false, self_dealer, offense, danger_open_hand_facts())
     }
 
-    fn assert_high_open_hand_decision(
+    fn assert_actionable_open_hand_decision(
         inputs: &PushPullInputs,
         mode: PushPullMode,
         reason: PushPullReason,
     ) {
-        assert!(inputs.has_high_open_hand_threat());
+        assert!(inputs.has_actionable_open_hand_threat());
         let decision = decide_push_pull(inputs);
         assert_eq!(decision.mode, mode, "{:?}", inputs.offense);
         assert_eq!(decision.reason, reason, "{:?}", inputs.offense);
     }
 
     #[test]
-    fn no_high_open_hand_threat_keeps_pushing() {
+    fn no_actionable_open_hand_threat_keeps_pushing() {
         // 副露相手がいない、または Present しかいない局面は threat 扱いしない。
         for facts in [
             no_threat_facts(),
@@ -4233,7 +4233,7 @@ mod tests {
             open_meld_facts_of(1, 1, [false; 4], Some(0)),
         ] {
             let inputs = inputs_with_threats(0, false, false, Some(offense(2, 20, 4)), facts);
-            assert!(!inputs.has_high_open_hand_threat());
+            assert!(!inputs.has_actionable_open_hand_threat());
 
             let decision = decide_push_pull(&inputs);
             assert_eq!(decision.mode, PushPullMode::Push);
@@ -4242,24 +4242,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_offense_against_a_high_open_hand_folds() {
+    fn missing_offense_against_an_actionable_open_hand_folds() {
         // 情報不足で強いテンパイと確認できないため降りる。
-        assert_high_open_hand_decision(
-            &high_open_hand_inputs(None),
+        assert_actionable_open_hand_decision(
+            &danger_open_hand_inputs(None),
             PushPullMode::Fold,
             PushPullReason::MissingOffenseAgainstHighOpenHand,
         );
     }
 
     #[test]
-    fn strong_tenpai_against_a_high_open_hand_pushes() {
+    fn strong_tenpai_against_an_actionable_open_hand_pushes() {
         for shanten in [0, -1] {
             let offense = PushPullOffenseState {
                 min_shanten_after_discard: shanten,
                 ..strong_tenpai_offense()
             };
-            assert_high_open_hand_decision(
-                &high_open_hand_inputs(Some(offense)),
+            assert_actionable_open_hand_decision(
+                &danger_open_hand_inputs(Some(offense)),
                 PushPullMode::Push,
                 PushPullReason::StrongTenpaiAgainstHighOpenHand,
             );
@@ -4267,14 +4267,14 @@ mod tests {
     }
 
     #[test]
-    fn weak_tenpai_with_a_hard_safe_selected_discard_against_high_open_hand_pushes() {
-        let inputs = with_selected_normal_discard_hard_safe(high_open_hand_inputs(Some(
+    fn weak_tenpai_with_a_hard_safe_selected_discard_against_actionable_open_hand_pushes() {
+        let inputs = with_selected_normal_discard_hard_safe(danger_open_hand_inputs(Some(
             weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1),
         )));
         let offense = inputs.offense.expect("offense is present");
         assert!(!is_strong_tenpai(&offense, inputs.dealer_reacher));
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Push,
             PushPullReason::SafeTenpaiAgainstHighOpenHand,
@@ -4285,12 +4285,12 @@ mod tests {
     fn a_hard_safe_tile_elsewhere_in_the_hand_does_not_push_a_weak_tenpai() {
         // この fact は「選択された通常打牌」だけを表す。手牌内の別候補が hard-safe でも、
         // 選択打牌が safe でなければ false のままで従来 policy に従う。
-        let inputs = high_open_hand_inputs(Some(weighted_total_tenpai_offense(
+        let inputs = danger_open_hand_inputs(Some(weighted_total_tenpai_offense(
             TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1,
         )));
         assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstHighOpenHand,
@@ -4337,7 +4337,7 @@ mod tests {
 
     #[test]
     fn weak_tenpai_with_a_hard_safe_selected_discard_against_combined_threats_pushes() {
-        let mut facts = high_open_hand_facts();
+        let mut facts = danger_open_hand_facts();
         facts[2].reached = true;
         let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
             1,
@@ -4360,7 +4360,7 @@ mod tests {
     #[test]
     fn a_combined_threat_weak_tenpai_folds_when_one_target_is_not_hard_safe() {
         // 入力構築時の all-target hard-safe helper は1 target でも unsafe なら false にする。
-        let mut facts = high_open_hand_facts();
+        let mut facts = danger_open_hand_facts();
         facts[2].reached = true;
         let inputs = inputs_with_threats(
             1,
@@ -4401,10 +4401,10 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_two_shanten_discard_against_a_high_open_hand_pushes() {
+    fn a_hard_safe_selected_two_shanten_discard_against_an_actionable_open_hand_pushes() {
         for self_dealer in [false, true] {
-            assert_high_open_hand_decision(
-                &with_selected_normal_discard_hard_safe(high_open_hand_inputs_with_dealer(
+            assert_actionable_open_hand_decision(
+                &with_selected_normal_discard_hard_safe(danger_open_hand_inputs_with_dealer(
                     self_dealer,
                     Some(offense(2, 20, 5)),
                 )),
@@ -4415,11 +4415,11 @@ mod tests {
     }
 
     #[test]
-    fn a_non_hard_safe_selected_two_shanten_discard_against_a_high_open_hand_folds() {
-        let inputs = high_open_hand_inputs(Some(offense(2, 20, 5)));
+    fn a_non_hard_safe_selected_two_shanten_discard_against_an_actionable_open_hand_folds() {
+        let inputs = danger_open_hand_inputs(Some(offense(2, 20, 5)));
         assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Fold,
             PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
@@ -4427,8 +4427,8 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_two_shanten_discard_against_a_dealer_high_open_hand_pushes() {
-        // 相手の親子は条件にしない。親の2副露で High になった target でも押す。
+    fn a_hard_safe_selected_two_shanten_discard_against_a_dealer_actionable_open_hand_pushes() {
+        // 相手の親子は条件にしない。親の2副露で Danger になった target でも押す。
         let mut facts = open_meld_facts_of(1, 2, [false; 4], Some(0));
         facts[1].is_dealer = Some(true);
         let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
@@ -4443,7 +4443,7 @@ mod tests {
             Some(OpenHandThreatReason::DealerWithTwoOrMoreOpenMelds)
         );
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Push,
             PushPullReason::SafeTwoShantenAgainstHighOpenHand,
@@ -4453,7 +4453,7 @@ mod tests {
     #[test]
     fn a_hard_safe_selected_two_shanten_discard_against_a_high_visible_han_target_pushes() {
         // visible han proxy は条件にしない。副露ドラで打点が高く見える target でも押す。
-        let mut facts = high_open_hand_facts();
+        let mut facts = danger_open_hand_facts();
         facts[1].meld_dora_count = 6;
         assert!(facts[1].fixed_meld_visible_han_proxy() >= 6);
         let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
@@ -4464,7 +4464,7 @@ mod tests {
             facts,
         ));
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Push,
             PushPullReason::SafeTwoShantenAgainstHighOpenHand,
@@ -4472,8 +4472,9 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_two_shanten_discard_must_be_safe_for_every_high_open_hand_target() {
-        let mut facts = high_open_hand_facts();
+    fn a_hard_safe_selected_two_shanten_discard_must_be_safe_for_every_actionable_open_hand_target()
+    {
+        let mut facts = danger_open_hand_facts();
         let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
         facts[2] = second[2];
 
@@ -4484,9 +4485,9 @@ mod tests {
             Some(offense(2, 20, 5)),
             facts,
         ));
-        assert!(all_safe.open_hand_threats[1].is_high());
-        assert!(all_safe.open_hand_threats[2].is_high());
-        assert_high_open_hand_decision(
+        assert!(all_safe.open_hand_threats[1].is_actionable());
+        assert!(all_safe.open_hand_threats[2].is_actionable());
+        assert_actionable_open_hand_decision(
             &all_safe,
             PushPullMode::Push,
             PushPullReason::SafeTwoShantenAgainstHighOpenHand,
@@ -4496,7 +4497,7 @@ mod tests {
             selected_normal_discard_hard_safe_for_all_threat_targets: false,
             ..all_safe
         };
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &one_unsafe,
             PushPullMode::Fold,
             PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
@@ -4504,12 +4505,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_discard_against_a_high_open_hand_at_three_or_more_shanten_folds() {
+    fn a_hard_safe_selected_discard_against_an_actionable_open_hand_at_three_or_more_shanten_folds()
+    {
         for shanten in [3, 4] {
-            let inputs = with_selected_normal_discard_hard_safe(high_open_hand_inputs(Some(
+            let inputs = with_selected_normal_discard_hard_safe(danger_open_hand_inputs(Some(
                 offense(shanten, 20, 5),
             )));
-            assert_high_open_hand_decision(
+            assert_actionable_open_hand_decision(
                 &inputs,
                 PushPullMode::Fold,
                 PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
@@ -4519,8 +4521,8 @@ mod tests {
 
     #[test]
     fn a_hard_safe_selected_two_shanten_discard_against_combined_threats_does_not_push() {
-        // リーチ者と High target の全員に hard-safe でも、Combined の二向聴は緩和しない。
-        let mut facts = high_open_hand_facts();
+        // リーチ者と actionable target の全員に hard-safe でも、Combined の二向聴は緩和しない。
+        let mut facts = danger_open_hand_facts();
         facts[2].reached = true;
         let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
             1,
@@ -4554,11 +4556,11 @@ mod tests {
 
     #[test]
     fn the_early_fold_waits_for_the_selected_discard_with_a_hard_safe_two_shanten_candidate() {
-        // High OpenHandThreat 単独の二向聴で、最善向聴 cohort に hard-safe な候補がある場合だけ
+        // actionable OpenHandThreat 単独の二向聴で、最善向聴 cohort に hard-safe な候補がある場合だけ
         // 選択打牌を見るまで確定しない。
         for inputs in [
-            high_open_hand_inputs(None),
-            with_selected_normal_discard_hard_safe(high_open_hand_inputs(None)),
+            danger_open_hand_inputs(None),
+            with_selected_normal_discard_hard_safe(danger_open_hand_inputs(None)),
         ] {
             assert_eq!(early_fold_with_cohort(&inputs, 2, true), (None, true));
         }
@@ -4569,8 +4571,8 @@ mod tests {
         // 最善向聴 cohort に hard-safe な候補が1件もなければ、選ばれる打牌も hard-safe ではないので
         // 通常打牌選択より前に Fold を確定する。
         for inputs in [
-            high_open_hand_inputs(None),
-            with_selected_normal_discard_hard_safe(high_open_hand_inputs(None)),
+            danger_open_hand_inputs(None),
+            with_selected_normal_discard_hard_safe(danger_open_hand_inputs(None)),
         ] {
             assert_eq!(
                 early_fold_with_cohort(&inputs, 2, false),
@@ -4586,13 +4588,13 @@ mod tests {
     }
 
     #[test]
-    fn the_early_fold_is_kept_at_three_or_more_shanten_against_a_high_open_hand() {
+    fn the_early_fold_is_kept_at_three_or_more_shanten_against_an_actionable_open_hand() {
         // 三向聴以上は選択打牌の hard-safe fact で判断が変わらないので、cohort も見ない。
         for shanten in [3, 4] {
             for cohort_has_hard_safe in [false, true] {
                 assert_eq!(
                     early_fold_with_cohort(
-                        &high_open_hand_inputs(None),
+                        &danger_open_hand_inputs(None),
                         shanten,
                         cohort_has_hard_safe
                     ),
@@ -4610,7 +4612,7 @@ mod tests {
 
     #[test]
     fn the_early_fold_is_kept_at_two_or_more_shanten_against_a_reach_or_combined_threat() {
-        let mut combined_facts = high_open_hand_facts();
+        let mut combined_facts = danger_open_hand_facts();
         combined_facts[2].reached = true;
 
         for (inputs, reason) in [
@@ -4646,7 +4648,7 @@ mod tests {
             for cohort_has_hard_safe in [false, true] {
                 assert_eq!(
                     early_fold_with_cohort(
-                        &high_open_hand_inputs(None),
+                        &danger_open_hand_inputs(None),
                         shanten,
                         cohort_has_hard_safe
                     ),
@@ -4659,9 +4661,9 @@ mod tests {
     #[test]
     fn the_early_fold_and_the_final_decision_share_the_two_or_more_shanten_policy() {
         // early Fold が確定する局面では、通常打牌選択後の判断も同じ Fold になる。cohort に
-        // hard-safe 候補がない High OpenHandThreat 単独の二向聴では、選ばれる打牌も hard-safe
+        // hard-safe 候補がない actionable OpenHandThreat 単独の二向聴では、選ばれる打牌も hard-safe
         // ではない。
-        let mut combined_facts = high_open_hand_facts();
+        let mut combined_facts = danger_open_hand_facts();
         combined_facts[2].reached = true;
 
         for (base, shanten, cohort_has_hard_safe, selected_hard_safe) in [
@@ -4673,8 +4675,8 @@ mod tests {
                 true,
                 vec![false, true],
             ),
-            (high_open_hand_inputs(None), 3, true, vec![false, true]),
-            (high_open_hand_inputs(None), 2, false, vec![false]),
+            (danger_open_hand_inputs(None), 3, true, vec![false, true]),
+            (danger_open_hand_inputs(None), 2, false, vec![false]),
         ] {
             let early = early_fold_with_cohort(&base, shanten, cohort_has_hard_safe)
                 .0
@@ -4690,9 +4692,168 @@ mod tests {
         }
     }
 
+    // ---- Caution と Danger は同じ actionable OpenHandThreat として扱う ----
+
+    // 局進行だけで Caution になる facts と、面子数・確定打点・親で Danger になる facts。
+    fn caution_and_danger_facts() -> Vec<(OpenHandThreatLevel, [PlayerThreatFacts; 4])> {
+        let mut two_melds_nine_discards = open_meld_facts_of(1, 2, [false; 4], Some(0));
+        two_melds_nine_discards[1].discard_count = 9;
+        let mut visible_han = open_meld_facts_of(1, 2, [false; 4], Some(0));
+        visible_han[1].meld_dora_count = 2;
+        visible_han[1].open_meld_dora_count = 2;
+        let mut dealer = open_meld_facts_of(1, 2, [false; 4], Some(0));
+        dealer[1].is_dealer = Some(true);
+
+        vec![
+            (OpenHandThreatLevel::Caution, two_melds_nine_discards),
+            (OpenHandThreatLevel::Caution, late_one_meld_caution_facts()),
+            (
+                OpenHandThreatLevel::Caution,
+                late_single_ankan_caution_facts(),
+            ),
+            (OpenHandThreatLevel::Danger, danger_open_hand_facts()),
+            (OpenHandThreatLevel::Danger, visible_han),
+            (OpenHandThreatLevel::Danger, dealer),
+        ]
+    }
+
     #[test]
-    fn the_selected_discard_must_be_hard_safe_for_every_high_open_hand_target() {
-        let mut facts = high_open_hand_facts();
+    fn caution_and_danger_share_the_actionable_open_hand_policy() {
+        let not_valuable_iishanten =
+            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(999)));
+        let cases = [
+            (
+                None,
+                false,
+                PushPullMode::Fold,
+                PushPullReason::MissingOffenseAgainstHighOpenHand,
+            ),
+            (
+                Some(strong_tenpai_offense()),
+                false,
+                PushPullMode::Push,
+                PushPullReason::StrongTenpaiAgainstHighOpenHand,
+            ),
+            (
+                Some(not_valuable_iishanten),
+                true,
+                PushPullMode::Push,
+                PushPullReason::SafeIishantenAgainstHighOpenHand,
+            ),
+            (
+                Some(not_valuable_iishanten),
+                false,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstHighOpenHand,
+            ),
+            (
+                Some(offense(2, 20, 5)),
+                true,
+                PushPullMode::Push,
+                PushPullReason::SafeTwoShantenAgainstHighOpenHand,
+            ),
+            (
+                Some(offense(2, 20, 5)),
+                false,
+                PushPullMode::Fold,
+                PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            ),
+            (
+                Some(offense(3, 20, 5)),
+                true,
+                PushPullMode::Fold,
+                PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+            ),
+        ];
+
+        for (level, facts) in caution_and_danger_facts() {
+            let base = inputs_with_threats(0, false, false, None, facts);
+            assert_eq!(base.open_hand_threats[1].level(), Some(level), "{facts:?}");
+            assert!(!base.has_combined_threat(), "{facts:?}");
+
+            for (offense, hard_safe, mode, reason) in cases {
+                let inputs = PushPullInputs {
+                    offense,
+                    selected_normal_discard_hard_safe_for_all_threat_targets: hard_safe,
+                    ..base
+                };
+                assert_actionable_open_hand_decision(&inputs, mode, reason);
+            }
+        }
+    }
+
+    #[test]
+    fn caution_and_danger_share_the_two_shanten_early_fold() {
+        for (level, facts) in caution_and_danger_facts() {
+            let inputs = inputs_with_threats(0, false, false, None, facts);
+            assert_eq!(
+                inputs.open_hand_threats[1].level(),
+                Some(level),
+                "{facts:?}"
+            );
+
+            assert_eq!(
+                early_fold_with_cohort(&inputs, 2, true),
+                (None, true),
+                "{facts:?}"
+            );
+            assert_eq!(
+                early_fold_with_cohort(&inputs, 2, false),
+                (
+                    Some(PushPullDecision {
+                        mode: PushPullMode::Fold,
+                        reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+                    }),
+                    true
+                ),
+                "{facts:?}"
+            );
+            assert_eq!(
+                early_fold_with_cohort(&inputs, 3, true),
+                (
+                    Some(PushPullDecision {
+                        mode: PushPullMode::Fold,
+                        reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
+                    }),
+                    false
+                ),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_riichi_with_a_caution_or_danger_open_hand_is_a_combined_threat() {
+        for (level, mut facts) in caution_and_danger_facts() {
+            facts[2].reached = true;
+            let inputs = inputs_with_threats(1, false, false, Some(offense(2, 20, 5)), facts);
+            assert_eq!(
+                inputs.open_hand_threats[1].level(),
+                Some(level),
+                "{facts:?}"
+            );
+
+            assert_combined_threat_decision(
+                &inputs,
+                PushPullMode::Fold,
+                PushPullReason::TwoOrMoreShantenAgainstCombinedThreat,
+            );
+            assert_combined_threat_decision(
+                &with_selected_normal_discard_hard_safe(PushPullInputs {
+                    offense: Some(weighted_total_tenpai_offense(
+                        TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1,
+                    )),
+                    ..inputs
+                }),
+                PushPullMode::Push,
+                PushPullReason::SafeTenpaiAgainstCombinedThreat,
+            );
+        }
+    }
+
+    #[test]
+    fn the_selected_discard_must_be_hard_safe_for_every_actionable_open_hand_target() {
+        let mut facts = danger_open_hand_facts();
         let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
         facts[2] = second[2];
 
@@ -4708,11 +4869,11 @@ mod tests {
             all_safe
                 .open_hand_threats
                 .iter()
-                .filter(|assessment| assessment.is_high())
+                .filter(|assessment| assessment.is_actionable())
                 .count(),
             2
         );
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &all_safe,
             PushPullMode::Push,
             PushPullReason::SafeTenpaiAgainstHighOpenHand,
@@ -4723,7 +4884,7 @@ mod tests {
             selected_normal_discard_hard_safe_for_all_threat_targets: false,
             ..all_safe
         };
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &one_unsafe,
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstHighOpenHand,
@@ -4731,8 +4892,8 @@ mod tests {
     }
 
     #[test]
-    fn selected_discard_hard_safe_fact_uses_every_classified_high_target() {
-        let mut facts = high_open_hand_facts();
+    fn selected_discard_hard_safe_fact_uses_every_classified_actionable_target() {
+        let mut facts = danger_open_hand_facts();
         let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
         facts[2] = second[2];
         let assessments = classify_open_hand_threats(&facts);
@@ -4815,8 +4976,8 @@ mod tests {
         )
     }
 
-    // player 2 が3副露で High になる4席分の副露。
-    fn high_open_hand_melds() -> [Vec<crate::meld::Meld>; 4] {
+    // player 2 が3副露で Danger になる4席分の副露。
+    fn danger_open_hand_melds() -> [Vec<crate::meld::Meld>; 4] {
         let mut melds: [Vec<crate::meld::Meld>; 4] = Default::default();
         melds[2] = vec![chi_meld(), chi_meld(), chi_meld()];
         melds
@@ -4872,30 +5033,30 @@ mod tests {
     }
 
     #[test]
-    fn combined_threat_targets_need_hard_safe_for_reach_and_high_open_hand() {
+    fn combined_threat_targets_need_hard_safe_for_reach_and_actionable_open_hand() {
         let five_man = TileType::new(4).unwrap();
 
-        // リーチ者にだけ現物。High の非リーチ相手には通っていない。
+        // リーチ者にだけ現物。Caution / Danger の非リーチ相手には通っていない。
         let reach_only = threat_target_context(
             [false, true, false, false],
             [vec![], vec![tile(16)], vec![], vec![]],
-            high_open_hand_melds(),
+            danger_open_hand_melds(),
         );
         assert!(!hard_safe_fact(&reach_only, five_man, tile(17)));
 
-        // High の非リーチ相手にだけ hard-safe。リーチ者には通っていない。
-        let high_only = threat_target_context(
+        // Caution / Danger の非リーチ相手にだけ hard-safe。リーチ者には通っていない。
+        let open_hand_only = threat_target_context(
             [false, true, false, false],
             [vec![], vec![], vec![tile(16)], vec![]],
-            high_open_hand_melds(),
+            danger_open_hand_melds(),
         );
-        assert!(!hard_safe_fact(&high_only, five_man, tile(17)));
+        assert!(!hard_safe_fact(&open_hand_only, five_man, tile(17)));
 
         // 全 target に hard-safe なら true。
         let every_target = threat_target_context(
             [false, true, false, false],
             [vec![], vec![tile(16)], vec![tile(17)], vec![]],
-            high_open_hand_melds(),
+            danger_open_hand_melds(),
         );
         assert!(hard_safe_fact(&every_target, five_man, tile(18)));
     }
@@ -4913,28 +5074,28 @@ mod tests {
     }
 
     #[test]
-    fn tenpai_against_only_a_late_one_meld_high_open_hand_pushes() {
-        let weak = late_one_meld_high_inputs(Some(tenpai_offense(3, PermanentFuriten::No)));
-        assert!(weak.has_only_late_one_meld_high_open_hand_threats());
-        assert_high_open_hand_decision(
+    fn tenpai_against_only_a_late_one_meld_actionable_open_hand_pushes() {
+        let weak = late_one_meld_caution_inputs(Some(tenpai_offense(3, PermanentFuriten::No)));
+        assert!(weak.has_only_late_one_meld_actionable_open_hand_threats());
+        assert_actionable_open_hand_decision(
             &weak,
             PushPullMode::Push,
             PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
         );
 
         // strong tenpai は専用例外ではなく既存 reason のまま押す。
-        assert_high_open_hand_decision(
-            &late_one_meld_high_inputs(Some(strong_tenpai_offense())),
+        assert_actionable_open_hand_decision(
+            &late_one_meld_caution_inputs(Some(strong_tenpai_offense())),
             PushPullMode::Push,
             PushPullReason::StrongTenpaiAgainstHighOpenHand,
         );
     }
 
     #[test]
-    fn tenpai_against_a_late_single_ankan_high_open_hand_pushes() {
-        // 公開副露が無く暗槓1つだけでも、完成面子1つかつ河12枚以上で High になった相手は
+    fn tenpai_against_a_late_single_ankan_actionable_open_hand_pushes() {
+        // 公開副露が無く暗槓1つだけでも、完成面子1つかつ河12枚以上で Caution になった相手は
         // 終盤1面子の例外の対象になる。
-        let facts = late_single_ankan_high_facts();
+        let facts = late_single_ankan_caution_facts();
 
         assert_eq!(facts[1].meld_count, 1);
         assert_eq!(facts[1].open_meld_count, 0);
@@ -4942,7 +5103,7 @@ mod tests {
         assert_eq!(
             classify_open_hand_threat(facts[1]),
             OpenHandThreatAssessment::Classified(OpenHandThreatDecision {
-                level: OpenHandThreatLevel::High,
+                level: OpenHandThreatLevel::Caution,
                 reason: OpenHandThreatReason::FixedMeldFromTwelveDiscards,
             })
         );
@@ -4955,8 +5116,8 @@ mod tests {
             facts,
         );
 
-        assert!(inputs.has_only_late_one_meld_high_open_hand_threats());
-        assert_high_open_hand_decision(
+        assert!(inputs.has_only_late_one_meld_actionable_open_hand_threats());
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Push,
             PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
@@ -4965,15 +5126,15 @@ mod tests {
 
     #[test]
     fn the_late_one_meld_exception_does_not_depend_on_the_offense_value() {
-        // 打点を確定しても確定しなくても、終盤1面子 High だけならテンパイで押す例外は変わらない。
+        // 打点を確定しても確定しなくても、終盤1面子 Caution だけならテンパイで押す例外は変わらない。
         for offense in [
             weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1),
             unknown_value_tenpai_offense(2, PermanentFuriten::No),
             tenpai_offense(2, PermanentFuriten::Unknown),
         ] {
-            let inputs = late_one_meld_high_inputs(Some(offense));
+            let inputs = late_one_meld_caution_inputs(Some(offense));
             assert!(!is_strong_tenpai(&offense, false));
-            assert_high_open_hand_decision(
+            assert_actionable_open_hand_decision(
                 &inputs,
                 PushPullMode::Push,
                 PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
@@ -4982,27 +5143,27 @@ mod tests {
     }
 
     #[test]
-    fn non_tenpai_against_a_late_one_meld_high_open_hand_still_folds() {
-        assert_high_open_hand_decision(
-            &late_one_meld_high_inputs(Some(offense(1, 8, 3))),
+    fn non_tenpai_against_a_late_one_meld_actionable_open_hand_still_folds() {
+        assert_actionable_open_hand_decision(
+            &late_one_meld_caution_inputs(Some(offense(1, 8, 3))),
             PushPullMode::Fold,
             PushPullReason::IishantenAgainstHighOpenHand,
         );
-        assert_high_open_hand_decision(
-            &late_one_meld_high_inputs(Some(offense(2, 20, 4))),
+        assert_actionable_open_hand_decision(
+            &late_one_meld_caution_inputs(Some(offense(2, 20, 4))),
             PushPullMode::Fold,
             PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
         );
     }
 
     #[test]
-    fn weak_tenpai_against_a_two_meld_high_open_hand_still_folds() {
+    fn weak_tenpai_against_a_two_meld_actionable_open_hand_still_folds() {
         let mut facts = open_meld_facts_of(1, 2, [false; 4], Some(0));
         facts[1].discard_count = 9;
         let inputs = inputs_with_threats(0, false, false, Some(weak_tenpai_offense()), facts);
 
-        assert!(!inputs.has_only_late_one_meld_high_open_hand_threats());
-        assert_high_open_hand_decision(
+        assert!(!inputs.has_only_late_one_meld_actionable_open_hand_threats());
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstHighOpenHand,
@@ -5010,27 +5171,27 @@ mod tests {
     }
 
     #[test]
-    fn every_high_target_must_be_a_late_one_meld_open_hand() {
-        let mut all_late = late_one_meld_high_facts();
+    fn every_actionable_target_must_be_a_late_one_meld_open_hand() {
+        let mut all_late = late_one_meld_caution_facts();
         let mut second_late = open_meld_facts_of(2, 1, [false; 4], Some(0));
         second_late[2].discard_count = 13;
         all_late[2] = second_late[2];
         let all_late_inputs =
             inputs_with_threats(0, false, false, Some(weak_tenpai_offense()), all_late);
-        assert!(all_late_inputs.has_only_late_one_meld_high_open_hand_threats());
-        assert_high_open_hand_decision(
+        assert!(all_late_inputs.has_only_late_one_meld_actionable_open_hand_threats());
+        assert_actionable_open_hand_decision(
             &all_late_inputs,
             PushPullMode::Push,
             PushPullReason::TenpaiAgainstLateOneMeldHighOpenHand,
         );
 
-        let mut mixed = late_one_meld_high_facts();
+        let mut mixed = late_one_meld_caution_facts();
         let mut two_meld = open_meld_facts_of(2, 2, [false; 4], Some(0));
         two_meld[2].discard_count = 9;
         mixed[2] = two_meld[2];
         let mixed_inputs = inputs_with_threats(0, false, false, Some(weak_tenpai_offense()), mixed);
-        assert!(!mixed_inputs.has_only_late_one_meld_high_open_hand_threats());
-        assert_high_open_hand_decision(
+        assert!(!mixed_inputs.has_only_late_one_meld_actionable_open_hand_threats());
+        assert_actionable_open_hand_decision(
             &mixed_inputs,
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstHighOpenHand,
@@ -5038,13 +5199,13 @@ mod tests {
     }
 
     #[test]
-    fn a_reach_keeps_the_strong_tenpai_threshold_with_a_late_one_meld_high() {
-        let mut facts = late_one_meld_high_facts();
+    fn a_reach_keeps_the_strong_tenpai_threshold_with_a_late_one_meld_caution() {
+        let mut facts = late_one_meld_caution_facts();
         facts[2].reached = true;
         let inputs = inputs_with_threats(1, false, false, Some(weak_tenpai_offense()), facts);
 
         assert!(inputs.has_combined_threat());
-        assert!(inputs.has_only_late_one_meld_high_open_hand_threats());
+        assert!(inputs.has_only_late_one_meld_actionable_open_hand_threats());
         assert_decision(
             &inputs,
             PushPullMode::Fold,
@@ -5053,7 +5214,7 @@ mod tests {
     }
 
     #[test]
-    fn weak_tenpai_against_a_high_open_hand_folds() {
+    fn weak_tenpai_against_an_actionable_open_hand_folds() {
         // 待ち枚数不足・恒常フリテン・フリテン判定不能はどれも強いテンパイにしない。
         for offense in [
             weak_tenpai_offense(),
@@ -5061,8 +5222,8 @@ mod tests {
             tenpai_offense(20, PermanentFuriten::Unknown),
             offense(0, 20, 5),
         ] {
-            assert_high_open_hand_decision(
-                &high_open_hand_inputs(Some(offense)),
+            assert_actionable_open_hand_decision(
+                &danger_open_hand_inputs(Some(offense)),
                 PushPullMode::Fold,
                 PushPullReason::WeakTenpaiAgainstHighOpenHand,
             );
@@ -5070,7 +5231,7 @@ mod tests {
     }
 
     #[test]
-    fn the_high_open_hand_tenpai_boundary_matches_the_reach_boundary() {
+    fn the_actionable_open_hand_tenpai_boundary_matches_the_reach_boundary() {
         for (remaining, furiten, mode) in [
             (6, PermanentFuriten::No, PushPullMode::Push),
             (5, PermanentFuriten::No, PushPullMode::Fold),
@@ -5083,33 +5244,37 @@ mod tests {
             } else {
                 PushPullReason::WeakTenpaiAgainstHighOpenHand
             };
-            assert_high_open_hand_decision(&high_open_hand_inputs(Some(offense)), mode, reason);
+            assert_actionable_open_hand_decision(
+                &danger_open_hand_inputs(Some(offense)),
+                mode,
+                reason,
+            );
         }
     }
 
     #[test]
-    fn a_high_open_hand_threat_alone_uses_the_base_weighted_total_threshold() {
-        // High OpenHandThreat 単独はリーチ者がいないので、親リーチの 1.5 倍は適用しない。
+    fn an_actionable_open_hand_threat_alone_uses_the_base_weighted_total_threshold() {
+        // actionable OpenHandThreat 単独はリーチ者がいないので、親リーチの 1.5 倍は適用しない。
         let exact = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN);
         let below = weighted_total_tenpai_offense(TENPAI_PUSH_WEIGHTED_TOTAL_MIN - 1);
 
-        let inputs = high_open_hand_inputs(Some(exact));
+        let inputs = danger_open_hand_inputs(Some(exact));
         assert_eq!(inputs.opponent_reach_count, 0);
         assert!(!inputs.dealer_reacher);
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Push,
             PushPullReason::StrongTenpaiAgainstHighOpenHand,
         );
-        assert_high_open_hand_decision(
-            &high_open_hand_inputs(Some(below)),
+        assert_actionable_open_hand_decision(
+            &danger_open_hand_inputs(Some(below)),
             PushPullMode::Fold,
             PushPullReason::WeakTenpaiAgainstHighOpenHand,
         );
     }
 
     #[test]
-    fn iishanten_without_an_expected_self_tsumo_value_against_a_high_open_hand_folds() {
+    fn iishanten_without_an_expected_self_tsumo_value_against_an_actionable_open_hand_folds() {
         // 攻撃価値を確認できない一向聴は押さない。旧 strong / complete / dealer / high-value の
         // 一向聴補正は復活させない。
         let cases = [
@@ -5125,8 +5290,8 @@ mod tests {
 
         for offense in cases {
             for self_dealer in [false, true] {
-                assert_high_open_hand_decision(
-                    &high_open_hand_inputs_with_dealer(self_dealer, Some(offense)),
+                assert_actionable_open_hand_decision(
+                    &danger_open_hand_inputs_with_dealer(self_dealer, Some(offense)),
                     PushPullMode::Fold,
                     PushPullReason::IishantenAgainstHighOpenHand,
                 );
@@ -5135,7 +5300,7 @@ mod tests {
     }
 
     #[test]
-    fn iishanten_against_a_high_open_hand_uses_the_base_expected_self_tsumo_threshold() {
+    fn iishanten_against_an_actionable_open_hand_uses_the_base_expected_self_tsumo_threshold() {
         // 他家リーチがいないので親リーチ threshold は使わない。
         for (points, mode, reason) in [
             (
@@ -5153,8 +5318,8 @@ mod tests {
                 iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
 
             for self_dealer in [false, true] {
-                assert_high_open_hand_decision(
-                    &high_open_hand_inputs_with_dealer(self_dealer, Some(offense)),
+                assert_actionable_open_hand_decision(
+                    &danger_open_hand_inputs_with_dealer(self_dealer, Some(offense)),
                     mode,
                     reason,
                 );
@@ -5163,17 +5328,17 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_iishanten_discard_against_a_high_open_hand_pushes() {
+    fn a_hard_safe_selected_iishanten_discard_against_an_actionable_open_hand_pushes() {
         // ExpectedSelfTsumoValue が threshold 未満、または確認できなくても、選択打牌そのものが
-        // 全 High target に hard-safe なら一向聴を維持して押す。
+        // 全 actionable target に hard-safe なら一向聴を維持して押す。
         for expected_self_tsumo_value in [Some(self_tsumo_points(999)), None] {
             let offense =
                 iishanten_offense_with_expected_self_tsumo_value(expected_self_tsumo_value);
             assert!(!is_valuable_iishanten(&offense, false));
 
             for self_dealer in [false, true] {
-                assert_high_open_hand_decision(
-                    &with_selected_normal_discard_hard_safe(high_open_hand_inputs_with_dealer(
+                assert_actionable_open_hand_decision(
+                    &with_selected_normal_discard_hard_safe(danger_open_hand_inputs_with_dealer(
                         self_dealer,
                         Some(offense),
                     )),
@@ -5185,13 +5350,13 @@ mod tests {
     }
 
     #[test]
-    fn a_non_hard_safe_selected_iishanten_discard_against_a_high_open_hand_folds() {
+    fn a_non_hard_safe_selected_iishanten_discard_against_an_actionable_open_hand_folds() {
         let offense =
             iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(999)));
-        let inputs = high_open_hand_inputs(Some(offense));
+        let inputs = danger_open_hand_inputs(Some(offense));
         assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Fold,
             PushPullReason::IishantenAgainstHighOpenHand,
@@ -5205,10 +5370,10 @@ mod tests {
             iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(1_000)));
 
         for inputs in [
-            high_open_hand_inputs(Some(offense)),
-            with_selected_normal_discard_hard_safe(high_open_hand_inputs(Some(offense))),
+            danger_open_hand_inputs(Some(offense)),
+            with_selected_normal_discard_hard_safe(danger_open_hand_inputs(Some(offense))),
         ] {
-            assert_high_open_hand_decision(
+            assert_actionable_open_hand_decision(
                 &inputs,
                 PushPullMode::Push,
                 PushPullReason::ValuableIishantenAgainstHighOpenHand,
@@ -5217,8 +5382,8 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_safe_selected_iishanten_discard_must_be_safe_for_every_high_open_hand_target() {
-        let mut facts = high_open_hand_facts();
+    fn a_hard_safe_selected_iishanten_discard_must_be_safe_for_every_actionable_open_hand_target() {
+        let mut facts = danger_open_hand_facts();
         let second = open_meld_facts_of(2, 3, [false; 4], Some(0));
         facts[2] = second[2];
         let offense =
@@ -5231,7 +5396,7 @@ mod tests {
             Some(offense),
             facts,
         ));
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &all_safe,
             PushPullMode::Push,
             PushPullReason::SafeIishantenAgainstHighOpenHand,
@@ -5241,7 +5406,7 @@ mod tests {
             selected_normal_discard_hard_safe_for_all_threat_targets: false,
             ..all_safe
         };
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &one_unsafe,
             PushPullMode::Fold,
             PushPullReason::IishantenAgainstHighOpenHand,
@@ -5250,12 +5415,12 @@ mod tests {
 
     #[test]
     fn a_hard_safe_tile_elsewhere_in_the_hand_does_not_push_an_iishanten() {
-        // High target の河にある 5m が手牌内にあっても、選択打牌の 9m が hard-safe でなければ
+        // actionable target の河にある 5m が手牌内にあっても、選択打牌の 9m が hard-safe でなければ
         // fact は false で、一向聴の safe-discard 例外は使わない。
         let context = threat_target_context(
             [false; 4],
             [vec![], vec![], vec![tile(16)], vec![]],
-            high_open_hand_melds(),
+            danger_open_hand_melds(),
         );
         let facts = player_threat_facts_from_context(&context);
         assert!(hard_safe_fact(
@@ -5277,7 +5442,7 @@ mod tests {
             hard_safe_fact(&context, TileType::new(8).unwrap(), tile(33));
         assert!(!inputs.selected_normal_discard_hard_safe_for_all_threat_targets);
 
-        assert_high_open_hand_decision(
+        assert_actionable_open_hand_decision(
             &inputs,
             PushPullMode::Fold,
             PushPullReason::IishantenAgainstHighOpenHand,
@@ -5319,8 +5484,8 @@ mod tests {
 
     #[test]
     fn a_hard_safe_selected_iishanten_discard_against_combined_threats_does_not_push() {
-        // リーチ者と High target の全員に hard-safe でも、Combined の一向聴は緩和しない。
-        let mut facts = high_open_hand_facts();
+        // リーチ者と actionable target の全員に hard-safe でも、Combined の一向聴は緩和しない。
+        let mut facts = danger_open_hand_facts();
         facts[2].reached = true;
 
         for (points, mode, reason) in [
@@ -5351,10 +5516,10 @@ mod tests {
     }
 
     #[test]
-    fn two_or_more_shanten_against_a_high_open_hand_folds() {
+    fn two_or_more_shanten_against_an_actionable_open_hand_folds() {
         for shanten in [2, 3] {
-            assert_high_open_hand_decision(
-                &high_open_hand_inputs(Some(offense(shanten, 30, 6))),
+            assert_actionable_open_hand_decision(
+                &danger_open_hand_inputs(Some(offense(shanten, 30, 6))),
                 PushPullMode::Fold,
                 PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
             );
@@ -5362,8 +5527,8 @@ mod tests {
     }
 
     #[test]
-    fn a_reached_opponent_with_a_high_open_hand_uses_the_combined_policy() {
-        // player 1 がリーチ、player 2 が3副露の High。押し引きは複合 threat policy になる。
+    fn a_reached_opponent_with_an_actionable_open_hand_uses_the_combined_policy() {
+        // player 1 がリーチ、player 2 が3副露の Danger。押し引きは複合 threat policy になる。
         let facts = open_meld_facts_of(2, 3, [false, true, false, false], Some(0));
         assert!(facts[1].reached);
         assert_eq!(facts[2].open_meld_count, 3);
@@ -5406,14 +5571,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reached_player_is_not_a_high_open_hand_threat() {
+    fn a_reached_player_is_not_an_actionable_open_hand_threat() {
         // 副露しているリーチ者は OpenHandThreat の対象外。リーチ由来の危険度と二重適用しない。
         let facts = open_meld_facts_of(1, 3, [false, true, false, false], Some(0));
         assert!(facts[1].reached);
         assert_eq!(facts[1].open_meld_count, 3);
 
         let inputs = inputs_with_threats(0, false, false, Some(offense(2, 20, 4)), facts);
-        assert!(!inputs.has_high_open_hand_threat());
+        assert!(!inputs.has_actionable_open_hand_threat());
 
         let decision = decide_push_pull(&inputs);
         assert_eq!(decision.mode, PushPullMode::Push);
@@ -5421,13 +5586,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_player_id_is_not_guessed_as_a_high_open_hand_threat() {
+    fn an_unknown_player_id_is_not_guessed_as_an_actionable_open_hand_threat() {
         let facts = open_meld_facts_of(1, 3, [false; 4], None);
         assert_eq!(facts[1].open_meld_count, 3);
         assert_eq!(facts[1].is_self, None);
 
         let inputs = inputs_with_threats(0, false, false, Some(offense(2, 20, 4)), facts);
-        assert!(!inputs.has_high_open_hand_threat());
+        assert!(!inputs.has_actionable_open_hand_threat());
 
         let decision = decide_push_pull(&inputs);
         assert_eq!(decision.mode, PushPullMode::Push);
@@ -5446,19 +5611,19 @@ mod tests {
         );
     }
 
-    // ---- RiichiThreat + High OpenHandThreat の複合 threat に対する押し引き ----
+    // ---- RiichiThreat + actionable OpenHandThreat の複合 threat に対する押し引き ----
 
-    // player 1 がリーチ、player 2 が3副露で High になる facts。
+    // player 1 がリーチ、player 2 が3副露で Danger になる facts。
     fn combined_threat_facts() -> [PlayerThreatFacts; 4] {
         open_meld_facts_of(2, 3, [false, true, false, false], Some(0))
     }
 
-    // player 1 と player 3 がリーチ、player 2 が3副露で High になる facts。
+    // player 1 と player 3 がリーチ、player 2 が3副露で Danger になる facts。
     fn multiple_reach_combined_threat_facts() -> [PlayerThreatFacts; 4] {
         open_meld_facts_of(2, 3, [false, true, false, true], Some(0))
     }
 
-    // 子リーチ1人 + High の副露相手1人。
+    // 子リーチ1人 + Caution / Danger の副露相手1人。
     fn combined_threat_inputs(offense: Option<PushPullOffenseState>) -> PushPullInputs {
         inputs_with_threats(1, false, false, offense, combined_threat_facts())
     }
@@ -5475,18 +5640,18 @@ mod tests {
     }
 
     #[test]
-    fn a_riichi_with_a_high_open_hand_is_a_combined_threat() {
-        // リーチ者と High の副露相手が同時にいる場合だけ複合 threat。
+    fn a_riichi_with_an_actionable_open_hand_is_a_combined_threat() {
+        // リーチ者と Caution / Danger の副露相手が同時にいる場合だけ複合 threat。
         let facts = combined_threat_facts();
         assert_eq!(reached_opponent_count(&facts), 1);
 
         let combined = inputs_with_threats(1, false, false, Some(strong_tenpai_offense()), facts);
         assert!(combined.has_combined_threat());
 
-        // リーチ者だけ、High の副露相手だけの局面は複合 threat にしない。
+        // リーチ者だけ、Caution / Danger の副露相手だけの局面は複合 threat にしない。
         let riichi_only = inputs(1, false, Some(strong_tenpai_offense()));
         assert!(!riichi_only.has_combined_threat());
-        let open_hand_only = high_open_hand_inputs(Some(strong_tenpai_offense()));
+        let open_hand_only = danger_open_hand_inputs(Some(strong_tenpai_offense()));
         assert!(!open_hand_only.has_combined_threat());
     }
 
@@ -5496,7 +5661,7 @@ mod tests {
         let facts = open_meld_facts_of(2, 1, [false, true, false, false], Some(0));
         let inputs = inputs_with_threats(1, false, false, Some(strong_tenpai_offense()), facts);
 
-        assert!(!inputs.has_high_open_hand_threat());
+        assert!(!inputs.has_actionable_open_hand_threat());
         assert!(!inputs.has_combined_threat());
 
         let decision = decide_push_pull(&inputs);
@@ -5675,7 +5840,7 @@ mod tests {
                 inputs(1, false, offense),
                 inputs(1, true, offense),
                 inputs(2, false, offense),
-                high_open_hand_inputs(offense),
+                danger_open_hand_inputs(offense),
                 combined_threat_inputs(offense),
             ] {
                 assert_ne!(
@@ -5689,7 +5854,7 @@ mod tests {
 
     #[test]
     fn every_threat_kind_shares_the_same_boundary() {
-        // リーチだけ / High だけ / 複合 のどれでも、mode の境界は同じで reason だけが変わる。
+        // リーチだけ / actionable OpenHand だけ / 複合 のどれでも、mode の境界は同じで reason だけが変わる。
         let cases = [
             (None, PushPullMode::Fold),
             (Some(strong_tenpai_offense()), PushPullMode::Push),
@@ -5705,7 +5870,7 @@ mod tests {
                 "riichi {offense:?}"
             );
             assert_eq!(
-                decide_push_pull(&high_open_hand_inputs(offense)).mode,
+                decide_push_pull(&danger_open_hand_inputs(offense)).mode,
                 mode,
                 "open hand {offense:?}"
             );
@@ -5725,7 +5890,7 @@ mod tests {
         assert_eq!(
             inputs.has_combined_threat(),
             inputs.opponent_reach_count >= 1
-                && has_high_open_hand_threat(&inputs.open_hand_threats)
+                && has_actionable_open_hand_threat(&inputs.open_hand_threats)
         );
     }
 }

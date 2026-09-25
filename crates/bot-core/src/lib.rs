@@ -156,8 +156,8 @@ pub use offense_value::{
 pub use open_hand_defense::{
     OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandDefenseDiagnostic,
     OpenHandDefenseSelectionDiagnostic, OpenHandDefenseTargetSafety,
-    has_same_hand_passed_for_all_open_hand_targets, high_open_hand_threat_players,
-    high_open_hand_threat_players_from_context, high_open_hand_threat_players_from_facts,
+    actionable_open_hand_threat_players, actionable_open_hand_threat_players_from_context,
+    actionable_open_hand_threat_players_from_facts, has_same_hand_passed_for_all_open_hand_targets,
     is_discarded_by_all_open_hand_threats, is_ron_safe_for_all_open_hand_targets,
     is_ron_safe_for_open_hand_target, is_same_hand_passed_for_open_hand_target,
     open_hand_defense_category, open_hand_honor_dahai_actions_by_safety,
@@ -170,7 +170,7 @@ pub use open_hand_defense::{
 pub use open_hand_threat::{
     OpenHandThreatAssessment, OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel,
     OpenHandThreatReason, classify_open_hand_threat, classify_open_hand_threats,
-    has_high_open_hand_threat,
+    has_actionable_open_hand_threat,
 };
 pub use prospective_value::{
     ProspectiveBaselineValue, ProspectiveDiscardValue, ProspectiveDrawValue,

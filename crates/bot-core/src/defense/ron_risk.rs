@@ -137,7 +137,7 @@ pub(crate) fn open_hand_targets_dahai_actions_by_ron_risk<'a>(
     })
 }
 
-/// Riichi target と High OpenHand target を、それぞれ既存の exact model で評価して同じ
+/// Riichi target と actionable OpenHand target を、それぞれ既存の exact model で評価して同じ
 /// [`DahaiRonRiskVector`] へ積む。
 ///
 /// target kind の分類は呼び出し側の責務とし、ここでは席一覧だけを受け取る。どちらかの一覧が空、

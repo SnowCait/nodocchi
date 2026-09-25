@@ -1,5 +1,6 @@
-//! リーチ者と `High` [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の
-//! 非リーチ相手が同時にいる複合 threat 局面の防御 safety の source of truth。
+//! リーチ者と `Caution` / `Danger`
+//! [`OpenHandThreatLevel`](crate::open_hand_threat::OpenHandThreatLevel) の非リーチ相手が同時に
+//! いる複合 threat 局面の防御 safety の source of truth。
 //!
 //! 判定は既存 Defense / OpenHand Defense の pure helper をそのまま共有し、字牌の見え枚数・壁・
 //! スジ・役牌価値を別実装しない。違うのは target 集合の作り方と、「その player にロンされない」
@@ -27,7 +28,9 @@ use crate::defense::{
     sort_by_lexicographic_minimax, suited_dahai_actions_by_safety_with,
     suited_safety_evidence_for_players, suji_safety_rank_for, suji_safety_rank_for_players,
 };
-use crate::open_hand_defense::{high_open_hand_threat_players, is_ron_safe_for_open_hand_target};
+use crate::open_hand_defense::{
+    actionable_open_hand_threat_players, is_ron_safe_for_open_hand_target,
+};
 use crate::open_hand_threat::{OpenHandThreatAssessment, classify_open_hand_threats};
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 use bot_logic::TileType;
@@ -37,7 +40,9 @@ use bot_logic::TileType;
 pub enum ThreatDefenseTargetKind {
     /// 他家リーチ者。現物 ([`is_genbutsu_for`]) がロン安全の根拠。
     Riichi,
-    /// `High` の非リーチ相手。本人の河または現在有効な一時通過牌がロン安全の根拠。
+    /// `Caution` / `Danger` の非リーチ相手。本人の河または現在有効な一時通過牌がロン安全の根拠。
+    ///
+    /// 診断表示に出る名前なので、level 分割後も従来の名前のまま両方の level に使う。
     HighOpenHand,
 }
 
@@ -66,12 +71,12 @@ impl ThreatDefenseTarget {
 
 /// 複合 threat 局面の防御 target を席順で集める pure helper。
 ///
-/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`High` の副露相手は渡された
-/// classification ([`high_open_hand_threat_players`]) をそのまま source of truth にする。どちらも
+/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`Caution` / `Danger` の副露相手は渡された
+/// classification ([`actionable_open_hand_threat_players`]) をそのまま source of truth にする。どちらも
 /// ここで分類し直さない。リーチ済みの席は OpenHandThreat の対象外なので、1つの席が両方の target
 /// になることはない。
 ///
-/// 戻り値が空でないのは「リーチ者が1人以上」かつ「`High` の副露相手が1人以上」の複合 threat
+/// 戻り値が空でないのは「リーチ者が1人以上」かつ「`Caution` / `Danger` の副露相手が1人以上」の複合 threat
 /// 局面だけ。どちらか一方しかいない局面は既存の Riichi Defense / OpenHand Defense が担当するため、
 /// ここでは target を作らない。
 pub fn combined_threat_defense_targets(
@@ -82,10 +87,10 @@ pub fn combined_threat_defense_targets(
     let has_riichi = targets
         .iter()
         .any(|target| target.kind == ThreatDefenseTargetKind::Riichi);
-    let has_high = targets
+    let has_open_hand = targets
         .iter()
         .any(|target| target.kind == ThreatDefenseTargetKind::HighOpenHand);
-    if has_riichi && has_high {
+    if has_riichi && has_open_hand {
         targets
     } else {
         Vec::new()
@@ -94,13 +99,13 @@ pub fn combined_threat_defense_targets(
 
 /// 現在の threat target を種類付きで席順に集める pure helper。
 ///
-/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`High` の非リーチ相手は渡された
-/// classification ([`high_open_hand_threat_players`]) をそのまま source of truth にする。どちらも
+/// リーチ者は [`PlayerThreatFacts::is_reached_opponent`]、`Caution` / `Danger` の非リーチ相手は渡された
+/// classification ([`actionable_open_hand_threat_players`]) をそのまま source of truth にする。どちらも
 /// ここで分類し直さない。したがって [`ThreatDefenseTargetKind::HighOpenHand`] の target は公開副露
-/// がある相手に限らず、暗槓だけで `High` になった相手も含む。リーチ済みの席は OpenHandThreat の
+/// がある相手に限らず、暗槓だけで `Caution` / `Danger` になった相手も含む。リーチ済みの席は OpenHandThreat の
 /// 対象外なので、1つの席が両方の target になることはない。
 ///
-/// [`combined_threat_defense_targets`] と違い、リーチ者だけ・`High` の非リーチ相手だけの局面でも
+/// [`combined_threat_defense_targets`] と違い、リーチ者だけ・`Caution` / `Danger` の非リーチ相手だけの局面でも
 /// その target を返す。target ごとの hard-safe 判定 ([`is_ron_safe_for_target`] /
 /// [`is_safe_against_all_threats`]) を threat 構成によらず1つの概念として共有したい呼び出し元の
 /// ための入口で、防御 fallback の action 選択そのものは従来どおり threat 構成ごとの入口が担当する。
@@ -115,7 +120,7 @@ pub fn threat_defense_targets(
         .filter(|facts| facts.is_reached_opponent())
         .map(|facts| ThreatDefenseTarget::riichi(facts.player))
         .chain(
-            high_open_hand_threat_players(assessments)
+            actionable_open_hand_threat_players(assessments)
                 .into_iter()
                 .map(ThreatDefenseTarget::high_open_hand),
         )
@@ -141,7 +146,7 @@ pub fn combined_threat_defense_targets_from_context(
 /// その target にこの牌でロンされないと言えるか判定する pure helper。
 ///
 /// 根拠は target の種類ごとに変わる。リーチ者は現物 ([`is_genbutsu_for`]) で、本人の河と
-/// `post_reach_passed_tiles` の両方を使う。`High` の副露相手は本人の河または現在有効な一時通過牌
+/// `post_reach_passed_tiles` の両方を使う。`Caution` / `Danger` の副露相手は本人の河または現在有効な一時通過牌
 /// ([`is_ron_safe_for_open_hand_target`]) を使い、`post_reach_passed_tiles` は使わない。
 ///
 /// この判定を selector や診断へ散らさず、target 種類の分岐はここに1つだけ置く。
@@ -681,7 +686,7 @@ pub struct CombinedDefenseTargetSafety {
     /// target の席と種類。
     pub target: ThreatDefenseTarget,
     /// この target にこの牌でロンされないか ([`is_ron_safe_for_target`])。根拠は種類ごとに違い、
-    /// リーチ者は現物、`High` の副露相手は本人の河または現在有効な一時通過牌。
+    /// リーチ者は現物、`Caution` / `Danger` の副露相手は本人の河または現在有効な一時通過牌。
     pub ron_safe: bool,
     /// `HighOpenHand` target の concealed hand が最後に変化して以降に通ったか。
     pub same_hand_passed: bool,
@@ -863,7 +868,7 @@ pub struct CombinedDefenseSelectionDiagnostic {
 
 /// 複合 threat に対する防御 safety の構造化診断。
 ///
-/// `targets` が空の局面は「複合 threat ではない」で、候補評価も作らない。リーチ者だけ / `High` の
+/// `targets` が空の局面は「複合 threat ではない」で、候補評価も作らない。リーチ者だけ / `Caution` / `Danger` の
 /// 副露相手だけの局面は既存の `Defense` / `OpenHand defense` が担当する。
 ///
 /// `selected` は複合 threat 用の防御 fallback を実際に採用した場合だけ `Some` になる。採用しな
@@ -990,7 +995,7 @@ mod tests {
     use bot_logic::TileId;
 
     // 自分は player 0、親は player 1、場風は東で固定する。player 1 がリーチ、player 3 が3副露の
-    // High OpenHandThreat という複合 threat を既定の形にする。
+    // actionable OpenHandThreat という複合 threat を既定の形にする。
     const SELF_PLAYER: usize = 0;
     const RIICHI_TARGET: usize = 1;
     const OTHER_PLAYER: usize = 2;
@@ -1022,7 +1027,7 @@ mod tests {
         Meld::new(MeldKind::Chi, tiles("1s 2s 3s"), Some(tile("1s")))
     }
 
-    // 副露を count 個持つ席を作る。High 条件の「3副露以上」を満たすかどうかを count で決める。
+    // 副露を count 個持つ席を作る。Caution / Danger 条件の「3副露以上」を満たすかどうかを count で決める。
     fn open_melds(count: usize) -> Vec<Meld> {
         (0..count).map(|_| chi()).collect()
     }
@@ -1462,9 +1467,21 @@ mod tests {
 
     // ---- target の決定 ----
 
+    // 河12枚。1副露と組み合わせると Caution になる。
+    const TWELVE_DISCARDS: &str = "1m 2m 3m 4m 5m 6m 7m 8m 9m 1p 2p 3p";
+
+    fn assert_the_open_hand_level(context: &GameContext, level: OpenHandThreatLevel) {
+        let facts = player_threat_facts_from_context(context);
+        assert_eq!(
+            classify_open_hand_threats(&facts)[OPEN_HAND_TARGET].level(),
+            Some(level)
+        );
+    }
+
     #[test]
-    fn a_riichi_and_a_high_open_hand_become_targets_in_seat_order() {
+    fn a_riichi_and_a_danger_open_hand_become_targets_in_seat_order() {
         let context = ContextSpec::combined().build();
+        assert_the_open_hand_level(&context, OpenHandThreatLevel::Danger);
 
         assert_eq!(
             targets(&context),
@@ -1476,7 +1493,45 @@ mod tests {
     }
 
     #[test]
-    fn a_riichi_without_a_high_open_hand_has_no_combined_target() {
+    fn a_riichi_and_a_caution_open_hand_become_targets_in_seat_order() {
+        // 局進行だけで Caution になった相手も、従来の High と同じく複合 threat の target にする。
+        let context = ContextSpec::new()
+            .reached(RIICHI_TARGET)
+            .melds_of(OPEN_HAND_TARGET, open_melds(1))
+            .discards_of(OPEN_HAND_TARGET, TWELVE_DISCARDS)
+            .build();
+        assert_the_open_hand_level(&context, OpenHandThreatLevel::Caution);
+
+        let expected = vec![
+            ThreatDefenseTarget::riichi(RIICHI_TARGET),
+            ThreatDefenseTarget::high_open_hand(OPEN_HAND_TARGET),
+        ];
+        let facts = player_threat_facts_from_context(&context);
+        assert_eq!(targets(&context), expected);
+        assert_eq!(
+            threat_defense_targets(&facts, &classify_open_hand_threats(&facts)),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_caution_open_hand_alone_is_a_shared_threat_target() {
+        let context = ContextSpec::new()
+            .melds_of(OPEN_HAND_TARGET, open_melds(1))
+            .discards_of(OPEN_HAND_TARGET, TWELVE_DISCARDS)
+            .build();
+        assert_the_open_hand_level(&context, OpenHandThreatLevel::Caution);
+        let facts = player_threat_facts_from_context(&context);
+
+        assert!(targets(&context).is_empty());
+        assert_eq!(
+            threat_defense_targets(&facts, &classify_open_hand_threats(&facts)),
+            vec![ThreatDefenseTarget::high_open_hand(OPEN_HAND_TARGET)]
+        );
+    }
+
+    #[test]
+    fn a_riichi_without_an_actionable_open_hand_has_no_combined_target() {
         // リーチ者だけの局面は既存のリーチ者向け防御が担当する。
         let context = ContextSpec::new().reached(RIICHI_TARGET).build();
 
@@ -1485,15 +1540,15 @@ mod tests {
     }
 
     #[test]
-    fn a_high_open_hand_without_a_riichi_has_no_combined_target() {
-        // High の副露相手だけの局面は既存の OpenHand 防御が担当する。
+    fn an_actionable_open_hand_without_a_riichi_has_no_combined_target() {
+        // Caution / Danger の副露相手だけの局面は既存の OpenHand 防御が担当する。
         let context = ContextSpec::new()
             .melds_of(OPEN_HAND_TARGET, open_melds(3))
             .build();
         let facts = player_threat_facts_from_context(&context);
 
         assert_eq!(
-            high_open_hand_threat_players(&classify_open_hand_threats(&facts)),
+            actionable_open_hand_threat_players(&classify_open_hand_threats(&facts)),
             vec![OPEN_HAND_TARGET]
         );
         assert!(targets(&context).is_empty());
@@ -1533,7 +1588,7 @@ mod tests {
 
     #[test]
     fn an_unknown_player_id_makes_no_combined_target() {
-        // 席が不明な相手を High と推測しないので、複合 threat にもならない。
+        // 席が不明な相手を Caution / Danger と推測しないので、複合 threat にもならない。
         let mut spec = ContextSpec::combined();
         spec.player_id = None;
         let context = spec.build();
@@ -1544,7 +1599,7 @@ mod tests {
 
     #[test]
     fn the_targets_match_the_shared_threat_sources() {
-        // target 側でリーチも High も判定し直さない。
+        // target 側でリーチも Caution / Danger も判定し直さない。
         let context = ContextSpec::combined().build();
         let facts = player_threat_facts_from_context(&context);
 
@@ -1561,7 +1616,7 @@ mod tests {
     #[test]
     fn the_shared_threat_targets_cover_each_threat_alone() {
         // 複合 threat 用の target は従来どおり両方いる局面だけだが、共有 helper は
-        // リーチだけ・High の非リーチ相手だけの局面でもその target を返す。
+        // リーチだけ・Caution / Danger の非リーチ相手だけの局面でもその target を返す。
         let facts_of = |context: &GameContext| player_threat_facts_from_context(context);
 
         let reach_only = ContextSpec::new().reached(RIICHI_TARGET).build();
@@ -1572,10 +1627,10 @@ mod tests {
             vec![ThreatDefenseTarget::riichi(RIICHI_TARGET)]
         );
 
-        let high_only = ContextSpec::new()
+        let open_hand_only = ContextSpec::new()
             .melds_of(OPEN_HAND_TARGET, open_melds(3))
             .build();
-        let facts = facts_of(&high_only);
+        let facts = facts_of(&open_hand_only);
         assert!(combined_threat_defense_targets_from_facts(&facts).is_empty());
         assert_eq!(
             threat_defense_targets(&facts, &classify_open_hand_threats(&facts)),
@@ -1626,7 +1681,7 @@ mod tests {
 
     #[test]
     fn a_post_reach_passed_tile_is_ron_safe_only_for_the_riichi_target() {
-        // リーチ者は現物 (本人の河 + post_reach_passed)、High の副露相手は本人の河だけ。
+        // リーチ者は現物 (本人の河 + post_reach_passed)、Caution / Danger の副露相手は本人の河だけ。
         let context = ContextSpec::combined()
             .post_reach_passed(RIICHI_TARGET, "4s")
             .discards_of(OPEN_HAND_TARGET, "4s")
@@ -1960,7 +2015,7 @@ mod tests {
     // ---- exact ron-risk vector ----
 
     #[test]
-    fn riichi_and_high_open_hand_share_one_exact_risk_vector() {
+    fn riichi_and_actionable_open_hand_share_one_exact_risk_vector() {
         let context = exact_combined_context(&[("1m", 1), ("2m", 2)]).build();
         let legal_actions = vec![dahai("2m"), dahai("1m")];
         let evaluation = evaluate_combined_threat_defense_fallback_action_with_kind(
@@ -2196,7 +2251,7 @@ mod tests {
                 &[OPEN_HAND_TARGET]
             )
             .is_none(),
-            "High OpenHand exact is unavailable"
+            "OpenHand exact is unavailable"
         );
         assert!(evaluation.ron_risk_vectors.is_none());
         assert_eq!(

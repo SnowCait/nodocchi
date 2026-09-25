@@ -11,8 +11,8 @@ use crate::defense::{
     log_defense_fallback_evaluation,
 };
 use crate::open_hand_defense::{
-    OpenHandDefenseCategory, OpenHandDefenseEvaluation,
-    evaluate_open_hand_defense_fallback_action_with_kind, high_open_hand_threat_players,
+    OpenHandDefenseCategory, OpenHandDefenseEvaluation, actionable_open_hand_threat_players,
+    evaluate_open_hand_defense_fallback_action_with_kind,
 };
 use crate::push_pull::PushPullInputs;
 
@@ -102,7 +102,7 @@ pub(crate) fn evaluate_fold_defense<'a>(
         return FoldDefenseEvaluation::Reach(evaluation);
     }
 
-    let targets = high_open_hand_threat_players(&inputs.open_hand_threats);
+    let targets = actionable_open_hand_threat_players(&inputs.open_hand_threats);
     FoldDefenseEvaluation::OpenHand(evaluate_open_hand_defense_fallback_action_with_kind(
         context,
         legal_actions,

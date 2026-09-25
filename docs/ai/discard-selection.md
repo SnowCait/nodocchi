@@ -587,7 +587,7 @@ live copies は1〜3枚
 待ち牌は么九牌ではない (`TileType::is_yaochu() == false`、つまり2〜8の中張牌)
 Reach 宣言牌を河へ置いた後の public safety が非現物かつ NoWall かつ NoSuji
 reached opponents = 0
-High OpenHand targets = 0
+actionable OpenHand targets = 0
 ```
 
 恒常フリテンは既存の `PermanentFuriten` だけが source of truth です。`can_ron() == Some(false)` だけで恒常フリテンだと推測しません。`PermanentFuriten::Unknown` と履歴依存フリテンだけの局面はどちらの経路にも入れず、従来どおり `ReachNow` を維持します。
@@ -728,7 +728,7 @@ Ron
 - **live copies** は選んだ打牌後の既存受け入れが持つ残枚数そのものです。見え牌を別経路で数え直しません。残枚数 0 の牌種は待ちとして並べません。赤5 / 黒5は同じ牌種として1件にまとめ、structural safety を共有します。物理 variant ごとの打点は従来どおり Ron baseline 側が別々に持ちます。
 - **reach public safety** は「自分が今リーチを宣言した場合、その待ち牌が他家から見てどう見えるか」の evidence です。現物は既存の hard-safety helper (`is_genbutsu_for()`)、数牌は既存 [`SuitedSafetyEvidence`](defense.md#suji--halfsuji) (スジ + 壁 + 既存の統合 rank)、字牌は既存 [`HonorSafety`](defense.md#honorsafety) の rank と見え枚数をそのまま載せます。新しい safety rank も係数も作らず、Defense selection の comparator も呼びません。
 - **Damaten** 側には Reach と同じ safety rank を付けません。`declaration visible: no` という事実だけです。これは「ダマなら安全牌評価が無効」という意味ではなく、**他家がこちらの待ちに対する防御を開始する公開トリガーが無い**という事実を表します。
-- **external threats** は既存 classification の観測値です。リーチ者は `GameContext::reached_opponents()`、High OpenHand target は既存 [`OpenHandThreat`](push-pull.md#openhandthreat) の分類そのままで、threat を分類し直すことも確率へ変換することもしません。
+- **external threats** は既存 classification の観測値です。リーチ者は `GameContext::reached_opponents()`、actionable OpenHand target (`Caution` / `Danger`) は既存 [`OpenHandThreat`](push-pull.md#actionable-openhandthreat) の分類そのままで (表示名は従来どおり `high open-hand targets`)、threat を分類し直すことも確率へ変換することもしません。
 
 #### 評価時点は打牌後の公開状態
 
@@ -785,7 +785,7 @@ reach public safety は、**通常打牌 selection が選んだ打牌を河へ�
 
 **`RonOpportunityDiagnostic` 全体は diagnostics 専用です。** production の base Reach / Damaten 判断 (`decide_reach_reason()`) は変更しておらず、統合診断はその結論を観測値として載せるだけです。winner も新しい `should_reach` も持ちません。
 
-非フリテン悪形の暫定 timing heuristic は診断全体を構築せず、selected wait 1件の Reach public safety だけを同じ pure helper から取得します。High OpenHand target も押し引きが既に構築した classification を借り、分類し直しません。この gate を通過した場合にだけ既存 `selected_tenpai_self_tsumo_comparison()` を評価します。
+非フリテン悪形の暫定 timing heuristic は診断全体を構築せず、selected wait 1件の Reach public safety だけを同じ pure helper から取得します。actionable OpenHand target も押し引きが既に構築した classification を借り、分類し直しません。この gate を通過した場合にだけ既存 `selected_tenpai_self_tsumo_comparison()` を評価します。
 
 ## selected と runner-up
 

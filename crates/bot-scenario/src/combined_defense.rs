@@ -1,7 +1,7 @@
-//! リーチ者と High OpenHandThreat の副露相手が同時にいる複合 threat 局面の防御 safety の
+//! リーチ者と actionable OpenHandThreat の副露相手が同時にいる複合 threat 局面の防御 safety の
 //! scenario 回帰テスト。
 //!
-//! `scenarios/combined_threat_defense.json` は、player 1 がリーチ・player 3 が3副露の High・
+//! `scenarios/combined_threat_defense.json` は、player 1 がリーチ・player 3 が3副露の Danger・
 //! player 2 が Present という局面で、合法 Dahai ごとに「全 threat へのロン安全」「字牌 safety」
 //! 「壁」「スジ」がどう出るかを1つの fixture で見比べるためのもの。corpus 側で safety を計算し
 //! 直さず、production の pure helper が返した値をそのまま確認する。
@@ -32,7 +32,7 @@ const REQUEST_131_TEMPORARY_PASSED: &str =
 const RIICHI_TARGET: usize = 1;
 // 1副露だけの Present な副露相手。防御 target にしない。
 const PRESENT_PLAYER: usize = 2;
-// 3副露の High な副露相手。
+// 3副露の Danger な副露相手。
 const OPEN_HAND_TARGET: usize = 3;
 
 fn spec() -> ScenarioSpec {
@@ -160,7 +160,7 @@ fn candidate(
 }
 
 #[test]
-fn the_riichi_and_the_high_open_hand_are_both_defense_targets() {
+fn the_riichi_and_the_actionable_open_hand_are_both_defense_targets() {
     let diagnostic = diagnose(&scenario());
 
     assert_eq!(
@@ -555,7 +555,7 @@ fn a_fold_without_a_safe_tile_falls_back_to_the_normal_discard() {
 }
 
 #[test]
-fn a_riichi_without_a_high_open_hand_keeps_the_existing_defense() {
+fn a_riichi_without_an_actionable_open_hand_keeps_the_existing_defense() {
     // player 3 の副露を1つに減らすと Present になり、複合 threat ではなくなる。
     let mut spec = spec();
     let melds = spec.melds.as_mut().expect("melds");
@@ -580,7 +580,7 @@ fn a_riichi_without_a_high_open_hand_keeps_the_existing_defense() {
 }
 
 #[test]
-fn a_high_open_hand_without_a_riichi_keeps_the_open_hand_defense() {
+fn an_actionable_open_hand_without_a_riichi_keeps_the_open_hand_defense() {
     // リーチを外すと複合 threat ではなくなり、既存の OpenHand 防御 fallback に戻る。
     let mut spec = spec();
     spec.reached = Some(vec![false; 4]);

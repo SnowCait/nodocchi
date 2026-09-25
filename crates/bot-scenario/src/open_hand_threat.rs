@@ -5,8 +5,8 @@
 //! 固定局面。corpus 側で threat score や副露評価を再実装せず、production が構築した facts と
 //! classification をそのまま確認する。
 //!
-//! `decide_push_pull()` は `High` の相手だけを threat として扱うため、`None` / `Present` の
-//! fixture は従来どおり `NoThreat` → `Push`、`High` の fixture は自分の攻撃状態で分かれる。
+//! `decide_push_pull()` は `Caution` / `Danger` の相手だけを threat として扱うため、`None` / `Present` の
+//! fixture は従来どおり `NoThreat` → `Push`、`Caution` / `Danger` の fixture は自分の攻撃状態で分かれる。
 //! 強いテンパイの自分なら `StrongTenpaiAgainstHighOpenHand` → `Push`、一向聴の自分なら受け入れの
 //! 強さにかかわらず `IishantenAgainstHighOpenHand` → `Fold`、二向聴の自分なら
 //! `TwoOrMoreShantenAgainstHighOpenHand` → `Fold` になることを固定する。
@@ -148,14 +148,23 @@ fn fixed_meld_present() -> OpenHandThreatDecision {
     }
 }
 
-fn high(reason: OpenHandThreatReason) -> OpenHandThreatDecision {
+// 局進行だけを根拠にした警戒条件を満たす相手。
+fn caution(reason: OpenHandThreatReason) -> OpenHandThreatDecision {
     OpenHandThreatDecision {
-        level: OpenHandThreatLevel::High,
+        level: OpenHandThreatLevel::Caution,
         reason,
     }
 }
 
-// 役牌もドラも含まない Chi 3組を持つ子。3副露なので High になる。
+// 面子数・確定打点・親を根拠にした強い警戒条件を満たす相手。
+fn danger(reason: OpenHandThreatReason) -> OpenHandThreatDecision {
+    OpenHandThreatDecision {
+        level: OpenHandThreatLevel::Danger,
+        reason,
+    }
+}
+
+// 役牌もドラも含まない Chi 3組を持つ子。3副露なので Danger になる。
 fn three_plain_chi() -> ExpectedOpenHand {
     ExpectedOpenHand {
         player: 3,
@@ -170,7 +179,7 @@ fn three_plain_chi() -> ExpectedOpenHand {
         open_meld_dora_count: 0,
         open_meld_red_dora_count: 0,
         open_value_honor_melds: ValueHonorMeldCounts::default(),
-        threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
+        threat: danger(OpenHandThreatReason::ThreeOrMoreOpenMelds),
     }
 }
 
@@ -279,7 +288,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 2,
                 open_meld_red_dora_count: 1,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                threat: high(OpenHandThreatReason::TwoOrMoreWithVisibleHan),
+                threat: danger(OpenHandThreatReason::TwoOrMoreWithVisibleHan),
             }),
         },
         CorpusScenario {
@@ -299,8 +308,8 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                // 役牌もドラも無い2副露でも、河が9枚まで進むと High になる。
-                threat: high(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards),
+                // 役牌もドラも無い2副露でも、河が9枚まで進むと Caution になる。
+                threat: caution(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards),
             }),
         },
         CorpusScenario {
@@ -320,7 +329,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                threat: high(OpenHandThreatReason::OpenMeldFromTwelveDiscards),
+                threat: caution(OpenHandThreatReason::OpenMeldFromTwelveDiscards),
             }),
         },
         CorpusScenario {
@@ -340,7 +349,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: ValueHonorMeldCounts::default(),
-                threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
+                threat: danger(OpenHandThreatReason::ThreeOrMoreOpenMelds),
             }),
         },
         CorpusScenario {
@@ -361,7 +370,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_red_dora_count: 1,
                 open_value_honor_melds: dragon_meld(),
                 // 役牌・ドラの条件も満たすが、優先順位により3副露の reason になる。
-                threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
+                threat: danger(OpenHandThreatReason::ThreeOrMoreOpenMelds),
             }),
         },
         CorpusScenario {
@@ -381,7 +390,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 0,
                 open_meld_red_dora_count: 0,
                 open_value_honor_melds: dragon_meld(),
-                // 親でも1副露では High にしない。
+                // 親でも1副露では Caution / Danger にしない。
                 threat: present(),
             }),
         },
@@ -476,7 +485,7 @@ fn corpus() -> Vec<CorpusScenario> {
                 open_meld_dora_count: 2,
                 open_meld_red_dora_count: 1,
                 open_value_honor_melds: dragon_meld(),
-                threat: high(OpenHandThreatReason::ThreeOrMoreOpenMelds),
+                threat: danger(OpenHandThreatReason::ThreeOrMoreOpenMelds),
             }),
         },
     ]
@@ -626,16 +635,16 @@ fn hand_tiles(scenario: &Scenario) -> Vec<TileId> {
     scenario.context.hand_tiles().to_vec()
 }
 
-// その fixture が High の副露相手を持つか。
-fn has_high_threat(entry: &CorpusScenario) -> bool {
+// その fixture が Caution / Danger の副露相手を持つか。
+fn has_actionable_threat(entry: &CorpusScenario) -> bool {
     entry
         .melded
-        .is_some_and(|melded| melded.threat.level == OpenHandThreatLevel::High)
+        .is_some_and(|melded| OpenHandThreatAssessment::Classified(melded.threat).is_actionable())
 }
 
-// その fixture に期待する押し引き。High の副露相手がいる場合だけ新しい policy の対象になる。
+// その fixture に期待する押し引き。Caution / Danger の副露相手がいる場合だけ新しい policy の対象になる。
 fn expected_push_pull(entry: &CorpusScenario) -> (PushPullMode, PushPullReason) {
-    if !has_high_threat(entry) {
+    if !has_actionable_threat(entry) {
         return (PushPullMode::Push, PushPullReason::NoThreat);
     }
     match entry.self_hand {
@@ -655,11 +664,11 @@ fn expected_push_pull(entry: &CorpusScenario) -> (PushPullMode, PushPullReason) 
     }
 }
 
-// その fixture で OpenHand 防御 target になるべき席。High の副露相手だけが対象。
+// その fixture で OpenHand 防御 target になるべき席。Caution / Danger の副露相手だけが対象。
 fn expected_targets(entry: &CorpusScenario) -> Vec<usize> {
     entry
         .melded
-        .filter(|melded| melded.threat.level == OpenHandThreatLevel::High)
+        .filter(|melded| OpenHandThreatAssessment::Classified(melded.threat).is_actionable())
         .map(|melded| vec![melded.player])
         .unwrap_or_default()
 }
@@ -755,8 +764,8 @@ fn assert_no_opponent_reach(evaluated: &Evaluated) {
     assert!(!inputs.dealer_reacher, "{name}");
     assert!(!inputs.self_dealer, "{name}");
     assert_eq!(
-        inputs.has_high_open_hand_threat(),
-        has_high_threat(&evaluated.entry),
+        inputs.has_actionable_open_hand_threat(),
+        has_actionable_threat(&evaluated.entry),
         "{name}"
     );
 }
@@ -838,7 +847,7 @@ fn assert_the_threat_facts_are_shared_with_push_pull(evaluated: &Evaluated) {
 }
 
 // target は Player threats の classification と同じ source of truth から選ぶ。
-fn assert_the_high_threats_are_the_defense_targets(evaluated: &Evaluated) {
+fn assert_the_actionable_threats_are_the_defense_targets(evaluated: &Evaluated) {
     let name = evaluated.name();
 
     assert_eq!(
@@ -847,11 +856,10 @@ fn assert_the_high_threats_are_the_defense_targets(evaluated: &Evaluated) {
         "{name}"
     );
     for &player in &evaluated.diagnostic.open_hand_defense.targets {
-        assert_eq!(
+        assert!(
             evaluated.diagnostic.player_threats[player]
                 .open_hand_threat
-                .level(),
-            Some(OpenHandThreatLevel::High),
+                .is_actionable(),
             "{name} player {player}"
         );
     }
@@ -870,7 +878,7 @@ fn assert_the_present_threat_keeps_the_push_pull(evaluated: &Evaluated) {
     );
 }
 
-// High + 一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
+// Caution / Danger + 一向聴 / 二向聴以上の Fold では、通常打牌より OpenHand 防御 fallback を優先する。
 fn assert_the_folding_scenario_selects_the_defense_fallback(evaluated: &Evaluated) {
     let name = evaluated.name();
     let diagnostic = &evaluated.diagnostic;
@@ -894,7 +902,7 @@ fn assert_the_folding_scenario_selects_the_defense_fallback(evaluated: &Evaluate
     assert_eq!(diagnostic.defense_fallback_kind(), None, "{name}");
 }
 
-// High でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。リーチが合法な局面では
+// Caution / Danger でも強いテンパイで Push なら、安全牌を通常打牌より優先しない。リーチが合法な局面では
 // その通常打牌のままリーチを宣言するため、最終 action が Reach でも通常打牌は変わらない。
 fn assert_the_pushing_scenario_keeps_the_normal_discard(evaluated: &Evaluated) {
     let name = evaluated.name();
@@ -1033,36 +1041,74 @@ fn assert_no_other_players_river_is_river_safe(evaluated: &Evaluated) {
 }
 
 // 2副露 + 9捨て / 1副露 + 12捨て / 役牌入り2副露 / 3副露 の代表局面で target を固定する。
-fn assert_the_representative_high_scenarios_fix_the_defense_target(corpus: &EvaluatedCorpus) {
+fn assert_the_representative_actionable_scenarios_fix_the_defense_target(corpus: &EvaluatedCorpus) {
     let representatives = [
         (
             "open_hand_two_melds_nine_discards",
-            OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards,
+            caution(OpenHandThreatReason::TwoOrMoreOpenMeldsFromNineDiscards),
         ),
         (
             "open_hand_chi_twelve_discards",
-            OpenHandThreatReason::OpenMeldFromTwelveDiscards,
+            caution(OpenHandThreatReason::OpenMeldFromTwelveDiscards),
         ),
         (
             "open_hand_dora_melds",
-            OpenHandThreatReason::TwoOrMoreWithVisibleHan,
+            danger(OpenHandThreatReason::TwoOrMoreWithVisibleHan),
         ),
         (
             "open_hand_three_melds",
-            OpenHandThreatReason::ThreeOrMoreOpenMelds,
+            danger(OpenHandThreatReason::ThreeOrMoreOpenMelds),
         ),
     ];
 
-    for (name, reason) in representatives {
+    for (name, decision) in representatives {
         let diagnostic = &corpus.find(name).diagnostic;
 
         assert_eq!(diagnostic.open_hand_defense.targets, vec![3], "{name}");
         assert_eq!(
-            diagnostic.player_threats[3].open_hand_threat.reason(),
-            Some(reason),
+            diagnostic.player_threats[3].open_hand_threat.decision(),
+            Some(decision),
             "{name}"
         );
         assert!(diagnostic.open_hand_defense.has_target(), "{name}");
+    }
+}
+
+// 同じ自分の局面では、Caution の fixture も Danger の fixture と同じ押し引き・最終 action になる。
+// production policy は Caution と Danger を区別しない。
+fn assert_caution_and_danger_share_the_decision(corpus: &EvaluatedCorpus) {
+    let danger = corpus.find("open_hand_three_melds");
+    assert_eq!(
+        danger.diagnostic.player_threats[3].open_hand_threat.level(),
+        Some(OpenHandThreatLevel::Danger)
+    );
+
+    for name in [
+        "open_hand_two_melds_nine_discards",
+        "open_hand_chi_twelve_discards",
+    ] {
+        let caution = corpus.find(name);
+        assert_eq!(caution.entry.self_hand, danger.entry.self_hand, "{name}");
+        assert_eq!(
+            caution.diagnostic.player_threats[3]
+                .open_hand_threat
+                .level(),
+            Some(OpenHandThreatLevel::Caution),
+            "{name}"
+        );
+        assert_eq!(
+            caution.push_pull_decision(),
+            danger.push_pull_decision(),
+            "{name}"
+        );
+        assert_eq!(
+            caution.diagnostic.selected_action, danger.diagnostic.selected_action,
+            "{name}"
+        );
+        assert_eq!(
+            caution.diagnostic.selected_source, danger.diagnostic.selected_source,
+            "{name}"
+        );
     }
 }
 
@@ -1138,7 +1184,7 @@ fn assert_the_group_shares_the_normal_discard_and_offense(group: &[&Evaluated]) 
             evaluated.diagnostic.normal_discard_action, baseline.diagnostic.normal_discard_action,
             "{name}: 通常打牌 selected が一致する"
         );
-        // 最終 action は押し引きが同じ fixture 同士でだけ一致する。High の副露相手がいて
+        // 最終 action は押し引きが同じ fixture 同士でだけ一致する。Caution / Danger の副露相手がいて
         // Fold になる fixture は、通常打牌より OpenHand 防御 fallback を優先する。
         if expected_push_pull(&evaluated.entry) == expected_push_pull(&baseline.entry) {
             assert_eq!(
@@ -1272,7 +1318,7 @@ fn the_corpus_fixes_the_open_hand_threat_facts_and_decisions() {
         assert_the_expected_player_threat_facts(evaluated);
         assert_the_expected_open_hand_threat(evaluated);
         assert_the_threat_facts_are_shared_with_push_pull(evaluated);
-        assert_the_high_threats_are_the_defense_targets(evaluated);
+        assert_the_actionable_threats_are_the_defense_targets(evaluated);
         assert_the_selected_action_matches_act(evaluated);
 
         let targets = expected_targets(&evaluated.entry);
@@ -1284,10 +1330,10 @@ fn the_corpus_fixes_the_open_hand_threat_facts_and_decisions() {
         }
     }
 
-    // High になる fixture だけが threat の対象。強いテンパイなら押し、一向聴以下なら降りる。
-    let high_scenarios = corpus.select(has_high_threat);
-    assert!(!high_scenarios.is_empty());
-    for evaluated in &high_scenarios {
+    // Caution / Danger になる fixture だけが threat の対象。強いテンパイなら押し、一向聴以下なら降りる。
+    let actionable_scenarios = corpus.select(has_actionable_threat);
+    assert!(!actionable_scenarios.is_empty());
+    for evaluated in &actionable_scenarios {
         assert_the_expected_push_pull(evaluated);
     }
 
@@ -1309,7 +1355,7 @@ fn the_corpus_fixes_the_open_hand_threat_facts_and_decisions() {
     }
 
     let pushing_scenarios = corpus.select(|entry| {
-        has_high_threat(entry) && expected_push_pull(entry).0 != PushPullMode::Fold
+        has_actionable_threat(entry) && expected_push_pull(entry).0 != PushPullMode::Fold
     });
     assert!(!pushing_scenarios.is_empty());
     for evaluated in &pushing_scenarios {
@@ -1322,7 +1368,8 @@ fn the_corpus_fixes_the_open_hand_threat_facts_and_decisions() {
         assert_open_melds_add_visible_tiles_outside_the_acceptance(&group);
     }
 
-    assert_the_representative_high_scenarios_fix_the_defense_target(&corpus);
+    assert_the_representative_actionable_scenarios_fix_the_defense_target(&corpus);
+    assert_caution_and_danger_share_the_decision(&corpus);
     assert_the_nine_discard_scenario_shares_the_existing_wall_rank(
         corpus.find("open_hand_two_melds_nine_discards"),
     );

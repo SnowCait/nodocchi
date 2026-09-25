@@ -198,25 +198,25 @@ pub struct ShantenDecisionDiagnostic {
     /// `is_opponent()` が unknown で表す。危険度の判断は含まず、現時点では押し引き・防御・
     /// 打牌選択のどれにも影響しない解析専用の情報。
     pub player_threats: [PlayerThreatDiagnostic; 4],
-    /// `High` OpenHandThreat の相手に対する防御 safety の診断。
+    /// actionable OpenHandThreat の相手に対する防御 safety の診断。
     ///
     /// target は `player_threats` が持つ classification をそのまま source of truth にして選ぶ。
-    /// `High` の相手がいない局面では `targets` も `candidates` も空になる。
+    /// `Caution` / `Danger` の相手がいない局面では `targets` も `candidates` も空になる。
     ///
     /// 防御 fallback ([`Self::defense`]) がリーチ者向けなのに対し、こちらは非リーチ相手
     /// 向けで、現物相当の根拠に `post_reach_passed_tiles` を使わない。`selected` は `act()` が
     /// 実際に採用した OpenHand 防御 fallback で、診断側で選び直さない。採用しなかった局面では
     /// `None` になり、候補評価だけが解析用に残る。
     pub open_hand_defense: OpenHandDefenseDiagnostic,
-    /// リーチ者と `High` OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety の診断。
+    /// リーチ者と actionable OpenHandThreat の相手が同時にいる複合 threat 局面の防御 safety の診断。
     ///
     /// target はリーチ情報と `player_threats` が持つ classification をそのまま source of truth に
-    /// して選ぶ。複合 threat ではない局面 (リーチ者だけ / `High` の相手だけ / threat なし) では
+    /// して選ぶ。複合 threat ではない局面 (リーチ者だけ / `Caution` / `Danger` の相手だけ / threat なし) では
     /// `targets` も `candidates` も空になり、防御は既存の [`Self::defense`] /
     /// [`Self::open_hand_defense`] が担当する。
     ///
     /// target ごとに「ロン安全」の根拠が違い、リーチ者は現物 (本人の河 + post_reach_passed)、
-    /// `High` の副露相手は本人の河と現在有効な一時通過牌を使う。`selected` は `act()` が実際に
+    /// `Caution` / `Danger` の副露相手は本人の河と現在有効な一時通過牌を使う。`selected` は `act()` が実際に
     /// 採用した複合 threat 用の防御 fallback で、診断側で選び直さない。
     pub combined_defense: CombinedDefenseDiagnostic,
 }
