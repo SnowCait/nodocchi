@@ -37,6 +37,7 @@ pub mod three_shanten_continuation_comparison;
 pub mod three_shanten_self_tsumo_cost;
 pub mod two_shanten_full_parallel_comparison;
 pub mod two_shanten_self_tsumo_cost;
+pub mod two_shanten_stay_call_observation;
 
 pub use action::LegalAction;
 pub use agent::Agent;
@@ -229,4 +230,10 @@ pub use three_shanten_self_tsumo_cost::{
 pub use two_shanten_self_tsumo_cost::{
     TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
     measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
+};
+pub use two_shanten_stay_call_observation::{
+    TwoShantenStayCallAgreement, TwoShantenStayCallCandidate, TwoShantenStayCallFull,
+    TwoShantenStayCallObservation, TwoShantenStayCallProgress, TwoShantenStayCallScope,
+    TwoShantenStayCallUnknown, TwoShantenStayCallValue, TwoShantenStayPassObservation,
+    observe_two_shanten_stay_calls,
 };

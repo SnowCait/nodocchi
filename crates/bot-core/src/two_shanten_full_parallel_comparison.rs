@@ -150,6 +150,9 @@ pub struct TwoShantenFullParallelRun {
     pub memo: SearchStateMemoStats,
     /// Full 追加評価に実際に使った thread 数。逐次評価と gate 不発では 1。
     pub full_workers: usize,
+    /// ドラ差 gate を通って Full 追加評価を行った2候補。gate 不発と2向聴 selection の対象外では
+    /// `None`。値を確定できなかった候補も含む。
+    pub full_pair: Option<[TileType; 2]>,
 }
 
 impl TwoShantenFullParallelRun {
@@ -346,6 +349,7 @@ fn run(
         search: observed.search,
         memo: observed.memo,
         full_workers: observed.two_shanten_full_workers,
+        full_pair: observed.two_shanten_full_pair,
     }
 }
 

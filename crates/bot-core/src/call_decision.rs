@@ -353,7 +353,8 @@ use bot_logic::{
     MeldKind, OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
     awaiting_draw_expected_self_tsumo_value,
     awaiting_draw_three_shanten_progress_only_self_tsumo_value,
-    awaiting_draw_two_shanten_expected_self_tsumo_value, best_discard_selection_index,
+    awaiting_draw_two_shanten_expected_self_tsumo_value,
+    awaiting_draw_two_shanten_progress_self_tsumo_value, best_discard_selection_index,
     calculate_acceptance_with_fixed_melds_and_visible_tiles, calculate_shanten_with_fixed_melds,
     discard_tenpai_wait_availability, evaluate_tenpai_hand_value, fixed_melds_guarantee_yaku,
     split_discarded_tile, tenpai_completed_hands,
@@ -867,6 +868,27 @@ fn evaluate_call_decision_with_order(
     order: CallPassEvaluationOrder,
     timing: &mut CallDecisionTimer,
 ) -> Option<CallDecisionDiagnostic> {
+    evaluate_call_decision_with_post_call_states(
+        ctx,
+        legal_actions,
+        collect_observations,
+        order,
+        timing,
+    )
+    .map(|(decision, _)| decision)
+}
+
+// 鳴き判断の本体。production の結論に加えて、候補ごとに鳴き後の評価へ渡した入力を返す。
+//
+// 返す入力は判断が実際に使ったものそのままで、観測用に組み立て直さない。production の呼び出しは
+// 捨てるだけなので、判断も評価の回数も変わらない。
+fn evaluate_call_decision_with_post_call_states(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+    collect_observations: bool,
+    order: CallPassEvaluationOrder,
+    timing: &mut CallDecisionTimer,
+) -> Option<(CallDecisionDiagnostic, Vec<PostCallState>)> {
     let mut slots = prepare_call_candidates(ctx, legal_actions, timing);
     if slots.is_empty() {
         return None;
@@ -901,11 +923,14 @@ fn evaluate_call_decision_with_order(
     let reason = candidates[selected_index.unwrap_or(0)].reason;
     let selected = selected_index.map(|index| candidates[index].action.clone());
 
-    Some(CallDecisionDiagnostic {
-        selected,
-        reason,
-        candidates,
-    })
+    Some((
+        CallDecisionDiagnostic {
+            selected,
+            reason,
+            candidates,
+        },
+        post_call_states,
+    ))
 }
 
 // 評価を終えた作業単位を、合法 action の列挙順の候補診断と鳴き後 state へ分ける。
@@ -1314,6 +1339,116 @@ impl CallEvaluationKey {
             post_call_concealed: PhysicalTile::sequence(post_call_tiles),
         }
     }
+}
+
+/// `現在2向聴 → Chi / Pon → 打牌 → 2向聴のまま` の候補1件について、production の candidate
+/// preparation が組み立てた鳴き後 state。
+///
+/// observation 専用で、production の判断はこの struct を読まない。値はどれも鳴き判断が実際に
+/// 使ったもの、または Push/Pull gate と同じ既存の組み立て ([`post_call_melds`] /
+/// [`post_call_legal_dahai_actions`]) の結果で、observation のために向聴・受け入れ・喰い替えを
+/// 求め直さない。
+#[derive(Debug, Clone)]
+pub(crate) struct TwoShantenStayCallState {
+    pub(crate) post_call_tiles: Vec<TileId>,
+    /// 既存副露に今回の Chi / Pon を加えた副露一覧。
+    pub(crate) post_call_melds: Vec<Meld>,
+    /// 事前判定が求めた鳴き後の全合法打牌候補の1手評価。喰い替え禁止牌は除いてある。
+    pub(crate) post_call_discards: Vec<DiscardEvaluation>,
+    pub(crate) forbidden_discards: Vec<TileType>,
+    pub(crate) post_call_fixed_meld_count: FixedMeldCount,
+    pub(crate) post_call_min_shanten: i8,
+    /// 今回の鳴きを反映した鳴き後の局面。自分の席を特定できない場合は `None`。
+    pub(crate) post_call_context: Option<GameContext>,
+    /// 鳴き後の合法 Dahai。喰い替え禁止牌を除いた物理牌そのもの。
+    pub(crate) post_call_legal_actions: Vec<LegalAction>,
+}
+
+/// observation 対象の候補が鳴き後 state をどこから読むか。
+#[derive(Debug, Clone)]
+pub(crate) enum TwoShantenStayCallSource {
+    Evaluated(Box<TwoShantenStayCallState>),
+    /// 物理牌 semantics まで同じ鳴き後 state を作る先行候補 (候補 index)。
+    Reused(usize),
+}
+
+/// production の判断で `PostCallNotIishanten` になった `現在2向聴 → 2向聴のまま` の候補。
+#[derive(Debug, Clone)]
+pub(crate) struct TwoShantenStayCallTarget {
+    /// [`CallDecisionDiagnostic::candidates`] の index。合法 action の列挙順。
+    pub(crate) candidate_index: usize,
+    pub(crate) source: TwoShantenStayCallSource,
+}
+
+impl CallCandidateDiagnostic {
+    /// production の判断で `現在2向聴 → Call → 打牌 → 2向聴のまま` として止まった候補か。
+    ///
+    /// production が書き込んだ現在向聴数・鳴き後の最良打牌の向聴数・理由を読むだけで、判定を
+    /// やり直さない。
+    pub fn stays_two_shanten_after_call(&self) -> bool {
+        self.current_shanten == Some(CALL_TWO_SHANTEN_SHANTEN)
+            && self.post_call_shanten() == Some(CALL_TWO_SHANTEN_SHANTEN)
+            && self.reason == CallDecisionReason::PostCallNotIishanten
+    }
+}
+
+/// production と同じ鳴き判断を1回行い、結論と `現在2向聴 → 2向聴のまま` の候補の鳴き後 state を
+/// 返す。
+///
+/// 判断は `act()` と同じ入口・同じ評価順で、observation のための追加探索はここでは走らない。
+/// 鳴き後 state は判断が捨てる前の candidate preparation から取り出すだけなので、同じ state を
+/// 別実装で組み立て直さない。合法な Chi / Pon が無ければ `None`。
+pub(crate) fn evaluate_call_decision_with_two_shanten_stay_calls(
+    ctx: &GameContext,
+    legal_actions: &[LegalAction],
+) -> Option<(CallDecisionDiagnostic, Vec<TwoShantenStayCallTarget>)> {
+    let (decision, post_call_states) = evaluate_call_decision_with_post_call_states(
+        ctx,
+        legal_actions,
+        false,
+        CallPassEvaluationOrder::PRODUCTION,
+        &mut CallDecisionTimer::disabled(),
+    )?;
+    let targets = post_call_states
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| decision.candidates[*index].stays_two_shanten_after_call())
+        .filter_map(|(index, state)| {
+            let source = match state {
+                PostCallState::Reused(source) => TwoShantenStayCallSource::Reused(source),
+                PostCallState::Evaluated {
+                    preparation: CallCandidatePreparation::TwoShantenCall(inputs),
+                    ..
+                } => {
+                    let candidate = &decision.candidates[index];
+                    let forbidden_discards = candidate.post_call_forbidden_discards.clone()?;
+                    let post_call_melds = post_call_melds(ctx, &inputs.meld);
+                    TwoShantenStayCallSource::Evaluated(Box::new(TwoShantenStayCallState {
+                        post_call_context: ctx.with_own_hand_state(
+                            inputs.post_call_tiles.clone(),
+                            post_call_melds.clone(),
+                        ),
+                        post_call_legal_actions: post_call_legal_dahai_actions(
+                            &inputs.post_call_tiles,
+                            &forbidden_discards,
+                        ),
+                        post_call_fixed_meld_count: candidate.post_call_fixed_meld_count?,
+                        post_call_min_shanten: inputs.post_call_min_shanten?,
+                        post_call_tiles: inputs.post_call_tiles,
+                        post_call_melds,
+                        post_call_discards: inputs.post_call_discards,
+                        forbidden_discards,
+                    }))
+                }
+                PostCallState::Evaluated { .. } => return None,
+            };
+            Some(TwoShantenStayCallTarget {
+                candidate_index: index,
+                source,
+            })
+        })
+        .collect();
+    Some((decision, targets))
 }
 
 // 合法 action を Chi / Pon の共通表現へ正規化する。それ以外の action は対象外。
@@ -2169,7 +2304,7 @@ fn post_call_melds(ctx: &GameContext, meld: &Meld) -> Vec<Meld> {
 
 // Call > Pass の比較そのもの。`eligible` は Call が厳密に高い場合の理由で、現在の向聴数によって
 // だけ変わる。同値・どちらかが unknown・反応元不明はすべて鳴かない理由になる。
-fn compare_call_pass_self_tsumo_values(
+pub(crate) fn compare_call_pass_self_tsumo_values(
     reaction_source_known: bool,
     call: Option<u64>,
     pass: Option<u64>,
@@ -2196,7 +2331,7 @@ fn compare_call_pass_self_tsumo_values(
 
 // reaction 元の次巡から自分の次の自摸までに山から引かれる枚数。観測できない席や自家打牌は
 // reaction として不整合なので None のままにする。
-fn reaction_draw_distance(ctx: &GameContext) -> Option<u32> {
+pub(crate) fn reaction_draw_distance(ctx: &GameContext) -> Option<u32> {
     let own = ctx.player_id()?;
     let source = ctx.reaction_source_player()?;
     if own >= 4 || source >= 4 || own == source {
@@ -2259,11 +2394,24 @@ fn pass_iishanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
     )
 }
 
-fn pass_two_shanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
+pub(crate) fn pass_two_shanten_expected_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
     pass_expected_self_tsumo_value(
         ctx,
         CALL_TWO_SHANTEN_SHANTEN,
         awaiting_draw_two_shanten_expected_self_tsumo_value,
+    )
+}
+
+/// 鳴かずに次の自摸を待つ現在2向聴 state の、最初のツモで1向聴へ進む枝だけの self-tsumo 寄与。
+///
+/// production の鳴き判断は読まない。`現在2向聴 → Call → 2向聴のまま` の observation が Progress
+/// scope の Pass 側として使う。入力の組み立ては [`pass_two_shanten_expected_self_tsumo_value`] と
+/// 共通で、違うのは最初のツモで2向聴を維持する枝を足さないことだけ。
+pub(crate) fn pass_two_shanten_progress_self_tsumo_value(ctx: &GameContext) -> Option<u64> {
+    pass_expected_self_tsumo_value(
+        ctx,
+        CALL_TWO_SHANTEN_SHANTEN,
+        awaiting_draw_two_shanten_progress_self_tsumo_value,
     )
 }
 
@@ -4684,6 +4832,38 @@ mod tests {
             Some(189_935_840),
             "pass",
         );
+    }
+
+    // `現在2向聴 → Call → 2向聴のまま` の observation が使う Pass Progress 値は、Pass Full と同じ入力を
+    // 既存の awaiting-draw Progress helper へ渡した値そのもの。
+    #[test]
+    fn the_two_shanten_pass_progress_is_the_existing_awaiting_draw_progress_helper() {
+        let ctx = valued_two_shanten_reaction_context(
+            &TWO_SHANTEN_CALL_PON_HAND,
+            TWO_SHANTEN_CALL_PON_TARGET,
+            Some(1),
+            Some(32),
+        );
+        let counts = TileCounts::from_tiles(ctx.hand_tiles().iter().copied());
+        let acceptance = calculate_acceptance_with_fixed_melds_and_visible_tiles(
+            &counts,
+            ctx.own_fixed_meld_count().unwrap(),
+            ctx.visible_tiles(),
+        );
+        let valuator = ProductionProspectiveValuator::new_with_hand_state(&ctx, ctx.own_melds());
+        let inputs =
+            with_production_iishanten_continuation(lookahead_inputs_with_own_future_draws(
+                &ctx,
+                ctx.hand_tiles(),
+                &valuator,
+                LookaheadDiagnosticScope::None,
+                pass_own_future_draws(&ctx),
+            ));
+        let progress = awaiting_draw_two_shanten_progress_self_tsumo_value(&inputs, &acceptance);
+
+        assert!(progress.is_some());
+        assert_eq!(pass_two_shanten_progress_self_tsumo_value(&ctx), progress);
+        assert!(pass_two_shanten_expected_self_tsumo_value(&ctx) > progress);
     }
 
     #[test]

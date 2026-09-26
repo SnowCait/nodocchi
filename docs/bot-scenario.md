@@ -279,6 +279,122 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では 
 
 **production の打牌選択は P2 と同じ方式です。** Full 追加評価の対象は常に provisional 上位2候補だけなので、要求する worker 数の上限も `min(2, available_parallelism)` で、`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。ドラ差 gate が発火しない局面では Full 追加評価そのものが走らないので、thread も分けません。Progress cohort の評価は従来どおり逐次のままです。S は P2 を比べるための baseline として残ります。他の診断 option とは併用できません。
 
+### 2向聴 → Chi / Pon → 2向聴のまま の observation
+
+`--two-shanten-stay-call-comparison` は、現在2向聴から Chi / Pon しても鳴き後の最良打牌で2向聴のままになる候補について、Call と Pass を2つの scope で独立に比べる **observation-only** の診断 option です。Issue #287 の「2向聴 → Chi / Pon → 2向聴のまま」を production へ接続する前に、評価値・Pass との差・比較尺度・実行コストを確かめるために使います。
+
+**production policy は変わりません。** `ShantenAgent::act()` と通常の `diagnose()` の選択・理由、Call / Pass policy、2→1 / 3→2 の既存 policy、速度優先 policy、鳴き後の Push/Pull、打牌 comparator、2向聴 Full の gate と並列度はどれも observation の有無で変わらず、観測結果を production へ戻す経路もありません。この option を指定しない通常実行では、追加の Progress / Full 探索を一切走らせません。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  crates/bot-scenario/scenarios/two_shanten_stay_call_chi_dora_gate.json \
+  --two-shanten-stay-call-comparison
+
+cargo run --release -p bot-scenario -- \
+  --riichilab-capture capture.jsonl --request-id 123 --two-shanten-stay-call-comparison
+```
+
+PowerShell からも同じ形で `cargo run -p bot-scenario -- .\scenario.json --two-shanten-stay-call-comparison` のように実行できます。
+
+#### 対象候補
+
+production と同じ鳴き判断 (`act()` と同じ入口・同じ評価順) を1回行い、次の候補だけを対象にします。
+
+```text
+current_shanten = 2
+post_call_min_shanten = 2
+reason = PostCallNotIishanten
+```
+
+鳴き後の手牌・副露・鳴き後打牌候補の1手評価・喰い替え禁止牌・副露数・最小向聴数は、その判断の candidate preparation が既に組み立てたものをそのまま使い、観測のために同じ state を組み立て直しません。鳴き後の `GameContext` と喰い替え禁止牌を除いた合法 Dahai も、鳴き後の Push/Pull と同じ既存の組み立てを通します。同じ request に 2→1 の候補があっても対象にはしません。物理牌 semantics まで同じ鳴き後 state を作る候補は production と同じく先行候補の観測を複製し (`same post-call state as #N`)、赤5 / 黒5 が違う候補は別の state として評価します。対象候補が無い request では Pass も Call も評価せず、`No 2 -> 2 Chi / Pon candidate` と表示して終わります。
+
+#### Progress と Full
+
+| scope | Call | Pass |
+| --- | --- | --- |
+| Progress | 鳴き後の合法打牌を既存の2向聴 Progress comparator (`best_two_shanten_progress_discard_among_observed`) で比べ、選んだ打牌の Progress 値 | 次の自摸を待つ現在2向聴 state の `awaiting_draw_two_shanten_progress_self_tsumo_value` |
+| Full | 鳴き後の局面を production の2向聴 discard selection へそのまま渡し、選ばれた打牌の Full 値 | 2→1 Call / Pass 比較の Pass 側と同じ `awaiting_draw_two_shanten_expected_self_tsumo_value` |
+
+Progress は「最初のツモで1向聴へ進む枝 → production の1向聴 continuation」だけの寄与で、2向聴 production selection の Progress cohort と同じ尺度です。3向聴 → 2向聴の Call が使う Progress-only (1向聴到達後も Progress だけを追う) とは1向聴到達後の枝が違うので、混ぜないでください。Full はそれに最初のツモで2向聴を維持する枝を1回だけ足した値です。向聴・受け入れ・確率・打点・ドラ・役・scoring はすべて既存 helper を通り、Call 専用の評価は持ちません。
+
+**Full は「全打牌候補を Full 評価する」ものではありません。** Call 側は production の2向聴 selection (Progress cohort → provisional ranking → ドラ差 gate → gated top-2 の Full 追加評価 → production comparator、Full の並列度も production のまま) を1回通すだけです。gate が発火しない局面では選ばれた打牌の Full 値は存在しないので、0 などで補完せず unknown にします。production へ接続したときの latency と選択をそのまま測るためで、観測のための「全候補 Full」policy は持ちません。
+
+Pass は request ごと・scope ごとに1回だけ評価し、その request の全対象候補で共有します。
+
+#### Call / Pass の結論
+
+Progress と Full の値は混ぜず、scope ごとに独立に `call > pass` / `pass >= call` / `unknown` を判定します。同値は既存 Call / Pass policy と同じく `pass >= call` です。`unknown` には値を確定できなかった側と原因を添えます。
+
+| 原因 | 意味 |
+| --- | --- |
+| `reaction source unknown` | 反応元の席が分からず Pass の horizon を作れない。Pass は評価しない |
+| `no post-call selection` | 鳴き後の局面を作れない、または鳴き後の合法打牌が無い |
+| `no competing targets` | production の2向聴 selection が比較対象を1件に絞り、Progress も Full も評価しない |
+| `full gate not fired` | production の2向聴 selection でドラ差 gate が発火せず、Full 追加評価が走らない |
+| `selected outside the full pair` | Full 追加評価の対象外の打牌が選ばれた |
+| `unresolved` | 評価したが既存 helper が値を確定できなかった |
+
+#### 計測条件
+
+cold memo 条件で計ります。対象候補を決める production の鳴き判断を除き、どの計測も新しい thread で行うので、向聴・受け入れの thread-local memo は毎回 cold から始まります。探索内の memo は run ごとに作り直すため、Progress と Full の探索も互いを暖めません。Call は既存の comparison tooling と同じく、instrumentation を持たない計測 run (`elapsed` の出どころ) と、探索規模を計上する観測 run (`search` の出どころ) の2本を取ります。Pass は計測 run 1本だけです。この option は他の診断 option と併用できず、計測より前に別の深い診断を走らせません。
+
+#### 出力の読み方
+
+```text
+Production call decision (unchanged)
+  selected: none
+  reason: PostCallNotIishanten
+  reaction source player: 3
+  call candidates: 1, 2 -> 2 targets: 1
+    #0 Chi 8m <- 6m 7m: PostCallNotIishanten (2 -> 2 target)
+
+Pass (evaluated once per request and scope, shared by every target)
+  progress: 81.935943 (elapsed 67.195 ms)
+  full: 152.160704 (elapsed 1099.725 ms)
+
+Candidate #0 Chi 8m <- 6m 7m
+  forbidden discards: 8m 5m, post-call fixed melds: 1, post-call min shanten: 2
+  progress: selected F, call 0.192268, pass 81.935943, pass >= call
+    call elapsed (timing run): 49.494 ms, timing and observation runs agree: true
+    search (observation run): ...
+  full: selected 5p, call 2.141449, pass 152.160704, pass >= call
+    progress cohort: 3 (5p 6p F), full evaluated: 2 (F 5p), full workers: 2
+    selection elapsed (timing run): 783.101 ms, timing and observation runs agree: true
+    search (observation run): ...
+  selected post-call discard: different
+  call / pass conclusion progress vs full: same
+```
+
+- `Production call decision (unchanged)` は production の鳴き判断そのものです。observation はこの結論を変えません。
+- 値は既存 self-tsumo value と同じ点数単位で小数6桁まで表示します。
+- `selected post-call discard` は2つの scope が選んだ鳴き後打牌 (物理牌) が一致したかです。
+- `call / pass conclusion progress vs full` は、両方の結論が確定して同じなら `same`、反転していれば `flipped`、どちらかが `unknown` なら `undetermined` です。
+- `full evaluated` はドラ差 gate を通って Full 追加評価を行った2候補です。`none` の場合、Full の Call 値は `unknown (full gate not fired)` などになります。
+
+代表 fixture は2つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。
+
+#### capture 全体の集計
+
+`--compare-two-shanten-stay-call` は capture の全 `request_action` を再生し、同じ observation を行って集計します。既存の `--compare-three-shanten-continuation` と同じく、後続の path をすべて capture として受け取り、他の scenario / 診断 option とは併用できません。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --compare-two-shanten-stay-call logs/first.jsonl logs/second.jsonl
+```
+
+request 単位と候補単位を分けて表示します。
+
+| section | 単位 | 内容 |
+| --- | --- | --- |
+| `Requests` | request | replay した request 数、Chi / Pon が合法な request 数、2→2 対象 request 数 |
+| `Candidates` | 候補 | 2→2 Call 候補数と Chi / Pon の内訳、先行候補の state を複製した候補数 |
+| `Call / Pass conclusion` | 候補 | scope ごとの `call > pass` / `pass >= call` / `unknown` と unknown の原因 |
+| `Progress vs full` | 候補 | 結論の一致 (`same`) / 反転 (`flipped`) / どちらか unknown、選択打牌の一致 / 不一致 |
+| `Latency` | request / 評価した候補 | Pass は request 単位、Call は評価した候補単位 (複製した候補を除く) の count / median / p95 / max。request ごとの Pass + Call の逐次合計も並べる |
+| `Slowest full calls` | 評価した候補 | Full の Call 評価が遅い上位5件 |
+| `Flipped conclusions` | 候補 | Progress と Full で結論が反転した候補の代表10件。capture・`request_id`・候補 index で追える |
+| `Per request with a 2 -> 2 target` | request | production の結論、対象候補数、2つの Pass 値 |
+
 ### --force-fold
 
 `--force-fold` は、通常の押し引き判断とは無関係に「この局面でベタ降りすると仮定した場合の防御打牌」を確認する option です。防御候補をランキングし、上位候補と model risk・fold risk を並べます。

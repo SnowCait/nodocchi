@@ -720,6 +720,9 @@ pub(crate) struct IishantenContinuationSelection {
     pub(crate) forward_workers: usize,
     /// 2向聴 Full 追加評価に実際に使った thread 数。逐次評価とドラ差 gate 不発では 1。
     pub(crate) two_shanten_full_workers: usize,
+    /// ドラ差 gate を通って Full 追加評価を行った provisional 上位2候補。gate 不発と2向聴 selection
+    /// の対象外では `None`。値を確定できなかった候補も含む。
+    pub(crate) two_shanten_full_pair: Option<[TileType; 2]>,
     /// production comparator が実際に評価した2向聴候補ごとの実測。計測しない run では空。
     pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     /// production が深い前方評価を実際に行った1向聴候補ごとの実測。計測しない run と、最善
@@ -758,7 +761,13 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
     let iishanten_forward_candidates = timing.take_iishanten_forward_candidates();
     let phases = timing.finish();
 
+    let two_shanten_full_pair = run.metrics.two_shanten.full_pair.as_ref().map(|pair| {
+        pair.indices
+            .map(|index| run.legal.evaluations[index].discard)
+    });
+
     IishantenContinuationSelection {
+        two_shanten_full_pair,
         diagnostic: diagnose_legal_evaluations(
             context,
             &run.legal,
@@ -2774,6 +2783,62 @@ pub(crate) fn select_best_two_shanten_post_call_discard(
         expected_self_tsumo_value,
         scored_han,
     })
+}
+
+/// 鳴き後も2向聴の打牌候補を、2向聴 production selection の Progress cohort と同じ尺度で選んだ
+/// observation の結果。
+pub(crate) struct ObservedPostCallTwoShantenProgress {
+    /// 選んだ打牌と、その Progress 値。合法な打牌候補が無ければ `None`。
+    pub(crate) selection: Option<PostCallTwoShantenSelection>,
+    /// 探索規模。計上を要求しなかった run では既定値のまま。
+    pub(crate) search: ThreeShantenSearchStats,
+    /// 探索内の同一 state memo の利用数。
+    pub(crate) memo: SearchStateMemoStats,
+}
+
+/// 鳴き後も2向聴の打牌候補を、2向聴の Progress 値だけで選ぶ observation 専用の入口。
+///
+/// production の鳴き判断はこの入口を使わない。`現在2向聴 → Call → 2向聴のまま` の Call 側を、
+/// 鳴かなかった2向聴 state の Pass Progress 値と同じ尺度で求めるためにある。
+///
+/// 候補ごとの値は既存の [`two_shanten_progress_self_tsumo_value_for_candidate`](bot_logic::two_shanten_progress_self_tsumo_value_for_candidate)、
+/// 最良打牌の決定は既存の [`best_two_shanten_progress_discard_among_observed`] で、2向聴 Full
+/// gate は通らない。[`select_best_two_shanten_post_call_discard`] との違いは1向聴到達後の
+/// continuation だけで、こちらは3向聴起点の Progress-only ではなく、2向聴 production selection・
+/// Pass の [`with_production_iishanten_continuation`] と同じ1向聴 continuation を追う。
+/// 向聴・受け入れ・確率・打点・ドラ・役判定をこの層で持たない。
+pub(crate) fn select_two_shanten_progress_post_call_discard_observed(
+    context: &GameContext,
+    tiles: &[TileId],
+    melds: &[Meld],
+    evaluations: &[DiscardEvaluation],
+    search_stats: bool,
+) -> ObservedPostCallTwoShantenProgress {
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds));
+    let inputs = with_production_iishanten_continuation(lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+    ));
+    let inputs = if search_stats {
+        inputs.with_three_shanten_search_stats()
+    } else {
+        inputs
+    };
+    let selection =
+        best_two_shanten_progress_discard_among_observed(&inputs, evaluations, || {}, || ()).map(
+            |(index, expected_self_tsumo_value, ())| PostCallTwoShantenSelection {
+                evaluation: evaluations[index].clone(),
+                expected_self_tsumo_value,
+                scored_han: None,
+            },
+        );
+    ObservedPostCallTwoShantenProgress {
+        selection,
+        search: inputs.three_shanten_search_stats(),
+        memo: inputs.search_state_memo_stats(),
+    }
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
