@@ -1987,7 +1987,7 @@ fn format_push_pull(
                     }
                 }
                 lines.extend(format_tenpai_offense_value(offense, inputs.dealer_reacher));
-                lines.extend(format_iishanten_forward_metrics(offense));
+                lines.extend(format_iishanten_forward_metrics(offense, inputs));
                 lines.push(format!(
                     "    dora after discard: {}",
                     offense.dora_count_after_discard
@@ -2040,14 +2040,33 @@ fn format_tenpai_offense_value(
 //
 // `weighted prospective value` は将来テンパイの確定打点を1手目・和了牌の残枚数で重み付けした
 // 合計で、確定できない枝がある場合と集計対象の枝が無い場合は `unknown`。平均へ正規化した値でも
-// 完全な EV でもない。現在の押し引きが一向聴の判定へ使うのは `expected self-tsumo value` だけで、
-// 残りは観測値。
-fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<String> {
+// 完全な EV でもない。forward metrics は configured horizon の通常打牌選択の値で、押し引きが一向聴の
+// threshold と比べるのは選択候補を UNTIL_RYUKYOKU で評価し直した
+// `push/pull expected self-tsumo value (until ryukyoku)` だけ。
+// 明確な threat が無い局面では Push/Fold 用の値を評価しないので、その旨だけを出す。
+fn format_iishanten_forward_metrics(
+    offense: &PushPullOffenseState,
+    inputs: &PushPullInputs,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if offense.min_shanten_after_discard == 1 {
+        let clear_threat =
+            inputs.opponent_reach_count >= 1 || inputs.has_actionable_open_hand_threat();
+        lines.push(format!(
+            "    push/pull expected self-tsumo value (until ryukyoku): {}",
+            if clear_threat {
+                format_self_tsumo_value(offense.iishanten_push_pull_expected_self_tsumo_value())
+            } else {
+                NOT_EVALUATED.to_string()
+            }
+        ));
+    }
     let Some(metrics) = offense.iishanten_forward_metrics else {
-        return vec![format!("    iishanten forward metrics: {NONE}")];
+        lines.push(format!("    iishanten forward metrics: {NONE}"));
+        return lines;
     };
 
-    vec![
+    lines.extend([
         "    iishanten forward metrics".to_string(),
         format!(
             "      expected self-tsumo value: {}",
@@ -2061,7 +2080,8 @@ fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<Strin
             "      weighted tenpai wait: {}",
             format_tenpai_wait(metrics.tenpai_wait)
         ),
-    ]
+    ]);
+    lines
 }
 
 fn prospective_total_label(total: Option<u64>) -> String {

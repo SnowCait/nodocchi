@@ -38,9 +38,9 @@ use bot_logic::{
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
     ForwardMetrics, IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, Meld,
     OwnDiscards, SameShantenContinuationDepth, SearchStateMemoStats, SelfTsumoFacts,
-    TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics, ThreeShantenSearchStats,
-    TileCounts, TileId, TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
-    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
+    SelfTsumoHorizon, TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics,
+    ThreeShantenSearchStats, TileCounts, TileId, TileType, TwoShantenMetrics,
+    TwoShantenProgressSelfTsumoDiagnostic, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_three_shanten_metrics,
     best_discard_selection_index_with_two_shanten_metrics,
@@ -1369,6 +1369,37 @@ pub(crate) fn selected_iishanten_forward_metrics_from_context(
         .collect();
 
     selected_iishanten_forward_metrics(context, &tiles, evaluation, ForwardMetrics::default())
+}
+
+/// 1向聴 Push/Fold の固定 threshold と比較する、選択済み打牌1件の ExpectedSelfTsumoValue
+/// [[`bot_logic::SELF_TSUMO_VALUE_SCALE`]]。
+///
+/// 打牌候補は configured horizon ([`GameContext::self_tsumo_horizon`]) の通常打牌選択で決まるが、
+/// その候補を固定 threshold と比較する scalar は horizon に依存しない尺度を保つため、
+/// [`SelfTsumoHorizon::UNTIL_RYUKYOKU`] で評価する。選択の値 (`selection_metrics`) は configured
+/// horizon の値なので、configured horizon がすでに `UNTIL_RYUKYOKU` の場合だけそのまま使い、
+/// それ以外は選んだ1候補だけを同じ前方評価基盤で評価し直す。全候補を評価し直さない。
+///
+/// 選んだ打牌が1向聴でない場合と、残り山が unknown などで値を確定できない場合は `None`。
+pub(crate) fn push_pull_iishanten_expected_self_tsumo_value(
+    context: &GameContext,
+    evaluation: &DiscardEvaluation,
+    selection_metrics: Option<ForwardMetrics>,
+) -> Option<u64> {
+    if evaluation.min_shanten_after_discard() != IISHANTEN_SHANTEN {
+        return None;
+    }
+    if context.self_tsumo_horizon() == SelfTsumoHorizon::UNTIL_RYUKYOKU
+        && let Some(metrics) = selection_metrics
+    {
+        return metrics.expected_self_tsumo_value;
+    }
+
+    let until_ryukyoku = context
+        .clone()
+        .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+    selected_iishanten_forward_metrics_from_context(&until_ryukyoku, evaluation)?
+        .expected_self_tsumo_value
 }
 
 // 最善向聴を維持する複数候補について、打牌選択用の前方集計値を求める。
@@ -6190,6 +6221,15 @@ pub(crate) mod tests {
         dora_indicator: &str,
         winds: bool,
     ) -> (GameContext, Vec<LegalAction>) {
+        value_context_with_reached(hand, dora_indicator, winds, [false; 4])
+    }
+
+    fn value_context_with_reached(
+        hand: &[&str; 14],
+        dora_indicator: &str,
+        winds: bool,
+        reached: [bool; 4],
+    ) -> (GameContext, Vec<LegalAction>) {
         let mut used: Vec<TileId> = Vec::new();
         let mut take = |mjai: &str| {
             let red = mjai.ends_with('r');
@@ -6221,7 +6261,7 @@ pub(crate) mod tests {
             Some(0),
             Some(3),
             Default::default(),
-            [false; 4],
+            reached,
         )
         // 履歴依存フリテンを既知にして、未来テンパイのロン可否まで確定できる局面にする。
         .with_history_furiten_facts(HistoryFuritenFacts {
@@ -7479,6 +7519,224 @@ pub(crate) mod tests {
                     .any(|(shorter, longer)| shorter < longer)
             );
         }
+    }
+
+    // 34567899m 5799p 34s の1向聴に下家リーチが入った局面。Push/Fold が1向聴の攻撃価値を使う。
+    fn reach_threat_iishanten_context(
+        remaining_tiles: u32,
+        horizon_turn: u32,
+    ) -> (GameContext, Vec<LegalAction>) {
+        const HAND: [&str; 14] = [
+            "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "5p", "7p", "9p", "9p", "3s", "4s",
+        ];
+        let (context, actions) =
+            value_context_with_reached(&HAND, "3m", true, [false, true, false, false]);
+        let context = context
+            .with_table_state_facts(bot_core_table_state(remaining_tiles))
+            .with_self_tsumo_horizon(SelfTsumoHorizon {
+                horizon_turn,
+                late_min_future_draws: 2,
+            });
+        (context, actions)
+    }
+
+    // 全1向聴候補を UNTIL_RYUKYOKU で評価した値。検証用の baseline で、production の Push/Fold
+    // はこの全候補評価を行わない。
+    fn until_ryukyoku_values(
+        context: &GameContext,
+        actions: &[LegalAction],
+    ) -> Vec<(TileType, Option<u64>)> {
+        let context = context
+            .clone()
+            .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+        let legal = legal_discard_evaluations(&context, actions);
+        let valuator = ProductionProspectiveValuator::new(&context);
+        let inputs = with_production_iishanten_continuation(lookahead_inputs(
+            &context,
+            &legal.tiles,
+            &valuator,
+            LookaheadDiagnosticScope::None,
+        ));
+        legal
+            .evaluations
+            .iter()
+            .filter(|evaluation| evaluation.min_shanten_after_discard() == IISHANTEN_SHANTEN)
+            .map(|evaluation| {
+                (
+                    evaluation.discard,
+                    forward_metrics_for_candidate(&inputs, evaluation).expected_self_tsumo_value,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_push_pull_expected_self_tsumo_value_does_not_follow_the_configured_horizon() {
+        let runs = [12, 14, 16, 18].map(|turn| {
+            let (context, actions) = reach_threat_iishanten_context(66, turn);
+            let (selection, offense) = selected_offense(&context, &actions);
+            (
+                selection.evaluation.expect("選択できる").discard,
+                offense.iishanten_selection_expected_self_tsumo_value(),
+                offense.iishanten_push_pull_expected_self_tsumo_value(),
+            )
+        });
+
+        // どの horizon でも同じ候補を選び、Push/Fold 用の値は UNTIL_RYUKYOKU の尺度で一定。
+        let (discard, _, push_pull) = runs[0];
+        assert_eq!(discard.to_mjai_string(), "5p");
+        assert!(push_pull.is_some());
+        for &(other, _, other_push_pull) in &runs {
+            assert_eq!(other, discard);
+            assert_eq!(other_push_pull, push_pull);
+        }
+
+        // 選択用の値は configured horizon に追従する。
+        for pair in runs.windows(2) {
+            assert!(pair[0].1 < pair[1].1, "{:?} >= {:?}", pair[0].1, pair[1].1);
+        }
+        // horizon 18 では選択用の値と Push/Fold 用の値が一致する。
+        assert_eq!(runs[3].1, push_pull);
+
+        let (context, actions) = reach_threat_iishanten_context(66, 12);
+        assert_eq!(
+            until_ryukyoku_values(&context, &actions)
+                .into_iter()
+                .find(|&(candidate, _)| candidate == discard)
+                .map(|(_, value)| value),
+            Some(push_pull)
+        );
+    }
+
+    #[test]
+    fn an_until_ryukyoku_configured_horizon_reuses_the_selection_value() {
+        let (context, actions) = reach_threat_iishanten_context(66, 18);
+        let context = context.with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+        let (selection, offense) = selected_offense(&context, &actions);
+        let evaluation = selection.evaluation.as_ref().expect("選択できる");
+
+        assert!(
+            offense
+                .iishanten_selection_expected_self_tsumo_value()
+                .is_some()
+        );
+        assert_eq!(
+            offense.iishanten_push_pull_expected_self_tsumo_value(),
+            offense.iishanten_selection_expected_self_tsumo_value()
+        );
+        // 再評価しても同じ値になる。
+        assert_eq!(
+            offense.iishanten_push_pull_expected_self_tsumo_value(),
+            push_pull_iishanten_expected_self_tsumo_value(&context, evaluation, None)
+        );
+    }
+
+    #[test]
+    fn a_changed_selection_is_evaluated_at_until_ryukyoku_for_the_push_pull() {
+        // 終盤では horizon によって選ぶ打牌が変わる。Push/Fold 用の値はそれぞれ選ばれた候補の
+        // UNTIL_RYUKYOKU 値になる。
+        let baseline = {
+            let (context, actions) = reach_threat_iishanten_context(30, 18);
+            until_ryukyoku_values(&context, &actions)
+        };
+        let value_of = |discard: TileType| {
+            baseline
+                .iter()
+                .find(|&&(candidate, _)| candidate == discard)
+                .and_then(|&(_, value)| value)
+        };
+
+        let runs = [12, 18].map(|turn| {
+            let (context, actions) = reach_threat_iishanten_context(30, turn);
+            let (selection, offense) = selected_offense(&context, &actions);
+            (
+                selection.evaluation.expect("選択できる").discard,
+                offense.iishanten_push_pull_expected_self_tsumo_value(),
+            )
+        });
+        assert_ne!(runs[0].0, runs[1].0, "{runs:?}");
+        for (discard, push_pull) in runs {
+            assert!(push_pull.is_some());
+            assert_eq!(push_pull, value_of(discard), "{}", discard.to_mjai_string());
+        }
+    }
+
+    #[test]
+    fn the_push_pull_value_reevaluates_only_the_selected_candidate() {
+        use crate::prospective_value::tenpai_value_memo_counter;
+
+        let (context, actions) = reach_threat_iishanten_context(66, 12);
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        let evaluation = selection.evaluation.as_ref().expect("選択できる");
+
+        let (value, hits, misses) = tenpai_value_memo_counter::count_during(|| {
+            push_pull_iishanten_expected_self_tsumo_value(
+                &context,
+                evaluation,
+                selection.iishanten_forward_metrics,
+            )
+        });
+        assert!(value.is_some());
+
+        // 選んだ1候補だけを UNTIL_RYUKYOKU で評価した場合と同じ仕事量で、全候補の評価より少ない。
+        let until = context
+            .clone()
+            .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+        let (single, single_hits, single_misses) = tenpai_value_memo_counter::count_during(|| {
+            selected_iishanten_forward_metrics_from_context(&until, evaluation)
+        });
+        assert_eq!(
+            single.and_then(|metrics| metrics.expected_self_tsumo_value),
+            value
+        );
+        assert_eq!((hits, misses), (single_hits, single_misses));
+
+        let (_, all_hits, all_misses) =
+            tenpai_value_memo_counter::count_during(|| until_ryukyoku_values(&context, &actions));
+        assert!(hits + misses < all_hits + all_misses);
+    }
+
+    #[test]
+    fn the_push_pull_value_is_not_evaluated_without_a_threat_or_a_known_wall() {
+        // 明確な threat が無い局面では Push/Fold がこの値を使わないので評価しない。
+        let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let (_, offense) = selected_offense(&context, &actions);
+        assert!(
+            offense
+                .iishanten_selection_expected_self_tsumo_value()
+                .is_some()
+        );
+        assert_eq!(
+            offense.iishanten_push_pull_expected_self_tsumo_value(),
+            None
+        );
+
+        // 残り山が unknown なら UNTIL_RYUKYOKU の値も確定せず、押さない。
+        const HAND: [&str; 14] = [
+            "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "5p", "7p", "9p", "9p", "3s", "4s",
+        ];
+        let (unknown_wall, actions) =
+            value_context_with_reached(&HAND, "3m", true, [false, true, false, false]);
+        let selection = select_discard_action_with_evaluation(&unknown_wall, &actions);
+        let inputs = push_pull_inputs_from_threat_facts(
+            &unknown_wall,
+            player_threat_facts_from_context(&unknown_wall),
+            selection.evaluation.as_ref(),
+            selection.iishanten_forward_metrics,
+            None,
+            None,
+            &actions,
+        );
+        let offense = inputs.offense.expect("攻撃評価がある");
+        assert_eq!(offense.min_shanten_after_discard, 1);
+        assert_eq!(
+            offense.iishanten_push_pull_expected_self_tsumo_value(),
+            None
+        );
+        assert_eq!(
+            crate::push_pull::decide_push_pull(&inputs).mode,
+            crate::push_pull::PushPullMode::Fold
+        );
     }
 
     #[test]

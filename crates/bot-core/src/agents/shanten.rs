@@ -2606,7 +2606,14 @@ mod tests {
         // 一向聴の前方集計値まで通常打牌選択が求めている。この最小局面では打点が unknown なので
         // ExpectedSelfTsumoValue 自体は確認できず、押さない既存 policy がそのまま適用される。
         assert!(offense.iishanten_forward_metrics.is_some());
-        assert_eq!(offense.iishanten_expected_self_tsumo_value(), None);
+        assert_eq!(
+            offense.iishanten_selection_expected_self_tsumo_value(),
+            None
+        );
+        assert_eq!(
+            offense.iishanten_push_pull_expected_self_tsumo_value(),
+            None
+        );
     }
 
     #[test]

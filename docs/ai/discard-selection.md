@@ -195,6 +195,8 @@ effective_future_draws =
 
 raw 値から effective 値への変換は `bot-logic` の pure helper (`soft_horizon_future_draws` / `SelfTsumoHorizon`) で、`bot-core` は self-tsumo facts を作る唯一の入口 (lookahead 入力の構築) でこれを適用します。したがって通常打牌の1向聴・2向聴・3向聴 continuation、現在聴牌の self-tsumo 値と継続比較、Call / Pass 比較 (1向聴 / 2向聴) はすべて同じ horizon を使い、1向聴だけ別 semantics になることはありません。Pass 側は reaction 元から求めた raw 値へ同じ変換を適用します。鳴きの打点要件 (speed required han) など self-tsumo facts 以外で使う残り自摸機会は raw 値のままです。
 
+1向聴 Push/Fold の固定 threshold (1,000 / 1,500 / 750 点) は流局までの尺度のままです。選ぶ打牌はこの configured horizon で決まりますが、その選択候補を threshold と比較する scalar は `SelfTsumoHorizon::UNTIL_RYUKYOKU` で選択候補1件だけ評価し直します ([一向聴の攻撃価値](push-pull.md#一向聴の攻撃価値))。
+
 horizon は live bot の設定としては公開していません。検証用には bot-scenario の [`--self-tsumo-horizon-turn` / `--self-tsumo-late-min-future-draws`](../bot-scenario.md#self-tsumo-soft-horizon-の上書き) で上書きできます。
 
 ### 深い候補評価の並列化

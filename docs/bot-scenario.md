@@ -147,7 +147,7 @@ self-tsumo continuation が見る将来の自摸機会は、`floor(remaining_til
 | `--self-tsumo-horizon-turn <TURN>` | 18巡相当の流局 horizon から `18 - TURN` だけ raw を短くする | 12 |
 | `--self-tsumo-late-min-future-draws <COUNT>` | horizon を過ぎた終盤にも残す最低自摸機会 (raw は超えない) | 2 |
 
-`--self-tsumo-horizon-turn 18` は従来の流局までの評価と同じ semantics です。上書きは scenario の context へ載るので、通常打牌・現在聴牌・Call / Pass のどの self-tsumo continuation にも同じ値が効きます。inline `--hand`、JSON scenario、`--riichilab-capture` の単一 request で使え、capture 一括の option (`--benchmark-riichilab-capture` / `--compare-*`) とは併用できません。
+`--self-tsumo-horizon-turn 18` は従来の流局までの評価と同じ semantics です。上書きは scenario の context へ載るので、通常打牌・現在聴牌・Call / Pass のどの self-tsumo continuation にも同じ値が効きます。1向聴 Push/Fold の threshold と比較する値は上書きに追従せず、選ばれた候補を常に `UNTIL_RYUKYOKU` で評価します。`Push/Pull` の節の `push/pull expected self-tsumo value (until ryukyoku)` がその値で、`iishanten forward metrics` の `expected self-tsumo value` は configured horizon の選択値です。inline `--hand`、JSON scenario、`--riichilab-capture` の単一 request で使え、capture 一括の option (`--benchmark-riichilab-capture` / `--compare-*`) とは併用できません。
 
 通常の診断出力には `Self-tsumo horizon` section が入り、horizon turn・late minimum future draws・raw / effective future own draws を表示します。`remaining_tiles` が unknown なら raw / effective とも `unknown` です。
 

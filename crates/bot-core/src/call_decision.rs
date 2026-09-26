@@ -6533,78 +6533,95 @@ mod tests {
 
     #[test]
     fn the_post_call_push_pull_gate_reuses_the_selected_iishanten_forward_metrics() {
-        // gate は鳴き後の打牌選択が求めた前方集計値を転記するだけで、1向聴の前方評価も
-        // terminal scoring もやり直さない。
+        // gate は鳴き後の打牌選択が求めた前方集計値を転記する。Push/Fold 用の値は configured
+        // horizon が UNTIL_RYUKYOKU なら選択の値をそのまま使い、1向聴の前方評価も terminal
+        // scoring もやり直さない。それ以外の horizon では選んだ1打牌だけを UNTIL_RYUKYOKU で
+        // 評価し直す。
+        for horizon in [
+            SelfTsumoHorizon::UNTIL_RYUKYOKU,
+            SelfTsumoHorizon::PRODUCTION,
+        ] {
+            let iishanten =
+                threatened_reaction_context(&IISHANTEN_PON_HAND, vec![], IISHANTEN_PON_TARGET, 12)
+                    .with_self_tsumo_horizon(horizon);
+            let iishanten_action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+            let two_shanten = threatened_low_value_two_shanten_reaction_context(
+                &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
+                TWO_SHANTEN_CALL_PON_TARGET,
+                32,
+            )
+            .with_self_tsumo_horizon(horizon);
+            let two_shanten_action =
+                pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+
+            for (ctx, action, kind) in [
+                (
+                    &iishanten,
+                    &iishanten_action,
+                    PassSelfTsumoContinuationKind::Iishanten,
+                ),
+                (
+                    &two_shanten,
+                    &two_shanten_action,
+                    PassSelfTsumoContinuationKind::TwoShanten,
+                ),
+            ] {
+                let (mut candidates, post_call_states) = evaluated_candidates(ctx, action);
+                let mut timing = CallDecisionTimer::disabled();
+                apply_iishanten_self_tsumo_policy(
+                    ctx,
+                    &mut candidates,
+                    (kind == PassSelfTsumoContinuationKind::Iishanten).then(|| pass(kind, Some(0))),
+                    &mut timing,
+                );
+                apply_two_shanten_self_tsumo_policy(
+                    ctx,
+                    &mut candidates,
+                    (kind == PassSelfTsumoContinuationKind::TwoShanten)
+                        .then(|| pass(kind, Some(0))),
+                    &mut timing,
+                );
+                assert!(candidates[0].eligible, "{:?}", candidates[0].reason);
+
+                let PostCallState::Evaluated {
+                    iishanten_forward_metrics,
+                    ..
+                } = &post_call_states[0]
+                else {
+                    panic!("高コストな評価を行った候補");
+                };
+                let selected_metrics = iishanten_forward_metrics.expect("選択が求めた前方集計値");
+                assert_eq!(
+                    selected_metrics.expected_self_tsumo_value,
+                    candidates[0]
+                        .iishanten_self_tsumo
+                        .map(|diagnostic| diagnostic.call_expected_self_tsumo_value)
+                        .or(candidates[0]
+                            .two_shanten_self_tsumo
+                            .map(|diagnostic| diagnostic.call_expected_self_tsumo_value))
+                        .expect("Call / Pass 比較対象")
+                );
+
+                let ((), hits, misses) = tenpai_value_memo_counter::count_during(|| {
+                    apply_post_call_push_pull_gate(ctx, &mut candidates, &post_call_states)
+                });
+                if horizon == SelfTsumoHorizon::UNTIL_RYUKYOKU {
+                    assert_eq!((hits, misses), (0, 0));
+                } else {
+                    assert!(misses > 0);
+                }
+                assert_eq!(
+                    candidates[0].post_call_push_pull,
+                    Some(PushPullDecision {
+                        mode: PushPullMode::Fold,
+                        reason: PushPullReason::IishantenAgainstHighOpenHand,
+                    })
+                );
+            }
+        }
         let iishanten =
             threatened_reaction_context(&IISHANTEN_PON_HAND, vec![], IISHANTEN_PON_TARGET, 12);
         let iishanten_action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let two_shanten = threatened_low_value_two_shanten_reaction_context(
-            &LOW_VALUE_TWO_SHANTEN_CALL_PON_HAND,
-            TWO_SHANTEN_CALL_PON_TARGET,
-            32,
-        );
-        let two_shanten_action =
-            pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
-
-        for (ctx, action, kind) in [
-            (
-                &iishanten,
-                &iishanten_action,
-                PassSelfTsumoContinuationKind::Iishanten,
-            ),
-            (
-                &two_shanten,
-                &two_shanten_action,
-                PassSelfTsumoContinuationKind::TwoShanten,
-            ),
-        ] {
-            let (mut candidates, post_call_states) = evaluated_candidates(ctx, action);
-            let mut timing = CallDecisionTimer::disabled();
-            apply_iishanten_self_tsumo_policy(
-                ctx,
-                &mut candidates,
-                (kind == PassSelfTsumoContinuationKind::Iishanten).then(|| pass(kind, Some(0))),
-                &mut timing,
-            );
-            apply_two_shanten_self_tsumo_policy(
-                ctx,
-                &mut candidates,
-                (kind == PassSelfTsumoContinuationKind::TwoShanten).then(|| pass(kind, Some(0))),
-                &mut timing,
-            );
-            assert!(candidates[0].eligible, "{:?}", candidates[0].reason);
-
-            let PostCallState::Evaluated {
-                iishanten_forward_metrics,
-                ..
-            } = &post_call_states[0]
-            else {
-                panic!("高コストな評価を行った候補");
-            };
-            let selected_metrics = iishanten_forward_metrics.expect("選択が求めた前方集計値");
-            assert_eq!(
-                selected_metrics.expected_self_tsumo_value,
-                candidates[0]
-                    .iishanten_self_tsumo
-                    .map(|diagnostic| diagnostic.call_expected_self_tsumo_value)
-                    .or(candidates[0]
-                        .two_shanten_self_tsumo
-                        .map(|diagnostic| diagnostic.call_expected_self_tsumo_value))
-                    .expect("Call / Pass 比較対象")
-            );
-
-            let ((), hits, misses) = tenpai_value_memo_counter::count_during(|| {
-                apply_post_call_push_pull_gate(ctx, &mut candidates, &post_call_states)
-            });
-            assert_eq!((hits, misses), (0, 0));
-            assert_eq!(
-                candidates[0].post_call_push_pull,
-                Some(PushPullDecision {
-                    mode: PushPullMode::Fold,
-                    reason: PushPullReason::IishantenAgainstHighOpenHand,
-                })
-            );
-        }
 
         // 選択の計算済み値を持たない入口は、同じ鳴き後 state の前方評価をやり直す。gate が
         // この入口を通らないことの対照。

@@ -159,13 +159,13 @@ fn the_post_call_push_pull_before_the_call_matches_the_decision_after_the_pon() 
             .as_ref()
             .and_then(dahai_type)
     );
-    // 鳴き後 Push/Pull が読んだ1向聴の ExpectedSelfTsumoValue も、Pon 後の通常打牌選択と同じ。
+    // Call 側の1向聴 ExpectedSelfTsumoValue は、Pon 後の通常打牌選択の値 (configured horizon) と同じ。
     assert_eq!(
         pon.two_shanten_self_tsumo
             .and_then(|comparison| comparison.call_expected_self_tsumo_value),
         diagnostic
             .push_pull_inputs
             .and_then(|inputs| inputs.offense)
-            .and_then(|offense| offense.iishanten_expected_self_tsumo_value())
+            .and_then(|offense| offense.iishanten_selection_expected_self_tsumo_value())
     );
 }

@@ -159,7 +159,14 @@ reason は threat の種類ごとに分かれるので、diagnostics からど�
 
 ## 一向聴の攻撃価値
 
-明確な threat がある一向聴では、[打牌選択](discard-selection.md)が既に求めている `expected self-tsumo value` だけを見ます。押し引き側で前方探索も打点集計も受け入れ集計も行わず、選んだ打牌の集計値をそのまま比較します。
+明確な threat がある一向聴では、通常打牌選択が選んだ打牌の ExpectedSelfTsumoValue だけを見ます。押し引き側で前方探索も打点集計も受け入れ集計も持たず、[打牌選択](discard-selection.md) の既存前方評価基盤で求めた値を比較します。
+
+選ぶ打牌そのものは、通常どおり configured soft horizon ([将来自摸機会の soft horizon](discard-selection.md#将来自摸機会の-soft-horizon)) の self-tsumo continuation で決まります。一方、下の固定 threshold は流局までの自摸機会を前提にした尺度なので、選ばれたその1候補を threshold と比較する scalar は `SelfTsumoHorizon::UNTIL_RYUKYOKU` で評価し直した値です。horizon ごとの threshold は持ちません。
+
+- 同じ候補なら configured horizon が 12 / 14 / 16 / 18 のどれでも、threshold と比較する値は同じです。
+- configured horizon を変えて選ぶ打牌が変わった場合は、新しく選ばれた候補を `UNTIL_RYUKYOKU` で評価するので、Push/Fold の結論が変わることはあります。
+- 評価し直すのは選択済みの1候補だけで、全合法打牌を再探索しません。configured horizon が `UNTIL_RYUKYOKU` なら選択の値をそのまま使います。
+- 評価するのは打牌後が一向聴で明確な threat がある場合だけです。残り山が unknown などで値を確定できなければ `None` で、推測せず下の保守的な `Fold` になります。
 
 | threat | 押すために要求する ExpectedSelfTsumoValue |
 | --- | --- |
@@ -172,7 +179,7 @@ threshold は inclusive です。親リーチのときだけ、テンパイと�
 
 他家リーチがなく actionable target がすべて `Caution` の局面 ([Caution-only](#caution-only-のテンパイ)) だけ、`Danger` より危険度が低いので 750 点に緩めます。Caution-only の判定は `has_only_caution_open_hand_threats()` を使い、面子数・河枚数・reason から組み立て直しません。`Reach + Caution` は Combined threat なので 750 点を使いません。reason は threshold に関係なく `ValuableIishantenAgainstHighOpenHand` で、threshold 未満のときの [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外) の優先順位も変わりません。
 
-threshold の選択は `iishanten_push_expected_self_tsumo_min()` の1か所にまとめ、押し引き判定と debug log の `offense_iishanten_push_expected_self_tsumo_min` は同じ値を使います。
+threshold の選択は `iishanten_push_expected_self_tsumo_min()` の1か所にまとめ、押し引き判定と debug log の `offense_iishanten_push_expected_self_tsumo_min` は同じ値を使います。debug log では threshold と比較した値を `offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku`、configured horizon の選択値を `offense_iishanten_selection_expected_self_tsumo_value` として分けて出します。
 
 ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値系なので、同じ threshold で比較しません。
 
