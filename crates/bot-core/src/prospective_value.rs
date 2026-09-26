@@ -1502,7 +1502,7 @@ fn wait_values(profile: &TenpaiHandValueProfile<'_>) -> Vec<ProspectiveWaitValue
 /// 未来テンパイの値 memo の利用数。同じ未来テンパイを2回評価しないことを test から観測する
 /// ためだけの counter で、production build には残らない。
 #[cfg(test)]
-mod tenpai_value_memo_counter {
+pub(crate) mod tenpai_value_memo_counter {
     use std::cell::Cell;
 
     thread_local! {
@@ -1519,7 +1519,7 @@ mod tenpai_value_memo_counter {
     }
 
     /// `body` の実行と、その間の memo hit / miss。
-    pub(super) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64, u64) {
+    pub(crate) fn count_during<T>(body: impl FnOnce() -> T) -> (T, u64, u64) {
         let hits = HITS.with(Cell::get);
         let misses = MISSES.with(Cell::get);
         let value = body();

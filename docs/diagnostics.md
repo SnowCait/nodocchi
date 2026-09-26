@@ -91,11 +91,32 @@ scoring からそのまま回収するので、判定のための追加探索も
 SameShanten の枝を追加探索することもありません)。`overrides pass` が立った候補の `call reason` は
 `EligibleThreeShantenSpeed` になります。他家リーチ時の鳴きはこの policy でも上書きしません。
 
+鳴き後の押し引きを評価した候補には `post-call push/pull: <mode> (<reason>)` を表示します。即テンパイ
+Call では成立条件を満たした候補、非テンパイ Call では Call / Pass 比較 (速度優先 policy を含む) で
+成立した候補だけが持ちます。非テンパイ Call では、比較段階で成立した理由を
+`call / pass eligible reason: <reason>` として並べます。候補の `reason` が `PostCallNotPush` で
+これらの行がある場合は、「Call / Pass 比較では成立した → 鳴き後の既存 Push/Pull は `Push` ではない
+→ 鳴かない」と読みます。比較で落ちた候補にはどちらの行も出ず、`reason` は比較で落ちた理由の
+ままです。
+
+```text
+  Pon 5s <- 5s 5s
+    selected: no
+    eligible: no
+    reason: PostCallNotPush
+    ...
+    two-shanten comparison: call higher
+    ...
+    call / pass eligible reason: EligibleTwoShantenSelfTsumo
+    post-call push/pull: Fold (IishantenAgainstHighOpenHand)
+```
+
 `Summary` の鳴き行は、候補固有の値を必ず同じ候補から取ります。Call を採用しなかった場合の
 `call reason` は最初の候補が落ちた理由なので `(first candidate)` を添え、self-tsumo 比較を表示する
 候補がその候補と異なる場合は
 `call compared candidate: <候補> (<その候補の reason>)` を先に出します。続く
-`call ... self-tsumo` と `call post-call discard` はどちらもこの候補の値です。
+`call ... self-tsumo` と `call post-call discard` はどちらもこの候補の値です。この候補が鳴き後の
+押し引きを評価していれば、続けて `call post-call push/pull: <mode> (<reason>)` も出します。
 
 ```text
 Final decision

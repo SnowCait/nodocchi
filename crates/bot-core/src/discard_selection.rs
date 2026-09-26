@@ -2654,10 +2654,11 @@ pub(crate) fn post_call_discard_evaluations(
 
 /// 鳴き後も1向聴の打牌候補の選択結果。
 ///
-/// `expected_self_tsumo_value` は選択に使った metric そのもので、診断表示のために探索し直さない。
+/// `forward_metrics` は選んだ打牌について選択に使った前方集計値そのもので、Call / Pass 比較・
+/// 鳴き後の押し引き・診断表示のために探索し直さない。
 pub(crate) struct PostCallIishantenSelection {
     pub evaluation: DiscardEvaluation,
-    pub expected_self_tsumo_value: Option<u64>,
+    pub forward_metrics: ForwardMetrics,
     /// 要求翻数を渡した場合だけ求める、選んだ打牌の continuation が評価したテンパイの確定打点の
     /// 判定。
     ///
@@ -2711,7 +2712,7 @@ pub(crate) fn select_best_iishanten_post_call_discard(
     let index = best_discard_selection_index_with_forward_metrics(evaluations, &metrics)?;
     Some(PostCallIishantenSelection {
         evaluation: evaluations[index].clone(),
-        expected_self_tsumo_value: metrics[index].expected_self_tsumo_value,
+        forward_metrics: metrics[index],
         continuation_han: verdicts[index],
     })
 }
