@@ -56,6 +56,7 @@ pub const USAGE: &str = "usage:
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
                --two-shanten-stay-call-comparison
   bot-scenario --compare-two-shanten-stay-call <CAPTURE_JSONL>...
+  bot-scenario --compare-self-tsumo-horizon <CAPTURE_JSONL>...
 
   --dora is a backward-compatible alias of --dora-indicator
   --discards-shimocha, --discards-toimen and --discards-kamicha set the whole river of that
@@ -174,7 +175,15 @@ pub const USAGE: &str = "usage:
   observation on the requests with such a candidate, and reports the request and candidate
   counts, the call / pass conclusions of both scopes, their agreement, the selected post-call
   discard agreement, the latency and the slowest and flipped cases; it takes all following
-  capture paths and cannot be combined with the other scenario or diagnostic options";
+  capture paths and cannot be combined with the other scenario or diagnostic options
+  --compare-self-tsumo-horizon replays every captured request_action through the production
+  decision path once per self-tsumo soft horizon 12 / 14 / 16 / 18 with the production late
+  minimum of 2 future draws, each on its own fresh thread with cold memos, and reports the
+  final action agreement of every horizon pair, the all-four agreement and its patterns, the
+  normal discard selection agreement, the counts by raw future own draws and the requests
+  whose decision differs; it observes how the production decision changes with the horizon
+  rather than choosing a correct one, takes all following capture paths and cannot be
+  combined with the other scenario or diagnostic options";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CliError {
@@ -247,6 +256,9 @@ pub enum CliError {
     #[error("--compare-two-shanten-stay-call cannot be combined with {0}")]
     ConflictingTwoShantenStayCallCaptureComparison(String),
 
+    #[error("--compare-self-tsumo-horizon cannot be combined with {0}")]
+    ConflictingSelfTsumoHorizonCaptureComparison(String),
+
     #[error("--two-shanten-self-tsumo-cost must be all or forward-targets, but is {0:?}")]
     InvalidTwoShantenSelfTsumoCostScope(String),
 
@@ -283,6 +295,8 @@ pub enum ScenarioSource {
     RiichilabCaptureComparison(CaptureComparisonSpec),
     /// `現在2向聴 → Call → 2向聴のまま` の observation を capture 全体で集計する。
     RiichilabCaptureTwoShantenStayCallComparison(CaptureComparisonSpec),
+    /// self-tsumo soft horizon 12 / 14 / 16 / 18 の production 判断を capture 全体で比較する。
+    RiichilabCaptureSelfTsumoHorizonComparison(CaptureComparisonSpec),
 }
 
 /// A/B 比較を行う capture の指定。
@@ -357,6 +371,7 @@ impl CliArgs {
         let mut two_shanten_stay_call_comparison = false;
         let mut comparison_captures: Vec<String> = Vec::new();
         let mut stay_call_captures: Vec<String> = Vec::new();
+        let mut horizon_captures: Vec<String> = Vec::new();
         let mut path: Option<String> = None;
         let mut spec = ScenarioSpec::default();
         let mut hand: Option<String> = None;
@@ -516,6 +531,9 @@ impl CliArgs {
                     comparison_captures
                         .push(value_of(&mut args, "--compare-three-shanten-continuation")?);
                 }
+                "--compare-self-tsumo-horizon" => {
+                    horizon_captures.push(value_of(&mut args, "--compare-self-tsumo-horizon")?);
+                }
                 "--two-shanten-self-tsumo" => two_shanten_self_tsumo = true,
                 "--two-shanten-self-tsumo-cost" => {
                     let value = value_of(&mut args, "--two-shanten-self-tsumo-cost")?;
@@ -559,6 +577,9 @@ impl CliArgs {
                 other if !stay_call_captures.is_empty() => {
                     stay_call_captures.push(other.to_string());
                 }
+                other if !horizon_captures.is_empty() => {
+                    horizon_captures.push(other.to_string());
+                }
                 other => match path {
                     Some(_) => return Err(CliError::MultipleScenarioFiles(other.to_string())),
                     None => path = Some(other.to_string()),
@@ -582,6 +603,7 @@ impl CliArgs {
                     !stay_call_captures.is_empty(),
                     "--compare-two-shanten-stay-call",
                 ),
+                (!horizon_captures.is_empty(), "--compare-self-tsumo-horizon"),
             ])
         {
             return Err(CliError::ConflictingSelfTsumoHorizon {
@@ -627,6 +649,8 @@ impl CliArgs {
                 Some("--compare-three-shanten-continuation".to_string())
             } else if !stay_call_captures.is_empty() {
                 Some("--compare-two-shanten-stay-call".to_string())
+            } else if !horizon_captures.is_empty() {
+                Some("--compare-self-tsumo-horizon".to_string())
             } else if force_fold {
                 Some("--force-fold".to_string())
             } else if verbose {
@@ -699,6 +723,8 @@ impl CliArgs {
                 Some("--two-shanten-stay-call-comparison".to_string())
             } else if !stay_call_captures.is_empty() {
                 Some("--compare-two-shanten-stay-call".to_string())
+            } else if !horizon_captures.is_empty() {
+                Some("--compare-self-tsumo-horizon".to_string())
             } else if benchmark_json.is_some() {
                 Some("--benchmark-json".to_string())
             } else if force_fold {
@@ -797,6 +823,7 @@ impl CliArgs {
                         two_shanten_stay_call_comparison,
                         "--two-shanten-stay-call-comparison",
                     ),
+                    (!horizon_captures.is_empty(), "--compare-self-tsumo-horizon"),
                 ])
             };
             if let Some(conflict) = conflict {
@@ -809,6 +836,101 @@ impl CliArgs {
                 source: ScenarioSource::RiichilabCaptureTwoShantenStayCallComparison(
                     CaptureComparisonSpec {
                         paths: stay_call_captures,
+                    },
+                ),
+                verbose: false,
+                three_shanten_progress_self_tsumo: false,
+                three_shanten_continuation_comparison: false,
+                iishanten_continuation_depth_comparison: false,
+                iishanten_selection_depth_comparison: false,
+                iishanten_selection_parallel_comparison: false,
+                two_shanten_full_parallel_comparison: false,
+                two_shanten_stay_call_comparison: false,
+                lookahead: false,
+                two_shanten_self_tsumo: false,
+                two_shanten_self_tsumo_cost: None,
+                two_shanten_progress_self_tsumo_cost: None,
+                summary_only: false,
+                force_fold: false,
+                structural_expected_deal_in_loss: false,
+                self_tsumo_horizon: SelfTsumoHorizon::PRODUCTION,
+            });
+        }
+
+        // horizon 比較は4つの horizon を同じ cold memo 条件で比べるので、他の診断を走らせない。
+        // horizon の上書き option は上で拒否済み。
+        if !horizon_captures.is_empty() {
+            let conflict = if capture.is_some() {
+                Some("--riichilab-capture".to_string())
+            } else if let Some(path) = path.as_deref() {
+                Some(format!("{path:?}"))
+            } else if hand.is_some() {
+                Some("--hand".to_string())
+            } else if inline_options {
+                Some("scenario options".to_string())
+            } else if request_id.is_some() {
+                Some("--request-id".to_string())
+            } else if benchmark_json.is_some() {
+                Some("--benchmark-json".to_string())
+            } else {
+                first_enabled_diagnostic_option(&[
+                    (lookahead, "--lookahead"),
+                    (verbose, "--verbose"),
+                    (summary_only, "--summary-only"),
+                    (force_fold, "--force-fold"),
+                    (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                    (
+                        two_shanten_self_tsumo_cost.is_some(),
+                        "--two-shanten-self-tsumo-cost",
+                    ),
+                    (
+                        two_shanten_progress_self_tsumo_cost.is_some(),
+                        "--two-shanten-progress-self-tsumo-cost",
+                    ),
+                    (
+                        three_shanten_progress_self_tsumo,
+                        "--three-shanten-progress-self-tsumo",
+                    ),
+                    (
+                        structural_expected_deal_in_loss,
+                        "--structural-expected-deal-in-loss",
+                    ),
+                    (
+                        three_shanten_continuation_comparison,
+                        "--three-shanten-continuation-comparison",
+                    ),
+                    (
+                        iishanten_continuation_depth_comparison,
+                        "--iishanten-continuation-depth-comparison",
+                    ),
+                    (
+                        iishanten_selection_depth_comparison,
+                        "--iishanten-selection-depth-comparison",
+                    ),
+                    (
+                        iishanten_selection_parallel_comparison,
+                        "--iishanten-selection-parallel-comparison",
+                    ),
+                    (
+                        two_shanten_full_parallel_comparison,
+                        "--two-shanten-full-parallel-comparison",
+                    ),
+                    (
+                        two_shanten_stay_call_comparison,
+                        "--two-shanten-stay-call-comparison",
+                    ),
+                ])
+            };
+            if let Some(conflict) = conflict {
+                return Err(CliError::ConflictingSelfTsumoHorizonCaptureComparison(
+                    conflict,
+                ));
+            }
+
+            return Ok(Self {
+                source: ScenarioSource::RiichilabCaptureSelfTsumoHorizonComparison(
+                    CaptureComparisonSpec {
+                        paths: horizon_captures,
                     },
                 ),
                 verbose: false,
@@ -3375,6 +3497,7 @@ mod tests {
             "--benchmark-riichilab-capture",
             "--compare-three-shanten-continuation",
             "--compare-two-shanten-stay-call",
+            "--compare-self-tsumo-horizon",
         ] {
             assert_eq!(
                 parse(&[batch, "capture.jsonl", "--self-tsumo-horizon-turn", "14"]),
@@ -3383,6 +3506,79 @@ mod tests {
                     conflict: batch.to_string(),
                 }),
                 "{batch}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_the_self_tsumo_horizon_capture_comparison_paths() {
+        let args = parse(&[
+            "--compare-self-tsumo-horizon",
+            "first.jsonl",
+            "second.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::RiichilabCaptureSelfTsumoHorizonComparison(CaptureComparisonSpec {
+                paths: vec!["first.jsonl".to_string(), "second.jsonl".to_string()],
+            })
+        );
+        assert_eq!(args.self_tsumo_horizon, SelfTsumoHorizon::PRODUCTION);
+    }
+
+    #[test]
+    fn the_self_tsumo_horizon_capture_comparison_stays_alone() {
+        for (extra, conflict) in [
+            (vec!["--hand", "234m455p789s1123z"], "--hand"),
+            (vec!["--request-id", "1"], "--request-id"),
+            (vec!["--verbose"], "--verbose"),
+            (vec!["--lookahead"], "--lookahead"),
+            (vec!["--summary-only"], "--summary-only"),
+            (vec!["--force-fold"], "--force-fold"),
+            (vec!["--benchmark-json", "out.json"], "--benchmark-json"),
+            (
+                vec!["--two-shanten-stay-call-comparison"],
+                "--two-shanten-stay-call-comparison",
+            ),
+        ] {
+            let mut args = vec!["--compare-self-tsumo-horizon", "capture.jsonl"];
+            args.extend(extra);
+            assert_eq!(
+                parse(&args),
+                Err(CliError::ConflictingSelfTsumoHorizonCaptureComparison(
+                    conflict.to_string()
+                )),
+                "{conflict}"
+            );
+        }
+        for (other, error) in [
+            (
+                "--compare-three-shanten-continuation",
+                CliError::ConflictingCaptureComparisonInput(
+                    "--compare-self-tsumo-horizon".to_string(),
+                ),
+            ),
+            (
+                "--compare-two-shanten-stay-call",
+                CliError::ConflictingTwoShantenStayCallCaptureComparison(
+                    "--compare-self-tsumo-horizon".to_string(),
+                ),
+            ),
+            (
+                "--benchmark-riichilab-capture",
+                CliError::ConflictingBenchmarkInput("--compare-self-tsumo-horizon".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                parse(&[
+                    other,
+                    "first.jsonl",
+                    "--compare-self-tsumo-horizon",
+                    "second.jsonl",
+                ]),
+                Err(error),
+                "{other}"
             );
         }
     }

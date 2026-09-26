@@ -27,6 +27,7 @@ pub mod reach_decision;
 pub mod reach_policy;
 pub mod ron_opportunity;
 pub mod ryukyoku_decision;
+pub mod self_tsumo_horizon_comparison;
 pub mod shanten_diagnostic;
 #[cfg(test)]
 pub(crate) mod shanten_test_support;
@@ -200,6 +201,10 @@ pub use ryukyoku_decision::{
     RYUKYOKU_CONTINUE_CHIITOITSU_SHANTEN, RYUKYOKU_CONTINUE_KOKUSHI_SHANTEN,
     RYUKYOKU_CONTINUE_STANDARD_SHANTEN, RyukyokuDecisionDiagnostic, RyukyokuVerdict,
     continues_with_shanten, evaluate_ryukyoku_decision,
+};
+pub use self_tsumo_horizon_comparison::{
+    COMPARED_SELF_TSUMO_HORIZON_TURNS, COMPARED_SELF_TSUMO_HORIZONS, SelfTsumoHorizonComparison,
+    SelfTsumoHorizonDecision, compare_self_tsumo_horizons, decide_with_self_tsumo_horizon,
 };
 pub use shanten_diagnostic::{
     DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,

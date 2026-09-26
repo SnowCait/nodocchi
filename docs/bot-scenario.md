@@ -164,6 +164,27 @@ done
 
 この局面 (raw 7) では effective future own draws が 2 / 3 / 5 / 7 と変わり、各1向聴候補の `expected self-tsumo value` は horizon が長いほど単調に増えます。horizon 12 / 14 では 9p、16 / 18 では 5p が選ばれます。`--remaining-tiles 66` (raw 16 → effective 10 / 12 / 14 / 16) ではどの horizon でも 5p です。
 
+#### capture 全体の horizon 比較
+
+`--compare-self-tsumo-horizon <CAPTURE_JSONL>...` は capture の全 `request_action` を再生し、各 request を soft horizon 12 / 14 / 16 / 18 (`late_min_future_draws` は production と同じ 2 で固定) の4通りで判断して集計します。scenario・context・legal actions はそのままで horizon だけを差し替え、`ShantenAgent::act()` と同じ production の判断経路を horizon ごとに1回通します。比較専用の打牌選択・Call 判断は持たず、構造化診断も構築しません。各 horizon は新しい thread の cold な memo から始まり、horizon 間で memo を共有しません。1向聴 Push/Fold の固定 threshold と比較する値は horizon によらず `UNTIL_RYUKYOKU` のままです。
+
+この比較は **どの horizon が正しいかを自動判定するものではなく**、horizon を変えた場合に production 判断がどの程度・どの局面で変わるかを観測する診断です。
+
+```sh
+cargo run --release -p bot-scenario -- \
+  --compare-self-tsumo-horizon logs/first.jsonl logs/second.jsonl
+```
+
+出力は次のとおりです。
+
+- 全体: captures、requests evaluated、raw future draws が known / unknown の request 数
+- `Final action agreement (primary)`: 12 vs 14 / 12 vs 16 / 12 vs 18 / 14 vs 16 / 14 vs 18 / 16 vs 18 の最終 action の same / different / agreement %、4つとも一致した件数 (`all four same`) と `not all same`、分かれ方の pattern (`12 / 14=16=18` は 12 だけが違う、`12=14 / 16=18` は 12・14 と 16・18 で分かれた)
+- `Normal discard selection agreement (secondary)`: 通常打牌選択の同じ集計。pair はその2つの horizon がどちらも通常打牌選択を通った request だけを数え、Call・確定 Fold の早期決着などで通らなかった horizon がある request は `not evaluated at some horizon` に数えます。最終 action は一致したが通常打牌選択が分かれた request (Fold で同じ防御牌を選んだ場合など) は `final action all same but normal discard different` です
+- `By raw future own draws`: raw future own draws の bucket (0-2 / 3-4 / 5-6 / 7-8 / 9-10 / 11+ / unknown) ごとの requests・all four same・not all same・normal discard not all same。残り山が unknown の request は推測せず unknown に入れます
+- `Differing requests`: 最終 action か通常打牌選択が horizon で分かれた request だけ。capture path・request_id・raw / effective future own draws・最終 action と通常打牌選択それぞれの分かれ方と、horizon ごとの final action・final action source (`NormalDiscard` / `Call` / `Reach` / `DefenseFallback(...)` など production の source そのもの)・push/pull・normal discard selection を出します。通常打牌選択を通った horizon は、production が押し引き入力へ渡した選択打牌の shanten after discard・acceptance remaining / types・ExpectedSelfTsumoValue (その horizon の選択値)・weighted tenpai wait・Push/Fold 用の `UNTIL_RYUKYOKU` 値も出します。どれも表示のために評価し直さず、production が持っていない値は `not evaluated` / `unknown` です
+
+request ごとに production の判断を4回行うので、実行時間は `--benchmark-riichilab-capture` の約4倍です。後続の path をすべて capture として受け取り、他の scenario / 診断 option や horizon の上書き option とは併用できません。
+
 ### 3向聴 Progress-only 診断
 
 `--three-shanten-progress-self-tsumo` は、production の3向聴打牌比較が使う値をそのまま全候補分表示する診断 option です。値の evaluator は production と共通で、診断専用の実装は持ちません。3→2、2→1、1→0 のいずれも Progress のみを追います。1向聴を直接評価する通常の ExpectedSelfTsumoValue は変わらず SameShanten も追いますが、3向聴起点の continuation では追いません。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。
