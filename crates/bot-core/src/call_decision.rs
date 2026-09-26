@@ -2351,7 +2351,10 @@ pub(crate) fn reaction_draw_distance(ctx: &GameContext) -> Option<u32> {
 
 // Pass 後から流局までの自分の自摸回数。source の次席から順に残り山を配るため、通常打牌後や
 // Call 後の floor(remaining / 4) とは最初の自摸位置だけが異なる。
-fn pass_own_future_draws(ctx: &GameContext) -> Option<u32> {
+//
+// 流局までの raw な値で、soft horizon は Pass continuation の lookahead 入力を作る入口で適用する。
+// 診断も Pass 側の自摸回数はこの helper から読み、式を複製しない。
+pub(crate) fn pass_own_future_draws(ctx: &GameContext) -> Option<u32> {
     let remaining = ctx.remaining_tiles()?;
     let distance = reaction_draw_distance(ctx)?;
     if remaining < distance {

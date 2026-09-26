@@ -17,6 +17,7 @@ mod open_hand_threat;
 mod replay;
 #[cfg(test)]
 mod scenario_regression;
+mod self_tsumo_horizon;
 mod three_shanten_continuation;
 #[cfg(test)]
 mod two_shanten_early_fold;
@@ -77,6 +78,9 @@ where
         }
         ScenarioSource::RiichilabCaptureTwoShantenStayCallComparison(spec) => {
             return two_shanten_stay_call::run_capture_comparison(spec);
+        }
+        ScenarioSource::RiichilabCaptureSelfTsumoHorizonComparison(spec) => {
+            return self_tsumo_horizon::run_capture_comparison(spec);
         }
     };
 

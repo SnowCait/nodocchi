@@ -424,6 +424,48 @@ pub fn fixture_base64_with_discards(
     observation.serialize_to_base64().unwrap()
 }
 
+/// 場風・親・河・リーチ宣言を指定できる `Observation` fixture。
+///
+/// 山の残り枚数は河の枚数から復元されるので、河で残り山を調整できる。
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+pub fn fixture_base64_with_winds_and_discards(
+    player_id: u8,
+    drawn_tile: Option<u8>,
+    hand: Vec<u8>,
+    dora_indicators: Vec<u8>,
+    discards: [Vec<u8>; 4],
+    riichi_declared: [bool; 4],
+    round_wind: u8,
+    oya: u8,
+) -> String {
+    let mut hands: [Vec<u8>; 4] = Default::default();
+    hands[usize::from(player_id)] = hand;
+    let observation = Observation::new(
+        player_id,
+        hands,
+        Default::default(),
+        discards,
+        dora_indicators,
+        [25000; 4],
+        riichi_declared,
+        vec![],
+        vec![],
+        0,
+        0,
+        round_wind,
+        oya,
+        0,
+        vec![],
+        false,
+        [None; 4],
+        [None; 4],
+        None,
+        drawn_tile,
+    );
+    observation.serialize_to_base64().unwrap()
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 pub fn fixture_base64_with_table_state(

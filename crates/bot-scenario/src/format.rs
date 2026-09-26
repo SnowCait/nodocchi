@@ -1587,7 +1587,7 @@ fn format_optional_probability(scaled: Option<u64>) -> String {
 }
 
 // 固定小数点の期待支払いを点数表記へ直す。表示のためだけの変換で、比較にも選択にも使わない。
-fn format_self_tsumo_value(scaled: Option<u64>) -> String {
+pub(crate) fn format_self_tsumo_value(scaled: Option<u64>) -> String {
     let Some(scaled) = scaled else {
         return UNKNOWN.to_string();
     };
