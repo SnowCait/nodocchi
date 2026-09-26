@@ -53,6 +53,7 @@ pub use discard::{
     diagnose_discard_evaluations_with_fixed_melds_and_forward_metrics,
     diagnose_discard_evaluations_with_fixed_melds_and_tenpai_wait,
     diagnose_discard_evaluations_with_metrics,
+    diagnose_discard_evaluations_with_stable_order_fallback,
     diagnose_discard_evaluations_with_three_shanten_metrics,
     diagnose_discard_evaluations_with_two_shanten_metrics, discard_block_context,
     discard_block_context_with_fixed_melds, evaluate_discards, evaluate_discards_from_tiles,
@@ -125,14 +126,15 @@ pub use scoring_selection::{
 };
 pub use selection::{
     CurrentTenpaiFuritenCohort, CurrentTenpaiMetrics, DiscardSelectionCandidate, ForwardMetrics,
-    NextAcceptanceMetric, TenpaiWaitMetric, ThreeShantenMetrics, TwoShantenMetrics,
-    WeightedForwardMetric, best_discard_selection_index,
+    IishantenStableOrderFallbackMetrics, NextAcceptanceMetric, TenpaiWaitMetric,
+    ThreeShantenMetrics, TwoShantenMetrics, WeightedForwardMetric, best_discard_selection_index,
     best_discard_selection_index_with_forward_metrics, best_discard_selection_index_with_metrics,
+    best_discard_selection_index_with_stable_order_fallback,
     best_discard_selection_index_with_three_shanten_metrics,
     best_discard_selection_index_with_two_shanten_metrics, classify_current_tenpai_furiten_cohort,
     compare_discard_selection_candidates, current_tenpai_continuation_targets, forward_target_mask,
-    resolve_current_tenpai_value_axis, resolve_prospective_value_axis,
-    resolve_three_shanten_progress_self_tsumo_value_axis,
+    iishanten_stable_order_fallback_cohort, resolve_current_tenpai_value_axis,
+    resolve_prospective_value_axis, resolve_three_shanten_progress_self_tsumo_value_axis,
     resolve_two_shanten_expected_self_tsumo_value_axis,
 };
 pub use self_tsumo::{

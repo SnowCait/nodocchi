@@ -264,6 +264,12 @@ fn comparison_values(comparison: &ChoiceComparison) -> Option<RankedChoiceCompar
                 loser: loser.expected_self_tsumo_value?,
             }
         }
+        DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue => {
+            RankedChoiceComparisonValues::SelfTsumoValue {
+                winner: winner.until_ryukyoku_expected_self_tsumo_value?,
+                loser: loser.until_ryukyoku_expected_self_tsumo_value?,
+            }
+        }
         DiscardComparisonReason::TwoShantenExpectedSelfTsumoValue => {
             RankedChoiceComparisonValues::SelfTsumoValue {
                 winner: winner.two_shanten_expected_self_tsumo_value?,

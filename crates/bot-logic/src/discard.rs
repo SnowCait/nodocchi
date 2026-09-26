@@ -4,12 +4,10 @@ use crate::acceptance::{
 };
 use crate::iishanten::{IishantenShape, classify_standard_iishanten_shape_with_standard_shanten};
 use crate::selection::{
-    CurrentTenpaiMetrics, DiscardSelectionCandidateView, ForwardMetrics, NextAcceptanceMetric,
-    TenpaiWaitMetric, ThreeShantenMetrics, TwoShantenMetrics,
-    best_discard_selection_index_with_three_shanten_metrics,
-    compare_discard_selection_candidate_views, resolve_current_tenpai_value_axis,
-    resolve_prospective_value_axis, resolve_three_shanten_progress_self_tsumo_value_axis,
-    resolve_two_shanten_expected_self_tsumo_value_axis,
+    CurrentTenpaiMetrics, ForwardMetrics, IishantenStableOrderFallbackMetrics,
+    NextAcceptanceMetric, TenpaiWaitMetric, ThreeShantenMetrics, TwoShantenMetrics,
+    compare_discard_selection_candidate_views, resolved_selection_candidate_views,
+    select_with_iishanten_stable_order_fallback,
 };
 use crate::shanten::{EffectiveShanten, FixedMeldCount};
 use crate::tile::{TileId, TileType, count_indicated_dora};
@@ -848,6 +846,12 @@ pub enum DiscardComparisonReason {
     Dora,
     ValueHonor,
     RedFive,
+    /// 1向聴限定の StableOrder fallback。production horizon の全既存軸で完全同値になった cohort
+    /// だけを、[`crate::self_tsumo::SelfTsumoHorizon::UNTIL_RYUKYOKU`] の
+    /// [`Self::ExpectedSelfTsumoValue`] で比較する。
+    ///
+    /// 既存軸のどれかで決着する候補の組には値が入らず、[`Self::StableOrder`] の代わりにだけ使う。
+    UntilRyukyokuExpectedSelfTsumoValue,
     StableOrder,
 }
 
@@ -855,6 +859,14 @@ pub enum DiscardComparisonReason {
 pub struct DiscardComparison {
     pub candidate_is_better: bool,
     pub reason: DiscardComparisonReason,
+}
+
+impl DiscardComparison {
+    /// 全軸で同値だった場合の結論。先に現れた候補を維持する。
+    pub(crate) const STABLE_ORDER: Self = Self {
+        candidate_is_better: false,
+        reason: DiscardComparisonReason::StableOrder,
+    };
 }
 
 /// 1手の打牌評価だけで打牌候補を比較する。
@@ -869,7 +881,8 @@ pub fn compare_discard_evaluations(
     let candidate = candidate.view();
     let current_best = current_best.view();
     compare_discard_before_acceptance(&candidate, &current_best)
-        .unwrap_or_else(|| compare_discard_from_acceptance(&candidate, &current_best))
+        .or_else(|| compare_discard_from_acceptance(&candidate, &current_best))
+        .unwrap_or(DiscardComparison::STABLE_ORDER)
 }
 
 // 比較順のうち、向聴数と多向聴限定の孤立牌比較まで。決着しなければ `None` を返す。
@@ -894,77 +907,71 @@ pub(crate) fn compare_discard_before_acceptance(
     compare_isolated_honor_discard(candidate, current_best)
 }
 
-// 比較順のうち、受け入れ以降。最後は StableOrder になるので必ず決着する。
+// 比較順のうち、受け入れ以降 RedFive まで。全軸で同値なら `None` を返し、StableOrder は
+// 呼び出し側が決める。
 pub(crate) fn compare_discard_from_acceptance(
     candidate: &DiscardEvaluationView<'_>,
     current_best: &DiscardEvaluationView<'_>,
-) -> DiscardComparison {
+) -> Option<DiscardComparison> {
     let candidate_remaining = candidate.acceptance_total_remaining();
     let best_remaining = current_best.acceptance_total_remaining();
     if candidate_remaining != best_remaining {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate_remaining > best_remaining,
             reason: DiscardComparisonReason::AcceptanceRemaining,
-        };
+        });
     }
 
     let candidate_type_count = candidate.acceptance_type_count();
     let best_type_count = current_best.acceptance_type_count();
     if candidate_type_count != best_type_count {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate_type_count > best_type_count,
             reason: DiscardComparisonReason::AcceptanceTypeCount,
-        };
+        });
     }
 
     if let Some(comparison) = compare_chiitoitsu_wait_quality(candidate, current_best) {
-        return comparison;
+        return Some(comparison);
     }
 
     if let Some(comparison) = compare_standard_iishanten_shape(candidate, current_best) {
-        return comparison;
+        return Some(comparison);
     }
 
     if candidate.shape_penalty != current_best.shape_penalty {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate.shape_penalty < current_best.shape_penalty,
             reason: DiscardComparisonReason::ShapePenalty,
-        };
+        });
     }
 
     if candidate.floating_tile_value != current_best.floating_tile_value {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate.floating_tile_value < current_best.floating_tile_value,
             reason: DiscardComparisonReason::FloatingTileValue,
-        };
+        });
     }
 
     if candidate.discarded_dora_count != current_best.discarded_dora_count {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate.discarded_dora_count < current_best.discarded_dora_count,
             reason: DiscardComparisonReason::Dora,
-        };
+        });
     }
 
     if candidate.discarded_value_honor_count != current_best.discarded_value_honor_count {
-        return DiscardComparison {
+        return Some(DiscardComparison {
             candidate_is_better: candidate.discarded_value_honor_count
                 < current_best.discarded_value_honor_count,
             reason: DiscardComparisonReason::ValueHonor,
-        };
+        });
     }
 
-    if candidate.discards_red_five != current_best.discards_red_five {
-        return DiscardComparison {
-            candidate_is_better: !candidate.discards_red_five && current_best.discards_red_five,
-            reason: DiscardComparisonReason::RedFive,
-        };
-    }
-
-    DiscardComparison {
-        candidate_is_better: false,
-        reason: DiscardComparisonReason::StableOrder,
-    }
+    (candidate.discards_red_five != current_best.discards_red_five).then_some(DiscardComparison {
+        candidate_is_better: !candidate.discards_red_five && current_best.discards_red_five,
+        reason: DiscardComparisonReason::RedFive,
+    })
 }
 
 // 候補単独で「孤立牌の優先対象」かどうかを判定する。手牌構造上の孤立牌
@@ -1217,6 +1224,12 @@ pub struct DiscardCandidateDiagnostic {
     /// `current_tenpai_expected_self_tsumo_value` と同じ terminal tenpai から求めた観測値で、
     /// 打牌選択には使わない。値軸を cohort 単位で無効化した場合も確率は落とさない。
     pub current_tenpai_self_tsumo_hit_probability: Option<u64>,
+    /// 1向聴 StableOrder fallback が比較に使った UNTIL_RYUKYOKU ExpectedSelfTsumoValue
+    /// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// production horizon の [`Self::expected_self_tsumo_value`] とは別 field に保持する。fallback
+    /// が発火し、cohort の全候補で値が確定した場合の cohort の候補だけ `Some`。
+    pub until_ryukyoku_expected_self_tsumo_value: Option<u64>,
 }
 
 pub fn diagnose_discard_evaluations(
@@ -1316,53 +1329,47 @@ pub fn diagnose_discard_evaluations_with_three_shanten_metrics(
     two_shanten_metrics: &[TwoShantenMetrics],
     three_shanten_metrics: &[ThreeShantenMetrics],
 ) -> DiscardDecisionDiagnostic {
-    // 打点込みの軸は候補集合単位で決まる。診断が報告する比較理由を本番選択と一致させるため、
-    // 診断側でも同じ解決を通した集計値を使う。
-    let forward_metrics = resolve_prospective_value_axis(evaluations, forward_metrics);
-    let current_tenpai_metrics =
-        resolve_current_tenpai_value_axis(evaluations, current_tenpai_metrics);
-    let two_shanten_metrics =
-        resolve_two_shanten_expected_self_tsumo_value_axis(evaluations, two_shanten_metrics);
-    let three_shanten_metrics =
-        resolve_three_shanten_progress_self_tsumo_value_axis(evaluations, three_shanten_metrics);
-    let candidate_at = |index: usize| DiscardSelectionCandidateView {
-        evaluation: evaluations[index].view(),
-        tenpai_wait: forward_metrics
-            .get(index)
-            .and_then(|metric| metric.tenpai_wait),
-        next_acceptance: forward_metrics
-            .get(index)
-            .and_then(|metric| metric.next_acceptance),
-        prospective_value: forward_metrics
-            .get(index)
-            .and_then(|metric| metric.prospective_value),
-        expected_self_tsumo_value: forward_metrics
-            .get(index)
-            .and_then(|metric| metric.expected_self_tsumo_value),
-        two_shanten_expected_self_tsumo_value: two_shanten_metrics
-            .get(index)
-            .and_then(|metric| metric.expected_self_tsumo_value),
-        three_shanten_progress_self_tsumo_value: three_shanten_metrics
-            .get(index)
-            .and_then(|metric| metric.progress_self_tsumo_value),
-        current_tenpai_offense_weighted_total: current_tenpai_metrics
-            .get(index)
-            .and_then(|metric| metric.offense_weighted_total),
-        current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
-            .get(index)
-            .and_then(|metric| metric.expected_self_tsumo_value),
-        current_tenpai_continuation_self_tsumo_value: current_tenpai_metrics
-            .get(index)
-            .and_then(|metric| metric.continuation_self_tsumo_value),
-    };
-
-    let best_index = best_discard_selection_index_with_three_shanten_metrics(
+    diagnose_discard_evaluations_with_stable_order_fallback(
+        counts,
+        fixed_meld_count,
         evaluations,
-        &forward_metrics,
-        &current_tenpai_metrics,
-        &two_shanten_metrics,
-        &three_shanten_metrics,
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        three_shanten_metrics,
+        &[],
+    )
+}
+
+/// 1向聴 StableOrder fallback の supplemental metric も含めて診断を構築する。
+///
+/// 選択は [`crate::selection::best_discard_selection_index_with_stable_order_fallback`] と同じ
+/// helper を通り、fallback で決着した候補の比較理由は
+/// [`DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue`] になる。fallback の値は
+/// 比較へ使った cohort の候補だけに載せ、それ以外の候補は `None` のまま。
+#[allow(clippy::too_many_arguments)]
+pub fn diagnose_discard_evaluations_with_stable_order_fallback(
+    counts: &TileCounts,
+    fixed_meld_count: FixedMeldCount,
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
+    stable_order_fallback: &[IishantenStableOrderFallbackMetrics],
+) -> DiscardDecisionDiagnostic {
+    // 軸は候補集合単位で決まる。診断が報告する比較理由を本番選択と一致させるため、診断側でも
+    // 選択と同じ解決を通した比較入力を使う。
+    let views: Vec<_> = evaluations.iter().map(DiscardEvaluation::view).collect();
+    let mut candidate_views = resolved_selection_candidate_views(
+        &views,
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        three_shanten_metrics,
     );
+    let best_index =
+        select_with_iishanten_stable_order_fallback(&mut candidate_views, stable_order_fallback);
     let selected = best_index.map(|index| evaluations[index].clone());
 
     let candidates = evaluations
@@ -1376,8 +1383,8 @@ pub fn diagnose_discard_evaluations_with_three_shanten_metrics(
                 let best_index = best_index
                     .expect("non-selected candidate implies a selected evaluation exists");
                 let comparison = compare_discard_selection_candidate_views(
-                    &candidate_at(best_index),
-                    &candidate_at(index),
+                    &candidate_views[best_index],
+                    &candidate_views[index],
                 );
                 if comparison.candidate_is_better {
                     (true, comparison.reason)
@@ -1385,6 +1392,7 @@ pub fn diagnose_discard_evaluations_with_three_shanten_metrics(
                     (false, DiscardComparisonReason::StableOrder)
                 }
             };
+            let view = &candidate_views[index];
 
             DiscardCandidateDiagnostic {
                 evaluation: evaluation.clone(),
@@ -1402,37 +1410,25 @@ pub fn diagnose_discard_evaluations_with_three_shanten_metrics(
                     counts,
                     evaluation.discard,
                 ),
-                tenpai_wait: forward_metrics
-                    .get(index)
-                    .and_then(|metric| metric.tenpai_wait),
-                next_acceptance: forward_metrics
-                    .get(index)
-                    .and_then(|metric| metric.next_acceptance),
-                prospective_value: forward_metrics
-                    .get(index)
-                    .and_then(|metric| metric.prospective_value),
-                expected_self_tsumo_value: forward_metrics
-                    .get(index)
-                    .and_then(|metric| metric.expected_self_tsumo_value),
-                two_shanten_expected_self_tsumo_value: two_shanten_metrics
-                    .get(index)
-                    .and_then(|metric| metric.expected_self_tsumo_value),
+                tenpai_wait: view.tenpai_wait,
+                next_acceptance: view.next_acceptance,
+                prospective_value: view.prospective_value,
+                expected_self_tsumo_value: view.expected_self_tsumo_value,
+                two_shanten_expected_self_tsumo_value: view.two_shanten_expected_self_tsumo_value,
                 two_shanten_progress_self_tsumo_value: None,
-                three_shanten_progress_self_tsumo_value: three_shanten_metrics
-                    .get(index)
-                    .and_then(|metric| metric.progress_self_tsumo_value),
-                current_tenpai_offense_weighted_total: current_tenpai_metrics
-                    .get(index)
-                    .and_then(|metric| metric.offense_weighted_total),
-                current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
-                    .get(index)
-                    .and_then(|metric| metric.expected_self_tsumo_value),
-                current_tenpai_continuation_self_tsumo_value: current_tenpai_metrics
-                    .get(index)
-                    .and_then(|metric| metric.continuation_self_tsumo_value),
+                three_shanten_progress_self_tsumo_value: view
+                    .three_shanten_progress_self_tsumo_value,
+                current_tenpai_offense_weighted_total: view.current_tenpai_offense_weighted_total,
+                current_tenpai_expected_self_tsumo_value: view
+                    .current_tenpai_expected_self_tsumo_value,
+                current_tenpai_continuation_self_tsumo_value: view
+                    .current_tenpai_continuation_self_tsumo_value,
+                // 比較へ使わない観測値なので、cohort 単位の軸解決を通さずそのまま載せる。
                 current_tenpai_self_tsumo_hit_probability: current_tenpai_metrics
                     .get(index)
                     .and_then(|metric| metric.self_tsumo_hit_probability),
+                until_ryukyoku_expected_self_tsumo_value: view
+                    .until_ryukyoku_expected_self_tsumo_value,
             }
         })
         .collect();

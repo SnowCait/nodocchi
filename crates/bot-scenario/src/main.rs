@@ -16,6 +16,8 @@ mod open_hand_defense;
 mod open_hand_threat;
 mod replay;
 #[cfg(test)]
+mod request_103_regression;
+#[cfg(test)]
 mod scenario_regression;
 mod self_tsumo_horizon;
 mod three_shanten_continuation;

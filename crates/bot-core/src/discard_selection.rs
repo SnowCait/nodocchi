@@ -36,15 +36,17 @@ use bot_logic::best_discard_selection_index;
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
-    ForwardMetrics, IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, Meld,
-    OwnDiscards, SameShantenContinuationDepth, SearchStateMemoStats, SelfTsumoFacts,
-    SelfTsumoHorizon, TenpaiCompletedHands, TenpaiWaitAvailability, ThreeShantenMetrics,
-    ThreeShantenSearchStats, TileCounts, TileId, TileType, TwoShantenMetrics,
-    TwoShantenProgressSelfTsumoDiagnostic, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
+    ForwardMetrics, IishantenContinuationScope, IishantenStableOrderFallbackMetrics,
+    LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SameShantenContinuationDepth,
+    SearchStateMemoStats, SelfTsumoFacts, SelfTsumoHorizon, TenpaiCompletedHands,
+    TenpaiWaitAvailability, ThreeShantenMetrics, ThreeShantenSearchStats, TileCounts, TileId,
+    TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
+    TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
-    best_discard_selection_index_with_three_shanten_metrics,
+    best_discard_selection_index_with_stable_order_fallback,
     best_discard_selection_index_with_two_shanten_metrics,
     best_two_shanten_progress_discard_among_observed, current_tenpai_continuation_targets,
+    diagnose_discard_evaluations_with_stable_order_fallback,
     diagnose_discard_evaluations_with_three_shanten_metrics, diagnose_discard_furiten,
     diagnose_lookahead, diagnose_two_shanten_progress_self_tsumo_instrumented,
     diagnose_two_shanten_self_tsumo, discard_tenpai_wait_availability,
@@ -53,8 +55,8 @@ use bot_logic::{
     forward_metrics, forward_metrics_for_candidate, forward_metrics_for_candidate_instrumented,
     forward_metrics_from_lookahead, forward_metrics_instrumented,
     forward_metrics_with_lookahead_for_candidate, forward_target_mask,
-    resolve_two_shanten_expected_self_tsumo_value_axis, split_discarded_tile,
-    three_shanten_progress_only_self_tsumo_value_for_candidate,
+    iishanten_stable_order_fallback_cohort, resolve_two_shanten_expected_self_tsumo_value_axis,
+    split_discarded_tile, three_shanten_progress_only_self_tsumo_value_for_candidate,
     three_shanten_progress_self_tsumo_value_for_candidate, tsumo_hit_probability,
     two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
 };
@@ -273,6 +275,19 @@ impl LegalDiscardEvaluations {
     }
 }
 
+/// production の1向聴 StableOrder fallback 1回分の評価結果。
+///
+/// production horizon の全既存軸で winner と完全同値な cohort
+/// ([`iishanten_stable_order_fallback_cohort`]) だけを [`SelfTsumoHorizon::UNTIL_RYUKYOKU`] で
+/// 評価した値で、production horizon の前方集計値とは別に持つ。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct IishantenStableOrderFallback {
+    /// `evaluations` と同じ順序。cohort 外の候補は `None`。発火しなかった局面では空。
+    metrics: Vec<IishantenStableOrderFallbackMetrics>,
+    /// `UNTIL_RYUKYOKU` で評価した cohort の候補数。発火しなかった局面では 0。
+    candidates: usize,
+}
+
 // 打牌選択に使う前方集計値。`evaluations` と同じ順序・同じ件数で、前方評価を
 // 計算しなかった候補は `None`。本番選択・構造化診断・tracing ログはこの1組を共有し、同じ枝を
 // 二重に評価しない。
@@ -484,6 +499,7 @@ struct ProductionSelectionRun {
     legal: LegalDiscardEvaluations,
     metrics: ProductionSelectionMetrics,
     current_tenpai: CurrentTenpaiCandidateEvaluations,
+    stable_order_fallback: IishantenStableOrderFallback,
     selection: DiscardActionSelection,
 }
 
@@ -516,6 +532,16 @@ fn run_production_selection(
         &legal.evaluations,
         legal_actions,
     );
+    let stable_order_fallback = iishanten_stable_order_fallback(
+        context,
+        &legal,
+        &metrics.forward,
+        &current_tenpai,
+        &metrics.two_shanten,
+        &metrics.three_shanten,
+        continuation,
+        timing,
+    );
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
         log_discard_diagnostic(
@@ -528,6 +554,7 @@ fn run_production_selection(
                 &current_tenpai,
                 &metrics.two_shanten,
                 &metrics.three_shanten,
+                &stable_order_fallback,
             ),
         );
     }
@@ -539,6 +566,7 @@ fn run_production_selection(
         &current_tenpai,
         &metrics.two_shanten,
         &metrics.three_shanten,
+        &stable_order_fallback,
         legal_actions,
     );
 
@@ -546,6 +574,7 @@ fn run_production_selection(
         legal,
         metrics,
         current_tenpai,
+        stable_order_fallback,
         selection,
     }
 }
@@ -775,6 +804,7 @@ pub(crate) fn select_discard_action_with_iishanten_continuation_settings(
             &run.current_tenpai,
             &run.metrics.two_shanten,
             &run.metrics.three_shanten,
+            &run.stable_order_fallback,
         ),
         forward_targets: forward_target_mask(&run.legal.evaluations),
         forward: run.metrics.forward,
@@ -892,6 +922,16 @@ pub(crate) fn select_discard_action_with_diagnostic(
         legal_actions,
         tenpai_continuation.as_ref(),
     );
+    let stable_order_fallback = iishanten_stable_order_fallback(
+        context,
+        &legal,
+        &tenpai_wait,
+        &current_tenpai,
+        &two_shanten_selection,
+        &three_shanten_selection,
+        continuation,
+        &mut NormalDiscardPhaseTimer::disabled(),
+    );
 
     let diagnostic = diagnose_legal_evaluations(
         context,
@@ -900,6 +940,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
         &current_tenpai,
         &two_shanten_selection,
         &three_shanten_selection,
+        &stable_order_fallback,
     );
 
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
@@ -926,6 +967,7 @@ pub(crate) fn select_discard_action_with_diagnostic(
             &current_tenpai,
             &two_shanten_selection,
             &three_shanten_selection,
+            &stable_order_fallback,
             legal_actions,
         ),
         diagnostic,
@@ -964,6 +1006,7 @@ pub(crate) fn legal_discard_evaluations(
 //
 // 選んだ打牌が1向聴の場合は、押し引きが観測する前方集計値も同時に決める。選択で使った
 // `tenpai_wait` をそのまま再利用するので、比較に使った値と押し引きへ渡る値は同じになる。
+#[allow(clippy::too_many_arguments)]
 fn selection_from_legal_evaluations(
     context: &GameContext,
     legal: &LegalDiscardEvaluations,
@@ -971,6 +1014,7 @@ fn selection_from_legal_evaluations(
     current_tenpai: &[CurrentTenpaiCandidateEvaluation],
     two_shanten: &TwoShantenProductionSelection,
     three_shanten: &[ThreeShantenMetrics],
+    stable_order_fallback: &IishantenStableOrderFallback,
     legal_actions: &[LegalAction],
 ) -> DiscardActionSelection {
     let current_tenpai_metrics = current_tenpai_metrics(current_tenpai);
@@ -980,6 +1024,7 @@ fn selection_from_legal_evaluations(
         &current_tenpai_metrics,
         two_shanten,
         three_shanten,
+        stable_order_fallback,
     );
     let evaluation = selected.map(|index| legal.evaluations[index].clone());
     let action = evaluation
@@ -1018,16 +1063,109 @@ fn production_selection_index(
     current_tenpai_metrics: &[CurrentTenpaiMetrics],
     two_shanten: &TwoShantenProductionSelection,
     three_shanten: &[ThreeShantenMetrics],
+    stable_order_fallback: &IishantenStableOrderFallback,
 ) -> Option<usize> {
     two_shanten.selected.or_else(|| {
-        best_discard_selection_index_with_three_shanten_metrics(
+        best_discard_selection_index_with_stable_order_fallback(
             evaluations,
             forward_metrics,
             current_tenpai_metrics,
             &two_shanten.progress,
             three_shanten,
+            &stable_order_fallback.metrics,
         )
     })
+}
+
+/// production の1向聴 StableOrder fallback。
+///
+/// production horizon の comparator が使った入力 (合法候補・前方集計値・各 supplemental metric)
+/// をそのまま渡し、winner と StableOrder の手前までの全既存軸で完全同値な cohort
+/// ([`iishanten_stable_order_fallback_cohort`]) が2件以上ある場合だけ、その cohort の候補を
+/// [`SelfTsumoHorizon::UNTIL_RYUKYOKU`] で評価する。cohort が空の局面 (既存軸で決着した・winner
+/// が1向聴でない・2向聴 selection が決めた) では追加の探索を一切行わない。
+///
+/// 評価は production と同じ候補1件の前方評価 ([`forward_metrics_for_candidate`])・同じ
+/// [`production_lookahead_inputs`]・同じ continuation 設定と候補単位の並列化
+/// ([`parallel_candidate_forward_metrics`]) を通り、変えるのは context の horizon だけ。lookahead
+/// 入力は horizon ごとに作り直すので、horizon で値が変わる探索内 memo を production horizon の
+/// 評価と共有しない。
+///
+/// configured horizon がすでに `UNTIL_RYUKYOKU` の場合は、同じ値で比べ直すだけになるので評価
+/// しない。
+#[allow(clippy::too_many_arguments)]
+fn iishanten_stable_order_fallback(
+    context: &GameContext,
+    legal: &LegalDiscardEvaluations,
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai: &[CurrentTenpaiCandidateEvaluation],
+    two_shanten: &TwoShantenProductionSelection,
+    three_shanten: &[ThreeShantenMetrics],
+    continuation: IishantenContinuationSettings,
+    timing: &mut NormalDiscardPhaseTimer,
+) -> IishantenStableOrderFallback {
+    if two_shanten.selected.is_some()
+        || context.self_tsumo_horizon() == SelfTsumoHorizon::UNTIL_RYUKYOKU
+    {
+        return IishantenStableOrderFallback::default();
+    }
+    let cohort = iishanten_stable_order_fallback_cohort(
+        &legal.evaluations,
+        forward_metrics,
+        &current_tenpai_metrics(current_tenpai),
+        &two_shanten.progress,
+        three_shanten,
+    );
+    if cohort.is_empty() {
+        return IishantenStableOrderFallback::default();
+    }
+
+    timing.enter(NormalDiscardPhase::IishantenStableOrderFallback);
+    let until_ryukyoku = context
+        .clone()
+        .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+    let metrics = match parallel_forward_workers(&legal.evaluations, continuation) {
+        Some(workers) => {
+            parallel_candidate_forward_metrics(
+                &until_ryukyoku,
+                &legal.tiles,
+                &legal.evaluations,
+                &cohort,
+                continuation,
+                workers,
+                &mut ForwardMetricsPhaseTimer::disabled(),
+            )
+            .metrics
+        }
+        None => {
+            let valuator = ProductionProspectiveValuator::new(&until_ryukyoku);
+            let inputs = production_lookahead_inputs(
+                &until_ryukyoku,
+                &legal.tiles,
+                &valuator,
+                LookaheadDiagnosticScope::None,
+                &legal.evaluations,
+                continuation,
+            );
+            let mut metrics = vec![ForwardMetrics::default(); legal.evaluations.len()];
+            for &index in &cohort {
+                metrics[index] = forward_metrics_for_candidate(&inputs, &legal.evaluations[index]);
+            }
+            metrics
+        }
+    };
+    timing.record_iishanten_stable_order_fallback_candidates(cohort.len());
+    timing.enter(NormalDiscardPhase::SelectionFinalize);
+
+    let mut fallback = vec![IishantenStableOrderFallbackMetrics::default(); metrics.len()];
+    for &index in &cohort {
+        fallback[index].until_ryukyoku_expected_self_tsumo_value =
+            metrics[index].expected_self_tsumo_value;
+    }
+    IishantenStableOrderFallback {
+        metrics: fallback,
+        candidates: cohort.len(),
+    }
 }
 
 /// 最善向聴が現在聴牌で、競合する合法候補が複数ある場合だけ既存 wait / offense evaluator を
@@ -1618,7 +1756,31 @@ fn parallel_forward_metrics(
             timing,
         ));
     }
+    parallel_candidate_forward_metrics(
+        context,
+        tiles,
+        evaluations,
+        &targets,
+        continuation,
+        workers,
+        timing,
+    )
+}
 
+/// 指定した候補だけを候補単位で複数 thread に分けて前方評価する。
+///
+/// 対象候補の決め方は呼び出し側が持つ。production の1向聴前方評価は [`forward_target_mask`] の
+/// cohort を、1向聴 StableOrder fallback は完全同値 cohort を渡す。候補1件の評価も worker ごとの
+/// 探索基盤も同じ helper を通り、対象外の候補は [`ForwardMetrics::default`] のまま返す。
+fn parallel_candidate_forward_metrics(
+    context: &GameContext,
+    tiles: &[TileId],
+    evaluations: &[DiscardEvaluation],
+    targets: &[usize],
+    continuation: IishantenContinuationSettings,
+    workers: NonZeroUsize,
+    timing: &mut ForwardMetricsPhaseTimer,
+) -> ParallelForwardMetrics {
     // 空回りする worker を作らないよう、thread 数は深く評価する候補数を超えない。
     let worker_count = workers.get().min(targets.len());
     // 計測しない run は worker 側でも `Instant` を取らない。
@@ -1629,7 +1791,6 @@ fn parallel_forward_metrics(
         let workers: Vec<_> = (0..worker_count)
             .map(|_| {
                 let next = &next;
-                let targets = targets.as_slice();
                 scope.spawn(move || {
                     let valuator = ProductionProspectiveValuator::new(context);
                     let inputs = production_lookahead_inputs(
@@ -2281,11 +2442,12 @@ fn diagnose_legal_evaluations(
     current_tenpai: &[CurrentTenpaiCandidateEvaluation],
     two_shanten: &TwoShantenProductionSelection,
     three_shanten: &[ThreeShantenMetrics],
+    stable_order_fallback: &IishantenStableOrderFallback,
 ) -> DiscardDecisionDiagnostic {
     let counts = TileCounts::from_tiles(legal.tiles.iter().copied());
     let fixed_meld_count = evaluation_fixed_meld_count(context);
     let current_tenpai_metrics = current_tenpai_metrics(current_tenpai);
-    let mut diagnostic = diagnose_discard_evaluations_with_three_shanten_metrics(
+    let mut diagnostic = diagnose_discard_evaluations_with_stable_order_fallback(
         &counts,
         fixed_meld_count,
         &legal.evaluations,
@@ -2293,6 +2455,7 @@ fn diagnose_legal_evaluations(
         &current_tenpai_metrics,
         &two_shanten.progress,
         three_shanten,
+        &stable_order_fallback.metrics,
     );
 
     // 汎用診断は TwoShantenMetrics を Full として表示する。production がそこへ
@@ -2657,19 +2820,33 @@ pub(crate) fn select_best_normal_discard_evaluation(
     tiles: &[TileId],
     legal_actions: &[LegalAction],
 ) -> Option<DiscardEvaluation> {
-    let evaluations = evaluate_discard_candidates(context, tiles);
-    let metrics = production_selection_metrics(context, tiles, &evaluations);
+    let legal = LegalDiscardEvaluations {
+        tiles: tiles.to_vec(),
+        evaluations: evaluate_discard_candidates(context, tiles),
+    };
+    let metrics = production_selection_metrics(context, tiles, &legal.evaluations);
     let current_tenpai =
-        current_tenpai_candidate_evaluations(context, tiles, &evaluations, legal_actions);
+        current_tenpai_candidate_evaluations(context, tiles, &legal.evaluations, legal_actions);
+    let stable_order_fallback = iishanten_stable_order_fallback(
+        context,
+        &legal,
+        &metrics.forward,
+        &current_tenpai,
+        &metrics.two_shanten,
+        &metrics.three_shanten,
+        production_iishanten_continuation_settings(),
+        &mut NormalDiscardPhaseTimer::disabled(),
+    );
 
     production_selection_index(
-        &evaluations,
+        &legal.evaluations,
         &metrics.forward,
         &current_tenpai_metrics(&current_tenpai),
         &metrics.two_shanten,
         &metrics.three_shanten,
+        &stable_order_fallback,
     )
-    .map(|index| evaluations[index].clone())
+    .map(|index| legal.evaluations[index].clone())
 }
 
 /// 副露済み面子数と切れない牌種を明示した、テスト用の1手評価 best。
@@ -3041,6 +3218,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
             ?candidate.two_shanten_progress_self_tsumo_value,
         two_shanten_full_self_tsumo_value =
             ?candidate.two_shanten_expected_self_tsumo_value,
+        until_ryukyoku_expected_self_tsumo_value =
+            ?candidate.until_ryukyoku_expected_self_tsumo_value,
         shape_penalty = evaluation.shape_penalty,
         iishanten_shape_after_discard = ?evaluation.standard_iishanten_shape_after_discard,
         floating_tile_value = evaluation.floating_tile_value,
@@ -4761,6 +4940,7 @@ pub(crate) mod tests {
             &current_tenpai,
             &two_shanten,
             &[],
+            &IishantenStableOrderFallback::default(),
         );
         let selection = selection_from_legal_evaluations(
             context,
@@ -4769,6 +4949,7 @@ pub(crate) mod tests {
             &current_tenpai,
             &two_shanten,
             &[],
+            &IishantenStableOrderFallback::default(),
             actions,
         );
 
@@ -6888,6 +7069,7 @@ pub(crate) mod tests {
                 &current_tenpai_metrics(&empty_current_tenpai),
                 &metrics.two_shanten,
                 three_shanten,
+                &IishantenStableOrderFallback::default(),
             )
             .map(|index| legal.evaluations[index].discard.to_mjai_string())
         };
@@ -6903,6 +7085,7 @@ pub(crate) mod tests {
             &empty_current_tenpai,
             &metrics.two_shanten,
             &metrics.three_shanten,
+            &IishantenStableOrderFallback::default(),
         );
         let candidate = |discard: &str| &diagnostic.candidates[index_of(discard)];
         assert!(candidate("2s").selected);
@@ -7169,6 +7352,7 @@ pub(crate) mod tests {
             &empty_current_tenpai,
             &no_two_shanten,
             &[],
+            &IishantenStableOrderFallback::default(),
             &actions,
         );
         let after = selection_from_legal_evaluations(
@@ -7178,6 +7362,7 @@ pub(crate) mod tests {
             &empty_current_tenpai,
             &metrics.two_shanten,
             &[],
+            &IishantenStableOrderFallback::default(),
             &actions,
         );
         assert_eq!(before.evaluation.unwrap().discard.to_mjai_string(), "5m");
@@ -7190,6 +7375,7 @@ pub(crate) mod tests {
             &empty_current_tenpai,
             &metrics.two_shanten,
             &[],
+            &IishantenStableOrderFallback::default(),
         );
         for (discard, expected) in [("8m", 43_237_279), ("9s", 41_878_243), ("5m", 40_579_757)] {
             let candidate = diagnostic
@@ -7243,6 +7429,81 @@ pub(crate) mod tests {
 
         assert_eq!(selected_discard(&unknown_wall, &actions), "5s");
         assert_eq!(selected_discard(&known_wall, &actions), "9s");
+    }
+
+    // production comparator と同じ入力から1向聴 StableOrder fallback を1回求める。
+    fn production_stable_order_fallback(
+        context: &GameContext,
+        actions: &[LegalAction],
+    ) -> IishantenStableOrderFallback {
+        let legal = legal_discard_evaluations(context, actions);
+        let metrics = production_selection_metrics(context, &legal.tiles, &legal.evaluations);
+        let current_tenpai = current_tenpai_candidate_evaluations(
+            context,
+            &legal.tiles,
+            &legal.evaluations,
+            actions,
+        );
+        iishanten_stable_order_fallback(
+            context,
+            &legal,
+            &metrics.forward,
+            &current_tenpai,
+            &metrics.two_shanten,
+            &metrics.three_shanten,
+            production_iishanten_continuation_settings(),
+            &mut NormalDiscardPhaseTimer::disabled(),
+        )
+    }
+
+    #[test]
+    fn the_stable_order_fallback_evaluates_nothing_without_a_full_h12_tie() {
+        // 既存軸で決着する1向聴・2向聴・3向聴・聴牌では cohort ができず、UNTIL_RYUKYOKU の追加
+        // 評価を1件も行わない。phase の計測も 0 のまま。
+        let cases = [
+            (
+                "iishanten decided by ExpectedSelfTsumoValue",
+                self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60),
+            ),
+            ("two shanten", two_shanten_ev_regression_context()),
+            ("three shanten", three_shanten_progress_regression_context()),
+            ("tenpai", (tenpai_context(&[]), tenpai_actions())),
+        ];
+        for (name, (context, actions)) in cases {
+            assert_eq!(context.self_tsumo_horizon(), SelfTsumoHorizon::PRODUCTION);
+            let fallback = production_stable_order_fallback(&context, &actions);
+            assert_eq!(fallback, IishantenStableOrderFallback::default(), "{name}");
+            assert_eq!(fallback.candidates, 0, "{name}");
+
+            let mut timing = NormalDiscardPhaseTimer::started();
+            let timed =
+                select_discard_action_with_evaluation_instrumented(&context, &actions, &mut timing);
+            assert_eq!(
+                timing.finish().iishanten_stable_order_fallback,
+                Duration::ZERO,
+                "{name}"
+            );
+            assert_eq!(
+                timed,
+                select_discard_action_with_evaluation(&context, &actions),
+                "{name}"
+            );
+        }
+
+        // EV で決着した1向聴の winner は fallback の有無に依らず同じ。
+        let (context, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let diagnostic = select_discard_action_with_diagnostic(
+            &context,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        )
+        .diagnostic;
+        assert!(diagnostic.candidates.iter().all(|candidate| {
+            candidate.until_ryukyoku_expected_self_tsumo_value.is_none()
+                && candidate.comparison_reason
+                    != bot_logic::DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue
+        }));
+        assert_eq!(selected_discard(&context, &actions), "9s");
     }
 
     #[test]
