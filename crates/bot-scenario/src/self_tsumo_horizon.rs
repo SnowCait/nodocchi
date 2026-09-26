@@ -26,6 +26,7 @@ const HORIZON_COUNT: usize = COMPARED_SELF_TSUMO_HORIZONS.len();
 const NOT_EVALUATED: &str = "not evaluated";
 const UNKNOWN: &str = "unknown";
 const NOT_APPLICABLE: &str = "not applicable";
+const DIFFERS_ACROSS_HORIZONS: &str = "differs across horizons";
 
 // 比較する horizon の全 pair。表示順は (12, 14), (12, 16), ... (16, 18)。
 const HORIZON_PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
@@ -167,10 +168,15 @@ pub struct HorizonComparisonSummary {
     pub requests: usize,
     pub known_baseline_raw_future_draws: usize,
     pub unknown_baseline_raw_future_draws: usize,
-    /// Chi / Pon の反応 request で、Pass 側の自摸回数を production が確定できたもの。
+    /// production が Call / Pass self-tsumo 比較を行った反応 request で、Pass 側の自摸回数を
+    /// 確定できたもの。即テンパイ Call しか無い request などの not applicable は含まない。
     pub known_pass_raw_future_draws: usize,
-    /// Chi / Pon の反応 request で、反応元不明などで Pass 側の自摸回数が unknown のもの。
+    /// production が Call / Pass self-tsumo 比較を行った反応 request で、反応元不明などで Pass 側の
+    /// 自摸回数が unknown のもの。
     pub unknown_pass_raw_future_draws: usize,
+    /// horizon によって Pass continuation の対象かどうかが分かれた request。起こらないはずの
+    /// 状態で、どれか1つの horizon の値へ寄せずに数える。
+    pub pass_raw_future_draws_differing_across_horizons: usize,
     pub final_pairs: [PairAgreement; 6],
     pub final_all_four_same: usize,
     pub final_not_all_same: usize,
@@ -207,6 +213,9 @@ impl HorizonComparisonSummary {
             match request.comparison.pass_raw_future_draws {
                 PassFutureDraws::Known(_) => summary.known_pass_raw_future_draws += 1,
                 PassFutureDraws::Unknown => summary.unknown_pass_raw_future_draws += 1,
+                PassFutureDraws::DiffersAcrossHorizons => {
+                    summary.pass_raw_future_draws_differing_across_horizons += 1;
+                }
                 PassFutureDraws::NotApplicable => {}
             }
 
@@ -305,7 +314,9 @@ pub fn format_capture_comparison(captures: usize, requests: &[ComparedRequest]) 
         format!("  requests evaluated: {}", summary.requests),
         "  baseline future draws are floor(remaining_tiles / 4) after a normal discard or a call;"
             .to_string(),
-        "  the pass branch of a Chi / Pon reaction counts its own draws from the reaction source"
+        "  the pass branch of a Chi / Pon reaction counts its own draws from the reaction source;"
+            .to_string(),
+        "  pass draws are shown only where production compared the call with the pass continuation"
             .to_string(),
         format!(
             "  requests with known baseline raw future draws: {}",
@@ -322,6 +333,10 @@ pub fn format_capture_comparison(captures: usize, requests: &[ComparedRequest]) 
         format!(
             "  reaction requests with unknown pass raw future draws: {}",
             summary.unknown_pass_raw_future_draws
+        ),
+        format!(
+            "  reaction requests whose pass side differs across horizons: {}",
+            summary.pass_raw_future_draws_differing_across_horizons
         ),
         String::new(),
         "Final action agreement (primary)".to_string(),
@@ -431,7 +446,16 @@ fn format_differing_request(request: &ComparedRequest) -> Vec<String> {
             format_pass_draws(comparison.pass_raw_future_draws)
         ),
     ];
-    // Pass が無い request では Pass 側の effective も無いので、行を増やさない。
+    // horizon で分かれた場合はどれか1つに寄せず、horizon ごとの raw を並べる。
+    if comparison.pass_raw_future_draws == PassFutureDraws::DiffersAcrossHorizons {
+        lines.push(format!(
+            "    pass raw future own draws by horizon: {}",
+            format_per_horizon(comparison, |decision| format_pass_draws(
+                decision.pass_raw_future_draws
+            ))
+        ));
+    }
+    // Pass continuation を使わない request では Pass 側の effective も無いので、行を増やさない。
     if comparison.pass_raw_future_draws != PassFutureDraws::NotApplicable {
         lines.push(format!(
             "    pass effective future own draws: {}",
@@ -554,6 +578,7 @@ fn format_pass_draws(draws: PassFutureDraws) -> String {
         PassFutureDraws::NotApplicable => NOT_APPLICABLE.to_string(),
         PassFutureDraws::Unknown => UNKNOWN.to_string(),
         PassFutureDraws::Known(draws) => draws.to_string(),
+        PassFutureDraws::DiffersAcrossHorizons => DIFFERS_ACROSS_HORIZONS.to_string(),
     }
 }
 
@@ -698,6 +723,7 @@ mod tests {
                 horizon,
                 baseline_effective_future_draws: raw_future_draws
                     .map(|raw| horizon.effective_future_draws(raw)),
+                pass_raw_future_draws,
                 pass_effective_future_draws: match pass_raw_future_draws {
                     PassFutureDraws::Known(raw) => {
                         PassFutureDraws::Known(horizon.effective_future_draws(raw))
@@ -863,6 +889,59 @@ mod tests {
         assert_eq!(summary.known_baseline_raw_future_draws, 3);
         assert_eq!(summary.known_pass_raw_future_draws, 1);
         assert_eq!(summary.unknown_pass_raw_future_draws, 1);
+    }
+
+    #[test]
+    fn only_applicable_pass_sides_are_counted_and_a_horizon_split_is_not_merged() {
+        // 即テンパイ Call しか無い反応 request は production が Pass continuation を使わないので
+        // not applicable のまま数えない。
+        let immediate_tenpai_call = synthetic_reaction(
+            1,
+            Some(15),
+            PassFutureDraws::NotApplicable,
+            [1, 2, 2, 2],
+            [None; 4],
+        );
+        let mut split = synthetic_reaction(
+            2,
+            Some(15),
+            PassFutureDraws::DiffersAcrossHorizons,
+            [1, 2, 2, 2],
+            [None; 4],
+        );
+        for (index, decision) in split.comparison.decisions.iter_mut().enumerate() {
+            let raw = if index == 0 {
+                PassFutureDraws::NotApplicable
+            } else {
+                PassFutureDraws::Known(16)
+            };
+            decision.pass_raw_future_draws = raw;
+            decision.pass_effective_future_draws = match raw {
+                PassFutureDraws::Known(raw) => {
+                    PassFutureDraws::Known(decision.horizon.effective_future_draws(raw))
+                }
+                other => other,
+            };
+        }
+        let requests = [immediate_tenpai_call, split];
+        let summary = HorizonComparisonSummary::from_requests(&requests);
+        assert_eq!(summary.known_pass_raw_future_draws, 0);
+        assert_eq!(summary.unknown_pass_raw_future_draws, 0);
+        assert_eq!(summary.pass_raw_future_draws_differing_across_horizons, 1);
+
+        let output = format_capture_comparison(1, &requests);
+        assert!(
+            output.contains("  synthetic-1.jsonl  request_id=1\n    baseline raw future own draws: 15\n    baseline effective future own draws: h12=9 h14=11 h16=13 h18=15\n    pass raw future own draws: not applicable\n    final action:"),
+            "{output}"
+        );
+        assert!(
+            output.contains("    pass raw future own draws: differs across horizons\n    pass raw future own draws by horizon: h12=not applicable h14=16 h16=16 h18=16\n    pass effective future own draws: h12=not applicable h14=12 h16=14 h18=16\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  reaction requests whose pass side differs across horizons: 1\n"),
+            "{output}"
+        );
     }
 
     #[test]

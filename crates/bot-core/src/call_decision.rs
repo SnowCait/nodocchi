@@ -1457,14 +1457,6 @@ pub(crate) fn evaluate_call_decision_with_two_shanten_stay_calls(
 }
 
 // 合法 action を Chi / Pon の共通表現へ正規化する。それ以外の action は対象外。
-// 鳴き判断が Call 候補として扱う合法 action (Chi / Pon) が1件以上あるか。無い request では
-// 鳴き判断も Pass 側の continuation も評価しない。
-pub(crate) fn has_call_candidate_action(legal_actions: &[LegalAction]) -> bool {
-    legal_actions
-        .iter()
-        .any(|action| normalize_call(action).is_some())
-}
-
 fn normalize_call(action: &LegalAction) -> Option<(CallKind, TileId, &[TileId])> {
     match action {
         LegalAction::Chi { tile, consumed } => Some((CallKind::Chi, *tile, consumed)),
