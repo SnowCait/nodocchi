@@ -160,9 +160,42 @@ cohort に値を確定できない候補が1件でもある場合はこの軸を
 
 追加深度を接続する前の production は手変わり1回まで (`SameShanten → Progress`) でした。その旧設定は bot-scenario の [1向聴 continuation 深度の A/B 比較](../bot-scenario.md#1向聴-continuation-深度の-ab-比較) と [1向聴 selection 深度の A/B 比較](../bot-scenario.md#1向聴-selection-深度の-ab-比較) に legacy shallow depth (A) として比較 baseline のまま残っています。前者が表示する順位はこの軸単独の ranking で、下の cohort 単位の軸解決を含む最終打牌選択ではありません。
 
-この軸は「現在打牌後に自分へ残っている自摸機会」が exact に分かる局面でだけ使います。山の残りツモ可能枚数を `floor(remaining_tiles / 4)` で自分の自摸回数へ直すだけで、巡目や河の枚数からの推測はしません。材料が揃わない局面では軸そのものを持たず、下の `weighted prospective value` 以降へ落とします。テンパイのツモ打点を確定できない枝が1つでもある候補も、0点にせず値を持ちません。
+この軸は「現在打牌後に自分へ残っている自摸機会」が exact に分かる局面でだけ使います。山の残りツモ可能枚数を `floor(remaining_tiles / 4)` で自分の自摸回数 (raw future own draws) へ直すだけで、巡目や河の枚数からの推測はしません。self-tsumo continuation が実際に使うのは、この raw 値へ下の [soft horizon](#将来自摸機会の-soft-horizon) を適用した effective future own draws です。材料が揃わない局面では軸そのものを持たず、下の `weighted prospective value` 以降へ落とします。テンパイのツモ打点を確定できない枝が1つでもある候補も、0点にせず値を持ちません。
 
 軸を使うかどうかは打点軸と同じく cohort 単位で決めます。
+
+### 将来自摸機会の soft horizon
+
+raw future own draws をそのまま使うと、流局まで自分の全ツモ機会を使える前提になります。実戦では他家和了・放銃などで局が途中で終わるため、深い SameShanten continuation が遠い将来の手変わり価値を過大に数え、即テンパイ受けの広い候補から手変わり候補へ選択が反転することがあります。
+
+そこで self-tsumo continuation の将来 horizon を短くします。**これは「12巡目で局が終了する」というモデルではありません。** 他家和了等による局の途中終了 (survival probability) を直接モデル化する代わりに、self-tsumo continuation が見る将来の自摸機会を短くする近似です。18巡相当を従来の流局 horizon とみなし、
+
+```text
+horizon_reduction = 18 - horizon_turn
+
+effective_future_draws =
+    min(
+        raw_future_draws,
+        max(raw_future_draws - horizon_reduction, late_min_future_draws)
+    )
+```
+
+とします (減算は 0 で止めます)。production の既定値は `horizon_turn = 12`、`late_min_future_draws = 2` です。
+
+| raw | 17 | 16 | 12 | 10 | 9 | 8 | 7 | 3 | 2 | 1 | 0 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| effective | 11 | 10 | 6 | 4 | 3 | 2 | 2 | 2 | 2 | 1 | 0 |
+
+- 序盤は12巡目相当まで十分に将来を見ます。
+- 12巡目相当を過ぎた終盤でも ExpectedSelfTsumoValue を完全には無効化せず、`late_min_future_draws = 2` により最低2回の将来自摸機会を残します。1向聴から `Progress → テンパイ → 1回のツモ和了機会` を最低限評価できる値です。`1` では最初のツモをテンパイ到達に使った時点で terminal の自摸機会が 0 になり、終盤の ExpectedSelfTsumoValue が実質的に無効になるため production には使いません。
+- effective は raw を超えません (`raw < late_min_future_draws` なら raw のまま)。`remaining_tiles` が unknown なら effective も unknown です。
+- `horizon_turn = 18` は従来の流局までの評価と同じ semantics です。
+
+変えるのは起点の自摸機会だけで、経路確率 (`SelfTsumoPath`)・`tsumo_hit_probability()`・terminal scoring の式は変えません。テンパイ到達までに使った自摸数は従来どおり effective 値から差し引くので、SameShanten を挟むほど terminal の自摸機会は1ずつ減ります。
+
+raw 値から effective 値への変換は `bot-logic` の pure helper (`soft_horizon_future_draws` / `SelfTsumoHorizon`) で、`bot-core` は self-tsumo facts を作る唯一の入口 (lookahead 入力の構築) でこれを適用します。したがって通常打牌の1向聴・2向聴・3向聴 continuation、現在聴牌の self-tsumo 値と継続比較、Call / Pass 比較 (1向聴 / 2向聴) はすべて同じ horizon を使い、1向聴だけ別 semantics になることはありません。Pass 側は reaction 元から求めた raw 値へ同じ変換を適用します。鳴きの打点要件 (speed required han) など self-tsumo facts 以外で使う残り自摸機会は raw 値のままです。
+
+horizon は live bot の設定としては公開していません。検証用には bot-scenario の [`--self-tsumo-horizon-turn` / `--self-tsumo-late-min-future-draws`](../bot-scenario.md#self-tsumo-soft-horizon-の上書き) で上書きできます。
 
 ### 深い候補評価の並列化
 
@@ -183,8 +216,8 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では�
 
 Pass は架空の現在打牌を作らず、「action 済みで次の自摸を待つ1向聴 state」から通常打牌後と
 同じ Progress / SameShanten 探索へ入ります。流局までの horizon は観測済みの reaction 元 player
-から Pass 後の最初の自摸位置を求めて揃えます。reaction 元または残り山が unknown なら値も
-unknown のままです。
+から Pass 後の最初の自摸位置を求めて揃え、Call 側と同じ soft horizon を適用します。reaction 元
+または残り山が unknown なら値も unknown のままです。
 
 Call 側と Pass 側は同じ1向聴 continuation の設定 (手変わり2回まで + exact same-state memo) で求めます。Call 側は鳴いた後の候補比較へ、Pass 側は次の自摸を待つ state の継続評価へ、どちらも同じ設定を明示的に適用します。片側だけ深い評価になって比較が尺度の違いを拾うことはありません。
 

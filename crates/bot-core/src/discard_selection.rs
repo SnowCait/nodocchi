@@ -2184,6 +2184,11 @@ fn production_lookahead_inputs<'a>(
 
 /// 通常打牌とは開始地点が異なる経路向けに、残り自摸機会を明示して同じ lookahead 入力を作る。
 /// その他の局面 fact と scoring evaluator は [`lookahead_inputs`] と共有する。
+///
+/// `own_future_draws` は流局までの raw な残り自摸機会で、self-tsumo facts へ渡す前にここで
+/// context の soft horizon ([`effective_own_future_draws`]) を適用する。self-tsumo facts を作る
+/// 経路はすべてこの入口を通るので、通常打牌・現在聴牌・Call / Pass・2向聴 / 3向聴の continuation
+/// が同じ horizon を使う。
 pub(crate) fn lookahead_inputs_with_own_future_draws<'a>(
     context: &'a GameContext,
     tiles: &'a [TileId],
@@ -2201,7 +2206,7 @@ pub(crate) fn lookahead_inputs_with_own_future_draws<'a>(
     .with_visible_tiles(context.visible_tiles())
     .with_prospective_valuator(valuator)
     .with_tsumo_valuator(valuator);
-    let inputs = match own_future_draws {
+    let inputs = match effective_own_future_draws(context, own_future_draws) {
         Some(draws) => inputs.with_own_future_draws(draws),
         None => inputs,
     };
@@ -2219,8 +2224,20 @@ pub(crate) fn lookahead_inputs_with_own_future_draws<'a>(
 /// 山の残枚数なので、ここで1枚引き直さない。
 ///
 /// 巡目や河の枚数からの推測はしない。exact な fact が無い局面では新しい軸を使わない。
-pub(crate) fn own_future_draws(context: &GameContext) -> Option<u32> {
+///
+/// これは流局までの raw な値で、self-tsumo continuation が実際に使う値は
+/// [`effective_own_future_draws`] で soft horizon を適用した後の値。
+pub fn own_future_draws(context: &GameContext) -> Option<u32> {
     Some(context.remaining_tiles()? / 4)
+}
+
+/// raw な残り自摸機会へ context の soft horizon ([`bot_logic::SelfTsumoHorizon`]) を適用した値。
+/// raw が unknown なら unknown のまま。
+pub fn effective_own_future_draws(
+    context: &GameContext,
+    raw_own_future_draws: Option<u32>,
+) -> Option<u32> {
+    raw_own_future_draws.map(|raw| context.self_tsumo_horizon().effective_future_draws(raw))
 }
 
 // 絞り込み済みの合法候補集合から既存の診断を構築する。診断と tracing ログはこの結果を共有する。
@@ -3012,6 +3029,8 @@ fn log_discard_candidate(candidate: &DiscardCandidateDiagnostic) {
 pub(crate) mod tests {
     use std::time::Duration;
 
+    use bot_logic::SelfTsumoHorizon;
+
     use super::*;
     use crate::context::TableStateFacts;
     use crate::decision_timing::ForwardMetricsPhaseDurations;
@@ -3407,7 +3426,7 @@ pub(crate) mod tests {
         let selected = selection
             .iishanten_forward_metrics
             .expect("1向聴の前方集計値がある");
-        assert_eq!(selected.expected_self_tsumo_value, Some(1_031_805_837));
+        assert_eq!(selected.expected_self_tsumo_value, Some(681_306_057));
 
         // 同じ候補を fallback (選択の値を持たない入口) で評価した値。この入口は選択の値を
         // 渡さないため、必ず後追いの1候補評価を通る。
@@ -6719,9 +6738,9 @@ pub(crate) mod tests {
         assert_ne!(next_discard_after("2m"), tile("2m"));
 
         // 1向聴 self-tsumo 軸は 5p / 9p のどちらも確定でき、production の追加深度では 5p が
-        // 9p を上回る。手変わり1回までの旧設定では 9p が選ばれていた候補で、深度を上げた
-        // 効果がそのまま最終打牌に出る。
-        let value_of = |discard: &str| {
+        // 9p を上回る。流局までの horizon で手変わり1回までの旧設定を使うと 9p が選ばれていた
+        // 候補。
+        let value_of = |selection: &DiscardActionSelectionWithDiagnostic, discard: &str| {
             selection
                 .diagnostic
                 .candidates
@@ -6731,10 +6750,23 @@ pub(crate) mod tests {
                 .expected_self_tsumo_value
                 .expect("self-tsumo continuation を確定できる")
         };
-        assert_eq!(value_of("5p"), 1_031_805_837);
-        assert_eq!(value_of("9p"), 989_272_961);
-        assert!(value_of("5p") > value_of("9p"));
+        assert_eq!(value_of(&selection, "5p"), 681_306_057);
+        assert_eq!(value_of(&selection, "9p"), 652_767_943);
+        assert!(value_of(&selection, "5p") > value_of(&selection, "9p"));
         assert_eq!(selected_discard(&context, &actions), "5p");
+
+        // horizon 18 は流局までの従来の値。
+        let legacy = context
+            .clone()
+            .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+        let legacy_selection = select_discard_action_with_diagnostic(
+            &legacy,
+            &actions,
+            LookaheadDiagnosticScope::None,
+        );
+        assert_eq!(value_of(&legacy_selection, "5p"), 1_031_805_837);
+        assert_eq!(value_of(&legacy_selection, "9p"), 989_272_961);
+        assert_eq!(selected_discard(&legacy, &actions), "5p");
     }
 
     fn two_shanten_ev_regression_context() -> (GameContext, Vec<LegalAction>) {
@@ -7081,9 +7113,9 @@ pub(crate) mod tests {
         };
 
         // 全 ForwardTargets を同じ Progress-only 尺度で順位付けする。
-        assert_eq!(value("5m"), 66_307_421);
-        assert_eq!(value("8m"), 70_251_801);
-        assert_eq!(value("9s"), 67_676_242);
+        assert_eq!(value("5m"), 40_579_757);
+        assert_eq!(value("8m"), 43_237_279);
+        assert_eq!(value("9s"), 41_878_243);
         assert!(value("8m") > value("9s") && value("9s") > value("5m"));
         assert_eq!(metrics.two_shanten.full_pair, None);
 
@@ -7119,7 +7151,7 @@ pub(crate) mod tests {
             &metrics.two_shanten,
             &[],
         );
-        for (discard, expected) in [("8m", 70_251_801), ("9s", 67_676_242), ("5m", 66_307_421)] {
+        for (discard, expected) in [("8m", 43_237_279), ("9s", 41_878_243), ("5m", 40_579_757)] {
             let candidate = diagnostic
                 .candidates
                 .iter()
@@ -7310,5 +7342,172 @@ pub(crate) mod tests {
 
         let (unknown_wall, _) = value_context(&SELF_TSUMO_FLIP_HAND, "1p");
         assert_eq!(own_future_draws(&unknown_wall), None);
+    }
+
+    fn self_tsumo_facts_of(context: &GameContext) -> Option<bot_logic::SelfTsumoFacts> {
+        let valuator = ProductionProspectiveValuator::new(context);
+        lookahead_inputs(
+            context,
+            context.hand_tiles(),
+            &valuator,
+            LookaheadDiagnosticScope::None,
+        )
+        .self_tsumo_facts()
+    }
+
+    fn with_horizon(
+        context: &GameContext,
+        horizon_turn: u32,
+        late_min_future_draws: u32,
+    ) -> GameContext {
+        context.clone().with_self_tsumo_horizon(SelfTsumoHorizon {
+            horizon_turn,
+            late_min_future_draws,
+        })
+    }
+
+    #[test]
+    fn the_self_tsumo_facts_use_the_production_soft_horizon() {
+        let (context, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        assert_eq!(context.self_tsumo_horizon(), SelfTsumoHorizon::PRODUCTION);
+        assert_eq!(own_future_draws(&context), Some(15));
+        assert_eq!(
+            effective_own_future_draws(&context, own_future_draws(&context)),
+            Some(9)
+        );
+        assert_eq!(
+            self_tsumo_facts_of(&context).map(|facts| facts.own_future_draws),
+            Some(9)
+        );
+
+        for (remaining_tiles, effective) in [(40, 4), (32, 2), (20, 2), (8, 2), (7, 1), (3, 0)] {
+            let (context, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", remaining_tiles);
+            assert_eq!(
+                self_tsumo_facts_of(&context).map(|facts| facts.own_future_draws),
+                Some(effective),
+                "remaining {remaining_tiles}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_until_ryukyoku_horizon_keeps_the_raw_own_future_draws() {
+        // horizon 18 は従来の floor(remaining_tiles / 4) と同じ自摸機会になる。
+        for remaining_tiles in [69, 60, 33, 12, 7, 4, 3, 0] {
+            let (context, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", remaining_tiles);
+            let legacy = context
+                .clone()
+                .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+            assert_eq!(
+                self_tsumo_facts_of(&legacy).map(|facts| facts.own_future_draws),
+                Some(remaining_tiles / 4),
+                "remaining {remaining_tiles}"
+            );
+            assert_eq!(
+                self_tsumo_facts_of(&with_horizon(&context, 18, 2)),
+                self_tsumo_facts_of(&legacy)
+            );
+        }
+    }
+
+    #[test]
+    fn the_effective_own_future_draws_follow_the_horizon_turn() {
+        let (context, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 64);
+        let draws = |turn| {
+            self_tsumo_facts_of(&with_horizon(&context, turn, 2))
+                .map(|facts| facts.own_future_draws)
+        };
+        assert_eq!(
+            [12, 14, 16, 18].map(draws),
+            [Some(10), Some(12), Some(14), Some(16)]
+        );
+
+        let (late, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 28);
+        let draws = |turn| {
+            self_tsumo_facts_of(&with_horizon(&late, turn, 2)).map(|facts| facts.own_future_draws)
+        };
+        assert_eq!(
+            [12, 14, 16, 18].map(draws),
+            [Some(2), Some(3), Some(5), Some(7)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_wall_stays_unknown_under_any_horizon() {
+        let (unknown_wall, _) = value_context(&SELF_TSUMO_FLIP_HAND, "1p");
+        for horizon_turn in [0, 12, 18] {
+            let context = with_horizon(&unknown_wall, horizon_turn, 2);
+            assert_eq!(
+                effective_own_future_draws(&context, own_future_draws(&context)),
+                None
+            );
+            assert_eq!(self_tsumo_facts_of(&context), None);
+        }
+    }
+
+    #[test]
+    fn a_longer_horizon_never_lowers_the_iishanten_expected_self_tsumo_value() {
+        let (base, actions) = same_shanten_next_discard_regression_context();
+        let values = |turn| {
+            let context = with_horizon(&base, turn, 2);
+            let legal = legal_discard_evaluations(&context, &actions);
+            let valuator = ProductionProspectiveValuator::new(&context);
+            forward_metrics(
+                &lookahead_inputs(
+                    &context,
+                    &legal.tiles,
+                    &valuator,
+                    LookaheadDiagnosticScope::None,
+                ),
+                &legal.evaluations,
+            )
+            .iter()
+            .map(|metric| metric.expected_self_tsumo_value)
+            .collect::<Vec<_>>()
+        };
+        let by_turn = [12, 14, 16, 18].map(values);
+        assert!(by_turn[0].iter().any(Option::is_some));
+        for pair in by_turn.windows(2) {
+            for (shorter, longer) in pair[0].iter().zip(&pair[1]) {
+                assert_eq!(shorter.is_some(), longer.is_some());
+                assert!(shorter <= longer, "{shorter:?} > {longer:?}");
+            }
+            assert!(
+                pair[0]
+                    .iter()
+                    .zip(&pair[1])
+                    .any(|(shorter, longer)| shorter < longer)
+            );
+        }
+    }
+
+    #[test]
+    fn the_soft_horizon_only_shifts_the_starting_own_draws() {
+        // 経路確率も terminal scoring も変えないので、horizon 12 の値は自摸機会が同じになる
+        // horizon 18 の値と一致する。
+        let (production, actions) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 60);
+        let (legacy, _) = self_tsumo_context(&SELF_TSUMO_FLIP_HAND, "1p", 36);
+        let legacy = legacy.with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
+        let metrics = |context: &GameContext| {
+            let legal = legal_discard_evaluations(context, &actions);
+            let valuator = ProductionProspectiveValuator::new(context);
+            forward_metrics(
+                &lookahead_inputs(
+                    context,
+                    &legal.tiles,
+                    &valuator,
+                    LookaheadDiagnosticScope::None,
+                ),
+                &legal.evaluations,
+            )
+            .iter()
+            .map(|metric| metric.expected_self_tsumo_value)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            self_tsumo_facts_of(&production),
+            self_tsumo_facts_of(&legacy)
+        );
+        assert_eq!(metrics(&production), metrics(&legacy));
     }
 }

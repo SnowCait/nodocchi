@@ -306,7 +306,7 @@ mod tests {
     use super::*;
     use crate::context::{GameContext, TableStateFacts};
     use crate::shanten_test_support::{dahai, tile};
-    use bot_logic::{HistoryFuritenFacts, TileId, forward_metrics_for_candidate};
+    use bot_logic::{HistoryFuritenFacts, SelfTsumoHorizon, TileId, forward_metrics_for_candidate};
 
     // 調査対象の1向聴局面 34567899m5799p34s。ドラ表示 3m / 場風 E / 自風 N / player 0 / oya 1 /
     // remaining 66 / 履歴フリテンなしで、bot-scenario の inline baseline と同じ facts になる。
@@ -337,7 +337,10 @@ mod tests {
         .with_history_furiten_facts(HistoryFuritenFacts {
             same_turn: Some(false),
             riichi_missed_win: Some(false),
-        });
+        })
+        // 深度 A/B の差を固定値で見る fixture なので、流局までの horizon で評価する。production
+        // の soft horizon では A も 5p を選び、深度による選択の差は出ない。
+        .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
         // 合法打牌を絞ると評価する候補だけが減り、候補1件あたりの探索も値も変わらない。
         // 追加深度の探索は重いので、比較対象の 5p / 9p だけを残す。
         let actions = [53, 68].iter().map(|&value| dahai(value)).collect();

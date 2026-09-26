@@ -2606,9 +2606,9 @@ mod tests {
 
     use bot_logic::{
         DiscardLookaheadDiagnostic, DrawLookaheadDiagnostic, DrawTransition, EffectiveAcceptance,
-        MeldShape, ProspectiveTenpai, ProspectiveTenpaiValuator, ThreeShantenSearchStats,
-        forward_metrics_with_lookahead_for_candidate, prospective_branch_root_tiles,
-        prospective_branch_tiles_after_draw,
+        MeldShape, ProspectiveTenpai, ProspectiveTenpaiValuator, SelfTsumoHorizon,
+        ThreeShantenSearchStats, forward_metrics_with_lookahead_for_candidate,
+        prospective_branch_root_tiles, prospective_branch_tiles_after_draw,
     };
 
     use crate::discard_selection::{
@@ -2750,8 +2750,9 @@ mod tests {
     fn an_iishanten_call_with_a_higher_expected_self_tsumo_value_is_selected() {
         // 門前のまま進めた方が手変わりの経路を多く持つため、Call が上回るのは残り自摸機会が
         // 少ない局面。1向聴 continuation の深度はどちらの側も production のものを使う。
+        // 残り 36 枚は production の soft horizon で Call / Pass とも自摸機会 3 回になる。
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 12);
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 36);
         let (decision, candidate) = single_candidate(&ctx, &action, true);
         let comparison = candidate.iishanten_self_tsumo.expect("comparison");
 
@@ -2817,7 +2818,9 @@ mod tests {
         // どちらも production の手変わり深度で、片側だけ旧 shallow へ戻ると値が動く局面を使う
         // (手変わり1回までの旧設定では pass 176.885897 / call 165.908530 になる)。
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
-        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63);
+        // 値は流局までの horizon で固定する。
+        let ctx = valued_reaction_context(&IISHANTEN_PON_HAND, IISHANTEN_PON_TARGET, 1, 63)
+            .with_self_tsumo_horizon(SelfTsumoHorizon::UNTIL_RYUKYOKU);
         let (_, candidate) = single_candidate(&ctx, &action, true);
         let comparison = candidate.iishanten_self_tsumo.expect("comparison");
 
@@ -2830,6 +2833,81 @@ mod tests {
             comparison.call_expected_self_tsumo_value,
             Some(239_138_199),
             "call",
+        );
+    }
+
+    #[test]
+    fn the_call_and_pass_share_the_soft_horizon() {
+        // Call 後の floor(remaining / 4) と Pass 後の 1 + (remaining - distance) / 4 のどちらにも
+        // 同じ soft horizon が掛かる。horizon 12 で残り 63 枚の局面は、どちらの側も horizon 18
+        // で残り 39 枚の局面と同じ自摸機会 (Call 9 / Pass 10) になり、値も一致する。
+        let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
+        let values = |remaining_tiles, horizon: SelfTsumoHorizon| {
+            let ctx = valued_reaction_context(
+                &IISHANTEN_PON_HAND,
+                IISHANTEN_PON_TARGET,
+                1,
+                remaining_tiles,
+            )
+            .with_self_tsumo_horizon(horizon);
+            let (_, candidate) = single_candidate(&ctx, &action, false);
+            let comparison = candidate.iishanten_self_tsumo.expect("comparison");
+            (
+                comparison.call_expected_self_tsumo_value,
+                comparison.pass_expected_self_tsumo_value,
+            )
+        };
+        let horizon = |horizon_turn| SelfTsumoHorizon {
+            horizon_turn,
+            late_min_future_draws: 2,
+        };
+
+        let production = values(63, SelfTsumoHorizon::PRODUCTION);
+        assert_eq!(production, values(39, SelfTsumoHorizon::UNTIL_RYUKYOKU));
+        assert_eq!(
+            values(63, horizon(18)),
+            values(63, SelfTsumoHorizon::UNTIL_RYUKYOKU)
+        );
+        assert_eq!(
+            values(63, horizon(18)),
+            (Some(239_138_199), Some(284_875_812))
+        );
+
+        let by_turn = [12, 14, 16, 18].map(|turn| values(63, horizon(turn)));
+        assert_eq!(by_turn[0], production);
+        for pair in by_turn.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "call {pair:?}");
+            assert!(pair[0].1 < pair[1].1, "pass {pair:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_shanten_call_and_pass_share_the_soft_horizon() {
+        // 2向聴 Pass の Full evaluation と、Call 後の1向聴 continuation も同じ horizon を使う。
+        let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
+        let values = |remaining_tiles, horizon| {
+            let ctx = valued_two_shanten_reaction_context(
+                &TWO_SHANTEN_CALL_PON_HAND,
+                TWO_SHANTEN_CALL_PON_TARGET,
+                Some(1),
+                Some(remaining_tiles),
+            )
+            .with_self_tsumo_horizon(horizon);
+            let (_, candidate) = single_candidate(&ctx, &action, false);
+            let comparison = candidate.two_shanten_self_tsumo.expect("比較対象");
+            (
+                comparison.call_expected_self_tsumo_value,
+                comparison.pass_expected_self_tsumo_value,
+            )
+        };
+
+        assert_eq!(
+            values(56, SelfTsumoHorizon::PRODUCTION),
+            values(32, SelfTsumoHorizon::UNTIL_RYUKYOKU)
+        );
+        assert_eq!(
+            values(32, SelfTsumoHorizon::UNTIL_RYUKYOKU),
+            (Some(4_103_395_595), Some(189_935_840))
         );
     }
 
@@ -4816,7 +4894,7 @@ mod tests {
             &TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,
             Some(1),
-            Some(32),
+            Some(56),
         );
         let action = pon_action(TWO_SHANTEN_CALL_PON_TARGET, &TWO_SHANTEN_CALL_PON_CONSUMED);
         let (_, candidate) = single_candidate(&ctx, &action, true);
@@ -4842,7 +4920,7 @@ mod tests {
             &TWO_SHANTEN_CALL_PON_HAND,
             TWO_SHANTEN_CALL_PON_TARGET,
             Some(1),
-            Some(32),
+            Some(56),
         );
         let counts = TileCounts::from_tiles(ctx.hand_tiles().iter().copied());
         let acceptance = calculate_acceptance_with_fixed_melds_and_visible_tiles(
@@ -5720,7 +5798,7 @@ mod tests {
             two_shanten_yakuless_chi_melds(),
             TWO_SHANTEN_YAKULESS_CHI_TARGET,
             Some(1),
-            Some(32),
+            Some(56),
         );
         let action = chi_action(
             TWO_SHANTEN_YAKULESS_CHI_TARGET,

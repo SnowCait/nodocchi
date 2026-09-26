@@ -1,4 +1,4 @@
-use bot_logic::{FixedMeldCount, HistoryFuritenFacts, TileId, TileType};
+use bot_logic::{FixedMeldCount, HistoryFuritenFacts, SelfTsumoHorizon, TileId, TileType};
 
 use crate::meld::{Meld, fixed_meld_count};
 
@@ -115,6 +115,9 @@ pub struct GameContext {
     history_furiten: HistoryFuritenFacts,
     double_riichi: DoubleRiichiFacts,
     riichi_situation: RiichiSituationFacts,
+    // 観測事実ではなく self-tsumo continuation の評価設定。live bot は常に production 既定値で、
+    // 上書きするのは診断だけ。
+    self_tsumo_horizon: SelfTsumoHorizon,
 }
 
 impl GameContext {
@@ -323,6 +326,17 @@ impl GameContext {
     pub fn with_riichi_situation_facts(mut self, riichi_situation: RiichiSituationFacts) -> Self {
         self.riichi_situation = riichi_situation;
         self
+    }
+
+    /// self-tsumo continuation の soft horizon を差し替える。bot-scenario の検証専用で、live bot
+    /// は既定の [`SelfTsumoHorizon::PRODUCTION`] のまま使う。
+    pub fn with_self_tsumo_horizon(mut self, self_tsumo_horizon: SelfTsumoHorizon) -> Self {
+        self.self_tsumo_horizon = self_tsumo_horizon;
+        self
+    }
+
+    pub fn self_tsumo_horizon(&self) -> SelfTsumoHorizon {
+        self.self_tsumo_horizon
     }
 
     pub fn drawn_tile(&self) -> Option<TileId> {

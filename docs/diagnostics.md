@@ -298,7 +298,7 @@ validation だけで採用します。したがって `reason: EligibleAnkanAfte
 
 `--verbose` は候補の詳細、`--lookahead` は2手先の概要を追加します。2手先の概要は仮想ツモ牌を向聴数が下がるもの (`draws`) と維持するもの (`same-shanten`) に分けて種類数と残枚数を表示し、`--verbose` の牌ごとの詳細では `transition` にその分類を表示します。`--lookahead --verbose` では、1向聴候補の向聴数を維持する枝だけをテンパイまでもう1段追い、`downstream value` と候補ごとの `same-shanten downstream value` を追加します。指標と comparator の読み方は [打牌選択](ai/discard-selection.md) を参照してください。
 
-`Lookahead` の節の先頭には `self-tsumo continuation` として、その局面で共通の `unknown tiles` (自分から見て未確認の物理牌) と `current future own draws` (現在打牌後に自分へ残っている自摸機会) を表示します。材料が揃わない局面では `not evaluated` です。テンパイへ到達した枝には `tsumo continuation` として、`path probability` (その経路を引く確率) と `terminal tenpai` の内訳 (`mode` / `unknown tiles` / `future own draws` / `winning variants` / `hit probability` / `weighted tsumo payment` / `continuation value`)、およびその経路分の `path continuation value` を表示します。確率は 0〜1 の小数、打点は点数です。
+`Lookahead` の節の先頭には `self-tsumo continuation` として、その局面で共通の `unknown tiles` (自分から見て未確認の物理牌) と `current future own draws` (現在打牌後に自分へ残っている自摸機会) を表示します。`current future own draws` は `floor(remaining_tiles / 4)` の raw 値ではなく soft horizon を適用した effective 値で、raw 値と horizon 設定は `Self-tsumo horizon` の節に出ます ([打牌選択](ai/discard-selection.md#将来自摸機会の-soft-horizon) 参照)。材料が揃わない局面では `not evaluated` です。テンパイへ到達した枝には `tsumo continuation` として、`path probability` (その経路を引く確率) と `terminal tenpai` の内訳 (`mode` / `unknown tiles` / `future own draws` / `winning variants` / `hit probability` / `weighted tsumo payment` / `continuation value`)、およびその経路分の `path continuation value` を表示します。確率は 0〜1 の小数、打点は点数です。
 
 ## Two-shanten expected self-tsumo value
 

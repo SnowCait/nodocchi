@@ -30,6 +30,7 @@ use bot_core::{
     TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
     TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
     TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
+    discard_selection::{effective_own_future_draws, own_future_draws},
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
@@ -65,6 +66,7 @@ pub fn format_diagnostic(
     let mut sections = vec![
         format_scenario(scenario, verbose),
         format_table_state(&scenario.context),
+        format_self_tsumo_horizon(&scenario.context),
         format_history_furiten(diagnostic),
         format_final_decision(diagnostic),
         format_call(diagnostic.call.as_ref(), verbose),
@@ -285,6 +287,27 @@ pub(crate) fn format_table_state(context: &GameContext) -> String {
         ),
         format!("  scores: {}", format_scores(table_state.scores)),
         format!("  kyoku: {}", format_optional_count(table_state.kyoku)),
+    ]
+    .join("\n")
+}
+
+// self-tsumo continuation が使う将来自摸機会の soft horizon。raw は流局までの値で、effective
+// が self-tsumo facts に渡る値。
+pub(crate) fn format_self_tsumo_horizon(context: &GameContext) -> String {
+    let horizon = context.self_tsumo_horizon();
+    let raw = own_future_draws(context);
+    [
+        "Self-tsumo horizon".to_string(),
+        format!("  horizon turn: {}", horizon.horizon_turn),
+        format!(
+            "  late minimum future draws: {}",
+            horizon.late_min_future_draws
+        ),
+        format!("  raw future own draws: {}", format_optional_count(raw)),
+        format!(
+            "  effective future own draws: {}",
+            format_optional_count(effective_own_future_draws(context, raw))
+        ),
     ]
     .join("\n")
 }
@@ -4403,9 +4426,9 @@ mod tests {
         assert_eq!(action_label(&diagnostic.selected_action), "8m");
 
         for (discard, expected, formatted) in [
-            ("8m", 70_251_801, "70.251"),
-            ("9s", 67_676_242, "67.676"),
-            ("5m", 66_307_421, "66.307"),
+            ("8m", 43_237_279, "43.237"),
+            ("9s", 41_878_243, "41.878"),
+            ("5m", 40_579_757, "40.579"),
         ] {
             let candidate = cohort_candidate(&diagnostic, discard);
             assert_eq!(
@@ -4439,13 +4462,13 @@ mod tests {
         assert!(summary.contains("  choice 1: 8m"), "{summary}");
         assert!(
             summary.contains(
-                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 70.251 > choice 2 67.676"
+                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 43.237 > choice 2 41.878"
             ),
             "{summary}"
         );
         assert!(
             summary.contains(
-                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 67.676 > choice 3 66.307"
+                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 41.878 > choice 3 40.579"
             ),
             "{summary}"
         );
@@ -7422,11 +7445,11 @@ mod tests {
             "{reach_section}"
         );
         assert!(
-            reach_section.contains("    reach now: 1460.235"),
+            reach_section.contains("    reach now: 994.783"),
             "{reach_section}"
         );
         assert!(
-            reach_section.contains("      forced Reach: 2094.467"),
+            reach_section.contains("      forced Reach: 1478.969"),
             "{reach_section}"
         );
         assert!(summary.contains("  reach: deferred"), "{summary}");
@@ -9634,11 +9657,12 @@ mod tests {
         );
 
         // 局面共通の未確認牌と残り自摸機会を節の先頭に1回だけ出す。
-        // 手牌14枚 + ドラ表示牌1枚が見えているので未確認は 121枚。残り山 60枚を4人で分ける。
+        // 手牌14枚 + ドラ表示牌1枚が見えているので未確認は 121枚。残り山 60枚を4人で分けた
+        // 15回へ production の soft horizon を適用して 9回。
         let facts = [
             "  self-tsumo continuation",
             "    unknown tiles: 121",
-            "    current future own draws: 15",
+            "    current future own draws: 9",
         ]
         .join("\n");
         assert!(lookahead.contains(&facts), "{lookahead}");
@@ -9650,7 +9674,7 @@ mod tests {
             "          terminal tenpai",
             "            mode: Reach",
             "            unknown tiles: 120",
-            "            future own draws: 14",
+            "            future own draws: 8",
         ]
         .join("\n");
         assert!(lookahead.contains(&branch), "{lookahead}");

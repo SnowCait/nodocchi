@@ -23,7 +23,7 @@
 //! ```text
 //! U = 自分から見て未確認の物理牌
 //! W = ツモ和了できる live physical winning variant の残枚数合計
-//! n = そこから流局までに残っている自分の自摸機会
+//! n = そこから残っている自分の自摸機会 (soft horizon 適用後)
 //! ```
 //!
 //! とすると、`n` 回以内に少なくとも1枚 winning variant を引く確率は
@@ -33,6 +33,12 @@
 //! ```
 //!
 //! になる。`W == 0` と `n == 0` は 0、`n > U - W` は 1、`n > U` は `n = U` として扱う。
+//!
+//! # soft horizon
+//!
+//! `n` の起点は流局までの raw の自摸機会ではなく、[`SelfTsumoHorizon`] で短くした値。他家和了・
+//! 放銃などによる局の途中終了を直接モデル化する代わりの近似で、経路確率・`P_hit`・terminal
+//! scoring の式は変えず、起点の自摸機会だけを変える。
 //!
 //! # 固定小数点
 //!
@@ -46,6 +52,77 @@ pub const TSUMO_PROBABILITY_SCALE: u64 = 1_000_000_000_000;
 /// 期待支払いの固定小数点スケール。`SELF_TSUMO_VALUE_SCALE` が 1 点を表す。
 pub const SELF_TSUMO_VALUE_SCALE: u64 = 1_000_000;
 
+/// 従来の流局までの horizon とみなす巡目。`horizon_turn` がこれ以上なら soft horizon は raw の
+/// 自摸機会をそのまま返す。
+pub const UNTIL_RYUKYOKU_HORIZON_TURN: u32 = 18;
+
+/// self-tsumo continuation が見る将来の自摸機会の soft horizon。
+///
+/// 他家和了・放銃などによる局の途中終了を直接モデル化する代わりに、self-tsumo continuation の
+/// 将来 horizon を短くする近似で、「`horizon_turn` 巡目で局が終わる」モデルではない。
+/// 流局までを [`UNTIL_RYUKYOKU_HORIZON_TURN`] 巡相当とみなし、その差だけ raw の自摸機会を減らす。
+/// `horizon_turn` 巡目相当を過ぎても `late_min_future_draws` 回までは残すので、終盤でも近未来の
+/// self-tsumo 評価は無効にならない。どの場合も raw を超えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfTsumoHorizon {
+    pub horizon_turn: u32,
+    pub late_min_future_draws: u32,
+}
+
+impl SelfTsumoHorizon {
+    /// production の既定値。
+    ///
+    /// `late_min_future_draws = 2` は、1向聴から `Progress -> テンパイ -> 1回のツモ和了機会` を
+    /// 最低限評価できる値。1 では最初のツモをテンパイ到達に使った時点で terminal の自摸機会が
+    /// 0 になり、終盤の ExpectedSelfTsumoValue が実質的に無効になる。
+    pub const PRODUCTION: Self = Self {
+        horizon_turn: 12,
+        late_min_future_draws: 2,
+    };
+
+    /// 流局までの自摸機会をすべて使う従来の semantics。
+    pub const UNTIL_RYUKYOKU: Self = Self {
+        horizon_turn: UNTIL_RYUKYOKU_HORIZON_TURN,
+        late_min_future_draws: 0,
+    };
+
+    /// raw の残り自摸機会へこの horizon を適用した値。
+    pub fn effective_future_draws(self, raw_future_draws: u32) -> u32 {
+        soft_horizon_future_draws(
+            raw_future_draws,
+            self.horizon_turn,
+            self.late_min_future_draws,
+        )
+    }
+}
+
+impl Default for SelfTsumoHorizon {
+    fn default() -> Self {
+        Self::PRODUCTION
+    }
+}
+
+/// raw の残り自摸機会 (流局まで) を soft horizon で短くした自摸機会。
+///
+/// ```text
+/// horizon_reduction = 18 - horizon_turn
+/// effective = min(raw, max(raw - horizon_reduction, late_min_future_draws))
+/// ```
+///
+/// 減算はどちらも 0 で止める。`horizon_turn >= 18` では raw のまま。
+pub fn soft_horizon_future_draws(
+    raw_future_draws: u32,
+    horizon_turn: u32,
+    late_min_future_draws: u32,
+) -> u32 {
+    let horizon_reduction = UNTIL_RYUKYOKU_HORIZON_TURN.saturating_sub(horizon_turn);
+    raw_future_draws.min(
+        raw_future_draws
+            .saturating_sub(horizon_reduction)
+            .max(late_min_future_draws),
+    )
+}
+
 /// terminal tenpai 到達時点の、自分の自摸機会に関する事実。
 ///
 /// どちらも現在打牌後の値で、仮想ツモを1回進めるごとに1ずつ減る。
@@ -53,7 +130,8 @@ pub const SELF_TSUMO_VALUE_SCALE: u64 = 1_000_000;
 pub struct SelfTsumoFacts {
     /// 現在打牌後に自分から見て未確認の物理牌の総数 `U0`。山の残枚数ではない。
     pub unknown_tiles: u32,
-    /// 現在打牌後に自分へ残っている自摸機会。
+    /// 現在打牌後に自分へ残っている自摸機会。流局までの raw 値ではなく、[`SelfTsumoHorizon`]
+    /// を適用した後の値。
     pub own_future_draws: u32,
 }
 
@@ -394,6 +472,140 @@ mod tests {
     fn a_path_without_an_unknown_pool_has_no_probability() {
         assert_eq!(SelfTsumoPath::immediate(4, 0), None);
         assert_eq!(SelfTsumoPath::via_same_shanten(4, 4, 1), None);
+    }
+
+    #[test]
+    fn the_production_soft_horizon_shortens_raw_draws_with_a_late_minimum() {
+        let horizon = SelfTsumoHorizon::PRODUCTION;
+        assert_eq!(horizon, SelfTsumoHorizon::default());
+        assert_eq!(
+            (horizon.horizon_turn, horizon.late_min_future_draws),
+            (12, 2)
+        );
+        for (raw, effective) in [
+            (17, 11),
+            (16, 10),
+            (12, 6),
+            (10, 4),
+            (9, 3),
+            (8, 2),
+            (7, 2),
+            (3, 2),
+            (2, 2),
+            (1, 1),
+            (0, 0),
+        ] {
+            assert_eq!(horizon.effective_future_draws(raw), effective, "raw {raw}");
+        }
+    }
+
+    #[test]
+    fn the_until_ryukyoku_horizon_keeps_the_raw_draws() {
+        for raw in 0..=20 {
+            assert_eq!(
+                SelfTsumoHorizon::UNTIL_RYUKYOKU.effective_future_draws(raw),
+                raw
+            );
+            // horizon 18 は late minimum に依らず従来どおり。
+            for late_min in 0..=4 {
+                assert_eq!(soft_horizon_future_draws(raw, 18, late_min), raw);
+            }
+            assert_eq!(soft_horizon_future_draws(raw, 20, 2), raw);
+        }
+    }
+
+    #[test]
+    fn the_soft_horizon_never_exceeds_the_raw_draws() {
+        for horizon_turn in 0..=20 {
+            for late_min in 0..=5 {
+                for raw in 0..=20 {
+                    let effective = soft_horizon_future_draws(raw, horizon_turn, late_min);
+                    assert!(effective <= raw, "{horizon_turn} {late_min} {raw}");
+                    assert!(
+                        effective >= raw.min(late_min),
+                        "{horizon_turn} {late_min} {raw}"
+                    );
+                }
+            }
+        }
+        // raw < late_min では raw のまま。
+        assert_eq!(soft_horizon_future_draws(1, 12, 2), 1);
+        assert_eq!(soft_horizon_future_draws(0, 12, 2), 0);
+        assert_eq!(soft_horizon_future_draws(2, 12, 3), 2);
+    }
+
+    #[test]
+    fn the_effective_draws_grow_with_the_horizon_turn() {
+        let effective = |horizon_turn, raw| soft_horizon_future_draws(raw, horizon_turn, 2);
+        assert_eq!(
+            [12, 14, 16, 18].map(|turn| effective(turn, 16)),
+            [10, 12, 14, 16]
+        );
+        assert_eq!(
+            [12, 14, 16, 18].map(|turn| effective(turn, 8)),
+            [2, 4, 6, 8]
+        );
+        assert_eq!(
+            [12, 14, 16, 18].map(|turn| effective(turn, 4)),
+            [2, 2, 2, 4]
+        );
+        assert_eq!(
+            [12, 14, 16, 18].map(|turn| effective(turn, 1)),
+            [1, 1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn a_late_minimum_of_two_leaves_one_draw_after_the_progress() {
+        let terminal = TenpaiTsumoValue {
+            winning_remaining: 4,
+            weighted_total: 4 * 3900,
+        };
+        let progress = SelfTsumoPath::immediate(8, 100).expect("経路を作れる");
+        let facts = |horizon: SelfTsumoHorizon| SelfTsumoFacts {
+            unknown_tiles: 100,
+            own_future_draws: horizon.effective_future_draws(5),
+        };
+
+        let production = facts(SelfTsumoHorizon::PRODUCTION);
+        assert_eq!(production.own_future_draws, 2);
+        assert_eq!(progress.terminal_own_future_draws(production), 1);
+        assert!(progress.expected_payment(production, terminal) > 0);
+
+        // late minimum 1 では Progress でテンパイした時点で自摸機会が残らない。
+        let late_one = facts(SelfTsumoHorizon {
+            horizon_turn: 12,
+            late_min_future_draws: 1,
+        });
+        assert_eq!(late_one.own_future_draws, 1);
+        assert_eq!(progress.terminal_own_future_draws(late_one), 0);
+        assert_eq!(progress.expected_payment(late_one, terminal), 0);
+    }
+
+    #[test]
+    fn same_shanten_steps_consume_the_effective_draws() {
+        let facts = SelfTsumoFacts {
+            unknown_tiles: 100,
+            own_future_draws: SelfTsumoHorizon::PRODUCTION.effective_future_draws(10),
+        };
+        assert_eq!(facts.own_future_draws, 4);
+        let immediate = SelfTsumoPath::immediate(4, 100).expect("経路を作れる");
+        let once = SelfTsumoPath::via_same_shanten(4, 4, 100).expect("経路を作れる");
+        let twice = SelfTsumoPath::via_same_shanten_twice(4, 4, 4, 100).expect("経路を作れる");
+        assert_eq!(
+            [immediate, once, twice].map(|path| path.terminal_own_future_draws(facts)),
+            [3, 2, 1]
+        );
+
+        let late = SelfTsumoFacts {
+            own_future_draws: SelfTsumoHorizon::PRODUCTION.effective_future_draws(6),
+            ..facts
+        };
+        assert_eq!(late.own_future_draws, 2);
+        assert_eq!(
+            [immediate, once, twice].map(|path| path.terminal_own_future_draws(late)),
+            [1, 0, 0]
+        );
     }
 
     #[test]

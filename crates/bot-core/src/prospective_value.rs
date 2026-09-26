@@ -1592,7 +1592,8 @@ mod tests {
     use crate::context::{DoubleRiichiFacts, TableStateFacts};
     use crate::damaten_value::DAMATEN_MIN_TOTAL;
     use crate::discard_selection::{
-        LookaheadDiagnosticScope, lookahead_inputs, select_discard_action_with_diagnostic,
+        LookaheadDiagnosticScope, lookahead_inputs, own_future_draws,
+        select_discard_action_with_diagnostic,
     };
     use crate::meld::MeldKind;
     use crate::offense_value::current_reach_riichi_status;
@@ -3311,7 +3312,8 @@ mod tests {
 
     #[test]
     fn the_iishanten_candidates_share_the_same_unknown_pool() {
-        // 未確認牌の総数は打牌候補によらず同じで、残り自摸機会は山の残枚数の4分の1。
+        // 未確認牌の総数は打牌候補によらず同じで、残り自摸機会は山の残枚数の4分の1に soft
+        // horizon を適用した値。
         let case = &*TSUMO_RED_FIVE;
         let tiles: Vec<TileId> = hand_tiles(&case.ctx);
         let valuator = ProductionProspectiveValuator::new(&case.ctx);
@@ -3319,7 +3321,8 @@ mod tests {
             .self_tsumo_facts()
             .expect("材料が揃っている");
 
-        assert_eq!(facts.own_future_draws, 15);
+        assert_eq!(own_future_draws(&case.ctx), Some(15));
+        assert_eq!(facts.own_future_draws, 9);
         // 手牌14枚 + ドラ表示牌1枚が見えている。
         assert_eq!(facts.unknown_tiles, 121);
     }

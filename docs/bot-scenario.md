@@ -136,6 +136,34 @@ cargo run -p bot-scenario -- \
   --two-shanten-self-tsumo
 ```
 
+### self-tsumo soft horizon の上書き
+
+self-tsumo continuation が見る将来の自摸機会は、`floor(remaining_tiles / 4)` の raw future own draws へ soft horizon を適用した effective future own draws です。これは「その巡目で局が終わる」というモデルではなく、他家和了等による局の途中終了を直接モデル化する代わりに将来 horizon を短くする近似です ([打牌選択](ai/discard-selection.md#将来自摸機会の-soft-horizon) 参照)。production の既定値は `horizon_turn = 12` / `late_min_future_draws = 2` で、live bot の設定としては公開していません。
+
+検証用に次の option で上書きできます。
+
+| option | 意味 | production |
+|---|---|---|
+| `--self-tsumo-horizon-turn <TURN>` | 18巡相当の流局 horizon から `18 - TURN` だけ raw を短くする | 12 |
+| `--self-tsumo-late-min-future-draws <COUNT>` | horizon を過ぎた終盤にも残す最低自摸機会 (raw は超えない) | 2 |
+
+`--self-tsumo-horizon-turn 18` は従来の流局までの評価と同じ semantics です。上書きは scenario の context へ載るので、通常打牌・現在聴牌・Call / Pass のどの self-tsumo continuation にも同じ値が効きます。inline `--hand`、JSON scenario、`--riichilab-capture` の単一 request で使え、capture 一括の option (`--benchmark-riichilab-capture` / `--compare-*`) とは併用できません。
+
+通常の診断出力には `Self-tsumo horizon` section が入り、horizon turn・late minimum future draws・raw / effective future own draws を表示します。`remaining_tiles` が unknown なら raw / effective とも `unknown` です。
+
+同じ scenario で horizon を変えて比較するには、option だけを変えて実行します。
+
+```sh
+for turn in 12 14 16 18; do
+  cargo run --release -p bot-scenario -- \
+    --hand '34567899m5799p34s' --dora-indicator 3m \
+    --round-wind E --seat-wind N --player-id 0 --oya 1 --remaining-tiles 30 \
+    --self-tsumo-horizon-turn "$turn"
+done
+```
+
+この局面 (raw 7) では effective future own draws が 2 / 3 / 5 / 7 と変わり、各1向聴候補の `expected self-tsumo value` は horizon が長いほど単調に増えます。horizon 12 / 14 では 9p、16 / 18 では 5p が選ばれます。`--remaining-tiles 66` (raw 16 → effective 10 / 12 / 14 / 16) ではどの horizon でも 5p です。
+
 ### 3向聴 Progress-only 診断
 
 `--three-shanten-progress-self-tsumo` は、production の3向聴打牌比較が使う値をそのまま全候補分表示する診断 option です。値の evaluator は production と共通で、診断専用の実装は持ちません。3→2、2→1、1→0 のいずれも Progress のみを追います。1向聴を直接評価する通常の ExpectedSelfTsumoValue は変わらず SameShanten も追いますが、3向聴起点の continuation では追いません。次打牌の比較、確率、terminal scoring、Reach/Damaten も既存処理と共通で、unknown は `unknown` と表示します。
