@@ -906,6 +906,13 @@ fn format_normal_discard_candidate(
         "  expected self-tsumo value: {}",
         format_self_tsumo_value(candidate.expected_self_tsumo_value)
     ));
+    // 1向聴 StableOrder fallback が比較に使った cohort の候補だけに出す。
+    if let Some(value) = candidate.until_ryukyoku_expected_self_tsumo_value {
+        lines.push(format!(
+            "  stable-order fallback self-tsumo value (until ryukyoku): {}",
+            format_self_tsumo_value(Some(value))
+        ));
+    }
     lines.push(format!(
         "  two-shanten progress self-tsumo value: {}",
         if evaluation.min_shanten_after_discard() == 2 {

@@ -184,6 +184,8 @@ impl ShantenAgent {
         );
         let two_shanten_self_tsumo_candidates = timing.take_two_shanten_self_tsumo_candidates();
         let iishanten_forward_candidates = timing.take_iishanten_forward_candidates();
+        let iishanten_stable_order_fallback_candidates =
+            timing.take_iishanten_stable_order_fallback_candidates();
         let call_candidates = timing.take_call_candidates();
         let phases = timing.finish();
         log_agent_decision(&decision);
@@ -192,6 +194,7 @@ impl ShantenAgent {
             phases,
             two_shanten_self_tsumo_candidates,
             iishanten_forward_candidates,
+            iishanten_stable_order_fallback_candidates,
             call_candidates,
         }
     }

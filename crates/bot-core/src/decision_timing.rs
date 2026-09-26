@@ -115,6 +115,10 @@ pub struct NormalDiscardPhaseDurations {
     /// production comparator が評価する3向聴 Progress-only self-tsumo value。
     /// 対象外の局面では `Duration::ZERO` のままになる。
     pub three_shanten_self_tsumo: Duration,
+    /// 1向聴 StableOrder fallback が cohort の候補を `UNTIL_RYUKYOKU` で評価した時間。
+    /// fallback が発火しなかった局面では `Duration::ZERO` のままになる。cohort の抽出そのものは
+    /// `selection_finalize` に入る。
+    pub iishanten_stable_order_fallback: Duration,
     /// 残りの補助評価 (現在聴牌候補の待ち / 打点 / ツモ期待値) と候補比較・最終打牌の確定。
     pub selection_finalize: Duration,
 }
@@ -125,6 +129,7 @@ impl NormalDiscardPhaseDurations {
             + self.forward_metrics
             + self.two_shanten_self_tsumo
             + self.three_shanten_self_tsumo
+            + self.iishanten_stable_order_fallback
             + self.selection_finalize
     }
 }
@@ -190,6 +195,7 @@ pub struct TimedAgentAction {
     pub phases: DecisionPhaseDurations,
     pub(crate) two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     pub(crate) iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
+    pub(crate) iishanten_stable_order_fallback_candidates: usize,
     pub(crate) call_candidates: Vec<CallCandidateDuration>,
 }
 
@@ -209,6 +215,13 @@ impl TimedAgentAction {
     /// 1向聴でない request と、前方評価を通らなかった request では空。
     pub fn iishanten_forward_candidates(&self) -> &[IishantenForwardCandidateDuration] {
         &self.iishanten_forward_candidates
+    }
+
+    /// 同じ production execution で1向聴 StableOrder fallback が `UNTIL_RYUKYOKU` で評価した
+    /// cohort の候補数。fallback が発火しなかった request では 0。評価時間は
+    /// [`NormalDiscardPhaseDurations::iishanten_stable_order_fallback`] が持つ。
+    pub fn iishanten_stable_order_fallback_candidates(&self) -> usize {
+        self.iishanten_stable_order_fallback_candidates
     }
 
     /// 同じ production execution で実際に評価した鳴き候補の実測。合法な Chi / Pon が無い
@@ -231,6 +244,7 @@ pub(crate) enum NormalDiscardPhase {
     ForwardMetrics,
     TwoShantenSelfTsumo,
     ThreeShantenSelfTsumo,
+    IishantenStableOrderFallback,
     SelectionFinalize,
 }
 
@@ -283,6 +297,9 @@ impl PhaseDurations for NormalDiscardPhaseDurations {
             NormalDiscardPhase::ForwardMetrics => self.forward_metrics += elapsed,
             NormalDiscardPhase::TwoShantenSelfTsumo => self.two_shanten_self_tsumo += elapsed,
             NormalDiscardPhase::ThreeShantenSelfTsumo => self.three_shanten_self_tsumo += elapsed,
+            NormalDiscardPhase::IishantenStableOrderFallback => {
+                self.iishanten_stable_order_fallback += elapsed
+            }
             NormalDiscardPhase::SelectionFinalize => self.selection_finalize += elapsed,
         }
     }
@@ -311,6 +328,8 @@ pub(crate) struct DecisionBreakdown {
 pub(crate) struct NormalDiscardBreakdown {
     two_shanten_self_tsumo_candidates: Vec<TwoShantenSelfTsumoCandidateDuration>,
     iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
+    /// 1向聴 StableOrder fallback が評価した cohort の候補数。発火しなかった場合は 0。
+    iishanten_stable_order_fallback_candidates: usize,
 }
 
 pub(crate) type DecisionPhaseTimer = PhaseTimer<DecisionPhaseDurations, DecisionBreakdown>;
@@ -488,6 +507,15 @@ impl DecisionPhaseTimer {
         &mut self,
     ) -> Vec<IishantenForwardCandidateDuration> {
         std::mem::take(&mut self.breakdown.normal_discard.iishanten_forward_candidates)
+    }
+
+    pub(crate) fn take_iishanten_stable_order_fallback_candidates(&mut self) -> usize {
+        std::mem::take(
+            &mut self
+                .breakdown
+                .normal_discard
+                .iishanten_stable_order_fallback_candidates,
+        )
     }
 }
 
@@ -797,6 +825,13 @@ impl<D: PhaseDurations> PhaseTimer<D, NormalDiscardBreakdown> {
         }
     }
 
+    /// 1向聴 StableOrder fallback が評価した cohort の候補数。計測が無効な場合は何もしない。
+    pub(crate) fn record_iishanten_stable_order_fallback_candidates(&mut self, candidates: usize) {
+        if self.state.is_some() {
+            self.breakdown.iishanten_stable_order_fallback_candidates = candidates;
+        }
+    }
+
     pub(crate) fn take_two_shanten_self_tsumo_candidates(
         &mut self,
     ) -> Vec<TwoShantenSelfTsumoCandidateDuration> {
@@ -1080,6 +1115,7 @@ mod tests {
             phases: decision.finish(),
             two_shanten_self_tsumo_candidates,
             iishanten_forward_candidates,
+            iishanten_stable_order_fallback_candidates: 0,
             call_candidates: Vec::new(),
         };
         let phases = timed.phases;
@@ -1175,8 +1211,13 @@ mod tests {
         decision.record_normal_discard_breakdown(NormalDiscardBreakdown {
             two_shanten_self_tsumo_candidates: vec![candidate],
             iishanten_forward_candidates: Vec::new(),
+            iishanten_stable_order_fallback_candidates: 2,
         });
         assert!(decision.take_two_shanten_self_tsumo_candidates().is_empty());
+        assert_eq!(
+            decision.take_iishanten_stable_order_fallback_candidates(),
+            0
+        );
     }
 
     #[test]

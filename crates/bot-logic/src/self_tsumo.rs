@@ -86,6 +86,15 @@ impl SelfTsumoHorizon {
         late_min_future_draws: 0,
     };
 
+    /// この horizon がすでに流局までの semantics か。
+    ///
+    /// `horizon_turn >= UNTIL_RYUKYOKU_HORIZON_TURN` では soft horizon の reduction が 0 になり、
+    /// `late_min_future_draws` に依らず raw の自摸機会をそのまま使う。struct の一致ではなく
+    /// この判定を source of truth にする。
+    pub const fn is_until_ryukyoku(self) -> bool {
+        self.horizon_turn >= UNTIL_RYUKYOKU_HORIZON_TURN
+    }
+
     /// raw の残り自摸機会へこの horizon を適用した値。
     pub fn effective_future_draws(self, raw_future_draws: u32) -> u32 {
         soft_horizon_future_draws(
@@ -511,6 +520,35 @@ mod tests {
                 assert_eq!(soft_horizon_future_draws(raw, 18, late_min), raw);
             }
             assert_eq!(soft_horizon_future_draws(raw, 20, 2), raw);
+        }
+    }
+
+    #[test]
+    fn a_horizon_turn_of_eighteen_or_more_is_until_ryukyoku_for_any_late_minimum() {
+        let horizon = |horizon_turn, late_min_future_draws| SelfTsumoHorizon {
+            horizon_turn,
+            late_min_future_draws,
+        };
+        assert!(SelfTsumoHorizon::UNTIL_RYUKYOKU.is_until_ryukyoku());
+        assert!(horizon(18, 0).is_until_ryukyoku());
+        assert!(horizon(18, 2).is_until_ryukyoku());
+        assert!(horizon(20, 2).is_until_ryukyoku());
+        assert!(!SelfTsumoHorizon::PRODUCTION.is_until_ryukyoku());
+        for late_min in 0..=4 {
+            assert!(!horizon(17, late_min).is_until_ryukyoku());
+        }
+
+        // 判定は raw をそのまま使う soft horizon の semantics と一致する。
+        for horizon_turn in 0..=22 {
+            for late_min in 0..=4 {
+                let candidate = horizon(horizon_turn, late_min);
+                let keeps_raw = (0..=20).all(|raw| candidate.effective_future_draws(raw) == raw);
+                assert_eq!(
+                    candidate.is_until_ryukyoku(),
+                    keeps_raw,
+                    "{horizon_turn} {late_min}"
+                );
+            }
         }
     }
 
