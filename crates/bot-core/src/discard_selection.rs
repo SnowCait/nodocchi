@@ -1091,8 +1091,8 @@ fn production_selection_index(
 /// 入力は horizon ごとに作り直すので、horizon で値が変わる探索内 memo を production horizon の
 /// 評価と共有しない。
 ///
-/// configured horizon がすでに `UNTIL_RYUKYOKU` の場合は、同じ値で比べ直すだけになるので評価
-/// しない。
+/// configured horizon がすでに流局までの semantics ([`SelfTsumoHorizon::is_until_ryukyoku`]) の
+/// 場合は、`late_min_future_draws` に依らず同じ値で比べ直すだけになるので評価しない。
 #[allow(clippy::too_many_arguments)]
 fn iishanten_stable_order_fallback(
     context: &GameContext,
@@ -1104,9 +1104,7 @@ fn iishanten_stable_order_fallback(
     continuation: IishantenContinuationSettings,
     timing: &mut NormalDiscardPhaseTimer,
 ) -> IishantenStableOrderFallback {
-    if two_shanten.selected.is_some()
-        || context.self_tsumo_horizon() == SelfTsumoHorizon::UNTIL_RYUKYOKU
-    {
+    if two_shanten.selected.is_some() || context.self_tsumo_horizon().is_until_ryukyoku() {
         return IishantenStableOrderFallback::default();
     }
     let cohort = iishanten_stable_order_fallback_cohort(

@@ -221,7 +221,7 @@ horizon は live bot の設定としては公開していません。検証用�
 - cohort の全候補で値が確定した場合だけ軸を使います。1件でも確定しなければ cohort 全体で fallback を無効にし、StableOrder に戻ります。最大値が複数候補で同じ場合もそれ以上の軸は足さず、その中の StableOrder (先に現れた候補) で決めます。
 - 決着した候補の比較理由は `UntilRyukyokuExpectedSelfTsumoValue` で、h12 の `ExpectedSelfTsumoValue` と区別できます。fallback の値は `DiscardCandidateDiagnostic::until_ryukyoku_expected_self_tsumo_value` という別 field に cohort の候補だけ載せ、bot-scenario では `stable-order fallback self-tsumo value (until ryukyoku)` として cohort の候補にだけ表示します。fallback が発火しない局面の出力は増えません。
 - 選ばれた候補の `DiscardActionSelection` (evaluation / action / `iishanten_forward_metrics`) と押し引き・リーチ判断は最終的に選ばれた候補から作ります。`iishanten_forward_metrics` は従来どおり configured horizon (h12) の値で、fallback の値を混ぜません。
-- configured horizon がすでに `UNTIL_RYUKYOKU` の場合は同じ値で比べ直すだけなので評価しません。2向聴・3向聴・現在聴牌の選択、Call / Pass の比較、鳴き後の打牌選択は対象外です。
+- configured horizon がすでに流局までの semantics (`horizon_turn >= 18`、`SelfTsumoHorizon::is_until_ryukyoku`) の場合は、`late_min_future_draws` に依らず同じ値で比べ直すだけなので評価しません。2向聴・3向聴・現在聴牌の選択、Call / Pass の比較、鳴き後の打牌選択は対象外です。
 - fallback の発火件数・評価した候補数・評価時間は [`--benchmark-riichilab-capture`](../bot-scenario.md#riichilab-capture-の-production-latency-計測) で観測できます。通常の live bot は計測用の `Instant` を取らず、追加されるのは cohort の抽出 (候補同士の比較だけ) と、発火した場合の cohort の評価そのものです。
 
 鳴き後も1向聴の打牌選択 (`select_best_iishanten_post_call_discard`) にも同じ StableOrder への落ち方はありますが、この選択は Call / Pass 比較の Call 側の値を決めるため、fallback を入れると Call policy の結論が変わり得ます。今回は通常打牌だけを対象にし、鳴き後の打牌選択には適用していません。

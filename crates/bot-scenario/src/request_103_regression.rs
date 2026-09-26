@@ -322,3 +322,58 @@ fn the_fallback_cohort_and_winner_do_not_depend_on_the_candidate_order() {
         }
     }
 }
+
+#[test]
+fn an_until_ryukyoku_configured_horizon_skips_the_fallback_regardless_of_the_late_minimum() {
+    // horizon_turn >= 18 はすでに流局までの評価なので、late minimum が残っていても fallback の
+    // 追加探索を行わない。production (h12) では同じ局面で発火する。
+    let scenario = resolve();
+    let mut agent = ShantenAgent;
+    let production = agent.act_with_phase_timing(&scenario.context, &scenario.legal_actions);
+    assert_eq!(production.iishanten_stable_order_fallback_candidates(), 2);
+    assert!(
+        production
+            .phases
+            .normal_discard_phases
+            .iishanten_stable_order_fallback
+            > std::time::Duration::ZERO
+    );
+
+    for horizon in [
+        SelfTsumoHorizon::UNTIL_RYUKYOKU,
+        SelfTsumoHorizon {
+            horizon_turn: 18,
+            late_min_future_draws: 2,
+        },
+        SelfTsumoHorizon {
+            horizon_turn: 20,
+            late_min_future_draws: 2,
+        },
+    ] {
+        assert!(horizon.is_until_ryukyoku());
+        let context = scenario.context.clone().with_self_tsumo_horizon(horizon);
+        let timed = agent.act_with_phase_timing(&context, &scenario.legal_actions);
+        assert_eq!(
+            timed.iishanten_stable_order_fallback_candidates(),
+            0,
+            "{horizon:?}"
+        );
+        assert_eq!(
+            timed
+                .phases
+                .normal_discard_phases
+                .iishanten_stable_order_fallback,
+            std::time::Duration::ZERO,
+            "{horizon:?}"
+        );
+        let diagnostic = diagnose(&context, &scenario.legal_actions);
+        assert!(
+            candidates(&diagnostic).iter().all(|candidate| {
+                candidate.until_ryukyoku_expected_self_tsumo_value.is_none()
+                    && candidate.comparison_reason
+                        != DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue
+            }),
+            "{horizon:?}"
+        );
+    }
+}
