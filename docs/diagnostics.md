@@ -62,6 +62,9 @@ policy には使いません。`Summary` にも同じ値、比較結果、鳴き
 2向聴 state の Full value です。`two-shanten comparison` は `call higher` / `pass not lower` /
 `unknown` を区別し、`call higher` の場合だけ鳴きます。同値・`unknown`・反応元不明は Pass です。
 鳴き後も2向聴のままの候補は対象外で、対象候補が無い局面では重い Pass Full 探索を実行しません。
+その候補 (`reason: PostCallNotIishanten`) の Call / Pass は通常の診断では評価せず、observation-only の
+[`--two-shanten-stay-call-comparison`](bot-scenario.md#2向聴--chi--pon--2向聴のまま-の-observation)
+でだけ Progress / Full の2つの scope で観測できます。
 
 同じ候補には速度優先 policy の判断材料 `two-shanten speed` も表示します。`draws` は Call 後に
 自分へ残っている自摸機会、`han` は鳴き後の実際の手牌 state から**Call 側 ExpectedSelfTsumoValue が

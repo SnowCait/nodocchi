@@ -208,6 +208,12 @@ unknown、reaction 元不明はすべて Pass です。成立した候補が複�
 値が最大の候補を選びます。鳴き後の最良打牌が2向聴のままの候補、Kan、他家リーチなど既存 policy
 境界で評価を打ち切る候補は対象外で、順位条件や守備力による例外もありません。
 
+鳴き後の最良打牌が2向聴のままの候補は `PostCallNotIishanten` で止まり、production では Call / Pass
+を比較しません。この候補の評価値・Pass との差・実行コストは、production へ接続する前の
+observation として bot-scenario の
+[`--two-shanten-stay-call-comparison` / `--compare-two-shanten-stay-call`](../bot-scenario.md#2向聴--chi--pon--2向聴のまま-の-observation)
+でだけ観測します。observation は production の判断・理由・選択 action を変えません。
+
 ### 鳴き後の押し引き
 
 非テンパイ Call (`1向聴 → 1向聴` / `2向聴 → 1向聴` / `3向聴 → 2向聴`) は、上記の Call / Pass

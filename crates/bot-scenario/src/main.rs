@@ -23,6 +23,7 @@ mod two_shanten_early_fold;
 mod two_shanten_full_parallel;
 #[cfg(test)]
 mod two_shanten_full_parallel_regression;
+mod two_shanten_stay_call;
 
 use std::process::ExitCode;
 
@@ -74,6 +75,9 @@ where
         ScenarioSource::RiichilabCaptureComparison(spec) => {
             return three_shanten_continuation::run_capture_comparison(spec);
         }
+        ScenarioSource::RiichilabCaptureTwoShantenStayCallComparison(spec) => {
+            return two_shanten_stay_call::run_capture_comparison(spec);
+        }
     };
 
     // ベタ降り仮定の評価は通常打牌選択・押し引き・リーチ判断を一切走らせず、既存 Fold
@@ -88,6 +92,16 @@ where
         } else {
             format_forced_fold(&scenario, &result, args.verbose)
         };
+        return Ok(match header {
+            Some(header) => format!("{header}\n\n{output}"),
+            None => output,
+        });
+    }
+
+    // 2→2 の observation も他の診断を走らせず、cold memo 条件で計る。production の判断は
+    // 変えない。
+    if args.two_shanten_stay_call_comparison {
+        let output = two_shanten_stay_call::format_scenario_observation(&scenario);
         return Ok(match header {
             Some(header) => format!("{header}\n\n{output}"),
             None => output,
@@ -311,6 +325,46 @@ mod tests {
         assert!(
             output.contains(&format!("  B progress-only: {selected} (discard selection")),
             "{selected}: {output}"
+        );
+    }
+
+    #[test]
+    fn the_two_shanten_stay_call_observation_is_a_separate_report() {
+        let fixture = "scenarios/two_shanten_stay_call_chi_dora_gate.json";
+        let path = format!("{}/{fixture}", env!("CARGO_MANIFEST_DIR"));
+
+        let first = run_args(&[&path, "--two-shanten-stay-call-comparison"]).unwrap();
+        let normal = run_args(&[&path]).unwrap();
+        assert!(!normal.contains("Two-shanten stay call observation"));
+
+        // 観測専用の出力で、計測より前に通常の打牌診断を走らせない。
+        let output = run_args(&[&path, "--two-shanten-stay-call-comparison"]).unwrap();
+        assert!(
+            output.starts_with("Two-shanten stay call observation"),
+            "{output}"
+        );
+        assert!(!output.contains("Final decision"), "{output}");
+
+        // 各 run は fresh thread の cold memo から始まるので、先に深い通常診断を走らせても
+        // 観測 run の探索規模は変わらない。
+        let search = |output: &str| -> Vec<String> {
+            output
+                .lines()
+                .filter(|line| line.contains("search (observation run)"))
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(search(&first).len(), 2, "{first}");
+        assert_eq!(search(&first), search(&output));
+
+        // production の判断は observation の有無で変わらない。
+        assert!(
+            normal.contains("\nFinal decision\n  action: None\n"),
+            "{normal}"
+        );
+        assert!(
+            output.contains("  selected: none\n  reason: PostCallNotIishanten"),
+            "{output}"
         );
     }
 

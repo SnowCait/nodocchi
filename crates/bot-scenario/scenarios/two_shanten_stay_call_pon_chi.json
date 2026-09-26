@@ -1,0 +1,20 @@
+{
+  "hand": "1m 1m 5p 6p 8p 8p 3s 4s 4s 5s 7s 7s 8s",
+
+  "dora_indicators": "8p",
+
+  "round_wind": "E",
+  "seat_wind": "S",
+
+  "player_id": 0,
+  "oya": 3,
+
+  "remaining_tiles": 56,
+
+  "discards": ["", "", "", "4s"],
+
+  "legal_dahai": "",
+  "legal_pon": [{ "from_player": 3, "tile": "4s", "consumed": "4s 4s" }],
+  "legal_chi": [{ "from_player": 3, "tile": "4s", "consumed": "3s 5s" }],
+  "allow_none": true
+}

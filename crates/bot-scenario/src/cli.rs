@@ -49,6 +49,10 @@ pub const USAGE: &str = "usage:
   bot-scenario <SCENARIO_JSON> --two-shanten-full-parallel-comparison
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
                --two-shanten-full-parallel-comparison
+  bot-scenario <SCENARIO_JSON> --two-shanten-stay-call-comparison
+  bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
+               --two-shanten-stay-call-comparison
+  bot-scenario --compare-two-shanten-stay-call <CAPTURE_JSONL>...
 
   --dora is a backward-compatible alias of --dora-indicator
   --discards-shimocha, --discards-toimen and --discards-kamicha set the whole river of that
@@ -144,7 +148,22 @@ pub const USAGE: &str = "usage:
   --compare-three-shanten-continuation replays every captured request_action, runs the same
   A/B comparison on the requests where the three-shanten axis fires, and reports latency,
   search size and selection differences; it takes all following capture paths and cannot be
-  combined with the other scenario or diagnostic options";
+  combined with the other scenario or diagnostic options
+  --two-shanten-stay-call-comparison observes, without changing the production decision, the
+  Chi / Pon candidates the production call decision stops as PostCallNotIishanten from a
+  two-shanten hand that stays two-shanten after the call; it compares the call with the pass
+  in two independent scopes, Progress (the first Progress branch into the production
+  one-shanten continuation) and Full (the production two-shanten discard selection semantics:
+  Progress cohort, dora-difference gate and the gated top-2 Full evaluation, not a Full
+  evaluation of every discard), and reports the selected post-call discard, both values, the
+  call / pass conclusion and the elapsed time of each scope; the pass is evaluated once per
+  request and scope, every measured run starts on its own fresh thread with cold memos, and it
+  cannot be combined with other diagnostic options
+  --compare-two-shanten-stay-call replays every captured request_action, runs the same
+  observation on the requests with such a candidate, and reports the request and candidate
+  counts, the call / pass conclusions of both scopes, their agreement, the selected post-call
+  discard agreement, the latency and the slowest and flipped cases; it takes all following
+  capture paths and cannot be combined with the other scenario or diagnostic options";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CliError {
@@ -211,6 +230,12 @@ pub enum CliError {
     #[error("--compare-three-shanten-continuation cannot be combined with {0}")]
     ConflictingCaptureComparisonInput(String),
 
+    #[error("--two-shanten-stay-call-comparison cannot be combined with {0}")]
+    ConflictingTwoShantenStayCallComparison(String),
+
+    #[error("--compare-two-shanten-stay-call cannot be combined with {0}")]
+    ConflictingTwoShantenStayCallCaptureComparison(String),
+
     #[error("--two-shanten-self-tsumo-cost must be all or forward-targets, but is {0:?}")]
     InvalidTwoShantenSelfTsumoCostScope(String),
 
@@ -242,6 +267,8 @@ pub enum ScenarioSource {
     },
     RiichilabCaptureBenchmark(CaptureBenchmarkSpec),
     RiichilabCaptureComparison(CaptureComparisonSpec),
+    /// `現在2向聴 → Call → 2向聴のまま` の observation を capture 全体で集計する。
+    RiichilabCaptureTwoShantenStayCallComparison(CaptureComparisonSpec),
 }
 
 /// A/B 比較を行う capture の指定。
@@ -274,6 +301,9 @@ pub struct CliArgs {
     /// 2向聴のドラ差 gate を通った provisional 上位2候補の Full 追加評価の分け方 (S / P2) を
     /// 比べる専用診断。P2 が現行 production と同じ方式。
     pub two_shanten_full_parallel_comparison: bool,
+    /// `現在2向聴 → Call → 2向聴のまま` の候補を Progress / Full で観測する専用診断。production の
+    /// 判断は変えない。
+    pub two_shanten_stay_call_comparison: bool,
     pub source: ScenarioSource,
     pub verbose: bool,
     /// 2手先診断を構築して表示するかどうか。既存の打牌診断より重い探索なので既定では行わない。
@@ -308,7 +338,9 @@ impl CliArgs {
         let mut iishanten_selection_depth_comparison = false;
         let mut iishanten_selection_parallel_comparison = false;
         let mut two_shanten_full_parallel_comparison = false;
+        let mut two_shanten_stay_call_comparison = false;
         let mut comparison_captures: Vec<String> = Vec::new();
+        let mut stay_call_captures: Vec<String> = Vec::new();
         let mut path: Option<String> = None;
         let mut spec = ScenarioSpec::default();
         let mut hand: Option<String> = None;
@@ -455,6 +487,13 @@ impl CliArgs {
                 "--two-shanten-full-parallel-comparison" => {
                     two_shanten_full_parallel_comparison = true;
                 }
+                "--two-shanten-stay-call-comparison" => {
+                    two_shanten_stay_call_comparison = true;
+                }
+                "--compare-two-shanten-stay-call" => {
+                    stay_call_captures
+                        .push(value_of(&mut args, "--compare-two-shanten-stay-call")?);
+                }
                 "--compare-three-shanten-continuation" => {
                     comparison_captures
                         .push(value_of(&mut args, "--compare-three-shanten-continuation")?);
@@ -488,6 +527,9 @@ impl CliArgs {
                 }
                 other if !comparison_captures.is_empty() => {
                     comparison_captures.push(other.to_string());
+                }
+                other if !stay_call_captures.is_empty() => {
+                    stay_call_captures.push(other.to_string());
                 }
                 other => match path {
                     Some(_) => return Err(CliError::MultipleScenarioFiles(other.to_string())),
@@ -527,8 +569,12 @@ impl CliArgs {
                 Some("--iishanten-selection-parallel-comparison".to_string())
             } else if two_shanten_full_parallel_comparison {
                 Some("--two-shanten-full-parallel-comparison".to_string())
+            } else if two_shanten_stay_call_comparison {
+                Some("--two-shanten-stay-call-comparison".to_string())
             } else if !comparison_captures.is_empty() {
                 Some("--compare-three-shanten-continuation".to_string())
+            } else if !stay_call_captures.is_empty() {
+                Some("--compare-two-shanten-stay-call".to_string())
             } else if force_fold {
                 Some("--force-fold".to_string())
             } else if verbose {
@@ -554,6 +600,7 @@ impl CliArgs {
                 iishanten_selection_depth_comparison: false,
                 iishanten_selection_parallel_comparison: false,
                 two_shanten_full_parallel_comparison: false,
+                two_shanten_stay_call_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -595,6 +642,10 @@ impl CliArgs {
                 Some("--iishanten-selection-parallel-comparison".to_string())
             } else if two_shanten_full_parallel_comparison {
                 Some("--two-shanten-full-parallel-comparison".to_string())
+            } else if two_shanten_stay_call_comparison {
+                Some("--two-shanten-stay-call-comparison".to_string())
+            } else if !stay_call_captures.is_empty() {
+                Some("--compare-two-shanten-stay-call".to_string())
             } else if benchmark_json.is_some() {
                 Some("--benchmark-json".to_string())
             } else if force_fold {
@@ -621,6 +672,99 @@ impl CliArgs {
                 iishanten_selection_depth_comparison: false,
                 iishanten_selection_parallel_comparison: false,
                 two_shanten_full_parallel_comparison: false,
+                two_shanten_stay_call_comparison: false,
+                lookahead: false,
+                two_shanten_self_tsumo: false,
+                two_shanten_self_tsumo_cost: None,
+                two_shanten_progress_self_tsumo_cost: None,
+                summary_only: false,
+                force_fold: false,
+                structural_expected_deal_in_loss: false,
+            });
+        }
+
+        if !stay_call_captures.is_empty() {
+            let conflict = if capture.is_some() {
+                Some("--riichilab-capture".to_string())
+            } else if let Some(path) = path.as_deref() {
+                Some(format!("{path:?}"))
+            } else if hand.is_some() {
+                Some("--hand".to_string())
+            } else if inline_options {
+                Some("scenario options".to_string())
+            } else if request_id.is_some() {
+                Some("--request-id".to_string())
+            } else if benchmark_json.is_some() {
+                Some("--benchmark-json".to_string())
+            } else {
+                first_enabled_diagnostic_option(&[
+                    (lookahead, "--lookahead"),
+                    (verbose, "--verbose"),
+                    (summary_only, "--summary-only"),
+                    (force_fold, "--force-fold"),
+                    (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                    (
+                        two_shanten_self_tsumo_cost.is_some(),
+                        "--two-shanten-self-tsumo-cost",
+                    ),
+                    (
+                        two_shanten_progress_self_tsumo_cost.is_some(),
+                        "--two-shanten-progress-self-tsumo-cost",
+                    ),
+                    (
+                        three_shanten_progress_self_tsumo,
+                        "--three-shanten-progress-self-tsumo",
+                    ),
+                    (
+                        structural_expected_deal_in_loss,
+                        "--structural-expected-deal-in-loss",
+                    ),
+                    (
+                        three_shanten_continuation_comparison,
+                        "--three-shanten-continuation-comparison",
+                    ),
+                    (
+                        iishanten_continuation_depth_comparison,
+                        "--iishanten-continuation-depth-comparison",
+                    ),
+                    (
+                        iishanten_selection_depth_comparison,
+                        "--iishanten-selection-depth-comparison",
+                    ),
+                    (
+                        iishanten_selection_parallel_comparison,
+                        "--iishanten-selection-parallel-comparison",
+                    ),
+                    (
+                        two_shanten_full_parallel_comparison,
+                        "--two-shanten-full-parallel-comparison",
+                    ),
+                    (
+                        two_shanten_stay_call_comparison,
+                        "--two-shanten-stay-call-comparison",
+                    ),
+                ])
+            };
+            if let Some(conflict) = conflict {
+                return Err(CliError::ConflictingTwoShantenStayCallCaptureComparison(
+                    conflict,
+                ));
+            }
+
+            return Ok(Self {
+                source: ScenarioSource::RiichilabCaptureTwoShantenStayCallComparison(
+                    CaptureComparisonSpec {
+                        paths: stay_call_captures,
+                    },
+                ),
+                verbose: false,
+                three_shanten_progress_self_tsumo: false,
+                three_shanten_continuation_comparison: false,
+                iishanten_continuation_depth_comparison: false,
+                iishanten_selection_depth_comparison: false,
+                iishanten_selection_parallel_comparison: false,
+                two_shanten_full_parallel_comparison: false,
+                two_shanten_stay_call_comparison: false,
                 lookahead: false,
                 two_shanten_self_tsumo: false,
                 two_shanten_self_tsumo_cost: None,
@@ -633,6 +777,56 @@ impl CliArgs {
 
         if benchmark_json.is_some() {
             return Err(CliError::BenchmarkJsonWithoutBenchmark);
+        }
+
+        // 2→2 の observation も他の診断を走らせない。先行する深い探索は向聴・受け入れの memo を
+        // 温めるため、後続の計測が本来より速く見えてしまう。
+        if two_shanten_stay_call_comparison
+            && let Some(conflict) = first_enabled_diagnostic_option(&[
+                (lookahead, "--lookahead"),
+                (verbose, "--verbose"),
+                (summary_only, "--summary-only"),
+                (force_fold, "--force-fold"),
+                (two_shanten_self_tsumo, "--two-shanten-self-tsumo"),
+                (
+                    two_shanten_self_tsumo_cost.is_some(),
+                    "--two-shanten-self-tsumo-cost",
+                ),
+                (
+                    two_shanten_progress_self_tsumo_cost.is_some(),
+                    "--two-shanten-progress-self-tsumo-cost",
+                ),
+                (
+                    three_shanten_progress_self_tsumo,
+                    "--three-shanten-progress-self-tsumo",
+                ),
+                (
+                    structural_expected_deal_in_loss,
+                    "--structural-expected-deal-in-loss",
+                ),
+                (
+                    three_shanten_continuation_comparison,
+                    "--three-shanten-continuation-comparison",
+                ),
+                (
+                    iishanten_continuation_depth_comparison,
+                    "--iishanten-continuation-depth-comparison",
+                ),
+                (
+                    iishanten_selection_depth_comparison,
+                    "--iishanten-selection-depth-comparison",
+                ),
+                (
+                    iishanten_selection_parallel_comparison,
+                    "--iishanten-selection-parallel-comparison",
+                ),
+                (
+                    two_shanten_full_parallel_comparison,
+                    "--two-shanten-full-parallel-comparison",
+                ),
+            ])
+        {
+            return Err(CliError::ConflictingTwoShantenStayCallComparison(conflict));
         }
 
         // forced fold は通常打牌の選択も追加診断も走らせないので、それらを要求する option とは
@@ -1036,6 +1230,7 @@ impl CliArgs {
             iishanten_selection_depth_comparison,
             iishanten_selection_parallel_comparison,
             two_shanten_full_parallel_comparison,
+            two_shanten_stay_call_comparison,
             verbose,
             // 2向聴診断は2手先診断の枝をさらに深く追うので、明示指定は2手先診断も含む。
             lookahead: lookahead || two_shanten_self_tsumo,
@@ -1047,6 +1242,14 @@ impl CliArgs {
             structural_expected_deal_in_loss,
         })
     }
+}
+
+// 指定された option のうち最初の1つの名前。どれも指定されていない場合は `None`。
+fn first_enabled_diagnostic_option(options: &[(bool, &str)]) -> Option<String> {
+    options
+        .iter()
+        .find(|(enabled, _)| *enabled)
+        .map(|(_, option)| option.to_string())
 }
 
 // リーチ済みの席へ一括で与えるリーチ状況依存役の事実。
@@ -1793,6 +1996,121 @@ mod tests {
                 "{option}"
             );
         }
+    }
+
+    #[test]
+    fn parses_the_two_shanten_stay_call_comparison_option() {
+        let args = parse(&["scenario.json", "--two-shanten-stay-call-comparison"]).unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::Json("scenario.json".to_string())
+        );
+        assert!(args.two_shanten_stay_call_comparison);
+        assert!(!args.two_shanten_full_parallel_comparison);
+        assert!(!args.lookahead);
+
+        let args = parse(&[
+            "--riichilab-capture",
+            "capture.jsonl",
+            "--request-id",
+            "123",
+            "--two-shanten-stay-call-comparison",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::RiichilabCapture {
+                path: "capture.jsonl".to_string(),
+                request_id: Some(123),
+            }
+        );
+        assert!(args.two_shanten_stay_call_comparison);
+    }
+
+    // 先行する深い探索は向聴・受け入れの memo を温めるので、他の診断とは同時に走らせない。
+    #[test]
+    fn the_two_shanten_stay_call_comparison_cannot_be_combined_with_another_diagnostic() {
+        for option in [
+            "--lookahead",
+            "--verbose",
+            "--summary-only",
+            "--force-fold",
+            "--two-shanten-self-tsumo",
+            "--three-shanten-progress-self-tsumo",
+            "--two-shanten-full-parallel-comparison",
+            "--iishanten-selection-depth-comparison",
+        ] {
+            assert!(
+                matches!(
+                    parse(&["scenario.json", option, "--two-shanten-stay-call-comparison"]),
+                    Err(CliError::ConflictingTwoShantenStayCallComparison(conflicting))
+                        if conflicting == option
+                ),
+                "{option}",
+            );
+        }
+    }
+
+    #[test]
+    fn parses_the_two_shanten_stay_call_capture_comparison_paths() {
+        let args = parse(&[
+            "--compare-two-shanten-stay-call",
+            "first.jsonl",
+            "second.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.source,
+            ScenarioSource::RiichilabCaptureTwoShantenStayCallComparison(CaptureComparisonSpec {
+                paths: vec!["first.jsonl".to_string(), "second.jsonl".to_string()],
+            })
+        );
+        assert!(!args.two_shanten_stay_call_comparison);
+    }
+
+    #[test]
+    fn the_two_shanten_stay_call_capture_comparison_stays_alone() {
+        for (extra, conflict) in [
+            (vec!["--hand", "234m455p789s1123z"], "--hand"),
+            (vec!["--request-id", "1"], "--request-id"),
+            (vec!["--verbose"], "--verbose"),
+            (
+                vec!["--two-shanten-stay-call-comparison"],
+                "--two-shanten-stay-call-comparison",
+            ),
+        ] {
+            let mut args = vec!["--compare-two-shanten-stay-call", "capture.jsonl"];
+            args.extend(extra);
+            assert_eq!(
+                parse(&args),
+                Err(CliError::ConflictingTwoShantenStayCallCaptureComparison(
+                    conflict.to_string()
+                )),
+                "{conflict}",
+            );
+        }
+        assert_eq!(
+            parse(&[
+                "--compare-three-shanten-continuation",
+                "a.jsonl",
+                "--compare-two-shanten-stay-call",
+                "b.jsonl",
+            ]),
+            Err(CliError::ConflictingCaptureComparisonInput(
+                "--compare-two-shanten-stay-call".to_string()
+            ))
+        );
+        assert_eq!(
+            parse(&[
+                "--benchmark-riichilab-capture",
+                "a.jsonl",
+                "--compare-two-shanten-stay-call",
+                "b.jsonl",
+            ]),
+            Err(CliError::ConflictingBenchmarkInput(
+                "--compare-two-shanten-stay-call".to_string()
+            ))
+        );
     }
 
     #[test]
