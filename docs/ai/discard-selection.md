@@ -199,6 +199,33 @@ raw 値から effective 値への変換は `bot-logic` の pure helper (`soft_ho
 
 horizon は live bot の設定としては公開していません。検証用には bot-scenario の [`--self-tsumo-horizon-turn` / `--self-tsumo-late-min-future-draws`](../bot-scenario.md#self-tsumo-soft-horizon-の上書き) で上書きできます。
 
+### 完全同値 cohort の UNTIL_RYUKYOKU fallback
+
+1向聴の通常打牌選択は production horizon (`SelfTsumoHorizon::PRODUCTION`、h12) が primary です。h12 の comparator が StableOrder の手前までの全既存軸で決着しなかった場合だけ、その完全同値 cohort を `SelfTsumoHorizon::UNTIL_RYUKYOKU` の `ExpectedSelfTsumoValue` で比べ直します。
+
+```text
+1向聴通常打牌:
+  h12 production comparator
+    Shanten → ... → ExpectedSelfTsumoValue(h12) → WeightedProspectiveValue
+    → WeightedTenpaiWait → Acceptance → IishantenShape → ShapePenalty
+    → FloatingTileValue → Dora → ValueHonor → RedFive
+  → どこかの既存軸で決着: そのまま採用 (UNTIL_RYUKYOKU は評価しない)
+  → 全既存軸で完全同値:
+       [完全同値 cohort のみ] UntilRyukyokuExpectedSelfTsumoValue
+       → それでも同値: StableOrder
+```
+
+- **h18 は h12 の通常判断を上書きしません。** fallback の値は StableOrder の手前までの既存比較 (`compare_discard_selection_candidate_views_before_stable_order`) が `None` を返した組にしか入らず、comparator でも StableOrder の直前にだけ置かれます。h12 の `ExpectedSelfTsumoValue`・Acceptance・weighted tenpai wait・`IishantenShape`・`ShapePenalty`・Dora / ValueHonor / RedFive などで決着した候補の組は、fallback の値が何であっても結論が変わりません。
+- **対象は完全同値 cohort だけです。** cohort は h12 comparator の winner から見て既存の全軸が決着しない候補の集合で、同じ comparator の入力 (合法候補・前方集計値・各 supplemental metric) をそのまま使って抽出します (`iishanten_stable_order_fallback_cohort`)。StableOrder を診断から推測したり、比較順を別に再実装したりはしません。winner が1向聴で、cohort が2件以上の場合だけ発火します。winner と2位だけではなく cohort 全体を評価し、完全同値は各候補の値だけで決まる同値関係なので候補の列挙順を変えても同じ cohort になります。
+- 評価は cohort の候補だけです。既存の1向聴 production continuation と同じ候補1件の前方評価 (`forward_metrics_for_candidate`)・lookahead 入力 (`production_lookahead_inputs`)・continuation 設定 (手変わり2回まで + exact same-state memo)・scoring・候補単位の並列化をそのまま使い、context の horizon だけを `UNTIL_RYUKYOKU` へ変えます。lookahead 入力は horizon ごとに作り直すので、値が horizon に依存する探索内 memo を h12 と共有しません。新しい evaluator も別の thread pool も持ちません。
+- cohort の全候補で値が確定した場合だけ軸を使います。1件でも確定しなければ cohort 全体で fallback を無効にし、StableOrder に戻ります。最大値が複数候補で同じ場合もそれ以上の軸は足さず、その中の StableOrder (先に現れた候補) で決めます。
+- 決着した候補の比較理由は `UntilRyukyokuExpectedSelfTsumoValue` で、h12 の `ExpectedSelfTsumoValue` と区別できます。fallback の値は `DiscardCandidateDiagnostic::until_ryukyoku_expected_self_tsumo_value` という別 field に cohort の候補だけ載せ、bot-scenario では `stable-order fallback self-tsumo value (until ryukyoku)` として cohort の候補にだけ表示します。fallback が発火しない局面の出力は増えません。
+- 選ばれた候補の `DiscardActionSelection` (evaluation / action / `iishanten_forward_metrics`) と押し引き・リーチ判断は最終的に選ばれた候補から作ります。`iishanten_forward_metrics` は従来どおり configured horizon (h12) の値で、fallback の値を混ぜません。
+- configured horizon がすでに `UNTIL_RYUKYOKU` の場合は同じ値で比べ直すだけなので評価しません。2向聴・3向聴・現在聴牌の選択、Call / Pass の比較、鳴き後の打牌選択は対象外です。
+- fallback の発火件数・評価した候補数・評価時間は [`--benchmark-riichilab-capture`](../bot-scenario.md#riichilab-capture-の-production-latency-計測) で観測できます。通常の live bot は計測用の `Instant` を取らず、追加されるのは cohort の抽出 (候補同士の比較だけ) と、発火した場合の cohort の評価そのものです。
+
+鳴き後も1向聴の打牌選択 (`select_best_iishanten_post_call_discard`) にも同じ StableOrder への落ち方はありますが、この選択は Call / Pass 比較の Call 側の値を決めるため、fallback を入れると Call policy の結論が変わり得ます。今回は通常打牌だけを対象にし、鳴き後の打牌選択には適用していません。
+
 ### 深い候補評価の並列化
 
 追加深度に合わせて、探索内の同一 state memo (`SearchStateMemo`) を1向聴 continuation でも常に有効にし、深い前方評価の対象になった候補 (pre-acceptance 軸まで同順位の cohort) を候補単位で複数 worker に分けて評価します。worker の上限は `std::thread::available_parallelism()` で、実際に使う数は `min(available_parallelism, 深く評価する候補数)` です。`available_parallelism()` が取得できない環境と並列度1の環境では逐次評価へ落ちます。固定 worker 数は持ちません。
