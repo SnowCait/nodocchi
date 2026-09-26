@@ -674,12 +674,14 @@ cargo run -p bot-scenario -- crates/bot-scenario/scenarios/defense.json
 | `reach_discard_indices` | 各 player のリーチ宣言牌が河の何枚目か。河の1枚目を `1` とする 1-based で、要素数4。省略時と `null` は宣言牌位置 unknown |
 | `post_reach_passed` | 各 player のリーチ成立後に他家から切られて通った牌。要素数4 |
 | `temporary_passed` | 各 player の最後の手牌変化後に他家から切られて通った牌。要素数4。省略時 unknown |
+| `same_hand_passed` | 各 player の concealed hand が最後に変化して以降に通った牌。要素数4。省略時 unknown |
 | `history_furiten` | `same_turn` / `riichi_missed_win`。各値は省略時 unknown |
 | `double_riichi` | `eligible` / `declared`。各値は省略時 unknown |
 | `riichi_situation` | 各 player の `declared_double_riichi` / `ippatsu`。要素数4で、省略時と `null` は unknown |
 | `melds` | 各 player の副露・暗槓。要素数4 |
 | `extra_visible_tiles` | 他の field で表現していない見え牌 |
 | `legal_dahai` | 打牌可能な牌と候補順 |
+| `legal_pon` / `legal_chi` | 合法な Pon / Chi。`from_player` の最後の打牌を `tile`、手牌から出す2枚を `consumed` に書く。Chi は上家からだけで、Pon の後ろに並ぶ。reaction 元はすべての鳴きの `from_player` が一致する場合だけ設定する |
 | `legal_ankan` | 合法な暗槓 |
 | `legal_kakan` | 合法な加槓 |
 | `remaining_tiles` / `honba` / `kyotaku_points` / `scores` / `kyoku` | table state |
@@ -1134,4 +1136,4 @@ capture は実戦局面を見つけて調べる入口、JSON scenario は恒久�
 4. diagnostics から判断経路を確認する
 5. 原因が分かったら局面を JSON scenario に落として回帰 fixture にする
 
-既存 fixture は [`crates/bot-scenario/scenarios/`](../crates/bot-scenario/scenarios/) にあります。副露 threat の段階比較には `open_hand_*.json`、複合 threat には `combined_threat_defense.json` などを使用します。`open_hand_value_pon_and_chi.json` は現在、通常役牌1翻だけの2副露なので `Present` です。 `two_shanten_pon_post_call_fold.json` は、Call / Pass 比較では 5s の Pon が成立する (`EligibleTwoShantenSelfTsumo`) ものの、3副露の相手に対して鳴き後の既存 Push/Pull が `Fold / IishantenAgainstHighOpenHand` になるため Pon しない局面で、`two_shanten_pon_post_call_fold_after_pon.json` は同じ局面で Pon した直後の打牌局面です。正確な境界条件は production tests を source of truth としてください。 局面構築そのものの回帰 fixture は [`crates/bot-analysis/scenarios/`](../crates/bot-analysis/scenarios/) にあります。
+既存 fixture は [`crates/bot-scenario/scenarios/`](../crates/bot-scenario/scenarios/) にあります。副露 threat の段階比較には `open_hand_*.json`、複合 threat には `combined_threat_defense.json` などを使用します。`open_hand_value_pon_and_chi.json` は現在、通常役牌1翻だけの2副露なので `Present` です。 `issue_348_pon_5s_before_call.json` は Issue #348 の実戦代表局面 (Call 前) で、Call / Pass 比較では 5s の Pon が成立する (`EligibleTwoShantenSelfTsumo`) ものの、鳴き後の選択打牌 W を既存 Push/Pull へ通すと `Fold / IishantenAgainstHighOpenHand` になるため Pon しません。`issue_348_pon_5s_after_pon.json` は同じ局面で Pon した直後の state です。正確な境界条件は production tests を source of truth としてください。 局面構築そのものの回帰 fixture は [`crates/bot-analysis/scenarios/`](../crates/bot-analysis/scenarios/) にあります。

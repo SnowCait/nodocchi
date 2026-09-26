@@ -1,0 +1,49 @@
+{
+  "hand": "5m 5m 7m 8p 2s 2s 2s 2s 3s 4s W",
+
+  "dora_indicators": "N",
+
+  "round_wind": "E",
+  "seat_wind": "N",
+  "kyoku": 2,
+
+  "player_id": 0,
+  "oya": 1,
+
+  "honba": 1,
+  "kyotaku_points": 1000,
+  "scores": [20000, 35000, 22000, 22000],
+
+  "remaining_tiles": 22,
+
+  "reached": [false, false, false, false],
+  "post_reach_passed": ["", "", "", ""],
+
+  "temporary_passed": ["", "8s 5s", "5s", ""],
+  "same_hand_passed": ["", "5p S 8s 5s", "S 5p 1s 5s", "3m E 5p 1s 8s"],
+
+  "history_furiten": { "same_turn": false, "riichi_missed_win": false },
+
+  "discards": [
+    "F C 1p 8s 6m 8m 4p 4p 1s 6s 3m 5p",
+    "2m 6m 6p 4p N 8m 1m 7p 7s 6m 3m E 1s",
+    "9m 9s 7m 9s S 1s 3p S 1m 6s N 5p 8s",
+    "S 1m W N 6s 9p 8s 9m 2m 2p 9m S 5s"
+  ],
+
+  "melds": [
+    [
+      { "kind": "pon", "tiles": "5sr 5s 5s", "called_tile": "5s" }
+    ],
+    [
+      { "kind": "pon", "tiles": "F F F", "called_tile": "F" },
+      { "kind": "chi", "tiles": "7s 8s 9s", "called_tile": "8s" }
+    ],
+    [
+      { "kind": "pon", "tiles": "E E E", "called_tile": "E" }
+    ],
+    []
+  ],
+
+  "legal_dahai": "5m 7m 8p 2s 3s 4s W"
+}

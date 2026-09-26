@@ -84,6 +84,9 @@ pub enum ScenarioBuildError {
     #[error("temporary_passed must have 4 elements, but has {count}")]
     TemporaryPassedLength { count: usize },
 
+    #[error("same_hand_passed must have 4 elements, but has {count}")]
+    SameHandPassedLength { count: usize },
+
     #[error("melds must have 4 elements, but has {count}")]
     MeldsLength { count: usize },
 
@@ -166,6 +169,20 @@ pub enum ScenarioBuildError {
 
     #[error("{field} consumed {tile} is not in hand")]
     LegalPonConsumedNotHeld { field: String, tile: String },
+
+    #[error("{field} from_player {from_player} is not the kamicha of player_id {player_id}")]
+    LegalChiNotFromKamicha {
+        field: String,
+        from_player: u8,
+        player_id: u8,
+    },
+
+    #[error("{field} tile {tile} and consumed ({consumed:?}) do not form a sequence")]
+    LegalChiShape {
+        field: String,
+        tile: String,
+        consumed: String,
+    },
 
     #[error("{field} consumed must have {expected} tiles, but has {count}")]
     LegalAnkanConsumedCount {

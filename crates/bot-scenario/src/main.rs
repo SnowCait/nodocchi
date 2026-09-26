@@ -9,11 +9,11 @@ mod iishanten_continuation_depth;
 mod iishanten_selection_depth;
 mod iishanten_selection_parallel;
 #[cfg(test)]
+mod issue_348_regression;
+#[cfg(test)]
 mod open_hand_defense;
 #[cfg(test)]
 mod open_hand_threat;
-#[cfg(test)]
-mod post_call_push_pull_regression;
 mod replay;
 #[cfg(test)]
 mod scenario_regression;

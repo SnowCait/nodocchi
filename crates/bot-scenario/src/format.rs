@@ -4993,9 +4993,10 @@ mod tests {
 
     #[test]
     fn a_call_declined_by_the_post_call_push_pull_shows_both_decisions() {
-        // Call / Pass 比較では成立したが、鳴き後の既存 Push/Pull が Fold なので鳴かない。
+        // Issue #348 の代表局面。Call / Pass 比較では成立したが、鳴き後の既存 Push/Pull が Fold
+        // なので鳴かない。
         let (_, _, output) = rendered(
-            include_str!("../scenarios/two_shanten_pon_post_call_fold.json"),
+            include_str!("../scenarios/issue_348_pon_5s_before_call.json"),
             false,
         );
         let call = section(&output, "Call\n");

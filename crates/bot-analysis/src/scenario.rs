@@ -50,6 +50,10 @@ pub struct ScenarioSpec {
     pub post_reach_passed: Option<Vec<String>>,
     #[serde(default)]
     pub temporary_passed: Option<Vec<String>>,
+    /// 各 player の concealed hand が最後に変化して以降に通った牌種。player id 順の4要素で、
+    /// 省略すると unknown のまま。
+    #[serde(default)]
+    pub same_hand_passed: Option<Vec<String>>,
     #[serde(default)]
     pub melds: Option<Vec<Vec<MeldSpec>>>,
     #[serde(default)]
@@ -74,6 +78,9 @@ pub struct ScenarioSpec {
     pub legal_dahai: Option<String>,
     #[serde(default)]
     pub legal_pon: Option<Vec<PonActionSpec>>,
+    /// 合法な Chi。`legal_pon` の後ろに並ぶ。対象は上家の最後の打牌だけ。
+    #[serde(default)]
+    pub legal_chi: Option<Vec<ChiActionSpec>>,
     /// 合法な暗槓。consumed は手牌とツモ牌から取る同じ牌種4枚で、`"E E E E"` のように書く。
     ///
     /// 暗槓の合法性 (リーチ後に待ちが変わらないかなど) は入力側が source of truth なので、
@@ -137,6 +144,14 @@ pub struct RiichiSituationSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PonActionSpec {
+    pub from_player: u8,
+    pub tile: String,
+    pub consumed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChiActionSpec {
     pub from_player: u8,
     pub tile: String,
     pub consumed: String,
@@ -209,19 +224,25 @@ impl Scenario {
             resolve_post_reach_passed_tiles(spec.post_reach_passed.as_deref())?;
         let temporary_passed_tiles =
             resolve_temporary_passed_tiles(spec.temporary_passed.as_deref())?;
+        let same_hand_passed_tiles =
+            resolve_same_hand_passed_tiles(spec.same_hand_passed.as_deref())?;
         let meld_inputs = resolve_meld_inputs(spec.melds.as_deref())?;
         let player_id = resolve_seat("player_id", spec.player_id)?;
         let oya = resolve_seat("oya", spec.oya)?;
         let round_wind = parse_wind("round_wind", spec.round_wind.as_deref())?;
         let seat_wind = resolve_seat_wind(spec.seat_wind.as_deref(), player_id, oya)?;
         let table_state = resolve_table_state_facts(spec)?;
-        let reaction_source_player = spec.legal_pon.as_deref().and_then(|calls| {
-            let source = calls.first()?.from_player;
-            calls
-                .iter()
-                .all(|call| call.from_player == source)
-                .then_some(source)
-        });
+        let call_sources: Vec<u8> = spec
+            .legal_pon
+            .iter()
+            .flatten()
+            .map(|call| call.from_player)
+            .chain(spec.legal_chi.iter().flatten().map(|call| call.from_player))
+            .collect();
+        let reaction_source_player = call_sources
+            .first()
+            .copied()
+            .filter(|source| call_sources.iter().all(|call_source| call_source == source));
 
         let mut allocator = TileAllocator::new();
         let hand = allocate_field(&mut allocator, "hand", &spec.hand)?;
@@ -272,6 +293,7 @@ impl Scenario {
         .with_reach_discard_indices(reach_discard_indices)
         .with_post_reach_passed_tiles(post_reach_passed_tiles)
         .with_temporary_passed_tiles(temporary_passed_tiles)
+        .with_same_hand_passed_tiles(same_hand_passed_tiles)
         .with_table_state_facts(table_state)
         .with_history_furiten_facts(resolve_history_furiten_facts(spec))
         .with_double_riichi_facts(resolve_double_riichi_facts(spec))
@@ -476,16 +498,36 @@ fn resolve_temporary_passed_tiles(
             count: values.len(),
         });
     }
+    resolve_passed_tile_types("temporary_passed", values).map(Some)
+}
 
+fn resolve_same_hand_passed_tiles(
+    same_hand_passed: Option<&[String]>,
+) -> Result<Option<[Vec<TileType>; 4]>, ScenarioBuildError> {
+    let Some(values) = same_hand_passed else {
+        return Ok(None);
+    };
+    if values.len() != 4 {
+        return Err(ScenarioBuildError::SameHandPassedLength {
+            count: values.len(),
+        });
+    }
+    resolve_passed_tile_types("same_hand_passed", values).map(Some)
+}
+
+fn resolve_passed_tile_types(
+    field: &str,
+    values: &[String],
+) -> Result<[Vec<TileType>; 4], ScenarioBuildError> {
     let mut tiles: [Vec<TileType>; 4] = std::array::from_fn(|_| Vec::new());
     for (player, slot) in tiles.iter_mut().enumerate() {
         let input = values.get(player).map(String::as_str).unwrap_or_default();
-        *slot = parse_field(&format!("temporary_passed[{player}]"), input)?
+        *slot = parse_field(&format!("{field}[{player}]"), input)?
             .into_iter()
             .map(|tile| tile.tile_type)
             .collect();
     }
-    Ok(Some(tiles))
+    Ok(tiles)
 }
 
 fn resolve_seat(field: &str, value: Option<u8>) -> Result<Option<u8>, ScenarioBuildError> {
@@ -864,6 +906,15 @@ fn build_legal_actions(
         )?);
     }
 
+    if let Some(specs) = spec.legal_chi.as_deref() {
+        actions.extend(chi_actions(
+            specs,
+            hand,
+            context.discards(),
+            context.player_id(),
+        )?);
+    }
+
     if let Some(specs) = spec.legal_ankan.as_deref() {
         actions.extend(ankan_actions(specs, hand, draw)?);
     }
@@ -1086,6 +1137,83 @@ fn pon_target_tile(
     }
 
     Ok(target)
+}
+
+fn chi_actions(
+    specs: &[ChiActionSpec],
+    hand: &[TileId],
+    discards: &[Vec<TileId>; 4],
+    player_id: Option<u8>,
+) -> Result<Vec<LegalAction>, ScenarioBuildError> {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            chi_action(
+                &format!("legal_chi[{index}]"),
+                spec,
+                hand,
+                discards,
+                player_id,
+            )
+        })
+        .collect()
+}
+
+// 対象牌と consumed の割り当ては Pon と同じ helper を使い、Chi に固有なのは上家からであることと
+// 順子の形だけ。形の検証は既存 [`Meld::shape`] に任せる。
+fn chi_action(
+    field: &str,
+    spec: &ChiActionSpec,
+    hand: &[TileId],
+    discards: &[Vec<TileId>; 4],
+    player_id: Option<u8>,
+) -> Result<LegalAction, ScenarioBuildError> {
+    let Some(player_id) = player_id else {
+        return Err(ScenarioBuildError::LegalPonWithoutPlayerId {
+            field: field.to_string(),
+        });
+    };
+
+    let from_player = validate_seat(&format!("{field}.from_player"), spec.from_player)?;
+    if from_player != (player_id + 3) % 4 {
+        return Err(ScenarioBuildError::LegalChiNotFromKamicha {
+            field: field.to_string(),
+            from_player,
+            player_id,
+        });
+    }
+
+    let tile = parse_single_tile(&format!("{field}.tile"), &spec.tile)?;
+    let consumed = parse_field(&format!("{field}.consumed"), &spec.consumed)?;
+    if consumed.len() != CHI_TILE_COUNT - 1 {
+        return Err(ScenarioBuildError::LegalPonConsumedCount {
+            field: field.to_string(),
+            expected: CHI_TILE_COUNT - 1,
+            count: consumed.len(),
+        });
+    }
+
+    let target = pon_target_tile(field, tile, from_player, discards)?;
+    let consumed = pon_consumed_tiles(field, &consumed, hand)?;
+
+    let mut tiles = vec![target];
+    tiles.extend_from_slice(&consumed);
+    if Meld::new(MeldKind::Chi, tiles, Some(target))
+        .shape()
+        .is_none()
+    {
+        return Err(ScenarioBuildError::LegalChiShape {
+            field: field.to_string(),
+            tile: spec.tile.clone(),
+            consumed: spec.consumed.clone(),
+        });
+    }
+
+    Ok(LegalAction::Chi {
+        tile: target,
+        consumed,
+    })
 }
 
 fn ankan_actions(
@@ -2359,6 +2487,101 @@ mod tests {
         assert_eq!(
             labels,
             ["1p", "5p", "Pon", "Reach", "Hora", "Ryukyoku", "None"]
+        );
+    }
+
+    #[test]
+    fn legal_chi_follows_legal_pon_from_the_kamicha() {
+        let scenario = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "234m 567m 55s 34s 99p N",
+                "player_id": 0,
+                "discards": ["", "", "", "5s"],
+                "legal_dahai": "",
+                "legal_pon": [{ "from_player": 3, "tile": "5s", "consumed": "5s 5s" }],
+                "legal_chi": [{ "from_player": 3, "tile": "5s", "consumed": "3s 4s" }],
+                "allow_none": true
+            }"#,
+        ))
+        .unwrap();
+
+        let target = scenario.context.discards()[3][0];
+        assert!(matches!(
+            scenario.legal_actions.as_slice(),
+            [LegalAction::Pon { tile: pon, .. }, LegalAction::Chi { tile: chi, consumed }, LegalAction::None]
+                if *pon == target
+                    && *chi == target
+                    && consumed.iter().map(|tile| tile.tile_type().to_mjai_string()).collect::<Vec<_>>()
+                        == ["3s", "4s"]
+        ));
+        assert_eq!(scenario.context.reaction_source_player(), Some(3));
+    }
+
+    #[test]
+    fn rejects_legal_chi_that_is_not_from_the_kamicha_or_not_a_sequence() {
+        let chi_error = |from_player: u8, consumed: &str| {
+            Scenario::resolve(&spec_from_json(&format!(
+                r#"{{
+                    "hand": "234m 567m 55s 34s 99p N",
+                    "player_id": 0,
+                    "discards": ["", "5sr", "", "5s"],
+                    "legal_dahai": "",
+                    "legal_chi": [{{ "from_player": {from_player}, "tile": "5s", "consumed": "{consumed}" }}]
+                }}"#
+            )))
+            .unwrap_err()
+        };
+
+        assert_eq!(
+            chi_error(1, "3s 4s"),
+            ScenarioBuildError::LegalChiNotFromKamicha {
+                field: "legal_chi[0]".to_string(),
+                from_player: 1,
+                player_id: 0,
+            }
+        );
+        assert!(matches!(
+            chi_error(3, "5s 5s"),
+            ScenarioBuildError::LegalChiShape { .. }
+        ));
+    }
+
+    #[test]
+    fn same_hand_passed_sets_the_tiles_of_each_player() {
+        let scenario = Scenario::resolve(&spec_from_json(
+            r#"{
+                "hand": "234m 567m 55s 34s 99p N",
+                "same_hand_passed": ["1s 8s", "5p S", "", "3m"]
+            }"#,
+        ))
+        .unwrap();
+        let passed = scenario.context.same_hand_passed_tiles().unwrap();
+        let labels: Vec<Vec<String>> = passed
+            .iter()
+            .map(|tiles| tiles.iter().map(|tile| tile.to_mjai_string()).collect())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                vec!["1s".to_string(), "8s".to_string()],
+                vec!["5p".to_string(), "S".to_string()],
+                vec![],
+                vec!["3m".to_string()],
+            ]
+        );
+        assert_eq!(
+            Scenario::resolve(&spec_from_json(
+                r#"{ "hand": "234m 567m 55s 34s 99p N", "same_hand_passed": ["", ""] }"#
+            ))
+            .unwrap_err(),
+            ScenarioBuildError::SameHandPassedLength { count: 2 }
+        );
+        assert_eq!(
+            Scenario::resolve(&spec_from_json(r#"{ "hand": "234m 567m 55s 34s 99p N" }"#))
+                .unwrap()
+                .context
+                .same_hand_passed_tiles(),
+            None
         );
     }
 
