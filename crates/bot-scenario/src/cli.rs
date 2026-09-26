@@ -2,7 +2,7 @@ use std::iter::Peekable;
 
 use bot_analysis::{HistoryFuritenSpec, RiichiSituationSpec, ScenarioSpec, parse_seat_wind};
 use bot_core::seat_wind_for_player;
-use bot_logic::{TileType, TwoShantenSelfTsumoScope};
+use bot_logic::{SelfTsumoHorizon, TileType, TwoShantenSelfTsumoScope};
 use thiserror::Error;
 
 pub const USAGE: &str = "usage:
@@ -17,12 +17,15 @@ pub const USAGE: &str = "usage:
                [--allow-ryukyoku] [--lookahead] [--two-shanten-self-tsumo] [--verbose]
                [--two-shanten-self-tsumo-cost <SCOPE>]
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
+               [--self-tsumo-horizon-turn <TURN>] [--self-tsumo-late-min-future-draws <COUNT>]
   bot-scenario <SCENARIO_JSON> [--lookahead] [--two-shanten-self-tsumo] [--verbose]
                [--structural-expected-deal-in-loss]
                [--two-shanten-self-tsumo-cost <SCOPE>] [--force-fold]
                [--two-shanten-progress-self-tsumo-cost <SCOPE>] [--summary-only]
+               [--self-tsumo-horizon-turn <TURN>] [--self-tsumo-late-min-future-draws <COUNT>]
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>] [--lookahead]
                [--two-shanten-self-tsumo] [--verbose] [--force-fold] [--summary-only]
+               [--self-tsumo-horizon-turn <TURN>] [--self-tsumo-late-min-future-draws <COUNT>]
   bot-scenario --hand <TILES> [scenario options] --three-shanten-progress-self-tsumo
   bot-scenario <SCENARIO_JSON> --three-shanten-progress-self-tsumo
   bot-scenario --riichilab-capture <CAPTURE_JSONL> [--request-id <ID>]
@@ -97,6 +100,14 @@ pub const USAGE: &str = "usage:
   exact hidden-hand states the existing R/T counts and scores every one of them, so it is the
   heaviest diagnostic here, it is unavailable unless exactly one opponent has reached, and it
   never changes what the production bot decides
+  --self-tsumo-horizon-turn overrides the turn of the self-tsumo soft horizon (production
+  12) and --self-tsumo-late-min-future-draws overrides its late minimum of future own draws
+  (production 2); the raw future own draws floor(remaining_tiles / 4) are shortened by
+  18 - TURN but never below the late minimum and never above the raw value, so TURN 18
+  keeps the until-ryukyoku draws; it applies to every self-tsumo continuation of the
+  scenario (discard, current tenpai, call / pass), is an approximation of an early end of
+  the hand rather than a hand that ends at TURN, and cannot be combined with the capture
+  batch options
   --summary-only prints the Summary section only, and cannot be combined with
   --lookahead, --two-shanten-self-tsumo or --verbose
   --benchmark-riichilab-capture replays every captured request_action and measures the
@@ -255,6 +266,9 @@ pub enum CliError {
         "--reacher-riichi-facts must be none or a comma separated list of double and ippatsu, but is {0:?}"
     )]
     InvalidReacherRiichiFacts(String),
+
+    #[error("{option} cannot be combined with {conflict}")]
+    ConflictingSelfTsumoHorizon { option: String, conflict: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +338,8 @@ pub struct CliArgs {
     /// 単独リーチ相手への structural expected deal-in loss を構築して表示するかどうか。
     /// 既存 `R/T` と同じ隠れ手牌状態を1件ずつ点数計算するので、既定では行わない。
     pub structural_expected_deal_in_loss: bool,
+    /// self-tsumo continuation の soft horizon。指定が無ければ production 既定値。
+    pub self_tsumo_horizon: SelfTsumoHorizon,
 }
 
 impl CliArgs {
@@ -362,6 +378,8 @@ impl CliArgs {
         let mut dora_alias = false;
         let mut relative_discards: [Option<String>; RELATIVE_SEAT_COUNT] = Default::default();
         let mut relative_riichi: [Option<Option<u32>>; RELATIVE_SEAT_COUNT] = Default::default();
+        let mut self_tsumo_horizon = SelfTsumoHorizon::PRODUCTION;
+        let mut self_tsumo_horizon_option: Option<&str> = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -517,6 +535,16 @@ impl CliArgs {
                     reacher_riichi_facts = Some(parse_reacher_riichi_facts(&value)?);
                     inline_options = true;
                 }
+                "--self-tsumo-horizon-turn" => {
+                    self_tsumo_horizon.horizon_turn =
+                        count_value_of(&mut args, "--self-tsumo-horizon-turn")?;
+                    self_tsumo_horizon_option.get_or_insert("--self-tsumo-horizon-turn");
+                }
+                "--self-tsumo-late-min-future-draws" => {
+                    self_tsumo_horizon.late_min_future_draws =
+                        count_value_of(&mut args, "--self-tsumo-late-min-future-draws")?;
+                    self_tsumo_horizon_option.get_or_insert("--self-tsumo-late-min-future-draws");
+                }
                 "--summary-only" => summary_only = true,
                 "--force-fold" => force_fold = true,
                 other if other.starts_with('-') => {
@@ -536,6 +564,30 @@ impl CliArgs {
                     None => path = Some(other.to_string()),
                 },
             }
+        }
+
+        // capture 一括の mode は scenario ごとの context を CLI から差し替えないので、horizon の
+        // 上書きを黙って無視しない。
+        if let Some(option) = self_tsumo_horizon_option
+            && let Some(conflict) = first_enabled_diagnostic_option(&[
+                (
+                    !benchmark_captures.is_empty(),
+                    "--benchmark-riichilab-capture",
+                ),
+                (
+                    !comparison_captures.is_empty(),
+                    "--compare-three-shanten-continuation",
+                ),
+                (
+                    !stay_call_captures.is_empty(),
+                    "--compare-two-shanten-stay-call",
+                ),
+            ])
+        {
+            return Err(CliError::ConflictingSelfTsumoHorizon {
+                option: option.to_string(),
+                conflict,
+            });
         }
 
         if !benchmark_captures.is_empty() {
@@ -608,6 +660,7 @@ impl CliArgs {
                 summary_only: false,
                 force_fold: false,
                 structural_expected_deal_in_loss: false,
+                self_tsumo_horizon: SelfTsumoHorizon::PRODUCTION,
             });
         }
 
@@ -680,6 +733,7 @@ impl CliArgs {
                 summary_only: false,
                 force_fold: false,
                 structural_expected_deal_in_loss: false,
+                self_tsumo_horizon: SelfTsumoHorizon::PRODUCTION,
             });
         }
 
@@ -772,6 +826,7 @@ impl CliArgs {
                 summary_only: false,
                 force_fold: false,
                 structural_expected_deal_in_loss: false,
+                self_tsumo_horizon: SelfTsumoHorizon::PRODUCTION,
             });
         }
 
@@ -1240,6 +1295,7 @@ impl CliArgs {
             summary_only,
             force_fold,
             structural_expected_deal_in_loss,
+            self_tsumo_horizon,
         })
     }
 }
@@ -3266,5 +3322,68 @@ mod tests {
                 "--force-fold".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn the_self_tsumo_horizon_defaults_to_production_and_can_be_overridden() {
+        assert_eq!(
+            parse(&["--hand", "123m"]).unwrap().self_tsumo_horizon,
+            SelfTsumoHorizon::PRODUCTION
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--self-tsumo-horizon-turn", "16"])
+                .unwrap()
+                .self_tsumo_horizon,
+            SelfTsumoHorizon {
+                horizon_turn: 16,
+                late_min_future_draws: 2,
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "scenario.json",
+                "--self-tsumo-horizon-turn",
+                "18",
+                "--self-tsumo-late-min-future-draws",
+                "1",
+            ])
+            .unwrap()
+            .self_tsumo_horizon,
+            SelfTsumoHorizon {
+                horizon_turn: 18,
+                late_min_future_draws: 1,
+            }
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--self-tsumo-horizon-turn", "late"]),
+            Err(CliError::InvalidCount {
+                option: "--self-tsumo-horizon-turn".to_string(),
+                value: "late".to_string(),
+            })
+        );
+        assert_eq!(
+            parse(&["--hand", "123m", "--self-tsumo-late-min-future-draws"]),
+            Err(CliError::MissingValue(
+                "--self-tsumo-late-min-future-draws".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_the_self_tsumo_horizon_with_the_capture_batch_modes() {
+        for batch in [
+            "--benchmark-riichilab-capture",
+            "--compare-three-shanten-continuation",
+            "--compare-two-shanten-stay-call",
+        ] {
+            assert_eq!(
+                parse(&[batch, "capture.jsonl", "--self-tsumo-horizon-turn", "14"]),
+                Err(CliError::ConflictingSelfTsumoHorizon {
+                    option: "--self-tsumo-horizon-turn".to_string(),
+                    conflict: batch.to_string(),
+                }),
+                "{batch}"
+            );
+        }
     }
 }

@@ -64,7 +64,7 @@ where
     I: IntoIterator<Item = String>,
 {
     let args = CliArgs::parse(args)?;
-    let (header, scenario) = match &args.source {
+    let (header, mut scenario) = match &args.source {
         ScenarioSource::Json(path) => (None, Scenario::resolve(&read_spec(path)?)?),
         ScenarioSource::Inline(spec) => (None, Scenario::resolve(spec)?),
         ScenarioSource::RiichilabCapture { path, request_id } => {
@@ -79,6 +79,12 @@ where
             return two_shanten_stay_call::run_capture_comparison(spec);
         }
     };
+
+    // soft horizon は評価設定なので、scenario の観測事実を解決した後に context へ載せる。以降の
+    // どの mode も同じ context を使うので、self-tsumo continuation は一貫して同じ horizon になる。
+    scenario.context = scenario
+        .context
+        .with_self_tsumo_horizon(args.self_tsumo_horizon);
 
     // ベタ降り仮定の評価は通常打牌選択・押し引き・リーチ判断を一切走らせず、既存 Fold
     // defense をそのまま実行する。production の判断は変わらない。
@@ -286,6 +292,106 @@ mod tests {
         assert_eq!(
             options_of(&["--hand", "123m", "--two-shanten-self-tsumo", "--verbose"]),
             DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM_AND_TWO_SHANTEN_SELF_TSUMO
+        );
+    }
+
+    // 同じ synthetic scenario を horizon だけ変えて実行し、Self-tsumo horizon section と打 5p の
+    // expected self-tsumo value を読む。
+    fn run_with_horizon(remaining_tiles: &str, horizon: &[&str]) -> (String, f64) {
+        let mut args = vec![
+            "--hand",
+            "34567899m5799p34s",
+            "--dora-indicator",
+            "3m",
+            "--round-wind",
+            "E",
+            "--seat-wind",
+            "N",
+            "--player-id",
+            "0",
+            "--oya",
+            "1",
+            "--remaining-tiles",
+            remaining_tiles,
+        ];
+        args.extend_from_slice(horizon);
+        let output = run_args(&args).unwrap();
+        let section = output
+            .split("\n\n")
+            .find(|section| section.starts_with("Self-tsumo horizon\n"))
+            .expect("Self-tsumo horizon section がある")
+            .to_string();
+        let value = output
+            .split("\n\n5p\n")
+            .nth(1)
+            .and_then(|candidate| {
+                candidate
+                    .lines()
+                    .find_map(|line| line.strip_prefix("  expected self-tsumo value: "))
+            })
+            .and_then(|value| value.parse::<f64>().ok())
+            .expect("打 5p の expected self-tsumo value がある");
+        (section, value)
+    }
+
+    #[test]
+    fn the_self_tsumo_horizon_is_reported_and_changes_the_values_monotonically() {
+        let (production, _) = run_with_horizon("30", &[]);
+        assert_eq!(
+            production,
+            "Self-tsumo horizon\n  horizon turn: 12\n  late minimum future draws: 2\n  \
+             raw future own draws: 7\n  effective future own draws: 2"
+        );
+
+        let runs: Vec<_> = ["12", "14", "16", "18"]
+            .into_iter()
+            .map(|turn| run_with_horizon("30", &["--self-tsumo-horizon-turn", turn]))
+            .collect();
+        for ((section, _), effective) in runs.iter().zip([2, 3, 5, 7]) {
+            assert!(
+                section.ends_with(&format!("effective future own draws: {effective}")),
+                "{section}"
+            );
+        }
+        for pair in runs.windows(2) {
+            assert!(pair[0].1 < pair[1].1, "{} >= {}", pair[0].1, pair[1].1);
+        }
+
+        // horizon 18 は late minimum に依らず流局までの従来の値になる。
+        let legacy = run_with_horizon(
+            "30",
+            &[
+                "--self-tsumo-horizon-turn",
+                "18",
+                "--self-tsumo-late-min-future-draws",
+                "0",
+            ],
+        );
+        assert_eq!(legacy.1, runs[3].1);
+        assert!(
+            legacy
+                .0
+                .ends_with("raw future own draws: 7\n  effective future own draws: 7")
+        );
+    }
+
+    #[test]
+    fn the_self_tsumo_horizon_keeps_an_unknown_wall_unknown() {
+        let output = run_args(&[
+            "--hand",
+            "34567899m5799p34s",
+            "--discards-shimocha",
+            "1z",
+            "--self-tsumo-horizon-turn",
+            "14",
+        ])
+        .unwrap();
+        assert!(
+            output.contains(
+                "Self-tsumo horizon\n  horizon turn: 14\n  late minimum future draws: 2\n  \
+                 raw future own draws: unknown\n  effective future own draws: unknown\n"
+            ),
+            "{output}"
         );
     }
 
@@ -1049,7 +1155,7 @@ mod tests {
             lookahead.contains("  self-tsumo (expected tsumo payment)"),
             "{lookahead}"
         );
-        assert!(lookahead.contains("    reach now: 1460.235"), "{lookahead}");
+        assert!(lookahead.contains("    reach now: 994.783"), "{lookahead}");
     }
 
     #[test]

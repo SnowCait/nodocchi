@@ -136,8 +136,9 @@ pub use selection::{
     resolve_two_shanten_expected_self_tsumo_value_axis,
 };
 pub use self_tsumo::{
-    SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoPath, TSUMO_PROBABILITY_SCALE,
-    TenpaiTsumoValue, tsumo_hit_probability,
+    SELF_TSUMO_VALUE_SCALE, SelfTsumoFacts, SelfTsumoHorizon, SelfTsumoPath,
+    TSUMO_PROBABILITY_SCALE, TenpaiTsumoValue, UNTIL_RYUKYOKU_HORIZON_TURN,
+    soft_horizon_future_draws, tsumo_hit_probability,
 };
 pub use shanten::{
     EffectiveShanten, FixedMeldCount, MinShanten, Shanten, calculate_shanten,

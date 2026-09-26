@@ -2,7 +2,8 @@ use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::combined_defense::{is_safe_against_all_threats, threat_defense_targets};
 use crate::context::GameContext;
 use crate::discard_selection::{
-    LegalDiscardEvaluations, concealed_tiles_after_discard, select_best_normal_discard_evaluation,
+    LegalDiscardEvaluations, concealed_tiles_after_discard,
+    push_pull_iishanten_expected_self_tsumo_value, select_best_normal_discard_evaluation,
     selected_discard_tenpai_wait_availability, selected_iishanten_forward_metrics_from_context,
 };
 use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
@@ -46,7 +47,7 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 ///
 /// 正確な打点は [`PushPullOffenseState::tenpai_offense_value_after_discard`] として持ち、
 /// threat ありの非フリテンテンパイでだけ判定へ反映する。一向聴では
-/// [`PushPullOffenseState::iishanten_expected_self_tsumo_value`] だけを判定へ反映する。
+/// [`PushPullOffenseState::iishanten_push_pull_expected_self_tsumo_value`] だけを判定へ反映する。
 /// 打牌後の受け入れ・一向聴形・簡易打点 proxy は `PushPullInputs` とログに保持するが、
 /// 現在の判定には使わない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,9 +69,9 @@ pub enum PushPullMode {
 /// そのまま受け取る。
 ///
 /// `decide_push_pull()` が現在参照するのは `min_shanten_after_discard` /
-/// `tenpai_wait_after_discard` / `tenpai_offense_value_after_discard` と、1向聴の前方集計値の
-/// うち [`ForwardMetrics::expected_self_tsumo_value`] だけで、受け入れ・一向聴形・簡易打点
-/// proxy と残りの前方集計値は診断・ログ用に保持する。簡易打点 proxy は exact 打点とは別物で、
+/// `tenpai_wait_after_discard` / `tenpai_offense_value_after_discard` と、1向聴の
+/// `iishanten_push_pull_expected_self_tsumo_value` だけで、受け入れ・一向聴形・簡易打点
+/// proxy と通常打牌選択の前方集計値は診断・ログ用に保持する。簡易打点 proxy は exact 打点とは別物で、
 /// 解析材料として残している。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushPullOffenseState {
@@ -111,14 +112,27 @@ pub struct PushPullOffenseState {
     /// 打牌後が1向聴の場合に、通常打牌選択が使った前方集計値。1向聴でなければ `None`。
     ///
     /// 通常打牌選択が持っている値をそのまま転記するだけで、押し引き側で2手先探索も打点集計も
-    /// 行わない。1向聴の押し引きが判定へ使うのは [`ForwardMetrics::expected_self_tsumo_value`]
-    /// だけで、残りは診断・ログ用の観測値として持つ。
+    /// 行わない。値は configured horizon ([`GameContext::self_tsumo_horizon`]) の尺度で、押し引き
+    /// の判定には使わない診断・ログ用の観測値。判定が使うのは
+    /// [`Self::iishanten_push_pull_expected_self_tsumo_value`]。
     ///
     /// [`ForwardMetrics::tenpai_wait`] は将来テンパイの待ちを1手目の残枚数で重み付けした
     /// 合計、[`ForwardMetrics::prospective_value`] はその枝を確定打点で重み付けした合計。
     /// 打点を確定できない枝がある場合と、集計対象の枝が1つも無い場合は打点込みの値が `None`
     /// になる。確定しない打点を 0 点として扱わない。
     pub iishanten_forward_metrics: Option<ForwardMetrics>,
+
+    /// 1向聴 Push/Fold の固定 threshold と比較する ExpectedSelfTsumoValue
+    /// [[`SELF_TSUMO_VALUE_SCALE`]]。
+    ///
+    /// 選んだ打牌は configured horizon の通常打牌選択で決まるが、その打牌を固定 threshold と
+    /// 比較する値は [`bot_logic::SelfTsumoHorizon::UNTIL_RYUKYOKU`] で選択候補1件だけ評価し直した
+    /// もの ([`push_pull_iishanten_expected_self_tsumo_value`])。configured horizon を変えても同じ
+    /// 候補なら同じ値になる。
+    ///
+    /// 評価するのは打牌後が1向聴で明確な threat がある (Push/Fold がこの値を使う) 局面だけで、
+    /// それ以外と値を確定できない場合は `None`。
+    pub iishanten_push_pull_expected_self_tsumo_value: Option<u64>,
 }
 
 impl PushPullOffenseState {
@@ -140,13 +154,17 @@ impl PushPullOffenseState {
             .weighted_total()
     }
 
-    /// 一向聴から攻撃を継続した場合の ExpectedSelfTsumoValue [[`SELF_TSUMO_VALUE_SCALE`]]。
+    /// 通常打牌選択が使った1向聴の ExpectedSelfTsumoValue [[`SELF_TSUMO_VALUE_SCALE`]]。
     ///
-    /// 打牌後が一向聴でない場合と、確定できない枝があって集計値を持たない場合はどちらも
-    /// `None`。既存 [`ForwardMetrics::expected_self_tsumo_value`] をそのまま読み、押し引き側で
-    /// 集計し直さない。
-    pub fn iishanten_expected_self_tsumo_value(&self) -> Option<u64> {
+    /// configured horizon の尺度の観測値で、押し引きの threshold とは比較しない。
+    pub fn iishanten_selection_expected_self_tsumo_value(&self) -> Option<u64> {
         self.iishanten_forward_metrics?.expected_self_tsumo_value
+    }
+
+    /// 1向聴 Push/Fold の threshold と比較する `UNTIL_RYUKYOKU` の ExpectedSelfTsumoValue
+    /// [[`SELF_TSUMO_VALUE_SCALE`]]。
+    pub fn iishanten_push_pull_expected_self_tsumo_value(&self) -> Option<u64> {
+        self.iishanten_push_pull_expected_self_tsumo_value
     }
 
     /// 明確な threat に対して押すために要求する打牌後テンパイの条件。
@@ -673,8 +691,12 @@ pub(crate) fn push_pull_inputs_from_selected_tenpai(
 /// `legal_actions` を source of truth にし、Reach 可否を別経路で推測し直さない。
 ///
 /// `iishanten_forward_metrics` は通常打牌選択が同じ `evaluation` について観測した1向聴の前方
-/// 集計値で、押し引き側では転記するだけ。2手先探索も打点集計もここでは行わない。1向聴でない
-/// 打牌では `None` を渡す。
+/// 集計値で、押し引き側では転記するだけ。1向聴でない打牌では `None` を渡す。
+///
+/// 1向聴 Push/Fold の threshold と比較する値は、打牌後が1向聴で明確な threat がある場合だけ
+/// 選択候補1件について `UNTIL_RYUKYOKU` で求める
+/// ([`push_pull_iishanten_expected_self_tsumo_value`])。探索は discard-selection の既存前方評価
+/// 基盤が行い、押し引き側では持たない。
 ///
 /// `selected_tenpai_wait` / `selected_tenpai_offense_value` は、複数の現在聴牌候補を通常打牌選択が
 /// 比較した場合の計算済み結果。渡された場合は押し引き用に待ち・hand valueを再評価せず転記する。
@@ -697,6 +719,8 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
     };
 
     let open_hand_threats = classify_open_hand_threats(&player_threats);
+    let clear_threat =
+        opponent_reach_count >= 1 || has_actionable_open_hand_threat(&open_hand_threats);
     let selected_normal_discard_hard_safe_for_all_threat_targets =
         selected_normal_discard_hard_safe_for_all_threat_targets(
             context,
@@ -740,6 +764,15 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
             red_dora_count_after_discard: value_proxy.red_dora_count,
             value_honor_han_proxy_after_discard: value_proxy.value_honor_han_proxy,
             iishanten_forward_metrics,
+            iishanten_push_pull_expected_self_tsumo_value: if clear_threat {
+                push_pull_iishanten_expected_self_tsumo_value(
+                    context,
+                    evaluation,
+                    iishanten_forward_metrics,
+                )
+            } else {
+                None
+            },
         }
     });
 
@@ -1030,15 +1063,16 @@ fn is_strong_tenpai(offense: &PushPullOffenseState, dealer_reacher: bool) -> boo
 
 /// 明確な threat に対して一向聴から押せる攻撃価値があるか。
 ///
-/// 通常打牌選択が既に求めた [`ForwardMetrics::expected_self_tsumo_value`] を scalar 比較する
-/// だけで、押し引き側で前方探索も打点集計も受け入れ集計も行わない。要求する値は
+/// 選択候補を `UNTIL_RYUKYOKU` で評価した
+/// [`PushPullOffenseState::iishanten_push_pull_expected_self_tsumo_value`] を scalar 比較する
+/// だけで、configured horizon の選択値とは比較しない。要求する値は
 /// [`iishanten_push_expected_self_tsumo_min`] が1か所で決める。
 ///
 /// 値を確認できない場合は保守的に押さない。受け入れ・一向聴形・weighted tenpai wait・
 /// weighted prospective value・簡易打点 proxy へ fallback しない。
 fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs) -> bool {
     offense
-        .iishanten_expected_self_tsumo_value()
+        .iishanten_push_pull_expected_self_tsumo_value()
         .is_some_and(|value| value >= iishanten_push_expected_self_tsumo_min(inputs))
 }
 
@@ -1233,7 +1267,8 @@ pub(crate) fn log_push_pull_decision(
         offense_iishanten_prospective_value = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.prospective_value),
         offense_iishanten_weighted_tenpai_wait_remaining = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_remaining),
         offense_iishanten_weighted_tenpai_wait_type_count = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_type_count),
-        offense_iishanten_expected_self_tsumo_value = ?inputs.offense.and_then(|offense| offense.iishanten_expected_self_tsumo_value()),
+        offense_iishanten_selection_expected_self_tsumo_value = ?inputs.offense.and_then(|offense| offense.iishanten_selection_expected_self_tsumo_value()),
+        offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku = ?inputs.offense.and_then(|offense| offense.iishanten_push_pull_expected_self_tsumo_value()),
         offense_iishanten_push_expected_self_tsumo_min = iishanten_push_expected_self_tsumo_min(inputs),
         early_fold_best_shanten_after_discard = ?early_fold_best_shanten_after_discard,
         normal_discard = ?normal_discard,
@@ -1336,10 +1371,11 @@ mod tests {
         points * SELF_TSUMO_VALUE_SCALE
     }
 
-    // ExpectedSelfTsumoValue だけを指定した一向聴の攻撃評価。
+    // Push/Fold 用の `UNTIL_RYUKYOKU` ExpectedSelfTsumoValue だけを指定した一向聴の攻撃評価。
     //
-    // 判定に使わない前方集計値 (weighted tenpai wait / weighted prospective value) はあえて
-    // 高い値で埋め、ExpectedSelfTsumoValue だけで境界が決まることを固定する。
+    // 判定に使わない前方集計値 (weighted tenpai wait / weighted prospective value と、configured
+    // horizon の選択用 ExpectedSelfTsumoValue) はあえて高い値で埋め、Push/Fold 用の値だけで
+    // 境界が決まることを固定する。
     fn iishanten_offense_with_expected_self_tsumo_value(
         expected_self_tsumo_value: Option<u64>,
     ) -> PushPullOffenseState {
@@ -1352,8 +1388,9 @@ mod tests {
                 }),
                 next_acceptance: None,
                 prospective_value: Some(u64::MAX),
-                expected_self_tsumo_value,
+                expected_self_tsumo_value: Some(u64::MAX),
             }),
+            iishanten_push_pull_expected_self_tsumo_value: expected_self_tsumo_value,
             ..offense_with_shape(1, 16, 5, IishantenShape::Complete)
         }
     }
@@ -1388,6 +1425,7 @@ mod tests {
             red_dora_count_after_discard: red_dora,
             value_honor_han_proxy_after_discard: value_honor_han,
             iishanten_forward_metrics: None,
+            iishanten_push_pull_expected_self_tsumo_value: None,
         }
     }
 
@@ -1980,6 +2018,57 @@ mod tests {
                         PushPullReason::IishantenAgainstReach,
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_iishanten_thresholds_stay_on_the_until_ryukyoku_scale() {
+        // horizon ごとの threshold は持たない。固定値は UNTIL_RYUKYOKU の尺度のまま。
+        assert_eq!(
+            IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            self_tsumo_points(1_000)
+        );
+        assert_eq!(
+            DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            self_tsumo_points(1_500)
+        );
+        assert_eq!(
+            CAUTION_ONLY_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
+            self_tsumo_points(750)
+        );
+    }
+
+    #[test]
+    fn the_selection_expected_self_tsumo_value_is_not_compared_with_the_threshold() {
+        // threshold と比較するのは UNTIL_RYUKYOKU の Push/Fold 用の値だけで、configured horizon の
+        // 選択用の値がどれだけ高くても低くても判定は変わらない。
+        let offense = |selection: Option<u64>, push_pull: Option<u64>| PushPullOffenseState {
+            iishanten_forward_metrics: Some(ForwardMetrics {
+                expected_self_tsumo_value: selection,
+                ..ForwardMetrics::default()
+            }),
+            iishanten_push_pull_expected_self_tsumo_value: push_pull,
+            ..offense_with_shape(1, 8, 2, IishantenShape::Complete)
+        };
+        let threshold = IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN;
+        for selection in [None, Some(0), Some(u64::MAX)] {
+            let high = offense(selection, Some(threshold));
+            assert_eq!(
+                high.iishanten_selection_expected_self_tsumo_value(),
+                selection
+            );
+            assert_decision(
+                &inputs(1, false, Some(high)),
+                PushPullMode::Push,
+                PushPullReason::ValuableIishantenAgainstReach,
+            );
+            for push_pull in [None, Some(threshold - 1)] {
+                assert_decision(
+                    &inputs(1, false, Some(offense(selection, push_pull))),
+                    PushPullMode::Fold,
+                    PushPullReason::IishantenAgainstReach,
+                );
             }
         }
     }

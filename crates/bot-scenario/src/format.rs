@@ -30,6 +30,7 @@ use bot_core::{
     TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
     TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
     TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
+    discard_selection::{effective_own_future_draws, own_future_draws},
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
@@ -65,6 +66,7 @@ pub fn format_diagnostic(
     let mut sections = vec![
         format_scenario(scenario, verbose),
         format_table_state(&scenario.context),
+        format_self_tsumo_horizon(&scenario.context),
         format_history_furiten(diagnostic),
         format_final_decision(diagnostic),
         format_call(diagnostic.call.as_ref(), verbose),
@@ -285,6 +287,27 @@ pub(crate) fn format_table_state(context: &GameContext) -> String {
         ),
         format!("  scores: {}", format_scores(table_state.scores)),
         format!("  kyoku: {}", format_optional_count(table_state.kyoku)),
+    ]
+    .join("\n")
+}
+
+// self-tsumo continuation が使う将来自摸機会の soft horizon。raw は流局までの値で、effective
+// が self-tsumo facts に渡る値。
+pub(crate) fn format_self_tsumo_horizon(context: &GameContext) -> String {
+    let horizon = context.self_tsumo_horizon();
+    let raw = own_future_draws(context);
+    [
+        "Self-tsumo horizon".to_string(),
+        format!("  horizon turn: {}", horizon.horizon_turn),
+        format!(
+            "  late minimum future draws: {}",
+            horizon.late_min_future_draws
+        ),
+        format!("  raw future own draws: {}", format_optional_count(raw)),
+        format!(
+            "  effective future own draws: {}",
+            format_optional_count(effective_own_future_draws(context, raw))
+        ),
     ]
     .join("\n")
 }
@@ -1964,7 +1987,7 @@ fn format_push_pull(
                     }
                 }
                 lines.extend(format_tenpai_offense_value(offense, inputs.dealer_reacher));
-                lines.extend(format_iishanten_forward_metrics(offense));
+                lines.extend(format_iishanten_forward_metrics(offense, inputs));
                 lines.push(format!(
                     "    dora after discard: {}",
                     offense.dora_count_after_discard
@@ -2017,14 +2040,33 @@ fn format_tenpai_offense_value(
 //
 // `weighted prospective value` は将来テンパイの確定打点を1手目・和了牌の残枚数で重み付けした
 // 合計で、確定できない枝がある場合と集計対象の枝が無い場合は `unknown`。平均へ正規化した値でも
-// 完全な EV でもない。現在の押し引きが一向聴の判定へ使うのは `expected self-tsumo value` だけで、
-// 残りは観測値。
-fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<String> {
+// 完全な EV でもない。forward metrics は configured horizon の通常打牌選択の値で、押し引きが一向聴の
+// threshold と比べるのは選択候補を UNTIL_RYUKYOKU で評価し直した
+// `push/pull expected self-tsumo value (until ryukyoku)` だけ。
+// 明確な threat が無い局面では Push/Fold 用の値を評価しないので、その旨だけを出す。
+fn format_iishanten_forward_metrics(
+    offense: &PushPullOffenseState,
+    inputs: &PushPullInputs,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if offense.min_shanten_after_discard == 1 {
+        let clear_threat =
+            inputs.opponent_reach_count >= 1 || inputs.has_actionable_open_hand_threat();
+        lines.push(format!(
+            "    push/pull expected self-tsumo value (until ryukyoku): {}",
+            if clear_threat {
+                format_self_tsumo_value(offense.iishanten_push_pull_expected_self_tsumo_value())
+            } else {
+                NOT_EVALUATED.to_string()
+            }
+        ));
+    }
     let Some(metrics) = offense.iishanten_forward_metrics else {
-        return vec![format!("    iishanten forward metrics: {NONE}")];
+        lines.push(format!("    iishanten forward metrics: {NONE}"));
+        return lines;
     };
 
-    vec![
+    lines.extend([
         "    iishanten forward metrics".to_string(),
         format!(
             "      expected self-tsumo value: {}",
@@ -2038,7 +2080,8 @@ fn format_iishanten_forward_metrics(offense: &PushPullOffenseState) -> Vec<Strin
             "      weighted tenpai wait: {}",
             format_tenpai_wait(metrics.tenpai_wait)
         ),
-    ]
+    ]);
+    lines
 }
 
 fn prospective_total_label(total: Option<u64>) -> String {
@@ -4403,9 +4446,9 @@ mod tests {
         assert_eq!(action_label(&diagnostic.selected_action), "8m");
 
         for (discard, expected, formatted) in [
-            ("8m", 70_251_801, "70.251"),
-            ("9s", 67_676_242, "67.676"),
-            ("5m", 66_307_421, "66.307"),
+            ("8m", 43_237_279, "43.237"),
+            ("9s", 41_878_243, "41.878"),
+            ("5m", 40_579_757, "40.579"),
         ] {
             let candidate = cohort_candidate(&diagnostic, discard);
             assert_eq!(
@@ -4439,13 +4482,13 @@ mod tests {
         assert!(summary.contains("  choice 1: 8m"), "{summary}");
         assert!(
             summary.contains(
-                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 70.251 > choice 2 67.676"
+                "  choice 2: 9s\n  choice 2 source: NormalDiscard\n  choice 2 lost by: TwoShantenProgressSelfTsumoValue\n  choice 2 comparison: choice 1 43.237 > choice 2 41.878"
             ),
             "{summary}"
         );
         assert!(
             summary.contains(
-                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 67.676 > choice 3 66.307"
+                "  choice 3: 5m\n  choice 3 source: NormalDiscard\n  choice 3 lost by: TwoShantenProgressSelfTsumoValue\n  choice 3 comparison: choice 2 41.878 > choice 3 40.579"
             ),
             "{summary}"
         );
@@ -7422,11 +7465,11 @@ mod tests {
             "{reach_section}"
         );
         assert!(
-            reach_section.contains("    reach now: 1460.235"),
+            reach_section.contains("    reach now: 994.783"),
             "{reach_section}"
         );
         assert!(
-            reach_section.contains("      forced Reach: 2094.467"),
+            reach_section.contains("      forced Reach: 1478.969"),
             "{reach_section}"
         );
         assert!(summary.contains("  reach: deferred"), "{summary}");
@@ -9634,11 +9677,12 @@ mod tests {
         );
 
         // 局面共通の未確認牌と残り自摸機会を節の先頭に1回だけ出す。
-        // 手牌14枚 + ドラ表示牌1枚が見えているので未確認は 121枚。残り山 60枚を4人で分ける。
+        // 手牌14枚 + ドラ表示牌1枚が見えているので未確認は 121枚。残り山 60枚を4人で分けた
+        // 15回へ production の soft horizon を適用して 9回。
         let facts = [
             "  self-tsumo continuation",
             "    unknown tiles: 121",
-            "    current future own draws: 15",
+            "    current future own draws: 9",
         ]
         .join("\n");
         assert!(lookahead.contains(&facts), "{lookahead}");
@@ -9650,7 +9694,7 @@ mod tests {
             "          terminal tenpai",
             "            mode: Reach",
             "            unknown tiles: 120",
-            "            future own draws: 14",
+            "            future own draws: 8",
         ]
         .join("\n");
         assert!(lookahead.contains(&branch), "{lookahead}");
