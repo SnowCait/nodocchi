@@ -203,8 +203,9 @@ pub use ryukyoku_decision::{
     continues_with_shanten, evaluate_ryukyoku_decision,
 };
 pub use self_tsumo_horizon_comparison::{
-    COMPARED_SELF_TSUMO_HORIZON_TURNS, COMPARED_SELF_TSUMO_HORIZONS, SelfTsumoHorizonComparison,
-    SelfTsumoHorizonDecision, compare_self_tsumo_horizons, decide_with_self_tsumo_horizon,
+    COMPARED_SELF_TSUMO_HORIZON_TURNS, COMPARED_SELF_TSUMO_HORIZONS, PassFutureDraws,
+    SelfTsumoHorizonComparison, SelfTsumoHorizonDecision, compare_self_tsumo_horizons,
+    decide_with_self_tsumo_horizon,
 };
 pub use shanten_diagnostic::{
     DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,

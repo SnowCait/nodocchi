@@ -4,13 +4,17 @@
 //! production と同じ判断経路を通す ([`compare_self_tsumo_horizons`])。どの horizon が正しいかは
 //! 判定せず、horizon を変えた場合に production 判断がどの程度・どの局面で変わるかを数える。
 //! primary metric は最終 action、secondary metric は通常打牌選択の一致。
+//!
+//! 将来自摸機会は、通常打牌後・Call 後の baseline `floor(remaining_tiles / 4)` と、Chi / Pon への
+//! 反応 request で鳴き判断が評価する Pass 側の値を分けて扱う。局面の時期の bucket は baseline で
+//! 1 request = 1 bucket に分類し、Pass 側の値は差分 request の詳細で並べて表示する。
 
 use std::collections::BTreeMap;
 
 use bot_core::{
     AgentActionSource, COMPARED_SELF_TSUMO_HORIZON_TURNS, COMPARED_SELF_TSUMO_HORIZONS,
-    LegalAction, PushPullOffenseState, SelfTsumoHorizonComparison, SelfTsumoHorizonDecision,
-    compare_self_tsumo_horizons,
+    LegalAction, PassFutureDraws, PushPullOffenseState, SelfTsumoHorizonComparison,
+    SelfTsumoHorizonDecision, compare_self_tsumo_horizons,
 };
 
 use crate::cli::CaptureComparisonSpec;
@@ -21,11 +25,14 @@ use crate::replay::load_captured_scenarios;
 const HORIZON_COUNT: usize = COMPARED_SELF_TSUMO_HORIZONS.len();
 const NOT_EVALUATED: &str = "not evaluated";
 const UNKNOWN: &str = "unknown";
+const NOT_APPLICABLE: &str = "not applicable";
 
 // 比較する horizon の全 pair。表示順は (12, 14), (12, 16), ... (16, 18)。
 const HORIZON_PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 
-/// raw future own draws の集計 bucket。
+/// baseline raw future own draws (`floor(remaining_tiles / 4)`) の集計 bucket。
+///
+/// 反応 request の Pass 側が使う自摸回数とは異なる場合があるが、分類には使わない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RawDrawBucket {
     UpTo2,
@@ -158,8 +165,12 @@ pub struct BucketSummary {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HorizonComparisonSummary {
     pub requests: usize,
-    pub known_raw_future_draws: usize,
-    pub unknown_raw_future_draws: usize,
+    pub known_baseline_raw_future_draws: usize,
+    pub unknown_baseline_raw_future_draws: usize,
+    /// Chi / Pon の反応 request で、Pass 側の自摸回数を production が確定できたもの。
+    pub known_pass_raw_future_draws: usize,
+    /// Chi / Pon の反応 request で、反応元不明などで Pass 側の自摸回数が unknown のもの。
+    pub unknown_pass_raw_future_draws: usize,
     pub final_pairs: [PairAgreement; 6],
     pub final_all_four_same: usize,
     pub final_not_all_same: usize,
@@ -187,11 +198,16 @@ impl HorizonComparisonSummary {
             ..Self::default()
         };
         for request in requests {
-            let raw = request.comparison.raw_future_draws;
+            let raw = request.comparison.baseline_raw_future_draws;
             if raw.is_some() {
-                summary.known_raw_future_draws += 1;
+                summary.known_baseline_raw_future_draws += 1;
             } else {
-                summary.unknown_raw_future_draws += 1;
+                summary.unknown_baseline_raw_future_draws += 1;
+            }
+            match request.comparison.pass_raw_future_draws {
+                PassFutureDraws::Known(_) => summary.known_pass_raw_future_draws += 1,
+                PassFutureDraws::Unknown => summary.unknown_pass_raw_future_draws += 1,
+                PassFutureDraws::NotApplicable => {}
             }
 
             let actions = request.final_actions();
@@ -287,13 +303,25 @@ pub fn format_capture_comparison(captures: usize, requests: &[ComparedRequest]) 
         "  this observes how the production decision changes; it does not pick a correct horizon"
             .to_string(),
         format!("  requests evaluated: {}", summary.requests),
+        "  baseline future draws are floor(remaining_tiles / 4) after a normal discard or a call;"
+            .to_string(),
+        "  the pass branch of a Chi / Pon reaction counts its own draws from the reaction source"
+            .to_string(),
         format!(
-            "  requests with known raw future draws: {}",
-            summary.known_raw_future_draws
+            "  requests with known baseline raw future draws: {}",
+            summary.known_baseline_raw_future_draws
         ),
         format!(
-            "  requests with unknown raw future draws: {}",
-            summary.unknown_raw_future_draws
+            "  requests with unknown baseline raw future draws: {}",
+            summary.unknown_baseline_raw_future_draws
+        ),
+        format!(
+            "  reaction requests with known pass raw future draws: {}",
+            summary.known_pass_raw_future_draws
+        ),
+        format!(
+            "  reaction requests with unknown pass raw future draws: {}",
+            summary.unknown_pass_raw_future_draws
         ),
         String::new(),
         "Final action agreement (primary)".to_string(),
@@ -333,7 +361,11 @@ pub fn format_capture_comparison(captures: usize, requests: &[ComparedRequest]) 
     ));
 
     lines.push(String::new());
-    lines.push("By raw future own draws".to_string());
+    lines.push("By baseline raw future own draws".to_string());
+    lines.push(
+        "  floor(remaining_tiles / 4); the pass branch of a reaction may use a different count"
+            .to_string(),
+    );
     for (bucket, counts) in &summary.buckets {
         lines.push(format!(
             "  {}: requests {}, all four same {}, not all same {}, normal discard not all same {}",
@@ -385,22 +417,30 @@ fn format_differing_request(request: &ComparedRequest) -> Vec<String> {
     let mut lines = vec![
         format!("  {}  request_id={}", request.capture, request.request_id),
         format!(
-            "    raw future own draws: {}",
-            format_count(comparison.raw_future_draws)
+            "    baseline raw future own draws: {}",
+            format_count(comparison.baseline_raw_future_draws)
         ),
         format!(
-            "    effective future own draws: {}",
-            comparison
-                .decisions
-                .iter()
-                .map(|decision| format!(
-                    "h{}={}",
-                    decision.horizon.horizon_turn,
-                    format_count(decision.effective_future_draws)
-                ))
-                .collect::<Vec<_>>()
-                .join(" ")
+            "    baseline effective future own draws: {}",
+            format_per_horizon(comparison, |decision| format_count(
+                decision.baseline_effective_future_draws
+            ))
         ),
+        format!(
+            "    pass raw future own draws: {}",
+            format_pass_draws(comparison.pass_raw_future_draws)
+        ),
+    ];
+    // Pass が無い request では Pass 側の effective も無いので、行を増やさない。
+    if comparison.pass_raw_future_draws != PassFutureDraws::NotApplicable {
+        lines.push(format!(
+            "    pass effective future own draws: {}",
+            format_per_horizon(comparison, |decision| format_pass_draws(
+                decision.pass_effective_future_draws
+            ))
+        ));
+    }
+    lines.extend([
         format!(
             "    final action: {}",
             partition_label(&request.final_actions())
@@ -409,7 +449,7 @@ fn format_differing_request(request: &ComparedRequest) -> Vec<String> {
             "    normal discard selection: {}",
             partition_label(&request.normal_discards())
         ),
-    ];
+    ]);
     for decision in &comparison.decisions {
         lines.extend(format_decision(decision));
     }
@@ -495,6 +535,26 @@ fn format_offense(offense: &PushPullOffenseState) -> Vec<String> {
 // 防御 fallback の種別もそのまま出し、どの経路の差かを読めるようにする。
 fn source_label(source: AgentActionSource) -> String {
     format!("{source:?}")
+}
+
+fn format_per_horizon(
+    comparison: &SelfTsumoHorizonComparison,
+    value: impl Fn(&SelfTsumoHorizonDecision) -> String,
+) -> String {
+    comparison
+        .decisions
+        .iter()
+        .map(|decision| format!("h{}={}", decision.horizon.horizon_turn, value(decision)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_pass_draws(draws: PassFutureDraws) -> String {
+    match draws {
+        PassFutureDraws::NotApplicable => NOT_APPLICABLE.to_string(),
+        PassFutureDraws::Unknown => UNKNOWN.to_string(),
+        PassFutureDraws::Known(draws) => draws.to_string(),
+    }
 }
 
 fn format_count(value: Option<u32>) -> String {
@@ -615,12 +675,35 @@ mod tests {
         finals: [u8; 4],
         normal_discards: [Option<u8>; 4],
     ) -> ComparedRequest {
+        synthetic_reaction(
+            request_id,
+            raw_future_draws,
+            PassFutureDraws::NotApplicable,
+            finals,
+            normal_discards,
+        )
+    }
+
+    // Pass 側の自摸回数も指定する。effective は production の soft horizon helper で作る。
+    fn synthetic_reaction(
+        request_id: u64,
+        raw_future_draws: Option<u32>,
+        pass_raw_future_draws: PassFutureDraws,
+        finals: [u8; 4],
+        normal_discards: [Option<u8>; 4],
+    ) -> ComparedRequest {
         let decisions = [0, 1, 2, 3].map(|index| {
             let horizon = COMPARED_SELF_TSUMO_HORIZONS[index];
             SelfTsumoHorizonDecision {
                 horizon,
-                effective_future_draws: raw_future_draws
+                baseline_effective_future_draws: raw_future_draws
                     .map(|raw| horizon.effective_future_draws(raw)),
+                pass_effective_future_draws: match pass_raw_future_draws {
+                    PassFutureDraws::Known(raw) => {
+                        PassFutureDraws::Known(horizon.effective_future_draws(raw))
+                    }
+                    other => other,
+                },
                 action: dahai(finals[index]),
                 source: if normal_discards[index] == Some(finals[index]) {
                     AgentActionSource::NormalDiscard
@@ -636,7 +719,8 @@ mod tests {
             capture: format!("synthetic-{request_id}.jsonl"),
             request_id,
             comparison: SelfTsumoHorizonComparison {
-                raw_future_draws,
+                baseline_raw_future_draws: raw_future_draws,
+                pass_raw_future_draws,
                 decisions,
             },
         }
@@ -702,8 +786,8 @@ mod tests {
         let summary = HorizonComparisonSummary::from_requests(&requests);
 
         assert_eq!(summary.requests, 5);
-        assert_eq!(summary.known_raw_future_draws, 4);
-        assert_eq!(summary.unknown_raw_future_draws, 1);
+        assert_eq!(summary.known_baseline_raw_future_draws, 4);
+        assert_eq!(summary.unknown_baseline_raw_future_draws, 1);
         let same_different =
             |pairs: &[PairAgreement; 6]| pairs.map(|pair| (pair.same, pair.different));
         // 12v14, 12v16, 12v18, 14v16, 14v18, 16v18
@@ -749,6 +833,77 @@ mod tests {
     }
 
     #[test]
+    fn the_buckets_follow_the_baseline_and_not_the_pass_draws() {
+        // baseline 15 (floor(63 / 4)) と Pass 16 は同じ 11+ だが、baseline 10 と Pass 11 は
+        // baseline の 9-10 だけに入り、Pass 側で別 bucket へ二重計上しない。
+        let requests = [
+            synthetic_reaction(
+                1,
+                Some(10),
+                PassFutureDraws::Known(11),
+                [1, 2, 2, 2],
+                [None; 4],
+            ),
+            synthetic_reaction(2, Some(15), PassFutureDraws::Unknown, [1; 4], [None; 4]),
+            synthetic_request(3, Some(10), [1; 4], [Some(1); 4]),
+        ];
+        let summary = HorizonComparisonSummary::from_requests(&requests);
+
+        assert_eq!(summary.buckets[&RawDrawBucket::NineToTen].requests, 2);
+        assert_eq!(summary.buckets[&RawDrawBucket::NineToTen].not_all_same, 1);
+        assert_eq!(summary.buckets[&RawDrawBucket::ElevenOrMore].requests, 1);
+        assert_eq!(
+            summary
+                .buckets
+                .values()
+                .map(|bucket| bucket.requests)
+                .sum::<usize>(),
+            requests.len()
+        );
+        assert_eq!(summary.known_baseline_raw_future_draws, 3);
+        assert_eq!(summary.known_pass_raw_future_draws, 1);
+        assert_eq!(summary.unknown_pass_raw_future_draws, 1);
+    }
+
+    #[test]
+    fn a_differing_reaction_shows_the_baseline_and_the_pass_draws_apart() {
+        let requests = [
+            synthetic_reaction(
+                7,
+                Some(15),
+                PassFutureDraws::Known(16),
+                [1, 2, 2, 2],
+                [None; 4],
+            ),
+            synthetic_reaction(
+                8,
+                Some(15),
+                PassFutureDraws::Unknown,
+                [1, 2, 2, 2],
+                [None; 4],
+            ),
+        ];
+        let output = format_capture_comparison(1, &requests);
+
+        assert!(
+            output.contains("  synthetic-7.jsonl  request_id=7\n    baseline raw future own draws: 15\n    baseline effective future own draws: h12=9 h14=11 h16=13 h18=15\n    pass raw future own draws: 16\n    pass effective future own draws: h12=10 h14=12 h16=14 h18=16\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  synthetic-8.jsonl  request_id=8\n    baseline raw future own draws: 15\n    baseline effective future own draws: h12=9 h14=11 h16=13 h18=15\n    pass raw future own draws: unknown\n    pass effective future own draws: h12=unknown h14=unknown h16=unknown h18=unknown\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("  reaction requests with known pass raw future draws: 1\n  reaction requests with unknown pass raw future draws: 1\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("By baseline raw future own draws\n"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn only_the_differing_requests_are_listed_with_their_capture_and_request_id() {
         let requests = [
             synthetic_request(1, Some(11), [1, 1, 1, 1], [Some(1); 4]),
@@ -771,11 +926,11 @@ mod tests {
         assert!(output.contains("  captures: 2\n"), "{output}");
         assert!(output.contains("Differing requests: 2\n"), "{output}");
         assert!(
-            output.contains("  synthetic-2.jsonl  request_id=2\n    raw future own draws: 7\n    effective future own draws: h12=2 h14=3 h16=5 h18=7\n    final action: 12 / 14=16=18\n    normal discard selection: 12 / 14=16=18\n"),
+            output.contains("  synthetic-2.jsonl  request_id=2\n    baseline raw future own draws: 7\n    baseline effective future own draws: h12=2 h14=3 h16=5 h18=7\n    pass raw future own draws: not applicable\n    final action: 12 / 14=16=18\n    normal discard selection: 12 / 14=16=18\n"),
             "{output}"
         );
         assert!(
-            output.contains("  synthetic-4.jsonl  request_id=4\n    raw future own draws: 7\n    effective future own draws: h12=2 h14=3 h16=5 h18=7\n    final action: 12=14=16=18\n    normal discard selection: 12 / 14=16=18\n"),
+            output.contains("  synthetic-4.jsonl  request_id=4\n    baseline raw future own draws: 7\n    baseline effective future own draws: h12=2 h14=3 h16=5 h18=7\n    pass raw future own draws: not applicable\n    final action: 12=14=16=18\n    normal discard selection: 12 / 14=16=18\n"),
             "{output}"
         );
         assert!(!output.contains("request_id=1\n"), "{output}");
@@ -865,11 +1020,11 @@ mod tests {
         assert!(output.contains("  captures: 3\n"), "{output}");
         assert!(output.contains("  requests evaluated: 3\n"), "{output}");
         assert!(
-            output.contains("  requests with known raw future draws: 2\n"),
+            output.contains("  requests with known baseline raw future draws: 2\n"),
             "{output}"
         );
         assert!(
-            output.contains("  requests with unknown raw future draws: 1\n"),
+            output.contains("  requests with unknown baseline raw future draws: 1\n"),
             "{output}"
         );
         assert!(
@@ -882,10 +1037,25 @@ mod tests {
         );
         assert!(output.contains("  all four same: 3\n"), "{output}");
         assert!(output.contains("Differing requests: 0"), "{output}");
+        // 通常ツモ番の baseline は従来どおり floor(remaining_tiles / 4) で、Pass は存在しない。
+        for (original, request) in originals.iter().zip(&requests) {
+            assert_eq!(
+                request.comparison.baseline_raw_future_draws,
+                original
+                    .context
+                    .remaining_tiles()
+                    .map(|remaining| remaining / 4)
+            );
+            assert_eq!(
+                request.comparison.pass_raw_future_draws,
+                PassFutureDraws::NotApplicable
+            );
+        }
+        assert!(!output.contains("  pass raw future own draws"), "{output}");
         let unknown = &requests[2].comparison;
-        assert_eq!(unknown.raw_future_draws, None);
+        assert_eq!(unknown.baseline_raw_future_draws, None);
         for decision in &unknown.decisions {
-            assert_eq!(decision.effective_future_draws, None);
+            assert_eq!(decision.baseline_effective_future_draws, None);
         }
     }
 
@@ -914,13 +1084,13 @@ mod tests {
                 .comparison
                 .decisions
                 .each_ref()
-                .map(|decision| decision.effective_future_draws.unwrap())
+                .map(|decision| decision.baseline_effective_future_draws.unwrap())
         };
-        assert_eq!(requests[0].comparison.raw_future_draws, Some(11));
+        assert_eq!(requests[0].comparison.baseline_raw_future_draws, Some(11));
         assert_eq!(effective(&requests[0]), [5, 7, 9, 11]);
-        assert_eq!(requests[1].comparison.raw_future_draws, Some(7));
+        assert_eq!(requests[1].comparison.baseline_raw_future_draws, Some(7));
         assert_eq!(effective(&requests[1]), [2, 3, 5, 7]);
-        assert_eq!(requests[2].comparison.raw_future_draws, Some(5));
+        assert_eq!(requests[2].comparison.baseline_raw_future_draws, Some(5));
         assert_eq!(effective(&requests[2]), [2, 2, 3, 5]);
 
         let labels = |request: &ComparedRequest| {
@@ -944,8 +1114,8 @@ mod tests {
         for expected in [
             "  captures: 2\n",
             "  requests evaluated: 3\n",
-            "  requests with known raw future draws: 3\n",
-            "  requests with unknown raw future draws: 0\n",
+            "  requests with known baseline raw future draws: 3\n",
+            "  requests with unknown baseline raw future draws: 0\n",
             "  12 vs 14: same 2, different 1, agreement 66.7%\n",
             "  12 vs 16: same 1, different 2, agreement 33.3%\n",
             "  12 vs 18: same 1, different 2, agreement 33.3%\n",
@@ -965,13 +1135,13 @@ mod tests {
         }
         assert!(
             output.contains(&format!(
-                "  {first}  request_id=2\n    raw future own draws: 7\n    effective future own draws: h12=2 h14=3 h16=5 h18=7\n"
+                "  {first}  request_id=2\n    baseline raw future own draws: 7\n    baseline effective future own draws: h12=2 h14=3 h16=5 h18=7\n    pass raw future own draws: not applicable\n"
             )),
             "{output}"
         );
         assert!(
             output.contains(&format!(
-                "  {second}  request_id=3\n    raw future own draws: 5\n    effective future own draws: h12=2 h14=2 h16=3 h18=5\n"
+                "  {second}  request_id=3\n    baseline raw future own draws: 5\n    baseline effective future own draws: h12=2 h14=2 h16=3 h18=5\n    pass raw future own draws: not applicable\n"
             )),
             "{output}"
         );

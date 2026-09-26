@@ -1457,6 +1457,14 @@ pub(crate) fn evaluate_call_decision_with_two_shanten_stay_calls(
 }
 
 // 合法 action を Chi / Pon の共通表現へ正規化する。それ以外の action は対象外。
+// 鳴き判断が Call 候補として扱う合法 action (Chi / Pon) が1件以上あるか。無い request では
+// 鳴き判断も Pass 側の continuation も評価しない。
+pub(crate) fn has_call_candidate_action(legal_actions: &[LegalAction]) -> bool {
+    legal_actions
+        .iter()
+        .any(|action| normalize_call(action).is_some())
+}
+
 fn normalize_call(action: &LegalAction) -> Option<(CallKind, TileId, &[TileId])> {
     match action {
         LegalAction::Chi { tile, consumed } => Some((CallKind::Chi, *tile, consumed)),
@@ -2351,7 +2359,10 @@ pub(crate) fn reaction_draw_distance(ctx: &GameContext) -> Option<u32> {
 
 // Pass 後から流局までの自分の自摸回数。source の次席から順に残り山を配るため、通常打牌後や
 // Call 後の floor(remaining / 4) とは最初の自摸位置だけが異なる。
-fn pass_own_future_draws(ctx: &GameContext) -> Option<u32> {
+//
+// 流局までの raw な値で、soft horizon は Pass continuation の lookahead 入力を作る入口で適用する。
+// 診断も Pass 側の自摸回数はこの helper から読み、式を複製しない。
+pub(crate) fn pass_own_future_draws(ctx: &GameContext) -> Option<u32> {
     let remaining = ctx.remaining_tiles()?;
     let distance = reaction_draw_distance(ctx)?;
     if remaining < distance {

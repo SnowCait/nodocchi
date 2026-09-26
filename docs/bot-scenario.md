@@ -170,6 +170,11 @@ done
 
 この比較は **どの horizon が正しいかを自動判定するものではなく**、horizon を変えた場合に production 判断がどの程度・どの局面で変わるかを観測する診断です。
 
+将来自摸機会は2種類を区別します。
+
+- **baseline** (通常打牌後・Call 後): raw future own draws は `floor(remaining_tiles / 4)`、effective はそれへ各 horizon を適用した値です
+- **pass side** (Chi / Pon への反応 request の Pass continuation): production の鳴き判断は反応元の席の位置から `1 + (remaining_tiles - reaction_draw_distance) / 4` を使うので、同じ request でも baseline と異なる場合があります (例: 残り 63 枚・反応元が下家なら baseline 15、Pass 16)。値は production の helper をそのまま読み、比較側で式を持ちません。Chi / Pon の合法 action が無い request では `not applicable`、反応元不明などで production が確定できない場合は推測せず `unknown` です
+
 ```sh
 cargo run --release -p bot-scenario -- \
   --compare-self-tsumo-horizon logs/first.jsonl logs/second.jsonl
@@ -177,11 +182,11 @@ cargo run --release -p bot-scenario -- \
 
 出力は次のとおりです。
 
-- 全体: captures、requests evaluated、raw future draws が known / unknown の request 数
+- 全体: captures、requests evaluated、baseline raw future draws が known / unknown の request 数、pass raw future draws が known / unknown の反応 request 数
 - `Final action agreement (primary)`: 12 vs 14 / 12 vs 16 / 12 vs 18 / 14 vs 16 / 14 vs 18 / 16 vs 18 の最終 action の same / different / agreement %、4つとも一致した件数 (`all four same`) と `not all same`、分かれ方の pattern (`12 / 14=16=18` は 12 だけが違う、`12=14 / 16=18` は 12・14 と 16・18 で分かれた)
 - `Normal discard selection agreement (secondary)`: 通常打牌選択の同じ集計。pair はその2つの horizon がどちらも通常打牌選択を通った request だけを数え、Call・確定 Fold の早期決着などで通らなかった horizon がある request は `not evaluated at some horizon` に数えます。最終 action は一致したが通常打牌選択が分かれた request (Fold で同じ防御牌を選んだ場合など) は `final action all same but normal discard different` です
-- `By raw future own draws`: raw future own draws の bucket (0-2 / 3-4 / 5-6 / 7-8 / 9-10 / 11+ / unknown) ごとの requests・all four same・not all same・normal discard not all same。残り山が unknown の request は推測せず unknown に入れます
-- `Differing requests`: 最終 action か通常打牌選択が horizon で分かれた request だけ。capture path・request_id・raw / effective future own draws・最終 action と通常打牌選択それぞれの分かれ方と、horizon ごとの final action・final action source (`NormalDiscard` / `Call` / `Reach` / `DefenseFallback(...)` など production の source そのもの)・push/pull・normal discard selection を出します。通常打牌選択を通った horizon は、production が押し引き入力へ渡した選択打牌の shanten after discard・acceptance remaining / types・ExpectedSelfTsumoValue (その horizon の選択値)・weighted tenpai wait・Push/Fold 用の `UNTIL_RYUKYOKU` 値も出します。どれも表示のために評価し直さず、production が持っていない値は `not evaluated` / `unknown` です
+- `By baseline raw future own draws`: baseline raw future own draws (`floor(remaining_tiles / 4)`) の bucket (0-2 / 3-4 / 5-6 / 7-8 / 9-10 / 11+ / unknown) ごとの requests・all four same・not all same・normal discard not all same。局面の時期の分類で、1 request は1 bucket だけに入ります。反応 request の Pass branch が実際に使う自摸回数とは異なる場合がありますが、Pass 側の値で別 bucket へ二重計上はしません。残り山が unknown の request は推測せず unknown に入れます
+- `Differing requests`: 最終 action か通常打牌選択が horizon で分かれた request だけ。capture path・request_id・baseline raw / effective future own draws (h12 / h14 / h16 / h18)・pass raw future own draws (反応 request では pass effective future own draws も h12 / h14 / h16 / h18 で並べ、Pass が無い request は `not applicable` の1行だけ)・最終 action と通常打牌選択それぞれの分かれ方と、horizon ごとの final action・final action source (`NormalDiscard` / `Call` / `Reach` / `DefenseFallback(...)` など production の source そのもの)・push/pull・normal discard selection を出します。通常打牌選択を通った horizon は、production が押し引き入力へ渡した選択打牌の shanten after discard・acceptance remaining / types・ExpectedSelfTsumoValue (その horizon の選択値)・weighted tenpai wait・Push/Fold 用の `UNTIL_RYUKYOKU` 値も出します。どれも表示のために評価し直さず、production が持っていない値は `not evaluated` / `unknown` です
 
 request ごとに production の判断を4回行うので、実行時間は `--benchmark-riichilab-capture` の約4倍です。後続の path をすべて capture として受け取り、他の scenario / 診断 option や horizon の上書き option とは併用できません。
 
