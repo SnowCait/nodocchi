@@ -304,9 +304,12 @@
 //!
 //! 入力の構築は通常の `act()` が打牌選択の結果を押し引きへ渡すのと同じ
 //! [`push_pull_inputs_from_threat_facts`] を通す。選択の計算済み値を持たない呼び出し向けの入口
-//! (`push_pull_inputs_from_context_with_evaluation`) は使わないので、押し引きのために1向聴の前方
-//! 評価も terminal scoring もやり直さない。3向聴からの鳴きは鳴き後2向聴で、Push/Pull が読むのは
-//! 向聴数と選択打牌の hard-safe だけなので前方集計値を渡さない。
+//! (`push_pull_inputs_from_context_with_evaluation`) は使わないので、configured horizon の1向聴前方
+//! 集計値はそのまま再利用する。1向聴 Push/Fold の threshold と比較する ExpectedSelfTsumoValue だけは
+//! `UNTIL_RYUKYOKU` の尺度で、configured horizon が `UNTIL_RYUKYOKU` なら選択の計算済み値を使い、
+//! それ以外では選択済みの1打牌だけを `UNTIL_RYUKYOKU` で評価し直す。全候補は再探索しない。
+//! 3向聴からの鳴きは鳴き後2向聴で、Push/Pull が読むのは向聴数と選択打牌の hard-safe だけなので
+//! 前方集計値を渡さない。
 //!
 //! Call / Pass 比較で落ちた候補には Push/Pull を評価せず、理由も上書きしない。比較で成立して
 //! いたことは [`CallCandidateDiagnostic::call_pass_eligible_reason`]、鳴き後の判定は
@@ -975,8 +978,10 @@ struct CallCandidateSlot {
     elapsed: CallCandidateElapsed,
     /// 鳴き後の打牌選択が選んだ1向聴打牌について、その選択が既に求めた前方集計値。
     ///
-    /// 鳴き後の押し引き ([`apply_post_call_push_pull_gate`]) へそのまま渡し、同じ前方評価を
-    /// やり直さない。鳴き後の選択打牌が1向聴でない候補と、そこまで評価しなかった候補では `None`。
+    /// configured horizon の値で、鳴き後の押し引き ([`apply_post_call_push_pull_gate`]) へそのまま
+    /// 渡す。threshold と比較する `UNTIL_RYUKYOKU` の値は configured horizon が `UNTIL_RYUKYOKU` なら
+    /// これを再利用し、それ以外では押し引き側が選択済みの1打牌だけを評価し直す。鳴き後の選択打牌が
+    /// 1向聴でない候補と、そこまで評価しなかった候補では `None`。
     post_call_iishanten_forward_metrics: Option<ForwardMetrics>,
 }
 
@@ -2190,8 +2195,12 @@ fn apply_three_shanten_self_tsumo_policy(
 //
 // 入力は通常の `act()` が打牌選択の結果を押し引きへ渡すのと同じ
 // [`push_pull_inputs_from_threat_facts`] で、鳴き後の打牌選択が既に選んだ打牌評価・1向聴の
-// 前方集計値・鳴き後の合法打牌をそのまま渡す。押し引きのために前方評価も打点集計もやり直さず、
-// threat の分類・選択打牌の hard-safe 判定・threshold は push_pull 側が持つ。
+// 前方集計値 (configured horizon)・鳴き後の合法打牌をそのまま渡す。threat の分類・選択打牌の
+// hard-safe 判定・threshold は push_pull 側が持つ。
+//
+// 1向聴 Push/Fold の threshold と比較する ExpectedSelfTsumoValue は `UNTIL_RYUKYOKU` の尺度で、
+// configured horizon が `UNTIL_RYUKYOKU` なら選択の計算済み値を再利用して追加評価しない。それ以外の
+// horizon では選択済みの1打牌だけを `UNTIL_RYUKYOKU` で評価し直し、全候補は再探索しない。
 //
 // threat facts は鳴く前の局面から1回だけ作り、全候補で共有する。鳴いて変わるのは自分の手牌と
 // 副露だけで、押し引きが読む他家の facts は鳴く前と同じになる。
