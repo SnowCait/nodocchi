@@ -408,9 +408,41 @@ Progress と Full の値は混ぜず、scope ごとに独立に `call > pass` / 
 | `selected outside the full pair` | Full 追加評価の対象外の打牌が選ばれた |
 | `unresolved` | 評価したが既存 helper が値を確定できなかった |
 
+#### 片和了 policy の counterfactual
+
+Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの2つの policy を当てはめた結論も並べます。**どちらも observation 上の counterfactual で、production policy は変わりません。** 即テンパイ Call の `YakuMissing` (生きた和了牌 variant に1つでも役なしがあれば鳴かない)、1→1 / 2→1 / 3→2 の Call policy、Push/Pull、2向聴 Full gate、通常打牌 selection はどれもそのままで、`ShantenAgent` の設定や CLI で production を切り替える経路もありません。
+
+| policy | Call 相当 | それ以外 |
+| --- | --- | --- |
+| `RequireAllLiveWaits` | Progress が `call > pass` で、strict ron yaku が `AtLeast` | Progress が `pass >= call` なら `Pass`。`call > pass` で strict ron yaku が `Below` なら `Blocked (partial yaku)`、`Unknown` なら `Unknown`。Progress の比較が unknown なら `Unknown` |
+| `AllowPartialWaits` | Progress が `call > pass` | Progress が `pass >= call` なら `Pass`、unknown なら `Unknown` |
+
+```text
+Progress Call / Pass: Tsumo の self-tsumo value で比較 (どちらの policy でも同じ)
+RequireAllLiveWaits:  Progress が call > pass AND Progress terminal の全 live variant に hypothetical Ron で役がある
+AllowPartialWaits:    Progress が call > pass
+```
+
+- **`RequireAllLiveWaits`** は、即テンパイ Call の `YakuMissing` と同じ hypothetical Ron baseline で、全 live variant に役があることを要求します。terminal ごとの判定は即テンパイ Call と同じ helper を通り、Ron baseline (`damaten_baseline_context`) で既存 scoring (`evaluate_tenpai_hand_value`) を評価して `HandValueOutcome` を読みます。
+- **`AllowPartialWaits`** は、Progress self-tsumo value の Tsumo semantics をそのまま使います。役なし variant は non-winning draw です。Progress 値の terminal scoring は役なし variant を0点の和了として加算せず、既存 self-tsumo evaluator どおり和了できない牌として扱うので、その上から別の補正はしません。役なし variant で値を水増ししているわけではありません。
+
+Progress の Call / Pass 値・`call > pass` / `pass >= call`・鳴き後打牌の選択・Full の観測は、どちらの policy でも変わりません。
+
+strict ron yaku (`AtLeast` / `Below` / `Unknown`) は次のように求めます。
+
+- **対象の terminal 集合**: Progress が選んだ鳴き後打牌について、その Progress 値が terminal scoring を通したテンパイすべてです (最初のツモで1向聴へ進む枝 → production の1向聴 continuation が到達するテンパイ)。選ばなかった鳴き後打牌の terminal は混ぜません。
+- **判定**: 生きた (残枚数 > 0) 和了牌の物理牌 variant ごとに、`Known` は役あり、`NoCandidate` は役なし、`IndeterminateBonusHan`・scoring error は unknown とします。役なしの variant が1つでもあれば `Below`、役なしは無いが unknown や評価できないテンパイがあれば `Unknown`、対象の live variant すべてが役ありの場合だけ `AtLeast` です。**unknown を役ありと推測しません。** 生きた variant が1つも無いテンパイは寄与させず、判定対象の terminal が1件も無い場合は `Unknown` です。
+- **ロン可否との関係**: 即テンパイ Call でもロン可否 (`CannotRon`) と役の有無 (`YakuMissing`) は別軸です。ここで見るのは「その牌で hypothetical Ron した場合に役があるか」だけで、将来 terminal がフリテンでもロン可否 unknown でも、それを理由に `Below` や `Unknown` にはしません。
+
+役は観測 run の中で求めます。Progress の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal が memo hit で scoring を通らず、集約から漏れる可能性があります。そこで選んだ鳴き後打牌1件だけを新しい探索内 memo で評価し直し、terminal scoring を通したテンパイごとに Ron baseline の点数計算を1回ずつ足して畳みます。追加の点数計算は observation の観測 run だけで行い、production path と計測 run には入りません。評価し直した Progress 値が観測 run の値と一致しない場合は、別の terminal 集合を見た可能性があるので `Unknown` とし、出力にもそう表示します。
+
+既存の `scored_han_verdict` (3→2 速度優先 policy の翻数判定) は流用しません。ロンできる terminal でしか翻数を確定しないので、将来フリテンの terminal が `Unknown` になるためです。また、候補ごとに集約を区切るので、上の memo 共有による集約漏れも起こり得ます。
+
 #### 計測条件
 
 cold memo 条件で計ります。対象候補を決める production の鳴き判断を除き、どの計測も新しい thread で行うので、向聴・受け入れの thread-local memo は毎回 cold から始まります。探索内の memo は run ごとに作り直すため、Progress と Full の探索も互いを暖めません。Call は既存の comparison tooling と同じく、instrumentation を持たない計測 run (`elapsed` の出どころ) と、探索規模を計上する観測 run (`search` の出どころ) の2本を取ります。Pass は計測 run 1本だけです。この option は他の診断 option と併用できず、計測より前に別の深い診断を走らせません。
+
+strict ron yaku の評価は Progress の観測 run の中で、経過時間を測り終えた後に行います。計測 run には何も足さないので、Progress の `elapsed` と latency 集計は従来と同じ意味です。`timing and observation runs agree` も従来どおり、計測 run と観測 run が同じ鳴き後打牌・同じ値になったかだけを表します。
 
 #### 出力の読み方
 
@@ -431,6 +463,10 @@ Candidate #0 Chi 8m <- 6m 7m
   progress: selected F, call 0.192268, pass 81.935943, pass >= call
     call elapsed (timing run): 49.494 ms, timing and observation runs agree: true
     search (observation run): ...
+  partial-yaku (progress, counterfactual)
+    strict ron yaku (hypothetical ron baseline, observation run): Below (contains a no-yaku live variant)
+    RequireAllLiveWaits: Pass
+    AllowPartialWaits: Pass
   full: selected 5p, call 2.141449, pass 152.160704, pass >= call
     progress cohort: 3 (5p 6p F), full evaluated: 2 (F 5p), full workers: 2
     selection elapsed (timing run): 783.101 ms, timing and observation runs agree: true
@@ -444,8 +480,9 @@ Candidate #0 Chi 8m <- 6m 7m
 - `selected post-call discard` は2つの scope が選んだ鳴き後打牌 (物理牌) が一致したかです。
 - `call / pass conclusion progress vs full` は、両方の結論が確定して同じなら `same`、反転していれば `flipped`、どちらかが `unknown` なら `undetermined` です。
 - `full evaluated` はドラ差 gate を通って Full 追加評価を行った2候補です。`none` の場合、Full の Call 値は `unknown (full gate not fired)` などになります。
+- `partial-yaku` は [片和了 policy の counterfactual](#片和了-policy-の-counterfactual) です。Progress が `pass >= call` の候補は strict ron yaku に関係なくどちらの policy でも `Pass` です。
 
-代表 fixture は2つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。
+代表 fixture は4つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。`two_shanten_stay_call_haku_pon.json` は白ポンで Progress が `call > pass`、strict ron yaku が `AtLeast` なので両 policy とも `Call` になる局面、`two_shanten_stay_call_tanyao_pon.json` は断幺頼みの 7p ポンで Progress が `call > pass` でも strict ron yaku が `Below` になり、`RequireAllLiveWaits` だけが `Blocked (partial yaku)` になる局面です。
 
 #### capture 全体の集計
 
@@ -461,9 +498,11 @@ request 単位と候補単位を分けて表示します。
 | section | 単位 | 内容 |
 | --- | --- | --- |
 | `Requests` | request | replay した request 数、Chi / Pon が合法な request 数、2→2 対象 request 数 |
-| `Candidates` | 候補 | 2→2 Call 候補数と Chi / Pon の内訳、先行候補の state を複製した候補数 |
+| `Candidates` | 候補 | 2→2 Call 候補数と Chi / Pon の内訳、先行候補の state を複製した候補数。複製した候補も従来どおり候補として数え、片和了 policy の集計にも複製元と同じ結論で入る |
 | `Call / Pass conclusion` | 候補 | scope ごとの `call > pass` / `pass >= call` / `unknown` と unknown の原因 |
 | `Progress vs full` | 候補 | 結論の一致 (`same`) / 反転 (`flipped`) / どちらか unknown、選択打牌の一致 / 不一致 |
+| `Progress call > pass partial-yaku policy` | 候補 | Progress が `call > pass` の候補を母数に、strict ron yaku (`all live variants >= 1 han` / `contains no-yaku live variant` / `unknown`)、`RequireAllLiveWaits` の `call` / `blocked by partial yaku` / `unknown`、`AllowPartialWaits` の `call` |
+| `RequireAllLiveWaits vs AllowPartialWaits differences` | 候補 | 2つの policy の結論が違う候補の全件。capture・`request_id`・候補 index・Chi / Pon と鳴いた牌 / 晒した牌、先行候補の複製なら `reused_from=#N`、Progress の選択打牌・Call 値・Pass 値・比較、strict ron yaku と両 policy の結論 |
 | `Latency` | request / 評価した候補 | Pass は request 単位、Call は評価した候補単位 (複製した候補を除く) の count / median / p95 / max。request ごとの Pass + Call の逐次合計も並べる |
 | `Slowest full calls` | 評価した候補 | Full の Call 評価が遅い上位5件 |
 | `Flipped conclusions` | 候補 | Progress と Full で結論が反転した候補の代表10件。capture・`request_id`・候補 index で追える |

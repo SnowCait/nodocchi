@@ -3064,6 +3064,32 @@ pub(crate) fn select_two_shanten_progress_post_call_discard_observed(
     }
 }
 
+/// 鳴き後も2向聴の打牌候補1件の Progress 値を、terminal の役の有無も畳む評価器で求める
+/// observation 専用の入口。
+///
+/// 値は [`select_two_shanten_progress_post_call_discard_observed`] が候補ごとに求める Progress 値と
+/// 同じ helper・同じ continuation で、評価器が terminal scoring を通したテンパイの役を
+/// 即テンパイ Call と同じロン baseline で畳む点だけが違う
+/// ([`ProductionProspectiveValuator::terminal_ron_yaku_verdict`])。探索内の memo はこの候補1件
+/// だけで作るので、terminal はどれもこの評価の中で1回以上 scoring を通る。
+pub(crate) fn two_shanten_progress_post_call_terminal_ron_yaku(
+    context: &GameContext,
+    tiles: &[TileId],
+    melds: &[Meld],
+    evaluation: &DiscardEvaluation,
+) -> (Option<u64>, ProspectiveHanVerdict) {
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds))
+        .collecting_terminal_ron_yaku(true);
+    let inputs = with_production_iishanten_continuation(lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+    ));
+    let value = bot_logic::two_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation);
+    (value, valuator.terminal_ron_yaku_verdict())
+}
+
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
     tiles
         .iter()
