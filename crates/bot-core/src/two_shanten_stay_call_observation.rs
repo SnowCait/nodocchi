@@ -56,21 +56,25 @@
 //!
 //! | policy | Call 相当になる条件 |
 //! | --- | --- |
-//! | [`TwoShantenStayRequireAllLiveWaits`] | Progress が `CallHigher` で、選んだ鳴き後打牌の Progress terminal 全体で生きた和了牌 variant すべてに役がある |
+//! | [`TwoShantenStayRequireAllLiveWaits`] | Progress が `CallHigher` で、選んだ鳴き後打牌の Progress terminal すべてで、生きた和了牌 variant すべてに hypothetical ロンで役がある |
 //! | [`TwoShantenStayAllowPartialWaits`] | Progress が `CallHigher` |
 //!
-//! Progress 値の terminal scoring は Tsumo baseline で役なしの variant を non-winning draw として
-//! 扱う。`AllowPartialWaits` はその値をそのまま使い、別の補正をしない。
+//! `RequireAllLiveWaits` は即テンパイ Call の片和了禁止 ([`CallDecisionReason::YakuMissing`]) と
+//! 同じ役 semantics で、terminal ごとの判定も即テンパイ Call と同じ helper
+//! (`live_ron_wait_yaku_reason`) を通る。ロン baseline で既存 scoring を評価し、役なし
+//! (`NoCandidate`) の生きた variant が1つでもあれば `Below`、それ以外で確定できないもの
+//! (`IndeterminateBonusHan`・scoring error) があれば `Unknown` とし、役ありだと推測しない。
+//! 将来テンパイのロン可否 (フリテン) は別軸なので読まない。生きた variant を持つ terminal が
+//! 1件も無い場合は `Unknown`。
 //!
-//! 役の有無は、その値を求めたのと同じ Tsumo profile の結論
-//! (`ProductionProspectiveValuator::terminal_yaku_verdict`) を読む。
-//! 対象は選んだ鳴き後打牌の Progress 評価が terminal scoring を通したテンパイ全体で、役なしの
-//! 生きた variant が1つでもあれば `Below`、それ以外で確定できないものがあれば `Unknown` とし、
-//! 役ありだと推測しない。
+//! `AllowPartialWaits` は Progress 値の self-tsumo semantics (Tsumo baseline で役なしの variant を
+//! non-winning draw とする) をそのまま使い、別の補正をしない。Progress の Call / Pass 値と比較は
+//! どちらの policy でも変わらない。
 //!
 //! 観測 run の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal は
 //! memo hit で scoring を通らないことがある。そのため役は観測 run の中で、選んだ打牌1件だけを
-//! 新しい memo で評価し直して畳む。計測 run には何も足さない。
+//! 新しい memo で評価し直し、terminal scoring を通したテンパイごとにロン baseline の点数計算を
+//! 1回足して畳む。計測 run には何も足さない。
 
 use std::time::{Duration, Instant};
 
@@ -86,7 +90,7 @@ use crate::call_decision::{
 use crate::context::GameContext;
 use crate::discard_selection::{
     select_two_shanten_progress_post_call_discard_observed,
-    two_shanten_progress_post_call_terminal_yaku,
+    two_shanten_progress_post_call_terminal_ron_yaku,
 };
 use crate::iishanten_selection_depth_comparison::measured_on_a_fresh_thread;
 use crate::prospective_value::ProspectiveHanVerdict;
@@ -163,14 +167,14 @@ pub struct TwoShantenStayCallProgress {
     pub memo: SearchStateMemoStats,
     /// 計測 run と観測 run が同じ打牌・同じ値になったか。
     pub runs_agree: bool,
-    /// 観測 run で選んだ鳴き後打牌の Progress terminal 全体で、生きた和了牌 variant すべてに役が
-    /// あるか。
-    pub terminal_yaku: TwoShantenStayCallTerminalYaku,
+    /// 観測 run で選んだ鳴き後打牌の Progress terminal すべてで、生きた和了牌 variant すべてに
+    /// hypothetical ロンで役があるか。`RequireAllLiveWaits` が読む。
+    pub terminal_ron_yaku: TwoShantenStayCallTerminalRonYaku,
 }
 
-/// 選んだ鳴き後打牌の Progress terminal の役の有無。
+/// 選んだ鳴き後打牌の Progress terminal の、即テンパイ Call と同じロン baseline での役の有無。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TwoShantenStayCallTerminalYaku {
+pub struct TwoShantenStayCallTerminalRonYaku {
     /// 役を畳む評価が Progress 値を再現できなかった場合は、別の terminal 集合を見た可能性が
     /// あるので `Unknown`。
     pub verdict: ProspectiveHanVerdict,
@@ -179,14 +183,15 @@ pub struct TwoShantenStayCallTerminalYaku {
     pub reproduces_value: bool,
 }
 
-impl TwoShantenStayCallTerminalYaku {
+impl TwoShantenStayCallTerminalRonYaku {
     const UNAVAILABLE: Self = Self {
         verdict: ProspectiveHanVerdict::Unknown,
         reproduces_value: false,
     };
 }
 
-/// 生きた和了牌 variant すべてに役を要求する policy の counterfactual な結論。
+/// 即テンパイ Call と同じく、生きた和了牌 variant すべてにロン baseline で役を要求する policy の
+/// counterfactual な結論。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TwoShantenStayRequireAllLiveWaits {
     Call,
@@ -285,7 +290,7 @@ impl TwoShantenStayCallCandidate {
     pub fn require_all_live_waits(&self) -> TwoShantenStayRequireAllLiveWaits {
         match (
             self.progress_comparison,
-            self.progress.terminal_yaku.verdict,
+            self.progress.terminal_ron_yaku.verdict,
         ) {
             (CallIishantenComparison::PassNotLower, _) => TwoShantenStayRequireAllLiveWaits::Pass,
             (CallIishantenComparison::Unknown, _)
@@ -492,7 +497,7 @@ struct ProgressRun {
     elapsed: Duration,
     search: ThreeShantenSearchStats,
     memo: SearchStateMemoStats,
-    terminal_yaku: TwoShantenStayCallTerminalYaku,
+    terminal_ron_yaku: TwoShantenStayCallTerminalRonYaku,
 }
 
 fn observe_progress_call(
@@ -508,11 +513,11 @@ fn observe_progress_call(
         elapsed: timing.elapsed,
         search: observation.search,
         memo: observation.memo,
-        terminal_yaku: observation.terminal_yaku,
+        terminal_ron_yaku: observation.terminal_ron_yaku,
     }
 }
 
-// 観測 run だけが探索規模を計上し、選んだ打牌の terminal の役を畳む。どちらも経過時間を測り
+// 観測 run だけが探索規模を計上し、選んだ打牌の terminal のロン baseline の役を畳む。どちらも経過時間を測り
 // 終えた後に行うので、`elapsed` には入らない。
 fn progress_run(
     context: &GameContext,
@@ -545,16 +550,16 @@ fn progress_run(
             TwoShantenStayCallValue::Unknown(TwoShantenStayCallUnknown::NoPostCallSelection),
         ),
     };
-    let terminal_yaku = match &observed.selection {
+    let terminal_ron_yaku = match &observed.selection {
         Some(selection) if observation_run => {
-            let (reproduced, verdict) = two_shanten_progress_post_call_terminal_yaku(
+            let (reproduced, verdict) = two_shanten_progress_post_call_terminal_ron_yaku(
                 context,
                 &state.post_call_tiles,
                 &state.post_call_melds,
                 &selection.evaluation,
             );
             let reproduces_value = reproduced == selection.expected_self_tsumo_value;
-            TwoShantenStayCallTerminalYaku {
+            TwoShantenStayCallTerminalRonYaku {
                 verdict: if reproduces_value {
                     verdict
                 } else {
@@ -563,7 +568,7 @@ fn progress_run(
                 reproduces_value,
             }
         }
-        _ => TwoShantenStayCallTerminalYaku::UNAVAILABLE,
+        _ => TwoShantenStayCallTerminalRonYaku::UNAVAILABLE,
     };
     ProgressRun {
         selected,
@@ -571,7 +576,7 @@ fn progress_run(
         elapsed,
         search: observed.search,
         memo: observed.memo,
-        terminal_yaku,
+        terminal_ron_yaku,
     }
 }
 
@@ -645,6 +650,7 @@ fn full_unknown_reason(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bot_logic::{
@@ -972,7 +978,7 @@ mod tests {
             );
             assert!(candidate.progress.runs_agree);
             assert!(candidate.progress.search.two_to_one_variants > 0);
-            assert!(candidate.progress.terminal_yaku.reproduces_value);
+            assert!(candidate.progress.terminal_ron_yaku.reproduces_value);
         }
     }
 
@@ -1156,18 +1162,21 @@ mod tests {
         }
     }
 
+    // 白ポンの observation は重いので、同じ局面を読むテストで共有する。
+    static HAKU_OBSERVATION: LazyLock<TwoShantenStayCallObservation> =
+        LazyLock::new(|| observe_keeping_production(&haku_context(), &haku_actions()));
+
     #[test]
     fn a_call_with_yaku_on_every_live_wait_is_a_call_under_both_policies() {
-        let observation = observe_keeping_production(&haku_context(), &haku_actions());
-        let candidate = only_candidate(&observation);
+        let candidate = only_candidate(&HAKU_OBSERVATION);
 
         assert_eq!(
             candidate.progress_comparison,
             CallIishantenComparison::CallHigher
         );
         assert_eq!(
-            candidate.progress.terminal_yaku,
-            TwoShantenStayCallTerminalYaku {
+            candidate.progress.terminal_ron_yaku,
+            TwoShantenStayCallTerminalRonYaku {
                 verdict: ProspectiveHanVerdict::AtLeast,
                 reproduces_value: true,
             }
@@ -1181,6 +1190,29 @@ mod tests {
             TwoShantenStayAllowPartialWaits::Call
         );
         assert!(!candidate.partial_yaku_policies_differ());
+    }
+
+    #[test]
+    fn a_tsumo_only_yaku_terminal_blocks_only_the_ron_yaku_policy() {
+        // ツモなら三暗刻が付くシャンポンのように、ロン baseline でだけ役が無い terminal を含むと
+        // 役の判定は `Below` になる (prospective_value のテストで固定)。Progress の Tsumo 値と比較は
+        // そのままなので、`AllowPartialWaits` は Call のまま、`RequireAllLiveWaits` だけが止める。
+        let mut candidate = only_candidate(&HAKU_OBSERVATION).clone();
+        assert_eq!(
+            candidate.progress_comparison,
+            CallIishantenComparison::CallHigher
+        );
+        candidate.progress.terminal_ron_yaku.verdict = ProspectiveHanVerdict::Below;
+
+        assert_eq!(
+            candidate.require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::BlockedByPartialYaku
+        );
+        assert_eq!(
+            candidate.allow_partial_waits(),
+            TwoShantenStayAllowPartialWaits::Call
+        );
+        assert!(candidate.partial_yaku_policies_differ());
     }
 
     #[test]
@@ -1201,8 +1233,8 @@ mod tests {
             CallIishantenComparison::CallHigher
         );
         assert_eq!(
-            candidate.progress.terminal_yaku,
-            TwoShantenStayCallTerminalYaku {
+            candidate.progress.terminal_ron_yaku,
+            TwoShantenStayCallTerminalRonYaku {
                 verdict: ProspectiveHanVerdict::Below,
                 reproduces_value: true,
             }
@@ -1233,7 +1265,7 @@ mod tests {
         let candidate = only_candidate(&observation);
 
         assert_eq!(
-            candidate.progress.terminal_yaku.verdict,
+            candidate.progress.terminal_ron_yaku.verdict,
             ProspectiveHanVerdict::Unknown
         );
         assert_eq!(
@@ -1276,7 +1308,7 @@ mod tests {
                 ProspectiveHanVerdict::Unknown,
             ] {
                 let mut candidate = candidate.clone();
-                candidate.progress.terminal_yaku.verdict = verdict;
+                candidate.progress.terminal_ron_yaku.verdict = verdict;
                 assert_eq!(
                     candidate.require_all_live_waits(),
                     TwoShantenStayRequireAllLiveWaits::Pass
@@ -1291,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_candidate_copies_the_terminal_yaku_and_both_policies() {
+    fn a_reused_candidate_copies_the_terminal_ron_yaku_and_both_policies() {
         let ctx = reaction_context_with_dora(
             &HAKU_HAND,
             EIGHT_PIN_TARGET,
@@ -1315,8 +1347,8 @@ mod tests {
         assert_eq!(reused.len(), 2);
         // 役なしの terminal を含むが、Progress が Pass 以上なのでどちらの policy でも Pass。
         assert_eq!(
-            source.progress.terminal_yaku,
-            TwoShantenStayCallTerminalYaku {
+            source.progress.terminal_ron_yaku,
+            TwoShantenStayCallTerminalRonYaku {
                 verdict: ProspectiveHanVerdict::Below,
                 reproduces_value: true,
             }
@@ -1332,8 +1364,8 @@ mod tests {
         for candidate in reused {
             assert_eq!(candidate.reused_from, Some(source.candidate_index));
             assert_eq!(
-                candidate.progress.terminal_yaku,
-                source.progress.terminal_yaku
+                candidate.progress.terminal_ron_yaku,
+                source.progress.terminal_ron_yaku
             );
             assert_eq!(
                 candidate.require_all_live_waits(),

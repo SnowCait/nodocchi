@@ -240,7 +240,7 @@ pub use two_shanten_self_tsumo_cost::{
 pub use two_shanten_stay_call_observation::{
     TwoShantenStayAllowPartialWaits, TwoShantenStayCallAgreement, TwoShantenStayCallCandidate,
     TwoShantenStayCallFull, TwoShantenStayCallObservation, TwoShantenStayCallProgress,
-    TwoShantenStayCallScope, TwoShantenStayCallTerminalYaku, TwoShantenStayCallUnknown,
+    TwoShantenStayCallScope, TwoShantenStayCallTerminalRonYaku, TwoShantenStayCallUnknown,
     TwoShantenStayCallValue, TwoShantenStayPassObservation, TwoShantenStayRequireAllLiveWaits,
     observe_two_shanten_stay_calls,
 };

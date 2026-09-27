@@ -166,6 +166,7 @@ use bot_logic::{
     tenpai_wait_availability,
 };
 
+use crate::call_decision::{CallDecisionReason, live_ron_wait_yaku_reason};
 use crate::context::GameContext;
 use crate::damaten_value::{damaten_baseline_context, damaten_value_from_hands};
 use crate::discard_selection::evaluation_fixed_meld_count_of;
@@ -175,8 +176,7 @@ use crate::offense_value::{
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 use crate::tenpai_scoring::{
-    TenpaiVariantHan, TenpaiVariantValue, TsumoVariantOutcomes, TsumoVariantStatus,
-    tenpai_tsumo_value_from_hands, tenpai_tsumo_value_with_live_yaku,
+    TenpaiVariantHan, TenpaiVariantValue, TsumoVariantOutcomes, tenpai_tsumo_value_from_hands,
     tenpai_tsumo_variant_outcomes, tenpai_variant_value,
 };
 use std::cell::{Cell, RefCell};
@@ -650,13 +650,15 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     // 1件も通していない場合は `None`。terminal scoring 1件ごとに memo 済みの下限を読んで畳む
     // だけなので、点数計算も探索も増えない。
     scored_han_floor: Cell<Option<ProspectiveHanFloor>>,
-    // terminal scoring の Tsumo profile から、生きた和了牌 variant の役の有無も畳むか。
+    // terminal scoring を通したテンパイについて、即テンパイ Call と同じロン baseline で生きた
+    // 和了牌 variant の役の有無も畳むか。
     //
-    // 2→2 Call の observation だけが要求する観測値で、既定は畳まない。
-    collects_terminal_yaku: bool,
+    // 2→2 Call の observation だけが要求する観測値で、既定は畳まない。畳む評価器ではテンパイ
+    // 1件につきロン baseline の点数計算が1回増える。
+    collects_terminal_ron_yaku: bool,
     // この評価器が terminal scoring を通したテンパイ全体の役の結論。1件も通していない場合と、
     // 生きた variant を持つテンパイを1件も通していない場合は `None`。
-    terminal_yaku: Cell<Option<ProspectiveHanVerdict>>,
+    terminal_ron_yaku: Cell<Option<ProspectiveHanVerdict>>,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -696,8 +698,8 @@ impl<'a> ProductionProspectiveValuator<'a> {
             values: RefCell::new(EvaluatedTenpaiValueMemo::default()),
             collects_han_floor: false,
             scored_han_floor: Cell::new(None),
-            collects_terminal_yaku: false,
-            terminal_yaku: Cell::new(None),
+            collects_terminal_ron_yaku: false,
+            terminal_ron_yaku: Cell::new(None),
         }
     }
 
@@ -712,44 +714,44 @@ impl<'a> ProductionProspectiveValuator<'a> {
         self
     }
 
-    /// terminal scoring が選択値のために通す Tsumo profile から、生きた和了牌 variant の役の有無も
-    /// 畳む評価器にする。
+    /// terminal scoring を通したテンパイについて、即テンパイ Call の片和了判定と同じロン
+    /// baseline で、生きた和了牌 variant の役の有無も畳む評価器にする。
     ///
-    /// 点数計算は選択値と同じ1回のままで、枝の探索も選択値も変わらない。畳んだ結論は
-    /// [`Self::terminal_yaku_verdict`] で読む。
-    pub(crate) fn collecting_terminal_yaku(mut self, collects: bool) -> Self {
-        self.collects_terminal_yaku = collects;
+    /// 選択値もツモ値も枝の探索も変わらない。役の判定にはテンパイ1件につきロン baseline の
+    /// 点数計算を1回足す。畳んだ結論は [`Self::terminal_ron_yaku_verdict`] で読む。
+    pub(crate) fn collecting_terminal_ron_yaku(mut self, collects: bool) -> Self {
+        self.collects_terminal_ron_yaku = collects;
         self
     }
 
-    /// この評価器が terminal scoring を通したテンパイ全体で、生きた和了牌 variant すべてに役が
-    /// あるか。
+    /// この評価器が terminal scoring を通したテンパイ全体で、生きた和了牌 variant すべてに
+    /// hypothetical ロンで役があるか。
     ///
-    /// 判定は選択値と同じ Tsumo profile の [`TsumoVariantStatus`] で、役なし (0翻) の variant が
-    /// 1つでもあれば [`ProspectiveHanVerdict::Below`]、それ以外で確定できない variant・テンパイが
-    /// あれば [`ProspectiveHanVerdict::Unknown`]。生きた variant が1つも無いテンパイは和了も
-    /// 役なしも生まないので寄与させない。対象が1件も無い場合と、畳むことを要求していない評価器は
-    /// `Unknown`。
-    pub(crate) fn terminal_yaku_verdict(&self) -> ProspectiveHanVerdict {
-        self.terminal_yaku
+    /// テンパイ1件の判定は即テンパイ Call と同じ ([`live_ron_wait_yaku_reason`])。ロン可否
+    /// (フリテン) は見ない。役なしの variant が1つでもあれば [`ProspectiveHanVerdict::Below`]、
+    /// それ以外で確定できない variant・テンパイがあれば [`ProspectiveHanVerdict::Unknown`]。
+    /// 生きた variant が1つも無いテンパイは寄与させない。対象が1件も無い場合と、畳むことを
+    /// 要求していない評価器は `Unknown`。
+    pub(crate) fn terminal_ron_yaku_verdict(&self) -> ProspectiveHanVerdict {
+        self.terminal_ron_yaku
             .get()
             .unwrap_or(ProspectiveHanVerdict::Unknown)
     }
 
-    fn collect_terminal_yaku(&self, yaku: Option<TsumoVariantStatus>) {
-        let Some(yaku) = yaku else {
+    fn collect_terminal_ron_yaku(&self, reason: Option<CallDecisionReason>) {
+        let Some(reason) = reason else {
             return;
         };
-        let verdict = match yaku {
-            TsumoVariantStatus::Winning => ProspectiveHanVerdict::AtLeast,
-            TsumoVariantStatus::NoYaku => ProspectiveHanVerdict::Below,
-            TsumoVariantStatus::Unknown => ProspectiveHanVerdict::Unknown,
+        let verdict = match reason {
+            CallDecisionReason::EligibleTenpai => ProspectiveHanVerdict::AtLeast,
+            CallDecisionReason::YakuMissing => ProspectiveHanVerdict::Below,
+            _ => ProspectiveHanVerdict::Unknown,
         };
-        let folded = match self.terminal_yaku.get() {
+        let folded = match self.terminal_ron_yaku.get() {
             Some(collected) => collected.weaker(verdict),
             None => verdict,
         };
-        self.terminal_yaku.set(Some(folded));
+        self.terminal_ron_yaku.set(Some(folded));
     }
 
     /// 評価対象の副露済み面子数。2手先評価へ渡す値もここから取り、評価器と食い違わせない。
@@ -1097,24 +1099,20 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         }
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
-        let value = if self.collects_terminal_yaku {
-            // memo hit の枝は同じ評価器で初回に畳み済みなので、畳むのは点数計算を通すここだけ。
-            let (value, yaku) = self
-                .with_evaluated_tenpai(tenpai, |facts, mode| {
-                    Some(tenpai_tsumo_value_with_live_yaku(
-                        self.context,
-                        &facts.hands,
-                        TenpaiScoringMode::prospective(mode),
-                    ))
-                })
-                .unwrap_or((None, Some(TsumoVariantStatus::Unknown)));
-            self.collect_terminal_yaku(yaku);
-            value
-        } else {
-            self.with_evaluated_tenpai(tenpai, |facts, mode| {
-                self.prospective_tsumo_value(facts, mode)
-            })
-        };
+        // memo hit の枝は同じ評価器で初回に畳み済みなので、役を畳むのは点数計算を通すここだけ。
+        let mut ron_yaku = None;
+        let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
+            if self.collects_terminal_ron_yaku {
+                ron_yaku = Some(live_ron_wait_yaku_reason(self.context, &facts.hands));
+            }
+            self.prospective_tsumo_value(facts, mode)
+        });
+        if self.collects_terminal_ron_yaku {
+            // 評価材料を組み立てられないテンパイは役の有無を確定できない。
+            self.collect_terminal_ron_yaku(
+                ron_yaku.unwrap_or(Some(CallDecisionReason::HandValueUnknown)),
+            );
+        }
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
         }
@@ -1729,6 +1727,118 @@ mod tests {
             tenpai_value_memo_counter::count_during(|| valuator.memoized_han_floor(&tenpai));
         assert_ne!(floor, ProspectiveHanFloor::Unknown);
         assert_eq!((hits, misses), (0, 0));
+    }
+
+    // 123m を chi した副露手のシャンポン待ちの terminal。和了牌をツモれば三暗刻が付くが、
+    // ロンでは和了牌の刻子が明刻になるので、同じ牌でもロン baseline では役が無い。
+    const TSUMO_ONLY_SANANKOU_SHANPON: [&str; 10] =
+        ["5p", "5p", "5p", "7s", "7s", "7s", "9p", "9p", "4s", "4s"];
+    // 同じ形で 5p の暗刻を白にすると、ロンでも役牌が付く。
+    const YAKUHAI_SHANPON: [&str; 10] = ["P", "P", "P", "7s", "7s", "7s", "9p", "9p", "4s", "4s"];
+
+    // 副露手の terminal テンパイ1件をツモ値の入口へ通し、ツモ値とロン baseline の役の判定を返す。
+    fn open_terminal_ron_yaku(
+        concealed: &[&str],
+        own_river: &[&str],
+    ) -> (
+        Option<TenpaiTsumoValue>,
+        u32,
+        Option<bool>,
+        ProspectiveHanVerdict,
+    ) {
+        let mut source = TileIdSource::new();
+        let melds = vec![Meld::new(
+            MeldKind::Chi,
+            source.tiles(&["1m", "2m", "3m"]),
+            None,
+        )];
+        let concealed = source.tiles(concealed);
+        let river = source.tiles(own_river);
+        let visible: Vec<TileId> = concealed
+            .iter()
+            .chain(melds[0].tiles())
+            .chain(&river)
+            .copied()
+            .collect();
+        let ctx = GameContext::from_parts_with_melds(
+            None,
+            concealed.clone(),
+            Vec::new(),
+            Some(tile("E")),
+            Some(tile("S")),
+            visible,
+            Some(0),
+            Some(3),
+            [river, vec![], vec![], vec![]],
+            [false; 4],
+            [melds.clone(), vec![], vec![], vec![]],
+        )
+        .with_history_furiten_facts(known_history_furiten());
+        let acceptance = calculate_acceptance_with_fixed_melds(
+            &TileCounts::from_tiles(concealed.iter().copied()),
+            FixedMeldCount::new(1).expect("副露1つ"),
+        );
+        let live_remaining = acceptance
+            .tiles
+            .iter()
+            .map(|wait| u32::from(wait.remaining))
+            .sum();
+        let tenpai = ProspectiveTenpai {
+            concealed_tiles: &concealed,
+            acceptance: &acceptance,
+            discarded_tiles: &[],
+        };
+
+        let default_valuator =
+            ProductionProspectiveValuator::new_with_hand_state(&ctx, Some(&melds));
+        let valuator = ProductionProspectiveValuator::new_with_hand_state(&ctx, Some(&melds))
+            .collecting_terminal_ron_yaku(true);
+        let value = valuator.tenpai_tsumo_value(&tenpai);
+        // 役を畳む要求の有無でツモ値は変わらず、既定の評価器は何も畳まない。
+        assert_eq!(value, default_valuator.tenpai_tsumo_value(&tenpai));
+        assert_eq!(
+            default_valuator.terminal_ron_yaku_verdict(),
+            ProspectiveHanVerdict::Unknown
+        );
+        let can_ron = valuator
+            .tenpai_facts(&tenpai)
+            .and_then(|facts| facts.ron_availability());
+        (
+            value,
+            live_remaining,
+            can_ron,
+            valuator.terminal_ron_yaku_verdict(),
+        )
+    }
+
+    #[test]
+    fn the_terminal_ron_yaku_uses_the_immediate_call_ron_baseline_not_the_tsumo_value() {
+        // ツモなら全ての和了牌で三暗刻が付き、ツモ値はどの和了牌も和了として数える。それでも
+        // 即テンパイ Call と同じロン baseline では役が無いので `Below`。
+        let (value, live_remaining, can_ron, verdict) =
+            open_terminal_ron_yaku(&TSUMO_ONLY_SANANKOU_SHANPON, &[]);
+        let value = value.expect("ツモ打点を確定できる");
+        assert_eq!(can_ron, Some(true));
+        assert!(live_remaining > 0);
+        assert_eq!(value.winning_remaining, live_remaining);
+        assert_eq!(verdict, ProspectiveHanVerdict::Below);
+
+        let (_, _, _, verdict) = open_terminal_ron_yaku(&YAKUHAI_SHANPON, &[]);
+        assert_eq!(verdict, ProspectiveHanVerdict::AtLeast);
+    }
+
+    #[test]
+    fn a_future_furiten_does_not_change_the_terminal_ron_yaku() {
+        // 自分の河に 9p があり、この terminal はロンできない。ロン可否は別軸なので、役の判定は
+        // `Unknown` にも `Below` にもならず、ロンした場合の役の有無だけを見る。
+        let (_, _, can_ron, verdict) = open_terminal_ron_yaku(&YAKUHAI_SHANPON, &["9p"]);
+        assert_eq!(can_ron, Some(false));
+        assert_eq!(verdict, ProspectiveHanVerdict::AtLeast);
+
+        let (_, _, can_ron, verdict) =
+            open_terminal_ron_yaku(&TSUMO_ONLY_SANANKOU_SHANPON, &["9p"]);
+        assert_eq!(can_ron, Some(false));
+        assert_eq!(verdict, ProspectiveHanVerdict::Below);
     }
 
     #[test]

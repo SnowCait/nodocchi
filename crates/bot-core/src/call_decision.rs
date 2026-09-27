@@ -353,8 +353,8 @@ use std::time::{Duration, Instant};
 
 use bot_logic::{
     DiscardEvaluation, FixedMeldCount, ForwardMetrics, HandValueError, HandValueOutcome, Meld,
-    MeldKind, OwnDiscards, TenpaiWaitAvailability, TileCounts, TileId, TileType,
-    awaiting_draw_expected_self_tsumo_value,
+    MeldKind, OwnDiscards, TenpaiCompletedHands, TenpaiWaitAvailability, TileCounts, TileId,
+    TileType, awaiting_draw_expected_self_tsumo_value,
     awaiting_draw_three_shanten_progress_only_self_tsumo_value,
     awaiting_draw_two_shanten_expected_self_tsumo_value,
     awaiting_draw_two_shanten_progress_self_tsumo_value, best_discard_selection_index,
@@ -2534,25 +2534,46 @@ fn post_call_wait_yaku(
         ctx.visible_tiles(),
     )
     .ok()?;
+    Some(ron_wait_yaku(ctx, &hands))
+}
+
+// 和了牌の物理牌 variant ごとに、hypothetical ロン baseline で役があるか。ロン可否は読まない。
+fn ron_wait_yaku(ctx: &GameContext, hands: &TenpaiCompletedHands) -> Vec<CallWaitYakuDiagnostic> {
     let profile = evaluate_tenpai_hand_value(
-        &hands,
+        hands,
         damaten_baseline_context(ctx),
         ctx.dora_indicators(),
         None,
     );
+    profile
+        .waits()
+        .iter()
+        .flat_map(|wait| wait.winning_tiles())
+        .map(|winning_tile| CallWaitYakuDiagnostic {
+            winning_tile: winning_tile.winning_tile(),
+            remaining: winning_tile.remaining(),
+            yaku: wait_yaku(winning_tile.outcome()),
+        })
+        .collect()
+}
 
-    Some(
-        profile
-            .waits()
-            .iter()
-            .flat_map(|wait| wait.winning_tiles())
-            .map(|winning_tile| CallWaitYakuDiagnostic {
-                winning_tile: winning_tile.winning_tile(),
-                remaining: winning_tile.remaining(),
-                yaku: wait_yaku(winning_tile.outcome()),
-            })
-            .collect(),
-    )
+/// 即テンパイ Call の片和了判定と同じロン baseline・同じ variant 規則で、テンパイ1件の役を判定する。
+///
+/// 結論は [`CallDecisionReason::YakuMissing`] / [`CallDecisionReason::HandValueUnknown`] /
+/// [`CallDecisionReason::EligibleTenpai`] のどれか。ロン可否 (フリテン) は別軸なので読まず、
+/// 「その牌でロンした場合に役があるか」だけを見る。生きた variant が1つも無い場合は `None`。
+///
+/// production の鳴き判断は読まない。2→2 Call の observation が Progress terminal へ当てはめる
+/// ためにある。
+pub(crate) fn live_ron_wait_yaku_reason(
+    ctx: &GameContext,
+    hands: &TenpaiCompletedHands,
+) -> Option<CallDecisionReason> {
+    let waits = ron_wait_yaku(ctx, hands);
+    waits
+        .iter()
+        .any(CallWaitYakuDiagnostic::is_live)
+        .then(|| live_wait_yaku_reason(&waits))
 }
 
 // 既存の手牌価値の結果を役の有無へ畳む。役なしと確定できない理由を潰さずに区別して持つ。

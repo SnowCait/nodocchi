@@ -299,46 +299,6 @@ pub(crate) fn tenpai_tsumo_value_from_hands(
     evaluate_tenpai_tsumo(context, hands, mode).value
 }
 
-/// [`tenpai_tsumo_value_from_hands`] と同じ profile から、生きた和了牌 variant の役の結論も畳む。
-///
-/// 打点は [`tenpai_tsumo_value_from_hands`] と同じ値で、役の結論は同じ profile の
-/// [`TsumoVariantStatus`] を生きた variant すべてで畳んだもの。役なしの variant が1つでもあれば
-/// [`TsumoVariantStatus::NoYaku`]、それ以外で確定できない variant があれば
-/// [`TsumoVariantStatus::Unknown`] になる。生きた variant が1つも無い場合は `None`。baseline を
-/// 組み立てられない場合は打点も役も確定しない。点数計算は1回だけ通す。
-pub(crate) fn tenpai_tsumo_value_with_live_yaku(
-    context: &GameContext,
-    hands: &TenpaiCompletedHands,
-    mode: TenpaiScoringMode,
-) -> (Option<TenpaiTsumoValue>, Option<TsumoVariantStatus>) {
-    match tenpai_tsumo_profile(context, hands, mode) {
-        Some(profile) => (tsumo_value(&profile), live_tsumo_yaku(&profile)),
-        None => (None, Some(TsumoVariantStatus::Unknown)),
-    }
-}
-
-fn live_tsumo_yaku(profile: &TenpaiHandValueProfile<'_>) -> Option<TsumoVariantStatus> {
-    let mut folded = None;
-    for variant in profile
-        .waits()
-        .iter()
-        .flat_map(|wait| wait.winning_tiles().iter())
-        .filter(|variant| variant.remaining() > 0)
-    {
-        let status = TsumoVariantStatus::from_value(tenpai_variant_value(variant.outcome()));
-        folded = Some(match (folded, status) {
-            (Some(TsumoVariantStatus::NoYaku), _) | (_, TsumoVariantStatus::NoYaku) => {
-                TsumoVariantStatus::NoYaku
-            }
-            (Some(TsumoVariantStatus::Unknown), _) | (_, TsumoVariantStatus::Unknown) => {
-                TsumoVariantStatus::Unknown
-            }
-            _ => TsumoVariantStatus::Winning,
-        });
-    }
-    folded
-}
-
 /// テンパイのツモ和了が named 役満だと既存 scoring 上確定したか。
 ///
 /// 役満判定は既存 scoring の結論 ([`HandValue::is_yakuman`](bot_logic::HandValue::is_yakuman))
@@ -516,13 +476,6 @@ mod tests {
     // 333m を pon した 234m 567p 55s 78s のテンパイ。6s なら全て中張牌で断幺が付くが、9s は
     // 么九牌が入るため副露手では役が無い。
     fn open_tenpai_tsumo_value(mode: TenpaiScoringMode) -> Option<TenpaiTsumoValue> {
-        let (ctx, hands) = open_tenpai_case();
-        let (baseline, ura_dora) = tsumo_scoring_inputs(&ctx, mode)?;
-        let profile = evaluate_tenpai_hand_value(&hands, baseline, &[], ura_dora);
-        tsumo_value(&profile)
-    }
-
-    fn open_tenpai_case() -> (GameContext, TenpaiCompletedHands) {
         let mut source = TileIdSource::new();
         let melded = source.tiles(&["3m", "3m", "3m"]);
         let concealed = source.tiles(&["2m", "3m", "4m", "5p", "6p", "7p", "5s", "5s", "7s", "8s"]);
@@ -542,7 +495,9 @@ mod tests {
             Some(tile("E")),
             Some(tile("S")),
         );
-        (ctx, hands)
+        let (baseline, ura_dora) = tsumo_scoring_inputs(&ctx, mode)?;
+        let profile = evaluate_tenpai_hand_value(&hands, baseline, &[], ura_dora);
+        tsumo_value(&profile)
     }
 
     // 13面待ちの国士無双テンパイ。
@@ -720,47 +675,6 @@ mod tests {
         assert_eq!(value.winning_remaining, 4);
         assert_eq!(value.weighted_total % 4, 0);
         assert!(value.weighted_total > 0);
-    }
-
-    #[test]
-    fn the_live_yaku_is_folded_from_the_profile_the_tsumo_value_reads() {
-        // 6s は断幺が付き、9s は役なしの片和了。打点は役なしの 9s を non-winning のまま集計する。
-        let (ctx, hands) = open_tenpai_case();
-        assert_eq!(
-            tenpai_tsumo_value_with_live_yaku(&ctx, &hands, TenpaiScoringMode::Damaten),
-            (
-                open_tenpai_tsumo_value(TenpaiScoringMode::Damaten),
-                Some(TsumoVariantStatus::NoYaku)
-            )
-        );
-
-        let (ctx, hands) = tenpai_case(&KOKUSHI_TENPAI_HAND, &[], &[], true);
-        assert_eq!(
-            tenpai_tsumo_value_with_live_yaku(&ctx, &hands, TenpaiScoringMode::Damaten),
-            (
-                tenpai_tsumo_value_from_hands(&ctx, &hands, TenpaiScoringMode::Damaten),
-                Some(TsumoVariantStatus::Winning)
-            )
-        );
-        assert_eq!(
-            tenpai_tsumo_value_with_live_yaku(&ctx, &hands, TenpaiScoringMode::Unknown),
-            (None, Some(TsumoVariantStatus::Unknown))
-        );
-
-        // 自風が不明で支払いを確定できない variant は、役ありとも役なしとも推測しない。
-        let (ctx, hands) = tenpai_case(&KOKUSHI_TENPAI_HAND, &[], &[], false);
-        assert_eq!(
-            tenpai_tsumo_value_with_live_yaku(&ctx, &hands, TenpaiScoringMode::Damaten),
-            (None, Some(TsumoVariantStatus::Unknown))
-        );
-
-        // 生きた variant が1件も無いテンパイは和了も役なしも生まない。
-        let (ctx, hands) =
-            tenpai_case(&DAISANGEN_SHANPON_HAND, &[], &["5m", "5mr", "C", "C"], true);
-        assert_eq!(
-            tenpai_tsumo_value_with_live_yaku(&ctx, &hands, TenpaiScoringMode::Damaten).1,
-            None
-        );
     }
 
     #[test]
