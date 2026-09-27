@@ -68,6 +68,15 @@
 //! ([`current_tenpai_continuation_targets`])。1件でも確定しない場合は現在の待ちのままの
 //! self-tsumo expected payment へ戻る。どちらの値も上位層が求めたもので、この層は timing
 //! policy も threshold も持たない。
+//!
+//! # 1向聴 StableOrder fallback
+//!
+//! 1向聴で production horizon の全既存軸が決着しなかった場合だけ、winner と完全同値な cohort を
+//! [`crate::self_tsumo::SelfTsumoHorizon::UNTIL_RYUKYOKU`] の ExpectedSelfTsumoValue で比べ直す
+//! ([`iishanten_stable_order_fallback_cohort`] /
+//! [`best_discard_selection_index_with_stable_order_fallback`])。軸は StableOrder の直前にだけ
+//! 置き、値は cohort の全候補で確定した場合だけ cohort に入れるので、既存軸で決着する候補の組の
+//! 順序は変わらない。値そのものは上位層が既存の1向聴 continuation で求める。
 
 use crate::discard::{
     DiscardComparison, DiscardComparisonReason, DiscardEvaluation, DiscardEvaluationView,
@@ -324,6 +333,7 @@ impl<'a> DiscardSelectionCandidate<'a> {
             current_tenpai_expected_self_tsumo_value: self.current_tenpai_expected_self_tsumo_value,
             current_tenpai_continuation_self_tsumo_value: self
                 .current_tenpai_continuation_self_tsumo_value,
+            until_ryukyoku_expected_self_tsumo_value: None,
         }
     }
 }
@@ -346,6 +356,11 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
     pub current_tenpai_offense_weighted_total: Option<u64>,
     pub current_tenpai_expected_self_tsumo_value: Option<u64>,
     pub current_tenpai_continuation_self_tsumo_value: Option<u64>,
+    /// 1向聴 StableOrder fallback の UNTIL_RYUKYOKU ExpectedSelfTsumoValue。
+    ///
+    /// production comparator の winner と全既存軸で完全同値な cohort の全候補で確定した場合だけ
+    /// その cohort に入る ([`select_with_iishanten_stable_order_fallback`])。それ以外の候補は `None`。
+    pub until_ryukyoku_expected_self_tsumo_value: Option<u64>,
 }
 
 /// 前方集計値を含めて打牌候補を比較する。
@@ -362,7 +377,9 @@ pub(crate) struct DiscardSelectionCandidateView<'a> {
 ///   → [2向聴以上] WeightedNextAcceptanceRemaining → WeightedNextAcceptanceTypeCount
 ///   → [聴牌のみ] CurrentTenpaiContinuationSelfTsumoValue
 ///              / CurrentTenpaiExpectedSelfTsumoValue / CurrentTenpaiOffenseWeightedTotal
-///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ...
+///   → AcceptanceRemaining → AcceptanceTypeCount → IishantenShape → ... → RedFive
+///   → [1向聴 StableOrder fallback のみ] UntilRyukyokuExpectedSelfTsumoValue
+///   → StableOrder
 /// ```
 ///
 /// 各軸は両候補の向聴数が等しく、対応する前方集計値が両方にある場合だけ決着させる。打点込みの
@@ -376,61 +393,40 @@ pub fn compare_discard_selection_candidates(
 
 /// 借用 view のまま [`compare_discard_selection_candidates`] を求める比較本体。
 ///
-/// 比較順はここだけが持ち、public API 経路も探索経路もこの1本を通る。
+/// 比較順はここだけが持ち、public API 経路も探索経路もこの1本を通る。既存の全軸は
+/// [`compare_discard_selection_candidate_views_before_stable_order`] が持ち、そこで決着しなかった
+/// 組だけを1向聴 StableOrder fallback と StableOrder で決める。fallback の値は既存の全軸で完全
+/// 同値な cohort にしか入らないため、既存軸の結論を上書きしない。
 pub(crate) fn compare_discard_selection_candidate_views(
     candidate: &DiscardSelectionCandidateView,
     current_best: &DiscardSelectionCandidateView,
 ) -> DiscardComparison {
-    if let Some(comparison) =
-        compare_discard_before_acceptance(&candidate.evaluation, &current_best.evaluation)
-    {
-        return comparison;
-    }
+    compare_discard_selection_candidate_views_before_stable_order(candidate, current_best)
+        .or_else(|| compare_until_ryukyoku_expected_self_tsumo_value(candidate, current_best))
+        .unwrap_or(DiscardComparison::STABLE_ORDER)
+}
 
-    if let Some(comparison) = compare_expected_self_tsumo_value(candidate, current_best) {
-        return comparison;
-    }
-
-    if let Some(comparison) = compare_two_shanten_expected_self_tsumo_value(candidate, current_best)
-    {
-        return comparison;
-    }
-
-    if let Some(comparison) =
-        compare_three_shanten_progress_self_tsumo_value(candidate, current_best)
-    {
-        return comparison;
-    }
-
-    if let Some(comparison) = compare_weighted_prospective_value(candidate, current_best) {
-        return comparison;
-    }
-
-    if let Some(comparison) = compare_weighted_tenpai_wait(candidate, current_best) {
-        return comparison;
-    }
-
-    if let Some(comparison) = compare_weighted_next_acceptance(candidate, current_best) {
-        return comparison;
-    }
-
-    if let Some(comparison) =
-        compare_current_tenpai_continuation_self_tsumo_value(candidate, current_best)
-    {
-        return comparison;
-    }
-
-    if let Some(comparison) =
-        compare_current_tenpai_expected_self_tsumo_value(candidate, current_best)
-    {
-        return comparison;
-    }
-
-    if let Some(comparison) = compare_current_tenpai_offense_value(candidate, current_best) {
-        return comparison;
-    }
-
-    compare_discard_from_acceptance(&candidate.evaluation, &current_best.evaluation)
+/// StableOrder と1向聴 StableOrder fallback を除いた既存の全軸による比較。全軸で同値なら `None`。
+///
+/// 1向聴 StableOrder fallback の cohort はこの結果が `None` になる候補の集合で、比較順を別に
+/// 再実装して推測しない。
+pub(crate) fn compare_discard_selection_candidate_views_before_stable_order(
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
+) -> Option<DiscardComparison> {
+    compare_discard_before_acceptance(&candidate.evaluation, &current_best.evaluation)
+        .or_else(|| compare_expected_self_tsumo_value(candidate, current_best))
+        .or_else(|| compare_two_shanten_expected_self_tsumo_value(candidate, current_best))
+        .or_else(|| compare_three_shanten_progress_self_tsumo_value(candidate, current_best))
+        .or_else(|| compare_weighted_prospective_value(candidate, current_best))
+        .or_else(|| compare_weighted_tenpai_wait(candidate, current_best))
+        .or_else(|| compare_weighted_next_acceptance(candidate, current_best))
+        .or_else(|| compare_current_tenpai_continuation_self_tsumo_value(candidate, current_best))
+        .or_else(|| compare_current_tenpai_expected_self_tsumo_value(candidate, current_best))
+        .or_else(|| compare_current_tenpai_offense_value(candidate, current_best))
+        .or_else(|| {
+            compare_discard_from_acceptance(&candidate.evaluation, &current_best.evaluation)
+        })
 }
 
 /// 前方集計値を含む比較順で最善候補の index を返す。完全同値では先に現れた候補を維持する。
@@ -691,6 +687,18 @@ pub(crate) fn two_shanten_winner_without_forward_metrics(
         .then_some(selected)
 }
 
+/// 1向聴 StableOrder fallback を選択に渡す supplemental metric。
+///
+/// 値は [`crate::self_tsumo::SelfTsumoHorizon::UNTIL_RYUKYOKU`] で求めた1向聴 ExpectedSelfTsumoValue
+/// [[`crate::self_tsumo::SELF_TSUMO_VALUE_SCALE`]] で、production horizon の
+/// [`ForwardMetrics::expected_self_tsumo_value`] とは意味の違う値なので同じ field に混ぜない。
+/// 使うのは [`iishanten_stable_order_fallback_cohort`] が返す cohort の候補だけで、それ以外の
+/// index に値があっても比較へは渡さない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IishantenStableOrderFallbackMetrics {
+    pub until_ryukyoku_expected_self_tsumo_value: Option<u64>,
+}
+
 /// 借用 view のまま [`best_discard_selection_index_with_metrics`] を求める。比較順は共通。
 fn best_discard_selection_index_with_metrics_for_views(
     evaluations: &[DiscardEvaluationView<'_>],
@@ -699,6 +707,28 @@ fn best_discard_selection_index_with_metrics_for_views(
     two_shanten_metrics: &[TwoShantenMetrics],
     three_shanten_metrics: &[ThreeShantenMetrics],
 ) -> Option<usize> {
+    let candidates = resolved_selection_candidate_views(
+        evaluations,
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        three_shanten_metrics,
+    );
+    best_candidate_view_index(&candidates)
+}
+
+/// 軸を cohort 単位で解決した比較入力。`evaluations` と同じ順序・同じ件数。
+///
+/// 選択と診断はこの1本から比較入力を作り、軸の解決を2系統に複製しない。1向聴 StableOrder
+/// fallback の値はまだ入らず、[`select_with_iishanten_stable_order_fallback`] が cohort にだけ
+/// 入れる。
+pub(crate) fn resolved_selection_candidate_views<'a>(
+    evaluations: &[DiscardEvaluationView<'a>],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
+) -> Vec<DiscardSelectionCandidateView<'a>> {
     let resolved = resolve_prospective_value_axis_for_views(evaluations, forward_metrics);
     let two_shanten_metrics = resolve_two_shanten_expected_self_tsumo_value_axis_for_views(
         evaluations,
@@ -710,43 +740,152 @@ fn best_discard_selection_index_with_metrics_for_views(
     );
     let current_tenpai_metrics =
         resolve_current_tenpai_value_axis_for_views(evaluations, current_tenpai_metrics);
-    let metrics_at = |index: usize| resolved.get(index).copied().unwrap_or_default();
-    let candidate_at = |index: usize| DiscardSelectionCandidateView {
-        evaluation: evaluations[index],
-        tenpai_wait: metrics_at(index).tenpai_wait,
-        next_acceptance: metrics_at(index).next_acceptance,
-        prospective_value: metrics_at(index).prospective_value,
-        expected_self_tsumo_value: metrics_at(index).expected_self_tsumo_value,
-        two_shanten_expected_self_tsumo_value: two_shanten_metrics
-            .get(index)
-            .and_then(|metric| metric.expected_self_tsumo_value),
-        three_shanten_progress_self_tsumo_value: three_shanten_metrics
-            .get(index)
-            .and_then(|metric| metric.progress_self_tsumo_value),
-        current_tenpai_offense_weighted_total: current_tenpai_metrics
-            .get(index)
-            .and_then(|metric| metric.offense_weighted_total),
-        current_tenpai_expected_self_tsumo_value: current_tenpai_metrics
-            .get(index)
-            .and_then(|metric| metric.expected_self_tsumo_value),
-        current_tenpai_continuation_self_tsumo_value: current_tenpai_metrics
-            .get(index)
-            .and_then(|metric| metric.continuation_self_tsumo_value),
-    };
+    (0..evaluations.len())
+        .map(|index| {
+            let forward = resolved.get(index).copied().unwrap_or_default();
+            let current_tenpai = current_tenpai_metrics
+                .get(index)
+                .copied()
+                .unwrap_or_default();
+            DiscardSelectionCandidateView {
+                evaluation: evaluations[index],
+                tenpai_wait: forward.tenpai_wait,
+                next_acceptance: forward.next_acceptance,
+                prospective_value: forward.prospective_value,
+                expected_self_tsumo_value: forward.expected_self_tsumo_value,
+                two_shanten_expected_self_tsumo_value: two_shanten_metrics
+                    .get(index)
+                    .and_then(|metric| metric.expected_self_tsumo_value),
+                three_shanten_progress_self_tsumo_value: three_shanten_metrics
+                    .get(index)
+                    .and_then(|metric| metric.progress_self_tsumo_value),
+                current_tenpai_offense_weighted_total: current_tenpai.offense_weighted_total,
+                current_tenpai_expected_self_tsumo_value: current_tenpai.expected_self_tsumo_value,
+                current_tenpai_continuation_self_tsumo_value: current_tenpai
+                    .continuation_self_tsumo_value,
+                until_ryukyoku_expected_self_tsumo_value: None,
+            }
+        })
+        .collect()
+}
 
+// 比較入力の最善 index。完全同値では先に現れた候補を維持する。
+fn best_candidate_view_index(candidates: &[DiscardSelectionCandidateView]) -> Option<usize> {
     let mut best: Option<usize> = None;
-    for index in 0..evaluations.len() {
+    for index in 0..candidates.len() {
         match best {
             Some(best_index)
                 if !compare_discard_selection_candidate_views(
-                    &candidate_at(index),
-                    &candidate_at(best_index),
+                    &candidates[index],
+                    &candidates[best_index],
                 )
                 .candidate_is_better => {}
             _ => best = Some(index),
         }
     }
     best
+}
+
+// production comparator の winner と既存の全軸で完全同値な1向聴候補の index (列挙順)。
+//
+// winner が1向聴でない場合と、完全同値な候補が winner だけの場合は空。完全同値は各候補の値
+// だけで決まる同値関係なので、列挙順を変えても同じ集合になる。
+fn iishanten_stable_order_cohort_of_views(
+    candidates: &[DiscardSelectionCandidateView],
+    winner: usize,
+) -> Vec<usize> {
+    if candidates[winner].evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN {
+        return Vec::new();
+    }
+    let cohort: Vec<usize> = (0..candidates.len())
+        .filter(|&index| {
+            compare_discard_selection_candidate_views_before_stable_order(
+                &candidates[winner],
+                &candidates[index],
+            )
+            .is_none()
+        })
+        .collect();
+    if cohort.len() < 2 {
+        return Vec::new();
+    }
+    cohort
+}
+
+/// production comparator で最善候補を選び、1向聴 StableOrder fallback を適用した最終 index を返す。
+///
+/// fallback の値を入れるのは winner と既存の全軸で完全同値な cohort だけで、cohort の全候補で
+/// 値が確定した場合に限る。1件でも確定しない場合は cohort 全体で軸を無効にし、winner をそのまま
+/// 返す。値を入れた場合も同じ comparator で選び直すだけなので、cohort 外の候補との順序は既存軸の
+/// まま変わらない。`fallback` が空なら production comparator の winner そのもの。
+pub(crate) fn select_with_iishanten_stable_order_fallback(
+    candidates: &mut [DiscardSelectionCandidateView],
+    fallback: &[IishantenStableOrderFallbackMetrics],
+) -> Option<usize> {
+    let winner = best_candidate_view_index(candidates)?;
+    if fallback.is_empty() {
+        return Some(winner);
+    }
+    let cohort = iishanten_stable_order_cohort_of_views(candidates, winner);
+    let value_at = |index: usize| {
+        fallback
+            .get(index)
+            .and_then(|metric| metric.until_ryukyoku_expected_self_tsumo_value)
+    };
+    if cohort.is_empty() || !cohort.iter().all(|&index| value_at(index).is_some()) {
+        return Some(winner);
+    }
+    for &index in &cohort {
+        candidates[index].until_ryukyoku_expected_self_tsumo_value = value_at(index);
+    }
+    best_candidate_view_index(candidates)
+}
+
+/// production comparator の winner と既存の全軸で完全同値な1向聴候補の index を列挙順で返す。
+///
+/// 入力と軸の解決は [`best_discard_selection_index_with_three_shanten_metrics`] と同じで、完全
+/// 同値かどうかは StableOrder の手前までの既存比較が決着しないことそのもので判定する。winner が
+/// 1向聴でない場合と、完全同値な候補が2件未満の場合は空で、上位層は fallback を評価しない。
+pub fn iishanten_stable_order_fallback_cohort(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
+) -> Vec<usize> {
+    let candidates = resolved_selection_candidate_views(
+        &evaluation_views(evaluations),
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        three_shanten_metrics,
+    );
+    best_candidate_view_index(&candidates)
+        .map(|winner| iishanten_stable_order_cohort_of_views(&candidates, winner))
+        .unwrap_or_default()
+}
+
+/// [`best_discard_selection_index_with_three_shanten_metrics`] に1向聴 StableOrder fallback を
+/// 加えた最善候補の index。
+///
+/// `fallback` は `evaluations` と同じ順序で、[`iishanten_stable_order_fallback_cohort`] の cohort
+/// の値だけを使う。空スライスを渡すと fallback を使わない。
+pub fn best_discard_selection_index_with_stable_order_fallback(
+    evaluations: &[DiscardEvaluation],
+    forward_metrics: &[ForwardMetrics],
+    current_tenpai_metrics: &[CurrentTenpaiMetrics],
+    two_shanten_metrics: &[TwoShantenMetrics],
+    three_shanten_metrics: &[ThreeShantenMetrics],
+    fallback: &[IishantenStableOrderFallbackMetrics],
+) -> Option<usize> {
+    let mut candidates = resolved_selection_candidate_views(
+        &evaluation_views(evaluations),
+        forward_metrics,
+        current_tenpai_metrics,
+        two_shanten_metrics,
+        three_shanten_metrics,
+    );
+    select_with_iishanten_stable_order_fallback(&mut candidates, fallback)
 }
 
 /// 現在聴牌 cohort の恒常フリテン分類。
@@ -1145,6 +1284,28 @@ fn compare_current_tenpai_expected_self_tsumo_value(
     (candidate_value != best_value).then_some(DiscardComparison {
         candidate_is_better: candidate_value > best_value,
         reason: DiscardComparisonReason::CurrentTenpaiExpectedSelfTsumoValue,
+    })
+}
+
+// 1向聴 StableOrder fallback の UNTIL_RYUKYOKU ExpectedSelfTsumoValue による比較。
+//
+// 値は既存の全軸で完全同値な cohort の全候補で確定した場合だけ入る
+// ([`select_with_iishanten_stable_order_fallback`])。同値なら `None` で StableOrder へ委ねる。
+fn compare_until_ryukyoku_expected_self_tsumo_value(
+    candidate: &DiscardSelectionCandidateView,
+    current_best: &DiscardSelectionCandidateView,
+) -> Option<DiscardComparison> {
+    if candidate.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
+        || current_best.evaluation.min_shanten_after_discard() != TENPAI_WAIT_TARGET_SHANTEN
+    {
+        return None;
+    }
+
+    let candidate_value = candidate.until_ryukyoku_expected_self_tsumo_value?;
+    let best_value = current_best.until_ryukyoku_expected_self_tsumo_value?;
+    (candidate_value != best_value).then_some(DiscardComparison {
+        candidate_is_better: candidate_value > best_value,
+        reason: DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue,
     })
 }
 
@@ -2260,6 +2421,7 @@ mod tests {
                 current_tenpai_offense_weighted_total: None,
                 current_tenpai_expected_self_tsumo_value: None,
                 current_tenpai_continuation_self_tsumo_value: None,
+                until_ryukyoku_expected_self_tsumo_value: None,
             })
             .collect();
 
@@ -3221,5 +3383,374 @@ mod tests {
             .reason,
             DiscardComparisonReason::IsolatedTile
         );
+    }
+
+    fn tied_iishanten_pair() -> (Vec<DiscardEvaluation>, Vec<ForwardMetrics>) {
+        (
+            vec![
+                evaluation("4m", 1, &[("3p", 4), ("6p", 4)]),
+                evaluation("6s", 1, &[("2s", 4), ("5s", 4)]),
+            ],
+            vec![self_tsumo_metrics(metric(46, 22), Some(300), Some(100)); 2],
+        )
+    }
+
+    fn fallback_of(values: &[Option<u64>]) -> Vec<IishantenStableOrderFallbackMetrics> {
+        values
+            .iter()
+            .map(|&value| IishantenStableOrderFallbackMetrics {
+                until_ryukyoku_expected_self_tsumo_value: value,
+            })
+            .collect()
+    }
+
+    fn selected_with_fallback(
+        evaluations: &[DiscardEvaluation],
+        metrics: &[ForwardMetrics],
+        fallback: &[IishantenStableOrderFallbackMetrics],
+    ) -> Option<usize> {
+        best_discard_selection_index_with_stable_order_fallback(
+            evaluations,
+            metrics,
+            &[],
+            &[],
+            &[],
+            fallback,
+        )
+    }
+
+    fn cohort_of(evaluations: &[DiscardEvaluation], metrics: &[ForwardMetrics]) -> Vec<usize> {
+        iishanten_stable_order_fallback_cohort(evaluations, metrics, &[], &[], &[])
+    }
+
+    // 選択と同じ比較入力で、選ばれた候補から見た各候補の比較理由。診断と同じ組み立て。
+    fn reasons_with_fallback(
+        evaluations: &[DiscardEvaluation],
+        metrics: &[ForwardMetrics],
+        fallback: &[IishantenStableOrderFallbackMetrics],
+    ) -> Vec<DiscardComparisonReason> {
+        let views = evaluation_views(evaluations);
+        let mut candidates = resolved_selection_candidate_views(&views, metrics, &[], &[], &[]);
+        let selected = select_with_iishanten_stable_order_fallback(&mut candidates, fallback)
+            .expect("selected");
+        (0..candidates.len())
+            .map(|index| {
+                compare_discard_selection_candidate_views(&candidates[selected], &candidates[index])
+                    .reason
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_comparator_falls_to_the_stable_order_only_through_a_full_tie() {
+        let (evaluations, metrics) = tied_iishanten_pair();
+        let views = evaluation_views(&evaluations);
+        let candidates = resolved_selection_candidate_views(&views, &metrics, &[], &[], &[]);
+
+        assert_eq!(
+            compare_discard_selection_candidate_views_before_stable_order(
+                &candidates[1],
+                &candidates[0],
+            ),
+            None
+        );
+        assert_eq!(
+            compare_discard_selection_candidate_views(&candidates[1], &candidates[0]),
+            DiscardComparison::STABLE_ORDER
+        );
+        assert_eq!(
+            compare_discard_selection_candidates(
+                &candidates_of(&evaluations, &metrics)[1],
+                &candidates_of(&evaluations, &metrics)[0],
+            ),
+            DiscardComparison::STABLE_ORDER
+        );
+    }
+
+    #[test]
+    fn a_full_h12_tie_is_decided_by_the_until_ryukyoku_fallback() {
+        let (evaluations, metrics) = tied_iishanten_pair();
+        let fallback = fallback_of(&[Some(10), Some(20)]);
+
+        assert_eq!(cohort_of(&evaluations, &metrics), vec![0, 1]);
+        assert_eq!(selected_with_fallback(&evaluations, &metrics, &[]), Some(0));
+        assert_eq!(
+            best_discard_selection_index_with_three_shanten_metrics(
+                &evaluations,
+                &metrics,
+                &[],
+                &[],
+                &[]
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            selected_with_fallback(&evaluations, &metrics, &fallback),
+            Some(1)
+        );
+        assert_eq!(
+            reasons_with_fallback(&evaluations, &metrics, &fallback)[0],
+            DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn a_decided_h12_axis_never_consults_the_fallback() {
+        // h12 の既存軸のどれかで 4m が勝つ組では、6s に大きい fallback 値を渡しても cohort が
+        // できず、winner も比較理由も変わらない。
+        type Tweak = fn(&mut Vec<DiscardEvaluation>, &mut Vec<ForwardMetrics>);
+        let cases: [(&str, Tweak, DiscardComparisonReason); 10] = [
+            (
+                "ExpectedSelfTsumoValue",
+                |_, metrics| metrics[1].expected_self_tsumo_value = Some(99),
+                DiscardComparisonReason::ExpectedSelfTsumoValue,
+            ),
+            (
+                "WeightedProspectiveValue",
+                |_, metrics| metrics[1].prospective_value = Some(299),
+                DiscardComparisonReason::WeightedProspectiveValue,
+            ),
+            (
+                "WeightedTenpaiWaitRemaining",
+                |_, metrics| metrics[1].tenpai_wait = metric(45, 22),
+                DiscardComparisonReason::WeightedTenpaiWaitRemaining,
+            ),
+            (
+                "WeightedTenpaiWaitTypeCount",
+                |_, metrics| metrics[1].tenpai_wait = metric(46, 21),
+                DiscardComparisonReason::WeightedTenpaiWaitTypeCount,
+            ),
+            (
+                "AcceptanceRemaining",
+                |evaluations, _| {
+                    evaluations[1] = evaluation("6s", 1, &[("2s", 4), ("5s", 3)]);
+                },
+                DiscardComparisonReason::AcceptanceRemaining,
+            ),
+            (
+                "AcceptanceTypeCount",
+                |evaluations, _| {
+                    evaluations[1] = evaluation("6s", 1, &[("5s", 8)]);
+                },
+                DiscardComparisonReason::AcceptanceTypeCount,
+            ),
+            (
+                "ShapePenalty",
+                |evaluations, _| evaluations[1].shape_penalty = 1,
+                DiscardComparisonReason::ShapePenalty,
+            ),
+            (
+                "Dora",
+                |evaluations, _| evaluations[1].discarded_dora_count = 1,
+                DiscardComparisonReason::Dora,
+            ),
+            (
+                "ValueHonor",
+                |evaluations, _| evaluations[1].discarded_value_honor_count = 1,
+                DiscardComparisonReason::ValueHonor,
+            ),
+            (
+                "RedFive",
+                |evaluations, _| evaluations[1].discards_red_five = true,
+                DiscardComparisonReason::RedFive,
+            ),
+        ];
+
+        for (name, tweak, reason) in cases {
+            let (mut evaluations, mut metrics) = tied_iishanten_pair();
+            tweak(&mut evaluations, &mut metrics);
+            let fallback = fallback_of(&[Some(10), Some(u64::MAX)]);
+
+            assert!(cohort_of(&evaluations, &metrics).is_empty(), "{name}");
+            assert_eq!(
+                selected_with_fallback(&evaluations, &metrics, &fallback),
+                Some(0),
+                "{name}"
+            );
+            assert_eq!(
+                reasons_with_fallback(&evaluations, &metrics, &fallback)[1],
+                reason,
+                "{name}"
+            );
+
+            // 負ける候補を先に並べても h12 の winner のまま。
+            evaluations.reverse();
+            metrics.reverse();
+            let reversed_fallback = fallback_of(&[Some(u64::MAX), Some(10)]);
+            assert!(cohort_of(&evaluations, &metrics).is_empty(), "{name}");
+            assert_eq!(
+                selected_with_fallback(&evaluations, &metrics, &reversed_fallback),
+                Some(1),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_winner_without_a_full_tie_partner_does_not_trigger_the_fallback() {
+        // 6s と 9p は互いに完全同値だが、winner の 4m とは h12 EV で決着している。
+        let (mut evaluations, mut metrics) = tied_iishanten_pair();
+        evaluations.push(evaluation("9p", 1, &[("7p", 4), ("8p", 4)]));
+        metrics[0].expected_self_tsumo_value = Some(101);
+        metrics.push(metrics[1]);
+        let fallback = fallback_of(&[Some(10), Some(20), Some(30)]);
+
+        assert!(cohort_of(&evaluations, &metrics).is_empty());
+        assert_eq!(
+            selected_with_fallback(&evaluations, &metrics, &fallback),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_fallback_does_not_apply_to_other_shanten() {
+        for shanten in [0, 2, 3] {
+            let evaluations = vec![
+                evaluation("4m", shanten, &[("3p", 4), ("6p", 4)]),
+                evaluation("6s", shanten, &[("2s", 4), ("5s", 4)]),
+            ];
+            let metrics = vec![ForwardMetrics::default(); 2];
+            let fallback = fallback_of(&[Some(10), Some(20)]);
+
+            assert!(cohort_of(&evaluations, &metrics).is_empty(), "{shanten}");
+            assert_eq!(
+                selected_with_fallback(&evaluations, &metrics, &fallback),
+                Some(0),
+                "{shanten}"
+            );
+            assert_eq!(
+                reasons_with_fallback(&evaluations, &metrics, &fallback)[1],
+                DiscardComparisonReason::StableOrder,
+                "{shanten}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_until_ryukyoku_tie_keeps_the_stable_order() {
+        let (evaluations, metrics) = tied_iishanten_pair();
+        let fallback = fallback_of(&[Some(20), Some(20)]);
+        assert_eq!(
+            selected_with_fallback(&evaluations, &metrics, &fallback),
+            Some(0)
+        );
+        assert_eq!(
+            reasons_with_fallback(&evaluations, &metrics, &fallback)[1],
+            DiscardComparisonReason::StableOrder
+        );
+
+        // 最大値が複数なら、その中の先に現れた候補を StableOrder で選ぶ。
+        let (mut evaluations, mut metrics) = tied_iishanten_pair();
+        evaluations.push(evaluation("9p", 1, &[("7p", 4), ("8p", 4)]));
+        metrics.push(metrics[0]);
+        let fallback = fallback_of(&[Some(10), Some(20), Some(20)]);
+        assert_eq!(
+            selected_with_fallback(&evaluations, &metrics, &fallback),
+            Some(1)
+        );
+        assert_eq!(
+            reasons_with_fallback(&evaluations, &metrics, &fallback),
+            vec![
+                DiscardComparisonReason::UntilRyukyokuExpectedSelfTsumoValue,
+                DiscardComparisonReason::StableOrder,
+                DiscardComparisonReason::StableOrder,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_until_ryukyoku_value_disables_the_fallback_for_the_whole_cohort() {
+        let (mut evaluations, mut metrics) = tied_iishanten_pair();
+        evaluations.push(evaluation("9p", 1, &[("7p", 4), ("8p", 4)]));
+        metrics.push(metrics[0]);
+        let fallback = fallback_of(&[Some(10), Some(30), None]);
+
+        assert_eq!(cohort_of(&evaluations, &metrics), vec![0, 1, 2]);
+        assert_eq!(
+            selected_with_fallback(&evaluations, &metrics, &fallback),
+            Some(0)
+        );
+        assert_eq!(
+            reasons_with_fallback(&evaluations, &metrics, &fallback),
+            vec![DiscardComparisonReason::StableOrder; 3]
+        );
+    }
+
+    #[test]
+    fn a_fallback_value_outside_the_cohort_is_ignored() {
+        // cohort 外の候補に値があっても比較へ渡さない。
+        let (mut evaluations, mut metrics) = tied_iishanten_pair();
+        evaluations.push(evaluation("9p", 1, &[("7p", 4), ("8p", 4)]));
+        metrics.push(ForwardMetrics {
+            expected_self_tsumo_value: Some(99),
+            ..metrics[0]
+        });
+        let fallback = fallback_of(&[Some(10), Some(20), Some(u64::MAX)]);
+
+        assert_eq!(cohort_of(&evaluations, &metrics), vec![0, 1]);
+        assert_eq!(
+            selected_with_fallback(&evaluations, &metrics, &fallback),
+            Some(1)
+        );
+        assert_eq!(
+            reasons_with_fallback(&evaluations, &metrics, &fallback)[2],
+            DiscardComparisonReason::ExpectedSelfTsumoValue
+        );
+    }
+
+    #[test]
+    fn the_fallback_cohort_and_winner_are_stable_under_permutation() {
+        let base_evaluations = [
+            evaluation("4m", 1, &[("3p", 4), ("6p", 4)]),
+            evaluation("6s", 1, &[("2s", 4), ("5s", 4)]),
+            evaluation("9p", 1, &[("7p", 4), ("8p", 4)]),
+            evaluation("1m", 1, &[("2m", 4), ("3m", 4)]),
+        ];
+        let tied = self_tsumo_metrics(metric(46, 22), Some(300), Some(100));
+        let base_metrics = [
+            tied,
+            tied,
+            tied,
+            self_tsumo_metrics(metric(46, 22), Some(300), Some(99)),
+        ];
+        let base_fallback = fallback_of(&[Some(10), Some(30), Some(20), Some(u64::MAX)]);
+
+        let mut order = [0, 1, 2, 3];
+        let mut permutations = Vec::new();
+        permute(&mut order, 0, &mut permutations);
+        assert_eq!(permutations.len(), 24);
+        for order in permutations {
+            let evaluations: Vec<_> = order
+                .iter()
+                .map(|&index| base_evaluations[index].clone())
+                .collect();
+            let metrics: Vec<_> = order.iter().map(|&index| base_metrics[index]).collect();
+            let fallback: Vec<_> = order.iter().map(|&index| base_fallback[index]).collect();
+
+            let mut cohort: Vec<_> = cohort_of(&evaluations, &metrics)
+                .into_iter()
+                .map(|index| evaluations[index].discard)
+                .collect();
+            cohort.sort();
+            let mut expected = vec![tile("4m"), tile("6s"), tile("9p")];
+            expected.sort();
+            assert_eq!(cohort, expected, "{order:?}");
+
+            let selected =
+                selected_with_fallback(&evaluations, &metrics, &fallback).expect("selected");
+            assert_eq!(evaluations[selected].discard, tile("6s"), "{order:?}");
+        }
+    }
+
+    fn permute(order: &mut [usize; 4], start: usize, out: &mut Vec<[usize; 4]>) {
+        if start == order.len() {
+            out.push(*order);
+            return;
+        }
+        for index in start..order.len() {
+            order.swap(start, index);
+            permute(order, start + 1, out);
+            order.swap(start, index);
+        }
     }
 }

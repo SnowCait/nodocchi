@@ -1,0 +1,37 @@
+{
+  "hand": "3m 4m 4m 5m 7m 7m 8m 8m 5pr 5p 6s 6s 7s",
+  "draw": "5sr",
+
+  "dora_indicators": "E",
+
+  "round_wind": "E",
+  "seat_wind": "N",
+  "kyoku": 2,
+
+  "player_id": 0,
+  "oya": 1,
+
+  "honba": 0,
+  "kyotaku_points": 0,
+  "scores": [25000, 25000, 32700, 17300],
+
+  "remaining_tiles": 35,
+
+  "reached": [false, false, false, false],
+
+  "discards": [
+    "W 9p 1p 1s S 6p E 9s",
+    "W 9m 9s 2p 8p 9p 8s C W",
+    "N 8p 1p C 8s 6s 6p N 8p",
+    "P 8m 8p 2p 4p 6m 2s 7s 7s"
+  ],
+
+  "melds": [
+    [],
+    [
+      { "kind": "pon", "tiles": "E E E", "called_tile": "E" }
+    ],
+    [],
+    []
+  ]
+}

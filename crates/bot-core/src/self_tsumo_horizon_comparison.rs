@@ -237,6 +237,21 @@ mod tests {
     use crate::shanten_test_support::{tenpai_actions, tenpai_context, tile};
     use bot_logic::TileType;
 
+    #[test]
+    fn only_the_compared_h18_is_until_ryukyoku() {
+        // 比較用 h18 は late minimum を production に揃えたままでも流局までの semantics。
+        let until_ryukyoku: Vec<_> = COMPARED_SELF_TSUMO_HORIZONS
+            .iter()
+            .map(|horizon| horizon.is_until_ryukyoku())
+            .collect();
+        assert_eq!(until_ryukyoku, [false, false, false, true]);
+        assert_eq!(COMPARED_SELF_TSUMO_HORIZONS[3].horizon_turn, 18);
+        assert_eq!(
+            COMPARED_SELF_TSUMO_HORIZONS[3].late_min_future_draws,
+            SelfTsumoHorizon::PRODUCTION.late_min_future_draws
+        );
+    }
+
     fn context(remaining_tiles: Option<u32>) -> (GameContext, Vec<LegalAction>) {
         let context = tenpai_context(&[]).with_table_state_facts(TableStateFacts {
             remaining_tiles,

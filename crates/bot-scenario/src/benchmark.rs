@@ -29,6 +29,9 @@ pub struct RequestMeasurement {
     pub phases: DecisionPhaseDurations,
     pub two_shanten_self_tsumo_candidates: Vec<(TileType, Duration)>,
     pub iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
+    /// 1向聴 StableOrder fallback が `UNTIL_RYUKYOKU` で評価した cohort の候補数。発火しなかった
+    /// request では 0。評価時間は `phases.normal_discard_phases.iishanten_stable_order_fallback`。
+    pub iishanten_stable_order_fallback_candidates: usize,
     pub call_candidates: Vec<CallCandidateDuration>,
     pub selected_action: LegalAction,
 }
@@ -59,6 +62,35 @@ pub struct BenchmarkRun {
     pub captures: usize,
     pub requests: Vec<RequestMeasurement>,
     pub statistics: LatencyStatistics,
+}
+
+/// 1向聴 StableOrder fallback の run 全体の集計。
+///
+/// `triggered` は fallback が cohort を評価した request 数、`candidates` はその cohort の候補数の
+/// 合計、`elapsed` はその評価時間の合計。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StableOrderFallbackSummary {
+    pub triggered: usize,
+    pub candidates: usize,
+    pub elapsed: Duration,
+}
+
+impl StableOrderFallbackSummary {
+    pub fn from_requests(requests: &[RequestMeasurement]) -> Self {
+        requests
+            .iter()
+            .filter(|measurement| measurement.iishanten_stable_order_fallback_candidates > 0)
+            .fold(Self::default(), |summary, measurement| Self {
+                triggered: summary.triggered + 1,
+                candidates: summary.candidates
+                    + measurement.iishanten_stable_order_fallback_candidates,
+                elapsed: summary.elapsed
+                    + measurement
+                        .phases
+                        .normal_discard_phases
+                        .iishanten_stable_order_fallback,
+            })
+    }
 }
 
 pub fn run_capture_benchmark(spec: &CaptureBenchmarkSpec) -> Result<String, ScenarioError> {
@@ -105,6 +137,8 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
         phases: timed.phases,
         two_shanten_self_tsumo_candidates: timed.two_shanten_self_tsumo_candidates().collect(),
         iishanten_forward_candidates: timed.iishanten_forward_candidates().to_vec(),
+        iishanten_stable_order_fallback_candidates: timed
+            .iishanten_stable_order_fallback_candidates(),
         call_candidates: timed.call_candidates().to_vec(),
         selected_action: timed.action,
     }
@@ -167,6 +201,7 @@ pub fn slowest_requests(run: &BenchmarkRun, count: usize) -> Vec<&RequestMeasure
 
 pub fn format_benchmark(run: &BenchmarkRun) -> String {
     let statistics = &run.statistics;
+    let stable_order_fallback = StableOrderFallbackSummary::from_requests(&run.requests);
     let mut lines = vec![
         "RiichiLab production latency benchmark".to_string(),
         format!("  captures: {}", run.captures),
@@ -182,6 +217,18 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
         format!("  > 1 s: {}", statistics.thresholds.over_1s),
         format!("  > 2 s: {}", statistics.thresholds.over_2s),
         format!("  > 3 s: {}", statistics.thresholds.over_3s),
+        format!(
+            "  iishanten stable fallback triggered: {}",
+            stable_order_fallback.triggered
+        ),
+        format!(
+            "  iishanten stable fallback candidate count: {}",
+            stable_order_fallback.candidates
+        ),
+        format!(
+            "  iishanten stable fallback elapsed: {}",
+            format_duration(stable_order_fallback.elapsed)
+        ),
         String::new(),
         "Slowest requests".to_string(),
     ];
@@ -199,6 +246,7 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
                 &measurement.phases.normal_discard_phases,
                 &measurement.two_shanten_self_tsumo_candidates,
                 &measurement.iishanten_forward_candidates,
+                measurement.iishanten_stable_order_fallback_candidates,
             ),
             format_duration(measurement.phases.post_discard),
             action_label(&measurement.selected_action),
@@ -266,9 +314,10 @@ fn format_normal_discard_phases(
     phases: &NormalDiscardPhaseDurations,
     candidates: &[(TileType, Duration)],
     forward_candidates: &[IishantenForwardCandidateDuration],
+    stable_order_fallback_candidates: usize,
 ) -> String {
     format!(
-        "base={} forward={} [{}] forward_candidates={} [{}] two_shanten_self_tsumo={} candidates={} [{}] three_shanten_self_tsumo={} finalize={}",
+        "base={} forward={} [{}] forward_candidates={} [{}] two_shanten_self_tsumo={} candidates={} [{}] three_shanten_self_tsumo={} stable_fallback={} candidates={} finalize={}",
         format_duration(phases.base_evaluation),
         format_duration(phases.forward_metrics),
         format_forward_metrics_phases(&phases.forward_metrics_phases),
@@ -290,6 +339,8 @@ fn format_normal_discard_phases(
             .collect::<Vec<_>>()
             .join(" "),
         format_duration(phases.three_shanten_self_tsumo),
+        format_duration(phases.iishanten_stable_order_fallback),
+        stable_order_fallback_candidates,
         format_duration(phases.selection_finalize),
     )
 }
@@ -338,6 +389,12 @@ pub struct BenchmarkSummaryJson {
     pub over_1s: usize,
     pub over_2s: usize,
     pub over_3s: usize,
+    #[serde(default)]
+    pub iishanten_stable_fallback_triggered: usize,
+    #[serde(default)]
+    pub iishanten_stable_fallback_candidate_count: usize,
+    #[serde(default)]
+    pub iishanten_stable_fallback_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +434,10 @@ pub struct BenchmarkRequestJson {
     pub two_shanten_self_tsumo_candidate_count: usize,
     pub two_shanten_self_tsumo_candidates: Vec<BenchmarkTwoShantenSelfTsumoCandidateJson>,
     pub three_shanten_self_tsumo_ns: u64,
+    #[serde(default)]
+    pub iishanten_stable_fallback_ns: u64,
+    #[serde(default)]
+    pub iishanten_stable_fallback_candidate_count: usize,
     pub normal_discard_finalize_ns: u64,
     pub post_discard_ns: u64,
     pub selected: String,
@@ -416,6 +477,7 @@ pub struct BenchmarkIishantenForwardCandidateJson {
 impl BenchmarkJson {
     pub fn from_run(run: &BenchmarkRun) -> Self {
         let statistics = &run.statistics;
+        let stable_order_fallback = StableOrderFallbackSummary::from_requests(&run.requests);
         Self {
             summary: BenchmarkSummaryJson {
                 captures: run.captures,
@@ -431,6 +493,9 @@ impl BenchmarkJson {
                 over_1s: statistics.thresholds.over_1s,
                 over_2s: statistics.thresholds.over_2s,
                 over_3s: statistics.thresholds.over_3s,
+                iishanten_stable_fallback_triggered: stable_order_fallback.triggered,
+                iishanten_stable_fallback_candidate_count: stable_order_fallback.candidates,
+                iishanten_stable_fallback_ns: nanos(stable_order_fallback.elapsed),
             },
             requests: run
                 .requests
@@ -533,6 +598,14 @@ impl BenchmarkJson {
                             .normal_discard_phases
                             .three_shanten_self_tsumo,
                     ),
+                    iishanten_stable_fallback_ns: nanos(
+                        measurement
+                            .phases
+                            .normal_discard_phases
+                            .iishanten_stable_order_fallback,
+                    ),
+                    iishanten_stable_fallback_candidate_count: measurement
+                        .iishanten_stable_order_fallback_candidates,
                     normal_discard_finalize_ns: nanos(
                         measurement.phases.normal_discard_phases.selection_finalize,
                     ),
@@ -846,6 +919,7 @@ mod tests {
             phases,
             two_shanten_self_tsumo_candidates: Vec::new(),
             iishanten_forward_candidates: Vec::new(),
+            iishanten_stable_order_fallback_candidates: 0,
             call_candidates: Vec::new(),
             selected_action: LegalAction::Dahai {
                 tile: TileId::new(0).unwrap(),
@@ -1098,11 +1172,15 @@ mod tests {
         assert!(report.contains("\n  > 1 s: 1\n"), "{report}");
         assert!(report.contains("\n  > 2 s: 1\n"), "{report}");
         assert!(report.contains("\n  > 3 s: 0\n"), "{report}");
+        assert!(
+            report.contains("\n  iishanten stable fallback triggered: 0\n"),
+            "{report}"
+        );
 
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms stable_fallback=0.000 ms candidates=0 finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms stable_fallback=0.000 ms candidates=0 finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
         );
     }
 
@@ -1214,6 +1292,164 @@ mod tests {
         let text = serde_json::to_string(&json).unwrap();
         assert!(text.contains("\"call_candidates_ns\""), "{text}");
         assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    fn with_stable_order_fallback(
+        mut measurement: RequestMeasurement,
+        elapsed: u64,
+        candidates: usize,
+    ) -> RequestMeasurement {
+        measurement
+            .phases
+            .normal_discard_phases
+            .iishanten_stable_order_fallback = Duration::from_millis(elapsed);
+        measurement.iishanten_stable_order_fallback_candidates = candidates;
+        measurement
+    }
+
+    #[test]
+    fn report_and_json_show_the_iishanten_stable_order_fallback() {
+        let run = synthetic_run(vec![
+            measurement("game-001.jsonl", 1, 10),
+            with_stable_order_fallback(
+                measurement_with_phases(
+                    "game-001.jsonl",
+                    103,
+                    900,
+                    phases_with_normal_discard_breakdown(0, 890, 10, 5, 700, 10),
+                ),
+                175,
+                2,
+            ),
+            with_stable_order_fallback(
+                measurement_with_phases(
+                    "game-002.jsonl",
+                    7,
+                    400,
+                    phases_with_normal_discard_breakdown(0, 390, 10, 5, 300, 10),
+                ),
+                75,
+                3,
+            ),
+        ]);
+        let report = format_benchmark(&run);
+        let json = BenchmarkJson::from_run(&run);
+
+        assert_eq!(
+            StableOrderFallbackSummary::from_requests(&run.requests),
+            StableOrderFallbackSummary {
+                triggered: 2,
+                candidates: 5,
+                elapsed: Duration::from_millis(250),
+            }
+        );
+        assert!(
+            report.contains("  iishanten stable fallback triggered: 2\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("  iishanten stable fallback candidate count: 5\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("  iishanten stable fallback elapsed: 250.000 ms\n"),
+            "{report}"
+        );
+        let slowest = report
+            .lines()
+            .find(|line| line.contains("request_id=103"))
+            .expect("slowest line");
+        assert!(
+            slowest.contains("stable_fallback=175.000 ms candidates=2 finalize="),
+            "{slowest}"
+        );
+        let untriggered = report
+            .lines()
+            .find(|line| line.contains("request_id=1 "))
+            .expect("untriggered line");
+        assert!(
+            untriggered.contains("stable_fallback=0.000 ms candidates=0 finalize="),
+            "{untriggered}"
+        );
+
+        assert_eq!(json.summary.iishanten_stable_fallback_triggered, 2);
+        assert_eq!(json.summary.iishanten_stable_fallback_candidate_count, 5);
+        assert_eq!(json.summary.iishanten_stable_fallback_ns, 250_000_000);
+        let request = |request_id: u64| {
+            json.requests
+                .iter()
+                .find(|request| request.request_id == request_id)
+                .unwrap()
+        };
+        assert_eq!(request(103).iishanten_stable_fallback_ns, 175_000_000);
+        assert_eq!(request(103).iishanten_stable_fallback_candidate_count, 2);
+        assert_eq!(request(1).iishanten_stable_fallback_ns, 0);
+        assert_eq!(request(1).iishanten_stable_fallback_candidate_count, 0);
+        // fallback は normal discard の内訳の1つで、合計は normal_discard を超えない。
+        for measurement in &run.requests {
+            assert!(
+                measurement.phases.normal_discard_phases.total()
+                    <= measurement.phases.normal_discard
+            );
+        }
+
+        let text = serde_json::to_string(&json).unwrap();
+        for key in [
+            "\"iishanten_stable_fallback_triggered\"",
+            "\"iishanten_stable_fallback_candidate_count\"",
+            "\"iishanten_stable_fallback_ns\"",
+        ] {
+            assert!(text.contains(key), "{key}");
+        }
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
+    }
+
+    #[test]
+    fn the_stable_fallback_fields_of_an_earlier_benchmark_json_default_to_zero() {
+        let json =
+            BenchmarkJson::from_run(&synthetic_run(vec![measurement("game-001.jsonl", 1, 10)]));
+        let mut value = serde_json::to_value(&json).unwrap();
+        let summary = value["summary"].as_object_mut().unwrap();
+        summary.remove("iishanten_stable_fallback_triggered");
+        summary.remove("iishanten_stable_fallback_candidate_count");
+        summary.remove("iishanten_stable_fallback_ns");
+        let request = value["requests"][0].as_object_mut().unwrap();
+        request.remove("iishanten_stable_fallback_ns");
+        request.remove("iishanten_stable_fallback_candidate_count");
+
+        assert_eq!(
+            serde_json::from_value::<BenchmarkJson>(value).unwrap(),
+            json
+        );
+    }
+
+    #[test]
+    fn the_benchmark_measures_the_production_stable_order_fallback() {
+        // request 103 相当の局面は production で fallback が発火し、benchmark はその候補数と
+        // 時間をそのまま持つ。選択は計測の有無で変わらない。
+        let spec: bot_analysis::ScenarioSpec = serde_json::from_str(include_str!(
+            "../scenarios/request_103_iishanten_stable_order.json"
+        ))
+        .unwrap();
+        let scenario = bot_analysis::Scenario::resolve(&spec).unwrap();
+        let captured = CapturedScenario {
+            path: "request-103.jsonl".to_string(),
+            request_id: 103,
+            actor: Some(0),
+            possible_action_count: scenario.legal_actions.len(),
+            scenario,
+        };
+        let measurement = measure_request(&captured);
+
+        assert_eq!(measurement.iishanten_stable_order_fallback_candidates, 2);
+        let phases = measurement.phases.normal_discard_phases;
+        assert!(phases.iishanten_stable_order_fallback > Duration::ZERO);
+        assert!(phases.total() <= measurement.phases.normal_discard);
+        assert_eq!(
+            measurement.selected_action,
+            ShantenAgent.act(&captured.scenario.context, &captured.scenario.legal_actions)
+        );
+        assert_eq!(action_label(&measurement.selected_action), "6s");
     }
 
     #[test]
@@ -1407,6 +1643,8 @@ mod tests {
                     two_shanten_self_tsumo_candidate_count: 0,
                     two_shanten_self_tsumo_candidates: vec![],
                     three_shanten_self_tsumo_ns: 0,
+                    iishanten_stable_fallback_ns: 0,
+                    iishanten_stable_fallback_candidate_count: 0,
                     normal_discard_finalize_ns: 0,
                     post_discard_ns: 0,
                     selected: "1m".to_string(),
@@ -1446,6 +1684,8 @@ mod tests {
                         },
                     ],
                     three_shanten_self_tsumo_ns: 0,
+                    iishanten_stable_fallback_ns: 0,
+                    iishanten_stable_fallback_candidate_count: 0,
                     normal_discard_finalize_ns: 20_000_000,
                     post_discard_ns: 69_000_000,
                     selected: "1m".to_string(),
