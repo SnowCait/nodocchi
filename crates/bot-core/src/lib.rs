@@ -238,8 +238,9 @@ pub use two_shanten_self_tsumo_cost::{
     measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
 };
 pub use two_shanten_stay_call_observation::{
-    TwoShantenStayCallAgreement, TwoShantenStayCallCandidate, TwoShantenStayCallFull,
-    TwoShantenStayCallObservation, TwoShantenStayCallProgress, TwoShantenStayCallScope,
-    TwoShantenStayCallUnknown, TwoShantenStayCallValue, TwoShantenStayPassObservation,
+    TwoShantenStayAllowPartialWaits, TwoShantenStayCallAgreement, TwoShantenStayCallCandidate,
+    TwoShantenStayCallFull, TwoShantenStayCallObservation, TwoShantenStayCallProgress,
+    TwoShantenStayCallScope, TwoShantenStayCallTerminalYaku, TwoShantenStayCallUnknown,
+    TwoShantenStayCallValue, TwoShantenStayPassObservation, TwoShantenStayRequireAllLiveWaits,
     observe_two_shanten_stay_calls,
 };

@@ -175,7 +175,8 @@ use crate::offense_value::{
 };
 use crate::reach_policy::{ReachLegalityFacts, decide_reach_reason, is_reach_legal};
 use crate::tenpai_scoring::{
-    TenpaiVariantHan, TenpaiVariantValue, TsumoVariantOutcomes, tenpai_tsumo_value_from_hands,
+    TenpaiVariantHan, TenpaiVariantValue, TsumoVariantOutcomes, TsumoVariantStatus,
+    tenpai_tsumo_value_from_hands, tenpai_tsumo_value_with_live_yaku,
     tenpai_tsumo_variant_outcomes, tenpai_variant_value,
 };
 use std::cell::{Cell, RefCell};
@@ -649,6 +650,13 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     // 1件も通していない場合は `None`。terminal scoring 1件ごとに memo 済みの下限を読んで畳む
     // だけなので、点数計算も探索も増えない。
     scored_han_floor: Cell<Option<ProspectiveHanFloor>>,
+    // terminal scoring の Tsumo profile から、生きた和了牌 variant の役の有無も畳むか。
+    //
+    // 2→2 Call の observation だけが要求する観測値で、既定は畳まない。
+    collects_terminal_yaku: bool,
+    // この評価器が terminal scoring を通したテンパイ全体の役の結論。1件も通していない場合と、
+    // 生きた variant を持つテンパイを1件も通していない場合は `None`。
+    terminal_yaku: Cell<Option<ProspectiveHanVerdict>>,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -688,6 +696,8 @@ impl<'a> ProductionProspectiveValuator<'a> {
             values: RefCell::new(EvaluatedTenpaiValueMemo::default()),
             collects_han_floor: false,
             scored_han_floor: Cell::new(None),
+            collects_terminal_yaku: false,
+            terminal_yaku: Cell::new(None),
         }
     }
 
@@ -700,6 +710,46 @@ impl<'a> ProductionProspectiveValuator<'a> {
     pub(crate) fn collecting_han_floor(mut self, collects: bool) -> Self {
         self.collects_han_floor = collects;
         self
+    }
+
+    /// terminal scoring が選択値のために通す Tsumo profile から、生きた和了牌 variant の役の有無も
+    /// 畳む評価器にする。
+    ///
+    /// 点数計算は選択値と同じ1回のままで、枝の探索も選択値も変わらない。畳んだ結論は
+    /// [`Self::terminal_yaku_verdict`] で読む。
+    pub(crate) fn collecting_terminal_yaku(mut self, collects: bool) -> Self {
+        self.collects_terminal_yaku = collects;
+        self
+    }
+
+    /// この評価器が terminal scoring を通したテンパイ全体で、生きた和了牌 variant すべてに役が
+    /// あるか。
+    ///
+    /// 判定は選択値と同じ Tsumo profile の [`TsumoVariantStatus`] で、役なし (0翻) の variant が
+    /// 1つでもあれば [`ProspectiveHanVerdict::Below`]、それ以外で確定できない variant・テンパイが
+    /// あれば [`ProspectiveHanVerdict::Unknown`]。生きた variant が1つも無いテンパイは和了も
+    /// 役なしも生まないので寄与させない。対象が1件も無い場合と、畳むことを要求していない評価器は
+    /// `Unknown`。
+    pub(crate) fn terminal_yaku_verdict(&self) -> ProspectiveHanVerdict {
+        self.terminal_yaku
+            .get()
+            .unwrap_or(ProspectiveHanVerdict::Unknown)
+    }
+
+    fn collect_terminal_yaku(&self, yaku: Option<TsumoVariantStatus>) {
+        let Some(yaku) = yaku else {
+            return;
+        };
+        let verdict = match yaku {
+            TsumoVariantStatus::Winning => ProspectiveHanVerdict::AtLeast,
+            TsumoVariantStatus::NoYaku => ProspectiveHanVerdict::Below,
+            TsumoVariantStatus::Unknown => ProspectiveHanVerdict::Unknown,
+        };
+        let folded = match self.terminal_yaku.get() {
+            Some(collected) => collected.weaker(verdict),
+            None => verdict,
+        };
+        self.terminal_yaku.set(Some(folded));
     }
 
     /// 評価対象の副露済み面子数。2手先評価へ渡す値もここから取り、評価器と食い違わせない。
@@ -1047,9 +1097,24 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
         }
         #[cfg(test)]
         tenpai_value_memo_counter::miss();
-        let value = self.with_evaluated_tenpai(tenpai, |facts, mode| {
-            self.prospective_tsumo_value(facts, mode)
-        });
+        let value = if self.collects_terminal_yaku {
+            // memo hit の枝は同じ評価器で初回に畳み済みなので、畳むのは点数計算を通すここだけ。
+            let (value, yaku) = self
+                .with_evaluated_tenpai(tenpai, |facts, mode| {
+                    Some(tenpai_tsumo_value_with_live_yaku(
+                        self.context,
+                        &facts.hands,
+                        TenpaiScoringMode::prospective(mode),
+                    ))
+                })
+                .unwrap_or((None, Some(TsumoVariantStatus::Unknown)));
+            self.collect_terminal_yaku(yaku);
+            value
+        } else {
+            self.with_evaluated_tenpai(tenpai, |facts, mode| {
+                self.prospective_tsumo_value(facts, mode)
+            })
+        };
         if let Some(key) = key {
             self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
         }
