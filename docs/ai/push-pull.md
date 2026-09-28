@@ -75,7 +75,8 @@ Caution-only で通常打牌後がテンパイ (`min_shanten_after_discard <= 0`
 | --- | --- | --- |
 | Caution-only | `Push` | 一向聴の ExpectedSelfTsumoValue threshold だけ 750 点。それ以外は現行 policy (`Caution` / `Danger` 共通) |
 | actionable target に `Danger` を含む | 現行の strong-tenpai / hard-safe policy | 現行 policy (`Caution` / `Danger` 共通) |
-| Riichi threat | 現行 policy (Caution-only の例外なし) | 現行 policy |
+| Riichi threat (リーチ者1人) | 現行 policy (Caution-only の例外なし) | 現行 policy |
+| Riichi threat (リーチ者2人以上) | 現行 policy (Caution-only の例外なし) | 一向聴は一律 `Fold`。二向聴以上は現行 policy |
 | Combined threat | 現行 policy (Caution-only の例外なし) | 一向聴は一律 `Fold`。二向聴以上は現行 policy |
 
 この例外は actionable OpenHandThreat 単独に限り、Riichi threat と Combined threat には適用しません。リーチ者と `Caution` の相手が同時にいる局面は Combined threat として扱い、Caution-only の例外は適用しません。一向聴は [一向聴の攻撃価値](#一向聴の攻撃価値) の threshold だけが Caution-only で緩くなり、hard-safe 例外や reason は `Caution` / `Danger` 共通です。二向聴・三向聴以上は `Caution` だからという理由では押さず、下の表のとおり `Caution` / `Danger` 共通の policy を使います。
@@ -91,7 +92,8 @@ Caution-only で通常打牌後がテンパイ (`min_shanten_after_discard <= 0`
 | actionable target がすべて `Caution` のテンパイ (strong / hard-safe でない) | `Push` | `TenpaiAgainstCautionOpenHand` |
 | それ以外の強いと確認できないテンパイ | `Fold` | `WeakTenpaiAgainst*` |
 | Combined threat に対する一向聴 (攻撃価値・hard-safe によらない) | `Fold` | `IishantenAgainstCombinedThreat` |
-| Riichi threat / actionable OpenHandThreat 単独で ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainstReach` / `ValuableIishantenAgainstHighOpenHand` |
+| リーチ者2人以上の Riichi threat に対する一向聴 (攻撃価値・hard-safe によらない) | `Fold` | `IishantenAgainstReach` |
+| リーチ者1人の Riichi threat / actionable OpenHandThreat 単独で ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` | `ValuableIishantenAgainstReach` / `ValuableIishantenAgainstHighOpenHand` |
 | actionable OpenHandThreat 単独で、選択した一向聴打牌が全 actionable target に hard-safe | `Push` | `SafeIishantenAgainstHighOpenHand` |
 | それ以外の一向聴 | `Fold` | `IishantenAgainst*` |
 | actionable OpenHandThreat 単独で、選択したちょうど二向聴の打牌が全 actionable target に hard-safe | `Push` | `SafeTwoShantenAgainstHighOpenHand` |
@@ -121,7 +123,7 @@ Caution-only で通常打牌後がテンパイ (`min_shanten_after_discard <= 0`
 
 15,600 点は旧 policy の代表的な境界 `3900 × 4枚` / `5200 × 3枚` をそのまま連続的な threshold へ置き換えた値です。したがって `2000 × 8枚` や `8000 × 2枚` は押し、`7700 × 2枚 = 15,400` や `12000 × 1枚` は押しません。
 
-他家リーチ者に親が含まれる場合だけ、放銃時の失点が大きいので 1.5 倍の 23,400 点を要求します。リーチ者が複数いても、親が1人でも含まれていればこちらを使います。子リーチだけ、または actionable OpenHandThreat 単独なら 15,600 点です。
+他家リーチ者に親が含まれる場合だけ、放銃時の失点が大きいので 1.5 倍の 23,400 点を要求します。テンパイではリーチ者が複数いても threshold は同じで、親が1人でも含まれていればこちらを使います (一向聴はリーチ者2人以上なら一律 `Fold` です。[複数リーチの一向聴](#複数リーチの一向聴) を参照)。子リーチだけ、または actionable OpenHandThreat 単独なら 15,600 点です。
 
 恒常フリテンのテンパイはロンできずツモ依存になるため、この加重合計 policy を適用せず残枚数だけで判断します。攻撃打点を確定できない場合の 6枚も、親リーチだからといって増やしません。
 
@@ -161,28 +163,29 @@ reason は threat の種類ごとに分かれるので、diagnostics からど�
 
 ## 一向聴の攻撃価値
 
-Riichi threat 単独または actionable OpenHandThreat 単独の一向聴では、通常打牌選択が選んだ打牌の ExpectedSelfTsumoValue だけを見ます。Combined threat の一向聴は ExpectedSelfTsumoValue を見ずに一律 `Fold` です ([Combined threat の一向聴](#combined-threat-の一向聴))。押し引き側で前方探索も打点集計も受け入れ集計も持たず、[打牌選択](discard-selection.md) の既存前方評価基盤で求めた値を比較します。
+リーチ者1人の Riichi threat または actionable OpenHandThreat 単独の一向聴では、通常打牌選択が選んだ打牌の ExpectedSelfTsumoValue だけを見ます。リーチ者2人以上の Riichi threat と Combined threat の一向聴は ExpectedSelfTsumoValue を見ずに一律 `Fold` です ([複数リーチの一向聴](#複数リーチの一向聴) / [Combined threat の一向聴](#combined-threat-の一向聴))。押し引き側で前方探索も打点集計も受け入れ集計も持たず、[打牌選択](discard-selection.md) の既存前方評価基盤で求めた値を比較します。
 
 選ぶ打牌そのものは、通常どおり configured soft horizon ([将来自摸機会の soft horizon](discard-selection.md#将来自摸機会の-soft-horizon)) の self-tsumo continuation で決まります。一方、下の固定 threshold は流局までの自摸機会を前提にした尺度なので、選ばれたその1候補を threshold と比較する scalar は `SelfTsumoHorizon::UNTIL_RYUKYOKU` で評価し直した値です。horizon ごとの threshold は持ちません。
 
 - 同じ候補なら configured horizon が 12 / 14 / 16 / 18 のどれでも、threshold と比較する値は同じです。
 - configured horizon を変えて選ぶ打牌が変わった場合は、新しく選ばれた候補を `UNTIL_RYUKYOKU` で評価するので、Push/Fold の結論が変わることはあります。
 - 評価し直すのは選択済みの1候補だけで、全合法打牌を再探索しません。configured horizon が `UNTIL_RYUKYOKU` なら選択の値をそのまま使います。
-- 評価するのは打牌後が一向聴で Riichi threat 単独または actionable OpenHandThreat 単独の場合だけです。Combined threat では Push/Fold に使わないので評価し直しません。残り山が unknown などで値を確定できなければ `None` で、推測せず下の保守的な `Fold` になります。
+- 評価するのは打牌後が一向聴でリーチ者1人の Riichi threat または actionable OpenHandThreat 単独の場合だけです。リーチ者2人以上の Riichi threat と Combined threat では Push/Fold に使わないので評価し直しません。残り山が unknown などで値を確定できなければ `None` で、推測せず下の保守的な `Fold` になります。
 
 | threat | 押すために要求する ExpectedSelfTsumoValue |
 | --- | --- |
 | actionable OpenHandThreat 単独で Caution-only | 750 点以上 |
 | actionable OpenHandThreat 単独で `Danger` を含む | 1,000 点以上 |
-| Riichi threat 単独 (親リーチなし) | 1,000 点以上 |
-| Riichi threat 単独 (親リーチを含む) | 1,500 点以上 |
+| 子リーチ1人の Riichi threat | 1,000 点以上 |
+| 親リーチ1人の Riichi threat | 1,500 点以上 |
+| リーチ者2人以上の Riichi threat (親リーチの有無によらない) | threshold なし (一律 `Fold`) |
 | Combined threat | threshold なし (一律 `Fold`) |
 
-threshold は inclusive です。親リーチのときだけ、テンパイと同じく基本 threshold の 1.5 倍を要求します。リーチ者が複数いても、親が含まれなければ 1,000 点のままです。自分が親かどうかでは変えません。
+threshold は inclusive です。リーチ者1人が親のときだけ、テンパイと同じく基本 threshold の 1.5 倍を要求します。自分が親かどうかでは変えません。
 
 他家リーチがなく actionable target がすべて `Caution` の局面 ([Caution-only](#caution-only-のテンパイ)) だけ、`Danger` より危険度が低いので 750 点に緩めます。Caution-only の判定は `has_only_caution_open_hand_threats()` を使い、面子数・河枚数・reason から組み立て直しません。`Reach + Caution` は Combined threat なので 750 点を使わず、一向聴は一律 `Fold` です。reason は threshold に関係なく `ValuableIishantenAgainstHighOpenHand` で、threshold 未満のときの [一向聴の選択打牌 hard-safe 例外](#一向聴の選択打牌-hard-safe-例外) の優先順位も変わりません。
 
-threshold の選択は `iishanten_push_expected_self_tsumo_min()` の1か所にまとめ、押し引き判定と debug log の `offense_iishanten_push_expected_self_tsumo_min` は同じ値を使います。Combined threat と明確な threat がない局面では threshold を持たないので、ログは `None` になります。debug log では threshold と比較した値を `offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku`、configured horizon の選択値を `offense_iishanten_selection_expected_self_tsumo_value` として分けて出します。
+threshold の選択は `iishanten_push_expected_self_tsumo_min()` の1か所にまとめ、押し引き判定と debug log の `offense_iishanten_push_expected_self_tsumo_min` は同じ値を使います。リーチ者2人以上の Riichi threat・Combined threat・明確な threat がない局面では threshold を持たないので、ログは `None` になります。リーチ者2人以上の Riichi threat と Combined threat では threshold と比較する値も評価しないので、`offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku` も `None` です。debug log では threshold と比較した値を `offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku`、configured horizon の選択値を `offense_iishanten_selection_expected_self_tsumo_value` として分けて出します。
 
 ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値系なので、同じ threshold で比較しません。
 
@@ -190,11 +193,19 @@ ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値
 
 二向聴以上ではこの値を使いません。
 
+### 複数リーチの一向聴
+
+他家リーチ者が2人以上いる Riichi threat では、通常打牌後がちょうど一向聴なら攻撃価値にかかわらず `Fold` / `IishantenAgainstReach` です。複数リーチはリーチ者1人より放銃リスクが明確に高いので、ExpectedSelfTsumoValue がどれだけ高くても、親リーチの有無・自分が親かどうかによらず押しません。選択打牌の hard-safe fact・スジ・ワンチャンス・exact ron-risk (`R/T`) による一向聴の押し例外もありません。
+
+リーチ者数で policy を分けるのは一向聴だけです。テンパイはリーチ者が2人以上でも [強いテンパイ](#offense-state-と-mode) の threshold と [選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外) (`StrongTenpaiAgainstReach` / `SafeTenpaiAgainstReach`) をそのまま使い、リーチ者数では変えません。二向聴以上の policy も変わりません。複数リーチに actionable OpenHandThreat も加わる局面は Combined threat として下の policy になります。
+
+判定は `iishanten_uses_expected_self_tsumo_value()` の1か所にまとめ、押し引き判定・Push/Fold 用 ExpectedSelfTsumoValue の評価要否・debug log の threshold で共有します。threat の分類 (`ThreatKind`) そのものは変えず、Riichi threat のままリーチ者数だけで一向聴の policy を分けます。
+
 ### Combined threat の一向聴
 
 他家リーチと actionable OpenHandThreat が同時にいる Combined threat では、通常打牌後がちょうど一向聴なら攻撃価値にかかわらず `Fold` / `IishantenAgainstCombinedThreat` です。ExpectedSelfTsumoValue がどれだけ高くても、親リーチの有無・リーチ者数・`Caution` / `Danger` によらず押しません。選択打牌の hard-safe fact・スジ・ワンチャンス・exact ron-risk (`R/T`) による一向聴の押し例外もありません。
 
-`ValuableIishantenAgainstCombinedThreat` は reason enum に残っていますが、現在の policy では使いません。Riichi threat 単独と actionable OpenHandThreat 単独の一向聴、Combined threat のテンパイ (`StrongTenpaiAgainstCombinedThreat` / `SafeTenpaiAgainstCombinedThreat`) と二向聴以上の policy は変わりません。
+`ValuableIishantenAgainstCombinedThreat` は reason enum に残っていますが、現在の policy では使いません。Riichi threat と actionable OpenHandThreat 単独の一向聴、Combined threat のテンパイ (`StrongTenpaiAgainstCombinedThreat` / `SafeTenpaiAgainstCombinedThreat`) と二向聴以上の policy は変わりません。
 
 ## 一向聴の選択打牌 hard-safe 例外
 
@@ -208,7 +219,7 @@ actionable OpenHandThreat 単独 (他家リーチなし) の一向聴では、Ex
 
 ExpectedSelfTsumoValue の条件を先に評価するので、両方を満たす場合は `ValuableIishantenAgainstHighOpenHand` のままです。hard-safe の判定はテンパイの [選択打牌の hard-safe 例外](#選択打牌の-hard-safe-例外) と同じ fact をそのまま使い、手牌内の別の安全牌は根拠にしません。新しい threshold・倍率・受け入れ枚数・一向聴形の条件も加えません。
 
-Riichi threat の一向聴にはこの例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断します。Combined threat の一向聴は [一律 `Fold`](#combined-threat-の一向聴) です。二向聴は下の [二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) を参照してください。
+リーチ者1人の Riichi threat の一向聴にはこの例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断します。リーチ者2人以上の Riichi threat と Combined threat の一向聴は一律 `Fold` です ([複数リーチの一向聴](#複数リーチの一向聴) / [Combined threat の一向聴](#combined-threat-の一向聴))。二向聴は下の [二向聴の選択打牌 hard-safe 例外](#二向聴の選択打牌-hard-safe-例外) を参照してください。
 
 ## 二向聴の選択打牌 hard-safe 例外
 
