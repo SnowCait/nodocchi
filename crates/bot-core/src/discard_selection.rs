@@ -3293,7 +3293,8 @@ pub(crate) mod tests {
     use crate::context::TableStateFacts;
     use crate::decision_timing::ForwardMetricsPhaseDurations;
     use crate::push_pull::{
-        PushPullOffenseState, PushPullReason, decide_push_pull, push_pull_inputs_from_threat_facts,
+        PushPullDecision, PushPullMode, PushPullOffenseState, PushPullReason, decide_push_pull,
+        push_pull_inputs_from_threat_facts,
     };
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
     use crate::shanten_test_support::{
@@ -7952,6 +7953,58 @@ pub(crate) mod tests {
             decide_push_pull(&inputs).reason,
             PushPullReason::IishantenAgainstCombinedThreat
         );
+
+        let (_, reach_offense) = selected_offense(&context, &actions);
+        assert!(
+            reach_offense
+                .iishanten_push_pull_expected_self_tsumo_value()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn multiple_reaches_do_not_evaluate_the_push_pull_expected_self_tsumo_value() {
+        // 他家リーチ2人以上の一向聴は攻撃価値によらず降りるので、Push/Fold 用の値を評価し直さない。
+        let (context, actions) = reach_threat_iishanten_context(66, 12);
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        for extra_reachers in [&[2][..], &[2, 3][..]] {
+            let mut facts = player_threat_facts_from_context(&context);
+            for &seat in extra_reachers {
+                facts[seat].reached = true;
+            }
+            let inputs = push_pull_inputs_from_threat_facts(
+                &context,
+                facts,
+                selection.evaluation.as_ref(),
+                selection.iishanten_forward_metrics,
+                selection.tenpai_wait.as_ref(),
+                selection.tenpai_offense_value,
+                &actions,
+            );
+            assert_eq!(
+                usize::from(inputs.opponent_reach_count),
+                1 + extra_reachers.len()
+            );
+            assert!(!inputs.has_combined_threat());
+            let offense = inputs.offense.expect("攻撃評価がある");
+            assert_eq!(offense.min_shanten_after_discard, IISHANTEN_SHANTEN);
+            assert!(
+                offense
+                    .iishanten_selection_expected_self_tsumo_value()
+                    .is_some()
+            );
+            assert_eq!(
+                offense.iishanten_push_pull_expected_self_tsumo_value(),
+                None
+            );
+            assert_eq!(
+                decide_push_pull(&inputs),
+                PushPullDecision {
+                    mode: PushPullMode::Fold,
+                    reason: PushPullReason::IishantenAgainstReach,
+                }
+            );
+        }
 
         let (_, reach_offense) = selected_offense(&context, &actions);
         assert!(
