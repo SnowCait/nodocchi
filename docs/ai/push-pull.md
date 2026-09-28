@@ -78,7 +78,7 @@ Caution-only で通常打牌後がテンパイ (`min_shanten_after_discard <= 0`
 | Riichi threat | 現行 policy (Caution-only の例外なし) | 現行 policy |
 | Combined threat | 現行 policy (Caution-only の例外なし) | 一向聴は一律 `Fold`。二向聴以上は現行 policy |
 
-この例外は actionable OpenHandThreat 単独に限り、Riichi threat と Combined threat には適用しません。リーチ者と `Caution` の相手が同時にいる局面は Combined threat の現行 policy のままです。一向聴は [一向聴の攻撃価値](#一向聴の攻撃価値) の threshold だけが Caution-only で緩くなり、hard-safe 例外や reason は `Caution` / `Danger` 共通です。二向聴・三向聴以上は `Caution` だからという理由では押さず、下の表のとおり `Caution` / `Danger` 共通の policy を使います。
+この例外は actionable OpenHandThreat 単独に限り、Riichi threat と Combined threat には適用しません。リーチ者と `Caution` の相手が同時にいる局面は Combined threat として扱い、Caution-only の例外は適用しません。一向聴は [一向聴の攻撃価値](#一向聴の攻撃価値) の threshold だけが Caution-only で緩くなり、hard-safe 例外や reason は `Caution` / `Danger` 共通です。二向聴・三向聴以上は `Caution` だからという理由では押さず、下の表のとおり `Caution` / `Danger` 共通の policy を使います。
 
 ## offense state と mode
 
