@@ -47,7 +47,7 @@ pub(crate) fn player_ron_risk_evidence_for_action<'a>(
 /// 戻り値は `legal_actions` 中の Dahai と同じ順序で並ぶ。`CompressedHiddenHandStates` は1回だけ
 /// 構築し、同じ `TileType` も1回だけ評価する。exact model が unsupported、`T == 0`、または model
 /// invariant と矛盾する場合は `None` を返す。
-pub(super) fn dahai_ron_risk_evidence_for_player(
+pub(crate) fn dahai_ron_risk_evidence_for_player(
     player: usize,
     context: &GameContext,
     legal_actions: &[LegalAction],

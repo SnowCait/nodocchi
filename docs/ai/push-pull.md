@@ -193,6 +193,12 @@ ExpectedSelfTsumoValue はテンパイの残枚数加重合計とは別の数値
 
 二向聴以上ではこの値を使いません。
 
+### 単独リーチの一向聴の exact `R/T` 観測
+
+リーチ者1人の Riichi threat (Combined threat ではない) で通常打牌後がちょうど一向聴の局面では、将来の policy 検討のため、打牌後も一向聴を維持する候補の exact ron-risk (`R/T`) を production 経路で計算し `PushPullInputs::iishanten_reach_ron_risk` に保持します。選択打牌の `R` / `T`、一向聴候補中の最小 `R/T`、選択打牌の risk 順位などの compact summary で、詳細は [防御](defense.md#単独リーチ--1向聴の-exact-rt-観測-pushpull-用policy-未接続) を参照してください。
+
+**現時点では `decide_push_pull()` はこの値を読みません。** Push/Fold は上の ExpectedSelfTsumoValue threshold だけで決まり、`R/T` は実放銃確率ではない観測値として debug log に出すだけです。複数リーチ・Combined threat・actionable OpenHandThreat 単独・テンパイ・二向聴以上では計算しません。
+
 ### 複数リーチの一向聴
 
 他家リーチ者が2人以上いる Riichi threat では、通常打牌後がちょうど一向聴なら攻撃価値にかかわらず `Fold` / `IishantenAgainstReach` です。複数リーチはリーチ者1人より放銃リスクが明確に高いので、ExpectedSelfTsumoValue がどれだけ高くても、親リーチの有無・自分が親かどうかによらず押しません。選択打牌の hard-safe fact・スジ・ワンチャンス・exact ron-risk (`R/T`) による一向聴の押し例外もありません。

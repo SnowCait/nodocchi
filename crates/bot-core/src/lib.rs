@@ -12,6 +12,7 @@ pub mod discard_selection;
 mod fold_defense;
 pub mod forced_fold;
 pub mod iishanten_continuation_depth_comparison;
+pub mod iishanten_reach_ron_risk;
 pub mod iishanten_selection_depth_comparison;
 pub mod iishanten_selection_parallel_comparison;
 pub mod kan_decision;
@@ -144,6 +145,7 @@ pub use two_shanten_full_parallel_comparison::{
     select_with_two_shanten_full_parallelism, two_shanten_full_parallelism_is_available,
 };
 
+pub use iishanten_reach_ron_risk::{IishantenReachRonRisk, IishantenReachRonRiskSummary};
 pub use kan_decision::{
     KakanChankanDiagnostic, KakanChankanOpponent, KakanChankanSafety, KanCandidateDiagnostic,
     KanDecisionDiagnostic, KanDecisionReason, KanHandDiagnostic, KanKind,

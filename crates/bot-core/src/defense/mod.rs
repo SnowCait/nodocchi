@@ -44,8 +44,8 @@ pub use honor::{
 };
 pub(crate) use ron_risk::{
     DahaiRonRiskVector, combined_targets_dahai_actions_by_ron_risk,
-    open_hand_targets_dahai_actions_by_ron_risk, player_ron_risk_evidence_for_action,
-    reached_opponents_dahai_actions_by_ron_risk,
+    dahai_ron_risk_evidence_for_player, open_hand_targets_dahai_actions_by_ron_risk,
+    player_ron_risk_evidence_for_action, reached_opponents_dahai_actions_by_ron_risk,
 };
 pub use ron_risk::{
     PlayerRonRiskEvidence, compare_lexicographic_minimax_ron_risk, worst_first_ron_risk_evidence,

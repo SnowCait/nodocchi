@@ -33,6 +33,7 @@ use crate::tenpai_continuation::{
 use crate::tenpai_scoring::{NamedYakumanTsumo, evaluate_tenpai_tsumo, tenpai_tsumo_named_yakuman};
 #[cfg(test)]
 use bot_logic::best_discard_selection_index;
+use bot_logic::tile::TileTypeSet;
 use bot_logic::{
     CurrentTenpaiMetrics, DiscardCandidateDiagnostic, DiscardDecisionDiagnostic, DiscardEvaluation,
     DiscardFuritenDiagnostic, EffectiveAcceptanceTile, EffectiveShanten, FixedMeldCount,
@@ -102,6 +103,11 @@ pub(crate) struct DiscardActionSelection {
     /// 値は既存 [`decide_permanent_furiten_reach_timing`] の結論そのもので、この field のために
     /// timing policy を複製しない。
     pub tenpai_reach_timing: Option<ReachTimingDiagnostic>,
+    /// 選択に使った合法打牌候補のうち、打牌後がちょうど1向聴になる牌種。
+    ///
+    /// 既存の1手評価の `min_shanten_after_discard` をそのまま使い、選択には影響しない。単独リーチ
+    /// × 1向聴の exact ron-risk 観測が候補集合として使う。
+    pub iishanten_discards: TileTypeSet,
 }
 
 impl DiscardActionSelection {
@@ -120,6 +126,7 @@ impl DiscardActionSelection {
             tenpai_offense_value: None,
             damaten_value: None,
             tenpai_reach_timing: None,
+            iishanten_discards: TileTypeSet::new(),
         }
     }
 }
@@ -260,6 +267,15 @@ impl LegalDiscardEvaluations {
     /// なる。
     pub(crate) fn best_shanten_after_discard(&self) -> Option<i8> {
         best_shanten_after_discard(&self.evaluations)
+    }
+
+    /// 打牌後の向聴数がちょうど1向聴になる合法打牌候補の牌種。既存の1手評価の値をそのまま使う。
+    pub(crate) fn iishanten_discards(&self) -> TileTypeSet {
+        self.evaluations
+            .iter()
+            .filter(|evaluation| evaluation.min_shanten_after_discard() == 1)
+            .map(|evaluation| evaluation.discard)
+            .collect()
     }
 
     /// 打牌後の向聴数が最善向聴と等しい合法打牌候補の牌種。
@@ -1054,6 +1070,7 @@ fn selection_from_legal_evaluations(
         // 候補比較が使った timing をそのまま転記する。後段のリーチ判断は同じ候補について
         // 継続評価をやり直さない。
         tenpai_reach_timing: selected_tenpai.and_then(|value| value.continuation_timing),
+        iishanten_discards: legal.iishanten_discards(),
     }
 }
 
@@ -3337,6 +3354,7 @@ pub(crate) mod tests {
             tenpai_offense_value: None,
             damaten_value: None,
             tenpai_reach_timing: None,
+            iishanten_discards: TileTypeSet::new(),
         };
 
         assert_eq!(selection.action, None);
