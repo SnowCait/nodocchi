@@ -10,6 +10,7 @@ use crate::discard_selection::{
     select_discard_action_with_evaluation_instrumented,
 };
 use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
+use crate::iishanten_reach_ron_risk::iishanten_reach_ron_risk;
 use crate::kan_decision::{KanDecisionDiagnostic, evaluate_kan_decision};
 use crate::open_hand_defense::OpenHandDefenseCategory;
 use crate::push_pull::{
@@ -190,6 +191,9 @@ impl ShantenAgent {
         let phases = timing.finish();
         log_agent_decision(&decision);
         TimedAgentAction {
+            iishanten_reach_ron_risk: decision
+                .push_pull_inputs
+                .and_then(|inputs| inputs.iishanten_reach_ron_risk),
             action: decision.action,
             phases,
             two_shanten_self_tsumo_candidates,
@@ -324,7 +328,7 @@ impl ShantenAgent {
         let discard_selection = self.select_normal_discard(ctx, legal_actions, diagnostics, timing);
         timing.enter(DecisionPhase::PostDiscard);
 
-        let inputs = push_pull_inputs_from_threat_facts(
+        let mut inputs = push_pull_inputs_from_threat_facts(
             ctx,
             player_threats,
             discard_selection.evaluation.as_ref(),
@@ -333,8 +337,25 @@ impl ShantenAgent {
             discard_selection.tenpai_offense_value,
             legal_actions,
         );
+        // 単独リーチ × 1向聴の exact R/T は将来の Push/Fold policy のための観測値。対象局面では
+        // logging の有無にかかわらず評価するが、押し引きの結論と action 選択は読まない。
+        inputs.iishanten_reach_ron_risk = timing.measure_iishanten_reach_ron_risk(|| {
+            iishanten_reach_ron_risk(
+                ctx,
+                &inputs,
+                discard_selection.action.as_ref(),
+                discard_selection.iishanten_discards,
+                legal_actions,
+            )
+        });
         let push_pull = decide_push_pull(&inputs);
-        log_push_pull_decision(&push_pull, &inputs, discard_selection.action.as_ref(), None);
+        log_push_pull_decision(
+            &push_pull,
+            &inputs,
+            ctx,
+            discard_selection.action.as_ref(),
+            None,
+        );
 
         let normal_discard = discard_selection.action.clone();
         let mut reach = None;
@@ -476,7 +497,13 @@ impl ShantenAgent {
             return None;
         };
 
-        log_push_pull_decision(&push_pull, &inputs, None, Some(best_shanten_after_discard));
+        log_push_pull_decision(
+            &push_pull,
+            &inputs,
+            ctx,
+            None,
+            Some(best_shanten_after_discard),
+        );
 
         Some(EarlyFoldDecision {
             action,
@@ -5730,5 +5757,100 @@ mod tests {
         assert_eq!(ryukyoku.standard_shanten(), None);
         assert_eq!(ryukyoku.chiitoitsu_shanten(), None);
         assert_eq!(ryukyoku.kokushi_shanten(), None);
+    }
+
+    mod iishanten_reach_ron_risk_observation {
+        use super::*;
+        use crate::shanten_test_support::{
+            SINGLE_REACH_IISHANTEN_DRAWN, SINGLE_REACH_IISHANTEN_HAND, dahai_actions_for,
+            single_reach_iishanten_context, single_reach_iishanten_push_context,
+        };
+
+        // 単独リーチ × 1向聴の exact R/T は観測値で、押し引きの結論も最終 action も変えない。
+        #[test]
+        fn the_exact_summary_does_not_change_the_push_pull_decision_or_the_final_action() {
+            let mut agent = ShantenAgent;
+            let actions =
+                dahai_actions_for(&SINGLE_REACH_IISHANTEN_HAND, SINGLE_REACH_IISHANTEN_DRAWN);
+            let contexts = [
+                single_reach_iishanten_context(None),
+                single_reach_iishanten_context(Some(1)),
+                single_reach_iishanten_push_context(3),
+                single_reach_iishanten_push_context(1),
+            ];
+            for ctx in contexts {
+                let decision = agent.decide(&ctx, &actions);
+                let inputs = decision.push_pull_inputs.unwrap();
+                assert!(inputs.iishanten_reach_ron_risk.is_some());
+
+                let without = PushPullInputs {
+                    iishanten_reach_ron_risk: None,
+                    ..inputs
+                };
+                let push_pull = decide_push_pull(&without);
+                assert_eq!(Some(push_pull), decision.push_pull);
+
+                let selection = agent.select_normal_discard(
+                    &ctx,
+                    &actions,
+                    &mut DecisionDiagnostics::disabled(),
+                    &mut DecisionPhaseTimer::disabled(),
+                );
+                assert_eq!(selection.action, decision.normal_discard);
+                let (action, source) = agent
+                    .select_action_for_push_pull_mode(
+                        push_pull.mode,
+                        &ctx,
+                        &actions,
+                        &without,
+                        &selection,
+                        &mut None,
+                        &mut None,
+                        &mut DecisionDiagnostics::disabled(),
+                    )
+                    .unwrap();
+                assert_eq!(action, decision.action);
+                assert_eq!(source, decision.source);
+                assert_eq!(agent.act(&ctx, &actions), decision.action);
+
+                let timed = agent.act_with_phase_timing(&ctx, &actions);
+                assert_eq!(timed.action, decision.action);
+                assert_eq!(
+                    timed.iishanten_reach_ron_risk(),
+                    inputs.iishanten_reach_ron_risk
+                );
+                assert!(timed.phases.iishanten_reach_ron_risk > Duration::ZERO);
+                assert!(timed.phases.iishanten_reach_ron_risk <= timed.phases.post_discard);
+            }
+        }
+
+        #[test]
+        fn only_the_log_reads_the_exact_summary() {
+            let production = include_str!("shanten.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap();
+            let action_selection = production
+                .split("fn select_action_for_push_pull_mode(")
+                .nth(1)
+                .unwrap()
+                .split("fn select_kan(")
+                .next()
+                .unwrap();
+            assert!(!action_selection.contains("iishanten_reach_ron_risk"));
+
+            let push_pull = include_str!("../push_pull.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap();
+            let decide = push_pull
+                .split("pub fn decide_push_pull(")
+                .nth(1)
+                .unwrap()
+                .split("/// 押し引き判断1回につき DEBUG イベントを1件出す")
+                .next()
+                .unwrap();
+            assert!(!decide.contains("iishanten_reach_ron_risk"));
+        }
     }
 }

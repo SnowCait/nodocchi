@@ -7,6 +7,7 @@ use bot_logic::{
 
 use crate::action::LegalAction;
 use crate::call_decision::CallKind;
+use crate::iishanten_reach_ron_risk::IishantenReachRonRisk;
 
 /// 意思決定1回を phase 別に分けた実測時間。
 ///
@@ -23,6 +24,10 @@ pub struct DecisionPhaseDurations {
     pub normal_discard_phases: NormalDiscardPhaseDurations,
     /// 通常打牌選択より後の押し引き / Reach / 防御 / 最終 action 選択。
     pub post_discard: Duration,
+    /// `post_discard` の内訳のうち、単独リーチ × 1向聴の exact ron-risk 観測
+    /// ([`crate::IishantenReachRonRisk`])。対象判定だけで終わる局面ではほぼ 0 で、通常打牌選択を
+    /// 通らなかった局面では `Duration::ZERO` のままになる。
+    pub iishanten_reach_ron_risk: Duration,
     /// `early` の内訳のうち鳴き判断。合法な Chi / Pon が無い局面では、すべて
     /// `Duration::ZERO` のままになる。
     pub call: CallDecisionDurations,
@@ -198,9 +203,16 @@ pub struct TimedAgentAction {
     pub(crate) iishanten_forward_candidates: Vec<IishantenForwardCandidateDuration>,
     pub(crate) iishanten_stable_order_fallback_candidates: usize,
     pub(crate) call_candidates: Vec<CallCandidateDuration>,
+    pub(crate) iishanten_reach_ron_risk: Option<IishantenReachRonRisk>,
 }
 
 impl TimedAgentAction {
+    /// 同じ production execution で求めた単独リーチ × 1向聴の exact ron-risk 観測値。対象外の
+    /// request では `None`。評価時間は [`DecisionPhaseDurations::iishanten_reach_ron_risk`]。
+    pub fn iishanten_reach_ron_risk(&self) -> Option<IishantenReachRonRisk> {
+        self.iishanten_reach_ron_risk
+    }
+
     /// 同じ production execution で実際に評価した `ForwardTargets` の Progress と、
     /// gate 対象 pair の Full 追加評価の打牌・実測時間。Full 対象は同じ牌種が2回現れる。
     /// 対象外の request では空。内部の計測用 representation は公開しない。
@@ -480,6 +492,24 @@ impl DecisionPhaseTimer {
             state.durations.call = durations;
             self.breakdown.call_candidates = candidates;
         }
+    }
+
+    /// 単独リーチ × 1向聴の exact ron-risk 観測を計る。計測が無効なら `Instant` を取得せず
+    /// そのまま評価する。評価内容は計測の有無で変わらない。
+    pub(crate) fn measure_iishanten_reach_ron_risk<T>(
+        &mut self,
+        evaluate: impl FnOnce() -> T,
+    ) -> T {
+        if self.state.is_none() {
+            return evaluate();
+        }
+        let started = Instant::now();
+        let value = evaluate();
+        let elapsed = started.elapsed();
+        if let Some(state) = self.state.as_mut() {
+            state.durations.iishanten_reach_ron_risk += elapsed;
+        }
+        value
     }
 
     pub(crate) fn take_call_candidates(&mut self) -> Vec<CallCandidateDuration> {
@@ -1118,6 +1148,7 @@ mod tests {
             iishanten_forward_candidates,
             iishanten_stable_order_fallback_candidates: 0,
             call_candidates: Vec::new(),
+            iishanten_reach_ron_risk: None,
         };
         let phases = timed.phases;
         assert_eq!(phases, timed.phases);

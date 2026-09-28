@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use bot_core::{
     CallCandidateDuration, CallDecisionDurations, DecisionPhaseDurations,
-    ForwardMetricsPhaseDurations, IishantenForwardCandidateDuration, LegalAction,
-    NormalDiscardPhaseDurations, ShantenAgent,
+    ForwardMetricsPhaseDurations, IishantenForwardCandidateDuration, IishantenReachRonRisk,
+    LegalAction, NormalDiscardPhaseDurations, ShantenAgent,
 };
 use bot_logic::TileType;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,36 @@ pub struct RequestMeasurement {
     /// request では 0。評価時間は `phases.normal_discard_phases.iishanten_stable_order_fallback`。
     pub iishanten_stable_order_fallback_candidates: usize,
     pub call_candidates: Vec<CallCandidateDuration>,
+    /// 単独リーチ × 1向聴の exact ron-risk 観測の結果。評価時間は
+    /// `phases.iishanten_reach_ron_risk`。
+    pub iishanten_reach_ron_risk: IishantenReachRonRiskOutcome,
     pub selected_action: LegalAction,
+}
+
+/// 単独リーチ × 1向聴の exact ron-risk 観測が request でどうなったか。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IishantenReachRonRiskOutcome {
+    /// 対象局面ではなく、exact model を構築していない。
+    #[default]
+    NotTarget,
+    /// 対象局面で exact evaluation を行い、summary を得た。
+    ExactAvailable,
+    /// 対象局面で exact evaluation を試みたが unavailable だった。
+    ExactUnavailable,
+}
+
+impl IishantenReachRonRiskOutcome {
+    fn from_timed(ron_risk: Option<IishantenReachRonRisk>) -> Self {
+        match ron_risk {
+            None => Self::NotTarget,
+            Some(ron_risk) if ron_risk.is_exact_available() => Self::ExactAvailable,
+            Some(_) => Self::ExactUnavailable,
+        }
+    }
+
+    fn is_target(self) -> bool {
+        self != Self::NotTarget
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -73,6 +102,40 @@ pub struct StableOrderFallbackSummary {
     pub triggered: usize,
     pub candidates: usize,
     pub elapsed: Duration,
+}
+
+/// 単独リーチ × 1向聴の exact ron-risk 観測の run 全体の集計。
+///
+/// `targets` は exact evaluation を行った対象 request 数、`exact_available` はそのうち summary を
+/// 得た request 数。`elapsed` / `max` は対象 request の `phases.iishanten_reach_ron_risk` の合計と
+/// 最大で、対象外 request の対象判定だけの時間は含めない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IishantenReachRonRiskBenchmarkSummary {
+    pub targets: usize,
+    pub exact_available: usize,
+    pub elapsed: Duration,
+    pub max: Duration,
+}
+
+impl IishantenReachRonRiskBenchmarkSummary {
+    pub fn from_requests(requests: &[RequestMeasurement]) -> Self {
+        requests
+            .iter()
+            .filter(|measurement| measurement.iishanten_reach_ron_risk.is_target())
+            .fold(Self::default(), |summary, measurement| {
+                let elapsed = measurement.phases.iishanten_reach_ron_risk;
+                Self {
+                    targets: summary.targets + 1,
+                    exact_available: summary.exact_available
+                        + usize::from(
+                            measurement.iishanten_reach_ron_risk
+                                == IishantenReachRonRiskOutcome::ExactAvailable,
+                        ),
+                    elapsed: summary.elapsed + elapsed,
+                    max: summary.max.max(elapsed),
+                }
+            })
+    }
 }
 
 impl StableOrderFallbackSummary {
@@ -140,6 +203,9 @@ fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
         iishanten_stable_order_fallback_candidates: timed
             .iishanten_stable_order_fallback_candidates(),
         call_candidates: timed.call_candidates().to_vec(),
+        iishanten_reach_ron_risk: IishantenReachRonRiskOutcome::from_timed(
+            timed.iishanten_reach_ron_risk(),
+        ),
         selected_action: timed.action,
     }
 }
@@ -202,6 +268,7 @@ pub fn slowest_requests(run: &BenchmarkRun, count: usize) -> Vec<&RequestMeasure
 pub fn format_benchmark(run: &BenchmarkRun) -> String {
     let statistics = &run.statistics;
     let stable_order_fallback = StableOrderFallbackSummary::from_requests(&run.requests);
+    let ron_risk = IishantenReachRonRiskBenchmarkSummary::from_requests(&run.requests);
     let mut lines = vec![
         "RiichiLab production latency benchmark".to_string(),
         format!("  captures: {}", run.captures),
@@ -229,13 +296,29 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
             "  iishanten stable fallback elapsed: {}",
             format_duration(stable_order_fallback.elapsed)
         ),
+        format!(
+            "  single-reach iishanten exact ron-risk targets: {}",
+            ron_risk.targets
+        ),
+        format!(
+            "  single-reach iishanten exact ron-risk available: {}",
+            ron_risk.exact_available
+        ),
+        format!(
+            "  single-reach iishanten exact ron-risk elapsed: {}",
+            format_duration(ron_risk.elapsed)
+        ),
+        format!(
+            "  single-reach iishanten exact ron-risk max: {}",
+            format_duration(ron_risk.max)
+        ),
         String::new(),
         "Slowest requests".to_string(),
     ];
 
     for measurement in slowest_requests(run, SLOWEST_REQUEST_COUNT) {
         lines.push(format!(
-            "  {}  {}  request_id={}  early={} ({})  normal_discard={} ({})  post_discard={}  selected={}",
+            "  {}  {}  request_id={}  early={} ({})  normal_discard={} ({})  post_discard={} (iishanten_reach_ron_risk={})  selected={}",
             format_duration(measurement.elapsed),
             measurement.capture,
             measurement.request_id,
@@ -249,6 +332,7 @@ pub fn format_benchmark(run: &BenchmarkRun) -> String {
                 measurement.iishanten_stable_order_fallback_candidates,
             ),
             format_duration(measurement.phases.post_discard),
+            format_duration(measurement.phases.iishanten_reach_ron_risk),
             action_label(&measurement.selected_action),
         ));
     }
@@ -395,6 +479,14 @@ pub struct BenchmarkSummaryJson {
     pub iishanten_stable_fallback_candidate_count: usize,
     #[serde(default)]
     pub iishanten_stable_fallback_ns: u64,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_targets: usize,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_exact_available: usize,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_ns: u64,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_max_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +532,12 @@ pub struct BenchmarkRequestJson {
     pub iishanten_stable_fallback_candidate_count: usize,
     pub normal_discard_finalize_ns: u64,
     pub post_discard_ns: u64,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_ns: u64,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_target: bool,
+    #[serde(default)]
+    pub iishanten_reach_ron_risk_exact_available: bool,
     pub selected: String,
 }
 
@@ -478,6 +576,7 @@ impl BenchmarkJson {
     pub fn from_run(run: &BenchmarkRun) -> Self {
         let statistics = &run.statistics;
         let stable_order_fallback = StableOrderFallbackSummary::from_requests(&run.requests);
+        let ron_risk = IishantenReachRonRiskBenchmarkSummary::from_requests(&run.requests);
         Self {
             summary: BenchmarkSummaryJson {
                 captures: run.captures,
@@ -496,6 +595,10 @@ impl BenchmarkJson {
                 iishanten_stable_fallback_triggered: stable_order_fallback.triggered,
                 iishanten_stable_fallback_candidate_count: stable_order_fallback.candidates,
                 iishanten_stable_fallback_ns: nanos(stable_order_fallback.elapsed),
+                iishanten_reach_ron_risk_targets: ron_risk.targets,
+                iishanten_reach_ron_risk_exact_available: ron_risk.exact_available,
+                iishanten_reach_ron_risk_ns: nanos(ron_risk.elapsed),
+                iishanten_reach_ron_risk_max_ns: nanos(ron_risk.max),
             },
             requests: run
                 .requests
@@ -610,6 +713,12 @@ impl BenchmarkJson {
                         measurement.phases.normal_discard_phases.selection_finalize,
                     ),
                     post_discard_ns: nanos(measurement.phases.post_discard),
+                    iishanten_reach_ron_risk_ns: nanos(measurement.phases.iishanten_reach_ron_risk),
+                    iishanten_reach_ron_risk_target: measurement
+                        .iishanten_reach_ron_risk
+                        .is_target(),
+                    iishanten_reach_ron_risk_exact_available: measurement.iishanten_reach_ron_risk
+                        == IishantenReachRonRiskOutcome::ExactAvailable,
                     selected: action_label(&measurement.selected_action),
                 })
                 .collect(),
@@ -765,6 +874,7 @@ mod tests {
             normal_discard: Duration::from_millis(normal_discard),
             normal_discard_phases: NormalDiscardPhaseDurations::default(),
             post_discard: Duration::from_millis(post_discard),
+            iishanten_reach_ron_risk: Duration::ZERO,
             call: CallDecisionDurations::default(),
         }
     }
@@ -921,6 +1031,7 @@ mod tests {
             iishanten_forward_candidates: Vec::new(),
             iishanten_stable_order_fallback_candidates: 0,
             call_candidates: Vec::new(),
+            iishanten_reach_ron_risk: IishantenReachRonRiskOutcome::NotTarget,
             selected_action: LegalAction::Dahai {
                 tile: TileId::new(0).unwrap(),
             },
@@ -1180,7 +1291,7 @@ mod tests {
         let slowest = report.split("\n\nSlowest requests\n").nth(1).unwrap();
         assert_eq!(
             slowest,
-            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms stable_fallback=0.000 ms candidates=0 finalize=20.000 ms)  post_discard=69.000 ms  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms stable_fallback=0.000 ms candidates=0 finalize=0.000 ms)  post_discard=0.000 ms  selected=1m"
+            "  2470.000 ms  game-002.jsonl  request_id=2  early=1.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=2400.000 ms (base=30.000 ms forward=2000.000 ms [lookahead_search=1950.000 ms weighted_aggregation=30.000 ms self_tsumo_continuation=20.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=350.000 ms candidates=2 [5m=180.000 ms 8m=160.000 ms] three_shanten_self_tsumo=0.000 ms stable_fallback=0.000 ms candidates=0 finalize=20.000 ms)  post_discard=69.000 ms (iishanten_reach_ron_risk=0.000 ms)  selected=1m\n  10.000 ms  game-001.jsonl  request_id=1  early=0.000 ms (call=0.000 ms call_candidates=0.000 ms count=0 [] call_pass=0.000 ms call_two_shanten_pass=0.000 ms call_three_shanten_pass=0.000 ms call_remaining=0.000 ms)  normal_discard=0.000 ms (base=0.000 ms forward=0.000 ms [lookahead_search=0.000 ms weighted_aggregation=0.000 ms self_tsumo_continuation=0.000 ms] forward_candidates=0 [] two_shanten_self_tsumo=0.000 ms candidates=0 [] three_shanten_self_tsumo=0.000 ms stable_fallback=0.000 ms candidates=0 finalize=0.000 ms)  post_discard=0.000 ms (iishanten_reach_ron_risk=0.000 ms)  selected=1m"
         );
     }
 
@@ -1305,6 +1416,72 @@ mod tests {
             .iishanten_stable_order_fallback = Duration::from_millis(elapsed);
         measurement.iishanten_stable_order_fallback_candidates = candidates;
         measurement
+    }
+
+    fn with_iishanten_reach_ron_risk(
+        mut measurement: RequestMeasurement,
+        elapsed: u64,
+        outcome: IishantenReachRonRiskOutcome,
+    ) -> RequestMeasurement {
+        measurement.phases.iishanten_reach_ron_risk = Duration::from_millis(elapsed);
+        measurement.iishanten_reach_ron_risk = outcome;
+        measurement
+    }
+
+    #[test]
+    fn report_and_json_show_the_single_reach_iishanten_exact_ron_risk() {
+        let run = synthetic_run(vec![
+            measurement("game-001.jsonl", 1, 10),
+            with_iishanten_reach_ron_risk(
+                measurement("game-001.jsonl", 2, 300),
+                12,
+                IishantenReachRonRiskOutcome::ExactAvailable,
+            ),
+            with_iishanten_reach_ron_risk(
+                measurement("game-002.jsonl", 3, 200),
+                3,
+                IishantenReachRonRiskOutcome::ExactUnavailable,
+            ),
+        ]);
+        let report = format_benchmark(&run);
+        let json = BenchmarkJson::from_run(&run);
+
+        assert_eq!(
+            IishantenReachRonRiskBenchmarkSummary::from_requests(&run.requests),
+            IishantenReachRonRiskBenchmarkSummary {
+                targets: 2,
+                exact_available: 1,
+                elapsed: Duration::from_millis(15),
+                max: Duration::from_millis(12),
+            }
+        );
+        assert!(
+            report.contains("  single-reach iishanten exact ron-risk targets: 2\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("  single-reach iishanten exact ron-risk available: 1\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("  single-reach iishanten exact ron-risk elapsed: 15.000 ms\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("(iishanten_reach_ron_risk=12.000 ms)"),
+            "{report}"
+        );
+        assert_eq!(json.summary.iishanten_reach_ron_risk_targets, 2);
+        assert_eq!(json.summary.iishanten_reach_ron_risk_exact_available, 1);
+        assert_eq!(json.summary.iishanten_reach_ron_risk_ns, 15_000_000);
+        assert_eq!(json.summary.iishanten_reach_ron_risk_max_ns, 12_000_000);
+        assert!(!json.requests[0].iishanten_reach_ron_risk_target);
+        assert!(json.requests[1].iishanten_reach_ron_risk_exact_available);
+        assert!(json.requests[2].iishanten_reach_ron_risk_target);
+        assert!(!json.requests[2].iishanten_reach_ron_risk_exact_available);
+
+        let text = serde_json::to_string(&json).unwrap();
+        assert_eq!(serde_json::from_str::<BenchmarkJson>(&text).unwrap(), json);
     }
 
     #[test]
@@ -1536,6 +1713,9 @@ mod tests {
         assert!(json.requests[0].call_candidates.is_empty());
         assert_eq!(json.requests[0].iishanten_forward_candidate_count, 0);
         assert!(json.requests[0].iishanten_forward_candidates.is_empty());
+        assert_eq!(json.summary.iishanten_reach_ron_risk_targets, 0);
+        assert_eq!(json.requests[0].iishanten_reach_ron_risk_ns, 0);
+        assert!(!json.requests[0].iishanten_reach_ron_risk_target);
     }
 
     #[test]
@@ -1647,6 +1827,9 @@ mod tests {
                     iishanten_stable_fallback_candidate_count: 0,
                     normal_discard_finalize_ns: 0,
                     post_discard_ns: 0,
+                    iishanten_reach_ron_risk_ns: 0,
+                    iishanten_reach_ron_risk_target: false,
+                    iishanten_reach_ron_risk_exact_available: false,
                     selected: "1m".to_string(),
                 },
                 BenchmarkRequestJson {
@@ -1688,6 +1871,9 @@ mod tests {
                     iishanten_stable_fallback_candidate_count: 0,
                     normal_discard_finalize_ns: 20_000_000,
                     post_discard_ns: 69_000_000,
+                    iishanten_reach_ron_risk_ns: 0,
+                    iishanten_reach_ron_risk_target: false,
+                    iishanten_reach_ron_risk_exact_available: false,
                     selected: "1m".to_string(),
                 },
             ]

@@ -136,6 +136,80 @@ exact path を使うのは、**全リーチ者**の exact model が利用可能�
 
 になった場合は、推測で補完せず、partial exact と partial legacy を混在させもせず、**局面全体**を [legacy safety fallback](#legacy-safety-fallback) へ落とします。通常のリーチ局面では exact path を使います。
 
+### 単独リーチ × 1向聴の exact `R/T` 観測 (Push/Pull 用、policy 未接続)
+
+将来、単独リーチに対する1向聴の Push/Fold policy (exact `R/T` が低い牌だけ押す、1向聴候補の中で相対的に安全な牌だけ押す、など) を検討するため、実戦で exact `R/T` と実放銃の関係を収集します。**現時点では観測だけで、`R/T` を Push/Fold 判断には使いません。**
+
+#### 対象
+
+次をすべて満たす局面だけで評価します。現在も [`ValuableIishantenAgainstReach` / `IishantenAgainstReach`](push-pull.md#一向聴の攻撃価値) の対象になる単独リーチ1向聴局面です。
+
+- 他家リーチ者がちょうど1人
+- actionable OpenHandThreat が同時にいない (Combined threat ではない)
+- production の通常打牌選択後がちょうど1向聴
+
+複数リーチ、Combined threat、OpenHandThreat 単独、テンパイ、2向聴以上、明確な threat がない局面では追加評価しません。通常打牌選択を通らない [確定 Fold](push-pull.md#通常打牌選択より前の確定-fold) と、鳴き後の押し引き入力も対象外です。
+
+対象局面では logging の有無にかかわらず production 経路 (`ShantenAgent` の通常打牌選択の直後) で計算し、`PushPullInputs::iishanten_reach_ron_risk` に保持します。
+
+#### exact model は Reach Defense と共有する
+
+新しい risk model は作りません。Reach Defense と同じ `CompressedHiddenHandStates` / `RonRiskEvidence` を、同じ `dahai_ron_risk_evidence_for_player()` → `collect_dahai_ron_risk_evidence()` の経路で使います。`R = ron_capable_weight`、`T = tenpai_weight` で、意味は [`R/T` が表すもの](#rt-が表すもの) と同じく**実放銃確率ではない structural risk evidence** です。
+
+評価する候補は選択打牌1枚だけではなく、production の合法打牌候補のうち**打牌後もちょうど1向聴を維持する候補すべて**です。リーチ者1人につき `CompressedHiddenHandStates` を1回だけ構築し、共通の `T` を再利用して各候補の `R` を求めます。候補の単位は牌種で、赤5 / 黒5 は同じ evidence を共有して1候補に数えます。1向聴候補の判定は通常打牌選択が評価した1手評価 (`min_shanten_after_discard`) をそのまま使い、向聴数を計算し直しません。
+
+#### 1向聴候補間の相対 risk
+
+選択打牌の絶対値だけでなく、1向聴候補の中でどれだけ安全な打牌を選んだかも観測します。Push/Pull へ渡すのは候補全体の `Vec` ではなく compact な summary です。
+
+| field | 内容 |
+| --- | --- |
+| `reacher` | 評価したリーチ者の席 |
+| `selected_discard` | production が選んだ通常打牌の牌種 |
+| `exact` | exact 評価できた場合の summary。unavailable なら `None` |
+| `exact.selected` | 選択打牌の `RonRiskEvidence` (`R` / `T`) |
+| `exact.minimum` | 1向聴候補の中で `R/T` が最小の `RonRiskEvidence` |
+| `exact.selected_rank` | 選択打牌の risk 順位 (1 始まり) |
+| `exact.candidate_count` | exact 評価できた1向聴候補の牌種数 (選択打牌を含む) |
+| `exact.selected_is_minimum` | 選択打牌が最小 `R/T` と同率か |
+
+比率の比較はすべて `RonRiskEvidence::compare_ratio()` の cross multiplication で行い、浮動小数点を production truth にしません。順位は「`R/T` が選択打牌より厳密に小さい候補の数 + 1」で、同率の候補は同じ順位です。合法 action の並び順などの安定順序を risk 差として扱いません。
+
+#### unavailable
+
+exact model が unsupported、`T == 0`、`R > T` などの model invariant との矛盾、exact ratio comparison 不能のいずれかなら `exact` は `None` (unavailable) です。スジ・壁・字牌の見え枚数などから `R/T` を補完しません。対象局面であることと unavailable であることは区別して残ります。
+
+#### 判断には使わない
+
+summary は観測値だけで、次は変わりません。exact `R/T` を計算した結果によって最終 action が変わることはありません。
+
+- `decide_push_pull()` の結論 (mode / reason)
+- 1向聴の ExpectedSelfTsumoValue threshold (子リーチ 1,000 点 / 親リーチ 1,500 点)
+- 通常打牌 selection
+- Reach / Damaten、Defense、Call
+- Combined threat と複数リーチに対する1向聴の一律 `Fold`
+
+#### integer evidence とログ
+
+source of truth は整数の `R` / `T` で、百分率は表示専用です。`RUST_LOG=bot_core::push_pull=debug` の既存 `push-pull decision` ログに、次の field を追加しています。対象外の局面ではすべて `None` です。
+
+| field | 内容 |
+| --- | --- |
+| `iishanten_reach_ron_risk_reacher` | リーチ者の席 |
+| `iishanten_reach_ron_risk_exact_available` | exact 評価できたか |
+| `iishanten_reach_ron_risk_selected_ron_capable_weight` / `..._selected_tenpai_weight` | 選択打牌の `R` / `T` |
+| `iishanten_reach_ron_risk_selected_percent` | 選択打牌の `R/T` (表示専用) |
+| `iishanten_reach_ron_risk_minimum_ron_capable_weight` / `..._minimum_tenpai_weight` / `..._minimum_percent` | 最小 `R/T` の `R` / `T` / 表示 |
+| `iishanten_reach_ron_risk_selected_rank` | 選択打牌の risk 順位 |
+| `iishanten_reach_ron_risk_candidate_count` | exact 評価できた1向聴候補数 |
+| `iishanten_reach_ron_risk_selected_is_minimum` | 選択打牌が最小 `R/T` と同率か |
+| `iishanten_reach_ron_risk_selected_suji_safety_rank` | リーチ者に対する選択打牌の `SujiSafetyRank` (字牌は `None`) |
+| `iishanten_reach_ron_risk_selected_wall_rank` | 選択打牌の `WallRank` |
+
+selected discard (`normal_discard`)・Push/Pull の `mode` / `reason`・ExpectedSelfTsumoValue (`offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku`)・現行 threshold (`offense_iishanten_push_expected_self_tsumo_min`)・`dealer_reacher`・`self_dealer` は同じログの既存 field です。`SujiSafetyRank` / `WallRank` は集計用にログのときだけ求め、判断にも `R/T` の補完にも使いません。
+
+追加 latency は [production latency 計測](../bot-scenario.md#riichilab-capture-の-production-latency-計測) の `iishanten_reach_ron_risk` で確認できます。
+
 ### 単独リーチへの structural expected deal-in loss (diagnostics only)
 
 `R/T` は「その牌でロンされ得る hidden-hand state の割合」だけを表し、**ロンされた場合にいくら払うか**を含みません。同じ `R/T` でも、ロン可能 state の打点分布が違えば失う点数の期待値は違います。そこで `R/T` と同じ state space・同じ weight の上で、打点まで含めた期待放銃損失を求めます。

@@ -1,11 +1,13 @@
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 use crate::combined_defense::{is_safe_against_all_threats, threat_defense_targets};
 use crate::context::GameContext;
+use crate::defense::{RonRiskEvidence, suji_safety_rank_for, wall_rank};
 use crate::discard_selection::{
     LegalDiscardEvaluations, concealed_tiles_after_discard,
     push_pull_iishanten_expected_self_tsumo_value, select_best_normal_discard_evaluation,
     selected_discard_tenpai_wait_availability, selected_iishanten_forward_metrics_from_context,
 };
+use crate::iishanten_reach_ron_risk::IishantenReachRonRisk;
 use crate::offense_value::{TenpaiOffenseValue, evaluate_tenpai_offense_value};
 use crate::open_hand_threat::{
     OpenHandThreatAssessment, classify_open_hand_threats, has_actionable_open_hand_threat,
@@ -455,6 +457,13 @@ pub struct PushPullInputs {
     /// 手牌内の別の safe tile はこの fact に含めない。threat target がいない場合や通常打牌評価が
     /// ない場合は `false`。
     pub selected_normal_discard_hard_safe_for_all_threat_targets: bool,
+    /// 他家リーチ者がちょうど1人 (Combined threat ではない) で通常打牌後がちょうど1向聴の局面の、
+    /// 1向聴候補の exact ron-risk summary。対象外の局面では `None`。
+    ///
+    /// 将来の1向聴 Push/Fold policy のための観測値で、[`decide_push_pull`] は読まない。値を
+    /// 埋めるのは `ShantenAgent` の通常打牌選択後の経路だけで、鳴き後の押し引きなど他の入口では
+    /// 常に `None`。
+    pub iishanten_reach_ron_risk: Option<IishantenReachRonRisk>,
 }
 
 impl PushPullInputs {
@@ -482,6 +491,13 @@ impl PushPullInputs {
     /// `Danger` が1人でもいれば `false`。`Present` / `None` の相手は判定に影響しない。
     pub fn has_only_caution_open_hand_threats(&self) -> bool {
         has_only_caution_open_hand_threats(&self.open_hand_threats)
+    }
+
+    /// 他家リーチ者がちょうど1人で、actionable OpenHandThreat が同時にいない Riichi threat か。
+    ///
+    /// threat の分類は [`threat_kind`] と共有し、Combined threat と複数リーチは含まない。
+    pub fn is_single_reach_threat(&self) -> bool {
+        threat_kind(self) == Some(ThreatKind::Reach) && self.opponent_reach_count == 1
     }
 }
 
@@ -797,6 +813,7 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
         player_threats,
         open_hand_threats,
         selected_normal_discard_hard_safe_for_all_threat_targets,
+        iishanten_reach_ron_risk: None,
     }
 }
 
@@ -1266,9 +1283,15 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
 /// [`two_or_more_shanten_fold`] で Fold を確定した場合にその根拠として使った合法打牌候補の
 /// 最善向聴。通常経路では `None` で、その局面では `offense` 側が向聴数を持つ。判断が実際に
 /// 使った値だけを記録し、ログのために攻撃評価を追加で構築しない。
+///
+/// `iishanten_reach_ron_risk_*` は単独リーチ × 1向聴の局面で production が求めた exact `R/T`
+/// の観測値 ([`PushPullInputs::iishanten_reach_ron_risk`]) で、対象外の局面では `None`。整数の
+/// `R` / `T` が source of truth で、`*_percent` は表示専用。選択打牌の `SujiSafetyRank` /
+/// `WallRank` は集計用にログのときだけ求め、判断にも exact 値の補完にも使わない。
 pub(crate) fn log_push_pull_decision(
     decision: &PushPullDecision,
     inputs: &PushPullInputs,
+    context: &GameContext,
     normal_discard: Option<&LegalAction>,
     early_fold_best_shanten_after_discard: Option<i8>,
 ) {
@@ -1280,6 +1303,8 @@ pub(crate) fn log_push_pull_decision(
         LegalAction::Dahai { tile } => tile.to_mjai_string(),
         other => format!("{other:?}"),
     });
+    let ron_risk = inputs.iishanten_reach_ron_risk;
+    let ron_risk_exact = ron_risk.and_then(|ron_risk| ron_risk.exact);
 
     tracing::debug!(
         target: LOG_TARGET,
@@ -1317,8 +1342,29 @@ pub(crate) fn log_push_pull_decision(
         offense_iishanten_push_expected_self_tsumo_min = ?iishanten_push_expected_self_tsumo_min(inputs),
         early_fold_best_shanten_after_discard = ?early_fold_best_shanten_after_discard,
         normal_discard = ?normal_discard,
+        iishanten_reach_ron_risk_reacher = ?ron_risk.map(|ron_risk| ron_risk.reacher),
+        iishanten_reach_ron_risk_exact_available = ?ron_risk.map(|ron_risk| ron_risk.is_exact_available()),
+        iishanten_reach_ron_risk_selected_ron_capable_weight = ?ron_risk_exact.map(|exact| exact.selected.ron_capable_weight),
+        iishanten_reach_ron_risk_selected_tenpai_weight = ?ron_risk_exact.map(|exact| exact.selected.tenpai_weight),
+        iishanten_reach_ron_risk_selected_percent = ?ron_risk_exact.map(|exact| ron_risk_percent(exact.selected)),
+        iishanten_reach_ron_risk_minimum_ron_capable_weight = ?ron_risk_exact.map(|exact| exact.minimum.ron_capable_weight),
+        iishanten_reach_ron_risk_minimum_tenpai_weight = ?ron_risk_exact.map(|exact| exact.minimum.tenpai_weight),
+        iishanten_reach_ron_risk_minimum_percent = ?ron_risk_exact.map(|exact| ron_risk_percent(exact.minimum)),
+        iishanten_reach_ron_risk_selected_rank = ?ron_risk_exact.map(|exact| exact.selected_rank),
+        iishanten_reach_ron_risk_candidate_count = ?ron_risk_exact.map(|exact| exact.candidate_count),
+        iishanten_reach_ron_risk_selected_is_minimum = ?ron_risk_exact.map(|exact| exact.selected_is_minimum),
+        iishanten_reach_ron_risk_selected_suji_safety_rank = ?ron_risk.and_then(|ron_risk| suji_safety_rank_for(ron_risk.selected_discard, ron_risk.reacher, context)),
+        iishanten_reach_ron_risk_selected_wall_rank = ?ron_risk.map(|ron_risk| wall_rank(ron_risk.selected_discard, context)),
         "push-pull decision",
     );
+}
+
+// 表示専用の百分率。比較・集計には整数の R / T を使う。
+fn ron_risk_percent(evidence: RonRiskEvidence) -> String {
+    format!(
+        "{:.4}%",
+        evidence.ron_capable_weight as f64 * 100.0 / evidence.tenpai_weight as f64
+    )
 }
 
 #[cfg(test)]
@@ -1512,6 +1558,7 @@ mod tests {
             player_threats,
             open_hand_threats: classify_open_hand_threats(&player_threats),
             selected_normal_discard_hard_safe_for_all_threat_targets: false,
+            iishanten_reach_ron_risk: None,
         }
     }
 

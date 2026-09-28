@@ -641,3 +641,112 @@ pub(crate) fn kakan_suited_context() -> GameContext {
         [vec![], vec![8], vec![104], vec![76]],
     )
 }
+
+/// 単独リーチ × 1向聴の exact ron-risk 観測の局面。
+///
+/// 1m2m3m4m 0m5m 7m8m9m 1p2p3p 5s + W。1m / 4m / 赤5m / 黒5m / 5s / W のどれを切っても1向聴の
+/// まま。リーチ者は player 1 で、その河は 8s / 中 / 1s。見え牌は手牌・河・副露をすべて含む。
+pub(crate) const SINGLE_REACH_IISHANTEN_HAND: [u8; 13] =
+    [0, 4, 8, 12, 16, 17, 24, 28, 32, 36, 40, 44, 89];
+pub(crate) const SINGLE_REACH_IISHANTEN_DRAWN: u8 = 116;
+const SINGLE_REACH_IISHANTEN_REACHER_DISCARDS: [u8; 3] = [100, 132, 72];
+
+pub(crate) fn dahai_actions_for(hand: &[u8], drawn: u8) -> Vec<LegalAction> {
+    hand.iter()
+        .chain([&drawn])
+        .map(|&value| dahai(value))
+        .collect()
+}
+
+pub(crate) fn single_reach_iishanten_fixture(
+    hand: &[u8],
+    drawn: u8,
+    oya: Option<u8>,
+    reached: [bool; 4],
+    melds: [Vec<Meld>; 4],
+) -> GameContext {
+    single_reach_iishanten_fixture_with_table(hand, drawn, oya, reached, melds, &[], None, None)
+}
+
+/// ドラ表示牌と場風・自風も指定する [`single_reach_iishanten_fixture`]。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn single_reach_iishanten_fixture_with_table(
+    hand: &[u8],
+    drawn: u8,
+    oya: Option<u8>,
+    reached: [bool; 4],
+    melds: [Vec<Meld>; 4],
+    dora_indicators: &[u8],
+    round_wind: Option<TileType>,
+    seat_wind: Option<TileType>,
+) -> GameContext {
+    let discards = [
+        vec![],
+        SINGLE_REACH_IISHANTEN_REACHER_DISCARDS
+            .iter()
+            .map(|&value| tile(value))
+            .collect(),
+        vec![tile(104)],
+        vec![tile(128)],
+    ];
+    let visible = hand
+        .iter()
+        .chain([&drawn])
+        .map(|&value| tile(value))
+        .chain(discards.iter().flatten().copied())
+        .chain(
+            melds
+                .iter()
+                .flatten()
+                .flat_map(|meld| meld.tiles().to_vec()),
+        )
+        .chain(dora_indicators.iter().map(|&value| tile(value)))
+        .collect();
+    GameContext::from_parts_with_melds(
+        Some(tile(drawn)),
+        hand.iter().map(|&value| tile(value)).collect(),
+        dora_indicators.iter().map(|&value| tile(value)).collect(),
+        round_wind,
+        seat_wind,
+        visible,
+        Some(0),
+        oya,
+        discards,
+        reached,
+        melds,
+    )
+    .with_table_state_facts(TableStateFacts {
+        remaining_tiles: Some(60),
+        ..Default::default()
+    })
+}
+
+pub(crate) fn single_reach_iishanten_context(oya: Option<u8>) -> GameContext {
+    single_reach_iishanten_fixture(
+        &SINGLE_REACH_IISHANTEN_HAND,
+        SINGLE_REACH_IISHANTEN_DRAWN,
+        oya,
+        [false, true, false, false],
+        Default::default(),
+    )
+}
+
+/// 場風・自風を既知にした [`single_reach_iishanten_context`]。ExpectedSelfTsumoValue を確定でき、
+/// 子リーチ (`oya == 3`) でも親リーチ (`oya == 1`) でも `ValuableIishantenAgainstReach` で押す。
+pub(crate) fn single_reach_iishanten_push_context(oya: u8) -> GameContext {
+    let seat_wind = match oya {
+        1 => "N",
+        3 => "S",
+        _ => panic!("player 0 の自風を決める親は 1 か 3"),
+    };
+    single_reach_iishanten_fixture_with_table(
+        &SINGLE_REACH_IISHANTEN_HAND,
+        SINGLE_REACH_IISHANTEN_DRAWN,
+        Some(oya),
+        [false, true, false, false],
+        Default::default(),
+        &[],
+        TileType::from_mjai_type_str("E").ok(),
+        TileType::from_mjai_type_str(seat_wind).ok(),
+    )
+}
