@@ -1,23 +1,31 @@
-//! `現在2向聴 → Chi / Pon → 打牌 → 2向聴のまま` の Call / Pass を、production policy へ接続せずに
-//! 観測する。
+//! `現在2向聴 → Chi / Pon → 打牌 → 2向聴のまま` の Call / Pass を、production の判断とは別に観測
+//! する。
 //!
-//! production の鳴き判断はこの候補を [`CallDecisionReason::PostCallNotIishanten`] で止め、Call /
-//! Pass を比較しない。この module はその候補について、同じ Call を2つの scope で独立に評価し、
-//! Pass と比べた結論・選ぶ鳴き後打牌・実行コストを並べるだけで、production の判断は一切変えない。
-//! production path はこの module を通らず、専用の observation 入口を呼ばない限り追加の探索も
-//! 走らない。
+//! production の鳴き判断はこの候補を Progress-only の Call / Pass 比較・`RequireAllLiveWaits`・
+//! 鳴き後 Push/Pull で判断する ([`crate::call_decision`])。この module はその候補について、同じ
+//! Call を2つの scope で独立に評価し、Pass と比べた結論・選ぶ鳴き後打牌・実行コストを並べるだけで、
+//! production の判断は一切変えない。production path はこの module を通らず、専用の observation
+//! 入口を呼ばない限り追加の探索も走らない。
+//!
+//! | 観測項目 | production との関係 |
+//! | --- | --- |
+//! | Progress scope | production の Call / Pass 比較と同じ尺度 |
+//! | Full scope | observation-only。production では評価しない |
+//! | `RequireAllLiveWaits` | production policy と同じ strict 判定 |
+//! | `AllowPartialWaits` | observation-only の counterfactual |
 //!
 //! # 対象候補
 //!
-//! production と同じ鳴き判断を1回行い、
+//! production と同じ鳴き判断を1回行い、その candidate preparation が
 //!
 //! ```text
 //! current_shanten = 2
 //! post_call_min_shanten = 2
-//! reason = PostCallNotIishanten
+//! Chi / Pon
 //! ```
 //!
-//! になった Chi / Pon 候補だけを対象にする。鳴き後の手牌・副露・1手評価・喰い替え禁止牌・副露数・
+//! と判定した候補を対象にする。production の理由は読まないので、production で Call になった候補も
+//! Pass になった候補も対象に残る。鳴き後の手牌・副露・1手評価・喰い替え禁止牌・副露数・
 //! 最小向聴数は、その判断の candidate preparation が組み立てたものをそのまま使う。物理牌
 //! semantics まで同じ鳴き後 state を作る候補 (`Reused`) は production と同じく先行候補の結果を
 //! 複製し、評価し直さない。赤5 / 黒5 が違う候補は別の state として別々に評価する。
@@ -39,7 +47,7 @@
 //! 発火しない局面では選ばれた打牌の Full 値は存在せず unknown になる。0 などで補完しない。
 //!
 //! Progress と Full の値は混ぜない。比較は scope ごとに独立に行い、同値は既存 Call / Pass policy
-//! と同じく Pass 側に倒す。
+//! と同じく Pass 側に倒す。production は Progress だけを使い、Full は observation-only のまま。
 //!
 //! # 計測条件
 //!
@@ -49,10 +57,11 @@
 //! 始まり、先に走った評価 (対象候補を決める production の鳴き判断を含む) が後の計測を暖めない。
 //! 探索内の memo は run ごとに作り直すので、Progress と Full も互いに暖めない。
 //!
-//! # 片和了 policy の counterfactual
+//! # 片和了 policy
 //!
 //! Progress の Call / Pass 結論に、片和了をどう扱うかの2つの policy を当てはめた結論も並べる。
-//! どちらも observation 上の counterfactual で、production の鳴き判断へは接続しない。
+//! `RequireAllLiveWaits` は production policy と同じ判定で、`AllowPartialWaits` は production へ
+//! 接続しない counterfactual のまま。
 //!
 //! | policy | Call 相当になる条件 |
 //! | --- | --- |
@@ -71,27 +80,25 @@
 //! non-winning draw とする) をそのまま使い、別の補正をしない。Progress の Call / Pass 値と比較は
 //! どちらの policy でも変わらない。
 //!
-//! 観測 run の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal は
-//! memo hit で scoring を通らないことがある。そのため役は観測 run の中で、選んだ打牌1件だけを
-//! 新しい memo で評価し直し、terminal scoring を通したテンパイごとにロン baseline の点数計算を
-//! 1回足して畳む。計測 run には何も足さない。
+//! 役は production と同じ helper ([`two_shanten_stay_call_terminal_ron_yaku`]) で、観測 run の
+//! 中で選んだ打牌1件だけを新しい memo で評価し直して畳む。observation 側で別実装を持たない。
+//! 計測 run には何も足さない。
 
 use std::time::{Duration, Instant};
 
 use bot_logic::{FixedMeldCount, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
 
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
+pub use crate::call_decision::TwoShantenStayCallTerminalRonYaku;
 use crate::call_decision::{
     CallDecisionDiagnostic, CallDecisionReason, CallIishantenComparison, CallKind,
     TwoShantenStayCallSource, TwoShantenStayCallState, compare_call_pass_self_tsumo_values,
     evaluate_call_decision_with_two_shanten_stay_calls, pass_two_shanten_expected_self_tsumo_value,
     pass_two_shanten_progress_self_tsumo_value, reaction_draw_distance,
+    two_shanten_stay_call_terminal_ron_yaku,
 };
 use crate::context::GameContext;
-use crate::discard_selection::{
-    select_two_shanten_progress_post_call_discard_observed,
-    two_shanten_progress_post_call_terminal_ron_yaku,
-};
+use crate::discard_selection::select_two_shanten_progress_post_call_discard_observed;
 use crate::iishanten_selection_depth_comparison::measured_on_a_fresh_thread;
 use crate::prospective_value::ProspectiveHanVerdict;
 use crate::two_shanten_full_parallel_comparison::{
@@ -172,26 +179,8 @@ pub struct TwoShantenStayCallProgress {
     pub terminal_ron_yaku: TwoShantenStayCallTerminalRonYaku,
 }
 
-/// 選んだ鳴き後打牌の Progress terminal の、即テンパイ Call と同じロン baseline での役の有無。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TwoShantenStayCallTerminalRonYaku {
-    /// 役を畳む評価が Progress 値を再現できなかった場合は、別の terminal 集合を見た可能性が
-    /// あるので `Unknown`。
-    pub verdict: ProspectiveHanVerdict,
-    /// 役を畳む評価が観測 run の Progress 値と同じ値になったか。鳴き後打牌を選べなかった場合は
-    /// `false`。
-    pub reproduces_value: bool,
-}
-
-impl TwoShantenStayCallTerminalRonYaku {
-    const UNAVAILABLE: Self = Self {
-        verdict: ProspectiveHanVerdict::Unknown,
-        reproduces_value: false,
-    };
-}
-
 /// 即テンパイ Call と同じく、生きた和了牌 variant すべてにロン baseline で役を要求する policy の
-/// counterfactual な結論。
+/// 結論。production の `現在2向聴 → 2向聴のまま` Call と同じ判定を observation 上で並べる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TwoShantenStayRequireAllLiveWaits {
     Call,
@@ -434,7 +423,7 @@ fn observe_with_pass_evaluators(
                         reaction_source_known,
                         call.known(),
                         pass.known(),
-                        CallDecisionReason::EligibleTwoShantenSelfTsumo,
+                        CallDecisionReason::EligibleTwoShantenStaySelfTsumo,
                     )
                     .0
                 };
@@ -551,23 +540,13 @@ fn progress_run(
         ),
     };
     let terminal_ron_yaku = match &observed.selection {
-        Some(selection) if observation_run => {
-            let (reproduced, verdict) = two_shanten_progress_post_call_terminal_ron_yaku(
-                context,
-                &state.post_call_tiles,
-                &state.post_call_melds,
-                &selection.evaluation,
-            );
-            let reproduces_value = reproduced == selection.expected_self_tsumo_value;
-            TwoShantenStayCallTerminalRonYaku {
-                verdict: if reproduces_value {
-                    verdict
-                } else {
-                    ProspectiveHanVerdict::Unknown
-                },
-                reproduces_value,
-            }
-        }
+        Some(selection) if observation_run => two_shanten_stay_call_terminal_ron_yaku(
+            context,
+            &state.post_call_tiles,
+            &state.post_call_melds,
+            &selection.evaluation,
+            selection.expected_self_tsumo_value,
+        ),
         _ => TwoShantenStayCallTerminalRonYaku::UNAVAILABLE,
     };
     ProgressRun {
@@ -813,7 +792,8 @@ mod tests {
         vec![pon(HAKU_TARGET, HAKU_PON_CONSUMED), LegalAction::None]
     }
 
-    // observation の前後で production の鳴き判断も act() も変わらず、2→2 候補は鳴かない。
+    // observation の前後で production の鳴き判断も act() も変わらない。act() は production の
+    // 鳴き判断が選んだ Call か、鳴かない None のどちらか。
     fn observe_keeping_production(
         ctx: &GameContext,
         actions: &[LegalAction],
@@ -826,9 +806,38 @@ mod tests {
         assert_eq!(observation.call.as_ref(), Some(&before));
         assert_eq!(production_call(ctx, actions), before);
         assert_eq!(ShantenAgent.act(ctx, actions), act_before);
-        assert_eq!(act_before, LegalAction::None);
+        assert_eq!(
+            act_before,
+            before.selected.clone().unwrap_or(LegalAction::None)
+        );
         assert!(observation.has_targets());
         observation
+    }
+
+    // observation の Progress scope と production の2→2 Call / Pass 比較は同じ尺度・同じ helper
+    // なので、同じ値・同じ結論になる。片和了の strict 判定も、production が判定した候補では同じ
+    // 結論になる。
+    fn assert_the_progress_scope_matches_the_production(
+        observation: &TwoShantenStayCallObservation,
+    ) {
+        let call = observation.call.as_ref().unwrap();
+        for candidate in &observation.candidates {
+            let production = call.candidates[candidate.candidate_index]
+                .two_shanten_stay_self_tsumo
+                .expect("production も2→2 Call / Pass を比較する");
+            assert_eq!(
+                production.pass_expected_self_tsumo_value,
+                observation.progress_pass.unwrap().value.known()
+            );
+            assert_eq!(
+                production.call_expected_self_tsumo_value,
+                candidate.progress.value.known()
+            );
+            assert_eq!(production.comparison, candidate.progress_comparison);
+            if let Some(ron_yaku) = production.ron_yaku {
+                assert_eq!(ron_yaku, candidate.progress.terminal_ron_yaku.verdict);
+            }
+        }
     }
 
     fn only_candidate(observation: &TwoShantenStayCallObservation) -> &TwoShantenStayCallCandidate {
@@ -853,7 +862,10 @@ mod tests {
                 candidate.post_call_shanten(),
                 Some(CALL_TWO_SHANTEN_SHANTEN)
             );
-            assert_eq!(candidate.reason, CallDecisionReason::PostCallNotIishanten);
+            // production の結論によらず、構造的な条件だけで対象になる。この局面では Progress が
+            // Pass 以上なので production は鳴かない。
+            assert!(candidate.stays_two_shanten_after_call());
+            assert_eq!(candidate.reason, CallDecisionReason::PassSelfTsumoNotLower);
             let state = evaluated_state(target);
             assert_eq!(state.post_call_min_shanten, CALL_TWO_SHANTEN_SHANTEN);
             assert_eq!(state.post_call_fixed_meld_count.get(), 1);
@@ -1092,9 +1104,10 @@ mod tests {
         for candidate in &observation.candidates {
             assert_eq!(
                 before.candidates[candidate.candidate_index].reason,
-                CallDecisionReason::PostCallNotIishanten
+                CallDecisionReason::PassSelfTsumoNotLower
             );
         }
+        assert_the_progress_scope_matches_the_production(&observation);
         assert_eq!(production_call(&ctx, &actions), before);
         assert_eq!(ShantenAgent.act(&ctx, &actions), act_before);
         assert_eq!(act_before, LegalAction::None);
@@ -1167,6 +1180,40 @@ mod tests {
         LazyLock::new(|| observe_keeping_production(&haku_context(), &haku_actions()));
 
     #[test]
+    fn a_production_two_shanten_stay_call_is_still_observed() {
+        // production が2→2 Call を採用した候補も observation の対象に残り、Progress / Full /
+        // strict / permissive のどれも並ぶ。
+        let observation = &*HAKU_OBSERVATION;
+        let candidate = only_candidate(observation);
+        let call = observation.call.as_ref().unwrap();
+
+        assert_eq!(
+            observation.production_selected(),
+            Some(&pon(HAKU_TARGET, HAKU_PON_CONSUMED))
+        );
+        assert_eq!(
+            observation.production_reason(),
+            Some(CallDecisionReason::EligibleTwoShantenStaySelfTsumo)
+        );
+        assert!(call.candidates[candidate.candidate_index].stays_two_shanten_after_call());
+        assert_the_progress_scope_matches_the_production(observation);
+        assert!(matches!(
+            candidate.progress.value,
+            TwoShantenStayCallValue::Known(_)
+        ));
+        assert!(observation.full_pass.is_some());
+        assert!(candidate.full.progress_cohort.len() > 1);
+        assert_eq!(
+            candidate.require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Call
+        );
+        assert_eq!(
+            candidate.allow_partial_waits(),
+            TwoShantenStayAllowPartialWaits::Call
+        );
+    }
+
+    #[test]
     fn a_call_with_yaku_on_every_live_wait_is_a_call_under_both_policies() {
         let candidate = only_candidate(&HAKU_OBSERVATION);
 
@@ -1228,6 +1275,12 @@ mod tests {
         let observation = observe_keeping_production(&ctx, &actions);
         let candidate = only_candidate(&observation);
 
+        // production も同じ strict 判定で片和了を鳴かない。
+        assert_eq!(
+            observation.production_reason(),
+            Some(CallDecisionReason::YakuMissing)
+        );
+        assert_the_progress_scope_matches_the_production(&observation);
         assert_eq!(
             candidate.progress_comparison,
             CallIishantenComparison::CallHigher

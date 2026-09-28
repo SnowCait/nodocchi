@@ -3008,8 +3008,29 @@ pub(crate) fn select_best_two_shanten_post_call_discard(
     })
 }
 
+/// 鳴き後も2向聴の打牌候補を、2向聴 production selection の Progress cohort と同じ尺度で選ぶ。
+///
+/// `現在2向聴 → Call → 2向聴のまま` の Call 側を、鳴かなかった2向聴 state の Pass Progress 値と
+/// 同じ尺度で求める production の入口。探索規模を計上しない点だけが
+/// [`select_two_shanten_progress_post_call_discard_observed`] と違い、選択も値も同じになる。
+pub(crate) fn select_two_shanten_progress_post_call_discard(
+    context: &GameContext,
+    tiles: &[TileId],
+    melds: &[Meld],
+    evaluations: &[DiscardEvaluation],
+) -> Option<PostCallTwoShantenSelection> {
+    select_two_shanten_progress_post_call_discard_observed(
+        context,
+        tiles,
+        melds,
+        evaluations,
+        false,
+    )
+    .selection
+}
+
 /// 鳴き後も2向聴の打牌候補を、2向聴 production selection の Progress cohort と同じ尺度で選んだ
-/// observation の結果。
+/// 結果。
 pub(crate) struct ObservedPostCallTwoShantenProgress {
     /// 選んだ打牌と、その Progress 値。合法な打牌候補が無ければ `None`。
     pub(crate) selection: Option<PostCallTwoShantenSelection>,
@@ -3019,9 +3040,10 @@ pub(crate) struct ObservedPostCallTwoShantenProgress {
     pub(crate) memo: SearchStateMemoStats,
 }
 
-/// 鳴き後も2向聴の打牌候補を、2向聴の Progress 値だけで選ぶ observation 専用の入口。
+/// 鳴き後も2向聴の打牌候補を、2向聴の Progress 値だけで選ぶ。探索規模の計上を要求できる。
 ///
-/// production の鳴き判断はこの入口を使わない。`現在2向聴 → Call → 2向聴のまま` の Call 側を、
+/// production の鳴き判断は計上なしの [`select_two_shanten_progress_post_call_discard`] から通り、
+/// observation は計上ありの run もこの入口で取る。`現在2向聴 → Call → 2向聴のまま` の Call 側を、
 /// 鳴かなかった2向聴 state の Pass Progress 値と同じ尺度で求めるためにある。
 ///
 /// 候補ごとの値は既存の [`two_shanten_progress_self_tsumo_value_for_candidate`](bot_logic::two_shanten_progress_self_tsumo_value_for_candidate)、
@@ -3064,8 +3086,10 @@ pub(crate) fn select_two_shanten_progress_post_call_discard_observed(
     }
 }
 
-/// 鳴き後も2向聴の打牌候補1件の Progress 値を、terminal の役の有無も畳む評価器で求める
-/// observation 専用の入口。
+/// 鳴き後も2向聴の打牌候補1件の Progress 値を、terminal の役の有無も畳む評価器で求める。
+///
+/// `現在2向聴 → Call → 2向聴のまま` の片和了 strict 判定
+/// ([`crate::call_decision::two_shanten_stay_call_terminal_ron_yaku`]) だけが通る。
 ///
 /// 値は [`select_two_shanten_progress_post_call_discard_observed`] が候補ごとに求める Progress 値と
 /// 同じ helper・同じ continuation で、評価器が terminal scoring を通したテンパイの役を

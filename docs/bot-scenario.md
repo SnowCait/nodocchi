@@ -355,9 +355,18 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では 
 
 ### 2向聴 → Chi / Pon → 2向聴のまま の observation
 
-`--two-shanten-stay-call-comparison` は、現在2向聴から Chi / Pon しても鳴き後の最良打牌で2向聴のままになる候補について、Call と Pass を2つの scope で独立に比べる **observation-only** の診断 option です。Issue #287 の「2向聴 → Chi / Pon → 2向聴のまま」を production へ接続する前に、評価値・Pass との差・比較尺度・実行コストを確かめるために使います。
+`--two-shanten-stay-call-comparison` は、現在2向聴から Chi / Pon しても鳴き後の最良打牌で2向聴のままになる候補について、Call と Pass を2つの scope で独立に比べる **observation-only** の診断 option です。Issue #287 の「2向聴 → Chi / Pon → 2向聴のまま」の評価値・Pass との差・比較尺度・実行コストを確かめるために使います。
 
-**production policy は変わりません。** `ShantenAgent::act()` と通常の `diagnose()` の選択・理由、Call / Pass policy、2→1 / 3→2 の既存 policy、速度優先 policy、鳴き後の Push/Pull、打牌 comparator、2向聴 Full の gate と並列度はどれも observation の有無で変わらず、観測結果を production へ戻す経路もありません。この option を指定しない通常実行では、追加の Progress / Full 探索を一切走らせません。
+この候補は production でも判断されます ([打牌選択の「2向聴のまま鳴く Call」](ai/discard-selection.md#2向聴のまま鳴く-call))。production は Progress だけで Call / Pass を比べ、`RequireAllLiveWaits` と鳴き後 Push/Pull を通った候補だけ鳴きます。observation の各項目と production の関係は次のとおりです。
+
+| 観測項目 | production との関係 |
+| --- | --- |
+| Progress scope | production の Call / Pass 比較と同じ尺度・同じ helper |
+| Full scope | observation-only。production では評価しない |
+| `RequireAllLiveWaits` | production policy と同じ strict 判定 |
+| `AllowPartialWaits` | observation-only の counterfactual |
+
+**observation は production を変えません。** `ShantenAgent::act()` と通常の `diagnose()` の選択・理由、Call / Pass policy、速度優先 policy、鳴き後の Push/Pull、打牌 comparator、2向聴 Full の gate と並列度はどれも observation の有無で変わらず、観測結果を production へ戻す経路もありません。この option を指定しない通常実行では、observation の Progress / Full 探索を一切走らせません。
 
 ```sh
 cargo run --release -p bot-scenario -- \
@@ -372,15 +381,15 @@ PowerShell からも同じ形で `cargo run -p bot-scenario -- .\scenario.json -
 
 #### 対象候補
 
-production と同じ鳴き判断 (`act()` と同じ入口・同じ評価順) を1回行い、次の候補だけを対象にします。
+production と同じ鳴き判断 (`act()` と同じ入口・同じ評価順) を1回行い、その candidate preparation が次の構造的な条件を満たすと判定した候補を対象にします。
 
 ```text
 current_shanten = 2
 post_call_min_shanten = 2
-reason = PostCallNotIishanten
+Chi / Pon
 ```
 
-鳴き後の手牌・副露・鳴き後打牌候補の1手評価・喰い替え禁止牌・副露数・最小向聴数は、その判断の candidate preparation が既に組み立てたものをそのまま使い、観測のために同じ state を組み立て直しません。鳴き後の `GameContext` と喰い替え禁止牌を除いた合法 Dahai も、鳴き後の Push/Pull と同じ既存の組み立てを通します。同じ request に 2→1 の候補があっても対象にはしません。物理牌 semantics まで同じ鳴き後 state を作る候補は production と同じく先行候補の観測を複製し (`same post-call state as #N`)、赤5 / 黒5 が違う候補は別の state として評価します。対象候補が無い request では Pass も Call も評価せず、`No 2 -> 2 Chi / Pon candidate` と表示して終わります。
+production の理由は読まないので、production で Call になった候補も Pass になった候補も対象に残ります。production が各候補に下した理由は候補ごとの `production:` 行で確認できます。鳴き後の手牌・副露・鳴き後打牌候補の1手評価・喰い替え禁止牌・副露数・最小向聴数は、その判断の candidate preparation が既に組み立てたものをそのまま使い、観測のために同じ state を組み立て直しません。鳴き後の `GameContext` と喰い替え禁止牌を除いた合法 Dahai も、鳴き後の Push/Pull と同じ既存の組み立てを通します。同じ request に 2→1 の候補があっても対象にはしません。物理牌 semantics まで同じ鳴き後 state を作る候補は production と同じく先行候補の観測を複製し (`same post-call state as #N`)、赤5 / 黒5 が違う候補は別の state として評価します。対象候補が無い request では Pass も Call も評価せず、`No 2 -> 2 Chi / Pon candidate` と表示して終わります。
 
 #### Progress と Full
 
@@ -389,9 +398,9 @@ reason = PostCallNotIishanten
 | Progress | 鳴き後の合法打牌を既存の2向聴 Progress comparator (`best_two_shanten_progress_discard_among_observed`) で比べ、選んだ打牌の Progress 値 | 次の自摸を待つ現在2向聴 state の `awaiting_draw_two_shanten_progress_self_tsumo_value` |
 | Full | 鳴き後の局面を production の2向聴 discard selection へそのまま渡し、選ばれた打牌の Full 値 | 2→1 Call / Pass 比較の Pass 側と同じ `awaiting_draw_two_shanten_expected_self_tsumo_value` |
 
-Progress は「最初のツモで1向聴へ進む枝 → production の1向聴 continuation」だけの寄与で、2向聴 production selection の Progress cohort と同じ尺度です。3向聴 → 2向聴の Call が使う Progress-only (1向聴到達後も Progress だけを追う) とは1向聴到達後の枝が違うので、混ぜないでください。Full はそれに最初のツモで2向聴を維持する枝を1回だけ足した値です。向聴・受け入れ・確率・打点・ドラ・役・scoring はすべて既存 helper を通り、Call 専用の評価は持ちません。
+Progress は「最初のツモで1向聴へ進む枝 → production の1向聴 continuation」だけの寄与で、2向聴 production selection の Progress cohort と同じ尺度です。production の 2→2 Call / Pass 比較もこの scope を使います。3向聴 → 2向聴の Call が使う Progress-only (1向聴到達後も Progress だけを追う) とは1向聴到達後の枝が違うので、混ぜないでください。Full はそれに最初のツモで2向聴を維持する枝を1回だけ足した値です。向聴・受け入れ・確率・打点・ドラ・役・scoring はすべて既存 helper を通り、Call 専用の評価は持ちません。
 
-**Full は「全打牌候補を Full 評価する」ものではありません。** Call 側は production の2向聴 selection (Progress cohort → provisional ranking → ドラ差 gate → gated top-2 の Full 追加評価 → production comparator、Full の並列度も production のまま) を1回通すだけです。gate が発火しない局面では選ばれた打牌の Full 値は存在しないので、0 などで補完せず unknown にします。production へ接続したときの latency と選択をそのまま測るためで、観測のための「全候補 Full」policy は持ちません。
+Full は observation-only で、production の鳴き判断では評価しません。**Full は「全打牌候補を Full 評価する」ものではありません。** Call 側は production の2向聴 selection (Progress cohort → provisional ranking → ドラ差 gate → gated top-2 の Full 追加評価 → production comparator、Full の並列度も production のまま) を1回通すだけです。gate が発火しない局面では選ばれた打牌の Full 値は存在しないので、0 などで補完せず unknown にします。Full を production へ接続した場合の latency と選択をそのまま測るためで、観測のための「全候補 Full」policy は持ちません。117対局の capture では Full の結論は96%以上の候補で unknown になり、latency も Progress より大幅に重かったため、production は Progress だけを使います。
 
 Pass は request ごと・scope ごとに1回だけ評価し、その request の全対象候補で共有します。
 
@@ -408,9 +417,9 @@ Progress と Full の値は混ぜず、scope ごとに独立に `call > pass` / 
 | `selected outside the full pair` | Full 追加評価の対象外の打牌が選ばれた |
 | `unresolved` | 評価したが既存 helper が値を確定できなかった |
 
-#### 片和了 policy の counterfactual
+#### 片和了 policy
 
-Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの2つの policy を当てはめた結論も並べます。**どちらも observation 上の counterfactual で、production policy は変わりません。** 即テンパイ Call の `YakuMissing` (生きた和了牌 variant に1つでも役なしがあれば鳴かない)、1→1 / 2→1 / 3→2 の Call policy、Push/Pull、2向聴 Full gate、通常打牌 selection はどれもそのままで、`ShantenAgent` の設定や CLI で production を切り替える経路もありません。
+Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの2つの policy を当てはめた結論も並べます。**`RequireAllLiveWaits` は production policy と同じ判定**で、production の 2→2 Call はこれに加えて鳴き後 Push/Pull が `Push` の候補だけ鳴きます。**`AllowPartialWaits` は observation 上の counterfactual のまま**で、production へは接続しません。`ShantenAgent` の設定や CLI で production の片和了 policy を切り替える経路もありません。
 
 | policy | Call 相当 | それ以外 |
 | --- | --- | --- |
@@ -423,8 +432,8 @@ RequireAllLiveWaits:  Progress が call > pass AND Progress terminal の全 live
 AllowPartialWaits:    Progress が call > pass
 ```
 
-- **`RequireAllLiveWaits`** は、即テンパイ Call の `YakuMissing` と同じ hypothetical Ron baseline で、全 live variant に役があることを要求します。terminal ごとの判定は即テンパイ Call と同じ helper を通り、Ron baseline (`damaten_baseline_context`) で既存 scoring (`evaluate_tenpai_hand_value`) を評価して `HandValueOutcome` を読みます。
-- **`AllowPartialWaits`** は、Progress self-tsumo value の Tsumo semantics をそのまま使います。役なし variant は non-winning draw です。Progress 値の terminal scoring は役なし variant を0点の和了として加算せず、既存 self-tsumo evaluator どおり和了できない牌として扱うので、その上から別の補正はしません。役なし variant で値を水増ししているわけではありません。
+- **`RequireAllLiveWaits`** (production policy) は、即テンパイ Call の `YakuMissing` と同じ hypothetical Ron baseline で、全 live variant に役があることを要求します。production では `Below` を `YakuMissing`、`Unknown` を `HandValueUnknown` として鳴きません。terminal ごとの判定は即テンパイ Call と同じ helper を通り、Ron baseline (`damaten_baseline_context`) で既存 scoring (`evaluate_tenpai_hand_value`) を評価して `HandValueOutcome` を読みます。
+- **`AllowPartialWaits`** (counterfactual) は、Progress self-tsumo value の Tsumo semantics をそのまま使います。役なし variant は non-winning draw です。Progress 値の terminal scoring は役なし variant を0点の和了として加算せず、既存 self-tsumo evaluator どおり和了できない牌として扱うので、その上から別の補正はしません。役なし variant で値を水増ししているわけではありません。
 
 Progress の Call / Pass 値・`call > pass` / `pass >= call`・鳴き後打牌の選択・Full の観測は、どちらの policy でも変わりません。
 
@@ -434,7 +443,9 @@ strict ron yaku (`AtLeast` / `Below` / `Unknown`) は次のように求めます
 - **判定**: 生きた (残枚数 > 0) 和了牌の物理牌 variant ごとに、`Known` は役あり、`NoCandidate` は役なし、`IndeterminateBonusHan`・scoring error は unknown とします。役なしの variant が1つでもあれば `Below`、役なしは無いが unknown や評価できないテンパイがあれば `Unknown`、対象の live variant すべてが役ありの場合だけ `AtLeast` です。**unknown を役ありと推測しません。** 生きた variant が1つも無いテンパイは寄与させず、判定対象の terminal が1件も無い場合は `Unknown` です。
 - **ロン可否との関係**: 即テンパイ Call でもロン可否 (`CannotRon`) と役の有無 (`YakuMissing`) は別軸です。ここで見るのは「その牌で hypothetical Ron した場合に役があるか」だけで、将来 terminal がフリテンでもロン可否 unknown でも、それを理由に `Below` や `Unknown` にはしません。
 
-役は観測 run の中で求めます。Progress の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal が memo hit で scoring を通らず、集約から漏れる可能性があります。そこで選んだ鳴き後打牌1件だけを新しい探索内 memo で評価し直し、terminal scoring を通したテンパイごとに Ron baseline の点数計算を1回ずつ足して畳みます。追加の点数計算は observation の観測 run だけで行い、production path と計測 run には入りません。評価し直した Progress 値が観測 run の値と一致しない場合は、別の terminal 集合を見た可能性があるので `Unknown` とし、出力にもそう表示します。
+役は production と同じ helper で、観測 run の中で求めます。Progress の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal が memo hit で scoring を通らず、集約から漏れる可能性があります。そこで選んだ鳴き後打牌1件だけを新しい探索内 memo で評価し直し、terminal scoring を通したテンパイごとに Ron baseline の点数計算を1回ずつ足して畳みます。observation では計測 run には入りません。production では Progress が `call > pass` の候補だけに同じ評価を行います。評価し直した Progress 値が比較に使った値と一致しない場合は、別の terminal 集合を見た可能性があるので `Unknown` とし、出力にもそう表示します。
+
+集約する terminal は Progress 評価が terminal scoring を通したもの全体で、1向聴 continuation の将来打牌比較で最終的に選ばれない枝の terminal も含みます。production はこの保守的な判定をそのまま使い、選ばれる将来打牌経路上の terminal だけに限定する精密化は [Issue #355](https://github.com/SnowCait/nodocchi/issues/355) で扱います。
 
 既存の `scored_han_verdict` (3→2 速度優先 policy の翻数判定) は流用しません。ロンできる terminal でしか翻数を確定しないので、将来フリテンの terminal が `Unknown` になるためです。また、候補ごとに集約を区切るので、上の memo 共有による集約漏れも起こり得ます。
 
@@ -449,24 +460,25 @@ strict ron yaku の評価は Progress の観測 run の中で、経過時間を�
 ```text
 Production call decision (unchanged)
   selected: none
-  reason: PostCallNotIishanten
+  reason: PassSelfTsumoNotLower
   reaction source player: 3
   call candidates: 1, 2 -> 2 targets: 1
-    #0 Chi 8m <- 6m 7m: PostCallNotIishanten (2 -> 2 target)
+    #0 Chi 8m <- 6m 7m: PassSelfTsumoNotLower (2 -> 2 target)
 
 Pass (evaluated once per request and scope, shared by every target)
   progress: 81.935943 (elapsed 67.195 ms)
   full: 152.160704 (elapsed 1099.725 ms)
 
 Candidate #0 Chi 8m <- 6m 7m
+  production: PassSelfTsumoNotLower
   forbidden discards: 8m 5m, post-call fixed melds: 1, post-call min shanten: 2
   progress: selected F, call 0.192268, pass 81.935943, pass >= call
     call elapsed (timing run): 49.494 ms, timing and observation runs agree: true
     search (observation run): ...
-  partial-yaku (progress, counterfactual)
+  partial-yaku (progress; RequireAllLiveWaits = production policy, AllowPartialWaits = counterfactual)
     strict ron yaku (hypothetical ron baseline, observation run): Below (contains a no-yaku live variant)
-    RequireAllLiveWaits: Pass
-    AllowPartialWaits: Pass
+    RequireAllLiveWaits (production policy): Pass
+    AllowPartialWaits (counterfactual): Pass
   full: selected 5p, call 2.141449, pass 152.160704, pass >= call
     progress cohort: 3 (5p 6p F), full evaluated: 2 (F 5p), full workers: 2
     selection elapsed (timing run): 783.101 ms, timing and observation runs agree: true
@@ -475,14 +487,14 @@ Candidate #0 Chi 8m <- 6m 7m
   call / pass conclusion progress vs full: same
 ```
 
-- `Production call decision (unchanged)` は production の鳴き判断そのものです。observation はこの結論を変えません。
+- `Production call decision (unchanged)` は production の鳴き判断そのものです。observation はこの結論を変えません。候補ごとの `production:` はその候補の production の理由で、採用した候補には `(selected)` が付きます。
 - 値は既存 self-tsumo value と同じ点数単位で小数6桁まで表示します。
 - `selected post-call discard` は2つの scope が選んだ鳴き後打牌 (物理牌) が一致したかです。
 - `call / pass conclusion progress vs full` は、両方の結論が確定して同じなら `same`、反転していれば `flipped`、どちらかが `unknown` なら `undetermined` です。
 - `full evaluated` はドラ差 gate を通って Full 追加評価を行った2候補です。`none` の場合、Full の Call 値は `unknown (full gate not fired)` などになります。
-- `partial-yaku` は [片和了 policy の counterfactual](#片和了-policy-の-counterfactual) です。Progress が `pass >= call` の候補は strict ron yaku に関係なくどちらの policy でも `Pass` です。
+- `partial-yaku` は [片和了 policy](#片和了-policy) です。Progress が `pass >= call` の候補は strict ron yaku に関係なくどちらの policy でも `Pass` です。
 
-代表 fixture は4つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。`two_shanten_stay_call_haku_pon.json` は白ポンで Progress が `call > pass`、strict ron yaku が `AtLeast` なので両 policy とも `Call` になる局面、`two_shanten_stay_call_tanyao_pon.json` は断幺頼みの 7p ポンで Progress が `call > pass` でも strict ron yaku が `Below` になり、`RequireAllLiveWaits` だけが `Blocked (partial yaku)` になる局面です。
+代表 fixture は4つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。`two_shanten_stay_call_haku_pon.json` は白ポンで Progress が `call > pass`、strict ron yaku が `AtLeast` なので両 policy とも `Call` になり、production も `EligibleTwoShantenStaySelfTsumo` で鳴く局面、`two_shanten_stay_call_tanyao_pon.json` は断幺頼みの 7p ポンで Progress が `call > pass` でも strict ron yaku が `Below` になり、`RequireAllLiveWaits` だけが `Blocked (partial yaku)` になる (production は `YakuMissing` で鳴かない) 局面です。
 
 #### capture 全体の集計
 
@@ -499,9 +511,10 @@ request 単位と候補単位を分けて表示します。
 | --- | --- | --- |
 | `Requests` | request | replay した request 数、Chi / Pon が合法な request 数、2→2 対象 request 数 |
 | `Candidates` | 候補 | 2→2 Call 候補数と Chi / Pon の内訳、先行候補の state を複製した候補数。複製した候補も従来どおり候補として数え、片和了 policy の集計にも複製元と同じ結論で入る |
+| `Production decision` | 候補 | production が採用した対象候補数と、対象候補の production の理由ごとの件数 |
 | `Call / Pass conclusion` | 候補 | scope ごとの `call > pass` / `pass >= call` / `unknown` と unknown の原因 |
 | `Progress vs full` | 候補 | 結論の一致 (`same`) / 反転 (`flipped`) / どちらか unknown、選択打牌の一致 / 不一致 |
-| `Progress call > pass partial-yaku policy` | 候補 | Progress が `call > pass` の候補を母数に、strict ron yaku (`all live variants >= 1 han` / `contains no-yaku live variant` / `unknown`)、`RequireAllLiveWaits` の `call` / `blocked by partial yaku` / `unknown`、`AllowPartialWaits` の `call` |
+| `Progress call > pass partial-yaku policy` | 候補 | Progress が `call > pass` の候補を母数に、strict ron yaku (`all live variants >= 1 han` / `contains no-yaku live variant` / `unknown`)、`RequireAllLiveWaits` (production policy) の `call` / `blocked by partial yaku` / `unknown`、`AllowPartialWaits` (counterfactual) の `call` |
 | `RequireAllLiveWaits vs AllowPartialWaits differences` | 候補 | 2つの policy の結論が違う候補の全件。capture・`request_id`・候補 index・Chi / Pon と鳴いた牌 / 晒した牌、先行候補の複製なら `reused_from=#N`、Progress の選択打牌・Call 値・Pass 値・比較、strict ron yaku と両 policy の結論 |
 | `Latency` | request / 評価した候補 | Pass は request 単位、Call は評価した候補単位 (複製した候補を除く) の count / median / p95 / max。request ごとの Pass + Call の逐次合計も並べる |
 | `Slowest full calls` | 評価した候補 | Full の Call 評価が遅い上位5件 |
@@ -1201,7 +1214,7 @@ Hora などで早期 return した request は、到達しなかった phase が
 | `call` | 鳴き判断全体の壁時計。最初の候補評価から最終候補の選択まで |
 | `call_candidates` | 鳴き候補ごとの評価の合計。候補別に kind / 鳴いた牌 / consumed / elapsed と、そのうちの鳴き後の打牌選択 (`post_call_discard`) を表示する |
 | `call_pass` | 1向聴 Call / Pass 比較のために1回だけ評価する Pass 側 ExpectedSelfTsumoValue |
-| `call_two_shanten_pass` | 2向聴 Call / Pass 比較のために1回だけ評価する Pass 側の2向聴 Full ExpectedSelfTsumoValue |
+| `call_two_shanten_pass` | 2向聴 Call / Pass 比較のために評価する Pass 側の値。鳴き後1向聴になる候補用の2向聴 Full ExpectedSelfTsumoValue と、鳴き後も2向聴のままの候補用の2向聴 Progress 値をそれぞれ request で1回ずつ評価した合計 |
 | `call_remaining` | 候補評価と Pass 評価を除いた残りの鳴き policy 処理 (比較・採用候補の選択など) |
 
 Call / Pass 比較が発火する request では、Call 側の候補評価 group と Pass 側の継続評価を別 thread で重ねます。どちらの elapsed もその評価が実際に走っていた時間なので、`call_candidates` / `call_pass` / `call_two_shanten_pass` / `call_remaining` の合計は壁時計である `call` を超え得ます (その場合 `call_remaining` は 0 になります)。重ねなかった request では従来どおり合計が `call` に一致します。`call` は同じ request の `early` を超えません。合法な Chi / Pon が無い request では全て 0、候補 timing は空のままです。Call / Pass 比較が発火しない request では `call_pass` も `call_two_shanten_pass` も 0 のままです。どちらを評価するかは現在の向聴数が決めるので、同じ request で両方が 0 を超えることはありません。同じ `tile` / `consumed` の重複候補も除かず、合法 action の順にそれぞれ1件ずつ並びます。`early` の残りと `post_discard` の内部は細分化していません。
@@ -1364,7 +1377,7 @@ percentile は nearest-rank です。昇順に並べた `n` 件について順�
 }
 ```
 
-`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `iishanten_stable_fallback_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`iishanten_stable_fallback_ns` と `iishanten_stable_fallback_candidate_count` は1向聴 StableOrder fallback の評価時間と評価した cohort の候補数で、発火しなかった request では 0 です。`summary` の `iishanten_stable_fallback_triggered` / `iishanten_stable_fallback_candidate_count` / `iishanten_stable_fallback_ns` は run 全体の発火 request 数・候補数の合計・評価時間の合計です。これらの field が無い以前の JSON も 0 として読めます。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の wall-clock の内訳で、合計は `normal_discard_forward_ns` を超えません。この意味は従来から変わりません。production が1向聴候補を候補単位で並行に評価した request では、計測 thread が phase の区切りを通らないため従来どおり 0 のままで、その request の内訳は `iishanten_forward_candidates` から読みます。`iishanten_forward_candidates` は production が深い前方評価を実際に行った1向聴候補だけを production の候補順そのままで持ち、その件数を `iishanten_forward_candidate_count` にも出します。深く評価されなかった候補は1件も混ざりません。候補ごとに `discard` / `elapsed_ns` と、その内訳の `lookahead_search_ns` / `weighted_aggregation_ns` / `self_tsumo_continuation_ns` を持ちます。候補単位で並行に評価するため、候補の `elapsed_ns` の合計も、候補の `lookahead_search_ns` などの合計も、phase の wall-clock である `normal_discard_forward_ns` を超え得ます。合計を wall-clock として読まないでください。候補側の `lookahead_search_ns` などはその候補の中での実時間で、request 単位の `forward_lookahead_search_ns` とは別物です。最善向聴数が1向聴でない request では 0 と空 array のままです。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_pass_two_shanten_self_tsumo_ns` / `call_pass_three_shanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_pass_two_shanten_self_tsumo_ns` は現在2向聴の Call / Pass 比較が評価した Pass 側の2向聴 Full、`call_pass_three_shanten_self_tsumo_ns` は現在3向聴の Call / Pass 比較が評価した Pass 側の3向聴 Progress-only で、読み方はどちらも `call_pass_iishanten_self_tsumo_ns` と同じです。どれを評価するかは現在の向聴数が決めるので、同じ request で複数が 0 を超えることはありません。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
+`requests` は計測順、つまり capture の指定順と file 内の `request_action` record 順です。`early_ns` / `normal_discard_ns` / `post_discard_ns` は phase 別の内訳で、合計は `elapsed_ns` を超えません。`normal_discard_base_ns` / `normal_discard_forward_ns` / `two_shanten_self_tsumo_ns` / `three_shanten_self_tsumo_ns` / `iishanten_stable_fallback_ns` / `normal_discard_finalize_ns` は `normal_discard_ns` の内訳で、合計は `normal_discard_ns` を超えません。`iishanten_stable_fallback_ns` と `iishanten_stable_fallback_candidate_count` は1向聴 StableOrder fallback の評価時間と評価した cohort の候補数で、発火しなかった request では 0 です。`summary` の `iishanten_stable_fallback_triggered` / `iishanten_stable_fallback_candidate_count` / `iishanten_stable_fallback_ns` は run 全体の発火 request 数・候補数の合計・評価時間の合計です。これらの field が無い以前の JSON も 0 として読めます。`forward_lookahead_search_ns` / `forward_weighted_aggregation_ns` / `forward_self_tsumo_ns` は `normal_discard_forward_ns` の wall-clock の内訳で、合計は `normal_discard_forward_ns` を超えません。この意味は従来から変わりません。production が1向聴候補を候補単位で並行に評価した request では、計測 thread が phase の区切りを通らないため従来どおり 0 のままで、その request の内訳は `iishanten_forward_candidates` から読みます。`iishanten_forward_candidates` は production が深い前方評価を実際に行った1向聴候補だけを production の候補順そのままで持ち、その件数を `iishanten_forward_candidate_count` にも出します。深く評価されなかった候補は1件も混ざりません。候補ごとに `discard` / `elapsed_ns` と、その内訳の `lookahead_search_ns` / `weighted_aggregation_ns` / `self_tsumo_continuation_ns` を持ちます。候補単位で並行に評価するため、候補の `elapsed_ns` の合計も、候補の `lookahead_search_ns` などの合計も、phase の wall-clock である `normal_discard_forward_ns` を超え得ます。合計を wall-clock として読まないでください。候補側の `lookahead_search_ns` などはその候補の中での実時間で、request 単位の `forward_lookahead_search_ns` とは別物です。最善向聴数が1向聴でない request では 0 と空 array のままです。`two_shanten_self_tsumo_candidates` は production が実際に評価した `ForwardTargets` だけを評価順に持ち、その件数を `two_shanten_self_tsumo_candidate_count` にも出します。Progress 候補は逐次評価しますが、Full gate を通った上位2候補の Full 追加評価は並列に走るため、候補別時間の合計は phase の wall-clock である `two_shanten_self_tsumo_ns` を超え得ます。`call_ns` は `early_ns` の内訳です。Call 側の候補評価 group と Pass 側の継続評価は重ねて走るため、`call_candidates_ns` / `call_pass_iishanten_self_tsumo_ns` / `call_pass_two_shanten_self_tsumo_ns` / `call_pass_three_shanten_self_tsumo_ns` / `call_remaining_ns` の合計は壁時計である `call_ns` を超え得ます。重ねなかった request では合計が `call_ns` に一致します。`call_pass_two_shanten_self_tsumo_ns` は現在2向聴の Call / Pass 比較が評価した Pass 側の2向聴 Full (2→1 用) と2向聴 Progress (2→2 用) の合計、`call_pass_three_shanten_self_tsumo_ns` は現在3向聴の Call / Pass 比較が評価した Pass 側の3向聴 Progress-only で、読み方はどちらも `call_pass_iishanten_self_tsumo_ns` と同じです。どれを評価するかは現在の向聴数が決めるので、同じ request で複数が 0 を超えることはありません。`call_candidates` は production が実際に評価した鳴き候補だけを評価順に持ち、候補ごとに `kind` / `tile` / `consumed` / `elapsed_ns` / `post_call_discard_selection_ns` を持ちます。件数は `call_candidate_count` にも出します。鳴き候補が無い request では 0 と空 array のままです。
 
 CI の共有 runner は実行時間が安定しないため、CI では集計や percentile の correctness だけを test し、実測値を pass / fail の threshold にはしません。実性能値は release build を実環境で実行して取得します。
 

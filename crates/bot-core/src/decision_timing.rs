@@ -53,10 +53,11 @@ pub struct CallDecisionDurations {
     /// 比較が発火しなかった局面では `Duration::ZERO` のままになる。Call 側と重ねて評価した
     /// 局面でも、この値は Pass 側の評価そのものにかかった時間で、待ち時間を含まない。
     pub pass_iishanten_self_tsumo: Duration,
-    /// 2向聴 Call / Pass 比較のために1回だけ評価する Pass 側の2向聴 Full
-    /// ExpectedSelfTsumoValue。読み方は `pass_iishanten_self_tsumo` と同じ。現在の向聴数が
-    /// どれを評価するかを決めるので、1回の鳴き判断で複数が `Duration::ZERO` を超えることは
-    /// ない。
+    /// 2向聴 Call / Pass 比較のために評価する Pass 側の値。鳴き後1向聴になる候補用の2向聴 Full
+    /// ExpectedSelfTsumoValue と、鳴き後も2向聴のままの候補用の2向聴 Progress 値をそれぞれ
+    /// request で1回ずつ評価し、その合計を持つ。読み方は `pass_iishanten_self_tsumo` と同じ。
+    /// 現在の向聴数がどれを評価するかを決めるので、1回の鳴き判断で1向聴・2向聴・3向聴のうち
+    /// 複数が `Duration::ZERO` を超えることはない。
     pub pass_two_shanten_self_tsumo: Duration,
     /// 3向聴 Call / Pass 比較のために1回だけ評価する Pass 側の3向聴 Progress-only
     /// ExpectedSelfTsumoValue。読み方は `pass_iishanten_self_tsumo` と同じ。

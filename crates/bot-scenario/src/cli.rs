@@ -162,20 +162,24 @@ pub const USAGE: &str = "usage:
   search size and selection differences; it takes all following capture paths and cannot be
   combined with the other scenario or diagnostic options
   --two-shanten-stay-call-comparison observes, without changing the production decision, the
-  Chi / Pon candidates the production call decision stops as PostCallNotIishanten from a
-  two-shanten hand that stays two-shanten after the call; it compares the call with the pass
-  in two independent scopes, Progress (the first Progress branch into the production
-  one-shanten continuation) and Full (the production two-shanten discard selection semantics:
-  Progress cohort, dora-difference gate and the gated top-2 Full evaluation, not a Full
-  evaluation of every discard), and reports the selected post-call discard, both values, the
-  call / pass conclusion and the elapsed time of each scope; the pass is evaluated once per
-  request and scope, every measured run starts on its own fresh thread with cold memos, and it
-  cannot be combined with other diagnostic options
+  Chi / Pon candidates from a two-shanten hand that stays two-shanten after the call, whether
+  the production call decision (Progress call / pass, RequireAllLiveWaits and the post-call
+  push/pull) calls or passes them; it compares the call with the pass in two independent
+  scopes, Progress (the first Progress branch into the production one-shanten continuation,
+  the scope production uses) and Full (observation only: the production two-shanten discard
+  selection semantics, Progress cohort, dora-difference gate and the gated top-2 Full
+  evaluation, not a Full evaluation of every discard), and reports the production reason, the
+  selected post-call discard, both values, the call / pass conclusion, the RequireAllLiveWaits
+  (production policy) and AllowPartialWaits (counterfactual) conclusions and the elapsed time
+  of each scope; the pass is evaluated once per request and scope, every measured run starts
+  on its own fresh thread with cold memos, and it cannot be combined with other diagnostic
+  options
   --compare-two-shanten-stay-call replays every captured request_action, runs the same
   observation on the requests with such a candidate, and reports the request and candidate
-  counts, the call / pass conclusions of both scopes, their agreement, the selected post-call
-  discard agreement, the latency and the slowest and flipped cases; it takes all following
-  capture paths and cannot be combined with the other scenario or diagnostic options
+  counts, the production reasons, the call / pass conclusions of both scopes, their
+  agreement, the selected post-call discard agreement, the partial-yaku policies, the latency
+  and the slowest and flipped cases; it takes all following capture paths and cannot be
+  combined with the other scenario or diagnostic options
   --compare-self-tsumo-horizon replays every captured request_action through the production
   decision path once per self-tsumo soft horizon 12 / 14 / 16 / 18 with the production late
   minimum of 2 future draws, each on its own fresh thread with cold memos, and reports the

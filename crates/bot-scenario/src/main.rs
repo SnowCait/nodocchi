@@ -475,7 +475,7 @@ mod tests {
             "{normal}"
         );
         assert!(
-            output.contains("  selected: none\n  reason: PostCallNotIishanten"),
+            output.contains("  selected: none\n  reason: PassSelfTsumoNotLower"),
             "{output}"
         );
     }

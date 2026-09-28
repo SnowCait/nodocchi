@@ -61,10 +61,23 @@ policy には使いません。`Summary` にも同じ値、比較結果、鳴き
 `two-shanten self-tsumo` を表示します。Call は鳴き後の1向聴 continuation、Pass は次の自摸を待つ
 2向聴 state の Full value です。`two-shanten comparison` は `call higher` / `pass not lower` /
 `unknown` を区別し、`call higher` の場合だけ鳴きます。同値・`unknown`・反応元不明は Pass です。
-鳴き後も2向聴のままの候補は対象外で、対象候補が無い局面では重い Pass Full 探索を実行しません。
-その候補 (`reason: PostCallNotIishanten`) の Call / Pass は通常の診断では評価せず、observation-only の
+鳴き後も2向聴のままの候補はこの比較の対象外で、対象候補が無い局面では重い Pass Full 探索を実行
+しません。
+
+現在2向聴から Chi / Pon 後の最良打牌でも2向聴のままの候補には、production が比較した
+`two-shanten stay self-tsumo` を表示します。Call は鳴き後2向聴の Progress 値、Pass は次の自摸を
+待つ2向聴 state の Progress 値 (`pass progress`) で、Full は production では評価しません。
+`two-shanten stay comparison` の読み方は `two-shanten comparison` と同じで、速度優先 policy は
+ありません。`two-shanten stay ron yaku (RequireAllLiveWaits)` は、`call higher` の候補だけが持つ
+片和了の strict 判定で、選んだ鳴き後打牌の Progress terminal すべてで生きた和了牌 variant すべてに
+ロン役があれば `yaku on every live variant`、役なしの variant があれば `no-yaku live variant`
+(`reason: YakuMissing`)、確定できなければ `unknown` (`reason: HandValueUnknown`) です。比較で
+落ちた候補は判定しないので `not evaluated` です。両方を通った候補だけが鳴き後の押し引きへ進み、
+成立すると `reason: EligibleTwoShantenStaySelfTsumo` になります。同じ request に成立した 2→1 の
+候補があればそちらを優先し、2→1 の Full 値と 2→2 の Progress 値は比べません。同じ候補の
+Progress / Full の2つの scope と片和了 policy の counterfactual は
 [`--two-shanten-stay-call-comparison`](bot-scenario.md#2向聴--chi--pon--2向聴のまま-の-observation)
-でだけ Progress / Full の2つの scope で観測できます。
+で観測できます。
 
 同じ候補には速度優先 policy の判断材料 `two-shanten speed` も表示します。`draws` は Call 後に
 自分へ残っている自摸機会、`han` は鳴き後の実際の手牌 state から**Call 側 ExpectedSelfTsumoValue が
@@ -95,8 +108,8 @@ SameShanten の枝を追加探索することもありません)。`overrides pa
 `EligibleThreeShantenSpeed` になります。他家リーチ時の鳴きはこの policy でも上書きしません。
 
 鳴き後の押し引きを評価した候補には `post-call push/pull: <mode> (<reason>)` を表示します。即テンパイ
-Call では成立条件を満たした候補、非テンパイ Call では Call / Pass 比較 (速度優先 policy を含む) で
-成立した候補だけが持ちます。非テンパイ Call では、比較段階で成立した理由を
+Call では成立条件を満たした候補、非テンパイ Call では Call / Pass 比較 (速度優先 policy と、2→2 の
+片和了判定を含む) で成立した候補だけが持ちます。非テンパイ Call では、比較段階で成立した理由を
 `call / pass eligible reason: <reason>` として並べます。候補の `reason` が `PostCallNotPush` で
 これらの行がある場合は、「Call / Pass 比較では成立した → 鳴き後の既存 Push/Pull は `Push` ではない
 → 鳴かない」と読みます。比較で落ちた候補にはどちらの行も出ず、`reason` は比較で落ちた理由の

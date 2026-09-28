@@ -3261,6 +3261,7 @@ mod tests {
                     | CallDecisionReason::EligibleIishantenSelfTsumo
                     | CallDecisionReason::EligibleTwoShantenSelfTsumo
                     | CallDecisionReason::EligibleTwoShantenSpeed
+                    | CallDecisionReason::EligibleTwoShantenStaySelfTsumo
                     | CallDecisionReason::EligibleThreeShantenSelfTsumo
                     | CallDecisionReason::EligibleThreeShantenSpeed
             )
