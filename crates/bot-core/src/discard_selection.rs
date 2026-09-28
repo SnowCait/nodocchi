@@ -3292,7 +3292,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::context::TableStateFacts;
     use crate::decision_timing::ForwardMetricsPhaseDurations;
-    use crate::push_pull::{PushPullOffenseState, push_pull_inputs_from_threat_facts};
+    use crate::push_pull::{
+        PushPullOffenseState, PushPullReason, decide_push_pull, push_pull_inputs_from_threat_facts,
+    };
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
     use crate::shanten_test_support::{
         tenpai_actions, tenpai_context, three_shanten_progress_regression_context,
@@ -7914,6 +7916,48 @@ pub(crate) mod tests {
                 .find(|&(candidate, _)| candidate == discard)
                 .map(|(_, value)| value),
             Some(push_pull)
+        );
+    }
+
+    #[test]
+    fn a_combined_threat_does_not_evaluate_the_push_pull_expected_self_tsumo_value() {
+        // Combined threat の一向聴は攻撃価値によらず降りるので、Push/Fold 用の値を評価し直さない。
+        let (context, actions) = reach_threat_iishanten_context(66, 12);
+        let selection = select_discard_action_with_evaluation(&context, &actions);
+        let mut facts = player_threat_facts_from_context(&context);
+        facts[2].meld_count = 3;
+        facts[2].open_meld_count = 3;
+        let inputs = push_pull_inputs_from_threat_facts(
+            &context,
+            facts,
+            selection.evaluation.as_ref(),
+            selection.iishanten_forward_metrics,
+            selection.tenpai_wait.as_ref(),
+            selection.tenpai_offense_value,
+            &actions,
+        );
+        assert!(inputs.has_combined_threat());
+        let offense = inputs.offense.expect("攻撃評価がある");
+        assert_eq!(offense.min_shanten_after_discard, IISHANTEN_SHANTEN);
+        assert!(
+            offense
+                .iishanten_selection_expected_self_tsumo_value()
+                .is_some()
+        );
+        assert_eq!(
+            offense.iishanten_push_pull_expected_self_tsumo_value(),
+            None
+        );
+        assert_eq!(
+            decide_push_pull(&inputs).reason,
+            PushPullReason::IishantenAgainstCombinedThreat
+        );
+
+        let (_, reach_offense) = selected_offense(&context, &actions);
+        assert!(
+            reach_offense
+                .iishanten_push_pull_expected_self_tsumo_value()
+                .is_some()
         );
     }
 
