@@ -130,8 +130,9 @@ pub struct PushPullOffenseState {
     /// もの ([`push_pull_iishanten_expected_self_tsumo_value`])。configured horizon を変えても同じ
     /// 候補なら同じ値になる。
     ///
-    /// 評価するのは打牌後が1向聴で明確な threat がある (Push/Fold がこの値を使う) 局面だけで、
-    /// それ以外と値を確定できない場合は `None`。
+    /// 評価するのは打牌後が1向聴で他家リーチ単独または actionable OpenHandThreat 単独の threat が
+    /// ある (Push/Fold がこの値を使う) 局面だけで、それ以外と値を確定できない場合は `None`。
+    /// Combined threat の一向聴は攻撃価値によらず降りるので評価しない。
     pub iishanten_push_pull_expected_self_tsumo_value: Option<u64>,
 }
 
@@ -227,21 +228,25 @@ fn tenpai_push_weighted_total_min(dealer_reacher: bool) -> u64 {
 /// テンパイの [`tenpai_push_weighted_total_min`] とは別の数値系なので、残枚数加重合計とは
 /// 比較しない。他家リーチ者に親が含まれれば親リーチの threshold、他家リーチがなく actionable
 /// target がすべて `Caution` なら Caution-only の threshold、それ以外は基本 threshold になる。
-/// リーチ者数や actionable OpenHandThreat との複合では変えないので、`Reach + Caution` の
-/// Combined は Caution-only の threshold を使わない。`dealer_reacher` は
-/// [`PushPullInputs::dealer_reacher`]、Caution 判定は
+/// リーチ者数では変えない。`dealer_reacher` は [`PushPullInputs::dealer_reacher`]、Caution 判定は
 /// [`PushPullInputs::has_only_caution_open_hand_threats`] が source of truth で、ここで判定し直さない。
 ///
+/// 明確な threat がない場合と Combined threat では `None`。Combined の一向聴は攻撃価値によらず
+/// 降りるので、ExpectedSelfTsumoValue と比較する threshold を持たない。
+///
 /// 押し引き判定と debug log はどちらもこの関数だけで threshold を得る。
-fn iishanten_push_expected_self_tsumo_min(inputs: &PushPullInputs) -> u64 {
-    if inputs.dealer_reacher {
-        DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
-    } else if threat_kind(inputs) == Some(ThreatKind::ActionableOpenHand)
+fn iishanten_push_expected_self_tsumo_min(inputs: &PushPullInputs) -> Option<u64> {
+    let threat = threat_kind(inputs)?;
+    if threat == ThreatKind::Combined {
+        None
+    } else if inputs.dealer_reacher {
+        Some(DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN)
+    } else if threat == ThreatKind::ActionableOpenHand
         && inputs.has_only_caution_open_hand_threats()
     {
-        CAUTION_ONLY_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
+        Some(CAUTION_ONLY_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN)
     } else {
-        IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN
+        Some(IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN)
     }
 }
 
@@ -522,7 +527,7 @@ pub enum PushPullReason {
     /// hard-safe なので押す。
     SafeTenpaiAgainstCombinedThreat,
     WeakTenpaiAgainstCombinedThreat,
-    /// ExpectedSelfTsumoValue が threshold 以上なので一向聴から押す。
+    /// Combined threat の一向聴は攻撃価値によらず降りるので、現在の policy では使わない。
     ValuableIishantenAgainstCombinedThreat,
     IishantenAgainstCombinedThreat,
     TwoOrMoreShantenAgainstCombinedThreat,
@@ -564,14 +569,14 @@ const TENPAI_PUSH_WEIGHTED_TOTAL_MIN: u64 = 15_600;
 // 含まれていればこちらを使う。自分が親かどうかでは変えない。
 const DEALER_REACH_TENPAI_PUSH_WEIGHTED_TOTAL_MIN: u64 = 23_400;
 
-// 明確な threat に対して一向聴から押すために要求する ExpectedSelfTsumoValue
-// [SELF_TSUMO_VALUE_SCALE]。inclusive。一向聴から押すのはリスクが高いので、十分な攻撃価値を
+// 他家リーチ単独または actionable OpenHandThreat 単独に対して一向聴から押すために要求する
+// ExpectedSelfTsumoValue [SELF_TSUMO_VALUE_SCALE]。inclusive。一向聴から押すのはリスクが高いので、十分な攻撃価値を
 // 確認できた場合だけ押す保守的な threshold にする。テンパイの残枚数加重合計とは別の数値系。
 const IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_000 * SELF_TSUMO_VALUE_SCALE;
 
 // 他家リーチ者に親が含まれる場合に一向聴から押すために要求する ExpectedSelfTsumoValue
 // [SELF_TSUMO_VALUE_SCALE]。inclusive。テンパイと同じく基本 threshold の 1.5 倍を要求する。
-// リーチ者が複数いる場合や actionable OpenHandThreat との複合というだけでは倍率を増やさない。
+// リーチ者が複数いるというだけでは倍率を増やさない。Combined threat の一向聴には使わない。
 const DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN: u64 = 1_500 * SELF_TSUMO_VALUE_SCALE;
 
 // 他家リーチがなく actionable OpenHandThreat がすべて `Caution` の場合に一向聴から押すために要求する
@@ -719,8 +724,13 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
     };
 
     let open_hand_threats = classify_open_hand_threats(&player_threats);
-    let clear_threat =
-        opponent_reach_count >= 1 || has_actionable_open_hand_threat(&open_hand_threats);
+    let iishanten_push_pull_value_needed = matches!(
+        threat_kind_of(
+            opponent_reach_count,
+            has_actionable_open_hand_threat(&open_hand_threats),
+        ),
+        Some(ThreatKind::Reach | ThreatKind::ActionableOpenHand)
+    );
     let selected_normal_discard_hard_safe_for_all_threat_targets =
         selected_normal_discard_hard_safe_for_all_threat_targets(
             context,
@@ -764,7 +774,7 @@ pub(crate) fn push_pull_inputs_from_threat_facts(
             red_dora_count_after_discard: value_proxy.red_dora_count,
             value_honor_han_proxy_after_discard: value_proxy.value_honor_han_proxy,
             iishanten_forward_metrics,
-            iishanten_push_pull_expected_self_tsumo_value: if clear_threat {
+            iishanten_push_pull_expected_self_tsumo_value: if iishanten_push_pull_value_needed {
                 push_pull_iishanten_expected_self_tsumo_value(
                     context,
                     evaluation,
@@ -908,10 +918,17 @@ impl ThreatKind {
 ///
 /// リーチ情報も Caution / Danger 条件も既存の source of truth をそのまま使い、ここで分類し直さない。
 fn threat_kind(inputs: &PushPullInputs) -> Option<ThreatKind> {
-    match (
-        inputs.opponent_reach_count >= 1,
+    threat_kind_of(
+        inputs.opponent_reach_count,
         inputs.has_actionable_open_hand_threat(),
-    ) {
+    )
+}
+
+fn threat_kind_of(
+    opponent_reach_count: u8,
+    has_actionable_open_hand_threat: bool,
+) -> Option<ThreatKind> {
+    match (opponent_reach_count >= 1, has_actionable_open_hand_threat) {
         (true, true) => Some(ThreatKind::Combined),
         (true, false) => Some(ThreatKind::Reach),
         (false, true) => Some(ThreatKind::ActionableOpenHand),
@@ -1061,26 +1078,28 @@ fn is_strong_tenpai(offense: &PushPullOffenseState, dealer_reacher: bool) -> boo
     }
 }
 
-/// 明確な threat に対して一向聴から押せる攻撃価値があるか。
+/// 他家リーチ単独または actionable OpenHandThreat 単独に対して一向聴から押せる攻撃価値があるか。
 ///
 /// 選択候補を `UNTIL_RYUKYOKU` で評価した
 /// [`PushPullOffenseState::iishanten_push_pull_expected_self_tsumo_value`] を scalar 比較する
 /// だけで、configured horizon の選択値とは比較しない。要求する値は
 /// [`iishanten_push_expected_self_tsumo_min`] が1か所で決める。
 ///
-/// 値を確認できない場合は保守的に押さない。受け入れ・一向聴形・weighted tenpai wait・
-/// weighted prospective value・簡易打点 proxy へ fallback しない。
+/// 値や threshold を確認できない場合は保守的に押さない。受け入れ・一向聴形・weighted tenpai wait・
+/// weighted prospective value・簡易打点 proxy へ fallback しない。Combined threat は threshold を
+/// 持たないので常に `false`。
 fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs) -> bool {
     offense
         .iishanten_push_pull_expected_self_tsumo_value()
-        .is_some_and(|value| value >= iishanten_push_expected_self_tsumo_min(inputs))
+        .zip(iishanten_push_expected_self_tsumo_min(inputs))
+        .is_some_and(|(value, min)| value >= min)
 }
 
 /// 押し引きを判定する pure な暫定 helper。
 ///
 /// 明確な threat が無ければ従来どおり通常の攻撃判断 (`Push`) を続ける。明確な threat がある
-/// 場合は、打牌後が強いテンパイのときと、一向聴で十分な攻撃価値を確認できたときだけ押し、
-/// それ以外は降りる。ただし通常打牌として選んだテンパイ打牌そのものが現在の全 threat target に
+/// 場合は、打牌後が強いテンパイのときと、他家リーチ単独または actionable OpenHandThreat 単独に
+/// 対する一向聴で十分な攻撃価値を確認できたときだけ押し、それ以外は降りる。ただし通常打牌として選んだテンパイ打牌そのものが現在の全 threat target に
 /// hard-safe な場合、または他家リーチがなく actionable target がすべて `Caution` なら、
 /// テンパイの強さを問わず押す。また actionable OpenHandThreat 単独では、通常打牌として選んだ一向聴
 /// 打牌そのものが全 actionable target に hard-safe なら、ExpectedSelfTsumoValue が threshold 未満でも
@@ -1091,7 +1110,8 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs
 /// | 攻撃評価を作れない | `Fold` |
 /// | 強いテンパイ | `Push` |
 /// | 強いと確認できないテンパイ | `Fold` (選択打牌が全 threat target に hard-safe、または actionable target が `Caution` だけなら `Push`) |
-/// | ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
+/// | Combined threat に対する一向聴 | `Fold` (攻撃価値によらない) |
+/// | Reach / actionable OpenHandThreat 単独で ExpectedSelfTsumoValue が threshold 以上の一向聴 | `Push` |
 /// | actionable OpenHandThreat 単独で、選択打牌が全 actionable target に hard-safe な一向聴 | `Push` |
 /// | それ以外の一向聴 | `Fold` |
 /// | actionable OpenHandThreat 単独で、選択打牌が全 actionable target に hard-safe なちょうど二向聴 | `Push` |
@@ -1108,8 +1128,9 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs
 ///
 /// 一向聴の選択打牌 hard-safe 例外は actionable OpenHandThreat 単独だけに適用し、reason は
 /// `SafeIishantenAgainstHighOpenHand` になる。ExpectedSelfTsumoValue の条件を先に評価するので、
-/// 両方を満たす場合は `ValuableIishantenAgainstHighOpenHand` のまま。Reach / Combined の一向聴には
-/// この例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断する。
+/// 両方を満たす場合は `ValuableIishantenAgainstHighOpenHand` のまま。Reach 単独の一向聴には
+/// この例外を適用せず、ExpectedSelfTsumoValue の threshold だけで判断する。Combined threat の一向聴は
+/// ExpectedSelfTsumoValue も hard-safe fact も見ず、常に `IishantenAgainstCombinedThreat` で降りる。
 ///
 /// 二向聴でも同じ hard-safe fact だけを根拠に、actionable OpenHandThreat 単独かつ打牌後がちょうど
 /// 二向聴なら `SafeTwoShantenAgainstHighOpenHand` で押す。相手の親子・visible han proxy・副露数・
@@ -1130,7 +1151,7 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs
 /// 一向聴の攻撃価値の境界は通常打牌選択が既に求めた ExpectedSelfTsumoValue だけで決まる
 /// ([`iishanten_push_expected_self_tsumo_min`])。他家リーチがなく actionable target がすべて
 /// `Caution` の場合だけ基本 threshold より緩い値を使う。値を確認できない一向聴は攻撃価値では押さず、
-/// 受け入れや一向聴形などへ fallback しない。二向聴以上ではこの値を使わない。
+/// 受け入れや一向聴形などへ fallback しない。Combined threat の一向聴と二向聴以上ではこの値を使わない。
 ///
 /// これは説明可能な暫定 policy であり、以下はまだ考慮していない。
 ///
@@ -1187,10 +1208,13 @@ pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
         return PushPullDecision { mode, reason };
     }
 
-    // 4. 一向聴。攻撃価値を確認できた場合と、actionable OpenHandThreat 単独で選択打牌が全 actionable
-    // target に hard-safe な場合だけ押す。Reach / Combined は safe_iishanten を持たない。
+    // 4. 一向聴。Combined threat には攻撃価値によらず降りる。Reach / actionable OpenHandThreat 単独
+    // では攻撃価値を確認できた場合と、actionable OpenHandThreat 単独で選択打牌が全 actionable target に
+    // hard-safe な場合だけ押す。Reach は safe_iishanten を持たない。
     if offense.min_shanten_after_discard == 1 {
-        let (mode, reason) = if is_valuable_iishanten(&offense, inputs) {
+        let (mode, reason) = if threat == ThreatKind::Combined {
+            (PushPullMode::Fold, reasons.iishanten)
+        } else if is_valuable_iishanten(&offense, inputs) {
             (PushPullMode::Push, reasons.valuable_iishanten)
         } else if let Some(safe_iishanten) = reasons
             .safe_iishanten
@@ -1269,7 +1293,7 @@ pub(crate) fn log_push_pull_decision(
         offense_iishanten_weighted_tenpai_wait_type_count = ?inputs.offense.and_then(|offense| offense.iishanten_forward_metrics).and_then(|metrics| metrics.tenpai_wait).map(|wait| wait.weighted_type_count),
         offense_iishanten_selection_expected_self_tsumo_value = ?inputs.offense.and_then(|offense| offense.iishanten_selection_expected_self_tsumo_value()),
         offense_iishanten_push_pull_expected_self_tsumo_value_until_ryukyoku = ?inputs.offense.and_then(|offense| offense.iishanten_push_pull_expected_self_tsumo_value()),
-        offense_iishanten_push_expected_self_tsumo_min = iishanten_push_expected_self_tsumo_min(inputs),
+        offense_iishanten_push_expected_self_tsumo_min = ?iishanten_push_expected_self_tsumo_min(inputs),
         early_fold_best_shanten_after_discard = ?early_fold_best_shanten_after_discard,
         normal_discard = ?normal_discard,
         "push-pull decision",
@@ -5443,29 +5467,13 @@ mod tests {
     }
 
     #[test]
-    fn iishanten_against_a_reach_and_a_caution_keeps_the_combined_threshold() {
+    fn iishanten_against_a_reach_and_a_caution_folds_regardless_of_the_value() {
         for (level, mut facts) in caution_and_danger_facts() {
             if level != OpenHandThreatLevel::Caution {
                 continue;
             }
             facts[2].reached = true;
-            for (points, mode, reason) in [
-                (
-                    750,
-                    PushPullMode::Fold,
-                    PushPullReason::IishantenAgainstCombinedThreat,
-                ),
-                (
-                    999,
-                    PushPullMode::Fold,
-                    PushPullReason::IishantenAgainstCombinedThreat,
-                ),
-                (
-                    1_000,
-                    PushPullMode::Push,
-                    PushPullReason::ValuableIishantenAgainstCombinedThreat,
-                ),
-            ] {
+            for points in [750, 999, 1_000, 1_500, 100_000] {
                 let inputs = inputs_with_threats(
                     1,
                     false,
@@ -5474,39 +5482,36 @@ mod tests {
                     facts,
                 );
                 assert!(inputs.has_only_caution_open_hand_threats(), "{facts:?}");
-                assert_combined_threat_decision(&inputs, mode, reason);
+                assert_combined_threat_decision(
+                    &inputs,
+                    PushPullMode::Fold,
+                    PushPullReason::IishantenAgainstCombinedThreat,
+                );
 
                 // hard-safe でも Combined の一向聴には safe_iishanten の例外がない。
                 assert_combined_threat_decision(
                     &with_selected_normal_discard_hard_safe(inputs),
-                    mode,
-                    reason,
+                    PushPullMode::Fold,
+                    PushPullReason::IishantenAgainstCombinedThreat,
                 );
             }
         }
     }
 
     #[test]
-    fn iishanten_against_a_dealer_reach_and_a_caution_keeps_the_dealer_threshold() {
+    fn iishanten_against_a_dealer_reach_and_a_caution_folds_regardless_of_the_value() {
         let mut facts = late_one_meld_caution_facts();
         facts[2].reached = true;
         facts[2].is_dealer = Some(true);
-        for (points, mode, reason) in [
-            (
-                1_499,
-                PushPullMode::Fold,
-                PushPullReason::IishantenAgainstCombinedThreat,
-            ),
-            (
-                1_500,
-                PushPullMode::Push,
-                PushPullReason::ValuableIishantenAgainstCombinedThreat,
-            ),
-        ] {
+        for points in [1_499, 1_500, 100_000] {
             let inputs =
                 inputs_with_threats(1, true, false, Some(iishanten_with_points(points)), facts);
             assert!(inputs.has_only_caution_open_hand_threats());
-            assert_combined_threat_decision(&inputs, mode, reason);
+            assert_combined_threat_decision(
+                &inputs,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstCombinedThreat,
+            );
         }
     }
 
@@ -5532,10 +5537,6 @@ mod tests {
                 IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
             ),
             (
-                inputs_with_threats(1, false, false, None, reach_and_caution),
-                IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
-            ),
-            (
                 inputs_with_threats(1, false, false, None, reach),
                 IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
             ),
@@ -5543,12 +5544,9 @@ mod tests {
                 inputs_with_threats(1, true, false, None, dealer_reach),
                 DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
             ),
-            (
-                inputs_with_threats(1, true, false, None, dealer_reach_and_caution),
-                DEALER_REACH_IISHANTEN_PUSH_EXPECTED_SELF_TSUMO_MIN,
-            ),
         ] {
-            let logged_min = iishanten_push_expected_self_tsumo_min(&base);
+            let logged_min = iishanten_push_expected_self_tsumo_min(&base)
+                .expect("単独 threat は threshold を持つ");
             assert_eq!(logged_min, expected_min, "{:?}", base.open_hand_threats);
 
             let below = decide_push_pull(&PushPullInputs {
@@ -5566,6 +5564,19 @@ mod tests {
             assert_eq!(below.mode, PushPullMode::Fold, "{below:?}");
             assert_eq!(at.mode, PushPullMode::Push, "{at:?}");
         }
+
+        // Combined threat の一向聴は threshold を持たず、ログにも Push 基準を出さない。
+        for (dealer_reacher, facts) in
+            [(false, reach_and_caution), (true, dealer_reach_and_caution)]
+        {
+            let base = inputs_with_threats(1, dealer_reacher, false, None, facts);
+            assert!(base.has_combined_threat());
+            assert_eq!(iishanten_push_expected_self_tsumo_min(&base), None);
+        }
+        assert_eq!(
+            iishanten_push_expected_self_tsumo_min(&inputs(0, false, None)),
+            None
+        );
     }
 
     #[test]
@@ -5988,18 +5999,7 @@ mod tests {
         let mut facts = danger_open_hand_facts();
         facts[2].reached = true;
 
-        for (points, mode, reason) in [
-            (
-                999,
-                PushPullMode::Fold,
-                PushPullReason::IishantenAgainstCombinedThreat,
-            ),
-            (
-                1_000,
-                PushPullMode::Push,
-                PushPullReason::ValuableIishantenAgainstCombinedThreat,
-            ),
-        ] {
+        for points in [999, 1_000, 100_000] {
             let offense =
                 iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
             let inputs = with_selected_normal_discard_hard_safe(inputs_with_threats(
@@ -6011,7 +6011,11 @@ mod tests {
             ));
 
             assert!(inputs.has_combined_threat());
-            assert_decision(&inputs, mode, reason);
+            assert_decision(
+                &inputs,
+                PushPullMode::Fold,
+                PushPullReason::IishantenAgainstCombinedThreat,
+            );
         }
     }
 
@@ -6272,40 +6276,44 @@ mod tests {
     }
 
     #[test]
-    fn a_combined_threat_alone_does_not_raise_the_iishanten_expected_self_tsumo_threshold() {
-        // 複合というだけでは 1.5 倍にしない。親リーチが含まれるかだけで決まる。
-        let offense =
-            iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(1_000)));
-
-        for facts in [
-            combined_threat_facts(),
-            multiple_reach_combined_threat_facts(),
-        ] {
-            assert_combined_threat_decision(
-                &inputs_with_threats(1, false, false, Some(offense), facts),
-                PushPullMode::Push,
-                PushPullReason::ValuableIishantenAgainstCombinedThreat,
-            );
+    fn iishanten_against_a_combined_threat_folds_even_with_a_very_high_expected_self_tsumo_value() {
+        // 親リーチの有無・リーチ者数・自分が親かどうかによらず、Combined の一向聴は降りる。
+        for points in [1_000, 1_500, 100_000] {
+            let offense =
+                iishanten_offense_with_expected_self_tsumo_value(Some(self_tsumo_points(points)));
+            for facts in [
+                combined_threat_facts(),
+                multiple_reach_combined_threat_facts(),
+            ] {
+                for dealer_reacher in [false, true] {
+                    for self_dealer in [false, true] {
+                        assert_combined_threat_decision(
+                            &inputs_with_threats(
+                                1,
+                                dealer_reacher,
+                                self_dealer,
+                                Some(offense),
+                                facts,
+                            ),
+                            PushPullMode::Fold,
+                            PushPullReason::IishantenAgainstCombinedThreat,
+                        );
+                    }
+                }
+            }
         }
-
-        // 親リーチを含む複合 threat では 1000 点では足りない。
-        assert_combined_threat_decision(
-            &inputs_with_threats(1, true, false, Some(offense), combined_threat_facts()),
-            PushPullMode::Fold,
-            PushPullReason::IishantenAgainstCombinedThreat,
-        );
         assert_combined_threat_decision(
             &inputs_with_threats(
                 1,
                 true,
                 false,
                 Some(iishanten_offense_with_expected_self_tsumo_value(Some(
-                    self_tsumo_points(1_500),
+                    u64::MAX,
                 ))),
                 combined_threat_facts(),
             ),
-            PushPullMode::Push,
-            PushPullReason::ValuableIishantenAgainstCombinedThreat,
+            PushPullMode::Fold,
+            PushPullReason::IishantenAgainstCombinedThreat,
         );
     }
 
