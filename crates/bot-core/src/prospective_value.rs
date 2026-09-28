@@ -653,8 +653,8 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     // terminal scoring を通したテンパイについて、即テンパイ Call と同じロン baseline で生きた
     // 和了牌 variant の役の有無も畳むか。
     //
-    // 2→2 Call の observation だけが要求する観測値で、既定は畳まない。畳む評価器ではテンパイ
-    // 1件につきロン baseline の点数計算が1回増える。
+    // 2→2 Call の片和了 strict 判定 (production と observation が共有) だけが要求する値で、既定は
+    // 畳まない。畳む評価器ではテンパイ1件につきロン baseline の点数計算が1回増える。
     collects_terminal_ron_yaku: bool,
     // この評価器が terminal scoring を通したテンパイ全体の役の結論。1件も通していない場合と、
     // 生きた variant を持つテンパイを1件も通していない場合は `None`。

@@ -54,7 +54,7 @@ pub use call_decision::{
     CallIishantenSelfTsumoDiagnostic, CallKind, CallThreeShantenPassEvaluation,
     CallThreeShantenSelfTsumoDiagnostic, CallThreeShantenSpeedDiagnostic,
     CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallTwoShantenSpeedDiagnostic,
-    CallWaitYaku, CallWaitYakuDiagnostic,
+    CallTwoShantenStaySelfTsumoDiagnostic, CallWaitYaku, CallWaitYakuDiagnostic,
 };
 pub use combined_defense::{
     CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, CombinedDefenseDiagnostic,

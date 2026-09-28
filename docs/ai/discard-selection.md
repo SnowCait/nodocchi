@@ -267,19 +267,64 @@ Pass state 1件だけを評価して全候補で共有し、通常打牌候補�
 
 判断は1向聴からの鳴きと同じで、Call が Pass より厳密に高い場合だけ鳴きます。同値、どちらかが
 unknown、reaction 元不明はすべて Pass です。成立した候補が複数ある場合は、比較に使った Call 側の
-値が最大の候補を選びます。鳴き後の最良打牌が2向聴のままの候補、Kan、他家リーチなど既存 policy
-境界で評価を打ち切る候補は対象外で、順位条件や守備力による例外もありません。
+値が最大の候補を選びます。鳴き後の最良打牌が2向聴のままの候補 (次節)、Kan、他家リーチなど既存
+policy 境界で評価を打ち切る候補は対象外で、順位条件や守備力による例外もありません。
 
-鳴き後の最良打牌が2向聴のままの候補は `PostCallNotIishanten` で止まり、production では Call / Pass
-を比較しません。この候補の評価値・Pass との差・実行コストは、production へ接続する前の
-observation として bot-scenario の
+### 2向聴のまま鳴く Call
+
+現在2向聴から Chi / Pon と合法打牌を経ても2向聴のままの候補は、Call / Pass を **Progress 値だけ**で
+比較します。
+
+| 側 | 値 |
+| --- | --- |
+| Call | 鳴き後の合法打牌を既存の2向聴 Progress comparator で比べ、選んだ打牌の Progress 値 |
+| Pass | 次の自摸を待つ現在2向聴 state の Progress 値 |
+
+Progress は「最初の自摸で1向聴へ進む枝 → production の1向聴 continuation」だけの寄与で、2向聴
+production selection の Progress cohort と同じ尺度です。Call と Pass の両側が2向聴起点なので、
+2→1 のように片側だけ完全な1向聴 continuation になる尺度差はありません。Full (最初の自摸で2向聴を
+維持する枝を足した値) は production では評価しません。117対局の実戦 capture の observation では、
+Full の Call 側が production の2向聴 selection の gate に依存して96%以上の候補で unknown になり、
+latency も Progress より大幅に重かった一方、Progress は全候補で結論を確定できました。
+
+Call になるのは次をすべて満たす場合だけです。
+
+```text
+current effective shanten == 2
+AND 鳴き後の最良打牌で effective shanten == 2
+AND reaction 元が分かる
+AND Call Progress value > Pass Progress value
+AND RequireAllLiveWaits を満たす
+AND 鳴き後の押し引きが Push
+```
+
+同値・どちらかが unknown・reaction 元不明は Pass です。速度優先 policy はありません。
+
+`RequireAllLiveWaits` は、Progress が `CallHigher` の候補だけに、選んだ鳴き後打牌の Progress terminal
+すべてで生きた和了牌 variant すべてに hypothetical ロンで役があるかを判定します。役の判定は即テンパイ
+Call の片和了禁止と同じロン baseline で、役なしの variant があれば `YakuMissing`、確定できなければ
+`HandValueUnknown` で鳴きません。`PassNotLower` / unknown の候補にはこの判定のための再探索も点数
+計算も行いません。判定は Progress 評価が terminal scoring を通した terminal 全体を畳むので、1向聴
+continuation の将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定です。選ばれる
+将来打牌経路上の terminal だけに限定する精密化は [Issue #355](https://github.com/SnowCait/nodocchi/issues/355) で扱います。片和了を許す
+`AllowPartialWaits` は production へ接続せず、observation の counterfactual のままです。
+
+現在2向聴の同じ request に 2→1 と 2→2 の候補が並ぶ場合、2→1 は Full ExpectedSelfTsumoValue、
+2→2 は Progress 値なので raw value は比べません。即テンパイ、成立した 2→1
+(`EligibleTwoShantenSelfTsumo` → `EligibleTwoShantenSpeed`)、成立した 2→2
+(`EligibleTwoShantenStaySelfTsumo`) の順に優先し、2→1 の候補が比較で Pass になっただけなら
+成立した 2→2 を選びます。2→2 の候補同士は Call 側の Progress 値が最大のものを選び、完全同値では
+合法 action の列挙順を維持します。Pass 側の Full と Progress は request ごとにそれぞれ1回だけ評価
+します。
+
+同じ候補の Progress / Full の2つの scope の比較・片和了 policy・実行コストは、bot-scenario の
 [`--two-shanten-stay-call-comparison` / `--compare-two-shanten-stay-call`](../bot-scenario.md#2向聴--chi--pon--2向聴のまま-の-observation)
-でだけ観測します。observation は production の判断・理由・選択 action を変えません。
+で観測できます。observation は production の判断・理由・選択 action を変えません。
 
 ### 鳴き後の押し引き
 
-非テンパイ Call (`1向聴 → 1向聴` / `2向聴 → 1向聴` / `3向聴 → 2向聴`) は、上記の Call / Pass
-比較 (速度優先 policy を含む) で成立した候補だけ、鳴き後の打牌選択が選んだ打牌を既存の
+非テンパイ Call (`1向聴 → 1向聴` / `2向聴 → 1向聴` / `2向聴 → 2向聴` / `3向聴 → 2向聴`) は、上記の
+Call / Pass 比較 (速度優先 policy と、2→2 の片和了判定を含む) で成立した候補だけ、鳴き後の打牌選択が選んだ打牌を既存の
 [押し引き](push-pull.md) へ通します。`Push` なら従来どおり Call 候補として残り、`Push` 以外なら
 `PostCallNotPush` で鳴きません。鳴いた直後に同じ production の押し引きが `Fold` する手を、攻撃価値の
 比較だけで鳴かないようにするためで、即テンパイ Call が成立条件の最後に同じ判定を持つのと同じ
@@ -293,6 +338,7 @@ observation として bot-scenario の
 | --- | --- | --- |
 | 1向聴 → 1向聴 | 通常打牌 selector が鳴き後 state で選んだ打牌 | その selector が選択に使った `ForwardMetrics` |
 | 2向聴 → 1向聴 | 鳴き後1向聴の打牌比較が選んだ打牌 | その比較が選択に使った `ForwardMetrics` |
+| 2向聴 → 2向聴 | 鳴き後2向聴の Progress 比較が選んだ打牌 | 渡さない (二向聴の押し引きは向聴数と選択打牌の hard-safe だけを読む) |
 | 3向聴 → 2向聴 | 鳴き後2向聴の Progress-only 比較が選んだ打牌 | 渡さない (二向聴の押し引きは向聴数と選択打牌の hard-safe だけを読む) |
 
 押し引きの入力は通常の打牌後と同じ入口で組み立て、選択打牌の hard-safe は喰い替え禁止牌を除いた

@@ -3,6 +3,9 @@
 //!
 //! 観測そのものは [`bot_core::observe_two_shanten_stay_calls`] が行い、ここは単一局面と capture
 //! 全体の集計・整形だけを持つ。production の鳴き判断は変わらず、表示のために比較をやり直さない。
+//!
+//! production は Progress の Call / Pass 比較・`RequireAllLiveWaits`・鳴き後 Push/Pull で 2→2 を
+//! 判断する。Full scope と `AllowPartialWaits` は observation-only のまま並べる。
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -70,16 +73,19 @@ fn definition_lines() -> Vec<String> {
         "  observation only: the production call decision, its reasons and the selected action \
          stay unchanged, and nothing here feeds back into the production policy"
             .to_string(),
-        "  targets: current shanten 2, post-call min shanten 2 and reason PostCallNotIishanten, \
-         read from the production call decision and its candidate preparation"
+        "  targets: current shanten 2, post-call min shanten 2 and Chi / Pon, read from the \
+         production candidate preparation whatever the production call decision concluded (a \
+         production call stays a target)"
             .to_string(),
         "  progress: the first draw Progress branch into the production one-shanten continuation; \
-         the call selects its post-call discard with the existing two-shanten Progress comparator"
+         the call selects its post-call discard with the existing two-shanten Progress comparator; \
+         the production 2 -> 2 call / pass uses this scope"
             .to_string(),
-        "  full: the production two-shanten discard selection semantics (Progress cohort, \
-         provisional ranking, dora-difference gate, gated top-2 Full evaluation, production \
-         comparator and parallelism), not a Full evaluation of every discard; a discard the \
-         selection does not evaluate with Full stays unknown"
+        "  full (observation only, never evaluated in production): the production two-shanten \
+         discard selection semantics (Progress cohort, provisional ranking, dora-difference gate, \
+         gated top-2 Full evaluation, production comparator and parallelism), not a Full \
+         evaluation of every discard; a discard the selection does not evaluate with Full stays \
+         unknown"
             .to_string(),
         "  progress and full are compared independently; a tie keeps the pass as the production \
          call / pass policy does"
@@ -88,9 +94,10 @@ fn definition_lines() -> Vec<String> {
          (a timing run with no instrumentation the elapsed time comes from, and an observation \
          run the search stats and the strict ron yaku come from)"
             .to_string(),
-        "  partial-yaku: counterfactual policies on the progress conclusion, never wired into \
-         production; the progress call / pass values and comparison stay the tsumo self-tsumo \
-         values; strict ron yaku folds every live winning-tile variant of every terminal the \
+        "  partial-yaku: policies on the progress conclusion; RequireAllLiveWaits is the \
+         production policy (a production call also needs the post-call push/pull), \
+         AllowPartialWaits stays a counterfactual never wired into production; the progress call \
+         / pass values and comparison stay the tsumo self-tsumo values; strict ron yaku folds every live winning-tile variant of every terminal the \
          selected post-call discard's progress value scored, judged with the hypothetical ron \
          baseline the immediate tenpai call YakuMissing uses (ron availability / furiten is not \
          read), and an unknown is never taken as yaku; RequireAllLiveWaits calls only on call > \
@@ -164,6 +171,10 @@ fn format_candidate(
         candidate.candidate_index,
         call_label(&candidate.action)
     )];
+    lines.push(format!(
+        "  production: {}",
+        format_production_candidate(observation, candidate)
+    ));
     if let Some(source) = candidate.reused_from {
         lines.push(format!(
             "  same post-call state as #{source}: the observation is reused, nothing is evaluated \
@@ -194,17 +205,17 @@ fn format_candidate(
         "    search (observation run): {}",
         format_search(&progress.search, &progress.memo)
     ));
-    lines.push("  partial-yaku (progress, counterfactual)".to_string());
+    lines.push(format!("  {PARTIAL_YAKU_HEADER}"));
     lines.push(format!(
         "    strict ron yaku (hypothetical ron baseline, observation run): {}",
         format_terminal_ron_yaku(candidate)
     ));
     lines.push(format!(
-        "    RequireAllLiveWaits: {}",
+        "    RequireAllLiveWaits (production policy): {}",
         require_all_live_waits_label(candidate.require_all_live_waits())
     ));
     lines.push(format!(
-        "    AllowPartialWaits: {}",
+        "    AllowPartialWaits (counterfactual): {}",
         allow_partial_waits_label(candidate.allow_partial_waits())
     ));
 
@@ -247,6 +258,31 @@ fn format_candidate(
         agreement_label(candidate.comparison_agreement())
     ));
     lines
+}
+
+const PARTIAL_YAKU_HEADER: &str = "partial-yaku (progress; RequireAllLiveWaits = production policy, AllowPartialWaits = counterfactual)";
+
+// production が同じ候補に下した結論。observation はこの結論を読むだけで変えない。
+fn format_production_candidate(
+    observation: &TwoShantenStayCallObservation,
+    candidate: &TwoShantenStayCallCandidate,
+) -> String {
+    let Some(production) = observation
+        .call
+        .as_ref()
+        .and_then(|call| call.candidates.get(candidate.candidate_index))
+    else {
+        return "unavailable".to_string();
+    };
+    format!(
+        "{:?}{}",
+        production.reason,
+        if production.selected {
+            " (selected)"
+        } else {
+            ""
+        }
+    )
 }
 
 fn format_terminal_ron_yaku(candidate: &TwoShantenStayCallCandidate) -> String {
@@ -369,6 +405,10 @@ struct Summary {
     different_discard: usize,
     unavailable_discard: usize,
     partial_yaku: PartialYakuCounts,
+    /// production がそれぞれの対象候補に下した結論の理由ごとの件数。
+    production_reasons: BTreeMap<String, usize>,
+    /// production が採用した対象候補の件数。
+    production_selected: usize,
 }
 
 /// Progress が `call > pass` の候補についての、片和了 policy ごとの結論の件数。
@@ -452,6 +492,19 @@ impl Summary {
                     None => summary.unavailable_discard += 1,
                 }
                 summary.partial_yaku.count(candidate);
+                if let Some(production) = observation
+                    .call
+                    .as_ref()
+                    .and_then(|call| call.candidates.get(candidate.candidate_index))
+                {
+                    *summary
+                        .production_reasons
+                        .entry(format!("{:?}", production.reason))
+                        .or_default() += 1;
+                    if production.selected {
+                        summary.production_selected += 1;
+                    }
+                }
             }
         }
         summary
@@ -538,6 +591,22 @@ fn format_capture_comparison(
             summary.reused
         ),
         String::new(),
+        "Production decision (candidates)".to_string(),
+        format!("  selected: {}", summary.production_selected),
+        format!(
+            "  reasons: {}",
+            if summary.production_reasons.is_empty() {
+                "none".to_string()
+            } else {
+                summary
+                    .production_reasons
+                    .iter()
+                    .map(|(reason, count)| format!("{reason} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+        String::new(),
         "Call / Pass conclusion (candidates)".to_string(),
     ]);
     for scope in SCOPES {
@@ -609,21 +678,23 @@ fn format_capture_comparison(
 
 fn format_partial_yaku(counts: &PartialYakuCounts) -> Vec<String> {
     vec![
-        "Progress call > pass partial-yaku policy (candidates, counterfactual)".to_string(),
+        "Progress call > pass partial-yaku policy (candidates; RequireAllLiveWaits = production \
+         policy, AllowPartialWaits = counterfactual)"
+            .to_string(),
         format!("  candidates: {}", counts.candidates),
         "  strict ron yaku (hypothetical ron baseline, as the immediate tenpai call YakuMissing):"
             .to_string(),
         format!("    all live variants >= 1 han: {}", counts.yaku_at_least),
         format!("    contains no-yaku live variant: {}", counts.yaku_below),
         format!("    unknown: {}", counts.yaku_unknown),
-        "  RequireAllLiveWaits:".to_string(),
+        "  RequireAllLiveWaits (production policy):".to_string(),
         format!("    call: {}", counts.require_all_call),
         format!(
             "    blocked by partial yaku: {}",
             counts.require_all_blocked
         ),
         format!("    unknown: {}", counts.require_all_unknown),
-        "  AllowPartialWaits:".to_string(),
+        "  AllowPartialWaits (counterfactual):".to_string(),
         format!("    call: {}", counts.allow_partial_call),
     ]
 }
@@ -969,14 +1040,17 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.contains("  selected: none\n  reason: PostCallNotIishanten"),
+            output.contains("  selected: none\n  reason: PassSelfTsumoNotLower"),
             "{output}"
         );
         assert!(
-            output.contains("#0 Chi 8m <- 6m 7m: PostCallNotIishanten (2 -> 2 target)"),
+            output.contains("#0 Chi 8m <- 6m 7m: PassSelfTsumoNotLower (2 -> 2 target)"),
             "{output}"
         );
-        assert!(output.contains("Candidate #0 Chi 8m <- 6m 7m"), "{output}");
+        assert!(
+            output.contains("Candidate #0 Chi 8m <- 6m 7m\n  production: PassSelfTsumoNotLower\n"),
+            "{output}"
+        );
         let progress = line_with(&output, "progress: selected");
         assert!(
             progress.starts_with("  progress: selected F, call "),
@@ -1040,7 +1114,7 @@ mod tests {
 
     fn partial_yaku_lines(output: &str) -> Vec<&str> {
         output
-            .split("  partial-yaku (progress, counterfactual)\n")
+            .split(&format!("  {PARTIAL_YAKU_HEADER}\n"))
             .nth(1)
             .unwrap_or_else(|| panic!("{output}"))
             .lines()
@@ -1050,10 +1124,18 @@ mod tests {
 
     #[test]
     fn a_yakuhai_pon_is_a_call_under_both_partial_yaku_policies() {
+        // production も同じ Progress 比較と RequireAllLiveWaits で Call し、Call になった候補も
+        // 観測対象に残る。
         let output = format_scenario_observation(&resolve(HAKU_PON));
 
         assert!(
-            output.contains("  reason: PostCallNotIishanten"),
+            output.contains("  selected: Pon P <- P P\n  reason: EligibleTwoShantenStaySelfTsumo"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "Candidate #0 Pon P <- P P\n  production: EligibleTwoShantenStaySelfTsumo (selected)\n"
+            ),
             "{output}"
         );
         assert!(
@@ -1064,8 +1146,8 @@ mod tests {
             partial_yaku_lines(&output),
             [
                 "    strict ron yaku (hypothetical ron baseline, observation run): AtLeast (all live variants >= 1 han)",
-                "    RequireAllLiveWaits: Call",
-                "    AllowPartialWaits: Call",
+                "    RequireAllLiveWaits (production policy): Call",
+                "    AllowPartialWaits (counterfactual): Call",
             ]
         );
     }
@@ -1075,7 +1157,7 @@ mod tests {
         let output = format_scenario_observation(&resolve(TANYAO_PON));
 
         assert!(
-            output.contains("  reason: PostCallNotIishanten"),
+            output.contains("  selected: none\n  reason: YakuMissing"),
             "{output}"
         );
         assert!(
@@ -1086,8 +1168,8 @@ mod tests {
             partial_yaku_lines(&output),
             [
                 "    strict ron yaku (hypothetical ron baseline, observation run): Below (contains a no-yaku live variant)",
-                "    RequireAllLiveWaits: Blocked (partial yaku)",
-                "    AllowPartialWaits: Call",
+                "    RequireAllLiveWaits (production policy): Blocked (partial yaku)",
+                "    AllowPartialWaits (counterfactual): Call",
             ]
         );
     }
@@ -1117,7 +1199,7 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.contains("    #1 Chi 5s <- 3s 4s: PostCallNotIishanten (2 -> 2 target)"),
+            output.contains("    #1 Chi 5s <- 3s 4s: PassSelfTsumoNotLower (2 -> 2 target)"),
             "{output}"
         );
         assert!(!output.contains("Candidate #0"), "{output}");
@@ -1219,7 +1301,8 @@ mod tests {
             "  flipped conclusion: 0",
             "  undetermined (either scope unknown): 2",
             "  selected post-call discard: same 2, different 1, unavailable 0",
-            "Progress call > pass partial-yaku policy (candidates, counterfactual)\n  candidates: 0",
+            "Production decision (candidates)\n  selected: 0\n  reasons: PassSelfTsumoNotLower 3",
+            "Progress call > pass partial-yaku policy (candidates; RequireAllLiveWaits = production policy, AllowPartialWaits = counterfactual)\n  candidates: 0",
             "RequireAllLiveWaits vs AllowPartialWaits differences (0)",
             "Flipped conclusions (showing up to 10 of 0)",
         ] {
@@ -1259,10 +1342,10 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.contains("request_id=11  production=none (PostCallNotIishanten)  targets=2")
+            output.contains("request_id=11  production=none (PassSelfTsumoNotLower)  targets=2")
         );
         assert!(
-            output.contains("request_id=13  production=none (PostCallNotIishanten)  targets=1")
+            output.contains("request_id=13  production=none (PassSelfTsumoNotLower)  targets=1")
         );
         assert!(!output.contains("request_id=12  production"), "{output}");
     }
@@ -1330,7 +1413,7 @@ mod tests {
             observation: TwoShantenStayCallObservation {
                 call: Some(CallDecisionDiagnostic {
                     selected: None,
-                    reason: CallDecisionReason::PostCallNotIishanten,
+                    reason: CallDecisionReason::PassSelfTsumoNotLower,
                     candidates: Vec::new(),
                 }),
                 reaction_source_player: Some(3),
@@ -1501,7 +1584,7 @@ mod tests {
 
         let output = format_capture_comparison(1, 2, &requests);
         for expected in [
-            "Progress call > pass partial-yaku policy (candidates, counterfactual)\n  candidates: 4\n  strict ron yaku (hypothetical ron baseline, as the immediate tenpai call YakuMissing):\n    all live variants >= 1 han: 1\n    contains no-yaku live variant: 2\n    unknown: 1\n  RequireAllLiveWaits:\n    call: 1\n    blocked by partial yaku: 2\n    unknown: 1\n  AllowPartialWaits:\n    call: 4\n",
+            "Progress call > pass partial-yaku policy (candidates; RequireAllLiveWaits = production policy, AllowPartialWaits = counterfactual)\n  candidates: 4\n  strict ron yaku (hypothetical ron baseline, as the immediate tenpai call YakuMissing):\n    all live variants >= 1 han: 1\n    contains no-yaku live variant: 2\n    unknown: 1\n  RequireAllLiveWaits (production policy):\n    call: 1\n    blocked by partial yaku: 2\n    unknown: 1\n  AllowPartialWaits (counterfactual):\n    call: 4\n",
             "RequireAllLiveWaits vs AllowPartialWaits differences (3)\n  synthetic.jsonl  request_id=1  #1 Pon 1m <- 1m 1m\n    progress: selected 1m, call 0.000070, pass 0.000050, call > pass\n    strict ron yaku: Below (contains a no-yaku live variant), RequireAllLiveWaits: Blocked (partial yaku), AllowPartialWaits: Call\n  synthetic.jsonl  request_id=1  #2 Pon 1m <- 1m 1m  reused_from=#1\n",
             "  synthetic.jsonl  request_id=2  #0 Pon 1m <- 1m 1m\n    progress: selected 1m, call 0.000080, pass 0.000050, call > pass\n    strict ron yaku: Unknown, RequireAllLiveWaits: Unknown, AllowPartialWaits: Call\n\n",
         ] {

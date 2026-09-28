@@ -3,9 +3,9 @@ use bot_core::{
     CallThreeShantenPassEvaluation, CallTwoShantenPassEvaluation, CombinedDefenseCategory,
     DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, KanCandidateDiagnostic, KanDecisionDiagnostic,
-    KanDecisionReason, KanKind, LegalAction, OpenHandDefenseCategory, PushPullDecision,
-    PushPullMode, PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason, ReachTimingReason,
-    RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
+    KanDecisionReason, KanKind, LegalAction, OpenHandDefenseCategory, ProspectiveHanVerdict,
+    PushPullDecision, PushPullMode, PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason,
+    ReachTimingReason, RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
     StrongTenpaiRequirement, TenpaiOffenseValue,
 };
 use bot_logic::{PermanentFuriten, TileId, TileType};
@@ -273,6 +273,13 @@ pub enum AnalysisCallSelfTsumo {
         pass_evaluation: CallTwoShantenPassEvaluation,
         comparison: AnalysisCallSelfTsumoComparison,
     },
+    /// 現在2向聴から鳴き後の最良打牌でも2向聴のままの候補の Progress 比較と片和了判定。
+    TwoShantenStay {
+        pass_evaluation: CallTwoShantenPassEvaluation,
+        comparison: AnalysisCallSelfTsumoComparison,
+        /// Progress が `CallHigher` の候補だけが持つ片和了の strict 判定。
+        ron_yaku: Option<ProspectiveHanVerdict>,
+    },
     /// 現在3向聴から鳴き後の最良打牌で2向聴になる候補の比較。
     ThreeShanten {
         pass_evaluation: CallThreeShantenPassEvaluation,
@@ -485,6 +492,17 @@ fn call_self_tsumo(candidate: &CallCandidateDiagnostic) -> Option<AnalysisCallSe
             },
         });
     }
+    if let Some(compared) = candidate.two_shanten_stay_self_tsumo.as_ref() {
+        return Some(AnalysisCallSelfTsumo::TwoShantenStay {
+            pass_evaluation: compared.pass_evaluation,
+            comparison: AnalysisCallSelfTsumoComparison {
+                pass_expected_self_tsumo_value: compared.pass_expected_self_tsumo_value,
+                call_expected_self_tsumo_value: compared.call_expected_self_tsumo_value,
+                verdict: compared.comparison,
+            },
+            ron_yaku: compared.ron_yaku,
+        });
+    }
     let compared = candidate.three_shanten_self_tsumo.as_ref()?;
     Some(AnalysisCallSelfTsumo::ThreeShanten {
         pass_evaluation: compared.pass_evaluation,
@@ -547,8 +565,8 @@ mod tests {
     use crate::scenario::{Scenario, ScenarioSpec};
     use bot_core::{
         CallKind, CallTwoShantenSelfTsumoDiagnostic, CallTwoShantenSpeedDiagnostic,
-        CombinedDefenseCategory, OpenHandDefenseCategory, OpponentHonorValue, ShantenAgent,
-        TenpaiOffenseMode,
+        CallTwoShantenStaySelfTsumoDiagnostic, CombinedDefenseCategory, OpenHandDefenseCategory,
+        OpponentHonorValue, ShantenAgent, TenpaiOffenseMode,
     };
     use bot_logic::{DiscardEvaluation, TileCounts, select_best_discard};
 
@@ -1080,6 +1098,54 @@ mod tests {
     }
 
     #[test]
+    fn a_two_shanten_stay_call_keeps_its_progress_comparison_and_ron_yaku() {
+        let stay = CallTwoShantenStaySelfTsumoDiagnostic {
+            reaction_source_player: Some(3),
+            pass_evaluation: CallTwoShantenPassEvaluation::Progress,
+            pass_expected_self_tsumo_value: Some(15_685_656),
+            call_expected_self_tsumo_value: Some(98_161_601),
+            comparison: CallIishantenComparison::CallHigher,
+            ron_yaku: Some(ProspectiveHanVerdict::AtLeast),
+        };
+        let selected = CallCandidateDiagnostic {
+            two_shanten_stay_self_tsumo: Some(stay),
+            eligible: true,
+            selected: true,
+            ..call_candidate_diagnostic(
+                124,
+                CallDecisionReason::EligibleTwoShantenStaySelfTsumo,
+                None,
+                None,
+            )
+        };
+        let diagnostic = CallDecisionDiagnostic {
+            selected: Some(selected.action.clone()),
+            reason: selected.reason,
+            candidates: vec![selected],
+        };
+
+        let projected = call(&diagnostic);
+        let candidate = projected.compared_candidate.expect("採用した候補");
+
+        assert_eq!(
+            candidate.reason,
+            CallDecisionReason::EligibleTwoShantenStaySelfTsumo
+        );
+        assert_eq!(
+            candidate.self_tsumo,
+            AnalysisCallSelfTsumo::TwoShantenStay {
+                pass_evaluation: CallTwoShantenPassEvaluation::Progress,
+                comparison: AnalysisCallSelfTsumoComparison {
+                    pass_expected_self_tsumo_value: Some(15_685_656),
+                    call_expected_self_tsumo_value: Some(98_161_601),
+                    verdict: CallIishantenComparison::CallHigher,
+                },
+                ron_yaku: Some(ProspectiveHanVerdict::AtLeast),
+            }
+        );
+    }
+
+    #[test]
     fn the_compared_call_candidate_can_differ_from_the_reason_source() {
         // 採用が無く、最初の候補が self-tsumo 比較を持たない局面。比較は次の候補から取り、
         // 理由の由来は最初の候補のままにする。
@@ -1262,6 +1328,7 @@ mod tests {
             iishanten_acceptance: None,
             iishanten_self_tsumo: None,
             two_shanten_self_tsumo,
+            two_shanten_stay_self_tsumo: None,
             three_shanten_self_tsumo: None,
             eligible: false,
             selected: false,

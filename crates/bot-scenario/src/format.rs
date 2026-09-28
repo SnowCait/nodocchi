@@ -10,22 +10,22 @@ use bot_core::{
     AgentActionSource, CallCandidateDiagnostic, CallDecisionDiagnostic,
     CallIishantenAcceptanceDiagnostic, CallIishantenComparison, CallIishantenSelfTsumoDiagnostic,
     CallThreeShantenPassEvaluation, CallThreeShantenSelfTsumoDiagnostic,
-    CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic, CallWaitYaku,
-    CombinedDefenseCandidateDiagnostic, CombinedDefenseDiagnostic,
-    CurrentTenpaiContinuationCandidate, CurrentTenpaiContinuationDiagnostic, DamatenValue,
-    DamatenValueDiagnostic, DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext,
-    KakanChankanDiagnostic, KakanChankanSafety, KanCandidateDiagnostic, KanDecisionDiagnostic,
-    KanHandDiagnostic, LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic,
-    OffenseValue, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic,
-    OpenHandThreatAssessment, PlayerThreatDiagnostic, ProspectiveBaselineValue,
-    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveDrawVariantValue,
-    ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
-    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
-    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
-    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
-    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
-    RonOpportunityWaitDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
-    StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
+    CallTwoShantenPassEvaluation, CallTwoShantenSelfTsumoDiagnostic,
+    CallTwoShantenStaySelfTsumoDiagnostic, CallWaitYaku, CombinedDefenseCandidateDiagnostic,
+    CombinedDefenseDiagnostic, CurrentTenpaiContinuationCandidate,
+    CurrentTenpaiContinuationDiagnostic, DamatenValue, DamatenValueDiagnostic,
+    DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext, KakanChankanDiagnostic,
+    KakanChankanSafety, KanCandidateDiagnostic, KanDecisionDiagnostic, KanHandDiagnostic,
+    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
+    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
+    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
+    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveHanVerdict,
+    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
+    ProspectiveWaitValue, PushPullDecision, PushPullInputs, PushPullOffenseState,
+    ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic, ReachPublicSafetyEvidence,
+    ReachRonBaselineDiagnostic, ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
+    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuVerdict,
+    ShantenDecisionDiagnostic, StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
     StructuralExpectedDealInLossEvidence, TenpaiContinuationBranch, TenpaiContinuationCandidate,
     TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
     TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
@@ -593,6 +593,9 @@ fn format_call_candidate(candidate: &CallCandidateDiagnostic, verbose: bool) -> 
     lines.extend(format_call_two_shanten_self_tsumo(
         candidate.two_shanten_self_tsumo.as_ref(),
     ));
+    lines.extend(format_call_two_shanten_stay_self_tsumo(
+        candidate.two_shanten_stay_self_tsumo.as_ref(),
+    ));
     lines.extend(format_call_three_shanten_self_tsumo(
         candidate.three_shanten_self_tsumo.as_ref(),
     ));
@@ -734,6 +737,46 @@ fn call_two_shanten_pass_evaluation_label(
 ) -> &'static str {
     match evaluation {
         CallTwoShantenPassEvaluation::Full => "full",
+        CallTwoShantenPassEvaluation::Progress => "progress",
+    }
+}
+
+// `現在2向聴 → 2向聴のまま` の候補だけに出る。片和了の strict 判定は Progress が call higher の
+// 候補だけが持ち、判定しなかったことと「役を確定できない」を区別する。
+fn format_call_two_shanten_stay_self_tsumo(
+    comparison: Option<&CallTwoShantenStaySelfTsumoDiagnostic>,
+) -> Vec<String> {
+    let Some(comparison) = comparison else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "    two-shanten stay self-tsumo: pass {} {} / call {}",
+            call_two_shanten_pass_evaluation_label(comparison.pass_evaluation),
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+        ),
+        format!(
+            "    two-shanten stay comparison: {}",
+            call_iishanten_comparison_label(comparison.comparison)
+        ),
+        format!(
+            "    two-shanten stay ron yaku (RequireAllLiveWaits): {}",
+            call_two_shanten_stay_ron_yaku_label(comparison.ron_yaku)
+        ),
+        format!(
+            "    reaction source player: {}",
+            format_seat(comparison.reaction_source_player)
+        ),
+    ]
+}
+
+fn call_two_shanten_stay_ron_yaku_label(ron_yaku: Option<ProspectiveHanVerdict>) -> &'static str {
+    match ron_yaku {
+        None => NOT_EVALUATED,
+        Some(ProspectiveHanVerdict::AtLeast) => "yaku on every live variant",
+        Some(ProspectiveHanVerdict::Below) => "no-yaku live variant",
+        Some(ProspectiveHanVerdict::Unknown) => UNKNOWN,
     }
 }
 
@@ -3482,6 +3525,18 @@ fn summary_call_self_tsumo_comparison(self_tsumo: AnalysisCallSelfTsumo) -> Stri
             format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
             format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
             call_iishanten_comparison_label(comparison.verdict),
+        ),
+        AnalysisCallSelfTsumo::TwoShantenStay {
+            pass_evaluation,
+            comparison,
+            ron_yaku,
+        } => format!(
+            "  call two-shanten stay self-tsumo: pass {} {} / call {} ({}, ron yaku {})",
+            call_two_shanten_pass_evaluation_label(pass_evaluation),
+            format_self_tsumo_value(comparison.pass_expected_self_tsumo_value),
+            format_self_tsumo_value(comparison.call_expected_self_tsumo_value),
+            call_iishanten_comparison_label(comparison.verdict),
+            call_two_shanten_stay_ron_yaku_label(ron_yaku),
         ),
         AnalysisCallSelfTsumo::ThreeShanten {
             pass_evaluation,
