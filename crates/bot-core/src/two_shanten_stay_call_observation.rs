@@ -11,7 +11,8 @@
 //! | --- | --- |
 //! | Progress scope | production の Call / Pass 比較と同じ尺度 |
 //! | Full scope | observation-only。production では評価しない |
-//! | `RequireAllLiveWaits` | production policy と同じ strict 判定 |
+//! | `RequireAllLiveWaits` (all-terminal strict) | production policy と同じ strict 判定 |
+//! | `RequireAllLiveWaits` (selected-path strict) | observation-only の比較 |
 //! | `AllowPartialWaits` | observation-only の counterfactual |
 //!
 //! # 対象候補
@@ -59,13 +60,15 @@
 //!
 //! # 片和了 policy
 //!
-//! Progress の Call / Pass 結論に、片和了をどう扱うかの2つの policy を当てはめた結論も並べる。
-//! `RequireAllLiveWaits` は production policy と同じ判定で、`AllowPartialWaits` は production へ
-//! 接続しない counterfactual のまま。
+//! Progress の Call / Pass 結論に、片和了をどう扱うかの policy を当てはめた結論も並べる。
+//! all-terminal strict の `RequireAllLiveWaits` は production policy と同じ判定で、selected-path
+//! strict の `RequireAllLiveWaits` と `AllowPartialWaits` は production へ接続しない observation の
+//! 比較のまま。
 //!
 //! | policy | Call 相当になる条件 |
 //! | --- | --- |
-//! | [`TwoShantenStayRequireAllLiveWaits`] | Progress が `CallHigher` で、選んだ鳴き後打牌の Progress terminal すべてで、生きた和了牌 variant すべてに hypothetical ロンで役がある |
+//! | [`TwoShantenStayRequireAllLiveWaits`] (all-terminal) | Progress が `CallHigher` で、選んだ鳴き後打牌の Progress terminal すべてで、生きた和了牌 variant すべてに hypothetical ロンで役がある |
+//! | [`TwoShantenStayRequireAllLiveWaits`] (selected-path) | Progress が `CallHigher` で、そのうち1向聴 continuation が選ぶ将来打牌の経路上の terminal すべてで同じ条件を満たす |
 //! | [`TwoShantenStayAllowPartialWaits`] | Progress が `CallHigher` |
 //!
 //! `RequireAllLiveWaits` は即テンパイ Call の片和了禁止 ([`CallDecisionReason::YakuMissing`]) と
@@ -80,13 +83,24 @@
 //! non-winning draw とする) をそのまま使い、別の補正をしない。Progress の Call / Pass 値と比較は
 //! どちらの policy でも変わらない。
 //!
-//! 役は production と同じ helper ([`two_shanten_stay_call_terminal_ron_yaku`]) で、観測 run の
-//! 中で選んだ打牌1件だけを新しい memo で評価し直して畳む。observation 側で別実装を持たない。
-//! 計測 run には何も足さない。
+//! all-terminal strict は Progress 評価が terminal scoring を通した terminal 全体を畳むので、1向聴
+//! continuation の将来打牌比較で最終的に選ばれない打牌の枝の terminal も含む。selected-path strict は
+//! そのうち、continuation の既存比較が実際に選ぶ将来打牌の経路上にある terminal だけを畳む。
+//! terminal ごとの判定 (ロン baseline・生きた variant・`Below` / `Unknown` の規則) はどちらも同じ。
+//!
+//! 役は観測 run の中で、選んだ打牌1件だけを新しい memo で評価し直して畳む。この評価は production の
+//! [`two_shanten_stay_call_terminal_ron_yaku`](crate::call_decision::two_shanten_stay_call_terminal_ron_yaku)
+//! と同じ探索・同じ terminal scoring で、all-terminal strict も同じ結論になる。selected-path strict は
+//! 同じ評価の中で、1向聴 continuation の探索結果 (値の集計に使った枝そのもの) を受け取って辿り、
+//! 評価器が terminal scoring のときに memo へ載せた役の結論を読むだけなので、selected-path のための
+//! 追加探索も追加の点数計算も無い。計測 run には何も足さない。production の鳴き判断はこの経路を
+//! 通らず、selected-path を求めない。
 
 use std::time::{Duration, Instant};
 
-use bot_logic::{FixedMeldCount, SearchStateMemoStats, ThreeShantenSearchStats, TileType};
+use bot_logic::{
+    DiscardEvaluation, FixedMeldCount, SearchStateMemoStats, ThreeShantenSearchStats, TileType,
+};
 
 use crate::action::{LegalAction, preferred_dahai_action_for_type};
 pub use crate::call_decision::TwoShantenStayCallTerminalRonYaku;
@@ -95,10 +109,12 @@ use crate::call_decision::{
     TwoShantenStayCallSource, TwoShantenStayCallState, compare_call_pass_self_tsumo_values,
     evaluate_call_decision_with_two_shanten_stay_calls, pass_two_shanten_expected_self_tsumo_value,
     pass_two_shanten_progress_self_tsumo_value, reaction_draw_distance,
-    two_shanten_stay_call_terminal_ron_yaku,
 };
 use crate::context::GameContext;
-use crate::discard_selection::select_two_shanten_progress_post_call_discard_observed;
+use crate::discard_selection::{
+    select_two_shanten_progress_post_call_discard_observed,
+    two_shanten_progress_post_call_terminal_ron_yakus,
+};
 use crate::iishanten_selection_depth_comparison::measured_on_a_fresh_thread;
 use crate::prospective_value::ProspectiveHanVerdict;
 use crate::two_shanten_full_parallel_comparison::{
@@ -175,8 +191,12 @@ pub struct TwoShantenStayCallProgress {
     /// 計測 run と観測 run が同じ打牌・同じ値になったか。
     pub runs_agree: bool,
     /// 観測 run で選んだ鳴き後打牌の Progress terminal すべてで、生きた和了牌 variant すべてに
-    /// hypothetical ロンで役があるか。`RequireAllLiveWaits` が読む。
+    /// hypothetical ロンで役があるか (all-terminal strict)。production policy の
+    /// `RequireAllLiveWaits` が読むのと同じ判定。
     pub terminal_ron_yaku: TwoShantenStayCallTerminalRonYaku,
+    /// 同じ評価のうち、1向聴 continuation の既存比較が選ぶ将来打牌の経路上の terminal だけで
+    /// 判定した結論 (selected-path strict)。observation-only で、production は読まない。
+    pub selected_path_ron_yaku: TwoShantenStayCallTerminalRonYaku,
 }
 
 /// 即テンパイ Call と同じく、生きた和了牌 variant すべてにロン baseline で役を要求する policy の
@@ -276,11 +296,27 @@ impl TwoShantenStayCallCandidate {
         }
     }
 
+    /// production policy と同じ all-terminal strict の `RequireAllLiveWaits`。
     pub fn require_all_live_waits(&self) -> TwoShantenStayRequireAllLiveWaits {
-        match (
-            self.progress_comparison,
-            self.progress.terminal_ron_yaku.verdict,
-        ) {
+        self.require_all_live_waits_with(self.progress.terminal_ron_yaku.verdict)
+    }
+
+    /// selected-path strict を当てはめた `RequireAllLiveWaits`。observation-only の
+    /// counterfactual で、production は all-terminal strict ([`Self::require_all_live_waits`]) のまま。
+    pub fn selected_path_require_all_live_waits(&self) -> TwoShantenStayRequireAllLiveWaits {
+        self.require_all_live_waits_with(self.progress.selected_path_ron_yaku.verdict)
+    }
+
+    /// all-terminal strict と selected-path strict の役の結論が違うか。
+    pub fn strict_ron_yaku_scopes_differ(&self) -> bool {
+        self.progress.terminal_ron_yaku.verdict != self.progress.selected_path_ron_yaku.verdict
+    }
+
+    fn require_all_live_waits_with(
+        &self,
+        ron_yaku: ProspectiveHanVerdict,
+    ) -> TwoShantenStayRequireAllLiveWaits {
+        match (self.progress_comparison, ron_yaku) {
             (CallIishantenComparison::PassNotLower, _) => TwoShantenStayRequireAllLiveWaits::Pass,
             (CallIishantenComparison::Unknown, _)
             | (CallIishantenComparison::CallHigher, ProspectiveHanVerdict::Unknown) => {
@@ -487,6 +523,7 @@ struct ProgressRun {
     search: ThreeShantenSearchStats,
     memo: SearchStateMemoStats,
     terminal_ron_yaku: TwoShantenStayCallTerminalRonYaku,
+    selected_path_ron_yaku: TwoShantenStayCallTerminalRonYaku,
 }
 
 fn observe_progress_call(
@@ -503,6 +540,7 @@ fn observe_progress_call(
         search: observation.search,
         memo: observation.memo,
         terminal_ron_yaku: observation.terminal_ron_yaku,
+        selected_path_ron_yaku: observation.selected_path_ron_yaku,
     }
 }
 
@@ -539,15 +577,17 @@ fn progress_run(
             TwoShantenStayCallValue::Unknown(TwoShantenStayCallUnknown::NoPostCallSelection),
         ),
     };
-    let terminal_ron_yaku = match &observed.selection {
-        Some(selection) if observation_run => two_shanten_stay_call_terminal_ron_yaku(
+    let (terminal_ron_yaku, selected_path_ron_yaku) = match &observed.selection {
+        Some(selection) if observation_run => terminal_ron_yakus(
             context,
-            &state.post_call_tiles,
-            &state.post_call_melds,
+            state,
             &selection.evaluation,
             selection.expected_self_tsumo_value,
         ),
-        _ => TwoShantenStayCallTerminalRonYaku::UNAVAILABLE,
+        _ => (
+            TwoShantenStayCallTerminalRonYaku::UNAVAILABLE,
+            TwoShantenStayCallTerminalRonYaku::UNAVAILABLE,
+        ),
     };
     ProgressRun {
         selected,
@@ -556,7 +596,50 @@ fn progress_run(
         search: observed.search,
         memo: observed.memo,
         terminal_ron_yaku,
+        selected_path_ron_yaku,
     }
+}
+
+// 選んだ鳴き後打牌1件を新しい memo で評価し直し、all-terminal strict と selected-path strict を
+// 同じ評価1回から回収する。all-terminal strict は production の
+// [`two_shanten_stay_call_terminal_ron_yaku`] と同じ評価・同じ判定で、selected-path strict はその
+// 評価の探索結果を辿って読むだけなので、selected-path のための追加探索も追加の点数計算も無い。
+//
+// 評価し直した値が比較に使った値と一致しない場合は、別の terminal 集合を見た可能性があるので
+// どちらも `Unknown`。値を確定できなかった評価は途中の continuation までしか辿れていないので、
+// selected-path も `Unknown` にする。
+fn terminal_ron_yakus(
+    context: &GameContext,
+    state: &TwoShantenStayCallState,
+    evaluation: &DiscardEvaluation,
+    call_value: Option<u64>,
+) -> (
+    TwoShantenStayCallTerminalRonYaku,
+    TwoShantenStayCallTerminalRonYaku,
+) {
+    let yakus = two_shanten_progress_post_call_terminal_ron_yakus(
+        context,
+        &state.post_call_tiles,
+        &state.post_call_melds,
+        evaluation,
+    );
+    let reproduces_value = yakus.value == call_value;
+    let judged = |verdict| TwoShantenStayCallTerminalRonYaku {
+        verdict: if reproduces_value {
+            verdict
+        } else {
+            ProspectiveHanVerdict::Unknown
+        },
+        reproduces_value,
+    };
+    (
+        judged(yakus.all_terminals),
+        judged(if yakus.value.is_some() {
+            yakus.selected_path
+        } else {
+            ProspectiveHanVerdict::Unknown
+        }),
+    )
 }
 
 // Full 側は production の2向聴 selection を production と同じ並列度で通す。計測 run と観測 run
@@ -642,12 +725,13 @@ mod tests {
     use crate::agents::ShantenAgent;
     use crate::call_decision::{
         CALL_TWO_SHANTEN_SHANTEN, TwoShantenStayCallTarget, evaluate_call_decision,
+        two_shanten_stay_call_terminal_ron_yaku,
     };
     use crate::context::TableStateFacts;
     use crate::decision_timing::CallDecisionTimer;
     use crate::discard_selection::{
         LookaheadDiagnosticScope, lookahead_inputs, select_discard_action_with_evaluation,
-        with_production_iishanten_continuation,
+        select_two_shanten_progress_post_call_discard, with_production_iishanten_continuation,
     };
     use crate::prospective_value::ProductionProspectiveValuator;
 
@@ -688,6 +772,15 @@ mod tests {
     const TANYAO_TARGET: u8 = 62;
     const TANYAO_PON_CONSUMED: [u8; 2] = [60, 61];
     const TANYAO_DORA_INDICATOR: u8 = 22;
+
+    // 6m7m 33p 6p 77p 3s44s 66s7s、ドラ F。上家の 4s を Pon しても2向聴のままで、Progress は
+    // Call が高い。役は断幺頼みで、1向聴 continuation が手変わりの後に比べて選ばなかった打牌の枝
+    // (么九牌を残す枝) には役なしの terminal があるが、選ばれる将来打牌の経路上の terminal は
+    // どれも生きた和了牌すべてに役がある。
+    const SELECTED_PATH_HAND: [u8; 13] = [20, 24, 44, 45, 56, 60, 61, 80, 84, 85, 92, 93, 96];
+    const SELECTED_PATH_TARGET: u8 = 86;
+    const SELECTED_PATH_PON_CONSUMED: [u8; 2] = [84, 85];
+    const SELECTED_PATH_DORA_INDICATOR: u8 = 124;
 
     const KAMICHA: u8 = 3;
 
@@ -836,6 +929,47 @@ mod tests {
             assert_eq!(production.comparison, candidate.progress_comparison);
             if let Some(ron_yaku) = production.ron_yaku {
                 assert_eq!(ron_yaku, candidate.progress.terminal_ron_yaku.verdict);
+            }
+        }
+    }
+
+    // observation の all-terminal strict は production の helper
+    // ([`two_shanten_stay_call_terminal_ron_yaku`]) と同じ評価・同じ判定で、selected-path strict は
+    // その terminal の一部だけを見るので、all-terminal が `AtLeast` なら selected-path も `AtLeast`。
+    fn assert_the_all_terminal_strict_is_the_production_helper(
+        ctx: &GameContext,
+        actions: &[LegalAction],
+        observation: &TwoShantenStayCallObservation,
+    ) {
+        let (_, targets) =
+            evaluate_call_decision_with_two_shanten_stay_calls(ctx, actions).unwrap();
+        assert_eq!(targets.len(), observation.candidates.len());
+        for (candidate, target) in observation.candidates.iter().zip(&targets) {
+            let TwoShantenStayCallSource::Evaluated(state) = &target.source else {
+                continue;
+            };
+            let selection = select_two_shanten_progress_post_call_discard(
+                ctx,
+                &state.post_call_tiles,
+                &state.post_call_melds,
+                &state.post_call_discards,
+            )
+            .unwrap();
+            assert_eq!(
+                candidate.progress.terminal_ron_yaku,
+                two_shanten_stay_call_terminal_ron_yaku(
+                    ctx,
+                    &state.post_call_tiles,
+                    &state.post_call_melds,
+                    &selection.evaluation,
+                    selection.expected_self_tsumo_value,
+                )
+            );
+            if candidate.progress.terminal_ron_yaku.verdict == ProspectiveHanVerdict::AtLeast {
+                assert_eq!(
+                    candidate.progress.selected_path_ron_yaku.verdict,
+                    ProspectiveHanVerdict::AtLeast
+                );
             }
         }
     }
@@ -1215,6 +1349,11 @@ mod tests {
 
     #[test]
     fn a_call_with_yaku_on_every_live_wait_is_a_call_under_both_policies() {
+        assert_the_all_terminal_strict_is_the_production_helper(
+            &haku_context(),
+            &haku_actions(),
+            &HAKU_OBSERVATION,
+        );
         let candidate = only_candidate(&HAKU_OBSERVATION);
 
         assert_eq!(
@@ -1228,8 +1367,18 @@ mod tests {
                 reproduces_value: true,
             }
         );
+        // 経路上の terminal は all-terminal の一部なので、selected-path も役がある。
+        assert_eq!(
+            candidate.progress.selected_path_ron_yaku,
+            candidate.progress.terminal_ron_yaku
+        );
+        assert!(!candidate.strict_ron_yaku_scopes_differ());
         assert_eq!(
             candidate.require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Call
+        );
+        assert_eq!(
+            candidate.selected_path_require_all_live_waits(),
             TwoShantenStayRequireAllLiveWaits::Call
         );
         assert_eq!(
@@ -1260,6 +1409,18 @@ mod tests {
             TwoShantenStayAllowPartialWaits::Call
         );
         assert!(candidate.partial_yaku_policies_differ());
+        // selected-path strict は production policy を変えず、observation 上の結論だけが変わる。
+        assert_eq!(
+            candidate.selected_path_require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Call
+        );
+        assert!(candidate.strict_ron_yaku_scopes_differ());
+        candidate.progress.selected_path_ron_yaku.verdict = ProspectiveHanVerdict::Below;
+        assert_eq!(
+            candidate.selected_path_require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::BlockedByPartialYaku
+        );
+        assert!(!candidate.strict_ron_yaku_scopes_differ());
     }
 
     #[test]
@@ -1273,6 +1434,7 @@ mod tests {
         let actions = vec![pon(TANYAO_TARGET, TANYAO_PON_CONSUMED), LegalAction::None];
 
         let observation = observe_keeping_production(&ctx, &actions);
+        assert_the_all_terminal_strict_is_the_production_helper(&ctx, &actions, &observation);
         let candidate = only_candidate(&observation);
 
         // production も同じ strict 判定で片和了を鳴かない。
@@ -1296,12 +1458,81 @@ mod tests {
             candidate.require_all_live_waits(),
             TwoShantenStayRequireAllLiveWaits::BlockedByPartialYaku
         );
+        // 選ばれる将来打牌の経路上にも役なしの variant を含む terminal が残る。
+        assert_eq!(
+            candidate.progress.selected_path_ron_yaku,
+            TwoShantenStayCallTerminalRonYaku {
+                verdict: ProspectiveHanVerdict::Below,
+                reproduces_value: true,
+            }
+        );
+        assert!(!candidate.strict_ron_yaku_scopes_differ());
+        assert_eq!(
+            candidate.selected_path_require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::BlockedByPartialYaku
+        );
         // 役なしの variant を non-winning draw とした既存 Progress 値の結論をそのまま使う。
         assert_eq!(
             candidate.allow_partial_waits(),
             TwoShantenStayAllowPartialWaits::Call
         );
         assert!(candidate.partial_yaku_policies_differ());
+    }
+
+    #[test]
+    fn a_no_yaku_terminal_off_the_selected_path_blocks_only_the_all_terminal_strict() {
+        let ctx = reaction_context_with_dora(
+            &SELECTED_PATH_HAND,
+            SELECTED_PATH_TARGET,
+            Some(KAMICHA),
+            SELECTED_PATH_DORA_INDICATOR,
+        );
+        let actions = vec![
+            pon(SELECTED_PATH_TARGET, SELECTED_PATH_PON_CONSUMED),
+            LegalAction::None,
+        ];
+
+        let observation = observe_keeping_production(&ctx, &actions);
+        assert_the_all_terminal_strict_is_the_production_helper(&ctx, &actions, &observation);
+        let candidate = only_candidate(&observation);
+
+        // production は all-terminal strict のままなので、この候補を片和了として鳴かない。
+        assert_eq!(
+            observation.production_reason(),
+            Some(CallDecisionReason::YakuMissing)
+        );
+        assert_the_progress_scope_matches_the_production(&observation);
+        assert_eq!(
+            candidate.progress_comparison,
+            CallIishantenComparison::CallHigher
+        );
+        assert_eq!(
+            candidate.progress.terminal_ron_yaku,
+            TwoShantenStayCallTerminalRonYaku {
+                verdict: ProspectiveHanVerdict::Below,
+                reproduces_value: true,
+            }
+        );
+        assert_eq!(
+            candidate.progress.selected_path_ron_yaku,
+            TwoShantenStayCallTerminalRonYaku {
+                verdict: ProspectiveHanVerdict::AtLeast,
+                reproduces_value: true,
+            }
+        );
+        assert!(candidate.strict_ron_yaku_scopes_differ());
+        assert_eq!(
+            candidate.require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::BlockedByPartialYaku
+        );
+        assert_eq!(
+            candidate.selected_path_require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Call
+        );
+        assert_eq!(
+            candidate.allow_partial_waits(),
+            TwoShantenStayAllowPartialWaits::Call
+        );
     }
 
     #[test]
@@ -1322,7 +1553,15 @@ mod tests {
             ProspectiveHanVerdict::Unknown
         );
         assert_eq!(
+            candidate.progress.selected_path_ron_yaku.verdict,
+            ProspectiveHanVerdict::Unknown
+        );
+        assert_eq!(
             candidate.require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Unknown
+        );
+        assert_eq!(
+            candidate.selected_path_require_all_live_waits(),
             TwoShantenStayRequireAllLiveWaits::Unknown
         );
         assert_eq!(
@@ -1338,6 +1577,17 @@ mod tests {
             TwoShantenStayRequireAllLiveWaits::Unknown
         );
         assert_eq!(
+            call_higher.selected_path_require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Unknown
+        );
+        // all-terminal が `Below` でも、selected-path を確定できなければ Call にしない。
+        call_higher.progress.terminal_ron_yaku.verdict = ProspectiveHanVerdict::Below;
+        assert_eq!(
+            call_higher.selected_path_require_all_live_waits(),
+            TwoShantenStayRequireAllLiveWaits::Unknown
+        );
+        call_higher.progress.terminal_ron_yaku.verdict = ProspectiveHanVerdict::Unknown;
+        assert_eq!(
             call_higher.allow_partial_waits(),
             TwoShantenStayAllowPartialWaits::Call
         );
@@ -1348,6 +1598,11 @@ mod tests {
     fn a_pass_not_lower_is_a_pass_under_both_policies_whatever_the_yaku() {
         let ctx = stay_context();
         let observation = observe_two_shanten_stay_calls(&ctx, &stay_actions());
+        assert_the_all_terminal_strict_is_the_production_helper(
+            &ctx,
+            &stay_actions(),
+            &observation,
+        );
 
         assert_eq!(observation.candidates.len(), 2);
         for candidate in &observation.candidates {
@@ -1355,15 +1610,24 @@ mod tests {
                 candidate.progress_comparison,
                 CallIishantenComparison::PassNotLower
             );
-            for verdict in [
+            let verdicts = [
                 ProspectiveHanVerdict::AtLeast,
                 ProspectiveHanVerdict::Below,
                 ProspectiveHanVerdict::Unknown,
-            ] {
+            ];
+            for (verdict, selected_path) in verdicts
+                .into_iter()
+                .flat_map(|verdict| verdicts.map(|selected_path| (verdict, selected_path)))
+            {
                 let mut candidate = candidate.clone();
                 candidate.progress.terminal_ron_yaku.verdict = verdict;
+                candidate.progress.selected_path_ron_yaku.verdict = selected_path;
                 assert_eq!(
                     candidate.require_all_live_waits(),
+                    TwoShantenStayRequireAllLiveWaits::Pass
+                );
+                assert_eq!(
+                    candidate.selected_path_require_all_live_waits(),
                     TwoShantenStayRequireAllLiveWaits::Pass
                 );
                 assert_eq!(
@@ -1421,8 +1685,16 @@ mod tests {
                 source.progress.terminal_ron_yaku
             );
             assert_eq!(
+                candidate.progress.selected_path_ron_yaku,
+                source.progress.selected_path_ron_yaku
+            );
+            assert_eq!(
                 candidate.require_all_live_waits(),
                 source.require_all_live_waits()
+            );
+            assert_eq!(
+                candidate.selected_path_require_all_live_waits(),
+                source.selected_path_require_all_live_waits()
             );
             assert_eq!(
                 candidate.allow_partial_waits(),

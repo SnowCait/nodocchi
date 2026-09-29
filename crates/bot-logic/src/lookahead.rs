@@ -1356,7 +1356,7 @@ pub fn awaiting_draw_two_shanten_progress_self_tsumo_value(
     }
     let facts = inputs.self_tsumo_facts()?;
     let branch = CandidateBranch::from_waiting_state(&inputs.root);
-    two_shanten_progress_self_tsumo_value(inputs, &branch, acceptance, facts)
+    two_shanten_progress_self_tsumo_value(inputs, &branch, acceptance, facts, &mut ())
 }
 
 /// 次の自摸を待つ2向聴 state の ExpectedSelfTsumoValue
@@ -1446,6 +1446,19 @@ pub fn two_shanten_progress_self_tsumo_value_for_candidate(
     inputs: &LookaheadInputs,
     evaluation: &DiscardEvaluation,
 ) -> Option<u64> {
+    two_shanten_progress_self_tsumo_value_for_candidate_observed(inputs, evaluation, &mut ())
+}
+
+/// [`two_shanten_progress_self_tsumo_value_for_candidate`] と同じ値を、1向聴 continuation を探索
+/// するたびにその探索結果を観測器へ渡しながら求める。
+///
+/// 探索も値も観測器の有無で変わらない。観測器が受け取るのは値の集計に使った枝そのもので、
+/// 観測のために枝を探索し直さない。
+pub fn two_shanten_progress_self_tsumo_value_for_candidate_observed(
+    inputs: &LookaheadInputs,
+    evaluation: &DiscardEvaluation,
+    observer: &mut impl TwoShantenProgressContinuationObserver,
+) -> Option<u64> {
     if evaluation.min_shanten_after_discard() != RYANSHANTEN_SHANTEN {
         return None;
     }
@@ -1456,7 +1469,38 @@ pub fn two_shanten_progress_self_tsumo_value_for_candidate(
         &branch,
         &evaluation.acceptance_after_discard,
         facts,
+        observer,
     )
+}
+
+/// 2向聴 Progress 評価が最初のツモで1向聴へ進んだ枝1件の、1向聴 continuation の探索結果。
+///
+/// `concealed_tiles` / `discarded_tiles` は最初のツモの前の物理牌で、
+/// [`prospective_branch_tiles_after_draw`] へ `drawn_tile` と `next_discard` を渡すと、`draws` の
+/// 起点 (1向聴の打牌後) と同じ正規形になる。
+pub struct TwoShantenProgressContinuation<'a> {
+    pub concealed_tiles: &'a [TileId],
+    pub discarded_tiles: &'a [TileId],
+    /// 最初のツモの物理牌。
+    pub drawn_tile: TileId,
+    /// ツモ後に既存比較が選んだ1向聴の打牌。
+    pub next_discard: &'a DiscardEvaluation,
+    /// その打牌後の1向聴 continuation が探索した枝。手変わりの先の段は、既存比較が選んだ打牌の
+    /// 枝だけを持つ。
+    pub draws: &'a [DrawLookaheadDiagnostic],
+}
+
+/// 2向聴 Progress 評価の1向聴 continuation の探索結果を受け取る観測器。
+///
+/// 通知するのは探索内 memo に無く、実際に探索した continuation だけ。memo hit の枝は同じ入力の
+/// 探索を既に通知済みなので、同じ枝をもう一度通知しない。
+pub trait TwoShantenProgressContinuationObserver {
+    fn searched(&mut self, continuation: TwoShantenProgressContinuation<'_>);
+}
+
+/// 何も受け取らない観測器。観測しない経路はこれを通る。
+impl TwoShantenProgressContinuationObserver for () {
+    fn searched(&mut self, _continuation: TwoShantenProgressContinuation<'_>) {}
 }
 
 /// 3向聴候補の、1向聴到達後も SameShanten を追う比較用の self-tsumo 寄与
@@ -1887,7 +1931,8 @@ fn two_shanten_self_tsumo_value(
     acceptance: &EffectiveAcceptance,
     facts: SelfTsumoFacts,
 ) -> Option<u64> {
-    let progress = two_shanten_progress_self_tsumo_value(inputs, branch, acceptance, facts)?;
+    let progress =
+        two_shanten_progress_self_tsumo_value(inputs, branch, acceptance, facts, &mut ())?;
     two_shanten_self_tsumo_value_from_progress(inputs, branch, facts, progress)
 }
 
@@ -1909,13 +1954,14 @@ fn two_shanten_progress_self_tsumo_value(
     branch: &CandidateBranch,
     acceptance: &EffectiveAcceptance,
     facts: SelfTsumoFacts,
+    observer: &mut impl TwoShantenProgressContinuationObserver,
 ) -> Option<u64> {
     let mut total = 0u64;
     for accepted in &acceptance.tiles {
         let drawable = drawable(accepted);
         for variant in branch.variants_of(&drawable) {
             let value = iishanten_continuation_after_progress_draw(
-                inputs, branch, &drawable, variant, facts,
+                inputs, branch, &drawable, variant, facts, observer,
             )?;
             total = total.saturating_add(value);
         }
@@ -1977,6 +2023,7 @@ fn two_shanten_progress_after_same_shanten_draw(
         &next,
         &evaluation.acceptance_after_discard,
         continuation,
+        &mut (),
     )?;
     Some(path.weighted_continuation(value))
 }
@@ -1992,6 +2039,7 @@ fn iishanten_continuation_after_progress_draw(
     drawable: &DrawableTile,
     variant: PhysicalTileVariant,
     facts: SelfTsumoFacts,
+    observer: &mut impl TwoShantenProgressContinuationObserver,
 ) -> Option<u64> {
     inputs.count(|stats| stats.two_to_one_variants += 1);
     let Some(state) = branch.state_after_draw(drawable.tile, variant.tile) else {
@@ -2035,7 +2083,16 @@ fn iishanten_continuation_after_progress_draw(
         inputs.iishanten_continuation.scopes(),
         Some(continuation),
     )
-    .inspect(|draws| count_iishanten_continuation_draws(inputs, draws))
+    .inspect(|draws| {
+        count_iishanten_continuation_draws(inputs, draws);
+        observer.searched(TwoShantenProgressContinuation {
+            concealed_tiles: &branch.next_tiles,
+            discarded_tiles: &branch.discarded,
+            drawn_tile: variant.tile,
+            next_discard: &evaluation,
+            draws,
+        });
+    })
     .and_then(|draws| expected_self_tsumo_value_from_draws(&draws, continuation));
     if let Some(memo) = &inputs.search_state_memo {
         memo.borrow_mut().iishanten.insert(key.unwrap(), value);
@@ -6727,6 +6784,54 @@ mod tests {
             awaiting_draw_two_shanten_progress_self_tsumo_value(&awaiting, &acceptance),
             Some(progress)
         );
+    }
+
+    #[test]
+    fn the_observed_two_shanten_progress_value_reports_every_searched_continuation() {
+        // 観測器の有無で値は変わらず、観測器は値の集計に使った1向聴 continuation の枝を受け取る。
+        struct Continuations(Vec<(Vec<TileId>, Vec<TileId>, usize)>);
+        impl TwoShantenProgressContinuationObserver for Continuations {
+            fn searched(&mut self, continuation: TwoShantenProgressContinuation<'_>) {
+                let (concealed, discarded) = prospective_branch_tiles_after_draw(
+                    continuation.concealed_tiles,
+                    continuation.discarded_tiles,
+                    continuation.drawn_tile,
+                    continuation.next_discard,
+                )
+                .expect("continuation の起点を組み立てられる");
+                assert_eq!(
+                    continuation.next_discard.min_shanten_after_discard(),
+                    IISHANTEN_SHANTEN
+                );
+                self.0
+                    .push((concealed, discarded, continuation.draws.len()));
+            }
+        }
+
+        let tiles = two_shanten_candidate_hand();
+        let situation = visible_situation(&tiles, fixed(3), Vec::new(), None, None, tiles.clone());
+        let inputs = self_tsumo_inputs(&situation, &FIXED_TSUMO_VALUATOR);
+        let evaluation = situation.evaluations.first().expect("打牌候補がある");
+
+        let mut observer = Continuations(Vec::new());
+        let observed = two_shanten_progress_self_tsumo_value_for_candidate_observed(
+            &inputs,
+            evaluation,
+            &mut observer,
+        );
+
+        assert_eq!(
+            observed,
+            two_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation)
+        );
+        assert!(observed.is_some_and(|value| value > 0));
+        assert!(!observer.0.is_empty());
+        for (concealed, discarded, draws) in &observer.0 {
+            // 起点は鳴き後打牌と1向聴の打牌を切った後で、どちらの打牌も河に残る。
+            assert_eq!(concealed.len(), tiles.len() - 1);
+            assert_eq!(discarded.len(), 2);
+            assert!(*draws > 0);
+        }
     }
 
     #[test]

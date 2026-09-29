@@ -506,6 +506,127 @@ pub(crate) fn scored_han_verdict(
     }
 }
 
+// 即テンパイ Call と同じ役の判定理由を、テンパイ1件の役の結論へ写す。
+fn terminal_ron_yaku_verdict_of(reason: CallDecisionReason) -> ProspectiveHanVerdict {
+    match reason {
+        CallDecisionReason::EligibleTenpai => ProspectiveHanVerdict::AtLeast,
+        CallDecisionReason::YakuMissing => ProspectiveHanVerdict::Below,
+        _ => ProspectiveHanVerdict::Unknown,
+    }
+}
+
+/// 2向聴 Progress 評価の1向聴 continuation 1件について、既存比較が選んだ将来打牌の経路上にある
+/// terminal だけで、生きた和了牌 variant すべてに hypothetical ロンで役があるかを畳む。
+///
+/// 辿るのは探索が値の集計に使った枝 (`continuation.draws`) そのもので、手変わりの先の段も
+/// 既存比較が選んだ打牌の枝だけを持つ。選ばれなかった打牌の枝の terminal は、探索中に
+/// terminal scoring を通っていても対象にならない。テンパイ1件の判定は
+/// [`ProductionProspectiveValuator::terminal_ron_yaku_verdict`] が畳むものと同じで、探索中に
+/// 評価器が memo へ載せた結論を読むだけ ([`ProductionProspectiveValuator::memoizing_terminal_ron_yaku`])。
+/// 探索も点数計算もやり直さない。
+///
+/// 値の集計と同じく、打牌候補が無い枝とテンパイへ進まない枝は terminal を持たないので寄与
+/// させない。生きた variant が1つも無いテンパイも寄与させない。枝の物理牌を進められない枝・
+/// 先の段が無い手変わりの枝・役の結論が memo に無いテンパイは `Unknown`。対象の terminal が
+/// 1件も無い場合は `None`。
+pub(crate) fn selected_path_terminal_ron_yaku(
+    valuator: &ProductionProspectiveValuator,
+    continuation: &bot_logic::TwoShantenProgressContinuation<'_>,
+) -> Option<ProspectiveHanVerdict> {
+    let Some((concealed_tiles, discarded_tiles)) = prospective_branch_tiles_after_draw(
+        continuation.concealed_tiles,
+        continuation.discarded_tiles,
+        continuation.drawn_tile,
+        continuation.next_discard,
+    ) else {
+        return Some(ProspectiveHanVerdict::Unknown);
+    };
+    draws_ron_yaku(
+        valuator,
+        &concealed_tiles,
+        &discarded_tiles,
+        continuation.draws,
+    )
+}
+
+// 探索1段分の枝の役の結論をまとめて畳む。SameShanten の先の段も同じ入口を通る。
+fn draws_ron_yaku(
+    valuator: &ProductionProspectiveValuator,
+    concealed_tiles: &[TileId],
+    discarded_tiles: &[TileId],
+    draws: &[DrawLookaheadDiagnostic],
+) -> Option<ProspectiveHanVerdict> {
+    let mut verdict: Option<ProspectiveHanVerdict> = None;
+    for draw in draws {
+        for variant in &draw.variants {
+            let branch = branch_ron_yaku(
+                valuator,
+                concealed_tiles,
+                discarded_tiles,
+                draw.transition,
+                variant,
+            );
+            verdict = fold_ron_yaku(verdict, branch);
+        }
+    }
+    verdict
+}
+
+// 枝1件分の役の結論。
+fn branch_ron_yaku(
+    valuator: &ProductionProspectiveValuator,
+    concealed_tiles: &[TileId],
+    discarded_tiles: &[TileId],
+    transition: DrawTransition,
+    variant: &DrawVariantLookaheadDiagnostic,
+) -> Option<ProspectiveHanVerdict> {
+    let next = variant.next_discard.as_ref()?;
+    if transition == DrawTransition::Progress && next.min_shanten_after_discard() != TENPAI_SHANTEN
+    {
+        return None;
+    }
+    let Some((concealed_tiles, discarded_tiles)) = prospective_branch_tiles_after_draw(
+        concealed_tiles,
+        discarded_tiles,
+        variant.drawn_tile,
+        next,
+    ) else {
+        return Some(ProspectiveHanVerdict::Unknown);
+    };
+    match transition {
+        DrawTransition::Progress => {
+            let tenpai = ProspectiveTenpai {
+                concealed_tiles: &concealed_tiles,
+                acceptance: &next.acceptance_after_discard,
+                discarded_tiles: &discarded_tiles,
+            };
+            valuator
+                .memoized_terminal_ron_yaku(&tenpai)
+                .unwrap_or(Some(ProspectiveHanVerdict::Unknown))
+        }
+        DrawTransition::SameShanten => match variant.downstream.as_ref() {
+            Some(downstream) => draws_ron_yaku(
+                valuator,
+                &concealed_tiles,
+                &discarded_tiles,
+                &downstream.draws,
+            ),
+            None => Some(ProspectiveHanVerdict::Unknown),
+        },
+    }
+}
+
+/// 役の結論2つを畳む。どちらかが対象の terminal を持たない場合はもう一方をそのまま使う。
+pub(crate) fn fold_ron_yaku(
+    folded: Option<ProspectiveHanVerdict>,
+    verdict: Option<ProspectiveHanVerdict>,
+) -> Option<ProspectiveHanVerdict> {
+    match (folded, verdict) {
+        (Some(folded), Some(verdict)) => Some(folded.weaker(verdict)),
+        (folded, verdict) => folded.or(verdict),
+    }
+}
+
 // 探索1段分の枝をまとめて畳む。1段目も SameShanten の先の段も同じ入口を通る。
 fn draws_han_verdict(
     valuator: &ProductionProspectiveValuator,
@@ -659,6 +780,11 @@ pub(crate) struct ProductionProspectiveValuator<'a> {
     // この評価器が terminal scoring を通したテンパイ全体の役の結論。1件も通していない場合と、
     // 生きた variant を持つテンパイを1件も通していない場合は `None`。
     terminal_ron_yaku: Cell<Option<ProspectiveHanVerdict>>,
+    // 畳んだ役の結論をテンパイごとにも memo へ載せるか。
+    //
+    // 2→2 Call の selected-path strict 判定 (observation-only) だけが要求する値で、既定は載せない。
+    // 載せるのは畳むために求めた結論そのものなので、点数計算は増えない。
+    memoizes_terminal_ron_yaku: bool,
 }
 
 impl<'a> ProductionProspectiveValuator<'a> {
@@ -700,6 +826,7 @@ impl<'a> ProductionProspectiveValuator<'a> {
             scored_han_floor: Cell::new(None),
             collects_terminal_ron_yaku: false,
             terminal_ron_yaku: Cell::new(None),
+            memoizes_terminal_ron_yaku: false,
         }
     }
 
@@ -738,15 +865,34 @@ impl<'a> ProductionProspectiveValuator<'a> {
             .unwrap_or(ProspectiveHanVerdict::Unknown)
     }
 
+    /// [`Self::collecting_terminal_ron_yaku`] が畳む役の結論を、テンパイごとにも memo へ載せる
+    /// 評価器にする。畳む要求も有効にした評価器でだけ意味を持つ。
+    ///
+    /// 載せた結論は [`selected_path_terminal_ron_yaku`] が探索済みの枝を辿って読む。載せるのは
+    /// 畳むために求めた結論そのもので、点数計算も探索も選択値も変わらない。
+    pub(crate) fn memoizing_terminal_ron_yaku(mut self, memoizes: bool) -> Self {
+        self.memoizes_terminal_ron_yaku = memoizes;
+        self
+    }
+
+    // memo に載っているテンパイ1件の役の結論。`Some(None)` は生きた variant が1つも無いテンパイ、
+    // `None` は役を畳んでいないテンパイ。
+    fn memoized_terminal_ron_yaku(
+        &self,
+        tenpai: &ProspectiveTenpai<'_>,
+    ) -> Option<Option<ProspectiveHanVerdict>> {
+        let key = ProspectiveTenpaiKey::new(tenpai)?;
+        self.values
+            .borrow()
+            .get(&key)
+            .and_then(|values| values.terminal_ron_yaku)
+    }
+
     fn collect_terminal_ron_yaku(&self, reason: Option<CallDecisionReason>) {
         let Some(reason) = reason else {
             return;
         };
-        let verdict = match reason {
-            CallDecisionReason::EligibleTenpai => ProspectiveHanVerdict::AtLeast,
-            CallDecisionReason::YakuMissing => ProspectiveHanVerdict::Below,
-            _ => ProspectiveHanVerdict::Unknown,
-        };
+        let verdict = terminal_ron_yaku_verdict_of(reason);
         let folded = match self.terminal_ron_yaku.get() {
             Some(collected) => collected.weaker(verdict),
             None => verdict,
@@ -1107,14 +1253,22 @@ impl ProspectiveTsumoValuator for ProductionProspectiveValuator<'_> {
             }
             self.prospective_tsumo_value(facts, mode)
         });
-        if self.collects_terminal_ron_yaku {
-            // 評価材料を組み立てられないテンパイは役の有無を確定できない。
-            self.collect_terminal_ron_yaku(
-                ron_yaku.unwrap_or(Some(CallDecisionReason::HandValueUnknown)),
-            );
+        // 評価材料を組み立てられないテンパイは役の有無を確定できない。
+        let ron_yaku = self
+            .collects_terminal_ron_yaku
+            .then(|| ron_yaku.unwrap_or(Some(CallDecisionReason::HandValueUnknown)));
+        if let Some(reason) = ron_yaku {
+            self.collect_terminal_ron_yaku(reason);
         }
         if let Some(key) = key {
-            self.values.borrow_mut().entry(key).or_default().tsumo = Some(value);
+            let mut values = self.values.borrow_mut();
+            let entry = values.entry(key).or_default();
+            entry.tsumo = Some(value);
+            if self.memoizes_terminal_ron_yaku
+                && let Some(reason) = ron_yaku
+            {
+                entry.terminal_ron_yaku = Some(reason.map(terminal_ron_yaku_verdict_of));
+            }
         }
         // terminal scoring はこの入口だけを通る。同じテンパイの選択値は先に求まっているので、
         // 畳むのは memo に載った下限を読むだけになる。
@@ -1187,6 +1341,9 @@ struct EvaluatedTenpaiValues {
     /// 選択値と一緒に1回だけ求めるので、下限を読むために点数計算をやり直さない。下限を要求して
     /// いない評価器では畳まないので `None` のままになる。
     han_floor: Option<ProspectiveHanFloor>,
+    /// terminal scoring のときに畳んだ役の結論。`Some(None)` は生きた variant が1つも無い
+    /// テンパイ。載せることを要求していない評価器では `None` のままになる。
+    terminal_ron_yaku: Option<Option<ProspectiveHanVerdict>>,
 }
 
 // 探索 node ごとに引く memo なので、探索基盤が使っているものと同じ安価な hasher を共有する。
@@ -1800,6 +1957,21 @@ mod tests {
             default_valuator.terminal_ron_yaku_verdict(),
             ProspectiveHanVerdict::Unknown
         );
+        // テンパイごとに memo へ載せる要求を足してもツモ値も畳んだ結論も変わらず、memo へ載るのは
+        // 畳んだ結論そのもの。載せる要求の無い評価器は memo へ載せない。
+        let memoizing = ProductionProspectiveValuator::new_with_hand_state(&ctx, Some(&melds))
+            .collecting_terminal_ron_yaku(true)
+            .memoizing_terminal_ron_yaku(true);
+        assert_eq!(memoizing.tenpai_tsumo_value(&tenpai), value);
+        assert_eq!(
+            memoizing.terminal_ron_yaku_verdict(),
+            valuator.terminal_ron_yaku_verdict()
+        );
+        assert_eq!(
+            memoizing.memoized_terminal_ron_yaku(&tenpai),
+            Some(Some(valuator.terminal_ron_yaku_verdict()))
+        );
+        assert_eq!(valuator.memoized_terminal_ron_yaku(&tenpai), None);
         let can_ron = valuator
             .tenpai_facts(&tenpai)
             .and_then(|facts| facts.ron_availability());

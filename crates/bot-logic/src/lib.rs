@@ -94,6 +94,7 @@ pub use lookahead::{
     IishantenContinuationScope, LookaheadDiagnostic, LookaheadInputs, ProspectiveTenpai,
     ProspectiveTenpaiValuator, ProspectiveTsumoValuator, SameShantenContinuationDepth,
     SameShantenDownstreamDiagnostic, SearchStateMemoStats, SharedDraws, ThreeShantenSearchStats,
+    TwoShantenProgressContinuation, TwoShantenProgressContinuationObserver,
     TwoShantenProgressSelfTsumoCandidate, TwoShantenProgressSelfTsumoDiagnostic,
     TwoShantenSelfTsumoCandidate, TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoObserver,
     TwoShantenSelfTsumoScope, awaiting_draw_expected_self_tsumo_value,
@@ -113,6 +114,7 @@ pub use lookahead::{
     two_shanten_expected_self_tsumo_value_for_candidate,
     two_shanten_expected_self_tsumo_value_for_candidate_from_progress,
     two_shanten_progress_self_tsumo_value_for_candidate,
+    two_shanten_progress_self_tsumo_value_for_candidate_observed,
 };
 pub use meld::{Meld, MeldKind, MeldShape, fixed_meld_count, is_menzen};
 pub use normal_hand_scoring::{

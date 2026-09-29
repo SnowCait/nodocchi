@@ -296,8 +296,10 @@
 //! 行わない。semantic に同一な候補 (`Reused`) は先行候補の判定をそのまま複製する。
 //!
 //! 判定は Progress 評価が terminal scoring を通した terminal 全体を畳むので、1向聴 continuation の
-//! 将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定になる。production が実際に
-//! 選ぶ将来打牌経路上の terminal だけに限定する精密化は別 Issue (#355) で扱う。
+//! 将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定になる (all-terminal strict)。
+//! production が実際に選ぶ将来打牌経路上の terminal だけに限定した判定 (selected-path strict) は
+//! Issue #355 で observation ([`crate::two_shanten_stay_call_observation`]) にだけ追加した。
+//! production は実戦 capture での再計測結果を見るまで all-terminal strict のまま使う。
 //!
 //! 片和了を許して Progress 値の結論をそのまま使う `AllowPartialWaits` は production へ接続せず、
 //! observation ([`crate::two_shanten_stay_call_observation`]) の counterfactual のまま残す。
@@ -2757,7 +2759,9 @@ impl TwoShantenStayCallTerminalRonYaku {
 /// `Unknown` にする。役ありだと推測しない。
 ///
 /// 集約するのは Progress 評価が terminal scoring を通した terminal 全体で、1向聴 continuation の
-/// 将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定になる。
+/// 将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定になる (all-terminal strict)。
+/// 選ばれる将来打牌の経路上の terminal だけの判定 (selected-path strict) は observation だけが
+/// 同じ評価から回収し ([`crate::two_shanten_stay_call_observation`])、この helper は求めない。
 pub(crate) fn two_shanten_stay_call_terminal_ron_yaku(
     ctx: &GameContext,
     post_call_tiles: &[TileId],
