@@ -357,13 +357,14 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では 
 
 `--two-shanten-stay-call-comparison` は、現在2向聴から Chi / Pon しても鳴き後の最良打牌で2向聴のままになる候補について、Call と Pass を2つの scope で独立に比べる **observation-only** の診断 option です。Issue #287 の「2向聴 → Chi / Pon → 2向聴のまま」の評価値・Pass との差・比較尺度・実行コストを確かめるために使います。
 
-この候補は production でも判断されます ([打牌選択の「2向聴のまま鳴く Call」](ai/discard-selection.md#2向聴のまま鳴く-call))。production は Progress だけで Call / Pass を比べ、`RequireAllLiveWaits` と鳴き後 Push/Pull を通った候補だけ鳴きます。observation の各項目と production の関係は次のとおりです。
+この候補は production でも判断されます ([打牌選択の「2向聴のまま鳴く Call」](ai/discard-selection.md#2向聴のまま鳴く-call))。production は Progress だけで Call / Pass を比べ、all-terminal strict の `RequireAllLiveWaits` と鳴き後 Push/Pull を通った候補だけ鳴きます。observation の各項目と production の関係は次のとおりです。
 
 | 観測項目 | production との関係 |
 | --- | --- |
 | Progress scope | production の Call / Pass 比較と同じ尺度・同じ helper |
 | Full scope | observation-only。production では評価しない |
-| `RequireAllLiveWaits` | production policy と同じ strict 判定 |
+| `RequireAllLiveWaits` (all-terminal strict) | production policy と同じ strict 判定 |
+| selected-path `RequireAllLiveWaits` (selected-path strict) | observation-only の比較 ([Issue #355](https://github.com/SnowCait/nodocchi/issues/355)) |
 | `AllowPartialWaits` | observation-only の counterfactual |
 
 **observation は production を変えません。** `ShantenAgent::act()` と通常の `diagnose()` の選択・理由、Call / Pass policy、速度優先 policy、鳴き後の Push/Pull、打牌 comparator、2向聴 Full の gate と並列度はどれも observation の有無で変わらず、観測結果を production へ戻す経路もありません。この option を指定しない通常実行では、observation の Progress / Full 探索を一切走らせません。
@@ -419,41 +420,51 @@ Progress と Full の値は混ぜず、scope ごとに独立に `call > pass` / 
 
 #### 片和了 policy
 
-Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの2つの policy を当てはめた結論も並べます。**`RequireAllLiveWaits` は production policy と同じ判定**で、production の 2→2 Call はこれに加えて鳴き後 Push/Pull が `Push` の候補だけ鳴きます。**`AllowPartialWaits` は observation 上の counterfactual のまま**で、production へは接続しません。`ShantenAgent` の設定や CLI で production の片和了 policy を切り替える経路もありません。
+Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの policy を当てはめた結論も並べます。**all-terminal strict の `RequireAllLiveWaits` は production policy と同じ判定**で、production の 2→2 Call はこれに加えて鳴き後 Push/Pull が `Push` の候補だけ鳴きます。**selected-path strict の `RequireAllLiveWaits` は observation-only の比較**、**`AllowPartialWaits` は observation 上の counterfactual** で、どちらも production へは接続しません。`ShantenAgent` の設定や CLI で production の片和了 policy を切り替える経路もありません。Issue #355 の実戦 capture での再計測結果を確認するまで、production は all-terminal strict のまま切り替えません。
 
 | policy | Call 相当 | それ以外 |
 | --- | --- | --- |
-| `RequireAllLiveWaits` | Progress が `call > pass` で、strict ron yaku が `AtLeast` | Progress が `pass >= call` なら `Pass`。`call > pass` で strict ron yaku が `Below` なら `Blocked (partial yaku)`、`Unknown` なら `Unknown`。Progress の比較が unknown なら `Unknown` |
-| `AllowPartialWaits` | Progress が `call > pass` | Progress が `pass >= call` なら `Pass`、unknown なら `Unknown` |
+| `RequireAllLiveWaits` (production policy) | Progress が `call > pass` で、all-terminal strict ron yaku が `AtLeast` | Progress が `pass >= call` なら `Pass`。`call > pass` で strict ron yaku が `Below` なら `Blocked (partial yaku)`、`Unknown` なら `Unknown`。Progress の比較が unknown なら `Unknown` |
+| selected-path `RequireAllLiveWaits` (observation only) | Progress が `call > pass` で、selected-path strict ron yaku が `AtLeast` | production policy と同じ規則を selected-path strict ron yaku に当てはめる |
+| `AllowPartialWaits` (counterfactual) | Progress が `call > pass` | Progress が `pass >= call` なら `Pass`、unknown なら `Unknown` |
 
 ```text
-Progress Call / Pass: Tsumo の self-tsumo value で比較 (どちらの policy でも同じ)
-RequireAllLiveWaits:  Progress が call > pass AND Progress terminal の全 live variant に hypothetical Ron で役がある
-AllowPartialWaits:    Progress が call > pass
+Progress Call / Pass:                Tsumo の self-tsumo value で比較 (どの policy でも同じ)
+RequireAllLiveWaits:                 Progress が call > pass AND Progress terminal 全体の全 live variant に hypothetical Ron で役がある
+selected-path RequireAllLiveWaits:   Progress が call > pass AND 選ばれる将来打牌経路上の terminal の全 live variant に hypothetical Ron で役がある
+AllowPartialWaits:                   Progress が call > pass
 ```
 
 - **`RequireAllLiveWaits`** (production policy) は、即テンパイ Call の `YakuMissing` と同じ hypothetical Ron baseline で、全 live variant に役があることを要求します。production では `Below` を `YakuMissing`、`Unknown` を `HandValueUnknown` として鳴きません。terminal ごとの判定は即テンパイ Call と同じ helper を通り、Ron baseline (`damaten_baseline_context`) で既存 scoring (`evaluate_tenpai_hand_value`) を評価して `HandValueOutcome` を読みます。
 - **`AllowPartialWaits`** (counterfactual) は、Progress self-tsumo value の Tsumo semantics をそのまま使います。役なし variant は non-winning draw です。Progress 値の terminal scoring は役なし variant を0点の和了として加算せず、既存 self-tsumo evaluator どおり和了できない牌として扱うので、その上から別の補正はしません。役なし variant で値を水増ししているわけではありません。
 
-Progress の Call / Pass 値・`call > pass` / `pass >= call`・鳴き後打牌の選択・Full の観測は、どちらの policy でも変わりません。
+- **selected-path `RequireAllLiveWaits`** (observation only) は、判定規則は production policy と同じで、対象の terminal を選ばれる将来打牌経路上のものに限ります (下の「対象の terminal 集合」)。
 
-strict ron yaku (`AtLeast` / `Below` / `Unknown`) は次のように求めます。
+Progress の Call / Pass 値・`call > pass` / `pass >= call`・鳴き後打牌の選択・Full の観測は、どの policy でも変わりません。
 
-- **対象の terminal 集合**: Progress が選んだ鳴き後打牌について、その Progress 値が terminal scoring を通したテンパイすべてです (最初のツモで1向聴へ進む枝 → production の1向聴 continuation が到達するテンパイ)。選ばなかった鳴き後打牌の terminal は混ぜません。
+strict ron yaku (`AtLeast` / `Below` / `Unknown`) は次のように求めます。all-terminal strict と selected-path strict は対象の terminal 集合だけが違い、terminal ごとの判定と畳み方は同じです。
+
+- **対象の terminal 集合 (all-terminal strict、production policy)**: Progress が選んだ鳴き後打牌について、その Progress 値が terminal scoring を通したテンパイすべてです (最初のツモで1向聴へ進む枝 → production の1向聴 continuation が到達するテンパイ)。1向聴 continuation は手変わりの後の将来打牌を選ぶために、最終的に選ばない打牌の枝も探索して terminal scoring を通すので、その terminal も含みます。選ばなかった鳴き後打牌の terminal は混ぜません。
+- **対象の terminal 集合 (selected-path strict、observation only)**: そのうち、1向聴 continuation の既存比較が実際に選ぶ将来打牌の経路上にある terminal だけです。2→1 のツモ後に既存比較が選んだ1向聴の打牌から、Progress のツモで選ばれたテンパイ打牌の terminal と、手変わり (SameShanten) のツモで選ばれた打牌の先の段の terminal を辿ります。経路は production の探索が値の集計に使った枝そのもので、観測のための近似や別の選択規則は持ちません。値の集計と同じく、打牌候補が無い枝とテンパイへ進まない枝は terminal を持たないので寄与しません。枝の物理牌を進められない枝・先の段が無い手変わりの枝・役の結論を読めないテンパイは `Unknown` です。
 - **判定**: 生きた (残枚数 > 0) 和了牌の物理牌 variant ごとに、`Known` は役あり、`NoCandidate` は役なし、`IndeterminateBonusHan`・scoring error は unknown とします。役なしの variant が1つでもあれば `Below`、役なしは無いが unknown や評価できないテンパイがあれば `Unknown`、対象の live variant すべてが役ありの場合だけ `AtLeast` です。**unknown を役ありと推測しません。** 生きた variant が1つも無いテンパイは寄与させず、判定対象の terminal が1件も無い場合は `Unknown` です。
 - **ロン可否との関係**: 即テンパイ Call でもロン可否 (`CannotRon`) と役の有無 (`YakuMissing`) は別軸です。ここで見るのは「その牌で hypothetical Ron した場合に役があるか」だけで、将来 terminal がフリテンでもロン可否 unknown でも、それを理由に `Below` や `Unknown` にはしません。
 
-役は production と同じ helper で、観測 run の中で求めます。Progress の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal が memo hit で scoring を通らず、集約から漏れる可能性があります。そこで選んだ鳴き後打牌1件だけを新しい探索内 memo で評価し直し、terminal scoring を通したテンパイごとに Ron baseline の点数計算を1回ずつ足して畳みます。observation では計測 run には入りません。production では Progress が `call > pass` の候補だけに同じ評価を行います。評価し直した Progress 値が比較に使った値と一致しない場合は、別の terminal 集合を見た可能性があるので `Unknown` とし、出力にもそう表示します。
+役は観測 run の中で求めます。Progress の候補比較は探索内 memo を候補間で共有するので、後から評価した候補の terminal が memo hit で scoring を通らず、集約から漏れる可能性があります。そこで選んだ鳴き後打牌1件だけを新しい探索内 memo で評価し直し、terminal scoring を通したテンパイごとに Ron baseline の点数計算を1回ずつ足して畳みます。この評価は production の helper (`two_shanten_stay_call_terminal_ron_yaku`) と同じ探索・同じ terminal scoring で、all-terminal strict も production と同じ結論になります。observation では計測 run には入りません。production では Progress が `call > pass` の候補だけに同じ評価を行います。評価し直した Progress 値が比較に使った値と一致しない場合は、別の terminal 集合を見た可能性があるので両方の strict を `Unknown` とし、出力にもそう表示します。
 
-集約する terminal は Progress 評価が terminal scoring を通したもの全体で、1向聴 continuation の将来打牌比較で最終的に選ばれない枝の terminal も含みます。production はこの保守的な判定をそのまま使い、選ばれる将来打牌経路上の terminal だけに限定する精密化は [Issue #355](https://github.com/SnowCait/nodocchi/issues/355) で扱います。
+selected-path strict は同じ評価1回から回収し、そのための追加探索も追加の点数計算も行いません。1向聴 continuation の探索結果は値を集計した時点で捨てられ、探索内 memo も値しか持たないので、評価の後から経路を辿り直すことはできません。そこで observation の評価だけ、次の2つを有効にします。
 
-既存の `scored_han_verdict` (3→2 速度優先 policy の翻数判定) は流用しません。ロンできる terminal でしか翻数を確定しないので、将来フリテンの terminal が `Unknown` になるためです。また、候補ごとに集約を区切るので、上の memo 共有による集約漏れも起こり得ます。
+- 評価器が terminal scoring のときに畳む Ron baseline の役の結論を、テンパイごとにも評価器の memo へ載せる
+- 1向聴 continuation を探索するたびに、その探索結果の枝 (値の集計に使った枝そのもの) を観測器で受け取り、選ばれた将来打牌の経路を辿って、memo に載った役の結論を畳む
+
+探索内 memo の hit で探索しなかった continuation は、同じ評価の中で同じ入力を探索済みで、その経路は既に畳んでいます。Progress 値を確定できなかった評価は途中の continuation までしか辿れていないので、selected-path strict は `Unknown` にします。production の鳴き判断はこの経路を通らず、selected-path strict を求めません。
+
+既存の `scored_han_verdict` (3→2 速度優先 policy の翻数判定) は流用していません。参考にしたのは「選択された候補の探索にだけ判定を結び付ける」構造だけです。`scored_han_verdict` はリーチ判断が選んだ baseline の翻数下限を読むので、ダマでロンできない将来フリテンの terminal が `Unknown` になり、2→2 strict の「ロン可否を読まない hypothetical Ron baseline の役」とは判定 semantics が違います。また、候補ごとに集約をリセットする方式は、候補間で探索内 memo を共有する Progress 比較では後から評価した候補の terminal が memo hit で漏れます。selected-path strict は、all-terminal strict と同じ新しい memo での評価1回の中で、探索結果の枝を辿って候補1件分に結び付けるので、どちらの問題も起こりません。
 
 #### 計測条件
 
 cold memo 条件で計ります。対象候補を決める production の鳴き判断を除き、どの計測も新しい thread で行うので、向聴・受け入れの thread-local memo は毎回 cold から始まります。探索内の memo は run ごとに作り直すため、Progress と Full の探索も互いを暖めません。Call は既存の comparison tooling と同じく、instrumentation を持たない計測 run (`elapsed` の出どころ) と、探索規模を計上する観測 run (`search` の出どころ) の2本を取ります。Pass は計測 run 1本だけです。この option は他の診断 option と併用できず、計測より前に別の深い診断を走らせません。
 
-strict ron yaku の評価は Progress の観測 run の中で、経過時間を測り終えた後に行います。計測 run には何も足さないので、Progress の `elapsed` と latency 集計は従来と同じ意味です。`timing and observation runs agree` も従来どおり、計測 run と観測 run が同じ鳴き後打牌・同じ値になったかだけを表します。
+strict ron yaku (all-terminal と selected-path の両方) の評価は Progress の観測 run の中で、経過時間を測り終えた後に行います。計測 run には何も足さないので、Progress の `elapsed` と latency 集計は従来と同じ意味です。`timing and observation runs agree` も従来どおり、計測 run と観測 run が同じ鳴き後打牌・同じ値になったかだけを表します。
 
 #### 出力の読み方
 
@@ -475,9 +486,11 @@ Candidate #0 Chi 8m <- 6m 7m
   progress: selected F, call 0.192268, pass 81.935943, pass >= call
     call elapsed (timing run): 49.494 ms, timing and observation runs agree: true
     search (observation run): ...
-  partial-yaku (progress; RequireAllLiveWaits = production policy, AllowPartialWaits = counterfactual)
-    strict ron yaku (hypothetical ron baseline, observation run): Below (contains a no-yaku live variant)
-    RequireAllLiveWaits (production policy): Pass
+  partial-yaku (progress; RequireAllLiveWaits = production policy on the all-terminal strict ron yaku, selected-path RequireAllLiveWaits = observation only, AllowPartialWaits = counterfactual)
+    all-terminal strict ron yaku (production policy input, hypothetical ron baseline, observation run): Below (contains a no-yaku live variant)
+    selected-path strict ron yaku (observation only, same evaluation): Below (contains a no-yaku live variant)
+    RequireAllLiveWaits (production policy, all-terminal): Pass
+    selected-path RequireAllLiveWaits (observation only): Pass
     AllowPartialWaits (counterfactual): Pass
   full: selected 5p, call 2.141449, pass 152.160704, pass >= call
     progress cohort: 3 (5p 6p F), full evaluated: 2 (F 5p), full workers: 2
@@ -492,9 +505,9 @@ Candidate #0 Chi 8m <- 6m 7m
 - `selected post-call discard` は2つの scope が選んだ鳴き後打牌 (物理牌) が一致したかです。
 - `call / pass conclusion progress vs full` は、両方の結論が確定して同じなら `same`、反転していれば `flipped`、どちらかが `unknown` なら `undetermined` です。
 - `full evaluated` はドラ差 gate を通って Full 追加評価を行った2候補です。`none` の場合、Full の Call 値は `unknown (full gate not fired)` などになります。
-- `partial-yaku` は [片和了 policy](#片和了-policy) です。Progress が `pass >= call` の候補は strict ron yaku に関係なくどちらの policy でも `Pass` です。
+- `partial-yaku` は [片和了 policy](#片和了-policy) です。`all-terminal strict ron yaku` と `RequireAllLiveWaits (production policy, all-terminal)` が production と同じ判定、`selected-path` の2行が observation-only の比較、`AllowPartialWaits` が counterfactual です。Progress が `pass >= call` の候補は strict ron yaku に関係なくどの policy でも `Pass` です。
 
-代表 fixture は4つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。`two_shanten_stay_call_haku_pon.json` は白ポンで Progress が `call > pass`、strict ron yaku が `AtLeast` なので両 policy とも `Call` になり、production も `EligibleTwoShantenStaySelfTsumo` で鳴く局面、`two_shanten_stay_call_tanyao_pon.json` は断幺頼みの 7p ポンで Progress が `call > pass` でも strict ron yaku が `Below` になり、`RequireAllLiveWaits` だけが `Blocked (partial yaku)` になる (production は `YakuMissing` で鳴かない) 局面です。
+代表 fixture は5つあります。`two_shanten_stay_call_chi_dora_gate.json` はドラ差 gate が発火して Full の Call 値が確定し、Progress と Full で鳴き後打牌が変わる局面、`two_shanten_stay_call_pon_chi.json` は同じ牌への Pon と Chi がどちらも 2→2 になり、gate が発火しないので Full の結論が unknown になる局面です。`two_shanten_stay_call_haku_pon.json` は白ポンで Progress が `call > pass`、strict ron yaku が `AtLeast` なので両 policy とも `Call` になり、production も `EligibleTwoShantenStaySelfTsumo` で鳴く局面、`two_shanten_stay_call_tanyao_pon.json` は断幺頼みの 7p ポンで Progress が `call > pass` でも strict ron yaku が `Below` になり、`RequireAllLiveWaits` だけが `Blocked (partial yaku)` になる (production は `YakuMissing` で鳴かない) 局面で、選ばれる将来打牌経路上にも役なしの variant が残るので selected-path strict も `Below` です。`two_shanten_stay_call_selected_path_pon.json` は同じく断幺頼みの 4s ポンで、1向聴 continuation が比べて選ばなかった打牌の枝 (么九牌を残す枝) にだけ役なしの terminal があり、all-terminal strict は `Below` (production は `YakuMissing`)、selected-path strict は `AtLeast` になる局面です。
 
 #### capture 全体の集計
 
@@ -514,12 +527,15 @@ request 単位と候補単位を分けて表示します。
 | `Production decision` | 候補 | production が採用した対象候補数と、対象候補の production の理由ごとの件数 |
 | `Call / Pass conclusion` | 候補 | scope ごとの `call > pass` / `pass >= call` / `unknown` と unknown の原因 |
 | `Progress vs full` | 候補 | 結論の一致 (`same`) / 反転 (`flipped`) / どちらか unknown、選択打牌の一致 / 不一致 |
-| `Progress call > pass partial-yaku policy` | 候補 | Progress が `call > pass` の候補を母数に、strict ron yaku (`all live variants >= 1 han` / `contains no-yaku live variant` / `unknown`)、`RequireAllLiveWaits` (production policy) の `call` / `blocked by partial yaku` / `unknown`、`AllowPartialWaits` (counterfactual) の `call` |
-| `RequireAllLiveWaits vs AllowPartialWaits differences` | 候補 | 2つの policy の結論が違う候補の全件。capture・`request_id`・候補 index・Chi / Pon と鳴いた牌 / 晒した牌、先行候補の複製なら `reused_from=#N`、Progress の選択打牌・Call 値・Pass 値・比較、strict ron yaku と両 policy の結論 |
+| `Progress call > pass partial-yaku policy` | 候補 | Progress が `call > pass` の候補を母数に、all-terminal strict ron yaku (production policy の入力) と selected-path strict ron yaku (observation only) それぞれの `all live variants >= 1 han` / `contains no-yaku live variant` / `unknown`、all-terminal → selected-path の遷移 (`AtLeast` / `Below` / `Unknown` の3x3)、`RequireAllLiveWaits` (production policy, all-terminal) と selected-path `RequireAllLiveWaits` (observation only) それぞれの `call` / `blocked by partial yaku` / `unknown`、`AllowPartialWaits` (counterfactual) の `call` |
+| `All-terminal vs selected-path strict ron yaku differences` | 候補 | Progress が `call > pass` で、all-terminal strict と selected-path strict の結論が違う候補の全件。capture・`request_id`・候補 index・Chi / Pon と鳴いた牌 / 晒した牌、先行候補の複製なら `reused_from=#N`、Progress の選択打牌・Call 値・Pass 値・比較、2つの strict ron yaku、production policy / selected-path / `AllowPartialWaits` の結論 |
+| `RequireAllLiveWaits vs AllowPartialWaits differences` | 候補 | production policy と `AllowPartialWaits` の結論が違う候補の全件。表示する項目は上と同じ |
 | `Latency` | request / 評価した候補 | Pass は request 単位、Call は評価した候補単位 (複製した候補を除く) の count / median / p95 / max。request ごとの Pass + Call の逐次合計も並べる |
 | `Slowest full calls` | 評価した候補 | Full の Call 評価が遅い上位5件 |
 | `Flipped conclusions` | 候補 | Progress と Full で結論が反転した候補の代表10件。capture・`request_id`・候補 index で追える |
 | `Per request with a 2 -> 2 target` | request | production の結論、対象候補数、2つの Pass 値 |
+
+`all-terminal -> selected-path strict ron yaku` は、行が all-terminal strict (production policy の入力) の結論、列が selected-path strict の結論です。Issue #355 で確認したいのは `Below -> ...` の行で、production が `YakuMissing` で鳴かない候補のうち、選ばれる将来打牌経路上の terminal だけに限ると全 live variant に役がある (`AtLeast`)・経路上にも役なしの variant がある (`Below`)・確定できない (`Unknown`) の件数を表します。selected-path strict は all-terminal strict が畳んだ terminal の一部だけを見るので、`AtLeast -> Below` は起こらない想定です。production を selected-path strict へ切り替えるかどうかは、この再計測結果を確認してから別途判断します。
 
 ### --force-fold
 

@@ -305,9 +305,11 @@ AND 鳴き後の押し引きが Push
 Call の片和了禁止と同じロン baseline で、役なしの variant があれば `YakuMissing`、確定できなければ
 `HandValueUnknown` で鳴きません。`PassNotLower` / unknown の候補にはこの判定のための再探索も点数
 計算も行いません。判定は Progress 評価が terminal scoring を通した terminal 全体を畳むので、1向聴
-continuation の将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定です。選ばれる
-将来打牌経路上の terminal だけに限定する精密化は [Issue #355](https://github.com/SnowCait/nodocchi/issues/355) で扱います。片和了を許す
-`AllowPartialWaits` は production へ接続せず、observation の counterfactual のままです。
+continuation の将来打牌比較で最終的に選ばれない枝の terminal も含む保守的な判定です (all-terminal
+strict)。選ばれる将来打牌経路上の terminal だけに限定した判定 (selected-path strict) は
+[Issue #355](https://github.com/SnowCait/nodocchi/issues/355) で observation にだけ追加しました。
+production は実戦 capture での再計測結果を確認するまで all-terminal strict のまま切り替えません。片和了を許す
+`AllowPartialWaits` も production へ接続せず、observation の counterfactual のままです。
 
 現在2向聴の同じ request に 2→1 と 2→2 の候補が並ぶ場合、2→1 は Full ExpectedSelfTsumoValue、
 2→2 は Progress 値なので raw value は比べません。即テンパイ、成立した 2→1

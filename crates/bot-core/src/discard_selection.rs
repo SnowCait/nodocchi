@@ -20,7 +20,8 @@ use crate::offense_value::{
 };
 use crate::prospective_value::{
     ProductionProspectiveValuator, ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic,
-    continuation_han_verdict, evaluate_prospective_lookahead_value, scored_han_verdict,
+    continuation_han_verdict, evaluate_prospective_lookahead_value, fold_ron_yaku,
+    scored_han_verdict, selected_path_terminal_ron_yaku,
 };
 use crate::reach_policy::{
     ReachTimingDiagnostic, decide_permanent_furiten_reach_timing, evaluates_named_yakuman_damaten,
@@ -41,7 +42,8 @@ use bot_logic::{
     LookaheadDiagnostic, LookaheadInputs, Meld, OwnDiscards, SameShantenContinuationDepth,
     SearchStateMemoStats, SelfTsumoFacts, SelfTsumoHorizon, TenpaiCompletedHands,
     TenpaiWaitAvailability, ThreeShantenMetrics, ThreeShantenSearchStats, TileCounts, TileId,
-    TileType, TwoShantenMetrics, TwoShantenProgressSelfTsumoDiagnostic,
+    TileType, TwoShantenMetrics, TwoShantenProgressContinuation,
+    TwoShantenProgressContinuationObserver, TwoShantenProgressSelfTsumoDiagnostic,
     TwoShantenSelfTsumoDiagnostic, TwoShantenSelfTsumoScope,
     best_discard_selection_index_with_forward_metrics,
     best_discard_selection_index_with_stable_order_fallback,
@@ -3129,6 +3131,86 @@ pub(crate) fn two_shanten_progress_post_call_terminal_ron_yaku(
     ));
     let value = bot_logic::two_shanten_progress_self_tsumo_value_for_candidate(&inputs, evaluation);
     (value, valuator.terminal_ron_yaku_verdict())
+}
+
+/// 鳴き後も2向聴の打牌候補1件の Progress 値と、terminal の役の2つの集約。
+///
+/// observation-only の [`two_shanten_progress_post_call_terminal_ron_yakus`] が返す。
+pub(crate) struct PostCallTerminalRonYakus {
+    pub(crate) value: Option<u64>,
+    /// 評価器が terminal scoring を通したテンパイ全体の結論。
+    /// [`two_shanten_progress_post_call_terminal_ron_yaku`] と同じ値。
+    pub(crate) all_terminals: ProspectiveHanVerdict,
+    /// そのうち1向聴 continuation の既存比較が選んだ将来打牌の経路上にある terminal だけの結論。
+    /// 対象の terminal が1件も無い場合は `Unknown`。
+    pub(crate) selected_path: ProspectiveHanVerdict,
+}
+
+/// [`two_shanten_progress_post_call_terminal_ron_yaku`] と同じ評価1回から、terminal 全体の役の
+/// 結論に加えて、選ばれる将来打牌の経路上の terminal だけの結論 (selected-path) も回収する。
+///
+/// `現在2向聴 → Call → 2向聴のまま` の observation ([`crate::two_shanten_stay_call_observation`])
+/// だけが通り、production の鳴き判断は通らない。
+///
+/// Progress 値・探索・terminal scoring は [`two_shanten_progress_post_call_terminal_ron_yaku`] と
+/// 同じで、terminal 全体の結論も同じになる。違いは次の2つだけで、どちらも追加の探索も点数計算も
+/// 行わない。
+///
+/// - 評価器が畳む役の結論を、テンパイごとにも memo へ載せる
+///   ([`ProductionProspectiveValuator::memoizing_terminal_ron_yaku`])
+/// - 1向聴 continuation を探索するたびに、その探索結果の枝 (値の集計に使った枝そのもの) を
+///   観測器で受け取り、選ばれた将来打牌の経路上の terminal の結論を memo から読んで畳む
+///   ([`selected_path_terminal_ron_yaku`])
+///
+/// continuation の探索結果は値を集計した時点で捨てられ、探索内 memo も値しか持たないので、
+/// 探索後に経路を辿り直すことはできない。そのため探索中に観測器で受け取る。探索内 memo の hit で
+/// 通知されない continuation は、同じ評価の中で同じ入力を探索済みで、その経路は通知済みになる。
+pub(crate) fn two_shanten_progress_post_call_terminal_ron_yakus(
+    context: &GameContext,
+    tiles: &[TileId],
+    melds: &[Meld],
+    evaluation: &DiscardEvaluation,
+) -> PostCallTerminalRonYakus {
+    let valuator = ProductionProspectiveValuator::new_with_hand_state(context, Some(melds))
+        .collecting_terminal_ron_yaku(true)
+        .memoizing_terminal_ron_yaku(true);
+    let inputs = with_production_iishanten_continuation(lookahead_inputs(
+        context,
+        tiles,
+        &valuator,
+        LookaheadDiagnosticScope::None,
+    ));
+    let mut selected_path = SelectedPathRonYaku {
+        valuator: &valuator,
+        verdict: None,
+    };
+    let value = bot_logic::two_shanten_progress_self_tsumo_value_for_candidate_observed(
+        &inputs,
+        evaluation,
+        &mut selected_path,
+    );
+    PostCallTerminalRonYakus {
+        value,
+        all_terminals: valuator.terminal_ron_yaku_verdict(),
+        selected_path: selected_path
+            .verdict
+            .unwrap_or(ProspectiveHanVerdict::Unknown),
+    }
+}
+
+// 1向聴 continuation の探索結果ごとに、選ばれた将来打牌の経路上の terminal の役の結論を畳む。
+struct SelectedPathRonYaku<'v, 'a> {
+    valuator: &'v ProductionProspectiveValuator<'a>,
+    verdict: Option<ProspectiveHanVerdict>,
+}
+
+impl TwoShantenProgressContinuationObserver for SelectedPathRonYaku<'_, '_> {
+    fn searched(&mut self, continuation: TwoShantenProgressContinuation<'_>) {
+        self.verdict = fold_ron_yaku(
+            self.verdict,
+            selected_path_terminal_ron_yaku(self.valuator, &continuation),
+        );
+    }
 }
 
 fn tiles_to_mjai(tiles: &[TileId]) -> String {
