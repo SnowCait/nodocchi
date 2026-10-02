@@ -383,6 +383,16 @@ weighted next acceptance
 
 仮想ツモが赤5 / 黒5に分かれる牌種では、物理牌ごとに次打牌を評価し、それぞれの残枚数で集約します。この指標に打点は含めないため、赤 / 黒で変わるのは残枚数の内訳だけです。1向聴の `weighted prospective value` はここでは使いません。
 
+## 次の自摸を待つ state の weighted forward metric
+
+既に action が終わり次の自摸を待っている未テンパイ state についても、`awaiting_draw_weighted_forward_metric()` で通常打牌後と同じ意味の `weighted_remaining` / `weighted_type_count` / `prospective_value` を取得できます。
+
+```text
+次の自摸を待つ N 向聴 state → Progress する牌をツモ → 既存 comparator の次打牌 → N-1 向聴
+```
+
+だけを集計し、1向聴では `weighted tenpai wait`、2向聴以上では `weighted next acceptance` と同じ値になります。架空の現在打牌は作らず、探索・物理牌 variant・次打牌の比較・将来打点・集計規則は打牌候補の前方評価と同じものを使います。SameShanten の枝は含めず、`ExpectedSelfTsumoValue` とは別の尺度です。打点を確定できない枝がある場合、`prospective_value` は 0 点にせず値を持ちません。production の打牌選択と Call policy はこの値を使いません。
+
 ## 2向聴: ExpectedSelfTsumoValue
 
 2向聴の候補も、1向聴と同じ self-tsumo 尺度へ揃えて観測できます。
