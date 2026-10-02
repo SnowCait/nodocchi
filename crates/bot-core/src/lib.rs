@@ -44,7 +44,7 @@ pub mod two_shanten_stay_call_observation;
 pub use action::LegalAction;
 pub use agent::Agent;
 pub use agents::{
-    AgentActionSource, MenzenAgent, NormalAgent, ReachDecisionReason, ShantenAgent, TsumogiriAgent,
+    AgentActionSource, MenzenAgent, NodocchiAgent, NormalAgent, ReachDecisionReason, TsumogiriAgent,
 };
 pub use call_decision::{
     CALL_CURRENT_SHANTEN, CALL_MIN_LIVE_WAIT_REMAINING, CALL_TENPAI_SHANTEN,

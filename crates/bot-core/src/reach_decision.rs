@@ -47,7 +47,7 @@ const REACH_TENPAI_SHANTEN: i8 = 0;
 ///   専用に向聴・受け入れ・待ち・フリテンを計算し直さない。`shanten_after_discard` は
 ///   [`DiscardEvaluation::min_shanten_after_discard`]、`tenpai_wait` のツモ側は
 ///   [`DiscardEvaluation::acceptance_after_discard`] そのもの。
-/// - `selected` は `ShantenAgent::act()` が実際に採用したリーチそのもので、診断用の別判断
+/// - `selected` は `NodocchiAgent::act()` が実際に採用したリーチそのもので、診断用の別判断
 ///   ロジックは持たない。
 /// - 判定が進まなかった項目は推測せず `None` のままにする。
 ///

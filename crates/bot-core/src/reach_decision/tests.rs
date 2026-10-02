@@ -2,7 +2,7 @@ use super::*;
 
 use crate::action::LegalAction;
 use crate::agent::Agent;
-use crate::agents::{AgentActionSource, ShantenAgent};
+use crate::agents::{AgentActionSource, NodocchiAgent};
 use crate::context::{GameContext, TableStateFacts};
 use crate::damaten_value::{
     DAMATEN_MIN_TOTAL, DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict,
@@ -30,9 +30,9 @@ use crate::tenpai_continuation::{
 use bot_logic::{HistoryFuritenFacts, PermanentFuriten, RiichiStatus, TileId, TileType, WinMethod};
 
 fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let expected = agent.act(ctx, actions);
-    let diagnostic = ShantenAgent::diagnose(ctx, actions);
+    let diagnostic = NodocchiAgent::diagnose(ctx, actions);
     assert_eq!(diagnostic.selected_action, expected);
     diagnostic
 }
@@ -194,14 +194,14 @@ fn reach_diagnostic(ctx: &GameContext, actions: &[LegalAction]) -> ReachDecision
 
 #[test]
 fn reaches_when_visible_waits_are_plentiful() {
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let ctx = tenpai_context(&[]);
     assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
 }
 
 #[test]
 fn skips_reach_when_visible_waits_are_scarce() {
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let ctx = tenpai_context(&TENPAI_SCARCE_VISIBLE);
     let selected = agent.act(&ctx, &tenpai_actions());
     assert!(matches!(selected, LegalAction::Dahai { .. }));
@@ -211,7 +211,7 @@ fn skips_reach_when_visible_waits_are_scarce() {
 fn reaches_when_visible_tiles_empty_even_with_hand() {
     // visible tiles が空でも「空だから無条件にリーチ」ではなく、選んだ打牌の受け入れで
     // 判断する。この手牌は見え牌補正が無くても待ちが8枚あるのでリーチになる。
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let ctx = tenpai_context_without_visible_tiles();
     assert!(ctx.visible_tiles().is_empty());
     assert_eq!(agent.act(&ctx, &tenpai_actions()), LegalAction::Reach);
@@ -221,12 +221,12 @@ fn reaches_when_visible_tiles_empty_even_with_hand() {
 fn does_not_reach_without_hand_information() {
     // 手牌が無く通常打牌 selection が打牌を選べない局面では、リーチ専用の fallback で
     // 無条件にリーチしない。
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let ctx = GameContext::default();
     let actions = vec![LegalAction::Reach];
 
     assert_ne!(agent.act(&ctx, &actions), LegalAction::Reach);
-    let reach = ShantenAgent::diagnose(&ctx, &actions)
+    let reach = NodocchiAgent::diagnose(&ctx, &actions)
         .reach
         .expect("Push mode でリーチを検討する");
     assert!(!reach.should_reach());
@@ -320,11 +320,11 @@ fn reach_decision_is_shared_by_act_and_every_diagnose_entry_point() {
                 .collect()
         }),
     ] {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&ctx, &actions);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
         assert_eq!(diagnostic.selected_action, acted);
         assert_eq!(with_lookahead.selected_action, acted);
@@ -336,7 +336,7 @@ fn reach_decision_is_shared_by_act_and_every_diagnose_entry_point() {
 fn reach_evaluation_does_not_build_the_analysis_diagnostics() {
     let ctx = tenpai_context(&[]);
     let mut diagnostics = DecisionDiagnostics::disabled();
-    let decision = ShantenAgent.decide_with_diagnostics(&ctx, &tenpai_actions(), &mut diagnostics);
+    let decision = NodocchiAgent.decide_with_diagnostics(&ctx, &tenpai_actions(), &mut diagnostics);
 
     assert_eq!(decision.action, LegalAction::Reach);
     assert!(diagnostics.normal_discard.is_none());
@@ -387,7 +387,7 @@ impl DamatenCase {
     }
 
     fn act(&self) -> LegalAction {
-        ShantenAgent.act(&self.ctx, &self.actions)
+        NodocchiAgent.act(&self.ctx, &self.actions)
     }
 
     fn damaten(&self) -> DamatenValueDiagnostic {
@@ -1135,7 +1135,7 @@ fn a_permanent_furiten_named_yakuman_tenpai_never_declares_the_reach() {
     // 通常打牌 selection が選んだ打牌をそのまま行う。
     assert_eq!(reach.selected_discard, Some(case.tsumogiri.clone()));
     assert_eq!(case.act(), case.tsumogiri);
-    let diagnostic = ShantenAgent::diagnose(&case.ctx, &case.actions);
+    let diagnostic = NodocchiAgent::diagnose(&case.ctx, &case.actions);
     assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
     assert_eq!(
         diagnostic.normal_discard_action,
@@ -1316,7 +1316,7 @@ impl ReachTimingCase {
     }
 
     fn act(&self) -> LegalAction {
-        ShantenAgent.act(&self.ctx, &self.actions)
+        NodocchiAgent.act(&self.ctx, &self.actions)
     }
 
     // 選択済み候補1件の self-tsumo 比較。timing 判断が対象外にした局面でも counterfactual を
@@ -1458,7 +1458,7 @@ fn a_permanent_furiten_tenpai_defers_the_reach_when_one_more_draw_scores_higher(
     assert_eq!(reach.selected_discard, Some(case.tsumogiri.clone()));
     assert_eq!(case.act(), case.tsumogiri);
     assert_eq!(
-        ShantenAgent::diagnose(&case.ctx, &case.actions).selected_source,
+        NodocchiAgent::diagnose(&case.ctx, &case.actions).selected_source,
         AgentActionSource::NormalDiscard
     );
 }
@@ -1555,7 +1555,7 @@ fn a_non_furiten_bad_single_wait_defers_when_one_more_draw_scores_higher() {
     assert!(reach.defers_reach());
     assert_eq!(case.act(), case.tsumogiri);
     assert_eq!(
-        ShantenAgent::diagnose(&case.ctx, &case.actions).selected_source,
+        NodocchiAgent::diagnose(&case.ctx, &case.actions).selected_source,
         AgentActionSource::NormalDiscard
     );
 }

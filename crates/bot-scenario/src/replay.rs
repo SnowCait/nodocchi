@@ -179,8 +179,8 @@ mod tests {
     use super::*;
     use bot_analysis::ScenarioSpec;
     use bot_core::{
-        Agent, CallDecisionReason, CallIishantenComparison, LegalAction, MeldKind, PushPullMode,
-        PushPullReason, ShantenAgent, current_reach_riichi_status,
+        Agent, CallDecisionReason, CallIishantenComparison, LegalAction, MeldKind, NodocchiAgent,
+        PushPullMode, PushPullReason, current_reach_riichi_status,
         player_threat_facts_from_context,
     };
     use bot_logic::{TileId, TileType};
@@ -504,7 +504,7 @@ mod tests {
     fn replay_does_not_infer_a_reaction_source_from_a_legal_pon() {
         let captured = replay_capture(&[iishanten_pon_request_action_line(424)], None).unwrap();
         let diagnostic =
-            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+            NodocchiAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
 
         assert_eq!(captured.scenario.context.reaction_source_player(), None);
         assert_eq!(
@@ -524,7 +524,7 @@ mod tests {
         )
         .unwrap();
         let diagnostic =
-            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+            NodocchiAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
         let call = diagnostic.call.expect("call diagnostic");
         let comparison = call.candidates[0]
             .iishanten_self_tsumo
@@ -580,7 +580,7 @@ mod tests {
         let captured = replay_capture(&[request_action_line(414, &observation)], None).unwrap();
 
         let diagnostic =
-            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+            NodocchiAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
         let output = crate::format::format_diagnostic(&captured.scenario, &diagnostic, false);
 
         assert!(output.contains("\n\nTable state\n"), "{output}");
@@ -702,13 +702,13 @@ mod tests {
 
         let direct = direct_scenario(&observation);
         let replayed =
-            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
-        let expected = ShantenAgent::diagnose(&direct.context, &direct.legal_actions);
+            NodocchiAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+        let expected = NodocchiAgent::diagnose(&direct.context, &direct.legal_actions);
 
         assert_eq!(replayed.selected_action, expected.selected_action);
         assert_eq!(
             replayed.selected_action,
-            ShantenAgent.act(&direct.context, &direct.legal_actions)
+            NodocchiAgent.act(&direct.context, &direct.legal_actions)
         );
         assert_eq!(replayed.push_pull_inputs, expected.push_pull_inputs);
         assert_eq!(replayed.push_pull_decision, expected.push_pull_decision);
@@ -775,11 +775,11 @@ mod tests {
             captured.request_id,
             &possible_actions,
             &ObservationPayload::new(observation),
-            &mut ShantenAgent,
+            &mut NodocchiAgent,
         );
 
         let diagnostic =
-            ShantenAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
+            NodocchiAgent::diagnose(&captured.scenario.context, &captured.scenario.legal_actions);
         assert!(client_response.is_some());
         assert_eq!(
             client_response,
@@ -799,7 +799,7 @@ mod tests {
         let captured = replay_capture(&[request_action_line(414, &observation)], None).unwrap();
 
         let context = &captured.scenario.context;
-        let diagnostic = ShantenAgent::diagnose(context, &captured.scenario.legal_actions);
+        let diagnostic = NodocchiAgent::diagnose(context, &captured.scenario.legal_actions);
         let facts = &diagnostic.player_threats[1].facts;
 
         assert!(!context.any_opponent_reached());

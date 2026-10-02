@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use bot_core::{
     CallCandidateDuration, CallDecisionDurations, DecisionPhaseDurations,
     ForwardMetricsPhaseDurations, IishantenForwardCandidateDuration, IishantenReachRonRisk,
-    LegalAction, NormalDiscardPhaseDurations, ShantenAgent,
+    LegalAction, NodocchiAgent, NormalDiscardPhaseDurations,
 };
 use bot_logic::TileType;
 use serde::{Deserialize, Serialize};
@@ -184,7 +184,7 @@ pub fn measure_captures(paths: &[String]) -> Result<BenchmarkRun, ScenarioError>
 }
 
 fn measure_request(captured: &CapturedScenario) -> RequestMeasurement {
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let context = &captured.scenario.context;
     let legal_actions = captured.scenario.legal_actions.as_slice();
 
@@ -1114,7 +1114,7 @@ mod tests {
             serde_json::from_str(&format!("[{}]", possible_actions_json(&CAPTURED_DAHAI))).unwrap();
         let legal_actions = possible_actions_to_legal_actions(&possible_actions);
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             run.requests[0].selected_action,
             agent.act(&context, &legal_actions)
@@ -1624,7 +1624,7 @@ mod tests {
         assert!(phases.total() <= measurement.phases.normal_discard);
         assert_eq!(
             measurement.selected_action,
-            ShantenAgent.act(&captured.scenario.context, &captured.scenario.legal_actions)
+            NodocchiAgent.act(&captured.scenario.context, &captured.scenario.legal_actions)
         );
         assert_eq!(action_label(&measurement.selected_action), "6s");
     }
@@ -1911,8 +1911,8 @@ mod tests {
             serde_json::from_str(&format!("[{}]", possible_actions_json(&CAPTURED_DAHAI))).unwrap();
         let legal_actions = possible_actions_to_legal_actions(&possible_actions);
 
-        let mut timed_agent = ShantenAgent;
-        let mut untimed_agent = ShantenAgent;
+        let mut timed_agent = NodocchiAgent;
+        let mut untimed_agent = NodocchiAgent;
         assert_eq!(
             timed_agent
                 .act_with_phase_timing(&context, &legal_actions)

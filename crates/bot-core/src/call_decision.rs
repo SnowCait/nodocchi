@@ -944,7 +944,7 @@ impl CallCandidateDiagnostic {
 
 /// 鳴き判断の構造化診断。
 ///
-/// `selected` は `ShantenAgent::act()` が実際に採用した鳴きそのもので、診断用の別判断ロジック
+/// `selected` は `NodocchiAgent::act()` が実際に採用した鳴きそのもので、診断用の別判断ロジック
 /// は持たない。採用が無い場合の `reason` は最初の候補が落ちた理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallDecisionDiagnostic {
@@ -6371,12 +6371,12 @@ mod tests {
         let action = pon_action(IISHANTEN_PON_TARGET, &IISHANTEN_PON_CONSUMED);
         let actions = [action.clone(), LegalAction::None];
 
-        let mut agent = crate::agents::ShantenAgent;
+        let mut agent = crate::agents::NodocchiAgent;
         let acted = crate::agent::Agent::act(&mut agent, &ctx, &actions);
         assert_eq!(acted, action);
 
         // diagnose() は観測値を集めるが、選ぶ action は act() と同じ。
-        let diagnostic = crate::agents::ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = crate::agents::NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_action, acted);
         let call = diagnostic.call.as_ref().expect("evaluated");
         assert_eq!(call.selected, Some(acted));

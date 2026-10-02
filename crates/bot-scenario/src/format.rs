@@ -3782,9 +3782,8 @@ mod tests {
     use bot_core::{
         Agent, CallDecisionReason, CombinedDefenseSelectionDiagnostic, DefenseFallbackKind,
         DiagnosticOptions, KakanChankanOpponent, KakanChankanSafety, KanDecisionReason, KanKind,
-        MenzenAgent, OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic,
-        PlayerRonRiskEvidence, RonRiskEvidence, ShantenAgent, TenpaiOffenseMode,
-        TenpaiOffenseValue,
+        MenzenAgent, NodocchiAgent, OpenHandDefenseCategory, OpenHandDefenseSelectionDiagnostic,
+        PlayerRonRiskEvidence, RonRiskEvidence, TenpaiOffenseMode, TenpaiOffenseValue,
     };
     use bot_logic::{
         DiscardComparisonReason, TileCounts, TwoShantenSelfTsumoCandidate,
@@ -3800,7 +3799,7 @@ mod tests {
     }
 
     fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
-        ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+        NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
     }
 
     fn rendered(json: &str, verbose: bool) -> (Scenario, ShantenDecisionDiagnostic, String) {
@@ -3843,7 +3842,7 @@ mod tests {
 
     fn rendered_with_structural_expected_deal_in_loss(json: &str) -> RenderedDiagnostic {
         let scenario = scenario_from_json(json);
-        let diagnostic = ShantenAgent::diagnose_with_options(
+        let diagnostic = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
@@ -3874,7 +3873,7 @@ mod tests {
 
     fn rendered_with_lookahead_diagnostic(json: &str, verbose: bool) -> RenderedDiagnostic {
         let scenario = scenario_from_json(json);
-        let diagnostic = ShantenAgent::diagnose_with_options(
+        let diagnostic = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
@@ -3888,7 +3887,7 @@ mod tests {
     // same-shanten の枝をテンパイまで追った詳細診断。深い探索なので必要なテストだけで使う。
     fn rendered_with_same_shanten_downstream(json: &str) -> String {
         let scenario = scenario_from_json(json);
-        let diagnostic = ShantenAgent::diagnose_with_options(
+        let diagnostic = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
@@ -4482,10 +4481,10 @@ mod tests {
     #[test]
     fn ryanshanten_scenario_keeps_act_and_diagnostics_consistent() {
         let scenario = scenario_from_json(RYANSHANTEN_NEXT_ACCEPTANCE_SCENARIO);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
         let diagnosed = diagnose(&scenario);
-        let with_lookahead = ShantenAgent::diagnose_with_options(
+        let with_lookahead = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
@@ -4670,11 +4669,11 @@ mod tests {
     fn iishanten_tenpai_wait_scenario_selects_the_same_action_with_lookahead() {
         // act() / diagnose() / --lookahead 付き診断で selected action が一致する。
         let scenario = scenario_from_json(IISHANTEN_TENPAI_WAIT_SCENARIO);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
 
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
         let diagnostic = diagnose(&scenario);
-        let with_lookahead = ShantenAgent::diagnose_with_options(
+        let with_lookahead = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
@@ -4802,11 +4801,11 @@ mod tests {
     fn permanent_furiten_scenario_selects_the_same_action_everywhere() {
         // フリテン診断は事実の表現だけで、act() / diagnose() / --lookahead の選択を変えない。
         let scenario = scenario_from_json(PERMANENT_FURITEN_SCENARIO);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
 
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
         let diagnostic = diagnose(&scenario);
-        let with_lookahead = ShantenAgent::diagnose_with_options(
+        let with_lookahead = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
@@ -4848,11 +4847,11 @@ mod tests {
     fn history_furiten_scenario_selects_the_same_action_everywhere() {
         // 履歴依存フリテンを含む局面でも act() / diagnose() / --lookahead の選択は一致する。
         let scenario = scenario_from_json(HISTORY_FURITEN_SAME_TURN_SCENARIO);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
 
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
         let diagnostic = diagnose(&scenario);
-        let with_lookahead = ShantenAgent::diagnose_with_options(
+        let with_lookahead = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,
@@ -4885,7 +4884,7 @@ mod tests {
     #[test]
     fn an_auto_generated_reach_is_selected_and_matches_act() {
         let (scenario, diagnostic, output) = rendered(AUTO_REACH_SCENARIO, false);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
 
         assert!(scenario.legal_actions.contains(&LegalAction::Reach));
 
@@ -4929,7 +4928,7 @@ mod tests {
         assert!(matches!(scenario.legal_actions[0], LegalAction::Pon { .. }));
         assert_eq!(scenario.legal_actions[1], LegalAction::None);
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&scenario.context, &scenario.legal_actions),
             scenario.legal_actions[0]
@@ -5034,7 +5033,7 @@ mod tests {
     #[test]
     fn a_two_shanten_call_with_a_higher_value_is_selected_and_visible() {
         let (scenario, diagnostic, output) = rendered(TWO_SHANTEN_PON_CALL_SCENARIO, false);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
         let call = diagnostic.call.as_ref().expect("call diagnostic");
         let candidate = &call.candidates[0];
@@ -5182,7 +5181,7 @@ mod tests {
     fn an_iishanten_call_candidate_is_still_not_selected() {
         let (scenario, diagnostic, output) = rendered(IISHANTEN_PON_REACTION_SCENARIO, false);
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&scenario.context, &scenario.legal_actions),
             LegalAction::None
@@ -5203,7 +5202,7 @@ mod tests {
             "\"remaining_tiles\": 12, \"allow_none\": true",
         );
         let (scenario, diagnostic, output) = rendered(&json, false);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
 
         assert_eq!(diagnostic.selected_action, acted);
@@ -5573,9 +5572,9 @@ mod tests {
             LegalAction::None
         );
 
-        let mut shanten = ShantenAgent;
+        let mut nodocchi = NodocchiAgent;
         assert_eq!(
-            shanten.act(&scenario.context, &scenario.legal_actions),
+            nodocchi.act(&scenario.context, &scenario.legal_actions),
             scenario.legal_actions[0]
         );
     }
@@ -5751,7 +5750,7 @@ mod tests {
         for json in [NORMAL_SCENARIO, DEFENSE_SCENARIO] {
             let scenario = scenario_from_json(json);
             let diagnostic = diagnose(&scenario);
-            let mut agent = ShantenAgent;
+            let mut agent = NodocchiAgent;
             let acted = agent.act(&scenario.context, &scenario.legal_actions);
             assert_eq!(diagnostic.selected_action, acted);
 
@@ -6588,7 +6587,7 @@ mod tests {
         let mut remaining = scenario.legal_actions.clone();
         let mut choices = Vec::new();
         while choices.len() < limit && !remaining.is_empty() {
-            let choice = ShantenAgent::diagnose(&scenario.context, &remaining);
+            let choice = NodocchiAgent::diagnose(&scenario.context, &remaining);
             if choice.selected_action == LegalAction::None {
                 if choices.is_empty() {
                     choices.push(choice);
@@ -7007,7 +7006,7 @@ mod tests {
 
             let mut reversed_actions = scenario.legal_actions.clone();
             reversed_actions.reverse();
-            let reversed = ShantenAgent::diagnose(&scenario.context, &reversed_actions);
+            let reversed = NodocchiAgent::diagnose(&scenario.context, &reversed_actions);
             assert_eq!(action_label(&reversed.selected_action), expected);
         }
     }
@@ -7095,7 +7094,7 @@ mod tests {
             let diagnostic = diagnose(&scenario);
             let output = format_diagnostic(&scenario, &diagnostic, false);
 
-            let mut agent = ShantenAgent;
+            let mut agent = NodocchiAgent;
             assert_eq!(
                 diagnostic.selected_action,
                 agent.act(&scenario.context, &scenario.legal_actions)
@@ -8187,7 +8186,7 @@ mod tests {
 
     fn rendered_with_two_shanten_self_tsumo(json: &str) -> String {
         let scenario = scenario_from_json(json);
-        let diagnostic = ShantenAgent::diagnose_with_options(
+        let diagnostic = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
@@ -9968,7 +9967,7 @@ mod tests {
     fn the_structural_expected_deal_in_loss_section_does_not_change_the_other_sections() {
         let scenario = scenario_from_json(STRUCTURAL_EXPECTED_DEAL_IN_LOSS_SCENARIO);
         let without = diagnose(&scenario);
-        let with = ShantenAgent::diagnose_with_options(
+        let with = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,

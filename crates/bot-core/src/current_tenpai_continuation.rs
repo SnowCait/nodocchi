@@ -174,7 +174,7 @@ mod tests {
     use bot_logic::{HistoryFuritenFacts, TileId};
 
     use crate::action::LegalAction;
-    use crate::agents::{DiagnosticOptions, ShantenAgent};
+    use crate::agents::{DiagnosticOptions, NodocchiAgent};
     use crate::context::{GameContext, TableStateFacts};
     use crate::discard_selection::{
         DiscardActionSelectionWithDiagnostic, LookaheadDiagnosticScope,
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn current_tenpai_continuation_is_carried_to_the_final_shanten_diagnostic() {
         let case = CaseSpec::default().context();
-        let diagnostic = ShantenAgent::diagnose_with_options(
+        let diagnostic = NodocchiAgent::diagnose_with_options(
             &case.context,
             &case.actions,
             DiagnosticOptions::WITH_LOOKAHEAD,

@@ -1,13 +1,13 @@
 use bot_core::{
     AgentActionSource, CombinedDefenseCategory, DefenseFallbackKind, GameContext, LegalAction,
-    OpenHandDefenseCategory, OpponentHonorValue, ShantenAgent, ShantenDecisionDiagnostic,
+    NodocchiAgent, OpenHandDefenseCategory, OpponentHonorValue, ShantenDecisionDiagnostic,
 };
 use bot_logic::{DiscardCandidateDiagnostic, DiscardComparisonReason};
 
 /// 上位から順に並べた選択肢1件分の構造化結果。
 ///
 /// choice 1 は呼び出し側が既に得ている production 診断そのもので、choice 2 以降は上位 choice が
-/// 選んだ action を合法手から順に除外して production の [`ShantenAgent::diagnose`] を再実行した
+/// 選んだ action を合法手から順に除外して production の [`NodocchiAgent::diagnose`] を再実行した
 /// 結果になる。内部では [`ShantenDecisionDiagnostic`] を使うが、consumer へはこの薄い結果だけを
 /// 渡し、診断全体を公開しない。表示用の文字列も作らず、既存の enum と数値をそのまま保持する。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +86,7 @@ pub struct RankedChoiceHitProbability {
 /// `diagnostic` は、ここへ渡す `context` と `legal_actions` そのものに対して得た primary 診断で
 /// なければならない。choice 1 は渡された `diagnostic` そのもので、別の診断範囲で取り直さない。
 /// choice 2 以降だけ、その同じ `legal_actions` から上位 choice が選んだ action を1件ずつ除外して
-/// production の [`ShantenAgent::diagnose`] を再実行する。したがって別の合法手集合から得た診断を
+/// production の [`NodocchiAgent::diagnose`] を再実行する。したがって別の合法手集合から得た診断を
 /// 渡すと、choice 1 と choice 2 以降が違う前提の並びになる。
 ///
 /// 追加診断の範囲は違っていてよい。[`DiagnosticOptions`](bot_core::DiagnosticOptions) は選択する
@@ -180,7 +180,7 @@ fn diagnose_choices(
             break;
         }
 
-        let next = ShantenAgent::diagnose(context, &next_actions);
+        let next = NodocchiAgent::diagnose(context, &next_actions);
         if next.selected_action == LegalAction::None {
             break;
         }
@@ -415,7 +415,7 @@ mod tests {
     }
 
     fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
-        ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+        NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
     }
 
     fn ranked(
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn keeps_the_given_primary_diagnostic_as_the_first_choice() {
         let scenario = scenario_from_json(NORMAL_SCENARIO);
-        let diagnostic = ShantenAgent::diagnose_with_options(
+        let diagnostic = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,

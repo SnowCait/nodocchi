@@ -3,7 +3,7 @@
 `riichilab-client` で RiichiLab に接続します。
 
 ```text
-usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen] [--log-file <PATH>] [--capture-file <PATH>]
+usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|nodocchi|menzen] [--log-file <PATH>] [--capture-file <PATH>]
 ```
 
 ## 接続モード
@@ -17,12 +17,12 @@ cargo run -p riichilab-client --bin riichilab-client -- ranked
 
 ## Agent の指定
 
-`--agent shanten` は向聴ベースの `ShantenAgent`、`--agent menzen` は同じ基本判断を使いながらチー・ポン・明槓など門前を崩す鳴きを行わない `MenzenAgent` を使用します。未指定時は `NormalAgent` です。
+`--agent nodocchi` は production AI の `NodocchiAgent`、`--agent menzen` は `NodocchiAgent` と同じ基本判断を使いながらチー・ポン・明槓など門前を崩す鳴きを行わない `MenzenAgent` を使用します。`--agent normal` は単純 baseline の `NormalAgent`、`--agent tsumogiri` はツモ切り baseline の `TsumogiriAgent` です。`--agent` を省略した場合は環境変数 `MAHJONG_AGENT` を同じ名前で読み、それも未指定なら `NormalAgent` です。各 Agent の位置づけは [麻雀 AI の概要](ai/overview.md#agent-構成) を参照してください。
 
 ```text
 --agent normal
 --agent tsumogiri
---agent shanten
+--agent nodocchi
 --agent menzen
 ```
 
@@ -31,7 +31,7 @@ validation の例:
 ```bash
 RIICHILAB_BOT_TOKEN=... \
 cargo run -p riichilab-client --bin riichilab-client -- \
-  validate --agent shanten
+  validate --agent nodocchi
 ```
 
 ranked の例:
@@ -39,7 +39,7 @@ ranked の例:
 ```bash
 RIICHILAB_BOT_TOKEN=... \
 cargo run -p riichilab-client --bin riichilab-client -- \
-  ranked --agent shanten
+  ranked --agent nodocchi
 ```
 
 `RIICHILAB_BOT_TOKEN` は secret として扱い、repository、文書、issue、PR、log に残さないでください。`ranked` は実戦 queue に入るため、validation と bot activation を確認してから実行してください。
@@ -64,7 +64,7 @@ starting riichilab-client version=0.1.0 git_revision=896a6ef94a00b45f4e14af6064f
 ```bash
 cargo run -p riichilab-client --bin riichilab-client -- \
   ranked \
-  --agent shanten \
+  --agent nodocchi \
   --log-file logs/ranked.log
 ```
 
@@ -78,7 +78,7 @@ investigation preset の target は既存 instrumentation の `bot_core::agent_d
 RUST_LOG=bot_core::push_pull=trace \
 cargo run -p riichilab-client --bin riichilab-client -- \
   ranked \
-  --agent shanten \
+  --agent nodocchi \
   --log-file logs/ranked.log
 ```
 
@@ -112,7 +112,7 @@ meld applied actor=1 target=0 pai="7p" consumed=["5p", "6p"]
 RIICHILAB_BOT_TOKEN=... \
 cargo run -p riichilab-client --bin riichilab-client -- \
   ranked \
-  --agent shanten \
+  --agent nodocchi \
   --log-file logs/ranked.log \
   --capture-file logs/ranked-capture.jsonl
 ```
@@ -123,7 +123,7 @@ validation でも同じ option を使用できます。
 RIICHILAB_BOT_TOKEN=... \
 cargo run -p riichilab-client --bin riichilab-client -- \
   validate \
-  --agent shanten \
+  --agent nodocchi \
   --capture-file logs/validate-capture.jsonl
 ```
 
@@ -164,7 +164,7 @@ capture file は client 1起動、つまり ranked 1対局または validation 1
 
 ```bash
 cargo run -p riichilab-client --bin riichilab-client -- \
-  ranked --agent shanten \
+  ranked --agent nodocchi \
   --capture-file "logs/ranked-capture-$(date +%Y%m%d-%H%M%S).jsonl"
 ```
 

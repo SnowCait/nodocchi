@@ -8,7 +8,7 @@
 
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
-    AgentActionSource, GameContext, LegalAction, ShantenAgent, ShantenDecisionDiagnostic,
+    AgentActionSource, GameContext, LegalAction, NodocchiAgent, ShantenDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardEvaluation, ForwardMetrics,
@@ -31,7 +31,7 @@ fn tile_type(mjai: &str) -> TileType {
 }
 
 fn diagnose(context: &GameContext, legal_actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
-    ShantenAgent::diagnose(context, legal_actions)
+    NodocchiAgent::diagnose(context, legal_actions)
 }
 
 fn candidates(diagnostic: &ShantenDecisionDiagnostic) -> &[DiscardCandidateDiagnostic] {
@@ -220,7 +220,7 @@ fn the_until_ryukyoku_fallback_selects_6s_with_its_own_reason() {
     );
 
     // production act() も同じ打牌を選ぶ。
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let action = bot_core::Agent::act(&mut agent, &scenario.context, &scenario.legal_actions);
     assert_eq!(action, diagnostic.selected_action);
 }
@@ -328,7 +328,7 @@ fn an_until_ryukyoku_configured_horizon_skips_the_fallback_regardless_of_the_lat
     // horizon_turn >= 18 はすでに流局までの評価なので、late minimum が残っていても fallback の
     // 追加探索を行わない。production (h12) では同じ局面で発火する。
     let scenario = resolve();
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let production = agent.act_with_phase_timing(&scenario.context, &scenario.legal_actions);
     assert_eq!(production.iishanten_stable_order_fallback_candidates(), 2);
     assert!(

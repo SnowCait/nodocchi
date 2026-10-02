@@ -54,7 +54,7 @@ impl AnalysisResult {
     ///
     /// 追加診断の範囲は違っていてよい。[`DiagnosticOptions`](bot_core::DiagnosticOptions) は
     /// 選択する action を変えないので、同じ `context` / `legal_actions` から
-    /// [`ShantenAgent::diagnose_with_options()`](bot_core::ShantenAgent::diagnose_with_options)
+    /// [`NodocchiAgent::diagnose_with_options()`](bot_core::NodocchiAgent::diagnose_with_options)
     /// で得た詳細診断も同じ decision point の primary 診断として渡せる。
     ///
     /// この前提は runtime では検証しない。`context` / `legal_actions` と `diagnostic` の対応は
@@ -565,8 +565,8 @@ mod tests {
     use crate::scenario::{Scenario, ScenarioSpec};
     use bot_core::{
         CallKind, CallTwoShantenSelfTsumoDiagnostic, CallTwoShantenSpeedDiagnostic,
-        CallTwoShantenStaySelfTsumoDiagnostic, CombinedDefenseCategory, OpenHandDefenseCategory,
-        OpponentHonorValue, ShantenAgent, TenpaiOffenseMode,
+        CallTwoShantenStaySelfTsumoDiagnostic, CombinedDefenseCategory, NodocchiAgent,
+        OpenHandDefenseCategory, OpponentHonorValue, TenpaiOffenseMode,
     };
     use bot_logic::{DiscardEvaluation, TileCounts, select_best_discard};
 
@@ -787,7 +787,7 @@ mod tests {
 
     fn analyzed(json: &str) -> (Scenario, ShantenDecisionDiagnostic, AnalysisResult) {
         let scenario = scenario_from_json(json);
-        let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
+        let diagnostic = NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions);
         let result = AnalysisResult::from_decision(
             &scenario.context,
             &scenario.legal_actions,

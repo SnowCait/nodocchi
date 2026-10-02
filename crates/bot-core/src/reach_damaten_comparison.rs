@@ -16,7 +16,7 @@
 //! リーチ Ron 打点だけは production 判断が評価しない観測値なので、この層が既存 scoring rule で
 //! 評価する。診断のために新しく点数計算するのはこの1つで、他の材料は既存値をそのまま読む。
 //!
-//! 評価するのは診断が有効な経路だけ。通常の [`ShantenAgent::act()`](crate::agents::ShantenAgent)
+//! 評価するのは診断が有効な経路だけ。通常の [`NodocchiAgent::act()`](crate::agents::NodocchiAgent)
 //! はこの層を通らないので、完成手の組み立ても hand-value evaluation も production には入らない。
 //! 完成手は待ちごとの解析を丸ごと所有する重い値なので、production の打牌選択へ持ち回らせない。
 //! リーチ判断がダマ打点のために組み立てた集合があればその所有権を受け取り、無い場合だけ選んだ
@@ -329,7 +329,7 @@ mod tests {
     use bot_logic::{HistoryFuritenFacts, RiichiStatus, TileId, WinMethod};
 
     use crate::agent::Agent;
-    use crate::agents::{DiagnosticOptions, ShantenAgent, ShantenDecisionDiagnostic};
+    use crate::agents::{DiagnosticOptions, NodocchiAgent, ShantenDecisionDiagnostic};
     use crate::context::TableStateFacts;
     use crate::damaten_value::DamatenValue;
     use crate::defense::{
@@ -515,7 +515,7 @@ mod tests {
             })
             .with_history_furiten_facts(self.history_furiten);
 
-            let diagnostic = ShantenAgent::diagnose_with_options(&context, &actions, self.options);
+            let diagnostic = NodocchiAgent::diagnose_with_options(&context, &actions, self.options);
 
             Case {
                 context,
@@ -665,7 +665,7 @@ mod tests {
     fn the_comparison_does_not_change_the_selected_action() {
         for spec in [CaseSpec::default(), ittsuu_spec(), open_spec()] {
             let case = spec.build();
-            let mut agent = ShantenAgent;
+            let mut agent = NodocchiAgent;
 
             assert_eq!(
                 case.diagnostic.selected_action,

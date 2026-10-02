@@ -1666,7 +1666,7 @@ where
 mod tests {
     use super::*;
     use bot_analysis::{Scenario, ScenarioBuildError};
-    use bot_core::ShantenAgent;
+    use bot_core::NodocchiAgent;
 
     fn parse(args: &[&str]) -> Result<CliArgs, CliError> {
         CliArgs::parse(args.iter().map(|arg| arg.to_string()))
@@ -1684,7 +1684,7 @@ mod tests {
     }
 
     fn acceptance_remaining(scenario: &Scenario, discard: &str) -> u8 {
-        ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+        NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
             .normal_discard
             .expect("normal discard evaluated")
             .candidates

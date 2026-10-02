@@ -1,7 +1,7 @@
-//! ShantenAgent の production decision から診断情報を収集し、最終診断を組み立てる。
+//! NodocchiAgent の production decision から診断情報を収集し、最終診断を組み立てる。
 
 use crate::action::LegalAction;
-use crate::agents::{AgentActionSource, AgentDecision, ShantenAgent, log_agent_decision};
+use crate::agents::{AgentActionSource, AgentDecision, NodocchiAgent, log_agent_decision};
 use crate::call_decision::CallDecisionDiagnostic;
 use crate::combined_defense::{CombinedDefenseCategory, CombinedDefenseDiagnostic};
 use crate::context::GameContext;
@@ -37,13 +37,13 @@ use bot_logic::{
 #[cfg(test)]
 mod tests;
 
-/// `ShantenAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
+/// `NodocchiAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
 ///
 /// 契約:
 ///
-/// - `selected_action` / `selected_source` は `ShantenAgent::act()` と**同じ selection logic** の
+/// - `selected_action` / `selected_source` は `NodocchiAgent::act()` と**同じ selection logic** の
 ///   結果である。診断専用の別判断ロジックは持たない。
-///   常に `selected_action == ShantenAgent::act(context, legal_actions)` が成り立つ。
+///   常に `selected_action == NodocchiAgent::act(context, legal_actions)` が成り立つ。
 /// - 追加診断情報(候補ごとの形の内訳、全防御候補評価など)は解析用途であり、action 選択には
 ///   影響しない。
 /// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku / 鳴きで
@@ -55,7 +55,7 @@ mod tests;
 /// tracing ログとは独立した pure なデータであり、ログをパースして構築することはない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShantenDecisionDiagnostic {
-    /// 最終的に選んだ action。`ShantenAgent::act()` の結果と一致する。
+    /// 最終的に選んだ action。`NodocchiAgent::act()` の結果と一致する。
     pub selected_action: LegalAction,
     /// 最終 action をどの経路で選んだか。
     pub selected_source: AgentActionSource,
@@ -340,9 +340,9 @@ impl DiagnosticOptions {
     }
 }
 
-/// `ShantenAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
+/// `NodocchiAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
 ///
-/// [`ShantenAgent::diagnose`] の別名。契約は [`ShantenDecisionDiagnostic`] を参照。
+/// [`NodocchiAgent::diagnose`] の別名。契約は [`ShantenDecisionDiagnostic`] を参照。
 pub fn diagnose_shanten_decision(
     context: &GameContext,
     legal_actions: &[LegalAction],
@@ -350,16 +350,16 @@ pub fn diagnose_shanten_decision(
     diagnose_shanten_decision_with_options(context, legal_actions, DiagnosticOptions::NONE)
 }
 
-/// 追加診断を指定して `ShantenAgent::act()` と同じ判断を行う。
+/// 追加診断を指定して `NodocchiAgent::act()` と同じ判断を行う。
 ///
-/// [`ShantenAgent::diagnose_with_options`] の別名。
+/// [`NodocchiAgent::diagnose_with_options`] の別名。
 pub fn diagnose_shanten_decision_with_options(
     context: &GameContext,
     legal_actions: &[LegalAction],
     options: DiagnosticOptions,
 ) -> ShantenDecisionDiagnostic {
     let mut diagnostics = DecisionDiagnostics::enabled_with(options);
-    let decision = ShantenAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
+    let decision = NodocchiAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
     log_agent_decision(&decision);
     diagnostics.finish(context, legal_actions, decision)
 }

@@ -8,17 +8,17 @@
 CHIIHOU_NSEC=nsec1... \
 cargo run -p chiihou-client --bin chiihou-client -- \
   --channel hanchan \
-  --agent shanten
+  --agent nodocchi
 ```
 
 ```text
-usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten|menzen] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]
+usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|nodocchi|menzen] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]
 ```
 
 | 引数 | 必須 | 内容 |
 | --- | --: | --- |
 | `--channel` | 必須 | `hanchan` または `tonpuu` |
-| `--agent` | 任意 | `normal`、`tsumogiri`、`shanten`、`menzen`。既定値は `normal` |
+| `--agent` | 任意 | `normal`、`tsumogiri`、`nodocchi`、`menzen`。既定値は `normal`。各 Agent の位置づけは [麻雀 AI の概要](ai/overview.md#agent-構成) を参照 |
 | `--server-npub` | 任意 | server の NIP-19 `npub` または `nprofile`。省略時は既定 server |
 | `--auto-next` | 任意 | 局終了ごとに `next` を1回送信する |
 | `--response-delay-ms` | 任意 | GET reply と自動 next の publish 前に入れる遅延。ミリ秒、既定値 `0` |
@@ -35,7 +35,7 @@ server を上書きする例:
 CHIIHOU_NSEC=nsec1... \
 cargo run -p chiihou-client --bin chiihou-client -- \
   --channel hanchan \
-  --agent shanten \
+  --agent nodocchi \
   --server-npub npub1...
 ```
 
@@ -46,7 +46,7 @@ CHIIHOU_NSEC=nsec1... \
 RUST_LOG=info \
 cargo run -p chiihou-client --bin chiihou-client -- \
   --channel hanchan \
-  --agent shanten \
+  --agent nodocchi \
   --auto-next \
   --response-delay-ms 5000
 ```

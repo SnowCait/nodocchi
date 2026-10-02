@@ -26,7 +26,7 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 
 /// 押し引きの判断結果を表すモード。
 ///
-/// `ShantenAgent` は `Hora` / `Ryukyoku` を確認したあと、このモードに応じて
+/// `NodocchiAgent` は `Hora` / `Ryukyoku` を確認したあと、このモードに応じて
 /// action の優先順位を切り替える。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
@@ -37,7 +37,7 @@ const LOG_TARGET: &str = "bot_core::push_pull";
 /// `Push`、明確な threat があれば強いテンパイと攻撃価値を確認できた一向聴だけ `Push` で、
 /// それ以外は `Fold` になる。一向聴では Reach できず `Push` と `Neutral` の action 順序に
 /// 実質的な違いが無いため、一向聴の判定も `Push` / `Fold` の二値にしている。`Neutral` は
-/// `ShantenAgent` の action 順序としては残してあり、攻撃価値と safety を同時に比較する本当の
+/// `NodocchiAgent` の action 順序としては残してあり、攻撃価値と safety を同時に比較する本当の
 /// 中間モードを実装するときに使う。
 ///
 /// これは暫定 heuristic であり、以下はまだ考慮していない。
@@ -367,7 +367,7 @@ fn own_fixed_meld_value_proxy(context: &GameContext) -> OffenseValueProxyBreakdo
 /// 実際に切られる物理牌カテゴリ(赤5・通常5)と一致するよう、`concealed_tiles_after_discard` で
 /// 物理牌を1枚除いた打牌後の concealed hand へ処理を一元化する。ドラ総数・赤ドラ数・役牌翻 proxy を同じ牌集合から求める。
 ///
-/// 通常の `ShantenAgent` 経路では補正済み評価と合法 action の物理牌情報が一致する不変条件があるため、
+/// 通常の `NodocchiAgent` 経路では補正済み評価と合法 action の物理牌情報が一致する不変条件があるため、
 /// 一致する物理牌は必ず見つかる。それでも見つからない場合は panic せず、契約違反を `debug_assert` で
 /// 検出しつつ release ではデフォルト値(計算不能)を返す。
 fn concealed_value_proxy_after_discard(
@@ -461,7 +461,7 @@ pub struct PushPullInputs {
     /// 1向聴候補の exact ron-risk summary。対象外の局面では `None`。
     ///
     /// 将来の1向聴 Push/Fold policy のための観測値で、[`decide_push_pull`] は読まない。値を
-    /// 埋めるのは `ShantenAgent` の通常打牌選択後の経路だけで、鳴き後の押し引きなど他の入口では
+    /// 埋めるのは `NodocchiAgent` の通常打牌選択後の経路だけで、鳴き後の押し引きなど他の入口では
     /// 常に `None`。
     pub iishanten_reach_ron_risk: Option<IishantenReachRonRisk>,
 }
@@ -612,7 +612,7 @@ const MULTIPLE_REACH_IISHANTEN_FOLD_MIN_REACH_COUNT: u8 = 2;
 /// 対象にする。
 ///
 /// 攻撃評価は既存の通常打牌 best 評価 ([`select_best_normal_discard_evaluation`]) を再利用する。
-/// 比較 semantics は `ShantenAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait と
+/// 比較 semantics は `NodocchiAgent` の通常打牌選択と同じで、1向聴限定の weighted tenpai wait と
 /// 現在聴牌の offense weighted total を含む。打牌候補の絞り込みには `legal_actions` を使わない
 /// ので、対象は手牌から切れる全打牌候補になる。手牌とツモ牌が空なら `offense == None`。
 ///
@@ -1199,12 +1199,12 @@ fn is_valuable_iishanten(offense: &PushPullOffenseState, inputs: &PushPullInputs
 /// - 点棒状況・局・順位条件
 ///
 /// 暫定 threshold は実戦の regression test に基づいて将来調整する。この判定結果は
-/// `ShantenAgent` の action 選択に反映される。
+/// `NodocchiAgent` の action 選択に反映される。
 ///
 /// - `Push`: Reach → 通常打牌 → 防御 fallback
 /// - `Fold`: 防御 fallback → 通常打牌(Reach は抑制)
 ///
-/// 二向聴以上の段は [`two_or_more_shanten_fold`] と同じ helper を通る。`ShantenAgent` は
+/// 二向聴以上の段は [`two_or_more_shanten_fold`] と同じ helper を通る。`NodocchiAgent` は
 /// 通常打牌選択より前にその helper だけで Fold を確定できる局面を判定するが、判定に使う
 /// threat 分類も reason もこの module が source of truth のまま変わらない。
 pub fn decide_push_pull(inputs: &PushPullInputs) -> PushPullDecision {
@@ -6450,7 +6450,7 @@ mod tests {
 
     #[test]
     fn the_current_policy_never_returns_neutral() {
-        // Neutral は ShantenAgent の action 順序としては残しているが、現在の policy は返さない。
+        // Neutral は NodocchiAgent の action 順序としては残しているが、現在の policy は返さない。
         let offenses = [
             None,
             Some(strong_tenpai_offense()),

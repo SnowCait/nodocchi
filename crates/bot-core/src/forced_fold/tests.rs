@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::agent::Agent;
-use crate::agents::ShantenAgent;
+use crate::agents::NodocchiAgent;
 use crate::context::TableStateFacts;
 use crate::defense::{
     HonorSafetyRank, PlayerRonRiskEvidence, RonRiskEvidence,
@@ -256,15 +256,15 @@ fn returns_the_fold_defense_discard_even_when_the_decision_is_push() {
 fn does_not_change_the_production_decision() {
     let context = tenpai_under_reach_context(None, [false, true, false, false]);
     let actions = tenpai_actions();
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
 
     let before = agent.act(&context, &actions);
-    let before_diagnostic = ShantenAgent::diagnose(&context, &actions);
+    let before_diagnostic = NodocchiAgent::diagnose(&context, &actions);
 
     let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
 
     let after = agent.act(&context, &actions);
-    let after_diagnostic = ShantenAgent::diagnose(&context, &actions);
+    let after_diagnostic = NodocchiAgent::diagnose(&context, &actions);
 
     assert_eq!(before, after);
     assert_eq!(before_diagnostic, after_diagnostic);

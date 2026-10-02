@@ -639,7 +639,7 @@ fn build_naku_reply_for_decision(server_npub: &str, decision: ChiihouNakuDecisio
 mod tests {
     use super::*;
     use crate::protocol::ChiihouNakuAction;
-    use bot_core::{AgentActionSource, CallDecisionReason, ShantenAgent};
+    use bot_core::{AgentActionSource, CallDecisionReason, NodocchiAgent};
     use bot_logic::{FixedMeldCount, TileId};
 
     fn pai(s: &str) -> ChiihouPai {
@@ -1184,8 +1184,8 @@ mod tests {
     }
 
     #[test]
-    fn shanten_agent_tsumos_complete_hand() {
-        let mut agent = ShantenAgent;
+    fn nodocchi_agent_tsumos_complete_hand() {
+        let mut agent = NodocchiAgent;
         assert_eq!(
             choose_sutehai_decision(&complete_sutehai_request(), &mut agent),
             Ok(ChiihouSutehaiDecision::Tsumo)
@@ -1371,8 +1371,8 @@ mod tests {
     }
 
     #[test]
-    fn shanten_agent_rons_when_ron_is_offered() {
-        let mut agent = ShantenAgent;
+    fn nodocchi_agent_rons_when_ron_is_offered() {
+        let mut agent = NodocchiAgent;
         assert_eq!(
             choose_naku_decision(&naku_request(vec![ChiihouNakuAction::Ron]), &mut agent),
             Ok(ChiihouNakuDecision::Ron)
@@ -1864,61 +1864,61 @@ mod tests {
     }
 
     #[test]
-    fn shanten_agent_declines_pon_offer() {
+    fn nodocchi_agent_declines_pon_offer() {
         let request = naku_request_with(
             &["1z", "1z", "1m", "2m", "3m"],
             "1z",
             vec![ChiihouNakuAction::Pon],
         );
         assert_eq!(
-            choose_naku_decision(&request, &mut ShantenAgent),
+            choose_naku_decision(&request, &mut NodocchiAgent),
             Ok(ChiihouNakuDecision::No)
         );
         assert_eq!(
-            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            build_naku_reply_for_request("npub1server", &request, &mut NodocchiAgent),
             Ok("nostr:npub1server naku? no".to_string())
         );
     }
 
     #[test]
-    fn shanten_agent_declines_chi_offer() {
+    fn nodocchi_agent_declines_chi_offer() {
         let request = naku_request_with(
             &["1m", "2m", "4m", "5m"],
             "3m",
             vec![ChiihouNakuAction::Chi],
         );
         assert_eq!(
-            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            build_naku_reply_for_request("npub1server", &request, &mut NodocchiAgent),
             Ok("nostr:npub1server naku? no".to_string())
         );
     }
 
     #[test]
-    fn shanten_agent_declines_daiminkan_offer() {
+    fn nodocchi_agent_declines_daiminkan_offer() {
         let request = naku_request_with(
             &["1z", "1z", "1z", "2m", "3m"],
             "1z",
             vec![ChiihouNakuAction::Kan],
         );
         assert_eq!(
-            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            build_naku_reply_for_request("npub1server", &request, &mut NodocchiAgent),
             Ok("nostr:npub1server naku? no".to_string())
         );
     }
 
     #[test]
-    fn shanten_agent_rons_when_ron_and_pon_are_offered() {
+    fn nodocchi_agent_rons_when_ron_and_pon_are_offered() {
         let request = naku_request_with(
             &["1z", "1z", "1m", "2m", "3m"],
             "1z",
             vec![ChiihouNakuAction::Ron, ChiihouNakuAction::Pon],
         );
         assert_eq!(
-            choose_naku_decision(&request, &mut ShantenAgent),
+            choose_naku_decision(&request, &mut NodocchiAgent),
             Ok(ChiihouNakuDecision::Ron)
         );
         assert_eq!(
-            build_naku_reply_for_request("npub1server", &request, &mut ShantenAgent),
+            build_naku_reply_for_request("npub1server", &request, &mut NodocchiAgent),
             Ok("nostr:npub1server naku? ron".to_string())
         );
     }
@@ -2833,8 +2833,8 @@ nostr:npub1ai000 GET sutehai?"
     }
 
     #[test]
-    fn shanten_agent_richis_with_plentiful_waits() {
-        let mut agent = ShantenAgent;
+    fn nodocchi_agent_richis_with_plentiful_waits() {
+        let mut agent = NodocchiAgent;
         assert_eq!(
             choose_sutehai_decision_with_state(&richi_request(), &richi_snapshot(), &mut agent),
             Ok(ChiihouSutehaiDecision::Richi(pai("1z")))
@@ -2842,8 +2842,8 @@ nostr:npub1ai000 GET sutehai?"
     }
 
     #[test]
-    fn shanten_agent_discards_when_waits_are_scarce() {
-        let mut agent = ShantenAgent;
+    fn nodocchi_agent_discards_when_waits_are_scarce() {
+        let mut agent = NodocchiAgent;
         let mut state = richi_snapshot();
         state.discards[1] = pais(&["1p", "1p", "1p", "1p", "4p", "4p", "4p"]);
         assert_eq!(
@@ -2879,8 +2879,8 @@ nostr:npub1ai000 GET sutehai?"
     }
 
     #[test]
-    fn builds_sutehai_reply_with_shanten_agent() {
-        let mut agent = ShantenAgent;
+    fn builds_sutehai_reply_with_nodocchi_agent() {
+        let mut agent = NodocchiAgent;
         let request = ChiihouRequest::Sutehai {
             hand: vec![
                 pai("1m"),
@@ -3132,8 +3132,8 @@ nostr:npub1ai000 GET sutehai?"
     }
 
     #[test]
-    fn shanten_agent_discards_drawn_when_reached() {
-        let mut agent = ShantenAgent;
+    fn nodocchi_agent_discards_drawn_when_reached() {
+        let mut agent = NodocchiAgent;
         assert_eq!(
             choose_sutehai_decision_with_state(
                 &richi_request(),
@@ -3164,7 +3164,7 @@ nostr:npub1ai000 GET sutehai?"
                 "npub1server",
                 &richi_request(),
                 &self_reached_snapshot(),
-                &mut ShantenAgent
+                &mut NodocchiAgent
             ),
             Ok("nostr:npub1server sutehai? sutehai 1z".to_string())
         );
@@ -3329,7 +3329,7 @@ nostr:npub1ai000 GET naku? pon";
     }
 
     #[test]
-    fn shanten_agent_pons_value_honor_from_a_raw_naku_request() {
+    fn nodocchi_agent_pons_value_honor_from_a_raw_naku_request() {
         let ChiihouRequest::Naku {
             hand,
             target,
@@ -3341,7 +3341,7 @@ nostr:npub1ai000 GET naku? pon";
 
         let context = known_history_furiten_context(&hand);
         let legal_actions = legal_actions_from_naku_request(&hand, target, &actions);
-        assert_eq!(ShantenAgent.act(&context, &legal_actions), pon("5z"));
+        assert_eq!(NodocchiAgent.act(&context, &legal_actions), pon("5z"));
     }
 
     #[test]
@@ -3360,17 +3360,17 @@ nostr:npub1ai000 GET naku? pon";
         let context = game_context_from_naku_request_with_state(hand, &pon_snapshot());
         let legal_actions = legal_actions_from_naku_request(hand, *target, actions);
         assert_eq!(
-            ShantenAgent.act(&context, &legal_actions),
+            NodocchiAgent.act(&context, &legal_actions),
             LegalAction::None
         );
 
-        let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
+        let diagnostic = NodocchiAgent::diagnose(&context, &legal_actions);
         let call = diagnostic.call.as_ref().unwrap();
         assert_eq!(call.reason, CallDecisionReason::CannotRon);
         assert_eq!(call.candidates[0].can_ron(), None);
 
         assert_eq!(
-            choose_naku_decision_with_state(&request, &pon_snapshot(), &mut ShantenAgent),
+            choose_naku_decision_with_state(&request, &pon_snapshot(), &mut NodocchiAgent),
             Ok(ChiihouNakuDecision::No)
         );
     }
@@ -3388,7 +3388,7 @@ nostr:npub1ai000 GET naku? pon";
         let context = known_history_furiten_context(&hand);
         let legal_actions = legal_actions_from_naku_request(&hand, target, &actions);
 
-        let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
+        let diagnostic = NodocchiAgent::diagnose(&context, &legal_actions);
         assert_eq!(diagnostic.selected_action, pon("5z"));
         assert_eq!(diagnostic.selected_source, AgentActionSource::Call);
 

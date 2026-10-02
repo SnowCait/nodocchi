@@ -13,10 +13,10 @@
 
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
-    Agent, DiagnosticOptions, LegalAction, MeldKindCounts, OpenHandThreatAssessment,
+    Agent, DiagnosticOptions, LegalAction, MeldKindCounts, NodocchiAgent, OpenHandThreatAssessment,
     OpenHandThreatDecision, OpenHandThreatExclusion, OpenHandThreatLevel, OpenHandThreatReason,
     PlayerThreatFacts, PushPullDecision, PushPullInputs, PushPullMode, PushPullOffenseState,
-    PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, SuitedSafetyRank, SujiSafetyRank,
+    PushPullReason, ShantenDecisionDiagnostic, SuitedSafetyRank, SujiSafetyRank,
     ValueHonorMeldCounts, WallRank, classify_open_hand_threat, honor_safety_rank,
     is_discarded_by_all_open_hand_threats, opponent_honor_value_for_open_hand_threats,
     suited_safety_rank_for_open_hand_threats, suji_safety_rank_for,
@@ -498,7 +498,7 @@ fn resolve(entry: &CorpusScenario) -> Scenario {
 }
 
 fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
-    ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+    NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
 }
 
 // 副露を持たない席に期待する観測事実。河だけは player 2 が 5 枚持つ。
@@ -1292,7 +1292,7 @@ fn assert_the_self_hands_cover_the_push_pull_branches(corpus: &EvaluatedCorpus) 
 
 // 診断を無効にした production 経路の選択と、同じ局面の診断の選択が一致する。
 fn assert_the_selected_action_matches_act(evaluated: &Evaluated) {
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let acted = agent.act(
         &evaluated.scenario.context,
         &evaluated.scenario.legal_actions,
@@ -1400,10 +1400,10 @@ fn the_lookahead_scenarios_select_the_same_action_in_act_and_diagnose() {
             .find(|entry| entry.name == name)
             .unwrap_or_else(|| panic!("{name} scenario"));
         let scenario = resolve(&entry);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
 
         let acted = agent.act(&scenario.context, &scenario.legal_actions);
-        let with_lookahead = ShantenAgent::diagnose_with_options(
+        let with_lookahead = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,

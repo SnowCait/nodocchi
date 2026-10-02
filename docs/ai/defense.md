@@ -150,7 +150,7 @@ exact path を使うのは、**全リーチ者**の exact model が利用可能�
 
 複数リーチ、Combined threat、OpenHandThreat 単独、テンパイ、2向聴以上、明確な threat がない局面では追加評価しません。通常打牌選択を通らない [確定 Fold](push-pull.md#通常打牌選択より前の確定-fold) と、鳴き後の押し引き入力も対象外です。
 
-対象局面では logging の有無にかかわらず production 経路 (`ShantenAgent` の通常打牌選択の直後) で計算し、`PushPullInputs::iishanten_reach_ron_risk` に保持します。
+対象局面では logging の有無にかかわらず production 経路 (`NodocchiAgent` の通常打牌選択の直後) で計算し、`PushPullInputs::iishanten_reach_ron_risk` に保持します。
 
 #### exact model は Reach Defense と共有する
 

@@ -1,4 +1,4 @@
-use bot_core::{GameContext, LegalAction, ShantenAgent};
+use bot_core::{GameContext, LegalAction, NodocchiAgent};
 
 use crate::analysis_result::AnalysisResult;
 
@@ -8,7 +8,7 @@ use crate::analysis_result::AnalysisResult;
 /// [`Scenario::resolve()`](crate::Scenario::resolve) が、replay は復元した decision point が、
 /// それぞれこの2つを用意すればこの入口へ繋がる。
 ///
-/// primary 診断は production 既定の [`ShantenAgent::diagnose`] でここで1回だけ取り、追加
+/// primary 診断は production 既定の [`NodocchiAgent::diagnose`] でここで1回だけ取り、追加
 /// 調査用の診断は構築しない。診断そのものは返さず、[`AnalysisResult`] へ投影した結果だけを
 /// 渡す。同じ `context` / 合法手に対する primary 診断を既に持っている consumer は、再診断せずに
 /// [`AnalysisResult::from_decision`] を直接呼ぶ。
@@ -19,7 +19,7 @@ pub fn analyze(
     legal_actions: &[LegalAction],
     choice_limit: usize,
 ) -> AnalysisResult {
-    let diagnostic = ShantenAgent::diagnose(context, legal_actions);
+    let diagnostic = NodocchiAgent::diagnose(context, legal_actions);
     AnalysisResult::from_decision(context, legal_actions, &diagnostic, choice_limit)
 }
 
@@ -54,7 +54,7 @@ mod tests {
     }
 
     fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
-        ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+        NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
     }
 
     // 共通入口は production 診断と既存の投影を組み合わせたものと同じ結果になる。
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn keeps_the_selection_of_a_detailed_primary_diagnostic() {
         let scenario = scenario_from_json(NORMAL_SCENARIO);
-        let detailed = ShantenAgent::diagnose_with_options(
+        let detailed = NodocchiAgent::diagnose_with_options(
             &scenario.context,
             &scenario.legal_actions,
             DiagnosticOptions::WITH_LOOKAHEAD,

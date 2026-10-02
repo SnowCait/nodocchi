@@ -1,6 +1,6 @@
 //! 攻撃を継続するテンパイで Reach / Damaten のどちらを選ぶかを決める policy 層。
 //!
-//! リーチ判断そのもの ([`crate::agents::ShantenAgent`] の Reach action 選択) と、押し引きが
+//! リーチ判断そのもの ([`crate::agents::NodocchiAgent`] の Reach action 選択) と、押し引きが
 //! 攻撃打点を求めるときの攻撃モード判定は、同じ結論でなければならない。両者が同じ条件を別々に
 //! 書くと片方だけがずれるため、条件は [`decide_reach_reason`] 1本だけが持つ。Reach action 判断
 //! だけに適用する categorical rule も同じく1本の helper が持ち、条件を呼び出し側へ散らさない。

@@ -72,7 +72,7 @@ pub enum RyukyokuVerdict {
 ///
 /// - [`LegalAction::Ryukyoku`](crate::action::LegalAction::Ryukyoku) が合法だった局面でだけ
 ///   作られる。合法性はこの層で再判定しない。
-/// - `verdict` は `ShantenAgent::act()` が実際に通った経路そのもので、診断用の別判断ロジック
+/// - `verdict` は `NodocchiAgent::act()` が実際に通った経路そのもので、診断用の別判断ロジック
 ///   は持たない。
 /// - 3種類の向聴数は同じ [`calculate_shanten`] の結果で、判断に使った値そのもの。
 /// - 手牌を評価できなかった場合は `shanten` が `None` になり、向聴数を推測して埋めない。

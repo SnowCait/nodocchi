@@ -1,6 +1,6 @@
 # bot-scenario
 
-`bot-scenario` は、手牌・局面を入力して `ShantenAgent` の判断と根拠をオフラインで確認する CLI です。実対局や WebSocket 接続は行いません。出力の読み方は [Structured diagnostics](diagnostics.md)、判断仕様は [麻雀 AI の概要](ai/overview.md) を参照してください。
+`bot-scenario` は、手牌・局面を入力して `NodocchiAgent` の判断と根拠をオフラインで確認する CLI です。実対局や WebSocket 接続は行いません。出力の読み方は [Structured diagnostics](diagnostics.md)、判断仕様は [麻雀 AI の概要](ai/overview.md) を参照してください。
 
 牌文字列の parse、physical tile の割り当て、scenario の validation、`GameContext` と `LegalAction` の構築は、platform 非依存の library crate [`bot-analysis`](../crates/bot-analysis/) にあります。`bot-scenario` は CLI 引数の解析・file I/O・RiichiLab capture の再生・出力の整形を担当し、局面構築は `bot-analysis` の `ScenarioSpec` → `Scenario::resolve()` → `Scenario` をそのまま使用します。
 
@@ -186,14 +186,14 @@ done
 
 #### capture 全体の horizon 比較
 
-`--compare-self-tsumo-horizon <CAPTURE_JSONL>...` は capture の全 `request_action` を再生し、各 request を soft horizon 12 / 14 / 16 / 18 (`late_min_future_draws` は production と同じ 2 で固定) の4通りで判断して集計します。scenario・context・legal actions はそのままで horizon だけを差し替え、`ShantenAgent::act()` と同じ production の判断経路を horizon ごとに1回通します。比較専用の打牌選択・Call 判断は持たず、構造化診断も構築しません。各 horizon は新しい thread の cold な memo から始まり、horizon 間で memo を共有しません。1向聴 Push/Fold の固定 threshold と比較する値は horizon によらず `UNTIL_RYUKYOKU` のままです。
+`--compare-self-tsumo-horizon <CAPTURE_JSONL>...` は capture の全 `request_action` を再生し、各 request を soft horizon 12 / 14 / 16 / 18 (`late_min_future_draws` は production と同じ 2 で固定) の4通りで判断して集計します。scenario・context・legal actions はそのままで horizon だけを差し替え、`NodocchiAgent::act()` と同じ production の判断経路を horizon ごとに1回通します。比較専用の打牌選択・Call 判断は持たず、構造化診断も構築しません。各 horizon は新しい thread の cold な memo から始まり、horizon 間で memo を共有しません。1向聴 Push/Fold の固定 threshold と比較する値は horizon によらず `UNTIL_RYUKYOKU` のままです。
 
 この比較は **どの horizon が正しいかを自動判定するものではなく**、horizon を変えた場合に production 判断がどの程度・どの局面で変わるかを観測する診断です。
 
 将来自摸機会は2種類を区別します。
 
 - **baseline** (通常打牌後・Call 後): raw future own draws は `floor(remaining_tiles / 4)`、effective はそれへ各 horizon を適用した値です
-- **pass side** (Chi / Pon への反応 request の Pass continuation): production の鳴き判断は反応元の席の位置から `1 + (remaining_tiles - reaction_draw_distance) / 4` を使うので、同じ request でも baseline と異なる場合があります (例: 残り 63 枚・反応元が下家なら baseline 15、Pass 16)。値は production の helper をそのまま読み、比較側で式を持ちません。Pass 側の値を持つのは、production の鳴き判断が実際に Call / Pass self-tsumo continuation を評価する対象となった request (1向聴→Call→1向聴、2向聴→Call→1向聴、3向聴→Call→2向聴の候補がある request) だけです。対象かどうかは各 horizon の `ShantenAgent::decide()` が返した鳴き判断の候補 (`iishanten_self_tsumo` / `two_shanten_self_tsumo` / `three_shanten_self_tsumo`) をそのまま読み、比較側で候補の準備や向聴判定をやり直しません。Chi / Pon が無い request と、即テンパイ Call など Call は合法でも Pass continuation を使わない request は `not applicable` です。対象ではあるが反応元不明・残り山不明などで production が Pass 側の自摸回数を確定できない場合は、推測せず `unknown` です。対象かどうかは horizon に依りませんが、万一 horizon で分かれた場合はどれか1つに寄せず `differs across horizons` と horizon ごとの値を出します
+- **pass side** (Chi / Pon への反応 request の Pass continuation): production の鳴き判断は反応元の席の位置から `1 + (remaining_tiles - reaction_draw_distance) / 4` を使うので、同じ request でも baseline と異なる場合があります (例: 残り 63 枚・反応元が下家なら baseline 15、Pass 16)。値は production の helper をそのまま読み、比較側で式を持ちません。Pass 側の値を持つのは、production の鳴き判断が実際に Call / Pass self-tsumo continuation を評価する対象となった request (1向聴→Call→1向聴、2向聴→Call→1向聴、3向聴→Call→2向聴の候補がある request) だけです。対象かどうかは各 horizon の `NodocchiAgent::decide()` が返した鳴き判断の候補 (`iishanten_self_tsumo` / `two_shanten_self_tsumo` / `three_shanten_self_tsumo`) をそのまま読み、比較側で候補の準備や向聴判定をやり直しません。Chi / Pon が無い request と、即テンパイ Call など Call は合法でも Pass continuation を使わない request は `not applicable` です。対象ではあるが反応元不明・残り山不明などで production が Pass 側の自摸回数を確定できない場合は、推測せず `unknown` です。対象かどうかは horizon に依りませんが、万一 horizon で分かれた場合はどれか1つに寄せず `differs across horizons` と horizon ごとの値を出します
 
 ```sh
 cargo run --release -p bot-scenario -- \
@@ -367,7 +367,7 @@ worker はそれぞれ自分の探索基盤を持つため、逐次評価では 
 | selected-path `RequireAllLiveWaits` (selected-path strict) | observation-only の比較 ([Issue #355](https://github.com/SnowCait/nodocchi/issues/355)) |
 | `AllowPartialWaits` | observation-only の counterfactual |
 
-**observation は production を変えません。** `ShantenAgent::act()` と通常の `diagnose()` の選択・理由、Call / Pass policy、速度優先 policy、鳴き後の Push/Pull、打牌 comparator、2向聴 Full の gate と並列度はどれも observation の有無で変わらず、観測結果を production へ戻す経路もありません。この option を指定しない通常実行では、observation の Progress / Full 探索を一切走らせません。
+**observation は production を変えません。** `NodocchiAgent::act()` と通常の `diagnose()` の選択・理由、Call / Pass policy、速度優先 policy、鳴き後の Push/Pull、打牌 comparator、2向聴 Full の gate と並列度はどれも observation の有無で変わらず、観測結果を production へ戻す経路もありません。この option を指定しない通常実行では、observation の Progress / Full 探索を一切走らせません。
 
 ```sh
 cargo run --release -p bot-scenario -- \
@@ -420,7 +420,7 @@ Progress と Full の値は混ぜず、scope ごとに独立に `call > pass` / 
 
 #### 片和了 policy
 
-Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの policy を当てはめた結論も並べます。**all-terminal strict の `RequireAllLiveWaits` は production policy と同じ判定**で、production の 2→2 Call はこれに加えて鳴き後 Push/Pull が `Push` の候補だけ鳴きます。**selected-path strict の `RequireAllLiveWaits` は observation-only の比較**、**`AllowPartialWaits` は observation 上の counterfactual** で、どちらも production へは接続しません。`ShantenAgent` の設定や CLI で production の片和了 policy を切り替える経路もありません。Issue #355 の実戦 capture での再計測結果を確認するまで、production は all-terminal strict のまま切り替えません。
+Progress の Call / Pass 結論に、片和了 (生きた和了牌の一部にしか役が無い待ち) をどう扱うかの policy を当てはめた結論も並べます。**all-terminal strict の `RequireAllLiveWaits` は production policy と同じ判定**で、production の 2→2 Call はこれに加えて鳴き後 Push/Pull が `Push` の候補だけ鳴きます。**selected-path strict の `RequireAllLiveWaits` は observation-only の比較**、**`AllowPartialWaits` は observation 上の counterfactual** で、どちらも production へは接続しません。`NodocchiAgent` の設定や CLI で production の片和了 policy を切り替える経路もありません。Issue #355 の実戦 capture での再計測結果を確認するまで、production は all-terminal strict のまま切り替えません。
 
 | policy | Call 相当 | それ以外 |
 | --- | --- | --- |
@@ -541,7 +541,7 @@ request 単位と候補単位を分けて表示します。
 
 `--force-fold` は、通常の押し引き判断とは無関係に「この局面でベタ降りすると仮定した場合の防御打牌」を確認する option です。防御候補をランキングし、上位候補と model risk・fold risk を並べます。
 
-production bot の判断は変わりません。`ShantenAgent::act()` も `diagnose()` も `--force-fold` の有無で結果が変わらず、この option が `PushPullMode::Fold` を production decision へ注入することもありません。通常診断とは独立した hypothetical evaluation として、既存 Fold defense evaluator を直接実行します。
+production bot の判断は変わりません。`NodocchiAgent::act()` も `diagnose()` も `--force-fold` の有無で結果が変わらず、この option が `PushPullMode::Fold` を production decision へ注入することもありません。通常診断とは独立した hypothetical evaluation として、既存 Fold defense evaluator を直接実行します。
 
 そのため通常打牌の選択・2手先探索・押し引き判定・Reach / Damaten 判断は走りません。防御 evaluator 自体が必要とする threat facts と exact defense facts は通常どおり使用します。
 
@@ -1157,7 +1157,7 @@ record は先頭から順に処理し、server の `dahai` 等を live client �
 
 ## RiichiLab capture の production latency 計測
 
-session capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `ShantenAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
+session capture 内の `request_action` を全件再生し、復元した局面に対して production と同じ `NodocchiAgent::act()` を実行して、その decision latency を request 単位で計測します。同じ capture corpus を revision 間で実行すれば、p50 / p95 / p99 / max や3秒超の件数を同じ方法で比較できます。
 
 計測に使う `GameContext` は replay と同じ経路で、`observation` と capture の server event 列から
 復元します。reaction source は event 列から反映しますが、live client が積み上げる
@@ -1189,11 +1189,11 @@ malformed な record や decode できない `observation` は黙って読み飛
 
 ### 計測区間
 
-timer に含むのは、復元済みの `GameContext` と合法手に対する production `ShantenAgent::act()` だけです。
+timer に含むのは、復元済みの `GameContext` と合法手に対する production `NodocchiAgent::act()` だけです。
 
 | | 内容 |
 | --- | --- |
-| 含む | production `ShantenAgent::act()` |
+| 含む | production `NodocchiAgent::act()` |
 | 含まない | capture file の読み込み、JSON parse、`observation` decode、`GameContext` 構築、合法手構築、出力整形、file I/O、集計 |
 
 計測のために診断 (`--lookahead` / `--verbose` 相当) は構築しません。各 request は1回だけ実行します。同じ request を繰り返す microbenchmark ではありません。

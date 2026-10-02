@@ -668,7 +668,7 @@ mod tests {
     use crate::convert::temporary_tile_id_from_mjai_pai;
     use crate::observation::{fixture_base64, fixture_base64_with_discards};
     use bot_core::{
-        AgentActionSource, CallDecisionReason, LegalAction, NormalAgent, ShantenAgent,
+        AgentActionSource, CallDecisionReason, LegalAction, NodocchiAgent, NormalAgent,
         TsumogiriAgent,
     };
     use bot_logic::{FixedMeldCount, HistoryFuritenFacts, TileId, TileType};
@@ -1103,7 +1103,7 @@ mod tests {
     fn builds_dahai_with_hand_tiles_from_observation() {
         let observation = ObservationPayload::new(fixture_base64(0, Some(59), vec![0, 16, 104]));
         let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let response =
             build_response_for_request(0, 91, &possible_actions, &observation, &mut agent);
         assert!(matches!(response, Some(MjaiAction::Dahai { .. })));
@@ -1577,11 +1577,11 @@ mod tests {
     }
 
     #[test]
-    fn shanten_agent_still_passes_on_claims() {
-        // 送信できるようになっても、ShantenAgent の鳴き判断は変えない。
+    fn nodocchi_agent_still_passes_on_claims() {
+        // 送信できるようになっても、NodocchiAgent の鳴き判断は変えない。
         for claim in [possible_chi(), possible_pon(), possible_daiminkan()] {
             let possible_actions = vec![claim.clone(), MjaiPossibleAction::None];
-            let mut agent = ShantenAgent;
+            let mut agent = NodocchiAgent;
             let response = build_response_for_request_with_context(
                 0,
                 99,
@@ -1600,13 +1600,13 @@ mod tests {
     }
 
     #[test]
-    fn shanten_agent_still_prefers_hora_over_claims() {
+    fn nodocchi_agent_still_prefers_hora_over_claims() {
         let possible_actions = vec![
             MjaiPossibleAction::Hora,
             possible_pon(),
             MjaiPossibleAction::None,
         ];
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let response = build_response_for_request_with_context(
             0,
             100,
@@ -1710,7 +1710,7 @@ mod tests {
     fn pon_consumed_tiles_match_the_observation_hand_tiles() {
         // possible_actions の mjai 牌文字列と Observation の raw 物理牌 ID は、非赤牌なら
         // 同じ牌種代表の temporary TileId へ正規化される。手牌の P 2枚と consumed の P 2枚が
-        // 物理牌 ID として対応するため、ShantenAgent の consumed 除去が InvalidConsumed に
+        // 物理牌 ID として対応するため、NodocchiAgent の consumed 除去が InvalidConsumed に
         // ならずに Pon まで到達する。
         let decoded = pon_reaction_observation().decode_4p().unwrap();
         let legal_actions = possible_actions_to_legal_actions(&pon_reaction_possible_actions());
@@ -1732,10 +1732,10 @@ mod tests {
     }
 
     #[test]
-    fn shanten_agent_pons_value_honor_through_the_observation_path() {
+    fn nodocchi_agent_pons_value_honor_through_the_observation_path() {
         let context = pon_reaction_context();
         let possible_actions = pon_reaction_possible_actions();
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let response = build_response_for_request_with_context(
             0,
             116,
@@ -1769,7 +1769,7 @@ mod tests {
         assert_eq!(context.own_fixed_meld_count(), Some(FixedMeldCount::NONE));
         assert!(!context.any_opponent_reached());
 
-        let diagnostic = ShantenAgent::diagnose(&context, &legal_actions);
+        let diagnostic = NodocchiAgent::diagnose(&context, &legal_actions);
         assert_eq!(diagnostic.selected_action, legal_actions[0]);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Call);
 
@@ -1801,7 +1801,7 @@ mod tests {
     mod capture_session {
         use super::*;
         use crate::capture::{self, CaptureDirection, CaptureRecord, CapturedRequestAction};
-        use bot_core::ShantenAgent;
+        use bot_core::NodocchiAgent;
 
         const CAPTURED_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 53, 54, 96, 100, 120, 124, 125];
 
@@ -1858,7 +1858,7 @@ mod tests {
                 request_id,
                 &possible_actions,
                 &ObservationPayload::new(observation),
-                &mut ShantenAgent,
+                &mut NodocchiAgent,
             )
         }
 
@@ -2054,8 +2054,8 @@ mod tests {
             let context = record.game_context().unwrap();
             let legal_actions = record.legal_actions();
 
-            let acted = ShantenAgent.act(&context, &legal_actions);
-            let diagnosed = ShantenAgent::diagnose(&context, &legal_actions);
+            let acted = NodocchiAgent.act(&context, &legal_actions);
+            let diagnosed = NodocchiAgent::diagnose(&context, &legal_actions);
             assert_eq!(diagnosed.selected_action, acted);
 
             let response = response_for(&text).unwrap();

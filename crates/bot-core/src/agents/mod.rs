@@ -1,6 +1,6 @@
 mod menzen;
+mod nodocchi;
 mod normal;
-mod shanten;
 mod tsumogiri;
 
 pub use crate::reach_decision::ReachDecisionDiagnostic;
@@ -12,7 +12,7 @@ pub use crate::shanten_diagnostic::{
     diagnose_shanten_decision_with_options,
 };
 pub use menzen::MenzenAgent;
+pub use nodocchi::{AgentActionSource, NodocchiAgent};
+pub(crate) use nodocchi::{AgentDecision, log_agent_decision};
 pub use normal::NormalAgent;
-pub use shanten::{AgentActionSource, ShantenAgent};
-pub(crate) use shanten::{AgentDecision, log_agent_decision};
 pub use tsumogiri::TsumogiriAgent;
