@@ -142,6 +142,14 @@
 //! 入力 ([`CandidateSeen::additional_seen`] の戻り値) を key にするため、`counts_candidate_discard`
 //! を含む既存 seen semantics のまま同じ入力だけを共有する。
 //!
+//! # 次の自摸を待つ state の重み付き集計値
+//!
+//! 既に action が終わり次の自摸を待っている未テンパイ state からも、通常打牌後と同じ
+//! [`WeightedForwardMetric`] を [`awaiting_draw_weighted_forward_metric`] で求められる。架空の
+//! 現在打牌は作らず、Progress 枝の探索・次打牌の比較・将来打点・集計規則は現在打牌後の候補と
+//! 同じ primitive を共有する。1向聴では weighted tenpai wait、2向聴以上では weighted next
+//! acceptance と同じ意味で、SameShanten の枝は含めない。
+//!
 //! # 2向聴から1向聴へ進む枝
 //!
 //! 次の自摸を待つ2向聴 state については、
@@ -401,12 +409,22 @@ impl DiscardLookaheadDiagnostic {
     /// ため元から寄与しないが、詳細診断の有無で選択結果が変わらないことを枝集合そのもので
     /// 保証する。
     pub fn weighted_forward_metric(&self, required_next_shanten: i8) -> WeightedForwardMetric {
-        accumulate_draws(
-            self.draws_with(DrawTransition::Progress),
-            |_| required_next_shanten,
-            |variant| variant.prospective_value,
-        )
+        progress_forward_metric(&self.draws, required_next_shanten)
     }
+}
+
+// 現在打牌後と「action 済みで次の自摸を待つ状態」の両方が共有する、Progress 枝の重み付き集計。
+fn progress_forward_metric(
+    draws: &[DrawLookaheadDiagnostic],
+    required_next_shanten: i8,
+) -> WeightedForwardMetric {
+    accumulate_draws(
+        draws
+            .iter()
+            .filter(|draw| draw.transition == DrawTransition::Progress),
+        |_| required_next_shanten,
+        |variant| variant.prospective_value,
+    )
 }
 
 /// 現在打牌後の仮想ツモ牌1牌種分の2手先評価。
@@ -1322,6 +1340,34 @@ pub fn awaiting_draw_expected_self_tsumo_value(
         Some(facts),
     );
     expected_self_tsumo_value_from_draws(&draws, facts)
+}
+
+/// 既に action が終わり、次の自摸を待っている未テンパイ state の重み付き前方集計値。
+///
+/// 対象は通常打牌後の [`WeightedForwardMetric`] と同じ Progress 枝だけで、
+///
+/// ```text
+/// 次の自摸を待つ N 向聴 state → 向聴数を下げる牌をツモ → 既存比較が選ぶ次打牌 → N-1 向聴
+/// ```
+///
+/// を、現在打牌後の候補と同じ探索 primitive・同じ accumulator で集計する。1向聴では weighted
+/// tenpai wait ([`TenpaiWaitMetric`])、2向聴以上では weighted next acceptance
+/// ([`crate::NextAcceptanceMetric`]) と同じ意味になる。SameShanten の枝は含めず、
+/// ExpectedSelfTsumoValue とは別の尺度として扱う。
+///
+/// 架空の現在打牌は作らず、`acceptance` はこの state に対して既存 acceptance calculator が
+/// 返した値をそのまま渡す。`prospective_value` は既存と同じく、集計対象の枝の打点を1つでも
+/// 確定できなければ 0 点で補完せず `None`。テンパイ以下の state では `None`。
+pub fn awaiting_draw_weighted_forward_metric(
+    inputs: &LookaheadInputs,
+    acceptance: &EffectiveAcceptance,
+) -> Option<WeightedForwardMetric> {
+    let shanten = acceptance.current_min_shanten();
+    if shanten <= TENPAI_SHANTEN {
+        return None;
+    }
+    let draws = search_waiting_state(inputs, acceptance, PROGRESS_ONLY, inputs.self_tsumo_facts());
+    Some(progress_forward_metric(&draws, shanten - 1))
 }
 
 /// 次の自摸を待つ2向聴 state から、最初のツモで1向聴へ進む枝だけを既存の1向聴 self-tsumo
@@ -7399,5 +7445,291 @@ mod tests {
             )
         };
         assert_ne!(melded_of(fixed(2)), melded_of(fixed(3)));
+    }
+
+    // ---- 次の自摸を待つ state の weighted forward metric ----
+
+    // 打牌候補を実際に切り終え、次の自摸を待っている state。`visible` は打牌前の局面と同じ
+    // 物理牌の集合で、切った牌は手牌から外れて見え牌として数えられるだけになる。架空の打牌を
+    // 見え牌にも河にも足さない。
+    struct AwaitingAfterDiscard<'a> {
+        situation: &'a Situation,
+        tiles: Vec<TileId>,
+    }
+
+    impl<'a> AwaitingAfterDiscard<'a> {
+        fn new(situation: &'a Situation, evaluation: &DiscardEvaluation) -> Self {
+            let (discarded, tiles) =
+                split_discarded_tile(situation.tiles.clone(), evaluation).expect("discard");
+            assert!(
+                situation.visible.contains(&discarded),
+                "見え牌が手牌を含む局面が必要"
+            );
+            Self { situation, tiles }
+        }
+
+        fn inputs(&self) -> LookaheadInputs<'_> {
+            LookaheadInputs::new(
+                &self.tiles,
+                self.situation.fixed_meld_count,
+                &self.situation.dora_indicators,
+                self.situation.round_wind,
+                self.situation.seat_wind,
+            )
+            .with_visible_tiles(&self.situation.visible)
+        }
+
+        fn acceptance(&self) -> EffectiveAcceptance {
+            awaiting_draw_acceptance(
+                &self.tiles,
+                self.situation.fixed_meld_count,
+                &self.situation.visible,
+            )
+        }
+    }
+
+    // 評価したテンパイごとに、ここまでに切った牌を記録する検証用の評価器。値は
+    // [`AcceptanceRemainingValuator`] と同じ。
+    #[derive(Default)]
+    struct RecordingDiscardsValuator {
+        discarded: RefCell<Vec<Vec<TileId>>>,
+    }
+
+    impl ProspectiveTenpaiValuator for RecordingDiscardsValuator {
+        fn tenpai_value(&self, tenpai: &ProspectiveTenpai<'_>) -> Option<u64> {
+            self.discarded
+                .borrow_mut()
+                .push(tenpai.discarded_tiles.to_vec());
+            ACCEPTANCE_REMAINING_VALUATOR.tenpai_value(tenpai)
+        }
+    }
+
+    #[test]
+    fn an_awaiting_iishanten_state_has_the_weighted_tenpai_wait_of_the_discard_that_led_to_it() {
+        // 1向聴の次の自摸待ちは、そこへ至る打牌候補の weighted tenpai wait と同じ値になる。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluation = evaluation_of(case, tile("9s"));
+        assert_eq!(evaluation.min_shanten_after_discard(), IISHANTEN_SHANTEN);
+        let expected = forward_metrics_for_candidate(
+            &inputs(&case.situation).with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR),
+            evaluation,
+        );
+        let expected_metric = expected.tenpai_wait.expect("1向聴候補の集計値がある");
+        assert!(expected_metric.weighted_remaining > 0);
+        assert!(expected_metric.weighted_type_count > 0);
+        assert!(expected_metric.prospective_value.is_some());
+
+        let awaiting = AwaitingAfterDiscard::new(&case.situation, evaluation);
+        let acceptance = awaiting.acceptance();
+        assert_eq!(acceptance, evaluation.acceptance_after_discard);
+        let metric = awaiting_draw_weighted_forward_metric(
+            &awaiting
+                .inputs()
+                .with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR),
+            &acceptance,
+        );
+
+        assert_eq!(metric, Some(expected_metric));
+        assert_eq!(
+            metric.and_then(|metric| metric.prospective_value),
+            expected.prospective_value
+        );
+    }
+
+    #[test]
+    fn an_awaiting_two_shanten_state_has_the_weighted_next_acceptance_of_the_discard_that_led_to_it()
+     {
+        // 2向聴以上では次打牌後が1向聴の枝を集計する weighted next acceptance と同じ値になる。
+        // 次打牌後はテンパイではないため、打点込みの集計値は既存と同じく持たない。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluation = evaluation_of(case, tile("1m"));
+        assert_eq!(evaluation.min_shanten_after_discard(), RYANSHANTEN_SHANTEN);
+        let expected = forward_metrics_for_candidate(
+            &inputs(&case.situation).with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR),
+            evaluation,
+        );
+        assert_eq!(expected.tenpai_wait, None);
+        let expected_metric = expected.next_acceptance.expect("2向聴候補の集計値がある");
+        assert!(expected_metric.weighted_remaining > 0);
+        assert!(expected_metric.weighted_type_count > 0);
+        assert_eq!(expected_metric.prospective_value, None);
+
+        let awaiting = AwaitingAfterDiscard::new(&case.situation, evaluation);
+        let acceptance = awaiting.acceptance();
+        assert_eq!(acceptance.current_min_shanten(), RYANSHANTEN_SHANTEN);
+        assert_eq!(
+            awaiting_draw_weighted_forward_metric(
+                &awaiting
+                    .inputs()
+                    .with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR),
+                &acceptance,
+            ),
+            Some(expected_metric)
+        );
+    }
+
+    #[test]
+    fn the_awaiting_draw_weighted_metric_only_aggregates_the_progress_branches() {
+        // SameShanten の枝を持つ state でも、集計するのは Progress 枝の次打牌後だけ。
+        // self-tsumo continuation の材料を渡しても集計値は変わらない。
+        let tiles = iishanten_awaiting_draw_hand();
+        let fixed_meld_count = fixed(3);
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed_meld_count, &tiles);
+        assert_eq!(acceptance.current_min_shanten(), IISHANTEN_SHANTEN);
+        let plain = LookaheadInputs::new(&tiles, fixed_meld_count, &[], None, None)
+            .with_visible_tiles(&tiles)
+            .with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR);
+        let with_facts = awaiting_draw_inputs(
+            &tiles,
+            fixed_meld_count,
+            &FIXED_TSUMO_VALUATOR,
+            TEST_OWN_FUTURE_DRAWS,
+        )
+        .with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR);
+        let metric = awaiting_draw_weighted_forward_metric(&plain, &acceptance)
+            .expect("未テンパイ state の集計値がある");
+        assert_eq!(
+            awaiting_draw_weighted_forward_metric(&with_facts, &acceptance),
+            Some(metric)
+        );
+
+        let draws = search_waiting_state(
+            &with_facts,
+            &acceptance,
+            IISHANTEN_CONTINUATION,
+            with_facts.self_tsumo_facts(),
+        );
+        let same_shanten = accumulate_same_shanten_draws(
+            draws
+                .iter()
+                .filter(|draw| draw.transition == DrawTransition::SameShanten),
+            |variant| variant.prospective_value,
+        );
+        assert!(same_shanten.weighted_remaining > 0, "SameShanten 枝が必要");
+
+        let (mut remaining, mut type_count, mut value) = (0u32, 0u32, 0u64);
+        for variant in draws
+            .iter()
+            .filter(|draw| draw.transition == DrawTransition::Progress)
+            .flat_map(|draw| draw.variants.iter())
+        {
+            let next = variant.next_discard.as_ref().expect("次打牌がある");
+            assert_eq!(next.min_shanten_after_discard(), TENPAI_SHANTEN);
+            let weight = u32::from(variant.remaining);
+            remaining += weight * u32::from(next.acceptance_total_remaining());
+            type_count += weight * next.acceptance_type_count() as u32;
+            value += u64::from(variant.remaining) * variant.prospective_value.expect("確定できる");
+        }
+        assert_eq!(
+            metric,
+            WeightedForwardMetric {
+                weighted_remaining: remaining,
+                weighted_type_count: type_count,
+                prospective_value: Some(value),
+            }
+        );
+    }
+
+    #[test]
+    fn the_awaiting_draw_prospective_value_stays_unknown_when_a_branch_cannot_be_valued() {
+        // 対象枝の打点を1つでも確定できなければ 0 点で補完せず `None`。形と速度の集計値は
+        // 打点に依らないため変わらない。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluation = evaluation_of(case, tile("9s"));
+        let awaiting = AwaitingAfterDiscard::new(&case.situation, evaluation);
+        let acceptance = awaiting.acceptance();
+        let known = awaiting_draw_weighted_forward_metric(
+            &awaiting
+                .inputs()
+                .with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR),
+            &acceptance,
+        )
+        .expect("未テンパイ state の集計値がある");
+
+        let draws = search_waiting_state(&awaiting.inputs(), &acceptance, PROGRESS_ONLY, None);
+        let unknown_wait = draws[0].variants[0]
+            .next_discard
+            .as_ref()
+            .expect("次打牌がある")
+            .acceptance_after_discard
+            .tiles[0]
+            .tile;
+        let valuator = UnknownWaitValuator { unknown_wait };
+        let unknown = awaiting_draw_weighted_forward_metric(
+            &awaiting.inputs().with_prospective_valuator(&valuator),
+            &acceptance,
+        )
+        .expect("未テンパイ state の集計値がある");
+
+        assert_eq!(unknown.prospective_value, None);
+        assert_eq!(
+            forward_metrics_for_candidate(
+                &inputs(&case.situation).with_prospective_valuator(&valuator),
+                evaluation,
+            )
+            .prospective_value,
+            None
+        );
+        assert_eq!(
+            (unknown.weighted_remaining, unknown.weighted_type_count),
+            (known.weighted_remaining, known.weighted_type_count)
+        );
+        // 評価器を渡さない場合も打点は確定しない。
+        assert_eq!(
+            awaiting_draw_weighted_forward_metric(&awaiting.inputs(), &acceptance),
+            Some(WeightedForwardMetric {
+                prospective_value: None,
+                ..known
+            })
+        );
+    }
+
+    #[test]
+    fn the_awaiting_draw_weighted_metric_does_not_add_a_fake_discard() {
+        // 将来テンパイの河は「ツモ後に切った牌」だけで、次の自摸を待つ state へ至った打牌も
+        // 架空の打牌も含まない。打牌候補から評価した場合だけ、その打牌が河に入る。
+        let case = &*SAME_SHANTEN_CASE;
+        let evaluation = evaluation_of(case, tile("9s"));
+        let awaiting = AwaitingAfterDiscard::new(&case.situation, evaluation);
+
+        let from_waiting = RecordingDiscardsValuator::default();
+        awaiting_draw_weighted_forward_metric(
+            &awaiting.inputs().with_prospective_valuator(&from_waiting),
+            &awaiting.acceptance(),
+        )
+        .expect("未テンパイ state の集計値がある");
+        let from_waiting = from_waiting.discarded.into_inner();
+        assert!(!from_waiting.is_empty());
+        assert!(from_waiting.iter().all(|discarded| discarded.len() == 1));
+
+        let from_candidate = RecordingDiscardsValuator::default();
+        forward_metrics_for_candidate(
+            &inputs(&case.situation).with_prospective_valuator(&from_candidate),
+            evaluation,
+        );
+        assert!(
+            from_candidate
+                .discarded
+                .into_inner()
+                .iter()
+                .all(|discarded| discarded.len() == 2)
+        );
+    }
+
+    #[test]
+    fn a_tenpai_awaiting_draw_state_has_no_weighted_forward_metric() {
+        // 1向聴の state から有効牌を1枚引いて1枚切った後のテンパイ。
+        let tiles = ids(&[0, 4, 8, 53]);
+        let fixed_meld_count = fixed(3);
+        let acceptance = awaiting_draw_acceptance(&tiles, fixed_meld_count, &tiles);
+        assert_eq!(acceptance.current_min_shanten(), TENPAI_SHANTEN);
+        let inputs = LookaheadInputs::new(&tiles, fixed_meld_count, &[], None, None)
+            .with_visible_tiles(&tiles)
+            .with_prospective_valuator(&ACCEPTANCE_REMAINING_VALUATOR);
+
+        assert_eq!(
+            awaiting_draw_weighted_forward_metric(&inputs, &acceptance),
+            None
+        );
     }
 }
