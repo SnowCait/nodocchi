@@ -253,7 +253,7 @@ fn profile_on_the_measuring_thread(
 mod tests {
     use super::*;
     use crate::meld::{Meld, MeldKind};
-    use crate::shanten_test_support::tile;
+    use crate::nodocchi_test_support::tile;
     use bot_logic::TileId;
 
     // 3向聴軸が発火する軽い局面。2副露 (白ポン + 發ポン) で concealed 8枚。
@@ -532,8 +532,8 @@ mod tests {
     #[test]
     fn the_comparison_reports_no_three_shanten_axis_outside_the_cohort() {
         // 3向聴軸が発火しない局面では、どちらの方式も同じ production 打牌になる。
-        let context = crate::shanten_test_support::tenpai_context(&[]);
-        let actions = crate::shanten_test_support::tenpai_dahai_actions();
+        let context = crate::nodocchi_test_support::tenpai_context(&[]);
+        let actions = crate::nodocchi_test_support::tenpai_dahai_actions();
         let comparison = compare_three_shanten_continuation_scopes(&context, &actions);
 
         assert!(!comparison.fired());

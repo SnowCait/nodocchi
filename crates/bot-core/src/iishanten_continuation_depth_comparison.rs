@@ -305,7 +305,7 @@ pub fn compare_iishanten_continuation_depths(
 mod tests {
     use super::*;
     use crate::context::{GameContext, TableStateFacts};
-    use crate::shanten_test_support::{dahai, tile};
+    use crate::nodocchi_test_support::{dahai, tile};
     use bot_logic::{HistoryFuritenFacts, SelfTsumoHorizon, TileId, forward_metrics_for_candidate};
 
     // 調査対象の1向聴局面 34567899m5799p34s。ドラ表示 3m / 場風 E / 自風 N / player 0 / oya 1 /

@@ -11,7 +11,7 @@
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, AgentActionSource, CallDecisionReason, CallIishantenComparison, CallKind, LegalAction,
-    OpenHandDefenseCategory, PushPullDecision, PushPullMode, PushPullReason, ShantenAgent,
+    NodocchiAgent, OpenHandDefenseCategory, PushPullDecision, PushPullMode, PushPullReason,
 };
 use bot_logic::TileType;
 
@@ -68,9 +68,9 @@ fn the_legal_actions_are_the_pon_the_chi_and_none_of_the_issue() {
 #[test]
 fn the_pon_5s_that_folds_right_after_the_call_is_not_taken() {
     let scenario = resolve(BEFORE_CALL);
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let action = agent.act(&scenario.context, &scenario.legal_actions);
-    let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
+    let diagnostic = NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions);
 
     assert_eq!(action, LegalAction::None);
     assert_eq!(diagnostic.selected_action, action);
@@ -109,9 +109,9 @@ fn the_pon_5s_that_folds_right_after_the_call_is_not_taken() {
 #[test]
 fn the_decision_right_after_the_pon_folds_to_the_open_hand_defense() {
     let scenario = resolve(AFTER_PON);
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let action = agent.act(&scenario.context, &scenario.legal_actions);
-    let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
+    let diagnostic = NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions);
 
     assert_eq!(diagnostic.selected_action, action);
     assert_eq!(dahai_type(&action), Some(tile_type("2s")));
@@ -137,7 +137,7 @@ fn the_decision_right_after_the_pon_folds_to_the_open_hand_defense() {
 #[test]
 fn the_post_call_push_pull_before_the_call_matches_the_decision_after_the_pon() {
     let before = resolve(BEFORE_CALL);
-    let call = ShantenAgent::diagnose(&before.context, &before.legal_actions)
+    let call = NodocchiAgent::diagnose(&before.context, &before.legal_actions)
         .call
         .expect("call diagnostic");
     let pon = call
@@ -147,7 +147,7 @@ fn the_post_call_push_pull_before_the_call_matches_the_decision_after_the_pon() 
         .expect("Pon 5s");
 
     let after = resolve(AFTER_PON);
-    let diagnostic = ShantenAgent::diagnose(&after.context, &after.legal_actions);
+    let diagnostic = NodocchiAgent::diagnose(&after.context, &after.legal_actions);
 
     assert_eq!(pon.post_call_push_pull, diagnostic.push_pull_decision);
     assert_eq!(

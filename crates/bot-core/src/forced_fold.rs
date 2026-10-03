@@ -1,6 +1,6 @@
 //! 押し引き判断とは独立に、ベタ降りを仮定した場合の防御打牌を評価する hypothetical 入口。
 //!
-//! production の打牌選択には接続しない。`ShantenAgent::act()` / `diagnose*()` はこの module を
+//! production の打牌選択には接続しない。`NodocchiAgent::act()` / `diagnose*()` はこの module を
 //! 呼ばず、ここでの評価も production decision を書き換えない。
 //!
 //! routing も防御選択も既存 [`evaluate_fold_defense`] をそのまま source of truth にし、threat の

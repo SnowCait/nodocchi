@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
-    Agent, AgentActionSource, DefenseFallbackKind, DiagnosticOptions, LegalAction, PushPullMode,
-    PushPullReason, ShantenAgent,
+    Agent, AgentActionSource, DefenseFallbackKind, DiagnosticOptions, LegalAction, NodocchiAgent,
+    PushPullMode, PushPullReason,
 };
 
 const REACH_GENBUTSU: &str = include_str!("../scenarios/two_shanten_fold_reach_genbutsu.json");
@@ -39,7 +39,7 @@ fn selected_tile(action: &LegalAction) -> String {
 fn two_shanten_fold_against_a_reach_discards_the_genbutsu_without_the_deep_evaluation() {
     for (name, spec) in [("light", REACH_GENBUTSU), ("heavy", REACH_GENBUTSU_HEAVY)] {
         let scenario = scenario(spec);
-        let timed = ShantenAgent.act_with_phase_timing(&scenario.context, &scenario.legal_actions);
+        let timed = NodocchiAgent.act_with_phase_timing(&scenario.context, &scenario.legal_actions);
         let phases = timed.phases.normal_discard_phases;
 
         assert_eq!(selected_tile(&timed.action), "S", "{name}");
@@ -61,7 +61,7 @@ fn the_early_fold_keeps_the_push_pull_reason_and_the_defense_source() {
     // 判断内訳は診断経路が従来どおり通常打牌選択まで通して組み立てる。production が省略しても
     // 最終 action・押し引き・防御 fallback の種別は同じになる。
     let scenario = scenario(REACH_GENBUTSU);
-    let diagnostic = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
         DiagnosticOptions::NONE,
@@ -83,6 +83,6 @@ fn the_early_fold_keeps_the_push_pull_reason_and_the_defense_source() {
     );
     assert_eq!(
         diagnostic.selected_action,
-        ShantenAgent.act(&scenario.context, &scenario.legal_actions)
+        NodocchiAgent.act(&scenario.context, &scenario.legal_actions)
     );
 }

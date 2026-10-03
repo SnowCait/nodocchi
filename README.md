@@ -2,20 +2,20 @@
 
 リーチ麻雀 AI。
 
-RiichiLab と地鳳へ接続する client、向聴数を基に打牌・リーチ・押し引き・防御を判断する `ShantenAgent`、局面をオフラインで再現して判断根拠を確認する `bot-scenario` を提供します。
+RiichiLab と地鳳へ接続する client、打牌・副露・リーチ・押し引き・防御・カンなどを統合して判断する実戦用エージェント `NodocchiAgent`、局面をオフラインで再現して判断根拠を確認する `bot-scenario` を提供します。
 
 ## 主な機能
 
 - [RiichiLab 接続](docs/riichilab.md)
 - [地鳳接続](docs/chiihou.md)
-- [`ShantenAgent` を中心とした麻雀 AI](docs/ai/overview.md)
+- [`NodocchiAgent` を中心とした麻雀 AI](docs/ai/overview.md)
 - [`bot-scenario` による局面解析](docs/bot-scenario.md)
 - [RiichiLab の request capture / replay](docs/bot-scenario.md#riichilab-capture-の再生)
 - [Structured diagnostics](docs/diagnostics.md)
 
 ## Quick Start
 
-局面を直接指定して `ShantenAgent` の判断を確認します。
+局面を直接指定して `NodocchiAgent` の判断を確認します。
 
 ```bash
 cargo run -p bot-scenario -- \
@@ -28,7 +28,7 @@ RiichiLab の validation endpoint へ接続する例です。token は secret �
 ```bash
 RIICHILAB_BOT_TOKEN=... \
 cargo run -p riichilab-client --bin riichilab-client -- \
-  validate --agent shanten
+  validate --agent nodocchi
 ```
 
 地鳳へ接続する例です。`CHIIHOU_NSEC` も secret として扱ってください。
@@ -36,7 +36,7 @@ cargo run -p riichilab-client --bin riichilab-client -- \
 ```bash
 CHIIHOU_NSEC=nsec1... \
 cargo run -p chiihou-client --bin chiihou-client -- \
-  --channel hanchan --agent shanten
+  --channel hanchan --agent nodocchi
 ```
 
 ## Documentation

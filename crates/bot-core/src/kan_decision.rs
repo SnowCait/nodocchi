@@ -71,7 +71,7 @@
 //!
 //! # 判断する位置
 //!
-//! `ShantenAgent` は
+//! `NodocchiAgent` は
 //!
 //! ```text
 //! Hora → 九種九牌 → Chi / Pon → 押し引き → (Push なら Reach) → Kan → 通常打牌 / 防御 fallback
@@ -776,7 +776,7 @@ impl KanCandidateDiagnostic {
 
 /// カン判断の構造化診断。
 ///
-/// `selected` は `ShantenAgent::act()` が実際に採用したカンそのもので、診断用の別判断ロジック
+/// `selected` は `NodocchiAgent::act()` が実際に採用したカンそのもので、診断用の別判断ロジック
 /// は持たない。採用が無い場合の `reason` は最初の候補が落ちた理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KanDecisionDiagnostic {

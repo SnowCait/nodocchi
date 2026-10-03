@@ -596,7 +596,7 @@ fn format_percent(part: usize, total: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::{Agent, ShantenAgent};
+    use bot_core::{Agent, NodocchiAgent};
     use bot_logic::SelfTsumoHorizon;
     use riichilab_client::capture::{self, CaptureDirection};
     use riichilab_client::observation::fixture_base64_with_winds_and_discards;
@@ -1084,7 +1084,7 @@ mod tests {
             );
             assert_eq!(
                 request.comparison.decisions[0].action,
-                ShantenAgent.act(&original.context, &original.legal_actions)
+                NodocchiAgent.act(&original.context, &original.legal_actions)
             );
         }
         assert_eq!(

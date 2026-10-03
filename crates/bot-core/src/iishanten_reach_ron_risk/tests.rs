@@ -1,16 +1,16 @@
 use super::*;
-use crate::agents::ShantenAgent;
+use crate::agents::NodocchiAgent;
 use crate::defense::reached_opponents_dahai_actions_by_ron_risk;
 use crate::discard_selection::legal_discard_evaluations;
 use crate::meld::{Meld, MeldKind};
-use crate::push_pull::{
-    PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context,
-};
-use crate::shanten_test_support::{
+use crate::nodocchi_test_support::{
     SINGLE_REACH_IISHANTEN_DRAWN as DRAWN, SINGLE_REACH_IISHANTEN_HAND as HAND, TENPAI_DRAWN,
     TENPAI_HAND, dahai_actions_for as actions_for, single_reach_iishanten_context,
     single_reach_iishanten_fixture as fixture, single_reach_iishanten_push_context, tenpai_actions,
     tile, unavailable_reach_meld,
+};
+use crate::push_pull::{
+    PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context,
 };
 use bot_logic::TileId;
 
@@ -31,7 +31,7 @@ fn production_ron_risk(
     context: &GameContext,
     actions: &[LegalAction],
 ) -> Option<IishantenReachRonRisk> {
-    ShantenAgent
+    NodocchiAgent
         .decide(context, actions)
         .push_pull_inputs
         .and_then(|inputs| inputs.iishanten_reach_ron_risk)
@@ -72,7 +72,7 @@ fn single_reach_iishanten_gets_an_exact_summary() {
     let context = single_reach_context(None);
     let actions = actions_for(&HAND, DRAWN);
 
-    let decision = ShantenAgent.decide(&context, &actions);
+    let decision = NodocchiAgent.decide(&context, &actions);
     let inputs = decision.push_pull_inputs.expect("通常打牌選択を通る");
     assert!(inputs.is_single_reach_threat());
     assert_eq!(inputs.offense.unwrap().min_shanten_after_discard, 1);
@@ -244,7 +244,7 @@ fn dealer_reach_uses_the_same_exact_model() {
     let child = single_reach_context(None);
     let dealer = single_reach_context(Some(1));
 
-    let decision = ShantenAgent.decide(&dealer, &actions);
+    let decision = NodocchiAgent.decide(&dealer, &actions);
     let inputs = decision.push_pull_inputs.unwrap();
     assert!(inputs.dealer_reacher);
 
@@ -273,7 +273,7 @@ fn multiple_reaches_are_not_evaluated() {
     );
     let actions = actions_for(&HAND, DRAWN);
 
-    let decision = ShantenAgent.decide(&context, &actions);
+    let decision = NodocchiAgent.decide(&context, &actions);
     let inputs = decision.push_pull_inputs.unwrap();
     assert_eq!(inputs.opponent_reach_count, 2);
     assert_eq!(inputs.offense.unwrap().min_shanten_after_discard, 1);
@@ -291,7 +291,7 @@ fn combined_threats_are_not_evaluated() {
     let context = fixture(&HAND, DRAWN, None, [false, true, false, false], melds);
     let actions = actions_for(&HAND, DRAWN);
 
-    let decision = ShantenAgent.decide(&context, &actions);
+    let decision = NodocchiAgent.decide(&context, &actions);
     let inputs = decision.push_pull_inputs.unwrap();
     assert!(inputs.has_combined_threat());
     assert!(!inputs.is_single_reach_threat());
@@ -312,7 +312,7 @@ fn tenpai_and_two_or_more_shanten_are_not_evaluated() {
         [false, true, false, false],
         Default::default(),
     );
-    let tenpai_decision = ShantenAgent.decide(&tenpai, &tenpai_actions());
+    let tenpai_decision = NodocchiAgent.decide(&tenpai, &tenpai_actions());
     let tenpai_inputs = tenpai_decision.push_pull_inputs.unwrap();
     assert!(tenpai_inputs.is_single_reach_threat());
     assert_eq!(tenpai_inputs.offense.unwrap().min_shanten_after_discard, 0);
@@ -360,7 +360,7 @@ fn no_threat_and_open_hand_threat_alone_are_not_evaluated() {
     let mut melds: [Vec<Meld>; 4] = Default::default();
     melds[2] = vec![pon([120, 121, 122]), pon([96, 97, 98]), pon([56, 57, 58])];
     let open_hand = fixture(&HAND, DRAWN, None, [false; 4], melds);
-    let inputs = ShantenAgent
+    let inputs = NodocchiAgent
         .decide(&open_hand, &actions)
         .push_pull_inputs
         .unwrap();
@@ -380,7 +380,7 @@ fn an_unavailable_exact_model_is_not_supplemented() {
         None
     );
 
-    let decision = ShantenAgent.decide(&context, &actions);
+    let decision = NodocchiAgent.decide(&context, &actions);
     let ron_risk = decision
         .push_pull_inputs
         .unwrap()
@@ -435,7 +435,7 @@ fn the_summary_does_not_change_the_push_pull_decision() {
         ),
     ];
     for (context, reason) in cases {
-        let decision = ShantenAgent.decide(&context, &actions);
+        let decision = NodocchiAgent.decide(&context, &actions);
         let inputs = decision.push_pull_inputs.unwrap();
         assert!(
             inputs

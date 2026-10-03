@@ -10,13 +10,14 @@
 
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
-    Agent, DiagnosticOptions, HonorSafetyRank, LegalAction, OpenHandDefenseCandidateDiagnostic,
-    OpenHandDefenseCategory, OpenHandThreatLevel, OpenHandThreatReason, OpponentHonorValue,
-    PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic, SuitedSafetyRank,
-    SujiSafetyRank, WallRank, honor_safety_rank, is_discarded_by_all_open_hand_threats,
-    open_hand_defense_category, opponent_honor_value_for_open_hand_threats,
-    select_open_hand_defense_fallback_action_with_kind, suited_safety_rank_for_open_hand_threats,
-    suji_safety_rank_for, suji_safety_rank_for_open_hand_threats, wall_rank,
+    Agent, DiagnosticOptions, HonorSafetyRank, LegalAction, NodocchiAgent,
+    NodocchiDecisionDiagnostic, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory,
+    OpenHandThreatLevel, OpenHandThreatReason, OpponentHonorValue, PushPullMode, PushPullReason,
+    SuitedSafetyRank, SujiSafetyRank, WallRank, honor_safety_rank,
+    is_discarded_by_all_open_hand_threats, open_hand_defense_category,
+    opponent_honor_value_for_open_hand_threats, select_open_hand_defense_fallback_action_with_kind,
+    suited_safety_rank_for_open_hand_threats, suji_safety_rank_for,
+    suji_safety_rank_for_open_hand_threats, wall_rank,
 };
 use bot_logic::TileType;
 
@@ -40,8 +41,8 @@ fn scenario() -> Scenario {
     resolve(&spec())
 }
 
-fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
-    ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
+    NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
 }
 
 fn tile_type(mjai: &str) -> TileType {
@@ -56,7 +57,7 @@ fn discards(action: &LegalAction) -> TileType {
 }
 
 fn candidate(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     mjai: &str,
 ) -> OpenHandDefenseCandidateDiagnostic {
     diagnostic
@@ -348,10 +349,10 @@ fn a_post_reach_passed_tile_is_not_river_safe_for_a_non_reach_target() {
 #[test]
 fn the_actionable_threats_drive_the_fold_and_the_selected_action() {
     let scenario = scenario();
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let acted = agent.act(&scenario.context, &scenario.legal_actions);
     let diagnostic = diagnose(&scenario);
-    let with_lookahead = ShantenAgent::diagnose_with_options(
+    let with_lookahead = NodocchiAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
         DiagnosticOptions::WITH_LOOKAHEAD,

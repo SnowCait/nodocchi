@@ -32,8 +32,8 @@ use std::process::ExitCode;
 
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
-    DiagnosticOptions, ShantenAgent, evaluate_forced_fold, measure_two_shanten_progress_self_tsumo,
-    measure_two_shanten_self_tsumo,
+    DiagnosticOptions, NodocchiAgent, evaluate_forced_fold,
+    measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
 };
 
 use crate::benchmark::run_capture_benchmark;
@@ -190,7 +190,7 @@ where
                 ),
             )
         });
-    let diagnostic = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
         diagnostic_options(&args),

@@ -1,7 +1,7 @@
-//! ShantenAgent の production decision から診断情報を収集し、最終診断を組み立てる。
+//! NodocchiAgent の production decision から診断情報を収集し、最終診断を組み立てる。
 
 use crate::action::LegalAction;
-use crate::agents::{AgentActionSource, AgentDecision, ShantenAgent, log_agent_decision};
+use crate::agents::{AgentActionSource, AgentDecision, NodocchiAgent, log_agent_decision};
 use crate::call_decision::CallDecisionDiagnostic;
 use crate::combined_defense::{CombinedDefenseCategory, CombinedDefenseDiagnostic};
 use crate::context::GameContext;
@@ -37,13 +37,13 @@ use bot_logic::{
 #[cfg(test)]
 mod tests;
 
-/// `ShantenAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
+/// `NodocchiAgent` の判断過程を外部の解析ツールから辿るための構造化診断。
 ///
 /// 契約:
 ///
-/// - `selected_action` / `selected_source` は `ShantenAgent::act()` と**同じ selection logic** の
+/// - `selected_action` / `selected_source` は `NodocchiAgent::act()` と**同じ selection logic** の
 ///   結果である。診断専用の別判断ロジックは持たない。
-///   常に `selected_action == ShantenAgent::act(context, legal_actions)` が成り立つ。
+///   常に `selected_action == NodocchiAgent::act(context, legal_actions)` が成り立つ。
 /// - 追加診断情報(候補ごとの形の内訳、全防御候補評価など)は解析用途であり、action 選択には
 ///   影響しない。
 /// - 実際に実行されなかった判断は `None` で、推測して埋めない。Hora / Ryukyoku / 鳴きで
@@ -54,8 +54,8 @@ mod tests;
 ///
 /// tracing ログとは独立した pure なデータであり、ログをパースして構築することはない。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShantenDecisionDiagnostic {
-    /// 最終的に選んだ action。`ShantenAgent::act()` の結果と一致する。
+pub struct NodocchiDecisionDiagnostic {
+    /// 最終的に選んだ action。`NodocchiAgent::act()` の結果と一致する。
     pub selected_action: LegalAction,
     /// 最終 action をどの経路で選んだか。
     pub selected_source: AgentActionSource,
@@ -221,7 +221,7 @@ pub struct ShantenDecisionDiagnostic {
     pub combined_defense: CombinedDefenseDiagnostic,
 }
 
-impl ShantenDecisionDiagnostic {
+impl NodocchiDecisionDiagnostic {
     /// 最終 action がリーチ者向けの防御 fallback 由来の場合のその種別。他の経路では `None`。
     pub fn defense_fallback_kind(&self) -> Option<DefenseFallbackKind> {
         self.selected_source.defense_kind()
@@ -246,7 +246,7 @@ impl ShantenDecisionDiagnostic {
 /// diagnostics の一部として、diagnostics が有効な場合だけ構築する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiagnosticOptions {
-    /// 通常打牌候補の2手先診断 ([`ShantenDecisionDiagnostic::normal_discard_lookahead`]) を
+    /// 通常打牌候補の2手先診断 ([`NodocchiDecisionDiagnostic::normal_discard_lookahead`]) を
     /// 構築するかどうか。
     ///
     /// 2手先は「打牌候補 × 受け入れ牌 × 次打牌候補」の探索になり既存診断よりさらに重いため、
@@ -260,7 +260,7 @@ pub struct DiagnosticOptions {
     /// 選択結果は変わらない。
     pub same_shanten_downstream: bool,
     /// 現在打牌後が2向聴の候補の ExpectedSelfTsumoValue
-    /// ([`ShantenDecisionDiagnostic::normal_discard_two_shanten_self_tsumo`]) を構築するかどうか。
+    /// ([`NodocchiDecisionDiagnostic::normal_discard_two_shanten_self_tsumo`]) を構築するかどうか。
     ///
     /// 「2向聴 → (Progress / 一度だけの SameShanten) → 1向聴 → 既存の1向聴 continuation」まで
     /// 探索するため、追加探索の中で最も重い。対象は打牌候補集合の最善向聴数が2向聴の場合だけで、
@@ -271,7 +271,7 @@ pub struct DiagnosticOptions {
     /// 場合、もう片方の探索は走らない。
     pub two_shanten_self_tsumo: bool,
     /// 通常打牌 selector が選んだ打牌の structural expected deal-in loss
-    /// ([`ShantenDecisionDiagnostic::normal_discard_structural_expected_deal_in_loss`]) を
+    /// ([`NodocchiDecisionDiagnostic::normal_discard_structural_expected_deal_in_loss`]) を
     /// 構築するかどうか。
     ///
     /// 既存 `R/T` と同じ hidden-hand state space を1状態ずつ列挙し、状態ごとに既存 scoring layer
@@ -340,26 +340,26 @@ impl DiagnosticOptions {
     }
 }
 
-/// `ShantenAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
+/// `NodocchiAgent::act()` と同じ判断を行い、その過程を構造化診断として返す。
 ///
-/// [`ShantenAgent::diagnose`] の別名。契約は [`ShantenDecisionDiagnostic`] を参照。
-pub fn diagnose_shanten_decision(
+/// [`NodocchiAgent::diagnose`] の別名。契約は [`NodocchiDecisionDiagnostic`] を参照。
+pub fn diagnose_nodocchi_decision(
     context: &GameContext,
     legal_actions: &[LegalAction],
-) -> ShantenDecisionDiagnostic {
-    diagnose_shanten_decision_with_options(context, legal_actions, DiagnosticOptions::NONE)
+) -> NodocchiDecisionDiagnostic {
+    diagnose_nodocchi_decision_with_options(context, legal_actions, DiagnosticOptions::NONE)
 }
 
-/// 追加診断を指定して `ShantenAgent::act()` と同じ判断を行う。
+/// 追加診断を指定して `NodocchiAgent::act()` と同じ判断を行う。
 ///
-/// [`ShantenAgent::diagnose_with_options`] の別名。
-pub fn diagnose_shanten_decision_with_options(
+/// [`NodocchiAgent::diagnose_with_options`] の別名。
+pub fn diagnose_nodocchi_decision_with_options(
     context: &GameContext,
     legal_actions: &[LegalAction],
     options: DiagnosticOptions,
-) -> ShantenDecisionDiagnostic {
+) -> NodocchiDecisionDiagnostic {
     let mut diagnostics = DecisionDiagnostics::enabled_with(options);
-    let decision = ShantenAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
+    let decision = NodocchiAgent.decide_with_diagnostics(context, legal_actions, &mut diagnostics);
     log_agent_decision(&decision);
     diagnostics.finish(context, legal_actions, decision)
 }
@@ -514,7 +514,7 @@ impl DecisionDiagnostics {
         context: &GameContext,
         legal_actions: &[LegalAction],
         decision: AgentDecision,
-    ) -> ShantenDecisionDiagnostic {
+    ) -> NodocchiDecisionDiagnostic {
         // 押し引きまで進んだ場合はそのとき使った facts をそのまま診断へ載せ、集計を作り直さない。
         // Hora / Ryukyoku / 鳴きで早期終了した場合だけ、診断のためにここで facts を作る。
         let player_threat_facts = decision.push_pull_inputs.map_or_else(
@@ -561,7 +561,7 @@ impl DecisionDiagnostics {
             .flatten()
             .and_then(|action| diagnose_structural_expected_deal_in_loss(context, action));
 
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             selected_action: decision.action,
             selected_source: decision.source,
             normal_discard_action: decision.normal_discard,

@@ -722,7 +722,7 @@ mod tests {
 
     use super::*;
     use crate::agent::Agent;
-    use crate::agents::ShantenAgent;
+    use crate::agents::NodocchiAgent;
     use crate::call_decision::{
         CALL_TWO_SHANTEN_SHANTEN, TwoShantenStayCallTarget, evaluate_call_decision,
         two_shanten_stay_call_terminal_ron_yaku,
@@ -892,13 +892,13 @@ mod tests {
         actions: &[LegalAction],
     ) -> TwoShantenStayCallObservation {
         let before = production_call(ctx, actions);
-        let act_before = ShantenAgent.act(ctx, actions);
+        let act_before = NodocchiAgent.act(ctx, actions);
 
         let observation = observe_two_shanten_stay_calls(ctx, actions);
 
         assert_eq!(observation.call.as_ref(), Some(&before));
         assert_eq!(production_call(ctx, actions), before);
-        assert_eq!(ShantenAgent.act(ctx, actions), act_before);
+        assert_eq!(NodocchiAgent.act(ctx, actions), act_before);
         assert_eq!(
             act_before,
             before.selected.clone().unwrap_or(LegalAction::None)
@@ -1230,7 +1230,7 @@ mod tests {
         let ctx = stay_context();
         let actions = stay_actions();
         let before = production_call(&ctx, &actions);
-        let act_before = ShantenAgent.act(&ctx, &actions);
+        let act_before = NodocchiAgent.act(&ctx, &actions);
 
         let observation = observe_two_shanten_stay_calls(&ctx, &actions);
 
@@ -1243,7 +1243,7 @@ mod tests {
         }
         assert_the_progress_scope_matches_the_production(&observation);
         assert_eq!(production_call(&ctx, &actions), before);
-        assert_eq!(ShantenAgent.act(&ctx, &actions), act_before);
+        assert_eq!(NodocchiAgent.act(&ctx, &actions), act_before);
         assert_eq!(act_before, LegalAction::None);
         assert_eq!(observation.production_selected(), None);
     }
@@ -1288,7 +1288,7 @@ mod tests {
         let actions = stay_actions();
         let first = observe_two_shanten_stay_calls(&ctx, &actions);
 
-        crate::shanten_diagnostic::diagnose_shanten_decision(&ctx, &actions);
+        crate::nodocchi_diagnostic::diagnose_nodocchi_decision(&ctx, &actions);
         let second = observe_two_shanten_stay_calls(&ctx, &actions);
 
         for (first, second) in first.candidates.iter().zip(&second.candidates) {

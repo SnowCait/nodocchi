@@ -6,7 +6,7 @@
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, DefenseCandidateDiagnostic, DefenseFallbackKind, DiagnosticOptions, HonorSafetyRank,
-    LegalAction, OpponentHonorValue, ShantenAgent, SuitedSafetyRank, SujiSafetyRank,
+    LegalAction, NodocchiAgent, OpponentHonorValue, SuitedSafetyRank, SujiSafetyRank,
     is_genbutsu_for, is_genbutsu_for_all_reached, select_defense_fallback_action_with_kind,
     suji_safety_rank_for,
 };
@@ -98,10 +98,10 @@ fn multi_riichi_double_wind_scenario_prefers_suji_and_keeps_diagnostics_consiste
         Some(OpponentHonorValue::DoubleWind)
     );
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let action = agent.act(&scenario.context, &scenario.legal_actions);
-    let diagnostic = ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions);
-    let with_lookahead = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions);
+    let with_lookahead = NodocchiAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
         DiagnosticOptions::WITH_LOOKAHEAD,
@@ -129,10 +129,10 @@ fn history_furiten_does_not_change_selection_or_diagnostic_consistency() {
             same_turn: Some(true),
             riichi_missed_win: Some(true),
         });
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let action = agent.act(&context, &base.legal_actions);
-    let diagnostic = ShantenAgent::diagnose(&context, &base.legal_actions);
-    let lookahead = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose(&context, &base.legal_actions);
+    let lookahead = NodocchiAgent::diagnose_with_options(
         &context,
         &base.legal_actions,
         DiagnosticOptions::WITH_LOOKAHEAD,

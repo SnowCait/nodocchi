@@ -2,25 +2,25 @@ use super::*;
 
 use crate::action::LegalAction;
 use crate::agent::Agent;
-use crate::agents::{AgentActionSource, ShantenAgent};
+use crate::agents::{AgentActionSource, NodocchiAgent};
 use crate::context::{GameContext, TableStateFacts};
 use crate::defense::{
     DefenseFallbackKind, HonorSafetyRank, RonRiskEvidence, StructuralExpectedDealInLossUnavailable,
 };
 use crate::discard_selection::{select_discard_action, select_discard_action_with_evaluation};
 use crate::meld::{Meld, MeldKind};
-use crate::push_pull::{
-    PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context_with_evaluation,
-};
-use crate::reach_policy::ReachDecisionReason;
-use crate::ryukyoku_decision::tests::{KOKUSHI_FOUR_HAND, hand_tiles};
-use crate::shanten_test_support::{
+use crate::nodocchi_test_support::{
     OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, dahai, fold_actions, fold_under_reach_context,
     opponent_meld_actions, opponent_reach_context, opponent_reach_context_with_visible, pon_meld,
     suited_reach_context, suited_reach_context_with_reached, tenpai_actions, tenpai_context,
     tenpai_dahai_actions, tenpai_under_reach_context, tile, weak_tenpai_actions,
     weak_tenpai_under_reach_context,
 };
+use crate::push_pull::{
+    PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context_with_evaluation,
+};
+use crate::reach_policy::ReachDecisionReason;
+use crate::ryukyoku_decision::tests::{KOKUSHI_FOUR_HAND, hand_tiles};
 use crate::threat::diagnose_player_threats;
 use crate::two_shanten_self_tsumo_cost::{
     measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
@@ -31,14 +31,14 @@ use bot_logic::{
     compare_discard_evaluations,
 };
 
-// ---- 構造化診断 (ShantenAgent::diagnose) テスト ----
+// ---- 構造化診断 (NodocchiAgent::diagnose) テスト ----
 // 診断は act() と同じ selection logic を通るため、最終 action は常に act() と一致する。
 
 // 診断の最終 action / source が act() と一致することを確認し、診断を返す共通 helper。
-fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
-    let mut agent = ShantenAgent;
+fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> NodocchiDecisionDiagnostic {
+    let mut agent = NodocchiAgent;
     let expected = agent.act(ctx, actions);
-    let diagnostic = ShantenAgent::diagnose(ctx, actions);
+    let diagnostic = NodocchiAgent::diagnose(ctx, actions);
     assert_eq!(diagnostic.selected_action, expected);
     assert_eq!(
         diagnostic.selected_source,
@@ -95,8 +95,8 @@ fn diagnose_free_function_matches_associated_function() {
     let ctx = fold_under_reach_context();
     let actions = fold_actions();
     assert_eq!(
-        diagnose_shanten_decision(&ctx, &actions),
-        ShantenAgent::diagnose(&ctx, &actions)
+        diagnose_nodocchi_decision(&ctx, &actions),
+        NodocchiAgent::diagnose(&ctx, &actions)
     );
 }
 
@@ -301,7 +301,7 @@ fn assert_push_pull_diagnostic(
     ctx: &GameContext,
     actions: &[LegalAction],
     expected_mode: PushPullMode,
-) -> ShantenDecisionDiagnostic {
+) -> NodocchiDecisionDiagnostic {
     let diagnostic = diagnose_matching_act(ctx, actions);
     let inputs = diagnostic.push_pull_inputs.unwrap();
     let decision = diagnostic.push_pull_decision.unwrap();
@@ -632,10 +632,10 @@ fn own_fixed_meld_value_does_not_change_the_selected_action() {
 
     for ctx in [&plain, &valuable] {
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
         assert_eq!(
             with_lookahead.selected_action,
-            ShantenAgent::diagnose(ctx, &actions).selected_action
+            NodocchiAgent::diagnose(ctx, &actions).selected_action
         );
     }
 
@@ -1029,11 +1029,11 @@ fn player_threats_keep_act_and_diagnose_consistent() {
     let ctx = opponent_meld_context(Some(0), vec![white_dragon_pon(), red_five_chi()]);
     let actions = opponent_meld_actions();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let acted = agent.act(&ctx, &actions);
-    let diagnosed = ShantenAgent::diagnose(&ctx, &actions);
+    let diagnosed = NodocchiAgent::diagnose(&ctx, &actions);
     let with_lookahead =
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
     assert_eq!(diagnosed.selected_action, acted);
     assert_eq!(with_lookahead.selected_action, acted);
@@ -1088,7 +1088,7 @@ fn push_pull_and_diagnostics_share_the_same_threat_facts() {
 
     // 2手先診断を有効にしても facts は変わらない。
     let with_lookahead =
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
     assert_eq!(with_lookahead.push_pull_inputs, diagnostic.push_pull_inputs);
     assert_eq!(with_lookahead.player_threats, diagnostic.player_threats);
 }
@@ -1189,7 +1189,7 @@ fn act_uses_the_fixed_meld_aware_normal_discard() {
         .chain([dahai(120)])
         .collect();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     assert_eq!(agent.act(&ctx, &actions), dahai(120));
 
     let diagnostic = diagnose_matching_act(&ctx, &actions);
@@ -1258,14 +1258,14 @@ fn melds_do_not_change_the_selected_action() {
     let without_melds = context_with_own_melds(Some(0), &hand_values, Some(40), vec![]);
     let with_melds = context_with_own_melds(Some(0), &hand_values, Some(40), vec![pon_meld()]);
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     assert_eq!(
         agent.act(&with_melds, &actions),
         agent.act(&without_melds, &actions)
     );
     assert_eq!(
-        ShantenAgent::diagnose(&with_melds, &actions).selected_action,
-        ShantenAgent::diagnose(&without_melds, &actions).selected_action
+        NodocchiAgent::diagnose(&with_melds, &actions).selected_action,
+        NodocchiAgent::diagnose(&without_melds, &actions).selected_action
     );
 }
 
@@ -1294,7 +1294,7 @@ fn act_path_does_not_build_analysis_diagnostics() {
     let actions = fold_actions();
 
     let mut diagnostics = DecisionDiagnostics::disabled();
-    let decision = ShantenAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
+    let decision = NodocchiAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
 
     assert_eq!(decision.action, dahai(89));
     assert!(diagnostics.normal_discard.is_none());
@@ -1310,7 +1310,7 @@ fn act_path_does_not_build_the_reach_damaten_comparison() {
     let actions = tenpai_actions();
 
     let mut diagnostics = DecisionDiagnostics::disabled();
-    let decision = ShantenAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
+    let decision = NodocchiAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
 
     assert_eq!(decision.action, LegalAction::Reach);
     assert!(decision.reach.is_some());
@@ -1323,8 +1323,8 @@ fn the_reach_damaten_comparison_is_built_only_with_diagnostics() {
     // Some(true) の通常ケースでは、リーチ Ron baseline も構築する。
     let (ctx, actions) = pinfu_tanyao_context_and_actions();
 
-    let mut agent = ShantenAgent;
-    let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+    let mut agent = NodocchiAgent;
+    let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
     let comparison = diagnostic
         .reach_damaten_comparison
         .as_ref()
@@ -1354,7 +1354,7 @@ fn enabling_diagnostics_does_not_change_decision() {
     ];
 
     for (ctx, actions) in cases {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let production = agent.decide(&ctx, &actions);
         let with_diagnostics =
             agent.decide_with_diagnostics(&ctx, &actions, &mut DecisionDiagnostics::enabled());
@@ -1381,7 +1381,7 @@ fn diagnostics_keep_the_normal_discard_that_the_early_fold_skips() {
     // 明確な threat に対する二向聴以上の確定 Fold。production は最終 action に使わない通常打牌
     // 選択を省略し、診断経路だけが通常打牌と攻撃評価を持つ。選ばれる action と押し引きは同じ。
     let (ctx, actions) = (fold_under_reach_context(), fold_actions());
-    let agent = ShantenAgent;
+    let agent = NodocchiAgent;
     let production = agent.decide(&ctx, &actions);
     let with_diagnostics =
         agent.decide_with_diagnostics(&ctx, &actions, &mut DecisionDiagnostics::enabled());
@@ -1487,7 +1487,7 @@ fn no_threat_two_shanten_keeps_the_normal_discard_selection() {
     // 通常打牌選択をそのまま通し、その結果を最終 action にする。
     let ctx = two_shanten_context(Some(66));
     let actions = two_shanten_actions();
-    let decision = ShantenAgent.decide(&ctx, &actions);
+    let decision = NodocchiAgent.decide(&ctx, &actions);
 
     assert_eq!(
         decision.push_pull,
@@ -1575,19 +1575,19 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_build_the_same_shanten_downstr
     let actions = iishanten_actions();
 
     let lookahead_only =
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
-    let downstream = ShantenAgent::diagnose_with_options(
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+    let downstream = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
     );
-    let two_shanten = ShantenAgent::diagnose_with_options(
+    let two_shanten = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
     );
 
-    let count = |diagnostic: &ShantenDecisionDiagnostic| {
+    let count = |diagnostic: &NodocchiDecisionDiagnostic| {
         same_shanten_downstream_count(
             diagnostic
                 .normal_discard_lookahead
@@ -1614,7 +1614,7 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_build_the_same_shanten_downstr
     );
 
     // scope の違いは選ぶ action を変えない。
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let expected = agent.act(&ctx, &actions);
     for diagnostic in [&lookahead_only, &downstream, &two_shanten] {
         assert_eq!(diagnostic.selected_action, expected);
@@ -1633,7 +1633,7 @@ fn the_two_shanten_self_tsumo_diagnostic_is_opt_in() {
         DiagnosticOptions::WITH_SAME_SHANTEN_DOWNSTREAM,
     ] {
         assert!(
-            ShantenAgent::diagnose_with_options(&ctx, &actions, options)
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, options)
                 .normal_discard_two_shanten_self_tsumo
                 .is_none()
         );
@@ -1647,10 +1647,10 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_change_the_selected_action() {
     let ctx = two_shanten_context(None);
     let actions = two_shanten_actions();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let expected = agent.act(&ctx, &actions);
-    let without = ShantenAgent::diagnose(&ctx, &actions);
-    let with = ShantenAgent::diagnose_with_options(
+    let without = NodocchiAgent::diagnose(&ctx, &actions);
+    let with = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
@@ -1677,7 +1677,7 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_change_the_selected_action() {
 
     // 2向聴診断以外の診断はすべて既定の診断と一致する。
     assert_eq!(
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             normal_discard_lookahead: None,
             normal_discard_lookahead_value: None,
             normal_discard_tenpai_continuation: None,
@@ -1701,13 +1701,13 @@ fn the_structural_expected_deal_in_loss_diagnostic_is_opt_in() {
         DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
     ] {
         assert!(
-            ShantenAgent::diagnose_with_options(&ctx, &actions, options)
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, options)
                 .normal_discard_structural_expected_deal_in_loss
                 .is_none()
         );
     }
     assert!(
-        ShantenAgent::diagnose_with_options(
+        NodocchiAgent::diagnose_with_options(
             &ctx,
             &actions,
             DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
@@ -1723,10 +1723,10 @@ fn the_structural_expected_deal_in_loss_diagnostic_does_not_change_any_decision(
     let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
     let actions = tenpai_dahai_actions();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let expected = agent.act(&ctx, &actions);
-    let without = ShantenAgent::diagnose(&ctx, &actions);
-    let with = ShantenAgent::diagnose_with_options(
+    let without = NodocchiAgent::diagnose(&ctx, &actions);
+    let with = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
@@ -1741,7 +1741,7 @@ fn the_structural_expected_deal_in_loss_diagnostic_does_not_change_any_decision(
 
     // 追加した診断以外はすべて既定の診断と一致する。
     assert_eq!(
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             normal_discard_structural_expected_deal_in_loss: None,
             ..with
         },
@@ -1756,7 +1756,7 @@ fn the_structural_expected_deal_in_loss_diagnostic_targets_the_selected_normal_d
     let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
     let actions = tenpai_dahai_actions();
 
-    let diagnostic = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
@@ -1794,7 +1794,7 @@ fn a_multiple_reach_position_has_no_structural_expected_deal_in_loss_diagnostic(
     let actions = tenpai_dahai_actions();
 
     assert!(
-        ShantenAgent::diagnose_with_options(
+        NodocchiAgent::diagnose_with_options(
             &ctx,
             &actions,
             DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
@@ -1811,7 +1811,7 @@ fn an_unknown_scoring_fact_leaves_the_structural_expected_deal_in_loss_unavailab
     let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
     let actions = tenpai_dahai_actions();
 
-    let diagnostic = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_STRUCTURAL_EXPECTED_DEAL_IN_LOSS,
@@ -1832,7 +1832,7 @@ fn the_two_shanten_self_tsumo_cost_measurement_returns_the_same_values_as_the_di
     let ctx = two_shanten_context(Some(66));
     let actions = two_shanten_actions();
 
-    let expected = ShantenAgent::diagnose_with_options(
+    let expected = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
@@ -1937,7 +1937,7 @@ fn two_shanten_cost_measurements_do_not_change_the_selected_action() {
     let ctx = two_shanten_context(Some(66));
     let actions = two_shanten_actions();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let expected = agent.act(&ctx, &actions);
     for scope in [
         TwoShantenSelfTsumoScope::AllCandidates,
@@ -1957,7 +1957,7 @@ fn two_shanten_cost_measurements_do_not_change_the_selected_action() {
 // production の打牌比較が Shanten / IsolatedTile / IsolatedHonor で決着させず、前方評価まで
 // 残した候補。診断そのものではなく打牌比較の結果から求める。
 fn compared_discards(ctx: &GameContext, actions: &[LegalAction]) -> Vec<TileType> {
-    let candidates = ShantenAgent::diagnose(ctx, actions)
+    let candidates = NodocchiAgent::diagnose(ctx, actions)
         .normal_discard
         .expect("normal discard evaluated")
         .candidates;
@@ -1988,7 +1988,7 @@ fn only_a_two_shanten_candidate_set_has_the_two_shanten_self_tsumo_value() {
     let ctx = lookahead_context();
     let actions = lookahead_actions();
 
-    let diagnostic = ShantenAgent::diagnose_with_options(
+    let diagnostic = NodocchiAgent::diagnose_with_options(
         &ctx,
         &actions,
         DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
@@ -2038,7 +2038,7 @@ fn act_path_does_not_build_lookahead() {
     let actions = lookahead_actions();
 
     let mut diagnostics = DecisionDiagnostics::disabled();
-    let _ = ShantenAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
+    let _ = NodocchiAgent.decide_with_diagnostics(&ctx, &actions, &mut diagnostics);
 
     assert!(diagnostics.normal_discard_lookahead.is_none());
 }
@@ -2050,12 +2050,12 @@ fn diagnose_does_not_build_lookahead_by_default() {
     let actions = lookahead_actions();
 
     assert!(
-        ShantenAgent::diagnose(&ctx, &actions)
+        NodocchiAgent::diagnose(&ctx, &actions)
             .normal_discard_lookahead
             .is_none()
     );
     assert!(
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::NONE)
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::NONE)
             .normal_discard_lookahead
             .is_none()
     );
@@ -2066,11 +2066,11 @@ fn lookahead_does_not_change_the_selected_action() {
     let ctx = lookahead_context();
     let actions = lookahead_actions();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let expected = agent.act(&ctx, &actions);
-    let without = ShantenAgent::diagnose(&ctx, &actions);
+    let without = NodocchiAgent::diagnose(&ctx, &actions);
     let with =
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
     assert_eq!(with.selected_action, expected);
     assert!(
@@ -2083,7 +2083,7 @@ fn lookahead_does_not_change_the_selected_action() {
     );
     // 2手先とその将来打点以外の診断はすべて既定の診断と一致する。
     assert_eq!(
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             normal_discard_lookahead: None,
             normal_discard_lookahead_value: None,
             normal_discard_tenpai_continuation: None,
@@ -2099,7 +2099,7 @@ fn lookahead_covers_every_normal_discard_candidate() {
     let ctx = lookahead_context();
     let actions = lookahead_actions();
     let diagnostic =
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
     let normal_discard = diagnostic.normal_discard.expect("normal discard evaluated");
     let lookahead = diagnostic
@@ -2139,8 +2139,8 @@ fn lookahead_free_function_matches_associated_function() {
     let ctx = lookahead_context();
     let actions = lookahead_actions();
     assert_eq!(
-        diagnose_shanten_decision_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD),
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD)
+        diagnose_nodocchi_decision_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD),
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD)
     );
 }
 
@@ -2178,11 +2178,11 @@ fn table_state_facts_keep_every_diagnose_entry_point_in_agreement() {
 
     for facts in table_state_variants() {
         let ctx = base.clone().with_table_state_facts(facts);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&ctx, &actions);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
         assert_eq!(diagnostic.selected_action, acted, "{facts:?}");
         assert_eq!(with_lookahead.selected_action, acted, "{facts:?}");
@@ -2211,11 +2211,11 @@ fn weighted_tenpai_wait_keeps_act_and_diagnose_consistent() {
     let ctx = iishanten_wait_context();
     let actions = iishanten_wait_actions();
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let acted = agent.act(&ctx, &actions);
-    let diagnosed = ShantenAgent::diagnose(&ctx, &actions);
+    let diagnosed = NodocchiAgent::diagnose(&ctx, &actions);
     let with_lookahead =
-        ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+        NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
     assert_eq!(diagnosed.selected_action, acted);
     assert_eq!(with_lookahead.selected_action, acted);
@@ -2241,7 +2241,7 @@ fn push_pull_shares_the_selected_normal_discard() {
     let ctx = iishanten_wait_context();
     let actions = iishanten_wait_actions();
 
-    let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+    let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
     let selected = diagnostic
         .normal_discard
         .as_ref()
@@ -2325,7 +2325,7 @@ fn furiten_context(player_id: Option<u8>, discards: [Vec<TileId>; 4]) -> GameCon
 }
 
 fn furiten_of(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     discard: TileType,
 ) -> DiscardFuritenDiagnostic {
     diagnostic
@@ -2442,11 +2442,11 @@ fn the_furiten_diagnostic_does_not_change_the_selected_action() {
         );
         let actions = furiten_actions();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&ctx, &actions);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
         assert_eq!(acted, dahai(FURITEN_DRAWN));
         assert_eq!(diagnostic.selected_action, acted);
@@ -2585,7 +2585,7 @@ fn act_path_does_not_build_the_furiten_diagnostic() {
     let ctx = furiten_context(Some(0), [vec![tile(FURITEN_WAIT)], vec![], vec![], vec![]]);
 
     let mut diagnostics = DecisionDiagnostics::disabled();
-    let _ = ShantenAgent.decide_with_diagnostics(&ctx, &furiten_actions(), &mut diagnostics);
+    let _ = NodocchiAgent.decide_with_diagnostics(&ctx, &furiten_actions(), &mut diagnostics);
 
     assert!(diagnostics.normal_discard_furiten.is_none());
 }
@@ -2675,7 +2675,7 @@ fn history_furiten_meld_context(history: bot_logic::HistoryFuritenFacts) -> Game
 fn selected_tenpai_wait(
     ctx: &GameContext,
     actions: &[LegalAction],
-) -> (ShantenDecisionDiagnostic, TenpaiWaitAvailability) {
+) -> (NodocchiDecisionDiagnostic, TenpaiWaitAvailability) {
     let diagnostic = diagnose_matching_act(ctx, actions);
     let Some(LegalAction::Dahai { tile }) = &diagnostic.normal_discard_action else {
         panic!("打牌が選ばれる: {:?}", diagnostic.normal_discard_action);
@@ -2826,7 +2826,7 @@ fn history_furiten_does_not_change_the_reach_or_push_pull_policy() {
         cannot_ron_diagnostic.selected_source
     );
 
-    let reach_of = |diagnostic: &ShantenDecisionDiagnostic| {
+    let reach_of = |diagnostic: &NodocchiDecisionDiagnostic| {
         let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
         (reach.selected.clone(), reach.reason, reach.should_reach())
     };
@@ -2835,7 +2835,7 @@ fn history_furiten_does_not_change_the_reach_or_push_pull_policy() {
         reach_of(&cannot_ron_diagnostic)
     );
 
-    let push_pull_of = |diagnostic: &ShantenDecisionDiagnostic| {
+    let push_pull_of = |diagnostic: &NodocchiDecisionDiagnostic| {
         let decision = diagnostic
             .push_pull_decision
             .as_ref()

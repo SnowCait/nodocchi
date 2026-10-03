@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::config::ClientConfig;
 use crate::validation_policy::AgentKind;
 
-pub const USAGE: &str = "usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|shanten|menzen] [--log-file <PATH>] [--capture-file <PATH>]";
+pub const USAGE: &str = "usage: riichilab-client [validate|ranked] [--agent normal|tsumogiri|nodocchi|menzen] [--log-file <PATH>] [--capture-file <PATH>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionMode {
@@ -137,9 +137,9 @@ mod tests {
 
     #[test]
     fn parses_agent_option() {
-        let args = parse(&["validate", "--agent", "shanten"]).unwrap();
+        let args = parse(&["validate", "--agent", "nodocchi"]).unwrap();
         assert_eq!(args.mode, ConnectionMode::Validate);
-        assert_eq!(args.agent, Some(AgentKind::Shanten));
+        assert_eq!(args.agent, Some(AgentKind::Nodocchi));
     }
 
     #[test]
@@ -166,13 +166,13 @@ mod tests {
         let args = parse(&[
             "ranked",
             "--agent",
-            "shanten",
+            "nodocchi",
             "--log-file",
             "logs/ranked.log",
         ])
         .unwrap();
         assert_eq!(args.mode, ConnectionMode::Ranked);
-        assert_eq!(args.agent, Some(AgentKind::Shanten));
+        assert_eq!(args.agent, Some(AgentKind::Nodocchi));
         assert_eq!(args.log_file, Some(PathBuf::from("logs/ranked.log")));
     }
 
@@ -191,7 +191,7 @@ mod tests {
         let args = parse(&[
             "ranked",
             "--agent",
-            "shanten",
+            "nodocchi",
             "--log-file",
             "logs/ranked.log",
             "--capture-file",
@@ -199,7 +199,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.mode, ConnectionMode::Ranked);
-        assert_eq!(args.agent, Some(AgentKind::Shanten));
+        assert_eq!(args.agent, Some(AgentKind::Nodocchi));
         assert_eq!(args.log_file, Some(PathBuf::from("logs/ranked.log")));
         assert_eq!(
             args.capture_file,
@@ -252,8 +252,16 @@ mod tests {
     #[test]
     fn rejects_unknown_agent() {
         assert_eq!(
-            parse(&["--agent", "nodocchi"]),
-            Err(CliError::UnknownAgent("nodocchi".to_string()))
+            parse(&["--agent", "unknown"]),
+            Err(CliError::UnknownAgent("unknown".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_removed_shanten_agent() {
+        assert_eq!(
+            parse(&["--agent", "shanten"]),
+            Err(CliError::UnknownAgent("shanten".to_string()))
         );
     }
 

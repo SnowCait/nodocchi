@@ -1,4 +1,4 @@
-use bot_core::{Agent, GameContext, MenzenAgent, NormalAgent, ShantenAgent, TsumogiriAgent};
+use bot_core::{Agent, GameContext, MenzenAgent, NodocchiAgent, NormalAgent, TsumogiriAgent};
 
 use crate::convert::{
     checked_legal_action_to_mjai_action, possible_actions_to_legal_actions,
@@ -13,7 +13,7 @@ pub type ResponsePolicy =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentKind {
     Tsumogiri,
-    Shanten,
+    Nodocchi,
     Menzen,
     #[default]
     Normal,
@@ -31,7 +31,7 @@ impl AgentKind {
     pub fn response_policy(self) -> ResponsePolicy {
         match self {
             Self::Tsumogiri => build_tsumogiri_response_with_context,
-            Self::Shanten => build_shanten_response_with_context,
+            Self::Nodocchi => build_nodocchi_response_with_context,
             Self::Menzen => build_menzen_response_with_context,
             Self::Normal => build_normal_response_with_context,
         }
@@ -45,7 +45,7 @@ impl std::str::FromStr for AgentKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "" | "normal" => Ok(Self::Normal),
             "tsumogiri" | "tsumo-giri" => Ok(Self::Tsumogiri),
-            "shanten" => Ok(Self::Shanten),
+            "nodocchi" => Ok(Self::Nodocchi),
             "menzen" => Ok(Self::Menzen),
             other => Err(AgentKindError::Unknown(other.to_string())),
         }
@@ -56,7 +56,7 @@ impl std::fmt::Display for AgentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tsumogiri => write!(f, "tsumogiri"),
-            Self::Shanten => write!(f, "shanten"),
+            Self::Nodocchi => write!(f, "nodocchi"),
             Self::Menzen => write!(f, "menzen"),
             Self::Normal => write!(f, "normal"),
         }
@@ -130,16 +130,16 @@ pub(crate) fn build_normal_response_with_context(
     )
 }
 
-pub fn build_shanten_response(
+pub fn build_nodocchi_response(
     state: &ValidationState,
     request_id: u64,
     possible_actions: &[MjaiPossibleAction],
 ) -> Option<MjaiAction> {
     let context = game_context_from_validation_state(state);
-    build_shanten_response_with_context(state, &context, request_id, possible_actions)
+    build_nodocchi_response_with_context(state, &context, request_id, possible_actions)
 }
 
-pub(crate) fn build_shanten_response_with_context(
+pub(crate) fn build_nodocchi_response_with_context(
     state: &ValidationState,
     context: &GameContext,
     request_id: u64,
@@ -147,7 +147,7 @@ pub(crate) fn build_shanten_response_with_context(
 ) -> Option<MjaiAction> {
     let legal_actions = possible_actions_to_legal_actions(possible_actions);
 
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let chosen = agent.act(context, &legal_actions);
 
     checked_legal_action_to_mjai_action(
@@ -257,8 +257,11 @@ mod tests {
         }
 
         #[test]
-        fn parses_shanten() {
-            assert_eq!("shanten".parse::<AgentKind>().unwrap(), AgentKind::Shanten);
+        fn parses_nodocchi() {
+            assert_eq!(
+                "nodocchi".parse::<AgentKind>().unwrap(),
+                AgentKind::Nodocchi
+            );
         }
 
         #[test]
@@ -273,7 +276,10 @@ mod tests {
                 "TsumoGiri".parse::<AgentKind>().unwrap(),
                 AgentKind::Tsumogiri
             );
-            assert_eq!("Shanten".parse::<AgentKind>().unwrap(), AgentKind::Shanten);
+            assert_eq!(
+                "Nodocchi".parse::<AgentKind>().unwrap(),
+                AgentKind::Nodocchi
+            );
             assert_eq!("Menzen".parse::<AgentKind>().unwrap(), AgentKind::Menzen);
         }
 
@@ -284,16 +290,24 @@ mod tests {
                 AgentKind::Tsumogiri
             );
             assert_eq!(
-                " Shanten ".parse::<AgentKind>().unwrap(),
-                AgentKind::Shanten
+                " Nodocchi ".parse::<AgentKind>().unwrap(),
+                AgentKind::Nodocchi
             );
         }
 
         #[test]
         fn unknown_value_is_error() {
             assert_eq!(
-                "nodocchi".parse::<AgentKind>(),
-                Err(AgentKindError::Unknown("nodocchi".to_string()))
+                "unknown".parse::<AgentKind>(),
+                Err(AgentKindError::Unknown("unknown".to_string()))
+            );
+        }
+
+        #[test]
+        fn rejects_removed_shanten_name() {
+            assert_eq!(
+                "shanten".parse::<AgentKind>(),
+                Err(AgentKindError::Unknown("shanten".to_string()))
             );
         }
 
@@ -301,7 +315,7 @@ mod tests {
         fn display_matches_env_values() {
             assert_eq!(AgentKind::Normal.to_string(), "normal");
             assert_eq!(AgentKind::Tsumogiri.to_string(), "tsumogiri");
-            assert_eq!(AgentKind::Shanten.to_string(), "shanten");
+            assert_eq!(AgentKind::Nodocchi.to_string(), "nodocchi");
             assert_eq!(AgentKind::Menzen.to_string(), "menzen");
         }
     }
@@ -690,7 +704,7 @@ mod tests {
         }
     }
 
-    mod shanten_policy {
+    mod nodocchi_policy {
         use super::*;
         use bot_logic::TileId;
 
@@ -704,7 +718,7 @@ mod tests {
             let context = GameContext::with_drawn_tile(tile(0));
             let possible_actions = vec![possible_dahai("1m")];
             let response =
-                build_shanten_response_with_context(&state, &context, 42, &possible_actions);
+                build_nodocchi_response_with_context(&state, &context, 42, &possible_actions);
             assert_eq!(
                 response,
                 Some(MjaiAction::Dahai {
@@ -722,7 +736,7 @@ mod tests {
             let context = GameContext::with_drawn_tile(tile(56));
             let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::Hora];
             let response =
-                build_shanten_response_with_context(&state, &context, 80, &possible_actions);
+                build_nodocchi_response_with_context(&state, &context, 80, &possible_actions);
             assert_eq!(
                 response,
                 Some(MjaiAction::Hora {
@@ -740,7 +754,7 @@ mod tests {
             let context = GameContext::with_drawn_tile(tile(56));
             let possible_actions = vec![possible_dahai("6p"), MjaiPossibleAction::Ryukyoku];
             let response =
-                build_shanten_response_with_context(&state, &context, 81, &possible_actions);
+                build_nodocchi_response_with_context(&state, &context, 81, &possible_actions);
             assert_eq!(
                 response,
                 Some(MjaiAction::Ryukyoku {
@@ -757,7 +771,7 @@ mod tests {
                 GameContext::from_parts(Some(tile(56)), vec![tile(0), tile(16), tile(56)]);
             let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
             let response =
-                build_shanten_response_with_context(&state, &context, 82, &possible_actions);
+                build_nodocchi_response_with_context(&state, &context, 82, &possible_actions);
             assert!(matches!(response, Some(MjaiAction::Dahai { .. })));
         }
 
@@ -767,11 +781,11 @@ mod tests {
             let context = game_context_from_validation_state(&state);
             let possible_actions = vec![possible_pon()];
             assert_eq!(
-                build_shanten_response_with_context(&state, &context, 83, &possible_actions),
+                build_nodocchi_response_with_context(&state, &context, 83, &possible_actions),
                 None
             );
             assert_eq!(
-                build_shanten_response_with_context(&state, &context, 83, &[]),
+                build_nodocchi_response_with_context(&state, &context, 83, &[]),
                 None
             );
         }
@@ -782,7 +796,7 @@ mod tests {
             let context = GameContext::default();
             let possible_actions = vec![possible_pon(), MjaiPossibleAction::None];
             let response =
-                build_shanten_response_with_context(&state, &context, 84, &possible_actions);
+                build_nodocchi_response_with_context(&state, &context, 84, &possible_actions);
             assert_eq!(
                 response,
                 Some(MjaiAction::None {
@@ -797,8 +811,8 @@ mod tests {
             let context = game_context_from_validation_state(&state);
             let possible_actions = vec![possible_dahai("1m"), possible_dahai("6p")];
             assert_eq!(
-                build_shanten_response(&state, 85, &possible_actions),
-                build_shanten_response_with_context(&state, &context, 85, &possible_actions)
+                build_nodocchi_response(&state, 85, &possible_actions),
+                build_nodocchi_response_with_context(&state, &context, 85, &possible_actions)
             );
         }
     }
@@ -840,7 +854,7 @@ mod tests {
         }
 
         #[test]
-        fn matches_shanten_policy_without_meld_actions() {
+        fn matches_nodocchi_policy_without_meld_actions() {
             let state = state_with_tsumo(0, "6p");
             for possible_actions in [
                 vec![possible_dahai("1m"), possible_dahai("6p")],
@@ -849,7 +863,7 @@ mod tests {
             ] {
                 assert_eq!(
                     build_menzen_response(&state, 92, &possible_actions),
-                    build_shanten_response(&state, 92, &possible_actions)
+                    build_nodocchi_response(&state, 92, &possible_actions)
                 );
             }
         }
@@ -1070,8 +1084,8 @@ mod tests {
         }
 
         #[test]
-        fn shanten_kind_uses_shanten_policy() {
-            let policy = AgentKind::Shanten.response_policy();
+        fn nodocchi_kind_uses_nodocchi_policy() {
+            let policy = AgentKind::Nodocchi.response_policy();
             let state = state_with_tsumo(0, "6p");
             let context = game_context_from_validation_state(&state);
             for possible_actions in [
@@ -1086,7 +1100,7 @@ mod tests {
             ] {
                 assert_eq!(
                     policy(&state, &context, 32, &possible_actions),
-                    build_shanten_response(&state, 32, &possible_actions)
+                    build_nodocchi_response(&state, 32, &possible_actions)
                 );
             }
         }

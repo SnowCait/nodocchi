@@ -2,7 +2,7 @@
 //!
 //! 比較する horizon は `horizon_turn` = 12 / 14 / 16 / 18 の4通りで、`late_min_future_draws` は
 //! production と同じ 2 に固定する。各 horizon の判断は context の horizon だけを差し替えて
-//! `ShantenAgent::act()` と同じ判断経路 ([`ShantenAgent::decide`]) を1回ずつ通したもので、
+//! `NodocchiAgent::act()` と同じ判断経路 ([`NodocchiAgent::decide`]) を1回ずつ通したもので、
 //! 比較専用の打牌選択・Call 判断は持たない。構造化診断は構築しない。
 //!
 //! どの horizon が正しいかを判定するものではなく、horizon を変えた場合に production 判断が
@@ -19,7 +19,7 @@
 //! [`pass_own_future_draws`] と [`effective_own_future_draws`]) から読み、式を複製しない。
 //!
 //! Pass 側の値を持つのは、production の鳴き判断が実際に Call / Pass self-tsumo 比較まで進めた
-//! 候補を持つ request だけ。判定は [`ShantenAgent::decide`] が返した鳴き判断の候補
+//! 候補を持つ request だけ。判定は [`NodocchiAgent::decide`] が返した鳴き判断の候補
 //! ([`CallCandidateDiagnostic`] の `iishanten_self_tsumo` / `two_shanten_self_tsumo` /
 //! `three_shanten_self_tsumo`) をそのまま読み、候補の準備も向聴判定も評価し直さない。
 //!
@@ -32,7 +32,7 @@
 use bot_logic::SelfTsumoHorizon;
 
 use crate::action::LegalAction;
-use crate::agents::{AgentActionSource, ShantenAgent};
+use crate::agents::{AgentActionSource, NodocchiAgent};
 use crate::call_decision::{
     CallCandidateDiagnostic, CallDecisionDiagnostic, pass_own_future_draws,
 };
@@ -143,7 +143,7 @@ pub struct SelfTsumoHorizonDecision {
     pub pass_raw_future_draws: PassFutureDraws,
     /// 反応 request の Pass 側の将来自摸機会へこの horizon を適用した値。
     pub pass_effective_future_draws: PassFutureDraws,
-    /// 最終 action。`ShantenAgent::act()` の結果と一致する。
+    /// 最終 action。`NodocchiAgent::act()` の結果と一致する。
     pub action: LegalAction,
     pub source: AgentActionSource,
     /// 通常打牌選択が選んだ Dahai。通常打牌選択を通らなかった場合 (Hora / 九種九牌 / 鳴き /
@@ -207,7 +207,7 @@ pub fn decide_with_self_tsumo_horizon(
     horizon: SelfTsumoHorizon,
 ) -> SelfTsumoHorizonDecision {
     let context = context.clone().with_self_tsumo_horizon(horizon);
-    let decision = measured_on_a_fresh_thread(|| ShantenAgent.decide(&context, legal_actions));
+    let decision = measured_on_a_fresh_thread(|| NodocchiAgent.decide(&context, legal_actions));
     let (pass_raw_future_draws, pass_effective_future_draws) = pass_future_draws(
         &context,
         evaluates_pass_continuation(decision.call.as_ref()),
@@ -234,7 +234,7 @@ mod tests {
     use crate::agent::Agent;
     use crate::context::TableStateFacts;
     use crate::meld::{Meld, MeldKind};
-    use crate::shanten_test_support::{tenpai_actions, tenpai_context, tile};
+    use crate::nodocchi_test_support::{tenpai_actions, tenpai_context, tile};
     use bot_logic::TileType;
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
 
         // 通常ツモ番の baseline は従来どおり floor(remaining_tiles / 4)。鳴き判断は無く、Pass は
         // 存在しない。
-        assert!(ShantenAgent.decide(&context, &actions).call.is_none());
+        assert!(NodocchiAgent.decide(&context, &actions).call.is_none());
         assert_eq!(comparison.baseline_raw_future_draws, Some(10));
         assert_eq!(
             comparison.baseline_raw_future_draws,
@@ -316,8 +316,8 @@ mod tests {
         assert_eq!(context.self_tsumo_horizon(), SelfTsumoHorizon::PRODUCTION);
         for decision in &comparison.decisions {
             let configured = context.clone().with_self_tsumo_horizon(decision.horizon);
-            assert_eq!(decision.action, ShantenAgent.act(&configured, &actions));
-            let diagnostic = ShantenAgent::diagnose(&configured, &actions);
+            assert_eq!(decision.action, NodocchiAgent.act(&configured, &actions));
+            let diagnostic = NodocchiAgent::diagnose(&configured, &actions);
             assert_eq!(decision.source, diagnostic.selected_source);
             assert_eq!(decision.normal_discard, diagnostic.normal_discard_action);
             assert_eq!(
@@ -447,7 +447,7 @@ mod tests {
 
     // production の鳴き判断が持つ候補。比較と同じ判断経路の結果で、この test の確認用。
     fn production_call(context: &GameContext, actions: &[LegalAction]) -> CallDecisionDiagnostic {
-        ShantenAgent
+        NodocchiAgent
             .decide(context, actions)
             .call
             .expect("Chi / Pon の候補を評価する")
@@ -477,8 +477,8 @@ mod tests {
     ) {
         for decision in &comparison.decisions {
             let configured = context.clone().with_self_tsumo_horizon(decision.horizon);
-            assert_eq!(decision.action, ShantenAgent.act(&configured, actions));
-            let production = ShantenAgent.decide(&configured, actions);
+            assert_eq!(decision.action, NodocchiAgent.act(&configured, actions));
+            let production = NodocchiAgent.decide(&configured, actions);
             assert_eq!(decision.source, production.source);
             assert_eq!(decision.normal_discard, production.normal_discard);
         }
@@ -666,7 +666,7 @@ mod tests {
                 "{reevaluation} を比較側から呼ばない"
             );
         }
-        assert_eq!(implementation.matches("ShantenAgent.decide(").count(), 1);
+        assert_eq!(implementation.matches("NodocchiAgent.decide(").count(), 1);
         assert!(implementation.contains("evaluates_pass_continuation(decision.call.as_ref())"));
         assert!(implementation.contains("pass_own_future_draws(context)"));
         assert!(implementation.contains("own_future_draws(context)"));

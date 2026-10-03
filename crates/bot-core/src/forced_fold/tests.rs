@@ -1,18 +1,18 @@
 use super::*;
 
 use crate::agent::Agent;
-use crate::agents::ShantenAgent;
+use crate::agents::NodocchiAgent;
 use crate::context::TableStateFacts;
 use crate::defense::{
     HonorSafetyRank, PlayerRonRiskEvidence, RonRiskEvidence,
     open_hand_targets_dahai_actions_by_ron_risk, select_genbutsu_fallback_action,
 };
 use crate::meld::{Meld, MeldKind};
-use crate::push_pull::{PushPullMode, decide_push_pull, push_pull_inputs_from_context};
-use crate::shanten_test_support::{
+use crate::nodocchi_test_support::{
     dahai, fold_actions, fold_under_reach_context, suited_reach_context_with_reached,
     tenpai_actions, tenpai_under_reach_context, tile,
 };
+use crate::push_pull::{PushPullMode, decide_push_pull, push_pull_inputs_from_context};
 use bot_logic::{TileId, TileType};
 
 const OPEN_HAND_FOLD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 44, 53, 60];
@@ -256,15 +256,15 @@ fn returns_the_fold_defense_discard_even_when_the_decision_is_push() {
 fn does_not_change_the_production_decision() {
     let context = tenpai_under_reach_context(None, [false, true, false, false]);
     let actions = tenpai_actions();
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
 
     let before = agent.act(&context, &actions);
-    let before_diagnostic = ShantenAgent::diagnose(&context, &actions);
+    let before_diagnostic = NodocchiAgent::diagnose(&context, &actions);
 
     let forced = detailed(&context, &actions).expect("forced fold が打牌を選ぶ");
 
     let after = agent.act(&context, &actions);
-    let after_diagnostic = ShantenAgent::diagnose(&context, &actions);
+    let after_diagnostic = NodocchiAgent::diagnose(&context, &actions);
 
     assert_eq!(before, after);
     assert_eq!(before_diagnostic, after_diagnostic);

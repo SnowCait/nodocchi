@@ -12,6 +12,10 @@ use crate::discard_selection::{
 use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
 use crate::iishanten_reach_ron_risk::iishanten_reach_ron_risk;
 use crate::kan_decision::{KanDecisionDiagnostic, evaluate_kan_decision};
+use crate::nodocchi_diagnostic::{
+    DecisionDiagnostics, DiagnosticOptions, NodocchiDecisionDiagnostic, diagnose_nodocchi_decision,
+    diagnose_nodocchi_decision_with_options,
+};
 use crate::open_hand_defense::OpenHandDefenseCategory;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, has_clear_threat,
@@ -19,17 +23,13 @@ use crate::push_pull::{
 };
 use crate::reach_decision::{ReachDecision, ReachDecisionDiagnostic, decide_reach};
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
-use crate::shanten_diagnostic::{
-    DecisionDiagnostics, DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,
-    diagnose_shanten_decision_with_options,
-};
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
 
 /// 最終 action がどの経路で選ばれたかを表す診断。プロトコル非依存。
 ///
-/// `ShantenAgent::act()` が実際に通った経路そのものであり、診断用の別判断ロジックではない。
+/// `NodocchiAgent::act()` が実際に通った経路そのものであり、診断用の別判断ロジックではない。
 ///
 /// 防御 fallback はリーチ者向けの [`Self::DefenseFallback`]、非リーチ相手向けの
 /// [`Self::OpenHandDefenseFallback`]、両者が同時にいる複合 threat 向けの
@@ -96,7 +96,7 @@ impl AgentActionSource {
     }
 }
 
-/// `ShantenAgent` が下した最終判断と、その選択経路・ログ用文脈をまとめた内部表現。
+/// `NodocchiAgent` が下した最終判断と、その選択経路・ログ用文脈をまとめた内部表現。
 ///
 /// ログや diagnostics assembly のために判断ロジックを再実行しないよう、action 選択の過程で
 /// 得た情報を保持する。
@@ -135,41 +135,41 @@ struct EarlyFoldDecision {
 }
 
 #[derive(Debug, Default)]
-pub struct ShantenAgent;
+pub struct NodocchiAgent;
 
-impl ShantenAgent {
+impl NodocchiAgent {
     /// `act()` と同じ判断を行い、その過程を構造化診断として返す。
     ///
     /// 判断経路は `act()` と共通の内部 helper を通るため、
-    /// `diagnose(...).selected_action == ShantenAgent::act(...)` が常に成り立つ。診断用の別判断
-    /// ロジックは持たない。契約の詳細は [`ShantenDecisionDiagnostic`] を参照。
+    /// `diagnose(...).selected_action == NodocchiAgent::act(...)` が常に成り立つ。診断用の別判断
+    /// ロジックは持たない。契約の詳細は [`NodocchiDecisionDiagnostic`] を参照。
     ///
     /// 解析専用の追加情報(候補ごとの形の内訳、全合法 Dahai の防御候補評価など)はこの経路
     /// でのみ構築する。通常の `act()` では計算しない。
     pub fn diagnose(
         context: &GameContext,
         legal_actions: &[LegalAction],
-    ) -> ShantenDecisionDiagnostic {
-        diagnose_shanten_decision(context, legal_actions)
+    ) -> NodocchiDecisionDiagnostic {
+        diagnose_nodocchi_decision(context, legal_actions)
     }
 
     /// 追加診断を指定して `act()` と同じ判断を行い、その過程を構造化診断として返す。
     ///
     /// `options` は解析専用の追加情報を構築するかどうかだけを決め、選択結果には影響しない。
-    /// `diagnose_with_options(...).selected_action == ShantenAgent::act(...)` は `options` に
+    /// `diagnose_with_options(...).selected_action == NodocchiAgent::act(...)` は `options` に
     /// かかわらず常に成り立つ。
     pub fn diagnose_with_options(
         context: &GameContext,
         legal_actions: &[LegalAction],
         options: DiagnosticOptions,
-    ) -> ShantenDecisionDiagnostic {
-        diagnose_shanten_decision_with_options(context, legal_actions, options)
+    ) -> NodocchiDecisionDiagnostic {
+        diagnose_nodocchi_decision_with_options(context, legal_actions, options)
     }
 
     /// `act()` と同じ判断を1回だけ行い、phase ごとの実測時間を併せて返す。
     ///
     /// 判断経路は `act()` と共通で、計測のために判断を再実行しない。計測を有効にしても
-    /// 選択結果は変わらず、`act_with_phase_timing(...).action == ShantenAgent::act(...)` が
+    /// 選択結果は変わらず、`act_with_phase_timing(...).action == NodocchiAgent::act(...)` が
     /// 常に成り立つ。
     pub fn act_with_phase_timing(
         &mut self,
@@ -813,7 +813,7 @@ pub(crate) fn log_agent_decision(decision: &AgentDecision) {
     );
 }
 
-impl Agent for ShantenAgent {
+impl Agent for NodocchiAgent {
     fn act(&mut self, ctx: &GameContext, legal_actions: &[LegalAction]) -> LegalAction {
         let decision = self.decide(ctx, legal_actions);
         log_agent_decision(&decision);
@@ -844,17 +844,7 @@ mod tests {
         select_discard_action_with_evaluation,
     };
     use crate::kan_decision::{KanDecisionReason, KanKind};
-    use crate::push_pull::{
-        PushPullReason, push_pull_inputs_from_context,
-        push_pull_inputs_from_context_with_evaluation,
-    };
-    use crate::reach_policy::ReachDecisionReason;
-    use crate::ryukyoku_decision::RyukyokuVerdict;
-    use crate::ryukyoku_decision::tests::{
-        CHIITOITSU_THREE_HAND, CHIITOITSU_TWO_HAND, KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND,
-        STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
-    };
-    use crate::shanten_test_support::{
+    use crate::nodocchi_test_support::{
         ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND, ANKAN_IISHANTEN_CONSUMED,
         ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED, ANKAN_REACH_DRAWN,
         ANKAN_REACH_HAND, ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND,
@@ -867,6 +857,16 @@ mod tests {
         tenpai_context, tenpai_dahai_actions, tenpai_under_reach_context, tile,
         unavailable_reach_meld, weak_tenpai_actions, weak_tenpai_under_reach_context,
         weak_tenpai_under_reach_context_with,
+    };
+    use crate::push_pull::{
+        PushPullReason, push_pull_inputs_from_context,
+        push_pull_inputs_from_context_with_evaluation,
+    };
+    use crate::reach_policy::ReachDecisionReason;
+    use crate::ryukyoku_decision::RyukyokuVerdict;
+    use crate::ryukyoku_decision::tests::{
+        CHIITOITSU_THREE_HAND, CHIITOITSU_TWO_HAND, KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND,
+        STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
     };
     use bot_logic::{
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
@@ -919,8 +919,8 @@ mod tests {
     #[test]
     fn phase_timing_does_not_change_the_selected_action() {
         for (ctx, actions) in phase_timing_contexts() {
-            let mut timed = ShantenAgent;
-            let mut untimed = ShantenAgent;
+            let mut timed = NodocchiAgent;
+            let mut untimed = NodocchiAgent;
             assert_eq!(
                 timed.act_with_phase_timing(&ctx, &actions).action,
                 untimed.act(&ctx, &actions),
@@ -931,7 +931,7 @@ mod tests {
 
     #[test]
     fn an_early_return_keeps_the_phases_it_never_reached_at_zero() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
 
         let hora = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Hora]);
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn an_early_return_keeps_the_normal_discard_subphases_at_zero() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
 
         let hora = agent.act_with_phase_timing(&ctx, &[dahai(0), LegalAction::Hora]);
@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn the_normal_discard_breakdown_measures_a_single_selection() {
-        let production = include_str!("shanten.rs")
+        let production = include_str!("nodocchi.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn phase_timing_runs_the_decision_only_once() {
-        let production = include_str!("shanten.rs")
+        let production = include_str!("nodocchi.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn picks_hora_first() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
         let actions = vec![dahai(0), LegalAction::Hora];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test]
     fn prefers_ryukyoku_over_dahai() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
         let actions = vec![dahai(0), LegalAction::Ryukyoku];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
@@ -1043,7 +1043,7 @@ mod tests {
 
     #[test]
     fn picks_dahai_by_discard_evaluation() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = GameContext::from_parts(
             Some(tile(116)),
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn prefers_hora_over_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
         let actions = vec![LegalAction::Reach, LegalAction::Hora];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
@@ -1070,7 +1070,7 @@ mod tests {
 
     #[test]
     fn prefers_ryukyoku_over_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
         let actions = vec![LegalAction::Reach, LegalAction::Ryukyoku];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
@@ -1078,7 +1078,7 @@ mod tests {
 
     #[test]
     fn prefers_reach_over_evaluated_dahai() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = tenpai_context(&[]);
         let actions = tenpai_actions();
         assert!(select_discard_action(&ctx, &actions).is_some());
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn reach_is_policy_choice_not_fallback() {
         // 通常打牌を選べる局面でも、選んだ打牌後の待ちが十分ならリーチを選ぶ。
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = tenpai_context(&[]);
         let actions = tenpai_actions();
 
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn picks_dahai_when_reach_absent() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::with_drawn_tile(tile(0));
         let actions = vec![dahai(0)];
         assert_eq!(agent.act(&ctx, &actions), dahai(0));
@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_first_dahai_without_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions = vec![dahai(4), dahai(0)];
         assert_eq!(agent.act(&ctx, &actions), dahai(4));
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn picks_none_when_no_dahai() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions = vec![LegalAction::None];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[test]
     fn does_not_actively_claim_chi_or_kans() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions: Vec<LegalAction> = chi_and_kan_actions()
             .into_iter()
@@ -1179,14 +1179,14 @@ mod tests {
             ])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let action = agent.act(&ctx, &actions);
         assert!(
             matches!(action, LegalAction::Dahai { .. }),
             "action: {action:?}"
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_ne!(diagnostic.selected_source, AgentActionSource::Kan);
         let kan = diagnostic.kan.expect("カン候補が並ぶ");
         assert_eq!(kan.selected, None);
@@ -1217,13 +1217,13 @@ mod tests {
             .chain([ankan_action(&ANKAN_FREE_CONSUMED)])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&ctx, &actions),
             ankan_action(&ANKAN_FREE_CONSUMED)
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
         let kan = diagnostic.kan.expect("暗槓候補");
         assert_eq!(kan.selected, Some(ankan_action(&ANKAN_FREE_CONSUMED)));
@@ -1246,14 +1246,14 @@ mod tests {
                 .chain([ankan_action(&ANKAN_REGRESSING_CONSUMED)])
                 .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let action = agent.act(&ctx, &actions);
         assert!(
             matches!(action, LegalAction::Dahai { .. }),
             "action: {action:?}"
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
         let kan = diagnostic.kan.expect("暗槓候補");
         assert_eq!(kan.selected, None);
@@ -1277,7 +1277,7 @@ mod tests {
             .chain([ankan_action(&ANKAN_REGRESSING_CONSUMED)])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&ctx, &with_kan),
             agent.act(&ctx, &without_kan),
@@ -1300,10 +1300,10 @@ mod tests {
             .chain([ankan_action(&ANKAN_REACH_CONSUMED), LegalAction::Reach])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Reach);
         // リーチを採用した局面ではカン判断そのものを行わない。
         assert_eq!(diagnostic.kan, None);
@@ -1346,14 +1346,14 @@ mod tests {
             .chain([ankan_action(&ANKAN_IISHANTEN_CONSUMED)])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&ctx, &with_kan),
             agent.act(&ctx, &without_kan),
             "打点を比較できない暗槓では通常打牌を維持する"
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &with_kan);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &with_kan);
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
         let kan = diagnostic.kan.expect("暗槓候補");
         assert_eq!(kan.selected, None);
@@ -1372,13 +1372,13 @@ mod tests {
             .chain([kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED)])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&ctx, &actions),
             kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED)
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
         let kan = diagnostic.kan.expect("加槓候補");
         assert_eq!(
@@ -1410,14 +1410,14 @@ mod tests {
             .chain([kakan_action(KAKAN_FREE_DRAWN, &KAKAN_FREE_CONSUMED)])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let action = agent.act(&ctx, &actions);
         assert!(
             matches!(action, LegalAction::Dahai { .. }),
             "action: {action:?}"
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_ne!(diagnostic.selected_source, AgentActionSource::Kan);
         assert_eq!(
             diagnostic.kan.map(|kan| kan.reason),
@@ -1435,9 +1435,9 @@ mod tests {
             LegalAction::None,
         ];
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
-        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).kan, None);
+        assert_eq!(NodocchiAgent::diagnose(&ctx, &actions).kan, None);
     }
 
     // Hora は暗槓より優先する。
@@ -1456,9 +1456,9 @@ mod tests {
             LegalAction::None,
         ];
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
-        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).kan, None);
+        assert_eq!(NodocchiAgent::diagnose(&ctx, &actions).kan, None);
     }
 
     // 自分のリーチ後でも、合法性は legal_actions が source of truth のまま扱う。bot-core 側で
@@ -1477,7 +1477,7 @@ mod tests {
         let without_kan = vec![tsumogiri.clone()];
         let with_kan = vec![tsumogiri.clone(), ankan_action(&ANKAN_FREE_CONSUMED)];
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 合法手に Ankan が無ければ従来どおりツモ切り。
         assert_eq!(agent.act(&ctx, &without_kan), tsumogiri);
         // 提示された Ankan は待ちを変えない前提で、そのまま暗槓できる。
@@ -1486,14 +1486,14 @@ mod tests {
             ankan_action(&ANKAN_FREE_CONSUMED)
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &with_kan);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &with_kan);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Kan);
         assert_eq!(diagnostic.reach.map(|reach| reach.selected), Some(None));
         assert_eq!(
             diagnostic.kan.map(|kan| kan.reason),
             Some(KanDecisionReason::EligibleAnkanAfterOwnReach)
         );
-        assert_eq!(ShantenAgent::diagnose(&ctx, &without_kan).kan, None);
+        assert_eq!(NodocchiAgent::diagnose(&ctx, &without_kan).kan, None);
     }
 
     // 自己リーチ後は降りようがないので、他家リーチで押し引きが Fold になっても暗槓する。
@@ -1511,13 +1511,13 @@ mod tests {
         let tsumogiri = dahai(ANKAN_FREE_DRAWN);
         let actions = vec![tsumogiri.clone(), ankan_action(&ANKAN_FREE_CONSUMED)];
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(
             agent.act(&ctx, &actions),
             ankan_action(&ANKAN_FREE_CONSUMED)
         );
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(
             diagnostic.push_pull_decision.map(|decision| decision.mode),
             Some(PushPullMode::Fold)
@@ -1536,7 +1536,7 @@ mod tests {
                 .into_iter()
                 .chain([ankan_action(&ANKAN_FREE_CONSUMED)])
                 .collect();
-        let before = ShantenAgent::diagnose(&before_reach, &before_reach_actions);
+        let before = NodocchiAgent::diagnose(&before_reach, &before_reach_actions);
         assert_ne!(before.selected_source, AgentActionSource::Kan);
         assert_eq!(
             before.kan.map(|kan| kan.reason),
@@ -1560,9 +1560,9 @@ mod tests {
             dahai(ANKAN_FREE_DRAWN),
         ];
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
-        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).kan, None);
+        assert_eq!(NodocchiAgent::diagnose(&ctx, &actions).kan, None);
     }
 
     // 他家リーチ中は暗槓しない。新ドラがリーチ者の打点へ与える影響を既存評価で測れない。
@@ -1580,7 +1580,7 @@ mod tests {
             .chain([ankan_action(&ANKAN_FREE_CONSUMED)])
             .collect();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let action = agent.act(&ctx, &actions);
         assert!(
             matches!(action, LegalAction::Dahai { .. }),
@@ -1590,7 +1590,7 @@ mod tests {
 
     #[test]
     fn does_not_claim_pon_outside_the_limited_conditions() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions: Vec<LegalAction> = chi_and_kan_actions()
             .into_iter()
@@ -1607,14 +1607,14 @@ mod tests {
 
     #[test]
     fn falls_back_to_none_for_empty_actions() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::default();
         assert_eq!(agent.act(&ctx, &[]), LegalAction::None);
     }
 
     #[test]
     fn uses_visible_tiles_for_discard_evaluation() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36];
         let hand: Vec<_> = hand_values.iter().map(|&value| tile(value)).collect();
         let mut visible = hand.clone();
@@ -1641,7 +1641,7 @@ mod tests {
     }
 
     fn reach_diagnostic(ctx: &GameContext, actions: &[LegalAction]) -> ReachDecisionDiagnostic {
-        ShantenAgent::diagnose(ctx, actions)
+        NodocchiAgent::diagnose(ctx, actions)
             .reach
             .expect("リーチを検討している")
     }
@@ -1673,11 +1673,11 @@ mod tests {
         // 品質の高い E 単騎に取るため 1s を切る。診断は production comparator の理由を載せる。
         let ctx = chiitoitsu_tanki_context();
         let actions = chiitoitsu_tanki_dahai_actions();
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&ctx, &actions);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
         assert_eq!(acted, dahai(CHIITOITSU_TANKI_DISCARD));
         assert_eq!(diagnostic.selected_action, acted);
@@ -1704,7 +1704,7 @@ mod tests {
 
     #[test]
     fn follows_discard_selection_for_same_tile_type() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::from_parts(Some(tile(16)), vec![tile(17)]);
         let actions = vec![dahai(17), dahai(16)];
 
@@ -1715,7 +1715,7 @@ mod tests {
 
     #[test]
     fn prefers_hora_over_genbutsu_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::Hora];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
@@ -1723,7 +1723,7 @@ mod tests {
 
     #[test]
     fn prefers_ryukyoku_over_genbutsu_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::Ryukyoku];
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
@@ -1731,7 +1731,7 @@ mod tests {
 
     #[test]
     fn prefers_genbutsu_fallback_over_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(16)];
         assert_eq!(agent.act(&ctx, &actions), dahai(16));
@@ -1739,7 +1739,7 @@ mod tests {
 
     #[test]
     fn fold_iishanten_prefers_genbutsu_fallback_over_normal_discard() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 単独の子リーチに対する一向聴。受け入れが広くても押さず、共通現物 16(5m) を
         // 通常打牌より優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
@@ -1760,7 +1760,7 @@ mod tests {
 
     #[test]
     fn fold_without_common_genbutsu_falls_through_to_normal_discard() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 他家リーチ中でも合法 Dahai に共通現物が無い Fold 局面。Reach は抑制し通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
@@ -1773,7 +1773,7 @@ mod tests {
 
     #[test]
     fn keeps_normal_behavior_without_opponent_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 他家リーチが無ければ、河の 16(5m) と同じ現物相当の 17(5m) が合法でも Reach を選ぶ。
         let ctx = tenpai_under_reach_context(None, [false; 4]);
         let actions = vec![LegalAction::Reach, dahai(TENPAI_DRAWN), dahai(17)];
@@ -1782,7 +1782,7 @@ mod tests {
 
     #[test]
     fn does_not_claim_melds_even_under_opponent_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 他家リーチ中でも副露・カンは積極選択しない。共通現物も無い局面。
         let ctx = opponent_reach_context(None, &[]);
         let actions = vec![
@@ -1800,7 +1800,7 @@ mod tests {
 
     #[test]
     fn prefers_genbutsu_fallback_over_none() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::None];
         assert_eq!(agent.act(&ctx, &actions), dahai(16));
@@ -1808,7 +1808,7 @@ mod tests {
 
     #[test]
     fn prefers_genbutsu_fallback_over_honor_safety_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物 16(5m) と字牌 108(東) が両方合法でも、現物を優先する。
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(108), dahai(16)];
@@ -1817,7 +1817,7 @@ mod tests {
 
     #[test]
     fn picks_safest_honor_dahai_when_no_common_genbutsu() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物なし。東は2枚見え、南は0枚見え。より安全な東を切る。
         let ctx = opponent_reach_context_with_visible(Some(112), &[], &[108, 109]);
         let actions = vec![dahai(112), dahai(108)];
@@ -1826,7 +1826,7 @@ mod tests {
 
     #[test]
     fn prefers_honor_safety_fallback_over_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物なし。数牌と字牌が合法なら Reach より字牌を切る。
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(108)];
@@ -1835,7 +1835,7 @@ mod tests {
 
     #[test]
     fn prefers_honor_safety_fallback_over_discard_evaluation() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 通常評価では別牌が選ばれ得る手牌だが、共通現物がなければ字牌 108(東) を優先する。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = opponent_reach_context(Some(108), &hand_values);
@@ -1849,7 +1849,7 @@ mod tests {
 
     #[test]
     fn fold_without_common_genbutsu_or_honor_falls_through_to_normal_discard() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物も字牌 Dahai もなく、数牌も全て NoSafety の Fold 局面。
         // リーチ者の河は 16(5m) のみで、0(1m) / 56(6p) は無スジ・壁なしの NoSafety。
         // Reach を抑制し、防御牌が無いので通常打牌へ進む。
@@ -1864,7 +1864,7 @@ mod tests {
 
     #[test]
     fn does_not_use_honor_safety_fallback_without_opponent_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 他家リーチが無ければ、字牌(116 = 北)が合法でも従来の Reach を選ぶ。
         let ctx = tenpai_context(&[]);
         let actions = vec![LegalAction::Reach, dahai(TENPAI_DRAWN)];
@@ -1873,7 +1873,7 @@ mod tests {
 
     #[test]
     fn honor_safety_fallback_ignores_number_dahai() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 数牌のみで字牌がなければ字牌 fallback は発動しない。Fold だが安全牌が無いので通常打牌へ進む。
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(56)];
@@ -1886,7 +1886,7 @@ mod tests {
 
     #[test]
     fn honor_safety_fallback_ignores_non_dahai_honor_actions() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 字牌の Pon はあっても字牌 Dahai が無ければ fallback は発動しない。
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![
@@ -1901,7 +1901,7 @@ mod tests {
 
     #[test]
     fn honor_safety_fallback_preserves_order_within_same_rank() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 東も南も0枚見えで同安全度なら legal_actions の元順序を保つ。
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(112), dahai(108)];
@@ -1929,7 +1929,7 @@ mod tests {
 
     #[test]
     fn honor_safety_fallback_breaks_same_rank_ties_by_opponent_honor_value() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // player 1 / 3 の複数リーチで legacy path を通す。oya=3 では両者にとって N は
         // GuestWind、C は SingleValueHonor のままなので、同じ HonorSafetyRank を N が制する。
         let ctx = multiple_reach_wind_context(3, Some(0));
@@ -1975,7 +1975,7 @@ mod tests {
 
     #[test]
     fn honor_safety_fallback_keeps_visible_count_over_opponent_honor_value() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = GameContext::from_parts_with_table_state(
             Some(tile(0)),
             vec![],
@@ -1993,7 +1993,7 @@ mod tests {
 
     #[test]
     fn prefers_genbutsu_fallback_over_suited_safety_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物 16(5m) と NoChance 数牌 4(2m) が両方合法でも、現物を優先する。
         let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[16]);
         let actions = vec![dahai(4), dahai(16)];
@@ -2002,7 +2002,7 @@ mod tests {
 
     #[test]
     fn prefers_honor_safety_fallback_over_suited_safety_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物なし。字牌 108(東) と NoChance 数牌 4(2m) が合法なら字牌を優先する。
         let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
         let actions = vec![dahai(108), dahai(4)];
@@ -2011,7 +2011,7 @@ mod tests {
 
     #[test]
     fn picks_no_chance_suited_dahai_when_no_genbutsu_or_honor() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物も字牌もなし。4m を4枚見えにして経路 [3m,4m] を Blocked にし 2m を NoChance。
         // 無スジ 0(1m) より NoChance 4(2m) を選ぶ。
         let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
@@ -2021,7 +2021,7 @@ mod tests {
 
     #[test]
     fn picks_one_chance_suited_dahai_when_no_genbutsu_or_honor() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 複数リーチの legacy path。共通現物も字牌もなく、4m を3枚見えにして経路
         // [3m,4m] を OneChance にする。無スジ 1m より OneChance 2m を選ぶ。
         let ctx = suited_reach_context_with_reached(
@@ -2051,7 +2051,7 @@ mod tests {
 
     #[test]
     fn picks_suji_suited_dahai_when_no_genbutsu_or_honor() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物も字牌もなし。リーチ者の河に 12(4m) があり 0(1m) はスジ。無スジ 16(5m) より選ぶ。
         let ctx = suited_reach_context(Some(0), &[], &[], &[12]);
         let actions = vec![dahai(16), dahai(0)];
@@ -2060,7 +2060,7 @@ mod tests {
 
     #[test]
     fn suited_safety_fallback_follows_safety_order() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 経路壁で安全度を作る。1p は 2p 4枚で NoChance、9p は 8p 3枚で OneChance、
         // 1s は両リーチ者の 4s 河でスジ(Suji)、5s は無スジ・壁なし(NoSafety)。複数リーチの
         // legacy path で最も安全な NoChance を選ぶ。
@@ -2107,7 +2107,7 @@ mod tests {
 
     #[test]
     fn fold_without_safe_suited_falls_through_to_normal_discard() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // Fold 局面で共通現物も字牌もなく数牌が全て NoSafety なら、防御 fallback は無い。
         // Reach は抑制し、防御牌がないことを理由に失敗させず通常打牌へ進む。
         let ctx = suited_reach_context(Some(0), &[], &[], &[]);
@@ -2121,7 +2121,7 @@ mod tests {
 
     #[test]
     fn does_not_use_suited_safety_fallback_without_opponent_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 他家リーチが無ければ、河に 16(5m) があり 4(2m) がスジ相当でも従来の Reach を選ぶ。
         let ctx = tenpai_under_reach_context(None, [false; 4]);
         let actions = vec![LegalAction::Reach, dahai(TENPAI_DRAWN), dahai(4)];
@@ -2130,7 +2130,7 @@ mod tests {
 
     #[test]
     fn prefers_suited_safety_fallback_over_reach() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 共通現物も字牌もなし。4m を4枚見えにして 2m を NoChance にすると Reach より優先する。
         let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(4)];
@@ -2139,7 +2139,7 @@ mod tests {
 
     #[test]
     fn push_prefers_normal_discard_over_the_defense_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 強いテンパイで単独の子リーチに対しては Push。Reach が合法でなければ通常打牌へ進み、
         // 現物 17(5m) より通常打牌を優先する。
         let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
@@ -2155,7 +2155,7 @@ mod tests {
 
     #[test]
     fn suited_safety_fallback_ignores_non_dahai_actions() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 数牌の Pon はあっても数牌 Dahai が無ければ数牌防御 fallback は発動しない。
         let ctx = suited_reach_context(Some(0), &[], &[4, 5, 6, 7], &[]);
         let actions = vec![
@@ -2170,7 +2170,7 @@ mod tests {
 
     #[test]
     fn push_tenpai_against_single_non_dealer_reaches() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 単独の子リーチに対するテンパイ。decide_push_pull は Push。
         // Reach が合法でリーチ判断も Eligible なら、現物があっても Reach を選ぶ。
         let ctx = tenpai_under_reach_context(None, [false, true, false, false]);
@@ -2188,7 +2188,7 @@ mod tests {
 
     #[test]
     fn push_strong_tenpai_against_dealer_reach_reaches() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 親リーチでも強いテンパイなら押す。Push の順序どおり Reach を最優先する。
         let ctx = tenpai_under_reach_context(Some(1), [false, true, false, false]);
         let inputs = push_pull_inputs_from_context(&ctx, &tenpai_actions());
@@ -2202,7 +2202,7 @@ mod tests {
 
     #[test]
     fn push_strong_tenpai_against_multiple_reach_reaches() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 複数リーチでも強いテンパイなら押す。
         let ctx = tenpai_under_reach_context(None, [false, true, true, false]);
         let inputs = push_pull_inputs_from_context(&ctx, &tenpai_actions());
@@ -2216,7 +2216,7 @@ mod tests {
 
     #[test]
     fn fold_weak_tenpai_against_a_reach_prefers_the_defense_fallback() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 待ち枚数が足りないテンパイは押さない。Reach が合法でも抑制し、現物を優先する。
         let ctx = weak_tenpai_under_reach_context();
         let mut actions = vec![LegalAction::Reach];
@@ -2258,7 +2258,7 @@ mod tests {
 
     #[test]
     fn fold_prefers_defense_fallback_over_normal_discard() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 二向聴以上で他家リーチを受ける Fold 局面。防御 fallback(現物 5s)と通常打牌が異なり、
         // Fold では防御 fallback を通常打牌より優先する。
         let ctx = fold_under_reach_context();
@@ -2340,7 +2340,7 @@ mod tests {
         );
 
         // Agent は合法候補(ツモ切り 3p)を切る。
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &actions), dahai(drawn));
     }
 
@@ -2349,7 +2349,7 @@ mod tests {
 
     #[test]
     fn decide_reports_hora_source() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::Hora];
         let decision = agent.decide(&ctx, &actions);
@@ -2362,7 +2362,7 @@ mod tests {
 
     #[test]
     fn decide_reports_ryukyoku_source() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![dahai(16), LegalAction::Ryukyoku];
         let decision = agent.decide(&ctx, &actions);
@@ -2374,7 +2374,7 @@ mod tests {
 
     #[test]
     fn decide_reports_reach_source_on_push() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 他家リーチなし → Push。選んだ打牌後のテンパイが十分な待ちを持つなら Reach を選ぶ。
         let ctx = tenpai_context(&[]);
         let actions = tenpai_actions();
@@ -2390,7 +2390,7 @@ mod tests {
 
     #[test]
     fn decide_reports_normal_discard_source_on_push() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 他家リーチなし → Push。Reach が無ければ通常打牌。
         let hand_values = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 40, 44, 89];
         let ctx = GameContext::from_parts(
@@ -2423,7 +2423,7 @@ mod tests {
         let mut kan = None;
         let mut diagnostics = DecisionDiagnostics::disabled();
 
-        let (action, source) = ShantenAgent
+        let (action, source) = NodocchiAgent
             .select_action_for_push_pull_mode(
                 PushPullMode::Neutral,
                 &ctx,
@@ -2444,7 +2444,7 @@ mod tests {
 
     #[test]
     fn decide_reports_defense_fallback_genbutsu_source_on_fold() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 二向聴以上の Fold 局面。防御 fallback(現物 5s)を採用し、通常打牌とは異なる。
         let ctx = fold_under_reach_context();
         let actions = fold_actions();
@@ -2471,7 +2471,7 @@ mod tests {
 
     #[test]
     fn defense_trace_does_not_collect_exact_evidence_for_genbutsu() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = fold_under_reach_context();
         let actions = fold_actions();
         let diagnostics = DecisionDiagnostics::disabled();
@@ -2504,7 +2504,7 @@ mod tests {
 
     #[test]
     fn defense_trace_reuses_exact_evidence_when_selection_requires_it() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 共通現物なし。production selector 自体が exact R/T を比較して 2m を選ぶ。
         let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
         let actions = vec![dahai(0), dahai(4)];
@@ -2540,7 +2540,7 @@ mod tests {
     // 実牌姿での防御は河・visible の正確な再現が必要なため、pure な選択経路として構築する。
     #[test]
     fn decide_reports_exact_ron_risk_defense_source_on_single_reach_fold() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 共通現物なしの単独リーチ。ツモ 1m(0) だけが手牌評価対象なので通常打牌は 1m、
         // exact defense fallback は R の小さい 2m。
         let ctx = suited_reach_context(Some(0), &[], &[12, 13, 14, 15], &[]);
@@ -2565,7 +2565,7 @@ mod tests {
 
     #[test]
     fn early_fold_against_a_reach_skips_the_normal_discard_selection() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 明確な threat に対する二向聴以上。防御 fallback が現物を選べるので、最終 action に
         // 使わない通常打牌選択そのものを行わない。
         let ctx = fold_under_reach_context();
@@ -2603,7 +2603,7 @@ mod tests {
 
     #[test]
     fn iishanten_against_a_reach_keeps_the_expected_self_tsumo_value_policy() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 単独の子リーチに対する一向聴。early Fold は適用せず、通常打牌選択が求めた
         // ExpectedSelfTsumoValue で押し引きを決める既存 policy をそのまま通す。
         let hand_values = [0, 4, 8, 12, 13, 20, 24, 28, 32, 36, 40, 44, 89];
@@ -2648,7 +2648,7 @@ mod tests {
 
     #[test]
     fn tenpai_against_a_reach_keeps_the_strong_tenpai_policy() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // 親リーチに対する強いテンパイ。early Fold は適用せず、通常打牌選択と強いテンパイ判定を
         // 通してリーチを選ぶ。
         let ctx = tenpai_under_reach_context(Some(1), [false, true, false, false]);
@@ -2719,7 +2719,7 @@ mod tests {
         let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
         assert_best_shanten_after_discard(&ctx, &actions, 2);
 
-        let decision = ShantenAgent.decide(&ctx, &actions);
+        let decision = NodocchiAgent.decide(&ctx, &actions);
         assert_eq!(
             decision.push_pull,
             Some(PushPullDecision {
@@ -2756,7 +2756,7 @@ mod tests {
         assert_best_shanten_after_discard(&ctx, &actions, 2);
         assert!(best_shanten_cohort(&ctx, &actions).contains(&TileType::new(9).unwrap()));
 
-        let decision = ShantenAgent.decide(&ctx, &actions);
+        let decision = NodocchiAgent.decide(&ctx, &actions);
         assert_eq!(
             decision.push_pull,
             Some(PushPullDecision {
@@ -2782,7 +2782,7 @@ mod tests {
         );
 
         // 通常打牌選択へ進んだので、2向聴の production comparator も評価している。
-        let timed = ShantenAgent.act_with_phase_timing(&ctx, &actions);
+        let timed = NodocchiAgent.act_with_phase_timing(&ctx, &actions);
         assert_eq!(timed.action, decision.action);
         assert!(timed.two_shanten_self_tsumo_candidates().len() > 0);
     }
@@ -2796,7 +2796,7 @@ mod tests {
         let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
         assert_best_shanten_after_discard(&ctx, &actions, 2);
 
-        let decision = ShantenAgent.decide(&ctx, &actions);
+        let decision = NodocchiAgent.decide(&ctx, &actions);
         let fold = PushPullDecision {
             mode: PushPullMode::Fold,
             reason: PushPullReason::TwoOrMoreShantenAgainstHighOpenHand,
@@ -2809,7 +2809,7 @@ mod tests {
         );
 
         // 2向聴の production comparator (Progress / Full) を評価しない。
-        let timed = ShantenAgent.act_with_phase_timing(&ctx, &actions);
+        let timed = NodocchiAgent.act_with_phase_timing(&ctx, &actions);
         assert_eq!(timed.action, decision.action);
         assert_eq!(timed.two_shanten_self_tsumo_candidates().len(), 0);
         assert_eq!(
@@ -2855,7 +2855,7 @@ mod tests {
         assert_eq!(one_man.min_shanten_after_discard(), 3);
         assert!(!best_shanten_cohort(&ctx, &actions).contains(&TileType::new(0).unwrap()));
 
-        let decision = ShantenAgent.decide(&ctx, &actions);
+        let decision = NodocchiAgent.decide(&ctx, &actions);
         assert_eq!(
             decision.push_pull,
             Some(PushPullDecision {
@@ -2866,7 +2866,7 @@ mod tests {
         assert_eq!(decision.normal_discard, None);
         assert_eq!(decision.action, dahai(0));
 
-        let timed = ShantenAgent.act_with_phase_timing(&ctx, &actions);
+        let timed = NodocchiAgent.act_with_phase_timing(&ctx, &actions);
         assert_eq!(timed.two_shanten_self_tsumo_candidates().len(), 0);
     }
 
@@ -2877,7 +2877,7 @@ mod tests {
         let actions = shanten_fold_actions(&THREE_SHANTEN_HAND);
         assert_best_shanten_after_discard(&ctx, &actions, 3);
 
-        let decision = ShantenAgent.decide(&ctx, &actions);
+        let decision = NodocchiAgent.decide(&ctx, &actions);
         assert_eq!(
             decision.push_pull,
             Some(PushPullDecision {
@@ -2911,7 +2911,7 @@ mod tests {
             let actions = shanten_fold_actions(&TWO_SHANTEN_HAND);
             assert_best_shanten_after_discard(&ctx, &actions, 2);
 
-            let decision = ShantenAgent.decide(&ctx, &actions);
+            let decision = NodocchiAgent.decide(&ctx, &actions);
             assert_eq!(
                 decision.push_pull,
                 Some(PushPullDecision {
@@ -2929,7 +2929,7 @@ mod tests {
 
     #[test]
     fn decide_falls_through_to_normal_discard_when_fold_has_no_defense() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         // Fold だが共通現物・字牌・数牌 safety がいずれも無い局面。通常打牌へ進む。
         let ctx =
             suited_reach_context_with_reached(Some(0), &[], &[], &[], [false, true, true, false]);
@@ -2957,7 +2957,7 @@ mod tests {
     fn legal_dahai_fallback_prefers_black_five() {
         // 手牌評価が作れず(手牌なし)、他家リーチも無い局面。通常打牌も防御 fallback も None で
         // LegalDahaiFallback へ落ちる。合法 Dahai [赤5m, 黒5m] なら黒5m を返す。
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions = vec![dahai(16), dahai(17)];
         let decision = agent.decide(&ctx, &actions);
@@ -2967,7 +2967,7 @@ mod tests {
 
     #[test]
     fn legal_dahai_fallback_prefers_black_five_when_reversed() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions = vec![dahai(17), dahai(16)];
         let decision = agent.decide(&ctx, &actions);
@@ -2977,7 +2977,7 @@ mod tests {
 
     #[test]
     fn legal_dahai_fallback_keeps_red_five_when_only_red() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions = vec![dahai(16)];
         let decision = agent.decide(&ctx, &actions);
@@ -2988,7 +2988,7 @@ mod tests {
     #[test]
     fn legal_dahai_fallback_keeps_leading_tile_type() {
         // 合法 Dahai [1p, 赤5m, 黒5m] では先頭牌種 1p を維持する。黒5優先で 5m を前へ出さない。
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = GameContext::default();
         let actions = vec![dahai(36), dahai(16), dahai(17)];
         let decision = agent.decide(&ctx, &actions);
@@ -2998,7 +2998,7 @@ mod tests {
 
     #[test]
     fn decide_reports_none_source_for_empty_actions() {
-        let agent = ShantenAgent;
+        let agent = NodocchiAgent;
         let ctx = GameContext::default();
         let decision = agent.decide(&ctx, &[]);
         assert_eq!(decision.action, LegalAction::None);
@@ -3008,10 +3008,10 @@ mod tests {
     fn diagnose_matching_act(
         ctx: &GameContext,
         actions: &[LegalAction],
-    ) -> ShantenDecisionDiagnostic {
-        let mut agent = ShantenAgent;
+    ) -> NodocchiDecisionDiagnostic {
+        let mut agent = NodocchiAgent;
         let expected = agent.act(ctx, actions);
-        let diagnostic = ShantenAgent::diagnose(ctx, actions);
+        let diagnostic = NodocchiAgent::diagnose(ctx, actions);
         assert_eq!(diagnostic.selected_action, expected);
         assert_eq!(
             diagnostic.selected_source,
@@ -3402,10 +3402,10 @@ mod tests {
         let ctx = reaction.context();
         let actions = reaction.actions();
 
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &actions), reaction.call());
 
-        let decision = ShantenAgent.decide(&ctx, &actions);
+        let decision = NodocchiAgent.decide(&ctx, &actions);
         assert_eq!(decision.source, AgentActionSource::Call);
         // 鳴き後候補の Push/Pull は call 診断内に保持する。現在局面の通常打牌・Push/Pull・防御は
         // 鳴きの採用後には進まないため、AgentDecision の各フィールドには持たない。
@@ -3413,7 +3413,7 @@ mod tests {
         assert_eq!(decision.push_pull_inputs, None);
         assert_eq!(decision.normal_discard, None);
 
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Call);
         assert_eq!(diagnostic.normal_discard, None);
         assert_eq!(diagnostic.push_pull_decision, None);
@@ -4107,7 +4107,7 @@ mod tests {
 
     #[test]
     fn prefers_hora_over_an_eligible_call() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let reaction = dragon_pon_reaction();
         let ctx = reaction.context();
 
@@ -4116,7 +4116,7 @@ mod tests {
             vec![reaction.call(), LegalAction::Hora, LegalAction::None],
         ] {
             assert_eq!(agent.act(&ctx, &actions), LegalAction::Hora);
-            let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+            let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
             assert_eq!(diagnostic.selected_source, AgentActionSource::Hora);
             // Hora で早期終了するので鳴きは検討していない。
             assert_eq!(diagnostic.call, None);
@@ -4125,13 +4125,13 @@ mod tests {
 
     #[test]
     fn prefers_ryukyoku_over_an_eligible_call() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let reaction = dragon_pon_reaction();
         let ctx = reaction.context();
         let actions = vec![reaction.call(), LegalAction::Ryukyoku, LegalAction::None];
 
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Ryukyoku);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         assert_eq!(diagnostic.selected_source, AgentActionSource::Ryukyoku);
         assert_eq!(diagnostic.call, None);
     }
@@ -4139,7 +4139,7 @@ mod tests {
     #[test]
     fn does_not_claim_kans_in_an_eligible_pon_context() {
         // Pon が成立する局面でも、Daiminkan / Ankan / Kakan は今回の対象外なので選ばない。
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = dragon_pon_reaction().context();
         let actions: Vec<LegalAction> = chi_and_kan_actions()
             .into_iter()
@@ -4148,14 +4148,14 @@ mod tests {
             .collect();
 
         assert_eq!(agent.act(&ctx, &actions), LegalAction::None);
-        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).call, None);
+        assert_eq!(NodocchiAgent::diagnose(&ctx, &actions).call, None);
     }
 
     #[test]
     fn call_diagnostic_is_absent_without_a_legal_chi_or_pon() {
         let ctx = dragon_pon_reaction().context();
         let actions = vec![LegalAction::None];
-        assert_eq!(ShantenAgent::diagnose(&ctx, &actions).call, None);
+        assert_eq!(NodocchiAgent::diagnose(&ctx, &actions).call, None);
     }
 
     #[test]
@@ -5044,7 +5044,7 @@ mod tests {
         assert_eq!(diagnostic.selected_source, AgentActionSource::NormalDiscard);
         assert_eq!(diagnostic.selected_action, normal_discard);
         assert_ne!(diagnostic.selected_action, defense_fallback);
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         assert_eq!(agent.act(&ctx, &hand_actions), normal_discard);
 
         // 合法 Reach がある場合も、Push によって攻撃継続側の既存 priority (Reach → 通常打牌) を使う。
@@ -5375,11 +5375,11 @@ mod tests {
             &[],
         );
         let actions = opponent_meld_actions();
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&ctx, &actions);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
         let inputs = diagnostic.push_pull_inputs.expect("押し引き入力がある");
         let offense = inputs.offense.expect("offense がある");
@@ -5583,11 +5583,11 @@ mod tests {
         // act() / diagnose() / 追加診断つき diagnose() の選択結果は必ず一致する。
         let ctx = combined_threat_fold_context(&[33], &[33]);
         let actions = open_hand_fold_actions();
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let acted = agent.act(&ctx, &actions);
-        let diagnostic = ShantenAgent::diagnose(&ctx, &actions);
+        let diagnostic = NodocchiAgent::diagnose(&ctx, &actions);
         let with_lookahead =
-            ShantenAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
+            NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD);
 
         assert_eq!(diagnostic.selected_action, acted);
         assert_eq!(with_lookahead.selected_action, acted);
@@ -5628,14 +5628,14 @@ mod tests {
         ctx: &GameContext,
         actions: &[LegalAction],
     ) -> RyukyokuDecisionDiagnostic {
-        ShantenAgent::diagnose(ctx, actions)
+        NodocchiAgent::diagnose(ctx, actions)
             .ryukyoku
             .expect("九種九牌を検討している")
     }
 
     #[test]
     fn prefers_hora_over_ryukyoku() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = context_from_hand(&KOKUSHI_FOUR_HAND);
         let mut actions = ryukyoku_actions(&ctx);
         actions.push(LegalAction::Hora);
@@ -5650,7 +5650,7 @@ mod tests {
 
     #[test]
     fn keeps_the_existing_selection_without_a_legal_ryukyoku() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         let ctx = context_from_hand(&KOKUSHI_FOUR_HAND);
         let actions = ryukyoku_dahai_actions(&ctx);
 
@@ -5666,7 +5666,7 @@ mod tests {
 
     #[test]
     fn declares_ryukyoku_when_every_shanten_is_too_far() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         for hand in [
             &KOKUSHI_FOUR_HAND,
             &STANDARD_THREE_HAND,
@@ -5693,7 +5693,7 @@ mod tests {
 
     #[test]
     fn continues_past_ryukyoku_when_any_shanten_is_close_enough() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         for hand in [
             &STANDARD_TWO_HAND,
             &CHIITOITSU_TWO_HAND,
@@ -5717,7 +5717,7 @@ mod tests {
             let diagnostic = diagnose_matching_act(&ctx, &actions);
             assert_eq!(
                 diagnostic.selected_source,
-                ShantenAgent::diagnose(&ctx, &without_ryukyoku).selected_source,
+                NodocchiAgent::diagnose(&ctx, &without_ryukyoku).selected_source,
                 "{hand:?}"
             );
         }
@@ -5742,7 +5742,7 @@ mod tests {
 
     #[test]
     fn keeps_ryukyoku_when_the_current_hand_cannot_be_evaluated() {
-        let mut agent = ShantenAgent;
+        let mut agent = NodocchiAgent;
         // 自摸牌が分からない context では自摸後手牌を復元できない。向聴数を推測して続行せず、
         // 従来どおり Ryukyoku を選ぶ。
         let evaluable = context_from_hand(&KOKUSHI_THREE_HAND);
@@ -5761,7 +5761,7 @@ mod tests {
 
     mod iishanten_reach_ron_risk_observation {
         use super::*;
-        use crate::shanten_test_support::{
+        use crate::nodocchi_test_support::{
             SINGLE_REACH_IISHANTEN_DRAWN, SINGLE_REACH_IISHANTEN_HAND, dahai_actions_for,
             single_reach_iishanten_context, single_reach_iishanten_push_context,
         };
@@ -5769,7 +5769,7 @@ mod tests {
         // 単独リーチ × 1向聴の exact R/T は観測値で、押し引きの結論も最終 action も変えない。
         #[test]
         fn the_exact_summary_does_not_change_the_push_pull_decision_or_the_final_action() {
-            let mut agent = ShantenAgent;
+            let mut agent = NodocchiAgent;
             let actions =
                 dahai_actions_for(&SINGLE_REACH_IISHANTEN_HAND, SINGLE_REACH_IISHANTEN_DRAWN);
             let contexts = [
@@ -5826,7 +5826,7 @@ mod tests {
 
         #[test]
         fn only_the_log_reads_the_exact_summary() {
-            let production = include_str!("shanten.rs")
+            let production = include_str!("nodocchi.rs")
                 .split("#[cfg(test)]")
                 .next()
                 .unwrap();

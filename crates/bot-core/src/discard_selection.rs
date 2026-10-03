@@ -3391,14 +3391,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::context::TableStateFacts;
     use crate::decision_timing::ForwardMetricsPhaseDurations;
+    use crate::nodocchi_test_support::{
+        tenpai_actions, tenpai_context, three_shanten_progress_regression_context,
+    };
     use crate::push_pull::{
         PushPullDecision, PushPullMode, PushPullOffenseState, PushPullReason, decide_push_pull,
         push_pull_inputs_from_threat_facts,
     };
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
-    use crate::shanten_test_support::{
-        tenpai_actions, tenpai_context, three_shanten_progress_regression_context,
-    };
     use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{
@@ -4376,7 +4376,7 @@ pub(crate) mod tests {
 
         // 選ばれた named 役満候補には継続 timing が付かず、後段の base policy も従来どおり。
         assert_eq!(result.selection.tenpai_reach_timing, None);
-        let reach = crate::agents::ShantenAgent::diagnose_with_options(
+        let reach = crate::agents::NodocchiAgent::diagnose_with_options(
             &context,
             &actions,
             crate::agents::DiagnosticOptions::NONE,
@@ -4471,7 +4471,7 @@ pub(crate) mod tests {
         let selection = select_discard_action_with_evaluation(&context, &actions);
         assert_eq!(selection.tenpai_reach_timing, Some(comparator_timing));
 
-        let diagnostic = crate::agents::ShantenAgent::diagnose_with_options(
+        let diagnostic = crate::agents::NodocchiAgent::diagnose_with_options(
             &context,
             &actions,
             crate::agents::DiagnosticOptions::NONE,
@@ -4500,7 +4500,7 @@ pub(crate) mod tests {
         assert_eq!(selection.action, Some(selected_discard));
         assert_eq!(selection.tenpai_reach_timing, None);
 
-        let diagnostic = crate::agents::ShantenAgent::diagnose_with_options(
+        let diagnostic = crate::agents::NodocchiAgent::diagnose_with_options(
             &context,
             &actions,
             crate::agents::DiagnosticOptions::NONE,
@@ -7306,10 +7306,10 @@ pub(crate) mod tests {
     fn three_shanten_phase_timing_measures_only_the_three_shanten_progress_evaluation() {
         // 深い3向聴局面は1回の評価が重いため、計測あり・なしの production 実行は公開入口の
         // 2回だけにする。
-        use crate::{Agent, ShantenAgent};
+        use crate::{Agent, NodocchiAgent};
         let (context, actions) = three_shanten_progress_regression_context();
-        let timed = ShantenAgent.act_with_phase_timing(&context, &actions);
-        let untimed = ShantenAgent.act(&context, &actions);
+        let timed = NodocchiAgent.act_with_phase_timing(&context, &actions);
+        let untimed = NodocchiAgent.act(&context, &actions);
         let phases = timed.phases.normal_discard_phases;
 
         assert_eq!(timed.action, untimed);
@@ -7344,9 +7344,9 @@ pub(crate) mod tests {
         assert_eq!(phases.three_shanten_self_tsumo, Duration::ZERO);
         assert!(phases.two_shanten_self_tsumo > Duration::ZERO);
 
-        use crate::{Agent, ShantenAgent};
-        let timed_action = ShantenAgent.act_with_phase_timing(&context, &actions);
-        assert_eq!(timed_action.action, ShantenAgent.act(&context, &actions));
+        use crate::{Agent, NodocchiAgent};
+        let timed_action = NodocchiAgent.act_with_phase_timing(&context, &actions);
+        assert_eq!(timed_action.action, NodocchiAgent.act(&context, &actions));
         assert_eq!(
             timed_action
                 .phases
@@ -7437,9 +7437,9 @@ pub(crate) mod tests {
         );
 
         // 実際の公開入口まで候補が伝わることも確認する。判断は通常 act() と同じ。
-        use crate::{Agent, ShantenAgent};
-        let timed_action = ShantenAgent.act_with_phase_timing(&context, &actions);
-        assert_eq!(timed_action.action, ShantenAgent.act(&context, &actions));
+        use crate::{Agent, NodocchiAgent};
+        let timed_action = NodocchiAgent.act_with_phase_timing(&context, &actions);
+        assert_eq!(timed_action.action, NodocchiAgent.act(&context, &actions));
         assert_eq!(
             timed_action
                 .two_shanten_self_tsumo_candidates()

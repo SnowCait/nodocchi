@@ -12,9 +12,9 @@
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, DiagnosticOptions,
-    HonorSafetyRank, LegalAction, OpenHandDefenseCategory, OpenHandThreatReason,
-    OpponentHonorValue, PushPullMode, PushPullReason, ShantenAgent, ShantenDecisionDiagnostic,
-    SuitedSafetyRank, SujiSafetyRank, ThreatDefenseTarget, ThreatDefenseTargetKind,
+    HonorSafetyRank, LegalAction, NodocchiAgent, NodocchiDecisionDiagnostic,
+    OpenHandDefenseCategory, OpenHandThreatReason, OpponentHonorValue, PushPullMode,
+    PushPullReason, SuitedSafetyRank, SujiSafetyRank, ThreatDefenseTarget, ThreatDefenseTargetKind,
     combined_defense_category, combined_threat_defense_targets_from_context, honor_safety_rank,
     is_discarded_by_player, is_ron_safe_for_target, is_safe_against_all_threats,
     opponent_honor_value_for_combined_threats,
@@ -131,8 +131,8 @@ fn request_131_selects_nine_man_after_drawing_eight_sou() {
     );
 }
 
-fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
-    ShantenAgent::diagnose(&scenario.context, &scenario.legal_actions)
+fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
+    NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
 }
 
 fn tile_type(mjai: &str) -> TileType {
@@ -147,7 +147,7 @@ fn discards(action: &LegalAction) -> TileType {
 }
 
 fn candidate(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     mjai: &str,
 ) -> CombinedDefenseCandidateDiagnostic {
     diagnostic
@@ -456,10 +456,10 @@ fn every_candidate_reports_the_production_safety_helpers() {
 #[test]
 fn the_combined_threat_drives_the_fold_and_the_selected_action() {
     let scenario = scenario();
-    let mut agent = ShantenAgent;
+    let mut agent = NodocchiAgent;
     let acted = agent.act(&scenario.context, &scenario.legal_actions);
     let diagnostic = diagnose(&scenario);
-    let with_lookahead = ShantenAgent::diagnose_with_options(
+    let with_lookahead = NodocchiAgent::diagnose_with_options(
         &scenario.context,
         &scenario.legal_actions,
         DiagnosticOptions::WITH_LOOKAHEAD,

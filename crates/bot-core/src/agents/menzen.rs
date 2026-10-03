@@ -1,11 +1,11 @@
 use crate::action::LegalAction;
 use crate::agent::Agent;
-use crate::agents::shanten::ShantenAgent;
+use crate::agents::nodocchi::NodocchiAgent;
 use crate::context::GameContext;
 
 #[derive(Debug, Default)]
 pub struct MenzenAgent {
-    inner: ShantenAgent,
+    inner: NodocchiAgent,
 }
 
 fn is_menzen_compatible_action(action: &LegalAction) -> bool {
@@ -41,11 +41,11 @@ impl Agent for MenzenAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nodocchi_test_support::{
+        TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
+    };
     use crate::ryukyoku_decision::tests::{
         KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND, context_from_hand,
-    };
-    use crate::shanten_test_support::{
-        TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
     };
     use bot_logic::{HistoryFuritenFacts, TileType};
 
@@ -235,76 +235,76 @@ mod tests {
     #[test]
     fn keeps_reach_even_when_pon_is_legal() {
         let mut agent = MenzenAgent::default();
-        let mut shanten = ShantenAgent;
+        let mut nodocchi = NodocchiAgent;
         let ctx = tenpai_context(&[]);
         let menzen_only = tenpai_actions();
-        assert_eq!(shanten.act(&ctx, &menzen_only), LegalAction::Reach);
+        assert_eq!(nodocchi.act(&ctx, &menzen_only), LegalAction::Reach);
 
         let actions: Vec<LegalAction> = std::iter::once(pon()).chain(menzen_only).collect();
         assert_eq!(agent.act(&ctx, &actions), LegalAction::Reach);
     }
 
     #[test]
-    fn matches_shanten_agent_on_normal_discard() {
+    fn matches_nodocchi_agent_on_normal_discard() {
         let mut agent = MenzenAgent::default();
-        let mut shanten = ShantenAgent;
+        let mut nodocchi = NodocchiAgent;
         let ctx = tenpai_context(&TENPAI_SCARCE_VISIBLE);
         let actions = tenpai_actions();
 
-        let expected = shanten.act(&ctx, &actions);
+        let expected = nodocchi.act(&ctx, &actions);
         assert!(matches!(expected, LegalAction::Dahai { .. }));
         assert_eq!(agent.act(&ctx, &actions), expected);
     }
 
     #[test]
-    fn matches_shanten_agent_on_hora() {
+    fn matches_nodocchi_agent_on_hora() {
         let mut agent = MenzenAgent::default();
-        let mut shanten = ShantenAgent;
+        let mut nodocchi = NodocchiAgent;
         let ctx = tenpai_context(&[]);
         let actions: Vec<LegalAction> = tenpai_actions()
             .into_iter()
             .chain([LegalAction::Hora])
             .collect();
 
-        let expected = shanten.act(&ctx, &actions);
+        let expected = nodocchi.act(&ctx, &actions);
         assert_eq!(expected, LegalAction::Hora);
         assert_eq!(agent.act(&ctx, &actions), expected);
     }
 
     #[test]
-    fn matches_shanten_agent_on_reach() {
+    fn matches_nodocchi_agent_on_reach() {
         let mut agent = MenzenAgent::default();
-        let mut shanten = ShantenAgent;
+        let mut nodocchi = NodocchiAgent;
         let ctx = tenpai_context(&[]);
         let actions = tenpai_actions();
 
-        let expected = shanten.act(&ctx, &actions);
+        let expected = nodocchi.act(&ctx, &actions);
         assert_eq!(expected, LegalAction::Reach);
         assert_eq!(agent.act(&ctx, &actions), expected);
     }
 
     #[test]
-    fn matches_shanten_agent_under_opponent_reach() {
+    fn matches_nodocchi_agent_under_opponent_reach() {
         let mut agent = MenzenAgent::default();
-        let mut shanten = ShantenAgent;
+        let mut nodocchi = NodocchiAgent;
         let ctx = opponent_reach_context(Some(0), &[]);
         let actions = vec![LegalAction::Reach, dahai(0), dahai(16)];
 
-        let expected = shanten.act(&ctx, &actions);
+        let expected = nodocchi.act(&ctx, &actions);
         assert_eq!(expected, dahai(16));
         assert_eq!(agent.act(&ctx, &actions), expected);
     }
 
     #[test]
-    fn keeps_none_where_shanten_agent_pons_a_value_honor_pair() {
-        // 123456m 55p 78s N PP に他家が P を捨てた局面。ShantenAgent は Pon するが、
+    fn keeps_none_where_nodocchi_agent_pons_a_value_honor_pair() {
+        // 123456m 55p 78s N PP に他家が P を捨てた局面。NodocchiAgent は Pon するが、
         // MenzenAgent は Pon を除外するので None を維持する。
         let (ctx, actions, call) = value_honor_pon_context_and_actions();
 
-        let mut shanten = ShantenAgent;
-        assert_eq!(shanten.act(&ctx, &actions), call);
+        let mut nodocchi = NodocchiAgent;
+        assert_eq!(nodocchi.act(&ctx, &actions), call);
         assert_eq!(
-            ShantenAgent::diagnose(&ctx, &actions).selected_source,
+            NodocchiAgent::diagnose(&ctx, &actions).selected_source,
             crate::AgentActionSource::Call
         );
 
@@ -320,19 +320,19 @@ mod tests {
         assert_eq!(agent.act(&ctx, &[]), LegalAction::None);
     }
 
-    // 九種九牌の宣言 / 続行 policy は ShantenAgent が持ち、MenzenAgent は委譲するだけで
+    // 九種九牌の宣言 / 続行 policy は NodocchiAgent が持ち、MenzenAgent は委譲するだけで
     // 同じ結論になる。判断 logic を複製しない。
     #[test]
-    fn delegates_the_ryukyoku_decision_to_the_shanten_agent() {
+    fn delegates_the_ryukyoku_decision_to_the_nodocchi_agent() {
         for hand in [&KOKUSHI_FOUR_HAND, &KOKUSHI_THREE_HAND] {
             let ctx = context_from_hand(hand);
             let actions = ryukyoku_actions(&ctx);
 
             let mut menzen = MenzenAgent::default();
-            let mut shanten = ShantenAgent;
+            let mut nodocchi = NodocchiAgent;
             assert_eq!(
                 menzen.act(&ctx, &actions),
-                shanten.act(&ctx, &actions),
+                nodocchi.act(&ctx, &actions),
                 "{hand:?}"
             );
         }

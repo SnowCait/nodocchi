@@ -2040,8 +2040,8 @@ mod tests {
         }
 
         #[test]
-        fn shanten_agent_uses_visible_tiles_from_decoded_observation() {
-            use bot_core::{Agent, LegalAction, ShantenAgent};
+        fn nodocchi_agent_uses_visible_tiles_from_decoded_observation() {
+            use bot_core::{Agent, LegalAction, NodocchiAgent};
 
             let hand_values = [0u8, 4, 8, 12, 17, 20, 24, 28, 32, 48, 53, 56, 36];
             let hand: Vec<TileId> = hand_values
@@ -2067,7 +2067,7 @@ mod tests {
                 })
                 .collect();
 
-            let mut agent = ShantenAgent;
+            let mut agent = NodocchiAgent;
             let LegalAction::Dahai { tile } = agent.act(&context, &actions) else {
                 panic!("expected dahai");
             };

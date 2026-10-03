@@ -6,14 +6,14 @@ use nostr_sdk::prelude::{FromBech32, PublicKey};
 use crate::config::{CHIIHOU_SERVER_NPUB, ChiihouChannel, ChiihouConfigError, ChiihouNostrConfig};
 use crate::secret::{ChiihouSecretError, validate_chiihou_nsec};
 
-pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|shanten|menzen] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]";
+pub const USAGE: &str = "usage: chiihou-client --channel <hanchan|tonpuu> [--agent normal|tsumogiri|nodocchi|menzen] [--server-npub <NPUB_OR_NPROFILE>] [--auto-next] [--response-delay-ms <MILLISECONDS>]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChiihouAgentKind {
     #[default]
     Normal,
     Tsumogiri,
-    Shanten,
+    Nodocchi,
     Menzen,
 }
 
@@ -28,7 +28,7 @@ impl std::str::FromStr for ChiihouAgentKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "normal" => Ok(Self::Normal),
             "tsumogiri" | "tsumo-giri" => Ok(Self::Tsumogiri),
-            "shanten" => Ok(Self::Shanten),
+            "nodocchi" => Ok(Self::Nodocchi),
             "menzen" => Ok(Self::Menzen),
             other => Err(ChiihouAgentKindParseError(other.to_string())),
         }
@@ -40,7 +40,7 @@ impl std::fmt::Display for ChiihouAgentKind {
         match self {
             Self::Normal => write!(f, "normal"),
             Self::Tsumogiri => write!(f, "tsumogiri"),
-            Self::Shanten => write!(f, "shanten"),
+            Self::Nodocchi => write!(f, "nodocchi"),
             Self::Menzen => write!(f, "menzen"),
         }
     }
@@ -269,7 +269,7 @@ mod tests {
     fn auto_next_defaults_to_false() {
         let args = parse(&["--channel", "hanchan"]).unwrap();
         assert!(!args.auto_next);
-        let args = parse(&["--channel", "tonpuu", "--agent", "shanten"]).unwrap();
+        let args = parse(&["--channel", "tonpuu", "--agent", "nodocchi"]).unwrap();
         assert!(!args.auto_next);
     }
 
@@ -289,12 +289,12 @@ mod tests {
 
     #[test]
     fn parses_auto_next_with_agent_in_any_order() {
-        let args = parse(&["--channel", "hanchan", "--agent", "shanten", "--auto-next"]).unwrap();
+        let args = parse(&["--channel", "hanchan", "--agent", "nodocchi", "--auto-next"]).unwrap();
         assert!(args.auto_next);
-        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
-        let args = parse(&["--agent", "shanten", "--auto-next", "--channel", "hanchan"]).unwrap();
+        assert_eq!(args.agent, ChiihouAgentKind::Nodocchi);
+        let args = parse(&["--agent", "nodocchi", "--auto-next", "--channel", "hanchan"]).unwrap();
         assert!(args.auto_next);
-        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
+        assert_eq!(args.agent, ChiihouAgentKind::Nodocchi);
         assert_eq!(args.channel, ChiihouChannel::Hanchan);
     }
 
@@ -463,7 +463,7 @@ mod tests {
     fn parses_options_in_any_order() {
         let args = parse(&[
             "--agent",
-            "shanten",
+            "nodocchi",
             "--channel",
             "tonpuu",
             "--server-npub",
@@ -472,7 +472,7 @@ mod tests {
         .unwrap();
         assert_eq!(args.server_npub, Some("npub1example".to_string()));
         assert_eq!(args.channel, ChiihouChannel::Tonpuu);
-        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
+        assert_eq!(args.agent, ChiihouAgentKind::Nodocchi);
     }
 
     #[test]
@@ -494,9 +494,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_agent_shanten() {
-        let args = parse(&["--channel", "hanchan", "--agent", "shanten"]).unwrap();
-        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
+    fn parses_agent_nodocchi() {
+        let args = parse(&["--channel", "hanchan", "--agent", "nodocchi"]).unwrap();
+        assert_eq!(args.agent, ChiihouAgentKind::Nodocchi);
     }
 
     #[test]
@@ -521,8 +521,8 @@ mod tests {
 
     #[test]
     fn agent_ignores_ascii_case() {
-        let args = parse(&["--channel", "hanchan", "--agent", "Shanten"]).unwrap();
-        assert_eq!(args.agent, ChiihouAgentKind::Shanten);
+        let args = parse(&["--channel", "hanchan", "--agent", "Nodocchi"]).unwrap();
+        assert_eq!(args.agent, ChiihouAgentKind::Nodocchi);
         let args = parse(&["--channel", "hanchan", "--agent", "TSUMOGIRI"]).unwrap();
         assert_eq!(args.agent, ChiihouAgentKind::Tsumogiri);
         let args = parse(&["--channel", "hanchan", "--agent", "Menzen"]).unwrap();
@@ -580,8 +580,16 @@ mod tests {
     #[test]
     fn rejects_unknown_agent() {
         assert_eq!(
-            parse(&["--channel", "hanchan", "--agent", "nodocchi"]),
-            Err(ChiihouCliError::UnknownAgent("nodocchi".to_string()))
+            parse(&["--channel", "hanchan", "--agent", "unknown"]),
+            Err(ChiihouCliError::UnknownAgent("unknown".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_removed_shanten_agent() {
+        assert_eq!(
+            parse(&["--channel", "hanchan", "--agent", "shanten"]),
+            Err(ChiihouCliError::UnknownAgent("shanten".to_string()))
         );
     }
 
@@ -625,7 +633,7 @@ mod tests {
                 "--agent",
                 "normal",
                 "--agent",
-                "shanten"
+                "nodocchi"
             ]),
             Err(ChiihouCliError::DuplicateOption("--agent"))
         );
@@ -639,8 +647,8 @@ mod tests {
     #[test]
     fn agent_kind_from_str_trims_whitespace() {
         assert_eq!(
-            " shanten ".parse::<ChiihouAgentKind>().unwrap(),
-            ChiihouAgentKind::Shanten
+            " nodocchi ".parse::<ChiihouAgentKind>().unwrap(),
+            ChiihouAgentKind::Nodocchi
         );
     }
 
@@ -648,7 +656,7 @@ mod tests {
     fn agent_kind_display_matches_input_format() {
         assert_eq!(ChiihouAgentKind::Normal.to_string(), "normal");
         assert_eq!(ChiihouAgentKind::Tsumogiri.to_string(), "tsumogiri");
-        assert_eq!(ChiihouAgentKind::Shanten.to_string(), "shanten");
+        assert_eq!(ChiihouAgentKind::Nodocchi.to_string(), "nodocchi");
         assert_eq!(ChiihouAgentKind::Menzen.to_string(), "menzen");
     }
 
