@@ -11,9 +11,9 @@
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, DiagnosticOptions, HonorSafetyRank, LegalAction, NodocchiAgent,
-    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory, OpenHandThreatLevel,
-    OpenHandThreatReason, OpponentHonorValue, PushPullMode, PushPullReason,
-    ShantenDecisionDiagnostic, SuitedSafetyRank, SujiSafetyRank, WallRank, honor_safety_rank,
+    NodocchiDecisionDiagnostic, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseCategory,
+    OpenHandThreatLevel, OpenHandThreatReason, OpponentHonorValue, PushPullMode, PushPullReason,
+    SuitedSafetyRank, SujiSafetyRank, WallRank, honor_safety_rank,
     is_discarded_by_all_open_hand_threats, open_hand_defense_category,
     opponent_honor_value_for_open_hand_threats, select_open_hand_defense_fallback_action_with_kind,
     suited_safety_rank_for_open_hand_threats, suji_safety_rank_for,
@@ -41,7 +41,7 @@ fn scenario() -> Scenario {
     resolve(&spec())
 }
 
-fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
+fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
     NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
 }
 
@@ -57,7 +57,7 @@ fn discards(action: &LegalAction) -> TileType {
 }
 
 fn candidate(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     mjai: &str,
 ) -> OpenHandDefenseCandidateDiagnostic {
     diagnostic

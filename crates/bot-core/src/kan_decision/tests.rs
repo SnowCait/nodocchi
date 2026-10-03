@@ -6,9 +6,7 @@ use crate::context::TableStateFacts;
 use crate::defense::CompressedStructuralTenpaiHiddenHandStates;
 use crate::discard_selection::select_best_normal_discard_evaluation;
 use crate::meld::{Meld, MeldKind};
-use crate::offense_value::OffenseValue;
-use crate::reach_policy::REACH_MIN_REMAINING_TILES;
-use crate::shanten_test_support::{
+use crate::nodocchi_test_support::{
     ANKAN_ACCEPTANCE_REGRESSING_CONSUMED, ANKAN_ACCEPTANCE_REGRESSING_DRAWN,
     ANKAN_ACCEPTANCE_REGRESSING_HAND, ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND,
     ANKAN_IISHANTEN_CONSUMED, ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED,
@@ -25,6 +23,8 @@ use crate::shanten_test_support::{
     opponent_two_man_pon, rivers_with_tile_for_all_opponents, three_man_pon_meld, tile,
     two_man_pon_meld,
 };
+use crate::offense_value::OffenseValue;
+use crate::reach_policy::REACH_MIN_REMAINING_TILES;
 
 fn tiles(values: &[u8]) -> Vec<TileId> {
     values.iter().map(|&value| tile(value)).collect()

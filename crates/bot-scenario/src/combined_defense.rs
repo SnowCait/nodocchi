@@ -12,11 +12,12 @@
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
     Agent, CombinedDefenseCandidateDiagnostic, CombinedDefenseCategory, DiagnosticOptions,
-    HonorSafetyRank, LegalAction, NodocchiAgent, OpenHandDefenseCategory, OpenHandThreatReason,
-    OpponentHonorValue, PushPullMode, PushPullReason, ShantenDecisionDiagnostic, SuitedSafetyRank,
-    SujiSafetyRank, ThreatDefenseTarget, ThreatDefenseTargetKind, combined_defense_category,
-    combined_threat_defense_targets_from_context, honor_safety_rank, is_discarded_by_player,
-    is_ron_safe_for_target, is_safe_against_all_threats, opponent_honor_value_for_combined_threats,
+    HonorSafetyRank, LegalAction, NodocchiAgent, NodocchiDecisionDiagnostic,
+    OpenHandDefenseCategory, OpenHandThreatReason, OpponentHonorValue, PushPullMode,
+    PushPullReason, SuitedSafetyRank, SujiSafetyRank, ThreatDefenseTarget, ThreatDefenseTargetKind,
+    combined_defense_category, combined_threat_defense_targets_from_context, honor_safety_rank,
+    is_discarded_by_player, is_ron_safe_for_target, is_safe_against_all_threats,
+    opponent_honor_value_for_combined_threats,
     select_combined_threat_defense_fallback_action_with_kind,
     suited_safety_rank_for_combined_threats, suji_safety_rank_for,
     suji_safety_rank_for_combined_threats, wall_rank,
@@ -130,7 +131,7 @@ fn request_131_selects_nine_man_after_drawing_eight_sou() {
     );
 }
 
-fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
+fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
     NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
 }
 
@@ -146,7 +147,7 @@ fn discards(action: &LegalAction) -> TileType {
 }
 
 fn candidate(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     mjai: &str,
 ) -> CombinedDefenseCandidateDiagnostic {
     diagnostic

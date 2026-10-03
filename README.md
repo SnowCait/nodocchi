@@ -2,7 +2,7 @@
 
 リーチ麻雀 AI。
 
-RiichiLab と地鳳へ接続する client、production AI の `NodocchiAgent`、局面をオフラインで再現して判断根拠を確認する `bot-scenario` を提供します。
+RiichiLab と地鳳へ接続する client、打牌・副露・リーチ・押し引き・防御・カンなどを統合して判断する実戦用エージェント `NodocchiAgent`、局面をオフラインで再現して判断根拠を確認する `bot-scenario` を提供します。
 
 ## 主な機能
 

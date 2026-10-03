@@ -28,7 +28,7 @@ mod tests {
     use super::*;
     use crate::ranked_choice::rank_choices;
     use crate::scenario::{Scenario, ScenarioSpec};
-    use bot_core::{DiagnosticOptions, ShantenDecisionDiagnostic};
+    use bot_core::{DiagnosticOptions, NodocchiDecisionDiagnostic};
 
     const CHOICE_LIMIT: usize = 3;
 
@@ -53,7 +53,7 @@ mod tests {
         Scenario::resolve(&spec).unwrap()
     }
 
-    fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
+    fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
         NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
     }
 

@@ -9,18 +9,18 @@ use crate::defense::{
 };
 use crate::discard_selection::{select_discard_action, select_discard_action_with_evaluation};
 use crate::meld::{Meld, MeldKind};
-use crate::push_pull::{
-    PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context_with_evaluation,
-};
-use crate::reach_policy::ReachDecisionReason;
-use crate::ryukyoku_decision::tests::{KOKUSHI_FOUR_HAND, hand_tiles};
-use crate::shanten_test_support::{
+use crate::nodocchi_test_support::{
     OPPONENT_MELD_DRAW, OPPONENT_MELD_HAND, dahai, fold_actions, fold_under_reach_context,
     opponent_meld_actions, opponent_reach_context, opponent_reach_context_with_visible, pon_meld,
     suited_reach_context, suited_reach_context_with_reached, tenpai_actions, tenpai_context,
     tenpai_dahai_actions, tenpai_under_reach_context, tile, weak_tenpai_actions,
     weak_tenpai_under_reach_context,
 };
+use crate::push_pull::{
+    PushPullMode, PushPullReason, decide_push_pull, push_pull_inputs_from_context_with_evaluation,
+};
+use crate::reach_policy::ReachDecisionReason;
+use crate::ryukyoku_decision::tests::{KOKUSHI_FOUR_HAND, hand_tiles};
 use crate::threat::diagnose_player_threats;
 use crate::two_shanten_self_tsumo_cost::{
     measure_two_shanten_progress_self_tsumo, measure_two_shanten_self_tsumo,
@@ -35,7 +35,7 @@ use bot_logic::{
 // 診断は act() と同じ selection logic を通るため、最終 action は常に act() と一致する。
 
 // 診断の最終 action / source が act() と一致することを確認し、診断を返す共通 helper。
-fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
+fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> NodocchiDecisionDiagnostic {
     let mut agent = NodocchiAgent;
     let expected = agent.act(ctx, actions);
     let diagnostic = NodocchiAgent::diagnose(ctx, actions);
@@ -95,7 +95,7 @@ fn diagnose_free_function_matches_associated_function() {
     let ctx = fold_under_reach_context();
     let actions = fold_actions();
     assert_eq!(
-        diagnose_shanten_decision(&ctx, &actions),
+        diagnose_nodocchi_decision(&ctx, &actions),
         NodocchiAgent::diagnose(&ctx, &actions)
     );
 }
@@ -301,7 +301,7 @@ fn assert_push_pull_diagnostic(
     ctx: &GameContext,
     actions: &[LegalAction],
     expected_mode: PushPullMode,
-) -> ShantenDecisionDiagnostic {
+) -> NodocchiDecisionDiagnostic {
     let diagnostic = diagnose_matching_act(ctx, actions);
     let inputs = diagnostic.push_pull_inputs.unwrap();
     let decision = diagnostic.push_pull_decision.unwrap();
@@ -1587,7 +1587,7 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_build_the_same_shanten_downstr
         DiagnosticOptions::WITH_TWO_SHANTEN_SELF_TSUMO,
     );
 
-    let count = |diagnostic: &ShantenDecisionDiagnostic| {
+    let count = |diagnostic: &NodocchiDecisionDiagnostic| {
         same_shanten_downstream_count(
             diagnostic
                 .normal_discard_lookahead
@@ -1677,7 +1677,7 @@ fn the_two_shanten_self_tsumo_diagnostic_does_not_change_the_selected_action() {
 
     // 2向聴診断以外の診断はすべて既定の診断と一致する。
     assert_eq!(
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             normal_discard_lookahead: None,
             normal_discard_lookahead_value: None,
             normal_discard_tenpai_continuation: None,
@@ -1741,7 +1741,7 @@ fn the_structural_expected_deal_in_loss_diagnostic_does_not_change_any_decision(
 
     // 追加した診断以外はすべて既定の診断と一致する。
     assert_eq!(
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             normal_discard_structural_expected_deal_in_loss: None,
             ..with
         },
@@ -2083,7 +2083,7 @@ fn lookahead_does_not_change_the_selected_action() {
     );
     // 2手先とその将来打点以外の診断はすべて既定の診断と一致する。
     assert_eq!(
-        ShantenDecisionDiagnostic {
+        NodocchiDecisionDiagnostic {
             normal_discard_lookahead: None,
             normal_discard_lookahead_value: None,
             normal_discard_tenpai_continuation: None,
@@ -2139,7 +2139,7 @@ fn lookahead_free_function_matches_associated_function() {
     let ctx = lookahead_context();
     let actions = lookahead_actions();
     assert_eq!(
-        diagnose_shanten_decision_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD),
+        diagnose_nodocchi_decision_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD),
         NodocchiAgent::diagnose_with_options(&ctx, &actions, DiagnosticOptions::WITH_LOOKAHEAD)
     );
 }
@@ -2325,7 +2325,7 @@ fn furiten_context(player_id: Option<u8>, discards: [Vec<TileId>; 4]) -> GameCon
 }
 
 fn furiten_of(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     discard: TileType,
 ) -> DiscardFuritenDiagnostic {
     diagnostic
@@ -2675,7 +2675,7 @@ fn history_furiten_meld_context(history: bot_logic::HistoryFuritenFacts) -> Game
 fn selected_tenpai_wait(
     ctx: &GameContext,
     actions: &[LegalAction],
-) -> (ShantenDecisionDiagnostic, TenpaiWaitAvailability) {
+) -> (NodocchiDecisionDiagnostic, TenpaiWaitAvailability) {
     let diagnostic = diagnose_matching_act(ctx, actions);
     let Some(LegalAction::Dahai { tile }) = &diagnostic.normal_discard_action else {
         panic!("打牌が選ばれる: {:?}", diagnostic.normal_discard_action);
@@ -2826,7 +2826,7 @@ fn history_furiten_does_not_change_the_reach_or_push_pull_policy() {
         cannot_ron_diagnostic.selected_source
     );
 
-    let reach_of = |diagnostic: &ShantenDecisionDiagnostic| {
+    let reach_of = |diagnostic: &NodocchiDecisionDiagnostic| {
         let reach = diagnostic.reach.as_ref().expect("リーチを検討している");
         (reach.selected.clone(), reach.reason, reach.should_reach())
     };
@@ -2835,7 +2835,7 @@ fn history_furiten_does_not_change_the_reach_or_push_pull_policy() {
         reach_of(&cannot_ron_diagnostic)
     );
 
-    let push_pull_of = |diagnostic: &ShantenDecisionDiagnostic| {
+    let push_pull_of = |diagnostic: &NodocchiDecisionDiagnostic| {
         let decision = diagnostic
             .push_pull_decision
             .as_ref()

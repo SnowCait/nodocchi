@@ -1288,7 +1288,7 @@ mod tests {
         let actions = stay_actions();
         let first = observe_two_shanten_stay_calls(&ctx, &actions);
 
-        crate::shanten_diagnostic::diagnose_shanten_decision(&ctx, &actions);
+        crate::nodocchi_diagnostic::diagnose_nodocchi_decision(&ctx, &actions);
         let second = observe_two_shanten_stay_calls(&ctx, &actions);
 
         for (first, second) in first.candidates.iter().zip(&second.candidates) {

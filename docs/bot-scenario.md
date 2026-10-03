@@ -4,7 +4,7 @@
 
 牌文字列の parse、physical tile の割り当て、scenario の validation、`GameContext` と `LegalAction` の構築は、platform 非依存の library crate [`bot-analysis`](../crates/bot-analysis/) にあります。`bot-scenario` は CLI 引数の解析・file I/O・RiichiLab capture の再生・出力の整形を担当し、局面構築は `bot-analysis` の `ScenarioSpec` → `Scenario::resolve()` → `Scenario` をそのまま使用します。
 
-[Summary](#summary) が表示する値も `bot-analysis` が決めます。`Scenario` と production の `ShantenDecisionDiagnostic` から `AnalysisResult::from_decision()` が薄い構造化結果を作り、CLI はそれを文字列化するだけです。どの候補を比較対象にするか、どの防御 source を出すかといった選択は `bot-analysis` 側にあり、CLI は持ちません。
+[Summary](#summary) が表示する値も `bot-analysis` が決めます。`Scenario` と production の `NodocchiDecisionDiagnostic` から `AnalysisResult::from_decision()` が薄い構造化結果を作り、CLI はそれを文字列化するだけです。どの候補を比較対象にするか、どの防御 source を出すかといった選択は `bot-analysis` 側にあり、CLI は持ちません。
 
 ## 簡易 CLI
 

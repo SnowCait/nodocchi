@@ -18,6 +18,9 @@ pub mod iishanten_selection_parallel_comparison;
 pub mod kan_decision;
 pub mod kuikae;
 pub mod meld;
+pub mod nodocchi_diagnostic;
+#[cfg(test)]
+pub(crate) mod nodocchi_test_support;
 pub mod offense_value;
 pub mod open_hand_defense;
 pub mod open_hand_threat;
@@ -29,9 +32,6 @@ pub mod reach_policy;
 pub mod ron_opportunity;
 pub mod ryukyoku_decision;
 pub mod self_tsumo_horizon_comparison;
-pub mod shanten_diagnostic;
-#[cfg(test)]
-pub(crate) mod shanten_test_support;
 pub mod tenpai_continuation;
 pub mod tenpai_scoring;
 pub mod threat;
@@ -152,6 +152,10 @@ pub use kan_decision::{
 };
 pub use kuikae::forbidden_discards_after_call;
 pub use meld::{Meld, MeldKind, fixed_meld_count};
+pub use nodocchi_diagnostic::{
+    DiagnosticOptions, NodocchiDecisionDiagnostic, diagnose_nodocchi_decision,
+    diagnose_nodocchi_decision_with_options,
+};
 pub use offense_value::{
     OffenseValue, ReachRonBaselineDiagnostic, ReachRonWaitValue, ReachRonWinningTileValue,
     TenpaiOffenseMode, TenpaiOffenseValue, current_reach_baseline_context,
@@ -208,10 +212,6 @@ pub use self_tsumo_horizon_comparison::{
     COMPARED_SELF_TSUMO_HORIZON_TURNS, COMPARED_SELF_TSUMO_HORIZONS, PassFutureDraws,
     SelfTsumoHorizonComparison, SelfTsumoHorizonDecision, compare_self_tsumo_horizons,
     decide_with_self_tsumo_horizon,
-};
-pub use shanten_diagnostic::{
-    DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,
-    diagnose_shanten_decision_with_options,
 };
 pub use tenpai_continuation::{
     TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,

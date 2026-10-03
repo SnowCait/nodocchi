@@ -12,6 +12,10 @@ use crate::discard_selection::{
 use crate::fold_defense::{FoldDefenseKind, evaluate_fold_defense, evaluate_reach_defense};
 use crate::iishanten_reach_ron_risk::iishanten_reach_ron_risk;
 use crate::kan_decision::{KanDecisionDiagnostic, evaluate_kan_decision};
+use crate::nodocchi_diagnostic::{
+    DecisionDiagnostics, DiagnosticOptions, NodocchiDecisionDiagnostic, diagnose_nodocchi_decision,
+    diagnose_nodocchi_decision_with_options,
+};
 use crate::open_hand_defense::OpenHandDefenseCategory;
 use crate::push_pull::{
     PushPullDecision, PushPullInputs, PushPullMode, decide_push_pull, has_clear_threat,
@@ -19,10 +23,6 @@ use crate::push_pull::{
 };
 use crate::reach_decision::{ReachDecision, ReachDecisionDiagnostic, decide_reach};
 use crate::ryukyoku_decision::{RyukyokuDecisionDiagnostic, evaluate_ryukyoku_decision};
-use crate::shanten_diagnostic::{
-    DecisionDiagnostics, DiagnosticOptions, ShantenDecisionDiagnostic, diagnose_shanten_decision,
-    diagnose_shanten_decision_with_options,
-};
 use crate::threat::{PlayerThreatFacts, player_threat_facts_from_context};
 
 const AGENT_DECISION_LOG_TARGET: &str = "bot_core::agent_decision";
@@ -142,15 +142,15 @@ impl NodocchiAgent {
     ///
     /// 判断経路は `act()` と共通の内部 helper を通るため、
     /// `diagnose(...).selected_action == NodocchiAgent::act(...)` が常に成り立つ。診断用の別判断
-    /// ロジックは持たない。契約の詳細は [`ShantenDecisionDiagnostic`] を参照。
+    /// ロジックは持たない。契約の詳細は [`NodocchiDecisionDiagnostic`] を参照。
     ///
     /// 解析専用の追加情報(候補ごとの形の内訳、全合法 Dahai の防御候補評価など)はこの経路
     /// でのみ構築する。通常の `act()` では計算しない。
     pub fn diagnose(
         context: &GameContext,
         legal_actions: &[LegalAction],
-    ) -> ShantenDecisionDiagnostic {
-        diagnose_shanten_decision(context, legal_actions)
+    ) -> NodocchiDecisionDiagnostic {
+        diagnose_nodocchi_decision(context, legal_actions)
     }
 
     /// 追加診断を指定して `act()` と同じ判断を行い、その過程を構造化診断として返す。
@@ -162,8 +162,8 @@ impl NodocchiAgent {
         context: &GameContext,
         legal_actions: &[LegalAction],
         options: DiagnosticOptions,
-    ) -> ShantenDecisionDiagnostic {
-        diagnose_shanten_decision_with_options(context, legal_actions, options)
+    ) -> NodocchiDecisionDiagnostic {
+        diagnose_nodocchi_decision_with_options(context, legal_actions, options)
     }
 
     /// `act()` と同じ判断を1回だけ行い、phase ごとの実測時間を併せて返す。
@@ -844,17 +844,7 @@ mod tests {
         select_discard_action_with_evaluation,
     };
     use crate::kan_decision::{KanDecisionReason, KanKind};
-    use crate::push_pull::{
-        PushPullReason, push_pull_inputs_from_context,
-        push_pull_inputs_from_context_with_evaluation,
-    };
-    use crate::reach_policy::ReachDecisionReason;
-    use crate::ryukyoku_decision::RyukyokuVerdict;
-    use crate::ryukyoku_decision::tests::{
-        CHIITOITSU_THREE_HAND, CHIITOITSU_TWO_HAND, KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND,
-        STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
-    };
-    use crate::shanten_test_support::{
+    use crate::nodocchi_test_support::{
         ANKAN_FREE_CONSUMED, ANKAN_FREE_DRAWN, ANKAN_FREE_HAND, ANKAN_IISHANTEN_CONSUMED,
         ANKAN_IISHANTEN_DRAWN, ANKAN_IISHANTEN_HAND, ANKAN_REACH_CONSUMED, ANKAN_REACH_DRAWN,
         ANKAN_REACH_HAND, ANKAN_REGRESSING_CONSUMED, ANKAN_REGRESSING_DRAWN, ANKAN_REGRESSING_HAND,
@@ -867,6 +857,16 @@ mod tests {
         tenpai_context, tenpai_dahai_actions, tenpai_under_reach_context, tile,
         unavailable_reach_meld, weak_tenpai_actions, weak_tenpai_under_reach_context,
         weak_tenpai_under_reach_context_with,
+    };
+    use crate::push_pull::{
+        PushPullReason, push_pull_inputs_from_context,
+        push_pull_inputs_from_context_with_evaluation,
+    };
+    use crate::reach_policy::ReachDecisionReason;
+    use crate::ryukyoku_decision::RyukyokuVerdict;
+    use crate::ryukyoku_decision::tests::{
+        CHIITOITSU_THREE_HAND, CHIITOITSU_TWO_HAND, KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND,
+        STANDARD_THREE_HAND, STANDARD_TWO_HAND, context_from_hand,
     };
     use bot_logic::{
         DiscardComparisonReason, DiscardEvaluation, FixedMeldCount, PermanentFuriten, TileCounts,
@@ -3008,7 +3008,7 @@ mod tests {
     fn diagnose_matching_act(
         ctx: &GameContext,
         actions: &[LegalAction],
-    ) -> ShantenDecisionDiagnostic {
+    ) -> NodocchiDecisionDiagnostic {
         let mut agent = NodocchiAgent;
         let expected = agent.act(ctx, actions);
         let diagnostic = NodocchiAgent::diagnose(ctx, actions);
@@ -5761,7 +5761,7 @@ mod tests {
 
     mod iishanten_reach_ron_risk_observation {
         use super::*;
-        use crate::shanten_test_support::{
+        use crate::nodocchi_test_support::{
             SINGLE_REACH_IISHANTEN_DRAWN, SINGLE_REACH_IISHANTEN_HAND, dahai_actions_for,
             single_reach_iishanten_context, single_reach_iishanten_push_context,
         };

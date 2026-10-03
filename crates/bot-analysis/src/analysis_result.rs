@@ -3,9 +3,9 @@ use bot_core::{
     CallThreeShantenPassEvaluation, CallTwoShantenPassEvaluation, CombinedDefenseCategory,
     DamatenValue, DamatenValueDiagnostic, DamatenValueVerdict, DefenseDecisionDiagnostic,
     DefenseFallbackKind, GameContext, KanCandidateDiagnostic, KanDecisionDiagnostic,
-    KanDecisionReason, KanKind, LegalAction, OpenHandDefenseCategory, ProspectiveHanVerdict,
-    PushPullDecision, PushPullMode, PushPullReason, ReachDecisionDiagnostic, ReachDecisionReason,
-    ReachTimingReason, RyukyokuDecisionDiagnostic, RyukyokuVerdict, ShantenDecisionDiagnostic,
+    KanDecisionReason, KanKind, LegalAction, NodocchiDecisionDiagnostic, OpenHandDefenseCategory,
+    ProspectiveHanVerdict, PushPullDecision, PushPullMode, PushPullReason, ReachDecisionDiagnostic,
+    ReachDecisionReason, ReachTimingReason, RyukyokuDecisionDiagnostic, RyukyokuVerdict,
     StrongTenpaiRequirement, TenpaiOffenseValue,
 };
 use bot_logic::{PermanentFuriten, TileId, TileType};
@@ -14,7 +14,7 @@ use crate::ranked_choice::{AnalysisOpponentHonorValue, RankedChoice, rank_choice
 
 /// 1局面の production 判断を consumer 向けに投影した構造化結果。
 ///
-/// `GameContext` と合法手、そしてその局面で既に得ている primary [`ShantenDecisionDiagnostic`]
+/// `GameContext` と合法手、そしてその局面で既に得ている primary [`NodocchiDecisionDiagnostic`]
 /// から作る。手入力 scenario か replay かといった局面の出所には依存しない。
 /// 診断そのものを公開せず、consumer が必要とする値だけを薄く写す。表示用の文字列は作らず、
 /// 既存の enum と数値をそのまま保持するので、CLI formatter と Web が同じ結果を読める。
@@ -64,7 +64,7 @@ impl AnalysisResult {
     pub fn from_decision(
         context: &GameContext,
         legal_actions: &[LegalAction],
-        diagnostic: &ShantenDecisionDiagnostic,
+        diagnostic: &NodocchiDecisionDiagnostic,
         choice_limit: usize,
     ) -> Self {
         Self {
@@ -333,7 +333,7 @@ fn ryukyoku(ryukyoku: &RyukyokuDecisionDiagnostic) -> AnalysisRyukyoku {
     }
 }
 
-fn push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Option<AnalysisPushPull> {
+fn push_pull(diagnostic: &NodocchiDecisionDiagnostic) -> Option<AnalysisPushPull> {
     let decision = diagnostic.push_pull_decision?;
     Some(AnalysisPushPull {
         mode: decision.mode,
@@ -342,7 +342,7 @@ fn push_pull(diagnostic: &ShantenDecisionDiagnostic) -> Option<AnalysisPushPull>
     })
 }
 
-fn tenpai_offense(diagnostic: &ShantenDecisionDiagnostic) -> Option<AnalysisTenpaiOffense> {
+fn tenpai_offense(diagnostic: &NodocchiDecisionDiagnostic) -> Option<AnalysisTenpaiOffense> {
     let inputs = diagnostic.push_pull_inputs.as_ref()?;
     let offense = inputs.offense?;
     let wait = offense.tenpai_wait_after_discard?;
@@ -356,7 +356,7 @@ fn tenpai_offense(diagnostic: &ShantenDecisionDiagnostic) -> Option<AnalysisTenp
     })
 }
 
-fn reach(diagnostic: &ShantenDecisionDiagnostic) -> AnalysisReach {
+fn reach(diagnostic: &NodocchiDecisionDiagnostic) -> AnalysisReach {
     let Some(reach) = diagnostic.reach.as_ref() else {
         return match diagnostic.push_pull_decision {
             Some(_) => AnalysisReach::NotEvaluated,
@@ -516,7 +516,7 @@ fn call_self_tsumo(candidate: &CallCandidateDiagnostic) -> Option<AnalysisCallSe
 
 // 防御の source は「リーチ者向け → 複合 threat → 非リーチ相手」の優先順で1つだけ選ぶ。
 // リーチ者向け防御を評価した局面では、採用が無くてもその事実を残し、他の source へ落とさない。
-fn defense(diagnostic: &ShantenDecisionDiagnostic) -> Option<AnalysisDefense> {
+fn defense(diagnostic: &NodocchiDecisionDiagnostic) -> Option<AnalysisDefense> {
     if let Some(defense) = diagnostic.defense.as_ref() {
         return Some(match reach_threat_defense(defense) {
             Some(selected) => AnalysisDefense::ReachThreat(selected),
@@ -785,7 +785,7 @@ mod tests {
         Scenario::resolve(&spec).unwrap()
     }
 
-    fn analyzed(json: &str) -> (Scenario, ShantenDecisionDiagnostic, AnalysisResult) {
+    fn analyzed(json: &str) -> (Scenario, NodocchiDecisionDiagnostic, AnalysisResult) {
         let scenario = scenario_from_json(json);
         let diagnostic = NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions);
         let result = AnalysisResult::from_decision(

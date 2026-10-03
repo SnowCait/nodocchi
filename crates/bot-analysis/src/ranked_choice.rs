@@ -1,6 +1,6 @@
 use bot_core::{
     AgentActionSource, CombinedDefenseCategory, DefenseFallbackKind, GameContext, LegalAction,
-    NodocchiAgent, OpenHandDefenseCategory, OpponentHonorValue, ShantenDecisionDiagnostic,
+    NodocchiAgent, NodocchiDecisionDiagnostic, OpenHandDefenseCategory, OpponentHonorValue,
 };
 use bot_logic::{DiscardCandidateDiagnostic, DiscardComparisonReason};
 
@@ -8,7 +8,7 @@ use bot_logic::{DiscardCandidateDiagnostic, DiscardComparisonReason};
 ///
 /// choice 1 は呼び出し側が既に得ている production 診断そのもので、choice 2 以降は上位 choice が
 /// 選んだ action を合法手から順に除外して production の [`NodocchiAgent::diagnose`] を再実行した
-/// 結果になる。内部では [`ShantenDecisionDiagnostic`] を使うが、consumer へはこの薄い結果だけを
+/// 結果になる。内部では [`NodocchiDecisionDiagnostic`] を使うが、consumer へはこの薄い結果だけを
 /// 渡し、診断全体を公開しない。表示用の文字列も作らず、既存の enum と数値をそのまま保持する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedChoice {
@@ -98,7 +98,7 @@ pub struct RankedChoiceHitProbability {
 pub fn rank_choices(
     context: &GameContext,
     legal_actions: &[LegalAction],
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     limit: usize,
 ) -> Vec<RankedChoice> {
     let diagnostics = diagnose_choices(context, legal_actions, diagnostic, limit);
@@ -113,8 +113,8 @@ pub fn rank_choices(
 }
 
 fn ranked_choice(
-    diagnostic: &ShantenDecisionDiagnostic,
-    previous: Option<&ShantenDecisionDiagnostic>,
+    diagnostic: &NodocchiDecisionDiagnostic,
+    previous: Option<&NodocchiDecisionDiagnostic>,
 ) -> RankedChoice {
     RankedChoice {
         selected_action: diagnostic.selected_action.clone(),
@@ -134,7 +134,7 @@ fn ranked_choice(
     }
 }
 
-fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&LegalAction> {
+fn selected_reach_discard(diagnostic: &NodocchiDecisionDiagnostic) -> Option<&LegalAction> {
     if !matches!(diagnostic.selected_action, LegalAction::Reach) {
         return None;
     }
@@ -142,7 +142,7 @@ fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&Leg
 }
 
 fn honor_safety_opponent_honor_value(
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
 ) -> Option<AnalysisOpponentHonorValue> {
     if !matches!(
         diagnostic.defense_fallback_kind(),
@@ -160,9 +160,9 @@ fn honor_safety_opponent_honor_value(
 fn diagnose_choices(
     context: &GameContext,
     legal_actions: &[LegalAction],
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     limit: usize,
-) -> Vec<ShantenDecisionDiagnostic> {
+) -> Vec<NodocchiDecisionDiagnostic> {
     if limit == 0 {
         return Vec::new();
     }
@@ -215,8 +215,8 @@ struct ChoiceComparison<'a> {
 }
 
 fn choice_comparison<'a>(
-    diagnostic: &'a ShantenDecisionDiagnostic,
-    choice: &ShantenDecisionDiagnostic,
+    diagnostic: &'a NodocchiDecisionDiagnostic,
+    choice: &NodocchiDecisionDiagnostic,
 ) -> Option<ChoiceComparison<'a>> {
     if diagnostic.selected_source != AgentActionSource::NormalDiscard
         || choice.selected_source != AgentActionSource::NormalDiscard
@@ -414,14 +414,14 @@ mod tests {
         Scenario::resolve(&spec).unwrap()
     }
 
-    fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
+    fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
         NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
     }
 
     fn ranked(
         json: &str,
         limit: usize,
-    ) -> (Scenario, ShantenDecisionDiagnostic, Vec<RankedChoice>) {
+    ) -> (Scenario, NodocchiDecisionDiagnostic, Vec<RankedChoice>) {
         let scenario = scenario_from_json(json);
         let diagnostic = diagnose(&scenario);
         let choices = rank_choices(
@@ -433,7 +433,7 @@ mod tests {
         (scenario, diagnostic, choices)
     }
 
-    fn selected_candidate(diagnostic: &ShantenDecisionDiagnostic) -> &DiscardCandidateDiagnostic {
+    fn selected_candidate(diagnostic: &NodocchiDecisionDiagnostic) -> &DiscardCandidateDiagnostic {
         candidates(diagnostic)
             .iter()
             .find(|candidate| candidate.selected)
@@ -441,7 +441,7 @@ mod tests {
     }
 
     fn candidate_for<'a>(
-        diagnostic: &'a ShantenDecisionDiagnostic,
+        diagnostic: &'a NodocchiDecisionDiagnostic,
         action: &LegalAction,
     ) -> &'a DiscardCandidateDiagnostic {
         let discard = dahai_tile_type(action);
@@ -451,7 +451,7 @@ mod tests {
             .expect("candidate for the action")
     }
 
-    fn candidates(diagnostic: &ShantenDecisionDiagnostic) -> &[DiscardCandidateDiagnostic] {
+    fn candidates(diagnostic: &NodocchiDecisionDiagnostic) -> &[DiscardCandidateDiagnostic] {
         &diagnostic
             .normal_discard
             .as_ref()

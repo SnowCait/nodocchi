@@ -10,26 +10,26 @@ use crate::damaten_value::{
 };
 use crate::defense::{SujiSafetyRank, WallRank};
 use crate::discard_selection::{select_best_normal_discard_evaluation, select_discard_action};
+use crate::nodocchi_diagnostic::{
+    DecisionDiagnostics, DiagnosticOptions, NodocchiDecisionDiagnostic,
+};
+use crate::nodocchi_test_support::{
+    TENPAI_DRAWN, TENPAI_HAND, TENPAI_SCARCE_VISIBLE, dahai, fold_actions,
+    fold_under_reach_context, tenpai_actions, tenpai_context, tile, weak_tenpai_actions,
+    weak_tenpai_under_reach_context,
+};
 use crate::push_pull::PushPullMode;
 use crate::reach_policy::{
     REACH_MIN_REMAINING, ReachDecisionReason, ReachTimingDecision, ReachTimingDiagnostic,
     ReachTimingReason,
 };
 use crate::ron_opportunity::reach_public_safety_after_discard;
-use crate::shanten_diagnostic::{
-    DecisionDiagnostics, DiagnosticOptions, ShantenDecisionDiagnostic,
-};
-use crate::shanten_test_support::{
-    TENPAI_DRAWN, TENPAI_HAND, TENPAI_SCARCE_VISIBLE, dahai, fold_actions,
-    fold_under_reach_context, tenpai_actions, tenpai_context, tile, weak_tenpai_actions,
-    weak_tenpai_under_reach_context,
-};
 use crate::tenpai_continuation::{
     TenpaiSelfTsumoComparison, selected_tenpai_self_tsumo_comparison,
 };
 use bot_logic::{HistoryFuritenFacts, PermanentFuriten, RiichiStatus, TileId, TileType, WinMethod};
 
-fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
+fn diagnose_matching_act(ctx: &GameContext, actions: &[LegalAction]) -> NodocchiDecisionDiagnostic {
     let mut agent = NodocchiAgent;
     let expected = agent.act(ctx, actions);
     let diagnostic = NodocchiAgent::diagnose(ctx, actions);

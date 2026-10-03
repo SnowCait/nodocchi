@@ -234,7 +234,7 @@ mod tests {
     use crate::agent::Agent;
     use crate::context::TableStateFacts;
     use crate::meld::{Meld, MeldKind};
-    use crate::shanten_test_support::{tenpai_actions, tenpai_context, tile};
+    use crate::nodocchi_test_support::{tenpai_actions, tenpai_context, tile};
     use bot_logic::TileType;
 
     #[test]

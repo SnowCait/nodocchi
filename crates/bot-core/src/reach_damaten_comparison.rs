@@ -329,7 +329,7 @@ mod tests {
     use bot_logic::{HistoryFuritenFacts, RiichiStatus, TileId, WinMethod};
 
     use crate::agent::Agent;
-    use crate::agents::{DiagnosticOptions, NodocchiAgent, ShantenDecisionDiagnostic};
+    use crate::agents::{DiagnosticOptions, NodocchiAgent, NodocchiDecisionDiagnostic};
     use crate::context::TableStateFacts;
     use crate::damaten_value::DamatenValue;
     use crate::defense::{
@@ -451,7 +451,7 @@ mod tests {
     struct Case {
         context: GameContext,
         actions: Vec<LegalAction>,
-        diagnostic: ShantenDecisionDiagnostic,
+        diagnostic: NodocchiDecisionDiagnostic,
     }
 
     impl CaseSpec<'_> {

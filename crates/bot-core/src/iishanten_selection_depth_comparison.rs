@@ -414,7 +414,7 @@ pub fn compare_iishanten_selection_depths(
 pub(crate) mod test_support {
     use super::*;
     use crate::context::{GameContext, TableStateFacts};
-    use crate::shanten_test_support::{dahai, tile};
+    use crate::nodocchi_test_support::{dahai, tile};
     use bot_logic::{HistoryFuritenFacts, SelfTsumoHorizon, TileId};
 
     // 1向聴局面 34567899m5799p34s。ドラ表示 3m / 場風 E / 自風 N / player 0 / oya 1 /
@@ -461,7 +461,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::iishanten_selection_depth_comparison::test_support::iishanten_context;
-    use crate::shanten_test_support::tile;
+    use crate::nodocchi_test_support::tile;
 
     #[test]
     fn the_production_comparator_narrows_the_fixture_to_its_pre_acceptance_cohort() {

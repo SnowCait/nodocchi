@@ -3391,14 +3391,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::context::TableStateFacts;
     use crate::decision_timing::ForwardMetricsPhaseDurations;
+    use crate::nodocchi_test_support::{
+        tenpai_actions, tenpai_context, three_shanten_progress_regression_context,
+    };
     use crate::push_pull::{
         PushPullDecision, PushPullMode, PushPullOffenseState, PushPullReason, decide_push_pull,
         push_pull_inputs_from_threat_facts,
     };
     use crate::reach_policy::{ReachDecisionReason, ReachTimingDecision};
-    use crate::shanten_test_support::{
-        tenpai_actions, tenpai_context, three_shanten_progress_regression_context,
-    };
     use crate::tenpai_scoring::tenpai_tsumo_value_from_hands;
     use crate::threat::player_threat_facts_from_context;
     use bot_logic::{

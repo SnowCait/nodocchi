@@ -8,11 +8,11 @@ use crate::defense::{
     open_hand_targets_dahai_actions_by_ron_risk, select_genbutsu_fallback_action,
 };
 use crate::meld::{Meld, MeldKind};
-use crate::push_pull::{PushPullMode, decide_push_pull, push_pull_inputs_from_context};
-use crate::shanten_test_support::{
+use crate::nodocchi_test_support::{
     dahai, fold_actions, fold_under_reach_context, suited_reach_context_with_reached,
     tenpai_actions, tenpai_under_reach_context, tile,
 };
+use crate::push_pull::{PushPullMode, decide_push_pull, push_pull_inputs_from_context};
 use bot_logic::{TileId, TileType};
 
 const OPEN_HAND_FOLD_HAND: [u8; 13] = [0, 4, 8, 12, 17, 20, 24, 28, 32, 36, 44, 53, 60];

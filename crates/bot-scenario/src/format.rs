@@ -16,20 +16,20 @@ use bot_core::{
     CurrentTenpaiContinuationDiagnostic, DamatenValue, DamatenValueDiagnostic,
     DefenseCandidateDiagnostic, DefenseDecisionDiagnostic, GameContext, KakanChankanDiagnostic,
     KakanChankanSafety, KanCandidateDiagnostic, KanDecisionDiagnostic, KanHandDiagnostic,
-    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, OffenseValue,
-    OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic, OpenHandThreatAssessment,
-    PlayerThreatDiagnostic, ProspectiveBaselineValue, ProspectiveDiscardValue,
-    ProspectiveDrawValue, ProspectiveDrawVariantValue, ProspectiveHanVerdict,
-    ProspectiveLookaheadDiagnostic, ProspectiveOutcome, ProspectiveUnavailable,
-    ProspectiveWaitValue, PushPullDecision, PushPullInputs, PushPullOffenseState,
-    ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic, ReachPublicSafetyEvidence,
-    ReachRonBaselineDiagnostic, ReachTimingDiagnostic, ReachTimingReason, RonOpportunityDiagnostic,
-    RonOpportunityExternalThreats, RonOpportunityWaitDiagnostic, RyukyokuVerdict,
-    ShantenDecisionDiagnostic, StrongTenpaiRequirement, StructuralExpectedDealInLossDiagnostic,
-    StructuralExpectedDealInLossEvidence, TenpaiContinuationBranch, TenpaiContinuationCandidate,
-    TenpaiContinuationDiagnostic, TenpaiOffenseValue, TenpaiSelfTsumoComparison,
-    TenpaiVariantUnknownReason, TenpaiVariantValue, ThreatDefenseTarget,
-    TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
+    LegalAction, Meld, MeldKind, MeldKindCounts, MeldThreatDiagnostic, NodocchiDecisionDiagnostic,
+    OffenseValue, OpenHandDefenseCandidateDiagnostic, OpenHandDefenseDiagnostic,
+    OpenHandThreatAssessment, PlayerThreatDiagnostic, ProspectiveBaselineValue,
+    ProspectiveDiscardValue, ProspectiveDrawValue, ProspectiveDrawVariantValue,
+    ProspectiveHanVerdict, ProspectiveLookaheadDiagnostic, ProspectiveOutcome,
+    ProspectiveUnavailable, ProspectiveWaitValue, PushPullDecision, PushPullInputs,
+    PushPullOffenseState, ReachDamatenComparisonDiagnostic, ReachDecisionDiagnostic,
+    ReachPublicSafetyEvidence, ReachRonBaselineDiagnostic, ReachTimingDiagnostic,
+    ReachTimingReason, RonOpportunityDiagnostic, RonOpportunityExternalThreats,
+    RonOpportunityWaitDiagnostic, RyukyokuVerdict, StrongTenpaiRequirement,
+    StructuralExpectedDealInLossDiagnostic, StructuralExpectedDealInLossEvidence,
+    TenpaiContinuationBranch, TenpaiContinuationCandidate, TenpaiContinuationDiagnostic,
+    TenpaiOffenseValue, TenpaiSelfTsumoComparison, TenpaiVariantUnknownReason, TenpaiVariantValue,
+    ThreatDefenseTarget, TwoShantenProgressSelfTsumoCost, TwoShantenSelfTsumoCost,
     discard_selection::{effective_own_future_draws, own_future_draws},
 };
 use bot_logic::{
@@ -60,7 +60,7 @@ const FIRST_SUMMARY_CHOICE_RANK: usize = 1;
 
 pub fn format_diagnostic(
     scenario: &Scenario,
-    diagnostic: &ShantenDecisionDiagnostic,
+    diagnostic: &NodocchiDecisionDiagnostic,
     verbose: bool,
 ) -> String {
     let mut sections = vec![
@@ -146,7 +146,7 @@ pub fn format_diagnostic(
 
 // 現在時点 (今回の打牌の前) の履歴依存フリテン。打牌後の評価時点へ補正した facts は
 // 各打牌候補とリーチ判断の待ち診断が別に出す。
-fn format_history_furiten(diagnostic: &ShantenDecisionDiagnostic) -> String {
+fn format_history_furiten(diagnostic: &NodocchiDecisionDiagnostic) -> String {
     format!(
         "History furiten\n  same turn: {}\n  riichi missed win: {}",
         optional_bool_label(diagnostic.history_furiten.same_turn),
@@ -331,7 +331,7 @@ fn format_scores(scores: Option<[i32; 4]>) -> String {
         .join(" / ")
 }
 
-fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
+fn format_final_decision(diagnostic: &NodocchiDecisionDiagnostic) -> String {
     let mut lines = vec!["Final decision".to_string()];
     lines.push(format!(
         "  action: {}",
@@ -356,7 +356,7 @@ fn format_final_decision(diagnostic: &ShantenDecisionDiagnostic) -> String {
     lines.join("\n")
 }
 
-fn selected_reach_discard(diagnostic: &ShantenDecisionDiagnostic) -> Option<&LegalAction> {
+fn selected_reach_discard(diagnostic: &NodocchiDecisionDiagnostic) -> Option<&LegalAction> {
     if !matches!(diagnostic.selected_action, LegalAction::Reach) {
         return None;
     }
@@ -868,7 +868,7 @@ fn call_wait_yaku_label(yaku: CallWaitYaku) -> &'static str {
     }
 }
 
-fn format_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
+fn format_normal_discard(diagnostic: &NodocchiDecisionDiagnostic) -> String {
     let mut lines = vec!["Normal discard".to_string()];
 
     let Some(normal_discard) = diagnostic.normal_discard.as_ref() else {
@@ -3024,7 +3024,7 @@ fn format_combined_defense_candidate(candidate: &CombinedDefenseCandidateDiagnos
 
 // player ごとの脅威診断。診断が持つ観測事実をそのまま出し、表示用に副露やドラを解析し直さない。
 // 危険度の判断は含まず、押し引きにもまだ反映していない。
-fn format_player_threats(diagnostic: &ShantenDecisionDiagnostic) -> String {
+fn format_player_threats(diagnostic: &NodocchiDecisionDiagnostic) -> String {
     let mut blocks = vec!["Player threats".to_string()];
     for threat in &diagnostic.player_threats {
         blocks.push(format_player_threat(threat));
@@ -3156,7 +3156,7 @@ fn format_meld_kind_counts(counts: MeldKindCounts) -> String {
 /// 表示する値の選択は `bot-analysis` の [`AnalysisResult`] が済ませている。ここは受け取った
 /// 構造化結果を文字列化するだけで、診断を読み直すことも、表示専用の評価や comparator を持つ
 /// こともしない。
-pub fn format_summary(scenario: &Scenario, diagnostic: &ShantenDecisionDiagnostic) -> String {
+pub fn format_summary(scenario: &Scenario, diagnostic: &NodocchiDecisionDiagnostic) -> String {
     format_analysis_summary(&AnalysisResult::from_decision(
         &scenario.context,
         &scenario.legal_actions,
@@ -3798,11 +3798,11 @@ mod tests {
         Scenario::resolve(&spec).unwrap()
     }
 
-    fn diagnose(scenario: &Scenario) -> ShantenDecisionDiagnostic {
+    fn diagnose(scenario: &Scenario) -> NodocchiDecisionDiagnostic {
         NodocchiAgent::diagnose(&scenario.context, &scenario.legal_actions)
     }
 
-    fn rendered(json: &str, verbose: bool) -> (Scenario, ShantenDecisionDiagnostic, String) {
+    fn rendered(json: &str, verbose: bool) -> (Scenario, NodocchiDecisionDiagnostic, String) {
         let scenario = scenario_from_json(json);
         let diagnostic = diagnose(&scenario);
         let output = format_diagnostic(&scenario, &diagnostic, verbose);
@@ -3868,7 +3868,7 @@ mod tests {
     // テストが、同じ局面を2回探索しなくてよいように1回の構築から両方を取り出す。
     struct RenderedDiagnostic {
         rendered: String,
-        diagnostic: ShantenDecisionDiagnostic,
+        diagnostic: NodocchiDecisionDiagnostic,
     }
 
     fn rendered_with_lookahead_diagnostic(json: &str, verbose: bool) -> RenderedDiagnostic {
@@ -6583,7 +6583,7 @@ mod tests {
         remaining
     }
 
-    fn expected_choices(scenario: &Scenario, limit: usize) -> Vec<ShantenDecisionDiagnostic> {
+    fn expected_choices(scenario: &Scenario, limit: usize) -> Vec<NodocchiDecisionDiagnostic> {
         let mut remaining = scenario.legal_actions.clone();
         let mut choices = Vec::new();
         while choices.len() < limit && !remaining.is_empty() {
@@ -6675,7 +6675,7 @@ mod tests {
     }"#;
 
     fn cohort_candidate<'a>(
-        diagnostic: &'a ShantenDecisionDiagnostic,
+        diagnostic: &'a NodocchiDecisionDiagnostic,
         tile: &str,
     ) -> &'a DiscardCandidateDiagnostic {
         diagnostic
@@ -6688,7 +6688,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing candidate {tile}"))
     }
 
-    fn cohort_winner(diagnostic: &ShantenDecisionDiagnostic) -> &DiscardCandidateDiagnostic {
+    fn cohort_winner(diagnostic: &NodocchiDecisionDiagnostic) -> &DiscardCandidateDiagnostic {
         diagnostic
             .normal_discard
             .as_ref()
@@ -8076,7 +8076,7 @@ mod tests {
     const TWO_SHANTEN_PROGRESS_ONLY_HEAVY: &str =
         include_str!("../scenarios/two_shanten_progress_only_heavy.json");
 
-    fn selected_normal_discard(diagnostic: &ShantenDecisionDiagnostic) -> String {
+    fn selected_normal_discard(diagnostic: &NodocchiDecisionDiagnostic) -> String {
         diagnostic
             .normal_discard
             .as_ref()

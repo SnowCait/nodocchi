@@ -1,5 +1,5 @@
 //! `--force-fold` の出力。通常診断とは別の hypothetical evaluation なので、偽の
-//! `ShantenDecisionDiagnostic` を組み立てず専用の formatter を持つ。
+//! `NodocchiDecisionDiagnostic` を組み立てず専用の formatter を持つ。
 //!
 //! Summary の候補は `ForcedFoldDiagnostic::ranked_candidates` をそのまま表示する。順位付けは
 //! bot-core の forced fold ranking が source of truth で、ここで並べ替えや risk score を作らない。

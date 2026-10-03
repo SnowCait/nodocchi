@@ -1,12 +1,12 @@
 # 麻雀 AI の概要
 
-この repository には複数の Agent があります。production AI は `NodocchiAgent` で、向聴数と見え牌を基に通常打牌を評価し、和了・九種九牌・鳴き (Chi / Pon)・リーチ・押し引き・防御・カン (暗槓) を同じ decision path で選びます。
+この repository には複数の Agent があります。`NodocchiAgent` は打牌・副露・リーチ・押し引き・防御・カンなどを統合して判断する実戦用エージェントで、向聴数と見え牌を基に通常打牌を評価し、和了・九種九牌・鳴き (Chi / Pon)・リーチ・押し引き・防御・カン (暗槓) を同じ decision path で選んで最終 action を決めます。
 
 ## Agent 構成
 
 | Agent | `--agent` | 位置づけ |
 | --- | --- | --- |
-| `NodocchiAgent` | `nodocchi` | production AI。この文書の判断仕様はすべて `NodocchiAgent` のもの |
+| `NodocchiAgent` | `nodocchi` | 打牌・副露・リーチ・押し引き・防御・カンなどを統合して判断する実戦用エージェント。この文書の判断仕様の基準 |
 | `MenzenAgent` | `menzen` | `NodocchiAgent` の門前 variant。Chi / Pon / 大明槓 / 加槓など門前を崩す action を合法手から除外し、残りを `NodocchiAgent` に委譲する。判断 logic は複製しない |
 | `FuroAgent` | なし | 和了速度を重視して積極的に副露する比較用 variant として追加予定。未実装 |
 | `NormalAgent` | `normal` | 単純な action 優先順の baseline |

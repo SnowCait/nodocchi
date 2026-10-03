@@ -17,7 +17,7 @@ cargo run -p riichilab-client --bin riichilab-client -- ranked
 
 ## Agent の指定
 
-`--agent nodocchi` は production AI の `NodocchiAgent`、`--agent menzen` は `NodocchiAgent` と同じ基本判断を使いながらチー・ポン・明槓など門前を崩す鳴きを行わない `MenzenAgent` を使用します。`--agent normal` は単純 baseline の `NormalAgent`、`--agent tsumogiri` はツモ切り baseline の `TsumogiriAgent` です。`--agent` を省略した場合は環境変数 `MAHJONG_AGENT` を同じ名前で読み、それも未指定なら `NormalAgent` です。各 Agent の位置づけは [麻雀 AI の概要](ai/overview.md#agent-構成) を参照してください。
+`--agent nodocchi` は打牌・副露・リーチ・押し引き・防御・カンなどを統合して判断する実戦用エージェント `NodocchiAgent`、`--agent menzen` は `NodocchiAgent` と同じ基本判断を使いながらチー・ポン・明槓など門前を崩す鳴きを行わない `MenzenAgent` を使用します。`--agent normal` は単純 baseline の `NormalAgent`、`--agent tsumogiri` はツモ切り baseline の `TsumogiriAgent` です。`--agent` を省略した場合は環境変数 `MAHJONG_AGENT` を同じ名前で読み、それも未指定なら `NormalAgent` です。各 Agent の位置づけは [麻雀 AI の概要](ai/overview.md#agent-構成) を参照してください。
 
 ```text
 --agent normal
@@ -193,7 +193,7 @@ start_kyoku
 end_kyoku
 ```
 
-capture record には `ShantenDiagnostic`、`RonOpportunityDiagnostic`、`ReachDamatenComparisonDiagnostic` などの bot-core diagnostic を埋め込みません。これらは同じ `request_action` の observation から replay / offline analyzer 側で再計算します。capture は protocol の観測記録に限定し、agent の diagnostic とは密結合させません。
+capture record には `NodocchiDecisionDiagnostic`、`RonOpportunityDiagnostic`、`ReachDamatenComparisonDiagnostic` などの bot-core diagnostic を埋め込みません。これらは同じ `request_action` の observation から replay / offline analyzer 側で再計算します。capture は protocol の観測記録に限定し、agent の diagnostic とは密結合させません。
 
 この双方向 capture により、[Ron opportunity](ai/discard-selection.md#ron-opportunity-structural-facts-only) の structural facts と、実戦でその後に発生した opponent の `dahai` / `hora` / `ryukyoku` を offline で対応付けられます。Ron probability の推定や dataset 化は今後の課題で、現時点では実装していません。
 

@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn current_tenpai_continuation_is_carried_to_the_final_shanten_diagnostic() {
+    fn current_tenpai_continuation_is_carried_to_the_final_nodocchi_diagnostic() {
         let case = CaseSpec::default().context();
         let diagnostic = NodocchiAgent::diagnose_with_options(
             &case.context,

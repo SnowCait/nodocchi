@@ -41,11 +41,11 @@ impl Agent for MenzenAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nodocchi_test_support::{
+        TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
+    };
     use crate::ryukyoku_decision::tests::{
         KOKUSHI_FOUR_HAND, KOKUSHI_THREE_HAND, context_from_hand,
-    };
-    use crate::shanten_test_support::{
-        TENPAI_SCARCE_VISIBLE, dahai, opponent_reach_context, tenpai_actions, tenpai_context, tile,
     };
     use bot_logic::{HistoryFuritenFacts, TileType};
 

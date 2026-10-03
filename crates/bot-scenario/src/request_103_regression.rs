@@ -8,7 +8,7 @@
 
 use bot_analysis::{Scenario, ScenarioSpec};
 use bot_core::{
-    AgentActionSource, GameContext, LegalAction, NodocchiAgent, ShantenDecisionDiagnostic,
+    AgentActionSource, GameContext, LegalAction, NodocchiAgent, NodocchiDecisionDiagnostic,
 };
 use bot_logic::{
     DiscardCandidateDiagnostic, DiscardComparisonReason, DiscardEvaluation, ForwardMetrics,
@@ -30,11 +30,11 @@ fn tile_type(mjai: &str) -> TileType {
     TileType::from_mjai_type_str(mjai).unwrap()
 }
 
-fn diagnose(context: &GameContext, legal_actions: &[LegalAction]) -> ShantenDecisionDiagnostic {
+fn diagnose(context: &GameContext, legal_actions: &[LegalAction]) -> NodocchiDecisionDiagnostic {
     NodocchiAgent::diagnose(context, legal_actions)
 }
 
-fn candidates(diagnostic: &ShantenDecisionDiagnostic) -> &[DiscardCandidateDiagnostic] {
+fn candidates(diagnostic: &NodocchiDecisionDiagnostic) -> &[DiscardCandidateDiagnostic] {
     &diagnostic
         .normal_discard
         .as_ref()
@@ -43,7 +43,7 @@ fn candidates(diagnostic: &ShantenDecisionDiagnostic) -> &[DiscardCandidateDiagn
 }
 
 fn candidate<'a>(
-    diagnostic: &'a ShantenDecisionDiagnostic,
+    diagnostic: &'a NodocchiDecisionDiagnostic,
     discard: &str,
 ) -> &'a DiscardCandidateDiagnostic {
     candidates(diagnostic)
@@ -59,7 +59,7 @@ struct ComparatorInputs {
     fallback: Vec<IishantenStableOrderFallbackMetrics>,
 }
 
-fn comparator_inputs(diagnostic: &ShantenDecisionDiagnostic) -> ComparatorInputs {
+fn comparator_inputs(diagnostic: &NodocchiDecisionDiagnostic) -> ComparatorInputs {
     let candidates = candidates(diagnostic);
     ComparatorInputs {
         evaluations: candidates
